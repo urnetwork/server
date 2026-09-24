@@ -14,8 +14,9 @@ import (
 )
 
 // validEgressHealthBody is a well-formed submission: the four scored classes
-// sum to exactly ok_count/total_count, and the reputation figures sit outside
-// them. Tests mutate a copy of this to exercise one rule at a time.
+// sum to exactly ok_count/total_count, and the reputation figures an older
+// prober still sends sit outside them. Tests mutate a copy of this to exercise
+// one rule at a time.
 func validEgressHealthBody(clientId server.Id) map[string]any {
 	return map[string]any{
 		"client_id":   clientId.String(),
@@ -250,8 +251,9 @@ func TestProviderEgressHealthResultRejectsOKAboveTotal(t *testing.T) {
 
 // TestProviderEgressHealthResultStoresAValidRun is the accept path: a correct
 // secret clears auth, a consistent payload passes validation, and the row
-// lands with the reputation figures stored beside the health figures rather
-// than inside them.
+// lands with the health figures as sent. The reputation class dissolved into
+// the sites (GEOMAP §11.3): what an older prober sends for it is accepted and
+// stored as nothing, never folded into the health figures.
 func TestProviderEgressHealthResultStoresAValidRun(t *testing.T) {
 	t.Setenv("WARP_ENV", "local")
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -272,15 +274,15 @@ func TestProviderEgressHealthResultStoresAValidRun(t *testing.T) {
 		if health.OKCount != 25 || health.Total != 26 {
 			t.Errorf("ok/total = %d/%d, want 25/26", health.OKCount, health.Total)
 		}
-		// reputation stored...
-		if health.ReputationOK != 1 || health.ReputationTotal != 4 {
-			t.Errorf("reputation = %d/%d, want 1/4", health.ReputationOK, health.ReputationTotal)
+		// reputation ignored...
+		if health.ReputationOK != 0 || health.ReputationTotal != 0 {
+			t.Errorf("reputation = %d/%d, want the dissolved class stored as 0/0", health.ReputationOK, health.ReputationTotal)
 		}
-		if health.ReputationFailedNames != "akamai,etsy,canva" {
-			t.Errorf("reputation_failed_names = %q", health.ReputationFailedNames)
+		if health.ReputationFailedNames != "" {
+			t.Errorf("reputation_failed_names = %q, want none", health.ReputationFailedNames)
 		}
-		// ...and excluded from the health figures. 26/30 would be the shape of
-		// a reputation-folded-in regression.
+		// ...and never folded into the health figures. 26/30 would be the
+		// shape of a reputation-folded-in regression.
 		if health.OKCount == 26 || health.Total == 30 {
 			t.Errorf("reputation was folded into ok/total: %d/%d", health.OKCount, health.Total)
 		}
@@ -325,6 +327,88 @@ func TestProviderEgressHealthResultStoresTLSAuthenticationFailure(t *testing.T) 
 		health := model.GetProviderEgressHealth(context.Background(), clientId)
 		if health == nil || !health.TLSAuthenticationFailure {
 			t.Fatalf("stored health = %+v, want TLSAuthenticationFailure=true", health)
+		}
+	})
+}
+
+// The loads the run could not measure, its canaries and its short classes are
+// stored beside the counts, which they are not part of.
+func TestProviderEgressHealthResultStoresTheUncountedLoads(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		const secret = "correct-operator-secret-0123456789"
+		defer withStubOperatorIngestSecret(secret)()
+
+		clientId := server.NewId()
+		body := validEgressHealthBody(clientId)
+		body["reputation_ok"] = 0
+		body["reputation_total"] = 0
+		body["reputation_failed_names"] = ""
+		body["not_measured_count"] = 2
+		body["not_measured_names"] = "news-a,news-b"
+		body["canary_passed_names"] = "blocked-a"
+		body["canary_failed_names"] = "blocked-b"
+		body["short_classes"] = "site"
+		w := postEgressHealth(t, secret, body)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+		}
+		health := model.GetProviderEgressHealth(context.Background(), clientId)
+		if health == nil || health.OKCount != 25 || health.Total != 26 ||
+			health.NotMeasuredCount != 2 || health.NotMeasuredNames != "news-a,news-b" ||
+			health.CanaryPassedNames != "blocked-a" || health.CanaryFailedNames != "blocked-b" ||
+			health.ShortClasses != "site" {
+			t.Fatalf("stored health = %+v", health)
+		}
+
+		body["not_measured_count"] = -1
+		if w := postEgressHealth(t, secret, body); w.Code != http.StatusBadRequest {
+			t.Fatalf("a negative not_measured_count was accepted: %d", w.Code)
+		}
+	})
+}
+
+// A failed load of a site on probation leaves the counts at ingest and is
+// named apart, so a site that has not earned it cannot cost a provider a
+// tier; a failure of a scored site stays.
+func TestProviderEgressHealthResultLeavesProbationFailuresOut(t *testing.T) {
+	t.Setenv("WARP_ENV", "local")
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		const secret = "correct-operator-secret-0123456789"
+		defer withStubOperatorIngestSecret(secret)()
+		ctx := context.Background()
+
+		model.SetProviderEgressDestination(ctx, &model.ProviderEgressDestination{
+			Name:      "probation-edge",
+			Class:     "cdn",
+			Url:       "https://probation-edge.example/robots.txt",
+			Expect:    "body",
+			Category:  "cdn",
+			Region:    "global",
+			Source:    model.ProviderEgressDestinationSourceCandidates,
+			Active:    true,
+			Probation: true,
+		})
+
+		clientId := server.NewId()
+		body := validEgressHealthBody(clientId)
+		body["ok_count"] = 24
+		body["class_results"] = map[string]any{
+			"dns":          map[string]any{"ok": 4, "total": 4},
+			"connectivity": map[string]any{"ok": 5, "total": 5},
+			"cdn":          map[string]any{"ok": 3, "total": 5},
+			"site":         map[string]any{"ok": 12, "total": 12},
+		}
+		body["failed_names"] = "probation-edge,cachefly"
+		w := postEgressHealth(t, secret, body)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
+		}
+		health := model.GetProviderEgressHealth(ctx, clientId)
+		if health == nil || health.OKCount != 24 || health.Total != 25 ||
+			health.ClassResults["cdn"] != (model.ProviderEgressHealthClassResult{OK: 3, Total: 4}) ||
+			health.FailedNames != "cachefly" || health.UnscoredFailedNames != "probation-edge" {
+			t.Fatalf("stored health = %+v", health)
 		}
 	})
 }

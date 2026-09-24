@@ -350,6 +350,10 @@ func GetProviderEgressProbeFleetOutcomeTally(ctx context.Context) map[string]int
 						WHEN 'locate_failed' THEN 'locate_failed'
 						WHEN 'not_confident' THEN 'not_confident'
 						WHEN 'submit_failed' THEN 'submit_failed'
+						WHEN 'health_not_run' THEN 'health_not_run'
+						WHEN 'run_not_measured' THEN 'run_not_measured'
+						WHEN 'no_exit_ip' THEN 'no_exit_ip'
+						WHEN 'run_batch_guard' THEN 'run_batch_guard'
 						ELSE 'unknown_failure'
 					END
 					WHEN pel.observed_at >= $3

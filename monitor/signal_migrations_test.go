@@ -958,6 +958,10 @@ func TestMigrationsSignalRejectsLookalikePlainOrderedIndexes(t *testing.T) {
 		{version: 674, table: "contract_extender", name: "contract_extender_create_time_contract_id", keys: "(create_time, contract_id)"},
 		{version: 675, table: "wallet_auth_challenge_attempt", name: "wallet_auth_challenge_attempt_client_address_hash_attempt_time", keys: "(client_address_hash, attempt_time)"},
 		{version: 683, table: "network_extender_activation", name: "network_extender_activation_extender_id_activate_time", keys: "(extender_id, activate_time)"},
+		{version: 694, table: "network_ping", name: "network_ping_target_pinger_nonce", keys: "(target_extender_id, pinger_kind, pinger_id, probe_nonce)", unique: true},
+		{version: 695, table: "network_ping", name: "network_ping_create_time", keys: "(create_time)"},
+		{version: 696, table: "network_ping", name: "network_ping_target_extender_id_create_time", keys: "(target_extender_id, create_time)"},
+		{version: 697, table: "network_ping", name: "network_ping_pinger_kind_pinger_id_create_time", keys: "(pinger_kind, pinger_id, create_time)"},
 		{version: 614, table: "st_epoch", name: "st_epoch_status", keys: "(deployment_key, status, epoch)", grouped: true},
 		{version: 614, table: "st_publish", name: "st_publish_epoch_kind", keys: "(deployment_key, epoch, kind, create_time)", grouped: true},
 		{version: 614, table: "st_event", name: "st_event_kind_block", keys: "(deployment_key, kind, block_number, log_index)", grouped: true},
@@ -1081,9 +1085,9 @@ func syntheticMigrationCatalogRows(head int) []Row {
 	return rows
 }
 
-// These shapes are pinned by the attested LOCAL PostgreSQL 18 reconstruction
-// of the append-only migration SQL. Tests execute the emitted production
-// WHERE clause over synthetic catalog values; no LIKE verdict is modeled.
+// Pin complete operative shapes from the append-only migration SQL. Tests
+// execute the emitted production WHERE clause over synthetic local catalog
+// values; no LIKE verdict is modeled.
 type syntheticMigrationPartialIndexContract struct {
 	version   int
 	table     string
@@ -1118,6 +1122,7 @@ func syntheticMigrationPartialIndexContracts() []syntheticMigrationPartialIndexC
 		{version: 638, table: "network_onboarding_apple_offer_code", name: "network_onboarding_apple_offer_code_available", keys: "expires_at, code", predicate: "(network_id IS NULL)"},
 		{version: 645, table: "network_onboarding", name: "network_onboarding_next_send_at", keys: "next_send_at", predicate: "(next_send_at IS NOT NULL)"},
 		{version: 652, table: "competition_round", name: "competition_round_one_active_staging", keys: "competition_id", predicate: "((staging = true) AND (canceled = false) AND (finalized_at IS NULL))", unique: true},
+		{version: 692, table: "location", name: "location_geoname_id", keys: "geoname_id", predicate: "(geoname_id IS NOT NULL)", unique: true},
 	}
 }
 

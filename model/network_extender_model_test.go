@@ -668,7 +668,7 @@ func TestGetNetworkExtenderIdsForPublishOrdersOldestFirst(t *testing.T) {
 
 		// never published first, then oldest stamp to newest
 		want := []server.Id{extenderIds[3], extenderIds[0], extenderIds[1], extenderIds[2]}
-		got := GetNetworkExtenderIdsForPublish(ctx, 4)
+		got := GetNetworkExtenderIdsForPublish(ctx, 4, testPublishStaleBefore())
 		if !slices.Equal(got, want) {
 			t.Fatalf("publish order = %v, want %v", got, want)
 		}
@@ -676,7 +676,7 @@ func TestGetNetworkExtenderIdsForPublishOrdersOldestFirst(t *testing.T) {
 		// publishing the head moves it to the back
 		sign, _ := testRecordSigner()
 		connect.AssertEqual(t, PublishNetworkExtenderRecord(ctx, extenderIds[3], sign), true)
-		got = GetNetworkExtenderIdsForPublish(ctx, 4)
+		got = GetNetworkExtenderIdsForPublish(ctx, 4, testPublishStaleBefore())
 		connect.AssertEqual(t, got[0], extenderIds[0])
 		connect.AssertEqual(t, got[3], extenderIds[3])
 
@@ -693,6 +693,114 @@ func TestGetNetworkExtenderIdsForPublishOrdersOldestFirst(t *testing.T) {
 
 func timePtr(t time.Time) *time.Time {
 	return &t
+}
+
+// The stale cut of the drip at a 12 hour rotation (GEOMAP §2.8), which is the
+// work package's ExtenderPublishRotationTimeout.
+func testPublishStaleBefore() time.Time {
+	return server.NowUtc().Add(-12 * time.Hour)
+}
+
+// An active extender with one active v4 address stamped at lastPublishTime
+// (nil for never drip-published) and a newest record issued at
+// recordIssueTime (nil for never signed).
+func testCreatePublishExtender(
+	ctx context.Context,
+	index int,
+	active bool,
+	lastPublishTime *time.Time,
+	recordIssueTime *time.Time,
+) server.Id {
+	extenderId := server.NewId()
+	createTime := server.NowUtc().Add(-48 * time.Hour)
+	Testing_CreateNetworkExtender(
+		ctx,
+		&NetworkExtender{
+			ExtenderId:      extenderId,
+			NetworkId:       server.NewId(),
+			ClientId:        server.NewId(),
+			PublicKey:       []byte(fmt.Sprintf("extender-public-key-stale-%06d", index)),
+			CreateTime:      createTime,
+			TcpPort:         443,
+			UdpPort:         443,
+			DnsPort:         53,
+			DnsTld:          connect.DefaultExtenderDnsTld,
+			CountryCode:     "US",
+			Active:          active,
+			RecordIssueTime: recordIssueTime,
+		},
+		[]*NetworkExtenderAddress{
+			{
+				IpVersion:       4,
+				Ip:              netip.MustParseAddr(fmt.Sprintf("192.0.2.%d", 150+index)),
+				Carriers:        []string{connect.ExtenderCarrierTcp},
+				ActivateTime:    createTime,
+				Active:          active,
+				LastPublishTime: lastPublishTime,
+			},
+		},
+	)
+	return extenderId
+}
+
+// Every active extender whose newest record is older than the stale cut is
+// released whatever the batch (GEOMAP §2.8, D19), beside the oldest-first
+// batch, each once and in batch order. The newest record is what clients
+// hold, so an extender re-activated an hour ago is fresh even when its drip
+// stamp is old -- it still takes its turn in the batch -- and one never
+// signed for is always stale.
+func TestGetNetworkExtenderIdsForPublishReleasesStaleExtendersBeyondTheBatch(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		hoursAgo := func(hours int) *time.Time {
+			return timePtr(now.Add(-time.Duration(hours) * time.Hour))
+		}
+
+		// drip published two hours ago: fresh, newest stamp
+		fresh := testCreatePublishExtender(ctx, 1, true, hoursAgo(2), hoursAgo(2))
+		// drip published thirteen hours ago and not since: stale
+		stale := testCreatePublishExtender(ctx, 2, true, hoursAgo(13), hoursAgo(13))
+		// drip stamp fourteen hours old, but re-activated an hour ago
+		reactivated := testCreatePublishExtender(ctx, 3, true, hoursAgo(14), hoursAgo(1))
+		// activated half an hour ago and never drip published
+		activated := testCreatePublishExtender(ctx, 4, true, nil, timePtr(now.Add(-30*time.Minute)))
+		// stale, but no longer active: never selected
+		testCreatePublishExtender(ctx, 5, false, hoursAgo(30), hoursAgo(30))
+
+		staleBefore := now.Add(-12 * time.Hour)
+		for _, test := range []struct {
+			limit int
+			want  []server.Id
+		}{
+			// the stale extender goes even when the batch has no room for it
+			{limit: 0, want: []server.Id{stale}},
+			{limit: 1, want: []server.Id{activated, stale}},
+			// the batch takes the drip order, and the stale one appears once
+			{limit: 2, want: []server.Id{activated, reactivated, stale}},
+			{limit: 3, want: []server.Id{activated, reactivated, stale}},
+			{limit: 4, want: []server.Id{activated, reactivated, stale, fresh}},
+			{limit: 8, want: []server.Id{activated, reactivated, stale, fresh}},
+		} {
+			got := GetNetworkExtenderIdsForPublish(ctx, test.limit, staleBefore)
+			if !slices.Equal(got, test.want) {
+				t.Fatalf("limit %d: selected %v, want %v", test.limit, got, test.want)
+			}
+		}
+
+		// with a cut older than every record, only the batch goes
+		got := GetNetworkExtenderIdsForPublish(ctx, 1, now.Add(-20*time.Hour))
+		if !slices.Equal(got, []server.Id{activated}) {
+			t.Fatalf("with nothing stale selected %v, want the batch of one", got)
+		}
+
+		// an extender never signed for has no newest record, and is stale
+		unsigned := testCreatePublishExtender(ctx, 6, true, hoursAgo(1), nil)
+		got = GetNetworkExtenderIdsForPublish(ctx, 0, staleBefore)
+		if !slices.Equal(got, []server.Id{stale, unsigned}) {
+			t.Fatalf("with an unsigned extender selected %v, want %v", got, []server.Id{stale, unsigned})
+		}
+	})
 }
 
 // An extender with one never-published address sorts with the unpublished, not
@@ -762,7 +870,7 @@ func TestGetNetworkExtenderIdsForPublishRanksAPartlyUnpublishedExtenderFirst(t *
 			},
 		)
 
-		got := GetNetworkExtenderIdsForPublish(ctx, 2)
+		got := GetNetworkExtenderIdsForPublish(ctx, 2, testPublishStaleBefore())
 		if !slices.Equal(got, []server.Id{partialId, publishedId}) {
 			t.Fatalf(
 				"publish order = %v, want the partly unpublished extender %v first",
@@ -1007,7 +1115,7 @@ func TestPublishNetworkExtenderRecordSkipsAnExtenderThatWentAway(t *testing.T) {
 		connect.AssertEqual(t, len(signed()), signedCount)
 		connect.AssertEqual(t, len(Testing_GetNetworkExtenderPublishes(ctx)), publishCount)
 		// and neither is ever selected for a batch in the first place
-		connect.AssertEqual(t, len(GetNetworkExtenderIdsForPublish(ctx, 8)), 0)
+		connect.AssertEqual(t, len(GetNetworkExtenderIdsForPublish(ctx, 8, testPublishStaleBefore())), 0)
 
 		// the stamps are untouched, so a later activation is still the oldest
 		stored := Testing_GetNetworkExtender(ctx, addressless.Extender.ExtenderId)

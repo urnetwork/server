@@ -829,10 +829,6 @@ func loadCredentialRequirements(environment string, stConfiguredEnabled bool, se
 			fields: []credentialFieldSpec{field("project_id", "project_id")},
 		},
 		{
-			key: "ipinfo", resource: "ipinfo.yml", purpose: "IP geolocation lookup", required: required,
-			fields: []credentialFieldSpec{field("ipinfo.access_token", "ipinfo", "access_token")},
-		},
-		{
 			key: "apple-crash-reporting", resource: "apple-reporting.yml", purpose: "Apple crash-report retrieval", required: false,
 			fields: []credentialFieldSpec{
 				field("issuer_id", "issuer_id"),

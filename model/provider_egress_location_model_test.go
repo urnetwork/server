@@ -29,10 +29,11 @@ func TestProviderEgressLocationUpsertAndGet(t *testing.T) {
 			ClientId:    clientId,
 			LocationId:  country.LocationId,
 			CountryCode: "us",
-			ASN:         401486,
-			Org:         "RAVNIX LLC",
-			Hosting:     true,
-			ObservedAt:  now,
+			// a documentation asn (rfc 5398) and a synthetic organization
+			ASN:        64500,
+			Org:        "Example Transit",
+			Hosting:    true,
+			ObservedAt: now,
 		})
 
 		got := GetProviderEgressLocation(ctx, clientId)
@@ -41,8 +42,11 @@ func TestProviderEgressLocationUpsertAndGet(t *testing.T) {
 		}
 		connect.AssertEqual(t, got.LocationId, country.LocationId)
 		connect.AssertEqual(t, got.CountryCode, "us")
-		connect.AssertEqual(t, got.ASN, 401486)
-		connect.AssertEqual(t, got.Hosting, true)
+		connect.AssertEqual(t, got.ASN, 64500)
+		// a probe carries no hosting, proxy or mobile verdict any more
+		// (connect/GEOMAP.md §11.3): the deprecated flags are neither stored nor
+		// read, whatever a caller sets
+		connect.AssertEqual(t, got.Hosting, false)
 		connect.AssertEqual(t, got.Proxy, false)
 
 		// upsert replaces, given a strictly newer observed_at: the upsert is
@@ -52,15 +56,14 @@ func TestProviderEgressLocationUpsertAndGet(t *testing.T) {
 			ClientId:    clientId,
 			LocationId:  country.LocationId,
 			CountryCode: "us",
-			ASN:         999,
-			Hosting:     false,
+			ASN:         64501,
 			Proxy:       true,
 			ObservedAt:  now.Add(time.Minute),
 		})
 		got = GetProviderEgressLocation(ctx, clientId)
-		connect.AssertEqual(t, got.ASN, 999)
+		connect.AssertEqual(t, got.ASN, 64501)
 		connect.AssertEqual(t, got.Hosting, false)
-		connect.AssertEqual(t, got.Proxy, true)
+		connect.AssertEqual(t, got.Proxy, false)
 	})
 }
 
@@ -362,15 +365,23 @@ func TestGetProviderEgressLocationDueDefersOnlyCurrentBlackholes(t *testing.T) {
 			checkedAt time.Time
 			ok        bool
 			present   bool
+			// dark is a failure repeated to the dark rule's threshold over its
+			// span; a failure without it is one failed check
+			dark bool
 		}
 		verdictStates := []verdictState{
 			{
 				name: "current failure", checkedAt: now.Add(-ProviderBlackholeCheckDueAge - time.Minute),
+				present: true, dark: true,
+			},
+			{
+				// one failed check is a failure, not a verdict (GEOMAP §11.3)
+				name: "current single failure", checkedAt: now.Add(-ProviderBlackholeCheckDueAge - time.Minute),
 				present: true,
 			},
 			{
 				name: "stale failure", checkedAt: now.Add(-ProviderBlackholeCheckMaxAge - time.Minute),
-				present: true,
+				present: true, dark: true,
 			},
 			{
 				name: "current pass", checkedAt: now.Add(-time.Minute),
@@ -393,14 +404,21 @@ func TestGetProviderEgressLocationDueDefersOnlyCurrentBlackholes(t *testing.T) {
 				addressOctet++
 
 				if verdict.present {
-					failure := ""
-					if !verdict.ok {
-						failure = "synthetic_dark"
-					}
-					SetProviderBlackholeCheck(ctx, &ProviderBlackholeCheck{
+					check := &ProviderBlackholeCheck{
 						ClientId: clientId, CheckedAt: verdict.checkedAt,
-						OK: verdict.ok, Failure: failure,
-					})
+						OK: verdict.ok,
+					}
+					if !verdict.ok {
+						check.Failure = "synthetic_dark"
+						check.ConsecutiveFailures = 1
+						firstFailedAt := verdict.checkedAt
+						if verdict.dark {
+							check.ConsecutiveFailures = DefaultProviderEgressRules().DarkConsecutiveFailures
+							firstFailedAt = verdict.checkedAt.Add(-40 * time.Minute)
+						}
+						check.FirstFailedAt = &firstFailedAt
+					}
+					SetProviderBlackholeCheck(ctx, check)
 				}
 
 				label := fmt.Sprintf("%s/%s", lane, verdict.name)
@@ -458,9 +476,7 @@ func TestGetProviderEgressLocationDueDefersOnlyCurrentBlackholes(t *testing.T) {
 			}
 		}
 
-		blackholeDue := GetProviderBlackholeCheckDue(
-			ctx, now.Add(-ProviderBlackholeCheckDueAge), 100, 0, 1,
-		)
+		blackholeDue := GetProviderBlackholeCheckDue(ctx, now, 100, 0, 1)
 		for clientId, label := range currentFailures {
 			if !slices.Contains(blackholeDue, clientId) {
 				t.Errorf("cheap blackhole due is missing deferred provider %s", label)

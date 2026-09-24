@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -22,67 +23,141 @@ type ProviderEgressHealthClassResult struct {
 // provider actually carry traffic to the real internet, across several
 // independent classes of destination.
 //
-// # Reputation is not health
+// Every count is over the loads the run sampled and measured, after every
+// load's retries (connect/GEOMAP.md §11.3): a load that passed on some attempt
+// is ok, one that failed every attempt is a failure, and that is what the
+// egress index and the 90 % rule count. A load whose tunnel was gone and could
+// not be re-created is neither -- it is out of OKCount and Total and named in
+// NotMeasuredNames -- and so is a canary, an unscored load from a place its
+// site is marked incompatible with.
 //
-// ReputationOK/ReputationTotal are stored because they are measured in the
-// same pass, and they are deliberately NOT part of OKCount/Total. This mirrors
-// the operator-proxy's egresshealth package comment, which calls its own
-// version of this "the one thing in this package most likely to be 'fixed'
-// into a bug", and the reasoning holds identically server-side.
+// # Reputation is dissolved
 //
-// The reputation class measures whether large vendors treat the exit ip as a
-// datacenter address. Nearly every honest hosted provider fails most of it,
-// because it IS hosted -- that is a fact about the vendor's ip intelligence
-// feed, not about whether the provider carries traffic. Folding it into
-// OKCount/Total would take a provider that carried every byte it was asked for
-// and score it as partly broken, and the providers it would punish hardest are
-// the well-run datacenter ones. Nothing downstream may add these figures into
-// OKCount, Total, or any health score derived from them.
-//
-// The two failure name lists are kept apart for the same reason: FailedNames
-// is destinations that mean the provider is not carrying traffic, while
-// ReputationFailedNames is vendors that refused a datacenter ip. Merged, they
-// would read as one longer failure list.
+// The sites that used to form an unscored reputation class are ordinary site
+// destinations now, sampled and scored like the rest (GEOMAP §11.3). The
+// ReputationOK/ReputationTotal/ReputationFailedNames columns are kept for the
+// release that still submits them, always zero and empty.
 type ProviderEgressHealth struct {
 	ClientId   server.Id
 	MeasuredAt time.Time
-	// OKCount and Total cover the SCORED classes only (dns, connectivity, cdn,
-	// site), over this run's sample.
+	// OKCount and Total cover the scored loads the run measured: every class,
+	// after retries, less what ingest left out of the counts (see
+	// UnscoredFailedNames).
 	OKCount int
 	Total   int
-	// ClassResults is the per-class tally for the scored classes only. A
-	// partial failure is only diagnosable per class: "ok=14/26" alone says
-	// nothing, while "dns=4/4 cdn=0/5 site=12/12" says the tunnel carries
-	// bytes and resolves names but is being refused by content providers --
-	// a completely different fault from a total blackhole.
+	// ClassResults is the per-class tally of the same loads. A partial failure
+	// is only diagnosable per class: "ok=44/50" alone says nothing, while
+	// "dns=6/6 cdn=0/10 site=26/26" says the tunnel carries bytes and resolves
+	// names but is being refused by content providers -- a completely
+	// different fault from a total blackhole.
 	ClassResults map[string]ProviderEgressHealthClassResult
-	// ReputationOK/ReputationTotal: stored, never scored. See the type comment.
+	// ReputationOK/ReputationTotal: always zero since the class dissolved.
 	ReputationOK    int
 	ReputationTotal int
-	// FailedNames is the comma-joined names of the scored destinations that
-	// failed. It is the only record of WHICH destinations a given provider was
-	// asked for on a given pass, since the sample is drawn fresh each run.
+	// FailedNames is the comma-joined names of the scored loads that failed
+	// every attempt. It is the only record of WHICH destinations a given
+	// provider failed on a given pass, since the sample is drawn fresh each
+	// run.
 	FailedNames string
-	// ReputationFailedNames is the comma-joined names of the reputation
-	// destinations that refused. Separate from FailedNames, deliberately.
+	// ReputationFailedNames: always empty since the class dissolved.
 	ReputationFailedNames string
 	// TLSAuthenticationFailure records that at least one sampled HTTPS peer did
 	// not authenticate the requested hostname. It is not a score component: one
 	// forged identity is sufficient to make the provider unsafe.
 	TLSAuthenticationFailure bool
+	// NotMeasuredCount/NotMeasuredNames are the loads whose tunnel was gone for
+	// their last attempt and could not be re-created: neither passed nor
+	// failed, and out of every count, so a short run is told from a thin one.
+	NotMeasuredCount int
+	NotMeasuredNames string
+	// CanaryPassedNames/CanaryFailedNames are the canaries of this run: sites
+	// loaded, unscored, from a place they are marked incompatible with, which
+	// is how the pool learns a site works there again (GEOMAP §11.4).
+	CanaryPassedNames string
+	CanaryFailedNames string
+	// ShortClasses is the comma-joined classes too thin, for the provider's
+	// place, to fill their sample: the pool's signal, not the provider's.
+	ShortClasses string
+	// UnscoredFailedNames is the comma-joined failed loads the server left out
+	// of the counts at ingest: a site on probation, or one marked incompatible
+	// with the provider's place (see ScoreProviderEgressHealth).
+	UnscoredFailedNames string
+}
+
+// Takes out of a submitted run's counts every failed load the pool says must
+// not count against this provider: a site on probation, which has to earn the
+// right to cost a provider a tier, and a site marked incompatible with the
+// provider's place, which says nothing about the exits there (GEOMAP §11.3,
+// §11.4). Each such failure leaves FailedNames, its class's total and Total,
+// and is named in UnscoredFailedNames.
+//
+// Only failures can be taken out here: a run reports which loads failed, not
+// which passed. The probe task, which holds every load of the run, submits a
+// run already scored this way -- passes included -- so for it this finds
+// nothing; for any other submitter it is the part of the rule the wire allows.
+// A failed name whose class the run's tally cannot give back is left counted:
+// taking it out would make the tally inconsistent with itself.
+func ScoreProviderEgressHealth(
+	health *ProviderEgressHealth,
+	place ProviderEgressPlace,
+	scoring *ProviderEgressHealthScoring,
+) *ProviderEgressHealth {
+	scored := *health
+	scored.ClassResults = map[string]ProviderEgressHealthClassResult{}
+	for class, tally := range health.ClassResults {
+		scored.ClassResults[class] = tally
+	}
+	kept := []string{}
+	unscored := []string{}
+	if health.UnscoredFailedNames != "" {
+		unscored = append(unscored, splitProviderEgressNames(health.UnscoredFailedNames)...)
+	}
+	for _, name := range splitProviderEgressNames(health.FailedNames) {
+		if scoring.Scores(name, place) {
+			kept = append(kept, name)
+			continue
+		}
+		class := scoring.Class(name)
+		tally, ok := scored.ClassResults[class]
+		if !ok || tally.Total <= tally.OK || scored.Total <= scored.OKCount {
+			kept = append(kept, name)
+			continue
+		}
+		tally.Total -= 1
+		scored.ClassResults[class] = tally
+		scored.Total -= 1
+		unscored = append(unscored, name)
+	}
+	scored.FailedNames = strings.Join(kept, ",")
+	scored.UnscoredFailedNames = strings.Join(unscored, ",")
+	return &scored
+}
+
+// Splits a comma-joined name list, dropping empty elements and the "…+N more"
+// marker a truncated list ends with.
+func splitProviderEgressNames(names string) []string {
+	out := []string{}
+	for _, name := range strings.Split(names, ",") {
+		name = strings.TrimSpace(name)
+		if index := strings.Index(name, "…"); 0 <= index {
+			name = strings.TrimSpace(name[:index])
+		}
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // SetProviderEgressHealth records a provider's latest egress-health run.
 //
 // The row is keyed on client_id alone, so a new run REPLACES the previous one:
 // this is the current picture per provider that a consumer reads, not a
-// history. That mirrors provider_egress_location's lifecycle exactly. If
-// trending is wanted later it belongs in a separate partitioned append table,
-// not in a second key column here -- the read path for "is this provider
-// carrying traffic right now" wants one row per provider and nothing else.
-//
-// Nothing here folds reputation into the health figures; see the
-// ProviderEgressHealth comment for why that must stay true.
+// history. That mirrors provider_egress_location's lifecycle exactly. The
+// per-site history the pool refresh needs is the site tally
+// (AddProviderEgressRunTally), not a second key column here -- the read path
+// for "is this provider carrying traffic right now" wants one row per provider
+// and nothing else.
 func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) {
 	classResults := health.ClassResults
 	if classResults == nil {
@@ -108,9 +183,15 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 				reputation_total,
 				failed_names,
 				reputation_failed_names,
-				tls_authentication_failure
+				tls_authentication_failure,
+				not_measured_count,
+				not_measured_names,
+				canary_passed_names,
+				canary_failed_names,
+				short_classes,
+				unscored_failed_names
 			)
-			VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)
+			VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 			ON CONFLICT (client_id) DO UPDATE
 			SET
 				measured_at = $2,
@@ -121,7 +202,13 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 				reputation_total = $7,
 				failed_names = $8,
 				reputation_failed_names = $9,
-				tls_authentication_failure = $10
+				tls_authentication_failure = $10,
+				not_measured_count = $11,
+				not_measured_names = $12,
+				canary_passed_names = $13,
+				canary_failed_names = $14,
+				short_classes = $15,
+				unscored_failed_names = $16
 			`,
 			health.ClientId,
 			// measured_at is a naive timestamp column holding utc, as
@@ -135,6 +222,12 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 			health.FailedNames,
 			health.ReputationFailedNames,
 			health.TLSAuthenticationFailure,
+			health.NotMeasuredCount,
+			health.NotMeasuredNames,
+			health.CanaryPassedNames,
+			health.CanaryFailedNames,
+			health.ShortClasses,
+			health.UnscoredFailedNames,
 		))
 	})
 }
@@ -286,7 +379,13 @@ func GetProviderEgressHealth(ctx context.Context, clientId server.Id) *ProviderE
 				reputation_total,
 				failed_names,
 				reputation_failed_names,
-				tls_authentication_failure
+				tls_authentication_failure,
+				not_measured_count,
+				not_measured_names,
+				canary_passed_names,
+				canary_failed_names,
+				short_classes,
+				unscored_failed_names
 			FROM provider_egress_health
 			WHERE client_id = $1
 			`,
@@ -306,6 +405,12 @@ func GetProviderEgressHealth(ctx context.Context, clientId server.Id) *ProviderE
 					&h.FailedNames,
 					&h.ReputationFailedNames,
 					&h.TLSAuthenticationFailure,
+					&h.NotMeasuredCount,
+					&h.NotMeasuredNames,
+					&h.CanaryPassedNames,
+					&h.CanaryFailedNames,
+					&h.ShortClasses,
+					&h.UnscoredFailedNames,
 				))
 				h.ClassResults = map[string]ProviderEgressHealthClassResult{}
 				server.Raise(json.Unmarshal(classResultsJson, &h.ClassResults))

@@ -184,7 +184,9 @@ func TestSubnetOperatorWorkloadPreservesProductionDefault(t *testing.T) {
 		for _, pending := range task.GetTasks(ctx, task.ListPendingTasks(ctx)...) {
 			seeded[pending.FunctionName] = true
 		}
-		for _, target := range []task.Target{task.NewTaskTarget(work.Payout), task.NewTaskTarget(work.RefreshGeolocationSourcePins), task.NewTaskTarget(work.StSyncChain)} {
+		// the geolocation-source pin refresh is retired and no longer seeded
+		// (connect/GEOMAP.md D24); the pool refresh is the egress default now
+		for _, target := range []task.Target{task.NewTaskTarget(work.Payout), task.NewTaskTarget(work.RefreshEgressDestinations), task.NewTaskTarget(work.StSyncChain)} {
 			name := target.TargetFunctionName()
 			if !worker.HasTarget(name) || !seeded[name] {
 				t.Errorf("ordinary production default lost scheduled/registered task %s", name)

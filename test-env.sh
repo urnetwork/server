@@ -31,6 +31,47 @@ test_env_find_resource() {
     return 1
 }
 
+# Finds a nested resource (mmdb/places.yml) the way the Go resolver's
+# versionLookup does: at every directory level the path continues either
+# through its next literal component or through a semantic-version directory,
+# so config/all/mmdb/2026.9.23/places.yml answers for mmdb/places.yml.
+# Version-directory symlinks are not followed, matching the resolver.
+test_env_find_versioned_resource() {
+    local directory="$1"
+    local resource_name="$2"
+    local version_path
+
+    if [[ "$resource_name" == */* ]]; then
+        if [[ -d "$directory/${resource_name%%/*}" ]] &&
+            test_env_find_versioned_resource "$directory/${resource_name%%/*}" "${resource_name#*/}"; then
+            return 0
+        fi
+    elif [[ -f "$directory/$resource_name" ]]; then
+        TEST_ENV_RESOURCE_PATH="$directory/$resource_name"
+        return 0
+    fi
+    while IFS= read -r version_path; do
+        if test_env_is_semver_name "${version_path##*/}" &&
+            test_env_find_versioned_resource "$version_path" "$resource_name"; then
+            return 0
+        fi
+    done < <(find -H "$directory" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | LC_ALL=C sort)
+    return 1
+}
+
+test_env_find_nested_resource() {
+    local root="$1"
+    local resource_name="$2"
+    local home
+    for home in "$root" "$root/local" "$root/all"; do
+        if [[ -d "$home" ]] && test_env_find_versioned_resource "$home" "$resource_name"; then
+            return 0
+        fi
+    done
+    test_env_error "required resource is missing: $root/{,local/,all/}$resource_name"
+    return 1
+}
+
 test_env_int64_decimal() {
     local value="$1"
     local LC_ALL=C
@@ -163,8 +204,11 @@ test_env_find_resource_tree() {
 }
 
 # Reads the checked-in, non-executable resource boundary for a complete local
-# server suite. Resource names are constrained to one path element before the
-# normal root/local/all resolver is used.
+# server suite. Vault names are constrained to one path element before the
+# normal root/local/all resolver is used. A config name may be a relative path
+# of such elements (mmdb/places.yml, which ships in a dated directory beside
+# its database) and resolves through version directories as the Go resolver
+# does; no element may begin with a dot, so none can climb out of the root.
 test_env_validate_suite_resource_manifest() {
     local manifest_path="$1"
     local vault_root="$2"
@@ -199,6 +243,9 @@ test_env_validate_suite_resource_manifest() {
         if [[ "$line" =~ ^(vault|vault_tree|config)=([a-zA-Z0-9][a-zA-Z0-9._-]*)$ ]]; then
             resource_kind="${BASH_REMATCH[1]}"
             resource_name="${BASH_REMATCH[2]}"
+        elif [[ "$line" =~ ^(config)=([a-zA-Z0-9][a-zA-Z0-9._-]*(/[a-zA-Z0-9][a-zA-Z0-9._-]*)+)$ ]]; then
+            resource_kind="${BASH_REMATCH[1]}"
+            resource_name="${BASH_REMATCH[2]}"
         else
             test_env_error "suite resource manifest has an invalid entry: $manifest_path"
             return 1
@@ -219,6 +266,9 @@ test_env_validate_suite_resource_manifest() {
         elif [[ "$resource_kind" == vault_tree ]]; then
             vault_tree_count=$((vault_tree_count + 1))
             test_env_find_resource_tree "$vault_root" "$resource_name" || return $?
+        elif [[ "$resource_name" == */* ]]; then
+            config_resource_count=$((config_resource_count + 1))
+            test_env_find_nested_resource "$config_root" "$resource_name" || return $?
         else
             config_resource_count=$((config_resource_count + 1))
             test_env_find_resource "$config_root" "$resource_name" || return $?

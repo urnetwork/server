@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -28,67 +29,140 @@ const MaxProviderEgressLocationSubmissionAge = 24 * time.Hour
 // whatever location was submitted, with no API-side recovery.
 const MaxProviderEgressLocationSubmissionSkew = 5 * time.Minute
 
-// maxLocationNameLen bounds country/city/region as submitted: these flow into
-// model.CreateLocation, whose location_name column is varchar(128). Rejecting
-// an over-long value here with a clear error is preferable to letting
-// CreateLocation panic on a Postgres "value too long for type character
-// varying(128)" error.
-const maxLocationNameLen = 128
-
-// maxOrgLen mirrors maxLocationNameLen for org, which is stored in
-// provider_egress_location.org, a varchar(256) column.
-const maxOrgLen = 256
-
 type SubmitProviderEgressLocationArgs struct {
-	ClientId         server.Id `json:"client_id"`
-	CountryCode      string    `json:"country_code"`
-	Country          string    `json:"country"`
-	Region           string    `json:"region,omitempty"`
-	City             string    `json:"city,omitempty"`
-	ASN              int       `json:"asn,omitempty"`
-	Org              string    `json:"org,omitempty"`
-	Hosting          bool      `json:"hosting,omitempty"`
-	Proxy            bool      `json:"proxy,omitempty"`
-	Mobile           bool      `json:"mobile,omitempty"`
-	CountryConfident bool      `json:"country_confident"`
-	CityConfident    bool      `json:"city_confident,omitempty"`
-	ObservedAt       time.Time `json:"observed_at"`
+	ClientId server.Id `json:"client_id"`
+	// The address the operator's own /ip echo (GET /my-ip-info) saw the probe
+	// come from through the provider's tunnel. It is the whole
+	// submission (connect/GEOMAP.md §11.3): the server places it with its own
+	// GeoLite2, and it is never stored.
+	ExitIp     string    `json:"exit_ip"`
+	ObservedAt time.Time `json:"observed_at"`
+
+	// The fields below are what the prober's retired vendor consensus used to
+	// fill. The prober still sends country_code, country and
+	// country_confident, always empty, for one release, and an older prober
+	// sends all of them; they are declared so such a body decodes, and are
+	// ignored. A body without exit_ip is refused whatever these say.
+	CountryCode      string `json:"country_code,omitempty"`
+	Country          string `json:"country,omitempty"`
+	Region           string `json:"region,omitempty"`
+	City             string `json:"city,omitempty"`
+	ASN              int    `json:"asn,omitempty"`
+	Org              string `json:"org,omitempty"`
+	Hosting          bool   `json:"hosting,omitempty"`
+	Proxy            bool   `json:"proxy,omitempty"`
+	Mobile           bool   `json:"mobile,omitempty"`
+	CountryConfident bool   `json:"country_confident,omitempty"`
+	CityConfident    bool   `json:"city_confident,omitempty"`
 }
 
 type SubmitProviderEgressLocationResult struct {
 	LocationId server.Id `json:"location_id"`
 }
 
-// providerEgressVerdict marshals a submission, and the row it is about to
-// replace, into probeverdict's Input. It is the only place the two are joined;
-// the rules themselves live in the probeverdict package and are not restated
-// here.
+// Where GeoLite2 places a probed exit address: the location row to store it
+// at, not yet created, and how precisely.
+type ProviderEgressExit struct {
+	// Location is the GeoLite2 place at the granularity the lookup supports:
+	// the city when GeoLite2 places the address within the confident radius,
+	// else its region, else its country.
+	Location *model.Location
+	// CountryCode is lowercase alpha-2.
+	CountryCode string
+	// CityConfident is whether Location is the city: GeoLite2 names one and
+	// its accuracy radius is at most ProviderEgressRules.CityConfidentRadiusKm.
+	CityConfident bool
+	// AccuracyRadiusKm is GeoLite2's radius, 0 when it gives none.
+	AccuracyRadiusKm int
+}
+
+// Places an exit address with the server's own GeoLite2 (connect/GEOMAP.md §3,
+// §11.3), exactly as a connection's address is placed (GetLocationForIp), so a
+// probed location and a looked-up one are the same kind of fact from the same
+// database. It is the only place the exit is resolved: the location ingest
+// stores its answer, and the prober's metrics label a submission with it.
+//
+// A city is kept only when GeoLite2 places the address within
+// cityConfidentRadiusKm. provider_egress_location's documented invariant is
+// that location_id is a city row exactly when city_confident is set, and
+// probedLocationPreferred reads the granularity off that flag, so a place too
+// coarse for its city is stored at its region, or its country, and a probe can
+// correct a provider's country without pinning it to a city GeoLite2 is unsure
+// of.
+func ResolveProviderEgressExit(exitIp string, cityConfidentRadiusKm int) (*ProviderEgressExit, error) {
+	addr, err := netip.ParseAddr(strings.TrimSpace(exitIp))
+	if err != nil {
+		return nil, fmt.Errorf("The exit address does not parse.")
+	}
+	ipInfo, err := server.GetIpInfo(addr.Unmap())
+	if err != nil {
+		return nil, fmt.Errorf("GeoLite2 has no place for the exit address.")
+	}
+	return providerEgressExitFromIpInfo(ipInfo, cityConfidentRadiusKm)
+}
+
+// The place and precision one GeoLite2 record gives an exit, with no lookup:
+// the city only within the confident radius, else the region, else the
+// country.
+func providerEgressExitFromIpInfo(ipInfo *server.IpInfo, cityConfidentRadiusKm int) (*ProviderEgressExit, error) {
+	countryCode := strings.ToLower(strings.TrimSpace(ipInfo.CountryCode))
+	if len(countryCode) != 2 || strings.TrimSpace(ipInfo.Country) == "" {
+		return nil, fmt.Errorf("GeoLite2 places the exit address in no country.")
+	}
+
+	cityConfident := strings.TrimSpace(ipInfo.City) != "" &&
+		0 < ipInfo.AccuracyRadiusKm && ipInfo.AccuracyRadiusKm <= cityConfidentRadiusKm
+
+	location := &model.Location{
+		Region:           ipInfo.Region,
+		Country:          ipInfo.Country,
+		CountryCode:      countryCode,
+		Continent:        ipInfo.Continent,
+		ContinentCode:    ipInfo.ContinentCode,
+		Latitude:         ipInfo.Latitude,
+		Longitude:        ipInfo.Longitude,
+		Timezone:         ipInfo.Timezone,
+		RegionGeonameId:  ipInfo.RegionGeonameId,
+		CountryGeonameId: ipInfo.CountryGeonameId,
+	}
+	if cityConfident {
+		location.City = ipInfo.City
+		location.CityGeonameId = ipInfo.CityGeonameId
+	}
+	locationType, err := location.GuessLocationType()
+	if err != nil {
+		return nil, err
+	}
+	location.LocationType = locationType
+
+	return &ProviderEgressExit{
+		Location:         location,
+		CountryCode:      countryCode,
+		CityConfident:    cityConfident,
+		AccuracyRadiusKm: ipInfo.AccuracyRadiusKm,
+	}, nil
+}
+
+// Joins the submission's resolved country and the row it
+// is about to replace into probeverdict's Input. It is the only place the two
+// are joined; the rules themselves live in the probeverdict package.
+//
+// The country is GeoLite2's own answer for the exit, so it is always
+// confident: there is no second source for it to disagree with any more
+// (GEOMAP D24). What remains is the history rule -- a country that flips
+// within a day of the last probe is suspect.
 //
 // previous is the row currently stored for this provider, or nil when the
-// provider has never been probed successfully. A nil previous leaves
-// PreviousCountryCode empty, which probeverdict reads as "no history to
-// contradict" -- a first probe is judged on its consensus alone.
-//
-// Note what is NOT passed: the mmdb country for the provider's control ip. A
-// probed country that disagrees with mmdb is the finding this project exists to
-// produce, never a fault, and probeverdict.Input structurally has no field for
-// it. Do not add one.
+// provider has never been probed successfully.
 func providerEgressVerdict(
-	args *SubmitProviderEgressLocationArgs,
+	countryCode string,
 	previous *model.ProviderEgressLocation,
 ) probeverdict.Verdict {
 	in := probeverdict.Input{
-		CountryConfident: args.CountryConfident,
-		// stored country codes are lowercased (see
-		// model.SetProviderEgressLocation), so normalize the submitted one the
-		// same way before comparing it against the stored history -- otherwise
-		// a prober sending "US" against a stored "us" reads as a country change
-		// and every second probe would be suspect.
-		CountryCode: strings.ToLower(strings.TrimSpace(args.CountryCode)),
+		CountryConfident: true,
+		CountryCode:      countryCode,
 		// the server's clock, not the prober's: the age of the stored history
-		// is a server-side judgement, and args.ObservedAt is attacker-adjacent
-		// input. Its skew is already bounded, but the bound is a rejection
-		// rule, not a licence to measure history against it.
+		// is a server-side judgement
 		Now: server.NowUtc(),
 	}
 	if previous != nil {
@@ -98,20 +172,24 @@ func providerEgressVerdict(
 	return probeverdict.Evaluate(in)
 }
 
-// SubmitProviderEgressLocation records a probed egress location for a provider.
-// Only country-confident submissions are accepted; city/region are stored only
-// when the probe was also city-confident (free geolocation sources disagree on
-// city often enough that an unconfirmed city is worse than none).
+// Records where a provider's traffic exits: the
+// address the operator's own /ip echo saw through the provider's tunnel,
+// placed with the server's GeoLite2 (connect/GEOMAP.md §11.3).
+//
+// The address itself is never stored -- only the location row it resolves
+// to, its country and whether it was placed to a city. No ip-intelligence
+// verdict is recorded either: hosting, proxy and mobile are not known and are
+// written false, and the columns go one release later.
+//
+// A submission without exit_ip is the retired vendor-consensus shape. It is
+// refused rather than stored: the prober and the server deploy together, and a
+// country an older prober asserted is not the server's own lookup.
 func SubmitProviderEgressLocation(
 	ctx context.Context,
 	args *SubmitProviderEgressLocationArgs,
 ) (*SubmitProviderEgressLocationResult, error) {
-	if !args.CountryConfident {
-		return nil, fmt.Errorf("Submission is not country-confident.")
-	}
-	countryCode := strings.ToLower(strings.TrimSpace(args.CountryCode))
-	if len(countryCode) != 2 {
-		return nil, fmt.Errorf("Country code must be alpha-2.")
+	if strings.TrimSpace(args.ExitIp) == "" {
+		return nil, fmt.Errorf("Missing exit_ip: submit the address the operator's /ip echo saw through the tunnel; vendor-consensus locations are no longer accepted.")
 	}
 	if args.ObservedAt.IsZero() {
 		return nil, fmt.Errorf("Missing observed_at.")
@@ -126,128 +204,38 @@ func SubmitProviderEgressLocation(
 		return nil, fmt.Errorf("Unknown client.")
 	}
 
-	// country is always used to resolve/create a location row (at minimum
-	// the country-granular one), and model.CreateLocation dedupes country
-	// rows on (location_type, country_code): an empty name here would create
-	// a canonical row with location_name='' that every later lookup for this
-	// country reuses forever, even after a subsequent real mmdb lookup. Reject
-	// rather than silently falling back, so the prober learns it sent a bad
-	// payload instead of the server permanently corrupting shared data.
-	country := strings.TrimSpace(args.Country)
-	if country == "" {
-		return nil, fmt.Errorf("Missing country.")
-	}
-	if maxLocationNameLen < len(country) {
-		return nil, fmt.Errorf("Country is too long.")
-	}
-	if maxOrgLen < len(args.Org) {
-		return nil, fmt.Errorf("Org is too long.")
+	exit, err := ResolveProviderEgressExit(args.ExitIp, model.GetProviderEgressRules().CityConfidentRadiusKm)
+	if err != nil {
+		// the message names no address: the error reaches the prober's logs
+		// and the address is never kept anywhere
+		return nil, err
 	}
 
-	// city/region are only used (and their rows only created) when the probe
-	// was city-confident; the same empty-name corruption applies to them, so
-	// require both are present and reject rather than silently dropping to
-	// country granularity on a bad payload.
-	var city, region string
-	if args.CityConfident {
-		city = strings.TrimSpace(args.City)
-		region = strings.TrimSpace(args.Region)
-		if city == "" {
-			return nil, fmt.Errorf("Missing city for a city-confident submission.")
-		}
-		if region == "" {
-			return nil, fmt.Errorf("Missing region for a city-confident submission.")
-		}
-		if maxLocationNameLen < len(city) {
-			return nil, fmt.Errorf("City is too long.")
-		}
-		if maxLocationNameLen < len(region) {
-			return nil, fmt.Errorf("Region is too long.")
-		}
-	}
+	// GeoLite2's names are the canonical ones the location table is seeded
+	// from (connect/GEOMAP.md §4), so the row is created exactly as the mmdb
+	// path in SetConnectionLocation creates it. The vendor spellings the
+	// consensus path had to match against existing rows have no source here
+	// any more, and that matcher is gone with them.
+	model.CreateLocation(ctx, exit.Location)
 
-	// resolve to a location row. City granularity only when the probe agreed
-	// on a city AND that city already exists in the location table.
-	//
-	// The probe MUST NOT define new cities or regions. model.CreateLocation
-	// dedupes a city on its exact location_name, so an unrecognised spelling
-	// does not fail -- it silently inserts a new permanent row into the shared
-	// `location` table and adds it to the search index. The three free
-	// geolocation sources the prober reaches consensus over demonstrably
-	// disagree on spelling ("Frankfurt am Main (Innenstadt I)" vs "Frankfurt am
-	// Main" for the same host, observed), and the consensus keeps the winning
-	// source's original display string -- so "Frankfurt am Main", "Frankfurt Am
-	// Main" and "Frankfurt/Main" would each become their own row. Those rows
-	// survive a code revert and there is no cleanup path.
-	//
-	// model.MatchExistingLocation therefore matches only, never creates,
-	// case-insensitively and ignoring punctuation/whitespace/accents and
-	// parenthesised district qualifiers, so the ordinary variants -- the
-	// "(Innenstadt I)" case above included -- land on the row that is already
-	// there. When it does not resolve,
-	// this submission falls back to country granularity: country is the
-	// granularity this design treats as trustworthy anyway, and losing city
-	// precision for one probe is strictly better than permanently polluting a
-	// table shared with the provider list and the location search.
-	var location *model.Location
-	if args.CityConfident {
-		location = model.MatchExistingLocation(ctx, countryCode, region, city)
-	}
-
-	// city_confident records the granularity of the row actually stored, not
-	// what the probe claimed. The schema's documented invariant is that
-	// location_id is a city row exactly when city_confident is set (see the
-	// provider_egress_location migration), and a city-confident probe whose
-	// city did not resolve is stored at country granularity.
-	cityConfident := location != nil
-
-	if location == nil {
-		// country granularity. This still goes through CreateLocation: a
-		// country row is keyed on country_code, so a variant *name* can never
-		// produce a second row for the same country the way a variant city name
-		// can -- the pollution this guards against is not reachable here. The
-		// country row is also the whole point of the fallback, so a probe from
-		// a country not yet in the table must not be dropped.
-		location = &model.Location{
-			LocationType: model.LocationTypeCountry,
-			Country:      country,
-			CountryCode:  countryCode,
-		}
-		model.CreateLocation(ctx, location)
-	}
-
-	// judge the submission against the history it is about to replace. This is
-	// the only call site probeverdict has and the only place a verdict is
-	// computed: every geolocation submission already funnels through here, so
-	// verdicts fall out of the existing probe cadence with no separate
-	// scheduler and no separate endpoint. Before this, every row in the table
-	// read the column default `unverified` -- the absence of a judgement, which
-	// is indistinguishable from a judgement of "could not verify".
-	//
-	// The read is the only one: SetProviderEgressLocation below is an upsert,
-	// so the previous row has to be fetched before it is overwritten, and the
-	// verdict is the only thing that needs it.
+	// judge the submission against the history it is about to replace; the
+	// upsert below overwrites that history, so it is read first
 	previous := model.GetProviderEgressLocation(ctx, args.ClientId)
-	verdict := providerEgressVerdict(args, previous)
+	verdict := providerEgressVerdict(exit.CountryCode, previous)
 
 	model.SetProviderEgressLocation(ctx, &model.ProviderEgressLocation{
 		ClientId:      args.ClientId,
-		LocationId:    location.LocationId,
-		CountryCode:   countryCode,
-		ASN:           args.ASN,
-		Org:           args.Org,
-		Hosting:       args.Hosting,
-		Proxy:         args.Proxy,
-		Mobile:        args.Mobile,
-		CityConfident: cityConfident,
+		LocationId:    exit.Location.LocationId,
+		CountryCode:   exit.CountryCode,
+		CityConfident: exit.CityConfident,
 		ObservedAt:    args.ObservedAt,
 		Verdict:       verdict.State,
 		VerdictReason: verdict.Reason,
 		// assurance stays at the model default (`direct`): this probe reached
-		// the provider over a single tunnel from the prober. Multi-hop is P3.
+		// the provider over a single tunnel from the prober
 	})
 
-	return &SubmitProviderEgressLocationResult{LocationId: location.LocationId}, nil
+	return &SubmitProviderEgressLocationResult{LocationId: exit.Location.LocationId}, nil
 }
 
 // maxProbeFailureLen bounds the failure class as submitted:

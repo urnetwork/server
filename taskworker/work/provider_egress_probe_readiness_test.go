@@ -11,7 +11,6 @@ import (
 
 	"github.com/urnetwork/operator-proxy/egresshealth"
 	"github.com/urnetwork/operator-proxy/fleetprobe"
-	"github.com/urnetwork/operator-proxy/geolocate"
 	"github.com/urnetwork/operator-proxy/ingest"
 	"github.com/urnetwork/operator-proxy/prober"
 	"github.com/urnetwork/server"
@@ -31,16 +30,20 @@ func TestProviderEgressProbeReadinessUnfundedPassDoesNotMeasureProviders(t *test
 			minimum:   1,
 			available: func(context.Context) (model.ByteCount, error) { return 0, nil },
 		},
-		blackholeDue: func(context.Context, int) ([]string, error) { return []string{"provider.example"}, nil },
-		fullDue:      func(context.Context, int) ([]string, error) { return []string{"provider.example"}, nil },
+		blackholeDue: func(context.Context, int) ([]ingest.DueProvider, error) {
+			return testDueProviders("provider.example"), nil
+		},
+		fullDue: func(context.Context, int) ([]ingest.DueProvider, error) {
+			return testDueProviders("provider.example"), nil
+		},
 		loadPins: func(context.Context) (map[string][]string, error) {
 			return map[string][]string{"geo.example": {"synthetic-pin"}}, nil
 		},
-		runBlackhole: func(context.Context, []string, fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
+		runBlackhole: func(context.Context, []prober.Provider, fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
 			tunnels++
 			return fleetprobe.BlackholeSummary{Checks: []ingest.BlackholeCheck{{ClientId: "provider.example"}}, Dark: 1}, nil
 		},
-		runFull: func(context.Context, []string, fleetprobe.FullOptions) (prober.Summary, error) {
+		runFull: func(context.Context, []prober.Provider, fleetprobe.FullOptions) (prober.Summary, error) {
 			tunnels++
 			return prober.Summary{Attempted: 1, Failed: 1}, nil
 		},
@@ -66,13 +69,13 @@ func TestProviderEgressProbeReadinessDepletionBeforeBlackholePublication(t *test
 			minimum:   1,
 			available: func(context.Context) (model.ByteCount, error) { return available, nil },
 		},
-		runBlackhole: func(context.Context, []string, fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
+		runBlackhole: func(context.Context, []prober.Provider, fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
 			available = 0
 			return fleetprobe.BlackholeSummary{Checks: []ingest.BlackholeCheck{{ClientId: "provider.example"}}, Dark: 1}, nil
 		},
 		submitBlackholeChecks: func(context.Context, []ingest.BlackholeCheck) error { submissions++; return nil },
 	}
-	summary, err := pass.runBlackholeBatch(context.Background(), args, nil, 1, []string{"provider.example"})
+	summary, _, err := pass.runBlackholeBatch(context.Background(), args, nil, nil, 1, fleetprobe.ProvidersFromClientIds([]string{"provider.example"}))
 	if submissions != 0 || len(summary.Checks) != 0 || summary.Dark != 0 {
 		t.Fatalf("credit depletion published or counted a dark provider: submissions=%d checks=%d dark=%d", submissions, len(summary.Checks), summary.Dark)
 	}
@@ -92,7 +95,7 @@ func TestProviderEgressProbeReadinessUnfundedFullFailureIsNotPublished(t *testin
 			available: func(context.Context) (model.ByteCount, error) { return 0, nil },
 		},
 	}
-	attemptErr := reporter.ReportAttempt(context.Background(), "provider.example", prober.FailureNoConsensus)
+	attemptErr := reporter.ReportAttempt(context.Background(), "provider.example", prober.FailureNoExitIp)
 	healthErr := reporter.SubmitEgressHealth(context.Background(), "provider.example", &egresshealth.Result{Total: 2})
 	if len(inner.attempts) != 0 || len(inner.health) != 0 {
 		t.Fatalf("unfunded full probe published provider failure: attempts=%d health=%d", len(inner.attempts), len(inner.health))
@@ -115,7 +118,7 @@ func TestProviderEgressProbeReadinessUnknownFullFailureIsNotPublished(t *testing
 			},
 		},
 	}
-	attemptErr := reporter.ReportAttempt(context.Background(), "provider.example", prober.FailureNoConsensus)
+	attemptErr := reporter.ReportAttempt(context.Background(), "provider.example", prober.FailureNoExitIp)
 	healthErr := reporter.SubmitEgressHealth(context.Background(), "provider.example", &egresshealth.Result{Total: 2})
 	if len(inner.attempts) != 0 || len(inner.health) != 0 {
 		t.Fatal("unknown shared credit published a negative provider measurement")
@@ -136,17 +139,17 @@ func TestProviderEgressProbeReadinessFundedDarkMeasurementStillPublishes(t *test
 			minimum:   1,
 			available: func(context.Context) (model.ByteCount, error) { return 1, nil },
 		},
-		runBlackhole: func(context.Context, []string, fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
+		runBlackhole: func(context.Context, []prober.Provider, fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
 			return fleetprobe.BlackholeSummary{Checks: []ingest.BlackholeCheck{{ClientId: "provider.example", Failure: egresshealth.FailureAllDestinationsFailed}}, Dark: 1}, nil
 		},
 		submitBlackholeChecks: inner.SubmitBlackholeChecks,
 	}
-	summary, err := pass.runBlackholeBatch(context.Background(), args, nil, 1, []string{"provider.example"})
+	summary, _, err := pass.runBlackholeBatch(context.Background(), args, nil, nil, 1, fleetprobe.ProvidersFromClientIds([]string{"provider.example"}))
 	if err != nil || len(inner.blackhole) != 1 || summary.Dark != 1 {
 		t.Fatalf("funded provider failure was suppressed: published=%d dark=%d error=%v", len(inner.blackhole), summary.Dark, err)
 	}
 	reporter := &providerEgressProbeReadinessReporter{egressProbeIngest: inner, readiness: pass.readiness}
-	if err := reporter.ReportAttempt(context.Background(), "provider.example", prober.FailureNoConsensus); err != nil {
+	if err := reporter.ReportAttempt(context.Background(), "provider.example", prober.FailureNoExitIp); err != nil {
 		t.Fatal(err)
 	}
 	if err := reporter.SubmitEgressHealth(context.Background(), "provider.example", &egresshealth.Result{Total: 2}); err != nil {
@@ -168,29 +171,29 @@ func TestProviderEgressProbeReadinessRetainsPositiveAndTlsEvidence(t *testing.T)
 			minimum:   1,
 			available: func(context.Context) (model.ByteCount, error) { return available, nil },
 		},
-		runBlackhole: func(context.Context, []string, fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
+		runBlackhole: func(context.Context, []prober.Provider, fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
 			available = 0
 			return fleetprobe.BlackholeSummary{Checks: []ingest.BlackholeCheck{
-				{ClientId: "healthy.example", OK: true},
-				{ClientId: "tls.example", Failure: egresshealth.FailureTLSAuthentication},
+				{ClientId: "healthy.example", Ok: true},
+				{ClientId: "tls.example", Failure: egresshealth.FailureTlsAuthentication},
 				{ClientId: "unknown.example", Failure: egresshealth.FailureAllDestinationsFailed},
 			}, Dark: 2}, nil
 		},
 		submitBlackholeChecks: inner.SubmitBlackholeChecks,
 	}
-	summary, err := pass.runBlackholeBatch(context.Background(), args, nil, 1, []string{"healthy.example", "tls.example", "unknown.example"})
+	summary, _, err := pass.runBlackholeBatch(context.Background(), args, nil, nil, 1, fleetprobe.ProvidersFromClientIds([]string{"healthy.example", "tls.example", "unknown.example"}))
 	if !errors.Is(err, errProviderEgressProbeUnfunded) || len(inner.blackhole) != 2 || summary.Dark != 1 ||
 		inner.blackhole[0].ClientId != "healthy.example" || inner.blackhole[1].ClientId != "tls.example" {
 		t.Fatalf("independent blackhole evidence changed: published=%+v summary=%+v error=%v", inner.blackhole, summary, err)
 	}
 	reporter := &providerEgressProbeReadinessReporter{egressProbeIngest: inner, readiness: pass.readiness}
-	if err := reporter.Submit(context.Background(), "healthy.example", &geolocate.ConsensusLocation{CountryConfident: true}); err != nil {
+	if err := reporter.Submit(context.Background(), "healthy.example", "203.0.113.7", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := reporter.ReportAttempt(context.Background(), "healthy.example", ""); err != nil {
 		t.Fatal(err)
 	}
-	for _, result := range []*egresshealth.Result{{Total: 2, OKCount: 2}, {Total: 2, TLSAuthenticationFailure: true}, nil} {
+	for _, result := range []*egresshealth.Result{{Total: 2, OkCount: 2}, {Total: 2, TlsAuthenticationFailure: true}, nil} {
 		if err := reporter.SubmitEgressHealth(context.Background(), "healthy.example", result); err != nil {
 			t.Fatal(err)
 		}
@@ -213,13 +216,13 @@ func TestProviderEgressProbeReadinessFullRunnerCannotSwallowFundingFailure(t *te
 	reporter := &providerEgressProbeReadinessReporter{egressProbeIngest: inner, readiness: readiness}
 	pass := &providerEgressProbePass{
 		readiness: readiness,
-		runFull: func(ctx context.Context, _ []string, _ fleetprobe.FullOptions) (prober.Summary, error) {
+		runFull: func(ctx context.Context, _ []prober.Provider, _ fleetprobe.FullOptions) (prober.Summary, error) {
 			available = 0
-			_ = reporter.ReportAttempt(ctx, "provider.example", prober.FailureNoConsensus)
+			_ = reporter.ReportAttempt(ctx, "provider.example", prober.FailureNoExitIp)
 			return prober.Summary{Attempted: 1, Failed: 1}, nil
 		},
 	}
-	outcome := pass.runFullBatch(context.Background(), args, nil, []string{"provider.example"})
+	outcome := pass.runFullBatch(context.Background(), args, nil, nil, testDueProviders("provider.example"))
 	if !errors.Is(outcome.err, errProviderEgressProbeUnfunded) || outcome.summary.Attempted != 1 || len(inner.attempts) != 0 {
 		t.Fatalf("full runner lost shared failure or published provider backoff: outcome=%+v attempts=%d", outcome, len(inner.attempts))
 	}

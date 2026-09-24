@@ -272,64 +272,132 @@ func TestSetConnectionLocationProbedNetTypeForeignMatchesMmdbParity(t *testing.T
 	})
 }
 
-// A fresh probed location's Hosting/Proxy flags must map onto the stored
-// connection's net_type_hosting/net_type_privacy scores. Mobile must NOT map
-// onto net_type_virtual: Hosting/Proxy have direct mmdb-path equivalents
-// (ipInfo.Hosting/ipInfo.Privacy, see GetLocationForIp), but Mobile has none
-// (IpInfo has no Mobile concept at all, and NetTypeVirtual is only ever set
-// from the ipinfo schema's is_satellite field, never from DB-IP or from
-// anything Mobile-shaped) -- deriving NetTypeVirtual from Mobile would give
-// a probed mobile provider a ranking penalty an identical unprobed mobile
-// provider never takes, breaking the parity this feature promises.
-func TestSetConnectionLocationMapsProbedFlagsToScores(t *testing.T) {
+// A probe decides a connection's location and nothing else
+// (connect/GEOMAP.md §11.3, D24): the hosting and proxy verdicts it once
+// carried onto net_type_hosting and net_type_privacy came from ip-intelligence
+// vendors the prober no longer consults. So a probed connection stores 0 for
+// all three net types exactly as an unprobed one does, whichever location
+// wins -- even for a row written with the deprecated flags set, which the
+// model neither stores nor reads back.
+func TestSetConnectionLocationStoresNoProbedNetTypes(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
-		probed := &model.Location{
+		connectProvider := func(clientIp string) (clientId server.Id, connectionId server.Id) {
+			networkId := server.NewId()
+			clientId = server.NewId()
+			model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+
+			handlerId := model.CreateNetworkClientHandler(ctx)
+			var err error
+			connectionId, _, _, _, err = model.ConnectNetworkClient(ctx, clientId, clientIp+":0", handlerId)
+			connect.AssertEqual(t, err, nil)
+			return
+		}
+		storedNetTypes := func(connectionId server.Id) (netTypeHosting int, netTypePrivacy int, netTypeVirtual int) {
+			found := false
+			server.Db(ctx, func(conn server.PgConn) {
+				result, qerr := conn.Query(
+					ctx,
+					`SELECT net_type_hosting, net_type_privacy, net_type_virtual FROM network_client_location WHERE connection_id = $1`,
+					connectionId,
+				)
+				server.WithPgResult(result, qerr, func() {
+					if result.Next() {
+						found = true
+						server.Raise(result.Scan(&netTypeHosting, &netTypePrivacy, &netTypeVirtual))
+					}
+				})
+			})
+			if !found {
+				t.Fatalf("no location stored for connection %s", connectionId)
+			}
+			return
+		}
+
+		// the probe's location wins: mmdb places 67.43.156.1, an address of
+		// MaxMind's published test data, only in its country, so a
+		// country-level probe replaces it
+		probedJapan := &model.Location{
 			LocationType: model.LocationTypeCountry,
 			Country:      "Japan",
 			CountryCode:  "jp",
 		}
-		model.CreateLocation(ctx, probed)
+		model.CreateLocation(ctx, probedJapan)
 
-		networkId := server.NewId()
-		clientId := server.NewId()
-		model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
-
-		handlerId := model.CreateNetworkClientHandler(ctx)
-		connectionId, _, _, _, err := model.ConnectNetworkClient(ctx, clientId, "8.8.8.8:0", handlerId)
-		connect.AssertEqual(t, err, nil)
-
+		clientId, connectionId := connectProvider("67.43.156.1")
 		model.SetProviderEgressLocation(ctx, &model.ProviderEgressLocation{
 			ClientId:    clientId,
-			LocationId:  probed.LocationId,
+			LocationId:  probedJapan.LocationId,
 			CountryCode: "jp",
 			Hosting:     true,
 			Proxy:       true,
 			Mobile:      true,
 			ObservedAt:  server.NowUtc(),
 		})
+		stored := model.GetProviderEgressLocation(ctx, clientId)
+		if stored == nil || stored.Hosting || stored.Proxy || stored.Mobile {
+			t.Fatalf("the deprecated flags were stored or read back: %+v", stored)
+		}
 
-		err = SetConnectionLocation(ctx, connectionId, "8.8.8.8")
+		err := SetConnectionLocation(ctx, connectionId, "67.43.156.1")
 		connect.AssertEqual(t, err, nil)
 
-		var netTypeHosting int
-		var netTypePrivacy int
-		var netTypeVirtual int
-		server.Db(ctx, func(conn server.PgConn) {
-			result, qerr := conn.Query(
-				ctx,
-				`SELECT net_type_hosting, net_type_privacy, net_type_virtual FROM network_client_location WHERE connection_id = $1`,
-				connectionId,
-			)
-			server.WithPgResult(result, qerr, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&netTypeHosting, &netTypePrivacy, &netTypeVirtual))
-				}
-			})
-		})
-		connect.AssertEqual(t, netTypeHosting, 1)
-		connect.AssertEqual(t, netTypePrivacy, 1)
+		_, _, countryLocationId := testing_connectionLocationIds(ctx, connectionId)
+		connect.AssertEqual(t, countryLocationId, probedJapan.CountryLocationId)
+		netTypeHosting, netTypePrivacy, netTypeVirtual := storedNetTypes(connectionId)
+		connect.AssertEqual(t, netTypeHosting, 0)
+		connect.AssertEqual(t, netTypePrivacy, 0)
+		connect.AssertEqual(t, netTypeVirtual, 0)
+
+		// the mmdb location wins: mmdb places 24.48.0.1 in Montreal, and a
+		// country-level probe that agrees on Canada would only coarsen it
+		// (see TestSetConnectionLocationProbedCountryDoesNotCoarsenMmdbCity)
+		clientIp := "24.48.0.1"
+		mmdbLocation, _, err := GetLocationForIp(ctx, clientIp)
+		connect.AssertEqual(t, err, nil)
+		// the case is only meaningful if mmdb really has a city here
+		connect.AssertEqual(t, mmdbLocation.LocationType, model.LocationTypeCity)
+		model.CreateLocation(ctx, mmdbLocation)
+
+		probedCanada := &model.Location{
+			LocationType: model.LocationTypeCountry,
+			Country:      "Canada",
+			CountryCode:  "ca",
+		}
+		model.CreateLocation(ctx, probedCanada)
+
+		egress := &model.ProviderEgressLocation{
+			LocationId:    probedCanada.LocationId,
+			CountryCode:   "ca",
+			CityConfident: false,
+			ObservedAt:    server.NowUtc(),
+		}
+		connect.AssertEqual(t, probedLocationPreferred(egress, mmdbLocation), false)
+
+		clientId, connectionId = connectProvider(clientIp)
+		egress.ClientId = clientId
+		model.SetProviderEgressLocation(ctx, egress)
+
+		err = SetConnectionLocation(ctx, connectionId, clientIp)
+		connect.AssertEqual(t, err, nil)
+
+		cityLocationId, _, _ := testing_connectionLocationIds(ctx, connectionId)
+		connect.AssertEqual(t, cityLocationId, mmdbLocation.CityLocationId)
+		netTypeHosting, netTypePrivacy, netTypeVirtual = storedNetTypes(connectionId)
+		connect.AssertEqual(t, netTypeHosting, 0)
+		connect.AssertEqual(t, netTypePrivacy, 0)
+		connect.AssertEqual(t, netTypeVirtual, 0)
+
+		// and with no probe at all, all three stay 0
+		_, connectionId = connectProvider(clientIp)
+
+		err = SetConnectionLocation(ctx, connectionId, clientIp)
+		connect.AssertEqual(t, err, nil)
+
+		netTypeHosting, netTypePrivacy, netTypeVirtual = storedNetTypes(connectionId)
+		connect.AssertEqual(t, netTypeHosting, 0)
+		connect.AssertEqual(t, netTypePrivacy, 0)
 		connect.AssertEqual(t, netTypeVirtual, 0)
 	})
 }

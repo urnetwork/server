@@ -6986,19 +6986,45 @@ the prober's existing non-fatal behavior are unchanged.
 Independent positive traffic control:
 `urnetwork_egress_probe_health_checks_total{result="ok"}` records a validated
 fetch on that full probe's provider tunnel: the HTTP request and the destination's
-status/body contract passed before the health report API call. It is not a byte
-counter or a report acknowledgment. A fresh same-process positive delta proves
-carried probe traffic, not a join to an individual failed geolocation source,
-new contract admission, or customer-route recovery. Health runs after geolocation
-on the same initially cold tunnel, so later success cannot exclude an earlier
-formation failure.
+status/body contract passed before the health report API call, on some attempt
+of the load's retries. It is not a byte counter or a report acknowledgment;
+canaries (`canary_ok`, `canary_fail`) and loads that were not measured
+(`not_measured`) carry results of their own. A fresh same-process positive delta
+proves carried probe traffic, not a join to an individual failed attempt or exit
+lookup, new contract admission, or customer-route recovery. The loads run after
+the operator's `/ip` echo warm-up on the same initially cold tunnel, which the
+run may re-create, so later success cannot exclude an earlier formation failure.
+A full batch the run guard holds back records no loads at all.
 
-`urnetwork_egress_probe_geolocation_diagnostics_total` contains source outcomes
-only from diagnostic-bearing `no_consensus` probes, including any source that
-succeeded within that failed probe. It is not an all-source request denominator
-or a fleet-wide DNS/TLS failure rate. Missing or newly created auxiliary series
-are unknown, not healthy zero. These auxiliary controls are not added to the
-fixed admission query or its alert thresholds.
+Exit and attempt controls: `urnetwork_egress_probe_locations_total` counts the
+exit addresses the prober submits by the precision of the GeoLite2 placement the
+ingest itself applies: `city_confident="true"` a city within the confident
+radius, `city_confident="false"` a region or country only, and
+`country="unknown"` an address GeoLite2 cannot place, which the ingest refuses
+and the attempt reports as `submit_failed`. The address itself is never a label.
+`urnetwork_egress_probe_attempts_total` counts one outcome per full run, `ok` or
+its failure class; the prober-side classes `health_not_run` (the run never
+started), `run_not_measured` (its tunnel died and could not be re-created),
+`no_exit_ip` (the `/ip` echo never answered) and `run_batch_guard` (its batch was
+held back by the run guard) are the probe's own misses, not verdicts on the
+provider's traffic. Both are recorded only once the run guard has judged the
+batch -- a held-back batch records only its `run_batch_guard` attempts -- and
+before the report call returns: they are measurement events, not acknowledgments
+or accepted locations. Neither is an all-provider request denominator or a
+fleet-wide DNS/TLS failure rate: a provider the pass never reached is not counted.
+
+Fleet share controls: `urnetwork_egress_probe_fleet_dark_share` (dark providers
+over those with a current measured blackhole check) and
+`urnetwork_egress_probe_fleet_failure_share{class}` (the failed share of the
+scored loads measured within the prober-fault window) are process-local
+snapshots re-counted from the durable tables at most once a minute. Read them
+from the one Taskworker with the freshest
+`urnetwork_egress_probe_fleet_snapshot_timestamp_seconds` and never sum them
+across Taskworkers. Each reads 0 when it has nothing to divide, so zero is not
+health without the counts behind it; the prober-fault finding of §2.19b judges
+the same failure share directly from the database. Missing or newly created
+auxiliary series are unknown, not healthy zero. These auxiliary controls are not
+added to the fixed admission query or its alert thresholds.
 
 The reusable probe runs once per minute using one fixed nine-family Mimir
 instant query through an inventory services gateway. It returns values plus
@@ -7084,7 +7110,7 @@ last successful grant and an unexpired token did not establish current affordabi
 The owning Operator Proxy correction gives only the cheap blackhole tunnel a
 private 1 MiB contract-reservation ramp target using fresh client settings. It
 avoids the ordinary large unused successors for this small measurement; full
-geolocation and bandwidth tunnels keep their defaults. This is a per-request
+probe and bandwidth tunnels keep their defaults. This is a per-request
 target, not a total quota or a hard cap: a larger legal message floor still wins,
 and an independent provider's return-companion prefetch is not governed by the
 probing client's setting. `TestProviderTunnelContractReservationRequests` observes
@@ -7106,17 +7132,38 @@ evidence aging into unknown are not recovery.
 **DNS-family progress boundary:** deterministic two-Tun, remote-only RFC 8484
 tests reproduce a shared Connect defect: stream dialing waited for both A and
 AAAA, so a completed or cached usable answer could not start TCP while the other
-query remained pending. The correction feeds completed families into the
-existing 250 ms TCP fallback race, preserving ready/cached IPv6 preference,
-late-family fallback after TCP failure, explicit family selection, and custom
-resolver authority. UDP's full-list resolution policy is unchanged. The dial
-cancels and joins its `QueryResult` callers and TCP workers, closing losing
-connections; shared-cache HTTP transport tails retain their separate ownership
-until `cache.Close`, not necessarily until stream return.
-`TestTunDohProgress*`, `TestInternalDohProgress*`, and `TestDohDialProgress*`
-cover both stalled-family directions, cold/partial/full caches, failed first
-TCP, cancellation, late successful losers, and authoritative-empty versus
+query remained pending. The current correction launches the first usable A or
+AAAA answer immediately, even when it is IPv4 and IPv6 is still pending; the
+250 ms stagger applies only to later TCP attempts. A failed first TCP path can
+still use a later family. Generic single-address UDP uses the first usable
+family immediately and cancels/joins its own pending sibling query; an empty or
+failed first family leaves the other live. Explicit family selection and custom
+resolver authority remain unchanged. The dial closes losing TCP connections;
+shared-cache HTTP transport tails retain their separate ownership until
+`cache.Close`, not necessarily until stream return.
+`TestTunDohProgress*`, `TestInternalDohProgress*`, `TestDohDialProgress*`,
+`TestDohFirstAnswer*`, and `TestTunDohFirstAnswer*` cover both stalled-family
+directions, cold/partial/full caches, real TUN UDP, failed first TCP,
+cancellation, late successful losers, and authoritative-empty versus
 unobservable results.
+
+Extender bootstrap/manual discovery previously queried A and then AAAA
+serially before returning to its feed loop. The corrected per-client owner
+publishes the first usable family and lets signed-TXT or explicit-manual
+candidates reach the feed dial before the other family finishes; it merges late
+addresses and joins workers on close. Bare DNS bootstrap addresses remain
+unverified and nondialable. `TestExtenderDohFirstAnswer*` checks actual feed
+readiness, startup release without unsigned dialing, late inventory, wake from
+backoff, and owner teardown. Native H3 and Alt/whodis retain a bounded pending
+family source after first-candidate admission, so a failed first handshake can
+use a later answer without bypassing per-instance transport budgets;
+`TestH3DohFirstAnswer*`, `TestAltDohFirstAnswer*`, and
+`TestUdpProgressive*` cover first work, fallback, and cleanup. H3 DNS-carrier
+modes keep their existing single-socket policy: first-address selection is
+immediate, but this change does not add later-family handshake fallback there.
+These source tests do not attest a running Main image or explain every DoH PAGE;
+verify the deployed artifact and same-process logical outcome before
+attribution or closure.
 
 **Per-probe DoH ownership:** Taskworker's full and blackhole Operator Proxy
 checks each open a new `providertunnel.Tunnel`. Each tunnel constructs its own
@@ -7132,13 +7179,18 @@ strategy but currently resolves its host names outside the in-tunnel DoH path;
 do not confuse that bootstrap resolution with provider egress DNS.
 
 False-positive qualifier: this proves the mechanism, not attribution of every
-production geolocation timeout. `pre-GotConn`/`connect_formation` is a fallback
-classification, not proof of a Connect-service or TLS-phase failure.
-That fallback includes manual TLS inside the custom `DialTLSContext`; a generic
-timeout at this stage is not a DNS-specific verdict.
-False-negative qualifier: geolocation precedes health on the same initially
-cold tunnel/cache; later aggregate health success does not establish what
-happened to an individual failed source or exclude an earlier DNS-family stall.
+production probe timeout. The prober no longer records the stage an attempt
+failed at: a timeout before the connection is established is one failed attempt
+of the load, retried like any other, and it counts against the load like any
+other failure once every attempt has failed, so it is not a DNS-specific
+verdict. Only a TLS authentication failure, which ends the load at once, and a
+tunnel lost under the load's last attempt, which leaves the load not measured,
+are told apart; at the run level a tunnel that never opens is `tunnel_failed`
+and a warm-up the `/ip` echo never answers is `no_exit_ip`.
+False-negative qualifier: the `/ip` echo warm-up precedes the scored loads on
+the same initially cold tunnel/cache; later aggregate health success does not
+establish what happened to an individual failed warm-up or load or exclude an
+earlier DNS-family stall.
 A timed-out DoH socket with `resolver_outcome=answer` rules out failure of its
 initiating resolver call only, not the provider probe or another record family.
 Conversely, `resolver_outcome=canceled` can follow a real outer Tun dial
@@ -7148,11 +7200,11 @@ The nested resolver can therefore record cancellation rather than timeout.
 Even fresh same-process `timeout` delta zero does not exclude this deadline
 path. Successful races also cancel unused families, so cancellation alone
 proves neither a harmless losing hedge nor provider failure. Retain unknown
-attribution without the owning pass/attempt outcome and source-stage control.
+attribution without the owning pass/attempt outcome.
 Compare the running artifact with the owning correction before recommending a
-rollout. Require fresh source outcomes and traffic-bearing full submissions,
-alongside the independent provider-list recovery gates; a code fix or quieter
-resolver-attempt logs alone do not prove recovery.
+rollout. Require fresh exit placements, attempt outcomes and traffic-bearing
+full submissions, alongside the independent provider-list recovery gates; a
+code fix or quieter resolver-attempt logs alone do not prove recovery.
 
 The producer has a matching correctness boundary: `fleetprobe.RunBlackhole`
 discards an in-flight result if the owning context is canceled before that
@@ -7212,6 +7264,386 @@ pin the strict expiry boundary, actual limited/deduplicated EDF counts, fixed
 preseeded label domains, post-call timing/error identity, and nil-health no-op.
 Formal Go execution remains subject to the repository's toolchain/license gate;
 formatting or package metadata checks do not substitute for executing these tests.
+
+### 2.19b Egress site pool freshness — retire sites that fail everyone, and keep the pool representative
+Probe: `egress-site-pool`
+
+The probe's verdicts are only as good as the sites it loads. A site that
+refuses every exit — a bot manager that rejects the probe's request shape, a
+changed redirect, a site that went away — reads as a failure on every
+provider and cannot distinguish one exit from another; left in the pool it
+lowers every provider's index and pushes healthy providers past the
+one-in-ten line of connect/GEOMAP.md §10.3. The pool is therefore data, not
+code: `provider_egress_destination` holds the active sites per class (dns,
+connectivity, cdn, site) with their load contracts, and a candidate list of
+representative sites by category and region, seeded from the prober's
+built-in table and extended in `config/all/egress-sites.yml`; the prober
+fetches the active set at the start of every pass
+(`GET /network/provider-egress-destinations`). A daily task,
+`RefreshEgressDestinations`, judges each active site against exits that are
+known to work and swaps out the ones that fail them (connect/GEOMAP.md §11.4).
+A promoted site is on probation: served and recorded, but no provider's counts
+include it until it has passed at least `SiteProbationShare` (50 %) of
+`SiteMinSamples` healthy exits.
+
+Observe the pool from our own data, never from a vendor. A health run names
+the sites it failed, not the ones it loaded, and a run draws about one site in
+four, so the share of runs a site failed in is not its failure share. The
+probe task, which holds every load of a run, therefore records each one in
+`provider_egress_site_tally` by day and by the exit's published place, and
+marks the loads whose exit was **healthy** — it passed at least nine in ten of
+the *other* scored sites of the same run, after their retries. A site's
+failure share is its failed healthy loads over its healthy loads in the
+window (`SiteWindow`, three days), per class:
+
+```sql
+SELECT d.name, d.class,
+       sum(t.healthy_failure_count) AS failed_loads,
+       sum(t.healthy_load_count) AS loads
+FROM provider_egress_destination d
+JOIN provider_egress_site_tally t ON t.name = d.name
+WHERE d.active
+  AND date_trunc('day', now() at time zone 'utc' - interval '3 days')::date <= t.tally_day
+GROUP BY d.name, d.class;
+```
+
+When fewer than `SiteMinSamples` (200) healthy loads exist for a site, the
+refresh judges it on all of its loads and says so in its log line. The
+refresh records its judgement on the row (`failure_share`, `sample_count`,
+`judged_time`, and `above_retire_since` while the share stands above the
+retire line with enough samples), and the signal reads that record together
+with the tally.
+
+Alert, WARN tier, five-minute cadence, when any of these holds:
+
+- **pool needs refresh** (`egress-site-pool-needs-refresh`, one finding per
+  site): an active scored site's failure share among healthy exits has stood
+  above `SiteRetireShare` (50 %) over at least `SiteMinSamples` (200) loads
+  for more than 24 hours — the refresh task should have retired it, so this
+  is the task not doing its job, or its per-class cap
+  (`SiteMaxRetirePerRun`, 1) retiring a degrading class one site a day;
+- **refresh not running** (`egress-site-refresh-not-running`, frames
+  `task-missing`, `task-parked`, `stale-run`): the `pending_task` row for
+  `github.com/urnetwork/server/taskworker/work.RefreshEgressDestinations`
+  is missing, parked on a reschedule error, or a whole cadence past its run
+  time — each run schedules the next one `SiteRefreshInterval` out, so that
+  is a last run more than twice its cadence ago;
+- **pool thin** (`egress-site-pool-thin`, frames `<class>/below-pool-size`
+  and `<class>/candidates-exhausted`): a class's active pool is below
+  `SitePoolSize` for that class, or no candidate is left to promote, so the
+  next retirement cannot be replaced; candidates listed in
+  `egress-sites.yml` and not yet synced count;
+- **regional failure unmarked** (`egress-site-regional-failure-unmarked`,
+  frame `<site>@<country>` or `<site>@<country>/<region>`): an active site
+  fails at least `SiteRegionFailShare` (90 %) of healthy exits in one country
+  or (country, region) over at least `SiteRegionMinSamples` (30) loads, in a
+  place where most sites pass, while its fleet-wide share is under the retire
+  line, and that place is not yet in the site's `incompatible` list — the
+  refresh task should have marked it, so the exits there are paying for a
+  site they could never reach;
+- **place pool thin** (`egress-site-place-pool-thin`, frame
+  `<class>@<place>`): for some country or region the tally saw exits at, a
+  class's compatible active sites number fewer than that class's sample size
+  (`SiteSampleSize`: dns 6, connectivity 8, cdn 10, site 26), so runs there
+  cannot draw a representative sample; the candidate list needs sites that
+  work from that place;
+- **country unreachable** (`egress-country-unreachable`, frame the country
+  code): every active site fails at least 90 % of the exits of one country
+  over the window, healthy or not, over at least `SiteRegionMinSamples` runs
+  — not a site fault but the prober's route to that country's exits, its
+  capacity toward them, or the `/ip` echo blocked there (the finding carries
+  the echo failures), to be read with §2.19a and never answered by marking
+  sites;
+- **backfill sustained** (`egress-backfill-sustained`, frame the rank mode):
+  more than half of the providers FindProviders2 answered with for a rank
+  mode over the last hour were borrowed from another bucket
+  (`increase(urnetwork_provider_backfill_sum[1h])` against
+  `increase(urnetwork_provider_answered_total[1h])`) — the answer looks full
+  to every user while the bucket behind it has emptied, which is exactly what
+  backfill is meant to hide from users and must not hide from the operator;
+- **retry queue starved** (`egress-retry-queue-starved`): blackhole retries
+  of eligible providers — rows with a run of failures, or a check that
+  measured nothing — whose `next_due_at` is more than one backoff step
+  (`DarkBackoff`) in the past have not been rechecked: a failing provider is
+  neither confirmed dark nor cleared, and the pool is silently smaller than
+  the checks admit;
+- **prober fault, not sites** (`egress-prober-fault`, frames
+  `failure-share`, `guard-full`, `guard-blackhole`): the fleet-wide
+  failed-load share after retries exceeds `SiteProberFaultShare` (20 %) in
+  every class over the runs of the last `SiteProberFaultWindow` (an hour),
+  each class judged on at least 100 scored loads, or
+  the dark or run batch guard of connect/GEOMAP.md §11.3 tripped within the
+  hour (`urnetwork_egress_probe_batch_guard_trips_total`) — a request-shape or
+  capacity fault on the prober, to be read together with §2.19a.
+
+The backfill and guard series come from Mimir; when they cannot be read the
+signal reports `egress-site-pool-unobservable` and evaluates neither
+condition, since a healthy finding would resolve an open alert on no
+evidence.
+
+Every finding is a bounded reason and a site name, a class, a country code
+or a region name; provider ids, task ids and credentials are never exported.
+Sites failing on unhealthy exits are not evidence: a dark or broken exit
+fails everything, which is what §10.3's exclusions are for.
+
+Every destination row and candidate carries `incompatible`, the countries
+and (country, region) pairs it is known to fail from; the prober never
+loads a site from a place on its list, the health ingest drops any load that
+arrives anyway, and the task adds a place to the list when a site fails that
+place completely while working elsewhere. A place the task learned keeps a
+canary — `SiteRegionCanaryShare` (5 %) of pool fetches ask for the site to be
+loaded there anyway, unscored — and is unmarked after `SiteRegionCooldown`
+(30 days) of passing canaries.
+
+Action: a sustained backfill is a degradation with a cause, and the alert
+is closed by finding it, never by the answers looking full. Read the
+exclusion-reason and index panels beside the backfill metric: a wave of
+"unprobed" is the prober or its capacity (§2.19, §2.19a); a wave over the
+one-in-ten line with the pool healthy is the exits — new evidence is needed
+before ranking them again, whether more sites, a longer window, or a source
+of quality this design does not yet read; a wave in one place is the
+place's pool or its route (the conditions above). Then, for the pool:
+confirm the refresh task's last run and its `[egresssites]` log lines
+(retired, promoted, on probation, marked incompatible, candidates remaining
+per class); if a class or a place's pool is thin, extend the candidate list
+for that class and place in `egress-sites.yml` (a site retired for good
+returns by raising its entry's `revision`); if the fleet-wide share is high,
+check the prober's request profile and capacity before touching the pool,
+because retiring sites during a prober fault empties the pool for nothing —
+the refresh skips its run while the share is above the prober-fault line for
+that reason. Verify: the site's failure share on healthy exits falls under
+the retire line within one refresh cadence after the swap, and the
+quality-bucket count of §2.9a stops falling.
+
+Implementation convention: SIGNALS.md §2.19b (`egress-site-pool`) maps to
+`signal_egress_site_pool.go` and `signal_egress_site_pool_test.go`. The
+thresholds are the refresh task's own (`model.ProviderEgressSiteSettings`,
+the `settings` block of `egress-sites.yml`) beside the signal's
+`EgressSitePoolSettings` (the 24-hour refresh age, the backfill share and
+window, the guard window, the fewest loads a class's share is judged on,
+the unreachable share), so the monitor judges by the numbers the task acts on.
+
+### 2.19c Derived-location health — the ping geometry and its calibration
+Probe: `derived-locations`
+
+The derive job (connect/GEOMAP.md §5, `taskworker/work/derive_location_work.go`)
+turns a day of co-signed pings into a corrected position per provider and
+extender every eight hours, behind publish gates, and `SetConnectionLocation`
+reads the result first. It has parameters that were set on synthetic data —
+the km-per-millisecond slope and overhead, the containment penalties, the
+reputation floors and exclusion sigma, the publish gates — and a wrong one
+does not fail: it quietly places nodes wrong, or publishes nothing, or moves
+every node a little every run. The job writes its run summary to Redis, which
+the stats collector publishes (`derive_last_run_seconds`,
+`derive_excluded_sources`, `derive_residual_km{at=derived|genesis}`, and the
+capacity: `derive_solve_seconds{at=measured|projected|budget}`,
+`derive_solve_bytes{at=peak|projected|budget}`, `derive_ingest_seconds`), and
+its table is the record:
+
+```sql
+SELECT count(*) AS published,
+       count(*) FILTER (WHERE crossed_region) AS crossed_region,
+       count(*) FILTER (WHERE crossed_country) AS crossed_country,
+       count(*) FILTER (WHERE peer_count <= 3) AS at_min_peers,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY residual_km) AS median_residual_km,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY reputation) AS median_reputation,
+       max(update_time) AS last_update
+FROM derived_location;
+
+-- the ingest's hour tally (GEOMAP §2.7), never network_ping's rows: at the
+-- target a day's partition is 275 GiB
+SELECT hour,
+       COALESCE(sum(ping_count) FILTER (WHERE cosign = 1), 0)::bigint AS cosigned,
+       COALESCE(sum(ping_count) FILTER (WHERE cosign = 2), 0)::bigint AS rejected,
+       COALESCE(sum(ping_count) FILTER (WHERE cosign = 2 AND cosign_reason = 6), 0)::bigint AS rate_limited,
+       COALESCE(sum(ping_count) FILTER (WHERE cosign = 0), 0)::bigint AS unknown,
+       COALESCE(sum(ping_count) FILTER (WHERE relayed), 0)::bigint AS relayed,
+       sum(zero_rtt_count)::bigint AS zero_rtt,
+       sum(beyond_half_planet_count)::bigint AS beyond_half_planet
+FROM network_ping_hour_tally
+WHERE date_trunc('hour', now() at time zone 'utc') - interval '23 hours' <= hour
+GROUP BY hour ORDER BY hour;
+```
+
+The ingest adds every stored report to that tally in the report's own
+transaction, so the counts are exact; the day is the 24 clock hours up to the
+current one, and beyond half the planet is the ingest's threshold (200 ms at
+the solver's 100 km per ms), which `DeriveHalfPlanetRttMs` follows.
+
+Alert, WARN tier, fifteen-minute cadence, when any of these thirteen
+conditions holds (every threshold a setting with the default given):
+
+- **not running** (`derive-not-running`, parts `stale-run`, `task-missing`,
+  `task-parked`): `derive_last_run_seconds` is older than twice
+  `DeriveInterval` (16 hours), or the `pending_task` row for
+  `github.com/urnetwork/server/taskworker/work.DeriveLocations` is missing or
+  parked;
+- **supply gone** (`derive-supply-gone`): fewer than
+  `DeriveMinCosignedPerHour` (100) co-signed pings in the last hour while
+  providers and extenders are connected — the pingers, the reporters or the
+  ingest have stopped;
+- **refusals** (`derive-refusals`, parts `rejected`, `rate-limited`):
+  rejected pings above `DeriveMaxRefusalShare` (10 %) of verdicts over the
+  last hour — targets refusing honest claims (gate tolerance, clock skew) or
+  pingers under-claiming; or rate-limited (reason 6) above 5 %, which is the
+  extenders' admission limits (connect/EXTENDER.md A12) set too tight for the
+  ping cadence;
+- **no verdicts** (`derive-no-verdicts`): pings with no verdict above
+  `DeriveMaxUnknownShare` (30 %) — extenders on the old binary, or the
+  verdict frame lost on a carrier;
+- **published collapse** (`derive-published-collapse`): the published count
+  under half of the previous run's while the co-signed supply did not fall —
+  the publish gates or the solve, not the data; the finding carries both
+  runs' refusals by gate (too few pings, too few peers, still moving past
+  the solver's `PublishMaxLastStepKm` when the solve stopped, no better than
+  genesis, a fresh probe's country, no place), which name the gate;
+- **residual not improving** (`derive-residual-not-improving`): the fleet
+  RMS residual at the derived positions above `DeriveMaxResidualKm` (50 km),
+  or not below the residual at genesis on two consecutive runs — the slope,
+  the overhead or the whole-millisecond wire (GEOMAP §9) are off, and the
+  corrections are noise;
+- **crossings** (`derive-crossings`, parts `country`, `region`): country
+  crossings above `DeriveMaxCountryCrossingShare` (2 %) of published nodes,
+  or region crossings above 10 % — a wrong genesis source, a bad slope, or a
+  colluding cluster; the dashboard lists them;
+- **exclusions** (`derive-exclusions`, parts `excluded-share`,
+  `median-reputation`): excluded sources above `DeriveMaxExcludedShare`
+  (10 %) of sources, or median reputation under 0.5 — the population
+  statistics are skewed by something systematic, not by a few bad sources;
+  the finding carries the peers the run expected an extender and a provider
+  to measure, the job's `ExtenderPeerSampleSize` and
+  `ProviderProbeSampleSize` (four, a provider's probe window), since a kind
+  measured against more peers than its pinger is designed to reach is marked
+  down wholesale on coverage;
+- **non-convergence** (`derive-non-convergence`, parts `sweep-cap`,
+  `still-moving`): the last reputation round hit the sweep cap on
+  `DeriveCapRuns` (3) consecutive runs; or the last run refused more than
+  `DeriveMaxStillMovingShare` (5 %) of its solved nodes as still moving past
+  the solver's `PublishMaxLastStepKm` when the solve stopped — a solve that
+  ends before it settles, on the sweep cap (more sweeps, at the price of the
+  capacity projection) or on a stagnation stop that comes too early; the
+  finding names the stop and sets the share against the run before, and the
+  nodes it counts keep their genesis;
+- **thin evidence** (`derive-thin-evidence`): published nodes at exactly
+  `MinDerivePeers` peers (the solver's peer gate, 3) above 30 % of the
+  published — publication resting on the least geometry that fixes a node.
+  Two peers leave a node at either of two mirror points, the risk GEOMAP §9
+  records, which is why the gate is three (GEOMAP D11, 2026-09-24); at three,
+  peers near one line barely break the tie and one bad peer has nothing to
+  outvote it. The first remedy is ping coverage; a higher gate trades these
+  publications for `few_peers` refusals, which every run's refusals by gate
+  count and the published-collapse finding carries;
+- **capacity** (`derive-capacity`, parts `seconds`, `bytes`): the planner's
+  projection for the next run is within `DeriveCapacityMargin` (20 %) of
+  `MaxSolveSeconds` (600 s) or `MaxSolveBytes` (8 GiB) at the host's cores —
+  the fleet is approaching the solve's budget on this host; the action is
+  more cores or memory on the taskworker host, or the partitioning GEOMAP
+  §5.3 keeps on paper;
+- **sweep** (`derive-sweep-stalled`, parts `partition-drop`,
+  `partition-ahead`, `derived_location`): the hourly sweep is not running.
+  `network_ping` is dropped a whole day partition at a time and never by
+  row, so a row lives until its day goes and its age says nothing; the
+  partitions themselves are read from the catalog (`pg_inherits`, with each
+  bound read back from `pg_get_expr` as the sweep reads it) and counted, no
+  name leaving the database. A drop is overdue when a partition of the
+  sweep's own naming (`network_ping_pYYYYMMDD`) has an upper bound older
+  than `PingPartitionKeepTimeout` — the span the sweep keeps a ping past its
+  create time, the ingest's `ExtenderPingReportSettings.KeepTimeout()`: the
+  retention, or the two clock skews a report is accepted across if longer,
+  plus one sweep interval (25 h 5 min) — plus `DeriveSweepGrace` (one sweep
+  interval, an hour) for that sweep to run; creation is overdue when no
+  partition covers the day before the last one the sweep keeps ahead
+  (`PingPartitionAheadDays`, 2, from `model.NetworkPingPartitionSettings`,
+  so tomorrow), which leaves the hour after midnight, before the sweep adds
+  the new last day, reading as nothing missing. A partition under another
+  name is never the sweep's to drop and is the migration signal's (§8.9); a
+  `network_ping` the conversion migration has not reached is not
+  partitioned, and neither part is judged. `derived_location` goes one row
+  per node: any row older than `PingRetention` plus `DeriveSweepGrace`;
+- **clock or wire** (`derive-clock-or-wire`, parts `zero-rtt`,
+  `beyond-half-planet`): pings with a zero round trip above 1 %, or with a
+  round trip beyond half the planet above 5 %.
+
+Findings carry counts, shares and a threshold name; never a client id, an
+extender id or a coordinate. The job's own log line carries the per-run
+detail (nodes, terms, excluded, crossings, sweeps per round).
+
+Action: a supply or verdict finding is the ping path (connect, the
+extenders' binaries, the ingest); a residual, crossing or exclusion finding
+is calibration — change one setting at a time in `DeriveSettings`, wait
+one run, and read the residual and crossing panels; a thin-evidence finding
+is ping coverage first and the peer gate second; a non-convergence finding
+is the sweep cap or the damping. Verify: the finding clears on the next run
+and the residual falls.
+
+The run-to-run conditions read the job's run history: every derivation
+pushes its summary (run time, nodes, sources, terms, co-signed pings read,
+published, excluded sources, the residual at the derived positions and at
+genesis, the last reputation round's sweeps against the cap and whether it
+stopped on the objective's stagnation, and the solved nodes refused
+publication by gate; what the run
+cost — its sweeps, cores and read cursors, the seconds it read and solved
+for, its peak heap, and the per-unit costs those split into; the planner's
+projection of the next run with the budgets it is judged against; and the
+peers a node was expected to measure) onto the Redis list
+`derive_locations.runs`, newest first, trimmed to eight runs and expiring
+after seven days (`model.DeriveLocationsRunsRedisKey`). The capacity
+condition reads the newest record only. A list is
+the smaller record: the job already wrote its summary to Redis for the
+stats collector, the history is a few hundred bytes a run, and a table would
+add a migration with its monitor row and catalog entry, and a retention
+sweep, for data the comparisons only ever read three runs deep. The stats
+collector publishes the list's head. A history that cannot be
+read, or that holds a record the signal cannot parse, is
+`derive-run-history-unobservable` (WARN, two probes): the comparisons across
+runs then report neither a fault nor health, and "not running" falls back to
+the table's newest `update_time`.
+
+The thresholds the conditions above leave open are settings too, with these
+defaults: a share over the hour's pings is judged on at least
+`DeriveMinPingSamples` (100) pings, and a share over nodes on at least
+`DeriveMinNodeSamples` (20) nodes — published nodes for the crossing,
+thin-evidence and reputation shares and the previous run of a collapse,
+sources for the excluded share; "the co-signed supply did not fall" is the
+last run's supply at or above `DeriveCollapseSupplyShare` (0.9) of the
+previous run's, since a day's rolling window moves a few percent between
+runs; "providers and extenders are connected" is at least
+`DeriveSupplyMinExtenders` (1) active extender and
+`DeriveSupplyMinProviders` (1) connected public provider; "the last hour" is
+the last complete clock hour of the second query; and "beyond half the
+planet" is `DeriveHalfPlanetRttMs`, half the earth's circumference at the
+solver's km per ms (200 ms at 100 km/ms). `DeriveMaxRunAge`,
+`PingRetention`, `DeriveSweepGrace`, `PingPartitionKeepTimeout`,
+`PingPartitionAheadDays` and `MinDerivePeers` default to the ingest's, the
+ping model's and the solver's own — `2 × DeriveInterval`, `Retention`,
+`SweepTimeout` and `KeepTimeout()` of
+`controller.DefaultExtenderPingReportSettings()`,
+`model.DefaultNetworkPingPartitionSettings().AheadDays` and
+`solve.DefaultSettings().MinDerivePeers` (3) — so the signal cannot disagree
+with the sweep or with the peer gate. The
+capacity budget is the one each run records beside its projection, which is
+the job's own (`DeriveLocationsSettings`), so a larger taskworker host raises
+it in one place; `MaxSolveSeconds` (600 s) and `MaxSolveBytes` (8 GiB) stand
+in only for a record that carries none.
+
+Implementation convention: SIGNALS.md §2.19c (`derived-locations`) maps to
+`signal_derived_locations.go` and `signal_derived_locations_test.go`
+(`DerivedLocationsSettings`, `DefaultDerivedLocationsSettings`). Synthetic
+tests cover every condition and part against fixture rows, a fixed clock and
+a fake Redis history, the previous-run comparisons (a collapse on a held
+supply and on a fallen one, a residual over one and two runs, the sweep cap
+over two and three runs, the still-moving share against the run before), the
+refusals by gate and the expected peers the findings carry, the capacity
+projection against the recorded
+budget, the settings' budget and its margin boundary, an unreadable and a
+malformed history, and the healthy baseline; a DB-backed fixture seeds
+`derived_location`, `network_ping` (one ping in a partition past its drop)
+and the Redis history, leaves `pending_task` without the job's row, and runs
+the production queries end to end, asserting the findings and that no seeded
+id or coordinate reaches an alert; three more databases each hold one
+partition shape — the conversion's own partitions, a partition of the
+sweep's naming four days old, and tomorrow's partition dropped — and assert
+exactly the sweep part each one is.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`
@@ -7895,7 +8327,13 @@ successful-ingest timestamp; do not infer it from this overloaded column.
 
 The only exported outcome vocabulary is success, `tunnel_failed`, legacy
 `contract_failed`, `no_consensus`, `locate_failed`, `not_confident`,
-`submit_failed`, `unknown_failure`, `inconsistent`, and `unobserved`. Raw
+`submit_failed`, `health_not_run`, `run_not_measured`, `no_exit_ip`,
+`run_batch_guard`, `unknown_failure`, `inconsistent`, and `unobserved`.
+`no_consensus`, `locate_failed` and `not_confident` are the retired vendor
+consensus's and appear only on attempts written before connect/GEOMAP.md
+§11.3; `health_not_run` and `run_not_measured` are runs that did not start or
+measured nothing, `no_exit_ip` a warm-up the operator's `/ip` echo never
+answered, and `run_batch_guard` a full batch the run guard held back. Raw
 failure text is normalized inside PostgreSQL. `unknown_failure` counts toward
 the total failure share but can never become the dominant common class because
 several distinct raw values may have collapsed into that one redacted bucket.
@@ -7924,8 +8362,10 @@ evidence floor:
   reintroduce the retired environment-token design.
 - `egress-mixed-failure` (WARN after two samples): total current failures cover
   at least 90% of eligible providers, but no one known class does. This proves
-  broad degradation, not a credential cause. Split task, API, tunnel,
-  geolocation-source, and submission evidence before acting.
+  broad degradation, not a credential cause. Split task, API, tunnel, exit
+  placement and prober-side attempt class (`no_exit_ip`, `run_not_measured`,
+  `health_not_run`, `run_batch_guard`), site pool (§2.19b), and submission
+  evidence before acting.
 - `egress-outcome-inconsistent` (WARN after two samples): a current attempt
   says success but no trusted location exists. Trace submission/report ordering,
   monotonic upserts, retention, and direct mutations; never create a location
@@ -7994,7 +8434,12 @@ inside PostgreSQL to:
 
 The description is claimed metadata, not runtime attestation. It cannot by
 itself establish a protocol failure. Join each eligible provider to its latest
-blackhole verdict and compare the bounded behavioral cohorts:
+blackhole verdict and compare the bounded behavioral cohorts. A current
+verdict is a pass within `ProviderBlackholeCheckMaxAge`, or a provider dark by
+the rule of connect/GEOMAP.md §11.3 -- `DarkConsecutiveFailures` failed
+checks in a row spanning `DarkMinimumSpan`, or a TLS-authentication failure;
+a single failed check, or a check that measured nothing, is no verdict and
+joins neither cohort's checked count:
 
 - at least 20 claimed-legacy providers have a current verdict;
 - at least 90% of that checked legacy cohort is dark;
@@ -9456,6 +9901,18 @@ failure of its host/control-plane DNS, nor the Proxy-only IPv4 TUN MTU mismatch.
 Prove the task and path from the deployed source and same-window evidence.
 `answer`, authoritative empty, and stale answers must remain distinct; canceled
 calls may be intentional teardown. Keep the existing attempt PAGE independent.
+
+`canceled` can also follow an outer Tun dial deadline whose cleanup uses ordinary
+cancellation; `timeout=0` therefore cannot exclude that failure. Positive `failed`
+deltas establish no-answer resolver calls even while other calls answer, but do
+not distinguish ordinary resolver-chain failure from a coalesced owner's
+cancellation without same-call evidence. Neither observation supplies a
+customer-request denominator. Matching a same-container log envelope is not
+independent process-start attestation; a partial set of fresh pairs cannot
+establish fleet completeness or recovery of the missing callers.
+Even when a live coalesced waiter successfully retries after its owner's
+cancellation, that handoff can start another outbound attempt; a per-leg PAGE
+alone therefore cannot prove whether the handoff fix worked or failed.
 
 **False-negative qualifiers and closure:** legacy and pending outcomes remain
 unknown. A success-only callback, a later host socket control, a single sample,
@@ -12391,6 +12848,34 @@ This is the version-to-artifact contract checked by the probe:
 | 688 | valid/ready `account_payment_block_number_payment` lookup index |
 | 689 | valid/ready partial `account_payment_block_rollup_pending` index |
 | 690 | valid/ready partial `account_point_payment_rollup` index |
+| 691 | nullable, no-default bigint `location.geoname_id` |
+| 692 | exact valid/ready unique `location_geoname_id` index on `location (geoname_id)` restricted to nonnull keys |
+| 693 | `network_ping` pinger-reported ping table with exact column types, nullability, defaults, and ping primary key (required through version 712) |
+| 694 | exact valid/ready unique `network_ping_target_pinger_nonce` replay index on `(target_extender_id, pinger_kind, pinger_id, probe_nonce)` (required through version 712) |
+| 695 | exact valid/ready `network_ping_create_time` retention index (required through version 712) |
+| 696 | exact valid/ready `network_ping_target_extender_id_create_time` target lookup index (required through version 712) |
+| 697 | exact valid/ready `network_ping_pinger_kind_pinger_id_create_time` pinger lookup index (required through version 712) |
+| 698 | nullable, no-default real `network_client_location.accuracy_km` |
+| 699 | nullable, no-default real `network_extender_activation.accuracy_km` |
+| 700 | required smallint `network_ping.hop_count` with a zero default |
+| 701 | `derived_location` derived-location table with exact column types, required no-default columns, and the `(node_kind, node_id)` primary key |
+| 702 | nullable, no-default UUID `network_client_location.genesis_location_id` |
+| 703 | nullable, no-default smallint `network_client_location_reliability.egress_index` |
+| 704 | nullable, no-default boolean `network_client_location_reliability.egress_quality` |
+| 705 | nullable, no-default timestamp `network_client_location_reliability.egress_evidence_time` |
+| 706 | required integer `provider_blackhole_check.consecutive_failures` with a zero default |
+| 707 | nullable, no-default timestamp `provider_blackhole_check.first_failed_at` |
+| 708 | nullable, no-default timestamp `provider_blackhole_check.next_due_at` |
+| 709 | the six required `provider_egress_health` unscored-load columns: integer `not_measured_count` with a zero default, and text `not_measured_names`, `canary_passed_names`, `canary_failed_names`, `short_classes` and `unscored_failed_names` with empty defaults |
+| 710 | `provider_egress_destination` destination pool table with its 25 columns, the exact types and nullability of `name`, `class`, `url`, `incompatible`, `verify`, `active`, `probation`, `retired_time` and `above_retire_since`, and the validated `name` primary key |
+| 711 | `provider_egress_site_tally` per-site daily tally table with its 11 columns and the validated `(tally_day, name, country_code, region)` primary key |
+| 712 | `provider_egress_place_tally` per-place daily tally table with its 7 columns and the validated `(tally_day, country_code, region)` primary key |
+| 713 | `network_ping` range-partitioned by `create_time` with the exact column types, nullability and defaults of 693 and 700; exact valid/ready partitioned indexes: unique `network_ping_target_pinger_nonce` on `(target_extender_id, pinger_kind, pinger_id, probe_nonce, create_time)`, `network_ping_target_extender_id_create_time` and `network_ping_pinger_kind_pinger_id_create_time`; at least one partition, and every partition a plain table named `network_ping_p` plus its utc day that covers exactly that day |
+| 714 | the pre-partition `network_ping_legacy` table absent |
+| 715 | `network_ping_hour_tally` fleet ping tally: exact required, no-default columns and the `(hour, shard, pinger_kind, relayed, cosign, cosign_reason)` primary key |
+| 716 | `network_ping_pinger_day` range-partitioned by `day`: exact required, no-default columns, the `(day, pinger_kind, pinger_id)` primary key, at least one partition, and every partition named `network_ping_pinger_day_p` plus the utc day it covers exactly |
+| 717 | `network_ping_target_day` range-partitioned by `day`: exact required, no-default columns, the `(day, target_extender_id)` primary key, and day partitions named and bounded as 716's |
+| 718 | `network_ping_target_hour_tally` range-partitioned by `hour`: exact required, no-default columns, the `(hour, target_extender_id, pinger_kind)` primary key, and day partitions named and bounded as 716's |
 
 On 2026-09-09, Main had durably reached version 650 through the onboarding
 schema while independently developed client-key and competition-staging
@@ -12441,6 +12926,98 @@ valid/ready btree indexes bound retention sweeps and per-Extender reads. A
 numeric head at or above one of these versions is coherent only when the
 corresponding typed relation or index contract is present; never reconstruct
 the attestation table or its indexes manually after a failed migration.
+
+Versions 693–697 append the pinger-reported ping table of
+`POST /network/ping-report` (connect/GEOMAP.md §2.5–§2.6) and its four
+indexes. The replay key is the unique `(target_extender_id, pinger_kind,
+pinger_id, probe_nonce)` index, not a table constraint, so it is checked in
+the index catalog with its exact uniqueness and key order; the other three
+bound the hourly retention sweep and the per-target and per-pinger reads. The
+table guard pins every column's type, nullability and default, including the
+zero `cosign_reason` default and the `now()` creation time. Versions 698–699
+add the nullable genesis accuracy radius to `network_client_location` and to
+`network_extender_activation`; a NULL is the normal value for rows written
+before the column and for locations with no radius, so only the column shape is
+checked. Version 700 adds the NLayer relay depth `network_ping.hop_count`
+(connect/GEOMAP.md §2.9), required with a zero default so a direct ping and a
+row written before the column read the same. False-positive qualifier: absent
+artifacts before their published version are a pending-migration gate, not
+drift. False-negative qualifier: a numeric head or a matching relation or
+index name cannot clear these checks. Never reconstruct the ping table or its
+indexes by hand after a failed migration.
+
+Versions 701–702 append the derive phase's output (connect/GEOMAP.md §5.4,
+§5.7, §6). Version 701 is `derived_location`, one row per provider or
+extender whose co-signed pings placed it better than its genesis, keyed by
+`(node_kind, node_id)`; every one of its twenty columns is required and has no
+default, because a derivation writes each row whole, and the table guard pins
+each column's type together with the primary key. The table holds at most one
+row per node that pinged in the last day, so it has no index beyond its key.
+Version 702 adds the nullable `network_client_location.genesis_location_id`:
+the location a connection's own address lookup resolved to, stored beside the
+published location, so that once a derived location is published the next
+derivation still anchors the provider to its lookup rather than to its own
+last answer. A NULL is the normal value for rows written before the column and
+for locations the egress probe placed, so only the column shape is checked.
+Both are location references the de-duplication job repoints, and it refuses
+to run on a schema whose location columns it has not inventoried. Code that
+derives, publishes or reads derived locations -- the derive task, the ping
+sweep, `SetConnectionLocation` and extender record signing -- must stay behind
+version 702. False-positive qualifier: absent artifacts before their published
+version are a pending-migration gate, not drift. False-negative qualifier: a
+numeric head or a matching relation or column name cannot clear these checks.
+Never reconstruct the derived-location table by hand after a failed migration;
+a derivation rewrites it whole on its next run.
+
+Versions 703–705 append the egress index (connect/GEOMAP.md §10.4, D23) to
+`network_client_location_reliability`: `egress_index`, the weighted and
+capped count of the latest health run's scored loads that failed every retry
+(0 without a usable run), `egress_quality`, whether that run passes the 90 %
+rule, and `egress_evidence_time`, the newer of the health run and the
+location probe. The reliability rollup writes all three per provider in the
+pass that fills the net-type maxima, and the client-score job reads them into
+the quality and speed tiers. All three are nullable with no default, and a
+NULL is a normal value, so only the column shapes are checked: a NULL index is
+a row the new rollup has not written yet -- every row before version 703, or
+one an older binary inserted -- which FindProviders2 ranks exactly as before
+on `max_net_type_score` and `max_net_type_score_speed`, and a NULL verdict is
+a provider without usable evidence, which the online bucket answers for. Adding the
+columns rewrites nothing. Code that writes or reads them -- the rollup, the
+client-score job, the location counts, the provider stats and `bringyourctl
+provider inspect` -- must stay behind version 705. False-positive qualifier:
+absent artifacts before their published version are a pending-migration gate,
+not drift, and a NULL-heavy table after a deploy is the transition, not a
+fault, until the next rollup pass. False-negative qualifier: a numeric head or
+a matching column name cannot clear these checks. Never backfill the columns
+by hand; the next rollup pass writes every connected provider's row.
+
+Versions 706–712 append the prober's server side of connect/GEOMAP.md §11.3
+and §11.4. Versions 706–708 give `provider_blackhole_check` the run a dark
+verdict now needs: `consecutive_failures`, how many measured checks in a row
+failed, `first_failed_at`, when the first of them started, and `next_due_at`,
+the backoff step after a failure or the ordinary due age after a pass. A
+provider is dark only at `DarkConsecutiveFailures` failures spanning
+`DarkMinimumSpan`, so every row before 706 reads as a run of 0 -- the
+single-check verdicts it held were the false dark of §11.2 -- and a NULL
+`next_due_at` is due at its old `checked_at` age. Version 709 gives
+`provider_egress_health` what a run could not score: the loads whose tunnel
+was gone, the canaries, the classes too thin for the provider's place, and
+the failures ingest left out of the counts; the defaults describe a run with
+none, which is every run before it. Versions 710–712 are the destination pool
+and the two daily tallies the pool refresh judges sites by (§2.19b); the pool
+is seeded from the prober's built-in table on first use and the tallies fill
+as runs are submitted, so empty tables after a deploy are the transition.
+Adding these columns and tables rewrites nothing. Code that ingests checks
+and health runs, serves or refreshes the pool, or reads the tallies -- the
+blackhole and health ingest, `GET /network/provider-egress-destinations`,
+`ProviderEgressProbe`, `RefreshEgressDestinations` and the §2.19b signal --
+must stay behind version 712. False-positive qualifier: absent artifacts
+before their published version are a pending-migration gate, not drift, and a
+pool whose rows are all `builtin` is a pool no refresh has changed yet.
+False-negative qualifier: a numeric head or a matching relation or column
+name cannot clear these checks. Never seed the pool or write tally rows by
+hand; the pool route seeds an empty pool, and the probe task writes the
+tallies from the runs it submits.
 
 Versions 682–683 append Extender activation history and its
 `(extender_id, activate_time)` lookup index. The history preserves an optional

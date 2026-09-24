@@ -14,6 +14,7 @@ import (
 	"github.com/urnetwork/operator-proxy/egresshealth"
 	"github.com/urnetwork/operator-proxy/fleetprobe"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"gopkg.in/yaml.v3"
 )
 
@@ -30,7 +31,18 @@ func syntheticEgressCoverageSignal() Signal {
 const syntheticEgressDesiredConfig = `enabled: true
 shard_count: 4
 idle_delay_seconds: 300
-max_time_seconds: 1800
+max_time_seconds: 4500
+load_attempts: 3
+load_retry_mean_interval_seconds: 300
+tunnel_recreate_attempts: 2
+dark_consecutive_failures: 3
+dark_minimum_span_seconds: 1800
+dark_backoff_seconds: [300, 900, 1800]
+dark_batch_guard: 0.2
+dark_batch_guard_min_checks: 10
+run_batch_guard: 0.3
+run_batch_guard_min_runs: 3
+city_confident_radius_km: 25
 api_url: https://private-desired-api.example.invalid
 platform_url: wss://private-desired-platform.example.invalid
 public_api_url: https://private-desired-public.example.invalid
@@ -46,6 +58,7 @@ blackhole:
   limit: 250
   concurrency: 52
   probe_timeout_seconds: 15
+  ip_echo_timeout_seconds: 60
 `
 
 func syntheticDesiredEgressConfig(t *testing.T, raw string) egressCoverageDesiredConfig {
@@ -55,8 +68,16 @@ func syntheticDesiredEgressConfig(t *testing.T, raw string) egressCoverageDesire
 	})
 }
 
+// The shortest full probe timeout the taskworker accepts: since every load is
+// retried minutes apart (connect/GEOMAP.md §11.3), the run no longer has to
+// fit in one probe timeout, and the only floor left is that one attempt gets
+// at least the module's per-request timeout, whatever the destination
+// geometry.
 func syntheticEgressMinimumFullTimeoutSeconds(allDestinations bool) int {
-	minimum := time.Duration(fleetprobe.EgressHealthRounds(allDestinations)) * egresshealth.DefaultPerRequestTimeout
+	minimum := egresshealth.DefaultPerRequestTimeout
+	if options := fleetprobe.EgressHealthOptions(minimum, allDestinations); options.PerRequestTimeout < minimum {
+		panic("the module's health geometry lowers the per-request floor")
+	}
 	return int((minimum + time.Second - 1) / time.Second)
 }
 
@@ -70,6 +91,10 @@ func syntheticEgressRowsForConfig(t *testing.T, config egressCoverageConfig) []R
 			Full: config.full, Blackhole: config.blackhole,
 			APIURL: config.apiURL, PlatformURL: config.platformURL,
 			PublicAPIURL: config.publicAPIURL, BandwidthCDNURL: config.bandwidthCDNURL,
+			LoadAttempts:                 config.rules.loadAttempts,
+			LoadRetryMeanIntervalSeconds: config.rules.loadRetryMeanIntervalSeconds,
+			TunnelRecreateAttempts:       config.rules.tunnelRecreateAttempts,
+			ProviderEgressRules:          config.rules.modelRules(),
 		}))
 	}
 	return rows
@@ -457,16 +482,20 @@ func syntheticEgressCoverageTask(t *testing.T, shardIndex, shardCount int) Row {
 	t.Helper()
 	args := egressCoverageTaskArgs{
 		ShardIndex: shardIndex, ShardCount: shardCount,
-		IdleDelaySeconds: 300, MaxTimeSeconds: 1800,
+		IdleDelaySeconds: 300, MaxTimeSeconds: 4500,
 		Full: egressCoverageBatchArgs{
 			Limit: 8, Concurrency: 2, ProbeTimeoutSeconds: 60,
 			Bandwidth: true, BandwidthTimeoutSeconds: 5,
 		},
-		Blackhole:       egressCoverageBatchArgs{Limit: 250, Concurrency: 4, ProbeTimeoutSeconds: 15},
-		APIURL:          "https://api.example.invalid",
-		PlatformURL:     "wss://connect.example.invalid",
-		PublicAPIURL:    "https://public-api.example.invalid",
-		BandwidthCDNURL: "https://cdn.example.invalid/down",
+		Blackhole:                    egressCoverageBatchArgs{Limit: 250, Concurrency: 4, ProbeTimeoutSeconds: 15, IpEchoTimeoutSeconds: 60},
+		APIURL:                       "https://api.example.invalid",
+		PlatformURL:                  "wss://connect.example.invalid",
+		PublicAPIURL:                 "https://public-api.example.invalid",
+		BandwidthCDNURL:              "https://cdn.example.invalid/down",
+		LoadAttempts:                 3,
+		LoadRetryMeanIntervalSeconds: 300,
+		TunnelRecreateAttempts:       2,
+		ProviderEgressRules:          model.DefaultProviderEgressRules(),
 	}
 	return syntheticEgressCoverageTaskWithArgs(t, args)
 }
@@ -716,7 +745,7 @@ func TestEgressCoverageSignalSyntheticShardLocalStalls(t *testing.T) {
 				syntheticEgressCoverageActivity(egressCoverageSnapshot{
 					shardIndex: 0, eligible: 22000, noLocationDue: 8, blackholeDue: 250,
 					deferredCurrentDarkDue: 12000,
-					fullAgeSeconds:         3600, blackholeAgeSeconds: 4200,
+					fullAgeSeconds:         6000, blackholeAgeSeconds: 6600,
 					fullCurrent: 400, blackholeCurrent: 18000,
 					fullAttemptsLastHour: 100, blackholeLastHour: 9000,
 					staleLocationOldestAgeSeconds: -1, staleHealthOldestAgeSeconds: -1,
@@ -745,7 +774,7 @@ func TestEgressCoverageSignalSyntheticShardLocalStalls(t *testing.T) {
 	for _, alert := range []Alert{full, blackhole} {
 		for _, want := range []string{
 			"shard-0-of-2",
-			"derived_stall_bound=40m0s",
+			"derived_stall_bound=1h25m0s",
 			"healthy sibling shards",
 			"no provider or task identifier",
 			"Do not delete provider evidence",
@@ -826,7 +855,7 @@ func TestEgressCoverageSignalSyntheticHealthyNoDueWork(t *testing.T) {
 }
 
 func TestEgressCoverageActivityQueryUsesEarliestPresentLocationDeadline(t *testing.T) {
-	query := egressCoverageActivityQuery(4)
+	query := egressCoverageActivityQuery(4, model.DefaultProviderEgressRules())
 	// For a 90-hour-old location and 25-hour-old health row, both scheduler
 	// heads are eligible, but health expired one hour ago while location has 78
 	// hours left. The location CASE must therefore win only on <=; the health
@@ -908,15 +937,19 @@ func TestEgressCoverageSignalSyntheticConfiguredCapacityBounds(t *testing.T) {
 	for shardIndex := range shardCount {
 		args := egressCoverageTaskArgs{
 			ShardIndex: shardIndex, ShardCount: shardCount,
-			IdleDelaySeconds: 120, MaxTimeSeconds: 900,
+			IdleDelaySeconds: 120, MaxTimeSeconds: 4500,
 			Full: egressCoverageBatchArgs{
 				Limit: 6, Concurrency: 2, ProbeTimeoutSeconds: 60,
 			},
 			Blackhole: egressCoverageBatchArgs{
-				Limit: 90, Concurrency: 5, ProbeTimeoutSeconds: 20,
+				Limit: 90, Concurrency: 5, ProbeTimeoutSeconds: 20, IpEchoTimeoutSeconds: 60,
 			},
-			APIURL:      "https://api.example.invalid",
-			PlatformURL: "wss://connect.example.invalid",
+			APIURL:                       "https://api.example.invalid",
+			PlatformURL:                  "wss://connect.example.invalid",
+			LoadAttempts:                 3,
+			LoadRetryMeanIntervalSeconds: 300,
+			TunnelRecreateAttempts:       2,
+			ProviderEgressRules:          model.DefaultProviderEgressRules(),
 		}
 		taskRows = append(taskRows, syntheticEgressCoverageTaskWithArgs(t, args))
 	}

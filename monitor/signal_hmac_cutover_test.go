@@ -2,9 +2,12 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/urnetwork/server/model"
 )
 
 func syntheticHMACCutoverSource(row Row) *syntheticSource {
@@ -232,5 +235,28 @@ func TestHMACCutoverQueryIsBoundedAndPrivate(t *testing.T) {
 		if strings.Contains(finalSelect, forbidden) {
 			t.Fatalf("final aggregate exports %q:\n%s", forbidden, finalSelect)
 		}
+	}
+}
+
+// A verdict is what the dark rule of connect/GEOMAP.md §11.3 says it is: a
+// current pass, or a provider dark over consecutive failures (or a TLS
+// failure); a single failed check and a check that measured nothing are no
+// verdict and join neither cohort's checked count, so a legacy cohort cannot
+// look dark on failures the rule does not call dark.
+func TestHMACCutoverQueryCountsOnlyCurrentVerdicts(t *testing.T) {
+	query := hmacCutoverQuery()
+	rules := model.DefaultProviderEgressRules()
+	for _, want := range []string{
+		"COALESCE(pbc.ok, false) AS ok",
+		"AND (pbc.ok OR " + model.ProviderBlackholeDarkSql("pbc", "clock.utc_now - interval '10800 seconds'", rules) + ")",
+		fmt.Sprintf("%d <= pbc.consecutive_failures", rules.DarkConsecutiveFailures),
+		"pbc.failure = '" + model.ProviderBlackholeTlsAuthenticationFailure + "'",
+	} {
+		if !strings.Contains(query, want) {
+			t.Fatalf("query missing %q:\n%s", want, query)
+		}
+	}
+	if strings.Contains(query, "           pbc.ok,\n") {
+		t.Fatal("the query still reads a single failed check as dark")
 	}
 }

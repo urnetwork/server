@@ -2,7 +2,6 @@ package model
 
 import (
 	"context"
-	"slices"
 	"strings"
 	"testing"
 
@@ -14,8 +13,8 @@ import (
 // liveBlankCountryCodes is the exact set of country codes that were observed
 // with an empty `location_name` on the live beta deployment -- the rows the
 // unnamed location-group member path created. Every one of them has to resolve
-// from the built-in table, because none of them is in `iso-country-list.yml`
-// (that is precisely why they were blank).
+// from the built-in table, because none of them was in the deployment's
+// country list of the time (that is precisely why they were blank).
 //
 // Real data, do not trim. Pulled with:
 //
@@ -65,7 +64,7 @@ func TestISOCountryName(t *testing.T) {
 	connect.AssertEqual(t, name, "Dominican Republic")
 
 	// case insensitive, since callers hold codes in either case
-	// (`iso-country-list.yml` is upper case, the `location` table is lower)
+	// (GeoLite2's iso codes are upper case, the `location` table is lower)
 	name, ok = ISOCountryName("DO")
 	connect.AssertEqual(t, ok, true)
 	connect.AssertEqual(t, name, "Dominican Republic")
@@ -154,8 +153,8 @@ func TestCreateLocationResolvesCountryName(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
-		// `cn` is not in iso-country-list.yml, and had 272 providers behind a
-		// blank name on the live deployment
+		// `cn` was not in the deployment's country list, and had 272 providers
+		// behind a blank name on the live deployment
 		location := &Location{
 			LocationType: LocationTypeCountry,
 			CountryCode:  "cn",
@@ -167,10 +166,10 @@ func TestCreateLocationResolvesCountryName(t *testing.T) {
 	})
 }
 
-// TestCreateLocationConfigCountryNameWins pins the precedence in the plan's
-// global constraints: a deployment that names a country its own way keeps that
-// name, even though the Go table also has the code.
-func TestCreateLocationConfigCountryNameWins(t *testing.T) {
+// Pins the precedence the place list sets: a country the seeder stored under
+// its GeoLite2 name keeps that name for a code-only location, even though the
+// Go table also has the code and names it otherwise.
+func TestCreateLocationSeededCountryNameWins(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
@@ -179,11 +178,15 @@ func TestCreateLocationConfigCountryNameWins(t *testing.T) {
 		connect.AssertEqual(t, ok, true)
 		connect.AssertEqual(t, name, "North Korea")
 
-		pop := server.Config.PushSimpleResource(
-			"iso-country-list.yml",
-			[]byte("KP: Deployment Naming For Korea\n"),
-		)
-		defer pop()
+		defer pushTestPlaces(`
+version: 1
+source: test
+build_epoch: 1
+countries:
+  kp: {name: Deployment Naming For Korea, geoname_id: 1873107, continent_code: as, continent: Asia}
+places: {}
+`)()
+		AddDefaultLocations(ctx, 0)
 
 		location := &Location{
 			LocationType: LocationTypeCountry,
@@ -196,6 +199,8 @@ func TestCreateLocationConfigCountryNameWins(t *testing.T) {
 			locationName(ctx, t, location.LocationId),
 			"Deployment Naming For Korea",
 		)
+		connect.AssertEqual(t, location.Country, "Deployment Naming For Korea")
+		connect.AssertEqual(t, location.CountryGeonameId, uint32(1873107))
 		connect.AssertEqual(t, blankNamedLocationCount(ctx, t), 0)
 	})
 }
@@ -406,13 +411,14 @@ func TestCreateLocationUnknownLocationTypeCreatesNoRow(t *testing.T) {
 func TestAddDefaultLocationsHasNoBlankNames(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		defer pushTestPlaces(testPlacesYaml)()
 
 		AddDefaultLocations(ctx, 10)
 
 		connect.AssertEqual(t, blankNamedLocationCount(ctx, t), 0)
 
-		// and the country rows that iso-country-list.yml does name keep that
-		// name rather than the table's
+		// the place list's countries, and every group member besides, which the
+		// Go table names
 		var countryCount int
 		server.Db(ctx, func(conn server.PgConn) {
 			result, err := conn.Query(
@@ -427,53 +433,20 @@ func TestAddDefaultLocationsHasNoBlankNames(t *testing.T) {
 			})
 		})
 		if countryCount < 58 {
-			t.Fatalf("expected at least the 58 configured countries, found %d", countryCount)
+			t.Fatalf("expected at least the 58 listed and grouped countries, found %d", countryCount)
 		}
 
-		// Where both sources name a code and disagree, the config's name is the
-		// one that lands. The code is taken from the config this deployment
-		// actually ships rather than hardcoded: which names differ is config
-		// data, so naming one here pins the test to one deployment's file and
-		// makes it assert nothing the day that row changes to agree.
-		countryCode, configName, ok := disagreeingCountryCode(t)
-		if !ok {
-			return
-		}
+		// Where the place list and the Go table both name a code and disagree,
+		// the list's name is the one that lands: `nl` is "The Netherlands" in
+		// the list and "Netherlands" in the table, and a group names it by code.
+		tableName, ok := ISOCountryName("nl")
+		connect.AssertEqual(t, ok, true)
+		connect.AssertNotEqual(t, tableName, "The Netherlands")
 		location := &Location{
 			LocationType: LocationTypeCountry,
-			CountryCode:  countryCode,
+			CountryCode:  "nl",
 		}
 		CreateLocation(ctx, location)
-		connect.AssertEqual(t, locationName(ctx, t, location.LocationId), configName)
+		connect.AssertEqual(t, locationName(ctx, t, location.LocationId), "The Netherlands")
 	})
-}
-
-// disagreeingCountryCode returns one country code that iso-country-list.yml and
-// the built-in table both name, and name differently, with the config's name.
-func disagreeingCountryCode(t testing.TB) (countryCode string, configName string, found bool) {
-	t.Helper()
-	resource, err := server.Config.SimpleResource("iso-country-list.yml")
-	if err != nil {
-		t.Fatalf("read iso-country-list.yml: %s", err)
-	}
-	// sorted so a failure names the same code on every run
-	codes := []string{}
-	names := map[string]string{}
-	for code, name := range resource.Parse() {
-		configName, ok := name.(string)
-		if !ok || configName == "" {
-			continue
-		}
-		code = strings.ToLower(code)
-		codes = append(codes, code)
-		names[code] = configName
-	}
-	slices.Sort(codes)
-	for _, code := range codes {
-		tableName, ok := ISOCountryName(code)
-		if ok && tableName != names[code] {
-			return code, names[code], true
-		}
-	}
-	return "", "", false
 }

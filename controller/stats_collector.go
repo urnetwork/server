@@ -36,6 +36,21 @@ package controller
 //	urnetwork_stats_prev_block_miner_claims_alpha    alpha claimed by miners in the last finished block
 //	urnetwork_stats_prev_block_miners_claimed        distinct miner coldkeys that claimed in the last finished block
 //
+// the derived-location gauges are internal (connect/GEOMAP.md §5.4, §5.7)
+// and are read only by grafana/dashboards/extenders.json:
+//
+//	urnetwork_stats_derived_locations                nodes with a published derived location {node_kind} (db)
+//	urnetwork_stats_derived_location_crossings       of those, the ones mapped outside the genesis region or country {kind} (db)
+//	urnetwork_stats_derive_excluded_sources          sources the last derivation excluded on reputation (redis, written by the derivation)
+//	urnetwork_stats_derive_residual_km               the last derivation's RMS ping residual {at} (redis, written by the derivation)
+//	urnetwork_stats_derive_last_run_seconds          unix time of the last derivation (redis, written by the derivation)
+//
+// the egress index gauges are internal (connect/GEOMAP.md §10.4) and are read
+// only by grafana/dashboards/providers.json:
+//
+//	urnetwork_stats_provider_egress_index            connected valid public providers per bucket and egress index {bucket, index} (db)
+//	urnetwork_stats_provider_excluded                of those, the ones the egress rules leave out of a bucket {reason} (db)
+//
 // the contract gauges are internal (connect/EXTENDER.md M3, M4) and are read
 // only by grafana/dashboards/providers.json:
 //
@@ -76,6 +91,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -282,6 +298,28 @@ var statsDisputes24hGauge = newStatsGauge(
 	"Transfer contracts created in the last 24 hours that are disputed",
 )
 
+// The egress index (connect/GEOMAP.md §10.4), read only by the providers
+// dashboard: the connected valid public providers of each bucket by their
+// index, and the ones each rule of §10.3 leaves out, so a probe outage shows
+// as a wave of "unprobed" and an online bucket that grows to answer for it,
+// rather than as a silent drop in quality supply. The labels are bounded
+// enums: three buckets, the index from zero to the largest the settings can
+// produce plus "none" for a row the new rollup has not written, and five
+// reasons. Every series is published every refresh, zero included.
+var statsProviderEgressIndexGauge = newStatsGaugeVec(
+	"provider_egress_index",
+	"Connected valid public providers of each bucket by their egress index",
+	"bucket",
+	"index",
+)
+
+// The providers each rule of §10.3 leaves out of a bucket, per reason.
+var statsProviderExcludedGauge = newStatsGaugeVec(
+	"provider_excluded",
+	"Connected valid public providers the egress rules leave out of a bucket, per reason",
+	"reason",
+)
+
 // the extender gauges are internal and are read only by
 // grafana/dashboards/extenders.json.
 //
@@ -336,28 +374,112 @@ var statsExtenderContractsCounter = newStatsCounterVec(
 	"extender_id",
 )
 
-// The provider latency attestations the operator accepted
-// (connect/DESIGNNOTES4.md §3), read only by the extenders dashboard. The
-// window gauges are bounded; the per-extender counter has the same shape,
-// cost and reset behaviour as the contracts counter above, and is fed from
-// the same closed hour buckets.
-var statsExtenderProviderPings24hGauge = newStatsGauge(
-	"extender_provider_pings_24h",
-	"Provider latency attestations accepted in the last 24 hours",
+// The pings the operator stored (connect/GEOMAP.md §2.5-§2.7), read only by
+// the extenders dashboard. A ping is a ping here: providers and extenders both
+// ping, every verdict counts, a ping relayed through an NLayer chain counts
+// (§2.9), and the labels say which. The window gauges carry only bounded
+// labels -- two pinger kinds, three verdicts, relayed or not -- and the
+// per-extender counters have the same shape, cost and reset behaviour as the
+// contracts counter above, fed from the same closed hour buckets. The pings
+// counter also carries the pinger kind, which at most doubles its series and
+// is what shows the extender to extender traffic per hour.
+var statsExtenderPings24hGauge = newStatsGaugeVec(
+	"extender_pings_24h",
+	"Pings stored in the 24 clock hours up to and including the current one, per pinger kind, verdict and whether an NLayer chain relayed them, from the ingest's hour tally",
+	"pinger_kind",
+	"outcome",
+	"relayed",
 )
-var statsExtenderPingProviders24hGauge = newStatsGauge(
-	"extender_ping_providers_24h",
-	"Distinct providers whose latency attestations were accepted in the last 24 hours",
+var statsExtenderPingSources24hGauge = newStatsGaugeVec(
+	"extender_ping_sources_24h",
+	"Distinct pingers with a ping stored in the last 24 hours, per pinger kind, counted exactly over the utc days that cover them, so at most a day wider",
+	"pinger_kind",
 )
 var statsExtenderPingedExtenders24hGauge = newStatsGauge(
 	"extender_pinged_extenders_24h",
-	"Distinct extenders with an accepted latency attestation in the last 24 hours",
+	"Distinct extenders pinged in the last 24 hours, counted exactly over the utc days that cover them, so at most a day wider",
 )
-var statsExtenderProviderPingsCounter = newStatsCounterVec(
-	"extender_provider_pings_total",
-	"Provider latency attestations accepted for each extender, accumulated from closed hour buckets",
+var statsExtenderPingsCounter = newStatsCounterVec(
+	"extender_pings_total",
+	"Pings stored for each target extender, per pinger kind, accumulated from closed hour buckets",
+	"extender_id",
+	"pinger_kind",
+)
+var statsExtenderPingRejectionsCounter = newStatsCounterVec(
+	"extender_ping_rejections_total",
+	"Refused pings stored for each target extender, accumulated from closed hour buckets",
 	"extender_id",
 )
+
+// The derived locations (connect/GEOMAP.md §5.4, §5.7), read only by the
+// extenders dashboard. The published rows are counted from the table, so the
+// counts fall as the sweep removes rows a derivation did not renew; what the
+// last derivation left out and how well it fit is known only to that run,
+// which records it for every collector to publish alike
+// (model.DeriveLocationsRun). Every label is a bounded enum.
+var statsDerivedLocationsGauge = newStatsGaugeVec(
+	"derived_locations",
+	"Nodes with a published derived location, per node kind",
+	"node_kind",
+)
+var statsDerivedLocationCrossingsGauge = newStatsGaugeVec(
+	"derived_location_crossings",
+	"Published derived locations whose mapped place lies outside the genesis region or country, per kind of crossing",
+	"kind",
+)
+var statsDeriveExcludedSourcesGauge = newStatsGauge(
+	"derive_excluded_sources",
+	"Sources the last derivation left out of its solve on reputation",
+)
+var statsDeriveResidualKmGauge = newStatsGaugeVec(
+	"derive_residual_km",
+	"RMS ping residual of the last derivation's final solve, in km, at the derived positions and at genesis",
+	"at",
+)
+var statsDeriveLastRunSecondsGauge = newStatsGauge(
+	"derive_last_run_seconds",
+	"Unix time of the last derivation",
+)
+
+// The derive job's capacity (GEOMAP §5.3, "Scale"; SIGNALS.md §2.19c,
+// "capacity"): what the last run's solve took, what the planner projects for
+// the next at the taskworker host's cores, and the budget the projection is
+// judged against, each as an `at` of one gauge per resource, so a panel sets
+// the three side by side; and how long the last run read the day over its
+// cursors.
+var statsDeriveSolveSecondsGauge = newStatsGaugeVec(
+	"derive_solve_seconds",
+	"The last derivation's solve wall time (measured), the planner's projection of the next at the taskworker host's cores (projected), and the budget it is judged against (budget), in seconds",
+	"at",
+)
+var statsDeriveSolveBytesGauge = newStatsGaugeVec(
+	"derive_solve_bytes",
+	"The last derivation's peak heap over its ingest and solve (peak), the planner's projection of the next (projected), and the budget it is judged against (budget), in bytes",
+	"at",
+)
+var statsDeriveIngestSecondsGauge = newStatsGauge(
+	"derive_ingest_seconds",
+	"The last derivation's wall time reading the day's co-signed pings over its cursors",
+)
+
+// the node_kind label values of the derived locations
+var statsDerivedNodeKindNames = map[int]string{
+	model.DerivedLocationNodeKindProvider: "provider",
+	model.DerivedLocationNodeKindExtender: "extender",
+}
+
+// The label values of the ping metrics, which are the report's own words for
+// the pinger kinds and verdicts (connect's ExtenderPingerKind and
+// ExtenderPingOutcome).
+var statsPingerKindNames = map[int]string{
+	model.NetworkPingPingerKindProvider: "provider",
+	model.NetworkPingPingerKindExtender: "extender",
+}
+var statsPingOutcomeNames = map[int]string{
+	model.NetworkPingCosignCosigned: "cosigned",
+	model.NetworkPingCosignRejected: "rejected",
+	model.NetworkPingCosignUnknown:  "unknown",
+}
 
 // statsCounterVec is a labeled monotonic counter with the same lazy
 // registration as the gauges. Unlike a gauge vec it is never replaced: a
@@ -565,6 +687,12 @@ func statsRefreshDb(ctx context.Context) {
 		providersDualstack,
 	))
 
+	// isolated, so an egress read that fails -- a database the migration has
+	// not reached -- costs these gauges one refresh and never the ones after
+	server.HandleError(func() {
+		statsRefreshProviderEgress(ctx)
+	})
+
 	// one scan of the online extenders, grouped by country with the same
 	// family filters (M2). an extender whose activation resolved no country
 	// counts in the population and its family but has no country to label, so
@@ -621,6 +749,55 @@ func statsRefreshDb(ctx context.Context) {
 	}
 }
 
+// Publishes the pool as the egress rules decide it, with the rollout flag as
+// it is now (model.CountProviderEgress).
+func statsRefreshProviderEgress(ctx context.Context) {
+	counts := model.CountProviderEgress(ctx)
+	indexValues := []statsLabeledValue{}
+	for _, bucket := range model.ProviderEgressBuckets {
+		indexLabelCounts := counts.BucketIndexCounts[bucket]
+		for _, indexLabel := range statsProviderEgressIndexLabels(counts.MaxIndex, indexLabelCounts) {
+			indexValues = append(indexValues, statsLabeledValue{
+				labelValues: []string{bucket, indexLabel},
+				value:       float64(indexLabelCounts[indexLabel]),
+			})
+		}
+	}
+	statsProviderEgressIndexGauge.replace(indexValues)
+
+	reasonValues := []statsLabeledValue{}
+	for _, reason := range model.ProviderExcludedReasons {
+		reasonValues = append(reasonValues, statsLabeledValue{
+			labelValues: []string{reason},
+			value:       float64(counts.ReasonCounts[reason]),
+		})
+	}
+	statsProviderExcludedGauge.replace(reasonValues)
+}
+
+// Every index label a bucket publishes: each index up to the largest the
+// settings produce, "none", and any larger index still stored from settings
+// that have since been lowered, so a label that has emptied reads as zero
+// rather than as a series that stopped.
+func statsProviderEgressIndexLabels(maxIndex int, observedLabelCounts map[string]int64) []string {
+	indexLabels := []string{}
+	for index := 0; index <= maxIndex; index += 1 {
+		indexLabels = append(indexLabels, strconv.Itoa(index))
+	}
+	indexLabels = append(indexLabels, model.ProviderEgressIndexNone)
+	extraIndexes := []int{}
+	for indexLabel := range observedLabelCounts {
+		if index, err := strconv.Atoi(indexLabel); err == nil && maxIndex < index {
+			extraIndexes = append(extraIndexes, index)
+		}
+	}
+	slices.Sort(extraIndexes)
+	for _, index := range extraIndexes {
+		indexLabels = append(indexLabels, strconv.Itoa(index))
+	}
+	return indexLabels
+}
+
 // statsRefreshExtenders publishes the gossip release queue and the contract
 // leaderboard.
 //
@@ -665,13 +842,93 @@ func statsRefreshExtenders(ctx context.Context, now time.Time) {
 	statsExtenderGossipReleased24hGauge.replace(released)
 	statsExtenderGossipExtenders24hGauge.replace(releasedExtenders)
 
-	pings := model.CountExtenderProviderPings(ctx, now)
-	statsExtenderProviderPings24hGauge.set(float64(pings.Pings24h))
-	statsExtenderPingProviders24hGauge.set(float64(pings.Providers24h))
-	statsExtenderPingedExtenders24hGauge.set(float64(pings.Extenders24h))
+	// every kind, verdict and relay is published, zero included, so a verdict
+	// that has gone quiet is a zero rather than an absent series (M4)
+	pings := model.CountExtenderPings(ctx, now)
+	pingOutcomes := []statsLabeledValue{}
+	for _, count := range pings.Outcomes24h {
+		pingerKind, kindOk := statsPingerKindNames[count.PingerKind]
+		outcome, outcomeOk := statsPingOutcomeNames[count.Cosign]
+		if !kindOk || !outcomeOk {
+			continue
+		}
+		relayed := "no"
+		if count.Relayed {
+			relayed = "yes"
+		}
+		pingOutcomes = append(pingOutcomes, statsLabeledValue{
+			labelValues: []string{pingerKind, outcome, relayed},
+			value:       float64(count.Pings),
+		})
+	}
+	pingSources := []statsLabeledValue{}
+	for _, count := range pings.Sources24h {
+		pingerKind, ok := statsPingerKindNames[count.PingerKind]
+		if !ok {
+			continue
+		}
+		pingSources = append(pingSources, statsLabeledValue{
+			labelValues: []string{pingerKind},
+			value:       float64(count.Sources),
+		})
+	}
+	statsExtenderPings24hGauge.replace(pingOutcomes)
+	statsExtenderPingSources24hGauge.replace(pingSources)
+	statsExtenderPingedExtenders24hGauge.set(float64(pings.Targets24h))
 
 	statsRefreshExtenderContracts(ctx, now)
 	statsRefreshExtenderPings(ctx, now)
+	// isolated, so a derived-location read that fails -- a database the
+	// migration has not reached, a redis that is down -- costs these gauges one
+	// refresh and never the contract gauges refreshed after them
+	server.HandleError(func() {
+		statsRefreshDerivedLocations(ctx)
+	})
+}
+
+// Publishes the published rows and the last derivation. Every kind and
+// crossing is published, zero included, so a table the sweep has emptied reads
+// as zeros rather than as series that stopped. The last derivation is
+// published only once one is recorded: before the first, "no data" is the
+// truth.
+func statsRefreshDerivedLocations(ctx context.Context) {
+	counts := model.CountDerivedLocations(ctx)
+	nodeKinds := []statsLabeledValue{}
+	for _, count := range counts.NodeKinds {
+		nodeKind, ok := statsDerivedNodeKindNames[count.NodeKind]
+		if !ok {
+			continue
+		}
+		nodeKinds = append(nodeKinds, statsLabeledValue{
+			labelValues: []string{nodeKind},
+			value:       float64(count.Count),
+		})
+	}
+	statsDerivedLocationsGauge.replace(nodeKinds)
+	statsDerivedLocationCrossingsGauge.replace([]statsLabeledValue{
+		{labelValues: []string{"region"}, value: float64(counts.CrossedRegion)},
+		{labelValues: []string{"country"}, value: float64(counts.CrossedCountry)},
+	})
+
+	if run, ok := model.GetDeriveLocationsRun(ctx); ok {
+		statsDeriveExcludedSourcesGauge.set(float64(run.ExcludedSources))
+		statsDeriveResidualKmGauge.replace([]statsLabeledValue{
+			{labelValues: []string{"derived"}, value: run.ResidualKm},
+			{labelValues: []string{"genesis"}, value: run.GenesisResidualKm},
+		})
+		statsDeriveLastRunSecondsGauge.set(float64(run.RunTime.Unix()))
+		statsDeriveSolveSecondsGauge.replace([]statsLabeledValue{
+			{labelValues: []string{"measured"}, value: run.SolveSeconds},
+			{labelValues: []string{"projected"}, value: run.ProjectedSeconds},
+			{labelValues: []string{"budget"}, value: run.MaxSolveSeconds},
+		})
+		statsDeriveSolveBytesGauge.replace([]statsLabeledValue{
+			{labelValues: []string{"peak"}, value: float64(run.PeakBytes)},
+			{labelValues: []string{"projected"}, value: float64(run.ProjectedBytes)},
+			{labelValues: []string{"budget"}, value: float64(run.MaxSolveBytes)},
+		})
+		statsDeriveIngestSecondsGauge.set(run.IngestSeconds)
+	}
 }
 
 // statsExtenderContractsHour is the last closed hour already added to the
@@ -706,22 +963,41 @@ func statsRefreshExtenderContracts(ctx context.Context, now time.Time) {
 	}
 }
 
-// statsExtenderPingsHour is the counter cursor of the provider pings, kept
-// separately from the contracts cursor so the two counters seed and resume
-// independently.
+// statsExtenderPingsHour is the counter cursor of the pings, kept separately
+// from the contracts cursor so the two counters seed and resume independently.
+// The pings and rejections counters share it: both are fed from the one
+// grouped query per hour.
 var statsExtenderPingsHour time.Time
 
 // statsRefreshExtenderPings adds every hour that closed since the last refresh
-// to the per-extender pings counter, on the same rules as the contracts.
+// to the per-extender pings and rejections counters, on the same rules as the
+// contracts.
+//
+// A target's rejections series is written in every hour the target was
+// pinged, zero included. A counter series that first appears at a nonzero
+// value hides that value from increase(), so a rejections series that only
+// appeared with a target's first refusal would lose it. Written from the
+// target's first pinged hour, it has exactly the first-hour blind spot its
+// pings series has, and the refusal rate on the dashboard compares like with
+// like.
 func statsRefreshExtenderPings(ctx context.Context, now time.Time) {
 	if statsExtenderPingsHour.IsZero() {
 		statsExtenderPingsHour = statsClosedHour(now)
 		return
 	}
 	for _, hour := range statsClosedHoursSince(statsExtenderPingsHour, now) {
-		for _, count := range model.CountExtenderProviderPingsByHour(ctx, hour) {
-			statsExtenderProviderPingsCounter.add(
+		for _, count := range model.CountExtenderPingsByHour(ctx, hour) {
+			pingerKind, ok := statsPingerKindNames[count.PingerKind]
+			if !ok {
+				continue
+			}
+			statsExtenderPingsCounter.add(
 				float64(count.Pings),
+				count.ExtenderId.String(),
+				pingerKind,
+			)
+			statsExtenderPingRejectionsCounter.add(
+				float64(count.Rejections),
 				count.ExtenderId.String(),
 			)
 		}

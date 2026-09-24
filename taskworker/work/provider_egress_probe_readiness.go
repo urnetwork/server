@@ -142,7 +142,7 @@ func (self *providerEgressProbeReadinessReporter) ReportAttempt(ctx context.Cont
 
 // Health is published inside the full runner, before it returns its summary.
 func (self *providerEgressProbeReadinessReporter) SubmitEgressHealth(ctx context.Context, providerClientId string, result *egresshealth.Result) error {
-	if result != nil && !result.TLSAuthenticationFailure && (result.Total <= 0 || result.OKCount < result.Total) {
+	if result != nil && !result.TlsAuthenticationFailure && (result.Total <= 0 || result.OkCount < result.Total) {
 		if err := self.readiness.check(ctx); err != nil {
 			return err
 		}

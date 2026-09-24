@@ -63,6 +63,22 @@ type NetworkExtender struct {
 	CityLocationId    *server.Id
 	RegionLocationId  *server.Id
 	CountryLocationId *server.Id
+	// The country of the extender's derived location (connect/GEOMAP.md §6),
+	// lower case, or empty while it has none. Read where a record is signed,
+	// and nowhere else: the columns above stay where the extender activated
+	// from, which is its genesis.
+	DerivedCountryCode string
+}
+
+// The country the extender's signed record carries (connect/GEOMAP.md §6):
+// the country of its derived location while it has one, which its own pings
+// placed it in, else the country it last activated from. The record's
+// continent follows the same country.
+func (self *NetworkExtender) RecordCountryCode() string {
+	if self.DerivedCountryCode != "" {
+		return self.DerivedCountryCode
+	}
+	return self.CountryCode
 }
 
 // One family an extender was activated and is probed on. DnsPorts are the dns
@@ -145,7 +161,9 @@ func GetActiveNetworkExtenderForRecord(
 		if len(addresses) == 0 {
 			extender = nil
 			addresses = nil
+			return
 		}
+		extender.DerivedCountryCode = derivedCountryCodeInTx(ctx, tx, extenderId)
 	})
 	return extender, addresses
 }
@@ -185,6 +203,10 @@ type NetworkExtenderActivation struct {
 	// activation history the way a connection keeps it (M1); nil when the
 	// address could not be read
 	ClientAddressHash []byte
+	// the accuracy radius in km of the lookup that placed the activating
+	// address, the extender's genesis confidence (connect/GEOMAP.md §5.1),
+	// kept on the history row; nil when the lookup gave none
+	AccuracyKm *float32
 	// the location the activating address resolved to (M1), already created in
 	// the location table by the caller. Each field is nil when the lookup did
 	// not reach that granularity; all four nil is a lookup that failed, which
@@ -578,6 +600,10 @@ func ActivateNetworkExtender(
 			CityLocationId:    activation.CityLocationId,
 			RegionLocationId:  activation.RegionLocationId,
 			CountryLocationId: activation.CountryLocationId,
+			// the record signed now carries the derived country while the
+			// extender has one (connect/GEOMAP.md §6); a re-activation writes a
+			// new genesis, which the next derivation solves from
+			DerivedCountryCode: derivedCountryCodeInTx(ctx, tx, extenderId),
 		}
 		addresses := getActiveNetworkExtenderAddressesInTx(ctx, tx, extenderId)
 
@@ -770,6 +796,7 @@ func PublishNetworkExtenderRecord(
 		if len(addresses) == 0 {
 			return
 		}
+		extender.DerivedCountryCode = derivedCountryCodeInTx(ctx, tx, extenderId)
 
 		issueTime := server.NowUtc()
 		message, err := signRecord(extender, addresses, issueTime)
@@ -861,7 +888,9 @@ func GetActiveNetworkExtenderProbeTargets(ctx context.Context) []*NetworkExtende
 
 // GetActiveNetworkExtenderDnsAddresses reads every address the geo dns sets
 // may hold (C5): one row per active address of an active extender, with the
-// country the extender activated from.
+// country its record carries -- its derived location's while it has one, else
+// the one it activated from (RecordCountryCode) -- so a continent set holds
+// exactly the extenders whose records name that continent.
 //
 // The order is stable rather than random. The sampler does its own shuffling
 // from a seeded source, so a random order here would only make one tick's
@@ -875,16 +904,22 @@ func GetActiveNetworkExtenderDnsAddresses(ctx context.Context) []*NetworkExtende
 			`
 			SELECT
 				network_extender.extender_id,
-				network_extender.country_code,
+				COALESCE(LOWER(derived_country.country_code::text), network_extender.country_code::text),
 				network_extender_address.ip_version,
 				network_extender_address.ip
 			FROM network_extender
 			INNER JOIN network_extender_address ON
 				network_extender_address.extender_id = network_extender.extender_id AND
 				network_extender_address.active
+			LEFT JOIN derived_location ON
+				derived_location.node_kind = $1 AND
+				derived_location.node_id = network_extender.extender_id
+			LEFT JOIN location AS derived_country ON
+				derived_country.location_id = derived_location.country_location_id
 			WHERE network_extender.active
 			ORDER BY network_extender.extender_id, network_extender_address.ip_version
 			`,
+			DerivedLocationNodeKindExtender,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -930,35 +965,66 @@ func CountActiveNetworkExtenders(ctx context.Context) int {
 	return count
 }
 
-// GetNetworkExtenderIdsForPublish selects the next drip batch: the active
-// extenders whose records are oldest (C4).
+// Selects what the next drip tick republishes (C4; connect/GEOMAP.md §2.8):
+// the oldest-first batch of up to `limit` active extenders, plus every active
+// extender whose latest publish is before `staleBefore`, however many that
+// is, each once.
 //
-// The order key is the oldest publish stamp over the extender's active
+// The batch order key is the oldest publish stamp over the extender's active
 // addresses, with never-published sorting first. A null cannot be folded in by
 // MIN, which ignores nulls and would rank an extender with one fresh address
 // and one never-published address by the fresh one, so the null is mapped to
 // the earliest representable time instead.
-func GetNetworkExtenderIdsForPublish(ctx context.Context, limit int) []server.Id {
+//
+// The latest publish is record_issue_time, the newest record signed for the
+// extender by an activation or by the drip: that is the record every client
+// holds, so once it is older than `staleBefore` the extender is released on
+// this tick whatever the batch. A batch sized to rotate the set on time can
+// still fall behind -- a tick that ran late, a taskworker that was down, a
+// population that grew between ticks -- and without this an extender that
+// stays up would reach the expired tier of every client at once. An extender
+// never signed for has no latest publish and is always stale. The result is
+// in batch order, so a tick cut short has published the oldest first.
+func GetNetworkExtenderIdsForPublish(ctx context.Context, limit int, staleBefore time.Time) []server.Id {
 	extenderIds := []server.Id{}
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-			SELECT network_extender.extender_id
-			FROM network_extender
-			INNER JOIN network_extender_address ON
-				network_extender_address.extender_id = network_extender.extender_id AND
-				network_extender_address.active
-			WHERE network_extender.active
-			GROUP BY network_extender.extender_id
-			ORDER BY MIN(COALESCE(
-				network_extender_address.last_publish_time,
-				TIMESTAMP '-infinity'
-			)) ASC
-			LIMIT $1
+			WITH active_extender AS (
+				SELECT
+					network_extender.extender_id,
+					MIN(COALESCE(
+						network_extender_address.last_publish_time,
+						TIMESTAMP '-infinity'
+					)) AS publish_order,
+					COALESCE(
+						network_extender.record_issue_time,
+						TIMESTAMP '-infinity'
+					) AS latest_publish_time
+				FROM network_extender
+				INNER JOIN network_extender_address ON
+					network_extender_address.extender_id = network_extender.extender_id AND
+					network_extender_address.active
+				WHERE network_extender.active
+				GROUP BY network_extender.extender_id, network_extender.record_issue_time
+			),
+			batch AS (
+				SELECT extender_id
+				FROM active_extender
+				ORDER BY publish_order ASC, extender_id ASC
+				LIMIT $1
+			)
+			SELECT active_extender.extender_id
+			FROM active_extender
+			WHERE
+				active_extender.latest_publish_time < $2 OR
+				active_extender.extender_id IN (SELECT extender_id FROM batch)
+			ORDER BY active_extender.publish_order ASC, active_extender.extender_id ASC
 			`,
 			limit,
+			staleBefore.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -1003,6 +1069,7 @@ func GetRandomActiveNetworkExtenders(
 				network_extender.dns_port,
 				network_extender.dns_tld,
 				network_extender.country_code,
+				COALESCE(LOWER(derived_country.country_code::text), ''),
 				network_extender.record_issue_time,
 				network_extender_address.ip_version,
 				network_extender_address.ip,
@@ -1014,6 +1081,11 @@ func GetRandomActiveNetworkExtenders(
 			INNER JOIN network_extender_address ON
 				network_extender_address.extender_id = network_extender.extender_id AND
 				network_extender_address.active
+			LEFT JOIN derived_location ON
+				derived_location.node_kind = $3 AND
+				derived_location.node_id = network_extender.extender_id
+			LEFT JOIN location AS derived_country ON
+				derived_country.location_id = derived_location.country_location_id
 			WHERE network_extender.extender_id IN (
 				SELECT sampled.extender_id
 				FROM network_extender sampled
@@ -1029,6 +1101,7 @@ func GetRandomActiveNetworkExtenders(
 			`,
 			limit,
 			excludeExtenderId,
+			DerivedLocationNodeKindExtender,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -1047,6 +1120,7 @@ func GetRandomActiveNetworkExtenders(
 					&extender.DnsPort,
 					&extender.DnsTld,
 					&extender.CountryCode,
+					&extender.DerivedCountryCode,
 					&extender.RecordIssueTime,
 					&address.IpVersion,
 					&address.Ip,
@@ -1235,9 +1309,12 @@ func Testing_CreateNetworkExtender(
 }
 
 // Testing_CreateNetworkExtenderPopulation bulk-creates count active extenders,
-// each with one never-published active v6 address, in one statement.
+// each with one active v6 address the drip has never published, in one
+// statement. Each carries the record issue time of the activation that
+// created it, as a real activation does, so the population is fresh rather
+// than stale to the drip (GetNetworkExtenderIdsForPublish).
 //
-// The drip's batch only grows past its floor above eight thousand active
+// The drip's batch only grows past its floor above several hundred active
 // extenders, so a test of that boundary needs a population no row-at-a-time
 // helper could build in reasonable time. Keys and addresses are derived from
 // the series index, so they are unique, synthetic and reproducible.
@@ -1258,7 +1335,8 @@ func Testing_CreateNetworkExtenderPopulation(
 					client_id,
 					public_key,
 					create_time,
-					active
+					active,
+					record_issue_time
 				)
 				SELECT
 					gen_random_uuid(),
@@ -1266,7 +1344,8 @@ func Testing_CreateNetworkExtenderPopulation(
 					$2,
 					sha256(('extender-population-' || i::text)::bytea),
 					$3,
-					true
+					true,
+					$3
 				FROM generate_series(1, $4) AS i
 				RETURNING extender_id
 			)

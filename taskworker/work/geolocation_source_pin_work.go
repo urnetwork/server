@@ -247,22 +247,10 @@ type RefreshGeolocationSourcePinsResult struct {
 	Failed   int `json:"failed"`
 }
 
-// ScheduleRefreshGeolocationSourcePins schedules the first observation to run
-// IMMEDIATELY, which is a deliberate departure from the usual Schedule* pattern
-// of arming the first run one interval out.
-//
-// This job is not a cleanup job whose first pass can wait. Its table is what
-// the prober pins against, and the prober's correct response to a missing pin
-// is to refuse to probe -- so an empty table means no probing at all. Arming
-// the first run six hours out would leave a freshly-migrated deployment unable
-// to probe anything for those six hours, for no benefit. The recurring six-hour
-// cadence is set in the Post below.
-//
-// RunOnce merges on conflict with `run_at = LEAST(existing, new)`, so a
-// taskworker restart pulls a pending observation forward to now rather than
-// stacking a second one. That costs one TLS handshake per source host per
-// restart, which is nothing, and it means a restart after a rotation picks the
-// new certificate up at once.
+// ScheduleRefreshGeolocationSourcePins schedules an observation now. Nothing
+// in production calls it any more: the geolocation sources whose pins this
+// job observed are gone (connect/GEOMAP.md D24), and it is kept, with the task
+// below, only for the release that drains the rows it scheduled.
 func ScheduleRefreshGeolocationSourcePins(clientSession *session.ClientSession, tx server.PgTx) {
 	scheduleRefreshGeolocationSourcePinsAt(clientSession, tx, server.NowUtc())
 }
@@ -278,71 +266,37 @@ func scheduleRefreshGeolocationSourcePinsAt(clientSession *session.ClientSession
 	)
 }
 
-// RefreshGeolocationSourcePins re-observes every geolocation source host and
-// records what it saw, so the prober's pins track the real certificates instead
-// of a constant someone pasted in weeks ago.
+// RefreshGeolocationSourcePins is retired. It observed the certificate pins
+// of the three ip-intelligence sources the prober used to geolocate through,
+// and the prober consults none of them now: the exit is placed by the
+// operator's own /ip echo and GeoLite2 (GEOMAP §11.3). A row this job
+// scheduled before the release runs once more here, observes nothing, and
+// schedules no successor.
 //
-// It returns nil even when hosts failed, and that is deliberate. A task that
-// returns an error is rescheduled with exponential backoff and its Post -- the
-// function that re-arms the six-hourly chain -- does not run. So returning an
-// error whenever any single host was unreachable would let one flaky host slow
-// and eventually strand the refresh for ALL hosts: a job that quietly stops is
-// the precise failure shape this feature exists to remove. Failures are loud in
-// the log and counted in the result instead, and the chain always re-arms.
+// It is not repurposed to pin the api host the echo answers on, deliberately.
+// A pin that lags a certificate rotation -- a new leaf from a different
+// intermediate, which the api's issuer does routinely -- fails every warm-up
+// in the fleet on TLS authentication, and a TLS-authentication failure is
+// immediate dark evidence the batch guard keeps (§11.3): one rotation would
+// darken the whole fleet until the next observation. Unpinned, the echo host
+// is verified by WebPKI like every pooled destination, which a provider on the
+// path cannot pass without a mis-issued certificate. The pin route keeps
+// serving the rows already stored, for hosts no probe dials any more, which
+// the prober drops before it opens a tunnel (fleetprobe.restrictPins); the
+// route, this task and its table go together one release later.
 func RefreshGeolocationSourcePins(
 	_ *RefreshGeolocationSourcePinsArgs,
-	clientSession *session.ClientSession,
+	_ *session.ClientSession,
 ) (*RefreshGeolocationSourcePinsResult, error) {
-	targets := productionGeolocationSourceTargets()
-	changes, errs := refreshGeolocationSourcePins(clientSession.Ctx, targets)
-
-	for _, change := range changes {
-		if change.FirstObservation {
-			glog.Infof(
-				"[gsp]first observation for %s: leaf=%s intermediate=%s\n",
-				change.Host,
-				change.NewLeaf,
-				change.NewIntermediate,
-			)
-			continue
-		}
-		// old AND new, always. A rotation that is only visible as "the pin is
-		// different now" is the same as no record at all when someone is trying
-		// to work out why a source dropped out.
-		glog.Errorf(
-			"[gsp]pin ROTATED for %s: leaf %s -> %s, intermediate %s -> %s\n",
-			change.Host,
-			change.OldLeaf,
-			change.NewLeaf,
-			change.OldIntermediate,
-			change.NewIntermediate,
-		)
-	}
-	for _, err := range errs {
-		// loud: a host that cannot be validated keeps serving its previous pin
-		// to the prober, which is correct but is also exactly how a pin goes
-		// stale without anyone noticing
-		glog.Errorf("[gsp]observation FAILED, previous pin left in place: %v\n", err)
-	}
-
-	return &RefreshGeolocationSourcePinsResult{
-		Observed: len(targets) - len(errs),
-		Changed:  len(changes),
-		Failed:   len(errs),
-	}, nil
+	glog.Infof("[gsp]the geolocation-source pin refresh is retired; this pending row drains without a successor\n")
+	return &RefreshGeolocationSourcePinsResult{}, nil
 }
 
 func RefreshGeolocationSourcePinsPost(
 	_ *RefreshGeolocationSourcePinsArgs,
 	_ *RefreshGeolocationSourcePinsResult,
-	clientSession *session.ClientSession,
-	tx server.PgTx,
+	_ *session.ClientSession,
+	_ server.PgTx,
 ) error {
-	// the recurring cadence; only the very first run is immediate
-	scheduleRefreshGeolocationSourcePinsAt(
-		clientSession,
-		tx,
-		server.NowUtc().Add(GeolocationSourcePinRefreshTimeout),
-	)
 	return nil
 }

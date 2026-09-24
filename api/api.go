@@ -89,11 +89,24 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		// a provider offering itself as an extender; the handler probes the
 		// caller address back before anything is stored (connect/EXTENDER.md C2)
 		router.NewRoute("POST", "/network/extender-activate", handlers.ExtenderActivate),
+		// the continent a client tries extenders on first, and the provider
+		// latency attestations an extender forwards (connect/DESIGNNOTES4.md);
+		// the latter stays for one release beside the ping report that
+		// supersedes it (connect/GEOMAP.md D14)
+		router.NewRoute("GET", "/network/extender-hint", handlers.ExtenderHint),
+		router.NewRoute("POST", "/network/extender-latency", handlers.ExtenderLatencyReport),
+		// the pings a provider or an extender measured, reported by the pinger
+		// with the target's co-signature (connect/GEOMAP.md §2.5)
+		router.NewRoute("POST", "/network/ping-report", handlers.ExtenderPingReport),
 		router.NewRoute("POST", "/network/provider-egress-location", handlers.ProviderEgressLocationSubmit),
 		router.NewRoute("GET", "/network/provider-egress-due", handlers.ProviderEgressLocationDue),
 		router.NewRoute("GET", "/network/provider-blackhole-due", handlers.ProviderBlackholeCheckDue),
 		router.NewRoute("POST", "/network/provider-blackhole-checks", handlers.SubmitProviderBlackholeChecks),
 		router.NewRoute("POST", "/network/provider-egress-attempt", handlers.ProviderEgressLocationAttempt),
+		// operator-to-server, same operator secret: the destination pool the
+		// prober loads each pass (connect/GEOMAP.md §11.4), in the prober
+		// module's own Pool shape
+		router.NewRoute("GET", "/network/provider-egress-destinations", handlers.ProviderEgressDestinations),
 		// operator-to-server, same operator secret as the egress routes above:
 		// the prober fetching the network client jwt that the bootstrap task
 		// minted for it. This is what makes the credential arrive without a

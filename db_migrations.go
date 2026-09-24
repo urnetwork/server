@@ -8343,4 +8343,655 @@ var migrations = []any{
 		END
 		$competition_round_honesty_review_gate$;
 	`),
+
+	// The canonical place key (connect/GEOMAP.md §4.2, D7): the GeoNames id
+	// GeoLite2 gives the city, subdivision or country a row stands for.
+	// CreateLocation and the seeder match on it before the name, so a renamed
+	// place keeps its row. It is NULL on rows that predate it (the old city
+	// list, the older ip databases) until a seeded or looked-up place of the
+	// same name fills it in, and stays NULL on the region named for a country
+	// GeoLite2 gives no subdivision, which stands for no GeoNames place. Adding
+	// a nullable column rewrites nothing.
+	newSqlMigration(`
+		ALTER TABLE location
+		ADD COLUMN geoname_id bigint NULL
+	`),
+	// A GeoNames id names one place, so it is unique where set. Build online:
+	// CreateLocation inserts on the connect-announce path, and a plain build
+	// would hold those inserts for the scan of every location row. The drop
+	// clears the invalid index an interrupted concurrent build leaves behind.
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS location_geoname_id
+	`, `
+		CREATE UNIQUE INDEX CONCURRENTLY location_geoname_id
+		ON location (geoname_id)
+		WHERE geoname_id IS NOT NULL
+	`, `
+		DROP INDEX IF EXISTS location_geoname_id;
+		CREATE UNIQUE INDEX location_geoname_id
+		ON location (geoname_id)
+		WHERE geoname_id IS NOT NULL
+	`),
+
+	// Pings as their pinger reports them (connect/GEOMAP.md §2.5, §2.6): one
+	// row per attested probe of a target extender, by a provider (pinger_kind
+	// 1, pinger_id its client id) or by an extender (pinger_kind 2, pinger_id
+	// its extender id). cosign is the operator's own verdict, recomputed at
+	// ingest under the stored keys rather than taken from the report: 1 when
+	// the target's co-signature verifies, 2 when the pinger says the target
+	// refused (cosign_reason is the reason it says the target gave), 0 when no
+	// verdict arrived. Only a co-signed row is a measurement (D8); the others
+	// are the pinger's claims, read in aggregate (§5.5). Both signatures are
+	// kept so a row can be re-verified and a dispute shown rather than
+	// argued. Rows live one day and are swept hourly (§5.7).
+	newSqlMigration(`
+		CREATE TABLE network_ping (
+			ping_id uuid NOT NULL,
+			pinger_kind smallint NOT NULL,
+			pinger_id uuid NOT NULL,
+			target_extender_id uuid NOT NULL,
+			probe_nonce bytea NOT NULL,
+			rtt_ms int NOT NULL,
+			probe_time timestamp NOT NULL,
+			cosign smallint NOT NULL,
+			cosign_reason smallint NOT NULL DEFAULT 0,
+			pinger_signature bytea NOT NULL,
+			cosignature bytea NULL,
+			create_time timestamp NOT NULL DEFAULT now(),
+
+			PRIMARY KEY (ping_id)
+		)
+	`),
+	// One row per target, pinger and nonce. The nonce is the target's, fresh
+	// per probe, so a report posted twice is a no-op at the insert rather
+	// than a second sample, which is what makes a replay count as rejected.
+	newSqlMigration(`
+		CREATE UNIQUE INDEX network_ping_target_pinger_nonce
+		ON network_ping (target_extender_id, pinger_kind, pinger_id, probe_nonce)
+	`),
+	// The retention sweep.
+	newSqlMigration(`
+		CREATE INDEX network_ping_create_time
+		ON network_ping (create_time)
+	`),
+	// The per target read: what was measured of one extender in the window,
+	// and how often it refused.
+	newSqlMigration(`
+		CREATE INDEX network_ping_target_extender_id_create_time
+		ON network_ping (target_extender_id, create_time)
+	`),
+	// The per pinger read: what one source measured in the window, which is
+	// what its reputation is scored on (§5.5).
+	newSqlMigration(`
+		CREATE INDEX network_ping_pinger_kind_pinger_id_create_time
+		ON network_ping (pinger_kind, pinger_id, create_time)
+	`),
+
+	// The genesis accuracy radius (connect/GEOMAP.md §5.1): GeoLite2's radius,
+	// in km, around the coordinates it gives the address a connection's
+	// location was looked up from -- a few km for a well placed residential
+	// prefix, 1000 for an address it can place only in its country. It is how
+	// strongly the derive phase anchors a node to its genesis. NULL when the
+	// location came from the egress probe or from an override that names no
+	// radius, and on every row written before this column; adding a nullable
+	// column with no default rewrites nothing.
+	newSqlMigration(`
+		ALTER TABLE network_client_location
+		ADD COLUMN accuracy_km real NULL
+	`),
+	// The same radius for the address an extender activated from, kept on
+	// its activation history row, which is the extender's genesis (§5.1).
+	newSqlMigration(`
+		ALTER TABLE network_extender_activation
+		ADD COLUMN accuracy_km real NULL
+	`),
+
+	// The relay depth of a ping (connect/GEOMAP.md §2.9, D22): 0 for a direct
+	// probe, else the number of NLayer relays it crossed to reach the chain
+	// end its target names. The pinger reports it outside its signature --
+	// the probe response carries it, and the claim does not -- so nothing
+	// checks it, and nothing needs to: a relayed ping is shown on the
+	// dashboard and counted as co-signature evidence but is never a solver
+	// term, since a relayed round trip overstates the distance to the chain
+	// end by the detour through the front, and a pinger that hid a relay
+	// could only put a longer round trip in front of the solver. The table is
+	// new and empty, so the constant default rewrites nothing.
+	newSqlMigration(`
+		ALTER TABLE network_ping
+		ADD COLUMN hop_count smallint NOT NULL DEFAULT 0
+	`),
+
+	// Derived locations (connect/GEOMAP.md §5.4, §5.7, §6): where the derive
+	// phase placed a provider (node_kind 1, node_id its client id) or an
+	// extender (node_kind 2, node_id its extender id) from the pings it
+	// co-signed, one row per node, rewritten whole by each derivation. The row
+	// keeps the genesis it was solved from and the radius it was anchored with,
+	// the correction as a latitude and longitude delta, the point, the pings and
+	// peers behind it, its residual and the node's reputation as a source
+	// (§5.5), and the place the point maps to, with whether that place lies
+	// outside the genesis region or country. A node the derivation does not
+	// publish has no row and keeps its genesis; a row is swept a day after its
+	// update_time, so its presence is its freshness. The table holds at most one
+	// row per node that pinged in the last day, so the sweep and the dashboard
+	// counts scan it whole and it needs no index beyond its key.
+	newSqlMigration(`
+		CREATE TABLE derived_location (
+			node_kind smallint NOT NULL,
+			node_id uuid NOT NULL,
+			genesis_latitude double precision NOT NULL,
+			genesis_longitude double precision NOT NULL,
+			genesis_accuracy_km real NOT NULL,
+			delta_latitude double precision NOT NULL,
+			delta_longitude double precision NOT NULL,
+			latitude double precision NOT NULL,
+			longitude double precision NOT NULL,
+			ping_count int NOT NULL,
+			peer_count int NOT NULL,
+			residual_km real NOT NULL,
+			reputation real NOT NULL,
+			crossed_region bool NOT NULL,
+			crossed_country bool NOT NULL,
+			location_id uuid NOT NULL,
+			city_location_id uuid NOT NULL,
+			region_location_id uuid NOT NULL,
+			country_location_id uuid NOT NULL,
+			update_time timestamp NOT NULL,
+
+			PRIMARY KEY (node_kind, node_id)
+		)
+	`),
+
+	// The genesis of a connection's location (connect/GEOMAP.md §5.1, §6): the
+	// location the connection's own address lookup resolved to, stored beside
+	// the location the connection is published at. Once a derived location is
+	// published the two differ, and the derive phase must still read the
+	// lookup as the provider's genesis, never the derived location it wrote,
+	// or each derivation would anchor to the one before it. NULL for a location
+	// the egress probe placed and on every row written before this column;
+	// adding a nullable column with no default rewrites nothing.
+	newSqlMigration(`
+		ALTER TABLE network_client_location
+		ADD COLUMN genesis_location_id uuid NULL
+	`),
+
+	// The egress index (connect/GEOMAP.md §10.4, D23), written per provider by
+	// the reliability rollup from its latest egress health run, and read by the
+	// client-score job in place of the net-type score: the weighted, capped
+	// count of the run's scored loads that failed every retry, and 0 when
+	// there is no usable run, which egress_quality then marks. NULL is a row
+	// the new rollup has not written yet -- every row before this column, or
+	// one an older binary inserted -- and the client-score job ranks such a
+	// row exactly as before, on max_net_type_score and
+	// max_net_type_score_speed. Adding a nullable column with no default
+	// rewrites nothing.
+	newSqlMigration(`
+		ALTER TABLE network_client_location_reliability
+		ADD COLUMN egress_index smallint NULL
+	`),
+	// Whether that run passes the 90 % rule over all its scored loads: true or
+	// false when the run is evidence, NULL when there is none, which puts a
+	// provider past the exclusions and the reliability minimums in the online
+	// bucket.
+	newSqlMigration(`
+		ALTER TABLE network_client_location_reliability
+		ADD COLUMN egress_quality bool NULL
+	`),
+	// The newer of the provider's health run and location probe, whatever its
+	// age, so a reader can tell stale evidence from none; NULL when there has
+	// been neither.
+	newSqlMigration(`
+		ALTER TABLE network_client_location_reliability
+		ADD COLUMN egress_evidence_time timestamp NULL
+	`),
+
+	// A failed blackhole check is a failure, not a verdict (connect/GEOMAP.md
+	// §11.3, D24): a provider is dark only after consecutive failed checks
+	// spanning a minimum time. The row carries the run: how many measured
+	// checks in a row have failed, when the first of them started, and when
+	// the provider is next due, which is a backoff step after a failure and
+	// the ordinary due age after a pass. Every existing row starts a new run
+	// at 0 -- the single-check verdicts before this were the false dark of
+	// §11.2 -- and a NULL next_due_at is due its old checked_at-based age.
+	// Adding a column with a constant default, or a nullable one, rewrites
+	// nothing.
+	newSqlMigration(`
+		ALTER TABLE provider_blackhole_check
+		ADD COLUMN consecutive_failures int NOT NULL DEFAULT 0
+	`),
+	newSqlMigration(`
+		ALTER TABLE provider_blackhole_check
+		ADD COLUMN first_failed_at timestamp NULL
+	`),
+	newSqlMigration(`
+		ALTER TABLE provider_blackhole_check
+		ADD COLUMN next_due_at timestamp NULL
+	`),
+
+	// What a health run could not score (connect/GEOMAP.md §11.3): the loads
+	// whose tunnel was gone and could not be re-created (out of ok_count and
+	// total_count, counted and named apart), the canaries loaded from a place
+	// their site is marked incompatible with, the classes too thin for the
+	// provider's place to fill their sample, and the failed loads the server
+	// itself left out of the counts -- a site on probation, or one marked
+	// incompatible with the provider's place (§11.4). Defaults describe a run
+	// with none of these, which is every run before this column.
+	newSqlMigration(`
+		ALTER TABLE provider_egress_health
+		ADD COLUMN not_measured_count int NOT NULL DEFAULT 0,
+		ADD COLUMN not_measured_names text NOT NULL DEFAULT '',
+		ADD COLUMN canary_passed_names text NOT NULL DEFAULT '',
+		ADD COLUMN canary_failed_names text NOT NULL DEFAULT '',
+		ADD COLUMN short_classes text NOT NULL DEFAULT '',
+		ADD COLUMN unscored_failed_names text NOT NULL DEFAULT ''
+	`),
+
+	// The egress destination pool as data (connect/GEOMAP.md §11.4): every site
+	// the prober may load, active or candidate, with its load contract in the
+	// prober's own wire shape (egresshealth.Destination: expect, status,
+	// max_bytes, headers, verify -- the body check DoH and portal entries
+	// cannot run without), its category and region for representative
+	// promotion, and the places it is known not to work from. Seeded on first
+	// use from the prober's built-in table and extended from egress-sites.yml;
+	// RefreshEgressDestinations retires, promotes, marks and judges it daily.
+	// active and probation are the pool state: active and scored, active on
+	// probation (served and recorded, never scored), or a candidate.
+	// failure_share, sample_count, judged_time and above_retire_since are the
+	// last judgement, which the §2.19b monitor reads. The table holds a few
+	// hundred rows and is read whole.
+	newSqlMigration(`
+		CREATE TABLE provider_egress_destination (
+			name varchar(128) NOT NULL,
+			class varchar(32) NOT NULL,
+			url varchar(2048) NOT NULL,
+			expect varchar(16) NOT NULL DEFAULT 'body',
+			status int NOT NULL DEFAULT 0,
+			max_bytes int NOT NULL DEFAULT 0,
+			headers jsonb NOT NULL DEFAULT '{}',
+			verify jsonb NOT NULL DEFAULT '{}',
+			category varchar(32) NOT NULL DEFAULT '',
+			region varchar(64) NOT NULL DEFAULT '',
+			incompatible jsonb NOT NULL DEFAULT '[]',
+			source varchar(16) NOT NULL DEFAULT 'builtin',
+			revision int NOT NULL DEFAULT 0,
+			active bool NOT NULL DEFAULT false,
+			probation bool NOT NULL DEFAULT false,
+			added_time timestamp NOT NULL,
+			promoted_time timestamp NULL,
+			retired_time timestamp NULL,
+			retire_reason varchar(256) NOT NULL DEFAULT '',
+			retire_count int NOT NULL DEFAULT 0,
+			failure_share real NULL,
+			sample_count int NOT NULL DEFAULT 0,
+			judged_time timestamp NULL,
+			above_retire_since timestamp NULL,
+			update_time timestamp NOT NULL,
+
+			PRIMARY KEY (name)
+		)
+	`),
+
+	// Per-site load outcomes by day and by the exit's published place
+	// (connect/GEOMAP.md §11.4), written by the probe task from each run it
+	// submits. A run reports only the sites that failed, and a site is drawn
+	// in about one run in four, so the share of runs a site failed is not its
+	// failure share; the task, which holds every load of the run, records each
+	// load instead. healthy counts are loads on exits that passed nine in ten
+	// of the run's other scored sites, which is what the refresh judges sites
+	// by. The per-site, per-place concentration lives here rather than in
+	// metric labels, since sites times places is unbounded; the refresh sweeps
+	// rows past its retention.
+	newSqlMigration(`
+		CREATE TABLE provider_egress_site_tally (
+			tally_day date NOT NULL,
+			name varchar(128) NOT NULL,
+			country_code varchar(2) NOT NULL DEFAULT '',
+			region varchar(128) NOT NULL DEFAULT '',
+			load_count int NOT NULL DEFAULT 0,
+			failure_count int NOT NULL DEFAULT 0,
+			healthy_load_count int NOT NULL DEFAULT 0,
+			healthy_failure_count int NOT NULL DEFAULT 0,
+			canary_load_count int NOT NULL DEFAULT 0,
+			canary_pass_count int NOT NULL DEFAULT 0,
+			update_time timestamp NOT NULL,
+
+			PRIMARY KEY (tally_day, name, country_code, region)
+		)
+	`),
+
+	// Per-place run outcomes by day, beside the site tally: how many runs the
+	// place's exits submitted, how many of them were healthy, and how many
+	// warm-ups the operator's /ip echo never answered -- what the §2.19b
+	// country-unreachable finding needs besides the sites.
+	newSqlMigration(`
+		CREATE TABLE provider_egress_place_tally (
+			tally_day date NOT NULL,
+			country_code varchar(2) NOT NULL DEFAULT '',
+			region varchar(128) NOT NULL DEFAULT '',
+			run_count int NOT NULL DEFAULT 0,
+			healthy_run_count int NOT NULL DEFAULT 0,
+			echo_failure_count int NOT NULL DEFAULT 0,
+			update_time timestamp NOT NULL,
+
+			PRIMARY KEY (tally_day, country_code, region)
+		)
+	`),
+
+	// Pings partitioned by day (connect/GEOMAP.md §5.7, D26). At fleet scale
+	// network_ping takes hundreds of millions of rows a day and keeps about a
+	// day of them: a sweep deleting rows would leave the dead tuples, vacuum
+	// debt and index bloat that row retention left on client_reliability, at a
+	// far higher rate, where dropping a whole day's partition is a catalog
+	// change that hands its space back at once. So the table becomes
+	// range-partitioned by create_time into utc days, each partition named for
+	// its day (network_ping_p20260924 holds 2026-09-24), and the sweep drops
+	// whole days past the retention and never deletes a row.
+	//
+	// A partitioned table's unique key must carry its partition column, so the
+	// replay key gains create_time, and ping_id stops being a key: the natural
+	// key identifies a row, the id is still minted per ping, and nothing reads
+	// by it alone. With create_time in the key a copy stored at another instant
+	// no longer conflicts, so the ingest looks the target, pinger and nonce up
+	// across its replay window before it stores (AddReportedNetworkPings). The
+	// target and pinger read indexes carry over; the create_time index served
+	// only the row sweep and goes with it.
+	//
+	// The old table and its indexes are renamed network_ping_legacy first and
+	// the new table is created under the name, so every name on it is the
+	// plain one; the not null constraints are named because postgres 18
+	// catalogues them and would otherwise suffix the new table's while the old
+	// still holds the plain names. Partitions are made for yesterday, today and
+	// the next two days, which the sweep then keeps, and for every day the old
+	// table holds a row in, so the copy keeps every row; a day already past the
+	// retention goes whole at the next sweep. The following migration drops the
+	// old table.
+	newSqlMigration(`
+		ALTER TABLE network_ping RENAME TO network_ping_legacy;
+		ALTER INDEX network_ping_pkey RENAME TO network_ping_legacy_pkey;
+		ALTER INDEX network_ping_target_pinger_nonce RENAME TO network_ping_legacy_target_pinger_nonce;
+		ALTER INDEX network_ping_create_time RENAME TO network_ping_legacy_create_time;
+		ALTER INDEX network_ping_target_extender_id_create_time RENAME TO network_ping_legacy_target_extender_id_create_time;
+		ALTER INDEX network_ping_pinger_kind_pinger_id_create_time RENAME TO network_ping_legacy_pinger_kind_pinger_id_create_time;
+
+		CREATE TABLE network_ping (
+			ping_id uuid CONSTRAINT network_ping_ping_id_not_null NOT NULL,
+			pinger_kind smallint CONSTRAINT network_ping_pinger_kind_not_null NOT NULL,
+			pinger_id uuid CONSTRAINT network_ping_pinger_id_not_null NOT NULL,
+			target_extender_id uuid CONSTRAINT network_ping_target_extender_id_not_null NOT NULL,
+			probe_nonce bytea CONSTRAINT network_ping_probe_nonce_not_null NOT NULL,
+			rtt_ms int CONSTRAINT network_ping_rtt_ms_not_null NOT NULL,
+			probe_time timestamp CONSTRAINT network_ping_probe_time_not_null NOT NULL,
+			cosign smallint CONSTRAINT network_ping_cosign_not_null NOT NULL,
+			cosign_reason smallint CONSTRAINT network_ping_cosign_reason_not_null NOT NULL DEFAULT 0,
+			pinger_signature bytea CONSTRAINT network_ping_pinger_signature_not_null NOT NULL,
+			cosignature bytea NULL,
+			create_time timestamp CONSTRAINT network_ping_create_time_not_null NOT NULL DEFAULT now(),
+			hop_count smallint CONSTRAINT network_ping_hop_count_not_null NOT NULL DEFAULT 0
+		) PARTITION BY RANGE (create_time);
+
+		CREATE UNIQUE INDEX network_ping_target_pinger_nonce
+		ON network_ping (target_extender_id, pinger_kind, pinger_id, probe_nonce, create_time);
+		CREATE INDEX network_ping_target_extender_id_create_time
+		ON network_ping (target_extender_id, create_time);
+		CREATE INDEX network_ping_pinger_kind_pinger_id_create_time
+		ON network_ping (pinger_kind, pinger_id, create_time);
+
+		DO $network_ping_partitions$
+		DECLARE
+			partition_day timestamp;
+		BEGIN
+			FOR partition_day IN
+				SELECT calendar.day
+				FROM generate_series(
+					date_trunc('day', now() AT TIME ZONE 'utc') - interval '1 day',
+					date_trunc('day', now() AT TIME ZONE 'utc') + interval '2 days',
+					interval '1 day'
+				) AS calendar(day)
+				UNION
+				SELECT date_trunc('day', network_ping_legacy.create_time)
+				FROM network_ping_legacy
+			LOOP
+				EXECUTE format(
+					'CREATE TABLE %I PARTITION OF network_ping FOR VALUES FROM (%L) TO (%L)',
+					'network_ping_p' || to_char(partition_day, 'YYYYMMDD'),
+					to_char(partition_day, 'YYYY-MM-DD'),
+					to_char(partition_day + interval '1 day', 'YYYY-MM-DD')
+				);
+			END LOOP;
+		END
+		$network_ping_partitions$;
+
+		INSERT INTO network_ping (
+			ping_id,
+			pinger_kind,
+			pinger_id,
+			target_extender_id,
+			probe_nonce,
+			rtt_ms,
+			probe_time,
+			cosign,
+			cosign_reason,
+			pinger_signature,
+			cosignature,
+			create_time,
+			hop_count
+		)
+		SELECT
+			ping_id,
+			pinger_kind,
+			pinger_id,
+			target_extender_id,
+			probe_nonce,
+			rtt_ms,
+			probe_time,
+			cosign,
+			cosign_reason,
+			pinger_signature,
+			cosignature,
+			create_time,
+			hop_count
+		FROM network_ping_legacy
+	`),
+	// The table the day partitions replaced (the migration above), now that
+	// every row of it is in them.
+	newSqlMigration(`
+		DROP TABLE network_ping_legacy
+	`),
+
+	// The fleet's ping tally by hour (connect/GEOMAP.md §2.7, §5.7): what the
+	// dashboard's day of pings and the §2.19c signal read instead of the rows.
+	// At the target a day's partition of network_ping is 275 GiB, and counting
+	// it on every dashboard refresh read it whole; the ingest adds each stored
+	// batch here in the same transaction as its rows, so the counts are exact
+	// and cost a few thousand rows to read. A row is one hour, pinger kind,
+	// relay, verdict and reason, split over shards by the pinger id -- every
+	// report of the fleet adds to the same few rows of the hour, which one row
+	// each would serialize on its lock -- with the round trips the signal
+	// watches: zero, and beyond half the planet at the solver's 100 km per ms,
+	// 200 ms. It stays small, tens of thousands of rows a day, so the sweep
+	// deletes whole days of it behind the ping days it drops. The backfill
+	// counts what network_ping holds with the sixteen shards and 200 ms the
+	// ingest's defaults use.
+	newSqlMigration(`
+		CREATE TABLE network_ping_hour_tally (
+			hour timestamp NOT NULL,
+			shard smallint NOT NULL,
+			pinger_kind smallint NOT NULL,
+			relayed boolean NOT NULL,
+			cosign smallint NOT NULL,
+			cosign_reason smallint NOT NULL,
+			ping_count bigint NOT NULL,
+			zero_rtt_count bigint NOT NULL,
+			beyond_half_planet_count bigint NOT NULL,
+
+			PRIMARY KEY (hour, shard, pinger_kind, relayed, cosign, cosign_reason)
+		);
+
+		INSERT INTO network_ping_hour_tally (
+			hour,
+			shard,
+			pinger_kind,
+			relayed,
+			cosign,
+			cosign_reason,
+			ping_count,
+			zero_rtt_count,
+			beyond_half_planet_count
+		)
+		SELECT
+			date_trunc('hour', create_time),
+			get_byte(uuid_send(pinger_id), 15) % 16,
+			pinger_kind,
+			0 < hop_count,
+			cosign,
+			cosign_reason,
+			count(*),
+			count(*) FILTER (WHERE rtt_ms = 0),
+			count(*) FILTER (WHERE 200 < rtt_ms)
+		FROM network_ping
+		GROUP BY 1, 2, 3, 4, 5, 6
+	`),
+
+	// The distinct pingers of each day (connect/GEOMAP.md §2.7): one row per
+	// day, pinger kind and pinger, added at ingest in the ping's transaction
+	// and skipped when present, so a day's pingers are an index-only count
+	// where the dashboard counted them over a day of rows. A couple of million
+	// rows a day at the target, so it is partitioned by day like network_ping,
+	// on the same days, and dropped a day at a time with it.
+	newSqlMigration(`
+		CREATE TABLE network_ping_pinger_day (
+			day date NOT NULL,
+			pinger_kind smallint NOT NULL,
+			pinger_id uuid NOT NULL,
+
+			PRIMARY KEY (day, pinger_kind, pinger_id)
+		) PARTITION BY RANGE (day);
+
+		DO $network_ping_pinger_day_partitions$
+		DECLARE
+			partition_day timestamp;
+		BEGIN
+			FOR partition_day IN
+				SELECT calendar.day
+				FROM generate_series(
+					date_trunc('day', now() AT TIME ZONE 'utc') - interval '1 day',
+					date_trunc('day', now() AT TIME ZONE 'utc') + interval '2 days',
+					interval '1 day'
+				) AS calendar(day)
+				UNION
+				SELECT date_trunc('day', network_ping.create_time)
+				FROM network_ping
+			LOOP
+				EXECUTE format(
+					'CREATE TABLE %I PARTITION OF network_ping_pinger_day FOR VALUES FROM (%L) TO (%L)',
+					'network_ping_pinger_day_p' || to_char(partition_day, 'YYYYMMDD'),
+					to_char(partition_day, 'YYYY-MM-DD'),
+					to_char(partition_day + interval '1 day', 'YYYY-MM-DD')
+				);
+			END LOOP;
+		END
+		$network_ping_pinger_day_partitions$;
+
+		INSERT INTO network_ping_pinger_day (day, pinger_kind, pinger_id)
+		SELECT DISTINCT create_time::date, pinger_kind, pinger_id
+		FROM network_ping
+	`),
+
+	// The distinct targets of each day, the extenders that took a ping
+	// (connect/GEOMAP.md §2.7), kept like the pingers above: about a million
+	// rows a day at the target, partitioned by day, dropped with the pings.
+	newSqlMigration(`
+		CREATE TABLE network_ping_target_day (
+			day date NOT NULL,
+			target_extender_id uuid NOT NULL,
+
+			PRIMARY KEY (day, target_extender_id)
+		) PARTITION BY RANGE (day);
+
+		DO $network_ping_target_day_partitions$
+		DECLARE
+			partition_day timestamp;
+		BEGIN
+			FOR partition_day IN
+				SELECT calendar.day
+				FROM generate_series(
+					date_trunc('day', now() AT TIME ZONE 'utc') - interval '1 day',
+					date_trunc('day', now() AT TIME ZONE 'utc') + interval '2 days',
+					interval '1 day'
+				) AS calendar(day)
+				UNION
+				SELECT date_trunc('day', network_ping.create_time)
+				FROM network_ping
+			LOOP
+				EXECUTE format(
+					'CREATE TABLE %I PARTITION OF network_ping_target_day FOR VALUES FROM (%L) TO (%L)',
+					'network_ping_target_day_p' || to_char(partition_day, 'YYYYMMDD'),
+					to_char(partition_day, 'YYYY-MM-DD'),
+					to_char(partition_day + interval '1 day', 'YYYY-MM-DD')
+				);
+			END LOOP;
+		END
+		$network_ping_target_day_partitions$;
+
+		INSERT INTO network_ping_target_day (day, target_extender_id)
+		SELECT DISTINCT create_time::date, target_extender_id
+		FROM network_ping
+	`),
+
+	// The pings each target extender took per hour and pinger kind, and how
+	// many of them the pinger says were refused (connect/GEOMAP.md §2.7): what
+	// the per-extender counters read for each closed hour, where they scanned
+	// the hour's whole day partition of rows. Tens of millions of rows a day at
+	// the target, so partitioned by day and dropped with the ping days.
+	newSqlMigration(`
+		CREATE TABLE network_ping_target_hour_tally (
+			hour timestamp NOT NULL,
+			target_extender_id uuid NOT NULL,
+			pinger_kind smallint NOT NULL,
+			ping_count bigint NOT NULL,
+			rejection_count bigint NOT NULL,
+
+			PRIMARY KEY (hour, target_extender_id, pinger_kind)
+		) PARTITION BY RANGE (hour);
+
+		DO $network_ping_target_hour_tally_partitions$
+		DECLARE
+			partition_day timestamp;
+		BEGIN
+			FOR partition_day IN
+				SELECT calendar.day
+				FROM generate_series(
+					date_trunc('day', now() AT TIME ZONE 'utc') - interval '1 day',
+					date_trunc('day', now() AT TIME ZONE 'utc') + interval '2 days',
+					interval '1 day'
+				) AS calendar(day)
+				UNION
+				SELECT date_trunc('day', network_ping.create_time)
+				FROM network_ping
+			LOOP
+				EXECUTE format(
+					'CREATE TABLE %I PARTITION OF network_ping_target_hour_tally FOR VALUES FROM (%L) TO (%L)',
+					'network_ping_target_hour_tally_p' || to_char(partition_day, 'YYYYMMDD'),
+					to_char(partition_day, 'YYYY-MM-DD'),
+					to_char(partition_day + interval '1 day', 'YYYY-MM-DD')
+				);
+			END LOOP;
+		END
+		$network_ping_target_hour_tally_partitions$;
+
+		INSERT INTO network_ping_target_hour_tally (
+			hour,
+			target_extender_id,
+			pinger_kind,
+			ping_count,
+			rejection_count
+		)
+		SELECT
+			date_trunc('hour', create_time),
+			target_extender_id,
+			pinger_kind,
+			count(*),
+			count(*) FILTER (WHERE cosign = 2)
+		FROM network_ping
+		GROUP BY 1, 2, 3
+	`),
 }

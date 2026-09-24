@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -24,7 +25,6 @@ var (
 		"client.yml",
 		"coinbase.yml",
 		"helius.yml",
-		"ipinfo.yml",
 		"jwt.yml",
 		"jwt-local-evaluator.pem",
 		"password.yml",
@@ -51,8 +51,9 @@ var (
 	}
 	suiteProxyTestAllConfigResourceNames = []string{
 		"apple_roots.pem",
-		"city-list.yml",
-		"iso-country-list.yml",
+		// the place list the location seeder reads, which ships in the dated
+		// directory of the GeoLite2 database it is exported from
+		"mmdb/places.yml",
 		"pro.yml",
 	}
 )
@@ -198,7 +199,16 @@ func writeTestEnvironmentSuiteProxyResources(
 		}
 	}
 	for _, resourceName := range suiteProxyTestAllConfigResourceNames {
-		if err := os.WriteFile(filepath.Join(configAllDir, resourceName), []byte("{}\n"), 0o600); err != nil {
+		resourcePath := filepath.Join(configAllDir, filepath.FromSlash(resourceName))
+		if directory, name := path.Split(resourceName); directory != "" {
+			// a nested resource lives in a version directory, as the place list
+			// does beside its database (all/mmdb/<date>/places.yml)
+			resourcePath = filepath.Join(configAllDir, filepath.FromSlash(directory), "2026.9.23", name)
+		}
+		if err := os.MkdirAll(filepath.Dir(resourcePath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(resourcePath, []byte("{}\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -992,6 +1002,88 @@ func TestTestEnvironmentScriptRejectsSuiteProxyConfigManifestGap(t *testing.T) {
 	}
 	if _, err := os.Stat(probeRecordPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing config resource reached probe: %v", err)
+	}
+}
+
+// A nested config resource (mmdb/places.yml) resolves as the Go resolver
+// resolves it: directly under a root, or through a version directory at any
+// level (the default layout above, all/mmdb/<date>/places.yml), but never
+// through a version-directory symlink; a missing one stops preflight before
+// the first service probe.
+func TestTestEnvironmentScriptResolvesSuiteProxyNestedConfigResource(t *testing.T) {
+	for _, layout := range []string{"flat", "missing", "symlinked version"} {
+		stateDir := writeTestEnvironmentSuiteProxyState(t, suiteProxyTestAddress, "15432", "16379")
+		vaultDir, configDir := writeTestEnvironmentSuiteProxyResources(
+			t,
+			"{{ env:BRINGYOUR_POSTGRES_HOSTNAME }}:15432",
+			"{{ env:BRINGYOUR_REDIS_HOSTNAME }}:16379",
+		)
+		versionDir := filepath.Join(configDir, "all", "mmdb", "2026.9.23")
+		switch layout {
+		case "flat":
+			// the portable fixture writes config/mmdb/places.yml
+			if err := os.MkdirAll(filepath.Join(configDir, "mmdb"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(filepath.Join(versionDir, "places.yml"), filepath.Join(configDir, "mmdb", "places.yml")); err != nil {
+				t.Fatal(err)
+			}
+		case "missing":
+			if err := os.Remove(filepath.Join(versionDir, "places.yml")); err != nil {
+				t.Fatal(err)
+			}
+		case "symlinked version":
+			retainedDir := filepath.Join(t.TempDir(), "retained")
+			if err := os.Rename(versionDir, retainedDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(retainedDir, versionDir); err != nil {
+				t.Fatal(err)
+			}
+		}
+		binDir := writeTestEnvironmentSuiteProxyTools(t)
+		probeRecordPath := filepath.Join(t.TempDir(), "probe-record")
+		probePath := filepath.Join(t.TempDir(), "probe")
+		if err := os.WriteFile(
+			probePath,
+			[]byte("#!/bin/sh\nprintf '%s %s %s\\n' \"$1\" \"$2\" \"$3\" >> \"$WARP_TEST_ENV_PROBE_RECORD\"\n"),
+			0o700,
+		); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("bash", "./test-env.sh")
+		cmd.Env = testCommandEnvironment(
+			map[string]string{
+				"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"SUITE_TEST_HOST_IP":                  suiteProxyTestAddress,
+				"SUITE_TEST_OWNER_TOKEN":              suiteProxyTestToken,
+				"WARP_CONFIG_HOME":                    configDir,
+				"WARP_TEST_ENV_PROBE_RECORD":          probeRecordPath,
+				"WARP_TEST_ENV_SUITE_PROXY_STATE_DIR": stateDir,
+				"WARP_TEST_ENV_TCP_PROBE":             probePath,
+				"WARP_VAULT_HOME":                     vaultDir,
+			},
+			"BRINGYOUR_POSTGRES_HOSTNAME",
+			"BRINGYOUR_REDIS_HOSTNAME",
+			"WARP_ENV",
+			"WARP_TEST_ENV_ALLOW_UNMANAGED_PORTABLE_SERVICES",
+			"WARP_TEST_ENV_USE_PORTABLE_RESOURCES",
+		)
+		output, err := cmd.CombinedOutput()
+		_, probeErr := os.Stat(probeRecordPath)
+		if layout == "flat" {
+			if err != nil || probeErr != nil {
+				t.Fatalf("%s place list = %v, probes %v, %q", layout, err, probeErr, output)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(string(output), "mmdb/places.yml") ||
+			!strings.Contains(string(output), "required resource is missing") {
+			t.Fatalf("%s place list = %v, %q", layout, err, output)
+		}
+		if !errors.Is(probeErr, os.ErrNotExist) {
+			t.Fatalf("%s place list reached probe: %v", layout, probeErr)
+		}
 	}
 }
 

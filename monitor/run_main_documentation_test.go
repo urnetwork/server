@@ -220,8 +220,11 @@ func TestMonitorDocumentationRequiresEvidenceBackedErrorQualifiers(t *testing.T)
 	}
 }
 
-// Keeps actual probe traffic distinct from report acceptance and conditional
-// failure diagnostics, without promoting either aggregate to a per-pass join.
+// Keeps actual probe traffic distinct from report acceptance, and the exit,
+// attempt and fleet share controls distinct from provider verdicts and
+// fleet-wide rates, without promoting any aggregate to a per-pass join. The
+// series and request stages only the retired vendor geolocation produced must
+// stay undocumented.
 func TestMonitorDocumentationEgressEvidenceBoundaries(t *testing.T) {
 	t.Parallel()
 	data, err := os.ReadFile("SIGNALS.md")
@@ -242,18 +245,39 @@ func TestMonitorDocumentationEgressEvidenceBoundaries(t *testing.T) {
 		"status/body contract passed before the health report API call",
 		"not a byte counter or a report acknowledgment",
 		"fresh same-process positive delta proves carried probe traffic",
-		"not a join to an individual failed geolocation source",
+		"not a join to an individual failed attempt or exit lookup",
 		"later success cannot exclude an earlier formation failure",
-		"`urnetwork_egress_probe_geolocation_diagnostics_total` contains source outcomes only from diagnostic-bearing `no_consensus` probes",
-		"including any source that succeeded within that failed probe",
-		"not an all-source request denominator or a fleet-wide DNS/TLS failure rate",
+		"A full batch the run guard holds back records no loads at all",
+		"`urnetwork_egress_probe_locations_total` counts the exit addresses the prober submits by the precision of the GeoLite2 placement the ingest itself applies",
+		"`country=\"unknown\"` an address GeoLite2 cannot place, which the ingest refuses and the attempt reports as `submit_failed`",
+		"`urnetwork_egress_probe_attempts_total` counts one outcome per full run",
+		"`health_not_run` (the run never started), `run_not_measured` (its tunnel died and could not be re-created), `no_exit_ip` (the `/ip` echo never answered) and `run_batch_guard` (its batch was held back by the run guard) are the probe's own misses, not verdicts on the provider's traffic",
+		"they are measurement events, not acknowledgments or accepted locations",
+		"Neither is an all-provider request denominator or a fleet-wide DNS/TLS failure rate",
+		"`urnetwork_egress_probe_fleet_dark_share` (dark providers over those with a current measured blackhole check)",
+		"`urnetwork_egress_probe_fleet_failure_share{class}` (the failed share of the scored loads measured within the prober-fault window) are process-local snapshots re-counted from the durable tables at most once a minute",
+		"never sum them across Taskworkers",
+		"Each reads 0 when it has nothing to divide, so zero is not health without the counts behind it",
 		"Missing or newly created auxiliary series are unknown, not healthy zero",
 		"not added to the fixed admission query or its alert thresholds",
-		"fallback includes manual TLS inside the custom `DialTLSContext`",
-		"timeout at this stage is not a DNS-specific verdict",
+		"The prober no longer records the stage an attempt failed at",
+		"a timeout before the connection is established is one failed attempt of the load, retried like any other, and it counts against the load like any other failure once every attempt has failed, so it is not a DNS-specific verdict",
+		"Only a TLS authentication failure, which ends the load at once, and a tunnel lost under the load's last attempt, which leaves the load not measured, are told apart",
+		"at the run level a tunnel that never opens is `tunnel_failed` and a warm-up the `/ip` echo never answers is `no_exit_ip`",
 	} {
 		if !strings.Contains(documentation, required) {
 			t.Errorf("SIGNALS.md lost the egress evidence boundary %q", required)
+		}
+	}
+	for _, retired := range []string{
+		"urnetwork_egress_probe_geolocation_diagnostics_total",
+		"urnetwork_egress_probe_geolocation_sources_total",
+		"urnetwork_egress_probe_location_flags_total",
+		"connect_formation",
+		"pre-GotConn",
+	} {
+		if strings.Contains(documentation, retired) {
+			t.Errorf("SIGNALS.md documents %s, which only the retired vendor geolocation produced (connect/GEOMAP.md §11.3)", retired)
 		}
 	}
 }

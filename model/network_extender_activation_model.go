@@ -30,6 +30,9 @@ type NetworkExtenderActivationRecord struct {
 	CityLocationId    *server.Id
 	RegionLocationId  *server.Id
 	CountryLocationId *server.Id
+	// the lookup's accuracy radius in km (connect/GEOMAP.md §5.1); nil when
+	// it gave none, and on rows written before the column
+	AccuracyKm *float32
 }
 
 // Writes the history row of one activation inside the activation transaction.
@@ -53,9 +56,10 @@ func insertNetworkExtenderActivationInTx(
 			location_id,
 			city_location_id,
 			region_location_id,
-			country_location_id
+			country_location_id,
+			accuracy_km
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		`,
 		server.NewId(),
 		extenderId,
@@ -67,6 +71,7 @@ func insertNetworkExtenderActivationInTx(
 		activation.CityLocationId,
 		activation.RegionLocationId,
 		activation.CountryLocationId,
+		activation.AccuracyKm,
 	))
 }
 
@@ -91,7 +96,8 @@ func GetNetworkExtenderActivations(
 				location_id,
 				city_location_id,
 				region_location_id,
-				country_location_id
+				country_location_id,
+				accuracy_km
 			FROM network_extender_activation
 			WHERE extender_id = $1 AND $2 <= activate_time
 			ORDER BY activate_time ASC
@@ -112,6 +118,7 @@ func GetNetworkExtenderActivations(
 					&activation.CityLocationId,
 					&activation.RegionLocationId,
 					&activation.CountryLocationId,
+					&activation.AccuracyKm,
 				))
 				activations = append(activations, activation)
 			}

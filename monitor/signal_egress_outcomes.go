@@ -82,6 +82,10 @@ WITH clock AS MATERIALIZED (
                    WHEN 'locate_failed' THEN 'locate_failed'
                    WHEN 'not_confident' THEN 'not_confident'
                    WHEN 'submit_failed' THEN 'submit_failed'
+                   WHEN 'health_not_run' THEN 'health_not_run'
+                   WHEN 'run_not_measured' THEN 'run_not_measured'
+                   WHEN 'no_exit_ip' THEN 'no_exit_ip'
+                   WHEN 'run_batch_guard' THEN 'run_batch_guard'
                    ELSE 'unknown_failure'
                END
                WHEN location_current
@@ -111,6 +115,10 @@ WITH clock AS MATERIALIZED (
            count(*) FILTER (WHERE outcome_class = 'locate_failed')::bigint AS locate_failed,
            count(*) FILTER (WHERE outcome_class = 'not_confident')::bigint AS not_confident,
            count(*) FILTER (WHERE outcome_class = 'submit_failed')::bigint AS submit_failed,
+           count(*) FILTER (WHERE outcome_class = 'health_not_run')::bigint AS health_not_run,
+           count(*) FILTER (WHERE outcome_class = 'run_not_measured')::bigint AS run_not_measured,
+           count(*) FILTER (WHERE outcome_class = 'no_exit_ip')::bigint AS no_exit_ip,
+           count(*) FILTER (WHERE outcome_class = 'run_batch_guard')::bigint AS run_batch_guard,
            count(*) FILTER (WHERE outcome_class = 'unknown_failure')::bigint AS unknown_failure,
            count(*) FILTER (WHERE outcome_class = 'inconsistent')::bigint AS inconsistent,
            count(*) FILTER (WHERE outcome_class = 'unobserved')::bigint AS unobserved,
@@ -132,6 +140,10 @@ SELECT eligible::text,
        locate_failed::text,
        not_confident::text,
        submit_failed::text,
+       health_not_run::text,
+       run_not_measured::text,
+       no_exit_ip::text,
+       run_batch_guard::text,
        unknown_failure::text,
        inconsistent::text,
        unobserved::text,
@@ -152,6 +164,10 @@ type egressOutcomeSnapshot struct {
 	locateFailed            int
 	notConfident            int
 	submitFailed            int
+	healthNotRun            int
+	runNotMeasured          int
+	noExitIp                int
+	runBatchGuard           int
 	unknownFailure          int
 	inconsistent            int
 	unobserved              int
@@ -168,6 +184,10 @@ func (s egressOutcomeSnapshot) tally() map[string]int {
 		"locate_failed":                     s.locateFailed,
 		"not_confident":                     s.notConfident,
 		"submit_failed":                     s.submitFailed,
+		"health_not_run":                    s.healthNotRun,
+		"run_not_measured":                  s.runNotMeasured,
+		"no_exit_ip":                        s.noExitIp,
+		model.ProbeRunBatchGuardClass:       s.runBatchGuard,
 		model.ProbeFleetUnknownFailureClass: s.unknownFailure,
 		model.ProbeFleetInconsistentClass:   s.inconsistent,
 		model.ProbeFleetUnobservedClass:     s.unobserved,
@@ -175,19 +195,21 @@ func (s egressOutcomeSnapshot) tally() map[string]int {
 }
 
 func parseEgressOutcomeSnapshot(rows []pgRow) (egressOutcomeSnapshot, error) {
-	if len(rows) != 1 || len(rows[0]) != 15 {
+	// seventeen counts, then the two ages, which are -1 when absent
+	const countColumns = 17
+	if len(rows) != 1 || len(rows[0]) != countColumns+2 {
 		return egressOutcomeSnapshot{}, fmt.Errorf("provider egress outcomes returned an invalid aggregate shape")
 	}
-	values := make([]int64, 15)
+	values := make([]int64, countColumns+2)
 	for index := range values {
 		value, err := parseStrictInt64(rows[0].str(index))
-		if err != nil || (index < 13 && value < 0) || (13 <= index && value < -1) {
+		if err != nil || (index < countColumns && value < 0) || (countColumns <= index && value < -1) {
 			return egressOutcomeSnapshot{}, fmt.Errorf("provider egress outcomes returned an invalid numeric field %d", index)
 		}
 		values[index] = value
 	}
 	maxInt := int64(^uint(0) >> 1)
-	for index := 0; index < 13; index++ {
+	for index := 0; index < countColumns; index++ {
 		if maxInt < values[index] {
 			return egressOutcomeSnapshot{}, fmt.Errorf("provider egress outcomes field %d exceeds the local integer range", index)
 		}
@@ -196,11 +218,14 @@ func parseEgressOutcomeSnapshot(rows []pgRow) (egressOutcomeSnapshot, error) {
 		eligible: int(values[0]), observed: int(values[1]), successes: int(values[2]), failures: int(values[3]),
 		tunnelFailed: int(values[4]), contractFailed: int(values[5]), noConsensus: int(values[6]),
 		locateFailed: int(values[7]), notConfident: int(values[8]), submitFailed: int(values[9]),
-		unknownFailure: int(values[10]), inconsistent: int(values[11]), unobserved: int(values[12]),
-		newestOutcomeAgeSeconds: values[13], oldestOutcomeAgeSeconds: values[14],
+		healthNotRun: int(values[10]), runNotMeasured: int(values[11]), noExitIp: int(values[12]),
+		runBatchGuard:  int(values[13]),
+		unknownFailure: int(values[14]), inconsistent: int(values[15]), unobserved: int(values[16]),
+		newestOutcomeAgeSeconds: values[17], oldestOutcomeAgeSeconds: values[18],
 	}
 	knownFailures := snapshot.tunnelFailed + snapshot.contractFailed + snapshot.noConsensus +
-		snapshot.locateFailed + snapshot.notConfident + snapshot.submitFailed
+		snapshot.locateFailed + snapshot.notConfident + snapshot.submitFailed +
+		snapshot.healthNotRun + snapshot.runNotMeasured + snapshot.noExitIp + snapshot.runBatchGuard
 	if snapshot.failures != knownFailures+snapshot.unknownFailure ||
 		snapshot.observed != snapshot.successes+snapshot.failures ||
 		snapshot.eligible != snapshot.observed+snapshot.inconsistent+snapshot.unobserved {
@@ -256,10 +281,11 @@ func (egressOutcomesProbe) check(ctx context.Context, env *probeEnv) ([]finding,
 
 func egressOutcomeObserved(snapshot egressOutcomeSnapshot) string {
 	return fmt.Sprintf(
-		"eligible=%d observed=%d success=%d failure=%d tunnel_failed=%d contract_failed=%d no_consensus=%d locate_failed=%d not_confident=%d submit_failed=%d unknown_failure=%d inconsistent=%d unobserved=%d newest_outcome_age_seconds=%d oldest_outcome_age_seconds=%d",
+		"eligible=%d observed=%d success=%d failure=%d tunnel_failed=%d contract_failed=%d no_consensus=%d locate_failed=%d not_confident=%d submit_failed=%d health_not_run=%d run_not_measured=%d no_exit_ip=%d run_batch_guard=%d unknown_failure=%d inconsistent=%d unobserved=%d newest_outcome_age_seconds=%d oldest_outcome_age_seconds=%d",
 		snapshot.eligible, snapshot.observed, snapshot.successes, snapshot.failures,
 		snapshot.tunnelFailed, snapshot.contractFailed, snapshot.noConsensus,
 		snapshot.locateFailed, snapshot.notConfident, snapshot.submitFailed,
+		snapshot.healthNotRun, snapshot.runNotMeasured, snapshot.noExitIp, snapshot.runBatchGuard,
 		snapshot.unknownFailure, snapshot.inconsistent, snapshot.unobserved,
 		snapshot.newestOutcomeAgeSeconds, snapshot.oldestOutcomeAgeSeconds,
 	)
@@ -288,7 +314,15 @@ func egressCommonModeAction(class string) string {
 	case "no_consensus", "tunnel_failed", "contract_failed":
 		return "Inspect the persisted prober_identity singleton for complete client credential and mint state, the ProberBootstrap task, and the prober network's transfer balance first. Then verify bounded platform/API reachability and egress confinement from the executing Taskworkers. Do not inspect individual providers first, reveal the stored token, or introduce a legacy environment credential."
 	case "locate_failed", "not_confident":
-		return "Inspect the bounded geolocation-source outcome/stage metrics and shared resolver/HTTP path from the prober, then verify the configured source quorum. Do not weaken consensus or investigate individual provider locations until the shared source boundary is healthy."
+		// retired with the vendor consensus (connect/GEOMAP.md §11.3); only
+		// attempts written before that release still carry them
+		return "These classes come only from probers that predate the operator's own /ip echo; confirm every Taskworker runs the current prober, whose runs report no_exit_ip instead. Do not investigate individual provider locations."
+	case "no_exit_ip":
+		return "Every run's warm-up fetches the operator's /ip echo on the public api address through the provider's tunnel (public_api_url); a common failure is that echo -- its reachability from the open internet, its certificate, or the api behind it -- not the providers. Check it from outside the operator network before anything else."
+	case "health_not_run", "run_not_measured":
+		return "A run that did not start or measured nothing is the prober's, not the provider's: inspect the Taskworker pass errors, the transport and tunnel re-creation budgets, platform reachability, and whether the shard's max time still covers a run at the load rules (§2.19)."
+	case model.ProbeRunBatchGuardClass:
+		return "The run batch guard held whole full batches back because their scored loads failed together: inspect the prober's request profile (egress-sites.yml), the destination pool, and the prober host's capacity, as the §2.19b prober-fault finding describes."
 	case "submit_failed":
 		return "Inspect the bounded provider-egress submission response class, operator authentication readiness, API availability, and deployed producer/API schema. Preserve the failed attempts; do not replay raw payloads or print operator credentials."
 	default:
@@ -309,7 +343,7 @@ func egressMixedFailureFinding(target string, snapshot egressOutcomeSnapshot) fi
 		observed:  egressOutcomeObserved(snapshot),
 		evidence:  "Only fixed aggregate counts, bounded class labels, and aggregate ages leave PostgreSQL. Raw classes and provider identity remain private.",
 		context:   "This is a broad software/operational degradation without a proved common cause. It is not resolved by adding Proxy hardware.",
-		action:    "Correlate §2.19 shard progress with bounded task pass errors, platform/API reachability, geolocation-source health, submission status, and provider eligibility. Separate the failure classes before changing anything; do not relax provider gates or inspect customer/provider identifiers from this aggregate.",
+		action:    "Correlate §2.19 shard progress with bounded task pass errors, platform/API reachability, exit placements (urnetwork_egress_probe_locations_total) and the prober-side attempt classes in the observed counts (no_exit_ip, run_not_measured, health_not_run, run_batch_guard), the §2.19b site pool findings, submission status, and provider eligibility. Separate the failure classes before changing anything; do not relax provider gates or inspect customer/provider identifiers from this aggregate.",
 		verify:    egressOutcomeVerify(),
 		playbook:  "SIGNALS.md §2.23, §2.19, and §8.9",
 	}

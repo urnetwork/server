@@ -665,8 +665,19 @@ func TestProvisionProvidersCreatesCurrentSelectionPrerequisites(t *testing.T) {
 		if location.LocationId != locationId || location.CountryCode != "zz" {
 			t.Fatalf("simulated location = %s/%q, want %s/zz", location.LocationId, location.CountryCode, locationId)
 		}
-		if !location.Hosting || !location.Mobile || location.Proxy {
-			t.Fatalf("simulated location flags = hosting:%t mobile:%t proxy:%t", location.Hosting, location.Mobile, location.Proxy)
+		// a probed location carries no hosting, proxy or mobile verdict any
+		// more (connect/GEOMAP.md §11.3), so the fixture writes none, even for
+		// a hosting user on a mobile component
+		var hosting, proxy, mobile bool
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(
+				ctx,
+				`SELECT hosting, proxy, mobile FROM provider_egress_location WHERE client_id = $1`,
+				firstClientId,
+			).Scan(&hosting, &proxy, &mobile))
+		})
+		if hosting || proxy || mobile {
+			t.Fatalf("simulated location flags = hosting:%t proxy:%t mobile:%t, want none", hosting, proxy, mobile)
 		}
 		if location.Verdict != "verified" || location.Assurance != model.ProviderEgressAssuranceDirect {
 			t.Fatalf("simulated location judgement = %q/%q", location.Verdict, location.Assurance)

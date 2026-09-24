@@ -42,10 +42,14 @@ import (
 // which is the only bootstrap an app has before it has any peer (D6).
 
 const (
-	// How long a signed record stays valid (B2). Long enough that a missed
-	// drip rotation does not expire an extender, short enough that an operator
-	// that stops publishing drains out within a fortnight.
-	ExtenderRecordExpireTimeout = 14 * 24 * time.Hour
+	// How long a signed record stays valid (B2; connect/GEOMAP.md §2.8, D19):
+	// a day, the same day a ping and a derived location live. The publish
+	// drip re-releases every active extender within
+	// ExtenderPublishRotationTimeout, half of this, so a record reaches every
+	// client with half its life left and an extender that stays up is never
+	// seen expired by a connected client; an operator that stops publishing
+	// drains out of every directory within a day.
+	ExtenderRecordExpireTimeout = 24 * time.Hour
 
 	// The whole probe budget of one activation (C2). Every carrier and the
 	// forward share it, so a caller cannot hold a request open by being slow
@@ -165,6 +169,11 @@ func extenderCarrierConnectMode(carrier string) (connect.ExtenderConnectMode, bo
 // ascending, because the record names one extender's ports and not one
 // address's, and a client dials the lowest first. DnsPort stays the extender's
 // configured port, which is what a reader that predates the list dials.
+//
+// The country, and the continent with it, is the extender's derived location's
+// while it has one, else the one it activated from (connect/GEOMAP.md §6,
+// NetworkExtender.RecordCountryCode): the same precedence a provider's
+// connection location follows.
 func SignExtenderRecord(
 	config *ExtenderConfig,
 	rootPrivateKey ed25519.PrivateKey,
@@ -187,18 +196,22 @@ func SignExtenderRecord(
 		}
 	}
 	slices.Sort(dnsPorts)
+	countryCode := extender.RecordCountryCode()
 	record, err := connect.SignExtenderRecord(rootPrivateKey, &protocol.ExtenderRecordBody{
-		PublicKey:    extender.PublicKey,
-		Addresses:    recordAddresses,
-		TcpPort:      uint32(extender.TcpPort),
-		UdpPort:      uint32(extender.UdpPort),
-		DnsPort:      uint32(extender.DnsPort),
-		DnsPorts:     dnsPorts,
-		DnsTld:       extender.DnsTld,
-		CountryCode:  extender.CountryCode,
-		IssueTimeMs:  uint64(issueTime.UnixMilli()),
-		ExpireTimeMs: uint64(issueTime.Add(ExtenderRecordExpireTimeout).UnixMilli()),
-		NetworkHost:  config.NetworkHost,
+		PublicKey:   extender.PublicKey,
+		Addresses:   recordAddresses,
+		TcpPort:     uint32(extender.TcpPort),
+		UdpPort:     uint32(extender.UdpPort),
+		DnsPort:     uint32(extender.DnsPort),
+		DnsPorts:    dnsPorts,
+		DnsTld:      extender.DnsTld,
+		CountryCode: countryCode,
+		// the same mapping and the same country the geo dns sets use, so
+		// "close" means one thing on both paths (connect/DESIGNNOTES4.md §2)
+		ContinentCode: model.ContinentCodeForCountry(countryCode),
+		IssueTimeMs:   uint64(issueTime.UnixMilli()),
+		ExpireTimeMs:  uint64(issueTime.Add(ExtenderRecordExpireTimeout).UnixMilli()),
+		NetworkHost:   config.NetworkHost,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -489,7 +502,10 @@ func ExtenderActivate(
 	// resolve unset and store the rest.
 	countryCode := ""
 	var activationLocation *model.Location
-	if location, _, err := GetLocationForIp(clientSession.Ctx, clientIpStr); err == nil {
+	// the genesis accuracy radius of the lookup (connect/GEOMAP.md §5.1),
+	// stored with the location it qualifies and never without one
+	var activationAccuracyKm *float32
+	if location, scores, err := GetLocationForIp(clientSession.Ctx, clientIpStr); err == nil {
 		countryCode = location.CountryCode
 		// CreateLocation raises on a country it cannot name, and it is the
 		// only thing here that writes: contain it so a location the table
@@ -498,6 +514,7 @@ func ExtenderActivate(
 			model.CreateLocation(clientSession.Ctx, location)
 		}); r == nil {
 			activationLocation = location
+			activationAccuracyKm = scores.AccuracyKm
 		} else if glog.V(1) {
 			glog.Infof("[extender]no location row for the activating address: %s\n", r)
 		}
@@ -532,6 +549,7 @@ func ExtenderActivate(
 			DnsPorts:    activeDnsPorts,
 
 			ClientAddressHash: clientAddressHash,
+			AccuracyKm:        activationAccuracyKm,
 		}).WithLocation(activationLocation),
 		func(
 			extender *model.NetworkExtender,

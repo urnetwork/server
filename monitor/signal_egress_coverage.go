@@ -45,6 +45,7 @@ type egressCoverageBatchArgs struct {
 	Concurrency              int   `json:"concurrency"`
 	ProbeTimeoutSeconds      int   `json:"probe_timeout_seconds"`
 	AllDestinations          bool  `json:"all_destinations,omitempty"`
+	IpEchoTimeoutSeconds     int   `json:"ip_echo_timeout_seconds,omitempty"`
 	Bandwidth                bool  `json:"bandwidth,omitempty"`
 	BandwidthTimeoutSeconds  int   `json:"bandwidth_timeout_seconds,omitempty"`
 	TransportBudgetByteCount int64 `json:"transport_budget_byte_count,omitempty"`
@@ -62,6 +63,74 @@ type egressCoverageTaskArgs struct {
 	PlatformURL      string                  `json:"platform_url"`
 	PublicAPIURL     string                  `json:"public_api_url,omitempty"`
 	BandwidthCDNURL  string                  `json:"bandwidth_cdn_url,omitempty"`
+	// the load and dark rules of connect/GEOMAP.md §11.3, snapshotted with the
+	// rest of the task's arguments
+	LoadAttempts                 int `json:"load_attempts"`
+	LoadRetryMeanIntervalSeconds int `json:"load_retry_mean_interval_seconds"`
+	TunnelRecreateAttempts       int `json:"tunnel_recreate_attempts"`
+	model.ProviderEgressRules
+}
+
+// The load and dark rules as one comparable value: the backoff schedule is
+// carried as its canonical text, since a slice would make the configuration
+// uncomparable.
+type egressCoverageRules struct {
+	loadAttempts                 int
+	loadRetryMeanIntervalSeconds int
+	tunnelRecreateAttempts       int
+	darkConsecutiveFailures      int
+	darkMinimumSpanSeconds       int
+	darkBackoffSeconds           string
+	darkBatchGuard               float64
+	darkBatchGuardMinChecks      int
+	runBatchGuard                float64
+	runBatchGuardMinRuns         int
+	cityConfidentRadiusKm        int
+}
+
+// The comparable form of a task's load and dark rules.
+func newEgressCoverageRules(loadAttempts int, loadRetryMeanIntervalSeconds int, tunnelRecreateAttempts int, rules model.ProviderEgressRules) egressCoverageRules {
+	backoffs := make([]string, 0, len(rules.DarkBackoffSeconds))
+	for _, seconds := range rules.DarkBackoffSeconds {
+		backoffs = append(backoffs, strconv.Itoa(seconds))
+	}
+	return egressCoverageRules{
+		loadAttempts:                 loadAttempts,
+		loadRetryMeanIntervalSeconds: loadRetryMeanIntervalSeconds,
+		tunnelRecreateAttempts:       tunnelRecreateAttempts,
+		darkConsecutiveFailures:      rules.DarkConsecutiveFailures,
+		darkMinimumSpanSeconds:       rules.DarkMinimumSpanSeconds,
+		darkBackoffSeconds:           strings.Join(backoffs, ","),
+		darkBatchGuard:               rules.DarkBatchGuard,
+		darkBatchGuardMinChecks:      rules.DarkBatchGuardMinChecks,
+		runBatchGuard:                rules.RunBatchGuard,
+		runBatchGuardMinRuns:         rules.RunBatchGuardMinRuns,
+		cityConfidentRadiusKm:        rules.CityConfidentRadiusKm,
+	}
+}
+
+// The rules back in the model's shape, for validation.
+func (self egressCoverageRules) modelRules() model.ProviderEgressRules {
+	backoffs := []int{}
+	for _, part := range strings.Split(self.darkBackoffSeconds, ",") {
+		if seconds, err := strconv.Atoi(part); err == nil {
+			backoffs = append(backoffs, seconds)
+		} else {
+			// an unparseable step is kept as an invalid one, so validation
+			// refuses it rather than dropping it
+			backoffs = append(backoffs, 0)
+		}
+	}
+	return model.ProviderEgressRules{
+		DarkConsecutiveFailures: self.darkConsecutiveFailures,
+		DarkMinimumSpanSeconds:  self.darkMinimumSpanSeconds,
+		DarkBackoffSeconds:      backoffs,
+		DarkBatchGuard:          self.darkBatchGuard,
+		DarkBatchGuardMinChecks: self.darkBatchGuardMinChecks,
+		RunBatchGuard:           self.runBatchGuard,
+		RunBatchGuardMinRuns:    self.runBatchGuardMinRuns,
+		CityConfidentRadiusKm:   self.cityConfidentRadiusKm,
+	}
 }
 
 type egressCoverageGeometry struct {
@@ -87,6 +156,7 @@ type egressCoverageConfig struct {
 	platformURL      string
 	publicAPIURL     string
 	bandwidthCDNURL  string
+	rules            egressCoverageRules
 }
 
 type egressCoverageDesiredConfig struct {
@@ -105,6 +175,7 @@ type egressCoverageDesiredBatchYAML struct {
 	Concurrency              int            `yaml:"concurrency"`
 	ProbeTimeoutSeconds      int            `yaml:"probe_timeout_seconds"`
 	AllDestinations          bool           `yaml:"all_destinations"`
+	IpEchoTimeoutSeconds     *int           `yaml:"ip_echo_timeout_seconds"`
 	Bandwidth                *bool          `yaml:"bandwidth"`
 	BandwidthTimeoutSeconds  *int           `yaml:"bandwidth_timeout_seconds"`
 	TransportBudgetByteCount int64          `yaml:"transport_budget_byte_count"`
@@ -125,6 +196,9 @@ func (batch egressCoverageDesiredBatchYAML) args() egressCoverageBatchArgs {
 	if batch.BandwidthTimeoutSeconds != nil {
 		args.BandwidthTimeoutSeconds = *batch.BandwidthTimeoutSeconds
 	}
+	if batch.IpEchoTimeoutSeconds != nil {
+		args.IpEchoTimeoutSeconds = *batch.IpEchoTimeoutSeconds
+	}
 	return args
 }
 
@@ -139,7 +213,20 @@ type egressCoverageDesiredYAML struct {
 	PlatformURL      string                         `yaml:"platform_url"`
 	PublicAPIURL     *string                        `yaml:"public_api_url"`
 	BandwidthCDNURL  *string                        `yaml:"bandwidth_cdn_url"`
-	Unknown          map[string]any                 `yaml:",inline"`
+	// the load and dark rules; each is default-dependent, so each must be
+	// written out before the monitor compares it
+	LoadAttempts                 *int           `yaml:"load_attempts"`
+	LoadRetryMeanIntervalSeconds *int           `yaml:"load_retry_mean_interval_seconds"`
+	TunnelRecreateAttempts       *int           `yaml:"tunnel_recreate_attempts"`
+	DarkConsecutiveFailures      *int           `yaml:"dark_consecutive_failures"`
+	DarkMinimumSpanSeconds       *int           `yaml:"dark_minimum_span_seconds"`
+	DarkBackoffSeconds           []int          `yaml:"dark_backoff_seconds"`
+	DarkBatchGuard               *float64       `yaml:"dark_batch_guard"`
+	DarkBatchGuardMinChecks      *int           `yaml:"dark_batch_guard_min_checks"`
+	RunBatchGuard                *float64       `yaml:"run_batch_guard"`
+	RunBatchGuardMinRuns         *int           `yaml:"run_batch_guard_min_runs"`
+	CityConfidentRadiusKm        *int           `yaml:"city_confident_radius_km"`
+	Unknown                      map[string]any `yaml:",inline"`
 }
 
 func loadEgressCoverageDesiredConfig() egressCoverageDesiredConfig {
@@ -176,7 +263,12 @@ func inspectEgressCoverageDesiredConfig(load func(any) error) egressCoverageDesi
 		return desired
 	}
 	if raw.Full.Bandwidth == nil || raw.Full.BandwidthTimeoutSeconds == nil ||
-		raw.PublicAPIURL == nil || raw.BandwidthCDNURL == nil {
+		raw.PublicAPIURL == nil || raw.BandwidthCDNURL == nil ||
+		raw.Blackhole.IpEchoTimeoutSeconds == nil ||
+		raw.LoadAttempts == nil || raw.LoadRetryMeanIntervalSeconds == nil || raw.TunnelRecreateAttempts == nil ||
+		raw.DarkConsecutiveFailures == nil || raw.DarkMinimumSpanSeconds == nil || len(raw.DarkBackoffSeconds) == 0 ||
+		raw.DarkBatchGuard == nil || raw.DarkBatchGuardMinChecks == nil ||
+		raw.RunBatchGuard == nil || raw.RunBatchGuardMinRuns == nil || raw.CityConfidentRadiusKm == nil {
 		desired.invalidReason = "default-dependent-execution-settings"
 		return desired
 	}
@@ -185,6 +277,16 @@ func inspectEgressCoverageDesiredConfig(load func(any) error) egressCoverageDesi
 		full: raw.Full.args(), blackhole: raw.Blackhole.args(),
 		apiURL: raw.APIURL, platformURL: raw.PlatformURL,
 		publicAPIURL: *raw.PublicAPIURL, bandwidthCDNURL: *raw.BandwidthCDNURL,
+		rules: newEgressCoverageRules(*raw.LoadAttempts, *raw.LoadRetryMeanIntervalSeconds, *raw.TunnelRecreateAttempts, model.ProviderEgressRules{
+			DarkConsecutiveFailures: *raw.DarkConsecutiveFailures,
+			DarkMinimumSpanSeconds:  *raw.DarkMinimumSpanSeconds,
+			DarkBackoffSeconds:      raw.DarkBackoffSeconds,
+			DarkBatchGuard:          *raw.DarkBatchGuard,
+			DarkBatchGuardMinChecks: *raw.DarkBatchGuardMinChecks,
+			RunBatchGuard:           *raw.RunBatchGuard,
+			RunBatchGuardMinRuns:    *raw.RunBatchGuardMinRuns,
+			CityConfidentRadiusKm:   *raw.CityConfidentRadiusKm,
+		}),
 	}
 	if !validEgressCoverageConfig(desired.settings) {
 		desired.invalidReason = "invalid-or-incomplete-execution-settings"
@@ -200,7 +302,55 @@ func validEgressCoverageConfig(config egressCoverageConfig) bool {
 		return false
 	}
 	probeTimeout := time.Duration(config.full.ProbeTimeoutSeconds) * time.Second
-	return fleetprobe.EgressHealthOptions(probeTimeout, config.full.AllDestinations).PerRequestTimeout >= egresshealth.DefaultPerRequestTimeout
+	if fleetprobe.EgressHealthOptions(probeTimeout, config.full.AllDestinations).PerRequestTimeout < egresshealth.DefaultPerRequestTimeout {
+		return false
+	}
+	// the taskworker's own validation of the load and dark rules, the
+	// warm-up timeouts and a max time that covers a run
+	rules := config.rules
+	if rules.loadAttempts < 1 || rules.loadRetryMeanIntervalSeconds < 1 || rules.tunnelRecreateAttempts < 1 ||
+		config.full.IpEchoTimeoutSeconds != 0 || config.blackhole.IpEchoTimeoutSeconds < 1 {
+		return false
+	}
+	if rules.modelRules().Validate() != nil {
+		return false
+	}
+	// the shortest max time a pass can be given at these load rules: one full
+	// run's whole retry schedule with its warm-up, tunnel open and bandwidth
+	// sample, plus one blackhole check's, as the taskworker computes it
+	// (providerEgressProbeMinMaxTime), since a blackhole batch in flight when
+	// the full batch ends runs to completion
+	minMaxTime := func() time.Duration {
+		fullOptions := fleetprobe.EgressHealthOptions(probeTimeout, config.full.AllDestinations)
+		fullOptions.LoadAttempts = config.rules.loadAttempts
+		fullOptions.LoadRetryMeanInterval = time.Duration(config.rules.loadRetryMeanIntervalSeconds) * time.Second
+		fullOptions.IpEchoUrl = egresshealth.IpEchoPath
+		loads := egresshealth.SamplePerRun()
+		if config.full.AllDestinations {
+			loads = len(egresshealth.Destinations())
+		}
+		full := fullOptions.RunBudget(loads) + probeTimeout
+		if config.full.Bandwidth {
+			full += time.Duration(config.full.BandwidthTimeoutSeconds) * time.Second
+		}
+		return full + egressCoverageCheckBudget(config)
+	}
+	return minMaxTime() <= time.Duration(config.maxTimeSeconds)*time.Second
+}
+
+// The longest one blackhole check can hold its slot: its warm-up, every
+// load's every attempt and the longest spacing between them, and its tunnel
+// open. A check that passes takes a fraction of this; one whose loads keep
+// failing takes all of it.
+func egressCoverageCheckBudget(config egressCoverageConfig) time.Duration {
+	checkOptions := egresshealth.Options{
+		PerRequestTimeout:     time.Duration(config.blackhole.ProbeTimeoutSeconds) * time.Second,
+		IpEchoUrl:             egresshealth.IpEchoPath,
+		IpEchoTimeout:         time.Duration(config.blackhole.IpEchoTimeoutSeconds) * time.Second,
+		LoadAttempts:          config.rules.loadAttempts,
+		LoadRetryMeanInterval: time.Duration(config.rules.loadRetryMeanIntervalSeconds) * time.Second,
+	}
+	return checkOptions.RunBudget(egresshealth.BlackholeSampleSize) + max(checkOptions.PerRequestTimeout, checkOptions.IpEchoTimeout)
 }
 
 const egressCoverageConfigConvergenceAction = "Deploy config-updater first and verify that the desired configuration version is completely published; then deploy Taskworker so every executor mounts that completed version. Let successful ProviderEgressProbe post-steps replace the four-or-configured-count durable snapshots, or normal disabled-task cleanup retire them when disabled. Failed executions retry their old arguments, and an old-config worker can recreate stale settings. Do not insert, delete, or hand-edit pending_task rows."
@@ -277,6 +427,7 @@ func egressCoverageConfigChanges(desired, durable egressCoverageConfig) []string
 		note(batch.name+".concurrency", batch.want.Concurrency, batch.have.Concurrency)
 		note(batch.name+".probe_timeout_seconds", batch.want.ProbeTimeoutSeconds, batch.have.ProbeTimeoutSeconds)
 		note(batch.name+".all_destinations", batch.want.AllDestinations, batch.have.AllDestinations)
+		note(batch.name+".ip_echo_timeout_seconds", batch.want.IpEchoTimeoutSeconds, batch.have.IpEchoTimeoutSeconds)
 		note(batch.name+".bandwidth", batch.want.Bandwidth, batch.have.Bandwidth)
 		note(batch.name+".bandwidth_timeout_seconds", batch.want.BandwidthTimeoutSeconds, batch.have.BandwidthTimeoutSeconds)
 		note(batch.name+".transport_budget_byte_count", batch.want.TransportBudgetByteCount, batch.have.TransportBudgetByteCount)
@@ -287,6 +438,17 @@ func egressCoverageConfigChanges(desired, durable egressCoverageConfig) []string
 	note("platform_url", desired.platformURL, durable.platformURL)
 	note("public_api_url", desired.publicAPIURL, durable.publicAPIURL)
 	note("bandwidth_cdn_url", desired.bandwidthCDNURL, durable.bandwidthCDNURL)
+	note("load_attempts", desired.rules.loadAttempts, durable.rules.loadAttempts)
+	note("load_retry_mean_interval_seconds", desired.rules.loadRetryMeanIntervalSeconds, durable.rules.loadRetryMeanIntervalSeconds)
+	note("tunnel_recreate_attempts", desired.rules.tunnelRecreateAttempts, durable.rules.tunnelRecreateAttempts)
+	note("dark_consecutive_failures", desired.rules.darkConsecutiveFailures, durable.rules.darkConsecutiveFailures)
+	note("dark_minimum_span_seconds", desired.rules.darkMinimumSpanSeconds, durable.rules.darkMinimumSpanSeconds)
+	note("dark_backoff_seconds", desired.rules.darkBackoffSeconds, durable.rules.darkBackoffSeconds)
+	note("dark_batch_guard", desired.rules.darkBatchGuard, durable.rules.darkBatchGuard)
+	note("dark_batch_guard_min_checks", desired.rules.darkBatchGuardMinChecks, durable.rules.darkBatchGuardMinChecks)
+	note("run_batch_guard", desired.rules.runBatchGuard, durable.rules.runBatchGuard)
+	note("run_batch_guard_min_runs", desired.rules.runBatchGuardMinRuns, durable.rules.runBatchGuardMinRuns)
+	note("city_confident_radius_km", desired.rules.cityConfidentRadiusKm, durable.rules.cityConfidentRadiusKm)
 	return changes
 }
 
@@ -298,8 +460,16 @@ func egressCoverageSafeSettings(prefix string, config egressCoverageConfig) stri
 	}{{"full", config.full}, {"blackhole", config.blackhole}} {
 		name := prefix + "_" + batch.name
 		fields = append(fields, fmt.Sprintf("%s_limit=%d %s_concurrency_per_shard=%d %s_probe_timeout_seconds=%d %s_all_destinations=%t %s_bandwidth=%t %s_bandwidth_timeout_seconds=%d", name, batch.args.Limit, name, batch.args.Concurrency, name, batch.args.ProbeTimeoutSeconds, name, batch.args.AllDestinations, name, batch.args.Bandwidth, name, batch.args.BandwidthTimeoutSeconds))
-		fields = append(fields, fmt.Sprintf("%s_transport_budget_byte_count=%d %s_transport_budget_count=%d", name, batch.args.TransportBudgetByteCount, name, batch.args.TransportBudgetCount))
+		fields = append(fields, fmt.Sprintf("%s_transport_budget_byte_count=%d %s_transport_budget_count=%d %s_ip_echo_timeout_seconds=%d", name, batch.args.TransportBudgetByteCount, name, batch.args.TransportBudgetCount, name, batch.args.IpEchoTimeoutSeconds))
 	}
+	rules := config.rules
+	fields = append(fields, fmt.Sprintf(
+		"%[1]s_load_attempts=%[2]d %[1]s_load_retry_mean_interval_seconds=%[3]d %[1]s_tunnel_recreate_attempts=%[4]d %[1]s_dark_consecutive_failures=%[5]d %[1]s_dark_minimum_span_seconds=%[6]d %[1]s_dark_backoff_seconds=%[7]s %[1]s_dark_batch_guard=%[8]g %[1]s_dark_batch_guard_min_checks=%[9]d %[1]s_run_batch_guard=%[10]g %[1]s_run_batch_guard_min_runs=%[11]d %[1]s_city_confident_radius_km=%[12]d",
+		prefix, rules.loadAttempts, rules.loadRetryMeanIntervalSeconds, rules.tunnelRecreateAttempts,
+		rules.darkConsecutiveFailures, rules.darkMinimumSpanSeconds, rules.darkBackoffSeconds,
+		rules.darkBatchGuard, rules.darkBatchGuardMinChecks, rules.runBatchGuard, rules.runBatchGuardMinRuns,
+		rules.cityConfidentRadiusKm,
+	))
 	return strings.Join(fields, " ")
 }
 
@@ -412,7 +582,7 @@ func (p egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		}), nil
 	}
 
-	activityRows, err := env.runner.pg(ctx, egressCoverageActivityQuery(geometry.shardCount))
+	activityRows, err := env.runner.pg(ctx, egressCoverageActivityQuery(geometry.shardCount, geometry.settings.rules.modelRules()))
 	if err != nil {
 		return nil, err
 	}
@@ -496,6 +666,7 @@ func inspectEgressCoverageTasks(rows []pgRow) (egressCoverageGeometry, error) {
 			full: args.Full, blackhole: args.Blackhole,
 			apiURL: args.APIURL, platformURL: args.PlatformURL,
 			publicAPIURL: args.PublicAPIURL, bandwidthCDNURL: args.BandwidthCDNURL,
+			rules: newEgressCoverageRules(args.LoadAttempts, args.LoadRetryMeanIntervalSeconds, args.TunnelRecreateAttempts, args.ProviderEgressRules),
 		}
 		if !validEgressCoverageConfig(config) || args.ShardIndex < 0 || config.shardCount <= args.ShardIndex {
 			problems = append(problems, fmt.Sprintf("row_%d_invalid_settings", rowIndex+1))
@@ -614,8 +785,12 @@ const egressCoverageDeadlineCTEs = `,
 		 GROUP BY p.shard_index
 		)`
 
-func egressCoverageActivityQuery(shardCount int) string {
-	return fmt.Sprintf(`
+// The per-shard activity aggregate. A provider's current dark verdict is the
+// consecutive-failure rule of connect/GEOMAP.md §11.3, the same fragment the
+// dark set and the full due heads use (model.ProviderBlackholeDarkSql), so
+// the deferred-dark accounting here cannot drift from the scheduler's.
+func egressCoverageActivityQuery(shardCount int, rules model.ProviderEgressRules) string {
+	query := fmt.Sprintf(`
 		WITH lifecycle_clock AS MATERIALIZED (
 		 SELECT now() AT TIME ZONE 'UTC' AS now_utc
 		), shards AS (
@@ -635,11 +810,7 @@ func egressCoverageActivityQuery(shardCount int) string {
 		 SELECT e.shard_index, e.client_id,
 		        pel.observed_at, pea.attempt_at, peh.measured_at, pbc.checked_at,
 		        pel.client_id IS NULL AS no_location,
-		        COALESCE(
-		          pbc.ok = false AND
-		          pbc.checked_at >= lifecycle_clock.now_utc - interval '3 hours',
-		          false
-		        ) AS current_dark,
+		        COALESCE({{current_dark}}, false) AS current_dark,
 		        CASE
 		          WHEN pel.client_id IS NULL THEN 'no-location'
 		          WHEN peh.client_id IS NULL THEN 'missing-health'
@@ -723,6 +894,12 @@ func egressCoverageActivityQuery(shardCount int) string {
 		LEFT JOIN deadline_slack USING (shard_index)
 		ORDER BY shard_index;
 	`, shardCount, shardCount, shardCount, shardCount, egressCoverageDeadlineCTEs)
+	currentDark := model.ProviderBlackholeDarkSql(
+		"pbc",
+		fmt.Sprintf("lifecycle_clock.now_utc - interval '%d seconds'", int64(model.ProviderBlackholeCheckMaxAge/time.Second)),
+		rules,
+	)
+	return strings.Replace(query, "{{current_dark}}", currentDark, 1)
 }
 
 type egressCoverageSnapshot struct {
@@ -858,6 +1035,12 @@ func egressBlackholeCapacityFinding(
 	probeTimeoutSeconds := int64(geometry.blackholeTimeoutSeconds)
 	blackholeOnlyTimeoutCeilingPerHour := configuredBlackholeConcurrency * int64(time.Hour/time.Second) / probeTimeoutSeconds
 	blackholeOnlyDeadlineMinimumConcurrency := (requiredPerHour*probeTimeoutSeconds + int64(time.Hour/time.Second) - 1) / int64(time.Hour/time.Second)
+	// since every load is retried minutes apart (connect/GEOMAP.md §11.3), a
+	// check whose loads keep failing holds its slot for its whole retry
+	// schedule, not one timeout: that is the ceiling a batch of failing checks
+	// meets
+	checkBudgetSeconds := max(int64(1), int64(egressCoverageCheckBudget(geometry.settings)/time.Second))
+	retryScheduleCeilingPerHour := configuredBlackholeConcurrency * int64(time.Hour/time.Second) / checkBudgetSeconds
 	reservedEvidence := "independent_drain_overlap_possible=false full_reserved_blackhole_concurrency_per_shard=unavailable full_reserved_total_blackhole_concurrency=unavailable full_reserved_timeout_ceiling_per_hour=unavailable"
 	if geometry.fullConcurrency < geometry.blackholeConcurrency {
 		reservedPerShard := int64(geometry.blackholeConcurrency - geometry.fullConcurrency)
@@ -875,16 +1058,17 @@ func egressBlackholeCapacityFinding(
 		mechanism: "Shard timestamps are advancing, but aggregate production is too slow to refresh the complete eligible population before verdicts expire. A known-dark provider therefore ages out of the exclusion set and becomes selectable again without a successful recheck; shard-local liveness alone cannot see this chronic under-capacity state. The blackhole-only slot calculation does not include residence time spent on full probes inside the same durable task.",
 		baseline:  fmt.Sprintf("The measured one-hour blackhole-check rate is at least %d providers/hour, so one complete fleet sweep fits inside the %s verdict lifetime, or current coverage is already complete.", requiredPerHour, model.ProviderBlackholeCheckMaxAge),
 		observed: fmt.Sprintf(
-			"eligible=%d current=%d current_percent=%.1f checked_last_hour=%d required_per_hour=%d projected_sweep=%s verdict_max_age=%s configured_shards=%d configured_blackhole_concurrency_per_shard=%d configured_total_blackhole_concurrency=%d blackhole_probe_timeout_seconds=%d blackhole_only_timeout_ceiling_per_hour=%d blackhole_only_deadline_minimum_concurrency=%d configured_full_limit_per_shard=%d configured_full_concurrency_per_shard=%d full_probe_timeout_seconds=%d %s",
+			"eligible=%d current=%d current_percent=%.1f checked_last_hour=%d required_per_hour=%d projected_sweep=%s verdict_max_age=%s configured_shards=%d configured_blackhole_concurrency_per_shard=%d configured_total_blackhole_concurrency=%d blackhole_probe_timeout_seconds=%d blackhole_only_timeout_ceiling_per_hour=%d blackhole_only_deadline_minimum_concurrency=%d blackhole_check_retry_schedule_seconds=%d blackhole_retry_schedule_ceiling_per_hour=%d configured_full_limit_per_shard=%d configured_full_concurrency_per_shard=%d full_probe_timeout_seconds=%d %s",
 			eligible, current, coveragePercent, checkedLastHour, requiredPerHour,
 			(time.Duration(projectedSweepSeconds) * time.Second).Round(time.Second), model.ProviderBlackholeCheckMaxAge,
 			geometry.shardCount, geometry.blackholeConcurrency, configuredBlackholeConcurrency,
 			probeTimeoutSeconds, blackholeOnlyTimeoutCeilingPerHour, blackholeOnlyDeadlineMinimumConcurrency,
+			checkBudgetSeconds, retryScheduleCeilingPerHour,
 			geometry.fullLimit, geometry.fullConcurrency, geometry.fullTimeoutSeconds,
 			reservedEvidence,
 		),
 		evidence: "The query counts one latest row per eligible provider inside PostgreSQL and joins those aggregate rates only to the complete common execution geometry parsed from the durable task arguments. Provider, network, task, endpoint, and failure identities never leave the database.",
-		context:  "This is a software execution-capacity and negative-evidence lifecycle boundary, not proof that Proxy hosts need more active-client hardware. A common timeout cohort can consume the full blackhole deadline and depress throughput. On an independent-drain artifact, while both queues are due, Full.Concurrency is reserved from Blackhole.Concurrency, so the full_reserved figures model the smaller effective blackhole pool without adding full slots to the configured peak. When full concurrency is not smaller, overlap is unavailable rather than a negative or zero throughput claim. These are conditional sizing models, not runtime capability or queue-activity attestations. The blackhole-only timeout rate is not a whole-task ceiling when a running artifact serializes full work in the same shard; measured throughput remains authoritative because full-probe residence, setup, teardown, fast successes, and mixed failure latencies change the realized rate.",
+		context:  "This is a software execution-capacity and negative-evidence lifecycle boundary, not proof that Proxy hosts need more active-client hardware. A common timeout cohort can consume the full blackhole deadline and depress throughput; since loads are retried minutes apart, a cohort of failing checks holds each slot for its whole retry schedule, which the retry-schedule ceiling models. On an independent-drain artifact, while both queues are due, Full.Concurrency is reserved from Blackhole.Concurrency, so the full_reserved figures model the smaller effective blackhole pool without adding full slots to the configured peak. When full concurrency is not smaller, overlap is unavailable rather than a negative or zero throughput claim. These are conditional sizing models, not runtime capability or queue-activity attestations. The blackhole-only timeout rate is not a whole-task ceiling when a running artifact serializes full work in the same shard; measured throughput remains authoritative because full-probe residence, setup, teardown, fast successes, and mixed failure latencies change the realized rate.",
 		action:   "Run §2.23 and §2.24 first, then establish the running Taskworker's execution behavior. If full work blocks blackhole progress inside one shard task, deploy the architecture-preserving correction that overlaps one full batch with a repeated blackhole drain while reserving its configured concurrency; do not increase concurrency first. If independent drain is already present and the measured rate still misses the bound, capacity-test any geometry change against PostgreSQL/PgBouncer, API, and Taskworker CPU/memory headroom. Separately obtain an explicit correctness decision for retaining a failed verdict until a successful recheck; do not merely lengthen the max age, delete evidence, or suppress the provider gate.",
 		verify:   "After convergence, for two complete verdict lifetimes every shard advances, current coverage reaches the complete eligible population, the measured hourly rate stays at or above the required rate, the projected sweep remains inside the verdict lifetime, known-dark providers never re-enter selection only because evidence aged, and healthy controls remain selectable. Keep more than 25% PostgreSQL normal-role headroom and verify PgBouncer, API, and Taskworker CPU/memory controls throughout the sustained duty cycle.",
 		playbook: "SIGNALS.md §2.19, §2.23, and §2.24",

@@ -74,6 +74,8 @@ func NewSignals() []Signal {
 		NewStaleDestinationSignal(),
 		NewEgressCoverageSignal(),
 		NewEgressAdmissionSignal(),
+		NewEgressSitePoolSignal(),
+		NewDerivedLocationsSignal(),
 		NewStaleContractsSignal(),
 		NewPaymentReconciliationSignal(),
 		NewPaymentFailuresSignal(),

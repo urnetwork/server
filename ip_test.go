@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"reflect"
 	"testing"
 	"time"
 
@@ -32,16 +33,32 @@ func requirePortableIpInfoFixture(t *testing.T) {
 
 func TestIpInfo(t *testing.T) {
 	requirePortableIpInfoFixture(t)
+	// the fixture sets only the names, so everything GeoLite2 would add
+	// (radius, coordinates, geoname ids) stays at its zero, unknown value
+	expected := IpInfo{
+		CountryCode: "zz",
+		Country:     "Fixture Country",
+		Region:      "Fixture Region",
+		Regions:     []string{"Fixture Region"},
+		City:        "Fixture City",
+	}
 	for _, rawIp := range []string{portableIpInfoIpv4, portableIpInfoIpv6} {
 		ipInfo, err := GetIpInfoFromIp(net.ParseIP(rawIp))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if ipInfo == nil || ipInfo.CountryCode != "zz" || ipInfo.Country != "Fixture Country" ||
-			ipInfo.Region != "Fixture Region" || ipInfo.City != "Fixture City" ||
-			ipInfo.UserType != UserTypeConsumer || ipInfo.Hosting || ipInfo.Latitude != 0 || ipInfo.Longitude != 0 {
+		if ipInfo == nil || !reflect.DeepEqual(*ipInfo, expected) {
 			t.Fatalf("documentation address %s resolved to unexpected synthetic info: %+v", rawIp, ipInfo)
 		}
+
+		// every lookup is a copy; a caller editing its regions cannot
+		// rewrite the fixture for the next lookup
+		ipInfo.Regions[0] = "Edited"
+		again, err := GetIpInfoFromIp(net.ParseIP(rawIp))
+		if err != nil {
+			t.Fatal(err)
+		}
+		connect.AssertEqual(t, again.Regions, []string{"Fixture Region"})
 	}
 }
 
@@ -57,14 +74,18 @@ func TestIpInfoPerf(t *testing.T) {
 	n := 100000
 	startTime := time.Now()
 	for index := range n {
-		if _, err := GetIpInfoFromIp(ips[index%len(ips)]); err != nil {
+		ipInfo, err := GetIpInfoFromIp(ips[index%len(ips)])
+		if err != nil {
 			t.Fatal(err)
+		}
+		if ipInfo.CountryCode != "zz" {
+			t.Fatalf("lookup %d left the fixture: %+v", index, ipInfo)
 		}
 	}
 	endTime := time.Now()
 
 	duration := endTime.Sub(startTime)
-	fmt.Printf("[ip]%d lookups per second (%s total)\n", int((time.Duration(n)*duration)/time.Second), duration)
+	fmt.Printf("[ip]%d lookups per second (%s total)\n", int(float64(n)/duration.Seconds()), duration)
 	connect.AssertEqual(t, duration <= 20*time.Second, true)
 }
 
@@ -182,14 +203,34 @@ func TestParseIpOverrides(t *testing.T) {
 			"subnet":       "198.19.0.0/20",
 			"country_code": "zz",
 			"country":      "Sim",
-			"hosting":      true,
-			"latitude":     10,
-			"longitude":    20.5,
+			// the old verdict keys still load, whatever their value, and
+			// have no effect
+			"hosting":   true,
+			"privacy":   true,
+			"virtual":   "yes",
+			"latitude":  10,
+			"longitude": 20.5,
+		},
+		map[string]any{
+			"subnet":             "2001:db8:1::/48",
+			"continent_code":     "EU",
+			"continent":          "Europe",
+			"country_code":       "GB",
+			"country":            "United Kingdom",
+			"region":             "England",
+			"city":               "East Finchley",
+			"latitude":           51.5967,
+			"longitude":          -0.1593,
+			"timezone":           "Europe/London",
+			"accuracy_radius_km": 200,
+			"city_geoname_id":    2650444,
+			"region_geoname_id":  6269131,
+			"country_geoname_id": 2635167,
 		},
 	}
 
 	overrides := parseIpOverrides(settingsObj)
-	connect.AssertEqual(t, len(overrides), 2)
+	connect.AssertEqual(t, len(overrides), 3)
 
 	find := func(addr string) *IpInfo {
 		for _, override := range overrides {
@@ -201,22 +242,76 @@ func TestParseIpOverrides(t *testing.T) {
 		return nil
 	}
 
+	// a missing optional key is its zero value, never a panic
 	ipInfo := find("198.18.5.4")
 	connect.AssertNotEqual(t, ipInfo, nil)
-	connect.AssertEqual(t, ipInfo.CountryCode, "zz")
-	connect.AssertEqual(t, ipInfo.Country, "Sim")
-	connect.AssertEqual(t, ipInfo.Region, "Sim")
-	connect.AssertEqual(t, ipInfo.City, "Sim")
-	connect.AssertEqual(t, ipInfo.UserType, UserTypeConsumer)
-	connect.AssertEqual(t, ipInfo.Hosting, false)
+	connect.AssertEqual(t, *ipInfo, IpInfo{
+		CountryCode: "zz",
+		Country:     "Sim",
+		Region:      "Sim",
+		Regions:     []string{"Sim"},
+		City:        "Sim",
+	})
 
 	ipInfo = find("198.19.0.100")
 	connect.AssertNotEqual(t, ipInfo, nil)
-	connect.AssertEqual(t, ipInfo.UserType, UserTypeHosting)
-	connect.AssertEqual(t, ipInfo.Hosting, true)
-	connect.AssertEqual(t, ipInfo.Latitude, float64(10))
-	connect.AssertEqual(t, ipInfo.Longitude, 20.5)
+	connect.AssertEqual(t, *ipInfo, IpInfo{
+		CountryCode: "zz",
+		Country:     "Sim",
+		Regions:     []string{},
+		Latitude:    10,
+		Longitude:   20.5,
+	})
+
+	ipInfo = find("2001:db8:1:2::3")
+	connect.AssertNotEqual(t, ipInfo, nil)
+	connect.AssertEqual(t, *ipInfo, IpInfo{
+		ContinentCode:    "eu",
+		Continent:        "Europe",
+		CountryCode:      "gb",
+		Country:          "United Kingdom",
+		Region:           "England",
+		Regions:          []string{"England"},
+		City:             "East Finchley",
+		Latitude:         51.5967,
+		Longitude:        -0.1593,
+		AccuracyRadiusKm: 200,
+		Timezone:         "Europe/London",
+		CityGeonameId:    2650444,
+		RegionGeonameId:  6269131,
+		CountryGeonameId: 2635167,
+	})
 
 	// outside every override subnet
 	connect.AssertEqual(t, find("203.0.113.1") == nil, true)
+}
+
+// A radius or geoname id of the wrong type or range, or a latitude that is
+// not a number, panics at parse; the widest geoname id still fits.
+func TestParseIpOverridesRejectsMalformedValues(t *testing.T) {
+	requirePanic := func(name string, entry map[string]any) {
+		t.Helper()
+		entry["subnet"] = "198.18.0.0/16"
+		defer func() {
+			if recover() == nil {
+				t.Fatalf("%s: expected a panic", name)
+			}
+		}()
+		parseIpOverrides([]any{entry})
+	}
+
+	requirePanic("radius as a string", map[string]any{"accuracy_radius_km": "200"})
+	requirePanic("negative radius", map[string]any{"accuracy_radius_km": -1})
+	requirePanic("fractional radius", map[string]any{"accuracy_radius_km": 2.5})
+	requirePanic("geoname id as a string", map[string]any{"city_geoname_id": "2650444"})
+	requirePanic("negative geoname id", map[string]any{"region_geoname_id": -1})
+	requirePanic("geoname id over 32 bits", map[string]any{"country_geoname_id": 4294967296})
+	requirePanic("latitude as a string", map[string]any{"latitude": "51.5"})
+
+	// the widest geoname id still fits
+	overrides := parseIpOverrides([]any{map[string]any{
+		"subnet":             "198.18.0.0/16",
+		"country_geoname_id": 4294967295,
+	}})
+	connect.AssertEqual(t, overrides[0].ipInfo.CountryGeonameId, uint32(4294967295))
 }

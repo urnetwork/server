@@ -206,33 +206,48 @@ func TestInitTasksReapsRemovedTargets(t *testing.T) {
 	})
 }
 
-// TestInitTasksReapsRemovedExtenderLatencyTarget pins the production failure:
-// the retired job was scheduled before its target was removed.  A worker
-// startup must reap that exact legacy row instead of retrying it forever.
-func TestInitTasksReapsRemovedExtenderLatencyTarget(t *testing.T) {
+// Pins the reverse of the production failure that once reaped this job: the
+// latency sweep is live again (connect/GEOMAP.md D14), so a row armed under
+// its exact production name must survive a worker start as the one chain of
+// its run once key, rather than being reaped as a removed target and re-armed
+// on every start.
+func TestInitTasksKeepsTheRestoredExtenderLatencyTarget(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		const removedTarget = "github.com/urnetwork/server/taskworker/work.RemoveOldExtenderLatencies"
+		const restoredTarget = "github.com/urnetwork/server/taskworker/work.RemoveOldExtenderLatencies"
 
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
+		var taskId server.Id
 		server.Tx(ctx, func(tx server.PgTx) {
-			taskID := task.ScheduleTaskInTx(tx, orphanSeedTask, &orphanSeedArgs{}, clientSession)
-			server.RaisePgResult(tx.Exec(ctx,
-				`UPDATE pending_task SET function_name = $2 WHERE task_id = $1`, taskID, removedTarget))
+			work.ScheduleRemoveOldExtenderLatencies(clientSession, tx)
+		})
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(ctx, `SELECT task_id FROM pending_task WHERE function_name = $1`, restoredTarget)
+			server.WithPgResult(result, err, func() {
+				connect.AssertEqual(t, result.Next(), true)
+				server.Raise(result.Scan(&taskId))
+			})
 		})
 
 		InitTasks(ctx)
 
 		var remaining int
+		var sameTask bool
 		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(ctx, `SELECT COUNT(*) FROM pending_task WHERE function_name = $1`, removedTarget)
+			result, err := conn.Query(
+				ctx,
+				`SELECT COUNT(*), bool_or(task_id = $2) FROM pending_task WHERE function_name = $1`,
+				restoredTarget,
+				taskId,
+			)
 			server.WithPgResult(result, err, func() {
 				connect.AssertEqual(t, result.Next(), true)
-				server.Raise(result.Scan(&remaining))
+				server.Raise(result.Scan(&remaining, &sameTask))
 			})
 		})
-		connect.AssertEqual(t, remaining, 0)
+		connect.AssertEqual(t, remaining, 1)
+		connect.AssertEqual(t, sameTask, true)
 	})
 }
 

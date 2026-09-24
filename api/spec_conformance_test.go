@@ -35,6 +35,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/urnetwork/operator-proxy/egresshealth"
+
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
@@ -98,7 +100,12 @@ func registry() []specEndpoint {
 		{"GET", "/network/reliability", nil, rt(controller.GetNetworkReliabilityResult{})},
 		{"GET", "/network/user", nil, rt(controller.GetNetworkUserResult{})},
 		{"POST", "/network/user/update", rt(controller.UpdateNetworkNameArgs{}), rt(controller.UpdateNetworkNameResult{})},
-		{"POST", "/network/extender-activate", rt(controller.ExtenderActivateArgs{}), rt(controller.ExtenderActivateResult{})},
+		{method: "POST", path: "/network/extender-activate", argType: rt(controller.ExtenderActivateArgs{}), resultType: rt(controller.ExtenderActivateResult{})},
+		{method: "GET", path: "/network/extender-hint", argType: nil, resultType: rt(controller.ExtenderHintResult{})},
+		{method: "POST", path: "/network/extender-latency", argType: rt(controller.ExtenderLatencyReportArgs{}), resultType: rt(controller.ExtenderLatencyReportResult{})},
+		{method: "POST", path: "/network/ping-report", argType: rt(controller.ExtenderPingReportArgs{}), resultType: rt(controller.ExtenderPingReportResult{})},
+		// the prober module's own pool type is the response (connect/GEOMAP.md §11.4)
+		{method: "GET", path: "/network/provider-egress-destinations", argType: nil, resultType: rt(egresshealth.Pool{})},
 
 		{"POST", "/preferences/set-preferences", rt(model.AccountPreferencesSetArgs{}), rt(model.AccountPreferencesSetResult{})},
 		{"GET", "/preferences", nil, rt(model.AccountPreferencesGetResult{})},
@@ -137,6 +144,7 @@ func registry() []specEndpoint {
 		{"GET", "/key/{clientId}", nil, rt(controller.GetClientKeyResult{})},
 		{"GET", "/key/{clientId}/history", nil, rt(controller.GetClientKeyHistoryResult{})},
 		{"GET", "/hello", nil, rt(controller.HelloResult{})},
+		{method: "GET", path: "/my-ip-info", argType: nil, resultType: rt(controller.MyIpInfoResult{})},
 
 		{"POST", "/account/api-key", rt(model.CreateApiKeyArgs{}), rt(model.CreateApiKeyResult{})},
 		{"POST", "/account/api-key/remove", rt(controller.DeleteApiKeyArgs{}), rt(controller.DeleteApiKeyResult{})},
@@ -182,7 +190,6 @@ func registry() []specEndpoint {
 // present as routes; TestSpecRoutesImplemented covers that.)
 func skips() map[string]string {
 	return map[string]string{
-		"GET /my-ip-info":                      "spec MyIPInfoResult includes landmarks[], served by whereami rather than this api",
 		"GET /device/share-code/{code}/qr.png": "image/png response, no JSON schema",
 		"GET /device/adopt-code/{code}/qr.png": "image/png response, no JSON schema",
 	}

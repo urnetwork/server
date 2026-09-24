@@ -83,11 +83,9 @@ func TestProviderEgressLocationSubmitAcceptsCorrectSecret(t *testing.T) {
 		// surfaced by the handler as 400. That 400 is proof the request
 		// reached the controller, i.e. proof auth passed.
 		args := controller.SubmitProviderEgressLocationArgs{
-			ClientId:         server.NewId(),
-			CountryCode:      "US",
-			Country:          "United States",
-			CountryConfident: true,
-			ObservedAt:       server.NowUtc(),
+			ClientId:   server.NewId(),
+			ExitIp:     "192.0.2.1",
+			ObservedAt: server.NowUtc(),
 		}
 		body, err := json.Marshal(args)
 		if err != nil {
@@ -269,12 +267,17 @@ func TestProviderEgressLocationDueAcceptsCorrectSecret(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 			t.Fatalf("decode body %q: %s", w.Body.String(), err)
 		}
-		if !slices.Contains(result.ClientIds, due) {
-			t.Fatalf("client_ids = %v, want it to contain the never-probed provider %s", result.ClientIds, due)
+		if !slices.Contains(testDueClientIds(result), due) {
+			t.Fatalf("providers = %+v, want it to contain the never-probed provider %s", result.Providers, due)
 		}
-		// the wire name the prober reads
-		if !strings.Contains(w.Body.String(), `"client_ids"`) {
-			t.Fatalf("body = %s, want a client_ids field", w.Body.String())
+		// the wire names the prober reads, and the place its sample is drawn for
+		if !strings.Contains(w.Body.String(), `"providers"`) || !strings.Contains(w.Body.String(), `"client_id"`) {
+			t.Fatalf("body = %s, want providers with client ids", w.Body.String())
+		}
+		for _, provider := range result.Providers {
+			if provider.ClientId == due && (provider.CountryCode != "us" || provider.Region != "California") {
+				t.Fatalf("due provider = %+v, want it placed at us/California", provider)
+			}
 		}
 	})
 }
@@ -314,8 +317,8 @@ func TestProviderEgressLocationDueHonoursLimit(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 			t.Fatalf("decode body %q: %s", w.Body.String(), err)
 		}
-		if len(result.ClientIds) != 1 {
-			t.Fatalf("len(client_ids) = %d, want 1 for limit=1; body = %s", len(result.ClientIds), w.Body.String())
+		if len(result.Providers) != 1 {
+			t.Fatalf("len(providers) = %d, want 1 for limit=1; body = %s", len(result.Providers), w.Body.String())
 		}
 	})
 }
@@ -380,11 +383,11 @@ func TestProviderEgressLocationDueHonoursStalenessCutoff(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 			t.Fatalf("decode body %q: %s", w.Body.String(), err)
 		}
-		if slices.Contains(result.ClientIds, fresh) {
-			t.Fatalf("client_ids = %v, must not contain the just-probed provider %s", result.ClientIds, fresh)
+		if slices.Contains(testDueClientIds(result), fresh) {
+			t.Fatalf("providers = %+v, must not contain the just-probed provider %s", result.Providers, fresh)
 		}
-		if !slices.Contains(result.ClientIds, stale) {
-			t.Fatalf("client_ids = %v, must contain the provider probed past the cutoff %s", result.ClientIds, stale)
+		if !slices.Contains(testDueClientIds(result), stale) {
+			t.Fatalf("providers = %+v, must contain the provider probed past the cutoff %s", result.Providers, stale)
 		}
 	})
 }
@@ -500,7 +503,16 @@ func due(t testing.TB, secret string) []server.Id {
 	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
 		t.Fatalf("due: decode body %q: %s", w.Body.String(), err)
 	}
-	return result.ClientIds
+	return testDueClientIds(result)
+}
+
+// The client ids of a due result, in order.
+func testDueClientIds(result ProviderEgressLocationDueResult) []server.Id {
+	clientIds := []server.Id{}
+	for _, provider := range result.Providers {
+		clientIds = append(clientIds, provider.ClientId)
+	}
+	return clientIds
 }
 
 // An unknown client id must be rejected rather than writing an attempt row

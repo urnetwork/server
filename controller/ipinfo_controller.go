@@ -21,12 +21,12 @@ func GetMyIpInfo(session *session.ClientSession) (*MyIpInfoResult, error) {
 		return nil, err
 	}
 
-	location, connectionLocationScores, err := GetLocationForIp(session.Ctx, clientIp)
+	location, _, err := GetLocationForIp(session.Ctx, clientIp)
 	if err != nil {
 		return nil, err
 	}
 
-	myInfo, err := NewMyInfo(clientIp, location, connectionLocationScores)
+	myInfo, err := NewMyInfo(clientIp, location)
 	if err != nil {
 		return nil, err
 	}
@@ -37,10 +37,13 @@ func GetMyIpInfo(session *session.ClientSession) (*MyIpInfoResult, error) {
 	}, nil
 }
 
+// Only what GeoLite2 can back for an ip (connect/GEOMAP.md §3.3). There is
+// deliberately no privacy (vpn/proxy/hosting) verdict: GeoLite2 has none, and
+// the egress prober's verdicts belong to probed provider connections, not to
+// a caller's ip.
 type MyInfo struct {
 	IP       string      `json:"ip"`
 	Location *IpLocation `json:"location,omitempty"`
-	Privacy  *IpPrivacy  `json:"privacy,omitempty"`
 }
 
 type IpLocation struct {
@@ -52,32 +55,18 @@ type IpLocation struct {
 	Timezone    string       `json:"timezone,omitempty"`
 }
 
-type IpPrivacy struct {
-	VPN     bool   `json:"vpn"`
-	Proxy   bool   `json:"proxy"`
-	Tor     bool   `json:"tor"`
-	Relay   bool   `json:"relay"`
-	Hosting bool   `json:"hosting"`
-	Service string `json:"service"`
-}
-
 type IpContinent struct {
 	Code string `json:"code,omitempty"`
 	Name string `json:"name,omitempty"`
 }
 
 type IpCountry struct {
-	Code    string `json:"code,omitempty"`
-	Name    string `json:"name,omitempty"`
-	FlagURL string `json:"flag_url,omitempty"`
+	Code string `json:"code,omitempty"`
+	Name string `json:"name,omitempty"`
 }
 
-func NewMyInfo(clientIp string, location *model.Location, connectionLocationScores *model.ConnectionLocationScores) (MyInfo, error) {
-	privacy := &IpPrivacy{
-		VPN:     0 < connectionLocationScores.NetTypePrivacy,
-		Hosting: 0 < connectionLocationScores.NetTypeHosting,
-	}
-
+// The my-ip-info body of an address and the location it resolved to.
+func NewMyInfo(clientIp string, location *model.Location) (MyInfo, error) {
 	return MyInfo{
 		IP: clientIp,
 		Location: &IpLocation{
@@ -97,7 +86,6 @@ func NewMyInfo(clientIp string, location *model.Location, connectionLocationScor
 			},
 			Timezone: location.Timezone,
 		},
-		Privacy: privacy,
 	}, nil
 }
 

@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -2359,6 +2360,14 @@ type clientLocationReliability struct {
 	netTypeScoreSpeeds       map[int]int
 	allBytesPerSecond        map[ByteCount]int
 	allRelativeLatencyMillis map[int]int
+
+	// the egress index of connect/GEOMAP.md §10.4, set for every client of the
+	// pass once all its connection rows are folded in. The index is nil, and
+	// written as NULL, only for a client the pass did not reach, which the
+	// client-score job then ranks by the rules before the index.
+	egressIndex        *int
+	egressQuality      *bool
+	egressEvidenceTime *time.Time
 }
 
 func newClientLocationReliability(networkId server.Id, connected bool) *clientLocationReliability {
@@ -2478,8 +2487,11 @@ func (self *clientLocationReliability) Values() []any {
 	// [12] connected
 	// [13] ipv4_proven
 	// [14] ipv6_proven
+	// [15] egress_index
+	// [16] egress_quality
+	// [17] egress_evidence_time
 
-	values := make([]any, 15)
+	values := make([]any, 18)
 
 	values[0] = self.networkId
 
@@ -2521,6 +2533,9 @@ func (self *clientLocationReliability) Values() []any {
 	values[12] = self.connected
 	values[13] = self.ipv4Proven
 	values[14] = self.ipv6Proven
+	values[15] = self.egressIndex
+	values[16] = self.egressQuality
+	values[17] = self.egressEvidenceTime
 
 	return values
 }
@@ -2692,6 +2707,95 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		}
 	})
 
+	// the egress index (connect/GEOMAP.md §10.4), from each provider's latest
+	// health run and location probe, in the same pass that fills the net-type
+	// maxima. Both tables hold one row per ever-probed provider, so each is
+	// read whole once for the pass rather than once per provider. Nothing of
+	// the net-type score enters it: a provider without evidence is written an
+	// index of 0 and no verdict, which puts it in the online bucket. The
+	// blackhole and TLS sets are not folded in: they are exclusions, read where
+	// the pool is built and the result assembled, since a verdict must not
+	// wait for this pass to take effect or to lift.
+	egressSettings := egressIndexSettings()
+	egressNow := server.NowUtc()
+	clientIdHealthRuns := func() map[server.Id]*EgressHealthRun {
+		clientIdHealthRuns := map[server.Id]*EgressHealthRun{}
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT
+				client_id,
+				measured_at,
+				ok_count,
+				total_count,
+				class_results
+			FROM provider_egress_health
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var clientId server.Id
+				var classResultsJson []byte
+				healthRun := &EgressHealthRun{}
+				server.Raise(result.Scan(
+					&clientId,
+					&healthRun.MeasuredAt,
+					&healthRun.OkCount,
+					&healthRun.Total,
+					&classResultsJson,
+				))
+				healthRun.ClassResults = map[string]ProviderEgressHealthClassResult{}
+				if err := json.Unmarshal(classResultsJson, &healthRun.ClassResults); err != nil {
+					// an unreadable tally leaves the run's failures to the
+					// default weight rather than failing the rollup for the
+					// whole fleet
+					glog.Infof("[egress]client %s class results are unreadable (%s)\n", clientId, err)
+					healthRun.ClassResults = map[string]ProviderEgressHealthClassResult{}
+				}
+				clientIdHealthRuns[clientId] = healthRun
+			}
+		})
+		return clientIdHealthRuns
+	}()
+	// when each provider's latest location probe ran: the other half of the
+	// evidence time
+	clientIdObservedTimes := func() map[server.Id]time.Time {
+		clientIdObservedTimes := map[server.Id]time.Time{}
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT
+				client_id,
+				observed_at
+			FROM provider_egress_location
+			`,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var clientId server.Id
+				var observedTime time.Time
+				server.Raise(result.Scan(
+					&clientId,
+					&observedTime,
+				))
+				clientIdObservedTimes[clientId] = observedTime
+			}
+		})
+		return clientIdObservedTimes
+	}()
+	for clientId, reliability := range clientLocationReliabilities {
+		healthRun := clientIdHealthRuns[clientId]
+		egressIndex := ComputeEgressIndex(healthRun, egressNow, egressSettings)
+		index := egressIndex.Index
+		reliability.egressIndex = &index
+		reliability.egressQuality = egressIndex.QualityVerdict()
+		var observedTime *time.Time
+		if t, ok := clientIdObservedTimes[clientId]; ok {
+			observedTime = &t
+		}
+		reliability.egressEvidenceTime = egressEvidenceTime(healthRun, observedTime)
+	}
+
 	server.CreateTempJoinTableInTx(
 		ctx,
 		tx,
@@ -2712,7 +2816,10 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			    has_latency_test bool,
 			    connected bool,
 			    ipv4_proven bool,
-			    ipv6_proven bool
+			    ipv6_proven bool,
+			    egress_index smallint NULL,
+			    egress_quality bool NULL,
+			    egress_evidence_time timestamp NULL
 	        )
 	    `,
 		clientLocationReliabilities,
@@ -2738,7 +2845,10 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        has_speed_test,
 	        has_latency_test,
 	        ipv4_proven,
-	        ipv6_proven
+	        ipv6_proven,
+	        egress_index,
+	        egress_quality,
+	        egress_evidence_time
 	    )
 	    SELECT
 	    	client_id,
@@ -2757,7 +2867,10 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        has_speed_test,
 	        has_latency_test,
 	        ipv4_proven,
-	        ipv6_proven
+	        ipv6_proven,
+	        egress_index,
+	        egress_quality,
+	        egress_evidence_time
 	    FROM temp_network_client_location_reliability
 	    ORDER BY client_id
 	    ON CONFLICT (client_id) DO UPDATE
@@ -2777,7 +2890,10 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        has_speed_test = EXCLUDED.has_speed_test,
 	        has_latency_test = EXCLUDED.has_latency_test,
 	        ipv4_proven = EXCLUDED.ipv4_proven,
-	        ipv6_proven = EXCLUDED.ipv6_proven
+	        ipv6_proven = EXCLUDED.ipv6_proven,
+	        egress_index = EXCLUDED.egress_index,
+	        egress_quality = EXCLUDED.egress_quality,
+	        egress_evidence_time = EXCLUDED.egress_evidence_time
 	    `,
 		updateBlockNumber,
 	))

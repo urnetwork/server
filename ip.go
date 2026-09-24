@@ -11,9 +11,11 @@ import (
 	"net/netip"
 	// "os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	// "sync"
 	"math"
 
@@ -31,7 +33,13 @@ import (
 func init() {
 	OnWarmup(WarmupTargetIPDatabase, func() {
 		db, _ := ipDb()
-		glog.Infof("[ip]ip info database type: %s\n", db.Metadata.DatabaseType)
+		// GeoLite2 must be kept current (connect/GEOMAP.md §3.1), so the
+		// build date of the deployed file is logged with its type
+		glog.Infof(
+			"[ip]ip info database type: %s (build %s)\n",
+			db.Metadata.DatabaseType,
+			db.Metadata.BuildTime().UTC().Format(time.DateOnly),
+		)
 
 		arinDb()
 	})
@@ -218,493 +226,110 @@ func ScrubIpPort(s string) string {
 type schemaType string
 
 const (
-	schemaTypeDbIpEnterprise schemaType = "DBIP-Location-ISP (compat=Enterprise)"
-	schemaTypeIpInfoCoreData schemaType = "ipinfo bundle_location_core.mmdb"
-	schemaTypeArinDb         schemaType = "urnetwork arindb"
+	schemaTypeGeoLite2City schemaType = "GeoLite2-City"
+	schemaTypeArinDb       schemaType = "urnetwork arindb"
 )
 
-var ipDb = sync.OnceValues(func() (*mmdb.Reader, schemaType) {
-	path, err := Config.ResourcePath("mmdb/ip-ipinfo.mmdb")
+// MaxMind GeoLite2 City (connect/GEOMAP.md §3), the one packaged source of
+// location. It carries no ip-quality verdicts: hosting and proxy come only
+// from the egress prober, and the foreign check from our own ARIN build
+// (`arinDb`).
+var ipDb = sync.OnceValues(loadIpDb)
+
+// Opens the deployed GeoLite2 City file of the config resources.
+func loadIpDb() (*mmdb.Reader, schemaType) {
+	path, err := Config.ResourcePath("mmdb/geolite2.mmdb")
 	if err != nil {
 		panic(err)
 	}
+	return openIpDb(path)
+}
 
+// Opens the database at path and refuses any type but GeoLite2 City.
+// geoLite2CityRecord describes that one record shape, and the struct decoder
+// skips keys it does not know, so another type would not fail a lookup: it
+// would answer every address empty, or with different data if it shares the
+// GeoIP2 layout. Refusing it here fails the deploy at warmup instead.
+func openIpDb(path string) (*mmdb.Reader, schemaType) {
 	db, err := mmdb.Open(path)
 	if err != nil {
 		panic(err)
 	}
-
-	return db, schemaType(db.Metadata.DatabaseType)
-})
-
-type UserType int
-
-const (
-	UserTypeUnknown UserType = 0
-	// consumer is ISP
-	UserTypeConsumer   UserType = 1
-	UserTypeBusiness   UserType = 2
-	UserTypeHosting    UserType = 3
-	UserTypeGovernment UserType = 4
-	UserTypeEducation  UserType = 5
-)
+	if databaseType := db.Metadata.DatabaseType; schemaType(databaseType) != schemaTypeGeoLite2City {
+		db.Close()
+		panic(fmt.Errorf("ip database %s has type \"%s\"; only \"%s\" is supported", path, databaseType, schemaTypeGeoLite2City))
+	}
+	return db, schemaTypeGeoLite2City
+}
 
 type IpInfo struct {
-	schemaType schemaType
 	// continent code is lowercase
 	ContinentCode string
 	Continent     string
 	// country code is lowercase
-	CountryCode    string
-	Country        string
-	Region         string
-	Regions        []string
-	City           string
-	Longitude      float64
-	Latitude       float64
-	Timezone       string
-	UserType       UserType
-	Organization   string
-	ASN            uint32
-	ASOrganization string
-	Hosting        bool
-	Privacy        bool
-	Virtual        bool
+	CountryCode string
+	Country     string
+	// the first subdivision. GeoLite2 lists subdivisions largest first
+	// (England, then Barnet), so this is the one a location is filed under
+	Region string
+	// every subdivision, largest first. Regions[i] names subdivision i and is
+	// empty when that subdivision has no English name
+	Regions   []string
+	City      string
+	Longitude float64
+	Latitude  float64
+	// the radius around the coordinates within which MaxMind places the
+	// address with 67% confidence, from a few km to 1000 for an address
+	// located only to its country. It is the genesis confidence of
+	// connect/GEOMAP.md §5. 0 when unknown
+	AccuracyRadiusKm int
+	Timezone         string
+	// GeoNames ids of the city, the first subdivision (`Region`) and the
+	// country; 0 when the record has no such place
+	CityGeonameId    uint32
+	RegionGeonameId  uint32
+	CountryGeonameId uint32
 }
 
-func (self *IpInfo) UnmarshalMaxMindDB(d *mmdbdata.Decoder) error {
-	switch self.schemaType {
-	case schemaTypeDbIpEnterprise:
-		return self.unmarshalDbIp(d)
-	case schemaTypeIpInfoCoreData:
-		return self.unmarshalIpInfo(d)
-	default:
-		return fmt.Errorf("Unknown schema type: %s", self.schemaType)
-	}
+// The part of a GeoLite2 City record that IpInfo keeps, for the library's
+// struct decoder (https://dev.maxmind.com/geoip/docs/databases/city-and-country/).
+// The decoder skips every key without a field here -- postal, registered and
+// represented country, and every language but `en` of each `names` map --
+// without decoding it. An integer stored at another unsigned width than the
+// field's still decodes, and one too large for its field is an error. So is
+// every other wrong type, except a place (or `names`) that is not a map,
+// which maxminddb-golang v2.4.1 does not reliably reject; only a corrupt file
+// has one (see TestIpInfoDecodeGeoLite2CityNonMapPlaceIsNotRejected).
+type geoLite2CityRecord struct {
+	City struct {
+		GeonameId uint32        `maxminddb:"geoname_id"`
+		Names     geoLite2Names `maxminddb:"names"`
+	} `maxminddb:"city"`
+	Continent struct {
+		Code  string        `maxminddb:"code"`
+		Names geoLite2Names `maxminddb:"names"`
+	} `maxminddb:"continent"`
+	Country struct {
+		GeonameId uint32        `maxminddb:"geoname_id"`
+		IsoCode   string        `maxminddb:"iso_code"`
+		Names     geoLite2Names `maxminddb:"names"`
+	} `maxminddb:"country"`
+	Location struct {
+		AccuracyRadius uint16  `maxminddb:"accuracy_radius"`
+		Latitude       float64 `maxminddb:"latitude"`
+		Longitude      float64 `maxminddb:"longitude"`
+		TimeZone       string  `maxminddb:"time_zone"`
+	} `maxminddb:"location"`
+	// largest first
+	Subdivisions []struct {
+		GeonameId uint32        `maxminddb:"geoname_id"`
+		Names     geoLite2Names `maxminddb:"names"`
+	} `maxminddb:"subdivisions"`
 }
 
-func (self *IpInfo) unmarshalDbIp(d *mmdbdata.Decoder) error {
-	// the following schema are supported:
-	// - `DBIP-Location-ISP (compat=Enterprise)`
-	//   https://db-ip.com/db/format/ip-to-location-isp/mmdb.html
-	mapIter, _, err := d.ReadMap()
-	if err != nil {
-		return err
-	}
-	for key, err := range mapIter {
-		if err != nil {
-			return err
-		}
-		// kind, err := d.PeekKind()
-		// if err != nil {
-		// 	return err
-		// }
-		// glog.Infof("[ip]decode key \"%s\" = %s\n", key, kind)
-		switch string(key) {
-		case "continent":
-			// readMap
-			// code
-			// names [en]
-			countryIter, _, err := d.ReadMap()
-			if err != nil {
-				return err
-			}
-			for countryKey, err := range countryIter {
-				if err != nil {
-					return err
-				}
-				switch string(countryKey) {
-				case "code":
-					continentCode, err := d.ReadString()
-					if err != nil {
-						return err
-					}
-					self.ContinentCode = strings.ToLower(continentCode)
-				case "names":
-					namesIter, _, err := d.ReadMap()
-					if err != nil {
-						return err
-					}
-					for namesKey, err := range namesIter {
-						if err != nil {
-							return err
-						}
-						switch string(namesKey) {
-						case "en":
-							self.Continent, err = d.ReadString()
-							if err != nil {
-								return err
-							}
-						default:
-							if err := d.SkipValue(); err != nil {
-								return err
-							}
-						}
-					}
-				default:
-					if err := d.SkipValue(); err != nil {
-						return err
-					}
-				}
-			}
-
-		case "country":
-			// readMap
-			// iso_code
-			// names [en]
-			countryIter, _, err := d.ReadMap()
-			if err != nil {
-				return err
-			}
-			for countryKey, err := range countryIter {
-				if err != nil {
-					return err
-				}
-				switch string(countryKey) {
-				case "iso_code":
-					countryCode, err := d.ReadString()
-					if err != nil {
-						return err
-					}
-					self.CountryCode = strings.ToLower(countryCode)
-				case "names":
-					namesIter, _, err := d.ReadMap()
-					if err != nil {
-						return err
-					}
-					for namesKey, err := range namesIter {
-						if err != nil {
-							return err
-						}
-						switch string(namesKey) {
-						case "en":
-							self.Country, err = d.ReadString()
-							if err != nil {
-								return err
-							}
-						default:
-							if err := d.SkipValue(); err != nil {
-								return err
-							}
-						}
-					}
-				default:
-					if err := d.SkipValue(); err != nil {
-						return err
-					}
-				}
-			}
-
-		case "subdivisions":
-			// map
-			// names [en]
-
-			subdivisionsIter, _, err := d.ReadSlice()
-			if err != nil {
-				return err
-			}
-			for err := range subdivisionsIter {
-				if err != nil {
-					return err
-				}
-
-				subdivisionIter, _, err := d.ReadMap()
-				if err != nil {
-					return err
-				}
-				for subdivisionKey, err := range subdivisionIter {
-					if err != nil {
-						return err
-					}
-					switch string(subdivisionKey) {
-					case "names":
-						namesIter, _, err := d.ReadMap()
-						if err != nil {
-							return err
-						}
-						for namesKey, err := range namesIter {
-							if err != nil {
-								return err
-							}
-							switch string(namesKey) {
-							case "en":
-								region, err := d.ReadString()
-								if err != nil {
-									return err
-								}
-								self.Regions = append(self.Regions, region)
-							default:
-								if err := d.SkipValue(); err != nil {
-									return err
-								}
-							}
-						}
-					default:
-						if err := d.SkipValue(); err != nil {
-							return err
-						}
-					}
-				}
-			}
-
-			if 0 < len(self.Regions) {
-				self.Region = self.Regions[0]
-			}
-
-		case "city":
-			// map
-			// names [en]
-
-			cityIter, _, err := d.ReadMap()
-			if err != nil {
-				return err
-			}
-			for cityKey, err := range cityIter {
-				if err != nil {
-					return err
-				}
-				switch string(cityKey) {
-				case "names":
-					namesIter, _, err := d.ReadMap()
-					if err != nil {
-						return err
-					}
-					for namesKey, err := range namesIter {
-						if err != nil {
-							return err
-						}
-						switch string(namesKey) {
-						case "en":
-							self.City, err = d.ReadString()
-							if err != nil {
-								return err
-							}
-						default:
-							if err := d.SkipValue(); err != nil {
-								return err
-							}
-						}
-					}
-				default:
-					if err := d.SkipValue(); err != nil {
-						return err
-					}
-				}
-			}
-
-		case "location":
-			// readMap
-			// latitude
-			// longitude
-			// timezone
-			locationIter, _, err := d.ReadMap()
-			if err != nil {
-				return err
-			}
-			for locationKey, err := range locationIter {
-				if err != nil {
-					return err
-				}
-				switch string(locationKey) {
-				case "latitude":
-					self.Latitude, err = d.ReadFloat64()
-					if err != nil {
-						return err
-					}
-				case "longitude":
-					self.Longitude, err = d.ReadFloat64()
-					if err != nil {
-						return err
-					}
-				case "timezone":
-					self.Timezone, err = d.ReadString()
-					if err != nil {
-						return err
-					}
-				default:
-					if err := d.SkipValue(); err != nil {
-						return err
-					}
-				}
-			}
-
-		case "traits":
-			// map
-			// user_type [business,residential,cellular,hosting]
-
-			traitsIter, _, err := d.ReadMap()
-			if err != nil {
-				return err
-			}
-			for traitsKey, err := range traitsIter {
-				if err != nil {
-					return err
-				}
-				switch string(traitsKey) {
-				case "user_type":
-					userType, err := d.ReadString()
-					if err != nil {
-						return err
-					}
-					switch userType {
-					case "residential":
-					case "cellular":
-						self.UserType = UserTypeConsumer
-					case "business":
-						self.UserType = UserTypeBusiness
-					case "hosting":
-						self.UserType = UserTypeHosting
-						self.Hosting = true
-					default:
-						self.UserType = UserTypeUnknown
-					}
-				case "organization":
-					self.Organization, err = d.ReadString()
-					if err != nil {
-						return err
-					}
-				case "autonomous_system_number":
-					self.ASN, err = d.ReadUint32()
-					if err != nil {
-						return err
-					}
-				case "autonomous_system_organization":
-					self.ASOrganization, err = d.ReadString()
-					if err != nil {
-						return err
-					}
-				default:
-					if err := d.SkipValue(); err != nil {
-						return err
-					}
-				}
-			}
-
-		default:
-			// glog.Infof("[ip]decode skip key \"%s\"\n", key)
-			if err := d.SkipValue(); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func (self *IpInfo) unmarshalIpInfo(d *mmdbdata.Decoder) error {
-	// the following schema are supported:
-	// - `ipinfo bundle_location_core.mmdb`
-	//    https://ipinfo.io/developers/ipinfo-core-database
-	mapIter, _, err := d.ReadMap()
-	if err != nil {
-		return err
-	}
-	for key, err := range mapIter {
-		if err != nil {
-			return err
-		}
-
-		switch string(key) {
-		case "continent_code":
-			continentCode, err := d.ReadString()
-			if err != nil {
-				return err
-			}
-			self.ContinentCode = strings.ToLower(continentCode)
-		case "continent":
-			self.Continent, err = d.ReadString()
-			if err != nil {
-				return err
-			}
-		case "country_code":
-			countryCode, err := d.ReadString()
-			if err != nil {
-				return err
-			}
-			self.CountryCode = strings.ToLower(countryCode)
-		case "country":
-			self.Country, err = d.ReadString()
-			if err != nil {
-				return err
-			}
-		case "region":
-			region, err := d.ReadString()
-			if err != nil {
-				return err
-			}
-			self.Region = region
-			self.Regions = []string{region}
-		case "city":
-			self.City, err = d.ReadString()
-			if err != nil {
-				return err
-			}
-		case "longitude":
-			self.Longitude, err = d.ReadFloat64()
-			if err != nil {
-				return err
-			}
-		case "latitude":
-			self.Latitude, err = d.ReadFloat64()
-			if err != nil {
-				return err
-			}
-		case "as_type":
-			asType, err := d.ReadString()
-			if err != nil {
-				return err
-			}
-			var userType UserType
-			switch strings.ToLower(asType) {
-			case "isp":
-				userType = UserTypeConsumer
-			case "hosting":
-				userType = UserTypeHosting
-			case "business":
-				userType = UserTypeBusiness
-			case "government":
-				userType = UserTypeGovernment
-			case "education":
-				userType = UserTypeEducation
-			default:
-				userType = UserTypeUnknown
-			}
-			self.UserType = userType
-		case "asn":
-			asnStr, err := d.ReadString()
-			if err != nil {
-				return err
-			}
-			_, err = fmt.Sscanf(asnStr, "AS%d", &self.ASN)
-			if err != nil {
-				return err
-			}
-		case "is_hosting":
-			self.Hosting, err = d.ReadBool()
-			if err != nil {
-				return err
-			}
-		case "is_satellite":
-			satellite, err := d.ReadBool()
-			if err != nil {
-				return err
-			}
-			if satellite {
-				self.Virtual = true
-			}
-		case "is_anonymous":
-			self.Privacy, err = d.ReadBool()
-			if err != nil {
-				return err
-			}
-		default:
-			// glog.Infof("[ip]decode skip key \"%s\"\n", key)
-			if err := d.SkipValue(); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
+// A `names` map with only the English name decoded.
+type geoLite2Names struct {
+	En string `maxminddb:"en"`
 }
 
 // test/simulation ip overrides
@@ -712,8 +337,8 @@ func (self *IpInfo) unmarshalIpInfo(d *mmdbdata.Decoder) error {
 // `ip_overrides` in settings (config or site settings.yml) defines subnets
 // whose ip info is served from configuration instead of the packaged mmdb
 // databases. Local simulation environments (e.g. sim-latency) use this to
-// give fake testing subnets a location and net type; production settings do
-// not define the key, so the packaged databases serve every lookup.
+// give fake testing subnets a location; production settings do not define
+// the key, so the packaged databases serve every lookup.
 //
 //	ip_overrides:
 //	  - subnet: "198.18.0.0/16"
@@ -723,11 +348,14 @@ func (self *IpInfo) unmarshalIpInfo(d *mmdbdata.Decoder) error {
 //	    city: "Sim"
 //
 // optional fields: continent, continent_code, latitude, longitude, timezone,
-// hosting, privacy, virtual. An overridden subnet also short-circuits
-// `GetArinInfo` with a non-foreign org, so the net type is fully determined
-// by the settings entry. Malformed entries panic at first lookup: an override
-// is only ever present deliberately, and a silently skipped entry would make
-// a simulation quietly wrong.
+// accuracy_radius_km, city_geoname_id, region_geoname_id, country_geoname_id.
+// `hosting`, `privacy` and `virtual` are still accepted so that existing
+// settings keep loading, but they are ignored: no ip lookup yields those
+// verdicts any more (the egress prober is their only source). An overridden
+// subnet also short-circuits `GetArinInfo` with a non-foreign org, so an
+// overridden address never scores as foreign either. Malformed entries panic
+// at first lookup: an override is only ever present deliberately, and a
+// silently skipped entry would make a simulation quietly wrong.
 type ipOverride struct {
 	prefix netip.Prefix
 	ipInfo IpInfo
@@ -765,15 +393,6 @@ func parseIpOverrides(settingsObj any) []*ipOverride {
 			}
 			return ""
 		}
-		boolValue := func(key string) bool {
-			if v, ok := entry[key]; ok {
-				if b, ok := v.(bool); ok {
-					return b
-				}
-				panic(fmt.Errorf("ip_overrides %s must be a bool", key))
-			}
-			return false
-		}
 		floatValue := func(key string) float64 {
 			if v, ok := entry[key]; ok {
 				switch f := v.(type) {
@@ -786,16 +405,30 @@ func parseIpOverrides(settingsObj any) []*ipOverride {
 			}
 			return 0
 		}
+		intValue := func(key string) int {
+			if v, ok := entry[key]; ok {
+				if i, ok := v.(int); ok && 0 <= i {
+					return i
+				}
+				panic(fmt.Errorf("ip_overrides %s must be a non-negative integer", key))
+			}
+			return 0
+		}
+		uint32Value := func(key string) uint32 {
+			if v, ok := entry[key]; ok {
+				if i, ok := v.(int); ok && 0 <= i && uint64(i) <= math.MaxUint32 {
+					return uint32(i)
+				}
+				panic(fmt.Errorf("ip_overrides %s must be an integer from 0 to %d", key, uint64(math.MaxUint32)))
+			}
+			return 0
+		}
 
 		prefix, err := netip.ParsePrefix(stringValue("subnet"))
 		if err != nil {
 			panic(fmt.Errorf("ip_overrides subnet %q: %w", stringValue("subnet"), err))
 		}
 
-		userType := UserTypeConsumer
-		if boolValue("hosting") {
-			userType = UserTypeHosting
-		}
 		region := stringValue("region")
 		regions := []string{}
 		if region != "" {
@@ -804,20 +437,20 @@ func parseIpOverrides(settingsObj any) []*ipOverride {
 		overrides = append(overrides, &ipOverride{
 			prefix: prefix,
 			ipInfo: IpInfo{
-				ContinentCode: strings.ToLower(stringValue("continent_code")),
-				Continent:     stringValue("continent"),
-				CountryCode:   strings.ToLower(stringValue("country_code")),
-				Country:       stringValue("country"),
-				Region:        region,
-				Regions:       regions,
-				City:          stringValue("city"),
-				Longitude:     floatValue("longitude"),
-				Latitude:      floatValue("latitude"),
-				Timezone:      stringValue("timezone"),
-				UserType:      userType,
-				Hosting:       boolValue("hosting"),
-				Privacy:       boolValue("privacy"),
-				Virtual:       boolValue("virtual"),
+				ContinentCode:    strings.ToLower(stringValue("continent_code")),
+				Continent:        stringValue("continent"),
+				CountryCode:      strings.ToLower(stringValue("country_code")),
+				Country:          stringValue("country"),
+				Region:           region,
+				Regions:          regions,
+				City:             stringValue("city"),
+				Longitude:        floatValue("longitude"),
+				Latitude:         floatValue("latitude"),
+				AccuracyRadiusKm: intValue("accuracy_radius_km"),
+				Timezone:         stringValue("timezone"),
+				CityGeonameId:    uint32Value("city_geoname_id"),
+				RegionGeonameId:  uint32Value("region_geoname_id"),
+				CountryGeonameId: uint32Value("country_geoname_id"),
 			},
 		})
 	}
@@ -829,6 +462,7 @@ func ipOverrideFor(addr netip.Addr) *IpInfo {
 		if override.prefix.Contains(addr) {
 			// copy so callers cannot mutate the shared template
 			ipInfo := override.ipInfo
+			ipInfo.Regions = slices.Clone(ipInfo.Regions)
 			return &ipInfo
 		}
 	}
@@ -855,22 +489,60 @@ func GetIpInfoFromIp(ip net.IP) (*IpInfo, error) {
 	}
 }
 
+// Resolves addr from the `ip_overrides` settings when a subnet there covers
+// it, and from GeoLite2 otherwise.
+//
+// An address GeoLite2 has no record for (reserved, private or unannounced
+// space) is not an error. The result is an empty IpInfo, as it was with the
+// databases before, and callers read its empty CountryCode as unknown;
+// GetLocationForIp, which cannot classify an empty location, errors then.
 func GetIpInfo(addr netip.Addr) (*IpInfo, error) {
 	if ipInfo := ipOverrideFor(addr); ipInfo != nil {
 		return ipInfo, nil
 	}
 
 	ipDb, schemaType := ipDb()
+	return lookupIpInfo(ipDb, schemaType, addr)
+}
 
-	r := ipDb.Lookup(addr)
-	ipInfo := IpInfo{
-		schemaType: schemaType,
+// Reads addr from db, opened as schemaType by openIpDb.
+func lookupIpInfo(db *mmdb.Reader, schemaType schemaType, addr netip.Addr) (*IpInfo, error) {
+	switch schemaType {
+	case schemaTypeGeoLite2City:
+		// a record-less address leaves the record empty, and an empty
+		// record is an empty IpInfo
+		var record geoLite2CityRecord
+		if err := db.Lookup(addr).Decode(&record); err != nil {
+			return nil, err
+		}
+		ipInfo := &IpInfo{
+			ContinentCode:    strings.ToLower(record.Continent.Code),
+			Continent:        record.Continent.Names.En,
+			CountryCode:      strings.ToLower(record.Country.IsoCode),
+			Country:          record.Country.Names.En,
+			City:             record.City.Names.En,
+			Longitude:        record.Location.Longitude,
+			Latitude:         record.Location.Latitude,
+			AccuracyRadiusKm: int(record.Location.AccuracyRadius),
+			Timezone:         record.Location.TimeZone,
+			CityGeonameId:    record.City.GeonameId,
+			CountryGeonameId: record.Country.GeonameId,
+		}
+		if 0 < len(record.Subdivisions) {
+			regions := make([]string, len(record.Subdivisions))
+			for i, subdivision := range record.Subdivisions {
+				regions[i] = subdivision.Names.En
+			}
+			// the region and its id always describe the same subdivision,
+			// even when that subdivision has no English name
+			ipInfo.Region = regions[0]
+			ipInfo.Regions = regions
+			ipInfo.RegionGeonameId = record.Subdivisions[0].GeonameId
+		}
+		return ipInfo, nil
+	default:
+		return nil, fmt.Errorf("Unknown schema type: %s", schemaType)
 	}
-	err := r.Decode(&ipInfo)
-	if err != nil {
-		return nil, err
-	}
-	return &ipInfo, nil
 }
 
 var HostLatituteLongitude = sync.OnceValues(func() (latitude float64, longitude float64) {

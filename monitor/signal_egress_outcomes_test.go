@@ -15,6 +15,7 @@ func syntheticEgressOutcomeRow(snapshot egressOutcomeSnapshot) Row {
 		snapshot.eligible, snapshot.observed, snapshot.successes, snapshot.failures,
 		snapshot.tunnelFailed, snapshot.contractFailed, snapshot.noConsensus,
 		snapshot.locateFailed, snapshot.notConfident, snapshot.submitFailed,
+		snapshot.healthNotRun, snapshot.runNotMeasured, snapshot.noExitIp, snapshot.runBatchGuard,
 		snapshot.unknownFailure, snapshot.inconsistent, snapshot.unobserved,
 		snapshot.newestOutcomeAgeSeconds, snapshot.oldestOutcomeAgeSeconds,
 	}
@@ -146,6 +147,16 @@ func TestEgressOutcomesWarnsOnMixedFleetFailureWithoutCommonCauseClaim(t *testin
 	if got := requireAlertClassCount(alerts, "egress-common-mode"); got != 0 {
 		t.Fatalf("mixed failures also emitted %d common-mode alerts", got)
 	}
+	// the retired vendor geolocation has no health left to inspect; the
+	// prober's own exit and attempt evidence and the site pool signal replace it
+	for _, evidence := range []string{"exit placements", "no_exit_ip", "run_not_measured", "health_not_run", "run_batch_guard", "§2.19b"} {
+		if !strings.Contains(alert.Action, evidence) {
+			t.Errorf("mixed failure action omits %q: %s", evidence, alert.Action)
+		}
+	}
+	if strings.Contains(strings.ToLower(alert.Markdown()), "geolocation") {
+		t.Errorf("mixed failure points at the retired vendor geolocation:\n%s", alert.Markdown())
+	}
 }
 
 func TestEgressOutcomesUnknownClassesCannotManufactureDominance(t *testing.T) {
@@ -229,7 +240,7 @@ func TestEgressOutcomesRejectsMalformedOrContradictoryAggregate(t *testing.T) {
 		})}},
 		{name: "inverted ages", rows: []Row{func() Row {
 			row := syntheticEgressOutcomeRow(valid)
-			row[13], row[14] = "30", "20"
+			row[17], row[18] = "30", "20"
 			return row
 		}()}},
 	}
@@ -285,4 +296,33 @@ func requireAlertClassCount(alerts []Alert, class string) int {
 		}
 	}
 	return count
+}
+
+// The classes the current prober reports (connect/GEOMAP.md §11.3) are in the
+// bounded vocabulary: a fleet reporting them is not an unknown-class alert, and
+// a common one is attributed with its own action.
+func TestEgressOutcomesKnowsTheCurrentProberClasses(t *testing.T) {
+	alerts := runSyntheticEgressOutcomes(t, egressOutcomeSnapshot{
+		eligible: 100, observed: 100, successes: 80, failures: 20,
+		healthNotRun: 5, runNotMeasured: 5, noExitIp: 5, runBatchGuard: 5,
+		newestOutcomeAgeSeconds: 60, oldestOutcomeAgeSeconds: 3600,
+	})
+	if len(alerts) != 0 {
+		t.Fatalf("current prober classes produced alerts = %+v", alerts)
+	}
+	query := egressOutcomesQuery()
+	for _, class := range []string{"health_not_run", "run_not_measured", "no_exit_ip", model.ProbeRunBatchGuardClass} {
+		if !strings.Contains(query, "WHEN '"+class+"' THEN '"+class+"'") {
+			t.Errorf("egress outcome query does not keep the class %s", class)
+		}
+	}
+
+	alerts = runSyntheticEgressOutcomes(t, egressOutcomeSnapshot{
+		eligible: 20, observed: 20, successes: 1, failures: 19,
+		noExitIp: 19, newestOutcomeAgeSeconds: 30, oldestOutcomeAgeSeconds: 600,
+	})
+	alert := requireAlertClass(t, alerts, "egress-common-mode")
+	if !strings.Contains(alert.Markdown(), "/ip echo") || !strings.Contains(alert.Observed, "no_exit_ip=19") {
+		t.Fatalf("a common no_exit_ip failure was not attributed to the echo:\n%s", alert.Markdown())
+	}
 }

@@ -266,6 +266,34 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "account_payment_block_rollup_pending", requiredVersion: 689, rowColumn: 100},
 	{name: "account_point_payment_rollup", requiredVersion: 690, rowColumn: 101},
 	{name: "competition staging best-safe winner and review isolation", requiredVersion: 691, rowColumn: 102},
+	{name: "location.geoname_id", requiredVersion: 692, rowColumn: 103},
+	{name: "location_geoname_id", requiredVersion: 693, rowColumn: 104},
+	{name: "network_ping table and primary key", requiredVersion: 694, removedVersion: 714, rowColumn: 105},
+	{name: "network_ping_target_pinger_nonce replay index", requiredVersion: 695, removedVersion: 714, rowColumn: 106},
+	{name: "network_ping_create_time retention index", requiredVersion: 696, removedVersion: 714, rowColumn: 107},
+	{name: "network_ping_target_extender_id_create_time target lookup index", requiredVersion: 697, removedVersion: 714, rowColumn: 108},
+	{name: "network_ping_pinger_kind_pinger_id_create_time pinger lookup index", requiredVersion: 698, removedVersion: 714, rowColumn: 109},
+	{name: "network_client_location.accuracy_km", requiredVersion: 699, rowColumn: 110},
+	{name: "network_extender_activation.accuracy_km", requiredVersion: 700, rowColumn: 111},
+	{name: "network_ping.hop_count", requiredVersion: 701, rowColumn: 112},
+	{name: "derived_location table and node primary key", requiredVersion: 702, rowColumn: 113},
+	{name: "network_client_location.genesis_location_id", requiredVersion: 703, rowColumn: 114},
+	{name: "network_client_location_reliability.egress_index", requiredVersion: 704, rowColumn: 115},
+	{name: "network_client_location_reliability.egress_quality", requiredVersion: 705, rowColumn: 116},
+	{name: "network_client_location_reliability.egress_evidence_time", requiredVersion: 706, rowColumn: 117},
+	{name: "provider_blackhole_check.consecutive_failures", requiredVersion: 707, rowColumn: 118},
+	{name: "provider_blackhole_check.first_failed_at", requiredVersion: 708, rowColumn: 119},
+	{name: "provider_blackhole_check.next_due_at", requiredVersion: 709, rowColumn: 120},
+	{name: "provider_egress_health unscored-load columns", requiredVersion: 710, rowColumn: 121},
+	{name: "provider_egress_destination table and name primary key", requiredVersion: 711, rowColumn: 122},
+	{name: "provider_egress_site_tally table and day/site/place primary key", requiredVersion: 712, rowColumn: 123},
+	{name: "provider_egress_place_tally table and day/place primary key", requiredVersion: 713, rowColumn: 124},
+	{name: "network_ping day partitions, replay key and read indexes", requiredVersion: 714, rowColumn: 125},
+	{name: "network_ping_legacy removed", requiredVersion: 715, rowColumn: 126},
+	{name: "network_ping_hour_tally table and hour tally key", requiredVersion: 716, rowColumn: 127},
+	{name: "network_ping_pinger_day day partitions and pinger key", requiredVersion: 717, rowColumn: 128},
+	{name: "network_ping_target_day day partitions and target key", requiredVersion: 718, rowColumn: 129},
+	{name: "network_ping_target_hour_tally day partitions and target hour key", requiredVersion: 719, rowColumn: 130},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -1464,7 +1492,504 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND definition = 'CREATE INDEX account_point_payment_rollup ON public.account_point USING btree (account_payment_id) WHERE ((account_payment_id IS NOT NULL) AND (point_value > 0))'
 		             AND indisvalid AND indisready
 		       ),
-		       `+competitionStagingBestWinnerArtifactQuery+`
+		       `+competitionStagingBestWinnerArtifactQuery+`,
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'location'
+		             AND column_name = 'geoname_id'
+		             AND data_type = 'bigint' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'location'
+		             AND index_name = 'location_geoname_id'
+		             AND definition = 'CREATE UNIQUE INDEX location_geoname_id ON public.location USING btree (geoname_id) WHERE (geoname_id IS NOT NULL)'
+		             AND predicate_definition = '(geoname_id IS NOT NULL)'
+		             AND indisvalid AND indisready
+		       ),
+		       (
+		           to_regclass('public.network_ping') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 12
+		               FROM (VALUES
+		                   ('ping_id', 'uuid', 'NO', NULL::text[]),
+		                   ('pinger_kind', 'smallint', 'NO', NULL),
+		                   ('pinger_id', 'uuid', 'NO', NULL),
+		                   ('target_extender_id', 'uuid', 'NO', NULL),
+		                   ('probe_nonce', 'bytea', 'NO', NULL),
+		                   ('rtt_ms', 'integer', 'NO', NULL),
+		                   ('probe_time', 'timestamp without time zone', 'NO', NULL),
+		                   ('cosign', 'smallint', 'NO', NULL),
+		                   ('cosign_reason', 'smallint', 'NO', ARRAY['0', '0::smallint', '''0''::smallint']),
+		                   ('pinger_signature', 'bytea', 'NO', NULL),
+		                   ('cosignature', 'bytea', 'YES', NULL),
+		                   ('create_time', 'timestamp without time zone', 'NO', ARRAY['now()'])
+		               ) AS expected(column_name, data_type, is_nullable, column_defaults)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_ping'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		                     AND (
+		                         (expected.column_defaults IS NULL AND actual.column_default IS NULL)
+		                         OR actual.column_default = ANY(expected.column_defaults)
+		                     )
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'network_ping'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (ping_id)'
+		                 AND validated
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_ping'
+		             AND index_name = 'network_ping_target_pinger_nonce'
+		             AND definition = 'CREATE UNIQUE INDEX network_ping_target_pinger_nonce ON public.network_ping USING btree (target_extender_id, pinger_kind, pinger_id, probe_nonce)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_ping'
+		             AND index_name = 'network_ping_create_time'
+		             AND definition = 'CREATE INDEX network_ping_create_time ON public.network_ping USING btree (create_time)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_ping'
+		             AND index_name = 'network_ping_target_extender_id_create_time'
+		             AND definition = 'CREATE INDEX network_ping_target_extender_id_create_time ON public.network_ping USING btree (target_extender_id, create_time)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_ping'
+		             AND index_name = 'network_ping_pinger_kind_pinger_id_create_time'
+		             AND definition = 'CREATE INDEX network_ping_pinger_kind_pinger_id_create_time ON public.network_ping USING btree (pinger_kind, pinger_id, create_time)'
+		             AND predicate_definition IS NULL
+		             AND indisvalid AND indisready
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_client_location'
+		             AND column_name = 'accuracy_km'
+		             AND data_type = 'real' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_extender_activation'
+		             AND column_name = 'accuracy_km'
+		             AND data_type = 'real' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_ping'
+		             AND column_name = 'hop_count'
+		             AND data_type = 'smallint' AND is_nullable = 'NO'
+		             AND column_default IN ('0', '0::smallint', '''0''::smallint')
+		       ),
+		       (
+		           to_regclass('public.derived_location') IS NOT NULL
+		           AND (
+		               SELECT count(*) = 20
+		               FROM (VALUES
+		                   ('node_kind', 'smallint'),
+		                   ('node_id', 'uuid'),
+		                   ('genesis_latitude', 'double precision'),
+		                   ('genesis_longitude', 'double precision'),
+		                   ('genesis_accuracy_km', 'real'),
+		                   ('delta_latitude', 'double precision'),
+		                   ('delta_longitude', 'double precision'),
+		                   ('latitude', 'double precision'),
+		                   ('longitude', 'double precision'),
+		                   ('ping_count', 'integer'),
+		                   ('peer_count', 'integer'),
+		                   ('residual_km', 'real'),
+		                   ('reputation', 'real'),
+		                   ('crossed_region', 'boolean'),
+		                   ('crossed_country', 'boolean'),
+		                   ('location_id', 'uuid'),
+		                   ('city_location_id', 'uuid'),
+		                   ('region_location_id', 'uuid'),
+		                   ('country_location_id', 'uuid'),
+		                   ('update_time', 'timestamp without time zone')
+		               ) AS expected(column_name, data_type)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'derived_location'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = 'NO'
+		                     AND actual.column_default IS NULL
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'derived_location'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (node_kind, node_id)'
+		                 AND validated
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_client_location'
+		             AND column_name = 'genesis_location_id'
+		             AND data_type = 'uuid' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_client_location_reliability'
+		             AND column_name = 'egress_index'
+		             AND data_type = 'smallint' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_client_location_reliability'
+		             AND column_name = 'egress_quality'
+		             AND data_type = 'boolean' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'network_client_location_reliability'
+		             AND column_name = 'egress_evidence_time'
+		             AND data_type = 'timestamp without time zone' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'provider_blackhole_check'
+		             AND column_name = 'consecutive_failures'
+		             AND data_type = 'integer' AND is_nullable = 'NO'
+		             AND column_default IN ('0', '0::integer', '''0''::integer')
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'provider_blackhole_check'
+		             AND column_name = 'first_failed_at'
+		             AND data_type = 'timestamp without time zone' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM information_schema.columns
+		           WHERE table_schema = 'public' AND table_name = 'provider_blackhole_check'
+		             AND column_name = 'next_due_at'
+		             AND data_type = 'timestamp without time zone' AND is_nullable = 'YES'
+		             AND column_default IS NULL
+		       ),
+		       (
+		           SELECT count(*) = 6
+		           FROM (VALUES
+		               ('not_measured_count', 'integer'),
+		               ('not_measured_names', 'text'),
+		               ('canary_passed_names', 'text'),
+		               ('canary_failed_names', 'text'),
+		               ('short_classes', 'text'),
+		               ('unscored_failed_names', 'text')
+		           ) AS expected(column_name, data_type)
+		           WHERE EXISTS (
+		               SELECT 1 FROM information_schema.columns AS actual
+		               WHERE actual.table_schema = 'public'
+		                 AND actual.table_name = 'provider_egress_health'
+		                 AND actual.column_name = expected.column_name
+		                 AND actual.data_type = expected.data_type
+		                 AND actual.is_nullable = 'NO'
+		                 AND actual.column_default IN ('0', '0::integer', '''''::text')
+		           )
+		       ),
+		       (
+		           (
+		               SELECT count(*) = 25
+		               FROM information_schema.columns
+		               WHERE table_schema = 'public' AND table_name = 'provider_egress_destination'
+		           )
+		           AND (
+		               SELECT count(*) = 9
+		               FROM (VALUES
+		                   ('name', 'character varying', 'NO'),
+		                   ('class', 'character varying', 'NO'),
+		                   ('url', 'character varying', 'NO'),
+		                   ('incompatible', 'jsonb', 'NO'),
+		                   ('verify', 'jsonb', 'NO'),
+		                   ('active', 'boolean', 'NO'),
+		                   ('probation', 'boolean', 'NO'),
+		                   ('retired_time', 'timestamp without time zone', 'YES'),
+		                   ('above_retire_since', 'timestamp without time zone', 'YES')
+		               ) AS expected(column_name, data_type, is_nullable)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'provider_egress_destination'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'provider_egress_destination'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (name)'
+		                 AND validated
+		           )
+		       ),
+		       (
+		           (
+		               SELECT count(*) = 11
+		               FROM information_schema.columns
+		               WHERE table_schema = 'public' AND table_name = 'provider_egress_site_tally'
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'provider_egress_site_tally'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (tally_day, name, country_code, region)'
+		                 AND validated
+		           )
+		       ),
+		       (
+		           (
+		               SELECT count(*) = 7
+		               FROM information_schema.columns
+		               WHERE table_schema = 'public' AND table_name = 'provider_egress_place_tally'
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'provider_egress_place_tally'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (tally_day, country_code, region)'
+		                 AND validated
+		           )
+		       ),
+		       (
+		           EXISTS (
+		               SELECT 1
+		               FROM pg_class AS relation
+		               JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+		               WHERE namespace.nspname = 'public'
+		                 AND relation.relname = 'network_ping'
+		                 AND relation.relkind = 'p'
+		                 AND pg_get_partkeydef(relation.oid) = 'RANGE (create_time)'
+		           )
+		           AND (
+		               SELECT count(*) = 13
+		               FROM (VALUES
+		                   ('ping_id', 'uuid', 'NO', NULL::text[]),
+		                   ('pinger_kind', 'smallint', 'NO', NULL),
+		                   ('pinger_id', 'uuid', 'NO', NULL),
+		                   ('target_extender_id', 'uuid', 'NO', NULL),
+		                   ('probe_nonce', 'bytea', 'NO', NULL),
+		                   ('rtt_ms', 'integer', 'NO', NULL),
+		                   ('probe_time', 'timestamp without time zone', 'NO', NULL),
+		                   ('cosign', 'smallint', 'NO', NULL),
+		                   ('cosign_reason', 'smallint', 'NO', ARRAY['0', '0::smallint', '''0''::smallint']),
+		                   ('pinger_signature', 'bytea', 'NO', NULL),
+		                   ('cosignature', 'bytea', 'YES', NULL),
+		                   ('create_time', 'timestamp without time zone', 'NO', ARRAY['now()']),
+		                   ('hop_count', 'smallint', 'NO', ARRAY['0', '0::smallint', '''0''::smallint'])
+		               ) AS expected(column_name, data_type, is_nullable, column_defaults)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_ping'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = expected.is_nullable
+		                     AND (
+		                         (expected.column_defaults IS NULL AND actual.column_default IS NULL)
+		                         OR actual.column_default = ANY(expected.column_defaults)
+		                     )
+		               )
+		           )
+		           AND (
+		               SELECT count(*) = 3
+		               FROM (VALUES
+		                   ('network_ping_target_pinger_nonce', 'CREATE UNIQUE INDEX network_ping_target_pinger_nonce ON ONLY public.network_ping USING btree (target_extender_id, pinger_kind, pinger_id, probe_nonce, create_time)'),
+		                   ('network_ping_target_extender_id_create_time', 'CREATE INDEX network_ping_target_extender_id_create_time ON ONLY public.network_ping USING btree (target_extender_id, create_time)'),
+		                   ('network_ping_pinger_kind_pinger_id_create_time', 'CREATE INDEX network_ping_pinger_kind_pinger_id_create_time ON ONLY public.network_ping USING btree (pinger_kind, pinger_id, create_time)')
+		               ) AS expected(index_name, definition)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM index_artifact AS actual
+		                   WHERE actual.table_name = 'network_ping'
+		                     AND actual.index_name = expected.index_name
+		                     AND actual.definition = expected.definition
+		                     AND actual.predicate_definition IS NULL
+		                     AND actual.indisvalid AND actual.indisready
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM pg_inherits AS inheritance
+		               WHERE inheritance.inhparent = to_regclass('public.network_ping')
+		           )
+		           AND NOT EXISTS (
+		               SELECT 1
+		               FROM pg_inherits AS inheritance
+		               JOIN pg_class AS partition_relation ON partition_relation.oid = inheritance.inhrelid
+		               LEFT JOIN LATERAL (
+		                   SELECT (matched.value)[1]::timestamp AS lower_bound,
+		                          (matched.value)[2]::timestamp AS upper_bound
+		                   FROM regexp_match(
+		                       pg_get_expr(partition_relation.relpartbound, partition_relation.oid),
+		                       '^FOR VALUES FROM \(''([^'']*)''\) TO \(''([^'']*)''\)$'
+		                   ) AS matched(value)
+		               ) AS bound ON true
+		               WHERE inheritance.inhparent = to_regclass('public.network_ping')
+		                 AND NOT coalesce(
+		                     partition_relation.relkind = 'r'
+		                     AND bound.lower_bound = date_trunc('day', bound.lower_bound)
+		                     AND bound.upper_bound = bound.lower_bound + interval '1 day'
+		                     AND partition_relation.relname = 'network_ping_p' || to_char(bound.lower_bound, 'YYYYMMDD'),
+		                     false
+		                 )
+		           )
+		       ),
+		       to_regclass('public.network_ping_legacy') IS NULL,
+		       (
+		           COALESCE((
+		               SELECT relkind = 'r'
+		               FROM pg_class WHERE oid = to_regclass('public.network_ping_hour_tally')
+		           ), false)
+		           AND (
+		               SELECT count(*) = 9
+		               FROM (VALUES
+				   ('hour', 'timestamp without time zone'),
+				   ('shard', 'smallint'),
+				   ('pinger_kind', 'smallint'),
+				   ('relayed', 'boolean'),
+				   ('cosign', 'smallint'),
+				   ('cosign_reason', 'smallint'),
+				   ('ping_count', 'bigint'),
+				   ('zero_rtt_count', 'bigint'),
+				   ('beyond_half_planet_count', 'bigint')
+		               ) AS expected(column_name, data_type)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_ping_hour_tally'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = 'NO'
+		                     AND actual.column_default IS NULL
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'network_ping_hour_tally'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (hour, shard, pinger_kind, relayed, cosign, cosign_reason)'
+		                 AND validated
+		           )
+		       ),
+		       (
+		           COALESCE((
+		               SELECT relkind = 'p' AND pg_get_partkeydef(oid) = 'RANGE (day)'
+		               FROM pg_class WHERE oid = to_regclass('public.network_ping_pinger_day')
+		           ), false)
+		           AND (
+		               SELECT count(*) = 3
+		               FROM (VALUES
+				   ('day', 'date'),
+				   ('pinger_kind', 'smallint'),
+				   ('pinger_id', 'uuid')
+		               ) AS expected(column_name, data_type)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_ping_pinger_day'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = 'NO'
+		                     AND actual.column_default IS NULL
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'network_ping_pinger_day'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (day, pinger_kind, pinger_id)'
+		                 AND validated
+		           )
+		           AND `+migrationDayPartitionsArtifactQuery("network_ping_pinger_day")+`
+		       ),
+		       (
+		           COALESCE((
+		               SELECT relkind = 'p' AND pg_get_partkeydef(oid) = 'RANGE (day)'
+		               FROM pg_class WHERE oid = to_regclass('public.network_ping_target_day')
+		           ), false)
+		           AND (
+		               SELECT count(*) = 2
+		               FROM (VALUES
+				   ('day', 'date'),
+				   ('target_extender_id', 'uuid')
+		               ) AS expected(column_name, data_type)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_ping_target_day'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = 'NO'
+		                     AND actual.column_default IS NULL
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'network_ping_target_day'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (day, target_extender_id)'
+		                 AND validated
+		           )
+		           AND `+migrationDayPartitionsArtifactQuery("network_ping_target_day")+`
+		       ),
+		       (
+		           COALESCE((
+		               SELECT relkind = 'p' AND pg_get_partkeydef(oid) = 'RANGE (hour)'
+		               FROM pg_class WHERE oid = to_regclass('public.network_ping_target_hour_tally')
+		           ), false)
+		           AND (
+		               SELECT count(*) = 5
+		               FROM (VALUES
+				   ('hour', 'timestamp without time zone'),
+				   ('target_extender_id', 'uuid'),
+				   ('pinger_kind', 'smallint'),
+				   ('ping_count', 'bigint'),
+				   ('rejection_count', 'bigint')
+		               ) AS expected(column_name, data_type)
+		               WHERE EXISTS (
+		                   SELECT 1 FROM information_schema.columns AS actual
+		                   WHERE actual.table_schema = 'public'
+		                     AND actual.table_name = 'network_ping_target_hour_tally'
+		                     AND actual.column_name = expected.column_name
+		                     AND actual.data_type = expected.data_type
+		                     AND actual.is_nullable = 'NO'
+		                     AND actual.column_default IS NULL
+		               )
+		           )
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'network_ping_target_hour_tally'
+		                 AND constraint_type = 'p'
+		                 AND definition = 'PRIMARY KEY (hour, target_extender_id, pinger_kind)'
+		                 AND validated
+		           )
+		           AND `+migrationDayPartitionsArtifactQuery("network_ping_target_hour_tally")+`
+		       )
 		FROM version;
 	`)
 	if err != nil {
@@ -1564,6 +2089,40 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 	}
 
 	return findings, nil
+}
+
+// The day-partition contract of network_ping's tallies kept by day (GEOMAP
+// §5.7): at least one partition, and every partition of `table` a plain table
+// named for the day it covers and covering exactly that day
+// (network_ping_pinger_day_p20260924 holds 2026-09-24). A bound is read back
+// from pg_get_expr's text and cast in the same session, so the check holds
+// under any date style.
+func migrationDayPartitionsArtifactQuery(table string) string {
+	return fmt.Sprintf(`EXISTS (
+		               SELECT 1 FROM pg_inherits AS inheritance
+		               WHERE inheritance.inhparent = to_regclass('public.%[1]s')
+		           )
+		           AND NOT EXISTS (
+		               SELECT 1
+		               FROM pg_inherits AS inheritance
+		               JOIN pg_class AS partition_relation ON partition_relation.oid = inheritance.inhrelid
+		               LEFT JOIN LATERAL (
+		                   SELECT (matched.value)[1]::timestamp AS lower_bound,
+		                          (matched.value)[2]::timestamp AS upper_bound
+		                   FROM regexp_match(
+		                       pg_get_expr(partition_relation.relpartbound, partition_relation.oid),
+		                       '^FOR VALUES FROM \(''([^'']*)''\) TO \(''([^'']*)''\)$'
+		                   ) AS matched(value)
+		               ) AS bound ON true
+		               WHERE inheritance.inhparent = to_regclass('public.%[1]s')
+		                 AND NOT coalesce(
+		                     partition_relation.relkind = 'r'
+		                     AND bound.lower_bound = date_trunc('day', bound.lower_bound)
+		                     AND bound.upper_bound = bound.lower_bound + interval '1 day'
+		                     AND partition_relation.relname = '%[1]s_p' || to_char(bound.lower_bound, 'YYYYMMDD'),
+		                     false
+		                 )
+		           )`, table)
 }
 
 func migrationBool(value string) bool {

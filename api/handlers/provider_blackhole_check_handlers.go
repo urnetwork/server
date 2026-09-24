@@ -3,6 +3,7 @@ package handlers
 import (
 	"crypto/hmac"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,14 +25,12 @@ const (
 	maxProviderBlackholeDueLimit = 5000
 )
 
-// ProviderBlackholeCheckDueResult is the response body of
-// ProviderBlackholeCheckDue.
-type ProviderBlackholeCheckDueResult struct {
-	ClientIds []server.Id `json:"client_ids"`
-}
-
-// ProviderBlackholeCheckDue serves the sweep: which providers to check next,
-// never-checked first, then least recently checked.
+// ProviderBlackholeCheckDue serves the sweep: which providers to check next --
+// every row whose next check has come due, oldest due first, before any
+// provider never checked, so a failing provider's retry is never pushed out of
+// a batch (connect/GEOMAP.md §11.3) -- each with the place it is published
+// under, so the check draws only connectivity destinations compatible with it.
+// The body is ProviderEgressLocationDueResult, the full probe's shape.
 //
 // Authenticated with the same operator secret as the egress-location
 // endpoints -- one secret, one mechanism, one thing for a deployment to get
@@ -77,20 +76,17 @@ func ProviderBlackholeCheckDue(w http.ResponseWriter, r *http.Request) {
 		shardIndex = parsed
 	}
 
-	// computed here and passed in: checked_at is a naive timestamp holding utc,
-	// so comparing it to sql now() in the query would cast through the session
-	// timezone
-	minCheckedAt := server.NowUtc().Add(-model.ProviderBlackholeCheckDueAge)
-
-	result := &ProviderBlackholeCheckDueResult{
-		ClientIds: model.GetProviderBlackholeCheckDue(
-			r.Context(),
-			minCheckedAt,
-			limit,
-			shardIndex,
-			shardCount,
-		),
-	}
+	// computed here and passed in: next_due_at and checked_at are naive
+	// timestamps holding utc, so comparing them to sql now() in the query
+	// would cast through the session timezone
+	clientIds := model.GetProviderBlackholeCheckDue(
+		r.Context(),
+		server.NowUtc(),
+		limit,
+		shardIndex,
+		shardCount,
+	)
+	result := &ProviderEgressLocationDueResult{Providers: providerEgressDueProviders(r, clientIds)}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
@@ -103,8 +99,13 @@ type SubmitProviderBlackholeCheckArgs struct {
 	OK       bool      `json:"ok"`
 	// Failure is a short class when OK is false: tunnel_failed,
 	// all_destinations_failed, and so on. Ignored when OK.
-	Failure   string    `json:"failure,omitempty"`
-	CheckedAt time.Time `json:"checked_at"`
+	Failure string `json:"failure,omitempty"`
+	// NotMeasured is a check none of whose loads could be measured: its tunnel
+	// was gone and could not be re-created. It is not a verdict -- ok is false
+	// and failure not_measured only because those fields must say something --
+	// and it only reschedules the provider (model.NextProviderBlackholeCheck).
+	NotMeasured bool      `json:"not_measured,omitempty"`
+	CheckedAt   time.Time `json:"checked_at"`
 }
 
 // SubmitProviderBlackholeChecks accepts a BATCH of results.
@@ -122,6 +123,10 @@ type SubmitProviderBlackholeChecksArgs struct {
 // was legitimately handed.
 const maxProviderBlackholeChecksPerRequest = 10000
 
+// maxProviderBlackholeChecksBody bounds the body read: a full batch of checks
+// at about 150 bytes each, with room.
+const maxProviderBlackholeChecksBody = 4 * 1024 * 1024
+
 func SubmitProviderBlackholeChecks(w http.ResponseWriter, r *http.Request) {
 	secret := operatorIngestSecret()
 	provided := r.Header.Get(operatorSecretHeader)
@@ -130,8 +135,13 @@ func SubmitProviderBlackholeChecks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// strict: a field this server does not know decodes to nothing, and a
+	// check whose not_measured flag was dropped would be stored as a failure
+	// counted against the provider
 	var args SubmitProviderBlackholeChecksArgs
-	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+	decoder := json.NewDecoder(io.LimitReader(r.Body, maxProviderBlackholeChecksBody+1))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&args); err != nil {
 		http.Error(w, "Bad request", http.StatusBadRequest)
 		return
 	}
@@ -176,14 +186,19 @@ func SubmitProviderBlackholeChecks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	reports := make([]model.ProviderBlackholeCheckReport, 0, len(args.Checks))
 	for _, check := range args.Checks {
-		model.SetProviderBlackholeCheck(r.Context(), &model.ProviderBlackholeCheck{
-			ClientId:  check.ClientId,
-			CheckedAt: check.CheckedAt,
-			OK:        check.OK,
-			Failure:   check.Failure,
+		reports = append(reports, model.ProviderBlackholeCheckReport{
+			ClientId:    check.ClientId,
+			CheckedAt:   check.CheckedAt,
+			Ok:          check.OK,
+			Failure:     check.Failure,
+			NotMeasured: !check.OK && check.NotMeasured,
 		})
 	}
+	// one failed check is a failure, not a verdict: the model keeps the run of
+	// consecutive failures and the backoff that schedules the next check
+	model.RecordProviderBlackholeChecks(r.Context(), reports, model.GetProviderEgressRules())
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(struct{}{})

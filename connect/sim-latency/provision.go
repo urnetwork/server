@@ -138,7 +138,7 @@ func provisionEgressEvidenceBatch(
 						hosting, proxy, mobile, city_confident,
 						observed_at, verdict, verdict_reason, assurance, update_time
 					)
-					VALUES ($1, $2, $3, 0, 'sim', $4, false, $5, false, $6, 'verified', '', 'direct', $6)
+					VALUES ($1, $2, $3, 0, 'sim', false, false, false, false, $4, 'verified', '', 'direct', $4)
 					ON CONFLICT (client_id) DO UPDATE
 					SET
 						location_id = EXCLUDED.location_id,
@@ -156,11 +156,13 @@ func provisionEgressEvidenceBatch(
 						update_time = EXCLUDED.update_time
 					WHERE provider_egress_location.observed_at < EXCLUDED.observed_at
 					`,
+					// the hosting, proxy and mobile columns stay false, as a
+					// probe writes them: an exit is placed by the operator's
+					// own /ip echo now, which carries no such verdicts
+					// (connect/GEOMAP.md §11.3), and nothing reads them
 					clientId,
 					locationId,
 					countryCode,
-					entry.UserType == "hosting",
-					entry.Component == "mobile-variable",
 					measuredAt,
 				)
 			}

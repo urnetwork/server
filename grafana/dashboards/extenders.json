@@ -5,7 +5,7 @@
   "urnetwork",
   "extenders"
  ],
- "description": "The extender network: population and reachability, what is published in dns, the gossip release queue, and which extenders carry the contract load. Fed by the stats collector (controller/stats_collector.go) and the dns publish tick (taskworker/work/extender_dns_metrics.go).",
+ "description": "The extender network: population and reachability, what is published in dns, the gossip release queue, which extenders carry the contract load, the pings providers and extenders measure of each other, with how targets answer them (connect/GEOMAP.md \u00a72.7), and the locations derived from those pings (\u00a75.4), with what deriving them costs against the solve's budget (\u00a75.3). Fed by the stats collector (controller/stats_collector.go) and the dns publish tick (taskworker/work/extender_dns_metrics.go).",
  "editable": false,
  "graphTooltip": 1,
  "schemaVersion": 39,
@@ -1644,7 +1644,7 @@
   {
    "id": 32,
    "type": "row",
-   "title": "provider pings",
+   "title": "pings",
    "collapsed": false,
    "gridPos": {
     "h": 1,
@@ -1657,7 +1657,7 @@
   {
    "id": 33,
    "type": "stat",
-   "title": "provider pings (24h)",
+   "title": "pings (24h)",
    "datasource": {
     "type": "prometheus",
     "uid": "warp-mimir"
@@ -1701,17 +1701,17 @@
       "type": "prometheus",
       "uid": "warp-mimir"
      },
-     "expr": "max(urnetwork_stats_extender_provider_pings_24h{env=\"$env\"})",
+     "expr": "sum(max by (pinger_kind, outcome, relayed) (urnetwork_stats_extender_pings_24h{env=\"$env\"}))",
      "refId": "A",
-     "legendFormat": "provider pings (24h)"
+     "legendFormat": "pings (24h)"
     }
    ],
-   "description": "Provider latency attestations the operator accepted in the last 24 hours (connect/DESIGNNOTES4.md \u00a73): each is one provider's signed round trip to one extender that the extender's own measurement corroborated. Only providers attest; a consumer client probes without identifying itself, so this never counts consumers."
+   "description": "Every ping the operator stored in the last 24 hours (connect/GEOMAP.md \u00a72.5): a provider or an extender measured its round trip to an extender and reported it itself, over its own credential, with whatever the target answered. Every verdict counts and so does a ping relayed through an NLayer chain; the panels beside this one say which. A consumer client probes to rank without identifying itself, so this never counts consumers."
   },
   {
-   "id": 34,
+   "id": 39,
    "type": "stat",
-   "title": "providers measuring (24h)",
+   "title": "co-signed (24h)",
    "datasource": {
     "type": "prometheus",
     "uid": "warp-mimir"
@@ -1755,12 +1755,174 @@
       "type": "prometheus",
       "uid": "warp-mimir"
      },
-     "expr": "max(urnetwork_stats_extender_ping_providers_24h{env=\"$env\"})",
+     "expr": "sum(max by (pinger_kind, relayed) (urnetwork_stats_extender_pings_24h{env=\"$env\",outcome=\"cosigned\"}))",
+     "refId": "A",
+     "legendFormat": "co-signed (24h)"
+    }
+   ],
+   "description": "Pings whose target co-signed them, as the operator recomputed it: the target's co-signature verified under the target's stored key over exactly the claim the pinger signed. Only these are measurements (D8). Well below the total means targets are refusing or not answering; the refusals table below says which."
+  },
+  {
+   "id": 40,
+   "type": "stat",
+   "title": "refused (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 8,
+    "y": 53
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#f2495c"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(max by (pinger_kind, relayed) (urnetwork_stats_extender_pings_24h{env=\"$env\",outcome=\"rejected\"}))",
+     "refId": "A",
+     "legendFormat": "refused (24h)"
+    }
+   ],
+   "description": "Pings the pinger says its target refused, plus acceptances whose co-signature did not verify. A refusal is the pinger's word only and is evidence against a target only in aggregate (GEOMAP \u00a75.5); a ping that got no verdict at all is counted apart as unknown, so a flaky path is not read as a refusing extender."
+  },
+  {
+   "id": 34,
+   "type": "stat",
+   "title": "providers measuring (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 12,
+    "y": 53
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#8ab8ff"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_ping_sources_24h{env=\"$env\",pinger_kind=\"provider\"})",
      "refId": "A",
      "legendFormat": "providers measuring (24h)"
     }
    ],
-   "description": "Distinct providers behind those attestations. A provider probes on start and on its refresh cadence, so this is roughly the providers that ran in the window; well below the online provider count means most providers are not reaching extenders, or the extenders they reach do not report."
+   "description": "Distinct providers with a ping stored in the window. A provider probes on start and on its 12 hour refresh, so this is roughly the providers that ran in the window; well below the online provider count means most providers are not reaching extenders, or not reporting what they measured."
+  },
+  {
+   "id": 41,
+   "type": "stat",
+   "title": "extenders measuring (24h)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 16,
+    "y": 53
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#b877d9"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_extender_ping_sources_24h{env=\"$env\",pinger_kind=\"extender\"})",
+     "refId": "A",
+     "legendFormat": "extenders measuring (24h)"
+    }
+   ],
+   "description": "Distinct extenders with a ping of another extender stored in the window (GEOMAP \u00a72.1). Every extender pings every peer in its directory within a day, so this should track the online extender count; a gap is extenders on a binary without the peer pinger, or reporters that cannot reach the operator."
   },
   {
    "id": 35,
@@ -1773,7 +1935,7 @@
    "gridPos": {
     "h": 5,
     "w": 4,
-    "x": 8,
+    "x": 20,
     "y": 53
    },
    "fieldConfig": {
@@ -1814,21 +1976,21 @@
      "legendFormat": "extenders pinged (24h)"
     }
    ],
-   "description": "Distinct extenders with at least one accepted attestation in the window. Compare with the online extender count: an extender that is online but never pinged is either unreachable from every provider or not forwarding what it measured."
+   "description": "Distinct extenders that were the target of at least one stored ping in the window. Compare with the online extender count: an extender that is online but never pinged is unreachable from every pinger, or absent from their directories."
   },
   {
    "id": 36,
    "type": "timeseries",
-   "title": "provider pings per hour",
+   "title": "pings by kind and outcome (24h)",
    "datasource": {
     "type": "prometheus",
     "uid": "warp-mimir"
    },
    "gridPos": {
-    "h": 5,
+    "h": 8,
     "w": 12,
-    "x": 12,
-    "y": 53
+    "x": 0,
+    "y": 58
    },
    "fieldConfig": {
     "defaults": {
@@ -1866,12 +2028,78 @@
       "type": "prometheus",
       "uid": "warp-mimir"
      },
-     "expr": "sum(increase(urnetwork_stats_extender_provider_pings_total{env=\"$env\"}[1h]))",
+     "expr": "max by (pinger_kind, outcome, relayed) (urnetwork_stats_extender_pings_24h{env=\"$env\"})",
      "refId": "A",
-     "legendFormat": "pings per hour"
+     "legendFormat": "{{pinger_kind}} {{outcome}} relayed={{relayed}}"
     }
    ],
-   "description": "Accepted attestations per hour across the fleet, from the per-extender counter. The counter is fed from closed hour buckets, so the last hour is always a step behind; a flat zero with providers online means the report path is down, not that nobody measured."
+   "description": "The trailing 24 hour ping count over time, split by who pinged (provider or extender), what the operator made of the target's verdict (cosigned, rejected, unknown) and whether the ping was relayed. A relayed ping (GEOMAP \u00a72.9) went through an NLayer extender, which relays a probe to the end of its chain: the round trip is the whole chain's, the claim is judged and co-signed by the chain end, and the row counts here and as co-signature evidence but is never a solver term, since the detour through the front overstates the distance to the end. Every series is published, zero included, so a verdict that goes quiet is a line at zero rather than a gap."
+  },
+  {
+   "id": 42,
+   "type": "timeseries",
+   "title": "extender\u2194extender pings per hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 58
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(increase(urnetwork_stats_extender_pings_total{env=\"$env\",pinger_kind=\"extender\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "extender to extender"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(increase(urnetwork_stats_extender_pings_total{env=\"$env\",pinger_kind=\"provider\"}[1h]))",
+     "refId": "B",
+     "legendFormat": "provider to extender"
+    }
+   ],
+   "description": "Pings stored per hour by pinger kind, from the per-extender counter: extenders pinging each other, the edges between the nodes with the most stable positions (GEOMAP \u00a72), beside providers pinging extenders. An extender with P peers pings about 2P times a day, so the extender series should grow with the square of the fleet. The counter is fed from closed hour buckets, so the last hour is always a step behind; a flat zero with extenders online means the peer pinger or its reporter is down, not that nobody measured."
   },
   {
    "id": 37,
@@ -1885,7 +2113,7 @@
     "h": 9,
     "w": 12,
     "x": 0,
-    "y": 58
+    "y": 66
    },
    "fieldConfig": {
     "defaults": {
@@ -1907,7 +2135,7 @@
    "targets": [
     {
      "refId": "A",
-     "expr": "topk(20, sum by (extender_id) (increase(urnetwork_stats_extender_provider_pings_total{env=\"$env\"}[$__range])))",
+     "expr": "topk(20, sum by (extender_id) (increase(urnetwork_stats_extender_pings_total{env=\"$env\"}[$__range])))",
      "legendFormat": "{{extender_id}}",
      "format": "table",
      "instant": true,
@@ -1919,7 +2147,7 @@
      }
     }
    ],
-   "description": "Accepted attestations per extender over the dashboard's time range, most first, top 20. Each ping is stored against its extender id, and the counter is the same shape as the contracts counter: one series per extender fed from closed hour buckets, capped with topk so an open population never renders one line per extender, read through increase() so a restart's counter reset does not show as a drop. sum by extender_id merges a redeploy's overlapping processes."
+   "description": "Pings per target extender over the dashboard's time range, every pinger kind and verdict, most first, top 20. The counter is the same shape as the contracts counter: one series per extender and pinger kind fed from closed hour buckets, capped with topk so an open population never renders one line per extender, read through increase() so a restart's counter reset does not show as a drop. sum by extender_id merges the pinger kinds and a redeploy's overlapping processes."
   },
   {
    "id": 38,
@@ -1933,7 +2161,7 @@
     "h": 9,
     "w": 12,
     "x": 12,
-    "y": 58
+    "y": 66
    },
    "fieldConfig": {
     "defaults": {
@@ -1971,12 +2199,1076 @@
       "type": "prometheus",
       "uid": "warp-mimir"
      },
-     "expr": "topk(20, sum by (extender_id) (increase(urnetwork_stats_extender_provider_pings_total{env=\"$env\"}[1h])))",
+     "expr": "topk(20, sum by (extender_id) (increase(urnetwork_stats_extender_pings_total{env=\"$env\"}[1h])))",
      "refId": "A",
      "legendFormat": "{{extender_id}}"
     }
    ],
-   "description": "Attestations per hour for the twenty most pinged extenders. Capped with topk for the same reason as the leaderboard -- the extender population is open -- and read through increase() because it is a counter. Whether pings concentrate on a few extenders or spread across the fleet is what this shows; the continent hint and latency ordering should spread them."
+   "description": "Pings per hour for the twenty most pinged extenders. Capped with topk for the same reason as the table -- the extender population is open -- and read through increase() because it is a counter. Whether pings concentrate on a few extenders or spread across the fleet is what this shows; the continent hint, the latency ordering and the peer pinger should spread them."
+  },
+  {
+   "id": 43,
+   "type": "table",
+   "title": "targets refusing the most",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 12,
+    "x": 0,
+    "y": 75
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "decimals": 1
+    },
+    "overrides": []
+   },
+   "options": {
+    "showHeader": true,
+    "cellHeight": "sm",
+    "sortBy": [
+     {
+      "displayName": "Value",
+      "desc": true
+     }
+    ]
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "topk(20, sum by (extender_id) (increase(urnetwork_stats_extender_ping_rejections_total{env=\"$env\"}[$__range])) / (sum by (extender_id) (increase(urnetwork_stats_extender_pings_total{env=\"$env\"}[$__range])) >= 10))",
+     "legendFormat": "{{extender_id}}",
+     "format": "table",
+     "instant": true,
+     "range": false,
+     "editorMode": "code",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     }
+    }
+   ],
+   "description": "The share of each target's pings that were refused over the dashboard's time range, highest first, top 20, among targets with at least ten pings in the range so one refused ping is not a 100% row. This is the evidence the co-signature exists for (GEOMAP \u00a72.3, \u00a72.7): an extender that never co-signs, or refuses far more than its peers, is one rejecting valid readings -- or one many pingers lie about, which is why a refusal is only the pinger's word and is weighed in aggregate by the reputation of \u00a75.5. A ping with no verdict is not a refusal and is not counted here. Both counters are per-extender, fed from closed hour buckets, capped with topk and read through increase()."
+  },
+  {
+   "id": 44,
+   "type": "timeseries",
+   "title": "refusals per hour",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 9,
+    "w": 12,
+    "x": 12,
+    "y": 75
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(increase(urnetwork_stats_extender_ping_rejections_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "refused pings per hour"
+    }
+   ],
+   "description": "Refused pings stored per hour across the fleet, from the per-extender rejections counter. A step up that the ping rate does not share is a target, or a group of them, starting to refuse; the table beside this one names them. Fed from closed hour buckets, so the last hour is a step behind."
+  },
+  {
+   "id": 45,
+   "type": "row",
+   "title": "derived locations",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 84
+   },
+   "panels": []
+  },
+  {
+   "id": 46,
+   "type": "stat",
+   "title": "derived locations",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 0,
+    "y": 85
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#8ab8ff"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(max by (node_kind) (urnetwork_stats_derived_locations{env=\"$env\"}))",
+     "refId": "A",
+     "legendFormat": "derived locations"
+    }
+   ],
+   "description": "Providers and extenders with a published derived location (connect/GEOMAP.md \u00a75.4): nodes whose co-signed, direct pings placed them better than their genesis, with at least three pings to at least three peers. Every other node keeps its genesis, so this is expected to be well below the population. Counted from the table, which holds exactly what the last derivation published and loses a row a day after the derivation that wrote it (\u00a75.7), so a node that stops pinging falls back to its genesis on its own and drops out of this count."
+  },
+  {
+   "id": 47,
+   "type": "stat",
+   "title": "crossed region",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 4,
+    "y": 85
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#fade2a"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_derived_location_crossings{env=\"$env\",kind=\"region\"})",
+     "refId": "A",
+     "legendFormat": "crossed region"
+    }
+   ],
+   "description": "Published derived locations whose mapped place (\u00a76) lies outside the region their genesis placed them in; a country crossing counts here too. The containment terms of the solve (\u00a75.2) price every crossing, so one that survives is the pings insisting, not an error. A handful is normal at region borders; a rising count is how a wrong genesis, a miscalibrated k, or a colluding cluster first shows (\u00a75.4)."
+  },
+  {
+   "id": 48,
+   "type": "stat",
+   "title": "crossed country",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 8,
+    "y": 85
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#ff9830"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_derived_location_crossings{env=\"$env\",kind=\"country\"})",
+     "refId": "A",
+     "legendFormat": "crossed country"
+    }
+   ],
+   "description": "Published derived locations whose mapped place lies outside the country their genesis placed them in. The country term is weighted far above the region term, since GeoLite2's country is far more reliable than its city (\u00a75.2, D10), so this should be near zero; any is worth a look, and a jump is the strongest early sign of a colluding cluster or a bad genesis source. These nodes are published in the derived country: provider search and the extender record's country and continent follow it (\u00a76)."
+  },
+  {
+   "id": 49,
+   "type": "stat",
+   "title": "excluded sources (last run)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 12,
+    "y": 85
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "locale",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#f2495c"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_derive_excluded_sources{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "excluded sources"
+    }
+   ],
+   "description": "Sources the last derivation left out of its solve on reputation (\u00a75.5): past four sigma from the population on scatter, bias or a refusal rate. An excluded source's own measurements carry no weight; it is still placed from what others measured of it. Normal is zero or a few; the derive job's log names every one. Recorded by the derivation, so it holds its value between runs and across taskworker restarts."
+  },
+  {
+   "id": 50,
+   "type": "stat",
+   "title": "ping residual (last run)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 16,
+    "y": 85
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "lengthkm",
+     "decimals": 1,
+     "min": 0,
+     "color": {
+      "mode": "fixed",
+      "fixedColor": "#8ab8ff"
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_derive_residual_km{env=\"$env\",at=\"derived\"})",
+     "refId": "A",
+     "legendFormat": "residual"
+    }
+   ],
+   "description": "The RMS ping residual, d(p_s, p_t) \u2212 d\u0302_st, over the last derivation's final solve, in km, at the derived positions (\u00a75.2, \u00a75.4). The panel below sets it against the same residual at genesis, which the derivation exists to reduce. It moves with the population's spread of detours and queues; a drift with no change in the population is how a miscalibrated k or o shows."
+  },
+  {
+   "id": 51,
+   "type": "stat",
+   "title": "since the last derivation",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 4,
+    "x": 20,
+    "y": 85
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 32400
+       },
+       {
+        "color": "red",
+        "value": 57600
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "time() - max(urnetwork_stats_derive_last_run_seconds{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "since the last derivation"
+    }
+   ],
+   "description": "Time since the last derivation (\u00a75.3, \u00a75.7). The derive job runs every 8 hours, so this saw-tooths between zero and 8 h. Amber past 9 h, a run is late; red past 16 h, two were missed, and the published rows are expiring without being renewed, so nodes are falling back to genesis. No data means no derivation has been recorded yet, which is normal until the first run 8 hours after deploy."
+  },
+  {
+   "id": 52,
+   "type": "timeseries",
+   "title": "derived locations by kind",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 6,
+    "x": 0,
+    "y": 90
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (node_kind) (urnetwork_stats_derived_locations{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "{{node_kind}}"
+    }
+   ],
+   "description": "Published derived locations over time, providers and extenders apart. Each derivation replaces the set whole, so steps land every 8 hours; between them the count only falls, as the hourly sweep removes rows a day old (\u00a75.7). Both kinds are always published, zero included."
+  },
+  {
+   "id": 53,
+   "type": "timeseries",
+   "title": "crossings",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 6,
+    "x": 6,
+    "y": 90
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (kind) (urnetwork_stats_derived_location_crossings{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "crossed {{kind}}"
+    }
+   ],
+   "description": "Published derived locations mapped outside their genesis region and country, over time (\u00a75.4, \u00a76). The country line should sit near zero; a region line that climbs while the population does not is the first sign of a wrong genesis source, a miscalibrated k, or a colluding cluster."
+  },
+  {
+   "id": 54,
+   "type": "timeseries",
+   "title": "excluded sources",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 6,
+    "x": 12,
+    "y": 90
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_derive_excluded_sources{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "excluded sources"
+    }
+   ],
+   "description": "Sources each derivation left out on reputation (\u00a75.5), as a step per run. Reputation is recomputed from the day's pings on every run and nothing accumulates, so a source that stops misbehaving leaves this count within a day."
+  },
+  {
+   "id": 55,
+   "type": "timeseries",
+   "title": "ping residual",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 6,
+    "x": 18,
+    "y": 90
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "lengthkm",
+     "decimals": 1,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (at) (urnetwork_stats_derive_residual_km{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "at {{at}}"
+    }
+   ],
+   "description": "The RMS ping residual of each derivation's final solve, in km, at the derived positions and at genesis (\u00a75.4). The derived line is expected to sit well below the genesis line; the gap is what the derivation adds over GeoLite2 alone. The two converging means the pings have stopped improving on genesis."
+  },
+  {
+   "id": 56,
+   "type": "stat",
+   "title": "projected solve time (share of budget)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 6,
+    "x": 0,
+    "y": 98
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0.8
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_derive_solve_seconds{env=\"$env\",at=\"projected\"}) / max(urnetwork_stats_derive_solve_seconds{env=\"$env\",at=\"budget\"})",
+     "refId": "A",
+     "legendFormat": "projected solve time"
+    }
+   ],
+   "description": "The planner's projection of the next derivation's solve time at the taskworker host's cores, as a share of MaxSolveSeconds (GEOMAP \u00a75.3, \"Scale\"). Every run projects the next from its own measured seconds per term and per node sweep, the sweeps it took and a safety factor, so this moves with the fleet, one step a run. Amber from 80 %, where SIGNALS.md \u00a72.19c raises its capacity finding (DeriveCapacityMargin); red at the budget. The job does not partition past it: the answer is more cores on the taskworker host."
+  },
+  {
+   "id": 57,
+   "type": "stat",
+   "title": "projected solve memory (share of budget)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 6,
+    "x": 6,
+    "y": 98
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "decimals": 0,
+     "min": 0,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0.8
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_derive_solve_bytes{env=\"$env\",at=\"projected\"}) / max(urnetwork_stats_derive_solve_bytes{env=\"$env\",at=\"budget\"})",
+     "refId": "A",
+     "legendFormat": "projected solve memory"
+    }
+   ],
+   "description": "The planner's projection of the next derivation's peak heap, as a share of MaxSolveBytes (GEOMAP \u00a75.3, \"Scale\"): the last run's measured bytes per term and per node at the next run's counts. The heap is sampled while the day is read and solved, and includes garbage not yet collected, so the projection errs high. Amber from 80 %, where SIGNALS.md \u00a72.19c raises its capacity finding; red at the budget, past which the answer is more memory on the taskworker host."
+  },
+  {
+   "id": 58,
+   "type": "stat",
+   "title": "last solve",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 6,
+    "x": 12,
+    "y": 98
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 1,
+     "min": 0,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_derive_solve_seconds{env=\"$env\",at=\"measured\"})",
+     "refId": "A",
+     "legendFormat": "last solve"
+    }
+   ],
+   "description": "The wall time of the last derivation's solve and mapping (GEOMAP \u00a75.3): three reputation rounds of parallel Jacobi sweeps over every term, on the taskworker host's cores. Seconds at a few thousand nodes, a minute or two at the scale target; the projection beside it is this, scaled to the next run's counts and cores."
+  },
+  {
+   "id": 59,
+   "type": "stat",
+   "title": "last read of the day",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 5,
+    "w": 6,
+    "x": 18,
+    "y": 98
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 1,
+     "min": 0,
+     "color": {
+      "mode": "thresholds"
+     },
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": "",
+     "values": false
+    },
+    "orientation": "auto",
+    "colorMode": "value",
+    "graphMode": "area",
+    "justifyMode": "center",
+    "textMode": "value",
+    "wideLayout": true
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_derive_ingest_seconds{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "last read of the day"
+    }
+   ],
+   "description": "The wall time of the last derivation reading the day's co-signed pings over its concurrent cursors, one pinger-id hash range each, aggregating into terms as the rows arrive (GEOMAP \u00a75.3, \"Scale\"). It grows with the rows, not the pairs; a jump with no change in the fleet is the database, not the job."
+  },
+  {
+   "id": 60,
+   "type": "timeseries",
+   "title": "solve time against its budget",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 103
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 1,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (at) (urnetwork_stats_derive_solve_seconds{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "{{at}}"
+    }
+   ],
+   "description": "Each derivation's measured solve time, the planner's projection of the next at the taskworker host's cores, and MaxSolveSeconds, over time (GEOMAP \u00a75.3, \"Scale\"). The projection runs about three times the measurement, the safety factor for a run that takes more sweeps than the last. A projection climbing toward the budget is the fleet outgrowing the host's cores; SIGNALS.md \u00a72.19c finds it at 80 %."
+  },
+  {
+   "id": 61,
+   "type": "timeseries",
+   "title": "solve memory against its budget",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 103
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "bytes",
+     "decimals": 1,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max by (at) (urnetwork_stats_derive_solve_bytes{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "{{at}}"
+    }
+   ],
+   "description": "Each derivation's peak heap over its read of the day and its solve, the planner's projection of the next, and MaxSolveBytes, over time (GEOMAP \u00a75.3, \"Scale\"). The aggregation keeps a bounded reservoir of samples per ordered pair, so the heap follows the pairs, not the pings. A projection climbing toward the budget is the fleet outgrowing the host's memory; SIGNALS.md \u00a72.19c finds it at 80 %."
   }
  ]
 }

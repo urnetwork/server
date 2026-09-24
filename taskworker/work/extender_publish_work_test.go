@@ -13,15 +13,42 @@ import (
 	"github.com/urnetwork/connect/protocol"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
 
-// The extender publish drip (connect/EXTENDER.md C4).
+// The extender publish drip (connect/EXTENDER.md C4; connect/GEOMAP.md §2.8).
+
+// The rotation is half the record's life, and the ticks are derived from it,
+// so a record reaches every client with at least half its life left (D19).
+// Pure arithmetic over the constants.
+func TestExtenderPublishRotationIsHalfTheRecordLife(t *testing.T) {
+	connect.AssertEqual(t, ExtenderPublishRotationTimeout, 12*time.Hour)
+	connect.AssertEqual(t, 2*ExtenderPublishRotationTimeout, controller.ExtenderRecordExpireTimeout)
+	connect.AssertEqual(t, ExtenderPublishRotationTickCount, 72)
+	connect.AssertEqual(
+		t,
+		time.Duration(ExtenderPublishRotationTickCount)*ExtenderPublishTimeout,
+		ExtenderPublishRotationTimeout,
+	)
+
+	// the stale cut: a record issued exactly at it has half its life left,
+	// and one issued before it has less, which is when it may no longer wait
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	staleBefore := extenderPublishStaleBefore(now)
+	connect.AssertEqual(t, now.Sub(staleBefore), ExtenderPublishRotationTimeout)
+	connect.AssertEqual(
+		t,
+		staleBefore.Add(controller.ExtenderRecordExpireTimeout).Sub(now),
+		controller.ExtenderRecordExpireTimeout/2,
+	)
+}
 
 // The batch is a floor until the population needs more, and it rounds upward:
-// a batch one short of the requirement lets the rotation drift past seven days
-// and eventually past a record's fourteen day expiry.
+// a batch one short of the requirement lets the rotation drift past twelve
+// hours, and every extender it leaves behind is then released at once as
+// stale rather than spread over the ticks. Pure.
 func TestExtenderPublishBatchSize(t *testing.T) {
 	cases := []struct {
 		activeCount int
@@ -29,13 +56,16 @@ func TestExtenderPublishBatchSize(t *testing.T) {
 	}{
 		{activeCount: 0, batchSize: 8},
 		{activeCount: 1, batchSize: 8},
-		{activeCount: 1008, batchSize: 8},
-		{activeCount: 1009, batchSize: 8},
-		// the most eight per tick rotates within the window
+		{activeCount: 500, batchSize: 8},
+		// the most eight per tick rotates within the 72 ticks of twelve hours
+		{activeCount: 576, batchSize: 8},
+		{activeCount: 577, batchSize: 9},
 		{activeCount: 8 * ExtenderPublishRotationTickCount, batchSize: 8},
 		{activeCount: 8*ExtenderPublishRotationTickCount + 1, batchSize: 9},
 		{activeCount: 9 * ExtenderPublishRotationTickCount, batchSize: 9},
 		{activeCount: 9*ExtenderPublishRotationTickCount + 1, batchSize: 10},
+		// a large fleet: ten thousand extenders need 139 a tick
+		{activeCount: 10000, batchSize: 139},
 	}
 	for _, c := range cases {
 		batchSize := extenderPublishBatchSize(c.activeCount)
@@ -77,12 +107,13 @@ func TestExtenderPublishDripsOldestFirstAndStampsThem(t *testing.T) {
 		ctx := context.Background()
 		rootPublicKey := installTestExtenderWorkConfig(t)
 
-		// twelve extenders, staggered so the order is not a tie
+		// twelve extenders, staggered so the order is not a tie, all published
+		// within the rotation so none of them is stale
 		extenderIds := []server.Id{}
 		for i := range 12 {
 			extenderIds = append(extenderIds, createTestExtender(ctx, 10+i, 4))
 		}
-		baseTime := server.NowUtc().Add(-24 * time.Hour)
+		baseTime := server.NowUtc().Add(-6 * time.Hour)
 		for i, extenderId := range extenderIds {
 			stampTestExtenderPublishTime(ctx, t, extenderId, baseTime.Add(time.Duration(i)*time.Minute))
 		}
@@ -90,6 +121,7 @@ func TestExtenderPublishDripsOldestFirstAndStampsThem(t *testing.T) {
 		result := runTestExtenderPublish(t, ctx)
 		connect.AssertEqual(t, result.Active, 12)
 		connect.AssertEqual(t, result.BatchSize, ExtenderPublishMinBatchSize)
+		connect.AssertEqual(t, result.Selected, ExtenderPublishMinBatchSize)
 		connect.AssertEqual(t, result.Published, ExtenderPublishMinBatchSize)
 
 		firstPublishes := model.Testing_GetNetworkExtenderPublishes(ctx)
@@ -125,7 +157,7 @@ func TestExtenderPublishDripsOldestFirstAndStampsThem(t *testing.T) {
 		}
 
 		// every published record verifies under the configured root key and is
-		// valid for fourteen days
+		// valid for a day
 		keySet := connect.NewExtenderRootKeySet(rootPublicKey)
 		for _, publish := range model.Testing_GetNetworkExtenderPublishes(ctx) {
 			message := &protocol.ExtenderGossipMessage{}
@@ -143,14 +175,17 @@ func TestExtenderPublishDripsOldestFirstAndStampsThem(t *testing.T) {
 			connect.AssertEqual(
 				t,
 				expireTime.Sub(issueTime).Round(time.Minute),
-				14*24*time.Hour,
+				controller.ExtenderRecordExpireTimeout,
 			)
+			connect.AssertEqual(t, controller.ExtenderRecordExpireTimeout, 24*time.Hour)
 		}
 	})
 }
 
-// Moves one extender's active addresses to a known publish time so the drip
-// order is deterministic.
+// Moves one extender to a known publish time, as a drip publish at that time
+// leaves it: its active addresses stamped and its newest record issued then.
+// The stamp decides the drip order and the record time decides whether it is
+// stale, so a test sets both or it describes a state no publish produces.
 func stampTestExtenderPublishTime(
 	ctx context.Context,
 	t testing.TB,
@@ -169,6 +204,79 @@ func stampTestExtenderPublishTime(
 			extenderId,
 			lastPublishTime.UTC(),
 		))
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			UPDATE network_extender
+			SET record_issue_time = $2
+			WHERE extender_id = $1
+			`,
+			extenderId,
+			lastPublishTime.UTC(),
+		))
+	})
+}
+
+// An extender whose newest record is older than the rotation is released on
+// the next tick whatever the batch (GEOMAP §2.8): here twelve stale extenders
+// against a batch of eight all go at once, and the three fresh ones wait
+// their turn. The drip cannot let a record reach half its life while its
+// extender is up, however far behind the batch has fallen.
+func TestExtenderPublishReleasesStaleExtendersBeyondTheBatch(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		installTestExtenderWorkConfig(t)
+
+		now := server.NowUtc()
+		staleIds := []server.Id{}
+		for i := range 12 {
+			extenderId := createTestExtender(ctx, 30+i, 4)
+			// published just past the rotation ago, staggered
+			stampTestExtenderPublishTime(ctx, t, extenderId, now.Add(-ExtenderPublishRotationTimeout-time.Duration(1+i)*time.Minute))
+			staleIds = append(staleIds, extenderId)
+		}
+		freshIds := []server.Id{}
+		for i := range 3 {
+			extenderId := createTestExtender(ctx, 50+i, 4)
+			stampTestExtenderPublishTime(ctx, t, extenderId, now.Add(-time.Hour-time.Duration(i)*time.Minute))
+			freshIds = append(freshIds, extenderId)
+		}
+
+		result := runTestExtenderPublish(t, ctx)
+		connect.AssertEqual(t, result.Active, 15)
+		connect.AssertEqual(t, result.BatchSize, ExtenderPublishMinBatchSize)
+		connect.AssertEqual(t, result.Selected, len(staleIds))
+		connect.AssertEqual(t, result.Published, len(staleIds))
+
+		publishedExtenderIds := []server.Id{}
+		for _, publish := range model.Testing_GetNetworkExtenderPublishes(ctx) {
+			publishedExtenderIds = append(publishedExtenderIds, publish.ExtenderId)
+		}
+		for _, extenderId := range staleIds {
+			if !slices.Contains(publishedExtenderIds, extenderId) {
+				t.Fatalf("the stale extender %s was not released", extenderId)
+			}
+		}
+		for _, extenderId := range freshIds {
+			if slices.Contains(publishedExtenderIds, extenderId) {
+				t.Fatalf("the fresh extender %s was released before its turn", extenderId)
+			}
+		}
+
+		// released, they are fresh again, and the next tick is an ordinary
+		// batch that starts with the oldest: the three that waited
+		secondResult := runTestExtenderPublish(t, ctx)
+		connect.AssertEqual(t, secondResult.Selected, ExtenderPublishMinBatchSize)
+		connect.AssertEqual(t, secondResult.Published, ExtenderPublishMinBatchSize)
+		secondPublishedExtenderIds := []server.Id{}
+		for _, publish := range model.Testing_GetNetworkExtenderPublishes(ctx)[len(publishedExtenderIds):] {
+			secondPublishedExtenderIds = append(secondPublishedExtenderIds, publish.ExtenderId)
+		}
+		for _, extenderId := range freshIds {
+			if !slices.Contains(secondPublishedExtenderIds, extenderId) {
+				t.Fatalf("the waiting extender %s was not in the next batch", extenderId)
+			}
+		}
 	})
 }
 

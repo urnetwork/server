@@ -2,15 +2,212 @@ package model
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
-	"unicode"
 
-	"golang.org/x/text/unicode/norm"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 )
+
+// ProviderEgressProbeResourceName is the deployment's probe configuration. The
+// probe task snapshots all of it into its durable arguments; the api reads the
+// ProviderEgressRules from it at ingest, so the two sides of one rule --
+// the prober's guard and the server's verdict -- come from one file.
+const ProviderEgressProbeResourceName = "provider_egress_probe.yml"
+
+// The server's half of the probe rules of connect/GEOMAP.md §11.3: when failed
+// checks make a provider dark, how a failed or unmeasured check is
+// rescheduled, when a batch is the prober's own fault rather than its
+// providers', and how precise a GeoLite2 place must be to be stored as a city.
+// Every field is a setting: the top-level keys of provider_egress_probe.yml
+// override it (see ProviderEgressRulesFromResource).
+//
+// The yaml and json names are the configuration's and the probe task's
+// argument snapshot's, so both can embed this struct and neither restates a
+// key.
+type ProviderEgressRules struct {
+	// DarkConsecutiveFailures is how many failed checks in a row make a
+	// provider dark. One failed check is a failure, not a verdict: a slow cold
+	// start or a reconnect mid-check fails a single check for reasons that
+	// have nothing to do with the exit (GEOMAP §11.2).
+	DarkConsecutiveFailures int `yaml:"dark_consecutive_failures" json:"dark_consecutive_failures"`
+	// DarkMinimumSpanSeconds is how long the run of failures must span, from
+	// the first failed check to the latest, before it is a verdict. With the
+	// backoff below, three failures inside the span are one bad half hour,
+	// which a provider restart can produce.
+	DarkMinimumSpanSeconds int `yaml:"dark_minimum_span_seconds" json:"dark_minimum_span_seconds"`
+	// DarkBackoffSeconds is when the next check comes after the n-th failure
+	// in a row: element min(n, len)-1. Short enough that a failing provider is
+	// confirmed or cleared within the hour, long enough that the checks are
+	// not one cold start measured three times.
+	DarkBackoffSeconds []int `yaml:"dark_backoff_seconds" json:"dark_backoff_seconds"`
+	// DarkBatchGuard is the dark share of a blackhole batch above which its
+	// negative results are the prober's fault until proven otherwise: they are
+	// discarded and the batch's providers are re-checked after the backoff.
+	DarkBatchGuard float64 `yaml:"dark_batch_guard" json:"dark_batch_guard"`
+	// DarkBatchGuardMinChecks is the fewest measured checks a batch needs for
+	// DarkBatchGuard to judge it. Below it the share is a statement about a
+	// handful of providers, not about the prober, and one dark provider in a
+	// three-provider tail batch must not be discarded as a prober fault.
+	DarkBatchGuardMinChecks int `yaml:"dark_batch_guard_min_checks" json:"dark_batch_guard_min_checks"`
+	// RunBatchGuard is the failed share of a full batch's scored loads above
+	// which the batch is not submitted: a CDN outage, a broken request profile
+	// or a saturated prober host fails everyone at once and would stamp every
+	// provider probed in that window with a bad index for days.
+	RunBatchGuard float64 `yaml:"run_batch_guard" json:"run_batch_guard"`
+	// RunBatchGuardMinRuns is the fewest measured runs a full batch needs for
+	// RunBatchGuard to judge it, for the reason DarkBatchGuardMinChecks
+	// exists: one genuinely broken exit is a whole batch of one.
+	RunBatchGuardMinRuns int `yaml:"run_batch_guard_min_runs" json:"run_batch_guard_min_runs"`
+	// CityConfidentRadiusKm is the largest GeoLite2 accuracy radius at which
+	// the probed exit is stored as a city. Past it the exit is stored at its
+	// region, or its country, so a probe can correct where a provider is
+	// listed but never pin it to a city GeoLite2 itself is unsure of.
+	CityConfidentRadiusKm int `yaml:"city_confident_radius_km" json:"city_confident_radius_km"`
+}
+
+// The rules of connect/GEOMAP.md §11.3.
+func DefaultProviderEgressRules() ProviderEgressRules {
+	return ProviderEgressRules{
+		DarkConsecutiveFailures: 3,
+		DarkMinimumSpanSeconds:  30 * 60,
+		DarkBackoffSeconds:      []int{5 * 60, 15 * 60, 30 * 60},
+		DarkBatchGuard:          0.2,
+		DarkBatchGuardMinChecks: 10,
+		RunBatchGuard:           0.3,
+		RunBatchGuardMinRuns:    3,
+		CityConfidentRadiusKm:   25,
+	}
+}
+
+// Reports why the rules cannot be applied, or nil.
+func (self ProviderEgressRules) Validate() error {
+	var problems []string
+	if self.DarkConsecutiveFailures < 1 {
+		problems = append(problems, fmt.Sprintf("dark_consecutive_failures %d must be at least 1", self.DarkConsecutiveFailures))
+	}
+	if self.DarkMinimumSpanSeconds < 0 {
+		problems = append(problems, fmt.Sprintf("dark_minimum_span_seconds %d must not be negative", self.DarkMinimumSpanSeconds))
+	}
+	if len(self.DarkBackoffSeconds) == 0 {
+		problems = append(problems, "dark_backoff_seconds must name at least one step")
+	}
+	for i, seconds := range self.DarkBackoffSeconds {
+		if seconds < 1 {
+			problems = append(problems, fmt.Sprintf("dark_backoff_seconds[%d] %d must be positive", i, seconds))
+		}
+	}
+	// a guard of 0 would discard every batch with one dark provider, and one
+	// above 1 could never trip
+	if !(0 < self.DarkBatchGuard && self.DarkBatchGuard <= 1) {
+		problems = append(problems, fmt.Sprintf("dark_batch_guard %v must be in (0, 1]", self.DarkBatchGuard))
+	}
+	if !(0 < self.RunBatchGuard && self.RunBatchGuard <= 1) {
+		problems = append(problems, fmt.Sprintf("run_batch_guard %v must be in (0, 1]", self.RunBatchGuard))
+	}
+	if self.DarkBatchGuardMinChecks < 1 {
+		problems = append(problems, fmt.Sprintf("dark_batch_guard_min_checks %d must be at least 1", self.DarkBatchGuardMinChecks))
+	}
+	if self.RunBatchGuardMinRuns < 1 {
+		problems = append(problems, fmt.Sprintf("run_batch_guard_min_runs %d must be at least 1", self.RunBatchGuardMinRuns))
+	}
+	if self.CityConfidentRadiusKm < 1 {
+		problems = append(problems, fmt.Sprintf("city_confident_radius_km %d must be at least 1", self.CityConfidentRadiusKm))
+	}
+	if 0 < len(problems) {
+		return errors.New("provider egress rules: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// DarkMinimumSpanSeconds as a duration.
+func (self ProviderEgressRules) DarkMinimumSpan() time.Duration {
+	return time.Duration(self.DarkMinimumSpanSeconds) * time.Second
+}
+
+// When the check after consecutiveFailures failures in a row is
+// due: the schedule's element min(consecutiveFailures, len)-1, and its first
+// element for a provider with no failure (a check that was not measured, or a
+// batch the guard discarded).
+func (self ProviderEgressRules) DarkBackoff(consecutiveFailures int) time.Duration {
+	if len(self.DarkBackoffSeconds) == 0 {
+		return 0
+	}
+	step := min(max(consecutiveFailures, 1), len(self.DarkBackoffSeconds)) - 1
+	return time.Duration(self.DarkBackoffSeconds[step]) * time.Second
+}
+
+// The defaults with the overrides of one provider_egress_probe.yml. A missing
+// file is the defaults. An unreadable or invalid one is also the defaults,
+// returned with the error: the api must keep judging checks through a typo in
+// the probe's configuration, and the probe task, which validates the same file
+// before it schedules anything, is where the typo is refused.
+func ProviderEgressRulesFromResource(resource *server.SimpleResource, err error) (ProviderEgressRules, error) {
+	defaults := DefaultProviderEgressRules()
+	if err != nil {
+		if errors.Is(err, server.ErrResourceNotFound) {
+			return defaults, nil
+		}
+		return defaults, err
+	}
+	if resource == nil {
+		return defaults, nil
+	}
+	rules := DefaultProviderEgressRules()
+	if err := resource.UnmarshalYamlE(&rules); err != nil {
+		return defaults, err
+	}
+	if err := rules.Validate(); err != nil {
+		return defaults, err
+	}
+	return rules, nil
+}
+
+// The rules as read at loadTime, for the cached read.
+type providerEgressRulesSnapshot struct {
+	rules    ProviderEgressRules
+	loadTime time.Time
+}
+
+// providerEgressRulesStaleAfter bounds how old the rules a request path reads
+// may be: ingest and the dark set run far too often to read and parse a file
+// each time, and a configuration change reaches them within this.
+const providerEgressRulesStaleAfter = time.Minute
+
+var currentProviderEgressRules atomic.Pointer[providerEgressRulesSnapshot]
+
+// Drops the cached rules on a reset, so a test's pushed resource is read.
+func init() {
+	server.OnReset(func() {
+		currentProviderEgressRules.Store(nil)
+	})
+}
+
+// The rules as the deployment configures them, at most
+// providerEgressRulesStaleAfter old. Two callers racing past the age both read
+// the file, which is harmless.
+func GetProviderEgressRules() ProviderEgressRules {
+	snapshot := currentProviderEgressRules.Load()
+	if snapshot == nil || providerEgressRulesStaleAfter <= time.Since(snapshot.loadTime) {
+		rules, err := ProviderEgressRulesFromResource(
+			server.Config.SimpleResource(ProviderEgressProbeResourceName),
+		)
+		if err != nil {
+			glog.Errorf("[egress]%s is unusable (%s); the egress rules keep their defaults\n", ProviderEgressProbeResourceName, err)
+		}
+		snapshot = &providerEgressRulesSnapshot{
+			rules:    rules,
+			loadTime: time.Now(),
+		}
+		currentProviderEgressRules.Store(snapshot)
+	}
+	return snapshot.rules
+}
 
 // ProviderEgressLocationMaxAge bounds how long a probed egress location is
 // trusted. Past this, the location is ignored and the caller falls back to the
@@ -26,6 +223,12 @@ const ProviderEgressLocationMaxAge = 7 * 24 * time.Hour
 // be transient -- just not on every single poll, which is what starves the rest
 // of the queue.
 const ProviderEgressProbeAttemptBackoff = 6 * time.Hour
+
+// ProbeRunBatchGuardClass is the attempt failure class of a full batch the run
+// guard held back (ProviderEgressRules.RunBatchGuard): the batch's providers
+// are re-offered after the first dark-backoff step instead of the ordinary
+// attempt backoff, since nothing about them was learned.
+const ProbeRunBatchGuardClass = "run_batch_guard"
 
 // the verdict/assurance values a provider_egress_location row can hold. These
 // mirror the column defaults, and are what an unjudged submission is normalized
@@ -48,15 +251,28 @@ const (
 // or scoring reads them. An empty Verdict or Assurance is normalized to the
 // column default on write, so a caller that does not compute a judgement stores
 // an unjudged direct probe rather than an empty string.
+//
+// There is no hosting, proxy or mobile verdict any more (connect/GEOMAP.md
+// §11.3, D24): those came from ip-intelligence vendors, which the prober no
+// longer consults. Their columns are no longer written or read, and go one
+// release later.
 type ProviderEgressLocation struct {
-	ClientId      server.Id
-	LocationId    server.Id
-	CountryCode   string
-	ASN           int
-	Org           string
-	Hosting       bool
-	Proxy         bool
-	Mobile        bool
+	ClientId    server.Id
+	LocationId  server.Id
+	CountryCode string
+	ASN         int
+	Org         string
+	// Deprecated: Hosting, Proxy and Mobile are neither stored by
+	// SetProviderEgressLocation nor read back, and are always false on a row
+	// read from the table. They remain for the release that still carries the
+	// columns, so callers written against them keep compiling; nothing may
+	// read them.
+	Hosting bool
+	Proxy   bool
+	Mobile  bool
+	// CityConfident is whether LocationId is a city row: GeoLite2 placed the
+	// exit within ProviderEgressRules.CityConfidentRadiusKm (see
+	// controller.ResolveProviderEgressExit).
 	CityConfident bool
 	ObservedAt    time.Time
 	Verdict       string
@@ -100,9 +316,6 @@ func SetProviderEgressLocation(ctx context.Context, e *ProviderEgressLocation) {
 				country_code,
 				asn,
 				org,
-				hosting,
-				proxy,
-				mobile,
 				city_confident,
 				observed_at,
 				verdict,
@@ -110,22 +323,19 @@ func SetProviderEgressLocation(ctx context.Context, e *ProviderEgressLocation) {
 				assurance,
 				update_time
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			ON CONFLICT (client_id) DO UPDATE
 			SET
 				location_id = $2,
 				country_code = $3,
 				asn = $4,
 				org = $5,
-				hosting = $6,
-				proxy = $7,
-				mobile = $8,
-				city_confident = $9,
-				observed_at = $10,
-				verdict = $11,
-				verdict_reason = $12,
-				assurance = $13,
-				update_time = $14
+				city_confident = $6,
+				observed_at = $7,
+				verdict = $8,
+				verdict_reason = $9,
+				assurance = $10,
+				update_time = $11
 			WHERE provider_egress_location.observed_at < EXCLUDED.observed_at
 			`,
 			e.ClientId,
@@ -133,9 +343,6 @@ func SetProviderEgressLocation(ctx context.Context, e *ProviderEgressLocation) {
 			countryCode,
 			e.ASN,
 			e.Org,
-			e.Hosting,
-			e.Proxy,
-			e.Mobile,
 			e.CityConfident,
 			e.ObservedAt.UTC(),
 			verdict,
@@ -240,9 +447,6 @@ func GetProviderEgressLocation(ctx context.Context, clientId server.Id) *Provide
 				country_code,
 				asn,
 				org,
-				hosting,
-				proxy,
-				mobile,
 				city_confident,
 				observed_at,
 				verdict,
@@ -263,9 +467,6 @@ func GetProviderEgressLocation(ctx context.Context, clientId server.Id) *Provide
 					&e.CountryCode,
 					&e.ASN,
 					&e.Org,
-					&e.Hosting,
-					&e.Proxy,
-					&e.Mobile,
 					&e.CityConfident,
 					&e.ObservedAt,
 					&e.Verdict,
@@ -393,9 +594,6 @@ func GetFreshProviderEgressLocationForConnection(
 				pel.country_code,
 				pel.asn,
 				pel.org,
-				pel.hosting,
-				pel.proxy,
-				pel.mobile,
 				pel.city_confident,
 				pel.observed_at,
 				pel.verdict,
@@ -417,9 +615,6 @@ func GetFreshProviderEgressLocationForConnection(
 					&e.CountryCode,
 					&e.ASN,
 					&e.Org,
-					&e.Hosting,
-					&e.Proxy,
-					&e.Mobile,
 					&e.CityConfident,
 					&e.ObservedAt,
 					&e.Verdict,
@@ -439,396 +634,88 @@ func GetFreshProviderEgressLocationForConnection(
 	return e
 }
 
-// GetLocation returns the canonical location row, or nil.
-//
-// Note: the location table also has a location_name column, but it holds the
-// name for whichever granularity that specific row represents (e.g. a city
-// row's own name), not a single name field on the Location struct. Location
-// instead splits City/Region/Country by joining sibling rows (see
-// IndexSearchLocationsInTx in network_client_location_model.go). This helper
-// only needs to resolve identity/type, so it selects the columns that map
-// directly onto Location's fields and leaves City/Region/Country empty.
+// GetLocation returns the canonical location row, or nil, with the city,
+// region and country rows it is filed under: their ids, names and GeoNames ids
+// (connect/GEOMAP.md §4.2), and the row's own coordinates. The ids of a
+// granularity the row does not reach stay zero -- a country row has no city.
 func GetLocation(ctx context.Context, locationId server.Id) *Location {
-	var loc *Location
+	return getLocationWhere(ctx, "location.location_id = $1", locationId)
+}
+
+// The attempt backoff over the provider_egress_probe_attempt row named alias:
+// an attempt at or after minAttemptAtParam defers the provider, except a batch
+// the run guard held back (ProbeRunBatchGuardClass), which defers it only
+// until minGuardAttemptAtParam -- nothing about those providers was learned,
+// and the batch is retried after the first backoff step as a guarded blackhole
+// batch is (GEOMAP §11.3).
+func providerEgressAttemptDeferredSql(alias string, minAttemptAtParam string, minGuardAttemptAtParam string) string {
+	return fmt.Sprintf(
+		// the parameters are cast: a CASE of two untyped parameters resolves
+		// to text, which does not compare with a timestamp
+		`CASE WHEN %[1]s.probe_failure = '%[4]s' THEN %[3]s::timestamp ELSE %[2]s::timestamp END <= %[1]s.attempt_at`,
+		alias,
+		minAttemptAtParam,
+		minGuardAttemptAtParam,
+		ProbeRunBatchGuardClass,
+	)
+}
+
+// Where a provider is published: the country and region of its reliability
+// rollup's location ids. The due lists carry it so the prober draws a
+// provider's sample only from the destinations compatible with it
+// (connect/GEOMAP.md §11.3), and the health ingest uses it to drop a load of a
+// site incompatible with it.
+type ProviderEgressPlace struct {
+	// CountryCode is lowercase alpha-2; "" when the rollup has no country.
+	CountryCode string
+	// Region is the region location's name, as the incompatible places name
+	// it; "" when the rollup has none.
+	Region string
+}
+
+// Reads the published place of each provider in one query. A provider without
+// a rollup row is absent, which the due list sends as a provider with no
+// place: it excludes nothing.
+func GetProviderEgressPlaces(ctx context.Context, clientIds []server.Id) map[server.Id]ProviderEgressPlace {
+	places := map[server.Id]ProviderEgressPlace{}
+	if len(clientIds) == 0 {
+		return places
+	}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-			SELECT location_id, location_type, city_location_id, region_location_id, country_location_id, country_code
-			FROM location
-			WHERE location_id = $1
+			SELECT
+				network_client_location_reliability.client_id,
+				COALESCE(country_location.country_code, ''),
+				COALESCE(region_location.location_name, '')
+			FROM network_client_location_reliability
+			LEFT JOIN location country_location ON
+				country_location.location_id = network_client_location_reliability.country_location_id
+			LEFT JOIN location region_location ON
+				region_location.location_id = network_client_location_reliability.region_location_id
+			WHERE network_client_location_reliability.client_id = ANY($1)
 			`,
-			locationId,
+			clientIds,
 		)
 		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				loc = &Location{}
-				// city_location_id/region_location_id are only set once the
-				// row's hierarchy reaches that granularity (e.g. a country
-				// row has both NULL); server.Id.Scan errors on a nil source,
-				// so scan through nullable pointers as in
-				// IndexSearchLocationsInTx (network_client_location_model.go).
-				var cityLocationId *server.Id
-				var regionLocationId *server.Id
-				var countryLocationId *server.Id
-				server.Raise(result.Scan(
-					&loc.LocationId,
-					&loc.LocationType,
-					&cityLocationId,
-					&regionLocationId,
-					&countryLocationId,
-					&loc.CountryCode,
-				))
-				if cityLocationId != nil {
-					loc.CityLocationId = *cityLocationId
-				}
-				if regionLocationId != nil {
-					loc.RegionLocationId = *regionLocationId
-				}
-				if countryLocationId != nil {
-					loc.CountryLocationId = *countryLocationId
-				}
+			for result.Next() {
+				var clientId server.Id
+				var place ProviderEgressPlace
+				server.Raise(result.Scan(&clientId, &place.CountryCode, &place.Region))
+				place.CountryCode = strings.ToLower(strings.TrimSpace(place.CountryCode))
+				place.Region = strings.TrimSpace(place.Region)
+				places[clientId] = place
 			}
 		})
 	})
-	return loc
+	return places
 }
 
-// normalizeLocationName folds a location name to a comparison key: lowercased,
-// accent-stripped, with every rune that is not a letter or a digit dropped. So
-// "Frankfurt am Main", "Frankfurt Am Main" and "FRANKFURT AM MAIN" all fold to
-// "frankfurtammain", and "São Paulo", "Zürich" and "Kraków" fold to the same
-// keys as "Sao Paulo", "Zurich" and "Krakow".
-//
-// This is deliberately a comparison key only -- it is never stored, and never
-// used to build a location_name. It exists so a trivial spelling variant from a
-// geolocation source resolves to the existing row instead of being treated as a
-// different place.
-//
-// Diacritics are the single biggest source of these variants: the free
-// geolocation sources disagree over whether to emit the local spelling or an
-// ASCII transliteration for the same city, and the mmdb import that seeded most
-// existing rows made its own choice. Folding is done with an NFD decomposition
-// followed by dropping the combining marks (unicode.Mn), which covers the whole
-// accent class at once -- a hand-rolled é->e table would have to enumerate the
-// world's diacritics and would silently keep missing the ones it forgot.
-//
-// golang.org/x/text is already a dependency of this module, so this costs no
-// new supply-chain surface. (An earlier revision of this function was
-// stdlib-only by mistake: that constraint belongs to the prober repo's
-// `geolocate` package, not to the server.)
-//
-// Letters that carry a stroke rather than a combining mark -- ł, ø, đ -- do not
-// decompose and therefore still do not fold onto l/o/d. Those fall back to
-// country granularity, which is the safe outcome; the alternative is the
-// transliteration table this function deliberately avoids.
-//
-// Punctuation is dropped rather than mapped to a space because the disagreement
-// is over whether the separator exists at all ("Washington, D.C." vs
-// "Washington DC"). Note this deliberately does not fold "Frankfurt/Main" onto
-// "Frankfurt am Main": dropping the separator gives "frankfurtmain" !=
-// "frankfurtammain", so that one falls back to country granularity rather than
-// matching the wrong row. Falling back is the safe outcome; guessing is not.
-func normalizeLocationName(name string) string {
-	// NFD splits a precomposed letter ("ü") into its base letter plus a
-	// combining mark ("u" + U+0308). The mark is category Mn, which is neither
-	// a letter nor a digit, so the filter below drops it; the explicit Mn skip
-	// is there to say so rather than to leave it to a category coincidence.
-	decomposed := norm.NFD.String(strings.ToLower(name))
-	var b strings.Builder
-	b.Grow(len(decomposed))
-	for _, r := range decomposed {
-		if unicode.Is(unicode.Mn, r) {
-			continue
-		}
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
-// stripParentheticals removes every parenthesised span from name, so
-// "Frankfurt am Main (Innenstadt I)" becomes "Frankfurt am Main ". Nesting is
-// tracked, and an unclosed "(" swallows the rest of the string -- a qualifier
-// that was truncated by a length limit is still a qualifier.
-//
-// This is only ever applied to a comparison key, never to anything stored.
-func stripParentheticals(name string) string {
-	if !strings.ContainsRune(name, '(') {
-		return name
-	}
-	var b strings.Builder
-	b.Grow(len(name))
-	depth := 0
-	for _, r := range name {
-		switch r {
-		case '(':
-			depth += 1
-		case ')':
-			if 0 < depth {
-				depth -= 1
-			}
-		default:
-			if depth == 0 {
-				b.WriteRune(r)
-			}
-		}
-	}
-	return b.String()
-}
-
-// matchLocationName returns the location_id of the row in `candidates` whose
-// location_name matches `name`, or nil for no match. Candidates must already be
-// ordered deterministically by the caller so that two rows folding to the same
-// key always resolve the same way.
-//
-// Three passes, narrowest first:
-//
-//  1. exact string equality -- the common case, since the winning source usually
-//     spells it the way the mmdb import did;
-//  2. the normalized fold (see normalizeLocationName): case, punctuation,
-//     whitespace and accents;
-//  3. the normalized fold with parenthesised qualifiers stripped from BOTH
-//     sides. This is the case that motivated the whole feature: one source
-//     reports "Frankfurt am Main (Innenstadt I)" -- a district qualifier -- for
-//     a host another source calls "Frankfurt am Main". Pass 2 cannot see
-//     through that, because dropping the parentheses as punctuation leaves the
-//     qualifier's letters in the key.
-//
-// Pass 3 is the only pass that can plausibly match the wrong row -- two
-// same-region rows "Springfield (IL)" and "Springfield (MA)" both reduce to
-// "springfield" -- so it requires the stripped key to identify exactly ONE
-// candidate and returns nil on any ambiguity. Falling back to country
-// granularity is the safe outcome; guessing is not.
-func matchLocationName(name string, candidateIds []server.Id, candidateNames []string) *server.Id {
-	for i, candidateName := range candidateNames {
-		if candidateName == name {
-			return &candidateIds[i]
-		}
-	}
-	normalized := normalizeLocationName(name)
-	if normalized == "" {
-		// nothing comparable survives folding (e.g. a name of only
-		// punctuation); an empty key would match any other such row
-		return nil
-	}
-	for i, candidateName := range candidateNames {
-		if normalizeLocationName(candidateName) == normalized {
-			return &candidateIds[i]
-		}
-	}
-
-	base := normalizeLocationName(stripParentheticals(name))
-	if base == "" {
-		// the name was nothing but a qualifier
-		return nil
-	}
-	var unique *server.Id
-	for i, candidateName := range candidateNames {
-		if normalizeLocationName(stripParentheticals(candidateName)) == base {
-			if unique != nil {
-				return nil
-			}
-			unique = &candidateIds[i]
-		}
-	}
-	return unique
-}
-
-// MatchExistingLocation resolves (countryCode, region, city) against location
-// rows that ALREADY EXIST and returns the city-granular row, or nil if any
-// level of the hierarchy does not resolve. It never inserts anything.
-//
-// This is the resolver the provider egress ingest path uses instead of
-// CreateLocation. CreateLocation deduplicates a city on its exact
-// location_name, so an unrecognised spelling does not fail -- it silently
-// creates a new, permanent row in the shared `location` table and indexes it
-// for search. A geolocation probe has no business defining the world's cities:
-// the three free sources the prober reaches consensus over demonstrably
-// disagree on spelling (we observed "Frankfurt am Main (Innenstadt I)" against
-// "Frankfurt am Main" for one host), and the consensus stores the winning
-// source's original display string. Each variant would become its own row,
-// those rows outlive a code revert, and there is no cleanup path.
-//
-// Matching is case-insensitive and ignores punctuation, whitespace, accents and
-// parenthesised district qualifiers (see matchLocationName), so the ordinary
-// variants resolve to the row that is already there -- including the
-// "Frankfurt am Main (Innenstadt I)" case above, which is what this exists for.
-// When nothing resolves the caller falls back to country granularity --
-// see SubmitProviderEgressLocation. Falling back loses precision for one
-// submission; creating a row corrupts shared data permanently.
-//
-// Each level tries an exact, fully-indexed match first (the common case: the
-// winning source usually spells it the way the mmdb import did) and only scans
-// the level's candidates when that misses.
-func MatchExistingLocation(
-	ctx context.Context,
-	countryCode string,
-	region string,
-	city string,
-) *Location {
-	countryCode = strings.ToLower(strings.TrimSpace(countryCode))
-	region = strings.TrimSpace(region)
-	city = strings.TrimSpace(city)
-	if countryCode == "" || region == "" || city == "" {
-		return nil
-	}
-
-	var match *Location
-	server.Db(ctx, func(conn server.PgConn) {
-		// country: keyed on country_code alone, exactly as CreateLocation
-		// dedupes it, so there is no name to match here
-		var countryLocationId server.Id
-		var countryName string
-		found := false
-		result, err := conn.Query(
-			ctx,
-			`
-			SELECT location_id, location_name
-			FROM location
-			WHERE location_type = $1 AND country_code = $2
-			ORDER BY location_id
-			LIMIT 1
-			`,
-			LocationTypeCountry,
-			countryCode,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&countryLocationId, &countryName))
-				found = true
-			}
-		})
-		if !found {
-			return
-		}
-
-		// region, within that country
-		regionLocationId := matchChildLocation(
-			ctx,
-			conn,
-			LocationTypeRegion,
-			countryCode,
-			region,
-			`
-			SELECT location_id, location_name
-			FROM location
-			WHERE
-				location_type = $1 AND
-				country_code = $2 AND
-				location_name = $3 AND
-				country_location_id = $4
-			`,
-			`
-			SELECT location_id, location_name
-			FROM location
-			WHERE
-				location_type = $1 AND
-				country_code = $2 AND
-				country_location_id = $3
-			ORDER BY location_id
-			`,
-			[]any{countryLocationId},
-		)
-		if regionLocationId == nil {
-			return
-		}
-
-		// city, within that region
-		cityLocationId := matchChildLocation(
-			ctx,
-			conn,
-			LocationTypeCity,
-			countryCode,
-			city,
-			`
-			SELECT location_id, location_name
-			FROM location
-			WHERE
-				location_type = $1 AND
-				country_code = $2 AND
-				location_name = $3 AND
-				region_location_id = $4 AND
-				country_location_id = $5
-			`,
-			`
-			SELECT location_id, location_name
-			FROM location
-			WHERE
-				location_type = $1 AND
-				country_code = $2 AND
-				region_location_id = $3 AND
-				country_location_id = $4
-			ORDER BY location_id
-			`,
-			[]any{*regionLocationId, countryLocationId},
-		)
-		if cityLocationId == nil {
-			return
-		}
-
-		match = &Location{
-			LocationType:      LocationTypeCity,
-			City:              city,
-			Region:            region,
-			Country:           countryName,
-			CountryCode:       countryCode,
-			LocationId:        *cityLocationId,
-			CityLocationId:    *cityLocationId,
-			RegionLocationId:  *regionLocationId,
-			CountryLocationId: countryLocationId,
-		}
-	})
-	return match
-}
-
-// matchChildLocation runs the exact-match query first and only falls back to
-// scanning the level's candidates when it misses. `parents` are the parent
-// location ids the two queries scope on: the exact query binds them after
-// (location_type, country_code, name), the candidate query after
-// (location_type, country_code).
-func matchChildLocation(
-	ctx context.Context,
-	conn server.PgConn,
-	locationType LocationType,
-	countryCode string,
-	name string,
-	exactSql string,
-	candidatesSql string,
-	parents []any,
-) *server.Id {
-	exactArgs := append([]any{locationType, countryCode, name}, parents...)
-	var exactId *server.Id
-	result, err := conn.Query(ctx, exactSql, exactArgs...)
-	server.WithPgResult(result, err, func() {
-		if result.Next() {
-			var locationId server.Id
-			var locationName string
-			server.Raise(result.Scan(&locationId, &locationName))
-			exactId = &locationId
-		}
-	})
-	if exactId != nil {
-		return exactId
-	}
-
-	candidateArgs := append([]any{locationType, countryCode}, parents...)
-	candidateIds := []server.Id{}
-	candidateNames := []string{}
-	result, err = conn.Query(ctx, candidatesSql, candidateArgs...)
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			var locationId server.Id
-			var locationName string
-			server.Raise(result.Scan(&locationId, &locationName))
-			candidateIds = append(candidateIds, locationId)
-			candidateNames = append(candidateNames, locationName)
-		}
-	})
-	return matchLocationName(name, candidateIds, candidateNames)
-}
-
+// providerEgressStaleHealthDueQuery is formatted with the current-dark
+// predicate (%[1]s, see ProviderBlackholeDarkSql) and the attempt-backoff
+// predicate (%[2]s, see providerEgressAttemptDeferredSql) before it is run,
+// so its own modulo operators are written %% to survive the formatting.
 const providerEgressStaleHealthDueQuery = `
 	SELECT
 		provider_egress_health.client_id,
@@ -857,18 +744,17 @@ const providerEgressStaleHealthDueQuery = `
 			SELECT 1 FROM provider_egress_probe_attempt
 			WHERE
 				provider_egress_probe_attempt.client_id = provider_egress_health.client_id AND
-				$3 <= provider_egress_probe_attempt.attempt_at
+				%[2]s
 		) AND
 		NOT EXISTS (
 			SELECT 1 FROM provider_blackhole_check
 			WHERE
 				provider_blackhole_check.client_id = provider_egress_health.client_id AND
-				provider_blackhole_check.ok = false AND
-				$7 <= provider_blackhole_check.checked_at
+				%[1]s
 		) AND
 		(
 			$5 <= 1 OR
-			((hashtext(provider_egress_health.client_id::text) % $5) + $5) % $5 = $6
+			((hashtext(provider_egress_health.client_id::text) %% $5) + $5) %% $5 = $6
 		)
 
 	ORDER BY
@@ -912,12 +798,15 @@ const providerEgressStaleHealthDueQuery = `
 // probe worked; moving the schedule server-side dropped that protection, and
 // provider_egress_probe_attempt is what restores it.
 //
-// Fourth, a current explicit blackhole failure defers the expensive full
-// probe. The cheap blackhole queue remains independent and retries failures
-// without the full-probe attempt backoff, so a passing recheck makes the
-// provider immediately full-probeable again. If that queue stalls, its verdict
-// ages out after ProviderBlackholeCheckMaxAge and this queue fails open. Missing
-// checks, stale checks, and current passing checks never exclude a provider.
+// Fourth, a current dark verdict defers the expensive full probe: the
+// consecutive failed checks of GEOMAP §11.3 (ProviderBlackholeDarkSql), not a
+// single failed check, which is only a failure and may be a slow cold start.
+// The cheap blackhole queue remains independent and retries failures on its
+// short backoff, so a passing recheck makes the provider immediately
+// full-probeable again. If that queue stalls, its verdict ages out after
+// ProviderBlackholeCheckMaxAge and this queue fails open. Missing checks, stale
+// checks, a run of failures short of dark, and current passing checks never
+// exclude a provider.
 //
 // The observed-at and attempt-at cutoffs are computed by the caller in Go and
 // bound as parameters. The health and current-blackhole cutoffs are likewise
@@ -1009,7 +898,12 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 	shardCount int,
 ) ([]server.Id, ProviderEgressDueDiagnostics) {
 	now := server.NowUtc()
+	rules := GetProviderEgressRules()
 	minBlackholeCheckedAt := now.Add(-ProviderBlackholeCheckMaxAge)
+	// a batch the run guard held back measured nothing about its providers,
+	// so they come round again after the first backoff step rather than the
+	// ordinary attempt backoff
+	minGuardAttemptAt := now.Add(-rules.DarkBackoff(0))
 	clientIds := []server.Id{}
 	diagnostics := ProviderEgressDueDiagnostics{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -1059,14 +953,13 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 					SELECT 1 FROM provider_egress_probe_attempt
 					WHERE
 						provider_egress_probe_attempt.client_id = provider_egress_location.client_id AND
-						$3 <= provider_egress_probe_attempt.attempt_at
+						`+providerEgressAttemptDeferredSql("provider_egress_probe_attempt", "$3", "$8")+`
 				) AND
 				NOT EXISTS (
 					SELECT 1 FROM provider_blackhole_check
 					WHERE
 						provider_blackhole_check.client_id = provider_egress_location.client_id AND
-						provider_blackhole_check.ok = false AND
-						$7 <= provider_blackhole_check.checked_at
+						`+ProviderBlackholeDarkSql("provider_blackhole_check", "$7", rules)+`
 				) AND
 				(
 					$5 <= 1 OR
@@ -1085,6 +978,7 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 			shardCount,
 			shardIndex,
 			minBlackholeCheckedAt.UTC(),
+			minGuardAttemptAt.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -1106,7 +1000,11 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 		minMeasuredAt := now.Add(-ProviderEgressHealthMaxAge / 2)
 		result, err = conn.Query(
 			ctx,
-			providerEgressStaleHealthDueQuery,
+			fmt.Sprintf(
+				providerEgressStaleHealthDueQuery,
+				ProviderBlackholeDarkSql("provider_blackhole_check", "$7", rules),
+				providerEgressAttemptDeferredSql("provider_egress_probe_attempt", "$3", "$8"),
+			),
 			ProvideModePublic,
 			minMeasuredAt.UTC(),
 			minAttemptAt.UTC(),
@@ -1114,6 +1012,7 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 			shardCount,
 			shardIndex,
 			minBlackholeCheckedAt.UTC(),
+			minGuardAttemptAt.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -1173,14 +1072,13 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 					SELECT 1 FROM provider_egress_probe_attempt
 					WHERE
 						provider_egress_probe_attempt.client_id = provider_egress_location.client_id AND
-						$2 <= provider_egress_probe_attempt.attempt_at
+						`+providerEgressAttemptDeferredSql("provider_egress_probe_attempt", "$2", "$7")+`
 				) AND
 				NOT EXISTS (
 					SELECT 1 FROM provider_blackhole_check
 					WHERE
 						provider_blackhole_check.client_id = provider_egress_location.client_id AND
-						provider_blackhole_check.ok = false AND
-						$6 <= provider_blackhole_check.checked_at
+						`+ProviderBlackholeDarkSql("provider_blackhole_check", "$6", rules)+`
 				) AND
 				(
 					$4 <= 1 OR
@@ -1198,6 +1096,7 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 			shardCount,
 			shardIndex,
 			minBlackholeCheckedAt.UTC(),
+			minGuardAttemptAt.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -1266,14 +1165,13 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 					SELECT 1 FROM provider_egress_probe_attempt
 					WHERE
 						provider_egress_probe_attempt.client_id = network_client_location_reliability.client_id AND
-						$2 <= provider_egress_probe_attempt.attempt_at
+						`+providerEgressAttemptDeferredSql("provider_egress_probe_attempt", "$2", "$7")+`
 				) AND
 				NOT EXISTS (
 					SELECT 1 FROM provider_blackhole_check
 					WHERE
 						provider_blackhole_check.client_id = network_client_location_reliability.client_id AND
-						provider_blackhole_check.ok = false AND
-						$6 <= provider_blackhole_check.checked_at
+						`+ProviderBlackholeDarkSql("provider_blackhole_check", "$6", rules)+`
 				) AND
 				-- hashtext is signed and '%' preserves the sign, so normalize
 				-- the modulo into [0, shardCount).
@@ -1291,6 +1189,7 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 			shardCount,
 			shardIndex,
 			minBlackholeCheckedAt.UTC(),
+			minGuardAttemptAt.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			seen := map[server.Id]bool{}

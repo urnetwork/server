@@ -26,9 +26,6 @@ import (
 var removedTaskTargets = []string{
 	// split into ScheduleRefreshFree/Pro/ReferralTransferBalances
 	"github.com/urnetwork/server/controller.RefreshTransferBalances",
-	// Removed with the reverted extender-latency experiment. Its already
-	// scheduled production row otherwise retries Target not found forever.
-	"github.com/urnetwork/server/taskworker/work.RemoveOldExtenderLatencies",
 }
 
 // InitTasks schedules the recurring tasks. It is invoked at startup by the
@@ -80,10 +77,16 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleRemoveExpiredWalletNonces(clientSession, tx)
 		work.ScheduleRemoveExpiredProviderEgressLocations(clientSession, tx)
 		work.ScheduleProberBootstrap(clientSession, tx)
-		work.ScheduleRefreshGeolocationSourcePins(clientSession, tx)
+		// no geolocation-source pin refresh: its sources are gone
+		// (connect/GEOMAP.md D24), and a pending row drains through the
+		// registered task below without scheduling a successor
 		work.ScheduleProviderEgressProbeTasks(clientSession, tx)
+		work.ScheduleRefreshEgressDestinations(clientSession, tx)
 		work.ScheduleExtenderProbe(clientSession, tx)
 		work.ScheduleExtenderPublish(clientSession, tx)
+		work.ScheduleRemoveOldExtenderLatencies(clientSession, tx)
+		work.ScheduleRemoveExpiredPings(clientSession, tx)
+		work.ScheduleDeriveLocations(clientSession, tx)
 		work.ScheduleRemoveExpiredBulkClientRemovalQuota(clientSession, tx)
 		work.ScheduleRemoveOldAuditNetworkEvents(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
@@ -328,12 +331,28 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ProviderEgressProbePost,
 		),
 		task.NewTaskTargetWithPost(
+			work.RefreshEgressDestinations,
+			work.RefreshEgressDestinationsPost,
+		),
+		task.NewTaskTargetWithPost(
 			work.ExtenderProbe,
 			work.ExtenderProbePost,
 		),
 		task.NewTaskTargetWithPost(
 			work.ExtenderPublish,
 			work.ExtenderPublishPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveOldExtenderLatencies,
+			work.RemoveOldExtenderLatenciesPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveExpiredPings,
+			work.RemoveExpiredPingsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.DeriveLocations,
+			work.DeriveLocationsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveExpiredBulkClientRemovalQuota,

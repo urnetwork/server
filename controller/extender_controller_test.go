@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -135,7 +136,7 @@ func TestExtenderActivateStoresAndSignsPerFamily(t *testing.T) {
 			if !slices.Equal(body.Addresses[0].Carriers, []string{"tcp", "quic", "dns"}) {
 				t.Fatalf("%s record carriers = %v", c.loopbackIp, body.Addresses[0].Carriers)
 			}
-			// fourteen days out, to the minute
+			// a day out, to the minute (connect/GEOMAP.md §2.8)
 			expireTime := time.UnixMilli(int64(body.ExpireTimeMs)).UTC()
 			issueTime := time.UnixMilli(int64(body.IssueTimeMs)).UTC()
 			connect.AssertEqual(
@@ -195,6 +196,11 @@ func TestExtenderActivateRecordsTheActivationHistory(t *testing.T) {
 			if activation.LocationId != nil || activation.CityLocationId != nil ||
 				activation.RegionLocationId != nil || activation.CountryLocationId != nil {
 				t.Fatalf("loopback resolved to a location: %+v", activation)
+			}
+			// and a lookup that placed nothing has no accuracy radius either:
+			// the radius is stored with the location it qualifies, never alone
+			if activation.AccuracyKm != nil {
+				t.Fatalf("loopback stored an accuracy radius of %f km", *activation.AccuracyKm)
 			}
 			if activation.ActivateTime.IsZero() {
 				t.Fatal("the activation carries no time")
@@ -983,4 +989,63 @@ func TestExtenderActivateBootstrapRecordsCarryTheDnsPorts(t *testing.T) {
 			t.Fatalf("bootstrap dns ports = %v, want %v", testRecordDnsPorts(body), wantDnsPorts)
 		}
 	})
+}
+
+// The record carries the continent of its country, from the same mapping the
+// geo dns sets use (connect/DESIGNNOTES4.md §2), and lives a day
+// (connect/GEOMAP.md §2.8, D19). Signing reads no database, so this runs
+// anywhere.
+func TestSignExtenderRecordStampsTheContinentAndTheDay(t *testing.T) {
+	rootPublicKey, rootPrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := &ExtenderConfig{
+		NetworkHost: testExtenderNetworkHost,
+	}
+	issueTime := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		countryCode   string
+		continentCode string
+	}{
+		{countryCode: "us", continentCode: "NA"},
+		{countryCode: "DE", continentCode: "EU"},
+		{countryCode: "jp", continentCode: "AS"},
+		{countryCode: "br", continentCode: "SA"},
+		// an extender the operator could not place has no continent, which a
+		// client sorts last rather than guessing
+		{countryCode: "", continentCode: ""},
+		{countryCode: "zz", continentCode: ""},
+	} {
+		extender := &model.NetworkExtender{
+			ExtenderId:  server.NewId(),
+			PublicKey:   rootPublicKey,
+			TcpPort:     443,
+			UdpPort:     443,
+			DnsPort:     connect.ExtenderDnsPort,
+			DnsTld:      connect.DefaultExtenderDnsTld,
+			CountryCode: test.countryCode,
+		}
+		addresses := []*model.NetworkExtenderAddress{
+			{
+				IpVersion: 4,
+				Ip:        netip.MustParseAddr("192.0.2.7"),
+				Carriers:  []string{connect.ExtenderCarrierTcp},
+			},
+		}
+		record, _, err := SignExtenderRecord(config, rootPrivateKey, extender, addresses, issueTime)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := connect.NewExtenderRootKeySet(rootPublicKey).VerifyRecord(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connect.AssertEqual(t, body.CountryCode, test.countryCode)
+		connect.AssertEqual(t, body.ContinentCode, test.continentCode)
+		connect.AssertEqual(t, body.ContinentCode, model.ContinentCodeForCountry(test.countryCode))
+		connect.AssertEqual(t, int64(body.IssueTimeMs), issueTime.UnixMilli())
+		connect.AssertEqual(t, int64(body.ExpireTimeMs), issueTime.Add(24*time.Hour).UnixMilli())
+	}
+	connect.AssertEqual(t, ExtenderRecordExpireTimeout, 24*time.Hour)
 }

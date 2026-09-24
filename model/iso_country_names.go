@@ -19,9 +19,10 @@ import "strings"
 //
 // Name policy: the standard's `common_name` where it has one (11 entries,
 // e.g. `kr` -> "South Korea" rather than "Korea, Republic of"), otherwise its
-// `name`. That matches the short-form style of the deployment-supplied
-// iso-country-list.yml, which wins over this table wherever it has an entry
-// -- see resolveCountryName in network_client_location_model.go.
+// `name`. That matches the short-form style of the GeoLite2 names the location
+// seeder stores from the canonical place list, which win over this table for
+// every country the list names -- see resolveCountryName in
+// network_client_location_model.go.
 var isoCountryNames = map[string]string{
 	"ad": "Andorra",
 	"ae": "United Arab Emirates",

@@ -85,9 +85,13 @@ WITH clock AS MATERIALIZED (
     FROM metadata
 ), checked AS MATERIALIZED (
     SELECT classified.*,
-           pbc.ok,
+           COALESCE(pbc.ok, false) AS ok,
+           -- a current verdict is a pass within the max age, or a provider
+           -- dark by the consecutive-failure rule of connect/GEOMAP.md §11.3;
+           -- a single failed check, or one that measured nothing, is none
            COALESCE(
-               pbc.checked_at >= clock.utc_now - interval '%d seconds',
+               pbc.checked_at >= clock.utc_now - interval '%d seconds'
+               AND (pbc.ok OR %s),
                false
            ) AS current_check
     FROM classified
@@ -125,7 +129,9 @@ SELECT cutover_active::text,
        compatible_ok::text
 FROM aggregate;
 `, storedContractHMACCompatibleYear, storedContractHMACCompatibleMonth, storedContractHMACCompatibleDay,
-		currentSeconds, cutover, cutover)
+		currentSeconds,
+		model.ProviderBlackholeDarkSql("pbc", fmt.Sprintf("clock.utc_now - interval '%d seconds'", currentSeconds), model.GetProviderEgressRules()),
+		cutover, cutover)
 }
 
 type hmacCutoverSnapshot struct {

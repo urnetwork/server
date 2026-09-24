@@ -16,7 +16,7 @@
   },
   "graphTooltip": 1,
   "editable": true,
-  "description": "Continuous provider quality probes (operator-proxy fleetprobe, run by the taskworker): fleet state, probe outcomes, breakdowns by provider country and by probe target, failure classes, latency, geolocation, blackhole, bandwidth, and pass health. Fleet snapshot panels select one most-recent Taskworker refresh and go no-data after 15 minutes; monitor signal §2.23 is the authoritative direct-database alert.",
+  "description": "Continuous provider quality probes (operator-proxy fleetprobe, run by the taskworker): fleet state, probe outcomes, breakdowns by provider country and by probe target, failure classes, latency, exit placement, blackhole, bandwidth, and pass health. Fleet snapshot panels select one most-recent Taskworker refresh and go no-data after 15 minutes; monitor signal §2.23 is the authoritative direct-database alert.",
   "templating": {
     "list": [
       {
@@ -145,7 +145,7 @@
       "title": "read me first",
       "options": {
         "mode": "markdown",
-        "content": "\n**What the probes are.** The taskworker runs the provider egress probes (operator-proxy `fleetprobe`) as recurring `pending_task` shards. Each **full probe** opens a tunnel pinned to one provider, geolocates the egress through it (country is the trusted output, city only with two agreeing sources), runs the **egress health** table through the same tunnel (a random sample per class: `dns`, `connectivity`, `cdn`, `site`, plus `reputation` reported alongside but never scored), optionally samples **active bandwidth**, and reports the attempt outcome. A separate **blackhole** schedule checks whether a provider carries anything at all. Findings are written to Postgres through the operator ingest API; the metrics on this board are recorded by the taskworker at the moment each finding is submitted (`urnetwork_egress_probe_*`), and the fleet gauges are re-counted from the durable tables at most once a minute.\n\n**Reading systematic issues.** A prober fault looks the same for every provider: one failure class dominates the attempts (row *failure classes* and the *dominant failure class* stat), every country's fail rate jumps at once, and the pass rows show due queues pinned at the batch limit or batch errors. A bad **target** looks like one destination failing for every country (row *by target*) while its class siblings stay green. A bad **region** looks like every class failing for one country (row *by country*) while the same targets stay green elsewhere. A **fleet** problem (providers really degrading) shows as rising `dead`/`degraded` health results with the pass rows healthy.\n\n**Data not collected today.** Per-check latency is recorded only for successful checks (a failed check's elapsed time is not exported). The provider's app version, transport and IP family are not part of the probe record, so there is no breakdown by those. Bandwidth samples carry the sample source only, not the country.\n"
+        "content": "\n**What the probes are.** The taskworker runs the provider egress probes (operator-proxy `fleetprobe`) as recurring `pending_task` shards. Each **full probe** opens a tunnel pinned to one provider, warms it up on the operator's own `/my-ip-info` echo, which answers with the exit address the platform saw (the server places it with GeoLite2: the city only within the confident radius, else the region or country; no vendor is asked, so there are no hosting, proxy or mobile verdicts), loads a sample of real sites through the same tunnel (per class: `dns`, `connectivity`, `cdn`, `site`, only sites compatible with the provider's place; each load gets up to three browser-shaped tries spaced minutes apart, and a load a lost tunnel never reached is *not measured*, not failed), optionally samples **active bandwidth**, and reports the attempt outcome. A separate **blackhole** schedule checks whether a provider carries anything at all; a failed check is not a verdict, and a provider is dark only after three failed checks in a row. Findings are written to Postgres through the operator ingest API; the metrics on this board are recorded by the taskworker at the moment each finding is submitted (`urnetwork_egress_probe_*`), and the fleet gauges are re-counted from the durable tables at most once a minute.\n\n**Reading systematic issues.** A prober fault looks the same for every provider: one failure class dominates the attempts (the *failed attempts / min by class* panel and the *dominant failure class* stat), every country's fail rate jumps at once, and the pass rows show due queues pinned at the batch limit or batch errors. The prober also judges itself: the *fleet dark share* or *fleet failure share by class* over its 20 % line, *batch guard trips*, and the prober-side attempt classes (`health_not_run`, `run_not_measured`, `no_exit_ip`, `run_batch_guard`) are its own misses, never verdicts on providers. A bad **target** looks like one destination failing for every country (row *by target*) while its class siblings stay green. A bad **region** looks like every class failing for one country (row *by country*) while the same targets stay green elsewhere. A **fleet** problem (providers really degrading) shows as rising `dead`/`degraded` health results with the pass rows healthy.\n\n**Data not collected today.** Per-check latency is recorded only for successful checks (a failed check's elapsed time is not exported). The provider's app version, transport and IP family are not part of the probe record, so there is no breakdown by those. Bandwidth samples carry the sample source only, not the country.\n"
       },
       "gridPos": {
         "h": 9,
@@ -353,7 +353,7 @@
     {
       "type": "stat",
       "title": "current proved failures",
-      "description": "Currently eligible providers with a proved current failure in the bounded failure vocabulary. Unobserved and inconsistent states stay in the population but are not mislabeled as provider failures.",
+      "description": "Currently eligible providers with a proved current failure in the bounded failure vocabulary, the failure count of monitor signal §2.23: tunnel_failed, contract_failed, submit_failed, health_not_run, run_not_measured, no_exit_ip, run_batch_guard and unknown_failure, plus the consensus classes no_consensus, locate_failed and not_confident, which the prober no longer reports and which read zero once their attempts age out of the six-hour retry window. health_not_run, run_not_measured, no_exit_ip and run_batch_guard are the probe's own misses (a run that never started, measured nothing, got no answer from the operator's /ip echo, or was held back by the run batch guard), not verdicts on the provider's traffic; they count because a fleet failing that way is the prober. Unobserved and inconsistent states stay in the population but are not mislabeled as provider failures; *eligible fleet by probe outcome* splits the count by class.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -396,7 +396,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(urnetwork_egress_probe_fleet_attempt_providers{env=\"$env\",result=~\"tunnel_failed|contract_failed|no_consensus|locate_failed|not_confident|submit_failed|unknown_failure\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "expr": "sum(urnetwork_egress_probe_fleet_attempt_providers{env=\"$env\",result=~\"tunnel_failed|contract_failed|health_not_run|run_not_measured|no_exit_ip|submit_failed|run_batch_guard|no_consensus|locate_failed|not_confident|unknown_failure\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "refId": "A",
           "legendFormat": "",
           "instant": true,
@@ -605,7 +605,7 @@
     {
       "type": "stat",
       "title": "blackholed providers",
-      "description": "Providers whose last blackhole check found them carrying nothing (dark).",
+      "description": "Providers currently dark: three failed blackhole checks in a row spanning at least 30 minutes by default, or a tls authentication failure, within the three-hour check max age (geomap §11.3). A single failed check is not dark.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -786,6 +786,142 @@
         "y": 15
       },
       "id": 14
+    },
+    {
+      "type": "stat",
+      "title": "fleet dark share",
+      "description": "The share of the providers with a current measured blackhole check that are dark by the consecutive-failure rule (geomap §11.3). A fleet over the dark batch guard's 20 % line is the prober until proven otherwise -- a request-shape, route or capacity fault, not a fifth of the providers going dark at once. The same gauge as the providers dashboard's, read from the one fresh taskworker snapshot like the rest of this row.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_egress_probe_fleet_dark_share{env=\"$env\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 19
+      },
+      "id": 71
+    },
+    {
+      "type": "stat",
+      "title": "fleet failure share by class",
+      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them (all). Over the 20 % prober-fault line in every class is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal §2.19b), and the site pool refresh skips its run while the all share is over the line. Read from the one fresh taskworker snapshot like the rest of this row.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "orientation": "auto",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (class) (urnetwork_egress_probe_fleet_failure_share{env=\"$env\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{class}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 4,
+        "y": 19
+      },
+      "id": 72
     },
     {
       "type": "row",
@@ -1114,8 +1250,8 @@
     },
     {
       "type": "stat",
-      "title": "blackhole checks dark (range)",
-      "description": "Blackhole checks that found the provider carrying nothing.",
+      "title": "blackhole checks failed (range)",
+      "description": "Blackhole checks in the range that measured the provider and failed after their retries (all_destinations_failed, tunnel_failed, tls_authentication_failed). A failed check is not a verdict: a provider is dark only after three in a row spanning at least 30 minutes, or at once on a tls authentication failure (geomap §11.3). Checks that measured nothing (not_measured) are the prober's lost path and are left out.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -1158,7 +1294,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(increase(urnetwork_egress_probe_blackhole_checks_total{env=\"$env\",result=\"dark\"}[$__range]))",
+          "expr": "sum(increase(urnetwork_egress_probe_blackhole_checks_total{env=\"$env\",result!~\"ok|not_measured\"}[$__range]))",
           "refId": "A",
           "legendFormat": "",
           "instant": true,
@@ -1285,7 +1421,7 @@
     {
       "type": "timeseries",
       "title": "failed attempts / min by class",
-      "description": "Failures by class: tunnel_failed (the pinned tunnel never came up: platform or prober connectivity), no_consensus (geolocation sources disagreed or failed: see geolocation panels), locate_failed, not_confident (country not confident), submit_failed (the operator API rejected the finding: server side), contract_failed. One class carrying the whole area is a prober fault.",
+      "description": "Failures by class: tunnel_failed (the pinned tunnel never came up: platform or prober connectivity), health_not_run (the health run never started: no budget left, a structural error, or the pass ended under it), run_not_measured (the tunnel died and could not be re-created, so nothing was measured), no_exit_ip (the operator's /ip echo never answered, so there was no exit to submit), run_batch_guard (the run's batch failed its scored loads together over the run guard line and was held back and re-queued), submit_failed (the operator API refused the finding, an exit GeoLite2 cannot place among them: server side), contract_failed. no_consensus, locate_failed and not_confident come only from probers that predate the /ip echo. One class carrying the whole area is a prober fault.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -1618,7 +1754,7 @@
     {
       "type": "table",
       "title": "health checks by country (range)",
-      "description": "Egress health checks per provider country over the range (filter by class to isolate dns / connectivity / cdn / site / reputation).",
+      "description": "Egress health loads per provider country over the range, after each load's retries (filter by class to isolate dns / connectivity / cdn / site). The fail rate is over the ok and failed loads: loads not measured and canaries are neither.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -1886,7 +2022,7 @@
     {
       "type": "timeseries",
       "title": "health check fail rate by class and country (top 10)",
-      "description": "Worst country+class pairs by health check fail rate: a single country with several classes listed is a region; a single class across many countries is a target class.",
+      "description": "Worst country+class pairs by health check fail rate: a single country with several classes listed is a region; a single class across many countries is a target class. The rate is over the ok and failed loads, as in the tables: loads not measured and canaries are neither.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -1925,7 +2061,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "topk(10, sum by (country, class) (rate(urnetwork_egress_probe_health_checks_by_country_total{env=\"$env\",class=~\"$class\",country=~\"$country\",result=\"fail\"}[$__rate_interval])) / clamp_min(sum by (country, class) (rate(urnetwork_egress_probe_health_checks_by_country_total{env=\"$env\",class=~\"$class\",country=~\"$country\"}[$__rate_interval])), 1e-9))",
+          "expr": "topk(10, sum by (country, class) (rate(urnetwork_egress_probe_health_checks_by_country_total{env=\"$env\",class=~\"$class\",country=~\"$country\",result=\"fail\"}[$__rate_interval])) / clamp_min(sum by (country, class) (rate(urnetwork_egress_probe_health_checks_by_country_total{env=\"$env\",class=~\"$class\",country=~\"$country\",result=~\"ok|fail\"}[$__rate_interval])), 1e-9))",
           "refId": "A",
           "legendFormat": "{{country}} {{class}}"
         }
@@ -1994,8 +2130,8 @@
     },
     {
       "type": "timeseries",
-      "title": "location flags / min",
-      "description": "Hosting / proxy / mobile flags on submitted locations, and locations whose city did not reach two-source confidence.",
+      "title": "exit placements / min by precision",
+      "description": "How precisely GeoLite2 places the exit addresses the prober submits, by the resolution the ingest itself applies, so the label and the stored row agree (geomap §11.3): city when the record names one within the confident radius (25 km by default), region or country when it does not, and not placed when GeoLite2 has no country for the address, which the server refuses and the attempt reports as submit_failed. Filtered by the country GeoLite2 places the exit in. No vendor is asked where an exit is, so there are no hosting, proxy or mobile flags; a run whose /ip echo never answered submits no exit (see *exit address lookups / min*).",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2009,7 +2145,7 @@
             "fillOpacity": 8,
             "showPoints": "never",
             "stacking": {
-              "mode": "none"
+              "mode": "normal"
             }
           },
           "min": 0
@@ -2033,18 +2169,27 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum by (flag) (rate(urnetwork_egress_probe_location_flags_total{env=\"$env\",country=~\"$country\"}[$__rate_interval])) * 60",
+          "expr": "sum(rate(urnetwork_egress_probe_locations_total{env=\"$env\",country=~\"$country\",city_confident=\"true\"}[$__rate_interval])) * 60",
           "refId": "A",
-          "legendFormat": "{{flag}}"
+          "legendFormat": "city"
         },
         {
           "datasource": {
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(rate(urnetwork_egress_probe_locations_total{env=\"$env\",country=~\"$country\",city_confident=\"false\"}[$__rate_interval])) * 60",
-          "refId": "A",
-          "legendFormat": "city not confident"
+          "expr": "sum(rate(urnetwork_egress_probe_locations_total{env=\"$env\",country=~\"$country\",country!=\"unknown\",city_confident=\"false\"}[$__rate_interval])) * 60",
+          "refId": "B",
+          "legendFormat": "region or country"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_egress_probe_locations_total{env=\"$env\",country=~\"$country\",country=\"unknown\"}[$__rate_interval])) * 60",
+          "refId": "C",
+          "legendFormat": "not placed"
         }
       ],
       "gridPos": {
@@ -2283,7 +2428,7 @@
     {
       "type": "timeseries",
       "title": "health check fail rate by destination (top 15)",
-      "description": "Worst destinations by fail rate over time.",
+      "description": "Worst destinations by fail rate over time. The rate is over the ok and failed loads, as in the tables: loads not measured and canaries are neither.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2322,7 +2467,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "topk(15, sum by (destination) (rate(urnetwork_egress_probe_health_checks_total{env=\"$env\",class=~\"$class\",destination=~\"$destination\",result=\"fail\"}[$__rate_interval])) / clamp_min(sum by (destination) (rate(urnetwork_egress_probe_health_checks_total{env=\"$env\",class=~\"$class\",destination=~\"$destination\"}[$__rate_interval])), 1e-9))",
+          "expr": "topk(15, sum by (destination) (rate(urnetwork_egress_probe_health_checks_total{env=\"$env\",class=~\"$class\",destination=~\"$destination\",result=\"fail\"}[$__rate_interval])) / clamp_min(sum by (destination) (rate(urnetwork_egress_probe_health_checks_total{env=\"$env\",class=~\"$class\",destination=~\"$destination\",result=~\"ok|fail\"}[$__rate_interval])), 1e-9))",
           "refId": "A",
           "legendFormat": "{{destination}}"
         }
@@ -2338,7 +2483,7 @@
     {
       "type": "timeseries",
       "title": "health check fail rate by class",
-      "description": "Fail rate per class. reputation is reported alongside the score and never inside it, so a datacenter provider failing every reputation destination is expected there.",
+      "description": "Fail rate per class, after each load's retries. There is no reputation class any more: its sites are ordinary site destinations, sampled and scored like the rest (geomap §11.3). The rate is over the ok and failed loads, as in the tables: loads not measured and canaries are neither.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2377,7 +2522,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum by (class) (rate(urnetwork_egress_probe_health_checks_total{env=\"$env\",class=~\"$class\",destination=~\"$destination\",result=\"fail\"}[$__rate_interval])) / clamp_min(sum by (class) (rate(urnetwork_egress_probe_health_checks_total{env=\"$env\",class=~\"$class\",destination=~\"$destination\"}[$__rate_interval])), 1e-9)",
+          "expr": "sum by (class) (rate(urnetwork_egress_probe_health_checks_total{env=\"$env\",class=~\"$class\",destination=~\"$destination\",result=\"fail\"}[$__rate_interval])) / clamp_min(sum by (class) (rate(urnetwork_egress_probe_health_checks_total{env=\"$env\",class=~\"$class\",destination=~\"$destination\",result=~\"ok|fail\"}[$__rate_interval])), 1e-9)",
           "refId": "A",
           "legendFormat": "{{class}}"
         }
@@ -2817,7 +2962,7 @@
     },
     {
       "type": "row",
-      "title": "geolocation sources, blackhole checks, bandwidth",
+      "title": "exit address, prober-side outcomes, blackhole checks, bandwidth",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -2829,8 +2974,8 @@
     },
     {
       "type": "timeseries",
-      "title": "geolocation source lookups / min",
-      "description": "Every geolocation source behind submitted locations, ok vs error. One source erroring while the others are fine is that API (rate limit, key, outage) and shows up as no_consensus / not_confident attempts; every source erroring is the tunnel.",
+      "title": "exit address lookups / min",
+      "description": "The prober's only source for where an exit is: the operator's own /my-ip-info echo, fetched through the provider's tunnel as each run's warm-up (geomap §11.3). exit submitted is the runs whose echo answered, their exits sent to the server to be placed (filtered by the exit's country); no_exit_ip is the runs that measured loads but never got an answer, so there was no exit to submit (filtered by the provider's last known country). no_exit_ip in every country at once is the echo itself -- its reachability from the open internet, its certificate, or the api behind it -- not the providers (monitor signal §2.23); in one country only, the echo is unreachable or blocked from there.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2868,9 +3013,18 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum by (source, result) (rate(urnetwork_egress_probe_geolocation_sources_total{env=\"$env\"}[$__rate_interval])) * 60",
+          "expr": "sum(rate(urnetwork_egress_probe_locations_total{env=\"$env\",country=~\"$country\"}[$__rate_interval])) * 60",
           "refId": "A",
-          "legendFormat": "{{source}} {{result}}"
+          "legendFormat": "exit submitted"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(rate(urnetwork_egress_probe_attempts_total{env=\"$env\",country=~\"$country\",result=\"no_exit_ip\"}[$__rate_interval])) * 60",
+          "refId": "B",
+          "legendFormat": "no_exit_ip"
         }
       ],
       "gridPos": {
@@ -2883,8 +3037,8 @@
     },
     {
       "type": "table",
-      "title": "geolocation diagnostics behind no_consensus (range)",
-      "description": "Source failure diagnostics the full batches carried for no_consensus outcomes: which source, which failure class, at which stage. The bounded tail omits groups beyond the cap.",
+      "title": "prober-side attempt outcomes by country (range)",
+      "description": "Full-run attempts over the range that ended on the prober's side, by provider country and class: health_not_run (the run never started), run_not_measured (its tunnel died and could not be re-created), no_exit_ip (the operator's /ip echo never answered) and run_batch_guard (its batch's scored loads failed together over the run guard line, so the batch was held back and re-queued). None is a verdict on the provider's traffic. One country at the top is that place's route or the echo blocked there; every country together is the prober.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -2925,7 +3079,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum by (source, class, stage) (increase(urnetwork_egress_probe_geolocation_diagnostics_total{env=\"$env\"}[$__range]))",
+          "expr": "sum by (country, result) (increase(urnetwork_egress_probe_attempts_total{env=\"$env\",country=~\"$country\",result=~\"health_not_run|run_not_measured|no_exit_ip|run_batch_guard\"}[$__range])) > 0",
           "refId": "A",
           "legendFormat": "",
           "instant": true,
@@ -2941,6 +3095,7 @@
               "Time": true
             },
             "renameByName": {
+              "result": "class",
               "Value": "count"
             }
           }
@@ -2957,7 +3112,7 @@
     {
       "type": "timeseries",
       "title": "blackhole checks / min by result",
-      "description": "Blackhole schedule outcomes: ok, dark (carried nothing), or the check's failure class. dark rising with tunnel_failed flat is providers really going dark; tunnel_failed rising is the prober's connectivity.",
+      "description": "Blackhole check outcomes after each check's retries: ok, all_destinations_failed (no sampled connectivity destination answered any attempt), tunnel_failed (no tunnel to the provider), tls_authentication_failed, or not_measured (the tunnel died and could not be re-created, or the dark batch guard discarded the batch's negatives; nothing counts against the provider). A failed check is not a verdict: a provider is dark only after three in a row spanning at least 30 minutes (geomap §11.3). all_destinations_failed rising with tunnel_failed flat is providers failing checks; tunnel_failed or not_measured rising is the prober's connectivity.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -3328,7 +3483,7 @@
     {
       "type": "timeseries",
       "title": "providers handled / min (blackhole schedule)",
-      "description": "Blackhole-schedule batch tallies: checked, dark, tunnel_failed.",
+      "description": "Blackhole-schedule batch tallies: checked, dark (checks that failed, tunnel failures included -- not the dark verdict, which takes three failed checks in a row), tunnel_failed. Checks that measured nothing are counted on *not measured providers*.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -3448,7 +3603,7 @@
     {
       "type": "heatmap",
       "title": "scored ok/total ratio per probed provider",
-      "description": "Distribution of each probed provider's scored ratio (ok checks / total checks, reputation excluded). Healthy fleets pile up at 1.0. The mass sliding down uniformly across every bucket at once is a prober or platform fault; a growing 0 bucket with the rest unchanged is providers going dead.",
+      "description": "Distribution of each probed provider's scored ratio (ok loads / scored loads after retries; canaries, sites on probation and loads not measured are left out). Healthy fleets pile up at 1.0. The mass sliding down uniformly across every bucket at once is a prober or platform fault; a growing 0 bucket with the rest unchanged is providers going dead.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -3761,6 +3916,288 @@
           "refId": "A",
           "expr": "sum by (kind, outcome) (rate(urnetwork_egress_probe_submission_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
           "legendFormat": "{{kind}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 65,
+      "type": "row",
+      "title": "egress site pool: prober and refresh events",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 189
+      }
+    },
+    {
+      "id": 66,
+      "type": "timeseries",
+      "title": "batch guard trips",
+      "description": "Batches the prober held to be its own fault (geomap §11.3). A blackhole trip is a batch whose dark share was over 20 %: its negatives were discarded and are re-checked after the backoff. A full trip is a batch whose scored-load failure share was over 30 %: it was not submitted and is re-queued, so no provider's index moved. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes: any non-zero value is a trip, and any trip is the prober-fault finding of monitor signal §2.19b. The share each guard judged is on the providers dashboard.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 190
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (schedule) (increase(urnetwork_egress_probe_batch_guard_trips_total{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{schedule}}"
+        }
+      ]
+    },
+    {
+      "id": 67,
+      "type": "timeseries",
+      "title": "not measured providers",
+      "description": "Providers per schedule whose run or check measured nothing because its tunnel died and could not be re-created: the prober's lost path, never a verdict on the provider (geomap §11.3). Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes; a sustained rise is the prober losing tunnels, not providers failing.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 190
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (schedule) (increase(urnetwork_egress_probe_pass_not_measured_total{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{schedule}}"
+        }
+      ]
+    },
+    {
+      "id": 68,
+      "type": "timeseries",
+      "title": "destination pool fetches",
+      "description": "Destination pool fetches at the start of each pass, by result: server when the prober loaded the pool the server serves, builtin when that fetch failed and the prober fell back to its built-in table. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes; any builtin value is passes that probed the built-in sites instead of the refreshed pool.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 190
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (result) (increase(urnetwork_egress_probe_pool_fetches_total{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "id": 69,
+      "type": "timeseries",
+      "title": "site pool refresh runs",
+      "description": "Pool refresh runs by result: refreshed, skipped because the fleet-wide failure share was over the prober-fault line, or failed. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes: any non-zero value is a run; a skip is the refresh keeping a prober fault from emptying the pool, and failures with no refresh after them are the refresh-not-running finding of monitor signal §2.19b.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 198
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (result) (increase(urnetwork_egress_site_refresh_runs_total{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "id": 70,
+      "type": "timeseries",
+      "title": "site pool changes",
+      "description": "The changes each refresh made to the pool: sites retired, candidates promoted onto probation, sites graduated from probation, and places marked incompatible for a site or unmarked after their canaries passed. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes: any non-zero value is a change; the refresh is daily, so changes arrive once a day, at most one retirement per class.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 198
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (change) (increase(urnetwork_egress_site_changes_total{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{change}}"
         }
       ]
     }

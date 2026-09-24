@@ -1,7 +1,7 @@
 {
   "uid": "urnetwork-providers",
   "title": "urnetwork / providers",
-  "description": "The supply side of the network and the contracts it carries: the provider and extender populations with their ip family splits, the contract and dispute counts open now and over the trailing 24 hours, and the countries with the most of each. Internal: the contract counts are not published. Every gauge is replicated by every taskworker and read with max, so no panel needs a block or host variable.",
+  "description": "The supply side of the network and the contracts it carries: the provider and extender populations with their ip family splits, the contract and dispute counts open now and over the trailing 24 hours, the countries with the most of each, and the egress buckets with the providers each egress rule leaves out and the backfill that answers for them. Internal: the contract counts are not published. Every gauge is replicated by every taskworker and read with max, so no panel needs a block or host variable; the one histogram, the backfill, is observed by each api process for its own answers and read as a rate summed across them.",
   "tags": [
     "urnetwork",
     "providers"
@@ -1663,6 +1663,1607 @@
         }
       ],
       "description": "The ten countries with the most online extenders, by the country each extender last activated from. An extender whose activation resolved no country is counted in the population total and has no series here."
+    },
+    {
+      "id": 33,
+      "type": "row",
+      "title": "egress buckets",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 49
+      },
+      "panels": [],
+      "description": "The three buckets FindProviders2 answers from and the providers each egress rule leaves out (connect/GEOMAP.md §10). Membership here is the rules' alone -- the hard exclusions, the country gate and the 90 % rule -- before the reliability and performance minimums of the score cache, over the connected valid public providers the online gauge counts."
+    },
+    {
+      "id": 34,
+      "type": "stat",
+      "title": "quality bucket",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 0,
+        "y": 50
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2ec4b6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(max by (index) (urnetwork_stats_provider_egress_index{env=\"$env\",bucket=\"quality\"}))",
+          "refId": "A",
+          "legendFormat": "quality"
+        }
+      ],
+      "description": "Probed providers past the hard exclusions and the country gate whose latest health run passed at least nine in ten of its real-site loads. The default rank mode draws from these."
+    },
+    {
+      "id": 35,
+      "type": "stat",
+      "title": "speed bucket",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 5,
+        "y": 50
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2ec4b6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(max by (index) (urnetwork_stats_provider_egress_index{env=\"$env\",bucket=\"speed\"}))",
+          "refId": "A",
+          "legendFormat": "speed"
+        }
+      ],
+      "description": "Every probed provider past the hard exclusions and the country gate, whatever its run found, ordered by latency and throughput alone."
+    },
+    {
+      "id": 36,
+      "type": "stat",
+      "title": "online bucket",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 10,
+        "y": 50
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(max by (index) (urnetwork_stats_provider_egress_index{env=\"$env\",bucket=\"online\"}))",
+          "refId": "A",
+          "legendFormat": "online"
+        }
+      ],
+      "description": "Providers with no probe verdict -- none within the evidence age, or a run of too few loads -- past the exclusions and the country gate. The score cache admits those that pass the reliability floors and the speed-mode score maximum, so a provider no client has measured is not admitted. No request names this bucket; a short quality or speed answer borrows from it last, ordered by reliability. It grows when the probe pipeline stops or covers little of the fleet."
+    },
+    {
+      "id": 37,
+      "type": "stat",
+      "title": "quality bucket at index 0",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 15,
+        "y": 50
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2ec4b6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_egress_index{env=\"$env\",bucket=\"quality\",index=\"0\"})",
+          "refId": "A",
+          "legendFormat": "index 0"
+        }
+      ],
+      "description": "Quality providers whose latest run had no failed load at all -- the only ones that can carry tier 0, which the client requires before a network's own provider carries a fresh web session."
+    },
+    {
+      "id": 38,
+      "type": "stat",
+      "title": "quality share of online providers",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 19,
+        "y": 50
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#2ec4b6"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(max by (index) (urnetwork_stats_provider_egress_index{env=\"$env\",bucket=\"quality\"})) / max(urnetwork_stats_online_providers{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "share"
+        }
+      ],
+      "description": "The quality bucket as a fraction of the connected valid public providers, both counted by the same collector tick over the same population. Near zero while the probe samples fewer loads than a run needs to be evidence, when the online bucket answers instead."
+    },
+    {
+      "id": 39,
+      "type": "stat",
+      "title": "left out: blackhole",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 55
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e71d36"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_excluded{env=\"$env\",reason=\"blackhole\"})",
+          "refId": "A",
+          "legendFormat": "blackhole"
+        }
+      ],
+      "description": "Providers with a current blackhole verdict: absent from every bucket, every count, force_minimum and an explicit client id. The verdict lifts by itself when the next check passes. A wave here is the checker before it is the fleet (GEOMAP §11.2)."
+    },
+    {
+      "id": 40,
+      "type": "stat",
+      "title": "left out: tls",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 55
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e71d36"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_excluded{env=\"$env\",reason=\"tls\"})",
+          "refId": "A",
+          "legendFormat": "tls"
+        }
+      ],
+      "description": "Providers whose latest health run saw a TLS-authentication failure: a forged identity on one destination, absent everywhere like a blackhole until a later run is clean."
+    },
+    {
+      "id": 41,
+      "type": "stat",
+      "title": "left out: country",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 55
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_excluded{env=\"$env\",reason=\"country\"})",
+          "refId": "A",
+          "legendFormat": "country"
+        }
+      ],
+      "description": "Providers a fresh probe observed exiting in a country other than the one they are listed in: out of every bucket and the counts as a minimum, still reachable with force_minimum or an explicit client id. Only a derived location that crossed a border can put a provider here, and the derive job refuses those, so anything above zero is worth a look."
+    },
+    {
+      "id": 42,
+      "type": "stat",
+      "title": "out of quality: health",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 55
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_excluded{env=\"$env\",reason=\"health\"})",
+          "refId": "A",
+          "legendFormat": "health"
+        }
+      ],
+      "description": "Probed providers that failed more than one in ten of their real-site loads: out of quality, still in speed and in the counts, and borrowed first by a short quality answer."
+    },
+    {
+      "id": 43,
+      "type": "stat",
+      "title": "out of quality and speed: unprobed",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 55
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_excluded{env=\"$env\",reason=\"unprobed\"})",
+          "refId": "A",
+          "legendFormat": "unprobed"
+        }
+      ],
+      "description": "Providers with no probe evidence -- none within the evidence age, or a run of too few loads: out of quality and speed, in the online bucket, and counted. A wave here is a probe outage, not a quality problem."
+    },
+    {
+      "id": 44,
+      "type": "stat",
+      "title": "left out in total",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 55
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum(max by (reason) (urnetwork_stats_provider_excluded{env=\"$env\"}))",
+          "refId": "A",
+          "legendFormat": "total"
+        }
+      ],
+      "description": "Every provider left out of at least one bucket, each counted once under the first rule that holds, in the order blackhole, tls, country, health, unprobed."
+    },
+    {
+      "id": 45,
+      "type": "timeseries",
+      "title": "providers left out, by reason",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 59
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (reason) (urnetwork_stats_provider_excluded{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{reason}}"
+        }
+      ],
+      "description": "The providers each rule leaves out over time. Blackhole and tls remove a provider from everything, country from every bucket, health from quality alone, unprobed from quality and speed. Every reason is published every refresh, zero included."
+    },
+    {
+      "id": 46,
+      "type": "timeseries",
+      "title": "borrowed providers, by rank mode",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 59
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (rank_mode) (rate(urnetwork_provider_backfill_sum{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{rank_mode}}"
+        }
+      ],
+      "description": "Providers per second that FindProviders2 answers borrowed from outside the requested bucket -- the other bucket, then the probed past their cutoffs, then online -- summed over every api process. A mass probe failure shows here as a wave of backfill beside the reasons it follows from."
+    },
+    {
+      "id": 47,
+      "type": "timeseries",
+      "title": "borrowed per answer, by rank mode",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 59
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (rank_mode) (rate(urnetwork_provider_backfill_sum{env=\"$env\"}[5m])) / sum by (rank_mode) (rate(urnetwork_provider_backfill_count{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{rank_mode}}"
+        }
+      ],
+      "description": "The mean number of borrowed providers in a non-forced answer to a location request. Zero is every answer filled from its own bucket; the request count is the ceiling."
+    },
+    {
+      "id": 48,
+      "type": "timeseries",
+      "title": "providers per bucket",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 67
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (bucket) (max by (bucket, index) (urnetwork_stats_provider_egress_index{env=\"$env\"}))",
+          "refId": "A",
+          "legendFormat": "{{bucket}}"
+        }
+      ],
+      "description": "The three buckets over time. Quality is a subset of speed; online is disjoint from both. A fall in quality and speed with online rising is a probe outage the online bucket is answering for."
+    },
+    {
+      "id": 49,
+      "type": "timeseries",
+      "title": "quality bucket by egress index",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 67
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (index) (urnetwork_stats_provider_egress_index{env=\"$env\",bucket=\"quality\"})",
+          "refId": "A",
+          "legendFormat": "index {{index}}"
+        }
+      ],
+      "description": "The quality bucket stacked by egress index: the weighted real-site loads of the latest run that failed every retry, capped. \"none\" is a row the new rollup has not written, ranked on the net-type score. The index sets the quality tier."
+    },
+    {
+      "id": 50,
+      "type": "timeseries",
+      "title": "speed bucket by egress index",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 67
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (index) (urnetwork_stats_provider_egress_index{env=\"$env\",bucket=\"speed\"})",
+          "refId": "A",
+          "legendFormat": "index {{index}}"
+        }
+      ],
+      "description": "The speed bucket stacked by the same index. Speed ranks on latency and throughput alone, so the index does not order it; the split shows how much of the probed supply quality would admit."
+    },
+    {
+      "id": 51,
+      "type": "bargauge",
+      "title": "quality bucket by egress index, now",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 75
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (index) (urnetwork_stats_provider_egress_index{env=\"$env\",bucket=\"quality\"})",
+          "refId": "A",
+          "legendFormat": "index {{index}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "description": "The current distribution of the quality bucket over the index, every index up to the settings' largest published, zero included."
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "share of answers backfilled, by rank mode",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 75
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "1 - sum by (rank_mode) (rate(urnetwork_provider_backfill_bucket{env=\"$env\",le=\"0\"}[5m])) / sum by (rank_mode) (rate(urnetwork_provider_backfill_count{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{rank_mode}}"
+        }
+      ],
+      "description": "The fraction of non-forced location answers that borrowed at least one provider. Speed answers borrow in most locations while few providers pass the speed cutoffs; a rise in quality answers is a bucket emptying."
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "answers by result count, by rank mode",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 83
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (rank_mode, result_count) (rate(urnetwork_findproviders2_outcomes_total{env=\"$env\",force_minimum=\"false\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{rank_mode}} {{result_count}}"
+        }
+      ],
+      "description": "Non-forced FindProviders2 answers per second by how many providers they held, after every request-time filter, summed over every api process. The backfill exists to keep the 0 and 1-2 bands empty; answers there while the buckets above are empty are a probe outage the online bucket could not cover."
+    },
+    {
+      "id": 54,
+      "type": "timeseries",
+      "title": "borrowed share of answered providers, by rank mode",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 83
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (rank_mode) (rate(urnetwork_provider_backfill_sum{env=\"$env\"}[5m])) / sum by (rank_mode) (rate(urnetwork_provider_answered_total{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{rank_mode}}"
+        }
+      ],
+      "description": "Of every provider non-forced location answers handed out, the share borrowed from outside the requested bucket. Backfill makes every answer look full, so this is the operator's view of how empty the bucket behind it is; above half for an hour is the backfill-sustained finding of SIGNALS.md §2.19b."
+    },
+    {
+      "id": 55,
+      "type": "row",
+      "title": "egress site pool and dark verdicts",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 91
+      },
+      "panels": [],
+      "description": "The prober's dark verdicts and the destination pool its health runs load (the geomap design, §11.3 and §11.4). The fleet shares are snapshots each taskworker takes for itself, so they are read from the one with the freshest snapshot; the pool gauges are read from the taskworker that ran the latest refresh; the prober's and the refresh's event counters are summed across the taskworkers on the egress probes dashboard."
+    },
+    {
+      "id": 56,
+      "type": "stat",
+      "title": "fleet dark share",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 92
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#e71d36"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_egress_probe_fleet_dark_share{env=\"$env\"} and on(env,service,block,host,instance) topk(1, (max by (env, service, block, host, instance) (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, block, host, instance) (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "dark"
+        }
+      ],
+      "description": "The share of the providers with a current measured blackhole check that are dark. Dark is a verdict over consecutive failed checks -- three in a row spanning at least 30 minutes by default (geomap §11.3) -- never a single failed check, and one passing check clears it; only a tls authentication failure is dark at once. Read from the one taskworker with the freshest fleet snapshot."
+    },
+    {
+      "id": 57,
+      "type": "timeseries",
+      "title": "fleet failure share by class",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 9,
+        "x": 6,
+        "y": 92
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (class) (urnetwork_egress_probe_fleet_failure_share{env=\"$env\"} and on(env,service,block,host,instance) topk(1, (max by (env, service, block, host, instance) (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"}) > time() - 900) and (max by (env, service, block, host, instance) (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"}) <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{class}}"
+        }
+      ],
+      "description": "The failed share of the scored loads, after retries, of the health runs measured within the prober-fault window (an hour by default), per class and over all of them. Above the 20 % prober-fault line across every class for an hour is a fault on the prober -- its request shape or its capacity -- not on the sites (monitor signal §2.19b), and the pool refresh skips its run while the all share is over the line. Read from the one taskworker with the freshest fleet snapshot."
+    },
+    {
+      "id": 63,
+      "type": "timeseries",
+      "title": "batch guard share",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 9,
+        "x": 15,
+        "y": 92
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (schedule) (urnetwork_egress_probe_batch_share{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "{{schedule}}"
+        }
+      ],
+      "description": "The share the batch guard judged in the latest batch of each schedule: for blackhole, dark checks over measured checks, against its 0.2 guard line; for full, failed scored loads over scored loads, against its 0.3 guard line. Each taskworker keeps the share of its own latest batch until it runs another, so this is the highest of those shares; a value over its line is a batch the guard held. The trips are counted on the egress probes dashboard."
+    },
+    {
+      "id": 61,
+      "type": "stat",
+      "title": "site pool refresh, last run",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 6,
+        "x": 0,
+        "y": 100
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 90000
+              },
+              {
+                "color": "red",
+                "value": 172800
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "time() - max(urnetwork_egress_site_refresh_last_run_timestamp_seconds{env=\"$env\"})",
+          "refId": "A",
+          "legendFormat": "since the last refresh"
+        }
+      ],
+      "description": "Time since a taskworker last completed the daily pool refresh, refreshed or skipped, so this saw-tooths between zero and a day. Amber past 25 h, a run is late; red past two days, the refresh is not running (monitor signal §2.19b refresh not running): its task is missing, parked or failing. The time is kept by the process that ran the refresh, so right after every taskworker restarts this reads as decades until the next daily run."
+    },
+    {
+      "id": 59,
+      "type": "bargauge",
+      "title": "site failure share (worst 15)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 9,
+        "x": 6,
+        "y": 100
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "topk(15, max by (site, class) (urnetwork_egress_site_failure_share{env=\"$env\"} and on(env,service,block,host,instance) topk(1, max by (env,service,block,host,instance) (urnetwork_egress_site_refresh_last_run_timestamp_seconds{env=\"$env\"}))))",
+          "refId": "A",
+          "legendFormat": "{{site}} ({{class}})",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "description": "The latest refresh's failure share of each active site: the share of the runs on healthy exits, those that passed nine in ten of the other sites, in which the site failed every attempt (over all exits when too few qualified). Read from the taskworker that ran the latest refresh; a skipped refresh judges nothing, so after one this shows that taskworker's last judged shares, or none. A site over the 50 % retire line across at least 200 runs on healthy exits is retired by the next refresh, at most one per class per run; one that stays over it for a day is the pool-needs-refresh finding of monitor signal §2.19b."
+    },
+    {
+      "id": 60,
+      "type": "timeseries",
+      "title": "site pool by class",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 9,
+        "x": 15,
+        "y": 100
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (class, state) (urnetwork_egress_site_pool_size{env=\"$env\"} and on(env,service,block,host,instance) topk(1, max by (env,service,block,host,instance) (urnetwork_egress_site_refresh_last_run_timestamp_seconds{env=\"$env\"})))",
+          "refId": "A",
+          "legendFormat": "{{class}} {{state}}"
+        }
+      ],
+      "description": "Destination pool rows per class after the latest refresh, by state: scored sites count toward the index and the 90 % rule, probation sites are loaded and recorded but not yet counted, and candidates are promotable now. Read from the taskworker that ran the latest refresh. An active pool under the class's pool size, or no candidates left to promote, is the pool-thin finding of monitor signal §2.19b."
     }
   ]
 }

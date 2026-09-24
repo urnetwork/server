@@ -703,6 +703,22 @@ func (self *SimpleResource) Parse() map[string]any {
 	return obj
 }
 
+// The resource's raw content, or the pushed override when there is one, for a
+// reader that parses its own format (the place list, whose loader lives in
+// `geo`). Nothing is cached.
+func (self *SimpleResource) BytesE() ([]byte, error) {
+	return self.bytes()
+}
+
+// BytesE's content, panicking when the resource cannot be read.
+func (self *SimpleResource) Bytes() []byte {
+	bytes, err := self.BytesE()
+	if err != nil {
+		panic(err)
+	}
+	return bytes
+}
+
 // UnmarshalYamlE decodes a simple resource without panicking. It intentionally
 // does not cache a typed value, so callers can use independent schema structs.
 func (self *SimpleResource) UnmarshalYamlE(value any) error {

@@ -13,9 +13,10 @@ import (
 
 	"github.com/urnetwork/operator-proxy/egresshealth"
 	"github.com/urnetwork/operator-proxy/fleetprobe"
-	"github.com/urnetwork/operator-proxy/geolocate"
 	"github.com/urnetwork/operator-proxy/ingest"
 	"github.com/urnetwork/operator-proxy/prober"
+
+	"github.com/urnetwork/server/controller"
 )
 
 func TestEgressProbeHealthLatencyAvoidsBucketCardinalityAndKeepsFreshMaximum(t *testing.T) {
@@ -86,7 +87,7 @@ func newFakeEgressProbeIngest() *fakeEgressProbeIngest {
 	return &fakeEgressProbeIngest{attempts: map[string]string{}}
 }
 
-func (self *fakeEgressProbeIngest) Submit(_ context.Context, providerClientId string, _ *geolocate.ConsensusLocation) error {
+func (self *fakeEgressProbeIngest) Submit(_ context.Context, providerClientId string, _ string, _ time.Time) error {
 	self.submitted = append(self.submitted, providerClientId)
 	return nil
 }
@@ -133,10 +134,18 @@ func TestEgressProbeMetricsReporterLabelsAttemptsByOutcomeAndCountry(t *testing.
 		}
 		return ""
 	})
+	// the exit is labelled with the ingest's own GeoLite2 resolution; a fake
+	// keeps this test off the database file
+	reporter.resolveExit = func(exitIp string) (*controller.ProviderEgressExit, error) {
+		if exitIp != "203.0.113.7" {
+			t.Fatalf("resolved exit %q, want the submitted one", exitIp)
+		}
+		return &controller.ProviderEgressExit{CountryCode: "us", CityConfident: true}, nil
+	}
 	ctx := context.Background()
 
-	// a located provider carries the country it just submitted
-	if err := reporter.Submit(ctx, "fresh-us", &geolocate.ConsensusLocation{CountryCode: "us", CityConfident: true}); err != nil {
+	// a located provider carries the country its exit was just placed in
+	if err := reporter.Submit(ctx, "fresh-us", "203.0.113.7", time.Now()); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 	if err := reporter.ReportAttempt(ctx, "fresh-us", prober.FailureSubmit); err != nil {
@@ -180,7 +189,7 @@ func TestEgressProbeMetricsReporterForwardsErrorsUnchanged(t *testing.T) {
 	inner := newFakeEgressProbeIngest()
 	inner.attemptErr = errors.New("operator down")
 	reporter := newEgressProbeMetricsReporter(inner, nil)
-	err := reporter.ReportAttempt(context.Background(), "x", prober.FailureLocate)
+	err := reporter.ReportAttempt(context.Background(), "x", prober.FailureNoExitIp)
 	if !errors.Is(err, inner.attemptErr) {
 		t.Fatalf("err = %v, want the operator error", err)
 	}
@@ -197,20 +206,20 @@ func TestEgressProbeMetricsReporterCountsHealthChecksByDestinationAndCountry(t *
 
 	res := &egresshealth.Result{
 		Checks: []egresshealth.CheckResult{
-			{Name: "cloudflare-dns", Class: egresshealth.ClassDNS, OK: true, Latency: 120 * time.Millisecond},
-			{Name: "gstatic-204", Class: egresshealth.ClassConnectivity, OK: false, Err: "timeout"},
-			{Name: "example-site", Class: egresshealth.ClassSite, OK: false, TLSAuthenticationFailure: true},
+			{Name: "cloudflare-dns", Class: egresshealth.ClassDns, Ok: true, Latency: 120 * time.Millisecond},
+			{Name: "gstatic-204", Class: egresshealth.ClassConnectivity, Ok: false, Err: "timeout"},
+			{Name: "example-site", Class: egresshealth.ClassSite, Ok: false, TlsAuthenticationFailure: true},
 		},
-		OKCount: 1,
+		OkCount: 1,
 		Total:   3,
 	}
 	if err := reporter.SubmitEgressHealth(ctx, "p1", res); err != nil {
 		t.Fatalf("submit health: %v", err)
 	}
-	if err := reporter.SubmitEgressHealth(ctx, "p2", &egresshealth.Result{OKCount: 0, Total: 2}); err != nil {
+	if err := reporter.SubmitEgressHealth(ctx, "p2", &egresshealth.Result{OkCount: 0, Total: 2}); err != nil {
 		t.Fatalf("submit health: %v", err)
 	}
-	if err := reporter.SubmitEgressHealth(ctx, "p3", &egresshealth.Result{OKCount: 4, Total: 4}); err != nil {
+	if err := reporter.SubmitEgressHealth(ctx, "p3", &egresshealth.Result{OkCount: 4, Total: 4}); err != nil {
 		t.Fatalf("submit health: %v", err)
 	}
 
@@ -241,9 +250,9 @@ func TestEgressProbeMetricsReporterCountsBlackholeChecksByResult(t *testing.T) {
 	inner := newFakeEgressProbeIngest()
 	reporter := newEgressProbeMetricsReporter(inner, nil)
 	checks := []ingest.BlackholeCheck{
-		{ClientId: "a", OK: true},
-		{ClientId: "b", OK: false},
-		{ClientId: "c", OK: false, Failure: "tunnel_failed"},
+		{ClientId: "a", Ok: true},
+		{ClientId: "b", Ok: false},
+		{ClientId: "c", Ok: false, Failure: "tunnel_failed"},
 	}
 	if err := reporter.SubmitBlackholeChecks(context.Background(), checks); err != nil {
 		t.Fatalf("submit: %v", err)
@@ -279,32 +288,29 @@ func TestEgressProbePassRecordsBatchMetricsAndRefreshesFleet(t *testing.T) {
 	egressProbePassesTotal.Reset()
 	egressProbePassProvidersTotal.Reset()
 	egressProbePassErrorsTotal.Reset()
-	egressProbeGeolocationDiagnosticsTotal.Reset()
 	args := providerEgressProbeArgs(testProviderEgressProbeSettings(4), 1)
 	refreshed := 0
 	pass := &providerEgressProbePass{
-		blackholeDue: func(context.Context, int) ([]string, error) {
+		blackholeDue: func(context.Context, int) ([]ingest.DueProvider, error) {
 			return nil, errors.New("due unavailable")
 		},
-		fullDue: func(context.Context, int) ([]string, error) {
-			return []string{"full-1", "full-2"}, nil
+		fullDue: func(context.Context, int) ([]ingest.DueProvider, error) {
+			return []ingest.DueProvider{{ClientId: "full-1"}, {ClientId: "full-2"}}, nil
 		},
 		loadPins: func(context.Context) (map[string][]string, error) {
 			return map[string][]string{}, nil
 		},
 		submitBlackholeChecks: func(context.Context, []ingest.BlackholeCheck) error { return nil },
-		runBlackhole: func(context.Context, []string, fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
+		runBlackhole: func(context.Context, []prober.Provider, fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
 			t.Fatalf("blackhole batch must not run without due providers")
 			return fleetprobe.BlackholeSummary{}, nil
 		},
-		runFull: func(context.Context, []string, fleetprobe.FullOptions) (prober.Summary, error) {
+		runFull: func(context.Context, []prober.Provider, fleetprobe.FullOptions) (prober.Summary, error) {
 			return prober.Summary{
-				Attempted: 2,
-				Submitted: 1,
-				Failed:    1,
-				GeolocationSourceOutcomes: []prober.GeolocationSourceOutcomeCount{
-					{Source: "ipinfo", Class: "timeout", Stage: "request", Count: 3},
-				},
+				Attempted:   2,
+				Submitted:   1,
+				Failed:      1,
+				NotMeasured: 1,
 			}, nil
 		},
 		refreshFleet: func(context.Context) { refreshed += 1 },
@@ -321,8 +327,8 @@ func TestEgressProbePassRecordsBatchMetricsAndRefreshesFleet(t *testing.T) {
 	if got := testutil.ToFloat64(egressProbePassErrorsTotal.WithLabelValues("blackhole_due")); got != 1 {
 		t.Fatalf("blackhole_due errors = %v, want 1", got)
 	}
-	if got := testutil.ToFloat64(egressProbeGeolocationDiagnosticsTotal.WithLabelValues("ipinfo", "timeout", "request")); got != 3 {
-		t.Fatalf("geolocation diagnostics = %v, want 3", got)
+	if got := testutil.ToFloat64(egressProbePassNotMeasuredTotal.WithLabelValues("full")); got != 1 {
+		t.Fatalf("full not-measured providers = %v, want 1", got)
 	}
 	if refreshed != 1 {
 		t.Fatalf("fleet refreshes = %d, want 1", refreshed)

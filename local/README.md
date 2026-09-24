@@ -155,15 +155,21 @@ then its `local` directory, then its `all` directory. The exact local full-suite
 boundary is:
 
 - vault: `auth.yml`, `brevo.yml`, `circle.yml`, `client.yml`, `coinbase.yml`,
-  `helius.yml`, `ipinfo.yml`, `jwt.yml`, `jwt-local-evaluator.pem`,
+  `helius.yml`, `jwt.yml`, `jwt-local-evaluator.pem`,
   `password.yml`, `pg.yml`, `proxy.yml`, `redis.yml`, `services.yml`, `st.yml`,
   `stripe.yml`, `wireguard.yml`, and `x402.yml`, plus `tls` certificate/key
   pairs for `ur.network`, `bringyour.com`, `main-connect.ur.network`, and
   `main-connect.bringyour.com`; each pair must be colocated at one direct or
   recursively versioned resolver location;
-- config: `apple_roots.pem`, `brevo.yml`, `city-list.yml`, `db.yml`,
-  `email.yml`, `iso-country-list.yml`, `pro.yml`, `redis.yml`, `settings.yml`,
-  `subsidy.yml`, and `tls.yml`.
+- config: `apple_roots.pem`, `brevo.yml`, `db.yml`, `email.yml`,
+  `mmdb/places.yml`, `pro.yml`, `redis.yml`, `settings.yml`, `subsidy.yml`,
+  and `tls.yml`.
+
+`mmdb/places.yml` is the location seeder's place list, which ships in the dated
+directory of the GeoLite2 database it is exported from
+(`all/mmdb/<date>/places.yml`). A config entry may therefore be a relative
+path, and it resolves through semantic-version directories at every level, as
+the Go resolver does; no path element may begin with a dot.
 
 An incomplete explicit resource checkout is rejected fail closed.
 The underlying resolver orders certificate and key paths independently,

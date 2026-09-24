@@ -109,6 +109,7 @@ Usage:
     bringyourctl proxy keygen
     bringyourctl proxy reset-client-ipv4
     bringyourctl proxy inspect <proxy_id>
+    bringyourctl provider inspect --client_id=<client_id>
     bringyourctl model migrate provide-mode
     bringyourctl model migrate proxy-device-config
     bringyourctl model migrate client-reliability-partition [--dry-run] [--finalize] [--parallel=<n>] [--oneshot]
@@ -343,6 +344,10 @@ Options:
 			proxyResetClientIpv4(opts)
 		} else if inspect, _ := opts.Bool("inspect"); inspect {
 			proxyInspect(opts)
+		}
+	} else if provider, _ := opts.Bool("provider"); provider {
+		if inspect, _ := opts.Bool("inspect"); inspect {
+			providerInspect(opts)
 		}
 	} else if model_, _ := opts.Bool("model"); model_ {
 		if migrate, _ := opts.Bool("migrate"); migrate {
@@ -2119,6 +2124,77 @@ func proxyInspect(opts docopt.Opts) {
 	fmt.Printf("%v\n", proxyDeviceConfig.InitialDeviceState.Location)
 	fmt.Printf("%v\n", proxyDeviceConfig.InitialDeviceState.PerformanceProfile)
 	fmt.Printf("%v\n", proxyDeviceConfig.InitialDeviceState.DnsResolverSettings)
+}
+
+// Prints one provider as the egress rules of connect/GEOMAP.md §10.3 decide
+// it: the index, quality verdict and evidence time the rollup stored, the
+// index its latest health run gives now (what the next rollup will store), the
+// evidence behind the exclusions, and the reason, if any, it is out of a
+// bucket.
+func providerInspect(opts docopt.Opts) {
+	ctx := context.Background()
+
+	clientIdStr, _ := opts.String("--client_id")
+	clientId := server.RequireParseId(clientIdStr)
+
+	inspection := model.InspectProviderEgress(ctx, clientId)
+	if inspection == nil {
+		fmt.Printf("Provider %s has no location reliability row.\n", clientId)
+		return
+	}
+	now := server.NowUtc()
+
+	optionalInt := func(value *int) string {
+		if value == nil {
+			return "none (the rollup has not written it; ranked on the net-type score)"
+		}
+		return strconv.Itoa(*value)
+	}
+	optionalBool := func(value *bool) string {
+		if value == nil {
+			return "none (no evidence)"
+		}
+		return strconv.FormatBool(*value)
+	}
+	optionalTime := func(value *time.Time) string {
+		if value == nil {
+			return "none"
+		}
+		return fmt.Sprintf("%s (%s ago)", value.UTC().Format(time.RFC3339), now.Sub(*value).Round(time.Minute))
+	}
+	optionalString := func(value string) string {
+		if value == "" {
+			return "none"
+		}
+		return value
+	}
+
+	fmt.Printf("provider %s\n", inspection.ClientId)
+	fmt.Printf("  connected %t, valid %t, published country %s\n", inspection.Connected, inspection.Valid, optionalString(inspection.PublishedCountryCode))
+	fmt.Printf("  net-type score %d, speed %d\n", inspection.MaxNetTypeScore, inspection.MaxNetTypeScoreSpeed)
+	fmt.Printf("  egress index %s\n", optionalInt(inspection.EgressIndex))
+	fmt.Printf("  egress quality %s\n", optionalBool(inspection.EgressQuality))
+	fmt.Printf("  egress evidence time %s\n", optionalTime(inspection.EgressEvidenceTime))
+	if run := inspection.HealthRun; run != nil {
+		classTallies := []string{}
+		for class, tally := range run.ClassResults {
+			classTallies = append(classTallies, fmt.Sprintf("%s=%d/%d", class, tally.OK, tally.Total))
+		}
+		slices.Sort(classTallies)
+		fmt.Printf("  latest health run %s, ok %d/%d [%s], tls failure %t\n", optionalTime(&run.MeasuredAt), run.OKCount, run.Total, strings.Join(classTallies, " "), run.TLSAuthenticationFailure)
+	} else {
+		fmt.Printf("  latest health run none\n")
+	}
+	evidence := "no evidence"
+	if inspection.CurrentIndex.Evidence {
+		evidence = fmt.Sprintf("quality %t", inspection.CurrentIndex.Quality)
+	}
+	fmt.Printf("  index from the latest run now %d (%s; evidence is %d or more loads within %s)\n", inspection.CurrentIndex.Index, evidence, inspection.Settings.MinScoredLoads, inspection.Settings.EvidenceMaxAge)
+	fmt.Printf("  fresh probe country %s\n", optionalString(inspection.ObservedCountryCode))
+	fmt.Printf("  blackholed %t, tls authentication failure %t\n", inspection.Blackholed, inspection.TlsAuthenticationFailed)
+	fmt.Printf("  rollout flag (enable_egress_test, rows before the index only) %t, country gate %t\n", inspection.EgressTestEnabled, inspection.Settings.CountryGate)
+	fmt.Printf("  quality %t, speed %t, online %t (the score cache also requires the reliability floors and the speed-mode score maximum, so a provider no client has measured is not online), counted %t, hard excluded %t\n", inspection.Quality, inspection.Speed, inspection.Online, inspection.Counted, inspection.HardExcluded)
+	fmt.Printf("  exclusion reason %s\n", optionalString(inspection.Reason))
 }
 
 func refreshTransferBalances(opts docopt.Opts) {
