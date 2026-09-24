@@ -319,6 +319,48 @@ func TestOpenContractsSignalObservationFailureDoesNotInferRetention(t *testing.T
 	}
 }
 
+// The count observes only non-disputed unresolved rows; a zero old-open band
+// cannot certify that disputed reservations or financial failures cleared.
+func TestOpenContractsDisputedReservationsAreOutsideCount(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if !strings.Contains(query, "WHERE open = true") {
+			t.Fatal("guidance changed the existing open population")
+		}
+		return []Row{{"180000", "70000", "0"}}, nil
+	}}
+	alerts, err := NewOpenContractsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "open-set-size")
+	for _, want := range []string{"excludes disputed nonfinal contracts", "not a census of reserved escrow", "Age-band differences are not matched-cohort throughput"} {
+		if !strings.Contains(alert.Mechanism, want) {
+			t.Errorf("open-set mechanism omitted %q", want)
+		}
+	}
+	if alert.Severity != SeverityWarn || alert.Sustain != 3 || !strings.Contains(alert.Observed, "older_30m=0") || !strings.Contains(alert.Symptom, "warming up") {
+		t.Fatal("authority guidance changed the observed values or escalation")
+	}
+}
+
+// Resolution intent and selected rows are not terminal outcomes. The same
+// emitted alert and Markdown must name the stronger same-call authority.
+func TestOpenContractsResolutionCounterCannotCertifyDrain(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{"180000", "70000", "0"}}, nil
+	}}
+	alerts, err := NewOpenContractsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "open-set-size")
+	for _, want := range []string{"force_closed_total", "before close succeeds", "not terminal-verified throughput", "same-call terminal_verified", "exact executor artifact"} {
+		if !strings.Contains(alert.Context, want) || !strings.Contains(alert.Markdown(), want) {
+			t.Errorf("emitted context/Markdown omitted outcome authority %q", want)
+		}
+	}
+}
+
 // The general catalog qualifier must not borrow proof from historical incidents.
 func TestOpenContractsCatalogRequiresCausalAttribution(t *testing.T) {
 	catalogBytes, err := os.ReadFile("SIGNALS.md")
@@ -345,6 +387,11 @@ func TestOpenContractsCatalogRequiresCausalAttribution(t *testing.T) {
 		"transfer_contract autovacuum phase",
 		"only if that attribution is confirmed",
 		"historical episodes below are not proof of the current running path",
+		"excludes disputed nonfinal contracts",
+		"Age-band differences are not matched-cohort throughput",
+		"can increment before close succeeds",
+		"terminal-verified throughput",
+		"exact executor artifact",
 	} {
 		if !strings.Contains(section, want) {
 			t.Errorf("open-set catalog omitted causal qualifier %q", want)

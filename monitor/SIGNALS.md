@@ -3727,6 +3727,18 @@ not unknown. The next valid sample compares with the last valid count, or
 retains warmup if none existed; the threshold, five-minute cadence and
 three-observation sustain below are unchanged.
 
+The generated `open` predicate is `dispute=false AND outcome IS NULL`, so
+this count excludes disputed nonfinal contracts and is not a census of
+reserved escrow. Zero old-open rows or a falling open set cannot certify
+that old disputed reservations cleared. Age-band differences are not
+matched-cohort throughput: aging, creation, terminal closes and transitions
+into dispute all affect them. The `force_closed_total` resolution counter
+can increment before close succeeds and before all posts complete; it is not
+terminal-verified throughput. Prefer the closer's same-call
+`terminal_verified`, `unresolved_accounting` and `quarantined_accounting`
+summary, complete stored error/retry timing, and exact executor artifact.
+An unavailable summary or a nearby panic timestamp cannot establish that join.
+
 - HEALTHY: ~10–50k (29,981 at steady state after the 2026-07-17 recovery;
   pre-incident hourly residue was ~8k).
 - BROKEN: > 150k and rising = closes not keeping up (CloseExpiredContracts
@@ -7644,6 +7656,65 @@ id or coordinate reaches an alert; three more databases each hold one
 partition shape — the conversion's own partitions, a partition of the
 sweep's naming four days old, and tomorrow's partition dropped — and assert
 exactly the sweep part each one is.
+
+### 2.19d Country-specific egress site coverage and freshness
+Probe: `egress-country-sites`
+
+The full quality probe's `site` sample is 13 general destinations and 13
+destinations selected for the provider's published country
+(`connect/GEOMAP.md` §11.5). A missing country list is **not** provider
+failure: it makes that full quality result unscorable and must not be hidden
+by 26 general loads or by a healthy `egress-site-pool` result. Blackhole
+checks and the independently useful general loads may continue. This signal
+monitors the *measurement system*, not the country or its providers.
+
+The GeoLite2 exported country codes are the denominator, including small
+territories for which a genuinely country-specific popularity source may be
+unavailable. For each code read the country-list manifest's source identity,
+source period, curation and last independent load-verification times, the
+100-site target for both the country and global lists, at least 100
+compatible active scored country sites, and the
+published pool generation. Compare the served generation with full-run
+receipts: successful split runs must report 13/13 sampled sites and the
+country they were selected for. Export only country codes and aggregate
+counts, never visited URLs, provider ids, credentials, or raw failures.
+
+Alert WARN for a missing or underfilled (<100) country or global list,
+shared-hostname overlap, a Radar source period older than seven days or a
+CrUX corroboration period older than two monthly releases, verification older
+than 30 days, or fewer than 100 compatible active sites in any GeoLite2
+country. These are pool-quality and coverage findings, not provider faults.
+Alert PAGE if a country with due full probes has *new* country-coverage skips
+in two distinct consecutive probe cadences (advancing attempt ids or counters,
+not the same retained skip observed twice), or if a scored full run uses anything
+other than the 13/13 split once the split feature is enabled. Keep
+`source-unavailable` distinct from `stale` and from `unobservable`: some
+territories may have no defensible country-ranked data, but that is an
+explicit coverage gap, never invented sites. An unreadable manifest,
+pool endpoint, GeoLite2 export, or run receipt cannot emit healthy evidence
+or resolve an existing alert. A freshly deployed manifest is not enough to
+close an active-use gap; observe advancing, correctly split full runs for that
+country. If no provider is due, structural source, pool, and generation
+evidence can resolve a list-quality alert while active use remains unobserved.
+
+False-positive qualifiers: a country with no due providers cannot be called
+actively probe-blocked merely because no new 13/13 receipt appeared, though
+its list can still be stale or unavailable. Region-specific hard exclusions
+can leave fewer than 13 eligible sites even if the country has 100 active
+sites; this is a scored-capacity gap for that provider, not evidence that the
+whole country list is absent. A site that is country-ranked
+but inaccessible from the prober host is a curation candidate, not proof of
+provider failure. False-negative qualifiers: a 13/13 count alone does not
+prove distinct domains, current source evidence, correct country selection,
+or successful load verification. Use source and pool generation together.
+
+Implementation convention: §2.19d (`egress-country-sites`) maps to
+`signal_egress_country_sites.go` and `signal_egress_country_sites_test.go`.
+Deterministic tests use synthetic countries and reserved example domains for
+all coverage, freshness, missing-source, disjointness, enabled/legacy,
+partial-metrics, healthy and alert-rendering cases. This section is the
+acceptance contract for the new probe; it does not assert that the current
+Main watcher, destination pool, or country list already implements it.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`
