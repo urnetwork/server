@@ -91,7 +91,10 @@ func prepareContractExpiryInTx(ctx context.Context, tx server.PgTx, contractId s
 		return nil, fmt.Errorf("lock expiring contract: %w", err)
 	}
 	if outcome != nil {
-		return nil, errContractAlreadySettled
+		if *outcome == ContractOutcomeSettled {
+			return nil, errContractAlreadySettled
+		}
+		return nil, fmt.Errorf("contract already closed with outcome %s", *outcome)
 	}
 	lastReport := created
 	rows, err := tx.Query(ctx, `SELECT party, used_transfer_byte_count, checkpoint, close_time FROM contract_close WHERE contract_id=$1`, contractId)
