@@ -119,8 +119,9 @@ type Settings struct {
 
 	// Source reputation (§5.5): ReputationRounds solves, each weighted by the
 	// scores of the one before. A source's weight is
-	// clamp(1/(1 + z_max²), MinQ, 1), and a source beyond ExcludeZ on any
-	// statistic but coverage is left out of the solve.
+	// clamp(1/(1 + z_max²), MinQ, 1). Scatter, bias and refusal as pinger can
+	// exclude; coverage only lowers weight. Refusal as target is diagnostic
+	// only and contributes neither to weight nor to exclusion.
 	ReputationRounds int
 	MinQ             float64
 	ExcludeZ         float64

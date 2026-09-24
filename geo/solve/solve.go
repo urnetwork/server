@@ -55,12 +55,13 @@ type Term struct {
 }
 
 // One node's attestations over the window, counted as pinger and as
-// target. A refused attestation is never a measurement (D8); it is evidence
-// for reputation only.
+// target. A refused attestation is never a measurement (D8). Reporter-side
+// counts remain reputation evidence; target-side totals carry no peer
+// provenance and are diagnostic only, with no target weight or exclusion.
 type Refusals struct {
 	// the node's attestations, as pinger, that their target refused
 	AsPinger int
-	// the attestations the node refused as target
+	// the attestations reported refused by this target, not corroborated
 	AsTarget int
 	// every attestation the node made as pinger, refused or not
 	PingsAsPinger int
@@ -110,7 +111,8 @@ type NodeResult struct {
 	// z-scores of the scoring that decided both. A statistic the node has no
 	// data for (no terms of its own, no attestations in that role) is 0, and
 	// so is its z-score. With one ReputationRound nothing is scored: Q is 1
-	// and the rest is 0.
+	// and the rest is 0. RefusalRateAsTarget and RefusalAsTargetZ are
+	// diagnostic only; neither contributes to Q or Excluded.
 	Q                   float64
 	Excluded            bool
 	SourceTermCount     int

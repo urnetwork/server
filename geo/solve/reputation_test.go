@@ -126,7 +126,7 @@ func TestReputationStatistics(t *testing.T) {
 		{node: "a", q: 0.573333333},
 		{node: "b", q: 0.774774775},
 		{node: "c", q: 0.337254902},
-		{node: "d", q: 0.333333333},
+		{node: "d", q: 1},
 	} {
 		assertNear(t, "q of "+want.node, scores.q[nodeIdIndexes[want.node]], want.q, 1e-6)
 		if scores.excluded[nodeIdIndexes[want.node]] {
@@ -134,14 +134,14 @@ func TestReputationStatistics(t *testing.T) {
 		}
 	}
 
-	// Exclusion is strictly past ExcludeZ: at 1.4 c (bias 1.402) and d
-	// (target refusals 1.414) are out; at 1.41 only d.
+	// Exclusion is strictly past ExcludeZ: c's bias is past 1.4, not 1.41.
+	// d's target-refusal z remains diagnostic and cannot exclude it.
 	for _, test := range []struct {
 		excludeZ float64
 		excluded []string
 	}{
-		{excludeZ: 1.4, excluded: []string{"c", "d"}},
-		{excludeZ: 1.41, excluded: []string{"d"}},
+		{excludeZ: 1.4, excluded: []string{"c"}},
+		{excludeZ: 1.41, excluded: []string{}},
 		{excludeZ: 1.415, excluded: []string{}},
 	} {
 		excludeSettings := DefaultSettings()
@@ -241,9 +241,8 @@ func TestReputationSpreadFloor(t *testing.T) {
 	}
 }
 
-// Refusals are read two-sided and against the population (§5.5): a pinger the
-// targets refuse, while they co-sign everyone else, loses its weight, and
-// the targets that refused it, each refusing once like all the others, do not.
+// Refusals retain both sides' population diagnostics (§5.5). The pinger's
+// evidence lowers its own weight; target totals are never used as penalties.
 func TestReputationRefusalsTwoSided(t *testing.T) {
 	settings := DefaultSettings()
 	nodes := []Node{}
@@ -290,7 +289,7 @@ func TestReputationResultIsConsistent(t *testing.T) {
 	scatterCount := 0
 	excluded := []string{}
 	for _, node := range result.Nodes {
-		zMax := max(max(0, node.ScatterZ), math.Abs(node.BiasZ), max(0, -node.CoverageZ), max(0, node.RefusalAsPingerZ), max(0, node.RefusalAsTargetZ))
+		zMax := max(max(0, node.ScatterZ), math.Abs(node.BiasZ), max(0, -node.CoverageZ), max(0, node.RefusalAsPingerZ))
 		assertNear(t, node.Id+" q", node.Q, min(1, max(settings.MinQ, 1/(1+zMax*zMax))), 1e-12)
 		if 0 < node.SourceTermCount {
 			scatterSum += node.ScatterKm

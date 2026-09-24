@@ -1,5 +1,5 @@
-// Source reputation (§5.5): each node scored against the population on five
-// statistics, and the weights and exclusions the scores give the next solve.
+// Source reputation (§5.5): five population statistics, four admissible as
+// scoring evidence, and their weights and exclusions for the next solve.
 
 package solve
 
@@ -24,7 +24,9 @@ import (
 //     measured it, so a provider (which can only ping extenders) and an
 //     extender (which pings the other extenders) are each measured against
 //     what they could have pinged;
-//   - its refusal rate as pinger and its refusal rate as target.
+//   - its refusal rate as pinger;
+//   - its refusal rate as target, retained for diagnosis only. These totals
+//     do not establish independent-peer corroboration or target authority.
 //
 // Four readings the section leaves open are settled here, each because the
 // alternative defeats its purpose:
@@ -44,7 +46,8 @@ import (
 //     population that all measured everything, one source's coverage z-score
 //     is −√(N−1) however many peers it did measure, which passes any fixed
 //     threshold once N is large enough. Exclusion takes evidence against the
-//     numbers themselves (scatter, bias) or against the protocol (refusals).
+//     numbers themselves (scatter, bias) or its own protocol evidence
+//     (refusals as pinger), never unsigned allegations against a target.
 //   - A z-score divides by the population's standard deviation, but never by
 //     less than the statistic's spread floor (Settings). A population tighter
 //     than the floor has no spread worth standardizing: one refusal among
@@ -55,11 +58,11 @@ import (
 //     dropping the outliers from the population would make every honest
 //     source's ordinary spread look like an outlier in the next round.
 //
-// A source's weight is q = clamp(1/(1 + z_max²), MinQ, 1) over the five
+// A source's weight is q = clamp(1/(1 + z_max²), MinQ, 1) over the four
 // one-sided z-scores. It scales every term the source measured and nothing
 // else: a target did not produce the number on a term, it only co-signed that
 // the number was not undercut. A source past ExcludeZ on scatter, bias or
-// either refusal rate is left out of the next solve entirely -- its terms
+// its refusal rate as pinger is left out of the next solve entirely -- its terms
 // carry no weight at all, not MinQ's -- and listed. It is still solved as a
 // target from the terms others measured toward it, which is also what lets
 // the next scoring judge its own claims against a geometry they had no part
@@ -220,10 +223,9 @@ func (self *problem) score() *scoreSet {
 		bias := math.Abs(scores.z[statisticBias][i])
 		coverage := max(0, -scores.z[statisticCoverage][i])
 		refusalAsPinger := max(0, scores.z[statisticRefusalAsPinger][i])
-		refusalAsTarget := max(0, scores.z[statisticRefusalAsTarget][i])
-		// the evidence against the numbers and the protocol, which alone can
-		// exclude
-		evidence := max(scatter, bias, refusalAsPinger, refusalAsTarget)
+		// Target totals can be repeated allegations from one reporter. They
+		// remain diagnostic, not independent evidence for weight or exclusion.
+		evidence := max(scatter, bias, refusalAsPinger)
 		zMax := max(evidence, coverage)
 		scores.q[i] = min(1, max(settings.MinQ, 1/(1+zMax*zMax)))
 		scores.excluded[i] = settings.ExcludeZ < evidence
