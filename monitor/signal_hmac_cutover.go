@@ -191,6 +191,14 @@ func hmacShareAtLeast(numerator, denominator, percent int64) bool {
 }
 
 func (hmacCutoverProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	schema := hmacCutoverSchemaContract()
+	ready, err := probeSchemaReady(ctx, env, schema)
+	if err != nil {
+		return nil, err
+	}
+	if !ready {
+		return []finding{probeSchemaUnavailableFinding(schema, pgTarget(env))}, nil
+	}
 	rows, err := env.runner.pg(ctx, hmacCutoverQuery())
 	if err != nil {
 		return nil, err
@@ -212,7 +220,7 @@ func (hmacCutoverProbe) check(ctx context.Context, env *probeEnv) ([]finding, er
 	} else if snapshot.legacy > 0 && (snapshot.cutoverActive || snapshot.cutoffAgeSeconds >= -int64((30*24*time.Hour)/time.Second)) {
 		findings[1] = hmacCutoverReadinessFinding(snapshot)
 	}
-	return findings, nil
+	return append(findings, healthyFinding(schema.probeId, tierWarn, schema.class, pgTarget(env))), nil
 }
 
 func hmacCutoverObserved(snapshot hmacCutoverSnapshot) string {

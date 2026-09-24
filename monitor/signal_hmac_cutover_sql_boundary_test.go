@@ -70,6 +70,9 @@ func runHmacCutoverSqlFixture(t testing.TB, clock time.Time, legacySql, compatib
 	var captured []Row
 	calls := 0
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "monitor-schema-readiness") {
+			return []Row{{"true"}}, nil
+		}
 		calls++
 		const originalClock = "WITH clock AS MATERIALIZED (\n    SELECT now() AT TIME ZONE 'UTC' AS utc_now\n)"
 		if calls != 1 || strings.Count(query, originalClock) != 1 || strings.Count(query, "monitor-signal-2.24-hmac-cutover") != 1 {

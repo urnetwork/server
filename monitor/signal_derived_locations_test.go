@@ -141,6 +141,8 @@ func (self *derivedLocationsFixture) source(t testing.TB) *syntheticSource {
 		postgresFn: func(query string) ([]Row, error) {
 			self.queries = append(self.queries, query)
 			switch {
+			case strings.Contains(query, "monitor-schema-readiness"):
+				return []Row{{"true"}}, nil
 			case strings.Contains(query, "monitor-signal-2.19c-derived-locations-table"):
 				table := self.table
 				return []Row{{
@@ -292,6 +294,7 @@ func TestDerivedLocationsSignalHealthyBaseline(t *testing.T) {
 		classes[finding.class] += 1
 	}
 	for _, class := range []string{
+		"derived-locations-schema-unavailable",
 		"derive-run-history-unobservable",
 		"derive-not-running",
 		"derive-supply-gone",
@@ -311,8 +314,8 @@ func TestDerivedLocationsSignalHealthyBaseline(t *testing.T) {
 			t.Errorf("class %s has %d healthy findings, want 1", class, classes[class])
 		}
 	}
-	if len(classes) != 14 {
-		t.Errorf("healthy classes %v, want the thirteen conditions and the history", classes)
+	if len(classes) != 15 {
+		t.Errorf("healthy classes %v, want the thirteen conditions, history and schema readiness", classes)
 	}
 
 	// the history is read three runs deep, the deepest comparison

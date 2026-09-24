@@ -225,6 +225,14 @@ type egressSitePoolObservation struct {
 
 // Implements probe: one cadence, from configuration, PostgreSQL and Mimir.
 func (self egressSitePoolProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	schema := egressSitePoolSchemaContract()
+	ready, err := probeSchemaReady(ctx, env, schema)
+	if err != nil {
+		return nil, err
+	}
+	if !ready {
+		return []finding{probeSchemaUnavailableFinding(schema, pgTarget(env))}, nil
+	}
 	settings := self.settings
 	if settings == nil {
 		settings = DefaultEgressSitePoolSettings()
@@ -245,7 +253,7 @@ func (self egressSitePoolProbe) check(ctx context.Context, env *probeEnv) ([]fin
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return evaluateEgressSitePool(settings, poolContext, pgTarget(env), observation), nil
+	return append(evaluateEgressSitePool(settings, poolContext, pgTarget(env), observation), healthyFinding(schema.probeId, tierWarn, schema.class, pgTarget(env))), nil
 }
 
 // The first tally day of the refresh's window, as the refresh computes it

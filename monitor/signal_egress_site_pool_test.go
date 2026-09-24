@@ -143,6 +143,8 @@ func (self *egressSitePoolFixture) source(t *testing.T) *syntheticSource {
 	return &syntheticSource{
 		postgresFn: func(query string) ([]Row, error) {
 			switch {
+			case strings.Contains(query, "monitor-schema-readiness"):
+				return []Row{{"true"}}, nil
 			case strings.Contains(query, "monitor-signal-2.19b-egress-site-pool-destinations"):
 				return rows(self.destinations), nil
 			case strings.Contains(query, "monitor-signal-2.19b-egress-site-pool-regional"):

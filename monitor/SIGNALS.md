@@ -7299,6 +7299,25 @@ formatting or package metadata checks do not substitute for executing these test
 ### 2.19b Egress site pool freshness — retire sites that fail everyone, and keep the pool representative
 Probe: `egress-site-pool`
 
+Schema readiness: before any data or Mimir read, a bounded catalog-only
+preflight verifies every public table/column/type used by this probe,
+including blackhole retry fields (707/709), destination pool (711) and both
+tallies (712/713). Missing or incompatible schema emits
+`egress-site-pool-schema-unavailable` (WARN, one sample): readiness unknown,
+not an empty/healthy pool or proof of a running service outage.
+No dependent healthy sentinel is emitted, so prior incidents remain open.
+The one-shot can complete with this explicit warning. Read errors, malformed
+output and cancellation still fail closed; a later DDL/data-query failure
+also remains an error. Metadata visibility can conservatively delay coverage,
+and a successful preflight is not full migration or running-artifact
+attestation. Use §8.9 and exact deployed artifacts to review the rollout;
+this warning is not permission to migrate merely to clear the monitor.
+
+Schema-ticket recovery means the physical preflight is ready and dependent
+PostgreSQL queries returned validly. It clears only schema readiness:
+independent Mimir or Redis visibility may remain unknown, and this does not
+declare feature recovery.
+
 The probe's verdicts are only as good as the sites it loads. A site that
 refuses every exit — a bot manager that rejects the probe's request shape, a
 changed redirect, a site that went away — reads as a failure on every
@@ -7490,6 +7509,25 @@ the unreachable share), so the monitor judges by the numbers the task acts on.
 
 ### 2.19c Derived-location health — the ping geometry and its calibration
 Probe: `derived-locations`
+
+Schema readiness: a bounded catalog-only preflight checks every public
+table/column/type read by the data queries, including `derived_location`
+(702), the hour tally (716) and a network_ping relation witness, before data or Redis history is read.
+Missing or incompatible schema emits `derived-locations-schema-unavailable`
+(WARN, one sample): readiness unknown, not zero published nodes or proof of
+a stalled running job. No dependent healthy sentinel is emitted.
+The one-shot can complete with the warning. Read errors, malformed output and
+cancellation still fail closed; later DDL/data-query failures remain errors.
+Catalog visibility restrictions can delay observation. The preflight does
+not attest indexes, defaults, constraints, a running writer or full migration
+coherence; nullable partition-catalog checks retain their existing semantics.
+Review §8.9 and exact deployed artifacts; this is not permission to migrate
+merely to make the monitor green.
+
+Schema-ticket recovery means the physical preflight is ready and dependent
+PostgreSQL queries returned validly. It clears only schema readiness:
+independent Mimir or Redis visibility may remain unknown, and this does not
+declare feature recovery.
 
 The derive job (connect/GEOMAP.md §5, `taskworker/work/derive_location_work.go`)
 turns a day of co-signed pings into a corrected position per provider and
@@ -8566,6 +8604,25 @@ success, strict aggregate rejection, query privacy, and detailed Markdown.
 
 ### 2.24 Stored-contract HMAC cutover compatibility
 Probe: `hmac-cutover`
+
+Schema readiness: before reading cohort data, a bounded catalog-only
+preflight checks all referenced public columns and query-compatible types,
+including `consecutive_failures` (707) and `first_failed_at` (708).
+Missing or incompatible schema emits `hmac-cutover-schema-unavailable`
+(WARN, one sample): readiness unknown. No dependent healthy sentinel is
+emitted and no legacy single-failure rule is substituted, so missing schema
+cannot resolve the HMAC incident or weaken the consecutive-dark definition.
+The one-shot can complete with the explicit warning. Read errors, malformed
+output and cancellation still fail closed; later DDL/data-query failures
+remain errors. Restricted catalog visibility may delay observation; presence
+alone does not attest all migrations, a deployed verdict writer or receiver
+ancestry. Review §8.9 and exact deployed artifacts; this warning is not
+permission to migrate merely to clear the monitor.
+
+Schema-ticket recovery means the physical preflight is ready and dependent
+PostgreSQL queries returned validly. It clears only schema readiness:
+independent Mimir or Redis visibility may remain unknown, and this does not
+declare feature recovery.
 
 `connect.SignStoredContract` changes the signature emitted by API and resident
 Connect controllers at `ContractManagerSettings.NetworkEventTimeChangeHmac`.
