@@ -163,6 +163,43 @@ var competitionStagingBestWinnerArtifactQuery = func() string {
 	return strings.Replace(competitionStagingWinnerArtifactQuery, oldEligibility, newEligibility, 1)
 }()
 
+// The policy namespace append changes identity keys but leaves signed rows
+// immutable; the active-head index admits exactly one live projection.
+const clientKeyPolicyNamespaceArtifactQuery = `(
+	EXISTS (
+		SELECT 1 FROM constraint_artifact
+		WHERE table_name = 'st_client_key_history' AND constraint_type = 'p'
+		  AND definition = 'PRIMARY KEY (client_id, domain_hash, generation)' AND validated
+	)
+	AND EXISTS (
+		SELECT 1 FROM constraint_artifact
+		WHERE table_name = 'st_client_key_head' AND constraint_type = 'p'
+		  AND definition = 'PRIMARY KEY (client_id, domain_hash)' AND validated
+	)
+	AND EXISTS (
+		SELECT 1 FROM constraint_artifact
+		WHERE table_name = 'st_client_key_head' AND constraint_type = 'f'
+		  AND definition LIKE '%(client_id, domain_hash, generation)%st_client_key_history(client_id, domain_hash, generation)%'
+		  AND validated
+	)
+	AND EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'st_client_key_head'
+		  AND column_name = 'is_current' AND data_type = 'boolean' AND is_nullable = 'NO'
+	)
+	AND EXISTS (
+		SELECT 1 FROM index_artifact
+		WHERE table_name = 'st_client_key_head' AND index_name = 'st_client_key_head_current'
+		  AND definition = 'CREATE UNIQUE INDEX st_client_key_head_current ON public.st_client_key_head USING btree (client_id) WHERE is_current'
+		  AND predicate_definition = 'is_current' AND indisvalid AND indisready
+	)
+	AND to_regprocedure('public.st_client_key_head_identity_guard()') IS NOT NULL
+	AND regexp_replace(
+		pg_get_functiondef(to_regprocedure('public.st_client_key_head_identity_guard()')),
+		'[[:space:]]+', ' ', 'g'
+	) LIKE '%NOT OLD.is_current AND (NEW.is_current OR NEW.generation <> OLD.generation)%'
+)`
+
 var migrationArtifacts = []migrationArtifact{
 	{name: "competition_round", requiredVersion: 588, rowColumn: 1},
 	{name: "competition_job_immutable_guard", requiredVersion: 589, rowColumn: 2},
@@ -296,6 +333,9 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "network_ping_target_hour_tally day partitions and target hour key", requiredVersion: 719, rowColumn: 130},
 	{name: "competition staging lifecycle winner eligibility", requiredVersion: 720, rowColumn: 131},
 	{name: "competition staging winner approval and append-only guards", requiredVersion: 721, rowColumn: 132},
+	{name: "transfer_contract subnet usage columns and shape", requiredVersion: 722, rowColumn: 133},
+	{name: "transfer_contract_closed_usage lookup index", requiredVersion: 723, rowColumn: 134},
+	{name: "signed client-key policy namespaces and active head", requiredVersion: 724, rowColumn: 135},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -2002,7 +2042,37 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND position('NEW.staging OR (job.score_json->>''takeover_eligible'')::boolean'
 		                          in pg_get_functiondef(function_record.oid)) > 0
 		       ),
-		       `+competitionStagingApprovalArtifactQuery+`
+		       `+competitionStagingApprovalArtifactQuery+`,
+		       (
+		           (SELECT count(*) = 3 FROM (VALUES
+		               ('usage_origin_is_source', 'boolean', 'YES'),
+		               ('usage_unverified', 'boolean', 'NO'),
+		               ('provider_usage', 'jsonb', 'YES')
+		           ) AS expected(column_name, data_type, is_nullable)
+		           WHERE EXISTS (
+		               SELECT 1 FROM information_schema.columns AS actual
+		               WHERE actual.table_schema = 'public' AND actual.table_name = 'transfer_contract'
+		                 AND actual.column_name = expected.column_name
+		                 AND actual.data_type = expected.data_type
+		                 AND actual.is_nullable = expected.is_nullable
+		           ))
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'transfer_contract'
+		                 AND constraint_name = 'transfer_contract_provider_usage_shape'
+		                 AND constraint_type = 'c'
+		                 AND definition LIKE '%jsonb_typeof(provider_usage)%'
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'transfer_contract'
+		             AND index_name = 'transfer_contract_closed_usage'
+		             AND definition = 'CREATE INDEX transfer_contract_closed_usage ON public.transfer_contract USING btree (close_time, contract_id) WHERE (outcome IS NOT NULL)'
+		             AND predicate_definition = '(outcome IS NOT NULL)'
+		             AND indisvalid AND indisready
+		       ),
+		       `+clientKeyPolicyNamespaceArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {
