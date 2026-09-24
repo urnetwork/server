@@ -16,6 +16,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/proxy/flowtrace"
 )
 
 func DefaultProxyDeviceManagerSettings() *ProxyDeviceManagerSettings {
@@ -677,6 +678,7 @@ type ProxyDevice struct {
 	cancel    context.CancelFunc
 	closeOnce sync.Once
 	closeErr  error
+	flowTrace atomic.Pointer[flowtrace.Recorder]
 
 	clientId          server.Id
 	instanceId        server.Id
@@ -954,6 +956,9 @@ func (self *ProxyDevice) Run() {
 		ipPath *connect.IpPath,
 		packets [][]byte,
 	) {
+		if recorder := self.flowTrace.Load(); recorder != nil {
+			recorder.Return(source, packets, time.Now())
+		}
 		self.deliverReturnPackets(packets)
 	}
 	sub := self.deviceLocal.AddReceivePacketsCallback(receivePacketsCallback)

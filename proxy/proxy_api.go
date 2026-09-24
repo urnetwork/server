@@ -59,10 +59,16 @@ func (self *apiServer) run() {
 	// id) and terminates the same per-proxy SNI TLS, so it belongs here rather
 	// than on the forward-proxy listener.
 	deviceRpc := NewDeviceRpcHandler(self.proxyDeviceManager, self.settings)
+	flowTrace := flowTraceHandler{
+		auth: authHeaderProxyId, open: self.proxyDeviceManager.OpenProxyDevice,
+		lookup: self.proxyDeviceManager.flowTraceDevice,
+	}
 
 	routes := []*router.Route{
 		router.NewRoute("POST", "/warmup", self.HandleWarmup),
 		router.NewRoute("GET", deviceRpcPath, deviceRpc.ServeHTTP),
+		router.NewRoute("POST", flowTracePath, flowTrace.ServeHTTP),
+		router.NewRoute("GET", flowTracePath, flowTrace.ServeHTTP),
 	}
 
 	router := router.NewRouter(self.ctx, routes)

@@ -20054,19 +20054,60 @@ sanitized issuer common name, the first six bytes of SHA-256 over the DER, the
 total peer-certificate count, and the verified-chain count. Do not retain PEM,
 certificate contents, private request headers, or disable verification to get
 a response. Compare the leaf identity and fingerprint with a direct-origin
-control and the exact selected exit. A matching bad origin chain is external;
-a different issuer/fingerprint only through the proxy isolates the exit or
-route. Go can report an empty `tls.ConnectionState` on a failed handshake even
-though `crypto/x509` already parsed the rejected leaf and retained it in
-`x509.UnknownAuthorityError`. In that exact case, fall back to the error's
-certificate and emit only the same sanitized subject/issuer and truncated DER
-fingerprint, framed as `peer_certs=unavailable`, `verified_chains=0`, and
-`rejected_leaf=...`; do not treat the absent connection-state slice as proof
-that the peer sent no certificate. `TestHTTPSRequestTraceRetainsRejectedPeerCertificateChain`
-supplies a synthetic rejected two-certificate state, while
-`TestHTTPSRequestTraceFallsBackToRejectedUnknownAuthorityLeaf` reproduces the
-empty-state error and requires the bounded leaf identity to survive without
-certificate bytes.
+control and the exact observed return provider. Controls must be contemporaneous
+and retain the same destination IP and TLS SNI: differing fingerprints alone
+can be legitimate CDN rotation, and a later clean direct request does not
+locate an earlier failure. `net/http` supplies an empty `tls.ConnectionState` on failed handshakes,
+but `tls.CertificateVerificationError.UnverifiedCertificates` retains the full
+parsed peer chain, including hostname and expiry rejections. Summarize that
+chain first and label its source `certificate_source=verification_error`.
+A bare `x509.UnknownAuthorityError.Cert` can be an intermediate or root, so the
+last-resort single-certificate diagnostic is `rejected_cert`, not a presumed
+leaf. The real loopback TLS regression
+`TestProbeHTTPSRetainsRejectedChainFromRealTLSHandshake` first accepts a trusted
+response, then rejects another issuer without retrying or sending an HTTP
+request; it requires both rejected certificate fingerprints to survive.
+
+The WireGuard origin dialer records the connected origin IP and port before
+TLS starts. `request route` reports only aggregate destination/local-channel
+samples whose entire RPC interval falls within the failing request. They are
+candidates, not per-flow ownership proof; absence remains `samples=none`.
+HTTP/SOCKS do not expose their server-resolved origin socket and explicitly
+report `origin=unavailable`. Their listener addresses and later hosted-device
+timeline snapshots must not be mistaken for the failing origin's route.
+`GetDestinationExits.ClientId` is a local window slot; an alias such as `p29`
+does not identify the egress provider. `ProviderEvent.EgressClientId` and the
+authenticated return envelope's `SourceId` identify the provider instead.
+
+Opt-in `./proxy/test-main.sh --trace-tls-flows=true` requires the matching
+server `/diagnostics/flow-trace` API. The existing signed-proxy authentication
+scopes it to one temporary device. POST arms a 45-minute, 1024-event ring;
+GET never creates a replacement device. A trace-session generation and paired
+event/drop cursors delimit each request without comparing clocks. At the
+authenticated final-return callback it records only each TCP tuple, sequence,
+payload length, UTC timestamp and a session-scoped HMAC provider alias. No
+packet payload, credentials or raw provider IDs are retained or exported.
+Recording never waits behind a reader; contention and overwritten events make
+the interval incomplete. Recording is disabled by default.
+
+HTTP/SOCKS join one observed proxy-side dial to that exact return tuple;
+WireGuard joins the client-observed origin and inner TCP source port (its
+server NAT rewrites the address, not the port). Multiple dials, missing data,
+lost generations and expired traces remain unavailable. A complete match is
+`scope=actual-return-flow`, with the provider count and at most eight provider
+aliases/eight payload-event summaries. These are authenticated sources that
+delivered bytes for the flow, not proof which source supplied a particular
+certificate if multiple sources occur. Missing diagnostics never change the
+target verdict; diagnostic reads are outside its HTTP-client timeout. No TLS
+verification, target retry or forwarding behavior is changed.
+
+Compare the rejected chain with simultaneous normal-verifier controls to the
+same IP/SNI through a direct route and an independent provider. An untrusted
+chain seen only on one attributed provider path narrows the fault to that
+path, but cannot distinguish the provider from its upstream interception or
+per-egress origin edge. The same untrusted chain on independent routes instead
+points toward the origin or a shared upstream. Neither a later passing retry
+nor these diagnostics remediate an untrusted response.
 
 **WireGuard encrypted-UDP versus inner-TUN boundary:** an acceptance request
 whose inner packet trace ends at outbound TCP retransmits still leaves two

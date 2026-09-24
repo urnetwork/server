@@ -1068,5 +1068,17 @@ func (s *wireGuardStack) DialContext(ctx context.Context, network, address strin
 	s.stats.DialPort = uint16(port)
 	s.stats.DialFlow = wireGuardTCPFlow{}
 	s.statsLock.Unlock()
-	return gonet.DialContextTCP(ctx, s.stack, fullAddress, ipv4.ProtocolNumber)
+	connection, err := gonet.DialContextTCP(ctx, s.stack, fullAddress, ipv4.ProtocolNumber)
+	if err == nil {
+		origin, _ := netip.AddrFromSlice(ipv4Address)
+		recordHTTPSOrigin(ctx, netip.AddrPortFrom(origin.Unmap(), uint16(port)))
+		if trace, ok := ctx.Value(httpsRequestTraceContextKey{}).(*httpsRequestTrace); ok {
+			if local, err := netip.ParseAddrPort(connection.LocalAddr().String()); err == nil {
+				trace.stateLock.Lock()
+				trace.originLocalPort = local.Port()
+				trace.stateLock.Unlock()
+			}
+		}
+	}
+	return connection, err
 }

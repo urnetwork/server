@@ -48,11 +48,18 @@ type sdkHostedDeviceTracker struct {
 	causalHistory []string
 	lastSignature string
 	lastLiveRoute string
+	requestRoutes []hostedDeviceRouteSample
 	closeOnce     sync.Once
 	packetState   hostedDevicePacketState
 	lastMetrics   sdk.ReliabilityMetrics
 	metricsReady  bool
 	lastExitState map[string]hostedDeviceExitState
+}
+
+type hostedDeviceRouteSample struct {
+	started      time.Time
+	finished     time.Time
+	destinations string
 }
 
 type hostedDevicePacketState struct {
@@ -150,14 +157,20 @@ func (self *sdkHostedDeviceTracker) snapshot() string {
 	now := time.Now()
 	metrics := self.remote.GetReliabilityMetrics()
 	exits := self.remote.GetExits()
+	window := self.remote.GetWindowStatus()
+	packetSummary := self.packetState.summary(now, self.remote.GetPacketStats())
+	routeStarted := time.Now()
+	destinations := self.remote.GetDestinationExits()
+	routeFinished := time.Now()
 	snapshot := formatHostedDeviceState(
-		self.remote.GetWindowStatus(),
+		window,
 		metrics,
-		self.packetState.summary(now, self.remote.GetPacketStats()),
+		packetSummary,
 		exits,
-		self.remote.GetDestinationExits(),
+		destinations,
 		self.aliases,
 	)
+	self.recordRequestRouteSample(routeStarted, routeFinished, snapshot)
 	self.recordLiveRoute(now, snapshot)
 	self.recordReliability(now, metrics)
 	self.recordExitTransitions(now, exits)
@@ -659,6 +672,70 @@ func (self *sdkHostedDeviceTracker) recordLiveRoute(now time.Time, signature str
 	self.stateLock.Unlock()
 }
 
+// Keep the already bounded, aliased route observations with their actual RPC
+// intervals. Later cleanup or another protocol's traffic must not become
+// evidence of the route that carried an earlier failed request.
+func (self *sdkHostedDeviceTracker) recordRequestRouteSample(started, finished time.Time, signature string) {
+	const prefix = "destinations=["
+	start := strings.Index(signature, prefix)
+	if start < 0 {
+		return
+	}
+	value := signature[start+len(prefix):]
+	end := strings.IndexByte(value, ']')
+	if end < 0 {
+		return
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.requestRoutes = append(self.requestRoutes, hostedDeviceRouteSample{started, finished, value[:end]})
+	if hostedDeviceHistorySize < len(self.requestRoutes) {
+		self.requestRoutes = append([]hostedDeviceRouteSample(nil), self.requestRoutes[len(self.requestRoutes)-hostedDeviceHistorySize:]...)
+	}
+}
+
+// These are destination-level local-channel candidates, not provider IDs or
+// a per-flow provider verdict. GetDestinationExits.ClientId names a window slot.
+// HTTP/SOCKS hide the origin socket behind their proxy, so proxy-listener DNS
+// cannot safely select a destination here. A missing in-request sample remains
+// explicit instead of borrowing the current or most recent live route.
+func (self *sdkHostedDeviceTracker) RequestDiagnostic(request *httpsRequestFailure) string {
+	if !request.originAddress.IsValid() {
+		return "origin=unavailable candidates=unavailable reason=origin-not-observed"
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	prefix := request.originAddress.Addr().String() + "->"
+	samples := []string{}
+	for _, sample := range self.requestRoutes {
+		if sample.started.Before(request.started) || sample.finished.After(request.finished) {
+			continue
+		}
+		candidates := []string{}
+		for _, route := range strings.Split(sample.destinations, ",") {
+			if strings.HasPrefix(route, prefix) {
+				candidates = append(candidates, strings.TrimPrefix(route, prefix))
+			}
+		}
+		candidateSummary := "not-observed"
+		if len(candidates) != 0 {
+			candidateSummary = strings.Join(candidates, ",")
+		}
+		samples = append(samples, fmt.Sprintf("%s/%s candidates=%s",
+			sample.started.UTC().Format(time.RFC3339Nano),
+			sample.finished.UTC().Format(time.RFC3339Nano),
+			candidateSummary))
+	}
+	const maxSamples = 3
+	if maxSamples < len(samples) {
+		samples = samples[len(samples)-maxSamples:]
+	}
+	if len(samples) == 0 {
+		return fmt.Sprintf("origin=%s scope=destination-aggregate candidate_kind=local-channel samples=none", request.originAddress)
+	}
+	return fmt.Sprintf("origin=%s scope=destination-aggregate candidate_kind=local-channel samples=[%s]", request.originAddress, strings.Join(samples, " | "))
+}
+
 // record stores only state transitions; repeated steady-state polling cannot
 // evict the moment a flow first selected its provider.
 func (self *sdkHostedDeviceTracker) record(now time.Time, signature string) {
@@ -724,6 +801,12 @@ func (self *sdkHostedDeviceTracker) Close() {
 func withHostedDeviceDiagnostics(err error, tracker hostedDeviceTracker) error {
 	if err == nil || tracker == nil {
 		return err
+	}
+	var request *httpsRequestFailure
+	if scoped, ok := tracker.(interface {
+		RequestDiagnostic(*httpsRequestFailure) string
+	}); ok && errors.As(err, &request) {
+		return fmt.Errorf("%w; request route: {%s}; hosted device timeline: %s", err, scoped.RequestDiagnostic(request), tracker.Diagnostic())
 	}
 	return fmt.Errorf("%w; hosted device timeline: %s", err, tracker.Diagnostic())
 }
