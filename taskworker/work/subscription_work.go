@@ -35,6 +35,13 @@ func closeExpiredContractsFull(closeCount int64) bool {
 	return int64(closeExpiredContractsMaxCount/(4*DefaultCloseExpiredContractsBlockSize)) <= closeCount
 }
 
+// Twelve quiet minutes allow two default receive-owner lifetimes before
+// synthesizing an absent report. The model applies this cutoff to creation
+// and the latest authenticated report, so delivery progress retains its owner.
+func closeExpiredContractsCutoff(now time.Time) time.Time {
+	return now.Add(-12 * time.Minute)
+}
+
 type CloseExpiredContractsArgs struct {
 	BlockSize  int `json:"block_size"`
 	BlockIndex int `json:"block_index"`
@@ -82,7 +89,7 @@ func CloseExpiredContracts(
 	clientSession *session.ClientSession,
 ) (*CloseExpiredContractsResult, error) {
 	if closeExpiredContracts.BlockSize == DefaultCloseExpiredContractsBlockSize {
-		minTime := server.NowUtc().Add(-5 * time.Minute)
+		minTime := closeExpiredContractsCutoff(server.NowUtc())
 		c, err := model.ForceCloseOpenContractIds(
 			clientSession.Ctx,
 			minTime,
