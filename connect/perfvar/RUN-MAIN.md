@@ -6,7 +6,8 @@ regressions, and promotes measured improvements. It covers the deterministic
 PERFVAR environment plus the two attached Android test devices. The research
 contracts remain
 [`connect/LOWBAR.md`](../../../connect/LOWBAR.md),
-[`connect/MEMSTEADY.md`](../../../connect/MEMSTEADY.md), and
+[`connect/MEMSTEADY.md`](../../../connect/MEMSTEADY.md),
+[`connect/NODELAY.md`](../../../connect/NODELAY.md), and
 [`PERFVAR.md`](./PERFVAR.md).
 
 `sim-latency` is deliberately outside this harness. Its separate continuous
@@ -186,8 +187,8 @@ do not rewrite the plan after observing data.
 
 ## Bootstrap and preflight
 
-1. Read this file, `PERFVAR.md`, the current active portions of `LOWBAR.md` and
-   `MEMSTEADY.md`, Android's
+1. Read this file, `PERFVAR.md`, the current active portions of `LOWBAR.md`,
+   `MEMSTEADY.md`, and `NODELAY.md`, Android's
    [`PHYSICAL_LOWBAR.md`](../../../android/app/scripts/PHYSICAL_LOWBAR.md), and
    the active entry in the tests measurement ledger.
 2. Inspect branch, HEAD, upstream, and `git status --short --branch` in tests,
@@ -233,6 +234,53 @@ go test ./connect/perfvar -run '^TestPerfvar' -short -count=1
 Do not begin a candidate arm until the control source is reconstructible, both
 APKs are stamped with distinct immutable build IDs, and the full manifest is
 frozen.
+
+## Continuous packet-flow delay audit
+
+Run the `connect/NODELAY.md` audit at the start of every PERFVAR campaign and
+again at least daily while a campaign or standing harness continues. Also run
+it after any change to DNS, dial, carrier, Transfer, provider-window, TUN,
+proxy, or route lifecycle code. This is a source-and-evidence check alongside
+PERFVAR's measurements, not a substitute for them or a reason to run the
+separate sim-latency harness.
+
+For each changed or newly observed wait between DNS first usable answer,
+first dial attempt, carrier and contract readiness, cipher readiness,
+selectable-provider publication, first packet enqueue, and first response:
+
+1. Record the exact source path and event pair, whether the wait is a true
+   deadline, intentional privacy hedge/pacing, retry backoff, idle detection,
+   or timer-only readiness polling. A configured `250ms` does not prove a
+   packet waited that long; an event-driven maximum timeout is different from
+   a fixed delay. Equally, a successful probe at the end does not hide a
+   startup or packet-flow delay.
+2. Check both IPv4 and IPv6 first-answer behavior, TCP and UDP, initial and
+   resumed connections, Required encryption, zero-provider formation,
+   already-present failed candidates, cancellation, and time-expiring
+   selection filters. A usable A or AAAA answer or eligible offer must be
+   acted on promptly without waiting for the other family or a polling tick.
+   Preserve deliberate privacy boundaries and paced retries explicitly.
+3. When a readiness poll is found, add a deterministic actual-path test whose
+   causal case fails with the timer held and succeeds on publication, plus
+   controls for no publication, deadline, cancellation, failed-send pacing,
+   and stale/wrong-family state. Pair subscription with the state read under
+   the same owner lock so the fix cannot lose an edge; do not add an unbounded
+   goroutine, global budget, spin loop, or hot-path allocation to make the
+   test pass.
+4. Sol owns the causal analysis and smallest correction. Terra independently
+   runs source-frozen RED/GREEN, adjacent normal/race/vet, then the unchanged
+   PERFVAR control/candidate matrix and applicable Android cells. Record
+   stage timing and variance under the same compatibility key, with failed
+   attempts retained. A source-only improvement or one green focused test
+   is not a performance promotion or deployed-product verification.
+
+Append the audit date, inspected source revision/dirty hash, newly classified
+waits, test receipts, and any unresolved hypothesis to the campaign's private
+manifest, with a privacy-safe summary in `tests/PERFVAR-MEASUREMENTS.md`.
+Update `connect/NODELAY.md` when a verified mechanism, intentional policy, or
+adjacent-path result changes its explanation. An unchanged audit still records
+what was inspected and when; never silently carry an old NODELAY conclusion
+forward to a new binary.
 
 ## Statistical contract
 
