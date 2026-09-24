@@ -16,14 +16,14 @@ import (
 // The three appended versions (connect/GEOMAP.md §10.4), each with the one
 // contract that owns its positional column.
 var migrationEgressIndexArtifacts = []migrationArtifact{
-	{name: "network_client_location_reliability.egress_index", requiredVersion: 703, rowColumn: 114},
-	{name: "network_client_location_reliability.egress_quality", requiredVersion: 704, rowColumn: 115},
-	{name: "network_client_location_reliability.egress_evidence_time", requiredVersion: 705, rowColumn: 116},
+	{name: "network_client_location_reliability.egress_index", requiredVersion: 704, rowColumn: 115},
+	{name: "network_client_location_reliability.egress_quality", requiredVersion: 705, rowColumn: 116},
+	{name: "network_client_location_reliability.egress_evidence_time", requiredVersion: 706, rowColumn: 117},
 }
 
 // Every appended version keeps exactly one contract in the positional row.
 func TestMigrationEgressIndexContractsAreComplete(t *testing.T) {
-	if server.MigrationCount() < 705 {
+	if server.MigrationCount() < 706 {
 		t.Fatal("egress index migrations have not been appended")
 	}
 	for _, want := range migrationEgressIndexArtifacts {
@@ -45,7 +45,7 @@ func TestMigrationEgressIndexContractsAreComplete(t *testing.T) {
 // Absent future artifacts are staging, not drift: each prefix of the rollout
 // is coherent and reports only the existing head lag.
 func TestMigrationEgressIndexStagedArtifactsDoNotPage(t *testing.T) {
-	for version := 702; version <= 705; version++ {
+	for version := 703; version <= 706; version++ {
 		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 			if strings.Contains(query, "FROM migration_catalog") {
 				return syntheticMigrationCatalogRows(version), nil

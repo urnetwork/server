@@ -15,23 +15,23 @@ import (
 // The appended ping versions (connect/GEOMAP.md §2.6, §2.7, §2.9, §5.1, §5.7),
 // each with the one contract that owns its positional column. The first
 // table's key and indexes are required until the day partitioning replaced
-// them at 713, and the partitioned table from then on; the tallies the
-// dashboard reads follow at 715-718.
+// them at 714, and the partitioned table from then on; the tallies the
+// dashboard reads follow at 716-719.
 var migrationPingArtifacts = []migrationArtifact{
-	{name: "network_ping table and primary key", requiredVersion: 693, removedVersion: 713, rowColumn: 104},
-	{name: "network_ping_target_pinger_nonce replay index", requiredVersion: 694, removedVersion: 713, rowColumn: 105},
-	{name: "network_ping_create_time retention index", requiredVersion: 695, removedVersion: 713, rowColumn: 106},
-	{name: "network_ping_target_extender_id_create_time target lookup index", requiredVersion: 696, removedVersion: 713, rowColumn: 107},
-	{name: "network_ping_pinger_kind_pinger_id_create_time pinger lookup index", requiredVersion: 697, removedVersion: 713, rowColumn: 108},
-	{name: "network_client_location.accuracy_km", requiredVersion: 698, rowColumn: 109},
-	{name: "network_extender_activation.accuracy_km", requiredVersion: 699, rowColumn: 110},
-	{name: "network_ping.hop_count", requiredVersion: 700, rowColumn: 111},
-	{name: "network_ping day partitions, replay key and read indexes", requiredVersion: 713, rowColumn: 124},
-	{name: "network_ping_legacy removed", requiredVersion: 714, rowColumn: 125},
-	{name: "network_ping_hour_tally table and hour tally key", requiredVersion: 715, rowColumn: 126},
-	{name: "network_ping_pinger_day day partitions and pinger key", requiredVersion: 716, rowColumn: 127},
-	{name: "network_ping_target_day day partitions and target key", requiredVersion: 717, rowColumn: 128},
-	{name: "network_ping_target_hour_tally day partitions and target hour key", requiredVersion: 718, rowColumn: 129},
+	{name: "network_ping table and primary key", requiredVersion: 694, removedVersion: 714, rowColumn: 105},
+	{name: "network_ping_target_pinger_nonce replay index", requiredVersion: 695, removedVersion: 714, rowColumn: 106},
+	{name: "network_ping_create_time retention index", requiredVersion: 696, removedVersion: 714, rowColumn: 107},
+	{name: "network_ping_target_extender_id_create_time target lookup index", requiredVersion: 697, removedVersion: 714, rowColumn: 108},
+	{name: "network_ping_pinger_kind_pinger_id_create_time pinger lookup index", requiredVersion: 698, removedVersion: 714, rowColumn: 109},
+	{name: "network_client_location.accuracy_km", requiredVersion: 699, rowColumn: 110},
+	{name: "network_extender_activation.accuracy_km", requiredVersion: 700, rowColumn: 111},
+	{name: "network_ping.hop_count", requiredVersion: 701, rowColumn: 112},
+	{name: "network_ping day partitions, replay key and read indexes", requiredVersion: 714, rowColumn: 125},
+	{name: "network_ping_legacy removed", requiredVersion: 715, rowColumn: 126},
+	{name: "network_ping_hour_tally table and hour tally key", requiredVersion: 716, rowColumn: 127},
+	{name: "network_ping_pinger_day day partitions and pinger key", requiredVersion: 717, rowColumn: 128},
+	{name: "network_ping_target_day day partitions and target key", requiredVersion: 718, rowColumn: 129},
+	{name: "network_ping_target_hour_tally day partitions and target hour key", requiredVersion: 719, rowColumn: 130},
 }
 
 // A healthy row at `version`: every artifact published by then and not yet
@@ -50,7 +50,7 @@ func syntheticMigrationPingRow(version int) Row {
 
 // Every appended version keeps exactly one contract in the positional row.
 func TestMigrationPingContractsAreComplete(t *testing.T) {
-	if server.MigrationCount() < 718 {
+	if server.MigrationCount() < 719 {
 		t.Fatal("the ping migrations have not been appended")
 	}
 	for _, want := range migrationPingArtifacts {
@@ -74,7 +74,7 @@ func TestMigrationPingContractsAreComplete(t *testing.T) {
 // partitions and the drop of the old table included, is coherent and reports
 // only the existing head lag.
 func TestMigrationPingStagedArtifactsDoNotPage(t *testing.T) {
-	for version := 692; version <= 718; version++ {
+	for version := 693; version <= 719; version++ {
 		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 			if strings.Contains(query, "FROM migration_catalog") {
 				return syntheticMigrationCatalogRows(version), nil
@@ -286,23 +286,23 @@ func TestMigrationPingPartitionArtifactsOnAMigratedDatabase(t *testing.T) {
 		}{
 			{
 				sql:      `CREATE TABLE network_ping_synthetic_other PARTITION OF network_ping FOR VALUES FROM ('2099-01-01') TO ('2099-01-02')`,
-				artifact: "network_ping day partitions, replay key and read indexes@v713",
+				artifact: "network_ping day partitions, replay key and read indexes@v714",
 			},
 			{
 				sql:      `CREATE TABLE network_ping_p20990201 PARTITION OF network_ping FOR VALUES FROM ('2099-02-01') TO ('2099-02-03')`,
-				artifact: "network_ping day partitions, replay key and read indexes@v713",
+				artifact: "network_ping day partitions, replay key and read indexes@v714",
 			},
 			{
 				sql:      `CREATE TABLE network_ping_legacy (ping_id uuid NOT NULL)`,
-				artifact: "network_ping_legacy removed@v714",
+				artifact: "network_ping_legacy removed@v715",
 			},
 			{
 				sql:      `CREATE TABLE network_ping_pinger_day_synthetic_other PARTITION OF network_ping_pinger_day FOR VALUES FROM ('2099-01-01') TO ('2099-01-02')`,
-				artifact: "network_ping_pinger_day day partitions and pinger key@v716",
+				artifact: "network_ping_pinger_day day partitions and pinger key@v717",
 			},
 			{
 				sql:      `CREATE TABLE network_ping_target_hour_tally_p20990201 PARTITION OF network_ping_target_hour_tally FOR VALUES FROM ('2099-02-01') TO ('2099-02-03')`,
-				artifact: "network_ping_target_hour_tally day partitions and target hour key@v718",
+				artifact: "network_ping_target_hour_tally day partitions and target hour key@v719",
 			},
 		} {
 			server.MaintenanceTx(ctx, func(tx server.PgTx) {

@@ -16,22 +16,22 @@ import (
 // reducer must fail for ignoring published evidence, not an out-of-bounds row.
 func syntheticMigrationGeonameRow(version int, column, index bool) Row {
 	row := syntheticMigrationArtifactRow(version)
-	for len(row) < 104 {
+	for len(row) < 105 {
 		row = append(row, "t")
 	}
-	row[102] = fmt.Sprint(column)
-	row[103] = fmt.Sprint(index)
+	row[103] = fmt.Sprint(column)
+	row[104] = fmt.Sprint(index)
 	return row
 }
 
 // Both appended versions keep one contract in the positional SQL row.
 func TestMigrationGeonameContractsAreComplete(t *testing.T) {
-	if server.MigrationCount() < 692 {
+	if server.MigrationCount() < 693 {
 		t.Fatal("GeoNames migrations have not been appended")
 	}
 	for _, want := range []migrationArtifact{
-		{name: "location.geoname_id", requiredVersion: 691, rowColumn: 102},
-		{name: "location_geoname_id", requiredVersion: 692, rowColumn: 103},
+		{name: "location.geoname_id", requiredVersion: 692, rowColumn: 103},
+		{name: "location_geoname_id", requiredVersion: 693, rowColumn: 104},
 	} {
 		count := 0
 		for _, actual := range migrationArtifacts {
@@ -51,12 +51,12 @@ func TestMigrationGeonameContractsAreComplete(t *testing.T) {
 // Absent future artifacts are staging, not drift. Each healthy published
 // prefix remains coherent while the existing head-lag warning stays intact.
 func TestMigrationGeonameStagedArtifactsDoNotPage(t *testing.T) {
-	for _, version := range []int{690, 691, 692} {
+	for _, version := range []int{691, 692, 693} {
 		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 			if strings.Contains(query, "FROM migration_catalog") {
 				return syntheticMigrationCatalogRows(version), nil
 			}
-			return []Row{syntheticMigrationGeonameRow(version, 691 <= version, 692 <= version)}, nil
+			return []Row{syntheticMigrationGeonameRow(version, 692 <= version, 693 <= version)}, nil
 		}}
 		alerts, err := NewMigrationsSignal().Run(t.Context(), syntheticSettings(source))
 		if err != nil {
@@ -85,8 +85,8 @@ func TestMigrationGeonamePublishedArtifactsAreRequired(t *testing.T) {
 		column  bool
 		want    string
 	}{
-		{version: 691, want: "location.geoname_id@v691"},
-		{version: 692, column: true, want: "location_geoname_id@v692"},
+		{version: 692, want: "location.geoname_id@v692"},
+		{version: 693, column: true, want: "location_geoname_id@v693"},
 	} {
 		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 			if strings.Contains(query, "FROM migration_catalog") {
@@ -148,12 +148,12 @@ func TestMigrationGeonameColumnExecutesExactGuard(t *testing.T) {
 				normalized := strings.Join(strings.Fields(query), " ")
 				marker := "EXISTS ( SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'location' AND column_name = 'geoname_id'"
 				if strings.Count(normalized, marker) != 1 {
-					t.Fatal("migration 691 has no unique relation-scoped column guard")
+					t.Fatal("migration 692 has no unique relation-scoped column guard")
 				}
 				start := strings.Index(normalized, marker)
 				guard, _, ok := strings.Cut(normalized[start:], " ),")
 				if !ok {
-					t.Fatal("migration 691 column guard has no following artifact boundary")
+					t.Fatal("migration 692 column guard has no following artifact boundary")
 				}
 				guard = strings.ReplaceAll(guard+" )", "information_schema.columns", "observed_column")
 				var admitted bool
@@ -182,7 +182,7 @@ func TestMigrationGeonameColumnExecutesExactGuard(t *testing.T) {
 				}
 			} else {
 				alert := requireAlertClass(t, alerts, "migration-schema-drift")
-				if !strings.Contains(alert.Markdown(), "location.geoname_id@v691") {
+				if !strings.Contains(alert.Markdown(), "location.geoname_id@v692") {
 					t.Fatalf("%s lost the column's owning artifact", fault)
 				}
 			}

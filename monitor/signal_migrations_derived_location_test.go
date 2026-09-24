@@ -14,13 +14,13 @@ import (
 // The two appended versions (connect/GEOMAP.md §5.4, §6), each with the one
 // contract that owns its positional column.
 var migrationDerivedLocationArtifacts = []migrationArtifact{
-	{name: "derived_location table and node primary key", requiredVersion: 701, rowColumn: 112},
-	{name: "network_client_location.genesis_location_id", requiredVersion: 702, rowColumn: 113},
+	{name: "derived_location table and node primary key", requiredVersion: 702, rowColumn: 113},
+	{name: "network_client_location.genesis_location_id", requiredVersion: 703, rowColumn: 114},
 }
 
 // Every appended version keeps exactly one contract in the positional row.
 func TestMigrationDerivedLocationContractsAreComplete(t *testing.T) {
-	if server.MigrationCount() < 702 {
+	if server.MigrationCount() < 703 {
 		t.Fatal("derived-location migrations have not been appended")
 	}
 	for _, want := range migrationDerivedLocationArtifacts {
@@ -42,7 +42,7 @@ func TestMigrationDerivedLocationContractsAreComplete(t *testing.T) {
 // Absent future artifacts are staging, not drift: each prefix of the rollout
 // is coherent and reports only the existing head lag.
 func TestMigrationDerivedLocationStagedArtifactsDoNotPage(t *testing.T) {
-	for version := 700; version <= 702; version++ {
+	for version := 701; version <= 703; version++ {
 		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 			if strings.Contains(query, "FROM migration_catalog") {
 				return syntheticMigrationCatalogRows(version), nil

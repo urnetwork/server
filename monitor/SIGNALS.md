@@ -12975,34 +12975,35 @@ This is the version-to-artifact contract checked by the probe:
 | 688 | valid/ready `account_payment_block_number_payment` lookup index |
 | 689 | valid/ready partial `account_payment_block_rollup_pending` index |
 | 690 | valid/ready partial `account_point_payment_rollup` index |
-| 691 | nullable, no-default bigint `location.geoname_id` |
-| 692 | exact valid/ready unique `location_geoname_id` index on `location (geoname_id)` restricted to nonnull keys |
-| 693 | `network_ping` pinger-reported ping table with exact column types, nullability, defaults, and ping primary key (required through version 712) |
-| 694 | exact valid/ready unique `network_ping_target_pinger_nonce` replay index on `(target_extender_id, pinger_kind, pinger_id, probe_nonce)` (required through version 712) |
-| 695 | exact valid/ready `network_ping_create_time` retention index (required through version 712) |
-| 696 | exact valid/ready `network_ping_target_extender_id_create_time` target lookup index (required through version 712) |
-| 697 | exact valid/ready `network_ping_pinger_kind_pinger_id_create_time` pinger lookup index (required through version 712) |
-| 698 | nullable, no-default real `network_client_location.accuracy_km` |
-| 699 | nullable, no-default real `network_extender_activation.accuracy_km` |
-| 700 | required smallint `network_ping.hop_count` with a zero default |
-| 701 | `derived_location` derived-location table with exact column types, required no-default columns, and the `(node_kind, node_id)` primary key |
-| 702 | nullable, no-default UUID `network_client_location.genesis_location_id` |
-| 703 | nullable, no-default smallint `network_client_location_reliability.egress_index` |
-| 704 | nullable, no-default boolean `network_client_location_reliability.egress_quality` |
-| 705 | nullable, no-default timestamp `network_client_location_reliability.egress_evidence_time` |
-| 706 | required integer `provider_blackhole_check.consecutive_failures` with a zero default |
-| 707 | nullable, no-default timestamp `provider_blackhole_check.first_failed_at` |
-| 708 | nullable, no-default timestamp `provider_blackhole_check.next_due_at` |
-| 709 | the six required `provider_egress_health` unscored-load columns: integer `not_measured_count` with a zero default, and text `not_measured_names`, `canary_passed_names`, `canary_failed_names`, `short_classes` and `unscored_failed_names` with empty defaults |
-| 710 | `provider_egress_destination` destination pool table with its 25 columns, the exact types and nullability of `name`, `class`, `url`, `incompatible`, `verify`, `active`, `probation`, `retired_time` and `above_retire_since`, and the validated `name` primary key |
-| 711 | `provider_egress_site_tally` per-site daily tally table with its 11 columns and the validated `(tally_day, name, country_code, region)` primary key |
-| 712 | `provider_egress_place_tally` per-place daily tally table with its 7 columns and the validated `(tally_day, country_code, region)` primary key |
-| 713 | `network_ping` range-partitioned by `create_time` with the exact column types, nullability and defaults of 693 and 700; exact valid/ready partitioned indexes: unique `network_ping_target_pinger_nonce` on `(target_extender_id, pinger_kind, pinger_id, probe_nonce, create_time)`, `network_ping_target_extender_id_create_time` and `network_ping_pinger_kind_pinger_id_create_time`; at least one partition, and every partition a plain table named `network_ping_p` plus its utc day that covers exactly that day |
-| 714 | the pre-partition `network_ping_legacy` table absent |
-| 715 | `network_ping_hour_tally` fleet ping tally: exact required, no-default columns and the `(hour, shard, pinger_kind, relayed, cosign, cosign_reason)` primary key |
-| 716 | `network_ping_pinger_day` range-partitioned by `day`: exact required, no-default columns, the `(day, pinger_kind, pinger_id)` primary key, at least one partition, and every partition named `network_ping_pinger_day_p` plus the utc day it covers exactly |
-| 717 | `network_ping_target_day` range-partitioned by `day`: exact required, no-default columns, the `(day, target_extender_id)` primary key, and day partitions named and bounded as 716's |
-| 718 | `network_ping_target_hour_tally` range-partitioned by `hour`: exact required, no-default columns, the `(hour, target_extender_id, pinger_kind)` primary key, and day partitions named and bounded as 716's |
+| 691 | staging best-safe winner and review isolation without weakening production honesty gates |
+| 692 | nullable, no-default bigint `location.geoname_id` |
+| 693 | exact valid/ready unique `location_geoname_id` index on `location (geoname_id)` restricted to nonnull keys |
+| 694 | `network_ping` pinger-reported ping table with exact column types, nullability, defaults, and ping primary key (required through version 713) |
+| 695 | exact valid/ready unique `network_ping_target_pinger_nonce` replay index on `(target_extender_id, pinger_kind, pinger_id, probe_nonce)` (required through version 713) |
+| 696 | exact valid/ready `network_ping_create_time` retention index (required through version 713) |
+| 697 | exact valid/ready `network_ping_target_extender_id_create_time` target lookup index (required through version 713) |
+| 698 | exact valid/ready `network_ping_pinger_kind_pinger_id_create_time` pinger lookup index (required through version 713) |
+| 699 | nullable, no-default real `network_client_location.accuracy_km` |
+| 700 | nullable, no-default real `network_extender_activation.accuracy_km` |
+| 701 | required smallint `network_ping.hop_count` with a zero default |
+| 702 | `derived_location` derived-location table with exact column types, required no-default columns, and the `(node_kind, node_id)` primary key |
+| 703 | nullable, no-default UUID `network_client_location.genesis_location_id` |
+| 704 | nullable, no-default smallint `network_client_location_reliability.egress_index` |
+| 705 | nullable, no-default boolean `network_client_location_reliability.egress_quality` |
+| 706 | nullable, no-default timestamp `network_client_location_reliability.egress_evidence_time` |
+| 707 | required integer `provider_blackhole_check.consecutive_failures` with a zero default |
+| 708 | nullable, no-default timestamp `provider_blackhole_check.first_failed_at` |
+| 709 | nullable, no-default timestamp `provider_blackhole_check.next_due_at` |
+| 710 | the six required `provider_egress_health` unscored-load columns: integer `not_measured_count` with a zero default, and text `not_measured_names`, `canary_passed_names`, `canary_failed_names`, `short_classes` and `unscored_failed_names` with empty defaults |
+| 711 | `provider_egress_destination` destination pool table with its 25 columns, the exact types and nullability of `name`, `class`, `url`, `incompatible`, `verify`, `active`, `probation`, `retired_time` and `above_retire_since`, and the validated `name` primary key |
+| 712 | `provider_egress_site_tally` per-site daily tally table with its 11 columns and the validated `(tally_day, name, country_code, region)` primary key |
+| 713 | `provider_egress_place_tally` per-place daily tally table with its 7 columns and the validated `(tally_day, country_code, region)` primary key |
+| 714 | `network_ping` range-partitioned by `create_time` with the exact column types, nullability and defaults of 694 and 701; exact valid/ready partitioned indexes: unique `network_ping_target_pinger_nonce` on `(target_extender_id, pinger_kind, pinger_id, probe_nonce, create_time)`, `network_ping_target_extender_id_create_time` and `network_ping_pinger_kind_pinger_id_create_time`; at least one partition, and every partition a plain table named `network_ping_p` plus its utc day that covers exactly that day |
+| 715 | the pre-partition `network_ping_legacy` table absent |
+| 716 | `network_ping_hour_tally` fleet ping tally: exact required, no-default columns and the `(hour, shard, pinger_kind, relayed, cosign, cosign_reason)` primary key |
+| 717 | `network_ping_pinger_day` range-partitioned by `day`: exact required, no-default columns, the `(day, pinger_kind, pinger_id)` primary key, at least one partition, and every partition named `network_ping_pinger_day_p` plus the utc day it covers exactly |
+| 718 | `network_ping_target_day` range-partitioned by `day`: exact required, no-default columns, the `(day, target_extender_id)` primary key, and day partitions named and bounded as 717's |
+| 719 | `network_ping_target_hour_tally` range-partitioned by `hour`: exact required, no-default columns, the `(hour, target_extender_id, pinger_kind)` primary key, and day partitions named and bounded as 717's |
 
 On 2026-09-09, Main had durably reached version 650 through the onboarding
 schema while independently developed client-key and competition-staging
