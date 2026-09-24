@@ -333,3 +333,34 @@ func TestStContractUsageExpiryBillingQuarantinePreservesProof(t *testing.T) {
 		}
 	})
 }
+
+// Only an exact settled outcome is benign duplicate expiry. Cancellation,
+// adjudication and unknown terminal states keep their own verdict and bytes.
+func TestStContractUsageExpiryPreservesExactTerminalOutcome(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		for _, outcome := range []ContractOutcome{ContractOutcomeSettled, ContractOutcomeDisputeResolvedToSource, "canceled", "foreign-terminal"} {
+			id := addStContractUsageSnapshotTestRow(t, ctx, server.NowUtc(), &contractUsageSnapshot{Version: 1, Providers: []contractProviderUsage{}})
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET outcome=$2 WHERE contract_id=$1`, id, outcome))
+			})
+			before, _ := readContractExpiryTestSnapshot(t, ctx, id)
+			server.Tx(ctx, func(tx server.PgTx) {
+				state, err := prepareContractExpiryInTx(ctx, tx, id, server.NowUtc().Add(time.Hour))
+				if state != nil || err == nil || errors.Is(err, errContractAlreadySettled) != (outcome == ContractOutcomeSettled) {
+					t.Fatalf("terminal outcome %q relabeled: %+v, %v", outcome, state, err)
+				}
+			})
+			after, _ := readContractExpiryTestSnapshot(t, ctx, id)
+			var retained ContractOutcome
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1`, id).Scan(&retained))
+			})
+			if !bytes.Equal(before, after) || retained != outcome {
+				t.Fatalf("terminal outcome mutated: %q -> %q, %s -> %s", outcome, retained, before, after)
+			}
+		}
+	})
+}
