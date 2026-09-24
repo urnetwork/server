@@ -563,14 +563,10 @@ func TestMigrationArtifactCatalogPinsRecentSchemaShapes(t *testing.T) {
 			"table_name = 'wallet_auth_challenge_attempt'",
 			"index_name = 'wallet_auth_challenge_attempt_client_address_hash_attempt_time'",
 			"definition = 'CREATE INDEX wallet_auth_challenge_attempt_client_address_hash_attempt_time ON public.wallet_auth_challenge_attempt USING btree (client_address_hash, attempt_time)'",
-			"SELECT count(*) = 7 FROM (VALUES ('latency_id', 'uuid', 'NO'), ('extender_id', 'uuid', 'NO'), ('client_id', 'uuid', 'NO')",
-			"('rtt_ms', 'integer', 'NO'), ('probe_time', 'timestamp without time zone', 'NO'), ('create_time', 'timestamp without time zone', 'NO')",
-			"('p', 'PRIMARY KEY (latency_id)')",
-			"('u', 'UNIQUE (extender_id, client_id, probe_nonce)')",
-			"index_name = 'network_extender_latency_create_time'",
-			"definition = 'CREATE INDEX network_extender_latency_create_time ON public.network_extender_latency USING btree (create_time)'",
-			"index_name = 'network_extender_latency_extender_id_create_time'",
-			"definition = 'CREATE INDEX network_extender_latency_extender_id_create_time ON public.network_extender_latency USING btree (extender_id, create_time)'",
+			"SELECT count(*) = 3 FROM (VALUES ('usage_origin_is_source', 'boolean', 'YES'), ('usage_unverified', 'boolean', 'NO'), ('provider_usage', 'jsonb', 'YES')",
+			"constraint_name = 'transfer_contract_provider_usage_shape'",
+			"index_name = 'transfer_contract_closed_usage'",
+			"definition = 'CREATE INDEX transfer_contract_closed_usage ON public.transfer_contract USING btree (close_time, contract_id) WHERE (outcome IS NOT NULL)'",
 			"SELECT count(*) = 10 FROM (VALUES ('activation_id', 'uuid', 'NO', NULL), ('extender_id', 'uuid', 'NO', NULL)",
 			"('activate_time', 'timestamp without time zone', 'NO', NULL), ('ip_version', 'integer', 'NO', NULL)",
 			"('client_address_hash', 'bytea', 'YES', NULL)",
@@ -578,6 +574,8 @@ func TestMigrationArtifactCatalogPinsRecentSchemaShapes(t *testing.T) {
 			"actual.column_default IS NOT DISTINCT FROM expected.column_default",
 			"definition = 'PRIMARY KEY (activation_id)'",
 			"definition = 'CREATE INDEX network_extender_activation_extender_id_activate_time ON public.network_extender_activation USING btree (extender_id, activate_time)'",
+			"definition = 'PRIMARY KEY (client_id, domain_hash, generation)'",
+			"index_name = 'st_client_key_head_current'",
 		} {
 			if !strings.Contains(normalized, want) {
 				t.Fatalf("recent migration query lost %q:\n%s", want, query)

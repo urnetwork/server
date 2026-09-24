@@ -65,8 +65,8 @@ func TestCompetitionRankingCompatibilityMigrationAppendsAfterSharedBaseline(t *t
 // moving applied migrations or changing production's ordered review policy.
 func TestCompetitionStagingWinnerMigrationAppendsWithoutChangingReviewPolicy(t *testing.T) {
 	index := sqlMigrationIndex(t, "expected_staging_winner uuid")
-	if index != 683 {
-		t.Fatalf("automatic staging winner migration index = %d, want 683", index)
+	if index != 678 {
+		t.Fatalf("automatic staging winner migration index = %d, want 678", index)
 	}
 	migration := migrations[index].(*SqlMigration)
 	normalized := strings.Join(strings.Fields(migration.sql), " ")

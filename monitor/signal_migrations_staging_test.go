@@ -103,7 +103,7 @@ func TestMigrationsSignalStagingWinnerPinsPublishedFunctions(t *testing.T) {
 	}
 }
 
-// A coherent historical head remains behind, while only heads at or after 684
+// A coherent historical head remains behind, while only heads at or after 679
 // require the automatic winner contract; the initial staging policy stays retired.
 func TestMigrationsSignalStagingWinnerArtifactLifetime(t *testing.T) {
 	for _, test := range []struct {
@@ -112,7 +112,9 @@ func TestMigrationsSignalStagingWinnerArtifactLifetime(t *testing.T) {
 	}{
 		{version: 651},
 		{version: 652},
-		{version: 683},
+		{version: 678},
+		{version: 679},
+		{version: 679, missing: true},
 		{version: 684},
 		{version: 684, missing: true},
 	} {
@@ -120,7 +122,7 @@ func TestMigrationsSignalStagingWinnerArtifactLifetime(t *testing.T) {
 		for _, artifact := range migrationArtifacts {
 			if test.version < artifact.requiredVersion ||
 				artifact.removedVersion != 0 && artifact.removedVersion <= test.version ||
-				artifact.requiredVersion == 684 && test.missing {
+				artifact.name == "competition staging automatic winner and review isolation" && test.missing {
 				row[artifact.rowColumn] = "f"
 			}
 		}
@@ -142,7 +144,7 @@ func TestMigrationsSignalStagingWinnerArtifactLifetime(t *testing.T) {
 		if test.missing {
 			wantAlerts++
 			alert := requireAlertClass(t, alerts, "migration-schema-drift")
-			if !strings.Contains(alert.Markdown(), "competition staging automatic winner and review isolation@v684") {
+			if !strings.Contains(alert.Markdown(), "competition staging automatic winner and review isolation@v679") {
 				t.Fatalf("missing staging winner contract was not identified: %s", alert.Markdown())
 			}
 		}
@@ -289,7 +291,7 @@ func TestMigrationsSignalStagingWinnerExecutesAutomaticGuard(t *testing.T) {
 					return nil, err
 				}
 				row := syntheticMigrationArtifactRow(head)
-				row[95] = fmt.Sprint(admitted)
+				row[90] = fmt.Sprint(admitted)
 				return []Row{row}, nil
 			}}
 			alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(source))
@@ -302,7 +304,7 @@ func TestMigrationsSignalStagingWinnerExecutesAutomaticGuard(t *testing.T) {
 				}
 			} else {
 				alert := requireAlertClass(t, alerts, "migration-schema-drift")
-				if len(alerts) != 1 || alert.Severity != SeverityPage || !strings.Contains(alert.Markdown(), "competition staging automatic winner and review isolation@v684") {
+				if len(alerts) != 1 || alert.Severity != SeverityPage || !strings.Contains(alert.Markdown(), "competition staging automatic winner and review isolation@v679") {
 					t.Fatalf("%s lost the staging winner gate: %s", test.name, alerts.ToMarkdown())
 				}
 			}

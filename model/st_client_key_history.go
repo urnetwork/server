@@ -1,6 +1,7 @@
 // Signed client-key transitions are committed before Redis projection or
 // public publication. The current head and every exact signed generation
-// survive process crashes and client reaping. Functions are safe concurrently.
+// survive process crashes, policy changes and client reaping. Each policy has
+// its own contiguous generations. Functions are safe concurrently.
 package model
 
 import (
@@ -145,28 +146,52 @@ func StoreStClientKeyRegistration(ctx context.Context, input StClientKeyRegistra
 			SELECT h.domain_hash, h.network_id, h.generation, h.retired,
 				r.registration, r.registration_hash, r.evidence, r.evidence_hash
 			FROM st_client_key_head h
-			JOIN st_client_key_history r ON r.client_id = h.client_id AND r.generation = h.generation
-			WHERE h.client_id = $1 FOR UPDATE OF h
+			JOIN st_client_key_history r ON r.client_id = h.client_id AND r.domain_hash = h.domain_hash AND r.generation = h.generation
+			WHERE h.client_id = $1 AND h.is_current FOR UPDATE OF h
 		`, input.ClientID).Scan(&storedDomain, &storedNetworkID, &generation, &retired, &registrationBytes, &registrationHash, &evidenceBytes, &evidenceHash)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			server.Raise(err)
 		}
 		if err == nil {
-			if retired || storedNetworkID != networkID || !bytes.Equal(storedDomain, domainHash[:]) || generation <= 0 {
-				server.Raise(errors.New("client-key registration cannot replace a retired or different-domain head"))
+			if retired || storedNetworkID != networkID || generation <= 0 {
+				server.Raise(errors.New("client-key registration cannot replace a retired or different-network head"))
 			}
 			prior, err := decodeStClientKeyHistoryRecord(registrationBytes, registrationHash, evidenceBytes, evidenceHash)
 			server.Raise(err)
-			if prior.Registration.Domain != input.Domain || prior.Registration.ClientID != [16]byte(input.ClientID) || prior.Registration.NetworkID != [16]byte(networkID) || prior.Registration.Generation != uint64(generation) {
+			priorDomainHash, err := prior.Registration.Domain.Digest()
+			server.Raise(err)
+			if !bytes.Equal(storedDomain, priorDomainHash[:]) || prior.Registration.ClientID != [16]byte(input.ClientID) || prior.Registration.NetworkID != [16]byte(networkID) || prior.Registration.Generation != uint64(generation) {
 				server.Raise(errors.New("client-key registration head differs from its signed row"))
 			}
-			if prior.Registration.Present == (len(input.PublicKey) != 0) && prior.Registration.PublicKey == publicKey {
-				result = &prior
-				return
+			if prior.Registration.Domain == input.Domain {
+				if prior.Registration.Present == (len(input.PublicKey) != 0) && prior.Registration.PublicKey == publicKey {
+					result = &prior
+					return
+				}
+				priorRegistration = &prior.Registration
+			} else {
+				// Policy is the only mutable namespace component. The controller
+				// already authenticated that policy at this finalized boundary.
+				previousDomain := prior.Registration.Domain
+				previousDomain.PolicyHash = input.Domain.PolicyHash
+				if previousDomain != input.Domain || input.Boundary.Block <= prior.Registration.EffectiveBoundary.Block || input.Boundary.Epoch < prior.Registration.EffectiveBoundary.Epoch {
+					server.Raise(errors.New("client-key policy transition changes deployment identity or does not advance its boundary"))
+				}
+				var seenDomain bool
+				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM st_client_key_head WHERE client_id = $1 AND domain_hash = $2)`, input.ClientID, domainHash[:]).Scan(&seenDomain))
+				if seenDomain {
+					server.Raise(errors.New("client-key policy transition cannot reactivate an archived domain"))
+				}
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE st_client_key_head SET is_current = false WHERE client_id = $1 AND is_current`, input.ClientID))
+				generation = 0
 			}
-			priorRegistration = &prior.Registration
 		}
-		if generation >= int64(MaxStClientKeyHistoryRegistrations) || generation == math.MaxInt64 {
+		var lifetimeCount int64
+		server.Raise(tx.QueryRow(ctx, `SELECT COUNT(*) FROM st_client_key_history WHERE client_id = $1`, input.ClientID).Scan(&lifetimeCount))
+		if generation == 0 && errors.Is(err, pgx.ErrNoRows) && lifetimeCount != 0 {
+			server.Raise(errors.New("client-key registration has archived history but no current head"))
+		}
+		if lifetimeCount >= int64(MaxStClientKeyHistoryRegistrations) || generation >= int64(MaxStClientKeyHistoryRegistrations) || generation == math.MaxInt64 {
 			server.Raise(errors.New("client-key generation history has reached its finite lifetime bound"))
 		}
 		registration := protocol.ClientKeyRegistration{Domain: input.Domain, ClientID: [16]byte(input.ClientID), NetworkID: [16]byte(networkID), Generation: uint64(generation + 1), Present: len(input.PublicKey) != 0, PublicKey: publicKey, EffectiveBoundary: input.Boundary}
@@ -188,7 +213,7 @@ func StoreStClientKeyRegistration(ctx context.Context, input StClientKeyRegistra
 		server.RaisePgResult(tx.Exec(ctx, `
 			INSERT INTO st_client_key_head (client_id, domain_hash, network_id, generation, retired)
 			VALUES ($1, $2, $3, $4, false)
-			ON CONFLICT (client_id) DO UPDATE SET generation = EXCLUDED.generation
+			ON CONFLICT (client_id, domain_hash) DO UPDATE SET generation = EXCLUDED.generation
 		`, input.ClientID, domainHash[:], networkID, generation+1))
 		result = &StClientKeyHistoryRecord{Registration: registration, RegistrationBytes: registrationBytes, EvidenceHash: evidenceHash, EvidenceBytes: evidenceBytes}
 	}, server.TxReadCommitted)
@@ -198,8 +223,9 @@ func StoreStClientKeyRegistration(ctx context.Context, input StClientKeyRegistra
 	return result, ctx.Err()
 }
 
-// Reads count/byte admission and every row from one repeatable-read snapshot.
-// A current API lookup never silently truncates an overlong or missing history.
+// Reads the exact requested policy segment from one repeatable-read snapshot.
+// Archived segments remain readable while the client is active; count/byte
+// admission never truncates an overlong or missing signed generation sequence.
 func LoadStClientKeyHistory(ctx context.Context, domain protocol.ClientKeyHistoryDomain, clientID server.Id, maximumRegistrations, maximumBytes uint64) (result []StClientKeyHistoryRecord, resultErr error) {
 	if ctx == nil || clientID == (server.Id{}) || maximumRegistrations == 0 || maximumRegistrations > MaxStClientKeyHistoryRegistrations || maximumBytes == 0 || maximumBytes > MaxStClientKeyHistoryBytes {
 		return nil, errors.New("client-key history lookup or finite bounds are invalid")
@@ -229,8 +255,8 @@ func LoadStClientKeyHistory(ctx context.Context, domain protocol.ClientKeyHistor
 		server.Raise(tx.QueryRow(ctx, `
 			SELECT h.generation, h.retired, h.domain_hash, h.network_id
 			FROM st_client_key_head h JOIN network_client n ON n.client_id = h.client_id AND n.network_id = h.network_id AND n.active = true
-			WHERE h.client_id = $1
-		`, clientID).Scan(&generation, &retired, &storedDomain, &networkID))
+			WHERE h.client_id = $1 AND h.domain_hash = $2
+		`, clientID, domainHash[:]).Scan(&generation, &retired, &storedDomain, &networkID))
 		if retired || generation <= 0 || uint64(generation) > maximumRegistrations || !bytes.Equal(storedDomain, domainHash[:]) {
 			server.Raise(errors.New("client-key history head is retired, wrong-domain or exceeds its finite census"))
 		}
@@ -241,15 +267,15 @@ func LoadStClientKeyHistory(ctx context.Context, domain protocol.ClientKeyHistor
 		server.Raise(tx.QueryRow(ctx, `
 			SELECT COUNT(*), COALESCE(MIN(generation), 0), COALESCE(MAX(generation), 0),
 				COALESCE(SUM(6 * octet_length(registration) + 6 * octet_length(evidence) + 2 * octet_length(evidence_hash) + octet_length(registration_hash) + $2), 0)::bigint
-			FROM st_client_key_history WHERE client_id = $1
-		`, clientID, controlBytes).Scan(&count, &first, &last, &storedBytes))
+			FROM st_client_key_history WHERE client_id = $1 AND domain_hash = $3
+		`, clientID, controlBytes, domainHash[:]).Scan(&count, &first, &last, &storedBytes))
 		if count != generation || first != 1 || last != generation || storedBytes <= 0 || uint64(storedBytes) > maximumBytes {
 			server.Raise(errors.New("client-key history census, continuity or bytes exceed the independent allowance"))
 		}
 		rows, err := tx.Query(ctx, `
 			SELECT generation, domain_hash, registration_hash, registration, evidence_hash, evidence
-			FROM st_client_key_history WHERE client_id = $1 ORDER BY generation ASC LIMIT $2
-		`, clientID, generation+1)
+			FROM st_client_key_history WHERE client_id = $1 AND domain_hash = $3 ORDER BY generation ASC LIMIT $2
+		`, clientID, generation+1, domainHash[:])
 		server.Raise(err)
 		defer rows.Close()
 		result = make([]StClientKeyHistoryRecord, 0, int(generation))
@@ -310,8 +336,8 @@ func stClientKeyCurrent(ctx context.Context, clientID server.Id) (publicKey []by
 		err := conn.QueryRow(ctx, `
 			SELECT h.retired, EXISTS (SELECT 1 FROM network_client n WHERE n.client_id = h.client_id AND n.network_id = h.network_id AND n.active = true),
 				h.network_id, h.generation, h.domain_hash, r.registration, r.registration_hash, r.evidence, r.evidence_hash
-			FROM st_client_key_head h JOIN st_client_key_history r ON r.client_id = h.client_id AND r.generation = h.generation
-			WHERE h.client_id = $1
+			FROM st_client_key_head h JOIN st_client_key_history r ON r.client_id = h.client_id AND r.domain_hash = h.domain_hash AND r.generation = h.generation
+			WHERE h.client_id = $1 AND h.is_current
 		`, clientID).Scan(&retired, &clientExists, &networkID, &generation, &domainHash, &registrationBytes, &registrationHash, &evidenceBytes, &evidenceHash)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return
@@ -353,8 +379,8 @@ func overlayStClientKeyCurrent(ctx context.Context, clientIDs []server.Id, publi
 				SELECT h.client_id, h.retired,
 					EXISTS (SELECT 1 FROM network_client n WHERE n.client_id = h.client_id AND n.network_id = h.network_id AND n.active = true),
 					h.network_id, h.generation, h.domain_hash, r.registration, r.registration_hash, r.evidence, r.evidence_hash
-				FROM st_client_key_head h JOIN st_client_key_history r ON r.client_id = h.client_id AND r.generation = h.generation
-				WHERE h.client_id = ANY($1::uuid[]) LIMIT 101
+				FROM st_client_key_head h JOIN st_client_key_history r ON r.client_id = h.client_id AND r.domain_hash = h.domain_hash AND r.generation = h.generation
+				WHERE h.client_id = ANY($1::uuid[]) AND h.is_current LIMIT 101
 			`, idStrings(chunk))
 			server.Raise(err)
 			defer rows.Close()

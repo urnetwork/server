@@ -153,6 +153,43 @@ const competitionStagingWinnerArtifactQuery = `(
 	)
 )`
 
+// The policy namespace append changes identity keys but leaves signed rows
+// immutable; the active-head index admits exactly one live projection.
+const clientKeyPolicyNamespaceArtifactQuery = `(
+	EXISTS (
+		SELECT 1 FROM constraint_artifact
+		WHERE table_name = 'st_client_key_history' AND constraint_type = 'p'
+		  AND definition = 'PRIMARY KEY (client_id, domain_hash, generation)' AND validated
+	)
+	AND EXISTS (
+		SELECT 1 FROM constraint_artifact
+		WHERE table_name = 'st_client_key_head' AND constraint_type = 'p'
+		  AND definition = 'PRIMARY KEY (client_id, domain_hash)' AND validated
+	)
+	AND EXISTS (
+		SELECT 1 FROM constraint_artifact
+		WHERE table_name = 'st_client_key_head' AND constraint_type = 'f'
+		  AND definition LIKE '%(client_id, domain_hash, generation)%st_client_key_history(client_id, domain_hash, generation)%'
+		  AND validated
+	)
+	AND EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'st_client_key_head'
+		  AND column_name = 'is_current' AND data_type = 'boolean' AND is_nullable = 'NO'
+	)
+	AND EXISTS (
+		SELECT 1 FROM index_artifact
+		WHERE table_name = 'st_client_key_head' AND index_name = 'st_client_key_head_current'
+		  AND definition = 'CREATE UNIQUE INDEX st_client_key_head_current ON public.st_client_key_head USING btree (client_id) WHERE is_current'
+		  AND predicate_definition = 'is_current' AND indisvalid AND indisready
+	)
+	AND to_regprocedure('public.st_client_key_head_identity_guard()') IS NOT NULL
+	AND regexp_replace(
+		pg_get_functiondef(to_regprocedure('public.st_client_key_head_identity_guard()')),
+		'[[:space:]]+', ' ', 'g'
+	) LIKE '%NOT OLD.is_current AND (NEW.is_current OR NEW.generation <> OLD.generation)%'
+)`
+
 var migrationArtifacts = []migrationArtifact{
 	{name: "competition_round", requiredVersion: 588, rowColumn: 1},
 	{name: "competition_job_immutable_guard", requiredVersion: 589, rowColumn: 2},
@@ -243,12 +280,12 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "competition_round_baseline and append-only guards", requiredVersion: 676, rowColumn: 87},
 	{name: "competition candidate absolute raw-score ordering", requiredVersion: 677, removedVersion: 678, rowColumn: 88},
 	{name: "competition legacy/shared-control ranking policy", requiredVersion: 678, rowColumn: 89},
-	{name: "network_extender_latency attestation table and identity key", requiredVersion: 679, rowColumn: 90},
-	{name: "network_extender_latency_create_time retention index", requiredVersion: 680, rowColumn: 91},
-	{name: "network_extender_latency_extender_id_create_time lookup index", requiredVersion: 681, rowColumn: 92},
+	{name: "competition staging automatic winner and review isolation", requiredVersion: 679, rowColumn: 90},
+	{name: "transfer_contract subnet usage columns and shape", requiredVersion: 680, rowColumn: 91},
+	{name: "transfer_contract_closed_usage lookup index", requiredVersion: 681, rowColumn: 92},
 	{name: "network_extender_activation history table and identity key", requiredVersion: 682, rowColumn: 93},
 	{name: "network_extender_activation_extender_id_activate_time lookup index", requiredVersion: 683, rowColumn: 94},
-	{name: "competition staging automatic winner and review isolation", requiredVersion: 684, rowColumn: 95},
+	{name: "signed client-key policy namespaces and active head", requiredVersion: 684, rowColumn: 95},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -802,17 +839,17 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       (
 		           to_regclass('public.st_client_key_history') IS NOT NULL
 		           AND to_regclass('public.st_client_key_head') IS NOT NULL
-		           AND EXISTS (
+		           AND (version.value >= 684 OR EXISTS (
 		               SELECT 1 FROM constraint_artifact
 		               WHERE table_name = 'st_client_key_history' AND constraint_type = 'p'
 		                 AND definition = 'PRIMARY KEY (client_id, generation)' AND validated
-		           )
-		           AND EXISTS (
+		           ))
+		           AND (version.value >= 684 OR EXISTS (
 		               SELECT 1 FROM constraint_artifact
 		               WHERE table_name = 'st_client_key_head' AND constraint_type = 'f'
 		                 AND definition LIKE '%(client_id, generation)%st_client_key_history(client_id, generation)%'
 		                 AND validated
-		           )
+		           ))
 		           AND NOT EXISTS (
 		               SELECT 1 FROM (VALUES
 		                   ('st_client_key_history', 'st_client_key_history_immutable', 'st_client_key_history_immutable_guard'),
@@ -1289,57 +1326,34 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		               to_regprocedure('public.competition_round_baseline_insert_guard()')
 		           ) LIKE '%state = ''running'' AND attempt_count >= NEW.source_attempt%'
 		       ),
+		       `+competitionStagingWinnerArtifactQuery+`,
 		       (
-		           to_regclass('public.network_extender_latency') IS NOT NULL
-		           AND (
-		               SELECT count(*) = 7
-		               FROM (VALUES
-		                   ('latency_id', 'uuid', 'NO'),
-		                   ('extender_id', 'uuid', 'NO'),
-		                   ('client_id', 'uuid', 'NO'),
-		                   ('probe_nonce', 'bytea', 'NO'),
-		                   ('rtt_ms', 'integer', 'NO'),
-		                   ('probe_time', 'timestamp without time zone', 'NO'),
-		                   ('create_time', 'timestamp without time zone', 'NO')
-		               ) AS expected(column_name, data_type, is_nullable)
-		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
-		                   WHERE actual.table_schema = 'public'
-		                     AND actual.table_name = 'network_extender_latency'
-		                     AND actual.column_name = expected.column_name
-		                     AND actual.data_type = expected.data_type
-		                     AND actual.is_nullable = expected.is_nullable
-		               )
-		           )
-		           AND (
-		               SELECT count(*) = 2
-		               FROM (VALUES
-		                   ('p', 'PRIMARY KEY (latency_id)'),
-		                   ('u', 'UNIQUE (extender_id, client_id, probe_nonce)')
-		               ) AS expected(constraint_type, definition)
-		               WHERE EXISTS (
-		                   SELECT 1 FROM constraint_artifact AS actual
-		                   WHERE actual.table_name = 'network_extender_latency'
-		                     AND actual.constraint_type = expected.constraint_type
-		                     AND actual.definition = expected.definition
-		                     AND actual.validated
-		               )
+		           (SELECT count(*) = 3 FROM (VALUES
+		               ('usage_origin_is_source', 'boolean', 'YES'),
+		               ('usage_unverified', 'boolean', 'NO'),
+		               ('provider_usage', 'jsonb', 'YES')
+		           ) AS expected(column_name, data_type, is_nullable)
+		           WHERE EXISTS (
+		               SELECT 1 FROM information_schema.columns AS actual
+		               WHERE actual.table_schema = 'public' AND actual.table_name = 'transfer_contract'
+		                 AND actual.column_name = expected.column_name
+		                 AND actual.data_type = expected.data_type
+		                 AND actual.is_nullable = expected.is_nullable
+		           ))
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'transfer_contract'
+		                 AND constraint_name = 'transfer_contract_provider_usage_shape'
+		                 AND constraint_type = 'c'
+		                 AND definition LIKE '%jsonb_typeof(provider_usage)%'
 		           )
 		       ),
 		       EXISTS (
 		           SELECT 1 FROM index_artifact
-		           WHERE table_name = 'network_extender_latency'
-		             AND index_name = 'network_extender_latency_create_time'
-		             AND definition = 'CREATE INDEX network_extender_latency_create_time ON public.network_extender_latency USING btree (create_time)'
-		             AND predicate_definition IS NULL
-		             AND indisvalid AND indisready
-		       ),
-		       EXISTS (
-		           SELECT 1 FROM index_artifact
-		           WHERE table_name = 'network_extender_latency'
-		             AND index_name = 'network_extender_latency_extender_id_create_time'
-		             AND definition = 'CREATE INDEX network_extender_latency_extender_id_create_time ON public.network_extender_latency USING btree (extender_id, create_time)'
-		             AND predicate_definition IS NULL
+		           WHERE table_name = 'transfer_contract'
+		             AND index_name = 'transfer_contract_closed_usage'
+		             AND definition = 'CREATE INDEX transfer_contract_closed_usage ON public.transfer_contract USING btree (close_time, contract_id) WHERE (outcome IS NOT NULL)'
+		             AND predicate_definition = '(outcome IS NOT NULL)'
 		             AND indisvalid AND indisready
 		       ),
 		       (
@@ -1385,7 +1399,7 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND predicate_definition IS NULL
 		             AND indisvalid AND indisready
 		       ),
-		       `+competitionStagingWinnerArtifactQuery+`
+		       `+clientKeyPolicyNamespaceArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {

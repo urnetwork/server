@@ -8217,4 +8217,6 @@ var migrations = []any{
 		CREATE INDEX network_extender_activation_extender_id_activate_time
 		ON network_extender_activation (extender_id, activate_time)
 	`),
+	// Policy changes start a fresh signed segment while retaining every prior byte.
+	newSqlMigration(clientKeyPolicyHistorySchemaSql),
 }
