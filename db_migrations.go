@@ -8194,4 +8194,27 @@ var migrations = []any{
 		`CREATE INDEX IF NOT EXISTS transfer_contract_closed_usage
 		 ON transfer_contract (close_time, contract_id) WHERE outcome IS NOT NULL`,
 	),
+	// Activation history was left in the model when the earlier extender
+	// rollout was reverted. Restore its schema after the published subnet
+	// usage migrations without changing any recorded migration identity.
+	newSqlMigration(`
+		CREATE TABLE network_extender_activation (
+			activation_id uuid NOT NULL,
+			extender_id uuid NOT NULL,
+			activate_time timestamp NOT NULL,
+			ip_version int NOT NULL,
+			client_address_hash bytea NULL,
+			country_code varchar NOT NULL DEFAULT '',
+			location_id uuid NULL,
+			city_location_id uuid NULL,
+			region_location_id uuid NULL,
+			country_location_id uuid NULL,
+
+			PRIMARY KEY (activation_id)
+		)
+	`),
+	newSqlMigration(`
+		CREATE INDEX network_extender_activation_extender_id_activate_time
+		ON network_extender_activation (extender_id, activate_time)
+	`),
 }
