@@ -9102,4 +9102,6 @@ var migrations = []any{
 		`CREATE INDEX IF NOT EXISTS transfer_contract_closed_usage
 		 ON transfer_contract (close_time, contract_id) WHERE outcome IS NOT NULL`,
 	),
+	// Policy changes start a fresh signed segment without rewriting history.
+	newSqlMigration(clientKeyPolicyHistorySchemaSql),
 }
