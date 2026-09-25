@@ -4292,18 +4292,28 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 			}
 		})
 
-		// create top links
+		// The rollup's counted hierarchy can lag current location metadata.
+		// Link only counted parents; missing metadata does not invent supply.
 		for locationId, clientLocation := range clientLocations {
 			switch clientLocation.LocationType {
 			case LocationTypeCity:
-				regionClientLocation := clientLocations[*(clientLocation.RegionLocationId)]
-				regionClientLocation.TopCityLocationIdCounts[locationId] = clientLocation.ClientCount
+				if clientLocation.RegionLocationId != nil {
+					if regionClientLocation := clientLocations[*clientLocation.RegionLocationId]; regionClientLocation != nil {
+						regionClientLocation.TopCityLocationIdCounts[locationId] = clientLocation.ClientCount
+					}
+				}
 
-				countryClientLocation := clientLocations[*(clientLocation.CountryLocationId)]
-				countryClientLocation.TopCityLocationIdCounts[locationId] = clientLocation.ClientCount
+				if clientLocation.CountryLocationId != nil {
+					if countryClientLocation := clientLocations[*clientLocation.CountryLocationId]; countryClientLocation != nil {
+						countryClientLocation.TopCityLocationIdCounts[locationId] = clientLocation.ClientCount
+					}
+				}
 			case LocationTypeRegion:
-				countryClientLocation := clientLocations[*(clientLocation.CountryLocationId)]
-				countryClientLocation.TopRegionLocationIdCounts[locationId] = clientLocation.ClientCount
+				if clientLocation.CountryLocationId != nil {
+					if countryClientLocation := clientLocations[*clientLocation.CountryLocationId]; countryClientLocation != nil {
+						countryClientLocation.TopRegionLocationIdCounts[locationId] = clientLocation.ClientCount
+					}
+				}
 			}
 		}
 		filterTop := func(locationIdCounts map[server.Id]int, n int) map[server.Id]int {
