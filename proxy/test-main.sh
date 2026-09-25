@@ -7,6 +7,7 @@
 #   ./proxy/test-main.sh --repeat=5
 #   ./proxy/test-main.sh --soak-duration=10m --soak-interval=5s
 #   ./proxy/test-main.sh --overlap-protocols=false
+#   ./proxy/test-main.sh --trace-tls-flows=true
 #   ./proxy/test-main.sh --skip-build
 #
 # Environment:
@@ -18,6 +19,7 @@
 #   UR_ACCEPT_PROXY_SOAK_DURATION=<dur> default: 5m per protocol
 #   UR_ACCEPT_PROXY_SOAK_INTERVAL=<dur> default: 5s between sustained requests
 #   UR_ACCEPT_PROXY_OVERLAP_PROTOCOLS=<bool> default: true
+#   UR_ACCEPT_PROXY_TRACE_TLS_FLOWS=<bool> default: false; requires matching server diagnostics
 #   UR_ACCEPT_PROXY_TIMEOUT=<dur>       default: 2h for the complete runner
 set -Eeuo pipefail
 umask 077
@@ -35,6 +37,7 @@ binary="${UR_ACCEPT_PROXY_BIN:-$server_root/temp/acceptance/proxy-main}"
 soak_duration="${UR_ACCEPT_PROXY_SOAK_DURATION:-5m}"
 soak_interval="${UR_ACCEPT_PROXY_SOAK_INTERVAL:-5s}"
 overlap_protocols="${UR_ACCEPT_PROXY_OVERLAP_PROTOCOLS:-true}"
+trace_tls_flows="${UR_ACCEPT_PROXY_TRACE_TLS_FLOWS:-false}"
 runner_timeout="${UR_ACCEPT_PROXY_TIMEOUT:-2h}"
 
 usage() {
@@ -47,6 +50,7 @@ for arg in "$@"; do
     --soak-duration=*) soak_duration="${arg#*=}" ;;
     --soak-interval=*) soak_interval="${arg#*=}" ;;
     --overlap-protocols=*) overlap_protocols="${arg#*=}" ;;
+    --trace-tls-flows=*) trace_tls_flows="${arg#*=}" ;;
     --skip-build) skip_build=1 ;;
     --headless|--keep-fixture) ;; # accepted for root-runner parity
     -h|--help) usage; exit 0 ;;
@@ -61,6 +65,14 @@ case "$overlap_protocols" in
   true|false) ;;
   *) echo "--overlap-protocols must be true or false" >&2; exit 2 ;;
 esac
+case "$trace_tls_flows" in
+  true|false) ;;
+  *) echo "--trace-tls-flows must be true or false" >&2; exit 2 ;;
+esac
+trace_tls_flows_arg=""
+if [ "$trace_tls_flows" = true ]; then
+  trace_tls_flows_arg="--trace-tls-flows=true"
+fi
 
 network_test_gate="$root/tests/network-intensive-suite-lock.sh"
 if [[ ! -x "$network_test_gate" ]]; then
@@ -192,6 +204,7 @@ timeout --foreground --signal=TERM --kill-after=60s "$runner_timeout" \
     --soak-duration="$soak_duration" \
     --soak-interval="$soak_interval" \
     --overlap-protocols="$overlap_protocols" \
+    ${trace_tls_flows_arg:+"$trace_tls_flows_arg"} \
   >"$runner_output_pipe" 2>&1 &
 runner_pid=$!
 runner_active=1

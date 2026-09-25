@@ -311,6 +311,14 @@ type derivedLocationsHistory struct {
 
 // Implements probe: the four queries and the run history, judged together.
 func (self derivedLocationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	schema := derivedLocationsSchemaContract()
+	ready, err := probeSchemaReady(ctx, env, schema)
+	if err != nil {
+		return nil, err
+	}
+	if !ready {
+		return []finding{probeSchemaUnavailableFinding(schema, pgTarget(env))}, nil
+	}
 	settings := self.settings
 	if settings == nil {
 		settings = DefaultDerivedLocationsSettings()
@@ -337,7 +345,7 @@ func (self derivedLocationsProbe) check(ctx context.Context, env *probeEnv) ([]f
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return evaluateDerivedLocations(settings, env.now(), table, pings, state, partitions, history), nil
+	return append(evaluateDerivedLocations(settings, env.now(), table, pings, state, partitions, history), healthyFinding(schema.probeId, tierWarn, schema.class, pgTarget(env))), nil
 }
 
 // The sweep's cuts, in seconds before now: a derived row past the first is

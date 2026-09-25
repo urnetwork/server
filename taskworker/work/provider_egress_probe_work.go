@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +31,11 @@ import (
 const (
 	defaultProviderEgressProbeShardCount = 4
 	maxProviderEgressProbeShardCount     = 256
+	providerEgressBlackholeSubmitTimeout = 30 * time.Second
 )
+
+// Admission refusal is not task cancellation or a successful empty pass.
+var errProviderEgressBlackholeAdmissionBudget = errors.New("insufficient remaining task budget for blackhole admission")
 
 // ProviderEgressProbeBatchArgs is one kind of work inside a shard pass. Full
 // and blackhole probes deliberately share the same recurring task; their due
@@ -195,14 +200,8 @@ func providerEgressFullHealthOptions(args *ProviderEgressProbeArgs) egresshealth
 	return options
 }
 
-// The shortest max_time_seconds a pass can be given: one full run's whole
-// retry schedule (Options.RunBudget over the loads it draws, with its warm-up)
-// plus its tunnel open and bandwidth sample, and a blackhole check's, since a
-// blackhole batch in flight when the full batch ends runs to completion. A
-// pass that outlives its max time is read as stalled by §2.19, and a run the
-// task ends mid-way is never submitted (egresshealth.ErrInterrupted), so the
-// bound has to move with the load rules.
-func providerEgressProbeMinMaxTime(args *ProviderEgressProbeArgs) time.Duration {
+// One full provider's modeled retry schedule, tunnel open and bandwidth sample.
+func providerEgressFullRunBudget(args *ProviderEgressProbeArgs) time.Duration {
 	fullOptions := providerEgressFullHealthOptions(args)
 	// the budget counts the warm-up only for a run that has one, which every
 	// production run does
@@ -217,7 +216,11 @@ func providerEgressProbeMinMaxTime(args *ProviderEgressProbeArgs) time.Duration 
 		full += time.Duration(args.Full.BandwidthTimeoutSeconds) * time.Second
 	}
 
-	// a blackhole check's geometry: its warm-up has its own timeout
+	return full
+}
+
+// One blackhole provider's modeled retry schedule, warm-up and tunnel open.
+func providerEgressBlackholeCheckBudget(args *ProviderEgressProbeArgs) time.Duration {
 	checkOptions := egresshealth.Options{
 		PerRequestTimeout:      time.Duration(args.Blackhole.ProbeTimeoutSeconds) * time.Second,
 		IpEchoUrl:              egresshealth.IpEchoPath,
@@ -226,9 +229,15 @@ func providerEgressProbeMinMaxTime(args *ProviderEgressProbeArgs) time.Duration 
 		LoadRetryMeanInterval:  time.Duration(args.LoadRetryMeanIntervalSeconds) * time.Second,
 		TunnelRecreateAttempts: args.TunnelRecreateAttempts,
 	}
-	check := checkOptions.RunBudget(egresshealth.BlackholeSampleSize) +
+	return checkOptions.RunBudget(egresshealth.BlackholeSampleSize) +
 		max(checkOptions.PerRequestTimeout, checkOptions.IpEchoTimeout)
-	return full + check
+}
+
+// The argument floor covers one full provider and one check, not an entire
+// selected multi-wave batch. Serial/no-full admission also reserves publication
+// and any selected serial full waves against the actual remaining task lease.
+func providerEgressProbeMinMaxTime(args *ProviderEgressProbeArgs) time.Duration {
+	return providerEgressFullRunBudget(args) + providerEgressBlackholeCheckBudget(args)
 }
 
 // Every invariant of one argument snapshot, whether it came from settings or a
@@ -420,7 +429,31 @@ func validateProviderEgressProbeArgs(args *ProviderEgressProbeArgs) error {
 	return validateProviderEgressProbeArgsConfig(args)
 }
 
-// ProviderEgressProbe runs one bounded shard batch. A configuration geometry
+// Current settings are read once at task entry. A failed immutable snapshot
+// otherwise never reaches Post and can keep retrying an obsolete capacity,
+// endpoint or guard configuration forever. This comparison does not mutate or
+// cancel in-flight work; Stale success lets the existing same-key Post retire it.
+func providerEgressProbeArgsMatchSettings(args *ProviderEgressProbeArgs, settings providerEgressProbeSettings) bool {
+	return args.ShardCount == settings.ShardCount &&
+		args.IdleDelaySeconds == settings.IdleDelaySeconds &&
+		args.MaxTimeSeconds == settings.MaxTimeSeconds &&
+		args.Full == settings.Full && args.Blackhole == settings.Blackhole &&
+		args.APIURL == settings.APIURL && args.PlatformURL == settings.PlatformURL &&
+		args.PublicAPIURL == settings.PublicAPIURL && args.BandwidthCDNURL == settings.BandwidthCDNURL &&
+		args.LoadAttempts == settings.LoadAttempts &&
+		args.LoadRetryMeanIntervalSeconds == settings.LoadRetryMeanIntervalSeconds &&
+		args.TunnelRecreateAttempts == settings.TunnelRecreateAttempts &&
+		args.DarkConsecutiveFailures == settings.DarkConsecutiveFailures &&
+		args.DarkMinimumSpanSeconds == settings.DarkMinimumSpanSeconds &&
+		slices.Equal(args.DarkBackoffSeconds, settings.DarkBackoffSeconds) &&
+		args.DarkBatchGuard == settings.DarkBatchGuard &&
+		args.DarkBatchGuardMinChecks == settings.DarkBatchGuardMinChecks &&
+		args.RunBatchGuard == settings.RunBatchGuard &&
+		args.RunBatchGuardMinRuns == settings.RunBatchGuardMinRuns &&
+		args.CityConfidentRadiusKm == settings.CityConfidentRadiusKm
+}
+
+// ProviderEgressProbe runs one bounded shard batch. A configuration snapshot
 // change makes an old task a no-op; its post-step replaces it with current args.
 func ProviderEgressProbe(
 	args *ProviderEgressProbeArgs,
@@ -447,7 +480,7 @@ func ProviderEgressProbe(
 	if err := validateProviderEgressProbeArgs(args); err != nil {
 		return nil, err
 	}
-	if args.ShardCount != settings.ShardCount || settings.ShardCount <= args.ShardIndex {
+	if settings.ShardCount <= args.ShardIndex || !providerEgressProbeArgsMatchSettings(args, settings) {
 		return &ProviderEgressProbeResult{Stale: true}, nil
 	}
 	result, err := executeProviderEgressProbe(clientSession.Ctx, args)
@@ -532,6 +565,9 @@ type providerEgressProbePass struct {
 	// fullSink is where a full batch's submissions go once the run guard has
 	// passed the batch; the prober's reporters only collect into the batch.
 	fullSink *egressProbeMetricsReporter
+	// Only additional full batches retain the task deadline when detaching
+	// cancellation for publication. Zero preserves the original first batch.
+	fullReleaseDeadline time.Time
 	// recordTally records one submitted run in the site tally the pool
 	// refresh judges sites by. Nil records nothing.
 	recordTally  func(context.Context, time.Time, model.ProviderEgressRunTally, []model.ProviderEgressSiteLoad)
@@ -556,6 +592,8 @@ type providerEgressBlackholeOutcome struct {
 }
 
 type providerEgressFullOutcome struct {
+	due          int
+	full         bool
 	summary      prober.Summary
 	guardTripped bool
 	err          error
@@ -588,7 +626,13 @@ func providerEgressBlackholeGuard(
 	if measured < rules.DarkBatchGuardMinChecks || share <= rules.DarkBatchGuard {
 		return summary, share, false
 	}
-	guarded = fleetprobe.BlackholeSummary{
+	return providerEgressBlackholeHoldNegatives(summary), share, true
+}
+
+// Preserve independent pass/TLS evidence while withholding ordinary negatives
+// from an unsafe sample. Return a copy: the measured input stays diagnostic.
+func providerEgressBlackholeHoldNegatives(summary fleetprobe.BlackholeSummary) fleetprobe.BlackholeSummary {
+	guarded := fleetprobe.BlackholeSummary{
 		Checks: make([]ingest.BlackholeCheck, 0, len(summary.Checks)),
 	}
 	for _, check := range summary.Checks {
@@ -610,7 +654,7 @@ func providerEgressBlackholeGuard(
 		}
 		guarded.Checks = append(guarded.Checks, check)
 	}
-	return guarded, share, true
+	return guarded
 }
 
 // runBlackholeBatch owns the accounting and submission for one due batch.
@@ -639,17 +683,40 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 	options.LoadRetryMeanInterval = time.Duration(args.LoadRetryMeanIntervalSeconds) * time.Second
 	options.TunnelRecreateAttempts = args.TunnelRecreateAttempts
 	options.Concurrency = concurrency
+	progress := egressProbeBlackholeProgress.begin(len(providers))
+	defer progress.close()
+	observer := options.ObserveProgress
+	options.ObserveProgress = func(event fleetprobe.BlackholeProgress) {
+		progress.observe(event)
+		if observer != nil {
+			observer(event)
+		}
+	}
 	startTime := time.Now()
 	summary, runErr := self.runBlackhole(ctx, providers, options)
 	egressProbePassSeconds.WithLabelValues("blackhole").Observe(time.Since(startTime).Seconds())
+	if runErr == nil && len(summary.Checks) == 0 && ctx.Err() == nil && options.MinimumAdmission == 0 {
+		// Readiness can consume a strict admission window. No measured work
+		// must not become a successful saturated pass and immediate successor.
+		select {
+		case <-options.AdmissionDone:
+			runErr = errProviderEgressBlackholeAdmissionBudget
+		default:
+		}
+	}
 	if runErr != nil {
 		egressProbePassesTotal.WithLabelValues("blackhole", "error").Inc()
 		egressProbePassErrorsTotal.WithLabelValues("blackhole_run").Inc()
 		return fleetprobe.BlackholeSummary{}, false, fmt.Errorf("run blackhole batch: %w", runErr)
 	}
 
-	var measurementErr error
+	// The fleet retains only checks completed before cancellation. Keep that
+	// lifecycle failure even when every retained check is passing or absent.
+	measurementErr := ctx.Err()
 	for _, check := range summary.Checks {
+		if measurementErr != nil {
+			break
+		}
 		if !check.Ok && !check.NotMeasured && check.Failure != egresshealth.FailureTlsAuthentication {
 			measurementErr = self.readiness.check(ctx)
 			break
@@ -696,6 +763,19 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 			guarded.NotMeasured-summary.NotMeasured,
 		)
 		summary = guarded
+	} else if len(summary.Checks) < len(providers) && len(summary.Checks)-summary.NotMeasured < args.DarkBatchGuardMinChecks {
+		// Admission can stop part-way through a selected batch. Its truncated
+		// sample is not an ordinary small due tail: do not bypass the minimum
+		// sample guard just because the full lane finished early.
+		guarded = providerEgressBlackholeHoldNegatives(summary)
+		if held := guarded.NotMeasured - summary.NotMeasured; 0 < held {
+			glog.Infof(
+				"[egress]incomplete blackhole sample: shard=%d/%d selected=%d completed=%d measured=%d minimum=%d ordinary_negatives_held=%d; passes and TLS evidence remain, held negatives are not measured\n",
+				args.ShardIndex, args.ShardCount, len(providers), len(summary.Checks),
+				len(summary.Checks)-summary.NotMeasured, args.DarkBatchGuardMinChecks, held,
+			)
+		}
+		summary = guarded
 	}
 
 	egressProbePassProvidersTotal.WithLabelValues("blackhole", "checked").Add(float64(len(summary.Checks)))
@@ -703,7 +783,12 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 	egressProbePassProvidersTotal.WithLabelValues("blackhole", "tunnel_failed").Add(float64(summary.TunnelFailed))
 	egressProbePassNotMeasuredTotal.WithLabelValues("blackhole").Add(float64(summary.NotMeasured))
 	if 0 < len(summary.Checks) {
-		if submitErr := self.submitBlackholeChecks(ctx, summary.Checks); submitErr != nil {
+		// Finalize completed evidence independently of task drain/max-time.
+		// Ordinary negatives have already passed the live-readiness boundary;
+		// one bounded request retains completed passing/TLS/unknown evidence.
+		submitCtx, cancelSubmit := context.WithTimeout(context.WithoutCancel(ctx), providerEgressBlackholeSubmitTimeout)
+		defer cancelSubmit()
+		if submitErr := self.submitBlackholeChecks(submitCtx, summary.Checks); submitErr != nil {
 			egressProbePassErrorsTotal.WithLabelValues("blackhole_submit").Inc()
 			return summary, tripped, errors.Join(measurementErr, fmt.Errorf("submit blackhole batch: %w", submitErr))
 		}
@@ -999,15 +1084,16 @@ func (self *providerEgressFullBatch) release(
 	return submitFailures
 }
 
-// The batch's health runs, in submission order.
-func (self *providerEgressFullBatch) results() []*egresshealth.Result {
-	results := []*egresshealth.Result{}
+// Snapshots health runs with their provider identity so the guard uses the
+// same per-provider place as publication. Guard totals do not depend on order.
+func (self *providerEgressFullBatch) resultsByProvider() map[string]*egresshealth.Result {
+	results := map[string]*egresshealth.Result{}
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		for _, providerClientId := range self.order {
 			if health := self.byProvider[providerClientId].health; health != nil {
-				results = append(results, health)
+				results[providerClientId] = health
 			}
 		}
 	}()
@@ -1023,7 +1109,7 @@ func (self *providerEgressProbePass) runFullBatch(
 ) providerEgressFullOutcome {
 	if err := self.readiness.check(ctx); err != nil {
 		egressProbePassesTotal.WithLabelValues("full", "error").Inc()
-		return providerEgressFullOutcome{err: err}
+		return providerEgressFullOutcome{due: len(due), full: len(due) == args.Full.Limit, err: err}
 	}
 	var scoring *model.ProviderEgressHealthScoring
 	siteSettings := model.DefaultProviderEgressSiteSettings()
@@ -1062,14 +1148,14 @@ func (self *providerEgressProbePass) runFullBatch(
 	if runErr != nil {
 		egressProbePassesTotal.WithLabelValues("full", "error").Inc()
 		egressProbePassErrorsTotal.WithLabelValues("full_run").Inc()
-		return providerEgressFullOutcome{err: fmt.Errorf("run full-probe batch: %w", runErr)}
+		return providerEgressFullOutcome{due: len(due), full: len(due) == args.Full.Limit, err: fmt.Errorf("run full-probe batch: %w", runErr)}
 	}
 
-	// the guard judges the runs as they may count, so a site on probation
-	// cannot trip it any more than it can cost a provider
+	// the guard and publication score the same provider/place: neither
+	// probationary nor incompatible loads may trip or dilute the guard
 	scoredRuns := []*egresshealth.Result{}
-	for _, run := range batch.results() {
-		scoredRuns = append(scoredRuns, scoreEgressHealthResult(run, model.ProviderEgressPlace{}, scoring))
+	for providerClientId, run := range batch.resultsByProvider() {
+		scoredRuns = append(scoredRuns, scoreEgressHealthResult(run, places[providerClientId], scoring))
 	}
 	share, tripped := providerEgressRunGuard(scoredRuns, args.ProviderEgressRules)
 	egressProbeBatchShare.WithLabelValues("full").Set(share)
@@ -1087,12 +1173,18 @@ func (self *providerEgressProbePass) runFullBatch(
 		)
 	}
 
-	// submitted on a context detached from the task's: a batch measured before
-	// a drain still lands, and the prober itself never submits a run the task
-	// ended under. The release stays bounded without a deadline of its own:
-	// it makes at most three requests per provider of the batch, each bounded
-	// by the control-plane client's timeout.
-	submitFailures := batch.release(context.WithoutCancel(ctx), tripped, places, scoring, siteSettings.SiteHealthyExitShare, self.recordTally)
+	// The original first batch keeps its detached release: at most three
+	// requests per provider, each bounded by the control-plane client's timeout.
+	// An additional full batch reserves those requests before admission and
+	// keeps the existing task deadline on release. Cancellation alone does not
+	// discard completed evidence while its publication reserve remains.
+	releaseCtx := context.WithoutCancel(ctx)
+	if !self.fullReleaseDeadline.IsZero() {
+		var cancelRelease context.CancelFunc
+		releaseCtx, cancelRelease = context.WithDeadline(releaseCtx, self.fullReleaseDeadline)
+		defer cancelRelease()
+	}
+	submitFailures := batch.release(releaseCtx, tripped, places, scoring, siteSettings.SiteHealthyExitShare, self.recordTally)
 	if tripped {
 		summary.Failed += summary.Submitted
 		summary.Submitted = 0
@@ -1102,6 +1194,9 @@ func (self *providerEgressProbePass) runFullBatch(
 	}
 
 	measurementErr := self.readiness.err()
+	if err := releaseCtx.Err(); err != nil {
+		measurementErr = errors.Join(measurementErr, fmt.Errorf("full-probe successor publication: %w", err))
+	}
 	if measurementErr != nil {
 		egressProbePassesTotal.WithLabelValues("full", "error").Inc()
 	} else {
@@ -1112,13 +1207,15 @@ func (self *providerEgressProbePass) runFullBatch(
 	egressProbePassProvidersTotal.WithLabelValues("full", "skipped").Add(float64(summary.Skipped))
 	egressProbePassProvidersTotal.WithLabelValues("full", "failed").Add(float64(summary.Failed))
 	egressProbePassNotMeasuredTotal.WithLabelValues("full").Add(float64(summary.NotMeasured))
-	return providerEgressFullOutcome{summary: summary, guardTripped: tripped, err: measurementErr}
+	return providerEgressFullOutcome{due: len(due), full: len(due) == args.Full.Limit, summary: summary, guardTripped: tripped, err: measurementErr}
 }
 
 // drainBlackhole runs the already-selected batch and, while a concurrent full
 // batch remains in flight, keeps selecting saturated successor batches. It
-// stops on the first error, partial batch, cancellation, or full completion so
-// the durable task remains bounded by its existing full-batch lifetime.
+// stops on the first error, partial batch, cancellation, or full completion.
+// The initial guard-sized cohort is independent of the full lane's outcome.
+// Full completion stops successor admission; already-started checks keep
+// their own budgets and are joined before return.
 func (self *providerEgressProbePass) drainBlackhole(
 	ctx context.Context,
 	args *ProviderEgressProbeArgs,
@@ -1129,11 +1226,16 @@ func (self *providerEgressProbePass) drainBlackhole(
 	fullFinished <-chan struct{},
 ) providerEgressBlackholeOutcome {
 	outcome := providerEgressBlackholeOutcome{}
+	batchPass := *self
+	if fullFinished != nil {
+		batchPass.blackholeOptions.AdmissionDone = fullFinished
+		batchPass.blackholeOptions.MinimumAdmission = min(args.DarkBatchGuardMinChecks, len(initialDue))
+	}
 	due := initialDue
 	for 0 < len(due) {
 		outcome.due += len(due)
 		outcome.full = outcome.full || len(due) == args.Blackhole.Limit
-		summary, tripped, err := self.runBlackholeBatch(ctx, args, pinSource, poolSource, concurrency, fleetprobe.ProvidersFromDue(due))
+		summary, tripped, err := batchPass.runBlackholeBatch(ctx, args, pinSource, poolSource, concurrency, fleetprobe.ProvidersFromDue(due))
 		outcome.checked += len(summary.Checks)
 		outcome.dark += summary.Dark
 		outcome.tunnelFailed += summary.TunnelFailed
@@ -1174,10 +1276,11 @@ func (self *providerEgressProbePass) drainBlackhole(
 
 // run executes both independently due schedules with one certificate-pin and
 // one destination-pool snapshot. When both queues have work and the configured
-// blackhole pool can reserve the full pool without raising the shard's prior
-// peak concurrency, full work and a repeated blackhole drain run together. A
-// failure in one lane is retained but does not suppress the other; task retry
-// then revisits only work whose server-side due state remains stale.
+// blackhole pool is larger than the full pool, both independently configured
+// pools run together. The first full completion stops new blackhole admission;
+// while its admitted checks drain, bounded full successors can still advance.
+// A failure in one lane is retained but does not suppress the other; task retry
+// revisits only work whose server-side due state remains stale.
 func (self *providerEgressProbePass) run(
 	ctx context.Context,
 	args *ProviderEgressProbeArgs,
@@ -1261,6 +1364,8 @@ func (self *providerEgressProbePass) run(
 		result.Full = result.Full || outcome.full
 	}
 	applyFull := func(outcome providerEgressFullOutcome) {
+		result.FullDue = outcome.due
+		result.Full = result.Full || outcome.full
 		result.Attempted = outcome.summary.Attempted
 		result.Submitted = outcome.summary.Submitted
 		result.Failed = outcome.summary.Failed
@@ -1268,24 +1373,24 @@ func (self *providerEgressProbePass) run(
 		result.FullGuardTripped = outcome.guardTripped
 	}
 	if parallel {
-		// Full probes retain their configured pool. Reserving those slots from
-		// blackhole work keeps the combined shard peak at the previously
-		// configured blackhole peak while allowing the cheap lane to advance.
-		blackholeConcurrency -= args.Full.Concurrency
+		// Each lane owns its configured worker pool and each provider owns its
+		// own transport budget. Subtracting the full pool would create an
+		// artificial second blackhole wave even when concurrency == limit.
 		start := make(chan struct{})
 		fullFinished := make(chan struct{})
+		blackholeFinished := make(chan struct{})
 		blackholeOutcomeCh := make(chan providerEgressBlackholeOutcome, 1)
 		fullOutcomeCh := make(chan providerEgressFullOutcome, 1)
 		go func() {
 			<-start
+			defer close(blackholeFinished)
 			blackholeOutcomeCh <- self.drainBlackhole(
 				ctx, args, pinSource, poolSource, blackholeConcurrency, blackholeDue, fullFinished,
 			)
 		}()
 		go func() {
 			<-start
-			fullOutcomeCh <- self.runFullBatch(ctx, args, pinSource, poolSource, fullDue)
-			close(fullFinished)
+			fullOutcomeCh <- self.drainFull(ctx, args, pinSource, poolSource, fullDue, fullFinished, blackholeFinished)
 		}()
 		close(start)
 
@@ -1295,12 +1400,50 @@ func (self *providerEgressProbePass) run(
 		applyFull(fullOutcome)
 		errList = append(errList, blackholeOutcome.err, fullOutcome.err)
 	} else {
-		// A one-slot configuration cannot overlap two lanes without exceeding
-		// its prior peak. Preserve the old bounded order for that geometry.
+		// Without a concurrent full owner, selected checks may span many
+		// waves. Stop only admission early enough to retain the started wave,
+		// its publication and any serial full work inside the modeled lease.
 		if 0 < len(blackholeDue) {
-			blackholeOutcome := self.drainBlackhole(
-				ctx, args, pinSource, poolSource, blackholeConcurrency, blackholeDue, nil,
-			)
+			blackholeOutcome := func() providerEgressBlackholeOutcome {
+				batchPass := *self
+				if deadline, ok := ctx.Deadline(); ok {
+					remaining := time.Until(deadline)
+					reserve := providerEgressBlackholeSubmitTimeout
+					checkBudget := providerEgressBlackholeCheckBudget(args)
+					fits := 0 < checkBudget && reserve < remaining && checkBudget < remaining-reserve
+					if fits {
+						reserve += checkBudget
+					}
+					if fits && 0 < len(fullDue) {
+						fullBudget := providerEgressFullRunBudget(args)
+						fullWaves := 1 + (len(fullDue)-1)/args.Full.Concurrency
+						// Divide before multiplying; an oversized full selection
+						// must not wrap the reservation into apparent spare time.
+						fits = 0 < fullBudget && time.Duration(fullWaves) <= (remaining-reserve-1)/fullBudget
+						if fits {
+							reserve += time.Duration(fullWaves) * fullBudget
+						}
+					}
+					if !fits {
+						egressProbePassesTotal.WithLabelValues("blackhole", "error").Inc()
+						egressProbePassErrorsTotal.WithLabelValues("blackhole_run").Inc()
+						return providerEgressBlackholeOutcome{
+							due:  len(blackholeDue),
+							full: len(blackholeDue) == args.Blackhole.Limit,
+							err:  fmt.Errorf("run blackhole batch: %w", errProviderEgressBlackholeAdmissionBudget),
+						}
+					}
+					admissionCtx, cancelAdmission := context.WithDeadline(ctx, deadline.Add(-reserve))
+					defer cancelAdmission()
+					batchPass.blackholeOptions.AdmissionDone = admissionCtx.Done()
+					batchPass.blackholeOptions.MinimumAdmission = 0
+				}
+				// Checks retain ctx, not admissionCtx. A ready worker admits its
+				// successor immediately until the cutoff; started work is joined.
+				return batchPass.drainBlackhole(
+					ctx, args, pinSource, poolSource, blackholeConcurrency, blackholeDue, nil,
+				)
+			}()
 			applyBlackhole(blackholeOutcome)
 			errList = append(errList, blackholeOutcome.err)
 		}
@@ -1387,7 +1530,7 @@ func runProviderEgressProbe(
 		OperatorSecret: operatorSecret,
 		ShardIndex:     args.ShardIndex,
 		ShardCount:     args.ShardCount,
-		Http:           controlplane.NewHTTPClient(30 * time.Second),
+		Http:           controlplane.NewHTTPClient(providerEgressControlPlaneTimeout),
 	}
 	tunnelConfig := providertunnel.Config{
 		ApiUrl:            args.APIURL,

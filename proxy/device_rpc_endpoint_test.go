@@ -153,19 +153,15 @@ func TestProxyDeviceRpcSessionIdle(t *testing.T) {
 		opts := defaultProxyTestOptions()
 		opts.enableDeviceRpc = true
 		opts.disableSecurityPolicies = true
+		// The idle worker checks immediately, before its one-minute timer.
+		// Configure the unpublished device instead of racing that first read.
+		const idleTimeout = 3 * time.Second
+		opts.proxyDeviceIdleTimeout = idleTimeout
 		h := setupProxyTestWithOptions(t, opts)
 		defer h.close(t)
 
 		pd, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
 		connect.AssertEqual(t, err, nil)
-
-		// shrink the idle timeout so the keepalive ticker (idleTimeout/2) and the
-		// idle threshold are observable in-test. Set before attaching:
-		// PushDeviceRpc reads it when it starts the ticker. The per-device idle
-		// checker runs on the manager's 1-minute cadence, so it does not reap the
-		// device during this short window; the activity timestamp is read directly.
-		const idleTimeout = 3 * time.Second
-		pd.settings.ProxyDeviceIdleTimeout = idleTimeout
 
 		idleFor := func() time.Duration {
 			return time.Since(time.Unix(0, pd.lastActivityNanos.Load()))

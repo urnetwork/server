@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -233,7 +234,9 @@ func (self *deviceRpcObservedWebsocket) WriteMessage(messageType int, data []byt
 }
 
 func (self *deviceRpcObservedWebsocket) WriteControl(messageType int, data []byte, deadline time.Time) error {
-	return self.ws.WriteControl(messageType, data, deadline)
+	err := self.ws.WriteControl(messageType, data, deadline)
+	self.observeError(err)
+	return err
 }
 
 func (self *deviceRpcObservedWebsocket) NextReader() (int, io.Reader, error) {
@@ -254,10 +257,14 @@ func (self *deviceRpcObservedWebsocket) SetReadLimit(limit int64) {
 	self.ws.SetReadLimit(limit)
 }
 func (self *deviceRpcObservedWebsocket) SetReadDeadline(t time.Time) error {
-	return self.ws.SetReadDeadline(t)
+	err := self.ws.SetReadDeadline(t)
+	self.observeError(err)
+	return err
 }
 func (self *deviceRpcObservedWebsocket) SetWriteDeadline(t time.Time) error {
-	return self.ws.SetWriteDeadline(t)
+	err := self.ws.SetWriteDeadline(t)
+	self.observeError(err)
+	return err
 }
 func (self *deviceRpcObservedWebsocket) SetPongHandler(h func(string) error) {
 	self.ws.SetPongHandler(h)
@@ -326,7 +333,7 @@ func (self *deviceRpcHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	} else {
-		ws, err = self.upgrader.Upgrade(w, r, nil)
+		ws, err = self.upgradeWebsocket(w, r)
 	}
 	if err != nil {
 		glog.Infof("[drpc][%s]ws upgrade err = %s\n", proxyId, err)
@@ -366,4 +373,27 @@ func deviceRpcSignedProxyId(r *http.Request) (server.Id, error) {
 		}
 	}
 	return server.Id{}, fmt.Errorf("missing signed proxy id")
+}
+
+// Preserves the authenticated handler's WebSocket upgrade branch as a narrow
+// owner boundary, independently testable without creating a hosted device.
+func (self *deviceRpcHandler) upgradeWebsocket(w http.ResponseWriter, r *http.Request) (*websocket.Conn, error) {
+	return self.upgrader.Upgrade(&deviceRpcDeadlineResponseWriter{ResponseWriter: w}, r, nil)
+}
+
+// Wraps only the socket whose ownership the successful hijack transfers to
+// Gorilla. HTTP behavior, buffered input and borrowed pre-hijack state stay intact.
+type deviceRpcDeadlineResponseWriter struct{ http.ResponseWriter }
+
+// Gorilla ignores inner deadline errors; the shared owned adapter latches them.
+func (self *deviceRpcDeadlineResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := self.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("device rpc response writer does not support hijacking")
+	}
+	conn, readWriter, err := hijacker.Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	return connect.NewWebSocketWriteBatchConn(conn), readWriter, nil
 }

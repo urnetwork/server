@@ -74,7 +74,7 @@ type mimirAdmissionIdentity struct {
 	processStart string
 }
 
-// Only monotonic counters need a prior value; gauges are current-page context.
+// Only monotonic counters need a prior value; headroom is a current gauge.
 type mimirAdmissionHistory struct {
 	discardTotal     int64
 	rateDiscardTotal int64
@@ -163,6 +163,8 @@ type mimirAdmissionAssessment struct {
 	ingestionBurstMaximum int64
 	headroomMinimum       int64
 	headroomMaximum       int64
+	headroomObservedCount int
+	headroomLowInstances  int
 	generationChanges     int
 	counterResets         int
 	directComplete        bool
@@ -543,7 +545,7 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 			stateSaved = true
 		}
 	}
-	findings := make([]finding, 0, len(assessment.visibilityFailures)+3)
+	findings := make([]finding, 0, len(assessment.visibilityFailures)+4)
 	seenVisibilityTargets := map[string]bool{}
 	for _, failure := range assessment.visibilityFailures {
 		if seenVisibilityTargets[failure.target] {
@@ -570,6 +572,13 @@ func (self *mimirAdmissionProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	} else if stateSaved && assessment.directComplete && assessment.comparable {
 		findings = append(findings, healthyFinding(
 			"observability/mimir-admission", tierPage, "mimir-ingestion-rate-limit", "mimir-fleet",
+		))
+	}
+	if assessment.headroomLowInstances > 0 {
+		findings = append(findings, mimirAdmissionHeadroomFinding(assessment))
+	} else if stateSaved && assessment.directComplete && assessment.comparable && assessment.headroomObservedCount > 0 {
+		findings = append(findings, healthyFinding(
+			"observability/mimir-admission", tierWarn, "mimir-series-headroom", "mimir-fleet",
 		))
 	}
 	return findings, nil
@@ -748,6 +757,12 @@ func (self *mimirAdmissionProbe) observe(now time.Time, results []mimirAdmission
 			}
 
 			headroom := instance.localLimit - instance.memorySeries
+			assessment.headroomObservedCount++
+			// Compare each child's pair; division avoids overflow at int64
+			// bounds and includes exact ten-percent equality and excess head.
+			if headroom <= instance.localLimit/10 {
+				assessment.headroomLowInstances++
+			}
 			if !metricRangeInitialized {
 				assessment.memoryMinimum = instance.memorySeries
 				assessment.memoryMaximum = instance.memorySeries
@@ -901,6 +916,33 @@ func advanceMimirAdmissionIncident(
 		return true, now.Sub(*quietSince)
 	}
 	return *incident, 0
+}
+
+// Retained-head reserve is an independent current risk, not an admission
+// counter. A known low child remains visible beside an unknown sibling.
+func mimirAdmissionHeadroomFinding(assessment mimirAdmissionAssessment) finding {
+	return finding{
+		probeId: "observability/mimir-admission", tier: tierWarn,
+		class: "mimir-series-headroom", target: "mimir-fleet", frame: "retained-series-headroom", sustain: 1,
+		symptom:   "A Mimir child has at most 10% retained-series headroom under its effective local series limit",
+		mechanism: "The local limit minus retained memory series is at most 10% of the limit on the same child. This is capacity risk, not proof of current sample loss: only exact discard counters establish admission loss. The warning is independent of both discard quiet holds.",
+		baseline:  "Every enabled child has more than 10% same-child retained-head reserve. Healthy recovery requires complete comparable current observations and a successful state save; an unknown sibling cannot authorize fleet recovery.",
+		observed: fmt.Sprintf(
+			"configured_hosts=%d observable_hosts=%d mimir_instances=%d headroom_observed_instances=%d low_headroom_instances=%d threshold_percent=10 memory_series=%d..%d active_series=%d..%d local_limit=%d..%d local_headroom=%d..%d direct_complete=%t comparable=%t",
+			assessment.configuredHosts, assessment.observableHosts, assessment.instanceCount,
+			assessment.headroomObservedCount, assessment.headroomLowInstances,
+			assessment.memoryMinimum, assessment.memoryMaximum,
+			assessment.activeMinimum, assessment.activeMaximum,
+			assessment.localLimitMinimum, assessment.localLimitMaximum,
+			assessment.headroomMinimum, assessment.headroomMaximum,
+			assessment.directComplete, assessment.comparable,
+		),
+		evidence: "The existing bounded host-local command pairs retained memory series and the effective local limit on each exact process child. Only fixed numeric ranges and counts are rendered; no additional query or raw tenant, process, publisher, or metric labels are emitted.",
+		context:  "Retained head is not the instantaneous active or query-visible accepted set; old series can remain after publisher replacement. Accepted-series counts cannot identify rejected candidates or the owner of retained growth. The reviewed bundled single-tenant configuration makes process head comparable to the per-user limit; different or multi-tenant configuration requires separate authority. More than 10% reserve is not a rollout-capacity guarantee, a memory or writable-ring check, or an enforced Main service limit.",
+		action:   "Compare complete per-child retained head, effective limits, memory, writable ring, and generation overlap before the next authorized rollout. Diagnose a growing owner with bounded source-qualified evidence before changing a source or capacity. Do not restart Mimir to reset its head or automatically raise limits.",
+		verify:   "Resolve this warning only after complete comparable current observations put every enabled child above 10% reserve. The independent series and rate discard pages still require their full zero-increment quiet holds; historical query continuity remains separate.",
+		playbook: "SIGNALS.md §11.20a, §11.20, §8.11, and §8.12",
+	}
 }
 
 // The fixed finding keeps replicated child increments distinct from unique

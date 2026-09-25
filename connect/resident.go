@@ -663,6 +663,9 @@ type Exchange struct {
 	// Nil in production; generation tests observe the exact point at which an
 	// accepted header has found no local resident and is about to wait.
 	afterResidentMissingForTest func()
+	// Nil in production; constructor tests inject failure after child ownership
+	// exists but before the fallible peer-profile lookup publishes callbacks.
+	beforeResidentProfileForTest func(*Resident)
 
 	// the shared key-event subscriber (PEERSSTREAMS2.md); nil unless
 	// KeyEventDelivery.Enabled
@@ -2074,7 +2077,9 @@ func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, head
 	e.Encode(header)
 	headerBytes := b.Bytes()
 
-	conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeWriteHeaderTimeout))
+	if err := conn.SetWriteDeadline(time.Now().Add(self.settings.ExchangeWriteHeaderTimeout)); err != nil {
+		return err
+	}
 	if err := self.framer.Write(conn, headerBytes); err != nil {
 		return err
 	}
@@ -2083,7 +2088,9 @@ func (self *ExchangeBuffer) WriteHeader(ctx context.Context, conn net.Conn, head
 }
 
 func (self *ExchangeBuffer) ReadHeader(ctx context.Context, conn net.Conn) (*ExchangeHeader, error) {
-	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadHeaderTimeout))
+	if err := conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadHeaderTimeout)); err != nil {
+		return nil, err
+	}
 	headerBytes, err := self.framer.Read(self.connReader(conn))
 	if err != nil {
 		return nil, err
@@ -2115,7 +2122,10 @@ func (self *ExchangeBuffer) WriteMessage(conn net.Conn, transferFrameBytes []byt
 		}
 		self.writeStorage = make([]byte, storageByteCount)
 	}
-	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+	if err := conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout)); err != nil {
+		connect.MessagePoolReturn(transferFrameBytes)
+		return err
+	}
 	err := self.framer.WriteBatchWithStorage(
 		conn,
 		[][]byte{transferFrameBytes},
@@ -2157,7 +2167,12 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 		}
 	}
 
-	conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+	if err := conn.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout)); err != nil {
+		for _, message := range transferFrameBytesBatch {
+			connect.MessagePoolReturn(message)
+		}
+		return err
+	}
 
 	headers := connect.MessagePoolGet(exchangeIOFrameHeaderByteCount * len(transferFrameBytesBatch))
 	defer connect.MessagePoolReturn(headers)
@@ -2189,7 +2204,9 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 }
 
 func (self *ExchangeBuffer) ReadMessage(conn net.Conn) ([]byte, error) {
-	conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadTimeout))
+	if err := conn.SetReadDeadline(time.Now().Add(self.settings.ExchangeReadTimeout)); err != nil {
+		return nil, err
+	}
 	transferFrameBytes, err := self.framer.Read(self.connReader(conn))
 	if err != nil {
 		return nil, err
@@ -3442,11 +3459,24 @@ func NewResident(
 		controlLimiter:          newLimiter(cancelCtx, exchange.settings.ControlMinTimeout),
 	}
 	resident.lastActivityNanos.Store(time.Now().UnixNano())
+	constructed := false
+	defer func() {
+		if !constructed {
+			// No owner has received this resident yet. A profile lookup panic
+			// must join its client and detached controller before unwinding.
+			if err := resident.CloseAndWait(context.Background()); err != nil {
+				glog.Errorf("[r]aborted construction close wait = %s\n", err)
+			}
+		}
+	}()
 
 	// only top-level clients are network peers and get peer subscriptions.
 	// Networks over the top-level client limit (created before the limit)
 	// are excluded (`peersEnabled`): their peer replay and event fan-out
 	// would scale with the connected top-level client count.
+	if beforeProfile := exchange.beforeResidentProfileForTest; beforeProfile != nil {
+		beforeProfile(resident)
+	}
 	if networkId, topLevel, category, peerProfile, peersEnabled := model.GetNetworkPeerProfile(cancelCtx, clientId); topLevel && peersEnabled && peerProfile != nil {
 		resident.peerNetworkId = &networkId
 		resident.peerProfile = peerProfile
@@ -3490,6 +3520,7 @@ func NewResident(
 		go server.HandleError(resident.chaos, cancel)
 	}
 
+	constructed = true
 	return resident
 }
 

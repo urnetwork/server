@@ -12,6 +12,9 @@ import (
 
 func syntheticHMACCutoverSource(row Row) *syntheticSource {
 	return &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		if strings.Contains(query, "monitor-schema-readiness") {
+			return []Row{{"true"}}, nil
+		}
 		if !strings.Contains(query, "monitor-signal-2.24-hmac-cutover") {
 			return nil, nil
 		}

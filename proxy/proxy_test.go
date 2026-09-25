@@ -103,6 +103,8 @@ type proxyTestOptions struct {
 	// the endpoint accepts XL by default, like production; true opts out
 	disableDeviceRpcH1Plus bool
 	deviceRpcH1PlusStats   *connect.H1PlusStats
+	// Set only on an unpublished device, before its lifecycle and idle worker start.
+	proxyDeviceIdleTimeout time.Duration
 	// when true, stand up only what the device rpc CONTROL plane needs: no live
 	// provider client (transport, egress NAT, provide registration) and no wait
 	// for the proxy device to reach a usable egress path. For tests of rpc
@@ -522,6 +524,17 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 		pdmSettings.ClientSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
 	}
 	proxyDeviceManager := NewProxyDeviceManager(ctx, pdmSettings)
+	if idleTimeout := opts.proxyDeviceIdleTimeout; 0 < idleTimeout {
+		buildProxyDevice := proxyDeviceManager.proxyDeviceBuilder
+		proxyDeviceManager.proxyDeviceBuilder = func(proxyId server.Id) (*ProxyDevice, error) {
+			pd, err := buildProxyDevice(proxyId)
+			if err == nil {
+				// The builder has not published pd or started CancelIfIdle.
+				pd.settings.ProxyDeviceIdleTimeout = idleTimeout
+			}
+			return pd, err
+		}
+	}
 	go func() {
 		<-ctx.Done()
 		_ = proxyDeviceManager.CloseAndWait(context.Background())

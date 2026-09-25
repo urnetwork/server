@@ -179,6 +179,7 @@ active missing capability and must not be read as green.
 | Section | Kind | Executable boundary |
 |---|---|---|
 | 1.7 | Coverage gap | Shared SSH status taxonomy preserves every source failure; automatic observer-overlay route attribution is missing an inventory/configured observer-interface or gateway contract. `settings-freshness`, `edge-ipv6`, and `vpn-sessions` do not supply that contract. |
+| 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-selected full-run receipts are missing; `egress-site-pool` and `egress-outcomes` do not attest country-ranked lists or the 13/13 sampling split. |
 | 5.1 | Runbook | `contract-rate`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
 | 5.3 | Runbook | `redis-cluster`, `log-errors` |
@@ -587,6 +588,24 @@ FROM failures GROUP BY task;
   through its owning policy, without deleting/replaying the task or weakening
   the guard. Only the target's positive typed batch proof can request this
   cadence; diagnostic error text alone cannot authorize it.
+
+  Retry/progress authority: max_errors is a cumulative stored retry count,
+  not a failed-contract count or a matched-window execution rate.
+  outcome=failed is intentional when the target retains any unresolved
+  accounting failure, even if healthy siblings were terminal-verified.
+  The grouped query does not observe per-attempt progress, typed retry
+  authority, the selected delay or executor lineage; other/unclassified
+  does not distinguish ordinary backoff from retained target cadence.
+  The completed-batch summary currently carries no task or attempt identity.
+  A nearby timestamp or matching diagnostic text does not establish its
+  identity with the sampled pending row. A missing summary is unknown, not zero terminal progress.
+  A filtered evaluator line can omit joined-error continuations and
+  does not prove accounting-only classification. False-positive control:
+  keep observed healthy sibling progress separate from the failed task.
+  False-negative control: keep the warning and financial guard for a truly
+  parked or zero-progress retry; prompt scheduling, a fresh heartbeat or an
+  unjoined positive summary cannot resolve it. Require exact private
+  task/run correlation and complete error authority for a stronger claim.
 - The 2026-09-03 `UpdateReliabilities` alert exposed this gap. Task-canary,
   close-duration, selection-freshness, netescrow, reboot-collision,
   stuck-leases, worker-memory, and worker-churn now keep identifiers inside
@@ -4689,6 +4708,14 @@ erase an independently observed ineligible-supply finding.
 ### 2.9a User-visible provider-count degradation — product selection coverage
 Probe: `provider-count`
 
+**An empty app provider list is a priority product-availability symptom.**
+Monitor both distinct surfaces: this section measures `FindProviders2`
+connection-selection responses; §2.9b measures the initial/search location
+picker. Neither can substitute for the other, and global supply, HTTP 200,
+response bytes, or a nonempty best-available control cannot certify a requested
+location/group or the user's rendered screen. Preserve the screen/request-shape
+distinction without waiting for customer identifiers or weakening eligibility.
+
 The registered healthy sentinel is `provider-count-degraded`. It emits no
 Markdown alert by itself; it exists so the probe has one stable class whose
 healthy state can be catalog-audited. Real findings are the distinct
@@ -4700,8 +4727,8 @@ the metric is unavailable: the probe returns an explicit observation error.
 an effective-empty PAGE or a supply-depletion diagnosis. `direct` means no
 location, group, or best-available selector. In the emitting API's matching
 `FindProviders2` source, explicit ClientId specs are appended unless the final
-destination is excluded, without running discovery score, health, reliability,
-network-only, or IP-family filters. Empty specs or all-excluded explicit IDs can
+destination is explicitly or hard-egress excluded, without running discovery
+score, reliability, network-only, or IP-family filters. Empty specs or all-excluded explicit IDs can
 return zero; one or two requested IDs can correctly return one or two. The
 metric's default `quality` label does not mean ranking ran, and `unknown`
 caller-country is expected when this branch skips the IP-country lookup.
@@ -4827,6 +4854,39 @@ must cover the product-supported country/group and IP-family matrix without
 using customer identities. Cache coverage alone also cannot see a stale mobile
 or desktop client that never asks the current API.
 
+Backend-read discriminator: the API model exports
+`urnetwork_client_score_read_errors_total` with exactly two preinitialized phase children: `counts` and `samples`.
+It increments once when a non-missing Redis command or pipeline error invalidates
+that score-load phase, including an error hidden behind an earlier missing key.
+It counts failed loader pipelines, not failed keys, unique requests or API failures.
+A counted error can reflect caller cancellation/deadline or client lifecycle,
+not a Redis-service outage; the phase alone does not identify the failing owner.
+The initial connection/PING and payload decoding error paths are outside these
+two counters. Missing keys and successfully decoded empty pools do not increment
+them. No caller, country, rank, family, key, error text, address or identifier is
+added as a label or exemplar.
+
+Primary and optional other-rank backfill loads share these phase counters.
+A primary read error leaves the completed-response denominator; the optional
+backfill retains its valid primary result under the existing policy. Therefore
+fewer completed zero responses can mean surfaced backend errors rather than
+recovery, and a positive read-error counter does not prove every API call failed
+or identify a provider cohort. The existing
+`urnetwork_findproviders2_load_seconds_count` counts successful primary loads,
+not every attempted phase, and cannot supply a loader-error rate denominator.
+
+Backend-read coverage gap: these new reader counters are not consumed by the current registered `provider-count` probe.
+Its reduced response query does not preserve exact process/start identity or
+underlying source timestamps. A future bounded reader diagnostic must pair both
+phase children across the same process generation and observation window, cover
+the expected enabled inventory, validate underlying sample freshness and counter
+resets, and retain a positive successful-read control. A complete zero error
+delta is not proof of nonempty supply; absent, partial, reset or rejected samples remain unknown.
+Metric deployment and accepted samples must be verified separately: an API
+version claim, one visible process, quiet traffic or healthy score-writer phases
+cannot certify reader coverage. Do not add request dimensions to the six-label
+completed-response family to obtain this discriminator.
+
 Verification: require two consecutive windows in which every materially used
 ordinary request class has its response-count distribution back inside the
 recorded baseline, §2.9 has complete current cache documents, and successful
@@ -4848,6 +4908,109 @@ with no identifiers. Direct-cohort controls additionally preserve a healthy
 one/two-explicit-ID response shape as unknown intent, prohibit direct paging,
 retain a real discovery PAGE alongside direct uncertainty, and prevent a
 below-threshold direct-only observation from emitting discovery health.
+
+### 2.9b App location-picker availability — initial and search results
+Probe: `provider-picker`
+
+The initial GET `/network/provider-locations` and search POST
+`/network/find-provider-locations` are app list surfaces independent of
+`FindProviders2` (§2.9a). A healthy connection-candidate pool, HTTP 200 or large
+response body does not prove a nonempty picker. The deprecated
+`/network/find-locations` endpoint is not included. Empty-picker user reports
+remain actionable below any metric volume floor; the floor is not a dismissal
+of an individual report.
+
+The model exports `urnetwork_provider_picker_outcomes_total` with exactly nine
+preinitialized children: surface `initial`, `search`, `direct` crossed with
+outcome `nonempty`, `empty`, `error`. `initial` is GET only; POST (including a
+blank query) is `search`, except a syntactically valid device ID is `direct`.
+No query, caller/target country, identifier, cache key or raw error is exported.
+The result band mirrors rows rendered by the shared SDK: countries, promoted
+groups and devices populate the initial screen; cities/regions alone do not.
+Search also displays city/region and exact-match rows. A nil result or an error,
+including a panic unwind, is not successful empty. The model-return boundary
+does not prove HTTP delivery, device receipt or every native/web UI version's
+rendering. Device-side filtering, stale caches and unsupported app versions
+remain separately verified boundaries across Apple, Android, desktop and web.
+
+`urnetwork_provider_picker_read_errors_total` has two preinitialized phase
+children, `initial` and `filters`. Non-missing Redis GET/pipeline errors and
+payload decode failures increment once per failed loader. An earlier
+`redis.Nil` cannot hide a later failed command. Missing keys retain normal
+absence semantics; neither missing nor valid empty payloads increment errors.
+The initial connection/PING can panic before these phase counters, while the
+owning picker outcome still records an error. Other callers of the shared
+loaders can increment phase counts without a corresponding picker request.
+Read counts and outcome counts therefore must not be added or treated as the
+same-attempt denominator. Decode/WRONGTYPE, caller cancellation and client
+lifecycle errors do not by themselves prove a Redis service outage.
+
+The source-correctness boundary is fail-closed: a failed initial read must not
+become an empty successful GET; failed filters must not silently remove every
+location from GET or POST results. A genuine initial-cache miss returns an
+empty structure (including blank POST), not a nil dereference. No cache is
+cleared, no providers are invented, and score/health/country exclusion rules
+are unchanged.
+
+One fixed query observes only configured permitted API host/block placements.
+It carries process instance and start value, raw source timestamps at now and
+five minutes earlier, reset witnesses and range-presence witnesses. A process
+contributes deltas only when all eleven children and process-start fields are
+paired, source-fresh (90s, at most 30s future clock skew), from the same scrape
+at each bound, monotonic and reset-free. New/mixed/transient generations, old
+producers, disabled/unenrolled desired slots and missing children stay unknown.
+The query permits at most 32 desired slots, four generations per slot, 8,192
+rows and 4MiB; one gateway, a 15s transport timeout, no retry or failover.
+Schema/warnings/nonfinite values/duplicate rows fail closed without exposing
+response labels or bodies. Positive complete-process deltas survive a missing
+sibling, but are explicitly an observed-process subset, not fleet totals.
+
+- PAGE `provider-picker-effective-empty`: at least 20 successful initial GET
+  outcomes in five minutes, at least 80% with no rendered initial rows.
+- WARN `provider-picker-read-or-request-error`: any positive observed read or
+  request error; PAGE when at least 20 request errors occur in that window.
+  This separate denominator prevents surfaced errors from looking like recovery
+  merely because they leave successful-empty counts.
+- WARN `provider-picker-unobservable`: missing/unreadable/partial/stale/reset
+  producer evidence, or fewer than 20 successful initial outcomes for a health
+  claim. Search/direct-only or quiet traffic cannot establish initial health.
+- A legitimate empty search or direct lookup is diagnostic, not a supply PAGE.
+  Nonempty direct output proves only a syntactically accepted ID, not a live
+  provider. Search misses do not invalidate a separately healthy initial list.
+
+False positives: intentional caller-country exclusions can produce a truly
+empty initial list without global supply loss; invalid queries and legitimate
+empty search results must not be conflated with it. Requests are not unique
+users. A failing observed subset need not describe the whole API fleet, and
+transport cancellation need not indicate backend outage. Preserve the symptom
+while establishing exact request and artifact authority before attribution.
+
+False negatives: under-volume pockets, failures before entering the model,
+omitted/rejected metric samples, wholly unscraped generations, lost HTTP
+delivery and device-side rendering can escape this server metric. Complete
+paired inventory is query-visible coverage, not proof that Mimir accepted every
+sample or that the app rendered rows. Cross-check §11.20/§11.20a continuity and
+admission, HTTP outcomes, the user's surface, and §2.9a target restrictions.
+
+Recovery requires two complete fresh five-minute windows after the exact API
+producer/fix rollout, with at least 20 successful initial outcomes per window,
+below the empty threshold and no read/request errors, plus independent recovery
+of the reported app surface. Healthy findings are emitted only for complete
+paired coverage with that traffic floor; the surrounding monitor owns sustain.
+Classes clear independently: a proven nonempty initial cohort can clear its
+prior empty-list PAGE while a read-error WARN persists; complete visibility and
+zero read/request errors can clear those classes while a real empty PAGE
+persists. Partial or below-floor evidence never supplies a healthy sentinel.
+Taskworker rollout alone does not deploy this API reader/producer. No migration
+is required. Until API rollout and a full paired window, the registered probe
+reports visibility loss, not fabricated healthy zeroes.
+
+Implementation: `signal_provider_picker.go` / `signal_provider_picker_test.go`,
+registered in `NewSignals`. Synthetic controls exercise empty/nonempty/error,
+search/direct ambiguity, partial positive siblings, old/missing/stale/reset or
+mixed process evidence, bounds, cancellation, Markdown and redaction. Actual
+local Redis-to-model controls reproduce failed GET/pipeline errors versus
+missing keys and verify endpoint propagation and producer counts.
 
 ### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
 Probe: `retention-fanout`
@@ -6419,7 +6582,10 @@ it reports only bounded structural reasons such as `missing_shard_1`,
 work: it is `egress-probe-unarmed`. The same rollout alert remains open until
 the append-only `provider_egress_health.tls_authentication_failure` field
 exists, because the new full-probe ingestion path cannot satisfy its integrity
-contract without that schema. The deadline scheduler additionally requires
+contract without that schema. The activity query also requires every
+blackhole measurement/schedule column through migration 709, including
+`next_due_at`; an absent or malformed physical-schema observation remains
+unarmed/unobservable, never an empty ready queue. The deadline scheduler additionally requires
 migration 657's `provider_egress_health_measured_at_client_id` index to be a
 valid, ready, non-partial btree over exactly `(measured_at, client_id)`. Index
 absence or a same-name malformed/not-ready index emits an additive rollout
@@ -6454,17 +6620,27 @@ For each shard, aggregate without exporting identifiers:
   that a health verdict ever existed. A retained health row without an extant
   location stays exclusively in the no-location lane. An exact location/health
   deadline tie is assigned to location, matching the scheduler's stable merge;
-- blackhole due: no check, or a check older than 90 minutes;
+- blackhole scheduler-ready due: no stored row, or
+  `COALESCE(next_due_at, checked_at + 90 minutes) <= snapshot_time`, exactly
+  matching the current due API, including the NULL legacy-schedule fallback;
+- `verdict_refresh_due`: no measured check, or a measured check older than
+  90 minutes. This exposure count is independent of scheduler readiness and
+  does not disappear merely because an unmeasured retry was rescheduled;
 - deferred current-dark full due: the number that otherwise meets a full-due
   lane but whose latest blackhole check is a failure inside three hours;
 - newest full activity: the newest location, attempt, or health timestamp from
   a provider without a current dark verdict in that same shard. Excluding old-
   deployment activity against rows now dark prevents it from masking a stalled
   corrected candidate queue;
-- newest blackhole activity: the newest blackhole check in that shard; and
-- current coverage: locations inside seven days and blackhole checks inside
-  three hours, plus the number of unique latest full attempts and blackhole
-  checks written in the last hour. The full-attempt count is success-inclusive:
+- newest blackhole evidence: the newest measured check's `checked_at` in
+  that shard; and
+- current coverage: locations inside seven days and measured blackhole checks
+  inside three hours, plus unique latest full attempts and measured blackhole
+  checks whose `checked_at` starts inside the last hour. A first row with
+  `ok=false, failure=not_measured, consecutive_failures=0` is not a measured
+  check, matching `CountCurrentProviderBlackholeChecks`. These latest-row
+  clocks are not a submission counter or an integer census of API writes.
+  The full-attempt count is success-inclusive:
   a successful probe may leave its former due category, so classifying attempts
   by the provider's current category would manufacture zero progress. This
   gross last-hour attempt rate deliberately remains unfiltered by current-dark
@@ -6473,26 +6649,100 @@ For each shard, aggregate without exporting identifiers:
 The due ages are the application contract: full location refresh begins at
 half the seven-day location lifetime, existing-health refresh begins at half
 its 24-hour lifetime, a missing-health row is eligible after the common attempt
-backoff, failed attempts back off for six hours, and the cheap blackhole sweep
-becomes due at half its three-hour maximum age. Do not invent a percentage
-floor while a large first sweep is catching up. Instead, when `due > 0`,
-require the corresponding shard-local newest timestamp to be no older than its
-durable `max_time + idle_delay` plus one five-minute monitor cadence. Old
-evidence is healthy when the exact due count is zero.
+backoff, and failed full attempts back off for six hours. Blackhole readiness
+honors `next_due_at`: a measured pass normally schedules half the three-hour
+maximum age later; failures and unmeasured retries follow their configured
+backoff, while NULL legacy schedules retain the old age fallback. Do not invent
+a percentage floor during catch-up. For full due work, require shard-local
+newest evidence inside durable `max_time + idle_delay` plus one five-minute
+monitor cadence. The same bound applies to blackhole measured evidence when
+`verdict_refresh_due > 0`. Blackhole scheduler-ready `due=0` alone is not
+coverage recovery while measured-verdict refresh candidates remain.
 
-Only a current explicit `ok=false` blackhole verdict defers the expensive full
-queue. A missing check, a check at least three hours old, or a current passing
-check remains admitted. Recovery does not depend on the full queue: the cheap
-blackhole queue has no attempt backoff, offers the failing provider again after
-90 minutes, restores full eligibility immediately on a passing upsert, and
-fails open when an unreplaced failure reaches three hours. The primary-key
+Only a current dark blackhole verdict under
+`model.ProviderBlackholeDarkSql` defers the expensive full queue. A missing
+check, a check at least three hours old, or a current passing check remains
+admitted. The cheap queue honors the stored retry schedule independently of the
+full queue, restores full eligibility on a passing upsert, and the dark
+predicate expires an unreplaced failure at its existing maximum age. The primary-key
 lookup on `provider_blackhole_check(client_id)` keeps the new exclusion local
 to each candidate reached by the pre-existing head plan; it adds no migration,
 scan, sort, policy weight, concurrency, or timeout.
 
+
+Blackhole false-positive/false-negative qualification: `checked_at` is the
+latest measured check's start time, not receipt/completion time and not a
+submission counter. Against an existing row, a newer `not_measured` report
+preserves the old measurement and advances `next_due_at` / `update_time`.
+A first NotMeasured-only row supplies no measured freshness or last-hour
+throughput. Thus fresh claims, successful rescheduling, and zero current
+measured checks can coexist. Do not translate stale measured clocks into
+absent submissions, a dead task, or a particular authentication/tunnel fault.
+A new artifact's check-start can precede a rollout-time cutoff while its
+publication occurs much later. Zero `checked_at >= cutoff` alone therefore
+does not prove zero measured reports from that artifact. Preserve the actual
+check-start interval and compare bounded `update_time` publication cohorts;
+stored verdict classes can predate a NotMeasured upsert and are not the new
+submitted payload. Neither a batch acknowledgement nor matching row counts
+establishes a same-attempt or exact-artifact join.
+Conversely, scheduled backoff, `due=0`, or a fresh unknown first row cannot
+certify restored measured coverage. A healthy sibling can still hide individual
+old providers inside a shard maximum; retain the independent fleet-capacity
+check and do not infer all-provider freshness from the maximum.
+
+Batch publication is distinct from task Post: the blackhole worker pool retains
+results until every admitted check joins, then the owning batch applies
+readiness/guard rules and makes a bounded ingest request. Post schedules the
+successor; it is not the verdict publisher. A slow admitted tail can therefore
+delay publication of fast successful checks. NotMeasured, guard conversion,
+older-row merge rules, and submission errors are separate causes of unchanged
+measured clocks. Batch pass/checked counters and pre-call reporter counters are
+not acknowledgements. A refreshed `claim_time` is a lease heartbeat, not a
+reliable execution-start timestamp; `run_at` is the scheduled time.
+
+The Taskworker executable exports twelve preinitialized, identity-free progress
+series: `urnetwork_egress_probe_blackhole_inflight{state}` with
+`active_batches|queued|running|completed_buffered`;
+`urnetwork_egress_probe_blackhole_worker_events_total{event}` with
+`started|completed|canceled|discarded`;
+`urnetwork_egress_probe_blackhole_submission_outcomes_total{outcome}` with
+`acknowledged|canceled|error_or_unknown`; and
+`urnetwork_egress_probe_blackhole_progress_enabled=1`.
+The gauges sum concurrent batch owners with coherent collection and exact
+owner retirement, rather than letting the last batch overwrite a sibling.
+Completed means retained in memory before guards; it includes NotMeasured and
+is not a durable verdict. Canceled/discarded workers retain no result. Queued
+means selected but not started within an active batch, not the database due
+queue. A returned acknowledgement counts one nonempty batch request, not rows
+measured or replaced. Empty no-request calls do not acknowledge anything.
+No provider, task, shard, URL, error text, or credential is a metric label.
+
+These metrics require capability plus complete, fresh process/start/source-time
+coverage and reset-aware deltas before fleet interpretation; they intentionally
+do not identify a shard owner. Missing/partial series are unknown, not zero work.
+Without this evidence the registered coverage probe explicitly reports
+`publication_progress=unobserved`; no new latency threshold or automatic
+recovery follows from in-memory completion or a retired gauge. Persisted
+measured evidence remains the recovery authority. The counters diagnose batch
+latency but do not establish a per-check duration or guarantee future capacity.
+
+The no-full and serial paths require a separate execution-geometry control:
+one selected blackhole list may contain many worker waves before final
+submission, while the source's minimum max-time validation budgets one full
+run and one blackhole check. A private fake-clock test can reproduce a valid
+250-provider selection reaching the 75-minute task deadline with completed
+earlier waves, but this does not establish a running Main artifact or its
+actual queue geometry. Preserve per-check security/retry budgets and the
+cancellation finalizer's passing/TLS/unknown evidence. Join a running artifact,
+complete saved arguments, selected full/blackhole counts, guard/readiness
+state, and same-attempt publication outcome before attributing a live stall.
+No service-wide cap, longer task timeout, or weakened dark rule follows from
+the aggregate.
+
 Shard activity is necessary but not sufficient. Sum the eligible, current, and
-last-hour blackhole counts across the complete geometry. When current coverage
-is incomplete and at least one check was written in the last hour, project one
+last-hour measured blackhole counts across the complete geometry. When current
+coverage is incomplete and at least one latest measured check started in the last
+hour, project one
 whole-fleet sweep at that measured rate. It must fit inside
 `ProviderBlackholeCheckMaxAge` (currently three hours):
 
@@ -6511,6 +6761,22 @@ the shard task inside a serialized full batch, whose location, health, and
 bandwidth stages are not described by one blackhole timeout. Measured
 throughput remains authoritative. Malformed or mixed task geometry still fails
 before any capacity calculation.
+
+Parallel pool ownership is artifact-dependent. Legacy shared-peak drain code
+subtracts Full.Concurrency from Blackhole.Concurrency: selected250 with250/8
+settings starts242 blackhole workers and needs an eight-check second wave.
+The independent-pool correction retains250 blackhole workers beside the full8,
+so every selected check can start before any completes (combined258 per shard).
+It preserves the per-check transport root, request/retry budgets, admission
+stop, cancellation finalizer, and complete-batch negative guard. It does not
+remove the slowest-check batch barrier or prove sufficient fleet throughput.
+The probe labels `parallel_pool_model=unattested`: `full_reserved_*` is the
+legacy shared-peak model, while `independent_pool_*` models the corrected
+per-lane pools. Join the running artifact before assigning either geometry to
+live work; task arguments alone cannot distinguish them. No service-wide cap
+or provider policy changes. Validate the additional eight concurrent checks
+per shard against actual Taskworker/Proxy/API/datastore resource and verdict
+controls, not against a transport budget treated as an RSS reservation.
 
 This is a rate/capacity invariant, not a percentage floor. A first sweep may be
 incomplete without fault when its measured rate can finish before evidence
@@ -6564,7 +6830,8 @@ the exact projected drain from the exact remaining time. Zero slack is not a
 shortfall, while any negative slack (including a subsecond shortfall) remains
 negative. Only three additional scalar minima leave PostgreSQL, one per urgent
 category; no provider identities, individual deadlines, or prefix rows leave
-the database. The activity response has exactly 23 columns. A due category
+the database. The activity response has exactly 24 columns, including the separate
+`verdict_refresh_due` count. A due category
 with a nonzero gross rate must return a valid signed slack; missing, malformed,
 or legacy aggregate-only responses fail closed. An empty category or zero
 gross rate returns `unavailable`, never a fabricated zero or healthy forecast.
@@ -6625,8 +6892,12 @@ first-attempt-versus-retry allocation inside the unlocated lane.
   non-dark candidates but no location/attempt/health progress inside the
   derived bound. The newest-activity clock excludes current-dark candidates so
   earlier attempts against them cannot keep a corrected queue falsely fresh.
-- `egress-blackhole-stalled` (PAGE after two samples): a shard has blackhole
-  due candidates but no check progress inside the same derived bound.
+- `egress-blackhole-stalled` (PAGE after two samples): a shard has
+  measured-verdict refresh candidates and no measured-check clock inside the
+  same derived bound. The existing alert identity is retained, but observed
+  `due` now means exact scheduler-ready work and `verdict_refresh_due` is
+  separate exposure. A successful `not_measured` reschedule may leave this
+  coverage alert open without any failed submission or scheduler fault.
 - `egress-blackhole-capacity` (PAGE after two samples): shard activity is
   current, but the complete-fleet projection at the measured last-hour rate is
   longer than the blackhole-verdict lifetime. Diagnose §2.23 and §2.24 first:
@@ -6936,9 +7207,10 @@ standing deployment guidance after the rebase.
 Correlate a stalled frame with its bounded `ProviderEgressProbe` Taskworker
 logs and generic task error. Repair the concrete authentication, API,
 task-claim, or tunnel execution fault; do not delete provider evidence just to
-move the timestamp. This is a **software execution / operational rollout**
-alert class. It cannot be fixed by adding Proxy hardware, and it does not imply
-that the independent Proxy active-client ceiling is adequate.
+move the timestamp. The blackhole finding is measured-coverage exposure,
+not a proved software execution or operational rollout cause. Its clocks alone
+do not identify a resource bottleneck or establish the independent Proxy
+capacity boundary.
 
 Implementation convention: SIGNALS.md §2.19 (`egress-coverage`) maps to
 `signal_egress_coverage.go` and `signal_egress_coverage_test.go`. Synthetic
@@ -7017,7 +7289,7 @@ and the attempt reports as `submit_failed`. The address itself is never a label.
 `urnetwork_egress_probe_attempts_total` counts one outcome per full run, `ok` or
 its failure class; the prober-side classes `health_not_run` (the run never
 started), `run_not_measured` (its tunnel died and could not be re-created),
-`no_exit_ip` (the `/ip` echo never answered) and `run_batch_guard` (its batch was
+`no_exit_ip` (the `/my-ip-info` echo never answered) and `run_batch_guard` (its batch was
 held back by the run guard) are the probe's own misses, not verdicts on the
 provider's traffic. Both are recorded only once the run guard has judged the
 batch -- a held-back batch records only its `run_batch_guard` attempts -- and
@@ -7191,15 +7463,52 @@ strategy but currently resolves its host names outside the in-tunnel DoH path;
 do not confuse that bootstrap resolution with provider egress DNS.
 
 False-positive qualifier: this proves the mechanism, not attribution of every
-production probe timeout. The prober no longer records the stage an attempt
-failed at: a timeout before the connection is established is one failed attempt
+production probe timeout. Scored-load attempts do not record the failed stage:
+a timeout before the connection is established is one failed attempt
 of the load, retried like any other, and it counts against the load like any
 other failure once every attempt has failed, so it is not a DNS-specific
 verdict. Only a TLS authentication failure, which ends the load at once, and a
 tunnel lost under the load's last attempt, which leaves the load not measured,
 are told apart; at the run level a tunnel that never opens is `tunnel_failed`
-and a warm-up the `/ip` echo never answers is `no_exit_ip`.
-False-negative qualifier: the `/ip` echo warm-up precedes the scored loads on
+and a warm-up the `/my-ip-info` echo never answers is `no_exit_ip`.
+
+Source checkpoint (2026-09-25): Operator Proxy `7ce5f03` is committed in source
+but not yet deployed to Main. It records fixed `echo_stage` and `error_class`
+for completed no-exit results. This is not an in-flight stage observation:
+health still waits for scored loads before returning its result, and
+cancellation before the final result can omit the echo detail. DNS and socket
+dialing remain combined; contract/window readiness remains unknown. This adds
+no new metric families or labels and does not make the existing watcher parse
+these fields. Verify the running Taskworker artifact before expecting this
+detail; deduplicated log samples are not an attempt denominator.
+
+Confirmed request-owner defect (2026-09-25, Operator Proxy `633891b`): Go's HTTP transport deliberately
+detaches dial cancellation with `context.WithoutCancel` for potential reuse,
+even when the provider probe disables keep-alives. The custom
+`providertunnel` `DialTLSContext` callback formerly passed that context to its
+tunnel dial and TLS handshake. A 10/15-second scored request could release its
+fetch slot while its independently bounded 30-second tunnel dial remained
+active. `TestProbeHttpRequestOwner*` reproduces this at the actual HTTP owner:
+six full-health fetch slots admitted 18 overlapping synthetic dials, and a
+three-load blackhole retry retained six. The scoped correction restores each
+request's deadline/cancellation and joins admitted dial work before release;
+it preserves independent request ownership, response-body lifetime, HTTP1,
+closed host policy, WebPKI/pins, retry spacing and existing guard semantics.
+A live-path deadline remains measured failure; genuine path loss remains
+NotMeasured. No timeout increase or new shared admission limit is involved.
+
+This is source-proven abandoned-work amplification, not a proven cause of
+Main's broad HTTP/load failures. The synthetic dial models the existing TUN
+bound; it is not a measured live amplification factor or phase census. Before
+rollout attribution or recovery, verify the running Taskworker contains the
+request-owner correction and compare same-attempt logical outcomes, guard
+inputs and acknowledged measured publication. DNS-leg log rates, quieter
+cancellation, or a passing local test do not establish recovery. Deployment
+of this correction is not yet verified by this source checkpoint; §2.19 owns
+the independent persisted-coverage and publication-clock gate. This catalog
+change adds no watcher query, metric family, label or new alert identity.
+
+False-negative qualifier: the `/my-ip-info` echo warm-up precedes the scored loads on
 the same initially cold tunnel/cache; later aggregate health success does not
 establish what happened to an individual failed warm-up or load or exclude an
 earlier DNS-family stall.
@@ -7279,6 +7588,25 @@ formatting or package metadata checks do not substitute for executing these test
 
 ### 2.19b Egress site pool freshness — retire sites that fail everyone, and keep the pool representative
 Probe: `egress-site-pool`
+
+Schema readiness: before any data or Mimir read, a bounded catalog-only
+preflight verifies every public table/column/type used by this probe,
+including blackhole retry fields (707/709), destination pool (711) and both
+tallies (712/713). Missing or incompatible schema emits
+`egress-site-pool-schema-unavailable` (WARN, one sample): readiness unknown,
+not an empty/healthy pool or proof of a running service outage.
+No dependent healthy sentinel is emitted, so prior incidents remain open.
+The one-shot can complete with this explicit warning. Read errors, malformed
+output and cancellation still fail closed; a later DDL/data-query failure
+also remains an error. Metadata visibility can conservatively delay coverage,
+and a successful preflight is not full migration or running-artifact
+attestation. Use §8.9 and exact deployed artifacts to review the rollout;
+this warning is not permission to migrate merely to clear the monitor.
+
+Schema-ticket recovery means the physical preflight is ready and dependent
+PostgreSQL queries returned validly. It clears only schema readiness:
+independent Mimir or Redis visibility may remain unknown, and this does not
+declare feature recovery.
 
 The probe's verdicts are only as good as the sites it loads. A site that
 refuses every exit — a bot manager that rejects the probe's request shape, a
@@ -7380,14 +7708,29 @@ Alert, WARN tier, five-minute cadence, when any of these holds:
   (`DarkBackoff`) in the past have not been rechecked: a failing provider is
   neither confirmed dark nor cleared, and the pool is silently smaller than
   the checks admit;
-- **prober fault, not sites** (`egress-prober-fault`, frames
-  `failure-share`, `guard-full`, `guard-blackhole`): the fleet-wide
-  failed-load share after retries exceeds `SiteProberFaultShare` (20 %) in
+- **protective candidate, cause unproven** (`egress-prober-fault`, frames
+  `failure-share`, `guard-full`, `guard-blackhole`): the recorded failed-load
+  share after retries exceeds `SiteProberFaultShare` (20 %) in
   every class over the runs of the last `SiteProberFaultWindow` (an hour),
   each class judged on at least 100 scored loads, or
   the dark or run batch guard of connect/GEOMAP.md §11.3 tripped within the
-  hour (`urnetwork_egress_probe_batch_guard_trips_total`) — a request-shape or
-  capacity fault on the prober, to be read together with §2.19a.
+  hour (`urnetwork_egress_probe_batch_guard_trips_total`) — a protective
+  candidate, not proof of a request-shape, capacity or other common prober
+  cause, to be read together with §2.19a.
+
+The stable `egress-prober-fault` identity preserves ticket continuity, not
+causal certainty. A full guard must score the same provider place and scoring
+snapshot as publication: incompatible failures can falsely trip it, while
+incompatible passing loads can hide valid failures. Unknown place does not
+establish an exclusion. Require a same-batch result/place/scoring join and the
+exact running artifact before attributing that defect to a live trip; a local
+fix or nearby aggregate is insufficient. Blackhole guard behavior is separate:
+ordinary negatives become `not_measured`, while passing and TLS-authentication
+evidence remains; a full guard withholds health/location/tally publication.
+Attempt reporting must succeed before a durable retry can be inferred. The
+all-class condition describes recorded loads, not complete fleet coverage or
+observed refresh execution. Missing batch, place, source or artifact evidence
+leaves the cause unknown without clearing the protective finding.
 
 The backfill and guard series come from Mimir. Unreadable, empty, partial,
 stale, restarted or excluded coverage reports `egress-site-pool-unobservable`;
@@ -7471,6 +7814,25 @@ the unreachable share), so the monitor judges by the numbers the task acts on.
 
 ### 2.19c Derived-location health — the ping geometry and its calibration
 Probe: `derived-locations`
+
+Schema readiness: a bounded catalog-only preflight checks every public
+table/column/type read by the data queries, including `derived_location`
+(702), the hour tally (716) and a network_ping relation witness, before data or Redis history is read.
+Missing or incompatible schema emits `derived-locations-schema-unavailable`
+(WARN, one sample): readiness unknown, not zero published nodes or proof of
+a stalled running job. No dependent healthy sentinel is emitted.
+The one-shot can complete with the warning. Read errors, malformed output and
+cancellation still fail closed; later DDL/data-query failures remain errors.
+Catalog visibility restrictions can delay observation. The preflight does
+not attest indexes, defaults, constraints, a running writer or full migration
+coherence; nullable partition-catalog checks retain their existing semantics.
+Review §8.9 and exact deployed artifacts; this is not permission to migrate
+merely to make the monitor green.
+
+Schema-ticket recovery means the physical preflight is ready and dependent
+PostgreSQL queries returned validly. It clears only schema readiness:
+independent Mimir or Redis visibility may remain unknown, and this does not
+declare feature recovery.
 
 The derive job (connect/GEOMAP.md §5, `taskworker/work/derive_location_work.go`)
 turns a day of co-signed pings into a corrected position per provider and
@@ -7704,9 +8066,18 @@ sweep's naming four days old, and tomorrow's partition dropped — and assert
 exactly the sweep part each one is.
 
 ### 2.19d Country-specific egress site coverage and freshness
-Probe: `egress-country-sites`
+Planned probe: `egress-country-sites`
 
-The full quality probe's `site` sample is 13 general destinations and 13
+Coverage status: no registered runtime probe currently implements this
+section. The country-site candidate helpers filter proposed websites; they
+do not publish a country-list manifest or attest the served pool or full-run
+selection. The required country-list provenance/verification records,
+published country-pool generation and generation-linked split-run/skip
+receipts are missing from the current producer/storage contract. This is an
+explicit measurement coverage gap, not healthy country coverage. The
+requirements below remain the acceptance contract for implementation.
+
+The required full quality probe `site` sample is 13 general destinations and 13
 destinations selected for the provider's published country
 (`connect/GEOMAP.md` §11.5). A missing country list is **not** provider
 failure: it makes that full quality result unscorable and must not be hidden
@@ -7754,7 +8125,7 @@ provider failure. False-negative qualifiers: a 13/13 count alone does not
 prove distinct domains, current source evidence, correct country selection,
 or successful load verification. Use source and pool generation together.
 
-Implementation convention: §2.19d (`egress-country-sites`) maps to
+Planned implementation convention: §2.19d (`egress-country-sites`) maps to
 `signal_egress_country_sites.go` and `signal_egress_country_sites_test.go`.
 Deterministic tests use synthetic countries and reserved example domains for
 all coverage, freshness, missing-source, disjointness, enabled/legacy,
@@ -8538,6 +8909,25 @@ success, strict aggregate rejection, query privacy, and detailed Markdown.
 
 ### 2.24 Stored-contract HMAC cutover compatibility
 Probe: `hmac-cutover`
+
+Schema readiness: before reading cohort data, a bounded catalog-only
+preflight checks all referenced public columns and query-compatible types,
+including `consecutive_failures` (707) and `first_failed_at` (708).
+Missing or incompatible schema emits `hmac-cutover-schema-unavailable`
+(WARN, one sample): readiness unknown. No dependent healthy sentinel is
+emitted and no legacy single-failure rule is substituted, so missing schema
+cannot resolve the HMAC incident or weaken the consecutive-dark definition.
+The one-shot can complete with the explicit warning. Read errors, malformed
+output and cancellation still fail closed; later DDL/data-query failures
+remain errors. Restricted catalog visibility may delay observation; presence
+alone does not attest all migrations, a deployed verdict writer or receiver
+ancestry. Review §8.9 and exact deployed artifacts; this warning is not
+permission to migrate merely to clear the monitor.
+
+Schema-ticket recovery means the physical preflight is ready and dependent
+PostgreSQL queries returned validly. It clears only schema readiness:
+independent Mimir or Redis visibility may remain unknown, and this does not
+declare feature recovery.
 
 `connect.SignStoredContract` changes the signature emitted by API and resident
 Connect controllers at `ContractManagerSettings.NetworkEventTimeChangeHmac`.
@@ -9776,7 +10166,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 
 | Class (grep) | Meaning | Action |
 |---|---|---|
-| `Stats push rejected status=... reason=series-limit ...` or legacy `Stats push rejected (400): ... per-user series limit` (`mimir-series-limit`) | Mimir rejected series admission because the tenant's in-memory budget is exhausted. PAGE on the first rejection window. Current fronts discard the raw response and emit only a fixed job class, family-class counts, total families, and total time series; legacy bodies can embed private labels and are reduced to a generic sample. A mixed rejected batch identifies candidate contributors, not a family that independently crossed the shared limit. | Run `mimir-admission` (§11.20a) for exact-process admission-discard and created/removed-series counters. Use a current structured batch to bound candidate sources, but treat accepted per-service/family aggregates as context only because rejected candidates never enter them. Preserve distinct instance labels; do not restart Mimir or raise its limit to manufacture headroom. After removing a proven avoidable source, require observed series removal, enough per-ingester headroom for the next complete overlap, zero new discards, and fresh source metrics through the complete two-hour quiet window. Historical gaps stay under §11.20. |
+| `Stats push rejected status=... reason=series-limit ...` or legacy `Stats push rejected (400): ... per-user series limit` (`mimir-series-limit`) | Mimir rejected series admission because the tenant's in-memory budget is exhausted. PAGE on the first rejection window. Current fronts discard the raw response and emit only a fixed job class, family-class counts, total families, and total time series; legacy bodies can embed private labels and are reduced to a generic sample. A mixed rejected batch identifies candidate contributors, not a family that independently crossed the shared limit. | Run `mimir-admission` (§11.20a) for exact-process admission-discard and created/removed-series counters. Use a current structured batch to bound candidate sources, but treat accepted per-service/family aggregates as context only because rejected candidates never enter them. Preserve distinct instance labels; do not restart Mimir to manufacture headroom. An operator-authorized limit increase is a capacity change, not incident closure: verify effective per-ingester limits, host headroom, zero new discards, and fresh source metrics through the complete two-hour quiet window while continuing source-cardinality review. Historical gaps stay under §11.20. |
 | `Stats push rejected status=... reason=rate-limit ...` or `cortex_discarded_samples_total{reason="rate_limited"}` (`mimir-ingestion-rate-limit`) | Mimir's per-tenant sample token bucket rejected ingestion. The exact child-counter increase proves lost samples independently of series-cardinality headroom, but replicated child counters are not unique request counts. A structured rejected batch supplies bounded candidate job/family classes without proving unique loss or one culpable family. | Run `mimir-admission` (§11.20a), preserve exact child generations, then use `mimir-balance` and `mimir-publishers` to distinguish placement skew from aggregate load. Remove or reduce only a proven unnecessary sample source. A rate/burst increase may require an operational capacity decision and resource validation; do not raise it, restart Mimir, or blindly retry rejected payloads automatically. Require zero new rate-limited increments and fresh required metrics for the complete two-hour quiet window. |
 | `Stats push rejected status=... reason=other-client|server ...` (`mimir-push-rejected`) | The Grafana front lost a batch to an unclassified upstream rejection without a proven typed limit. An unreadable, oversized, or unknown client-error body can still conceal a series/rate cause; the generic class does not exclude those causes. The fixed enum preserves the owner boundary while the raw upstream response is discarded because it can contain arbitrary private labels. | Use the fixed job/family classes only to select the owning investigation; direct admission counters independently establish any limit incident. Check the exact child and submitting artifact, reproduce with a synthetic valid push, and never restore raw response-body logging. Require direct health, a successful controlled push, and ten quiet minutes. |
 | `mimir-rejection-unobservable` | A recognized structured rejection failed the fixed semantic schema (compatible status/reason, bounded positive counts, unique sorted fixed family classes, and exact family-count sum), or a recognized legacy rejection lacks the exact source-reviewed series-limit body prefix. An echoed sample label containing a limit phrase is not a capacity discriminator. WARN at one event/minute. Raw payloads are discarded; this is visibility loss, not a series, rate, or server capacity diagnosis. The same window withholds healthy findings for all three typed rejection identities so unknown evidence cannot close a prior loss incident. | Compare exact emitting Grafana/monitor artifact schemas and repair the owning producer or parser; never infer capacity from unknown response text. Verify current events are parseable and ten minutes free of unknown-schema events. Typed loss incidents separately require their direct-counter recovery windows. See §1.5/§4. |
@@ -11830,6 +12220,7 @@ Tier-1 (warn):
 | mimir-index | host Mimir metrics | §11.18 per-process gateway sync/tenant coverage plus fleet compactor index freshness | gateway sync > 30m, discovered != synced, or writer index > 35m; 2 probes |
 | mimir-continuity-gap-unclassified / mimir-query-store-visibility-gap / mimir-ingestion-gap | raw Mimir range | §11.20 repeated always-emitted build-info continuity across the public dashboard window | >= 3 missing 5-minute evaluations inside two present samples; first observation remains unclassified; a strictly advancing left edge on the same fixed-right-edge gap proves historical query/store restoration, including batched discovery; retained restoration history must be distinguished from current movement or stationary observations, and a repeated fixed post-boundary gap is loss |
 | mimir-series-limit | exact child Mimir metrics | §11.20a per-process per-user-series admission counter and headroom | positive exact total on a new generation or positive same-generation delta; immediate PAGE, then 2h complete comparable quiet hold |
+| mimir-series-headroom | exact child Mimir metrics | §11.20a same-child effective local limit minus retained memory series | reserve <= 10% of that child's local limit; immediate independent WARN, not proof of current sample loss; complete comparable current fleet evidence required for recovery |
 | mimir-ingestion-rate-limit | exact child Mimir metrics | §11.20a per-process sample-rate admission counter plus effective rate/burst context | positive exact total on a new generation or positive same-generation delta; immediate PAGE, then its independent 2h complete comparable quiet hold |
 | mimir-push-rejected | structured Grafana rejection event | §11.20a unclassified rejection without a proven typed limit plus bounded job/family classes | >=1/min; limit causes are not excluded; raw upstream body is never retained |
 | mimir-rejection-unobservable | structured Grafana rejection parser | §1.5/§4 fixed semantic schema validity, with typed healthy-recovery withholding | >=1 malformed event/min; visibility only, no capacity attribution; ten-minute parseable quiet gate |
@@ -14011,8 +14402,13 @@ process has:
 
 - at least 16 GiB RSS plus any of: at least 6.25% of host CPUs (bounded to
   1–4 cores), 250,000 goroutines, or 256 MiB/s allocation; or
-- an unconditional hard shape of at least 64 GiB RSS, 500,000 goroutines, or
+- an unconditional alert shape of at least 64 GiB RSS, 500,000 goroutines, or
   1 GiB/s allocation.
+
+These are monitor PAGE thresholds, not enforced Go or service ceilings. Do not
+add a process-wide hard limit to Main services to silence this signal: retain
+the alert and diagnose the responsible per-instance work, lifecycle, and host
+capacity while the service continues to run.
 
 The 2026-09-15 pre-correction production discriminator was Connect, not generic
 traffic or a host kernel fault. Busy production blocks retained approximately
@@ -15876,6 +16272,36 @@ source-unrecognized whole-family absence, descriptor loss, a malformed
 exact-reason row, another generation change, or another increase resets the
 affected quiet window.
 
+Retained-head capacity risk has a separate immediate WARN identity,
+`mimir-series-headroom`, target `mimir-fleet`, frame
+`retained-series-headroom`. It fires when the effective local series limit
+minus retained memory series is at most 10% of that limit on the same child,
+including equality and negative reserve. Pair each child's values before
+reducing the fleet; do not compare one child's headroom with another child's
+limit. This warning is independent of both discard quiet holds and remains
+visible after their recovery or when discard counters have always been zero.
+A valid low-headroom child survives an unknown host or sibling child, with
+partial coverage stated explicitly. Healthy resolution requires complete
+comparable current observations of every enabled child above 10%, plus a
+successful state save. Missing or malformed frames, source-unrecognized
+absence, a first generation, a reset, or a failed state operation cannot
+manufacture healthy recovery. The existing bounded host command supplies this
+gauge; no extra query, metric labels, or durable incident bit is introduced.
+
+Low headroom is not proof of current sample loss or a publisher cause. Retained
+memory series differ from both the active set and instantaneous query-visible
+accepted series; old publisher generations can retain head after active series
+fall. Accepted aggregates also omit rejected candidates. The reviewed bundled
+single-tenant configuration makes process head comparable to the per-user local
+limit; a different or multi-tenant deployment requires separate authority and
+can otherwise overstate per-user pressure. More than 10% reserve is not a
+rollout-capacity guarantee: memory, writable-ring membership, skew, and the
+complete next-generation overlap still need their own evidence. This is a
+monitor warning threshold, not a Main service cap or an instruction to raise a
+limit. Do not restart Mimir to clear the warning. A known healthy subset cannot
+clear a warning for unobserved children; discard-counter pages and historical
+query continuity retain their independent recovery contracts.
+
 The bounded host/port/process histories, both active-incident bits, and both
 quiet boundaries are stored atomically under the configured monitor state
 directory through the shared versioned state lock. Version-two state loads the
@@ -15956,9 +16382,12 @@ the complete two-hour windows. Verify two fresh independent application-metric
 reads and the exact running Server/Warp artifacts. A new Mimir version or
 revision must stay unknown until its registration, instantiation, and
 exposition behavior is reviewed and added with deterministic descriptor-present,
-exact-absence, partial-descriptor, and positive-row controls. Do not raise a limit, suppress
-labels, retry rejected payloads, or restart Mimir merely to reset a visible
-counter. Historical availability and replacement durability remain independent
+exact-absence, partial-descriptor, and positive-row controls. An explicitly
+authorized series-limit increase requires measured memory headroom and the
+effective local limit on every writable ingester; it cannot clear the PAGE
+without the same two-hour zero-discard and metric-freshness controls. Do not
+suppress labels, retry rejected payloads, or restart Mimir merely to reset a
+visible counter. Historical availability and replacement durability remain independent
 under §11.20 and §11.21.
 
 ### 11.20b Mimir distributor ingestion balance
@@ -20054,19 +20483,60 @@ sanitized issuer common name, the first six bytes of SHA-256 over the DER, the
 total peer-certificate count, and the verified-chain count. Do not retain PEM,
 certificate contents, private request headers, or disable verification to get
 a response. Compare the leaf identity and fingerprint with a direct-origin
-control and the exact selected exit. A matching bad origin chain is external;
-a different issuer/fingerprint only through the proxy isolates the exit or
-route. Go can report an empty `tls.ConnectionState` on a failed handshake even
-though `crypto/x509` already parsed the rejected leaf and retained it in
-`x509.UnknownAuthorityError`. In that exact case, fall back to the error's
-certificate and emit only the same sanitized subject/issuer and truncated DER
-fingerprint, framed as `peer_certs=unavailable`, `verified_chains=0`, and
-`rejected_leaf=...`; do not treat the absent connection-state slice as proof
-that the peer sent no certificate. `TestHTTPSRequestTraceRetainsRejectedPeerCertificateChain`
-supplies a synthetic rejected two-certificate state, while
-`TestHTTPSRequestTraceFallsBackToRejectedUnknownAuthorityLeaf` reproduces the
-empty-state error and requires the bounded leaf identity to survive without
-certificate bytes.
+control and the exact observed return provider. Controls must be contemporaneous
+and retain the same destination IP and TLS SNI: differing fingerprints alone
+can be legitimate CDN rotation, and a later clean direct request does not
+locate an earlier failure. `net/http` supplies an empty `tls.ConnectionState` on failed handshakes,
+but `tls.CertificateVerificationError.UnverifiedCertificates` retains the full
+parsed peer chain, including hostname and expiry rejections. Summarize that
+chain first and label its source `certificate_source=verification_error`.
+A bare `x509.UnknownAuthorityError.Cert` can be an intermediate or root, so the
+last-resort single-certificate diagnostic is `rejected_cert`, not a presumed
+leaf. The real loopback TLS regression
+`TestProbeHTTPSRetainsRejectedChainFromRealTLSHandshake` first accepts a trusted
+response, then rejects another issuer without retrying or sending an HTTP
+request; it requires both rejected certificate fingerprints to survive.
+
+The WireGuard origin dialer records the connected origin IP and port before
+TLS starts. `request route` reports only aggregate destination/local-channel
+samples whose entire RPC interval falls within the failing request. They are
+candidates, not per-flow ownership proof; absence remains `samples=none`.
+HTTP/SOCKS do not expose their server-resolved origin socket and explicitly
+report `origin=unavailable`. Their listener addresses and later hosted-device
+timeline snapshots must not be mistaken for the failing origin's route.
+`GetDestinationExits.ClientId` is a local window slot; an alias such as `p29`
+does not identify the egress provider. `ProviderEvent.EgressClientId` and the
+authenticated return envelope's `SourceId` identify the provider instead.
+
+Opt-in `./proxy/test-main.sh --trace-tls-flows=true` requires the matching
+server `/diagnostics/flow-trace` API. The existing signed-proxy authentication
+scopes it to one temporary device. POST arms a 45-minute, 1024-event ring;
+GET never creates a replacement device. A trace-session generation and paired
+event/drop cursors delimit each request without comparing clocks. At the
+authenticated final-return callback it records only each TCP tuple, sequence,
+payload length, UTC timestamp and a session-scoped HMAC provider alias. No
+packet payload, credentials or raw provider IDs are retained or exported.
+Recording never waits behind a reader; contention and overwritten events make
+the interval incomplete. Recording is disabled by default.
+
+HTTP/SOCKS join one observed proxy-side dial to that exact return tuple;
+WireGuard joins the client-observed origin and inner TCP source port (its
+server NAT rewrites the address, not the port). Multiple dials, missing data,
+lost generations and expired traces remain unavailable. A complete match is
+`scope=actual-return-flow`, with the provider count and at most eight provider
+aliases/eight payload-event summaries. These are authenticated sources that
+delivered bytes for the flow, not proof which source supplied a particular
+certificate if multiple sources occur. Missing diagnostics never change the
+target verdict; diagnostic reads are outside its HTTP-client timeout. No TLS
+verification, target retry or forwarding behavior is changed.
+
+Compare the rejected chain with simultaneous normal-verifier controls to the
+same IP/SNI through a direct route and an independent provider. An untrusted
+chain seen only on one attributed provider path narrows the fault to that
+path, but cannot distinguish the provider from its upstream interception or
+per-egress origin edge. The same untrusted chain on independent routes instead
+points toward the origin or a shared upstream. Neither a later passing retry
+nor these diagnostics remediate an untrusted response.
 
 **WireGuard encrypted-UDP versus inner-TUN boundary:** an acceptance request
 whose inner packet trace ends at outbound TCP retransmits still leaves two

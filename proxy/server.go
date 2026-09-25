@@ -368,6 +368,7 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 			recordProxyAdmissionFailure("socks", false)
 			return nil, err
 		}
+		pd.recordFlowTraceDial("socks", conn)
 		return instrumentProxyConnection("socks", conn), nil
 	}
 
@@ -522,6 +523,7 @@ func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
 			recordProxyAdmissionFailure("http", false)
 			return nil, err
 		}
+		pd.recordFlowTraceDial("http", conn)
 		return instrumentProxyConnection("http", conn), nil
 	}
 
