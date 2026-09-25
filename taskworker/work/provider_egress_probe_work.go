@@ -648,8 +648,13 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 		return fleetprobe.BlackholeSummary{}, false, fmt.Errorf("run blackhole batch: %w", runErr)
 	}
 
-	var measurementErr error
+	// The fleet retains only checks completed before cancellation. Keep that
+	// lifecycle failure even when every retained check is passing or absent.
+	measurementErr := ctx.Err()
 	for _, check := range summary.Checks {
+		if measurementErr != nil {
+			break
+		}
 		if !check.Ok && !check.NotMeasured && check.Failure != egresshealth.FailureTlsAuthentication {
 			measurementErr = self.readiness.check(ctx)
 			break
@@ -703,7 +708,12 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 	egressProbePassProvidersTotal.WithLabelValues("blackhole", "tunnel_failed").Add(float64(summary.TunnelFailed))
 	egressProbePassNotMeasuredTotal.WithLabelValues("blackhole").Add(float64(summary.NotMeasured))
 	if 0 < len(summary.Checks) {
-		if submitErr := self.submitBlackholeChecks(ctx, summary.Checks); submitErr != nil {
+		// Finalize completed evidence independently of task drain/max-time.
+		// Ordinary negatives have already passed the live-readiness boundary;
+		// one bounded request retains completed passing/TLS/unknown evidence.
+		submitCtx, cancelSubmit := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancelSubmit()
+		if submitErr := self.submitBlackholeChecks(submitCtx, summary.Checks); submitErr != nil {
 			egressProbePassErrorsTotal.WithLabelValues("blackhole_submit").Inc()
 			return summary, tripped, errors.Join(measurementErr, fmt.Errorf("submit blackhole batch: %w", submitErr))
 		}
