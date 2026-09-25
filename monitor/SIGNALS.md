@@ -7451,14 +7451,29 @@ Alert, WARN tier, five-minute cadence, when any of these holds:
   (`DarkBackoff`) in the past have not been rechecked: a failing provider is
   neither confirmed dark nor cleared, and the pool is silently smaller than
   the checks admit;
-- **prober fault, not sites** (`egress-prober-fault`, frames
-  `failure-share`, `guard-full`, `guard-blackhole`): the fleet-wide
-  failed-load share after retries exceeds `SiteProberFaultShare` (20 %) in
+- **protective candidate, cause unproven** (`egress-prober-fault`, frames
+  `failure-share`, `guard-full`, `guard-blackhole`): the recorded failed-load
+  share after retries exceeds `SiteProberFaultShare` (20 %) in
   every class over the runs of the last `SiteProberFaultWindow` (an hour),
   each class judged on at least 100 scored loads, or
   the dark or run batch guard of connect/GEOMAP.md §11.3 tripped within the
-  hour (`urnetwork_egress_probe_batch_guard_trips_total`) — a request-shape or
-  capacity fault on the prober, to be read together with §2.19a.
+  hour (`urnetwork_egress_probe_batch_guard_trips_total`) — a protective
+  candidate, not proof of a request-shape, capacity or other common prober
+  cause, to be read together with §2.19a.
+
+The stable `egress-prober-fault` identity preserves ticket continuity, not
+causal certainty. A full guard must score the same provider place and scoring
+snapshot as publication: incompatible failures can falsely trip it, while
+incompatible passing loads can hide valid failures. Unknown place does not
+establish an exclusion. Require a same-batch result/place/scoring join and the
+exact running artifact before attributing that defect to a live trip; a local
+fix or nearby aggregate is insufficient. Blackhole guard behavior is separate:
+ordinary negatives become `not_measured`, while passing and TLS-authentication
+evidence remains; a full guard withholds health/location/tally publication.
+Attempt reporting must succeed before a durable retry can be inferred. The
+all-class condition describes recorded loads, not complete fleet coverage or
+observed refresh execution. Missing batch, place, source or artifact evidence
+leaves the cause unknown without clearing the protective finding.
 
 The backfill and guard series come from Mimir. Unreadable, empty, partial,
 stale, restarted or excluded coverage reports `egress-site-pool-unobservable`;

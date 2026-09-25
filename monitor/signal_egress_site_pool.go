@@ -890,7 +890,7 @@ func evaluateEgressSitePool(
 		emit("egress-retry-queue-starved", failing)
 	}
 
-	// prober fault, not sites
+	// protective candidates, not an attribution of the common cause
 	{
 		failing := []finding{}
 		allAbove := true
@@ -912,13 +912,13 @@ func evaluateEgressSitePool(
 		}
 		if allAbove {
 			f := egressSitePoolFinding("egress-prober-fault", target, "failure-share", 2)
-			f.symptom = fmt.Sprintf("The fleet-wide failed-load share after retries is above %.0f%% in every class", 100*siteSettings.SiteProberFaultShare)
-			f.mechanism = "Sites fail providers one class at a time; every class failing at once is the prober -- its request profile, its host's capacity, or its route -- not the pool. The refresh skips its run while this holds, since retiring sites now would empty the pool for nothing."
+			f.symptom = fmt.Sprintf("The recorded failed-load share after retries is above %.0f%% in every class", 100*siteSettings.SiteProberFaultShare)
+			f.mechanism = "This cross-class pattern is a protective candidate, not proof that the prober is at fault or that destination, provider-path or scoring causes are absent. Refresh policy defers site retirement under this condition; the alert does not attest refresh execution."
 			f.baseline = fmt.Sprintf("At least one class under SiteProberFaultShare=%.2f over the last %ds of runs.", siteSettings.SiteProberFaultShare, siteSettings.SiteProberFaultWindowSeconds)
 			f.observed = "failed/total " + strings.Join(observed, " ")
 			f.evidence = "Class tallies of the health runs measured in the window; bounded classes only."
-			f.context = "Read together with §2.19a."
-			f.action = "Check the prober's request profile (egress-sites.yml profile), its host's capacity and its route before touching the pool."
+			f.context = "Recorded class tallies do not establish complete fleet coverage or join a particular provider, batch, destination-pool snapshot or exact running artifact. Read together with §2.19a."
+			f.action = "Compare bounded request-profile, host-capacity, route, destination-pool and scoring evidence before assigning a cause or changing the pool. Preserve the protective policy while the owning evidence is unknown."
 			f.verify = "Some class falls under the line for an hour."
 			failing = append(failing, f)
 		}
@@ -933,12 +933,12 @@ func evaluateEgressSitePool(
 			for _, schedule := range schedules {
 				f := egressSitePoolFinding("egress-prober-fault", target, "guard-"+schedule, 1)
 				f.symptom = fmt.Sprintf("The %s batch guard tripped within the last %s", schedule, settings.GuardTripWindow)
-				f.mechanism = "A blackhole batch with more than DarkBatchGuard of its checks dark, or a full batch with more than RunBatchGuard of its scored loads failed, is held to be the prober's own fault: its negatives are discarded or it is not submitted, and its providers are retried after the backoff."
+				f.mechanism = "A guard trip is a protective candidate, not proof of a common prober cause. Blackhole policy rewrites ordinary negative checks as not_measured while retaining passing and TLS-authentication evidence; full policy withholds health, location and tally publication and reports guarded attempts. A durable retry still requires successful reporting."
 				f.baseline = "No batch guard trips."
 				f.observed = fmt.Sprintf("schedule=%s trips=%.0f", schedule, observation.metrics.guardTrips[schedule])
 				f.evidence = "urnetwork_egress_probe_batch_guard_trips_total from the taskworkers; the [egress] guard log line carries the share."
-				f.context = "Read together with §2.19a."
-				f.action = "Check the prober's request profile, its host's capacity and its route; a trip that repeats every pass is a fault the guard is absorbing, not solving."
+				f.context = "The observed counter can be a positive partial subset; it does not identify a same-batch result or prove a shared cause. For full trips, preserve the provider place and scoring snapshot with the exact running artifact before attributing a place-scoring defect. Read together with §2.19a."
+				f.action = "Check profile, capacity, route, destination pool and funding/readiness as candidates. For full trips, require a same-batch result, provider place, scoring snapshot and exact running artifact join; neither aggregate overlap nor a local fix establishes live cause. Do not relax TLS or dark-state policy from the trip alone."
 				f.verify = "No trip for an hour."
 				failing = append(failing, f)
 			}
