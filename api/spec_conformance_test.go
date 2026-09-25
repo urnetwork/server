@@ -305,6 +305,22 @@ func (s *specDoc) kind(sch map[string]any) string {
 	if t, ok := sch["type"].(string); ok {
 		return t
 	}
+	// 3.1 nullable: type: [array, "null"]
+	if ts, ok := sch["type"].([]any); ok {
+		for _, t := range ts {
+			if t, ok := t.(string); ok && t != "null" {
+				return t
+			}
+		}
+	}
+	// nullable ref: oneOf: [{$ref}, {type: "null"}]
+	if alts, ok := sch["oneOf"].([]any); ok && len(alts) == 2 {
+		for _, alt := range alts {
+			if alt, ok := alt.(map[string]any); ok && alt["type"] != "null" {
+				return s.kind(alt)
+			}
+		}
+	}
 	if _, ok := sch["allOf"]; ok {
 		return "object"
 	}

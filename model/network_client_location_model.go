@@ -4919,14 +4919,18 @@ type FindProviders2Result struct {
 }
 
 type FindProvidersProvider struct {
-	ClientId                   server.Id         `json:"client_id"`
-	EstimatedBytesPerSecond    ByteCount         `json:"estimated_bytes_per_second"`
-	HasEstimatedBytesPerSecond bool              `json:"has_estimated_bytes_per_second"`
-	Tier                       int               `json:"tier"`
-	IntermediaryIds            []server.Id       `json:"intermediary_ids"`
-	NetworkOnly                bool              `json:"network_only,omitempty"`
-	ReputationFailedNames      string            `json:"reputation_failed_names,omitempty"`
-	Location                   *ProviderLocation `json:"location,omitempty"`
+	ClientId                   server.Id `json:"client_id"`
+	EstimatedBytesPerSecond    ByteCount `json:"estimated_bytes_per_second"`
+	HasEstimatedBytesPerSecond bool      `json:"has_estimated_bytes_per_second"`
+	Tier                       int       `json:"tier"`
+	// IntermediaryIds is reserved for future multi-hop routes (the
+	// intermediaries to reach ClientId through, in order). Find-providers
+	// never returns multi-hop routes today, so it is never populated and is
+	// omitted from the response rather than sent as null.
+	IntermediaryIds       []server.Id       `json:"intermediary_ids,omitempty"`
+	NetworkOnly           bool              `json:"network_only,omitempty"`
+	ReputationFailedNames string            `json:"reputation_failed_names,omitempty"`
+	Location              *ProviderLocation `json:"location,omitempty"`
 	// IpFamily is the provider's proven category: "dualstack", "v4-only" or
 	// "v6-only". Empty for a fixed client-id spec, which bypasses discovery.
 	IpFamily string `json:"ip_family,omitempty"`

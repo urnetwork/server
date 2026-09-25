@@ -1229,25 +1229,12 @@ type NetworkClientsResult struct {
 	Clients []*NetworkClientInfo `json:"clients"`
 }
 
+// NetworkClientInfo is one row of the network's device list. The client's
+// resident (`NetworkClientResident`: the exchange host, service, block and
+// internal ports the platform runs it on) is internal routing state and is
+// not part of the api view.
 type NetworkClientInfo struct {
-	// ClientId server.Id `json:"client_id"`
-	// NetworkId server.Id `json:"network_id"`
-	// Description string `json:"description"`
-	// DeviceSpec string `json:"device_spec"`
-
-	// CreateTime time.Time `json:"create_time"`
-	// AuthTime time.Time `json:"auth_time"`
-
-	// InstanceId server.Id `json:"client_id"`
-	// ResidentId server.Id `json:"resident_id"`
-	// ResidentHost string `json:"resident_host"`
-	// ResidentService string `json:"resident_service"`
-	// ResidentBlock string `json:"resident_block"`
-	// ResidentInternalPorts []int `json:"resident_internal_ports"`
-
 	NetworkClient
-
-	Resident *NetworkClientResident `json:"resident,omitempty"`
 
 	Connections []*NetworkClientConnection `json:"connections,omitempty"`
 }
