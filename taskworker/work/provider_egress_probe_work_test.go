@@ -192,6 +192,79 @@ func TestProviderEgressProbeExecutesArbitraryCurrentArgsUnchanged(t *testing.T) 
 	}
 }
 
+// Task MaxTime cancels its session with a timer, but does not attach a
+// context deadline. A saturated probe needs a deadline to reserve time for
+// check and publication work instead of silently falling back to serial.
+func TestProviderEgressProbeAddsDeadlineToUnboundedTaskSession(t *testing.T) {
+	settings := testProviderEgressProbeSettings(1)
+	withProviderEgressProbeSettings(t, settings)
+	args := providerEgressProbeArgs(settings, 0)
+	if args.MaxTimeSeconds <= 0 {
+		t.Fatal("test requires a positive task max time")
+	}
+
+	previous := executeProviderEgressProbe
+	called := false
+	executeProviderEgressProbe = func(ctx context.Context, gotArgs *ProviderEgressProbeArgs) (*ProviderEgressProbeResult, error) {
+		called = true
+		if gotArgs != args {
+			t.Fatal("probe arguments changed at the execution boundary")
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("task session without a deadline forced saturated probes into serial fallback")
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 || time.Duration(args.MaxTimeSeconds)*time.Second < remaining {
+			t.Fatalf("probe deadline outside its task max time: %s", remaining)
+		}
+		return &ProviderEgressProbeResult{}, nil
+	}
+	t.Cleanup(func() { executeProviderEgressProbe = previous })
+
+	clientSession := session.NewLocalClientSession(context.Background(), "0.0.0.0:0", nil)
+	defer clientSession.Cancel()
+	if _, ok := clientSession.Ctx.Deadline(); ok {
+		t.Fatal("synthetic task session unexpectedly has a deadline")
+	}
+	if _, err := ProviderEgressProbe(args, clientSession); err != nil {
+		t.Fatalf("ProviderEgressProbe: %v", err)
+	}
+	if !called {
+		t.Fatal("probe executor was not called")
+	}
+}
+
+func TestProviderEgressProbePreservesEarlierTaskDeadline(t *testing.T) {
+	settings := testProviderEgressProbeSettings(1)
+	withProviderEgressProbeSettings(t, settings)
+	args := providerEgressProbeArgs(settings, 0)
+	parentDeadline := time.Now().Add(time.Minute)
+	parent, cancelParent := context.WithDeadline(context.Background(), parentDeadline)
+	defer cancelParent()
+
+	previous := executeProviderEgressProbe
+	called := false
+	executeProviderEgressProbe = func(ctx context.Context, _ *ProviderEgressProbeArgs) (*ProviderEgressProbeResult, error) {
+		called = true
+		deadline, ok := ctx.Deadline()
+		if !ok || !deadline.Equal(parentDeadline) {
+			t.Fatalf("earlier parent deadline was widened: got=%s present=%t want=%s", deadline, ok, parentDeadline)
+		}
+		return &ProviderEgressProbeResult{}, nil
+	}
+	t.Cleanup(func() { executeProviderEgressProbe = previous })
+
+	clientSession := session.NewLocalClientSession(parent, "0.0.0.0:0", nil)
+	defer clientSession.Cancel()
+	if _, err := ProviderEgressProbe(args, clientSession); err != nil {
+		t.Fatalf("ProviderEgressProbe: %v", err)
+	}
+	if !called {
+		t.Fatal("probe executor was not called")
+	}
+}
+
 func TestProviderEgressProbeRetiresStaleShardGeometryWithoutNetworkWork(t *testing.T) {
 	settings := testProviderEgressProbeSettings(3)
 	withProviderEgressProbeSettings(t, settings)

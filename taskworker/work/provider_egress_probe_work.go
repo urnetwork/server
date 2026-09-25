@@ -483,7 +483,13 @@ func ProviderEgressProbe(
 	if settings.ShardCount <= args.ShardIndex || !providerEgressProbeArgsMatchSettings(args, settings) {
 		return &ProviderEgressProbeResult{Stale: true}, nil
 	}
-	result, err := executeProviderEgressProbe(clientSession.Ctx, args)
+	// Task MaxTime cancels the session with a timer but does not set a
+	// context deadline. The probe's bounded cohort admission needs the
+	// deadline to reserve check and publication time; an earlier parent
+	// deadline or cancellation still wins.
+	probeCtx, cancelProbe := context.WithTimeout(clientSession.Ctx, time.Duration(args.MaxTimeSeconds)*time.Second)
+	defer cancelProbe()
+	result, err := executeProviderEgressProbe(probeCtx, args)
 	if providerEgressProbeUnfundedOnly(err) {
 		err = task.WithRetryDelay(err, time.Duration(args.IdleDelaySeconds)*time.Second)
 	}

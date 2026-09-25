@@ -6802,6 +6802,17 @@ Use complete fresh same-process/start deltas with progress and submission
 outcomes. Missing children or an old executable leave the reason unknown;
 neither a decision nor an in-memory completion certifies persisted recovery.
 
+Activation is a separate discriminator from artifact provenance: a binary can
+export all thirteen children yet run only `serial_geometry`. Taskworker's
+declared `MaxTime` historically canceled its session by timer without attaching
+a context deadline, so the bounded pipeline fell back to serial even for a
+full-size 250-provider cohort. The probe now derives a scoped deadline from
+its snapshotted `MaxTimeSeconds`, preserving earlier parent cancellation and
+deadlines. Confirm `pipeline_started` and `successor_selected` increase on
+fresh same-process/start samples before attributing any throughput change to
+the pipeline. `serial_geometry` alone does not identify which fallback operand
+failed; compare actual selected count, limit, concurrency and deadline first.
+
 The no-full and serial paths require a separate execution-geometry control:
 one selected blackhole list may contain many worker waves before final
 submission, while the source's minimum max-time validation budgets one full
