@@ -595,6 +595,11 @@ func httpClientOverDialerWithHosts(dial dialContextFunc, pins map[string][]strin
 		TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{},
 	}
 	tr.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		ctx, done, err := beginProviderHttpDial(ctx)
+		if err != nil {
+			return nil, &providerHttpStageError{stage: "dial_dns_or_socket", err: err}
+		}
+		defer done()
 		host, _, err := net.SplitHostPort(addr)
 		if err != nil {
 			host = addr
@@ -634,7 +639,7 @@ func httpClientOverDialerWithHosts(dial dialContextFunc, pins map[string][]strin
 		return tlsConn, nil
 	}
 	return &http.Client{
-		Transport: tr,
+		Transport: &providerHttpTransport{Transport: tr},
 		Timeout:   timeout,
 		// A probe has no legitimate reason to follow a redirect: the echo
 		// answers directly, and a destination that redirects declares the

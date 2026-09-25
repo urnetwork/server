@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"net/http"
 	"os"
 	"sync/atomic"
 	"testing"
@@ -83,7 +82,7 @@ func TestProbeHttpStageTransportPolicy(t *testing.T) {
 	client := httpClientOverDialerWithHosts(func(context.Context, string, string) (net.Conn, error) {
 		return nil, context.Canceled
 	}, nil, []string{"echo.example"}, time.Minute)
-	transport, ok := client.Transport.(*http.Transport)
+	transport, ok := client.Transport.(*providerHttpTransport)
 	if !ok || !transport.DisableKeepAlives || transport.TLSNextProto == nil || len(transport.TLSNextProto) != 0 || client.Timeout != time.Minute {
 		t.Fatal("diagnostics changed pooling, protocol or owner timeout")
 	}

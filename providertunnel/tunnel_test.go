@@ -325,9 +325,9 @@ func TestHttpClientAppliesPinnedTlsPerHost(t *testing.T) {
 		return nil, context.Canceled // never actually connects
 	}
 	client := httpClientOverDialer(dial, map[string][]string{"pinned.example": {"pin"}}, time.Second)
-	tr, ok := client.Transport.(*http.Transport)
+	tr, ok := client.Transport.(*providerHttpTransport)
 	if !ok {
-		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
+		t.Fatalf("transport type = %T, want *providerHttpTransport", client.Transport)
 	}
 	if tr.DialContext == nil {
 		t.Fatal("transport must dial through the tunnel")
