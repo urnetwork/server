@@ -5,6 +5,7 @@ package server
 import (
 	"errors"
 	"net/http"
+	"syscall"
 
 	"github.com/minio/minio-go/v7"
 )
@@ -33,6 +34,6 @@ func IsBlobCapacityError(err error) bool {
 	case interface{ Unwrap() error }:
 		return IsBlobCapacityError(err.Unwrap())
 	default:
-		return err == ErrBlobCapacityExceeded
+		return err == ErrBlobCapacityExceeded || err == syscall.ENOSPC || err == syscall.EDQUOT
 	}
 }
