@@ -161,12 +161,12 @@ func TestProviderEgressProbeDisabledSettingsSkipOperationalValidation(t *testing
 
 func TestProviderEgressProbeExecutesArbitraryCurrentArgsUnchanged(t *testing.T) {
 	settings := testProviderEgressProbeSettings(4)
+	settings.Full.Limit = 7
+	settings.Full.Concurrency = 1
+	settings.APIURL = "https://api.example.test"
 	withProviderEgressProbeSettings(t, settings)
 
 	args := providerEgressProbeArgs(settings, 2)
-	args.Full.Limit = 7
-	args.Full.Concurrency = 1
-	args.APIURL = "https://api.example.test"
 
 	previous := executeProviderEgressProbe
 	called := false
@@ -912,7 +912,8 @@ func TestProviderEgressProbePostConvergesAChangedShardCount(t *testing.T) {
 }
 
 // A capacity-only rollout keeps the durable shard keys stable. The currently
-// claimed row completes with its immutable arguments, then its post-step must
+// already executing row completes with its immutable arguments; a stale row at
+// entry retires before network work. In either case its post-step must
 // snapshot the new worker-pool size into the successor without requiring a
 // second task chain or a manual pending_task edit.
 func TestProviderEgressProbePostConvergesChangedBatchSettings(t *testing.T) {

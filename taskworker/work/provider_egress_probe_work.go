@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -428,7 +429,31 @@ func validateProviderEgressProbeArgs(args *ProviderEgressProbeArgs) error {
 	return validateProviderEgressProbeArgsConfig(args)
 }
 
-// ProviderEgressProbe runs one bounded shard batch. A configuration geometry
+// Current settings are read once at task entry. A failed immutable snapshot
+// otherwise never reaches Post and can keep retrying an obsolete capacity,
+// endpoint or guard configuration forever. This comparison does not mutate or
+// cancel in-flight work; Stale success lets the existing same-key Post retire it.
+func providerEgressProbeArgsMatchSettings(args *ProviderEgressProbeArgs, settings providerEgressProbeSettings) bool {
+	return args.ShardCount == settings.ShardCount &&
+		args.IdleDelaySeconds == settings.IdleDelaySeconds &&
+		args.MaxTimeSeconds == settings.MaxTimeSeconds &&
+		args.Full == settings.Full && args.Blackhole == settings.Blackhole &&
+		args.APIURL == settings.APIURL && args.PlatformURL == settings.PlatformURL &&
+		args.PublicAPIURL == settings.PublicAPIURL && args.BandwidthCDNURL == settings.BandwidthCDNURL &&
+		args.LoadAttempts == settings.LoadAttempts &&
+		args.LoadRetryMeanIntervalSeconds == settings.LoadRetryMeanIntervalSeconds &&
+		args.TunnelRecreateAttempts == settings.TunnelRecreateAttempts &&
+		args.DarkConsecutiveFailures == settings.DarkConsecutiveFailures &&
+		args.DarkMinimumSpanSeconds == settings.DarkMinimumSpanSeconds &&
+		slices.Equal(args.DarkBackoffSeconds, settings.DarkBackoffSeconds) &&
+		args.DarkBatchGuard == settings.DarkBatchGuard &&
+		args.DarkBatchGuardMinChecks == settings.DarkBatchGuardMinChecks &&
+		args.RunBatchGuard == settings.RunBatchGuard &&
+		args.RunBatchGuardMinRuns == settings.RunBatchGuardMinRuns &&
+		args.CityConfidentRadiusKm == settings.CityConfidentRadiusKm
+}
+
+// ProviderEgressProbe runs one bounded shard batch. A configuration snapshot
 // change makes an old task a no-op; its post-step replaces it with current args.
 func ProviderEgressProbe(
 	args *ProviderEgressProbeArgs,
@@ -455,7 +480,7 @@ func ProviderEgressProbe(
 	if err := validateProviderEgressProbeArgs(args); err != nil {
 		return nil, err
 	}
-	if args.ShardCount != settings.ShardCount || settings.ShardCount <= args.ShardIndex {
+	if settings.ShardCount <= args.ShardIndex || !providerEgressProbeArgsMatchSettings(args, settings) {
 		return &ProviderEgressProbeResult{Stale: true}, nil
 	}
 	result, err := executeProviderEgressProbe(clientSession.Ctx, args)
