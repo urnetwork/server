@@ -366,6 +366,12 @@ func TestBuildScoreBaselineAcceptsZeroStagingMargin(t *testing.T) {
 	if err := validateScoreBaseline(baseline); err != nil {
 		t.Fatalf("zero-margin baseline validation: %v", err)
 	}
+	writeScoreJSON(t, fixture.baseline, baseline)
+	result := Score(fixture.inputs)
+	if result.EvalError != nil || !result.Placeable || result.Diagnostics.TakeoverMargin != 0 ||
+		result.Significance == nil || result.Significance.TakeoverMarginPercent != 0 {
+		t.Fatalf("zero-margin candidate score = %+v", result)
+	}
 	inputs.TakeoverMargin = -0.001
 	if _, err := BuildScoreBaseline(inputs); err == nil {
 		t.Fatal("negative-margin baseline accepted")
