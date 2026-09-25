@@ -663,6 +663,9 @@ type Exchange struct {
 	// Nil in production; generation tests observe the exact point at which an
 	// accepted header has found no local resident and is about to wait.
 	afterResidentMissingForTest func()
+	// Nil in production; constructor tests inject failure after child ownership
+	// exists but before the fallible peer-profile lookup publishes callbacks.
+	beforeResidentProfileForTest func(*Resident)
 
 	// the shared key-event subscriber (PEERSSTREAMS2.md); nil unless
 	// KeyEventDelivery.Enabled
@@ -3456,11 +3459,24 @@ func NewResident(
 		controlLimiter:          newLimiter(cancelCtx, exchange.settings.ControlMinTimeout),
 	}
 	resident.lastActivityNanos.Store(time.Now().UnixNano())
+	constructed := false
+	defer func() {
+		if !constructed {
+			// No owner has received this resident yet. A profile lookup panic
+			// must join its client and detached controller before unwinding.
+			if err := resident.CloseAndWait(context.Background()); err != nil {
+				glog.Errorf("[r]aborted construction close wait = %s\n", err)
+			}
+		}
+	}()
 
 	// only top-level clients are network peers and get peer subscriptions.
 	// Networks over the top-level client limit (created before the limit)
 	// are excluded (`peersEnabled`): their peer replay and event fan-out
 	// would scale with the connected top-level client count.
+	if beforeProfile := exchange.beforeResidentProfileForTest; beforeProfile != nil {
+		beforeProfile(resident)
+	}
 	if networkId, topLevel, category, peerProfile, peersEnabled := model.GetNetworkPeerProfile(cancelCtx, clientId); topLevel && peersEnabled && peerProfile != nil {
 		resident.peerNetworkId = &networkId
 		resident.peerProfile = peerProfile
@@ -3504,6 +3520,7 @@ func NewResident(
 		go server.HandleError(resident.chaos, cancel)
 	}
 
+	constructed = true
 	return resident
 }
 
