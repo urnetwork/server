@@ -588,7 +588,13 @@ func providerEgressBlackholeGuard(
 	if measured < rules.DarkBatchGuardMinChecks || share <= rules.DarkBatchGuard {
 		return summary, share, false
 	}
-	guarded = fleetprobe.BlackholeSummary{
+	return providerEgressBlackholeHoldNegatives(summary), share, true
+}
+
+// Preserve independent pass/TLS evidence while withholding ordinary negatives
+// from an unsafe sample. Return a copy: the measured input stays diagnostic.
+func providerEgressBlackholeHoldNegatives(summary fleetprobe.BlackholeSummary) fleetprobe.BlackholeSummary {
+	guarded := fleetprobe.BlackholeSummary{
 		Checks: make([]ingest.BlackholeCheck, 0, len(summary.Checks)),
 	}
 	for _, check := range summary.Checks {
@@ -610,7 +616,7 @@ func providerEgressBlackholeGuard(
 		}
 		guarded.Checks = append(guarded.Checks, check)
 	}
-	return guarded, share, true
+	return guarded
 }
 
 // runBlackholeBatch owns the accounting and submission for one due batch.
@@ -700,6 +706,19 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 			len(summary.Checks)-summary.NotMeasured,
 			guarded.NotMeasured-summary.NotMeasured,
 		)
+		summary = guarded
+	} else if len(summary.Checks) < len(providers) && len(summary.Checks)-summary.NotMeasured < args.DarkBatchGuardMinChecks {
+		// Admission can stop part-way through a selected batch. Its truncated
+		// sample is not an ordinary small due tail: do not bypass the minimum
+		// sample guard just because the full lane finished early.
+		guarded = providerEgressBlackholeHoldNegatives(summary)
+		if held := guarded.NotMeasured - summary.NotMeasured; 0 < held {
+			glog.Infof(
+				"[egress]incomplete blackhole sample: shard=%d/%d selected=%d completed=%d measured=%d minimum=%d ordinary_negatives_held=%d; passes and TLS evidence remain, held negatives are not measured\n",
+				args.ShardIndex, args.ShardCount, len(providers), len(summary.Checks),
+				len(summary.Checks)-summary.NotMeasured, args.DarkBatchGuardMinChecks, held,
+			)
+		}
 		summary = guarded
 	}
 
@@ -1128,8 +1147,10 @@ func (self *providerEgressProbePass) runFullBatch(
 
 // drainBlackhole runs the already-selected batch and, while a concurrent full
 // batch remains in flight, keeps selecting saturated successor batches. It
-// stops on the first error, partial batch, cancellation, or full completion so
-// the durable task remains bounded by its existing full-batch lifetime.
+// stops on the first error, partial batch, cancellation, or full completion.
+// The initial guard-sized cohort is independent of the full lane's outcome.
+// Full completion stops successor admission; already-started checks keep
+// their own budgets and are joined before return.
 func (self *providerEgressProbePass) drainBlackhole(
 	ctx context.Context,
 	args *ProviderEgressProbeArgs,
@@ -1140,11 +1161,16 @@ func (self *providerEgressProbePass) drainBlackhole(
 	fullFinished <-chan struct{},
 ) providerEgressBlackholeOutcome {
 	outcome := providerEgressBlackholeOutcome{}
+	batchPass := *self
+	if fullFinished != nil {
+		batchPass.blackholeOptions.AdmissionDone = fullFinished
+		batchPass.blackholeOptions.MinimumAdmission = min(args.DarkBatchGuardMinChecks, len(initialDue))
+	}
 	due := initialDue
 	for 0 < len(due) {
 		outcome.due += len(due)
 		outcome.full = outcome.full || len(due) == args.Blackhole.Limit
-		summary, tripped, err := self.runBlackholeBatch(ctx, args, pinSource, poolSource, concurrency, fleetprobe.ProvidersFromDue(due))
+		summary, tripped, err := batchPass.runBlackholeBatch(ctx, args, pinSource, poolSource, concurrency, fleetprobe.ProvidersFromDue(due))
 		outcome.checked += len(summary.Checks)
 		outcome.dark += summary.Dark
 		outcome.tunnelFailed += summary.TunnelFailed
