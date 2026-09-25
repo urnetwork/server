@@ -22,6 +22,9 @@ type probeTunnel interface {
 	Close() error
 }
 
+// The concrete boundary is replaceable in lifecycle tests before any network I/O.
+var openProviderTunnel = providertunnel.Open
+
 // Opens one tunnel to the probe's provider.
 type tunnelOpener func(ctx context.Context) (probeTunnel, error)
 
@@ -31,8 +34,16 @@ type tunnelOpener func(ctx context.Context) (probeTunnel, error)
 // most egresshealth.Options.TunnelRecreateAttempts times.
 func providerTunnelOpener(config providertunnel.Config, providerClientId connect.Id, hosts []string) tunnelOpener {
 	config.Pins = restrictPins(config.Pins, hosts)
+	// A pass supplies limit values, not shared admission for unrelated probes.
+	// This opener owns one check; every replacement reuses its captured root.
+	budget := config.PlatformTransportBudget
+	if budget == nil {
+		budget = connect.DefaultPlatformTransportSettings().PlatformTransportBudget
+	}
+	limits := budget.Stats()
+	config.PlatformTransportBudget = connect.NewPlatformTransportBudget(limits.TotalByteCount, limits.MaxTransportCount)
 	return func(ctx context.Context) (probeTunnel, error) {
-		tunnel, err := providertunnel.Open(ctx, config, providerClientId)
+		tunnel, err := openProviderTunnel(ctx, config, providerClientId)
 		if err != nil {
 			// never a typed nil in the interface
 			return nil, err
