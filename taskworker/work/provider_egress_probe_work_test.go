@@ -320,7 +320,7 @@ func TestProviderEgressProbePassRunsBothSchedulesWithOnePinSnapshot(t *testing.T
 			if !slices.Equal(testProviderClientIds(providers), []string{"blackhole-1", "blackhole-2"}) {
 				t.Errorf("blackhole client ids = %v", testProviderClientIds(providers))
 			}
-			wantConcurrency := args.Blackhole.Concurrency - args.Full.Concurrency
+			wantConcurrency := args.Blackhole.Concurrency
 			if options.Concurrency != wantConcurrency || options.Timeout != time.Duration(args.Blackhole.ProbeTimeoutSeconds)*time.Second {
 				t.Errorf("blackhole options = %+v, want concurrency %d", options, wantConcurrency)
 			}
@@ -424,8 +424,8 @@ func TestProviderEgressProbePassDrainsBlackholeWhileFullBatchIsBlocked(t *testin
 			}
 		},
 		runBlackhole: func(ctx context.Context, providers []prober.Provider, options fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
-			if options.Concurrency != 30 {
-				t.Errorf("blackhole concurrency = %d, want 30 reserved beside the 2-slot full pool", options.Concurrency)
+			if options.Concurrency != 32 {
+				t.Errorf("blackhole concurrency = %d, want 32 independent of the 2-slot full pool", options.Concurrency)
 			}
 			select {
 			case <-fullStarted:

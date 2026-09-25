@@ -87,9 +87,9 @@ type testProviderEgressParallelObservation struct {
 	checks         []ingest.BlackholeCheck
 }
 
-// Hold the initial worker cohort, then release exactly eight slots while the
-// full owner remains blocked. All selected250 must start without waiting for
-// fullFinished. The remaining checks retain their original context and join.
+// Hold every initial worker, then release eight while the full owner remains
+// blocked. The full selected250 must already have started before that release;
+// the independent full owner does not subtract from the blackhole pool.
 func testProviderEgressParallelRun(t *testing.T, full bool, guarded bool, cancelRun bool) testProviderEgressParallelObservation {
 	t.Helper()
 	args := testProviderEgressParallelArgs(t)
@@ -146,9 +146,6 @@ func testProviderEgressParallelRun(t *testing.T, full bool, guarded bool, cancel
 			}},
 			runBlackhole: func(runCtx context.Context, providers []prober.Provider, options fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
 				wantConcurrency := 250
-				if full {
-					wantConcurrency -= 8
-				}
 				if options.Concurrency != wantConcurrency || options.Timeout != 15*time.Second || options.IpEchoTimeout != time.Minute ||
 					options.LoadAttempts != 3 || options.LoadRetryMeanInterval != 5*time.Minute || options.TunnelRecreateAttempts != 2 {
 					t.Error("parallel worker geometry changed per-check safety settings")
@@ -191,11 +188,11 @@ func testProviderEgressParallelRun(t *testing.T, full bool, guarded bool, cancel
 	return observation
 }
 
-func TestProviderEgressParallel242ReserveAdmitsSelected250(t *testing.T) {
+func TestProviderEgressParallelIndependentPoolsAdmitSelected250(t *testing.T) {
 	got := testProviderEgressParallelRun(t, true, false, false)
-	if got.initialStarted != 242 || got.allStarted != 250 || got.peak != 242 || got.err != nil ||
+	if got.initialStarted != 250 || got.allStarted != 250 || got.peak != 250 || got.err != nil ||
 		got.result == nil || got.result.Checked != 250 || len(got.checks) != 250 || got.result.Submitted != 8 {
-		t.Fatalf("high-parallel full reserve: initial=%d all=%d peak=%d checks=%d err=%v result=%+v", got.initialStarted, got.allStarted, got.peak, len(got.checks), got.err, got.result)
+		t.Fatalf("high-parallel independent pools: initial=%d all=%d peak=%d checks=%d err=%v result=%+v", got.initialStarted, got.allStarted, got.peak, len(got.checks), got.err, got.result)
 	}
 }
 

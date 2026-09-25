@@ -36,7 +36,7 @@ type testBlackholeAdmissionObservation struct {
 	submitted []ingest.BlackholeCheck
 }
 
-// The first eight reserved workers are durably held. The full owner finishes
+// The first eight independently configured workers are durably held. The full owner finishes
 // before they are released, not merely before a wall-clock lower bound.
 func testBlackholeAdmissionRun(t *testing.T, test testBlackholeAdmissionCase) testBlackholeAdmissionObservation {
 	t.Helper()
@@ -51,9 +51,9 @@ func testBlackholeAdmissionRun(t *testing.T, test testBlackholeAdmissionCase) te
 			args.DarkBatchGuardMinChecks = test.minimum
 		}
 		observation.selected = args.Blackhole.Limit
-		args.Blackhole.Concurrency = 16
-		args.Full.Concurrency = 8
-		args.Full.Limit = 1
+		args.Blackhole.Concurrency = 8
+		args.Full.Concurrency = 4
+		args.Full.Limit = 4
 		args.Blackhole.ProbeTimeoutSeconds = 15
 		args.Blackhole.IpEchoTimeoutSeconds = 20
 		args.LoadAttempts = 3
@@ -103,7 +103,7 @@ func testBlackholeAdmissionRun(t *testing.T, test testBlackholeAdmissionCase) te
 				if options.Concurrency != 8 || options.Timeout != 15*time.Second ||
 					options.IpEchoTimeout != 20*time.Second || options.LoadAttempts != 3 ||
 					options.LoadRetryMeanInterval != 300*time.Second || options.TunnelRecreateAttempts != 2 {
-					t.Errorf("admission changed the per-check budget or reserved pool")
+					t.Errorf("admission changed the per-check budget or independent pool")
 				}
 				return fleetprobe.RunBlackhole(runCtx, providers, options)
 			},

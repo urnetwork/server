@@ -6755,6 +6755,22 @@ bandwidth stages are not described by one blackhole timeout. Measured
 throughput remains authoritative. Malformed or mixed task geometry still fails
 before any capacity calculation.
 
+Parallel pool ownership is artifact-dependent. Legacy shared-peak drain code
+subtracts Full.Concurrency from Blackhole.Concurrency: selected250 with250/8
+settings starts242 blackhole workers and needs an eight-check second wave.
+The independent-pool correction retains250 blackhole workers beside the full8,
+so every selected check can start before any completes (combined258 per shard).
+It preserves the per-check transport root, request/retry budgets, admission
+stop, cancellation finalizer, and complete-batch negative guard. It does not
+remove the slowest-check batch barrier or prove sufficient fleet throughput.
+The probe labels `parallel_pool_model=unattested`: `full_reserved_*` is the
+legacy shared-peak model, while `independent_pool_*` models the corrected
+per-lane pools. Join the running artifact before assigning either geometry to
+live work; task arguments alone cannot distinguish them. No service-wide cap
+or provider policy changes. Validate the additional eight concurrent checks
+per shard against actual Taskworker/Proxy/API/datastore resource and verdict
+controls, not against a transport budget treated as an RSS reservation.
+
 This is a rate/capacity invariant, not a percentage floor. A first sweep may be
 incomplete without fault when its measured rate can finish before evidence
 expires. Conversely, a shard can advance forever and remain broken when the
