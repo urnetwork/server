@@ -34,6 +34,7 @@ type testBlackholePipeline struct {
 	check                                              func(int, prober.Provider) fleetprobe.BlackholeResult
 	lookup                                             func(int, int) ([]ingest.DueProvider, error)
 	submitError                                        error
+	fullError                                          error
 	stateLock                                          sync.Mutex
 	started                                            map[string]int
 	published                                          map[string]bool
@@ -92,7 +93,7 @@ func newTestBlackholePipeline(t *testing.T, args *ProviderEgressProbeArgs, cohor
 		runFull: func(ctx context.Context, _ []prober.Provider, _ fleetprobe.FullOptions) (prober.Summary, error) {
 			select {
 			case <-h.fullRelease:
-				return prober.Summary{Attempted: 1, Submitted: 1}, nil
+				return prober.Summary{Attempted: 1, Submitted: 1}, h.fullError
 			case <-ctx.Done():
 				return prober.Summary{}, ctx.Err()
 			}
@@ -270,6 +271,7 @@ func TestProviderEgressBlackholePipelinePartialStopRetainsMinimumGuard(t *testin
 	synctest.Test(t, func(t *testing.T) {
 		h := newTestBlackholePipeline(t, args, 2)
 		h.firstHeld = 7
+		h.fullError = errors.New("synthetic full abort")
 		h.check = func(index int, p prober.Provider) fleetprobe.BlackholeResult {
 			if index == 10 {
 				return testBlackholeAdmissionPass(p)
@@ -414,10 +416,11 @@ func TestProviderEgressBlackholePipelineFastCohortContinues(t *testing.T) {
 	})
 }
 
-func TestProviderEgressBlackholePipelineFullStopsDuringLookup(t *testing.T) {
+func TestProviderEgressBlackholePipelineFullErrorStopsDuringLookup(t *testing.T) {
 	args := testProviderEgressParallelArgs(t)
 	synctest.Test(t, func(t *testing.T) {
 		h := newTestBlackholePipeline(t, args, 2)
+		h.fullError = errors.New("synthetic full abort during lookup")
 		entered, release := make(chan struct{}), make(chan struct{})
 		h.lookup = func(call, limit int) ([]ingest.DueProvider, error) {
 			if call == 1 {
@@ -444,13 +447,13 @@ func TestProviderEgressBlackholePipelineFullStopsDuringLookup(t *testing.T) {
 			t.Error("lookup crossed full-finished admission edge")
 		}
 		h.finish()
-		if h.err != nil || len(h.submittedCohort(1)) != 0 {
+		if !errors.Is(h.err, h.fullError) || len(h.submittedCohort(1)) != 0 {
 			t.Errorf("closed lookup manufactured an ACK/error: %v", h.err)
 		}
 	})
 }
 
-func TestProviderEgressBlackholePipelineFullStopsAtWorkerBoundary(t *testing.T) {
+func TestProviderEgressBlackholePipelineFullErrorStopsAtWorkerBoundary(t *testing.T) {
 	args := testProviderEgressParallelArgs(t)
 	synctest.Test(t, func(t *testing.T) {
 		h := newTestBlackholePipeline(t, args, 2)
@@ -467,7 +470,7 @@ func TestProviderEgressBlackholePipelineFullStopsAtWorkerBoundary(t *testing.T) 
 			return fleetprobe.RunBlackhole(ctx, ps, options)
 		}
 		go func() {
-			out := h.pass.drainBlackhole(h.ctx, args, nil, nil, 250, h.due[:250], fullFinished)
+			out := h.pass.drainBlackhole(h.ctx, args, nil, nil, 250, h.due[:250], fullFinished, fullFinished)
 			h.err = out.err
 			close(h.done)
 		}()

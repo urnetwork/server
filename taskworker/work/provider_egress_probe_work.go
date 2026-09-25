@@ -1265,6 +1265,7 @@ func (self *providerEgressProbePass) drainBlackholeSerial(
 		}
 		select {
 		case <-fullFinished:
+			egressProbeBlackholePipelineDecisions.WithLabelValues("full_finished").Inc()
 			return outcome
 		default:
 		}
@@ -1280,6 +1281,7 @@ func (self *providerEgressProbePass) drainBlackholeSerial(
 		// another tunnel batch after that closure boundary.
 		select {
 		case <-fullFinished:
+			egressProbeBlackholePipelineDecisions.WithLabelValues("full_finished").Inc()
 			return outcome
 		default:
 		}
@@ -1290,8 +1292,9 @@ func (self *providerEgressProbePass) drainBlackholeSerial(
 // run executes both independently due schedules with one certificate-pin and
 // one destination-pool snapshot. When both queues have work and the configured
 // blackhole pool is larger than the full pool, both independently configured
-// pools run together. The first full completion stops new blackhole admission;
-// while its admitted checks drain, bounded full successors can still advance.
+// pools run together. Bounded blackhole admission continues independently of
+// healthy full completion; explicit full failure still aborts fresh work.
+// While blackhole checks drain, bounded full successors can also advance.
 // A failure in one lane is retained but does not suppress the other; task retry
 // revisits only work whose server-side due state remains stale.
 func (self *providerEgressProbePass) run(
@@ -1391,6 +1394,7 @@ func (self *providerEgressProbePass) run(
 		// artificial second blackhole wave even when concurrency == limit.
 		start := make(chan struct{})
 		fullFinished := make(chan struct{})
+		fullFailed := make(chan struct{})
 		blackholeFinished := make(chan struct{})
 		blackholeOutcomeCh := make(chan providerEgressBlackholeOutcome, 1)
 		fullOutcomeCh := make(chan providerEgressFullOutcome, 1)
@@ -1398,12 +1402,16 @@ func (self *providerEgressProbePass) run(
 			<-start
 			defer close(blackholeFinished)
 			blackholeOutcomeCh <- self.drainBlackhole(
-				ctx, args, pinSource, poolSource, blackholeConcurrency, blackholeDue, fullFinished,
+				ctx, args, pinSource, poolSource, blackholeConcurrency, blackholeDue, fullFinished, fullFailed,
 			)
 		}()
 		go func() {
 			<-start
-			fullOutcomeCh <- self.drainFull(ctx, args, pinSource, poolSource, fullDue, fullFinished, blackholeFinished)
+			outcome := self.drainFull(ctx, args, pinSource, poolSource, fullDue, fullFinished, blackholeFinished)
+			if outcome.err != nil {
+				close(fullFailed)
+			}
+			fullOutcomeCh <- outcome
 		}()
 		close(start)
 
@@ -1454,7 +1462,7 @@ func (self *providerEgressProbePass) run(
 				// Checks retain ctx, not admissionCtx. A ready worker admits its
 				// successor immediately until the cutoff; started work is joined.
 				return batchPass.drainBlackhole(
-					ctx, args, pinSource, poolSource, blackholeConcurrency, blackholeDue, nil,
+					ctx, args, pinSource, poolSource, blackholeConcurrency, blackholeDue, nil, nil,
 				)
 			}()
 			applyBlackhole(blackholeOutcome)

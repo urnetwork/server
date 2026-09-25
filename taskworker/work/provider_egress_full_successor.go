@@ -37,8 +37,9 @@ func providerEgressFullSuccessorFits(args *ProviderEgressProbeArgs, selected int
 }
 
 // The first full batch retains its old admission/publication contract and
-// still closes firstFinished immediately. That closure stops new blackhole
-// work, so the two drain loops cannot keep each other alive indefinitely.
+// still closes firstFinished immediately for compatibility callers. The
+// independent bounded blackhole pipeline uses its lease/cohort bounds rather
+// than healthy full completion; the outer owner signals explicit full errors.
 // Additional full batches use their own unchanged per-provider budgets while
 // already-admitted blackhole checks drain. No full provider is admitted twice
 // within this pass, even if the bounded due source returns stale rows.

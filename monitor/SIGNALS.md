@@ -6776,6 +6776,32 @@ unknown. Compare independent ingest/publication clocks and check-start clocks;
 buffered results and an ACK are still not proof of newly persisted measurements.
 No probe threshold or recovery condition is changed by this qualification.
 
+The corrected bounded, saturated blackhole pipeline admits successors even
+when full work is absent or completes without a returned error. Up to eight
+original guard cohorts share the same instance-owned check-worker pool (250
+workers at the current settings); each cohort still joins, guards and submits
+independently. The selected-work bound, lease admission cutoff, explicit full
+error, readiness loss and cancellation stop new work. Serial full-work reserve
+and the initial parallel guard-sized minimum remain separate controls. This
+does not increase active checks, change retries, combine guard samples, or
+publish ordinary negatives early. Unsupported/partial geometry retains the
+legacy serial path. These are source guarantees, not proof a running artifact
+or observed process used a particular path.
+
+`urnetwork_egress_probe_blackhole_pipeline_decisions_total{decision}` has thirteen
+preinitialized fixed children: `pipeline_started`, `lookup_started`,
+`successor_selected`, `cutoff`, `partial_due`, `no_unseen_due`, `error`,
+`cohort_cap`, `canceled`, `full_error`, `full_finished`, `no_full_serial`, and
+`serial_geometry`. Entry/lookup/selection count events; each pipeline records
+its first stop decision before joining its tails. They are not task counts,
+acknowledgements or durable rows. A later error may follow a first partial/cap
+decision, so keep the existing error counters. `full_finished` identifies only
+a legacy serial stop, not successful full completion in the independent path;
+a guard-held full batch returning no error is likewise not a `full_error`.
+Use complete fresh same-process/start deltas with progress and submission
+outcomes. Missing children or an old executable leave the reason unknown;
+neither a decision nor an in-memory completion certifies persisted recovery.
+
 The no-full and serial paths require a separate execution-geometry control:
 one selected blackhole list may contain many worker waves before final
 submission, while the source's minimum max-time validation budgets one full

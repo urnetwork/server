@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 
 	"github.com/urnetwork/operator-proxy/fleetprobe"
@@ -13,13 +14,13 @@ import (
 
 // Bound retained identities/results per invocation, not the service. A full
 // result immediately rearms the durable task, so reaching this work bound does
-// not add an idle delay. Only two original guard cohorts may be pending at once.
+// not add an idle delay. Pending cohorts share one fixed check-worker pool.
 const providerEgressBlackholeSelectedCohorts = 8
 
 // The initial cohort keeps its old guard-sized minimum and budgets. Only the
-// bounded parallel geometry overlaps successors: one fixed worker pool is
-// shared across at most two original cohorts, each guarded/submitted on its
-// own join. No-full, partial and unbounded-call controls retain the old path.
+// bounded saturated geometry overlaps successors, regardless of healthy full
+// completion or absence. Each original cohort is guarded/submitted on its own
+// join. Partial and unbounded calls retain the previous compatibility path.
 func (self *providerEgressProbePass) drainBlackhole(
 	ctx context.Context,
 	args *ProviderEgressProbeArgs,
@@ -28,14 +29,21 @@ func (self *providerEgressProbePass) drainBlackhole(
 	concurrency int,
 	initialDue []ingest.DueProvider,
 	fullFinished <-chan struct{},
+	fullFailed <-chan struct{},
 ) providerEgressBlackholeOutcome {
 	deadline, bounded := ctx.Deadline()
-	// The existing blackhole due API caps one response at5000. Keep the two-
-	// cohort lookahead inside that contract and avoid arithmetic overflow.
-	if fullFinished == nil || !bounded || args.Blackhole.Limit <= 0 || 2500 < args.Blackhole.Limit ||
+	// The existing blackhole due API caps one response at5000. Keep bounded
+	// seen-prefix lookahead inside that contract and avoid arithmetic overflow.
+	if !bounded || args.Blackhole.Limit <= 0 || 2500 < args.Blackhole.Limit ||
 		len(initialDue) != args.Blackhole.Limit || concurrency <= 0 {
+		if fullFinished == nil {
+			egressProbeBlackholePipelineDecisions.WithLabelValues("no_full_serial").Inc()
+		} else {
+			egressProbeBlackholePipelineDecisions.WithLabelValues("serial_geometry").Inc()
+		}
 		return self.drainBlackholeSerial(ctx, args, pinSource, poolSource, concurrency, initialDue, fullFinished)
 	}
+	egressProbeBlackholePipelineDecisions.WithLabelValues("pipeline_started").Inc()
 	pool, err := fleetprobe.NewBlackholeWorkerPool(ctx, concurrency)
 	if err != nil {
 		return providerEgressBlackholeOutcome{err: err}
@@ -43,10 +51,21 @@ func (self *providerEgressProbePass) drainBlackhole(
 	defer pool.CloseAndWait()
 
 	// This cutoff only stops fresh checks. Active checks retain ctx and their
-	// per-provider budgets; two pending cohort publications have reserved time.
-	reserve := providerEgressBlackholeCheckBudget(args) + 2*providerEgressBlackholeSubmitTimeout
+	// per-provider budgets; every bounded pending cohort has publication time.
+	reserve := providerEgressBlackholeCheckBudget(args) + providerEgressBlackholeSelectedCohorts*providerEgressBlackholeSubmitTimeout
 	admissionCtx, stopAdmission := context.WithDeadline(ctx, deadline.Add(-reserve))
 	defer stopAdmission()
+	// Serial/no-full setup may reserve an earlier cutoff for serial full work.
+	// Preserve that strict owner boundary; healthy full completion is not one.
+	admissionDone := fullFailed
+	if admissionDone == nil {
+		admissionDone = self.blackholeOptions.AdmissionDone
+	}
+	var stopOnce sync.Once
+	noteStop := func(reason string) {
+		stopOnce.Do(func() { egressProbeBlackholePipelineDecisions.WithLabelValues(reason).Inc() })
+	}
+	halt := func(reason string) { noteStop(reason); stopAdmission() }
 
 	type cohortOutcome struct {
 		ordinal      int
@@ -55,7 +74,7 @@ func (self *providerEgressProbePass) drainBlackhole(
 		guardTripped bool
 		err          error
 	}
-	completed := make(chan cohortOutcome, 2)
+	completed := make(chan cohortOutcome, providerEgressBlackholeSelectedCohorts)
 	var latestSignal <-chan struct{}
 	latestReady := false
 	seen := make(map[string]bool, 2*args.Blackhole.Limit)
@@ -77,7 +96,7 @@ func (self *providerEgressProbePass) drainBlackhole(
 		batchPass := *self
 		batchPass.blackholeSuccessor = !initial
 		batchPass.blackholeOptions.WorkerPool = pool
-		batchPass.blackholeOptions.AdmissionDone = fullFinished
+		batchPass.blackholeOptions.AdmissionDone = admissionDone
 		batchPass.blackholeOptions.AdditionalAdmissionDone = admissionCtx.Done()
 		batchPass.blackholeOptions.MinimumAdmission = 0
 		observer := batchPass.blackholeOptions.ObserveProgress
@@ -90,8 +109,9 @@ func (self *providerEgressProbePass) drainBlackhole(
 				observer(event)
 			}
 		}
-		if initial {
-			batchPass.blackholeOptions.AdditionalAdmissionDone = nil
+		if initial && fullFinished != nil {
+			// RunBlackhole exempts only this prefix from both admission edges;
+			// later initial waves still need to fit the lease cutoff.
 			batchPass.blackholeOptions.MinimumAdmission = min(args.DarkBatchGuardMinChecks, len(due))
 		}
 		go func() {
@@ -99,7 +119,11 @@ func (self *providerEgressProbePass) drainBlackhole(
 			if err != nil {
 				// A due lookup may be in flight. Stop worker admission at the
 				// error owner, without waiting for the coordinator to receive it.
-				stopAdmission()
+				if ctx.Err() != nil {
+					halt("canceled")
+				} else {
+					halt("error")
+				}
 			}
 			completed <- cohortOutcome{ordinal: ordinal, selected: len(due), summary: summary, guardTripped: guarded, err: err}
 		}()
@@ -107,22 +131,29 @@ func (self *providerEgressProbePass) drainBlackhole(
 	start(initialDue, true)
 	stopLookups := false
 	admissionSignal := admissionCtx.Done()
-	fullSignal := fullFinished
+	ownerSignal := admissionDone
 	for {
 		select {
-		case <-fullFinished:
+		case <-admissionDone:
 			stopLookups = true
-			stopAdmission()
+			if ctx.Err() != nil {
+				halt("canceled")
+			} else if fullFailed != nil {
+				halt("full_error")
+			} else {
+				halt("cutoff")
+			}
 		default:
 		}
 		// Every extra cohort has its own original-size guard. The lookahead is
 		// selection only: never run one combined500-result guard or duplicate
 		// the already selected oldest rows which remain due until publication.
-		if latestReady && pending < 2 && !stopLookups && cohorts < providerEgressBlackholeSelectedCohorts && admissionCtx.Err() == nil {
+		if latestReady && pending < providerEgressBlackholeSelectedCohorts && !stopLookups && cohorts < providerEgressBlackholeSelectedCohorts && admissionCtx.Err() == nil {
 			// Earlier selected rows can remain due after an ACK (for example,
 			// an equal-time merge). Look beyond that bounded local prefix, not
 			// just the oldest two cohorts, while respecting the API response cap.
 			limit := min(5000, len(seen)+args.Blackhole.Limit)
+			egressProbeBlackholePipelineDecisions.WithLabelValues("lookup_started").Inc()
 			due, dueErr := self.blackholeDue(ctx, limit)
 			if dueErr != nil || limit < len(due) {
 				if dueErr == nil {
@@ -131,19 +162,25 @@ func (self *providerEgressProbePass) drainBlackhole(
 				egressProbePassErrorsTotal.WithLabelValues("blackhole_due").Inc()
 				outcome.err = errors.Join(outcome.err, fmt.Errorf("get blackhole due providers: %w", dueErr))
 				stopLookups = true
-				stopAdmission()
+				halt("error")
 				continue
 			}
-			// A full owner/cutoff may finish during the bounded lookup. Never
+			// An abort/cutoff may arrive during the bounded lookup. Never
 			// start even a guard-sized minimum for a successor after that edge.
 			if admissionCtx.Err() != nil || ctx.Err() != nil {
 				stopLookups = true
 				continue
 			}
 			select {
-			case <-fullFinished:
+			case <-admissionDone:
 				stopLookups = true
-				stopAdmission()
+				if ctx.Err() != nil {
+					halt("canceled")
+				} else if fullFailed != nil {
+					halt("full_error")
+				} else {
+					halt("cutoff")
+				}
 				continue
 			default:
 			}
@@ -161,9 +198,19 @@ func (self *providerEgressProbePass) drainBlackhole(
 			egressProbePassDue.WithLabelValues("blackhole").Set(float64(len(next)))
 			if len(next) < args.Blackhole.Limit {
 				stopLookups = true
+				if len(next) == 0 {
+					noteStop("no_unseen_due")
+				} else {
+					noteStop("partial_due")
+				}
 			}
 			if 0 < len(next) {
+				egressProbeBlackholePipelineDecisions.WithLabelValues("successor_selected").Inc()
 				start(next, false)
+				if cohorts == providerEgressBlackholeSelectedCohorts {
+					stopLookups = true
+					noteStop("cohort_cap")
+				}
 			}
 			continue
 		}
@@ -177,10 +224,21 @@ func (self *providerEgressProbePass) drainBlackhole(
 		case <-admissionSignal:
 			admissionSignal = nil
 			stopLookups = true
-		case <-fullSignal:
-			fullSignal = nil
+			if ctx.Err() != nil {
+				noteStop("canceled")
+			} else {
+				noteStop("cutoff")
+			}
+		case <-ownerSignal:
+			ownerSignal = nil
 			stopLookups = true
-			stopAdmission()
+			if ctx.Err() != nil {
+				halt("canceled")
+			} else if fullFailed != nil {
+				halt("full_error")
+			} else {
+				halt("cutoff")
+			}
 		case batch := <-completed:
 			pending--
 			if batch.ordinal == cohorts {
@@ -199,7 +257,7 @@ func (self *providerEgressProbePass) drainBlackhole(
 				// independently finalize already-started passing/TLS evidence.
 				outcome.err = errors.Join(outcome.err, batch.err)
 				stopLookups = true
-				stopAdmission()
+				halt("error")
 			}
 			if batch.selected < args.Blackhole.Limit {
 				stopLookups = true
