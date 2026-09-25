@@ -58,8 +58,16 @@ type BlackholeOptions struct {
 	// How many providers are checked at once. Zero uses
 	// DefaultBlackholeConcurrency.
 	Concurrency int
-	Now         func() time.Time
-	CheckOne    BlackholeChecker
+	// Stops successor admission without canceling an active check's context.
+	// The first MinimumAdmission selected checks still start unless ctx is
+	// canceled, even when this signal is already closed. All workers join.
+	// Nil leaves admission governed only by ctx and the selected batch.
+	AdmissionDone <-chan struct{}
+	// An initial per-batch cohort, bounded by the selected provider count.
+	// Zero allows AdmissionDone to stop the batch before its first check.
+	MinimumAdmission int
+	Now              func() time.Time
+	CheckOne         BlackholeChecker
 }
 
 // Returns Concurrency, or DefaultBlackholeConcurrency when unset.
@@ -115,6 +123,9 @@ func validateBlackholeOptions(options BlackholeOptions) error {
 	}
 	if options.Timeout <= 0 {
 		return fmt.Errorf("fleetprobe: blackhole timeout must be positive (got %s)", options.Timeout)
+	}
+	if options.MinimumAdmission < 0 {
+		return fmt.Errorf("fleetprobe: minimum admission must not be negative (got %d)", options.MinimumAdmission)
 	}
 	if options.Concurrency < 0 {
 		return fmt.Errorf("fleetprobe: blackhole concurrency must not be negative (got %d)", options.Concurrency)
@@ -229,6 +240,15 @@ func RunBlackhole(
 				if ctx.Err() != nil {
 					continue
 				}
+				admissionDone := options.AdmissionDone
+				if job.Index < options.MinimumAdmission {
+					admissionDone = nil
+				}
+				select {
+				case <-admissionDone:
+					return
+				default:
+				}
 				result := checkOne(job.Provider)
 				// The check may have been admitted while its parent task still had
 				// budget, then finish after the task/context was canceled. Its
@@ -249,9 +269,20 @@ sendJobs:
 		if ctx.Err() != nil {
 			break
 		}
+		admissionDone := options.AdmissionDone
+		if index < options.MinimumAdmission {
+			admissionDone = nil
+		}
+		select {
+		case <-admissionDone:
+			break sendJobs
+		default:
+		}
 		select {
 		case jobs <- job{Index: index, Provider: provider}:
 		case <-ctx.Done():
+			break sendJobs
+		case <-admissionDone:
 			break sendJobs
 		}
 	}
