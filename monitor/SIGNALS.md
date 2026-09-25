@@ -4824,6 +4824,20 @@ never a scarcity diagnosis or a healthy sentinel for this band. The existing
 PAGE and >=50 provisional WARN thresholds remain unchanged. Direct cohorts and
 ForceMinimum diagnostics keep their existing separate treatment.
 
+High-volume zero-tail false-negative qualifier: a non-direct location cohort
+can have hundreds of completed requests and a material zero-result fraction
+without crossing either the 80%-zero PAGE threshold or the provisional 50%
+zero-or-one-to-two WARN threshold. Main's post-API five-minute US-caller
+`any/location` samples on 2026-09-25 had approximately 20% zero results in
+quality mode and 29% in speed mode, while best-available controls returned
+`10+`; neither result establishes the requested target or a fleet-wide supply
+failure. Absence of a §2.9a alert is therefore not clearance for location
+selection. Keep the bounded result-band counters in the incident review and
+compare like-for-like traffic over subsequent windows. Before adding a lower
+automatic zero-tail threshold, expose or safely aggregate effective requested
+count and target class, retain a pre-incident baseline, and test intentional
+small/zero requests so this discriminator does not page on expected responses.
+
 This additional visibility can warn on legitimate caps or restrictive targets;
 the twenty-response floor limits low-traffic noise but does not establish a
 unique-caller or request-intent denominator. Absence below any volume floor,
