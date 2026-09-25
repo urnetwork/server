@@ -202,11 +202,9 @@ func TestRunBlackholeConcurrencyDefaultsAndRejectsNegative(t *testing.T) {
 	if got := (BlackholeOptions{}).concurrency(); got != DefaultBlackholeConcurrency || DefaultBlackholeConcurrency != 16 {
 		t.Fatalf("zero concurrency = %d (default %d), want the default of 16", got, DefaultBlackholeConcurrency)
 	}
-	var checked []string
 	summary, err := RunBlackhole(context.Background(), ProvidersFromClientIds([]string{"a", "b"}), BlackholeOptions{
 		Timeout: time.Second,
 		CheckOne: func(_ context.Context, provider prober.Provider) BlackholeResult {
-			checked = append(checked, provider.ClientId)
 			return BlackholeResult{Check: ingest.BlackholeCheck{ClientId: provider.ClientId, Ok: true, CheckedAt: time.Unix(1, 0).UTC()}}
 		},
 	})

@@ -58,11 +58,18 @@ type BlackholeOptions struct {
 	// How many providers are checked at once. Zero uses
 	// DefaultBlackholeConcurrency.
 	Concurrency int
+	// Optional pass-owned fixed worker set. Sharing it between logical cohorts
+	// does not merge their results or guards. Nil owns a private batch pool.
+	WorkerPool *BlackholeWorkerPool
 	// Stops successor admission without canceling an active check's context.
 	// The first MinimumAdmission selected checks still start unless ctx is
 	// canceled, even when this signal is already closed. All workers join.
 	// Nil leaves admission governed only by ctx and the selected batch.
 	AdmissionDone <-chan struct{}
+	// A second independent stop edge (for example an owning lease cutoff).
+	// Both edges are checked directly at submission and execution; neither
+	// relies on an asynchronous goroutine propagating cancellation.
+	AdditionalAdmissionDone <-chan struct{}
 	// An initial per-batch cohort, bounded by the selected provider count.
 	// Zero allows AdmissionDone to stop the batch before its first check.
 	MinimumAdmission int
@@ -132,6 +139,9 @@ func validateBlackholeOptions(options BlackholeOptions) error {
 	}
 	if options.Concurrency < 0 {
 		return fmt.Errorf("fleetprobe: blackhole concurrency must not be negative (got %d)", options.Concurrency)
+	}
+	if options.WorkerPool != nil && options.concurrency() < options.WorkerPool.workerCount {
+		return fmt.Errorf("fleetprobe: shared blackhole pool exceeds the batch concurrency")
 	}
 	return nil
 }
@@ -223,86 +233,75 @@ func RunBlackhole(
 	}
 
 	results := make([]BlackholeResult, len(providers))
-	// One provider of the batch and its place in the results.
-	type job struct {
-		Index    int
-		Provider prober.Provider
+	workerPool := options.WorkerPool
+	if workerPool == nil {
+		var err error
+		workerPool, err = NewBlackholeWorkerPool(ctx, min(options.concurrency(), len(providers)))
+		if err != nil {
+			return BlackholeSummary{}, err
+		}
+		defer workerPool.CloseAndWait()
 	}
-	jobs := make(chan job)
-	workerCount := min(options.concurrency(), len(providers))
 	var waitGroup sync.WaitGroup
-	for range workerCount {
-		waitGroup.Add(1)
-		go func() {
-			defer waitGroup.Done()
-			for job := range jobs {
-				// Cancellation and a channel receive may become ready together;
-				// select is intentionally random in that case. Re-check at the
-				// execution boundary so an admitted-but-not-started job cannot
-				// construct a doomed tunnel after task drain.
-				if ctx.Err() != nil {
-					continue
-				}
-				admissionDone := options.AdmissionDone
-				if job.Index < options.MinimumAdmission {
-					admissionDone = nil
-				}
-				select {
-				case <-admissionDone:
-					return
-				default:
-				}
-				if options.ObserveProgress != nil {
-					options.ObserveProgress(BlackholeStarted)
-				}
-				result := checkOne(job.Provider)
-				// The check may have been admitted while its parent task still had
-				// budget, then finish after the task/context was canceled. Its
-				// canceled requests look exactly like a provider blackhole, but
-				// the only fact established is that the prober lost its own budget.
-				// Do not persist that as a negative provider verdict. This mirrors
-				// the full health path's ErrNoBudget boundary.
-				if ctx.Err() != nil {
-					if options.ObserveProgress != nil {
-						options.ObserveProgress(BlackholeCanceled)
-					}
-					continue
-				}
-				results[job.Index] = result
-				if options.ObserveProgress != nil {
-					if result.Check.ClientId == "" {
-						options.ObserveProgress(BlackholeDiscarded)
-					} else {
-						options.ObserveProgress(BlackholeCompleted)
-					}
-				}
-			}
-		}()
-	}
-
 sendJobs:
 	for index, provider := range providers {
 		if ctx.Err() != nil {
 			break
 		}
 		admissionDone := options.AdmissionDone
+		additionalAdmissionDone := options.AdditionalAdmissionDone
 		if index < options.MinimumAdmission {
 			admissionDone = nil
+			additionalAdmissionDone = nil
 		}
 		select {
 		case <-admissionDone:
+			break sendJobs
+		case <-additionalAdmissionDone:
 			break sendJobs
 		default:
 		}
-		select {
-		case jobs <- job{Index: index, Provider: provider}:
-		case <-ctx.Done():
-			break sendJobs
-		case <-admissionDone:
-			break sendJobs
+		waitGroup.Add(1)
+		accepted := workerPool.submit(ctx, admissionDone, additionalAdmissionDone, func() {
+			defer waitGroup.Done()
+			// Cancellation and receipt may become ready together. Do not open
+			// a tunnel after either boundary merely because a worker was free.
+			if ctx.Err() != nil {
+				return
+			}
+			select {
+			case <-admissionDone:
+				return
+			case <-additionalAdmissionDone:
+				return
+			default:
+			}
+			if options.ObserveProgress != nil {
+				options.ObserveProgress(BlackholeStarted)
+			}
+			result := checkOne(provider)
+			// A canceled request is not a negative provider verdict. Keep only
+			// results which completed before the task lost its own budget.
+			if ctx.Err() != nil {
+				if options.ObserveProgress != nil {
+					options.ObserveProgress(BlackholeCanceled)
+				}
+				return
+			}
+			results[index] = result
+			if options.ObserveProgress != nil {
+				if result.Check.ClientId == "" {
+					options.ObserveProgress(BlackholeDiscarded)
+				} else {
+					options.ObserveProgress(BlackholeCompleted)
+				}
+			}
+		})
+		if !accepted {
+			waitGroup.Done()
+			break
 		}
 	}
-	close(jobs)
 	waitGroup.Wait()
 
 	summary := BlackholeSummary{
@@ -324,6 +323,9 @@ sendJobs:
 			}
 			log.Printf("blackhole: provider=%s dark %s", result.Check.ClientId, result.Details)
 		}
+	}
+	if workerPool.ctx.Err() != nil && ctx.Err() == nil {
+		return summary, ErrBlackholeWorkerPoolClosed
 	}
 	return summary, nil
 }
