@@ -4846,6 +4846,39 @@ must cover the product-supported country/group and IP-family matrix without
 using customer identities. Cache coverage alone also cannot see a stale mobile
 or desktop client that never asks the current API.
 
+Backend-read discriminator: the API model exports
+`urnetwork_client_score_read_errors_total` with exactly two preinitialized phase children: `counts` and `samples`.
+It increments once when a non-missing Redis command or pipeline error invalidates
+that score-load phase, including an error hidden behind an earlier missing key.
+It counts failed loader pipelines, not failed keys, unique requests or API failures.
+A counted error can reflect caller cancellation/deadline or client lifecycle,
+not a Redis-service outage; the phase alone does not identify the failing owner.
+The initial connection/PING and payload decoding error paths are outside these
+two counters. Missing keys and successfully decoded empty pools do not increment
+them. No caller, country, rank, family, key, error text, address or identifier is
+added as a label or exemplar.
+
+Primary and optional other-rank backfill loads share these phase counters.
+A primary read error leaves the completed-response denominator; the optional
+backfill retains its valid primary result under the existing policy. Therefore
+fewer completed zero responses can mean surfaced backend errors rather than
+recovery, and a positive read-error counter does not prove every API call failed
+or identify a provider cohort. The existing
+`urnetwork_findproviders2_load_seconds_count` counts successful primary loads,
+not every attempted phase, and cannot supply a loader-error rate denominator.
+
+Backend-read coverage gap: these new reader counters are not consumed by the current registered `provider-count` probe.
+Its reduced response query does not preserve exact process/start identity or
+underlying source timestamps. A future bounded reader diagnostic must pair both
+phase children across the same process generation and observation window, cover
+the expected enabled inventory, validate underlying sample freshness and counter
+resets, and retain a positive successful-read control. A complete zero error
+delta is not proof of nonempty supply; absent, partial, reset or rejected samples remain unknown.
+Metric deployment and accepted samples must be verified separately: an API
+version claim, one visible process, quiet traffic or healthy score-writer phases
+cannot certify reader coverage. Do not add request dimensions to the six-label
+completed-response family to obtain this discriminator.
+
 Verification: require two consecutive windows in which every materially used
 ordinary request class has its response-count distribution back inside the
 recorded baseline, §2.9 has complete current cache documents, and successful

@@ -6234,6 +6234,7 @@ func loadClientScores(
 			locationGroupReads[locationGroupId] = read
 		}
 		if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
+			clientScoreReadMetrics.counts.Inc()
 			returnErr = fmt.Errorf("read client score counts: %w", err)
 			return
 		}
@@ -6350,6 +6351,7 @@ func loadClientScores(
 			}
 		}
 		if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
+			clientScoreReadMetrics.samples.Inc()
 			returnErr = fmt.Errorf("read client score samples: %w", err)
 			return
 		}
