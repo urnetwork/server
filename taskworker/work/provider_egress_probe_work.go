@@ -999,15 +999,16 @@ func (self *providerEgressFullBatch) release(
 	return submitFailures
 }
 
-// The batch's health runs, in submission order.
-func (self *providerEgressFullBatch) results() []*egresshealth.Result {
-	results := []*egresshealth.Result{}
+// Snapshots health runs with their provider identity so the guard uses the
+// same per-provider place as publication. Guard totals do not depend on order.
+func (self *providerEgressFullBatch) resultsByProvider() map[string]*egresshealth.Result {
+	results := map[string]*egresshealth.Result{}
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		for _, providerClientId := range self.order {
 			if health := self.byProvider[providerClientId].health; health != nil {
-				results = append(results, health)
+				results[providerClientId] = health
 			}
 		}
 	}()
@@ -1065,11 +1066,11 @@ func (self *providerEgressProbePass) runFullBatch(
 		return providerEgressFullOutcome{err: fmt.Errorf("run full-probe batch: %w", runErr)}
 	}
 
-	// the guard judges the runs as they may count, so a site on probation
-	// cannot trip it any more than it can cost a provider
+	// the guard and publication score the same provider/place: neither
+	// probationary nor incompatible loads may trip or dilute the guard
 	scoredRuns := []*egresshealth.Result{}
-	for _, run := range batch.results() {
-		scoredRuns = append(scoredRuns, scoreEgressHealthResult(run, model.ProviderEgressPlace{}, scoring))
+	for providerClientId, run := range batch.resultsByProvider() {
+		scoredRuns = append(scoredRuns, scoreEgressHealthResult(run, places[providerClientId], scoring))
 	}
 	share, tripped := providerEgressRunGuard(scoredRuns, args.ProviderEgressRules)
 	egressProbeBatchShare.WithLabelValues("full").Set(share)
