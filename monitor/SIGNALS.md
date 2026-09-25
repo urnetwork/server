@@ -4708,6 +4708,14 @@ erase an independently observed ineligible-supply finding.
 ### 2.9a User-visible provider-count degradation — product selection coverage
 Probe: `provider-count`
 
+**An empty app provider list is a priority product-availability symptom.**
+Monitor both distinct surfaces: this section measures `FindProviders2`
+connection-selection responses; §2.9b measures the initial/search location
+picker. Neither can substitute for the other, and global supply, HTTP 200,
+response bytes, or a nonempty best-available control cannot certify a requested
+location/group or the user's rendered screen. Preserve the screen/request-shape
+distinction without waiting for customer identifiers or weakening eligibility.
+
 The registered healthy sentinel is `provider-count-degraded`. It emits no
 Markdown alert by itself; it exists so the probe has one stable class whose
 healthy state can be catalog-audited. Real findings are the distinct
@@ -4719,8 +4727,8 @@ the metric is unavailable: the probe returns an explicit observation error.
 an effective-empty PAGE or a supply-depletion diagnosis. `direct` means no
 location, group, or best-available selector. In the emitting API's matching
 `FindProviders2` source, explicit ClientId specs are appended unless the final
-destination is excluded, without running discovery score, health, reliability,
-network-only, or IP-family filters. Empty specs or all-excluded explicit IDs can
+destination is explicitly or hard-egress excluded, without running discovery
+score, reliability, network-only, or IP-family filters. Empty specs or all-excluded explicit IDs can
 return zero; one or two requested IDs can correctly return one or two. The
 metric's default `quality` label does not mean ranking ran, and `unknown`
 caller-country is expected when this branch skips the IP-country lookup.
@@ -4900,6 +4908,109 @@ with no identifiers. Direct-cohort controls additionally preserve a healthy
 one/two-explicit-ID response shape as unknown intent, prohibit direct paging,
 retain a real discovery PAGE alongside direct uncertainty, and prevent a
 below-threshold direct-only observation from emitting discovery health.
+
+### 2.9b App location-picker availability — initial and search results
+Probe: `provider-picker`
+
+The initial GET `/network/provider-locations` and search POST
+`/network/find-provider-locations` are app list surfaces independent of
+`FindProviders2` (§2.9a). A healthy connection-candidate pool, HTTP 200 or large
+response body does not prove a nonempty picker. The deprecated
+`/network/find-locations` endpoint is not included. Empty-picker user reports
+remain actionable below any metric volume floor; the floor is not a dismissal
+of an individual report.
+
+The model exports `urnetwork_provider_picker_outcomes_total` with exactly nine
+preinitialized children: surface `initial`, `search`, `direct` crossed with
+outcome `nonempty`, `empty`, `error`. `initial` is GET only; POST (including a
+blank query) is `search`, except a syntactically valid device ID is `direct`.
+No query, caller/target country, identifier, cache key or raw error is exported.
+The result band mirrors rows rendered by the shared SDK: countries, promoted
+groups and devices populate the initial screen; cities/regions alone do not.
+Search also displays city/region and exact-match rows. A nil result or an error,
+including a panic unwind, is not successful empty. The model-return boundary
+does not prove HTTP delivery, device receipt or every native/web UI version's
+rendering. Device-side filtering, stale caches and unsupported app versions
+remain separately verified boundaries across Apple, Android, desktop and web.
+
+`urnetwork_provider_picker_read_errors_total` has two preinitialized phase
+children, `initial` and `filters`. Non-missing Redis GET/pipeline errors and
+payload decode failures increment once per failed loader. An earlier
+`redis.Nil` cannot hide a later failed command. Missing keys retain normal
+absence semantics; neither missing nor valid empty payloads increment errors.
+The initial connection/PING can panic before these phase counters, while the
+owning picker outcome still records an error. Other callers of the shared
+loaders can increment phase counts without a corresponding picker request.
+Read counts and outcome counts therefore must not be added or treated as the
+same-attempt denominator. Decode/WRONGTYPE, caller cancellation and client
+lifecycle errors do not by themselves prove a Redis service outage.
+
+The source-correctness boundary is fail-closed: a failed initial read must not
+become an empty successful GET; failed filters must not silently remove every
+location from GET or POST results. A genuine initial-cache miss returns an
+empty structure (including blank POST), not a nil dereference. No cache is
+cleared, no providers are invented, and score/health/country exclusion rules
+are unchanged.
+
+One fixed query observes only configured permitted API host/block placements.
+It carries process instance and start value, raw source timestamps at now and
+five minutes earlier, reset witnesses and range-presence witnesses. A process
+contributes deltas only when all eleven children and process-start fields are
+paired, source-fresh (90s, at most 30s future clock skew), from the same scrape
+at each bound, monotonic and reset-free. New/mixed/transient generations, old
+producers, disabled/unenrolled desired slots and missing children stay unknown.
+The query permits at most 32 desired slots, four generations per slot, 8,192
+rows and 4MiB; one gateway, a 15s transport timeout, no retry or failover.
+Schema/warnings/nonfinite values/duplicate rows fail closed without exposing
+response labels or bodies. Positive complete-process deltas survive a missing
+sibling, but are explicitly an observed-process subset, not fleet totals.
+
+- PAGE `provider-picker-effective-empty`: at least 20 successful initial GET
+  outcomes in five minutes, at least 80% with no rendered initial rows.
+- WARN `provider-picker-read-or-request-error`: any positive observed read or
+  request error; PAGE when at least 20 request errors occur in that window.
+  This separate denominator prevents surfaced errors from looking like recovery
+  merely because they leave successful-empty counts.
+- WARN `provider-picker-unobservable`: missing/unreadable/partial/stale/reset
+  producer evidence, or fewer than 20 successful initial outcomes for a health
+  claim. Search/direct-only or quiet traffic cannot establish initial health.
+- A legitimate empty search or direct lookup is diagnostic, not a supply PAGE.
+  Nonempty direct output proves only a syntactically accepted ID, not a live
+  provider. Search misses do not invalidate a separately healthy initial list.
+
+False positives: intentional caller-country exclusions can produce a truly
+empty initial list without global supply loss; invalid queries and legitimate
+empty search results must not be conflated with it. Requests are not unique
+users. A failing observed subset need not describe the whole API fleet, and
+transport cancellation need not indicate backend outage. Preserve the symptom
+while establishing exact request and artifact authority before attribution.
+
+False negatives: under-volume pockets, failures before entering the model,
+omitted/rejected metric samples, wholly unscraped generations, lost HTTP
+delivery and device-side rendering can escape this server metric. Complete
+paired inventory is query-visible coverage, not proof that Mimir accepted every
+sample or that the app rendered rows. Cross-check §11.20/§11.20a continuity and
+admission, HTTP outcomes, the user's surface, and §2.9a target restrictions.
+
+Recovery requires two complete fresh five-minute windows after the exact API
+producer/fix rollout, with at least 20 successful initial outcomes per window,
+below the empty threshold and no read/request errors, plus independent recovery
+of the reported app surface. Healthy findings are emitted only for complete
+paired coverage with that traffic floor; the surrounding monitor owns sustain.
+Classes clear independently: a proven nonempty initial cohort can clear its
+prior empty-list PAGE while a read-error WARN persists; complete visibility and
+zero read/request errors can clear those classes while a real empty PAGE
+persists. Partial or below-floor evidence never supplies a healthy sentinel.
+Taskworker rollout alone does not deploy this API reader/producer. No migration
+is required. Until API rollout and a full paired window, the registered probe
+reports visibility loss, not fabricated healthy zeroes.
+
+Implementation: `signal_provider_picker.go` / `signal_provider_picker_test.go`,
+registered in `NewSignals`. Synthetic controls exercise empty/nonempty/error,
+search/direct ambiguity, partial positive siblings, old/missing/stale/reset or
+mixed process evidence, bounds, cancellation, Markdown and redaction. Actual
+local Redis-to-model controls reproduce failed GET/pipeline errors versus
+missing keys and verify endpoint propagation and producer counts.
 
 ### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
 Probe: `retention-fanout`

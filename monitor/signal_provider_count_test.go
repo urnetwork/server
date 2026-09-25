@@ -26,6 +26,21 @@ func TestProviderCountSignalSyntheticEffectiveEmpty(t *testing.T) {
 	}
 }
 
+// Candidate selection and the app's location picker must never certify each other.
+func TestProviderCountSignalDistinguishesPickerAndTargetIntent(t *testing.T) {
+	now := time.Date(2026, 9, 25, 8, 0, 0, 0, time.UTC)
+	alerts, err := NewProviderCountSignal().Run(context.Background(), providerCountSyntheticSettings(t, now, providerCountFixture(t, now, map[string]float64{"0": 20}, "false")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "provider-count-effective-empty")
+	for _, text := range []string{"connection-selection", "provider-picker (§2.9b)", "cannot prove picker health", "caller country is not selected target country", "ForceCount/requested Count"} {
+		if !strings.Contains(alert.Markdown(), text) {
+			t.Errorf("missing app-list distinction %q", text)
+		}
+	}
+}
+
 func TestProviderCountSignalSyntheticSmallListAndForceMinimumControl(t *testing.T) {
 	now := time.Date(2026, 9, 22, 19, 30, 0, 0, time.UTC)
 	alerts, err := NewProviderCountSignal().Run(context.Background(), providerCountSyntheticSettings(t, now, providerCountFixture(t, now, map[string]float64{"0": 25, "1-2": 10, "3-9": 15}, "false")))

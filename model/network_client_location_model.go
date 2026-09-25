@@ -4532,7 +4532,12 @@ func loadInitialClientLocations(ctx context.Context) (initialClientLocations *In
 
 		cmd := r.Get(ctx, initialClientLocationsKey())
 
-		initialClientLocationsBytes, _ := cmd.Bytes()
+		initialClientLocationsBytes, err := cmd.Bytes()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			providerPickerMetrics.readInitial.Inc()
+			returnErr = err
+			return
+		}
 		if len(initialClientLocationsBytes) == 0 {
 			return
 		}
@@ -4541,6 +4546,7 @@ func loadInitialClientLocations(ctx context.Context) (initialClientLocations *In
 		var initialClientLocations_ InitialClientLocations
 		returnErr = e.Decode(&initialClientLocations_)
 		if returnErr != nil {
+			providerPickerMetrics.readInitial.Inc()
 			return
 		}
 
@@ -4588,8 +4594,13 @@ func loadLocationStables(
 			}
 			locationFilterCmds[locationId] = read
 		}
-		// note ignore the error for GET since it will include missing key
-		pipe.Exec(ctx)
+		// Missing keys are legitimate; a failed command is not an empty filter.
+		// Exec can report redis.Nil while a later command has a real error.
+		if returnErr = execClientScoreReadPipeline(ctx, pipe); returnErr != nil {
+			providerPickerMetrics.readFilters.Inc()
+			locationStables = nil
+			return
+		}
 
 		for locationId, read := range locationFilterCmds {
 			_, filterBytes := selectClientScorePayload(
@@ -4607,6 +4618,8 @@ func loadLocationStables(
 			var filter ClientFilter
 			returnErr = e.Decode(&filter)
 			if returnErr != nil {
+				providerPickerMetrics.readFilters.Inc()
+				locationStables = nil
 				return
 			}
 			if 0 < filter.Count {
@@ -4622,9 +4635,12 @@ func loadLocationStables(
 func FindProviderLocations(
 	findLocations *FindLocationsArgs,
 	session *session.ClientSession,
-) (*FindLocationsResult, error) {
+) (result *FindLocationsResult, returnErr error) {
+	surface := "search"
+	defer func() { providerPickerMetrics.observe(surface, result, returnErr) }()
 	query := strings.TrimSpace(findLocations.Query)
 	if clientId, err := server.ParseId(query); err == nil {
+		surface = "direct"
 		device := &LocationDeviceResult{
 			ClientId:   clientId,
 			DeviceName: fmt.Sprintf("%s", clientId),
@@ -4667,6 +4683,9 @@ func FindProviderLocations(
 			if err != nil {
 				return nil, err
 			}
+			if initialClientLocations == nil {
+				initialClientLocations = &InitialClientLocations{}
+			}
 			matchDistances = map[server.Id]int{}
 			clientLocations = map[server.Id]*ClientLocation{}
 			for _, clientLocation := range initialClientLocations.Locations {
@@ -4701,9 +4720,8 @@ func FindProviderLocations(
 			}
 		}
 
-		// ignore if this meta data can't be loaded
-		// in that case, all locations will be considered unstable
-		locationStables, _ := loadLocationStables(
+		// An absent entry excludes the location, so read errors must propagate.
+		locationStables, err := loadLocationStables(
 			session.Ctx,
 			slices.Collect(maps.Keys(clientLocations)),
 			// user-facing search: only surface locations that meet the bar
@@ -4711,6 +4729,9 @@ func FindProviderLocations(
 			rankMode,
 			clientLocationId,
 		)
+		if err != nil {
+			return nil, err
+		}
 		if locationStables == nil {
 			locationStables = map[server.Id]bool{}
 		}
@@ -4757,7 +4778,8 @@ func FindProviderLocations(
 // since there are no promoted groups, this call can be replaced with `FindProviderLocations` with an empty query
 func GetProviderLocations(
 	session *session.ClientSession,
-) (*FindLocationsResult, error) {
+) (result *FindLocationsResult, returnErr error) {
+	defer func() { providerPickerMetrics.observe("initial", result, returnErr) }()
 	rankMode := RankModeQuality
 
 	// the caller ip is used to match against provider excluded lists
@@ -4788,9 +4810,8 @@ func GetProviderLocations(
 		locationIds = append(locationIds, clientLocation.LocationId)
 	}
 
-	// ignore if this meta data can't be loaded
-	// in that case, all locations will be considered unstable
-	locationStables, _ := loadLocationStables(
+	// An unavailable filter cannot be reported as an empty successful picker.
+	locationStables, err := loadLocationStables(
 		session.Ctx,
 		locationIds,
 		// user-facing listing: only surface locations that meet the bar
@@ -4798,6 +4819,9 @@ func GetProviderLocations(
 		rankMode,
 		clientLocationId,
 	)
+	if err != nil {
+		return nil, err
+	}
 	if locationStables == nil {
 		locationStables = map[server.Id]bool{}
 	}
@@ -4842,7 +4866,7 @@ func GetProviderLocations(
 		locationResult.Country = clientLocationName(locationsById, locationResult.CountryLocationId)
 	}
 
-	result := &FindLocationsResult{
+	result = &FindLocationsResult{
 		Locations: locationResults,
 		Groups:    locationGroupResults,
 		Devices:   []*LocationDeviceResult{},
