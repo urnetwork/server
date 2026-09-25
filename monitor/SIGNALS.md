@@ -6749,6 +6749,19 @@ recovery follows from in-memory completion or a retired gauge. Persisted
 measured evidence remains the recovery authority. The counters diagnose batch
 latency but do not establish a per-check duration or guarantee future capacity.
 
+A sustained tail-barrier discriminator requires multiple complete, fresh,
+same-process/start samples: completed-buffered remains much larger than running,
+queued work is absent or low, and independent acknowledgement deltas remain
+small while scheduler-ready work exists. This supports a cohort-join bottleneck
+and idle check slots within those owners; it does not prove a global scheduler
+stall, network saturation, or missing provider supply. One fast-completion
+snapshot is normal and is not a PAGE condition. Full-finished/cutoff admission,
+cancellation, NotMeasured conversion, and submission errors remain separate
+controls. Partial process coverage or missing counters makes this discriminator
+unknown. Compare independent ingest/publication clocks and check-start clocks;
+buffered results and an ACK are still not proof of newly persisted measurements.
+No probe threshold or recovery condition is changed by this qualification.
+
 The no-full and serial paths require a separate execution-geometry control:
 one selected blackhole list may contain many worker waves before final
 submission, while the source's minimum max-time validation budgets one full

@@ -561,7 +561,10 @@ type providerEgressProbePass struct {
 	loadScoring           func(context.Context) (*model.ProviderEgressHealthScoring, *model.ProviderEgressSiteSettings)
 	submitBlackholeChecks func(context.Context, []ingest.BlackholeCheck) error
 	blackholeOptions      fleetprobe.BlackholeOptions
-	fullOptions           fleetprobe.FullOptions
+	// A speculative successor may legitimately stop before its first check;
+	// count that as empty admission, not a measured healthy/error batch.
+	blackholeSuccessor bool
+	fullOptions        fleetprobe.FullOptions
 	// fullSink is where a full batch's submissions go once the run guard has
 	// passed the batch; the prober's reporters only collect into the batch.
 	fullSink *egressProbeMetricsReporter
@@ -698,10 +701,20 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 	if runErr == nil && len(summary.Checks) == 0 && ctx.Err() == nil && options.MinimumAdmission == 0 {
 		// Readiness can consume a strict admission window. No measured work
 		// must not become a successful saturated pass and immediate successor.
+		stopped := false
 		select {
 		case <-options.AdmissionDone:
-			runErr = errProviderEgressBlackholeAdmissionBudget
+			stopped = true
+		case <-options.AdditionalAdmissionDone:
+			stopped = true
 		default:
+		}
+		if stopped {
+			if self.blackholeSuccessor {
+				egressProbePassesTotal.WithLabelValues("blackhole", "empty").Inc()
+				return summary, false, nil
+			}
+			runErr = errProviderEgressBlackholeAdmissionBudget
 		}
 	}
 	if runErr != nil {
@@ -1216,7 +1229,7 @@ func (self *providerEgressProbePass) runFullBatch(
 // The initial guard-sized cohort is independent of the full lane's outcome.
 // Full completion stops successor admission; already-started checks keep
 // their own budgets and are joined before return.
-func (self *providerEgressProbePass) drainBlackhole(
+func (self *providerEgressProbePass) drainBlackholeSerial(
 	ctx context.Context,
 	args *ProviderEgressProbeArgs,
 	pinSource fleetprobe.PinSource,

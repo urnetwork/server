@@ -243,7 +243,7 @@ var egressProbePassDue = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Namespace: "urnetwork",
 	Subsystem: "egress_probe",
 	Name:      "pass_due",
-	Help:      "Providers the server handed to the last batch of each schedule; equal to the batch limit means the due queue is not drained",
+	Help:      "Providers selected from the most recent due response by schedule; blackhole excludes locally selected IDs, and a full cohort does not prove additional backlog",
 }, []string{"schedule"})
 
 var egressProbePassProvidersTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
