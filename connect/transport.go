@@ -1305,6 +1305,8 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	custom := connect.IsFramedUpgrade(r, connect.H1FramerProtocol)
 	upgradeStart := time.Now()
+	// Transfer Close ownership only after construction succeeds: a nil
+	// concrete pointer assigned to this interface would pass its nil check.
 	var ws connect.H1MessageConn
 	defer func() {
 		if ws != nil {
@@ -1332,10 +1334,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 
 		batchResponseWriter := &connectH1BatchResponseWriter{ResponseWriter: w}
-		ws, err = upgrader.Upgrade(batchResponseWriter, r, nil)
-		if err != nil {
+		websocketConn, upgradeErr := upgrader.Upgrade(batchResponseWriter, r, nil)
+		if upgradeErr != nil {
 			return
 		}
+		ws = websocketConn
 
 		// enforce the message size limit on messages in
 		// +4 for the framer's length header (the websocket carries the framed message).
@@ -1422,11 +1425,12 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		if upgradeErr != nil {
 			return
 		}
-		ws, err = connect.NewFramedMessageConn(conn, connect.H1FramerProtocol, self.settings.FramerSettings.MaxMessageLen, self.settings.H1PlusStats)
-		if err != nil {
+		framedConn, framedErr := connect.NewFramedMessageConn(conn, connect.H1FramerProtocol, self.settings.FramerSettings.MaxMessageLen, self.settings.H1PlusStats)
+		if framedErr != nil {
 			conn.Close()
 			return
 		}
+		ws = framedConn
 	}
 
 	// the declared family rides with the connection record; the observed
