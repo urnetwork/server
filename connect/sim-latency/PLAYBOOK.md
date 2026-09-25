@@ -1,31 +1,38 @@
 # Sim-latency competition live-deployment playbook
 
-Status date: 2026-09-23
+Status date: 2026-09-25
 
 Evaluator/baseline qualification: **historical measured-product qualification
-preserved; shared-baseline staging epoch 8 open with four completed jobs and a
-running singleton worker; results remain embargoed until finalization**
+preserved; staging epoch 8 finalized with a named comment-only winner; staging
+epoch 9 is evaluating three accepted jobs in FIFO order**
 
-Launch-control validation: **staging API/evaluator active; best-safe staging
-winner policy requires migrations 691 and 720, API, and worker rollout; production
-qualification and external launch actions pending**
+Launch-control validation: **staging API/evaluator active; explicit staging
+winner approval and zero-margin future staging policy require the next
+migration/API/evaluator-image rollout; production qualification and external
+launch actions remain pending**
 
 After close and FIFO drain, staging selects the highest-ranked placeable
 candidate passing every gate, regardless of significance or takeover margin,
-or no winner when none is placeable. There is no staging honesty review or
-review pause; all staging rows
-remain `honesty_review: not_reviewed`. Naming a winner neither approves its
-honesty/safety nor promotes source, config, thresholds, or a production winner.
+or no winner when none is placeable. Naming a winner alone leaves
+`honesty_review: not_reviewed`. A separate, append-only manual approval of the
+exact finalized staging winner changes that entry to `approved` for Apex
+adapter-path testing; it never promotes source or changes a finalized ranking.
 Production retains mandatory review. Historical finalized results stay intact.
 
-Rollout remains pending for this policy: deploy the current migration runner
-(`bringyourctl` or `competitiondbinit`) and apply migrations 691 and 720 before new API readiness or
-worker startup, then deploy the main API built with the updated `sn` contract
-and rebuild/deploy the competition worker on sille. Refresh the monitor CLI
-separately to observe the new migration guard. None of these requires an
-evaluator image rebuild, scoring-baseline reset, config-updater rollout, or
-frozen-source change. The currently running worker still requires statistical
-significance for a staging winner until that control-plane rollout occurs.
+After a staging round finalizes with a winner, inspect the authenticated
+candidate in a private temporary directory with
+`./run-local-main.sh staging-review --epoch N next`. If the patch and score
+are honest and safe, record a reviewed evidence JSON object with
+`./run-local-main.sh staging-review --epoch N approve --job-id ID --reviewer ID --reason TEXT --evidence PATH`.
+This marks only that winner's leaderboard entry `approved`; it does not merge
+the patch. An unreviewed or dishonest staging winner remains `not_reviewed`.
+
+For the next staging epoch, deploy the new migration and API before using
+`staging-review`; rebuild the evaluator image with the zero-margin scorer and
+pin its digest in main competition config before opening that epoch. Do not
+change epoch 9's frozen image, source, or 0.161 policy mid-round. Once epoch 9
+drains, close/finalize it, deploy the new release, and open the next staging
+epoch. The production policy remains at its configured positive margin.
 
 Deployment model: one authoritative 12-physical-core host; 10 evaluation cores,
 2 management cores; one content-addressed image per canonical submission patch.
@@ -213,7 +220,7 @@ has an owner and a recorded value.
 | Artifact retention | Implemented through `server/blob`: every workload and authenticated attempt artifact is uploaded to exact MinIO versions under compliance retention and read back/hash-verified before score commit. `/readyz` now fails unless object lock, versioning, and an enabled server-validated replication destination all pass. `support@ur.xyz` is the owner authorized to delete evidence after `retain_until`. | Run and retain the live protection/capacity preflight. Grafana warns at 75% used and pages at 90%. |
 | Monitoring and on-call | Competition metrics, dashboard, MinIO capacity views, 15-second runner heartbeat, 30-second stale warning, service-labeled alert rules, and the `support@ur.xyz` contact-policy reconciler are implemented for main Mimir/Grafana. | Deploy the final server and warp commits and retain the live Grafana routing proof. |
 | Submission integration | Main API implements authenticated generate/submit/poll plus public info, reveal, and leaderboard routes from `sn/api/competition.yml`. The Go-only onboarding and atomic token rotation/revocation flows are documented in `launch/ONBOARDING.md`. | Deliver the token through the private channel and exercise live revocation once. No separate API is required. |
-| Leaderboard and winner | Public `GET /competition/leaderboard` defaults to finalized production epochs. Staging publishes its best placeable candidate passing every gate, or null when none qualifies, through `include_staging=true`, always with `honesty_review: not_reviewed` and no promotion; the best-safe policy requires migrations 691 and 720/API/worker rollout. Production rows retain approved/rejected/not-reviewed disposition; ranked significant production candidates require append-only honesty review, and promotion binds the exact approved patch and score. The admission fee is fixed at $20 USD. | Publish rewards, eligibility, legal terms, and abuse/appeal handling. Exercise automatic staging reconciliation, then production reject/advance, approve, exhausted-no-winner, and one dry-run promotion before opening epoch 1. |
+| Leaderboard and winner | Public `GET /competition/leaderboard` defaults to finalized production epochs. Staging publishes its best placeable candidate passing every gate, or null when none qualifies, through `include_staging=true`; its winner starts `not_reviewed` and can become `approved` only by the explicit append-only `staging-review` command, without source promotion. Production rows retain approved/rejected/not-reviewed disposition; ranked significant production candidates require append-only honesty review, and promotion binds the exact approved patch and score. The admission fee is fixed at $20 USD. | Publish rewards, eligibility, legal terms, and abuse/appeal handling. Exercise staging approval reconciliation, then production reject/advance, approve, exhausted-no-winner, and one dry-run promotion before opening epoch 1. |
 | Apex | Adapter mapping and handoff fields are documented in `launch/APEX-HANDOFF.md`. | Macrocosmos must accept the asynchronous external-evaluator contract, stage it, record signed image identities, and activate the private registry entry. |
 
 The installed provisioner authenticates an existing bundle and intentionally
@@ -367,11 +374,13 @@ curl -fsS "$COMPETITION_API_BASE/info" | \
          .evaluator_image_digest == "sha256:b0c07cf45c30adb483ee5c215b7426b2e098c0b35c7cf4c4abcb0166cb43a87e" and
          .evaluation_policy.provider_count == 1800 and
          .evaluation_policy.replicates == 9 and
-         .evaluation_policy.takeover_margin == 0.161'
+         (.evaluation_policy.takeover_margin == 0.161 or
+          .evaluation_policy.takeover_margin == 0)'
 ```
 
-The literal source/image and 0.161 checks above apply to the refreshed source
-epoch 0 for staging epoch 5, after API/migrations and config rollout.
+The literal source/image checks above apply to the current staging source.
+`/info` reports the frozen current round policy: historical staging rounds
+retain 0.161, while rounds opened after the zero-margin rollout report 0.
 For every later round, derive the source and margin from its selected source
 epoch in `config/main/sim-latency.yml` and the image from the corresponding
 verified release; do not copy epoch 0 values forward.

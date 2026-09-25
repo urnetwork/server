@@ -37,15 +37,15 @@ automatically and makes each job's score or typed failure visible through its
 status URL. The highest-ranked placeable candidate passing every gate is the
 named staging winner, without a statistical-significance or takeover-margin
 requirement; if none qualifies, there is no winner. Staging never pauses for
-honesty review.
+honesty review before finalization.
 `GET /competition/leaderboard?include_staging=true` also publishes a clearly
 marked staging epoch with the same `winner_job_id` and winning entry for
-adapter-path testing. Every staging entry has `honesty_review: not_reviewed`,
-including a winner: this is not an honesty or safety approval. It does not
-create a production leaderboard row, candidate review, or promotion, and does
-not change source epoch zero or its threshold. Historical finalized results
-are preserved. The best-safe named-winner policy requires migrations 691 and 720,
-API, and worker rollout before epoch 8 closes. See the dated
+adapter-path testing. A staging winner starts `honesty_review: not_reviewed`;
+an operator may explicitly approve it after inspecting the exact finalized
+patch and evidence, at which point its leaderboard entry becomes `approved`.
+This never promotes source or creates a production winner. Future staging
+rounds freeze a zero takeover margin; historical rounds retain their original
+margin. See the dated
 [epoch-5 release record](STAGING-5-RELEASE.md).
 
 UR creates or retrieves each identity with `run-main.sh staging`, then uses

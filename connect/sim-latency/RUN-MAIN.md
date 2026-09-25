@@ -105,13 +105,15 @@ If none qualifies, there is no winner. The default leaderboard remains
 production-only; its
 `include_staging=true` view publishes the finalized staging epoch with
 `staging: true`, its `winner_job_id`, and a matching winning entry. Staging
-entries, including the winner, retain `honesty_review: not_reviewed`. This
-creates no honesty-review, promotion, or production-winner state; a named
-staging winner is not an honesty or safety approval. Historical finalized
-results are unchanged. The best-safe staging policy requires migrations 691 and 720,
-API, and worker rollout before epoch 8 closes; the
-[release record](launch/STAGING-5-RELEASE.md) retains the historical epoch-5
-opening worker identity and policy.
+entries, including the winner, initially retain
+`honesty_review: not_reviewed`. An agent may separately run
+`staging-review --epoch N next` and, after real honesty/safety review,
+`staging-review --epoch N approve` to mark the exact finalized winner
+`approved` for Apex testing. This is append-only and never promotes source or
+changes production-winner state. New staging rounds freeze a zero takeover
+margin; historical rounds, including epoch 9, retain their original margin.
+The [release record](launch/STAGING-5-RELEASE.md) retains the historical
+epoch-5 opening worker identity and policy.
 
 For the polling proof, record both compatibility `state` and additive
 `evaluation_status`. Before publication, `state` remains `completed` for both

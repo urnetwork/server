@@ -45,10 +45,12 @@ publishes each score or typed failure at the immutable job status URL. Its
 finalized result is also available through
 the opt-in `GET /competition/leaderboard?include_staging=true` view with
 `staging: true`, the same `winner_job_id`, and a matching winning entry. All
-staging entries retain `honesty_review: not_reviewed`, including the winner;
-this does not attest honesty or safety. Staging never enters production ranking,
-honesty review, source promotion, or the default production leaderboard, and
-never changes the source-epoch-zero threshold. The first production-round commit
+staging entries start `honesty_review: not_reviewed`, including the winner.
+After a manual review of that exact finalized patch, the winner may change to
+`approved` through an append-only staging approval; this enables the adapter's
+approved-winner path but never promotes source or changes production ranking.
+New staging rounds freeze a zero takeover margin; historical rounds keep their
+original value. The first production-round commit
 ends the era and atomically cancels queued staging work; it refuses to race a
 running evaluation. The adapter must prefer `active_round` once present and
 persist the returned `staging` boolean.

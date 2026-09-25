@@ -137,6 +137,31 @@ func TestCompetitionStagingBestWinnerMigrationPreservesProductionGate(t *testing
 	}
 }
 
+func TestCompetitionStagingApprovalMigrationIsAppendOnlyAndWinnerBound(t *testing.T) {
+	index := sqlMigrationIndex(t, "CREATE TABLE competition_staging_winner_approval")
+	if index != len(migrations)-1 {
+		t.Fatalf("staging approval migration index = %d, want final migration %d", index, len(migrations)-1)
+	}
+	sql := migrations[index].(*SqlMigration).sql
+	for _, marker := range []string{
+		"PRIMARY KEY REFERENCES competition_round(round_id)",
+		"competition_staging_winner_approval_append_only",
+		"competition_append_only_guard()",
+		"round.staging = true",
+		"round.finalized_at IS NOT NULL",
+		"round.winner_job_id = NEW.job_id",
+		"job.state = 'succeeded'",
+	} {
+		if !strings.Contains(sql, marker) {
+			t.Errorf("staging approval migration lost %q", marker)
+		}
+	}
+	if strings.Contains(sql, "competition_candidate_review_insert_guard") ||
+		strings.Contains(sql, "UPDATE competition_round") {
+		t.Fatal("staging approval migration changed production review or finalized round")
+	}
+}
+
 // The best-safe winner query and honesty guard are insufficient if the
 // independent immutable-round trigger still requires takeover eligibility.
 // Migration 720 must relax only staging while preserving all production and

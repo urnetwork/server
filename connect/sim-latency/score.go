@@ -352,8 +352,8 @@ func BuildScoreBaseline(inputs ScoreBaselineInputs) (*ScoreBaselineManifest, err
 	if !scoreRoundIdPattern.MatchString(inputs.RoundId) {
 		return nil, scoreError("invalid_baseline", "baseline round id is invalid")
 	}
-	if !finite(inputs.TakeoverMargin) || inputs.TakeoverMargin <= 0 || 0.5 < inputs.TakeoverMargin {
-		return nil, scoreError("invalid_baseline", "baseline takeover margin is outside (0, 0.5]")
+	if !finite(inputs.TakeoverMargin) || inputs.TakeoverMargin < 0 || 0.5 < inputs.TakeoverMargin {
+		return nil, scoreError("invalid_baseline", "baseline takeover margin is outside [0, 0.5]")
 	}
 
 	first, _, err := readOfficialRunSidecar(inputs.Runs[0])
@@ -502,8 +502,8 @@ func validateScoreBaseline(baseline *ScoreBaselineManifest) error {
 	if len(baseline.RunFlags) == 0 {
 		return scoreError("invalid_baseline", "baseline manifest has no frozen run flags")
 	}
-	if !finite(baseline.TakeoverMargin) || baseline.TakeoverMargin <= 0 || 0.5 < baseline.TakeoverMargin {
-		return scoreError("invalid_baseline", "baseline takeover margin is outside (0, 0.5]")
+	if !finite(baseline.TakeoverMargin) || baseline.TakeoverMargin < 0 || 0.5 < baseline.TakeoverMargin {
+		return scoreError("invalid_baseline", "baseline takeover margin is outside [0, 0.5]")
 	}
 	if len(baseline.Replicates) == 0 || len(baseline.Replicates)%2 == 0 {
 		return scoreError("invalid_baseline", "baseline replicate count must be odd and positive")

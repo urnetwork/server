@@ -355,6 +355,23 @@ func TestBuildScoreBaselineUsesOfficialArtifactValidation(t *testing.T) {
 	}
 }
 
+func TestBuildScoreBaselineAcceptsZeroStagingMargin(t *testing.T) {
+	fixture := newScoreFixture(t, baselineScoreFixtureOptions())
+	inputs := baselineInputsFromFixture(fixture)
+	inputs.TakeoverMargin = 0
+	baseline, err := BuildScoreBaseline(inputs)
+	if err != nil || baseline.TakeoverMargin != 0 {
+		t.Fatalf("zero-margin baseline = %+v, %v", baseline, err)
+	}
+	if err := validateScoreBaseline(baseline); err != nil {
+		t.Fatalf("zero-margin baseline validation: %v", err)
+	}
+	inputs.TakeoverMargin = -0.001
+	if _, err := BuildScoreBaseline(inputs); err == nil {
+		t.Fatal("negative-margin baseline accepted")
+	}
+}
+
 // A scorer-owned control must not freeze telemetry copied from a manifest
 // when the underlying measured rows say something else.
 func TestBuildScoreBaselineRejectsForgedLiveMetric(t *testing.T) {

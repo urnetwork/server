@@ -53,6 +53,54 @@ func TestRoundPolicyPinsEvaluatorCommandIdentity(t *testing.T) {
 	}
 }
 
+func TestStagingRoundZeroMarginDoesNotChangeProductionOrHistoricalRound(t *testing.T) {
+	settings := validSettings()
+	stagingSettings := *settings
+	stagingSettings.EvaluationPolicy.TakeoverMargin = 0
+	zeroPolicy, err := policySnapshot(&stagingSettings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagingRound := &roundRecord{RoundResult: RoundResult{Staging: true}, PolicyJson: zeroPolicy}
+	frozen, err := settingsForFrozenRound(settings, stagingRound)
+	if err != nil || frozen.EvaluationPolicy.TakeoverMargin != 0 || settings.EvaluationPolicy.TakeoverMargin == 0 {
+		t.Fatalf("zero-margin staging policy = %+v, %v", frozen, err)
+	}
+	if _, err := settingsForFrozenRound(settings, &roundRecord{PolicyJson: zeroPolicy}); err == nil {
+		t.Fatal("production accepted zero staging margin")
+	}
+	historicalPolicy, err := policySnapshot(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historical, err := settingsForFrozenRound(settings, &roundRecord{
+		RoundResult: RoundResult{Staging: true}, PolicyJson: historicalPolicy,
+	})
+	if err != nil || historical.EvaluationPolicy.TakeoverMargin != settings.EvaluationPolicy.TakeoverMargin {
+		t.Fatalf("historical staging policy = %+v, %v", historical, err)
+	}
+	info := settings.PublicInfo()
+	if err := applyFrozenRoundPublicPolicy(&info, stagingRound); err != nil || info.EvaluationPolicy.TakeoverMargin != 0 {
+		t.Fatalf("public staging policy = %+v, %v", info.EvaluationPolicy, err)
+	}
+	info = settings.PublicInfo()
+	if err := applyFrozenRoundPublicPolicy(&info, &roundRecord{PolicyJson: historicalPolicy}); err != nil ||
+		info.EvaluationPolicy.TakeoverMargin != settings.EvaluationPolicy.TakeoverMargin {
+		t.Fatalf("public historical policy = %+v, %v", info.EvaluationPolicy, err)
+	}
+}
+
+func TestScoreMarginMustMatchFrozenStagingOrProductionPolicy(t *testing.T) {
+	score := &ScoreResult{Significance: &ScoreSignificance{TakeoverMarginPercent: 0}}
+	if !scoreMatchesFrozenMargin(score, 0) || scoreMatchesFrozenMargin(score, 0.161) {
+		t.Fatal("zero staging margin crossed production policy")
+	}
+	score.Significance.TakeoverMarginPercent = 16.1
+	if !scoreMatchesFrozenMargin(score, 0.161) || scoreMatchesFrozenMargin(score, 0) {
+		t.Fatal("positive production margin crossed staging policy")
+	}
+}
+
 // A valid newly configured executable must still be refused before an attempt
 // starts if its path or bytes differ from the round's frozen host command.
 func TestCommandEvaluatorRejectsRoundScriptReleaseChange(t *testing.T) {

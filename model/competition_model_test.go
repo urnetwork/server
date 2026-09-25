@@ -62,6 +62,18 @@ func TestCompetitionScoreRejectsMissingSignificance(t *testing.T) {
 	}
 }
 
+func TestCompetitionScoreAllowsZeroStagingMarginButRejectsNegativeMargin(t *testing.T) {
+	score := validCompetitionScoreForTest()
+	score.Significance.TakeoverMarginPercent = 0
+	if err := ValidateCompetitionScore(score); err != nil {
+		t.Fatalf("zero staging margin: %v", err)
+	}
+	score.Significance.TakeoverMarginPercent = -0.01
+	if err := ValidateCompetitionScore(score); err == nil {
+		t.Fatal("negative takeover margin accepted")
+	}
+}
+
 // Adjacent score fields must not provide alternate ways to publish a result
 // whose statistical decision is incomplete or contradictory.
 func TestCompetitionScoreRejectsAdjacentContractDrift(t *testing.T) {
