@@ -224,7 +224,8 @@ func TestMonitorDocumentationRequiresEvidenceBackedErrorQualifiers(t *testing.T)
 // attempt and fleet share controls distinct from provider verdicts and
 // fleet-wide rates, without promoting any aggregate to a per-pass join. The
 // series and request stages only the retired vendor geolocation produced must
-// stay undocumented.
+// stay undocumented. Completed echo diagnostics are a separate, source-gated
+// observation and must not be promoted to live scored-load stage evidence.
 func TestMonitorDocumentationEgressEvidenceBoundaries(t *testing.T) {
 	t.Parallel()
 	data, err := os.ReadFile("SIGNALS.md")
@@ -251,7 +252,7 @@ func TestMonitorDocumentationEgressEvidenceBoundaries(t *testing.T) {
 		"`urnetwork_egress_probe_locations_total` counts the exit addresses the prober submits by the precision of the GeoLite2 placement the ingest itself applies",
 		"`country=\"unknown\"` an address GeoLite2 cannot place, which the ingest refuses and the attempt reports as `submit_failed`",
 		"`urnetwork_egress_probe_attempts_total` counts one outcome per full run",
-		"`health_not_run` (the run never started), `run_not_measured` (its tunnel died and could not be re-created), `no_exit_ip` (the `/ip` echo never answered) and `run_batch_guard` (its batch was held back by the run guard) are the probe's own misses, not verdicts on the provider's traffic",
+		"`health_not_run` (the run never started), `run_not_measured` (its tunnel died and could not be re-created), `no_exit_ip` (the `/my-ip-info` echo never answered) and `run_batch_guard` (its batch was held back by the run guard) are the probe's own misses, not verdicts on the provider's traffic",
 		"they are measurement events, not acknowledgments or accepted locations",
 		"Neither is an all-provider request denominator or a fleet-wide DNS/TLS failure rate",
 		"`urnetwork_egress_probe_fleet_dark_share` (dark providers over those with a current measured blackhole check)",
@@ -260,10 +261,14 @@ func TestMonitorDocumentationEgressEvidenceBoundaries(t *testing.T) {
 		"Each reads 0 when it has nothing to divide, so zero is not health without the counts behind it",
 		"Missing or newly created auxiliary series are unknown, not healthy zero",
 		"not added to the fixed admission query or its alert thresholds",
-		"The prober no longer records the stage an attempt failed at",
+		"Scored-load attempts do not record the failed stage",
 		"a timeout before the connection is established is one failed attempt of the load, retried like any other, and it counts against the load like any other failure once every attempt has failed, so it is not a DNS-specific verdict",
 		"Only a TLS authentication failure, which ends the load at once, and a tunnel lost under the load's last attempt, which leaves the load not measured, are told apart",
-		"at the run level a tunnel that never opens is `tunnel_failed` and a warm-up the `/ip` echo never answers is `no_exit_ip`",
+		"at the run level a tunnel that never opens is `tunnel_failed` and a warm-up the `/my-ip-info` echo never answers is `no_exit_ip`",
+		"committed in source but not yet deployed to Main",
+		"fixed `echo_stage` and `error_class` for completed no-exit results",
+		"not an in-flight stage observation",
+		"DNS and socket dialing remain combined; contract/window readiness remains unknown",
 	} {
 		if !strings.Contains(documentation, required) {
 			t.Errorf("SIGNALS.md lost the egress evidence boundary %q", required)
@@ -275,6 +280,7 @@ func TestMonitorDocumentationEgressEvidenceBoundaries(t *testing.T) {
 		"urnetwork_egress_probe_location_flags_total",
 		"connect_formation",
 		"pre-GotConn",
+		"The prober no longer records the stage an attempt failed at",
 	} {
 		if strings.Contains(documentation, retired) {
 			t.Errorf("SIGNALS.md documents %s, which only the retired vendor geolocation produced (connect/GEOMAP.md §11.3)", retired)

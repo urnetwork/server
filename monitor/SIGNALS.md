@@ -6678,6 +6678,13 @@ A first NotMeasured-only row supplies no measured freshness or last-hour
 throughput. Thus fresh claims, successful rescheduling, and zero current
 measured checks can coexist. Do not translate stale measured clocks into
 absent submissions, a dead task, or a particular authentication/tunnel fault.
+A new artifact's check-start can precede a rollout-time cutoff while its
+publication occurs much later. Zero `checked_at >= cutoff` alone therefore
+does not prove zero measured reports from that artifact. Preserve the actual
+check-start interval and compare bounded `update_time` publication cohorts;
+stored verdict classes can predate a NotMeasured upsert and are not the new
+submitted payload. Neither a batch acknowledgement nor matching row counts
+establishes a same-attempt or exact-artifact join.
 Conversely, scheduled backoff, `due=0`, or a fresh unknown first row cannot
 certify restored measured coverage. A healthy sibling can still hide individual
 old providers inside a shard maximum; retain the independent fleet-capacity
@@ -7282,7 +7289,7 @@ and the attempt reports as `submit_failed`. The address itself is never a label.
 `urnetwork_egress_probe_attempts_total` counts one outcome per full run, `ok` or
 its failure class; the prober-side classes `health_not_run` (the run never
 started), `run_not_measured` (its tunnel died and could not be re-created),
-`no_exit_ip` (the `/ip` echo never answered) and `run_batch_guard` (its batch was
+`no_exit_ip` (the `/my-ip-info` echo never answered) and `run_batch_guard` (its batch was
 held back by the run guard) are the probe's own misses, not verdicts on the
 provider's traffic. Both are recorded only once the run guard has judged the
 batch -- a held-back batch records only its `run_batch_guard` attempts -- and
@@ -7456,15 +7463,52 @@ strategy but currently resolves its host names outside the in-tunnel DoH path;
 do not confuse that bootstrap resolution with provider egress DNS.
 
 False-positive qualifier: this proves the mechanism, not attribution of every
-production probe timeout. The prober no longer records the stage an attempt
-failed at: a timeout before the connection is established is one failed attempt
+production probe timeout. Scored-load attempts do not record the failed stage:
+a timeout before the connection is established is one failed attempt
 of the load, retried like any other, and it counts against the load like any
 other failure once every attempt has failed, so it is not a DNS-specific
 verdict. Only a TLS authentication failure, which ends the load at once, and a
 tunnel lost under the load's last attempt, which leaves the load not measured,
 are told apart; at the run level a tunnel that never opens is `tunnel_failed`
-and a warm-up the `/ip` echo never answers is `no_exit_ip`.
-False-negative qualifier: the `/ip` echo warm-up precedes the scored loads on
+and a warm-up the `/my-ip-info` echo never answers is `no_exit_ip`.
+
+Source checkpoint (2026-09-25): Operator Proxy `7ce5f03` is committed in source
+but not yet deployed to Main. It records fixed `echo_stage` and `error_class`
+for completed no-exit results. This is not an in-flight stage observation:
+health still waits for scored loads before returning its result, and
+cancellation before the final result can omit the echo detail. DNS and socket
+dialing remain combined; contract/window readiness remains unknown. This adds
+no new metric families or labels and does not make the existing watcher parse
+these fields. Verify the running Taskworker artifact before expecting this
+detail; deduplicated log samples are not an attempt denominator.
+
+Confirmed request-owner defect (2026-09-25, Operator Proxy `633891b`): Go's HTTP transport deliberately
+detaches dial cancellation with `context.WithoutCancel` for potential reuse,
+even when the provider probe disables keep-alives. The custom
+`providertunnel` `DialTLSContext` callback formerly passed that context to its
+tunnel dial and TLS handshake. A 10/15-second scored request could release its
+fetch slot while its independently bounded 30-second tunnel dial remained
+active. `TestProbeHttpRequestOwner*` reproduces this at the actual HTTP owner:
+six full-health fetch slots admitted 18 overlapping synthetic dials, and a
+three-load blackhole retry retained six. The scoped correction restores each
+request's deadline/cancellation and joins admitted dial work before release;
+it preserves independent request ownership, response-body lifetime, HTTP1,
+closed host policy, WebPKI/pins, retry spacing and existing guard semantics.
+A live-path deadline remains measured failure; genuine path loss remains
+NotMeasured. No timeout increase or new shared admission limit is involved.
+
+This is source-proven abandoned-work amplification, not a proven cause of
+Main's broad HTTP/load failures. The synthetic dial models the existing TUN
+bound; it is not a measured live amplification factor or phase census. Before
+rollout attribution or recovery, verify the running Taskworker contains the
+request-owner correction and compare same-attempt logical outcomes, guard
+inputs and acknowledged measured publication. DNS-leg log rates, quieter
+cancellation, or a passing local test do not establish recovery. Deployment
+of this correction is not yet verified by this source checkpoint; §2.19 owns
+the independent persisted-coverage and publication-clock gate. This catalog
+change adds no watcher query, metric family, label or new alert identity.
+
+False-negative qualifier: the `/my-ip-info` echo warm-up precedes the scored loads on
 the same initially cold tunnel/cache; later aggregate health success does not
 establish what happened to an individual failed warm-up or load or exclude an
 earlier DNS-family stall.
