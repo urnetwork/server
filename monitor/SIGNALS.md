@@ -6471,7 +6471,10 @@ it reports only bounded structural reasons such as `missing_shard_1`,
 work: it is `egress-probe-unarmed`. The same rollout alert remains open until
 the append-only `provider_egress_health.tls_authentication_failure` field
 exists, because the new full-probe ingestion path cannot satisfy its integrity
-contract without that schema. The deadline scheduler additionally requires
+contract without that schema. The activity query also requires every
+blackhole measurement/schedule column through migration 709, including
+`next_due_at`; an absent or malformed physical-schema observation remains
+unarmed/unobservable, never an empty ready queue. The deadline scheduler additionally requires
 migration 657's `provider_egress_health_measured_at_client_id` index to be a
 valid, ready, non-partial btree over exactly `(measured_at, client_id)`. Index
 absence or a same-name malformed/not-ready index emits an additive rollout
@@ -6506,17 +6509,27 @@ For each shard, aggregate without exporting identifiers:
   that a health verdict ever existed. A retained health row without an extant
   location stays exclusively in the no-location lane. An exact location/health
   deadline tie is assigned to location, matching the scheduler's stable merge;
-- blackhole due: no check, or a check older than 90 minutes;
+- blackhole scheduler-ready due: no stored row, or
+  `COALESCE(next_due_at, checked_at + 90 minutes) <= snapshot_time`, exactly
+  matching the current due API, including the NULL legacy-schedule fallback;
+- `verdict_refresh_due`: no measured check, or a measured check older than
+  90 minutes. This exposure count is independent of scheduler readiness and
+  does not disappear merely because an unmeasured retry was rescheduled;
 - deferred current-dark full due: the number that otherwise meets a full-due
   lane but whose latest blackhole check is a failure inside three hours;
 - newest full activity: the newest location, attempt, or health timestamp from
   a provider without a current dark verdict in that same shard. Excluding old-
   deployment activity against rows now dark prevents it from masking a stalled
   corrected candidate queue;
-- newest blackhole activity: the newest blackhole check in that shard; and
-- current coverage: locations inside seven days and blackhole checks inside
-  three hours, plus the number of unique latest full attempts and blackhole
-  checks written in the last hour. The full-attempt count is success-inclusive:
+- newest blackhole evidence: the newest measured check's `checked_at` in
+  that shard; and
+- current coverage: locations inside seven days and measured blackhole checks
+  inside three hours, plus unique latest full attempts and measured blackhole
+  checks whose `checked_at` starts inside the last hour. A first row with
+  `ok=false, failure=not_measured, consecutive_failures=0` is not a measured
+  check, matching `CountCurrentProviderBlackholeChecks`. These latest-row
+  clocks are not a submission counter or an integer census of API writes.
+  The full-attempt count is success-inclusive:
   a successful probe may leave its former due category, so classifying attempts
   by the provider's current category would manufacture zero progress. This
   gross last-hour attempt rate deliberately remains unfiltered by current-dark
@@ -6525,26 +6538,57 @@ For each shard, aggregate without exporting identifiers:
 The due ages are the application contract: full location refresh begins at
 half the seven-day location lifetime, existing-health refresh begins at half
 its 24-hour lifetime, a missing-health row is eligible after the common attempt
-backoff, failed attempts back off for six hours, and the cheap blackhole sweep
-becomes due at half its three-hour maximum age. Do not invent a percentage
-floor while a large first sweep is catching up. Instead, when `due > 0`,
-require the corresponding shard-local newest timestamp to be no older than its
-durable `max_time + idle_delay` plus one five-minute monitor cadence. Old
-evidence is healthy when the exact due count is zero.
+backoff, and failed full attempts back off for six hours. Blackhole readiness
+honors `next_due_at`: a measured pass normally schedules half the three-hour
+maximum age later; failures and unmeasured retries follow their configured
+backoff, while NULL legacy schedules retain the old age fallback. Do not invent
+a percentage floor during catch-up. For full due work, require shard-local
+newest evidence inside durable `max_time + idle_delay` plus one five-minute
+monitor cadence. The same bound applies to blackhole measured evidence when
+`verdict_refresh_due > 0`. Blackhole scheduler-ready `due=0` alone is not
+coverage recovery while measured-verdict refresh candidates remain.
 
-Only a current explicit `ok=false` blackhole verdict defers the expensive full
-queue. A missing check, a check at least three hours old, or a current passing
-check remains admitted. Recovery does not depend on the full queue: the cheap
-blackhole queue has no attempt backoff, offers the failing provider again after
-90 minutes, restores full eligibility immediately on a passing upsert, and
-fails open when an unreplaced failure reaches three hours. The primary-key
+Only a current dark blackhole verdict under
+`model.ProviderBlackholeDarkSql` defers the expensive full queue. A missing
+check, a check at least three hours old, or a current passing check remains
+admitted. The cheap queue honors the stored retry schedule independently of the
+full queue, restores full eligibility on a passing upsert, and the dark
+predicate expires an unreplaced failure at its existing maximum age. The primary-key
 lookup on `provider_blackhole_check(client_id)` keeps the new exclusion local
 to each candidate reached by the pre-existing head plan; it adds no migration,
 scan, sort, policy weight, concurrency, or timeout.
 
+
+Blackhole false-positive/false-negative qualification: `checked_at` is the
+latest measured check's start time, not receipt/completion time and not a
+submission counter. Against an existing row, a newer `not_measured` report
+preserves the old measurement and advances `next_due_at` / `update_time`.
+A first NotMeasured-only row supplies no measured freshness or last-hour
+throughput. Thus fresh claims, successful rescheduling, and zero current
+measured checks can coexist. Do not translate stale measured clocks into
+absent submissions, a dead task, or a particular authentication/tunnel fault.
+Conversely, scheduled backoff, `due=0`, or a fresh unknown first row cannot
+certify restored measured coverage. A healthy sibling can still hide individual
+old providers inside a shard maximum; retain the independent fleet-capacity
+check and do not infer all-provider freshness from the maximum.
+
+The no-full and serial paths require a separate execution-geometry control:
+one selected blackhole list may contain many worker waves before final
+submission, while the source's minimum max-time validation budgets one full
+run and one blackhole check. A private fake-clock test can reproduce a valid
+250-provider selection reaching the 75-minute task deadline with completed
+earlier waves, but this does not establish a running Main artifact or its
+actual queue geometry. Preserve per-check security/retry budgets and the
+cancellation finalizer's passing/TLS/unknown evidence. Join a running artifact,
+complete saved arguments, selected full/blackhole counts, guard/readiness
+state, and same-attempt publication outcome before attributing a live stall.
+No service-wide cap, longer task timeout, or weakened dark rule follows from
+the aggregate.
+
 Shard activity is necessary but not sufficient. Sum the eligible, current, and
-last-hour blackhole counts across the complete geometry. When current coverage
-is incomplete and at least one check was written in the last hour, project one
+last-hour measured blackhole counts across the complete geometry. When current
+coverage is incomplete and at least one latest measured check started in the last
+hour, project one
 whole-fleet sweep at that measured rate. It must fit inside
 `ProviderBlackholeCheckMaxAge` (currently three hours):
 
@@ -6616,7 +6660,8 @@ the exact projected drain from the exact remaining time. Zero slack is not a
 shortfall, while any negative slack (including a subsecond shortfall) remains
 negative. Only three additional scalar minima leave PostgreSQL, one per urgent
 category; no provider identities, individual deadlines, or prefix rows leave
-the database. The activity response has exactly 23 columns. A due category
+the database. The activity response has exactly 24 columns, including the separate
+`verdict_refresh_due` count. A due category
 with a nonzero gross rate must return a valid signed slack; missing, malformed,
 or legacy aggregate-only responses fail closed. An empty category or zero
 gross rate returns `unavailable`, never a fabricated zero or healthy forecast.
@@ -6677,8 +6722,12 @@ first-attempt-versus-retry allocation inside the unlocated lane.
   non-dark candidates but no location/attempt/health progress inside the
   derived bound. The newest-activity clock excludes current-dark candidates so
   earlier attempts against them cannot keep a corrected queue falsely fresh.
-- `egress-blackhole-stalled` (PAGE after two samples): a shard has blackhole
-  due candidates but no check progress inside the same derived bound.
+- `egress-blackhole-stalled` (PAGE after two samples): a shard has
+  measured-verdict refresh candidates and no measured-check clock inside the
+  same derived bound. The existing alert identity is retained, but observed
+  `due` now means exact scheduler-ready work and `verdict_refresh_due` is
+  separate exposure. A successful `not_measured` reschedule may leave this
+  coverage alert open without any failed submission or scheduler fault.
 - `egress-blackhole-capacity` (PAGE after two samples): shard activity is
   current, but the complete-fleet projection at the measured last-hour rate is
   longer than the blackhole-verdict lifetime. Diagnose §2.23 and §2.24 first:
@@ -6988,9 +7037,10 @@ standing deployment guidance after the rebase.
 Correlate a stalled frame with its bounded `ProviderEgressProbe` Taskworker
 logs and generic task error. Repair the concrete authentication, API,
 task-claim, or tunnel execution fault; do not delete provider evidence just to
-move the timestamp. This is a **software execution / operational rollout**
-alert class. It cannot be fixed by adding Proxy hardware, and it does not imply
-that the independent Proxy active-client ceiling is adequate.
+move the timestamp. The blackhole finding is measured-coverage exposure,
+not a proved software execution or operational rollout cause. Its clocks alone
+do not identify a resource bottleneck or establish the independent Proxy
+capacity boundary.
 
 Implementation convention: SIGNALS.md §2.19 (`egress-coverage`) maps to
 `signal_egress_coverage.go` and `signal_egress_coverage_test.go`. Synthetic

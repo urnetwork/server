@@ -105,7 +105,7 @@ func syntheticEgressConfigSource(t *testing.T, taskRows *[]Row) *syntheticSource
 	return &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
 		case strings.Contains(query, "pg_attribute"):
-			return []Row{{"t", "t"}}, nil
+			return []Row{{"t", "t", "t"}}, nil
 		case strings.Contains(query, "FROM pending_task"):
 			return *taskRows, nil
 		case strings.Contains(query, "WITH lifecycle_clock AS"):
@@ -429,7 +429,7 @@ func TestEgressCoverageDisabledDesiredStateDoesNotSuppressDurableFaults(t *testi
 		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 			switch {
 			case strings.Contains(query, "pg_attribute"):
-				return []Row{{"t", "t"}}, nil
+				return []Row{{"t", "t", "t"}}, nil
 			case strings.Contains(query, "FROM pending_task"):
 				return rows, nil
 			case strings.Contains(query, "WITH lifecycle_clock AS"):
@@ -540,6 +540,7 @@ func syntheticEgressCoverageActivity(snapshot egressCoverageSnapshot) Row {
 		slack(snapshot.staleLocationDeadlineSlackSeconds, snapshot.staleLocationDue, snapshot.staleLocationOldestAgeSeconds, 7*24*3600),
 		slack(snapshot.staleHealthDeadlineSlackSeconds, snapshot.staleHealthDue, snapshot.staleHealthOldestAgeSeconds, 24*3600),
 		slack(snapshot.missingHealthDeadlineSlackSeconds, snapshot.missingHealthDue, snapshot.missingHealthOldestAgeSeconds, 24*3600),
+		fmt.Sprint(snapshot.blackholeVerdictDue),
 	}
 }
 
@@ -562,7 +563,7 @@ func TestEgressCoverageSignalSyntheticUnarmedRollout(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
 		case strings.Contains(query, "pg_attribute"):
-			return []Row{{"f", "f"}}, nil
+			return []Row{{"f", "f", "f"}}, nil
 		case strings.Contains(query, "FROM pending_task"):
 			return nil, nil
 		default:
@@ -601,7 +602,7 @@ func TestEgressCoverageSignalSyntheticSchemaArmedTasksAbsent(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
 		case strings.Contains(query, "pg_attribute"):
-			return []Row{{"t", "t"}}, nil
+			return []Row{{"t", "t", "t"}}, nil
 		case strings.Contains(query, "FROM pending_task"):
 			return nil, nil
 		default:
@@ -644,7 +645,7 @@ func TestEgressCoverageSignalSyntheticHealthDeadlineIndexAbsent(t *testing.T) {
 		switch {
 		case strings.Contains(query, "pg_attribute"):
 			schemaQuery = query
-			return []Row{{"t", "f"}}, nil
+			return []Row{{"t", "f", "t"}}, nil
 		case strings.Contains(query, "FROM pending_task"):
 			return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
 		case strings.Contains(query, "WITH lifecycle_clock AS"):
@@ -699,7 +700,7 @@ func TestEgressCoverageSignalSyntheticIncompleteShardGeometry(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
 		case strings.Contains(query, "pg_attribute"):
-			return []Row{{"t", "t"}}, nil
+			return []Row{{"t", "t", "t"}}, nil
 		case strings.Contains(query, "FROM pending_task"):
 			return []Row{
 				syntheticEgressCoverageTask(t, 0, 3),
@@ -733,7 +734,7 @@ func TestEgressCoverageSignalSyntheticShardLocalStalls(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
 		case strings.Contains(query, "pg_attribute"):
-			return []Row{{"t", "t"}}, nil
+			return []Row{{"t", "t", "t"}}, nil
 		case strings.Contains(query, "FROM pending_task"):
 			return []Row{
 				syntheticEgressCoverageTask(t, 0, 2),
@@ -743,7 +744,7 @@ func TestEgressCoverageSignalSyntheticShardLocalStalls(t *testing.T) {
 			activityQuery = query
 			return []Row{
 				syntheticEgressCoverageActivity(egressCoverageSnapshot{
-					shardIndex: 0, eligible: 22000, noLocationDue: 8, blackholeDue: 250,
+					shardIndex: 0, eligible: 22000, noLocationDue: 8, blackholeDue: 250, blackholeVerdictDue: 250,
 					deferredCurrentDarkDue: 12000,
 					fullAgeSeconds:         6000, blackholeAgeSeconds: 6600,
 					fullCurrent: 400, blackholeCurrent: 18000,
@@ -829,7 +830,7 @@ func TestEgressCoverageSignalSyntheticHealthyNoDueWork(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
 		case strings.Contains(query, "pg_attribute"):
-			return []Row{{"t", "t"}}, nil
+			return []Row{{"t", "t", "t"}}, nil
 		case strings.Contains(query, "FROM pending_task"):
 			return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
 		case strings.Contains(query, "WITH lifecycle_clock AS"):
@@ -882,14 +883,14 @@ func TestEgressCoverageSignalSyntheticBlackholeCapacity(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
 		case strings.Contains(query, "pg_attribute"):
-			return []Row{{"t", "t"}}, nil
+			return []Row{{"t", "t", "t"}}, nil
 		case strings.Contains(query, "FROM pending_task"):
 			return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
 		case strings.Contains(query, "WITH lifecycle_clock AS"):
 			// Activity is fresh, so shard liveness is healthy. At 100 checks/hour,
 			// 301 providers require just over the three-hour verdict lifetime.
 			return []Row{syntheticEgressCoverageActivity(egressCoverageSnapshot{
-				shardIndex: 0, eligible: 301, blackholeDue: 201,
+				shardIndex: 0, eligible: 301, blackholeDue: 201, blackholeVerdictDue: 201,
 				fullAgeSeconds:      10,
 				blackholeAgeSeconds: 10, fullCurrent: 10, blackholeCurrent: 200,
 				fullAttemptsLastHour: 1, blackholeLastHour: 100,
@@ -956,14 +957,14 @@ func TestEgressCoverageSignalSyntheticConfiguredCapacityBounds(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
 		case strings.Contains(query, "pg_attribute"):
-			return []Row{{"t", "t"}}, nil
+			return []Row{{"t", "t", "t"}}, nil
 		case strings.Contains(query, "FROM pending_task"):
 			return taskRows, nil
 		case strings.Contains(query, "WITH lifecycle_clock AS"):
 			rows := make([]Row, 0, 3)
 			for shardIndex := 0; shardIndex < 3; shardIndex++ {
 				rows = append(rows, syntheticEgressCoverageActivity(egressCoverageSnapshot{
-					shardIndex: shardIndex, eligible: 2000, blackholeDue: 1500,
+					shardIndex: shardIndex, eligible: 2000, blackholeDue: 1500, blackholeVerdictDue: 1500,
 					fullAgeSeconds:      10,
 					blackholeAgeSeconds: 10, fullCurrent: 100, blackholeCurrent: 1000,
 					fullAttemptsLastHour: 1, blackholeLastHour: 200,
@@ -1014,7 +1015,7 @@ func TestEgressCoverageSignalSyntheticBlackholeCapacityBoundary(t *testing.T) {
 			source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 				switch {
 				case strings.Contains(query, "pg_attribute"):
-					return []Row{{"t", "t"}}, nil
+					return []Row{{"t", "t", "t"}}, nil
 				case strings.Contains(query, "FROM pending_task"):
 					return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
 				case strings.Contains(query, "WITH lifecycle_clock AS"):
@@ -1026,7 +1027,7 @@ func TestEgressCoverageSignalSyntheticBlackholeCapacityBoundary(t *testing.T) {
 					current, _ := strconv.ParseInt(testCase.current, 10, 64)
 					due, _ := strconv.ParseInt(blackholeDue, 10, 64)
 					return []Row{syntheticEgressCoverageActivity(egressCoverageSnapshot{
-						shardIndex: 0, eligible: eligible, blackholeDue: due,
+						shardIndex: 0, eligible: eligible, blackholeDue: due, blackholeVerdictDue: due,
 						fullAgeSeconds:      10,
 						blackholeAgeSeconds: 10, fullCurrent: 10, blackholeCurrent: current,
 						fullAttemptsLastHour: 1, blackholeLastHour: 100,
@@ -1052,7 +1053,7 @@ func TestEgressCoverageSignalSyntheticFullCapacity(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
 		case strings.Contains(query, "pg_attribute"):
-			return []Row{{"t", "t"}}, nil
+			return []Row{{"t", "t", "t"}}, nil
 		case strings.Contains(query, "FROM pending_task"):
 			return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
 		case strings.Contains(query, "WITH lifecycle_clock AS"):
@@ -1140,7 +1141,7 @@ func TestEgressCoverageSignalSyntheticFullFairnessIsCategoryLocal(t *testing.T) 
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
 		case strings.Contains(query, "pg_attribute"):
-			return []Row{{"t", "t"}}, nil
+			return []Row{{"t", "t", "t"}}, nil
 		case strings.Contains(query, "FROM pending_task"):
 			return []Row{syntheticEgressCoverageTask(t, 0, 2), syntheticEgressCoverageTask(t, 1, 2)}, nil
 		case strings.Contains(query, "WITH lifecycle_clock AS"):
@@ -1187,7 +1188,7 @@ func TestEgressCoverageSignalSyntheticFullFairnessDeadlineProjection(t *testing.
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
 		case strings.Contains(query, "pg_attribute"):
-			return []Row{{"t", "t"}}, nil
+			return []Row{{"t", "t", "t"}}, nil
 		case strings.Contains(query, "FROM pending_task"):
 			return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
 		case strings.Contains(query, "WITH lifecycle_clock AS"):
@@ -1223,7 +1224,7 @@ func TestEgressCoverageSignalSyntheticMissingHealthFairness(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
 		case strings.Contains(query, "pg_attribute"):
-			return []Row{{"t", "t"}}, nil
+			return []Row{{"t", "t", "t"}}, nil
 		case strings.Contains(query, "FROM pending_task"):
 			return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
 		case strings.Contains(query, "WITH lifecycle_clock AS"):
@@ -1271,7 +1272,7 @@ func TestEgressCoverageSignalSyntheticFullBoundariesAreHealthy(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {
 		case strings.Contains(query, "pg_attribute"):
-			return []Row{{"t", "t"}}, nil
+			return []Row{{"t", "t", "t"}}, nil
 		case strings.Contains(query, "FROM pending_task"):
 			return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
 		case strings.Contains(query, "WITH lifecycle_clock AS"):
@@ -1574,7 +1575,7 @@ func TestEgressCoverageDeadlinePrefixSQL(t *testing.T) {
 				source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 					switch {
 					case strings.Contains(query, "pg_attribute"):
-						return []Row{{"t", "t"}}, nil
+						return []Row{{"t", "t", "t"}}, nil
 					case strings.Contains(query, "FROM pending_task"):
 						return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
 					case strings.Contains(query, "WITH lifecycle_clock AS"):

@@ -496,12 +496,22 @@ func (p egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		    AND index_record.indpred IS NULL
 		    AND index_record.indisvalid
 		    AND index_record.indisready
-		 );
+		 ),
+		 NOT EXISTS (
+		  SELECT 1
+		  FROM (VALUES ('client_id'), ('checked_at'), ('ok'), ('failure'),
+		               ('consecutive_failures'), ('first_failed_at'), ('next_due_at')) AS required(name)
+		  WHERE NOT EXISTS (
+		   SELECT 1 FROM pg_attribute
+		   WHERE attrelid=to_regclass('public.provider_blackhole_check')
+		     AND attname=required.name AND attnum > 0 AND NOT attisdropped
+		  )
+		 ) AS blackhole_schema_armed;
 	`)
 	if err != nil {
 		return nil, err
 	}
-	if len(schemaRows) != 1 || len(schemaRows[0]) != 2 {
+	if len(schemaRows) != 1 || len(schemaRows[0]) != 3 {
 		return nil, fmt.Errorf("provider egress coverage schema query returned an invalid shape")
 	}
 	tlsIntegrityArmed, err := strconv.ParseBool(schemaRows[0].str(0))
@@ -511,6 +521,11 @@ func (p egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]findin
 	healthDeadlineIndexArmed, err := strconv.ParseBool(schemaRows[0].str(1))
 	if err != nil {
 		return nil, fmt.Errorf("provider egress coverage returned invalid health-deadline index state %q", schemaRows[0].str(1))
+	}
+
+	blackholeSchemaArmed, err := strconv.ParseBool(schemaRows[0].str(2))
+	if err != nil {
+		return nil, fmt.Errorf("provider egress coverage returned invalid blackhole schema state")
 	}
 
 	taskRows, err := env.runner.pg(ctx, `
@@ -536,7 +551,7 @@ func (p egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		// checks until normal disabled-task cleanup has actually retired them.
 		return configFindings, nil
 	}
-	if !tlsIntegrityArmed || len(taskRows) == 0 {
+	if !tlsIntegrityArmed || !blackholeSchemaArmed || len(taskRows) == 0 {
 		missing := []string{}
 		if !tlsIntegrityArmed {
 			missing = append(missing, "tls_authentication_failure schema")
@@ -544,11 +559,14 @@ func (p egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		if !healthDeadlineIndexArmed {
 			missing = append(missing, "health-deadline ordered index")
 		}
+		if !blackholeSchemaArmed {
+			missing = append(missing, "blackhole measurement/schedule schema through migration 709")
+		}
 		if len(taskRows) == 0 {
 			missing = append(missing, "durable ProviderEgressProbe tasks")
 		}
-		action := "Apply only the pending append-only provider-egress migrations, including migration 657 when its exact health-deadline index is absent. After migration coherence, deploy the API artifact containing the EDF scheduler, then deploy the Taskworker artifact containing selective attempt cleanup and let normal task initialization converge the shards; do not insert, delete, or hand-edit pending_task rows."
-		if tlsIntegrityArmed && healthDeadlineIndexArmed {
+		action := "Apply only the pending append-only provider-egress migrations, including migration 657 when its exact health-deadline index is absent and migration 709 when blackhole measurement/schedule columns are absent. After migration coherence, deploy the API artifact containing the EDF scheduler, then deploy the Taskworker artifact containing selective attempt cleanup and let normal task initialization converge the shards; do not insert, delete, or hand-edit pending_task rows."
+		if tlsIntegrityArmed && healthDeadlineIndexArmed && blackholeSchemaArmed {
 			action = "The append-only provider-egress schema, including migration 657, is already armed; do not repeat migrations. Deploy the API artifact containing the EDF scheduler, then deploy the Taskworker artifact containing selective attempt cleanup and let normal task initialization converge the shards; do not insert, delete, or hand-edit pending_task rows."
 		}
 		return append(configFindings, finding{
@@ -556,8 +574,8 @@ func (p egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]findin
 			class: "egress-probe-unarmed", target: target, frame: "rollout", sustain: 2,
 			symptom:   "The provider-egress pipeline is not fully armed: " + strings.Join(missing, " and ") + " are absent.",
 			mechanism: "Provider scoring can only rely on egress evidence after the append-only integrity schema and the host-independent recurring task shards both exist. An empty task result is rollout absence, not proof that zero providers need measurement.",
-			baseline:  "The TLS-integrity column exists, the health-deadline index is a valid, ready, non-partial btree over exactly (measured_at, client_id), and pending_task contains one internally consistent ProviderEgressProbe row for every configured shard.",
-			observed:  fmt.Sprintf("tls_integrity_armed=%t health_deadline_index_armed=%t provider_egress_task_rows=%d", tlsIntegrityArmed, healthDeadlineIndexArmed, len(taskRows)),
+			baseline:  "The TLS-integrity and blackhole measurement/schedule columns exist, the health-deadline index is a valid, ready, non-partial btree over exactly (measured_at, client_id), and pending_task contains one internally consistent ProviderEgressProbe row for every configured shard.",
+			observed:  fmt.Sprintf("tls_integrity_armed=%t health_deadline_index_armed=%t blackhole_schema_armed=%t provider_egress_task_rows=%d", tlsIntegrityArmed, healthDeadlineIndexArmed, blackholeSchemaArmed, len(taskRows)),
 			evidence:  "Only schema presence and aggregate task-row count are exported; task IDs, client IDs, credentials, endpoints, and argument JSON remain private.",
 			context:   "This is a software rollout/operational boundary, not a Proxy hardware-capacity alert. The generic task canary remains responsible for individual claim, timeout, and reschedule errors.",
 			action:    action,
@@ -621,11 +639,8 @@ func (p egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		} else {
 			findings = append(findings, healthyFinding("pg/egress-coverage", tierPage, "egress-full-stalled", target))
 		}
-		if snapshot.eligible > 0 && snapshot.blackholeDue > 0 && (snapshot.blackholeAgeSeconds < 0 || stallSeconds < snapshot.blackholeAgeSeconds) {
-			findings = append(findings, egressCoverageStallFinding(
-				target, frame, "blackhole", snapshot.blackholeDue, snapshot.blackholeAgeSeconds,
-				snapshot.eligible, snapshot.blackholeCurrent, stallSeconds, 0,
-			))
+		if snapshot.eligible > 0 && snapshot.blackholeVerdictDue > 0 && (snapshot.blackholeAgeSeconds < 0 || stallSeconds < snapshot.blackholeAgeSeconds) {
+			findings = append(findings, egressBlackholeStallFinding(target, frame, snapshot, stallSeconds))
 		} else {
 			findings = append(findings, healthyFinding("pg/egress-coverage", tierPage, "egress-blackhole-stalled", target))
 		}
@@ -809,6 +824,12 @@ func egressCoverageActivityQuery(shardCount int, rules model.ProviderEgressRules
 		), classified AS MATERIALIZED (
 		 SELECT e.shard_index, e.client_id,
 		        pel.observed_at, pea.attempt_at, peh.measured_at, pbc.checked_at,
+		        (pbc.client_id IS NULL OR
+		          COALESCE(pbc.next_due_at, pbc.checked_at + interval '90 minutes') <= lifecycle_clock.now_utc
+		        ) AS blackhole_ready,
+		        (pbc.client_id IS NOT NULL AND
+		          NOT (pbc.ok = false AND pbc.failure = 'not_measured' AND pbc.consecutive_failures = 0)
+		        ) AS blackhole_measured,
 		        pel.client_id IS NULL AS no_location,
 		        COALESCE({{current_dark}}, false) AS current_dark,
 		        CASE
@@ -847,16 +868,14 @@ func egressCoverageActivityQuery(shardCount int, rules model.ProviderEgressRules
 		          NOT c.current_dark AND
 		          c.measured_at < c.now_utc - interval '24 hours'
 		        ) AS stale_health_expired_due,
-		        count(c.client_id) FILTER (WHERE
-		          c.checked_at IS NULL OR c.checked_at < c.now_utc - interval '90 minutes'
-		        ) AS blackhole_due,
+		        count(c.client_id) FILTER (WHERE c.blackhole_ready) AS blackhole_due,
 		        max(GREATEST(c.observed_at, c.attempt_at, c.measured_at))
 		          FILTER (WHERE NOT c.current_dark) AS latest_full,
-		        max(c.checked_at) AS latest_blackhole,
+		        max(c.checked_at) FILTER (WHERE c.blackhole_measured) AS latest_blackhole,
 		        count(c.client_id) FILTER (WHERE c.observed_at >= c.now_utc - interval '7 days') AS full_current,
-		        count(c.client_id) FILTER (WHERE c.checked_at >= c.now_utc - interval '3 hours') AS blackhole_current,
+		        count(c.client_id) FILTER (WHERE c.blackhole_measured AND c.checked_at >= c.now_utc - interval '3 hours') AS blackhole_current,
 		        count(c.client_id) FILTER (WHERE c.attempt_at >= c.now_utc - interval '1 hour') AS full_attempted_last_hour,
-		        count(c.client_id) FILTER (WHERE c.checked_at >= c.now_utc - interval '1 hour') AS blackhole_checked_last_hour,
+		        count(c.client_id) FILTER (WHERE c.blackhole_measured AND c.checked_at >= c.now_utc - interval '1 hour') AS blackhole_checked_last_hour,
 		        min(c.observed_at) FILTER (WHERE c.urgent_lane = 'stale-location' AND c.attempt_due AND NOT c.current_dark) AS oldest_stale_location,
 		        min(c.measured_at) FILTER (WHERE c.urgent_lane = 'stale-health' AND c.attempt_due AND NOT c.current_dark) AS oldest_stale_health,
 		        count(c.client_id) FILTER (WHERE c.urgent_lane = 'missing-health' AND c.attempt_due AND NOT c.current_dark) AS missing_health_due,
@@ -869,6 +888,9 @@ func egressCoverageActivityQuery(shardCount int, rules model.ProviderEgressRules
 		        count(c.client_id) FILTER (WHERE
 		          c.current_dark AND c.attempt_due AND c.urgent_lane <> ''
 		        ) AS deferred_current_dark_due,
+		        count(c.client_id) FILTER (WHERE
+		          NOT c.blackhole_measured OR c.checked_at < c.now_utc - interval '90 minutes'
+		        ) AS blackhole_verdict_refresh_due,
 		        max(c.now_utc) AS now_utc
 		 FROM shards s
 		 LEFT JOIN classified c USING (shard_index)
@@ -889,7 +911,8 @@ func egressCoverageActivityQuery(shardCount int, rules model.ProviderEgressRules
 		       deferred_current_dark_due::text,
 		       COALESCE(stale_location_deadline_slack_seconds::text, 'unavailable'),
 		       COALESCE(stale_health_deadline_slack_seconds::text, 'unavailable'),
-		       COALESCE(missing_health_deadline_slack_seconds::text, 'unavailable')
+		       COALESCE(missing_health_deadline_slack_seconds::text, 'unavailable'),
+		       blackhole_verdict_refresh_due::text
 		FROM snapshot
 		LEFT JOIN deadline_slack USING (shard_index)
 		ORDER BY shard_index;
@@ -911,6 +934,7 @@ type egressCoverageSnapshot struct {
 	staleLocationExpiredDue           int64
 	staleHealthExpiredDue             int64
 	blackholeDue                      int64
+	blackholeVerdictDue               int64
 	fullAgeSeconds                    int64
 	blackholeAgeSeconds               int64
 	fullCurrent                       int64
@@ -939,7 +963,7 @@ func parseEgressCoverageActivity(rows []pgRow, shardCount int) ([]egressCoverage
 	snapshots := make([]egressCoverageSnapshot, 0, shardCount)
 	seen := map[int]bool{}
 	for _, row := range rows {
-		if len(row) != 23 {
+		if len(row) != 24 {
 			return nil, fmt.Errorf("provider egress activity returned an invalid row shape")
 		}
 		values := make([]int64, 20)
@@ -966,6 +990,11 @@ func parseEgressCoverageActivity(rows []pgRow, shardCount int) ([]egressCoverage
 			missingHealthDue: values[16], missingHealthExpiredDue: values[17], missingHealthOldestAgeSeconds: values[18],
 			deferredCurrentDarkDue: values[19],
 		}
+		verdictDue, err := strconv.ParseInt(strings.TrimSpace(row.str(23)), 10, 64)
+		if err != nil || verdictDue < 0 {
+			return nil, fmt.Errorf("provider egress activity returned invalid measured-verdict exposure")
+		}
+		snapshot.blackholeVerdictDue = verdictDue
 		if snapshot.noLocationDue > snapshot.eligible || snapshot.staleLocationDue > snapshot.eligible ||
 			snapshot.staleHealthDue > snapshot.eligible || snapshot.missingHealthDue > snapshot.eligible ||
 			snapshot.fullDue() > snapshot.eligible ||
@@ -974,7 +1003,7 @@ func parseEgressCoverageActivity(rows []pgRow, shardCount int) ([]egressCoverage
 			snapshot.staleLocationExpiredDue > snapshot.staleLocationDue ||
 			snapshot.staleHealthExpiredDue > snapshot.staleHealthDue ||
 			snapshot.missingHealthExpiredDue > snapshot.missingHealthDue ||
-			snapshot.blackholeDue > snapshot.eligible ||
+			snapshot.blackholeDue > snapshot.eligible || snapshot.blackholeVerdictDue > snapshot.eligible ||
 			snapshot.fullCurrent > snapshot.eligible || snapshot.blackholeCurrent > snapshot.eligible ||
 			snapshot.fullAttemptsLastHour > snapshot.eligible ||
 			snapshot.blackholeLastHour > snapshot.blackholeCurrent ||
@@ -1222,6 +1251,20 @@ func egressFullFairnessFindings(
 		}
 	}
 	return findings
+}
+
+func egressBlackholeStallFinding(target, frame string, snapshot egressCoverageSnapshot, stallSeconds int64) finding {
+	f := egressCoverageStallFinding(target, frame, "blackhole", snapshot.blackholeDue, snapshot.blackholeAgeSeconds,
+		snapshot.eligible, snapshot.blackholeCurrent, stallSeconds, 0)
+	f.symptom = fmt.Sprintf("Provider-egress blackhole measured evidence is stale or missing in %s: %d scheduler-ready candidates and %d measured-verdict refresh candidates.", frame, snapshot.blackholeDue, snapshot.blackholeVerdictDue)
+	f.mechanism = "The shard has aged or missing measured blackhole evidence. Hash-local evidence prevents activity in healthy sibling shards from hiding that exposure. checked_at is a measurement-start clock, not a submission counter; a successful not_measured retry can preserve the older measurement while advancing next_due_at and update_time."
+	f.baseline = fmt.Sprintf("When measured-verdict refresh candidates exist, the shard's newest measured blackhole evidence is no older than max_time + idle_delay + one monitor cadence (%s). Scheduler readiness and evidence freshness are separate.", (time.Duration(stallSeconds) * time.Second).String())
+	f.observed += fmt.Sprintf(" verdict_refresh_due=%d", snapshot.blackholeVerdictDue)
+	f.evidence = "The same normalized PostgreSQL hash partition supplies exact scheduler-ready due using next_due_at with the legacy checked_at+90m fallback, and separate missing/older-than-90m measured-verdict exposure. A NotMeasured-only first row is excluded from measured current/hour counts and the newest-evidence clock; no provider or task identifier leaves the database."
+	f.context = "This is measured-coverage exposure, not proof of a stopped task, absent submissions, or a specific execution fault. Backoff can make scheduler-ready due zero without restoring measured evidence. Fresh claims, aggregate writes, or a passing sibling do not establish this shard's same-attempt measurement/publication outcome. Establish the running artifact and complete argument/queue geometry before attributing parallel, serial, or no-full behavior."
+	f.action = "Correlate fixed-class task outcomes with bounded same-attempt submission evidence and a same-snapshot count of checked_at, next_due_at and update_time states. Distinguish successful unmeasured rescheduling, guard/readiness suppression, multi-wave cancellation, and actual publication failure; repair only the evidenced owner. Do not delete provider evidence or manually rewrite the recurring task."
+	f.verify = "The affected shard's newest measured evidence advances inside the derived bound for two cadences, or measured-verdict refresh candidates drain to zero. Scheduler-ready due=0 alone, a new NotMeasured-only row, and a fresh task claim are not measured-coverage recovery."
+	return f
 }
 
 func egressCoverageStallFinding(target, frame, kind string, due, age, eligible, current, stallSeconds, deferredCurrentDarkDue int64) finding {
