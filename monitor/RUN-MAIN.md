@@ -122,6 +122,10 @@ bounded promotion, shorten windows, or persist sustain counters/ticket state.
 - Do not use a restart, larger timeout, larger queue, broader retry, alert
   suppression, or manual data correction as a root-cause fix without evidence
   that it repairs the causal mechanism and preserves correctness.
+- Runtime PAGE thresholds are observation criteria, not service-enforced caps.
+  Do not add process-wide hard limits to Main services as an incident response;
+  identify the responsible per-instance work and capacity constraint while
+  retaining the alert for parallel diagnosis.
 - Preserve unrelated and pre-existing working-tree changes. Do not amend,
   force-push, rebase, or push by default. Keep changes in different repositories
   in separate tested commits.

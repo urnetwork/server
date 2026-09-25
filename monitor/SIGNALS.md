@@ -14096,8 +14096,13 @@ process has:
 
 - at least 16 GiB RSS plus any of: at least 6.25% of host CPUs (bounded to
   1–4 cores), 250,000 goroutines, or 256 MiB/s allocation; or
-- an unconditional hard shape of at least 64 GiB RSS, 500,000 goroutines, or
+- an unconditional alert shape of at least 64 GiB RSS, 500,000 goroutines, or
   1 GiB/s allocation.
+
+These are monitor PAGE thresholds, not enforced Go or service ceilings. Do not
+add a process-wide hard limit to Main services to silence this signal: retain
+the alert and diagnose the responsible per-instance work, lifecycle, and host
+capacity while the service continues to run.
 
 The 2026-09-15 pre-correction production discriminator was Connect, not generic
 traffic or a host kernel fault. Busy production blocks retained approximately
