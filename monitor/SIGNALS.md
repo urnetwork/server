@@ -12013,6 +12013,7 @@ Tier-1 (warn):
 | mimir-index | host Mimir metrics | §11.18 per-process gateway sync/tenant coverage plus fleet compactor index freshness | gateway sync > 30m, discovered != synced, or writer index > 35m; 2 probes |
 | mimir-continuity-gap-unclassified / mimir-query-store-visibility-gap / mimir-ingestion-gap | raw Mimir range | §11.20 repeated always-emitted build-info continuity across the public dashboard window | >= 3 missing 5-minute evaluations inside two present samples; first observation remains unclassified; a strictly advancing left edge on the same fixed-right-edge gap proves historical query/store restoration, including batched discovery; retained restoration history must be distinguished from current movement or stationary observations, and a repeated fixed post-boundary gap is loss |
 | mimir-series-limit | exact child Mimir metrics | §11.20a per-process per-user-series admission counter and headroom | positive exact total on a new generation or positive same-generation delta; immediate PAGE, then 2h complete comparable quiet hold |
+| mimir-series-headroom | exact child Mimir metrics | §11.20a same-child effective local limit minus retained memory series | reserve <= 10% of that child's local limit; immediate independent WARN, not proof of current sample loss; complete comparable current fleet evidence required for recovery |
 | mimir-ingestion-rate-limit | exact child Mimir metrics | §11.20a per-process sample-rate admission counter plus effective rate/burst context | positive exact total on a new generation or positive same-generation delta; immediate PAGE, then its independent 2h complete comparable quiet hold |
 | mimir-push-rejected | structured Grafana rejection event | §11.20a unclassified rejection without a proven typed limit plus bounded job/family classes | >=1/min; limit causes are not excluded; raw upstream body is never retained |
 | mimir-rejection-unobservable | structured Grafana rejection parser | §1.5/§4 fixed semantic schema validity, with typed healthy-recovery withholding | >=1 malformed event/min; visibility only, no capacity attribution; ten-minute parseable quiet gate |
@@ -16063,6 +16064,36 @@ uninterrupted hours of complete comparable zero deltas. Observation loss,
 source-unrecognized whole-family absence, descriptor loss, a malformed
 exact-reason row, another generation change, or another increase resets the
 affected quiet window.
+
+Retained-head capacity risk has a separate immediate WARN identity,
+`mimir-series-headroom`, target `mimir-fleet`, frame
+`retained-series-headroom`. It fires when the effective local series limit
+minus retained memory series is at most 10% of that limit on the same child,
+including equality and negative reserve. Pair each child's values before
+reducing the fleet; do not compare one child's headroom with another child's
+limit. This warning is independent of both discard quiet holds and remains
+visible after their recovery or when discard counters have always been zero.
+A valid low-headroom child survives an unknown host or sibling child, with
+partial coverage stated explicitly. Healthy resolution requires complete
+comparable current observations of every enabled child above 10%, plus a
+successful state save. Missing or malformed frames, source-unrecognized
+absence, a first generation, a reset, or a failed state operation cannot
+manufacture healthy recovery. The existing bounded host command supplies this
+gauge; no extra query, metric labels, or durable incident bit is introduced.
+
+Low headroom is not proof of current sample loss or a publisher cause. Retained
+memory series differ from both the active set and instantaneous query-visible
+accepted series; old publisher generations can retain head after active series
+fall. Accepted aggregates also omit rejected candidates. The reviewed bundled
+single-tenant configuration makes process head comparable to the per-user local
+limit; a different or multi-tenant deployment requires separate authority and
+can otherwise overstate per-user pressure. More than 10% reserve is not a
+rollout-capacity guarantee: memory, writable-ring membership, skew, and the
+complete next-generation overlap still need their own evidence. This is a
+monitor warning threshold, not a Main service cap or an instruction to raise a
+limit. Do not restart Mimir to clear the warning. A known healthy subset cannot
+clear a warning for unobserved children; discard-counter pages and historical
+query continuity retain their independent recovery contracts.
 
 The bounded host/port/process histories, both active-incident bits, and both
 quiet boundaries are stored atomically under the configured monitor state
