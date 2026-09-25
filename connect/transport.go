@@ -1683,7 +1683,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				default:
 				}
 
-				pingTimer.Reset(max(self.settings.MinPingTimeout, pingTracker.MinPingTimeout()))
+				pingTimer.Reset(self.settings.heartbeatInterval(pingTracker))
 				select {
 				case <-handleCtx.Done():
 					return
@@ -2477,10 +2477,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			pingTimer := time.NewTimer(0)
 			defer pingTimer.Stop()
 			resetPingTimer := func() {
-				pingTimer.Reset(max(
-					self.settings.MinPingTimeout,
-					pingTracker.MinPingTimeout(),
-				))
+				pingTimer.Reset(self.settings.heartbeatInterval(pingTracker))
 			}
 			resetPingTimer()
 			defer func() {
