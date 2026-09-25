@@ -404,7 +404,7 @@ func egressCoverageConfigFindings(target string, desired egressCoverageDesiredCo
 		evidence:  "Only enablement, aggregate counts, safe execution scalars and fixed mismatch names are exported. Endpoint equality is compared in memory; endpoint values, credentials, raw YAML/JSON and task identities never enter the alert.",
 		context:   "The monitor's active resource is desired state, not proof of any worker's mounted configuration or executable capability. A mixed or malformed durable snapshot remains a separate shard PAGE and cannot be called converged. Measured-rate capacity remains independently authoritative.",
 		action:    egressCoverageConfigConvergenceAction,
-		verify:    "Prove the completed config version and independent-drain Taskworker artifact on every executor, then observe all configured shards adopt matching successor settings (or retire when explicitly disabled) for two cadences. For capacity changes, only after complete convergence begin two three-hour verdict lifetimes of measured-rate/coverage verification with more than 25% PostgreSQL headroom and healthy PgBouncer, API and Taskworker CPU/memory controls.",
+		verify:    "Prove the completed config version and independent-drain Taskworker artifact on every executor, then observe all configured shards adopt matching successor settings (or retire when explicitly disabled) for two cadences. For capacity changes, only after complete convergence begin two " + model.ProviderBlackholeCheckMaxAge.String() + " verdict lifetimes of measured-rate/coverage verification with more than 25% PostgreSQL headroom and healthy PgBouncer, API and Taskworker CPU/memory controls.",
 		playbook:  "SIGNALS.md §2.19, §2.23, and §2.24",
 	})
 }
@@ -825,7 +825,7 @@ func egressCoverageActivityQuery(shardCount int, rules model.ProviderEgressRules
 		 SELECT e.shard_index, e.client_id,
 		        pel.observed_at, pea.attempt_at, peh.measured_at, pbc.checked_at,
 		        (pbc.client_id IS NULL OR
-		          COALESCE(pbc.next_due_at, pbc.checked_at + interval '90 minutes') <= lifecycle_clock.now_utc
+		          COALESCE(pbc.next_due_at, pbc.checked_at + {{blackhole_due_age}}) <= lifecycle_clock.now_utc
 		        ) AS blackhole_ready,
 		        (pbc.client_id IS NOT NULL AND
 		          NOT (pbc.ok = false AND pbc.failure = 'not_measured' AND pbc.consecutive_failures = 0)
@@ -873,7 +873,7 @@ func egressCoverageActivityQuery(shardCount int, rules model.ProviderEgressRules
 		          FILTER (WHERE NOT c.current_dark) AS latest_full,
 		        max(c.checked_at) FILTER (WHERE c.blackhole_measured) AS latest_blackhole,
 		        count(c.client_id) FILTER (WHERE c.observed_at >= c.now_utc - interval '7 days') AS full_current,
-		        count(c.client_id) FILTER (WHERE c.blackhole_measured AND c.checked_at >= c.now_utc - interval '3 hours') AS blackhole_current,
+		        count(c.client_id) FILTER (WHERE c.blackhole_measured AND c.checked_at >= c.now_utc - {{blackhole_max_age}}) AS blackhole_current,
 		        count(c.client_id) FILTER (WHERE c.attempt_at >= c.now_utc - interval '1 hour') AS full_attempted_last_hour,
 		        count(c.client_id) FILTER (WHERE c.blackhole_measured AND c.checked_at >= c.now_utc - interval '1 hour') AS blackhole_checked_last_hour,
 		        min(c.observed_at) FILTER (WHERE c.urgent_lane = 'stale-location' AND c.attempt_due AND NOT c.current_dark) AS oldest_stale_location,
@@ -889,7 +889,7 @@ func egressCoverageActivityQuery(shardCount int, rules model.ProviderEgressRules
 		          c.current_dark AND c.attempt_due AND c.urgent_lane <> ''
 		        ) AS deferred_current_dark_due,
 		        count(c.client_id) FILTER (WHERE
-		          NOT c.blackhole_measured OR c.checked_at < c.now_utc - interval '90 minutes'
+		          NOT c.blackhole_measured OR c.checked_at < c.now_utc - {{blackhole_due_age}}
 		        ) AS blackhole_verdict_refresh_due,
 		        max(c.now_utc) AS now_utc
 		 FROM shards s
@@ -917,12 +917,16 @@ func egressCoverageActivityQuery(shardCount int, rules model.ProviderEgressRules
 		LEFT JOIN deadline_slack USING (shard_index)
 		ORDER BY shard_index;
 	`, shardCount, shardCount, shardCount, shardCount, egressCoverageDeadlineCTEs)
+	blackholeMaxAgeSql := fmt.Sprintf("interval '%d seconds'", int64(model.ProviderBlackholeCheckMaxAge/time.Second))
+	blackholeDueAgeSql := fmt.Sprintf("interval '%d seconds'", int64(model.ProviderBlackholeCheckDueAge/time.Second))
 	currentDark := model.ProviderBlackholeDarkSql(
 		"pbc",
-		fmt.Sprintf("lifecycle_clock.now_utc - interval '%d seconds'", int64(model.ProviderBlackholeCheckMaxAge/time.Second)),
+		"lifecycle_clock.now_utc - "+blackholeMaxAgeSql,
 		rules,
 	)
-	return strings.Replace(query, "{{current_dark}}", currentDark, 1)
+	query = strings.Replace(query, "{{current_dark}}", currentDark, 1)
+	query = strings.ReplaceAll(query, "{{blackhole_due_age}}", blackholeDueAgeSql)
+	return strings.Replace(query, "{{blackhole_max_age}}", blackholeMaxAgeSql, 1)
 }
 
 type egressCoverageSnapshot struct {

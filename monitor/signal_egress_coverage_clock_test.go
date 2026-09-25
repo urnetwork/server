@@ -146,7 +146,7 @@ func egressClockExposure(t *testing.T, row Row) int64 {
 
 func TestEgressCoverageClockRescheduledNotMeasuredRetainsExposure(t *testing.T) {
 	clock := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
-	previous := &model.ProviderBlackholeCheck{CheckedAt: clock.Add(-4 * time.Hour), OK: true}
+	previous := &model.ProviderBlackholeCheck{CheckedAt: clock.Add(-model.ProviderBlackholeCheckMaxAge - time.Hour), OK: true}
 	next, changed := model.NextProviderBlackholeCheck(previous, model.ProviderBlackholeCheckReport{
 		CheckedAt: clock.Add(-time.Minute), NotMeasured: true, Failure: model.ProviderBlackholeNotMeasuredFailure,
 	}, clock, model.DefaultProviderEgressRules())

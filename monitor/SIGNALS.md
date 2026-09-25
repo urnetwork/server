@@ -6627,7 +6627,8 @@ For each shard, aggregate without exporting identifiers:
   90 minutes. This exposure count is independent of scheduler readiness and
   does not disappear merely because an unmeasured retry was rescheduled;
 - deferred current-dark full due: the number that otherwise meets a full-due
-  lane but whose latest blackhole check is a failure inside three hours;
+  lane but whose latest blackhole check satisfies the current-dark rule inside
+  the eight-hour verdict lifetime;
 - newest full activity: the newest location, attempt, or health timestamp from
   a provider without a current dark verdict in that same shard. Excluding old-
   deployment activity against rows now dark prevents it from masking a stalled
@@ -6635,7 +6636,7 @@ For each shard, aggregate without exporting identifiers:
 - newest blackhole evidence: the newest measured check's `checked_at` in
   that shard; and
 - current coverage: locations inside seven days and measured blackhole checks
-  inside three hours, plus unique latest full attempts and measured blackhole
+  inside eight hours, plus unique latest full attempts and measured blackhole
   checks whose `checked_at` starts inside the last hour. A first row with
   `ok=false, failure=not_measured, consecutive_failures=0` is not a measured
   check, matching `CountCurrentProviderBlackholeChecks`. These latest-row
@@ -6650,8 +6651,8 @@ The due ages are the application contract: full location refresh begins at
 half the seven-day location lifetime, existing-health refresh begins at half
 its 24-hour lifetime, a missing-health row is eligible after the common attempt
 backoff, and failed full attempts back off for six hours. Blackhole readiness
-honors `next_due_at`: a measured pass normally schedules half the three-hour
-maximum age later; failures and unmeasured retries follow their configured
+honors `next_due_at`: a measured pass schedules 90 minutes after ingest,
+independent of the eight-hour verdict maximum age; failures and unmeasured retries follow their configured
 backoff, while NULL legacy schedules retain the old age fallback. Do not invent
 a percentage floor during catch-up. For full due work, require shard-local
 newest evidence inside durable `max_time + idle_delay` plus one five-minute
@@ -6661,13 +6662,35 @@ coverage recovery while measured-verdict refresh candidates remain.
 
 Only a current dark blackhole verdict under
 `model.ProviderBlackholeDarkSql` defers the expensive full queue. A missing
-check, a check at least three hours old, or a current passing check remains
+check, a check older than eight hours, or a current passing check remains
 admitted. The cheap queue honors the stored retry schedule independently of the
 full queue, restores full eligibility on a passing upsert, and the dark
 predicate expires an unreplaced failure at its existing maximum age. The primary-key
 lookup on `provider_blackhole_check(client_id)` keeps the new exclusion local
 to each candidate reached by the pre-existing head plan; it adds no migration,
 scan, sort, policy weight, concurrency, or timeout.
+
+The eight-hour policy extends measured-verdict retention only. The exact
+eight-hour boundary remains current; a check older by any positive duration
+expires. Passing checks still become due after 90 minutes, including the NULL
+`next_due_at` fallback; failure and NotMeasured backoffs, streak/span rules,
+and TLS precedence are unchanged. NotMeasured never refreshes a retained
+measured clock. No migration, data rewrite, or cleanup-policy change is needed.
+The existing blackhole cleanup helper has no scheduled production caller;
+egress-location/attempt retention is a separate policy.
+
+API selection/ingest/due readers, Taskworker provider-filter/cache publication,
+and this monitor must use the same model constant. This change alone does not
+require a Connect transport rollout. During mixed adoption, readers and caches
+may disagree. Previously retained three-to-eight-hour rows, including dark/TLS
+verdicts, can become current again without a new check. That coverage increase
+is a policy reclassification, not throughput recovery or fresh success.
+At 88,000 eligible providers the eight-hour retention floor is 11,000 measured
+checks/hour, while keeping up with the independent 90-minute passing cadence
+would require about 58,667 passing checks/hour if all providers pass. Current
+rate, complete coverage, guard outcomes, and healthy selection controls remain
+separate rollout gates; no timeout, guard, task geometry, or service cap is
+changed by this retention policy.
 
 
 Blackhole false-positive/false-negative qualification: `checked_at` is the
@@ -6744,7 +6767,7 @@ last-hour measured blackhole counts across the complete geometry. When current
 coverage is incomplete and at least one latest measured check started in the last
 hour, project one
 whole-fleet sweep at that measured rate. It must fit inside
-`ProviderBlackholeCheckMaxAge` (currently three hours):
+`ProviderBlackholeCheckMaxAge` (currently eight hours):
 
 ```text
 required_per_hour = ceil(eligible / max_age_hours)
@@ -7096,8 +7119,10 @@ to 723 clients with 625 young loopback-idle sessions, then drained normally to
 the retention boundary but demonstrates refill amplitude. After the corrected
 Taskworker converges, require more than 25% PostgreSQL normal-role headroom and
 healthy §1.3a/§1.3b, API, Taskworker CPU/memory, and Proxy controls throughout
-two complete three-hour verdict lifetimes; also require measured throughput at
-or above the live requirement and a projected sweep inside three hours. A
+two complete verdict lifetimes (eight hours each under the current policy);
+also require measured throughput at or above the live requirement and a
+projected sweep inside that lifetime. The historical incident above used the
+then-current three-hour policy. A
 current-zero or one quiet sample is not recovery.
 
 The separate full-fairness diagnosis frozen on 2026-09-10 established an older
@@ -7182,8 +7207,9 @@ those controls rule out only the observable common gates, not every credential
 or balance failure. The compatible passing cohort remains the direct healthy
 control against a shared prober, platform, API, or tunnel-readiness outage.
 
-The owning correction excludes only an explicit failing blackhole verdict
-younger than three hours from all four full-due heads. It does not treat absent
+The owning correction excludes only a current dark blackhole verdict from all
+four full-due heads (three hours in that historical incident, eight hours under
+the current policy). It does not treat absent
 or stale checks as failures. The independent 90-minute cheap retry supplies the
 recovery path, a pass re-admits immediately, and an unreplaced failure ages out
 fail-open. Monitor due/deadline/latest-activity accounting mirrors that desired
@@ -8995,7 +9021,7 @@ exact receiver/signer authority before per-provider attribution or quarantine.
 False-negative qualifiers: unknown descriptions can conceal legacy receivers;
 missing or stale checks leave part of the claimed cohort unobserved. A small
 passing destination sample does not establish generalized route capacity.
-Checks cover a three-hour window and need not share an artifact generation.
+Checks cover an eight-hour window and need not share an artifact generation.
 The ingest clock permits one minute of future skew relative to API time; the
 current query has no upper DB-time bound, so separately count future-dated
 verdicts before treating them as current causal evidence. Neither absent
@@ -9020,7 +9046,7 @@ Closure requires an explicit security/availability decision:
    behaviorally proven cohort through a separately approved eligibility
    control, then prove §2.8/§2.9 retain adequate healthy provider capacity.
    A current failed blackhole verdict is a hard selection exclusion only until
-   its three-hour lifetime expires; it deliberately fails open after that and
+   its eight-hour lifetime expires; it deliberately fails open after that and
    is therefore not a durable quarantine. Never permanently exclude a provider
    from its self-reported description alone.
 2. **Temporary compatibility:** postpone standard signing and uniformly build
@@ -9038,7 +9064,7 @@ Closure requires an explicit security/availability decision:
 Do not move the cutoff, quarantine supply, or choose weaker signing solely to
 clear a monitor alert. Do not lengthen egress timeouts: legacy rejection occurs
 before forwarding, and longer waits further reduce §2.19 coverage. For any
-chosen path, complete one whole-fleet blackhole refresh within the three-hour
+chosen path, complete one whole-fleet blackhole refresh within the eight-hour
 verdict lifetime, keep the compatible control healthy for two cadences, and
 require settled destination bytes—not contract creation alone—as the
 end-to-end gate. A temporary compatibility availability gate does not close the

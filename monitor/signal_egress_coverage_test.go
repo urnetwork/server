@@ -434,8 +434,8 @@ func TestEgressCoverageDisabledDesiredStateDoesNotSuppressDurableFaults(t *testi
 				return rows, nil
 			case strings.Contains(query, "WITH lifecycle_clock AS"):
 				return []Row{syntheticEgressCoverageActivity(egressCoverageSnapshot{
-					shardIndex: 0, eligible: 301,
-					fullCurrent: 301, blackholeCurrent: 200,
+					shardIndex: 0, eligible: 801,
+					fullCurrent: 801, blackholeCurrent: 200,
 					fullAgeSeconds: 10, blackholeAgeSeconds: 10,
 					fullAttemptsLastHour: 100, blackholeLastHour: 100,
 					staleLocationOldestAgeSeconds: -1, staleHealthOldestAgeSeconds: -1,
@@ -466,9 +466,9 @@ func TestEgressCoverageCapacityFullReservationIsConditional(t *testing.T) {
 		{1, 2, "independent_drain_overlap_possible=false full_reserved_blackhole_concurrency_per_shard=unavailable"},
 	} {
 		geometry := egressCoverageGeometry{shardCount: 4, blackholeConcurrency: tc.blackhole, blackholeTimeoutSeconds: 15, fullConcurrency: tc.full, fullLimit: 8, fullTimeoutSeconds: 60}
-		for _, eligible := range []int64{300, 301} {
+		for _, eligible := range []int64{800, 801} {
 			f, present := egressBlackholeCapacityFinding("pg-1", geometry, []egressCoverageSnapshot{{eligible: eligible, blackholeCurrent: 200, blackholeLastHour: 100}})
-			if present != (eligible == 301) {
+			if present != (eligible == 801) {
 				t.Fatal("reserved-slot model changed the measured-rate PAGE predicate")
 			}
 			if present && (!strings.Contains(f.observed, tc.want) || !strings.Contains(f.context, "not runtime capability or queue-activity attestations")) {
@@ -805,8 +805,8 @@ func TestEgressCoverageSignalSyntheticShardLocalStalls(t *testing.T) {
 		"interval '84 hours'",
 		"interval '12 hours'",
 		"interval '6 hours'",
-		"interval '90 minutes'",
-		"interval '3 hours'",
+		"interval '5400 seconds'",
+		"interval '28800 seconds'",
 		"interval '1 hour'",
 		"pbc.ok = false",
 		") AS current_dark",
@@ -888,9 +888,9 @@ func TestEgressCoverageSignalSyntheticBlackholeCapacity(t *testing.T) {
 			return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
 		case strings.Contains(query, "WITH lifecycle_clock AS"):
 			// Activity is fresh, so shard liveness is healthy. At 100 checks/hour,
-			// 301 providers require just over the three-hour verdict lifetime.
+			// 801 providers require just over the eight-hour verdict lifetime.
 			return []Row{syntheticEgressCoverageActivity(egressCoverageSnapshot{
-				shardIndex: 0, eligible: 301, blackholeDue: 201, blackholeVerdictDue: 201,
+				shardIndex: 0, eligible: 801, blackholeDue: 601, blackholeVerdictDue: 601,
 				fullAgeSeconds:      10,
 				blackholeAgeSeconds: 10, fullCurrent: 10, blackholeCurrent: 200,
 				fullAttemptsLastHour: 1, blackholeLastHour: 100,
@@ -910,8 +910,8 @@ func TestEgressCoverageSignalSyntheticBlackholeCapacity(t *testing.T) {
 	}
 	alert := requireAlertClass(t, alerts, "egress-blackhole-capacity")
 	for _, want := range []string{
-		"66.4%",
-		"projected_sweep=3h0m36s",
+		"25.0%",
+		"projected_sweep=8h0m36s",
 		"required_per_hour=101",
 		"configured_total_blackhole_concurrency=4",
 		"blackhole_only_timeout_ceiling_per_hour=960",
@@ -988,7 +988,7 @@ func TestEgressCoverageSignalSyntheticConfiguredCapacityBounds(t *testing.T) {
 		"configured_total_blackhole_concurrency=15",
 		"blackhole_probe_timeout_seconds=20",
 		"blackhole_only_timeout_ceiling_per_hour=2700",
-		"blackhole_only_deadline_minimum_concurrency=12",
+		"blackhole_only_deadline_minimum_concurrency=5",
 		"configured_full_limit_per_shard=6",
 		"configured_full_concurrency_per_shard=2",
 		"full_probe_timeout_seconds=60",
@@ -1008,44 +1008,42 @@ func TestEgressCoverageSignalSyntheticBlackholeCapacityBoundary(t *testing.T) {
 		current  string
 		want     int
 	}{
-		{name: "exact three hours", eligible: "300", current: "299", want: 0},
-		{name: "complete despite quiet hour", eligible: "301", current: "301", want: 0},
+		{name: "exact eight hours", eligible: "800", current: "799", want: 0},
+		{name: "complete despite quiet hour", eligible: "801", current: "801", want: 0},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
-				switch {
-				case strings.Contains(query, "pg_attribute"):
-					return []Row{{"t", "t", "t"}}, nil
-				case strings.Contains(query, "FROM pending_task"):
-					return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
-				case strings.Contains(query, "WITH lifecycle_clock AS"):
-					blackholeDue := "1"
-					if testCase.current == testCase.eligible {
-						blackholeDue = "0"
-					}
-					eligible, _ := strconv.ParseInt(testCase.eligible, 10, 64)
-					current, _ := strconv.ParseInt(testCase.current, 10, 64)
-					due, _ := strconv.ParseInt(blackholeDue, 10, 64)
-					return []Row{syntheticEgressCoverageActivity(egressCoverageSnapshot{
-						shardIndex: 0, eligible: eligible, blackholeDue: due, blackholeVerdictDue: due,
-						fullAgeSeconds:      10,
-						blackholeAgeSeconds: 10, fullCurrent: 10, blackholeCurrent: current,
-						fullAttemptsLastHour: 1, blackholeLastHour: 100,
-						staleLocationOldestAgeSeconds: -1, staleHealthOldestAgeSeconds: -1,
-					})}, nil
-				default:
-					t.Fatalf("unexpected provider coverage query: %s", query)
-					return nil, nil
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			switch {
+			case strings.Contains(query, "pg_attribute"):
+				return []Row{{"t", "t", "t"}}, nil
+			case strings.Contains(query, "FROM pending_task"):
+				return []Row{syntheticEgressCoverageTask(t, 0, 1)}, nil
+			case strings.Contains(query, "WITH lifecycle_clock AS"):
+				blackholeDue := "1"
+				if testCase.current == testCase.eligible {
+					blackholeDue = "0"
 				}
-			}}
-			alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
-			if err != nil {
-				t.Fatal(err)
+				eligible, _ := strconv.ParseInt(testCase.eligible, 10, 64)
+				current, _ := strconv.ParseInt(testCase.current, 10, 64)
+				due, _ := strconv.ParseInt(blackholeDue, 10, 64)
+				return []Row{syntheticEgressCoverageActivity(egressCoverageSnapshot{
+					shardIndex: 0, eligible: eligible, blackholeDue: due, blackholeVerdictDue: due,
+					fullAgeSeconds:      10,
+					blackholeAgeSeconds: 10, fullCurrent: 10, blackholeCurrent: current,
+					fullAttemptsLastHour: 1, blackholeLastHour: 100,
+					staleLocationOldestAgeSeconds: -1, staleHealthOldestAgeSeconds: -1,
+				})}, nil
+			default:
+				t.Fatalf("unexpected provider coverage query: %s", query)
+				return nil, nil
 			}
-			if len(alerts) != testCase.want {
-				t.Fatalf("alerts = %d, want %d: %+v", len(alerts), testCase.want, alerts)
-			}
-		})
+		}}
+		alerts, err := syntheticEgressCoverageSignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(alerts) != testCase.want {
+			t.Fatalf("%s: alerts = %d, want %d: %+v", testCase.name, len(alerts), testCase.want, alerts)
+		}
 	}
 }
 

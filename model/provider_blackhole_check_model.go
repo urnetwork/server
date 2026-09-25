@@ -11,22 +11,16 @@ import (
 // ProviderBlackholeCheckMaxAge is how long a blackhole check is treated as
 // current. Past it the provider is indistinguishable from one never checked.
 //
-// This is deliberately short. The whole point of the check is that it is cheap
-// enough to run hourly across the entire fleet, so evidence should never BE
-// this old in a healthy deployment -- if it is, the sweep is not keeping up and
-// the provider should fall back to being judged on egress health alone rather
-// than on a stale liveness answer.
-//
-// 3h, not 1h, so a single missed or slow sweep does not evict the fleet: the
-// checker gets three attempts at a provider before its evidence lapses.
-const ProviderBlackholeCheckMaxAge = 3 * time.Hour
+// Eight hours retains measured evidence through slow refreshes. It does not
+// refresh an old result or prove that the sweep has caught up. Both passing
+// and dark verdicts expire at this boundary; failure rules are unchanged.
+const ProviderBlackholeCheckMaxAge = 8 * time.Hour
 
 // ProviderBlackholeCheckDueAge is how long after a passing check the provider
 // is offered up again: the next_due_at a pass sets, and the due time of a row
-// written before next_due_at existed. Half the max age, for the same reason
-// providerEgressDueAge is half ProviderEgressLocationMaxAge: the sweep gets a
-// full window to refresh a check before it expires.
-const ProviderBlackholeCheckDueAge = ProviderBlackholeCheckMaxAge / 2
+// written before next_due_at existed. Keep this cadence independent of verdict
+// retention: extending the maximum age must not slow the requested refresh.
+const ProviderBlackholeCheckDueAge = 90 * time.Minute
 
 // MaxProviderBlackholeFailureLen mirrors the failure column width. A submission
 // longer than this is rejected rather than truncated, so a caller learns its

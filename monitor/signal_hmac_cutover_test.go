@@ -57,7 +57,7 @@ func TestHMACCutoverSignalSyntheticIncompatibleCohort(t *testing.T) {
 		"rebuild and safely promote the monitor from that same policy source",
 		"bounded period with a named sunset",
 		"not final protocol closure",
-		"whole refresh inside the three-hour verdict lifetime",
+		"whole refresh inside the 8h0m0s verdict lifetime",
 		"passing its availability gate is not final closure",
 		"not a Proxy RAM or active-client hardware ceiling",
 	} {
@@ -80,7 +80,7 @@ func TestHMACCutoverCatalogPreservesDecisionAndClosureBoundaries(t *testing.T) {
 	}
 	section := strings.Join(strings.Fields(catalog[start:end]), " ")
 	for _, want := range []string{
-		"three-hour lifetime expires",
+		"eight-hour lifetime expires",
 		"deliberately fails open",
 		"not a durable quarantine",
 		"Never permanently exclude a provider from its self-reported description alone",
@@ -225,7 +225,7 @@ func TestHMACCutoverQueryIsBoundedAndPrivate(t *testing.T) {
 		"regexp_count",
 		"ROW(2026, 5, 14)",
 		"provider_blackhole_check",
-		"interval '10800 seconds'",
+		"interval '28800 seconds'",
 		"timestamp '2026-09-01 00:00:00'",
 		"count(DISTINCT network_id)",
 	} {
@@ -251,7 +251,7 @@ func TestHMACCutoverQueryCountsOnlyCurrentVerdicts(t *testing.T) {
 	rules := model.DefaultProviderEgressRules()
 	for _, want := range []string{
 		"COALESCE(pbc.ok, false) AS ok",
-		"AND (pbc.ok OR " + model.ProviderBlackholeDarkSql("pbc", "clock.utc_now - interval '10800 seconds'", rules) + ")",
+		"AND (pbc.ok OR " + model.ProviderBlackholeDarkSql("pbc", "clock.utc_now - interval '28800 seconds'", rules) + ")",
 		fmt.Sprintf("%d <= pbc.consecutive_failures", rules.DarkConsecutiveFailures),
 		"pbc.failure = '" + model.ProviderBlackholeTlsAuthenticationFailure + "'",
 	} {
