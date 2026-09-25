@@ -68,6 +68,9 @@ type BlackholeOptions struct {
 	MinimumAdmission int
 	Now              func() time.Time
 	CheckOne         BlackholeChecker
+	// Optional concurrent, nonblocking observer. It receives no provider IDs.
+	// It must not panic; callbacks finish before RunBlackhole returns.
+	ObserveProgress func(BlackholeProgress)
 }
 
 // Returns Concurrency, or DefaultBlackholeConcurrency when unset.
@@ -249,6 +252,9 @@ func RunBlackhole(
 					return
 				default:
 				}
+				if options.ObserveProgress != nil {
+					options.ObserveProgress(BlackholeStarted)
+				}
 				result := checkOne(job.Provider)
 				// The check may have been admitted while its parent task still had
 				// budget, then finish after the task/context was canceled. Its
@@ -257,9 +263,19 @@ func RunBlackhole(
 				// Do not persist that as a negative provider verdict. This mirrors
 				// the full health path's ErrNoBudget boundary.
 				if ctx.Err() != nil {
+					if options.ObserveProgress != nil {
+						options.ObserveProgress(BlackholeCanceled)
+					}
 					continue
 				}
 				results[job.Index] = result
+				if options.ObserveProgress != nil {
+					if result.Check.ClientId == "" {
+						options.ObserveProgress(BlackholeDiscarded)
+					} else {
+						options.ObserveProgress(BlackholeCompleted)
+					}
+				}
 			}
 		}()
 	}
