@@ -6683,6 +6683,42 @@ certify restored measured coverage. A healthy sibling can still hide individual
 old providers inside a shard maximum; retain the independent fleet-capacity
 check and do not infer all-provider freshness from the maximum.
 
+Batch publication is distinct from task Post: the blackhole worker pool retains
+results until every admitted check joins, then the owning batch applies
+readiness/guard rules and makes a bounded ingest request. Post schedules the
+successor; it is not the verdict publisher. A slow admitted tail can therefore
+delay publication of fast successful checks. NotMeasured, guard conversion,
+older-row merge rules, and submission errors are separate causes of unchanged
+measured clocks. Batch pass/checked counters and pre-call reporter counters are
+not acknowledgements. A refreshed `claim_time` is a lease heartbeat, not a
+reliable execution-start timestamp; `run_at` is the scheduled time.
+
+The Taskworker executable exports twelve preinitialized, identity-free progress
+series: `urnetwork_egress_probe_blackhole_inflight{state}` with
+`active_batches|queued|running|completed_buffered`;
+`urnetwork_egress_probe_blackhole_worker_events_total{event}` with
+`started|completed|canceled|discarded`;
+`urnetwork_egress_probe_blackhole_submission_outcomes_total{outcome}` with
+`acknowledged|canceled|error_or_unknown`; and
+`urnetwork_egress_probe_blackhole_progress_enabled=1`.
+The gauges sum concurrent batch owners with coherent collection and exact
+owner retirement, rather than letting the last batch overwrite a sibling.
+Completed means retained in memory before guards; it includes NotMeasured and
+is not a durable verdict. Canceled/discarded workers retain no result. Queued
+means selected but not started within an active batch, not the database due
+queue. A returned acknowledgement counts one nonempty batch request, not rows
+measured or replaced. Empty no-request calls do not acknowledge anything.
+No provider, task, shard, URL, error text, or credential is a metric label.
+
+These metrics require capability plus complete, fresh process/start/source-time
+coverage and reset-aware deltas before fleet interpretation; they intentionally
+do not identify a shard owner. Missing/partial series are unknown, not zero work.
+Without this evidence the registered coverage probe explicitly reports
+`publication_progress=unobserved`; no new latency threshold or automatic
+recovery follows from in-memory completion or a retired gauge. Persisted
+measured evidence remains the recovery authority. The counters diagnose batch
+latency but do not establish a per-check duration or guarantee future capacity.
+
 The no-full and serial paths require a separate execution-geometry control:
 one selected blackhole list may contain many worker waves before final
 submission, while the source's minimum max-time validation budgets one full

@@ -661,7 +661,12 @@ func (self *egressProbeMetricsReporter) SubmitBlackholeChecks(ctx context.Contex
 		}
 		egressProbeBlackholeChecksTotal.WithLabelValues(result).Inc()
 	}
-	return self.inner.SubmitBlackholeChecks(ctx, checks)
+	err := self.inner.SubmitBlackholeChecks(ctx, checks)
+	if len(checks) != 0 {
+		// This is a returned request outcome, not a measured or replaced row.
+		egressProbeBlackholeProgress.submitted(err)
+	}
+	return err
 }
 
 // lookupProviderEgressCountry is the production country lookup: the durable
