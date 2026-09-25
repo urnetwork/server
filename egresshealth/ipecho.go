@@ -94,7 +94,7 @@ func (self *run) warmClient(ctx context.Context, client *http.Client) {
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, self.opts.IpEchoUrl, nil)
 		if err != nil {
-			return "", err
+			return "", &echoStageError{stage: "request_build", err: err}
 		}
 		// The profile like every request, with the navigation's Accept
 		// replaced: this one asks an api for json.
@@ -102,18 +102,22 @@ func (self *run) warmClient(ctx context.Context, client *http.Client) {
 
 		resp, err := client.Do(req)
 		if err != nil {
-			return "", err
+			return "", &echoStageError{stage: echoRequestStage(err), err: err}
 		}
 		defer resp.Body.Close()
 
 		body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxIpEchoBytes))
 		if resp.StatusCode != http.StatusOK {
-			return "", fmt.Errorf("the /ip echo answered status %d", resp.StatusCode)
+			return "", &echoStageError{stage: "response_status", err: fmt.Errorf("the /ip echo answered status %d", resp.StatusCode)}
 		}
 		if readErr != nil {
-			return "", readErr
+			return "", &echoStageError{stage: "response_body", err: readErr}
 		}
-		return parseIpEcho(body)
+		ip, err := parseIpEcho(body)
+		if err != nil {
+			return "", &echoStageError{stage: "response_schema", err: err}
+		}
+		return ip, nil
 	}
 	exitIp, err := fetchExitIp()
 	self.exit.record(exitIp, self.opts.now(), err)

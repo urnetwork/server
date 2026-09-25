@@ -559,7 +559,7 @@ func httpClientOverDialerWithHosts(dial dialContextFunc, pins map[string][]strin
 		// CheckRedirect (below) already refuses the downgrade-redirect route
 		// to the same hole.
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return nil, fmt.Errorf("%w (dial %s)", ErrPlainHttpRefused, addr)
+			return nil, &providerHttpStageError{stage: "policy", err: fmt.Errorf("%w (dial %s)", ErrPlainHttpRefused, addr)}
 		},
 		// TLSHandshakeTimeout is not set here: it only bounds the
 		// transport's own internal TLS handshake, which never runs because
@@ -610,12 +610,12 @@ func httpClientOverDialerWithHosts(dial dialContextFunc, pins map[string][]strin
 		// the endpoint set is closed, so it is where "unknown host" can
 		// safely mean "reject" instead of "pass through".
 		if _, pinned := allowed[normalizeHost(host)]; !pinned {
-			return nil, fmt.Errorf("%w: %s", ErrPinHostUnknown, host)
+			return nil, &providerHttpStageError{stage: "policy", err: fmt.Errorf("%w: %s", ErrPinHostUnknown, host)}
 		}
 
 		raw, err := dial(ctx, network, addr)
 		if err != nil {
-			return nil, err
+			return nil, &providerHttpStageError{stage: "dial_dns_or_socket", err: err}
 		}
 
 		handshakeCtx := ctx
@@ -629,7 +629,7 @@ func httpClientOverDialerWithHosts(dial dialContextFunc, pins map[string][]strin
 		tlsConn := tls.Client(raw, cfg)
 		if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
 			raw.Close()
-			return nil, err
+			return nil, &providerHttpStageError{stage: "tls", err: err}
 		}
 		return tlsConn, nil
 	}
