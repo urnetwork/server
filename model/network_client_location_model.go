@@ -6233,8 +6233,10 @@ func loadClientScores(
 			}
 			locationGroupReads[locationGroupId] = read
 		}
-		// note ignore the error for GET since it will include missing key
-		pipe.Exec(ctx)
+		if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
+			returnErr = fmt.Errorf("read client score counts: %w", err)
+			return
+		}
 
 		// sample keys grouped by draw order: one group per requested facet,
 		// then the un-faceted fallback group
@@ -6347,8 +6349,10 @@ func loadClientScores(
 				netCount += c
 			}
 		}
-		// note ignore the error for GET since it will include missing key
-		pipe.Exec(ctx)
+		if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
+			returnErr = fmt.Errorf("read client score samples: %w", err)
+			return
+		}
 
 		clientScores = map[server.Id]*ClientScore{}
 
