@@ -202,6 +202,10 @@ func SnEvidence(w http.ResponseWriter, r *http.Request) {
 		}
 		published, err := publishSnEvidence(r.Context(), body)
 		if err != nil {
+			if server.IsBlobCapacityError(err) {
+				http.Error(w, "Evidence storage capacity exhausted; check bucket quota and disk headroom.", http.StatusInsufficientStorage)
+				return
+			}
 			http.Error(w, "Evidence rejected.", http.StatusBadRequest)
 			return
 		}

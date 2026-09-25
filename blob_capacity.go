@@ -191,7 +191,7 @@ func localBlobAvailableBytes(usage, replacement, incoming, maximum int64) (int64
 	}
 	base := usage - replacement
 	if base > maximum || incoming > maximum-base {
-		return 0, fmt.Errorf("local blob capacity exceeded: usage=%d replacement=%d incoming=%d max=%d", usage, replacement, incoming, maximum)
+		return 0, fmt.Errorf("%w: usage=%d replacement=%d incoming=%d max=%d", ErrBlobCapacityExceeded, usage, replacement, incoming, maximum)
 	}
 	return maximum - base, nil
 }
