@@ -16,6 +16,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/stats"
@@ -226,7 +227,8 @@ func NewRouter(routeCtx context.Context, uploadCtx context.Context) (*router.Rou
 	if err != nil {
 		return nil, nil, fmt.Errorf("reserved validator staging startup: %w", err)
 	}
-	return router.NewRouter(routeCtx, routesWithReservedAttemptUpload(reservedUpload)),
-		reservedUpload.Close,
+	notifications := model.NewContractOriginNotifications(routeCtx, model.DefaultContractOriginNotificationSettings())
+	return router.NewRouter(routeCtx, routesWithReservedAttemptUpload(reservedUpload, notifications)),
+		func() { notifications.Close(); reservedUpload.Close() },
 		nil
 }

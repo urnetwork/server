@@ -1980,6 +1980,7 @@ func CreateTransferEscrow(
 	if returnErr != nil {
 		return
 	}
+	notifyCommittedContractOrigin(ctx, sourceId, destinationId)
 	server.RunPosts(ctx, posts...)
 	// the source is the paying side: count its top-level identity in the
 	// block users stat
@@ -2228,6 +2229,7 @@ func CreateCompanionTransferEscrow(
 	if returnErr != nil {
 		return
 	}
+	notifyCommittedContractOrigin(ctx, sourceId, destinationId)
 	server.RunPosts(ctx, posts...)
 	// a companion contract is the return path of an origin contract: the
 	// destination is the paying side — count its top-level identity in the
@@ -2384,6 +2386,7 @@ func CreateContractNoEscrow(
 	// network / friends-and-family egress has no payer but is still
 	// contract-creating usage: count the source's top-level identity in the
 	// block users stat
+	notifyCommittedContractOrigin(ctx, sourceId, destinationId)
 	StampTopLevelClientContractTime(ctx, sourceId)
 	return
 }

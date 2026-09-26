@@ -1658,7 +1658,7 @@ const (
 )
 
 // NetworkClientSourceOwner is a server-derived, bounded owner class for a
-// contract source. It distinguishes the durable egress-prober network from
+// contract endpoint. It distinguishes the durable egress-prober network from
 // every other known network and keeps incomplete identity state explicit. The
 // value is safe for a metric label because it is never accepted from a client
 // and cannot carry a client, network, device, or application identifier.
@@ -1675,6 +1675,7 @@ type ProvideRelationshipDetails struct {
 	SourceLifecycle      NetworkClientLifecycle
 	DestinationLifecycle NetworkClientLifecycle
 	SourceOwner          NetworkClientSourceOwner
+	DestinationOwner     NetworkClientSourceOwner
 }
 
 func networkClientLifecycle(active *bool, sourceClientId *server.Id) NetworkClientLifecycle {
@@ -1694,7 +1695,7 @@ func networkClientLifecycle(active *bool, sourceClientId *server.Id) NetworkClie
 }
 
 // GetProvideRelationshipDetails resolves the same relationship as
-// GetProvideRelationship while carrying bounded endpoint lifecycle and source
+// GetProvideRelationship while carrying bounded endpoint lifecycle and both
 // owner classes from that exact database snapshot. CreateContract already
 // needs this lookup; returning the extra columns makes failure telemetry causal
 // without an additional query on the hot path. Ownership compares the source's
@@ -1707,6 +1708,7 @@ func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 		SourceLifecycle:      NetworkClientLifecycleMissing,
 		DestinationLifecycle: NetworkClientLifecycleMissing,
 		SourceOwner:          NetworkClientSourceOwnerUnknown,
+		DestinationOwner:     NetworkClientSourceOwnerUnknown,
 	}
 	if clientIdA == clientIdB {
 		details.Mode = ProvideModeNetwork
@@ -1757,6 +1759,13 @@ func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 						details.SourceOwner = NetworkClientSourceOwnerEgressProber
 					} else {
 						details.SourceOwner = NetworkClientSourceOwnerOther
+					}
+				}
+				if networkIdB != nil && proberNetworkId != nil {
+					if *networkIdB == *proberNetworkId {
+						details.DestinationOwner = NetworkClientSourceOwnerEgressProber
+					} else {
+						details.DestinationOwner = NetworkClientSourceOwnerOther
 					}
 				}
 				if networkIdA != nil && networkIdB != nil && *networkIdA == *networkIdB {
