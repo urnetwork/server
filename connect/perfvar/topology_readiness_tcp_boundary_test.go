@@ -92,6 +92,9 @@ type readinessTCPBridge struct {
 	stage                             atomic.Int32
 	errs                              chan error
 	changed                           chan struct{}
+	// Protected by mu; called without mu after real packet injection but
+	// before the fixture publishes its injection ledger.
+	beforeInjectionPublication func(readinessTCPPacket, bool)
 }
 
 func newReadinessTCPBridge(t *testing.T, ctx context.Context) *readinessTCPBridge {
@@ -200,6 +203,11 @@ func (b *readinessTCPBridge) inject(to *clientconnect.Tun, packet []byte, revers
 		return err
 	}
 	b.mu.Lock()
+	if beforePublication := b.beforeInjectionPublication; beforePublication != nil {
+		b.mu.Unlock()
+		beforePublication(metadata, reverse)
+		b.mu.Lock()
+	}
 	defer b.mu.Unlock()
 	if reverse && b.baseSet && metadata.flags&16 != 0 {
 		offset := metadata.ack - b.base
@@ -245,6 +253,20 @@ type readinessTCPSnapshot struct {
 	HeldForward, HeldACK                          int
 	Read                                          int64
 	Stage                                         int32
+}
+
+func (s readinessTCPSnapshot) heldBoundaryReady(initialCwnd int, holdForward bool) bool {
+	// TCP establishment/packet progress need not wait for application Accept.
+	if s.Stage == 0 || s.DataPackets < initialCwnd || s.FirstPayloadSize == 0 {
+		return false
+	}
+	if holdForward {
+		return 0 < s.HeldForward && 0 < s.InjectedUnique
+	}
+	// Tun.Write exposes the packet to the peer before inject publishes its
+	// ledger. Peer read/ACK progress alone can therefore precede this record.
+	return 0 < s.HeldACK && s.ACKEmitted == uint32(s.EmittedUnique) && s.Read == int64(s.EmittedUnique) &&
+		s.InjectedUnique == s.EmittedUnique && s.InjectedPrefix == s.InjectedUnique
 }
 
 func (b *readinessTCPBridge) snapshot() readinessTCPSnapshot {
@@ -308,7 +330,7 @@ func (b *readinessTCPBridge) close() {
 // gVisor's runtime sleeper is not synctest-durable, so its real stack runs on
 // the normal clock; bounded wall-clock waits only fail a stuck fixture.
 func TestReadinessTCPBoundary(t *testing.T) {
-	for _, mode := range []string{"clean", "missing-first-range", "withheld-inner-ack"} {
+	for _, mode := range []string{"clean", "missing-first-range", "withheld-inner-ack", "withheld-inner-ack-unpublished-injection", "missing-first-range-unpublished-accept"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -318,12 +340,37 @@ func TestReadinessTCPBoundary(t *testing.T) {
 				t.Fatal(err)
 			}
 			payload := bytes.Clone(deterministicPayload()[:fullTunProbePayloadByteCount])
+			var acceptReached chan struct{}
+			var releaseAccept func()
+			var beforeAcceptPublication func()
+			if mode == "missing-first-range-unpublished-accept" {
+				acceptReached = make(chan struct{})
+				acceptRelease := make(chan struct{})
+				releaseAccept = sync.OnceFunc(func() { close(acceptRelease) })
+				beforeAcceptPublication = sync.OnceFunc(func() {
+					close(acceptReached)
+					b.notify()
+					select {
+					case <-acceptRelease:
+					case <-ctx.Done():
+					}
+				})
+			}
 			server := newReadinessEchoServer(readinessTCPListener{listener, &b.read, b.notify}, payload, &readinessEchoServerSettings{
-				afterAcceptForTest:    func(net.Conn) { b.stage.CompareAndSwap(0, 1) },
+				afterAcceptForTest: func(net.Conn) {
+					if beforeAcceptPublication != nil {
+						beforeAcceptPublication()
+					}
+					b.stage.CompareAndSwap(0, 1)
+					b.notify()
+				},
 				afterCompleteRequest:  func() { b.stage.Store(2) },
 				afterCompleteResponse: func() { b.stage.Store(3) },
 			})
 			defer server.CloseAndWait()
+			if releaseAccept != nil {
+				defer releaseAccept()
+			}
 			conn, err := b.app.DialContext(ctx, "tcp4", listener.Addr().String())
 			if err != nil {
 				t.Fatal(err)
@@ -333,8 +380,33 @@ func TestReadinessTCPBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			holdForward := mode == "missing-first-range" || mode == "missing-first-range-unpublished-accept"
+			holdACK := mode == "withheld-inner-ack" || mode == "withheld-inner-ack-unpublished-injection"
+			var publicationReached chan struct{}
+			var releasePublication func()
+			var beforePublication func(readinessTCPPacket, bool)
+			if mode == "withheld-inner-ack-unpublished-injection" {
+				publicationReached = make(chan struct{})
+				publicationRelease := make(chan struct{})
+				releasePublication = sync.OnceFunc(func() { close(publicationRelease) })
+				defer releasePublication()
+				pausePublication := sync.OnceFunc(func() {
+					close(publicationReached)
+					b.notify()
+					select {
+					case <-publicationRelease:
+					case <-ctx.Done():
+					}
+				})
+				beforePublication = func(packet readinessTCPPacket, reverse bool) {
+					if !reverse && len(packet.payload) != 0 && b.snapshot().DataPackets == int(info.SndCwnd) {
+						pausePublication()
+					}
+				}
+			}
 			b.mu.Lock()
-			b.holdForward, b.holdACK = mode == "missing-first-range", mode == "withheld-inner-ack"
+			b.holdForward, b.holdACK = holdForward, holdACK
+			b.beforeInjectionPublication = beforePublication
 			b.mu.Unlock()
 			if err := conn.SetDeadline(time.Now().Add(170880 * time.Millisecond)); err != nil {
 				t.Fatal(err)
@@ -342,20 +414,56 @@ func TestReadinessTCPBoundary(t *testing.T) {
 			if err := writeFullTunAll(conn, payload); err != nil {
 				t.Fatal(err)
 			}
-			if mode != "clean" {
-				partial := b.waitFor(t, func(s readinessTCPSnapshot) bool {
-					if s.DataPackets < int(info.SndCwnd) || s.FirstPayloadSize == 0 {
+			if acceptReached != nil {
+				// Dial and the initial TCP flight can complete before the
+				// application accept callback publishes the server stage.
+				unpublished := b.waitFor(t, func(s readinessTCPSnapshot) bool {
+					select {
+					case <-acceptReached:
+					default:
 						return false
 					}
-					if mode == "missing-first-range" {
-						return 0 < s.HeldForward && 0 < s.InjectedUnique
+					return s.DataPackets >= int(info.SndCwnd) && s.FirstPayloadSize != 0 && 0 < s.HeldForward && 0 < s.InjectedUnique
+				})
+				if unpublished.Stage != 0 || unpublished.Read != 0 || unpublished.InjectedPrefix != 0 || unpublished.ACKEmitted != 0 {
+					t.Fatalf("did not force the unpublished accept boundary: %+v", unpublished)
+				}
+				if unpublished.heldBoundaryReady(int(info.SndCwnd), holdForward) {
+					t.Fatalf("unpublished acceptance accepted as a complete held boundary: %+v", unpublished)
+				}
+				t.Logf("TCP flight preceded server accept publication=%+v", unpublished)
+				releaseAccept()
+			}
+			if publicationReached != nil {
+				// The peer may read and ACK the last initial-flight segment
+				// before inject returns to publish that segment in its ledger.
+				// Force that ordering without holding a fixture lock across
+				// peer progress or changing any production timeout.
+				unpublished := b.waitFor(t, func(s readinessTCPSnapshot) bool {
+					select {
+					case <-publicationReached:
+					default:
+						return false
 					}
 					return 0 < s.HeldACK && s.ACKEmitted == uint32(s.EmittedUnique) && s.Read == int64(s.EmittedUnique)
 				})
-				if partial.Stage != 1 || (mode == "withheld-inner-ack" && partial.EmittedUnique >= len(payload)) {
+				if unpublished.InjectedUnique >= unpublished.EmittedUnique || unpublished.InjectedPrefix != unpublished.InjectedUnique || unpublished.ACKInjected != 0 || unpublished.Stage != 1 {
+					t.Fatalf("did not force the unpublished injection boundary: %+v", unpublished)
+				}
+				if unpublished.heldBoundaryReady(int(info.SndCwnd), holdForward) {
+					t.Fatalf("unpublished injection accepted as a complete held boundary: %+v", unpublished)
+				}
+				t.Logf("peer read/ACK preceded injection ledger publication=%+v", unpublished)
+				releasePublication()
+			}
+			if mode != "clean" {
+				partial := b.waitFor(t, func(s readinessTCPSnapshot) bool {
+					return s.heldBoundaryReady(int(info.SndCwnd), holdForward)
+				})
+				if partial.Stage != 1 || (holdACK && partial.EmittedUnique >= len(payload)) {
 					t.Fatalf("held TCP boundary did not leave an incomplete request: %+v", partial)
 				}
-				if mode == "missing-first-range" {
+				if holdForward {
 					if partial.Read != 0 || partial.InjectedPrefix != 0 || partial.ACKEmitted != 0 || partial.InjectedUnique == partial.EmittedUnique {
 						t.Fatalf("request gap not localized: %+v", partial)
 					}
