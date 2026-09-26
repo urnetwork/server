@@ -1664,6 +1664,31 @@ The following machine classifier names share the playbooks already specified
 below and in §4; retaining their exact identifiers makes implementation and
 ledger crosswalks deterministic:
 
+- `peerconn-teardown-stalled` recognizes the exact five-second peerConn
+  watchdog header and its finite teardown stage. WARN on one header/minute,
+  PAGE on five/minute for one service/stage; each header is a diagnostic stall,
+  not a unique failed provider or probe. The subsequent `teardown goroutine`
+  records are stack evidence, not additional stalls. On 2026-09-26 one bounded
+  Taskworker sample contained only 17 seconds of source time in 2,000 returned
+  rows, with whole-process snapshots reporting 47,974–73,839 goroutines and
+  no log-rate guard. The legacy callback emitted one record per captured
+  goroutine, then teardown joined the callback; diagnostic output could itself
+  prolong resource release and exhaust the 20,000-row/eight-page log
+  reconciliation budget. This establishes log amplification, not the blocked
+  primitive or a causal share of §2.19's low probe throughput. A `starting`
+  stage spans cancellation, lifecycle worker close, ICE resolve cancellation,
+  and acquisition of the Pion lifecycle lock. Keep those alternatives open.
+  The bounded Connect diagnostic samples at most eight complete stacks within
+  a fixed capture and record-size budget, preserving a finite summary.
+  Correlate exact process/artifact and private stack evidence before fixing
+  lifecycle behavior; verify ten minutes of comparable churn, resource
+  release, and two complete log reconciliations after deployment. A missing
+  class during 20k/eight-page saturation or an nginx-facing HTTP 429 is a
+  false-negative boundary, not proof of no stalls. Conversely a 429 or a
+  capped log window alone is not proof of a product teardown fault. The
+  Grafana nginx-facing 429 and Taskworker page-budget saturation are separate
+  visibility failures until the active proxy rule and producer are confirmed.
+
 - `connection-refused`, `clusterdown`, and `redis-loading` distinguish a TCP
   refusal, Redis slot-coverage loss, and Redis load/failover state. The text
   alone does not identify the restart or rollout cause.
@@ -10256,6 +10281,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 
 | Class (grep) | Meaning | Action |
 |---|---|---|
+| `[peerconn]teardown stalled for 5s at <stage>` (`peerconn-teardown-stalled`) | One finite-stage watchdog header is one diagnostic stall; later per-goroutine stack records are not additional stalls. WARN at one header/minute and PAGE at five/minute per service/stage. `starting` is not a unique blocked primitive. Legacy whole-process stack fan-out can itself prolong teardown and obscure other logs; a capped or HTTP-429 reconciliation makes absence unknown. | Bind the exact process/artifact and finite stage, retain only bounded private stack evidence, then repair the owning lifecycle primitive. Deploy the bounded diagnostic separately when authorized. Require comparable connection churn, resource release, ten quiet minutes, and two complete overlap reconciliations; do not attribute provider-probe throughput without a process/task join. See §1.5. |
 | `Stats push rejected status=... reason=series-limit ...` or legacy `Stats push rejected (400): ... per-user series limit` (`mimir-series-limit`) | Mimir rejected series admission because the tenant's in-memory budget is exhausted. PAGE on the first rejection window. Current fronts discard the raw response and emit only a fixed job class, family-class counts, total families, and total time series; legacy bodies can embed private labels and are reduced to a generic sample. A mixed rejected batch identifies candidate contributors, not a family that independently crossed the shared limit. | Run `mimir-admission` (§11.20a) for exact-process admission-discard and created/removed-series counters. Use a current structured batch to bound candidate sources, but treat accepted per-service/family aggregates as context only because rejected candidates never enter them. Preserve distinct instance labels; do not restart Mimir to manufacture headroom. An operator-authorized limit increase is a capacity change, not incident closure: verify effective per-ingester limits, host headroom, zero new discards, and fresh source metrics through the complete two-hour quiet window while continuing source-cardinality review. Historical gaps stay under §11.20. |
 | `Stats push rejected status=... reason=rate-limit ...` or `cortex_discarded_samples_total{reason="rate_limited"}` (`mimir-ingestion-rate-limit`) | Mimir's per-tenant sample token bucket rejected ingestion. The exact child-counter increase proves lost samples independently of series-cardinality headroom, but replicated child counters are not unique request counts. A structured rejected batch supplies bounded candidate job/family classes without proving unique loss or one culpable family. | Run `mimir-admission` (§11.20a), preserve exact child generations, then use `mimir-balance` and `mimir-publishers` to distinguish placement skew from aggregate load. Remove or reduce only a proven unnecessary sample source. A rate/burst increase may require an operational capacity decision and resource validation; do not raise it, restart Mimir, or blindly retry rejected payloads automatically. Require zero new rate-limited increments and fresh required metrics for the complete two-hour quiet window. |
 | `Stats push rejected status=... reason=other-client|server ...` (`mimir-push-rejected`) | The Grafana front lost a batch to an unclassified upstream rejection without a proven typed limit. An unreadable, oversized, or unknown client-error body can still conceal a series/rate cause; the generic class does not exclude those causes. The fixed enum preserves the owner boundary while the raw upstream response is discarded because it can contain arbitrary private labels. | Use the fixed job/family classes only to select the owning investigation; direct admission counters independently establish any limit incident. Check the exact child and submitting artifact, reproduce with a synthetic valid push, and never restore raw response-body logging. Require direct health, a successful controlled push, and ten quiet minutes. |

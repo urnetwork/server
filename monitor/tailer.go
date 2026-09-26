@@ -426,8 +426,31 @@ func windowGeneratorCanceledLogSample(line string) string {
 	return strings.TrimSpace(windowGeneratorCanceledRe.FindString(line))
 }
 
+var peerConnectionTeardownStalledRe = regexp.MustCompile(`\[peerconn\]teardown stalled for 5s at (starting|stopping-dtls|closing-peer|closing-fast-path|closing-data-channel|clearing-signals|complete)(?:[[:space:]]|$)`)
+
+func peerConnectionTeardownStalledStage(line string) string {
+	match := peerConnectionTeardownStalledRe.FindStringSubmatch(line)
+	if len(match) != 2 {
+		return "unknown"
+	}
+	return match[1]
+}
+
 // the §4 taxonomy. Order matters: first match wins.
 var logClasses = []logClass{
+	{name: "peerconn-teardown-stalled", re: peerConnectionTeardownStalledRe,
+		sample: func(line string) string {
+			return "[peerconn]teardown stalled stage=" + peerConnectionTeardownStalledStage(line) + " (peer identity omitted)"
+		},
+		groupBy:       func(line string) string { return "stage=" + peerConnectionTeardownStalledStage(line) },
+		rateThreshold: 1, pageRateThreshold: 5, tier: tierWarn, playbook: "SIGNALS.md §1.5 and §14.6",
+		meaning:   "one or more peer connection teardowns exceeded the five-second watchdog at the reported finite stage",
+		mechanism: "A stalled teardown can retain a Pion peer generation and delay release of owned resources. Legacy diagnostics additionally captured every process goroutine and emitted one record per goroutine; their synchronous watchdog callback was joined by teardown, amplifying log load and completion delay.",
+		context:   "The stage names the last completed teardown phase, not the exact blocked primitive. Count watchdog headers, not goroutine stack records, as stall diagnostics. A Taskworker emitting the line does not prove its provider probe caused the stall or that §2.19 throughput fell for this reason. Missing or incomplete Loki reconciliation makes absence of this line unknown, not healthy.",
+		action:    "Correlate a bounded stall header with the exact running Connect-bearing artifact and process generation, owner teardown phase, and independent probe progress. Preserve a representative private stack sample; fix the blocked lifecycle primitive. Deploy bounded diagnostics only with a tested containing artifact, and do not raise the log-query page budget to absorb whole-process stack floods.",
+		verify:    "After complete artifact convergence, require zero stalled teardown headers for ten minutes through comparable connection churn, bounded diagnostic emission per watchdog, and two complete current-generation log reconciliations. Confirm resource release and provider progress separately.",
+		redactIDs: true,
+	},
 	// Preserve the controller-owned reset phase before its processor response
 	// or persistence suffix can match an ordinary destination/network class.
 	{name: "payout-invalid-destination-reset-failed", re: regexp.MustCompile(`(?is)Payment create transaction error = .*; invalid destination reset error = \S`),
@@ -2501,6 +2524,14 @@ func (self *logTailer) drainWindow() []finding {
 			c.name == "mimir-ingestion-rate-limit" || c.name == "mimir-push-rejected")
 		if c.name == "loki-tail-dropped-entries" && self.classCounts["loki-tail-dropped-entries-unobservable"] > 0 {
 			withholdHealthy = true
+		}
+		if c.name == "peerconn-teardown-stalled" && self.reconcile != nil {
+			// A connected stream alone cannot clear a teardown-stall ticket:
+			// high-volume stack output or a failed overlap can hide its header.
+			latest := self.reconcileSuccesses[1]
+			withholdHealthy = withholdHealthy || self.lastReconcileError != "" ||
+				!self.reconcileSuccesses[0].advancesTo(latest) ||
+				self.clock().Sub(latest.completed) >= 2*logReconcileInterval
 		}
 		if !broken && !withholdHealthy {
 			findings = append(findings, healthyFinding("logs/"+c.name, c.tier, c.name, self.service))
