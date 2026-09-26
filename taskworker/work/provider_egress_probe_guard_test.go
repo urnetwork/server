@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -336,9 +337,10 @@ func TestEgressHealthSiteLoadsJudgesEachLoadOnTheOtherSites(t *testing.T) {
 	}
 }
 
-// An ingest that records every call in order, and refuses the location
-// submissions of the named providers.
+// Concurrent-safe recording ingest for independently publishing cohorts.
+// Read recorded fields only after all owners have joined.
 type recordingEgressProbeIngest struct {
+	stateLock    sync.Mutex
 	calls        []string
 	health       map[string]*egresshealth.Result
 	refuseSubmit map[string]bool
@@ -358,6 +360,8 @@ func newRecordingEgressProbeIngest(refused ...string) *recordingEgressProbeInges
 
 // Implements prober.Submitter.
 func (self *recordingEgressProbeIngest) Submit(_ context.Context, providerClientId string, exitIp string, _ time.Time) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	self.calls = append(self.calls, "submit "+providerClientId+" "+exitIp)
 	if self.refuseSubmit[providerClientId] {
 		return errors.New("synthetic refused submission")
@@ -367,12 +371,16 @@ func (self *recordingEgressProbeIngest) Submit(_ context.Context, providerClient
 
 // Implements prober.AttemptReporter.
 func (self *recordingEgressProbeIngest) ReportAttempt(_ context.Context, providerClientId string, probeFailure string) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	self.calls = append(self.calls, "attempt "+providerClientId+" "+probeFailure)
 	return nil
 }
 
 // Implements prober.HealthReporter.
 func (self *recordingEgressProbeIngest) SubmitEgressHealth(_ context.Context, providerClientId string, res *egresshealth.Result) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	self.calls = append(self.calls, "health "+providerClientId)
 	self.health[providerClientId] = res
 	return nil
@@ -390,6 +398,8 @@ func (self *recordingEgressProbeIngest) SubmitBandwidth(context.Context, string,
 
 // Records the checks as one call.
 func (self *recordingEgressProbeIngest) SubmitBlackholeChecks(_ context.Context, checks []ingest.BlackholeCheck) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	self.calls = append(self.calls, fmt.Sprintf("blackhole %d", len(checks)))
 	return nil
 }
