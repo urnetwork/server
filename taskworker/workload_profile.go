@@ -47,6 +47,8 @@ func InitTasksForProfile(ctx context.Context, profile WorkloadProfile) error {
 		InitTasks(ctx)
 		return nil
 	}
+	// Match production's per-statement conflict handling for live queue rows;
+	// startup scheduling does not require a shared snapshot across tasks.
 	server.Tx(ctx, func(tx server.PgTx) {
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
@@ -55,7 +57,7 @@ func InitTasksForProfile(ctx context.Context, profile WorkloadProfile) error {
 				definition.schedule(clientSession, tx)
 			}
 		}
-	})
+	}, server.TxReadCommitted)
 	stats.ApplyStreamRetention(ctx)
 	return nil
 }
