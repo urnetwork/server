@@ -7618,6 +7618,45 @@ or provider policy changes. Validate the additional eight concurrent checks
 per shard against actual Taskworker/Proxy/API/datastore resource and verdict
 controls, not against a transport budget treated as an RSS reservation.
 
+2026-09-26 late Main correction to the cheap-scan capacity diagnosis: one
+exact-process, closed 4,000-provider pass lasted 53 minutes and occupied
+1,936,275 worker-slot seconds. Its 4,000 completions averaged 484.07 seconds
+of slot ownership, but only 3,004 became measured results; the other 996 were
+withheld by the dark-batch guard. The seven guarded 250-provider cohorts had
+pre-guard dark shares of 38.0%, 44.0%, 48.8%, 43.6%, 47.2%, 90.0%, and
+87.2%. Their discarded-negative counts sum exactly to 996. This is **not**
+a set of marginal crossings above the configured 20% guard. The guard retained
+passing and independent TLS-authentication evidence as designed. It is a
+false-positive conclusion to call every guarded negative a genuinely dark
+provider, and a false-negative coverage conclusion to count its completed
+worker call or `not_measured` submission as a durable measurement.
+
+The due selector alternates a bounded oldest-retry head with a never-checked
+head. This is deliberately fairer than the old retry-only selection, but its
+cohorts are not representative random samples of all eligible providers.
+A bounded *current*, read-only head census after the closed pass found one
+shard with 188 prior failures and 335 prior unknown results among its next
+2,000 retry candidates, plus 476 available never-checked candidates. The
+seven guarded batches came from that shard. The guard itself has already
+changed those rows, so the current queue cannot reconstruct historical batch
+membership or prove whether transport failure or dark-enriched selection
+caused each batch. Do not tune the 20% guard from the fleet-wide dark fraction
+alone. Separate selected retry/first-check composition, per-attempt DNS versus
+TCP versus tunnel stages, independent passing controls, and process generation
+before changing how negatives are admitted.
+
+At the closed pass's failure mix, 4,000 perfectly occupied slots could produce
+only about 22,340 measured checks/hour, below the roughly 29,230/hour needed
+to cover 116,900 eligible providers in four hours. The old lifetime
+16-cohort selection cap also left capacity idle after early ACKs. A tested
+40-selected/16-retained cohort split can address that admission idle time
+without increasing the 1,000-worker-per-shard cap, changing retries, or
+weakening the guard; it **cannot** alone establish four-hour measured coverage.
+Judge a rollout by a complete post-convergence hour of distinct persisted
+`checked_at` gains and all-shard progress, not by selected, started, or
+completed counters. The deep URL-quality lane retains its separate seven-day
+schedule; no four-hour throughput claim applies to it.
+
 This is a rate/capacity invariant, not a percentage floor. A first sweep may be
 incomplete without fault when its measured rate can finish before evidence
 expires. Conversely, a shard can advance forever and remain broken when the
