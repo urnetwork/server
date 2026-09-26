@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -140,6 +141,53 @@ func TestWarmUpPrecedesEveryLoadAndCarriesTheExit(t *testing.T) {
 	}
 	if _, present := head["Range"]; present {
 		t.Error("the echo carried a Range header")
+	}
+}
+
+func TestSuccessfulLoadRecoversExitAfterTransientWarmUpFailure(t *testing.T) {
+	var echoes atomic.Int32
+	srv := newEchoServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if echoes.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(echoAnswer))
+	})
+	opts := fastOptions()
+	opts.IpEchoUrl = srv.URL + IpEchoPath
+	res, err := check(context.Background(), http.DefaultClient,
+		[]Destination{{Name: "synthetic-site", Class: ClassSite, Url: srv.URL + "/load"}}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OkCount != 1 || res.ExitIp != "203.0.113.7" || res.IpEchoErr != "" {
+		t.Fatalf("successful load did not recover exit: ok=%d exit=%q echo_err=%q", res.OkCount, res.ExitIp, res.IpEchoErr)
+	}
+	if got := srv.requests(); len(got) != 3 || got[0] != "echo" || got[1] != "load" || got[2] != "echo" {
+		t.Fatalf("requests=%v, want failed warm-up, successful load, then bounded echo recovery", got)
+	}
+}
+
+func TestFailedLoadsDoNotRetryAnUnavailableExitEcho(t *testing.T) {
+	var echoes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == IpEchoPath {
+			echoes.Add(1)
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	opts := fastOptions()
+	opts.LoadAttempts = 1
+	opts.IpEchoUrl = srv.URL + IpEchoPath
+	res, err := check(context.Background(), http.DefaultClient,
+		[]Destination{{Name: "synthetic-site", Class: ClassSite, Url: srv.URL + "/load"}}, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.OkCount != 0 || res.ExitIp != "" || echoes.Load() != 1 {
+		t.Fatalf("failed path extended echo recovery: ok=%d exit=%q echoes=%d", res.OkCount, res.ExitIp, echoes.Load())
 	}
 }
 

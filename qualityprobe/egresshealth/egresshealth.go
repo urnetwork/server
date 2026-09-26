@@ -2341,6 +2341,20 @@ func check(ctx context.Context, client *http.Client, dests []Destination, opts O
 	if err := parent.Err(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInterrupted, err)
 	}
+	// Open returns before the provider path is ready. A cold /my-ip-info may
+	// therefore fail even though a subsequent scored load proves the tunnel
+	// became usable. Recover the exit once on that positive evidence; without
+	// it the server cannot place an otherwise successful provider. A TLS
+	// authentication failure remains a hard failure, and a dead run or path
+	// gets no extra work.
+	if exitIp, _, _, tlsFailure := exit.read(); exitIp == "" && !tlsFailure && ctx.Err() == nil {
+		for _, check := range res.Checks {
+			if check.Ok {
+				r.warmUp(ctx)
+				break
+			}
+		}
+	}
 	res.ExitIp, res.ExitObservedAt, res.IpEchoErr, res.TlsAuthenticationFailure = exit.read()
 
 	// ByClass is seeded from the sample, not from the results that happened to
