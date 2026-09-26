@@ -926,6 +926,7 @@ func nextContract(
 		intermediaryIds,
 		// companion contracts reply to an existing open contract
 		companion,
+		!createContract.Companion && !companion,
 		model.ByteCount(createContract.TransferByteCount),
 		provideMode,
 		forceStream,
@@ -940,6 +941,7 @@ func newContract(
 	destinationId server.Id,
 	intermediaryIds []server.Id,
 	companionContract bool,
+	usageOriginIsSource bool,
 	transferByteCount model.ByteCount,
 	provideMode model.ProvideMode,
 	forceStream bool,
@@ -978,13 +980,14 @@ func newContract(
 	) * model.ByteCount(len(intermediaryIds)+1)
 
 	if provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily {
-		contractId, err = model.CreateContractNoEscrow(
+		contractId, err = model.CreateContractNoEscrowWithUsageOrigin(
 			ctx,
 			sourceNetworkId,
 			sourceId,
 			destinationNetworkId,
 			destinationId,
 			contractTransferByteCount,
+			usageOriginIsSource,
 		)
 		if err != nil {
 			returnErr = err

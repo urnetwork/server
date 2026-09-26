@@ -1,60 +1,70 @@
-// Epoch usage expands immutable provider allocations while keeping account
-// payments aggregated by network. A legacy fallback requires an immutable
-// endpoint-backed contract without the stream aggregation marker.
+// Epoch usage consumes immutable completed-work snapshots. Payment balances,
+// escrow sweeps, and current provider membership never determine pool weight.
 package model
 
 import (
 	"context"
 	"fmt"
+	"math"
+	"slices"
 	"time"
 
 	"github.com/urnetwork/server"
 )
 
-// Reads one PostgreSQL snapshot, validates every allocation against its exact
-// network sweep, and returns no partial credit if any historical row is
-// ambiguous. Legacy stream membership can be republished after a network
-// change, so it cannot prove which clients earned an older combined payment.
-// NULL legacy allocations never fall back merely because modern
-// allocation rows were empty, malformed, duplicated, or nonconserving.
+// Reads one PostgreSQL snapshot and refuses partial pre-activation history.
+// The half-open settlement window counts each contract once, regardless of
+// how many balances funded it or whether it needed escrow at all.
 func GetStEpochProviderUsage(ctx context.Context, startTime time.Time, endTime time.Time) ([]*StProviderUsage, error) {
-	usages := []*StProviderUsage{}
+	if !startTime.Before(endTime) {
+		return nil, fmt.Errorf("invalid subnet usage window")
+	}
+	usagesByClientId := map[server.Id]*StProviderUsage{}
 	var returnErr error
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(ctx, `
-            WITH payout_sweeps AS (
-                SELECT * FROM transfer_escrow_sweep
-                WHERE $1 <= sweep_time AND sweep_time < $2
-            )
-        `+contractProviderPayoutRowsSql+`
-            SELECT COALESCE(client_id, '00000000-0000-0000-0000-000000000000'::uuid),
-                network_id, COALESCE(SUM(payout_byte_count), 0)::bigint,
-                BOOL_AND(valid)
-            FROM provider_rows
-            GROUP BY client_id, network_id
-        `, startTime, endTime)
+		rows, err := conn.Query(ctx, `
+			SELECT contract_id, provider_usage FROM transfer_contract
+			WHERE $1 <= close_time AND close_time < $2 AND outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
+		`, startTime, endTime)
 		if err != nil {
-			returnErr = fmt.Errorf("read epoch provider attribution: %w", err)
+			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
 			return
 		}
-		defer result.Close()
-		for result.Next() {
-			usage := &StProviderUsage{}
-			var valid bool
-			if err := result.Scan(&usage.ClientId, &usage.NetworkId, &usage.PayoutByteCount, &valid); err != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var contractId server.Id
+			var data []byte
+			if err := rows.Scan(&contractId, &data); err != nil {
 				returnErr = err
 				return
 			}
-			if !valid {
-				returnErr = fmt.Errorf("subnet provider usage has missing, ambiguous, or nonconserving attribution for network %s", usage.NetworkId)
+			snapshot, err := decodeContractUsageSnapshot(data)
+			if err != nil {
+				returnErr = fmt.Errorf("subnet contract %s: %w", contractId, err)
 				return
 			}
-			usages = append(usages, usage)
+			for _, provider := range snapshot.Providers {
+				usage := usagesByClientId[provider.ClientId]
+				if usage == nil {
+					usage = &StProviderUsage{ClientId: provider.ClientId, NetworkId: provider.NetworkId}
+					usagesByClientId[provider.ClientId] = usage
+				}
+				if usage.NetworkId != provider.NetworkId || int64(provider.ByteCount) > math.MaxInt64-usage.PayoutByteCount {
+					returnErr = fmt.Errorf("subnet provider usage has ambiguous network or overflowing total")
+					return
+				}
+				usage.PayoutByteCount += int64(provider.ByteCount)
+			}
 		}
-		returnErr = result.Err()
+		returnErr = rows.Err()
 	})
 	if returnErr != nil {
 		return nil, returnErr
 	}
+	usages := make([]*StProviderUsage, 0, len(usagesByClientId))
+	for _, usage := range usagesByClientId {
+		usages = append(usages, usage)
+	}
+	slices.SortFunc(usages, func(a, b *StProviderUsage) int { return a.ClientId.Cmp(b.ClientId) })
 	return usages, nil
 }
