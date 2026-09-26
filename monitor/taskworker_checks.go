@@ -4,7 +4,7 @@
 // The taskworker plane has no client connections; a healthy deploy pauses
 // nothing (shared leased queue + make-before-break). These probes catch the
 // unhealthy paths: claims stranded by a killed worker (§12.3), a plane that
-// stopped claiming due work (§12.4), and a task type shipped without its
+// accumulates overdue timestamp availability (§12.4), and a task type shipped without its
 // target registration (§12.4 — visible at a flat ~16s retry since the
 // version-skew backoff clamp, so the error count climbs fast).
 package monitor
@@ -21,16 +21,15 @@ import (
 //   - pg/task-lease-stranded (12.3): a claimed task whose keepalive went
 //     silent. While a task runs, its worker refreshes claim_time every
 //     ~ReleaseTimeout/3 (10s); a claim with a future release_time and a
-//     claim_time silent > 2 minutes means the claiming worker is gone
-//     (SIGKILL, crash) and the task — and its RunOnce chain — is blocked
-//     until the bounded five-minute lease expires. A deploy does not rewrite
+//     claim_time silent > 2 minutes means its timestamp refresh is unhealthy,
+//     not that its worker is dead. Session advisory ownership can outlive the
+//     five-minute timestamp lease. A deploy does not rewrite
 //     the claim (InitTasks never touches claims); `bringyourctl task release`
 //     is available when immediate recovery is worth the operator check.
 //
-//   - pg/task-due-lag (12.4): the oldest due-and-unclaimed task. Healthy
-//     workers claim due tasks within seconds; a growing lag means no worker
-//     is claiming (both blocks broken, crash loop) — the silent-halt mode
-//     the readiness latch narrows but cannot fully remove.
+//   - pg/task-due-lag (12.4): the oldest timestamp-overdue task. The bounded
+//     advisory-lock context separates observed owners from an unowned prefix;
+//     neither timestamp lag nor an idle owner proves a fleet-wide halt.
 //
 //   - pg/task-target-missing (12.4): a task erroring `Target not found` far
 //     beyond any deploy overlap. During an overlap this is normal version
@@ -72,13 +71,13 @@ func (self taskworkerDrainProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		findings = append(findings, finding{
 			probeId: "pg/task-lease-stranded", tier: tierWarn,
 			class: "task-lease-stranded", target: target, frame: task, sustain: 2,
-			symptom: fmt.Sprintf("task %s claim keepalive silent %ss but lease held %ss more (max_time %ss) — claiming worker likely gone; the task auto-recovers when this bounded lease expires",
+			symptom: fmt.Sprintf("task %s timestamp keepalive silent %ss but timestamp lease held %ss more (max_time %ss) — owner liveness needs independent verification",
 				task, r.str(1), r.str(2), r.str(3)),
-			baseline: "a running task refreshes claim_time every ~10s; after a kill/crash its lease expires within 5m of the last heartbeat (12.3)",
+			baseline: "a running task refreshes claim_time every ~10s; the timestamp lease expires within 5m, but a surviving session advisory lock continues to exclude duplicate ownership (12.3)",
 			observed: fmt.Sprintf("silent_s=%s lease_remaining_s=%s max_time_s=%s claim_identity=withheld", r.str(1), r.str(2), r.str(3)),
-			context:  "correlate with taskworker deploys/kills; a cpu-starved extender can rarely mimic this — wait for automatic expiry unless immediate recovery is needed and the claiming worker is confirmed gone",
-			evidence: fmt.Sprintf("automatic recovery: lease expires in %ss; the durable claim identifier remains available only through the protected operator lookup", r.str(2)),
-			action:   "Normally observe automatic expiry. If immediate recovery is required, first prove the claiming worker is dead, then obtain the exact claim through the protected operator path and use the supported task release command without copying the identifier into an alert or transcript. Releasing a running task can permit duplicate execution.",
+			context:  "correlate with exact taskworker generation, resource pressure, advisory session heartbeat, refresh errors and deploys; timestamp expiry alone does not make an advisory-owned task claimable",
+			evidence: fmt.Sprintf("timestamp lease expires in %ss, advisory ownership not established by this probe; the durable claim identifier remains available only through the protected operator lookup", r.str(2)),
+			action:   "Observe timestamp expiry and independently establish session ownership. If immediate recovery is required, first prove the claiming worker is dead, then obtain the exact claim through the protected operator path and use the supported task release command without copying the identifier into an alert or transcript. Releasing a running task can permit duplicate execution.",
 			verify:   "The stranded lease expires or is safely released after its owner is proven dead, one successor claims the task, and the task reaches a real terminal result without duplicate execution.",
 			playbook: "SIGNALS.md 12.3",
 		})
@@ -87,7 +86,7 @@ func (self taskworkerDrainProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		findings = append(findings, healthyFinding("pg/task-lease-stranded", tierWarn, "task-lease-stranded", target))
 	}
 
-	// due-lag: oldest due-and-unclaimed task (workers claim within seconds)
+	// Timestamp availability is not advisory ownership or proof of claimability.
 	lagRows, err := env.runner.pg(ctx, `
 		SELECT coalesce(max(round(extract(epoch FROM now() - greatest(run_at, release_time)))),0)::int
 		FROM pending_task
@@ -101,11 +100,11 @@ func (self taskworkerDrainProbe) check(ctx context.Context, env *probeEnv) ([]fi
 		findings = append(findings, finding{
 			probeId: "pg/task-due-lag", tier: tierWarn,
 			class: "task-due-lag", target: target, sustain: 2,
-			symptom:  fmt.Sprintf("oldest due-and-unclaimed task is %ds past available (healthy: seconds) — the task plane is not claiming", dueLagSeconds),
-			baseline: "due tasks are claimed within seconds by any live worker in either block; transient spikes during a deploy overlap are normal (12.4)",
+			symptom:  fmt.Sprintf("oldest timestamp-overdue task is %ds past available; distinguish stale owner heartbeats from unowned work", dueLagSeconds),
+			baseline: "unowned due tasks normally make progress within seconds; timestamp availability can be old while an advisory session still owns the task (12.4)",
 			observed: fmt.Sprintf("due_lag_s=%d", dueLagSeconds),
-			context:  "if this grows after a taskworker deploy: check the deploy reverted (error not ready) or the workers crash-looped; contract close, handler reap, and reliability rollup are all stalling while this is red",
-			evidence: taskErrorBattery(ctx, env),
+			context:  "one old class does not prove a global stop: inspect per-class run/claim/release times, advisory owners, fresh per-process claim/finalization rates and exact generation; future retry backoff is not due until both run_at and release_time have elapsed",
+			evidence: taskDueOwnershipEvidence(ctx, env) + "\n" + taskErrorBattery(ctx, env),
 			playbook: "SIGNALS.md 12.4",
 		})
 	} else {

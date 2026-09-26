@@ -18802,7 +18802,8 @@ Probe: `stuck-leases`
 
 Alert id `pg/task-lease-stranded` (`signal_stuck_leases.go`, 60s cadence):
 claim with a future release_time whose keepalive (claim_time refresh every
-~10s while running) has been silent > 2 minutes = claiming worker gone.
+~10s while running) has been silent > 2 minutes = unhealthy timestamp refresh,
+not proof that its worker or session is gone.
 ```sql
 -- claims held with a future release: normal while a task RUNS; suspect when
 -- the claiming container is gone (correlate with deploys/restarts)
@@ -18817,14 +18818,20 @@ ORDER BY release_time DESC;
 - HEALTHY: rows whose task genuinely runs long (compare finished_task
   duration history, 2.5), whose claim_time keeps advancing, and whose worker
   is alive.
-- BROKEN: claim_time frozen > 2m shortly AFTER a taskworker kill/crash = a
-  temporarily stranded claim. Current binaries cap release_time at five
+- BROKEN: claim_time frozen > 2m shortly AFTER a verified taskworker kill/crash
+  can be a temporarily stranded claim. Current binaries cap release_time at five
   minutes after the last heartbeat regardless of run_max_time_seconds, so the
-  chain self-recovers in at most five minutes instead of 30min–24h. A
+  chain becomes reconsiderable in at most five minutes after its direct
+  ownership session disappears, instead of 30min–24h. A
   direct-postgres session advisory lock remains held while a worker is alive,
   so a starved heartbeat alone cannot create a duplicate; PostgreSQL drops the
   lock with the dead worker's connection. A lease remaining far beyond five
   minutes identifies a pre-fix claim/binary and still needs manual handling.
+- QUALIFIER: resource pressure, timestamp-update failure or a stalled live
+  worker can stop timestamp refreshes while its session advisory lock remains.
+  An idle PostgreSQL session alone is normal between ownership heartbeats;
+  verify heartbeat movement, exact process generation and real task progress.
+  Timestamp expiry alone does not release advisory ownership or prove recovery.
 - ACTION: normally observe automatic expiry. If immediate re-claim is needed,
   verify the claiming worker is dead (deploy log / container list), obtain the
   exact claim through the protected operator lookup, then use the supported
@@ -18835,8 +18842,9 @@ ORDER BY release_time DESC;
 ### 12.4 Post-deploy convergence
 Probe: `task-convergence`
 
-Alert ids: `pg/task-due-lag` (oldest due-and-unclaimed > 180s sustained = the
-plane stopped claiming) and `pg/task-target-missing` (`Target not found`
+Alert ids: `pg/task-due-lag` (oldest timestamp-overdue availability > 180s
+sustained; ownership and progress require independent evidence) and
+`pg/task-target-missing` (`Target not found`
 past 100 retries = beyond any overlap, a missing registration) — both in
 `signal_task_convergence.go`, 60s cadence.
 Within ~1min of a taskworker deploy completing:
@@ -18846,9 +18854,29 @@ SELECT round(extract(epoch from (now() - min(run_at)))) AS oldest_due_s
 FROM pending_task
 WHERE available_block <= extract(epoch from now()) AND run_at <= now();
 ```
-  (transient spikes while both build generations overlap are normal; a lag
-  that GROWS after the old containers exited = workers not claiming — check
-  12.2 and 1.2.)
+  (transient spikes while both build generations overlap are normal; growing
+  lag requires per-class and ownership inspection, not a global-stop verdict.)
+- Ownership context: when timestamp lag fires, `task_due_ownership.go` reads
+  at most 257 oldest eligible rows, classifies a 256-row prefix against a fresh
+  direct `pg_locks` snapshot in the current database, and emits only aggregate
+  advisory-held/unowned counts and ages. The bigint key matches the task
+  worker's UUID-XOR ownership namespace; task identifiers never leave the query.
+  Truncation is explicit and prefix counts are not fleet totals. Missing,
+  malformed or more-than-30s-old/future evidence is `due_ownership=unknown`,
+  while the independently observed timestamp-lag finding remains visible.
+- FALSE-POSITIVE QUALIFIER: `greatest(run_at, release_time)` is timestamp
+  eligibility, not proof that a task is unclaimed. A live or stalled direct
+  advisory owner can outlive stale timestamp leases while other workers keep
+  claiming and finalizing. Neither a single old class nor an idle ownership
+  session proves all task classes stopped. Future retry backoff is excluded
+  until both timestamps elapse; an expired backoff still requires owner and
+  execution evidence. Compare fresh per-process claim/finalization rates,
+  per-class ages, session heartbeats, timestamp-refresh errors and generation.
+- FALSE-NEGATIVE QUALIFIER: an absent advisory lock does not prove claimability:
+  a concurrent claim transaction can hold row locks and other workers can
+  silently `SKIP LOCKED`; excluded task targets and races remain separate.
+  A healthy timestamp lag is not proof that a long-running task is completing.
+  The bounded ownership read does not authorize task release or backend termination.
 - `Drained:` reschedules from the drain complete their re-runs (the rows
   disappear or complete; reschedule_error_count stayed 0).
 - `Target not found` reschedule errors are overlap noise and retry on a flat
