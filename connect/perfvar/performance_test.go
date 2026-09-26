@@ -1181,14 +1181,15 @@ func subtractPlatformTransportReceiveStats(
 
 // Monotonic workload-Pack terminal failures are baselined separately from
 // ownership. Candidate-client admission failures before a measured interval
-// are valid setup history. Within the interval, only a Pack explicitly marked
-// retained or regenerable by its upstream TCP state may have a failed attempt
-// without invalidating the run. Independent failures remain in diagnostics.
+// are valid setup history. During measurement, the exact device input owner
+// may prove final admission after a refused selection attempt; provider TCP
+// may retain or regenerate bytes. Both remain in the total failure diagnostics.
 type perfvarPackFailureCounts struct {
-	deviceFailureCount              uint64
-	providerFailureCount            uint64
-	providerRecoverableFailureCount uint64
-	providerDatagramFailureCount    uint64
+	deviceFailureCount                   uint64
+	deviceRecoveredAdmissionFailureCount uint64
+	providerFailureCount                 uint64
+	providerRecoverableFailureCount      uint64
+	providerDatagramFailureCount         uint64
 }
 
 // A boundary retains Client identity so lifetime receive and send-recovery
@@ -2098,6 +2099,8 @@ func snapshotPerfvarPackFailures(path *fullTunPath) perfvarPackFailureCounts {
 	counts := perfvarPackFailureCounts{}
 	if path.devicePackSends != nil {
 		counts.deviceFailureCount = path.devicePackSends.workloadFailures.Load()
+		counts.deviceRecoveredAdmissionFailureCount =
+			path.devicePackSends.workloadRecoveredAdmissionFailures.Load()
 	}
 	if path.providerPackSends != nil {
 		counts.providerFailureCount = path.providerPackSends.workloadFailures.Load()
@@ -2847,7 +2850,10 @@ func TestPerfvarCarrierGenerationStableIgnoresJoinedBridgeBatch(t *testing.T) {
 		[][]byte{{1}},
 		0,
 		func(time.Duration) {},
-		func(packets [][]byte) int { return len(packets) },
+		func(packets [][]byte, accepted []bool) int {
+			accepted[0] = true
+			return len(packets)
+		},
 	); sentPacketCount != 1 {
 		t.Fatalf("sent packets=%d, want 1", sentPacketCount)
 	}

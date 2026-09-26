@@ -160,6 +160,8 @@ const (
 	perfvarFeatureNoFastPathSizeAware  = "no-fast-path-size-aware"
 	perfvarFeatureLaneRule             = "reliable-lane-proven-recovery"
 	perfvarFeatureNoLaneRule           = "no-reliable-lane-proven-recovery"
+	// Legacy established-UDP policy control for the datagram NoAck A/B.
+	perfvarFeatureUdpTransferAck = "udp-transfer-ack"
 )
 
 // P2P topology names resolve to physical adjacent stream carriers. Split
@@ -638,6 +640,7 @@ func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
 			perfvarFeatureNoFastPathSizeAware,
 			perfvarFeatureLaneRule,
 			perfvarFeatureNoLaneRule,
+			perfvarFeatureUdpTransferAck,
 		},
 		[]string{},
 	)

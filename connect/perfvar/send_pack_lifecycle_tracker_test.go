@@ -37,19 +37,22 @@ type sendPackLifecycleTracker struct {
 	// Terminal failure counts are monotonic measurement watermarks. Exact
 	// ownership joins accept a failed terminal; measured intervals compare
 	// their start and end watermarks separately.
-	failures                    atomic.Uint64
-	recoverableFailures         atomic.Uint64
-	started                     atomic.Uint64
-	publishing                  atomic.Int64
-	workloadFailures            atomic.Uint64
-	workloadRecoverableFailures atomic.Uint64
-	workloadDatagramFailures    atomic.Uint64
-	workloadStarted             atomic.Uint64
-	workloadPublishing          atomic.Int64
-	nextClient                  atomic.Uint64
-	failureLock                 sync.Mutex
-	failureSamples              []clientconnect.SendPackLifecycleObservation
-	workloadFailureSamples      []clientconnect.SendPackLifecycleObservation
+	failures                           atomic.Uint64
+	recoverableFailures                atomic.Uint64
+	started                            atomic.Uint64
+	publishing                         atomic.Int64
+	workloadFailures                   atomic.Uint64
+	workloadRecoverableFailures        atomic.Uint64
+	workloadRecoveredAdmissionFailures atomic.Uint64
+	workloadDatagramFailures           atomic.Uint64
+	workloadStarted                    atomic.Uint64
+	workloadPublishing                 atomic.Int64
+	healthProbeStarted                 atomic.Uint64
+	healthProbeFailures                atomic.Uint64
+	nextClient                         atomic.Uint64
+	failureLock                        sync.Mutex
+	failureSamples                     []clientconnect.SendPackLifecycleObservation
+	workloadFailureSamples             []clientconnect.SendPackLifecycleObservation
 
 	// Nil test barriers expose publication races without delaying production
 	// measurement callbacks.
@@ -111,6 +114,7 @@ type sendPackLifecycleEntry struct {
 	ackRequired         bool
 	messageType         protocol.MessageType
 	upstreamRecoverable bool
+	healthProbe         bool
 	phase               atomic.Uint32
 }
 
@@ -141,8 +145,8 @@ type sendPackLifecycleEvent struct {
 }
 
 // PERFVAR workloads enter transfer through these two TUN data directions.
-// Signaling, contract maintenance, and health probes are independent traffic:
-// they remain visible to diagnostics but cannot own an application boundary.
+// Signaling and contract maintenance use distinct message types. Qualification
+// probes use these same IP types and additionally require producer identity.
 func sendPackLifecycleWorkloadMessageType(messageType protocol.MessageType) bool {
 	switch messageType {
 	case protocol.MessageType_IpIpPacketToProvider,
@@ -151,6 +155,10 @@ func sendPackLifecycleWorkloadMessageType(messageType protocol.MessageType) bool
 	default:
 		return false
 	}
+}
+
+func sendPackLifecycleWorkload(observation clientconnect.SendPackLifecycleObservation) bool {
+	return !observation.HealthProbe && sendPackLifecycleWorkloadMessageType(observation.MessageType)
 }
 
 // newSendPackLifecycleTracker starts the single state owner.
@@ -180,7 +188,7 @@ func (self *sendPackLifecycleTracker) notify() {
 func (self *sendPackLifecycleTracker) newObserver() func(clientconnect.SendPackLifecycleObservation) {
 	clientInstance := self.nextClient.Add(1)
 	return func(observation clientconnect.SendPackLifecycleObservation) {
-		workload := sendPackLifecycleWorkloadMessageType(observation.MessageType)
+		workload := sendPackLifecycleWorkload(observation)
 		self.publishing.Add(1)
 		if workload {
 			self.workloadPublishing.Add(1)
@@ -194,6 +202,9 @@ func (self *sendPackLifecycleTracker) newObserver() func(clientconnect.SendPackL
 		}()
 		if observation.Phase == clientconnect.SendPackLifecyclePhaseStarted {
 			self.started.Add(1)
+			if observation.HealthProbe {
+				self.healthProbeStarted.Add(1)
+			}
 			if workload {
 				self.workloadStarted.Add(1)
 			}
@@ -308,7 +319,7 @@ func (self *sendPackLifecycleTracker) run() {
 				if entry.phase.Load() == uint32(clientconnect.SendPackLifecyclePhaseTerminal) {
 					delete(entries, key)
 				} else if event.boundaryScope == sendPackLifecycleBoundaryScopeAll ||
-					sendPackLifecycleWorkloadMessageType(entry.messageType) {
+					!entry.healthProbe && sendPackLifecycleWorkloadMessageType(entry.messageType) {
 					boundary.entries = append(boundary.entries, entry)
 				}
 			}
@@ -334,6 +345,7 @@ func (self *sendPackLifecycleTracker) run() {
 				ackRequired:         observation.AckRequired,
 				messageType:         observation.MessageType,
 				upstreamRecoverable: observation.UpstreamRecoverable,
+				healthProbe:         observation.HealthProbe,
 				phase:               atomic.Uint32{},
 			}
 		case clientconnect.SendPackLifecyclePhaseFirstRouteWrite:
@@ -354,9 +366,15 @@ func (self *sendPackLifecycleTracker) run() {
 				break
 			}
 			if observation.Err != nil {
+				var admissionErr *clientconnect.SendPackAdmissionError
+				recoveredAdmission := errors.As(observation.Err, &admissionErr) &&
+					admissionErr.RecoveredByOwner && !admissionErr.OwnerTrackingOverflow
 				recoverableAttempt := observation.UpstreamRecoverable &&
 					errors.Is(observation.Err, clientconnect.ErrSendPackNotAdmitted)
 				self.failures.Add(1)
+				if observation.HealthProbe {
+					self.healthProbeFailures.Add(1)
+				}
 				if recoverableAttempt {
 					self.recoverableFailures.Add(1)
 				}
@@ -364,8 +382,11 @@ func (self *sendPackLifecycleTracker) run() {
 				if len(self.failureSamples) < sendPackLifecycleFailureSampleCapacity {
 					self.failureSamples = append(self.failureSamples, observation)
 				}
-				if sendPackLifecycleWorkloadMessageType(observation.MessageType) {
+				if sendPackLifecycleWorkload(observation) {
 					self.workloadFailures.Add(1)
+					if recoveredAdmission {
+						self.workloadRecoveredAdmissionFailures.Add(1)
+					}
 					if recoverableAttempt {
 						self.workloadRecoverableFailures.Add(1)
 					}
@@ -435,6 +456,7 @@ func sameSendPackLifecycleIdentity(
 		entry.destinationId == observation.DestinationId &&
 		entry.ackRequired == observation.AckRequired &&
 		entry.messageType == observation.MessageType &&
+		entry.healthProbe == observation.HealthProbe &&
 		entry.upstreamRecoverable == observation.UpstreamRecoverable
 }
 

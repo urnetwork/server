@@ -716,18 +716,25 @@ func measurePerfvarFreshApplicationWorkload(
 		return perfvarCorrectnessObservation{}, err
 	}
 	observation, measureErr := fixture.measure(workload, direction, measure)
+	if measureErr != nil {
+		measureErr = fmt.Errorf(
+			"%w; device_packets=%+v provider_packets=%+v device_recovery=%+v provider_recovery=%+v bridge_batches=%+v",
+			measureErr,
+			observation.Carrier.DevicePacketStats,
+			observation.Carrier.ProviderPacketStats,
+			observation.Carrier.DeviceSendRecovery,
+			observation.Carrier.ProviderSendRecovery,
+			observation.Carrier.BridgeBatches,
+		)
+	}
 	if measureErr != nil && (route == fullTunRouteExchangeH3 || route == fullTunRouteExchangeAuto) {
 		measureErr = fmt.Errorf(
-			"%w; device_h3=%+v provider_h3=%+v device_receive=%+v provider_receive=%+v device_packets=%+v provider_packets=%+v device_recovery=%+v provider_recovery=%+v",
+			"%w; device_h3=%+v provider_h3=%+v device_receive=%+v provider_receive=%+v",
 			measureErr,
 			fixture.path.deviceH3DatagramStats.Snapshot(),
 			fixture.path.providerH3DatagramStats.Snapshot(),
 			fixture.path.devicePlatformReceiveStats.Snapshot(),
 			fixture.path.providerPlatformReceiveStats.Snapshot(),
-			observation.Carrier.DevicePacketStats,
-			observation.Carrier.ProviderPacketStats,
-			observation.Carrier.DeviceSendRecovery,
-			observation.Carrier.ProviderSendRecovery,
 		)
 	}
 	fixture.close()

@@ -278,7 +278,12 @@ type fullTunConstructionTestHooks struct {
 	configureProviderPlatformSettings func(*clientconnect.PlatformTransportSettings)
 	configureDeviceClientSettings     func(*clientconnect.ClientSettings)
 	configureDevicePlatformSettings   func(*clientconnect.PlatformTransportSettings)
+	configureApplicationTunSettings   func(*clientconnect.TunSettings)
 }
+
+// An explicitly selected diagnostic can reuse construction-only hooks without
+// attaching packet observers. Canonical execution leaves this factory nil.
+var newFullTunConstructionHooksForTest func() *fullTunConstructionTestHooks
 
 // The transaction owns the partial path until commit transfers every acquired
 // resource to the returned fullTunPath. Any return before commit rolls back the
@@ -3421,6 +3426,9 @@ func fullTunClientSettingsWithFeatures(
 		case perfvarFeatureLaneRule, perfvarFeatureNoLaneRule:
 			target, field = settings.SendBufferSettings, "ReliableLaneProvenRecovery"
 			value = feature == perfvarFeatureLaneRule
+		case perfvarFeatureUdpTransferAck:
+			// Applied to MultiClientSettings at its construction site below.
+			continue
 		default:
 			panic(fmt.Sprintf("unknown PERFVAR feature %q", feature))
 		}
@@ -3645,6 +3653,10 @@ func tryNewFullTunPathWithTopology(
 	resources tunResourceProfile,
 	p2pHopCount int,
 ) (*fullTunPath, error) {
+	var hooks *fullTunConstructionTestHooks
+	if newFullTunConstructionHooksForTest != nil {
+		hooks = newFullTunConstructionHooksForTest()
+	}
 	return tryNewFullTunPathWithTopologyHooks(
 		ctx,
 		t,
@@ -3653,7 +3665,7 @@ func tryNewFullTunPathWithTopology(
 		useExtender,
 		resources,
 		p2pHopCount,
-		nil,
+		hooks,
 	)
 }
 
@@ -3895,6 +3907,7 @@ func tryNewFullTunPathWithTopologyHooks(
 		providerPlatformBudget,
 	)
 	providerPlatformSettings.H3DatagramStats = path.providerH3DatagramStats
+	path.providerProgressTrace.configurePlatform(providerPlatformSettings)
 	if hooks != nil && hooks.configureProviderPlatformSettings != nil {
 		hooks.configureProviderPlatformSettings(providerPlatformSettings)
 	}
@@ -4048,6 +4061,7 @@ func tryNewFullTunPathWithTopologyHooks(
 			devicePlatformBudget,
 		)
 		settings.H3DatagramStats = path.deviceH3DatagramStats
+		path.deviceProgressTrace.configurePlatform(settings)
 		if hooks != nil && hooks.configureDevicePlatformSettings != nil {
 			hooks.configureDevicePlatformSettings(settings)
 		}
@@ -4121,6 +4135,9 @@ func tryNewFullTunPathWithTopologyHooks(
 	}
 	applyFullTunApplicationDialSettings(appSettings, readinessPath)
 	applyTunResourceProfile(appSettings, resources)
+	if hooks != nil && hooks.configureApplicationTunSettings != nil {
+		hooks.configureApplicationTunSettings(appSettings)
+	}
 	appTun, err := clientconnect.CreateTun(ctx, appSettings)
 	if err != nil {
 		return nil, fmt.Errorf("create application TUN: %w", err)
@@ -4131,6 +4148,10 @@ func tryNewFullTunPathWithTopologyHooks(
 	}
 	multiClientCtx, multiClientCancel := context.WithCancel(ctx)
 	path.multiClientCancel = multiClientCancel
+	multiClientSettings := fullTunMultiClientSettings(readinessPath)
+	if slices.Contains(resources.Features, perfvarFeatureUdpTransferAck) {
+		multiClientSettings.UdpTransferNoAck = false
+	}
 	multiClient := clientconnect.NewRemoteUserNatMultiClient(
 		multiClientCtx,
 		generator,
@@ -4143,7 +4164,7 @@ func tryNewFullTunPathWithTopologyHooks(
 			_, _ = appTun.Write(packet)
 		},
 		protocol.ProvideMode_Network,
-		fullTunMultiClientSettings(readinessPath),
+		multiClientSettings,
 	)
 	path.multiClient = multiClient
 	multiClient.SetReceivePacketsCallback(func(
@@ -4276,18 +4297,19 @@ func (self *fullTunPath) startBridge(
 	go func() {
 		defer self.bridgeWaitGroup.Done()
 		packets := make([][]byte, max(1, resources.BatchSize))
-		sendPacketBatch := func(packetBatch [][]byte) int {
-			return self.multiClient.SendPacketBatch(
+		sendPacketBatch := func(packetBatch [][]byte, accepted []bool) int {
+			return self.multiClient.SendPacketBatchWithResults(
 				clientconnect.SourceId(self.deviceClientId),
 				protocol.ProvideMode_Network,
 				packetBatch,
 				-1,
+				accepted,
 			)
 		}
 		if resources.SingularBridgeSend {
-			sendPacketBatch = func(packetBatch [][]byte) int {
+			sendPacketBatch = func(packetBatch [][]byte, accepted []bool) int {
 				sentPacketCount := 0
-				for _, packet := range packetBatch {
+				for packetIndex, packet := range packetBatch {
 					if self.multiClient.SendPacket(
 						clientconnect.SourceId(self.deviceClientId),
 						protocol.ProvideMode_Network,
@@ -4295,6 +4317,7 @@ func (self *fullTunPath) startBridge(
 						-1,
 					) {
 						sentPacketCount += 1
+						accepted[packetIndex] = true
 					} else {
 						clientconnect.MessagePoolReturn(packet)
 					}
@@ -5072,8 +5095,14 @@ func (self *fullTunPath) closeAndWait(ctx context.Context) error {
 			complete(fullTunConstructionResourceNoAckTracker, nil)
 		}
 	}
-	for _, tracker := range []*sendPackLifecycleTracker{self.devicePackSends, self.providerPackSends} {
+	for trackerIndex, tracker := range []*sendPackLifecycleTracker{self.devicePackSends, self.providerPackSends} {
 		if tracker != nil {
+			if self.t != nil && tracker.healthProbeStarted.Load() != 0 {
+				_, joined := tracker.boundary(ctx)
+				self.t.Logf("[perfvar] health-probe-packs tracker=%d started=%d failures=%d workload-failures=%d all-failures=%d joined=%t",
+					trackerIndex, tracker.healthProbeStarted.Load(), tracker.healthProbeFailures.Load(),
+					tracker.workloadFailures.Load(), tracker.failures.Load(), joined)
+			}
 			tracker.close()
 			complete(fullTunConstructionResourcePackTracker, nil)
 		}
@@ -5278,8 +5307,9 @@ func (self *fullTunPath) joinSourcePackCarrierBoundary(
 }
 
 // A measured interval rejects terminal failures newer than its exact
-// workload-local start unless the Pack's caller identified an enclosing TCP
-// state that retains the exact bytes or can regenerate the control packet.
+// workload-local start unless the exact native input owner proves successful
+// final admission after an enqueue refusal, or the provider's enclosing TCP
+// state retains the exact bytes or can regenerate the control packet.
 // Setup candidate failures remain before the floor; UDP outside an explicitly
 // lossy probe, public callbacks, and unclassified failures remain fatal.
 func (self *fullTunPath) validateMeasuredPackFailures(
@@ -5292,6 +5322,7 @@ func (self *fullTunPath) validateMeasuredPackFailures(
 	}
 	packFailures := carrierEnd.packFailures
 	if packFailures.deviceFailureCount < packFailureFloor.deviceFailureCount ||
+		packFailures.deviceRecoveredAdmissionFailureCount < packFailureFloor.deviceRecoveredAdmissionFailureCount ||
 		packFailures.providerFailureCount < packFailureFloor.providerFailureCount ||
 		packFailures.providerRecoverableFailureCount <
 			packFailureFloor.providerRecoverableFailureCount ||
@@ -5305,6 +5336,12 @@ func (self *fullTunPath) validateMeasuredPackFailures(
 	}
 	deviceFailureCount := packFailures.deviceFailureCount -
 		packFailureFloor.deviceFailureCount
+	deviceRecoveredAdmissionFailureCount := packFailures.deviceRecoveredAdmissionFailureCount -
+		packFailureFloor.deviceRecoveredAdmissionFailureCount
+	if deviceRecoveredAdmissionFailureCount > deviceFailureCount {
+		return fmt.Errorf("device recovered admission failures exceeded all failures: start=%+v end=%+v", *packFailureFloor, packFailures)
+	}
+	deviceUnrecoveredFailureCount := deviceFailureCount - deviceRecoveredAdmissionFailureCount
 	providerFailureCount := packFailures.providerFailureCount -
 		packFailureFloor.providerFailureCount
 	providerRecoverableFailureCount :=
@@ -5330,7 +5367,7 @@ func (self *fullTunPath) validateMeasuredPackFailures(
 	}
 	providerUnrecoverableFailureCount :=
 		providerFailureCount - providerAllowedFailureCount
-	if deviceFailureCount == 0 && providerUnrecoverableFailureCount == 0 {
+	if deviceUnrecoveredFailureCount == 0 && providerUnrecoverableFailureCount == 0 {
 		if !self.advanceActivePackFailureFloor(*packFailureFloor, packFailures) {
 			return fmt.Errorf(
 				"Pack failure floor changed while validating: start=%+v end=%+v",
@@ -5349,9 +5386,11 @@ func (self *fullTunPath) validateMeasuredPackFailures(
 		providerFailureSamples = self.providerPackSends.workloadFailureSnapshot()
 	}
 	return fmt.Errorf(
-		"measured Pack terminal failures device=%d provider=%d provider-recoverable=%d provider-datagram=%d allow-provider-datagram=%t provider-unrecoverable=%d start=%+v end=%+v lifetime-device-samples=%+v lifetime-provider-samples=%+v",
+		"measured Pack terminal failures device=%d provider=%d device-recovered-admission=%d device-unrecovered=%d provider-recoverable=%d provider-datagram=%d allow-provider-datagram=%t provider-unrecoverable=%d start=%+v end=%+v lifetime-device-samples=%+v lifetime-provider-samples=%+v",
 		deviceFailureCount,
 		providerFailureCount,
+		deviceRecoveredAdmissionFailureCount,
+		deviceUnrecoveredFailureCount,
 		providerRecoverableFailureCount,
 		providerDatagramFailureCount,
 		allowProviderDatagramFailures,

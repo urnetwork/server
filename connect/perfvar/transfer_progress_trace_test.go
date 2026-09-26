@@ -31,6 +31,9 @@ type perfvarProgressTrace struct {
 	dumped         sync.Once
 	observeForTest func(clientconnect.TransferProgressEvent)
 	dumpForTest    func(testing.TB, string)
+	// Opt-in diagnostics may attach an endpoint-local logger. Ordinary traces
+	// and all production settings keep this nil.
+	configureForTest func(*clientconnect.ClientSettings)
 }
 
 // The opt-in one-cell diagnostic installs this before constructing clients
@@ -54,6 +57,15 @@ func (self *perfvarProgressTrace) configure(settings *clientconnect.ClientSettin
 	settings.SendBufferSettings.ProgressObserver = self.observe
 	settings.ReceiveBufferSettings.ProgressObserver = self.observe
 	settings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.ProgressObserver = self.observe
+	if self.configureForTest != nil {
+		self.configureForTest(settings)
+	}
+}
+
+func (self *perfvarProgressTrace) configurePlatform(settings *clientconnect.PlatformTransportSettings) {
+	if self != nil {
+		settings.ProgressObserver = self.observe
+	}
 }
 
 func (self *perfvarProgressTrace) observe(event clientconnect.TransferProgressEvent) {
@@ -129,12 +141,20 @@ func TestPerfvarProgressTraceIsOptInBoundedAndNonblocking(t *testing.T) {
 	if newPerfvarProgressTrace() != nil {
 		t.Fatal("disabled trace allocated a ring")
 	}
+	platformSettings := clientconnect.DefaultPlatformTransportSettings()
+	var disabled *perfvarProgressTrace
+	disabled.configurePlatform(platformSettings)
+	if platformSettings.ProgressObserver != nil {
+		t.Fatal("disabled trace attached the H1 physical observer")
+	}
 	t.Setenv("CONNECT_PERFVAR_PROGRESS_TRACE", "1")
 	trace := newPerfvarProgressTrace()
 	settings := clientconnect.DefaultClientSettings()
 	trace.configure(settings)
+	trace.configurePlatform(platformSettings)
 	if settings.SendBufferSettings.ProgressObserver == nil || settings.ReceiveBufferSettings.ProgressObserver == nil ||
-		settings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.ProgressObserver == nil {
+		settings.StreamManagerSettings.StreamBufferSettings.P2pTransportSettings.ProgressObserver == nil ||
+		platformSettings.ProgressObserver == nil {
 		t.Fatal("trace did not attach all production boundaries")
 	}
 	for index := range perfvarProgressTraceCapacity + 7 {

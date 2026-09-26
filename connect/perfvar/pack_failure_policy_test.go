@@ -73,6 +73,35 @@ func TestValidateMeasuredPackFailuresAllowsOnlyProviderRecoverable(t *testing.T)
 			wantErrorPart: "device=1",
 		},
 		{
+			name: "device exact-input admission retry recovered",
+			end: perfvarPackFailureCounts{
+				deviceFailureCount:                   2,
+				deviceRecoveredAdmissionFailureCount: 1,
+				providerFailureCount:                 2,
+				providerRecoverableFailureCount:      1,
+			},
+		},
+		{
+			name: "recovered admission cannot mask another device failure",
+			end: perfvarPackFailureCounts{
+				deviceFailureCount:                   3,
+				deviceRecoveredAdmissionFailureCount: 1,
+				providerFailureCount:                 2,
+				providerRecoverableFailureCount:      1,
+			},
+			wantErrorPart: "device-unrecovered=1",
+		},
+		{
+			name: "device recovered admission counter exceeds all failures",
+			end: perfvarPackFailureCounts{
+				deviceFailureCount:                   1,
+				deviceRecoveredAdmissionFailureCount: 1,
+				providerFailureCount:                 2,
+				providerRecoverableFailureCount:      1,
+			},
+			wantErrorPart: "exceeded all failures",
+		},
+		{
 			name: "recoverable counter exceeds all failures",
 			end: perfvarPackFailureCounts{
 				deviceFailureCount:              1,
