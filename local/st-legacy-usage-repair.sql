@@ -97,7 +97,7 @@ BEGIN
     GET DIAGNOSTICS affected = ROW_COUNT;
     IF affected <> expected_count OR EXISTS (
         SELECT 1 FROM transfer_contract AS c JOIN st_legacy_usage_repair_expected AS e USING (contract_id)
-        WHERE c.provider_usage <> e.snapshot OR (to_jsonb(c)-'provider_usage') <> (e.original->'contract'-'provider_usage'))
+        WHERE c.provider_usage <> e.snapshot OR (to_jsonb(c)-'provider_usage') <> ((e.original->'contract')-'provider_usage'))
     THEN RAISE EXCEPTION 'legacy usage repair write differs from exact zero-credit cohort'; END IF;
 
     -- The same digest and debt persist in every repaired snapshot. This session
