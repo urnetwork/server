@@ -162,6 +162,23 @@ func TestProviderEgressLocationDueRejectsMissingSecret(t *testing.T) {
 	}
 }
 
+// Main's full shard selects 1000 providers and may request a bounded 5000-row
+// lookahead after it has already selected a batch. The API fallback of 500
+// silently clipped both phases; exercise the actual uncached startup reader.
+func TestProviderEgressDueConfiguredCapAdmitsFullLookup(t *testing.T) {
+	pop := server.Config.PushSimpleResource("provider_egress_due.yml", []byte("max_due_limit: 5000\n"))
+	defer pop()
+	if got := readMaxProviderEgressDueLimit(); got != 5000 {
+		t.Fatalf("configured due ceiling = %d, want 5000", got)
+	}
+	if got := min(1000, readMaxProviderEgressDueLimit()); got != 1000 {
+		t.Fatalf("full shard clipped to %d providers, want 1000", got)
+	}
+	if got := min(5000, readMaxProviderEgressDueLimit()); got != 5000 {
+		t.Fatalf("bounded successor lookahead clipped to %d providers, want 5000", got)
+	}
+}
+
 func TestProviderEgressLocationDueRejectsWrongSecret(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/network/provider-egress-due", nil)
 	req.Header.Set(operatorSecretHeader, "definitely-not-the-secret")

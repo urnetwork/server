@@ -172,7 +172,11 @@ const (
 // OPTIONAL, exactly like provider_bandwidth.yml and pro.yml: a deployment
 // without the file must not fail to boot, it falls back to the conservative
 // default.
-var maxProviderEgressDueLimit = sync.OnceValue(func() int {
+var maxProviderEgressDueLimit = sync.OnceValue(readMaxProviderEgressDueLimit)
+
+// The uncached reader gives synthetic configuration tests the same parsing
+// path that each API process memoizes at startup.
+func readMaxProviderEgressDueLimit() int {
 	resource, err := server.Config.SimpleResource("provider_egress_due.yml")
 	if err != nil {
 		glog.Infof(
@@ -195,7 +199,7 @@ var maxProviderEgressDueLimit = sync.OnceValue(func() int {
 	}
 	glog.Infof("[pegl]max due limit: %d from provider_egress_due.yml\n", y.MaxDueLimit)
 	return y.MaxDueLimit
-})
+}
 
 // providerEgressDueAge is how stale a stored probe must be before its provider
 // is offered up for re-probing. It is deliberately shorter than
