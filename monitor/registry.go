@@ -48,6 +48,7 @@ func NewSignals() []Signal {
 		NewPoolRetentionSignal(),
 		NewPgCpuSignal(),
 		NewEscrowAmplificationSignal(),
+		NewTaskLockChainSignal(),
 		NewRedisClusterSignal(),
 		NewRedisRatesSignal(),
 		NewLogErrorsSignal(),

@@ -1601,6 +1601,67 @@ Implementation convention: SIGNALS.md §1.3d (`escrow-amplification`) maps to
 `signal_escrow_amplification.go`, `signal_escrow_amplification_test.go`, and
 `NewEscrowAmplificationSignal` in `NewSignals`.
 
+### 1.3e Task queue writes blocked by idle transactions
+Probe: `task-lock-chain`
+
+Alert classes: `task-write-idle-blocker` and `task-lock-chain-unavailable`.
+
+Use the inventory-owned primary's direct read-only PostgreSQL source. Join
+current active, lock-waiting `INSERT INTO`, `UPDATE`, or `DELETE FROM`
+`pending_task` statements to that relation's write locks and their direct
+`pg_blocking_pids` edges. Measure the actual ungranted lock's `pg_locks.waitstart`,
+not `query_start`; a query may execute for a long time before it blocks. Capture
+the blocker's state, continuous idle time, transaction age, backend PID and
+backend start time. Resolve its address only to a configured inventory host;
+do not export SQL, task identifiers, customer identifiers or source addresses.
+An inventory host match is not proof of the owning service or generation.
+
+- HEALTHY: a complete fresh visible source has no edge meeting both duration
+  thresholds. An old transaction without a blocked task write is not a fault
+  in this signal, and a running blocker is not called an idle transaction.
+- WARN: both actual lock wait and blocker `idle in transaction` age are at
+  least 60 seconds, sustained for two one-minute observations.
+- PAGE: both durations are at least 300 seconds, with the same sustain gate.
+  This detects queue obstruction before the generic §1.3 30-minute threshold;
+  it does not lower that threshold or declare the entire task plane stopped.
+- UNAVAILABLE: a failed query, absent `pg_read_all_stats` visibility, source
+  clock older/newer than 30 seconds, malformed/missing lock timestamps, or a
+  disappearing/prepared-transaction blocker produces an independent warning.
+  The query counts all matching writers/edges but returns at most 32 edge
+  details. Truncated or raced coverage cannot clear an earlier fault; any
+  confirmed qualifying edge still alerts alongside the coverage warning.
+- FALSE-POSITIVE QUALIFIERS: intentional transactions can briefly obstruct
+  queue writes; the paired durations and sustain gate limit those cases. The
+  signal proves a blocked write, not a dead process or a specific lost task.
+  Task due age, expired timestamp leases and idle advisory-lock sessions are
+  not sufficient proof of worker death. Advisory-owner pings may remain live
+  while a task is running, and retries can be intentionally parked.
+- FALSE-NEGATIVE QUALIFIERS: only current direct edges are inspected. A deeper
+  lock chain, active blocker, non-task write, short interruption, nonstandard
+  quoted/CTE task-write SQL, or advisory owner without a blocked write needs
+  separate evidence. Statistics can race backend exit or state transitions;
+  complete observations do not prove that every maintenance task progresses.
+- ACTION: re-read the exact PID plus backend start time and current lock edge;
+  attest its socket, process/service generation and same-attempt task progress
+  before attributing ownership. Inspect the cancellation/commit path and
+  bounded goroutine evidence if the owner is known. Never mass-terminate,
+  restart PostgreSQL, or kill an advisory owner from age alone. Any precise
+  termination requires operator authorization and fresh identity evidence.
+- VERIFY: two complete fresh observations have no qualifying edge, then
+  independently verify closer checkpoints, durable completions and aged-open
+  drainage. A cleared lock alone does not demonstrate throughput recovery.
+
+The 2026-09-26 discriminator observed a task INSERT waiting on a transaction
+lock held by an idle transaction whose last statement updated task claim and
+release times. Both ages exceeded 15 minutes while the generic 30-minute idle
+threshold was still below band. The chain later cleared without intervention;
+neither the former edge nor a different idle advisory session established a
+stale service generation. This signal preserves that attribution boundary.
+
+Implementation convention: SIGNALS.md §1.3e (`task-lock-chain`) maps to
+`signal_task_lock_chain.go`, `signal_task_lock_chain_test.go`, and
+`NewTaskLockChainSignal` in `NewSignals`.
+
 ### 1.4 redis cluster state + per-node liveness
 Probe: `redis-cluster`
 
