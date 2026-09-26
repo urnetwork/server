@@ -1,0 +1,7 @@
+# built binaries
+/egress-prober
+cmd/egress-prober/egress-prober
+
+# go test artifacts
+*.test
+*.out
