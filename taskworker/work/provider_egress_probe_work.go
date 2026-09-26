@@ -1435,13 +1435,13 @@ func (self *providerEgressProbePass) run(
 	}
 
 	blackholeConcurrency := args.Blackhole.Concurrency
-	// Both lanes have independent worker pools. A peer-sized full batch must
-	// not serialize behind blackhole merely because the worker counts match.
+	// Both lanes have independent worker pools. A peer-sized or larger full
+	// batch must not serialize behind blackhole merely because it owns at
+	// least as many workers as the blackhole batch.
 	// Retain the bounded serial reservation for a smaller full selection with
 	// an equal-size worker pool; its lease/guard behavior is distinct.
 	parallel := 0 < len(blackholeDue) && 0 < len(fullDue) &&
-		(args.Full.Concurrency < args.Blackhole.Concurrency ||
-			(args.Full.Concurrency == args.Blackhole.Concurrency && args.Full.Limit >= args.Blackhole.Limit))
+		(args.Full.Concurrency < args.Blackhole.Concurrency || args.Full.Limit >= args.Blackhole.Limit)
 	applyBlackhole := func(outcome providerEgressBlackholeOutcome) {
 		result.BlackholeDue = outcome.due
 		result.Checked = outcome.checked
@@ -1778,7 +1778,8 @@ func runProviderEgressProbe(
 		runFull:      fleetprobe.RunFull,
 		refreshFleet: refreshEgressProbeFleetMetrics,
 	}
-	result, err := pass.run(ctx, args)
+	result, err := runWithProviderEgressFleetHeartbeat(ctx, providerEgressFleetHeartbeatInterval,
+		pass.refreshFleet, func() (*ProviderEgressProbeResult, error) { return pass.run(ctx, args) })
 	if result == nil {
 		return nil, err
 	}

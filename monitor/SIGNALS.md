@@ -6881,8 +6881,9 @@ An equal-worker geometry exposed a second, independent execution fault: when
 the Taskworker selected its serial fallback and waited for the blackhole drain
 before starting full work. This can make a large full pool appear idle even
 after the API returns its entire requested cohort. The corrected peer-sized
-geometry starts both independent lanes; synthetic held-worker tests require
-full work to start while blackhole workers remain blocked. Smaller full
+or larger full-selection geometry starts both independent lanes; synthetic
+held-worker tests require full work to start while blackhole workers remain
+blocked. Smaller full
 selections with an equal-size pool retain their bounded serial reservation.
 Distinguish this fault from API clipping with same-process `pass_due`,
 `full_progress` and blackhole in-flight observations, plus the active task
@@ -6890,6 +6891,18 @@ arguments. A nonzero full due gauge alone is not proof that full work started;
 conversely, a full lane may legitimately be idle while no full rows are due.
 The source correction requires a new Taskworker image and an observed
 post-rollout full-attempt increase before closing the throughput finding.
+
+Dashboard freshness is a separate observation boundary. A Taskworker fleet
+snapshot timestamp of zero, or older than 15 minutes, makes the guarded fleet
+panels correctly show no current data even when full and blackhole workers are
+running. The fleet exporter used to refresh only at pass retirement; a
+long-running or restarted shard could therefore leave the entire leading
+dashboard blank. Active shard owners now refresh the durable fleet snapshot
+on entry and every five minutes, with a per-process one-minute coalescing
+guard; completed or canceled owners stop refreshing. Compare timestamp age
+with same-process in-flight workers and `pass_due` before calling a blank
+fleet panel an empty provider fleet. This heartbeat does not make a stale
+health result fresh or count an in-flight probe as completed coverage.
 
 Full capacity must be conditioned on real latency rather than one request
 timeout. The 60-second warmup/open allowance, 50-load sample, three attempts

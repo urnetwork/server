@@ -91,12 +91,12 @@ type testProviderEgressParallelObservation struct {
 // Hold every initial worker, then release eight while the full owner remains
 // blocked. The full selected250 must already have started before that release;
 // the independent full owner does not subtract from the blackhole pool.
-func testProviderEgressParallelRun(t *testing.T, full bool, guarded bool, cancelRun bool, equalPools ...bool) testProviderEgressParallelObservation {
+func testProviderEgressParallelRun(t *testing.T, full bool, guarded bool, cancelRun bool, fullPoolLimit ...int) testProviderEgressParallelObservation {
 	t.Helper()
 	args := testProviderEgressParallelArgs(t)
-	if len(equalPools) != 0 && equalPools[0] {
-		args.Full.Limit = args.Blackhole.Limit
-		args.Full.Concurrency = args.Blackhole.Concurrency
+	if len(fullPoolLimit) != 0 {
+		args.Full.Limit = fullPoolLimit[0]
+		args.Full.Concurrency = fullPoolLimit[0]
 	}
 	var observation testProviderEgressParallelObservation
 	synctest.Test(t, func(t *testing.T) {
@@ -197,9 +197,16 @@ func testProviderEgressParallelRun(t *testing.T, full bool, guarded bool, cancel
 }
 
 func TestProviderEgressEqualIndependentPoolsStartTogether(t *testing.T) {
-	got := testProviderEgressParallelRun(t, true, false, false, true)
+	got := testProviderEgressParallelRun(t, true, false, false, 250)
 	if !got.fullStarted || got.initialStarted != 250 || got.err != nil || got.result == nil || got.result.Submitted != 8 {
 		t.Fatalf("equal-sized full and blackhole pools were serialized: full_started=%t blackhole_started=%d err=%v result=%+v", got.fullStarted, got.initialStarted, got.err, got.result)
+	}
+}
+
+func TestProviderEgressLargerFullPoolStartsAlongsideBlackhole(t *testing.T) {
+	got := testProviderEgressParallelRun(t, true, false, false, 500)
+	if !got.fullStarted || got.initialStarted != 250 || got.err != nil || got.result == nil || got.result.Submitted != 8 {
+		t.Fatalf("larger full pool was serialized: full_started=%t blackhole_started=%d err=%v result=%+v", got.fullStarted, got.initialStarted, got.err, got.result)
 	}
 }
 
