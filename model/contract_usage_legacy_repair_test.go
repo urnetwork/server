@@ -74,7 +74,6 @@ func TestStContractUsageLegacyRepairTransactionRetainsExactDebt(t *testing.T) {
 		for _, debt := range []int{0, 100} {
 			id := addStContractUsageSnapshotTestRow(t, ctx, start, nil)
 			server.Tx(ctx, func(tx server.PgTx) {
-				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET open=false WHERE contract_id=$1`, id))
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close(contract_id,party,used_transfer_byte_count,checkpoint) VALUES($1,'source',$2,false),($1,'destination',$2,false)`, id, debt))
 			})
 		}
@@ -116,7 +115,6 @@ func TestStContractUsageLegacyRepairTransactionRejectsChangedCohort(t *testing.T
 			id := addStContractUsageSnapshotTestRow(t, ctx, start, nil)
 			ids = append(ids, id)
 			server.Tx(ctx, func(tx server.PgTx) {
-				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET open=false WHERE contract_id=$1`, id))
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close(contract_id,party,used_transfer_byte_count,checkpoint) VALUES($1,'source',$2,false),($1,'destination',$2,false)`, id, debt))
 			})
 		}
