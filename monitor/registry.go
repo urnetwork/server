@@ -46,6 +46,8 @@ func NewSignals() []Signal {
 		NewPostgresStateSignal(),
 		NewPgCapacitySignal(),
 		NewPoolRetentionSignal(),
+		NewPgCpuSignal(),
+		NewEscrowAmplificationSignal(),
 		NewRedisClusterSignal(),
 		NewRedisRatesSignal(),
 		NewLogErrorsSignal(),

@@ -1466,6 +1466,141 @@ diagnosis for a young cohort while retaining the warning as an early reserve-
 pressure detector. The ten-minute §1.3a headroom gate remains the full closure
 criterion.
 
+### 1.3c PostgreSQL CPU consumption
+Probe: `pg-cpu`
+
+Alert classes: `pg-cpu-high` and `pg-cpu-unavailable`.
+
+Read CPU independently from the enabled `pg-primary` inventory host, with one
+bounded 20-second SSH command. The Linux/systemd command takes two observations
+five seconds apart of every active, running `postgresql@*.service` unit's
+`CPUAccounting`, `CPUUsageNSec`, and `InvocationID`, along with the remote short
+hostname, boot ID, monotonic uptime, wall time, and online logical CPU count.
+Parse and reduce these fields in Go. The host must match inventory, accounting
+must be enabled, and the active unit set, invocation IDs, boot, and capacity must
+agree across the pair. Reject missing/unsupported counters, decreases, malformed
+or duplicate fields, a collection span over 0.5 seconds, a sample interval
+outside 4–15 seconds, and wall-time evidence more than 30 seconds old or ahead.
+Do not emit raw unit incarnations, process arguments, query text, or customer
+identifiers.
+
+The rate is `sum(delta(CPUUsageNSec)) / 1e9 / elapsed_monotonic_seconds`, in
+consumed CPU cores. Divide by the host's online logical CPU count for its
+capacity fraction. Cgroup accounting includes CPU charged to backends that
+exit during the interval; a matched-PID `ps TIME` delta loses that work and
+its integer-second resolution also loses short backend bursts. Summed
+`pg_stat_statements.total_exec_time` is cumulative statement wall time,
+including waits; it is never a CPU counter.
+
+- HEALTHY: a complete fresh pair measures PostgreSQL below 25% of host logical
+  CPU capacity. Healthy CPU does not imply healthy database throughput.
+- WARN: at least 25% of host capacity in two consecutive one-minute
+  observations. This is an early investigation band, not a host-saturation
+  claim. It requires neither the 90% CPU band nor load/core >= 1.25 from §8.14.
+- PAGE: at least 85% in two consecutive one-minute observations.
+- UNAVAILABLE: `pg-cpu-unavailable` warns after two incomplete observations.
+  An inactive-only census, missing accounting, a restart/reset, stale data, or
+  a changed CPU count is unknown, not zero; it cannot resolve `pg-cpu-high`.
+- FALSE-POSITIVE QUALIFIERS: a legitimate query, vacuum, backup, or maintenance
+  workload can explain high consumption. The signal proves resource use, not
+  a query owner, wasted work, or degraded throughput. Aggregate active units
+  may include more than one PostgreSQL cluster on the same inventory host.
+- FALSE-NEGATIVE QUALIFIERS: short peaks between observations, restricted CPU
+  affinity or quotas below host capacity, and PostgreSQL outside the observed
+  systemd unit family need separate direct controls. No accounting source is
+  a coverage failure. A below-band counter cannot dismiss WAL/buffer waits,
+  write amplification, or other contention; retain §1.3d and §2.2 independently.
+- ACTION: correlate direct active-query/wait observations, bounded statement
+  call deltas, escrow fanout, and a healthy workload control. Distinguish useful
+  demand from repeated work, CPU quotas, and hardware limits before changing
+  code or capacity. Do not restart PostgreSQL, cancel work, or increase
+  concurrency merely to change the observed CPU number.
+- VERIFY: two fresh complete observations below the band, with the affected
+  query/contract path healthy and no recurrence of the independent fanout or
+  wait finding.
+
+The 2026-09-26 discriminator established the source and threshold boundary.
+The inventory-owned active PostgreSQL service had CPU accounting enabled and
+a numeric counter with a stable invocation. Direct cgroup intervals measured
+roughly 35.8–45.4 consumed cores on 96 logical CPUs (37–47%). A separate
+matched-PID `ps` interval reported only about 9.2 cores because it omitted
+departed backends. These are distinct windows, not an exact same-window
+reconciliation, but the service counter demonstrates substantial CPU below
+the former proposed 60% warning. The 25% early warning retains that observation
+without calling it host saturation. Independent statement deltas showed
+roughly 72,000 escrow inserts and 600 contract inserts per second; those call
+counts and WALInsert/BufferContent waits support the write-amplification
+boundary below, not conversion of SQL wall time into CPU.
+
+Implementation convention: SIGNALS.md §1.3c (`pg-cpu`) maps to
+`signal_pg_cpu.go`, `signal_pg_cpu_test.go`, and `NewPgCpuSignal` in `NewSignals`.
+
+### 1.3d Empty transfer-escrow write amplification
+Probe: `escrow-amplification`
+
+Alert classes: `escrow-zero-byte-writes` and
+`escrow-amplification-unavailable`.
+
+Read direct PostgreSQL through the inventory-owned primary path. Take at most
+100 newest `transfer_contract` primary-key candidates; use their server-set
+`create_time`, not ULID time, to retain only positive-byte escrow contracts
+created within two minutes and no more than 30 seconds in the future. Exclude
+zero-byte anchor contracts and no-escrow contracts. For each retained contract,
+the `(contract_id, balance_id)` primary-key prefix bounds a lateral escrow scan
+to 513 rows; the extra row signals that the 512-row coverage bound was reached.
+Return only aggregate candidate, contract, escrow, zero-row, affected-contract,
+capped, and missing-allocation counts plus the database observation time. A
+sample more than 30 seconds old or ahead, malformed counts, or a failed direct
+read is unavailable. Do not export production identifiers, SQL text, or query IDs.
+
+- HEALTHY: a complete sample contains at least one eligible fresh contract,
+  with no zero-byte escrow row. Multiple positive grants are valid.
+- WARN: any confirmed zero-byte escrow row on a positive-byte contract for
+  two consecutive one-minute observations.
+- PAGE: at least 100 confirmed zero-byte rows across at least 10 current
+  contracts for two consecutive observations. This uses confirmed counts,
+  so a capped sample can prove waste but cannot prove its absence.
+- UNAVAILABLE: failed/stale/malformed evidence, no eligible current workload,
+  capped scans, or missing allocations warn after two observations. These
+  conditions cannot resolve the fanout finding. A partial sample retains any
+  independently proved zero-row warning/page alongside the coverage warning.
+- MECHANISM: PostgreSQL's generated active flag can remain true when Redis
+  reservations leave a grant with zero available bytes. Adding that grant to
+  each positive-byte allocation writes an empty escrow row, refreshes its
+  Redis mirror, and contaminates the paid/unpaid priority blend. Numerous
+  exhausted grants turn each new contract into many useless index/WAL writes.
+- FALSE-POSITIVE QUALIFIERS: zero-byte anchors preserve valid legacy semantics
+  and are explicitly excluded; legitimate splitting among positive grants
+  does not trigger the signal. CPU usage is not a prerequisite or attribution.
+- FALSE-NEGATIVE QUALIFIERS: a bounded newest-candidate sample can miss older,
+  rare, or heavily interleaved affected traffic. Limits are explicit coverage
+  failures, not complete population counts. Low traffic with no current sample
+  remains unobserved rather than proving a prior incident recovered.
+- ACTION: inspect grant selection after reservation subtraction in
+  `createTransferEscrowInTx`, including origin and companion creation. Skip
+  exhausted grants for positive-byte requests and retain zero-byte anchors,
+  exact funding, paid priority, and mirror semantics. Use bounded statement
+  call deltas and direct WAL/buffer waits as discriminators. Do not delete
+  ledger rows, grant new balance, or restart the database to hide repeated work.
+- VERIFY: two complete fresh samples have zero empty rows on positive-byte
+  contracts; deterministic origin/companion tests pass; contract throughput
+  remains healthy; related WAL/buffer contention recedes.
+
+The 2026-09-26 bounded control found about 99% of a latest-contract escrow
+sample held zero bytes, with around 150 rows per affected contract and roughly
+one positive row per unaffected contract. The deterministic Go reproduction
+created two fully reserved grants ahead of a usable grant and observed three
+escrow rows instead of one. Adjacent controls reproduced contaminated priority
+and unnecessary Redis deadline refreshes in both origin and companion paths.
+Skipping exhausted grants for positive requests removes all three effects;
+zero-byte contract compatibility remains separately covered. CPU can remain
+below its own band during the same WAL/buffer contention, so §1.3c and this
+signal have independent sources and findings.
+
+Implementation convention: SIGNALS.md §1.3d (`escrow-amplification`) maps to
+`signal_escrow_amplification.go`, `signal_escrow_amplification_test.go`, and
+`NewEscrowAmplificationSignal` in `NewSignals`.
+
 ### 1.4 redis cluster state + per-node liveness
 Probe: `redis-cluster`
 
