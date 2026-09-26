@@ -132,6 +132,25 @@ blackhole:
 	}
 }
 
+func TestProviderEgressProbeFiveThousandFullWorkersFitOneShardLease(t *testing.T) {
+	settings := testProviderEgressProbeSettings(4)
+	settings.MaxTimeSeconds = 75 * 60
+	settings.Full.Limit = 5000
+	settings.Full.Concurrency = 5000
+	settings.Blackhole.Limit = 1000
+	settings.Blackhole.Concurrency = 1000
+	if err := settings.validate(); err != nil {
+		t.Fatalf("independent full and blackhole pools: %v", err)
+	}
+	args := providerEgressProbeArgs(settings, 0)
+	if !providerEgressFullSuccessorFits(args, settings.Full.Limit, time.Now().Add(75*time.Minute)) {
+		t.Fatal("parallel eight-provider publication cohorts did not fit the task lease")
+	}
+	if credit, err := providerEgressProbeCreditMinimum(args); err != nil || credit <= 0 {
+		t.Fatalf("probe credit geometry: credit=%d err=%v", credit, err)
+	}
+}
+
 func TestProviderEgressProbeSettingsRejectUnavailableOptionalResource(t *testing.T) {
 	t.Setenv("WARP_DOMAIN", "example.test")
 	configHome := t.TempDir()
