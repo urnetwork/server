@@ -195,8 +195,18 @@ func TestMigrationsSignalStagingLifecycleGuardRequiredAt720(t *testing.T) {
 			continue
 		}
 		alert := requireAlertClass(t, alerts, "migration-schema-drift")
-		if len(alerts) != 1 || !strings.Contains(alert.Markdown(), "competition staging lifecycle winner eligibility@v720") {
+		if !strings.Contains(alert.Markdown(), "competition staging lifecycle winner eligibility@v720") {
 			t.Fatalf("version 720 alerts=%+v, want lifecycle-guard drift", alerts)
+		}
+		// A newer append-only migration independently reports migration-behind;
+		// it must not hide the missing v720 lifecycle guard.
+		wantAlerts := 1
+		if server.MigrationCount() > version {
+			requireAlertClass(t, alerts, "migration-behind")
+			wantAlerts++
+		}
+		if len(alerts) != wantAlerts {
+			t.Fatalf("version 720 alerts=%+v, want %d", alerts, wantAlerts)
 		}
 	}
 }
