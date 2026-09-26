@@ -6865,7 +6865,7 @@ resource is missing or invalid, the API falls back to 500, silently clipping
 both a 1,000-provider full-worker request and the bounded successor lookahead
 above. The desired-config `egress-probe-api-due-cap` page requires the ceiling
 to cover `max(full.limit, 5000)`; a malformed/unreadable resource yields a
-separate unobservable page. Main's September 26 rollout added an explicit
+separate `egress-probe-api-due-cap-unobservable` page. Main's September 26 rollout added an explicit
 5,000 ceiling, and a direct authenticated request for 1,000 rows returned
 1,000 after all API blocks mounted it. This confirms admission capacity, not
 that the selected probes finished, published, or raised measured coverage.
@@ -7760,8 +7760,8 @@ do not identify a resource bottleneck or establish the independent Proxy
 capacity boundary.
 
 Implementation convention: SIGNALS.md §2.19 (`egress-coverage`) maps to
-`signal_egress_coverage.go`, `signal_egress_due_cap.go`, and their matching
-`_test.go` files. Synthetic
+`signal_egress_coverage.go` and `signal_egress_coverage_test.go`; its API-cap
+helper and tests are `egress_due_cap.go` and `egress_due_cap_test.go`. Synthetic
 tests cover a fully unarmed rollout, the schema-armed/tasks-absent deployment
 boundary, exact valid/ready/non-partial migration-657 index coherence, additive
 index-unarmed plus capacity visibility, a missing shard, complete execution-

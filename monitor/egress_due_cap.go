@@ -7,7 +7,9 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// SIGNALS.md §2.19: the API due-list ceiling is independent of Taskworker's
+// SIGNALS.md §2.19: this helper belongs to the registered egress-coverage
+// signal; it is not an independently registered probe. The API due-list
+// ceiling is independent of Taskworker's
 // selected full-worker pool. The API fallback is 500, while Taskworker's
 // bounded successor lookahead may request up to 5000 rows. A smaller API cap
 // silently returns a partial batch and leaves otherwise idle full workers.
