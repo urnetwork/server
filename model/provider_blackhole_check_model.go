@@ -518,13 +518,13 @@ func CountCurrentProviderBlackholeChecks(ctx context.Context) int {
 // holding a Public provide key. A provider that cannot accept a contract cannot
 // be checked, and offering it would burn a slot on a tunnel that will be refused.
 //
-// Every row whose next_due_at has passed comes before every never-checked
-// provider, oldest due first (connect/GEOMAP.md §11.3). A failing provider's
-// retry is due a backoff step after its failure, so a failing provider is
-// confirmed or cleared on schedule while the prober runs at all: first checks
-// of newly connected providers cannot push a retry out of the batch, and a
-// retry queue cannot starve. A row written before next_due_at existed is due
-// ProviderBlackholeCheckDueAge after its check, as it always was.
+// Existing due rows and never-checked providers share admission 1:1 while
+// both have work; unused share goes to the other class. Existing rows retain
+// oldest-due order and lead an odd/one-slot response. First checks retain id
+// order. Absolute retry priority could indefinitely exclude first checks when
+// existing rows became due faster than the sweep completed them. The share
+// preserves failed-provider recovery without promising an impossible deadline
+// under insufficient capacity (connect/GEOMAP.md §11.3).
 //
 // There is no attempt backoff here beyond next_due_at. The check is cheap and
 // the whole design is that it runs over everything, so a provider that failed
@@ -538,80 +538,14 @@ func GetProviderBlackholeCheckDue(
 	shardCount int,
 ) []server.Id {
 	clientIds := []server.Id{}
-
+	// Both bounded heads share one request budget, including pool acquisition.
+	// Preserve an earlier caller deadline; leave room under the prober's 30s
+	// control-plane request for serialization/transport of the bounded result.
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			fmt.Sprintf(
-				`
-				SELECT
-					network_client_location_reliability.client_id
-				FROM network_client_location_reliability
-
-				INNER JOIN network_client ON
-					network_client.client_id = network_client_location_reliability.client_id
-
-				LEFT JOIN provider_blackhole_check ON
-					provider_blackhole_check.client_id = network_client_location_reliability.client_id
-
-				WHERE
-					network_client.active = true AND
-					network_client.source_client_id IS NULL AND
-					network_client_location_reliability.connected = true AND
-					network_client_location_reliability.valid = true AND
-					EXISTS (
-						SELECT 1 FROM provide_key
-						WHERE
-							provide_key.client_id = network_client_location_reliability.client_id AND
-							provide_key.provide_mode = $1
-					) AND
-					(
-						provider_blackhole_check.client_id IS NULL OR
-						COALESCE(
-							provider_blackhole_check.next_due_at,
-							provider_blackhole_check.checked_at + interval '%[1]d seconds'
-						) <= $2
-					) AND
-					-- the same shard partition the egress-location queue uses.
-					-- hashtext returns a SIGNED int32 and postgres '%%' keeps the sign
-					-- of the dividend, so a bare hashtext(...) %% n = i never matches
-					-- the negative half of the hash space and roughly half the fleet
-					-- would never be checked. The extra (+ n) %% n normalises into
-					-- [0, n). $4 <= 1 short-circuits to the unsharded behaviour.
-					(
-						$4 <= 1 OR
-						((hashtext(network_client_location_reliability.client_id::text) %% $4) + $4) %% $4 = $5
-					)
-
-				-- every due row before every first check, oldest due first;
-				-- client_id breaks the tie so batch composition is deterministic
-				-- rather than plan-dependent
-				ORDER BY
-					provider_blackhole_check.client_id IS NULL ASC,
-					COALESCE(
-						provider_blackhole_check.next_due_at,
-						provider_blackhole_check.checked_at + interval '%[1]d seconds'
-					) ASC,
-					network_client_location_reliability.client_id ASC
-				LIMIT $3
-				`,
-				int64(ProviderBlackholeCheckDueAge/time.Second),
-			),
-			ProvideModePublic,
-			now.UTC(),
-			limit,
-			shardCount,
-			shardIndex,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientId server.Id
-				server.Raise(result.Scan(&clientId))
-				clientIds = append(clientIds, clientId)
-			}
-		})
+		clientIds = getProviderBlackholeCheckDueWithQuery(ctx, conn, now, limit, shardIndex, shardCount)
 	})
-
 	return clientIds
 }
 

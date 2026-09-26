@@ -26,9 +26,9 @@ const (
 )
 
 // ProviderBlackholeCheckDue serves the sweep: which providers to check next --
-// every row whose next check has come due, oldest due first, before any
-// provider never checked, so a failing provider's retry is never pushed out of
-// a batch (connect/GEOMAP.md §11.3) -- each with the place it is published
+// oldest-due existing checks interleaved with first checks, lending unused
+// share to the other class and retaining retry priority for one slot
+// (connect/GEOMAP.md §11.3) -- each with the place it is published
 // under, so the check draws only connectivity destinations compatible with it.
 // The body is ProviderEgressLocationDueResult, the full probe's shape.
 //
