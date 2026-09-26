@@ -1400,6 +1400,8 @@ type perfvarCarrierBoundary struct {
 	providerP2P                    clientconnect.P2pDataPlaneStatsSnapshot
 	devicePacketStats              perfvarPacketStatsObservation
 	providerPacketStats            perfvarPacketStatsObservation
+	appTCP                         perfvarAppTCPBoundary
+	providerCongestionDrops        perfvarProviderCongestionBoundary
 	devicePlatformReceive          clientconnect.PlatformTransportReceiveStatsSnapshot
 	providerPlatformReceive        clientconnect.PlatformTransportReceiveStatsSnapshot
 	deviceH3Datagrams              clientconnect.H3DatagramStatsSnapshot
@@ -2126,6 +2128,8 @@ func snapshotPerfvarCarrier(path *fullTunPath) perfvarCarrierBoundary {
 		providerP2P:             path.providerStats.Snapshot(),
 		devicePacketStats:       snapshotPerfvarDevicePacketStats(path),
 		providerPacketStats:     snapshotPerfvarProviderPacketStats(path),
+		appTCP:                  snapshotPerfvarAppTCP(path.appTun),
+		providerCongestionDrops: snapshotPerfvarProviderCongestion(path.providerRemoteNat),
 		devicePlatformReceive:   path.devicePlatformReceiveStats.Snapshot(),
 		providerPlatformReceive: path.providerPlatformReceiveStats.Snapshot(),
 		deviceH3Datagrams:       snapshotPerfvarH3Datagrams(path.deviceH3DatagramStats),
@@ -2207,6 +2211,8 @@ func beginPerfvarCarrierMeasurementNow(
 		providerP2P:             path.providerStats.Snapshot(),
 		devicePacketStats:       snapshotPerfvarDevicePacketStats(path),
 		providerPacketStats:     snapshotPerfvarProviderPacketStats(path),
+		appTCP:                  snapshotPerfvarAppTCP(path.appTun),
+		providerCongestionDrops: snapshotPerfvarProviderCongestion(path.providerRemoteNat),
 		devicePlatformReceive:   path.devicePlatformReceiveStats.Snapshot(),
 		providerPlatformReceive: path.providerPlatformReceiveStats.Snapshot(),
 		deviceH3Datagrams:       snapshotPerfvarH3Datagrams(path.deviceH3DatagramStats),
@@ -3019,6 +3025,8 @@ func observePerfvarCarrierAt(
 		ProviderP2P:             provider,
 		DevicePacketStats:       devicePacketStats,
 		ProviderPacketStats:     providerPacketStats,
+		AppTCP:                  subtractPerfvarAppTCP(before.appTCP, after.appTCP),
+		ProviderCongestionDrops: subtractPerfvarProviderCongestion(before.providerCongestionDrops, after.providerCongestionDrops),
 		DevicePlatformReceive:   devicePlatformReceive,
 		ProviderPlatformReceive: providerPlatformReceive,
 		DeviceH3Datagrams:       deviceH3Datagrams,

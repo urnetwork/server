@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	perfvarSchemaVersion = 13
+	perfvarSchemaVersion = 14
 	// Mixed routes default to a bounded payload: a collapsed transfer reaches
 	// its directional deadline inside the run timeout, a healthy one still
 	// spans many relay bandwidth-delay products.
@@ -223,6 +223,8 @@ type perfvarCarrierObservation struct {
 	ProviderP2P                    clientconnect.P2pDataPlaneStatsSnapshot             `json:"provider_p2p"`
 	DevicePacketStats              perfvarPacketStatsObservation                       `json:"device_packet_stats"`
 	ProviderPacketStats            perfvarPacketStatsObservation                       `json:"provider_packet_stats"`
+	AppTCP                         perfvarAppTCPObservation                            `json:"app_tcp"`
+	ProviderCongestionDrops        perfvarProviderCongestionObservation                `json:"provider_congestion_drops"`
 	DevicePlatformReceive          clientconnect.PlatformTransportReceiveStatsSnapshot `json:"device_platform_receive"`
 	ProviderPlatformReceive        clientconnect.PlatformTransportReceiveStatsSnapshot `json:"provider_platform_receive"`
 	DeviceH3Datagrams              h3FullTunDatagramObservation                        `json:"device_h3_datagrams"`

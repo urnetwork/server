@@ -870,7 +870,7 @@ original aspirational two-times headroom target.
 
 ## Result format
 
-Schema version 12 emits one compact JSON record per run and one aggregate JSON
+Schema version 14 emits one compact JSON record per run and one aggregate JSON
 record per scenario. Every line begins with `[perfvar]` so records can be
 extracted from `go test -v` output.
 
@@ -884,6 +884,17 @@ but not yet physically written at measurement completion from being
 misclassified as a successful wire retry. Schema 12 records the resolved
 `application_mtu` independently from the physical profile and adds
 generation-safe device/provider direct-carrier affinity observations.
+
+Schema 14 adds `carrier.app_tcp` and `carrier.provider_congestion_drops`, read
+only at the existing frozen workload boundaries. App TCP reports gVisor inner
+endpoint sent/received segments, retransmits, timeouts, fast retransmits, and
+slow-start retransmits across all app connections, including loaded probes.
+It does not observe the host egress peer's TCP retransmits or H1 outer TCP.
+Provider congestion reports interval ingress NAT, return queue, and return send
+drop packet/byte counts. Both observations expose availability and endpoint
+generation changes; unrelated endpoint lifetimes are never subtracted. These
+fields are diagnostics and do not change gates or boundary readiness. The new
+instrument schema requires a fresh A/A study under `RUN-MAIN.md`.
 
 A run record includes:
 
