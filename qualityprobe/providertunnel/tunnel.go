@@ -626,21 +626,14 @@ func httpClientOverDialerWithHosts(dial dialContextFunc, pins map[string][]strin
 			return nil, &providerHttpStageError{stage: "policy", err: fmt.Errorf("%w: %s", ErrPinHostUnknown, host)}
 		}
 
-		// DialTLSContext owns both connection establishment and TLS. net/http
-		// cannot emit these trace phases for a custom TLS dialer, so publish
-		// them here for bounded request-progress diagnostics. The provider dial
-		// may include DNS; ConnectStart therefore identifies the whole custom
-		// dial boundary, not a proven socket-only interval.
+		// The tunnel reports its own target DNS/TCP boundaries; its private DoH
+		// HTTP transports cannot masquerade as the requested connection.
 		trace := httptrace.ContextClientTrace(ctx)
-		if trace != nil && trace.ConnectStart != nil {
-			trace.ConnectStart(network, addr)
-		}
+		ctx, dialTrace := traceProviderHttpDial(ctx, network, addr)
 		raw, err := dial(ctx, network, addr)
-		if trace != nil && trace.ConnectDone != nil {
-			trace.ConnectDone(network, addr, err)
-		}
+		dialStage := dialTrace.finish(err)
 		if err != nil {
-			return nil, &providerHttpStageError{stage: "dial_dns_or_socket", err: err}
+			return nil, &providerHttpStageError{stage: dialStage, err: err}
 		}
 
 		handshakeCtx := ctx

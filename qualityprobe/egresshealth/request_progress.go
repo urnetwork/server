@@ -8,9 +8,9 @@ import (
 )
 
 // requestProgress is local diagnostic evidence for a generic net/http
-// deadline. It cannot identify DNS versus socket versus TLS while obtaining a
-// connection, but it does distinguish that phase from request write and
-// response wait. Typed provider-tunnel stage errors remain authoritative.
+// deadline. The provider tunnel reports its target DNS/TCP/TLS boundaries;
+// uninstrumented clients retain the generic connection class. Typed provider
+// stage errors remain authoritative.
 type requestProgress struct{ phase atomic.Uint32 }
 
 const (
@@ -37,9 +37,13 @@ func (self *requestProgress) advance(phase uint32) {
 func traceRequestProgress(ctx context.Context) (context.Context, *requestProgress) {
 	progress := &requestProgress{}
 	trace := &httptrace.ClientTrace{
-		GetConn:      func(string) { progress.advance(requestPhaseConnect) },
-		DNSStart:     func(httptrace.DNSStartInfo) { progress.advance(requestPhaseDNS) },
-		DNSDone:      func(httptrace.DNSDoneInfo) { progress.advance(requestPhaseAfterDNS) },
+		GetConn:  func(string) { progress.advance(requestPhaseConnect) },
+		DNSStart: func(httptrace.DNSStartInfo) { progress.advance(requestPhaseDNS) },
+		DNSDone: func(info httptrace.DNSDoneInfo) {
+			if info.Err == nil {
+				progress.advance(requestPhaseAfterDNS)
+			}
+		},
 		ConnectStart: func(string, string) { progress.advance(requestPhaseDial) },
 		ConnectDone: func(_, _ string, err error) {
 			if err == nil {

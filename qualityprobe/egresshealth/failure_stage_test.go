@@ -43,6 +43,38 @@ func TestFailedLoadStageSurvivesHttpWrappingWithoutLeaking(t *testing.T) {
 	}
 }
 
+// New fixed tunnel stages retain ordinary failed-load semantics and stay out
+// of ingestion JSON, exactly like the existing combined diagnostic class.
+func TestFailedLoadTargetDialStagesStayLocal(t *testing.T) {
+	for _, stage := range []string{"dial_dns", "dial_tcp"} {
+		client := &http.Client{Transport: echoStageRoundTripper(func(*http.Request) (*http.Response, error) {
+			return nil, syntheticLoadStageError{stage: stage}
+		})}
+		result := fetch(context.Background(), client,
+			Destination{Name: "synthetic", Class: ClassSite, Url: "https://target.example/check"},
+			time.Second, DefaultRequestProfile(), time.Now)
+		if result.Ok || result.NotMeasured || result.FailureStage != stage || (&Result{Checks: []CheckResult{result}}).FailureStageSummary() != stage+":1" {
+			t.Errorf("target stage changed measured outcome or lost bounded evidence: %+v", result)
+		}
+		encoded, err := json.Marshal(result)
+		if err != nil || strings.Contains(string(encoded), stage) {
+			t.Error("local target stage escaped into ingestion JSON")
+		}
+	}
+}
+
+// Completion of a failed DNS lookup is not positive evidence of an answer.
+func TestRequestTimeoutAfterFailedDnsStaysDns(t *testing.T) {
+	ctx, progress := traceRequestProgress(context.Background())
+	trace := httptrace.ContextClientTrace(ctx)
+	trace.GetConn("target.example")
+	trace.DNSStart(httptrace.DNSStartInfo{})
+	trace.DNSDone(httptrace.DNSDoneInfo{Err: context.DeadlineExceeded})
+	if stage := progress.timeoutStage(); stage != "request_dns_timeout" {
+		t.Errorf("failed DNS completion invented later progress: %s", stage)
+	}
+}
+
 func TestFailureStageSummaryBoundsUntrustedStages(t *testing.T) {
 	var nilRun *Result
 	if got := nilRun.FailureStageSummary(); got != "" {

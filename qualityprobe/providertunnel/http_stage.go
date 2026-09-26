@@ -13,7 +13,8 @@ func (self *providerHttpStageError) Error() string { return self.err.Error() }
 func (self *providerHttpStageError) Unwrap() error { return self.err }
 
 // Returns only an owning phase, never the destination or a free-form error.
-// A dial includes private DNS and TCP races; this layer cannot split them.
+// Instrumented tunnel dials split target DNS from TCP. Other custom dialers
+// retain the combined class; no destination appears in diagnostic metadata.
 func (self *providerHttpStageError) ProviderHttpStage() string { return self.stage }
 
 // net/http's URL error queries Timeout directly, not through errors.As.

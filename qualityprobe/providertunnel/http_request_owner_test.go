@@ -233,10 +233,9 @@ func TestProbeHttpRequestOwnerHealthConcurrency(t *testing.T) {
 			}
 			for _, check := range got.result.Checks {
 				// net/http races the request deadline with the owned dial's
-				// returned error. Either result must retain the custom dial phase:
-				// the typed dial stage wins when it arrives first, and the trace
-				// covers a generic request deadline when it does not.
-				if check.FailureStage != "request_dial_timeout" && check.FailureStage != "dial_dns_or_socket" {
+				// returned error. This synthetic dialer supplies no target phase,
+				// so a generic deadline must not pretend to be socket-only.
+				if check.FailureStage != "request_connect_timeout" && check.FailureStage != "dial_dns_or_socket" {
 					t.Fatalf("blocked tunnel dial stage = %q, want a custom-dial class", check.FailureStage)
 				}
 			}
