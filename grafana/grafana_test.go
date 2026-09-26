@@ -81,6 +81,33 @@ type testPanel struct {
 	Targets []testTarget `json:"targets"`
 }
 
+func TestHostMetricsDashboardShowsTotalMemoryBesideCPUCores(t *testing.T) {
+	dashboard := readTestDashboard(t, "host-metrics.json")
+	cpu := dashboardPanelById(dashboard, 5)
+	memory := dashboardPanelById(dashboard, 14)
+	if cpu == nil || memory == nil {
+		t.Fatal("host capacity stats are missing")
+	}
+	if cpu.Title != "total cpu cores" || memory.Title != "total memory" || memory.Type != "stat" {
+		t.Fatalf("capacity panel titles/types: cpu=%q memory=%q type=%q", cpu.Title, memory.Title, memory.Type)
+	}
+	if memory.FieldConfig.Defaults.Unit != "bytes" || len(memory.Targets) != 1 ||
+		memory.Targets[0].Expr != `sum(max by (host) (node_memory_MemTotal_bytes{env="$env"}))` {
+		t.Fatalf("total memory has wrong unit or host-deduplicated source: unit=%q targets=%+v", memory.FieldConfig.Defaults.Unit, memory.Targets)
+	}
+	if cpu.GridPos.Y != memory.GridPos.Y || cpu.GridPos.X+cpu.GridPos.W != memory.GridPos.X ||
+		memory.GridPos.X+memory.GridPos.W != 24 {
+		t.Fatalf("capacity stats do not share the fleet row: cpu=%+v memory=%+v", cpu.GridPos, memory.GridPos)
+	}
+}
+
+func TestEgressDashboardUsesProviderQualityName(t *testing.T) {
+	dashboard := readTestDashboard(t, "egress-probes.json")
+	if dashboard.Title != "urnetwork / provider quality probes" {
+		t.Fatalf("dashboard title = %q", dashboard.Title)
+	}
+}
+
 func TestEgressProbeDashboardUsesPopulationAwareOutcomeClasses(t *testing.T) {
 	dashboard := readTestDashboard(t, "egress-probes.json")
 	failures := dashboardPanelById(dashboard, 8)

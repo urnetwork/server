@@ -1,6 +1,6 @@
 {
   "uid": "urnetwork-egress-probes",
-  "title": "urnetwork / provider egress probes",
+  "title": "urnetwork / provider quality probes",
   "tags": [
     "urnetwork",
     "probes",
