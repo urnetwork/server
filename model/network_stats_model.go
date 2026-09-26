@@ -282,6 +282,37 @@ func Testing_ResetContractTimeStampGate() {
 // index exactly ($1 <= contract_time implies contract_time IS NOT NULL) so
 // the scan is a bounded ordered range, never a full pass over the hot
 // table.
+// CountTopLevelClientsWithContractInEpoch is the feed's `users` definition
+// (CountTopLevelClientsWithContractSince) applied to one settlement epoch
+// window [startTime, endTime): distinct top-level client identities created
+// before the window closed that had contract usage at or after it opened. It
+// is the attested `total_users` of the epoch's signed payout artifact.
+// contract_time is a last-seen marker, so the count is exact when taken at the
+// epoch close (the StEpochClose task) and, recomputed later, can additionally
+// include only clients that were active again after the close; it never counts
+// a client created after the window.
+func CountTopLevelClientsWithContractInEpoch(ctx context.Context, startTime time.Time, endTime time.Time) int64 {
+	var count int64
+	server.ReplicaDb(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+                SELECT COUNT(client_id)
+                FROM network_client
+                WHERE active = true AND source_client_id IS NULL AND $1 <= contract_time AND create_time < $2
+            `,
+			startTime,
+			endTime,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&count))
+			}
+		})
+	})
+	return count
+}
+
 func CountTopLevelClientsWithContractSince(ctx context.Context, startTime time.Time) int64 {
 	var count int64
 	server.ReplicaDb(ctx, func(conn server.PgConn) {

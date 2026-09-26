@@ -407,3 +407,76 @@ func TestWalletAuthChallengeCreateBittensorValidAddress(t *testing.T) {
 		connect.AssertEqual(t, result.Error, nil)
 	})
 }
+
+// The miner CLI's `--message --signature` path: the challenge is issued pinned
+// to the coldkey (`provider wallet challenge <coldkey_ss58>`), signed elsewhere
+// over the RAW text (btcli style, no <Bytes> wrapper) and posted 0x-prefixed.
+// UseWalletAuthChallenge must accept it, bind it to the pinned address, and
+// refuse a second use.
+func TestWalletAuthChallengeBittensorRawSignatureCliFormat(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		seedBytes, err := hex.DecodeString("e5be9a5092b81bca64be81d212e7f2f9eba183bb7a90954f7b76361f6edb5c0a")
+		connect.AssertEqual(t, err, nil)
+		var seed [32]byte
+		copy(seed[:], seedBytes)
+		miniSecret, err := schnorrkel.NewMiniSecretKeyFromRaw(seed)
+		connect.AssertEqual(t, err, nil)
+		secretKey := miniSecret.ExpandEd25519()
+		address := testingSS58Encode(42, miniSecret.Public().Encode())
+		connect.AssertEqual(t, address, "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY")
+
+		blockchain := "TAO"
+		result := CreateWalletAuthChallenge(WalletAuthChallengeArgs{
+			Blockchain:    &blockchain,
+			WalletAddress: &address,
+		}, ctx)
+		connect.AssertEqual(t, result.Error, nil)
+
+		signature, err := secretKey.Sign(schnorrkel.NewSigningContext([]byte("substrate"), []byte(result.MessageTemplate)))
+		connect.AssertEqual(t, err, nil)
+		signatureBytes := signature.Encode()
+		signatureHex := "0x" + hex.EncodeToString(signatureBytes[:])
+
+		// another coldkey cannot use a challenge pinned to this one, even with
+		// a valid signature of its own
+		otherSecret, otherPublic, err := schnorrkel.GenerateKeypair()
+		connect.AssertEqual(t, err, nil)
+		otherSignature, err := otherSecret.Sign(schnorrkel.NewSigningContext([]byte("substrate"), []byte(result.MessageTemplate)))
+		connect.AssertEqual(t, err, nil)
+		otherSignatureBytes := otherSignature.Encode()
+		otherResult, err := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+			Blockchain: "TAO",
+			PublicKey:  testingSS58Encode(42, otherPublic.Encode()),
+			Message:    result.MessageTemplate,
+			Signature:  hex.EncodeToString(otherSignatureBytes[:]),
+		}, ctx)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, otherResult.Valid, false)
+		connect.AssertEqual(t, strings.HasPrefix(otherResult.Error.Message, "400 challenge wallet address mismatch"), true)
+
+		useResult, err := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+			Blockchain: "TAO",
+			PublicKey:  address,
+			Message:    result.MessageTemplate,
+			Signature:  signatureHex,
+		}, ctx)
+		connect.AssertEqual(t, err, nil)
+		if useResult.Error != nil {
+			t.Logf("UseWalletAuthChallenge error: %s", useResult.Error.Message)
+		}
+		connect.AssertEqual(t, useResult.Valid, true)
+
+		// single use
+		replay, err := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+			Blockchain: "TAO",
+			PublicKey:  address,
+			Message:    result.MessageTemplate,
+			Signature:  signatureHex,
+		}, ctx)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, replay.Valid, false)
+		connect.AssertEqual(t, strings.HasPrefix(replay.Error.Message, "403 "), true)
+	})
+}

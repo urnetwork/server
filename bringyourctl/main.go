@@ -2352,6 +2352,27 @@ func stStatus(opts docopt.Opts) {
 	fmt.Printf("  pool total:      %s rao\n", pool.PoolTotalRao)
 	fmt.Printf("  claimed:         %s rao\n", pool.ClaimedRao)
 
+	// what StDeposit sizes for the open epoch: the previous epoch's signed
+	// artifact totals at the conviction-snapshot tier, or the zero-price mode
+	if sizing, err := controller.StGetDepositSizing(ctx, state.PendingEpoch); err != nil {
+		fmt.Printf("epoch %d deposit sizing: unavailable (%s)\n", state.PendingEpoch, err)
+	} else {
+		fmt.Printf("epoch %d deposit sizing:\n", state.PendingEpoch)
+		if sizing.ZeroPrice {
+			fmt.Printf("  price:           zero (no demand deposit is required; nothing is sent)\n")
+		} else if sizing.Epoch == 0 {
+			fmt.Printf("  price:           epoch 0 has no prior usage artifact; nothing is sent\n")
+		} else {
+			fmt.Printf("  tier:            conviction >= %d rao: %d rao/GiB, %d rao/user, over %d\n", sizing.Tier.MinConvictionRao, sizing.Tier.RateNumeratorRaoPerGiB, sizing.Tier.RateNumeratorRaoPerUser, sizing.Tier.RateDenominator)
+		}
+		fmt.Printf("  source usage:    epoch %d artifact: %d bytes, %d users\n", sizing.SourceEpoch, sizing.UsageBytes, sizing.Users)
+		if sizing.Note != "" {
+			fmt.Printf("  note:            %s\n", sizing.Note)
+		}
+		fmt.Printf("  conviction:      %s rao (before epoch %d)\n", sizing.ConvictionRao, sizing.Epoch)
+		fmt.Printf("  required:        %s rao\n", sizing.RequiredRao)
+	}
+
 	if stEpoch := model.GetStEpoch(ctx, deploymentKey, epoch); stEpoch != nil {
 		fmt.Printf("epoch %d mirror:\n", epoch)
 		fmt.Printf("  status:          %s\n", stEpoch.Status)

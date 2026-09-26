@@ -14,8 +14,11 @@ package work
 //   - StEpochClose(e): compute + store the payout leaves/root; mark closed.
 //   - StCommitRoot(e): idempotent commitOperator within the +commitWindow
 //     deadline; bounded retries via task reschedule; T-2h alert (D-11).
-//   - StDeposit(e): reference-rate × previous-epoch-usage sizing, capped
-//     per epoch (D-3); push-then-credit, both publish kinds recorded.
+//   - StDeposit(e): previous-epoch signed usage (bytes and users) priced at
+//     the conviction-snapshot tier, capped per epoch (D-3); push-then-credit,
+//     both publish kinds recorded. Under the zero-price schedule
+//     (deposit_zero_rate_action: equal_demand) nothing is owed: the task
+//     records a skipped publish, sends no transaction and raises no alert.
 //   - StFinalizePoke(e): permissionless finalizeEpoch at/after the
 //     finalize block; marks the epoch finalized.
 //

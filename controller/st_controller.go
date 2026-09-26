@@ -160,9 +160,13 @@ type StConfig struct {
 	DepositRateDenominator uint64
 	DepositTiers           []StDepositTier
 	DepositEpochCapRao     uint64
-	ReliabilityAMin        int64
-	BlockSeconds           int64
-	DeployBlock            uint64
+	// DepositZeroRateAction mirrors the signed policy's zero_rate_action: an
+	// all-zero tier schedule (the zero-price launch mode, under which no
+	// deposit is sent) is accepted only with equal_demand, never by accident.
+	DepositZeroRateAction string
+	ReliabilityAMin       int64
+	BlockSeconds          int64
+	DeployBlock           uint64
 }
 
 // DeploymentKey is the exact chain/coordinator identity used to namespace
@@ -187,10 +191,15 @@ func StDeploymentKey() (model.StDeploymentKey, bool) {
 	return key, key != ""
 }
 
+// StDepositTier is one tier of the signed policy's schedule, copied verbatim
+// into st.yml: rate_numerator_rao_per_gib per GiB of usage and the optional
+// rate_numerator_rao_per_user (absent reads as 0) per distinct user, both over
+// rate_denominator.
 type StDepositTier struct {
-	MinConvictionRao uint64 `yaml:"min_conviction_rao" json:"min_conviction_rao"`
-	RateNumerator    uint64 `yaml:"rate_numerator_rao_per_gib" json:"rate_numerator_rao_per_gib"`
-	RateDenominator  uint64 `yaml:"rate_denominator" json:"rate_denominator"`
+	MinConvictionRao  uint64 `yaml:"min_conviction_rao" json:"min_conviction_rao"`
+	RateNumerator     uint64 `yaml:"rate_numerator_rao_per_gib" json:"rate_numerator_rao_per_gib"`
+	UserRateNumerator uint64 `yaml:"rate_numerator_rao_per_user" json:"rate_numerator_rao_per_user"`
+	RateDenominator   uint64 `yaml:"rate_denominator" json:"rate_denominator"`
 }
 
 // stVaultFile deliberately spells out both namespaces. The selected profile
@@ -231,6 +240,7 @@ type stVaultFile struct {
 	DepositRateDenominator uint64                         `yaml:"deposit_rate_denominator"`
 	DepositTiers           []StDepositTier                `yaml:"deposit_tiers"`
 	DepositEpochCapRao     uint64                         `yaml:"deposit_epoch_cap_rao"`
+	DepositZeroRateAction  string                         `yaml:"deposit_zero_rate_action"`
 	ReliabilityAMin        int64                          `yaml:"reliability_a_min"`
 	BlockSeconds           int64                          `yaml:"block_seconds"`
 	DeployBlock            uint64                         `yaml:"deploy_block"`
@@ -260,6 +270,7 @@ type stVaultFile struct {
 	TestnetDepositRateDenominator uint64                         `yaml:"testnet-deposit-rate-denominator"`
 	TestnetDepositTiers           []StDepositTier                `yaml:"testnet-deposit-tiers"`
 	TestnetDepositEpochCapRao     uint64                         `yaml:"testnet-deposit-epoch-cap-rao"`
+	TestnetDepositZeroRateAction  string                         `yaml:"testnet-deposit-zero-rate-action"`
 	TestnetReliabilityAMin        int64                          `yaml:"testnet-reliability-a-min"`
 	TestnetBlockSeconds           int64                          `yaml:"testnet-block-seconds"`
 	TestnetDeployBlock            uint64                         `yaml:"testnet-deploy-block"`
@@ -333,6 +344,7 @@ type stSelectedConfig struct {
 	TreasuryHotkey, DepositHotkey                                                                                  string
 	DepositKey, RootKey, ArtifactKey                                                                               string
 	DepositTiers                                                                                                   []StDepositTier
+	DepositZeroRateAction                                                                                          string
 }
 
 func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
@@ -353,7 +365,8 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			DepositRateDenominator: f.TestnetDepositRateDenominator,
 			DepositTiers:           append([]StDepositTier(nil), f.TestnetDepositTiers...),
 			DepositEpochCapRao:     f.TestnetDepositEpochCapRao, ReliabilityAMin: f.TestnetReliabilityAMin,
-			BlockSeconds: f.TestnetBlockSeconds, DeployBlock: f.TestnetDeployBlock,
+			DepositZeroRateAction: f.TestnetDepositZeroRateAction,
+			BlockSeconds:          f.TestnetBlockSeconds, DeployBlock: f.TestnetDeployBlock,
 		}, nil
 	case stconn.ProfileMainnet:
 		return stSelectedConfig{
@@ -369,7 +382,8 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			DepositRateNumerator: f.DepositRateNumerator, DepositRateDenominator: f.DepositRateDenominator,
 			DepositTiers:       append([]StDepositTier(nil), f.DepositTiers...),
 			DepositEpochCapRao: f.DepositEpochCapRao, ReliabilityAMin: f.ReliabilityAMin,
-			BlockSeconds: f.BlockSeconds, DeployBlock: f.DeployBlock,
+			DepositZeroRateAction: f.DepositZeroRateAction,
+			BlockSeconds:          f.BlockSeconds, DeployBlock: f.DeployBlock,
 		}, nil
 	default:
 		return stSelectedConfig{}, fmt.Errorf("st.yml unknown profile %q", profile)
@@ -386,8 +400,9 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 		ReservedAttemptUpload: s.ReservedAttemptUpload.clone(),
 		DepositAlphaRaoPerGib: s.DepositAlphaRaoPerGib, DepositRateNumerator: s.DepositRateNumerator,
 		DepositRateDenominator: s.DepositRateDenominator, DepositEpochCapRao: s.DepositEpochCapRao,
-		DepositTiers:    append([]StDepositTier(nil), s.DepositTiers...),
-		ReliabilityAMin: s.ReliabilityAMin, BlockSeconds: s.BlockSeconds, DeployBlock: s.DeployBlock}
+		DepositTiers:          append([]StDepositTier(nil), s.DepositTiers...),
+		DepositZeroRateAction: s.DepositZeroRateAction,
+		ReliabilityAMin:       s.ReliabilityAMin, BlockSeconds: s.BlockSeconds, DeployBlock: s.DeployBlock}
 	if cfg.ReliabilityAMin <= 0 {
 		cfg.ReliabilityAMin = stDefaultReliabilityAMin
 	}
@@ -403,18 +418,28 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 		cfg.DepositRateNumerator = cfg.DepositAlphaRaoPerGib
 		cfg.DepositRateDenominator = 1
 	}
-	if cfg.DepositRateNumerator == 0 || cfg.DepositRateDenominator == 0 {
-		return nil, fmt.Errorf("st.yml deposit rate numerator and denominator must be nonzero")
-	}
 	if len(cfg.DepositTiers) == 0 {
+		// Without a tier table the scalar rate is the whole (priced) schedule.
+		if cfg.DepositRateNumerator == 0 || cfg.DepositRateDenominator == 0 {
+			return nil, fmt.Errorf("st.yml deposit rate numerator and denominator must be nonzero unless deposit_tiers is set")
+		}
 		cfg.DepositTiers = []StDepositTier{{RateNumerator: cfg.DepositRateNumerator, RateDenominator: cfg.DepositRateDenominator}}
 	}
-	for i, tier := range cfg.DepositTiers {
-		invalidOrder := i > 0 && tier.MinConvictionRao <= cfg.DepositTiers[i-1].MinConvictionRao
-		increasingRate := i > 0 && new(big.Int).Mul(new(big.Int).SetUint64(tier.RateNumerator), new(big.Int).SetUint64(cfg.DepositTiers[i-1].RateDenominator)).Cmp(new(big.Int).Mul(new(big.Int).SetUint64(cfg.DepositTiers[i-1].RateNumerator), new(big.Int).SetUint64(tier.RateDenominator))) > 0
-		if tier.RateNumerator == 0 || tier.RateDenominator == 0 || (i == 0 && tier.MinConvictionRao != 0) || invalidOrder || increasingRate {
-			return nil, fmt.Errorf("st.yml deposit_tiers must start at zero and have increasing thresholds with nonzero rates")
+	// The tier table is the signed policy's schedule verbatim, so it is
+	// validated by the same shared rule validators apply, including the
+	// zero-price mode, which must be declared exactly as in the policy.
+	zeroPrice, err := protocol.ValidateDepositTiers(stDepositPolicy(cfg).Tiers)
+	if err != nil {
+		return nil, fmt.Errorf("st.yml deposit_tiers: %w", err)
+	}
+	switch cfg.DepositZeroRateAction {
+	case "", protocol.DepositZeroRateHalt:
+		if zeroPrice {
+			return nil, fmt.Errorf("st.yml deposit_tiers has a zero rate in every tier; set deposit_zero_rate_action: equal_demand to run the zero-price mode (no deposits are sent)")
 		}
+	case protocol.DepositZeroRateEqualDemand:
+	default:
+		return nil, fmt.Errorf("st.yml deposit_zero_rate_action %q is not halt or equal_demand", cfg.DepositZeroRateAction)
 	}
 	expectedChain := uint64(964)
 	if profile == stconn.ProfileTestnet {
@@ -2698,40 +2723,43 @@ func StEstimateBlockTime(headBlock uint64, headTime time.Time, block uint64) tim
 	return stEstimateBlockTime(headBlock, headTime, block, blockSeconds)
 }
 
-// stDepositSizeRao sizes the automated epoch deposit:
-// min(capRao, usageBytes × alphaRaoPerGib / GiB), in rao. A zero rate or a
-// zero cap disables automated deposits (returns 0).
-func stDepositSizeRao(usageBytes int64, rateNumerator, rateDenominator, capRao uint64) *big.Int {
-	if usageBytes <= 0 || rateNumerator == 0 || rateDenominator == 0 || capRao == 0 {
+// stDepositSizeRao sizes the automated epoch deposit under one tier:
+// min(capRao, floor(usageBytes × rate / (GiB × denominator) + users ×
+// userRate / denominator)), in rao. A zero denominator or a zero cap disables
+// automated deposits (returns 0); a zero rate for both components is the
+// zero-price mode and also sizes to 0.
+func stDepositSizeRao(usageBytes, users int64, rateNumerator, userRateNumerator, rateDenominator, capRao uint64) *big.Int {
+	if usageBytes < 0 || users < 0 || rateDenominator == 0 || capRao == 0 {
 		return big.NewInt(0)
 	}
-	policy := protocol.DepositPolicy{EpochCapRaoPerOperator: capRao, Tiers: []protocol.DepositTier{{RateNumeratorRaoPerGiB: rateNumerator, RateDenominator: rateDenominator}}}
-	amount, _, err := protocol.RequiredDepositRao(uint64(usageBytes), big.NewInt(0), policy)
+	policy := protocol.DepositPolicy{EpochCapRaoPerOperator: capRao, Tiers: []protocol.DepositTier{{RateNumeratorRaoPerGiB: rateNumerator, RateNumeratorRaoPerUser: userRateNumerator, RateDenominator: rateDenominator}}}
+	amount, _, err := protocol.RequiredDepositRao(uint64(usageBytes), uint64(users), big.NewInt(0), policy)
 	if err != nil {
 		return big.NewInt(0)
 	}
 	return amount
 }
 
-func stDepositRateForConviction(tiers []StDepositTier, conviction *big.Int) (uint64, uint64, error) {
-	selected, err := protocol.DepositTierAt(stDepositPolicy(tiers, ^uint64(0)), conviction)
-	if err != nil {
-		return 0, 0, err
-	}
-	return selected.RateNumeratorRaoPerGiB, selected.RateDenominator, nil
+// stDepositTierForConviction selects the configured tier exactly as validators
+// do from the conviction snapshot before the epoch.
+func stDepositTierForConviction(tiers []StDepositTier, conviction *big.Int) (protocol.DepositTier, error) {
+	return protocol.DepositTierAt(stDepositPolicy(&StConfig{DepositTiers: tiers, DepositEpochCapRao: ^uint64(0)}), conviction)
 }
 
-func stDepositPolicy(tiers []StDepositTier, capRao uint64) protocol.DepositPolicy {
-	policy := protocol.DepositPolicy{EpochCapRaoPerOperator: capRao, Tiers: make([]protocol.DepositTier, len(tiers))}
-	for i, tier := range tiers {
-		policy.Tiers[i] = protocol.DepositTier{MinConvictionRao: tier.MinConvictionRao, RateNumeratorRaoPerGiB: tier.RateNumerator, RateDenominator: tier.RateDenominator}
+// stDepositPolicy is the configured schedule in the shared protocol shape, so
+// sizing, tier selection and validation use the exact validator formula.
+func stDepositPolicy(cfg *StConfig) protocol.DepositPolicy {
+	policy := protocol.DepositPolicy{EpochCapRaoPerOperator: cfg.DepositEpochCapRao, ZeroRateAction: cfg.DepositZeroRateAction, Tiers: make([]protocol.DepositTier, len(cfg.DepositTiers))}
+	for i, tier := range cfg.DepositTiers {
+		policy.Tiers[i] = protocol.DepositTier{MinConvictionRao: tier.MinConvictionRao, RateNumeratorRaoPerGiB: tier.RateNumerator, RateNumeratorRaoPerUser: tier.UserRateNumerator, RateDenominator: tier.RateDenominator}
 	}
 	return policy
 }
 
 // stDepositArtifactUsage verifies the complete operator/artifact identity and
-// finalized boundaries before the next deposit consumes its usage total. The
-// artifact itself has already passed canonical reconstruction in startifact.Read.
+// finalized boundaries before the next deposit consumes its usage and user
+// totals. The artifact itself has already passed canonical reconstruction in
+// startifact.Read.
 func stDepositArtifactUsage(
 	artifact *startifact.Artifact,
 	record *model.StPayoutArtifact,
@@ -2741,21 +2769,151 @@ func stDepositArtifactUsage(
 	startHash [32]byte,
 	endBlock uint64,
 	endHash [32]byte,
-) (uint64, error) {
+) (usageBytes uint64, users uint64, err error) {
 	if artifact == nil || record == nil || cfg == nil || cfg.ArtifactKey == nil {
-		return 0, errors.New("deposit artifact identity is incomplete")
+		return 0, 0, errors.New("deposit artifact identity is incomplete")
 	}
 	expectedSigner := crypto.PubkeyToAddress(cfg.ArtifactKey.PublicKey)
 	if artifact.DeploymentID != cfg.DeploymentId || artifact.ChainID != cfg.ChainId || artifact.Netuid != uint16(cfg.Netuid) || artifact.Coordinator != cfg.ContractAddress || artifact.SettlementVault != cfg.SettlementVault || artifact.Epoch != epoch || artifact.NoID != cfg.NoId || artifact.Signer != expectedSigner || !strings.EqualFold(artifact.GenesisHash, fmt.Sprintf("0x%x", cfg.GenesisHash)) || !strings.EqualFold(artifact.PolicyHash, fmt.Sprintf("0x%x", cfg.PolicyHash)) {
-		return 0, fmt.Errorf("epoch %d payout artifact deployment identity mismatch", epoch)
+		return 0, 0, fmt.Errorf("epoch %d payout artifact deployment identity mismatch", epoch)
 	}
 	if !strings.EqualFold(artifact.ContentHash, record.ContentHash) || artifact.PayoutRoot != record.PayoutRoot {
-		return 0, fmt.Errorf("epoch %d payout artifact record mismatch", epoch)
+		return 0, 0, fmt.Errorf("epoch %d payout artifact record mismatch", epoch)
 	}
 	if artifact.Start.Number != startBlock || artifact.End.Number != endBlock || !strings.EqualFold(artifact.Start.Hash, common.BytesToHash(startHash[:]).Hex()) || !strings.EqualFold(artifact.End.Hash, common.BytesToHash(endHash[:]).Hex()) {
-		return 0, fmt.Errorf("epoch %d payout artifact finalized boundary mismatch", epoch)
+		return 0, 0, fmt.Errorf("epoch %d payout artifact finalized boundary mismatch", epoch)
 	}
-	return artifact.TotalUsageBytes, nil
+	return artifact.TotalUsageBytes, artifact.TotalUsers, nil
+}
+
+// StDepositSizing is the exact deposit the operator owes for one epoch under
+// its configured, policy-mirrored schedule: the previous epoch's signed usage
+// and user totals priced at the tier its conviction snapshot selects.
+type StDepositSizing struct {
+	Epoch       uint64
+	SourceEpoch uint64
+	UsageBytes  uint64
+	Users       uint64
+	// ConvictionRao is the conviction snapshot before Epoch.
+	ConvictionRao *big.Int
+	Tier          protocol.DepositTier
+	RequiredRao   *big.Int
+	// ZeroPrice is set when the configured schedule prices nothing: no deposit
+	// is required, none is sent, and nothing is alerted. The artifact totals
+	// are then informational and may be absent (see Note).
+	ZeroPrice bool
+	Note      string
+}
+
+func (self *StDepositSizing) String() string {
+	if self == nil {
+		return ""
+	}
+	if self.ZeroPrice {
+		note := ""
+		if self.Note != "" {
+			note = "; " + self.Note
+		}
+		return fmt.Sprintf("price is zero: no demand deposit is required for epoch %d (epoch %d artifact: %d bytes, %d users%s)", self.Epoch, self.SourceEpoch, self.UsageBytes, self.Users, note)
+	}
+	if self.Epoch == 0 {
+		return "epoch 0 has no prior usage artifact: no deposit"
+	}
+	return fmt.Sprintf("epoch %d requires %s rao (epoch %d artifact: %d bytes, %d users; conviction %s rao; tier >= %d rao at %d rao/GiB, %d rao/user over %d)", self.Epoch, self.RequiredRao, self.SourceEpoch, self.UsageBytes, self.Users, self.ConvictionRao, self.Tier.MinConvictionRao, self.Tier.RateNumeratorRaoPerGiB, self.Tier.RateNumeratorRaoPerUser, self.Tier.RateDenominator)
+}
+
+// stDepositArtifactTotals reads the previous epoch's immutable signed payout
+// artifact and returns its usage and user totals, or a retryable outcome when
+// it is not available yet.
+func stDepositArtifactTotals(ctx context.Context, cfg *StConfig, client StClient, state *StEpochState, sourceEpoch uint64) (usageBytes uint64, users uint64, failed *StPublishOutcome) {
+	_, _, prevStartBlock, prevEndBlock, err := stEpochWindow(ctx, cfg.DeploymentKey(), client, state, sourceEpoch, cfg.BlockSeconds)
+	if err != nil {
+		return 0, 0, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: err.Error(), Retry: true}
+	}
+	artifactRecord := model.GetStPayoutArtifact(ctx, cfg.DeploymentKey(), sourceEpoch, cfg.NoId)
+	if artifactRecord == nil {
+		return 0, 0, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: fmt.Sprintf("epoch %d signed payout artifact is not published yet", sourceEpoch), Retry: true}
+	}
+	store, ok := server.LoadBlobStore()
+	if !ok {
+		return 0, 0, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: "st payout artifact store is unavailable", Retry: true}
+	}
+	artifact, _, artifactErr := startifact.Read(ctx, store, artifactRecord.ContentHash)
+	if artifactErr != nil {
+		return 0, 0, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: fmt.Sprintf("epoch %d signed payout artifact: %v", sourceEpoch, artifactErr), Retry: true}
+	}
+	prevStartHash, hashErr := client.BlockHash(ctx, prevStartBlock)
+	if hashErr != nil {
+		return 0, 0, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: hashErr.Error(), Retry: true}
+	}
+	prevEndHash, hashErr := client.BlockHash(ctx, prevEndBlock)
+	if hashErr != nil {
+		return 0, 0, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: hashErr.Error(), Retry: true}
+	}
+	usageBytes, users, identityErr := stDepositArtifactUsage(artifact, artifactRecord, cfg, sourceEpoch, prevStartBlock, prevStartHash, prevEndBlock, prevEndHash)
+	if identityErr != nil {
+		return 0, 0, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: identityErr.Error(), Retry: true}
+	}
+	return usageBytes, users, nil
+}
+
+// stEpochDepositSizing sizes the epoch's automated deposit (D-3): the previous
+// epoch's signed usage and user totals at the conviction-snapshot tier, capped
+// by deposit_epoch_cap_rao. Epoch 0 has no prior artifact and sizes to zero.
+// Under the zero-price schedule the requirement is zero without reading the
+// artifact, so a not-yet-published artifact neither blocks nor retries the
+// task; its totals are still reported when available.
+func stEpochDepositSizing(ctx context.Context, cfg *StConfig, client StClient, state *StEpochState, epoch uint64) (*StDepositSizing, *StPublishOutcome, error) {
+	policy := stDepositPolicy(cfg)
+	sizing := &StDepositSizing{Epoch: epoch, ConvictionRao: big.NewInt(0), RequiredRao: big.NewInt(0), ZeroPrice: policy.IsZeroPrice()}
+	if epoch == 0 {
+		return sizing, nil, nil
+	}
+	sizing.SourceEpoch = epoch - 1
+	usageBytes, users, failed := stDepositArtifactTotals(ctx, cfg, client, state, sizing.SourceEpoch)
+	if failed != nil {
+		if !sizing.ZeroPrice {
+			return nil, failed, nil
+		}
+		sizing.Note = failed.Reason
+		return sizing, nil, nil
+	}
+	sizing.UsageBytes, sizing.Users = usageBytes, users
+	conviction, convictionErr := client.ConvictionBeforeEpoch(ctx, epoch, cfg.NoId)
+	if convictionErr != nil {
+		if sizing.ZeroPrice {
+			sizing.Note = convictionErr.Error()
+			return sizing, nil, nil
+		}
+		return nil, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: convictionErr.Error(), Retry: true}, nil
+	}
+	amount, tier, err := protocol.RequiredDepositRao(usageBytes, users, conviction, policy)
+	if err != nil {
+		return nil, nil, err
+	}
+	sizing.ConvictionRao, sizing.Tier, sizing.RequiredRao = conviction, tier, amount
+	return sizing, nil, nil
+}
+
+// StGetDepositSizing reports what the automated deposit for epoch would send
+// (bringyourctl st status). An input that is not available yet is an error.
+func StGetDepositSizing(ctx context.Context, epoch uint64) (*StDepositSizing, error) {
+	cfg, client, err := stRequire()
+	if err != nil {
+		return nil, err
+	}
+	state, err := client.Epoch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sizing, failed, err := stEpochDepositSizing(ctx, cfg, client, state, epoch)
+	if err != nil {
+		return nil, err
+	}
+	if failed != nil {
+		return nil, errors.New(failed.Reason)
+	}
+	return sizing, nil
 }
 
 // stBuildPayoutTree rebuilds the canonical payout Merkle tree from stored
@@ -3058,6 +3216,12 @@ func stComputeReleasePayout(
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
+	// The attested user count is the stats feed's per-block `users` figure
+	// over this epoch's window; with the usage bytes it sizes the next deposit.
+	epochUsers := model.CountTopLevelClientsWithContractInEpoch(ctx, startTime, endTime)
+	if epochUsers < 0 {
+		return [32]byte{}, 0, fmt.Errorf("epoch %d user count is negative", epoch)
+	}
 	startHash, err := client.BlockHash(ctx, startBlock)
 	if err != nil {
 		return [32]byte{}, 0, err
@@ -3079,6 +3243,7 @@ func stComputeReleasePayout(
 		End:                  startifact.Boundary{Number: closeBlock, Hash: common.BytesToHash(endHash[:]).Hex()},
 		OperatorSnapshotHash: stSnapshotHash(operatorSnapshot), FleetSnapshotHash: stSnapshotHash(fleetSnapshot),
 		Providers:       providers,
+		TotalUsers:      uint64(epochUsers),
 		ReliabilityAMin: uint64(cfg.ReliabilityAMin), CreatedAt: endTime,
 	})
 	if err != nil {
@@ -3406,46 +3571,25 @@ func StDepositForEpoch(ctx context.Context, epoch uint64, overrideRao *big.Int) 
 			return nil, fmt.Errorf("st: deposit %s rao exceeds deposit_epoch_cap_rao %d", amount, cfg.DepositEpochCapRao)
 		}
 	} else {
-		if epoch == 0 {
-			amount = big.NewInt(0)
-		} else {
-			_, _, prevStartBlock, prevEndBlock, err := stEpochWindow(ctx, cfg.DeploymentKey(), client, state, epoch-1, cfg.BlockSeconds)
-			if err != nil {
-				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: err.Error(), Retry: true}, nil
-			}
-			artifactRecord := model.GetStPayoutArtifact(ctx, cfg.DeploymentKey(), epoch-1, cfg.NoId)
-			if artifactRecord == nil {
-				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: fmt.Sprintf("epoch %d signed payout artifact is not published yet", epoch-1), Retry: true}, nil
-			}
-			store, ok := server.LoadBlobStore()
-			if !ok {
-				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: "st payout artifact store is unavailable", Retry: true}, nil
-			}
-			artifact, _, artifactErr := startifact.Read(ctx, store, artifactRecord.ContentHash)
-			if artifactErr != nil {
-				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: fmt.Sprintf("epoch %d signed payout artifact: %v", epoch-1, artifactErr), Retry: true}, nil
-			}
-			prevStartHash, hashErr := client.BlockHash(ctx, prevStartBlock)
-			if hashErr != nil {
-				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: hashErr.Error(), Retry: true}, nil
-			}
-			prevEndHash, hashErr := client.BlockHash(ctx, prevEndBlock)
-			if hashErr != nil {
-				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: hashErr.Error(), Retry: true}, nil
-			}
-			usageBytes, identityErr := stDepositArtifactUsage(artifact, artifactRecord, cfg, epoch-1, prevStartBlock, prevStartHash, prevEndBlock, prevEndHash)
-			if identityErr != nil {
-				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: identityErr.Error(), Retry: true}, nil
-			}
-			conviction, convictionErr := client.ConvictionBeforeEpoch(ctx, epoch, cfg.NoId)
-			if convictionErr != nil {
-				return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: convictionErr.Error(), Retry: true}, nil
-			}
-			amount, _, err = protocol.RequiredDepositRao(usageBytes, conviction, stDepositPolicy(cfg.DepositTiers, cfg.DepositEpochCapRao))
-			if err != nil {
-				return nil, err
-			}
+		sizing, failed, err := stEpochDepositSizing(ctx, cfg, client, state, epoch)
+		if err != nil {
+			return nil, err
 		}
+		if failed != nil {
+			return failed, nil
+		}
+		if sizing.ZeroPrice {
+			// Zero price: nothing is owed, so no transaction is sent, no nonce
+			// is reserved and nothing is retried or alerted.
+			outcome := &StPublishOutcome{
+				Status: model.StPublishStatusSkipped,
+				Reason: sizing.String(),
+			}
+			publishId := model.AddStPublish(ctx, cfg.DeploymentKey(), epoch, model.StPublishKindDeposit)
+			stResolvePublish(ctx, publishId, outcome)
+			return outcome, nil
+		}
+		amount = sizing.RequiredRao
 	}
 	if amount.Sign() <= 0 {
 		outcome := &StPublishOutcome{

@@ -22,8 +22,16 @@ func (self *CoreStClient) preflightDepositRuntimeMinimum(ctx context.Context, am
 	if self.coordinator == nil || self.cfg.SettlementVault == (common.Address{}) {
 		return nil
 	}
-	if self.vault == nil || self.cfg.Netuid == 0 || self.cfg.Netuid > 65535 || amount == nil || amount.Sign() <= 0 {
-		return errors.New("st: deposit runtime minimum identity or amount is invalid")
+	if amount == nil || amount.Sign() < 0 {
+		return errors.New("st: deposit runtime minimum amount is invalid")
+	}
+	if amount.Sign() == 0 {
+		// Nothing to move (no usage, or the zero-price mode): the transfer
+		// floor is a property of a reserve move, and there is none.
+		return nil
+	}
+	if self.vault == nil || self.cfg.Netuid == 0 || self.cfg.Netuid > 65535 {
+		return errors.New("st: deposit runtime minimum identity is invalid")
 	}
 	head, err := self.finalizedBlock(ctx)
 	if err != nil {

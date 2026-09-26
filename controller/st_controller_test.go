@@ -19,6 +19,7 @@ import (
 	"github.com/urnetwork/connect"
 
 	"github.com/urfoundation/sn/merkle"
+	"github.com/urfoundation/sn/stabi"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -463,43 +464,148 @@ func TestStBuildShareEntriesExcludesHeadBound(t *testing.T) {
 func TestStDepositSizeRao(t *testing.T) {
 	gib := int64(1) << 30
 
-	// zero usage, zero rate, or a zero cap all disable the deposit
-	connect.AssertEqual(t, "0", stDepositSizeRao(0, 1000, 1, 1000000).String())
-	connect.AssertEqual(t, "0", stDepositSizeRao(gib, 0, 1, 1000000).String())
-	connect.AssertEqual(t, "0", stDepositSizeRao(gib, 1000, 0, 1000000).String())
-	connect.AssertEqual(t, "0", stDepositSizeRao(gib, 1000, 1, 0).String())
+	// zero usage, a zero denominator, or a zero cap all disable the deposit
+	connect.AssertEqual(t, "0", stDepositSizeRao(0, 0, 1000, 0, 1, 1000000).String())
+	connect.AssertEqual(t, "0", stDepositSizeRao(gib, 0, 1000, 0, 0, 1000000).String())
+	connect.AssertEqual(t, "0", stDepositSizeRao(gib, 0, 1000, 0, 1, 0).String())
+	connect.AssertEqual(t, "0", stDepositSizeRao(-1, 0, 1000, 0, 1, 1000000).String())
+	connect.AssertEqual(t, "0", stDepositSizeRao(gib, -1, 1000, 0, 1, 1000000).String())
+
+	// zero price: both rates zero size to zero for any usage
+	connect.AssertEqual(t, "0", stDepositSizeRao(gib, 100, 0, 0, 1, 1000000).String())
 
 	// rate applies per GiB, flooring sub-rao remainders
-	connect.AssertEqual(t, "1000", stDepositSizeRao(gib, 1000, 1, 1000000).String())
-	connect.AssertEqual(t, "4", stDepositSizeRao(3*(gib/2), 3, 1, 1000000).String())
-	connect.AssertEqual(t, "2", stDepositSizeRao(3*(gib/2), 3, 2, 1000000).String())
+	connect.AssertEqual(t, "1000", stDepositSizeRao(gib, 0, 1000, 0, 1, 1000000).String())
+	connect.AssertEqual(t, "4", stDepositSizeRao(3*(gib/2), 0, 3, 0, 1, 1000000).String())
+	connect.AssertEqual(t, "2", stDepositSizeRao(3*(gib/2), 0, 3, 0, 2, 1000000).String())
+
+	// users only, both, and one floor over the exact two-component sum
+	connect.AssertEqual(t, "21", stDepositSizeRao(0, 3, 1000, 7, 1, 1000000).String())
+	connect.AssertEqual(t, "2070", stDepositSizeRao(2*gib, 10, 1000, 7, 1, 1000000).String())
+	connect.AssertEqual(t, "126", stDepositSizeRao(gib/2, 1, 500, 3, 2, 1000000).String())
 
 	// the per-epoch cap is the custody blast-radius control (D-3): the
-	// deposit never exceeds it even when usage says otherwise
-	connect.AssertEqual(t, "500", stDepositSizeRao(10*gib, 100, 1, 500).String())
+	// deposit never exceeds it even when usage or users say otherwise
+	connect.AssertEqual(t, "500", stDepositSizeRao(10*gib, 0, 100, 0, 1, 500).String())
+	connect.AssertEqual(t, "500", stDepositSizeRao(0, 1000, 100, 1, 1, 500).String())
 
 	// usage × rate beyond uint64 still clamps exactly to the cap
-	connect.AssertEqual(t, "12345", stDepositSizeRao(math.MaxInt64, math.MaxUint64, math.MaxUint64, 12345).String())
+	connect.AssertEqual(t, "12345", stDepositSizeRao(math.MaxInt64, math.MaxInt64, math.MaxUint64, math.MaxUint64, math.MaxUint64, 12345).String())
 }
 
-func TestStDepositRateForConvictionUsesPreEpochTierExactly(t *testing.T) {
+func TestStDepositTierForConvictionUsesPreEpochTierExactly(t *testing.T) {
 	tiers := []StDepositTier{
-		{MinConvictionRao: 0, RateNumerator: 10, RateDenominator: 3},
-		{MinConvictionRao: 100, RateNumerator: 7, RateDenominator: 4},
-		{MinConvictionRao: 1_000, RateNumerator: 1, RateDenominator: 2},
+		{MinConvictionRao: 0, RateNumerator: 10, UserRateNumerator: 6, RateDenominator: 3},
+		{MinConvictionRao: 100, RateNumerator: 7, UserRateNumerator: 4, RateDenominator: 4},
+		{MinConvictionRao: 1_000, RateNumerator: 1, UserRateNumerator: 1, RateDenominator: 2},
 	}
 	for _, test := range []struct {
-		conviction  uint64
-		numerator   uint64
-		denominator uint64
-	}{{0, 10, 3}, {99, 10, 3}, {100, 7, 4}, {999, 7, 4}, {1_000, 1, 2}} {
-		n, d, err := stDepositRateForConviction(tiers, new(big.Int).SetUint64(test.conviction))
-		if err != nil || n != test.numerator || d != test.denominator {
-			t.Fatalf("conviction %d rate = %d/%d, %v", test.conviction, n, d, err)
+		conviction    uint64
+		numerator     uint64
+		userNumerator uint64
+		denominator   uint64
+	}{{0, 10, 6, 3}, {99, 10, 6, 3}, {100, 7, 4, 4}, {999, 7, 4, 4}, {1_000, 1, 1, 2}} {
+		tier, err := stDepositTierForConviction(tiers, new(big.Int).SetUint64(test.conviction))
+		if err != nil || tier.RateNumeratorRaoPerGiB != test.numerator || tier.RateNumeratorRaoPerUser != test.userNumerator || tier.RateDenominator != test.denominator {
+			t.Fatalf("conviction %d tier = %+v, %v", test.conviction, tier, err)
 		}
 	}
-	if _, _, err := stDepositRateForConviction([]StDepositTier{{MinConvictionRao: 1, RateNumerator: 1, RateDenominator: 1}}, big.NewInt(0)); err == nil {
+	if _, err := stDepositTierForConviction([]StDepositTier{{MinConvictionRao: 1, RateNumerator: 1, RateDenominator: 1}}, big.NewInt(0)); err == nil {
 		t.Fatal("tier schedule without zero baseline accepted")
+	}
+	// a zero-price schedule selects its (zero-rate) tier without error
+	tier, err := stDepositTierForConviction([]StDepositTier{{RateDenominator: 1}, {MinConvictionRao: 5, RateDenominator: 1}}, big.NewInt(7))
+	if err != nil || tier.MinConvictionRao != 5 || !tier.IsZeroRate() {
+		t.Fatalf("zero-price tier = %+v, %v", tier, err)
+	}
+}
+
+// The zero-price mode is explicit in st.yml exactly as in the signed policy.
+func TestStConfigZeroPriceTiersRequireEqualDemand(t *testing.T) {
+	zero := []StDepositTier{{MinConvictionRao: 0, RateDenominator: 1}, {MinConvictionRao: 1_000_000_000, RateDenominator: 1}}
+	f := releaseStVaultFile()
+	f.TestnetDepositTiers = zero
+	f.TestnetDepositRateNumerator, f.TestnetDepositRateDenominator = 0, 0
+	if _, err := stConfigForProfile(stconn.ProfileTestnet, f, []string{"http://testnet"}); err == nil || !strings.Contains(err.Error(), "equal_demand") {
+		t.Fatalf("all-zero tiers accepted without deposit_zero_rate_action: %v", err)
+	}
+	f.TestnetDepositZeroRateAction = "ignore"
+	if _, err := stConfigForProfile(stconn.ProfileTestnet, f, []string{"http://testnet"}); err == nil {
+		t.Fatal("unknown deposit_zero_rate_action accepted")
+	}
+	f.TestnetDepositZeroRateAction = "equal_demand"
+	cfg, err := stConfigForProfile(stconn.ProfileTestnet, f, []string{"http://testnet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := stDepositPolicy(cfg)
+	if !policy.IsZeroPrice() || policy.ZeroRateAction != "equal_demand" || len(cfg.DepositTiers) != 2 {
+		t.Fatalf("zero-price config = %+v", cfg.DepositTiers)
+	}
+	// the explicit halt spelling rejects the zero price exactly like absence
+	f.TestnetDepositZeroRateAction = "halt"
+	if _, err := stConfigForProfile(stconn.ProfileTestnet, f, []string{"http://testnet"}); err == nil || !strings.Contains(err.Error(), "equal_demand") {
+		t.Fatalf("all-zero tiers accepted with deposit_zero_rate_action: halt: %v", err)
+	}
+	// a per-user rate is carried into the shared policy shape
+	priced := releaseStVaultFile()
+	priced.TestnetDepositTiers = []StDepositTier{{RateNumerator: 1_000_000, UserRateNumerator: 10, RateDenominator: 1}, {MinConvictionRao: 1_000_000_000, RateNumerator: 800_000, UserRateNumerator: 8, RateDenominator: 1}}
+	cfg, err = stConfigForProfile(stconn.ProfileTestnet, priced, []string{"http://testnet"})
+	if err != nil || stDepositPolicy(cfg).Tiers[1].RateNumeratorRaoPerUser != 8 || stDepositPolicy(cfg).IsZeroPrice() {
+		t.Fatalf("per-user rate lost: %+v %v", cfg.DepositTiers, err)
+	}
+	priced.TestnetDepositTiers[1].UserRateNumerator = 0
+	if _, err := stConfigForProfile(stconn.ProfileTestnet, priced, []string{"http://testnet"}); err == nil {
+		t.Fatal("per-user rate zero in some tiers only was accepted")
+	}
+	// the scalar legacy rate is only required without a tier table
+	legacy := releaseStVaultFile()
+	legacy.TestnetDepositTiers = nil
+	legacy.TestnetDepositRateNumerator, legacy.TestnetDepositRateDenominator = 0, 0
+	if _, err := stConfigForProfile(stconn.ProfileTestnet, legacy, []string{"http://testnet"}); err == nil {
+		t.Fatal("no schedule at all was accepted")
+	}
+}
+
+// Under the zero-price schedule the sizing owes nothing and the preflight
+// passes a zero amount, so the deposit task sends no transaction.
+func TestStDepositSizingZeroPriceSendsNothing(t *testing.T) {
+	f := releaseStVaultFile()
+	f.TestnetDepositTiers = []StDepositTier{{RateDenominator: 1}}
+	f.TestnetDepositZeroRateAction = "equal_demand"
+	cfg, err := stConfigForProfile(stconn.ProfileTestnet, f, []string{"http://testnet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sizing, failed, err := stEpochDepositSizing(t.Context(), cfg, nil, nil, 0)
+	if err != nil || failed != nil || !sizing.ZeroPrice || sizing.RequiredRao.Sign() != 0 || !strings.Contains(sizing.String(), "price is zero") {
+		t.Fatalf("zero-price epoch 0 sizing = %+v %v %v", sizing, failed, err)
+	}
+	priced, err := stConfigForProfile(stconn.ProfileTestnet, releaseStVaultFile(), []string{"http://testnet"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sizing, failed, err = stEpochDepositSizing(t.Context(), priced, nil, nil, 0)
+	if err != nil || failed != nil || sizing.ZeroPrice || sizing.RequiredRao.Sign() != 0 || !strings.Contains(sizing.String(), "epoch 0") {
+		t.Fatalf("priced epoch 0 sizing = %+v %v %v", sizing, failed, err)
+	}
+	full := &StDepositSizing{Epoch: 5, SourceEpoch: 4, UsageBytes: 1 << 30, Users: 12, ConvictionRao: big.NewInt(3), RequiredRao: big.NewInt(1_000_120), Tier: stDepositPolicy(priced).Tiers[0]}
+	if s := full.String(); !strings.Contains(s, "1000120 rao") || !strings.Contains(s, "12 users") || !strings.Contains(s, "1000000 rao/GiB") {
+		t.Fatalf("sizing summary = %q", s)
+	}
+
+	client := &CoreStClient{cfg: cfg, coordinator: stabi.NewSTCoordinator()}
+	if err := client.preflightDepositRuntimeMinimum(t.Context(), big.NewInt(0)); err != nil {
+		t.Fatalf("zero deposit preflight failed: %v", err)
+	}
+	if err := client.preflightDepositRuntimeMinimum(t.Context(), nil); err == nil {
+		t.Fatal("nil deposit amount passed preflight")
+	}
+	if err := client.preflightDepositRuntimeMinimum(t.Context(), big.NewInt(-1)); err == nil {
+		t.Fatal("negative deposit amount passed preflight")
+	}
+	if err := client.preflightDepositRuntimeMinimum(t.Context(), big.NewInt(1)); err == nil {
+		t.Fatal("a positive amount passed preflight without a vault binding")
 	}
 }
 
@@ -519,6 +625,7 @@ func TestStDepositArtifactUsagePinsSignerIdentityAndFinalizedBoundaries(t *testi
 		OperatorSnapshotHash: "sha256:" + strings.Repeat("10", 32),
 		FleetSnapshotHash:    "sha256:" + strings.Repeat("20", 32),
 		Providers:            []startifact.ProviderInput{{ClientID: [16]byte{1}, Coldkey: [32]byte{1}, UsageBytes: 1234, Assignments: 8, Confirmations: 8, Eligible: true}},
+		TotalUsers:           567,
 		ReliabilityAMin:      8, CreatedAt: time.Unix(1_700_000_000, 0).UTC(),
 	})
 	if err != nil {
@@ -528,11 +635,11 @@ func TestStDepositArtifactUsagePinsSignerIdentityAndFinalizedBoundaries(t *testi
 		t.Fatal(err)
 	}
 	record := &model.StPayoutArtifact{Epoch: 4, NoId: cfg.NoId, ContentHash: artifact.ContentHash, PayoutRoot: artifact.PayoutRoot}
-	usage, err := stDepositArtifactUsage(artifact, record, cfg, 4, 100, startHash, 200, endHash)
-	if err != nil || usage != 1234 {
-		t.Fatalf("artifact usage = %d, %v", usage, err)
+	usage, users, err := stDepositArtifactUsage(artifact, record, cfg, 4, 100, startHash, 200, endHash)
+	if err != nil || usage != 1234 || users != 567 {
+		t.Fatalf("artifact usage = %d bytes, %d users, %v", usage, users, err)
 	}
-	if _, err := stDepositArtifactUsage(artifact, record, cfg, 4, 100, [32]byte{9}, 200, endHash); err == nil {
+	if _, _, err := stDepositArtifactUsage(artifact, record, cfg, 4, 100, [32]byte{9}, 200, endHash); err == nil {
 		t.Fatal("orphaned start boundary was accepted")
 	}
 	otherKey, err := crypto.GenerateKey()
@@ -543,7 +650,7 @@ func TestStDepositArtifactUsagePinsSignerIdentityAndFinalizedBoundaries(t *testi
 		t.Fatal(err)
 	}
 	record.ContentHash = artifact.ContentHash
-	if _, err := stDepositArtifactUsage(artifact, record, cfg, 4, 100, startHash, 200, endHash); err == nil {
+	if _, _, err := stDepositArtifactUsage(artifact, record, cfg, 4, 100, startHash, 200, endHash); err == nil {
 		t.Fatal("unexpected artifact signer was accepted")
 	}
 }

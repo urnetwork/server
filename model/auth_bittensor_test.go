@@ -123,3 +123,70 @@ func TestParseBlockchainTao(t *testing.T) {
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, blockchain, TAO)
 }
+
+// The miner CLI (`provider wallet set --coldkey_seed_file`, sn/miner/sn.go)
+// derives the coldkey from a 32-byte mini secret the way subkey, polkadot-js
+// and btcli do (ExpandEd25519) and signs the wallet challenge in the
+// "substrate" signing context, hex encoded with a 0x prefix, over the
+// <Bytes>…</Bytes>-wrapped message (the same bytes a polkadot-js signRaw of
+// type "bytes" signs). A signature made elsewhere (`--message --signature`,
+// e.g. btcli) may cover the raw text instead. Both must verify here.
+//
+// Known keypair: the substrate dev account Alice (sr25519), whose mini secret
+// and public key are published vectors. The two fixed signatures were
+// produced by ur.io's test-only signer (mmm/ur.io/react/tests/sr25519.mjs,
+// vectors in sr25519.test.mjs) and pin that signer to this verifier.
+func TestVerifyBittensorSignatureKnownKeypairCliFormat(t *testing.T) {
+	seedBytes, err := hex.DecodeString("e5be9a5092b81bca64be81d212e7f2f9eba183bb7a90954f7b76361f6edb5c0a")
+	connect.AssertEqual(t, err, nil)
+	var seed [32]byte
+	copy(seed[:], seedBytes)
+	miniSecret, err := schnorrkel.NewMiniSecretKeyFromRaw(seed)
+	connect.AssertEqual(t, err, nil)
+	secretKey := miniSecret.ExpandEd25519()
+	publicKeyBytes := miniSecret.Public().Encode()
+	connect.AssertEqual(t, hex.EncodeToString(publicKeyBytes[:]), "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d")
+	address := testingSS58Encode(42, publicKeyBytes)
+	connect.AssertEqual(t, address, "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY")
+
+	message := FormatWalletAuthChallengeMessage("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", 1700000000)
+	connect.AssertEqual(t, message, "Sign in to URnetwork\nChallenge: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nTimestamp: 1700000000")
+
+	// the CLI's seed-file path: wrapped, 0x-prefixed hex
+	wrapped := "<Bytes>" + message + "</Bytes>"
+	signature, err := secretKey.Sign(schnorrkel.NewSigningContext([]byte("substrate"), []byte(wrapped)))
+	connect.AssertEqual(t, err, nil)
+	signatureBytes := signature.Encode()
+	valid, err := VerifyBittensorSignature(address, message, "0x"+hex.EncodeToString(signatureBytes[:]))
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, valid, true)
+
+	// a signature made elsewhere over the raw text (btcli style)
+	rawSignature, err := secretKey.Sign(schnorrkel.NewSigningContext([]byte("substrate"), []byte(message)))
+	connect.AssertEqual(t, err, nil)
+	rawSignatureBytes := rawSignature.Encode()
+	valid, err = VerifyBittensorSignature(address, message, hex.EncodeToString(rawSignatureBytes[:]))
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, valid, true)
+
+	// fixed vectors from the ur.io test signer: wrapped and raw
+	for _, fixed := range []string{
+		"0xb642fa47781f14d9185311b6fb29d654975b2f8d1b383ae0dc7ece352d377a4fc409bbaf53cc81293c103ee9a6113dd09e59c7db83e540eee85ccc7420cc538d",
+		"1c5a4bf2e43145dff05cd141d56d9d7bf61d4b512a071327a6a8e41783e8825766b5fc10f4e6a17bdf33297f0ececacbeeeb95fc23a7a59fdf33811dd3900388",
+	} {
+		valid, err = VerifyBittensorSignature(address, message, fixed)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, valid, true)
+		// the same signature does not verify for a different challenge
+		valid, _ = VerifyBittensorSignature(address, FormatWalletAuthChallengeMessage("BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=", 1700000000), fixed)
+		connect.AssertEqual(t, valid, false)
+	}
+
+	// the same key under a different derivation (ExpandUniform) is a different
+	// key: a signer that does not follow subkey/polkadot-js derivation would
+	// produce an address the CLI refuses to pair with the seed
+	uniformPublic, err := miniSecret.ExpandUniform().Public()
+	connect.AssertEqual(t, err, nil)
+	uniformPublicKey := uniformPublic.Encode()
+	connect.AssertNotEqual(t, hex.EncodeToString(uniformPublicKey[:]), hex.EncodeToString(publicKeyBytes[:]))
+}
