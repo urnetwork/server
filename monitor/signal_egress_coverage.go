@@ -34,6 +34,7 @@ type egressCoverageProbe struct {
 	// The per-probe seam keeps synthetic observations independent of the
 	// workstation's active Config resource. Production reloads it each cadence.
 	loadDesiredConfig func() egressCoverageDesiredConfig
+	loadAPIDueCap     func() egressCoverageAPIDueCap
 }
 
 func (egressCoverageProbe) id() string             { return "pg/egress-coverage" }
@@ -543,8 +544,13 @@ func (p egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		loadDesired = loadEgressCoverageDesiredConfig
 	}
 	desired := loadDesired()
+	loadCap := p.loadAPIDueCap
+	if loadCap == nil {
+		loadCap = loadEgressCoverageAPIDueCap
+	}
 	geometry, geometryErr := inspectEgressCoverageTasks(taskRows)
 	configFindings := egressCoverageConfigFindings(target, desired, len(taskRows), geometry, geometryErr)
+	configFindings = append(configFindings, egressCoverageAPIDueCapFindings(target, desired, loadCap())...)
 	if desired.present && desired.invalidReason == "" && !desired.enabled && len(taskRows) == 0 {
 		// Explicit disablement makes zero rows intentional, not an unarmed
 		// rollout. Lingering rows still pass through shard integrity and activity

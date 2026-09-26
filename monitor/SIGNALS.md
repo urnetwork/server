@@ -6860,6 +6860,22 @@ retained prefix and concurrent due changes can still hide work beyond that
 bound. Neither outcome certifies an empty fleet backlog. This is a tested
 source correction, not a verified cause of the current Main shortfall.
 
+The API's provider-due endpoint has an independent `max_due_limit`. If its
+resource is missing or invalid, the API falls back to 500, silently clipping
+both a 1,000-provider full-worker request and the bounded successor lookahead
+above. The desired-config `egress-probe-api-due-cap` page requires the ceiling
+to cover `max(full.limit, 5000)`; a malformed/unreadable resource yields a
+separate unobservable page. Main's September 26 rollout added an explicit
+5,000 ceiling, and a direct authenticated request for 1,000 rows returned
+1,000 after all API blocks mounted it. This confirms admission capacity, not
+that the selected probes finished, published, or raised measured coverage.
+The desired resource can be correct while a running API has stale mounts or
+an older executable (false negative); verify versions on every block and a
+live saturated due request. Conversely, an intentionally small due cohort can
+return fewer rows despite a healthy ceiling (false positive if interpreted as
+clamping); compare due backlog and request limit in the same interval. Do not
+raise the ceiling without retaining bounded API/PostgreSQL admission checks.
+
 Full capacity must be conditioned on real latency rather than one request
 timeout. The 60-second warmup/open allowance, 50-load sample, three attempts
 and capped retry spacing permit a 36m35s full run including a five-second
@@ -7729,7 +7745,8 @@ do not identify a resource bottleneck or establish the independent Proxy
 capacity boundary.
 
 Implementation convention: SIGNALS.md §2.19 (`egress-coverage`) maps to
-`signal_egress_coverage.go` and `signal_egress_coverage_test.go`. Synthetic
+`signal_egress_coverage.go`, `signal_egress_due_cap.go`, and their matching
+`_test.go` files. Synthetic
 tests cover a fully unarmed rollout, the schema-armed/tasks-absent deployment
 boundary, exact valid/ready/non-partial migration-657 index coherence, additive
 index-unarmed plus capacity visibility, a missing shard, complete execution-

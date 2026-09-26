@@ -22,6 +22,8 @@ func syntheticEgressCoverageSignal() Signal {
 	signal := NewEgressCoverageSignal().(*signalAdapter)
 	signal.probe = egressCoverageProbe{loadDesiredConfig: func() egressCoverageDesiredConfig {
 		return egressCoverageDesiredConfig{}
+	}, loadAPIDueCap: func() egressCoverageAPIDueCap {
+		return egressCoverageAPIDueCap{value: egressCoverageFullLookahead, state: "configured"}
 	}}
 	return signal
 }
@@ -144,6 +146,8 @@ func requireEgressConfigPrivacy(t *testing.T, alerts Alerts, forbidden ...string
 func TestEgressCoverageDesiredConfigDriftAndConvergence(t *testing.T) {
 	pop := server.Config.PushSimpleResource("provider_egress_probe.yml", []byte(syntheticEgressDesiredConfig))
 	defer pop()
+	popDue := server.Config.PushSimpleResource("provider_egress_due.yml", []byte("max_due_limit: 5000\n"))
+	defer popDue()
 	desired := loadEgressCoverageDesiredConfig()
 	if !desired.present || !desired.enabled || desired.invalidReason != "" ||
 		desired.settings.shardCount != 4 || desired.settings.blackhole.Concurrency != 52 ||
