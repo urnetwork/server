@@ -182,8 +182,8 @@ func validateProviderEgressProbeBatchArgs(name string, args ProviderEgressProbeB
 		// slowest check, while the pass still owns one bounded worker pool.
 		// Divide instead of multiplying to keep malformed large settings from
 		// overflowing the bound.
-		if (args.Concurrency-1)/providerEgressBlackholeSelectedCohorts >= args.Limit {
-			return fmt.Errorf("provider egress probe blackhole concurrency exceeds %d selected cohorts", providerEgressBlackholeSelectedCohorts)
+		if (args.Concurrency-1)/providerEgressBlackholeRetainedCohorts >= args.Limit {
+			return fmt.Errorf("provider egress probe blackhole concurrency exceeds %d retained cohorts", providerEgressBlackholeRetainedCohorts)
 		}
 	} else if args.Limit < args.Concurrency {
 		return fmt.Errorf("provider egress probe %s concurrency must be in [1,limit]", name)
@@ -1583,7 +1583,7 @@ func providerEgressProbeExecutionArgs(args *ProviderEgressProbeArgs) *ProviderEg
 	execution := *args
 	const preferredCohort = 250
 	if preferredCohort < args.Blackhole.Limit && preferredCohort < args.Blackhole.Concurrency {
-		minimumCohort := 1 + (args.Blackhole.Concurrency-1)/providerEgressBlackholeSelectedCohorts
+		minimumCohort := 1 + (args.Blackhole.Concurrency-1)/providerEgressBlackholeRetainedCohorts
 		execution.Blackhole.Limit = min(args.Blackhole.Limit,
 			max(preferredCohort, minimumCohort, args.DarkBatchGuardMinChecks))
 	}
@@ -1591,7 +1591,7 @@ func providerEgressProbeExecutionArgs(args *ProviderEgressProbeArgs) *ProviderEg
 }
 
 // The prober has one shared account, not exclusive per-shard reservations.
-// Plan for every retained cohort and tunnel generation, allowing current,
+// Plan for every selected cohort and tunnel generation, allowing current,
 // announced-ahead and prefetched contracts in both directions. The floor adds
 // overlap headroom, not an exact bound on all lanes, renewals or later full
 // successors; periodic replenishment and live available-credit checks remain
@@ -1607,7 +1607,7 @@ func providerEgressProbeCreditMinimum(args *ProviderEgressProbeArgs) (model.Byte
 	if int64(args.TunnelRecreateAttempts) == math.MaxInt64 {
 		return 0, fmt.Errorf("provider egress probe credit geometry overflows")
 	}
-	// Check every product before multiplication, including the retained
+	// Check every product before multiplication, including the selected
 	// cohort count and tunnel recreations. Do not wrap an underfunded minimum.
 	reserve := func(contract, selected, cohorts int64) (int64, error) {
 		amount := contract

@@ -53,7 +53,7 @@ func TestProviderEgressProbeCreditMinimumCoversAdmittedCohorts(t *testing.T) {
 		t.Fatal(err)
 	}
 	full := int64(connect.DefaultContractManagerSettings().StandardContractTransferByteCount)
-	want := model.ByteCount(2 * 5 * 6 * (8*full + 8*2500*1024*1024))
+	want := model.ByteCount(2 * 5 * 6 * (8*full + providerEgressBlackholeSelectedCohorts*1250*1024*1024))
 	if got != want || got <= 2*model.ProberShardTransferHeadroom {
 		t.Fatalf("minimum=%d, want concurrent cohorts and lingering tunnel generations=%d", got, want)
 	}
@@ -115,7 +115,7 @@ func TestProviderEgressProbeExecutionArgsPreserveOwnerSettings(t *testing.T) {
 		if !reflect.DeepEqual(execution, &want) || !reflect.DeepEqual(providerEgressProbeExecutionArgs(execution), execution) {
 			t.Fatalf("%+v: execution settings changed beyond idempotent cohort normalization", c)
 		}
-		if (execution.Blackhole.Concurrency-1)/providerEgressBlackholeSelectedCohorts >= execution.Blackhole.Limit {
+		if (execution.Blackhole.Concurrency-1)/providerEgressBlackholeRetainedCohorts >= execution.Blackhole.Limit {
 			t.Fatalf("%+v: normalized cohort cannot admit the configured workers", c)
 		}
 	}

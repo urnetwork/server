@@ -310,7 +310,7 @@ func TestProviderEgressBlackholeCohortPoolBound(t *testing.T) {
 	}
 	args.Blackhole.Concurrency = 4001
 	if err := validateProviderEgressProbeArgs(args); err == nil {
-		t.Fatal("pool larger than all sixteen selectable cohorts was accepted")
+		t.Fatal("pool larger than all sixteen retained cohorts was accepted")
 	}
 	args.Blackhole.Concurrency = 1000
 	args.Full.Concurrency = args.Full.Limit + 1
@@ -685,14 +685,14 @@ func TestProviderEgressBlackholePipelineCutoffDoesNotDelayReadyWork(t *testing.T
 func TestProviderEgressBlackholePipelineBoundsSelectedBookkeeping(t *testing.T) {
 	args := testProviderEgressParallelArgs(t)
 	synctest.Test(t, func(t *testing.T) {
-		h := newTestBlackholePipeline(t, args, 20)
+		h := newTestBlackholePipeline(t, args, providerEgressBlackholeSelectedCohorts+2)
 		close(h.firstRelease)
 		close(h.firstTail)
 		close(h.laterRelease)
 		h.start()
 		synctest.Wait()
 		h.finish()
-		if h.startedCount(0, len(h.due)) != 4000 || h.peak.Load() > 250 || h.result == nil || !h.result.Full || h.err != nil {
+		if h.startedCount(0, len(h.due)) != providerEgressBlackholeSelectedCohorts*250 || h.peak.Load() > 250 || h.result == nil || !h.result.Full || h.err != nil {
 			t.Errorf("per-task selected work not bounded/rearmed: started=%d peak=%d result=%+v err=%v", h.startedCount(0, len(h.due)), h.peak.Load(), h.result, h.err)
 		}
 	})
@@ -714,8 +714,8 @@ func TestProviderEgressBlackholePipelineRefillsPastEightSlowTailCohorts(t *testi
 		if got := h.startedCount(80, 90); got != 10 {
 			t.Errorf("ninth cohort started %d/10 while first tail remained blocked", got)
 		}
-		if got := h.startedCount(0, 160); got != 160 || h.startedCount(160, 200) != 0 {
-			t.Errorf("selected work escaped or stopped short of the sixteen-cohort bound: started=%d beyond=%d", got, h.startedCount(160, 200))
+		if got := h.startedCount(0, 200); got != 200 {
+			t.Errorf("completed cohorts stopped refilling before the selected-work bound: started=%d want200", got)
 		}
 		if got := h.active.Load(); got != 1 {
 			t.Errorf("active workers=%d, want only the held tail after other checks complete", got)
