@@ -205,13 +205,14 @@ or takeover margin. If none qualifies, `winner_job_id` is null. The default
 production leaderboard
 excludes staging; `GET /competition/leaderboard?include_staging=true` exposes
 the same winner identity in the finalized staging round and its winning entry.
-Staging has no honesty-review pause or review records: even its winner is
-`honesty_review: not_reviewed`. A named staging winner is not an honesty or
-safety approval and never promotes source, changes the significance threshold,
-or creates a production winner. Previously finalized staging results remain
-unchanged. The best-safe staging policy requires migrations 691 and 720, API, and worker
-rollout before epoch 8 closes; the [epoch-5 release record](launch/STAGING-5-RELEASE.md)
-describes its historical opening policy.
+Staging has no review pause before finalization: its winner starts
+`honesty_review: not_reviewed`. After explicit manual review, the append-only
+`staging-review` command can mark that exact finalized winner `approved` so
+Apex can exercise its approved-winner path. Staging never promotes source or
+creates a production winner. Newly opened staging rounds freeze a zero
+takeover margin; historical rounds retain their original policy. The
+[epoch-5 release record](launch/STAGING-5-RELEASE.md) describes its historical
+opening policy.
 
 With the operator-token environment configured as described in `RUN-MAIN.md`,
 `./run-main.sh staging` creates or returns the current staging epoch and

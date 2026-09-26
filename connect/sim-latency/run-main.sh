@@ -48,9 +48,10 @@ Optional environment:
                                     staging admission window; default 172800
 
 Exit 20 means a production candidate is waiting for the mandatory honesty and
-safety review documented in RUN-MAIN.md. Staging automatically names an eligible
-significant winner (or no winner) after close and drain; it never pauses for
-honesty review or promotes source.
+safety review documented in RUN-MAIN.md. Staging automatically names the best
+placeable winner (or no winner) after close and drain, with no takeover margin
+or statistical-significance requirement. Its named winner needs a separate
+manual staging review for Apex approval; staging never promotes source.
 EOF
 }
 

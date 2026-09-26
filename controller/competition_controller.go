@@ -1162,9 +1162,11 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 	if err := verifyPinnedExecutable(settings.EvaluatorCommand, settings.EvaluatorCommandSha256); err != nil {
 		return infrastructureFailure("evaluator_identity_mismatch", "pinned evaluator identity check failed")
 	}
-	if !storedPolicyMatches(settings, job.Round.PolicyJson) {
+	roundSettings, err := settingsForFrozenRound(settings, &job.Round)
+	if err != nil {
 		return infrastructureFailure("round_policy_mismatch", "round policy does not match the frozen evaluator policy")
 	}
+	settings = roundSettings
 	if job.Round.Staging && job.Round.Epoch < 0 ||
 		!job.Round.Staging && (job.Round.Epoch < 1 || settings.SeasonPolicy.EpochCount < job.Round.Epoch) {
 		return infrastructureFailure("source_epoch_invalid", "round does not map to a configured measured-source epoch")
@@ -1286,6 +1288,11 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 					"pinned scorer returned an invalid result",
 				),
 			}
+		}
+		if !scoreMatchesFrozenMargin(result.Score, settings.EvaluationPolicy.TakeoverMargin) {
+			return EvaluationOutcome{Error: terminalInfrastructureError(
+				"score_result_invalid", "pinned scorer used a margin different from the frozen round",
+			)}
 		}
 	}
 	if result.EvalError != nil {
@@ -1572,6 +1579,29 @@ func storedPolicyMatches(settings *Settings, stored json.RawMessage) bool {
 	}
 	actualBytes, err := json.Marshal(actual)
 	return err == nil && bytes.Equal(actualBytes, expectedBytes)
+}
+
+// Staging rounds created after the no-margin change freeze zero in their own
+// policy snapshot. Historical staging rounds retain their original margin;
+// neither case changes the production policy in process configuration.
+func settingsForFrozenRound(settings *Settings, round *roundRecord) (*Settings, error) {
+	if settings == nil || round == nil {
+		return nil, errors.New("round policy is missing")
+	}
+	copy := *settings
+	if round.Staging {
+		policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
+		if err != nil {
+			return nil, err
+		}
+		if policy.EvaluationPolicy.TakeoverMargin == 0 {
+			copy.EvaluationPolicy.TakeoverMargin = 0
+		}
+	}
+	if !storedPolicyMatches(&copy, round.PolicyJson) {
+		return nil, errors.New("round policy does not match the frozen evaluator policy")
+	}
+	return &copy, nil
 }
 
 func validateEvaluationError(evalError *CompetitionError) error {
@@ -3347,6 +3377,9 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 			return nil, revealErr
 		}
 		result.ActiveRound = view
+		if err := applyFrozenRoundPublicPolicy(&result, round); err != nil {
+			return nil, infrastructureError("round_policy_mismatch", "active round policy could not be authenticated")
+		}
 	}
 	stagingRound, err := self.store.CurrentStagingRound(ctx, settings)
 	if err != nil {
@@ -3358,8 +3391,25 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 			return nil, revealErr
 		}
 		result.StagingRound = view
+		if round == nil {
+			if err := applyFrozenRoundPublicPolicy(&result, stagingRound); err != nil {
+				return nil, infrastructureError("round_policy_mismatch", "staging round policy could not be authenticated")
+			}
+		}
 	}
 	return &result, nil
+}
+
+func applyFrozenRoundPublicPolicy(result *InfoResult, round *roundRecord) error {
+	policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
+	if err != nil || policy.CompetitionId != result.CompetitionId {
+		return errors.New("round policy identity is invalid")
+	}
+	result.BaseSha = policy.BaseSha
+	result.EvaluatorImageDigest = policy.EvaluatorImageDigest
+	result.PatchPolicy = policy.PatchPolicy
+	result.EvaluationPolicy = policy.EvaluationPolicy
+	return nil
 }
 
 // Creates the next fee-free evaluated round before production begins. A
@@ -3784,6 +3834,11 @@ func validateScore(score *ScoreResult) error {
 	return model.ValidateCompetitionScore(score)
 }
 
+func scoreMatchesFrozenMargin(score *ScoreResult, margin float64) bool {
+	return score != nil && score.Significance != nil &&
+		math.Abs(score.Significance.TakeoverMarginPercent-margin*100) <= 1e-9
+}
+
 func infrastructureError(code, message string) *CompetitionError {
 	return &CompetitionError{Kind: "infrastructure", Code: code, Message: message, Retriable: true}
 }
@@ -4131,7 +4186,9 @@ func (self PostgresStore) CreateStagingRound(
 	if !now.Before(settings.SeasonEndsAt) {
 		return nil, ErrSeasonComplete
 	}
-	round, err := self.prepareRound(ctx, settings, args, true)
+	stagingSettings := *settings
+	stagingSettings.EvaluationPolicy.TakeoverMargin = 0
+	round, err := self.prepareRound(ctx, &stagingSettings, args, true)
 	if err != nil {
 		return nil, err
 	}
@@ -4801,6 +4858,116 @@ func (self PostgresStore) RecordCandidateReview(
 	return state, err
 }
 
+func stagingWinnerForReview(ctx context.Context, tx server.PgTx, settings *Settings, epoch int) (*roundRecord, *CandidateReviewCandidate, error) {
+	round, err := scanRound(tx.QueryRow(ctx, `
+		SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
+		       seed_ciphertext, providers_sha256, providers_path, policy_json, opens_at, closes_at,
+		       reveal_at, created_at, canceled, finalized_at, winner_job_id, admission_closed_at
+		FROM competition_round
+		WHERE competition_id = $1 AND epoch_number = $2 AND staging = true AND canceled = false
+		FOR UPDATE
+	`, settings.CompetitionId, epoch))
+	if err != nil {
+		return nil, nil, err
+	}
+	if round.FinalizedAt == nil || round.WinnerJobId == nil {
+		return round, nil, ErrReviewNotReady
+	}
+	candidate, err := scanNextCandidate(tx.QueryRow(ctx, `
+		SELECT 1, job_id, patch_sha256, patch_bytes, submitted_at, score_json
+		FROM competition_job
+		WHERE round_id = $1 AND job_id = $2 AND state = 'succeeded'
+	`, round.RoundId, *round.WinnerJobId))
+	return round, candidate, err
+}
+
+// Staging approval is retrospective: automatic winner selection remains
+// immutable, but its leaderboard entry can be marked approved after a real
+// manual review. This does not authorize source promotion.
+func (self PostgresStore) PrepareStagingWinnerReview(
+	ctx context.Context, settings *Settings, epoch int,
+) (state *CandidateReviewState, err error) {
+	var stateErr error
+	err = captureDatabaseError(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			round, candidate, loadErr := stagingWinnerForReview(ctx, tx, settings, epoch)
+			if errors.Is(loadErr, pgx.ErrNoRows) {
+				stateErr = ErrNotFound
+				return
+			}
+			if errors.Is(loadErr, ErrReviewNotReady) {
+				stateErr = loadErr
+				return
+			}
+			server.Raise(loadErr)
+			var approved bool
+			server.Raise(tx.QueryRow(ctx, `
+				SELECT EXISTS (SELECT 1 FROM competition_staging_winner_approval WHERE round_id = $1)
+			`, round.RoundId).Scan(&approved))
+			if approved {
+				state = candidateReviewState(round, "finalized", 0)
+			} else {
+				state = candidateReviewState(round, "pending_review", 0)
+				state.Candidate = candidate
+			}
+		})
+	})
+	if err == nil && stateErr != nil {
+		return nil, stateErr
+	}
+	return state, err
+}
+
+func (self PostgresStore) ApproveStagingWinner(
+	ctx context.Context, settings *Settings, epoch int, decision CandidateReviewDecision,
+) (state *CandidateReviewState, err error) {
+	decision.Reason = strings.TrimSpace(decision.Reason)
+	if decision.Decision != "approved" {
+		return nil, errors.New("staging winner approval requires an approved decision")
+	}
+	if err := validateCandidateReviewDecision(decision); err != nil {
+		return nil, err
+	}
+	var stateErr error
+	err = captureDatabaseError(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			round, candidate, loadErr := stagingWinnerForReview(ctx, tx, settings, epoch)
+			if errors.Is(loadErr, pgx.ErrNoRows) {
+				stateErr = ErrNotFound
+				return
+			}
+			if errors.Is(loadErr, ErrReviewNotReady) {
+				stateErr = loadErr
+				return
+			}
+			server.Raise(loadErr)
+			if candidate.JobId != decision.JobId {
+				stateErr = ErrReviewOutOfOrder
+				return
+			}
+			var prior bool
+			server.Raise(tx.QueryRow(ctx, `
+				SELECT EXISTS (SELECT 1 FROM competition_staging_winner_approval WHERE round_id = $1)
+			`, round.RoundId).Scan(&prior))
+			if prior {
+				stateErr = ErrConflict
+				return
+			}
+			server.RaisePgResult(tx.Exec(ctx, `
+				INSERT INTO competition_staging_winner_approval (
+					round_id, job_id, reviewer_id, reason, evidence_json, evidence_sha256, reviewed_at
+				) VALUES ($1, $2, $3, $4, $5::json, $6, $7)
+			`, round.RoundId, candidate.JobId, decision.ReviewerId, decision.Reason,
+				string(decision.Evidence), decision.EvidenceSha256, self.nowUtc()))
+			state = candidateReviewState(round, "finalized", 0)
+		})
+	})
+	if err == nil && stateErr != nil {
+		return nil, stateErr
+	}
+	return state, err
+}
+
 // RequirePromotionDecision is the final source-promotion interlock. The
 // promotion CLI may only carry forward a finalized no-winner epoch or apply the
 // exact job that has an append-only approved honesty review.
@@ -4901,13 +5068,16 @@ func (self PostgresStore) Leaderboards(
 				jobRows, jobsErr := conn.Query(ctx, `
 					SELECT job.job_id, job.patch_sha256, job.submitted_at,
 					       job.score_json, count(principal.principal_id),
-					       COALESCE(review.decision, 'not_reviewed')
+					       CASE WHEN staging_approval.job_id IS NOT NULL THEN 'approved'
+					            ELSE COALESCE(review.decision, 'not_reviewed') END
 					FROM competition_job AS job
 					JOIN competition_job_principal AS principal ON principal.job_id = job.job_id
 					LEFT JOIN competition_candidate_review AS review
 					  ON review.round_id = job.round_id AND review.job_id = job.job_id
+					LEFT JOIN competition_staging_winner_approval AS staging_approval
+					  ON staging_approval.round_id = job.round_id AND staging_approval.job_id = job.job_id
 					WHERE job.round_id = $1 AND job.state = 'succeeded'
-					GROUP BY job.job_id, review.decision
+					GROUP BY job.job_id, review.decision, staging_approval.job_id
 					ORDER BY CASE WHEN NOT EXISTS (
 					             SELECT 1 FROM competition_round_baseline WHERE round_id = $1
 					         ) THEN (job.score_json->>'normalized_score')::numeric END DESC,
@@ -5431,19 +5601,20 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			var attempts int
 			var apiImageDigest, workerImageDigest string
 			var roundId server.Id
+			var staging bool
 			var providersSha256 string
 			var policyJson []byte
 			var startedAt time.Time
 			server.Raise(tx.QueryRow(ctx, `
 				SELECT state, COALESCE(lease_owner, ''), attempt_count,
 				       api_image_digest, COALESCE(worker_image_digest, ''), started_at,
-				       job.round_id, round.providers_sha256, round.policy_json
+			       job.round_id, round.staging, round.providers_sha256, round.policy_json
 				FROM competition_job AS job
 				JOIN competition_round AS round ON round.round_id = job.round_id
 				WHERE job.job_id = $1 FOR UPDATE OF job
 			`, jobId).Scan(
 				&state, &owner, &attempts, &apiImageDigest, &workerImageDigest, &startedAt,
-				&roundId, &providersSha256, &policyJson,
+				&roundId, &staging, &providersSha256, &policyJson,
 			))
 			if state != "running" || owner != workerId {
 				leaseLost = true
@@ -5486,11 +5657,13 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				}
 				round := &roundRecord{
 					RoundResult: RoundResult{
-						RoundId: roundId, ProvidersSha256: providersSha256,
+						RoundId: roundId, Staging: staging, ProvidersSha256: providersSha256,
 					},
 					PolicyJson: policyJson,
 				}
-				baselineSha256, baselineErr := validateRoundBaselineJson(settings, round, outcome.RoundBaselineJson)
+				roundSettings, roundSettingsErr := settingsForFrozenRound(settings, round)
+				server.Raise(roundSettingsErr)
+				baselineSha256, baselineErr := validateRoundBaselineJson(roundSettings, round, outcome.RoundBaselineJson)
 				server.Raise(baselineErr)
 				if baselineSha256 != outcome.RoundBaselineSha256 {
 					panic(errors.New("round baseline outcome digest does not match its bytes"))
@@ -5522,7 +5695,7 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 					FROM competition_round_baseline WHERE round_id = $1 FOR SHARE
 				`, roundId))
 				server.Raise(storedErr)
-				server.Raise(validateRoundBaselineRecord(settings, round, storedBaseline))
+				server.Raise(validateRoundBaselineRecord(roundSettings, round, storedBaseline))
 				if storedBaseline.Sha256 != baselineSha256 ||
 					!bytes.Equal(storedBaseline.Json, outcome.RoundBaselineJson) {
 					panic(errors.New("evaluator outcome conflicts with the immutable round baseline"))
@@ -6745,7 +6918,8 @@ func validateApexLeaderboard(leaderboard LeaderboardResult) error {
 			return errors.New("Apex reconciliation received inconsistent leaderboard winner identities")
 		}
 		if leaderboard.Staging {
-			if entry.HonestyReview != "not_reviewed" {
+			if entry.HonestyReview != "not_reviewed" &&
+				!(entry.Winner && entry.HonestyReview == "approved") {
 				return errors.New("Apex reconciliation received staging honesty-review state")
 			}
 		} else {

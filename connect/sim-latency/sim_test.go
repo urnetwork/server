@@ -130,7 +130,7 @@ func TestMutatingCommandsRequireExpectedEnvironment(t *testing.T) {
 		t.Fatalf("init should not require a service environment: %v", err)
 	}
 
-	for _, command := range []string{"epoch-review", "promote", "launch-preflight", "credentials"} {
+	for _, command := range []string{"epoch-review", "staging-review", "promote", "launch-preflight", "credentials"} {
 		if err := validateEnvironment(command, "main"); err != nil {
 			t.Fatalf("%s rejected main environment: %v", command, err)
 		}

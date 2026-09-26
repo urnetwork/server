@@ -32,6 +32,8 @@ package main
 //             verify immutable staging branches alias frozen baseline source
 //   epoch-review
 //             enumerate, reject, or approve ranked significant candidates
+//   staging-review
+//             inspect and explicitly approve a finalized staging winner
 //   promote   publish a significant winner or no-winner source transition
 //   launch-preflight
 //             prove frozen source, image, API, MinIO, Grafana, and heartbeat
@@ -82,6 +84,8 @@ Usage:
   sim-latency epoch-review --epoch=<n> export-winner --job-id=<id> [--out-dir=<dir>]
   sim-latency epoch-review --epoch=<n> reject --job-id=<id> --reviewer=<id> --reason=<text> --evidence=<path> [--out-dir=<dir>]
   sim-latency epoch-review --epoch=<n> approve --job-id=<id> --reviewer=<id> --reason=<text> --evidence=<path>
+  sim-latency staging-review --epoch=<n> next [--out-dir=<dir>]
+  sim-latency staging-review --epoch=<n> approve --job-id=<id> --reviewer=<id> --reason=<text> --evidence=<path>
   sim-latency promote --epoch=<n> (--winner=<dir> --winner-job-id=<id> | --no-winner) [--message=<text>] [--source-config=<path>] [--repos-root=<dir>] [--dry-run]
   sim-latency launch-preflight --epoch=<n> --evaluator-image=<digest> --operator-token-file=<path> --grafana-url=<url> --grafana-token-file=<path> --metrics-url=<url> --metrics-token-file=<path> [--api-url=<url>] [--openapi=<path>] [--artifact-capacity-bytes=<n>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
   sim-latency handoff-manifest --epoch=<n> --evaluator-image=<digest> --openapi=<path> --baseline-manifest=<path> --preflight=<path> [--staging-evidence=<paths>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
@@ -223,6 +227,9 @@ Options:
 	case optBool(opts, "epoch-review"):
 		requireMainEnvironment("epoch-review")
 		runEpochReview(opts)
+	case optBool(opts, "staging-review"):
+		requireMainEnvironment("staging-review")
+		runStagingReview(opts)
 	case optBool(opts, "promote"):
 		requireMainEnvironment("promote")
 		runPromote(opts)
@@ -423,7 +430,7 @@ func validateEnvironment(command string, env string) error {
 				env,
 			)
 		}
-	case "epoch-review", "promote", "launch-preflight", "credentials":
+	case "epoch-review", "staging-review", "promote", "launch-preflight", "credentials":
 		if env != "main" {
 			return fmt.Errorf(
 				"sim-latency %s is main-only: refusing WARP_ENV=%q",

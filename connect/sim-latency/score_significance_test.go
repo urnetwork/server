@@ -50,6 +50,16 @@ func TestScoreSignificanceRecordsVarianceAndOneSidedDecision(t *testing.T) {
 	}
 }
 
+func TestScoreSignificanceZeroStagingMargin(t *testing.T) {
+	baseline := significanceBaseline([]float64{96, 97, 98, 99, 100, 101, 102, 103, 104})
+	candidate := significanceCandidate([]float64{95, 96, 97, 98, 99, 100, 101, 102, 103})
+	result := scoreSignificance(baseline, candidate, 0)
+	if result.TakeoverMarginPercent != 0 || result.RequiredImprovementPercent == nil ||
+		*result.RequiredImprovementPercent <= 0 {
+		t.Fatalf("zero-margin staging significance = %+v", result)
+	}
+}
+
 func TestScoreSignificanceRejectsSmallOrUnmeasurableDraws(t *testing.T) {
 	t.Run("small improvement", func(t *testing.T) {
 		baseline := significanceBaseline([]float64{96, 97, 98, 99, 100, 101, 102, 103, 104})

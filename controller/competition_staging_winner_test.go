@@ -20,7 +20,11 @@ func (self *competitionRankingFixture) completeScore(t testing.TB, score *ScoreR
 	t.Helper()
 	job := self.addJob(t)
 	if shared {
-		outcome := testSharedBaselineOutcome(t, self.settings, job, EvaluationOutcome{Score: score})
+		roundSettings, err := settingsForFrozenRound(self.settings, &job.Round)
+		if err != nil {
+			t.Fatal(err)
+		}
+		outcome := testSharedBaselineOutcome(t, roundSettings, job, EvaluationOutcome{Score: score})
 		if retry, err := self.store.Complete(context.Background(), self.settings, "ranking-worker", job.JobId, outcome); err != nil || retry {
 			t.Fatalf("complete synthetic staging score: retry=%t error=%v", retry, err)
 		}
@@ -86,12 +90,36 @@ func TestCompetitionStagingWinnerPreservesRankingAndReviewIsolation(t *testing.T
 			if reviewErr == nil || !strings.Contains(reviewErr.Error(), "staging round cannot enter candidate review") {
 				t.Fatalf("shared=%t staging review gate error = %v", shared, reviewErr)
 			}
+			server.Db(ctx, func(conn server.PgConn) {
+				_, reviewErr = conn.Exec(ctx, `
+					INSERT INTO competition_staging_winner_approval (
+						round_id, job_id, reviewer_id, reason, evidence_json,
+						evidence_sha256, reviewed_at
+					) VALUES ($1, $2, 'synthetic-staging-reviewer', 'premature',
+						'{"synthetic":true}'::json, $3, $4)
+				`, fixture.round.RoundId, bestJobId, strings.Repeat("a", 64), fixture.now)
+			}, server.OptReadWrite())
+			if reviewErr == nil || !strings.Contains(reviewErr.Error(), "finalized winning job") {
+				t.Fatalf("premature staging approval gate error = %v", reviewErr)
+			}
 			if _, err := fixture.store.PrepareCandidateReview(ctx, fixture.settings, fixture.round.Epoch); !errors.Is(err, ErrNotFound) {
 				t.Fatalf("production review selected staging: %v", err)
 			}
 			finalized, err := fixture.store.FinalizeStagingRound(ctx, fixture.settings, fixture.round.Epoch)
 			if err != nil || finalized.FinalizedAt == nil || finalized.WinnerJobId == nil || *finalized.WinnerJobId != bestJobId {
 				t.Fatalf("shared=%t automatic winner = %+v, error=%v", shared, finalized, err)
+			}
+			server.Db(ctx, func(conn server.PgConn) {
+				_, reviewErr = conn.Exec(ctx, `
+					INSERT INTO competition_staging_winner_approval (
+						round_id, job_id, reviewer_id, reason, evidence_json,
+						evidence_sha256, reviewed_at
+					) VALUES ($1, $2, 'synthetic-staging-reviewer', 'wrong winner',
+						'{"synthetic":true}'::json, $3, $4)
+				`, fixture.round.RoundId, fixture.jobs[otherIndex].JobId, strings.Repeat("a", 64), fixture.now)
+			}, server.OptReadWrite())
+			if reviewErr == nil || !strings.Contains(reviewErr.Error(), "finalized winning job") {
+				t.Fatalf("non-winner staging approval gate error = %v", reviewErr)
 			}
 			for _, winnerJobId := range []*server.Id{nil, &bestJobId} {
 				if _, err := fixture.store.RequirePromotionDecision(ctx, fixture.settings, fixture.round.Epoch, winnerJobId); !errors.Is(err, ErrNotFound) {
@@ -106,6 +134,40 @@ func TestCompetitionStagingWinnerPreservesRankingAndReviewIsolation(t *testing.T
 				if entry.HonestyReview != "not_reviewed" || entry.Winner != (index == 0) {
 					t.Fatalf("automatic staging review/winner state = %+v", entry)
 				}
+			}
+			pending, err := fixture.store.PrepareStagingWinnerReview(ctx, fixture.settings, fixture.round.Epoch)
+			if err != nil || pending.Status != "pending_review" || pending.Candidate == nil || pending.Candidate.JobId != bestJobId {
+				t.Fatalf("staging winner pending review = %+v, %v", pending, err)
+			}
+			if _, err := fixture.store.ApproveStagingWinner(ctx, fixture.settings, fixture.round.Epoch,
+				testCandidateReviewDecision(fixture.jobs[otherIndex].JobId, "approved")); !errors.Is(err, ErrReviewOutOfOrder) {
+				t.Fatalf("non-winner staging approval accepted: %v", err)
+			}
+			approved, err := fixture.store.ApproveStagingWinner(ctx, fixture.settings, fixture.round.Epoch,
+				testCandidateReviewDecision(bestJobId, "approved"))
+			if err != nil || approved.Status != "finalized" || approved.WinnerJobId == nil || *approved.WinnerJobId != bestJobId {
+				t.Fatalf("staging approval = %+v, %v", approved, err)
+			}
+			if _, err := fixture.store.ApproveStagingWinner(ctx, fixture.settings, fixture.round.Epoch,
+				testCandidateReviewDecision(bestJobId, "approved")); !errors.Is(err, ErrConflict) {
+				t.Fatalf("duplicate staging approval accepted: %v", err)
+			}
+			server.Db(ctx, func(conn server.PgConn) {
+				_, reviewErr = conn.Exec(ctx, `
+					UPDATE competition_staging_winner_approval SET reason = 'rewritten'
+					WHERE round_id = $1
+				`, fixture.round.RoundId)
+			}, server.OptReadWrite())
+			if reviewErr == nil || !strings.Contains(reviewErr.Error(), "append-only") {
+				t.Fatalf("staging approval was mutable: %v", reviewErr)
+			}
+			boards, err = fixture.store.Leaderboards(ctx, fixture.settings, true)
+			if err != nil || len(boards.Epochs) != 1 || boards.Epochs[0].Entries[0].HonestyReview != "approved" ||
+				boards.Epochs[0].Entries[1].HonestyReview != "not_reviewed" {
+				t.Fatalf("reviewed staging leaderboard = %+v, %v", boards, err)
+			}
+			if err := validateApexLeaderboard(boards.Epochs[0]); err != nil {
+				t.Fatalf("Apex rejected reviewed staging winner: %v", err)
 			}
 			if public, err := fixture.store.Leaderboards(ctx, fixture.settings, false); err != nil || len(public.Epochs) != 0 {
 				t.Fatalf("default leaderboard leaked staging = %+v, %v", public, err)
@@ -253,6 +315,11 @@ func TestCompetitionStagingWinnerCannotCrossProductionEpoch(t *testing.T) {
 		if err != nil || fixture.round.Epoch != 1 {
 			t.Fatalf("staging epoch one = %+v, %v", fixture.round, err)
 		}
+		stagingSettings, err := settingsForFrozenRound(fixture.settings, fixture.round)
+		if err != nil || stagingSettings.EvaluationPolicy.TakeoverMargin != 0 ||
+			fixture.settings.EvaluationPolicy.TakeoverMargin == 0 {
+			t.Fatalf("staging round did not freeze zero margin: settings=%+v error=%v", stagingSettings, err)
+		}
 		stagingJob := fixture.completeScore(t, competitionRankingScore(90, 115), true)
 		if _, err := fixture.store.CloseStagingRound(ctx, fixture.settings); err != nil {
 			t.Fatal(err)
@@ -341,8 +408,9 @@ func newStagingWinnerAdapterFixture(t testing.TB, staging bool) (*ApexAdapterFil
 	return store, board, now.Add(2 * time.Hour)
 }
 
-// Both scopes require a consistent eligible winner, but staging never claims
-// an honesty approval. Historical null-winner staging boards remain accepted.
+// Both scopes require a consistent eligible winner. A finalized staging winner
+// may gain explicit approval after its first published leaderboard; historical
+// null-winner boards remain accepted.
 func TestApexAdapterAcceptsAutomaticStagingAndReviewedProductionWinners(t *testing.T) {
 	for _, staging := range []bool{false, true} {
 		store, board, now := newStagingWinnerAdapterFixture(t, staging)
@@ -362,6 +430,18 @@ func TestApexAdapterAcceptsAutomaticStagingAndReviewedProductionWinners(t *testi
 	board.WinnerJobId, board.Entries[0].Winner = nil, false
 	if err := store.ReconcileLeaderboard(SeasonLeaderboardResult{Epochs: []LeaderboardResult{board}}, now); err != nil {
 		t.Fatalf("historical null-winner staging board rejected: %v", err)
+	}
+	store, board, now = newStagingWinnerAdapterFixture(t, true)
+	if err := store.ReconcileLeaderboard(SeasonLeaderboardResult{Epochs: []LeaderboardResult{board}}, now); err != nil {
+		t.Fatal(err)
+	}
+	board.Entries[0].HonestyReview = "approved"
+	if err := store.ReconcileLeaderboard(SeasonLeaderboardResult{Epochs: []LeaderboardResult{board}}, now.Add(time.Minute)); err != nil {
+		t.Fatalf("reviewed staging winner rejected: %v", err)
+	}
+	record, err := store.Get("synthetic-winner")
+	if err != nil || record.HonestyReview != "approved" || !record.Winner {
+		t.Fatalf("staging approval was not reconciled: %+v, %v", record, err)
 	}
 }
 
@@ -389,7 +469,7 @@ func TestApexAdapterRejectsInconsistentAutomaticAndReviewedWinners(t *testing.T)
 			},
 			func(board *LeaderboardResult) { board.Entries[0].Score.RawScore = nil },
 		} {
-			if staging && (index == 6 || index == 7) {
+			if staging && (index == 5 || index == 6 || index == 7) {
 				continue
 			}
 			store, board, now := newStagingWinnerAdapterFixture(t, staging)

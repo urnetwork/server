@@ -313,7 +313,8 @@ func validateCompetitionScoreSignificance(significance *CompetitionScoreSignific
 		!competitionFinitePositive(significance.BaselineMeanRawScore) ||
 		!competitionFinitePositive(significance.CandidateMeanRawScore) ||
 		!competitionFinite(significance.ObservedImprovementPercent) ||
-		!competitionFinitePositive(significance.TakeoverMarginPercent) ||
+		!competitionFinite(significance.TakeoverMarginPercent) ||
+		significance.TakeoverMarginPercent < 0 ||
 		50 < significance.TakeoverMarginPercent {
 		return errors.New("score significance metadata is malformed")
 	}
@@ -337,7 +338,7 @@ func validateCompetitionScoreSignificance(significance *CompetitionScoreSignific
 		!competitionFiniteNonnegativePointer(significance.MinimumSignificantImprovementPercent) ||
 		!competitionFiniteNonnegativePointer(significance.RequiredImprovementPercent) ||
 		!competitionFiniteNonnegativePointer(significance.NextEpochMinimumImprovementPercent) ||
-		!competitionFinitePositivePointer(significance.RecommendedNextEpochTakeoverMarginPercent) ||
+		!competitionFiniteNonnegativePointer(significance.RecommendedNextEpochTakeoverMarginPercent) ||
 		significance.OneSidedPValue == nil ||
 		!competitionFinite(*significance.OneSidedPValue) ||
 		*significance.OneSidedPValue < 0 || 1 < *significance.OneSidedPValue {

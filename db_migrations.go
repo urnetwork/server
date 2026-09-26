@@ -9045,4 +9045,43 @@ var migrations = []any{
 		END
 		$competition_epoch_lifecycle_guard$;
 	`),
+
+	// An explicit, append-only operator approval lets Apex exercise its real
+	// approved-winner path in staging without weakening production candidate
+	// review or changing an already-finalized staging winner.
+	newSqlMigration(`
+		CREATE TABLE competition_staging_winner_approval (
+			round_id uuid PRIMARY KEY REFERENCES competition_round(round_id),
+			job_id uuid NOT NULL REFERENCES competition_job(job_id),
+			reviewer_id varchar(128) NOT NULL CHECK (
+				reviewer_id ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+			),
+			reason text NOT NULL CHECK (octet_length(reason) BETWEEN 1 AND 4096),
+			evidence_json json NOT NULL CHECK (json_typeof(evidence_json) = 'object'),
+			evidence_sha256 varchar(64) NOT NULL CHECK (evidence_sha256 ~ '^[0-9a-f]{64}$'),
+			reviewed_at timestamp NOT NULL
+		);
+		CREATE TRIGGER competition_staging_winner_approval_append_only
+		BEFORE UPDATE OR DELETE ON competition_staging_winner_approval
+		FOR EACH ROW EXECUTE FUNCTION competition_append_only_guard();
+		CREATE FUNCTION competition_staging_winner_approval_guard()
+		RETURNS trigger LANGUAGE plpgsql AS $staging_winner_approval_guard$
+		BEGIN
+			IF NOT EXISTS (
+				SELECT 1 FROM competition_round AS round
+				JOIN competition_job AS job ON job.job_id = NEW.job_id
+				WHERE round.round_id = NEW.round_id AND round.staging = true
+				  AND round.canceled = false AND round.finalized_at IS NOT NULL
+				  AND round.winner_job_id = NEW.job_id AND job.round_id = NEW.round_id
+				  AND job.state = 'succeeded'
+			) THEN
+				RAISE EXCEPTION 'staging approval requires the finalized winning job';
+			END IF;
+			RETURN NEW;
+		END
+		$staging_winner_approval_guard$;
+		CREATE TRIGGER competition_staging_winner_approval_insert_guard
+		BEFORE INSERT ON competition_staging_winner_approval
+		FOR EACH ROW EXECUTE FUNCTION competition_staging_winner_approval_guard();
+	`),
 }
