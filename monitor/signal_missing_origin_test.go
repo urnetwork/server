@@ -140,8 +140,10 @@ func TestMissingOriginSignalSyntheticCompleteDetailedCohorts(t *testing.T) {
 		"sender_client_rate_per_minute=211.325",
 		"source_owner_egress_prober_rate_per_minute=1200.000",
 		"source_owner_other_rate_per_minute=211.325",
+		"destination_owner_other_rate_per_minute=1411.325",
 		"dominant_sender_role=server",
 		"dominant_source_owner=egress_prober",
+		"dominant_destination_owner=other",
 		"dominant_resolution=stream_fallback",
 		"dominant_relationship=network",
 		"dominant_source_lifecycle=active_top",
@@ -157,6 +159,57 @@ func TestMissingOriginSignalSyntheticCompleteDetailedCohorts(t *testing.T) {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("complete-detail alert missing %q:\n%s", want, alert.Markdown())
 		}
+	}
+}
+
+func TestMissingOriginSignalDestinationOwnerSeparatesMixedAPIGenerations(t *testing.T) {
+	now := time.Date(2026, 9, 26, 23, 0, 0, 0, time.UTC)
+	payload := missingOriginFixtureWithDetailsJSON(t, now, 1400, []missingOriginDetailFixture{
+		{
+			senderRole: "absent", sourceOwner: "other", destinationOwner: "egress_prober",
+			resolution: "stream_fallback", relationship: "public",
+			sourceLifecycle: "active_top", destinationLifecycle: "active_derived", rate: 900,
+		},
+		{
+			senderRole: "absent", sourceOwner: "other", omitDestinationOwner: true,
+			resolution: "stream_fallback", relationship: "public",
+			sourceLifecycle: "active_top", destinationLifecycle: "active_derived", rate: 500,
+		},
+	})
+	alerts, err := NewMissingOriginSignal().Run(context.Background(), missingOriginSyntheticSettings(t, now, payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "missing-origin-rate").Markdown()
+	for _, want := range []string{
+		"detail_status=complete",
+		"destination_owner_egress_prober_rate_per_minute=900.000",
+		"destination_owner_unattributed_rate_per_minute=500.000",
+		"dominant_destination_owner=egress_prober",
+	} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("destination ownership omitted %q", want)
+		}
+	}
+}
+
+func TestMissingOriginSignalRejectsUnboundedDestinationOwner(t *testing.T) {
+	now := time.Date(2026, 9, 26, 23, 1, 0, 0, time.UTC)
+	privateValue := "synthetic-private-customer"
+	payload := missingOriginFixtureWithDetailsJSON(t, now, 1400, []missingOriginDetailFixture{{
+		senderRole: "absent", sourceOwner: "other", destinationOwner: privateValue,
+		resolution: "stream_fallback", relationship: "public",
+		sourceLifecycle: "active_top", destinationLifecycle: "active_derived", rate: 1400,
+	}})
+	alerts, err := NewMissingOriginSignal().Run(context.Background(), missingOriginSyntheticSettings(t, now, payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown := requireAlertClass(t, alerts, "missing-origin-rate").Markdown()
+	if !strings.Contains(markdown, "detail_status=ambiguous") ||
+		!strings.Contains(markdown, "detail_error=invalid_detail_labels") ||
+		strings.Contains(markdown, privateValue) {
+		t.Fatalf("unbounded destination owner escaped validation")
 	}
 }
 
@@ -404,7 +457,7 @@ func missingOriginSyntheticSettings(t testing.TB, now time.Time, payload string)
 			!strings.Contains(command, "missing_companion_origin") ||
 			!strings.Contains(command, "companion%3D%22false%22") ||
 			!strings.Contains(command, "request_companion%3D%22false%22") ||
-			!strings.Contains(command, "sum+by+%28sender_role%2Csource_owner%2Cresolution%2Crelationship%2Csource_lifecycle%2Cdestination_lifecycle%29") ||
+			!strings.Contains(command, "sum+by+%28sender_role%2Csource_owner%2Cdestination_owner%2Cresolution%2Crelationship%2Csource_lifecycle%2Cdestination_lifecycle%29") ||
 			!strings.Contains(command, "monitor_metric") ||
 			!strings.Contains(command, "%5B5m%5D") ||
 			!strings.Contains(command, "%22synthetic%22") {
@@ -441,7 +494,9 @@ func missingOriginFixtureJSON(t testing.TB, sampleTime time.Time, rates []float6
 type missingOriginDetailFixture struct {
 	senderRole           string
 	sourceOwner          string
+	destinationOwner     string
 	omitAttribution      bool
+	omitDestinationOwner bool
 	resolution           string
 	relationship         string
 	sourceLifecycle      string
@@ -485,6 +540,13 @@ func missingOriginFixtureWithDetailsJSON(
 			}
 			labels["sender_role"] = senderRole
 			labels["source_owner"] = sourceOwner
+			if !detail.omitDestinationOwner {
+				destinationOwner := detail.destinationOwner
+				if destinationOwner == "" {
+					destinationOwner = "other"
+				}
+				labels["destination_owner"] = destinationOwner
+			}
 		}
 		for key, value := range detail.extraLabels {
 			labels[key] = value

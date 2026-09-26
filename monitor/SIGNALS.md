@@ -5933,6 +5933,42 @@ correlation only and cannot assign process allocation ownership.
 Implementation convention: SIGNALS.md §2.12a (`worker-churn`) maps to
 `signal_worker_churn.go` and `signal_worker_churn_test.go`.
 
+### 2.12b Taskworker scheduler capacity — process cap is not host headroom
+Probe: `worker-cap`
+
+Join source-fresh `rate(process_cpu_seconds_total[5m])`,
+`go_sched_gomaxprocs_threads`, and `go_goroutines` by the **same**
+Taskworker host, block, and runtime instance. Filter each raw source timestamp
+to the last 90 seconds before accepting the instant-query result. WARN after
+two one-minute observations when CPU consumes at least 90% of that process's
+GOMAXPROCS and at least 10,000 goroutines are present. A missing, stale,
+invalid, duplicate, or mixed-instance member is `worker-scheduler-unobservable`, never
+proof of spare capacity. Preserve the separate §2.12a CPU/allocation-churn
+threshold: scheduler pressure does not require exceptional allocation.
+
+The 2026-09-26 Main probe load supplied the discriminator: one 128-full,
+1,000-cheap Taskworker consumed 3.71 CPU cores with `GOMAXPROCS=4` and
+approximately 105,000 goroutines while PostgreSQL still had host-level CPU
+headroom. The four-core value came from the Taskworker service's `cores`
+setting through Warpctl's `--core-limit` to `GOMAXPROCS`, not a Docker CPU
+quota. Thus host CPU percentage is a **false negative** for process-local
+scheduler saturation. High process CPU alone can be healthy useful work; the
+goroutine floor and joined §2.19 due/throughput evidence qualify the finding,
+not prove that every goroutine is runnable or that the scheduler is the sole
+cause of low coverage.
+
+Do not lift the cap as an isolated repair: pinned gVisor starts TCP dispatcher
+workers per private tunnel using `runtime.GOMAXPROCS(0)`. Raising it from 4
+to a 96-core host default could multiply those baseline workers by 24 while
+probes still hold tunnels through spaced retry chains. First bound detached
+DoH dials, verify per-process shard ownership and tunnel residency, and
+compare measured provider checks/hour with §2.19. Increasing shard count
+without admission balancing is not a placement guarantee: one Taskworker can
+claim several shards and mixed old/new shard counts can overlap provider
+partitions until old runs retire. Retain this WARN until two fresh exact-process
+cadences show pressure below threshold **and** coverage improves without
+PostgreSQL, API, or host regression.
+
 ### 2.13 Maintenance reboot collision — process exit is not task completion
 Probe: `reboot-collision`
 
@@ -6313,6 +6349,10 @@ server-side race wait. Server `c8dfe570` also added
 sender role plus server-derived source owner, request-time resolution,
 relationship, and source/destination lifecycle snapshot already read by
 `CreateContract`; it performs no identifier-bearing diagnostic query. The
+newer API also exports bounded `destination_owner` from that same snapshot;
+older API cohorts retain `destination_owner=unattributed` in the monitor, not
+`other` or a fabricated zero. This dimension distinguishes a prober-owned
+return destination from a request originating at the prober. The
 probe requests the aggregate and detail cohorts in one Mimir evaluation, only
 for requests whose original wire bit was false:
 
@@ -6325,7 +6365,7 @@ label_replace(
 )
 or
 label_replace(
-  sum by (sender_role,source_owner,resolution,relationship,source_lifecycle,destination_lifecycle) (
+  sum by (sender_role,source_owner,destination_owner,resolution,relationship,source_lifecycle,destination_lifecycle) (
     rate(urnetwork_connect_missing_origin_details_total{
       env="main",request_companion="false"
     }[5m])
@@ -6344,6 +6384,8 @@ It is never accepted from a request. `resolution` is one of
 `rejected`, or `unknown`; `relationship` is `network`, `friends_family`,
 `public`, or `unknown`; and each lifecycle is `missing`, `active_top`,
 `inactive_top`, `active_derived`, `inactive_derived`, `control`, or `unknown`.
+`destination_owner` uses the same fixed `egress_prober`, `other`, or `unknown`
+producer vocabulary as `source_owner`, and is independently server-derived.
 Mimir sums away API process/instance labels before the monitor sees the
 response. No customer, client, network, device, contract, or destination
 identity enters the cohort; the standard bounded monitor gateway name remains
@@ -6380,11 +6422,13 @@ using the cohorts:
   larger of 1/min or 2%; that narrow allowance covers a scrape landing between
   the two adjacent counter increments. The old five-label schema may coexist
   during a rolling range; the monitor retains both missing attribution labels
-  as the synthetic fixed class `unattributed`, never folds that rate into
-  `other`, and rejects a half-upgraded or producer-emitted `unattributed`
-  schema. Only in this state may the alert export the dominant joint sender/
-  source-owner/resolution/relationship/lifecycle cohort and its rate. A
-  reconciled `unattributed` cohort is rate-complete but not ownership evidence.
+  as the synthetic fixed class `unattributed`. The intermediate seven-label
+  schema retains only `destination_owner=unattributed`. Neither is folded into
+  `other`; a half-upgraded or producer-emitted `unattributed` schema is rejected.
+  Only in this state may the alert export the dominant joint sender/source-
+  owner/destination-owner/resolution/relationship/lifecycle cohort and its rate.
+  A reconciled `unattributed` cohort is rate-complete but not ownership evidence
+  for its missing dimension.
 - `detail_status=partial`: structurally valid cohorts sum materially below the
   aggregate. This is a mixed API rollout or incomplete ingestion window; do not
   assign the incident from the visible subset.
@@ -6407,16 +6451,37 @@ compare the onset with score publications, service rollout/drain boundaries,
 connection churn, successful contract creation, and the client-window lifetime.
 Windows selected before a repaired publication must age out naturally. For a
 complete detail snapshot, use its joint sender role, server-derived source
-owner, source lifecycle, destination lifecycle, relationship, and resolution
+owner, destination owner, source lifecycle, destination lifecycle, relationship, and resolution
 cohort to distinguish the internal prober from other selection/return traffic
 without raw client pairs. `source_owner=egress_prober` selects only the
 server-owned singleton for direct correlation. `source_owner=other` excludes
 that singleton but does not identify a product, application, device, or
-artifact. A complete older-schema cohort is retained as `unattributed`, never
+artifact. `destination_owner=egress_prober` can identify the prober-owned
+return destination when the source is another network; `source_owner=other`
+alone cannot exclude that path. A complete older-schema cohort is retained as `unattributed`, never
 folded into `other`. An absent, partial, ambiguous, or ownership-unattributed
 snapshot must not be used as causal proof. Do not log identifiers, edit Redis
 blobs, weaken provider gates, restart clients, or increase the companion wait
 merely to hide the rate.
+
+2026-09-26 Main diagnostic discriminator: the bounded five-minute cohort ran
+near 1,402 missing-origin failures/s with `requested_companion=false`,
+`sender_role=absent`, `source_owner=other`, `resolution=stream_fallback`,
+`relationship=public`, and `active_top→active_derived`. Only about 0.97/s had
+`source_owner=egress_prober`. This does **not** exonerate the prober: a provider
+reply can have another source and a prober-owned derived destination. The old
+metric has no destination-owner dimension, so it is a false-negative qualifier
+for prober attribution. The source path retries a missing origin about every
+100 ms for three seconds, normally running both the plain-origin and companion-
+origin PostgreSQL lookups, while the dominant origin SELECT ran roughly
+24,000–39,000 times/s and rarely returned a row. The retry multiplier is a
+confirmed database-load mechanism, not proof that every missing origin is
+impossible or that the query rate is exclusively from this cohort. Distinguish
+proven terminal failures from legitimate subsecond creation races; do not
+shorten the race window or skip its final authoritative database check merely
+to reduce load. An event-assisted wait must be post-commit, bounded per owner,
+safe across subscribe/commit races and missed Redis notifications, and must
+degrade to bounded database checks when Redis or an older writer is unavailable.
 
 2026-09-02 production evidence showed why this must be a first-class monitor
 signal rather than only a dashboard rule. After the eligibility export, the
@@ -6556,6 +6621,62 @@ schema rejection, partial mixed-rollout coverage, duplicate/skewed/unknown/
 extra-label ambiguity, identifier redaction, the exact healthy boundary,
 absent and duplicate aggregate visibility, stale samples, invalid rates, query
 scoping, and detailed Markdown rendering without identifiers.
+
+### 2.17a Companion-origin wait amplification and notification loss
+Probe: `origin-wait`
+
+After the event-assisted wait is deployed, join source-fresh five-minute rates
+of `urnetwork_connect_companion_origin_lookups_total{source=initial|event|fallback|deadline}`,
+`urnetwork_connect_companion_origin_wait_wakes_total{source=event|fallback|deadline|cancel}`,
+`urnetwork_contract_origin_notifications_total{event=<fixed vocabulary>}`, and
+`urnetwork_connect_companion_origin_lookups_per_request_count`. Every raw
+source must have been scraped inside 90 seconds; a fresh Mimir evaluation time
+alone is not enough. Counter children are preinitialized by the producer.
+Absent, stale, duplicate, extra-label, invalid, or partially deployed metrics
+are `origin-wait-unobservable`, not zero retries or healthy Redis delivery.
+Running API/Connect artifact convergence is a separate source-completeness
+gate: a complete metric family from only some instances can undercount.
+
+`origin-wait-db-amplification` WARNs after two one-minute cadences if fallback
+and deadline lookups exceed 500/min and total authoritative lookups average at
+least three per completed companion request. This is a database-work signal,
+not evidence that the absent origin could never arrive. Each lookup can issue
+both plain-origin and chained-companion SQL reads. Correlate with §2.17's
+server-derived source **and destination** owners, actual PostgreSQL statement
+deltas, cold-start success, and the provider-coverage controls. A low average
+can be a **false negative** if many immediate successes dilute a smaller but
+highly amplified failing cohort; the fixed source counters and §2.17 failure
+rate remain independent controls. A high average can reflect legitimate
+simultaneous cold starts; require the sustained rate and successful-contract
+control before calling it a defect.
+
+`origin-notification-loss` WARNs after two one-minute cadences when the sum of
+`queue_full`, `publish_failed`, `subscription_failed`,
+`registration_declined`, and `invalid_message` exceeds one/minute. A missed
+advisory notification forces bounded PostgreSQL fallback but must not change
+the committed contract result. `owner_closed` during orderly drain and
+`unowned` non-router/test callers are not loss by themselves. `subscribed`,
+`reconnected`, `received`, `enqueued`, and `published` are bounded diagnostic
+context, not a promise that every wait woke from Redis. Mixed old/new writers
+can fail to publish without incrementing the new metric; the timed and final
+database reads preserve correctness, and exact artifact inventory remains
+necessary to close that false negative.
+
+Retain an immediate lookup, a fast first retry, event/ack-triggered rechecks,
+bounded timed fallback, and a final authoritative lookup at the existing
+three-second deadline. An event publisher runs only after a successful
+PostgreSQL commit; queue/Redis failure cannot fail a committed contract.
+Subscriptions are multiplexed within an explicitly owned API/Connect instance
+and bounded independently per instance. Never add one Redis connection per
+waiting request or a process-global Connect admission budget. Verification
+requires two complete five-minute post-convergence windows with low loss and
+reduced fallback/SQL amplification, preserved cold-start contract success,
+and no regression in provider coverage or database CPU.
+
+Implementation convention: SIGNALS.md §2.17a (`origin-wait`) maps to
+`signal_origin_wait.go` and `signal_origin_wait_test.go`. Synthetic tests cover
+amplification, notification loss, missing child visibility, and identifier-
+unsafe metric labels without real secrets, addresses, or hosts.
 
 ### 2.18 Stale contract destination rejection — dead routes must not authorize
 Probe: `stale-destination`
@@ -13095,9 +13216,11 @@ Tier-1 (warn):
 | pgbouncer-write-stall | logs+host | 2.11 app write timeout to `:6432` | any route/host cluster sustained 2 min |
 | worker-memory-skew | mimir | 2.12 fresh taskworker allocated heap by host/block/instance | >= 8GiB and >= 4× fleet median for 2 probes; sparse-fleet fallback >= 16GiB |
 | worker-cpu-allocation-churn | mimir+task logs | 2.12a paired one-minute taskworker CPU/allocation rates by host/block/instance; score phase enrichment requires the complete source-fresh fixed family, independently of the global alias marker | >= 3.8 cores and >= 256MiB/s and both >= 8× fleet medians for 2 probes; missing/mixed phase series remain unobservable |
+| worker-scheduler-capacity / worker-scheduler-unobservable | loopback Mimir | §2.12b exact Taskworker instance's source-fresh five-minute process CPU, GOMAXPROCS, and goroutines | CPU >= 90% of own GOMAXPROCS with >= 10,000 goroutines for 2 probes; missing/stale/mixed tuple is visibility WARN, not spare capacity |
 | selection-stale | pg | 2.8 UpdateClientScores completion gap | > 90 min (page at > 3h — ttl cliff at 5h) |
 | contract-balance-failure-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` 5-minute rate | > 4,000/min for 5 min |
-| missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin",companion="false"}` 5-minute rate plus bounded/reconciled sender-role, server-derived source-owner, resolution, relationship, and lifecycle cohorts | > 500/min on one validated rolling-[5m] sample, WARN/Sustain1; two comparable complete five-minute windows are recovery verification, not extra trigger sustain; `companion=true` is not covered, missing detail never means zero, and legacy `unattributed` cohorts never establish ownership |
+| missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin",companion="false"}` 5-minute rate plus bounded/reconciled sender-role, server-derived source/destination-owner, resolution, relationship, and lifecycle cohorts | > 500/min on one validated rolling-[5m] sample, WARN/Sustain1; two comparable complete five-minute windows are recovery verification, not extra trigger sustain; `companion=true` is not covered, missing detail never means zero, and legacy `unattributed` cohorts never establish ownership |
+| origin-wait-db-amplification / origin-notification-loss / origin-wait-unobservable | Mimir/Grafana | §2.17a source-fresh fixed-class lookup, wait, notification, and completed-request rates | >= 500 fallback+deadline lookups/min and >= 3 lookups/request, or >= 1 notification-loss event/min, each for 2 one-minute probes; absent/mixed metrics are visibility WARN, not healthy zero |
 | keyevent-config-drift | redis | 9.1 notify-keyspace-events class SET per node | any node divergent from the fleet (all-off = healthy dark state) |
 | pubsub-conn-shape | redis | 9.1 CLIENT LIST TYPE pubsub count per node | warn > 300; page > 1,000 (O(clients) = the v1 outage shape) |
 | required-vault-resource | logs+route | 8.7 `Resource not found in vault` plus dependent-route probe | any active generation; payload includes resource, route, config generation |
