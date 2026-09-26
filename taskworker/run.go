@@ -128,11 +128,30 @@ func runWithDependencies(
 	listenAndServe func(context.Context, string, http.Handler, bool, server.HttpServerOptions) error,
 	startRuntime func(context.Context, context.CancelFunc, RunOptions) taskworkerRuntime,
 ) error {
+	return runWithDependenciesAndDrainLogger(ctx, options, readiness, startStatsPusher, listenAndServe, startRuntime, glog.Infof)
+}
+
+func runWithDependenciesAndDrainLogger(
+	ctx context.Context,
+	options RunOptions,
+	readiness func(context.Context) error,
+	startStatsPusher func(context.Context) func(),
+	listenAndServe func(context.Context, string, http.Handler, bool, server.HttpServerOptions) error,
+	startRuntime func(context.Context, context.CancelFunc, RunOptions) taskworkerRuntime,
+	drainLogf func(string, ...any),
+) error {
 	if ctx == nil {
 		return errors.New("taskworker run context is nil")
 	}
 	if err := options.Validate(); err != nil {
 		return err
+	}
+	// Journald/stdout backpressure must never delay drain, cancellation, or
+	// final metric handback. This logger is deliberately best effort at exit.
+	logDrainAsync := func(format string, args ...any) {
+		if drainLogf != nil {
+			go drainLogf(format, args...)
+		}
 	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -162,10 +181,10 @@ func runWithDependencies(
 				drainStart := time.Now()
 				inflight := worker.InflightCount()
 				drainInflightGauge.Set(float64(inflight))
-				glog.Infof("[taskworker]drain start with %d in flight\n", inflight)
+				logDrainAsync("[taskworker]drain start with %d in flight\n", inflight)
 				worker.Drain()
 				if !worker.WaitFinalHandback() {
-					glog.Infof("[taskworker]final handback grace ended with %d tasks still running; claims remain leased\n", worker.InflightCount())
+					logDrainAsync("[taskworker]final handback grace ended with %d tasks still running; claims remain leased\n", worker.InflightCount())
 				}
 				drainSecondsGauge.Set(time.Since(drainStart).Seconds())
 				drainCanceledGauge.Set(float64(worker.DrainCanceledCount()))
@@ -194,12 +213,12 @@ func runWithDependencies(
 		return err
 	}
 	if err != nil {
-		glog.Infof("[taskworker]status server shutdown error (%s)\n", err)
+		logDrainAsync("[taskworker]status server shutdown error (%s)\n", err)
 	}
 	// Drain and final claim handback have completed before runCtx is canceled.
 	// Push once more so those terminal execution, queue, and drain samples are
 	// not lost with the process.
 	flushStats()
-	glog.Infof("[taskworker]close\n")
+	logDrainAsync("[taskworker]close\n")
 	return nil
 }

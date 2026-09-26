@@ -1362,6 +1362,8 @@ type TaskWorker struct {
 	// constructed through NewTaskWorker receives the real clock and DB write.
 	heartbeatAfter             func(time.Duration) <-chan time.Time
 	refreshTaskTimestampLeases func(context.Context, map[server.Id]*Task)
+	// Drain logs are best effort: a full stdout pipe must not hold shutdown.
+	drainLogf func(string, ...any)
 
 	stateLock sync.Mutex
 	draining  bool
@@ -1391,6 +1393,7 @@ func NewTaskWorker(ctx context.Context, settings *TaskWorkerSettings) *TaskWorke
 		settings:                   settings,
 		heartbeatAfter:             time.After,
 		refreshTaskTimestampLeases: refreshTaskTimestampLeases,
+		drainLogf:                  glog.Infof,
 	}
 
 	taskWorker.AddTargets(
@@ -1502,18 +1505,18 @@ func (self *TaskWorker) Drain() {
 	}
 
 	if self.waitRunDone(self.settings.DrainFinishTimeout) {
-		glog.Infof("[taskworker]drain finished cleanly in %.1fs\n", elapsedSeconds())
+		self.logDrainAsync("[taskworker]drain finished cleanly in %.1fs\n", elapsedSeconds())
 		return
 	}
 
-	glog.Infof(
+	self.logDrainAsync(
 		"[taskworker]drain canceling %d in-flight tasks after %.1fs\n",
 		self.InflightCount(),
 		elapsedSeconds(),
 	)
 	self.drainCancel()
 	if self.waitRunDone(self.settings.DrainCancelTimeout) {
-		glog.Infof(
+		self.logDrainAsync(
 			"[taskworker]drain finished after cancel in %.1fs (%d canceled and rescheduled)\n",
 			elapsedSeconds(),
 			self.DrainCanceledCount(),
@@ -1521,11 +1524,19 @@ func (self *TaskWorker) Drain() {
 		return
 	}
 
-	glog.Infof(
+	self.logDrainAsync(
 		"[taskworker]drain gave up after %.1fs with %d tasks still running (claims release per task max time)\n",
 		elapsedSeconds(),
 		self.InflightCount(),
 	)
+}
+
+// Logging is not a shutdown gate. A stalled stdout/journal consumer can block
+// glog indefinitely; the drain deadlines and task cancellation must still run.
+func (self *TaskWorker) logDrainAsync(format string, args ...any) {
+	if self.drainLogf != nil {
+		go self.drainLogf(format, args...)
+	}
 }
 
 // WaitFinalHandback keeps the process alive for one bounded finalization
