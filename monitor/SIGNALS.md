@@ -7573,6 +7573,15 @@ provider-tunnel dialer can do DNS inside its dial callback, so
 because it was the last specific phase observed. These stages are diagnostic
 subsets, not replacement success/failure verdicts or evidence that packet
 routing through the provider has been repaired.
+Connect `dacc8bdc` and Server `661a2801` add a request-local target-dial
+observer so instrumented failures can report fixed `dial_dns` (no usable
+answer before the failure) or `dial_tcp` (target TCP was launched). Uninstrumented
+custom dialers retain `dial_dns_or_socket`; private DoH transport dials cannot
+impersonate the requested target's TCP progress. `dial_tcp` is the furthest
+positive stage, **not** exclusive blame on TCP when another DNS family is
+still pending. Compare these fixed classes only after attesting the running
+Taskworker binary contains both changes; an older or mixed artifact cannot
+be interpreted as a measured zero for the new classes.
 A direct 11:24 UTC read-only PostgreSQL census used the exact eligible and
 `blackhole_measured` predicates from this probe: 122,961 distinct eligible
 providers, 83,562 with a measured check inside eight hours, 57,988 inside
