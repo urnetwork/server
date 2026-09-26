@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 // Tests of the health step of a probe: the same tunnel client, the log line,
@@ -102,7 +102,7 @@ func TestEgressHealthRunsOnTheSameTunnelClient(t *testing.T) {
 
 	// The failed list is measured, scored failures only; the load the dead
 	// tunnel took and the canary are named apart.
-	want := "egress-health: provider=provider-1 ok=9/11 dns=3/3 connectivity=2/2 cdn=1/3 site=3/3 table=139 retried=1 not_measured=1 canary=0/1 failed=jsdelivr-fastly-mirror,amazon-cloudfront not-measured=reddit canary-failed=etsy"
+	want := "egress-health: provider=provider-1 ok=9/11 dns=3/3 connectivity=2/2 cdn=1/3 site=3/3 table=139 retried=1 not_measured=1 canary=0/1 failure_stages=unknown:4 failed=jsdelivr-fastly-mirror,amazon-cloudfront not-measured=reddit canary-failed=etsy"
 	if got := strings.TrimSpace(logs.String()); got != want {
 		t.Fatalf("log line =\n%q\nwant\n%q", got, want)
 	}

@@ -25,6 +25,15 @@ type Summary struct {
 	NotMeasured int
 }
 
+// Identity-free worker lifecycle, not a successful measurement or remote
+// publication. Finished follows ProbeOne's reports and tunnel teardown.
+type Progress int
+
+const (
+	ProbeStarted Progress = iota
+	ProbeFinished
+)
+
 // Probes a set of providers with bounded concurrency, skipping any
 // provider probed within CacheTtl. Only successful probes are cached, so a
 // failure is retried on the next run.
@@ -34,6 +43,9 @@ type Scheduler struct {
 	CacheTtl    time.Duration
 	// Defaults to time.Now; tests override it to advance the clock.
 	Now func() time.Time
+	// Called concurrently outside locks; the observer must be nonblocking.
+	// Cached, duplicate and canceled-before-admission providers emit no event.
+	ObserveProgress func(Progress)
 
 	stateLock sync.Mutex
 	probed    map[string]time.Time
@@ -198,7 +210,13 @@ func (self *Scheduler) Run(ctx context.Context, providers []Provider) Summary {
 				sum.Attempted++
 			}()
 
+			if self.ObserveProgress != nil {
+				self.ObserveProgress(ProbeStarted)
+			}
 			err := self.Prober.ProbeOne(ctx, provider)
+			if self.ObserveProgress != nil {
+				self.ObserveProgress(ProbeFinished)
+			}
 
 			// The tallies and the dedup decision under the lock, the log line
 			// after it.

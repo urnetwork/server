@@ -10,10 +10,10 @@ import (
 
 	"github.com/urnetwork/connect"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/ingest"
-	"github.com/urnetwork/operator-proxy/prober"
-	"github.com/urnetwork/operator-proxy/providertunnel"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/ingest"
+	"github.com/urnetwork/server/qualityprobe/prober"
+	"github.com/urnetwork/server/qualityprobe/providertunnel"
 )
 
 // One provider's cheap reachability result plus diagnostic
@@ -75,6 +75,10 @@ type BlackholeOptions struct {
 	MinimumAdmission int
 	Now              func() time.Time
 	CheckOne         BlackholeChecker
+	// A retained result may be observed before its slow siblings finish. The
+	// callback runs in a worker, must not block, and cannot publish ordinary
+	// negatives before the caller's batch-wide guard has judged them.
+	OnCompleted func(BlackholeResult)
 	// Optional concurrent, nonblocking observer. It receives no provider IDs.
 	// It must not panic; callbacks finish before RunBlackhole returns.
 	ObserveProgress func(BlackholeProgress)
@@ -289,6 +293,9 @@ sendJobs:
 				return
 			}
 			results[index] = result
+			if result.Check.ClientId != "" && options.OnCompleted != nil {
+				options.OnCompleted(result)
+			}
 			if options.ObserveProgress != nil {
 				if result.Check.ClientId == "" {
 					options.ObserveProgress(BlackholeDiscarded)
@@ -347,6 +354,9 @@ func blackholeResultOf(providerClientId string, checkedAt time.Time, result *egr
 		if checkResult.Err != "" {
 			details += fmt.Sprintf("%s=%s (attempts=%d) ", checkResult.Name, checkResult.Err, checkResult.Attempts)
 		}
+	}
+	if stages := result.FailureStageSummary(); stages != "" {
+		details += "failure_stages=" + stages + " "
 	}
 	if 0 < reopens {
 		details += fmt.Sprintf("tunnel_recreated=%d ", reopens)

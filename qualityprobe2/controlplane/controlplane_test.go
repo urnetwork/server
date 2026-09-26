@@ -17,7 +17,7 @@ func TestIPv4DialContextMapsUnspecifiedTCPToTCP4(t *testing.T) {
 		return nil, wantErr
 	})
 
-	_, err := dialContext(context.Background(), "tcp", "api.bringyour.com:443")
+	_, err := dialContext(context.Background(), "tcp", "api.example.invalid:443")
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("dial error = %v, want injected error", err)
 	}
@@ -34,7 +34,7 @@ func TestIPv4DialContextKeepsTCP4(t *testing.T) {
 		return nil, wantErr
 	})
 
-	_, err := dialContext(context.Background(), "tcp4", "connect.bringyour.com:443")
+	_, err := dialContext(context.Background(), "tcp4", "connect.example.invalid:443")
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("dial error = %v, want injected error", err)
 	}
@@ -102,7 +102,7 @@ func TestForceIPv4ConnectSettingsPreservesInjectedDialer(t *testing.T) {
 	}
 	forceIPv4ConnectSettings(settings)
 
-	_, err := settings.DialContext(context.Background(), "tcp", "connect.bringyour.com:443")
+	_, err := settings.DialContext(context.Background(), "tcp", "connect.example.invalid:443")
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("dial error = %v, want injected error", err)
 	}
@@ -133,7 +133,7 @@ func TestClientStrategySettingsLeaveIndependentSettingsUntouched(t *testing.T) {
 	if forced.ConnectSettings.DialContextSettings == nil {
 		t.Fatal("Connect strategy has no IPv4-only dial boundary")
 	}
-	_, _ = untouched.ConnectSettings.DialContext(context.Background(), "tcp", "connect.bringyour.com:443")
+	_, _ = untouched.ConnectSettings.DialContext(context.Background(), "tcp", "connect.example.invalid:443")
 	if gotNetwork != "tcp" {
 		t.Fatalf("strategy construction changed an independent dial network to %q", gotNetwork)
 	}

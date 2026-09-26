@@ -13,7 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/urnetwork/operator-proxy/controlplane"
+	"github.com/urnetwork/server/qualityprobe/controlplane"
 )
 
 // The due queue and attempt reports, and the bounded string fields they

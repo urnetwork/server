@@ -17,7 +17,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 var errProbeOwnerFixture = errors.New("synthetic probe dial released")
@@ -230,6 +230,15 @@ func TestProbeHttpRequestOwnerHealthConcurrency(t *testing.T) {
 			}
 			if got.result.Total != 18 || got.result.OkCount != 0 || got.result.NotMeasured != 0 {
 				t.Fatal("request deadlines were relabeled as unmeasured or passing loads")
+			}
+			for _, check := range got.result.Checks {
+				// net/http races the request deadline with the owned dial's
+				// returned error. Either result must retain the custom dial phase:
+				// the typed dial stage wins when it arrives first, and the trace
+				// covers a generic request deadline when it does not.
+				if check.FailureStage != "request_dial_timeout" && check.FailureStage != "dial_dns_or_socket" {
+					t.Fatalf("blocked tunnel dial stage = %q, want a custom-dial class", check.FailureStage)
+				}
 			}
 		default:
 			t.Fatal("health run outlived its three bounded request waves")

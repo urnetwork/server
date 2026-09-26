@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"os"
 )
 
@@ -49,6 +50,21 @@ func echoRequestStage(err error) string {
 		case "dial_dns_or_socket", "tls", "policy":
 			return stage
 		}
+	}
+	// net/http may return a request-context error without reaching the
+	// provider dial owner. Keep that distinct from a typed tunnel dial failure:
+	// a whole run of request deadlines is an admission/transport clue, not
+	// evidence that every destination's DNS or socket dial failed.
+	var timed net.Error
+	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded):
+		return "request_timeout"
+	case errors.Is(err, context.Canceled):
+		return "request_canceled"
+	case errors.As(err, &timed) && timed.Timeout():
+		return "request_timeout"
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return "request_eof"
 	}
 	return "request_unknown"
 }

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/ingest"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/ingest"
 )
 
 // Tests of the pass inputs: pin validation, the pool fallback, the derived
@@ -129,5 +129,12 @@ func TestBlackholeResultOf(t *testing.T) {
 	tls := blackholeResultOf("p", at, &egresshealth.BlackholeResult{Failure: egresshealth.FailureTlsAuthentication}, 0)
 	if !tls.Dark || tls.NotMeasured {
 		t.Errorf("tls = %+v, want the hard failure it has always been", tls)
+	}
+	staged := blackholeResultOf("synthetic-provider", at, &egresshealth.BlackholeResult{
+		Failure: egresshealth.FailureAllDestinationsFailed,
+		Results: []egresshealth.CheckResult{{Name: "synthetic-check", Err: "context deadline exceeded", FailureStage: "request_response_timeout", Attempts: 3}},
+	}, 0)
+	if !strings.Contains(staged.Details, "failure_stages=request_response_timeout:1") {
+		t.Errorf("blackhole details omit sanitized failure stage: %q", staged.Details)
 	}
 }

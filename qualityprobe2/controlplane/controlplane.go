@@ -5,12 +5,12 @@ package controlplane
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/http"
 	"time"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/server"
 )
 
 // DialContext is the part of net.Dialer used by the deterministic tests and
@@ -22,18 +22,7 @@ type DialContext func(context.Context, string, string) (net.Conn, error)
 // follow the same IPv4-only policy as the hosted proxy; silently accepting
 // IPv6 here would make the two paths disagree again.
 func ipv4DialContext(dialContext DialContext) DialContext {
-	return func(ctx context.Context, network string, address string) (net.Conn, error) {
-		switch network {
-		case "tcp", "tcp4":
-			return dialContext(ctx, "tcp4", address)
-		case "udp", "udp4":
-			return dialContext(ctx, "udp4", address)
-		case "tcp6", "udp6":
-			return nil, fmt.Errorf("controlplane: ipv6 dial refused for %s", address)
-		default:
-			return nil, fmt.Errorf("controlplane: unsupported network %q for %s", network, address)
-		}
-	}
+	return server.IPv4DialContext(dialContext)
 }
 
 // NewHTTPClient returns an IPv4-only client for direct API calls. The default
@@ -58,16 +47,13 @@ func NewHTTPClient(timeout time.Duration) *http.Client {
 // alter unrelated control clients in a taskworker process, while this package
 // owns only the provider-tunnel strategy.
 func forceIPv4ConnectSettings(settings *connect.ConnectSettings) {
-	base := *settings
-	settings.DialContextSettings = &connect.DialContextSettings{
-		DialContext: ipv4DialContext(base.DialContext),
-	}
+	server.ForceIPv4ConnectSettings(settings)
 }
 
 // clientStrategySettings returns the normal Connect strategy with an
 // IPv4-only dial boundary. This covers both API requests and the Connect
-// websocket used to build a provider tunnel; the data-plane TUN remains
-// dual-stack and separate.
+// websocket used to build a provider tunnel; the data-plane TUN has its
+// separate IPv4-only setting in providertunnel.Open.
 func clientStrategySettings() *connect.ClientStrategySettings {
 	settings := connect.DefaultClientStrategySettings()
 	forceIPv4ConnectSettings(&settings.ConnectSettings)

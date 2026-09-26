@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/ingest"
-	"github.com/urnetwork/operator-proxy/prober"
+	"github.com/urnetwork/server/qualityprobe/ingest"
+	"github.com/urnetwork/server/qualityprobe/prober"
 )
 
 func testBlackholeAdmissionContract(t *testing.T, ctx context.Context, stop <-chan struct{}, minimum int, count int) (BlackholeSummary, int, error) {

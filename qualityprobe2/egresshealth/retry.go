@@ -192,7 +192,7 @@ attempts:
 			}
 			// No tunnel for this attempt: it is spent, keeping the load's
 			// spacing, and says nothing about the site.
-			result = CheckResult{Name: d.Name, Class: d.Class, Attempts: attempt, Err: fmt.Sprintf("no tunnel: %v", err)}
+			result = CheckResult{Name: d.Name, Class: d.Class, Attempts: attempt, Err: fmt.Sprintf("no tunnel: %v", err), FailureStage: "tunnel_unavailable"}
 			lastFailure = result.Err
 			tunnelGone = true
 			continue
@@ -219,6 +219,7 @@ attempts:
 		// the record says why, so it cannot be read as a provider that
 		// answered nothing.
 		result.Err = fmt.Sprintf("not attempted: the run ended first (%v)", context.Cause(ctx))
+		result.FailureStage = "run_ended"
 		lastFailure = result.Err
 	}
 	result.LastFailure = lastFailure

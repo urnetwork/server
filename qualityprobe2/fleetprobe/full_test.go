@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/providertunnel"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/providertunnel"
 )
 
 // Tests of the full pass: the pool and profile a health run draws from, the

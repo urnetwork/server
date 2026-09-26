@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/bandwidth"
-	"github.com/urnetwork/operator-proxy/ingest"
-	"github.com/urnetwork/operator-proxy/prober"
-	"github.com/urnetwork/operator-proxy/providertunnel"
+	"github.com/urnetwork/server/qualityprobe/bandwidth"
+	"github.com/urnetwork/server/qualityprobe/ingest"
+	"github.com/urnetwork/server/qualityprobe/prober"
+	"github.com/urnetwork/server/qualityprobe/providertunnel"
 )
 
 // Tests of provider selection and the prober the CLI builds: the due list, the

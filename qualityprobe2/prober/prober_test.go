@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 // Tests of one probe's flow: the exit submitted, the provider's place, and the

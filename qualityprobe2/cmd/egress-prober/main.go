@@ -50,14 +50,14 @@ import (
 	gojwt "github.com/golang-jwt/jwt/v5"
 	"github.com/urnetwork/connect"
 
-	"github.com/urnetwork/operator-proxy/bandwidth"
-	"github.com/urnetwork/operator-proxy/confinement"
-	"github.com/urnetwork/operator-proxy/controlplane"
-	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/fleetprobe"
-	"github.com/urnetwork/operator-proxy/ingest"
-	"github.com/urnetwork/operator-proxy/prober"
-	"github.com/urnetwork/operator-proxy/providertunnel"
+	"github.com/urnetwork/server/qualityprobe/bandwidth"
+	"github.com/urnetwork/server/qualityprobe/confinement"
+	"github.com/urnetwork/server/qualityprobe/controlplane"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/fleetprobe"
+	"github.com/urnetwork/server/qualityprobe/ingest"
+	"github.com/urnetwork/server/qualityprobe/prober"
+	"github.com/urnetwork/server/qualityprobe/providertunnel"
 )
 
 // Parses and validates the flags, runs the startup self-checks and fetches,

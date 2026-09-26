@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/ingest"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/ingest"
 )
 
 // Tests of submitting health runs: what is submitted and when, fire-and-forget

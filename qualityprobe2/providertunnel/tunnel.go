@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,7 +19,8 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 
-	"github.com/urnetwork/operator-proxy/controlplane"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/qualityprobe/controlplane"
 )
 
 // The operator-provided identity and endpoints the prober uses to
@@ -101,7 +103,13 @@ var ErrPlainHttpRefused = errors.New("providertunnel: plain http refused; only h
 // inTunnelOnlyDnsResolverSettings) would bypass this seam entirely and fail
 // that test rather than silently reintroducing the leak.
 var createTun = func(ctx context.Context, resolver *connect.DnsResolverSettings) (*connect.Tun, error) {
-	return connect.CreateTunWithResolver(ctx, connect.DefaultTunSettings(), resolver)
+	settings := connect.DefaultTunSettings()
+	// Main's inner data-center routing is IPv4-only. DefaultTunnelMtu is
+	// 1280 and would enable an IPv6 address and ::/0 route in this private
+	// gVisor stack; the hosted server/proxy device uses DefaultMtu for the
+	// same boundary. Keep the public/control-plane address family separate.
+	server.CapServerTunIPv4(settings)
+	return connect.CreateTunWithResolver(ctx, settings, resolver)
 }
 
 // The control-plane strategy is a seam so the Open-path test can prove every
@@ -618,7 +626,19 @@ func httpClientOverDialerWithHosts(dial dialContextFunc, pins map[string][]strin
 			return nil, &providerHttpStageError{stage: "policy", err: fmt.Errorf("%w: %s", ErrPinHostUnknown, host)}
 		}
 
+		// DialTLSContext owns both connection establishment and TLS. net/http
+		// cannot emit these trace phases for a custom TLS dialer, so publish
+		// them here for bounded request-progress diagnostics. The provider dial
+		// may include DNS; ConnectStart therefore identifies the whole custom
+		// dial boundary, not a proven socket-only interval.
+		trace := httptrace.ContextClientTrace(ctx)
+		if trace != nil && trace.ConnectStart != nil {
+			trace.ConnectStart(network, addr)
+		}
 		raw, err := dial(ctx, network, addr)
+		if trace != nil && trace.ConnectDone != nil {
+			trace.ConnectDone(network, addr, err)
+		}
 		if err != nil {
 			return nil, &providerHttpStageError{stage: "dial_dns_or_socket", err: err}
 		}
@@ -632,7 +652,14 @@ func httpClientOverDialerWithHosts(dial dialContextFunc, pins map[string][]strin
 
 		cfg := PinnedTlsConfigForHost(pins, host)
 		tlsConn := tls.Client(raw, cfg)
-		if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
+		if trace != nil && trace.TLSHandshakeStart != nil {
+			trace.TLSHandshakeStart()
+		}
+		err = tlsConn.HandshakeContext(handshakeCtx)
+		if trace != nil && trace.TLSHandshakeDone != nil {
+			trace.TLSHandshakeDone(tlsConn.ConnectionState(), err)
+		}
+		if err != nil {
 			raw.Close()
 			return nil, &providerHttpStageError{stage: "tls", err: err}
 		}

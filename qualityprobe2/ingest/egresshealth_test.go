@@ -10,7 +10,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 // Tests of the egress-health submission: the wire body, the TLS flag, the

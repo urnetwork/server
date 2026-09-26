@@ -1707,13 +1707,16 @@ func truncate(s string, n int) string {
 // StatusCode, ByteCount, Latency and Err describe the last attempt made;
 // Attempts and LastFailure say how it got there.
 type CheckResult struct {
-	Name                     string
-	Class                    Class
-	Ok                       bool
-	StatusCode               int   // 0 when the request never produced a response
-	ByteCount                int64 // bytes of body actually read, capped; set on failures too
-	Latency                  time.Duration
-	Err                      string // "" when OK
+	Name       string
+	Class      Class
+	Ok         bool
+	StatusCode int   // 0 when the request never produced a response
+	ByteCount  int64 // bytes of body actually read, capped; set on failures too
+	Latency    time.Duration
+	Err        string // "" when OK
+	// Local-only, bounded diagnostic for the last attempt. Never sent to the
+	// ingestion API: raw Err may contain a URL, while this is a fixed stage.
+	FailureStage             string `json:"-"`
 	TlsAuthenticationFailure bool   // the peer's certificate could not authenticate the requested host
 	// How many times the destination was fetched: 1 when the
 	// first attempt passed, Options.LoadAttempts when every attempt failed,
@@ -2388,11 +2391,13 @@ func fetch(ctx context.Context, client *http.Client, d Destination, timeout time
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	ctx, progress := traceRequestProgress(ctx)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.Url, nil)
 	if err != nil {
 		r.Latency = now().Sub(start)
 		r.Err = err.Error()
+		r.FailureStage = "request_build"
 		return r
 	}
 	applyHeaders(req, profile, d.Headers)
@@ -2401,6 +2406,10 @@ func fetch(ctx context.Context, client *http.Client, d Destination, timeout time
 	if err != nil {
 		r.Latency = now().Sub(start)
 		r.Err = err.Error()
+		r.FailureStage = echoRequestStage(err)
+		if r.FailureStage == "request_timeout" {
+			r.FailureStage = progress.timeoutStage()
+		}
 		r.TlsAuthenticationFailure = isTlsAuthenticationFailure(err)
 		return r
 	}
@@ -2419,10 +2428,12 @@ func fetch(ctx context.Context, client *http.Client, d Destination, timeout time
 
 	if readErr != nil {
 		r.Err = readErr.Error()
+		r.FailureStage = "response_body"
 		return r
 	}
 	if err := d.judge(resp.StatusCode, body); err != nil {
 		r.Err = err.Error()
+		r.FailureStage = "response_judgment"
 		return r
 	}
 	r.Ok = true
@@ -2684,6 +2695,41 @@ func (self *Result) Summary() string {
 // is never in it.
 func (self *Result) FailedNames() []string {
 	return self.names(func(c CheckResult) bool { return !c.Ok && !c.NotMeasured && !c.Canary })
+}
+
+// FailureStageSummary is a finite, identity-free diagnostic of the final
+// attempt for each failed load. It is logged before the fleet batch guard, so
+// a guarded 0/N run still distinguishes a dial failure from a response or
+// policy failure. Unknown or malformed stages are not copied into logs.
+func (self *Result) FailureStageSummary() string {
+	if self == nil {
+		return ""
+	}
+	return failureStageSummary(self.Checks)
+}
+
+func failureStageSummary(checks []CheckResult) string {
+	order := []string{"dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "run_ended", "unknown"}
+	counts := map[string]int{}
+	for _, check := range checks {
+		if check.Ok {
+			continue
+		}
+		stage := check.FailureStage
+		switch stage {
+		case "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "run_ended":
+		default:
+			stage = "unknown"
+		}
+		counts[stage]++
+	}
+	parts := make([]string, 0, len(counts))
+	for _, stage := range order {
+		if count := counts[stage]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%s:%d", stage, count))
+		}
+	}
+	return strings.Join(parts, ",")
 }
 
 // Lists the loads the run could not measure, in table order.

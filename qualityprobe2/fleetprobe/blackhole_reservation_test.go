@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/connect"
-	"github.com/urnetwork/operator-proxy/providertunnel"
+	"github.com/urnetwork/server/qualityprobe/providertunnel"
 )
 
 // Each worker copies its configuration, including when another pass has an

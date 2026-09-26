@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 // One provider to probe: its client id, and the place it is
@@ -340,8 +340,12 @@ func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 		// different endpoints, and that is the check working, not drifting.
 		// not-measured= names the loads whose tunnel was gone for their last
 		// attempt (the Summary counts them as not_measured=N), and canary= the
-		// unscored canaries.
+		// unscored canaries. failure_stages= has only fixed stage names and
+		// counts from failed loads; it never includes a raw request error.
 		line := fmt.Sprintf("egress-health: provider=%s %s", providerClientId, res.Summary())
+		if stages := res.FailureStageSummary(); stages != "" {
+			line += " failure_stages=" + stages
+		}
 		if failed := res.FailedNames(); 0 < len(failed) {
 			line += " failed=" + strings.Join(failed, ",")
 		}

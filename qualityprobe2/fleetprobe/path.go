@@ -11,7 +11,7 @@ import (
 
 	"github.com/urnetwork/connect"
 
-	"github.com/urnetwork/operator-proxy/providertunnel"
+	"github.com/urnetwork/server/qualityprobe/providertunnel"
 )
 
 // The part of a providertunnel.Tunnel a probe uses. It is an

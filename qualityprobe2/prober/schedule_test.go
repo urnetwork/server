@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 // Tests of the scheduler: concurrency, cancellation, the success cache and its

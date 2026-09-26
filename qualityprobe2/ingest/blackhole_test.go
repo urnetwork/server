@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 // Tests of the blackhole submission's wire marks and of the operator-secret

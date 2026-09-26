@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/ingest"
+	"github.com/urnetwork/server/qualityprobe/ingest"
 )
 
 // The old sweep spawned one goroutine per returned provider and put the

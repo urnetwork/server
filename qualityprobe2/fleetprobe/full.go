@@ -13,10 +13,10 @@ import (
 
 	"github.com/urnetwork/connect"
 
-	"github.com/urnetwork/operator-proxy/bandwidth"
-	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/prober"
-	"github.com/urnetwork/operator-proxy/providertunnel"
+	"github.com/urnetwork/server/qualityprobe/bandwidth"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/prober"
+	"github.com/urnetwork/server/qualityprobe/providertunnel"
 )
 
 // Returns the current certificate-pin set, already validated (see
@@ -86,6 +86,9 @@ type FullOptions struct {
 	HealthResults          prober.HealthReporter
 	Bandwidth              *bandwidth.Sampler
 	BandwidthHosts         []string
+	// Identity-free actual worker entry/return, before batch guard/release.
+	// Called concurrently outside scheduler locks; must be nonblocking.
+	ObserveProgress func(prober.Progress)
 }
 
 // Returns Concurrency, or DefaultFullConcurrency when unset.
@@ -241,9 +244,10 @@ func RunFull(ctx context.Context, providers []prober.Provider, options FullOptio
 		return prober.Summary{}, err
 	}
 	scheduler := &prober.Scheduler{
-		Prober:      NewFullProber(options),
-		Concurrency: options.concurrency(),
-		CacheTtl:    0,
+		Prober:          NewFullProber(options),
+		Concurrency:     options.concurrency(),
+		CacheTtl:        0,
+		ObserveProgress: options.ObserveProgress,
 	}
 	return scheduler.Run(ctx, providers), nil
 }

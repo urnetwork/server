@@ -2,9 +2,12 @@ package providertunnel
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptrace"
 	"os"
 	"sync/atomic"
 	"testing"
@@ -47,6 +50,40 @@ func TestProbeHttpStageTls(t *testing.T) {
 		t.Fatal("TLS failure lost cause or owned connection cleanup")
 	}
 	requireProbeHttpStage(t, err, "tls")
+}
+
+// The probe owns DialTLSContext, so net/http cannot publish the custom dial
+// and handshake phases for request-progress diagnostics on its behalf.
+func TestProbeHttpCustomDialPublishesTracePhases(t *testing.T) {
+	var dialStart, dialDone, tlsStart, tlsDone atomic.Int32
+	client := httpClientOverDialerWithHosts(func(context.Context, string, string) (net.Conn, error) {
+		return &probeStageFailConn{}, nil
+	}, nil, []string{"echo.example"}, time.Minute)
+	trace := &httptrace.ClientTrace{
+		ConnectStart: func(string, string) { dialStart.Add(1) },
+		ConnectDone: func(_, _ string, err error) {
+			if err == nil {
+				dialDone.Add(1)
+			}
+		},
+		TLSHandshakeStart: func() { tlsStart.Add(1) },
+		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			if err != nil {
+				tlsDone.Add(1)
+			}
+		},
+	}
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(context.Background(), trace), http.MethodGet, "https://echo.example/my-ip-info", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Do(req); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("synthetic TLS failure lost its cause: %v", err)
+	}
+	if dialStart.Load() != 1 || dialDone.Load() != 1 || tlsStart.Load() != 1 || tlsDone.Load() != 1 {
+		t.Fatalf("custom dial trace phases = dial %d/%d tls %d/%d, want 1/1 each",
+			dialStart.Load(), dialDone.Load(), tlsStart.Load(), tlsDone.Load())
+	}
 }
 
 // Policy remains enforced before touching the provider dialer.

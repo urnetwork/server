@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/ingest"
-	"github.com/urnetwork/operator-proxy/prober"
+	"github.com/urnetwork/server/qualityprobe/ingest"
+	"github.com/urnetwork/server/qualityprobe/prober"
 )
 
 // Tests of the blackhole batch: the fixed worker pool, cancellation, due order,

@@ -1178,6 +1178,28 @@ func TestOpenUsesInTunnelOnlyDnsResolution(t *testing.T) {
 	assertInTunnelOnlyResolver(t, captured)
 }
 
+// Main's inner data-center path cannot carry IPv6 yet. The probe's private
+// gVisor TUN must not inherit Connect's dual-stack default even though its
+// separately owned control-plane strategy is already IPv4-only.
+func TestOpenUsesIpv4OnlyInnerTun(t *testing.T) {
+	tunnel, err := Open(context.Background(), dummyOpenConfig(), connect.NewId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tunnel.Close()
+	if tunnel.tun.Ipv6Enabled() {
+		t.Fatal("provider probe opened a dual-stack inner TUN")
+	}
+	for _, address := range tunnel.tun.LocalAddresses() {
+		if !address.Is4() {
+			t.Fatalf("inner TUN assigned non-IPv4 address %s", address)
+		}
+	}
+	if _, err := tunnel.tun.DialContext(context.Background(), "tcp6", "[2001:db8::1]:443"); err == nil {
+		t.Fatal("provider probe accepted an inner IPv6 dial")
+	}
+}
+
 // Mints a leaf that chains to nothing in the trust store:
 // it is its own issuer, and neither test CA signed it. Used below to prove that
 // an allowed-but-unpinned host still gets full WebPKI chain verification -- the

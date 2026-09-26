@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/ingest"
+	"github.com/urnetwork/server/qualityprobe/ingest"
 )
 
 // ---------------------------------------------------------------------------

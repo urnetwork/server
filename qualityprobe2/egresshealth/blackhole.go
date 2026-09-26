@@ -53,6 +53,15 @@ type BlackholeResult struct {
 	ShortClasses []Class
 }
 
+// FailureStageSummary reports bounded, identity-free final failure stages for
+// the cheap check, using the same vocabulary as the full health check.
+func (self *BlackholeResult) FailureStageSummary() string {
+	if self == nil {
+		return ""
+	}
+	return failureStageSummary(self.Results)
+}
+
 const (
 	// Means every sampled destination failed every
 	// one of its attempts.

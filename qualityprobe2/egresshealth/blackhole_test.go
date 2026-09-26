@@ -15,6 +15,22 @@ import (
 // Tests of the blackhole check: its connectivity-only sample, its any-pass rule,
 // the TLS-integrity override, its warm-up and its draw from a pool.
 
+func TestBlackholeFailureStageSummaryIsBoundedAndPrivate(t *testing.T) {
+	result := &BlackholeResult{Results: []CheckResult{
+		{Name: "synthetic-a", FailureStage: "request_connect_timeout"},
+		{Name: "synthetic-b", FailureStage: "request_connect_timeout"},
+		{Name: "synthetic-c", FailureStage: "response_body"},
+		{Name: "synthetic-private-name", FailureStage: "private.example"},
+		{Name: "synthetic-passed", Ok: true, FailureStage: "request_write_timeout"},
+	}}
+	if got, want := result.FailureStageSummary(), "request_connect_timeout:2,response_body:1,unknown:1"; got != want {
+		t.Fatalf("failure stages = %q, want %q", got, want)
+	}
+	if got := (*BlackholeResult)(nil).FailureStageSummary(); got != "" {
+		t.Fatalf("nil result exposed stages: %q", got)
+	}
+}
+
 // Builds a connectivity table pointed at one server, plus a
 // non-connectivity entry that must never be drawn.
 func stubDests(url string, n int) []Destination {

@@ -19,10 +19,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/bandwidth"
-	"github.com/urnetwork/operator-proxy/confinement"
-	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/ingest"
+	"github.com/urnetwork/server/qualityprobe/bandwidth"
+	"github.com/urnetwork/server/qualityprobe/confinement"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/ingest"
 )
 
 // Tests of the startup self-checks and flag validation: the confinement check

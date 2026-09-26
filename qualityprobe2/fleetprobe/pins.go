@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/urnetwork/operator-proxy/ingest"
+	"github.com/urnetwork/server/qualityprobe/ingest"
 )
 
 // Converts the server's served pin set into the tunnel's pin
