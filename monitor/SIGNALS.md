@@ -6876,6 +6876,21 @@ return fewer rows despite a healthy ceiling (false positive if interpreted as
 clamping); compare due backlog and request limit in the same interval. Do not
 raise the ceiling without retaining bounded API/PostgreSQL admission checks.
 
+An equal-worker geometry exposed a second, independent execution fault: when
+`full.concurrency == blackhole.concurrency == full.limit == blackhole.limit`,
+the Taskworker selected its serial fallback and waited for the blackhole drain
+before starting full work. This can make a large full pool appear idle even
+after the API returns its entire requested cohort. The corrected peer-sized
+geometry starts both independent lanes; synthetic held-worker tests require
+full work to start while blackhole workers remain blocked. Smaller full
+selections with an equal-size pool retain their bounded serial reservation.
+Distinguish this fault from API clipping with same-process `pass_due`,
+`full_progress` and blackhole in-flight observations, plus the active task
+arguments. A nonzero full due gauge alone is not proof that full work started;
+conversely, a full lane may legitimately be idle while no full rows are due.
+The source correction requires a new Taskworker image and an observed
+post-rollout full-attempt increase before closing the throughput finding.
+
 Full capacity must be conditioned on real latency rather than one request
 timeout. The 60-second warmup/open allowance, 50-load sample, three attempts
 and capped retry spacing permit a 36m35s full run including a five-second

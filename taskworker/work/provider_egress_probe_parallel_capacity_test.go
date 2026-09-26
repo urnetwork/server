@@ -82,6 +82,7 @@ type testProviderEgressParallelObservation struct {
 	initialStarted int
 	allStarted     int
 	peak           int
+	fullStarted    bool
 	result         *ProviderEgressProbeResult
 	err            error
 	checks         []ingest.BlackholeCheck
@@ -90,9 +91,13 @@ type testProviderEgressParallelObservation struct {
 // Hold every initial worker, then release eight while the full owner remains
 // blocked. The full selected250 must already have started before that release;
 // the independent full owner does not subtract from the blackhole pool.
-func testProviderEgressParallelRun(t *testing.T, full bool, guarded bool, cancelRun bool) testProviderEgressParallelObservation {
+func testProviderEgressParallelRun(t *testing.T, full bool, guarded bool, cancelRun bool, equalPools ...bool) testProviderEgressParallelObservation {
 	t.Helper()
 	args := testProviderEgressParallelArgs(t)
+	if len(equalPools) != 0 && equalPools[0] {
+		args.Full.Limit = args.Blackhole.Limit
+		args.Full.Concurrency = args.Blackhole.Concurrency
+	}
 	var observation testProviderEgressParallelObservation
 	synctest.Test(t, func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 75*time.Minute)
@@ -111,6 +116,7 @@ func testProviderEgressParallelRun(t *testing.T, full bool, guarded bool, cancel
 		releaseChecks := make(chan struct{})
 		releaseFull := make(chan struct{})
 		var started, active, peak atomic.Int32
+		var fullStarted atomic.Bool
 		var dueReads atomic.Int32
 		pass := &providerEgressProbePass{
 			blackholeDue: func(context.Context, int) ([]ingest.DueProvider, error) {
@@ -153,6 +159,7 @@ func testProviderEgressParallelRun(t *testing.T, full bool, guarded bool, cancel
 				return fleetprobe.RunBlackhole(runCtx, providers, options)
 			},
 			runFull: func(context.Context, []prober.Provider, fleetprobe.FullOptions) (prober.Summary, error) {
+				fullStarted.Store(true)
 				<-releaseFull
 				return prober.Summary{Attempted: 8, Submitted: 8}, nil
 			},
@@ -168,6 +175,7 @@ func testProviderEgressParallelRun(t *testing.T, full bool, guarded bool, cancel
 		go func() { observation.result, observation.err = pass.run(ctx, args); close(done) }()
 		synctest.Wait()
 		observation.initialStarted = int(started.Load())
+		observation.fullStarted = fullStarted.Load()
 		close(releaseFirst)
 		synctest.Wait()
 		observation.allStarted = int(started.Load())
@@ -186,6 +194,13 @@ func testProviderEgressParallelRun(t *testing.T, full bool, guarded bool, cancel
 		observation.peak = int(peak.Load())
 	})
 	return observation
+}
+
+func TestProviderEgressEqualIndependentPoolsStartTogether(t *testing.T) {
+	got := testProviderEgressParallelRun(t, true, false, false, true)
+	if !got.fullStarted || got.initialStarted != 250 || got.err != nil || got.result == nil || got.result.Submitted != 8 {
+		t.Fatalf("equal-sized full and blackhole pools were serialized: full_started=%t blackhole_started=%d err=%v result=%+v", got.fullStarted, got.initialStarted, got.err, got.result)
+	}
 }
 
 func TestProviderEgressParallelIndependentPoolsAdmitSelected250(t *testing.T) {
