@@ -252,19 +252,33 @@ func newTunPath(
 	profile networkProfile,
 	resources tunResourceProfile,
 ) (*tunPath, error) {
+	return newTunPathWithSettings(ctx, profile, resources, nil)
+}
+
+// An explicit, per-fixture override isolates application-stack experiments.
+// The ordinary path keeps nil; the peer setting is never changed implicitly.
+func newTunPathWithSettings(
+	ctx context.Context,
+	profile networkProfile,
+	resources tunResourceProfile,
+	configure func(left bool, settings *clientconnect.TunSettings),
+) (*tunPath, error) {
 	pathCtx, cancel := context.WithCancel(ctx)
-	newTun := func() (*clientconnect.Tun, error) {
+	newTun := func(left bool) (*clientconnect.Tun, error) {
 		settings := clientconnect.DefaultTunSettingsWithBufferSize(resources.ChannelSize)
 		settings.Mtu = profile.InnerMtu
 		applyTunResourceProfile(settings, resources)
+		if configure != nil {
+			configure(left, settings)
+		}
 		return clientconnect.CreateTun(pathCtx, settings)
 	}
-	left, err := newTun()
+	left, err := newTun(true)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	right, err := newTun()
+	right, err := newTun(false)
 	if err != nil {
 		left.Close()
 		cancel()
@@ -2159,6 +2173,83 @@ const (
 	latencyProbePostLoadStartSequence uint64 = 1 << 63
 )
 
+// Test-only probe evidence contains generated sequence identity and timing,
+// never retained payload. SampleTime is the actual read/offer/timer edge;
+// ObservedTime distinguishes that edge from delayed owner consumption.
+type latencyProbeObservation struct {
+	Stage        string
+	Sequence     uint64
+	ObservedTime time.Time
+	SampleTime   time.Time
+	OfferedTime  time.Time
+	ErrorKind    string
+}
+
+type latencyProbeObserver func(latencyProbeObservation)
+
+func observeLatencyProbe(
+	observer latencyProbeObserver,
+	stage string,
+	sequence uint64,
+	sampleTime time.Time,
+	offeredTime time.Time,
+	err error,
+) {
+	if observer == nil {
+		return
+	}
+	observedTime := time.Now()
+	if sampleTime.IsZero() {
+		sampleTime = observedTime
+	}
+	errorKind := ""
+	if err != nil {
+		var netErr net.Error
+		switch {
+		case errors.Is(err, context.Canceled):
+			errorKind = "canceled"
+		case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+			errorKind = "timeout"
+		case errors.Is(err, io.ErrShortWrite):
+			errorKind = "short-write"
+		case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+			errorKind = "eof"
+		default:
+			errorKind = "error"
+		}
+	}
+	observer(latencyProbeObservation{
+		Stage: stage, Sequence: sequence, ObservedTime: observedTime,
+		SampleTime: sampleTime, OfferedTime: offeredTime, ErrorKind: errorKind,
+	})
+}
+
+// Only an installed diagnostic parses the dedicated generated echo packet.
+// Short or malformed data is counted without retaining or logging its bytes.
+func observeLatencyProbePacket(
+	observer latencyProbeObserver,
+	stage string,
+	packet []byte,
+	sampleTime time.Time,
+	err error,
+) {
+	if observer == nil {
+		return
+	}
+	sequence := uint64(0)
+	valid := len(packet) == 32
+	if valid {
+		sequence = binary.BigEndian.Uint64(packet)
+		for _, value := range packet[8:] {
+			valid = valid && value == 0
+		}
+	}
+	if !valid {
+		stage += "-malformed"
+	}
+	observeLatencyProbe(observer, stage, sequence, sampleTime, time.Time{}, err)
+}
+
 // One datagram probe returns its same-process round-trip latency or an error.
 func runLatencyProbe(
 	ctx context.Context,
@@ -2166,23 +2257,40 @@ func runLatencyProbe(
 	sequence uint64,
 	timeout time.Duration,
 ) (time.Duration, error) {
+	return runLatencyProbeObserved(ctx, connection, sequence, timeout, nil)
+}
+
+func runLatencyProbeObserved(
+	ctx context.Context,
+	connection net.Conn,
+	sequence uint64,
+	timeout time.Duration,
+	observer latencyProbeObserver,
+) (time.Duration, error) {
 	var packet [32]byte
 	binary.BigEndian.PutUint64(packet[:], sequence)
 	startTime := time.Now()
+	observeLatencyProbe(observer, "offer", sequence, startTime, startTime, nil)
 	stopInterrupt := interruptDeadlineOnContext(ctx, connection)
 	defer stopInterrupt()
 	if err := connection.SetDeadline(boundedWorkloadDeadline(ctx, timeout)); err != nil {
+		observeLatencyProbe(observer, "write-end", sequence, time.Time{}, startTime, err)
 		return 0, contextBoundWorkloadError(ctx, err)
 	}
 	if _, err := connection.Write(packet[:]); err != nil {
+		observeLatencyProbe(observer, "write-end", sequence, time.Time{}, startTime, err)
 		return 0, contextBoundWorkloadError(ctx, err)
 	}
+	observeLatencyProbe(observer, "write-end", sequence, time.Time{}, startTime, nil)
 	var response [len(packet)]byte
 	for {
 		if _, err := io.ReadFull(connection, response[:]); err != nil {
+			observeLatencyProbe(observer, "read-error", sequence, time.Time{}, startTime, err)
 			return 0, contextBoundWorkloadError(ctx, err)
 		}
+		observeLatencyProbePacket(observer, "read-complete", response[:], time.Time{}, nil)
 		if bytes.Equal(response[:], packet[:]) {
+			observeLatencyProbe(observer, "accepted", sequence, time.Time{}, startTime, nil)
 			return time.Since(startTime), nil
 		}
 
@@ -2194,8 +2302,10 @@ func runLatencyProbe(
 		var stale [len(packet)]byte
 		binary.BigEndian.PutUint64(stale[:], responseSequence)
 		if responseSequence < sequence && bytes.Equal(response[:], stale[:]) {
+			observeLatencyProbe(observer, "stale", responseSequence, time.Time{}, time.Time{}, nil)
 			continue
 		}
+		observeLatencyProbe(observer, "malformed", responseSequence, time.Time{}, time.Time{}, nil)
 		return 0, fmt.Errorf("latency probe sequence %d was corrupted", sequence)
 	}
 }
@@ -2249,9 +2359,10 @@ func TestLatencyProbePhaseSequencesDoNotOverlapUnderLongLoad(t *testing.T) {
 // Tracks a fixed offered probe train independently from response timing. It is
 // owned by the workload goroutine; the reader only publishes complete replies.
 type loadedLatencyProbeState struct {
-	samples latencyProbeSamples
-	pending map[uint64]time.Time
-	timeout time.Duration
+	samples  latencyProbeSamples
+	pending  map[uint64]time.Time
+	timeout  time.Duration
+	observer latencyProbeObserver
 }
 
 func newLoadedLatencyProbeState(timeout time.Duration) *loadedLatencyProbeState {
@@ -2268,6 +2379,7 @@ func (self *loadedLatencyProbeState) attempt(
 	err error,
 ) {
 	self.samples.attemptCount += 1
+	observeLatencyProbe(self.observer, "write-end", sequence, time.Time{}, sendTime, err)
 	if err != nil {
 		self.samples.failureCount += 1
 		if self.samples.firstFailure == nil {
@@ -2284,9 +2396,11 @@ func (self *loadedLatencyProbeState) receive(
 	receiveTime time.Time,
 ) {
 	sequence := binary.BigEndian.Uint64(packet[:])
+	observeLatencyProbe(self.observer, "owner-receive", sequence, receiveTime, time.Time{}, nil)
 	var expected [len(packet)]byte
 	binary.BigEndian.PutUint64(expected[:], sequence)
 	if packet != expected {
+		observeLatencyProbe(self.observer, "malformed", sequence, receiveTime, time.Time{}, nil)
 		if self.samples.firstFailure == nil {
 			self.samples.firstFailure = fmt.Errorf("loaded latency probe response was corrupted")
 		}
@@ -2294,10 +2408,12 @@ func (self *loadedLatencyProbeState) receive(
 	}
 	sendTime, ok := self.pending[sequence]
 	if !ok {
+		observeLatencyProbe(self.observer, "unmatched", sequence, receiveTime, time.Time{}, nil)
 		return
 	}
 	delete(self.pending, sequence)
 	if receiveTime.Before(sendTime) {
+		observeLatencyProbe(self.observer, "before-offer", sequence, receiveTime, sendTime, nil)
 		if self.samples.firstFailure == nil {
 			self.samples.firstFailure = fmt.Errorf("loaded latency probe response preceded its send")
 		}
@@ -2306,6 +2422,7 @@ func (self *loadedLatencyProbeState) receive(
 	}
 	latency := receiveTime.Sub(sendTime)
 	if self.timeout < latency {
+		observeLatencyProbe(self.observer, "late", sequence, receiveTime, sendTime, context.DeadlineExceeded)
 		self.samples.failureCount += 1
 		if self.samples.firstFailure == nil {
 			self.samples.firstFailure = context.DeadlineExceeded
@@ -2316,6 +2433,7 @@ func (self *loadedLatencyProbeState) receive(
 		self.samples.latencies,
 		latency,
 	)
+	observeLatencyProbe(self.observer, "accepted", sequence, receiveTime, sendTime, nil)
 }
 
 // Converts every elapsed pending probe into one explicit timeout.
@@ -2325,6 +2443,7 @@ func (self *loadedLatencyProbeState) expire(currentTime time.Time) {
 			continue
 		}
 		delete(self.pending, sequence)
+		observeLatencyProbe(self.observer, "expired", sequence, currentTime, sendTime, context.DeadlineExceeded)
 		self.samples.failureCount += 1
 		if self.samples.firstFailure == nil {
 			self.samples.firstFailure = context.DeadlineExceeded
@@ -2335,8 +2454,9 @@ func (self *loadedLatencyProbeState) expire(currentTime time.Time) {
 // Closes the measurement boundary without letting post-load replies improve
 // the loaded phase retroactively.
 func (self *loadedLatencyProbeState) finish() {
-	for sequence := range self.pending {
+	for sequence, sendTime := range self.pending {
 		delete(self.pending, sequence)
+		observeLatencyProbe(self.observer, "incomplete", sequence, time.Time{}, sendTime, errLoadedLatencyProbeIncomplete)
 		self.samples.failureCount += 1
 		if self.samples.firstFailure == nil {
 			self.samples.firstFailure = errLoadedLatencyProbeIncomplete
@@ -2356,6 +2476,7 @@ type loadedLatencyProbeTestSettings struct {
 	afterAttemptHook          func(int)
 	afterResponseReadHook     func()
 	unbufferedResponseHandoff bool
+	observer                  latencyProbeObserver
 }
 
 // Offers probes at a fixed rate until the bulk goroutine exits. Multiple UDP
@@ -2378,6 +2499,10 @@ func runLoadedLatencyProbes(
 	}
 
 	probeCtx, probeCancel := context.WithCancel(ctx)
+	var observer latencyProbeObserver
+	if testSettings != nil {
+		observer = testSettings.observer
+	}
 	responseBufferCount := 64
 	if testSettings != nil && testSettings.unbufferedResponseHandoff {
 		responseBufferCount = 0
@@ -2392,6 +2517,7 @@ func runLoadedLatencyProbes(
 			if probeCtx.Err() != nil {
 				return
 			}
+			observeLatencyProbe(observer, "read-error", 0, time.Time{}, time.Time{}, err)
 			responses <- loadedLatencyProbeResponse{
 				receiveTime: time.Now(),
 				err:         err,
@@ -2421,6 +2547,7 @@ func runLoadedLatencyProbes(
 				packet:      packet,
 				receiveTime: time.Now(),
 			}
+			observeLatencyProbePacket(observer, "read-complete", packet[:], response.receiveTime, nil)
 			if testSettings != nil && testSettings.afterResponseReadHook != nil {
 				testSettings.afterResponseReadHook()
 			}
@@ -2431,6 +2558,7 @@ func runLoadedLatencyProbes(
 	}()
 
 	state := newLoadedLatencyProbeState(timeout)
+	state.observer = observer
 	nextSequence := startSequence
 	writeProbe := func() {
 		sequence := nextSequence
@@ -2438,6 +2566,7 @@ func runLoadedLatencyProbes(
 		var packet [32]byte
 		binary.BigEndian.PutUint64(packet[:], sequence)
 		sendTime := time.Now()
+		observeLatencyProbe(observer, "offer", sequence, sendTime, sendTime, nil)
 		err := connection.SetWriteDeadline(boundedWorkloadDeadline(ctx, timeout))
 		if err == nil {
 			var writeByteCount int
@@ -2484,10 +2613,12 @@ func runLoadedLatencyProbes(
 	}
 
 	receiveBoundary := time.Now()
+	observeLatencyProbe(observer, "loaded-boundary", 0, receiveBoundary, time.Time{}, nil)
 	probeCancel()
 	_ = connection.SetReadDeadline(time.Now())
 	for response := range responses {
 		if receiveBoundary.Before(response.receiveTime) {
+			observeLatencyProbePacket(observer, "read-after-boundary", response.packet[:], response.receiveTime, response.err)
 			continue
 		}
 		if response.err != nil {

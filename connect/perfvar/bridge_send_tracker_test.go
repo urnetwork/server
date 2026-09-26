@@ -17,15 +17,14 @@ import (
 
 // One native read burst opens every packet lifecycle before paying the
 // modeled application wake once, then transfers the complete burst through
-// one consuming batch call. A partial result marks every lifecycle failed:
-// the batch API has already consumed every owner, and a partial flow group is
-// not a valid performance sample.
+// one consuming batch call. Exact input results keep a refused incidental
+// flow from contaminating an accepted measured flow in the same native burst.
 func sendFullTunBridgeBatch(
 	bridgeSends *fullTunBridgeSendTracker,
 	packets [][]byte,
 	appDelay time.Duration,
 	delay func(time.Duration),
-	send func([][]byte) int,
+	send func([][]byte, []bool) int,
 ) int {
 	if len(packets) == 0 {
 		return 0
@@ -39,13 +38,15 @@ func sendFullTunBridgeBatch(
 		)
 	}
 	sendStart := bridgeSends.now()
-	sentPacketCount := send(packets)
+	var acceptedStorage [64]bool
+	accepted := acceptedStorage[:len(packets)]
+	sentPacketCount := send(packets, accepted)
 	bridgeSends.sendDurationNanoseconds.Add(
 		uint64(bridgeSends.now().Sub(sendStart)),
 	)
-	complete := sentPacketCount == len(packets)
-	for _, bridgeEntry := range bridgeEntries {
-		bridgeSends.terminal(bridgeEntry, complete)
+	consistent := bridgeSends.recordBatchAdmission(bridgeEntries, accepted, sentPacketCount)
+	for packetIndex, bridgeEntry := range bridgeEntries {
+		bridgeSends.terminal(bridgeEntry, consistent && accepted[packetIndex])
 	}
 	return sentPacketCount
 }
@@ -141,6 +142,9 @@ type fullTunBridgeSendTracker struct {
 	beforePublisherWaitForTest   atomic.Pointer[fullTunBridgeStartTestHook]
 	beforeTerminalReleaseForTest atomic.Pointer[fullTunBridgeTerminalTestHook]
 	now                          func() time.Time
+	admissionBatchId             atomic.Uint64
+	admissionFailureBatchCount   uint64
+	admissionFailureBatches      []fullTunBridgeAdmissionBatch
 }
 
 // An immutable optional hook exposes source entry and boundary publication.
@@ -228,10 +232,13 @@ func TestFullTunBridgeBatchAppliesOneDelayAndOneSend(t *testing.T) {
 			}
 			delayCount += 1
 		},
-		func(observedPackets [][]byte) int {
+		func(observedPackets [][]byte, accepted []bool) int {
 			sendCount += 1
 			if len(observedPackets) != len(packets) {
 				t.Fatalf("sent packets=%d, want %d", len(observedPackets), len(packets))
+			}
+			for i := range accepted {
+				accepted[i] = true
 			}
 			return len(observedPackets)
 		},
@@ -292,7 +299,12 @@ func TestFullTunBridgeBatchObservationExcludesBaseline(t *testing.T) {
 			packets,
 			0,
 			func(time.Duration) {},
-			func(observedPackets [][]byte) int { return len(observedPackets) },
+			func(observedPackets [][]byte, accepted []bool) int {
+				for i := range accepted {
+					accepted[i] = true
+				}
+				return len(observedPackets)
+			},
 		); sentPacketCount != packetCount {
 			t.Fatalf("sent packets=%d, want %d", sentPacketCount, packetCount)
 		}

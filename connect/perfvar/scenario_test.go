@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	perfvarSchemaVersion = 13
+	perfvarSchemaVersion = 14
 	// Mixed routes default to a bounded payload: a collapsed transfer reaches
 	// its directional deadline inside the run timeout, a healthy one still
 	// spans many relay bandwidth-delay products.
@@ -160,6 +160,8 @@ const (
 	perfvarFeatureNoFastPathSizeAware  = "no-fast-path-size-aware"
 	perfvarFeatureLaneRule             = "reliable-lane-proven-recovery"
 	perfvarFeatureNoLaneRule           = "no-reliable-lane-proven-recovery"
+	// Legacy established-UDP policy control for the datagram NoAck A/B.
+	perfvarFeatureUdpTransferAck = "udp-transfer-ack"
 )
 
 // P2P topology names resolve to physical adjacent stream carriers. Split
@@ -221,6 +223,8 @@ type perfvarCarrierObservation struct {
 	ProviderP2P                    clientconnect.P2pDataPlaneStatsSnapshot             `json:"provider_p2p"`
 	DevicePacketStats              perfvarPacketStatsObservation                       `json:"device_packet_stats"`
 	ProviderPacketStats            perfvarPacketStatsObservation                       `json:"provider_packet_stats"`
+	AppTCP                         perfvarAppTCPObservation                            `json:"app_tcp"`
+	ProviderCongestionDrops        perfvarProviderCongestionObservation                `json:"provider_congestion_drops"`
 	DevicePlatformReceive          clientconnect.PlatformTransportReceiveStatsSnapshot `json:"device_platform_receive"`
 	ProviderPlatformReceive        clientconnect.PlatformTransportReceiveStatsSnapshot `json:"provider_platform_receive"`
 	DeviceH3Datagrams              h3FullTunDatagramObservation                        `json:"device_h3_datagrams"`
@@ -638,6 +642,7 @@ func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
 			perfvarFeatureNoFastPathSizeAware,
 			perfvarFeatureLaneRule,
 			perfvarFeatureNoLaneRule,
+			perfvarFeatureUdpTransferAck,
 		},
 		[]string{},
 	)

@@ -55,10 +55,11 @@ type simulatedIPNetwork struct {
 	closeOnce sync.Once
 	waitGroup sync.WaitGroup
 
-	stateLock sync.Mutex
-	nodes     map[string]*simulatedTunNode
-	addresses map[netip.Addr]*simulatedTunNode
-	links     map[tunLinkKey]*directionalLink
+	stateLock    sync.Mutex
+	nodes        map[string]*simulatedTunNode
+	addresses    map[netip.Addr]*simulatedTunNode
+	links        map[tunLinkKey]*directionalLink
+	packetFences bool
 
 	unknownDestinationPacketCount atomic.Uint64
 	packetObserver                atomic.Pointer[simulatedIPPacketObserver]
@@ -145,6 +146,13 @@ func (self *simulatedIPNetwork) addLink(
 		}
 	}
 	link := newDirectionalLink(self.ctx, profile, seed, deliver)
+	if self.packetFences {
+		if err := link.enablePacketFences(); err != nil {
+			self.stateLock.Unlock()
+			link.close()
+			return nil, err
+		}
+	}
 	self.links[key] = link
 	self.stateLock.Unlock()
 	return link, nil

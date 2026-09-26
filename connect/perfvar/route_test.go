@@ -356,6 +356,14 @@ type routeEnvironment struct {
 
 	poolOutstandingBefore        int64
 	poolOutstandingClassesBefore map[int]int64
+
+	// Opt-in connection-creation diagnostics retain handles, never packets.
+	// Atomic publication also permits installation after a TUN is constructed.
+	clientDialObserverForTest atomic.Pointer[routeClientDialObserver]
+}
+
+type routeClientDialObserver struct {
+	observe func(string, *clientconnect.Tun, net.Conn)
 }
 
 // The fixture uses gVisor TCP and UDP for client-edge traffic and real TLS.
@@ -695,6 +703,11 @@ func (self *routeEnvironment) newClientNodeWithProfileAt(
 	strategySettings.ConnectSettings.DialContextSettings = &clientconnect.DialContextSettings{
 		DialContext: func(ctx context.Context, network string, address string) (net.Conn, error) {
 			connection, dialErr := clientTun.DialContext(ctx, network, address)
+			if dialErr == nil {
+				if observer := self.clientDialObserverForTest.Load(); observer != nil {
+					observer.observe(name, clientTun, connection)
+				}
+			}
 			if useExtender {
 				self.t.Logf("[perfvar] extender client dial network=%s address=%s err=%v", network, address, dialErr)
 			}

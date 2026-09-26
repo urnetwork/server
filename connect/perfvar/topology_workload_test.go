@@ -521,6 +521,13 @@ func measureFullTunUDPDirection(
 		}
 	}
 	sendDuration := time.Since(startTime)
+	bridgeFailure := func(targetPackets int64, targetBytes clientconnect.ByteCount, boundaryOK bool) error {
+		stateLock.Lock()
+		delivered, duplicate, corrupt := deliveredPacketCount, duplicatePacketCount, corruptPacketCount
+		stateLock.Unlock()
+		return path.bridgeSends.flowFailure(ctx, measuredBridgeWindow, targetPackets, targetBytes,
+			boundaryOK, delivered, duplicate, corrupt, path.multiClient.TcpCollapseDropCount())
+	}
 	// First prove that every measured application datagram reached its source
 	// SendPack. No terminal marker has entered the path yet.
 	if upload {
@@ -533,14 +540,8 @@ func measureFullTunUDPDirection(
 			targetBridgeByteCount,
 		)
 		if !bridgeBoundaryOk || !path.bridgeSends.waitThrough(ctx, bridgeBoundary) {
-			return workloadResult{}, fmt.Errorf(
-				"application bridge did not complete measured flow %+v at %d packets and %d bytes: %w; failures=%d",
-				measuredBridgeWindow.flowKey,
-				targetPacketCount,
-				targetBridgeByteCount,
-				ctx.Err(),
-				path.bridgeSends.failureCount.Load(),
-			)
+			return workloadResult{}, fmt.Errorf("application bridge did not complete measured flow: %w",
+				bridgeFailure(targetPacketCount, targetBridgeByteCount, bridgeBoundaryOk))
 		}
 	} else {
 		targetProviderReturnByteCount := clientconnect.ByteCount(targetPacketCount) *
@@ -613,15 +614,8 @@ func measureFullTunUDPDirection(
 				targetBridgeByteCount,
 			)
 			if !bridgeBoundaryOk || !path.bridgeSends.waitThrough(ctx, bridgeBoundary) {
-				return workloadResult{}, fmt.Errorf(
-					"marker %d bridge source did not complete flow %+v at %d packets and %d bytes: %w; failures=%d",
-					markerAttemptCount,
-					measuredBridgeWindow.flowKey,
-					targetBridgePacketCount,
-					targetBridgeByteCount,
-					ctx.Err(),
-					path.bridgeSends.failureCount.Load(),
-				)
+				return workloadResult{}, fmt.Errorf("marker %d bridge source did not complete flow: %w",
+					markerAttemptCount, bridgeFailure(targetBridgePacketCount, targetBridgeByteCount, bridgeBoundaryOk))
 			}
 		} else {
 			targetProviderReturnPacketCount := targetPacketCount + int64(markerAttemptCount)
@@ -1646,6 +1640,22 @@ func hasTransferEncoding(encodings []string, want string) bool {
 	return false
 }
 
+type fullTunLatencyProbeTestObserver struct {
+	observe latencyProbeObserver
+	phase   func(string)
+	finish  func()
+}
+
+// Only an explicitly selected diagnostic installs this factory. It is called
+// before any echo worker starts and its finish runs after every worker joins.
+var newFullTunLatencyProbeObserverForTest func(*fullTunPath) *fullTunLatencyProbeTestObserver
+
+func (self *fullTunLatencyProbeTestObserver) observePhase(phase string) {
+	if self != nil && self.phase != nil {
+		self.phase(phase)
+	}
+}
+
 // A host UDP echo probe observes interactive RTT before, during, and after a
 // full-TUN bulk transfer over the same selected route. The compatibility entry
 // point retains the original upload direction.
@@ -1701,6 +1711,17 @@ func measureFullTunLatencyUnderLoadDirectionWithStartHook(
 	upload bool,
 	startHook func() error,
 ) (workloadResult, error) {
+	var probeTrace *fullTunLatencyProbeTestObserver
+	var probeObserver latencyProbeObserver
+	if newFullTunLatencyProbeObserverForTest != nil {
+		probeTrace = newFullTunLatencyProbeObserverForTest(path)
+		if probeTrace != nil {
+			probeObserver = probeTrace.observe
+			if probeTrace.finish != nil {
+				defer probeTrace.finish()
+			}
+		}
+	}
 	probeListener, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
 		return workloadResult{}, err
@@ -1723,7 +1744,12 @@ func measureFullTunLatencyUnderLoadDirectionWithStartHook(
 			if readErr != nil {
 				return
 			}
-			_, _ = probeListener.WriteTo(packetBytes[:readByteCount], sourceAddress)
+			observeLatencyProbePacket(probeObserver, "echo-read", packetBytes[:readByteCount], time.Time{}, nil)
+			writeByteCount, writeErr := probeListener.WriteTo(packetBytes[:readByteCount], sourceAddress)
+			if writeErr == nil && writeByteCount != readByteCount {
+				writeErr = io.ErrShortWrite
+			}
+			observeLatencyProbePacket(probeObserver, "echo-write", packetBytes[:readByteCount], time.Time{}, writeErr)
 		}
 	}()
 	var probeServerJoinOnce sync.Once
@@ -1749,11 +1775,12 @@ func measureFullTunLatencyUnderLoadDirectionWithStartHook(
 			if ctx.Err() != nil {
 				break
 			}
-			latency, probeErr := runLatencyProbe(
+			latency, probeErr := runLatencyProbeObserved(
 				ctx,
 				probeConnection,
 				startSequence+uint64(probeIndex),
 				probeTimeout,
+				probeObserver,
 			)
 			samples.add(latency, probeErr)
 			if err := waitForWorkloadDelay(ctx, 5*time.Millisecond); err != nil {
@@ -1762,7 +1789,9 @@ func measureFullTunLatencyUnderLoadDirectionWithStartHook(
 		}
 		return samples
 	}
+	probeTrace.observePhase("idle-start")
 	idleSamples := probeMany(latencyProbeIdleStartSequence, 8)
+	probeTrace.observePhase("idle-end")
 	if err := idleSamples.validate("idle"); err != nil {
 		result := workloadResult{}
 		applyLatencyProbeSamples(&result, idleSamples, latencyProbeSamples{}, latencyProbeSamples{})
@@ -1844,6 +1873,11 @@ func measureFullTunLatencyUnderLoadDirectionWithStartHook(
 			return workloadResult{}, err
 		}
 	}
+	var loadedProbeSettings *loadedLatencyProbeTestSettings
+	if probeObserver != nil {
+		loadedProbeSettings = &loadedLatencyProbeTestSettings{observer: probeObserver}
+	}
+	probeTrace.observePhase("loaded-start")
 	loadedSamples := runLoadedLatencyProbes(
 		ctx,
 		probeConnection,
@@ -1854,8 +1888,9 @@ func measureFullTunLatencyUnderLoadDirectionWithStartHook(
 			fullTunEffectiveRateBitsPerSecond(path, upload),
 		),
 		bulkFinished,
-		nil,
+		loadedProbeSettings,
 	)
+	probeTrace.observePhase("loaded-end")
 	var bulkResult workloadResult
 	select {
 	case err := <-bulkErrors:
@@ -1871,7 +1906,9 @@ func measureFullTunLatencyUnderLoadDirectionWithStartHook(
 		return workloadResult{}, ctx.Err()
 	}
 	joinBulkUpload()
+	probeTrace.observePhase("post-load-start")
 	postLoadSamples := probeMany(latencyProbePostLoadStartSequence, 8)
+	probeTrace.observePhase("post-load-end")
 	joinProbeServer()
 	applyLatencyProbeSamples(&bulkResult, idleSamples, loadedSamples, postLoadSamples)
 	if err := validateLatencyProbeSamples(idleSamples, loadedSamples, postLoadSamples); err != nil {

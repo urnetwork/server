@@ -120,6 +120,37 @@ func ackLineageLoaded4Scenario(t testing.TB) perfvarScenario {
 
 func TestAckLineageLoaded4Identity(t *testing.T) { ackLineageLoaded4Scenario(t) }
 
+func ackLineageReplayRuntimeSupported(goVersion, goos, goarch string, maxProcs int) bool {
+	return goVersion == "go1.26.7" && goos == "darwin" && goarch == "arm64" && (maxProcs == 2 || maxProcs == 8)
+}
+
+func TestAckLineageReplayRuntimeGate(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		goVersion string
+		goos      string
+		goarch    string
+		maxProcs  int
+		want      bool
+	}{
+		{"historical_cpu2", "go1.26.7", "darwin", "arm64", 2, true},
+		{"canonical_cpu8", "go1.26.7", "darwin", "arm64", 8, true},
+		{"unset_cpu", "go1.26.7", "darwin", "arm64", 0, false},
+		{"cpu1", "go1.26.7", "darwin", "arm64", 1, false},
+		{"cpu4", "go1.26.7", "darwin", "arm64", 4, false},
+		{"host_cpu14", "go1.26.7", "darwin", "arm64", 14, false},
+		{"go_version_drift", "go1.26.8", "darwin", "arm64", 8, false},
+		{"platform_drift", "go1.26.7", "linux", "arm64", 8, false},
+		{"architecture_drift", "go1.26.7", "darwin", "amd64", 8, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ackLineageReplayRuntimeSupported(test.goVersion, test.goos, test.goarch, test.maxProcs); got != test.want {
+				t.Fatalf("runtime gate=%t want=%t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestAckLineageReplayRecorder(t *testing.T) {
 	recorder := &ackReplayRecorder{}
 	if got := testing.AllocsPerRun(100, func() { recorder.next.Store(0); recorder.observe(clientconnect.TransferProgressEvent{}) }); got != 0 {
@@ -171,8 +202,9 @@ func TestAckLineageLoaded4Replay(t *testing.T) {
 	if os.Getenv("CONNECT_PERFVAR_ACK_LINEAGE_REPLAY") != "loaded4" || os.Getenv("URNETWORK_ACK_LINEAGE_REPLAY_SLOT") != "granted" {
 		t.Fatal("one-cell diagnostic requires loaded4 and a parent-owned host/source slot")
 	}
-	if runtime.GOMAXPROCS(0) != 2 || runtime.Version() != "go1.26.7" || runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
-		t.Fatalf("diagnostic runtime changed: Go=%s GOMAXPROCS=%d platform=%s/%s", runtime.Version(), runtime.GOMAXPROCS(0), runtime.GOOS, runtime.GOARCH)
+	maxProcs := runtime.GOMAXPROCS(0)
+	if !ackLineageReplayRuntimeSupported(runtime.Version(), runtime.GOOS, runtime.GOARCH, maxProcs) {
+		t.Fatalf("diagnostic runtime changed: Go=%s GOMAXPROCS=%d platform=%s/%s", runtime.Version(), maxProcs, runtime.GOOS, runtime.GOARCH)
 	}
 	if os.Getenv("CONNECT_PERFVAR_PROGRESS_TRACE") != "1" || !clientconnect.DefaultLogger().V(1).Enabled() {
 		t.Fatal("diagnostic requires CONNECT_PERFVAR_PROGRESS_TRACE=1 and -args -v=1")
@@ -180,7 +212,7 @@ func TestAckLineageLoaded4Replay(t *testing.T) {
 	scenario := ackLineageLoaded4Scenario(t)
 	newPerfvarProgressTraceForTest = newAckReplayTrace
 	defer func() { newPerfvarProgressTraceForTest = nil }()
-	t.Log("[ack-lineage-runtime] identity=loaded4-cpu2-v1 original_GOMAXPROCS=8 diagnostic_GOMAXPROCS=2 baseline_eligible=false")
+	t.Logf("[ack-lineage-runtime] identity=loaded4-cpu%d-v1 original_GOMAXPROCS=8 diagnostic_GOMAXPROCS=%d baseline_eligible=false", maxProcs, maxProcs)
 	environment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
 	environment.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(context.Background(), perfvarRunTimeout(scenario))
