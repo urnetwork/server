@@ -3034,7 +3034,7 @@ func stComputeReleasePayout(
 	if prior := model.GetStPayoutArtifact(ctx, cfg.DeploymentKey(), epoch, cfg.NoId); prior != nil {
 		return prior.PayoutRoot, len(model.GetStPayoutLeaves(ctx, cfg.DeploymentKey(), epoch, cfg.NoId)), nil
 	}
-	usages, err := model.GetStEpochProviderUsage(ctx, startTime, endTime)
+	usages, err := model.GetStEpochProviderUsageAtEpoch(ctx, epoch, startTime, endTime)
 	if err != nil {
 		return [32]byte{}, 0, err
 	}

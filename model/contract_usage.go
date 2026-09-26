@@ -5,10 +5,13 @@ package model
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
 	"slices"
+	"strings"
+	"time"
 
 	"github.com/urnetwork/server"
 )
@@ -16,11 +19,23 @@ import (
 // One immutable contract total is partitioned once over the service clients.
 // Empty providers are permitted only for a zero-byte contract.
 type contractUsageSnapshot struct {
-	Version        int                     `json:"version"`
-	ByteCount      ByteCount               `json:"byte_count"`
-	Providers      []contractProviderUsage `json:"providers"`
-	ExcludedReason string                  `json:"excluded_reason,omitempty"`
-	Expiry         *contractUsageExpiry    `json:"expiry,omitempty"`
+	Version         int                           `json:"version"`
+	ByteCount       ByteCount                     `json:"byte_count"`
+	Providers       []contractProviderUsage       `json:"providers"`
+	ExcludedReason  string                        `json:"excluded_reason,omitempty"`
+	Expiry          *contractUsageExpiry          `json:"expiry,omitempty"`
+	LegacyExclusion *contractUsageLegacyExclusion `json:"legacy_exclusion,omitempty"`
+}
+
+// An explicitly reviewed repair retains missing historical usage as debt.
+// This never attributes bytes to mutable providers or authorizes final acceptance.
+type contractUsageLegacyExclusion struct {
+	RepairManifestSha256  string    `json:"repair_manifest_sha256"`
+	ContractId            server.Id `json:"contract_id"`
+	Epoch                 uint64    `json:"epoch"`
+	ClosedAt              time.Time `json:"closed_at"`
+	RetainedReportMinimum ByteCount `json:"retained_report_minimum"`
+	FinalAcceptance       bool      `json:"final_acceptance"`
 }
 
 // Includes same-network service clients; monetary eligibility is unrelated.
@@ -162,8 +177,16 @@ func decodeContractUsageSnapshot(data []byte) (*contractUsageSnapshot, error) {
 			NetworkId server.Id  `json:"network_id"`
 			ByteCount *ByteCount `json:"byte_count"`
 		} `json:"providers"`
-		ExcludedReason string `json:"excluded_reason,omitempty"`
-		Expiry         *struct {
+		ExcludedReason  string `json:"excluded_reason,omitempty"`
+		LegacyExclusion *struct {
+			RepairManifestSha256  string     `json:"repair_manifest_sha256"`
+			ContractId            server.Id  `json:"contract_id"`
+			Epoch                 uint64     `json:"epoch"`
+			ClosedAt              time.Time  `json:"closed_at"`
+			RetainedReportMinimum *ByteCount `json:"retained_report_minimum"`
+			FinalAcceptance       *bool      `json:"final_acceptance"`
+		} `json:"legacy_exclusion,omitempty"`
+		Expiry *struct {
 			Capacity *ByteCount `json:"capacity"`
 			Reports  *map[ContractParty]struct {
 				ByteCount  *ByteCount `json:"byte_count"`
@@ -180,6 +203,21 @@ func decodeContractUsageSnapshot(data []byte) (*contractUsageSnapshot, error) {
 		return nil, fmt.Errorf("missing contract usage fields")
 	}
 	snapshot := contractUsageSnapshot{Version: record.Version, ByteCount: *record.ByteCount, Providers: []contractProviderUsage{}, ExcludedReason: record.ExcludedReason}
+	if legacy := record.LegacyExclusion; legacy != nil {
+		digest, err := hex.DecodeString(strings.TrimPrefix(legacy.RepairManifestSha256, "sha256:"))
+		if err != nil || len(digest) != 32 || legacy.RepairManifestSha256 != "sha256:"+hex.EncodeToString(digest) ||
+			legacy.ContractId == (server.Id{}) || legacy.Epoch == 0 || legacy.ClosedAt.IsZero() ||
+			legacy.RetainedReportMinimum == nil || *legacy.RetainedReportMinimum < 0 || legacy.FinalAcceptance == nil || *legacy.FinalAcceptance ||
+			record.ExcludedReason != "legacy_usage_unavailable" || record.Expiry != nil {
+			return nil, fmt.Errorf("invalid legacy usage exclusion")
+		}
+		snapshot.LegacyExclusion = &contractUsageLegacyExclusion{RepairManifestSha256: legacy.RepairManifestSha256,
+			ContractId: legacy.ContractId, Epoch: legacy.Epoch, ClosedAt: legacy.ClosedAt,
+			RetainedReportMinimum: *legacy.RetainedReportMinimum, FinalAcceptance: false}
+	}
+	if record.ExcludedReason == "legacy_usage_unavailable" && snapshot.LegacyExclusion == nil {
+		return nil, fmt.Errorf("legacy usage exclusion lacks its explicit repair receipt")
+	}
 	if record.Expiry != nil {
 		if record.Expiry.Capacity == nil || record.Expiry.Reports == nil {
 			return nil, fmt.Errorf("missing original expiry report fields")
@@ -209,7 +247,7 @@ func decodeContractUsageSnapshot(data []byte) (*contractUsageSnapshot, error) {
 		snapshot.Providers = append(snapshot.Providers, contractProviderUsage{ClientId: provider.ClientId, NetworkId: provider.NetworkId, ByteCount: *provider.ByteCount})
 	}
 	if snapshot.Version != 1 || snapshot.ByteCount < 0 || snapshot.Providers == nil ||
-		(snapshot.ExcludedReason != "" && (snapshot.ExcludedReason != "expired_unconfirmed" || snapshot.ByteCount != 0 || len(snapshot.Providers) != 0)) {
+		(snapshot.ExcludedReason != "" && ((snapshot.ExcludedReason != "expired_unconfirmed" && snapshot.ExcludedReason != "legacy_usage_unavailable") || snapshot.ByteCount != 0 || len(snapshot.Providers) != 0)) {
 		return nil, fmt.Errorf("invalid contract usage snapshot header")
 	}
 	var total int64

@@ -16,6 +16,16 @@ import (
 // The half-open settlement window counts each contract once, regardless of
 // how many balances funded it or whether it needed escrow at all.
 func GetStEpochProviderUsage(ctx context.Context, startTime time.Time, endTime time.Time) ([]*StProviderUsage, error) {
+	return getStEpochProviderUsage(ctx, 0, startTime, endTime)
+}
+
+// Only the payout owner's explicit epoch can admit an exact historical debt
+// receipt. Generic time-window readers retain strict complete-usage admission.
+func GetStEpochProviderUsageAtEpoch(ctx context.Context, epoch uint64, startTime time.Time, endTime time.Time) ([]*StProviderUsage, error) {
+	return getStEpochProviderUsage(ctx, epoch, startTime, endTime)
+}
+
+func getStEpochProviderUsage(ctx context.Context, epoch uint64, startTime time.Time, endTime time.Time) ([]*StProviderUsage, error) {
 	if !startTime.Before(endTime) {
 		return nil, fmt.Errorf("invalid subnet usage window")
 	}
@@ -23,7 +33,7 @@ func GetStEpochProviderUsage(ctx context.Context, startTime time.Time, endTime t
 	var returnErr error
 	server.Db(ctx, func(conn server.PgConn) {
 		rows, err := conn.Query(ctx, `
-			SELECT contract_id, provider_usage FROM transfer_contract
+			SELECT contract_id, provider_usage, close_time FROM transfer_contract
 			WHERE $1 <= close_time AND close_time < $2 AND outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
 		`, startTime, endTime)
 		if err != nil {
@@ -34,13 +44,18 @@ func GetStEpochProviderUsage(ctx context.Context, startTime time.Time, endTime t
 		for rows.Next() {
 			var contractId server.Id
 			var data []byte
-			if err := rows.Scan(&contractId, &data); err != nil {
+			var closedAt time.Time
+			if err := rows.Scan(&contractId, &data, &closedAt); err != nil {
 				returnErr = err
 				return
 			}
 			snapshot, err := decodeContractUsageSnapshot(data)
 			if err != nil {
 				returnErr = fmt.Errorf("subnet contract %s: %w", contractId, err)
+				return
+			}
+			if legacy := snapshot.LegacyExclusion; legacy != nil && (legacy.ContractId != contractId || !legacy.ClosedAt.Equal(closedAt) || legacy.Epoch != epoch) {
+				returnErr = fmt.Errorf("subnet contract %s: legacy usage exclusion differs from its terminal owner", contractId)
 				return
 			}
 			for _, provider := range snapshot.Providers {
