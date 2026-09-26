@@ -297,14 +297,21 @@ type TransferBalance struct {
 }
 
 func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*TransferBalance {
-	now := server.NowUtc()
-
-	transferBalances := []*TransferBalance{}
-
+	var transferBalances []*TransferBalance
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
+		transferBalances = getActiveTransferBalanceRows(ctx, conn, networkId)
+	})
+	applyActiveTransferEscrow(ctx, transferBalances)
+	return transferBalances
+}
+
+// Share the balance query with transaction owners without acquiring another
+// pool connection while they hold a row lock.
+func getActiveTransferBalanceRows(ctx context.Context, query server.PgCanQuery, networkId server.Id) []*TransferBalance {
+	transferBalances := []*TransferBalance{}
+	result, err := query.Query(
+		ctx,
+		`
                 SELECT
                     balance_id,
                     start_time,
@@ -320,29 +327,33 @@ func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*Tran
                     active = true AND
                     start_time <= $2 AND $2 < end_time
             `,
-			networkId,
-			now,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				transferBalance := &TransferBalance{
-					NetworkId: networkId,
-				}
-				server.Raise(result.Scan(
-					&transferBalance.BalanceId,
-					&transferBalance.StartTime,
-					&transferBalance.EndTime,
-					&transferBalance.StartBalanceByteCount,
-					&transferBalance.NetRevenue,
-					&transferBalance.BalanceByteCount,
-					&transferBalance.Paid,
-					&transferBalance.Pro,
-				))
-				transferBalances = append(transferBalances, transferBalance)
+		networkId,
+		server.NowUtc(),
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			transferBalance := &TransferBalance{
+				NetworkId: networkId,
 			}
-		})
+			server.Raise(result.Scan(
+				&transferBalance.BalanceId,
+				&transferBalance.StartTime,
+				&transferBalance.EndTime,
+				&transferBalance.StartBalanceByteCount,
+				&transferBalance.NetRevenue,
+				&transferBalance.BalanceByteCount,
+				&transferBalance.Paid,
+				&transferBalance.Pro,
+			))
+			transferBalances = append(transferBalances, transferBalance)
+		}
 	})
+	return transferBalances
+}
 
+// Preserve the existing per-balance escrow clamp and fail closed on Redis
+// errors. Ordinary reads release PostgreSQL before fetching this mirror.
+func applyActiveTransferEscrow(ctx context.Context, transferBalances []*TransferBalance) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		netEscrowCmds := map[server.Id]*redis.StringCmd{}
 		// the net escrow keys use per-balance hash tags (different slots), so
@@ -369,8 +380,6 @@ func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*Tran
 			transferBalance.BalanceByteCount = max(0, transferBalance.BalanceByteCount-ByteCount(netEscrowBalanceByteCount))
 		}
 	})
-
-	return transferBalances
 }
 
 func GetActiveTransferBalanceByteCount(ctx context.Context, networkId server.Id) ByteCount {
@@ -2009,6 +2018,11 @@ func CreateCompanionContract(
 // manufactured dead-on-arrival multiclient window clients).
 var ErrMissingCompanionOrigin = fmt.Errorf("Missing origin contract for companion.")
 
+// The internal prober owns its return-path reservation ramp as well as its
+// outgoing ramp. A provider's defaults must not reserve a larger companion
+// against that account than the probe's own origin ramp. The earliest origin
+// remains the stream anchor, while a newer eligible origin may raise the
+// probe's reservation size. Ordinary accounts retain asymmetric request sizes.
 func CreateCompanionTransferEscrow(
 	ctx context.Context,
 	sourceNetworkId server.Id,
@@ -2028,10 +2042,26 @@ func CreateCompanionTransferEscrow(
 		result, err := tx.Query(
 			ctx,
 			`
-                SELECT contract_id
+                SELECT contract_id,
+                    CASE WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4)
+                    THEN GREATEST(transfer_byte_count, (
+                        SELECT max(transfer_byte_count)
+                        FROM (
+                            SELECT transfer_byte_count FROM transfer_contract
+                            WHERE
+                                (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                                source_id = $1 AND destination_id = $2 AND
+                                companion_contract_id IS NULL
+                            UNION ALL
+                            SELECT transfer_byte_count FROM transfer_contract
+                            WHERE open = false AND $3 <= close_time AND
+                                source_id = $1 AND destination_id = $2 AND
+                                companion_contract_id IS NULL
+                        ) AS eligible_probe_origins
+                    )) END AS prober_reservation_byte_count
                 FROM (
                     (
-                        SELECT contract_id, create_time
+                        SELECT contract_id, create_time, transfer_byte_count
                         FROM transfer_contract
                         WHERE
 							-- The CASE is equivalent to the generated open flag but
@@ -2047,7 +2077,7 @@ func CreateCompanionTransferEscrow(
                     UNION ALL
 
                     (
-                        SELECT contract_id, create_time
+                        SELECT contract_id, create_time, transfer_byte_count
                         FROM transfer_contract
                         WHERE
                             open = false AND
@@ -2072,11 +2102,13 @@ func CreateCompanionTransferEscrow(
 			destinationId,
 			sourceId,
 			server.NowUtc().Add(-originContractTimeout),
+			destinationNetworkId,
 		)
 		var companionContractId *server.Id
+		var proberReservationByteCount *ByteCount
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				server.Raise(result.Scan(&companionContractId))
+				server.Raise(result.Scan(&companionContractId, &proberReservationByteCount))
 			}
 		})
 
@@ -2100,10 +2132,26 @@ func CreateCompanionTransferEscrow(
 			result, err := tx.Query(
 				ctx,
 				`
-                    SELECT contract_id
+                    SELECT contract_id,
+                        CASE WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4)
+                        THEN GREATEST(transfer_byte_count, (
+                            SELECT max(transfer_byte_count)
+                            FROM (
+                                SELECT transfer_byte_count FROM transfer_contract
+                                WHERE
+                                    (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                                    source_id = $1 AND destination_id = $2 AND
+                                    companion_contract_id IS NOT NULL
+                                UNION ALL
+                                SELECT transfer_byte_count FROM transfer_contract
+                                WHERE open = false AND $3 <= close_time AND
+                                    source_id = $1 AND destination_id = $2 AND
+                                    companion_contract_id IS NOT NULL
+                            ) AS eligible_probe_companion_origins
+                        )) END AS prober_reservation_byte_count
                     FROM (
                         (
-                            SELECT contract_id, create_time
+                            SELECT contract_id, create_time, transfer_byte_count
                             FROM transfer_contract
                             WHERE
 								-- Keep both generic open and outcome-null partial
@@ -2119,7 +2167,7 @@ func CreateCompanionTransferEscrow(
                         UNION ALL
 
                         (
-                            SELECT contract_id, create_time
+                            SELECT contract_id, create_time, transfer_byte_count
                             FROM transfer_contract
                             WHERE
                                 open = false AND
@@ -2138,10 +2186,11 @@ func CreateCompanionTransferEscrow(
 				destinationId,
 				sourceId,
 				server.NowUtc().Add(-originContractTimeout),
+				destinationNetworkId,
 			)
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
-					server.Raise(result.Scan(&companionContractId))
+					server.Raise(result.Scan(&companionContractId, &proberReservationByteCount))
 				}
 			})
 		}
@@ -2149,6 +2198,10 @@ func CreateCompanionTransferEscrow(
 		if companionContractId == nil {
 			returnErr = ErrMissingCompanionOrigin
 			return
+		}
+
+		if proberReservationByteCount != nil {
+			contractTransferByteCount = min(contractTransferByteCount, *proberReservationByteCount)
 		}
 
 		transferEscrow, posts, returnErr = createTransferEscrowInTx(

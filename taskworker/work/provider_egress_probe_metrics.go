@@ -31,12 +31,12 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/ingest"
-	"github.com/urnetwork/operator-proxy/prober"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/ingest"
+	"github.com/urnetwork/server/qualityprobe/prober"
 )
 
 // egressProbeUnknownCountry labels an outcome whose provider has no known

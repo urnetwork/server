@@ -10,9 +10,9 @@ import (
 	"testing/synctest"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/urnetwork/operator-proxy/fleetprobe"
-	"github.com/urnetwork/operator-proxy/ingest"
-	"github.com/urnetwork/operator-proxy/prober"
+	"github.com/urnetwork/server/qualityprobe/fleetprobe"
+	"github.com/urnetwork/server/qualityprobe/ingest"
+	"github.com/urnetwork/server/qualityprobe/prober"
 )
 
 func testBlackholeProgressWork(check fleetprobe.BlackholeChecker, submit func(context.Context, []ingest.BlackholeCheck) error) *providerEgressProbePass {

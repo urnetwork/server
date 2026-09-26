@@ -455,6 +455,72 @@ func TestTaskCanariesSignalClassifiesTaskErrorsWithoutRenderingRawText(t *testin
 	}
 }
 
+// The wrapped-task diagnosis stays conditional and no private task reference
+// survives either of the public alert representations.
+func TestTaskCanariesSignalExplainsOptionalPostRecipientWithoutLeakingTask(t *testing.T) {
+	const privateId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH history AS"):
+			return nil, nil
+		case strings.Contains(query, "WITH failures AS"):
+			return []Row{{"(*TaskWorker)", "1", "1", "0", "53", "3600", "Missing user auth. private task " + privateId, "120", "1", "post-missing-recipient=1", "18.6", "32", "8MB"}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "task-parked")
+	markdown := alert.Markdown()
+	for _, expected := range []string{"post-missing-recipient", "wrapped task post hook", "validated task reference", "natural retry", "If it is terminal PlaySubscriptionRenewal", "does not identify the wrapped task", "establish that its notice is optional"} {
+		if !strings.Contains(markdown, expected) {
+			t.Fatalf("missing %q from post guidance: %s", expected, markdown)
+		}
+	}
+	encoded, err := json.Marshal(alert)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rendered := range []string{markdown, string(encoded)} {
+		for _, forbidden := range []string{privateId, "Missing user auth. private task"} {
+			if strings.Contains(rendered, forbidden) {
+				t.Fatal("post guidance leaked private task details")
+			}
+		}
+	}
+}
+
+// The same raw error in an ordinary task remains visible without acquiring
+// wrapper-specific deployment advice or permission to skip its failure.
+func TestTaskCanariesSignalDoesNotApplyPostRecipientGuidanceToOrdinaryTask(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		switch {
+		case strings.Contains(query, "UpdateClientLocations"):
+			return []Row{{"12"}}, nil
+		case strings.Contains(query, "WITH history AS"):
+			return nil, nil
+		case strings.Contains(query, "WITH failures AS"):
+			return []Row{{"PlaySubscriptionRenewal", "1", "1", "0", "53", "3600", "Missing user auth. synthetic-private-task", "120", "1", "other=1", "18.6", "32", "8MB"}}, nil
+		default:
+			return nil, nil
+		}
+	}}
+	alerts, err := NewTaskCanariesSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "task-parked")
+	if !strings.Contains(alert.Markdown(), "representative_error_class=unclassified") {
+		t.Fatal("ordinary task lost its unclassified failure")
+	}
+	requireAlertOmits(t, alert, "post-missing-recipient", "wrapped task post hook", "typed missing-recipient skip", "synthetic-private-task")
+}
+
 func TestTaskCanariesSignalSyntheticOverdueAndParkedTasks(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 		switch {

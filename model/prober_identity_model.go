@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -20,7 +21,7 @@ import (
 // once and refreshed on a schedule, by the bootstrap task in
 // taskworker/work/prober_bootstrap_work.go.
 //
-// The whole risk here is that the task re-runs every six hours forever. Every
+// The whole risk here is that the task re-runs periodically forever. Every
 // constant and every query below exists to make a repeated run a no-op rather
 // than a second account, a second client, or another balance grant.
 const (
@@ -35,17 +36,23 @@ const (
 	// error line, but nobody unwinds a thousand accounts.
 	MaxProberBootstrapAttempts = 5
 
-	// ProberMinTransferBalance is the active balance below which the prober's
-	// network is topped up. At or above it nothing is granted -- that check is
-	// what keeps a six-hourly task from stacking a grant every six hours.
-	ProberMinTransferBalance = 4 * Gib
+	// ProberMinTransferBalance is the available PG-minus-Redis-escrow balance
+	// below which the internal prober is topped up. A high-parallel sweep can
+	// reserve hundreds of GiB in short-lived contracts; 4 GiB headroom and a
+	// 32 GiB grant caused admission to stop before the next bootstrap. There
+	// is no lifetime cap for this internal identity, but healthy passes do not
+	// stack grants.
+	ProberMinTransferBalance = 256 * Gib
+	// A shard starts only after the shared prober has this much available
+	// headroom per configured shard. This covers overlapping, slow-to-close
+	// contracts from earlier passes, not just one new tunnel's reservation.
+	ProberShardTransferHeadroom = 256 * Gib
 
 	// ProberTransferBalanceTopUp / ProberTransferBalanceDuration are one grant.
-	// Deliberately generous relative to what probing costs (a tunnel handshake
-	// and a few small https requests per provider): the failure this feature
-	// exists to remove is silent, so erring toward "never runs dry" is cheap
-	// and erring the other way is invisible.
-	ProberTransferBalanceTopUp    = 32 * Gib
+	// This is accounting credit, not a traffic quota or a change to escrow
+	// settlement. Repeat conditional grants keep the internal prober funded
+	// as fleet size and parallelism grow without granting user networks credit.
+	ProberTransferBalanceTopUp    = 512 * Gib
 	ProberTransferBalanceDuration = 30 * 24 * time.Hour
 
 	// ProberJwtRefreshAge is how old a minted client jwt may get before it is
@@ -310,12 +317,58 @@ type ProberBootstrapStatus struct {
 	CreateExhausted bool `json:"create_exhausted"`
 }
 
+// EnsureProberTransferBalance replenishes only the persisted internal prober.
+// The singleton row lock serializes shard preflights and scheduled bootstrap
+// across Taskworker processes. Contract admission does not take this lock, so
+// this is headroom, not an exclusive reservation for any particular shard.
+func EnsureProberTransferBalance(ctx context.Context, minimum ByteCount) (granted bool, returnErr error) {
+	if minimum <= 0 {
+		return false, fmt.Errorf("prober minimum transfer balance must be positive")
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		// Tx may rerun its callback after a transient connection failure. Only
+		// report grants from the committed attempt.
+		granted = false
+		returnErr = nil
+		var networkId *server.Id
+		result, err := tx.Query(ctx, `SELECT network_id FROM prober_identity WHERE singleton FOR UPDATE`)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&networkId))
+			}
+		})
+		if networkId == nil {
+			returnErr = fmt.Errorf("internal prober network is not bootstrapped")
+			return
+		}
+		balances := getActiveTransferBalanceRows(ctx, tx, *networkId)
+		applyActiveTransferEscrow(ctx, balances)
+		available := ByteCount(0)
+		for _, balance := range balances {
+			// This is a comparison with a representable minimum, so saturate
+			// instead of turning abundant credit negative on integer overflow.
+			available += min(balance.BalanceByteCount, math.MaxInt64-available)
+		}
+		for available < minimum {
+			startTime := server.NowUtc()
+			grant := min(ProberTransferBalanceTopUp, math.MaxInt64-available)
+			if err := AddBasicTransferBalanceInTx(tx, ctx, *networkId,
+				grant, startTime, startTime.Add(ProberTransferBalanceDuration)); err != nil {
+				server.Raise(err) // abort the transaction; never commit a partial preflight
+			}
+			available += grant
+			granted = true
+		}
+	}, server.TxReadCommitted) // A queued lock owner must see the preceding committed grant.
+	return
+}
+
 // BootstrapProberIdentity brings the prober's credential up to date: it creates
 // the network account if there is none, tops the balance up if it has run low,
 // and mints a client jwt if there is none or the last one is getting old.
 //
-// Each of those three is separately conditional, because this runs every six
-// hours forever. In the steady state -- account present, balance healthy, jwt
+// Each of those three is separately conditional, because this runs every five
+// minutes forever. In the steady state -- account present, balance healthy, jwt
 // fresh -- a pass performs no writes at all.
 //
 // clientSession is the taskworker's UNAUTHENTICATED session (ByJwt == nil). It
@@ -345,32 +398,17 @@ func BootstrapProberIdentity(clientSession *session.ClientSession) (*ProberBoots
 		}
 	}
 
-	// Balance: only when it is actually low. GetActiveTransferBalanceByteCount
-	// sums the live balances, so a grant from an earlier pass -- or the ordinary
-	// daily free grant, which this network receives like any other -- suppresses
-	// the next one. Granting unconditionally here would write a new
-	// transfer_balance row four times a day forever.
-	if GetActiveTransferBalanceByteCount(ctx, *identity.NetworkId) < ProberMinTransferBalance {
-		startTime := server.NowUtc()
-		err := AddBasicTransferBalance(
-			ctx,
-			*identity.NetworkId,
-			ProberTransferBalanceTopUp,
-			startTime,
-			startTime.Add(ProberTransferBalanceDuration),
-		)
-		if err != nil {
-			// not fatal to the pass: an existing credential keeps working and
-			// the next pass tries again
-			glog.Errorf("[proberboot]could not add transfer balance: %s\n", err)
-		} else {
-			status.BalanceGranted = true
-			glog.Infof(
-				"[proberboot]granted %s transfer balance to %s\n",
-				ByteCountHumanReadable(ProberTransferBalanceTopUp),
-				identity.NetworkName,
-			)
-		}
+	// The scheduled bootstrap uses the same serialized grant path as shard
+	// preflight. A concurrent shard cannot observe this grant as still missing
+	// and issue a duplicate one.
+	granted, grantErr := EnsureProberTransferBalance(ctx, ProberMinTransferBalance)
+	if grantErr != nil {
+		// not fatal to the pass: an existing credential keeps working and
+		// the next pass tries again
+		glog.Errorf("[proberboot]could not add transfer balance: %s\n", grantErr)
+	} else if granted {
+		status.BalanceGranted = true
+		glog.Infof("[proberboot]replenished internal prober transfer balance for %s\n", identity.NetworkName)
 	}
 
 	if proberJwtNeedsMint(identity, server.NowUtc()) {

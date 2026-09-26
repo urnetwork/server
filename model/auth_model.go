@@ -1807,6 +1807,10 @@ func AuthCodeLogin(
 	return
 }
 
+// The network admin has null email/phone auth. Optional notifications may
+// skip this outcome, but must still propagate database failures.
+var ErrMissingUserAuth = errors.New("Missing user auth.")
+
 func GetUserAuth(ctx context.Context, networkId server.Id) (userAuth string, returnErr error) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -1828,7 +1832,7 @@ func GetUserAuth(ctx context.Context, networkId server.Id) (userAuth string, ret
 					userAuth = *userAuth_
 				} else {
 					// jwt auth
-					returnErr = errors.New("Missing user auth.")
+					returnErr = ErrMissingUserAuth
 				}
 			}
 		})

@@ -3222,9 +3222,11 @@ func tailerHealthFindings(service string, now time.Time, lastLine time.Time, res
 			probeId: "monitor/visibility", tier: tierWarn,
 			class: "tailer-silent", target: target, sustain: 2,
 			symptom:  fmt.Sprintf("log tailer for %s has read no line in %s (threshold %s)", service, silent.Round(time.Second), tailerSilentThreshold),
-			baseline: "every tailed service logs continuously; a silent tailer means the monitor is blind to that service's logs (§3.7)",
+			baseline: "a service emitting logs has its lines ingested promptly; an idle service may emit none",
 			observed: fmt.Sprintf("silent_for=%s scan_errors_total=%d", silent.Round(time.Second), scanErrors),
-			context:  "either the warpctl stream is broken (restart the monitor / check warpctl auth) or the service itself is down (warpctl ls versions)",
+			context:  "silence alone cannot distinguish an idle producer, a stopped service, and a broken tail stream; this is unknown visibility, not proof of an outage",
+			action:   "Check current process identity and service health, the producer's latest bounded Loki records, and the tailer's scan/restart counters. Do not restart a healthy idle service or monitor solely because no line was emitted.",
+			verify:   "A newly emitted service line appears in the standing tail and bounded Loki query, or document the service's intentional quiet interval while process health and tailer transport remain intact.",
 			playbook: "SIGNALS.md 1.5",
 		})
 	} else {

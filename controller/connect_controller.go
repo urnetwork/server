@@ -1088,6 +1088,9 @@ func newContract(
 			return
 		}
 		contractId = escrow.ContractId
+		// The prober's companion reservation may be smaller than the remote
+		// provider requested. Sign only the capacity actually held in escrow.
+		contractTransferByteCount = escrow.TransferByteCount
 		priority = escrow.Priority
 
 		switch streamVersion {

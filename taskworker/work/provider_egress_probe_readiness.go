@@ -6,10 +6,10 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 var errProviderEgressProbeUnfunded = errors.New("provider egress prober cannot fund its initial transfer contract")

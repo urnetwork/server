@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 
 	"github.com/urnetwork/server"
 )

@@ -2142,6 +2142,11 @@ func TestTailerHealthFindings(t *testing.T) {
 	if f.probeId != "monitor/visibility" || f.target != "logs/api" {
 		t.Fatalf("wrong identity: probeId=%s target=%s", f.probeId, f.target)
 	}
+	if !strings.Contains(f.baseline, "idle service may emit none") ||
+		!strings.Contains(f.context, "unknown visibility") ||
+		!strings.Contains(f.action, "Do not restart") {
+		t.Fatalf("silence was misclassified as a proven outage or broken stream: %+v", f)
+	}
 	if f := findingByClass(t, silent, "tailer-restarting"); !f.healthy {
 		t.Fatalf("silent-only case reported restarting: %+v", f)
 	}

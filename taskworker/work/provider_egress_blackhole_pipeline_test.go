@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,10 +15,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/fleetprobe"
-	"github.com/urnetwork/operator-proxy/ingest"
-	"github.com/urnetwork/operator-proxy/prober"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/fleetprobe"
+	"github.com/urnetwork/server/qualityprobe/ingest"
+	"github.com/urnetwork/server/qualityprobe/prober"
 )
 
 // One test task; channels hold checks, never real network operations. Published
@@ -218,6 +219,104 @@ func TestProviderEgressBlackholePipelineReusesTailSlotsBeforeFirstAck(t *testing
 			t.Errorf("unbounded due lookahead=%d", h.maxLookup)
 		}
 	})
+}
+
+func TestProviderEgressBlackholePipelineThousandWorkerGeometry(t *testing.T) {
+	args := testProviderEgressParallelArgs(t)
+	args.Blackhole.Limit, args.Blackhole.Concurrency = 1000, 1000
+	stored := *args
+	synctest.Test(t, func(t *testing.T) {
+		fixture := *args
+		fixture.Blackhole.Limit = 250
+		h := newTestBlackholePipeline(t, &fixture, 8)
+		// Use the production pass boundary with the unchanged saved 1000/1000
+		// arguments, while fixture barriers distinguish 250-check cohorts.
+		go func() { h.result, h.err = h.pass.run(h.ctx, args); close(h.done) }()
+		defer h.finish()
+		synctest.Wait()
+		if got := h.startedCount(0, 1000); got != 1000 {
+			t.Errorf("initial cohort started=%d, want1000", got)
+		}
+		close(h.firstRelease)
+		synctest.Wait()
+		if got := h.startedCount(1000, 2000); got != 249 {
+			t.Errorf("successor started=%d, want249 freed slots while other cohorts remain blocked", got)
+		}
+		if got := h.peak.Load(); got != 1000 {
+			t.Errorf("peak workers=%d, want1000", got)
+		}
+		close(h.laterRelease)
+		synctest.Wait()
+		if len(h.submittedCohort(1)) != 250 || len(h.submittedCohort(0)) != 0 {
+			t.Error("completed 250-check cohort buffered behind unrelated first-cohort tail")
+		}
+		for _, checks := range h.submissions {
+			if len(checks) != 250 {
+				t.Errorf("publication cohort=%d, want250", len(checks))
+			}
+		}
+		if h.maxLookup > 2250 {
+			t.Errorf("due lookahead=%d exceeds bounded eight-cohort geometry", h.maxLookup)
+		}
+		if !reflect.DeepEqual(args, &stored) {
+			t.Error("execution mutated durable settings")
+		}
+	})
+}
+
+// A large worker pool must be able to serve several small, independently
+// published guard cohorts. Otherwise one slow check withholds up to 999
+// completed results behind a 1000-provider batch barrier.
+func TestProviderEgressBlackholeSmallCohortsUseLargerWorkerPool(t *testing.T) {
+	args := testProviderEgressParallelArgs(t)
+	args.Blackhole.Limit, args.Blackhole.Concurrency = 2, 8
+	if err := validateProviderEgressProbeArgs(args); err != nil {
+		t.Fatalf("independent cohort and worker sizes rejected: %v", err)
+	}
+	synctest.Test(t, func(t *testing.T) {
+		h := newTestBlackholePipeline(t, args, 5)
+		h.start()
+		defer h.finish()
+		synctest.Wait()
+		if got := h.startedCount(0, 8); got != 8 {
+			t.Fatalf("only %d/8 checks entered the fixed worker pool", got)
+		}
+		if got := h.peak.Load(); got != 8 {
+			t.Errorf("worker peak=%d, want 8", got)
+		}
+		close(h.laterRelease)
+		synctest.Wait()
+		for cohort := 1; cohort < 4; cohort++ {
+			if got := len(h.submittedCohort(cohort)); got != 2 {
+				t.Errorf("cohort %d published %d/2 before oldest tail", cohort, got)
+			}
+		}
+		if got := len(h.submittedCohort(0)); got != 0 {
+			t.Errorf("oldest held cohort published %d results", got)
+		}
+		// The last bounded lookup includes one more cohort to prove there is
+		// no unseen work beyond the ten selected identities.
+		if h.maxLookup > 12 {
+			t.Errorf("due lookahead exceeded selected ten plus one cohort: %d", h.maxLookup)
+		}
+	})
+}
+
+func TestProviderEgressBlackholeCohortPoolBound(t *testing.T) {
+	args := testProviderEgressParallelArgs(t)
+	args.Blackhole.Limit, args.Blackhole.Concurrency = 250, 1000
+	if err := validateProviderEgressProbeArgs(args); err != nil {
+		t.Fatalf("four independent cohorts must fill one 1000-worker pool: %v", err)
+	}
+	args.Blackhole.Concurrency = 4001
+	if err := validateProviderEgressProbeArgs(args); err == nil {
+		t.Fatal("pool larger than all sixteen selectable cohorts was accepted")
+	}
+	args.Blackhole.Concurrency = 1000
+	args.Full.Concurrency = args.Full.Limit + 1
+	if err := validateProviderEgressProbeArgs(args); err == nil {
+		t.Fatal("the full run accepted more workers than selected providers")
+	}
 }
 
 func TestProviderEgressBlackholePipelineKeepsOriginalGuardCohorts(t *testing.T) {
@@ -586,15 +685,44 @@ func TestProviderEgressBlackholePipelineCutoffDoesNotDelayReadyWork(t *testing.T
 func TestProviderEgressBlackholePipelineBoundsSelectedBookkeeping(t *testing.T) {
 	args := testProviderEgressParallelArgs(t)
 	synctest.Test(t, func(t *testing.T) {
-		h := newTestBlackholePipeline(t, args, 12)
+		h := newTestBlackholePipeline(t, args, 20)
 		close(h.firstRelease)
 		close(h.firstTail)
 		close(h.laterRelease)
 		h.start()
 		synctest.Wait()
 		h.finish()
-		if h.startedCount(0, len(h.due)) != 2000 || h.peak.Load() > 250 || h.result == nil || !h.result.Full || h.err != nil {
+		if h.startedCount(0, len(h.due)) != 4000 || h.peak.Load() > 250 || h.result == nil || !h.result.Full || h.err != nil {
 			t.Errorf("per-task selected work not bounded/rearmed: started=%d peak=%d result=%+v err=%v", h.startedCount(0, len(h.due)), h.peak.Load(), h.result, h.err)
+		}
+	})
+}
+
+// A single slow tail must not freeze a shard at eight retained cohorts when
+// the other checks have finished and the per-instance worker pool is idle.
+// This is the production 2026-09-26 publication/admission shape, reduced to
+// synthetic checks with no network, real scheduler, and explicit barriers.
+func TestProviderEgressBlackholePipelineRefillsPastEightSlowTailCohorts(t *testing.T) {
+	args := testProviderEgressParallelArgs(t)
+	args.Blackhole.Limit, args.Blackhole.Concurrency, args.Full.Concurrency = 10, 40, 1
+	synctest.Test(t, func(t *testing.T) {
+		h := newTestBlackholePipeline(t, args, 20)
+		close(h.firstRelease)
+		close(h.laterRelease)
+		h.start()
+		synctest.Wait()
+		if got := h.startedCount(80, 90); got != 10 {
+			t.Errorf("ninth cohort started %d/10 while first tail remained blocked", got)
+		}
+		if got := h.startedCount(0, 160); got != 160 || h.startedCount(160, 200) != 0 {
+			t.Errorf("selected work escaped or stopped short of the sixteen-cohort bound: started=%d beyond=%d", got, h.startedCount(160, 200))
+		}
+		if got := h.active.Load(); got != 1 {
+			t.Errorf("active workers=%d, want only the held tail after other checks complete", got)
+		}
+		h.finish()
+		if h.err != nil {
+			t.Errorf("bounded shard failed: %v", h.err)
 		}
 	})
 }

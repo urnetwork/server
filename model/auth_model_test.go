@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"testing"
@@ -34,6 +35,33 @@ func TestGetUserAuth(t *testing.T) {
 		userAuth, err := GetUserAuth(ctx, networkId)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, userAuth, testingUserAuth)
+	})
+}
+
+// Guest and wallet admins share the null-recipient outcome without hiding
+// their distinct authentication types behind an untyped error string.
+func TestGetUserAuthMissingRecipientIsTyped(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		for _, accountType := range []string{"guest", "wallet"} {
+			networkId := server.NewId()
+			if accountType == "guest" {
+				Testing_CreateGuestNetwork(ctx, networkId, "synthetic-no-recipient-guest", server.NewId())
+			} else {
+				wallet := solana.NewWallet()
+				message := "synthetic recipient lookup fixture"
+				signature, err := wallet.PrivateKey.Sign([]byte(message))
+				if err != nil {
+					t.Fatal(err)
+				}
+				Testing_CreateNetworkByWallet(ctx, networkId, "synthetic-no-recipient-wallet", server.NewId(),
+					wallet.PublicKey().String(), base64.StdEncoding.EncodeToString(signature[:]), message)
+			}
+			userAuth, err := GetUserAuth(ctx, networkId)
+			if userAuth != "" || !errors.Is(err, ErrMissingUserAuth) {
+				t.Fatalf("%s recipient=%q error=%v, want typed missing recipient", accountType, userAuth, err)
+			}
+		}
 	})
 }
 

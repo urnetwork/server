@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/connect"
-	"github.com/urnetwork/operator-proxy/providertunnel"
+	"github.com/urnetwork/server/qualityprobe/providertunnel"
 )
 
 // Reusing one task argument snapshot must construct independent owners.

@@ -12,11 +12,11 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/fleetprobe"
-	"github.com/urnetwork/operator-proxy/ingest"
-	"github.com/urnetwork/operator-proxy/prober"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/fleetprobe"
+	"github.com/urnetwork/server/qualityprobe/ingest"
+	"github.com/urnetwork/server/qualityprobe/prober"
 )
 
 type testBlackholeLeaseAdmissionCase struct {
@@ -100,9 +100,11 @@ func testBlackholeLeaseAdmissionRun(t *testing.T, test testBlackholeLeaseAdmissi
 		}
 		residence := observation.checkBudget
 		fullResidence := observation.fullBudget * time.Duration((fullCount+args.Full.Concurrency-1)/args.Full.Concurrency)
+		fullCohortResidence := observation.fullBudget
 		if test.fast {
 			residence = time.Second
 			fullResidence = time.Second
+			fullCohortResidence = time.Second
 		}
 		due := make([]ingest.DueProvider, selected)
 		for index := range due {
@@ -209,7 +211,7 @@ func testBlackholeLeaseAdmissionRun(t *testing.T, test testBlackholeLeaseAdmissi
 			runFull: func(fullCtx context.Context, providers []prober.Provider, _ fleetprobe.FullOptions) (prober.Summary, error) {
 				observation.fullStarted++
 				observation.fullStartAt = time.Since(startTime)
-				timer := time.NewTimer(fullResidence)
+				timer := time.NewTimer(fullCohortResidence)
 				defer timer.Stop()
 				select {
 				case <-timer.C:
@@ -394,9 +396,12 @@ func TestBlackholeLeaseAdmissionBudgetErrorDoesNotSuppressFull(t *testing.T) {
 func TestBlackholeLeaseAdmissionReservesActualFullWaveCount(t *testing.T) {
 	observation := testBlackholeLeaseAdmissionRun(t, testBlackholeLeaseAdmissionCase{serial: true, fullCount: 9, passing: true})
 	testBlackholeLeaseAdmissionBudgetError(t, observation)
-	if observation.fullStarted != 1 || observation.fullStartAt != 0 ||
+	// Nine selected providers with eight full slots form two independent guard
+	// cohorts. The serial geometry must reserve both complete run waves while
+	// refusing blackhole admission that would overrun the task lease.
+	if observation.fullStarted != 2 || observation.fullStartAt != observation.fullBudget ||
 		observation.result.Submitted != 9 || observation.elapsed != 2*observation.fullBudget {
-		t.Fatalf("serial reservation counted the full lane as one wave despite nine selected/eight workers: %+v", observation)
+		t.Fatalf("serial reservation did not retain both full guard cohorts: %+v", observation)
 	}
 }
 

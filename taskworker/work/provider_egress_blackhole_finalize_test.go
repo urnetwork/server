@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/fleetprobe"
-	"github.com/urnetwork/operator-proxy/ingest"
-	"github.com/urnetwork/operator-proxy/prober"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/fleetprobe"
+	"github.com/urnetwork/server/qualityprobe/ingest"
+	"github.com/urnetwork/server/qualityprobe/prober"
 )
 
 // One worker completes every ready check before its final sibling cancels it.

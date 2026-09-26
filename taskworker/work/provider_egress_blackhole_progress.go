@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/urnetwork/operator-proxy/fleetprobe"
+	"github.com/urnetwork/server/qualityprobe/fleetprobe"
 )
 
 type providerEgressBlackholeProgressSnapshot struct {
@@ -30,7 +30,7 @@ type providerEgressBlackholeProgressMetrics struct {
 func newProviderEgressBlackholeProgressMetrics() *providerEgressBlackholeProgressMetrics {
 	return &providerEgressBlackholeProgressMetrics{
 		stateDesc: prometheus.NewDesc("urnetwork_egress_probe_blackhole_inflight",
-			"Aggregate currently owned blackhole batch states; completed_buffered includes unmeasured/guardable results and is not submitted or durable evidence", []string{"state"}, nil),
+			"Aggregate currently owned blackhole batch states; completed_buffered includes unmeasured/guardable results, some safe results may be submitted early, and the gauge does not prove durability", []string{"state"}, nil),
 		eventDesc: prometheus.NewDesc("urnetwork_egress_probe_blackhole_worker_events_total",
 			"Actual blackhole worker lifecycle events; completed means retained before guard and publication, canceled/discarded do not retain a result", []string{"event"}, nil),
 		submissionDesc: prometheus.NewDesc("urnetwork_egress_probe_blackhole_submission_outcomes_total",

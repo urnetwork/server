@@ -11,12 +11,12 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-// ProberBootstrapTimeout is the cadence of the credential refresh.
-//
-// Six hours is far shorter than the jwt refresh age it is keeping ahead of (see
-// model.ProberJwtRefreshAge), so a missed pass or two costs nothing. The first
-// task is immediate; only the post-step uses this recurring cadence.
-const ProberBootstrapTimeout = 6 * time.Hour
+// ProberBootstrapTimeout is the cadence of the internal prober credit and
+// credential check. A high-parallel sweep can consume hundreds of GiB of
+// short-lived escrow in less than six hours; the five-minute check keeps
+// admission funded while the seven-day JWT age is still handled by the same
+// conditional bootstrap. The first task is immediate.
+const ProberBootstrapTimeout = 5 * time.Minute
 
 type ProberBootstrapArgs struct{}
 

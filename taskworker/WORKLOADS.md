@@ -61,7 +61,7 @@ discovery/analytics workloads. Simulator
 its bounded miner/validator scenarios supply provider traffic. Simulator
 `operatorSimulationSiteSettings` supplies location metadata for those peers.
 Geolocation pin reads serve `/network/geolocation-source-pins` for
-operator-proxy's independent prober (`ingest/pins.go`); `/verify` does not read
+qualityprobe's independent prober (`qualityprobe/ingest/pins.go`); `/verify` does not read
 that table. `RefreshVerifyProxyEgress`, the verification index maintenance that
 the campaign does need, remains enabled and registered.
 

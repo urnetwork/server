@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/fleetprobe"
-	"github.com/urnetwork/operator-proxy/ingest"
+	"github.com/urnetwork/server/qualityprobe/fleetprobe"
+	"github.com/urnetwork/server/qualityprobe/ingest"
 )
 
 // The production direct control-plane client and the successor reservation
@@ -16,10 +16,11 @@ import (
 const providerEgressControlPlaneTimeout = 30 * time.Second
 
 // Conservative admission arithmetic, not a sleep or a new service budget.
-// Reserve the selected full waves, all sequential publication requests and
-// one blackhole publication. The actual deadline is checked again after the
-// bounded due lookup. Divide before multiplication to reject oversized input
-// without overflowing into apparent spare time.
+// Reserve the selected full cohort waves, each cohort's sequential publication
+// requests, and one blackhole publication. Independent cohorts publish in
+// parallel. The actual deadline is checked again after the bounded due lookup.
+// Divide before multiplication to reject oversized input without overflowing
+// into apparent spare time.
 func providerEgressFullSuccessorFits(args *ProviderEgressProbeArgs, selected int, deadline time.Time) bool {
 	if selected <= 0 || args.Full.Concurrency <= 0 {
 		return false
@@ -27,17 +28,26 @@ func providerEgressFullSuccessorFits(args *ProviderEgressProbeArgs, selected int
 	remaining := time.Until(deadline)
 	reserve := providerEgressBlackholeSubmitTimeout
 	publicationPerProvider := 3 * providerEgressControlPlaneTimeout
-	if remaining <= reserve || time.Duration(selected) > (remaining-reserve-1)/publicationPerProvider {
+	cohortSize := min(providerEgressFullGuardCohortSize, args.Full.Concurrency)
+	cohortCount := 1 + (selected-1)/cohortSize
+	parallelCohorts := max(1, args.Full.Concurrency/cohortSize)
+	publicationWaves := 1 + (cohortCount-1)/parallelCohorts
+	// Publications are serial within a guard cohort, but independent cohorts
+	// release concurrently. Reserving all selected providers serially would
+	// reject every successor at the new parallel geometry, even after a fast
+	// first run. Round the last cohort up for a conservative deadline bound.
+	publicationWaveBudget := time.Duration(cohortSize) * publicationPerProvider
+	if remaining <= reserve || time.Duration(publicationWaves) > (remaining-reserve-1)/publicationWaveBudget {
 		return false
 	}
-	reserve += time.Duration(selected) * publicationPerProvider
+	reserve += time.Duration(publicationWaves) * publicationWaveBudget
 	budget := providerEgressFullRunBudget(args)
-	waves := 1 + (selected-1)/args.Full.Concurrency
-	return 0 < budget && time.Duration(waves) <= (remaining-reserve-1)/budget
+	return 0 < budget && time.Duration(publicationWaves) <= (remaining-reserve-1)/budget
 }
 
-// The first full batch retains its old admission/publication contract and
-// still closes firstFinished immediately for compatibility callers. The
+// The first selected wave retains the original eight-provider guard and
+// publication contract within each cohort. It closes firstFinished after
+// all of its cohorts finish for compatibility callers. The
 // independent bounded blackhole pipeline uses its lease/cohort bounds rather
 // than healthy full completion; the outer owner signals explicit full errors.
 // Additional full batches use their own unchanged per-provider budgets while
@@ -52,7 +62,7 @@ func (self *providerEgressProbePass) drainFull(
 	firstFinished chan<- struct{},
 	blackholeFinished <-chan struct{},
 ) providerEgressFullOutcome {
-	outcome := self.runFullBatch(ctx, args, pinSource, poolSource, initialDue)
+	outcome := self.runFullCohorts(ctx, args, pinSource, poolSource, initialDue)
 	close(firstFinished)
 	if outcome.err != nil {
 		return outcome
@@ -78,37 +88,68 @@ func (self *providerEgressProbePass) drainFull(
 		if !providerEgressFullSuccessorFits(args, args.Full.Limit, deadline) {
 			return outcome
 		}
-		due, err := self.fullDue(ctx, args.Full.Limit)
-		egressProbePassDue.WithLabelValues("full").Set(float64(len(due)))
-		if err != nil {
-			egressProbePassErrorsTotal.WithLabelValues("full_due").Inc()
-			outcome.err = fmt.Errorf("get full-probe due providers: %w", err)
-			return outcome
+		// Only an all-seen saturated response earns one bounded lookahead.
+		// Retained/re-due rows must not strand unseen work behind that prefix.
+		// This never widens admission, retries a provider, or scans unboundedly.
+		lookupLimit, lookupMax := args.Full.Limit, args.Full.Limit
+		if args.Full.Limit < 5000 {
+			lookupMax += min(len(seen), 5000-args.Full.Limit)
 		}
-		if err := ctx.Err(); err != nil {
-			outcome.err = err
-			return outcome
+		var next []ingest.DueProvider
+		var selected map[string]bool
+		for {
+			due, err := self.fullDue(ctx, lookupLimit)
+			if err != nil {
+				egressProbePassErrorsTotal.WithLabelValues("full_due").Inc()
+				outcome.err = fmt.Errorf("get full-probe due providers: %w", err)
+				return outcome
+			}
+			if err := ctx.Err(); err != nil {
+				outcome.err = err
+				return outcome
+			}
+			select {
+			case <-blackholeFinished:
+				return outcome
+			default:
+			}
+			if lookupLimit < len(due) {
+				egressProbePassErrorsTotal.WithLabelValues("full_due").Inc()
+				outcome.err = fmt.Errorf("get full-probe due providers: response exceeds the requested limit")
+				return outcome
+			}
+			next = make([]ingest.DueProvider, 0, min(args.Full.Limit, len(due)))
+			selected = make(map[string]bool, cap(next))
+			retained := 0
+			for _, provider := range due {
+				if provider.ClientId == "" {
+					continue
+				}
+				if seen[provider.ClientId] {
+					retained++
+				} else if !selected[provider.ClientId] {
+					next = append(next, provider)
+					selected[provider.ClientId] = true
+					if len(next) == args.Full.Limit {
+						break
+					}
+				}
+			}
+			if len(next) == 0 && retained == len(due) && len(due) == lookupLimit && lookupLimit < lookupMax {
+				egressProbeFullProgress.selection(0)
+				lookupLimit = lookupMax
+				continue
+			}
+			break
 		}
-		select {
-		case <-blackholeFinished:
-			return outcome
-		default:
-		}
-		if args.Full.Limit < len(due) {
-			egressProbePassErrorsTotal.WithLabelValues("full_due").Inc()
-			outcome.err = fmt.Errorf("get full-probe due providers: response exceeds the requested limit")
-			return outcome
-		}
-		// Deduplicate both previous batches and this response, preserving the
-		// server's order. Do not mutate a source-owned slice or widen the query.
-		next := make([]ingest.DueProvider, 0, len(due))
-		selected := make(map[string]bool, len(due))
-		for _, provider := range due {
-			if provider.ClientId != "" && !seen[provider.ClientId] && !selected[provider.ClientId] {
-				next = append(next, provider)
-				selected[provider.ClientId] = true
+		if lookupLimit != args.Full.Limit {
+			if len(next) == 0 {
+				egressProbeFullProgress.selection(2)
+			} else {
+				egressProbeFullProgress.selection(1)
 			}
 		}
+		egressProbePassDue.WithLabelValues("full").Set(float64(len(next)))
 		if !providerEgressFullSuccessorFits(args, len(next), deadline) {
 			return outcome
 		}
@@ -117,7 +158,7 @@ func (self *providerEgressProbePass) drainFull(
 		}
 		batchPass := *self
 		batchPass.fullReleaseDeadline = deadline
-		batch := batchPass.runFullBatch(ctx, args, pinSource, poolSource, next)
+		batch := batchPass.runFullCohorts(ctx, args, pinSource, poolSource, next)
 		outcome.due += batch.due
 		outcome.full = outcome.full || batch.full
 		outcome.summary.Attempted += batch.summary.Attempted

@@ -8,14 +8,14 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/urnetwork/operator-proxy/fleetprobe"
-	"github.com/urnetwork/operator-proxy/ingest"
+	"github.com/urnetwork/server/qualityprobe/fleetprobe"
+	"github.com/urnetwork/server/qualityprobe/ingest"
 )
 
 // Bound retained identities/results per invocation, not the service. A full
 // result immediately rearms the durable task, so reaching this work bound does
 // not add an idle delay. Pending cohorts share one fixed check-worker pool.
-const providerEgressBlackholeSelectedCohorts = 8
+const providerEgressBlackholeSelectedCohorts = 16
 
 // The initial cohort keeps its old guard-sized minimum and budgets. Only the
 // bounded saturated geometry overlaps successors, regardless of healthy full

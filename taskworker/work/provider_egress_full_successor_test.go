@@ -3,16 +3,17 @@ package work
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/fleetprobe"
-	"github.com/urnetwork/operator-proxy/ingest"
-	"github.com/urnetwork/operator-proxy/prober"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/fleetprobe"
+	"github.com/urnetwork/server/qualityprobe/ingest"
+	"github.com/urnetwork/server/qualityprobe/prober"
 )
 
 // The real pass and blackhole worker own scheduling, guarding, publication and
@@ -192,6 +193,136 @@ func TestFullSuccessorDeduplicatesBoundedDueRows(t *testing.T) {
 		h.finish()
 		if h.err != nil || h.result.Attempted != 2 || h.result.FullDue != 2 || len(h.inner.health) != 2 {
 			t.Errorf("duplicate full admission: result=%+v err=%v health=%d", h.result, h.err, len(h.inner.health))
+		}
+	})
+}
+
+// A retained/renewedly-due prefix was already measured by this task; it must
+// not hide unseen providers immediately behind it for the remaining lease.
+func TestFullSuccessorAdvancesPastRetainedDuePrefix(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		before := egressProbeFullProgress.snapshot().selections
+		h := newTestFullSuccessorOwner(t, 75*time.Minute)
+		h.args.Full.Limit, h.args.Full.Concurrency = 2, 2
+		h.args.Blackhole.Limit, h.args.Blackhole.Concurrency = 3, 3
+		all := testDueProviders("synthetic-prefix-a", "synthetic-prefix-b", "synthetic-prefix-c", "synthetic-prefix-d", "synthetic-prefix-e")
+		maxLookup := 0
+		h.pass.fullDue = func(_ context.Context, limit int) ([]ingest.DueProvider, error) {
+			h.dueCalls.Add(1)
+			maxLookup = max(maxLookup, limit)
+			return slices.Clone(all[:min(len(all), limit)]), nil
+		}
+		admitted := map[string]int{}
+		h.pass.runFull = func(ctx context.Context, providers []prober.Provider, options fleetprobe.FullOptions) (prober.Summary, error) {
+			h.fullCalls.Add(1)
+			if len(providers) > h.args.Full.Limit {
+				t.Error("lookahead widened probe admission/guard cohort")
+			}
+			for _, provider := range providers {
+				admitted[provider.ClientId]++
+			}
+			return testFullSuccessorMeasure(ctx, providers, options, true)
+		}
+		h.start()
+		synctest.Wait()
+		h.finish()
+		if h.err != nil || h.result.Attempted != 5 || h.result.Submitted != 5 || len(admitted) != 5 {
+			t.Fatalf("seen prefix stranded unseen due: result=%+v error=%v admitted=%d", h.result, h.err, len(admitted))
+		}
+		for _, attempts := range admitted {
+			if attempts != 1 {
+				t.Error("lookahead re-probed already seen provider")
+			}
+		}
+		if maxLookup > len(all)+h.args.Full.Limit || h.dueCalls.Load() > 7 {
+			t.Fatalf("unbounded prefix scan: largest=%d queries=%d", maxLookup, h.dueCalls.Load())
+		}
+		want := [3]uint64{before[0] + 3, before[1] + 2, before[2] + 1}
+		if got := egressProbeFullProgress.snapshot().selections; got != want {
+			t.Errorf("prefix selection diagnostic=%v want=%v", got, want)
+		}
+	})
+}
+
+func TestFullSuccessorPrefixLookupFailureRemainsVisible(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newTestFullSuccessorOwner(t, 75*time.Minute)
+		want := errors.New("synthetic prefix lookup failure")
+		h.pass.fullDue = func(_ context.Context, limit int) ([]ingest.DueProvider, error) {
+			h.dueCalls.Add(1)
+			if limit > 1 {
+				return nil, want
+			}
+			return testDueProviders("synthetic-full-a"), nil
+		}
+		h.start()
+		synctest.Wait()
+		h.finish()
+		if !errors.Is(h.err, want) || h.result.Submitted != 1 || h.fullCalls.Load() != 1 || h.dueCalls.Load() != 3 {
+			t.Fatalf("prefix source failure hidden: result=%+v error=%v queries=%d", h.result, h.err, h.dueCalls.Load())
+		}
+	})
+}
+
+func TestFullSuccessorPrefixLookaheadRejectsOversizedReply(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newTestFullSuccessorOwner(t, 75*time.Minute)
+		h.pass.fullDue = func(_ context.Context, limit int) ([]ingest.DueProvider, error) {
+			h.dueCalls.Add(1)
+			if limit == 1 {
+				return testDueProviders("synthetic-full-a"), nil
+			}
+			providers := testDueProviders("synthetic-full-a")
+			for index := range limit {
+				providers = append(providers, ingest.DueProvider{ClientId: fmt.Sprintf("synthetic-extra-%d", index)})
+			}
+			return providers, nil
+		}
+		h.start()
+		synctest.Wait()
+		h.finish()
+		if h.err == nil || h.result.Submitted != 1 || h.fullCalls.Load() != 1 || h.dueCalls.Load() != 3 {
+			t.Fatalf("oversized prefix response admitted: result=%+v error=%v queries=%d", h.result, h.err, h.dueCalls.Load())
+		}
+	})
+}
+
+// A clamped/duplicate-only source is not authority to scan the whole fleet or
+// retry the same providers. One failed lookahead ends this owner normally.
+func TestFullSuccessorPrefixLookaheadStopsAfterOneBoundedReply(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newTestFullSuccessorOwner(t, 75*time.Minute)
+		h.pass.fullDue = func(_ context.Context, limit int) ([]ingest.DueProvider, error) {
+			if h.dueCalls.Add(1) > 3 || limit > 2 {
+				return nil, errors.New("synthetic unbounded prefix lookup")
+			}
+			return testDueProviders("synthetic-full-a"), nil
+		}
+		h.start()
+		synctest.Wait()
+		h.finish()
+		if h.err != nil || h.result.Submitted != 1 || h.fullCalls.Load() != 1 || h.dueCalls.Load() != 3 {
+			t.Fatalf("bounded-prefix control: result=%+v error=%v queries=%d", h.result, h.err, h.dueCalls.Load())
+		}
+	})
+}
+
+func TestFullSuccessorPrefixLookaheadRechecksCancellation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newTestFullSuccessorOwner(t, 75*time.Minute)
+		h.pass.fullDue = func(_ context.Context, limit int) ([]ingest.DueProvider, error) {
+			h.dueCalls.Add(1)
+			if limit == 1 {
+				return testDueProviders("synthetic-full-a"), nil
+			}
+			h.cancel()
+			return testDueProviders("synthetic-full-a", "synthetic-full-b"), nil
+		}
+		h.start()
+		synctest.Wait()
+		h.finish()
+		if !errors.Is(h.err, context.Canceled) || h.result.Attempted != 1 || h.fullCalls.Load() != 1 || h.dueCalls.Load() != 3 {
+			t.Fatalf("late-prefix reply admitted: result=%+v error=%v queries=%d", h.result, h.err, h.dueCalls.Load())
 		}
 	})
 }

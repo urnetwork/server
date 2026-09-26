@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/fleetprobe"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/fleetprobe"
 )
 
 const providerEgressProbeTaskFunction = "github.com/urnetwork/server/taskworker/work.ProviderEgressProbe"
@@ -297,7 +297,7 @@ func inspectEgressCoverageDesiredConfig(load func(any) error) egressCoverageDesi
 func validEgressCoverageConfig(config egressCoverageConfig) bool {
 	if !(1 <= config.shardCount && config.shardCount <= 256 &&
 		0 < config.idleDelaySeconds && 0 < config.maxTimeSeconds &&
-		validEgressCoverageBatchArgs(config.full) && validEgressCoverageBatchArgs(config.blackhole) &&
+		validEgressCoverageBatchArgs(config.full, false) && validEgressCoverageBatchArgs(config.blackhole, true) &&
 		strings.TrimSpace(config.apiURL) != "" && strings.TrimSpace(config.platformURL) != "") {
 		return false
 	}
@@ -353,7 +353,7 @@ func egressCoverageCheckBudget(config egressCoverageConfig) time.Duration {
 	return checkOptions.RunBudget(egresshealth.BlackholeSampleSize) + max(checkOptions.PerRequestTimeout, checkOptions.IpEchoTimeout)
 }
 
-const egressCoverageConfigConvergenceAction = "Deploy config-updater first and verify that the desired configuration version is completely published; then deploy Taskworker so every executor mounts that completed version. Let successful ProviderEgressProbe post-steps replace the four-or-configured-count durable snapshots, or normal disabled-task cleanup retire them when disabled. Failed executions retry their old arguments, and an old-config worker can recreate stale settings. Do not insert, delete, or hand-edit pending_task rows."
+const egressCoverageConfigConvergenceAction = "If increasing the full-probe limit, first converge a cohort-capable Taskworker artifact while durable tasks still carry the old small limit; verify that artifact before publishing the larger configuration. Otherwise publish the desired version through config-updater first. After publication, converge Taskworker mounts and let successful ProviderEgressProbe post-steps replace the four-or-configured-count durable snapshots, or normal disabled-task cleanup retire them when disabled. Failed executions retry their old arguments, and an old-config worker can recreate stale settings. Do not insert, delete, or hand-edit pending_task rows."
 
 func egressCoverageConfigFindings(target string, desired egressCoverageDesiredConfig, rowCount int, geometry egressCoverageGeometry, geometryErr error) []finding {
 	if !desired.present {
@@ -650,6 +650,11 @@ func (p egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]findin
 	} else {
 		findings = append(findings, healthyFinding("pg/egress-coverage", tierPage, "egress-blackhole-capacity", target))
 	}
+	if headroom, ok := egressBlackholeHeadroomFinding(target, activity); ok {
+		findings = append(findings, headroom)
+	} else {
+		findings = append(findings, healthyFinding("pg/egress-coverage", tierWarn, "egress-blackhole-headroom", target))
+	}
 	if capacity, ok := egressFullCapacityFinding(target, geometry, activity); ok {
 		findings = append(findings, capacity)
 	} else {
@@ -754,9 +759,21 @@ func decodeEgressCoverageTaskArgs(raw string) (egressCoverageTaskArgs, error) {
 	return args, nil
 }
 
-func validEgressCoverageBatchArgs(args egressCoverageBatchArgs) bool {
-	return 0 < args.Limit && 0 < args.Concurrency && args.Concurrency <= args.Limit &&
-		0 < args.ProbeTimeoutSeconds && (!args.Bandwidth || 0 < args.BandwidthTimeoutSeconds) &&
+// Must match Taskworker's instance-owned, sixteen-cohort blackhole pipeline.
+const egressCoverageBlackholeSelectedCohorts = 16
+
+func validEgressCoverageBatchArgs(args egressCoverageBatchArgs, blackhole bool) bool {
+	if args.Limit <= 0 || args.Concurrency <= 0 {
+		return false
+	}
+	if blackhole {
+		if (args.Concurrency-1)/egressCoverageBlackholeSelectedCohorts >= args.Limit {
+			return false
+		}
+	} else if args.Limit < args.Concurrency {
+		return false
+	}
+	return 0 < args.ProbeTimeoutSeconds && (!args.Bandwidth || 0 < args.BandwidthTimeoutSeconds) &&
 		0 <= args.TransportBudgetByteCount && 0 <= args.TransportBudgetCount &&
 		(args.TransportBudgetByteCount == 0) == (args.TransportBudgetCount == 0)
 }
@@ -1110,6 +1127,45 @@ func egressBlackholeCapacityFinding(
 		action:   "Run §2.23 and §2.24 first, then establish the running Taskworker's execution behavior. If full work blocks blackhole progress inside one shard task, deploy the architecture-preserving correction that overlaps one full batch with a repeated blackhole drain while retaining each lane's configured concurrency; do not increase concurrency first. If independent drain is already present and the measured rate still misses the bound, capacity-test any geometry change against PostgreSQL/PgBouncer, API, and Taskworker CPU/memory headroom. Separately obtain an explicit correctness decision for retaining a failed verdict until a successful recheck; do not merely lengthen the max age, delete evidence, or suppress the provider gate.",
 		verify:   "After convergence, for two complete verdict lifetimes every shard advances, current coverage reaches the complete eligible population, the measured hourly rate stays at or above the required rate, the projected sweep remains inside the verdict lifetime, known-dark providers never re-enter selection only because evidence aged, and healthy controls remain selectable. Keep more than 25% PostgreSQL normal-role headroom and verify PgBouncer, API, and Taskworker CPU/memory controls throughout the sustained duty cycle.",
 		playbook: "SIGNALS.md §2.19, §2.23, and §2.24",
+	}, true
+}
+
+// Four hours is the operator's working sweep target, leaving one complete
+// cycle of recovery room before the eight-hour verdict expires. This warning
+// is deliberately separate from the hard expiry PAGE above; it never changes
+// the checked-at, dark, or guard semantics.
+const egressBlackholeHeadroomTarget = 4 * time.Hour
+
+func egressBlackholeHeadroomFinding(target string, snapshots []egressCoverageSnapshot) (finding, bool) {
+	var eligible, current, checkedLastHour int64
+	for _, snapshot := range snapshots {
+		eligible += snapshot.eligible
+		current += snapshot.blackholeCurrent
+		checkedLastHour += snapshot.blackholeLastHour
+	}
+	if eligible == 0 || current >= eligible || checkedLastHour <= 0 {
+		return finding{}, false
+	}
+	projectedSeconds := (eligible*int64(time.Hour/time.Second) + checkedLastHour - 1) / checkedLastHour
+	if projectedSeconds <= int64(egressBlackholeHeadroomTarget/time.Second) ||
+		projectedSeconds > int64(model.ProviderBlackholeCheckMaxAge/time.Second) {
+		return finding{}, false
+	}
+	requiredPerHour := (eligible*int64(time.Hour/time.Second) + int64(egressBlackholeHeadroomTarget/time.Second) - 1) /
+		int64(egressBlackholeHeadroomTarget/time.Second)
+	projected := time.Duration(projectedSeconds) * time.Second
+	return finding{
+		probeId: "pg/egress-coverage", tier: tierWarn,
+		class: "egress-blackhole-headroom", target: target, frame: "fleet-refresh", sustain: 2,
+		symptom:   fmt.Sprintf("Provider blackhole sweep projects %s, beyond the four-hour operating target but inside the eight-hour verdict lifetime.", projected),
+		mechanism: "The measured gross check rate has too little retry and outage margin to refresh this eligible fleet within the operator's intended four-hour cycle. Evidence has not yet expired solely because this warning fired.",
+		baseline:  fmt.Sprintf("projected_sweep <= %s operating target; hard verdict lifetime %s is an independent PAGE", egressBlackholeHeadroomTarget, model.ProviderBlackholeCheckMaxAge),
+		observed:  fmt.Sprintf("eligible=%d current=%d current_percent=%.1f checked_last_hour=%d required_per_hour_4h=%d projected_sweep=%s", eligible, current, 100*float64(current)/float64(eligible), checkedLastHour, requiredPerHour, projected),
+		evidence:  "The same fresh eligible-provider and durable measured-check snapshot as §2.19's eight-hour capacity page; the last-hour rate is a gross observation, not a completed steady-state sweep.",
+		context:   "A recent Taskworker restart or backlog transition mixes old and new rates. Low current coverage with a just-adequate eight-hour rate remains incomplete; this warning is not a dark-provider verdict or proof that worker count alone is the cause.",
+		action:    "Measure a full post-rollout hourly window and per-shard starts, completions, guard outcomes and durable checked-at gains. Diagnose admission, long retry tails, publication, and datastore headroom before changing per-shard concurrency; do not lengthen the verdict lifetime or weaken guards to clear this warning.",
+		verify:    "Two complete post-rollout hourly windows project a sweep within four hours, every shard advances, current measured coverage catches up, and the eight-hour hard PAGE remains clear without loss of healthy-provider controls.",
+		playbook:  "SIGNALS.md §2.19",
 	}, true
 }
 

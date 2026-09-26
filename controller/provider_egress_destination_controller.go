@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"

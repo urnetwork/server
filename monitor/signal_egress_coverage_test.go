@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/fleetprobe"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/fleetprobe"
 	"gopkg.in/yaml.v3"
 )
 
@@ -169,14 +169,13 @@ func TestEgressCoverageDesiredConfigDriftAndConvergence(t *testing.T) {
 		"desired_enabled=true", "desired_shards=4", "durable_shards=4",
 		"desired_blackhole_concurrency_per_shard=52", "durable_blackhole_concurrency_per_shard=32",
 		"mismatched_fields=blackhole.concurrency", "not args_json", "successful ProviderEgressProbe post-steps",
-		"then deploy Taskworker", "mounts that completed version", "Do not insert, delete, or hand-edit pending_task",
+		"If increasing the full-probe limit", "cohort-capable Taskworker artifact",
+		"Otherwise publish the desired version through config-updater first",
+		"After publication, converge Taskworker mounts", "Do not insert, delete, or hand-edit pending_task",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("config-drift Markdown is missing %q", want)
 		}
-	}
-	if strings.Index(alert.Action, "config-updater") >= strings.Index(alert.Action, "Taskworker") {
-		t.Fatal("config-updater must precede Taskworker")
 	}
 	requireEgressConfigPrivacy(t, alerts, rows[0][1])
 
@@ -305,7 +304,7 @@ func TestEgressCoverageDesiredConfigMissingAndInvalid(t *testing.T) {
 		"enabled: true\nshard_count: 4\n",
 		strings.Replace(syntheticEgressDesiredConfig, "  bandwidth: true\n", "", 1),
 		strings.Replace(syntheticEgressDesiredConfig, "bandwidth_timeout_seconds: 5", "bandwidth_timeout_seconds: 0", 1),
-		strings.Replace(syntheticEgressDesiredConfig, "concurrency: 52", "concurrency: 251", 1),
+		strings.Replace(syntheticEgressDesiredConfig, "concurrency: 52", "concurrency: 4001", 1),
 		syntheticEgressDesiredConfig + "private-parser-marker: private-parser-marker\n",
 		strings.Replace(syntheticEgressDesiredConfig, "  concurrency: 52", "  private-parser-marker: private-parser-marker\n  concurrency: 52", 1),
 	} {
@@ -327,6 +326,25 @@ func TestEgressCoverageDesiredConfigMissingAndInvalid(t *testing.T) {
 	findings = egressCoverageConfigFindings("pg-1", desired, 0, egressCoverageGeometry{}, nil)
 	alert := alertFromFinding(syntheticSettings(nil), "2.19", "egress-coverage", "Provider egress probe coverage", findings[0])
 	requireEgressConfigPrivacy(t, Alerts{alert}, "private-read-error-marker")
+}
+
+func TestEgressCoverageDesiredBlackholeCohortPoolGeometry(t *testing.T) {
+	desired := syntheticDesiredEgressConfig(t, syntheticEgressDesiredConfig)
+	config := desired.settings
+	config.blackhole.Limit = 250
+	config.blackhole.Concurrency = 1000
+	if !validEgressCoverageConfig(config) {
+		t.Fatal("monitor rejected four independent guard cohorts sharing 1000 workers")
+	}
+	config.blackhole.Concurrency = 4001
+	if validEgressCoverageConfig(config) {
+		t.Fatal("monitor accepted more workers than sixteen selectable cohorts")
+	}
+	config.blackhole.Concurrency = 1000
+	config.full.Concurrency = config.full.Limit + 1
+	if validEgressCoverageConfig(config) {
+		t.Fatal("monitor accepted full-run workers beyond its selected limit")
+	}
 }
 
 func TestEgressCoverageDesiredConfigUsesTaskworkerHealthTimeoutFloor(t *testing.T) {
@@ -474,6 +492,51 @@ func TestEgressCoverageCapacityFullReservationIsConditional(t *testing.T) {
 			if present && (!strings.Contains(f.observed, tc.want) || !strings.Contains(f.context, "not runtime capability or queue-activity attestations")) {
 				t.Fatal("capacity finding misstated the conditional full-reservation model")
 			}
+		}
+	}
+}
+
+func TestEgressBlackholeHeadroomWarnsBeforeEightHourPage(t *testing.T) {
+	cases := []struct {
+		eligible, current, rate int64
+		wantWarn                bool
+	}{
+		{400, 200, 100, false}, // exactly four hours
+		{401, 200, 100, true},  // crosses the operator target
+		{800, 200, 100, true},  // exactly eight hours, hard PAGE not yet active
+		{801, 200, 100, false}, // hard PAGE owns the >8h band
+		{400, 400, 100, false}, // complete measured coverage
+		{400, 200, 0, false},   // unknown rate is not an invented projection
+	}
+	for _, test := range cases {
+		snapshots := []egressCoverageSnapshot{{eligible: test.eligible, blackholeCurrent: test.current, blackholeLastHour: test.rate}}
+		finding, present := egressBlackholeHeadroomFinding("db.fixture.example", snapshots)
+		if present != test.wantWarn {
+			t.Fatalf("eligible=%d current=%d rate=%d warning=%t, want %t", test.eligible, test.current, test.rate, present, test.wantWarn)
+		}
+		if present && (finding.tier != tierWarn || finding.class != "egress-blackhole-headroom" || finding.sustain != 2) {
+			t.Fatalf("wrong headroom identity: %+v", finding)
+		}
+	}
+}
+
+func TestEgressBlackholeHeadroomMarkdownAndCurrentFleetShape(t *testing.T) {
+	snapshots := []egressCoverageSnapshot{
+		{eligible: 60000, blackholeCurrent: 36000, blackholeLastHour: 7500},
+		{eligible: 60000, blackholeCurrent: 37000, blackholeLastHour: 7500},
+	}
+	finding, present := egressBlackholeHeadroomFinding("db.fixture.example", snapshots)
+	if !present {
+		t.Fatal("eight-hour sweep with only partial current coverage missed the four-hour warning")
+	}
+	settings := SignalSettings{Environment: "synthetic", Now: func() time.Time { return time.Date(2026, 9, 26, 9, 0, 0, 0, time.UTC) }}
+	alert := requireAlertClass(t, []Alert{alertFromFinding(settings, "2.19", "egress-coverage", "Provider egress probe coverage", finding)}, "egress-blackhole-headroom")
+	for _, want := range []string{
+		"current_percent=60.8", "checked_last_hour=15000", "required_per_hour_4h=30000",
+		"projected_sweep=8h0m0s", "four-hour", "eight-hour", "do not lengthen the verdict lifetime",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("headroom alert omitted %q", want)
 		}
 	}
 }
@@ -1003,13 +1066,13 @@ func TestEgressCoverageSignalSyntheticConfiguredCapacityBounds(t *testing.T) {
 
 func TestEgressCoverageSignalSyntheticBlackholeCapacityBoundary(t *testing.T) {
 	for _, testCase := range []struct {
-		name     string
-		eligible string
-		current  string
-		want     int
+		name         string
+		eligible     string
+		current      string
+		wantHeadroom bool
 	}{
-		{name: "exact eight hours", eligible: "800", current: "799", want: 0},
-		{name: "complete despite quiet hour", eligible: "801", current: "801", want: 0},
+		{name: "exact eight hours", eligible: "800", current: "799", wantHeadroom: true},
+		{name: "complete despite quiet hour", eligible: "801", current: "801", wantHeadroom: false},
 	} {
 		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
 			switch {
@@ -1041,8 +1104,11 @@ func TestEgressCoverageSignalSyntheticBlackholeCapacityBoundary(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(alerts) != testCase.want {
-			t.Fatalf("%s: alerts = %d, want %d: %+v", testCase.name, len(alerts), testCase.want, alerts)
+		if got := requireAlertClassCount(alerts, "egress-blackhole-headroom") == 1; got != testCase.wantHeadroom {
+			t.Fatalf("%s: headroom warning = %t, want %t: %+v", testCase.name, got, testCase.wantHeadroom, alerts)
+		}
+		if requireAlertClassCount(alerts, "egress-blackhole-capacity") != 0 {
+			t.Fatalf("%s: exact eight-hour capacity boundary paged: %+v", testCase.name, alerts)
 		}
 	}
 }

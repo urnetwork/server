@@ -153,8 +153,9 @@ func TestEgressCoverageEightHourCapacityFloor(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !test.alert {
-			if len(alerts) != 0 {
-				t.Errorf("exact eight-hour capacity boundary raised %d findings", len(alerts))
+			if requireAlertClassCount(alerts, "egress-blackhole-capacity") != 0 ||
+				requireAlertClassCount(alerts, "egress-blackhole-headroom") != 1 {
+				t.Errorf("exact eight-hour capacity boundary must warn for headroom without paging: %+v", alerts)
 			}
 			continue
 		}

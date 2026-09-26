@@ -671,6 +671,20 @@ WHERE function_name LIKE '%UpdateClient%'
   counts and one representative fixed error class. Raw task errors remain
   private inputs to classification and never enter Alert Markdown. Never cap
   raw rows before this grouping.
+- GOTCHA — a failing `(*TaskWorker).RunPost-*` row reports the wrapper, not
+  necessarily the original task. On 2026-09-26 a parked wrapper with 53
+  errors carried `Missing user auth.`; a protected read-only join of its
+  validated task reference to `finished_task` identified terminal
+  `PlaySubscriptionRenewal`. The underlying subscription processing was not
+  thereby proved failed: its optional ended-email post hook tried to obtain an
+  email/phone recipient from a guest network. The `post-missing-recipient`
+  class must identify this as a post-hook failure, not a payment or provider
+  outage, and must not publish task IDs, raw args, or account identity. The
+  class alone does not prove which wrapped task owns it. A typed missing-auth
+  skip is valid only for an optional notification; propagate database errors
+  and preserve a real recipient's email. Let the wrapper complete on its
+  natural retry after the corrected Taskworker is deployed. Do not edit task,
+  subscription, or payment rows to quiet the alert.
 - GOTCHA — one task family can still contain several causes. On 2026-08-30,
   `AdvancePayment` had 384 failing rows: 368 wallet-insufficient, ten
   connection-cleanup deadlines from §2.10 retention, five
@@ -1569,7 +1583,17 @@ across every block/host from one command (also `--query=`, `--since=`,
 `--limit=` for non-tail pulls — the escalation batteries use `--since` to
 pull the window around an incident). One tailer per service; a tailer that
 dies or goes silent while the service is running is itself a visibility
-signal.
+signal, not by itself proof of a broken stream.
+False-positive qualifier for `tailer-silent`: a live but idle service can emit
+no lines for longer than the threshold. On 2026-09-26 Main Gossip was present
+in fresh process metrics and had no `warpctl logs` lines after its startup;
+that establishes silence but not a broken stream or a service outage. Preserve
+the visibility WARN as unknown, and check current process identity, bounded
+Loki/producer records, and tailer scan/restart counters before acting. A
+healthy process metric alone does not prove that its log stream works (the
+false-negative boundary); a new known producer line reaching both the standing
+tail and Loki is the positive transport control. Never restart the monitor or
+service solely because a quiet producer has emitted no line.
 Count lines per minute matching each class in section 4. Healthy ≈ 0 for all
 classes. Alert on rate, include the class name and one sample line. Error
 VOLUME is retry amplification, not incident size — 100k identical lines can
@@ -4673,7 +4697,7 @@ rank, location, sampled provider, or API release.
   excluded even after its 24-hour score sample ages out, and only a later clean
   authenticated run may replace and clear it. Do not weaken the hard gate or
   average the failure into the 90% score. API must persist the bit and the
-  Taskworker/operator-proxy probe must classify, submit, and enforce it; apply
+  Taskworker/qualityprobe probe must classify, submit, and enforce it; apply
   the migration before deploying either schema-dependent artifact. This is a
   software integrity boundary plus provider/network remediation, not a
   hardware-capacity alert.
@@ -6773,7 +6797,10 @@ series: `urnetwork_egress_probe_blackhole_inflight{state}` with
 The gauges sum concurrent batch owners with coherent collection and exact
 owner retirement, rather than letting the last batch overwrite a sibling.
 Completed means retained in memory before guards; it includes NotMeasured and
-is not a durable verdict. Canceled/discarded workers retain no result. Queued
+is not a durable-verdict count. On a safe-streaming artifact some passing,
+TLS-authenticated or NotMeasured results may already be acknowledged while the
+owning cohort remains active; ordinary negatives still wait for its guard.
+Canceled/discarded workers retain no result. Queued
 means selected but not started within an active batch, not the database due
 queue. A returned acknowledgement counts one nonempty batch request, not rows
 measured or replaced. Empty no-request calls do not acknowledge anything.
@@ -6787,6 +6814,69 @@ Without this evidence the registered coverage probe explicitly reports
 recovery follows from in-memory completion or a retired gauge. Persisted
 measured evidence remains the recovery authority. The counters diagnose batch
 latency but do not establish a per-check duration or guarantee future capacity.
+
+Full-lane visibility is a separate control. The existing
+`pass_providers_total{schedule="full",result="attempted"}` increments after
+the complete full batch, guard and release, not when a provider starts.
+`pass_due{schedule="full"}` is a process-local last-selection gauge, not a
+shard count or an active-worker census. A zero attempted delta and a positive
+due gauge cannot distinguish idle workers from a long active batch. For the
+configured parallel path, full and blackhole lanes start independently; waiting
+for the blackhole result channel first only joins that owner and does not
+delay the full goroutine. Do not diagnose blackhole precedence from that join.
+
+The corrected executable additionally preinitializes twelve identity-free
+full progress series: `urnetwork_egress_probe_full_inflight{state}` with
+`active_batches|queued|running|finished_waiting`;
+`urnetwork_egress_probe_full_worker_events_total{event}` with
+`batch_started|batch_finished|provider_started|provider_finished`;
+`urnetwork_egress_probe_full_selection_total{outcome}` with
+`prefix_lookup|prefix_advanced|prefix_exhausted`; and
+`urnetwork_egress_probe_full_progress_enabled=1`. Running spans actual
+`ProbeOne` entry through reports and tunnel teardown. Finished-waiting includes
+failed/unmeasured work until its owning batch guards/releases; it is not success,
+an acknowledgement or durable coverage. Queued means selected but not started,
+including skipped candidates until batch retirement. Overlapping owners sum
+coherently; closing one cannot erase another. Observe capability and all required
+children on fresh, same-process/start tuples before diagnosing active-versus-idle,
+and compare independent API outcomes and measured PG clocks. The registered
+coverage probe does not yet consume these full-worker families; until a bounded,
+capability-aware observation is available their execution stage is unobserved,
+not healthy or stalled. This diagnostic addition changes no alert threshold,
+recovery rule, or full-snapshot cadence.
+
+A deterministic full-successor control found a retained-prefix starvation
+bug: querying only the configured batch limit, then discarding providers already
+seen in this task, could stop the lane despite unseen due work immediately
+behind them. A full response containing only seen providers now permits one
+lookahead bounded by `min(5000, seen_count + full_limit)`. Admission and guard
+cohort size remain at most `full_limit`; partial/nonempty ordinary responses
+retain their original lookup, and no provider is retried within the pass.
+Source errors, oversized replies and cancellation remain explicit failures.
+`prefix_advanced` establishes that lookahead exposed unseen candidates, not
+that they were subsequently measured; `prefix_exhausted` establishes only that
+the one bounded response exposed none. API clamping, duplicates, a larger
+retained prefix and concurrent due changes can still hide work beyond that
+bound. Neither outcome certifies an empty fleet backlog. This is a tested
+source correction, not a verified cause of the current Main shortfall.
+
+Full capacity must be conditioned on real latency rather than one request
+timeout. The 60-second warmup/open allowance, 50-load sample, three attempts
+and capped retry spacing permit a 36m35s full run including a five-second
+bandwidth sample. Eight concurrent full providers per shard across four shards
+would provide only about 52 probes/hour if every slot occupied that envelope;
+fast successful runs can be much faster, so concurrency alone does not prove
+that bottleneck. Full successor admission additionally reserves three bounded
+control-plane requests per selected provider plus blackhole publication. With
+eight selected, it needs more than 49m05s of lease left; a permitted 31-minute
+first batch in a 75-minute task cannot admit another eight-provider batch while
+blackhole tails remain. Deterministic long/fast controls pin that distinction.
+Against the 2026-09-25 due cohort of 81,829, the seven-day minimum is 488/hour;
+32 continuously occupied slots would need a mean occupied cycle below about
+236 seconds even before guard/publication and lease gaps. This is a capacity
+model, not proof all live checks take the maximum or that a fleet is idle.
+Retain complete observed durations, actual worker progress and durable throughput
+before changing full concurrency, retry rules or the selected guard cohort.
 
 A sustained tail-barrier discriminator requires multiple complete, fresh,
 same-process/start samples: completed-buffered remains much larger than running,
@@ -6803,8 +6893,8 @@ No probe threshold or recovery condition is changed by this qualification.
 
 The corrected bounded, saturated blackhole pipeline admits successors even
 when full work is absent or completes without a returned error. Up to eight
-original guard cohorts share the same instance-owned check-worker pool (250
-workers at the current settings); each cohort still joins, guards and submits
+original guard cohorts share the same instance-owned check-worker pool; each
+cohort still joins, guards and submits
 independently. The selected-work bound, lease admission cutoff, explicit full
 error, readiness loss and cancellation stop new work. Serial full-work reserve
 and the initial parallel guard-sized minimum remain separate controls. This
@@ -6812,6 +6902,79 @@ does not increase active checks, change retries, combine guard samples, or
 publish ordinary negatives early. Unsupported/partial geometry retains the
 legacy serial path. These are source guarantees, not proof a running artifact
 or observed process used a particular path.
+
+2026-09-25 publication-lag discriminator: Main's 1,000-selected/1,000-worker
+rollout completed roughly 4,544 individual blackhole workers in a bounded
+nominal 15-minute process sample, but only 1,218 checks reached cohort
+finalization and two batch calls acknowledged. Some starting metric samples
+were stale, so those aggregate deltas are diagnostic, not an exact fleet rate.
+The completed checks were buffered behind each cohort's slowest member, not
+lost. The corrected Taskworker validator permits a smaller selected cohort
+with a larger fixed worker pool only up to eight cohorts' total selected work
+(for example, 250 selected and 1,000 workers per shard). Each cohort retains
+its own guard and submission, so this can shorten publication lag without
+relaxing negative-evidence rules or claiming to speed an individual check.
+The monitor's desired/durable geometry validator must apply that same bound;
+otherwise it would falsely label the corrected configuration malformed.
+Until the effective execution geometry and artifact are independently verified
+running, this is a tested correction direction, not a Main recovery claim. A rising
+completed counter with low ACKs and a large completed_buffered gauge supports
+a tail-barrier diagnosis only with complete same-process/start samples; a
+slow physical check rate and credit admission remain separate possible limits.
+On an artifact with early safe publication, repeat that discriminator only after
+separating guardable ordinary negatives from independently publishable passing,
+TLS-authenticated, and NotMeasured results; a large retained gauge alone is no
+longer proof that every completion awaits the slow tail.
+At 21:12 UTC the new Taskworker process cohort reported 5,275 completed
+blackhole workers still buffered, 1,889 running, and no submission ACK across
+seven of eight fresh process tuples. This is direct tail-barrier evidence, not
+proof of a permanent stall or a complete fleet rate. The code-only Taskworker
+correction uses an execution-local copy of saved 1,000-selected/1,000-worker
+arguments with 250-check publication cohorts and the same 1,000-worker pool;
+it does not require Config Updater or change durable task/config arguments.
+Smaller configured cohorts remain unchanged. The effective cohort is never
+below the configured guard minimum or the size needed to fill the worker pool
+within eight retained cohorts. Full-lane and retry settings remain unchanged;
+a full execution cohort still immediately rearms the durable task. Verify its
+running artifact and fresh same-process completed/buffered/ACK counters before
+claiming an effect on Main. Acknowledged batch calls are not result counts or
+proof of durable measured coverage: at 21:28 UTC, two ACKs accompanied only
+19 bounded current measured rows with post-rollout check times. The measured
+percentage rose from 38.3% to 38.7% while its absolute row count fell by 230,
+because the eligible denominator shrank. Require absolute measured counts,
+current timestamps, eligible counts and sustained throughput together.
+
+2026-09-25 first-check starvation discriminator: one read-only snapshot of the
+exact blackhole eligibility predicate at 22:24:52 UTC found 85,357 eligible,
+10,973 without any check row, 67,684 existing scheduler-ready rows, and 6,700
+existing not-yet-due rows. Each shard had more than 16,000 existing due rows
+ahead of 2,700+ first checks. Under the attested legacy existing-before-missing
+ordering, both the first 250 and first 2,000 candidates in every shard therefore
+contained zero first checks; ranking or exporting identities was unnecessary.
+This proves selection exclusion at that snapshot, not permanent starvation
+without a sustained arrival/service comparison and not the cause of every
+failed measurement. Existing NotMeasured-only rows are not never-checked:
+they already had priority, and a retained measured row refreshed in place may
+add no net current coverage.
+
+The approved fairness correction is API/model-owned and can be rolled out
+without interrupting Taskworker cohorts. It reads independent existing-due and
+missing-row heads, each at most the request limit, then deterministically
+interleaves them 1:1 in Go. Unused share goes to the other class. Existing checks
+keep oldest-due/id order and lead odd/one-slot replies; a one-slot request
+explicitly has no first-check fairness guarantee. Both heads keep the identical
+active/top-level/connected/valid/Public/normalized-shard predicate, and category
+movement between reads is deduplicated. Both queries share a bounded request
+context; an error or cancellation must not masquerade as a partial healthy
+queue. No backoff, dark verdict, worker count, global budget or schema changes.
+Verify the exact API artifact before assuming this ordering is running.
+The legacy priority inference is invalid after the corrected artifact is
+active. Empty first-check selection can also be legitimate when that class is
+empty or a request has one slot; missing evidence is not zero selected work.
+Keep class counts, returned selections, actual worker progress, guarded/unknown
+outcomes and durable measured gains distinct. This correction prevents the
+demonstrated class exclusion but does not repair unrelated tunnel failures or
+prove the eight-hour coverage target has been met.
 
 `urnetwork_egress_probe_blackhole_pipeline_decisions_total{decision}` has thirteen
 preinitialized fixed children: `pipeline_started`, `lookup_started`,
@@ -6880,8 +7043,212 @@ settings starts242 blackhole workers and needs an eight-check second wave.
 The independent-pool correction retains250 blackhole workers beside the full8,
 so every selected check can start before any completes (combined258 per shard).
 It preserves the per-check transport root, request/retry budgets, admission
-stop, cancellation finalizer, and complete-batch negative guard. It does not
-remove the slowest-check batch barrier or prove sufficient fleet throughput.
+stop, cancellation finalizer, and complete-batch negative guard. The subsequent
+safe-publication correction removes the slowest-check barrier only for passing,
+TLS-authenticated, and NotMeasured results: it sends bounded 16-check batches
+while a sibling retries, retries a failed early call at finalization, and leaves
+ordinary negatives behind the unchanged full-cohort guard. A rising
+`completed_buffered` gauge therefore cannot alone prove a publication stall
+on that artifact; pair it with complete same-process ACK and durable-row clocks.
+Neither correction proves sufficient fleet throughput.
+
+2026-09-26 full-run failure discriminator: after the 128-per-shard rollout,
+eight same-process Taskworker cells acknowledged 512 full attempt records but
+submitted no full health/location results; all 64 eight-provider cohorts
+tripped the unchanged 30% guard. In bounded logs, 124 of 125 zero-pass runs
+attempted all 50 sampled destinations and lacked the operator exit echo;
+the echo's fixed stage was `dial_dns_or_socket`/`timeout`. Of the 512 guarded
+attempts, 102 had a still-current passing blackhole verdict, including 16
+checked shortly before the full-run interval. This rules out *only dark
+providers* as an adequate fleet-level explanation, but a prior pass is not
+same-attempt proof that one provider was still reachable. Do not weaken the
+guard or treat its acknowledged attempt records as delivered health. The
+diagnostic-only `failure_stages=` suffix on future egress-health log lines
+counts fixed, identity-free final-attempt stages (`dial_dns_or_socket`, `tls`,
+`policy`, response, tunnel unavailable, run ended, or unknown) before the
+batch guard. It must be verified in a running Taskworker artifact before using
+it as Main evidence; old logs have no such detail. A stage count is a
+per-run clue, not a durable check, and an `unknown` stage must not be read as
+a provider failure cause. Compare post-rollout full and blackhole cohorts,
+same-process concurrency/resource measurements, and the exact attempt time
+before choosing a capacity or transport correction.
+At 08:43 UTC, the new artifact's bounded 40-minute full-check log sample
+showed 19 zero-pass and 85 nonzero runs on edge-0/g2, versus 63/3 on
+edge-4/g1 and 75/2 on edge-4/g2. This is a host/process-path discriminator,
+not proof that the host itself is the cause: shard selection, provider mix,
+and run timing still need matching controls. Many zero-pass summaries have
+`request_unknown:49-50` after one or more typed dial failures. On this
+artifact `request_unknown` includes untyped request deadlines, cancellation,
+EOF, and other net/http errors, so it cannot distinguish shared tunnel
+failure from request-context expiry. A local diagnostic correction subdivides
+that fallback into finite `request_timeout`, `request_canceled`, and
+`request_eof` classes while preserving typed dial/TLS/policy precedence and
+keeping raw errors out of labels. Do not use those new subclasses as Main
+evidence until a Taskworker image containing them is verified live. Compare
+same-time blackhole and full outcomes by host, the per-request context
+deadline, and Connect host pressure before calling this a capacity failure.
+Taskworker `2026.9.26-outerwerld+1056124750` was independently sampled live on
+40/40 blocks at 08:52 UTC with the unchanged Config Updater generation; the
+new subclasses still require a completed post-rollout full run before drawing
+their first Main conclusion. Rollout-induced canceled runs are not proof of a
+provider or host defect.
+By 09:10 UTC, completed new-image runs included 20 nonzero results on
+edge-4/g2, each with 41–48 of 50 loads passing, alongside nonzero controls
+on edge-0/g1 and edge-1/g2. The finite new stage summary counted request
+timeouts separately from a much smaller unknown bucket. This rules out an
+absolute, persistent edge-4 inability to run full probes; the earlier
+zero-pass concentration remains a cohort/time/path problem to isolate, not a
+host diagnosis from association alone. Do not compare pre- and post-restart
+provider cohorts as if they were the same controlled requests.
+At 10:04 UTC, the verified new Taskworker image's bounded post-09:00 log
+sample had 600 full health runs, 396 with zero passing destinations, and
+20,519 final-load `request_timeout` stages; only 465 were typed
+`dial_dns_or_socket`. Three completed shard summaries submitted only 12–23 of
+128 attempted full results each while their cheap lanes checked 4,000
+candidates apiece. This proves a continuing full-path failure, not a global
+absence of probe execution. A bounded read-only database join found 198
+recent `run_batch_guard` attempts but only five had a passing cheap check in
+the preceding hour; 120 had a latest cheap check older than eight hours.
+The cheap and full selection cohorts are not controlled pairs, so neither a
+fleet-wide cheap pass rate nor an old passing check proves that a guarded
+provider was reachable during its full attempt. A zero-pass run on one host
+also cannot establish a host-only cause when other hosts show the same class.
+The untyped request timeout additionally merges net/http connection
+acquisition, request write, and response wait. The local diagnostic follow-up
+uses request-local HTTP trace hooks to split generic deadlines into finite
+`request_connect_timeout`, `request_write_timeout`, and
+`request_response_timeout` stages; a typed provider dial/TLS/policy error
+still wins. Focused, package, and race tests exercise the diagnostic, but it
+is not Main evidence until a Taskworker image containing it is verified live.
+A connection-stage timeout includes transport queueing, private DNS, socket
+dialing, and TLS, and is **not** a DNS diagnosis. The fix changes no retry,
+guard, provider verdict, or connection policy.
+The diagnostic Taskworker `2026.9.26-outerwerld+1056187320` converged on
+Main at 10:38 UTC. Its first 200 completed full runs by 11:03 included 128
+zero-pass runs; the slow cohort reversed the apparently healthy first five
+finishes, so early completions are a survivorship-biased control, not recovery.
+Every zero-pass summary in this bounded sample also lacked a warm-up `/ip`
+exit observation and was dominated by `request_connect_timeout`; nonzero
+results occurred on the same hosts. The log sample contained edge-0 and
+edge-1 completions only: edge-3's fresh in-process progress metrics already
+showed finished workers while its Fluent Bit journal-position signal was
+PAGE, so log absence from edge-3 is **not** an all-host outcome census.
+The connection-stage label includes
+transport queueing, private DNS, socket dialing, and TLS and does not alone
+identify which of those failed. A read-only, identifier-suppressed join of
+these exact completed provider IDs against current stored metadata found all
+128 zero-pass providers in the *unknown claimed-version* cohort, not in the
+four explicitly compatible runs; an unknown description can hide legacy
+receivers, so this does not rule HMAC out individually or prove it caused the
+cohort. Only five of those 128 had a current passing cheap verdict at query
+time, versus 56 of 68 nonzero unknown-version runs. Those are latest-row
+snapshots, not the cheap verdict at each full attempt: use them as a selection
+and freshness discriminator, not a causal matched-pair or a reason to suppress
+fail-open full candidates. The eight fresh Taskworker progress producers
+(one per host/block) reported 457 full workers running and 55 finished before
+batch release at 10:58 UTC. This rules out an idle full lane but does not
+establish durable coverage or four-hour throughput. Keep the historical
+legacy-HMAC and current full-path failures separate until exact capability,
+same-attempt reachability, and tunnel-stage evidence correlate them.
+The four-hour target with eight-hour freshness headroom is for the cheap
+blackhole-check cycle, already configured at 1,000 independent workers per
+shard. The separate full URL lane remains 128 per shard. Do not equate its
+slow retry schedule or 12-hour health evidence clock with the cheap verdict's
+eight-hour deadline, or increase full workers to "fix" a run guard that holds
+nearly all full submissions. Verify the cheap cycle using persisted measured
+`checked_at` coverage and complete, fresh process evidence; diagnose the full
+guard/publication boundary separately.
+A complete post-rollout hour at 11:55 UTC did **not** meet that target:
+123,234 eligible, 87,292 with a measured verdict inside eight hours, and
+10,380 distinct measured check starts in the preceding hour. At that rate a
+complete sweep projects about 11.9 hours. In the matching one-hour Mimir
+window, `blackhole/checked` increased by about 17,591, but
+`blackhole/pass_not_measured` increased by about 4,116 and the batch guard
+tripped about 35 times. `checked` includes non-verdict rechecks and is not a
+durable, distinct-provider refresh count; the remaining gap also may include
+repeated providers or timing/window differences, so the two sources do not
+prove exact per-provider causality. A short high `checked` burst is a false
+recovery signal until measured distinct `checked_at` advances. Separate
+guard-held negatives, tunnel/not-measured outcomes, due-list fairness, and
+submission errors before raising worker count or relaxing the guard.
+A bounded 12:03 UTC eligible-queue census found existing due rows ahead of
+never-checked rows in **every** shard: shard 0 had 22,491 due versus 3,692
+never checked; shard 1, 19,914 versus 4,136; shard 2, 23,795 versus 4,213;
+shard 3, 20,756 versus 3,427. The preceding selector's absolute due-first
+order admits no first check from a shard while its due head remains above the
+1,000-item limit. The selector is executed by the API handler for
+`/network/provider-blackhole-due`, not by Taskworker. At 12:10 UTC the
+never-checked set fell by about 833 in 15 minutes while each shard's due
+head stayed well above 1,000: this is partial first-check admission, not
+proof that the whole API fleet uses one selector. Independent read-only
+`warpctl ls versions --sample` then found beta/g1 on API
+`2026.9.25-outerwerld+1055811640` and g2/g3/g4 on
+`2026.9.25-outerwerld+1055700010`. Local images for those exact tags have
+different compiled source: the newer image contains
+`model/provider_blackhole_due.go` and the bounded fair query; the older
+image lacks that file and contains the due-first query. The Taskworker's
+operator client calls the public `api_url`, so a mixed API fleet can return
+fair or starving due lists as requests are routed. This is a concrete
+mixed-version selection mechanism consistent with the partial progress;
+local image content plus load-balancer samples still need exact per-host
+digest attestation before claiming every running process. Complete the API
+rollout only after its full build/test gate, then verify per-shard first-check
+advancement, measured coverage and retry recovery. Fairness alone does not
+repair high-dark cohorts or lost Fluent Bit visibility; retain the guard.
+The cheap blackhole log currently reports repeated `context deadline exceeded`
+for three independent destinations, but that text alone cannot distinguish
+DNS/socket, connect, write, or response timeouts. The next Taskworker artifact
+should include the bounded `failure_stages=` summary from each cheap check's
+final attempts. Compare its exact process generation and stage distribution
+with dark-batch guards, NotMeasured outcomes, and durable passing controls;
+absence before that artifact rolls out is unavailable telemetry, not evidence
+of zero failures. The summary uses a fixed stage vocabulary and never copies a
+provider identity, URL, raw error, or arbitrary stage into the aggregate.
+The next source also distinguishes a pending HTTP-trace DNS, dial or TLS phase
+from a generic pre-`GotConn` timeout when those callbacks exist. A custom
+provider-tunnel dialer can do DNS inside its dial callback, so
+`request_dial_timeout` is not proof that DNS finished; a missing callback stays
+`request_connect_timeout`, and a completed phase cannot be blamed merely
+because it was the last specific phase observed. These stages are diagnostic
+subsets, not replacement success/failure verdicts or evidence that packet
+routing through the provider has been repaired.
+A direct 11:24 UTC read-only PostgreSQL census used the exact eligible and
+`blackhole_measured` predicates from this probe: 122,961 distinct eligible
+providers, 83,562 with a measured check inside eight hours, 57,988 inside
+four hours, and 13,809 measured check starts in the preceding hour. The
+one-hour rate projects about 8.9 hours for a complete sweep, above the
+eight-hour verdict lifetime; 68% current coverage is not recovery. The
+fresh eight-process Taskworker counter showed 7,887 completed cheap checks
+in a shorter 15-minute window, which would project about 3.9 hours at the
+*current* denominator only if sustained and durably published. That short
+burst cannot replace the one-hour persisted rate, and the latter still
+contains pre-rollout work. Recheck after one complete new-version hour and
+verify persisted `checked_at` replacement before closing §2.19.
+2026-09-26 blackhole-admission discriminator: after early safe publication
+restored 6,682 durable rows, the newest *check start* aged about eight minutes while
+the active Taskworker set held 32 blackhole cohorts (eight per shard), 7,251
+completed/buffered checks, and only 749 running checks against 4,000
+configured per-shard worker slots. A bounded due backlog still existed. The
+fixed eight-cohort per-task selection bound, not a global process budget,
+prevented those idle slots from admitting another cohort until long-tail
+checks joined. This is not a blanket publication stall: at 08:04 UTC the
+newest `checked_at` was about eighteen minutes old but `update_time` was two
+seconds old, with 718 old-start checks updated in the preceding five minutes.
+The tested correction raises that *per-task* retained-cohort
+bound to sixteen, preserving the same fixed worker pool, per-cohort dark
+guard, retries, API 5,000-row lookup cap, and durable task arguments. The
+monitor's desired-geometry validator must mirror sixteen only when its
+corresponding new binary is promoted. This is a work-admission improvement,
+not evidence that slow individual checks or full-probe zero-pass runs are
+fixed. Verify same-process `cohort_cap`, running/queued/completed counts,
+durable checked-at rate, PG/API headroom, and Taskworker RSS/goroutines across
+a complete post-rollout task; the previous one-hour rate mixes the stall and
+recovery and cannot certify an eight-hour fleet sweep. The Taskworker image
+`2026.9.26-outerwerld+1056102830` reached all 40 Main blocks. A same-process
+sample with one pipeline start and thirteen successor selections exceeds the
+old seven-successor bound, and all 4,000 configured workers were busy while
+new durable checked-at rows advanced. These prove activation and fresh work,
+not yet the sustained eight-hour rate or a full-probe cause.
 The probe labels `parallel_pool_model=unattested`: `full_reserved_*` is the
 legacy shared-peak model, while `independent_pool_*` models the corrected
 per-lane pools. Join the running artifact before assigning either geometry to
@@ -6900,6 +7267,25 @@ again without a successful recheck.
 Apply the analogous measured-rate check to full probes. Sum the mutually
 exclusive full-due categories and gross success-inclusive latest attempts over
 the complete shard geometry:
+
+The configured full pool is an admission ceiling, not achieved throughput.
+Each full run can retain a tunnel through several minutes of spaced destination
+retries; guard/publication is scoped to eight-provider cohorts in the
+multi-cohort runner, so one slow cohort must not serialize independent cohorts
+in the same shard. Distinguish the deployed multi-cohort Taskworker artifact
+from older single-batch runners before attributing a live rate to this change.
+Compare fresh full-worker start/finish and durable attempt receipts on the same
+artifact and time window; a missing metric family or an in-flight cohort is
+unknown, never zero. If the full attempt rate remains low with cohorts visibly
+running, classify retry/tunnel duration, guard outcomes and attempt-report
+acknowledgements separately before increasing concurrency again.
+For a cohort-geometry rollout, converge the cohort-capable Taskworker binary
+while durable tasks still carry the old small full limit; only then publish a
+larger `provider_egress_probe.yml` snapshot and verify all durable shard rows
+and live executors agree. Publishing the larger limit to an old single-guard
+runner can enlarge its slowest-provider barrier instead of increasing useful
+parallelism. Treat desired/running drift during that bounded rollout as an
+explicit deployment state, not as proof of recovered coverage.
 
 ```text
 required_per_hour = ceil(full_due / 168 hours)
@@ -6981,8 +7367,11 @@ first-attempt-versus-retry allocation inside the unlocated lane.
   snapshot, including enablement, shard/batch geometry, deadlines, modes,
   paired `transport_budget_byte_count` / `transport_budget_count`, or
   endpoints. Endpoint equality is checked in memory and endpoint values never
-  enter the alert. Deploy config-updater first, then Taskworker so every
-  executor mounts the completed configuration version; allow successful
+  enter the alert. For a full-limit increase, converge the cohort-capable
+  Taskworker artifact on the old small snapshot before config-updater publishes
+  the larger setting; for other changes, deploy config-updater first, then
+  Taskworker so every executor mounts the completed configuration version;
+  allow successful
   `ProviderEgressProbe` post-steps to replace the immutable saved arguments.
   An initialization conflict does not replace `args_json`, a failed execution
   retries the old snapshot, and an old-config worker can recreate it. Never
@@ -7026,6 +7415,18 @@ first-attempt-versus-retry allocation inside the unlocated lane.
   remains authoritative. Keeping a failed verdict until a successful recheck
   is a separate correctness/availability decision; never hide the fault by
   merely lengthening the maximum age or deleting rows.
+- `egress-blackhole-headroom` (WARN after two samples): with incomplete current
+  measured coverage, the measured last-hour check rate projects a whole-fleet
+  sweep longer than the four-hour operating target but no longer than the
+  independent eight-hour verdict lifetime. This early warning preserves a full
+  recovery cycle of headroom before the hard capacity PAGE. A recent rollout or
+  backlog transition can mix old and new rates, so confirm with complete
+  post-rollout hourly windows and per-shard durable progress; neither a current
+  row nor an hours-old passing check proves the provider passed the present
+  full-probe attempt. A zero observed rate is unknown rather than a fabricated
+  projection and remains covered by the stalled/visibility controls. Do not
+  clear this warning by extending verdict age, weakening guards, or treating
+  cheap blackhole coverage as successful full-probe coverage.
 - `egress-full-capacity` (PAGE after two samples): gross full attempts are
   advancing, but the non-dark due population projects beyond the seven-day
   location lifetime. First prove corrected API artifact convergence, then
@@ -7483,8 +7884,82 @@ the shard's existing idle-delay retry through `task.WithRetryDelay`; the task an
 its increasing error count remain intact. Mixed errors, datastore uncertainty,
 and cancellation retain ordinary backoff. This avoids an accumulated funding
 failure parking the same task for an hour after cleanup makes credit available.
-It does not grant credit, change escrow or payout guards, retry financial writes,
-or alter the six-hour bootstrap funding policy.
+The admission guard itself does not grant credit, change escrow or payout
+guards, or retry financial writes. Taskworker
+`2026.9.25-outerwerld+1055685620` reached all 40 Main blocks at 20:41 UTC
+on 2026-09-25. It adds an independent preflight before each shard: under the
+persisted internal-prober identity lock, it compares the same available-credit
+formula with 256 GiB times the configured shard count and conditionally adds
+512 GiB, data-only grants until there is shared headroom. The scheduled
+bootstrap uses that serialized grant path every five minutes for its smaller
+256 GiB floor. This is not a per-shard reservation: all shards and contract
+admissions share one prober account, and contract creation does not take the
+preflight lock. Healthy preflights must not create duplicate grant rows. An
+unfunded alert after rollout requires checking the effective Taskworker
+version, preflight errors, current PostgreSQL balances and Redis reservations;
+gross open-contract escrow alone is not the admission balance. Ordinary user
+network credit and disputed escrow remain unchanged.
+
+2026-09-25 Main discriminator: the internal prober's exact active-balance
+PostgreSQL-minus-Redis read was about 170.5 GB available at 20:08 UTC, then
+zero at 20:26 and 20:31 UTC with all 37 active balances exhausted. Current
+Taskworker `funding_unavailable` counters advanced and a contemporary
+1,000-check cohort published 798 `NotMeasured`; provider coverage subsequently
+fell from 4,526 to 3,777 checked/hour. A single healthy-credit snapshot is
+therefore a false-recovery risk. Verify a sustained credit trajectory and fresh
+measured cohorts after the preflight rollout; do not equate all open-contract
+escrow with the per-active-balance Redis admission reservations. This evidence
+does not establish that every missed check was credit-caused, because cohort
+tails and other probe failures also affect throughput.
+At 20:43 UTC, three conditional 512 GiB internal-prober grants appeared; a
+fresh 20:44 UTC PG-minus-Redis read showed about 1.20 TiB available. That
+verifies the preflight's initial headroom, not sustained probe recovery.
+The next Taskworker source revision sizes the preflight from effective execution
+geometry, covering all eight retained blackhole cohorts, the full selected
+cohort, both directions, and current/announced-ahead/prefetched contracts for
+the initial and configured recreated tunnels. It retains the 256 GiB per-shard
+floor for overlapping old contracts, checks every product and the sum for all
+configured shards, and rejects arithmetic overflow. This is planned headroom,
+not an exact bound on every transfer lane, renewal or later full successor,
+and not an exclusive per-shard reservation: all shards share the same internal
+account. Periodic conditional grants and live credit checks remain necessary.
+The singleton-lock owner must read PostgreSQL balances on its existing
+connection, then apply the Redis mirror, using a fresh READ COMMITTED statement
+after acquiring the lock. Opening a second PostgreSQL connection while holding
+the first can deadlock saturated pools; a repeatable-read snapshot established
+before lock admission can duplicate the preceding grant. Deterministic
+single-connection and queued-lock tests reproduce those boundaries; they are
+source correctness findings, not independently established Main incident
+causes. Near-integer-boundary grants must not wrap available credit and loop.
+Do not infer the changes are active until their Taskworker artifact is deployed
+and verified. Pair credit alerts with actual admitted geometry, preflight/pool
+waits, and the sustained grant/escrow trajectory, not only one healthy balance.
+At 20:32 UTC, an exact bounded unsettled-escrow join matched the ~604.1 GB
+Redis reservation mirror: 13,668 contracts larger than 32 MiB held ~535.2 GB
+(88.6%) while 56,365 contracts at or below 1 MiB held ~59.1 GB. Thus the
+1 MiB blackhole opening target alone cannot explain the credit drain. Verify
+the deployed Taskworker/Operator Proxy artifact and attribute large contracts
+to a specific probe lane before changing reservation policy; source-tree code
+or contract size by itself is not deployed-lane proof.
+The 20:42 UTC bounded direction join then identified 15,652 open/unsettled
+contracts over 32 MiB (about 578.3 GiB requested) as return-to-prober
+companions, versus only 39 own-source originals (about 1.25 GiB). Fresh
+post-rollout minutes still contained thousands of new large reverse companions.
+This is a stronger discriminator than size alone: the probe-local 1 MiB
+ContractManager setting does not constrain the provider side's companion
+reservation. Monitor both *directions* and the new-contract size distribution;
+do not label a remaining large full-probe companion an error merely because
+blackhole probes have a smaller target. Confirm the origin size and exact
+deployed binary before attributing a specific companion to the blackhole lane.
+After API `2026.9.25-outerwerld+1055700010` reached all Main blocks,
+bounded still-open/unsettled reverse-companion counts over 32 MiB fell from
+roughly 1,700–2,300 per minute before convergence to nine at 21:06 UTC, zero
+at 21:07, and one at 21:08; small (at most 1 MiB) companions continued in the
+thousands per minute. This supports the new origin-size cap taking effect on
+fresh creation, with the qualification that an open-contract sample can censor
+older minutes after close. It does not prove old escrow drained, stable
+available credit, successful probes, or provider-list recovery. Check all four
+separately before closing the incident.
 
 Any complete advancing `funding_unavailable` delta yields `egress-prober-unfunded`
 PAGE even when the guard prevents every new provider attempt. A
@@ -8943,6 +9418,22 @@ the total failure share but can never become the dominant common class because
 several distinct raw values may have collapsed into that one redacted bucket.
 No client ID, raw class, location, endpoint, credential, task ID, or payload
 leaves PostgreSQL.
+
+False-positive qualifier for `run_batch_guard` as a *shared prober fault*:
+the guard compares the pooled failed-load share against 30% and holds every
+member of an eight-provider cohort, including individually passing providers.
+Main's first complete post-10:38 UTC Taskworker wave had a large heterogeneous
+zero-pass population and fresh eight-process 15-minute counters near 11:15
+showed 516 full attempts, 491 failed, and only 24 submitted; the bounded
+edge-0/edge-1 logs contained 45 guard trips while edge-3 journal-read loss
+made its log subset incomplete. A high dark or never-cheap-checked provider
+share can therefore trip the guard without a common prober outage. The
+opposite false-negative risk is also real: simply disabling or raising the
+guard would let a shared prober regression publish false provider negatives.
+Separate same-attempt provider-path controls, current cheap-check status,
+full worker completion, guard release, and persisted location/health results
+before choosing a targeted correction. A high configured worker count cannot
+repair near-zero accepted submissions by itself.
 
 Taskworker metrics mirror the same classifier but are process-local snapshots.
 Each completed refresh publishes a snapshot timestamp, including idle passes;
@@ -10431,6 +10922,16 @@ This is a Redis-specific diagnosis, not a classification of every outgoing
 TCP timeout. The generic `dial-io-timeout` class alone does not establish it.
 Exact DoH fanout-leg errors belong to `doh-dial-timeout` (§4); their logical
 DNS outcome remains unknown without a final-query or end-to-end control.
+The 2026-09-26 Taskworker sample makes this distinction concrete: in the two
+log-visible same-process `tun/address` resolver streams after 11:10 UTC,
+bounded first-to-last cumulative deltas were 108 answers, 18 failures,
+1,039 cancellations and **zero logical resolver timeouts**, while the
+separate endpoint-attempt stream still emitted DoH dial timeouts. The
+cancellations can follow a provider tunnel/request deadline; neither they
+nor timed-out losing endpoint legs prove a failed final DNS lookup. Edge-3's
+journal-reader loss leaves this a two-process control, not a fleet census.
+Keep the leg PAGE visible, but require final-query and provider-path evidence
+before changing DoH policy or blaming DNS for zero-pass full probes.
 
 Signature: the target is an identified Redis node; dial i/o timeouts occur
 fleet-wide for that ip:port; local PING hangs;
@@ -14427,6 +14928,59 @@ Implementation convention: SIGNALS.md §8.14 (`host-load`) maps to
 `signal_host_load.go` and `signal_host_load_test.go`. Synthetic tests reproduce
 CPU saturation, I/O saturation, low available memory, stale/missing and
 incomplete host telemetry, healthy hosts, alert identity, and Markdown detail.
+
+### 8.14a Host CPU runnable-delay pressure
+
+Probe: `host-pressure`
+
+Every minute, take a bounded read-only `/proc/pressure/cpu` sample from every
+enabled monitor-inventory host. Require the remote short hostname to match the
+selected inventory identity before attributing the sample. The Linux `some`
+`avg60` value measures the percentage of the last minute in which at least
+one runnable task waited for CPU. Page after two consecutive observations
+at or above 20% as `host-cpu-pressure`; a missing SSH result, hostname mismatch, unsupported file,
+or malformed sample is `host-cpu-pressure-unavailable`, never a healthy zero.
+An operator-disabled host must not be contacted.
+
+This closes a demonstrated §8.14 false negative, not a replacement for its
+CPU-mode or I/O-wait measurement. At 2026-09-26 08:59 UTC, edge-4 had load1
+about 195 on 72 logical CPUs and CPU `some avg60` about 54%, but roughly
+23% aggregate idle CPU, so the §8.14 condition requiring at least 90%
+execution did not alert. Edge-0's matched control had load1 about 23 on 96
+CPUs and CPU `some avg60` about 2%. Edge-4 also had about 533,000 established
+TCP sockets and 473,000 conntrack entries, versus about 123,000 and 163,000
+on edge-0; memory and I/O pressure were near zero. In the same bounded
+window, full probes were predominantly zero-pass on edge-4 but mostly
+nonzero on edge-0. The joined facts establish severe host-path contention
+and a monitor blind spot, not yet that Connect, a cgroup quota, or the host
+itself caused each provider failure. Do not infer that all 533,000 sockets
+belong to Connect without process ownership evidence.
+Subsequent full-probe success on edge-4 while pressure remained high confirms
+that CPU PSI is a latency/capacity warning, not a deterministic per-provider
+failure verdict. Keep the timing and selected provider cohort in the causal
+join.
+One sampled edge-4 Connect process reported `cpu.max=max 100000` and zero
+`nr_throttled`, so that specific container was not being throttled by a CPU
+quota. This does not classify every service cgroup or prove Connect owns the
+host-wide socket set.
+
+False-positive qualifier: PSI waiting is not proof of aggregate host CPU
+exhaustion or a specific service leak. A constrained cgroup can show delay
+while other host CPUs are idle, and legitimate demand may need more hardware.
+Compare per-service CPU, goroutines, socket ownership, cgroup throttling, and
+request latency before taking action. False-negative qualifier: `/proc` PSI
+does not cover an unresponsive host; transport/identity failure remains
+unknown and §8.14's exporter-denominator and host-reachability alerts remain
+necessary. A one-minute sample cannot explain a failed request outside its
+own interval. Do not reboot or add a hard global service cap to quiet the
+signal. Software lifecycle corrections and hardware capacity are separate
+closure paths.
+
+Implementation convention: SIGNALS.md §8.14a (`host-pressure`) maps to
+`signal_host_pressure.go` and `signal_host_pressure_test.go`. Synthetic tests
+cover the high-PSI/under-90%-execution discriminator, healthy host control,
+missing and malformed evidence, wrong-host identity, disabled-host exclusion,
+and Markdown detail.
 
 ### 8.15 Per-service runtime runaway
 
@@ -22521,6 +23075,27 @@ stale monitor pin cleared `subtensor-identity` locally without changing node
 software or historical-node progress. The Vault generation still must be
 deployed before Main is declared clear; a local monitor result is configuration
 validation, not evidence that every host has received the generation.
+
+On 2026-09-25, testfinney's public RPC reported spec 471/transaction 1 for
+the configured chain, genesis, runtime name, and EVM identity while both Main
+pins still said 468. Repeated historical RPC reads place the spec-470 → 471
+transition exactly between block 8,078,391
+(`0xf55569bf1f7ccd9268b8cdf3a7463c7fe9c1777b576abf2b867f9512e2a47e83`)
+and block 8,078,392
+(`0x5781c3fffd42f942b48db14f70ccc7f8ecdb74b0a37cbfd632a5ba37de7b56a1`).
+The pre-transition on-chain `:code` SHA-256 is
+`e5abec692e3988352da818823d9729f139820e205ea17048f93816974106c005`,
+matching the [official v470 release](https://github.com/RaoFoundation/subtensor/releases/tag/v470);
+the current on-chain `:code` SHA-256 is
+`04385dd7ddda37d4f70cd59a0e8360227165a4aefead0203c47adea5fc4b4aeb`,
+matching the [official v471 release](https://github.com/RaoFoundation/subtensor/releases/tag/v471)
+at commit `c004cebf360f4088187ee49d851dfb1a1eaaf710`. That release still
+describes its *finney* multisig as proposed; the observed testfinney execution
+is a separate, direct chain fact. The local Vault and Xops expectations were
+advanced to 471 without a node restart. Until the watcher is promoted with the
+new inventory, its 468-pinned runtime-ahead and local identity alerts remain
+valid for the old generation; after promotion, historical node lag and the
+lightnode's independently observed peer-retention issue must remain visible.
 
 On 2026-09-05, the same testfinney chain retained the exact genesis, runtime
 name, transaction version 1 and EVM identity above while advancing to spec 454

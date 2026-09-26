@@ -12,7 +12,7 @@ import (
 // ProviderEgressHealthClassResult is one class's ok/total tally over the
 // destinations a single run SAMPLED, not over the whole destination table. The
 // prober draws a bounded random subset of each class per run (see the
-// operator-proxy's egresshealth package), so `{"cdn":{"ok":4,"total":5}}` means
+// qualityprobe/egresshealth package), so `{"cdn":{"ok":4,"total":5}}` means
 // four of the five drawn this pass, out of a much larger table.
 type ProviderEgressHealthClassResult struct {
 	OK    int `json:"ok"`

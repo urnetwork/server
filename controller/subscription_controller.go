@@ -1388,9 +1388,13 @@ func PlaySubscriptionRenewalPost(
 		// else not renewed, stop trying
 		userAuth, err := model.GetUserAuth(clientSession.Ctx, playSubscriptionRenewal.NetworkId)
 		if err != nil {
+			if errors.Is(err, model.ErrMissingUserAuth) {
+				// The notice is optional; a wallet/guest account must not strand
+				// completed renewal post-processing for lack of a recipient.
+				return nil
+			}
 			return err
 		}
-
 		awsMessageSender := GetAWSMessageSender()
 		awsMessageSender.SendAccountMessageTemplate(
 			userAuth,

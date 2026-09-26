@@ -183,12 +183,21 @@ func newProxyDeviceManagerNetworkSpace(ctx context.Context) *sdk.NetworkSpace {
 	connectSettings := connect.DefaultConnectSettings()
 	// Embedded devices must be silent: this host runs thousands of clients.
 	connectSettings.Log = connect.NewNoopLogger()
+	forceIpv4ProxyDeviceTransport(connectSettings)
 	return sdk.NewPlatformNetworkSpace(
 		ctx,
 		server.RequireEnv(),
 		server.RequireDomain(),
 		connectSettings,
 	)
+}
+
+// Main's hosted proxy clients use IPv4 for their API and Connect carriers.
+// Public IPv6 listeners remain independent of this private SDK dial path.
+// Copy before installing the wrapper so calling the original settings cannot
+// recurse through the new DialContextSettings.
+func forceIpv4ProxyDeviceTransport(settings *connect.ConnectSettings) {
+	server.ForceIPv4ConnectSettings(settings)
 }
 
 // networkSpaceForDevice returns the single manager-owned NetworkSpace. sync.Once
@@ -800,8 +809,7 @@ func NewProxyDevice(
 	// Each Tun owns a private gVisor stack that Close() destroys, so a disconnecting
 	// client fully reclaims its connections' endpoints. TCP buffers come from these
 	// settings (auto-tuned up to 4MiB per direction per connection).
-	tunSettings := connect.DefaultTunSettingsWithBufferSize(settings.SequenceBufferSize)
-	tunSettings.Mtu = settings.Mtu
+	tunSettings := proxyDeviceTunSettings(settings)
 
 	// gVisor buffer sizes are LIMITS on what may be queued, not preallocations, so
 	// they cost nothing while a connection is idle and everything while it is
@@ -826,9 +834,6 @@ func NewProxyDevice(
 	//	64KiB  -> 142 KiB/flow         32KiB ->  76 KiB/flow
 	//
 	// 128kib is still ~90 MTU-sized datagrams of burst headroom.
-	tunSettings.UdpReceiveBufferByteCount = 128 * 1024
-	tunSettings.UdpSendBufferByteCount = 128 * 1024
-
 	tun, err := connect.CreateTunWithResolver(
 		cancelCtx,
 		tunSettings,
@@ -874,6 +879,18 @@ func NewProxyDevice(
 	glog.Infof("[pd]using api=%s connect=%s\n", networkSpace.GetApiUrl(), networkSpace.GetPlatformUrl())
 
 	return proxyDevice, nil
+}
+
+// Preserve a caller's lower MTU but never enable the gVisor IPv6 address and
+// ::/0 route. The inner data-center path is IPv4-only even when a caller asks
+// for the dual-stack Connect default of 1280 bytes.
+func proxyDeviceTunSettings(settings *ProxyDeviceSettings) *connect.TunSettings {
+	tunSettings := connect.DefaultTunSettingsWithBufferSize(settings.SequenceBufferSize)
+	tunSettings.Mtu = settings.Mtu
+	server.CapServerTunIPv4(tunSettings)
+	tunSettings.UdpReceiveBufferByteCount = 128 * 1024
+	tunSettings.UdpSendBufferByteCount = 128 * 1024
+	return tunSettings
 }
 
 // newProxyDeviceLocalSettings builds the immutable hosted-device policy used

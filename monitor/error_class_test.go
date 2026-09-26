@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/urnetwork/server"
 )
 
 func TestClassifyTaskErrorUsesFixedAllowlist(t *testing.T) {
@@ -69,6 +71,92 @@ func TestRepresentativeTaskErrorClassUsesBoundedDatabaseClass(t *testing.T) {
 	}
 }
 
+// Only the wrapped post family owns this bounded class, and operational
+// database failures take precedence when the same error contains both markers.
+func TestTaskPostMissingRecipientClassificationIsScopedAndSanitized(t *testing.T) {
+	const privateSuffix = " private-task=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	for _, testCase := range []struct {
+		name string
+		task string
+		raw  string
+		want string
+	}{
+		{name: "wrapped post", task: "(*TaskWorker)", raw: "Missing user auth.", want: taskErrorClassPostMissingRecipient},
+		{name: "wrapped uppercase", task: "(*TaskWorker)", raw: "MISSING USER AUTH.", want: taskErrorClassPostMissingRecipient},
+		{name: "unrelated task", task: "PlaySubscriptionRenewal", raw: "Missing user auth.", want: taskErrorClassUnclassified},
+		{name: "incomplete marker", task: "(*TaskWorker)", raw: "Missing user auth", want: taskErrorClassUnclassified},
+		{name: "database error", task: "(*TaskWorker)", raw: "Missing user auth. statement timeout (SQLSTATE 57014)", want: taskErrorClassPostgresStatementTimeout},
+		{name: "cancellation", task: "(*TaskWorker)", raw: "Missing user auth. context canceled", want: taskErrorClassContextCanceled},
+	} {
+		if got := classifyTaskError(testCase.task, testCase.raw+privateSuffix); got != testCase.want {
+			t.Errorf("%s class = %q, want %q", testCase.name, got, testCase.want)
+		}
+	}
+	if got := representativeTaskErrorClass("(*TaskWorker)", "Missing user auth."+privateSuffix, 1, "post-missing-recipient=1"); got != taskErrorClassPostMissingRecipient {
+		t.Fatalf("database post class = %q", got)
+	}
+}
+
+// Execute the production aggregate on a transaction-local synthetic table so
+// task scoping and error precedence agree with the Go classifier in PostgreSQL.
+func TestTaskPostMissingRecipientSqlClassificationMatchesGo(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `
+				CREATE TEMP TABLE pending_task (
+					function_name text,
+					reschedule_error_count integer,
+					run_at timestamp,
+					claim_time timestamp,
+					reschedule_error text,
+					run_max_time_seconds integer
+				) ON COMMIT DROP
+			`))
+			for _, testCase := range []struct {
+				name string
+				task string
+				raw  string
+			}{
+				{name: "wrapped post", task: "(*TaskWorker)", raw: "Missing user auth. synthetic-private-task"},
+				{name: "wrapped uppercase", task: "(*TaskWorker)", raw: "MISSING USER AUTH. synthetic-private-task"},
+				{name: "unrelated task", task: "PlaySubscriptionRenewal", raw: "Missing user auth. synthetic-private-task"},
+				{name: "incomplete marker", task: "(*TaskWorker)", raw: "Missing user auth"},
+				{name: "database error", task: "(*TaskWorker)", raw: "Missing user auth. statement timeout (SQLSTATE 57014)"},
+				{name: "cancellation", task: "(*TaskWorker)", raw: "Missing user auth. context canceled"},
+			} {
+				server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pg_temp.pending_task`))
+				server.RaisePgResult(tx.Exec(ctx, `
+					INSERT INTO pg_temp.pending_task (
+						function_name, reschedule_error_count, run_at, reschedule_error, run_max_time_seconds
+					) VALUES ($1, 1, now() + interval '1 hour', $2, 120)
+				`, "synthetic.example."+testCase.task, testCase.raw))
+				result, err := tx.Query(ctx,
+					`SELECT task, cause_class_count, cause_summary FROM (`+
+						strings.TrimSuffix(strings.TrimSpace(taskFailureSummarySQL), ";")+`) AS summary`)
+				server.WithPgResult(result, err, func() {
+					if !result.Next() {
+						t.Errorf("%s: no failure summary", testCase.name)
+						return
+					}
+					var task string
+					var classCount int
+					var classSummary string
+					server.Raise(result.Scan(&task, &classCount, &classSummary))
+					class, _, _ := strings.Cut(classSummary, "=")
+					want := classifyTaskError(testCase.task, testCase.raw)
+					if task != testCase.task || classCount != 1 || fixedTaskErrorClass(class) != want {
+						t.Errorf("%s: task=%q classes=%d summary=%q, want %q", testCase.name, task, classCount, classSummary, want)
+					}
+					if result.Next() {
+						t.Errorf("%s: extra failure summary", testCase.name)
+					}
+				})
+			}
+		})
+	})
+}
+
 func TestTaskFailureSummarySQLMirrorsFixedTaskErrorVocabulary(t *testing.T) {
 	for _, class := range []string{
 		taskErrorClassConcurrentSettled,
@@ -86,6 +174,7 @@ func TestTaskFailureSummarySQLMirrorsFixedTaskErrorVocabulary(t *testing.T) {
 		taskErrorClassContextCanceled,
 		taskErrorClassDrained,
 		taskErrorClassTargetNotFound,
+		taskErrorClassPostMissingRecipient,
 	} {
 		if !strings.Contains(taskFailureSummarySQL, "THEN '"+class+"'") {
 			t.Errorf("task failure SQL is missing fixed class %q", class)

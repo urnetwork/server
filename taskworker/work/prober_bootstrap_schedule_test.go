@@ -26,7 +26,36 @@ func TestProberBootstrapInitialTaskRunsImmediately(t *testing.T) {
 	})
 }
 
+func TestProberBootstrapStartupAdvancesOldSixHourSchedule(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+		before := server.NowUtc()
+		server.Tx(ctx, func(tx server.PgTx) {
+			scheduleProberBootstrapAt(clientSession, tx, before.Add(6*time.Hour))
+		})
+		server.Tx(ctx, func(tx server.PgTx) {
+			ScheduleProberBootstrap(clientSession, tx)
+		})
+		runAt := proberBootstrapRunAt(t, ctx)
+		if runAt.Before(before.Add(-time.Second)) || before.Add(5*time.Second).Before(runAt) {
+			t.Fatalf("startup did not advance the old six-hour task: run_at=%s", runAt)
+		}
+		var rows int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pending_task WHERE run_once_key = '["prober_bootstrap"]'`).Scan(&rows))
+		})
+		if rows != 1 {
+			t.Fatalf("startup created %d bootstrap rows, want one", rows)
+		}
+	})
+}
+
 func TestProberBootstrapPostKeepsTheRecurringCadence(t *testing.T) {
+	if ProberBootstrapTimeout > 5*time.Minute {
+		t.Fatalf("busy prober credit may be unavailable for %s before the next grant", ProberBootstrapTimeout)
+	}
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)

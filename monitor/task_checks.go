@@ -512,6 +512,9 @@ const taskFailureSummarySQL = `
 		           THEN 'context-canceled'
 		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%target not found%'
 		           THEN 'target-not-found'
+		         WHEN split_part(function_name,'.',3) = '(*TaskWorker)'
+		           AND lower(coalesce(reschedule_error,'')) LIKE '%missing user auth.%'
+		           THEN 'post-missing-recipient'
 		         ELSE 'other'
 		       END AS error_class
 		FROM pending_task
@@ -1032,6 +1035,11 @@ func (self taskCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			alertMechanism = "The stored task error reports an invalid payout destination. Historically, a pre-fix chain-blind validator allowed a Solana base58 key to be stored as MATIC, invalid for its declared chain. A typed definitive pre-chain rejection permits the guarded attempt reset; after a successful reset, an unchanged payout-wallet selection repeats the failure on its one-hour-mean backoff. Saturated retries are dispersed across 30–90 minutes after the proportional-jitter taskworker is deployed. This text class alone does not prove typed status, successful reset, or current wallet selection."
 			alertAction = "Verify typed-reset commit b8af229f in every active artifact, then confirm the typed pre-chain rejection, successful guarded reset, and current wallet selection. Correct a proven chain-mismatched payout wallet through the supported account API. Do not manually release the attempt, edit payment rows, or rotate idempotency keys; retain the reset's safety guard while preserving keys for transport errors, rate limits, and ambiguous submits."
 			alertVerify = "After a confirmed safe reset and authorized wallet correction, the next retry selects the corrected chain-compatible wallet with a fresh key, completes without a duplicate transfer, and processor-invalid-destination converges to zero after at most 90 minutes plus ingestion delay."
+		} else if task == "(*TaskWorker)" && lastErrorClass == taskErrorClassPostMissingRecipient {
+			alertMechanism = "A wrapped task post hook could not resolve an account-notice recipient because the network admin has no email or phone auth. The fixed error class alone does not identify the wrapped task, establish that its notice is optional, or prove the underlying task failed."
+			alertAction = "Join the wrapper's validated task reference to its finished original task in a protected read-only diagnostic. If it is terminal PlaySubscriptionRenewal, deploy the typed missing-recipient skip while preserving real database errors; do not edit the subscription, task row, or payment state. For another wrapped task, inspect its notification contract before changing it."
+			alertVerify = "For terminal PlaySubscriptionRenewal, the exact wrapped post completes on its natural retry, without sending to an absent recipient or scheduling another renewal; unrelated post hooks and database errors remain visible."
+			alertPlaybook = "SIGNALS.md §1.2"
 		}
 		symptom := fmt.Sprintf("task family %s has %d failing row(s) on %s (%d parked >5m; %d with a fresh claim heartbeat; sets may overlap)",
 			task, familyCount, target, parkedCount, freshClaimCount)

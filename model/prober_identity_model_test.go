@@ -2,6 +2,9 @@ package model
 
 import (
 	"context"
+	"fmt"
+	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,6 +33,223 @@ import (
 // authenticated session from the stored row rather than read one from this.
 func proberTaskSession(ctx context.Context) *session.ClientSession {
 	return session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+}
+
+// Grant admission must use its already-owned connection. Requiring another
+// pool slot while holding the grant lock deadlocks a saturated worker pool.
+func TestProberPreflightUsesOnePoolConnection(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		clientSession := proberTaskSession(ctx)
+		defer clientSession.Cancel()
+		if _, err := BootstrapProberIdentity(clientSession); err != nil {
+			t.Fatal(err)
+		}
+		pop := server.Config.PushSimpleResource("db.yml", []byte("min_connections: 0\nmax_connections: 1\n"))
+		server.PgReset()
+		defer func() { pop(); server.PgReset() }()
+		var granted bool
+		var grantErr error
+		if err := server.HandleError(func() {
+			granted, grantErr = EnsureProberTransferBalance(ctx, 2*ProberTransferBalanceTopUp)
+		}); err != nil {
+			t.Fatalf("single-connection preflight failed: %v", err)
+		}
+		if grantErr != nil || !granted {
+			t.Fatalf("single-connection preflight granted=%t error=%v", granted, grantErr)
+		}
+	})
+}
+
+// The waiter must read the grant committed by the previous lock owner, not
+// the snapshot established when its SELECT FOR UPDATE began waiting.
+func TestProberPreflightSeesPrecedingQueuedGrant(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		clientSession := proberTaskSession(ctx)
+		defer clientSession.Cancel()
+		if _, err := BootstrapProberIdentity(clientSession); err != nil {
+			t.Fatal(err)
+		}
+		identity := GetProberIdentity(ctx)
+		locked := make(chan uint32, 1)
+		release := make(chan struct{})
+		ownerDone := make(chan any, 1)
+		go func() {
+			ownerDone <- server.HandleError(func() {
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.RaisePgResult(tx.Exec(ctx, `SELECT network_id FROM prober_identity WHERE singleton FOR UPDATE`))
+					locked <- tx.Conn().PgConn().PID()
+					select {
+					case <-release:
+					case <-ctx.Done():
+						server.Raise(ctx.Err())
+					}
+					now := server.NowUtc()
+					server.Raise(AddBasicTransferBalanceInTx(tx, ctx, *identity.NetworkId,
+						ProberTransferBalanceTopUp, now, now.Add(ProberTransferBalanceDuration)))
+				})
+			})
+		}()
+		ownerPid := <-locked
+		waiterDone := make(chan any, 1)
+		go func() {
+			waiterDone <- server.HandleError(func() {
+				granted, err := EnsureProberTransferBalance(ctx, 2*ProberTransferBalanceTopUp)
+				server.Raise(err)
+				if granted {
+					panic(fmt.Errorf("queued preflight duplicated preceding committed grant"))
+				}
+			})
+		}()
+		// A real PostgreSQL lock waiter establishes the interleaving. There is
+		// no sleep-based assumption about when the second transaction started.
+		waiting := false
+		for !waiting && ctx.Err() == nil {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT EXISTS (
+					SELECT 1 FROM pg_stat_activity WHERE datname = current_database()
+					AND $1::int = ANY(pg_blocking_pids(pid))
+					AND query LIKE '%prober_identity%FOR UPDATE%'
+				)`, ownerPid).Scan(&waiting))
+			})
+		}
+		close(release)
+		if err := <-ownerDone; err != nil {
+			t.Fatalf("preceding grant: %v", err)
+		}
+		if err := <-waiterDone; err != nil {
+			t.Fatalf("queued preflight: %v", err)
+		}
+		if !waiting {
+			t.Fatal("did not establish queued singleton-lock waiter")
+		}
+		if got := countRows(ctx, `SELECT count(*) FROM transfer_balance WHERE network_id = $1`, *identity.NetworkId); got != 2 {
+			t.Fatalf("balance grants=%d, want bootstrap and preceding owner only", got)
+		}
+	})
+}
+
+// A final grant near the integer boundary must not wrap the available sum
+// and turn a one-byte deficit into an unbounded sequence of new grants.
+func TestProberPreflightDoesNotOverflowAvailableBalance(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		clientSession := proberTaskSession(ctx)
+		defer clientSession.Cancel()
+		if _, err := BootstrapProberIdentity(clientSession); err != nil {
+			t.Fatal(err)
+		}
+		identity := GetProberIdentity(ctx)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance
+				SET start_balance_byte_count = $1, balance_byte_count = $1
+				WHERE network_id = $2`, int64(math.MaxInt64-1), *identity.NetworkId))
+		})
+		if err := server.HandleError(func() {
+			granted, err := EnsureProberTransferBalance(ctx, math.MaxInt64)
+			server.Raise(err)
+			if !granted {
+				panic(fmt.Errorf("one-byte credit deficit was not granted"))
+			}
+		}); err != nil {
+			t.Fatalf("near-boundary preflight failed: %v", err)
+		}
+		if got := GetActiveTransferBalanceByteCount(ctx, *identity.NetworkId); got != math.MaxInt64 {
+			t.Fatalf("available credit=%d, want representable maximum", got)
+		}
+		granted, err := EnsureProberTransferBalance(ctx, math.MaxInt64)
+		if err != nil || granted {
+			t.Fatalf("healthy near-boundary repeat granted=%t error=%v", granted, err)
+		}
+	})
+}
+
+// Four shards may start on different Taskworkers at once. Their preflights
+// must serialize against the one persisted internal account, not each grant
+// against the same stale balance snapshot.
+func TestProberShardPreflightSerializesSharedHeadroom(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clientSession := proberTaskSession(ctx)
+		defer clientSession.Cancel()
+		if _, err := BootstrapProberIdentity(clientSession); err != nil {
+			t.Fatalf("bootstrap: %v", err)
+		}
+		identity := GetProberIdentity(ctx)
+		if !identity.HasNetwork() {
+			t.Fatal("bootstrap did not persist the internal prober network")
+		}
+		minimum := 4 * ProberShardTransferHeadroom
+		const simultaneousShards = 8
+		var wg sync.WaitGroup
+		errs := make(chan error, simultaneousShards)
+		grants := make(chan bool, simultaneousShards)
+		for i := 0; i < simultaneousShards; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				granted, err := EnsureProberTransferBalance(ctx, minimum)
+				grants <- granted
+				errs <- err
+			}()
+		}
+		wg.Wait()
+		close(errs)
+		close(grants)
+		for err := range errs {
+			if err != nil {
+				t.Fatalf("shard preflight: %v", err)
+			}
+		}
+		grantedCount := 0
+		for granted := range grants {
+			if granted {
+				grantedCount++
+			}
+		}
+		if grantedCount != 1 {
+			t.Errorf("%d preflights granted credit, want one", grantedCount)
+		}
+		if got := countRows(ctx, `SELECT count(*) FROM transfer_balance WHERE network_id = $1`, *identity.NetworkId); got != 2 {
+			t.Errorf("%d balance rows after concurrent preflights, want bootstrap plus one grant", got)
+		}
+		if available := GetActiveTransferBalanceByteCount(ctx, *identity.NetworkId); available < minimum {
+			t.Errorf("available credit %d below combined shard headroom %d", available, minimum)
+		}
+		granted, err := EnsureProberTransferBalance(ctx, minimum)
+		if err != nil || granted {
+			t.Errorf("healthy repeat preflight granted=%t error=%v", granted, err)
+		}
+		// Simulate the old cohort retaining both grants in Redis escrow. The
+		// next shard must replenish the full combined floor, not stop after one
+		// 512 GiB grant while most of its peers remain unfunded.
+		balances := GetActiveTransferBalances(ctx, *identity.NetworkId)
+		server.Redis(ctx, func(r server.RedisClient) {
+			for _, balance := range balances {
+				server.Raise(r.Set(ctx, netEscrowKey(balance.BalanceId),
+					int64(balance.BalanceByteCount)-1, time.Hour).Err())
+			}
+		})
+		defer server.Redis(ctx, func(r server.RedisClient) {
+			for _, balance := range balances {
+				server.Raise(r.Del(ctx, netEscrowKey(balance.BalanceId)).Err())
+			}
+		})
+		granted, err = EnsureProberTransferBalance(ctx, minimum)
+		if err != nil || !granted {
+			t.Fatalf("reserved headroom was not replenished: granted=%t error=%v", granted, err)
+		}
+		if got := countRows(ctx, `SELECT count(*) FROM transfer_balance WHERE network_id = $1`, *identity.NetworkId); got != 4 {
+			t.Errorf("%d grants after depleted shared headroom, want four total", got)
+		}
+		if available := GetActiveTransferBalanceByteCount(ctx, *identity.NetworkId); available < minimum {
+			t.Errorf("replenished credit %d below combined shard headroom %d", available, minimum)
+		}
+	})
 }
 
 // A second pass must not create a second network.
@@ -236,6 +456,54 @@ func TestProberBootstrapDoesNotRegrantAHealthyBalance(t *testing.T) {
 				"CURRENT balance being below ProberMinTransferBalance (%d), not on whether a grant ever happened -- "+
 				"a prober with no balance cannot open a contract and stops probing silently",
 				ProberMinTransferBalance)
+		}
+	})
+}
+
+// A busy prober can have hundreds of GiB of genuine, short-lived escrow.
+// Only this persisted internal identity may receive repeat grants; a Redis
+// reservation must reduce available credit without changing the PG grant row.
+func TestProberBootstrapReplenishesHeavyEscrow(t *testing.T) {
+	if ProberMinTransferBalance < 256*Gib || ProberTransferBalanceTopUp < 512*Gib {
+		t.Fatal("prober grant cannot cover the synthetic high-parallel reservation envelope")
+	}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		clientSession := proberTaskSession(ctx)
+		defer clientSession.Cancel()
+		first, err := BootstrapProberIdentity(clientSession)
+		if err != nil || !first.BalanceGranted {
+			t.Fatalf("first prober grant: granted=%t err=%v", first.BalanceGranted, err)
+		}
+		identity := GetProberIdentity(ctx)
+		if !identity.HasNetwork() {
+			t.Fatal("prober identity has no network")
+		}
+		balances := GetActiveTransferBalances(ctx, *identity.NetworkId)
+		if len(balances) != 1 {
+			t.Fatalf("first pass made %d grants, want one", len(balances))
+		}
+		key := netEscrowKey(balances[0].BalanceId)
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.Set(ctx, key, int64(balances[0].BalanceByteCount-1), time.Hour).Err())
+		})
+		defer server.Redis(ctx, func(r server.RedisClient) { server.Raise(r.Del(ctx, key).Err()) })
+		if available := GetActiveTransferBalanceByteCount(ctx, *identity.NetworkId); available != 1 {
+			t.Fatalf("synthetic reservation left %d bytes, want one", available)
+		}
+		second, err := BootstrapProberIdentity(clientSession)
+		if err != nil || !second.BalanceGranted {
+			t.Fatalf("reserved prober credit was not replenished: granted=%t err=%v", second.BalanceGranted, err)
+		}
+		if got := len(GetActiveTransferBalances(ctx, *identity.NetworkId)); got != 2 {
+			t.Fatalf("reservation refill made %d grant rows, want two total", got)
+		}
+		if available := GetActiveTransferBalanceByteCount(ctx, *identity.NetworkId); available < ProberMinTransferBalance {
+			t.Fatalf("refill left only %d available bytes", available)
+		}
+		third, err := BootstrapProberIdentity(clientSession)
+		if err != nil || third.BalanceGranted {
+			t.Fatalf("healthy prober received a duplicate refill: granted=%t err=%v", third.BalanceGranted, err)
 		}
 	})
 }

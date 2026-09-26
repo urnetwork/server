@@ -397,8 +397,8 @@ func TestGetAllProviderBlackholedClientIdsHonoursThresholdSpanAndMaxAge(t *testi
 	})
 }
 
-// The due query offers every row whose next check has come due before any
-// provider never checked, oldest due first, and nothing inside its backoff.
+// Existing due rows retain oldest-due order and backoff boundaries while
+// sharing admission with first checks.
 func TestGetProviderBlackholeCheckDueHonoursTheBackoff(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -461,10 +461,10 @@ func TestGetProviderBlackholeCheckDueHonoursTheBackoff(t *testing.T) {
 				t.Fatalf("due = %v is missing %s", due, clientId)
 			}
 		}
-		// oldest due first: the legacy row (due 22.5 hours ago), the pass
-		// (30 minutes ago), the retry (2 minutes ago), then the first check
-		if !(index(legacyDue) < index(passDue) && index(passDue) < index(retryDue) && index(retryDue) < index(never)) {
-			t.Errorf("due order = %v, want the legacy row, the pass, the retry, then the never-checked provider", due)
+		// Interleave one first check after the oldest legacy row, then lend
+		// its unused share to the remaining due rows in their original order.
+		if !slices.Equal(due, []server.Id{legacyDue, never, passDue, retryDue}) {
+			t.Errorf("due order = %v, want legacy, first check, pass, retry", due)
 		}
 	})
 }

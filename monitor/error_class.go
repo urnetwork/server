@@ -24,6 +24,7 @@ const (
 	taskErrorClassContextCanceled               = "context-canceled"
 	taskErrorClassDrained                       = "drained"
 	taskErrorClassTargetNotFound                = "target-not-found"
+	taskErrorClassPostMissingRecipient          = "post-missing-recipient"
 	taskErrorClassUnclassified                  = "unclassified"
 )
 
@@ -80,6 +81,8 @@ func classifyTaskError(taskName, value string) string {
 		return taskErrorClassContextCanceled
 	case strings.Contains(lower, "target not found"):
 		return taskErrorClassTargetNotFound
+	case taskName == "(*TaskWorker)" && strings.Contains(lower, "missing user auth."):
+		return taskErrorClassPostMissingRecipient
 	default:
 		return taskErrorClassUnclassified
 	}
@@ -104,6 +107,7 @@ func fixedTaskErrorClass(value string) string {
 		taskErrorClassContextCanceled,
 		taskErrorClassDrained,
 		taskErrorClassTargetNotFound,
+		taskErrorClassPostMissingRecipient,
 		taskErrorClassUnclassified:
 		return strings.TrimSpace(value)
 	case "other":

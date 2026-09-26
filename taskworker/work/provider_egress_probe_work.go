@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -14,13 +15,13 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
-	"github.com/urnetwork/operator-proxy/bandwidth"
-	"github.com/urnetwork/operator-proxy/controlplane"
-	"github.com/urnetwork/operator-proxy/egresshealth"
-	"github.com/urnetwork/operator-proxy/fleetprobe"
-	"github.com/urnetwork/operator-proxy/ingest"
-	"github.com/urnetwork/operator-proxy/prober"
-	"github.com/urnetwork/operator-proxy/providertunnel"
+	"github.com/urnetwork/server/qualityprobe/bandwidth"
+	"github.com/urnetwork/server/qualityprobe/controlplane"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/fleetprobe"
+	"github.com/urnetwork/server/qualityprobe/ingest"
+	"github.com/urnetwork/server/qualityprobe/prober"
+	"github.com/urnetwork/server/qualityprobe/providertunnel"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -172,7 +173,19 @@ func validateProviderEgressProbeBatchArgs(name string, args ProviderEgressProbeB
 	if args.Limit < 1 {
 		return fmt.Errorf("provider egress probe %s limit must be positive", name)
 	}
-	if args.Concurrency < 1 || args.Limit < args.Concurrency {
+	if args.Concurrency < 1 {
+		return fmt.Errorf("provider egress probe %s concurrency must be positive", name)
+	}
+	if name == "blackhole" {
+		// The fixed pool serves up to sixteen independent guard cohorts. A
+		// smaller cohort can publish without waiting for another cohort's
+		// slowest check, while the pass still owns one bounded worker pool.
+		// Divide instead of multiplying to keep malformed large settings from
+		// overflowing the bound.
+		if (args.Concurrency-1)/providerEgressBlackholeSelectedCohorts >= args.Limit {
+			return fmt.Errorf("provider egress probe blackhole concurrency exceeds %d selected cohorts", providerEgressBlackholeSelectedCohorts)
+		}
+	} else if args.Limit < args.Concurrency {
 		return fmt.Errorf("provider egress probe %s concurrency must be in [1,limit]", name)
 	}
 	if args.ProbeTimeoutSeconds < 1 {
@@ -567,6 +580,9 @@ type providerEgressProbePass struct {
 	loadScoring           func(context.Context) (*model.ProviderEgressHealthScoring, *model.ProviderEgressSiteSettings)
 	submitBlackholeChecks func(context.Context, []ingest.BlackholeCheck) error
 	blackholeOptions      fleetprobe.BlackholeOptions
+	// Production streams only guard-independent evidence before a slow batch
+	// tail. Tests of the original atomic publication path leave this disabled.
+	publishSafeBlackholeEarly bool
 	// A speculative successor may legitimately stop before its first check;
 	// count that as empty admission, not a measured healthy/error batch.
 	blackholeSuccessor bool
@@ -701,8 +717,24 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 			observer(event)
 		}
 	}
+	var early *providerEgressBlackholeEarlyPublisher
+	if self.publishSafeBlackholeEarly {
+		early = newProviderEgressBlackholeEarlyPublisher(ctx, len(providers), self.submitBlackholeChecks)
+		defer early.finish()
+		completedObserver := options.OnCompleted
+		options.OnCompleted = func(result fleetprobe.BlackholeResult) {
+			early.observe(result)
+			if completedObserver != nil {
+				completedObserver(result)
+			}
+		}
+	}
 	startTime := time.Now()
 	summary, runErr := self.runBlackhole(ctx, providers, options)
+	var earlyAcknowledged map[string]bool
+	if early != nil {
+		earlyAcknowledged = early.finish()
+	}
 	egressProbePassSeconds.WithLabelValues("blackhole").Observe(time.Since(startTime).Seconds())
 	if runErr == nil && len(summary.Checks) == 0 && ctx.Err() == nil && options.MinimumAdmission == 0 {
 		// Readiness can consume a strict admission window. No measured work
@@ -801,13 +833,19 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 	egressProbePassProvidersTotal.WithLabelValues("blackhole", "dark").Add(float64(summary.Dark))
 	egressProbePassProvidersTotal.WithLabelValues("blackhole", "tunnel_failed").Add(float64(summary.TunnelFailed))
 	egressProbePassNotMeasuredTotal.WithLabelValues("blackhole").Add(float64(summary.NotMeasured))
-	if 0 < len(summary.Checks) {
+	toSubmit := make([]ingest.BlackholeCheck, 0, len(summary.Checks))
+	for _, check := range summary.Checks {
+		if !earlyAcknowledged[check.ClientId] {
+			toSubmit = append(toSubmit, check)
+		}
+	}
+	if 0 < len(toSubmit) {
 		// Finalize completed evidence independently of task drain/max-time.
 		// Ordinary negatives have already passed the live-readiness boundary;
 		// one bounded request retains completed passing/TLS/unknown evidence.
 		submitCtx, cancelSubmit := context.WithTimeout(context.WithoutCancel(ctx), providerEgressBlackholeSubmitTimeout)
 		defer cancelSubmit()
-		if submitErr := self.submitBlackholeChecks(submitCtx, summary.Checks); submitErr != nil {
+		if submitErr := self.submitBlackholeChecks(submitCtx, toSubmit); submitErr != nil {
 			egressProbePassErrorsTotal.WithLabelValues("blackhole_submit").Inc()
 			return summary, tripped, errors.Join(measurementErr, fmt.Errorf("submit blackhole batch: %w", submitErr))
 		}
@@ -839,6 +877,9 @@ type providerEgressFullBatchEntry struct {
 // judge.
 type providerEgressFullBatch struct {
 	sink *egressProbeMetricsReporter
+	// release is called once after all workers join. Attempt-report failures
+	// must not turn a batch into a successful task with no durable attempt row.
+	releaseAttemptFailures int
 
 	stateLock  sync.Mutex
 	order      []string
@@ -1062,7 +1103,9 @@ func (self *providerEgressFullBatch) release(
 		entry := entries[providerClientId]
 		if tripped {
 			if entry.attempt != nil {
-				_ = self.sink.ReportAttempt(ctx, providerClientId, model.ProbeRunBatchGuardClass)
+				if self.sink.ReportAttempt(ctx, providerClientId, model.ProbeRunBatchGuardClass) != nil {
+					self.releaseAttemptFailures++
+				}
 			}
 			continue
 		}
@@ -1097,7 +1140,9 @@ func (self *providerEgressFullBatch) release(
 			}
 		}
 		if entry.attempt != nil {
-			_ = self.sink.ReportAttempt(ctx, providerClientId, failure)
+			if self.sink.ReportAttempt(ctx, providerClientId, failure) != nil {
+				self.releaseAttemptFailures++
+			}
 		}
 	}
 	return submitFailures
@@ -1126,6 +1171,8 @@ func (self *providerEgressProbePass) runFullBatch(
 	poolSource fleetprobe.PoolSource,
 	due []ingest.DueProvider,
 ) providerEgressFullOutcome {
+	progress := egressProbeFullProgress.begin(len(due))
+	defer progress.close()
 	if err := self.readiness.check(ctx); err != nil {
 		egressProbePassesTotal.WithLabelValues("full", "error").Inc()
 		return providerEgressFullOutcome{due: len(due), full: len(due) == args.Full.Limit, err: err}
@@ -1149,6 +1196,13 @@ func (self *providerEgressProbePass) runFullBatch(
 		readiness:         self.readiness,
 	}
 	options := self.fullOptions
+	observer := options.ObserveProgress
+	options.ObserveProgress = func(event prober.Progress) {
+		progress.observe(event)
+		if observer != nil {
+			observer(event)
+		}
+	}
 	options.Pins = pinSource
 	options.Pool = poolSource
 	options.ProbeTimeout = time.Duration(args.Full.ProbeTimeoutSeconds) * time.Second
@@ -1213,6 +1267,10 @@ func (self *providerEgressProbePass) runFullBatch(
 	}
 
 	measurementErr := self.readiness.err()
+	if batch.releaseAttemptFailures > 0 {
+		measurementErr = errors.Join(measurementErr,
+			fmt.Errorf("full-probe attempt publication failed for %d providers", batch.releaseAttemptFailures))
+	}
 	if err := releaseCtx.Err(); err != nil {
 		measurementErr = errors.Join(measurementErr, fmt.Errorf("full-probe successor publication: %w", err))
 	}
@@ -1307,6 +1365,9 @@ func (self *providerEgressProbePass) run(
 	ctx context.Context,
 	args *ProviderEgressProbeArgs,
 ) (*ProviderEgressProbeResult, error) {
+	if _, bounded := ctx.Deadline(); bounded {
+		args = providerEgressProbeExecutionArgs(args)
+	}
 	if self.refreshFleet != nil {
 		defer func() {
 			if ctx.Err() == nil {
@@ -1478,7 +1539,7 @@ func (self *providerEgressProbePass) run(
 		// more tunnels after task drain would extend shutdown and duplicate
 		// work after the lease is recovered by another worker.
 		if ctx.Err() == nil && 0 < len(fullDue) {
-			fullOutcome := self.runFullBatch(ctx, args, pinSource, poolSource, fullDue)
+			fullOutcome := self.runFullCohorts(ctx, args, pinSource, poolSource, fullDue)
 			applyFull(fullOutcome)
 			errList = append(errList, fullOutcome.err)
 		}
@@ -1504,6 +1565,75 @@ func providerEgressProbeTunnelConfig(
 	}
 	base.PlatformTransportBudget = connect.NewPlatformTransportBudget(byteCount, transportCount)
 	return base
+}
+
+// Large check pools need independent publication cohorts; a single slow
+// check must not hold every completed result in a 1000-check guard. Keep the
+// durable task/config unchanged and preserve smaller configured cohorts, the
+// guard minimum, and enough selected work for every configured worker.
+func providerEgressProbeExecutionArgs(args *ProviderEgressProbeArgs) *ProviderEgressProbeArgs {
+	if args == nil {
+		return nil
+	}
+	execution := *args
+	const preferredCohort = 250
+	if preferredCohort < args.Blackhole.Limit && preferredCohort < args.Blackhole.Concurrency {
+		minimumCohort := 1 + (args.Blackhole.Concurrency-1)/providerEgressBlackholeSelectedCohorts
+		execution.Blackhole.Limit = min(args.Blackhole.Limit,
+			max(preferredCohort, minimumCohort, args.DarkBatchGuardMinChecks))
+	}
+	return &execution
+}
+
+// The prober has one shared account, not exclusive per-shard reservations.
+// Plan for every retained cohort and tunnel generation, allowing current,
+// announced-ahead and prefetched contracts in both directions. The floor adds
+// overlap headroom, not an exact bound on all lanes, renewals or later full
+// successors; periodic replenishment and live available-credit checks remain
+// necessary. This is accounting headroom, never a traffic or worker limit.
+func providerEgressProbeCreditMinimum(args *ProviderEgressProbeArgs) (model.ByteCount, error) {
+	args = providerEgressProbeExecutionArgs(args)
+	if args == nil || args.ShardCount < 1 || args.Full.Limit < 1 || args.Blackhole.Limit < 1 ||
+		args.Full.Concurrency < 1 || args.Blackhole.Concurrency < 1 || args.TunnelRecreateAttempts < 1 {
+		return 0, fmt.Errorf("invalid provider egress probe credit geometry")
+	}
+	fullContract := int64(connect.DefaultContractManagerSettings().StandardContractTransferByteCount)
+	const blackholeContract = int64(1024 * 1024) // qualityprobe/fleetprobe.blackholeTunnelConfig
+	if int64(args.TunnelRecreateAttempts) == math.MaxInt64 {
+		return 0, fmt.Errorf("provider egress probe credit geometry overflows")
+	}
+	// Check every product before multiplication, including the retained
+	// cohort count and tunnel recreations. Do not wrap an underfunded minimum.
+	reserve := func(contract, selected, cohorts int64) (int64, error) {
+		amount := contract
+		for _, factor := range []int64{selected, cohorts, 2, 3, int64(args.TunnelRecreateAttempts) + 1} {
+			if amount <= 0 || factor <= 0 || amount > math.MaxInt64/factor {
+				return 0, fmt.Errorf("provider egress probe credit geometry overflows")
+			}
+			amount *= factor
+		}
+		return amount, nil
+	}
+	full, err := reserve(fullContract, int64(max(args.Full.Limit, args.Full.Concurrency)), 1)
+	if err != nil {
+		return 0, err
+	}
+	if int64(args.Blackhole.Limit) > math.MaxInt64/providerEgressBlackholeSelectedCohorts {
+		return 0, fmt.Errorf("provider egress probe credit geometry overflows")
+	}
+	blackholeSelected := max(int64(args.Blackhole.Limit)*providerEgressBlackholeSelectedCohorts, int64(args.Blackhole.Concurrency))
+	blackhole, err := reserve(blackholeContract, blackholeSelected, 1)
+	if err != nil {
+		return 0, err
+	}
+	if full > math.MaxInt64-blackhole {
+		return 0, fmt.Errorf("provider egress probe credit geometry overflows")
+	}
+	perShard := max(full+blackhole, int64(model.ProberShardTransferHeadroom))
+	if perShard > math.MaxInt64/int64(args.ShardCount) {
+		return 0, fmt.Errorf("provider egress probe credit geometry overflows")
+	}
+	return model.ByteCount(perShard * int64(args.ShardCount)), nil
 }
 
 // The production scoring read: the pool as it stands, and the refresh's
@@ -1551,6 +1681,21 @@ func runProviderEgressProbe(
 	operatorSecret, err := readProviderEgressOperatorSecret()
 	if err != nil {
 		return nil, err
+	}
+	// All shards use this one internal network. Size its credit from this
+	// shard's selected cohort and the total simultaneous shard count, then
+	// serialize conditional grants before any tunnel is admitted.
+	minimumCredit, err := providerEgressProbeCreditMinimum(args)
+	if err != nil {
+		return nil, err
+	}
+	creditGranted, err := model.EnsureProberTransferBalance(ctx, minimumCredit)
+	if err != nil {
+		return nil, fmt.Errorf("provider egress prober credit preflight: %w", err)
+	}
+	if creditGranted {
+		glog.Infof("[egressprobe]replenished shared internal prober credit before shard %d/%d; minimum available=%s\n",
+			args.ShardIndex, args.ShardCount, model.ByteCountHumanReadable(minimumCredit))
 	}
 	operator := &ingest.Client{
 		ServerUrl:      args.APIURL,
@@ -1611,8 +1756,9 @@ func runProviderEgressProbe(
 		loadPool: func(ctx context.Context) (*egresshealth.Pool, error) {
 			return fleetprobe.LoadPool(ctx, operator.Http, fleetprobe.PoolUrl(args.APIURL), operatorSecret)
 		},
-		loadScoring:           loadProviderEgressHealthScoring,
-		submitBlackholeChecks: reporter.SubmitBlackholeChecks,
+		loadScoring:               loadProviderEgressHealthScoring,
+		submitBlackholeChecks:     reporter.SubmitBlackholeChecks,
+		publishSafeBlackholeEarly: true,
 		blackholeOptions: fleetprobe.BlackholeOptions{
 			TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, args.Blackhole),
 		},

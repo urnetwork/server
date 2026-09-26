@@ -18,7 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/glog"
-	"github.com/urnetwork/operator-proxy/egresshealth"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"

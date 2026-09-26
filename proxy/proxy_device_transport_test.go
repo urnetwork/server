@@ -3,7 +3,10 @@ package proxy
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"net"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -187,6 +190,64 @@ func TestProxyDeviceLocalSettingsPinH1(t *testing.T) {
 				mode,
 				sdk.TransportModeH1,
 			)
+		}
+	}
+}
+
+func TestProxyDeviceSdkCarrierIpv4Only(t *testing.T) {
+	stop := errors.New("synthetic dial observed")
+	settings := connect.DefaultConnectSettings()
+	called := []string{}
+	settings.DialContextSettings = &connect.DialContextSettings{
+		DialContext: func(_ context.Context, network, _ string) (net.Conn, error) {
+			called = append(called, network)
+			return nil, stop
+		},
+	}
+	forceIpv4ProxyDeviceTransport(settings)
+	for _, network := range []string{"tcp", "tcp4", "udp", "udp4"} {
+		if _, err := settings.DialContext(context.Background(), network, "test.example:443"); !errors.Is(err, stop) {
+			t.Fatalf("%s dial error = %v, want synthetic dial", network, err)
+		}
+	}
+	if want := []string{"tcp4", "tcp4", "udp4", "udp4"}; !reflect.DeepEqual(called, want) {
+		t.Fatalf("SDK carrier dial networks = %v, want %v", called, want)
+	}
+	for _, network := range []string{"tcp6", "udp6"} {
+		if _, err := settings.DialContext(context.Background(), network, "[2001:db8::1]:443"); err == nil {
+			t.Fatalf("SDK carrier accepted explicit %s", network)
+		}
+	}
+	if len(called) != 4 {
+		t.Fatal("explicit IPv6 SDK carrier reached the underlying dialer")
+	}
+}
+
+func TestProxyDeviceInnerTunIpv4Only(t *testing.T) {
+	for _, mtu := range []int{900, connect.DefaultMtu, connect.DefaultTunnelMtu} {
+		settings := DefaultProxyDeviceSettings()
+		settings.Mtu = mtu
+		tunSettings := proxyDeviceTunSettings(settings)
+		if want := min(mtu, connect.DefaultMtu); tunSettings.Mtu != want {
+			t.Fatalf("requested MTU %d became %d, want %d", mtu, tunSettings.Mtu, want)
+		}
+		tun, err := connect.CreateTunWithResolver(context.Background(), tunSettings, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tun.Ipv6Enabled() {
+			t.Fatalf("requested MTU %d enabled the inner IPv6 route", mtu)
+		}
+		for _, address := range tun.LocalAddresses() {
+			if !address.Is4() {
+				t.Fatalf("requested MTU %d assigned non-IPv4 address %s", mtu, address)
+			}
+		}
+		if _, err := tun.DialContext(context.Background(), "tcp6", "[2001:db8::1]:443"); err == nil {
+			t.Fatalf("requested MTU %d accepted an inner IPv6 dial", mtu)
+		}
+		if err := tun.Close(); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/urnetwork/operator-proxy/fleetprobe"
-	"github.com/urnetwork/operator-proxy/ingest"
-	"github.com/urnetwork/operator-proxy/prober"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/qualityprobe/fleetprobe"
+	"github.com/urnetwork/server/qualityprobe/ingest"
+	"github.com/urnetwork/server/qualityprobe/prober"
 )
 
 func TestBlackholeIndependentNoFullReusesTailSlots(t *testing.T) {
@@ -286,10 +286,10 @@ func TestBlackholeIndependentDecisionMetricsHaveFixedDomain(t *testing.T) {
 	}
 }
 
-func TestBlackholeIndependentEightTailOwnersStayBoundedAndJoinCancellation(t *testing.T) {
+func TestBlackholeIndependentTailOwnersStayBoundedAndJoinCancellation(t *testing.T) {
 	args := testProviderEgressParallelArgs(t)
 	synctest.Test(t, func(t *testing.T) {
-		h := newTestBlackholePipeline(t, args, 10)
+		h := newTestBlackholePipeline(t, args, providerEgressBlackholeSelectedCohorts+2)
 		h.check = func(index int, p prober.Provider) fleetprobe.BlackholeResult {
 			if index%250 == 249 {
 				<-h.ctx.Done()
@@ -303,12 +303,12 @@ func TestBlackholeIndependentEightTailOwnersStayBoundedAndJoinCancellation(t *te
 		close(h.laterRelease)
 		h.start()
 		synctest.Wait()
-		if h.startedCount(0, len(h.due)) != 2000 || h.peak.Load() > 250 || len(h.submissions) != 0 {
-			t.Errorf("eight independent tails exceeded bounds or pinned admission: started=%d peak=%d ACKs=%d", h.startedCount(0, len(h.due)), h.peak.Load(), len(h.submissions))
+		if h.startedCount(0, len(h.due)) != providerEgressBlackholeSelectedCohorts*250 || h.peak.Load() > 250 || len(h.submissions) != 0 {
+			t.Errorf("independent tails exceeded bounds or pinned admission: started=%d peak=%d ACKs=%d", h.startedCount(0, len(h.due)), h.peak.Load(), len(h.submissions))
 		}
 		h.cancel()
 		h.finish()
-		for cohort := range 8 {
+		for cohort := range providerEgressBlackholeSelectedCohorts {
 			checks := h.submittedCohort(cohort)
 			if len(checks) != 249 {
 				t.Errorf("cohort%d lost completed evidence: %d", cohort, len(checks))
@@ -320,7 +320,7 @@ func TestBlackholeIndependentEightTailOwnersStayBoundedAndJoinCancellation(t *te
 				}
 			}
 		}
-		if !errors.Is(h.err, context.Canceled) || h.active.Load() != 0 || h.result.Checked != 8*249 || len(h.submissions) != 8 {
+		if !errors.Is(h.err, context.Canceled) || h.active.Load() != 0 || h.result.Checked != providerEgressBlackholeSelectedCohorts*249 || len(h.submissions) != providerEgressBlackholeSelectedCohorts {
 			t.Errorf("bounded tail cancellation lost retained passes or join: checked=%d ACKs=%d active=%d err=%v", h.result.Checked, len(h.submissions), h.active.Load(), h.err)
 		}
 	})
@@ -428,10 +428,10 @@ func TestBlackholeIndependentEightPendingGuardsRemainIsolated(t *testing.T) {
 	})
 }
 
-func TestBlackholeIndependentEightPendingCreditLossKeepsOnlySafeEvidence(t *testing.T) {
+func TestBlackholeIndependentPendingCreditLossKeepsOnlySafeEvidence(t *testing.T) {
 	args := testProviderEgressParallelArgs(t)
 	synctest.Test(t, func(t *testing.T) {
-		h := newTestBlackholePipeline(t, args, 10)
+		h := newTestBlackholePipeline(t, args, providerEgressBlackholeSelectedCohorts+2)
 		h.pass.fullDue = func(context.Context, int) ([]ingest.DueProvider, error) { return nil, nil }
 		var depleted atomic.Bool
 		h.pass.readiness = &providerEgressProbeReadiness{minimum: 1, available: func(context.Context) (model.ByteCount, error) {
@@ -456,19 +456,19 @@ func TestBlackholeIndependentEightPendingCreditLossKeepsOnlySafeEvidence(t *test
 		close(h.laterRelease)
 		h.start()
 		synctest.Wait()
-		if h.startedCount(0, len(h.due)) != 2000 || len(h.submissions) != 0 {
-			t.Error("credit-loss fixture did not reach eight buffered guard owners")
+		if h.startedCount(0, len(h.due)) != providerEgressBlackholeSelectedCohorts*250 || len(h.submissions) != 0 {
+			t.Error("credit-loss fixture did not reach all buffered guard owners")
 		}
 		depleted.Store(true)
 		close(releaseTails)
 		h.finish()
-		for cohort := range 8 {
+		for cohort := range providerEgressBlackholeSelectedCohorts {
 			checks := h.submittedCohort(cohort)
 			if len(checks) != 2 || !checks[0].Ok || checks[1].Failure != "tls_authentication_failed" || checks[1].NotMeasured {
 				t.Errorf("cohort%d published credit-invalid negatives or lost pass/TLS evidence: count=%d", cohort, len(checks))
 			}
 		}
-		if !errors.Is(h.err, errProviderEgressProbeUnfunded) || h.result.Checked != 16 || h.startedCount(2000, 2500) != 0 || h.active.Load() != 0 {
+		if !errors.Is(h.err, errProviderEgressProbeUnfunded) || h.result.Checked != 2*providerEgressBlackholeSelectedCohorts || h.startedCount(providerEgressBlackholeSelectedCohorts*250, (providerEgressBlackholeSelectedCohorts+2)*250) != 0 || h.active.Load() != 0 {
 			t.Errorf("credit-loss failure/admission/join contract lost: checked=%d err=%v", h.result.Checked, h.err)
 		}
 	})

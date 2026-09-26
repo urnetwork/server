@@ -106,6 +106,7 @@ func NewSignals() []Signal {
 		NewProvenanceSignal(),
 		NewReleaseBuilderSignal(),
 		NewHostLoadSignal(),
+		NewHostPressureSignal(),
 		NewServiceLoadSignal(),
 		NewRedisKeyEventsSignal(),
 		NewStuckLeasesSignal(),
