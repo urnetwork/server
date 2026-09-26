@@ -2152,6 +2152,73 @@ func TestReconcileNetEscrowCorrectsDrift(t *testing.T) {
 	})
 }
 
+// A fully reserved grant can remain active in PostgreSQL while its Redis
+// reservation leaves zero available bytes. It must not produce a zero-byte
+// escrow row for every new contract before the next usable grant is reached.
+func TestCreateTransferEscrowSkipsFullyReservedBalances(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		payerNetworkId := server.NewId()
+		payerId := server.NewId()
+		providerNetworkId := server.NewId()
+		providerId := server.NewId()
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{
+			payerId: payerNetworkId, providerId: providerNetworkId,
+		})
+		now := server.NowUtc()
+		for index := 0; index < 3; index++ {
+			AddBasicTransferBalance(ctx, payerNetworkId, ByteCount((index+1)*1024*1024),
+				now.Add(-time.Minute), now.Add(time.Duration(index+1)*24*time.Hour))
+		}
+		balances := GetActiveTransferBalances(ctx, payerNetworkId)
+		if len(balances) != 3 {
+			t.Fatalf("active balances = %d, want 3", len(balances))
+		}
+		var usableId server.Id
+		for _, balance := range balances {
+			if balance.StartBalanceByteCount == 3*1024*1024 {
+				usableId = balance.BalanceId
+				continue
+			}
+			server.Redis(ctx, func(r server.RedisClient) {
+				if err := r.IncrBy(ctx, netEscrowKey(balance.BalanceId), int64(balance.StartBalanceByteCount)).Err(); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+		const contractBytes = ByteCount(1024)
+		escrow, err := CreateTransferEscrow(ctx, payerNetworkId, payerId, providerNetworkId, providerId, contractBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows := 0
+		zeroRows := 0
+		var recordedId server.Id
+		var recordedBytes ByteCount
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(ctx, `SELECT balance_id, balance_byte_count FROM transfer_escrow WHERE contract_id = $1`, escrow.ContractId)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var balanceId server.Id
+					var byteCount ByteCount
+					if err := result.Scan(&balanceId, &byteCount); err != nil {
+						t.Fatal(err)
+					}
+					rows++
+					if byteCount == 0 {
+						zeroRows++
+					}
+					recordedId, recordedBytes = balanceId, byteCount
+				}
+			})
+		})
+		if rows != 1 || zeroRows != 0 || recordedId != usableId || recordedBytes != contractBytes {
+			t.Fatalf("escrow rows=%d zero=%d usable=%t bytes=%d, want one positive row on the usable grant",
+				rows, zeroRows, recordedId == usableId, recordedBytes)
+		}
+	})
+}
+
 // Round trip of the net escrow counter through the real write and read paths,
 // pinning the per-balance key format (`{escrow_<balanceId>}net`) and its
 // lifecycle at every mutation site:

@@ -1595,6 +1595,8 @@ const contractExtenderInsertSql = `
 		transfer_contract.contract_id = $1
 `
 
+// Reserves positive bytes from the earliest available grants. Zero-byte
+// contracts retain their existing earliest-grant anchor and priority.
 func createTransferEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -1710,6 +1712,11 @@ func createTransferEscrowInTx(
 	netEscrowBalanceByteCount := ByteCount(0)
 
 	for _, transferBalance := range orderedTransferBalances {
+		// PostgreSQL active balances can be fully reserved in Redis. They
+		// must not create empty rows, dilute priority, or refresh mirrors.
+		if 0 < contractTransferByteCount && transferBalance.balanceByteCount == 0 {
+			continue
+		}
 		escrowBalanceByteCount := min(
 			contractTransferByteCount-netEscrowBalanceByteCount,
 			transferBalance.balanceByteCount,
