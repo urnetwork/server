@@ -311,7 +311,7 @@ func TestSolanaWebhookGrantsExactlyThePlanQuoted(t *testing.T) {
 		connect.AssertEqual(t, balances[0].Pro, true)
 		connect.AssertEqual(t, balances[0].BalanceByteCount, RefreshSupporterTransferBalance)
 		// a MONTH plus the grace period. The year-for-everything webhook fails here.
-		connect.AssertEqual(t, balances[0].EndTime.Sub(balances[0].StartTime), 30*24*time.Hour+SubscriptionGracePeriod)
+		connect.AssertEqual(t, balances[0].EndTime.Sub(balances[0].StartTime), 30*24*time.Hour+manualPaymentGracePeriod)
 		// the entitlement is refreshed immediately, not after the pro cache ttl
 		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
 
@@ -367,7 +367,7 @@ func TestSolanaWebhookOverpaymentBuysThePlanQuotedNotAYear(t *testing.T) {
 		balances := model.GetActiveTransferBalances(ctx, networkId)
 		connect.AssertEqual(t, len(balances), 1)
 		// the plan QUOTED: a month, not the year the old webhook assumed
-		connect.AssertEqual(t, balances[0].EndTime.Sub(balances[0].StartTime), 30*24*time.Hour+SubscriptionGracePeriod)
+		connect.AssertEqual(t, balances[0].EndTime.Sub(balances[0].StartTime), 30*24*time.Hour+manualPaymentGracePeriod)
 	})
 }
 
@@ -429,7 +429,7 @@ func TestSolanaWebhookUnderpaymentTakesNothingAndKeepsTheQuote(t *testing.T) {
 		balances := model.GetActiveTransferBalances(ctx, networkId)
 		connect.AssertEqual(t, len(balances), 1)
 		connect.AssertEqual(t, balances[0].Pro, true)
-		connect.AssertEqual(t, balances[0].EndTime.Sub(balances[0].StartTime), SubscriptionYearDuration+SubscriptionGracePeriod)
+		connect.AssertEqual(t, balances[0].EndTime.Sub(balances[0].StartTime), SubscriptionYearDuration+manualPaymentGracePeriod)
 	})
 }
 

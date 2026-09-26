@@ -753,7 +753,7 @@ func x402GrantProMonth(
 	settleResponse *X402SettleResponse,
 ) (returnErr error) {
 	startTime := server.NowUtc()
-	endTime := startTime.Add(x402ProMonthDuration + SubscriptionGracePeriod)
+	endTime := startTime.Add(x402ProMonthDuration + manualPaymentGracePeriod)
 
 	granted := false
 	server.Tx(ctx, func(tx server.PgTx) {

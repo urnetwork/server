@@ -299,10 +299,13 @@ func appleDecodeJwsPayload(jws string) (map[string]any, error) {
 // ----- stripe API shapes (raw HTTP, via the stripeApiBaseUrl seam) -----
 
 type stripeReconcileSubscription struct {
-	Id                string            `json:"id"`
-	Status            string            `json:"status"`
-	CancelAtPeriodEnd bool              `json:"cancel_at_period_end"`
-	Metadata          map[string]string `json:"metadata"`
+	Id                  string            `json:"id"`
+	Status              string            `json:"status"`
+	CancelAtPeriodEnd   bool              `json:"cancel_at_period_end"`
+	Metadata            map[string]string `json:"metadata"`
+	CancellationDetails struct {
+		Reason string `json:"reason"`
+	} `json:"cancellation_details"`
 }
 
 // stripeSubscriptionOver applies the cancelled ≠ expired rule to a Stripe
@@ -1050,6 +1053,17 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 		if fullInvoice.Subscription == nil {
 			continue
 		}
+		// Preserve a verified paid window through manual-payment grace even
+		// if Stripe marks the renewal unpaid or auto-cancels it early. A
+		// customer-requested cancellation is not a payment failure.
+		manualPaymentGrace := (fullInvoice.Subscription.Status == "unpaid" ||
+			(fullInvoice.Subscription.Status == "canceled" &&
+				fullInvoice.Subscription.CancellationDetails.Reason == "payment_failed")) &&
+			renewal.EndTime.After(run.now) &&
+			stripeRenewalMatchesInvoice(ctx, renewal, fullInvoice)
+		if manualPaymentGrace {
+			continue
+		}
 		if stripeSubscriptionOver(fullInvoice.Subscription.Status) {
 			run.end(
 				store,
@@ -1103,8 +1117,12 @@ func stripeRenewalMatchesInvoice(
 		if line.Subscription != nil && *line.Subscription != invoice.Subscription.Id {
 			continue
 		}
+		periodEnd := time.Unix(line.Period.End, 0)
 		if renewal.StartTime.Equal(time.Unix(line.Period.Start, 0)) &&
-			renewal.EndTime.Equal(time.Unix(line.Period.End, 0).Add(SubscriptionGracePeriod)) {
+			(renewal.EndTime.Equal(periodEnd.Add(manualPaymentGracePeriod)) ||
+				// Existing paid invoices retain the old 24-hour window until a
+				// separately verified migration extends them.
+				renewal.EndTime.Equal(periodEnd.Add(SubscriptionGracePeriod))) {
 			return true
 		}
 	}

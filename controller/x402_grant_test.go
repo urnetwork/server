@@ -46,7 +46,7 @@ func TestX402GrantProMonthRollingWindow(t *testing.T) {
 		connect.AssertEqual(t, balances[0].Pro, true)
 		// a full month (plus grace) from the PURCHASE time, wherever in the
 		// calendar month it falls
-		connect.AssertEqual(t, balances[0].EndTime.Sub(balances[0].StartTime), x402ProMonthDuration+SubscriptionGracePeriod)
+		connect.AssertEqual(t, balances[0].EndTime.Sub(balances[0].StartTime), x402ProMonthDuration+manualPaymentGracePeriod)
 		// the window starts at the purchase (a second of slack absorbs timestamp
 		// truncation in the db), not at the top of the calendar month
 		connect.AssertEqual(t, balances[0].StartTime.After(before.Add(-time.Second)), true)

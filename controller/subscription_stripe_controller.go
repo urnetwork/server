@@ -775,7 +775,7 @@ func stripeResolveInvoiceCredit(
 		networkId:      *networkId,
 		subscriptionId: subscriptionId,
 		startTime:      time.Unix(periodStart, 0),
-		endTime:        time.Unix(periodEnd, 0).Add(SubscriptionGracePeriod),
+		endTime:        time.Unix(periodEnd, 0).Add(manualPaymentGracePeriod),
 		emailFallback:  emailFallback,
 	}
 	if emailFallback {

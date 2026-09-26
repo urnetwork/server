@@ -790,7 +790,7 @@ func TestPaymentReconcileStripeCreditsMissedInvoice(t *testing.T) {
 		model.Testing_CreateNetwork(ctx, networkId, "reconcilestripe1", userId)
 
 		invoiceId := "in_reconcile_missed_1"
-		now := server.NowUtc()
+		now := server.NowUtc().Truncate(time.Second)
 		stripeEnv.listInvoices = []map[string]any{
 			{"id": invoiceId, "total": 1000},
 		}
@@ -823,6 +823,36 @@ func TestPaymentReconcileStripeCreditsMissedInvoice(t *testing.T) {
 		connect.AssertEqual(t, result2.Credited, 0)
 		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 1)
 	})
+}
+
+// The Stripe invoice period is not the entitlement expiry: a successful
+// payment carries one manual-payment grace window, without relying on the
+// local test database's timestamp timezone conversion.
+func TestStripeInvoiceCreditIncludesManualPaymentGrace(t *testing.T) {
+	stripeEnv := newStripeReconcileTestEnv(t)
+	networkId := server.NewId()
+	invoiceId := "in_synthetic_manual_grace"
+	periodStart := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
+	periodEnd := periodStart.Add(30 * 24 * time.Hour)
+	stripeEnv.fullInvoices[invoiceId] = stripeTestFullInvoice(
+		invoiceId, "sub_synthetic_manual_grace", networkId,
+		periodStart, periodEnd, "active", false,
+	)
+
+	credit, err := stripeResolveInvoiceCredit(
+		invoiceId, &session.ClientSession{Ctx: context.Background()},
+	)
+	connect.AssertEqual(t, err, nil)
+	if credit == nil {
+		t.Fatal("synthetic paid subscription invoice was not credited")
+	}
+	connect.AssertEqual(t, credit.networkId, networkId)
+	if !credit.startTime.Equal(periodStart) {
+		t.Fatalf("credit starts at %v; want %v", credit.startTime, periodStart)
+	}
+	if !credit.endTime.Equal(periodEnd.Add(manualPaymentGracePeriod)) {
+		t.Fatalf("credit ends at %v; want %v", credit.endTime, periodEnd.Add(manualPaymentGracePeriod))
+	}
 }
 
 // A paid invoice can outlive the network named by its subscription metadata.
@@ -1524,6 +1554,140 @@ func TestPaymentReconcileStripeEndsRevokedNotCancelAtPeriodEnd(t *testing.T) {
 
 		events := model.GetPaymentReconciliationEvents(ctx, result.RunId)
 		connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketStripe, model.PaymentReconcileActionEnded), 1)
+	})
+}
+
+// A failed renewal keeps a verified paid window in past_due, unpaid, and
+// payment-failed auto-cancel states, including legacy 24-hour credits. An
+// intentional cancel or a mismatched payment ledger ends the grant instead;
+// none of these states credits another invoice or transfer balance.
+func TestPaymentReconcileStripePastDueVersusUnpaid(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		disableAllReconcileStores(t)
+		stripeEnv := newStripeReconcileTestEnv(t)
+		now := server.NowUtc().Truncate(time.Second)
+		startTime := now.Add(-10 * 24 * time.Hour)
+		endTime := now.Add(29 * 24 * time.Hour)
+
+		pastDueNetworkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, pastDueNetworkId, "pastduegrace", server.NewId())
+		pastDueInvoiceId := "in_synthetic_past_due_grace"
+		credited, err := stripeCreditInvoicePaid(
+			ctx, pastDueNetworkId, pastDueInvoiceId,
+			model.UsdToNanoCents(7), startTime, endTime,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, credited, true)
+		stripeEnv.fullInvoices[pastDueInvoiceId] = stripeTestFullInvoice(
+			pastDueInvoiceId, "sub_synthetic_past_due_grace", pastDueNetworkId,
+			startTime, endTime.Add(-manualPaymentGracePeriod), "past_due", false,
+		)
+
+		unpaidNetworkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, unpaidNetworkId, "unpaidgraceend", server.NewId())
+		unpaidInvoiceId := "in_synthetic_unpaid_grace_end"
+		credited, err = stripeCreditInvoicePaid(
+			ctx, unpaidNetworkId, unpaidInvoiceId,
+			model.UsdToNanoCents(7), startTime, endTime,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, credited, true)
+		stripeEnv.fullInvoices[unpaidInvoiceId] = stripeTestFullInvoice(
+			unpaidInvoiceId, "sub_synthetic_unpaid_grace_end", unpaidNetworkId,
+			startTime, endTime.Add(-manualPaymentGracePeriod), "unpaid", false,
+		)
+
+		failedNetworkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, failedNetworkId, "failedpaymentgrace", server.NewId())
+		failedInvoiceId := "in_synthetic_failed_payment_grace"
+		credited, err = stripeCreditInvoicePaid(
+			ctx, failedNetworkId, failedInvoiceId,
+			model.UsdToNanoCents(7), startTime, endTime,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, credited, true)
+		stripeEnv.fullInvoices[failedInvoiceId] = stripeTestFullInvoice(
+			failedInvoiceId, "sub_synthetic_failed_payment_grace", failedNetworkId,
+			startTime, endTime.Add(-manualPaymentGracePeriod), "canceled", false,
+		)
+		failedSubscription := stripeEnv.fullInvoices[failedInvoiceId]["subscription"].(map[string]any)
+		failedSubscription["cancellation_details"] = map[string]any{"reason": "payment_failed"}
+
+		legacyNetworkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, legacyNetworkId, "legacyunpaidgrace", server.NewId())
+		legacyInvoiceId := "in_synthetic_legacy_unpaid_grace"
+		legacyEndTime := now.Add(12 * time.Hour)
+		credited, err = stripeCreditInvoicePaid(
+			ctx, legacyNetworkId, legacyInvoiceId,
+			model.UsdToNanoCents(7), startTime, legacyEndTime,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, credited, true)
+		stripeEnv.fullInvoices[legacyInvoiceId] = stripeTestFullInvoice(
+			legacyInvoiceId, "sub_synthetic_legacy_unpaid_grace", legacyNetworkId,
+			startTime, legacyEndTime.Add(-SubscriptionGracePeriod), "unpaid", false,
+		)
+
+		unverifiedNetworkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, unverifiedNetworkId, "unverifiedunpaid", server.NewId())
+		unverifiedInvoiceId := "in_synthetic_unverified_unpaid"
+		credited, err = stripeCreditInvoicePaid(
+			ctx, unverifiedNetworkId, unverifiedInvoiceId,
+			model.UsdToNanoCents(7), startTime, endTime,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, credited, true)
+		stripeEnv.fullInvoices[unverifiedInvoiceId] = stripeTestFullInvoice(
+			unverifiedInvoiceId, "sub_synthetic_unverified_unpaid", unverifiedNetworkId,
+			startTime, endTime.Add(-manualPaymentGracePeriod), "unpaid", false,
+		)
+		server.Tx(ctx, func(tx server.PgTx) {
+			// A renewal is not proof of payment if its immutable invoice ledger
+			// belongs to another network. Unpaid must not preserve that grant.
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE stripe_invoice SET network_id = $2 WHERE invoice_id = $1`,
+				unverifiedInvoiceId,
+				legacyNetworkId,
+			))
+		})
+
+		canceledNetworkId := server.NewId()
+		model.Testing_CreateNetwork(ctx, canceledNetworkId, "requestedcancel", server.NewId())
+		canceledInvoiceId := "in_synthetic_requested_cancel"
+		credited, err = stripeCreditInvoicePaid(
+			ctx, canceledNetworkId, canceledInvoiceId,
+			model.UsdToNanoCents(7), startTime, endTime,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, credited, true)
+		stripeEnv.fullInvoices[canceledInvoiceId] = stripeTestFullInvoice(
+			canceledInvoiceId, "sub_synthetic_requested_cancel", canceledNetworkId,
+			startTime, endTime.Add(-manualPaymentGracePeriod), "canceled", false,
+		)
+		canceledSubscription := stripeEnv.fullInvoices[canceledInvoiceId]["subscription"].(map[string]any)
+		canceledSubscription["cancellation_details"] = map[string]any{"reason": "cancellation_requested"}
+
+		result, err := RunPaymentReconciliationWithOptions(
+			reconcileTestSession(t, ctx),
+			&PaymentReconcileRunOptions{Stores: []string{model.SubscriptionMarketStripe}},
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Ended, 2)
+		connect.AssertEqual(t, result.Credited, 0)
+		connect.AssertEqual(t, model.IsProNetwork(ctx, pastDueNetworkId), true)
+		connect.AssertEqual(t, model.IsProNetwork(ctx, unpaidNetworkId), true)
+		connect.AssertEqual(t, model.IsProNetwork(ctx, failedNetworkId), true)
+		connect.AssertEqual(t, model.IsProNetwork(ctx, legacyNetworkId), true)
+		connect.AssertEqual(t, model.IsProNetwork(ctx, unverifiedNetworkId), false)
+		connect.AssertEqual(t, model.IsProNetwork(ctx, canceledNetworkId), false)
+		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, pastDueNetworkId)), 1)
+		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, unpaidNetworkId)), 1)
+		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, failedNetworkId)), 1)
+		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, legacyNetworkId)), 1)
+		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, unverifiedNetworkId)), 0)
+		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, canceledNetworkId)), 0)
 	})
 }
 

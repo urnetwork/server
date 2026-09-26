@@ -43,6 +43,11 @@ const RefreshSupporterTransferBalance = 600 * model.Gib
 
 const SubscriptionGracePeriod = 24 * time.Hour
 
+// manualPaymentGracePeriod keeps an already-paid Stripe, Solana, or x402 supporter
+// entitlement available while a renewal can be paid manually. It does not
+// record an unpaid renewal as paid or mint another transfer balance.
+const manualPaymentGracePeriod = 30 * 24 * time.Hour
+
 const SubscriptionYearDuration = 365 * 24 * time.Hour
 
 type Skus struct {
@@ -2098,7 +2103,7 @@ func solanaCreditPaymentIntent(
 	// Grant the plan they actually bought. This used to be a YEAR every time,
 	// whatever they had chosen and whatever they had paid.
 	startTime := server.NowUtc()
-	endTime := startTime.Add(solanaPlanDuration(paymentSearchResult.SubscriptionPlan) + SubscriptionGracePeriod)
+	endTime := startTime.Add(solanaPlanDuration(paymentSearchResult.SubscriptionPlan) + manualPaymentGracePeriod)
 
 	netRevenue := model.UsdToNanoCents(tokenAmountReceivedUsd)
 
