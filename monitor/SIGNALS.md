@@ -14192,6 +14192,26 @@ This is the version-to-artifact contract checked by the probe:
 | 717 | `network_ping_pinger_day` range-partitioned by `day`: exact required, no-default columns, the `(day, pinger_kind, pinger_id)` primary key, at least one partition, and every partition named `network_ping_pinger_day_p` plus the utc day it covers exactly |
 | 718 | `network_ping_target_day` range-partitioned by `day`: exact required, no-default columns, the `(day, target_extender_id)` primary key, and day partitions named and bounded as 717's |
 | 719 | `network_ping_target_hour_tally` range-partitioned by `hour`: exact required, no-default columns, the `(hour, target_extender_id, pinger_kind)` primary key, and day partitions named and bounded as 717's |
+| 720 | the competition round lifecycle guard permits a placeable staging winner while retaining production takeover eligibility |
+| 721 | `competition_staging_winner_approval` exact seven-column shape, validated primary/foreign keys and review-evidence checks, plus enabled unconditional insert and append-only triggers bound to their exact published guard bodies |
+
+Version 721 adds explicit operator approval for a finalized, uncanceled staging
+winner; it does not approve production candidates or reopen winner selection.
+The probe checks required/no-default types and varchar bounds, both foreign
+keys, the round primary key, reviewer/reason/evidence constraints, and both
+protection triggers' table, function, event set, enabled state, unconditional
+execution and lack of column restrictions. Whitespace-normalized function
+bodies must match the published insert and append-only guards, including every
+staging, lifecycle, winner and job identity predicate. False-positive qualifier:
+absence before head 721 is pending rollout, not schema drift; semantically
+equivalent unpublished guard rewrites still require an append-only migration
+and an updated contract. False-negative qualifier: numeric head, relation
+existence, and matching function names alone cannot clear the check. Healthy
+metadata does not certify a reviewer's authority, the truth of review evidence,
+or approval-row contents. The 2026-09-26 full monitor gate caught the missing
+version-721 detector contract; this coverage defect did not imply the production
+table was absent. Local fixtures execute the emitted SQL over independently
+migrated metadata and changed/missing schema, guards, bindings and predicates.
 
 On 2026-09-09, Main had durably reached version 650 through the onboarding
 schema while independently developed client-key and competition-staging

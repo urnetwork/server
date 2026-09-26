@@ -95,7 +95,7 @@ func TestMigrationsSignalStagingWinnerPinsPublishedFunctions(t *testing.T) {
 			"trigger_record.tgenabled = 'O' AS enabled",
 			"trigger_record.tgqual IS NULL AS unconditional",
 			"attribute_record.attrelid = relation.oid AND attribute_record.attnum = ANY(trigger_record.tgattr) ORDER BY attribute_record.attname",
-			"WHERE namespace.nspname = 'public' AND relation.relname IN ('competition_candidate_review', 'competition_round') AND NOT trigger_record.tgisinternal",
+			"WHERE namespace.nspname = 'public' AND relation.relname IN ('competition_candidate_review', 'competition_round', 'competition_staging_winner_approval') AND NOT trigger_record.tgisinternal",
 		} {
 			if !strings.Contains(normalized, required) {
 				t.Fatalf("staging winner catalog collection lost %q", required)

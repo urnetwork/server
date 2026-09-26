@@ -295,6 +295,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "network_ping_target_day day partitions and target key", requiredVersion: 718, rowColumn: 129},
 	{name: "network_ping_target_hour_tally day partitions and target hour key", requiredVersion: 719, rowColumn: 130},
 	{name: "competition staging lifecycle winner eligibility", requiredVersion: 720, rowColumn: 131},
+	{name: "competition staging winner approval and append-only guards", requiredVersion: 721, rowColumn: 132},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -306,7 +307,7 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			SELECT coalesce(max(end_version_number), 0)::int AS value
 			FROM migration_audit
 			WHERE status = 'success'
-		), index_artifact AS (
+		), `+competitionStagingApprovalCatalogQuery+`, index_artifact AS (
 			SELECT table_relation.relname::text AS table_name,
 			       index_relation.relname::text AS index_name,
 			       regexp_replace(pg_get_indexdef(index_relation.oid), '[[:space:]]+', ' ', 'g') AS definition,
@@ -343,7 +344,9 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			       )) AS definition
 			FROM (VALUES
 			    ('competition_staging_candidate_review_guard'),
-			    ('competition_round_honesty_review_guard')
+			    ('competition_round_honesty_review_guard'),
+			    ('competition_append_only_guard'),
+			    ('competition_staging_winner_approval_guard')
 			) AS expected(function_name)
 			JOIN pg_proc AS function_record
 			  ON function_record.oid = to_regprocedure('public.' || expected.function_name || '()')
@@ -367,7 +370,7 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			JOIN pg_class AS relation ON relation.oid = trigger_record.tgrelid
 			JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
 			WHERE namespace.nspname = 'public'
-			  AND relation.relname IN ('competition_candidate_review', 'competition_round')
+			  AND relation.relname IN ('competition_candidate_review', 'competition_round', 'competition_staging_winner_approval')
 			  AND NOT trigger_record.tgisinternal
 		)
 		SELECT version.value,
@@ -1998,7 +2001,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND function_record.proname = 'competition_round_immutable_guard'
 		             AND position('NEW.staging OR (job.score_json->>''takeover_eligible'')::boolean'
 		                          in pg_get_functiondef(function_record.oid)) > 0
-		       )
+		       ),
+		       `+competitionStagingApprovalArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {
