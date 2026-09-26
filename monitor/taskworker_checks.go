@@ -12,6 +12,7 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -90,12 +91,19 @@ func (self taskworkerDrainProbe) check(ctx context.Context, env *probeEnv) ([]fi
 	lagRows, err := env.runner.pg(ctx, `
 		SELECT coalesce(max(round(extract(epoch FROM now() - greatest(run_at, release_time)))),0)::int
 		FROM pending_task
-		WHERE greatest(run_at, release_time) <= now();
+		WHERE available_block <= floor(extract(epoch FROM now()))::bigint
+		  AND greatest(run_at, release_time) <= now();
 	`)
 	if err != nil {
 		return findings, err
 	}
-	dueLagSeconds := atoiRow(lagRows[0], 0)
+	if len(lagRows) != 1 || len(lagRows[0]) != 1 {
+		return findings, fmt.Errorf("invalid task due-lag observation: expected one integer cell")
+	}
+	dueLagSeconds, err := strconv.ParseInt(lagRows[0].str(0), 10, 32)
+	if err != nil || dueLagSeconds < 0 {
+		return findings, fmt.Errorf("invalid task due-lag observation: expected a non-negative integer")
+	}
 	if dueLagSeconds > 180 {
 		findings = append(findings, finding{
 			probeId: "pg/task-due-lag", tier: tierWarn,
@@ -103,7 +111,7 @@ func (self taskworkerDrainProbe) check(ctx context.Context, env *probeEnv) ([]fi
 			symptom:  fmt.Sprintf("oldest timestamp-overdue task is %ds past available; distinguish stale owner heartbeats from unowned work", dueLagSeconds),
 			baseline: "unowned due tasks normally make progress within seconds; timestamp availability can be old while an advisory session still owns the task (12.4)",
 			observed: fmt.Sprintf("due_lag_s=%d", dueLagSeconds),
-			context:  "one old class does not prove a global stop: inspect per-class run/claim/release times, advisory owners, fresh per-process claim/finalization rates and exact generation; future retry backoff is not due until both run_at and release_time have elapsed",
+			context:  "one old class does not prove a global stop: inspect per-class run/claim/release times, advisory owners, fresh per-process claim/finalization rates and exact generation; future availability blocks and retry backoff are not due until available_block, run_at and release_time have elapsed",
 			evidence: taskDueOwnershipEvidence(ctx, env) + "\n" + taskErrorBattery(ctx, env),
 			playbook: "SIGNALS.md 12.4",
 		})

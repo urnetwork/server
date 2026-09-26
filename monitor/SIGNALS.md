@@ -18850,12 +18850,16 @@ past 100 retries = beyond any overlap, a missing registration) — both in
 Within ~1min of a taskworker deploy completing:
 - oldest-due lag returns to ~0:
 ```sql
-SELECT round(extract(epoch from (now() - min(run_at)))) AS oldest_due_s
+SELECT coalesce(max(round(extract(epoch FROM now() - greatest(run_at, release_time)))),0)::int AS oldest_due_s
 FROM pending_task
-WHERE available_block <= extract(epoch from now()) AND run_at <= now();
+WHERE available_block <= floor(extract(epoch FROM now()))::bigint
+  AND greatest(run_at, release_time) <= now();
 ```
   (transient spikes while both build generations overlap are normal; growing
   lag requires per-class and ownership inspection, not a global-stop verdict.)
+- The primary source must return exactly one non-negative integer cell.
+  Missing, malformed, negative, overflowed or extra rows/cells are unavailable,
+  never a healthy zero. A real empty eligible queue returns a valid scalar zero.
 - Ownership context: when timestamp lag fires, `task_due_ownership.go` reads
   at most 257 oldest eligible rows, classifies a 256-row prefix against a fresh
   direct `pg_locks` snapshot in the current database, and emits only aggregate
@@ -18868,8 +18872,9 @@ WHERE available_block <= extract(epoch from now()) AND run_at <= now();
   eligibility, not proof that a task is unclaimed. A live or stalled direct
   advisory owner can outlive stale timestamp leases while other workers keep
   claiming and finalizing. Neither a single old class nor an idle ownership
-  session proves all task classes stopped. Future retry backoff is excluded
-  until both timestamps elapse; an expired backoff still requires owner and
+  session proves all task classes stopped. Future availability blocks and retry
+  backoff are excluded until `available_block`, `run_at` and `release_time`
+  have elapsed; an expired backoff still requires owner and
   execution evidence. Compare fresh per-process claim/finalization rates,
   per-class ages, session heartbeats, timestamp-refresh errors and generation.
 - FALSE-NEGATIVE QUALIFIER: an absent advisory lock does not prove claimability:
