@@ -11,7 +11,9 @@ import (
 	"github.com/urnetwork/server"
 )
 
-const openContractStatsLimit int64 = 100000
+// A 1001-row newest-first sentinel has a direct one-second Main control. Keep
+// the count authority conservative instead of spending the whole query budget.
+const openContractStatsLimit int64 = 1000
 const openContractStatsTimeout = 5 * time.Second
 
 // Counts are lower bounds unless their exact flag is true. The extender count

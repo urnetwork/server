@@ -12,6 +12,20 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// Pin the collector's default to the small cap that has a direct runtime
+// control; a larger exactness range needs its own production budget evidence.
+func TestOpenContractStatsCollectorUsesVerifiedReadCap(t *testing.T) {
+	query := openContractStatsQueryTest(func(_ context.Context, _ string, args ...any) (pgx.Rows, error) {
+		if len(args) != 1 || args[0] != int64(1001) {
+			t.Fatalf("collector query bound=%v, want the verified 1001-row sentinel", args)
+		}
+		return &openContractStatsRowsTest{remaining: 1, cancel: func() {}}, nil
+	})
+	if _, err := readOpenContractStats(t.Context(), query, openContractStatsLimit); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // More than the cap must remain an explicit lower bound, including a zero
 // extender count. A rare extender predicate cannot move the cap after its join.
 func TestOpenContractStatsCapsLargePopulation(t *testing.T) {

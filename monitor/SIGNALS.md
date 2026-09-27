@@ -4066,16 +4066,19 @@ rows, not dead-index traversal, heap visibility checks, or wall-clock cost.
 
 The separate Taskworker stats collector no longer calls the exact unbounded
 `CountContracts`/`CountOpenContracts` path. Its open and disputed populations
-each use a 100,001-row sentinel in one materialized statement snapshot. The
+each use a 1,001-row sentinel in one materialized statement snapshot (at most
+1,000 is exact). The
 collector's open sample is **newest-first**, unlike this probe's oldest-first
 age buckets; extender membership is tested only over that bounded sample.
 Sampling order does not change exact totals below the cap or the capped
 lower-bound contract. A 2026-09-27 read-only control with a 1,001-row sentinel
 completed newest-first under a one-second server deadline, while otherwise
 identical oldest-first work timed out. This demonstrates traversal-sensitive
-physical work, not that the production 100,001-row cap is guaranteed to fit
-its budget. SSH-inclusive diagnostic elapsed time is not the Go pool/query
-duration. The collector has a five-second
+physical work. The collector now uses that smaller sentinel, rather than the
+unverified 100,001-row workload; above 1,000 it deliberately trades count
+resolution for a bounded lower bound. The control does not guarantee every
+future read fits its budget. SSH-inclusive diagnostic elapsed time is not the
+Go pool/query duration. The collector has a five-second
 acquire/query context, a five-second read-only transaction statement timeout,
 and at most one further second of rollback cleanup. The legacy open gauges
 publish NaN when capped/unavailable. Fixed `kind=open|with_extender|dispute`

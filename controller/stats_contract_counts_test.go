@@ -53,7 +53,7 @@ func TestStatsOpenContractsPublishesHonestTransitions(t *testing.T) {
 	if value := testStatsOpenContractValue(t, metrics, "urnetwork_stats_open_contracts", nil); value != 3 {
 		t.Fatalf("exact=%v", value)
 	}
-	capped := model.OpenContractStatsSnapshot{OpenContracts: 100001, OpenContractsWithExtender: 0, OpenDisputes: 0,
+	capped := model.OpenContractStatsSnapshot{OpenContracts: 1001, OpenContractsWithExtender: 0, OpenDisputes: 0,
 		OpenDisputesExact: true, ObservedAt: at.Add(time.Minute)}
 	metrics.publish(capped, true)
 	for _, name := range []string{"urnetwork_stats_open_contracts", "urnetwork_stats_open_contracts_with_extender"} {
@@ -61,7 +61,7 @@ func TestStatsOpenContractsPublishesHonestTransitions(t *testing.T) {
 			t.Fatalf("%s published a capped count as exact", name)
 		}
 	}
-	if testStatsOpenContractValue(t, metrics, "urnetwork_stats_contract_open_lower_bound", map[string]string{"kind": "open"}) != 100001 ||
+	if testStatsOpenContractValue(t, metrics, "urnetwork_stats_contract_open_lower_bound", map[string]string{"kind": "open"}) != 1001 ||
 		testStatsOpenContractValue(t, metrics, "urnetwork_stats_contract_open_lower_bound", map[string]string{"kind": "with_extender"}) != 0 ||
 		testStatsOpenContractValue(t, metrics, "urnetwork_stats_contract_open_status", map[string]string{"kind": "with_extender", "status": "capped"}) != 1 {
 		t.Fatal("capped lower bound lost its independent status")

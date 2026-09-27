@@ -793,7 +793,7 @@
           "range": false
         }
       ],
-      "description": "Open contracts, not disputed and without an outcome. Exact and at-least lower-bound series are distinct. Reads cap at 100,001 visible rows with a five-second query budget. Only same-process status and PostgreSQL snapshot times within ten minutes (at most thirty seconds ahead) qualify. No data means unavailable, stale or old-schema evidence, not zero. Capped values cannot establish trend or total population."
+      "description": "Open contracts, not disputed and without an outcome. Exact and at-least lower-bound series are distinct. Reads cap at 1,001 visible rows with a five-second query budget. Only same-process status and PostgreSQL snapshot times within ten minutes (at most thirty seconds ahead) qualify. No data means unavailable, stale or old-schema evidence, not zero. Capped values cannot establish trend or total population."
     },
     {
       "id": 16,
@@ -862,7 +862,7 @@
           "legendFormat": "at least open contracts"
         }
       ],
-      "description": "Open contracts, not disputed and without an outcome. Exact and at-least lower-bound series are distinct. Reads cap at 100,001 visible rows with a five-second query budget. Only same-process status and PostgreSQL snapshot times within ten minutes (at most thirty seconds ahead) qualify. No data means unavailable, stale or old-schema evidence, not zero. Capped values cannot establish trend or total population."
+      "description": "Open contracts, not disputed and without an outcome. Exact and at-least lower-bound series are distinct. Reads cap at 1,001 visible rows with a five-second query budget. Only same-process status and PostgreSQL snapshot times within ten minutes (at most thirty seconds ahead) qualify. No data means unavailable, stale or old-schema evidence, not zero. Capped values cannot establish trend or total population."
     },
     {
       "id": 17,
@@ -1293,7 +1293,7 @@
           "range": false
         }
       ],
-      "description": "Undecided disputes, independent of the open-contract cap. Exact and at-least lower-bound series require same-process status and PostgreSQL snapshot times within ten minutes. A 100,001-row sentinel marks capped evidence; query failure or stale/old-schema evidence is unknown, not healthy zero. A rising exact series may indicate settlement backlog; capped plateaus do not establish a trend."
+      "description": "Undecided disputes, independent of the open-contract cap. Exact and at-least lower-bound series require same-process status and PostgreSQL snapshot times within ten minutes. A 1,001-row sentinel marks capped evidence; query failure or stale/old-schema evidence is unknown, not healthy zero. A rising exact series may indicate settlement backlog; capped plateaus do not establish a trend."
     },
     {
       "id": 24,
@@ -1362,7 +1362,7 @@
           "legendFormat": "at least open disputes"
         }
       ],
-      "description": "Undecided disputes, independent of the open-contract cap. Exact and at-least lower-bound series require same-process status and PostgreSQL snapshot times within ten minutes. A 100,001-row sentinel marks capped evidence; query failure or stale/old-schema evidence is unknown, not healthy zero. A rising exact series may indicate settlement backlog; capped plateaus do not establish a trend."
+      "description": "Undecided disputes, independent of the open-contract cap. Exact and at-least lower-bound series require same-process status and PostgreSQL snapshot times within ten minutes. A 1,001-row sentinel marks capped evidence; query failure or stale/old-schema evidence is unknown, not healthy zero. A rising exact series may indicate settlement backlog; capped plateaus do not establish a trend."
     },
     {
       "id": 25,
