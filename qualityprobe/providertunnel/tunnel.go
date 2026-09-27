@@ -40,6 +40,9 @@ type Config struct {
 	// Optional fixed aggregate observer. It records completed DNS waves and
 	// their own tunnel's setup state without blocking on a metrics consumer.
 	DnsObservations *DnsObservations
+	// Optional fixed auth-request aggregate. Only this tunnel's synchronous
+	// client-mint calls opt in; no application URL or identity is recorded.
+	AuthObservations *connect.AuthNetworkClientObservations
 	// Certificate pins per host: a pinned host must present a chain
 	// with one of its pinned keys on the verified path, on top of ordinary
 	// WebPKI verification. They are optional -- a host without an entry is
@@ -248,6 +251,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	// network client. A single shared cancellation edge made every final
 	// remove-client request start on an already-canceled strategy.
 	lifecycleCtx, cancelLifecycle := context.WithCancel(ctx)
+	lifecycleCtx = connect.WithAuthNetworkClientObservations(lifecycleCtx, cfg.AuthObservations)
 	dataCtx, cancelData := context.WithCancel(lifecycleCtx)
 	clientStrategy := newControlplaneClientStrategy(lifecycleCtx)
 	transportBudget := cfg.PlatformTransportBudget

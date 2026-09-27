@@ -1726,6 +1726,7 @@ func runProviderEgressProbe(
 		DeviceSpec:        model.ProberClientDeviceSpec,
 		Version:           server.RequireVersion(),
 		DnsObservations:   &egressProbeDns.observations,
+		AuthObservations:  &egressProbeAuth.observations,
 	}
 
 	// every finding the prober submits passes through the metrics reporter

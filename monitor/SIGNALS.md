@@ -7848,6 +7848,37 @@ and sampled IPv4 DoH dial outcomes to discriminate transport silence from
 authoritative DNS negatives, then inspect auth/provide-registration and
 return-contract controls; neither signal alone convicts a provider.
 
+`urnetwork_egress_probe_auth_requests_total{phase,result}` is the opt-in
+control-plane discriminator for those probe tunnels. It exports all 36 fixed
+cells per Taskworker, with one increment per completed logical synchronous
+`AuthNetworkClient` call, not per route, `/hello`, provider, or measurement ACK.
+`phase` describes the **last actual auth POST attempt**: `no_post` means route
+discovery never launched a POST; `pre_write` means no successful complete-write
+callback or response was observed; `response_wait` means the request was
+written but response headers were not returned; `body_read` means headers
+arrived and response-body/JSON processing was reached. A late trace from an
+earlier attempt cannot advance the last attempt. Earlier attempts can have
+progressed farther or caused server side effects; this is not an idempotency
+guarantee or a history of every retry. Alternative transports without write
+callbacks conservatively remain `pre_write` until a response arrives.
+
+`result` is `ok`, `timeout`, `canceled`, `http_auth` (401/403), `http_rate`
+(429), `http_error` (other non-200), `api_error` (decoded API error),
+`decode_error`, or `error`. `ok` means the HTTP/JSON auth call returned without
+an API error, not that later JWT parsing, platform registration, provider
+ping, DNS, or quality publication succeeded. Timeout attribution preserves
+the strategy's internal request-budget exhaustion separately from caller or
+owner cancellation. `pre_write` can include route selection, DNS, connection,
+TLS, and request writing; it does not identify a particular socket failure.
+`response_wait` can include server processing or a lost response, and is not
+proof of database saturation. Basic `/hello` success cannot supply auth POST
+progress. The fixed atomic collector has no callbacks, queue, extra goroutine,
+URLs, identities, tokens, or error-text labels and changes no request behavior.
+Require matching Server **and Connect** artifact provenance before comparing
+rates; an absent metric is unavailable telemetry, not successful auth. Compare
+the clean-generation phase split with same-tunnel DNS path states and API route
+outcomes, retaining the uncontrolled caller-mix and retry-count qualifiers.
+
 The 04:42–04:45Z incident control showed 27,374 `tun/address` timeouts against
 186 answers across three observed process keys, alongside derived-client
 creation and provide-secret-registration timeouts. Those observations do not
