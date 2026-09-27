@@ -7908,6 +7908,47 @@ it does not remove the underlying model/database cost or fix unrelated API
 traffic. Require clean source-matched internal counts, active-path DNS answers
 and durable distinct measured coverage before claiming the four-hour target.
 
+The next control-plane discriminator is the configured `POST ^/connect/control$`
+route, not public auth. Read only the newest source-qualified API processes:
+`urnetwork_http_requests_inflight`, reset-aware five-minute
+`urnetwork_http_requests_total{outcome,status}`, and the duration summary's
+`_sum/_count` for that fixed route. The ratio is a **mean**, not p95. Compare
+traffic-bearing hosts, their pool/CPU controls, and the same Taskworker
+generation's internal credentials, DNS path states, registration/ping failures,
+guard outcomes, and acknowledged measured coverage. Router
+`outcome=canceled,status=none` is cancellation before any status was recorded;
+it is not an observed HTTP 499 or proof that the frame handler ran. An LB 499,
+when independently observed, is a different boundary. Successful `/hello` and
+internal minting do not establish this route's health.
+
+The 07:25–07:34Z control showed successful internal minting but repeated
+provide-secret registration timeouts, with roughly 26,000/36,000 API control
+requests in flight and about twelve-second mean handler durations on the two
+hot hosts. `provider_unresponsive` can contain those registration failures;
+it must not be treated as proof of provider fault or a reason to relax the
+dark guard. Canceled requests may be waiting for JWT validation or pool access
+before decoded control frames are counted. The existing
+`urnetwork_connect_control_frame_failures_total{message,cause}` is failure-only:
+`create_contract/other` does not identify a root cause or a failure rate, and
+zero `provide` errors does not prove registration succeeded. Connect-service
+rollout was mixed during this observation; require a clean later control.
+
+A deterministic real-send-sequence regression exposed a local multiplier:
+prewarm plus the 1s/2s/4s retry cadence emitted five equivalent opening-contract
+RPCs while the first response was still pending. The correction coalesces only
+the same request index and effective reservation bytes within the exact local
+contract-queue generation and original routing key. It releases admission
+after the OOB callback finishes, preserving definitive retries, independent
+lanes, successor prefetches, larger reservations, and retired-generation
+cleanup. It adds no global budget, changes no contract/credit policy, and does
+not promise remote exactly-once creation after an ambiguous response. This
+proves avoidable amplification, not its share of the live API storm. Activation
+requires rebuilding actual request producers (Taskworker, hosted Proxy, and
+eventually external SDK clients); a Connect-service-only rollout cannot update
+remote callers. Keep this a bounded manual discriminator until a dedicated
+source-qualified route-pressure signal is implemented. Neither a lower RPC
+count nor completed-buffered checks alone certify the four-hour measured sweep.
+
 The 04:42–04:45Z incident control showed 27,374 `tun/address` timeouts against
 186 answers across three observed process keys, alongside derived-client
 creation and provide-secret-registration timeouts. Those observations do not
