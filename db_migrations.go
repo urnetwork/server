@@ -9106,4 +9106,6 @@ var migrations = []any{
 	newSqlMigration(clientKeyPolicyHistorySchemaSql),
 	// Mixed-version writers must not create new missing usage or rewrite credit.
 	newSqlMigration(contractUsageGuardSchemaSql),
+	// Billing cleanup retains original usage atomically, without historical backfill.
+	newSqlMigration(providerUsageArchiveSchemaSql),
 }

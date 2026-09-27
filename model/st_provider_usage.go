@@ -12,7 +12,8 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Reads one PostgreSQL snapshot and refuses partial pre-activation history.
+// Reads live and archived work in one PostgreSQL snapshot and refuses partial
+// pre-activation history. A reused live/archive identity fails the whole window.
 // The half-open settlement window counts each contract once, regardless of
 // how many balances funded it or whether it needed escrow at all.
 func GetStEpochProviderUsage(ctx context.Context, startTime time.Time, endTime time.Time) ([]*StProviderUsage, error) {
@@ -33,8 +34,16 @@ func getStEpochProviderUsage(ctx context.Context, epoch uint64, startTime time.T
 	var returnErr error
 	server.Db(ctx, func(conn server.PgConn) {
 		rows, err := conn.Query(ctx, `
-			SELECT contract_id, provider_usage, close_time FROM transfer_contract
-			WHERE $1 <= close_time AND close_time < $2 AND outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
+			SELECT source.contract_id, source.provider_usage, source.close_time,
+				archive.contract_id IS NOT NULL AS duplicate
+			FROM transfer_contract AS source
+			LEFT JOIN st_provider_usage_archive AS archive ON archive.contract_id=source.contract_id
+			WHERE $1 <= source.close_time AND source.close_time < $2
+				AND source.outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
+			UNION ALL
+			SELECT contract_id, provider_usage, close_time, false FROM st_provider_usage_archive
+			WHERE $1 <= close_time AND close_time < $2
+				AND outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
 		`, startTime, endTime)
 		if err != nil {
 			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
@@ -45,8 +54,13 @@ func getStEpochProviderUsage(ctx context.Context, epoch uint64, startTime time.T
 			var contractId server.Id
 			var data []byte
 			var closedAt time.Time
-			if err := rows.Scan(&contractId, &data, &closedAt); err != nil {
+			var duplicate bool
+			if err := rows.Scan(&contractId, &data, &closedAt, &duplicate); err != nil {
 				returnErr = err
+				return
+			}
+			if duplicate {
+				returnErr = fmt.Errorf("subnet contract %s has both live and archived usage", contractId)
 				return
 			}
 			snapshot, err := decodeContractUsageSnapshot(data)

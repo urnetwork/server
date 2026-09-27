@@ -90,8 +90,13 @@ func TestStContractUsageLegacyExclusionRejectsForeignTerminalOwner(t *testing.T)
 		ctx := context.Background()
 		server.ApplyDbMigrationsUpTo(ctx, 724)
 		start := time.Unix(1_700_000_000, 0).UTC()
-		id := addStContractUsageSnapshotTestRow(t, ctx, start, nil)
-		for _, wire := range []map[string]any{contractUsageLegacyTestWire(server.NewId(), start, 1), contractUsageLegacyTestWire(id, start.Add(time.Second), 1)} {
+		for i := 0; i < 2; i++ {
+			closedAt := start.Add(time.Duration(i) * time.Hour)
+			id := addStContractUsageSnapshotTestRow(t, ctx, closedAt, nil)
+			wire := contractUsageLegacyTestWire(server.NewId(), closedAt, 1)
+			if i == 1 {
+				wire = contractUsageLegacyTestWire(id, closedAt.Add(time.Second), 1)
+			}
 			data, err := json.Marshal(wire)
 			if err != nil {
 				t.Fatal(err)
@@ -99,7 +104,11 @@ func TestStContractUsageLegacyExclusionRejectsForeignTerminalOwner(t *testing.T)
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET provider_usage=$2 WHERE contract_id=$1`, id, data))
 			})
-			if usages, err := GetStEpochProviderUsageAtEpoch(ctx, 17, start, start.Add(time.Hour)); err == nil || usages != nil {
+		}
+		server.ApplyDbMigrations(ctx)
+		for i := 0; i < 2; i++ {
+			closedAt := start.Add(time.Duration(i) * time.Hour)
+			if usages, err := GetStEpochProviderUsageAtEpoch(ctx, 17, closedAt, closedAt.Add(time.Hour)); err == nil || usages != nil {
 				t.Fatalf("foreign terminal repair accepted: %+v, %v", usages, err)
 			}
 		}
