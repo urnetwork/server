@@ -924,9 +924,10 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 			}
 		}
 
-		// Stale location alone no longer demands a Full probe. This legacy
-		// head supplies an urgent deadline only when health is also absent or
-		// stale; the composite observed_at/client_id index owns its ordering.
+		// Stale location alone no longer demands a Full probe. Preserve the
+		// client-verdict quorum's deliberate backdate, however: it is a forced
+		// recheck even when the previous sampled-site health remains fresh. The
+		// backdate precedes the health only if the quorum was recorded later.
 		result, err := conn.Query(
 			ctx,
 			`
@@ -945,6 +946,10 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 					SELECT 1 FROM provider_egress_health
 					WHERE provider_egress_health.client_id = provider_egress_location.client_id
 					  AND provider_egress_health.measured_at >= $9
+					  AND NOT (
+					      provider_egress_location.update_time > provider_egress_health.measured_at
+					      AND EXTRACT(EPOCH FROM (provider_egress_location.update_time - provider_egress_location.observed_at)) >= $10
+					  )
 				) AND
 				network_client.active = true AND
 				network_client.source_client_id IS NULL AND
@@ -987,6 +992,7 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 			minBlackholeCheckedAt.UTC(),
 			minGuardAttemptAt.UTC(),
 			minMeasuredAt.UTC(),
+			providerClientVerdictProbeDueAge.Seconds(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

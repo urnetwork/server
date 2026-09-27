@@ -112,13 +112,13 @@ func TestEgressHealthIsNotSubmittedWhenNoBudgetLeft(t *testing.T) {
 // contract. The product of a pass is the geolocation; a diagnostic that could
 // fail it would be worse than no diagnostic. The location has already been
 // recorded server-side by the time this runs.
-func TestEgressHealthSubmitFailureDoesNotFailTheProbe(t *testing.T) {
+func TestEgressHealthSubmitFailureFailsTheProbe(t *testing.T) {
 	logs := captureLog(t)
 	reporter := &stubHealthReporter{err: errors.New("connection refused")}
 	p := healthProber(healthy, reporter)
 
-	if err := p.ProbeOne(context.Background(), provider("provider-1")); err != nil {
-		t.Fatalf("a health submission failure failed the probe: %v", err)
+	if err := p.ProbeOne(context.Background(), provider("provider-1")); err == nil {
+		t.Fatalf("a health submission failure was silently acknowledged: %v", err)
 	}
 	if !strings.Contains(logs.String(), "could not submit an egress-health result") {
 		t.Fatalf("the submission failure was not logged.\n--- log ---\n%s", logs.String())
@@ -140,8 +140,8 @@ func TestEgressHealthSubmitErrorsAreLoggedOnce(t *testing.T) {
 	p := healthProber(healthy, reporter)
 
 	for i := 0; i < 5; i++ {
-		if err := p.ProbeOne(context.Background(), provider("provider-1")); err != nil {
-			t.Fatalf("ProbeOne err = %v", err)
+		if err := p.ProbeOne(context.Background(), provider("provider-1")); err == nil {
+			t.Fatalf("missing publication error: %v", err)
 		}
 	}
 	if n := strings.Count(logs.String(), "could not submit an egress-health result"); n != 1 {
@@ -155,13 +155,13 @@ func TestEgressHealthSubmitErrorsAreLoggedOnce(t *testing.T) {
 // A deployment that has not
 // shipped the endpoint answers 404. The prober must keep working against it,
 // and must say so as a skip rather than as a failure.
-func TestEgressHealthUnsupportedServerIsACleanSkip(t *testing.T) {
+func TestEgressHealthUnsupportedServerCannotAcknowledgeQuality(t *testing.T) {
 	logs := captureLog(t)
 	reporter := &stubHealthReporter{err: egresshealth.ErrUnsupported}
 	p := healthProber(healthy, reporter)
 
-	if err := p.ProbeOne(context.Background(), provider("provider-1")); err != nil {
-		t.Fatalf("an older server failed the probe: %v", err)
+	if err := p.ProbeOne(context.Background(), provider("provider-1")); err == nil {
+		t.Fatalf("an older server was silently acknowledged: %v", err)
 	}
 	out := logs.String()
 	if !strings.Contains(out, "does not store egress-health results") {
@@ -174,12 +174,12 @@ func TestEgressHealthUnsupportedServerIsACleanSkip(t *testing.T) {
 
 // The hook is optional, and a prober without
 // it must behave exactly as before -- health still logged, nothing submitted.
-func TestNilHealthReporterIsSkipped(t *testing.T) {
+func TestNilHealthReporterCannotAcknowledgeQuality(t *testing.T) {
 	logs := captureLog(t)
 	p := healthProber(healthy, nil)
 
-	if err := p.ProbeOne(context.Background(), provider("provider-1")); err != nil {
-		t.Fatalf("ProbeOne err = %v", err)
+	if err := p.ProbeOne(context.Background(), provider("provider-1")); err == nil {
+		t.Fatalf("missing publication error: %v", err)
 	}
 	if !strings.Contains(logs.String(), "ok=9/11") {
 		t.Fatalf("the health line was lost.\n--- log ---\n%s", logs.String())
@@ -269,7 +269,7 @@ func TestEgressHealthReachesAnIngestStub(t *testing.T) {
 // The same fire-and-forget
 // contract as above, reached through the real http path: a server that 500s
 // must not fail a probe whose location was already recorded.
-func TestEgressHealthIngestFailureDoesNotFailThePass(t *testing.T) {
+func TestEgressHealthIngestFailureFailsThePass(t *testing.T) {
 	logs := captureLog(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusInternalServerError)
@@ -278,8 +278,8 @@ func TestEgressHealthIngestFailureDoesNotFailThePass(t *testing.T) {
 
 	p := healthProber(healthy, &ingest.Client{ServerUrl: srv.URL, OperatorSecret: "s3cret", Http: srv.Client()})
 
-	if err := p.ProbeOne(context.Background(), provider("provider-1")); err != nil {
-		t.Fatalf("a 500 from the ingest endpoint failed the probe: %v", err)
+	if err := p.ProbeOne(context.Background(), provider("provider-1")); err == nil {
+		t.Fatalf("a 500 from the ingest endpoint was silently acknowledged: %v", err)
 	}
 	if !strings.Contains(logs.String(), "could not submit an egress-health result") {
 		t.Fatalf("the failure was not logged.\n--- log ---\n%s", logs.String())
@@ -288,7 +288,7 @@ func TestEgressHealthIngestFailureDoesNotFailThePass(t *testing.T) {
 	// and the same again with nothing listening at all
 	srv.Close()
 	p2 := healthProber(healthy, &ingest.Client{ServerUrl: srv.URL, OperatorSecret: "s3cret", Http: srv.Client()})
-	if err := p2.ProbeOne(context.Background(), provider("provider-1")); err != nil {
-		t.Fatalf("a refused connection to the ingest endpoint failed the probe: %v", err)
+	if err := p2.ProbeOne(context.Background(), provider("provider-1")); err == nil {
+		t.Fatalf("a refused connection to the ingest endpoint was silently acknowledged: %v", err)
 	}
 }

@@ -434,8 +434,8 @@ func TestEgressHealthOptionsFollowTheProbeTimeout(t *testing.T) {
 	for _, all := range []bool{false, true} {
 		for _, probeTimeout := range []time.Duration{10 * time.Second, 30 * time.Second, 60 * time.Second, 5 * time.Minute} {
 			opts := egressHealthOptions(probeTimeout, all)
-			if opts.IpEchoTimeout != probeTimeout {
-				t.Errorf("egressHealthOptions(%s, %t).IpEchoTimeout = %s, want the probe timeout", probeTimeout, all, opts.IpEchoTimeout)
+			if opts.ColdStartTimeout != probeTimeout {
+				t.Errorf("egressHealthOptions(%s, %t).ColdStartTimeout = %s, want the probe timeout", probeTimeout, all, opts.ColdStartTimeout)
 			}
 			if want := min(probeTimeout, egresshealth.DefaultPerRequestTimeout); opts.PerRequestTimeout != want {
 				t.Errorf("egressHealthOptions(%s, %t).PerRequestTimeout = %s, want %s", probeTimeout, all, opts.PerRequestTimeout, want)

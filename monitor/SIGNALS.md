@@ -6960,6 +6960,87 @@ cohort.
 ### 2.19 Provider egress probe coverage — every durable shard must advance
 Probe: `egress-coverage`
 
+Source architecture checkpoint (2026-09-27, sampled-only probe; verify the
+running API **and** Taskworker artifacts before applying these semantics):
+
+- Full and cheap checks start directly with randomized destination-pool URLs.
+  There is no separate `/ip` or `/my-ip-info` warm-up and no automatic operator
+  or CDN bulk-bandwidth fetch. Legacy task settings remain decodable but do not
+  authorize those requests. The sampled DNS, connectivity/captive-portal, CDN,
+  and ordinary-site classes retain their existing response contracts. Country
+  canaries are an additional random sample of at most two pool members, never
+  scored, included in the request budget; they are not an unbounded fixed set.
+  This is a source-proven boundedness correction, not evidence canaries caused
+  Main's location-specific provider-list incident.
+- Each sampled hostname has an explicit IPv4 name-resolution phase using its
+  own tunnel's DoH cache, followed by target TCP/TLS and response work. Up to
+  three transient DNS lookup attempts share the request's hard deadline, with
+  bounded 50–200 ms jitter and time reserved for the connection. An authoritative
+  negative is not immediately repeated; the existing spaced per-site retries
+  still apply. Fixed DoH resolver infrastructure is distinct from an added
+  application warm-up URL. A failure of one DoH transport leg is not a failed
+  logical lookup, and exhausted lookup retries do not alone distinguish shared
+  resolver/control-plane failure from a provider swallowing egress traffic.
+- The first sampled requests share one finite cold-start window per tunnel
+  generation. A response ends that allowance for later requests; failure does
+  not renew it. Hard request/run deadlines, per-provider concurrency, three
+  spaced load attempts, bounded tunnel recreation, TLS authentication, host
+  allowlists/pins, batch guards, and cheap dark-streak policy remain enforced.
+  The cold-generation reserve is included in admission math; at the default
+  full geometry the conservative envelope is 37 minutes of health work plus
+  one minute of tunnel opening, **not** a measured per-provider service time.
+- `CheckResult.Latency` and `urnetwork_egress_probe_health_check_seconds` retain
+  total bounded fetch duration. Separate request-local `DnsLookupLatency`,
+  `TimeToFirstByte` (DNS included), and `ConnectFirstByteLatency` distinguish
+  lookup from connection/TLS/request/first-byte work. Fixed summary fields
+  `dns_timed`, `dns_ms`, `first_byte`, `connect_ttfb_ms`, and `ttfb_ms` aggregate
+  last attempts only. Body throughput starts at the first response byte; a
+  no-first-byte timeout reports no speed. Capped small-body rate is diagnostic,
+  **not** the former calibrated bulk-bandwidth sample or a speed-score update.
+- Full success/`full_submitted` means nonempty scored website health survived
+  the batch guard and its reporter acknowledged publication. An unsupported
+  or failed health endpoint, empty result, or failed final buffered release
+  cannot certify success. Pre-submit measurement and attempt counters remain
+  non-ACK evidence; an error can follow a durable write whose reply was lost.
+  `submit_failed` now concerns health publication; older artifacts also used it
+  for location submission. Correlate §2.19a's separate acknowledgment controls,
+  not historical location-only meanings of the same pass-summary field.
+- Location is independent and optional: only an already-selected, successful
+  HTTPS connectivity `BodyCheckIpText` response may contribute an actual public
+  exit-IP observation. No extra request or first-position preference is added.
+  Special-purpose/nonpublic addresses are rejected conservatively; conflicting
+  valid observations produce no location. DNS answers, control IPs, and provider
+  claims are never substituted. Missing or rejected location publication does
+  not revoke acknowledged health. If no usable sample is obtained, existing
+  exit-location rows can age past seven days and ordinary connection-IP
+  geolocation fallback may describe a different exit. Health freshness does
+  not certify country/city placement. Optional sample absence is **not** an
+  echo failure: historical `provider_egress_place_tally.echo_failure_count` is
+  deprecated and receives no new echo events from this architecture.
+
+API due selection and fleet reconstruction must use independently fresh health
+after this change; deploying Taskworker alone does not activate those API/model
+semantics. Never interpret an older location-only outcome query's `inconsistent`
+rows as lost website-health publication. This change does not redefine the
+four-hour target: it is a complete **measured cheap blackhole** sweep of the
+eligible fleet, not the deep Full schedule and not attempted/unknown coverage.
+Validate distinct acknowledged measured providers, guard losses, shard placement,
+closed-cohort slot-seconds, CPU/memory and source artifacts over multiple
+cadences. Local tests and lower request counts alone do not establish four-hour
+capacity or explain the location-specific FindProviders2 regression.
+
+Brittle-gate audit left intentionally unchanged: a missing trusted pin snapshot
+fails the pass closed (do not recover by silently unpinning); a terminal TLS
+authentication failure remains integrity evidence; country-incompatible sites
+are unscored and only bounded canaries test recovery; shared-failure batch guards
+still contain false provider negatives. The latest-run 90% quality admission
+gate can exclude a 50-load provider after six final failed destinations, and
+country counts additionally need trustworthy exit-location evidence. With sparse
+Full coverage this may underfill particular target cohorts even when global
+best-available remains populated, but aggregate caller-country outcome bands
+do not prove that causal join. Do not relax country/security gates or attribute
+the live outage without target-level privacy-safe evidence and a tested policy.
+
 The provider-egress pipeline now runs as recurring `pending_task` shards rather
 than as host-owned edge services. Generic task health (§1.2/§8.9) can detect a
 row that is parked, overdue, or failing, but cannot prove that every hash slice
@@ -9860,14 +9941,18 @@ contract as §2.19:
 - it holds a Public provide key (`provide_mode=3`), tested with `EXISTS` so
   multiple keys cannot duplicate the denominator.
 
-The query joins each eligible provider to its single location and attempt rows,
-then emits only one fixed aggregate. A nonempty attempt inside the six-hour
-retry window is a current failure when there is no trusted location or its
-server-written update time is later than the location update. A trusted
-location is success only when no retained attempt exists or the retained
-attempt itself reports success. A retained nonempty failure older than six
-hours is `unobserved`, not permission to resurrect an older success. A current
-success attempt without a trusted location is `inconsistent`.
+The query joins each eligible provider to its sampled-site health, location,
+and attempt rows, then emits only one fixed aggregate. A nonempty attempt
+inside the six-hour retry window is a current failure when neither a newer
+fresh health measurement nor a newer trusted location supersedes it. A fresh
+health measurement is success without requiring exit-IP evidence when there
+is no newer failed attempt; legacy fresh location is still accepted with no
+retained failure or an empty failure class. A retained nonempty failure older
+than six hours is `unobserved`, not permission to resurrect an older success.
+A current success attempt without trusted health **or** location is
+`inconsistent`. This is a deployment-generation-sensitive transition: verify
+both Taskworker publication and the API/monitor reader artifacts before using
+the new meaning to judge recovery.
 
 Location `update_time` is deliberately one-way evidence. Client-verdict quorum
 handling can reprioritize a location by backdating `observed_at` and writing a
@@ -9884,9 +9969,10 @@ The only exported outcome vocabulary is success, `tunnel_failed`, legacy
 `no_consensus`, `locate_failed` and `not_confident` are the retired vendor
 consensus's and appear only on attempts written before connect/GEOMAP.md
 §11.3; `health_not_run` and `run_not_measured` are runs that did not start or
-measured nothing, `no_exit_ip` a run without a usable exit-IP observation
-from the operator's `/ip` echo, and `run_batch_guard` a full batch the run
-guard held back. Raw
+measured nothing, `no_exit_ip` a legacy run without a usable exit-IP
+observation (the sampled-only producer does not issue a separate echo request
+and does not use that class for missing optional location), and
+`run_batch_guard` a full batch the run guard held back. Raw
 failure text is normalized inside PostgreSQL. `unknown_failure` counts toward
 the total failure share but can never become the dominant common class because
 several distinct raw values may have collapsed into that one redacted bucket.
@@ -9936,20 +10022,21 @@ evidence floor:
   `health_not_run`, `run_batch_guard`), site pool (§2.19b), and submission
   evidence before acting.
 - `egress-outcome-inconsistent` (WARN after two samples): a current attempt
-  says success but no trusted location exists. Trace submission/report ordering,
-  monotonic upserts, retention, and direct mutations; never create a location
-  or delete an attempt to clear the alert.
+  says success but no trusted sampled-site health or legacy location exists.
+  Trace health acknowledgment/report ordering, monotonic upserts, retention,
+  and direct mutations; never synthesize a record or delete an attempt to
+  clear the alert.
 - `egress-outcome-unknown` (WARN after two samples): the producer and reader
   failure vocabularies differ or an invalid class was stored. Compare exact
   artifacts and add a reviewed bounded class when intentional; the raw value
   remains private.
 
-A dominant `no_exit_ip` class is a shared observation-stage pattern, not
-an identified failing component. It does not isolate echo reachability,
-certificate or response validation, provider-tunnel admission,
-provider-specific paths or shared route capacity. Direct healthy echo
-traffic does not certify the provider-tunnel path. Require bounded
-same-attempt phase/outcome evidence and running-artifact identity before
+A dominant `no_exit_ip` class is a legacy shared observation-stage pattern,
+not an identified failing component or evidence that sampled-site reachability
+failed. It does not isolate echo reachability, certificate or response
+validation, provider-tunnel admission, provider-specific paths, or shared
+route capacity. Require bounded same-attempt phase/outcome evidence and
+running-artifact identity before
 causal attribution or a corrective change; thresholds and due-window
 handling do not change.
 
@@ -9958,9 +10045,9 @@ faults: successful providers legitimately probe less often. Use §2.19 for
 durable shard geometry, due work, and advancement. Likewise, alert absence is
 not sufficient recovery: failed rows legitimately remain deferred for six
 hours, while simply aging past that backoff can turn them into `unobserved`.
-The next applicable due cycle is six hours for an absent or stale location, but
-can be as late as the 12-hour health due age when a failed full-probe pass
-refreshed health without replacing a still-fresh location. After repairing the
+The next applicable due cycle is six hours for a failed attempt, but
+can be as late as the 12-hour health due age after acknowledged sampled-site
+health. After repairing the
 proved shared boundary, require §2.19 to keep advancing through that applicable
 due cycle plus configured shard `max_time`, `idle_delay`, and one monitor
 cadence, and require replacement success/current evidence. Keep the

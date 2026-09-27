@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -58,6 +59,13 @@ func (self *lockedRand) expFloat64() float64 {
 	return self.r.ExpFloat64()
 }
 
+// Random launch order shares the run's serialized generator with retry spacing.
+func (self *lockedRand) perm(count int) []int {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.r.Perm(count)
+}
+
 // One run's shared state: every load's retry chain reads it, and none
 // writes it except through the slots, the path tracker and the exit record,
 // each of which is safe for that.
@@ -76,16 +84,23 @@ type run struct {
 	// waiting out its retry spacing holds no slot, which is what lets the
 	// loads of a run interleave: a site that keeps failing does not keep the
 	// rest of the sample queued behind its ten-minute chain.
-	slots chan struct{}
-	rng   *lockedRand
-	exit  *exitRecord
-	opts  Options
+	slots            chan struct{}
+	rng              *lockedRand
+	opts             Options
+	coldStateLock    sync.Mutex
+	coldClientStates map[*http.Client]coldClientState
+}
+
+// Bounded by the initial tunnel and the run's finite recreation allowance.
+type coldClientState struct {
+	deadline time.Time
+	warm     bool
 }
 
 // Resolves opts into one run's shared state: its path tracker, whose re-opened
-// tunnels are warmed up by this run, its budget's deadline on the Options
+// tunnels receive their own finite cold window, its deadline on the Options
 // clock, and concurrency slots.
-func newRun(path Path, opts Options, concurrency int, budget time.Duration, rng *rand.Rand, exit *exitRecord) *run {
+func newRun(path Path, opts Options, concurrency int, budget time.Duration, rng *rand.Rand) *run {
 	r := &run{
 		path:              &pathTracker{path: path, reopenLimit: opts.tunnelRecreateAttempts()},
 		profile:           opts.profile(),
@@ -95,11 +110,37 @@ func newRun(path Path, opts Options, concurrency int, budget time.Duration, rng 
 		deadline:          opts.now().Add(budget),
 		slots:             make(chan struct{}, max(1, concurrency)),
 		rng:               &lockedRand{r: rng},
-		exit:              exit,
 		opts:              opts,
 	}
-	r.path.warm = r.warmClient
 	return r
+}
+
+// All requests on one new tunnel share one non-renewable cold-start window.
+func (self *run) requestTimeout(client *http.Client) time.Duration {
+	now := self.opts.now()
+	self.coldStateLock.Lock()
+	defer self.coldStateLock.Unlock()
+	if self.coldClientStates == nil {
+		self.coldClientStates = map[*http.Client]coldClientState{}
+	}
+	state, found := self.coldClientStates[client]
+	if !found {
+		state.deadline = now.Add(self.opts.coldStartTimeout())
+		self.coldClientStates[client] = state
+	}
+	if state.warm {
+		return self.perRequestTimeout
+	}
+	return max(self.perRequestTimeout, state.deadline.Sub(now))
+}
+
+// A returned HTTP response proves establishment, even if the site refused it.
+func (self *run) established(client *http.Client) {
+	self.coldStateLock.Lock()
+	defer self.coldStateLock.Unlock()
+	state := self.coldClientStates[client]
+	state.warm = true
+	self.coldClientStates[client] = state
 }
 
 // Derives a context that also ends when signal does -- the tunnel under
@@ -198,7 +239,10 @@ attempts:
 			continue
 		}
 		attemptCtx, stop := bound(ctx, signal)
-		result = fetch(attemptCtx, client, d, self.perRequestTimeout, self.profile, self.opts.now)
+		result = fetchWithExitPolicy(attemptCtx, client, d, self.requestTimeout(client), self.profile, self.opts.now, self.opts.exitAddressAllowed)
+		if 0 < result.StatusCode {
+			self.established(client)
+		}
 		stop()
 		<-self.slots
 		result.Attempts = attempt
@@ -232,7 +276,10 @@ attempts:
 func (self *run) loadAll(ctx context.Context, dests []Destination) []CheckResult {
 	results := make([]CheckResult, len(dests))
 	var wg sync.WaitGroup
-	for i := range dests {
+	// Randomize launch order too: table order must not fingerprint the first
+	// request even though results retain stable destination ordering.
+	order := self.rng.perm(len(dests))
+	for _, i := range order {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -241,50 +288,4 @@ func (self *run) loadAll(ctx context.Context, dests []Destination) []CheckResult
 	}
 	wg.Wait()
 	return results
-}
-
-// What the run's warm-ups saw: the first exit address an echo
-// answered with, and why none did if none did. Warm-ups run on the first
-// tunnel and again on every re-created one, so it is written concurrently;
-// safe for concurrent use.
-type exitRecord struct {
-	stateLock  sync.Mutex
-	ip         string
-	observedAt time.Time
-	errMessage string
-	// Set by any echo whose peer did not authenticate the operator's
-	// own api host: interception of the one host whose answer places the
-	// provider, and the same hard signal a forged destination is.
-	tlsFailure bool
-}
-
-// Records one warm-up's outcome. The first address an echo answered with
-// stands; an error is kept only while no echo has answered, and a
-// TLS-authentication failure is kept whatever else was seen.
-func (self *exitRecord) record(ip string, at time.Time, err error) {
-	if err != nil {
-		errMessage := err.Error()
-		tlsFailure := isTlsAuthenticationFailure(err)
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		if self.ip == "" {
-			self.errMessage = errMessage
-		}
-		if tlsFailure {
-			self.tlsFailure = true
-		}
-		return
-	}
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	if self.ip == "" {
-		self.ip, self.observedAt, self.errMessage = ip, at, ""
-	}
-}
-
-// Returns what the warm-ups saw so far.
-func (self *exitRecord) read() (ip string, observedAt time.Time, errMessage string, tlsFailure bool) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	return self.ip, self.observedAt, self.errMessage, self.tlsFailure
 }

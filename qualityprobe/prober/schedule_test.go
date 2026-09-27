@@ -22,7 +22,7 @@ import (
 // Returns a prober whose every probe succeeds, counting probes in probed and
 // tracking the peak of concurrently open tunnels in maxSeen, under stateLock.
 func okProber(probed *int32, stateLock *sync.Mutex, inflight *int32, maxSeen *int32) *Prober {
-	return &Prober{
+	return &Prober{HealthResults: &stubHealthReporter{},
 		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
 			cur := atomic.AddInt32(inflight, 1)
 			stateLock.Lock()
@@ -86,7 +86,7 @@ func TestSchedulerStopsSpawningWhenCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var opens atomic.Int32
-	p := &Prober{
+	p := &Prober{HealthResults: &stubHealthReporter{},
 		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
 			opens.Add(1)
 			// the operator's signal lands while the first probe is in flight
@@ -200,7 +200,7 @@ func TestSchedulerPrunesProbedAfterTtl(t *testing.T) {
 
 // A failed probe is counted and not cached, so the next run retries it.
 func TestSchedulerCountsFailuresAndDoesNotCache(t *testing.T) {
-	p := &Prober{
+	p := &Prober{HealthResults: &stubHealthReporter{},
 		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
 			return nil, nil, errors.New("boom")
 		},
@@ -229,7 +229,7 @@ func TestSchedulerCountsRunsThatMeasuredNothing(t *testing.T) {
 		NotMeasured: 1,
 		ByClass:     map[egresshealth.Class]egresshealth.ClassSummary{},
 	}
-	p := &Prober{
+	p := &Prober{HealthResults: &stubHealthReporter{},
 		Open: okOpen,
 		Health: func(ctx context.Context, c *http.Client, place egresshealth.Place) (*egresshealth.Result, error) {
 			return unmeasured, nil
@@ -262,7 +262,7 @@ func TestSchedulerLogsCappedDistinctErrors(t *testing.T) {
 	log.SetOutput(&buf)
 	defer log.SetOutput(orig)
 
-	p := &Prober{
+	p := &Prober{HealthResults: &stubHealthReporter{},
 		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
 			return nil, nil, fmt.Errorf("boom-%s", id) // distinct per provider
 		},
@@ -301,7 +301,7 @@ func TestSchedulerLogsCappedDistinctErrors(t *testing.T) {
 // is whatever the server sent.
 func TestSchedulerProbesADuplicateIdOnce(t *testing.T) {
 	var opens atomic.Int32
-	p := &Prober{
+	p := &Prober{HealthResults: &stubHealthReporter{},
 		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
 			opens.Add(1)
 			time.Sleep(10 * time.Millisecond)

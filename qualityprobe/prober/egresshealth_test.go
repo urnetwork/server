@@ -79,7 +79,7 @@ func TestEgressHealthRunsOnTheSameTunnelClient(t *testing.T) {
 	var seen *http.Client
 
 	sub := &stubSubmitter{}
-	p := &Prober{
+	p := &Prober{HealthResults: &stubHealthReporter{},
 		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
 			opens++
 			return tunnelClient, func() error { return nil }, nil
@@ -159,7 +159,7 @@ func TestPartlyMeasuredRunIsSubmitted(t *testing.T) {
 // record.
 func TestEgressHealthStructuralFailureIsNotLoggedAsAScore(t *testing.T) {
 	logs := captureLog(t)
-	p := &Prober{
+	p := &Prober{HealthResults: &stubHealthReporter{},
 		Open: okOpen,
 		Health: func(context.Context, *http.Client, egresshealth.Place) (*egresshealth.Result, error) {
 			return nil, egresshealth.ErrNilClient
@@ -184,7 +184,7 @@ func TestEgressHealthStructuralFailureIsNotLoggedAsAScore(t *testing.T) {
 func TestEgressHealthSkippedWhenNoBudgetLeft(t *testing.T) {
 	logs := captureLog(t)
 	ran := false
-	p := &Prober{
+	p := &Prober{HealthResults: &stubHealthReporter{},
 		Open: okOpen,
 		Health: func(context.Context, *http.Client, egresshealth.Place) (*egresshealth.Result, error) {
 			ran = true
@@ -232,7 +232,7 @@ func (self *stubAttemptReporter) failures() []string {
 // The failure classes
 // reported to the server describe the probe; a health submission that failed
 // must not be able to rewrite whether the exit was recorded.
-func TestHealthSubmissionFailureNeverChangesTheProbeOutcome(t *testing.T) {
+func TestHealthSubmissionFailureReportsFailedAttempt(t *testing.T) {
 	captureLog(t)
 	sub := &stubSubmitter{}
 	rep := &stubAttemptReporter{}
@@ -243,13 +243,13 @@ func TestHealthSubmissionFailureNeverChangesTheProbeOutcome(t *testing.T) {
 		Attempts:      rep,
 		HealthResults: &stubHealthReporter{err: errors.New("health endpoint exploded")},
 	}
-	if err := p.ProbeOne(context.Background(), provider("provider-1")); err != nil {
-		t.Fatalf("a failing health submission failed the probe: %v", err)
+	if err := p.ProbeOne(context.Background(), provider("provider-1")); err == nil {
+		t.Fatalf("a failed health submission was silently acknowledged: %v", err)
 	}
-	if sub.calls != 1 {
-		t.Fatalf("submit calls = %d, want 1", sub.calls)
+	if sub.calls != 0 {
+		t.Fatalf("submit calls = %d, want 0", sub.calls)
 	}
-	if got := rep.failures(); len(got) != 1 || got[0] != "" {
+	if got := rep.failures(); len(got) != 1 || got[0] != FailureSubmit {
 		t.Fatalf("reported failure classes = %v, want one success (\"\")", got)
 	}
 }

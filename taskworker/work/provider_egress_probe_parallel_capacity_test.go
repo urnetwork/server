@@ -73,7 +73,7 @@ func TestProviderEgressParallelSettingsKeepSecurityGeometry(t *testing.T) {
 		args.RunBatchGuard != 0.3 || args.RunBatchGuardMinRuns != 3 {
 		t.Fatal("parallel settings altered selection size, retry, security or task lease")
 	}
-	if want := 32*time.Minute + 45*time.Second; providerEgressBlackholeCheckBudget(args) != want {
+	if want := 34 * time.Minute; providerEgressBlackholeCheckBudget(args) != want {
 		t.Fatalf("one check budget changed: %s, want %s", providerEgressBlackholeCheckBudget(args), want)
 	}
 }

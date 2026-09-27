@@ -45,9 +45,9 @@ type BlackholeOptions struct {
 	Pool PoolSource
 	// Bounds each load attempt of the check.
 	Timeout time.Duration
-	// The operator's /ip echo; empty derives it from
-	// TunnelConfig.ApiUrl. IpEchoTimeout bounds the warm-up alone; zero uses
-	// egresshealth.DefaultIpEchoTimeout, the cold-start allowance.
+	// Deprecated compatibility inputs. IpEchoUrl is never fetched;
+	// IpEchoTimeout remains the shared cold-start allowance per tunnel generation.
+	// Zero uses egresshealth.DefaultIpEchoTimeout.
 	IpEchoUrl     string
 	IpEchoTimeout time.Duration
 	// Passed through to egresshealth.Options, like the two fields below;
@@ -194,12 +194,11 @@ func RunBlackhole(
 		}
 
 		pool := options.Pool.pool()
-		echoUrl := options.ipEchoUrl()
-		echoTimeout := options.ipEchoTimeout()
-		hosts := dialHosts(egresshealth.BlackholeHostsOf(pool.Destinations), echoUrl)
-		// The client's own timeout bounds every request, the warm-up included, so
-		// it is the longer of the two.
-		clientTimeout := max(options.Timeout, echoTimeout)
+		coldStartTimeout := options.ipEchoTimeout()
+		hosts := egresshealth.BlackholeHostsOf(pool.Destinations)
+		// The client ceiling must allow initial sampled requests to establish
+		// the cold path; subsequent requests receive their smaller run deadline.
+		clientTimeout := max(options.Timeout, coldStartTimeout)
 		path, err := openProbePath(ctx, providerTunnelOpener(blackholeTunnelConfig(options), clientId, hosts), hosts, clientTimeout)
 		if err != nil {
 			return BlackholeResult{
@@ -223,8 +222,7 @@ func RunBlackhole(
 		client, _ := path.Current()
 		result := egresshealth.Blackhole(ctx, client, egresshealth.Options{
 			PerRequestTimeout:      options.Timeout,
-			IpEchoUrl:              echoUrl,
-			IpEchoTimeout:          echoTimeout,
+			ColdStartTimeout:       coldStartTimeout,
 			LoadAttempts:           options.LoadAttempts,
 			LoadRetryMeanInterval:  options.LoadRetryMeanInterval,
 			TunnelRecreateAttempts: options.TunnelRecreateAttempts,

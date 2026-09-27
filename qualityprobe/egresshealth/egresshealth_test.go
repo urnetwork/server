@@ -1374,7 +1374,7 @@ func TestWorstCaseBytesPerRunFitsTheBudget(t *testing.T) {
 		wholeTable += classTotal
 		t.Logf("  %-12s %2d of %3d x %4d = %6d bytes", c, n, pool, largest, n*largest)
 	}
-	whole := int64(DefaultLoadAttempts)*worst + maxIpEchoBytes
+	whole := int64(DefaultLoadAttempts) * worst
 	t.Logf("worst case per attempt round: %d bytes (%.2f KiB), budget %d; whole run with retries and the warm-up %d (%.2f KiB); the whole table would be %d (%.2f KiB) a round",
 		worst, float64(worst)/1024, perRound, whole, float64(whole)/1024, wholeTable, float64(wholeTable)/1024)
 
@@ -1384,7 +1384,7 @@ func TestWorstCaseBytesPerRunFitsTheBudget(t *testing.T) {
 	if wholeTable <= perRound {
 		t.Fatalf("the whole table costs %d bytes a round, within the %d budget; sampling is then buying nothing and the table should simply be run", wholeTable, perRound)
 	}
-	if limit := int64(DefaultLoadAttempts)*perRound + maxIpEchoBytes; limit < whole {
+	if limit := int64(DefaultLoadAttempts) * perRound; limit < whole {
 		t.Fatalf("a whole run can read %d bytes, above %d", whole, limit)
 	}
 }
@@ -1406,7 +1406,7 @@ func TestRunBudgetFitsTheScheduleAndStaysBounded(t *testing.T) {
 	if budget < DefaultIpEchoTimeout+longestChain {
 		t.Fatalf("RunBudget(%d) = %s, shorter than the warm-up plus the longest single chain %s", loads, budget, DefaultIpEchoTimeout+longestChain)
 	}
-	if want := DefaultIpEchoTimeout + time.Duration(DefaultLoadAttempts*rounds)*DefaultPerRequestTimeout +
+	if want := time.Duration(1+DefaultTunnelRecreateAttempts)*(DefaultIpEchoTimeout-DefaultPerRequestTimeout) + time.Duration(DefaultLoadAttempts*rounds)*DefaultPerRequestTimeout +
 		time.Duration(DefaultLoadAttempts-1)*retryDelayCapFactor*DefaultLoadRetryMeanInterval; budget != want {
 		t.Fatalf("RunBudget(%d) = %s, want %s", loads, budget, want)
 	}

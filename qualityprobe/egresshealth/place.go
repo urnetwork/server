@@ -60,7 +60,7 @@ func (self Destination) IncompatibleWith(place Place) bool {
 }
 
 // Splits a table for one provider's place: the destinations its
-// sample may draw from, and the canaries it loads besides.
+// sample may draw from, and the canary pool it may sample besides.
 //
 // A destination incompatible with the place is left out of the sample: a
 // site blocked in a country says nothing about that country's exits, and
@@ -69,9 +69,9 @@ func (self Destination) IncompatibleWith(place Place) bool {
 // padded from the incompatible sites; a class too thin to fill its size is
 // reported short (see Result.ShortClasses) as the pool's signal, not the provider's.
 //
-// An incompatible destination the server has marked Canary is loaded anyway,
-// in addition to the sample and never scored: it is how the server learns the
-// site works there again (§11.4). A canary-marked destination compatible with
+// Incompatible destinations marked Canary enter a separate bounded random
+// sample, never scored: it is how the server learns a site works there again
+// over successive runs (§11.4). A canary-marked destination compatible with
 // the place is an ordinary load.
 func forPlace(table []Destination, place Place) (compatible []Destination, canaries []Destination) {
 	compatible = make([]Destination, 0, len(table))

@@ -119,8 +119,7 @@ func (self *Client) SubmitEgressHealth(
 		// Bounded like probe_failure, and for the same reason: a run with
 		// many failures names dozens of destinations under
 		// -egress-health-all, and a submission the server rejects for length
-		// is a health signal dropped silently, since the prober submits these
-		// fire-and-forget with deduplicated error logging. Cut on element
+		// would leave the measured health unacknowledged. Cut on element
 		// boundaries with a dropped count -- see truncateNameList and
 		// MaxNameListLen.
 		FailedNames:       truncateNameList(res.FailedNames(), MaxNameListLen),

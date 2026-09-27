@@ -413,8 +413,8 @@ func testFullBatchSink(inner egressProbeIngest) *egressProbeMetricsReporter {
 }
 
 // Fills a batch the way the prober's reporters would: a provider with a
-// health run, an exit and an attempt; one whose tunnel failed; and one whose
-// exit the server will refuse.
+// health run, an exit and an attempt; one whose tunnel failed; and an invalid
+// exit-only row, which cannot certify website health.
 func testFillFullBatch(t *testing.T, batch *providerEgressFullBatch) {
 	t.Helper()
 	ctx := context.Background()
@@ -436,8 +436,8 @@ func testFillFullBatch(t *testing.T, batch *providerEgressFullBatch) {
 }
 
 // A released batch goes on provider by provider in the order it was measured:
-// the health run scored and tallied, then the exit, then the attempt, which a
-// refused exit turns into submit_failed.
+// the health run scored and tallied, then the optional exit, then the attempt.
+// An exit-only row cannot count as accepted quality.
 func TestProviderEgressFullBatchReleaseSubmitsInOrderAndTallies(t *testing.T) {
 	inner := newRecordingEgressProbeIngest("provider-c")
 	batch := newProviderEgressFullBatch(testFullBatchSink(inner))
@@ -459,7 +459,7 @@ func TestProviderEgressFullBatchReleaseSubmitsInOrderAndTallies(t *testing.T) {
 		},
 	)
 	if submitFailures != 1 {
-		t.Fatalf("submit failures = %d, want the one refused exit", submitFailures)
+		t.Fatalf("exit-only row certified health: failures=%d", submitFailures)
 	}
 	want := []string{
 		"health provider-a",
@@ -467,7 +467,7 @@ func TestProviderEgressFullBatchReleaseSubmitsInOrderAndTallies(t *testing.T) {
 		"attempt provider-a ",
 		"attempt provider-b " + prober.FailureTunnel,
 		"submit provider-c 203.0.113.9",
-		"attempt provider-c " + prober.FailureSubmit,
+		"attempt provider-c " + prober.FailureNotMeasured,
 	}
 	if !slices.Equal(inner.calls, want) {
 		t.Fatalf("released calls = %q, want %q", inner.calls, want)
@@ -594,7 +594,7 @@ func TestProviderEgressFullBatchReleaseSkipsARunWithNothingScored(t *testing.T) 
 			tallied += len(loads)
 		},
 	)
-	if !slices.Equal(inner.calls, []string{"attempt provider-a "}) {
+	if !slices.Equal(inner.calls, []string{"attempt provider-a " + prober.FailureNotMeasured}) {
 		t.Fatalf("released calls = %q, want the attempt alone", inner.calls)
 	}
 	if tallied != 1 {

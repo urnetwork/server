@@ -284,15 +284,15 @@ provider_egress_destination(name, active, probation) AS (
 	})
 }
 
-// A common class is a same-stage observation, not proof that the echo is the
-// cause or that provider-specific admission and routes are healthy.
+// A common legacy class is a same-stage observation, not proof that an echo
+// caused failure or that provider-specific admission and routes are healthy.
 func TestEgressOutcomesAuthorityNoExitIpCauseUnknown(t *testing.T) {
 	alerts := runSyntheticEgressOutcomes(t, egressOutcomeSnapshot{
 		eligible: 20, observed: 20, successes: 1, failures: 19,
 		noExitIp: 19, newestOutcomeAgeSeconds: 30, oldestOutcomeAgeSeconds: 600,
 	})
 	alert := requireAlertClass(t, alerts, "egress-common-mode")
-	for _, phrase := range []string{"does not isolate", "/ip echo", "provider", "same-attempt"} {
+	for _, phrase := range []string{"does not isolate", "sampled-only", "provider", "same-attempt"} {
 		if !strings.Contains(alert.Markdown(), phrase) {
 			t.Fatalf("no-exit-IP finding omitted %q: %s", phrase, alert.Markdown())
 		}

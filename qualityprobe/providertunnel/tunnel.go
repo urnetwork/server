@@ -1,6 +1,6 @@
 // Package providertunnel builds an http.Client whose every request egresses
 // through one specific urnetwork provider, so what a request made with it sees
-// -- the operator's own /ip echo, a site's answer -- is that provider's egress.
+// -- the sampled site's answer -- is that provider's egress.
 package providertunnel
 
 import (
@@ -403,7 +403,7 @@ func pumpStopped(dataCtx context.Context, err error, lose context.CancelCauseFun
 // tunnel, with the configured certificate pins applied. Only the pinned hosts
 // may be reached.
 func (self *Tunnel) HttpClient(timeout time.Duration) *http.Client {
-	return httpClientOverDialer(self.tun.DialContext, self.pins, timeout)
+	return self.HttpClientForHosts(timeout, nil)
 }
 
 // Returns the HttpClient client widened by a set of additional hosts that
@@ -415,13 +415,13 @@ func (self *Tunnel) HttpClient(timeout time.Duration) *http.Client {
 //
 // This exists for the egress-health probe (see egresshealth/), which checks
 // that a provider carries traffic to a random sample of ~140 well-known
-// internet destinations -- the built-in table or the server's pool -- after
-// fetching the operator's own /ip echo. Those hosts are reached unpinned
+// internet destinations -- the built-in table or the server's pool. No fixed
+// echo or bandwidth target is fetched. Those hosts are reached unpinned
 // unless the server serves a pin for one, and the reason is that pinning them
 // by default would make the signal worse, not better:
 //
 //   - The threat pinning defends against here is a provider forging a result.
-//     Forging a pass, or the echo's answer, requires presenting a chain-valid
+//     Forging a pass requires presenting a chain-valid
 //     certificate for cloudflare-dns.com, www.amazon.com or the operator's own
 //     api host -- i.e. compromising or mis-issuing from a public CA. A
 //     provider cannot do that by being on the path, which is the capability
@@ -440,7 +440,8 @@ func (self *Tunnel) HttpClient(timeout time.Duration) *http.Client {
 // pinned nor in extraHosts is still refused outright by DialTLSContext, so
 // this widens the closed set rather than opening it.
 func (self *Tunnel) HttpClientForHosts(timeout time.Duration, extraHosts []string) *http.Client {
-	return httpClientOverDialerWithHosts(self.tun.DialContext, self.pins, extraHosts, timeout)
+	resolver := &providerUrlResolver{query: self.tun.DohCache().QueryResult, dial: self.tun.DialResolvedContext}
+	return httpClientOverDialerWithResolver(self.tun.DialContext, resolver, self.pins, extraHosts, timeout)
 }
 
 // Tears the tunnel down. It is safe to call more than once; only the
@@ -539,6 +540,12 @@ func httpClientOverDialer(dial dialContextFunc, pins map[string][]string, timeou
 // gets full WebPKI chain verification, and a host in neither set is still
 // refused.
 func httpClientOverDialerWithHosts(dial dialContextFunc, pins map[string][]string, extraHosts []string, timeout time.Duration) *http.Client {
+	return httpClientOverDialerWithResolver(dial, nil, pins, extraHosts, timeout)
+}
+
+// Production supplies an owner-local resolution phase; synthetic/raw dialer
+// callers retain their existing dial contract. Both retain identical TLS policy.
+func httpClientOverDialerWithResolver(dial dialContextFunc, resolver *providerUrlResolver, pins map[string][]string, extraHosts []string, timeout time.Duration) *http.Client {
 	// Normalized once, up front: this is the allowlist of the closed set of
 	// hosts this tunnel is permitted to speak TLS to -- the pinned hosts plus
 	// any explicitly-permitted unpinned hosts. Any https host not in this set
@@ -583,7 +590,7 @@ func httpClientOverDialerWithHosts(dial dialContextFunc, pins map[string][]strin
 
 		// HTTP/2 is refused, explicitly rather than by accident.
 		//
-		// The bandwidth probe measures a provider by opening
+		// Standalone bandwidth diagnostics measure a provider by opening
 		// bandwidth.StreamCount requests at once, because a single TCP flow
 		// cannot exceed (connect's 1 MiB window / RTT) and N flows get N
 		// windows. That only holds if N requests are N transport connections.
@@ -630,7 +637,12 @@ func httpClientOverDialerWithHosts(dial dialContextFunc, pins map[string][]strin
 		// HTTP transports cannot masquerade as the requested connection.
 		trace := httptrace.ContextClientTrace(ctx)
 		ctx, dialTrace := traceProviderHttpDial(ctx, network, addr)
-		raw, err := dial(ctx, network, addr)
+		var raw net.Conn
+		if resolver != nil {
+			raw, err = resolver.dialContext(ctx, network, addr, dialTrace)
+		} else {
+			raw, err = dial(ctx, network, addr)
+		}
 		dialStage := dialTrace.finish(err)
 		if err != nil {
 			return nil, &providerHttpStageError{stage: dialStage, err: err}
@@ -661,8 +673,7 @@ func httpClientOverDialerWithHosts(dial dialContextFunc, pins map[string][]strin
 	return &http.Client{
 		Transport: &providerHttpTransport{Transport: tr},
 		Timeout:   timeout,
-		// A probe has no legitimate reason to follow a redirect: the echo
-		// answers directly, and a destination that redirects declares the
+		// A sampled destination that redirects declares the
 		// redirect as its answer (egresshealth's ExpectStatus). Refusing
 		// redirects closes off a provider MITM path where a host's response
 		// 3xx's to a different host, or downgrades to plain http://, either
