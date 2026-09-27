@@ -6951,15 +6951,29 @@ func FindProviders2(
 					borrow(clientScore, otherRankMode, clientScore.Tiers[otherRankMode]+backfillTierOffset)
 				}
 
-				// 3. the online bucket, which both modes' samples carry alike
+				// 3. the online bucket from both already-filtered samples. The
+				// pages are drawn independently, so either can hold usable online
+				// providers absent from the other. Keep the requested mode's copy
+				// on overlap, and never repeat a previously selected tier when
+				// cache generations disagree about a provider's online flag.
+				answeredClientIds := map[server.Id]bool{}
+				for _, provider := range providers {
+					answeredClientIds[provider.ClientId] = true
+				}
 				onlineClientScores := map[server.Id]*ClientScore{}
-				for clientId, clientScore := range clientScores {
-					if clientScore.Online {
+				for _, sample := range []map[server.Id]*ClientScore{clientScores, otherClientScores} {
+					for clientId, clientScore := range sample {
+						if !clientScore.Online || answeredClientIds[clientId] {
+							continue
+						}
+						if _, held := onlineClientScores[clientId]; held {
+							continue
+						}
 						onlineClientScores[clientId] = clientScore
 					}
 				}
 				for _, clientId := range selectOnline(onlineClientScores, remainingCount()) {
-					borrow(clientScores[clientId], RankModeSpeed, 2*backfillTierOffset)
+					borrow(onlineClientScores[clientId], RankModeSpeed, 2*backfillTierOffset)
 				}
 			}
 			chosenClientIds = append(chosenClientIds, borrowedClientIds...)
