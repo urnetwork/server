@@ -6421,9 +6421,10 @@ using the cohorts:
   nonnegative finite rate. Its sum must reconcile with the aggregate within the
   larger of 1/min or 2%; that narrow allowance covers a scrape landing between
   the two adjacent counter increments. The old five-label schema may coexist
-  during a rolling range; the monitor retains both missing attribution labels
-  as the synthetic fixed class `unattributed`. The intermediate seven-label
-  schema retains only `destination_owner=unattributed`. Neither is folded into
+  during a rolling range; the monitor retains missing `sender_role`,
+  `source_owner`, and `destination_owner` as the synthetic fixed class
+  `unattributed`. The intermediate seven-label schema retains only
+  `destination_owner=unattributed`. Neither is folded into
   `other`; a half-upgraded or producer-emitted `unattributed` schema is rejected.
   Only in this state may the alert export the dominant joint sender/source-
   owner/destination-owner/resolution/relationship/lifecycle cohort and its rate.
@@ -6593,9 +6594,10 @@ missing-origin mechanism. Deploy it to every API instance, wait one complete
 five-minute range, and require zero `unattributed` rate before selecting the
 internal-prober or other-source branch.
 
-Verification requires every API instance to export the seven-label detail
-family, one complete five-minute range with zero ownership-unattributed rate,
-and independently proven adoption of the applicable Connect ancestry:
+Verification requires every API instance to export the eight-label detail
+family (including `destination_owner`), one complete five-minute range with zero
+ownership-unattributed rate, and independently proven adoption of the applicable
+Connect ancestry:
 `ec34ce1` for selected/discovery windows, `55daddb` for provider-return source
 owners, or both while the path remains unattributed. Only then does a maximum
 client-window lifetime become a useful observation interval. A still-installed
