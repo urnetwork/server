@@ -43,12 +43,6 @@ WITH clock AS MATERIALIZED (
         nc.active,
         nc.create_time,
         nc.deactivate_time,
-        EXISTS (
-            SELECT 1
-            FROM network_client_connection ncc
-            WHERE ncc.client_id = nc.client_id
-              AND ncc.connected
-        ) AS connected,
         k.now_utc
     FROM prober p
     INNER JOIN network_client nc
@@ -56,6 +50,20 @@ WITH clock AS MATERIALIZED (
      AND nc.source_client_id = p.client_id
     CROSS JOIN clock k
     WHERE nc.create_time >= k.now_utc - interval '6 hours'
+), mature_active AS MATERIALIZED (
+    SELECT
+        r.client_id,
+        r.create_time,
+        r.now_utc,
+        EXISTS (
+            SELECT 1
+            FROM network_client_connection ncc
+            WHERE ncc.client_id = r.client_id
+              AND ncc.connected
+        ) AS connected
+    FROM recent r
+    WHERE r.create_time < r.now_utc - interval '10 minutes'
+      AND r.active
 ), aggregate AS (
     SELECT
         count(*)::bigint AS created_6h,
@@ -67,29 +75,22 @@ WITH clock AS MATERIALIZED (
               AND NOT active
         )::bigint AS mature_inactive,
         count(*) FILTER (
-            WHERE create_time < now_utc - interval '10 minutes'
-              AND active
-              AND connected
-        )::bigint AS mature_active_connected,
-        count(*) FILTER (
-            WHERE create_time < now_utc - interval '10 minutes'
-              AND active
-              AND NOT connected
-        )::bigint AS mature_active_disconnected,
-        count(*) FILTER (
             WHERE create_time >= now_utc - interval '10 minutes'
               AND active
         )::bigint AS fresh_active,
         count(*) FILTER (
             WHERE NOT active
               AND deactivate_time IS NULL
-        )::bigint AS inactive_without_deactivate_time,
-        COALESCE(floor(max(extract(epoch FROM (now_utc - create_time))) FILTER (
-            WHERE create_time < now_utc - interval '10 minutes'
-              AND active
-              AND NOT connected
-        )), 0)::bigint AS oldest_active_disconnected_age_seconds
+        )::bigint AS inactive_without_deactivate_time
     FROM recent
+), mature_active_aggregate AS (
+    SELECT
+        count(*) FILTER (WHERE connected)::bigint AS mature_active_connected,
+        count(*) FILTER (WHERE NOT connected)::bigint AS mature_active_disconnected,
+        COALESCE(floor(max(extract(epoch FROM (now_utc - create_time))) FILTER (
+            WHERE NOT connected
+        )), 0)::bigint AS oldest_active_disconnected_age_seconds
+    FROM mature_active
 ), residual_connection_history AS MATERIALIZED (
     SELECT
         EXISTS (
@@ -97,10 +98,8 @@ WITH clock AS MATERIALIZED (
             FROM network_client_connection ncc
             WHERE ncc.client_id = r.client_id
         ) AS ever_connected
-    FROM recent r
-    WHERE r.create_time < r.now_utc - interval '10 minutes'
-      AND r.active
-      AND NOT r.connected
+    FROM mature_active r
+    WHERE NOT r.connected
 ), residual_aggregate AS (
     SELECT
         count(*) FILTER (WHERE NOT ever_connected)::bigint AS mature_active_disconnected_never_connected,
@@ -120,6 +119,7 @@ SELECT
     mature_active_disconnected_never_connected::text,
     mature_active_disconnected_ever_connected::text
 FROM aggregate
+CROSS JOIN mature_active_aggregate
 CROSS JOIN residual_aggregate;
 `
 }

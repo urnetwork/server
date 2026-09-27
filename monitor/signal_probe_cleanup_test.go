@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/urnetwork/server"
 )
 
 func syntheticProbeCleanupSource(row Row) *syntheticSource {
@@ -248,4 +250,59 @@ func TestProbeCleanupQueryIsBoundedAndPrivate(t *testing.T) {
 			t.Fatalf("final cleanup aggregate exports %q:\n%s", forbidden, finalSelect)
 		}
 	}
+}
+
+func TestProbeCleanupQueryMatureActiveOnlyExactAggregate(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `
+				CREATE TEMP TABLE prober_identity (singleton boolean, network_id text, client_id text) ON COMMIT DROP;
+				CREATE TEMP TABLE network_client (
+					client_id text, network_id text, source_client_id text,
+					active boolean, create_time timestamp, deactivate_time timestamp
+				) ON COMMIT DROP;
+				CREATE TEMP TABLE network_client_connection (client_id text, connected boolean) ON COMMIT DROP;
+				INSERT INTO pg_temp.prober_identity VALUES (true, 'synthetic-network', 'synthetic-parent');
+				INSERT INTO pg_temp.network_client VALUES
+					('inactive-no-time', 'synthetic-network', 'synthetic-parent', false, statement_timestamp() AT TIME ZONE 'UTC' - interval '1 hour', NULL),
+					('inactive-with-time', 'synthetic-network', 'synthetic-parent', false, statement_timestamp() AT TIME ZONE 'UTC' - interval '2 hours', statement_timestamp() AT TIME ZONE 'UTC'),
+					('active-connected', 'synthetic-network', 'synthetic-parent', true, statement_timestamp() AT TIME ZONE 'UTC' - interval '20 minutes', NULL),
+					('active-never-connected', 'synthetic-network', 'synthetic-parent', true, statement_timestamp() AT TIME ZONE 'UTC' - interval '45 minutes', NULL),
+					('active-ever-connected', 'synthetic-network', 'synthetic-parent', true, statement_timestamp() AT TIME ZONE 'UTC' - interval '30 minutes', NULL),
+					('fresh-active', 'synthetic-network', 'synthetic-parent', true, statement_timestamp() AT TIME ZONE 'UTC' - interval '2 minutes', NULL),
+					('fresh-inactive-no-time', 'synthetic-network', 'synthetic-parent', false, statement_timestamp() AT TIME ZONE 'UTC' - interval '2 minutes', NULL),
+					('outside-six-hours', 'synthetic-network', 'synthetic-parent', true, statement_timestamp() AT TIME ZONE 'UTC' - interval '7 hours', NULL),
+					('other-parent', 'synthetic-network', 'other-parent', true, statement_timestamp() AT TIME ZONE 'UTC' - interval '1 hour', NULL),
+					('other-network', 'other-network', 'synthetic-parent', true, statement_timestamp() AT TIME ZONE 'UTC' - interval '1 hour', NULL);
+				INSERT INTO pg_temp.network_client_connection VALUES
+					('active-connected', true),
+					('active-ever-connected', false),
+					('fresh-active', true),
+					('outside-six-hours', true);
+			`))
+
+			rows, err := tx.Query(ctx, probeCleanupQuery())
+			server.WithPgResult(rows, err, func() {
+				if !rows.Next() {
+					t.Fatal("no cleanup aggregate")
+				}
+				values := make([]string, 11)
+				dest := make([]any, len(values))
+				for i := range values {
+					dest[i] = &values[i]
+				}
+				server.Raise(rows.Scan(dest...))
+				want := []string{"1", "7", "5", "2", "1", "2", "1", "2", "2700", "1", "1"}
+				for i := range want {
+					if values[i] != want[i] {
+						t.Errorf("field %d = %s, want %s", i, values[i], want[i])
+					}
+				}
+				if rows.Next() {
+					t.Error("extra cleanup aggregate row")
+				}
+			})
+		})
+	})
 }

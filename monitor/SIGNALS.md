@@ -10393,6 +10393,13 @@ active-disconnected residuals by whether any lifetime connection row exists.
 It exports only aggregate lifecycle counts. IDs, credentials, endpoints, and
 descriptions remain in PostgreSQL.
 
+Connection-history lookups apply only to mature active children. Fresh and
+inactive children still contribute to their exact cohort and integrity counts
+without requiring a per-child connection probe. If this aggregate times out,
+both retirement branches are unobserved, not healthy; retain the
+`monitor/visibility` finding. The six-hour cohort remains an exact query, not
+a truncated lower-bound sample.
+
 - `probe-child-retirement` (WARN after two samples for any residual; PAGE after two samples when
   at least 20 residuals are at least 10% of 20 or more mature children):
   previously connected children remain active after their connection closes.
