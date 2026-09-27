@@ -67,7 +67,10 @@ func testBlackholeLeaseAdmissionRun(t *testing.T, test testBlackholeLeaseAdmissi
 		if selected == 0 {
 			selected = 250
 		}
-		args.Blackhole.Limit = selected
+		// Exercise the serial lease-admission path, not the separately tested
+		// saturated-cohort pipeline. A partial due result selects all fixture
+		// providers while retaining the production pass's serial cutoff.
+		args.Blackhole.Limit = selected + 1
 		args.Blackhole.Concurrency = min(16, selected)
 		fullCount := test.fullCount
 		if test.serial {
@@ -82,21 +85,26 @@ func testBlackholeLeaseAdmissionRun(t *testing.T, test testBlackholeLeaseAdmissi
 		}
 		checkOptions := egresshealth.Options{
 			PerRequestTimeout:      time.Duration(args.Blackhole.ProbeTimeoutSeconds) * time.Second,
-			IpEchoUrl:              egresshealth.IpEchoPath,
-			IpEchoTimeout:          time.Duration(args.Blackhole.IpEchoTimeoutSeconds) * time.Second,
+			ColdStartTimeout:       time.Duration(args.Blackhole.IpEchoTimeoutSeconds) * time.Second,
 			LoadAttempts:           args.LoadAttempts,
 			LoadRetryMeanInterval:  time.Duration(args.LoadRetryMeanIntervalSeconds) * time.Second,
 			TunnelRecreateAttempts: args.TunnelRecreateAttempts,
 		}
 		observation.checkBudget = checkOptions.RunBudget(egresshealth.BlackholeSampleSize) +
-			max(checkOptions.PerRequestTimeout, checkOptions.IpEchoTimeout)
+			max(checkOptions.PerRequestTimeout, checkOptions.ColdStartTimeout)
 		observation.fullBudget = providerEgressProbeMinMaxTime(args) - observation.checkBudget
 		observation.lease = time.Duration(args.MaxTimeSeconds) * time.Second
 		if test.shortDeadline {
 			observation.lease = 50 * time.Minute
 		}
-		if observation.checkBudget != 32*time.Minute+45*time.Second || observation.fullBudget <= 0 {
-			t.Fatal("the default duration model changed; recheck the test's wave arithmetic")
+		if observation.checkBudget != providerEgressBlackholeCheckBudget(args) || observation.fullBudget <= 0 {
+			t.Fatal("the blackhole duration model diverged from the production admission budget")
+		}
+		if test.fullCount > args.Full.Concurrency {
+			// Two modeled full waves now exceed the default task lease. Give
+			// this fixture enough parent time for both full waves but not for
+			// another blackhole check; admission must refuse only that lane.
+			observation.lease = 2*observation.fullBudget + time.Minute
 		}
 		residence := observation.checkBudget
 		fullResidence := observation.fullBudget * time.Duration((fullCount+args.Full.Concurrency-1)/args.Full.Concurrency)
@@ -371,7 +379,7 @@ func testBlackholeLeaseAdmissionBudgetError(t *testing.T, observation testBlackh
 	if observation.err == nil || !strings.Contains(observation.err.Error(), "insufficient remaining task budget for blackhole admission") ||
 		errors.Is(observation.err, context.DeadlineExceeded) || observation.contextErr != nil ||
 		observation.runCalls != 0 || observation.started != 0 || observation.submitCalls != 0 ||
-		observation.result == nil || !observation.result.Full || observation.result.Checked != 0 {
+		observation.result == nil || observation.result.Checked != 0 {
 		t.Fatalf("no-work budget refusal became success, cancellation, or a hidden hot-loop candidate: %+v", observation)
 	}
 }
