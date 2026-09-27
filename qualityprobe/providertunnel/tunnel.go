@@ -37,6 +37,9 @@ type Config struct {
 	// Optional immutable override. Host/local resolution is never permitted
 	// for provider probes, even when a caller explicitly asks for it.
 	DnsResolverSettings *connect.DnsResolverSettings
+	// Optional fixed aggregate observer. It records completed DNS waves and
+	// their own tunnel's setup state without blocking on a metrics consumer.
+	DnsObservations *DnsObservations
 	// Certificate pins per host: a pinned host must present a chain
 	// with one of its pinned keys on the verified path, on top of ordinary
 	// WebPKI verification. They are optional -- a host without an entry is
@@ -212,12 +215,13 @@ type Tunnel struct {
 	// Ends when the path to the provider goes away while the tunnel is
 	// open, or when it is closed; lose sets why. unwatch stops the
 	// multi-client subscription that watches for the provider leaving.
-	lost         context.Context
-	lose         context.CancelCauseFunc
-	unwatch      func()
-	closeTimeout time.Duration
-	closeOnce    sync.Once
-	closeErr     error
+	lost            context.Context
+	lose            context.CancelCauseFunc
+	unwatch         func()
+	closeTimeout    time.Duration
+	closeOnce       sync.Once
+	closeErr        error
+	dnsObservations *DnsObservations
 }
 
 // An owner whose retirement Close joins.
@@ -354,6 +358,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		lose:            lose,
 		unwatch:         unwatch,
 		closeTimeout:    cfg.closeTimeout(),
+		dnsObservations: cfg.DnsObservations,
 	}, nil
 }
 
@@ -450,7 +455,15 @@ func (self *Tunnel) HttpClient(timeout time.Duration) *http.Client {
 // pinned nor in extraHosts is still refused outright by DialTLSContext, so
 // this widens the closed set rather than opening it.
 func (self *Tunnel) HttpClientForHosts(timeout time.Duration, extraHosts []string) *http.Client {
-	resolver := &providerUrlResolver{query: self.tun.DohCache().QueryResult, dial: self.tun.DialResolvedContext}
+	resolver := &providerUrlResolver{
+		query:        self.tun.DohCache().QueryResult,
+		dial:         self.tun.DialResolvedContext,
+		observations: self.dnsObservations,
+		pathState: func() dnsPathState {
+			window, providers := self.multiClient.Monitor().Events()
+			return dnsPathFromMonitor(self.lost, window, providers)
+		},
+	}
 	return httpClientOverDialerWithResolver(self.tun.DialContext, resolver, self.pins, extraHosts, timeout)
 }
 

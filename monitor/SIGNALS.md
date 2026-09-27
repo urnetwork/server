@@ -7819,6 +7819,50 @@ positive stage, **not** exclusive blame on TCP when another DNS family is
 still pending. Compare these fixed classes only after attesting the running
 Taskworker binary contains both changes; an older or mixed artifact cannot
 be interpreted as a measured zero for the new classes.
+
+The Taskworker's `urnetwork_egress_probe_dns_waves_total{result,path}` joins
+each completed sampled-URL DNS wave to **that same private tunnel's** current
+setup snapshot, before a long outer retry chain or cohort guard completes.
+It exports exactly 45 cells per process: `result` is `answer`,
+`authoritative_empty`, `timeout`, `unanswered`, or `canceled`; `path` is
+`unknown`, `active`, `forming`, `platform_unreachable`,
+`provider_unresponsive`, `rate_limited`, `auth_failing`, `lost`, or `closed`.
+Recording is a fixed atomic increment, with no callback queue, provider
+registry, endpoint/identity labels, shared resolver cache, or admission budget.
+An absent family on an older artifact is unavailable telemetry, not zero
+failures. Counters combine cheap and full URL loads and count DNS waves, not
+unique providers, DoH socket attempts, or acknowledged measured coverage.
+
+`timeout` means the wave's own context deadline expired; `QueryResult` does
+not expose every underlying resolver error, so an early non-authoritative
+empty result is `unanswered`, not a fabricated transport diagnosis. A cached
+answer can count as `answer` without fresh network traffic. A current added
+path outranks a stale window failure reason, but `active` proves routing
+admission, not successful packet delivery; `provider_unresponsive` is the
+SDK's evaluation class and may include a failed control-plane registration.
+The snapshot is taken at wave completion and cannot reconstruct every path
+transition during the wave. This counter does not identify regional plaintext
+DNS versus default/custom DoH, or join an API contract failure to the exact
+DNS flow. Compare same-generation Connect `tun/address` resolver outcomes
+and sampled IPv4 DoH dial outcomes to discriminate transport silence from
+authoritative DNS negatives, then inspect auth/provide-registration and
+return-contract controls; neither signal alone convicts a provider.
+
+The 04:42–04:45Z incident control showed 27,374 `tun/address` timeouts against
+186 answers across three observed process keys, alongside derived-client
+creation and provide-secret-registration timeouts. Those observations do not
+prove a DNS-server fault. Probe tunnels disable the SDK's inner qualification
+probe, including its receive refresh, so relay heartbeat `proven=0` is expected
+even for working probe traffic. Missing-companion-origin events concentrated
+toward prober-derived destinations identify a failed contract class, not its
+failure rate: no deployed same-owner success/request denominator exists.
+`stream_fallback` itself is a normal compatibility route. Likewise, cheap
+`not_measured` submissions include ordinary negatives held by a cohort guard,
+not only lost tunnels; bounded 04:55–05:07Z guard summaries held 2,357 of
+3,000 measured checks. These are diagnostic event totals, not unique-provider
+joins or acknowledgement counts. Preserve guards and require durable measured
+coverage before declaring four-hour recovery.
+
 A direct 11:24 UTC read-only PostgreSQL census used the exact eligible and
 `blackhole_measured` predicates from this probe: 122,961 distinct eligible
 providers, 83,562 with a measured check inside eight hours, 57,988 inside

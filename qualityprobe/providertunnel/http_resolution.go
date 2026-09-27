@@ -3,6 +3,7 @@ package providertunnel
 
 import (
 	"context"
+	"errors"
 	"math/rand/v2"
 	"net"
 	"net/netip"
@@ -14,8 +15,10 @@ import (
 // Each independent tunnel supplies its own cache and socket dialer. Probe
 // tunnels are IPv4-only; this does not change general Connect resolution.
 type providerUrlResolver struct {
-	query func(context.Context, string, string) ([]netip.Addr, bool)
-	dial  func(context.Context, string, string, []netip.Addr) (net.Conn, error)
+	query        func(context.Context, string, string) ([]netip.Addr, bool)
+	dial         func(context.Context, string, string, []netip.Addr) (net.Conn, error)
+	observations *DnsObservations
+	pathState    func() dnsPathState
 }
 
 // Retries resolver failures before attempting a socket. All attempts share the
@@ -55,6 +58,7 @@ func (self *providerUrlResolver) dialContext(ctx context.Context, network, addre
 			cancel()
 		}
 		addrs, authoritative = self.query(lookupCtx, "A", host)
+		lookupErr := lookupCtx.Err()
 		stop()
 		cancel()
 		ipv4 := make([]netip.Addr, 0, len(addrs))
@@ -64,6 +68,24 @@ func (self *providerUrlResolver) dialContext(ctx context.Context, network, addre
 			}
 		}
 		addrs = ipv4
+		if self.observations != nil {
+			result := dnsUnanswered
+			switch {
+			case ctx.Err() != nil:
+				result = dnsCanceled
+			case len(addrs) != 0:
+				result = dnsAnswer
+			case authoritative:
+				result = dnsAuthoritativeEmpty
+			case errors.Is(lookupErr, context.DeadlineExceeded):
+				result = dnsTimeout
+			}
+			path := dnsPathUnknown
+			if self.pathState != nil {
+				path = self.pathState()
+			}
+			self.observations.record(result, path)
+		}
 		if len(addrs) != 0 || authoritative {
 			break
 		}
