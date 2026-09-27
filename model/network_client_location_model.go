@@ -659,10 +659,11 @@ func resetCountryCodeLocationIds() {
 var countryCodeLocationIds func() map[string]server.Id
 
 type locationDirectoryEntry struct {
-	Name        string
-	CountryCode string
-	Latitude    *float64
-	Longitude   *float64
+	Name         string
+	CountryCode  string
+	LocationType LocationType
+	Latitude     *float64
+	Longitude    *float64
 }
 
 type locationDirectorySnapshot struct {
@@ -800,11 +801,12 @@ const locationDirectoryRedisKey = "location_directory"
 // MarshalText, so it cannot be a json map key — the cache carries a list and the
 // map is rebuilt on read.
 type locationDirectoryRow struct {
-	LocationId  server.Id `json:"location_id"`
-	Name        string    `json:"name"`
-	CountryCode string    `json:"country_code"`
-	Latitude    *float64  `json:"latitude,omitempty"`
-	Longitude   *float64  `json:"longitude,omitempty"`
+	LocationId   server.Id    `json:"location_id"`
+	Name         string       `json:"name"`
+	CountryCode  string       `json:"country_code"`
+	LocationType LocationType `json:"location_type,omitempty"`
+	Latitude     *float64     `json:"latitude,omitempty"`
+	Longitude    *float64     `json:"longitude,omitempty"`
 }
 
 // getLocationDirectoryCache reads the fleet-shared directory, or nil on miss.
@@ -826,10 +828,11 @@ func getLocationDirectoryCache(ctx context.Context) map[server.Id]*locationDirec
 		entries = map[server.Id]*locationDirectoryEntry{}
 		for _, row := range rows {
 			entries[row.LocationId] = &locationDirectoryEntry{
-				Name:        row.Name,
-				CountryCode: row.CountryCode,
-				Latitude:    row.Latitude,
-				Longitude:   row.Longitude,
+				Name:         row.Name,
+				CountryCode:  row.CountryCode,
+				LocationType: row.LocationType,
+				Latitude:     row.Latitude,
+				Longitude:    row.Longitude,
 			}
 		}
 	})
@@ -844,11 +847,12 @@ func setLocationDirectoryCache(
 	rows := make([]*locationDirectoryRow, 0, len(entries))
 	for locationId, entry := range entries {
 		rows = append(rows, &locationDirectoryRow{
-			LocationId:  locationId,
-			Name:        entry.Name,
-			CountryCode: entry.CountryCode,
-			Latitude:    entry.Latitude,
-			Longitude:   entry.Longitude,
+			LocationId:   locationId,
+			Name:         entry.Name,
+			CountryCode:  entry.CountryCode,
+			LocationType: entry.LocationType,
+			Latitude:     entry.Latitude,
+			Longitude:    entry.Longitude,
 		})
 	}
 	rowsJson, err := json.Marshal(rows)
@@ -937,6 +941,7 @@ func queryLocationDirectory(ctx context.Context) map[server.Id]*locationDirector
 				location.location_id,
 				location.location_name,
 				location.country_code,
+				location.location_type,
 				location.latitude,
 				location.longitude
 			FROM location
@@ -965,6 +970,7 @@ func queryLocationDirectory(ctx context.Context) map[server.Id]*locationDirector
 					&locationId,
 					&entry.Name,
 					&entry.CountryCode,
+					&entry.LocationType,
 					&entry.Latitude,
 					&entry.Longitude,
 				))
@@ -6201,7 +6207,12 @@ func loadClientScores(
 	clientLocationId server.Id,
 	n int,
 	facets []ipFamilyFacet,
+	observations ...*findProviders2LoadObservation,
 ) (clientScores map[server.Id]*ClientScore, returnErr error) {
+	var observation *findProviders2LoadObservation
+	if 0 < len(observations) {
+		observation = observations[0]
+	}
 	server.Redis(ctx, func(r server.RedisClient) {
 		type countsRead struct {
 			caller   *redis.StringCmd
@@ -6320,6 +6331,9 @@ func loadClientScores(
 			// written before the facets existed: fall back to the un-faceted buckets
 			effectiveClientLocationId, counts, ok := decodeCounts(read.alias, read.unfacted)
 			if returnErr != nil || !ok {
+				if returnErr == nil && observation != nil {
+					observation.missingTargets++
+				}
 				return
 			}
 			for i, count := range counts {
@@ -6357,6 +6371,7 @@ func loadClientScores(
 		}
 
 		samples := []*redis.StringCmd{}
+		sampleExpectedCounts := []int{}
 		netCount := 0
 
 		pipe = r.Pipeline()
@@ -6375,6 +6390,7 @@ func loadClientScores(
 				c := sampleKeyCounts[key]
 				v := pipe.Get(ctx, key)
 				samples = append(samples, v)
+				sampleExpectedCounts = append(sampleExpectedCounts, c)
 				netCount += c
 			}
 		}
@@ -6386,9 +6402,12 @@ func loadClientScores(
 
 		clientScores = map[server.Id]*ClientScore{}
 
-		for _, sampleCmd := range samples {
+		for i, sampleCmd := range samples {
 			sampleBytes, _ := sampleCmd.Bytes()
 			if len(sampleBytes) == 0 {
+				if observation != nil && 0 < sampleExpectedCounts[i] {
+					observation.missingPages++
+				}
 				continue
 			}
 			b := bytes.NewBuffer(sampleBytes)
@@ -6488,6 +6507,8 @@ func FindProviders2(
 	findProviders2 *FindProviders2Args,
 	session *session.ClientSession,
 ) (*FindProviders2Result, error) {
+	observation := newFindProviders2SelectionObservation(findProviders2)
+	defer observation.finish(session.Ctx)
 	providers := []*FindProvidersProvider{}
 	callerCountryCode := ""
 
@@ -6555,6 +6576,7 @@ func FindProviders2(
 	}
 
 	if 0 < len(locationIds) || 0 < len(locationGroupIds) {
+		observation.discovery = true
 		// use a min block size to reduce db activity
 		var count int
 		if findProviders2.ForceCount {
@@ -6576,6 +6598,7 @@ func FindProviders2(
 		}
 
 		// the caller ip is used to match against provider excluded lists
+		observation.enter("caller_location")
 		clientIp, _, err := session.ParseClientIpPort()
 		if err != nil {
 			return nil, err
@@ -6587,8 +6610,15 @@ func FindProviders2(
 		}
 		callerCountryCode = ipInfo.CountryCode
 
-		clientLocationId := countryCodeLocationIds()[ipInfo.CountryCode]
+		countryLocations := countryCodeLocationIds()
+		clientLocationId := countryLocations[ipInfo.CountryCode]
+		var targetDirectory map[server.Id]*locationDirectoryEntry
+		if snapshot := currentLocationDirectory.snapshot.Load(); snapshot != nil {
+			targetDirectory = snapshot.entries
+		}
+		observation.targetKind = findProviders2TargetKind(findProviders2, countryLocations, targetDirectory)
 
+		observation.enter("load_primary")
 		loadStartTime := time.Now()
 		clientScores, err := loadClientScores(
 			findProviders2.ForceMinimum,
@@ -6599,10 +6629,12 @@ func FindProviders2(
 			clientLocationId,
 			max(loadMultiplier*count, minLoadCount),
 			facets,
+			&observation.load,
 		)
 		if err != nil {
 			return nil, err
 		}
+		observation.loaded += len(clientScores)
 		loadEndTime := time.Now()
 		loadDuration := loadEndTime.Sub(loadStartTime)
 		loadMillis := float64(loadDuration) / float64(time.Millisecond)
@@ -6627,6 +6659,7 @@ func FindProviders2(
 		for clientId := range clientScores {
 			candidateClientIds = append(candidateClientIds, clientId)
 		}
+		observation.enter("hard_exclusions")
 		hardExcludedClientIds, err := getProviderHardExclusions(session.Ctx, candidateClientIds)
 		if err != nil {
 			return nil, err
@@ -6665,14 +6698,20 @@ func FindProviders2(
 		// and, when that comes up short, on the other mode's, so a borrowed
 		// provider passes exactly what a native one does.
 		filterPool := func(clientScores map[server.Id]*ClientScore, mode RankMode, hardExcludedClientIds map[server.Id]bool) {
+			observation.enter("filter")
+			before := len(clientScores)
 			for clientId := range hardExcludedClientIds {
 				delete(clientScores, clientId)
 			}
+			observation.dropped[0] += before - len(clientScores)
+			before = len(clientScores)
 			for clientId, clientScore := range clientScores {
 				if clientScore.NetworkOnly && clientScore.NetworkId != callerNetworkId {
 					delete(clientScores, clientId)
 				}
 			}
+			observation.dropped[1] += before - len(clientScores)
+			before = len(clientScores)
 
 			// a cache written without facets fell back to its un-faceted
 			// buckets, whose scores carry no proven family and read as v4-only
@@ -6681,10 +6720,14 @@ func FindProviders2(
 					delete(clientScores, clientId)
 				}
 			}
+			observation.dropped[2] += before - len(clientScores)
+			before = len(clientScores)
 
 			for clientId, _ := range excludeFinalDestinations() {
 				delete(clientScores, clientId)
 			}
+			observation.dropped[3] += before - len(clientScores)
+			observation.eligible += len(clientScores)
 			if findProviders2.ForceMinimum {
 				for _, clientScore := range clientScores {
 					clientScore.ScaledWeights[mode] = 1.0
@@ -6702,6 +6745,7 @@ func FindProviders2(
 			}
 		}
 		filterPool(clientScores, rankMode, hardExcludedClientIds)
+		observation.enter("select")
 
 		// Draws up to n of the candidates by their weight in `mode` and bands
 		// the draw by their tier in `mode`. Weighted selection and tier banding
@@ -6806,7 +6850,10 @@ func FindProviders2(
 		}
 		clientIds := selectProviders(nativeClientScores, rankMode, count)
 
+		observation.enter("directory")
 		directory := locationDirectory()
+		observation.targetKind = findProviders2TargetKind(findProviders2, countryLocations, directory)
+		observation.enter("select")
 
 		// output in order of `clientIds`
 		for _, clientId := range clientIds {
@@ -6872,6 +6919,7 @@ func FindProviders2(
 				}
 				backfillTierOffset := settingsSnapshot.settings.BackfillTierOffset
 
+				observation.enter("load_backfill")
 				otherClientScores, err := loadClientScores(
 					false,
 					otherRankMode,
@@ -6881,11 +6929,14 @@ func FindProviders2(
 					clientLocationId,
 					max(loadMultiplier*count, minLoadCount),
 					facets,
+					&observation.load,
 				)
 				if err != nil {
+					observation.backfillUnavailable = true
 					glog.Infof("[nclm]findproviders2 could not read the %s set to backfill %s; answering from the %s sample alone (%s)\n", otherRankMode, rankMode, rankMode, err)
 					otherClientScores = map[server.Id]*ClientScore{}
 				}
+				observation.loaded += len(otherClientScores)
 				// the exclusions of the providers this call has not read yet
 				unreadClientIds := []server.Id{}
 				for clientId := range otherClientScores {
@@ -6893,6 +6944,7 @@ func FindProviders2(
 						unreadClientIds = append(unreadClientIds, clientId)
 					}
 				}
+				observation.enter("hard_exclusions")
 				otherHardExcludedClientIds, err := getProviderHardExclusions(session.Ctx, unreadClientIds)
 				if err != nil {
 					return nil, err
@@ -6901,6 +6953,7 @@ func FindProviders2(
 					otherHardExcludedClientIds[clientId] = true
 				}
 				filterPool(otherClientScores, otherRankMode, otherHardExcludedClientIds)
+				observation.enter("select")
 
 				// 1. the other bucket's natives
 				borrowableClientScores := map[server.Id]*ClientScore{}
@@ -6997,6 +7050,7 @@ func FindProviders2(
 			)
 		}
 	} else {
+		observation.enter("hard_exclusions")
 		hardExcludedClientIds, err := getProviderHardExclusions(session.Ctx, specClientIds)
 		if err != nil {
 			return nil, err
@@ -7008,6 +7062,7 @@ func FindProviders2(
 	// result gets one match count, accumulated in redis (never pg on this hot
 	// path) and rolled up by RollupSearchProviderStats. Best-effort.
 	if 0 < len(providers) {
+		observation.enter("record_matches")
 		providerClientIds := make([]server.Id, 0, len(providers))
 		for _, provider := range providers {
 			providerClientIds = append(providerClientIds, provider.ClientId)
@@ -7019,6 +7074,7 @@ func FindProviders2(
 		Providers: providers,
 	}
 	recordFindProviders2Outcome(findProviders2, callerCountryCode, len(result.Providers))
+	observation.complete(len(result.Providers))
 	return result, nil
 }
 

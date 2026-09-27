@@ -5352,6 +5352,118 @@ mixed process evidence, bounds, cancellation, Markdown and redaction. Actual
 local Redis-to-model controls reproduce failed GET/pipeline errors versus
 missing keys and verify endpoint propagation and producer counts.
 
+### 2.9c Provider-selection boundary attribution — intent, cache and filters
+Probe: `provider-selection`
+
+This supplements §2.9a without changing its scarcity thresholds or interpreting
+the location picker (§2.9b). `FindProviders2` backfill reads the **same requested
+location/group** in the other rank mode; it is not a global-location fallback.
+A large global online pool or a successful best-available control therefore
+does not establish supply for the selected target. The roughly four-percent
+location zero tail observed during the 2026-09-27 incident remains unattributed
+until matching current-generation request-local evidence is available.
+
+The API exports `urnetwork_findproviders2_selection_schema_version=1` even
+without traffic, plus `urnetwork_findproviders2_selection_outcomes_total` once
+per model invocation, including errors/cancellation. The old
+`urnetwork_findproviders2_outcomes_total` schema and eligibility behavior are
+unchanged. New labels are finite vocabulary only:
+
+- `target_kind`: `none`, `direct`, `country`, `region`, `city`,
+  `location_unknown`, `group`, `best_available`, `mixed`;
+- `request_class`: `default_minimum` (effective discovery count at least 20),
+  `count_zero` (forced count <=0), `count_small` (forced count 1–2),
+  `count_positive` (forced count >=3), or `forced_minimum`;
+- `ip_family`: `any`, `v4`, `v6`, `dualstack`, `unknown`;
+- `rank_mode`: `quality`, `speed`, `unknown`;
+- `outcome`: `nonempty`, `zero`, `error`, `canceled`; and
+- `reason`: the fixed completed-result reason or the failed request stage.
+
+No country code, target ID, provider/client/network identity, address, free-form
+request value or error string is added. Target kind reuses the already-loaded
+country map and optional type in the existing location-directory cache. Older
+cache records and unreferenced locations remain `location_unknown`; a cold
+directory is unknown until the existing read resolves it, never guessed
+city/country. Adding the type field to
+the existing directory read introduces no additional request-time query.
+
+Completed reasons are `returned`, `intentional_zero`, `no_specs`,
+`direct_excluded`, `unresolved_target`, `backfill_unavailable`, `cache_page_gap`,
+`cache_missing`, `cache_empty`, `unsupported_rank`, `eligible_not_selected`,
+`filtered_hard`, `filtered_network`, `filtered_family`, `filtered_explicit`,
+`filtered_mixed`, `unclassified_zero`. An incomplete optional backfill or missing
+cache evidence takes precedence over filter attribution; `cache_page_gap`
+requires a positive page-count entry whose requested page is absent.
+`cache_missing` means requested target metadata was absent, not that a writer
+failed or the location has no real providers. `cache_empty` describes only the
+loaded target cache. Filters describe the sampled candidates from both modes,
+not unique fleet supply. Successful nonempty results retain `returned` even if
+an optional secondary read failed; existing cache-read error metrics remain
+the independent partial-read control.
+
+`urnetwork_findproviders2_stage_inflight{stage}` and
+`urnetwork_findproviders2_stage_seconds{stage}` retain fixed stages `validate`,
+`caller_location`, `load_primary`, `load_backfill`, `hard_exclusions`, `filter`,
+`directory`, `select`, `record_matches`. The existing directory read is measured
+separately so metadata I/O cannot masquerade as selection CPU. Residence includes failures and cancellation;
+inflight is released on every return/panic. These model stages exclude HTTP
+authentication before model entry and do not prove response delivery or a
+successful provider route.
+
+The registered read-only probe queries Mimir once per minute through an enabled
+services gateway, bounded to 15 seconds, 4 MiB and 8,192 rows. It privately joins
+exact API host/block/instance and unchanged process start across a five-minute
+window against configured API placement (maximum 32 slots), requires schema 1
+at both ends, source timestamps within 90 seconds, and nonreset observed counter
+partitions with at least two samples. No production SQL or Redis reads occur.
+
+- `provider-selection-empty-despite-eligible` **PAGE**: at least 3 completed
+  zero responses in five minutes with positive discovery count, known rank and
+  eligible candidates remaining after all request filters, sustained for two
+  one-minute observations. This is a selection invariant, not a supply claim.
+- `provider-selection-cache-page-gap` **WARN**: at least 20 completed zero
+  responses referencing absent positive-count cache pages in five minutes,
+  sustained for two observations. Inspect publication/expiry and exact reader
+  and writer generations; do not clear keys or widen targets.
+- `provider-selection-unavailable` **WARN**: missing/old/partial/excluded,
+  stale, restarted, reset, malformed or over-bound evidence. It never becomes
+  healthy zero. A valid observed-subset invariant finding is retained alongside
+  incomplete fleet visibility.
+
+Intentional zero-count and ForceMinimum cohorts do not enter those thresholds.
+Other zero reasons are diagnostic evidence, not new generic zero-tail alerts:
+a lower scarcity threshold still requires the request-intent and pre-incident
+baseline authority described in §2.9a. A complete quiet source or absence of
+these two narrow failures cannot certify the broader location zero tail.
+
+False-positive qualifiers: cache publication/expiry can transiently expose a
+positive count before its page; the sustained warning identifies that boundary
+without blaming overall supply. A city/group can legitimately have no sampled
+supply, and explicit, family, network and hard exclusions can correctly empty
+its sample. Counter increases count requests, not users. Do not infer a global
+selection failure, health-probe cause, or caller/target-country equivalence.
+
+False-negative qualifiers: unknown target type, sampled cache pages, lazy
+first-observation counters, partial metrics coverage, low volume and the two
+thresholds can hide real failures. Error/canceled requests are separate from
+completed zeroes. Per-request final reasons are a priority explanation, not a
+complete per-provider causal trace; multiple missing and filtered boundaries
+may coexist. Source-generation checks do not prove every intervening scrape
+was retained. Route failures after selection remain outside this signal.
+
+Build/deploy the API containing schema-1 selection diagnostics before trusting
+this attribution; Taskworker-only deployment does not update the emitting API.
+No migration or cache clearing is required. Keep old directory entries readable
+and wait for natural cache refresh for finer target types. Recovery requires
+two complete post-convergence five-minute windows without the matching internal
+failure, positive natural selection traffic, and independent route success;
+the generic four-percent tail still needs its measured reason distribution.
+Implementation: `signal_provider_selection.go` and its synthetic test file,
+registered in `NewSignals`. Controls cover true failure, legitimate empty and
+healthy lists, thresholds, partial positive evidence, old/missing/stale/reset
+sources, cancellation and redaction; model regressions exercise the actual
+selector and backward-compatible directory cache.
+
 ### 2.10 Payment-completion retention fan-out — low concurrency, huge writes
 Probe: `retention-fanout`
 

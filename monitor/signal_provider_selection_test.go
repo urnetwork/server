@@ -1,0 +1,178 @@
+// Synthetic request-boundary, source-authority and privacy controls for §2.9c.
+package monitor
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+)
+
+// One private process and one fixed cohort, with explicit timestamp witnesses.
+func selectionTestRows(reason string, count float64) []map[string]any {
+	now := pickerTestNow()
+	rows := []map[string]any{}
+	add := func(field string, value float64, outcome bool) {
+		labels := map[string]string{"env": "synthetic", "job": "api", "host": "api-synthetic", "block": "blue", "instance": "private-selection-instance", "monitor_selection": field}
+		if outcome {
+			labels["target_kind"], labels["request_class"], labels["ip_family"] = "country", "default_minimum", "any"
+			labels["rank_mode"], labels["outcome"], labels["reason"] = "quality", "zero", reason
+			if reason == "returned" {
+				labels["outcome"] = "nonempty"
+			}
+		}
+		rows = append(rows, map[string]any{"metric": labels, "value": []any{now.Unix(), fmt.Sprint(value)}})
+	}
+	for _, bound := range []string{"now", "prior"} {
+		stamp := now.Add(-5 * time.Second)
+		if bound == "prior" {
+			stamp = stamp.Add(-5 * time.Minute)
+		}
+		add(bound+"_start", float64(now.Add(-time.Hour).Unix()), false)
+		add(bound+"_schema", 1, false)
+		add(bound+"_start_time", float64(stamp.Unix()), false)
+		add(bound+"_schema_time", float64(stamp.Unix()), false)
+	}
+	add("count", count, true)
+	add("count_time", float64(now.Add(-5*time.Second).Unix()), true)
+	add("resets", 0, true)
+	add("samples", 20, true)
+	return rows
+}
+
+// A real Signal adapter and bounded source command, with no network access.
+func selectionTestSettings(t testing.TB, raw string) SignalSettings {
+	t.Helper()
+	source := &syntheticSource{hostFn: func(host HostSettings, command string) (string, error) {
+		if host.Name != "api-synthetic" || !strings.Contains(command, "--max-time 15 --max-filesize 4194304") || !strings.Contains(command, "urnetwork_findproviders2_selection_schema_version") || !strings.Contains(command, "offset 5m") || !strings.Contains(command, "timestamp(") || !strings.Contains(command, "resets(") || !strings.Contains(command, `host=~"api-synthetic"`) {
+			return "", errors.New("unexpected bounded selection source command")
+		}
+		return raw, nil
+	}}
+	settings := syntheticSettings(source)
+	settings.Environment, settings.Now = "synthetic", pickerTestNow
+	settings.Hosts = []HostSettings{{Name: "api-synthetic", Roles: []string{"services"}}}
+	settings.LogServices = []string{"api"}
+	settings.LogServiceHosts = map[string][]string{"api": {"api-synthetic"}}
+	settings.LogServiceBlocks = map[string][]string{"api": {"blue"}}
+	return settings
+}
+
+// The known invariant does not require assuming a global supply baseline.
+func TestProviderSelectionSignalEligibleZeroPagesAndRedacts(t *testing.T) {
+	settings := selectionTestSettings(t, pickerTestPayload(t, selectionTestRows("eligible_not_selected", 3)))
+	alerts, err := NewProviderSelectionSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "provider-selection-empty-despite-eligible")
+	if alert.Severity != SeverityPage || alert.Frame != "country/any/quality/default_minimum" {
+		t.Fatalf("unexpected invariant severity/frame: %s %s", alert.Severity, alert.Frame)
+	}
+	for _, text := range []string{"requests=3", "scope_complete=true", "not the global online pool", "no customer, provider, network", "SIGNALS.md §2.9c"} {
+		if !strings.Contains(alert.Markdown(), text) {
+			t.Errorf("missing invariant qualification %q", text)
+		}
+	}
+	for _, private := range []string{"private-selection-instance", "synthetic-private.example"} {
+		if strings.Contains(alert.Markdown(), private) {
+			t.Fatal("private source identity entered rendered alert")
+		}
+	}
+}
+
+// A positive-count missing page is a cache consistency warning, not scarcity.
+func TestProviderSelectionSignalCacheGapBoundary(t *testing.T) {
+	for _, count := range []float64{19, 20} {
+		alerts, err := NewProviderSelectionSignal().Run(context.Background(), selectionTestSettings(t, pickerTestPayload(t, selectionTestRows("cache_page_gap", count))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if count < 20 {
+			if len(alerts) != 0 {
+				t.Fatal("below-bound cache gap alerted")
+			}
+		} else if alert := requireAlertClass(t, alerts, "provider-selection-cache-page-gap"); alert.Severity != SeverityWarn || !strings.Contains(alert.Markdown(), "publication/expiry race") {
+			t.Fatal("cache gap lost noncausal warning qualifier")
+		}
+	}
+}
+
+// Legitimate restrictive/intentional zeroes and positive lists remain visible
+// as metrics but cannot be promoted into a new generic scarcity page.
+func TestProviderSelectionSignalHealthyAndRestrictedControls(t *testing.T) {
+	for _, reason := range []string{"returned", "intentional_zero", "no_specs", "direct_excluded", "cache_empty", "cache_missing", "filtered_hard", "filtered_network", "filtered_family", "filtered_explicit", "filtered_mixed"} {
+		alerts, err := NewProviderSelectionSignal().Run(context.Background(), selectionTestSettings(t, pickerTestPayload(t, selectionTestRows(reason, 500))))
+		if err != nil || len(alerts) != 0 {
+			t.Fatalf("%s manufactured scarcity or visibility error: alerts=%d err=%v", reason, len(alerts), err)
+		}
+	}
+}
+
+// Every source defect fails closed without echoing arbitrary metric text.
+func TestProviderSelectionSignalUnavailableControls(t *testing.T) {
+	for _, defect := range []string{"missing", "old-schema", "stale", "restart", "reset", "one-sample", "duplicate", "unknown-label"} {
+		rows := selectionTestRows("eligible_not_selected", 3)
+		if defect == "missing" {
+			rows = nil
+		}
+		for _, row := range rows {
+			labels := row["metric"].(map[string]string)
+			field := labels["monitor_selection"]
+			switch {
+			case defect == "old-schema" && field == "prior_schema":
+				row["value"].([]any)[1] = "0"
+			case defect == "stale" && field == "count_time":
+				row["value"].([]any)[1] = fmt.Sprint(pickerTestNow().Add(-91 * time.Second).Unix())
+			case defect == "restart" && field == "now_start":
+				row["value"].([]any)[1] = fmt.Sprint(pickerTestNow().Add(-time.Minute).Unix())
+			case defect == "reset" && field == "resets":
+				row["value"].([]any)[1] = "1"
+			case defect == "one-sample" && field == "samples":
+				row["value"].([]any)[1] = "1"
+			case defect == "unknown-label" && field == "count":
+				labels["target_kind"] = "country|region"
+				labels["reason"] = "synthetic-private.example"
+			}
+		}
+		if defect == "duplicate" {
+			rows = append(rows, rows[0])
+		}
+		alerts, err := NewProviderSelectionSignal().Run(context.Background(), selectionTestSettings(t, pickerTestPayload(t, rows)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		alert := requireAlertClass(t, alerts, "provider-selection-unavailable")
+		if len(alerts) != 1 || strings.Contains(alert.Markdown(), "synthetic-private.example") {
+			t.Fatalf("%s did not fail closed privately", defect)
+		}
+	}
+}
+
+// An incomplete fleet denominator must not erase a proven observed-subset
+// failure, or let that subset certify the unobserved generation.
+func TestProviderSelectionSignalPartialRetainsKnownFailure(t *testing.T) {
+	settings := selectionTestSettings(t, pickerTestPayload(t, selectionTestRows("eligible_not_selected", 3)))
+	settings.LogServiceBlocks["api"] = []string{"blue", "green"}
+	alerts, err := NewProviderSelectionSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireAlertClass(t, alerts, "provider-selection-unavailable")
+	alert := requireAlertClass(t, alerts, "provider-selection-empty-despite-eligible")
+	if !strings.Contains(alert.Markdown(), "scope_complete=false") {
+		t.Fatal("partial scope was described as complete")
+	}
+}
+
+// Cancellation ends at the transport boundary rather than emitting health.
+func TestProviderSelectionSignalCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := NewProviderSelectionSignal().Run(ctx, selectionTestSettings(t, pickerTestPayload(t, nil)))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation returned %v", err)
+	}
+}
