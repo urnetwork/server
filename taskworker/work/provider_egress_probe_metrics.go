@@ -651,6 +651,11 @@ func (self *egressProbeMetricsReporter) SubmitBandwidth(
 }
 
 func (self *egressProbeMetricsReporter) SubmitBlackholeChecks(ctx context.Context, checks []ingest.BlackholeCheck) error {
+	var counts [4]uint64
+	for _, check := range checks {
+		counts[providerEgressBlackholeResultOf(check)]++
+	}
+	egressProbeBlackholeResults.publication(counts, blackholePublicationAttempted)
 	for _, check := range checks {
 		result := "dark"
 		switch {
@@ -662,6 +667,7 @@ func (self *egressProbeMetricsReporter) SubmitBlackholeChecks(ctx context.Contex
 		egressProbeBlackholeChecksTotal.WithLabelValues(result).Inc()
 	}
 	err := self.inner.SubmitBlackholeChecks(ctx, checks)
+	egressProbeBlackholeResults.publication(counts, providerEgressBlackholePublicationOf(err))
 	if len(checks) != 0 {
 		// This is a returned request outcome, not a measured or replaced row.
 		egressProbeBlackholeProgress.submitted(err)

@@ -706,6 +706,8 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 	options.Concurrency = concurrency
 	progress := egressProbeBlackholeProgress.begin(len(providers))
 	defer progress.close()
+	results := egressProbeBlackholeResults.begin()
+	defer results.close()
 	observer := options.ObserveProgress
 	options.ObserveProgress = func(event fleetprobe.BlackholeProgress) {
 		progress.observe(event)
@@ -717,12 +719,15 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 	if self.publishSafeBlackholeEarly {
 		early = newProviderEgressBlackholeEarlyPublisher(ctx, len(providers), self.submitBlackholeChecks)
 		defer early.finish()
-		completedObserver := options.OnCompleted
-		options.OnCompleted = func(result fleetprobe.BlackholeResult) {
+	}
+	completedObserver := options.OnCompleted
+	options.OnCompleted = func(result fleetprobe.BlackholeResult) {
+		results.observe(result.Check)
+		if early != nil {
 			early.observe(result)
-			if completedObserver != nil {
-				completedObserver(result)
-			}
+		}
+		if completedObserver != nil {
+			completedObserver(result)
 		}
 	}
 	startTime := time.Now()
@@ -770,6 +775,11 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 		}
 	}
 	if measurementErr != nil {
+		disposition := blackholeNegativeReadiness
+		if ctx.Err() != nil {
+			disposition = blackholeNegativeCanceled
+		}
+		results.resolve(disposition)
 		// Credit can run out during a batch. Keep successful traffic,
 		// authenticated TLS failures and checks that measured nothing, but
 		// retain previous provider state for negative reachability measured
@@ -797,6 +807,7 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 	guarded, share, tripped := providerEgressBlackholeGuard(summary, args.ProviderEgressRules)
 	egressProbeBatchShare.WithLabelValues("blackhole").Set(share)
 	if tripped {
+		results.resolve(blackholeNegativeDarkGuard)
 		egressProbeBatchGuardTripsTotal.WithLabelValues("blackhole").Inc()
 		// alert class: a fifth of a batch dark at once is the prober until
 		// proven otherwise (GEOMAP §11.3), and the negatives are gone
@@ -811,6 +822,7 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 		)
 		summary = guarded
 	} else if len(summary.Checks) < len(providers) && len(summary.Checks)-summary.NotMeasured < args.DarkBatchGuardMinChecks {
+		results.resolve(blackholeNegativeIncomplete)
 		// Admission can stop part-way through a selected batch. Its truncated
 		// sample is not an ordinary small due tail: do not bypass the minimum
 		// sample guard just because the full lane finished early.
@@ -823,6 +835,8 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 			)
 		}
 		summary = guarded
+	} else {
+		results.resolve(blackholeNegativeEligible)
 	}
 
 	egressProbePassProvidersTotal.WithLabelValues("blackhole", "checked").Add(float64(len(summary.Checks)))

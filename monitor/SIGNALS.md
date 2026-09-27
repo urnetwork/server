@@ -7376,6 +7376,49 @@ window: the observed 15-minute cancellation burst crossed a Taskworker rollout,
 whereas the later five-minute window had zero cancellations. Missing process
 scrapes prevent a complete fleet attribution even when visible slots are full.
 
+Result-boundary telemetry (source checkpoint 2026-09-27; requires the owning
+Taskworker build) makes this conversion visible before a whole pass ends:
+
+- `urnetwork_egress_probe_blackhole_completed_results_total{result}` counts
+  actual retained `OnCompleted` callbacks before the cohort guard. Its four
+  fixed classes are `ok`, `tls_authentication_failed`, `ordinary_negative` and
+  `not_measured`. Canceled/discarded workers do not invoke this callback.
+- `urnetwork_egress_probe_blackhole_negative_pending` counts only completed
+  ordinary negatives awaiting their own cohort decision. Passing/TLS/unknown
+  rows never enter it, including safe rows already early-acknowledged.
+- `urnetwork_egress_probe_blackhole_negative_dispositions_total{disposition}`
+  counts those ordinary-negative **rows**, not cohorts. `guard_eligible` means
+  allowed to reach submission, not a durable dark verdict or ACK. `dark_guard`
+  and `incomplete_sample` convert them to unknown; `readiness_lost` and
+  `task_canceled` withhold them; `run_error_or_owner_exit` retires an unresolved
+  contribution during an unsuccessful owner exit. Closing one cohort cannot
+  erase another's pending count. TLS integrity evidence is never an ordinary
+  negative in this accounting.
+- `urnetwork_egress_probe_blackhole_publication_rows_total{result,outcome}`
+  has four result classes above by `attempted`, `acknowledged`, `canceled` and
+  `error_or_unknown`. `attempted` counts the payload at reporter entry; the
+  other cells are updated **after** the inner call returns. A nil return stays
+  acknowledged even if its context cancels concurrently. A failed early call
+  followed by final retry counts two attempts and only the actual returned
+  outcomes; empty calls count no rows, and a panic has no returned outcome.
+  The older `blackhole_checks_total` retains its pre-return semantics.
+
+All 28 fixed cells (including the pending and capability gauges) exist at zero
+when `urnetwork_egress_probe_blackhole_result_observation_enabled=1`. No
+provider, URL, arbitrary failure text or task label is added. Read same-source
+complete process windows, then compare original results, pending negatives,
+guard dispositions, and returned row outcomes. A high completed count with
+pending negatives is not publication loss. A high acknowledged unknown count
+is not measured coverage. ACKed rows can be replay/no-op, duplicate providers,
+or providers no longer in the monitor's currently eligible population; an
+error can follow a write whose reply was lost. Counter windows span different
+cohorts and cannot be subtracted as a same-provider funnel. Only §2.19's durable
+distinct currently eligible measured denominator establishes scan progress.
+Whole-pass `pass_providers_total` and `pass_not_measured_total` may remain zero
+or absent while independent cohorts are running/early-publishing; this does
+not establish a zero failure or zero conversion-loss rate. These diagnostics
+change neither guard thresholds nor publication, retry, credit or dark rules.
+
 The provider-egress pipeline now runs as recurring `pending_task` shards rather
 than as host-owned edge services. Generic task health (§1.2/§8.9) can detect a
 row that is parked, overdue, or failing, but cannot prove that every hash slice
