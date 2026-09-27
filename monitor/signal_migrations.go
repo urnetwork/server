@@ -200,6 +200,28 @@ const clientKeyPolicyNamespaceArtifactQuery = `(
 	) LIKE '%NOT OLD.is_current AND (NEW.is_current OR NEW.generation <> OLD.generation)%'
 )`
 
+// Admission pins the complete installed function, its relation and its enabled
+// insert/update trigger; a numeric head cannot hide a disabled custody guard.
+var contractUsageGuardArtifactQuery = `(
+    EXISTS (
+        SELECT 1 FROM pg_proc AS function_record
+        WHERE function_record.oid = to_regprocedure('public.transfer_contract_usage_guard()')
+          AND function_record.prorettype = 'trigger'::regtype
+          AND function_record.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+          AND function_record.prosrc = '` + strings.ReplaceAll(server.ContractUsageGuardFunctionBodySql, "'", "''") + `'
+    )
+    AND EXISTS (
+        SELECT 1 FROM pg_trigger AS trigger_record
+        WHERE trigger_record.tgrelid = to_regclass('public.transfer_contract')
+          AND trigger_record.tgname = 'transfer_contract_usage_guard'
+          AND trigger_record.tgfoid = to_regprocedure('public.transfer_contract_usage_guard()')
+          AND trigger_record.tgtype = 23 AND trigger_record.tgenabled = 'O'
+          AND trigger_record.tgnargs = 0 AND trigger_record.tgqual IS NULL
+          AND trigger_record.tgattr = ''::int2vector
+          AND NOT trigger_record.tgisinternal
+    )
+)`
+
 var migrationArtifacts = []migrationArtifact{
 	{name: "competition_round", requiredVersion: 588, rowColumn: 1},
 	{name: "competition_job_immutable_guard", requiredVersion: 589, rowColumn: 2},
@@ -336,6 +358,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "transfer_contract subnet usage columns and shape", requiredVersion: 722, rowColumn: 133},
 	{name: "transfer_contract_closed_usage lookup index", requiredVersion: 723, rowColumn: 134},
 	{name: "signed client-key policy namespaces and active head", requiredVersion: 724, rowColumn: 135},
+	{name: "transfer_contract immutable usage and terminal attribution guard", requiredVersion: 725, rowColumn: 136},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -2072,7 +2095,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND predicate_definition = '(outcome IS NOT NULL)'
 		             AND indisvalid AND indisready
 		       ),
-		       `+clientKeyPolicyNamespaceArtifactQuery+`
+		       `+clientKeyPolicyNamespaceArtifactQuery+`,
+		       `+contractUsageGuardArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {

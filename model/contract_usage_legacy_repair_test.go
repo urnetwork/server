@@ -68,8 +68,10 @@ func stApplyLegacyUsageRepairTest(ctx context.Context, wire []byte, digest strin
 func TestStContractUsageLegacyRepairTransactionRetainsExactDebt(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
+	testEnv.ApplyDbMigrations = false
 	testEnv.Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		server.ApplyDbMigrationsUpTo(ctx, 724)
 		start := time.Unix(1_700_000_000, 0).UTC()
 		for _, debt := range []int{0, 100} {
 			id := addStContractUsageSnapshotTestRow(t, ctx, start, nil)
@@ -78,6 +80,7 @@ func TestStContractUsageLegacyRepairTransactionRetainsExactDebt(t *testing.T) {
 			})
 		}
 		wire := stLegacyUsageRepairTestManifest(t, ctx, start)
+		server.ApplyDbMigrations(ctx)
 		digest := fmt.Sprintf("sha256:%x", sha256.Sum256(wire))
 		receipt, err := stApplyLegacyUsageRepairTest(ctx, wire, digest)
 		if err != nil {
@@ -107,8 +110,10 @@ func TestStContractUsageLegacyRepairTransactionRetainsExactDebt(t *testing.T) {
 func TestStContractUsageLegacyRepairTransactionRejectsChangedCohort(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
+	testEnv.ApplyDbMigrations = false
 	testEnv.Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		server.ApplyDbMigrationsUpTo(ctx, 724)
 		start := time.Unix(1_700_000_000, 0).UTC()
 		var ids []server.Id
 		for _, debt := range []int{0, 100} {
@@ -119,6 +124,8 @@ func TestStContractUsageLegacyRepairTransactionRejectsChangedCohort(t *testing.T
 			})
 		}
 		wire := stLegacyUsageRepairTestManifest(t, ctx, start)
+		addStContractUsageSnapshotTestOutcome(t, ctx, start.Add(30*time.Minute), nil, "canceled")
+		server.ApplyDbMigrations(ctx)
 		digest := fmt.Sprintf("sha256:%x", sha256.Sum256(wire))
 		assertRefused := func(hash string) {
 			t.Helper()
@@ -141,13 +148,40 @@ func TestStContractUsageLegacyRepairTransactionRejectsChangedCohort(t *testing.T
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET used_transfer_byte_count=100 WHERE contract_id=$1 AND party='source'`, ids[1]))
 		})
-		future := addStContractUsageSnapshotTestRow(t, ctx, start.Add(30*time.Minute), nil)
-		assertRefused(digest)
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET outcome='canceled' WHERE contract_id=$1`, future))
-		})
 		if _, err := stApplyLegacyUsageRepairTest(ctx, wire, digest); err != nil {
 			t.Fatalf("unchanged complete cohort did not recover: %v", err)
 		}
+	})
+}
+
+// A capture made before all older writers stopped cannot borrow a later
+// migration's admission: the entire expanded retained census must be reviewed.
+func TestStContractUsageLegacyRepairTransactionRejectsExpandedNullCensus(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.ApplyDbMigrations = false
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		server.ApplyDbMigrationsUpTo(ctx, 724)
+		start := time.Unix(1_700_000_000, 0).UTC()
+		for _, debt := range []int{0, 100} {
+			id := addStContractUsageSnapshotTestRow(t, ctx, start, nil)
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close(contract_id,party,used_transfer_byte_count,checkpoint) VALUES($1,'source',$2,false),($1,'destination',$2,false)`, id, debt))
+			})
+		}
+		wire := stLegacyUsageRepairTestManifest(t, ctx, start)
+		addStContractUsageSnapshotTestRow(t, ctx, start.Add(30*time.Minute), nil)
+		server.ApplyDbMigrations(ctx)
+		if _, err := stApplyLegacyUsageRepairTest(ctx, wire, fmt.Sprintf("sha256:%x", sha256.Sum256(wire))); err == nil {
+			t.Fatal("expanded missing-proof census borrowed the original repair")
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var missing int
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE provider_usage IS NULL`).Scan(&missing))
+			if missing != 3 {
+				t.Fatalf("expanded census refusal changed historical usage: %d missing rows", missing)
+			}
+		})
 	})
 }

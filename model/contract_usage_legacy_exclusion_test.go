@@ -25,13 +25,17 @@ func contractUsageLegacyTestWire(contractId server.Id, closedAt time.Time, debt 
 func TestStContractUsageLegacyExclusionRetainsUncreditedDebt(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
+	testEnv.ApplyDbMigrations = false
 	testEnv.Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		server.ApplyDbMigrationsUpTo(ctx, 724)
 		start := time.Unix(1_700_000_000, 0).UTC()
 		provider, network := server.NewId(), server.NewId()
 		addStContractUsageSnapshotTestRow(t, ctx, start, &contractUsageSnapshot{Version: 1, ByteCount: 121,
 			Providers: []contractProviderUsage{{ClientId: provider, NetworkId: network, ByteCount: 121}}})
 		id := addStContractUsageSnapshotTestRow(t, ctx, start, nil)
+		addStContractUsageSnapshotTestRow(t, ctx, start.Add(2*time.Hour), nil)
+		server.ApplyDbMigrations(ctx)
 		if usages, err := GetStEpochProviderUsageAtEpoch(ctx, 17, start, start.Add(time.Hour)); err == nil || usages != nil {
 			t.Fatalf("missing historical usage accepted: %+v, %v", usages, err)
 		}
@@ -68,7 +72,6 @@ func TestStContractUsageLegacyExclusionRetainsUncreditedDebt(t *testing.T) {
 		if !ok || legacy["retained_report_minimum"] != float64(987) || legacy["final_acceptance"] != false {
 			t.Fatalf("lost explicit uncredited debt: %s", roundTrip)
 		}
-		addStContractUsageSnapshotTestRow(t, ctx, start.Add(2*time.Hour), nil)
 		if usages, err := GetStEpochProviderUsageAtEpoch(ctx, 17, start.Add(time.Hour), start.Add(3*time.Hour)); err == nil || usages != nil {
 			t.Fatalf("future missing snapshot inherited historical repair: %+v, %v", usages, err)
 		}
@@ -80,8 +83,12 @@ func TestStContractUsageLegacyExclusionRetainsUncreditedDebt(t *testing.T) {
 func TestStContractUsageLegacyExclusionRejectsForeignTerminalOwner(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
+	// These malformed historical rows must remain rejected by the reader;
+	// the prospective database guard now prevents creating new copies.
+	testEnv.ApplyDbMigrations = false
 	testEnv.Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		server.ApplyDbMigrationsUpTo(ctx, 724)
 		start := time.Unix(1_700_000_000, 0).UTC()
 		id := addStContractUsageSnapshotTestRow(t, ctx, start, nil)
 		for _, wire := range []map[string]any{contractUsageLegacyTestWire(server.NewId(), start, 1), contractUsageLegacyTestWire(id, start.Add(time.Second), 1)} {
