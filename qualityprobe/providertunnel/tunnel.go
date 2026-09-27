@@ -266,6 +266,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	}
 	generatorSettings := connect.DefaultApiMultiClientGeneratorSettings()
 	generatorSettings.ClientCredentials = cfg.ClientCredentials
+	generatorSettings.ControlTelemetryProbe = true
 	generatorSettings.PlatformTransportSettingsGenerator = func() *connect.PlatformTransportSettings {
 		settings := connect.DefaultPlatformTransportSettings()
 		settings.PlatformTransportBudget = transportBudget

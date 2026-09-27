@@ -10,6 +10,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server/session"
 )
 
@@ -143,12 +144,71 @@ func TestControlHttpObservationQuietAndUnobservedRoutes(t *testing.T) {
 	for _, family := range families {
 		children += len(family.Metric)
 		for _, metric := range family.Metric {
-			if len(metric.Label) > 2 || metric.Counter.GetValue() != 0 || metric.Gauge.GetValue() != 0 || metric.Summary.GetSampleCount() != 0 {
+			if len(metric.Label) > 3 || metric.Counter.GetValue() != 0 || metric.Gauge.GetValue() != 0 || metric.Summary.GetSampleCount() != 0 {
 				t.Fatalf("unexpected quiet metric: %v", metric)
 			}
 		}
 	}
-	if children != 24 || testutil.ToFloat64(metrics.inflight.WithLabelValues("authenticate")) != 0 {
+	if children != 60 || testutil.ToFloat64(metrics.inflight.WithLabelValues("authenticate")) != 0 {
 		t.Fatalf("bounded quiet children = %d", children)
+	}
+}
+
+// The untrusted marker affects only fixed metric partitions. Claimed probes
+// and ordinary callers without credentials both fail the same real auth gate.
+func TestControlHttpProbeMarkerCannotAuthorizeRequests(t *testing.T) {
+	metrics := newControlHttpMetrics(prometheus.NewRegistry())
+	for _, fixture := range []struct{ marker, source string }{
+		{"1", "probe_claimed"}, {"", "unmarked"}, {"synthetic-private-label", "unmarked"},
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/connect/control", strings.NewReader(`{}`))
+		req.Header.Set(connect.ControlProbeTelemetryHeader, fixture.marker)
+		req, finish := observeConnectControl(req, metrics)
+		before := testutil.ToFloat64(metrics.requests.WithLabelValues(fixture.source, "authenticate", "rejected"))
+		writer := httptest.NewRecorder()
+		func() {
+			defer finish()
+			WrapWithInputRequireClient(func(map[string]any, *session.ClientSession) (bool, error) {
+				t.Fatal("probe telemetry bypassed authorization")
+				return false, nil
+			}, writer, req)
+		}()
+		if writer.Code != http.StatusUnauthorized {
+			t.Fatalf("telemetry changed auth status to %d", writer.Code)
+		}
+		if got := testutil.ToFloat64(metrics.requests.WithLabelValues(fixture.source, "authenticate", "rejected")); got != before+1 {
+			t.Fatalf("wrong fixed source partition: %v", got)
+		}
+		if got := testutil.ToFloat64(metrics.requestLive.WithLabelValues(fixture.source)); got != 0 {
+			t.Fatalf("source inflight leaked: %v", got)
+		}
+	}
+}
+
+// A logical request has exactly one completion even after several successful
+// phase transitions; cancellation keeps the final phase and releases its owner.
+func TestControlHttpProbeMarkerCountsLogicalRequestOnce(t *testing.T) {
+	metrics := newControlHttpMetrics(prometheus.NewRegistry())
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/connect/control", nil).WithContext(ctx)
+	req.Header.Set(connect.ControlProbeTelemetryHeader, "1")
+	req, finish := observeConnectControl(req, metrics)
+	func() {
+		defer finish()
+		advanceControlHttpPhase(req, controlHttpAuthenticate)
+		advanceControlHttpPhase(req, controlHttpController)
+		cancel()
+	}()
+	total := float64(0)
+	for _, phase := range controlHttpPhases {
+		for _, outcome := range controlHttpOutcomes {
+			total += testutil.ToFloat64(metrics.requests.WithLabelValues("probe_claimed", phase, outcome))
+		}
+	}
+	if total != 1 || testutil.ToFloat64(metrics.requests.WithLabelValues("probe_claimed", "controller", "canceled")) != 1 {
+		t.Fatalf("logical request completions = %v", total)
+	}
+	if testutil.ToFloat64(metrics.requestLive.WithLabelValues("probe_claimed")) != 0 {
+		t.Fatal("canceled request retained its source gauge")
 	}
 }

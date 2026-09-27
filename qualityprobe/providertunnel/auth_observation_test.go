@@ -28,6 +28,17 @@ func TestOpenCarriesExplicitCredentialAuthorityOnly(t *testing.T) {
 	}
 }
 
+// All private quality-probe windows are self-reported to the control API;
+// this is separate from their optional internal credential authority.
+func TestOpenMarksPrivateControlTelemetry(t *testing.T) {
+	settings := captureProbeTransportSettings(t, []Config{probeTransportBudgetTestConfig(), probeTransportBudgetTestConfig()})
+	for _, generatorSettings := range settings {
+		if !generatorSettings.ControlTelemetryProbe {
+			t.Fatal("private probe control owner was not marked")
+		}
+	}
+}
+
 // Exercise Open's real generator context, but stop before TUN creation. Each
 // synthetic auth is canceled before a route can dial, so this test needs no
 // socket, host resolution, provider, or control-plane service.
