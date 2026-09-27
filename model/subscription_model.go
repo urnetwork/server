@@ -1625,13 +1625,7 @@ func createTransferEscrowInTx(
 
 	contractId := server.NewId()
 
-	type escrow struct {
-		balanceId        server.Id
-		paid             bool
-		balanceByteCount ByteCount
-		startTime        time.Time
-		endTime          time.Time
-	}
+	type escrow = escrowTransferBalance
 
 	now := server.NowUtc()
 
@@ -1642,12 +1636,21 @@ func createTransferEscrowInTx(
 	// attempt to split up across remaining transfer balances
 
 	orderedTransferBalances := []*escrow{}
-	// Active describes remaining durable bytes, not the time window. Reuse
-	// this allocation's clock value so the existing index skips ineligible
-	// grants before row transfer, while Go keeps the same boundary check.
-	result, err := tx.Query(
-		ctx,
-		`
+	// Only the explicitly configured internal payer may take this path. The
+	// payer-side client is the destination for reverse companion contracts.
+	proberClientId := sourceId
+	if sourceNetworkId != payerNetworkId {
+		proberClientId = destinationId
+	}
+	if preferred := preferredProberTransferBalance(ctx, tx, payerNetworkId, proberClientId, now, contractTransferByteCount); preferred != nil {
+		orderedTransferBalances = append(orderedTransferBalances, preferred)
+	} else {
+		// Active describes remaining durable bytes, not the time window. Reuse
+		// this allocation's clock value so the existing index skips ineligible
+		// grants before row transfer, while Go keeps the same boundary check.
+		result, err := tx.Query(
+			ctx,
+			`
             SELECT
                 balance_id,
                 paid,
@@ -1660,66 +1663,67 @@ func createTransferEscrowInTx(
                 active = true AND
                 start_time <= $2 AND $2 < end_time
         `,
-		payerNetworkId,
-		now,
-	)
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			transferBalance := &escrow{}
-			server.Raise(result.Scan(
-				&transferBalance.balanceId,
-				&transferBalance.paid,
-				&transferBalance.balanceByteCount,
-				&transferBalance.startTime,
-				&transferBalance.endTime,
-			))
-			if !transferBalance.startTime.After(now) && now.Before(transferBalance.endTime) {
-				orderedTransferBalances = append(orderedTransferBalances, transferBalance)
+			payerNetworkId,
+			now,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				transferBalance := &escrow{}
+				server.Raise(result.Scan(
+					&transferBalance.balanceId,
+					&transferBalance.paid,
+					&transferBalance.balanceByteCount,
+					&transferBalance.startTime,
+					&transferBalance.endTime,
+				))
+				if !transferBalance.startTime.After(now) && now.Before(transferBalance.endTime) {
+					orderedTransferBalances = append(orderedTransferBalances, transferBalance)
+				}
 			}
-		}
-	})
-
-	server.Redis(ctx, func(r server.RedisClient) {
-		netEscrowCmds := map[server.Id]*redis.StringCmd{}
-		// the net escrow keys use per-balance hash tags (different slots), so
-		// use a plain pipeline, which auto-routes per slot on cluster
-		_, pipelineErr := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-			for _, transferBalance := range orderedTransferBalances {
-				netEscrowCmds[transferBalance.balanceId] = pipe.Get(ctx, netEscrowKey(transferBalance.balanceId))
-			}
-			return nil
 		})
-		if pipelineErr != nil && !errors.Is(pipelineErr, redis.Nil) {
-			server.Raise(pipelineErr)
-		}
-		for _, transferBalance := range orderedTransferBalances {
-			netEscrowCmd := netEscrowCmds[transferBalance.balanceId]
-			netEscrowBalanceByteCount, commandErr := netEscrowCmd.Int64()
-			if errors.Is(commandErr, redis.Nil) {
-				netEscrowBalanceByteCount = 0
-			} else {
-				server.Raise(commandErr)
+
+		server.Redis(ctx, func(r server.RedisClient) {
+			netEscrowCmds := map[server.Id]*redis.StringCmd{}
+			// the net escrow keys use per-balance hash tags (different slots), so
+			// use a plain pipeline, which auto-routes per slot on cluster
+			_, pipelineErr := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+				for _, transferBalance := range orderedTransferBalances {
+					netEscrowCmds[transferBalance.balanceId] = pipe.Get(ctx, netEscrowKey(transferBalance.balanceId))
+				}
+				return nil
+			})
+			if pipelineErr != nil && !errors.Is(pipelineErr, redis.Nil) {
+				server.Raise(pipelineErr)
 			}
-			netEscrowBalanceByteCount = max(int64(0), netEscrowBalanceByteCount)
-			transferBalance.balanceByteCount = max(0, transferBalance.balanceByteCount-ByteCount(netEscrowBalanceByteCount))
-		}
-	})
+			for _, transferBalance := range orderedTransferBalances {
+				netEscrowCmd := netEscrowCmds[transferBalance.balanceId]
+				netEscrowBalanceByteCount, commandErr := netEscrowCmd.Int64()
+				if errors.Is(commandErr, redis.Nil) {
+					netEscrowBalanceByteCount = 0
+				} else {
+					server.Raise(commandErr)
+				}
+				netEscrowBalanceByteCount = max(int64(0), netEscrowBalanceByteCount)
+				transferBalance.balanceByteCount = max(0, transferBalance.balanceByteCount-ByteCount(netEscrowBalanceByteCount))
+			}
+		})
 
-	slices.SortFunc(orderedTransferBalances, func(a *escrow, b *escrow) int {
-		if a.endTime.Before(b.endTime) {
-			return -1
-		} else if b.endTime.Before(a.endTime) {
-			return 1
-		}
+		slices.SortFunc(orderedTransferBalances, func(a *escrow, b *escrow) int {
+			if a.endTime.Before(b.endTime) {
+				return -1
+			} else if b.endTime.Before(a.endTime) {
+				return 1
+			}
 
-		if a.startTime.Before(b.startTime) {
-			return -1
-		} else if b.startTime.Before(a.startTime) {
-			return 1
-		}
+			if a.startTime.Before(b.startTime) {
+				return -1
+			} else if b.startTime.Before(a.startTime) {
+				return 1
+			}
 
-		return a.balanceId.Cmp(b.balanceId)
-	})
+			return a.balanceId.Cmp(b.balanceId)
+		})
+	}
 
 	netEscrowBalanceByteCount := ByteCount(0)
 
