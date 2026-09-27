@@ -115,7 +115,7 @@ func TestProviderEgressProbeExecutionArgsPreserveOwnerSettings(t *testing.T) {
 		if !reflect.DeepEqual(execution, &want) || !reflect.DeepEqual(providerEgressProbeExecutionArgs(execution), execution) {
 			t.Fatalf("%+v: execution settings changed beyond idempotent cohort normalization", c)
 		}
-		if (execution.Blackhole.Concurrency-1)/providerEgressBlackholeRetainedCohorts >= execution.Blackhole.Limit {
+		if (execution.Blackhole.Concurrency-1)/providerEgressBlackholeWorkerCohorts >= execution.Blackhole.Limit {
 			t.Fatalf("%+v: normalized cohort cannot admit the configured workers", c)
 		}
 	}

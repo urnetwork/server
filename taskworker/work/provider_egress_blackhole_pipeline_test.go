@@ -308,9 +308,13 @@ func TestProviderEgressBlackholeCohortPoolBound(t *testing.T) {
 	if err := validateProviderEgressProbeArgs(args); err != nil {
 		t.Fatalf("four independent cohorts must fill one 1000-worker pool: %v", err)
 	}
+	args.Blackhole.Concurrency = 4000
+	if err := validateProviderEgressProbeArgs(args); err != nil {
+		t.Fatalf("original sixteen-cohort worker boundary changed: %v", err)
+	}
 	args.Blackhole.Concurrency = 4001
 	if err := validateProviderEgressProbeArgs(args); err == nil {
-		t.Fatal("pool larger than all sixteen retained cohorts was accepted")
+		t.Fatal("metadata retention expanded the original sixteen-cohort worker bound")
 	}
 	args.Blackhole.Concurrency = 1000
 	args.Full.Concurrency = args.Full.Limit + 1
@@ -694,6 +698,197 @@ func TestProviderEgressBlackholePipelineBoundsSelectedBookkeeping(t *testing.T) 
 		h.finish()
 		if h.startedCount(0, len(h.due)) != providerEgressBlackholeSelectedCohorts*250 || h.peak.Load() > 250 || h.result == nil || !h.result.Full || h.err != nil {
 			t.Errorf("per-task selected work not bounded/rearmed: started=%d peak=%d result=%+v err=%v", h.startedCount(0, len(h.due)), h.peak.Load(), h.result, h.err)
+		}
+	})
+}
+
+// Every cohort retains one retrying provider while its other workers finish.
+// Completed result metadata must not strand the separate fixed worker pool;
+// the expanded metadata cap remains hard and never combines guard evidence.
+func TestProviderEgressBlackholePipelineRefillsSixteenRetainedTails(t *testing.T) {
+	args := testProviderEgressParallelArgs(t)
+	args.Blackhole.Limit, args.Blackhole.Concurrency, args.Full.Concurrency = 10, 40, 1
+	args.DarkBatchGuardMinChecks = 10
+	synctest.Test(t, func(t *testing.T) {
+		const retainedCohorts = 32
+		h := newTestBlackholePipeline(t, args, retainedCohorts+2)
+		releases := make([]chan struct{}, retainedCohorts+2)
+		for index := range releases {
+			releases[index] = make(chan struct{})
+		}
+		defer func() {
+			for _, release := range releases {
+				testBlackholePipelineRelease(release)
+			}
+			h.finish()
+		}()
+		h.check = func(index int, provider prober.Provider) fleetprobe.BlackholeResult {
+			if index%args.Blackhole.Limit == args.Blackhole.Limit-1 {
+				select {
+				case <-releases[index/args.Blackhole.Limit]:
+				case <-h.ctx.Done():
+				}
+			}
+			if index < args.Blackhole.Limit-1 {
+				return testBlackholeAdmissionDark(provider)
+			}
+			return testBlackholeAdmissionPass(provider)
+		}
+		close(h.firstRelease)
+		close(h.firstTail)
+		close(h.laterRelease)
+		h.start()
+		synctest.Wait()
+		if got := h.startedCount(160, 170); got != 10 {
+			t.Errorf("seventeenth cohort started %d/10 while sixteen independent tails retained results", got)
+		}
+		if got := h.startedCount(0, len(h.due)); got != retainedCohorts*args.Blackhole.Limit {
+			t.Errorf("retained work=%d, want hard bound %d", got, retainedCohorts*args.Blackhole.Limit)
+		}
+		if got := h.active.Load(); got != retainedCohorts {
+			t.Errorf("running=%d, want the %d independently held tails", got, retainedCohorts)
+		}
+		if h.startedCount(320, 340) != 0 || len(h.submittedCohort(0)) != 0 {
+			t.Error("retention bound or unfinished cohort guard was bypassed")
+		}
+
+		close(releases[0])
+		synctest.Wait()
+		if h.startedCount(320, 330) != 10 || h.startedCount(330, 340) != 0 {
+			t.Error("one finalized cohort did not free exactly one retained slot")
+		}
+		held, passing := 0, 0
+		for _, check := range h.submittedCohort(0) {
+			if check.NotMeasured {
+				held++
+			}
+			if check.Ok {
+				passing++
+			}
+		}
+		if held != 9 || passing != 1 || len(h.submittedCohort(1)) != 0 {
+			t.Errorf("independent high-dark guard changed: held=%d passing=%d", held, passing)
+		}
+		h.cancel()
+		synctest.Wait()
+		if h.active.Load() != 0 || h.peak.Load() > int32(args.Blackhole.Concurrency) {
+			t.Errorf("fixed workers did not join within their bound: active=%d peak=%d", h.active.Load(), h.peak.Load())
+		}
+		if h.maxLookup > (retainedCohorts+1)*args.Blackhole.Limit || h.dueReads > retainedCohorts+1 {
+			t.Errorf("retention refill exceeded bounded selection: lookup=%d reads=%d", h.maxLookup, h.dueReads)
+		}
+	})
+}
+
+// Retaining more independently guarded results must not consume more of the
+// check-admission lease: their publication owners run concurrently.
+func TestProviderEgressBlackholePipelineRetainedMetadataPreservesAdmissionLease(t *testing.T) {
+	args := testProviderEgressParallelArgs(t)
+	synctest.Test(t, func(t *testing.T) {
+		h := newTestBlackholePipeline(t, args, 1)
+		defer h.finish()
+		var admissionDone <-chan struct{}
+		runBlackhole := h.pass.runBlackhole
+		h.pass.runBlackhole = func(ctx context.Context, providers []prober.Provider, options fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
+			admissionDone = options.AdditionalAdmissionDone
+			return runBlackhole(ctx, providers, options)
+		}
+		h.start()
+		synctest.Wait()
+		if admissionDone == nil {
+			t.Fatal("bounded pipeline did not install its admission edge")
+		}
+		// The unchanged 75m lease, 32m45s check, and 8m finalization reserve
+		// admit until 34m15s. Charging 32 retained cohorts would stop at26m15s.
+		time.Sleep(30 * time.Minute)
+		select {
+		case <-admissionDone:
+			t.Error("retained metadata shortened the independent admission lease")
+		default:
+		}
+		h.finish()
+		if h.err != nil || h.startedCount(0, len(h.due)) != args.Blackhole.Limit {
+			t.Errorf("unchanged lease lost admitted work: started=%d err=%v", h.startedCount(0, len(h.due)), h.err)
+		}
+	})
+}
+
+// A larger configured cohort can queue more serial early calls even though
+// independent cohorts share no submission worker or deadline reservation.
+func TestProviderEgressBlackholePublicationBudgetCoversQueuedEarlyCalls(t *testing.T) {
+	for _, test := range []struct {
+		selected int
+		want     time.Duration
+	}{
+		{selected: 10, want: 8 * time.Minute},
+		{selected: 250, want: 8 * time.Minute},
+		{selected: 256, want: 8*time.Minute + 30*time.Second},
+		{selected: 2500, want: 78*time.Minute + 30*time.Second},
+	} {
+		if got := providerEgressBlackholePublicationBudget(test.selected); got != test.want {
+			t.Errorf("selected=%d publication reserve=%s, want%s", test.selected, got, test.want)
+		}
+	}
+}
+
+// An API-sized prefix of already-selected rows is not durable exhaustion.
+// Publication of one independent cohort makes one new cohort visible behind
+// that prefix, without a larger query or a timer-driven retry loop.
+func TestProviderEgressBlackholePipelineWaitsForPinnedMaximumPrefix(t *testing.T) {
+	args := testProviderEgressParallelArgs(t)
+	args.Blackhole.Concurrency = 1000
+	synctest.Test(t, func(t *testing.T) {
+		const cohorts = 22
+		h := newTestBlackholePipeline(t, args, cohorts)
+		releases := make([]chan struct{}, cohorts)
+		for index := range releases {
+			releases[index] = make(chan struct{})
+		}
+		defer func() {
+			for _, release := range releases {
+				testBlackholePipelineRelease(release)
+			}
+			h.finish()
+		}()
+		h.check = func(index int, provider prober.Provider) fleetprobe.BlackholeResult {
+			if index%args.Blackhole.Limit == args.Blackhole.Limit-1 {
+				select {
+				case <-releases[index/args.Blackhole.Limit]:
+				case <-h.ctx.Done():
+				}
+			}
+			return testBlackholeAdmissionPass(provider)
+		}
+		close(h.firstRelease)
+		close(h.firstTail)
+		close(h.laterRelease)
+		h.start()
+		synctest.Wait()
+		if h.startedCount(0, len(h.due)) != 5000 || h.dueReads != 21 || h.active.Load() != 20 {
+			t.Errorf("maximum prefix did not park on twenty bounded cohorts: started=%d reads=%d active=%d", h.startedCount(0, len(h.due)), h.dueReads, h.active.Load())
+		}
+		close(releases[0])
+		synctest.Wait()
+		if h.startedCount(5000, 5250) != 250 || h.startedCount(5250, 5500) != 0 {
+			t.Error("first publication failed to expose exactly one cohort behind the pinned prefix")
+		}
+		close(releases[1])
+		synctest.Wait()
+		if h.startedCount(5250, 5500) != 250 {
+			t.Error("second publication did not rearm a still-pinned due prefix")
+		}
+		if h.maxLookup != 5000 || h.dueReads > 2*cohorts+1 || h.peak.Load() > 1000 {
+			t.Errorf("prefix wait exceeded lookup/worker bounds: lookup=%d reads=%d peak=%d", h.maxLookup, h.dueReads, h.peak.Load())
+		}
+		h.cancel()
+		synctest.Wait()
+		select {
+		case <-h.done:
+		default:
+			t.Error("publication-prefix wait did not join after owner cancellation")
+		}
+		if h.active.Load() != 0 {
+			t.Errorf("publication-prefix cancellation retained %d workers", h.active.Load())
 		}
 	})
 }

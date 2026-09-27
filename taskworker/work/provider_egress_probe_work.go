@@ -177,13 +177,13 @@ func validateProviderEgressProbeBatchArgs(name string, args ProviderEgressProbeB
 		return fmt.Errorf("provider egress probe %s concurrency must be positive", name)
 	}
 	if name == "blackhole" {
-		// The fixed pool serves up to sixteen independent guard cohorts. A
-		// smaller cohort can publish without waiting for another cohort's
-		// slowest check, while the pass still owns one bounded worker pool.
+		// Keep the original sixteen-cohort worker bound independent of result
+		// retention: allowing more slow-tail metadata does not authorize more
+		// simultaneous tunnels or change the probe's credit geometry.
 		// Divide instead of multiplying to keep malformed large settings from
 		// overflowing the bound.
-		if (args.Concurrency-1)/providerEgressBlackholeRetainedCohorts >= args.Limit {
-			return fmt.Errorf("provider egress probe blackhole concurrency exceeds %d retained cohorts", providerEgressBlackholeRetainedCohorts)
+		if (args.Concurrency-1)/providerEgressBlackholeWorkerCohorts >= args.Limit {
+			return fmt.Errorf("provider egress probe blackhole concurrency exceeds %d worker cohorts", providerEgressBlackholeWorkerCohorts)
 		}
 	} else if args.Limit < args.Concurrency {
 		return fmt.Errorf("provider egress probe %s concurrency must be in [1,limit]", name)
@@ -1583,7 +1583,7 @@ func providerEgressProbeExecutionArgs(args *ProviderEgressProbeArgs) *ProviderEg
 	execution := *args
 	const preferredCohort = 250
 	if preferredCohort < args.Blackhole.Limit && preferredCohort < args.Blackhole.Concurrency {
-		minimumCohort := 1 + (args.Blackhole.Concurrency-1)/providerEgressBlackholeRetainedCohorts
+		minimumCohort := 1 + (args.Blackhole.Concurrency-1)/providerEgressBlackholeWorkerCohorts
 		execution.Blackhole.Limit = min(args.Blackhole.Limit,
 			max(preferredCohort, minimumCohort, args.DarkBatchGuardMinChecks))
 	}
