@@ -1642,6 +1642,9 @@ func createTransferEscrowInTx(
 	// attempt to split up across remaining transfer balances
 
 	orderedTransferBalances := []*escrow{}
+	// Active describes remaining durable bytes, not the time window. Reuse
+	// this allocation's clock value so the existing index skips ineligible
+	// grants before row transfer, while Go keeps the same boundary check.
 	result, err := tx.Query(
 		ctx,
 		`
@@ -1654,9 +1657,11 @@ func createTransferEscrowInTx(
             FROM transfer_balance
             WHERE
                 network_id = $1 AND
-                active = true
+                active = true AND
+                start_time <= $2 AND $2 < end_time
         `,
 		payerNetworkId,
+		now,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
