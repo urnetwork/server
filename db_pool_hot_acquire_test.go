@@ -27,6 +27,7 @@ type pgPoolWireFixture struct {
 	closed      bool
 	workers     sync.WaitGroup
 	query       func(int, string) bool
+	queryError  func(int, string) *pgproto3.ErrorResponse
 }
 
 // Supplies a synthetic PostgreSQL startup and simple-query transport.
@@ -85,6 +86,21 @@ func (self *pgPoolWireFixture) dial(ctx context.Context, network string, address
 				if self.query != nil && !self.query(connectionIndex, message.String) {
 					return
 				}
+				if self.queryError != nil {
+					if err := self.queryError(connectionIndex, message.String); err != nil {
+						if message.String == "commit" {
+							txStatus = 'I'
+						} else if txStatus == 'T' {
+							txStatus = 'E'
+						}
+						backend.Send(err)
+						backend.Send(&pgproto3.ReadyForQuery{TxStatus: txStatus})
+						if err := backend.Flush(); err != nil {
+							return
+						}
+						continue
+					}
+				}
 				commandTag := "SELECT 1"
 				switch {
 				case message.String == "-- ping":
@@ -113,7 +129,7 @@ func (self *pgPoolWireFixture) dial(ctx context.Context, network string, address
 }
 
 // Uses one actual pgx pool connection; no production config or network is read.
-func newPgPoolWireFixture(t testing.TB, query func(int, string) bool, shouldPing func(context.Context, pgxpool.ShouldPingParams) bool) (*pgPoolWireFixture, *safePgPool) {
+func newPgPoolWireFixture(t testing.TB, query func(int, string) bool, shouldPing func(context.Context, pgxpool.ShouldPingParams) bool, configure ...func(*pgPoolWireFixture, *pgxpool.Config)) (*pgPoolWireFixture, *safePgPool) {
 	t.Helper()
 	fixture := &pgPoolWireFixture{query: query}
 	config, err := pgxpool.ParseConfig("host=synthetic-pg.example user=synthetic dbname=synthetic sslmode=disable connect_timeout=5")
@@ -126,7 +142,11 @@ func newPgPoolWireFixture(t testing.TB, query func(int, string) bool, shouldPing
 		return []string{"192.0.2.1"}, nil
 	}
 	config.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	for _, f := range configure {
+		f(fixture, config)
+	}
 	configurePgPoolLiveness(config)
+	configurePgPoolWriteTracking(config)
 	config.ShouldPing = shouldPing
 	pgPool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {

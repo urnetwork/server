@@ -228,6 +228,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 			panic(fmt.Sprintf("Unable to parse url: %s", err))
 		}
 		configurePgPoolLiveness(config)
+		configurePgPoolWriteTracking(config)
 
 		self.pool, err = pgxpool.NewWithConfig(self.ctx, config)
 		if err != nil {
@@ -379,6 +380,9 @@ func (self *PgRetry) Error() string {
 func isTransientError(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
+		if pgErr.Code == pgerrcode.StatementCompletionUnknown {
+			return false
+		}
 		return pgerrcode.IsIntegrityConstraintViolation(pgErr.Code) ||
 			pgerrcode.IsTransactionRollback(pgErr.Code)
 	}
@@ -410,9 +414,9 @@ func isConnectionError(err error) bool {
 	return err.Error() == "conn closed"
 }
 
-// Separates a broken connection from permission to replay its callback. Pgx
-// marks protocol writes unsafe when any bytes may have reached PostgreSQL; all
-// other established connection retry classes retain their legacy behavior.
+// Classifies the current failure only. A callback replay additionally requires
+// transport proof that none of its statements wrote bytes; pgx can mask a lost
+// read reply as a SafeToRetry closed-connection error.
 func canRetryConnectionError(err error) bool {
 	// Read-side pgx timeouts are normalized into its private timeout wrapper.
 	// Preserve their established fresh-connection retry even though that wrapper
@@ -564,6 +568,9 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 	for {
 		var pgErr error
 		connectionContextDone := false
+		callbackStarted := false
+		callbackWrites := pgWriteSnapshot{}
+		connectionRetrySafe := false
 		conn, connErr := pool.open().Acquire(ctx)
 		if connErr != nil {
 			if retryOptions.rerunOnConnectionError {
@@ -602,6 +609,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 						} else if isConnectionError(v) {
 							connErr = v
 							connectionContextDone = isDoneContextConnectionError(ctx, v)
+							connectionRetrySafe = !callbackStarted || callbackWrites.unchanged()
 						} else {
 							panic(v)
 						}
@@ -615,6 +623,8 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				// the default is read only, escalate to rw
 				RaisePgResult(conn.Exec(ctx, "SET default_transaction_read_only=off"))
 			}
+			callbackWrites = snapshotPgWrites(conn.Conn().PgConn().Conn())
+			callbackStarted = true
 			callback(conn)
 		}()
 
@@ -641,7 +651,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 			if connectionContextDone {
 				panic(DbContextDoneError)
 			}
-			if retryOptions.rerunOnConnectionError && canRetryConnectionError(connErr) {
+			if retryOptions.rerunOnConnectionError && connectionRetrySafe && canRetryConnectionError(connErr) {
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
@@ -781,8 +791,9 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				// work that is durably written (observed: a contract's escrow
 				// rows committed while its redis mirror increment was dropped,
 				// leaving the net escrow counter permanently short). Waiting
-				// for the real answer costs at most PgCommitTimeout and makes
-				// commitErr mean what the caller assumes it means.
+				// for the answer costs at most PgCommitTimeout. A transport
+				// failure can still leave an ambiguous outcome, which must
+				// remain an error rather than replaying the transaction.
 				commitCtx, commitCancel := context.WithTimeout(
 					context.WithoutCancel(ctx),
 					PgCommitTimeout,
@@ -814,7 +825,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 			panic(pgErr)
 		}
 		if commitErr != nil {
-			if retryOptions.rerunOnCommitError {
+			if retryOptions.rerunOnCommitError && canRetryCommitError(commitErr) {
 				select {
 				case <-ctx.Done():
 					panic(DbContextDoneError)
