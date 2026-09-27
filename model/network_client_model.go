@@ -558,9 +558,10 @@ func AuthNetworkClient(
 					Message: "Invalid location",
 				}
 			} else {
-				if proxyDeviceState.Location.CountryCode != "" {
-					proxyDeviceState.DnsResolverSettings = connect.RegionalDnsResolverSettings(proxyDeviceState.Location.CountryCode)
-				}
+				proxyDeviceState.DnsResolverSettings = proxyDnsResolverSettings(
+					proxyDeviceState.DnsResolverSettings,
+					proxyDeviceState.Location.CountryCode,
+				)
 
 				proxyDeviceConfig := &ProxyDeviceConfig{
 					ProxyDeviceConnection: ProxyDeviceConnection{
@@ -774,6 +775,16 @@ func AuthNetworkClient(
 	}
 
 	return
+}
+
+// A caller's explicit resolver is authoritative. Only an unset resolver may
+// receive the SDK/Connect regional recommendation; unsupported countries keep
+// the default resolver behavior in the device instead of storing an empty one.
+func proxyDnsResolverSettings(configured *connect.DnsResolverSettings, countryCode string) *connect.DnsResolverSettings {
+	if configured != nil {
+		return configured
+	}
+	return connect.RegionalDnsResolverSettings(countryCode)
 }
 
 type RemoveNetworkClientArgs struct {

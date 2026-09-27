@@ -172,7 +172,8 @@ func NewFullProber(options FullOptions) *prober.Prober {
 	probes := &probeRegistry{}
 
 	providerProber := &prober.Prober{
-		Open: func(ctx context.Context, providerClientId string) (*http.Client, func() error, error) {
+		OpenProvider: func(ctx context.Context, provider prober.Provider) (*http.Client, func() error, error) {
+			providerClientId := provider.ClientId
 			clientId, err := connect.ParseId(providerClientId)
 			if err != nil {
 				return nil, nil, err
@@ -181,6 +182,7 @@ func NewFullProber(options FullOptions) *prober.Prober {
 			hosts := egresshealth.HostsOf(pool.Destinations)
 			tunnelConfig := options.TunnelConfig
 			tunnelConfig.Pins = options.Pins.pins()
+			tunnelConfig.ProviderCountry = provider.Place.Country
 			path, err := openProbePath(ctx, providerTunnelOpener(tunnelConfig, clientId, hosts), hosts, options.ProbeTimeout)
 			if err != nil {
 				return nil, nil, err
@@ -213,6 +215,11 @@ func NewFullProber(options FullOptions) *prober.Prober {
 		Submit:        options.Submit,
 		Attempts:      options.Attempts,
 		HealthResults: options.HealthResults,
+	}
+	// Retain the identifier-only API for older direct callers. Scheduled probes
+	// use OpenProvider and carry the due provider's place without an ID cache.
+	providerProber.Open = func(ctx context.Context, providerClientId string) (*http.Client, func() error, error) {
+		return providerProber.OpenProvider(ctx, prober.Provider{ClientId: providerClientId})
 	}
 
 	return providerProber

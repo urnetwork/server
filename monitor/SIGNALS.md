@@ -6973,7 +6973,18 @@ running API **and** Taskworker artifacts before applying these semantics):
   This is a source-proven boundedness correction, not evidence canaries caused
   Main's location-specific provider-list incident.
 - Each sampled hostname has an explicit IPv4 name-resolution phase using its
-  own tunnel's DoH cache, followed by target TCP/TLS and response work. Up to
+  own tunnel's private resolver, followed by target TCP/TLS and response work.
+  The tunnel takes Connect's existing provider-country regional recommendation
+  where available (as server/proxy does), an explicit safe custom resolver
+  first, and the existing in-tunnel DoH default otherwise. Never use the
+  operator host's DNS for provider targets or share resolver state across
+  providers. A regional plaintext DNS recommendation remains inside that
+  provider tunnel; it is not a new public bootstrap path. The source change
+  requires a new Taskworker artifact before it describes Main behavior. The
+  existing fixed failure stages do not expose resolver selection or join a
+  provider-country cohort, so they cannot prove a regional recommendation
+  caused improvement or failure. Unknown/stale country metadata can select the
+  default or an inapplicable recommendation; retain unknown attribution. Up to
   three transient DNS lookup attempts share the request's hard deadline, with
   bounded 50–200 ms jitter and time reserved for the connection. An authoritative
   negative is not immediately repeated; the existing spaced per-site retries
@@ -7033,13 +7044,48 @@ Brittle-gate audit left intentionally unchanged: a missing trusted pin snapshot
 fails the pass closed (do not recover by silently unpinning); a terminal TLS
 authentication failure remains integrity evidence; country-incompatible sites
 are unscored and only bounded canaries test recovery; shared-failure batch guards
-still contain false provider negatives. The latest-run 90% quality admission
-gate can exclude a 50-load provider after six final failed destinations, and
-country counts additionally need trustworthy exit-location evidence. With sparse
-Full coverage this may underfill particular target cohorts even when global
-best-available remains populated, but aggregate caller-country outcome bands
-do not prove that causal join. Do not relax country/security gates or attribute
-the live outage without target-level privacy-safe evidence and a tested policy.
+still contain false provider negatives. For a modern egress-index rollup, six
+final failures in 50 loads remove a provider from native quality but leave it
+in speed and location counts; absent quality routes it to the online bucket,
+subject to its separate traffic/reliability minimums. A known observed-country
+mismatch gates supply, but absent exit location alone is not a mismatch.
+`passesHealth`/`countsTowardCountry` are stricter legacy rules for rows whose
+egress index is NULL, not universal current provider predicates. Quality may
+borrow from speed and online. Sparse Full coverage alone therefore cannot
+explain location-specific empty responses. Inspect legacy-row share, each
+target's native/backfill/minimum populations and request-time exclusions;
+aggregate caller-country outcome bands do not prove that causal join. Do not
+relax country/security gates or attribute the live outage without target-level
+privacy-safe evidence and a tested policy.
+
+Cheap-lane throughput discriminator (2026-09-27 source review; rollout not yet
+verified): the implementation formerly waited for the ordinary retry chains of
+all three sampled destinations even after one destination had passed. A known
+pass could therefore occupy a cheap worker slot until other sites exhausted
+their spaced retries; a large running/queued worker count with few acknowledged
+checks is consistent with this hold, but does not prove it is the sole Main
+bottleneck. The correction stops only *future* ordinary retries after a pass;
+all initial requests and already-admitted retries still finish, and any TLS
+authentication failure still overrides a pass. An all-failed check retains its
+full retries and existing dark-streak policy. After rollout, compare distinct
+acknowledged measured checks per rolling hour against the four-hour fleet
+requirement, alongside running slots, queue depth, completion time, failed
+DNS/connect/TLS stages, and country-specific pass rate. A drop in retries
+alone is not proof of restored coverage; a regional-DNS change must not hide
+TLS failures or cause country cohorts to go dark.
+
+The cheap `completed_buffered` gauge retains a result until its cohort joins
+even when that safe result has already been early-acknowledged. It is not an
+unsubmitted-provider count. Early publication flushes groups of 16 passing,
+TLS-failed or not-measured results; at most 15 safe short-tail results per
+active cohort await its final flush, while ordinary negatives await the guard.
+Pair worker completions with submitted-check events, batch acknowledgment and
+durable measured coverage before diagnosing publication loss. The check counter
+is emitted before acknowledgment and a batch ACK is not a provider denominator.
+Compare cancellation deltas only inside a source-matched, post-convergence
+window: the observed 15-minute cancellation burst crossed a Taskworker rollout,
+whereas the later five-minute window had zero cancellations. Missing process
+scrapes prevent a complete fleet attribution even when visible slots are full.
 
 The provider-egress pipeline now runs as recurring `pending_task` shards rather
 than as host-owned edge services. Generic task health (§1.2/§8.9) can detect a

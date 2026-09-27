@@ -53,11 +53,10 @@ func PoolUrl(apiUrl string) string {
 	return strings.TrimRight(apiUrl, "/") + egresshealth.PoolPath
 }
 
-// Returns the operator's /ip echo on apiUrl, which every run and check
-// fetches first, through the provider's tunnel, for its warm-up and its exit
-// address. The api url has to be the address the api answers on from the
-// public internet, since the request leaves from the provider. Empty for an
-// empty api url.
+// Returns the operator's /ip echo URL for compatibility with older callers.
+// Provider quality probes no longer fetch this URL as a warm-up or exit-IP
+// check; they request only their randomized destination samples. Empty for an
+// empty api URL.
 func IpEchoUrl(apiUrl string) string {
 	if strings.TrimSpace(apiUrl) == "" {
 		return ""

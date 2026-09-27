@@ -199,7 +199,9 @@ func RunBlackhole(
 		// The client ceiling must allow initial sampled requests to establish
 		// the cold path; subsequent requests receive their smaller run deadline.
 		clientTimeout := max(options.Timeout, coldStartTimeout)
-		path, err := openProbePath(ctx, providerTunnelOpener(blackholeTunnelConfig(options), clientId, hosts), hosts, clientTimeout)
+		tunnelConfig := blackholeTunnelConfig(options)
+		tunnelConfig.ProviderCountry = provider.Place.Country
+		path, err := openProbePath(ctx, providerTunnelOpener(tunnelConfig, clientId, hosts), hosts, clientTimeout)
 		if err != nil {
 			return BlackholeResult{
 				Check: ingest.BlackholeCheck{

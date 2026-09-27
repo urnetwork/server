@@ -101,6 +101,9 @@ var ErrNotMeasured = errors.New("prober: the run measured nothing; its tunnel co
 // provider or server.
 type Prober struct {
 	Open TunnelOpener
+	// Optional place-aware opener. When set, it takes precedence over Open so
+	// the private tunnel can select the provider country's resolver at birth.
+	OpenProvider func(context.Context, Provider) (*http.Client, func() error, error)
 	// Runs the required sampled website check over the tunnel.
 	// The result is logged and acknowledged by HealthResults: the
 	// server's egress index and one-in-ten rule read it. No verdict is derived
@@ -369,7 +372,16 @@ func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 	// Runs the probe and returns the failure class ("" on success)
 	// alongside the error, so the attempt is reported for every outcome.
 	probe := func() (string, error) {
-		client, closeTunnel, err := self.Open(ctx, providerClientId)
+		var client *http.Client
+		var closeTunnel func() error
+		var err error
+		if self.OpenProvider != nil {
+			client, closeTunnel, err = self.OpenProvider(ctx, provider)
+		} else if self.Open != nil {
+			client, closeTunnel, err = self.Open(ctx, providerClientId)
+		} else {
+			err = errors.New("prober: no provider tunnel opener")
+		}
 		if err != nil {
 			// No provider id in the message: the scheduler dedups on the error
 			// text and keeps only MaxLoggedDistinctErrors distinct ones, so an id

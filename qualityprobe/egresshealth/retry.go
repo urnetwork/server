@@ -89,6 +89,10 @@ type run struct {
 	opts             Options
 	coldStateLock    sync.Mutex
 	coldClientStates map[*http.Client]coldClientState
+	// Cheap liveness can stop future ordinary retries after any pass. This
+	// context never owns a fetch: every admitted TLS observation still joins.
+	retryCtx      context.Context
+	livenessFound context.CancelFunc
 }
 
 // Bounded by the initial tunnel and the run's finite recreation allowance.
@@ -198,6 +202,13 @@ func (self *run) load(ctx context.Context, d Destination) CheckResult {
 attempts:
 	for attempt := 1; attempt <= self.loadAttempts; attempt++ {
 		if 1 < attempt {
+			retryCtx := ctx
+			if self.retryCtx != nil {
+				retryCtx = self.retryCtx
+				if retryCtx.Err() != nil {
+					break attempts
+				}
+			}
 			delay := retryDelay(self.rng.expFloat64(), self.retryMeanInterval)
 			remaining := time.Duration(self.loadAttempts - attempt + 1)
 			if share := (self.deadline.Sub(self.opts.now()) - remaining*self.perRequestTimeout) / remaining; share < delay {
@@ -206,7 +217,10 @@ attempts:
 				}
 				delay = share
 			}
-			if err := self.opts.sleep(ctx, delay); err != nil {
+			if err := self.opts.sleep(retryCtx, delay); err != nil {
+				break attempts
+			}
+			if retryCtx.Err() != nil {
 				break attempts
 			}
 		}
@@ -220,6 +234,10 @@ attempts:
 		select {
 		case self.slots <- struct{}{}:
 		case <-ctx.Done():
+			break attempts
+		}
+		if 1 < attempt && self.retryCtx != nil && self.retryCtx.Err() != nil {
+			<-self.slots
 			break attempts
 		}
 		// Asked for only once the slot is held, so the client is the path's
@@ -248,6 +266,9 @@ attempts:
 		result.Attempts = attempt
 
 		if result.Ok || result.TlsAuthenticationFailure {
+			if result.Ok && self.livenessFound != nil {
+				self.livenessFound()
+			}
 			tunnelGone = false
 			if !result.Ok {
 				lastFailure = result.Err

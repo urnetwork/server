@@ -91,8 +91,10 @@ const (
 // So this is deliberately the cheapest useful check, and since GEOMAP step 7 a
 // patient one. Three randomized connectivity loads start directly and share a
 // finite cold-start window for their tunnel generation. Each retains the
-// retries and spacing of Check, all concurrent: the check takes one round
-// when anything answers and up to about fifteen minutes when nothing does. It
+// retries and spacing of Check until any load passes. A pass ends only future
+// ordinary retries; every initial or already-admitted request still joins so
+// its TLS-authentication evidence cannot be hidden. With no pass, all retry
+// chains remain concurrent and can take about fifteen minutes. It
 // reuses fetch, and therefore the destinations' headers, body caps and checks
 // -- a captive portal that answers 200 with its own body fails here exactly as
 // it fails a full run, which is the property that makes "something got
@@ -132,6 +134,10 @@ func blackhole(ctx context.Context, client *http.Client, dests []Destination, op
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	r := newRun(opts.path(client), opts, max(1, len(sample)), budget, rng)
+	// Liveness ends only future ordinary retries. All initial requests and
+	// already-admitted later requests retain their owner and TLS evidence.
+	r.retryCtx, r.livenessFound = context.WithCancel(ctx)
+	defer r.livenessFound()
 
 	result.Results = r.loadAll(ctx, sample)
 	sawSuccess, measured := false, 0

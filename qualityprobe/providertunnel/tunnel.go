@@ -31,6 +31,12 @@ type Config struct {
 	PlatformUrl string
 	ByJwt       string
 	ClientId    connect.Id
+	// Country of the provider under test, not the operator or API caller.
+	// Only used when no explicit in-tunnel resolver settings were supplied.
+	ProviderCountry string
+	// Optional immutable override. Host/local resolution is never permitted
+	// for provider probes, even when a caller explicitly asks for it.
+	DnsResolverSettings *connect.DnsResolverSettings
 	// Certificate pins per host: a pinned host must present a chain
 	// with one of its pinned keys on the verified path, on top of ordinary
 	// WebPKI verification. They are optional -- a host without an entry is
@@ -227,6 +233,10 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	if cfg.ContractReservationByteCount < 0 {
 		return nil, ErrContractReservation
 	}
+	resolver, err := providerDnsResolverSettings(cfg)
+	if err != nil {
+		return nil, err
+	}
 
 	// The packet path and the control-plane lifecycle have separate child
 	// contexts. Close must stop Tun traffic first, while keeping the API and
@@ -274,7 +284,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	// Do not hoist the TUN or its DoH cache to the Taskworker pass: every full
 	// and blackhole provider probe needs an independently owned DNS cache and
 	// admission state. The constructor creates that cache for this TUN alone.
-	tun, err := createTun(dataCtx, inTunnelOnlyDnsResolverSettings())
+	tun, err := createTun(dataCtx, resolver)
 	if err != nil {
 		cancelData()
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), cfg.closeTimeout())

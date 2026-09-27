@@ -257,12 +257,14 @@ func TestBlackholeOneLoadPassingOnItsLastAttemptIsOk(t *testing.T) {
 		t.Fatalf("OK = %t failure = %q, want OK: one load passed on its last attempt", res.Ok, res.Failure)
 	}
 	for _, r := range res.Results {
-		want := DefaultLoadAttempts
-		if r.Name == "late" && !r.Ok {
-			t.Errorf("late = %+v, want a pass", r)
-		}
-		if r.Attempts != want {
-			t.Errorf("%s: %d attempt(s), want %d", r.Name, r.Attempts, want)
+		if r.Name == "late" {
+			if !r.Ok || r.Attempts != DefaultLoadAttempts {
+				t.Errorf("late = %+v, want a pass on the final attempt", r)
+			}
+		} else if r.Attempts < 1 || DefaultLoadAttempts < r.Attempts {
+			// Other ordinary retries may end as soon as the late response proves
+			// liveness, but no sampled host may lose its initial attempt.
+			t.Errorf("%s: %d attempts outside the bounded integrity sample", r.Name, r.Attempts)
 		}
 	}
 }
@@ -292,9 +294,8 @@ func TestBlackholeEveryLoadFailingEveryAttemptIsAllDestinationsFailed(t *testing
 	}
 }
 
-// The check opens with the warm-up, before any load, and carries its exit
-// address -- but the echo alone never makes a provider OK: a provider could
-// carry the one well-known operator host and blackhole everything else.
+// A retained legacy echo option cannot add a fixed request, even when every
+// sampled URL fails and the cheap check uses every ordinary retry.
 func TestBlackholeIgnoresConfiguredEchoEvenWhenLoadsFail(t *testing.T) {
 	var stateLock sync.Mutex
 	var order []string
