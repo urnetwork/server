@@ -6503,6 +6503,21 @@ func findProvidersProviderFromClientScore(
 	}
 }
 
+// Keep the existing candidate budget for ordinary small exclusion sets. A
+// broad explicit exclusion history needs room for the requested survivors;
+// otherwise excluded rows can fill every sampled page before fallback runs.
+// Compensation is request-local and capped at the standard client's 2,400-id
+// runtime history. Page rounding stays unchanged; no retry or filter is added.
+func findProviders2LoadCount(count int, exclusionCount int) int {
+	base := max(10*count, 1000)
+	if count <= 0 {
+		return base
+	}
+	spare := base - min(count, base)
+	extra := max(0, min(exclusionCount, 2400)-spare)
+	return base + min(extra, int(^uint(0)>>1)-base)
+}
+
 func FindProviders2(
 	findProviders2 *FindProviders2Args,
 	session *session.ClientSession,
@@ -6593,8 +6608,7 @@ func FindProviders2(
 		// 1. load (ideally this would be all, but is truncated for performance)
 		// 2. sample based on reliability * quality
 		// 3. band based on tier and keep the top `count`
-		minLoadCount := 1000
-		loadMultiplier := 10
+		loadCount := findProviders2LoadCount(count, len(excludeFinalDestinations()))
 
 		rankMode := RankModeQuality
 		if findProviders2.RankMode != "" {
@@ -6631,7 +6645,7 @@ func FindProviders2(
 			locationIds,
 			locationGroupIds,
 			clientLocationId,
-			max(loadMultiplier*count, minLoadCount),
+			loadCount,
 			facets,
 			&observation.load,
 		)
@@ -6935,7 +6949,7 @@ func FindProviders2(
 					locationIds,
 					locationGroupIds,
 					clientLocationId,
-					max(loadMultiplier*count, minLoadCount),
+					loadCount,
 					facets,
 					&observation.load,
 				)

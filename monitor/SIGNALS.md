@@ -5513,6 +5513,26 @@ Missing cache evidence takes precedence over filter attribution. Destination-tai
 exclusions are compatible with healthy-window refills but do not prove health;
 client-ID exclusions combine runtime removals and durable policy.
 
+Exclusion-budget qualifier (2026-09-27 source correction): request-time
+exclusions used to consume the fixed sampled-row budget before selection. A
+deterministic 2,000-entry v4 cache with 1,980 excluded IDs returned ten of its
+twenty available providers; 1,000 excluded preferred-facet entries could also
+hide twenty online entries in the next allowed facet. The API now budgets
+room for the requested survivors plus up to 2,400 unique explicit exclusions,
+without reducing the existing `max(1000, 10*count)` budget. The same bounded
+budget applies to primary and optional other-mode reads, with existing page
+rounding and no retry, DB read, target widening or filter relaxation. Ordinary
+twenty-count requests with six excluded destinations still load 1,000 rows.
+This requires the corrected API artifact; cache or Taskworker refresh alone
+does not change the reader. Larger exclusion histories, overlapping target
+pages, hard/network/family removals, and cache gaps can still leave a short
+sample. Schema-2 filter reasons describe sampled removals, not exclusion-set
+cardinality or proof that unread pages contained eligible alternatives. Main's
+observed destination-filtered zeroes do not by themselves establish this
+mechanism; the standard client's roughly six-entry healthy window cannot alone
+consume a distinct 1,000-provider sample. Keep §2.9a independent and verify
+successful provider admission after any improved response count.
+
 `urnetwork_findproviders2_stage_inflight{stage}` and
 `urnetwork_findproviders2_stage_seconds{stage}` retain fixed stages `validate`,
 `caller_location`, `load_primary`, `load_backfill`, `hard_exclusions`, `filter`,
