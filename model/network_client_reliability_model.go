@@ -1066,7 +1066,7 @@ func ClientReliabilityRollupSynced(ctx context.Context, now time.Time) (synced b
 // attempt hit its exact 7,200-second task deadline. The task now checkpoints
 // each lookback in its own transaction, so a slow later lookback cannot roll
 // back completed earlier work. Optional cadence re-anchors are also deferred
-// while a long VACUUM or concurrent index build is already consuming the
+// while a long VACUUM, concurrent index build, or logical backup occupies the
 // maintenance path. Missing state, a degraded-classification schema change,
 // and a backward window still re-anchor immediately because there is no
 // correct rolling alternative.
@@ -1167,14 +1167,15 @@ func reliabilityRunningNeedsRecompute(
 }
 
 // reliabilityRunningPeriodicReanchorAllowed keeps an optional full-window
-// scan from starting beside VACUUM or index-build work. Index builds block as
-// soon as they enter the progress view: even a new concurrent build can reach
+// scan from starting beside VACUUM, index-build, or logical-backup work. Index
+// builds block as soon as they enter the progress view: even a new build can reach
 // its old-snapshot wait before the full-window scan finishes. The five-minute
 // floor excludes tiny routine vacuums only; bootstrap and backwards-window
 // repairs bypass this result in reliabilityRunningNeedsRecompute.
 func reliabilityRunningPeriodicReanchorAllowed(ctx context.Context, tx server.PgTx) (allowed bool) {
 	var establishedVacuum bool
 	var indexBuild bool
+	var logicalBackup bool
 	result, err := tx.Query(
 		ctx,
 		`
@@ -1188,24 +1189,25 @@ func reliabilityRunningPeriodicReanchorAllowed(ctx context.Context, tx server.Pg
 			EXISTS (
 			SELECT 1
 			FROM pg_stat_progress_create_index p
-			)
+			),
+			(`+postgresLogicalBackupSnapshotActiveSQL+`)
 		`,
 		int64(reliabilityRunningMaintenanceDeferralAfter/time.Second),
 	)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
-			server.Raise(result.Scan(&establishedVacuum, &indexBuild))
+			server.Raise(result.Scan(&establishedVacuum, &indexBuild, &logicalBackup))
 		}
 	})
-	allowed = reliabilityRunningReanchorAllowedForMaintenance(establishedVacuum, indexBuild)
+	allowed = reliabilityRunningReanchorAllowedForMaintenance(establishedVacuum, indexBuild, logicalBackup)
 	return
 }
 
 // A concurrent index build must win immediately because its final validation
 // waits for snapshots that predate the build. Brief vacuums retain the grace
 // period applied by the catalog query.
-func reliabilityRunningReanchorAllowedForMaintenance(establishedVacuum bool, indexBuild bool) bool {
-	return !establishedVacuum && !indexBuild
+func reliabilityRunningReanchorAllowedForMaintenance(establishedVacuum bool, indexBuild bool, logicalBackup bool) bool {
+	return !establishedVacuum && !indexBuild && !logicalBackup
 }
 
 func readReliabilityRunningWindow(ctx context.Context, tx server.PgTx, lookbackIndex int) (w reliabilityRunningWindow) {
@@ -1347,7 +1349,7 @@ func updateClientReliabilityRunningLookbackAtBoundsInTx(
 	)
 	if deferred {
 		glog.Infof(
-			"[ncr]defer optional running-window re-anchor for lookback %d while established VACUUM/REINDEX work is active; rolling [%d,%d) -> [%d,%d)\n",
+			"[ncr]defer optional running-window re-anchor for lookback %d while VACUUM/index-build/logical-backup work is active; rolling [%d,%d) -> [%d,%d)\n",
 			lb.lookbackIndex,
 			prev.minBlockNumber,
 			prev.maxBlockNumber,
