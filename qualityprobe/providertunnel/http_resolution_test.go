@@ -128,3 +128,102 @@ func TestProviderResolutionRecoversAfterLookupTimeout(t *testing.T) {
 		}
 	})
 }
+
+// A cold tunnel may become usable after thirty seconds but still inside the
+// request's explicit sixty-second establishment allowance. DNS retries must
+// share that allowance, not discard its latter half before the path exists.
+func TestProviderResolutionUsesColdStartAllowance(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		queries, dials := 0, 0
+		ready := time.After(35 * time.Second)
+		target := netip.MustParseAddr("192.0.2.35")
+		left, right := net.Pipe()
+		defer left.Close()
+		defer right.Close()
+		resolver := &providerUrlResolver{
+			query: func(ctx context.Context, _, _ string) ([]netip.Addr, bool) {
+				queries++
+				select {
+				case <-ready:
+					return []netip.Addr{target}, true
+				case <-ctx.Done():
+					return nil, false
+				}
+			},
+			dial: func(ctx context.Context, _, _ string, addrs []netip.Addr) (net.Conn, error) {
+				dials++
+				deadline, bounded := ctx.Deadline()
+				if !bounded || time.Until(deadline) < 15*time.Second || len(addrs) != 1 || addrs[0] != target {
+					return nil, errors.New("cold lookup lost the original connection allowance")
+				}
+				return left, nil
+			},
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		ctx, observation := traceProviderHttpDial(ctx, "tcp", "cold-sample.example:443")
+		start := time.Now()
+		conn, err := resolver.dialContext(ctx, "tcp", "cold-sample.example:443", observation)
+		observation.finish(err)
+		if err != nil || conn != left || queries != 3 || dials != 1 || time.Since(start) != 35*time.Second {
+			t.Fatalf("cold-start allowance discarded: queries=%d dials=%d elapsed=%s err=%v", queries, dials, time.Since(start), err)
+		}
+	})
+}
+
+// A never-answering cold path still gets only three lookup attempts, retains
+// time for the final connection, and cannot renew the request deadline.
+func TestProviderResolutionColdTimeoutsKeepConnectionAllowance(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		queries := 0
+		resolver := &providerUrlResolver{
+			query: func(ctx context.Context, _, _ string) ([]netip.Addr, bool) {
+				queries++
+				<-ctx.Done()
+				return nil, false
+			},
+			dial: func(context.Context, string, string, []netip.Addr) (net.Conn, error) {
+				t.Error("unresolved cold target reached socket phase")
+				return nil, errors.New("unexpected dial")
+			},
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		ctx, observation := traceProviderHttpDial(ctx, "tcp", "cold-timeout.example:443")
+		start := time.Now()
+		_, err := resolver.dialContext(ctx, "tcp", "cold-timeout.example:443", observation)
+		elapsed := time.Since(start)
+		if err == nil || queries != 3 || elapsed < 45*time.Second || 46*time.Second <= elapsed || ctx.Err() != nil {
+			t.Fatalf("cold retry budget changed: queries=%d elapsed=%s ctx_error=%v err=%v", queries, elapsed, ctx.Err(), err)
+		}
+	})
+}
+
+// Diagnostic callers without a parent deadline retain finite ten-second
+// lookup waves instead of accidentally creating an unbounded resolver owner.
+func TestProviderResolutionUnboundedCallerKeepsFiniteLookupTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		queries := 0
+		resolver := &providerUrlResolver{
+			query: func(ctx context.Context, _, _ string) ([]netip.Addr, bool) {
+				queries++
+				deadline, bounded := ctx.Deadline()
+				if !bounded || time.Until(deadline) != 10*time.Second {
+					t.Error("unbounded diagnostic caller lost finite DNS attempt")
+				}
+				<-ctx.Done()
+				return nil, false
+			},
+			dial: func(context.Context, string, string, []netip.Addr) (net.Conn, error) {
+				t.Error("unresolved diagnostic target reached socket phase")
+				return nil, errors.New("unexpected dial")
+			},
+		}
+		ctx, observation := traceProviderHttpDial(t.Context(), "tcp", "unbounded-caller.example:443")
+		start := time.Now()
+		_, err := resolver.dialContext(ctx, "tcp", "unbounded-caller.example:443", observation)
+		if err == nil || queries != 3 || time.Since(start) < 30*time.Second || 31*time.Second <= time.Since(start) {
+			t.Fatalf("diagnostic lookup escaped finite budget: queries=%d elapsed=%s err=%v", queries, time.Since(start), err)
+		}
+	})
+}

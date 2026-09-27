@@ -39,7 +39,10 @@ func (self *providerUrlResolver) dialContext(ctx context.Context, network, addre
 		}
 		lookupTimeout := 10 * time.Second
 		if deadline, ok := ctx.Deadline(); ok {
-			lookupTimeout = min(lookupTimeout, time.Until(deadline)/time.Duration(attempts-attempt+1))
+			// Share the actual request allowance, including a cold tunnel's
+			// longer establishment window. A fixed per-wave ceiling would
+			// exhaust retries while that window still has usable time left.
+			lookupTimeout = time.Until(deadline) / time.Duration(attempts-attempt+1)
 		}
 		if lookupTimeout <= 0 {
 			return nil, context.DeadlineExceeded
