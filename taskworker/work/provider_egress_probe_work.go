@@ -1349,7 +1349,7 @@ func (self *providerEgressProbePass) drainBlackholeSerial(
 		default:
 		}
 
-		due, err = self.blackholeDue(ctx, args.Blackhole.Limit)
+		due, err = self.blackholeDueWithRetry(ctx, args.Blackhole.Limit, fullFinished)
 		egressProbePassDue.WithLabelValues("blackhole").Set(float64(len(due)))
 		if err != nil {
 			egressProbePassErrorsTotal.WithLabelValues("blackhole_due").Inc()
@@ -1394,7 +1394,7 @@ func (self *providerEgressProbePass) run(
 		return &ProviderEgressProbeResult{}, err
 	}
 	errList := []error{}
-	blackholeDue, err := self.blackholeDue(ctx, args.Blackhole.Limit)
+	blackholeDue, err := self.blackholeDueWithRetry(ctx, args.Blackhole.Limit, nil)
 	if err != nil {
 		egressProbePassErrorsTotal.WithLabelValues("blackhole_due").Inc()
 		errList = append(errList, fmt.Errorf("get blackhole due providers: %w", err))

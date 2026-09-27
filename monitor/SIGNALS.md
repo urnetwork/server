@@ -7268,6 +7268,37 @@ closed-cohort slot-seconds, CPU/memory and source artifacts over multiple
 cadences. Local tests and lower request counts alone do not establish four-hour
 capacity or explain the location-specific FindProviders2 regression.
 
+Cheap due-read resilience (source checkpoint 2026-09-27; requires a new
+Taskworker artifact): initial selection and both successor paths retry only
+typed transport timeouts, at most three reads, with the existing 30-second
+operator deadline per read and 250–500 ms jitter between attempts. The task or
+earlier admission deadline wins; a stopped admission never starts another
+read. This is a read-only selection retry, not a new task claim, provider
+probe, or publication retry. Authentication, unsupported endpoint, rejected
+status, decode, cancellation and unknown errors are not retried. HTTP 429/5xx
+currently share `rejected` with other non-success statuses, so this narrow
+policy does not recover those errors or distinguish their causes.
+`urnetwork_egress_probe_blackhole_due_read_attempts_total{result}` has eight
+preinitialized classes: `ok`, `timeout`, `canceled`, `unauthorized`,
+`unsupported`, `rejected`, `decode`, `error_or_unknown`. It counts returned
+read attempts, including retries, not providers or measured checks. An owning
+task/admission deadline is `canceled`; only a live owner's transport timeout
+is retryable. A read stopped before it starts emits no event.
+
+A failed initial cheap due read can leave a claimed shard running Full only
+until that independent lane finishes. Distinguish this from missing shard
+claims: on the same fresh executable/process, inspect positive Full running
+work, zero cheap running/queued/active cohorts, no cheap pipeline start and a
+`blackhole_due` pass error, then corroborate all configured owners and due
+population across cadences. Aggregate 3,000 of 4,000 running slots alone does
+not prove the mechanism; partial due populations, task turnover and missing
+scrapes can produce the same total. Main showed the same-process Full-only
+pattern across two generations, but the historical error subtype was not
+retained in fixed telemetry. Timeout-only retries address a deterministically
+reproduced resilience gap, not proof that the incident was a timeout or that
+four-hour coverage is restored. Existing checks keep their measurement and
+guard deadlines when a successor lookup reaches admission cutoff.
+
 Brittle-gate audit left intentionally unchanged: a missing trusted pin snapshot
 fails the pass closed (do not recover by silently unpinning); a terminal TLS
 authentication failure remains integrity evidence; country-incompatible sites

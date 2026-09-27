@@ -169,7 +169,14 @@ func (self *providerEgressProbePass) drainBlackhole(
 			// just the oldest two cohorts, while respecting the API response cap.
 			limit := min(5000, len(seen)+args.Blackhole.Limit)
 			egressProbeBlackholePipelineDecisions.WithLabelValues("lookup_started").Inc()
-			due, dueErr := self.blackholeDue(ctx, limit)
+			due, dueErr := self.blackholeDueWithRetry(admissionCtx, limit, admissionDone)
+			if dueErr != nil && admissionCtx.Err() != nil && ctx.Err() == nil {
+				// The selection deadline only stops new work. It must not turn
+				// already-owned checks into a failed/canceled measurement batch.
+				stopLookups = true
+				noteStop("cutoff")
+				continue
+			}
 			if dueErr != nil || limit < len(due) {
 				if dueErr == nil {
 					dueErr = errors.New("response exceeds requested lookahead")
