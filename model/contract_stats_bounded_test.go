@@ -20,7 +20,7 @@ func TestOpenContractStatsCapsLargePopulation(t *testing.T) {
 		now := server.NowUtc()
 		for i := range 12 {
 			id := testContractStatsContract(ctx, now.Add(time.Duration(i)*time.Second), false, nil)
-			if i >= 4 {
+			if i < 8 {
 				testContractStatsExtenderParty(ctx, id, ContractPartySource, now)
 			}
 			testContractStatsContract(ctx, now, true, nil)
@@ -35,6 +35,34 @@ func TestOpenContractStatsCapsLargePopulation(t *testing.T) {
 			}
 			if snapshot.OpenContractsWithExtender != 0 || snapshot.ObservedAt.IsZero() {
 				t.Fatal("capped empty extender sample lost its lower-bound snapshot")
+			}
+		})
+	})
+}
+
+// The cap begins at current arrivals rather than an old index prefix whose
+// invisible versions can outlive a long snapshot. Selection order is the
+// invariant; a local fixture must not infer performance from elapsed time.
+func TestOpenContractStatsSamplesNewestRowsBeforeExtenderMembership(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := server.NowUtc()
+		for i := range 7 {
+			id := testContractStatsContract(ctx, now.Add(time.Duration(i)*time.Second), false, nil)
+			if i < 4 {
+				testContractStatsExtenderParty(ctx, id, ContractPartySource, now)
+			}
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			snapshot, err := readOpenContractStats(ctx, conn, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.OpenContracts != 3 || snapshot.OpenContractsExact || snapshot.OpenContractsWithExtender != 0 {
+				t.Fatalf("bounded sample open=%d exact=%t extender=%d; want three newest rows, capped and no extender", snapshot.OpenContracts, snapshot.OpenContractsExact, snapshot.OpenContractsWithExtender)
+			}
+			if snapshot.OpenDisputes != 0 || !snapshot.OpenDisputesExact || snapshot.ObservedAt.IsZero() {
+				t.Fatal("newest-row sampling changed independent exactness or snapshot time")
 			}
 		})
 	})

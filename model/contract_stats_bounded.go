@@ -106,11 +106,13 @@ func readOpenContractStats(ctx context.Context, query server.PgCanQuery, limit i
 
 // Materialize the cap before testing extender membership. A limit outside a
 // rare EXISTS filter could still inspect the entire open table to find a page.
+// Start at new arrivals, not an old prefix with snapshot-retained dead entries.
+// Order only selects a lower-bound sample; exact counts still exhaust the set.
 // Row bounds do not bound dead-version visibility work; the deadline does.
 const openContractStatsSql = `
 	WITH open_contracts AS MATERIALIZED (
 		SELECT contract_id FROM transfer_contract WHERE open
-		ORDER BY create_time LIMIT $1
+		ORDER BY create_time DESC LIMIT $1
 	), disputes AS MATERIALIZED (
 		SELECT 1 FROM transfer_contract WHERE dispute AND outcome IS NULL LIMIT $1
 	)
