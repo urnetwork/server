@@ -41,6 +41,8 @@ deleted before it was installed. The migration receipt and retained source
 census must bound the history claimed by a release. Archive storage is durable;
 an authenticated export/retention policy must be designed before pruning it.
 
-These changes do not repair the PostgreSQL/Redis NetEscrow ordering race, choose
-or implement a native emission remainder mechanism, or prove chain funding,
+Migration 727 separately fences the PostgreSQL/Redis NetEscrow ordering race;
+see [NetEscrow ordering](net-escrow-ordering.md) for its coordinated writer
+cutover and cache recovery requirements. These changes do not choose or
+implement a native emission remainder mechanism or prove chain funding,
 capture, claims or mainnet acceptance.

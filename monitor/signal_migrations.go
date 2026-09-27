@@ -383,6 +383,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "signed client-key policy namespaces and active head", requiredVersion: 724, rowColumn: 135},
 	{name: "transfer_contract immutable usage and terminal attribution guard", requiredVersion: 725, rowColumn: 136},
 	{name: "st_provider_usage_archive exact atomic copy and append-only custody", requiredVersion: 726, rowColumn: 137},
+	{name: "net escrow durable snapshot revision and retention fences", requiredVersion: 727, rowColumn: 138},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -2105,7 +2106,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       ),
 		       `+clientKeyPolicyNamespaceArtifactQuery+`,
 		       `+contractUsageGuardArtifactQuery+`,
-		       `+providerUsageArchiveArtifactQuery+`
+		       `+providerUsageArchiveArtifactQuery+`,
+		       `+netEscrowRevisionArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {

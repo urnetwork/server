@@ -9108,4 +9108,6 @@ var migrations = []any{
 	newSqlMigration(contractUsageGuardSchemaSql),
 	// Billing cleanup retains original usage atomically, without historical backfill.
 	newSqlMigration(providerUsageArchiveSchemaSql),
+	// Commit cache ordering fences with every reservation transition.
+	newSqlMigration(netEscrowRevisionSchemaSql),
 }

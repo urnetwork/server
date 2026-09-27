@@ -49,22 +49,6 @@ func TestEscrowSettlementLegacyRowsUseOneStatement(t *testing.T) {
 	}
 }
 
-// Only the positive reservation has anything to release from the mirror.
-func TestEscrowSettlementLegacyRowsSkipZeroReleases(t *testing.T) {
-	ctx := context.Background()
-	scripter := &settlementReleaseRecorder{}
-	for range 45 {
-		if cmd := applyNetEscrowRelease(ctx, scripter, netEscrowKey(server.NewId()), 0); cmd != nil {
-			t.Errorf("zero reservation queued a Redis command")
-		}
-	}
-	positiveKey := netEscrowKey(server.NewId())
-	cmd := applyNetEscrowRelease(ctx, scripter, positiveKey, 1024)
-	if cmd == nil || scripter.calls != 1 || scripter.key != positiveKey || scripter.release != 1024 {
-		t.Fatalf("release calls=%d, want one unmodified positive reservation release", scripter.calls)
-	}
-}
-
 // An empty captured set cannot become a contract-wide update.
 func TestEscrowSettlementEmptyBatchHasNoStatement(t *testing.T) {
 	batch := &pgx.Batch{}
@@ -324,25 +308,4 @@ func assertSettlementEscrowState(t testing.TB, ctx context.Context, fixture *for
 			}
 		})
 	})
-}
-
-// Any unexpected Redis method fails rather than opening a real connection.
-type settlementReleaseRecorder struct {
-	redis.Scripter
-	calls   int
-	key     string
-	release ByteCount
-}
-
-// Records the existing atomic release script without executing it.
-func (self *settlementReleaseRecorder) Eval(ctx context.Context, script string, keys []string, args ...any) *redis.Cmd {
-	if script != netEscrowReleaseScript || len(keys) != 1 || len(args) != 2 {
-		panic("unexpected synthetic release command")
-	}
-	self.calls++
-	self.key = keys[0]
-	self.release = args[0].(ByteCount)
-	cmd := redis.NewCmd(ctx)
-	cmd.SetVal(int64(0))
-	return cmd
 }

@@ -2291,8 +2291,8 @@ func TestNetEscrowKeyFormatAndTtl(t *testing.T) {
 			connect.AssertEqual(t, true, 59*day < ttl && ttl <= 60*day)
 		})
 
-		// reconcile apply rewrites the counter with the fallback ttl even if
-		// the ttl was lost
+		// Reconciliation restores the same precise deadline as creation when
+		// a counter loses its ttl, still capped by the rolling horizon.
 		server.Redis(ctx, func(r server.RedisClient) {
 			r.Persist(ctx, key)
 			r.IncrBy(ctx, key, int64(5*1024*1024))
@@ -2303,12 +2303,11 @@ func TestNetEscrowKeyFormatAndTtl(t *testing.T) {
 		connect.AssertEqual(t, contractByteCount, Testing_NetEscrowByteCount(ctx, balanceId))
 		server.Redis(ctx, func(r server.RedisClient) {
 			ttl := r.TTL(ctx, key).Val()
-			connect.AssertEqual(t, true, 89*day < ttl && ttl <= 90*day)
+			connect.AssertEqual(t, true, 59*day < ttl && ttl <= 60*day)
 		})
 
-		// A settle release against a missing mirror returns a negative value for
-		// diagnostics, but atomically deletes the recreated counter. A missing
-		// counter reads as zero and cannot overstate the available balance.
+		// Settlement against a missing mirror publishes current zero with its
+		// revision fence, without replaying an unowned negative delta.
 		Testing_DeleteNetEscrow(ctx, balanceId)
 		err = CloseContract(ctx, contractId, clientId, 0, false)
 		connect.AssertEqual(t, nil, err)
