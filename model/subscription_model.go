@@ -837,12 +837,17 @@ end
 return value
 `
 
+// A zero-byte reservation owns no mirror change; nil means no command queued.
+// Nonzero releases retain the atomic negative clamp and existing TTL policy.
 func applyNetEscrowRelease(
 	ctx context.Context,
 	scripter redis.Scripter,
 	key string,
 	release ByteCount,
 ) *redis.Cmd {
+	if release == 0 {
+		return nil
+	}
 	return scripter.Eval(
 		ctx,
 		netEscrowReleaseScript,
@@ -956,7 +961,9 @@ func releaseNetEscrowForContract(ctx context.Context, contractId server.Id) {
 				var balanceId server.Id
 				var byteCount ByteCount
 				server.Raise(result.Scan(&balanceId, &byteCount))
-				escrowed[balanceId] = byteCount
+				if byteCount != 0 {
+					escrowed[balanceId] = byteCount
+				}
 			}
 		})
 	})
@@ -3209,25 +3216,7 @@ func settleEscrowInTx(
 		posts = append(posts, func() any {
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-					for balanceId, sweepPayout := range sweepPayouts {
-						batch.Queue(
-							`
-					            UPDATE transfer_escrow
-					            SET
-					                settled = true,
-					                settle_time = $2,
-					                payout_byte_count = $4
-					            WHERE
-					                transfer_escrow.contract_id = $1 AND
-					                transfer_escrow.balance_id = $3
-					        `,
-							contractId,
-							server.NowUtc(),
-							balanceId,
-							sweepPayout.payoutByteCount,
-						)
-
-					}
+					queueEscrowSettlementUpdates(batch, contractId, server.NowUtc(), sweepPayouts)
 				})
 			}, server.TxReadCommitted)
 			return nil
@@ -3272,56 +3261,62 @@ func settleEscrowInTx(
 			})
 		}
 
-		posts = append(posts, func() any {
-			server.Tx(ctx, func(tx server.PgTx) {
-				server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-					for balanceId, sweepPayout := range sweepPayouts {
-
-						if 0 < sweepPayout.payoutByteCount {
-
-							batch.Queue(
-								`
-						            UPDATE transfer_balance
-						            SET
-						                balance_byte_count = transfer_balance.balance_byte_count - $2
-						            WHERE
-						                transfer_balance.balance_id = $1
-						        `,
-								balanceId,
-								sweepPayout.payoutByteCount,
-							)
+		hasBalancePayout := false
+		hasReservationRelease := false
+		for _, sweepPayout := range sweepPayouts {
+			hasBalancePayout = hasBalancePayout || 0 < sweepPayout.payoutByteCount
+			hasReservationRelease = hasReservationRelease || sweepPayout.escrowBalanceByteCount != 0
+		}
+		// Zero-use contracts still mark every escrow row and return reservations,
+		// but have no balance debit transaction to execute.
+		if hasBalancePayout {
+			posts = append(posts, func() any {
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+						for balanceId, sweepPayout := range sweepPayouts {
+							if 0 < sweepPayout.payoutByteCount {
+								batch.Queue(`
+									UPDATE transfer_balance
+									SET balance_byte_count = balance_byte_count - $2
+									WHERE balance_id = $1
+								`, balanceId, sweepPayout.payoutByteCount)
+							}
 						}
-					}
-				})
-			}, server.TxReadCommitted)
-			return nil
-		})
-
-		posts = append(posts, func() any {
-			// the settlement is committed; the mirror must follow even if the
-			// caller has gone away (see netEscrowMirrorCtx)
-			mirrorCtx, mirrorCancel := netEscrowMirrorCtx(ctx)
-			defer mirrorCancel()
-			server.RedisDoOnce(mirrorCtx, func(r server.RedisClient) {
-				decrCmds := map[server.Id]*redis.Cmd{}
-				// per-balance hash tags (different slots): plain pipeline auto-routes
-				_, pipelineErr := r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
-					for balanceId, sweepPayout := range sweepPayouts {
-						key := netEscrowKey(balanceId)
-						decrCmds[balanceId] = applyNetEscrowRelease(
-							mirrorCtx,
-							pipe,
-							key,
-							sweepPayout.escrowBalanceByteCount,
-						)
-					}
-					return nil
-				})
-				reportNetEscrowMirrorWriteFailure("settle", pipelineErr)
-				reportNegativeNetEscrow(decrCmds, contractId, "settle")
+					})
+				}, server.TxReadCommitted)
+				return nil
 			})
-			return nil
-		})
+		}
+
+		if hasReservationRelease {
+			posts = append(posts, func() any {
+				// the settlement is committed; the mirror must follow even if the
+				// caller has gone away (see netEscrowMirrorCtx)
+				mirrorCtx, mirrorCancel := netEscrowMirrorCtx(ctx)
+				defer mirrorCancel()
+				server.RedisDoOnce(mirrorCtx, func(r server.RedisClient) {
+					decrCmds := map[server.Id]*redis.Cmd{}
+					// per-balance hash tags (different slots): plain pipeline auto-routes
+					_, pipelineErr := r.Pipelined(mirrorCtx, func(pipe redis.Pipeliner) error {
+						for balanceId, sweepPayout := range sweepPayouts {
+							key := netEscrowKey(balanceId)
+							if cmd := applyNetEscrowRelease(
+								mirrorCtx,
+								pipe,
+								key,
+								sweepPayout.escrowBalanceByteCount,
+							); cmd != nil {
+								decrCmds[balanceId] = cmd
+							}
+						}
+						return nil
+					})
+					reportNetEscrowMirrorWriteFailure("settle", pipelineErr)
+					reportNegativeNetEscrow(decrCmds, contractId, "settle")
+				})
+				return nil
+			})
+		}
 	}
 
 	if 0 < len(accountPayouts) {
