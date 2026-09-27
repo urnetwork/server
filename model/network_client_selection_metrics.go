@@ -31,7 +31,7 @@ var findProviders2SelectionSchema = prometheus.NewGauge(prometheus.GaugeOpts{
 // Registers the schema even on a process with no requests; quiet and old
 // producers remain distinguishable without a sentinel customer request.
 func init() {
-	findProviders2SelectionSchema.Set(1)
+	findProviders2SelectionSchema.Set(2)
 	prometheus.MustRegister(findProviders2SelectionOutcomes, findProviders2StageSeconds, findProviders2StageInflight, findProviders2SelectionSchema)
 }
 
@@ -44,21 +44,27 @@ type findProviders2LoadObservation struct {
 
 // Owned by one request. No identity map or observation state outlives it.
 type findProviders2SelectionObservation struct {
-	args                *FindProviders2Args
-	targetKind          string
-	requestClass        string
-	rankMode            string
-	stage               string
-	stageStarted        time.Time
-	outcome             string
-	reason              string
-	discovery           bool
-	directRequested     bool
-	backfillUnavailable bool
-	loaded              int
-	eligible            int
-	dropped             [4]int
-	load                findProviders2LoadObservation
+	args                 *FindProviders2Args
+	targetKind           string
+	requestClass         string
+	rankMode             string
+	stage                string
+	stageStarted         time.Time
+	outcome              string
+	reason               string
+	discovery            bool
+	directRequested      bool
+	backfillUnavailable  bool
+	loaded               int
+	eligible             int
+	dropped              [4]int
+	explicitSources      uint8
+	requestedCount       int
+	discoveryReturned    int
+	explicitReturned     int
+	primaryClientScores  map[server.Id]*ClientScore
+	backfillClientScores map[server.Id]*ClientScore
+	load                 findProviders2LoadObservation
 }
 
 // Captures only bounded request intent; resolving target types later reuses
@@ -158,7 +164,37 @@ func (self *findProviders2SelectionObservation) complete(resultCount int) {
 	self.outcome, self.reason = "zero", "unclassified_zero"
 	switch {
 	case 0 < resultCount:
-		self.outcome, self.reason = "nonempty", "returned"
+		self.outcome = "nonempty"
+		switch {
+		case 10 <= resultCount:
+			self.reason = "returned_10_plus"
+		case 3 <= resultCount:
+			self.reason = "returned_3_9"
+		case !self.discovery:
+			self.reason = "returned_small_direct"
+		case 0 < self.explicitReturned:
+			self.reason = "returned_small_mixed_direct"
+		case self.requestedCount <= self.discoveryReturned:
+			self.reason = "returned_small_requested"
+		case self.backfillUnavailable || 0 < self.load.missingPages || 0 < self.load.missingTargets:
+			self.reason = "returned_small_cache_unknown"
+		default:
+			// Both independently sampled modes can contain the same provider.
+			// Count their filtered union without another map or storage read.
+			eligibleCount := len(self.primaryClientScores)
+			for clientId := range self.backfillClientScores {
+				if _, ok := self.primaryClientScores[clientId]; !ok {
+					eligibleCount++
+				}
+			}
+			if self.discoveryReturned < eligibleCount {
+				self.reason = "returned_small_eligible"
+			} else if reason := self.filterReason(); reason != "unclassified_zero" {
+				self.reason = "returned_small_" + reason
+			} else {
+				self.reason = "returned_small_sample"
+			}
+		}
 	case self.discovery && self.args.ForceCount && self.args.Count <= 0:
 		self.reason = "intentional_zero"
 	case !self.discovery && self.directRequested:
@@ -182,18 +218,34 @@ func (self *findProviders2SelectionObservation) complete(resultCount int) {
 			self.reason = "eligible_not_selected"
 		}
 	default:
-		reasons := [4]string{"filtered_hard", "filtered_network", "filtered_family", "filtered_explicit"}
-		for i, count := range self.dropped {
-			if count == 0 {
-				continue
-			}
-			if self.reason == "unclassified_zero" {
-				self.reason = reasons[i]
-			} else {
-				self.reason = "filtered_mixed"
-			}
-		}
+		self.reason = self.filterReason()
 	}
+}
+
+// Classifies actual removed candidates, not the presence of an exclusion
+// field. Destination tails may be live-window refills; neither field proves
+// the client's current health or why it excluded a provider.
+func (self *findProviders2SelectionObservation) filterReason() string {
+	explicitReason := "filtered_explicit"
+	switch self.explicitSources {
+	case 1:
+		explicitReason = "filtered_client_ids"
+	case 2:
+		explicitReason = "filtered_destinations"
+	case 3:
+		explicitReason = "filtered_explicit_mixed"
+	}
+	reason := "unclassified_zero"
+	for i, next := range [4]string{"filtered_hard", "filtered_network", "filtered_family", explicitReason} {
+		if self.dropped[i] == 0 {
+			continue
+		}
+		if reason != "unclassified_zero" {
+			return "filtered_mixed"
+		}
+		reason = next
+	}
+	return reason
 }
 
 // Runs for every exit, including canceled/failed requests omitted by the

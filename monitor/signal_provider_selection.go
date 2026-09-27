@@ -86,6 +86,8 @@ type providerSelectionEvidence struct {
 	counts           map[providerSelectionKey]float64
 	paired, expected int
 	complete         bool
+	shapePaired      int
+	shapeComplete    bool
 	reason           string
 }
 
@@ -132,9 +134,9 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 			validReason := false
 			switch outcome.outcome {
 			case "nonempty":
-				validReason = outcome.reason == "returned"
+				validReason = contains(outcome.reason, "returned|returned_3_9|returned_10_plus|returned_small_direct|returned_small_mixed_direct|returned_small_requested|returned_small_cache_unknown|returned_small_eligible|returned_small_sample|returned_small_filtered_hard|returned_small_filtered_network|returned_small_filtered_family|returned_small_filtered_explicit|returned_small_filtered_client_ids|returned_small_filtered_destinations|returned_small_filtered_explicit_mixed|returned_small_filtered_mixed")
 			case "zero":
-				validReason = contains(outcome.reason, "intentional_zero|no_specs|direct_excluded|unresolved_target|backfill_unavailable|cache_page_gap|cache_missing|cache_empty|unsupported_rank|eligible_not_selected|filtered_hard|filtered_network|filtered_family|filtered_explicit|filtered_mixed|unclassified_zero")
+				validReason = contains(outcome.reason, "intentional_zero|no_specs|direct_excluded|unresolved_target|backfill_unavailable|cache_page_gap|cache_missing|cache_empty|unsupported_rank|eligible_not_selected|filtered_hard|filtered_network|filtered_family|filtered_explicit|filtered_client_ids|filtered_destinations|filtered_explicit_mixed|filtered_mixed|unclassified_zero")
 			case "error", "canceled":
 				validReason = contains(outcome.reason, "validate|caller_location|load_primary|load_backfill|hard_exclusions|filter|directory|select|record_matches")
 			}
@@ -161,15 +163,22 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 	}
 	for key, process := range processes {
 		fields := process.fields
-		if len(fields) != 8 || fields["now_schema"] != 1 || fields["prior_schema"] != 1 || fields["now_start"] != fields["prior_start"] || fields["now_start"] <= 0 || fields["now_start"] > float64(now.Add(-5*time.Minute).Unix()) {
+		schema := fields["now_schema"]
+		if len(fields) != 8 || (schema != 1 && schema != 2) || fields["prior_schema"] != schema || fields["now_start"] != fields["prior_start"] || fields["now_start"] <= 0 || fields["now_start"] > float64(now.Add(-5*time.Minute).Unix()) {
 			continue
 		}
 		if !fresh(fields["now_schema_time"], now) || !fresh(fields["now_start_time"], now) || !fresh(fields["prior_schema_time"], now.Add(-5*time.Minute)) || !fresh(fields["prior_start_time"], now.Add(-5*time.Minute)) {
 			continue
 		}
 		valid := true
-		for _, values := range process.outcomes {
+		for outcome, values := range process.outcomes {
 			if len(values) != 4 || !fresh(values["count_time"], now) || values["resets"] != 0 || values["samples"] < 2 || math.Trunc(values["samples"]) != values["samples"] {
+				valid = false
+			}
+			if outcome.outcome == "nonempty" && (outcome.reason == "returned") != (schema == 1) {
+				valid = false
+			}
+			if schema == 1 && contains(outcome.reason, "filtered_client_ids|filtered_destinations|filtered_explicit_mixed") {
 				valid = false
 			}
 		}
@@ -178,6 +187,9 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 		}
 		pairedSlots[key.host+"\x00"+key.block]++
 		evidence.paired++
+		if schema == 2 {
+			evidence.shapePaired++
+		}
 		for outcome, values := range process.outcomes {
 			evidence.counts[outcome] += values["count"]
 		}
@@ -191,6 +203,7 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 	if evidence.complete {
 		evidence.reason = "complete"
 	}
+	evidence.shapeComplete = evidence.complete && evidence.shapePaired == evidence.expected
 	return evidence
 }
 
@@ -222,15 +235,19 @@ func (providerSelectionProbe) check(ctx context.Context, env *probeEnv) ([]findi
 // A missing positive-count page or an eligible-but-unselected zero is narrower.
 func providerSelectionFindings(evidence providerSelectionEvidence) []finding {
 	findings := []finding{}
-	if !evidence.complete {
+	if !evidence.complete || !evidence.shapeComplete {
+		reason, frame := evidence.reason, ""
+		if evidence.complete {
+			reason, frame = "incomplete-shape-schema-window", "response-shape"
+		}
 		findings = append(findings, finding{
-			probeId: "mimir/provider-selection", tier: tierWarn, class: "provider-selection-unavailable", target: "api-fleet", sustain: 1,
+			probeId: "mimir/provider-selection", tier: tierWarn, class: "provider-selection-unavailable", target: "api-fleet", frame: frame, sustain: 1,
 			symptom:   "Provider-selection stage and zero-reason attribution is incomplete",
-			mechanism: "A fresh schema-1 producer and unchanged process generation must cover both ends of the five-minute window for every configured API slot. Old, missing, excluded, restarted, stale or reset evidence remains unknown.",
-			baseline:  "One fresh same-generation schema-1 process per configured API host/block, plus valid observed counter partitions.",
-			observed:  fmt.Sprintf("paired_processes=%d expected_slots=%d reason=%s", evidence.paired, evidence.expected, evidence.reason),
+			mechanism: "A fresh supported producer and unchanged process generation must cover both ends of the five-minute window for every configured API slot. Schema 1 retains zero-reason authority; schema 2 is required for small-list and exclusion-source attribution. Old, missing, excluded, restarted, stale or reset evidence remains unknown.",
+			baseline:  "One fresh same-generation schema-1 or schema-2 process per configured API host/block, plus valid observed counter partitions; complete response-shape attribution requires schema 2 everywhere.",
+			observed:  fmt.Sprintf("paired_processes=%d shape_paired_processes=%d expected_slots=%d reason=%s", evidence.paired, evidence.shapePaired, evidence.expected, reason),
 			evidence:  "Bounded Mimir query; private process join, fixed schema and source timestamps. No target IDs or raw producer strings enter this alert.",
-			context:   "Observed-subset invariant findings remain valid, but a missing partition cannot become healthy zero. Lazy counter series can omit a first event, and quiet traffic does not establish location availability.",
+			context:   "Observed-subset invariant findings remain valid, but a missing partition cannot become healthy zero. Destination-tail exclusions can be healthy-window refill requests; client-ID exclusions can be runtime removals or durable policy. Neither proves client health, and schema-2 reasons never suppress the independent provider-count finding. Lazy counter series can omit a first event, and quiet traffic does not establish location availability.",
 			action:    "Verify emitting API ancestry for the selection diagnostic schema, complete the authorized rollout and inspect scrape/generation/reset coverage. Do not change selection filters to restore telemetry.",
 			verify:    "Require a complete post-convergence five-minute process window and two fresh observations; verify request outcomes separately.", playbook: "SIGNALS.md §2.9c",
 		})

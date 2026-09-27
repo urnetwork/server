@@ -6522,13 +6522,15 @@ func FindProviders2(
 	locationIds := map[server.Id]bool{}
 	locationGroupIds := map[server.Id]bool{}
 
-	excludeFinalDestinations := sync.OnceValue(func() map[server.Id]bool {
-		excludeFinalDestinations := map[server.Id]bool{}
+	excludeFinalDestinations := sync.OnceValue(func() map[server.Id]uint8 {
+		// Preserve the union's eligibility behavior while retaining the two
+		// request fields that actually excluded sampled candidates.
+		excludeFinalDestinations := map[server.Id]uint8{}
 		for _, clientId := range findProviders2.ExcludeClientIds {
-			excludeFinalDestinations[clientId] = true
+			excludeFinalDestinations[clientId] |= 1
 		}
 		for _, destination := range findProviders2.ExcludeDestinations {
-			excludeFinalDestinations[destination[len(destination)-1]] = true
+			excludeFinalDestinations[destination[len(destination)-1]] |= 2
 		}
 		return excludeFinalDestinations
 	})
@@ -6545,7 +6547,7 @@ func FindProviders2(
 		}
 		if spec.ClientId != nil {
 			clientId := *(spec.ClientId)
-			if !excludeFinalDestinations()[clientId] {
+			if excludeFinalDestinations()[clientId] == 0 {
 				specClientIds = append(specClientIds, clientId)
 			}
 		}
@@ -6572,6 +6574,7 @@ func FindProviders2(
 			providers = append(providers, &FindProvidersProvider{
 				ClientId: clientId,
 			})
+			observation.explicitReturned++
 		}
 	}
 
@@ -6584,6 +6587,7 @@ func FindProviders2(
 		} else {
 			count = max(findProviders2.Count, 20)
 		}
+		observation.requestedCount = count
 
 		// the random process is
 		// 1. load (ideally this would be all, but is truncated for performance)
@@ -6723,7 +6727,10 @@ func FindProviders2(
 			observation.dropped[2] += before - len(clientScores)
 			before = len(clientScores)
 
-			for clientId, _ := range excludeFinalDestinations() {
+			for clientId, sources := range excludeFinalDestinations() {
+				if _, ok := clientScores[clientId]; ok {
+					observation.explicitSources |= sources
+				}
 				delete(clientScores, clientId)
 			}
 			observation.dropped[3] += before - len(clientScores)
@@ -6745,6 +6752,7 @@ func FindProviders2(
 			}
 		}
 		filterPool(clientScores, rankMode, hardExcludedClientIds)
+		observation.primaryClientScores = clientScores
 		observation.enter("select")
 
 		// Draws up to n of the candidates by their weight in `mode` and bands
@@ -6953,6 +6961,7 @@ func FindProviders2(
 					otherHardExcludedClientIds[clientId] = true
 				}
 				filterPool(otherClientScores, otherRankMode, otherHardExcludedClientIds)
+				observation.backfillClientScores = otherClientScores
 				observation.enter("select")
 
 				// 1. the other bucket's natives
@@ -7033,6 +7042,7 @@ func FindProviders2(
 			findProviders2BackfillProviders.WithLabelValues(rankMode).Observe(float64(len(borrowedClientIds)))
 			findProviders2AnsweredProviders.WithLabelValues(rankMode).Add(float64(len(clientIds) + len(borrowedClientIds)))
 		}
+		observation.discoveryReturned = len(chosenClientIds)
 
 		// export one anonymized stats sample tracing this call's pool and
 		// selection. Best-effort and gated on stats being enabled, so it is

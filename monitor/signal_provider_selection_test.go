@@ -13,13 +13,16 @@ import (
 // One private process and one fixed cohort, with explicit timestamp witnesses.
 func selectionTestRows(reason string, count float64) []map[string]any {
 	now := pickerTestNow()
+	if reason == "returned" {
+		reason = "returned_10_plus"
+	}
 	rows := []map[string]any{}
 	add := func(field string, value float64, outcome bool) {
 		labels := map[string]string{"env": "synthetic", "job": "api", "host": "api-synthetic", "block": "blue", "instance": "private-selection-instance", "monitor_selection": field}
 		if outcome {
 			labels["target_kind"], labels["request_class"], labels["ip_family"] = "country", "default_minimum", "any"
 			labels["rank_mode"], labels["outcome"], labels["reason"] = "quality", "zero", reason
-			if reason == "returned" {
+			if strings.HasPrefix(reason, "returned") {
 				labels["outcome"] = "nonempty"
 			}
 		}
@@ -31,7 +34,7 @@ func selectionTestRows(reason string, count float64) []map[string]any {
 			stamp = stamp.Add(-5 * time.Minute)
 		}
 		add(bound+"_start", float64(now.Add(-time.Hour).Unix()), false)
-		add(bound+"_schema", 1, false)
+		add(bound+"_schema", 2, false)
 		add(bound+"_start_time", float64(stamp.Unix()), false)
 		add(bound+"_schema_time", float64(stamp.Unix()), false)
 	}
@@ -40,6 +43,83 @@ func selectionTestRows(reason string, count float64) []map[string]any {
 	add("resets", 0, true)
 	add("samples", 20, true)
 	return rows
+}
+
+// Old producers remain usable for the original zero invariant, but cannot
+// certify result shape; an unknown or changing schema supplies neither.
+func TestProviderSelectionSignalMixedSchemaKeepsShapeUnknown(t *testing.T) {
+	rows := selectionTestRows("returned_small_filtered_destinations", 80)
+	oldRows := selectionTestRows("eligible_not_selected", 3)
+	for _, row := range oldRows {
+		labels := row["metric"].(map[string]string)
+		labels["block"] = "green"
+		if labels["monitor_selection"] == "now_schema" || labels["monitor_selection"] == "prior_schema" {
+			row["value"].([]any)[1] = "1"
+		}
+	}
+	rows = append(rows, oldRows...)
+	settings := selectionTestSettings(t, pickerTestPayload(t, rows))
+	settings.LogServiceBlocks["api"] = []string{"blue", "green"}
+	alerts, err := NewProviderSelectionSignal().Run(context.Background(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireAlertClass(t, alerts, "provider-selection-empty-despite-eligible")
+	unknown := requireAlertClass(t, alerts, "provider-selection-unavailable")
+	if unknown.Frame != "response-shape" || !strings.Contains(unknown.Markdown(), "paired_processes=2 shape_paired_processes=1 expected_slots=2") {
+		t.Fatal("mixed producer versions lost old invariant authority or certified complete response shape")
+	}
+}
+
+// A schema switch inside a process window cannot masquerade as a complete
+// generation. Arbitrary versions and cross-version reason shapes fail closed.
+func TestProviderSelectionSignalSchemaVersionBoundaries(t *testing.T) {
+	for _, defect := range []string{"changed", "future", "legacy-new-reason", "new-legacy-reason"} {
+		rows := selectionTestRows("returned_small_sample", 80)
+		for _, row := range rows {
+			labels := row["metric"].(map[string]string)
+			field := labels["monitor_selection"]
+			switch {
+			case defect == "changed" && field == "prior_schema":
+				row["value"].([]any)[1] = "1"
+			case defect == "future" && (field == "now_schema" || field == "prior_schema"):
+				row["value"].([]any)[1] = "3"
+			case defect == "legacy-new-reason" && (field == "now_schema" || field == "prior_schema"):
+				row["value"].([]any)[1] = "1"
+			case defect == "new-legacy-reason" && labels["reason"] != "":
+				labels["reason"] = "returned"
+			}
+		}
+		alerts, err := NewProviderSelectionSignal().Run(context.Background(), selectionTestSettings(t, pickerTestPayload(t, rows)))
+		if err != nil || len(alerts) != 1 {
+			t.Fatalf("%s did not retain schema uncertainty: alerts=%d error=%v", defect, len(alerts), err)
+		}
+		requireAlertClass(t, alerts, "provider-selection-unavailable")
+	}
+}
+
+// Small-list explanations are observations, not supply verdicts or permission
+// to suppress the independent user-visible count signal.
+func TestProviderSelectionSignalSmallResultReasonsStayBounded(t *testing.T) {
+	for _, reason := range []string{
+		"returned_3_9", "returned_10_plus", "returned_small_direct", "returned_small_mixed_direct", "returned_small_requested", "returned_small_cache_unknown", "returned_small_eligible", "returned_small_sample",
+		"returned_small_filtered_hard", "returned_small_filtered_network", "returned_small_filtered_family", "returned_small_filtered_explicit", "returned_small_filtered_client_ids", "returned_small_filtered_destinations", "returned_small_filtered_explicit_mixed", "returned_small_filtered_mixed",
+	} {
+		rows := selectionTestRows(reason, 80)
+		settings := selectionTestSettings(t, pickerTestPayload(t, rows))
+		env, err := newProbeEnv(settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		evidence := parseProviderSelection(pickerTestPayload(t, rows), "synthetic", pickerTestNow(), pickerScope(env))
+		if !evidence.complete || !evidence.shapeComplete || len(evidence.counts) != 1 {
+			t.Fatalf("%s lost its complete fixed-vocabulary attribution", reason)
+		}
+		alerts, err := NewProviderSelectionSignal().Run(context.Background(), settings)
+		if err != nil || len(alerts) != 0 {
+			t.Fatalf("%s became an unsupported scarcity finding: alerts=%d error=%v", reason, len(alerts), err)
+		}
+	}
 }
 
 // A real Signal adapter and bounded source command, with no network access.

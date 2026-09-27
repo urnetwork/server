@@ -113,7 +113,7 @@ func TestFindProviders2SelectionStageReleasedOnCanceledAndPanickedExit(t *testin
 func TestFindProviders2SelectionExplainsIntentCacheAndRequestFilters(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		for _, reason := range []string{"returned", "intentional_zero", "cache_empty", "cache_missing", "cache_page_gap", "filtered_hard", "filtered_network", "filtered_family", "filtered_explicit", "filtered_mixed"} {
+		for _, reason := range []string{"returned", "intentional_zero", "cache_empty", "cache_missing", "cache_page_gap", "filtered_hard", "filtered_network", "filtered_family", "filtered_explicit", "filtered_destinations", "filtered_explicit_mixed", "filtered_mixed"} {
 			locationId, networkId := server.NewId(), server.NewId()
 			candidate := onlineBackfillScore(true, 1)
 			args := &FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &locationId}}, Count: 3, ForceCount: true}
@@ -132,6 +132,11 @@ func TestFindProviders2SelectionExplainsIntentCacheAndRequestFilters(t *testing.
 				candidate.IpFamilies = ClientScoreIpFamilyV6
 			case "filtered_explicit":
 				args.ExcludeClientIds = []server.Id{candidate.ClientId}
+			case "filtered_destinations":
+				args.ExcludeDestinations = [][]server.Id{{server.NewId(), candidate.ClientId}}
+			case "filtered_explicit_mixed":
+				args.ExcludeClientIds = []server.Id{candidate.ClientId}
+				args.ExcludeDestinations = [][]server.Id{{candidate.ClientId}}
 			case "filtered_mixed":
 				candidate.NetworkOnly = true
 				excluded := onlineBackfillScore(true, 1)
@@ -160,7 +165,13 @@ func TestFindProviders2SelectionExplainsIntentCacheAndRequestFilters(t *testing.
 					}
 				}
 			})
-			labels := map[string]string{"target_kind": "location_unknown", "request_class": requestClass, "ip_family": "any", "rank_mode": "quality", "outcome": outcome, "reason": reason}
+			metricReason := reason
+			if reason == "returned" {
+				metricReason = "returned_small_sample"
+			} else if reason == "filtered_explicit" {
+				metricReason = "filtered_client_ids"
+			}
+			labels := map[string]string{"target_kind": "location_unknown", "request_class": requestClass, "ip_family": "any", "rank_mode": "quality", "outcome": outcome, "reason": metricReason}
 			before := selectionMetricCount(t, "urnetwork_findproviders2_selection_outcomes_total", labels)
 			clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(networkId, server.NewId(), "selection-metrics-test", false, false))
 			result, err := FindProviders2(args, clientSession)
