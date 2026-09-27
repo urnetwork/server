@@ -26,6 +26,38 @@ func GetStEpochProviderUsageAtEpoch(ctx context.Context, epoch uint64, startTime
 	return getStEpochProviderUsage(ctx, epoch, startTime, endTime)
 }
 
+// A historical terminal row with no close time cannot be assigned outside the
+// requested epoch. Probe at most one such identity per store in the same
+// statement snapshot as live/archive usage, including while retention moves it.
+// The live partial index excludes ordinary open/canceled rows; archive custody
+// contains only credit-bearing outcomes and uses its existing close-time index.
+const stEpochProviderUsageSql = `
+	WITH missing_time AS MATERIALIZED (
+		(SELECT contract_id, NULL::jsonb AS provider_usage, close_time, false AS duplicate
+		 FROM transfer_contract WHERE close_time IS NULL
+			AND outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
+		 ORDER BY contract_id LIMIT 1)
+		UNION ALL
+		(SELECT contract_id, NULL::jsonb AS provider_usage, close_time, false AS duplicate
+		 FROM st_provider_usage_archive WHERE close_time IS NULL
+		 ORDER BY close_time, contract_id LIMIT 1)
+	)
+	SELECT contract_id, provider_usage, close_time, duplicate FROM missing_time
+	UNION ALL
+	SELECT source.contract_id, source.provider_usage, source.close_time,
+		archive.contract_id IS NOT NULL AS duplicate
+	FROM transfer_contract AS source
+	LEFT JOIN st_provider_usage_archive AS archive ON archive.contract_id=source.contract_id
+	WHERE NOT EXISTS (SELECT 1 FROM missing_time)
+		AND $1 <= source.close_time AND source.close_time < $2
+		AND source.outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
+	UNION ALL
+	SELECT contract_id, provider_usage, close_time, false FROM st_provider_usage_archive
+	WHERE NOT EXISTS (SELECT 1 FROM missing_time)
+		AND $1 <= close_time AND close_time < $2
+		AND outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
+`
+
 func getStEpochProviderUsage(ctx context.Context, epoch uint64, startTime time.Time, endTime time.Time) ([]*StProviderUsage, error) {
 	if !startTime.Before(endTime) {
 		return nil, fmt.Errorf("invalid subnet usage window")
@@ -33,18 +65,7 @@ func getStEpochProviderUsage(ctx context.Context, epoch uint64, startTime time.T
 	usagesByClientId := map[server.Id]*StProviderUsage{}
 	var returnErr error
 	server.Db(ctx, func(conn server.PgConn) {
-		rows, err := conn.Query(ctx, `
-			SELECT source.contract_id, source.provider_usage, source.close_time,
-				archive.contract_id IS NOT NULL AS duplicate
-			FROM transfer_contract AS source
-			LEFT JOIN st_provider_usage_archive AS archive ON archive.contract_id=source.contract_id
-			WHERE $1 <= source.close_time AND source.close_time < $2
-				AND source.outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
-			UNION ALL
-			SELECT contract_id, provider_usage, close_time, false FROM st_provider_usage_archive
-			WHERE $1 <= close_time AND close_time < $2
-				AND outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
-		`, startTime, endTime)
+		rows, err := conn.Query(ctx, stEpochProviderUsageSql, startTime, endTime)
 		if err != nil {
 			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
 			return
@@ -53,10 +74,14 @@ func getStEpochProviderUsage(ctx context.Context, epoch uint64, startTime time.T
 		for rows.Next() {
 			var contractId server.Id
 			var data []byte
-			var closedAt time.Time
+			var closedAt *time.Time
 			var duplicate bool
 			if err := rows.Scan(&contractId, &data, &closedAt, &duplicate); err != nil {
 				returnErr = err
+				return
+			}
+			if closedAt == nil {
+				returnErr = fmt.Errorf("subnet contract %s has terminal usage without a close time; epoch completeness is unknown", contractId)
 				return
 			}
 			if duplicate {
@@ -68,7 +93,7 @@ func getStEpochProviderUsage(ctx context.Context, epoch uint64, startTime time.T
 				returnErr = fmt.Errorf("subnet contract %s: %w", contractId, err)
 				return
 			}
-			if legacy := snapshot.LegacyExclusion; legacy != nil && (legacy.ContractId != contractId || !legacy.ClosedAt.Equal(closedAt) || legacy.Epoch != epoch) {
+			if legacy := snapshot.LegacyExclusion; legacy != nil && (legacy.ContractId != contractId || !legacy.ClosedAt.Equal(*closedAt) || legacy.Epoch != epoch) {
 				returnErr = fmt.Errorf("subnet contract %s: legacy usage exclusion differs from its terminal owner", contractId)
 				return
 			}

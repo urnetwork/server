@@ -9110,4 +9110,17 @@ var migrations = []any{
 	newSqlMigration(providerUsageArchiveSchemaSql),
 	// Commit cache ordering fences with every reservation transition.
 	newSqlMigration(netEscrowRevisionSchemaSql),
+	// A missing terminal close time is retained debt, not an empty usage epoch.
+	// Keep its existence probe off the ordinary open/canceled contract history.
+	// Retry an interrupted online build rather than preserving an invalid index.
+	newRestartableOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_usage_missing_time`,
+		`CREATE INDEX CONCURRENTLY transfer_contract_usage_missing_time
+		 ON transfer_contract (contract_id) WHERE close_time IS NULL AND
+		 outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')`,
+		`DROP INDEX IF EXISTS transfer_contract_usage_missing_time;
+		 CREATE INDEX transfer_contract_usage_missing_time
+		 ON transfer_contract (contract_id) WHERE close_time IS NULL AND
+		 outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')`,
+	),
 }
