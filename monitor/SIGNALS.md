@@ -7879,6 +7879,35 @@ rates; an absent metric is unavailable telemetry, not successful auth. Compare
 the clean-generation phase split with same-tunnel DNS path states and API route
 outcomes, retaining the uncontrolled caller-mix and retry-count qualifiers.
 
+Platform-owned Taskworker probes now inject an internal mint/retire authority
+into each private tunnel. It is bound to the stored `prober_identity`, not task
+arguments or the provider under test, and calls the existing client models.
+Every mint still verifies the parent JWT's normal signature/audience/lifetime
+policy and current account/client state, requires the exact stored source
+client, and retains the model's derived device, root credential lineage,
+roles/principal, fresh Pro entitlement, normal JWT lifetime and accounting.
+Retirement still waits for client/contract/OOB drain, rejects the durable
+parent, and keeps the model's transactional network fence. No custom signing,
+new transfer grant, bypassed provider contract, or quality-gate change is
+introduced. The same finite call/retirement budgets remain. Nil authority
+preserves public API behavior for SDK and standalone/operator probes; an
+internal error never retries through HTTP, since a mint may already have
+committed. Existing ambiguous-commit/reaper behavior is not an exactly-once
+mint guarantee.
+
+On that artifact, zero public-auth phase increments for Taskworker are
+expected and are **not** evidence of successful internal minting. Compare
+`urnetwork_egress_probe_internal_credentials_total{operation,result}` instead:
+exactly eight cells, `operation=mint|retire`, `result=ok|error|timeout|canceled`.
+An internal success is not provider reachability or a measured ACK. API
+`/connect/control`, platform registration, contract authorization/credit,
+in-tunnel DNS and result ingestion remain independent dependencies. The
+change removes public auth/retirement routing and API-handler pool contention
+for this platform-owned work, but uses Taskworker's existing database pool;
+it does not remove the underlying model/database cost or fix unrelated API
+traffic. Require clean source-matched internal counts, active-path DNS answers
+and durable distinct measured coverage before claiming the four-hour target.
+
 The 04:42–04:45Z incident control showed 27,374 `tun/address` timeouts against
 186 answers across three observed process keys, alongside derived-client
 creation and provide-secret-registration timeouts. Those observations do not

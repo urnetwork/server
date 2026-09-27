@@ -8,6 +8,26 @@ import (
 	"github.com/urnetwork/connect"
 )
 
+type capturedProbeCredentials struct{}
+
+func (*capturedProbeCredentials) AuthNetworkClient(context.Context, *connect.AuthNetworkClientArgs) (*connect.AuthNetworkClientResult, error) {
+	return nil, errors.New("synthetic credential seam is capture-only")
+}
+
+func (*capturedProbeCredentials) RemoveNetworkClient(context.Context, *connect.RemoveNetworkClientArgs) (*connect.RemoveNetworkClientResult, error) {
+	return nil, errors.New("synthetic credential seam is capture-only")
+}
+
+func TestOpenCarriesExplicitCredentialAuthorityOnly(t *testing.T) {
+	configs := []Config{probeTransportBudgetTestConfig(), probeTransportBudgetTestConfig()}
+	authority := &capturedProbeCredentials{}
+	configs[0].ClientCredentials = authority
+	settings := captureProbeTransportSettings(t, configs)
+	if settings[0].ClientCredentials != authority || settings[1].ClientCredentials != nil {
+		t.Fatal("Open dropped its explicit credential owner or changed the standalone default")
+	}
+}
+
 // Exercise Open's real generator context, but stop before TUN creation. Each
 // synthetic auth is canceled before a route can dial, so this test needs no
 // socket, host resolution, provider, or control-plane service.

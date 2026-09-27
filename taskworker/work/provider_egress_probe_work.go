@@ -1691,6 +1691,10 @@ func runProviderEgressProbe(
 	if identity == nil || identity.NetworkId == nil || identity.ClientId == nil || identity.ByClientJwt == "" {
 		return nil, fmt.Errorf("provider egress prober identity is not bootstrapped")
 	}
+	credentials, err := newProviderEgressCredentials(identity)
+	if err != nil {
+		return nil, err
+	}
 	operatorSecret, err := readProviderEgressOperatorSecret()
 	if err != nil {
 		return nil, err
@@ -1727,6 +1731,7 @@ func runProviderEgressProbe(
 		Version:           server.RequireVersion(),
 		DnsObservations:   &egressProbeDns.observations,
 		AuthObservations:  &egressProbeAuth.observations,
+		ClientCredentials: credentials,
 	}
 
 	// every finding the prober submits passes through the metrics reporter
