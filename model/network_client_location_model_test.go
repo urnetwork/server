@@ -3539,45 +3539,43 @@ func TestUpdateClientScoresForceMinimumStillSeesHealthExcludedProviders(t *testi
 	})
 }
 
-// THE GRADUATION PATH. An excluded provider has to keep being probed, or it can
-// never measure healthy again and is stuck out permanently -- the gate would
-// become a one-way door.
-//
-// GetProviderEgressLocationDue reads network_client_location_reliability,
-// provide_key, provider_egress_location and provider_egress_probe_attempt. It
-// does not read PassesMinimums, the redis score sets, the egress columns or
-// provider_egress_health, so structurally it cannot see the gate. This test is
-// the regression guard on that: it asserts both halves at once -- gone from
-// the quality pool, still in the probe queue -- so a future change that wires
-// selection state into the queue fails here rather than silently stranding
-// every excluded provider.
+// Unhealthy providers remain eligible for probing when their health needs
+// refresh, even while selection excludes them. Fresh negative evidence defers
+// a full probe by the same schedule as fresh positive evidence.
 func TestProbeDueQueueIgnoresTheEgressHealthGate(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc()
 		city := testing_healthGateCity(ctx, t)
 
-		clientIds := testing_connectQualifyingProviders(ctx, t, city, 1)
-		deadClientId := clientIds[0]
+		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
+		staleClientId, freshClientId := clientIds[0], clientIds[1]
 
-		// measured blackholed, and probed an hour ago -- so this goes through the
-		// stale-but-probed pass of the due query, which is the realistic state for
-		// a provider that has a health record at all
-		testing_setProviderEgressHealth(ctx, deadClientId, 0, 131)
-		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
-			ClientId:    deadClientId,
-			LocationId:  city.LocationId,
-			CountryCode: "us",
-			ObservedAt:  now.Add(-time.Hour),
-		})
+		// Both bad measurements still exclude selection. Only the older one is
+		// beyond the half-life refresh boundary; location age alone is not due.
+		for _, clientId := range clientIds {
+			measuredAt := now
+			if clientId == staleClientId {
+				measuredAt = now.Add(-3 * ProviderEgressHealthMaxAge / 4)
+			}
+			SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+				ClientId: clientId, MeasuredAt: measuredAt, OKCount: 0, Total: 131,
+			})
+			SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+				ClientId: clientId, LocationId: city.LocationId,
+				CountryCode: "us", ObservedAt: now.Add(-time.Hour),
+			})
+		}
 		testing_rollUpEgress(ctx)
 
 		err := UpdateClientScores(ctx, time.Hour, 1)
 		connect.AssertEqual(t, err, nil)
 
 		clientScores := testing_selectableClientScores(ctx, t, city, false)
-		if _, ok := clientScores[deadClientId]; ok {
-			t.Fatal("fixture is wrong: the provider was not excluded, so this proves nothing about the queue")
+		for _, clientId := range clientIds {
+			if _, ok := clientScores[clientId]; ok {
+				t.Fatal("fixture is wrong: an unhealthy provider was not excluded, so this proves nothing about the queue")
+			}
 		}
 
 		due := GetProviderEgressLocationDue(
@@ -3586,11 +3584,14 @@ func TestProbeDueQueueIgnoresTheEgressHealthGate(t *testing.T) {
 			now.Add(-time.Minute),
 			100,
 		)
-		if !slices.Contains(due, deadClientId) {
+		if !slices.Contains(due, staleClientId) {
 			t.Fatal(
 				"an excluded provider is not in the probe due-queue: it can never be re-measured, " +
 					"so it can never graduate back into the public list",
 			)
+		}
+		if slices.Contains(due, freshClientId) {
+			t.Fatal("fresh negative health bypassed the ordinary full-probe refresh schedule")
 		}
 	})
 }

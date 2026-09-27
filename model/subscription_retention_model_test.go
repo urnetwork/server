@@ -123,6 +123,23 @@ func testingSettledPayoutContracts(ctx context.Context, t testing.TB) (
 	return
 }
 
+// Simulates a missing billing sweep after a genuine bilateral settlement.
+// The terminal timestamp and provider usage stay under the installed guard.
+func testingSettleSweeplessContract(t testing.TB, ctx context.Context, contractId, sourceId, destinationId server.Id, byteCount ByteCount) {
+	t.Helper()
+	for _, clientId := range []server.Id{sourceId, destinationId} {
+		if err := CloseContract(ctx, contractId, clientId, byteCount, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_escrow_sweep WHERE contract_id=$1`, contractId))
+		if tag.RowsAffected() == 0 {
+			t.Fatal("sweepless fixture did not remove an actual settled billing row")
+		}
+	})
+}
+
 // After a payment completes, RemoveCompletedContracts must hard delete each of
 // its contracts together with the contract_close/transfer_escrow/
 // transfer_escrow_sweep rows in the same pass (no orphans for a later sweep) --
@@ -861,18 +878,7 @@ func TestRemoveStragglerContracts(t *testing.T) {
 		// path) is also a straggler, reaped only once it ages past the window
 		sweeplessEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, ByteCount(1024))
 		connect.AssertEqual(t, err, nil)
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`
-				UPDATE transfer_contract
-				SET outcome = $2, close_time = now()
-				WHERE contract_id = $1
-				`,
-				sweeplessEscrow.ContractId,
-				ContractOutcomeSettled,
-			))
-		})
+		testingSettleSweeplessContract(t, ctx, sweeplessEscrow.ContractId, sourceId, destinationId, 1024)
 
 		countPendingPayments := func() int {
 			c := 0
@@ -1044,14 +1050,14 @@ func TestBackfillContractReapTime(t *testing.T) {
 				ctx,
 				`
 				UPDATE transfer_contract
-				SET outcome = $2, close_time = now(), create_time = $3
+				SET create_time = $2
 				WHERE contract_id = $1
 				`,
 				sweeplessEscrow.ContractId,
-				ContractOutcomeSettled,
 				server.NowUtc().Add(-StragglerContractExpiration-24*time.Hour),
 			))
 		})
+		testingSettleSweeplessContract(t, ctx, sweeplessEscrow.ContractId, sourceId, destinationId, 1024)
 		connect.AssertEqual(t, testingReapTime(ctx, sweeplessEscrow.ContractId) == nil, true)
 
 		before := server.NowUtc()
