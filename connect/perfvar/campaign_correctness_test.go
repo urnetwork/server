@@ -1454,6 +1454,12 @@ func TestPerfvarExtremeProfileRoutesCorrectness(t *testing.T) {
 			if err != nil {
 				t.Fatalf("construct %s/%s: %v", testCase.route, testCase.profileName, err)
 			}
+			var h3ClientStart h3FullTunClientSnapshot
+			var h3ProgressStart int64
+			if testCase.route == fullTunRouteExchangeH3 {
+				h3ClientStart = snapshotH3FullTunClients(fixture.path)
+				h3ProgressStart = fixture.path.workloadProgressBytes.Load()
+			}
 			pair, measureErr := fixture.measureExactTCP(testCase.payloadBytes)
 			if measureErr == nil {
 				measureErr = verifyPerfvarExtremeObservation(
@@ -1470,6 +1476,10 @@ func TestPerfvarExtremeProfileRoutesCorrectness(t *testing.T) {
 					profile,
 					pair.Download,
 				)
+			}
+			if measureErr != nil {
+				logH3CorrectnessFailure(t, fixture.path, h3ClientStart, h3ProgressStart,
+					testCase.profileName, testCase.payloadBytes, pair, measureErr)
 			}
 			fixture.close()
 			if measureErr != nil {
