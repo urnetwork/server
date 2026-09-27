@@ -142,6 +142,73 @@ func TestRecordAuthNetworkClientOnboardingPersistsOnceAfterCallerCancellation(t 
 	})
 }
 
+// A window-client mint is transport maintenance, not another device opening
+// the app. It must not attribute a click or enroll that network in a campaign.
+func TestRecordDerivedAuthNetworkClientSkipsOnboarding(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		userId := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx,
+				`INSERT INTO network (network_id, network_name, admin_user_id) VALUES ($1, $2, $3)`,
+				networkId, "synthetic-derived-onboarding-"+networkId.String(), userId,
+			))
+		})
+		now := server.NowUtc()
+		if err := model.AddOnboardingEvent(ctx, &model.OnboardingEvent{
+			NetworkId:  networkId,
+			Name:       model.EventLandingClicked,
+			At:         now.Add(-time.Minute),
+			ReceivedAt: now.Add(-time.Minute),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		clientSession := session.NewLocalClientSession(ctx, "", &jwt.ByJwt{
+			NetworkId: networkId,
+			UserId:    userId,
+		})
+		defer clientSession.Cancel()
+		sourceClientId := server.NewId()
+		authClient := &model.AuthNetworkClientArgs{
+			SourceClientId: &sourceClientId,
+			DeviceSpec:     "synthetic Android window client",
+			TimeZone:       "Etc/UTC",
+			Locale:         "en-US",
+		}
+		recordAuthNetworkClientOnboarding(authClient, clientSession)
+		if count := onboardingEventCount(t, ctx, networkId, model.EventAppOpened); count != 0 {
+			t.Errorf("derived client generated %d app-open events", count)
+		}
+		if row := model.GetNetworkOnboarding(ctx, networkId); row != nil {
+			t.Error("derived client enrolled its network in device onboarding")
+		}
+
+		// Maintenance must also leave an existing user campaign's device
+		// metadata unchanged, even if the derived caller supplies those fields.
+		model.CreateNetworkOnboarding(ctx, &model.NetworkOnboarding{
+			NetworkId: networkId,
+			CreatedAt: now,
+			Email:     true,
+		})
+		recordAuthNetworkClientOnboarding(authClient, clientSession)
+		row := model.GetNetworkOnboarding(ctx, networkId)
+		if row == nil || row.TimeZone != "" || row.Locale != "" || row.Platform != "" {
+			t.Error("derived client changed user-facing onboarding context")
+		}
+	})
+}
+
+// The derived guard precedes even borrowing a session or starting its
+// detached timeout, so it cannot acquire a database connection or queue behind
+// optional work. No session/dependencies exist in this deterministic control.
+func TestRecordDerivedAuthDoesNotEnterPostPrimaryPhase(t *testing.T) {
+	sourceClientId := server.NewId()
+	recordAuthNetworkClientOnboarding(&model.AuthNetworkClientArgs{
+		SourceClientId: &sourceClientId,
+	}, nil)
+}
+
 // NetworkCreate and AuthVerify have distinct result shapes but share the
 // account-path enrollment boundary. Exercise both concrete adapters with an
 // already-canceled request and prove their real PostgreSQL write is idempotent.

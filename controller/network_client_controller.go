@@ -48,14 +48,16 @@ func AuthNetworkClient(
 }
 
 // recordAuthNetworkClientOnboarding runs only after AuthNetworkClient has
-// committed its primary client creation. Preserve request cancellation for
-// that primary operation, then give its optional onboarding persistence one
-// finite detached budget. A shallow session copy retains authenticated and
-// ingress-derived values without changing ownership of the request session.
+// committed its primary client creation. Derived window identities are
+// transport maintenance, not a device opening the app. Only top-level device
+// auth enters the optional, finitely bounded post-commit persistence phase.
 func recordAuthNetworkClientOnboarding(
 	authClient *model.AuthNetworkClientArgs,
 	clientSession *session.ClientSession,
 ) {
+	if authClient.SourceClientId != nil {
+		return
+	}
 	runPostPrimaryOnboarding(clientSession, func(postSession *session.ClientSession) {
 		networkId := clientSession.ByJwt.NetworkId
 
