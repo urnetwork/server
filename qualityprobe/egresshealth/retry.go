@@ -178,7 +178,8 @@ func bound(ctx context.Context, signal context.Context) (context.Context, func()
 // loads it had not reached, it gets them on a new tunnel, with their remaining
 // attempts and their spacing intact. An attempt that could not get a tunnel,
 // or whose tunnel was lost under it, is spent like any other; and when the
-// last attempt is one of those, the load is not measured -- neither a pass nor
+// last attempt is one of those (or local registration failed before any client
+// existed), the load is not measured -- neither a pass nor
 // a failure -- because its tunnel could not be re-created within its attempts.
 // A pass stands whenever it happened, and so does a TLS-authentication
 // failure: that is an identity that did not authenticate, which a dying tunnel
@@ -276,7 +277,7 @@ attempts:
 			break attempts
 		}
 		lastFailure = result.Err
-		tunnelGone = lost(signal)
+		tunnelGone = lost(signal) || result.NotMeasured
 	}
 	if result.Attempts == 0 && result.Err == "" {
 		// The run ended before this load's first attempt could start. On the

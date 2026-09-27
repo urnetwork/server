@@ -7299,6 +7299,36 @@ DNS/connect/TLS stages, and country-specific pass rate. A drop in retries
 alone is not proof of restored coverage; a regional-DNS change must not hide
 TLS failures or cause country cohorts to go dark.
 
+The fixed `urnetwork_egress_probe_blackhole_retry_waiting_loads` gauge counts
+sleeping **site loads**, not provider workers. For the same complete process
+set and instant, with `R` running cheap checks and `W` waiting loads, the
+three-site sample implies at least `ceil(W/3)` checks contain a wait. Only
+`W > 2R` proves any entirely sleeping checks, with lower bound `W - 2R`.
+Do not apply this bound across mixed sources, missing scrapes, or different
+sample geometry. A sleeping load can still retain a live private TUN whose
+control work continues; it is not proof of idle process capacity. Retry
+starts/ends count site-wait edges, not unique providers or measured coverage.
+
+Typed local-registration correction (source checkpoint 2026-09-27; attest the
+Taskworker's Server and Connect artifacts): a failed processed Provide-secret
+or ClientKey registration before **any** registered client has returned from
+that private tunnel's generator cannot establish a provider negative. Failed
+HTTP attempts with that exact proof are `not_measured`, with bounded final
+stage `local_control_registration`; all three spaced attempts still apply.
+The proof is instance-local and monotonic: a single successful constructor
+permanently disables this shortcut for that TUN, even after later setup
+failures. Generic setup deadlines, peer refusals, monitor window reasons and
+DNS timeouts alone do not qualify. Actual TCP/HTTP response evidence, TLS
+authentication failure, and confinement-policy failures are never hidden by
+the shortcut. Existing lost-path recovery, batch guards and dark-streak rules
+are unchanged. This is a conservative absent-instrument discriminator, not
+proof a provider is healthy, a complete platform-fault detector, or increased
+measured coverage. Cheap unknown publication retains the prior measured
+timestamp and dark streak, and only schedules another check. Races in which
+registration failure is observed only after the request completes can remain
+unclassified; no historical monitor reason
+is substituted. Full runs with no measured loads publish no quality score.
+
 The cheap `completed_buffered` gauge retains a result until its cohort joins
 even when that safe result has already been early-acknowledged. It is not an
 unsubmitted-provider count. Early publication flushes groups of 16 passing,
@@ -8762,27 +8792,36 @@ of the load's retries. It is not a byte counter or a report acknowledgment;
 canaries (`canary_ok`, `canary_fail`) and loads that were not measured
 (`not_measured`) carry results of their own. A fresh same-process positive delta
 proves carried probe traffic, not a join to an individual failed attempt or exit
-lookup, new contract admission, or customer-route recovery. The loads run after
-the operator's `/ip` echo warm-up on the same initially cold tunnel, which the
-run may re-create, so later success cannot exclude an earlier formation failure.
+lookup, new contract admission, or customer-route recovery. Current sampled-only
+loads start on an initially cold tunnel without an `/ip` warm-up; the run may
+re-create it, so later success cannot exclude an earlier formation failure.
 A full batch the run guard holds back records no loads at all.
 
 Exit and attempt controls: `urnetwork_egress_probe_locations_total` counts the
 exit addresses the prober submits by the precision of the GeoLite2 placement the
 ingest itself applies: `city_confident="true"` a city within the confident
 radius, `city_confident="false"` a region or country only, and
-`country="unknown"` an address GeoLite2 cannot place, which the ingest refuses
-and the attempt reports as `submit_failed`. The address itself is never a label.
+`country="unknown"` an address GeoLite2 cannot place, which the ingest refuses.
+Current optional location failure does not revoke acknowledged health or change
+the attempt to `submit_failed`; older artifacts did. The address is never a label.
 `urnetwork_egress_probe_attempts_total` counts one outcome per full run, `ok` or
 its failure class; the prober-side classes `health_not_run` (the run never
-started), `run_not_measured` (its tunnel died and could not be re-created),
-`no_exit_ip` (the `/my-ip-info` echo never answered) and `run_batch_guard` (its batch was
-held back by the run guard) are the probe's own misses, not verdicts on the
+started), `run_not_measured` (no scored load could be measured), and
+`run_batch_guard` (its batch was held back by the run guard) are the probe's own
+misses, not verdicts on the
 provider's traffic. Both are recorded only once the run guard has judged the
 batch -- a held-back batch records only its `run_batch_guard` attempts -- and
 before the report call returns: they are measurement events, not acknowledgments
 or accepted locations. Neither is an all-provider request denominator or a
 fleet-wide DNS/TLS failure rate: a provider the pass never reached is not counted.
+`no_exit_ip` is historical echo-dependent behavior, not an expected current
+failure when no optional randomized IP-text destination supplied location.
+Cheap `pass_providers_total`/`pass_not_measured_total` emit only when a whole
+cohort finalizes. Their absence or zero while cohorts run does not describe
+early-published rows; `blackhole_checks_total` is before the inner submit return,
+while blackhole progress ACKs count calls, not acknowledged row outcomes or
+distinct current-eligible providers. Compare durable coverage before claiming
+that the worker-completion-to-publication gap is loss or a successful sweep.
 
 Fleet share controls: `urnetwork_egress_probe_fleet_dark_share` (dark providers
 over those with a current measured blackhole check) and

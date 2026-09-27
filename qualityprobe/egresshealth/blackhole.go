@@ -43,7 +43,7 @@ type BlackholeResult struct {
 	ExitIp    string
 	IpEchoErr string
 	// How many of the check's loads could not be measured
-	// because their tunnel was gone and could not be re-created in time.
+	// because their tunnel was gone or its local registration never succeeded.
 	NotMeasured int
 	// [connectivity] when fewer connectivity destinations are
 	// compatible with the provider's place than the check draws.
@@ -68,7 +68,8 @@ const (
 	// worked.
 	FailureTlsAuthentication = "tls_authentication_failed"
 	// Means none of the check's loads was measured: its
-	// tunnel was gone and could not be re-created within the loads' attempts.
+	// tunnel was gone and could not be re-created within the loads' attempts,
+	// or typed local registration failure prevented any usable client.
 	// Nothing about the provider was learned. It must be submitted as "not
 	// measured" -- the server reschedules the check and counts nothing
 	// against the provider -- never as a failed check, or a provider that

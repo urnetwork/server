@@ -1743,9 +1743,10 @@ type CheckResult struct {
 	// was needed. "" when the first attempt passed.
 	LastFailure string
 	// Set on a load whose tunnel was not there for its last
-	// attempt: the tunnel died under the attempt, or it could not be
-	// re-created in time (see Path). It is neither a pass nor a failure -- a
-	// tunnel that went away says nothing about the site -- and it is left out
+	// attempt: the tunnel died, could not be re-created in time (see Path),
+	// or its own control registration failed before any client existed.
+	// It is neither a pass nor a failure -- an unavailable instrument
+	// says nothing about the site -- and it is left out
 	// of every tally and reported on its own, so the server can leave it out
 	// of total_count. Attempts and LastFailure still say what happened.
 	NotMeasured bool
@@ -2457,6 +2458,15 @@ func fetchWithExitPolicy(ctx context.Context, client *http.Client, d Destination
 			r.FailureStage = progress.timeoutStage()
 		}
 		r.TlsAuthenticationFailure = isTlsAuthenticationFailure(err)
+		// No usable client ever existed in this private tunnel, and its own
+		// local registration failed. This is not a peer reachability verdict.
+		// Response/TCP/TLS evidence and confinement-policy failures still stand.
+		if unavailable, ok := client.Transport.(interface{ ProviderMeasurementUnavailable() bool }); ok &&
+			resp == nil && !r.TlsAuthenticationFailure && r.FailureStage != "policy" &&
+			progress.phase.Load() < requestPhaseAfterDial && unavailable.ProviderMeasurementUnavailable() {
+			r.NotMeasured = true
+			r.FailureStage = "local_control_registration"
+		}
 		return r
 	}
 	// Closed after the capped read, whatever is left on the wire: the first
@@ -2765,7 +2775,7 @@ func (self *Result) FailureStageSummary() string {
 }
 
 func failureStageSummary(checks []CheckResult) string {
-	order := []string{"dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "run_ended", "unknown"}
+	order := []string{"dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "local_control_registration", "run_ended", "unknown"}
 	counts := map[string]int{}
 	for _, check := range checks {
 		if check.Ok {
@@ -2773,7 +2783,7 @@ func failureStageSummary(checks []CheckResult) string {
 		}
 		stage := check.FailureStage
 		switch stage {
-		case "dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "run_ended":
+		case "dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "local_control_registration", "run_ended":
 		default:
 			stage = "unknown"
 		}

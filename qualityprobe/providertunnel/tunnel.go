@@ -228,6 +228,7 @@ type Tunnel struct {
 	closeOnce       sync.Once
 	closeErr        error
 	dnsObservations *DnsObservations
+	registration    *providerRegistrationState
 }
 
 // An owner whose retirement Close joins.
@@ -311,9 +312,10 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		)
 	}
 
+	registration := &providerRegistrationState{}
 	multiClient := connect.NewRemoteUserNatMultiClient(
 		dataCtx,
-		generator,
+		&providerRegistrationGenerator{ApiMultiClientGenerator: generator, registration: registration},
 		func(source connect.TransferPath, provideMode protocol.ProvideMode, ipPath *connect.IpPath, packet []byte) {
 			_, _ = tun.Write(packet)
 		},
@@ -368,6 +370,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		unwatch:         unwatch,
 		closeTimeout:    cfg.closeTimeout(),
 		dnsObservations: cfg.DnsObservations,
+		registration:    registration,
 	}, nil
 }
 
@@ -473,7 +476,9 @@ func (self *Tunnel) HttpClientForHosts(timeout time.Duration, extraHosts []strin
 			return dnsPathFromMonitor(self.lost, window, providers)
 		},
 	}
-	return httpClientOverDialerWithResolver(self.tun.DialContext, resolver, self.pins, extraHosts, timeout)
+	client := httpClientOverDialerWithResolver(self.tun.DialContext, resolver, self.pins, extraHosts, timeout)
+	client.Transport.(*providerHttpTransport).registration = self.registration
+	return client
 }
 
 // Tears the tunnel down. It is safe to call more than once; only the

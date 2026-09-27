@@ -13,6 +13,14 @@ import (
 // Each RoundTrip creates an independent owner; no cross-request budget or lock.
 type providerHttpTransport struct {
 	*http.Transport
+	registration *providerRegistrationState
+}
+
+// This monotonic proof is deliberately separate from error chains, which
+// net/http may replace when Client.Timeout expires. It is false for unobserved
+// setup, generic peer failures, and every tunnel that ever registered a client.
+func (self *providerHttpTransport) ProviderMeasurementUnavailable() bool {
+	return self != nil && self.registration.unavailable()
 }
 
 type providerHttpRequestKey struct{}
