@@ -941,20 +941,21 @@ func newContract(
 	contractManagerSettings *connect.ContractManagerSettings,
 ) (contractId server.Id, contractTransferByteCount model.ByteCount, priority model.Priority, streamId *server.Id, returnErr error) {
 	// Recheck lifecycle at the write boundary. CreateContract's detailed lookup
-	// provides the fast rejection and diagnosis; these active-only reads close
+	// provides the fast rejection and diagnosis; this fresh active-only read closes
 	// the race where either endpoint is deactivated before the contract insert.
-	sourceNetworkId, err := model.FindActiveClientNetwork(ctx, sourceId)
-	if err != nil {
+	sourceNetworkIdPointer, destinationNetworkIdPointer := model.FindActiveClientPairNetworks(ctx, sourceId, destinationId)
+	if sourceNetworkIdPointer == nil {
 		// The local/source identity is no longer valid. This is not evidence
 		// against the selected destination, so do not wrap it as Reliability.
-		returnErr = err
+		returnErr = model.ErrActiveClientNotFound
 		return
 	}
-	destinationNetworkId, err := model.FindActiveClientNetwork(ctx, destinationId)
-	if err != nil {
-		returnErr = fmt.Errorf("%w: %v", errContractDestinationInactive, err)
+	if destinationNetworkIdPointer == nil {
+		returnErr = fmt.Errorf("%w: %v", errContractDestinationInactive, model.ErrActiveClientNotFound)
 		return
 	}
+	sourceNetworkId, destinationNetworkId := *sourceNetworkIdPointer, *destinationNetworkIdPointer
+	var err error
 	// Participant persistence happens after Redis assigns/reuses the stream id.
 	// Resolve every intermediary before reserving the payer's balance so a
 	// malformed or stale path cannot leave an unreturnable contract behind if

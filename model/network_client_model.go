@@ -22,6 +22,7 @@ import (
 	// "github.com/twmb/murmur3"
 	"maps"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/glog"
@@ -133,6 +134,44 @@ func FindActiveClientNetwork(
 		})
 	})
 
+	return
+}
+
+// Reads both active mappings in one fresh statement and pool acquisition.
+// Nil identifies an absent or inactive endpoint independently; callers retain
+// their source/destination error precedence. This read does not lock either
+// row or replace the contract transaction's lifecycle validation.
+func FindActiveClientPairNetworks(
+	ctx context.Context,
+	sourceId server.Id,
+	destinationId server.Id,
+) (sourceNetworkId *server.Id, destinationNetworkId *server.Id) {
+	server.Db(ctx, func(conn server.PgConn) {
+		sourceNetworkId, destinationNetworkId = findActiveClientPairNetworks(ctx, conn, sourceId, destinationId)
+	})
+	return
+}
+
+// Two primary-key probes share one statement snapshot, including a same-client
+// pair. Scalar subqueries return one row even when both mappings are absent.
+func findActiveClientPairNetworks(
+	ctx context.Context,
+	query server.PgCanQuery,
+	sourceId server.Id,
+	destinationId server.Id,
+) (sourceNetworkId *server.Id, destinationNetworkId *server.Id) {
+	result, err := query.Query(ctx, `
+		SELECT
+			(SELECT network_id FROM network_client WHERE client_id = $1 AND active),
+			(SELECT network_id FROM network_client WHERE client_id = $2 AND active)
+	`, sourceId, destinationId)
+	server.WithPgResult(result, err, func() {
+		if !result.Next() {
+			server.Raise(result.Err())
+			server.Raise(pgx.ErrNoRows)
+		}
+		server.Raise(result.Scan(&sourceNetworkId, &destinationNetworkId))
+	})
 	return
 }
 
