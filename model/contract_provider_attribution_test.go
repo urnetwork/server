@@ -152,20 +152,23 @@ func addStProviderUsageTestSweep(t testing.TB, ctx context.Context, originNetwor
 	return contractId
 }
 
-// Legacy single-provider and current multi-provider history coexist in one
-// epoch. Half-open boundaries, unchanged network totals, and whole-row cleanup
 // Historic billing allocations are not a substitute for the new usage proof,
 // including direct contracts whose normalized return direction was discarded.
 func TestStEpochProviderUsageRejectsHistoricalBillingFallback(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
+	testEnv.ApplyDbMigrations = false
 	testEnv.Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		// Missing usage belongs to the pre-guard history, never a new
+		// settlement written after the custody boundary is installed.
+		server.ApplyDbMigrationsUpTo(ctx, 724)
 		start := time.Unix(1_700_000_000, 0).UTC()
 		contractId := addStProviderUsageTestSweep(t, ctx, server.NewId(), server.NewId(), server.NewId(), start, nil)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET close_time=$2, outcome='settled' WHERE contract_id=$1`, contractId, start))
 		})
+		server.ApplyDbMigrations(ctx)
 		if usages, err := GetStEpochProviderUsage(ctx, start, start.Add(time.Hour)); err == nil || usages != nil {
 			t.Fatalf("legacy billing acquired guessed subnet credit: %+v, %v", usages, err)
 		}

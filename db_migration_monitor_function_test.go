@@ -49,6 +49,12 @@ func TestPublishedMigrationMonitorCompetitionFunctionArtifacts(t *testing.T) {
 			}
 
 			baselineMissing := []int{676}
+			appendOnlyMissing := []int{676}
+			if version >= 721 {
+				// Staging approvals share the same append-only guard from
+				// their published version; renaming it damages both owners.
+				appendOnlyMissing = append(appendOnlyMissing, 721)
+			}
 			var reviewMissing []int
 			if version == 677 {
 				reviewMissing = []int{677}
@@ -76,7 +82,7 @@ func TestPublishedMigrationMonitorCompetitionFunctionArtifacts(t *testing.T) {
 					// expected-name lookup to handle absence independently.
 					name:    "append-only function renamed",
 					sql:     `ALTER FUNCTION public.competition_append_only_guard() RENAME TO synthetic_missing_append_only_guard`,
-					missing: []int{676},
+					missing: appendOnlyMissing,
 				},
 			} {
 				t.Logf("version %d schema fault: %s", version, fault.name)

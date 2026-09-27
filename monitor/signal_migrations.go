@@ -163,6 +163,28 @@ var competitionStagingBestWinnerArtifactQuery = func() string {
 	return strings.Replace(competitionStagingWinnerArtifactQuery, oldEligibility, newEligibility, 1)
 }()
 
+// These guards survive the policy namespace transition. The successor owns
+// them once the historical key shape is no longer required.
+const clientKeyHistoryGuardsArtifactQuery = `(
+	NOT EXISTS (
+		SELECT 1 FROM (VALUES
+			('st_client_key_history', 'st_client_key_history_immutable', 'st_client_key_history_immutable_guard'),
+			('st_client_key_head', 'st_client_key_head_identity', 'st_client_key_head_identity_guard'),
+			('network_client', 'st_client_key_retire_on_client_delete', 'st_client_key_retire_deleted_client')
+		) expected(table_name, trigger_name, function_name)
+		WHERE NOT EXISTS (
+			SELECT 1 FROM pg_trigger trigger_record
+			JOIN pg_class relation ON relation.oid = trigger_record.tgrelid
+			JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+			WHERE namespace.nspname = 'public' AND relation.relname = expected.table_name
+				AND trigger_record.tgname = expected.trigger_name
+				AND trigger_record.tgenabled = 'O'
+				AND trigger_record.tgfoid = to_regprocedure('public.' || expected.function_name || '()')
+				AND NOT trigger_record.tgisinternal
+		)
+	)
+)`
+
 // The policy namespace append changes identity keys but leaves signed rows
 // immutable; the active-head index admits exactly one live projection.
 const clientKeyPolicyNamespaceArtifactQuery = `(
@@ -198,6 +220,7 @@ const clientKeyPolicyNamespaceArtifactQuery = `(
 		pg_get_functiondef(to_regprocedure('public.st_client_key_head_identity_guard()')),
 		'[[:space:]]+', ' ', 'g'
 	) LIKE '%NOT OLD.is_current AND (NEW.is_current OR NEW.generation <> OLD.generation)%'
+	AND ` + clientKeyHistoryGuardsArtifactQuery + `
 )`
 
 // Admission pins the complete installed function, its relation and its enabled
@@ -284,7 +307,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "onboarding_results_daily", requiredVersion: 648, rowColumn: 59},
 	{name: "network_onboarding_experiment_state", requiredVersion: 649, rowColumn: 60},
 	{name: "network_onboarding_created_at", requiredVersion: 650, rowColumn: 61},
-	{name: "signed client-key history tables and guards", requiredVersion: 651, rowColumn: 62},
+	{name: "signed client-key history tables and guards", requiredVersion: 651, removedVersion: 724, rowColumn: 62},
 	{name: "repeatable competition staging lifecycle", requiredVersion: 652, rowColumn: 63},
 	{name: "competition_round.admission_closed_at and guard", requiredVersion: 653, rowColumn: 64},
 	{name: "network_points_leaderboard_snapshot.epoch_metrics_available", requiredVersion: 654, rowColumn: 65},
@@ -926,23 +949,7 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		                 AND definition LIKE '%(client_id, generation)%st_client_key_history(client_id, generation)%'
 		                 AND validated
 		           )
-		           AND NOT EXISTS (
-		               SELECT 1 FROM (VALUES
-		                   ('st_client_key_history', 'st_client_key_history_immutable', 'st_client_key_history_immutable_guard'),
-		                   ('st_client_key_head', 'st_client_key_head_identity', 'st_client_key_head_identity_guard'),
-		                   ('network_client', 'st_client_key_retire_on_client_delete', 'st_client_key_retire_deleted_client')
-		               ) expected(table_name, trigger_name, function_name)
-		               WHERE NOT EXISTS (
-		                   SELECT 1 FROM pg_trigger trigger_record
-		                   JOIN pg_class relation ON relation.oid = trigger_record.tgrelid
-		                   JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-		                   WHERE namespace.nspname = 'public' AND relation.relname = expected.table_name
-		                     AND trigger_record.tgname = expected.trigger_name
-		                     AND trigger_record.tgenabled = 'O'
-		                     AND trigger_record.tgfoid = to_regprocedure('public.' || expected.function_name || '()')
-		                     AND NOT trigger_record.tgisinternal
-		               )
-		           )
+		           AND `+clientKeyHistoryGuardsArtifactQuery+`
 		       ),
 		       (
 		           EXISTS (

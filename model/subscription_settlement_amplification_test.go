@@ -2,6 +2,7 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -77,6 +78,7 @@ func TestEscrowSettlementEmptyBatchHasNoStatement(t *testing.T) {
 func TestEscrowSettlementLegacyRowsPreserveAccounting(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		start := server.NowUtc()
 		const used = ByteCount(128)
 		fixture := newForceCloseDisputeFixture(t, ctx, true, true, used, used, 1024)
 		zeroBalanceIds := addLegacyEmptySettlementEscrows(t, ctx, fixture, 45)
@@ -105,6 +107,11 @@ func TestEscrowSettlementLegacyRowsPreserveAccounting(t *testing.T) {
 			t.Fatalf("legacy close selected=%d error=%v", selected, err)
 		}
 		assertSettlementEscrowState(t, ctx, fixture, 46, used, forceCloseDisputeInitialBalance-used)
+		proof, snapshot := readContractExpiryTestSnapshot(t, ctx, fixture.contractId)
+		if snapshot.ByteCount != used || snapshot.Expiry == nil || len(snapshot.Providers) != 1 ||
+			snapshot.Providers[0].ClientId != destinationId || snapshot.Providers[0].NetworkId != fixture.providerNetworkId {
+			t.Fatalf("batched settlement changed completed provider usage: %s", proof)
+		}
 		server.Db(ctx, func(conn server.PgConn) {
 			rows, err := conn.Query(ctx, `SELECT settled, coalesce(payout_byte_count,0)
 				FROM transfer_escrow WHERE contract_id=$1 AND balance_id=$2`, siblingId, fixture.balanceId)
@@ -140,6 +147,15 @@ func TestEscrowSettlementLegacyRowsPreserveAccounting(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertSettlementEscrowState(t, ctx, fixture, 46, used, forceCloseDisputeInitialBalance-used)
+		replayedProof, _ := readContractExpiryTestSnapshot(t, ctx, fixture.contractId)
+		if !bytes.Equal(proof, replayedProof) {
+			t.Fatal("duplicate settlement changed its retained usage proof")
+		}
+		usages, err := GetStEpochProviderUsage(ctx, start, server.NowUtc().Add(time.Hour))
+		if err != nil || len(usages) != 1 || usages[0].ClientId != destinationId ||
+			usages[0].NetworkId != fixture.providerNetworkId || usages[0].PayoutByteCount != int64(used) {
+			t.Fatalf("legacy zero rows or duplicate settlement changed epoch usage: %+v, %v", usages, err)
+		}
 		server.Redis(ctx, func(r server.RedisClient) {
 			if r.Get(ctx, netEscrowKey(fixture.balanceId)).Val() != "1024" ||
 				r.Get(ctx, accountBalanceNetPayoutByteCountKey(fixture.providerNetworkId)).Val() != "128" {
@@ -248,8 +264,14 @@ func TestEscrowSettlementZeroQuarantinePreservesUnrelatedMirror(t *testing.T) {
 			server.Raise(r.Set(ctx, netEscrowKey(zeroBalanceIds[0]), 512, 0).Err())
 		})
 		server.Tx(ctx, func(tx server.PgTx) {
-			if !claimContractOutcomeInTx(ctx, tx, fixture.contractId, ContractOutcomeSettled) {
-				t.Fatal("synthetic quarantine did not own its claim")
+			// Quarantine retains the original checkpoint proof before its
+			// terminal claim, just as the real expiry owner does.
+			state, err := prepareContractExpiryInTx(ctx, tx, fixture.contractId, fixture.cutoff)
+			if err != nil || state == nil {
+				t.Fatalf("synthetic quarantine did not retain expiry proof: %v", err)
+			}
+			if closed, err := claimContractOutcomeInTx(ctx, tx, fixture.contractId, ContractOutcomeSettled); err != nil || !closed {
+				t.Fatalf("synthetic quarantine did not own its claim: %v", err)
 			}
 		}, server.TxReadCommitted)
 		releaseNetEscrowForContract(ctx, fixture.contractId)
