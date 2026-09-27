@@ -34,11 +34,13 @@ import (
 //
 // A fleet diagnosis must reconstruct one state for every currently eligible
 // provider: active, top-level, connected, valid, and holding a Public provide
-// key. A current failed attempt is a failure when it is newer than the trusted
-// location; a newer location update makes the ordering ambiguous, never a
-// success, because verdict reprioritisation also writes that timestamp. An
-// older retained failure becomes unobserved rather than resurrecting that
-// location as success. Unobserved and inconsistent providers stay in the
+// key. Fresh, acknowledged sampled-site health proves a Full probe ran even
+// without exit-location evidence. A current failed attempt is a failure when
+// it is newer than trusted health and location; a newer location update alone
+// makes the ordering ambiguous, never a success, because verdict
+// reprioritisation also writes that timestamp. An older retained failure
+// becomes unobserved rather than resurrecting that location as success.
+// Unobserved and inconsistent providers stay in the
 // denominator without becoming a failure class. Two consequences follow and
 // must not be "fixed" away:
 //
@@ -62,7 +64,8 @@ const ProbeAttemptSuccessClass = ""
 const ProbeFleetUnobservedClass = "unobserved"
 
 // ProbeFleetInconsistentClass means a current attempt claims success but no
-// trusted location exists. It is an ingestion/data-integrity invariant, not a
+// trusted sampled-site health or location evidence exists. It is an
+// ingestion/data-integrity invariant, not a
 // provider failure, so it remains in the denominator and is alerted separately.
 const ProbeFleetInconsistentClass = "inconsistent"
 
@@ -304,7 +307,8 @@ func GetProviderEgressProbeAttemptTally(ctx context.Context) map[string]int {
 
 // GetProviderEgressProbeFleetOutcomeTally reconstructs one bounded state for
 // every currently eligible provider. observed_at is used only for the
-// seven-day trust bound. location update_time can prove that a current failure
+// seven-day location trust bound; sampled-site health has its own 24-hour
+// freshness bound. location update_time can prove that a current failure
 // came after a location, but the reverse is only ambiguous because verdict
 // reprioritisation also changes it. A failed attempt is current for the
 // six-hour retry window. Older failures do not resurrect an older success:
@@ -315,6 +319,7 @@ func GetProviderEgressProbeFleetOutcomeTally(ctx context.Context) map[string]int
 	now := server.NowUtc()
 	minAttemptAt := now.Add(-ProviderEgressProbeAttemptBackoff)
 	minObservedAt := now.Add(-ProviderEgressLocationMaxAge)
+	minMeasuredAt := now.Add(-ProviderEgressHealthMaxAge)
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -339,9 +344,8 @@ func GetProviderEgressProbeFleetOutcomeTally(ctx context.Context) map[string]int
 					WHEN pea.attempt_at >= $2
 					 AND pea.probe_failure <> ''
 					 AND (
-						pel.client_id IS NULL OR
-						pel.observed_at < $3 OR
-						pea.update_time > pel.update_time
+						(peh.measured_at IS NULL OR peh.measured_at < $4 OR pea.attempt_at >= peh.measured_at)
+						AND (pel.client_id IS NULL OR pel.observed_at < $3 OR pea.update_time > pel.update_time)
 					 )
 					THEN CASE pea.probe_failure
 						WHEN 'tunnel_failed' THEN 'tunnel_failed'
@@ -356,6 +360,9 @@ func GetProviderEgressProbeFleetOutcomeTally(ctx context.Context) map[string]int
 						WHEN 'run_batch_guard' THEN 'run_batch_guard'
 						ELSE 'unknown_failure'
 					END
+					WHEN peh.measured_at >= $4
+					 AND (pea.client_id IS NULL OR pea.probe_failure = '' OR pea.attempt_at < peh.measured_at)
+					THEN ''
 					WHEN pel.observed_at >= $3
 					 AND (pea.client_id IS NULL OR pea.probe_failure = '')
 					THEN ''
@@ -366,6 +373,7 @@ func GetProviderEgressProbeFleetOutcomeTally(ctx context.Context) map[string]int
 				FROM eligible e
 				LEFT JOIN provider_egress_probe_attempt pea USING (client_id)
 				LEFT JOIN provider_egress_location pel USING (client_id)
+				LEFT JOIN provider_egress_health peh USING (client_id)
 			)
 			SELECT outcome_class, count(*)
 			FROM classified
@@ -374,6 +382,7 @@ func GetProviderEgressProbeFleetOutcomeTally(ctx context.Context) map[string]int
 			ProvideModePublic,
 			minAttemptAt.UTC(),
 			minObservedAt.UTC(),
+			minMeasuredAt.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

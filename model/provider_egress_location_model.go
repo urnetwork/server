@@ -721,8 +721,6 @@ const providerEgressStaleHealthDueQuery = `
 		provider_egress_health.client_id,
 		provider_egress_health.measured_at
 	FROM provider_egress_health
-	INNER JOIN provider_egress_location ON
-		provider_egress_location.client_id = provider_egress_health.client_id
 	INNER JOIN network_client_location_reliability ON
 		network_client_location_reliability.client_id = provider_egress_health.client_id
 	INNER JOIN network_client ON
@@ -764,9 +762,9 @@ const providerEgressStaleHealthDueQuery = `
 `
 
 // GetProviderEgressLocationDue returns the client ids of providers whose full
-// egress probe is due: their location or health evidence is stale, their
-// location has no corresponding health evidence, or they have no location
-// evidence, and they have no attempt newer than minAttemptAt.
+// egress probe is due because sampled-site health is stale or absent, subject
+// to attempt backoff. Exit location is independent evidence: its absence or
+// staleness never makes a provider with fresh health due by itself.
 //
 // This is the durable replacement for the prober's in-memory ttl cache: the
 // schedule lives in the database, so a prober restart resumes where it left
@@ -819,13 +817,14 @@ const providerEgressStaleHealthDueQuery = `
 // A single statement over the complete live-provider population cannot use the
 // evidence timestamps' ordered indexes for a global deadline sort. Instead,
 // the location and health tables supply bounded oldest-evidence heads through
-// (timestamp, client_id). A third output-bounded anti-health head finds
+// (timestamp, client_id), with the location head excluding fresh health. A
+// third output-bounded anti-health head finds
 // providers whose accepted location has no health row, which is possible
 // because health reporting is non-fatal to location submission. Absence in a
 // different table has no observed_at range key; PostgreSQL may correctly scan
 // and sort the small location table when missing-health rows are rare. The
-// health head requires an extant location, so retained health history after
-// location cleanup remains exclusively in the unlocated lane. Go deduplicates
+// health head does not require an exit location, so retained stale health after
+// location cleanup remains deadline-ordered. Go deduplicates
 // those heads and merges them by absolute hard expiry: observed_at +
 // ProviderEgressLocationMaxAge, measured_at + ProviderEgressHealthMaxAge, or
 // observed_at + ProviderEgressHealthMaxAge for missing health. Equal deadlines
@@ -835,8 +834,9 @@ const providerEgressStaleHealthDueQuery = `
 // exposed all candidates in its lane.
 //
 // Urgent evidence refreshes are admitted before the unlocated lane. The latter
-// remains a separately bounded anti-join ordered by client_id and fills only
-// unused capacity. Its six-hour attempt floor still prevents an immediate
+// contains providers with neither location nor health, remains a separately
+// bounded anti-join ordered by client_id, and fills only unused capacity. Its
+// six-hour attempt floor still prevents an immediate
 // failed retry from occupying every poll. This ordering deliberately does not
 // choose the unresolved policy between first attempts and retries inside the
 // unlocated lane; retaining their latest attempt rows preserves the evidence a
@@ -904,6 +904,7 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 	// so they come round again after the first backoff step rather than the
 	// ordinary attempt backoff
 	minGuardAttemptAt := now.Add(-rules.DarkBackoff(0))
+	minMeasuredAt := now.Add(-ProviderEgressHealthMaxAge / 2)
 	clientIds := []server.Id{}
 	diagnostics := ProviderEgressDueDiagnostics{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -923,8 +924,9 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 			}
 		}
 
-		// Stale location head. The composite observed_at/client_id index owns
-		// both the cutoff and the complete stable ordering.
+		// Stale location alone no longer demands a Full probe. This legacy
+		// head supplies an urgent deadline only when health is also absent or
+		// stale; the composite observed_at/client_id index owns its ordering.
 		result, err := conn.Query(
 			ctx,
 			`
@@ -939,6 +941,11 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 
 			WHERE
 				provider_egress_location.observed_at < $2 AND
+				NOT EXISTS (
+					SELECT 1 FROM provider_egress_health
+					WHERE provider_egress_health.client_id = provider_egress_location.client_id
+					  AND provider_egress_health.measured_at >= $9
+				) AND
 				network_client.active = true AND
 				network_client.source_client_id IS NULL AND
 				network_client_location_reliability.connected = true AND
@@ -979,6 +986,7 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 			shardIndex,
 			minBlackholeCheckedAt.UTC(),
 			minGuardAttemptAt.UTC(),
+			minMeasuredAt.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -993,11 +1001,9 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 			}
 		})
 
-		// Stale health head. It requires a current location so a retained health
-		// row whose location was removed remains exclusively in the no-location
-		// lane. Located providers may overlap the stale-location head; a provider
-		// with both deadlines keeps the earlier one.
-		minMeasuredAt := now.Add(-ProviderEgressHealthMaxAge / 2)
+		// Stale health is due independently of exit-location evidence. A provider
+		// with no location must not be rechecked while its health is fresh, and
+		// must re-enter this deadline-ordered lane when that health grows stale.
 		result, err = conn.Query(
 			ctx,
 			fmt.Sprintf(
@@ -1160,6 +1166,10 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 					SELECT 1 FROM provider_egress_location
 					WHERE
 						provider_egress_location.client_id = network_client_location_reliability.client_id
+				) AND
+				NOT EXISTS (
+					SELECT 1 FROM provider_egress_health
+					WHERE provider_egress_health.client_id = network_client_location_reliability.client_id
 				) AND
 				NOT EXISTS (
 					SELECT 1 FROM provider_egress_probe_attempt
