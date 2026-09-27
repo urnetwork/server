@@ -3,7 +3,6 @@ package model
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"maps"
 	"testing"
@@ -228,23 +227,20 @@ func TestStContractUsageEpochRejectsPartialAndTamperedHistory(t *testing.T) {
 		start := time.Unix(1_700_000_000, 0).UTC()
 		snapshot := &contractUsageSnapshot{Version: 1, ByteCount: 10, Providers: []contractProviderUsage{{ClientId: server.NewId(), NetworkId: server.NewId(), ByteCount: 10}}}
 		addStContractUsageSnapshotTestRow(t, ctx, start, snapshot)
-		id := addStContractUsageSnapshotTestRow(t, ctx, start, nil)
+		addStContractUsageSnapshotTestRow(t, ctx, start, nil)
+		addStContractUsageSnapshotTestRow(t, ctx, start.Add(time.Hour), snapshot)
+		addStContractUsageSnapshotTestOutcome(t, ctx, start.Add(time.Hour), nil, "canceled")
+		invalid := *snapshot
+		invalid.ByteCount++
+		addStContractUsageSnapshotTestRow(t, ctx, start.Add(2*time.Hour), &invalid)
+		server.ApplyDbMigrations(ctx)
 		if usages, err := GetStEpochProviderUsage(ctx, start, start.Add(time.Hour)); err == nil || usages != nil {
 			t.Fatalf("partial epoch accepted: %+v,%v", usages, err)
 		}
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET outcome='canceled' WHERE contract_id=$1`, id))
-		})
-		if usages, err := GetStEpochProviderUsage(ctx, start, start.Add(time.Hour)); err != nil || len(usages) != 1 {
+		if usages, err := GetStEpochProviderUsage(ctx, start.Add(time.Hour), start.Add(2*time.Hour)); err != nil || len(usages) != 1 {
 			t.Fatalf("cancellation poisoned usage: %+v,%v", usages, err)
 		}
-		invalid := *snapshot
-		invalid.ByteCount++
-		data, _ := json.Marshal(invalid)
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET outcome='settled',provider_usage=$2 WHERE contract_id=$1`, id, data))
-		})
-		if usages, err := GetStEpochProviderUsage(ctx, start, start.Add(time.Hour)); err == nil || usages != nil {
+		if usages, err := GetStEpochProviderUsage(ctx, start.Add(2*time.Hour), start.Add(3*time.Hour)); err == nil || usages != nil {
 			t.Fatalf("tampered epoch accepted: %+v,%v", usages, err)
 		}
 	})

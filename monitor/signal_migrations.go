@@ -359,6 +359,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "transfer_contract_closed_usage lookup index", requiredVersion: 723, rowColumn: 134},
 	{name: "signed client-key policy namespaces and active head", requiredVersion: 724, rowColumn: 135},
 	{name: "transfer_contract immutable usage and terminal attribution guard", requiredVersion: 725, rowColumn: 136},
+	{name: "st_provider_usage_archive exact atomic copy and append-only custody", requiredVersion: 726, rowColumn: 137},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -2096,7 +2097,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND indisvalid AND indisready
 		       ),
 		       `+clientKeyPolicyNamespaceArtifactQuery+`,
-		       `+contractUsageGuardArtifactQuery+`
+		       `+contractUsageGuardArtifactQuery+`,
+		       `+providerUsageArchiveArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {
