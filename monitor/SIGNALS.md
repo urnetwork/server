@@ -9539,7 +9539,8 @@ healthy-host means 2.07–2.25 seconds and less than 1% cancellation, versus
 11.60–13.04 seconds and roughly 80% cancellation on the hot hosts. That is
 threshold calibration, not a universal latency SLA or proof of root cause.
 Missing inventory, source, range, or diagnostic collectors produces a WARN
-visibility finding; independently proven hot slots still alert.
+`control-route-pressure-unobservable` finding; independently proven hot slots
+still emit `control-route-pressure`.
 
 The opt-in API instrumentation adds only fixed cells:
 
@@ -9585,6 +9586,30 @@ tails; a quiet process cannot prove reachability; thresholds can miss short
 spikes or smaller absolute failures; absent/partial metrics cannot clear an
 incident. Use the minimum-inflight condition only over sampled observations,
 not as proof of continuous occupancy between scrapes.
+
+Probe-owned OOB control POSTs can now carry `X-Ur-Control-Probe: 1`. The
+immutable generator option is enabled by private quality-probe tunnels only;
+ordinary SDK controls default unmarked, including their cleanup calls. The
+marker follows probe retries and post-client-close cleanup, not `/hello`,
+auth/retirement, generic HTTP, shared strategy headers or sampled provider
+URLs. It is **self-reported and spoofable**, never an authentication,
+authorization, routing, credit, or admission input.
+
+`urnetwork_connect_control_http_requests_total{source,phase,outcome}` adds
+32 fixed cells: `source=probe_claimed|unmarked` with the same four phases and
+four outcomes above. Each completed HTTP handler increments exactly one final
+phase/outcome cell; a retried SDK operation can reach multiple handlers.
+Matching `urnetwork_connect_control_http_request_seconds_{sum,count}{source}`
+and `urnetwork_connect_control_http_requests_inflight{source}` provide the
+source-specific residence and active denominator. These are not unique
+providers, logical SDK operations, processed frames or measurement ACKs.
+Compare claimed and unmarked volumes on the exact API generation, using
+separate Taskworker source/owner counters as corroboration. `probe_claimed`
+also includes standalone quality probes; it is not proof of platform identity.
+`unmarked` includes older/unsupported producers and stripped headers, not
+proven non-probe traffic. Absence of the new collector or producer option is
+unknown attribution, not zero probe load. Tests pin marker confinement,
+retry/cleanup ownership and unchanged authentication rejection.
 
 Correlate exact source/image with probe internal mint, same-tunnel DNS path
 states, provide-secret registration/ping, guard outcomes and durable measured
