@@ -1993,10 +1993,15 @@ func (self *logTailer) recordReconcile(start time.Time, err error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if err != nil {
+		var logQueryError *warpctlLogQueryError
 		if errors.Is(err, errLogReconcileIncomplete) {
 			// Block/continuation wrappers must not add private selectors to
 			// this fixed producer-completeness diagnostic.
 			err = errLogReconcileIncomplete
+		} else if errors.As(err, &logQueryError) {
+			// A fixed local-query class must not acquire private block/query
+			// selectors from continuation wrappers before becoming alert text.
+			err = logQueryError
 		}
 		self.lastReconcileError = err.Error()
 		self.reconcileSuccesses = [2]logReconcileSuccess{}
@@ -3204,6 +3209,7 @@ func tailerReconcileFinding(service string, now time.Time, startedAt time.Time, 
 		),
 		observed:  observed,
 		mechanism: "Loki accepts out-of-order records, but a WebSocket tail advances by source timestamp. Without a successful overlapping query, a late-ingested record older than that cursor can remain absent even while the tail process is connected and reading newer lines.",
+		context:   "A fixed bounded-query error_class describes Warpctl's terminal local diagnostic, not a panic in the observed service. HTTP 429/502/503/504 does not identify which gateway or backend returned it; a config/schema panic can originate in local configuration or an invalid upstream response. Unknown, truncated, or unrecognized diagnostics remain failed visibility. Successful retry diagnostics do not make a completed query fail.",
 		action:    "Restore bounded warpctl/Loki query visibility. Retain active services.yml block partitioning and inclusive boundary continuation. If one boundary cannot advance or a partition consumes the eight-page budget, diagnose and remove the high-cardinality log producer before changing query limits. Keep the live tail running; do not interpret missing reconciliation as a healthy error window.",
 		verify:    "Two consecutive overlap windows complete below the cap in aggregate or drain every configured block through bounded continuation. Require a current-watcher monitor-log-reconcile schema=1 diagnostic receipt with collectors=enabled=fresh=consecutive_two > 0 and post-boundary advancing window/completion ranges; alert absence alone is insufficient. The standing monitor remains free of tailer-reconcile and loki-tail-dropped-streams alerts.",
 		playbook:  "SIGNALS.md 1.5",

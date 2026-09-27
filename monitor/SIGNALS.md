@@ -2183,6 +2183,41 @@ is not recovery; successful bounded reads still have their existing query-cap,
 parsing, and freshness limits. This source repair does not certify every live
 observer generation or alter the standing tailer's separate shutdown policy.
 
+Bounded Warpctl log-query failures also retain a privacy-safe terminal cause.
+The local command runner keeps stdout separate from a bounded 64 KiB stderr
+diagnostic prefix for classification while preserving the existing combined
+output contract. Only a failed `warpctl logs` query can acquire the fixed
+classes `observation-log-query-http-429`, `observation-log-query-http-502`,
+`observation-log-query-http-503`, `observation-log-query-http-504`, or
+`observation-log-query-config-schema`. The HTTP classes require Warpctl's
+terminal `panic: Loki query error (...)` header; the config/schema class
+requires a terminal JSON/YAML parsing shape. Native cancellation and the
+monitor's command deadline retain `observation-canceled` and
+`observation-timeout`; a terminal GET timeout has the same timeout class.
+Unknown, oversized, or ambiguous diagnostics remain
+`observation-command-failed`. Earlier retry records, remote stdout, and
+timestamp-framed records cannot establish the terminal query cause. A
+successful command remains successful even when stderr records failed retries.
+
+Only the fixed class and optional native numeric exit status enter the safe
+error; arguments, selectors, response bodies, raw stderr, addresses, and
+credentials are not copied. Reconciliation strips block/continuation wrappers
+around this typed error before storing alert text. Existing `tailer-reconcile`
+and one-shot `cannot-observe` identities, WARN severity, two-cadence sustain,
+partial-output rejection, and successful-query recovery remain unchanged.
+False-positive qualifier: a query HTTP status does not identify which gateway
+or backend returned it, and a JSON/YAML panic does not distinguish local
+configuration from an invalid upstream payload. Neither proves that the
+observed service panicked. False-negative qualifier: a changed producer error
+format, oversized stderr, or missing terminal header loses the narrower cause,
+but never turns the failed query healthy. Diagnose through bounded independent
+query/backend controls; do not restart the observed service from this class.
+Require the existing two complete reconciliation windows and independent live
+tail freshness for recovery. Deterministic controls in
+`conn_warpctl_log_error_test.go` cover each class, cancellation, native exit
+status, concurrent stdout/stderr capture, private-text exclusion, unknown and
+successful controls, and unchanged one-shot/standing visibility identities.
+
 The stderr boundary still needs narrow self-health parsing. Warpctl reconnects
 an interrupted WebSocket internally, so an explicit `Tail read error ... no
 route to host ... Reconnecting` does not exit the child or increment the
