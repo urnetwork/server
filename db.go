@@ -227,11 +227,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		if err != nil {
 			panic(fmt.Sprintf("Unable to parse url: %s", err))
 		}
-		config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-			// use `Id` instead of the default UUID type
-			pgxRegisterIdType(conn.TypeMap())
-			return nil
-		}
+		configurePgPoolLiveness(config)
 
 		self.pool, err = pgxpool.NewWithConfig(self.ctx, config)
 		if err != nil {
@@ -239,6 +235,18 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		}
 	}
 	return self.pool
+}
+
+// Validate a new socket before first use, then let pgx validate connections
+// idle for more than a second. A hot checkout needs no second round trip to
+// the transaction pooler; failed callback connections still follow disposal
+// and safe-retry classification in dbWithPool.
+func configurePgPoolLiveness(config *pgxpool.Config) {
+	config.PingTimeout = PgPingTimeout
+	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		pgxRegisterIdType(conn.TypeMap())
+		return pingPgConnection(ctx, conn)
+	}
 }
 
 func (self *safePgPool) close() {
@@ -558,27 +566,6 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 		connectionContextDone := false
 		conn, connErr := pool.open().Acquire(ctx)
 		if connErr != nil {
-			if retryOptions.rerunOnConnectionError {
-				select {
-				case <-ctx.Done():
-					panic(DbContextDoneError)
-				case <-time.After(backoff.NextRetryTimeout()):
-					if retryEndTime.Before(NowUtc()) {
-						panic(connErr)
-					}
-					continue
-				}
-			}
-			panic(connErr)
-		}
-
-		connErr = pingPgConnection(ctx, conn)
-		if connErr != nil {
-			// take the bad connection out of the pool
-			pgxConn := conn.Hijack()
-			closePgConnection(ctx, pgxConn)
-			conn = nil
-
 			if retryOptions.rerunOnConnectionError {
 				select {
 				case <-ctx.Done():
