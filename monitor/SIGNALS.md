@@ -7945,8 +7945,8 @@ not promise remote exactly-once creation after an ambiguous response. This
 proves avoidable amplification, not its share of the live API storm. Activation
 requires rebuilding actual request producers (Taskworker, hosted Proxy, and
 eventually external SDK clients); a Connect-service-only rollout cannot update
-remote callers. Keep this a bounded manual discriminator until a dedicated
-source-qualified route-pressure signal is implemented. Neither a lower RPC
+remote callers. The automatic source-qualified route-pressure signal is
+§2.19e; it does not attribute all control traffic to probes. Neither a lower RPC
 count nor completed-buffered checks alone certify the four-hour measured sweep.
 
 The 04:42–04:45Z incident control showed 27,374 `tun/address` timeouts against
@@ -9514,6 +9514,85 @@ all coverage, freshness, missing-source, disjointness, enabled/legacy,
 partial-metrics, healthy and alert-rendering cases. This section is the
 acceptance contract for the new probe; it does not assert that the current
 Main watcher, destination pool, or country list already implements it.
+
+### 2.19e Control route pressure — distinguish setup from provider failure
+Probe: `control-route-pressure`
+
+Observe only the configured `POST ^/connect/control$` API route. On each
+newest exact process identity, use reset-aware five-minute increases of all
+HTTP outcomes, canceled outcomes across **all statuses**, and duration
+`_sum/_count`, plus current and five-minute minimum inflight. The duration
+ratio is a mean, not p95. A process must be at least five minutes old, underlying
+source samples no older than 90 seconds, with at least five range samples and
+a sample in the first minute of the range. Request and duration denominators
+must agree within a small scrape-boundary tolerance. Expected host/block
+coverage comes from active service inventory, not surviving metric series;
+an incomplete replacement cannot borrow its draining predecessor's evidence.
+Mimir retains the baseline window across monitor restarts.
+
+For a traffic-bearing process (at least 100 completions in five minutes),
+WARN requires at least 20% cancellation **and** a mean of at least five
+seconds. PAGE requires at least 50% cancellation, a ten-second mean, and at
+least 100 inflight throughout the sampled range, sustained for two cadences.
+These are alert thresholds, not admission limits. The 08:07Z controls had
+healthy-host means 2.07–2.25 seconds and less than 1% cancellation, versus
+11.60–13.04 seconds and roughly 80% cancellation on the hot hosts. That is
+threshold calibration, not a universal latency SLA or proof of root cause.
+Missing inventory, source, range, or diagnostic collectors produces a WARN
+visibility finding; independently proven hot slots still alert.
+
+The opt-in API instrumentation adds only fixed cells:
+
+- `urnetwork_connect_control_http_phase_inflight{phase}` and
+  `urnetwork_connect_control_http_phase_seconds_{sum,count}{phase}` measure
+  `prepare` (session/body/JSON), `authenticate` (normal session auth),
+  `controller` (pack decode, frame handlers and pack encode), and `response`
+  (HTTP result formatting/writing). The matching
+  `urnetwork_connect_control_http_phase_completions_total{phase,outcome}` has
+  exactly 16 cells: four phases by `ok|rejected|canceled|panic`. Successful
+  transitions count the phase exited, not another logical request. Canceled
+  context takes precedence over panic. Early rejection remains in its owning
+  phase; all gauges release during normal return or panic unwind.
+- `urnetwork_connect_control_frames_total{ingress,message,outcome}` has 64
+  cells: `http|internal`, eight fixed message kinds (`create_contract`,
+  `close_contract`, `provide`, `encrypted_key`, `client_key`, `control_ping`,
+  `provide_ping`, `other`), and `handler_ok|error|canceled|panic`. Matching
+  `urnetwork_connect_control_frames_inflight` and
+  `urnetwork_connect_control_frame_seconds_{sum,count}` locate handler
+  residence. Every child exists at zero on a capable executable. `internal`
+  includes resident and other direct controller callers; it is not a provider
+  identity. HTTP ingress is stamped by the server entry point.
+
+Compare phase inflight/residence first, then the HTTP-ingress frame kinds and
+completion denominator. A canceled request may never pass authentication or
+decode a frame, so no `provide` failures did not prove successful registration.
+The older `control_frame_failures_total` remains a cause classifier, not a
+success denominator. `handler_ok` means the handler returned without a Go
+error; it can still contain a protocol contract rejection. HTTP 200 likewise
+can carry an application error. Neither count is a remote ACK, a unique
+provider, or a successful measured blackhole publication. The collector adds
+no labels from URLs, credentials, IDs or arbitrary errors and no background
+goroutines, routing policy, retry change, admission cap or authorization bypass.
+
+False-positive qualifiers: legitimate holds, caller cancellation/churn,
+response loss and changing request mix can contribute. `canceled/none` is not
+an observed LB HTTP 499. Phase timing separates authentication from frame
+processing and output but **does not isolate PG pool acquisition** inside
+either phase; pool/CPU measurements are independent corroboration. The
+`http|internal` split does not distinguish probe-generated from external SDK
+traffic. False-negative qualifiers: completion means omit still-running
+tails; a quiet process cannot prove reachability; thresholds can miss short
+spikes or smaller absolute failures; absent/partial metrics cannot clear an
+incident. Use the minimum-inflight condition only over sampled observations,
+not as proof of continuous occupancy between scrapes.
+
+Correlate exact source/image with probe internal mint, same-tunnel DNS path
+states, provide-secret registration/ping, guard outcomes and durable measured
+coverage. Setup failures reported as `provider_unresponsive` are not proof of
+provider fault. Do not weaken dark, TLS, credit, or location guards to clear
+this signal. Recovery requires two clean fresh cadences and improving
+acknowledged **distinct** measured providers; the four-hour fleet-scan goal
+is not satisfied by fewer RPCs, successful auth or buffered worker completions.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`

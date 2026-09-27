@@ -287,6 +287,7 @@ func wrapWithInput[T any, R any](
 		return
 	}
 
+	advanceControlHttpPhase(req, controlHttpResponse)
 	for _, formatter := range formatters {
 		if complete := formatter(result); complete {
 			return
@@ -361,10 +362,12 @@ func WrapWithInputBodyFormatterRequireClient[T any, R any](
 	wrapWithInput(
 		bodyFormatter,
 		func(arg T, session *session.ClientSession) (R, error) {
+			advanceControlHttpPhase(req, controlHttpAuthenticate)
 			if err := session.Auth(req); err != nil || session.ByJwt.ClientId == nil {
 				var empty R
 				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
 			}
+			advanceControlHttpPhase(req, controlHttpController)
 			return impl(arg, session)
 		},
 		w,

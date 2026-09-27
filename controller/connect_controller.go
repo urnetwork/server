@@ -334,7 +334,7 @@ func connectControlObserved(
 	}
 
 	resultFrames, resultErr := ConnectControlFrames(
-		clientSession.Ctx,
+		context.WithValue(clientSession.Ctx, controlHttpIngressKey{}, true),
 		*clientSession.ByJwt.ClientId,
 		pack.Frames,
 		connect.DefaultContractManagerSettings(),
@@ -397,6 +397,7 @@ func ConnectControlFrames(
 			// a frame that will not decode is client-supplied bytes; `nil`
 			// takes the bounded `other` message label
 			recordControlFrameFailure(nil, err)
+			_ = observeControlFrame(ctx, nil, defaultControlFrameMetrics, func() error { return err })
 			errs = append(errs, err)
 			continue
 		}
@@ -416,15 +417,7 @@ func ConnectControlFrames(
 		//   kill its batch siblings or resend-loop forever, and so it is
 		//   REPORTED (observed: silent bulk destination-party contract leaks
 		//   under chaos churn before this was surfaced).
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					if ctx.Err() != nil {
-						panic(r)
-					}
-					err = fmt.Errorf("control frame %T panicked: %v", message, r)
-				}
-			}()
+		err = observeControlFrame(ctx, message, defaultControlFrameMetrics, func() error {
 			switch v := message.(type) {
 			case *protocol.CreateContract:
 				outFrames, err = CreateContract(ctx, clientId, v, contractManagerSettings)
@@ -446,7 +439,8 @@ func ConnectControlFrames(
 			default:
 				err = fmt.Errorf("Cannot handle oob control message: %T", message)
 			}
-		}()
+			return err
+		})
 
 		if err != nil {
 			// A handler may produce partial replies before reporting an error.

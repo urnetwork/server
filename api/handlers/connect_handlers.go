@@ -11,6 +11,8 @@ import (
 )
 
 func ConnectControl(w http.ResponseWriter, r *http.Request) {
+	r, finish := router.ObserveConnectControl(r)
+	defer finish()
 	router.WrapWithInputRequireClient(controller.ConnectControl, w, r)
 }
 
