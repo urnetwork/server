@@ -48,6 +48,47 @@ simulation, with an omitted curl dependency as a negative control. That is not
 execution of arm64 maintainer scripts or an arm64 image qualification. A native
 or approved emulated arm64 build remains required before publishing that target.
 
+## Deterministic platform images
+
+Pinned inputs alone did not reproduce the original image. Two independent API
+builds changed `/var/log/dpkg.log` (wall-clock entries) and
+`/var/cache/ldconfig/aux-cache` (filesystem-specific metadata), plus hundreds of
+file timestamps. The install step now removes only those two disposable outputs
+after package configuration and certificate generation, within the same layer.
+It retains `/etc/ld.so.cache`, the package database, libraries and certificates.
+Build logs retain package installation output for review. `SOURCE_DATE_EPOCH`
+alone does not normalize bytes inside a package log or an inode cache.
+
+All seven `warp_build_image` recipes pass a numeric `SOURCE_DATE_EPOCH` and use
+the explicit image exporter with `rewrite-timestamp=true`. The default epoch is
+the current source commit's Unix timestamp. An explicit override is another
+release input and must be recorded; empty and nonnumeric values fail before the
+builder runs. This value controls image config/history timestamps, while the
+exporter normalizes layer file timestamps. Use a clean checkout and the same
+recorded epoch, build context, toolchain and export settings when reproducing.
+Direct `docker buildx` invocations must supply both options as well:
+
+```sh
+docker buildx build --no-cache --platform linux/amd64 \
+  --build-arg warp_env=review --build-arg SOURCE_DATE_EPOCH=1700000000 \
+  --provenance=mode=max \
+  --output type=oci,dest=review.oci.tar,rewrite-timestamp=true .
+```
+
+The example epoch is synthetic; use the recorded release value. Do not invoke
+the publishing Makefile target for a local review build.
+
+Two no-cache amd64 API builds and two no-cache amd64 proxy builds reproduced
+their respective platform manifest, config and all compressed layer bytes with
+BuildKit 0.33.0 / frontend 1.27.0 / Buildx 0.37.1. This is one-builder
+qualification for two package sets, not every host or target. Their top-level
+OCI indexes differ because each retained provenance attestation describes a
+different build invocation. Compare and retain platform descriptors and
+attestations separately; do not drop or falsify attestations to make an index
+hash repeat. API's existing maximum-provenance and SBOM publication flags remain
+enabled. The other six recipes retain their prior policy and are not claimed to
+produce API-equivalent attestations; aligning that release policy is still open.
+
 ## Updating the inputs
 
 1. Select and review the base image index and its target manifests. Retain the
@@ -61,8 +102,10 @@ or approved emulated arm64 build remains required before publishing that target.
 4. Update the lock and corresponding literal Dockerfile inputs together. Run
    `GOWORK=off go test ./local/runtimepackages` and the race/vet equivalents.
    Qualify both package sets offline on every release target, including package
-   configuration and the actual application binary. Rebuild image/source locks,
-   provenance, SBOMs and security assessments before deployment approval.
+   configuration and the actual application binary. Repeat no-cache builds with
+   the same recorded epoch and compare the platform descriptors separately from
+   attestations. Rebuild image/source locks, provenance, SBOMs and security
+   assessments before deployment approval.
 
 Do not turn the URL, digest, package version or base digest into overridable
 build arguments, remove `--network=none`, add `apt-get -f install`, or substitute
@@ -82,11 +125,15 @@ release input, including when the old set needs security updates.
   separate moving toolchain/package inputs; they are not qualified by this service
   lock and must not be represented as covered production recipes.
 - **Image reproducibility:** BuildKit/frontend/toolchain identity, target
-  manifests, prebuilt application bytes, timestamps, package maintainer-script
-  output and image/export metadata remain separate inputs. Immutable package
-  bytes do not by themselves establish byte-identical OCI rebuilds, source-to-image
-  provenance, operational readiness, or vulnerability freedom.
+  manifests, prebuilt application bytes, the source epoch, package maintainer
+  behavior and export metadata remain separate inputs. Future package changes
+  can add different volatile output and require the same causal rebuild checks.
+  The verified amd64 platform matches do not establish repeatable attestation
+  indexes, arm64 reproducibility, independent-builder reproduction, source-to-image
+  provenance, operational readiness or vulnerability freedom.
 
 References: [Ubuntu snapshot service](https://snapshot.ubuntu.com/),
 [Ubuntu snapshot usage](https://ubuntu.com/server/docs/how-to/software/snapshot-service/),
 and [Dockerfile ADD checksum and RUN mount/network semantics](https://docs.docker.com/reference/dockerfile/).
+Timestamp behavior is documented in
+[BuildKit 0.33.0 reproducibility](https://github.com/moby/buildkit/blob/v0.33.0/docs/build-repro.md).

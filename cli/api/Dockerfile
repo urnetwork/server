@@ -16,10 +16,12 @@ ARG TARGETPLATFORM
 ARG warp_env
 ENV WARP_ENV=$warp_env
 
-# Install only the reviewed package bytes, with no network or dependency resolver.
+# Install offline, then discard build-only inode cache and wall-clock log.
+# Keep the runtime linker cache, package database and generated certificates.
 RUN --network=none --mount=from=runtime-packages,source=/runtime-packages,target=/runtime-packages,ro \
     dpkg -i /runtime-packages/"$(dpkg --print-architecture)"/*.deb /runtime-packages/all/*.deb \
-    && update-ca-certificates
+    && update-ca-certificates \
+    && rm -f /var/cache/ldconfig/aux-cache /var/log/dpkg.log
 
 COPY build/$TARGETPLATFORM/api /usr/local/sbin/bringyour-api
 

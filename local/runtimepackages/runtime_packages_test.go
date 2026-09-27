@@ -213,7 +213,7 @@ func checkRuntimePackageRecipe(lock runtimePackageLock, role, recipe string) err
 			if instruction == "RUN ln -s /srv/warp/vault/.aws /root/.aws" {
 				continue
 			}
-			want := "RUN --network=none --mount=from=runtime-packages,source=/runtime-packages,target=/runtime-packages,ro dpkg -i /runtime-packages/\"$(dpkg --print-architecture)\"/*.deb /runtime-packages/all/*.deb && update-ca-certificates"
+			want := "RUN --network=none --mount=from=runtime-packages,source=/runtime-packages,target=/runtime-packages,ro dpkg -i /runtime-packages/\"$(dpkg --print-architecture)\"/*.deb /runtime-packages/all/*.deb && update-ca-certificates && rm -f /var/cache/ldconfig/aux-cache /var/log/dpkg.log"
 			if instruction != want {
 				return errors.New("package installation gained an unreviewed command, resolver or network")
 			}
