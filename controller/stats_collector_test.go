@@ -355,13 +355,13 @@ func TestStatsRefreshDbExportsExtenderAndContractGauges(t *testing.T) {
 			t.Fatalf("online_providers_by_ip_family{ipv6} = %f, want an exported zero", value)
 		}
 
-		if value := testStatsGaugeValue(t, statsOpenContractsGauge); value != 2 {
+		if value := testStatsOpenContractValue(t, statsOpenContractsMetrics, "urnetwork_stats_open_contracts", nil); value != 2 {
 			t.Fatalf("open_contracts = %f, want 2", value)
 		}
-		if value := testStatsGaugeValue(t, statsOpenContractsWithExtenderGauge); value != 1 {
+		if value := testStatsOpenContractValue(t, statsOpenContractsMetrics, "urnetwork_stats_open_contracts_with_extender", nil); value != 1 {
 			t.Fatalf("open_contracts_with_extender = %f, want 1", value)
 		}
-		if value := testStatsGaugeValue(t, statsOpenDisputesGauge); value != 1 {
+		if value := testStatsOpenContractValue(t, statsOpenContractsMetrics, "urnetwork_stats_open_disputes", nil); value != 1 {
 			t.Fatalf("open_disputes = %f, want 1", value)
 		}
 		if value := testStatsGaugeValue(t, statsContracts24hGauge); value != 3 {

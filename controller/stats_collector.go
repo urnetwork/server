@@ -61,6 +61,12 @@ package controller
 //	urnetwork_stats_open_disputes                    disputes raised and not yet decided (db)
 //	urnetwork_stats_disputes_24h                     contracts created in the trailing 24 hours that are disputed (db + redis hour buckets)
 //
+// The three open gauges are exact-only, NaN when capped or unavailable. Their
+// contract_open_lower_bound, contract_open_status and
+// contract_open_observed_at_seconds companions carry fixed kind labels. A
+// coherent statement snapshot is published by stats_contract_counts.go; the
+// dashboard must join status and source freshness from the same process.
+//
 // the 24 hour contract numbers are summed from one hour buckets of
 // create_time; a complete bucket is computed once by whichever host needs it
 // first and cached in redis, so a refresh normally scans only the current
@@ -273,25 +279,13 @@ var statsOnlineExtendersByIpFamilyGauge = newStatsGaugeVec(
 	"Online extenders by the ip families they have an active address on",
 	"ip_family",
 )
-var statsOpenContractsGauge = newStatsGauge(
-	"open_contracts",
-	"Transfer contracts open now",
-)
 var statsContracts24hGauge = newStatsGauge(
 	"contracts_24h",
 	"Transfer contracts created in the last 24 hours",
 )
-var statsOpenContractsWithExtenderGauge = newStatsGauge(
-	"open_contracts_with_extender",
-	"Open transfer contracts with at least one extender party",
-)
 var statsContractsWithExtender24hGauge = newStatsGauge(
 	"contracts_with_extender_24h",
 	"Transfer contracts created in the last 24 hours with at least one extender party",
-)
-var statsOpenDisputesGauge = newStatsGauge(
-	"open_disputes",
-	"Disputed contracts with no outcome yet",
 )
 var statsDisputes24hGauge = newStatsGauge(
 	"disputes_24h",
@@ -728,14 +722,13 @@ func statsRefreshDb(ctx context.Context) {
 	// the extender gossip and popularity gauges (grafana/dashboards/extenders.json)
 	statsRefreshExtenders(ctx, now)
 
-	// the contract gauges, each open now and over the trailing 24 hours (M3)
-	contracts := model.CountContracts(ctx, now)
-	statsOpenContractsGauge.set(float64(contracts.OpenContracts))
-	statsOpenContractsWithExtenderGauge.set(float64(contracts.OpenContractsWithExtender))
-	statsOpenDisputesGauge.set(float64(contracts.OpenDisputes))
-	statsContracts24hGauge.set(float64(contracts.Contracts24h))
-	statsContractsWithExtender24hGauge.set(float64(contracts.ContractsWithExtender24h))
-	statsDisputes24hGauge.set(float64(contracts.Disputes24h))
+	// Open counts are a bounded snapshot, separate from the hourly cache.
+	// A capped or unavailable read must never masquerade as an exact gauge.
+	statsRefreshOpenContracts(ctx)
+	contracts := model.CountContractHourWindow(ctx, now)
+	statsContracts24hGauge.set(float64(contracts.Contracts))
+	statsContractsWithExtender24hGauge.set(float64(contracts.WithExtender))
+	statsDisputes24hGauge.set(float64(contracts.Disputes))
 
 	statsUsers24hGauge.set(float64(model.CountTopLevelClientsWithContractSince(ctx, now.Add(-24*time.Hour))))
 

@@ -1535,6 +1535,32 @@ boundary below, not conversion of SQL wall time into CPU.
 Implementation convention: SIGNALS.md §1.3c (`pg-cpu`) maps to
 `signal_pg_cpu.go`, `signal_pg_cpu_test.go`, and `NewPgCpuSignal` in `NewSignals`.
 
+The 2026-09-27 read-only grant/backup discriminator is manual evidence, not a
+new automated alert. The current grant shape returned about 225 rows/call at
+834 calls/s, with 7,547 shared-buffer hits/call and no shared reads. The balance
+index's tuple-read/fetch delta was about 34:1. The oldest backend xmin belonged
+to a primary-local `pg_dump` transaction about 9.7 hours old; exact backend/start
+and transaction matching showed COPY progress of 619MB/1.94M tuples in 17.7s.
+The primary backup unit owned the dump/compressor processes. Planetoid only
+archives finished encrypted files; it did not own the live snapshot.
+
+An old snapshot constrains reclamation but does not prove that backup is stuck
+or caused current CPU. Index read/fetch is not an exact dead-version-chain
+length; cache hits are work, not physical I/O or CPU seconds. Preserve source
+generation and counter-reset checks, active COPY/vacuum progress, transaction
+age, relation churn, query call/row/hit deltas and an independent CPU sample.
+The bounded selected-grant control used current grant ranks 39–60 of 311, but
+EXPLAIN without ANALYZE put Sort/Limit above the same full index scan for a
+64-row page. That is not evidence paging reduces buffer work. The table-size
+estimate was close while payer statistics had no most-common-value entries at
+target 100, so ANALYZE alone is not a demonstrated fix for the skewed estimate.
+Missing source, a changed backend/backup stage, reset counters, or a capped
+grant sample is unknown. A future independent horizon-pressure probe needs
+these joint controls and calibrated healthy backup intervals; age alone must
+not page or authorize cancellation. Verify buffer work and affected throughput
+after natural horizon release before claiming recovery. Do not cancel backups,
+run maintenance, alter grants, or widen financial admission from this evidence.
+
 ### 1.3d Empty transfer-escrow write amplification
 Probe: `escrow-amplification`
 
@@ -4037,6 +4063,25 @@ without repeatedly scanning tens of millions of rows during an incident.
 There is no automatic unbounded count fallback. The normal read-only transport's
 30-second statement timeout still bounds a slow scan: a row cap limits visible
 rows, not dead-index traversal, heap visibility checks, or wall-clock cost.
+
+The separate Taskworker stats collector no longer calls the exact unbounded
+`CountContracts`/`CountOpenContracts` path. Its open and disputed populations
+each use a 100,001-row sentinel in one materialized statement snapshot; extender
+membership is tested only over the bounded open sample. It has a five-second
+acquire/query context, a five-second read-only transaction statement timeout,
+and at most one further second of rollback cleanup. The legacy open gauges
+publish NaN when capped/unavailable. Fixed `kind=open|with_extender|dispute`
+metrics `urnetwork_stats_contract_open_lower_bound`,
+`urnetwork_stats_contract_open_status{status="exact|capped|unavailable"}` and
+`urnetwork_stats_contract_open_observed_at_seconds` preserve the distinction.
+The providers dashboard joins same-process status and source time (ten-minute
+freshness, thirty-second future skew); stat panels query the current instant,
+not an older last-not-null point. A capped extender zero does not establish
+absence, and capped values cannot establish trend or an extender share. Old
+publishers or a collector stuck before this phase remain unknown when their
+authority/time is absent or stale. Hour-bucket counts stay separate and are not
+made cheap by this open-set bound. This changes neither this probe's 250,001
+cap nor its existing alert identities and thresholds.
 
 The source must return exactly one three-column aggregate row. Successful-empty,
 short or extra-row/column responses, non-integer or negative counts, a total

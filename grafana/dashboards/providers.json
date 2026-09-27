@@ -766,7 +766,7 @@
         "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "center",
-        "textMode": "value",
+        "textMode": "value_and_name",
         "wideLayout": true
       },
       "targets": [
@@ -775,12 +775,25 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_open_contracts{env=\"$env\"})",
+          "expr": "max(max by (env,host,block,instance) (urnetwork_stats_open_contracts{env=\"$env\"}) and on (env,host,block,instance) (max by (env,host,block,instance) (urnetwork_stats_contract_open_status{env=\"$env\",kind=\"open\",status=\"exact\"}) == 1) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"open\"})) < 600) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"open\"})) >= -30))",
           "refId": "A",
-          "legendFormat": "open contracts"
+          "legendFormat": "open contracts (exact)",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(max by (env,host,block,instance) (urnetwork_stats_contract_open_lower_bound{env=\"$env\",kind=\"open\"}) and on (env,host,block,instance) (max by (env,host,block,instance) (urnetwork_stats_contract_open_status{env=\"$env\",kind=\"open\",status=\"capped\"}) == 1) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"open\"})) < 600) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"open\"})) >= -30))",
+          "refId": "B",
+          "legendFormat": "at least open contracts",
+          "instant": true,
+          "range": false
         }
       ],
-      "description": "Transfer contracts open right now: not disputed and with no outcome yet. The open set is small and short-lived, so this is a queue depth, not a cumulative total."
+      "description": "Open contracts, not disputed and without an outcome. Exact and at-least lower-bound series are distinct. Reads cap at 100,001 visible rows with a five-second query budget. Only same-process status and PostgreSQL snapshot times within ten minutes (at most thirty seconds ahead) qualify. No data means unavailable, stale or old-schema evidence, not zero. Capped values cannot establish trend or total population."
     },
     {
       "id": 16,
@@ -820,9 +833,9 @@
       },
       "options": {
         "legend": {
-          "displayMode": "hidden",
+          "displayMode": "list",
           "placement": "bottom",
-          "showLegend": false
+          "showLegend": true
         },
         "tooltip": {
           "mode": "single",
@@ -835,12 +848,21 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_open_contracts{env=\"$env\"})",
+          "expr": "max(max by (env,host,block,instance) (urnetwork_stats_open_contracts{env=\"$env\"}) and on (env,host,block,instance) (max by (env,host,block,instance) (urnetwork_stats_contract_open_status{env=\"$env\",kind=\"open\",status=\"exact\"}) == 1) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"open\"})) < 600) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"open\"})) >= -30))",
           "refId": "A",
-          "legendFormat": "open contracts"
+          "legendFormat": "open contracts (exact)"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(max by (env,host,block,instance) (urnetwork_stats_contract_open_lower_bound{env=\"$env\",kind=\"open\"}) and on (env,host,block,instance) (max by (env,host,block,instance) (urnetwork_stats_contract_open_status{env=\"$env\",kind=\"open\",status=\"capped\"}) == 1) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"open\"})) < 600) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"open\"})) >= -30))",
+          "refId": "B",
+          "legendFormat": "at least open contracts"
         }
       ],
-      "description": "Transfer contracts open right now: not disputed and with no outcome yet. The open set is small and short-lived, so this is a queue depth, not a cumulative total."
+      "description": "Open contracts, not disputed and without an outcome. Exact and at-least lower-bound series are distinct. Reads cap at 100,001 visible rows with a five-second query budget. Only same-process status and PostgreSQL snapshot times within ten minutes (at most thirty seconds ahead) qualify. No data means unavailable, stale or old-schema evidence, not zero. Capped values cannot establish trend or total population."
     },
     {
       "id": 17,
@@ -994,7 +1016,7 @@
         "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "center",
-        "textMode": "value",
+        "textMode": "value_and_name",
         "wideLayout": true
       },
       "targets": [
@@ -1003,12 +1025,25 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_open_contracts_with_extender{env=\"$env\"})",
+          "expr": "max(max by (env,host,block,instance) (urnetwork_stats_open_contracts_with_extender{env=\"$env\"}) and on (env,host,block,instance) (max by (env,host,block,instance) (urnetwork_stats_contract_open_status{env=\"$env\",kind=\"with_extender\",status=\"exact\"}) == 1) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"with_extender\"})) < 600) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"with_extender\"})) >= -30))",
           "refId": "A",
-          "legendFormat": "open contracts with an extender"
+          "legendFormat": "open contracts with an extender (exact)",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(max by (env,host,block,instance) (urnetwork_stats_contract_open_lower_bound{env=\"$env\",kind=\"with_extender\"}) and on (env,host,block,instance) (max by (env,host,block,instance) (urnetwork_stats_contract_open_status{env=\"$env\",kind=\"with_extender\",status=\"capped\"}) == 1) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"with_extender\"})) < 600) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"with_extender\"})) >= -30))",
+          "refId": "B",
+          "legendFormat": "at least open contracts with an extender",
+          "instant": true,
+          "range": false
         }
       ],
-      "description": "Of the open contracts, those with at least one extender party. A contract records an extender party for each side whose connection arrived from an active extender address, zero to many per side."
+      "description": "Open contracts with at least one extender party, counted once per contract. The extender lookup is restricted to the capped open sample; even a sampled zero is only a lower bound when that sample is capped. Exact and at-least series require same-process status and snapshot freshness within ten minutes. No data is unknown, never zero; no capped share or trend is inferred."
     },
     {
       "id": 20,
@@ -1048,9 +1083,9 @@
       },
       "options": {
         "legend": {
-          "displayMode": "hidden",
+          "displayMode": "list",
           "placement": "bottom",
-          "showLegend": false
+          "showLegend": true
         },
         "tooltip": {
           "mode": "single",
@@ -1063,12 +1098,21 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_open_contracts_with_extender{env=\"$env\"})",
+          "expr": "max(max by (env,host,block,instance) (urnetwork_stats_open_contracts_with_extender{env=\"$env\"}) and on (env,host,block,instance) (max by (env,host,block,instance) (urnetwork_stats_contract_open_status{env=\"$env\",kind=\"with_extender\",status=\"exact\"}) == 1) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"with_extender\"})) < 600) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"with_extender\"})) >= -30))",
           "refId": "A",
-          "legendFormat": "open contracts with an extender"
+          "legendFormat": "open contracts with an extender (exact)"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(max by (env,host,block,instance) (urnetwork_stats_contract_open_lower_bound{env=\"$env\",kind=\"with_extender\"}) and on (env,host,block,instance) (max by (env,host,block,instance) (urnetwork_stats_contract_open_status{env=\"$env\",kind=\"with_extender\",status=\"capped\"}) == 1) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"with_extender\"})) < 600) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"with_extender\"})) >= -30))",
+          "refId": "B",
+          "legendFormat": "at least open contracts with an extender"
         }
       ],
-      "description": "Of the open contracts, those with at least one extender party. A contract records an extender party for each side whose connection arrived from an active extender address, zero to many per side."
+      "description": "Open contracts with at least one extender party, counted once per contract. The extender lookup is restricted to the capped open sample; even a sampled zero is only a lower bound when that sample is capped. Exact and at-least series require same-process status and snapshot freshness within ten minutes. No data is unknown, never zero; no capped share or trend is inferred."
     },
     {
       "id": 21,
@@ -1222,7 +1266,7 @@
         "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "center",
-        "textMode": "value",
+        "textMode": "value_and_name",
         "wideLayout": true
       },
       "targets": [
@@ -1231,12 +1275,25 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_open_disputes{env=\"$env\"})",
+          "expr": "max(max by (env,host,block,instance) (urnetwork_stats_open_disputes{env=\"$env\"}) and on (env,host,block,instance) (max by (env,host,block,instance) (urnetwork_stats_contract_open_status{env=\"$env\",kind=\"dispute\",status=\"exact\"}) == 1) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"dispute\"})) < 600) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"dispute\"})) >= -30))",
           "refId": "A",
-          "legendFormat": "open disputes"
+          "legendFormat": "open disputes (exact)",
+          "instant": true,
+          "range": false
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(max by (env,host,block,instance) (urnetwork_stats_contract_open_lower_bound{env=\"$env\",kind=\"dispute\"}) and on (env,host,block,instance) (max by (env,host,block,instance) (urnetwork_stats_contract_open_status{env=\"$env\",kind=\"dispute\",status=\"capped\"}) == 1) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"dispute\"})) < 600) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"dispute\"})) >= -30))",
+          "refId": "B",
+          "legendFormat": "at least open disputes",
+          "instant": true,
+          "range": false
         }
       ],
-      "description": "Disputes raised and not yet decided. A dispute is raised at close, so a rising number here is a settlement problem, not a transfer problem."
+      "description": "Undecided disputes, independent of the open-contract cap. Exact and at-least lower-bound series require same-process status and PostgreSQL snapshot times within ten minutes. A 100,001-row sentinel marks capped evidence; query failure or stale/old-schema evidence is unknown, not healthy zero. A rising exact series may indicate settlement backlog; capped plateaus do not establish a trend."
     },
     {
       "id": 24,
@@ -1276,9 +1333,9 @@
       },
       "options": {
         "legend": {
-          "displayMode": "hidden",
+          "displayMode": "list",
           "placement": "bottom",
-          "showLegend": false
+          "showLegend": true
         },
         "tooltip": {
           "mode": "single",
@@ -1291,12 +1348,21 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_open_disputes{env=\"$env\"})",
+          "expr": "max(max by (env,host,block,instance) (urnetwork_stats_open_disputes{env=\"$env\"}) and on (env,host,block,instance) (max by (env,host,block,instance) (urnetwork_stats_contract_open_status{env=\"$env\",kind=\"dispute\",status=\"exact\"}) == 1) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"dispute\"})) < 600) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"dispute\"})) >= -30))",
           "refId": "A",
-          "legendFormat": "open disputes"
+          "legendFormat": "open disputes (exact)"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(max by (env,host,block,instance) (urnetwork_stats_contract_open_lower_bound{env=\"$env\",kind=\"dispute\"}) and on (env,host,block,instance) (max by (env,host,block,instance) (urnetwork_stats_contract_open_status{env=\"$env\",kind=\"dispute\",status=\"capped\"}) == 1) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"dispute\"})) < 600) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"dispute\"})) >= -30))",
+          "refId": "B",
+          "legendFormat": "at least open disputes"
         }
       ],
-      "description": "Disputes raised and not yet decided. A dispute is raised at close, so a rising number here is a settlement problem, not a transfer problem."
+      "description": "Undecided disputes, independent of the open-contract cap. Exact and at-least lower-bound series require same-process status and PostgreSQL snapshot times within ten minutes. A 100,001-row sentinel marks capped evidence; query failure or stale/old-schema evidence is unknown, not healthy zero. A rising exact series may indicate settlement backlog; capped plateaus do not establish a trend."
     },
     {
       "id": 25,
@@ -1472,12 +1538,14 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "max(urnetwork_stats_open_contracts_with_extender{env=\"$env\"}) / max(urnetwork_stats_open_contracts{env=\"$env\"})",
+          "expr": "max((max by (env,host,block,instance) (urnetwork_stats_open_contracts_with_extender{env=\"$env\"}) and on (env,host,block,instance) (max by (env,host,block,instance) (urnetwork_stats_contract_open_status{env=\"$env\",kind=\"with_extender\",status=\"exact\"}) == 1) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"with_extender\"})) < 600) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"with_extender\"})) >= -30)) / (max by (env,host,block,instance) (urnetwork_stats_open_contracts{env=\"$env\"}) and on (env,host,block,instance) (max by (env,host,block,instance) (urnetwork_stats_contract_open_status{env=\"$env\",kind=\"open\",status=\"exact\"}) == 1) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"open\"})) < 600) and on (env,host,block,instance) ((time() - max by (env,host,block,instance) (urnetwork_stats_contract_open_observed_at_seconds{env=\"$env\",kind=\"open\"})) >= -30)))",
           "refId": "A",
-          "legendFormat": "share"
+          "legendFormat": "share",
+          "instant": true,
+          "range": false
         }
       ],
-      "description": "The fraction of the currently open contracts that record at least one extender party. Both sides are measured at the same instant by the same collector tick, so the ratio is of one population and not of two windows."
+      "description": "Exact extender share from one complete PostgreSQL snapshot per process, then max across replicas. Same-process exact status and snapshot freshness within ten minutes are mandatory for both counts. Capped, unavailable, stale and old-schema counts produce no share; zero divided by zero is not a healthy zero. This stat queries only the current instant, never a historical last-not-null value."
     },
     {
       "id": 29,

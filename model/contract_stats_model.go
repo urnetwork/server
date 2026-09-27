@@ -6,10 +6,10 @@ package model
 // A gauge is a point in time, so each number comes in two forms: open now, and
 // created in the trailing 24 hours.
 //
-// The open counts are three reads of the partial indexes on transfer_contract
-// (`open`, and `dispute AND outcome IS NULL`), plus an existence probe of
-// contract_extender over the open set, which is cheap because the open set is
-// small.
+// Explicit CountOpenContracts/CountContracts calls perform exact scans, which
+// can be expensive when close work falls behind. The production collector uses
+// ReadOpenContractStats instead: a capped, deadline-bound statement snapshot
+// with explicit exactness. It reads the hourly window separately.
 //
 // The 24 hour counts are bucketized in one hour blocks of create_time. A
 // complete bucket never changes, so it is computed once — by whichever
@@ -122,7 +122,7 @@ func contractHourBucketStart(t time.Time) time.Time {
 	return t.UTC().Truncate(time.Hour)
 }
 
-// CountContracts returns every contract number the collector publishes, with
+// CountContracts explicitly computes exact contract numbers, with
 // the trailing 24 hour window measured against now (M3). now is a parameter
 // rather than a call to the clock so a test can place the window exactly.
 func CountContracts(ctx context.Context, now time.Time) ContractCounts {

@@ -1506,6 +1506,9 @@ var internalMeasurementMetrics = []string{
 	"urnetwork_stats_contracts_with_extender_24h",
 	"urnetwork_stats_open_disputes",
 	"urnetwork_stats_disputes_24h",
+	"urnetwork_stats_contract_open_lower_bound",
+	"urnetwork_stats_contract_open_status",
+	"urnetwork_stats_contract_open_observed_at_seconds",
 }
 
 // the population measurements the providers dashboard shows beside them
