@@ -15,13 +15,20 @@ import (
 // Seeds only the immutable proof surface for window and corruption tests.
 func addStContractUsageSnapshotTestRow(t testing.TB, ctx context.Context, closeTime time.Time, snapshot *contractUsageSnapshot) server.Id {
 	t.Helper()
+	return addStContractUsageSnapshotTestOutcome(t, ctx, closeTime, snapshot, ContractOutcomeSettled)
+}
+
+// Terminal variants are seeded with their original verdict, never rewritten
+// after insertion now that the database protects exact epoch attribution.
+func addStContractUsageSnapshotTestOutcome(t testing.TB, ctx context.Context, closeTime time.Time, snapshot *contractUsageSnapshot, outcome ContractOutcome) server.Id {
+	t.Helper()
 	contractId := server.NewId()
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `
 			INSERT INTO transfer_contract (contract_id,source_id,source_network_id,destination_id,destination_network_id,
 			transfer_byte_count,outcome,close_time,provider_usage,usage_origin_is_source)
-			VALUES($1,$2,$3,$4,$5,1000000,'settled',$6,$7,true)
-		`, contractId, server.NewId(), server.NewId(), server.NewId(), server.NewId(), closeTime, snapshot))
+			VALUES($1,$2,$3,$4,$5,1000000,$8,$6,$7,true)
+		`, contractId, server.NewId(), server.NewId(), server.NewId(), server.NewId(), closeTime, snapshot, outcome))
 	})
 	return contractId
 }
@@ -212,8 +219,12 @@ func TestStContractUsageForcedCloseDoesNotInventBilateralReport(t *testing.T) {
 func TestStContractUsageEpochRejectsPartialAndTamperedHistory(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
+	// Corrupt retained rows predate the prospective settlement guard. The
+	// reader must still refuse them rather than silently omit their usage.
+	testEnv.ApplyDbMigrations = false
 	testEnv.Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		server.ApplyDbMigrationsUpTo(ctx, 724)
 		start := time.Unix(1_700_000_000, 0).UTC()
 		snapshot := &contractUsageSnapshot{Version: 1, ByteCount: 10, Providers: []contractProviderUsage{{ClientId: server.NewId(), NetworkId: server.NewId(), ByteCount: 10}}}
 		addStContractUsageSnapshotTestRow(t, ctx, start, snapshot)

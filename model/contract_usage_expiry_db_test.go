@@ -342,10 +342,7 @@ func TestStContractUsageExpiryPreservesExactTerminalOutcome(t *testing.T) {
 	testEnv.Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		for _, outcome := range []ContractOutcome{ContractOutcomeSettled, ContractOutcomeDisputeResolvedToSource, "canceled", "foreign-terminal"} {
-			id := addStContractUsageSnapshotTestRow(t, ctx, server.NowUtc(), &contractUsageSnapshot{Version: 1, Providers: []contractProviderUsage{}})
-			server.Tx(ctx, func(tx server.PgTx) {
-				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET outcome=$2 WHERE contract_id=$1`, id, outcome))
-			})
+			id := addStContractUsageSnapshotTestOutcome(t, ctx, server.NowUtc(), &contractUsageSnapshot{Version: 1, Providers: []contractProviderUsage{}}, outcome)
 			before, _ := readContractExpiryTestSnapshot(t, ctx, id)
 			server.Tx(ctx, func(tx server.PgTx) {
 				state, err := prepareContractExpiryInTx(ctx, tx, id, server.NowUtc().Add(time.Hour))

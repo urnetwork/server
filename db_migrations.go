@@ -9104,4 +9104,6 @@ var migrations = []any{
 	),
 	// Policy changes start a fresh signed segment without rewriting history.
 	newSqlMigration(clientKeyPolicyHistorySchemaSql),
+	// Mixed-version writers must not create new missing usage or rewrite credit.
+	newSqlMigration(contractUsageGuardSchemaSql),
 }
