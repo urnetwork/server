@@ -1224,7 +1224,9 @@ func (self *CoreStClient) waitFinalizedAttempt(
 		}
 
 		current := attempts[0]
-		if !receiptPending && current.Attempt < stTxMaxAttempts && time.Now().After(current.CreateTime.Add(stTxReplacementDelay)) {
+		// A failed receipt census says nothing about the existing signatures.
+		// Only complete absence can grant a bounded fee replacement.
+		if err == nil && ctx.Err() == nil && !receiptPending && current.Attempt < stTxMaxAttempts && time.Now().After(current.CreateTime.Add(stTxReplacementDelay)) {
 			return current.TxHash, errStReplaceTransaction
 		}
 		select {
@@ -1396,6 +1398,11 @@ func (self *CoreStClient) reconcileAccountIntents(
 					return observeErr
 				}
 				continue
+			}
+			// An advanced nonce cannot identify the winner of an incomplete
+			// receipt census. Keep every attempt discoverable for the next turn.
+			if observeErr != nil {
+				return fmt.Errorf("st: reconcile retained attempts for nonce %d: %w", intent.Nonce, observeErr)
 			}
 			if receiptPending {
 				desiredKind := model.StTxAttemptExecution
