@@ -157,33 +157,89 @@ func SweepProviderAuditEventsPost(
 // picks up late closes; each day is idempotent by replacement.
 
 type RollupTransferAuditEventsArgs struct {
+	// Carry the first deferred lower bound across backup delays so a day cannot
+	// age out of the ordinary three-day refresh window without being rolled up.
+	MinTime *time.Time `json:"min_time,omitempty"`
 }
 
 type RollupTransferAuditEventsResult struct {
-	DayCount int `json:"day_count"`
+	DayCount int  `json:"day_count"`
+	Deferred bool `json:"deferred,omitempty"`
+	// Earliest remaining day after a backup deferral or bounded catch-up batch.
+	MinTime *time.Time `json:"min_time,omitempty"`
 }
 
+const transferAuditBackupRetry = 30 * time.Minute
+
 func ScheduleRollupTransferAuditEvents(clientSession *session.ClientSession, tx server.PgTx) {
+	scheduleRollupTransferAuditEvents(clientSession, tx, &RollupTransferAuditEventsArgs{}, server.NowUtc().Add(6*time.Hour))
+}
+
+func scheduleRollupTransferAuditEvents(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+	args *RollupTransferAuditEventsArgs,
+	runAt time.Time,
+) {
 	task.ScheduleTaskInTx(
 		tx,
 		RollupTransferAuditEvents,
-		&RollupTransferAuditEventsArgs{},
+		args,
 		clientSession,
 		task.RunOnce("rollup_transfer_audit_events"),
-		task.RunAt(server.NowUtc().Add(6*time.Hour)),
+		task.RunAt(runAt),
 		task.MaxTime(1*time.Hour),
 	)
 }
 
 func RollupTransferAuditEvents(
-	rollupTransferAuditEvents *RollupTransferAuditEventsArgs,
+	args *RollupTransferAuditEventsArgs,
 	clientSession *session.ClientSession,
 ) (*RollupTransferAuditEventsResult, error) {
-	now := server.NowUtc()
-	dayCount := model.RollupTransferAuditEvents(clientSession.Ctx, now.Add(-3*24*time.Hour), now)
-	return &RollupTransferAuditEventsResult{
-		DayCount: dayCount,
-	}, nil
+	return rollupTransferAuditEvents(
+		clientSession.Ctx, args, server.NowUtc(),
+		model.PostgresLogicalBackupSnapshotActive, model.RollupTransferAuditEvents,
+	), nil
+}
+
+// Gate only the recurring refresh before its first write transaction. Explicit
+// model/CLI backfills keep their requested behavior, and this never interrupts
+// a rollup or backup already running. Keep the range durable through the post
+// hook rather than reporting skipped days as completed work.
+func rollupTransferAuditEvents(
+	ctx context.Context,
+	args *RollupTransferAuditEventsArgs,
+	now time.Time,
+	backupActive func(context.Context) bool,
+	rollup func(context.Context, time.Time, time.Time) int,
+) *RollupTransferAuditEventsResult {
+	minTime := now.Add(-3 * 24 * time.Hour)
+	if args != nil && args.MinTime != nil && args.MinTime.Before(now) {
+		minTime = *args.MinTime
+	}
+	if backupActive(ctx) {
+		glog.Infof("[audit]defer optional transfer rollup while logical-backup snapshot is active; preserving lower bound %s\n", minTime.UTC().Format(time.RFC3339))
+		return &RollupTransferAuditEventsResult{Deferred: true, MinTime: &minTime}
+	}
+	// A long deferral can span more than the usual three days. Keep each task
+	// at the old work bound and carry any later days to another invocation.
+	maxTime := now
+	batchEnd := minTime.UTC().Truncate(24 * time.Hour).Add(3 * 24 * time.Hour)
+	result := &RollupTransferAuditEventsResult{}
+	if batchEnd.Before(now.UTC().Truncate(24 * time.Hour)) {
+		maxTime = batchEnd
+		result.MinTime = &batchEnd
+	}
+	result.DayCount = rollup(ctx, minTime, maxTime)
+	return result
+}
+
+func nextTransferAuditRollup(now time.Time, result *RollupTransferAuditEventsResult) (*RollupTransferAuditEventsArgs, time.Time) {
+	if result.MinTime != nil {
+		minTime := *result.MinTime
+		return &RollupTransferAuditEventsArgs{MinTime: &minTime}, now.Add(transferAuditBackupRetry)
+	}
+	return &RollupTransferAuditEventsArgs{}, now.Add(6 * time.Hour)
 }
 
 func RollupTransferAuditEventsPost(
@@ -192,7 +248,8 @@ func RollupTransferAuditEventsPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleRollupTransferAuditEvents(clientSession, tx)
+	args, runAt := nextTransferAuditRollup(server.NowUtc(), rollupTransferAuditEventsResult)
+	scheduleRollupTransferAuditEvents(clientSession, tx, args, runAt)
 	return nil
 }
 

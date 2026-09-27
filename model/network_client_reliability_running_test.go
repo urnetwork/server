@@ -214,7 +214,7 @@ func TestReliabilityRunningRecomputeCadence(t *testing.T) {
 // reliability re-anchor that starts moments later. The re-anchor then owns an
 // older snapshot and prevents index validation until its full-window scan ends.
 func TestReliabilityRunningReanchorDefersForNewConcurrentIndex(t *testing.T) {
-	if reliabilityRunningReanchorAllowedForMaintenance(false, true) {
+	if reliabilityRunningReanchorAllowedForMaintenance(false, true, false) {
 		t.Fatal("new concurrent index build allowed an optional reliability re-anchor")
 	}
 }
@@ -222,11 +222,52 @@ func TestReliabilityRunningReanchorDefersForNewConcurrentIndex(t *testing.T) {
 // Small routine vacuums should not suppress the periodic correction. The live
 // catalog query classifies only vacuums older than the established-work floor.
 func TestReliabilityRunningReanchorAllowsBriefVacuum(t *testing.T) {
-	if !reliabilityRunningReanchorAllowedForMaintenance(false, false) {
+	if !reliabilityRunningReanchorAllowedForMaintenance(false, false, false) {
 		t.Fatal("brief vacuum suppressed an optional reliability re-anchor")
 	}
-	if reliabilityRunningReanchorAllowedForMaintenance(true, false) {
+	if reliabilityRunningReanchorAllowedForMaintenance(true, false, false) {
 		t.Fatal("established vacuum allowed an optional reliability re-anchor")
+	}
+}
+
+func TestReliabilityRunningReanchorDefersForBackupWithoutSuppressingRepair(t *testing.T) {
+	allowed := reliabilityRunningReanchorAllowedForMaintenance(false, false, true)
+	if allowed {
+		t.Fatal("logical backup allowed an optional full-window re-anchor")
+	}
+	base := reliabilityRunningWindow{
+		exists: true, minBlockNumber: 1000, maxBlockNumber: 2000, lastRecomputeBlock: 2000,
+		degradedClassificationVersion:           reliabilityDegradedClassificationVersion,
+		degradedClassificationWriteTokenPresent: true, degradedClassificationGuardPresent: true,
+	}
+	newMin, newMax := base.minBlockNumber+ReliabilityRunningRecomputeBlocks, base.maxBlockNumber+ReliabilityRunningRecomputeBlocks
+	if recompute, deferred := reliabilityRunningNeedsRecompute(base, newMin, newMax, allowed); recompute || !deferred {
+		t.Fatalf("optional backup decision=(%t,%t), want (false,true)", recompute, deferred)
+	}
+	for _, mutation := range []struct {
+		name   string
+		change func(*reliabilityRunningWindow)
+	}{
+		{"bootstrap", func(w *reliabilityRunningWindow) { w.exists = false }},
+		{"classification", func(w *reliabilityRunningWindow) { w.degradedClassificationVersion = 0 }},
+		{"writer token", func(w *reliabilityRunningWindow) { w.degradedClassificationWriteTokenPresent = false }},
+		{"writer guard", func(w *reliabilityRunningWindow) { w.degradedClassificationGuardPresent = false }},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			prev := base
+			mutation.change(&prev)
+			if recompute, deferred := reliabilityRunningNeedsRecompute(prev, newMin, newMax, allowed); !recompute || deferred {
+				t.Fatalf("mandatory backup decision=(%t,%t), want (true,false)", recompute, deferred)
+			}
+		})
+	}
+	for _, bounds := range [][2]int64{{999, 2001}, {1001, 1999}} {
+		if recompute, deferred := reliabilityRunningNeedsRecompute(base, bounds[0], bounds[1], allowed); !recompute || deferred {
+			t.Fatalf("backwards backup decision=(%t,%t), want (true,false)", recompute, deferred)
+		}
+	}
+	if recompute, deferred := reliabilityRunningNeedsRecompute(base, newMin, newMax, true); !recompute || deferred {
+		t.Fatalf("post-backup decision=(%t,%t), want (true,false)", recompute, deferred)
 	}
 }
 
