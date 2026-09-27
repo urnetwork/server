@@ -26,6 +26,57 @@ func noSleep(ctx context.Context, d time.Duration) error {
 	return ctx.Err()
 }
 
+func TestRetryWaitObserverBalancesOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entered := make(chan struct{})
+	var lock sync.Mutex
+	events := []bool{}
+	r := &run{opts: Options{
+		ObserveRetryWait: func(waiting bool) {
+			lock.Lock()
+			events = append(events, waiting)
+			lock.Unlock()
+		},
+		Sleep: func(ctx context.Context, _ time.Duration) error {
+			close(entered)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}}
+	done := make(chan error, 1)
+	go func() { done <- r.retryWait(ctx, time.Minute) }()
+	<-entered
+	lock.Lock()
+	if len(events) != 1 || !events[0] {
+		t.Errorf("while retry sleeps, events = %v, want [true]", events)
+	}
+	lock.Unlock()
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Errorf("canceled retry wait = %v, want context cancellation", err)
+	}
+	lock.Lock()
+	defer lock.Unlock()
+	if len(events) != 2 || !events[0] || events[1] {
+		t.Errorf("completed retry wait events = %v, want [true false]", events)
+	}
+}
+
+func TestRetryWaitObserverBalancesOnSuccess(t *testing.T) {
+	events := []bool{}
+	r := &run{opts: Options{
+		ObserveRetryWait: func(waiting bool) { events = append(events, waiting) },
+		Sleep:            func(context.Context, time.Duration) error { return nil },
+	}}
+	if err := r.retryWait(context.Background(), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || !events[0] || events[1] {
+		t.Errorf("successful retry wait events = %v, want [true false]", events)
+	}
+}
+
 // An injected clock whose Sleep advances it instead of waiting,
 // and records every wait a run asked for. It is shared by everything that
 // reads it, so it is only meaningful for one retry chain at a time; tests with
@@ -169,7 +220,14 @@ func TestLoadThatFailsTwiceThenPassesPasses(t *testing.T) {
 		_, _ = w.Write([]byte("User-agent: *"))
 	}}})
 
-	res, err := check(context.Background(), http.DefaultClient, dests, clockedOptions(clock))
+	opts := clockedOptions(clock)
+	retryWaitEvents := []bool{}
+	opts.ObserveRetryWait = func(waiting bool) {
+		stateLock.Lock()
+		retryWaitEvents = append(retryWaitEvents, waiting)
+		stateLock.Unlock()
+	}
+	res, err := check(context.Background(), http.DefaultClient, dests, opts)
 	if err != nil {
 		t.Fatalf("check err = %v", err)
 	}
@@ -199,6 +257,10 @@ func TestLoadThatFailsTwiceThenPassesPasses(t *testing.T) {
 	}
 	stateLock.Lock()
 	defer stateLock.Unlock()
+	if len(retryWaitEvents) != 4 || !retryWaitEvents[0] || retryWaitEvents[1] ||
+		!retryWaitEvents[2] || retryWaitEvents[3] {
+		t.Errorf("retry wait edges = %v, want two balanced waits", retryWaitEvents)
+	}
 	for i, d := range sleeps {
 		if d <= 0 || retryDelayCapFactor*DefaultLoadRetryMeanInterval < d {
 			t.Errorf("wait %d = %s, want a positive draw no longer than the cap", i, d)

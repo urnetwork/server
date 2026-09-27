@@ -217,7 +217,7 @@ attempts:
 				}
 				delay = share
 			}
-			if err := self.opts.sleep(retryCtx, delay); err != nil {
+			if err := self.retryWait(retryCtx, delay); err != nil {
 				break attempts
 			}
 			if retryCtx.Err() != nil {
@@ -290,6 +290,15 @@ attempts:
 	result.LastFailure = lastFailure
 	result.NotMeasured = tunnelGone && !result.Ok
 	return result
+}
+
+func (self *run) retryWait(ctx context.Context, delay time.Duration) error {
+	if self.opts.ObserveRetryWait == nil {
+		return self.opts.sleep(ctx, delay)
+	}
+	self.opts.ObserveRetryWait(true)
+	defer self.opts.ObserveRetryWait(false)
+	return self.opts.sleep(ctx, delay)
 }
 
 // Runs every destination's retry chain concurrently under the run's

@@ -1866,6 +1866,10 @@ type Options struct {
 	// failed attempt and the next (exponential, capped at three times the
 	// mean). Zero or negative uses DefaultLoadRetryMeanInterval.
 	LoadRetryMeanInterval time.Duration
+	// Called immediately before and after a retry wait. Concurrent loads may
+	// call it concurrently; observers must not block or retain provider data.
+	// It describes waiting load attempts, not occupied worker count.
+	ObserveRetryWait func(waiting bool)
 
 	// Deprecated compatibility input. Never requested: only sampled URLs
 	// traverse the provider. Website quality does not imply exit-location evidence.

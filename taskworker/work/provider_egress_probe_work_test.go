@@ -409,6 +409,12 @@ func TestProviderEgressProbePassRunsBothSchedulesWithOnePinSnapshot(t *testing.T
 		},
 		runBlackhole: func(_ context.Context, providers []prober.Provider, options fleetprobe.BlackholeOptions) (fleetprobe.BlackholeSummary, error) {
 			recordEvent("blackhole-run")
+			if options.ObserveRetryWait == nil {
+				t.Error("blackhole retry wait is not observable")
+			} else {
+				options.ObserveRetryWait(true)
+				options.ObserveRetryWait(false)
+			}
 			if !slices.Equal(testProviderClientIds(providers), []string{"blackhole-1", "blackhole-2"}) {
 				t.Errorf("blackhole client ids = %v", testProviderClientIds(providers))
 			}

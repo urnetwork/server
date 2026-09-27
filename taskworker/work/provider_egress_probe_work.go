@@ -695,6 +695,13 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 	options.IpEchoTimeout = time.Duration(args.Blackhole.IpEchoTimeoutSeconds) * time.Second
 	options.LoadAttempts = args.LoadAttempts
 	options.LoadRetryMeanInterval = time.Duration(args.LoadRetryMeanIntervalSeconds) * time.Second
+	retryWaitObserver := options.ObserveRetryWait
+	options.ObserveRetryWait = func(waiting bool) {
+		egressProbeBlackholeRetryWait.observe(waiting)
+		if retryWaitObserver != nil {
+			retryWaitObserver(waiting)
+		}
+	}
 	options.TunnelRecreateAttempts = args.TunnelRecreateAttempts
 	options.Concurrency = concurrency
 	progress := egressProbeBlackholeProgress.begin(len(providers))

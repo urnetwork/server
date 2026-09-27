@@ -52,8 +52,10 @@ type BlackholeOptions struct {
 	IpEchoTimeout time.Duration
 	// Passed through to egresshealth.Options, like the two fields below;
 	// zero uses its defaults (3, 5 minutes, 2).
-	LoadAttempts           int
-	LoadRetryMeanInterval  time.Duration
+	LoadAttempts          int
+	LoadRetryMeanInterval time.Duration
+	// Concurrent load-level retry-wait edges; never contains a provider ID.
+	ObserveRetryWait       func(waiting bool)
 	TunnelRecreateAttempts int
 	// How many providers are checked at once. Zero uses
 	// DefaultBlackholeConcurrency.
@@ -227,6 +229,7 @@ func RunBlackhole(
 			ColdStartTimeout:       coldStartTimeout,
 			LoadAttempts:           options.LoadAttempts,
 			LoadRetryMeanInterval:  options.LoadRetryMeanInterval,
+			ObserveRetryWait:       options.ObserveRetryWait,
 			TunnelRecreateAttempts: options.TunnelRecreateAttempts,
 			Destinations:           pool.Destinations,
 			Profile:                profileOf(pool),
