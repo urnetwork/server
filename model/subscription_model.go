@@ -2825,6 +2825,16 @@ func allocateContractParticipantPayouts(
 	return
 }
 
+// Computes the floor mean of two non-negative reports without summing them.
+// Valid reports can each reach the full signed storage limit.
+func meanContractByteCount(first, second ByteCount) (ByteCount, error) {
+	if first < 0 || second < 0 {
+		return 0, fmt.Errorf("negative contract close byte count")
+	}
+	lower, upper := min(first, second), max(first, second)
+	return lower + (upper-lower)/2, nil
+}
+
 // Claims the outcome and debits consumed payer credit in one transaction.
 // Lock contract, balances (by id), then reservation revisions in that order.
 func settleEscrowInTx(
@@ -2870,7 +2880,7 @@ func settleEscrowInTx(
             `,
 			contractId,
 		)
-		netUsedTransferByteCount := ByteCount(0)
+		var partyByteCounts [2]ByteCount
 		partyCount := 0
 		checkpointCount := 0
 		server.WithPgResult(result, err, func() {
@@ -2890,7 +2900,9 @@ func settleEscrowInTx(
 				if checkpoint {
 					checkpointCount += 1
 				}
-				netUsedTransferByteCount += usedTransferByteCountForParty
+				if partyCount < len(partyByteCounts) {
+					partyByteCounts[partyCount] = usedTransferByteCountForParty
+				}
 				if party == ContractPartyDestination {
 					clockTransferByteCount = usedTransferByteCountForParty
 				}
@@ -2907,7 +2919,10 @@ func settleEscrowInTx(
 			returnErr = fmt.Errorf("Cannot settle contract with both parties checkpoint.")
 			return
 		}
-		usedTransferByteCount = netUsedTransferByteCount / ByteCount(partyCount)
+		usedTransferByteCount, returnErr = meanContractByteCount(partyByteCounts[0], partyByteCounts[1])
+		if returnErr != nil {
+			return
+		}
 	case ContractOutcomeDisputeResolvedToSource, ContractOutcomeDisputeResolvedToDestination:
 		var party ContractParty
 		switch outcome {
@@ -2958,6 +2973,10 @@ func settleEscrowInTx(
 		returnErr = fmt.Errorf("Unknown contract outcome: %s", outcome)
 		return
 	}
+	if usedTransferByteCount < 0 || clockTransferByteCount < 0 {
+		returnErr = fmt.Errorf("negative contract close byte count")
+		return
+	}
 
 	contractParticipants, originNetworkId, err := contractParticipantsInTx(ctx, tx, contractId)
 	if err != nil {
@@ -3006,6 +3025,10 @@ func settleEscrowInTx(
 				&startBalanceByteCount,
 				&netRevenue,
 			))
+			if escrowBalanceByteCount < 0 {
+				returnErr = fmt.Errorf("negative escrow byte count")
+				return
+			}
 
 			payoutByteCount := min(usedTransferByteCount-netSettledByteCount, escrowBalanceByteCount)
 			returnByteCount := escrowBalanceByteCount - payoutByteCount
@@ -3023,6 +3046,9 @@ func settleEscrowInTx(
 			// fmt.Printf("SETTLE %s %s: payout %d (%d nanocents) return %d\n", contractId.String(), balanceId.String(), payoutByteCount, payout, returnByteCount)
 		}
 	})
+	if returnErr != nil {
+		return
+	}
 
 	// if len(sweepPayouts) == 0 {
 	// 	returnErr = fmt.Errorf("Invalid contract.")

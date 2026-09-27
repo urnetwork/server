@@ -63,6 +63,14 @@ zero-byte anchors, positive-grant allocation, signed provider usage and explicit
 zero-credit legacy exclusions retain their semantics. No new migration is
 required; the catalog through 728 is unchanged.
 
+The bilateral settlement mean is computed without adding two signed byte
+counts. Two valid maximum-sized reports must not wrap negative and bypass the
+debit; excessive usage still rejects settlement without releasing its reserved
+credit. Negative reports consumed by ordinary or adjudicated settlement also
+fail before the terminal claim, including legacy rows without usage snapshots.
+Malformed negative escrow grants are rejected before cumulative settlement
+arithmetic; they cannot wrap an unpaid contract into a completed settlement.
+
 This removes reordered-post and stale-page corruption while the fence history
 is retained. PostgreSQL and Redis still do not form one transaction: a crash can
 leave the approximate display mirror behind until publication or reconciliation
