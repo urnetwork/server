@@ -59,10 +59,14 @@ func providerSelectionQuery(environment string, scope providerPickerScope) strin
 		}
 	}
 	metric := "urnetwork_findproviders2_selection_outcomes_total{" + selector + "}"
-	add("count", "increase("+metric+"[5m])")
-	add("count_time", "timestamp("+metric+")")
-	add("resets", "resets("+metric+"[5m])")
-	add("samples", "count_over_time("+metric+"[5m])")
+	// Lazy label partitions remain exported after traffic moves elsewhere.
+	// Keep response capacity for this window's positive evidence; process
+	// and schema witnesses above still establish every quiet slot's authority.
+	positive := "(increase(" + metric + "[5m]) > 0)"
+	add("count", positive)
+	add("count_time", "timestamp("+metric+") and "+positive)
+	add("resets", "resets("+metric+"[5m]) and "+positive)
+	add("samples", "count_over_time("+metric+"[5m]) and "+positive)
 	return strings.Join(parts, " or ")
 }
 

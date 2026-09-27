@@ -5416,6 +5416,12 @@ exact API host/block/instance and unchanged process start across a five-minute
 window against configured API placement (maximum 32 slots), requires schema 1
 at both ends, source timestamps within 90 seconds, and nonreset observed counter
 partitions with at least two samples. No production SQL or Redis reads occur.
+Only positive five-minute outcome cohorts and their timestamp/reset/sample
+witnesses enter the response; lifetime-retained quiet counter labels cannot
+consume its row budget. Process/schema witnesses remain unfiltered for every
+configured slot, including fully quiet processes. Quiet complete authority is
+not positive request traffic or proof of target-level supply; the lazy first
+event can still be unobserved by a counter increase.
 
 - `provider-selection-empty-despite-eligible` **PAGE**: at least 3 completed
   zero responses in five minutes with positive discovery count, known rank and

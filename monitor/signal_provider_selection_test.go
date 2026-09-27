@@ -176,3 +176,33 @@ func TestProviderSelectionSignalCancellation(t *testing.T) {
 		t.Fatalf("cancellation returned %v", err)
 	}
 }
+
+// Quiet lazy counters otherwise accumulate for a process lifetime and exhaust
+// the bounded source response. Filter every outcome witness, never authority.
+func TestProviderSelectionQueryDropsQuietOutcomesKeepsAuthority(t *testing.T) {
+	scope := providerPickerScope{hosts: []string{"api-synthetic"}, blocks: []string{"blue"}}
+	query := providerSelectionQuery("synthetic", scope)
+	seen := map[string]bool{}
+	for _, part := range strings.Split(query, " or ") {
+		for _, field := range []string{"count", "count_time", "resets", "samples", "now_start", "now_start_time", "prior_start", "prior_start_time", "now_schema", "now_schema_time", "prior_schema", "prior_schema_time"} {
+			if !strings.Contains(part, `,"monitor_selection","`+field+`",`) {
+				continue
+			}
+			seen[field] = true
+			wantPositive := field == "count" || field == "count_time" || field == "resets" || field == "samples"
+			if gotPositive := strings.Contains(part, "[5m]) > 0"); gotPositive != wantPositive {
+				t.Errorf("%s positive-cohort filter=%t, want %t", field, gotPositive, wantPositive)
+			}
+		}
+	}
+	if len(seen) != 12 {
+		t.Fatalf("query carries %d witness fields, want 12", len(seen))
+	}
+	// A fully quiet process still has its complete authority window. It does
+	// not create a visibility warning or certify target-level supply.
+	rows := selectionTestRows("returned", 0)[:8]
+	alerts, err := NewProviderSelectionSignal().Run(context.Background(), selectionTestSettings(t, pickerTestPayload(t, rows)))
+	if err != nil || len(alerts) != 0 {
+		t.Fatalf("quiet complete authority became unavailable: alerts=%d err=%v", len(alerts), err)
+	}
+}
