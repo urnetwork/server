@@ -5193,6 +5193,20 @@ do not infer scarcity or suppress it merely because a cap is possible. The
 current Connect Go request type does not expose ForceCount, so this server-side
 possibility is not evidence that standard SDK callers used it.
 
+Refill qualifier: the standard client's window enumerator excludes its existing
+healthy destinations through `ExcludeDestinations` when seeking additional
+providers. Runtime reliability/app removals and constructor policy use
+`ExcludeClientIds`. A zero or small refill answer can coexist with a working
+window. The 2026-09-27 13:58 UTC schema-1 observation classified about 72.5
+any-family location zeroes as `filtered_explicit`, but could not distinguish
+these fields or nonempty response sizes. That observation does not establish
+healthy windows. Schema 2 in §2.9c records finite small-result boundaries and
+the exclusion field that actually removed sampled candidates; neither field
+is trusted evidence of client health. The API cannot distinguish durable policy
+from runtime removals within `ExcludeClientIds`, or join this target-kind metric
+to a caller-country cohort. These explanations never suppress this section's
+independent PAGE or provisional WARN.
+
 `caller_country=us` identifies the caller, not the requested/provider country;
 `location` combines different targets and can coexist with explicit ClientId
 specs. `ip_family=any` combines the empty and v4-capable request filters
@@ -5427,7 +5441,7 @@ does not establish supply for the selected target. The roughly four-percent
 location zero tail observed during the 2026-09-27 incident remains unattributed
 until matching current-generation request-local evidence is available.
 
-The API exports `urnetwork_findproviders2_selection_schema_version=1` even
+The API exports `urnetwork_findproviders2_selection_schema_version=2` even
 without traffic, plus `urnetwork_findproviders2_selection_outcomes_total` once
 per model invocation, including errors/cancellation. The old
 `urnetwork_findproviders2_outcomes_total` schema and eligibility behavior are
@@ -5451,7 +5465,7 @@ directory is unknown until the existing read resolves it, never guessed
 city/country. Adding the type field to
 the existing directory read introduces no additional request-time query.
 
-Completed reasons are `returned`, `intentional_zero`, `no_specs`,
+Schema-1 completed reasons are `returned`, `intentional_zero`, `no_specs`,
 `direct_excluded`, `unresolved_target`, `backfill_unavailable`, `cache_page_gap`,
 `cache_missing`, `cache_empty`, `unsupported_rank`, `eligible_not_selected`,
 `filtered_hard`, `filtered_network`, `filtered_family`, `filtered_explicit`,
@@ -5461,9 +5475,43 @@ requires a positive page-count entry whose requested page is absent.
 `cache_missing` means requested target metadata was absent, not that a writer
 failed or the location has no real providers. `cache_empty` describes only the
 loaded target cache. Filters describe the sampled candidates from both modes,
-not unique fleet supply. Successful nonempty results retain `returned` even if
+not unique fleet supply. Schema-1 nonempty results retain `returned` even if
 an optional secondary read failed; existing cache-read error metrics remain
 the independent partial-read control.
+
+Schema 2 retains the same six labels and unchanged selection behavior. Positive
+responses use `returned_3_9`, `returned_10_plus`, or one of these finite reasons
+for a one-to-two-entry response, in priority order:
+
+- `returned_small_direct` / `returned_small_mixed_direct`: explicit-ID entries
+  supply some or all of the result, so its size cannot measure discovery supply;
+- `returned_small_requested`: discovery fulfilled its actual count limit;
+  `request_class` retains forced one-to-two intent versus the normal >=20 count;
+- `returned_small_cache_unknown`: a target/page was missing or optional
+  backfill could not be read;
+- `returned_small_eligible`: more distinct already-filtered candidates remain
+  than discovery returned; this is diagnostic evidence, not a new PAGE rule;
+- `returned_small_filtered_hard`, `returned_small_filtered_network`,
+  `returned_small_filtered_family`, `returned_small_filtered_client_ids`,
+  `returned_small_filtered_destinations`,
+  `returned_small_filtered_explicit_mixed`, or
+  `returned_small_filtered_mixed`: those actual removals contributed to the
+  sampled shortfall. `returned_small_filtered_explicit` conservatively retains
+  unknown explicit-field attribution;
+- `returned_small_sample`: the response exhausted the distinct eligible sampled
+  union without an observed filter contribution or missing-cache boundary.
+
+For zeroes, schema 2 splits `filtered_explicit` into `filtered_client_ids`,
+`filtered_destinations`, and `filtered_explicit_mixed` when actual removals
+establish the source. An ID excluded by both fields stays mixed; a field that
+removed no candidate gets no causal credit. The two mode samples are deduplicated
+in memory for the eligibility comparison. No extra storage reads, count-valued
+labels, metric families, country labels, or target/provider/client/network IDs
+are added. Counts describe sampled candidates, not complete target supply, and
+filters establish a contribution rather than the sole cause or number removed.
+Missing cache evidence takes precedence over filter attribution. Destination-tail
+exclusions are compatible with healthy-window refills but do not prove health;
+client-ID exclusions combine runtime removals and durable policy.
 
 `urnetwork_findproviders2_stage_inflight{stage}` and
 `urnetwork_findproviders2_stage_seconds{stage}` retain fixed stages `validate`,
@@ -5477,7 +5525,8 @@ successful provider route.
 The registered read-only probe queries Mimir once per minute through an enabled
 services gateway, bounded to 15 seconds, 4 MiB and 8,192 rows. It privately joins
 exact API host/block/instance and unchanged process start across a five-minute
-window against configured API placement (maximum 32 slots), requires schema 1
+window against configured API placement (maximum 32 slots), requires an unchanged
+supported schema (1 or 2)
 at both ends, source timestamps within 90 seconds, and nonreset observed counter
 partitions with at least two samples. No production SQL or Redis reads occur.
 Only positive five-minute outcome cohorts and their timestamp/reset/sample
@@ -5500,6 +5549,15 @@ event can still be unobserved by a counter increase.
   healthy zero. A valid observed-subset invariant finding is retained alongside
   incomplete fleet visibility.
 
+The original zero invariants remain observable during mixed schema-1/schema-2
+rollouts. Complete response-shape attribution requires schema 2 at both ends of
+the window in every configured slot. A complete legacy/mixed fleet retains
+`provider-selection-unavailable` with `frame=response-shape` and
+`reason=incomplete-shape-schema-window`, alongside any proven legacy invariant.
+A changed/future schema or a reason incompatible with its schema stays unknown;
+old `returned` never means ten-plus. Small-result observations add no generic
+scarcity rule and do not clear or suppress §2.9a.
+
 Intentional zero-count and ForceMinimum cohorts do not enter those thresholds.
 Other zero reasons are diagnostic evidence, not new generic zero-tail alerts:
 a lower scarcity threshold still requires the request-intent and pre-incident
@@ -5521,8 +5579,9 @@ complete per-provider causal trace; multiple missing and filtered boundaries
 may coexist. Source-generation checks do not prove every intervening scrape
 was retained. Route failures after selection remain outside this signal.
 
-Build/deploy the API containing schema-1 selection diagnostics before trusting
-this attribution; Taskworker-only deployment does not update the emitting API.
+Build/deploy the API containing schema-2 diagnostics before trusting small-result
+and exclusion-source attribution; schema 1 retains only the older zero boundary.
+Taskworker-only deployment does not update the emitting API.
 No migration or cache clearing is required. Keep old directory entries readable
 and wait for natural cache refresh for finer target types. Recovery requires
 two complete post-convergence five-minute windows without the matching internal
@@ -7270,20 +7329,43 @@ capacity or explain the location-specific FindProviders2 regression.
 
 Cheap due-read resilience (source checkpoint 2026-09-27; requires a new
 Taskworker artifact): initial selection and both successor paths retry only
-typed transport timeouts, at most three reads, with the existing 30-second
+typed transport timeouts or explicit due-list HTTP 503, at most three reads, with the existing 30-second
 operator deadline per read and 250–500 ms jitter between attempts. The task or
 earlier admission deadline wins; a stopped admission never starts another
 read. This is a read-only selection retry, not a new task claim, provider
 probe, or publication retry. Authentication, unsupported endpoint, rejected
-status, decode, cancellation and unknown errors are not retried. HTTP 429/5xx
-currently share `rejected` with other non-success statuses, so this narrow
-policy does not recover those errors or distinguish their causes.
-`urnetwork_egress_probe_blackhole_due_read_attempts_total{result}` has eight
+status other than 503, decode, cancellation and unknown errors are not retried.
+HTTP 429 and other 5xx responses remain `rejected`; 503 is the separate
+`unavailable` read class. This does not authorize retrying a result submission
+whose write may already have committed.
+`urnetwork_egress_probe_blackhole_due_read_attempts_total{result}` has nine
 preinitialized classes: `ok`, `timeout`, `canceled`, `unauthorized`,
-`unsupported`, `rejected`, `decode`, `error_or_unknown`. It counts returned
+`unsupported`, `rejected`, `unavailable`, `decode`, `error_or_unknown`. It counts returned
 read attempts, including retries, not providers or measured checks. An owning
-task/admission deadline is `canceled`; only a live owner's transport timeout
-is retryable. A read stopped before it starts emits no event.
+task/admission deadline is `canceled`; only a live owner's transport timeout or
+explicit due-list 503 is retryable. A read stopped before it starts emits no event.
+
+Internal deadline response correction (2026-09-27 source checkpoint; rebuild
+API and Taskworker): the due model's 25-second child budget can end while its
+30-second HTTP caller is still live. Database cleanup raises the standard
+Done sentinel, which the router formerly consumed without a status/body; Go
+then returned an implicit empty 200. The real router/ingest regression observes
+JSON EOF, classified as a permanent `decode`, and a stopped cheap admission
+lane while independent Full work can continue. The router now responds with a
+generic 503 before response commitment, preserves canceled/hijacked ownership,
+and aborts an already committed stream without appending an error under its old
+status. Only the read endpoint marks 503 retryable, within the existing three
+attempts, jitter, and owner deadline. Malformed or empty 200, other statuses,
+authorization failures, and publication errors keep their earlier semantics.
+The synthetic deadline/healthy control proves this mechanism; a live decode
+counter alone cannot distinguish empty 200, malformed JSON, and a truncated
+transport. A source-matched Main window at 14:04 UTC had one active owner with
+a prior decode/error decision, no new worker starts for about ten minutes,
+112 cheap checks still running and 128 Full workers, but no response body or
+same-request SQL error was retained. Attribute that live subtype as unverified.
+Verify new API status outcomes, Taskworker `unavailable`/retry progress, and
+continued bounded Full ownership before attributing restored admission. Lower
+decode counts or successful retries do not establish measured fleet coverage.
 
 A failed initial cheap due read can leave a claimed shard running Full only
 until that independent lane finishes. Distinguish this from missing shard
@@ -7418,6 +7500,24 @@ Whole-pass `pass_providers_total` and `pass_not_measured_total` may remain zero
 or absent while independent cohorts are running/early-publishing; this does
 not establish a zero failure or zero conversion-loss rate. These diagnostics
 change neither guard thresholds nor publication, retry, credit or dark rules.
+
+At 2026-09-27 14:04 UTC, complete 78-cell, reset-free process windows were
+available for eight of ten configured Taskworker host/block slots. Across the
+visible source windows of about 589 seconds, 2,300 cheap completions comprised
+1,662 passing, 637 ordinary negative and one originally unmeasured result;
+1,583 passing payload rows and one unknown row were acknowledged, with no
+publication error or cancellation. Those are event counts across different
+cohort boundaries, not a distinct-provider funnel. Process-lifetime negative
+dispositions were 12,394 `dark_guard`, 46 `guard_eligible` and 644 still pending:
+the guard, rather than originally unmeasured work or failed publication, was
+the observed conversion loss. It remains required safety behavior, not the
+upstream cause. A separate capped 1,000-row negative-check log sample from
+13:41–13:52 UTC had 2,602 of 3,000 final loads in `dial_dns`, after all three
+spaced attempts. That earlier, completion-biased, three-slot sample cannot
+establish fleet failure rate or blame DNS infrastructure: use same-tunnel DNS
+wave/path counters and control-plane/registration controls. Missing process
+slots and differing completion, check-start, and update clocks keep fleet
+attribution incomplete; do not weaken the guard from these aggregates.
 
 The provider-egress pipeline now runs as recurring `pending_task` shards rather
 than as host-owned edge services. Generic task health (§1.2/§8.9) can detect a
