@@ -1116,23 +1116,23 @@ func (self *CoreStClient) observeTransactionAttempts(
 		cancel()
 		if errors.Is(err, ethereum.NotFound) {
 			if attempt.InclusionBlock != nil && attempt.InclusionHash != nil {
-				orphanErr := fmt.Errorf("st: receipt %s disappeared before finality", attempt.TxHash)
+				orphanErr := &stOrphanedTransactionReceiptError{message: fmt.Sprintf("st: receipt %s disappeared before finality", attempt.TxHash)}
 				model.MarkStTransactionOrphaned(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
 					*attempt.InclusionBlock, *attempt.InclusionHash, orphanErr)
 				attempt.Status = model.StTxUncertain
 				attempt.InclusionBlock, attempt.InclusionHash = nil, nil
-				lastErr = orphanErr
+				lastErr = errors.Join(lastErr, orphanErr)
 			}
 			continue
 		}
 		if err != nil {
-			lastErr = err
+			lastErr = errors.Join(lastErr, err)
 			continue
 		}
 		// An RPC receipt lookup does not authenticate the returned transaction
 		// hash. Refuse malformed/transplanted observations before durable writes.
 		if receipt == nil || receipt.TxHash != hash || receipt.BlockHash == (common.Hash{}) || receipt.BlockNumber == nil || !receipt.BlockNumber.IsInt64() || receipt.BlockNumber.Sign() <= 0 {
-			lastErr = fmt.Errorf("st: receipt response differs from requested transaction %s or has an invalid inclusion block", attempt.TxHash)
+			lastErr = errors.Join(lastErr, fmt.Errorf("st: receipt response differs from requested transaction %s or has an invalid inclusion block", attempt.TxHash))
 			continue
 		}
 		model.MarkStTransactionMined(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
@@ -1143,12 +1143,12 @@ func (self *CoreStClient) observeTransactionAttempts(
 		finalized, err := self.finalizedBlock(ctx)
 		if err != nil {
 			receiptPending = true
-			lastErr = err
+			lastErr = errors.Join(lastErr, err)
 			continue
 		}
 		if finalized.Number > math.MaxInt64 {
 			receiptPending = true
-			lastErr = errors.New("st: finalized transaction boundary exceeds postgres bigint")
+			lastErr = errors.Join(lastErr, errors.New("st: finalized transaction boundary exceeds postgres bigint"))
 			continue
 		}
 		if finalized.Number < receipt.BlockNumber.Uint64() {
@@ -1161,16 +1161,16 @@ func (self *CoreStClient) observeTransactionAttempts(
 		cancel()
 		if err != nil {
 			receiptPending = true
-			lastErr = err
+			lastErr = errors.Join(lastErr, err)
 			continue
 		}
 		if canonical.Hash != [32]byte(receipt.BlockHash) {
-			err = fmt.Errorf("st: receipt %s was orphaned before finality", attempt.TxHash)
+			err = &stOrphanedTransactionReceiptError{message: fmt.Sprintf("st: receipt %s was orphaned before finality", attempt.TxHash)}
 			model.MarkStTransactionOrphaned(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
 				receipt.BlockNumber.Uint64(), strings.ToLower(receipt.BlockHash.Hex()), err)
 			attempt.Status = model.StTxUncertain
 			attempt.InclusionBlock, attempt.InclusionHash = nil, nil
-			lastErr = err
+			lastErr = errors.Join(lastErr, err)
 			continue
 		}
 		finalizedHash := strings.ToLower(common.BytesToHash(finalized.Hash[:]).Hex())
@@ -1226,14 +1226,12 @@ func (self *CoreStClient) waitFinalizedAttempt(
 		current := attempts[0]
 		// A failed receipt census says nothing about the existing signatures.
 		// Only complete absence can grant a bounded fee replacement.
-		if err == nil && ctx.Err() == nil && !receiptPending && current.Attempt < stTxMaxAttempts && time.Now().After(current.CreateTime.Add(stTxReplacementDelay)) {
+		if stTransactionReceiptCensusComplete(err) && ctx.Err() == nil && !receiptPending && current.Attempt < stTxMaxAttempts && time.Now().After(current.CreateTime.Add(stTxReplacementDelay)) {
 			return current.TxHash, errStReplaceTransaction
 		}
 		select {
 		case <-ctx.Done():
-			if lastErr == nil {
-				lastErr = ctx.Err()
-			}
+			lastErr = errors.Join(lastErr, ctx.Err())
 			model.MarkStTransactionUncertain(context.WithoutCancel(ctx), intent.IntentId, current.Attempt, lastErr)
 			return current.TxHash, fmt.Errorf("st: transaction %s finality uncertain: %w", current.TxHash, lastErr)
 		case <-ticker.C:
@@ -1401,7 +1399,7 @@ func (self *CoreStClient) reconcileAccountIntents(
 			}
 			// An advanced nonce cannot identify the winner of an incomplete
 			// receipt census. Keep every attempt discoverable for the next turn.
-			if observeErr != nil {
+			if !stTransactionReceiptCensusComplete(observeErr) {
 				return fmt.Errorf("st: reconcile retained attempts for nonce %d: %w", intent.Nonce, observeErr)
 			}
 			if receiptPending {

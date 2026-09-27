@@ -225,6 +225,56 @@ func TestStAccountRecoveryMalformedReceiptRetainsEverySignedCandidate(t *testing
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) { checkStRecoveryReadFailure(tb, "identity") })
 }
 
+// A proved orphan can precede or follow a failed read. Neither scan order may
+// erase that failure and remove all candidate signatures from later recovery.
+func TestStAccountRecoveryReadErrorBesideOrphanRetainsCandidates(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		ctx := context.Background()
+		for _, fault := range []string{"transport", "identity"} {
+			for _, winner := range []int{0, 2} {
+				client, rpcClient, intent, fixture := newStRecoveryReadFixture(tb, 3, winner, 3, fault)
+				attempts := model.GetStTransactionAttempts(ctx, intent.IntentId)
+				// Newest-first order places the opposite end before/after the error.
+				orphan := attempts[winner]
+				model.MarkStTransactionMined(ctx, intent.IntentId, orphan.Attempt, orphan.TxHash, 98, stTransactionReconcileBlockHash(98).Hex())
+				from := common.HexToAddress(intent.FromAddress)
+				err := client.reconcileAccountIntents(ctx, rpcClient, nil, from)
+				wantError := "synthetic receipt storage temporarily unavailable"
+				if fault == "identity" {
+					wantError = "receipt response differs"
+				}
+				retained := model.GetStTransactionIntent(ctx, intent.LogicalKey)
+				pending := model.GetUnresolvedStTransactionIntents(ctx, intent.ChainId, intent.GenesisHash, intent.FromAddress)
+				if err == nil || !strings.Contains(err.Error(), wantError) || !strings.Contains(err.Error(), "disappeared before finality") || retained.Status != model.StTxUncertain || len(pending) != 1 {
+					tb.Fatalf("orphan hid failed read: fault=%s winner=%d status=%s pending=%d error=%v", fault, winner, retained.Status, len(pending), err)
+				}
+				after := model.GetStTransactionAttempts(ctx, intent.IntentId)
+				if len(after) != 3 || after[winner].InclusionBlock != nil || after[winner].InclusionHash != nil {
+					tb.Fatal("proven orphan was not retained without its stale inclusion")
+				}
+				for index := range attempts {
+					if !reflect.DeepEqual(after[index].RawTransaction, attempts[index].RawTransaction) || after[index].TxHash != attempts[index].TxHash {
+						tb.Fatal("mixed observation rewrote a retained signature")
+					}
+				}
+				fixture.stateLock.Lock()
+				if fixture.nonceReads != 0 || fixture.writeCalls != 0 || len(fixture.receiptKVs) != 3 {
+					tb.Errorf("mixed census fell through: nonce=%d writes=%d receipts=%d", fixture.nonceReads, fixture.writeCalls, len(fixture.receiptKVs))
+				}
+				fixture.phase = 1
+				fixture.stateLock.Unlock()
+				if err := client.reconcileAccountIntents(ctx, rpcClient, nil, from); err != nil {
+					tb.Fatal(err)
+				}
+				final := model.GetStTransactionIntent(ctx, intent.LogicalKey)
+				if final.CurrentTxHash == nil || *final.CurrentTxHash != fixture.winner.TxHash.Hex() || (final.Status != model.StTxFinalized && final.Status != model.StTxCanceled) {
+					tb.Fatal("mixed observation prevented later exact recovery")
+				}
+			}
+		}
+	})
+}
+
 // An eligible replacement age cannot turn a canceled receipt read into new
 // signing authority. No wall-clock wait is needed to force the old branch.
 func TestStReplacementWaitReadErrorCannotAuthorizeReplacement(t *testing.T) {
