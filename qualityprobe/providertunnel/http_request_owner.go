@@ -13,7 +13,8 @@ import (
 // Each RoundTrip creates an independent owner; no cross-request budget or lock.
 type providerHttpTransport struct {
 	*http.Transport
-	registration *providerRegistrationState
+	registration        *providerRegistrationState
+	contractAcquisition interface{ ProviderContractAcquisitionUnavailable() bool }
 }
 
 // This monotonic proof is deliberately separate from error chains, which
@@ -21,6 +22,12 @@ type providerHttpTransport struct {
 // setup, generic peer failures, and every tunnel that ever registered a client.
 func (self *providerHttpTransport) ProviderMeasurementUnavailable() bool {
 	return self != nil && self.registration.unavailable()
+}
+
+// Preserve the exact owner-scoped no-contact proof when net/http replaces a
+// dial error with its own timeout. Successful registration alone is insufficient.
+func (self *providerHttpTransport) ProviderContractAcquisitionUnavailable() bool {
+	return self != nil && self.contractAcquisition != nil && self.contractAcquisition.ProviderContractAcquisitionUnavailable()
 }
 
 type providerHttpRequestKey struct{}

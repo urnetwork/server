@@ -7445,6 +7445,22 @@ registration failure is observed only after the request completes can remain
 unclassified; no historical monitor reason
 is substituted. Full runs with no measured loads publish no quality score.
 
+Initial contract-acquisition correction (source checkpoint 2026-09-27; also
+attest Connect): the initial ping budget includes local contract acquisition.
+A ping deadline, no-contract callback, or pass cap spent in an actual contract
+wait **before any provider-directed writer invocation** is platform evidence,
+not provider-unresponsive evidence. Candidate retirement snapshots this proof
+before cancellation releases the wait. The private probe transport retains it
+as `local_contract_acquisition` / `not_measured`, including when HTTP replaces
+the dial error with its own timeout. Bootstrap control traffic does not count
+as provider contact. Any attempted provider write, even one returning an error,
+permanently disables the shortcut for that private multi-client; retiring or
+replacing its candidate cannot erase that fact. Generic DNS timeouts and monitor
+verdicts alone still do not qualify. Caller cancellation is not a new failure;
+real provider ping timeouts, TCP/HTTP/TLS evidence, confinement, retries,
+admission budgets and dark guards retain their existing semantics. This fixes
+false attribution, not contract-service capacity or proof of restored coverage.
+
 The cheap `completed_buffered` gauge retains a result until its cohort joins
 even when that safe result has already been early-acknowledged. It is not an
 unsubmitted-provider count. Early publication flushes groups of 16 passing,
