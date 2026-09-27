@@ -4013,18 +4013,60 @@ export from one correlated duration.
 Probe: `open-contracts`
 
 ```sql
-SELECT count(*) FROM transfer_contract WHERE open = true;
--- walks only the open partial index; seconds even under load
+WITH bounded_open AS MATERIALIZED (
+  SELECT create_time
+  FROM transfer_contract
+  WHERE open = true
+  ORDER BY create_time
+  LIMIT 250001
+)
+SELECT count(*),
+       count(*) FILTER (WHERE create_time < now() - interval '5 minutes'),
+       count(*) FILTER (WHERE create_time < now() - interval '30 minutes')
+FROM bounded_open;
 ```
 
 The automated probe reads total, older-than-five-minute and older-than-30-minute
-counts as exactly one three-column aggregate row. Successful-empty, short or
-extra-row/column responses are `cannot-observe` with
+counts from one oldest-first scan capped at 250,001 visible rows, using the
+existing `transfer_contract_open_partial_create_time` covering index. Below
+that cap the scan exhausted the population and all three counts are exact.
+At the cap each displayed count is explicitly a **lower bound**, not an exact
+count; `exact=false`, `trend=unknown`, and `scan_cap=250001` accompany `>=`
+values. This preserves the exact threshold and trend behavior below the cap
+without repeatedly scanning tens of millions of rows during an incident.
+There is no automatic unbounded count fallback. The normal read-only transport's
+30-second statement timeout still bounds a slow scan: a row cap limits visible
+rows, not dead-index traversal, heap visibility checks, or wall-clock cost.
+
+The source must return exactly one three-column aggregate row. Successful-empty,
+short or extra-row/column responses, non-integer or negative counts, a total
+above the cap, or age buckets not ordered `older_30m <= older_5m <= total`
+are `cannot-observe` with
 `observation-invalid-response`; they must not initialize or overwrite the
 previous valid count. A valid all-zero row remains an observed empty open set,
 not unknown. The next valid sample compares with the last valid count, or
 retains warmup if none existed; the threshold, five-minute cadence and
 three-observation sustain below are unchanged.
+
+A successful capped observation warns on the same `open-set-size` identity and
+three-observation sustain: the high lower bound is known, while its trend is
+unknown. Equal consecutive capped values are not a flat count or recovery and
+must never emit healthy. The cap breaks the adjacent exact trend pair without
+overwriting the last exact value; the first later exact observation starts
+warmup, and subsequent exact flat/falling observations restore the existing
+trend-based recovery semantics. Do not compare that first recovery count with
+a stale pre-cap count and mislabel a decline from an unknown peak as growth.
+
+The false-positive qualifier is explicit: a large but already-draining set can
+remain above the cap, so this warning does not claim growth or a failed closer.
+The false-negative qualifier is that capped samples cannot measure backlog
+size, drain rate, or matched-cohort age changes. Published age buckets are
+deliberately conservative bounds in capped mode; a zero age-bucket lower bound
+is not a recovery measurement.
+Timeout, malformed evidence, and missing visibility are unknown, not healthy.
+Use closer outcomes, complete task errors, and bounded vacuum/progress evidence
+while counts are censored; do not run an unbounded count on the hot primary to
+fill that visibility gap.
 
 The generated `open` predicate is `dispute=false AND outcome IS NULL`, so
 this count excludes disputed nonfinal contracts and is not a census of
@@ -4049,11 +4091,15 @@ An unavailable summary or a nearby panic timestamp cannot establish that join.
   bigger open set → slower pair queries → slower closes). 700k at the
   2026-07-17 peak. Observed drain after the fix: ~440k closed in 8 min, so a
   high reading self-heals fast once close runs are healthy — alert on
-  sustained rise, not a spot value during recovery.
-- Trend evidence is the immediately preceding five-minute sample. On monitor
+  sustained rise, not a spot value during recovery, while exact counts remain
+  available. Above the scan cap the sustained warning instead states the high
+  lower bound and unknown trend; it cannot distinguish ongoing growth from a
+  large draining set.
+- For exact counts, trend evidence is the immediately preceding valid exact
+  sample, provided no capped observation broke the pair. On monitor
   startup, a high one-shot diagnostic says the trend is warming up rather than
   claiming growth. The continuous loop requires three high/rising ticks (ten
-  minutes from the first observation); any flat or falling tick resets the
+  minutes from the first observation); any exact flat or falling tick resets the
   streak. Do not default `rising` true while a longer baseline warms up. The
   2026-08-30 hardening was prompted by a 212,497 alert whose persisted samples
   later confirmed that this instance really was rising: 90,328, 91,679,
@@ -13420,7 +13466,7 @@ Tier-1 (warn):
 | zombie-tx | pg | idle-in-tx xact age | > 30 min |
 | dead-tuples | pg | n_dead_tup hot tables | > 10M |
 | replica-cover | redis | CLUSTER NODES slave count | < expected |
-| open-set-size | pg | 2.6 open-contract count | > 150k sustained 10 min |
+| open-set-size | pg | 2.6 exact open-contract count below scan cap; explicit lower bounds at cap | exact > 150k high/rising, or capped >= 250001 with unknown trend; 3 ticks / 10 min |
 | close-duration-overrun | task logs+pg | 2.6a live heartbeat or completed CloseExpiredContracts duration | >= 120s; retain completed precursor 45 min |
 | reboot-task-collision | host journal+pg | 2.13 fresh non-terminal task heartbeat at previous-boot boundary | >= 120s during a boot in the last 20 min |
 | journal-buffer-config / journal-buffer-short / journal-buffer-file-headroom | host | §8.5b effective journald/loaded age-vacuum policy, bounded near-hour entry, and privacy-reduced active-machine journal-file census | any policy drift for 2 probes; no record at or before the 50-minute cutoff after 70 minutes host/journald uptime for 2 probes; or current/projected one-hour files use >25% of `SystemMaxFiles` for 2 probes; counts do not identify the rotation cause |

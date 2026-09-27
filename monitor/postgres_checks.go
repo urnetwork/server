@@ -13,24 +13,29 @@ import (
 )
 
 // pgOpenSetProbe is SIGNALS.md 2.6: the open-contract set size, the
-// close-backlog canary and the fuel of the 5.8 feedback loop.
+// close-backlog canary and the fuel of the 5.8 feedback loop. Counts below
+// the scan cap are exact; a cap hit is censored and cannot establish a trend.
 type pgOpenSetProbe struct {
-	lock        sync.Mutex
+	stateLock   sync.Mutex
 	initialized bool
 	lastCount   int
 }
+
+const pgOpenSetScanCap = 250_001
 
 func (self *pgOpenSetProbe) id() string             { return "pg/open-set-size" }
 func (self *pgOpenSetProbe) tier() string           { return tierWarn }
 func (self *pgOpenSetProbe) cadence() time.Duration { return 5 * time.Minute }
 
-// observe returns the immediately preceding sample. A process-local adjacent
-// sample is the only evidence needed for "rising"; defaulting that predicate
-// true while a longer trailing baseline warmed up made every monitor restart
-// mislabel a high-but-draining recovery set as growth.
-func (self *pgOpenSetProbe) observe(openCount int) (previous int, ready bool) {
-	self.lock.Lock()
-	defer self.lock.Unlock()
+// An exact adjacent pair establishes a trend. A censored observation breaks
+// that pair without substituting its lower bound for the last exact count.
+func (self *pgOpenSetProbe) observe(openCount int, exact bool) (previous int, ready bool) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if !exact {
+		self.initialized = false
+		return 0, false
+	}
 	if !self.initialized {
 		self.initialized = true
 		self.lastCount = openCount
@@ -46,46 +51,69 @@ func (self *pgOpenSetProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	if h := env.cfg.hostByRole("pg-primary"); h != nil {
 		target = h.name
 	}
-	rows, err := env.runner.pg(ctx, `
+	rows, err := env.runner.pg(ctx, fmt.Sprintf(`
+		WITH bounded_open AS MATERIALIZED (
+			SELECT create_time
+			FROM transfer_contract
+			WHERE open = true
+			ORDER BY create_time
+			LIMIT %d
+		)
 		SELECT count(*),
 		       count(*) FILTER (WHERE create_time < now() - interval '5 minutes'),
 		       count(*) FILTER (WHERE create_time < now() - interval '30 minutes')
-		FROM transfer_contract
-		WHERE open = true;
-	`)
+		FROM bounded_open;
+	`, pgOpenSetScanCap))
 	if err != nil {
 		return nil, err
 	}
-	row, err := pgAggregateRow(rows, 3)
+	counts, err := pgAggregateIntegers(rows, 3)
 	if err != nil {
 		return nil, err
 	}
-	openCount := atoiRow(row, 0)
-	olderFiveMinutes := atoiRow(row, 1)
-	olderThirtyMinutes := atoiRow(row, 2)
+	if counts[0] > pgOpenSetScanCap || counts[1] > counts[0] || counts[2] > counts[1] {
+		return nil, fmt.Errorf("invalid response for bounded PostgreSQL open-set aggregate")
+	}
+	openCount := int(counts[0])
+	olderFiveMinutes := int(counts[1])
+	olderThirtyMinutes := int(counts[2])
+	exact := openCount < pgOpenSetScanCap
 
-	previous, trendReady := self.observe(openCount)
+	previous, trendReady := self.observe(openCount, exact)
 	rising := trendReady && previous < openCount
-	if openCount > 150_000 && (!trendReady || rising) {
+	if openCount > 150_000 && (!exact || !trendReady || rising) {
 		symptom := fmt.Sprintf("open-contract set = %d above threshold; trend is warming up", openCount)
-		observed := fmt.Sprintf("open_contracts=%d previous=unavailable older_5m=%d older_30m=%d", openCount, olderFiveMinutes, olderThirtyMinutes)
+		observed := fmt.Sprintf("open_contracts=%d previous=unavailable older_5m=%d older_30m=%d exact=true", openCount, olderFiveMinutes, olderThirtyMinutes)
+		evidence := fmt.Sprintf("open age buckets: total=%d older_5m=%d older_30m=%d exact=true", openCount, olderFiveMinutes, olderThirtyMinutes)
 		if trendReady {
 			symptom = fmt.Sprintf("open-contract set = %d and rising (previous %d)", openCount, previous)
-			observed = fmt.Sprintf("open_contracts=%d previous_open_contracts=%d delta=%d older_5m=%d older_30m=%d", openCount, previous, openCount-previous, olderFiveMinutes, olderThirtyMinutes)
+			observed = fmt.Sprintf("open_contracts=%d previous_open_contracts=%d delta=%d older_5m=%d older_30m=%d exact=true", openCount, previous, openCount-previous, olderFiveMinutes, olderThirtyMinutes)
 		}
-		return []finding{{
+		if !exact {
+			symptom = fmt.Sprintf("open-contract set is at least %d; above threshold, scan cap reached and trend is unknown", openCount)
+			observed = fmt.Sprintf("open_contracts>=%d older_5m>=%d older_30m>=%d exact=false trend=unknown scan_cap=%d", openCount, olderFiveMinutes, olderThirtyMinutes, pgOpenSetScanCap)
+			evidence = fmt.Sprintf("bounded oldest-first sample: total>=%d older_5m>=%d older_30m>=%d; lower bounds, not exact population counts", openCount, olderFiveMinutes, olderThirtyMinutes)
+		}
+		f := finding{
 			probeId: "pg/open-set-size", tier: tierWarn,
 			class: "open-set-size", target: target, sustain: 3,
 			symptom:   symptom,
 			mechanism: "CloseExpiredContracts selects contracts older than five minutes with independent open and disputed scans capped at 25,000 each in current source (older deployments used 100,000 per scan). Their deduplicated union can contain up to 50,000 candidates; selected rows are not verified closes. This open=true count excludes disputed nonfinal contracts and is not a census of reserved escrow. Age-band differences are not matched-cohort throughput: they mix aging, creation and exits from the open set, including newly disputed rows. A growing old cohort is a backlog clue; a mostly-young spike may reflect demand or reconnect churn.",
 			baseline:  "10–50k healthy (29,981 steady state after 2026-07-17); growth = closes not keeping up, and the 2.3 landmine plan degrades linearly with this number",
 			observed:  observed,
-			evidence:  fmt.Sprintf("open age buckets: total=%d older_5m=%d older_30m=%d", openCount, olderFiveMinutes, olderThirtyMinutes),
+			evidence:  evidence,
 			context:   "Compare CloseExpiredContracts live/completed duration, complete stored error and next run time with the retention-fanout signal and transfer_contract autovacuum phase. A short accounting-rejected attempt can leave the singleton in long backoff despite independently committed siblings; a fast retry does not resolve the financial rejection. Filtered task-name logs can omit joined-error continuation lines. A full cohort with sub-second worker transactions can also be delayed by persisted write/vacuum debt after the retention query itself clears. The force_closed_total resolution counter can increment before close succeeds and is not terminal-verified throughput. Prefer same-call terminal_verified, unresolved_accounting and quarantined_accounting evidence with complete stored error/retry timing and the exact executor artifact; those summaries do not join to a sampled panic merely by timestamp.",
 			action:    "Correlate consecutive age buckets with CloseExpiredContracts duration/outcomes, complete stored error and next run time, retention-fanout evidence, and the transfer_contract autovacuum phase before changing code or deploying. A high or rising count alone does not establish a retention defect; apply the bounded retention correction only after that cause is confirmed in the running path. If exact private evidence verifies an underfunded disputed row, preserve its settlement guard and reservation; distinguish terminal-verified sibling progress with a prompt accounted-for retry from a long global backoff, without inferring that cause from the backlog count. Do not raise closer concurrency while PostgreSQL write/vacuum debt is present.",
 			verify:    "The older-than-five-minute cohort falls on consecutive samples and the total open set drains toward 10–50k. Confirm terminal-verified sibling progress and bounded next attempts; any unresolved financial rejection remains a task failure warning even when retries are prompt. A failed whole batch is not a successful task completion.",
 			playbook:  "SIGNALS.md 1.2, 2.6, 2.10 and 5.7",
-		}}, nil
+		}
+		if !exact {
+			f.mechanism += " The scan reached its fixed row cap. All reported counts are lower bounds; equal repeated bounds do not prove a flat or falling population."
+			f.context += " Exact size and trend are unavailable above the scan cap. Published age buckets are conservative lower bounds in capped mode; a zero age-bucket lower bound is not a recovery measurement. The first later exact count restarts trend warmup instead of comparing against a stale pre-cap count."
+			f.action += " Do not run an unbounded count to replace this censored observation while PostgreSQL is hot; use bounded closer outcomes and vacuum/progress evidence until an exact below-cap scan is available."
+			f.verify += " Require exact below-cap observations before claiming the count or age buckets are falling; repeated cap hits cannot resolve this warning."
+		}
+		return []finding{f}, nil
 	}
 	return []finding{healthyFinding("pg/open-set-size", tierWarn, "open-set-size", target)}, nil
 }

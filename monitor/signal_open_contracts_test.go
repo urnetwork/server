@@ -398,3 +398,195 @@ func TestOpenContractsCatalogRequiresCausalAttribution(t *testing.T) {
 		}
 	}
 }
+
+// The cap must sit below aggregation, so the source never counts the entire
+// overloaded population before truncating its single result row.
+func TestOpenContractsBoundedQuery(t *testing.T) {
+	reads := 0
+	source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+		reads++
+		compact := strings.Join(strings.Fields(query), " ")
+		want := "WITH bounded_open AS MATERIALIZED ( SELECT create_time FROM transfer_contract WHERE open = true ORDER BY create_time LIMIT 250001 ) SELECT count(*)"
+		if !strings.Contains(compact, want) || strings.Count(compact, "FROM transfer_contract") != 1 {
+			t.Error("open-set source is not one capped oldest-first scan before aggregation")
+		}
+		return []Row{{"50000", "1000", "0"}}, nil
+	}}
+	alerts, err := NewOpenContractsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil || len(alerts) != 0 || reads != 1 {
+		t.Fatal("bounded healthy observation changed its result or added an unbounded fallback")
+	}
+}
+
+// A repeated cap is still a lower bound, never an exact flat count or recovery.
+func TestOpenContractsCappedCountsStayUnknownAndWarn(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{"250001", "250001", "0"}}, nil
+	}}
+	signal := NewOpenContractsSignal()
+	for range 4 {
+		alerts, err := signal.Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		alert := requireAlertClass(t, alerts, "open-set-size")
+		if alert.Severity != SeverityWarn || alert.Sustain != 3 || alert.Target != "pg-1" {
+			t.Fatal("censored observation changed the open-set identity or escalation")
+		}
+		for _, want := range []string{"open_contracts>=250001", "older_5m>=250001", "older_30m>=0", "exact=false", "trend=unknown", "scan_cap=250001"} {
+			if !strings.Contains(alert.Observed, want) || !strings.Contains(alert.Markdown(), want) {
+				t.Errorf("capped observation omitted explicit bound %q", want)
+			}
+		}
+		if !strings.Contains(alert.Symptom, "at least 250001") ||
+			!strings.Contains(alert.Symptom, "trend is unknown") ||
+			strings.Contains(alert.Observed, "delta=") ||
+			strings.Contains(alert.Symptom, "rising") {
+			t.Error("capped observation invented an exact count or trend")
+		}
+		if !strings.Contains(alert.Context, "zero age-bucket lower bound is not a recovery measurement") ||
+			!strings.Contains(alert.Action, "Do not run an unbounded count") {
+			t.Error("capped guidance omitted the zero-bucket or load boundary")
+		}
+	}
+}
+
+// Exact high observations below the cap keep the original adjacent trend.
+func TestOpenContractsExactNearCapKeepsTrend(t *testing.T) {
+	counts := []int{249999, 250000}
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		count := counts[0]
+		counts = counts[1:]
+		return []Row{{strconv.Itoa(count), "200000", "100000"}}, nil
+	}}
+	signal := NewOpenContractsSignal()
+	for range 2 {
+		alerts, err := signal.Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		alert := requireAlertClass(t, alerts, "open-set-size")
+		if !strings.Contains(alert.Observed, "exact=true") || strings.Contains(alert.Observed, ">=") {
+			t.Fatal("completed scan below its cap lost exactness")
+		}
+		if len(counts) == 0 && (!strings.Contains(alert.Observed, "delta=1") || !strings.Contains(alert.Symptom, "rising (previous 249999)")) {
+			t.Error("exact observation near the cap lost adjacent trend semantics")
+		}
+	}
+}
+
+// Recovery must not compare an exact count with a stale pre-cap baseline and
+// mislabel a decline from the censored peak as fresh growth.
+func TestOpenContractsCappedRecoveryRestartsExactTrend(t *testing.T) {
+	counts := []int{160000, 250001, 170000, 169000}
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		count := counts[0]
+		counts = counts[1:]
+		return []Row{{strconv.Itoa(count), "100000", "1000"}}, nil
+	}}
+	signal := NewOpenContractsSignal()
+	for index := range 4 {
+		alerts, err := signal.Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if index == 2 {
+			alert := requireAlertClass(t, alerts, "open-set-size")
+			if !strings.Contains(alert.Symptom, "trend is warming up") || strings.Contains(alert.Observed, "delta=") {
+				t.Error("first exact post-cap observation claimed an adjacent exact trend")
+			}
+		}
+		if index == 3 && len(alerts) != 0 {
+			t.Error("two exact falling observations could not clear the backlog warning")
+		}
+	}
+}
+
+// Censored observations must sustain the actual ticket rather than resolving
+// it when two successive lower bounds happen to be equal.
+func TestOpenContractsCappedCannotResolveTicket(t *testing.T) {
+	row := Row{"250001", "250001", "250001"}
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return []Row{row}, nil }}
+	env, err := newProbeEnv(syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := &pgOpenSetProbe{}
+	manager := newTicketManager("synthetic", &ticketEscalationEmitter{})
+	manager.resolveTicks = 2
+	for index := range 5 {
+		findings, err := probe.check(context.Background(), env)
+		if err != nil || len(findings) != 1 || findings[0].healthy {
+			t.Fatal("capped observation became unavailable or healthy")
+		}
+		manager.ingest(context.Background(), findings)
+		if index >= 2 && manager.openCount() != 1 {
+			t.Fatal("repeated lower bounds failed to sustain one open ticket")
+		}
+	}
+	row = Row{"50000", "1000", "0"}
+	for range manager.resolveTicks {
+		findings, err := probe.check(context.Background(), env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		manager.ingest(context.Background(), findings)
+	}
+	if manager.openCount() != 0 {
+		t.Error("exact below-threshold recovery could not resolve the bounded warning")
+	}
+}
+
+// Numeric corruption and impossible buckets are unknown, not zero, exact, or
+// trusted lower bounds, and may not alter a prior valid trend.
+func TestOpenContractsInvalidBoundedCountsAreUnknown(t *testing.T) {
+	for _, row := range []Row{
+		{"-1", "0", "0"},
+		{"250001.0", "0", "0"},
+		{aggregatePrivateCell, "0", "0"},
+		{"9223372036854775808", "0", "0"},
+		{"250002", "0", "0"},
+		{"50000", "50001", "0"},
+		{"50000", "1000", "1001"},
+	} {
+		source := &syntheticSource{postgresFn: func(string) ([]Row, error) { return []Row{row}, nil }}
+		signal := NewOpenContractsSignal()
+		probe := signal.(*signalAdapter).probe.(*pgOpenSetProbe)
+		probe.initialized, probe.lastCount = true, 170000
+		alerts, err := NewWithSignals(syntheticSettings(source), signal).Run(context.Background())
+		if err == nil {
+			t.Fatal("invalid bounded counts were accepted")
+		}
+		requireAggregateVisibility(t, signal, alerts, observationErrorClassInvalidResponse)
+		if !probe.initialized || probe.lastCount != 170000 {
+			t.Error("invalid bounded count changed the last exact trend")
+		}
+	}
+}
+
+// The catalog describes the actual capped query and does not promise an exact
+// scan will always finish quickly on a large, churn-heavy open set.
+func TestOpenContractsCatalogExplainsCountBounds(t *testing.T) {
+	data, err := os.ReadFile("SIGNALS.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(data), "### 2.6 Open-contract set size")
+	if start < 0 {
+		t.Fatal("open-set catalog missing")
+	}
+	section := string(data)[start:]
+	end := strings.Index(section, "2026-08-30 close-tail discriminator:")
+	if end < 0 {
+		t.Fatal("open-set historical boundary missing")
+	}
+	section = strings.Join(strings.Fields(section[:end]), " ")
+	for _, want := range []string{"LIMIT 250001", "lower bound", "trend is unknown", "30-second statement timeout", "false-positive", "false-negative", "not an exact count"} {
+		if !strings.Contains(section, want) {
+			t.Errorf("bounded count catalog omitted %q", want)
+		}
+	}
+	if strings.Contains(section, "seconds even under load") {
+		t.Error("catalog still promises cheap exact counts under arbitrary backlog")
+	}
+}
