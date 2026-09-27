@@ -47,10 +47,40 @@ write on the hot creation path. Revision tombstones have no automatic pruning;
 design a bounded export/retirement policy before deleting them. The migration
 guards ordinary deletion, revision rollback, and source-table truncation.
 
+Admission now locks eligible payer balances in ascending ID order and reads
+durable open reservations in a separate statement after the lock completes.
+Both origin and companion creation use read-committed transactions. Reading
+reservations in the locking statement would retain its pre-wait snapshot and
+reintroduce double admission. Client lifecycle locks precede balance locks;
+settlement takes its contract lock, then the same ordered balance locks, before
+claiming the terminal outcome and updating reservation revisions.
+
+The successful terminal claimant debits consumed payer bytes in that same
+PostgreSQL transaction. A missing post can no longer release a reservation while
+leaving its spent credit available for a new contract. Rollback rolls back the
+outcome and debit together; a duplicate settlement cannot debit again. Existing
+zero-byte anchors, positive-grant allocation, signed provider usage and explicit
+zero-credit legacy exclusions retain their semantics. No new migration is
+required; the catalog through 728 is unchanged.
+
 This removes reordered-post and stale-page corruption while the fence history
 is retained. PostgreSQL and Redis still do not form one transaction: a crash can
-leave the approximate mirror behind until a post or reconciliation succeeds.
-Admission still uses the existing approximate cache and can over-reserve during
-concurrent creation or cache loss. Separate billing/payout posts are unchanged;
-these tests do not establish production load capacity or exact financial
-transactionality for those paths.
+leave the approximate display mirror behind until publication or reconciliation
+succeeds, but that mirror no longer authorizes admission. The coordinated drain
+must also exclude every old creator and old asynchronous debit writer before
+traffic resumes. A rolling mixed-version deployment is unsupported.
+
+Historical terminal contracts may already have lost a debit post. The old
+schema has no per-debit receipt that distinguishes applied from unapplied
+debits, so neither a terminal outcome nor a settled escrow marker is evidence
+that the payer was charged. Retain and independently reconcile the exact
+historical balance/debit evidence before activation; do not guess a debit or
+repeat an old post to repair it. Restoring PostgreSQL must likewise preserve
+that evidence and its financial cutover boundary.
+
+Participant sweep publication, account payout increments and clock/statistics
+posts remain separate asynchronous work. This bounded custody fix does not
+make those posts atomic, durable or idempotent and does not prove complete
+financial settlement or production load capacity. Qualify the extra indexed
+reservation read and per-payer lock contention under the intended workload
+before production admission.

@@ -264,6 +264,8 @@ func TestCreateTransferEscrowReservedGrantShortfallHasNoWrites(t *testing.T) {
 				AddTransferBalance(ctx, balance)
 				balances = append(balances, balance)
 			}
+			clients.reserve(ctx, balances[0].BalanceId, 2048)
+			wantContractCount++
 			server.Redis(ctx, func(r server.RedisClient) {
 				server.Raise(r.Set(ctx, netEscrowKey(balances[0].BalanceId), 2048, time.Hour).Err())
 			})
@@ -275,8 +277,8 @@ func TestCreateTransferEscrowReservedGrantShortfallHasNoWrites(t *testing.T) {
 				var contractCount, escrowCount int
 				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE payer_network_id = $1`, clients.payerNetworkId).Scan(&contractCount))
 				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_escrow WHERE balance_id = ANY($1)`, []server.Id{balances[0].BalanceId, balances[1].BalanceId}).Scan(&escrowCount))
-				if contractCount != wantContractCount || escrowCount != 0 {
-					t.Fatalf("companion=%t: shortfall wrote contracts=%d escrows=%d, want %d/0", companion, contractCount, escrowCount, wantContractCount)
+				if contractCount != wantContractCount || escrowCount != 1 {
+					t.Fatalf("companion=%t: shortfall wrote contracts=%d escrows=%d, want %d/1", companion, contractCount, escrowCount, wantContractCount)
 				}
 			})
 			server.Redis(ctx, func(r server.RedisClient) {

@@ -2127,8 +2127,6 @@ func TestReconcileNetEscrowCorrectsDrift(t *testing.T) {
 		})
 		// the drift makes the full balance appear unavailable
 		connect.AssertEqual(t, ByteCount(0), GetActiveTransferBalanceByteCount(ctx, networkId))
-		_, _, err := CreateContract(ctx, networkId, clientId, networkIdB, clientIdB, ByteCount(1024*1024))
-		connect.AssertNotEqual(t, nil, err)
 
 		// a dry run reports the drift but does not change anything
 		driftByNetworkId, _ := ReconcileNetEscrow(ctx, false)
@@ -2142,8 +2140,13 @@ func TestReconcileNetEscrowCorrectsDrift(t *testing.T) {
 		connect.AssertEqual(t, ByteCount(0), Testing_NetEscrowByteCount(ctx, balanceId))
 		connect.AssertEqual(t, initialBalance, GetActiveTransferBalanceByteCount(ctx, networkId))
 
-		// contracts work again, and the new reservation is mirrored in the counter
-		_, _, err = CreateContract(ctx, networkId, clientId, networkIdB, clientIdB, ByteCount(1024*1024))
+		// Even renewed cache drift cannot deny database-owned credit. The
+		// successful create post repairs the mirror to its real reservation.
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.IncrBy(ctx, netEscrowKey(balanceId), int64(initialBalance)).Err())
+		})
+		connect.AssertEqual(t, ByteCount(0), GetActiveTransferBalanceByteCount(ctx, networkId))
+		_, _, err := CreateContract(ctx, networkId, clientId, networkIdB, clientIdB, ByteCount(1024*1024))
 		connect.AssertEqual(t, nil, err)
 		connect.AssertEqual(t, ByteCount(1024*1024), Testing_NetEscrowByteCount(ctx, balanceId))
 
@@ -2160,8 +2163,8 @@ func TestReconcileNetEscrowCorrectsDrift(t *testing.T) {
 	})
 }
 
-// A fully reserved grant can remain active in PostgreSQL while its Redis
-// reservation leaves zero available bytes. It must not produce a zero-byte
+// A fully reserved grant can remain active in PostgreSQL while its open
+// reservations leave zero available bytes. It must not produce a zero-byte
 // escrow row for every new contract before the next usable grant is reached.
 func TestCreateTransferEscrowSkipsFullyReservedBalances(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -2186,13 +2189,10 @@ func TestCreateTransferEscrowSkipsFullyReservedBalances(t *testing.T) {
 		for _, balance := range balances {
 			if balance.StartBalanceByteCount == 3*1024*1024 {
 				usableId = balance.BalanceId
-				continue
 			}
-			server.Redis(ctx, func(r server.RedisClient) {
-				if err := r.IncrBy(ctx, netEscrowKey(balance.BalanceId), int64(balance.StartBalanceByteCount)).Err(); err != nil {
-					t.Fatal(err)
-				}
-			})
+		}
+		if _, err := CreateTransferEscrow(ctx, payerNetworkId, payerId, providerNetworkId, providerId, 3*1024*1024); err != nil {
+			t.Fatal(err)
 		}
 		const contractBytes = ByteCount(1024)
 		escrow, err := CreateTransferEscrow(ctx, payerNetworkId, payerId, providerNetworkId, providerId, contractBytes)

@@ -214,7 +214,8 @@ func NewUnorderedTransferPair(a server.Id, b server.Id) TransferPair {
 }
 
 // the escrow model has been updated so that:
-//   - `transfer_balance` tracks the balance not in a `transfer_escrow`
+//   - `transfer_balance` tracks unspent credit; settlement debits it atomically
+//     with the contract outcome
 //   - the net balance in a `transfer_escrow` is tracked approximately in redis `netEscrowKey`
 //     Because redis is not atomic with Postgres, the value in the `netEscrowKey` will
 //     eventually be consistent with the real value, but may be off by some amount at any given time.
@@ -227,9 +228,10 @@ func NewUnorderedTransferPair(a server.Id, b server.Id) TransferPair {
 // Every write site also gives the counter a ttl (see `netEscrowEndTimeSlack`
 // and `netEscrowFallbackTtl`), so a counter that outlives its balance -- for
 // example when the `RemoveCompletedContracts` delete is missed -- expires on
-// its own instead of accumulating without bound. An early expiry is safe: a
-// missing counter reads as zero (fail-open, more available balance) and the
-// reconcile task re-derives the true value from postgres
+// its own instead of accumulating without bound. A missing counter reads as
+// zero for approximate balance display. Admission locks database balances and
+// reads durable reservations, so cache loss cannot authorize more credit. The
+// reconcile task re-derives the displayed value from postgres
 // (see `ReconcileNetEscrow`).
 // netEscrowMirrorTimeout bounds a detached mirror update so a wedged redis
 // cannot retain the goroutine.
@@ -418,10 +420,9 @@ func Testing_DeleteNetEscrow(ctx context.Context, balanceId server.Id) {
 //
 // The counter remains an approximate mirror between a PostgreSQL commit and
 // its cache post. A crashed post can leave it behind until this reconciliation
-// runs; the bounded counter ttl alone does not repair that drift. Upward drift makes
-// `createTransferEscrowInTx` compute the available
-// balance too low and reject contracts with "Insufficient balance" even when
-// the postgres balance is plentiful; downward drift lets a balance over-commit.
+// runs; the bounded counter ttl alone does not repair that drift. Drift affects
+// approximate balance readers only. Admission uses locked database credit and
+// durable reservations instead of granting authority to the cache.
 //
 // The reserved bytes for a balance is the sum of its escrow rows whose contract
 // is still open. `transfer_contract.outcome` is claimed atomically in the
@@ -750,23 +751,31 @@ func openEscrowReservedForBalances(ctx context.Context, balanceIds []server.Id) 
 	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		configureNetEscrowReservationPageTimeout(ctx, tx, netEscrowReservationPageStatementTimeout)
-		result, err := tx.Query(
-			ctx,
-			netEscrowReservationPageSQL,
-			balanceIds,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var balanceId server.Id
-				var snapshot netEscrowSnapshot
-				server.Raise(result.Scan(&balanceId, &snapshot.revision, &snapshot.reserved, &snapshot.endTime))
-				if snapshot.revision < 0 || snapshot.reserved < 0 {
-					server.Raise(fmt.Errorf("invalid net escrow snapshot for balance %s", balanceId))
-				}
-				pending[balanceId] = snapshot
-			}
-		})
+		pending = readNetEscrowSnapshots(ctx, tx, balanceIds)
 	}, server.TxReadCommitted, pgx.ReadOnly)
+	return pending
+}
+
+// Reuses the bounded reservation census inside the caller's transaction. For
+// admission this statement must follow the balance locks, so read committed
+// observes reservations committed by a creator that held those locks first.
+func readNetEscrowSnapshots(ctx context.Context, query server.PgCanQuery, balanceIds []server.Id) map[server.Id]netEscrowSnapshot {
+	pending := map[server.Id]netEscrowSnapshot{}
+	if len(balanceIds) == 0 {
+		return pending
+	}
+	result, err := query.Query(ctx, netEscrowReservationPageSQL, balanceIds)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var balanceId server.Id
+			var snapshot netEscrowSnapshot
+			server.Raise(result.Scan(&balanceId, &snapshot.revision, &snapshot.reserved, &snapshot.endTime))
+			if snapshot.revision < 0 || snapshot.reserved < 0 {
+				server.Raise(fmt.Errorf("invalid net escrow snapshot for balance %s", balanceId))
+			}
+			pending[balanceId] = snapshot
+		}
+	})
 	return pending
 }
 
@@ -1383,8 +1392,9 @@ const contractExtenderInsertSql = `
 		transfer_contract.contract_id = $1
 `
 
-// Reserves positive bytes from the earliest available grants. Zero-byte
-// contracts retain their existing earliest-grant anchor and priority.
+// Reserves database-owned credit while holding payer balance locks through
+// commit. Callers use read committed so the census after a lock wait is fresh.
+// Zero-byte contracts retain their existing earliest-grant anchor and priority.
 func createTransferEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -1403,6 +1413,20 @@ func createTransferEscrowInTx(
 	// TODO we need better performance regression tools to measure small regressions in hotspots like this
 
 	// note it is possible to create a contract with `contractTransferByteCount = 0`
+	if contractTransferByteCount < 0 {
+		return nil, nil, fmt.Errorf("negative contract transfer byte count")
+	}
+	if err := lockActiveContractClientsInTx(
+		ctx,
+		tx,
+		sourceNetworkId,
+		sourceId,
+		destinationNetworkId,
+		destinationId,
+	); err != nil {
+		returnErr = err
+		return
+	}
 
 	contractId := server.NewId()
 
@@ -1435,9 +1459,13 @@ func createTransferEscrowInTx(
             FROM transfer_balance
             WHERE
                 network_id = $1 AND
-                active = true
+                active = true AND
+                start_time <= $2 AND $2 < end_time
+            ORDER BY balance_id
+            FOR UPDATE
         `,
 		payerNetworkId,
+		now,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
@@ -1455,30 +1483,19 @@ func createTransferEscrowInTx(
 		}
 	})
 
-	server.Redis(ctx, func(r server.RedisClient) {
-		netEscrowCmds := map[server.Id]*redis.StringCmd{}
-		// the net escrow keys use per-balance hash tags (different slots), so
-		// use a plain pipeline, which auto-routes per slot on cluster
-		_, pipelineErr := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-			for _, transferBalance := range orderedTransferBalances {
-				netEscrowCmds[transferBalance.balanceId] = pipe.Get(ctx, netEscrowKey(transferBalance.balanceId))
-			}
-			return nil
-		})
-		if pipelineErr != nil && !errors.Is(pipelineErr, redis.Nil) {
-			server.Raise(pipelineErr)
-		}
-		for _, transferBalance := range orderedTransferBalances {
-			netEscrowCmd := netEscrowCmds[transferBalance.balanceId]
-			netEscrowBalanceByteCount, commandErr := netEscrowCmd.Int64()
-			if errors.Is(commandErr, redis.Nil) {
-				netEscrowBalanceByteCount = 0
-			} else {
-				server.Raise(commandErr)
-			}
-			netEscrowBalanceByteCount = max(int64(0), netEscrowBalanceByteCount)
-			transferBalance.balanceByteCount = max(0, transferBalance.balanceByteCount-ByteCount(netEscrowBalanceByteCount))
-		}
+	// Do not combine this census with the locking statement: its snapshot would
+	// precede a competing creator's commit even after the lock wait completes.
+	lockedBalanceIds := make([]server.Id, 0, len(orderedTransferBalances))
+	for _, transferBalance := range orderedTransferBalances {
+		lockedBalanceIds = append(lockedBalanceIds, transferBalance.balanceId)
+	}
+	reserved := readNetEscrowSnapshots(ctx, tx, lockedBalanceIds)
+	now = server.NowUtc()
+	for _, transferBalance := range orderedTransferBalances {
+		transferBalance.balanceByteCount = max(0, transferBalance.balanceByteCount-reserved[transferBalance.balanceId].reserved)
+	}
+	orderedTransferBalances = slices.DeleteFunc(orderedTransferBalances, func(transferBalance *escrow) bool {
+		return transferBalance.startTime.After(now) || !now.Before(transferBalance.endTime)
 	})
 
 	slices.SortFunc(orderedTransferBalances, func(a *escrow, b *escrow) int {
@@ -1500,7 +1517,7 @@ func createTransferEscrowInTx(
 	netEscrowBalanceByteCount := ByteCount(0)
 
 	for _, transferBalance := range orderedTransferBalances {
-		// PostgreSQL active balances can be fully reserved in Redis. They
+		// Active balances can be fully reserved by open contracts. They
 		// must not create empty rows, dilute priority, or refresh mirrors.
 		if 0 < contractTransferByteCount && transferBalance.balanceByteCount == 0 {
 			continue
@@ -1542,18 +1559,6 @@ func createTransferEscrowInTx(
 		priority /= Priority(len(balanceEscrows))
 	} else {
 		priority = UnpaidPriority
-	}
-
-	if err := lockActiveContractClientsInTx(
-		ctx,
-		tx,
-		sourceNetworkId,
-		sourceId,
-		destinationNetworkId,
-		destinationId,
-	); err != nil {
-		returnErr = err
-		return
 	}
 
 	// Revision triggers serialize per balance. Keep multi-balance reservations
@@ -1754,7 +1759,7 @@ func CreateTransferEscrow(
 			contractTransferByteCount,
 			nil,
 		)
-	})
+	}, server.TxReadCommitted)
 
 	if returnErr != nil {
 		return
@@ -2003,7 +2008,7 @@ func CreateCompanionTransferEscrow(
 			contractTransferByteCount,
 			companionContractId,
 		)
-	})
+	}, server.TxReadCommitted)
 
 	if returnErr != nil {
 		return
@@ -2820,12 +2825,33 @@ func allocateContractParticipantPayouts(
 	return
 }
 
+// Claims the outcome and debits consumed payer credit in one transaction.
+// Lock contract, balances (by id), then reservation revisions in that order.
 func settleEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
 	contractId server.Id,
 	outcome ContractOutcome,
 ) (posts []func() any, closed bool, returnErr error) {
+	// CloseContract already owns this lock; direct and recovery settlement
+	// must acquire it before balance locks to keep the same lock order.
+	server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id = $1 FOR UPDATE`, contractId))
+	result, err := tx.Query(ctx, `
+		SELECT transfer_balance.balance_id
+		FROM transfer_balance
+		INNER JOIN transfer_escrow USING (balance_id)
+		WHERE transfer_escrow.contract_id = $1
+		ORDER BY transfer_balance.balance_id
+		FOR UPDATE OF transfer_balance
+	`, contractId)
+	lockedBalanceIds := []server.Id{}
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var balanceId server.Id
+			server.Raise(result.Scan(&balanceId))
+			lockedBalanceIds = append(lockedBalanceIds, balanceId)
+		}
+	})
 	var usedTransferByteCount ByteCount
 	var clockTransferByteCount ByteCount
 
@@ -2941,7 +2967,7 @@ func settleEscrowInTx(
 
 	// order balances by end date, ascending
 	// take from the earlier before the later
-	result, err := tx.Query(
+	result, err = tx.Query(
 		ctx,
 		`
             SELECT
@@ -3018,6 +3044,18 @@ func settleEscrowInTx(
 	if returnErr != nil || !closed {
 		return
 	}
+	// A terminal outcome removes its reservation from the census immediately.
+	// Its consumed credit must disappear in this same commit, even if every
+	// asynchronous post is lost. Replay cannot debit after another claimant.
+	for _, balanceId := range lockedBalanceIds {
+		if payout := sweepPayouts[balanceId].payoutByteCount; payout > 0 {
+			server.RaisePgResult(tx.Exec(ctx, `
+				UPDATE transfer_balance
+				SET balance_byte_count = balance_byte_count - $2
+				WHERE balance_id = $1
+			`, balanceId, payout))
+		}
+	}
 	if 0 < clockTransferByteCount {
 		posts = append(posts, clockTransferPost(ctx, clockTransferByteCount))
 	}
@@ -3073,35 +3111,12 @@ func settleEscrowInTx(
 			})
 		}
 
-		hasBalancePayout := false
 		mirrorBalanceIds := make([]server.Id, 0, len(sweepPayouts))
 		for balanceId, sweepPayout := range sweepPayouts {
-			hasBalancePayout = hasBalancePayout || 0 < sweepPayout.payoutByteCount
 			if 0 < sweepPayout.escrowBalanceByteCount {
 				mirrorBalanceIds = append(mirrorBalanceIds, balanceId)
 			}
 		}
-		// Zero-use contracts still mark every escrow row and return reservations,
-		// but have no balance debit transaction to execute.
-		if hasBalancePayout {
-			posts = append(posts, func() any {
-				server.Tx(ctx, func(tx server.PgTx) {
-					server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-						for balanceId, sweepPayout := range sweepPayouts {
-							if 0 < sweepPayout.payoutByteCount {
-								batch.Queue(`
-									UPDATE transfer_balance
-									SET balance_byte_count = balance_byte_count - $2
-									WHERE balance_id = $1
-								`, balanceId, sweepPayout.payoutByteCount)
-							}
-						}
-					})
-				}, server.TxReadCommitted)
-				return nil
-			})
-		}
-
 		if len(mirrorBalanceIds) > 0 {
 			posts = append(posts, func() any {
 				refreshNetEscrow(ctx, mirrorBalanceIds)
