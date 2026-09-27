@@ -128,8 +128,9 @@ func taskAdvisoryLockKey(taskId server.Id) int64 {
 }
 
 type taskClaimGuard struct {
-	conn        server.PgConn
-	releaseOnce sync.Once
+	conn         server.PgConn
+	releaseOnce  sync.Once
+	admissionKVs map[server.Id]*taskClaimReservation
 }
 
 func (self *taskClaimGuard) ping(ctx context.Context) error {
@@ -144,6 +145,11 @@ func (self *taskClaimGuard) release() {
 		return
 	}
 	self.releaseOnce.Do(func() {
+		defer func() {
+			for _, reservation := range self.admissionKVs {
+				reservation.release()
+			}
+		}()
 		if self.conn == nil {
 			return
 		}
@@ -1330,6 +1336,10 @@ type TaskWorkerSettings struct {
 	// Filtering precedes the candidate limit, including the owner of a RunPost
 	// retry, so an unrelated backlog cannot starve registered work.
 	ClaimRegisteredTargetsOnly bool
+	// Opt-in per-instance limits, keyed by canonical target function name.
+	// Aliases share their target's limit; RunPost wrappers do not borrow it.
+	// Nil leaves every target unlimited. Construction snapshots this map.
+	TargetClaimLimits map[string]int
 	// how long `Drain` waits for in-flight tasks to finish naturally before
 	// canceling their contexts
 	DrainFinishTimeout time.Duration
@@ -1364,9 +1374,14 @@ type TaskWorker struct {
 	refreshTaskTimestampLeases func(context.Context, map[server.Id]*Task)
 	// Drain logs are best effort: a full stdout pipe must not hold shutdown.
 	drainLogf func(string, ...any)
+	// Test barriers sit at real claim boundaries, without changing production
+	// ownership: nil leaves the direct PostgreSQL path untouched.
+	claimCandidatesReady func()
+	claimBeforeCommit    func(*taskClaimGuard) error
 
-	stateLock sync.Mutex
-	draining  bool
+	stateLock         sync.Mutex
+	draining          bool
+	claimTargetCounts map[string]int
 
 	inflightCount      atomic.Int64
 	drainCanceledCount atomic.Int64
@@ -1377,6 +1392,7 @@ func NewTaskWorkerWithDefaults(ctx context.Context) *TaskWorker {
 }
 
 func NewTaskWorker(ctx context.Context, settings *TaskWorkerSettings) *TaskWorker {
+	settings = snapshotTaskWorkerSettings(settings)
 	cancelCtx, cancel := context.WithCancel(ctx)
 	runCtx, runCancel := context.WithCancel(cancelCtx)
 	drainCtx, drainCancel := context.WithCancel(cancelCtx)
@@ -1394,6 +1410,7 @@ func NewTaskWorker(ctx context.Context, settings *TaskWorkerSettings) *TaskWorke
 		heartbeatAfter:             time.After,
 		refreshTaskTimestampLeases: refreshTaskTimestampLeases,
 		drainLogf:                  glog.Infof,
+		claimTargetCounts:          map[string]int{},
 	}
 
 	taskWorker.AddTargets(
@@ -1689,7 +1706,7 @@ func (self *TaskWorker) takeTasks(n int) (
 	if err != nil {
 		return nil, nil, err
 	}
-	guard := &taskClaimGuard{conn: conn}
+	guard := &taskClaimGuard{conn: conn, admissionKVs: map[server.Id]*taskClaimReservation{}}
 	retainGuard := false
 	defer func() {
 		if !retainGuard {
@@ -1716,8 +1733,9 @@ func (self *TaskWorker) takeTasks(n int) (
 		maxTimeSeconds int
 	}
 	type taskCandidate struct {
-		taskId   server.Id
-		priority taskPriority
+		taskId       server.Id
+		functionName string
+		priority     taskPriority
 	}
 
 	nowBlock := server.NowUtc().Unix() / BlockSizeSeconds
@@ -1750,11 +1768,18 @@ func (self *TaskWorker) takeTasks(n int) (
 		`
 		queryArgs = append(queryArgs, functionNames, functionName(self.RunPost))
 	}
+	if excluded := self.saturatedClaimFunctionNames(); len(excluded) != 0 {
+		claimPredicate += fmt.Sprintf(`
+			AND NOT (regexp_replace(function_name, '/v[0-9]+', '', 'g') = ANY($%d))
+		`, len(queryArgs)+1)
+		queryArgs = append(queryArgs, excluded)
+	}
 	result, err := tx.Query(
 		self.ctx,
 		`
 			SELECT
 				task_id,
+				function_name,
 				run_priority,
 				run_max_time_seconds
 			FROM pending_task
@@ -1774,6 +1799,7 @@ func (self *TaskWorker) takeTasks(n int) (
 		candidate := taskCandidate{}
 		if err := result.Scan(
 			&candidate.taskId,
+			&candidate.functionName,
 			&candidate.priority.priority,
 			&candidate.priority.maxTimeSeconds,
 		); err != nil {
@@ -1787,10 +1813,20 @@ func (self *TaskWorker) takeTasks(n int) (
 		return nil, nil, err
 	}
 	result.Close()
+	if self.claimCandidatesReady != nil {
+		self.claimCandidatesReady()
+	}
 
 	taskIds := []server.Id{}
 	taskIdPriorities := map[server.Id]taskPriority{}
 	for _, candidate := range candidates {
+		reservation, admitted := self.reserveTaskClaim(candidate.functionName)
+		if !admitted {
+			continue
+		}
+		if reservation != nil {
+			guard.admissionKVs[candidate.taskId] = reservation
+		}
 		lockKey := taskAdvisoryLockKey(candidate.taskId)
 		var acquired bool
 		if err := tx.QueryRow(
@@ -1801,6 +1837,7 @@ func (self *TaskWorker) takeTasks(n int) (
 			return nil, nil, err
 		}
 		if !acquired {
+			guard.releaseAdmission(candidate.taskId)
 			continue
 		}
 		taskIds = append(taskIds, candidate.taskId)
@@ -1852,6 +1889,7 @@ func (self *TaskWorker) takeTasks(n int) (
 		if !unlocked {
 			return nil, nil, fmt.Errorf("task advisory lock was not held for %s", taskId)
 		}
+		guard.releaseAdmission(taskId)
 	}
 	taskIds = taskIds[:selectedCount]
 
@@ -1877,6 +1915,11 @@ func (self *TaskWorker) takeTasks(n int) (
 		}
 	}
 
+	if self.claimBeforeCommit != nil {
+		if err := self.claimBeforeCommit(guard); err != nil {
+			return nil, nil, err
+		}
+	}
 	if err := tx.Commit(self.ctx); err != nil {
 		return nil, nil, err
 	}
@@ -1964,6 +2007,10 @@ func (self *TaskWorker) EvalTasks(n int) (
 	if len(tasks) == 0 {
 		return
 	}
+	if claimGuard == nil {
+		returnErr = errors.New("nonempty task claim has no advisory ownership guard")
+		return
+	}
 
 	// Once tasks are claimed, their result collection and final handback must
 	// survive cancellation of the process-serving context. Task functions
@@ -1992,8 +2039,10 @@ func (self *TaskWorker) EvalTasks(n int) (
 
 	taskCtx, taskCancel := context.WithCancel(evalCtx)
 	results := make(chan *result)
+	executionAdmissions := claimGuard.retainExecutionAdmissions(tasks)
 
 	go server.HandleError(func() {
+		defer executionAdmissions.releaseUnlaunched()
 		defer func() {
 			taskCancel()
 			close(results)
@@ -2003,8 +2052,12 @@ func (self *TaskWorker) EvalTasks(n int) (
 
 		for _, task := range tasks {
 			wg.Add(1)
+			reservation := executionAdmissions.take(task.TaskId)
 			go server.HandleError(func() {
 				defer wg.Done()
+				if reservation != nil {
+					defer reservation.release()
+				}
 				metricName := self.metricName(task.FunctionName)
 				attribution := taskMetricAttribution(task)
 				taskExecutionInflight.WithLabelValues(metricName, attribution).Inc()
