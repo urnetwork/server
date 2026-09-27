@@ -7027,6 +7027,33 @@ For each shard, aggregate without exporting identifiers:
   gross last-hour attempt rate deliberately remains unfiltered by current-dark
   state for rollout comparability.
 
+Full-attempt false-positive/false-negative qualification: the last-hour count
+is success-inclusive but still restricted to the **current eligible
+population**, not every worker execution or acknowledged API write. A provider
+that disconnects during or after a long run can retain its accepted attempt
+while leaving this denominator. A reconnect can restore the same recent row
+without another report, and repeated attempts on one provider collapse to its
+latest row. A lower eligible-row count than the producer counter is therefore
+not evidence of lost publication or of an equivalent fall in raw execution
+throughput. Conversely, a high acknowledged-attempt counter, especially when
+the run guard withheld health/location results, does not establish successful
+coverage of the current fleet or clear its deadline debt. The adjacent full
+deadline-prefix projections use the same eligibility-filtered rate.
+
+At 2026-09-27 00:52:03 UTC, a bounded read-only Main join found 401 unique
+latest full attempts from the previous hour, all `run_batch_guard`: 139 were
+currently eligible and 262 (65.3%) were currently disconnected. Same-process
+Taskworker observation showed acknowledged attempts with no unsupported,
+canceled, or error outcome in its sampled hour. This explains a substantial
+current-population exclusion, not an exact counter-to-row join across
+different observation windows, the time of each disconnect, or its cause.
+Reconcile same-window acknowledgements, bounded current-eligibility cohorts,
+and guard outcomes before assigning a publication or capacity fault. Keep the
+current eligibility predicate: adding disconnected attempts to its rate would
+hide connected-provider exposure. Do not cancel long probes or suppress
+retries from one disconnected snapshot; durable status freshness, reconnect
+semantics, and already-earned evidence need their own correctness proof.
+
 The due ages are the application contract: full location refresh begins at
 half the seven-day location lifetime, existing-health refresh begins at half
 its 24-hour lifetime, a missing-health row is eligible after the common attempt
