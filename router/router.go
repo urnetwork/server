@@ -128,11 +128,19 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				panic(err)
 			}
 			if server.IsDoneError(err) {
-				// A Done panic is the standard cancellation path. In particular,
-				// Connect can observe it after Gorilla has hijacked the H1 socket;
-				// net/http no longer owns that connection and any attempted error
-				// response produces a write-after-hijack warning. Consume the
-				// lifecycle signal without falling through to http.Error.
+				// A child operation can expire while the HTTP caller is still
+				// alive (for example the 25s due query inside its 30s request).
+				// Returning without a response would forge an empty successful
+				// 200. Hijacked sockets and canceled callers retain their owner;
+				// an already committed response must abort instead of completing
+				// a truncated body or appending an error under its old status.
+				if !observation.writer.hijacked && r.Context().Err() == nil {
+					if observation.writer.status != 0 {
+						observation.finish("aborted")
+						panic(http.ErrAbortHandler)
+					}
+					http.Error(writer, "Service temporarily unavailable.", http.StatusServiceUnavailable)
+				}
 				observation.finish("canceled")
 				return
 			}

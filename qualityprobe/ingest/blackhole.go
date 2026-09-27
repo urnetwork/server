@@ -23,6 +23,10 @@ import (
 // says so once rather than every pass.
 var ErrBlackholeUnsupported = errors.New("ingest: the server does not implement the provider-blackhole endpoints")
 
+// Only a due-list HTTP 503 carries this retryable read failure. It does not
+// apply to submissions, malformed successful bodies, or other 4xx/5xx errors.
+var ErrBlackholeDueUnavailable = errors.New("ingest: blackhole due service temporarily unavailable")
+
 // The width of the server's failure column
 // (varchar(64)). The server rejects an oversized value rather than truncating
 // it, and a rejected batch is a lost sweep, so truncate before sending.
@@ -80,6 +84,8 @@ func (self *Client) BlackholeDue(ctx context.Context, limit int) ([]DueProvider,
 		return nil, ErrBlackholeUnsupported
 	case http.StatusUnauthorized:
 		return nil, ErrUnauthorized
+	case http.StatusServiceUnavailable:
+		return nil, fmt.Errorf("%w: %w", ErrRejected, ErrBlackholeDueUnavailable)
 	default:
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("%w: status %d: %s", ErrRejected, resp.StatusCode, strings.TrimSpace(string(msg)))

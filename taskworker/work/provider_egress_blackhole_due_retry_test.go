@@ -238,7 +238,7 @@ func TestBlackholeDueReadMetricHasFixedPreinitializedDomain(t *testing.T) {
 	if err != nil || len(families) != 1 {
 		t.Fatalf("fixed metric gather: families=%d error=%v", len(families), err)
 	}
-	want := map[string]bool{"ok": true, "timeout": true, "canceled": true, "unauthorized": true, "unsupported": true, "rejected": true, "decode": true, "error_or_unknown": true}
+	want := map[string]bool{"ok": true, "timeout": true, "canceled": true, "unauthorized": true, "unsupported": true, "rejected": true, "unavailable": true, "decode": true, "error_or_unknown": true}
 	if got := len(families[0].Metric); got != len(want) {
 		t.Fatalf("due-read metric cardinality=%d want%d", got, len(want))
 	}

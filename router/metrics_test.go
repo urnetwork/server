@@ -78,6 +78,9 @@ func TestRouterMetricsClassifyUnmatchedPanicCancelAndAbort(t *testing.T) {
 	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/missing", nil))
 	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/panic", nil))
 	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/canceled", nil))
+	canceledCtx, cancelRequest := context.WithCancel(ctx)
+	cancelRequest()
+	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/canceled", nil).WithContext(canceledCtx))
 	router.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/panic", nil))
 	func() {
 		defer func() {
@@ -96,6 +99,7 @@ func TestRouterMetricsClassifyUnmatchedPanicCancelAndAbort(t *testing.T) {
 		{route: "not_found", status: "404", outcome: "not_found"},
 		{route: "method_not_allowed", status: "405", outcome: "method_not_allowed"},
 		{route: canceledRoute.id, status: "none", outcome: "canceled"},
+		{route: canceledRoute.id, status: "503", outcome: "canceled"},
 		{route: panicRoute.id, status: "500", outcome: "panic"},
 		{route: abortRoute.id, status: "none", outcome: "aborted"},
 	}

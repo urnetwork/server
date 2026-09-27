@@ -1,5 +1,5 @@
-// Read-only cheap due lookups may retry transient request timeouts within one
-// task's admission boundary. No claim, probe, or publication is retried here.
+// Read-only cheap due lookups may retry transient request timeouts or explicit
+// HTTP 503 within one task's admission boundary. No claim or probe is retried.
 package work
 
 import (
@@ -26,6 +26,7 @@ const (
 	blackholeDueReadUnauthorized
 	blackholeDueReadUnsupported
 	blackholeDueReadRejected
+	blackholeDueReadUnavailable
 	blackholeDueReadDecode
 	blackholeDueReadOther
 )
@@ -45,6 +46,8 @@ func (self providerEgressBlackholeDueReadResult) label() string {
 		return "unsupported"
 	case blackholeDueReadRejected:
 		return "rejected"
+	case blackholeDueReadUnavailable:
+		return "unavailable"
 	case blackholeDueReadDecode:
 		return "decode"
 	default:
@@ -69,8 +72,8 @@ func init() {
 	prometheus.MustRegister(egressProbeBlackholeDueReads)
 }
 
-// Cancellation and explicit endpoint/validation failures outrank any nested
-// timeout. Only a timeout while the owning context is live may be retried.
+// Cancellation and permanent endpoint failures outrank transient failures.
+// Only a timeout or explicit due HTTP 503 with a live owner may be retried.
 func providerEgressBlackholeDueReadClass(ctx context.Context, err error) providerEgressBlackholeDueReadResult {
 	if err == nil {
 		return blackholeDueReadOk
@@ -82,6 +85,8 @@ func providerEgressBlackholeDueReadClass(ctx context.Context, err error) provide
 		return blackholeDueReadUnauthorized
 	case errors.Is(err, ingest.ErrBlackholeUnsupported):
 		return blackholeDueReadUnsupported
+	case errors.Is(err, ingest.ErrBlackholeDueUnavailable):
+		return blackholeDueReadUnavailable
 	case errors.Is(err, ingest.ErrRejected):
 		return blackholeDueReadRejected
 	}
@@ -116,7 +121,7 @@ func (self *providerEgressProbePass) blackholeDueWithRetry(ctx context.Context, 
 		cancel()
 		result := providerEgressBlackholeDueReadClass(ctx, err)
 		egressProbeBlackholeDueReads.WithLabelValues(result.label()).Inc()
-		if result != blackholeDueReadTimeout || attempt == providerEgressBlackholeDueReadAttempts {
+		if (result != blackholeDueReadTimeout && result != blackholeDueReadUnavailable) || attempt == providerEgressBlackholeDueReadAttempts {
 			return due, err
 		}
 		// Independent bounded jitter avoids synchronized shard re-reads. The
