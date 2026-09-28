@@ -1199,7 +1199,9 @@ compiled and passed its pure oracle but was interrupted before the 100,000-row
 generic cases completed. It is **unverified**, not a green fix. Re-run generic
 normal/race, custom plans, causal pre-fix, functional, catalog and migration
 tests. Never treat the interrupted v3 as PASS. Exact private evidence and
-pre-fix SQL are in `.fp2-generic-evidence/` on this host; those logs may include
+pre-fix SQL are in
+`/Users/brien/urnetwork/temp/fp2-completed-priority.Nm69B1mI/generic-evidence/`
+on this host; those logs may include
 environment diagnostics and must not be added to a product commit. The
 portable source checkpoint/commit, once created, is identified below.
 
@@ -1210,6 +1212,55 @@ host's process/session handles, local uncommitted files, Vault, or private
 test artifacts. Do not restart probes, tests, migrations or deployment merely
 because a process handle is absent on the new host; first inspect the actual
 source, deployed versions, ledger, and current Main state.
+
+### Committed cross-host source and unfinished gates
+
+At the operator's explicit direction, unfinished source was committed and
+merged into local Server `main` for transfer. `591d52c0` checkpoints the native
+FP2 selection/reliability signal work; `49e698d8` is the isolated scheduler
+source commit and `c10f0cf8` merges it into `main`. **Merged does not mean
+validated, migrated, activated, or deployed.** The completed-run priority
+remains disabled without an explicit `url_completed_run_priority_since`; its
+new receipt/maintenance schema must be applied through the reviewed migration
+sequence before completion-capable services can be rolled out. Do not set the
+priority epoch or deploy from this handoff solely because the source is on
+`main`.
+
+The exact scheduler test debt is: forced generic 100,000-provider claim and
+quiet paths passed in the private v2 candidate; populated 256-shard expiry
+**failed** with 8,515 cycle reads/34,422 buffers; the final lateral locked
+lookup was written, but v3 100,000-provider generic testing was interrupted
+before that case. Functional, custom/generic normal and race, causal pre-fix,
+catalog, migration-shape, and merged full Model/Taskworker gates remain
+unproven. A compile-only gate for `./model ./qualityprobe/... ./taskworker/work
+./api/handlers` passed after merging. The earlier shared full Model gate hit
+its 20-minute timeout during many local TestEnv setups; investigate this
+separately and do not count it as a passing FP2 gate. The local pre-commit
+hook's `/usr/local/go/bin/gofmt` is wrong-architecture on this host; the
+checksum-verified Darwin Go 1.26.7 `gofmt` was run explicitly over staged Go
+files and reported no changes. Repair the hook/toolchain on the new host
+before relying on it.
+
+The three top-level `server-*` Git worktrees were moved into
+`/Users/brien/urnetwork/temp/` using `git worktree move`:
+`server-grant-index.ia3wI8fq`, `server-maintenance-backup.SMjfesYc`, and
+`server-prober-grant.ph6eNObP`. The grant-index branch was committed as
+`5fef6daa` and merged in `9744bcb6`, resolving the append-only index to
+zero-based migration 738 (operator migration 739). Its focused replay and
+retained-snapshot page-work tests passed locally; no Main DDL was applied.
+The maintenance-backup worktree's distinct SIGNALS.md notes merged in
+`8460fdcc`. The older prober-grant implementation `b7423d18` conflicts
+semantically and at the Go type level with the newer bounded selector already
+on `main` (`760bc1b8`); its ancestry was recorded in `main` with an **ours**
+merge, not by adding duplicate code. Its historical source remains available
+in Git, while `760bc1b8` remains the active implementation. This is a
+deliberate supersession, not a passing cross-implementation equivalence test.
+
+The new host should fetch `origin/main`, check the final pushed commit recorded
+by the operator, and start with `git status --short` and `git log -8 --oneline`.
+The non-versioned monitor ledger and private test transcripts remain local to
+the old host unless copied separately; the source, known RED, exact handoff
+steps, and no-deploy boundary above are the portable minimum.
 
 Additional bounded investigations are sealed separately in
 `/Users/brien/urnetwork/temp/fp2-contract-lane-handoff.ls5u2PWK/HANDOFF.md`
