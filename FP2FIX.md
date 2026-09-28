@@ -482,7 +482,23 @@ successful download does not prove that historical copies are safe.
 
 ## Implementation, tests, and rollout
 
-Current work checkpoints (2026-09-28 06:02 UTC; these are not production-completion claims):
+Current checkpoint (2026-09-28 07:00 UTC; production acceptance is incomplete):
+
+| Boundary | Verified progress and remaining work |
+| --- | --- |
+| Schema, resources and Connect | Main is at migration 730; Config A and the paired IP resources are deployed. Connect convergence and classification provenance are recorded in the earlier checkpoints below. No additional classifier epoch has been published. |
+| API deployment | The request-query correction `253977f2` is running in all 20 expected API slots. The 06:54 independent census binds the actual image and Config A mount, with zero old, overlapping or missing slots. Production statistics still show about 5,124 buffer accesses per call; deployment is not a demonstrated performance recovery. The 06:51 non-executing custom/generic plans show indexed candidate reads, not the old large health-table scan. Remaining candidate/CTE work needs actual execution evidence and realistic local controls. |
+| Taskworker deployment | The new URL workflow image `2026.9.27-outerwerld-1057572370` is independently verified on all eight expected slots at 06:53, with no old or overlapping containers. Natural reliability/location rollup initialized the queue. The final Config B image remains built but undeployed; both current defaults and that image use an eight-worker-per-shard canary, not proven fleet capacity. |
+| Queue initialization | At 06:32 all 113,880 eligible providers were uninitialized. At 06:49 the current cohort was 108,079, with 107,863 initialized/warming and 216 uninitialized. Changing denominators are retained; this is initialization progress, not a complete four-hour cycle. |
+| Accepted URL evidence | The closed 06:47–06:57 window recorded 384 selected-version outcomes from 384 providers: 77 successes and 307 errors. Failures were 298 DNS, two TCP and seven content. Median positive DNS phase time was about 45.1 seconds; successful HTTP stages were substantially faster. Join resolver observations to the same tunnel's setup state before attributing these waits to DoH or to a provider. None reached ten successes in that sampled interval. |
+| Location-index publication | The pending singleton had nine reschedule errors at 06:52, classified as `Interrupted: context canceled`, with no schema-error signature. `claim_time` is a moving lease heartbeat, not a start time; subtracting it from release time cannot prove an early cancellation. Trace the authoritative elapsed-time log and cancellation path before changing the task timeout or publication behavior. |
+| Additional scheduler correctness | `53e34cc2` retires only locked, rejected stale eligibility hints so they cannot pin a bounded due head ahead of healthy providers. Both pre-fix causal failures reproduce; full URL-model normal/race, eligibility/hard-exclusion controls, full API normal/race and vet pass after the repair. This follow-up is committed but not deployed, and has not been established as the cause of the sampled Main DNS failures. |
+| Additional quality catalog | Config `c376c63` and Server `8d300943` add two exact, reviewed cloud-quality rules and independent omission tests. They do not change risk policy, current resource bytes or the deployed epoch; a future resource refresh needs its own classification diff/readback. |
+| User-facing availability and CPU | The latest retained five-profile public app-route check at 06:09 returned 20 providers each, all online fallback; native quality/speed recovery and authenticated data-plane behavior remain unverified. PostgreSQL samples of 61.90% at 06:12 and 40.27% at 06:26 exceed the expected approximately 30% baseline. Completed query time is not CPU attribution. |
+| Completion | The four-hour rolling quota, sustained native quality/speed supply, and normal PostgreSQL CPU are not established. Continue source-bound diagnosis, deterministic correction, authorized deployment and matched post-deployment measurements. Do not substitute attempt counts, a green test gate or rollout completion for these outcomes. |
+
+Historical work checkpoints (2026-09-28 06:02 UTC; superseded deployment states
+are retained as evidence history, not current holds):
 
 | Work item | Current boundary |
 | --- | --- |
