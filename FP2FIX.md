@@ -482,7 +482,7 @@ successful download does not prove that historical copies are safe.
 
 ## Implementation, tests, and rollout
 
-Current work checkpoints (2026-09-28 01:30 UTC; these are not production-completion claims):
+Current work checkpoints (2026-09-28 04:05 UTC; these are not production-completion claims):
 
 | Work item | Current boundary |
 | --- | --- |
@@ -491,9 +491,11 @@ Current work checkpoints (2026-09-28 01:30 UTC; these are not production-complet
 | Request-filter-aware fallback refill | Production-reader regression fails before the repair; bounded refill and adjacent request-filter/Redis-error controls pass after it |
 | Grant-selection CPU repair | Committed as `760bc1b8`; isolated 25-test race gate and current grant, settlement, lifecycle, controller, API, Connect and Taskworker owning partitions pass. Earlier whole-model baseline failure remains recorded; no whole-model pass is claimed |
 | GeoLite2/ARIN refresh and Vault inputs | Tooling `cea4a9a3`, paired resource publication Config `5313e94`; independent runtime readback passes. ConfigA deployed; all six reachable host samples mount the new resource bytes. ARIN database epoch is `1790556325`; per-process use requires connection provenance, not just file presence |
-| Connection classification provenance | Connect rollout is mixed. At 01:23 UTC, 362 of 132,191 current connections carried the exact new database epoch, covering 350 fully classified providers. This small rollout-biased cohort is not a fleet/country shadow acceptance |
-| URL workflow monitoring | Committed `850b3bb0`; full monitor normal (434.120s), race (485.007s), and vet pass. Observer promotion remains a separate controlled handoff |
-| Commits, migrations and four-service rollout | Core workflow committed `d479eccd`. Main migrated 721→730 at 01:07 UTC; the exact artifact probe passes. ConfigA is deployed; new Connect is published to all five blocks but actual replacement/drain is incomplete. API, Taskworker, and final ConfigB images are built, not yet deployed |
+| Connection classification provenance | Connect converged: 20/20 intended slots, no old running generation at 03:44 UTC. The 03:48 shadow found 126,160 current connections: 123,057 located, 123,055 with the exact expected epoch, two located provenance gaps, and 3,103 missing locations. These residuals still need attribution; coverage percentage alone is not acceptance |
+| Country-risk review | The 03:48 shadow would exclude 465/509 classified reliable Australian providers and 79/85 Malaysian providers by risk. This is a projected membership loss, not proof of incorrect classification or an empty API response. Actual address/registration evidence and rollout-order review remain prerequisites to publication |
+| URL workflow monitoring | Committed `850b3bb0`; full monitor normal (434.120s), race (485.007s), and vet pass. The attached observer was restored at 03:44 after a recorded observation gap; all ten log tails have fresh advancing post-start windows. URL workflow activation is still pending |
+| Commits, migrations and four-service rollout | Core workflow committed `d479eccd`. Main migrated 721→730 at 01:07 UTC; the exact artifact probe passes. ConfigA and Connect are deployed and verified. API, Taskworker, and final ConfigB images are built, not yet deployed; 20/20 API and 8/8 Taskworker slots still run prior versions |
+| PostgreSQL CPU | Recent short samples range from about 29% to 58% of 96 cores; 04:05 was about 35%. One near-30% interval does not establish sustained recovery, and the grant-selection fix has not yet reached the owning API fleet |
 | Main four-hour quota and app availability | Not established; requires live accepted-history and request-local verification |
 | Long-running evidence retention/replay safety | Required before sustained fleet ramp; no production cleanup authorized or performed |
 
@@ -506,6 +508,14 @@ A recent container start or a successful deploy-command exit is therefore not
 proof of the requested executable version. Continue exact image/config and
 remaining-generation checks; do not suppress pending version drift or force-stop
 containers solely because these orderly replacements take time.
+
+The country diagnostic's first Main EXPLAIN exposed severe cardinality
+underestimation: materialized current-provider sets were estimated at one row,
+selecting repeated nested loops between large sets. That statement was not
+executed. Validate a bounded diagnostic plan at realistic cardinality before
+running it; an EXPLAIN cost or a small-fixture pass is not a performance proof.
+Any diagnostic planner setting must remain local to its read-only transaction,
+never a global production tuning change.
 
 1. Record a read-only baseline of eligibility counts by rejection reason,
    quality/speed/online membership, request-specific US and Best Available
