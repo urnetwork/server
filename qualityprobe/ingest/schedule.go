@@ -26,6 +26,9 @@ import (
 // against a server that has not deployed it.
 var ErrDueUnsupported = errors.New("ingest: the server does not implement /network/provider-egress-due")
 
+// An owned rolling-count maintenance page is not an empty due cohort.
+var ErrDuePriorityMaintenancePending = errors.New("ingest: completed URL-run priority maintenance is pending")
+
 // Reports that the server has no attempt endpoint (404),
 // for the same reason as ErrDueUnsupported. Probing continues; only the
 // server-side backoff for failing providers is unavailable.
@@ -141,6 +144,9 @@ type DueProvider struct {
 	SuccessesNeeded      int                        `json:"successes_needed,omitempty"`
 	CycleStartedAt       time.Time                  `json:"cycle_started_at,omitzero"`
 	OutcomeCount         int                        `json:"outcome_count,omitempty"`
+	ClaimOrdinal         int64                      `json:"claim_ordinal,omitempty"`
+	ClaimedAt            time.Time                  `json:"claimed_at,omitzero"`
+	CompletedRunCount    *int64                     `json:"completed_run_count,omitempty"`
 	SecurityDestinations []egresshealth.Destination `json:"security_destinations,omitempty"`
 	// The lower-case ISO 3166-1 alpha-2 country.
 	CountryCode string `json:"country_code,omitempty"`
@@ -151,8 +157,9 @@ type DueProvider struct {
 // providers are sends providers, each with its place; one that predates that
 // sends client_ids, which read as providers with no place.
 type dueResult struct {
-	Providers []DueProvider `json:"providers,omitempty"`
-	ClientIds []string      `json:"client_ids,omitempty"`
+	Providers                  []DueProvider `json:"providers,omitempty"`
+	ClientIds                  []string      `json:"client_ids,omitempty"`
+	PriorityMaintenancePending bool          `json:"priority_maintenance_pending,omitempty"`
 }
 
 // The list the result carries, in the server's order.
@@ -232,6 +239,9 @@ func (self *Client) Due(ctx context.Context, limit int) ([]DueProvider, error) {
 	var out dueResult
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, err
+	}
+	if out.PriorityMaintenancePending {
+		return nil, ErrDuePriorityMaintenancePending
 	}
 	return out.due(), nil
 }

@@ -37,6 +37,9 @@ type ProviderEgressRules struct {
 	// URL turns release their tunnel before waiting for these durable intervals.
 	UrlSuccessIntervalSeconds int `yaml:"url_success_interval_seconds" json:"url_success_interval_seconds"`
 	UrlFailureIntervalSeconds int `yaml:"url_failure_interval_seconds" json:"url_failure_interval_seconds"`
+	// Operator-attested retirement of old completion writers; zero keeps the
+	// old order. Exact rolling priority starts only after another four hours.
+	UrlCompletedRunPrioritySince time.Time `yaml:"url_completed_run_priority_since" json:"url_completed_run_priority_since,omitzero"`
 	// DarkConsecutiveFailures is how many failed checks in a row make a
 	// provider dark. One failed check is a failure, not a verdict: a slow cold
 	// start or a reconnect mid-check fails a single check for reasons that
@@ -411,41 +414,47 @@ type ProviderEgressProbeAttempt struct {
 // hand it back to the prober early.
 func SetProviderEgressProbeAttempt(ctx context.Context, a *ProviderEgressProbeAttempt) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		stored, err := tx.Exec(
-			ctx,
-			`
-			INSERT INTO provider_egress_probe_attempt (
-				client_id,
-				attempt_at,
-				probe_failure,
-				update_time
-			)
-			VALUES ($1, $2, $3, $4)
-			ON CONFLICT (client_id) DO UPDATE
-			SET
-				attempt_at = $2,
-				probe_failure = $3,
-				update_time = $4
-			WHERE provider_egress_probe_attempt.attempt_at < EXCLUDED.attempt_at
-			`,
-			a.ClientId,
-			a.AttemptAt.UTC(),
-			a.ProbeFailure,
-			server.NowUtc(),
-		)
-		server.Raise(err)
-		if stored.RowsAffected() > 0 && a.ProbeFailure != "" {
-			// Setup/publication failures preserve evidence and quota. Release the
-			// claim into paced retry without inventing a failed URL measurement.
-			server.RaisePgResult(tx.Exec(ctx, `
-				UPDATE provider_egress_probe_cycle SET next_attempt_at = `+
-				providerUrlProbePacedAttemptSql("provider_egress_probe_cycle", "$2", "0")+`
-				WHERE client_id=$1 AND cycle_started_at <= $2
-				AND (success_count < $3 OR (`+providerHasUrlSecurityExceptionSql("provider_egress_probe_cycle.client_id")+`))
-				AND (latest_result_at IS NULL OR latest_result_at < $2)`,
-				a.ClientId, a.AttemptAt.UTC(), ProviderEgressProbeSuccessTarget))
-		}
+		setProviderEgressProbeAttemptInTx(ctx, tx, a, true)
 	})
+}
+
+// Completion receipts own their claim-bound pacing; the legacy attempt row
+// remains a last-observation diagnostic and must not release a newer claim.
+func setProviderEgressProbeAttemptInTx(ctx context.Context, tx server.PgTx, a *ProviderEgressProbeAttempt, updateUrlPacing bool) {
+	stored, err := tx.Exec(
+		ctx,
+		`
+		INSERT INTO provider_egress_probe_attempt (
+			client_id,
+			attempt_at,
+			probe_failure,
+			update_time
+		)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (client_id) DO UPDATE
+		SET
+			attempt_at = $2,
+			probe_failure = $3,
+			update_time = $4
+		WHERE provider_egress_probe_attempt.attempt_at < EXCLUDED.attempt_at
+		`,
+		a.ClientId,
+		a.AttemptAt.UTC(),
+		a.ProbeFailure,
+		server.NowUtc(),
+	)
+	server.Raise(err)
+	if updateUrlPacing && stored.RowsAffected() > 0 && a.ProbeFailure != "" {
+		// Setup/publication failures preserve evidence and quota. Release the
+		// claim into paced retry without inventing a failed URL measurement.
+		server.RaisePgResult(tx.Exec(ctx, `
+			UPDATE provider_egress_probe_cycle SET next_attempt_at = `+
+			providerUrlProbePacedAttemptSql("provider_egress_probe_cycle", "$2", "0")+`
+			WHERE client_id=$1 AND cycle_started_at <= $2
+			AND (success_count < $3 OR (`+providerHasUrlSecurityExceptionSql("provider_egress_probe_cycle.client_id")+`))
+			AND (latest_result_at IS NULL OR latest_result_at < $2)`,
+			a.ClientId, a.AttemptAt.UTC(), ProviderEgressProbeSuccessTarget))
+	}
 }
 
 // GetProviderEgressProbeAttempt returns the last recorded probe attempt for a

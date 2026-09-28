@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/urnetwork/server/qualityprobe"
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
@@ -25,6 +26,7 @@ type Provider struct {
 	SuccessesNeeded      int
 	CycleStartedAt       time.Time
 	OutcomeCount         int
+	ClaimOrdinal         int64
 	SecurityDestinations []egresshealth.Destination
 }
 
@@ -264,7 +266,8 @@ func (self *Prober) maxLoggedDistinctErrors() int {
 // longer than the attempt backoff) but harmless, and reporting unconditionally
 // means no path through this function can forget.
 //
-// A failure to report never fails the probe itself.
+// Legacy/manual attempt reporting is best effort. A claimed URL turn requires
+// an identity-bearing completion acknowledgement, independent of health credit.
 func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 	providerClientId := provider.ClientId
 
@@ -450,6 +453,17 @@ func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 	}
 
 	failure, err := probe()
+	if provider.ClaimOrdinal > 0 {
+		completion := qualityprobe.UrlProbeCompletion{
+			ClientId: providerClientId, ClaimOrdinal: provider.ClaimOrdinal,
+			CompletedAt: time.Now().UTC(), ProbeFailure: failure, AllowPacing: true,
+		}
+		reporter, ok := self.Attempts.(qualityprobe.UrlProbeCompletionReporter)
+		if !ok {
+			return errors.Join(err, qualityprobe.ErrUrlProbeCompletionUnsupported)
+		}
+		return errors.Join(err, reporter.ReportUrlProbeCompletion(ctx, completion))
+	}
 	self.reportAttempt(ctx, providerClientId, failure)
 	return err
 }
