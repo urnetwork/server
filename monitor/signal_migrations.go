@@ -305,6 +305,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "probe queue generated slot and partial slot index", requiredVersion: 728, rowColumn: 139},
 	{name: "URL policy version and exact selected-success index", requiredVersion: 729, rowColumn: 140},
 	{name: "connection ARIN lookup provenance", requiredVersion: 730, rowColumn: 141},
+	{name: "network_client_location_reliability_arin_exceptions", requiredVersion: 731, rowColumn: 142},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -2012,7 +2013,15 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		                          in pg_get_functiondef(function_record.oid)) > 0
 		       ),
 		       `+competitionStagingApprovalArtifactQuery+`,
-		       `+strings.Join(migrationFp2ArtifactQueries, ",\n")+`
+		       `+strings.Join(migrationFp2ArtifactQueries, ",\n")+`,
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'network_client_location_reliability'
+		             AND index_name = 'network_client_location_reliability_arin_exceptions'
+		             AND definition = 'CREATE INDEX network_client_location_reliability_arin_exceptions ON public.network_client_location_reliability USING btree (client_id) INCLUDE (arin_risk, arin_non_quality) WHERE (arin_risk OR arin_non_quality)'
+		             AND predicate_definition = '(arin_risk OR arin_non_quality)'
+		             AND indisvalid AND indisready
+		       )
 		FROM version;
 	`)
 	if err != nil {

@@ -1,10 +1,11 @@
 # FindProviders2 supply and quality-probe repair plan
 
-Status: design and implementation plan, 2026-09-27. This document resets the
-quality-probe/indexing contract; it does not claim the changes below are live.
-Implement and test it in stages, keeping Main's existing supply available until
-the replacement index has been shadow-checked. IPv6 provider admission remains
-outside this rollout until the provider binaries support it.
+Status: implementation and Main validation in progress, 2026-09-28. This
+document defines the quality-probe/indexing contract. The checkpoint below
+distinguishes deployed changes from remaining production acceptance; code or
+deployment completion alone does not establish the four-hour quota or CPU
+recovery. IPv6 provider admission remains outside this rollout until the
+provider binaries support it.
 
 ## Product contract
 
@@ -482,19 +483,60 @@ successful download does not prove that historical copies are safe.
 
 ## Implementation, tests, and rollout
 
-Current checkpoint (2026-09-28 07:00 UTC; production acceptance is incomplete):
+Current checkpoint (2026-09-28 09:11 UTC; production acceptance is incomplete):
+
+- All eight actual Taskworkers have the reviewed new config mount, activating
+  eight shards with 64 workers each (512 configured slots). The census ended
+  08:44:58; task arguments corroborated the geometry at 08:45 and 08:59.
+- Unique accepted URL successes were 11,737 in 08:38:17–08:48:17
+  (19.56/second), then 5,469 in 08:45:17–08:55:17 (9.12/second). The latter
+  has 8,570 outcomes, 2,263 DNS failures, positive DNS median 7.00 seconds
+  and p95 45.13 seconds. These overlapping measurement-time windows involve
+  different cohorts and possible late ingestion; neither establishes rolling
+  quota recovery or the approximately 74.88/second maintenance floor.
+- The five 08:53 public US/Best Available quality/speed/refill profiles each
+  returned 20 distinct public IPv4 providers, all native requested-bucket
+  tiers under the reviewed offset 11. This is request-local availability,
+  not all-market, authenticated, backend-bound or data-plane acceptance.
+- At 08:58 the complete exclusion cache naturally renewed beyond the earlier
+  publication's expiry: `ready:v2`, 35,441 members and 1,798,948 ms remaining
+  of the 30-minute TTL. Sequential reads do not establish membership parity.
+- PostgreSQL short CPU samples were 17.30% at 08:52 and 38.56% at 09:00,
+  versus 61.02% at 08:24. A matched 348-second post-config statement window
+  fell to about 70,980 statements/second and 1.86 million shared-buffer
+  accesses/second, versus 200,628 and 2.91 million earlier. Transaction
+  controls are included; these are not request counts or CPU attribution.
+  Workload/admission changed and sustained recovery remains unproven.
+- Three active shard tasks had reschedule errors at 08:59; an indexed
+  current-error discriminator at 09:11 found none. Their natural recovery
+  does not establish the historical causes. Ordinary measured URL failures
+  do not stop a shard; a turn's control-plane/publication error does stop
+  fresh admission while current owners drain. Multi-cycle utilization is
+  under test. Separately, an actual-Client regression proves the old shared
+  drain/removal deadline can expire before derived-client retirement.
+  Its private correction passes owning and independent normal/race/vet;
+  the adjacent Tunnel final-join/worker-release correction is in progress.
+  These lifecycle follow-ups are not deployed or yet established as Main's
+  dominant throughput cause.
+
+Previous checkpoint (2026-09-28 08:45 UTC; retained evidence, superseded by
+the observations above where they differ):
 
 | Boundary | Verified progress and remaining work |
 | --- | --- |
-| Schema, resources and Connect | Main is at migration 730; Config A and the paired IP resources are deployed. Connect convergence and classification provenance are recorded in the earlier checkpoints below. No additional classifier epoch has been published. |
-| API deployment | The request-query correction `253977f2` is running in all 20 expected API slots. The 06:54 independent census binds the actual image and Config A mount, with zero old, overlapping or missing slots. Production statistics still show about 5,124 buffer accesses per call; deployment is not a demonstrated performance recovery. The 06:51 non-executing custom/generic plans show indexed candidate reads, not the old large health-table scan. Remaining candidate/CTE work needs actual execution evidence and realistic local controls. |
-| Taskworker deployment | The new URL workflow image `2026.9.27-outerwerld-1057572370` is independently verified on all eight expected slots at 06:53, with no old or overlapping containers. Natural reliability/location rollup initialized the queue. The final Config B image remains built but undeployed; both current defaults and that image use an eight-worker-per-shard canary, not proven fleet capacity. |
-| Queue initialization | At 06:32 all 113,880 eligible providers were uninitialized. At 06:49 the current cohort was 108,079, with 107,863 initialized/warming and 216 uninitialized. Changing denominators are retained; this is initialization progress, not a complete four-hour cycle. |
-| Accepted URL evidence | The closed 06:47–06:57 window recorded 384 selected-version outcomes from 384 providers: 77 successes and 307 errors. Failures were 298 DNS, two TCP and seven content. Median positive DNS phase time was about 45.1 seconds; successful HTTP stages were substantially faster. Join resolver observations to the same tunnel's setup state before attributing these waits to DoH or to a provider. None reached ten successes in that sampled interval. |
-| Location-index publication | The pending singleton had nine reschedule errors at 06:52, classified as `Interrupted: context canceled`, with no schema-error signature. `claim_time` is a moving lease heartbeat, not a start time; subtracting it from release time cannot prove an early cancellation. Trace the authoritative elapsed-time log and cancellation path before changing the task timeout or publication behavior. |
-| Additional scheduler correctness | `53e34cc2` retires only locked, rejected stale eligibility hints so they cannot pin a bounded due head ahead of healthy providers. Both pre-fix causal failures reproduce; full URL-model normal/race, eligibility/hard-exclusion controls, full API normal/race and vet pass after the repair. This follow-up is committed but not deployed, and has not been established as the cause of the sampled Main DNS failures. |
+| Schema, resources and Connect | Main reached migration 731 at 07:56:50. The independent catalog confirms its concurrent partial index is ready and valid; no data rows or database sessions were removed. Config Updater `2026.9.28-outerwerld-1057841730` was published at 08:35, retaining the same paired IP database bytes and epoch. Connect convergence and classification provenance are recorded in the earlier checkpoints below; this config rollout can cycle config-mounted services, and their earlier image censuses do not prove new-generation activation. |
+| API deployment and exclusion-cache cost | The request-query correction `253977f2` was independently verified in all 20 expected API slots at 06:54 with Config A. Before complete cache publication, the fallback still cost about 5,124 buffer accesses per call. In the matched 08:28:20–08:33:42 interval, the exact hard-exclusion fallback fingerprint had zero calls and zero buffer accesses. This proves removal of that read-through workload in that interval, not global CPU recovery or permanent cache readiness. The 08:23 public-route acceptance below predates the 08:35 config rollout; refresh its request and artifact evidence after convergence. |
+| Taskworker deployment | Repair image `2026.9.28-outerwerld-1057818710`, built from Server `6c6d4058` and local Connect `c2c515c6`, is independently verified on all eight actual slots at 08:11:22, with no old, overlapping or missing containers and Config A unchanged. It includes sparse publication, stale-head retirement, task timeout ownership, and pending-contract/setup-failure attribution. Warpctl's 40 status samples are HTTP responses, not 40 containers. |
+| Capacity ramp | Config `36235fe0` and Server synthetic controls `de40a227` passed owning and independent normal/race/vet gates. Config Updater `2026.9.28-outerwerld-1057841730` was built and published at 100%; the 08:44:36–08:44:58 census verifies the exact read-only config mount and resource digest on all eight actual Taskworkers, with no old, overlapping or missing containers. At 08:45:16 all eight shard tasks have active leases, explicit URL concurrency/limit 64, result version 1, and zero reschedule errors. This activates 512 configured slots, replacing the 32-slot canary; it is not proof of 512 simultaneously occupied workers, increased throughput, or rolling quota completion. The three-scalar comparison is against checked-in Config B, not the former live Config A. |
+| Queue initialization and quota | At 08:19 the current cohort was 107,821: 107,475 warming, 346 uninitialized/overdue, and zero rolling quota-complete. Selected-policy successes needed total 1,069,488. The authoritative partition is consistent; cached rolling counts match. Eight unresolved security exceptions have unknown legacy target identities. Changing denominators are retained; this is initialization progress, not a complete four-hour cycle. |
+| Accepted URL evidence | The closed post-convergence 08:11:22–08:21:22 window recorded 2,203 selected-version outcomes from 2,203 providers: 1,735 successes and 468 errors, including 239 DNS failures. Median positive DNS time was about 1.12 seconds, p95 45.11 seconds. The earlier 07:11:05–07:21:05 window had 940 outcomes/695 successes. These are different cohorts/windows, not isolated causal attribution. Current successful throughput is about 2.89/second, still far below the approximately 74.88/second maintenance floor. No provider reached ten successes within that ten-minute interval; the separate rolling census, not this short-window count, measures quota. |
+| DNS versus tunnel establishment | At 07:21 the same-source/boot counters paired all eight Taskworkers with all 45 result/path cells observed. Endpoint deltas show 973 answered waves, one authoritative empty answer, and 484 timeouts: 205 forming, 215 provider-unresponsive and 64 active. Counter scrape endpoints are near-aligned, not identical to the SQL receipt window; waves are not URL outcomes. The path label is the same tunnel's state at wave completion, not proof of its entire contact history. The first collector invocation incorrectly expected the Config A version instead of the Taskworker service version and is retained as unknown, not negative DNS evidence. |
+| Location-index publication | The earlier source-bound plan scanned about 155 million historical location rows. Sparse complete-exception SQL `6c6d4058` plus index 731 passed causal/parity and independent normal/race/vet gates. Main's 07:57:57 non-executing plan now uses the sparse exception index and historical-location primary-key lookups, without the large history scan. At 08:17 the direct Redis read finds `ready:v2`, 34,604 set members including the marker, and 1,792,610 ms remaining of the 30-minute TTL; the pre-rollout key was absent. These sequential non-atomic observations prove fresh cache publication, not complete membership parity or completion of the later task stages. The bounded task journal did not establish a post-convergence finish and had one host timeout. Sustained CPU savings remain unproven. |
+| Timeout attribution | Deployed `7f3d7b8b` preserves the timeout cause through panic recovery and joins timer ownership in both task execution paths. Deterministic pre-fix failures, independent focused normal/race, existing drain/lease/claim normal/race and vet pass. This fixes attribution/lifecycle safety rather than the bulk query cost. `claim_time` remains a moving heartbeat, not a start clock. |
+| Additional scheduler correctness | Deployed `53e34cc2` retires only locked, rejected stale eligibility hints so they cannot pin a bounded due head ahead of healthy providers. Both pre-fix causal failures reproduce; full URL-model normal/race, eligibility/hard-exclusion controls, full API normal/race and vet pass after the repair. This mechanism has not been established as the cause of the sampled Main DNS failures. |
+| Probe-credit allocation | A read-only PG/Redis capture at 08:13:53–08:14:02 finds all first 64 active grants have known reservations at least as large as their durable remaining credit. This explains rejection by the two bounded candidate windows at that observation. It does not establish corrupt reservations, historical CPU causality or permission to release them. Fifty older keys are missing and remain diagnostic unknowns; the application treats a missing reservation as zero. Trace normal reservation/closure and complete-reader costs before changing accounting. |
 | Additional quality catalog | Config `c376c63` and Server `8d300943` add two exact, reviewed cloud-quality rules and independent omission tests. They do not change risk policy, current resource bytes or the deployed epoch; a future resource refresh needs its own classification diff/readback. |
-| User-facing availability and CPU | The latest retained five-profile public app-route check at 06:09 returned 20 providers each, all online fallback; native quality/speed recovery and authenticated data-plane behavior remain unverified. PostgreSQL samples of 61.90% at 06:12 and 40.27% at 06:26 exceed the expected approximately 30% baseline. Completed query time is not CPU attribution. |
+| User-facing availability and CPU | At 08:23 the five ordinary public app-route profiles each returned 20 unique public IPv4 providers with correct country and exclusion-aware refill. All 100 responses used native requested-bucket quality/speed tiers under verified Config A tier offset 11; the 07:07 sample had only one native and 99 online fallback. This is current request-local improvement, not all-market, authenticated, backend-bound or data-plane proof. PostgreSQL was still at 61.02% of 96 logical CPUs at 08:24 after cache publication. Recovery to the expected approximately 30% remains unproven; matched residual query deltas are under investigation. Completed query time is not CPU attribution. |
 | Completion | The four-hour rolling quota, sustained native quality/speed supply, and normal PostgreSQL CPU are not established. Continue source-bound diagnosis, deterministic correction, authorized deployment and matched post-deployment measurements. Do not substitute attempt counts, a green test gate or rollout completion for these outcomes. |
 
 Historical work checkpoints (2026-09-28 06:02 UTC; superseded deployment states

@@ -1123,7 +1123,105 @@ func syntheticMigrationPartialIndexContracts() []syntheticMigrationPartialIndexC
 		{version: 645, table: "network_onboarding", name: "network_onboarding_next_send_at", keys: "next_send_at", predicate: "(next_send_at IS NOT NULL)"},
 		{version: 652, table: "competition_round", name: "competition_round_one_active_staging", keys: "competition_id", predicate: "((staging = true) AND (canceled = false) AND (finalized_at IS NULL))", unique: true},
 		{version: 693, table: "location", name: "location_geoname_id", keys: "geoname_id", predicate: "(geoname_id IS NOT NULL)", unique: true},
+		{version: 731, table: "network_client_location_reliability", name: "network_client_location_reliability_arin_exceptions", keys: "client_id", include: "arin_risk, arin_non_quality", predicate: "(arin_risk OR arin_non_quality)"},
 	}
+}
+
+// A future sparse index is pending, while its absence after publication must
+// page and a later exact observation must clear that same schema-drift finding.
+func TestMigrationsSignalSparseArinIndexVersionAndRecovery(t *testing.T) {
+	artifact := syntheticMigrationPartialIndexArtifact(t, 731)
+	for _, test := range []struct {
+		version int
+		present bool
+		drift   bool
+	}{
+		{version: 730},
+		{version: 731, drift: true},
+		{version: server.MigrationCount(), present: true},
+	} {
+		row := syntheticMigrationArtifactRow(test.version)
+		row[artifact.rowColumn] = fmt.Sprint(test.present)
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM migration_catalog") {
+				return syntheticMigrationCatalogRows(test.version), nil
+			}
+			return []Row{row}, nil
+		}}
+		alerts, err := NewMigrationsSignal().Run(t.Context(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		drift, behind := false, false
+		for _, alert := range alerts {
+			switch alert.Class {
+			case "migration-schema-drift":
+				drift = true
+				if alert.Severity != SeverityPage || !strings.Contains(alert.Markdown(), artifact.name+"@v731") {
+					t.Fatal("missing sparse index lost its exact published artifact gate")
+				}
+			case "migration-behind":
+				behind = true
+			default:
+				t.Fatalf("unexpected migration alert: %s", alert.Class)
+			}
+		}
+		if drift != test.drift || behind != (test.version < server.MigrationCount()) {
+			t.Fatalf("version=%d present=%t drift=%t behind=%t", test.version, test.present, drift, behind)
+		}
+	}
+}
+
+// The emitted guard reads the actual migration's catalog definition. Dropping
+// the local fixture's index and rolling back proves absence and recovery too.
+func TestMigrationsSignalSparseArinIndexMatchesPublishedSchema(t *testing.T) {
+	var contract syntheticMigrationPartialIndexContract
+	for _, candidate := range syntheticMigrationPartialIndexContracts() {
+		if candidate.version == 731 {
+			contract = candidate
+			break
+		}
+	}
+	if contract.name == "" {
+		t.Fatal("sparse ARIN index has no exact partial-index contract")
+	}
+	query := ""
+	source := &syntheticSource{postgresFn: func(emitted string) ([]Row, error) {
+		if strings.Contains(emitted, "FROM migration_catalog") {
+			return syntheticMigrationCatalogRows(server.MigrationCount()), nil
+		}
+		query = emitted
+		return []Row{syntheticMigrationArtifactRow(server.MigrationCount())}, nil
+	}}
+	if alerts, err := NewMigrationsSignal().Run(t.Context(), syntheticSettings(source)); err != nil || len(alerts) != 0 {
+		t.Fatalf("coherent sparse-index catalog is not healthy: %v", err)
+	}
+	prefix, _, ok := strings.Cut(query, "SELECT version.value,")
+	if !ok {
+		t.Fatal("migration signal did not emit its catalog query")
+	}
+	guard := syntheticMigrationPartialIndexGuard(t, query, contract)
+	query = prefix + "SELECT EXISTS (SELECT 1 FROM index_artifact " + guard + ")"
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		server.Tx(ctx, func(tx server.PgTx) {
+			for _, test := range []struct {
+				change string
+				want   bool
+			}{
+				{change: "SAVEPOINT sparse_arin_index", want: true},
+				{change: "DROP INDEX network_client_location_reliability_arin_exceptions"},
+				{change: "ROLLBACK TO SAVEPOINT sparse_arin_index", want: true},
+			} {
+				server.RaisePgResult(tx.Exec(ctx, test.change))
+				var matched bool
+				server.Raise(tx.QueryRow(ctx, query).Scan(&matched))
+				if matched != test.want {
+					t.Fatalf("sparse index matched=%t, want=%t after %s", matched, test.want, test.change)
+				}
+			}
+		})
+	})
 }
 
 type syntheticMigrationPartialIndexObservation struct {

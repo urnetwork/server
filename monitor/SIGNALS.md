@@ -418,6 +418,16 @@ preserve bounded per-minute completion history, pending claim/lease state,
 direct PostgreSQL capacity, active reindex progress, and Redis cluster state;
 attribute the failed layer before mutating it.
 
+`Interrupted: context canceled` alone does not identify deployment drain or a
+short attempt. `claim_time` advances with the lease heartbeat; release minus
+claim is not execution duration. Correlate the task family's authoritative
+elapsed-time log with the running image and its configured budget. On
+2026-09-28, two current-image location publications failed at exactly 120s,
+while an independently sampled bulk reliability read exceeded 153s. The old
+task panic path omitted the timeout cause, making budget exhaustion look like
+ordinary cancellation. A corrected error label is not a performance fix;
+require natural successful publication and renewed cache freshness afterward.
+
 The required completion-count aggregate must return exactly one row with one
 column. A successful command with no row, a missing column, or extra rows or
 columns is unknown (`cannot-observe`, `observation-invalid-response`), not a
@@ -3144,6 +3154,21 @@ candidate/result counts or a newly warm cache, establish bounded work. Retain
 missing/legacy/expired-cache regression controls, policy parity and both custom
 and generic prepared plans. The request-only candidate-input repair does not
 change the shared fleet eligibility policy or justify a new index by itself.
+Distinguish that bounded request query from `newProviderCountFilter`'s bulk
+publication query. Its all-row location-rollup read was observed against a
+table with about 155 million estimated live historical clients and a 24 GB
+heap, despite an eligible probe cohort near 108,000. The two populations are
+not interchangeable. A current catalog estimate and non-executing plan can
+establish the historical-scan risk without running an incident-time full
+count; they do not measure exact live rows or execution cost. Performance
+controls must include large neutral history, not only current providers.
+Preserve the complete `ready:v2` exclusion contract for disconnected, invalid
+and explicitly requested identities when replacing that scan with sparse
+exception reads. Restricting the snapshot to connected providers would silently
+weaken stale-cache and explicit-client safety. Verify the online partial index
+is valid and used, task completion resumes, the cache marker/TTL is renewed,
+and request read-through call volume falls before claiming recovery. An empty
+or expired snapshot remains unknown coverage, never an empty exclusion set.
 Statement wall-time deltas may include waits; use §1.3c for CPU and the wait
 history below for persistence rather than assigning CPU shares from SQL time.
 
@@ -7534,6 +7559,20 @@ real provider ping timeouts, TCP/HTTP/TLS evidence, confinement, retries,
 admission budgets and dark guards retain their existing semantics. This fixes
 false attribution, not contract-service capacity or proof of restored coverage.
 
+The 2026-09-28 deterministic controls establish two earlier boundaries too:
+internal credential creation can fail before a Client is constructed, and a
+sampled-URL DNS cutoff can precede the ping callback while an actual contract
+wait is still pending. Preserve that instance-local evidence immediately,
+including pending waits, rather than waiting for a later failure latch. Only
+the exact owner/destination's no-contact witness permits `not_measured`; a
+`forming` dashboard label alone does not. Any attempted provider write still
+overrides it across all that private multi-client's windows, and cancellation
+must release pending counts without inventing a natural failure. Require
+pre-fix deterministic controls with real contract-manager/send-sequence hooks,
+a granted-contract/contact negative control, and both Server and Connect
+artifact verification. These controls establish correctness defects, not the
+cause of any particular aggregate Main DNS timeout without matching evidence.
+
 The cheap `completed_buffered` gauge retains a result until its cohort joins
 even when that safe result has already been early-acknowledged. It is not an
 unsubmitted-provider count. Early publication flushes groups of 16 passing,
@@ -11298,6 +11337,32 @@ A deterministic regression blocks the remove-client response, starts
 `CloseAndWait`, proves shutdown remains joined until release, and requires one
 successful removal. Adjacent stale-generation and shutdown-store controls must
 remain green.
+
+A later deterministic source control exposed a different reached-channel
+failure: Client/OOB drain and identity removal shared one finite deadline.
+When the real Client join consumed that deadline, the removal authority
+received an already-expired context and the child stayed active. A successful
+outer wait or logged close timeout must not be treated as successful identity
+retirement. The correction must retain the actual carrier/Client/OOB owners
+until joined, then give the identity request its own existing finite budget.
+It must not revoke credentials before admitted contract-close controls finish.
+At the URL-worker boundary, expiration of the graceful waiter must cancel
+remaining work and retain ownership until the final joins complete; it cannot
+release a slot while cleanup continues invisibly in the background. Preserve
+the original timeout/error, restart-store semantics and private owner isolation.
+
+This is source correctness evidence, not attribution of a Main incident.
+For live attribution use same-source, same-boot deltas of
+`urnetwork_egress_probe_internal_credentials_total{operation,result}` under
+§2.19, with every expected Taskworker and all eight finite cells present.
+New `retire/timeout|canceled|error` events distinguish failed cleanup from
+ordinary in-flight children; a mint-minus-retire difference alone does not,
+because probes span observation windows. Missing metrics and process resets
+remain unknown. Correlate with this probe's post-rollout mature residuals,
+keeping never-connected and previously-connected children separate. Tests must
+cross the old deadline with an actual join barrier, verify no premature
+revocation or slot release, and then prove authenticated retirement after the
+barrier opens. Never expose raw credential errors in a final close error.
 
 Do not bulk-delete or deactivate production children to clear either alert.
 Software fixes prevent new leakage; historical active stock needs a separately
@@ -15587,9 +15652,10 @@ This is the version-to-artifact contract checked by the probe:
 | 728 | Stored generated 1024-slot routing column and valid/ready slot/next-attempt/client partial index |
 | 729 | Required zero-default policy-version column and version-one URL-success partial index, retaining the persistent URL marker/outcome obligations of 726 |
 | 730 | Nullable actual-lookup timestamp and required zero-default ARIN database epoch on connection location |
+| 731 | Valid/ready nonunique btree `network_client_location_reliability_arin_exceptions` on `(client_id)`, including `(arin_risk, arin_non_quality)`, with exactly `(arin_risk OR arin_non_quality)` as its predicate |
 
-FP2's 722–730 contract separates schema readiness from live evidence. A numeric
-730 alone cannot prove exact partial-index predicates, generated-slot semantics,
+FP2's 722–731 contract separates schema readiness from live evidence. A numeric
+731 alone cannot prove exact partial-index predicates, generated-slot semantics,
 history idempotency or preserved TLS quarantine. Conversely, missing artifacts
 above the recorded head are pending migrations, not reordered-history proof.
 Apply these migrations before any new worker seeds the cycle/history tables;
@@ -15601,6 +15667,17 @@ classification of existing connections: Connect must record the actual loaded
 database epoch after reconnect, independently of default-false exception bits.
 Do not clear legacy TLS findings or count version-zero history as version-one
 success merely to make readiness or coverage appear healthy.
+
+Version 731's sparse covering index preserves complete ARIN exceptions without
+scanning neutral historical rollup rows. The monitor pins its relation, key,
+included-column order, predicate, uniqueness, access method and valid/ready
+state; a same-name lookalike or interrupted concurrent build is not healthy.
+Absence before head 731 is pending rollout, not schema drift. After publication,
+require the exact catalog shape and a fresh coherence check to clear drift;
+use the reviewed append-only recovery path, never a hand-created substitute or
+an edited audit head. Catalog readiness does not prove index use, successful
+publication or cache freshness. The deterministic missing-731 coverage failure
+was a monitor catalog omission, not evidence that Main's index was absent.
 
 Version 721 adds explicit operator approval for a finalized, uncanceled staging
 winner; it does not approve production candidates or reopen winner selection.
@@ -16178,6 +16255,17 @@ running executable's `debug.ReadBuildInfo`; `WARP_IMAGE_DIGEST` is injected
 only after Warp pulls and inspects the exact image it passes to `docker run`.
 Both halves are required, and the reported digest must independently match the
 running container and the executable extracted from that digest.
+
+Warpctl version-sampling counts are HTTP responses, not unique processes or
+containers. Its twenty requests per logical block can produce forty samples
+for a two-block service on eight actual host/block slots. Derive the desired
+denominator from the current service placement and enabled inventory, then
+verify each slot's actual image and any old/new overlap independently. A fully
+new sampled version does not prove that every old draining container exited;
+a large sample count does not establish extra capacity. The 2026-09-28
+Taskworker rollout independently verified eight actual slots despite forty
+successful version samples. The metric join above already uses process
+identities rather than this sampler count; do not replace its denominator.
 
 The production discriminator was a Taskworker release on 2026-09-01. Six
 directly observable blocks on enabled edges 0/1/3 executed config digest
