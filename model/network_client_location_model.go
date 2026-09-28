@@ -6533,6 +6533,12 @@ func FindProviders2(
 			now := server.NowUtc()
 			for _, clientScore := range clientScores {
 				if clientScore.EgressValidUntil == nil || !now.Before(*clientScore.EgressValidUntil) {
+					// Older native cache records may not also set Online. Their
+					// prior native admission also admitted online fallback. Expiry
+					// removes only native evidence; request filters still run below.
+					if clientScore.PassesMinimums[RankModeQuality] || clientScore.PassesMinimums[RankModeSpeed] {
+						clientScore.Online = true
+					}
 					clientScore.PassesMinimums = nil
 					clientScore.UrlProbeSuccessWeight = 1
 				}

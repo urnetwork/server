@@ -9347,4 +9347,31 @@ var migrations = []any{
 		ON transfer_balance (network_id, end_time, start_time, balance_id)
 		WHERE active
 	`),
+
+	// Observed invalid minutes must not become missing-neutral client history.
+	// Old running writers do not maintain this count; their next checkpoint
+	// invalidates its version so a new writer re-anchors before using it.
+	newSqlMigration(`
+		ALTER TABLE client_reliability_running
+			ADD COLUMN observed_row_count bigint NOT NULL DEFAULT 0 CHECK (observed_row_count >= 0);
+		ALTER TABLE client_reliability_running_window
+			ADD COLUMN observation_version smallint NOT NULL DEFAULT 0,
+			ADD COLUMN observation_write_token uuid;
+		CREATE FUNCTION client_reliability_running_window_observation_guard() RETURNS trigger LANGUAGE plpgsql AS $observations$
+		BEGIN
+			IF TG_OP = 'INSERT' THEN
+				IF NEW.observation_write_token IS NULL THEN
+					NEW.observation_version := 0;
+				END IF;
+			ELSIF NEW.observation_write_token IS NULL OR
+				NEW.observation_write_token IS NOT DISTINCT FROM OLD.observation_write_token THEN
+				NEW.observation_version := 0;
+			END IF;
+			RETURN NEW;
+		END
+		$observations$;
+		CREATE TRIGGER client_reliability_running_window_observation_guard
+			BEFORE INSERT OR UPDATE ON client_reliability_running_window
+			FOR EACH ROW EXECUTE FUNCTION client_reliability_running_window_observation_guard();
+	`),
 }

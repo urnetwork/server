@@ -1270,3 +1270,311 @@ statement pair, young idle-transaction attribution, contract-generation
 controls, and DNS/quality-dashboard follow-ups. None is a proved Main fix or
 authority to bypass the release gate. Do not use private temporary research
 artifacts as a substitute for checked-in tests and source once a fix lands.
+
+## Linux continuation checkpoint: 2026-09-28 22:20 UTC
+
+This checkpoint supersedes the transfer's **status**, not the product contract.
+The current Linux checkout pulled `origin/main`, then committed and pushed the
+monitor's missing migration-artifact contracts for versions 732–739 as Server
+`0b18d6fc`. Focused migrated-catalog faults, full `./monitor` normal and race,
+and `go vet ./monitor` passed against isolated PostgreSQL 18.6 and Redis 8.0.5.
+The completed-run scheduler's merged forced-generic 100,000-provider claim,
+quiet maintenance, and populated expiry/promotion plans passed, including 256
+shards. Its focused receipt/maintenance functional controls also passed. These
+local gates do not establish a completed four-hour Main cycle.
+
+The new authoritative Main watcher started at 21:53:33 UTC with a pinned
+Server `0b18d6fc` binary, a validated Warpctl binary, ten matched live log
+tails, and `-min-probe-cadence=15m`. Two fresh log reconciliations and later
+one-minute frames covered all ten collectors. Its first active pass began at
+22:08:33 UTC. The FP2 provider-picker, provider-selection, egress,
+control-route and URL-coverage signals reported unavailable bounded Mimir
+evidence. A separate exact-request discriminator found this observer's SSH
+transport to the configured edge-0 gateway timed out before any Mimir query.
+Therefore the frame does **not** establish zero native supply, zero URL
+throughput, or quota recovery. The watcher remains live while strict-key,
+inventory-bound observer transport is repaired. Log-derived proxy/taskworker
+DoH and Taskworker ForceClose/panic identities remain under causal triage.
+
+A direct, bounded read through the enabled Main PostgreSQL host found migration
+head **731** and its sparse ARIN-exception index valid/ready; versions 732–740
+have not been applied. No index build was active. A long-running client read
+held a snapshot, requiring a fresh horizon/backup check before migration 739's
+large concurrent grant index. One 2.09-second direct process CPU sample used
+5.19 of 96 host core equivalents for PostgreSQL; this point is not a sustained
+CPU recovery result. The observer's quota, native membership, and hourly
+success-rate sources remain unknown at this checkpoint.
+
+The corrected real raw-writer → score → Go/SQL → FP2 → URL admission test first
+reproduced a distinct merged-source defect: 721 observed invalid minutes
+produced no 0/1/2 score rows, allowing missing-neutral Quality/Speed and URL
+admission. The uncommitted candidate migration 740 and writer repair now
+publish explicit zero scores while preserving truly missing neutrality; the
+focused normal/race, rolling-expiry, mixed-writer and exact-zero fractional
+controls pass. A million-row local custom/generic plan control measured 238
+shared buffers for the observed-history aggregate versus 148 for valid-only
+history and about 4,460 for an unbounded-invalid counterfactual. Full merged
+Model/Taskworker and monitor release gates, commit/push, Main migration and
+service rollout remain pending. The operator authorized running the migration
+locally after commit, pull and push, using a verified direct maintenance path.
+
+At 22:32 UTC a strict-tunnel, read-only Main PostgreSQL query using the exact
+`GetProviderUrlProbeFleet` eligibility and completion expression found 113,008
+eligible providers, **zero quota-complete**, 111,599 overdue, 97,260 due, and
+900,384 accepted successes still needed for the rolling four-hour target.
+The separately bounded native-membership query timed out at five seconds; its
+result is unknown. This is a single direct database observation, not a measured
+URL success rate or proof of API-visible native supply. The watcher continues
+on its 15-minute minimum active-probe cadence.
+
+The final local monitor package normal/race tests and `go vet` passed with
+the migration-740 catalog guard and picker gateway fallback. At 22:47 UTC the
+tested candidate watcher, using a private strict-SSH identity and pinned
+Warpctl, replaced the earlier watcher after two fresh ten-of-ten log windows.
+The old parent and all of its log-tail children exited cleanly. The successor
+keeps `-min-probe-cadence=15m`; its first active signals cannot start before
+22:57:35 UTC. Earlier active findings remain open pending new observations.
+
+A direct read-only migration preflight at 22:39 UTC reconfirmed Main head 731,
+absent 732–739 indexes, and no live index build. Two transactions held old
+snapshots for roughly 53 minutes, including an active client read whose owner
+still needs attribution. The PostgreSQL host's SSH path then timed out; fresh
+CPU, storage, and snapshot-horizon evidence is unavailable. No migration has
+started. The private local staged runner remains held behind the final broad
+Model/Taskworker gate, code commit/pull/push, and a fresh reachable direct
+maintenance preflight.
+
+The promoted watcher's first active pass at 22:57 UTC confirmed migration lag
+731→740 and found a separate §8.10 physical-index drift: the legacy
+`client_reliability` index remains by name, while the desired covering parent is
+absent and none of its 34 expected children are attached. The legacy parent's
+actual definition and any standalone covering children still need a bounded
+catalog read. The covering-index upgrade is outside ordinary
+schema migrations, so applying 732–740 would not repair this condition. The
+local million-row aggregate plan used the desired covering shape and must not
+be used as a Main cost forecast until the live index path is checked. Picker,
+URL, and sustained CPU results from the new watcher were still pending at this
+checkpoint.
+
+The first merged `./model ./taskworker/work` normal run exhausted its 35-minute
+Model package limit; the test active at timeout had run only three seconds.
+Thirteen named failures used a missing GeoLite binary in the portable fixture.
+Two independent assertions came from its PostgreSQL Los Angeles timezone;
+private fixture repair plus `PGTZ=UTC` made representative GeoLite, payout,
+and retry controls pass. A third independent FP2 cached-evidence test remained
+red under that environment and reproduced a real request-time demotion bug:
+expired or missing-clock legacy native records lost both native and online
+membership. A narrow source repair now retains their prior online eligibility
+while clearing native evidence; expanded normal and race controls pass. Full
+Model tests are being partitioned into disjoint bounded groups before the
+release gate can be called green. No production code commit or Main migration
+has followed from the failed broad run.
+
+A strict direct PostgreSQL catalog read at 23:02:58 UTC resolved the §8.10
+qualifier: the legacy parent is valid/ready with `(valid, block_number,
+client_address_hash)` and **no** `INCLUDE` payload. The desired covering parent
+is absent, and none of the 34 partitions has a covering-shape child, attached
+or standalone. This requires the supported full covering-index upgrade rather
+than only final metadata cleanup; no upgrade was started. The earlier long
+client SELECT had ended, while an autovacuum on `transfer_contract` was still
+active. Current direct CPU and free storage were still unknown.
+
+The candidate's first active picker and provider-selection results paired
+20/25 expected API processes; the picker saw four initial errors and one read
+filter in its observed five-minute subset. URL coverage warned that the hourly
+success range or expected process coverage was incomplete, so it supplied no
+authoritative current throughput rate. A separate 23:03 UTC strict host read
+found 1.042 TB available on the 7.556 TB PGDATA mount and a 2.095-second
+PostgreSQL process sample of 6.04 core equivalents on 96 logical CPUs (6.29%).
+That point sample is not a sustained CPU recovery measurement. The full
+covering-index build is distinct from migrations 732–740; no such upgrade has
+been authorized or started in this continuation.
+
+A 23:07 UTC bounded catalog sizing read put `client_reliability` at 34
+partitions, about 3.869 billion estimated rows, 737.47 GB heap, 434.55 GB
+existing indexes, and 100.17 GB in the legacy secondary family. The largest
+partition has about 173.99 million estimated rows, 33.22 GB heap and 4.20 GB
+legacy secondary index. The recent 1.042 TB free-space sample is not a peak
+budget for the new covering family because its `INCLUDE` payload and build
+sort space have not been measured. Keep this operation separate from migration
+739 and the writer's mandatory re-anchor; there has been no Main index build.
+
+The 23:12 UTC watcher wave reported PostgreSQL CPU **51.55 core equivalents
+of 96 (53.70%)** over 5.02 seconds at 23:16:09, so the earlier 6.04-core
+point was not representative of this later load. The URL-coverage signal at
+23:16:47 remained unobservable because it lacked a fresh coherent global
+census; per-shard owner counts cannot be added into a fleet throughput rate.
+This is evidence of ongoing high CPU, not a sustained post-fix measurement.
+A separate strict 5.08-second host reduction at 23:24 UTC measured the PG unit
+using 50.18 core equivalents; 145 of 769 child PIDs turned over between its
+endpoints. Its local peer `pg_stat_activity` snapshots failed, so the high CPU
+is independently corroborated but no SQL or Taskworker owner is yet proven.
+The 23:27 active monitor wave separately paged on seven Connect processes on
+edge-3/edge-4: individual RSS was about 78.8–166.6 GB, goroutines about
+618,936–949,462, and five-minute CPU about 4.56–5.88 cores per process.
+These are exact affected-process observations, not yet a causal leak or PG CPU
+attribution. Bounded source/task diagnosis is underway; no process was
+restarted or globally capped.
+A corrected paired direct-PostgreSQL/host reduction at 23:33:58–23:34:06 UTC
+measured 36.84 PG-unit core equivalents over 5.04 seconds, with 174 child
+PIDs gone and 176 new between endpoints. No statement kept the same query
+hash and start time across both database snapshots. About 20.08 core
+equivalents came from churn or unmatched children; this proves high load and
+short-lived work but still cannot assign it to a particular SQL/task owner.
+The third active wave also observed zero providers on 92/92 sampled ordinary
+IPv6/Quality requests with US callers at 23:31:44 UTC. This is a real
+request-local empty cohort, not evidence that global provider supply is zero.
+The counter does not include target IDs, exclusions or requested count, so the
+owning selection stage remains unknown. Picker pairing
+remained 20/25 API slots; the URL signal lacked a trustworthy same-URL TLS
+quarantine target, and third-wave PG CPU/migration results were still pending.
+
+With the corrected local MMDB/UTC fixture, the first of four disjoint full
+Model test buckets finished in 920.497 seconds with one failure:
+`TestUrlProbeDueEmptyShardPlan` logged 893 shared buffers for its empty-shard
+scenario on a 100,000-client synthetic population, returning zero slot rows;
+that scenario passed its bound. A subsequent scenario then failed because its
+plan used the global due index on PostgreSQL 18.6. A scenario-labelled rerun
+identified the **dense shard-0/4, limit-100** case: a keyed lateral recheck
+used that index for 100 point lookups, one row each, about 620 buffers. The
+blanket index-name assertion needs review against the intended population-scan
+boundary before changing production SQL; the remaining buckets and race gates
+are not yet complete. No commit/push or Main DDL followed this red gate.
+
+That review found a false-positive test oracle: the global index was used only
+for 100 client-keyed lateral rechecks, with one returned row, zero filtered
+rows and about 6.2 buffers per lookup. The owned-slot scan stayed bounded.
+The narrowed oracle permits only client-keyed point rechecks under row/buffer
+bounds while retaining synthetic negative controls against global due-head
+scans. It passed 16 normal/generic 100,000-client scenarios and the focused
+race run. Production claim SQL was not changed; the four full Model buckets
+must be rerun against the corrected test source.
+
+A bounded request-local Mimir discriminator at 23:39:49 UTC returned 99
+fixed-label selection-outcome rows. In the observed five-minute IPv6/Quality
+default-minimum slice, zero outcomes increased by about 149.79 and all carried
+`cache_empty`; target-kind labels split about 113.22 country and 36.56
+best-available. No nonempty outcome appeared in that slice of the returned
+vector. These are Prometheus increases, not exact request counts. The native
+source-outcome query returned no series, which is missing diagnostic evidence,
+not zero native traffic. The labels cannot link this aggregate to the 92 US
+caller requests, and picker process pairing remains 20/25. The cache-empty
+stage is now the next bounded source/code discriminator; global provider
+supply and the exact request cause remain unproven.
+
+The observed API schema boundary confirms `selection_schema_version=2` on
+20 process series, matching the 20/25 picker pairing, while
+`native_source_schema_version=1` returned no series at 23:43:29 UTC. Thus
+native-source counters are unavailable at this deployment/metric boundary;
+their absence cannot establish zero source events.
+
+A matched direct-primary `pg_stat_statements` pair at 23:42:01–09 UTC
+retained 2,720 statement identities with zero resets. Over about 7.62
+seconds, transfer-balance-feature statements accumulated 60.67 seconds of
+execution time across 23,790 calls, transfer-contract statements 46.84
+seconds across 300,951 calls, and other statements 58.78 seconds across
+824,721 calls. Smaller feature classes included escrow 3.34 seconds, client
+score 1.39 seconds, URL cycle 0.30 seconds, URL history 0.20 seconds,
+payout reliability 0.11 seconds, and no raw/running reliability calls.
+Session counters recorded 209 new and 143 abandoned connections and
+553,438 commits. There were no new temporary bytes or deadlocks. These
+figures establish large short-lived database work, including transfer tables;
+summed SQL elapsed time is not CPU attribution, and the owning application
+and background load still need a bounded discriminator.
+
+The paired activity snapshots also contained 271 before and 360 after
+idle-in-transaction backends whose last statement was the exact pgx default
+`BEGIN` emitted by `db.go` (`repeatable read read write not deferrable`).
+Combined with about 90% of client backends younger than 30 seconds, this
+locates a transaction-start/backend-churn boundary. It does not prove that
+`BEGIN` itself consumed the observed CPU or identify the calling service;
+live pool and owner counters are the next discriminator.
+
+An offline normalization of two captured statement hashes matched exact
+source queries in `CreateCompanionTransferEscrow` (`subscription_model.go`):
+the origin lookup made 135,972 calls, returned 4,997 rows and accumulated
+24.53 seconds of query execution over the 7.62-second sample; its fallback
+made 130,976 calls, returned two rows and accumulated 6.58 seconds. This
+proves repeated, mostly empty companion-origin lookups at the SQL boundary.
+The service caller, retry cause and fraction of PostgreSQL CPU remain to be
+established. A separate 51.3-second escrow/grant fingerprint is under review.
+
+That 51.316-second fingerprint (1,867 calls, 1,921 rows in the same sample)
+matches the legacy settlement escrow-to-balance join from the source before
+`e2356969`. Current `main` already contains that commit's contract-local
+LATERAL replacement. Thus an old statement is still executing on Main;
+the emitting process and its version remain unknown, and query elapsed time
+still does not prove CPU consumption. This requires deployment provenance
+before considering another source change.
+
+The fourth watcher pass began at 23:42:35 UTC, preserving the 15-minute
+minimum probe spacing and ten fresh/consecutive log collectors. At 23:47:36,
+its request-local IPv6/Quality/US-caller cohort again paged on empty providers
+(104 sampled ordinary requests); picker pairing remained incomplete. This
+repeats the user-visible symptom without yet connecting individual requests
+to the aggregate `cache_empty` counter or proving global native supply.
+
+The corrected first full Model partition then passed in 1,046.764 seconds
+using the final disjoint test manifest. Three Model partitions, Work package
+normal, and Model/Work race gates remain; this is a partial release gate.
+
+The fourth watcher URL signal at 23:47:49 UTC still warned that coverage and
+throughput lack a coherent global census; a separate legacy TLS quarantine
+also lacked a trustworthy same-URL target. Neither is evidence of zero URL
+work. Redis cache publication/read diagnosis is being limited to exact
+count documents and authorized caller aliases. The enabled Redis host on
+edge-6 currently lacks enrolled strict host trust from this observer, so
+the direct reader boundary remains unknown until a verified route is found.
+
+A bounded fixed-label counter read at 23:49:49 UTC observed five-minute
+API companion-origin increases of about 1.102 million initial, 3.155
+million fallback and 0.501 million deadline lookups, with only about one
+event lookup. The measured sum was about 4.759 million lookups over 1.101
+million requests (about 4.32 per request) across 20 API process series,
+with zero counter resets. Measured Connect (20 series) and Taskworker
+(eight series) lookup/wake increases were zero. This points strongly to the
+current API fallback path as the repeated-work owner at the metric boundary;
+it does not alone connect a specific SQL fingerprint or source revision to
+the observed PostgreSQL CPU.
+
+The fourth URL watcher did obtain a fresh database cohort snapshot at
+23:47:49 UTC: 110,485 eligible providers, zero quota-complete and zero
+secure-complete, 98,805 due, 110,297 overdue, and 916,854 accepted
+successes still needed. Warming was 188, uninitialized 26, security-pending
+10 and unknown-target seven; oldest due age was about 61,447.6 seconds.
+These are one-time cohort facts and supersede the older 113,008-provider
+snapshot; incomplete hourly success and process evidence still prevents a
+trustworthy throughput rate or a completed-coverage claim.
+
+Corrected parsing of the concatenated watcher reports recovered completed
+third- and fourth-wave migration/index/CPU findings previously described
+as pending. At 23:27:46/23:42:47 UTC, §8.10 still found the old
+non-covering reliability parent, no desired covering parent and zero
+attached desired children across 34 partitions. At 23:27:52/23:42:56,
+§8.9 still found Main migration head 731 against code-required 740.
+PostgreSQL CPU was 42.865 of 96 logical-core equivalents (44.65%) over
+5.02 seconds at 23:31:30, and 47.377 of 96 (49.35%) over 5.03 seconds
+at 23:46:37. These are repeated high-load snapshots, not an exact
+statement-CPU attribution. No monitor probe was omitted; only the local
+report-heading parser had missed these entries.
+
+A bounded local Connect mechanism control built 32 Resident-style internal
+clients with the current constructor (buffer 4,096, no transports, DB or
+Redis). It added 129 goroutines, about four per client, and 1.06 MiB total
+live heap; CloseAndWait returned to the single global pool-stats worker.
+That bare constructor alone cannot explain the Main affected processes'
+roughly 19–26 goroutines or 2.0–2.35 MiB heap per resident. The local
+control did not reproduce full Resident transport, queued work or the
+deployed revision. In sealed Main edge-4/g2 and edge-3/g2 observations,
+about 87%/78% of goroutines remained outside the three existing owned
+gauges, so a targeted active-owner discriminator is still required.
+
+A bounded notification counter read at 23:52:24 UTC found about 105,682
+API publishes, 105,762 enqueues and 2,113,773 received broadcast copies
+over five minutes. The received count is copies, not unique origins. All
+fixed notification-loss classes (queue full, publish/subscription failure,
+registration decline, invalid message and unowned) increased by zero on
+the 20 instrumented API processes, with no counter reset. The measured
+3.155 million fallback lookups therefore are not explained by measured
+notification loss in those processes. Five API slots are missing and there
+is no per-request join, so the full-fleet cause is still unknown.

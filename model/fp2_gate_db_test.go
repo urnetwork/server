@@ -381,18 +381,40 @@ func TestFp2ArinRollupForgetsDisconnectedRisk(t *testing.T) {
 func TestFp2CachedEvidenceExpiresBeforeCacheTtl(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		locationId := server.NewId()
-		score := onlineBackfillScore(false, 1)
-		expired := server.NowUtc().Add(-time.Microsecond)
-		score.EgressValidUntil = &expired
-		score.PassesMinimums = map[string]bool{RankModeQuality: true, RankModeSpeed: true}
-		for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
-			writeOnlineBackfillSample(ctx, t, locationId, mode, false, []*ClientScore{score})
-		}
-		for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
-			providers := egressTestFind(ctx, t, []*ProviderSpec{{LocationId: &locationId}}, mode, 1, false, server.NewId())
-			if len(providers) != 1 || providers[0].Tier != 2*egressTestBackfillOffset() {
-				t.Fatalf("mode=%s expired evidence did not become online fallback", mode)
+		for _, testCase := range []struct {
+			name         string
+			online       bool
+			native       bool
+			expired      bool
+			missingClock bool
+			wantCount    int
+			wantTier     int
+		}{
+			{name: "fresh_native", native: true, wantCount: 1},
+			{name: "expired_native", native: true, expired: true, wantCount: 1, wantTier: 2 * egressTestBackfillOffset()},
+			{name: "native_without_clock", native: true, missingClock: true, wantCount: 1, wantTier: 2 * egressTestBackfillOffset()},
+			{name: "expired_online", online: true, expired: true, wantCount: 1, wantTier: 2 * egressTestBackfillOffset()},
+			{name: "expired_never_admitted", expired: true},
+		} {
+			locationId := server.NewId()
+			score := onlineBackfillScore(testCase.online, 1)
+			score.PassesMinimums = map[string]bool{RankModeQuality: testCase.native, RankModeSpeed: testCase.native}
+			if testCase.expired {
+				expired := server.NowUtc().Add(-time.Second)
+				score.EgressValidUntil = &expired
+			} else if testCase.missingClock {
+				score.EgressValidUntil = nil
+			}
+			for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
+				writeOnlineBackfillSample(ctx, t, locationId, mode, false, []*ClientScore{score})
+			}
+			for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
+				providers := egressTestFind(ctx, t, []*ProviderSpec{{LocationId: &locationId}}, mode, 1, false, server.NewId())
+				if len(providers) != testCase.wantCount {
+					t.Errorf("case=%s mode=%s provider count=%d want=%d", testCase.name, mode, len(providers), testCase.wantCount)
+				} else if len(providers) != 0 && providers[0].Tier != testCase.wantTier {
+					t.Errorf("case=%s mode=%s tier=%d want=%d", testCase.name, mode, providers[0].Tier, testCase.wantTier)
+				}
 			}
 		}
 	})

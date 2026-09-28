@@ -19,7 +19,7 @@ const migrationFp2CatalogQuery = `fp2_column_artifact AS (
 	WHERE namespace.nspname='public' AND attribute.attnum>0 AND NOT attribute.attisdropped
 	AND relation.relname IN ('network_client_location','network_client_location_reliability',
 		'provider_egress_health','provider_egress_health_history','provider_egress_probe_cycle','provider_egress_url_security',
-		'provider_url_probe_run')
+		'provider_url_probe_run','client_reliability_running','client_reliability_running_window')
 )`
 
 // Expected fields are source-owned literals; SQL never incorporates live input.

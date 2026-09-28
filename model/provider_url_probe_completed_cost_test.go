@@ -15,6 +15,8 @@ type testingUrlCompletedPlanNode struct {
 	NodeType      string                        `json:"Node Type"`
 	RelationName  string                        `json:"Relation Name"`
 	IndexName     string                        `json:"Index Name"`
+	IndexCond     string                        `json:"Index Cond"`
+	Filter        string                        `json:"Filter"`
 	ActualRows    float64                       `json:"Actual Rows"`
 	ActualLoops   float64                       `json:"Actual Loops"`
 	RowsRemoved   float64                       `json:"Rows Removed by Filter"`

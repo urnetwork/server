@@ -1141,7 +1141,17 @@ type reliabilityRunningWindow struct {
 	degradedClassificationVersion           int
 	degradedClassificationWriteTokenPresent bool
 	degradedClassificationGuardPresent      bool
+	observationVersion                      int
+	observationWriteTokenPresent            bool
+	observationGuardPresent                 bool
 	exists                                  bool
+}
+
+const reliabilityObservationVersion = 1
+
+func reliabilityRunningObservationCurrent(window reliabilityRunningWindow) bool {
+	return window.observationVersion == reliabilityObservationVersion &&
+		window.observationWriteTokenPresent && window.observationGuardPresent
 }
 
 func reliabilityRunningNeedsRecompute(
@@ -1235,6 +1245,15 @@ func readReliabilityRunningWindow(ctx context.Context, tx server.PgTx, lookbackI
 					p.proname = 'client_reliability_running_window_classification_guard' AND
 					t.tgenabled IN ('O', 'A') AND
 					NOT t.tgisinternal
+			),
+			observation_version,
+			observation_write_token IS NOT NULL,
+			EXISTS (
+				SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
+				WHERE t.tgrelid='client_reliability_running_window'::regclass
+				AND t.tgname='client_reliability_running_window_observation_guard'
+				AND p.proname='client_reliability_running_window_observation_guard'
+				AND t.tgenabled IN ('O','A') AND NOT t.tgisinternal
 			)
 		FROM client_reliability_running_window
 		WHERE lookback_index = $1
@@ -1250,6 +1269,9 @@ func readReliabilityRunningWindow(ctx context.Context, tx server.PgTx, lookbackI
 				&w.degradedClassificationVersion,
 				&w.degradedClassificationWriteTokenPresent,
 				&w.degradedClassificationGuardPresent,
+				&w.observationVersion,
+				&w.observationWriteTokenPresent,
+				&w.observationGuardPresent,
 			))
 			w.exists = true
 		}
@@ -1274,22 +1296,27 @@ func writeReliabilityRunningWindow(
 			max_block_number,
 			last_recompute_block,
 			degraded_classification_version,
-			degraded_classification_write_token
+			degraded_classification_write_token,
+			observation_version,
+			observation_write_token
 		)
-		VALUES ($1, $2, $3, $4, $5, gen_random_uuid())
+		VALUES ($1, $2, $3, $4, $5, gen_random_uuid(), $6, gen_random_uuid())
 		ON CONFLICT (lookback_index) DO UPDATE
 		SET
 			min_block_number = EXCLUDED.min_block_number,
 			max_block_number = EXCLUDED.max_block_number,
 			last_recompute_block = EXCLUDED.last_recompute_block,
 			degraded_classification_version = EXCLUDED.degraded_classification_version,
-			degraded_classification_write_token = EXCLUDED.degraded_classification_write_token
+			degraded_classification_write_token = EXCLUDED.degraded_classification_write_token,
+			observation_version = EXCLUDED.observation_version,
+			observation_write_token = EXCLUDED.observation_write_token
 		`,
 		lookbackIndex,
 		minBlockNumber,
 		maxBlockNumber,
 		lastRecomputeBlock,
 		reliabilityDegradedClassificationVersion,
+		reliabilityObservationVersion,
 	))
 }
 
@@ -1337,6 +1364,26 @@ const reliabilityRunningAggSql = `
 	GROUP BY network_id, client_id
 `
 
+// Keep both validity ranges indexable on (valid,block_number,address_hash).
+// Valid rows retain the existing shared-IP numerator; invalid observations
+// contribute only presence. All-invalid history is observed zero, while a
+// client absent from every usable block remains missing. Network payout sums
+// continue to use the original valid-only aggregate.
+const reliabilityRunningObservedAggSql = `
+	SELECT network_id,client_id,SUM(ind)::float8 AS ind,SUM(rel)::float8 AS rel,
+		SUM(observed_row_count)::bigint AS observed_row_count
+	FROM (
+		SELECT valid_counts.*,valid_counts.ind::bigint AS observed_row_count
+		FROM (` + reliabilityRunningAggSql + `) AS valid_counts
+		UNION ALL
+		SELECT network_id,client_id,0::float8 AS ind,0::float8 AS rel,COUNT(*)::bigint AS observed_row_count
+		FROM client_reliability
+		WHERE valid=false AND $1<=block_number AND block_number<$2
+		AND NOT (block_number=ANY($3::bigint[]))
+		GROUP BY network_id,client_id
+	) AS observations GROUP BY network_id,client_id
+`
+
 func updateClientReliabilityRunningLookbackAtBoundsInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -1352,6 +1399,17 @@ func updateClientReliabilityRunningLookbackAtBoundsInTx(
 		newMax,
 		periodicReanchorAllowed,
 	)
+	aggregateSql := `SELECT valid_counts.*,0::bigint AS observed_row_count FROM (` + reliabilityRunningAggSql + `) AS valid_counts`
+	prunePredicate := `independent_sum < 0.5`
+	if lb.lookbackIndex != networkWindowLookbackIndex {
+		aggregateSql = reliabilityRunningObservedAggSql
+		prunePredicate = `observed_row_count = 0`
+		if !reliabilityRunningObservationCurrent(prev) {
+			// A legacy writer may have deleted observed-zero clients. This is
+			// mandatory repair, independent of optional re-anchor deferral.
+			recompute, deferred = true, false
+		}
+	}
 	if deferred {
 		glog.Infof(
 			"[ncr]defer optional running-window re-anchor for lookback %d while VACUUM/index-build/logical-backup work is active; rolling [%d,%d) -> [%d,%d)\n",
@@ -1374,10 +1432,10 @@ func updateClientReliabilityRunningLookbackAtBoundsInTx(
 			ctx,
 			`
 				INSERT INTO client_reliability_running (
-					client_id, lookback_index, network_id, independent_sum, reliability_sum
+					client_id, lookback_index, network_id, independent_sum, reliability_sum, observed_row_count
 				)
-				SELECT agg.client_id, $4, agg.network_id, agg.ind, agg.rel
-				FROM (`+reliabilityRunningAggSql+`) agg
+				SELECT agg.client_id, $4, agg.network_id, agg.ind, agg.rel, agg.observed_row_count
+				FROM (`+aggregateSql+`) agg
 				`,
 			newMin,
 			newMax,
@@ -1392,14 +1450,15 @@ func updateClientReliabilityRunningLookbackAtBoundsInTx(
 			ctx,
 			`
 				INSERT INTO client_reliability_running (
-					client_id, lookback_index, network_id, independent_sum, reliability_sum
+					client_id, lookback_index, network_id, independent_sum, reliability_sum, observed_row_count
 				)
-				SELECT agg.client_id, $4, agg.network_id, agg.ind, agg.rel
-				FROM (`+reliabilityRunningAggSql+`) agg
+				SELECT agg.client_id, $4, agg.network_id, agg.ind, agg.rel, agg.observed_row_count
+				FROM (`+aggregateSql+`) agg
 				ON CONFLICT (client_id, lookback_index) DO UPDATE
 				SET
 					independent_sum = client_reliability_running.independent_sum + EXCLUDED.independent_sum,
 					reliability_sum = client_reliability_running.reliability_sum + EXCLUDED.reliability_sum,
+					observed_row_count = client_reliability_running.observed_row_count + EXCLUDED.observed_row_count,
 					network_id = EXCLUDED.network_id
 				`,
 			prev.maxBlockNumber,
@@ -1418,8 +1477,10 @@ func updateClientReliabilityRunningLookbackAtBoundsInTx(
 				UPDATE client_reliability_running r
 				SET
 					independent_sum = r.independent_sum - agg.ind,
-					reliability_sum = r.reliability_sum - agg.rel
-				FROM (`+reliabilityRunningAggSql+`) agg
+					reliability_sum = CASE WHEN r.independent_sum = agg.ind THEN 0
+						ELSE r.reliability_sum - agg.rel END,
+					observed_row_count = r.observed_row_count - agg.observed_row_count
+				FROM (`+aggregateSql+`) agg
 				WHERE r.client_id = agg.client_id AND r.lookback_index = $4
 				`,
 			prev.minBlockNumber,
@@ -1428,12 +1489,11 @@ func updateClientReliabilityRunningLookbackAtBoundsInTx(
 			lb.lookbackIndex,
 		))
 
-		// drop clients that have fully left the window. independent_sum is a
-		// sum of integer counts carried as float, so a fully-departed client
-		// is exactly 0.0; the 0.5 epsilon guards float dust.
+		// Client windows retain observed zero until the final observation
+		// expires. Network sums retain their existing positive-only semantics.
 		server.RaisePgResult(tx.Exec(
 			ctx,
-			`DELETE FROM client_reliability_running WHERE lookback_index = $1 AND independent_sum < 0.5`,
+			`DELETE FROM client_reliability_running WHERE lookback_index = $1 AND `+prunePredicate,
 			lb.lookbackIndex,
 		))
 
@@ -1609,7 +1669,7 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 					nclr.valid = true
 				WHERE
 					r.lookback_index = $3 AND
-					r.independent_sum > 0
+					r.observed_row_count > 0
 				ON CONFLICT (client_id, lookback_index) DO UPDATE
 				SET
 					independent_reliability_score = EXCLUDED.independent_reliability_score,

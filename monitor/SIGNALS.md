@@ -5490,6 +5490,21 @@ sibling, but are explicitly an observed-process subset, not fleet totals.
   Nonempty direct output proves only a syntactically accepted ID, not a live
   provider. Search misses do not invalidate a separately healthy initial list.
 
+The 2026-09-28 observer control found an unreachable first services gateway
+and missing local SSH identity/host-key setup for reachable siblings. On an
+inventory-authorized sibling, strict authenticated SSH then returned a healthy
+`vector(1)` and the exact bounded picker query (HTTP 200, 1,200 vector rows,
+no warnings). This establishes an observation-path defect, not empty provider
+supply or Mimir failure. Picker now tries the existing authorized services
+gateways in order, retaining the identical query, evaluation time and desired
+API inventory. Disabled and operator-excluded hosts remain uncontacted. Only
+a transport failure permits the next gateway; a received malformed, partial
+or stale response remains unknown under the existing reducer. Healthy and
+genuinely empty sibling controls preserve their distinct verdicts, and loss of
+every gateway cannot clear visibility. Correct observer key permissions and
+host-key trust before promotion; a reachable socket alone proves neither
+authenticated transport nor complete process coverage.
+
 False positives: intentional caller-country exclusions can produce a truly
 empty initial list without global supply loss; invalid queries and legitimate
 empty search results must not be conflated with it. Requests are not unique
@@ -5606,6 +5621,18 @@ filters establish a contribution rather than the sole cause or number removed.
 Missing cache evidence takes precedence over filter attribution. Destination-tail
 exclusions are compatible with healthy-window refills but do not prove health;
 client-ID exclusions combine runtime removals and durable policy.
+
+Cache-expiry qualifier (2026-09-28): an admitted native cache record may carry
+the older `Online=false` encoding. Clearing its native flags when the URL
+evidence expires or its clock is absent previously also removed online
+fallback, so a fresh cache alone did not prove request availability. The
+request now preserves online membership from either previously admitted native
+mode before clearing the expired flags. A record with neither native nor online
+admission remains excluded; current hard, network, family and explicit filters
+still apply. Deterministic controls cover both requested modes, fresh native
+evidence, expired and missing clocks, already-online and never-admitted records.
+This establishes a cache-consumption mechanism, not its prevalence on Main;
+verify the serving API artifact and actual request boundary separately.
 
 Exclusion-budget qualifier (2026-09-27 source correction): request-time
 exclusions used to consume the fixed sampled-row budget before selection. A
@@ -6754,6 +6781,21 @@ messages. A high reliability pass rate is therefore platform-connection
 availability evidence, not proof of Internet/DNS/URL egress or native Quality.
 The URL success-ratio and non-quality classification gates remain separate;
 this freshness diagnostic does not conflate them or infer false positives.
+
+The 2026-09-28 deterministic writer-to-FP2 control established a separate
+correctness failure: usable all-invalid observations produced no score rows,
+so the intentional missing-history neutrality admitted measured failures.
+The corrected writer retains an observed-row count and publishes an explicit
+zero for each such client window. Truly absent usable history stays missing;
+invalid rows do not dilute another client's valid shared-IP numerator, and
+network payout sums keep their existing valid-only semantics. Migration 740
+and an observation-aware re-anchor precede use of these counts. A separate
+checkpoint token exposes a legacy writer even when its degraded-block token
+is current. Missing or unchanged observation tokens force repair independently
+of optional maintenance deferral. This local RED-to-GREEN control proves the
+writer mechanism, not its prevalence on Main. Fresh physical score timestamps
+alone cannot establish this semantic correction: require exact writer
+ancestry and current observation checkpoints after rollout.
 
 `boundary=running-window-lag` means the sample's score and running markers
 have not caught up; `score-publication-lag` means running state advanced past
@@ -10399,7 +10441,18 @@ and ARIN non-quality providers remain eligible for URL revalidation.
 The deterministic 100k-provider control exposed a residual shard
 filter scanning other shards' due rows; an indexed fixed-slot/lazy-head merge
 removes that scan, but dead index tuples still require ordinary vacuum and
-live query/buffer validation. Do not add a global connection cap or weaken
+live query/buffer validation. A 2026-09-28 PostgreSQL 18.6 release control
+initially rejected the later dense-shard client recheck solely because the
+planner used the global `(next_attempt_at, client_id)` index. The owned empty
+head had passed. The dense recheck had an explicit outer-client-key index
+condition, one row per loop, no filtered rows, and 620 buffers for 100 loops;
+it was bounded point work, not a global due-head scan. The corrected oracle
+requires that exact indexed key plus per-loop row and buffer bounds, and still
+rejects global heads, residual key filters, population-sized buffers and
+missing conditions. Normal and forced-generic controls cover empty, dense,
+large and hot-slot heads on four and 256 shards. This local planner choice
+does not establish Main's current query cost or explain its CPU load.
+Do not add a global connection cap or weaken
 credit/reliability/risk/security checks. Closure requires two fresh coherent
 cadences, per-provider rolling quota recovery, full shard observations, and
 independent FP2 availability and PostgreSQL CPU verification after rollout.
@@ -15844,6 +15897,7 @@ This is the version-to-artifact contract checked by the probe:
 | 737 | Valid/ready expiry index on `(completed_next_expiry_at, client_id)` restricted to nonnull expiry clocks |
 | 738 | The same expiry index with `slot_id` preceding the expiry/ID keys |
 | 739 | Valid/ready nonunique `transfer_balance_active_network_end_start_id` on `(network_id, end_time, start_time, balance_id)` with exactly `active` and no included balance amounts |
+| 740 | Required zero-default nonnegative bigint observed count on client running sums, required zero-default smallint observation version and nullable no-default UUID token on running windows, plus an enabled unconditional before-insert/update trigger bound to the exact checkpoint invalidation body |
 
 FP2's 722–731 contract separates schema readiness from live evidence. A numeric
 731 alone cannot prove exact partial-index predicates, generated-slot semantics,
@@ -15890,6 +15944,18 @@ rolling counts, planner work or grant availability. Keep those runtime gates
 independent; do not activate completed-run priority from migration success or
 an epoch's age alone. All catalog inspection remains read-only and safe when
 future relations or functions are absent.
+
+Version 740 preserves the distinction between observed-invalid client history
+and truly missing history. Its catalog guard rejects count/default/type/check
+drift, fabricated token defaults, and disabled, late, conditional, partial or
+no-op invalidation triggers. Future absence remains pending before head 740;
+missing or partial catalog evidence cannot clear a published version. Schema
+readiness does not prove that every active writer understands observations or
+that existing windows were re-anchored. Publish zero weights only from usable
+raw observations after an observation-aware checkpoint; retain the existing
+no-usable-denominator behavior and verify the writer boundary separately under
+§2.15a. A legacy writer must invalidate the observation version even if it
+continues to stamp the older degraded-classification token.
 
 Version 721 adds explicit operator approval for a finalized, uncanceled staging
 winner; it does not approve production candidates or reopen winner selection.
@@ -16210,6 +16276,51 @@ query's covering payload was added. Changing the builder to
 `INCLUDE (network_id, client_id)` did not change the already-created index:
 `CREATE INDEX IF NOT EXISTS` checks identity, not definition, and cannot
 reshape a parent index or its partition children.
+
+The 2026-09-28 23:02:58Z catalog cross-check found a different state from the
+historical finalization-only incident below: Main's successful schema head was
+731, the valid/ready legacy parent had exactly the three keys without INCLUDE,
+the desired parent was absent, and none of the 34 table partitions had an
+attached or standalone covering-shape child. All 68 child indexes belonged to
+other shapes. That state requires the full supported partition upgrade;
+ordinary migrations through 740 do not perform it. Catalog absence does not
+establish when or why a previous replacement disappeared. The earlier long
+client SELECT was no longer present; an autovacuum was still vacuuming indexes
+on `transfer_contract`. PostgreSQL excludes lazy vacuum from the final
+concurrent-index old-snapshot wait, so its xmin alone is not proof of that
+blocker. A later 23:03Z host sample found 1.042 TB available on the PGDATA
+mount and about 6.04 PostgreSQL CPU cores over 2.095 seconds on a 96-core host;
+that short host-relative sample does not establish the PostgreSQL cgroup's
+effective quota or sustained I/O headroom. The 23:07:47Z catalog size check
+found about 3.869 billion estimated rows, 737.47 GB of heap, 434.55 GB of
+existing indexes, and 100.17 GB in the legacy secondary family across the 34
+partitions. The two 16-byte INCLUDE columns alone represent about 123.8 GB of
+additional logical payload, and B-tree INCLUDE disables deduplication. The
+old family's size is not an upper bound for its replacement. Budget the
+complete replacement while retaining the old family, one partition's sort
+space, WAL/retention, ordinary growth, and any overlapping backup artifacts;
+the free-space point sample is not proof that this peak fits.
+
+Later observations superseded the brief low-CPU sample: the active monitor
+measured 51.55 PostgreSQL cores over 5.02 seconds at 23:16:09Z, and a direct
+23:24:08–13Z unit pair measured 50.18 cores. Only 26.72 cores belonged to the
+stable child-process subset in that second interval; 145 child PIDs turned
+over, and the paired SQL attribution source was unavailable. These facts
+establish current substantial CPU use but do not assign it to reliability,
+URL scheduling, or any particular statement. Hold a large maintenance start
+until the workload and capacity boundary is understood. At 23:16:53Z the
+backup service was inactive and PGDATA had 1.039 TB available; effective
+PostgreSQL quota remained unknown.
+
+Use the supported resumable path with an explicit reviewed maintenance window
+and bounded partition concurrency. Its CLI defaults to six partition builds,
+the observed server allowed sixteen parallel maintenance workers per build,
+and the child builder explicitly sets `statement_timeout=0`; an inherited
+statement timeout is therefore not a build deadline. Review the actual
+session and operation bounds before starting. Do not overlap this upgrade
+with migration 739's separate grant-index build. The local million-row observation-writer control
+used the desired covering shape and therefore does not establish Main's cost
+on this legacy physical layout; verify the actual plan before writer rollout.
 
 The live 2026-08-31 signature was 29 identical `[crp]secondary index drift`
 warnings in a bounded 30-minute taskworker window. They moved among every

@@ -314,6 +314,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "provider_probe_cycle_completed_expiry", requiredVersion: 737, rowColumn: 148},
 	{name: "provider_probe_cycle_slot_completed_expiry", requiredVersion: 738, rowColumn: 149},
 	{name: "transfer_balance_active_network_end_start_id", requiredVersion: 739, rowColumn: 150},
+	{name: "observed reliability counts and exact checkpoint invalidation", requiredVersion: 740, rowColumn: 151},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -2030,7 +2031,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND predicate_definition = '(arin_risk OR arin_non_quality)'
 		             AND indisvalid AND indisready
 		       ),
-		       `+strings.Join(migrationUrlCompletionArtifactQueries, ",\n")+`
+		       `+strings.Join(migrationUrlCompletionArtifactQueries, ",\n")+`,
+		       `+migrationReliabilityObservationArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {

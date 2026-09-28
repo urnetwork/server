@@ -135,19 +135,18 @@ func (p providerPickerProbe) check(ctx context.Context, env *probeEnv) ([]findin
 	if len(scope.slots) == 0 || len(scope.slots) > providerPickerMaxSlots || len(scope.hosts) == 0 || len(scope.blocks) == 0 {
 		return unavailable("inventory-unavailable-or-over-bound")
 	}
-	var gateway *host
+	gateways := []*host{}
 	for _, h := range env.cfg.hostsWithRole("services") {
 		if !h.disabled && !scope.excluded[h.name] {
-			gateway = h
-			break
+			gateways = append(gateways, h)
 		}
 	}
-	if gateway == nil {
+	if len(gateways) == 0 {
 		return unavailable("gateway-unavailable")
 	}
 	now := env.now()
 	command := "curl -fsS --max-time 15 --max-filesize " + strconv.Itoa(providerPickerMaxBytes) + " --data-urlencode " + shellSingleQuote("query="+providerPickerQuery(env.cfg.env, scope)) + " --data-urlencode " + shellSingleQuote("time="+strconv.FormatInt(now.Unix(), 10)) + " 'http://127.0.0.1:3100/prometheus/api/v1/query'"
-	out, err := env.runner.shell(ctx, gateway, command)
+	out, _, err := shellFirstServiceGateway(ctx, env.runner, gateways, nil, command)
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
