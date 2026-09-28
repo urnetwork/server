@@ -68,8 +68,9 @@ type Config struct {
 	// Descendant carriers may share an explicitly supplied probe-owner budget.
 	// Nil gives this tunnel a fresh independent budget using default values.
 	PlatformTransportBudget *connect.PlatformTransportBudget
-	// Bounds how long Close, or an Open that fails part-way, waits for the
-	// multi-client and the generator to retire. Zero or negative means 30s.
+	// Bounds graceful retirement before strategy/lifecycle cancellation.
+	// Close and failed Open still join their owners after that threshold;
+	// an expired waiter must not release the probe slot early. Default is 30s.
 	CloseTimeout time.Duration
 	// Bounds how long the packet pump waits for the multi-client to take one
 	// packet from the tun. Zero or negative means 15s.
@@ -310,6 +311,9 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		closeErr := generator.CloseAndWait(closeCtx)
 		clientStrategy.Close()
 		cancelLifecycle()
+		if closeCtx.Err() != nil {
+			closeErr = errors.Join(closeErr, generator.CloseAndWait(context.Background()))
+		}
 		return nil, errors.Join(
 			fmt.Errorf("create tun: %w", err),
 			wrapCloseError("generator", closeErr),
@@ -551,6 +555,16 @@ func closeTunnelParts(
 	)
 	closeClientStrategy()
 	cancelLifecycle()
+	if ctx.Err() != nil {
+		// The grace deadline triggers cancellation, not ownership transfer.
+		// Keep this probe's worker until stopped producers and their bounded
+		// final credential requests are terminal; retain the original error.
+		<-pumpDone
+		errList = append(errList,
+			wrapCloseError("multi-client final join", multiClient.CloseAndWait(context.Background())),
+			wrapCloseError("generator final join", generator.CloseAndWait(context.Background())),
+		)
+	}
 	return errors.Join(errList...)
 }
 
