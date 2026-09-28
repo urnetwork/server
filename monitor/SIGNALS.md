@@ -14481,6 +14481,17 @@ sudo -S -p '' docker ps --format '{{.Names}}\t{{.Image}}\t{{.RunningFor}}\t{{.St
 
 ### 8.1a Transparent services have no load-balancer status route
 
+Also distinguish an ordinary public service alias from the configured private
+load-balancer status route. For a standard service such as API, Warp deliberately
+denies the public alias's `/status`; its HTTP 403 is a probe-method mismatch,
+not evidence that the application is down. Use the configured protected status
+mechanism or host-side container/readiness evidence for deployment identity,
+and the actual public application route for user-facing availability. Never
+print private status prefixes. This qualification does not waive a 403 or other
+failure on an application route that is expected to be available. Conversely,
+a successful public search is backend-unbound and cannot establish that every
+API block runs the intended version or that providers pass data-plane tests.
+
 A service assigned only to transparent load-balancer interfaces cannot be
 sampled through `https://<env>-lb/.../by/b/<service>/<block>/status`. Those
 routes exist only on non-transparent load balancers. Proxy is in this class:

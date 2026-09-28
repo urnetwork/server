@@ -482,7 +482,7 @@ successful download does not prove that historical copies are safe.
 
 ## Implementation, tests, and rollout
 
-Current work checkpoints (2026-09-28 04:05 UTC; these are not production-completion claims):
+Current work checkpoints (2026-09-28 05:04 UTC; these are not production-completion claims):
 
 | Work item | Current boundary |
 | --- | --- |
@@ -492,11 +492,13 @@ Current work checkpoints (2026-09-28 04:05 UTC; these are not production-complet
 | Grant-selection CPU repair | Committed as `760bc1b8`; isolated 25-test race gate and current grant, settlement, lifecycle, controller, API, Connect and Taskworker owning partitions pass. Earlier whole-model baseline failure remains recorded; no whole-model pass is claimed |
 | GeoLite2/ARIN refresh and Vault inputs | Tooling `cea4a9a3`, paired resource publication Config `5313e94`; independent runtime readback passes. ConfigA deployed; all six reachable host samples mount the new resource bytes. ARIN database epoch is `1790556325`; per-process use requires connection provenance, not just file presence |
 | Connection classification provenance | Connect converged: 20/20 intended slots, no old running generation at 03:44 UTC. The 03:48 shadow found 126,160 current connections: 123,057 located, 123,055 with the exact expected epoch, two located provenance gaps, and 3,103 missing locations. These residuals still need attribution; coverage percentage alone is not acceptance |
-| Country-risk review | The 03:48 shadow would exclude 465/509 classified reliable Australian providers and 79/85 Malaysian providers by risk. This is a projected membership loss, not proof of incorrect classification or an empty API response. Actual address/registration evidence and rollout-order review remain prerequisites to publication |
+| Country-risk review | The bounded 04:33 query completed in five seconds: 465/507 classified reliable Australian providers and 79/85 Malaysian providers have risk on their preferred connection, not solely on secondary, unproven-family or extender connections. Australian non-quality overlap is 426; Malaysian overlap is zero. A separate bounded read at 05:04 isolated 544 affected providers into 526 private address-bucket groups for ownership validation; it changed no Main data. Registration-owner attribution is still required; these counts do not prove incorrect classification or actual cached/API supply |
+| Prefix-country evidence support | Committed `a6df5158`; independent normal/race/vet gates and native macOS/Linux builds pass. No real exception, new database or country waiver has been activated |
 | URL workflow monitoring | Committed `850b3bb0`; full monitor normal (434.120s), race (485.007s), and vet pass. The attached observer was restored at 03:44 after a recorded observation gap; all ten log tails have fresh advancing post-start windows. URL workflow activation is still pending |
-| Commits, migrations and four-service rollout | Core workflow committed `d479eccd`. Main migrated 721→730 at 01:07 UTC; the exact artifact probe passes. ConfigA and Connect are deployed and verified. API, Taskworker, and final ConfigB images are built, not yet deployed; 20/20 API and 8/8 Taskworker slots still run prior versions |
-| PostgreSQL CPU | Recent short samples range from about 29% to 58% of 96 cores; 04:05 was about 35%. One near-30% interval does not establish sustained recovery, and the grant-selection fix has not yet reached the owning API fleet |
-| Main four-hour quota and app availability | Not established; requires live accepted-history and request-local verification |
+| Commits, migrations and four-service rollout | Core workflow committed `d479eccd`. Main migrated 721→730 at 01:07 UTC; the exact artifact probe passes. ConfigA and Connect are deployed and verified. API-only rollout of `2026.9.27-outerwerld-1057571520` started at 04:39; independent image/mount census confirms 20/20 new slots, matching the built registry digest, with no running old API or slot overlap. Taskworker and final ConfigB remain built but undeployed; no bootstrap rollup refresh has run |
+| PostgreSQL CPU | The grant-selection fix is now on the owning API fleet. The 04:49 sample was 43.61% of 96 cores over five seconds, following recent samples of about 29–58%. CPU recovery and its attribution are not established; historical escrow rows are unchanged and candidate read-through adds work during compatibility staging |
+| App provider-search availability | At 04:55 UTC, normal public US quality/speed and Best Available quality/speed requests each returned 20 unique IPv4 providers; excluding the first US result set returned 20 replacements and no excluded IDs. All five cases were online fallback, not native quality/speed. This is request-local evidence, not all-market, authenticated-client, backend-bound or data-plane recovery proof |
+| Main four-hour quota | Not established; requires the new Taskworker and measured accepted selected-version successes in rolling four-hour history, not attempt counts or the successful online fallback sample |
 | Long-running evidence retention/replay safety | Required before sustained fleet ramp; no production cleanup authorized or performed |
 
 Rollout observation: the installed Warpctl serializes replacement/start/readiness
@@ -516,6 +518,32 @@ executed. Validate a bounded diagnostic plan at realistic cardinality before
 running it; an EXPLAIN cost or a small-fixture pass is not a performance proof.
 Any diagnostic planner setting must remain local to its read-only transaction,
 never a global production tuning change.
+
+The narrower country query now carries risk details in the provider aggregate
+and uses indexed current-location lookups with the normal planner. It does not
+join the small risk cohort back to the full materialized connection set. Its
+125k-provider/two-million-location synthetic control and bounded Main run both
+pass. The earlier broader read returned no usable result and remains unknown;
+do not retroactively classify that failure or promote a query-plan estimate to
+an observed runtime.
+
+API can be staged before country-index publication to activate its owning
+grant-selection CPU repair. Source review found no API startup or handler path
+publishing scores or refreshing location/reliability rollups. Keep the bootstrap
+refresh and new Taskworker held during this stage: either can activate raw
+connection ARIN flags in the rollups. The new reader rejects the old cache's
+`ready:v1` completeness marker and performs bounded candidate SQL read-through,
+so database load and request latency must be measured. Existing rollup risk,
+reliability and TLS exclusions are enforced immediately; old native rows without
+URL-expiry evidence can still supply online fallback. This is compatibility
+staging, not proof of the new index gates, fresh URL coverage or CPU recovery.
+
+Request verification must follow the actual public app route. A public-alias
+`/status` response of 403 is intentionally generated by Warp and does not prove
+an API outage. Attest executable/config generations separately. Likewise,
+failure of an assumed public-IP-on-host-interface check is not proof of an
+empty provider list; record the desired/applied interface discrepancy without
+changing router or host configuration as part of this rollout.
 
 1. Record a read-only baseline of eligibility counts by rejection reason,
    quality/speed/online membership, request-specific US and Best Available
