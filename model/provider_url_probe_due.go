@@ -67,8 +67,9 @@ func providerUrlProbeSuccessWindowSql(clientIdExpression, nowExpression string) 
 
 // The rollup seeds never-probed providers once. Its ordered next-attempt index
 // supplies a bounded candidate head; row locks prevent duplicate admission and
-// advance the retry deadline atomically. Failed/local attempts leave the quota
-// intact. Successes expire individually; the admission token never resets.
+// advance the retry deadline atomically. Rejected stale hints leave the ordered
+// head without changing progress. Failed/local attempts leave the quota intact.
+// Successes expire individually; the admission token never resets.
 func ClaimProviderUrlProbeDue(ctx context.Context, now time.Time, limit, shardIndex, shardCount int) []ProviderUrlProbeDue {
 	providers := []ProviderUrlProbeDue{}
 	if limit <= 0 || shardCount < 1 || ProviderUrlProbeSlotCount < shardCount || shardIndex < 0 || shardIndex >= shardCount {
@@ -134,6 +135,11 @@ func providerUrlProbeDueSql(shardIndex, shardCount int) string {
 				AND EXISTS (SELECT 1 FROM provide_key AS key
 					WHERE key.client_id=head.client_id AND key.provide_mode=$2)
 				AND %s
+			), ineligible_head AS (
+				UPDATE provider_egress_probe_cycle AS cycle SET eligible = false
+				FROM head WHERE cycle.client_id = head.client_id
+				AND NOT EXISTS (SELECT 1 FROM candidates WHERE candidates.client_id = head.client_id)
+				RETURNING cycle.client_id
 			), measured AS MATERIALIZED (
 				SELECT candidates.*, recent.success_count, recent.oldest_success_at,
 					%s AS security_exception

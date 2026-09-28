@@ -10219,7 +10219,18 @@ or that PostgreSQL returned to its usual CPU band.
 
 Investigate slot-index query work, oldest-due fairness, private tunnel/DNS/HTTP
 stage occupancy, accepted receipts, catalog compatibility and URL-scoped TLS
-recovery. The deterministic 100k-provider control exposed a residual shard
+recovery. An empty bounded due response does not prove the eligible fleet is
+empty: compare the authoritative cohort with initialized scheduling rows and
+the current location/reliability task. A newly deployed worker cannot measure
+providers before that task seeds their durable rows. Separately, stale
+`eligible=true` hints at the head may now fail the authoritative gates and hide
+a healthy tail. A claim must retire only those rejected, locked hints so the
+next bounded claim can advance, preserving their tokens, evidence and pacing
+for later re-eligibility. Synthetic single-shard and fixed-slot controls
+reproduce this starvation without a periodic eligibility refresh; they are
+not evidence that this mechanism caused a particular Main outage. TLS-only
+and ARIN non-quality providers remain eligible for URL revalidation.
+The deterministic 100k-provider control exposed a residual shard
 filter scanning other shards' due rows; an indexed fixed-slot/lazy-head merge
 removes that scan, but dead index tuples still require ordinary vacuum and
 live query/buffer validation. Do not add a global connection cap or weaken
