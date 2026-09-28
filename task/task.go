@@ -1105,6 +1105,8 @@ type TaskTarget[T any, R any] struct {
 	targetFunction         TaskFunction[T, R]
 	postFunction           TaskPostFunction[T, R]
 	alternateFunctionNames []string
+	// An instance-local timer boundary permits deterministic max-time controls.
+	runAfter func(time.Duration) <-chan time.Time
 }
 
 func NewTaskTarget[T any, R any](
@@ -1185,12 +1187,18 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 	defer clientSession.Cancel()
 
 	timeout := false
+	timerDone := make(chan struct{})
+	after := self.runAfter
+	if after == nil {
+		after = time.After
+	}
 
 	go server.HandleError(func() {
+		defer close(timerDone)
 		defer clientSession.Cancel()
 		select {
 		case <-clientSession.Ctx.Done():
-		case <-time.After(max(
+		case <-after(max(
 			time.Duration(task.RunMaxTimeSeconds)*time.Second,
 			DefaultMaxTime,
 		)):
@@ -1202,17 +1210,18 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 		if r := recover(); r != nil {
 			returnErr = taskPanicError(r)
 		}
+		// Join before reading the timer's result, including recovered panics.
+		// A canceled max-time context must not lose its timeout attribution.
+		clientSession.Cancel()
+		<-timerDone
+		if timeout {
+			returnErr = errors.Join(errors.New("Timeout"), returnErr)
+			runPost = nil
+		}
 	}()
 
 	result, returnErr = self.targetFunction(args, clientSession)
 	if returnErr != nil {
-		if timeout {
-			returnErr = errors.Join(errors.New("Timeout"), returnErr)
-		}
-		return
-	}
-	if timeout {
-		returnErr = errors.New("Timeout")
 		return
 	}
 
@@ -1274,12 +1283,18 @@ func (self *TaskTarget[T, R]) RunPost(
 	defer clientSession.Cancel()
 
 	timeout := false
+	timerDone := make(chan struct{})
+	after := self.runAfter
+	if after == nil {
+		after = time.After
+	}
 
 	go server.HandleError(func() {
+		defer close(timerDone)
 		defer clientSession.Cancel()
 		select {
 		case <-clientSession.Ctx.Done():
-		case <-time.After(max(
+		case <-after(max(
 			time.Duration(finishedTask.RunMaxTimeSeconds)*time.Second,
 			DefaultMaxTime,
 		)):
@@ -1291,19 +1306,14 @@ func (self *TaskTarget[T, R]) RunPost(
 		if r := recover(); r != nil {
 			returnErr = taskPanicError(r)
 		}
-	}()
-
-	returnErr = self.postFunction(args, result, clientSession, tx)
-	if returnErr != nil {
+		clientSession.Cancel()
+		<-timerDone
 		if timeout {
 			returnErr = errors.Join(errors.New("Timeout"), returnErr)
 		}
-		return
-	}
-	if timeout {
-		returnErr = errors.New("Timeout")
-		return
-	}
+	}()
+
+	returnErr = self.postFunction(args, result, clientSession, tx)
 
 	return
 }
