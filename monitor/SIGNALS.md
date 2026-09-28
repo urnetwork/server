@@ -1549,6 +1549,29 @@ establish neither current work rate nor CPU share. Qualify recovery with a
 matched-reset current statement delta, observed wait/worker context and an
 independent sustained PostgreSQL cgroup CPU window.
 
+The settlement repair keeps the requested contract and each matching balance
+parameterized through two non-flattening lateral reads in
+`settlementEscrowReadSql`. It preserves every escrow row with a matching
+balance, including zero reservations and arbitrarily wide legacy contracts,
+and retains ascending expiry order without defining an order within ties.
+It changes neither accounting posts nor database-wide planner/statistics
+settings. The synthetic distorted-estimate control must reproduce the old
+parallel plan while the owning custom and generic plans remain serial with
+bounded index work; actual-model controls must retain exact payouts, debits,
+reservation releases, rejection, and repeat behavior.
+
+This is a per-query work correction, not proof of current CPU attribution.
+An old high-cost interval, a fresh estimate, or a later lower CPU sample alone
+does not establish current demand or recovery. Before rollout, retain a fresh
+matched-reset call/row/work interval for the exact old statement and compare
+the affected traffic. After every active API, Connect, and Taskworker artifact
+contains the repair, account for both statement fingerprints during the
+transition, then require two fresh complete CPU observations below the band
+with ongoing successful settlement, the corrected query's work rate, and no
+new accounting or reservation failure. Worker absence alone cannot close a
+wait, write-amplification, capacity, or FP2 availability finding; reduced calls
+caused by failed or missing traffic cannot serve as the healthy control.
+
 The 2026-09-26 discriminator established the source and threshold boundary.
 The inventory-owned active PostgreSQL service had CPU accounting enabled and
 a numeric counter with a stable invocation. Direct cgroup intervals measured

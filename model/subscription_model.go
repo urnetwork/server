@@ -2952,6 +2952,31 @@ func allocateContractParticipantPayouts(
 	return
 }
 
+// Keep both lookups parameterized: historical contract cardinality estimates
+// can otherwise launch parallel workers for a single contract's small escrow.
+// The offset fences prevent flattening without limiting rows or ordering ties.
+const settlementEscrowReadSql = `
+    SELECT
+        selected_escrow.balance_id,
+        selected_escrow.balance_byte_count,
+        selected_balance.start_balance_byte_count,
+        selected_balance.net_revenue_nano_cents
+    FROM unnest(ARRAY[$1::uuid]) AS requested_contract(contract_id)
+    CROSS JOIN LATERAL (
+        SELECT balance_id, balance_byte_count
+        FROM transfer_escrow
+        WHERE contract_id = requested_contract.contract_id
+        OFFSET 0
+    ) AS selected_escrow
+    CROSS JOIN LATERAL (
+        SELECT start_balance_byte_count, net_revenue_nano_cents, end_time
+        FROM transfer_balance
+        WHERE balance_id = selected_escrow.balance_id
+        OFFSET 0
+    ) AS selected_balance
+    ORDER BY selected_balance.end_time ASC
+`
+
 func settleEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -3075,22 +3100,7 @@ func settleEscrowInTx(
 	// take from the earlier before the later
 	result, err := tx.Query(
 		ctx,
-		`
-            SELECT
-                transfer_escrow.balance_id,
-                transfer_escrow.balance_byte_count,
-                transfer_balance.start_balance_byte_count,
-                transfer_balance.net_revenue_nano_cents
-            FROM transfer_escrow
-
-            INNER JOIN transfer_balance ON
-                transfer_balance.balance_id = transfer_escrow.balance_id
-
-            WHERE
-                transfer_escrow.contract_id = $1
-
-            ORDER BY transfer_balance.end_time ASC
-        `,
+		settlementEscrowReadSql,
 		contractId,
 	)
 
