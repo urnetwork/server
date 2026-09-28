@@ -920,7 +920,7 @@ func TestGetProviderEgressLocationDueOrderingIsStableAcrossLimits(t *testing.T) 
 			locationTie:      now.Add(-ProviderEgressLocationMaxAge + 30*time.Minute),
 		}
 		for clientId, observedAt := range locationTimes {
-			SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+			testingSetHistoricalProviderEgressLocation(t, ctx, &ProviderEgressLocation{
 				ClientId: clientId, LocationId: city.LocationId,
 				CountryCode: "us", ObservedAt: observedAt,
 			})
@@ -1060,7 +1060,7 @@ func TestProviderEgressDueUsesHealthWithoutExitLocation(t *testing.T) {
 			testing_connectProbeableProvider(t, ctx, clientId, location.LocationId, fmt.Sprintf("192.0.2.%d:0", index+1), ProvideModePublic)
 		}
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
-		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+		testingSetHistoricalProviderEgressLocation(t, ctx, &ProviderEgressLocation{
 			ClientId: freshStaleLocation, LocationId: location.LocationId,
 			CountryCode: "zz", ObservedAt: now.Add(-4 * 24 * time.Hour),
 		})
