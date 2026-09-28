@@ -558,10 +558,12 @@ func TestFindProviders2ArinNonQualityIsSpeedOnly(t *testing.T) {
 	})
 }
 
-// A current blackhole verdict and a TLS-authentication failure are hard
+// ARIN risk and legacy TLS quarantine are hard
 // exclusions: absent in both modes, with force_minimum, when named by client
 // id, as a network-only provider of the caller's own network, from the
-// online bucket and from the counts -- and back by themselves once cleared.
+// online bucket and from the counts. Clearing risk restores that provider;
+// a clean aggregate cannot clear an unidentified legacy TLS finding. Exact-URL
+// recovery is covered separately by TestFp2UrlSecurityRecoveryIsExactOrderedAndIdempotent.
 func TestFindProviders2HardExclusionsHoldEverywhere(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -621,7 +623,7 @@ func TestFindProviders2HardExclusionsHoldEverywhere(t *testing.T) {
 		// the counts: the network-only provider is never counted publicly
 		connect.AssertEqual(t, egressTestLocationCount(ctx, t, city), 1)
 
-		// the verdicts clear: a passing check and a clean run
+		// Risk clears; the clean aggregate cannot authenticate the legacy target.
 		for _, clientId := range []server.Id{blackholed.clientId, networkOnly.clientId, onlineBlackholed.clientId} {
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client_location SET arin_risk=false WHERE client_id=$1`, clientId))
@@ -631,16 +633,20 @@ func TestFindProviders2HardExclusionsHoldEverywhere(t *testing.T) {
 		egressTestPasses(ctx, t)
 
 		returnedClientIds := egressTestIds(egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeQuality, 10, false, server.NewId()))
-		for _, clientId := range []server.Id{healthy.clientId, blackholed.clientId, intercepted.clientId, onlineBlackholed.clientId} {
+		for _, clientId := range []server.Id{healthy.clientId, blackholed.clientId, onlineBlackholed.clientId} {
 			if !slices.Contains(returnedClientIds, clientId) {
 				t.Errorf("provider %s did not come back once its verdict cleared", clientId)
 			}
 		}
+		if slices.Contains(returnedClientIds, intercepted.clientId) {
+			t.Fatal("clean aggregate restored a provider with legacy TLS quarantine")
+		}
+		connect.AssertEqual(t, len(egressTestFind(ctx, t, []*ProviderSpec{{ClientId: &intercepted.clientId}}, RankModeQuality, 1, false, server.NewId())), 0)
 		ownNetworkClientIds := egressTestIds(egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeQuality, 10, false, networkOnly.networkId))
 		if !slices.Contains(ownNetworkClientIds, networkOnly.clientId) {
 			t.Error("the network-only provider did not come back to its own network")
 		}
-		connect.AssertEqual(t, egressTestLocationCount(ctx, t, city), 4)
+		connect.AssertEqual(t, egressTestLocationCount(ctx, t, city), 3)
 	})
 }
 
