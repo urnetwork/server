@@ -19,3 +19,18 @@ rollback, so ReadCommitted must complete with one actual allocation attempt;
 the unchanged RepeatableRead control can recover final identity while still
 exposing its discarded allocation work. Real Tx retry behavior stays enabled.
 This fixture successor is pending independent normal/race qualification.
+
+The SDK route integration successor adds two external `api_test` roots using
+the actual `Routes()` table, JWT/session authentication, controller and database
+transaction, with the cumulative endpoint-pinned SDK/Connect dependencies. It
+breaks a physical HTTP response only after checking the real committed binding,
+then requires exact-request recovery of that same client/device. A newly opened
+SDK and renewed network bearer must retain that identity. Completed request and
+principal conflicts, and revocation through the actual SDK remove-client route,
+must preserve the binding without another allocation or legacy fallback.
+
+This is a test-only composition change. Its two roots need their own isolated
+normal/race qualification and an actual-route-removal control; it does not
+repeat or replace the full model qualification of the earlier changed allocation
+body. Successful local SDK HTTP fixtures alone did not cover this route/session/
+controller/database seam. Author compilation is not behavioral qualification.
