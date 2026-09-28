@@ -1,5 +1,5 @@
-// Only a failed local control registration before this private tunnel has
-// ever obtained a registered client can rule out provider measurement.
+// Only failed local credential acquisition or control registration before this
+// private tunnel has obtained a registered client can rule out measurement.
 package providertunnel
 
 import (
@@ -22,6 +22,14 @@ type providerRegistrationState struct {
 	state atomic.Uint32
 }
 
+// Failed args creation cannot contact a provider because no client exists yet.
+// A later credential alone is not contact; successful construction ends proof.
+func (self *providerRegistrationState) recordClientArgs(args *connect.MultiClientGeneratorClientArgs, err error) {
+	if args == nil && err != nil {
+		self.state.Or(providerRegistrationFailed)
+	}
+}
+
 // Consume one completed constructor before its client can enter the window.
 func (self *providerRegistrationState) record(client *connect.Client, err error) {
 	if client != nil {
@@ -40,11 +48,39 @@ func (self *providerRegistrationState) unavailable() bool {
 }
 
 // Embed the real API generator so its optional migration, identity, cleanup
-// and budget capabilities remain unchanged. Only construction results are
-// observed, before the window can use the returned client.
+// and budget capabilities remain unchanged. Credential and construction results
+// are observed before the window can use a returned client.
 type providerRegistrationGenerator struct {
 	*connect.ApiMultiClientGenerator
 	registration *providerRegistrationState
+}
+
+// Observe the legacy entrypoint without changing its parent-context ownership.
+func (self *providerRegistrationGenerator) NewClientArgs() (*connect.MultiClientGeneratorClientArgs, error) {
+	args, err := self.ApiMultiClientGenerator.NewClientArgs()
+	self.registration.recordClientArgs(args, err)
+	return args, err
+}
+
+// Preserve the caller's bounded credential acquisition and its exact error.
+func (self *providerRegistrationGenerator) NewClientArgsContext(ctx context.Context) (*connect.MultiClientGeneratorClientArgs, error) {
+	args, err := self.ApiMultiClientGenerator.NewClientArgsContext(ctx)
+	self.registration.recordClientArgs(args, err)
+	return args, err
+}
+
+// Destination-aware windows keep the real generator's identity/reuse behavior.
+func (self *providerRegistrationGenerator) NewClientArgsForDestination(destination connect.MultiHopId) (*connect.MultiClientGeneratorClientArgs, error) {
+	args, err := self.ApiMultiClientGenerator.NewClientArgsForDestination(destination)
+	self.registration.recordClientArgs(args, err)
+	return args, err
+}
+
+// Observe the context-aware destination path before any constructor can run.
+func (self *providerRegistrationGenerator) NewClientArgsForDestinationContext(ctx context.Context, destination connect.MultiHopId) (*connect.MultiClientGeneratorClientArgs, error) {
+	args, err := self.ApiMultiClientGenerator.NewClientArgsForDestinationContext(ctx, destination)
+	self.registration.recordClientArgs(args, err)
+	return args, err
 }
 
 // Retain the legacy caller's single-context lifecycle contract.
