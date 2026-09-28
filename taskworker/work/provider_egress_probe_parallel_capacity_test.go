@@ -17,7 +17,7 @@ import (
 	"github.com/urnetwork/server/qualityprobe/prober"
 )
 
-// Only synthetic deployment values enter the test configuration.
+// Synthetic legacy full/blackhole settings exercise their compatibility path.
 func testProviderEgressParallelArgs(t *testing.T) *ProviderEgressProbeArgs {
 	t.Helper()
 	t.Setenv("WARP_DOMAIN", "probe.example")
@@ -26,6 +26,7 @@ enabled: true
 shard_count: 4
 idle_delay_seconds: 300
 max_time_seconds: 4500
+url_probe: null
 api_url: https://api.probe.example
 platform_url: wss://platform.probe.example
 public_api_url: https://api.probe.example
@@ -65,6 +66,9 @@ blackhole:
 
 func TestProviderEgressParallelSettingsKeepSecurityGeometry(t *testing.T) {
 	args := testProviderEgressParallelArgs(t)
+	if args.UrlProbe != nil {
+		t.Fatal("legacy full/blackhole fixture selected URL scheduling")
+	}
 	if args.ShardCount != 4 || args.Blackhole.Concurrency != 250 || args.Blackhole.Limit != 250 ||
 		args.Full.Limit != 8 || args.Full.Concurrency != 8 || args.MaxTimeSeconds != 4500 || args.IdleDelaySeconds != 300 ||
 		args.LoadAttempts != 3 || args.LoadRetryMeanIntervalSeconds != 300 || args.TunnelRecreateAttempts != 2 ||

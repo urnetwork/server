@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -738,33 +739,90 @@ func TestPlanDeriveRunProjectsFromTheLastRun(t *testing.T) {
 	connect.AssertEqual(t, empty.bytesPerNode, jobSettings.BytesPerNode)
 }
 
-// The heap sampler reports the peak above where it started, stops on finish
-// and on its context, and does not spin without an interval.
-func TestDeriveMemoryPeakMeasuresTheRunsHeap(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	memoryPeak := startDeriveMemoryPeak(ctx, time.Millisecond)
-	held := make([]byte, 64*1024*1024)
-	for i := range held {
-		held[i] = byte(i)
+// A 64 MiB allocation after 16 MiB of baseline heap is collected grows the
+// process by only 48 MiB. The peak is a net difference, never gross allocation.
+func TestDeriveMemoryPeakMeasuresProcessHeapDelta(t *testing.T) {
+	const baseline = uint64(128 * 1024 * 1024)
+	var heapAlloc atomic.Uint64
+	var reads atomic.Int64
+	heapAlloc.Store(baseline)
+	memoryPeak := startDeriveMemoryPeakWithHeapAlloc(t.Context(), 0, func() uint64 {
+		reads.Add(1)
+		return heapAlloc.Load()
+	})
+	<-memoryPeak.done
+	if reads.Load() != 1 {
+		t.Fatal("a zero interval sampled after its baseline")
 	}
+	heapAlloc.Store(baseline - 16*1024*1024)
+	memoryPeak.sample()
+	heapAlloc.Store(baseline - 16*1024*1024 + 64*1024*1024)
+	memoryPeak.sample()
+	// A later collection cannot erase the observed peak.
+	heapAlloc.Store(baseline - 32*1024*1024)
 	peakBytes := memoryPeak.finish()
-	runtime.KeepAlive(held)
-	if peakBytes < 64*1024*1024 {
-		t.Fatalf("a 64 MiB allocation peaked at %d bytes", peakBytes)
-	}
-	// a second finish only reads the peak
+	connect.AssertEqual(t, peakBytes, int64(48*1024*1024))
+	connect.AssertEqual(t, reads.Load(), int64(4))
+	// A repeat must neither take another sample nor change the terminal value.
+	heapAlloc.Store(baseline + 256*1024*1024)
 	connect.AssertEqual(t, memoryPeak.finish(), peakBytes)
+	connect.AssertEqual(t, reads.Load(), int64(4))
+}
 
-	// no interval: the sampler goroutine ends at once
-	still := startDeriveMemoryPeak(ctx, 0)
-	<-still.done
-	connect.AssertEqual(t, 0 <= still.finish(), true)
+// Explicit reader barriers hold a periodic sample across finish's final sample.
+// Finish must join that sample and retain the higher value without sleeps.
+func TestDeriveMemoryPeakJoinsPeriodicSampleOnFinish(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	periodicStarted := make(chan struct{})
+	finishSampled := make(chan struct{})
+	releasePeriodic := make(chan struct{})
+	defer func() {
+		select {
+		case <-releasePeriodic:
+		default:
+			close(releasePeriodic)
+		}
+	}()
+	var reads atomic.Int64
+	memoryPeak := startDeriveMemoryPeakWithHeapAlloc(ctx, time.Nanosecond, func() uint64 {
+		switch reads.Add(1) {
+		case 1:
+			return 100
+		case 2:
+			close(periodicStarted)
+			<-releasePeriodic
+			return 200
+		case 3:
+			close(finishSampled)
+			return 150
+		default:
+			return 100
+		}
+	})
+	<-periodicStarted
+	finished := make(chan int64, 1)
+	go func() { finished <- memoryPeak.finish() }()
+	<-finishSampled
+	close(releasePeriodic)
+	connect.AssertEqual(t, <-finished, int64(100))
+	<-memoryPeak.done
+	finishedReads := reads.Load()
+	connect.AssertEqual(t, memoryPeak.finish(), int64(100))
+	connect.AssertEqual(t, reads.Load(), finishedReads)
+}
 
-	// the context ends the sampler
-	stopped, stop := context.WithCancel(ctx)
-	sampler := startDeriveMemoryPeak(stopped, time.Hour)
-	stop()
-	<-sampler.done
-	sampler.finish()
+// Cancellation ends the periodic worker; finish still takes its final sample.
+func TestDeriveMemoryPeakFinishesAfterContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var reads atomic.Int64
+	memoryPeak := startDeriveMemoryPeakWithHeapAlloc(ctx, time.Hour, func() uint64 {
+		return uint64(reads.Add(1) * 100)
+	})
+	cancel()
+	<-memoryPeak.done
+	connect.AssertEqual(t, reads.Load(), int64(1))
+	connect.AssertEqual(t, memoryPeak.finish(), int64(100))
+	connect.AssertEqual(t, reads.Load(), int64(2))
 }

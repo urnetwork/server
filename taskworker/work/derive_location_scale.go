@@ -250,13 +250,13 @@ func ingestDeriveInputs(
 	return inputs
 }
 
-// Samples the heap while a run ingests and solves, for the run's peak above
-// the heap it started from. Heap in use includes garbage not yet collected, so
-// the peak is an upper bound on what the run needed, which is the right side
-// to err on for a budget. The sampler goroutine and the caller share the peak
-// under stateLock.
+// Samples process heap growth above the run's starting heap. Other work and
+// garbage collection can move either side of that difference; it is neither
+// an allocation counter nor an isolated upper bound on the run's own memory.
+// The sampler goroutine and the caller share the peak under stateLock.
 type deriveMemoryPeak struct {
-	baseline uint64
+	baseline      uint64
+	readHeapAlloc func() uint64
 
 	stateLock sync.Mutex
 	peak      uint64
@@ -273,13 +273,23 @@ func startDeriveMemoryPeak(ctx context.Context, interval time.Duration) *deriveM
 	// the heap as the run finds it, without the garbage of whatever ran
 	// before it
 	runtime.GC()
-	stats := &runtime.MemStats{}
-	runtime.ReadMemStats(stats)
+	return startDeriveMemoryPeakWithHeapAlloc(ctx, interval, func() uint64 {
+		var stats runtime.MemStats
+		runtime.ReadMemStats(&stats)
+		return stats.HeapAlloc
+	})
+}
+
+// Keeps the counter reader with one sampler so tests can supply exact heap
+// states without changing process-global collection or scheduler settings.
+func startDeriveMemoryPeakWithHeapAlloc(ctx context.Context, interval time.Duration, readHeapAlloc func() uint64) *deriveMemoryPeak {
+	heapAlloc := readHeapAlloc()
 	self := &deriveMemoryPeak{
-		baseline: stats.HeapAlloc,
-		peak:     stats.HeapAlloc,
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		baseline:      heapAlloc,
+		readHeapAlloc: readHeapAlloc,
+		peak:          heapAlloc,
+		stop:          make(chan struct{}),
+		done:          make(chan struct{}),
 	}
 	go func() {
 		defer close(self.done)
@@ -302,12 +312,11 @@ func startDeriveMemoryPeak(ctx context.Context, interval time.Duration) *deriveM
 
 // Raises the peak to the heap in use now.
 func (self *deriveMemoryPeak) sample() {
-	stats := &runtime.MemStats{}
-	runtime.ReadMemStats(stats)
+	heapAlloc := self.readHeapAlloc()
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		self.peak = max(self.peak, stats.HeapAlloc)
+		self.peak = max(self.peak, heapAlloc)
 	}()
 }
 
