@@ -9,3 +9,13 @@ The new migration must be applied before advertising this route. Registration al
 Clients must persist their opaque request and stable scope before the first request, replay only that exact request after an unknown reply, and durably install the returned identity before publishing credentials. An older server's missing versioned route is an explicit unsupported capability; clients must not fall back to legacy creation. Deploy migration and server support before enabling fresh registration in approved validator configuration.
 
 Qualification is pending. The candidate has compile-only checks; the six new `TestNetworkClientRegistration` roots require normal/race qualification against real isolated PostgreSQL/Redis. Because the shared `AuthNetworkClient` allocation body is refactored, qualification must include existing legacy client, principal, limit, onboarding and controller roots, followed by a composed full `./model` normal run. Previous full-model results do not qualify this changed body. No live migration or deployment is part of this change.
+
+The original RepeatableRead causal control passed the concurrent identity test
+in both modes. That is preserved as an invalid causal claim, not a production
+dedup failure: the shared server.Tx owner retries integrity/rollback failures.
+The expanded concurrent root now observes real device-insert attempts through
+an isolated test-owned PostgreSQL sequence/trigger. Sequence advances survive
+rollback, so ReadCommitted must complete with one actual allocation attempt;
+the unchanged RepeatableRead control can recover final identity while still
+exposing its discarded allocation work. Real Tx retry behavior stays enabled.
+This fixture successor is pending independent normal/race qualification.

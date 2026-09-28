@@ -71,6 +71,22 @@ func TestNetworkClientRegistrationLostReplyPreservesIdentity(t *testing.T) {
 func TestNetworkClientRegistrationConcurrentDuplicates(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		clientSession, request := newNetworkClientRegistrationTest(t, t.Context())
+		// The isolated test database owns this sequence and trigger. PostgreSQL
+		// sequence advances survive transaction rollback, exposing discarded
+		// allocation work that the real retry owner correctly hides from callers.
+		server.Tx(t.Context(), func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(t.Context(), fmt.Sprintf(`
+CREATE SEQUENCE synthetic_registration_allocation_attempts;
+CREATE FUNCTION synthetic_registration_count_allocation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+ IF NEW.network_id = '%s'::uuid THEN
+  PERFORM nextval('synthetic_registration_allocation_attempts');
+ END IF;
+ RETURN NEW;
+END $$;
+CREATE TRIGGER synthetic_registration_count_allocation BEFORE INSERT ON device
+FOR EACH ROW EXECUTE FUNCTION synthetic_registration_count_allocation();`, clientSession.ByJwt.NetworkId.String())))
+		})
 		connection, err := server.AcquireMaintenanceDbConn(t.Context())
 		if err != nil {
 			t.Fatal(err)
@@ -107,7 +123,9 @@ func TestNetworkClientRegistrationConcurrentDuplicates(t *testing.T) {
 			})
 		}
 		// Observe both actual PostgreSQL lock waits before release. Under
-		// repeatable-read both would now retain the same pre-allocation view.
+		// repeatable-read both retain the same pre-allocation view. Its failed
+		// insert can recover through server.Tx retry, so identity equality alone
+		// cannot prove the post-lock lookup avoided repeating allocation work.
 		for {
 			var blocked int
 			server.Raise(lock.QueryRow(t.Context(), `SELECT count(DISTINCT pid) FROM pg_locks WHERE locktype='advisory' AND NOT granted AND $1::int=ANY(pg_blocking_pids(pid))`, blockerPid).Scan(&blocked))
@@ -134,6 +152,13 @@ func TestNetworkClientRegistrationConcurrentDuplicates(t *testing.T) {
 		if *first.result.ClientId != *second.result.ClientId || *first.result.DeviceId != *second.result.DeviceId {
 			t.Fatal("concurrent duplicate requests allocated two identities")
 		}
+		server.Db(t.Context(), func(conn server.PgConn) {
+			var attempts int64
+			server.Raise(conn.QueryRow(t.Context(), `SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM synthetic_registration_allocation_attempts`).Scan(&attempts))
+			if attempts != 1 {
+				t.Fatalf("concurrent duplicates repeated already committed allocation work: attempts=%d", attempts)
+			}
+		})
 	})
 }
 
