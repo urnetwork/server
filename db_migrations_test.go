@@ -139,8 +139,8 @@ func TestCompetitionStagingBestWinnerMigrationPreservesProductionGate(t *testing
 
 func TestCompetitionStagingApprovalMigrationIsAppendOnlyAndWinnerBound(t *testing.T) {
 	index := sqlMigrationIndex(t, "CREATE TABLE competition_staging_winner_approval")
-	if index != len(migrations)-1 {
-		t.Fatalf("staging approval migration index = %d, want final migration %d", index, len(migrations)-1)
+	if index != 720 {
+		t.Fatalf("staging approval migration index = %d, want published index 720", index)
 	}
 	sql := migrations[index].(*SqlMigration).sql
 	for _, marker := range []string{

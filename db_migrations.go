@@ -9084,4 +9084,23 @@ var migrations = []any{
 		BEFORE INSERT ON competition_staging_winner_approval
 		FOR EACH ROW EXECUTE FUNCTION competition_staging_winner_approval_guard();
 	`),
+
+	// Install before enabling ordered grant paging. The active-only index
+	// matches the payer, expiry cutoff and complete allocation order, allowing
+	// a funded page to stop without reading every eligible grant. Keep mutable
+	// balance amounts out of INCLUDE so every reservation update does not add
+	// covering-index work. Concurrent builds may await old backup snapshots;
+	// see docs/operations/grant-index-rollout.md for the deployment boundary.
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS transfer_balance_active_network_end_start_id
+	`, `
+		CREATE INDEX CONCURRENTLY transfer_balance_active_network_end_start_id
+		ON transfer_balance (network_id, end_time, start_time, balance_id)
+		WHERE active
+	`, `
+		DROP INDEX IF EXISTS transfer_balance_active_network_end_start_id;
+		CREATE INDEX transfer_balance_active_network_end_start_id
+		ON transfer_balance (network_id, end_time, start_time, balance_id)
+		WHERE active
+	`),
 }
