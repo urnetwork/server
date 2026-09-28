@@ -483,7 +483,50 @@ successful download does not prove that historical copies are safe.
 
 ## Implementation, tests, and rollout
 
-Current checkpoint (2026-09-28 09:50 UTC; production acceptance is incomplete):
+Current checkpoint (2026-09-28 10:31 UTC; production acceptance is incomplete):
+
+- The current observer's actual query/parser diagnostic found eight retired
+  processes represented only by historical counter ranges, alongside eight
+  valid current processes. Treating the former as unknown live owners erased
+  all current owners. The narrow correction and actual-parser regressions are
+  adopted with focused normal/race/vet and full monitor/CLI normal passes;
+  full race and watcher promotion remain pending. Desired placement still
+  includes ten slots, so restoring eight observed workers must not turn the
+  independent hourly completeness gap into a healthy verdict.
+- Deterministic actual-API/producer/expansion tests prove that a fixed-provider
+  request could pre-mint a second unused identity before its first setup
+  returned. Fixed discovery now offers inert destinations and the requesting
+  expansion owns minting. An adjacent canceled generator could also return an
+  identity with an error without retiring it. Both corrections and thirteen
+  controls are committed in Connect `8447b3f0`; owning and independent expanded
+  normal/race/vet pass.
+  Full release-relevant gates and a new Taskworker rollout are still pending.
+  The unused identity never constructed a transport or contract manager, so
+  this bug adds credential work but does not itself explain the origin storm.
+- The standing observer recorded approximately 637,283 companion-origin
+  fallback/deadline lookups per minute at 10:03, about 4.27 lookups per
+  completed request. Missing-origin errors predominantly target probe-owned
+  derived clients via stream fallback. Actual request ownership/age must be
+  established before attributing them to current probes or historical clients;
+  aggregate creation-minus-retirement counts are not an orphan census.
+- At 10:27, the exact settlement read's nonexecuting custom and generic plans
+  both estimated about 31,000 rows and selected two parallel workers. The
+  10:29 catalog read shows approximately 3.73 billion escrow rows but only
+  119,846 estimated distinct contract IDs at the default statistics target
+  100; autoanalyze completed at 10:25, so stale statistics alone do not explain
+  the estimate. The matched-reset 10:30:58–10:36:33 interval contains 66,104
+  calls returning 67,418 rows (1.02/call, about 197 calls/second), with 27.37 ms
+  mean execution wall time. Independent five-second PostgreSQL cgroup CPU is
+  59.04% at 10:36. This does not attribute that CPU to the statement. A local
+  control reproduces the row overestimate but not the parallel-worker plan;
+  no settlement rewrite is accepted yet. No live
+  ANALYZE, planner-setting change or accounting rewrite has been performed.
+- The 10:36 authoritative census still has zero rolling ten-success quotas
+  among 107,797 eligible providers, 86,109 due and 938,531 successes needed.
+  Cached rolling counts agree; 152 providers remain uninitialized. These are
+  not completion or throughput-recovery results.
+
+Previous checkpoint (2026-09-28 09:50 UTC; retained outcome evidence):
 
 - All eight source/boot-qualified Taskworkers in the 09:33–09:43 window
   completed 15,261 probe lifecycles; the 09:43 point has 501 of 512 configured

@@ -1540,6 +1540,15 @@ plan controls, not production CPU savings. Correlate fresh deployed source,
 statement call deltas, full plan rows/buffers, cache fallback state and this
 independent CPU counter; completed statement execution wall time is not CPU.
 
+A fresh autoanalyze timestamp does not establish accurate selectivity for
+current settlement traffic over large historical escrow. Compare the exact
+owning query's custom and generic estimates with finite column/relation
+statistics; severe row overestimation can introduce per-request parallel
+startup even for small results. Non-ANALYZE plans and cumulative rows/calls
+establish neither current work rate nor CPU share. Qualify recovery with a
+matched-reset current statement delta, observed wait/worker context and an
+independent sustained PostgreSQL cgroup CPU window.
+
 The 2026-09-26 discriminator established the source and threshold boundary.
 The inventory-owned active PostgreSQL service had CPU accounting enabled and
 a numeric counter with a stable invocation. Direct cgroup intervals measured
@@ -10186,6 +10195,16 @@ producer times no older than 180 seconds and no more than 30 seconds in the
 future. Warnings, duplicate cells, malformed labels, incomplete snapshots,
 unknown starts, tied process generations, and unavailable transport remain
 unobservable. Do not export instance IDs or provider/destination identities.
+
+Range-query results can survive a retired process after its instant start and
+gauges disappear. A valid process containing only historical success
+increase/sample-count fields is therefore excluded from current-owner
+selection, and its successes are never borrowed by a successor. Any instant
+family without a trustworthy start, malformed observation, duplicate or
+ambiguous current source remains unobservable. This distinction does not reduce
+desired placement to enabled placement: excluded desired slots still prevent a
+complete hourly fleet-rate verdict, while a uniquely owned coherent shard-zero
+census can independently establish the quota deficit.
 
 The capable producer exposes `urnetwork_url_probe_capability=1`, an explicit
 `urnetwork_url_probe_configured_shards`, and one

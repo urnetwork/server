@@ -232,6 +232,19 @@ func currentUrlProbeProcesses(processes []*urlProbeCoverageProcess, expected map
 		if !expected[slot] {
 			continue
 		}
+		// Range-only results prove historical activity, not a live owner.
+		// Any instant field or malformed process still fails closed below.
+		rangeOnly := !process.invalid && len(process.values) > 0
+		for name := range process.values {
+			switch name {
+			case "success", "success_samples", "success_early":
+			default:
+				rangeOnly = false
+			}
+		}
+		if rangeOnly {
+			continue
+		}
 		start := process.values["start"]
 		if start <= 0 || !urlProbeCoverageFresh(process.values["start_time"], now) || start > float64(now.Unix()+30) {
 			unknownStart[slot] = true
