@@ -1,0 +1,9 @@
+# Versioned client registration
+
+`POST /network/register-client-v1` binds one authenticated network principal and exact creation request to one server-issued client/device. The legacy `/network/auth-client` route keeps its existing behavior.
+
+The new migration must be applied before advertising this route. Registration allocation and its durable request/scope binding commit in the same transaction. Concurrent duplicates serialize on the network's transaction-owned advisory lock; read-committed isolation lets the waiter observe the preceding allocation. The binding survives client or device deletion, so replay cannot recreate a revoked identity. A changed payload, principal, role authority, request ID, or scope is refused.
+
+Clients must persist their opaque request and stable scope before the first request, replay only that exact request after an unknown reply, and durably install the returned identity before publishing credentials. An older server's missing versioned route is an explicit unsupported capability; clients must not fall back to legacy creation. Deploy migration and server support before enabling fresh registration in approved validator configuration.
+
+Qualification is pending. The candidate has compile-only checks; the six new `TestNetworkClientRegistration` roots require normal/race qualification against real isolated PostgreSQL/Redis. Because the shared `AuthNetworkClient` allocation body is refactored, qualification must include existing legacy client, principal, limit, onboarding and controller roots, followed by a composed full `./model` normal run. Previous full-model results do not qualify this changed body. No live migration or deployment is part of this change.

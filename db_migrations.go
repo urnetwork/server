@@ -9123,4 +9123,6 @@ var migrations = []any{
 		 ON transfer_contract (contract_id) WHERE close_time IS NULL AND
 		 outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')`,
 	),
+	// Persist the server-issued identity atomically with resumable registration.
+	newSqlMigration(clientRegistrationSchemaSql),
 }
