@@ -234,13 +234,47 @@ func TestNetworkClientRegistrationBindingRollback(t *testing.T) {
 	})
 }
 
-// Unknown fields on this explicit version are never silently interpreted as
-// permission to allocate a different identity or perform a proxy operation.
+// Exact versioned tags and string values are admitted before mutation. Case
+// folding, escaped duplicates and null cannot change an ownership field.
 func TestNetworkClientRegistrationRejectsUnknownWireIdentity(t *testing.T) {
-	for _, raw := range []string{`{"schema":"urnetwork-client-registration-v1","client_id":"synthetic"}`, `{"proxy_config":{}}`, `{} {}`, `{"registration_id":"first","registration_id":"second"}`} {
+	original := RegisterNetworkClientArgs{Schema: NetworkClientRegistrationSchema, RegistrationId: strings.Repeat("12", 32), ScopeSha256: strings.Repeat("34", 32), Description: "synthetic validator", DeviceSpec: "synthetic headless"}
+	canonical, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{string(canonical), strings.Replace(string(canonical), `"schema":`, `"\u0073chema":`, 1)} {
 		var request RegisterNetworkClientArgs
-		if err := json.Unmarshal([]byte(raw), &request); err == nil {
-			t.Fatal("versioned registration silently ignored unapproved fields")
+		if err := json.Unmarshal([]byte(raw), &request); err != nil || request != original {
+			t.Fatalf("canonical versioned registration changed: %v", err)
 		}
+	}
+	reject := func(raw string) {
+		request := original
+		if err := json.Unmarshal([]byte(raw), &request); err == nil {
+			t.Fatalf("versioned registration accepted noncanonical request grammar: %s", raw)
+		}
+		if request != original {
+			t.Fatal("rejected registration mutated the original request")
+		}
+	}
+	for _, name := range []string{"schema", "registration_id", "scope_sha256", "description", "device_spec"} {
+		for _, alias := range []string{strings.ToUpper(name[:1]) + name[1:], strings.ToUpper(name), strings.Replace(name, "s", "\u017f", 1)} {
+			reject(strings.Replace(string(canonical), `"`+name+`":`, `"`+alias+`":`, 1))
+			reject(`{"` + name + `":"synthetic","` + alias + `":"replacement"}`)
+			reject(`{"` + alias + `":"replacement","` + name + `":"synthetic"}`)
+			reject(`{"` + name + `":"synthetic","` + alias + `":null}`)
+		}
+		for _, value := range []string{`null`, `true`, `17`, `[]`, `{}`} {
+			reject(`{"` + name + `":` + value + `}`)
+		}
+		reject(`{"` + name + `":"first","` + name + `":"second"}`)
+	}
+	for _, raw := range []string{
+		`{"schema":"urnetwork-client-registration-v1","client_id":"synthetic"}`,
+		`{"proxy_config":{}}`, `{"extension":null}`, `{} {}`, `null`, `[]`, `17`, `"synthetic"`,
+		`{"schema":"first","\u0073chema":"second"}`, `{"schema":"synthetic",`,
+		`{"schema":"synthetic","description":{"schema":"nested"}}`,
+	} {
+		reject(raw)
 	}
 }

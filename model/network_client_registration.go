@@ -35,8 +35,8 @@ type RegisterNetworkClientArgs struct {
 // A versioned operation must not silently discard a caller's identity fields.
 // Legacy creation keeps its existing permissive wire contract separately.
 func (self *RegisterNetworkClientArgs) UnmarshalJSON(raw []byte) error {
-	// Every value in this version is scalar; typed decoding below rejects
-	// compound values. Track keys before decoding can overwrite duplicates.
+	// The fixed tag grammar precedes Go's case-insensitive struct matching.
+	// Track decoded keys so escaped duplicates cannot overwrite ownership.
 	keys := json.NewDecoder(bytes.NewReader(raw))
 	start, err := keys.Token()
 	if err != nil || start != json.Delim('{') {
@@ -49,9 +49,18 @@ func (self *RegisterNetworkClientArgs) UnmarshalJSON(raw []byte) error {
 		if err != nil || !ok || seen[name] {
 			return errors.New("registration request has an invalid or duplicate field")
 		}
+		switch name {
+		case "schema", "registration_id", "scope_sha256", "description", "device_spec":
+		default:
+			return errors.New("registration request has an unknown or noncanonical field")
+		}
 		seen[name] = true
-		if err := keys.Decode(new(json.RawMessage)); err != nil {
+		var fieldValue *string
+		if err := keys.Decode(&fieldValue); err != nil {
 			return err
+		}
+		if fieldValue == nil {
+			return errors.New("registration request fields must be strings")
 		}
 	}
 	if _, err := keys.Token(); err != nil {
