@@ -469,6 +469,34 @@ const providerHardExclusionsKey = "{provider_hard_exclusions}"
 // This reserved member cannot be a provider id. Older writers omit it.
 const providerHardExclusionsReadyMember = "ready:v2"
 
+// Bound every input before evaluating the shared fleet policy. Without these
+// request-only relation names, hashed EXISTS alternatives can scan the fleet
+// even though the outer candidate list and returned rows are bounded.
+func providerHardExclusionsSql() string {
+	return `
+		WITH client_connection_reliability_score AS MATERIALIZED (
+			SELECT client_id, lookback_index, independent_reliability_weight
+			FROM client_connection_reliability_score WHERE client_id = ANY($1)
+		), provider_egress_health AS MATERIALIZED (
+			SELECT client_id, tls_authentication_failure, legacy_tls_authentication_failure
+			FROM provider_egress_health WHERE client_id = ANY($1)
+		), provider_egress_url_security AS MATERIALIZED (
+			SELECT client_id, tls_failure
+			FROM provider_egress_url_security WHERE client_id = ANY($1)
+		)
+		SELECT client_id
+		FROM network_client_location_reliability AS provider_location
+		WHERE client_id = ANY($1) AND NOT (` + providerEgressEligibilitySql("provider_location") + `)
+		UNION
+		SELECT client_id
+		FROM provider_egress_health
+		WHERE client_id = ANY($1) AND tls_authentication_failure = true
+		UNION
+		SELECT client_id FROM provider_egress_url_security
+		WHERE client_id = ANY($1) AND tls_failure
+	`
+}
+
 // Which candidates the complete cached set excludes. A missing, expired or
 // legacy snapshot has unknown coverage, so read only these candidates from
 // the primary database. Backend errors never become an empty exclusion set.
@@ -529,18 +557,7 @@ func readProviderHardExclusions(ctx context.Context, clientIds []server.Id) (map
 	if len(uniqueClientIds) == 0 {
 		return excludedClientIds, nil
 	}
-	query := `
-		SELECT client_id
-		FROM network_client_location_reliability AS provider_location
-		WHERE client_id = ANY($1) AND NOT (` + providerEgressEligibilitySql("provider_location") + `)
-		UNION
-		SELECT client_id
-		FROM provider_egress_health
-		WHERE client_id = ANY($1) AND tls_authentication_failure = true
-		UNION
-		SELECT client_id FROM provider_egress_url_security
-		WHERE client_id = ANY($1) AND tls_failure
-	`
+	query := providerHardExclusionsSql()
 	var returnErr error
 	// This is a safety decision, not an analytics read: do not use a replica
 	// whose lag could re-admit a provider with a newly accepted hard verdict.

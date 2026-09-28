@@ -482,21 +482,21 @@ successful download does not prove that historical copies are safe.
 
 ## Implementation, tests, and rollout
 
-Current work checkpoints (2026-09-28 05:04 UTC; these are not production-completion claims):
+Current work checkpoints (2026-09-28 06:02 UTC; these are not production-completion claims):
 
 | Work item | Current boundary |
 | --- | --- |
 | Common gates, ranking, URL evidence and TLS recovery | Targeted model normal/race, owning API/Connect/Taskworker integration, and all nine quality-probe packages in normal/race modes pass |
 | Fixed-slot scheduler, rolling quota and query work | Implemented; deterministic mixed-outcome and 100k-provider/one-million-history controls pass |
 | Request-filter-aware fallback refill | Production-reader regression fails before the repair; bounded refill and adjacent request-filter/Redis-error controls pass after it |
-| Grant-selection CPU repair | Committed as `760bc1b8`; isolated 25-test race gate and current grant, settlement, lifecycle, controller, API, Connect and Taskworker owning partitions pass. Earlier whole-model baseline failure remains recorded; no whole-model pass is claimed |
+| Grant-selection CPU repair | Committed as `760bc1b8` and deployed on API; isolated 25-test race gate and owning partitions pass. However, the 05:25–05:40 window pairs all 20 enabled API processes and records 436,304 full-fallback allocations with zero first-window fast-path successes. Extended-window counters are absent, not an observed zero. Investigate denomination/reservation causes before claiming the repair effective; no balance mutation has been performed. Earlier whole-model baseline failure remains recorded; no whole-model pass is claimed |
 | GeoLite2/ARIN refresh and Vault inputs | Tooling `cea4a9a3`, paired resource publication Config `5313e94`; independent runtime readback passes. ConfigA deployed; all six reachable host samples mount the new resource bytes. ARIN database epoch is `1790556325`; per-process use requires connection provenance, not just file presence |
 | Connection classification provenance | Connect converged: 20/20 intended slots, no old running generation at 03:44 UTC. The 03:48 shadow found 126,160 current connections: 123,057 located, 123,055 with the exact expected epoch, two located provenance gaps, and 3,103 missing locations. These residuals still need attribution; coverage percentage alone is not acceptance |
 | Country-risk review | The bounded 04:33 query completed in five seconds: 465/507 classified reliable Australian providers and 79/85 Malaysian providers have risk on their preferred connection, not solely on secondary, unproven-family or extender connections. Australian non-quality overlap is 426; Malaysian overlap is zero. A separate bounded read at 05:04 isolated 544 affected providers into 526 private address-bucket groups for ownership validation; it changed no Main data. Registration-owner attribution is still required; these counts do not prove incorrect classification or actual cached/API supply |
 | Prefix-country evidence support | Committed `a6df5158`; independent normal/race/vet gates and native macOS/Linux builds pass. No real exception, new database or country waiver has been activated |
-| URL workflow monitoring | Committed `850b3bb0`; full monitor normal (434.120s), race (485.007s), and vet pass. The attached observer was restored at 03:44 after a recorded observation gap; all ten log tails have fresh advancing post-start windows. URL workflow activation is still pending |
+| URL workflow monitoring | Committed `850b3bb0`. The opt-in 15-minute active-probe cadence correction `13bd4975` passed full monitor/CLI normal, race and vet gates; the successor started at 05:39:03 with no observer overlap, an approximately 19-second collection gap and a Sustain reset. All ten standing collectors have fresh advancing receipts. The first active URL census at 05:54 reports no new-workflow shard owners, consistent with activation still pending; missing coverage is not healthy coverage |
 | Commits, migrations and four-service rollout | Core workflow committed `d479eccd`. Main migrated 721→730 at 01:07 UTC; the exact artifact probe passes. ConfigA and Connect are deployed and verified. API-only rollout of `2026.9.27-outerwerld-1057571520` started at 04:39; independent image/mount census confirms 20/20 new slots, matching the built registry digest, with no running old API or slot overlap. Taskworker and final ConfigB remain built but undeployed; no bootstrap rollup refresh has run |
-| PostgreSQL CPU | The grant-selection fix is now on the owning API fleet. The 04:49 sample was 43.61% of 96 cores over five seconds, following recent samples of about 29–58%. CPU recovery and its attribution are not established; historical escrow rows are unchanged and candidate read-through adds work during compatibility staging |
+| PostgreSQL CPU | Recovery is not established: the last two old-watcher samples were 32.90% and 55.07% of 96 cores. A stable 946-second post-API statistics delta positively binds 99,953 calls to `readProviderHardExclusions`, averaging 5,020 buffer accesses and 27.63 ms each. At realistic local cardinality, the original 256-candidate custom plan scans all 125,000 health rows; candidate-filtered intermediates preserve results and reduce measured work. The request-only repair passed causal failure reproduction, policy parity, prepared custom/generic plan bounds, and missing/legacy/expired-cache controls. Owning model/API normal/race and vet pass; independent focused model normal/race passed at 05:57. API build/deployment and live savings remain pending. Completed SQL wall time is not CPU attribution; historical escrow rows are unchanged |
 | App provider-search availability | At 04:55 UTC, normal public US quality/speed and Best Available quality/speed requests each returned 20 unique IPv4 providers; excluding the first US result set returned 20 replacements and no excluded IDs. All five cases were online fallback, not native quality/speed. This is request-local evidence, not all-market, authenticated-client, backend-bound or data-plane recovery proof |
 | Main four-hour quota | Not established; requires the new Taskworker and measured accepted selected-version successes in rolling four-hour history, not attempt counts or the successful online fallback sample |
 | Long-running evidence retention/replay safety | Required before sustained fleet ramp; no production cleanup authorized or performed |
@@ -518,6 +518,16 @@ executed. Validate a bounded diagnostic plan at realistic cardinality before
 running it; an EXPLAIN cost or a small-fixture pass is not a performance proof.
 Any diagnostic planner setting must remain local to its read-only transaction,
 never a global production tuning change.
+
+The post-API query finding is a separate, source-bound production hot path, not
+that earlier diagnostic. A bounded candidate list and bounded returned rows do
+not prove bounded intermediate work: the common-gate predicate can plan a
+fleet-wide hashed subquery. The request-only correction must preserve the shared
+reliability, ARIN and security rules, cover missing/legacy/expired cache states,
+and prove indexed work at realistic cardinality. A later complete cache can hide
+the fallback's cost; successful cache publication is not a substitute for fixing
+the fallback. The observed full-grant fallback is another owning path and needs
+its own allocation-counter and grant-state evidence.
 
 The narrower country query now carries risk details in the provider aggregate
 and uses indexed current-location lookups with the normal planner. It does not

@@ -1519,6 +1519,17 @@ including waits; it is never a CPU counter.
   query/contract path healthy and no recurrence of the independent fanout or
   wait finding.
 
+Bounded returned rows do not bound database work. The 2026-09-28 FP2
+hard-exclusion read-through was positively matched from a normalized statement
+fingerprint to `readProviderHardExclusions` and its shared eligibility SQL.
+Although each request chunk contained at most 256 candidates, a local
+125,000-provider fixture selected a hashed health subplan that scanned the
+fleet: 129,467 examined input rows and 4,745 buffers, versus 2,048 rows and 39
+buffers after candidate-scoped input materialization. These are synthetic
+plan controls, not production CPU savings. Correlate fresh deployed source,
+statement call deltas, full plan rows/buffers, cache fallback state and this
+independent CPU counter; completed statement execution wall time is not CPU.
+
 The 2026-09-26 discriminator established the source and threshold boundary.
 The inventory-owned active PostgreSQL service had CPU accounting enabled and
 a numeric counter with a stable invocation. Direct cgroup intervals measured
@@ -3124,6 +3135,17 @@ which it warns; task canaries report the resulting maintenance error as well.
 
 ### 2.2 Wait events on active queries
 Probe: `wait-events`
+
+FP2 hard-exclusion attribution also needs the request's cache state. A missing,
+expired or legacy `ready:v1` snapshot reads candidates through the primary
+database; a successful current publication can hide the fallback's query-plan
+defect. Exact source-bound SQL and full-plan examined rows/buffers, not merely
+candidate/result counts or a newly warm cache, establish bounded work. Retain
+missing/legacy/expired-cache regression controls, policy parity and both custom
+and generic prepared plans. The request-only candidate-input repair does not
+change the shared fleet eligibility policy or justify a new index by itself.
+Statement wall-time deltas may include waits; use §1.3c for CPU and the wait
+history below for persistence rather than assigning CPU shares from SQL time.
 
 `LWLock:WALWrite` clusters = WAL pressure (check checkpoint cadence,
 max_wal_size — a forced checkpoint every < 5 min melted main earlier this
