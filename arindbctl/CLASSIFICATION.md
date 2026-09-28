@@ -16,6 +16,8 @@ the reviewed policy inference, rather than an assertion made by ARIN itself.
 | Owner | Narrow matching scope | Primary operator evidence |
 | --- | --- | --- |
 | AWS | Six verified data-services handles and the anchored exact `Amazon Data Services, Inc.` name | [AWS network publication](https://docs.aws.amazon.com/vpc/latest/userguide/aws-ip-ranges.html) |
+| AWS EC2 | Exact `AMAZO-4` registration, whose ARIN record explicitly identifies AWS/EC2 | [ARIN service attribution](https://whois.arin.net/rest/org/AMAZO-4), [EC2 virtual servers](https://aws.amazon.com/ec2/) |
+| Oracle Public Cloud | Exact `OC-195` registration, not the Oracle corporate owners | [ARIN cloud identity](https://whois.arin.net/rest/org/OC-195.html), [OCI compute](https://www.oracle.com/cloud/compute/) |
 | Microsoft | `MSFT` | [Azure virtual machines](https://azure.microsoft.com/en-us/products/virtual-machines/) |
 | Google | `GOGL`, with a more-specific Fiber exception | [Google Cloud compute](https://cloud.google.com/products/compute) |
 | DigitalOcean | `DO-13` | [Droplets virtual machines](https://www.digitalocean.com/products/droplets) |
@@ -37,11 +39,22 @@ This explicit owner exception overrides a Google ancestor, but does not bypass
 the independent reliability, risk, TLS, or URL-success gates. Unknown direct
 children inherit a reviewed hosting parent as specified by the classifier.
 
-The initial rules deliberately do not blanket-match `AMAZON-4`: Amazon also
-operates [Leo consumer internet access](https://www.aboutamazon.com/what-we-do/devices-services/amazon-leo).
-Consequently AWS coverage is incomplete until additional specific owners or
-prefixes have evidence-backed review. Consumer cable/mobile/satellite owners,
-unrelated near-match names, and whole external registries are negative controls.
+The initial rules omitted `AMAZO-4` (the earlier text misspelled it
+`AMAZON-4`) out of concern about blanket Amazon classification. The 2026-09-28
+review found that this exact registration explicitly identifies AWS and links
+EC2; it and the explicitly named `OC-195` Oracle Public Cloud registration now
+have quality-only rules. This is not a generic Amazon/Oracle brand match:
+Amazon also operates [Leo consumer internet access](https://www.aboutamazon.com/what-we-do/devices-services/amazon-leo),
+and the corporate `AT-88-Z`, `ORACLE-4`, and `ORACLE-4-Z` registrations are not
+included in these additions. Their individual cloud prefixes need separately
+reviewed evidence. Consumer cable/mobile/satellite owners, unrelated near-match
+names, and whole external registries remain negative controls.
+
+These additions correct catalog omissions; they do not change geographic risk
+or automatically replace a deployed database. A subsequent resource build must
+bind the new rules, review its classification diff, and observe a new Config
+and connection-classification epoch. A quality-only change cannot alter the
+eligibility of a row already excluded by risk from all buckets and URL admission.
 
 Multinational registration country is not proof of a user's physical location.
 `risk` is computed separately from authoritative ARIN registration and actual
@@ -135,6 +148,25 @@ Run the release-catalog controls against the exact config artifact:
 ARIN_REVIEWED_RULES_PATH=/absolute/path/to/config/main/arindb.yml \
   go test ./arindbctl -run '^TestReviewedArinRules$' -count=1
 ```
+
+An independently reviewed owner-expectation document also detects a rule that
+was omitted entirely; enumerating only existing rules cannot detect that error.
+Keep actual owner identities in the explicit offline review input, not synthetic
+test fixtures. Its version-one JSON contains `expectations` with `org_handle`,
+`rule_name`, and `non_quality`. Run it against both the old and candidate rules
+to retain the omission failure and corrected result:
+
+```sh
+ARIN_REVIEWED_RULES_PATH=/absolute/path/to/reviewed/arindb.yml \
+ARIN_REVIEWED_QUALITY_EXPECTATIONS_PATH=/absolute/path/to/review/expectations.json \
+  go test ./arindbctl -run '^TestReviewedArinQualityExpectations$' -count=1
+```
+
+The always-on synthetic `TestArinQualityCatalogAdditionKeepsRiskAndAccessOverrides`
+checks every address across same-country and country-mismatch partitions before
+and after an exact hosting addition, including unknown-child inheritance,
+reviewed direct-access and narrower-prefix overrides, and an unrelated near-name
+negative control. It does not fetch operator evidence or activate a release.
 
 The build manifest binds the rule, ARIN source, GeoLite2, and output hashes.
 Before replacing the runtime resources, validate both databases and record
