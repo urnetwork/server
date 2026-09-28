@@ -3808,6 +3808,28 @@ type providerCountFilter struct {
 	tlsAuthenticationFailed map[server.Id]bool
 }
 
+// Complete means disconnected history too. The partial covering index supplies
+// only ARIN exceptions; observed score IDs bound the independent reliability
+// pass. Missing scores are neutral, and missing rollups retain their old scope.
+func providerCountFilterCommonSql() string {
+	return `WITH failed_reliability AS MATERIALIZED (
+		SELECT DISTINCT observed_reliability.client_id
+		FROM client_connection_reliability_score AS observed_reliability
+		WHERE NOT (` + providerReliabilityEligibilitySql("observed_reliability.client_id") + `)
+	)
+	SELECT client_id, arin_risk, arin_non_quality, false
+	FROM network_client_location_reliability
+	WHERE arin_risk OR arin_non_quality
+	UNION ALL
+	SELECT failed_reliability.client_id, false, false, true
+	FROM failed_reliability
+	WHERE EXISTS (
+		SELECT 1 FROM network_client_location_reliability AS provider_location
+		WHERE provider_location.client_id = failed_reliability.client_id
+	)`
+}
+
+// Load complete exception maps once for publication and provider diagnostics.
 func newProviderCountFilter(ctx context.Context, loadEgressEvidence bool) providerCountFilter {
 	f := providerCountFilter{
 		now:                     server.NowUtc(),
@@ -3819,9 +3841,7 @@ func newProviderCountFilter(ctx context.Context, loadEgressEvidence bool) provid
 		healthCounts:            GetAllProviderEgressHealthCounts(ctx),
 	}
 	server.Db(ctx, func(conn server.PgConn) {
-		rows, err := conn.Query(ctx, `SELECT client_id, arin_risk, arin_non_quality,
-			NOT (`+providerReliabilityEligibilitySql("provider_location.client_id")+`)
-			FROM network_client_location_reliability AS provider_location`)
+		rows, err := conn.Query(ctx, providerCountFilterCommonSql())
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				var clientId server.Id

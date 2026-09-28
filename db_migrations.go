@@ -9205,4 +9205,22 @@ var migrations = []any{
 			ADD COLUMN arin_lookup_at timestamp,
 			ADD COLUMN arin_database_build_epoch bigint NOT NULL DEFAULT 0;
 	`),
+
+	// Complete exclusions include disconnected history, but default-false rows
+	// need not be read on every publication. Build the sparse covering index
+	// online; a retry first removes residue from an interrupted concurrent build.
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS network_client_location_reliability_arin_exceptions
+	`, `
+		CREATE INDEX CONCURRENTLY network_client_location_reliability_arin_exceptions
+		ON network_client_location_reliability (client_id)
+		INCLUDE (arin_risk, arin_non_quality)
+		WHERE arin_risk OR arin_non_quality
+	`, `
+		DROP INDEX IF EXISTS network_client_location_reliability_arin_exceptions;
+		CREATE INDEX network_client_location_reliability_arin_exceptions
+		ON network_client_location_reliability (client_id)
+		INCLUDE (arin_risk, arin_non_quality)
+		WHERE arin_risk OR arin_non_quality
+	`),
 }
