@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	servermonitor "github.com/urnetwork/server/monitor"
 )
@@ -39,6 +40,7 @@ type monitorOptions struct {
 	excludedSignals       stringFlags
 	excludedHosts         stringFlags
 	excludedEdgeIPv6Hosts stringFlags
+	minimumProbeCadence   time.Duration
 }
 
 // Exit only after the command-owned process lifecycle has returned.
@@ -122,7 +124,7 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 		}
 		return runErr
 	}
-	return monitor.RunLoop(ctx, func(ctx context.Context, signal servermonitor.Signal, alerts servermonitor.Alerts) error {
+	return monitor.RunLoopWithOptions(ctx, servermonitor.RunLoopOptions{MinimumProbeCadence: opts.minimumProbeCadence}, func(ctx context.Context, signal servermonitor.Signal, alerts servermonitor.Alerts) error {
 		if len(alerts) == 0 {
 			return nil
 		}
@@ -153,13 +155,20 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	flags.StringVar(&opts.mode, "mode", "", "SSH address mode: lan or overlay")
 	flags.StringVar(&opts.format, "format", alertFormatMarkdown, "alert output format: markdown or jsonl")
 	flags.StringVar(&opts.output, "output", "", "write one-shot alert output directly to this file")
+	flags.DurationVar(&opts.minimumProbeCadence, "min-probe-cadence", 0, "continuous active-probe cadence floor and first-run delay; standing logs are unchanged")
 	flags.Var(&opts.keys, "ssh-key", "SSH identity path; may be repeated")
 	flags.Var(&opts.includedSignals, "include-signal", "signal key, number, or ID to run; may be repeated")
 	flags.Var(&opts.excludedSignals, "exclude-signal", "signal key, number, or ID to omit; may be repeated")
 	flags.Var(&opts.excludedHosts, "exclude-host", "exact inventory host whose observation should be paused; may be repeated")
 	flags.Var(&opts.excludedEdgeIPv6Hosts, "exclude-edge-ipv6-host", "host whose exact public IPv6 paths should be paused; may be repeated")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		return monitorOptions{}, errors.New("usage: monitor [-once] [-list-signals] [-format markdown|jsonl] [-include-signal IDENTIFIER | -exclude-signal IDENTIFIER]")
+		return monitorOptions{}, errors.New("usage: monitor [-once] [-list-signals] [-min-probe-cadence DURATION] [-format markdown|jsonl] [-include-signal IDENTIFIER | -exclude-signal IDENTIFIER]")
+	}
+	if opts.minimumProbeCadence < 0 {
+		return monitorOptions{}, errors.New("monitor: -min-probe-cadence must not be negative")
+	}
+	if opts.minimumProbeCadence != 0 && (opts.once || opts.listSignals) {
+		return monitorOptions{}, errors.New("monitor: nonzero -min-probe-cadence requires continuous mode")
 	}
 	if len(opts.includedSignals) > 0 && len(opts.excludedSignals) > 0 {
 		return monitorOptions{}, errors.New("monitor: -include-signal and -exclude-signal are mutually exclusive")

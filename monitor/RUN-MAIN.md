@@ -350,7 +350,7 @@ rg -q 'vcs\.modified=(true|false)$' "$monitor_run_dir/warpctl.version.txt"
 shasum -a 256 "$monitor_warpctl" >"$monitor_run_dir/warpctl.sha256"
 monitor_warpctl_dir=$(dirname "$monitor_warpctl")
 PATH="$monitor_warpctl_dir:$PATH" WARP_HOME="$WARP_HOME" WARP_ENV=main \
-  "$monitor_run_dir/monitor" -mode overlay \
+  "$monitor_run_dir/monitor" -mode overlay -min-probe-cadence=15m \
   >"$monitor_run_dir/alerts.md" \
   2>"$monitor_run_dir/stderr.log"
 ```
@@ -508,8 +508,27 @@ promote a receiver-owned candidate with the overlap procedure below before the
 owner exits. Record any interval without a pollable authoritative handle as an
 observation gap rather than silently recreating the watcher.
 
-Continuous mode runs signals at their own cadences, limits ordinary probe
-concurrency, applies each alert's sustain count, and replaces the bounded log
+The explicit `-min-probe-cadence=15m` invocation above enforces a per-watcher
+15-minute active-probe floor when the operator requests that interval. The
+first active probe waits 15 minutes; subsequent probes wait the greater of
+15 minutes or their native cadence after the previous observation and handler
+complete. Zero/omitted leaves existing immediate active startup and native
+cadences unchanged. Slower native probes stay slower. Do not substitute a
+shell loop of one-shots: preserve the running watcher's Sustain/PageSustain
+state. Those counters still require consecutive actual observations; the floor
+lengthens active-alert maturation, not the number of observations required.
+Negative/malformed floors and nonzero floors with `-once` or `-list-signals`
+are rejected before settings or probe contact.
+
+Standing streams start immediately, and standing-log drains plus independent
+overlap reconciliation keep their native cadence. The floor therefore does not
+discard the first 15 minutes of logs. It is not global coordination across
+watchers: use one of the explicit promotion procedures below and record its
+overlap or collection gap separately.
+Do not claim a delayed candidate's active coverage before its first observation.
+
+Continuous mode limits ordinary probe concurrency, applies each alert's sustain
+count, and replaces the bounded log
 probe with one standing `warpctl logs ... -f` stream per active service. Confirm
 the watcher is alive and owns every expected standing stream. A live parent
 with missing children is not healthy observation coverage.
@@ -534,6 +553,7 @@ For a temporary exact-edge pause, preserve all other coverage:
 
 ```sh
 WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
+  -min-probe-cadence=15m \
   -exclude-edge-ipv6-host HOSTNAME
 ```
 
@@ -545,6 +565,7 @@ For a whole-host pause, use repeatable exact inventory names:
 
 ```sh
 WARP_ENV=main "$monitor_run_dir/monitor" -mode overlay \
+  -min-probe-cadence=15m \
   -exclude-host HOSTNAME
 ```
 
@@ -570,7 +591,9 @@ Any monitor code, catalog, inventory-loading, tailer, alert-rendering, or
 effective Config/Vault settings-generation change requires a newly built
 watcher. A `settings-freshness` finding means this boundary has already been
 crossed; validate the current generation with a fresh one-shot before
-promotion. Promote it as a controlled handoff:
+promotion. Such a one-shot must also respect the operator's observation interval;
+do not add an immediate diagnostic merely to satisfy a handoff checklist.
+The normal bounded-overlap handoff is:
 
 1. run focused tests, the attested-local sequential package and race gates, and
    `go vet ./monitor` exactly as described under Deterministic verification
@@ -595,6 +618,22 @@ parent and tail processes; a PID-only check cannot certify durable ownership.
 Overlap is allowed only for this bounded handoff. Prolonged duplicate watchers
 distort log coverage and add production load; stopping the old watcher before
 the new one is proven creates an observation gap.
+
+When the operator explicitly prioritizes a no-overlap active-probe interval,
+use this alternative instead of waiting 15 minutes beside an active predecessor:
+finish the same tests/build/hash preflight, resolve the exact owned predecessor
+PID/session/binary, and gracefully stop it through its durable session. Confirm
+that its parent and all standing-tail children have exited, then immediately
+launch one receiver-owned successor with `-min-probe-cadence=15m`. No parallel
+watchers are permitted in this alternative. Prove the new session is pollable,
+the expected tails start immediately, and the native drain/reconciliation
+receipts advance. Record the brief log-collection gap and the Sustain reset;
+do not claim gap-free continuity or active-probe coverage before the first
+delayed observation. Because the old watcher is stopped before the new one
+starts its first-probe floor, this handoff does not create an immediate second
+active observation. The default zero-floor startup still runs immediately and
+cannot substitute for this explicit invocation. A failed successor remains an
+observation incident, not permission to silently restart another watcher.
 
 Sustain counters and alert gates are process-local. During overlap, compare the
 candidate's raw probe observations and direct source measurements with every

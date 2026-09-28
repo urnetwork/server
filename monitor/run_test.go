@@ -88,6 +88,17 @@ func (s *blockingLoopSignal) Run(ctx context.Context, _ SignalSettings) (Alerts,
 }
 
 func TestRunLoopStartsStandingLogTailers(t *testing.T) {
+	checkRunLoopStartsStandingLogTailers(t, RunLoopOptions{})
+}
+
+// Active startup deferral must not defer acquisition of standing log streams.
+func TestRunLoopCadenceFloorStartsStandingLogTailers(t *testing.T) {
+	checkRunLoopStartsStandingLogTailers(t, RunLoopOptions{MinimumProbeCadence: 15 * time.Minute})
+}
+
+// Both scheduling policies start and stop the same real synthetic stream.
+func checkRunLoopStartsStandingLogTailers(t *testing.T, options RunLoopOptions) {
+	t.Helper()
 	started := make(chan []string, 1)
 	source := &runLoopStreamingSource{
 		syntheticSource: &syntheticSource{localFn: func(name string, args ...string) (string, error) {
@@ -100,9 +111,10 @@ func TestRunLoopStartsStandingLogTailers(t *testing.T) {
 	}
 	monitor := NewWithSignals(syntheticSettings(source), NewLogErrorsSignal())
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	runErr := make(chan error, 1)
 	go func() {
-		runErr <- monitor.RunLoop(ctx, func(context.Context, Signal, Alerts) error { return nil })
+		runErr <- monitor.RunLoopWithOptions(ctx, options, func(context.Context, Signal, Alerts) error { return nil })
 	}()
 
 	select {

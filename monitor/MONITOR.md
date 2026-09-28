@@ -325,7 +325,7 @@ downstream system's specialization.
 type AlertHandler func(ctx context.Context, signal Signal, alerts Alerts) error
 ```
 
-The current CLI supplies this handler to `RunLoop`, skips empty batches, and
+The current CLI supplies this handler to `RunLoopWithOptions`, skips empty batches, and
 writes the selected Markdown or JSONL format to stdout. Stderr is diagnostic
 output, not a second machine-readable ticket-event channel. The legacy console
 emitter's lifecycle JSON and the historical webhook/PR proposals are not
@@ -406,6 +406,15 @@ Escalation batteries pull incident windows non-interactively with
   handler complete. Time spent queued or running therefore cannot create a
   buffered or wall-aligned back-to-back catch-up query against an already-slow
   dependency.
+- `RunLoopWithOptions` accepts a per-watcher `MinimumProbeCadence`; the CLI
+  exposes `-min-probe-cadence=15m` for an explicitly requested 15-minute active
+  observation floor. Zero/default preserves immediate active startup and native
+  cadences. A positive floor delays the **first active probe** by that floor,
+  then waits `max(native cadence, floor)` after each observation and handler.
+  Slower native probes remain slower. This is not a process-global throttle.
+  Standing log streams start immediately; their native drains and independent
+  overlap reconciliation are unchanged. Sustain/PageSustain still count actual
+  consecutive observations, so active-probe alert maturation takes longer.
 - One runtime-shared semaphore per destination host, capped at two actual SSH
   commands across every probe and probe-local battery. A limiter created per
   probe is not sufficient: four admitted signals can each fan out internally
@@ -613,7 +622,14 @@ Run it locally:
 WARP_HOME=/Users/brien/urnetwork WARP_ENV=main WARP_VERSION=0.0.0 \
   go run ./cli/monitor --once        # one pass, render a Markdown alert file
 WARP_HOME=... WARP_ENV=main ... go run ./cli/monitor   # cadence loop
+WARP_HOME=... WARP_ENV=main ... go run ./cli/monitor -min-probe-cadence=15m
 ```
+
+The optional cadence floor is continuous-mode only; negative, malformed, or
+nonzero `-once`/`-list-signals` combinations fail before settings or probes.
+It neither schedules one-shots nor replaces stateful monitoring with repeated
+snapshots. Coordinate any watcher overlap separately under RUN-MAIN.md; a
+per-watcher option does not coordinate active work across two processes.
 
 During an explicit per-host routing maintenance window, add
 `-exclude-edge-ipv6-host <configured-host-name>`. This removes only that

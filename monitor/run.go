@@ -93,6 +93,12 @@ func (g *cadenceAlertGate) filter(signal Signal, alerts Alerts) Alerts {
 // AlertHandler consumes the active alerts from one signal execution.
 type AlertHandler func(ctx context.Context, signal Signal, alerts Alerts) error
 
+// Per-watcher scheduling policy; zero preserves the registered cadences and
+// immediate active startup. Standing log streams and their drains are exempt.
+type RunLoopOptions struct {
+	MinimumProbeCadence time.Duration
+}
+
 // RunSignal executes a registered signal by its short key or SIGNALS.md
 // number. Keys are preferred in callers because they remain descriptive.
 func (m *Monitor) RunSignal(ctx context.Context, identifier string) (Alerts, error) {
@@ -174,7 +180,14 @@ func isStandingLogSignal(signal Signal) bool {
 // RunLoop schedules every registered signal at its own cadence. All execution
 // and scheduling logic lives here so cli/monitor only handles process wiring.
 func (m *Monitor) RunLoop(ctx context.Context, handle AlertHandler) error {
-	return m.runLoop(ctx, handle, func(cadence time.Duration) runLoopTicker {
+	return m.RunLoopWithOptions(ctx, RunLoopOptions{}, handle)
+}
+
+// A positive floor delays the first active probe by that floor, then waits at
+// least max(floor, native cadence) after each completed probe and handler.
+// Consecutive-observation Sustain state stays local to this running watcher.
+func (self *Monitor) RunLoopWithOptions(ctx context.Context, options RunLoopOptions, handle AlertHandler) error {
+	return self.runLoopWithOptions(ctx, options, handle, func(cadence time.Duration) runLoopTicker {
 		return &wallClockRunLoopTicker{ticker: time.NewTicker(cadence)}
 	})
 }
@@ -182,6 +195,15 @@ func (m *Monitor) RunLoop(ctx context.Context, handle AlertHandler) error {
 // runLoop carries an injected ticker factory so cadence/slot interactions can
 // be tested with explicit ticks instead of wall-clock sleeps.
 func (m *Monitor) runLoop(ctx context.Context, handle AlertHandler, newTicker runLoopTickerFactory) error {
+	return m.runLoopWithOptions(ctx, RunLoopOptions{}, handle, newTicker)
+}
+
+// Testable scheduling boundary; reject invalid options before preparing any
+// streams or remote observations. Options are never stored on the Monitor.
+func (self *Monitor) runLoopWithOptions(ctx context.Context, options RunLoopOptions, handle AlertHandler, newTicker runLoopTickerFactory) error {
+	if options.MinimumProbeCadence < 0 {
+		return fmt.Errorf("monitor: minimum probe cadence must not be negative")
+	}
 	if handle == nil {
 		return fmt.Errorf("monitor: alert handler is required")
 	}
@@ -192,7 +214,7 @@ func (m *Monitor) runLoop(ctx context.Context, handle AlertHandler, newTicker ru
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	signals, tailers, err := m.prepareRunLoop(ctx)
+	signals, tailers, err := self.prepareRunLoop(ctx)
 	if err != nil {
 		return err
 	}
@@ -216,13 +238,15 @@ func (m *Monitor) runLoop(ctx context.Context, handle AlertHandler, newTicker ru
 		go func() {
 			defer wg.Done()
 			standingLogSignal := isStandingLogSignal(signal)
+			initialDelay := options.MinimumProbeCadence
 			if standingLogSignal {
 				// Tailers begin just before these scheduler goroutines. Preserve
 				// their first complete cadence instead of immediately draining
 				// a startup fragment and calling it a per-minute rate.
-				if !waitRunLoopCadence(ctx, signal.Cadence(), newTicker) {
-					return
-				}
+				initialDelay = signal.Cadence()
+			}
+			if initialDelay > 0 && !waitRunLoopCadence(ctx, initialDelay, newTicker) {
+				return
 			}
 			for {
 				var alerts Alerts
@@ -231,7 +255,7 @@ func (m *Monitor) runLoop(ctx context.Context, handle AlertHandler, newTicker ru
 					// This check only drains mutex-protected in-memory counters.
 					// Giving it a remote-command slot lets slow unrelated probes
 					// distort the very rate window it is meant to measure.
-					alerts, err = signal.Run(ctx, m.settings)
+					alerts, err = signal.Run(ctx, self.settings)
 				} else {
 					select {
 					case runSlots <- struct{}{}:
@@ -240,7 +264,7 @@ func (m *Monitor) runLoop(ctx context.Context, handle AlertHandler, newTicker ru
 					}
 					alerts, err = func() (Alerts, error) {
 						defer func() { <-runSlots }()
-						return signal.Run(ctx, m.settings)
+						return signal.Run(ctx, self.settings)
 					}()
 				}
 				// A probe interrupted by monitor shutdown has not lost visibility;
@@ -250,7 +274,7 @@ func (m *Monitor) runLoop(ctx context.Context, handle AlertHandler, newTicker ru
 					return
 				}
 				if err != nil {
-					alerts = append(alerts, visibilityAlert(m.settings, signal, err))
+					alerts = append(alerts, visibilityAlert(self.settings, signal, err))
 				}
 				handleLock.Lock()
 				alerts = alertGate.filter(signal, alerts)
@@ -264,7 +288,11 @@ func (m *Monitor) runLoop(ctx context.Context, handle AlertHandler, newTicker ru
 					cancel()
 					return
 				}
-				if !waitRunLoopCadence(ctx, signal.Cadence(), newTicker) {
+				cadence := signal.Cadence()
+				if !standingLogSignal {
+					cadence = max(cadence, options.MinimumProbeCadence)
+				}
+				if !waitRunLoopCadence(ctx, cadence, newTicker) {
 					return
 				}
 			}

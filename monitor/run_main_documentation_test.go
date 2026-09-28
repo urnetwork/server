@@ -121,6 +121,28 @@ func runMainDocumentation(t *testing.T) string {
 	return strings.Join(strings.Fields(string(data)), " ")
 }
 
+// A slower active watcher must remain stateful and keep collecting its logs.
+func TestRunMainDocumentsOptInCadenceFloor(t *testing.T) {
+	t.Parallel()
+	documentation := runMainDocumentation(t)
+	for _, required := range []string{
+		"-min-probe-cadence=15m",
+		"first active probe waits 15 minutes",
+		"Zero/omitted leaves existing immediate active startup",
+		"Standing streams start immediately",
+		"overlap reconciliation keep their native cadence",
+		"Sustain/PageSustain",
+		"not global coordination across watchers",
+		"Do not claim a delayed candidate's active coverage before its first observation",
+		"No parallel watchers are permitted in this alternative",
+		"Record the brief log-collection gap and the Sustain reset",
+	} {
+		if !strings.Contains(documentation, required) {
+			t.Errorf("RUN-MAIN.md lost cadence-floor boundary %q", required)
+		}
+	}
+}
+
 func TestRunMainRequiresDailyThreeWayImprovementResearch(t *testing.T) {
 	t.Parallel()
 	documentation := runMainDocumentation(t)
