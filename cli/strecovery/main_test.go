@@ -5,8 +5,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,7 +98,7 @@ func TestRecoveryCommandCollectInspectAndRestoreOffline(t *testing.T) {
 func TestRecoveryCommandRejectsInvalidInputsAndPartialSource(t *testing.T) {
 	config, archive, _ := commandConfig(t)
 	reader := &commandReader{}
-	for _, args := range [][]string{nil, {"send"}, {"collect", "--archive", archive}, {"inspect", "--archive", archive, "--config", config}, {"collect", "--config", config, "--archive", archive, "--timeout", "31m"}, {"restore", "--archive", archive}} {
+	for _, args := range [][]string{nil, {"send"}, {"collect", "--archive", archive}, {"inspect", "--archive", archive, "--config", config}, {"collect", "--config", config, "--archive", archive, "--timeout", "31m"}, {"restore", "--archive", archive}, {"reconcile", "--archive", archive}, {"reconcile", "--archive", archive, "--observations", config}, {"reconcile", "--archive", archive, "--finality-authenticated"}} {
 		if err := run(context.Background(), args, new(bytes.Buffer), reader); err == nil {
 			t.Fatalf("invalid command admitted: %v", args)
 		}
@@ -110,5 +112,55 @@ func TestRecoveryCommandRejectsInvalidInputsAndPartialSource(t *testing.T) {
 	}
 	if _, err := os.Stat(archive); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("partial source published an archive")
+	}
+}
+
+// Reconciliation is entirely offline and cannot upgrade a source claim into
+// finality, even when the selected signed history is completely empty.
+func TestRecoveryCommandReconcilesPinnedObservationsWithoutAuthority(t *testing.T) {
+	config, archivePath, _ := commandConfig(t)
+	reader := &commandReader{}
+	if err := run(context.Background(), []string{"collect", "--config", config, "--archive", archivePath}, new(bytes.Buffer), reader); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := strecovery.LoadArchive(context.Background(), archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader.fail = true
+	boundary := "0x" + strings.Repeat("c", 64)
+	nonce := uint64(0)
+	observations := strecovery.ReceiptObservations{Schema: strecovery.ReceiptObservationsSchema, CensusHash: archive.CensusHash, ChainId: archive.Selection.ChainId, Genesis: archive.Selection.Genesis,
+		Source: "synthetic-observer", NativeFinalized: strecovery.ObservedBlockIdentity{Number: 200, Hash: "0x" + strings.Repeat("d", 64)},
+		EvmFinalized: strecovery.ObservedBlockIdentity{Number: 100, Hash: boundary}, MappingEvidenceHash: "sha256:" + strings.Repeat("e", 64),
+		Blocks:   []strecovery.ObservedCanonicalBlock{{Number: 100, Hash: boundary, GasLimit: 30000000}},
+		Accounts: []strecovery.ObservedAccount{{Role: archive.Selection.Roles[0].Id, Address: archive.Selection.Roles[0].Address, BlockHash: boundary, Outcome: "available", Nonce: &nonce}},
+		Receipts: []strecovery.ReceiptObservation{}}
+	raw, err := json.Marshal(observations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(filepath.Dir(archivePath), "observations.json")
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	pin := fmt.Sprintf("sha256:%x", sha256.Sum256(raw))
+	args := []string{"reconcile", "--archive", archivePath, "--observations", path, "--observations-sha256", pin}
+	var output bytes.Buffer
+	if err := run(context.Background(), args, &output, reader); err != nil {
+		t.Fatal(err)
+	}
+	var result strecovery.ReceiptReconciliation
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Schema != strecovery.ReceiptReconciliationSchema || result.CensusHash != archive.CensusHash || !result.ObservationAccountingComplete ||
+		result.FinalityAuthenticated || result.CanonicalReceiptsReconciled || result.ActualFeesReconciled || result.SpendingAuthorized || reader.calls != 2 {
+		t.Fatalf("offline reconciliation reached custody or invented authority: %+v", result)
+	}
+	args[len(args)-1] = "sha256:" + strings.Repeat("f", 64)
+	output.Reset()
+	if err := run(context.Background(), args, &output, reader); err == nil || output.Len() != 0 || reader.calls != 2 {
+		t.Fatal("pin mismatch returned a report or reached a database")
 	}
 }

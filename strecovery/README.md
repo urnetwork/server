@@ -1,11 +1,13 @@
 # Operator signature custody census
 
-`go run ./cli/strecovery` provides the bounded MG03/PF03 discovery and local
-restoration phase. It reads every intent generation and every signed attempt
-from each explicitly selected operator database, without filtering status or
-time, and joins them with selected retained transaction stores. It never signs,
-prices, reserves a nonce, broadcasts, changes database status or contacts a
-chain RPC endpoint.
+`go run ./cli/strecovery` provides bounded MG03/PF03 discovery, local
+restoration and offline receipt-observation reconciliation. It reads every
+intent generation and every signed attempt from each explicitly selected
+operator database, without filtering status or time, and joins them with
+selected retained transaction stores. It never signs, estimates new transaction
+fees, reserves a nonce, broadcasts, changes database status or contacts a
+chain RPC endpoint. The separate `reconcile` command computes conditional gas
+fees from pinned observation inputs; it cannot authenticate their finality.
 
 The incident motivating this path was a continuation collector that had 226 of
 230 database signatures. Four original signatures needed manual restoration.
@@ -169,15 +171,21 @@ status requires separate existing authority and canonical recovery checks.
 ## Remaining PF03 work and qualification
 
 This completes a source candidate for status-independent cross-database/store
-discovery and create-only original-byte restoration. It does not close MG03 or
-PF03. Canonical receipt/finality reconciliation for historical terminal rows,
-actual gas/fee accounting, native receipt reconciliation, synchronized source
-ownership and final production restart qualification remain open. No live
+discovery and create-only original-byte restoration, with an additive offline
+receipt-observation adapter described in [RECEIPT-OBSERVATIONS.md](RECEIPT-OBSERVATIONS.md).
+The adapter joins every retained signature and calculates exact conditional gas
+fees for unambiguous observed nonce winners. Its output explicitly leaves
+native-to-EVM finality authentication, canonical reconciliation and actual chain
+accounting false. It does not close MG03 or PF03. An independently approved
+observation producer and authenticated mapping verifier, native receipt
+reconciliation, synchronized source ownership and final production restart
+qualification remain open. No live
 database, signing, RPC mutation or deployment was exercised during development.
 
 Deterministic tests live in `census_test.go`, `census_database_test.go`,
-`census_files_test.go` and `../cli/strecovery/main_test.go`. The old active-only
-query is retained as a causal negative control. A snapshot barrier forces a
+`census_files_test.go`, `receipt_reconcile_test.go` and
+`../cli/strecovery/main_test.go`. The old active-only query is retained as a
+causal negative control. A snapshot barrier forces a
 committed concurrent insert between counts and reads. A restoration hook forces
 interruption immediately after one durable file, then a fresh owner resumes
 without changing the first inode. Other roots exercise source failures,
@@ -193,3 +201,9 @@ for `./strecovery ./cli/strecovery`, adjacent existing receipt/account recovery
 and transaction-model roots, `go vet`, and before/after source/module fences.
 Retain failures and environmental mismatches; do not count compile-only checks
 or prior receipt-reconciler tests as this candidate's qualification.
+
+The receipt-observation candidate has its own frozen-source gate in
+[RECEIPT-QUALIFICATION-HANDOFF.md](RECEIPT-QUALIFICATION-HANDOFF.md). Its new tests
+use synthetic signatures and private temporary files only; they require no
+chain or database service. The earlier census and adjacent controller/model
+gates still require the isolated fixture harness specified in their handoff.

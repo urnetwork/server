@@ -32,14 +32,14 @@ func main() {
 // tests to prove rejected input never reaches a database connection.
 func run(ctx context.Context, args []string, stdout io.Writer, reader strecovery.SnapshotReader) error {
 	if len(args) == 0 {
-		return errors.New("usage: strecovery collect|inspect|restore [flags]")
+		return errors.New("usage: strecovery collect|inspect|restore|reconcile [flags]")
 	}
 	command := args[0]
 	flags := flag.NewFlagSet("strecovery "+command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	archivePath := flags.String("archive", "", "absolute private archive path")
 	timeout := flags.Duration("timeout", 5*time.Minute, "bounded command deadline, at most 30m")
-	var configPath, storePath, acceptedHash string
+	var configPath, storePath, acceptedHash, observationsPath, observationsSha256 string
 	switch command {
 	case "collect":
 		flags.StringVar(&configPath, "config", "", "absolute private census config path")
@@ -47,13 +47,17 @@ func run(ctx context.Context, args []string, stdout io.Writer, reader strecovery
 	case "restore":
 		flags.StringVar(&storePath, "store", "", "absolute existing owner-private destination directory")
 		flags.StringVar(&acceptedHash, "accept-census-hash", "", "independently reviewed census digest")
+	case "reconcile":
+		flags.StringVar(&observationsPath, "observations", "", "absolute private receipt observation file")
+		flags.StringVar(&observationsSha256, "observations-sha256", "", "exact file byte pin; does not authenticate finality")
 	default:
 		return errors.New("unknown recovery command")
 	}
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
-	if flags.NArg() != 0 || *archivePath == "" || *timeout <= 0 || *timeout > 30*time.Minute || command == "collect" && configPath == "" || command == "restore" && (storePath == "" || acceptedHash == "") {
+	if flags.NArg() != 0 || *archivePath == "" || *timeout <= 0 || *timeout > 30*time.Minute || command == "collect" && configPath == "" ||
+		command == "restore" && (storePath == "" || acceptedHash == "") || command == "reconcile" && (observationsPath == "" || observationsSha256 == "") {
 		return errors.New("recovery command requires exact paths, a bounded deadline and all command-specific inputs")
 	}
 	ctx, cancel := context.WithTimeout(ctx, *timeout)
@@ -80,6 +84,17 @@ func run(ctx context.Context, args []string, stdout io.Writer, reader strecovery
 	}
 	if command == "inspect" {
 		return encoder.Encode(archive.Inspect())
+	}
+	if command == "reconcile" {
+		observations, err := strecovery.LoadReceiptObservations(ctx, strecovery.FileReference{Path: observationsPath, Sha256: observationsSha256})
+		if err != nil {
+			return err
+		}
+		result, err := strecovery.ReconcileReceipts(ctx, archive, observations)
+		if err != nil {
+			return err
+		}
+		return encoder.Encode(result)
 	}
 	result, err := strecovery.Restore(ctx, archive, storePath, acceptedHash)
 	if result != nil {
