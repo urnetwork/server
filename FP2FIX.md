@@ -483,7 +483,43 @@ successful download does not prove that historical copies are safe.
 
 ## Implementation, tests, and rollout
 
-Current checkpoint (2026-09-28 09:11 UTC; production acceptance is incomplete):
+Current checkpoint (2026-09-28 09:50 UTC; production acceptance is incomplete):
+
+- All eight source/boot-qualified Taskworkers in the 09:33–09:43 window
+  completed 15,261 probe lifecycles; the 09:43 point has 501 of 512 configured
+  slots occupied: 8 queued, 451 running, and 42 finished-waiting. These are
+  lifecycle observations, not accepted success counts or continuous utilization.
+  There were 35,611 successful internal retirements and no retirement
+  error/timeout/canceled increments. Mint-minus-retire is not an orphan census.
+- The corresponding fixed measurement-time receipt window contains 15,043
+  accepted URL outcomes and 10,103 successes (16.84/second), including 3,231
+  DNS-stage errors. Positive DNS p50/p95 are 3.15/45.13 seconds. At 09:47,
+  a separate ten-minute same-generation DNS-wave window has 17,481 answers,
+  5,742 timeouts with an active path, 2,733 while forming, and 1,542 with a
+  provider-unresponsive snapshot. These waves are not unique outcomes, and
+  active-at-completion is neither active-throughout nor delivery proof.
+- The 09:50 authoritative rolling census has 107,616 eligible providers,
+  79,570 due, 985,340 successes still needed, and zero ten-success completions.
+  Cached rolling counts agree. All eight logical shard tasks have live leases,
+  explicit 64-worker URL arguments and no current reschedule error. The
+  watcher nevertheless reports URL coverage unobservable: its qualifying
+  metric-owner count is not a census of running tasks. Investigate the missing
+  qualification instead of suppressing the warning or claiming an idle fleet.
+- PostgreSQL CPU is still unresolved: the 09:45 five-second sample is 62.89%
+  of 96 logical cores. At 09:50, 590 sessions are idle in transaction, but
+  460 have been idle less than one second and only one more than a minute
+  (116 seconds, last statement BEGIN, no backend xmin). This does not establish
+  widespread abandoned transactions. The oldest observed transaction is a
+  21.6-minute autovacuum on another relation, which also holds the oldest
+  reported xmin; this is not a proved vacuum blocker.
+  The complete-grant prefix shortcut failed accounting-error parity and was
+  rejected; the covering-index experiment also regressed on dirty heap pages.
+- Four focused scheduler ownership/failure-scope controls passed owning and
+  independent normal/race/vet gates and were adopted unchanged. They preserve
+  existing behavior; they are not evidence that scheduler idling caused Main's
+  current shortfall. No additional rollout follows merely from these tests.
+
+Previous checkpoint (2026-09-28 09:33 UTC; retained evidence):
 
 - All eight actual Taskworkers have the reviewed new config mount, activating
   eight shards with 64 workers each (512 configured slots). The census ended
@@ -494,6 +530,10 @@ Current checkpoint (2026-09-28 09:11 UTC; production acceptance is incomplete):
   and p95 45.13 seconds. These overlapping measurement-time windows involve
   different cohorts and possible late ingestion; neither establishes rolling
   quota recovery or the approximately 74.88/second maintenance floor.
+  The 09:18 rolling census has 107,644 eligible providers, 92,020 due,
+  1,036,335 successful outcomes still needed and zero quota-complete providers.
+  Cached counts agree with the authoritative selected-policy history. The
+  eligible cohort changed; its current maintenance floor is 74.75/second.
 - The five 08:53 public US/Best Available quality/speed/refill profiles each
   returned 20 distinct public IPv4 providers, all native requested-bucket
   tiers under the reviewed offset 11. This is request-local availability,
@@ -514,10 +554,19 @@ Current checkpoint (2026-09-28 09:11 UTC; production acceptance is incomplete):
   fresh admission while current owners drain. Multi-cycle utilization is
   under test. Separately, an actual-Client regression proves the old shared
   drain/removal deadline can expire before derived-client retirement.
-  Its private correction passes owning and independent normal/race/vet;
-  the adjacent Tunnel final-join/worker-release correction is in progress.
-  These lifecycle follow-ups are not deployed or yet established as Main's
-  dominant throughput cause.
+  Connect `18aa45f1` and Server `4949f5f9` correct the fresh retirement budget
+  and adjacent Tunnel final-join/worker-release boundary. Both have actual-owner
+  deterministic failure controls and owning/independent normal/race/vet passes.
+  Taskworker `2026.9.28-outerwerld-1057873150` was built and deployed at 100%;
+  the 09:28:19–09:28:41 census verifies all eight actual new images, the same
+  config, and zero old, overlapping or missing containers. Their effect on
+  Main's throughput and CPU is still under measurement, not established.
+- Monitor migration731 catalog correction `c57c6ace` passed full monitor/CLI
+  normal/race gates. A new primary-owned watcher started at 09:32:46 with the
+  15-minute first-active-probe floor. Its predecessor and children were gone
+  before launch; retain the approximately 20-second collection gap, process-local
+  Sustain reset and predecessor alerts. Initial log streams do not prove
+  delayed active-probe coverage or resolve previous mature alerts.
 
 Previous checkpoint (2026-09-28 08:45 UTC; retained evidence, superseded by
 the observations above where they differ):

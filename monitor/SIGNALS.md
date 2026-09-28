@@ -7913,6 +7913,17 @@ capability-aware observation is available their execution stage is unobserved,
 not healthy or stalled. This diagnostic addition changes no alert threshold,
 recovery rule, or full-snapshot cadence.
 
+For the explicit URL workflow, compare occupied slots and completed lifecycle
+events with independently accepted URL receipts. High occupied/running counts
+with a low accepted-success rate require residence-time and failure-stage
+diagnosis; they do not establish scheduler underfill. A single occupancy point
+does not establish continuous utilization. Provider-local open or measured URL
+failure allows refill; a final control-plane publication failure stops fresh
+admission while already admitted siblings drain. Accepted health is not revoked
+by a later failed attempt acknowledgment. Distinguish these cases in task-error
+evidence before changing retries or concurrency. The deadline reserve stops
+new admission, but is not a mandatory sleep or a proof that cleanup terminated.
+
 A deterministic full-successor control found a retained-prefix starvation
 bug: querying only the configured batch limit, then discarding providers already
 seen in this task, could stop the lane despite unseen due work immediately
