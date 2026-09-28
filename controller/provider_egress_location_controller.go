@@ -248,11 +248,17 @@ type RecordProviderEgressProbeAttemptArgs struct {
 	ClientId server.Id `json:"client_id"`
 	// ProbeFailure is "" when the attempt succeeded, otherwise a short failure
 	// class (`contract_failed`, `tunnel_failed`, `no_consensus`, ...).
-	ProbeFailure string `json:"probe_failure,omitempty"`
+	ProbeFailure string    `json:"probe_failure,omitempty"`
+	ClaimOrdinal int64     `json:"claim_ordinal,omitempty"`
+	CompletedAt  time.Time `json:"completed_at,omitzero"`
+	AllowPacing  bool      `json:"allow_pacing,omitempty"`
 }
 
 type RecordProviderEgressProbeAttemptResult struct {
-	AttemptAt time.Time `json:"attempt_at"`
+	AttemptAt    time.Time `json:"attempt_at"`
+	ClaimOrdinal int64     `json:"claim_ordinal,omitempty"`
+	ReceivedAt   time.Time `json:"received_at,omitzero"`
+	Replay       bool      `json:"replay,omitempty"`
 }
 
 // RecordProviderEgressProbeAttempt records that the prober tried this provider.
@@ -281,6 +287,19 @@ func RecordProviderEgressProbeAttempt(
 	}
 
 	attemptAt := server.NowUtc()
+	if args.ClaimOrdinal != 0 || !args.CompletedAt.IsZero() {
+		receipt, err := model.CompleteProviderUrlProbeRun(ctx, model.ProviderUrlProbeCompletion{
+			ClientId: args.ClientId, ClaimOrdinal: args.ClaimOrdinal,
+			CompletedAt: args.CompletedAt, ProbeFailure: args.ProbeFailure, AllowPacing: args.AllowPacing,
+		}, attemptAt)
+		if err != nil {
+			return nil, err
+		}
+		return &RecordProviderEgressProbeAttemptResult{
+			AttemptAt: receipt.CompletedAt, ClaimOrdinal: args.ClaimOrdinal,
+			ReceivedAt: receipt.ReceivedAt, Replay: receipt.Replay,
+		}, nil
+	}
 	model.SetProviderEgressProbeAttempt(ctx, &model.ProviderEgressProbeAttempt{
 		ClientId:     args.ClientId,
 		AttemptAt:    attemptAt,

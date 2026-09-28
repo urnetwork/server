@@ -114,6 +114,14 @@ func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *P
 		if admit && len(active) < args.Full.Concurrency {
 			limit := min(args.Full.Limit, args.Full.Concurrency-len(active), remaining)
 			due, err := self.fullDue(ctx, limit)
+			if errors.Is(err, ingest.ErrDuePriorityMaintenancePending) {
+				// The API completed one bounded maintenance page and issued no
+				// claims. Continue inside the existing task deadline, collecting
+				// finished workers above, rather than treating backlog as a long
+				// task-error backoff or an empty cohort. Cancellation still wins.
+				result.Backlog = true
+				continue
+			}
 			if err != nil {
 				runErr = errors.Join(runErr, fmt.Errorf("URL probe due claim: %w", err))
 				admit = false
@@ -121,6 +129,7 @@ func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *P
 				runErr = errors.Join(runErr, fmt.Errorf("URL probe due response exceeds requested limit"))
 				admit = false
 			} else {
+				result.Backlog = false
 				for _, provider := range due {
 					if provider.ClientId == "" || active[provider.ClientId] {
 						runErr = errors.Join(runErr, fmt.Errorf("URL probe due response contains an empty or in-flight provider"))

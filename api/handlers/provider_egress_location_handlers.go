@@ -291,9 +291,7 @@ func ProviderEgressLocationDue(w http.ResponseWriter, r *http.Request) {
 
 	// Stored timestamps hold UTC without a timezone; pass an explicit UTC clock.
 	now := server.NowUtc()
-	result := struct {
-		Providers []model.ProviderUrlProbeDue `json:"providers"`
-	}{Providers: model.ClaimProviderUrlProbeDue(r.Context(), now, limit, shardIndex, shardCount)}
+	result := model.ClaimProviderUrlProbeDueWithStatus(r.Context(), now, limit, shardIndex, shardCount)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(result); err != nil {

@@ -70,6 +70,7 @@ func ProvidersFromDue(due []ingest.DueProvider) []prober.Provider {
 			SuccessesNeeded:      entry.SuccessesNeeded,
 			CycleStartedAt:       entry.CycleStartedAt,
 			OutcomeCount:         entry.OutcomeCount,
+			ClaimOrdinal:         entry.ClaimOrdinal,
 			SecurityDestinations: entry.SecurityDestinations,
 			Place: egresshealth.Place{
 				Country: strings.ToLower(strings.TrimSpace(entry.CountryCode)),

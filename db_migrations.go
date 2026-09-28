@@ -9223,4 +9223,109 @@ var migrations = []any{
 		INCLUDE (arin_risk, arin_non_quality)
 		WHERE arin_risk OR arin_non_quality
 	`),
+
+	// Durable issued claims distinguish completed URL turns from retries and
+	// abandoned leases. Four-hour priority is enabled only after writer warmup.
+	newSqlMigration(`
+		ALTER TABLE provider_egress_probe_cycle
+			ADD COLUMN claim_ordinal bigint NOT NULL DEFAULT 0 CHECK (claim_ordinal >= 0),
+			ADD COLUMN completed_run_count bigint NOT NULL DEFAULT 0 CHECK (completed_run_count >= 0),
+			ADD COLUMN completed_next_expiry_at timestamp,
+			ADD COLUMN completed_priority_ready boolean NOT NULL DEFAULT false;
+		CREATE TABLE provider_url_probe_run (
+			client_id uuid NOT NULL,
+			claim_ordinal bigint NOT NULL CHECK (claim_ordinal > 0),
+			claimed_at timestamp NOT NULL,
+			reported_completed_at timestamp,
+			completed_at timestamp,
+			received_at timestamp,
+			probe_failure varchar(64) NOT NULL DEFAULT '',
+			counted boolean NOT NULL DEFAULT false,
+			PRIMARY KEY (client_id, claim_ordinal),
+			CHECK ((completed_at IS NULL) = (received_at IS NULL)),
+			CHECK (completed_at IS NULL OR (claimed_at <= completed_at AND completed_at <= received_at)),
+			CHECK (NOT counted OR completed_at IS NOT NULL)
+		);
+		CREATE INDEX provider_url_probe_run_active
+			ON provider_url_probe_run(client_id, completed_at, claim_ordinal) WHERE counted;
+		CREATE INDEX provider_url_probe_run_retention
+			ON provider_url_probe_run(claimed_at, client_id, claim_ordinal) WHERE NOT counted;
+		CREATE FUNCTION provider_url_probe_ready_invalidate() RETURNS trigger LANGUAGE plpgsql AS $ready$
+		BEGIN
+			IF NEW.next_attempt_at IS DISTINCT FROM OLD.next_attempt_at OR NOT NEW.eligible THEN
+				NEW.completed_priority_ready := false;
+			END IF;
+			RETURN NEW;
+		END
+		$ready$;
+		CREATE TRIGGER provider_url_probe_ready_invalidate
+			BEFORE UPDATE OF next_attempt_at, eligible ON provider_egress_probe_cycle
+			FOR EACH ROW EXECUTE FUNCTION provider_url_probe_ready_invalidate();
+	`),
+
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS provider_probe_cycle_completed_ready
+	`, `
+		CREATE INDEX CONCURRENTLY provider_probe_cycle_completed_ready
+			ON provider_egress_probe_cycle(completed_run_count,next_attempt_at,client_id) WHERE eligible AND completed_priority_ready
+	`, `
+		DROP INDEX IF EXISTS provider_probe_cycle_completed_ready;
+		CREATE INDEX provider_probe_cycle_completed_ready
+			ON provider_egress_probe_cycle(completed_run_count,next_attempt_at,client_id) WHERE eligible AND completed_priority_ready
+	`),
+
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS provider_probe_cycle_slot_completed_ready
+	`, `
+		CREATE INDEX CONCURRENTLY provider_probe_cycle_slot_completed_ready
+			ON provider_egress_probe_cycle(slot_id,completed_run_count,next_attempt_at,client_id) WHERE eligible AND completed_priority_ready
+	`, `
+		DROP INDEX IF EXISTS provider_probe_cycle_slot_completed_ready;
+		CREATE INDEX provider_probe_cycle_slot_completed_ready
+			ON provider_egress_probe_cycle(slot_id,completed_run_count,next_attempt_at,client_id) WHERE eligible AND completed_priority_ready
+	`),
+
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS provider_probe_cycle_completed_waiting
+	`, `
+		CREATE INDEX CONCURRENTLY provider_probe_cycle_completed_waiting
+			ON provider_egress_probe_cycle(next_attempt_at,client_id) WHERE eligible AND NOT completed_priority_ready
+	`, `
+		DROP INDEX IF EXISTS provider_probe_cycle_completed_waiting;
+		CREATE INDEX provider_probe_cycle_completed_waiting
+			ON provider_egress_probe_cycle(next_attempt_at,client_id) WHERE eligible AND NOT completed_priority_ready
+	`),
+
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS provider_probe_cycle_slot_completed_waiting
+	`, `
+		CREATE INDEX CONCURRENTLY provider_probe_cycle_slot_completed_waiting
+			ON provider_egress_probe_cycle(slot_id,next_attempt_at,client_id) WHERE eligible AND NOT completed_priority_ready
+	`, `
+		DROP INDEX IF EXISTS provider_probe_cycle_slot_completed_waiting;
+		CREATE INDEX provider_probe_cycle_slot_completed_waiting
+			ON provider_egress_probe_cycle(slot_id,next_attempt_at,client_id) WHERE eligible AND NOT completed_priority_ready
+	`),
+
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS provider_probe_cycle_completed_expiry
+	`, `
+		CREATE INDEX CONCURRENTLY provider_probe_cycle_completed_expiry
+			ON provider_egress_probe_cycle(completed_next_expiry_at,client_id) WHERE completed_next_expiry_at IS NOT NULL
+	`, `
+		DROP INDEX IF EXISTS provider_probe_cycle_completed_expiry;
+		CREATE INDEX provider_probe_cycle_completed_expiry
+			ON provider_egress_probe_cycle(completed_next_expiry_at,client_id) WHERE completed_next_expiry_at IS NOT NULL
+	`),
+
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS provider_probe_cycle_slot_completed_expiry
+	`, `
+		CREATE INDEX CONCURRENTLY provider_probe_cycle_slot_completed_expiry
+			ON provider_egress_probe_cycle(slot_id,completed_next_expiry_at,client_id) WHERE completed_next_expiry_at IS NOT NULL
+	`, `
+		DROP INDEX IF EXISTS provider_probe_cycle_slot_completed_expiry;
+		CREATE INDEX provider_probe_cycle_slot_completed_expiry
+			ON provider_egress_probe_cycle(slot_id,completed_next_expiry_at,client_id) WHERE completed_next_expiry_at IS NOT NULL
+	`),
 }

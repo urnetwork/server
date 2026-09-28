@@ -898,9 +898,10 @@ type providerEgressFullBatchExit struct {
 
 // Everything one provider's probe submitted.
 type providerEgressFullBatchEntry struct {
-	health  *egresshealth.Result
-	exit    *providerEgressFullBatchExit
-	attempt *string
+	health     *egresshealth.Result
+	exit       *providerEgressFullBatchExit
+	attempt    *string
+	completion *providerUrlProbeCompletion
 }
 
 // Holds one full batch's submissions until the run guard has judged the batch
@@ -1141,7 +1142,7 @@ func (self *providerEgressFullBatch) release(
 		entry := entries[providerClientId]
 		if tripped {
 			if entry.attempt != nil {
-				if self.sink.ReportAttempt(ctx, providerClientId, model.ProbeRunBatchGuardClass) != nil {
+				if self.publishAttempt(ctx, providerClientId, model.ProbeRunBatchGuardClass, entry) != nil {
 					self.releaseAttemptFailures++
 				}
 			}
@@ -1191,7 +1192,7 @@ func (self *providerEgressFullBatch) release(
 			submitFailures++
 		}
 		if entry.attempt != nil {
-			if self.sink.ReportAttempt(ctx, providerClientId, failure) != nil {
+			if self.publishAttempt(ctx, providerClientId, failure, entry) != nil {
 				self.releaseAttemptFailures++
 			}
 		}
