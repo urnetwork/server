@@ -3168,6 +3168,21 @@ an index for the redundant scan or cancel a live bounded attempt. Verify zero
 new legacy executions in both `pg_stat_activity` and `pg_stat_statements`, then
 require the same Payout row to commit and clear its error.
 
+Payout finalization is a different shape: `UPDATE transfer_escrow_sweep AS
+sweep` joins `temp_account_payment` and `temp_payment_network_ids` to assign
+the selected sweeps' payment IDs. On 2026-09-27 at 14:59:52Z, the existing
+active-query probe already warned on one such statement at 2,190 seconds,
+against its 697-second completed mean (strictly over the 1,394-second guard).
+The wait-event probe independently warned a second later on seven
+`LWLock:BufferMapping` waiters, with the same finalizer as its oldest waiter.
+These were one-shot findings requiring two cadence samples for sustained
+alerts, not proof of continuous wait residence. No new alert or lower
+threshold is needed for this observation. Statement age is not transaction
+age: this planner transaction was over three hours old, and its four-day
+event-time slice does not cap the number of selected rows. This UPDATE is
+neither the legacy subsidy-range scan above nor the retention reaper. Preserve
+payment atomicity and attribute the exact task/executor before any intervention.
+
 PostgreSQL utility statements are not represented in `pg_stat_statements`.
 Daily `DbMaintenance` intentionally runs `REINDEX TABLE/INDEX CONCURRENTLY`
 with a two-hour per-object timeout; a 40KiB `web_search_ingest_state` rotation
@@ -12884,6 +12899,22 @@ before declaring it stuck. The grouped task alert includes the representative
 row's `sample_max_time_s`; for a non-`Drained:` context cancellation, compare
 that value with the taskworker `eval error` duration before deciding whether
 the task-specific deadline is undersized.
+
+For Payout, first establish the current SQL phase; the historical nested
+reliability/idle-timeout failure is not an explanation for an active final
+sweep-assignment UPDATE. At 2026-09-27 14:59:52Z the RunOnce Payout row had a
+fresh 6.4-second claim and a six-hour task limit, but its `run_at` was only
+779 seconds old while the sampled payment-plan transaction had begun around
+11:46Z. A reschedule can change `run_at`; this mismatch alone proves neither
+an orphan nor ownership by the current attempt. Join the exact task heartbeat,
+executor artifact and connection ownership before classifying the transaction
+as progressing, abandoned or retry-safe. The task-overdue fallback is one
+hour when fewer than ten seven-day completions establish history; a recent
+reschedule can therefore be below that task guard while the independent
+active-query and wait-event warnings already fire. Points readiness observes
+committed payment/rollup rows, so it does not attest this uncommitted plan's
+progress. Do not cancel the financial transaction, replay the Payout row,
+change its atomicity or enlarge its deadline from this chronology alone.
 
 `CloseExpiredContracts` can fail briefly on a correctly enforced escrow guard
 and retain the same singleton in ordinary long backoff; this is not an execution
