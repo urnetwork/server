@@ -64,7 +64,7 @@ func TestCountrySiteCatalogCoverageCannotClaimUnregisteredProbe(t *testing.T) {
 		for _, required := range []string{
 			"no registered runtime probe currently implements",
 			"country-list provenance/verification records",
-			"generation-linked split-run/skip",
+			"generation-linked URL-draw/skip",
 			"not healthy country coverage",
 		} {
 			if !strings.Contains(section, required) {
@@ -80,8 +80,8 @@ func TestCountrySiteCatalogCoverageCannotClaimUnregisteredProbe(t *testing.T) {
 	}
 }
 
-// Labeling missing implementation must not lower the accepted country sample,
-// discard source freshness, or turn repeated retained skips into new attempts.
+// The URL-only acceptance contract retains country source freshness without
+// turning missing regional coverage into an independent provider exclusion.
 func TestCountrySiteCatalogRetainsAcceptanceControls(t *testing.T) {
 	data, err := os.ReadFile("SIGNALS.md")
 	if err != nil {
@@ -96,7 +96,9 @@ func TestCountrySiteCatalogRetainsAcceptanceControls(t *testing.T) {
 		section = section[:next+1]
 	}
 	for _, required := range []string{
-		"13 general destinations and 13",
+		"normal draws use equal general/country sampling",
+		"general URL measurements remain valid",
+		"50% of draws",
 		"100-site target for both the country and global lists",
 		"two distinct consecutive probe cadences",
 		"advancing attempt ids or counters",

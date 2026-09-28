@@ -19,6 +19,11 @@ import (
 
 const providerEgressProbeTaskFunction = "github.com/urnetwork/server/taskworker/work.ProviderEgressProbe"
 
+// This detector's SQL describes the retired full-probe producer's 24-hour
+// health contract. The replacement URL history has its own eight-hour window
+// and §2.19f detector; changing that model setting cannot rewrite old facts.
+const egressCoverageLegacyHealthMaxAge = 24 * time.Hour
+
 // SIGNALS.md §2.19 maps to signal_egress_coverage.go and
 // signal_egress_coverage_test.go. It proves that every configured durable
 // provider-probe shard exists and that due work produces fresh aggregate
@@ -122,16 +127,18 @@ func (self egressCoverageRules) modelRules() model.ProviderEgressRules {
 			backoffs = append(backoffs, 0)
 		}
 	}
-	return model.ProviderEgressRules{
-		DarkConsecutiveFailures: self.darkConsecutiveFailures,
-		DarkMinimumSpanSeconds:  self.darkMinimumSpanSeconds,
-		DarkBackoffSeconds:      backoffs,
-		DarkBatchGuard:          self.darkBatchGuard,
-		DarkBatchGuardMinChecks: self.darkBatchGuardMinChecks,
-		RunBatchGuard:           self.runBatchGuard,
-		RunBatchGuardMinRuns:    self.runBatchGuardMinRuns,
-		CityConfidentRadiusKm:   self.cityConfidentRadiusKm,
-	}
+	// Validate the legacy fields against current defaults without claiming
+	// that the observed task implements the separate URL-only workflow.
+	rules := model.DefaultProviderEgressRules()
+	rules.DarkConsecutiveFailures = self.darkConsecutiveFailures
+	rules.DarkMinimumSpanSeconds = self.darkMinimumSpanSeconds
+	rules.DarkBackoffSeconds = backoffs
+	rules.DarkBatchGuard = self.darkBatchGuard
+	rules.DarkBatchGuardMinChecks = self.darkBatchGuardMinChecks
+	rules.RunBatchGuard = self.runBatchGuard
+	rules.RunBatchGuardMinRuns = self.runBatchGuardMinRuns
+	rules.CityConfidentRadiusKm = self.cityConfidentRadiusKm
+	return rules
 }
 
 type egressCoverageGeometry struct {
@@ -163,6 +170,7 @@ type egressCoverageConfig struct {
 type egressCoverageDesiredConfig struct {
 	present       bool
 	enabled       bool
+	urlOnly       bool
 	invalidReason string
 	settings      egressCoverageConfig
 }
@@ -210,6 +218,7 @@ type egressCoverageDesiredYAML struct {
 	MaxTimeSeconds   int                            `yaml:"max_time_seconds"`
 	Full             egressCoverageDesiredBatchYAML `yaml:"full"`
 	Blackhole        egressCoverageDesiredBatchYAML `yaml:"blackhole"`
+	UrlProbe         map[string]any                 `yaml:"url_probe"`
 	APIURL           string                         `yaml:"api_url"`
 	PlatformURL      string                         `yaml:"platform_url"`
 	PublicAPIURL     *string                        `yaml:"public_api_url"`
@@ -257,6 +266,15 @@ func inspectEgressCoverageDesiredConfig(load func(any) error) egressCoverageDesi
 	desired.enabled = *raw.Enabled
 	if !desired.enabled {
 		// Taskworker deliberately does not validate inactive execution settings.
+		return desired
+	}
+	if raw.UrlProbe != nil {
+		urlDesired, err := parseUrlProbeCoverageDesired(load)
+		if err != nil || !urlDesired.enabled {
+			desired.invalidReason = "invalid-url-workflow-settings"
+		} else {
+			desired.urlOnly = true
+		}
 		return desired
 	}
 	if len(raw.Unknown)+len(raw.Full.Unknown)+len(raw.Blackhole.Unknown) > 0 {
@@ -326,9 +344,11 @@ func validEgressCoverageConfig(config egressCoverageConfig) bool {
 		fullOptions.LoadAttempts = config.rules.loadAttempts
 		fullOptions.LoadRetryMeanInterval = time.Duration(config.rules.loadRetryMeanIntervalSeconds) * time.Second
 		fullOptions.IpEchoUrl = egresshealth.IpEchoPath
-		loads := egresshealth.SamplePerRun()
+		loads := egresshealth.SampleTargetPerRun()
 		if config.full.AllDestinations {
-			loads = len(egresshealth.Destinations())
+			// A legacy all-target run has no source-owned catalog size. Its
+			// budget cannot be attested from the task snapshot alone.
+			return time.Duration(1<<63 - 1)
 		}
 		full := fullOptions.RunBudget(loads) + probeTimeout
 		if config.full.Bandwidth {
@@ -475,6 +495,20 @@ func egressCoverageSafeSettings(prefix string, config egressCoverageConfig) stri
 }
 
 func (p egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	loadDesired := p.loadDesiredConfig
+	if loadDesired == nil {
+		loadDesired = loadEgressCoverageDesiredConfig
+	}
+	desired := loadDesired()
+	if desired.urlOnly && desired.enabled && desired.invalidReason == "" {
+		// §2.19f owns this explicit replacement workflow, including missing
+		// owners/telemetry during rollout. Legacy full/blackhole freshness no
+		// longer measures its contract and must not manufacture an outage.
+		return nil, nil
+	}
 	schemaRows, err := env.runner.pg(ctx, `
 		SELECT
 		 EXISTS (
@@ -539,11 +573,6 @@ func (p egressCoverageProbe) check(ctx context.Context, env *probeEnv) ([]findin
 		return nil, err
 	}
 	target := pgTarget(env)
-	loadDesired := p.loadDesiredConfig
-	if loadDesired == nil {
-		loadDesired = loadEgressCoverageDesiredConfig
-	}
-	desired := loadDesired()
 	loadCap := p.loadAPIDueCap
 	if loadCap == nil {
 		loadCap = loadEgressCoverageAPIDueCap
@@ -1263,14 +1292,14 @@ func egressFullFairnessFindings(
 				name: "stale-health", due: snapshot.staleHealthDue,
 				expiredDue:           snapshot.staleHealthExpiredDue,
 				oldestAgeSeconds:     snapshot.staleHealthOldestAgeSeconds,
-				maxAge:               model.ProviderEgressHealthMaxAge,
+				maxAge:               egressCoverageLegacyHealthMaxAge,
 				deadlineSlackSeconds: snapshot.staleHealthDeadlineSlackSeconds,
 			},
 			{
 				name: "missing-health", due: snapshot.missingHealthDue,
 				expiredDue:           snapshot.missingHealthExpiredDue,
 				oldestAgeSeconds:     snapshot.missingHealthOldestAgeSeconds,
-				maxAge:               model.ProviderEgressHealthMaxAge,
+				maxAge:               egressCoverageLegacyHealthMaxAge,
 				deadlineSlackSeconds: snapshot.missingHealthDeadlineSlackSeconds,
 			},
 		}

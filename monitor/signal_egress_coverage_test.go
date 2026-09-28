@@ -70,6 +70,21 @@ func syntheticDesiredEgressConfig(t *testing.T, raw string) egressCoverageDesire
 	})
 }
 
+// A new URL-evidence field must not make a valid legacy task observation fail
+// validation while the old producer is still being monitored during cutover.
+func TestEgressCoverageLegacyRulesRetainValidUrlDefaults(t *testing.T) {
+	rules := newEgressCoverageRules(3, 300, 2, model.DefaultProviderEgressRules()).modelRules()
+	if err := rules.Validate(); err != nil {
+		t.Fatalf("legacy observation lost the model's URL defaults: %v", err)
+	}
+	defaults := model.DefaultProviderEgressRules()
+	if rules.UrlProbeResultVersion != defaults.UrlProbeResultVersion ||
+		rules.UrlSuccessIntervalSeconds != defaults.UrlSuccessIntervalSeconds ||
+		rules.UrlFailureIntervalSeconds != defaults.UrlFailureIntervalSeconds {
+		t.Fatal("legacy rule projection fabricated URL policy or pacing")
+	}
+}
+
 // The shortest full probe timeout the taskworker accepts: since every load is
 // retried minutes apart (connect/GEOMAP.md §11.3), the run no longer has to
 // fit in one probe timeout, and the only floor left is that one attempt gets
@@ -229,13 +244,6 @@ func TestEgressCoverageDesiredConfigComparesEveryExecutionSetting(t *testing.T) 
 		{field: "full.limit", mutate: func(c *egressCoverageConfig) { c.full.Limit++ }},
 		{field: "full.concurrency", mutate: func(c *egressCoverageConfig) { c.full.Concurrency++ }},
 		{field: "full.probe_timeout_seconds", mutate: func(c *egressCoverageConfig) { c.full.ProbeTimeoutSeconds++ }},
-		{
-			field: "full.all_destinations",
-			prepare: func(c *egressCoverageConfig) {
-				c.full.ProbeTimeoutSeconds = syntheticEgressMinimumFullTimeoutSeconds(true)
-			},
-			mutate: func(c *egressCoverageConfig) { c.full.AllDestinations = true },
-		},
 		{field: "full.bandwidth", mutate: func(c *egressCoverageConfig) { c.full.Bandwidth = false }},
 		{field: "full.bandwidth_timeout_seconds", mutate: func(c *egressCoverageConfig) { c.full.BandwidthTimeoutSeconds++ }},
 		{field: "blackhole.limit", mutate: func(c *egressCoverageConfig) { c.blackhole.Limit++ }},
@@ -366,6 +374,15 @@ func TestEgressCoverageDesiredConfigUsesTaskworkerHealthTimeoutFloor(t *testing.
 			t.Fatal("monitor accepted a timeout that Taskworker rejects below its cold-request floor")
 		}
 		config.full.ProbeTimeoutSeconds = minimum
+		if allDestinations {
+			// A legacy all-target snapshot has no catalog size after the
+			// catalog moved to Config. A finite budget is not attestable from
+			// the old task row, even at the per-request timeout floor.
+			if validEgressCoverageConfig(config) {
+				t.Fatal("all-target snapshot invented an unobserved catalog size")
+			}
+			continue
+		}
 		if !validEgressCoverageConfig(config) {
 			t.Fatal("monitor rejected the exact timeout floor accepted by Taskworker")
 		}
@@ -1402,10 +1419,6 @@ func TestInspectEgressCoverageTasksRejectsMixedCompleteExecutionSettings(t *test
 		name   string
 		mutate func(*egressCoverageTaskArgs)
 	}{
-		{name: "all destinations", mutate: func(args *egressCoverageTaskArgs) {
-			args.Full.AllDestinations = !args.Full.AllDestinations
-			args.Full.ProbeTimeoutSeconds = syntheticEgressMinimumFullTimeoutSeconds(args.Full.AllDestinations)
-		}},
 		{name: "bandwidth enabled", mutate: func(args *egressCoverageTaskArgs) {
 			args.Full.Bandwidth = !args.Full.Bandwidth
 		}},
@@ -1443,6 +1456,27 @@ func TestInspectEgressCoverageTasksRejectsMixedCompleteExecutionSettings(t *test
 				t.Fatalf("mixed %s setting leaked endpoint values: %v", testCase.name, err)
 			}
 		})
+	}
+}
+
+// A legacy all-target snapshot cannot attest its catalog cardinality. It is
+// invalid before mixed-settings comparison, even with a generous time budget.
+func TestInspectEgressCoverageTasksRejectsUnattestableAllDestinations(t *testing.T) {
+	first := syntheticEgressCoverageTask(t, 0, 2)
+	var secondArgs egressCoverageTaskArgs
+	if err := json.Unmarshal([]byte(syntheticEgressCoverageTask(t, 1, 2)[1]), &secondArgs); err != nil {
+		t.Fatal(err)
+	}
+	secondArgs.Full.AllDestinations = true
+	secondArgs.Full.ProbeTimeoutSeconds = syntheticEgressMinimumFullTimeoutSeconds(true)
+	secondArgs.MaxTimeSeconds = int((30 * 24 * time.Hour) / time.Second)
+	second := syntheticEgressCoverageTaskWithArgs(t, secondArgs)
+	_, err := inspectEgressCoverageTasks([]pgRow{pgRow(first), pgRow(second)})
+	if err == nil || !strings.Contains(err.Error(), "row_2_invalid_settings") || !strings.Contains(err.Error(), "missing_shard_1") {
+		t.Fatalf("unattestable all-target task was not rejected before shard admission: %v", err)
+	}
+	if strings.Contains(err.Error(), "mixed_settings") || strings.Contains(err.Error(), "example.invalid") {
+		t.Fatalf("unattestable task lost its structural classification or leaked an endpoint: %v", err)
 	}
 }
 

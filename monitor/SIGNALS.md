@@ -179,7 +179,7 @@ active missing capability and must not be read as green.
 | Section | Kind | Executable boundary |
 |---|---|---|
 | 1.7 | Coverage gap | Shared SSH status taxonomy preserves every source failure; automatic observer-overlay route attribution is missing an inventory/configured observer-interface or gateway contract. `settings-freshness`, `edge-ipv6`, and `vpn-sessions` do not supply that contract. |
-| 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-selected full-run receipts are missing; `egress-site-pool` and `egress-outcomes` do not attest country-ranked lists or the 13/13 sampling split. |
+| 2.19d | Coverage gap | Country-list provenance, published country-pool generation and country-linked URL-draw receipts remain missing. `egress-site-pool` checks shared pool health and `url-probe-coverage` checks accepted URL quota coverage; neither attests country-ranked lists or the normal general/country sampling split. |
 | 5.1 | Runbook | `contract-rate`, `task-canaries`, `redis-cluster`, `connection-rate`, `log-errors` |
 | 5.2 | Runbook | `redis-cluster`, `redis-process`, `log-errors` |
 | 5.3 | Runbook | `redis-cluster`, `log-errors` |
@@ -5533,6 +5533,28 @@ mechanism; the standard client's roughly six-entry healthy window cannot alone
 consume a distinct 1,000-provider sample. Keep §2.9a independent and verify
 successful provider admission after any improved response count.
 
+Post-filter refill qualifier (2026-09-28 source correction): a separate
+production-reader regression put 1,000 foreign-network-only rows in the
+preferred facet and twenty eligible public online rows in the next permitted
+facet of the same target. The reader returned zero before the fix. It now
+refills unread pages only while the filtered, deduplicated union is smaller
+than the requested count, preserving every safety gate, requested target and
+facet order. Hard/family exclusions and duplicate rows have matching controls;
+a same-network caller still uses its valid preferred rows. The existing
+2,400-row compensation bounds this work, not a new process-wide budget:
+twenty-count requests can inspect at most 2,420 nominal rows per mode plus one
+whole-page rounding. Missing pages consume their budget, pages are never
+refetched, and primary read failures cannot masquerade as empty healthy supply.
+Optional other-mode failure retains only already-validated candidates and its
+cache-degradation observation. No extra reads occur for an already-full result.
+False positive: a small genuinely requested market, exhausted bounded sample,
+or caller-country cohort alone does not prove starvation or justify widening
+the target. False negative: a large global/country cache and a completed initial
+sample do not prove request-specific fill. Validate the exact API artifact,
+target, filters and surviving same-target pages; these existing schema-2
+outcome classes do not independently reveal all unread supply or prove that
+this synthetic mechanism caused a particular Main incident.
+
 `urnetwork_findproviders2_stage_inflight{stage}` and
 `urnetwork_findproviders2_stage_seconds{stage}` retain fixed stages `validate`,
 `caller_location`, `load_primary`, `load_backfill`, `hard_exclusions`, `filter`,
@@ -7266,6 +7288,15 @@ cohort.
 
 ### 2.19 Provider egress probe coverage — every durable shard must advance
 Probe: `egress-coverage`
+
+Workflow applicability: the explicit URL-only `FP2FIX.md` rollout replaces
+the full/blackhole schedule. When desired config has a valid `url_probe`
+worker geometry and supported `url_probe_result_version`, this legacy probe
+performs no full/blackhole database queries; §2.19f owns replacement coverage
+and missing-owner/telemetry alerts. Do not interpret expiration of retired
+full/blackhole counters as a new URL-probe outage or reuse them as evidence
+of URL success. Missing, malformed, or legacy configuration cannot establish
+that handoff. Request-specific provider-list and DB-load probes remain active.
 
 Source architecture checkpoint (2026-09-27, sampled-only probe; verify the
 running API **and** Taskworker artifacts before applying these semantics):
@@ -9402,6 +9433,13 @@ formatting or package metadata checks do not substitute for executing these test
 ### 2.19b Egress site pool freshness — retire sites that fail everyone, and keep the pool representative
 Probe: `egress-site-pool`
 
+Under a validated explicit URL-only workflow, omit the retired
+`provider_blackhole_check` retry sub-check only: old retry rows are historical
+state, not debt owned by the URL scheduler. Do not emit an invented healthy
+legacy queue either. §2.19f owns rolling URL retry/quota visibility; site-pool
+refresh, catalog, regional failure, and request backfill observations remain
+active. A known refresh error must still alert during the workflow handoff.
+
 Schema readiness: before any data or Mimir read, a bounded catalog-only
 preflight verifies every public table/column/type used by this probe,
 including blackhole retry fields (707/709), destination pool (711) and both
@@ -9883,20 +9921,21 @@ Planned probe: `egress-country-sites`
 
 Coverage status: no registered runtime probe currently implements this
 section. The country-site candidate helpers filter proposed websites; they
-do not publish a country-list manifest or attest the served pool or full-run
+do not publish a complete verified country-list manifest or attest per-country
 selection. The required country-list provenance/verification records,
-published country-pool generation and generation-linked split-run/skip
+published country-pool generation and generation-linked URL-draw/skip
 receipts are missing from the current producer/storage contract. This is an
 explicit measurement coverage gap, not healthy country coverage. The
 requirements below remain the acceptance contract for implementation.
 
-The required full quality probe `site` sample is 13 general destinations and 13
-destinations selected for the provider's published country
-(`connect/GEOMAP.md` §11.5). A missing country list is **not** provider
-failure: it makes that full quality result unscorable and must not be hidden
-by 26 general loads or by a healthy `egress-site-pool` result. Blackhole
-checks and the independently useful general loads may continue. This signal
-monitors the *measurement system*, not the country or its providers.
+The URL-only contract in `FP2FIX.md` supersedes the historical full-run 13/13
+batch: normal draws use equal general/country sampling when both compatible
+pools are available. A missing country list is **not** provider failure or a
+new FP2 admission gate; general URL measurements remain valid while the
+country coverage gap stays visible. While TLS failures remain, 50% of draws
+come from the failed-URL pool; the normal half retains the general/country
+split. Security rechecks must not be miscounted as country sampling failures.
+This signal monitors the *measurement system*, not the country or its providers.
 
 The GeoLite2 exported country codes are the denominator, including small
 territories for which a genuinely country-specific popularity source may be
@@ -9904,9 +9943,10 @@ unavailable. For each code read the country-list manifest's source identity,
 source period, curation and last independent load-verification times, the
 100-site target for both the country and global lists, at least 100
 compatible active scored country sites, and the
-published pool generation. Compare the served generation with full-run
-receipts: successful split runs must report 13/13 sampled sites and the
-country they were selected for. Export only country codes and aggregate
+published pool generation. Compare the served generation with URL-draw
+receipts: normal draws must report their source, pool generation and provider
+country; retries must not advance the normal draw ordinal without an accepted
+measurement. Export only country codes and aggregate
 counts, never visited URLs, provider ids, credentials, or raw failures.
 
 Alert WARN for a missing or underfilled (<100) country or global list,
@@ -9914,27 +9954,29 @@ shared-hostname overlap, a Radar source period older than seven days or a
 CrUX corroboration period older than two monthly releases, verification older
 than 30 days, or fewer than 100 compatible active sites in any GeoLite2
 country. These are pool-quality and coverage findings, not provider faults.
-Alert PAGE if a country with due full probes has *new* country-coverage skips
+Alert PAGE if a country with an advertised usable list and due URL work has
+*new* unexpected country-coverage skips
 in two distinct consecutive probe cadences (advancing attempt ids or counters,
-not the same retained skip observed twice), or if a scored full run uses anything
-other than the 13/13 split once the split feature is enabled. Keep
+not the same retained skip observed twice), or if generation-linked receipt
+evidence proves the implemented normal draw rule cannot produce the configured
+equal split. Do not call finite random imbalance a deterministic violation. Keep
 `source-unavailable` distinct from `stale` and from `unobservable`: some
 territories may have no defensible country-ranked data, but that is an
 explicit coverage gap, never invented sites. An unreadable manifest,
 pool endpoint, GeoLite2 export, or run receipt cannot emit healthy evidence
 or resolve an existing alert. A freshly deployed manifest is not enough to
-close an active-use gap; observe advancing, correctly split full runs for that
+close an active-use gap; observe advancing, correctly sourced URL draws for that
 country. If no provider is due, structural source, pool, and generation
 evidence can resolve a list-quality alert while active use remains unobserved.
 
 False-positive qualifiers: a country with no due providers cannot be called
-actively probe-blocked merely because no new 13/13 receipt appeared, though
+actively probe-blocked merely because no new URL-draw receipt appeared, though
 its list can still be stale or unavailable. Region-specific hard exclusions
-can leave fewer than 13 eligible sites even if the country has 100 active
-sites; this is a scored-capacity gap for that provider, not evidence that the
+can leave few compatible sites even if the country has 100 active
+sites; this is a sampling-capacity gap for that provider, not evidence that the
 whole country list is absent. A site that is country-ranked
 but inaccessible from the prober host is a curation candidate, not proof of
-provider failure. False-negative qualifiers: a 13/13 count alone does not
+provider failure. False-negative qualifiers: aggregate draw counts alone do not
 prove distinct domains, current source evidence, correct country selection,
 or successful load verification. Use source and pool generation together.
 
@@ -10049,6 +10091,119 @@ provider fault. Do not weaken dark, TLS, credit, or location guards to clear
 this signal. Recovery requires two clean fresh cadences and improving
 acknowledged **distinct** measured providers; the four-hour fleet-scan goal
 is not satisfied by fewer RPCs, successful auth or buffered worker completions.
+
+### 2.19f Rolling URL-probe coverage and accepted-success capacity
+Probe: `url-probe-coverage`
+
+This is the URL-only `FP2FIX.md` contract, not a renamed legacy cheap/full
+measurement. Probe every five minutes. Expected shard count comes from an
+explicit enabled `url_probe` configuration in `provider_egress_probe.yml`,
+with the supported result-policy version and positive worker geometry, never
+from the surviving heartbeat series. It takes over coverage from §2.19 only
+for that explicit contract; a newly selected contract without deployed owners
+is an observation gap, not successful migration. Provider IDs have affinity to
+1,024 fixed slots; each logical shard owns a set of slots independently of
+the Taskworker host. Slot redistribution preserves history and live claims.
+
+Use a bounded Mimir instant query through an inventory-owned services gateway
+(15-second HTTP deadline, 2-MiB response cap). Join on exact
+`env/job/host/block/instance`, select the newest process per desired Taskworker
+host/block, and never fill a replacement's missing values from its draining
+predecessor. All values must be finite and nonnegative, evaluation/source and
+producer times no older than 180 seconds and no more than 30 seconds in the
+future. Warnings, duplicate cells, malformed labels, incomplete snapshots,
+unknown starts, tied process generations, and unavailable transport remain
+unobservable. Do not export instance IDs or provider/destination identities.
+
+The capable producer exposes `urnetwork_url_probe_capability=1`, an explicit
+`urnetwork_url_probe_configured_shards`, and one
+`urnetwork_url_probe_shard_observed_timestamp_seconds{shard}` for each actual
+task owner. Require exactly one fresh owner for every configured shard.
+Heartbeat proves ownership, not completed probes. The shard-zero owner alone
+periodically produces the global census:
+
+- `urnetwork_url_probe_fleet{state}` contains `eligible`, `due`, `overdue`,
+  `warming`, `uninitialized`, `successes_needed`, `quota_complete`,
+  `secure_complete`, compatibility `complete`, `security_pending`, and
+  `security_unknown_targets`.
+- `quota_complete` requires ten unique accepted successes of the selected
+  evidence-policy version measured strictly in the trailing four hours.
+  `secure_complete` additionally requires no unresolved TLS exception;
+  `complete` has the same value. Old-policy, unmeasured, duplicate, and future
+  outcomes cannot satisfy the target. Ten successes accumulated over an
+  overdue cycle are not rolling completion.
+- `urnetwork_url_probe_fleet_observed_timestamp_seconds`,
+  `urnetwork_url_probe_cohort_started_timestamp_seconds` and
+  `urnetwork_url_probe_oldest_due_seconds` are published with all census states
+  as one atomic generation. Require the same underlying scrape timestamp for
+  all census cells, independently check the durable observation clock, and
+  validate count relationships. Failed/canceled/over-deadline refresh retains
+  the old timestamp. Never sum these global gauges across processes.
+- Warmup follows durable first eligibility, not a process restart. Missing
+  cycle rows remain in the eligible denominator, are explicitly uninitialized,
+  and cannot receive an invented new four-hour grace interval.
+
+Emit `url-probe-coverage-deficit` WARN for any eligible provider lacking secure
+completion. Escalate to PAGE when at least 10% of eligible providers are
+overdue, sustained for two cadences. Report quota and security deficits
+separately. Emit `url-probe-security-recovery-unknown` WARN when legacy TLS
+quarantine has no trustworthy destination for same-URL recovery. A different
+URL's success, expired history, or a new policy version does not clear TLS.
+
+Hourly capacity uses reset-aware one-hour increases of
+`urnetwork_url_probe_outcomes_total{outcome="success"}` from **every expected
+current Taskworker process**, with capability, fresh underlying counter
+samples, at least 30 samples in the hour and one in its first five minutes,
+and a process at least one hour old. Capable producers preinitialize finite
+counter children: missing is not zero. Require complete unique shard-owner
+coverage as well. Emit `url-probe-throughput-deficit` WARN, sustained twice,
+when accepted successes/hour is below `10 * eligible / 4`; expose the
+necessary rate and the conditional projected hours. This is not attempted
+URLs, task completions, legacy full runs, or successful API submissions that
+were rejected as measurements.
+
+The worker counter records acknowledged outcomes, not an authoritative count
+of newly inserted history rows: an idempotent replay also receives HTTP 200.
+Treat its rate as an upper bound on unique accepted throughput. A low
+acknowledged rate proves insufficient capacity under the stated source
+conditions; a high rate cannot establish quota recovery. During rollout,
+corroborate it with selected-policy unique history counts over the same fixed
+measurement interval and the per-provider census. `measured_at` is a
+measurement timestamp, not an arrival timestamp, and changing intervals or
+retention can invalidate that comparison. The existing synthetic
+`TestUrlProbeCoverageHighAggregateRateCannotHideStarvedProviders` preserves
+the coverage PAGE even when acknowledged throughput is high.
+
+Missing desired geometry, source coverage, owner identity, coherent census or
+rate window emits `url-probe-coverage-unobservable` WARN, not a healthy zero
+or an inferred numerical throughput failure. An independently valid census
+can still prove a real coverage deficit when unrelated worker rate data is
+missing. Explicitly disabled scheduler configuration noops. A zero eligible
+census produces no artificial quota/rate outage; provider-population and
+request-specific FP2 signals must independently establish product supply.
+
+False-positive qualifiers: new eligibility needs its documented warmup;
+TLS rechecks can continue with zero success deficit; one-hour rate is a
+forecast under the observed workload, not proof a four-hour cycle has elapsed.
+Finite random destination imbalance is not itself a selection bug. An
+ordinary URL error affects quality/speed ratio and ranking but does not
+independently remove an otherwise eligible provider from online fallback.
+False-negative qualifiers: high aggregate rate can repeatedly cover a small
+subset; only the per-provider rolling census establishes quota coverage.
+Fresh heartbeat is not accepted work, retained gauges are not fresh census,
+and a missing process can hide throughput. This probe does not prove ARIN
+classification, per-country catalog freshness, request-specific FP2 refill,
+or that PostgreSQL returned to its usual CPU band.
+
+Investigate slot-index query work, oldest-due fairness, private tunnel/DNS/HTTP
+stage occupancy, accepted receipts, catalog compatibility and URL-scoped TLS
+recovery. The deterministic 100k-provider control exposed a residual shard
+filter scanning other shards' due rows; an indexed fixed-slot/lazy-head merge
+removes that scan, but dead index tuples still require ordinary vacuum and
+live query/buffer validation. Do not add a global connection cap or weaken
+credit/reliability/risk/security checks. Closure requires two fresh coherent
+cadences, per-provider rolling quota recovery, full shard observations, and
+independent FP2 availability and PostgreSQL CPU verification after rollout.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`
@@ -15356,6 +15511,29 @@ This is the version-to-artifact contract checked by the probe:
 | 719 | `network_ping_target_hour_tally` range-partitioned by `hour`: exact required, no-default columns, the `(hour, target_extender_id, pinger_kind)` primary key, and day partitions named and bounded as 717's |
 | 720 | the competition round lifecycle guard permits a placeable staging winner while retaining production takeover eligibility |
 | 721 | `competition_staging_winner_approval` exact seven-column shape, validated primary/foreign keys and review-evidence checks, plus enabled unconditional insert and append-only triggers bound to their exact published guard bodies |
+| 722 | Required false-default ARIN risk/non-quality columns on connection location and its reliability rollup |
+| 723 | Immutable URL history and durable probe-cycle tables, primary keys, count constraints and measurement/due indexes |
+| 724 | Nullable no-default health security timestamp; schema shape does not by itself prove historical row backfill |
+| 725 | Required false-default cycle eligibility and valid/ready eligible-due partial index |
+| 726 | URL-history marker, cycle outcome ordinal and the original URL-success partial index; that index's old predicate is required only before 729 |
+| 727 | Exact-target URL security table/key/unresolved index, legacy aggregate TLS quarantine flag and nullable JSONB URL evidence |
+| 728 | Stored generated 1024-slot routing column and valid/ready slot/next-attempt/client partial index |
+| 729 | Required zero-default policy-version column and version-one URL-success partial index, retaining the persistent URL marker/outcome obligations of 726 |
+| 730 | Nullable actual-lookup timestamp and required zero-default ARIN database epoch on connection location |
+
+FP2's 722–730 contract separates schema readiness from live evidence. A numeric
+730 alone cannot prove exact partial-index predicates, generated-slot semantics,
+history idempotency or preserved TLS quarantine. Conversely, missing artifacts
+above the recorded head are pending migrations, not reordered-history proof.
+Apply these migrations before any new worker seeds the cycle/history tables;
+the stored-slot rewrite and index replacement then operate on empty tables.
+Existing health backfills hold the ALTER lock through their transaction, so use
+bounded lock/statement/transaction deadlines and inspect audit plus actual
+schema after an uncertain outcome. Migration success does not attest ARIN
+classification of existing connections: Connect must record the actual loaded
+database epoch after reconnect, independently of default-false exception bits.
+Do not clear legacy TLS findings or count version-zero history as version-one
+success merely to make readiness or coverage appear healthy.
 
 Version 721 adds explicit operator approval for a finalized, uncanceled staging
 winner; it does not approve production candidates or reopen winner selection.

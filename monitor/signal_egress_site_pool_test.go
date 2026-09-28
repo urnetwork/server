@@ -374,6 +374,34 @@ func TestEgressSitePoolSignalSyntheticRetryQueueStarved(t *testing.T) {
 	}
 }
 
+// Deliberately retired blackhole retries cannot page the replacement workflow,
+// but a real site-pool refresh failure must remain visible after that cutover.
+func TestEgressSitePoolUrlOnlyRetiresOnlyLegacyRetryObservation(t *testing.T) {
+	fixture := healthyEgressSitePoolFixture()
+	fixture.retries = []string{"12", "3", "5400"}
+	fixture.task = []string{"1", "1", "2", "60"}
+	source := fixture.source(t)
+	query := source.postgresFn
+	source.postgresFn = func(sql string) ([]Row, error) {
+		if strings.Contains(sql, "monitor-signal-2.19b-egress-site-pool-retries") {
+			t.Fatal("URL-only workflow queried retired blackhole retries")
+		}
+		return query(sql)
+	}
+	poolContext := testEgressSitePoolContext()
+	poolContext.urlOnly = true
+	alerts, err := testEgressSitePoolSignal(poolContext).Run(context.Background(), testEgressSitePoolSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, alert := range alerts {
+		if alert.Class == "egress-retry-queue-starved" {
+			t.Fatal("retired retry observation produced a replacement-workflow verdict")
+		}
+	}
+	requireAlertClass(t, alerts, "egress-site-refresh-not-running")
+}
+
 // Every class failing above the prober-fault line at once is the prober;
 // one class under it, or with too few loads to judge, is not; a guard trip
 // is named by its schedule.
@@ -484,13 +512,43 @@ func (self *egressSitePoolDatabaseSource) PostgreSQL(ctx context.Context, query 
 	return rows, queryErr
 }
 
-// The production queries on a seeded database: the built-in pool with one
+const testSeededEgressSitePoolCatalog = `
+schema_version: 1
+settings:
+  site_pool_size: {dns: 4, connectivity: 1, cdn: 1, site: 5}
+  site_sample_size: {dns: 2, connectivity: 1, cdn: 1, site: 2}
+destinations:
+  - {name: resolver-a, class: dns, category: dns, url: "https://resolver-a.example.invalid/dns-query?name=example.invalid&type=A", verify: {kind: dns_json}}
+  - {name: resolver-b, class: dns, category: dns, url: "https://resolver-b.example.invalid/dns-query?name=example.invalid&type=A", verify: {kind: dns_json}}
+  - {name: resolver-c, class: dns, category: dns, url: "https://resolver-c.example.invalid/dns-query?name=example.invalid&type=A", verify: {kind: dns_json}}
+  - {name: resolver-d, class: dns, category: dns, url: "https://resolver-d.example.invalid/dns-query?name=example.invalid&type=A", verify: {kind: dns_json}}
+  - {name: connectivity-a, class: connectivity, category: connectivity, url: "https://connectivity.example.invalid/", verify: {kind: contains, text: synthetic-success}}
+  - {name: cdn-a, class: cdn, category: cdn, url: "https://cdn.example.invalid/"}
+  - {name: retiring-site, class: site, category: news, url: "https://retiring.example.invalid/"}
+  - {name: regional-site, class: site, category: news, url: "https://regional.example.invalid/"}
+  - {name: steady-site-a, class: site, category: news, url: "https://steady-a.example.invalid/"}
+  - {name: steady-site-b, class: site, category: news, url: "https://steady-b.example.invalid/"}
+  - {name: steady-site-c, class: site, category: news, url: "https://steady-c.example.invalid/"}
+candidates:
+  - {name: dns-candidate, class: dns, category: dns, url: "https://resolver-candidate.example.invalid/dns-query?name=example.invalid&type=A", verify: {kind: dns_json}}
+  - {name: connectivity-candidate, class: connectivity, category: connectivity, url: "https://connectivity-candidate.example.invalid/", verify: {kind: contains, text: synthetic-success}}
+  - {name: cdn-candidate, class: cdn, category: cdn, url: "https://cdn-candidate.example.invalid/"}
+  - {name: site-candidate, class: site, category: news, url: "https://site-candidate.example.invalid/"}
+`
+
+// The production queries on a seeded database: an explicit synthetic pool with one
 // site long over the retire line, one blocked in a place where the others
 // pass, a place too thin for its resolvers, a country no site reaches, no
 // refresh task, and no Mimir.
 func TestEgressSitePoolSignalOnASeededDatabase(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		ctx := context.Background()
+		pop := server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte(testSeededEgressSitePoolCatalog))
+		defer pop()
+		catalog, err := controller.LoadProviderEgressSites()
+		if err != nil {
+			tb.Fatal(err)
+		}
 		if _, err := controller.EnsureProviderEgressDestinationsSeeded(ctx); err != nil {
 			tb.Fatal(err)
 		}
@@ -500,7 +558,7 @@ func TestEgressSitePoolSignalOnASeededDatabase(t *testing.T) {
 		resolvers := 0
 		for _, d := range model.GetProviderEgressDestinations(ctx) {
 			switch {
-			case d.Name == "cnn":
+			case d.Name == "retiring-site":
 				d.FailureShare = &share
 				d.SampleCount = 250
 				d.AboveRetireSince = &overSince
@@ -539,11 +597,11 @@ func TestEgressSitePoolSignalOnASeededDatabase(t *testing.T) {
 					day, country, runs, echoFailures, now,
 				))
 			}
-			siteTally("bbc", "de", 30, 29)
-			for _, name := range []string{"reuters", "ap-news", "the-guardian"} {
+			siteTally("regional-site", "de", 30, 29)
+			for _, name := range []string{"steady-site-a", "steady-site-b", "steady-site-c"} {
 				siteTally(name, "de", 30, 0)
 			}
-			for _, name := range []string{"reuters", "ap-news"} {
+			for _, name := range []string{"steady-site-a", "steady-site-b"} {
 				siteTally(name, "kp", 40, 40)
 			}
 			placeTally("de", 30, 0)
@@ -552,9 +610,12 @@ func TestEgressSitePoolSignalOnASeededDatabase(t *testing.T) {
 		})
 
 		poolContext := &egressSitePoolContext{
-			siteSettings:         model.DefaultProviderEgressSiteSettings(),
+			siteSettings:         catalog.Settings,
 			rules:                model.DefaultProviderEgressRules(),
-			candidateNameClasses: map[string]string{"dns-candidate": "dns", "connectivity-candidate": "connectivity", "cdn-candidate": "cdn", "site-candidate": "site"},
+			candidateNameClasses: map[string]string{},
+		}
+		for _, candidate := range catalog.Candidates {
+			poolContext.candidateNameClasses[candidate.Name] = candidate.Class
 		}
 		settings := syntheticSettings(&egressSitePoolDatabaseSource{})
 		settings.Now = func() time.Time { return now }
@@ -563,9 +624,9 @@ func TestEgressSitePoolSignalOnASeededDatabase(t *testing.T) {
 			tb.Fatal(err)
 		}
 		want := []string{
-			"egress-site-pool-needs-refresh/cnn",
+			"egress-site-pool-needs-refresh/retiring-site",
 			"egress-site-refresh-not-running/task-missing",
-			"egress-site-regional-failure-unmarked/bbc@de",
+			"egress-site-regional-failure-unmarked/regional-site@de",
 			"egress-site-place-pool-thin/dns@ir",
 			"egress-country-unreachable/kp",
 			"egress-site-pool-unobservable/metrics",

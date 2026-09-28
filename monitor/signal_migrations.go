@@ -296,6 +296,15 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "network_ping_target_hour_tally day partitions and target hour key", requiredVersion: 719, rowColumn: 130},
 	{name: "competition staging lifecycle winner eligibility", requiredVersion: 720, rowColumn: 131},
 	{name: "competition staging winner approval and append-only guards", requiredVersion: 721, rowColumn: 132},
+	{name: "connection and rollup ARIN exception facts", requiredVersion: 722, rowColumn: 133},
+	{name: "URL receipt history and durable probe queue", requiredVersion: 723, rowColumn: 134},
+	{name: "provider_egress_health.security_measured_at", requiredVersion: 724, rowColumn: 135},
+	{name: "probe queue eligibility and partial due index", requiredVersion: 725, rowColumn: 136},
+	{name: "URL receipt marker and pre-version success index", requiredVersion: 726, removedVersion: 729, rowColumn: 137},
+	{name: "per-URL security identity and retained legacy quarantine", requiredVersion: 727, rowColumn: 138},
+	{name: "probe queue generated slot and partial slot index", requiredVersion: 728, rowColumn: 139},
+	{name: "URL policy version and exact selected-success index", requiredVersion: 729, rowColumn: 140},
+	{name: "connection ARIN lookup provenance", requiredVersion: 730, rowColumn: 141},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -307,7 +316,7 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			SELECT coalesce(max(end_version_number), 0)::int AS value
 			FROM migration_audit
 			WHERE status = 'success'
-		), `+competitionStagingApprovalCatalogQuery+`, index_artifact AS (
+		), `+competitionStagingApprovalCatalogQuery+`, `+migrationFp2CatalogQuery+`, index_artifact AS (
 			SELECT table_relation.relname::text AS table_name,
 			       index_relation.relname::text AS index_name,
 			       regexp_replace(pg_get_indexdef(index_relation.oid), '[[:space:]]+', ' ', 'g') AS definition,
@@ -2002,7 +2011,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND position('NEW.staging OR (job.score_json->>''takeover_eligible'')::boolean'
 		                          in pg_get_functiondef(function_record.oid)) > 0
 		       ),
-		       `+competitionStagingApprovalArtifactQuery+`
+		       `+competitionStagingApprovalArtifactQuery+`,
+		       `+strings.Join(migrationFp2ArtifactQueries, ",\n")+`
 		FROM version;
 	`)
 	if err != nil {

@@ -107,6 +107,7 @@ type egressSitePoolContext struct {
 	siteSettings         *model.ProviderEgressSiteSettings
 	rules                model.ProviderEgressRules
 	candidateNameClasses map[string]string
+	urlOnly              bool
 }
 
 // Reads the deployment's configuration. An unusable egress-sites.yml is an
@@ -125,6 +126,7 @@ func loadEgressSitePoolContext() (*egressSitePoolContext, error) {
 		siteSettings:         sites.Settings,
 		rules:                model.GetProviderEgressRules(),
 		candidateNameClasses: candidateNameClasses,
+		urlOnly:              loadEgressCoverageDesiredConfig().urlOnly,
 	}, nil
 }
 
@@ -602,17 +604,19 @@ func queryEgressSitePool(
 		}
 	}
 
-	rows, err = env.runner.pg(ctx, egressSitePoolRetriesQuery(poolContext.rules))
-	if err != nil {
-		return observation, err
-	}
-	row, err = pgAggregateRow(rows, 3)
-	if err != nil {
-		return observation, fmt.Errorf("egress site pool retries: %w", err)
-	}
-	for column, target := range map[int]*int64{0: &observation.retries.retryRows, 1: &observation.retries.overdueRows, 2: &observation.retries.maxOverdueSeconds} {
-		if *target, err = integer(row, column); err != nil {
-			return observation, fmt.Errorf("egress site pool retries returned an invalid integer field %d", column)
+	if !poolContext.urlOnly {
+		rows, err = env.runner.pg(ctx, egressSitePoolRetriesQuery(poolContext.rules))
+		if err != nil {
+			return observation, err
+		}
+		row, err = pgAggregateRow(rows, 3)
+		if err != nil {
+			return observation, fmt.Errorf("egress site pool retries: %w", err)
+		}
+		for column, target := range map[int]*int64{0: &observation.retries.retryRows, 1: &observation.retries.overdueRows, 2: &observation.retries.maxOverdueSeconds} {
+			if *target, err = integer(row, column); err != nil {
+				return observation, fmt.Errorf("egress site pool retries returned an invalid integer field %d", column)
+			}
 		}
 	}
 
@@ -873,8 +877,9 @@ func evaluateEgressSitePool(
 		}
 	}
 
-	// retry queue starved
-	{
+	// Only the legacy workflow owns blackhole retries. URL retry debt is
+	// measured by §2.19f; retirement must not fabricate a healthy old queue.
+	if !poolContext.urlOnly {
 		failing := []finding{}
 		if 0 < observation.retries.overdueRows {
 			f := egressSitePoolFinding("egress-retry-queue-starved", target, "", 2)
