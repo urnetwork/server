@@ -1279,21 +1279,25 @@ func TestRemoveContractBatchesDrainsDuplicateCandidates(t *testing.T) {
 		networkId := server.NewId()
 		contractIds := []server.Id{server.NewId(), server.NewId(), server.NewId()}
 		oldCreateTime := server.NowUtc().Add(-30 * 24 * time.Hour)
+		usage := &contractUsageSnapshot{Version: 1, ByteCount: 1024,
+			Providers: []contractProviderUsage{{ClientId: networkId, NetworkId: networkId, ByteCount: 1024}}}
 
 		server.Tx(ctx, func(tx server.PgTx) {
 			for _, contractId := range contractIds {
-				// closed contract (outcome set -> open = false)
+				// Historical terminal inputs carry their original time and
+				// complete usage in the first insert; retention may not invent them.
 				server.RaisePgResult(tx.Exec(
 					ctx,
 					`
 					INSERT INTO transfer_contract (
 						contract_id, source_network_id, source_id,
 						destination_network_id, destination_id,
-						transfer_byte_count, create_time, outcome
+						transfer_byte_count, create_time, close_time, outcome,
+						provider_usage, usage_origin_is_source
 					)
-					VALUES ($1, $2, $2, $2, $2, $3, $4, $5)
+					VALUES ($1, $2, $2, $2, $2, $3, $4, $4, $5, $6, TRUE)
 					`,
-					contractId, networkId, 1024, oldCreateTime, ContractOutcomeSettled,
+					contractId, networkId, 1024, oldCreateTime, ContractOutcomeSettled, usage,
 				))
 				// two sweeps per contract -> duplicate candidate contract_ids, so a
 				// full batch of two sweep rows can be a single contract
@@ -1307,7 +1311,7 @@ func TestRemoveContractBatchesDrainsDuplicateCandidates(t *testing.T) {
 						)
 						VALUES ($1, $2, $3, $4, $5)
 						`,
-						contractId, server.NewId(), networkId, 1024, 0,
+						contractId, server.NewId(), networkId, 512, 0,
 					))
 				}
 			}
@@ -1381,23 +1385,27 @@ func TestAssignStragglerReapTimeRespectsBudget(t *testing.T) {
 		networkId := server.NewId()
 		aged := server.NowUtc().Add(-StragglerContractExpiration - 24*time.Hour)
 		contractIds := []server.Id{}
+		usage := &contractUsageSnapshot{Version: 1, ByteCount: 1024,
+			Providers: []contractProviderUsage{{ClientId: networkId, NetworkId: networkId, ByteCount: 1024}}}
 		server.Tx(ctx, func(tx server.PgTx) {
 			for range 5 {
 				contractId := server.NewId()
 				// closed (outcome set -> open = false; close_time set) and never
 				// reaped (reap_time IS NULL), aged past the straggler window -> a
-				// straggler the assign pass targets
+				// straggler the assign pass targets. Its original terminal usage
+				// is complete before the retention pass receives the row.
 				server.RaisePgResult(tx.Exec(
 					ctx,
 					`
 					INSERT INTO transfer_contract (
 						contract_id, source_network_id, source_id,
 						destination_network_id, destination_id,
-						transfer_byte_count, create_time, close_time, outcome
+						transfer_byte_count, create_time, close_time, outcome,
+						provider_usage, usage_origin_is_source
 					)
-					VALUES ($1, $2, $2, $2, $2, $3, $4, $4, $5)
+					VALUES ($1, $2, $2, $2, $2, $3, $4, $4, $5, $6, TRUE)
 					`,
-					contractId, networkId, 1024, aged, ContractOutcomeSettled,
+					contractId, networkId, 1024, aged, ContractOutcomeSettled, usage,
 				))
 				contractIds = append(contractIds, contractId)
 			}
