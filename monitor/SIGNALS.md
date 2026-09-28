@@ -15111,6 +15111,29 @@ the coverage field. Exclude it from denominators only when the operator has
 explicitly declared it offline; never silently turn an SSH failure into a
 healthy sample.
 
+**Queued config rollout can start a stale binary after newer publication.**
+If the deployed worker captures its service/config pair before waiting for
+the service-scoped rollout lock, a queued candidate can start the old image
+with new config after the desired image changes. New container age is not
+new binary identity; an old-image duplicate may be a ready candidate plus
+its gracefully draining ancestor, not a crash loop.
+
+Join the actual worker PID and lock ownership to its captured target,
+successful pull, candidate readiness/effective config, and owned graceful
+stop of the preceding generation. Natural drain completion followed by the
+next group's progress explains a serialized wait, not fleet health or rollout
+completion. Use the actual deployed worker's drain/lock bounds, not current
+repository source; missing ownership, failed pull/readiness, or stalled
+progress beyond those bounds requires separate diagnosis (§8.11).
+
+Keep the desired-versus-running target mismatch open until the requested
+image/config pair is verified on every expected enabled slot and the old
+behavior has drained (§8.2–8.3). Neither a fresh container nor a desired-version
+row clears that alert. During mixed generations, classification observations
+must retain their exact fresh-epoch coverage denominator: a small new cohort
+does not attest the unclassified remainder. This qualifier grants no automatic
+permission to kill or restart a generation and changes no alert threshold.
+
 ### 8.7 Required credential and lazy-vault readiness — green startup, missing work
 Probe: `credentials`
 
