@@ -80,8 +80,11 @@ func arinBlockRegistrationScope(blockType string) string {
 // Rules are reviewed config inputs. Specific prefix overrides take precedence
 // over organization rules, allowing a verified access ISP inside a hosting parent.
 type classificationRules struct {
-	Version uint32               `yaml:"version"`
-	Rules   []classificationRule `yaml:"rules"`
+	Version              uint32                  `yaml:"version"`
+	Rules                []classificationRule    `yaml:"rules"`
+	CountryPolicyVersion uint32                  `yaml:"country_policy_version"`
+	CountrySources       []countryEvidenceSource `yaml:"country_sources"`
+	CountryRules         []countryEvidenceRule   `yaml:"country_rules"`
 }
 type classificationRule struct {
 	Name           string   `yaml:"name"`
@@ -284,6 +287,9 @@ func loadClassificationRules(path string) (classificationRules, error) {
 			rule.prefixes = append(rule.prefixes, prefix)
 		}
 	}
+	if err := rules.validateCountryEvidence(); err != nil {
+		return rules, err
+	}
 	return rules, nil
 }
 
@@ -341,14 +347,20 @@ func splitClassificationPrefix(prefix netip.Prefix, boundary netip.Prefix) []net
 
 func (self classificationRules) partitions(prefix netip.Prefix) []netip.Prefix {
 	partitions := []netip.Prefix{prefix}
+	split := func(boundary netip.Prefix) {
+		next := []netip.Prefix{}
+		for _, partition := range partitions {
+			next = append(next, splitClassificationPrefix(partition, boundary)...)
+		}
+		partitions = next
+	}
 	for _, rule := range self.Rules {
 		for _, boundary := range rule.prefixes {
-			next := []netip.Prefix{}
-			for _, partition := range partitions {
-				next = append(next, splitClassificationPrefix(partition, boundary)...)
-			}
-			partitions = next
+			split(boundary)
 		}
+	}
+	for _, rule := range self.CountryRules {
+		split(rule.prefix)
 	}
 	return partitions
 }
@@ -444,8 +456,16 @@ func selectArinAllocations(ctx context.Context, allocations []arinAllocation, ne
 // Writes a complete new database. ARIN prefixes are inserted broadest first;
 // child allocations replace their parent's facts, including a clean exception.
 func buildArinDatabase(ctx context.Context, source string, geolite2 string, rulesPath string, output string) error {
+	return buildArinDatabaseAt(ctx, source, geolite2, rulesPath, output, time.Now().UTC())
+}
+
+// One explicit build instant binds source freshness and reproducible metadata.
+func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, rulesPath string, output string, buildTime time.Time) error {
 	if source == "" || geolite2 == "" {
 		return errors.New("source and geolite2 are required")
+	}
+	if buildTime.Unix() <= 0 {
+		return errors.New("a positive ARIN build time is required")
 	}
 	inputHashes := map[string]string{}
 	inputPaths := map[string]string{"arin_xml": source, "geolite2": geolite2, "classification_rules": rulesPath}
@@ -459,6 +479,13 @@ func buildArinDatabase(ctx context.Context, source string, geolite2 string, rule
 	rules, err := loadClassificationRules(rulesPath)
 	if err != nil {
 		return err
+	}
+	countryHashes, err := rules.hashCountryEvidenceSources(ctx, rulesPath, buildTime)
+	if err != nil {
+		return err
+	}
+	for name, hash := range countryHashes {
+		inputHashes[name] = hash
 	}
 	geoDb, err := server.OpenIpInfoDatabase(geolite2)
 	if err != nil {
@@ -499,13 +526,17 @@ func buildArinDatabase(ctx context.Context, source string, geolite2 string, rule
 	if err != nil {
 		return err
 	}
+	if err := rules.validateCountryEvidenceOwners(allocationGroups); err != nil {
+		return err
+	}
 	networkParents = nil
-	writer, err := mmdbwriter.New(mmdbwriter.Options{DatabaseType: "urnetwork arindb", IncludeReservedNetworks: true, RecordSize: 32, Description: map[string]string{"en": "ARIN registration and GeoLite2 classification exceptions"}})
+	writer, err := mmdbwriter.New(mmdbwriter.Options{BuildEpoch: buildTime.Unix(), DatabaseType: "urnetwork arindb", IncludeReservedNetworks: true, RecordSize: 32, Description: map[string]string{"en": "ARIN registration and GeoLite2 classification exceptions"}})
 	if err != nil {
 		return err
 	}
 	var partitions, riskCount, nonQualityCount int
 	var multipleOwnerAllocations, conflictingCountryAllocations, unknownCountryAllocations, ambiguousQualityPartitions int
+	countryEvidencePartitions := map[string]int{}
 	registrationScopes := map[string]int{"arin": 0, "referral": 0, "registry": 0, "reserved": 0, "unknown": 0}
 	for _, group := range allocationGroups {
 		if err := ctx.Err(); err != nil {
@@ -553,10 +584,14 @@ func buildArinDatabase(ctx context.Context, source string, geolite2 string, rule
 		}
 		firstOwner := owners[0]
 		orgHandle, blockType := firstOwner.allocation.organization, firstOwner.allocation.blockType
+		netHandle := firstOwner.allocation.network
 		registrationScope, registeredCountry := firstOwner.registrationScope, firstOwner.registeredCountry
 		countryCodes := firstOwner.countries
 		countryAmbiguous := false
 		for _, owner := range owners[1:] {
+			if owner.allocation.network != netHandle {
+				netHandle = ""
+			}
 			if owner.allocation.organization != orgHandle {
 				orgHandle = ""
 			}
@@ -596,8 +631,10 @@ func buildArinDatabase(ctx context.Context, source string, geolite2 string, rule
 			if err != nil {
 				return err
 			}
-			risk := registeredCountry != "" && info.CountryCode != "" && registeredCountry != info.CountryCode
+			registrationMismatch := registeredCountry != "" && info.CountryCode != "" && registeredCountry != info.CountryCode
 			for _, prefix := range rules.partitions(prefix) {
+				countryEvidence := rules.countryEvidence(group, prefix.Addr())
+				risk := countryEvidence.risk(info.CountryCode, registrationMismatch)
 				classification := rules.classify(firstOwner.ancestors, prefix.Addr())
 				commonClassification := true
 				qualityAmbiguous := false
@@ -648,6 +685,12 @@ func buildArinDatabase(ctx context.Context, source string, geolite2 string, rule
 					"classification_org_handle":    mmdbtype.String(classification.orgHandle),
 					"multiple_registration_owners": mmdbtype.Bool(len(owners) > 1), "country_ambiguous": mmdbtype.Bool(countryAmbiguous),
 					"non_quality_ambiguous": mmdbtype.Bool(qualityAmbiguous),
+				}
+				countryEvidence.addRecordFields(data)
+				if countryEvidence.state != "" {
+					data["registration_mismatch"] = mmdbtype.Bool(registrationMismatch)
+					data["net_handle"] = mmdbtype.String(netHandle)
+					countryEvidencePartitions[countryEvidence.state]++
 				}
 				if len(ownerRecords) > 0 {
 					data["owner_evidence"] = ownerRecords
@@ -705,7 +748,16 @@ func buildArinDatabase(ctx context.Context, source string, geolite2 string, rule
 			return errors.New("ARIN build input changed during generation; output not published")
 		}
 	}
-	return writeManifest(output, map[string]any{"source": "ARIN bulk Whois", "source_url": arinDownloadUrl, "inputs_sha256": inputHashes, "built_at": time.Now().UTC(), "geolite2_build_time": geoDb.BuildTime().UTC(), "classifier_version": rules.Version, "organizations": len(organizations), "source_allocations": sourceAllocationCount, "allocations": len(allocationGroups), "coalesced_equal_prefix_allocations": sourceAllocationCount - len(allocationGroups), "multiple_owner_allocations": multipleOwnerAllocations, "conflicting_country_allocations": conflictingCountryAllocations, "unknown_country_allocations": unknownCountryAllocations, "registration_scope_allocations": registrationScopes, "emitted_partitions": partitions, "risk_partitions": riskCount, "non_quality_partitions": nonQualityCount, "ambiguous_non_quality_partitions": ambiguousQualityPartitions}, "arin.mmdb")
+	if _, err := rules.hashCountryEvidenceSources(ctx, rulesPath, buildTime); err != nil {
+		return err
+	}
+	manifest := map[string]any{"source": "ARIN bulk Whois", "source_url": arinDownloadUrl, "inputs_sha256": inputHashes, "built_at": buildTime, "geolite2_build_time": geoDb.BuildTime().UTC(), "classifier_version": rules.Version, "organizations": len(organizations), "source_allocations": sourceAllocationCount, "allocations": len(allocationGroups), "coalesced_equal_prefix_allocations": sourceAllocationCount - len(allocationGroups), "multiple_owner_allocations": multipleOwnerAllocations, "conflicting_country_allocations": conflictingCountryAllocations, "unknown_country_allocations": unknownCountryAllocations, "registration_scope_allocations": registrationScopes, "emitted_partitions": partitions, "risk_partitions": riskCount, "non_quality_partitions": nonQualityCount, "ambiguous_non_quality_partitions": ambiguousQualityPartitions}
+	if len(rules.CountryRules) > 0 {
+		manifest["country_policy_version"] = rules.CountryPolicyVersion
+		manifest["country_evidence_sources"] = rules.CountrySources
+		manifest["country_evidence_partitions"] = countryEvidencePartitions
+	}
+	return writeManifest(output, manifest, "arin.mmdb")
 }
 
 // Hash input content without retaining large XML/MMDB files in memory.

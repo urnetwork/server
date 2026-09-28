@@ -100,6 +100,42 @@ func TestArinExceptionRejectsUnknownClassifierVersion(t *testing.T) {
 	}
 }
 
+// Country-policy provenance is additive; the existing reader trusts final flags
+// and never recomputes a reviewed exception from the retained registration chain.
+func TestArinCountryPolicyEvidenceKeepsExistingReaderFormat(t *testing.T) {
+	for _, policyVersion := range []uint32{0, 2} {
+		for _, flags := range []struct{ risk, nonQuality bool }{
+			{risk: false, nonQuality: false}, {risk: false, nonQuality: true},
+			{risk: true, nonQuality: false}, {risk: true, nonQuality: true},
+		} {
+			record := mmdbtype.Map{
+				"classifier_version": mmdbtype.Uint32(1), "risk": mmdbtype.Bool(flags.risk),
+				"non_quality":        mmdbtype.Bool(flags.nonQuality),
+				"org_country_codes":  mmdbtype.Slice{mmdbtype.String("us")},
+				"registered_country": mmdbtype.String("us"), "associated_country": mmdbtype.String("ca"),
+			}
+			if policyVersion != 0 {
+				record["country_policy_version"] = mmdbtype.Uint32(policyVersion)
+				record["registration_mismatch"] = mmdbtype.Bool(true)
+				record["country_evidence_state"] = mmdbtype.String("known")
+				record["credible_country_codes"] = mmdbtype.Slice{mmdbtype.String("ca")}
+				record["country_evidence"] = mmdbtype.Slice{mmdbtype.Map{
+					"rule": mmdbtype.String("synthetic-reviewed-geography"), "source_id": mmdbtype.String("synthetic-source"),
+				}}
+			}
+			db, err := mmdb.OpenBytes(testExceptionDatabase(t, string(schemaTypeArinDb), map[string]mmdbtype.Map{"192.0.2.0/24": record}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := getArinInfoFromDatabase(db, schemaTypeArinDb, netip.MustParseAddr("192.0.2.1"))
+			db.Close()
+			if err != nil || info.Risk != flags.risk || info.NonQuality != flags.nonQuality || info.ClassifierVersion != 1 || info.DatabaseBuildEpoch <= 0 {
+				t.Fatalf("policy=%d flags=%+v: reader changed final flags: %+v error=%v", policyVersion, flags, info, err)
+			}
+		}
+	}
+}
+
 // An absent exception is a real lookup, not an uninitialized classification.
 func TestArinLookupBindsHitsAndMissingRecordsToDatabaseGeneration(t *testing.T) {
 	db, err := mmdb.OpenBytes(testExceptionDatabase(t, string(schemaTypeArinDb), map[string]mmdbtype.Map{

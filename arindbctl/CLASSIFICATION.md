@@ -62,6 +62,71 @@ The output records and manifest expose multi-owner and ambiguous-fact counts.
 Malformed cycles or contradictory facts within the same network record still
 stop publication.
 
+## Reviewed prefix country evidence
+
+The builder supports a separate, optional `country_policy_version: 2` input.
+No production country rules or source snapshots are enabled by this support.
+Unmatched prefixes retain the existing registration-country mismatch policy;
+the hosting catalog and its inheritance remain independent.
+
+This refinement is needed because ARIN's organization country describes
+[registration](https://www.arin.net/reference/research/bulkwhois/#org-xml-elements),
+and ARIN [does not maintain IP geolocation](https://www.arin.net/about/relations/law_enforcement/faq/).
+MaxMind documents [legitimate cross-border registrations](https://support.maxmind.com/knowledge-base/articles/country-level-and-city-level-geolocation-maxmind).
+A mismatch remains the selected baseline policy, but must not be described as
+proof of malicious operation or physical geography.
+
+`country_sources` contains reviewed local snapshots, each with `id`, HTTPS
+`url`, relative `file`, lowercase `sha256`, `observed_at` and `expires_at`.
+The rules file's directory is the configured read root: absolute paths, parent
+escapes and symlink escapes are rejected. Sources must be nonempty regular
+files no larger than 16 MiB. The build instant must be at or after observation
+and strictly before expiry. Hashes are checked before and after generation and
+included in `inputs_sha256`; malformed, missing, changed or stale evidence
+fails publication. There is no implicit fetch or fallback when evidence fails.
+Expiry does not silently reclassify an already published database; normal
+freshness monitoring and replacement review still apply.
+
+Each `country_rules` entry requires a unique `name`, canonical `prefix`,
+`owners: [{net_handle, org_handle}]`, `source_id`, `reason`, and exactly one of
+`country_codes` or nonempty `uncertainty`. Countries must be recognized country
+codes; unknown and regional codes cannot be a complete country set. The owner
+list must match all current direct owners of a containing authoritative ARIN
+allocation. A broader prefix, changed owner, missing network, referral record,
+or partial incomparable-owner set stops publication. An independently registered
+child does not inherit its parent's country rule.
+
+The builder intersects ARIN allocations, GeoLite country cells and all rule
+boundaries before deciding risk. The most-specific matching country rule wins.
+Equally specific assertions that disagree become `ambiguous`, with their
+original evidence retained; they never become a union of countries. A complete
+set excludes only a known associated country outside that set. Explicit
+uncertainty, conflicting evidence and unknown GeoLite country do not invent a
+geographic discrepancy. None of these decisions changes `non_quality`.
+
+The normalized country assertion is reviewed policy input, not automatically
+extracted from the snapshot. Review must establish that the snapshot supports
+the precise prefix and complete country set or uncertainty. The builder checks
+its bytes, freshness and registration binding; it cannot establish geographic
+truth from a digest. For example, [AWS's prefix geofeed](https://docs.aws.amazon.com/vpc/latest/userguide/aws-ip-ranges.html)
+accounts for Local Zones; parent-region names alone do not. AWS's documented
+[`GLOBAL` ranges](https://docs.aws.amazon.com/vpc/latest/userguide/aws-ip-syntax.html)
+can originate in multiple locations. Azure's
+[whole-cloud service tags](https://learn.microsoft.com/en-us/azure/virtual-network/service-tags-overview)
+do not identify one country. [RFC 8805](https://datatracker.ietf.org/doc/html/rfc8805#section-3)
+requires authority and accuracy review and recommends periodic refresh.
+No organization-wide or country-wide waiver follows from these documents.
+
+`classifier_version: 1` continues to identify the explicit-boolean record
+format understood by existing readers. Only refined records additionally carry
+`country_policy_version: 2`, `country_evidence_state`, `credible_country_codes`
+and `country_evidence`. They retain raw `registration_mismatch` and ownership
+provenance. Existing readers consume the final `risk`/`non_quality` flags and
+skip additive evidence; actual future record format version 2 remains rejected.
+The manifest versions country policy and binds all source snapshots separately.
+This compatibility does not authorize publication: actual provider binding,
+source review and shadow membership review are still required.
+
 ## Verification and shadow review
 
 Run the release-catalog controls against the exact config artifact:

@@ -1,5 +1,9 @@
 # IP database release refresh
 
+The release runner builds and runs this tool natively on macOS or Linux.
+Windows is currently unsupported by its Server dependency: the process log
+scrubber uses Unix file descriptors and descriptor duplication.
+
 `arindbctl refresh` downloads GeoLite2-City first, then ARIN organization and
 network records, and builds one new bundle containing `mmdb/` and `arindb/`.
 The bundle is published only after both databases validate. Existing output
