@@ -6,6 +6,7 @@ import (
 	// "errors"
 	"crypto/sha256"
 	"fmt"
+	"iter"
 	// "io"
 	"net"
 	"net/netip"
@@ -260,6 +261,62 @@ func openIpDb(path string) (*mmdb.Reader, schemaType) {
 		panic(fmt.Errorf("ip database %s has type \"%s\"; only \"%s\" is supported", path, databaseType, schemaTypeGeoLite2City))
 	}
 	return db, schemaTypeGeoLite2City
+}
+
+// An explicitly selected GeoLite2 file. Build tools use this reader so their
+// country correlation shares the runtime decoder without changing global config.
+// Concurrent lookups are safe; Close requires all readers to have stopped.
+type IpInfoDatabase struct {
+	db *mmdb.Reader
+}
+
+// Opens a GeoLite2-City file and validates its complete search tree/data section.
+func OpenIpInfoDatabase(path string) (*IpInfoDatabase, error) {
+	db, err := mmdb.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	if schemaType(db.Metadata.DatabaseType) != schemaTypeGeoLite2City {
+		db.Close()
+		return nil, fmt.Errorf("expected GeoLite2-City database, got %q", db.Metadata.DatabaseType)
+	}
+	if err := db.Verify(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("invalid GeoLite2 database: %w", err)
+	}
+	return &IpInfoDatabase{db: db}, nil
+}
+
+// Returns the provider's build time, independent of when the file was downloaded.
+func (self *IpInfoDatabase) BuildTime() time.Time { return self.db.Metadata.BuildTime() }
+
+// Closes the explicitly owned file; it never closes the process-wide runtime DB.
+func (self *IpInfoDatabase) Close() error { return self.db.Close() }
+
+// Reads the selected source without deployment-specific IP overrides.
+func (self *IpInfoDatabase) GetIpInfo(addr netip.Addr) (*IpInfo, error) {
+	return lookupIpInfo(self.db, schemaTypeGeoLite2City, addr.Unmap())
+}
+
+// Partitions a source prefix at GeoLite2 boundaries, including unknown regions.
+// A containing GeoLite2 range is clipped to the requested prefix. This prevents
+// assigning an entire ARIN allocation the country of its first address.
+func (self *IpInfoDatabase) NetworksWithin(prefix netip.Prefix) iter.Seq2[netip.Prefix, error] {
+	return func(yield func(netip.Prefix, error) bool) {
+		for result := range self.db.NetworksWithin(prefix, mmdb.IncludeNetworksWithoutData()) {
+			if err := result.Err(); err != nil {
+				yield(netip.Prefix{}, err)
+				return
+			}
+			network := result.Prefix()
+			if network.Bits() < prefix.Bits() {
+				network = prefix.Masked()
+			}
+			if !yield(network, nil) {
+				return
+			}
+		}
+	}
 }
 
 type IpInfo struct {
@@ -613,6 +670,10 @@ var arinDb = sync.OnceValues(func() (*mmdb.Reader, schemaType) {
 	if err != nil {
 		panic(err)
 	}
+	if schemaType(db.Metadata.DatabaseType) != schemaTypeArinDb {
+		db.Close()
+		panic(fmt.Errorf("expected ARIN database, got %q", db.Metadata.DatabaseType))
+	}
 
 	return db, schemaType(db.Metadata.DatabaseType)
 })
@@ -620,6 +681,23 @@ var arinDb = sync.OnceValues(func() (*mmdb.Reader, schemaType) {
 type ArinInfo struct {
 	schemaType      schemaType
 	OrgCountryCodes []string
+	// Explicit exceptions. A successful lookup without a record has neither.
+	Risk              bool
+	NonQuality        bool
+	ClassifierVersion uint32
+	// Metadata of the database actually queried, even when no record matched.
+	// Explicit IP overrides do not query a database and retain zero here.
+	DatabaseBuildEpoch int64
+}
+
+// Legacy records list parent registrations first and the direct owner last.
+// Unknown countries and absent records do not create a risk exception.
+func arinRegistrationRisk(countries []string, associatedCountry string) bool {
+	if len(countries) == 0 || associatedCountry == "" {
+		return false
+	}
+	registeredCountry := strings.ToLower(strings.TrimSpace(countries[len(countries)-1]))
+	return registeredCountry != "" && registeredCountry != strings.ToLower(associatedCountry)
 }
 
 func (self *ArinInfo) UnmarshalMaxMindDB(d *mmdbdata.Decoder) error {
@@ -642,6 +720,12 @@ func (self *ArinInfo) unmarshalArinDb(d *mmdbdata.Decoder) error {
 		}
 
 		switch string(key) {
+		case "risk":
+			self.Risk, err = d.ReadBool()
+		case "non_quality":
+			self.NonQuality, err = d.ReadBool()
+		case "classifier_version":
+			self.ClassifierVersion, err = d.ReadUint32()
 		case "org_country_codes":
 			iter, n, err := d.ReadSlice()
 			if err != nil {
@@ -662,8 +746,14 @@ func (self *ArinInfo) unmarshalArinDb(d *mmdbdata.Decoder) error {
 				return err
 			}
 		}
+		if err != nil {
+			return err
+		}
 	}
 
+	if self.ClassifierVersion > 1 {
+		return fmt.Errorf("unsupported ARIN classifier version: %d", self.ClassifierVersion)
+	}
 	return nil
 }
 
@@ -696,14 +786,26 @@ func GetArinInfo(addr netip.Addr) (*ArinInfo, error) {
 	}
 
 	arinDb, schemaType := arinDb()
+	return getArinInfoFromDatabase(arinDb, schemaType, addr)
+}
 
-	r := arinDb.Lookup(addr)
+// Bind successful no-record lookups to the same database generation as hits.
+func getArinInfoFromDatabase(db *mmdb.Reader, schema schemaType, addr netip.Addr) (*ArinInfo, error) {
+	r := db.Lookup(addr)
 	arinInfo := ArinInfo{
-		schemaType: schemaType,
+		schemaType:         schema,
+		DatabaseBuildEpoch: db.Metadata.BuildTime().Unix(),
 	}
 	err := r.Decode(&arinInfo)
 	if err != nil {
 		return nil, err
+	}
+	if arinInfo.ClassifierVersion == 0 && len(arinInfo.OrgCountryCodes) != 0 {
+		ipInfo, err := GetIpInfo(addr)
+		if err != nil {
+			return nil, err
+		}
+		arinInfo.Risk = arinRegistrationRisk(arinInfo.OrgCountryCodes, ipInfo.CountryCode)
 	}
 	return &arinInfo, nil
 }
