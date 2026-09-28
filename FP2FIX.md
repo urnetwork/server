@@ -536,11 +536,27 @@ containers solely because these orderly replacements take time.
    `restart: false`: first preserve the effective legacy policy files and
    overlay the validated IP databases plus the additive `qualityprobe.yml`
    catalog; expect existing services to restart.
-   Deploy Connect after the migrations, then verify exact-database-epoch
-   classification on all live provider connections and compare the raw
-   connection flags against current eligibility. Old Taskworker rollups do
-   not attest the new flags. GeoLite2 refresh can itself change country and
-   ranking inputs, so the resource phase is not behavior-neutral.
+   Deploy Connect after the migrations. Require the intended artifacts on
+   every expected enabled Connect slot and completion of old-generation
+   drains before accepting the fleet shadow. Require exact-database-epoch,
+   post-cutover, non-future lookup provenance on every live, located Public
+   provider connection other than a separately verified, reviewed operator
+   override. Keep the all-current-connection
+   denominator and separately reconcile missing-location ages, entirely
+   unlocated providers, mixed located/unlocated providers, and independently
+   verified operator overrides. Connection insertion precedes location lookup;
+   location failures retry without guaranteeing eventual success. Thus a
+   missing location is neither classified nor automatically nonserving when
+   another connection keeps that provider eligible. Epoch zero alone never
+   proves an override; effective config/site evidence is required. Unexplained
+   located provenance gaps and persistent missing-location gaps affecting
+   candidates must be resolved or explicitly reviewed, not hidden by a small
+   fresh cohort or an arbitrary coverage percentage. These are deployment
+   evidence checks, not additional serving gates. Compare raw connection flags
+   and conservative residual bounds against the current eligibility and country
+   distribution. Old Taskworker rollups do not attest the new flags. GeoLite2
+   refresh can itself change country and ranking inputs, so the resource phase
+   is not behavior-neutral.
    After reviewing that shadow, deploy the compatible API, then Taskworker,
    then the final URL-only config. New Taskworker defaults already activate
    the eight-worker-per-shard URL workflow under the legacy YAML; the final
