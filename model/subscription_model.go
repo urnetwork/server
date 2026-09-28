@@ -1602,7 +1602,8 @@ const contractExtenderInsertSql = `
 		transfer_contract.contract_id = $1
 `
 
-// Reserves positive bytes from the earliest available grants. Zero-byte
+// Ordinary payers reserve from the earliest available grants. The persisted
+// internal prober may use a bounded whole-request free grant first; zero-byte
 // contracts retain their existing earliest-grant anchor and priority.
 func createTransferEscrowInTx(
 	ctx context.Context,
@@ -1625,13 +1626,7 @@ func createTransferEscrowInTx(
 
 	contractId := server.NewId()
 
-	type escrow struct {
-		balanceId        server.Id
-		paid             bool
-		balanceByteCount ByteCount
-		startTime        time.Time
-		endTime          time.Time
-	}
+	type escrow = escrowTransferBalance
 
 	now := server.NowUtc()
 
@@ -1641,69 +1636,13 @@ func createTransferEscrowInTx(
 
 	// attempt to split up across remaining transfer balances
 
-	orderedTransferBalances := []*escrow{}
-	// Active describes remaining durable bytes, not the time window. Reuse
-	// this allocation's clock value so the existing index skips ineligible
-	// grants before row transfer, while Go keeps the same boundary check.
-	result, err := tx.Query(
-		ctx,
-		`
-            SELECT
-                balance_id,
-                paid,
-                balance_byte_count,
-                start_time,
-                end_time
-            FROM transfer_balance
-            WHERE
-                network_id = $1 AND
-                active = true AND
-                start_time <= $2 AND $2 < end_time
-        `,
-		payerNetworkId,
-		now,
-	)
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			transferBalance := &escrow{}
-			server.Raise(result.Scan(
-				&transferBalance.balanceId,
-				&transferBalance.paid,
-				&transferBalance.balanceByteCount,
-				&transferBalance.startTime,
-				&transferBalance.endTime,
-			))
-			if !transferBalance.startTime.After(now) && now.Before(transferBalance.endTime) {
-				orderedTransferBalances = append(orderedTransferBalances, transferBalance)
-			}
-		}
-	})
-
-	server.Redis(ctx, func(r server.RedisClient) {
-		netEscrowCmds := map[server.Id]*redis.StringCmd{}
-		// the net escrow keys use per-balance hash tags (different slots), so
-		// use a plain pipeline, which auto-routes per slot on cluster
-		_, pipelineErr := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-			for _, transferBalance := range orderedTransferBalances {
-				netEscrowCmds[transferBalance.balanceId] = pipe.Get(ctx, netEscrowKey(transferBalance.balanceId))
-			}
-			return nil
-		})
-		if pipelineErr != nil && !errors.Is(pipelineErr, redis.Nil) {
-			server.Raise(pipelineErr)
-		}
-		for _, transferBalance := range orderedTransferBalances {
-			netEscrowCmd := netEscrowCmds[transferBalance.balanceId]
-			netEscrowBalanceByteCount, commandErr := netEscrowCmd.Int64()
-			if errors.Is(commandErr, redis.Nil) {
-				netEscrowBalanceByteCount = 0
-			} else {
-				server.Raise(commandErr)
-			}
-			netEscrowBalanceByteCount = max(int64(0), netEscrowBalanceByteCount)
-			transferBalance.balanceByteCount = max(0, transferBalance.balanceByteCount-ByteCount(netEscrowBalanceByteCount))
-		}
-	})
+	// Reverse companions still use the payer-side client to spread independent
+	// prober allocations. Ordinary payers and zero-byte anchors keep their order.
+	payerClientId := sourceId
+	if sourceNetworkId != payerNetworkId {
+		payerClientId = destinationId
+	}
+	orderedTransferBalances := loadTransferEscrowBalances(ctx, tx, payerNetworkId, payerClientId, now, contractTransferByteCount)
 
 	slices.SortFunc(orderedTransferBalances, func(a *escrow, b *escrow) int {
 		if a.endTime.Before(b.endTime) {
