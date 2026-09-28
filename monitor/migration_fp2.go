@@ -18,7 +18,8 @@ const migrationFp2CatalogQuery = `fp2_column_artifact AS (
 	LEFT JOIN pg_attrdef AS defaults ON defaults.adrelid=attribute.attrelid AND defaults.adnum=attribute.attnum
 	WHERE namespace.nspname='public' AND attribute.attnum>0 AND NOT attribute.attisdropped
 	AND relation.relname IN ('network_client_location','network_client_location_reliability',
-		'provider_egress_health','provider_egress_health_history','provider_egress_probe_cycle','provider_egress_url_security')
+		'provider_egress_health','provider_egress_health_history','provider_egress_probe_cycle','provider_egress_url_security',
+		'provider_url_probe_run')
 )`
 
 // Expected fields are source-owned literals; SQL never incorporates live input.
@@ -56,7 +57,7 @@ func migrationFp2Index(table, name, keys, predicate string, unique bool) string 
 		predicateSql = "'" + strings.ReplaceAll(predicate, "'", "''") + "'"
 	}
 	return fmt.Sprintf(`EXISTS (SELECT 1 FROM index_artifact
-		WHERE table_name='%s' AND index_name='%s' AND definition='%s'
+		WHERE table_name = '%s' AND index_name = '%s' AND definition = '%s'
 		AND predicate_definition IS NOT DISTINCT FROM %s AND indisvalid AND indisready)`,
 		table, name, strings.ReplaceAll(definition, "'", "''"), predicateSql)
 }

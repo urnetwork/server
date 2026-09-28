@@ -15836,6 +15836,14 @@ This is the version-to-artifact contract checked by the probe:
 | 729 | Required zero-default policy-version column and version-one URL-success partial index, retaining the persistent URL marker/outcome obligations of 726 |
 | 730 | Nullable actual-lookup timestamp and required zero-default ARIN database epoch on connection location |
 | 731 | Valid/ready nonunique btree `network_client_location_reliability_arin_exceptions` on `(client_id)`, including `(arin_risk, arin_non_quality)`, with exactly `(arin_risk OR arin_non_quality)` as its predicate |
+| 732 | Durable issued URL receipts keyed by `(client_id, claim_ordinal)`, bounded failure strings, nullable raw/completion/receipt clocks, validated completion/count constraints, exact active/retention indexes, zero-default cycle counts, and the enabled, unconditional readiness trigger bound to its exact published body and update columns |
+| 733 | Valid/ready nonunique completed-priority index on `(completed_run_count, next_attempt_at, client_id)` with exactly `(eligible AND completed_priority_ready)` |
+| 734 | The same completed-priority index with `slot_id` preceding the count/due/ID keys |
+| 735 | Valid/ready waiting index on `(next_attempt_at, client_id)` with exactly `(eligible AND (NOT completed_priority_ready))` |
+| 736 | The same waiting index with `slot_id` preceding the due/ID keys |
+| 737 | Valid/ready expiry index on `(completed_next_expiry_at, client_id)` restricted to nonnull expiry clocks |
+| 738 | The same expiry index with `slot_id` preceding the expiry/ID keys |
+| 739 | Valid/ready nonunique `transfer_balance_active_network_end_start_id` on `(network_id, end_time, start_time, balance_id)` with exactly `active` and no included balance amounts |
 
 FP2's 722–731 contract separates schema readiness from live evidence. A numeric
 731 alone cannot prove exact partial-index predicates, generated-slot semantics,
@@ -15861,6 +15869,27 @@ use the reviewed append-only recovery path, never a hand-created substitute or
 an edited audit head. Catalog readiness does not prove index use, successful
 publication or cache freshness. The deterministic missing-731 coverage failure
 was a monitor catalog omission, not evidence that Main's index was absent.
+
+The 2026-09-28 merged-source gate found eight missing detector contracts for
+versions 732–739. That local failure established an observation gap, not missing
+Main schema. Their new guards execute the emitted catalog SQL against real
+locally migrated tables and controlled missing or changed artifacts, with
+rollback proving recovery. Receipt identity, clock bounds, zero/default state,
+active/retention predicates and readiness invalidation are separate obligations:
+a present table or trigger name cannot substitute for its operative shape.
+Index guards also reject invalid/not-ready builds, wrong key order, extra
+included columns and changed predicates. The trigger must run before row
+updates of both `next_attempt_at` and `eligible`; disabled, conditional, late,
+misbound and no-op lookalikes fail the same published-version guard.
+False-positive qualifiers: future artifacts remain pending until their
+recorded version, and canonical whitespace or a later additive column does
+not change the contract. False-negative qualifiers: absent/partial catalog
+evidence cannot clear the gate, and schema readiness says nothing about
+receipt-writer convergence, four hours of delivered completions, exact current
+rolling counts, planner work or grant availability. Keep those runtime gates
+independent; do not activate completed-run priority from migration success or
+an epoch's age alone. All catalog inspection remains read-only and safe when
+future relations or functions are absent.
 
 Version 721 adds explicit operator approval for a finalized, uncanceled staging
 winner; it does not approve production candidates or reopen winner selection.

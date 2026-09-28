@@ -1124,6 +1124,13 @@ func syntheticMigrationPartialIndexContracts() []syntheticMigrationPartialIndexC
 		{version: 652, table: "competition_round", name: "competition_round_one_active_staging", keys: "competition_id", predicate: "((staging = true) AND (canceled = false) AND (finalized_at IS NULL))", unique: true},
 		{version: 693, table: "location", name: "location_geoname_id", keys: "geoname_id", predicate: "(geoname_id IS NOT NULL)", unique: true},
 		{version: 731, table: "network_client_location_reliability", name: "network_client_location_reliability_arin_exceptions", keys: "client_id", include: "arin_risk, arin_non_quality", predicate: "(arin_risk OR arin_non_quality)"},
+		{version: 733, table: "provider_egress_probe_cycle", name: "provider_probe_cycle_completed_ready", keys: "completed_run_count, next_attempt_at, client_id", predicate: "(eligible AND completed_priority_ready)"},
+		{version: 734, table: "provider_egress_probe_cycle", name: "provider_probe_cycle_slot_completed_ready", keys: "slot_id, completed_run_count, next_attempt_at, client_id", predicate: "(eligible AND completed_priority_ready)"},
+		{version: 735, table: "provider_egress_probe_cycle", name: "provider_probe_cycle_completed_waiting", keys: "next_attempt_at, client_id", predicate: "(eligible AND (NOT completed_priority_ready))"},
+		{version: 736, table: "provider_egress_probe_cycle", name: "provider_probe_cycle_slot_completed_waiting", keys: "slot_id, next_attempt_at, client_id", predicate: "(eligible AND (NOT completed_priority_ready))"},
+		{version: 737, table: "provider_egress_probe_cycle", name: "provider_probe_cycle_completed_expiry", keys: "completed_next_expiry_at, client_id", predicate: "(completed_next_expiry_at IS NOT NULL)"},
+		{version: 738, table: "provider_egress_probe_cycle", name: "provider_probe_cycle_slot_completed_expiry", keys: "slot_id, completed_next_expiry_at, client_id", predicate: "(completed_next_expiry_at IS NOT NULL)"},
+		{version: 739, table: "transfer_balance", name: "transfer_balance_active_network_end_start_id", keys: "network_id, end_time, start_time, balance_id", predicate: "active"},
 	}
 }
 
