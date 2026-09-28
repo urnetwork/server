@@ -482,7 +482,7 @@ successful download does not prove that historical copies are safe.
 
 ## Implementation, tests, and rollout
 
-Current work checkpoints (2026-09-28 UTC; these are not production-completion claims):
+Current work checkpoints (2026-09-28 01:30 UTC; these are not production-completion claims):
 
 | Work item | Current boundary |
 | --- | --- |
@@ -490,12 +490,22 @@ Current work checkpoints (2026-09-28 UTC; these are not production-completion cl
 | Fixed-slot scheduler, rolling quota and query work | Implemented; deterministic mixed-outcome and 100k-provider/one-million-history controls pass |
 | Request-filter-aware fallback refill | Production-reader regression fails before the repair; bounded refill and adjacent request-filter/Redis-error controls pass after it |
 | Grant-selection CPU repair | Committed as `760bc1b8`; isolated 25-test race gate and current grant, settlement, lifecycle, controller, API, Connect and Taskworker owning partitions pass. Earlier whole-model baseline failure remains recorded; no whole-model pass is claimed |
-| GeoLite2/ARIN refresh and Vault inputs | Tooling committed as `cea4a9a3`; normal/race controls, real downloads and candidate runtime readback pass. Final artifacts are rebuilding from that committed source; publication pending |
-| Connection classification provenance | Synthetic database coverage control passes; live post-reconnect rollout verification pending |
-| URL workflow monitoring | Focused normal/race/vet controls pass; full monitor integration gate pending |
-| Commits, migrations and four-service rollout | Application release controls pass; checkpointing the FP2 workflow while complete monitor package gates run. Main remains at migration 721; migration to 730 and service rollout have not run |
+| GeoLite2/ARIN refresh and Vault inputs | Tooling `cea4a9a3`, paired resource publication Config `5313e94`; independent runtime readback passes. ConfigA deployed; all six reachable host samples mount the new resource bytes. ARIN database epoch is `1790556325`; per-process use requires connection provenance, not just file presence |
+| Connection classification provenance | Connect rollout is mixed. At 01:23 UTC, 362 of 132,191 current connections carried the exact new database epoch, covering 350 fully classified providers. This small rollout-biased cohort is not a fleet/country shadow acceptance |
+| URL workflow monitoring | Committed `850b3bb0`; full monitor normal (434.120s), race (485.007s), and vet pass. Observer promotion remains a separate controlled handoff |
+| Commits, migrations and four-service rollout | Core workflow committed `d479eccd`. Main migrated 721→730 at 01:07 UTC; the exact artifact probe passes. ConfigA is deployed; new Connect is published to all five blocks but actual replacement/drain is incomplete. API, Taskworker, and final ConfigB images are built, not yet deployed |
 | Main four-hour quota and app availability | Not established; requires live accepted-history and request-local verification |
 | Long-running evidence retention/replay safety | Required before sustained fleet ramp; no production cleanup authorized or performed |
+
+Rollout observation: the installed Warpctl serializes replacement/start/readiness
+and old-container drain across each host's Connect groups. A ConfigA rollout can
+capture the old image before waiting for that lock, then start it after the new
+Connect version has been published. Read-only journals confirmed successful pulls,
+ready replacement containers, and natural drains taking roughly 5–14 minutes.
+A recent container start or a successful deploy-command exit is therefore not
+proof of the requested executable version. Continue exact image/config and
+remaining-generation checks; do not suppress pending version drift or force-stop
+containers solely because these orderly replacements take time.
 
 1. Record a read-only baseline of eligibility counts by rejection reason,
    quality/speed/online membership, request-specific US and Best Available
