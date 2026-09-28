@@ -77,6 +77,7 @@ const (
 type clientScoreRedisSet struct {
 	key   string
 	value []byte
+	flush bool
 }
 
 type clientScoreTargetManifestDocument struct {
@@ -123,6 +124,14 @@ type clientScoreExportPayload struct {
 	counts       []int
 	encodeSample func(int) []byte
 	facets       map[ipFamilyFacet]clientScoreFacetPayload
+	nativeFacets map[ipFamilyFacet]clientScoreFacetPayload
+}
+
+// Native publication has its own commit boundary; legacy aliases and online
+// union keys remain compatible with readers deployed before this schema.
+type clientScoreNativeFanout struct {
+	publish func(server.Id, map[ipFamilyFacet]clientScoreFacetPayload) error
+	alias   func(server.Id) error
 }
 
 type clientScoreTargetEncode func(map[server.Id]*ClientScore) clientScoreExportPayload
@@ -200,6 +209,7 @@ func emitClientScoreTargetFanout(
 	writeLegacyUnchanged bool,
 	writeUnfacetedPayload bool,
 	emit func(clientScoreRedisSet) error,
+	nativeFanouts ...*clientScoreNativeFanout,
 ) error {
 	return emitClientScoreTargetFanoutWithMetrics(
 		clientLocationIds,
@@ -211,6 +221,7 @@ func emitClientScoreTargetFanout(
 		writeUnfacetedPayload,
 		emit,
 		updateClientScoresPhaseMetrics,
+		nativeFanouts...,
 	)
 }
 
@@ -224,7 +235,12 @@ func emitClientScoreTargetFanoutWithMetrics(
 	writeUnfacetedPayload bool,
 	emit func(clientScoreRedisSet) error,
 	metrics *updateClientScoresPhaseMetricSet,
+	nativeFanouts ...*clientScoreNativeFanout,
 ) error {
+	var nativeFanout *clientScoreNativeFanout
+	if 0 < len(nativeFanouts) {
+		nativeFanout = nativeFanouts[0]
+	}
 	targetSpan := metrics.start(updateClientScoresPhaseTargetExport)
 	defer targetSpan.finish()
 	metrics.addWork(updateClientScoresPhaseTargetExport, 1, 0)
@@ -313,12 +329,25 @@ func emitClientScoreTargetFanoutWithMetrics(
 	if err := emitPayload(baselineAndLegacyCallers, payload); err != nil {
 		return err
 	}
+	if nativeFanout != nil {
+		if err := emit(clientScoreRedisSet{flush: true}); err != nil {
+			return err
+		}
+		if err := nativeFanout.publish(server.Id{}, payload.nativeFacets); err != nil {
+			return err
+		}
+	}
 	for _, clientLocationId := range unchangedClientLocationIds {
 		if err := emit(clientScoreRedisSet{
 			key:   keys.alias(clientLocationId),
 			value: []byte(clientScoreAliasBaselineValue),
 		}); err != nil {
 			return err
+		}
+		if nativeFanout != nil {
+			if err := nativeFanout.alias(clientLocationId); err != nil {
+				return err
+			}
 		}
 	}
 	for _, clientLocationId := range changedClientLocationIds {
@@ -327,8 +356,17 @@ func emitClientScoreTargetFanoutWithMetrics(
 			excludeLocationNetworkIds[clientLocationId],
 			metrics,
 		)
-		if err := emitPayload([]server.Id{clientLocationId}, encode(activeClientScores)); err != nil {
+		payload := encode(activeClientScores)
+		if err := emitPayload([]server.Id{clientLocationId}, payload); err != nil {
 			return err
+		}
+		if nativeFanout != nil {
+			if err := emit(clientScoreRedisSet{flush: true}); err != nil {
+				return err
+			}
+			if err := nativeFanout.publish(clientLocationId, payload.nativeFacets); err != nil {
+				return err
+			}
 		}
 		if err := emit(clientScoreRedisSet{
 			key:   keys.alias(clientLocationId),
@@ -449,6 +487,14 @@ func runClientScoreExportStream(
 		return nil
 	}
 	emit := func(set clientScoreRedisSet) error {
+		// Native snapshot publication has its own bounded stream. Release the
+		// legacy tail before entering it, never retain two payload budgets.
+		if set.flush {
+			if set.key != "" || len(set.value) != 0 {
+				return fmt.Errorf("client score export barrier contains a payload")
+			}
+			return flush()
+		}
 		setBytes := len(set.key) + len(set.value)
 		// Count and bytes are independent guards. Encoded samples vary with
 		// provider population, so a 512-command batch alone is not a bounded
@@ -5039,6 +5085,7 @@ func clientScoreLocationGroupFacetSampleKey(forceMinimum bool, rankMode RankMode
 }
 
 func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (returnErr error) {
+	nativeSourceStartedAt := server.NowUtc()
 	aliasesReady, err := clientScoreAliasReady(ctx)
 	if err != nil {
 		return fmt.Errorf("read client score alias migration state: %w", err)
@@ -5644,6 +5691,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			migrateClientScore(clientScore)
 		}
 	}
+	nativeCensus := newClientScoreNativeCensus(nativeSourceStartedAt, server.NowUtc(), countFilter.healthCounts, locationClientScores, locationGroupClientScores)
 	// splitClientScoreSamples shuffles and buckets one list of scores into
 	// ClientScoreSampleCount-sized samples. Encode on demand so 48 parallel
 	// caller-location exporters retain at most one sample each, rather than
@@ -5682,9 +5730,14 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		defer mapSpan.finish()
 		clientScores := []*ClientScore{}
 		facetClientScores := map[ipFamilyFacet][]*ClientScore{}
+		nativeFacetClientScores := map[ipFamilyFacet][]*ClientScore{}
 		publicCount := 0
 		publicNetReliabilityWeight := float64(0)
 		for _, clientScore := range s {
+			if !forceMinimum && clientScore.PassesMinimums[rankMode] {
+				facet := clientScore.ipFamilyFacet()
+				nativeFacetClientScores[facet] = append(nativeFacetClientScores[facet], clientScore)
+			}
 			// an online provider sits in both modes' samples, native to
 			// neither: FindProviders2 borrows from it last
 			if clientScore.PassesMinimums[rankMode] || clientScore.Online || forceMinimum {
@@ -5717,6 +5770,14 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		updateClientScoresPhaseMetrics.addWork(updateClientScoresPhaseTargetMap, len(s), 0)
 		mapSpan.finish()
 		payload.countsBytes, payload.counts, payload.encodeSample = splitClientScoreSamples(clientScores)
+		if !forceMinimum {
+			payload.nativeFacets = map[ipFamilyFacet]clientScoreFacetPayload{}
+			for _, facet := range ipFamilyFacets {
+				nativePayload := clientScoreFacetPayload{}
+				nativePayload.countsBytes, nativePayload.counts, nativePayload.encodeSample = splitClientScoreSamples(nativeFacetClientScores[facet])
+				payload.nativeFacets[facet] = nativePayload
+			}
+		}
 		// every facet, an empty one included: see the key layout comment
 		for _, facet := range ipFamilyFacets {
 			facetPayload := clientScoreFacetPayload{}
@@ -5872,6 +5933,17 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 											len(clientLocationIds),
 										)
 									}
+									var nativeFanout *clientScoreNativeFanout
+									if !forceMinimum {
+										nativeFanout = &clientScoreNativeFanout{
+											publish: func(callerId server.Id, facets map[ipFamilyFacet]clientScoreFacetPayload) error {
+												return writeClientScoreNativeSnapshot(ctx, r, clientScoreNativeKey(keys.counts(callerId)), ttl, facets, nativeCensus)
+											},
+											alias: func(callerId server.Id) error {
+												return r.Set(ctx, clientScoreNativeKey(keys.counts(callerId)), clientScoreNativeBaseline, ttl).Err()
+											},
+										}
+									}
 									if err := emitClientScoreTargetFanout(
 										clientLocationIds,
 										target.clientScores,
@@ -5883,6 +5955,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 										writeLegacyUnchanged,
 										writeUnfacetedPayload,
 										emit,
+										nativeFanout,
 									); err != nil {
 										return err
 									}
@@ -5921,19 +5994,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	wg.Wait()
 	close(returnErrs)
 
-	func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case err, ok := <-returnErrs:
-				if !ok {
-					return
-				}
-				returnErr = errors.Join(returnErr, err)
-			}
-		}
-	}()
+	returnErr = finishClientScoreExport(ctx, returnErrs)
 
 	if returnErr == nil {
 		if writeLegacyUnchanged {
@@ -5952,6 +6013,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			glog.Infof("[nclm]client score ip family facets ready; un-faceted payloads will expire naturally\n")
 		}
 		glog.Infof("[nclm]client score provider eligibility ready; derived and inactive clients excluded\n")
+		if err := writeClientScoreNativeCensus(ctx, nativeCensus, ttl); err != nil {
+			return fmt.Errorf("publish native client score census: %w", err)
+		}
 		glog.Infof(
 			"[nclm]update %d client locations x %d location scores, %d location group scores\n",
 			len(clientLocationIds),
@@ -6072,6 +6136,7 @@ func loadClientScoresWithCursor(
 		// then the un-faceted fallback group
 		groupCount := len(facets) + 1
 		groupSampleKeyCounts := make([]map[string]int, groupCount)
+		sourceIncomplete := false
 		for i := range groupSampleKeyCounts {
 			groupSampleKeyCounts[i] = map[string]int{}
 		}
@@ -6102,6 +6167,7 @@ func loadClientScoresWithCursor(
 			sampleKey func(effectiveClientLocationId server.Id, index int) string,
 		) {
 			faceted := false
+			facetCount := 0
 			for facetIndex, facet := range facets {
 				effectiveClientLocationId, counts, ok := decodeCounts(read.alias, read.facets[facet])
 				if returnErr != nil {
@@ -6111,16 +6177,21 @@ func loadClientScoresWithCursor(
 					continue
 				}
 				faceted = true
+				facetCount++
 				for i, count := range counts {
 					groupSampleKeyCounts[facetIndex][facetSampleKey(effectiveClientLocationId, facet, i)] = count
 				}
 			}
 			if faceted {
+				if facetCount != len(facets) {
+					sourceIncomplete = true
+				}
 				return
 			}
 			// written before the facets existed: fall back to the un-faceted buckets
 			effectiveClientLocationId, counts, ok := decodeCounts(read.alias, read.unfacted)
 			if returnErr != nil || !ok {
+				sourceIncomplete = true
 				if returnErr == nil && observation != nil {
 					observation.missingTargets++
 				}
@@ -6161,6 +6232,7 @@ func loadClientScoresWithCursor(
 		}
 
 		cursor = newClientScoreCursor(groupSampleKeyCounts, observation)
+		cursor.sourceIncomplete = sourceIncomplete
 		clientScores, returnErr = cursor.readWithClient(ctx, r, n)
 	})
 
@@ -6367,7 +6439,7 @@ func FindProviders2(
 
 		observation.enter("load_primary")
 		loadStartTime := time.Now()
-		clientScores, primaryCursor, err := loadClientScoresWithCursor(
+		clientScores, primaryCursor, err := loadPreferredClientScoresWithCursor(
 			findProviders2.ForceMinimum,
 			rankMode,
 			session.Ctx,
@@ -6379,7 +6451,19 @@ func FindProviders2(
 			&observation.load,
 		)
 		if err != nil {
-			return nil, err
+			if session.Ctx.Err() != nil || findProviders2.ForceMinimum {
+				return nil, err
+			}
+			// Native cache availability is not a security decision. Preserve
+			// validated pages and try the next same-target bucket; diagnostics
+			// keep this unknown source distinct from proven exhaustion.
+			observation.backfillUnavailable = true
+			if primaryCursor != nil {
+				primaryCursor.sourceIncomplete = true
+			}
+		}
+		if clientScores == nil {
+			clientScores = map[server.Id]*ClientScore{}
 		}
 		observation.loaded += len(clientScores)
 		loadEndTime := time.Now()
@@ -6505,26 +6589,46 @@ func FindProviders2(
 			}
 		}
 		filterPool(clientScores, rankMode, hardExcludedClientIds)
+		if primaryCursor != nil && primaryCursor.nativeOnly {
+			retainNativeClientScores(clientScores, rankMode)
+		}
 
-		// Refill only a request-filtered shortfall, using unread pages from
-		// the same target and facet order. The existing exclusion allowance
-		// bounds total rows across all reads, including missing or duplicate
-		// rows; neither a refill nor the other mode resets that mode's cursor.
-		refillPool := func(scores, priorScores map[server.Id]*ClientScore, mode RankMode, cursor *clientScoreCursor, knownHardExclusions map[server.Id]bool, backfill bool) error {
-			for cursor.hasMore() {
+		// Native quota counts only native members after every request filter.
+		// Materialized native pages use bounded batches until quota or true
+		// exhaustion; online and pre-schema union reads keep their finite row
+		// allowance. Reaching that legacy limit is unknown, not exhaustion;
+		// degraded fallback still preserves availability and reports the gap.
+		refillPool := func(scores, priorScores map[server.Id]*ClientScore, mode RankMode, cursor *clientScoreCursor, knownHardExclusions map[server.Id]bool, backfill, native bool) error {
+			if count <= 0 {
+				return nil
+			}
+			uniqueCount := func() int {
 				uniqueCount := 0
-				for clientId := range scores {
+				for clientId, score := range scores {
+					if !findProviders2.ForceMinimum && ((native && !score.PassesMinimums[mode]) || (!native && !score.Online)) {
+						continue
+					}
 					if priorScores[clientId] == nil {
 						uniqueCount++
 					}
 				}
-				if count <= len(priorScores)+uniqueCount {
+				return uniqueCount
+			}
+			unknown := cursor == nil || cursor.sourceIncomplete || 0 < cursor.missingPages
+			for cursor.hasMore() {
+				if count <= len(priorScores)+uniqueCount() {
 					break
 				}
-				discardedRows := max(0, cursor.readCount-uniqueCount)
+				discardedRows := max(0, cursor.readCount-uniqueCount())
 				limit := findProviders2RefillLoadCount(count, len(excludeFinalDestinations()), discardedRows)
 				additionalRows := limit - cursor.readCount
+				if native && cursor.nativeOnly {
+					additionalRows = loadCount
+				}
 				if additionalRows <= 0 {
+					if native {
+						unknown = true
+					}
 					break
 				}
 				if backfill {
@@ -6534,13 +6638,13 @@ func FindProviders2(
 				}
 				extraScores, err := cursor.read(session.Ctx, additionalRows)
 				if err != nil {
-					if !backfill {
+					if session.Ctx.Err() != nil || (!native && !backfill) {
 						return err
 					}
-					observation.backfillUnavailable = true
-					glog.Infof("[nclm]findproviders2 could not refill the %s set; answering from already validated samples (%s)\n", mode, err)
-					break
+					unknown = true
 				}
+				readFailed := err != nil
+				unknown = unknown || cursor.sourceIncomplete || 0 < cursor.missingPages
 				observation.loaded += len(extraScores)
 				unreadClientIds := []server.Id{}
 				for clientId := range extraScores {
@@ -6560,15 +6664,33 @@ func FindProviders2(
 					knownHardExclusions[clientId] = true
 				}
 				filterPool(extraScores, mode, knownHardExclusions)
+				if native && cursor.nativeOnly {
+					retainNativeClientScores(extraScores, mode)
+				}
 				for clientId, clientScore := range extraScores {
 					if scores[clientId] == nil {
 						scores[clientId] = clientScore
 					}
 				}
+				if readFailed {
+					break
+				}
+			}
+			if unknown {
+				observation.backfillUnavailable = true
+			}
+			if native {
+				outcome := "exhausted"
+				if unknown {
+					outcome = "unavailable"
+				} else if count <= len(priorScores)+uniqueCount() {
+					outcome = "quota"
+				}
+				observation.nativeSource(mode, backfill, outcome)
 			}
 			return nil
 		}
-		if err := refillPool(clientScores, nil, rankMode, primaryCursor, hardExcludedClientIds, false); err != nil {
+		if err := refillPool(clientScores, nil, rankMode, primaryCursor, hardExcludedClientIds, false, !findProviders2.ForceMinimum); err != nil {
 			return nil, err
 		}
 		observation.primaryClientScores = clientScores
@@ -6719,7 +6841,7 @@ func FindProviders2(
 				backfillTierOffset := settingsSnapshot.settings.BackfillTierOffset
 
 				observation.enter("load_backfill")
-				otherClientScores, otherCursor, err := loadClientScoresWithCursor(
+				otherClientScores, otherCursor, err := loadPreferredClientScoresWithCursor(
 					false,
 					otherRankMode,
 					session.Ctx,
@@ -6731,10 +6853,16 @@ func FindProviders2(
 					&observation.load,
 				)
 				if err != nil {
+					if session.Ctx.Err() != nil {
+						return nil, err
+					}
 					observation.backfillUnavailable = true
-					glog.Infof("[nclm]findproviders2 could not read the %s set to backfill %s; answering from the %s sample alone (%s)\n", otherRankMode, rankMode, rankMode, err)
+					if otherCursor != nil {
+						otherCursor.sourceIncomplete = true
+					}
+				}
+				if otherClientScores == nil {
 					otherClientScores = map[server.Id]*ClientScore{}
-					otherCursor = nil
 				}
 				observation.loaded += len(otherClientScores)
 				// the exclusions of the providers this call has not read yet
@@ -6756,7 +6884,10 @@ func FindProviders2(
 					otherHardExcludedClientIds[clientId] = true
 				}
 				filterPool(otherClientScores, otherRankMode, otherHardExcludedClientIds)
-				if err := refillPool(otherClientScores, clientScores, otherRankMode, otherCursor, otherHardExcludedClientIds, true); err != nil {
+				if otherCursor != nil && otherCursor.nativeOnly {
+					retainNativeClientScores(otherClientScores, otherRankMode)
+				}
+				if err := refillPool(otherClientScores, nativeClientScores, otherRankMode, otherCursor, otherHardExcludedClientIds, true, true); err != nil {
 					return nil, err
 				}
 				observation.backfillClientScores = otherClientScores
@@ -6778,29 +6909,77 @@ func FindProviders2(
 					borrow(clientScore, otherRankMode, clientScore.Tiers[otherRankMode]+backfillTierOffset)
 				}
 
-				// The online bucket contains both already-filtered samples. The
-				// pages are drawn independently, so either can hold usable online
-				// providers absent from the other. Keep the requested mode's copy
-				// on overlap, and never repeat a previously selected tier when
-				// cache generations disagree about a provider's online flag.
-				answeredClientIds := map[server.Id]bool{}
-				for _, provider := range providers {
-					answeredClientIds[provider.ClientId] = true
-				}
-				onlineClientScores := map[server.Id]*ClientScore{}
-				for _, sample := range []map[server.Id]*ClientScore{clientScores, otherClientScores} {
-					for clientId, clientScore := range sample {
-						if answeredClientIds[clientId] {
-							continue
-						}
-						if _, held := onlineClientScores[clientId]; held {
-							continue
-						}
-						onlineClientScores[clientId] = clientScore
+				// Healthy native sources are exhausted before online fallback.
+				// An unavailable source instead uses degraded fallback, keeping
+				// its explicit unknown diagnosis without blocking connectivity.
+				if 0 < remainingCount() {
+					answeredClientScores := map[server.Id]*ClientScore{}
+					for _, clientId := range clientIds {
+						answeredClientScores[clientId] = clientScores[clientId]
 					}
-				}
-				for _, clientId := range selectOnline(onlineClientScores, remainingCount()) {
-					borrow(onlineClientScores[clientId], RankModeSpeed, 2*backfillTierOffset)
+					for _, clientId := range borrowedClientIds {
+						answeredClientScores[clientId] = otherClientScores[clientId]
+					}
+					onlineClientScores := map[server.Id]*ClientScore{}
+					for _, source := range []struct {
+						mode   RankMode
+						scores map[server.Id]*ClientScore
+						cursor *clientScoreCursor
+					}{
+						{mode: rankMode, scores: clientScores, cursor: primaryCursor},
+						{mode: otherRankMode, scores: otherClientScores, cursor: otherCursor},
+					} {
+						pool, cursor := source.scores, source.cursor
+						if cursor == nil || cursor.nativeOnly {
+							observation.enter("load_backfill")
+							var err error
+							pool, cursor, err = loadClientScoresWithCursor(false, source.mode, session.Ctx, locationIds, locationGroupIds, clientLocationId, loadCount, facets, &observation.load)
+							if err != nil {
+								if session.Ctx.Err() != nil {
+									return nil, err
+								}
+								observation.backfillUnavailable = true
+								if cursor != nil {
+									cursor.sourceIncomplete = true
+								}
+							}
+							if pool == nil {
+								pool = map[server.Id]*ClientScore{}
+							}
+							observation.loaded += len(pool)
+							unreadClientIds := []server.Id{}
+							for clientId := range pool {
+								if !exclusionReadClientIds[clientId] {
+									unreadClientIds = append(unreadClientIds, clientId)
+								}
+							}
+							observation.enter("hard_exclusions")
+							extraHardExclusions, err := getProviderHardExclusions(session.Ctx, unreadClientIds)
+							if err != nil {
+								return nil, err
+							}
+							for _, clientId := range unreadClientIds {
+								exclusionReadClientIds[clientId] = true
+							}
+							for clientId := range extraHardExclusions {
+								otherHardExcludedClientIds[clientId] = true
+							}
+							filterPool(pool, source.mode, otherHardExcludedClientIds)
+						}
+						priorScores := maps.Clone(answeredClientScores)
+						maps.Copy(priorScores, onlineClientScores)
+						if err := refillPool(pool, priorScores, source.mode, cursor, otherHardExcludedClientIds, true, false); err != nil {
+							return nil, err
+						}
+						for clientId, clientScore := range pool {
+							if clientScore.Online && answeredClientScores[clientId] == nil && onlineClientScores[clientId] == nil {
+								onlineClientScores[clientId] = clientScore
+							}
+						}
+					}
+					for _, clientId := range selectOnline(onlineClientScores, remainingCount()) {
+						borrow(onlineClientScores[clientId], RankModeSpeed, 2*backfillTierOffset)
+					}
 				}
 			}
 			chosenClientIds = append(chosenClientIds, borrowedClientIds...)

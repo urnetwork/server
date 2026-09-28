@@ -943,12 +943,20 @@ func TestGetProviderEgressLocationDueOrderingIsStableAcrossLimits(t *testing.T) 
 				ClientId: clientId, LocationId: city.LocationId,
 				CountryCode: "us", ObservedAt: observedAt,
 			})
+			// This is a historical observation, not a verdict-triggered
+			// backdate written after the new health below. The ordinary writer
+			// stamps real insertion time, so arrange the historical write clock
+			// explicitly rather than accidentally simulating a later quorum.
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_location
+					SET update_time=observed_at WHERE client_id=$1`, clientId))
+			})
 		}
 		healthTimes := map[server.Id]time.Time{
-			// Both crossedDeadlines lanes are due, but its 25-hour-old
+			// Both crossedDeadlines lanes are due, but its expired
 			// health expires before its 90-hour-old location. The merge and
 			// monitor category must follow that earlier absolute deadline.
-			crossedDeadlines: now.Add(-25 * time.Hour),
+			crossedDeadlines: now.Add(-ProviderEgressHealthMaxAge - time.Hour),
 			overlap:          now.Add(-ProviderEgressHealthMaxAge + 5*time.Minute),
 			healthFirst:      now.Add(-ProviderEgressHealthMaxAge + 10*time.Minute),
 			healthTie:        now.Add(-ProviderEgressHealthMaxAge + 30*time.Minute),
@@ -1042,6 +1050,18 @@ func TestGetProviderEgressLocationDueOrderingIsStableAcrossLimits(t *testing.T) 
 			if diagnostics != wantDiagnostics {
 				t.Errorf("limit %d: selected diagnostics = %+v, want %+v", limit, diagnostics, wantDiagnostics)
 			}
+		}
+
+		// The opposite chronology is a real recheck request: fresh health
+		// must not suppress a later client-verdict backdate. This also keeps
+		// the historical-clock correction from weakening that exception.
+		if !ReprioritiseProviderEgressProbe(ctx, fresh, now) {
+			t.Fatal("fresh historical control did not accept a later verdict backdate")
+		}
+		afterVerdict := GetProviderEgressLocationDue(ctx, minObservedAt, minAttemptAt, 100)
+		if len(afterVerdict) != len(expected)+1 || !slices.Contains(afterVerdict, fresh) ||
+			slices.Contains(afterVerdict, locationSecond) || slices.Contains(afterVerdict, locationTie) {
+			t.Fatal("later verdict backdate was lost or ordinary historical locations became forced rechecks")
 		}
 	})
 }

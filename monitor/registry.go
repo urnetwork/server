@@ -75,6 +75,7 @@ func NewSignals() []Signal {
 		NewWorkerCapSignal(),
 		NewCircleAdmissionSignal(),
 		NewReliabilityDriftSignal(),
+		NewReliabilityFreshnessSignal(),
 		NewConnectionOrphansSignal(),
 		NewMissingOriginSignal(),
 		NewOriginWaitSignal(),

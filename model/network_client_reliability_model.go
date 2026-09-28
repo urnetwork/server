@@ -1121,11 +1121,16 @@ type reliabilityRunningLookback struct {
 // networkWindowLookbackIndex). One client_reliability_running_window row is
 // kept per entry.
 func reliabilityRunningLookbacks() []reliabilityRunningLookback {
+	lookbacks := clientReliabilityRunningLookbacks()
+	return append(lookbacks, reliabilityRunningLookback{lookbackIndex: networkWindowLookbackIndex, lookback: NetworkWindowLookback})
+}
+
+// Client admission and ranking depend only on these windows, not the seven-day network score.
+func clientReliabilityRunningLookbacks() []reliabilityRunningLookback {
 	lookbacks := make([]reliabilityRunningLookback, 0, len(ClientLookbacks)+1)
 	for lookbackIndex, lookback := range ClientLookbacks {
-		lookbacks = append(lookbacks, reliabilityRunningLookback{lookbackIndex, lookback})
+		lookbacks = append(lookbacks, reliabilityRunningLookback{lookbackIndex: lookbackIndex, lookback: lookback})
 	}
-	lookbacks = append(lookbacks, reliabilityRunningLookback{networkWindowLookbackIndex, NetworkWindowLookback})
 	return lookbacks
 }
 
@@ -1442,6 +1447,11 @@ func updateClientReliabilityRunningLookbackAtBoundsInTx(
 // transaction. The recurring task first calls the checkpointed wrapper below;
 // this in-transaction pass is then idempotent for the same maxTime.
 func UpdateClientReliabilityRunningInTx(tx server.PgTx, ctx context.Context, maxTime time.Time) {
+	updateClientReliabilityRunningInTx(tx, ctx, maxTime, reliabilityRunningLookbacks())
+}
+
+// Advance only the inputs consumed by this score writer, preserving its atomic transaction.
+func updateClientReliabilityRunningInTx(tx server.PgTx, ctx context.Context, maxTime time.Time, lookbacks []reliabilityRunningLookback) {
 	// End every window at the redis-rollup high-water mark (the SAME shift the
 	// score queries use), computed once and applied to all lookbacks so they
 	// share one max block.
@@ -1450,7 +1460,7 @@ func UpdateClientReliabilityRunningInTx(tx server.PgTx, ctx context.Context, max
 	newMax := baseMaxBlockNumber - shift
 	periodicReanchorAllowed := reliabilityRunningPeriodicReanchorAllowed(ctx, tx)
 
-	for _, lb := range reliabilityRunningLookbacks() {
+	for _, lb := range lookbacks {
 		newMin := maxTime.Add(-lb.lookback).UTC().UnixMilli()/int64(ReliabilityBlockDuration/time.Millisecond) - shift
 		updateClientReliabilityRunningLookbackAtBoundsInTx(
 			tx,
@@ -1504,6 +1514,20 @@ func UpdateClientReliabilityRunningCheckpointed(ctx context.Context, maxTime tim
 	updateClientReliabilityRunningCheckpointed(ctx, maxTime, reliabilityRunningLookbacks(), nil)
 }
 
+// Preserve completed client checkpoints on interruption, then publish all client scores atomically.
+// A later seven-day or network-window failure must not withhold these independent FP2 inputs.
+func UpdateClientReliabilityScoresCheckpointed(ctx context.Context, maxTime time.Time) {
+	updateClientReliabilityRunningCheckpointed(ctx, maxTime, clientReliabilityRunningLookbacks(), nil)
+	UpdateClientReliabilityScores(ctx, maxTime, false)
+}
+
+// Keep the long network checkpoint durable without repeating unrelated client maintenance.
+func UpdateNetworkReliabilityRunningCheckpointed(ctx context.Context, maxTime time.Time) {
+	updateClientReliabilityRunningCheckpointed(ctx, maxTime, []reliabilityRunningLookback{
+		{lookbackIndex: networkWindowLookbackIndex, lookback: NetworkWindowLookback},
+	}, nil)
+}
+
 // this should run regulalry to keep the client scores up to date
 func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, complete bool) {
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
@@ -1517,7 +1541,7 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 		// write each client score below from the running table joined to the
 		// query-time location. This replaces the per-run full-window re-scan of
 		// client_reliability with per-block incremental maintenance.
-		UpdateClientReliabilityRunningInTx(tx, ctx, maxTime)
+		updateClientReliabilityRunningInTx(tx, ctx, maxTime, clientReliabilityRunningLookbacks())
 
 		var shift int64
 		{
@@ -2247,7 +2271,9 @@ func UpdateNetworkReliabilityWindowScoresInTx(tx server.PgTx, ctx context.Contex
 	// advance the running per-(client, network-window) sums, then aggregate the
 	// per-(network, country) window score below from the running table joined to
 	// the query-time location. Replaces the per-run 7-day full-window re-scan.
-	UpdateClientReliabilityRunningInTx(tx, ctx, maxTime)
+	updateClientReliabilityRunningInTx(tx, ctx, maxTime, []reliabilityRunningLookback{
+		{lookbackIndex: networkWindowLookbackIndex, lookback: NetworkWindowLookback},
+	})
 
 	minBlockNumber := minTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 	maxBlockNumber := (maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)) + 1

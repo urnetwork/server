@@ -346,13 +346,14 @@ func TestGetProviderEgressProbeAttemptTally(t *testing.T) {
 	})
 }
 
-// The fleet view must not mistake the six-hour failure retry cadence for the
+// The fleet view must not mistake the failure retry cadence for the
 // current eligible population. This synthetic population exercises the exact
 // write-order and freshness boundaries used by the monitor query.
 func TestGetProviderEgressProbeFleetOutcomeTallyReconstructsEligibleState(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc()
+		currentAttemptAt := now.Add(-ProviderEgressProbeAttemptBackoff / 2)
 		location := &Location{
 			LocationType: LocationTypeCity,
 			City:         "Synthetic City",
@@ -390,14 +391,14 @@ func TestGetProviderEgressProbeFleetOutcomeTallyReconstructsEligibleState(t *tes
 			CountryCode: "zz", ObservedAt: now.Add(-2 * time.Hour),
 		})
 		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
-			ClientId: plainFailure, AttemptAt: now.Add(-time.Hour), ProbeFailure: "no_consensus",
+			ClientId: plainFailure, AttemptAt: currentAttemptAt, ProbeFailure: "no_consensus",
 		})
 		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
 			ClientId: currentFailure, LocationId: location.LocationId,
 			CountryCode: "zz", ObservedAt: now.Add(-2 * time.Hour),
 		})
 		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
-			ClientId: currentFailure, AttemptAt: now.Add(-time.Hour), ProbeFailure: "no_consensus",
+			ClientId: currentFailure, AttemptAt: currentAttemptAt, ProbeFailure: "no_consensus",
 		})
 		// Reprioritisation writes location.update_time without a successful
 		// probe. It must not make this current failure look healthy.
@@ -409,28 +410,28 @@ func TestGetProviderEgressProbeFleetOutcomeTallyReconstructsEligibleState(t *tes
 		// attempt report for that later success may itself have failed. Remain
 		// conservative until a new success attempt replaces the failure.
 		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
-			ClientId: ambiguousLaterLocation, AttemptAt: now.Add(-time.Hour), ProbeFailure: "tunnel_failed",
+			ClientId: ambiguousLaterLocation, AttemptAt: currentAttemptAt, ProbeFailure: "tunnel_failed",
 		})
 		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
 			ClientId: ambiguousLaterLocation, LocationId: location.LocationId,
-			CountryCode: "zz", ObservedAt: now.Add(-30 * time.Minute),
+			CountryCode: "zz", ObservedAt: now.Add(-ProviderEgressProbeAttemptBackoff / 4),
 		})
 
-		// A retained failure newer than the location but outside the six-hour
+		// A retained failure newer than the location but outside the current
 		// retry window is unobserved. It cannot resurrect the older success.
 		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
 			ClientId: retainedFailure, LocationId: location.LocationId,
 			CountryCode: "zz", ObservedAt: now.Add(-2 * time.Hour),
 		})
 		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
-			ClientId: retainedFailure, AttemptAt: now.Add(-7 * time.Hour), ProbeFailure: "tunnel_failed",
+			ClientId: retainedFailure, AttemptAt: now.Add(-ProviderEgressProbeAttemptBackoff - time.Minute), ProbeFailure: "tunnel_failed",
 		})
 
 		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
-			ClientId: inconsistent, AttemptAt: now.Add(-time.Hour), ProbeFailure: "",
+			ClientId: inconsistent, AttemptAt: currentAttemptAt, ProbeFailure: "",
 		})
 		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
-			ClientId: ineligible, AttemptAt: now.Add(-time.Hour), ProbeFailure: "no_consensus",
+			ClientId: ineligible, AttemptAt: currentAttemptAt, ProbeFailure: "no_consensus",
 		})
 
 		got := GetProviderEgressProbeFleetOutcomeTally(ctx)

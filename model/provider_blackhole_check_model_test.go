@@ -205,6 +205,18 @@ func TestLegacyBlackholeDoesNotOverrideUrlRatio(t *testing.T) {
 		})
 
 		f := newProviderCountFilter(ctx, true)
+		for _, clientId := range []server.Id{healthy, blackholed} {
+			if f.healthCounts[clientId].Total != 0 || f.passesHealth(clientId) {
+				t.Fatal("legacy aggregate or cheap check supplied selected-policy URL evidence")
+			}
+			egressTestHealth(ctx, clientId, now.Add(-time.Hour), 5, 0)
+		}
+		f = newProviderCountFilter(ctx, true)
+		for _, clientId := range []server.Id{healthy, blackholed} {
+			if counts := f.healthCounts[clientId]; counts.Total != 5 || counts.OKCount != 5 {
+				t.Fatal("accepted individual URL history was not selected independently of legacy aggregate")
+			}
+		}
 
 		if !f.passesHealth(healthy) {
 			t.Errorf("a provider measured healthy and checked ok must pass the gate")
@@ -215,12 +227,7 @@ func TestLegacyBlackholeDoesNotOverrideUrlRatio(t *testing.T) {
 	})
 }
 
-// A verdict that has aged out must not be read as "blackholed".
-//
-// The signal can only ever remove providers, so when its evidence lapses the
-// provider falls back to being judged on egress health alone. Treating "not
-// checked recently" as "dark" would empty the list the moment the sweep
-// stalled.
+// An expired legacy check neither supplies nor excludes selected-policy URL evidence.
 func TestStaleBlackholeCheckDoesNotExclude(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -233,8 +240,16 @@ func TestStaleBlackholeCheckDoesNotExclude(t *testing.T) {
 			OKCount:    100, Total: 100,
 		})
 		Testing_SetProviderBlackholed(ctx, clientId, now.Add(-ProviderBlackholeCheckMaxAge-time.Minute))
+		if f := newProviderCountFilter(ctx, true); f.healthCounts[clientId].Total != 0 || f.passesHealth(clientId) {
+			t.Fatal("legacy aggregate or expired cheap check supplied selected-policy URL evidence")
+		}
+		egressTestHealth(ctx, clientId, now.Add(-time.Hour), 5, 0)
+		f := newProviderCountFilter(ctx, true)
+		if counts := f.healthCounts[clientId]; counts.Total != 5 || counts.OKCount != 5 {
+			t.Fatal("stale-check fixture is missing its accepted individual URL history")
+		}
 
-		if !newProviderCountFilter(ctx, true).passesHealth(clientId) {
+		if !f.passesHealth(clientId) {
 			t.Errorf("a dark verdict older than %s must not keep excluding the provider: "+
 				"a stalled sweep would otherwise drain the list", ProviderBlackholeCheckMaxAge)
 		}

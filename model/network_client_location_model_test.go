@@ -254,6 +254,9 @@ func TestBestAvailableProviders(t *testing.T) {
 			stats,
 		)
 		UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
+		// This is a provider-search fixture, not a reliability history test.
+		// One observed minute fails the longer common-gate lookbacks.
+		testing_providerReliabilityPasses(ctx, clientId)
 		UpdateClientScores(ctx, 5*time.Second, 1)
 
 		res, err := FindProviders2(findProviders2Args, clientSessionA)
@@ -595,6 +598,9 @@ func TestClientLocationScoreCacheRoundTrip(t *testing.T) {
 			stats,
 		)
 		UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
+		// Keep the cache round trip independent of the deliberately sparse
+		// reliability fixture; common safety gates still apply in both modes.
+		testing_providerReliabilityPasses(ctx, clientId)
 
 		// UpdateClientLocations counts only a provider a probe measured
 		// healthy AND observed egressing from the country it claims (see
@@ -720,9 +726,8 @@ func TestClientLocationScoreCacheRoundTrip(t *testing.T) {
 			connect.AssertEqual(t, err, nil)
 			connect.AssertEqual(t, clientScoresNoMatch, clientScoresUs)
 
-			// the client has no latency or speed tests, which deterministically
-			// fails the strict minimums. the force minimum false variant is
-			// written but exports zero clients.
+			// Accepted URL success makes this provider native in both modes.
+			// Missing latency/speed samples affect rank, never admission.
 			clientScoresStrict, err := loadClientScores(
 				false,
 				rankMode,
@@ -734,11 +739,14 @@ func TestClientLocationScoreCacheRoundTrip(t *testing.T) {
 				[]ipFamilyFacet{ipFamilyFacetDualstack, ipFamilyFacetV4Only},
 			)
 			connect.AssertEqual(t, err, nil)
-			connect.AssertEqual(t, len(clientScoresStrict), 0)
+			connect.AssertEqual(t, clientScoresStrict, clientScoresNoMatch)
+			connect.AssertEqual(t, clientScoresStrict[clientId].PassesMinimums[rankMode], true)
+			connect.AssertEqual(t, clientScoresStrict[clientId].HasLatencyTest, false)
+			connect.AssertEqual(t, clientScoresStrict[clientId].HasSpeedTest, false)
 		}
 
-		// the location stables read the force minimum false filter keys.
-		// the filter is present with a zero count, so no entries are stable.
+		// User-facing filters contain all three locations. A single provider
+		// is listed but does not meet the separate stable-supply weight.
 		locationStables, err := loadLocationStables(
 			ctx,
 			[]server.Id{city.LocationId, city.RegionLocationId, city.CountryLocationId},
@@ -747,7 +755,10 @@ func TestClientLocationScoreCacheRoundTrip(t *testing.T) {
 			usLocationId,
 		)
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(locationStables), 0)
+		connect.AssertEqual(t, len(locationStables), 3)
+		for _, stable := range locationStables {
+			connect.AssertEqual(t, stable, false)
+		}
 
 		// end to end through the public api
 		res, err := FindProviders2(
@@ -2481,18 +2492,10 @@ func TestFindProviders2NetworkOnlyProviderVisibleOnlyToItsOwnNetwork(t *testing.
 	})
 }
 
-// the prober enumerates locations through `GET /network/provider-locations` ->
-// `GetProviderLocations` -> `loadLocationStables`, and only then asks
-// `find-providers2` for the providers at each one. `force_minimum` on that
-// second call cannot recover a location the first call never listed, and the
-// read side hardcoded the `forceMinimum=false` filter key -- so a location
-// whose every provider fails the minimums gate was invisible, and those
-// providers could never be probed and so could never graduate probation.
-//
-// One connected+valid Public provider with no latency or speed samples, which
-// deterministically fails the strict minimums. The writer populates both key
-// families, so the same location must be absent under `forceMinimum=false`
-// (today's user-facing behaviour, unchanged) and present under `true`.
+// Force-minimum reads must still honor common safety gates. One observed
+// reliability minute is a failing history, not missing/neutral history. Once
+// the reliability fixture passes, the unprobed provider belongs to Online in
+// both key families; missing performance samples must not remove it.
 func TestLoadLocationStablesHonoursForceMinimum(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -2530,11 +2533,10 @@ func TestLoadLocationStablesHonoursForceMinimum(t *testing.T) {
 			ProvideModeNetwork: []byte("network-secret"),
 		})
 
-		// a lookback_index = 0 reliability score row, so the source query's join
-		// against `client_connection_reliability_score` is not what excludes it
-		// either. deliberately no `network_client_latency` / `network_client_speed`
-		// rows: the missing latency and speed tests are the only reason this
-		// provider fails the minimums.
+		// Pin both observation and scoring to one closed minute. All lookbacks
+		// contain exactly one valid block, so the longer observed histories
+		// fail their floors deterministically, independent of a minute rollover.
+		reliabilityTime := server.NowUtc().Truncate(ReliabilityBlockDuration).Add(-ReliabilityBlockDuration)
 		clientAddressHash, _, err := clientSession.ClientAddressHashPort()
 		connect.AssertEqual(t, err, nil)
 		AddClientReliabilityStats(
@@ -2542,7 +2544,7 @@ func TestLoadLocationStablesHonoursForceMinimum(t *testing.T) {
 			networkId,
 			clientId,
 			clientAddressHash,
-			server.NowUtc(),
+			reliabilityTime,
 			&ClientReliabilityStats{
 				ConnectionEstablishedCount: 1,
 				ProvideEnabledCount:        1,
@@ -2552,29 +2554,83 @@ func TestLoadLocationStablesHonoursForceMinimum(t *testing.T) {
 				SendByteCount:              1024,
 			},
 		)
-		UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
-
-		UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
+		UpdateClientReliabilityScores(ctx, reliabilityTime, true)
+		lookbacks := GetAllClientReliabilityScores(ctx)
+		for _, index := range []int{1, 2} {
+			score, ok := lookbacks[index][clientId]
+			wantWeight := 1 / float64(ClientLookbacks[index]/ReliabilityBlockDuration+1)
+			if !ok || score.IndependentReliabilityScore != 1 || score.IndependentReliabilityWeight != wantWeight {
+				t.Fatalf("single-minute reliability fixture: lookback=%d got=%+v want weight=%g", index, score, wantWeight)
+			}
+			if score.IndependentReliabilityWeight >= providerReliabilityMinimums()[index] {
+				t.Fatalf("single-minute reliability unexpectedly passed lookback=%d", index)
+			}
+		}
 
 		err = UpdateClientScores(ctx, time.Hour, 1)
 		connect.AssertEqual(t, err, nil)
 
 		locationIds := []server.Id{city.CountryLocationId}
 
-		// user-facing listing: the provider is below the bar, so the location
-		// has no entry at all -- a missing entry is how loadLocationStables says
-		// "no providers"
-		strict, err := loadLocationStables(ctx, locationIds, false, RankModeQuality, server.Id{})
-		connect.AssertEqual(t, err, nil)
-		_, ok := strict[city.CountryLocationId]
-		connect.AssertEqual(t, ok, false)
+		for _, forced := range []bool{false, true} {
+			locations, err := loadLocationStables(ctx, locationIds, forced, RankModeQuality, server.Id{})
+			connect.AssertEqual(t, err, nil)
+			if _, ok := locations[city.CountryLocationId]; ok {
+				t.Fatalf("common reliability gate bypassed with forceMinimum=%t", forced)
+			}
+		}
 
-		// operator census: the same location must be listed, otherwise its
-		// providers can never be reached
-		forced, err := loadLocationStables(ctx, locationIds, true, RankModeQuality, server.Id{})
+		// Positive control: fix only the reliability fixture. The provider
+		// remains unprobed and has no latency/speed samples, but is Online.
+		testing_providerReliabilityPasses(ctx, clientId)
+		err = UpdateClientScores(ctx, time.Hour, 1)
 		connect.AssertEqual(t, err, nil)
-		_, ok = forced[city.CountryLocationId]
-		connect.AssertEqual(t, ok, true)
+		for _, forced := range []bool{false, true} {
+			locations, err := loadLocationStables(ctx, locationIds, forced, RankModeQuality, server.Id{})
+			connect.AssertEqual(t, err, nil)
+			if _, ok := locations[city.CountryLocationId]; !ok {
+				t.Fatalf("eligible online provider missing with forceMinimum=%t", forced)
+			}
+			scores, err := loadClientScores(forced, RankModeQuality, ctx,
+				map[server.Id]bool{city.CountryLocationId: true}, nil, server.Id{}, 1,
+				[]ipFamilyFacet{ipFamilyFacetDualstack, ipFamilyFacetV4Only})
+			connect.AssertEqual(t, err, nil)
+			score := scores[clientId]
+			if score == nil || !score.Online || score.PassesMinimums[RankModeQuality] {
+				t.Fatalf("unprobed fixture must remain online-only with forceMinimum=%t: %+v", forced, score)
+			}
+		}
+	})
+}
+
+// The two key families remain distinct even when today's admission policy
+// publishes the same members. Prove reader routing directly, without using an
+// obsolete performance gate to manufacture different publisher output.
+func TestLoadLocationStablesUsesRequestedKeyFamily(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		locationId := server.NewId()
+		for _, populatedFamily := range []bool{false, true} {
+			server.Redis(ctx, func(r server.RedisClient) {
+				for _, forced := range []bool{false, true} {
+					filter := &ClientFilter{}
+					if forced == populatedFamily {
+						filter.Count = 1
+						filter.NetReliabilityWeight = MinStableNetReliabilityWeight
+					}
+					payload := encodeClientScoreGobValue(updateClientScoresPhaseMetrics, filter)
+					server.Raise(r.Set(ctx, clientScoreLocationFilterKey(forced, RankModeQuality, locationId, server.Id{}), payload, time.Minute).Err())
+				}
+			})
+			for _, forced := range []bool{false, true} {
+				locations, err := loadLocationStables(ctx, []server.Id{locationId}, forced, RankModeQuality, server.Id{})
+				connect.AssertEqual(t, err, nil)
+				stable, present := locations[locationId]
+				if present != (forced == populatedFamily) || (present && !stable) {
+					t.Fatalf("wrong force-minimum key family: read=%t populated=%t present=%t stable=%t", forced, populatedFamily, present, stable)
+				}
+			}
+		}
 	})
 }
 

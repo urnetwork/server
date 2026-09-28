@@ -6712,6 +6712,65 @@ legacy UPSERT during a mixed rollout, hold one sharp block's classification
 stable across a later/longer window, and prove rolling equals full recompute
 across a deterministic median flip.
 
+### 2.15a Client reliability publication freshness — running progress is not published evidence
+
+Probe: `reliability-freshness`
+
+Perfect weights can describe an old interval. This separate five-minute Go
+probe reads the singleton drain, four running markers, the exact current and
+legacy `UpdateReliabilities` run-once keys, and at most sixteen distinct
+eligible queue head/tail identities at eight fixed scheduler slots. Each
+identity gets three exact score-key reads (indices 0/1/2). No raw history,
+fleet score aggregation, provider identities or arbitrary task logs leave the
+source. The sample is biased, not a fleet count or a native-Quality census.
+
+With a rollup update and endpoint both younger than ten minutes, warn on a
+sampled physical score endpoint older than forty minutes, and page at sixty
+minutes. Both require two consecutive observations. Forty minutes allows the
+existing completion-plus-thirty-minute schedule and ten-minute drain grace;
+these are operational diagnostic bands, not an admission TTL or new quality
+policy. Index 0 is the five-minute ranking input, index 1 the one-hour gate,
+and index 2 the twelve-hour gate. The current writer does not emit index 3.
+
+The underlying valid-block rule measures an established public-provide
+connection with no unexcused provide change, at most one unexcused new
+connection, and a received message. Zero-byte liveness pings count as received
+messages. A high reliability pass rate is therefore platform-connection
+availability evidence, not proof of Internet/DNS/URL egress or native Quality.
+The URL success-ratio and non-quality classification gates remain separate;
+this freshness diagnostic does not conflate them or infer false positives.
+
+`boundary=running-window-lag` means the sample's score and running markers
+have not caught up; `score-publication-lag` means running state advanced past
+the oldest sampled score. A fresh claim plus lease is labelled active work,
+not a dead task and not proof of publication. Scheduled, overdue without a
+fresh claim, and unavailable task metadata remain distinct. Missing/partial
+score samples or stale drain produce `reliability-freshness-unobservable`,
+never fabricated zero age or an empty population. Concrete stale sampled rows
+still alert alongside a partial-source qualifier.
+
+False-positive qualifiers: a zero usable covered/nondegraded denominator
+deliberately retains previous scores; establish that condition before blaming
+the writer. An active checkpoint can be slow, and the 120-minute task ceiling
+does not make an old one-hour admission window current. The diagnostic does
+not attribute elapsed time to a particular SQL stage or establish provider
+misclassification. Use bounded task/progress and physical score reads; do not
+delete scores, invent neutral history, duplicate the singleton task, loosen
+the existing reliability floors, or restart workers to manufacture recovery.
+
+The 2026-09-28 source-bound observation found a successful 49m51.842s run,
+followed by the configured thirty-minute scheduling delay. A later 7m05.762s
+run and physical score read established recovery. This was active slow work
+plus publication/scheduling delay, not evidence of a dead writer or proof that
+all current providers had perfect recent histories.
+
+Implementation: `signal_reliability_freshness.go` and its same-stem tests,
+registered by `NewSignals`. Synthetic controls cover exact age bands, active
+and unclaimed lag, score-versus-running boundaries, stale/frozen drain,
+missing/partial metadata, malformed/truncated output and the finite read
+contract. Clear only after physical score endpoints advance while the drain
+remains fresh; a task completion or running marker alone is insufficient.
+
 ### 2.16 Open connection handler ownership — durable rows need a live owner
 Probe: `connection-orphans`
 
@@ -14596,6 +14655,8 @@ traceable; their owning numbered sections remain the full contracts.
 | `redis-cpu-sustained` | §3.4 `redis-process` | A Redis node's process CPU stays above the bounded band; identify commands/clients and require two healthy observations. |
 | `redis-kernel-oom` | §3.4 `redis-process` | The current boot records a kernel OOM involving Redis; preserve the event, repair the memory/capacity cause, and require a fault-free observation window. |
 | `reliability-classification-drift` | §2.15 `reliability-drift` | Stored provider reliability classifications disagree with the authoritative running-sum inputs; reconcile and require exact agreement. |
+| `reliability-score-stale` | §2.15a `reliability-freshness` | Finite sampled physical score rows are over-age despite fresh drain; distinguish running and publication lag without changing admission policy. |
+| `reliability-freshness-unobservable` | §2.15a `reliability-freshness` | Missing/partial source or stale drain cannot establish current score publication. |
 | `reliability-pipeline-degraded` | §3.7 `reliability-pipeline` | Redis latency/load makes the reliability pipeline miss its bounded service band; restore each node and prove fresh pipeline completions. |
 | `subtensor-gateway` | §17.1 `subtensor` | A configured Subtensor RPC gateway fails its exact listener/protocol contract; require the correct LAN/tunnel gateway response. This class is excluded from Main-only monitor runs by policy. |
 | `wait-event-cluster` | §2.2 `wait-events` | Active PostgreSQL backends cluster on one wait-event family; remove the owning blocker and require the cluster to dissipate. |

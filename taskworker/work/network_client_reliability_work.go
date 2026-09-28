@@ -179,19 +179,10 @@ func ScheduleUpdateReliabilities(clientSession *session.ClientSession, tx server
 		},
 		clientSession,
 		task.RunOnce("update_reliabilities"),
-		// every 30 minutes: the client scores (#1) and 7-day window score (#3) are
-		// now maintained incrementally by UpdateClientReliabilityRunningInTx (a
-		// running per-(client, lookback) sum advanced by only the blocks that
-		// entered/left the window since the last run, anchored by a ~4h full
-		// recompute), so a run no longer re-scans the full lookback of the ~566M-row
-		// client_reliability table -- the per-run cost dropped from the old 15-26 min
-		// full re-aggregation to a small per-block delta plus the periodic recompute.
-		// The 30-min cadence is kept: the scores are long-window (24h/7d) aggregates
-		// ending at now, so 30-minute staleness is immaterial, and the window buckets
-		// still fully cover the trailing hour (minTime is clamped to now-1h and
-		// buckets are upserted whole). NOTE: the window bucket computation
-		// (network_connection_reliability_window) still scans the trailing hour and is
-		// unchanged.
+		// Thirty minutes after completion, not after start. Client windows are
+		// 5 minutes, 1 hour and 12 hours; a long network stage can still delay the
+		// next client refresh. Early client publication below removes the current
+		// run's network barrier but does not change this scheduling contract.
 		task.RunAt(server.NowUtc().Add(30*time.Minute)),
 		task.MaxTime(120*time.Minute),
 		task.Priority(task.TaskPriorityFastest),
@@ -222,17 +213,12 @@ func UpdateReliabilities(
 		}, nil
 	}
 
-	// Checkpoint each running-sum lookback before either score writer opens its
-	// own atomic transaction. The 7-day full anchor has a long I/O-contention
-	// tail in production; if the task deadline interrupts a later lookback, the
-	// committed earlier markers survive and the retry rolls them forward instead
-	// of restarting every full scan from zero. The score writers call the same
-	// maintenance again at this maxTime, which is deliberately idempotent.
-	model.UpdateClientReliabilityRunningCheckpointed(clientSession.Ctx, maxTime)
+	// Publish client admission/ranking inputs before unrelated long network work.
+	// Each running window remains checkpointed; all client scores commit together.
+	model.UpdateClientReliabilityScoresCheckpointed(clientSession.Ctx, maxTime)
 
+	model.UpdateNetworkReliabilityRunningCheckpointed(clientSession.Ctx, maxTime)
 	model.UpdateNetworkReliabilityWindow(clientSession.Ctx, minTime, maxTime, false)
-
-	model.UpdateClientReliabilityScores(clientSession.Ctx, maxTime, false)
 
 	return &UpdateReliabilitiesResult{
 		MaxTime: maxTime,

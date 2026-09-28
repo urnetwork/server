@@ -28,11 +28,22 @@ var findProviders2SelectionSchema = prometheus.NewGauge(prometheus.GaugeOpts{
 	Name: "urnetwork_findproviders2_selection_schema_version", Help: "Fixed selection-diagnostic schema supported by this process",
 })
 
+var findProviders2NativeSourceOutcomes = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_findproviders2_native_source_outcomes_total",
+	Help: "Visited native bucket outcomes after request filters; unavailable is degraded priority, never proven exhaustion, even when online fallback fills the response",
+}, []string{"rank_mode", "source", "outcome"})
+
+var findProviders2NativeSourceSchema = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "urnetwork_findproviders2_native_source_schema_version",
+	Help: "Fixed native-source diagnostic schema supported even before the first provider request",
+})
+
 // Registers the schema even on a process with no requests; quiet and old
 // producers remain distinguishable without a sentinel customer request.
 func init() {
 	findProviders2SelectionSchema.Set(2)
-	prometheus.MustRegister(findProviders2SelectionOutcomes, findProviders2StageSeconds, findProviders2StageInflight, findProviders2SelectionSchema)
+	findProviders2NativeSourceSchema.Set(1)
+	prometheus.MustRegister(findProviders2SelectionOutcomes, findProviders2StageSeconds, findProviders2StageInflight, findProviders2SelectionSchema, findProviders2NativeSourceOutcomes, findProviders2NativeSourceSchema)
 }
 
 // Counts local observations of the pages actually requested, not unique fleet
@@ -158,6 +169,19 @@ func (self *findProviders2SelectionObservation) enter(stage string) {
 	findProviders2StageInflight.WithLabelValues(stage).Inc()
 }
 
+// One fixed outcome for each native tier the request actually visits. A
+// successful online answer must not hide a native publication/read failure.
+func (self *findProviders2SelectionObservation) nativeSource(mode RankMode, backfill bool, outcome string) {
+	if mode != RankModeQuality && mode != RankModeSpeed {
+		mode = "unknown"
+	}
+	source := "primary"
+	if backfill {
+		source = "alternate"
+	}
+	findProviders2NativeSourceOutcomes.WithLabelValues(mode, source, outcome).Inc()
+}
+
 // Explains the earliest proven zero boundary. Missing cache evidence is not
 // proof of missing providers, and a filter-empty sample is not fleet scarcity.
 func (self *findProviders2SelectionObservation) complete(resultCount int) {
@@ -203,12 +227,12 @@ func (self *findProviders2SelectionObservation) complete(resultCount int) {
 		self.reason = "no_specs"
 	case !self.discovery:
 		self.reason = "unresolved_target"
-	case self.backfillUnavailable:
-		self.reason = "backfill_unavailable"
 	case 0 < self.load.missingPages:
 		self.reason = "cache_page_gap"
 	case 0 < self.load.missingTargets:
 		self.reason = "cache_missing"
+	case self.backfillUnavailable:
+		self.reason = "backfill_unavailable"
 	case self.loaded == 0:
 		self.reason = "cache_empty"
 	case 0 < self.eligible:

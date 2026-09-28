@@ -69,11 +69,25 @@ and risk rules to explicit-client and
 `force_minimum` paths so callers cannot bypass them.
 
 Quality requests take native quality first, then native speed, then online.
-Speed requests take native speed first, then native quality, then online. Keep
-the existing bounded, exclusion-aware sampling, deduplicate providers across
-buckets, preserve each borrowed provider's lower client-visible tier, and
-apply request filters to *every* borrowed candidate. If the preferred pool is
-empty, a large reliable online pool must still answer. Online is a fallback
+Speed requests take native speed first, then native quality, then online.
+Read enough pages to fill the requested native limit after request filters,
+or establish actual exhaustion of that native source, before borrowing from
+the next bucket. Online rows cannot count toward a native quota. An initial
+sample or exclusion-row allowance ending is not proof of exhaustion. Keep
+individual reads, retained samples and publication storage bounded, using
+native-only pages rather than repeatedly walking a large online union.
+Deduplicate providers across buckets, preserve each borrowed provider's lower
+client-visible tier, and apply request filters to *every* borrowed candidate.
+Missing, incomplete, changed-generation or corrupt cache data is unavailable,
+not an empty native source. A failed refresh retains the last complete usable
+generation. If a native source is unavailable, retain independently validated
+native rows, try the next native bucket, then use bounded same-target online
+fallback so missing probe/cache evidence does not create a connectivity outage.
+That is explicitly degraded native priority, not a claim of native exhaustion;
+never manufacture zero supply or widen the requested target or security rules.
+Healthy readable native sources still fill the requested limit or prove their
+exhaustion before advancing. If complete native sources are exhausted, a large
+reliable online pool must still answer. Online is a fallback
 source containing all providers that pass the common gates, including members
 of quality/speed; deduplication keeps them from appearing twice. Performance
 metrics order eligible candidates rather than adding hidden bucket admission
@@ -118,6 +132,7 @@ and ARIN flags are gates; they must not be averaged away into a good score.
 | Throughput | Successful transferred bytes divided by transfer duration after first response byte | Speed ordering; DNS/connection wait is not transfer time |
 | Evidence age | Measurement timestamps and their eight-hour expiry, not ingest/retry timestamps | Removes expired outcomes from the ratio; missing/stale measurements do not imply failure |
 | Four-hour progress | Unique accepted URL successes measured strictly within the trailing four hours, capped at ten for coverage reporting | Rolling scheduling/coverage metric, not an additional admission gate; secure completion additionally requires no unresolved TLS exceptions |
+| Four-hour scheduling count | Unique completed URL-probe attempts in the trailing four hours, including failures and zero-attempt providers | Lowest count first among currently eligible, paced-due providers; distinct from successful quota and eight-hour admission evidence |
 
 For quality/speed, the initial selection weight is
 `reliabilityScale * reliabilityWeight * performanceScale * urlRankingWeight`.
@@ -150,6 +165,65 @@ Ten successes are a collection target, not an additional quality/speed gate;
 for example, three successes and two errors already pass the URL ratio gate.
 Probing pauses only when the rolling quota is met **and** all TLS exceptions
 have cleared; a quota-complete but quarantined provider still needs work.
+
+### Reliability history mapping and publication freshness
+
+The real writer's `ClientLookbacks` emits indices 0, 1 and 2, not 1, 2 and 3:
+
+| Stored index | Actual source window | Current role |
+| --- | --- | --- |
+| 0 | 5 minutes | Lowest emitted index supplies independent/shared-IP normalized ranking weights; not the 0.95 hard gate. |
+| 1 | 1 hour | Common admission requires observed independent weight at least 0.95 under the current normal-network branch. |
+| 2 | 12 hours | Common admission requires observed independent weight at least 0.70 under the current normal-network branch. |
+| 3 | Not emitted by the current writer | Existing 0.60 compatibility floor can still inspect a legacy row; no current six-day window is established by a commented-out source entry. |
+
+A valid raw block means an established public-provide connection, at most one
+unexcused new connection, no unexcused provide change, and at least one
+received message. Connect counts zero-byte liveness pings as received messages.
+This measures platform-connection availability, not Internet/DNS/URL success.
+High connection-reliability pass rates can therefore coexist with poor URL
+egress without establishing false positives in that connection metric. Native
+Quality and Speed must still independently pass the selected-policy URL ratio,
+and Quality additionally applies the reviewed non-quality classification gate.
+
+With a pinned closed minute and no uncovered/degraded blocks, the writer's
+inclusive endpoint convention yields 6, 61 and 721 blocks. Effective
+denominators exclude uncovered and immutable platform-degraded blocks. A
+denominator with no usable blocks intentionally retains prior scores. Missing
+rows are currently neutral in the gate; absence must not be described as
+measured perfect history. The writer-to-SQL/Go/request controls exercise real
+raw-history and score writers rather than inventing index-3 score fixtures.
+
+A score of 1 describes its stored interval, not necessarily the current
+interval. The bounded 2026-09-28 due-head/tail sample at 18:35:55Z found sixteen
+physical 0/1/2 score triplets, all weights 1, with stored denominators 6/61/721
+and an endpoint about 71 minutes old. The repeat found the same global running
+endpoint while the drain advanced; it did not preserve the same provider
+identities across queue selections. A later bounded task read established a
+49m51.842s successful writer run followed by its configured thirty-minute wait,
+then a 7m05.762s successful successor. The 18:57:34 score read confirmed actual
+client-score publication, with two sampled twelve-hour weights below 1. This
+was not proof of current perfect reliability, a dead task, a representative
+fleet pass rate, or a particular SQL stage owning all elapsed time.
+
+The reviewed publication correction commits client running checkpoints and
+their atomic three-window score publication before seven-day/network-window
+work. Each score writer advances only the windows it consumes. Deterministic
+real-transaction failures prove later network failure cannot withhold client
+scores, while failed client maintenance or score writes cannot publish a
+mixed/incorrect new generation. The completion-plus-thirty-minute schedule,
+two-hour task ceiling, hard gate floors and evidence policy are unchanged.
+Early publication alone does not guarantee a fresh five-minute window while
+that singleton remains occupied by long later work.
+
+Monitor §2.15a is implemented in source, with shared gates and watcher
+activation still pending at this checkpoint. Its source detects old physical
+sampled score endpoints despite
+a fresh advancing drain: warning beyond forty minutes, page at sixty minutes,
+both sustained twice. Active claims qualify task activity, not freshness;
+missing/partial sources and zero-usable-denominator retention remain explicit
+diagnostic limits. Gate admission must not be changed merely to make the
+freshness signal green.
 
 ## ARINdb and GeoLite2 build
 
@@ -425,14 +499,26 @@ already produced millions of goroutines and timeouts without a faster cycle.
 
 Make due admission one cheap, indexed, bounded operation per batch, excluding
 providers that cannot enter the target index *before* opening a tunnel. Use
-leases/claims with expiry and fair oldest-due scheduling so shards cannot
-duplicate work or starve never-probed providers. Schedule paced URL work
-with stable jitter until its ten-success quota is met; retry local failures in a
-separate bounded lane without repeatedly taking the head of the queue.
+leases/claims with expiry so shards cannot duplicate work. The user-confirmed
+2026-09-28 priority is **lowest completed URL-probe attempt count in the rolling
+four hours first, including zero**, among eligible providers whose next paced
+attempt is due. Break equal counts by oldest due time and then provider ID.
+Count a completed failed run as well as a successful run, once across report
+retries; a claim or an abandoned in-flight run is not a completed attempt.
+Do not substitute the lifetime receipt ordinal, successful-outcome count, or
+eight-hour admission denominator. Preserve stable jitter, claim exclusivity,
+the rolling ten-success quota, and outstanding URL-specific TLS recovery.
+Local setup failures still do not manufacture measured URL evidence. Maintain
+the scheduling window with bounded indexed state and exact aging at four
+hours; do not rescan every provider's history in the claim hot path. This
+scheduling change introduces no minimum-N quality/speed admission gate.
 Provider IDs map to **1,024 fixed logical slots**, independently of the current
 worker/host allocation. Each shard owns a set of slots. Index eligible due
-work by `(slot, next_attempt_at, client_id)` and select only owned slots, with
-a lazy oldest-due merge rather than materializing every slot's entire batch.
+work currently by `(slot, next_attempt_at, client_id)` and select only owned
+slots. The new maintained-count ordering must preserve bounded owned-slot
+access and a lazy priority merge rather than materializing every slot's entire
+batch; its migration and writer-first rollout remain a separate verification
+gate from the native-page publisher/reader.
 Changing shard assignment redistributes slots, not receipt history or rolling
 quota; unexpired durable claims remain excluded during handoff. Tests must
 cover empty, sparse, dense, and hot-slot populations, non-power-of-two shard
@@ -810,3 +896,326 @@ committed and tested. The operator acknowledges that Connect deployment
 cycles connections. Record exact release versions and measure classification,
 accepted quotas, actual cached lists, request-local results, and DB load after
 each rollout; writing this plan itself has performed no production mutation.
+
+## Source-bound checkpoint: 2026-09-28 14:15 UTC
+
+This checkpoint is historical, not a statement of current fleet recovery.
+The equal sampled quality/speed rank-document lengths (74,666 each) count
+online-union cache rows: the publisher includes a row when it is native to
+that mode **or** online. They are not native quality/speed counts. The then
+visible native gauge values were approximately 87,000 quality, 89,000 speed,
+and 112,000 online, but the source recomputation age was unknown; recent
+metric delivery alone does not make those current eligibility counts. These
+gauges and a requested market's cached rank-document lengths also have
+different population/snapshot boundaries and must not be equated.
+
+Native URL-history admission currently requires selected-policy history with
+`N > 0` and success ratio at least `0.6` in the eight-hour evidence window,
+plus the shared eligibility gates. A `1/1` history can qualify. Ten successes
+in four hours is the scheduling/coverage objective, not a minimum-history
+admission rule. The reported zero ten-success completions among 111,566
+eligible providers therefore does not contradict a much larger native gauge.
+The reported accepted-success rate of about `2.24/s` remains far below the
+approximately `77.48/s` needed for that population's rolling quota. Do not add
+a new minimum sample-count gate or infer successful coverage from native
+membership without an explicit policy decision and supporting evidence.
+
+Source review found an independent selection bug: both primary and alternate
+refill loops counted filtered online-union rows before checking native
+membership. Enough online rows could terminate refill while a later requested
+native page remained unread; the old exclusion cap was also not proof of
+native exhaustion. The private correction publishes native-only pages while
+preserving legacy union keys for old readers and eventual online fallback.
+It fills requested natives, then alternate natives, then online, applying
+the same hard, network, family and explicit exclusions to every candidate.
+It changes neither the URL-success ratio nor other bucket admission rules.
+Adjacent request-layer controls found and rejected an overly strict private
+failure path that suppressed online fallback when native metadata was unknown.
+The corrected path keeps last-good/independently verified pages, attempts
+bounded legacy compatibility, and continues through available lower-priority
+buckets. It never equates missing/corrupt/unread native data with exhaustion.
+The additive native-source diagnostic advertises
+`urnetwork_findproviders2_native_source_schema_version=1`, while preserving
+selection schema 2 for the existing monitor. It exposes each visited tier through
+`urnetwork_findproviders2_native_source_outcomes_total` with fixed `rank_mode`,
+`source` (`primary`/`alternate`) and `outcome`
+(`quota`/`exhausted`/`unavailable`) labels. A full 20-provider online fallback
+can therefore still be diagnosed as degraded native priority; returned count
+alone is not evidence that native publication was healthy. Request cancellation
+and hard-exclusion backend failures remain errors, not availability overrides.
+
+Native publication uses two bounded Redis hash slots per mode/caller/target,
+not an unbounded five-hour history of generation-key copies. Guarded staging
+writes cannot alter the active generation. An atomic pointer switch follows
+complete page-count/checksum metadata, with empty facets represented
+explicitly. Interrupted staging retains last-good data; stale competing
+writers and reused-generation readers fail explicitly. A target's manifest
+counts its own pages, not fleet-distinct providers: summing city, region,
+country and group manifests double-counts overlapping identities. Fleet
+publication counts use a separate deduplicated snapshot committed only after
+the complete export. Its generation ID, selected policy version, source-start,
+source-completed and last-successful publication timestamps remain explicit.
+The existing eight-hour selected-policy evidence map supplies denominator
+bands `0`, `1`, `2`, `3–4`, `5–9`, and `>=10`, with no additional database census. These
+are admission-evidence bands, not four-hour attempt or successful-quota bands;
+the latter remain unavailable until their owning scheduler/receipt source is
+wired. A missing or malformed census is unknown, and a complete empty census
+is zero. Scrape time never refreshes source age. Any displayed count must
+retain its population, generation and freshness qualification.
+
+This is a phased cache-schema rollout: deploy the tested Taskworker native
+publisher while old API readers continue using unchanged union keys; attest
+complete manifests for the required targets and facets before switching API
+readers. Verify interrupted refresh/last-good, native refill beyond the old
+allowance, exact exclusions, and complete-zero-native online availability
+before activation. Also verify bootstrap/corrupt-source online availability,
+validated native priority and explicit unknown telemetry. Bounded legacy
+compatibility must not mistake unread or missing pages for exhausted native
+supply. Record final source/artifact and
+cache-generation evidence separately from the first URL-only rollout above.
+
+The accepted-policy-1 measured interval 2026-09-28 13:41:09–13:51:09 UTC had
+2,733 unique completed URL outcomes: 1,344 successes (`2.24/s`), 1,177
+`dial_dns` errors and 212 other errors. Positive DNS-stage samples among final
+successes (`n=1,338`) had p50 `25.050s` and p95 `42.115s`; `dial_dns` failures
+(`n=1,177`) had p50 `45.108s` and p95 `45.153s`. That stage includes cold
+tunnel/contract/route formation as well as resolver residence. First-route
+timing telemetry was pending, so these durations are not pure resolver latency
+or proof of DNS-server fault. Keep the overlap diagnosis and its measured
+stage boundaries separate from native membership and selection.
+## Agent transition checkpoint: 2026-09-28 20:25 UTC
+
+This section supersedes the *status* in the 14:15 checkpoint above, not its
+product contract. The three active goals remain open: complete ten successful
+URL probes per otherwise eligible provider in each rolling four hours; make
+FindProviders2 consume native Quality/Speed supply before fallback without
+starving users; and bring Main PostgreSQL CPU toward its usual ~30% level.
+No FP2 service build, migration, or deployment from this checkpoint has reached
+Main. Do not describe the local fixes or a changing rolling denominator as
+production recovery.
+
+### Main facts to carry forward
+
+- The standing 19:39:40 UTC URL census had 113,539 eligible providers, **zero**
+  with ten successes in four hours, 113,439 overdue, and 972,214 successes
+  needed. A complete accepted-receipt read for 19:30–19:40 had 13,881
+  successes, or 23.135/s, versus approximately 78.85/s required. It improved
+  from the prior ten-minute 15.393/s but is one window, not sustained recovery.
+  The next agent must take a fresh matched window and census; do not reuse
+  these values as current.
+- Main PostgreSQL used 44.202 of 96 logical cores (~46%) in the 19:31 watcher
+  frame, above the operator's usual ~30%. The old settlement statement had
+  ~266 calls/s and ~46 shared-buffer hits/call in a matched 18:22–18:32
+  `pg_stat_statements` window. Execution time includes waits and is **not CPU
+  attribution**. The contract-local escrow-read correction is already
+  committed in Server `e2356969` but **not deployed**. A numeric-only,
+  reset-aware bounded statement-delta helper is frozen but untested and has
+  made no new Main read; see the contract-lane handoff below.
+- The open-contract probe remained capped at `>=250001`, all sampled older
+  than 30 minutes. A closer batch verified 25,000 terminal closes but retained
+  117 underfunded-accounting failures and retried; do not claim the capped
+  population is falling, release disputed escrow, or weaken the financial
+  guard. The recovered `ForceCloseOpenContractIds` log class is not proof of
+  Taskworker process crashes. This backlog needs its own matched progress and
+  financial-error investigation.
+- A bounded sample of 16 due-head/tail providers had real stored reliability
+  scores for indices 0/1/2, not missing-neutral fallback; legacy index 3 was
+  absent. The 5m/1h/12h scores had become ~81 minutes old while the raw rollup
+  stayed fresh. One `UpdateReliabilities` run took ~50 minutes, then waited its
+  configured 30 minutes after completion; the successor completed in ~7
+  minutes and published fresh scores. This proves intermittent publication
+  lag, not permanent corruption or a fleet-wide false-admission rate. The
+  producer's validity signal is platform connection/message liveness (including
+  zero-byte messages), **not** successful Internet URL egress; the gates must
+  remain distinct.
+- Successful in-tunnel DNS answer waves fell while tunnel-forming and
+  provider-unresponsive timeout waves rose in matched 17:50–18:10 windows.
+  The `dial_dns` timer includes tunnel setup and retries. Do not label this a
+  remote DoH-server fault, or raise probe concurrency blindly; a prior 5,000
+  worker/shard attempt produced millions of goroutines and poor coverage.
+
+### Local code and independent gates
+
+Server HEAD at this checkpoint is `d63d8582`, with uncommitted scoped changes.
+Preserve the shared worktree and inspect `git status --short` before editing.
+The native-only score publisher/reader, bounded cursor, complete-generation
+manifest and census, availability fallback, tests, and this plan are now in the
+shared `model/` and `FP2FIX.md`. The first private reader incorrectly blocked
+online fallback for an unavailable native source; the corrected code retains
+validated natives, tries the next tier, then bounded same-target online rows,
+with an explicit unavailable-source metric. Shared merged native/adjacent
+normal and race tests passed. Private causal tests proved the old native
+dilution, false exhaustion, outage, and canceled-publication failures; the
+synthetic 100k publisher/cursor cost normal and race gates passed. These are
+local test results, not a full release gate or Main throughput measurement.
+
+The shared reliability fix publishes 5m/1h/12h client scores before unrelated
+seven-day/network work without changing the task's 30-minute completion-based
+schedule. Four real-database controls passed normal/race with exact old-code
+causal failures; adjacent reliability controls passed. `monitor` §2.15a now
+checks scored-window freshness against a fresh rollup with bounded indexed
+reads. Full `./monitor` normal/race and `go vet ./monitor` passed; a Main
+non-executing plan cost ~160 with no fleet scan. The new signal is in the
+successor watcher below, but its first active probe was still pending at this
+checkpoint. Four formerly failing FP2 model tests were corrected as test
+fixtures only, and their combined focused normal/race controls passed.
+
+The rolling-four-hour, lowest-*completed*-run scheduler is **private and
+unmerged** at
+`/Users/brien/urnetwork/temp/fp2-completed-priority.Nm69B1mI/server`.
+Functional normal/race, two old-behavior causal REDs, and corrected 100k
+custom-plan normal/race passed. The initial all-future oracle falsely rejected
+an indexed zero-row/three-buffer seek; its strengthened replacement also
+rejects an actual 100,000-row zero-output scan. **Forced generic prepared
+plans still fail**: dense claim scans the cycle population and no-work expiry
+touches ~1,543 buffers. This is a real blocker, not a waived test. The
+key-driven generic-safe SQL repair is diagnosed but not yet written or tested;
+do not merge or migrate the scheduler until generic claim, expiry and
+promotion plans, quiet-queue paths, and 100k normal/race controls pass.
+The separate scheduler migration catalog guard passed normal/race and causal
+trigger/index mutants, but is also private. The scheduler's count means
+acknowledged completed URL-probe turns (including failed setup), never issued
+claims; replay is idempotent, but a lost receipt is still unobserved.
+
+The **final merged** full `./model` and `./taskworker/work` normal/race release
+gates have not run after native integration. Earlier full model tests exposed
+four now-corrected fixture expectations; do not quote that old RED as a
+product regression or call the final tree green from focused tests alone.
+The corrected writer-to-FP2 all-invalid-history causal test is queued but
+unrun. Source review suggests zero-positive observed history can disappear
+into missing-neutral admission, but neither the real-flow RED nor Main
+prevalence has been established. Preserve truly missing-history neutrality;
+do not apply a global fail-closed gate or query-time raw-history scan on this
+untested hypothesis. The system `/usr/local/go/bin/go` is currently an
+incompatible Linux binary on this Mac; the checksum-verified private Darwin
+Go 1.26.7 at `/Users/brien/urnetwork/temp/fp2-go.bxmaIv/go/bin/go` was used
+for these tests. Revalidate it before relying on the test gate.
+
+### Authoritative monitor handoff
+
+The old watcher PID 64125/session 85284 was gracefully stopped. A new,
+root-owned watcher started at approximately 20:23:22 UTC in session **86987**,
+PID **9421**, from
+`/Users/brien/urnetwork/monitor/server-monitor.watch.CZOoRpby/monitor`
+(SHA-256 `caf2f883ed1c510438b983ddddd4d9ce8a0ecc5eea151d1122eb961c78a4ca47`).
+Its pinned Warpctl image SHA-256 is
+`df39c1ace9cd6c9ee8f65759c1481c1f93f0e1de13b58cc0f82b9873aa9dd329`;
+the resolved Warpctl revision contains the required Loki live-tail cursor
+guard. `-list-signals` includes `2.15a reliability-freshness`. PID 9421 had
+ten expected `warpctl logs ... -f` children for web, app, connect, alt, api,
+grafana, proxy, taskworker, gossip and mcp; their loaded executable paths
+matched the pinned Warpctl image. A short no-overlap stream gap occurred
+between watchers; record it as a coverage gap, not continuous proof. The new
+watcher uses `-min-probe-cadence=15m`, so its first active probe is due no
+earlier than ~20:38 UTC. This transition did **not** yet prove two fresh
+same-generation log reconciliations or the first new freshness result.
+
+The next agent must first try to poll **session 86987** and verify PID 9421,
+its exact stdout/stderr artifacts in the run directory, all ten standing
+tails, loaded binary identities, first active probe, and two fresh log
+reconciliations. If that session handle cannot transfer across agents, the
+agent must take ownership with the controlled watcher handoff in
+`monitor/RUN-MAIN.md`; a PID-only narrative is not an authoritative monitor
+session. Keep at least 15 minutes between active monitor probe runs and do
+not start a duplicate one-shot merely to validate the handoff. The primary
+ledger is append-only at
+`/Users/brien/urnetwork/monitor/runs/server-monitor-watch-20260907T092035Z-pid63535/ledger.jsonl`;
+the watcher switch is recorded as
+`main-fp2-watcher-handoff-20260928T2030Z`, following
+`main-fp2-native-availability-gates-and-1939-census-20260928T1941Z`.
+Append subsequent verified evidence; never rewrite prior records.
+
+### Next-agent order of work
+
+1. Adopt and validate the new watcher as above; get a fresh URL-quota frame,
+   direct accepted measured-at receipt window, native Quality/Speed/Online
+   counts, and PostgreSQL CPU sample. Do not infer hourly throughput from a
+   coverage-unobservable watcher frame or the reporter ACK counter.
+2. Repair the scheduler's generic prepared-plan population scans privately;
+   rerun functional, causal, 100k custom and generic, expiry/maintenance,
+   catalog, and migration-shape gates. Do not touch Main schema yet. Its
+   private handoff is
+   `/Users/brien/urnetwork/temp/fp2-completed-priority.Nm69B1mI/TRANSITION-20260928.md`
+   (SHA-256 `2b6eb6b0a211db751b31a2da40744e6fc29c490561b7bffbf93bb9dcd3fc6863`).
+3. Reconcile the exact scheduler patch with the now-shared native and
+   reliability files; run the corrected writer-to-FP2 causal control, full
+   final model/work/monitor normal and race gates, vet, and migration catalog
+   audit. Inspect source/worktree overlap before any commit. The independent
+   test evidence lives under
+   `/Users/brien/urnetwork/monitor/fp2-gate-recovery.uGQ629ah`.
+4. Commit reviewed changes, then stage rollout carefully. The scheduler's
+   API receipt writer must be available before completion-capable Taskworkers;
+   the native Taskworker publisher must produce complete manifests before an
+   API native reader is trusted. These dependencies require an explicit
+   staged build/feature boundary; do **not** deploy one combined API/Taskworker
+   version and assume both ordering contracts hold. Apply and audit needed
+   migrations before activating receipt writes. Attest receipt-writer
+   convergence and a full four-hour delivered window before enabling the new
+   priority; an epoch age alone is not delivery proof. Keep legacy ordering
+   until that condition holds. Use the already-authorized local build/deploy
+   workflow only after gates, recording exact versions, artifact/source and
+   config generations. A Connect deploy cycles live connections; do not add
+   one without a demonstrated dependency.
+5. After each rollout, compare matched request-local native Quality/Speed
+   supply and online fallback, accepted URL successes/s versus
+   `eligible*10/14400`, per-stage failure/time distributions, worker
+   goroutines/memory, PostgreSQL statement deltas and CPU, and contract
+   backlog/financial failures. The target is a **measured**, sustained full
+   eligible cycle within four hours, not merely higher worker count or a
+   successful deployment. Keep repairing and redeploying only proven causes.
+
+## Cross-host transfer checkpoint: 2026-09-28 21:01 UTC
+
+The operator requested a stop for transfer to another host. This section
+supersedes the live-session instructions above: the authoritative Main monitor
+watcher PID 9421/session 86987 was gracefully stopped; its child tails exited.
+No successor watcher was launched. The first active run completed and the
+20:54:22 UTC URL frame paged: 113,080 eligible, zero quota-complete, 113,009
+overdue, and 915,037 accepted successes still needed. Its hourly success-rate
+source was incomplete, so this frame cannot establish throughput. The sole
+ledger records the stop as `main-fp2-cross-host-pause-20260928T2101Z`.
+Monitoring is **not** currently continuous. On the new host, establish a
+single pollable watcher, attest its source/binary and ten tails, and preserve
+the 15-minute active-probe cadence; do not infer a healthy interval from the
+gap. The staged replacement binary on this host was never activated.
+
+The shared full `./model ./taskworker/work` normal gate was attempted with the
+attested Darwin Go 1.26.7 and local test environment. `./model` hit its
+20-minute package timeout during numerous TestEnv database setups; the
+remaining combined run was stopped. This is **not** a clean release gate and
+not evidence of a particular FP2 product regression. The new agent should
+first run the focused owning tests in isolation, then diagnose the full-suite
+timeout before calling the merged tree green. Full race remains pending.
+
+The private completed-run scheduler at
+`/Users/brien/urnetwork/temp/fp2-completed-priority.Nm69B1mI/server`
+is frozen after the operator's stop. Its generic v2 tests passed claims and
+quiet maintenance at 100,000 providers across 1/3/4/256 shards, with populated
+reliability, security and URL-history tables. Populated expiry/promotion passed
+at 1/3/4 shards, but **expiry at 256 shards failed the bounded-work oracle**:
+8,515 cycle reads and 34,422 buffers from repeated bounded-key scans. A
+parameterized lateral, locked lookup correction was then written; the v3 run
+compiled and passed its pure oracle but was interrupted before the 100,000-row
+generic cases completed. It is **unverified**, not a green fix. Re-run generic
+normal/race, custom plans, causal pre-fix, functional, catalog and migration
+tests. Never treat the interrupted v3 as PASS. Exact private evidence and
+pre-fix SQL are in `.fp2-generic-evidence/` on this host; those logs may include
+environment diagnostics and must not be added to a product commit. The
+portable source checkpoint/commit, once created, is identified below.
+
+For transfer, obtain the committed Server branch and this document on the new
+host, then independently configure local Vault/test credentials and reread
+`monitor/RUN-MAIN.md`. A chat opened on another host does not transfer this
+host's process/session handles, local uncommitted files, Vault, or private
+test artifacts. Do not restart probes, tests, migrations or deployment merely
+because a process handle is absent on the new host; first inspect the actual
+source, deployed versions, ledger, and current Main state.
+
+Additional bounded investigations are sealed separately in
+`/Users/brien/urnetwork/temp/fp2-contract-lane-handoff.ls5u2PWK/HANDOFF.md`
+(SHA-256 `87f7af3b530b502331192b7ac8f6cdb2ae451be6f88c296052fdefcff6b2a643`):
+the pending all-invalid reliability causal test, numeric-only PostgreSQL
+statement pair, young idle-transaction attribution, contract-generation
+controls, and DNS/quality-dashboard follow-ups. None is a proved Main fix or
+authority to bypass the release gate. Do not use private temporary research
+artifacts as a substitute for checked-in tests and source once a fix lands.

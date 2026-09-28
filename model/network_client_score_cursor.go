@@ -5,7 +5,9 @@ package model
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"maps"
 	mathrand "math/rand"
@@ -16,15 +18,21 @@ import (
 )
 
 type clientScorePage struct {
-	key           string
-	expectedCount int
+	key              string
+	expectedCount    int
+	nativeKey        string
+	nativeGeneration string
+	nativeChecksum   [sha256.Size]byte
 }
 
 type clientScoreCursor struct {
-	pages       []clientScorePage
-	nextPage    int
-	readCount   int
-	observation *findProviders2LoadObservation
+	pages            []clientScorePage
+	nextPage         int
+	readCount        int
+	missingPages     int
+	sourceIncomplete bool
+	nativeOnly       bool
+	observation      *findProviders2LoadObservation
 }
 
 // Facet priority is unchanged. Within a facet, shuffle once for the whole
@@ -74,18 +82,52 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 	}
 	pages := self.take(additionalRows)
 	pipe := r.Pipeline()
-	commands := make([]*redis.StringCmd, 0, len(pages))
+	type pageRead struct {
+		page   clientScorePage
+		legacy *redis.StringCmd
+		native *redis.SliceCmd
+	}
+	commands := make([]pageRead, 0, len(pages))
 	for _, page := range pages {
-		commands = append(commands, pipe.Get(ctx, page.key))
+		read := pageRead{page: page}
+		if page.nativeKey == "" {
+			read.legacy = pipe.Get(ctx, page.key)
+		} else {
+			read.native = pipe.HMGet(ctx, page.nativeKey, "g", page.key)
+		}
+		commands = append(commands, read)
 	}
 	if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
 		clientScoreReadMetrics.samples.Inc()
 		return nil, fmt.Errorf("read client score samples: %w", err)
 	}
 	scores := map[server.Id]*ClientScore{}
+	var sourceErr error
 	for _, command := range commands {
-		data, _ := command.Bytes()
+		var data []byte
+		if command.native == nil {
+			data, _ = command.legacy.Bytes()
+		} else {
+			values, _ := command.native.Result()
+			if len(values) != 2 {
+				sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: incomplete page response", errClientScoreNativeUnavailable))
+				continue
+			}
+			generation, generationOk := values[0].(string)
+			value, valueOk := values[1].(string)
+			if !generationOk || !valueOk || generation != command.page.nativeGeneration {
+				sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: missing or changed page", errClientScoreNativeUnavailable))
+				continue
+			}
+			data = []byte(value)
+			if len(data) < sha256.Size || !bytes.Equal(data[:sha256.Size], command.page.nativeChecksum[:]) || sha256.Sum256(data[sha256.Size:]) != command.page.nativeChecksum {
+				sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: page checksum mismatch", errClientScoreNativeUnavailable))
+				continue
+			}
+			data = data[sha256.Size:]
+		}
 		if len(data) == 0 {
+			self.missingPages++
 			if self.observation != nil {
 				self.observation.missingPages++
 			}
@@ -93,11 +135,19 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 		}
 		sample, err := decodeClientScoreSample(data)
 		if err != nil {
-			return nil, err
+			sourceErr = errors.Join(sourceErr, err)
+			continue
+		}
+		if command.native != nil && len(sample) != command.page.expectedCount {
+			sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: page count mismatch", errClientScoreNativeUnavailable))
+			continue
 		}
 		mergeClientScoreSample(scores, sample)
 	}
-	return scores, nil
+	if sourceErr != nil {
+		self.sourceIncomplete = true
+	}
+	return scores, sourceErr
 }
 
 // Reuse the existing finite exclusion allowance. Already-known explicit

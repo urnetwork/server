@@ -94,8 +94,9 @@ func TestFindProviders2PostFilterRefillReachesSameTargetOnline(t *testing.T) {
 	})
 }
 
-// Primary read failures cannot become empty successes. Optional other-mode
-// refill failures keep only the already-validated primary sample.
+// A cache read failure is explicitly unknown, not native exhaustion. With no
+// usable fallback it can answer empty, while an optional failure retains every
+// validated higher-priority provider; neither path leaks filtered candidates.
 func TestFindProviders2RefillReadErrorsPreserveModeBoundary(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -119,6 +120,9 @@ func TestFindProviders2RefillReadErrorsPreserveModeBoundary(t *testing.T) {
 							score := onlineBackfillScore(true, 1)
 							score.IpFamilies = ClientScoreIpFamilyV4 | ClientScoreIpFamilyV6
 							if preferredCount == 5 {
+								validUntil := server.NowUtc().Add(time.Hour)
+								score.EgressValidUntil = &validUntil
+								score.PassesMinimums = map[RankMode]bool{mode: true}
 								allowed[score.ClientId] = true
 							} else {
 								score.NetworkOnly = true
@@ -144,16 +148,19 @@ func TestFindProviders2RefillReadErrorsPreserveModeBoundary(t *testing.T) {
 				_, err := pipe.Exec(ctx)
 				server.Raise(err)
 			})
+			source := "primary"
+			if failedMode == RankModeSpeed {
+				source = "alternate"
+			}
+			labels := map[string]string{"rank_mode": failedMode, "source": source, "outcome": "unavailable"}
+			before := selectionMetricCount(t, "urnetwork_findproviders2_native_source_outcomes_total", labels)
 			clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "refill-read-test", false, false))
 			result, err := FindProviders2(&FindProviders2Args{Specs: []*ProviderSpec{{LocationId: &locationId}}}, clientSession)
-			if failedMode == RankModeQuality {
-				if err == nil || result != nil {
-					t.Fatal("primary refill read failure became a successful result")
-				}
-				continue
-			}
 			if err != nil || result == nil || len(result.Providers) != len(allowed) {
-				t.Fatalf("optional refill failure discarded validated primary supply: err=%v", err)
+				t.Fatalf("refill failure changed validated fallback supply: mode=%s err=%v", failedMode, err)
+			}
+			if after := selectionMetricCount(t, "urnetwork_findproviders2_native_source_outcomes_total", labels); after != before+1 {
+				t.Fatal("failed refill was not explicitly unavailable")
 			}
 			for _, provider := range result.Providers {
 				if !allowed[provider.ClientId] {
