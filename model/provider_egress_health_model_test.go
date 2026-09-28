@@ -148,7 +148,7 @@ func TestSetProviderEgressHealthUpsertReplaces(t *testing.T) {
 		connect.AssertEqual(t, health.ReputationOK, 2)
 		connect.AssertEqual(t, health.FailedNames, "")
 		connect.AssertEqual(t, health.ReputationFailedNames, "")
-		connect.AssertEqual(t, health.TLSAuthenticationFailure, false)
+		connect.AssertEqual(t, health.TLSAuthenticationFailure, true)
 		connect.AssertEqual(t, health.ClassResults["dns"], ProviderEgressHealthClassResult{OK: 26, Total: 26})
 		if health.MeasuredAt.UTC().Before(later.Add(-time.Minute)) {
 			t.Errorf("MeasuredAt = %s, want the later run's %s", health.MeasuredAt.UTC(), later)
@@ -185,20 +185,12 @@ func TestStaleEgressHealthStopsGatingTheProvider(t *testing.T) {
 		fresh := server.NewId()
 		stale := server.NewId()
 
-		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
-			ClientId:   fresh,
-			MeasuredAt: now.Add(-time.Hour),
-			OKCount:    100, Total: 100,
-		})
+		egressTestHealth(ctx, fresh, now.Add(-time.Hour), 100, 0)
 		// deliberately a minute PAST the boundary rather than exactly on it:
 		// server.NowUtc() advances between this write and the query, so an
 		// exact-boundary fixture would land on whichever side the elapsed
 		// microseconds put it
-		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
-			ClientId:   stale,
-			MeasuredAt: now.Add(-ProviderEgressHealthMaxAge - time.Minute),
-			OKCount:    100, Total: 100,
-		})
+		egressTestHealth(ctx, stale, now.Add(-ProviderEgressHealthMaxAge-time.Minute), 100, 0)
 
 		f := newProviderCountFilter(ctx, true)
 
@@ -215,9 +207,9 @@ func TestStaleEgressHealthStopsGatingTheProvider(t *testing.T) {
 }
 
 // A hard TLS-authenticity failure does not become safe merely because the
-// prober stalls. It remains excluded until a later clean run replaces the row;
-// otherwise an interceptor is silently re-admitted at the age boundary.
-func TestTLSAuthenticationFailurePersistsUntilCleanRun(t *testing.T) {
+// prober stalls. An aggregate legacy finding lacks a trustworthy target, so
+// neither age nor an unrelated later passing batch can clear it.
+func TestTLSAuthenticationFailureWithoutUrlRetainsQuarantine(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		clientId := server.NewId()
@@ -234,8 +226,8 @@ func TestTLSAuthenticationFailurePersistsUntilCleanRun(t *testing.T) {
 			ClientId: clientId, MeasuredAt: server.NowUtc(),
 			OKCount: 131, Total: 131, TLSAuthenticationFailure: false,
 		})
-		if GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx)[clientId] {
-			t.Fatal("a later clean run did not restore the provider")
+		if !GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx)[clientId] {
+			t.Fatal("an unrelated aggregate run cleared unidentified TLS evidence")
 		}
 	})
 }

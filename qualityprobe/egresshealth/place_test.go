@@ -314,14 +314,14 @@ func TestDestinationPlacesWireFormat(t *testing.T) {
 // there, so a pool carrying one is refused.
 func TestPoolRefusesAPlaceItCannotMatch(t *testing.T) {
 	for _, place := range []Place{{Country: "USA"}, {Country: "US"}, {Country: ""}, {Country: "u1"}, {Region: "Texas"}} {
-		pool := BuiltinPool()
+		pool := testCatalogPool()
 		pool.Destinations[0].Incompatible = []Place{place}
 		err := ValidateDestinations(pool.Destinations)
 		if err == nil || !strings.Contains(err.Error(), "alpha-2") {
 			t.Errorf("incompatible place %+v was accepted: %v", place, err)
 		}
 	}
-	pool := BuiltinPool()
+	pool := testCatalogPool()
 	pool.Destinations[0].Incompatible = []Place{{Country: "us", Region: "Texas"}, {Country: "cn"}}
 	if err := ValidateDestinations(pool.Destinations); err != nil {
 		t.Errorf("valid places were refused: %v", err)

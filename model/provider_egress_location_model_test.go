@@ -344,13 +344,9 @@ func TestGetProviderEgressLocationDue(t *testing.T) {
 	})
 }
 
-// A current blackhole failure already proves that a fixed provider tunnel
-// cannot carry any destination. Offering the same provider to the expensive
-// full queue spends its location and health stages without producing evidence.
-// Only that current explicit failure is deferred: a passing, stale, or absent
-// verdict remains fail-open, and the independent cheap queue must still offer
-// deferred failures so recovery can restore full probing.
-func TestGetProviderEgressLocationDueDefersOnlyCurrentBlackholes(t *testing.T) {
+// Cheap reachability telemetry cannot suppress full quality evidence. Every
+// otherwise eligible provider stays due across cheap-check states and lanes.
+func TestGetProviderEgressLocationDueIgnoresCheapBlackholeFailures(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc()
@@ -428,9 +424,8 @@ func TestGetProviderEgressLocationDueDefersOnlyCurrentBlackholes(t *testing.T) {
 				label := fmt.Sprintf("%s/%s", lane, verdict.name)
 				if verdict.name == "current failure" {
 					currentFailures[clientId] = label
-				} else {
-					wantFullDue[clientId] = label
 				}
+				wantFullDue[clientId] = label
 
 				switch lane {
 				case "stale location":
@@ -469,11 +464,6 @@ func TestGetProviderEgressLocationDueDefersOnlyCurrentBlackholes(t *testing.T) {
 		if len(fullDue) != len(wantFullDue) {
 			t.Fatalf("len(full due) = %d, want %d", len(fullDue), len(wantFullDue))
 		}
-		for clientId, label := range currentFailures {
-			if slices.Contains(fullDue, clientId) {
-				t.Errorf("full due contains current blackhole failure %s", label)
-			}
-		}
 		for clientId, label := range wantFullDue {
 			if !slices.Contains(fullDue, clientId) {
 				t.Errorf("full due is missing fail-open provider %s", label)
@@ -485,6 +475,35 @@ func TestGetProviderEgressLocationDueDefersOnlyCurrentBlackholes(t *testing.T) {
 			if !slices.Contains(blackholeDue, clientId) {
 				t.Errorf("cheap blackhole due is missing deferred provider %s", label)
 			}
+		}
+	})
+}
+
+// The refresh target leaves four hours of headroom before the eight-hour
+// evidence deadline, even when the last location remains current for days.
+func TestGetProviderEgressLocationDueRefreshesWithinFourHours(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		country := &Location{LocationType: LocationTypeCountry, Country: "Synthetic Country", CountryCode: "zz"}
+		CreateLocation(ctx, country)
+		fresh, due := server.NewId(), server.NewId()
+		for i, clientId := range []server.Id{fresh, due} {
+			testing_connectProbeableProvider(t, ctx, clientId, country.LocationId, fmt.Sprintf("192.0.2.%d:0", i+1), ProvideModePublic)
+			SetProviderEgressLocation(ctx, &ProviderEgressLocation{ClientId: clientId, LocationId: country.LocationId, ObservedAt: now})
+			age := 2 * time.Hour
+			if clientId == due {
+				age = 4*time.Hour + time.Second
+			}
+			SetProviderEgressHealth(ctx, &ProviderEgressHealth{ClientId: clientId, MeasuredAt: now.Add(-age), OKCount: 1, Total: 1})
+		}
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+		got := GetProviderEgressLocationDue(ctx, now.Add(-ProviderEgressLocationMaxAge/2), now, 10)
+		if !slices.Equal(got, []server.Id{due}) {
+			t.Fatalf("four-hour refresh candidates = %v, want %s", got, due)
+		}
+		if ProviderEgressProbeAttemptBackoff >= 4*time.Hour {
+			t.Fatalf("attempt retry %s can consume the entire refresh cycle", ProviderEgressProbeAttemptBackoff)
 		}
 	})
 }

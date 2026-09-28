@@ -11,6 +11,7 @@ import (
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 // Without the operator secret the pool is not served.
@@ -23,11 +24,22 @@ func TestProviderEgressDestinationsRejectsMissingSecret(t *testing.T) {
 	}
 }
 
-// Under the secret a fresh deployment serves the seeded built-in table, in the
-// shape the prober decodes and validates.
+// Under the secret a fresh deployment serves only its configured catalog in
+// the shape the prober decodes and validates.
 func TestProviderEgressDestinationsServesThePool(t *testing.T) {
 	t.Setenv("WARP_ENV", "local")
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte(`schema_version: 1
+destinations:
+  - name: first-synthetic-site
+    class: site
+    category: reference
+    url: https://first.example/
+  - name: second-synthetic-site
+    class: site
+    category: reference
+    url: https://second.example/
+`)))
 		const secret = "correct-operator-secret-0123456789"
 		defer withStubOperatorIngestSecret(secret)()
 
@@ -42,7 +54,7 @@ func TestProviderEgressDestinationsServesThePool(t *testing.T) {
 		if err := json.Unmarshal(w.Body.Bytes(), &pool); err != nil {
 			t.Fatalf("decode pool: %v", err)
 		}
-		if len(pool.Destinations) != len(egresshealth.Destinations()) || pool.Version < 1 || pool.GeneratedAt.IsZero() {
+		if len(pool.Destinations) != 2 || pool.Version < 1 || pool.GeneratedAt.IsZero() {
 			t.Fatalf("served pool = %d destinations, version %d, generated %s", len(pool.Destinations), pool.Version, pool.GeneratedAt)
 		}
 		if err := egresshealth.ValidateDestinations(pool.Destinations); err != nil {

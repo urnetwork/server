@@ -612,6 +612,10 @@ func (self *egressProbeMetricsReporter) submitEgressHealthScored(
 		}
 	}
 	err := self.inner.SubmitEgressHealth(ctx, providerClientId, scored)
+	if err == nil && scored != nil && !scored.CycleStartedAt.IsZero() {
+		urlProbeOutcomes.WithLabelValues("success").Add(float64(scored.OkCount))
+		urlProbeOutcomes.WithLabelValues("error").Add(float64(scored.Total - scored.OkCount))
+	}
 	// A nil result is the ingest client's intentional no-request path.
 	if scored != nil {
 		egressProbeSubmissionOutcomesTotal.WithLabelValues("health", egressProbeSubmissionOutcome(err, egresshealth.ErrUnsupported)).Inc()

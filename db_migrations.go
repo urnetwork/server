@@ -9084,4 +9084,125 @@ var migrations = []any{
 		BEFORE INSERT ON competition_staging_winner_approval
 		FOR EACH ROW EXECUTE FUNCTION competition_staging_winner_approval_guard();
 	`),
+
+	// Explicit ARIN exceptions follow connection location refreshes into the
+	// existing provider rollup. No IP address or inferred hosting flag is stored.
+	newSqlMigration(`
+		ALTER TABLE network_client_location
+			ADD COLUMN arin_risk boolean NOT NULL DEFAULT false,
+			ADD COLUMN arin_non_quality boolean NOT NULL DEFAULT false;
+		ALTER TABLE network_client_location_reliability
+			ADD COLUMN arin_risk boolean NOT NULL DEFAULT false,
+			ADD COLUMN arin_non_quality boolean NOT NULL DEFAULT false;
+	`),
+
+	// Accepted probe runs are immutable and idempotent. Quota progress belongs
+	// to durable rolling four-hour progress, separate from the eight-hour serving window.
+	newSqlMigration(`
+		CREATE TABLE provider_egress_health_history (
+			run_id uuid PRIMARY KEY,
+			client_id uuid NOT NULL,
+			measured_at timestamp NOT NULL,
+			ok_count integer NOT NULL CHECK (ok_count >= 0),
+			total_count integer NOT NULL CHECK (total_count >= ok_count),
+			class_results jsonb NOT NULL,
+			tls_authentication_failure boolean NOT NULL,
+			cycle_started_at timestamp NULL
+		);
+		CREATE INDEX provider_egress_health_history_client_time
+			ON provider_egress_health_history (client_id, measured_at);
+		CREATE INDEX provider_egress_health_history_time
+			ON provider_egress_health_history (measured_at);
+		CREATE TABLE provider_egress_probe_cycle (
+			client_id uuid PRIMARY KEY,
+			cycle_started_at timestamp NOT NULL,
+			success_count integer NOT NULL DEFAULT 0 CHECK (success_count >= 0),
+			error_count integer NOT NULL DEFAULT 0 CHECK (error_count >= 0),
+			latest_result_at timestamp NULL,
+			next_attempt_at timestamp NOT NULL
+		);
+		CREATE INDEX provider_egress_probe_cycle_next_attempt
+			ON provider_egress_probe_cycle (next_attempt_at, client_id);
+	`),
+
+	// A delayed security event must not be hidden by a newer unmeasured report.
+	// URL-specific recovery requires newer authenticated TLS evidence, even when
+	// quality fails; equal-time security findings win. Legacy unknown targets stay.
+	newSqlMigration(`
+		ALTER TABLE provider_egress_health ADD COLUMN security_measured_at timestamp;
+		UPDATE provider_egress_health SET security_measured_at = measured_at
+			WHERE tls_authentication_failure OR ok_count > 0;
+	`),
+
+	// Admission maintains this scheduling hint once per rollup. The claim
+	// rechecks authoritative gates while its head index skips ineligible rows.
+	newSqlMigration(`
+		ALTER TABLE provider_egress_probe_cycle ADD COLUMN eligible boolean NOT NULL DEFAULT false;
+		CREATE INDEX provider_egress_probe_cycle_eligible_next_attempt
+			ON provider_egress_probe_cycle (next_attempt_at, client_id) WHERE eligible;
+	`),
+
+	// Rolling quota reads at most ten accepted individual URL successes. Grouped
+	// legacy reports remain audit evidence but cannot satisfy this URL target.
+	newSqlMigration(`
+		ALTER TABLE provider_egress_health_history ADD COLUMN url_probe boolean NOT NULL DEFAULT false;
+		UPDATE provider_egress_health_history SET url_probe=true
+			WHERE cycle_started_at IS NOT NULL AND total_count=1;
+		CREATE INDEX provider_egress_health_history_url_success
+			ON provider_egress_health_history(client_id, measured_at DESC)
+			WHERE url_probe AND ok_count=1;
+		ALTER TABLE provider_egress_probe_cycle ADD COLUMN outcome_count bigint NOT NULL DEFAULT 0;
+		UPDATE provider_egress_probe_cycle AS cycle SET outcome_count=history.outcomes
+		FROM (SELECT client_id,COUNT(*) AS outcomes FROM provider_egress_health_history
+			WHERE url_probe GROUP BY client_id) AS history
+		WHERE cycle.client_id=history.client_id;
+	`),
+
+	// Certificate findings are recovered only by a newer authenticated response
+	// from the exact affected URL. Legacy aggregate findings retain quarantine
+	// until their target can be reconstructed from trustworthy historical data.
+	newSqlMigration(`
+		CREATE TABLE provider_egress_url_security (
+			client_id uuid NOT NULL,
+			url_key varchar(64) NOT NULL,
+			destination jsonb NOT NULL,
+			measured_at timestamp NOT NULL,
+			tls_failure boolean NOT NULL,
+			PRIMARY KEY (client_id,url_key)
+		);
+		CREATE INDEX provider_egress_url_security_unresolved
+			ON provider_egress_url_security(client_id,url_key) WHERE tls_failure;
+		ALTER TABLE provider_egress_health ADD COLUMN legacy_tls_authentication_failure boolean NOT NULL DEFAULT false;
+		UPDATE provider_egress_health SET legacy_tls_authentication_failure=tls_authentication_failure;
+		ALTER TABLE provider_egress_health_history ADD COLUMN url_probe_evidence jsonb;
+	`),
+
+	// Stable logical routing lets an empty shard seek only its own due heads.
+	// Existing receipt tokens, pacing deadlines, and counts do not change.
+	newSqlMigration(`
+		ALTER TABLE provider_egress_probe_cycle ADD COLUMN slot_id smallint
+			GENERATED ALWAYS AS (((hashtext(client_id::text)%1024)+1024)%1024) STORED;
+		CREATE INDEX provider_egress_probe_cycle_slot_next_attempt
+			ON provider_egress_probe_cycle(slot_id,next_attempt_at,client_id) WHERE eligible;
+	`),
+
+	// Version zero retains legacy history without asserting the real-content,
+	// redirect, timing, and wire-throughput contract of URL policy version one.
+	newSqlMigration(`
+		ALTER TABLE provider_egress_health_history
+			ADD COLUMN url_probe_policy_version integer NOT NULL DEFAULT 0;
+		DROP INDEX provider_egress_health_history_url_success;
+		CREATE INDEX provider_egress_health_history_url_success
+			ON provider_egress_health_history(client_id, measured_at DESC)
+			WHERE url_probe AND url_probe_policy_version=1 AND ok_count=1;
+	`),
+
+	// A false exception bit is not proof a connected address was classified.
+	// Connect stamps successful lookups against the actual loaded MMDB epoch;
+	// legacy rows and explicit lookup overrides remain visibly unclassified.
+	newSqlMigration(`
+		ALTER TABLE network_client_location
+			ADD COLUMN arin_lookup_at timestamp,
+			ADD COLUMN arin_database_build_epoch bigint NOT NULL DEFAULT 0;
+	`),
 }

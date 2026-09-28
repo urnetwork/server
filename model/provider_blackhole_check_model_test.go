@@ -182,13 +182,8 @@ func TestProviderBlackholeCheckTlsFailureIsDarkAtOnce(t *testing.T) {
 	}
 }
 
-// A current failing check must override a passing health measurement.
-//
-// This is the whole reason the check exists. Egress health sweeps the fleet
-// over hours to days, so a provider that goes dark keeps its passing tally --
-// and its place in the public list -- until the next sweep reaches it. The
-// check closes that window, once its failures are a verdict.
-func TestBlackholedProviderFailsTheHealthGate(t *testing.T) {
+// Legacy cheap-check telemetry cannot override the accepted URL history.
+func TestLegacyBlackholeDoesNotOverrideUrlRatio(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc()
@@ -214,9 +209,8 @@ func TestBlackholedProviderFailsTheHealthGate(t *testing.T) {
 		if !f.passesHealth(healthy) {
 			t.Errorf("a provider measured healthy and checked ok must pass the gate")
 		}
-		if f.passesHealth(blackholed) {
-			t.Errorf("a provider whose current checks say nothing got through must NOT pass the gate, " +
-				"even with a passing health measurement -- that combination is exactly a provider that went dark since it was last swept")
+		if !f.passesHealth(blackholed) {
+			t.Error("legacy blackhole telemetry overrode passing URL history")
 		}
 	})
 }

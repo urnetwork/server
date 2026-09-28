@@ -335,6 +335,15 @@ func SetConnectionLocation(
 		// does not describe it. The row stores NULL, and the derive phase
 		// gives a probed genesis its own radius (connect/GEOMAP.md §5.1)
 		scores := &model.ConnectionLocationScores{}
+		addr, parseErr := netip.ParseAddr(clientIp)
+		if parseErr != nil {
+			return parseErr
+		}
+		arinInfo, arinErr := server.GetArinInfo(addr)
+		if arinErr != nil {
+			return arinErr
+		}
+		setArinConnectionFacts(scores, arinInfo)
 
 		// keep the ARIN org-vs-country foreign check on the probed path too,
 		// so a probed provider is ranked on equal terms with an equivalent

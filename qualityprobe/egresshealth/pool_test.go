@@ -52,7 +52,7 @@ func marshalPool(t *testing.T, pool *Pool) string {
 // shape comes back whole -- destinations, contracts, body checks, version and
 // profile -- fetched under the operator secret.
 func TestFetchPoolDecodesTheServedPool(t *testing.T) {
-	served := BuiltinPool()
+	served := testCatalogPool()
 	served.Version = 17
 	served.GeneratedAt = time.Date(2026, 9, 23, 6, 0, 0, 0, time.UTC)
 	served.Profile = RequestProfile{UserAgent: "Mozilla/5.0 pool-agent", Headers: map[string]string{"Accept-Language": "de-DE,de;q=0.9"}}
@@ -72,8 +72,8 @@ func TestFetchPoolDecodesTheServedPool(t *testing.T) {
 		t.Errorf("profile = %+v, want %+v", pool.Profile, served.Profile)
 	}
 	// The built-in table survives the wire unchanged -- which is what lets the
-	// server seed its pool from Destinations() and serve it back.
-	if !reflect.DeepEqual(pool.Destinations, Destinations()) {
+	// server seed its pool from testCatalogDestinations() and serve it back.
+	if !reflect.DeepEqual(pool.Destinations, testCatalogDestinations()) {
 		t.Fatal("the built-in table did not round-trip through the pool's wire format unchanged")
 	}
 }
@@ -139,13 +139,12 @@ func TestPoolWireFormat(t *testing.T) {
 // hand over a runnable pool is ErrPoolUnavailable, which the caller answers by
 // running the built-in table. None of them may come back as a pool.
 func TestFetchPoolFailsOnEveryUnusableAnswer(t *testing.T) {
-	valid := marshalPool(t, BuiltinPool())
+	valid := marshalPool(t, testCatalogPool())
 	withDestinations := func(dests ...Destination) string {
-		pool := BuiltinPool()
+		pool := testCatalogPool()
 		pool.Destinations = append(pool.Destinations, dests...)
 		return marshalPool(t, pool)
 	}
-	onlySites := &Pool{Destinations: []Destination{{Name: "s", Class: ClassSite, Url: "https://s.example"}}}
 
 	for name, tc := range map[string]struct {
 		status int
@@ -158,19 +157,18 @@ func TestFetchPoolFailsOnEveryUnusableAnswer(t *testing.T) {
 		"not json":           {status: http.StatusOK, body: "<html>maintenance</html>", want: "decoding"},
 		"null":               {status: http.StatusOK, body: "null", want: "at least one destination"},
 		"empty":              {status: http.StatusOK, body: `{"version":1,"destinations":[]}`, want: "at least one destination"},
-		"a class missing":    {status: http.StatusOK, body: marshalPool(t, onlySites), want: "has no destination"},
 		"plaintext url":      {status: http.StatusOK, body: withDestinations(Destination{Name: "plain", Class: ClassSite, Url: "http://plain.example"}), want: "https"},
 		"another port":       {status: http.StatusOK, body: withDestinations(Destination{Name: "port", Class: ClassSite, Url: "https://port.example:8443"}), want: "443"},
 		"unknown class":      {status: http.StatusOK, body: withDestinations(Destination{Name: "rep", Class: Class("reputation"), Url: "https://rep.example"}), want: "reputation"},
-		"duplicate name":     {status: http.StatusOK, body: withDestinations(Destination{Name: "google", Class: ClassSite, Url: "https://google.example"}), want: "repeats"},
+		"duplicate name":     {status: http.StatusOK, body: withDestinations(Destination{Name: "synthetic-dns-00", Class: ClassSite, Url: "https://duplicate.example"}), want: "repeats"},
 		"unverified dns":     {status: http.StatusOK, body: withDestinations(Destination{Name: "doh2", Class: ClassDns, Url: "https://doh2.example/dns-query"}), want: "dns_json"},
 		"unverified portal":  {status: http.StatusOK, body: withDestinations(Destination{Name: "portal2", Class: ClassConnectivity, Url: "https://portal2.example"}), want: "captive portal"},
 		"refusal declared":   {status: http.StatusOK, body: withDestinations(Destination{Name: "refused", Class: ClassSite, Url: "https://refused.example", Expect: ExpectStatus, Status: 403}), want: "2xx or 3xx"},
 		"reachable off site": {status: http.StatusOK, body: withDestinations(Destination{Name: "reach", Class: ClassCdn, Url: "https://reach.example", Expect: ExpectReachable}), want: "confined"},
 		"unknown expect":     {status: http.StatusOK, body: strings.Replace(valid, `"expect":"body"`, `"expect":"sometimes"`, 1), want: "unknown expect"},
 		"numeric expect":     {status: http.StatusOK, body: strings.Replace(valid, `"expect":"body"`, `"expect":0`, 1), want: "decoding"},
-		"unknown check":      {status: http.StatusOK, body: strings.Replace(valid, `"kind":"ip_text"`, `"kind":"looks_fine"`, 1), want: "unknown body check"},
-		"empty contains":     {status: http.StatusOK, body: strings.Replace(valid, `"text":"Success"`, `"text":""`, 1), want: "names no text"},
+		"unknown check":      {status: http.StatusOK, body: strings.Replace(valid, `"kind":"dns_json"`, `"kind":"looks_fine"`, 1), want: "unknown body check"},
+		"empty contains":     {status: http.StatusOK, body: strings.Replace(valid, `"text":"synthetic-success"`, `"text":""`, 1), want: "names no text"},
 	} {
 		srv, _ := poolServer(t, tc.status, tc.body)
 		pool, err := FetchPool(context.Background(), srv.Client(), srv.URL+PoolPath, "s3cret")
@@ -205,8 +203,8 @@ func TestFetchPoolFailsOnEveryUnusableAnswer(t *testing.T) {
 // pool from decoding, or every server-side addition would need a prober
 // release.
 func TestFetchPoolIgnoresServerBookkeeping(t *testing.T) {
-	body := strings.Replace(marshalPool(t, BuiltinPool()), `"name":"google"`, `"category":"search","region":"us","retire_count":2,"name":"google"`, 1)
-	body = strings.Replace(body, `{"version":0`, `{"etag":"abc","version":0`, 1)
+	body := strings.Replace(marshalPool(t, testCatalogPool()), `"name":"synthetic-dns-00"`, `"category":"search","region":"us","retire_count":2,"name":"synthetic-dns-00"`, 1)
+	body = strings.Replace(body, `{"version":1`, `{"etag":"abc","version":1`, 1)
 	srv, _ := poolServer(t, http.StatusOK, body)
 	if _, err := FetchPool(context.Background(), srv.Client(), srv.URL+PoolPath, "s"); err != nil {
 		t.Fatalf("a pool carrying server bookkeeping was refused: %s", err)
@@ -217,11 +215,11 @@ func TestFetchPoolIgnoresServerBookkeeping(t *testing.T) {
 // pool and the fallback, so it has to pass the very validation a served pool
 // does.
 func TestBuiltinTableIsAValidPool(t *testing.T) {
-	if err := ValidateDestinations(Destinations()); err != nil {
+	if err := ValidateDestinations(testCatalogDestinations()); err != nil {
 		t.Fatalf("the built-in table is not a valid pool: %s", err)
 	}
-	pool := BuiltinPool()
-	if pool.Version != 0 || len(pool.Destinations) != len(destinations) || pool.Profile.UserAgent != DefaultRequestProfile().UserAgent {
+	pool := testCatalogPool()
+	if pool.Version != 1 || len(pool.Destinations) != len(testDestinations) || pool.Profile.UserAgent != DefaultRequestProfile().UserAgent {
 		t.Errorf("BuiltinPool = version %d, %d destinations, agent %q", pool.Version, len(pool.Destinations), pool.Profile.UserAgent)
 	}
 }

@@ -3409,10 +3409,15 @@ func UpdateLocationGroup(ctx context.Context, locationGroup *LocationGroup) bool
 }
 
 type ConnectionLocationScores struct {
-	NetTypeHosting int
-	NetTypePrivacy int
-	NetTypeVirtual int
-	NetTypeForeign int
+	// Explicit exceptions from the ARIN database, independent of ranking scores.
+	ArinRisk               bool
+	ArinNonQuality         bool
+	ArinLookupAt           *time.Time
+	ArinDatabaseBuildEpoch int64
+	NetTypeHosting         int
+	NetTypePrivacy         int
+	NetTypeVirtual         int
+	NetTypeForeign         int
 	// the lookup's accuracy radius in km, the genesis confidence of
 	// connect/GEOMAP.md §5.1; nil (NULL) for a location with none, such as an
 	// egress-probed one. It describes the genesis location below when one is
@@ -3535,9 +3540,13 @@ func SetConnectionLocation(
 		            net_type_foreign,
 		            network_id,
 		            accuracy_km,
-		            genesis_location_id
+		            genesis_location_id,
+		            arin_risk,
+		            arin_non_quality,
+		            arin_lookup_at,
+		            arin_database_build_epoch
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                 ON CONFLICT (connection_id) DO UPDATE
                 SET
                     client_id = $2,
@@ -3550,7 +3559,11 @@ func SetConnectionLocation(
                     net_type_foreign = $9,
                     network_id = $10,
                     accuracy_km = $11,
-                    genesis_location_id = $12
+                    genesis_location_id = $12,
+                    arin_risk = $13,
+                    arin_non_quality = $14,
+                    arin_lookup_at = $15,
+                    arin_database_build_epoch = $16
             `,
 			connectionId,
 			clientId,
@@ -3564,6 +3577,10 @@ func SetConnectionLocation(
 			networkId,
 			connectionLocationScores.AccuracyKm,
 			connectionLocationScores.GenesisLocationId,
+			connectionLocationScores.ArinRisk,
+			connectionLocationScores.ArinNonQuality,
+			connectionLocationScores.ArinLookupAt,
+			connectionLocationScores.ArinDatabaseBuildEpoch,
 		))
 	})
 	return
@@ -3759,37 +3776,9 @@ func distinctIds(ids ...*server.Id) []server.Id {
 	return distinct
 }
 
-// The share of destinations a provider must reach to count as healthy: 90%,
-// as 9/10. Compared exactly as `10*ok >= 9*total` rather than through a float
-// division, so the boundary is the same for every denominator.
-//
-// 90% because it cleanly separates working from broken on the real
-// population: the healthy fleet measures 129-131 of 131 destinations, while
-// a dead proxy measures 0 of 131. Nothing observed sits near the line, so
-// the exact figure is not load bearing -- it only has to be far above 0 and
-// below the ~98% a genuinely working provider always clears.
-//
-// Package scope, not function scope: both UpdateClientScores and
-// UpdateClientLocations gate on this now, and two copies could drift.
-const minEgressHealthOKNumerator = 9
-const minEgressHealthOKDenominator = 10
-
 const providerConfigResourceName = "provider.yml"
 
-// The old rollout flag, which after connect/GEOMAP.md §10.3 speaks only for a
-// rollup row written before the egress index existed: on, such a row is gated in both buckets on its 24 hour
-// health run and counted only where a probe observed it where it is listed
-// (decideProviderEgress). For every row the new rollup has written, the online
-// bucket took over the flag's decision about the unprobed -- an unprobed
-// provider is online when traffic shows it working, counted either way, and
-// never fails closed -- and the hard exclusions, the country gate and the 90 %
-// rule apply whatever the flag says.
-//
-// Defaulting to false is deliberate. A deployment can introduce the server
-// side of the probe pipeline before any prober has populated its tables. In
-// that state, treating every missing measurement as an individual failure
-// publishes an empty cache even though the connected provider fleet is
-// healthy.
+// Retains the old rollout setting for diagnostics; it no longer changes admission.
 func providerEgressTestEnabled() bool {
 	return providerEgressTestEnabledFromResource(
 		server.Config.SimpleResource(providerConfigResourceName),
@@ -3804,47 +3793,52 @@ func providerEgressTestEnabledFromResource(resource *server.SimpleResource, err 
 	return len(enabled) == 1 && enabled[0]
 }
 
-// providerCountFilter answers one question: does this provider count as real,
-// reachable supply?
-//
-// It exists so the advertised provider_count (UpdateClientLocations) and the
-// gated membership (UpdateClientScores) apply an IDENTICAL predicate. They ran
-// different rules before: membership was gated on egress health while the count
-// was not, so a location could survive the gate and still advertise providers
-// that no probe had ever reached.
-//
-// Current hard-failure evidence is always loaded: an explicit blackhole verdict
-// or an unauthenticated TLS identity is conclusive per-provider evidence, not a
-// dependency on broad fleet probe coverage. So is the observed country, which
-// the country gate reads whatever the rollout flag says (connect/GEOMAP.md
-// §10.3). The 24 hour health counts are loaded only when the flag is on: they
-// decide only rollup rows written before the egress index, whose own columns
-// carry the health evidence for every other row. These loops run over the
-// entire provider population, so a per-provider query here is one round trip
-// per provider.
+// Bulk evidence for the shared provider decision. Database lookups are once per
+// publication pass; request paths use its complete hard-exclusion snapshot.
 type providerCountFilter struct {
-	healthCounts map[server.Id]ProviderEgressHealthCounts
-	countryCodes map[server.Id]string
-	// blackholed is the FAILING set only, not a verdict for every provider:
-	// absent means "no current evidence this provider is dark", which covers
-	// both a passing check and no check at all. See
-	// GetAllProviderBlackholedClientIds for why it fails in that direction.
+	now               time.Time
+	arinRisk          map[server.Id]bool
+	arinNonQuality    map[server.Id]bool
+	reliabilityFailed map[server.Id]bool
+	healthCounts      map[server.Id]ProviderEgressHealthCounts
+	countryCodes      map[server.Id]string
+	// Legacy diagnostic only; it never changes bucket admission.
 	blackholed map[server.Id]bool
-	// tlsAuthenticationFailed is positive integrity-failure evidence. It is
-	// loaded and enforced even while broad percentage/location qualification is
-	// disabled, just like a current explicit blackhole verdict.
+	// Security exceptions persist until later authenticated TLS from the same URL.
 	tlsAuthenticationFailed map[server.Id]bool
 }
 
 func newProviderCountFilter(ctx context.Context, loadEgressEvidence bool) providerCountFilter {
 	f := providerCountFilter{
-		blackholed:              GetAllProviderBlackholedClientIds(ctx),
+		now:                     server.NowUtc(),
+		arinRisk:                map[server.Id]bool{},
+		arinNonQuality:          map[server.Id]bool{},
+		reliabilityFailed:       map[server.Id]bool{},
 		tlsAuthenticationFailed: GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx),
 		countryCodes:            GetAllProviderEgressCountryCodes(ctx),
+		healthCounts:            GetAllProviderEgressHealthCounts(ctx),
 	}
-	if loadEgressEvidence {
-		f.healthCounts = GetAllProviderEgressHealthCounts(ctx)
-	}
+	server.Db(ctx, func(conn server.PgConn) {
+		rows, err := conn.Query(ctx, `SELECT client_id, arin_risk, arin_non_quality,
+			NOT (`+providerReliabilityEligibilitySql("provider_location.client_id")+`)
+			FROM network_client_location_reliability AS provider_location`)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				var clientId server.Id
+				var risk, nonQuality, reliabilityFailed bool
+				server.Raise(rows.Scan(&clientId, &risk, &nonQuality, &reliabilityFailed))
+				if risk {
+					f.arinRisk[clientId] = true
+				}
+				if nonQuality {
+					f.arinNonQuality[clientId] = true
+				}
+				if reliabilityFailed {
+					f.reliabilityFailed[clientId] = true
+				}
+			}
+		})
+	})
 	return f
 }
 
@@ -3853,22 +3847,12 @@ func (self providerCountFilter) isBlackholed(clientId server.Id) bool {
 }
 
 func (self providerCountFilter) hasHardEgressFailure(clientId server.Id) bool {
-	return self.isBlackholed(clientId) || self.tlsAuthenticationFailed[clientId]
+	return self.arinRisk[clientId] || self.reliabilityFailed[clientId] || self.tlsAuthenticationFailed[clientId]
 }
 
-// passesHealth reports whether a probe has MEASURED this provider healthy.
-// Fail closed: no record at all (never probed) does not pass, and neither does
-// a record with no destinations in it, which is not a measurement of anything.
-// Guarding total also keeps the ratio well defined.
-//
-// Compared exactly as 10*ok >= 9*total rather than through a float, so the 90%
-// boundary cannot drift with rounding.
+// Reports the indexer's accepted URL ratio after the common safety gates.
 func (self providerCountFilter) passesHealth(clientId server.Id) bool {
-	// Hard failures override a passing percentage. The hourly blackhole check
-	// catches a provider that went dark after its last health sweep; the TLS bit
-	// catches a provider for which one authenticated destination failed even if
-	// enough unrelated destinations passed to clear 90%. Neither is a ranking
-	// input: both only remove unsafe/unusable supply.
+	// A passing success ratio cannot override a common gate failure.
 	if self.hasHardEgressFailure(clientId) {
 		return false
 	}
@@ -3880,96 +3864,11 @@ func (self providerCountFilter) passesHealth(clientId server.Id) bool {
 	if counts.Total <= 0 {
 		return false
 	}
-	return minEgressHealthOKDenominator*counts.OKCount >= minEgressHealthOKNumerator*counts.Total
+	settings := egressIndexSettings()
+	return settings.QualityOkDenominator*counts.OKCount >= settings.QualityOkNumerator*counts.Total
 }
 
-// countsTowardCountry reports whether this provider counts as supply for
-// countryCode. It must both be measured healthy and have been OBSERVED
-// egressing from that country.
-//
-// The two locations are different claims. network_client_location is where the
-// provider says it is, derived from its own connection. provider_egress_location
-// is where a probe actually watched its traffic leave. Counting on the claim
-// alone advertises providers in countries they do not egress from -- measured
-// on beta at 3 of 152 healthy providers claiming `at` while egressing from `gb`
-// -- which is what an adversarial provider would exploit at scale.
-//
-// A provider with no observed location is not counted, matching the health rule.
-func (self providerCountFilter) countsTowardCountry(clientId server.Id, countryCode string) bool {
-	if !self.passesHealth(clientId) {
-		return false
-	}
-	observed, ok := self.countryCodes[clientId]
-	if !ok {
-		return false
-	}
-	return observed == strings.ToLower(countryCode)
-}
-
-// Reports whether the rollout flag's qualification should be skipped for this
-// count pass, counting an unprobed provider as though the
-// flag were off while the hard exclusions and the country gate still apply.
-//
-// Both maps are checked, not just healthCounts, because they are fed by two
-// INDEPENDENT pipelines that can stall separately: health arrives over the
-// external push endpoint (api/handlers/provider_egress_health_handlers.go),
-// while the observed egress location comes from a separate internal job
-// (controller/provider_egress_location_controller.go). If only the health
-// pipeline stalls (or vice versa), the healthy-but-unlocated -- or
-// located-but-unhealthy -- provider still fails closed in countsTowardCountry
-// and locationClientCounts still empties fleet-wide, which is exactly the
-// wiped-list failure this gate exists to prevent. Do NOT collapse this back
-// to a single condition: either map being empty is "we know nothing from that
-// pipeline", which must not be treated as "everything failed."
-func (self providerCountFilter) shouldSkipCountGate() bool {
-	return len(self.healthCounts) == 0 || len(self.countryCodes) == 0
-}
-
-// shouldRecountUngated is the SECOND half of the fleet-wide floor, applied
-// after a gated counting pass instead of before it: gated says the gate was
-// actually applied to this pass, providerRows is how many connected + valid +
-// Public rows the count query returned, and countedLocations is how many
-// locations came out of it with any supply at all.
-//
-// This is NOT redundant with shouldSkipCountGate, and a future reader must not
-// collapse the two. They answer different questions and neither implies the
-// other:
-//
-//   - shouldSkipCountGate asks "did either probe pipeline produce ANY rows at
-//     all". It reads the two input maps.
-//   - this asks "did rows that exist produce ANY counted supply". It reads the
-//     OUTPUT of the pass.
-//
-// Non-empty inputs can still yield an empty output, by more than one route: a
-// fleet-wide mismatch between claimed and observed countries, a location-table
-// anomaly that makes every claimed country NULL (see the countryCode == nil
-// branch below), a partially drained egress-location table whose surviving rows
-// all belong to churned clients, a fleet of rows written before the egress
-// index under the rollout flag, or any future rule added to
-// decideProviderEgress. In every one of those, the
-// input maps are non-empty so shouldSkipCountGate stays false, and yet
-// locationClientCounts comes out empty.
-//
-// An empty locationClientCounts is not a benign "no supply" result: every
-// location then misses the lookup below and lands in removeClientLocations,
-// which DELs every clientLocationKey from redis and publishes an empty
-// initialClientLocations -- /network/provider-locations returns nothing to
-// every app. Treat "rows existed but nothing counted" as "this pass learned
-// nothing" and redo it with only the hard exclusions, which is at least the
-// fallback shouldSkipCountGate selects.
-//
-// providerRows > 0 is what separates this from a genuinely empty fleet. If the
-// count query returned no rows at all, there really is no connected + valid +
-// Public supply and emptying the published list is the correct answer.
-func shouldRecountUngated(gated bool, providerRows int, countedLocations int) bool {
-	return gated && providerRows > 0 && countedLocations == 0
-}
-
-// providerCountRow is one connected + valid + Public provider row from the
-// count query, held in memory so the pass can be counted twice (with the
-// country gate and the rollout flag, then without them if the first pass came
-// out empty) without issuing a second query. Both passes apply the hard
-// exclusions.
+// A connected, valid, publicly reachable provider and its rollup diagnostics.
 type providerCountRow struct {
 	clientId          server.Id
 	cityLocationId    server.Id
@@ -3994,31 +3893,21 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 
 	initialClientLocations := &InitialClientLocations{}
 
-	// One bulk load per pass, outside the tx: this loop runs over the whole
-	// provider population. Current blackhole and TLS-authentication verdicts and
-	// the observed countries are always read; the 24 hour health counts only
-	// while the rollout flag is on (see providerCountFilter).
+	// Counts and score export use one bulk snapshot of the common gates.
 	egressTestEnabled := providerEgressTestEnabled()
 	egressSettings := egressIndexSettings()
 	countFilter := newProviderCountFilter(ctx, egressTestEnabled)
 
-	// The hard exclusions for FindProviders2 to read where it assembles a
-	// result (see providerHardExclusionsKey): every provider a current
-	// blackhole verdict or TLS-authentication failure excludes, from the same
-	// load as the counts so the two agree. The set is replaced whole in one
-	// transaction, so a reader sees the last set or this one and never part of
-	// one, and with the counts' ttl, so a stalled pass lets both lapse
-	// together. The marker distinguishes an authoritative empty publication
-	// from missing coverage; missing or legacy sets use candidate-only SQL.
+	// Publish the complete common-gate exclusion snapshot atomically, including
+	// a versioned marker for an authoritative empty set. Missing snapshots use SQL.
 	hardExcludedMembers := []any{providerHardExclusionsReadyMember}
-	for clientId, blackholed := range countFilter.blackholed {
-		if blackholed {
-			hardExcludedMembers = append(hardExcludedMembers, clientId.String())
-		}
-	}
-	for clientId, failed := range countFilter.tlsAuthenticationFailed {
-		if failed && !countFilter.blackholed[clientId] {
-			hardExcludedMembers = append(hardExcludedMembers, clientId.String())
+	seenHardExcludedClientIds := map[server.Id]bool{}
+	for _, exclusions := range []map[server.Id]bool{countFilter.arinRisk, countFilter.reliabilityFailed, countFilter.tlsAuthenticationFailed} {
+		for clientId, failed := range exclusions {
+			if failed && !seenHardExcludedClientIds[clientId] {
+				hardExcludedMembers = append(hardExcludedMembers, clientId.String())
+				seenHardExcludedClientIds[clientId] = true
+			}
 		}
 	}
 	var hardExclusionsErr error
@@ -4032,33 +3921,6 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 	})
 	if hardExclusionsErr != nil {
 		return fmt.Errorf("publish provider hard exclusions: %w", hardExclusionsErr)
-	}
-
-	// The rollout flag now speaks only for rollup rows written before the
-	// egress index, and for those it keeps its old fail-closed count rule: a
-	// row with no record does not count. An empty health or countryCodes map
-	// means one of the two probe pipelines has told us nothing yet -- stalled
-	// job, truncated table, cold environment -- not "every provider measured
-	// unhealthy" or "every provider is mislocated", and applying the rule
-	// fleet-wide then would empty locationClientCounts for a fleet of such
-	// rows, which sends every single location through removeClientLocations
-	// below and deletes every key from redis -- wiping the whole public
-	// provider list because one prober died, not because supply is actually
-	// gone. So count this pass as though the flag were off: only the hard
-	// exclusions and the country gate apply. See shouldSkipCountGate for why
-	// both maps are checked. Do not remove this as "redundant" with the
-	// per-provider rules -- it is a fleet-wide floor, not a per-provider one.
-	//
-	// This is only the input-side half of that floor: empty inputs are not the
-	// only way to reach an emptied count. See shouldRecountUngated, applied to
-	// the counted result below, for the other half.
-	countEgressTestEnabled := egressTestEnabled && !countFilter.shouldSkipCountGate()
-	if !countEgressTestEnabled {
-		if egressTestEnabled {
-			glog.Infof("[nclm]egress health or location records are empty; counting rows written before the egress index without the rollout flag for this pass; hard egress exclusions and the country gate remain enabled\n")
-		} else {
-			glog.Infof("[nclm]provider egress test is disabled; counting rows written before the egress index without it; hard egress exclusions and the country gate remain enabled\n")
-		}
 	}
 
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -4162,38 +4024,17 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 			}
 		})
 
-		// counted from the retained rows rather than inline in the scan loop, so
-		// the same pass can be counted a second time with the gate off without
-		// re-querying. See shouldRecountUngated.
-		countProviderRows := func(gated bool) map[server.Id]int {
+		// Count the same common-gate passes exposed as online supply.
+		countProviderRows := func() map[server.Id]int {
 			locationClientCounts := map[server.Id]int{}
 			for _, row := range providerCountRows {
-				// A current blackhole or TLS-authentication verdict is conclusive
-				// per-provider evidence and is never part of the fleet-wide
-				// health/location fallback. Otherwise that fallback would
-				// immediately resurrect the exact unsafe provider.
+				// Common gate failures never contribute advertised supply.
 				if countFilter.hasHardEgressFailure(row.clientId) {
 					continue
 				}
 
-				// This is the number every app shows when a user picks a
-				// location, so it is the supply a user can actually use
-				// (connect/GEOMAP.md §10.3): past the hard exclusions and the
-				// country gate. A probed provider that fails the 90 % rule
-				// still counts -- it is out of quality, not out of the market
-				// -- and so does an unprobed one, which the online bucket
-				// answers for once traffic shows it working and which never
-				// fails closed.
-				// A rollup row written before the egress index keeps the old
-				// rule: with the flag on, counted only where a probe measured
-				// it healthy and observed it egressing from the country it
-				// claims, and a claimed country with no location row fails
-				// closed, since it cannot be verified against anything.
-				//
-				// Unless the pass is ungated (see shouldRecountUngated below):
-				// a fleet the rules emptied is "unknown", not "unusable", and
-				// must not empty the public list.
-				if gated {
+				// Ordinary URL errors and missing probes still count online.
+				{
 					decision := decideProviderEgress(
 						countFilter.egressFacts(
 							row.clientId,
@@ -4202,7 +4043,7 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 							row.egressQuality,
 							egressSettings,
 						),
-						countEgressTestEnabled,
+						egressTestEnabled,
 					)
 					if !decision.counted {
 						continue
@@ -4232,22 +4073,7 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 			return locationClientCounts
 		}
 
-		// the country gate is not behind the flag, so every pass is gated
-		gated := true
-		locationClientCounts := countProviderRows(gated)
-
-		// the output-side half of the fleet-wide floor. shouldSkipCountGate
-		// guards the INPUTS (did a probe pipeline produce rows); this guards
-		// the OUTPUT (did those rows produce any counted supply). Neither
-		// implies the other -- see shouldRecountUngated for why they must not
-		// be collapsed.
-		if shouldRecountUngated(gated, len(providerCountRows), len(locationClientCounts)) {
-			glog.Infof(
-				"[nclm]count qualification emptied all %d connected provider rows fleet-wide; recounting without the country gate and the rollout flag; hard egress exclusions remain enabled\n",
-				len(providerCountRows),
-			)
-			locationClientCounts = countProviderRows(false)
-		}
+		locationClientCounts := countProviderRows()
 
 		server.CreateTempTableInTx(
 			ctx,
@@ -4984,6 +4810,10 @@ type ProviderLocation struct {
 }
 
 type ClientScore struct {
+	// A cached passing ratio is valid only until its first contributing result
+	// leaves the eight-hour window. A later export recalculates the ratio.
+	EgressValidUntil             *time.Time
+	UrlProbeSuccessWeight        float64
 	ClientId                     server.Id
 	NetworkId                    server.Id
 	Scores                       map[string]int
@@ -5017,15 +4847,8 @@ type ClientScore struct {
 	// NetworkOnly: an entry written before this field existed must keep
 	// today's behavior. See IpFamily and network_client_ip_family.go.
 	IpFamilies uint8
-	// marks a provider of the online bucket (connect/GEOMAP.md §10.3):
-	// no probe verdict, past the exclusions and the gate, and within every
-	// minimum the other buckets apply apart from the probe's -- the
-	// reliability floors and the speed-mode score maximum, so a provider no
-	// client has measured is not online. It sits in both modes' samples but
-	// is native to neither -- no request names the online bucket, and a
-	// short bucket borrows from it last. The zero value is "not online" for
-	// the same gob reason as NetworkOnly: an entry written before this field
-	// existed keeps its native place. Top-level only.
+	// Every common-gate pass belongs to online, including native quality/speed
+	// members. PassesMinimums distinguishes each mode's native membership.
 	Online bool
 
 	// set only on the top-level score, never on the `LookbackClientScores`
@@ -5042,16 +4865,7 @@ type ClientScore struct {
 	ScaledWeights  map[string]float32
 	PassesMinimums map[string]bool
 
-	// the score each mode's score minimum and selection weight read while
-	// UpdateClientScores builds the pool. Unexported, so gob
-	// never carries it into the cache. For a provider with an egress index it
-	// is the score without the index: the index orders the quality bucket
-	// through the tier, and must not also decide membership through the
-	// minimum (connect/GEOMAP.md §10.3), or two failed loads -- which the
-	// sites that refuse proxied requests hand most healthy providers (§10.5)
-	// -- would put the score at the minimum's bar and take out of quality a
-	// provider the 90 % rule admits. For a row written before the index it is
-	// the score itself, as it always was.
+	// Performance-only score for sampling weights. It never changes admission.
 	minimumScores map[string]int
 }
 
@@ -5324,9 +5138,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 					MaxClientScore,
 				)
 			} else {
-				clientScore.Scores[rankMode] = 0
+				clientScore.Scores[rankMode] = MaxClientScore
 				clientScore.Tiers[rankMode] = ClientScoreCutoffTier
-				clientScore.minimumScores[rankMode] = 0
+				clientScore.minimumScores[rankMode] = MaxClientScore
 			}
 		}
 	}
@@ -5428,29 +5242,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		return
 	}
 
-	// The evidence of the rules of connect/GEOMAP.md §10.3 is loaded once for
-	// the whole pass rather than per client: this walks every provider, and
-	// each table is at most one row per ever-probed provider. It is loaded
-	// before the pool so a hard-excluded provider never enters it: a current
-	// blackhole verdict or TLS-authentication failure keeps a provider out of
-	// every cached sample, force_minimum's included, and out of the stability
-	// filter's counts. Shared with UpdateClientLocations, so the gated
-	// membership and the advertised count can never disagree about a provider.
-	//
-	// # Staleness
-	//
-	// The index and its verdict are the rollup's, bounded by
-	// EgressIndexSettings.EvidenceMaxAge; the observed country is bounded by
-	// ProviderEgressLocationMaxAge and the blackhole verdict by
-	// ProviderBlackholeCheckMaxAge. The TLS bit has no age: it is positive
-	// evidence of an unsafe path, cleared only by a later clean run. A stale
-	// *good* run stops being evidence and its provider is decided as unprobed;
-	// a stale *bad* one likewise, and the full-probe queue stays independent of
-	// every one of these rules, so an excluded provider is always re-measured
-	// (TestProbeDueQueueIgnoresTheEgressHealthGate). Its only negative-evidence
-	// exception is a current blackhole failure: that independently proves the
-	// fixed tunnel cannot carry any destination, and the cheaper blackhole
-	// queue retries it without full-probe backoff.
+	// Load common gates and accepted URL history once before assembling any
+	// location or group pool. Every advertised count uses this same decision.
 	egressTestEnabled := providerEgressTestEnabled()
 	egressSettings := egressIndexSettings()
 	countFilter := newProviderCountFilter(ctx, egressTestEnabled)
@@ -5726,20 +5519,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// invalid however tolerant the rule is). 0.95 allows three such blocks an
 	// hour. Repeated reconnects still fail it: they are real user impact, and
 	// `client_reliability_valid` only forgives ONE per block.
-	if NormalNetworkConditions() {
-		minFilter.minIndependentReliabilityWeights = map[int]float64{
-			1: float64(0.95),
-			2: float64(0.7),
-			3: float64(0.6),
-		}
-	} else {
-		// some abormal conditions, loosen the stats as they reset
-		minFilter.minIndependentReliabilityWeights = map[int]float64{
-			1: float64(0.8),
-			2: float64(0.6),
-			3: float64(0.6),
-		}
-	}
+	minFilter.minIndependentReliabilityWeights = providerReliabilityMinimums()
 	minReliabilityWeightScale := 0.1
 	maxReliabilityWeightScale := 1.0
 	minScoreScale := 0.1
@@ -5799,62 +5579,37 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		clientScore.ScaledWeights = map[string]float32{}
 		clientScore.PassesMinimums = map[string]bool{}
 
-		// Bucket membership seeds each mode's minimum (decideProviderEgress):
-		// quality and speed differ exactly where the 90 % rule removes a
-		// provider from quality alone. It is a gate and nothing else: it can
-		// only take a provider out of a mode, and the scaled-weight
-		// arithmetic below reads the same minimum score for every provider
-		// that qualifies.
+		// Both native modes require passing accepted URL evidence; only quality
+		// additionally excludes the explicit ARIN non-quality class.
 		decision := clientIdEgressDecisions[clientScore.ClientId]
 		rankModePassesBucket := map[RankMode]bool{
 			RankModeQuality: decision.quality,
 			RankModeSpeed:   decision.speed,
 		}
 
-		// The online bucket (connect/GEOMAP.md §10.3) is every provider with
-		// no probe verdict past the exclusions and the gate that passes every
-		// minimum the other buckets apply apart from the probe's: per
-		// lookback, the independent weight floor that decides whether a
-		// provider is in the market at all, and the score maximum over the
-		// speed-mode score -- the performance adjustment with the missing-test
-		// penalties, on a base of 0 as in the speed bucket. A provider no
-		// client has measured carries both penalties, 80 capped at
-		// MaxClientScore against a maximum of 40, so it stays out exactly as
-		// it did before the buckets; one past a speed cutoff scores 0 there
-		// and passes, as it passes the speed bucket's minimum.
-		passesOnlineMinimums := true
+		// Online is all common-gate passes. Missing latency/throughput tests
+		// and low performance change ordering without reducing membership.
+		weights := map[int]float64{}
 		for lookbackIndex, lookbackClientScore := range clientScore.LookbackClientScores {
-			if lookbackClientScore.IndependentReliabilityWeight < minFilter.minIndependentReliabilityWeights[lookbackIndex] {
-				passesOnlineMinimums = false
-				break
-			}
-			if minFilter.maxScore <= lookbackClientScore.minimumScores[RankModeSpeed] {
-				passesOnlineMinimums = false
-				break
-			}
+			weights[lookbackIndex] = lookbackClientScore.IndependentReliabilityWeight
 		}
-		clientScore.Online = decision.online && passesOnlineMinimums
+		passesReliability := providerReliabilityPasses(weights, minFilter.minIndependentReliabilityWeights)
+		clientScore.Online = decision.online && passesReliability
+		clientScore.UrlProbeSuccessWeight = providerUrlProbeSuccessWeight(countFilter.healthCounts[clientScore.ClientId])
+		if counts, ok := countFilter.healthCounts[clientScore.ClientId]; ok && counts.Total > 0 {
+			validUntil := counts.FirstMeasuredAt.Add(min(egressSettings.EvidenceMaxAge, ProviderEgressHealthMaxAge))
+			clientScore.EgressValidUntil = &validUntil
+		}
 
 		for _, rankMode := range slices.Collect(maps.Keys(clientScore.Scores)) {
-			passesMinimum := rankModePassesBucket[rankMode]
-			// all lookback thresholds must pass
-			for lookbackIndex, lookbackClientScore := range clientScore.LookbackClientScores {
-				if lookbackClientScore.IndependentReliabilityWeight < minFilter.minIndependentReliabilityWeights[lookbackIndex] {
-					passesMinimum = false
-					break
-				}
-				if minFilter.maxScore <= lookbackClientScore.minimumScores[rankMode] {
-					passesMinimum = false
-					break
-				}
-			}
+			passesMinimum := rankModePassesBucket[rankMode] && passesReliability
 
 			if passesMinimum {
-				u := float64(minClientScore.IndependentReliabilityWeight-minFilter.minIndependentReliabilityWeights[minLookbackIndex]) / (1.0 - minFilter.minIndependentReliabilityWeights[minLookbackIndex])
+				u := max(0.0, min(1.0, float64(minClientScore.IndependentReliabilityWeight-minFilter.minIndependentReliabilityWeights[minLookbackIndex])/(1.0-minFilter.minIndependentReliabilityWeights[minLookbackIndex])))
 				reliabilityWeightScale := (1-u)*minReliabilityWeightScale + u*maxReliabilityWeightScale
-				v := float64(minFilter.maxScore-clientScore.minimumScores[rankMode]) / float64(minFilter.maxScore)
+				v := max(0.0, min(1.0, float64(minFilter.maxScore-clientScore.minimumScores[rankMode])/float64(minFilter.maxScore)))
 				scoreScale := (1-v)*minScoreScale + v*maxScoreScale
-				clientScore.ScaledWeights[rankMode] = float32(reliabilityWeightScale * clientScore.ReliabilityWeight * scoreScale)
+				clientScore.ScaledWeights[rankMode] = float32(reliabilityWeightScale * clientScore.ReliabilityWeight * scoreScale * clientScore.UrlProbeSuccessWeight)
 				clientScore.PassesMinimums[rankMode] = true
 			}
 		}
@@ -6209,6 +5964,21 @@ func loadClientScores(
 	facets []ipFamilyFacet,
 	observations ...*findProviders2LoadObservation,
 ) (clientScores map[server.Id]*ClientScore, returnErr error) {
+	clientScores, _, returnErr = loadClientScoresWithCursor(forceMinimum, rankMode, ctx, locationIds, locationGroupIds, clientLocationId, n, facets, observations...)
+	return
+}
+
+func loadClientScoresWithCursor(
+	forceMinimum bool,
+	rankMode RankMode,
+	ctx context.Context,
+	locationIds map[server.Id]bool,
+	locationGroupIds map[server.Id]bool,
+	clientLocationId server.Id,
+	n int,
+	facets []ipFamilyFacet,
+	observations ...*findProviders2LoadObservation,
+) (clientScores map[server.Id]*ClientScore, cursor *clientScoreCursor, returnErr error) {
 	var observation *findProviders2LoadObservation
 	if 0 < len(observations) {
 		observation = observations[0]
@@ -6370,66 +6140,8 @@ func loadClientScores(
 			}
 		}
 
-		samples := []*redis.StringCmd{}
-		sampleExpectedCounts := []int{}
-		netCount := 0
-
-		pipe = r.Pipeline()
-		for _, sampleKeyCounts := range groupSampleKeyCounts {
-			if n <= netCount {
-				break
-			}
-			keys := slices.Collect(maps.Keys(sampleKeyCounts))
-			mathrand.Shuffle(len(keys), func(i int, j int) {
-				keys[i], keys[j] = keys[j], keys[i]
-			})
-			for _, key := range keys {
-				if n <= netCount {
-					break
-				}
-				c := sampleKeyCounts[key]
-				v := pipe.Get(ctx, key)
-				samples = append(samples, v)
-				sampleExpectedCounts = append(sampleExpectedCounts, c)
-				netCount += c
-			}
-		}
-		if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
-			clientScoreReadMetrics.samples.Inc()
-			returnErr = fmt.Errorf("read client score samples: %w", err)
-			return
-		}
-
-		clientScores = map[server.Id]*ClientScore{}
-
-		for i, sampleCmd := range samples {
-			sampleBytes, _ := sampleCmd.Bytes()
-			if len(sampleBytes) == 0 {
-				if observation != nil && 0 < sampleExpectedCounts[i] {
-					observation.missingPages++
-				}
-				continue
-			}
-			b := bytes.NewBuffer(sampleBytes)
-			e := gob.NewDecoder(b)
-			var sample []*ClientScore
-			returnErr = e.Decode(&sample)
-			if returnErr != nil {
-				return
-			}
-
-			for _, clientScore := range sample {
-				// a client can appear under multiple requested keys with
-				// identical ranking fields, but only location-keyed samples
-				// carry location ids. keep the copy that has them.
-				if existing, ok := clientScores[clientScore.ClientId]; ok {
-					if existing.CountryLocationId != nil && clientScore.CountryLocationId == nil {
-						continue
-					}
-				}
-				clientScores[clientScore.ClientId] = clientScore
-			}
-		}
+		cursor = newClientScoreCursor(groupSampleKeyCounts, observation)
+		clientScores, returnErr = cursor.readWithClient(ctx, r, n)
 	})
 
 	return
@@ -6574,18 +6286,15 @@ func FindProviders2(
 		}
 	}
 
-	// A provider named by client id bypasses discovery, and with it every
-	// minimum: an explicit choice by the caller, such as reconnecting to a
-	// known provider, reaches a provider no bucket admits. The hard exclusions
-	// of connect/GEOMAP.md §10.3 are not minimums, so they hold here too: a
-	// blackholed provider is unusable and a TLS-intercepting one unsafe, and no
-	// caller's choice changes either. Named providers come first, in spec
-	// order, as they always have.
+	// Named providers precede discovery results and still pass the common
+	// reliability, ARIN risk and URL security exclusions.
 	appendSpecProviders := func(hardExcludedClientIds map[server.Id]bool) {
+		seenClientIds := map[server.Id]bool{}
 		for _, clientId := range specClientIds {
-			if hardExcludedClientIds[clientId] {
+			if hardExcludedClientIds[clientId] || seenClientIds[clientId] {
 				continue
 			}
+			seenClientIds[clientId] = true
 			providers = append(providers, &FindProvidersProvider{
 				ClientId: clientId,
 			})
@@ -6638,7 +6347,7 @@ func FindProviders2(
 
 		observation.enter("load_primary")
 		loadStartTime := time.Now()
-		clientScores, err := loadClientScores(
+		clientScores, primaryCursor, err := loadClientScoresWithCursor(
 			findProviders2.ForceMinimum,
 			rankMode,
 			session.Ctx,
@@ -6717,9 +6426,19 @@ func FindProviders2(
 		// provider passes exactly what a native one does.
 		filterPool := func(clientScores map[server.Id]*ClientScore, mode RankMode, hardExcludedClientIds map[server.Id]bool) {
 			observation.enter("filter")
+			now := server.NowUtc()
+			for _, clientScore := range clientScores {
+				if clientScore.EgressValidUntil == nil || !now.Before(*clientScore.EgressValidUntil) {
+					clientScore.PassesMinimums = nil
+					clientScore.UrlProbeSuccessWeight = 1
+				}
+			}
 			before := len(clientScores)
 			for clientId := range hardExcludedClientIds {
 				delete(clientScores, clientId)
+			}
+			for _, provider := range providers {
+				delete(clientScores, provider.ClientId)
 			}
 			observation.dropped[0] += before - len(clientScores)
 			before = len(clientScores)
@@ -6766,6 +6485,72 @@ func FindProviders2(
 			}
 		}
 		filterPool(clientScores, rankMode, hardExcludedClientIds)
+
+		// Refill only a request-filtered shortfall, using unread pages from
+		// the same target and facet order. The existing exclusion allowance
+		// bounds total rows across all reads, including missing or duplicate
+		// rows; neither a refill nor the other mode resets that mode's cursor.
+		refillPool := func(scores, priorScores map[server.Id]*ClientScore, mode RankMode, cursor *clientScoreCursor, knownHardExclusions map[server.Id]bool, backfill bool) error {
+			for cursor.hasMore() {
+				uniqueCount := 0
+				for clientId := range scores {
+					if priorScores[clientId] == nil {
+						uniqueCount++
+					}
+				}
+				if count <= len(priorScores)+uniqueCount {
+					break
+				}
+				discardedRows := max(0, cursor.readCount-uniqueCount)
+				limit := findProviders2RefillLoadCount(count, len(excludeFinalDestinations()), discardedRows)
+				additionalRows := limit - cursor.readCount
+				if additionalRows <= 0 {
+					break
+				}
+				if backfill {
+					observation.enter("load_backfill")
+				} else {
+					observation.enter("load_primary")
+				}
+				extraScores, err := cursor.read(session.Ctx, additionalRows)
+				if err != nil {
+					if !backfill {
+						return err
+					}
+					observation.backfillUnavailable = true
+					glog.Infof("[nclm]findproviders2 could not refill the %s set; answering from already validated samples (%s)\n", mode, err)
+					break
+				}
+				observation.loaded += len(extraScores)
+				unreadClientIds := []server.Id{}
+				for clientId := range extraScores {
+					if !exclusionReadClientIds[clientId] {
+						unreadClientIds = append(unreadClientIds, clientId)
+					}
+				}
+				observation.enter("hard_exclusions")
+				extraHardExclusions, err := getProviderHardExclusions(session.Ctx, unreadClientIds)
+				if err != nil {
+					return err
+				}
+				for _, clientId := range unreadClientIds {
+					exclusionReadClientIds[clientId] = true
+				}
+				for clientId := range extraHardExclusions {
+					knownHardExclusions[clientId] = true
+				}
+				filterPool(extraScores, mode, knownHardExclusions)
+				for clientId, clientScore := range extraScores {
+					if scores[clientId] == nil {
+						scores[clientId] = clientScore
+					}
+				}
+			}
+			return nil
+		}
+		if err := refillPool(clientScores, nil, rankMode, primaryCursor, hardExcludedClientIds, false); err != nil {
+			return nil, err
+		}
 		observation.primaryClientScores = clientScores
 		observation.enter("select")
 
@@ -6813,9 +6598,9 @@ func FindProviders2(
 		// Takes up to n of the online bucket in its order
 		// (connect/GEOMAP.md §10.3): reliability weight, highest first, then
 		// the speed-mode performance adjustment -- the client-measured latency
-		// and throughput, past the speed cutoffs last; a missing test's
-		// penalty alone reaches the score maximum, so no online provider
-		// carries one -- within each facet in the request's order.
+		// and throughput, past the speed cutoffs last. Missing measurements
+		// retain their ranking penalties without changing online admission.
+		// Each facet keeps the request's existing preference order.
 		selectOnline := func(candidateClientScores map[server.Id]*ClientScore, n int) []server.Id {
 			clientIds := []server.Id{}
 			for _, facet := range facets {
@@ -6836,10 +6621,17 @@ func FindProviders2(
 				slices.SortStableFunc(facetClientIds, func(a server.Id, b server.Id) int {
 					clientScoreA := candidateClientScores[a]
 					clientScoreB := candidateClientScores[b]
+					weightA, weightB := clientScoreA.UrlProbeSuccessWeight, clientScoreB.UrlProbeSuccessWeight
+					if weightA == 0 {
+						weightA = 1
+					}
+					if weightB == 0 {
+						weightB = 1
+					}
 					switch {
-					case clientScoreB.ReliabilityWeight < clientScoreA.ReliabilityWeight:
+					case clientScoreB.ReliabilityWeight*weightB < clientScoreA.ReliabilityWeight*weightA:
 						return -1
-					case clientScoreA.ReliabilityWeight < clientScoreB.ReliabilityWeight:
+					case clientScoreA.ReliabilityWeight*weightA < clientScoreB.ReliabilityWeight*weightB:
 						return 1
 					}
 					if d := clientScoreA.Tiers[RankModeSpeed] - clientScoreB.Tiers[RankModeSpeed]; d != 0 {
@@ -6852,20 +6644,13 @@ func FindProviders2(
 			return clientIds
 		}
 
-		// The natives: the requested mode's own providers within its latency
-		// and throughput cutoffs. A provider past a cutoff carries the top
-		// tier (ClientScoreCutoffTier) and stays in the mode's pool, but it is
-		// not what the mode promises, so it waits behind the other bucket in
-		// the backfill below rather than being drawn beside the natives --
-		// where its zero score would also have given it the largest weight. An
-		// online provider is in the sample but native to no mode. With
-		// force_minimum, the caller's blanket override, the whole pool is
-		// native, as always.
+		// Native membership comes only from the shared gate decision. The
+		// performance tier orders members within this bucket.
 		nativeClientScores := clientScores
 		if !findProviders2.ForceMinimum {
 			nativeClientScores = map[server.Id]*ClientScore{}
 			for clientId, clientScore := range clientScores {
-				if !clientScore.Online && clientScore.Tiers[rankMode] < ClientScoreCutoffTier {
+				if clientScore.PassesMinimums[rankMode] {
 					nativeClientScores[clientId] = clientScore
 				}
 			}
@@ -6883,37 +6668,9 @@ func FindProviders2(
 			providers = append(providers, findProvidersProviderFromClientScore(clientScore, rankMode, directory))
 		}
 
-		// Backfill (connect/GEOMAP.md §10.3): a bucket short of the request's
-		// count is filled from the others in a fixed order, so a location with
-		// few quality providers still answers a quality request, one with few
-		// fast providers a speed request, and a mass probe failure -- every
-		// verdict gone, or every verdict wrong -- still answers from what real
-		// traffic proves.
-		//
-		//  1. The other bucket's natives that are not natives here, in the
-		//     other bucket's order: quality short borrows the providers speed
-		//     holds and quality does not (over the one-in-ten line), speed
-		//     short the quality providers its cutoffs excluded.
-		//  2. The probed providers of either bucket past that bucket's cutoffs,
-		//     the requested bucket's first: they are the buckets', only slow,
-		//     and last in either bucket's order.
-		//  3. The online bucket, last, in its own order.
-		//
-		// A borrowed provider keeps its tier in the mode it came from plus
-		// BackfillTierOffset, so every native ranks ahead of every borrowed
-		// one on the client and the borrowed keep their order. The online
-		// bucket is no mode and its order is reliability first, which no tier
-		// of a mode expresses without inverting it on the client, so every
-		// online provider carries the one tier twice the offset: behind every
-		// other borrowed provider, in the answer's order among themselves.
-		//
-		// Nothing crosses an exclusion. The other mode's pool is its
-		// non-forced cache, which leaves out the hard-excluded and the
-		// country-gated exactly as this one does, and it passes the same
-		// request-time filters, the hard exclusions included. force_minimum
-		// is never backfilled. The other mode's set is an addition, never a
-		// requirement: a set that is not cached, or that cannot be read,
-		// leaves the answer to this mode's own sample.
+		// Fill the requested bucket, then the other native bucket, then the
+		// online union. Every borrowed page passes the same request filters;
+		// tier offsets preserve its lower client-visible priority.
 		chosenClientIds := slices.Clone(clientIds)
 		if otherRankMode, ok := backfillRankMode(rankMode); ok && !findProviders2.ForceMinimum {
 			borrowedClientIds := []server.Id{}
@@ -6942,7 +6699,7 @@ func FindProviders2(
 				backfillTierOffset := settingsSnapshot.settings.BackfillTierOffset
 
 				observation.enter("load_backfill")
-				otherClientScores, err := loadClientScores(
+				otherClientScores, otherCursor, err := loadClientScoresWithCursor(
 					false,
 					otherRankMode,
 					session.Ctx,
@@ -6957,6 +6714,7 @@ func FindProviders2(
 					observation.backfillUnavailable = true
 					glog.Infof("[nclm]findproviders2 could not read the %s set to backfill %s; answering from the %s sample alone (%s)\n", otherRankMode, rankMode, rankMode, err)
 					otherClientScores = map[server.Id]*ClientScore{}
+					otherCursor = nil
 				}
 				observation.loaded += len(otherClientScores)
 				// the exclusions of the providers this call has not read yet
@@ -6971,17 +6729,23 @@ func FindProviders2(
 				if err != nil {
 					return nil, err
 				}
+				for _, clientId := range unreadClientIds {
+					exclusionReadClientIds[clientId] = true
+				}
 				for clientId := range hardExcludedClientIds {
 					otherHardExcludedClientIds[clientId] = true
 				}
 				filterPool(otherClientScores, otherRankMode, otherHardExcludedClientIds)
+				if err := refillPool(otherClientScores, clientScores, otherRankMode, otherCursor, otherHardExcludedClientIds, true); err != nil {
+					return nil, err
+				}
 				observation.backfillClientScores = otherClientScores
 				observation.enter("select")
 
 				// 1. the other bucket's natives
 				borrowableClientScores := map[server.Id]*ClientScore{}
 				for clientId, clientScore := range otherClientScores {
-					if clientScore.Online || ClientScoreCutoffTier <= clientScore.Tiers[otherRankMode] {
+					if !clientScore.PassesMinimums[otherRankMode] {
 						continue
 					}
 					if _, native := nativeClientScores[clientId]; native {
@@ -6994,40 +6758,7 @@ func FindProviders2(
 					borrow(clientScore, otherRankMode, clientScore.Tiers[otherRankMode]+backfillTierOffset)
 				}
 
-				// 2. the probed past their bucket's cutoffs, this bucket's first
-				ownSlowClientScores := map[server.Id]*ClientScore{}
-				for clientId, clientScore := range clientScores {
-					if clientScore.Online || clientScore.Tiers[rankMode] < ClientScoreCutoffTier {
-						continue
-					}
-					if _, held := borrowableClientScores[clientId]; held {
-						continue
-					}
-					ownSlowClientScores[clientId] = clientScore
-				}
-				for _, clientId := range selectProviders(ownSlowClientScores, rankMode, remainingCount()) {
-					clientScore := clientScores[clientId]
-					borrow(clientScore, rankMode, clientScore.Tiers[rankMode]+backfillTierOffset)
-				}
-				otherSlowClientScores := map[server.Id]*ClientScore{}
-				for clientId, clientScore := range otherClientScores {
-					if clientScore.Online || clientScore.Tiers[otherRankMode] < ClientScoreCutoffTier {
-						continue
-					}
-					if _, native := nativeClientScores[clientId]; native {
-						continue
-					}
-					if _, taken := ownSlowClientScores[clientId]; taken {
-						continue
-					}
-					otherSlowClientScores[clientId] = clientScore
-				}
-				for _, clientId := range selectProviders(otherSlowClientScores, otherRankMode, remainingCount()) {
-					clientScore := otherClientScores[clientId]
-					borrow(clientScore, otherRankMode, clientScore.Tiers[otherRankMode]+backfillTierOffset)
-				}
-
-				// 3. the online bucket from both already-filtered samples. The
+				// The online bucket contains both already-filtered samples. The
 				// pages are drawn independently, so either can hold usable online
 				// providers absent from the other. Keep the requested mode's copy
 				// on overlap, and never repeat a previously selected tier when
@@ -7039,7 +6770,7 @@ func FindProviders2(
 				onlineClientScores := map[server.Id]*ClientScore{}
 				for _, sample := range []map[server.Id]*ClientScore{clientScores, otherClientScores} {
 					for clientId, clientScore := range sample {
-						if !clientScore.Online || answeredClientIds[clientId] {
+						if answeredClientIds[clientId] {
 							continue
 						}
 						if _, held := onlineClientScores[clientId]; held {

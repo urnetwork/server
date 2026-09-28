@@ -216,13 +216,13 @@ func TestBlackholeSampleDrawsConnectivityOnly(t *testing.T) {
 // silently degrades to "no sample, therefore a blackhole" and would condemn the
 // entire fleet.
 func TestBlackholeRealTableHasConnectivityDestinations(t *testing.T) {
-	sample := blackholeSample(Destinations(), rand.New(rand.NewSource(1)))
+	sample := blackholeSample(testCatalogDestinations(), rand.New(rand.NewSource(1)))
 	if len(sample) == 0 {
 		t.Fatal("the real destination table drew no connectivity destinations: " +
 			"every provider would be recorded as a blackhole")
 	}
-	if hosts := BlackholeHosts(); len(hosts) == 0 {
-		t.Error("BlackholeHosts() is empty: the confinement self-check would not cover " +
+	if hosts := BlackholeHostsOf(testDestinations); len(hosts) == 0 {
+		t.Error("BlackholeHostsOf(testDestinations) is empty: the confinement self-check would not cover " +
 			"the addresses this check dials, so a prober that could reach them directly would record every provider as ok")
 	}
 }

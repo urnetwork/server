@@ -97,6 +97,7 @@ func TestSubmitEgressHealthSendsAWellFormedBody(t *testing.T) {
 		t.Fatalf("unmarshal body: %s (raw = %s)", err, raw)
 	}
 	want := submitEgressHealthBody{
+		RunId:      got.RunId,
 		ClientId:   "provider-1",
 		OkCount:    9,
 		TotalCount: 11,
@@ -131,6 +132,8 @@ func TestSubmitEgressHealthSendsAWellFormedBody(t *testing.T) {
 		t.Fatalf("unmarshal body as a map: %s", err)
 	}
 	wantKeys := map[string]bool{
+		"run_id":                     true,
+		"cycle_started_at":           true,
 		"client_id":                  true,
 		"ok_count":                   true,
 		"total_count":                true,

@@ -87,10 +87,15 @@ func (self *providerEgressProbePass) drainFull(
 			outcome.err = err
 			return outcome
 		}
-		select {
-		case <-blackholeFinished:
+		if !self.urlProbes {
+			select {
+			case <-blackholeFinished:
+				return outcome
+			default:
+			}
+		}
+		if len(seen) >= providerEgressFullSelectedLimit {
 			return outcome
-		default:
 		}
 		if !providerEgressFullSuccessorFits(args, args.Full.Limit, deadline) {
 			return outcome
@@ -146,10 +151,12 @@ func (self *providerEgressProbePass) selectFullSuccessor(
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		select {
-		case <-blackholeFinished:
-			return nil, nil
-		default:
+		if !self.urlProbes {
+			select {
+			case <-blackholeFinished:
+				return nil, nil
+			default:
+			}
 		}
 		if lookupLimit < len(due) {
 			egressProbePassErrorsTotal.WithLabelValues("full_due").Inc()

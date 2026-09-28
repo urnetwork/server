@@ -16,26 +16,22 @@ import (
 // Returns the destination pool the next probe uses. Like PinSource
 // it is a snapshot getter: a long-lived command refreshes what it returns once
 // per pass (see LoadPool), a task fetches once and hands every batch of the
-// pass the same snapshot. A nil source, or a nil pool, means the built-in
-// table.
+// pass the same snapshot. A missing source has no destinations; it is a local
+// configuration failure, never permission to use a different target catalog.
 type PoolSource func() *egresshealth.Pool
 
-// Resolves a source, falling back to the built-in table.
+// Resolves a source without manufacturing targets when configuration is absent.
 func (self PoolSource) pool() *egresshealth.Pool {
 	if self != nil {
 		if pool := self(); pool != nil {
 			return pool
 		}
 	}
-	return egresshealth.BuiltinPool()
+	return &egresshealth.Pool{}
 }
 
-// Fetches the server's destination pool for one pass. It always
-// returns a pool it is safe to run: the server's, or -- when the fetch fails
-// for any reason, which the error then says -- the built-in table, which is
-// the seed the server's pool starts from and always a well-defined
-// measurement. A pass never stops for want of a pool; the error is for the
-// log and the metric.
+// Fetches the server's explicit destination catalog for one pass. A failed
+// fetch returns no pool; callers report a local visibility failure and retry.
 //
 // client is a control-plane client (the pool comes from the operator's server
 // directly, never through a provider), and poolUrl is normally PoolUrl of the
@@ -43,7 +39,7 @@ func (self PoolSource) pool() *egresshealth.Pool {
 func LoadPool(ctx context.Context, client *http.Client, poolUrl string, operatorSecret string) (*egresshealth.Pool, error) {
 	pool, err := egresshealth.FetchPool(ctx, client, poolUrl, operatorSecret)
 	if err != nil {
-		return egresshealth.BuiltinPool(), err
+		return nil, err
 	}
 	return pool, nil
 }
@@ -70,7 +66,11 @@ func ProvidersFromDue(due []ingest.DueProvider) []prober.Provider {
 	providers := make([]prober.Provider, 0, len(due))
 	for _, entry := range due {
 		providers = append(providers, prober.Provider{
-			ClientId: entry.ClientId,
+			ClientId:             entry.ClientId,
+			SuccessesNeeded:      entry.SuccessesNeeded,
+			CycleStartedAt:       entry.CycleStartedAt,
+			OutcomeCount:         entry.OutcomeCount,
+			SecurityDestinations: entry.SecurityDestinations,
 			Place: egresshealth.Place{
 				Country: strings.ToLower(strings.TrimSpace(entry.CountryCode)),
 				Region:  strings.TrimSpace(entry.Region),

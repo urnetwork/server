@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/gob"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -114,6 +115,7 @@ func TestFindProviders2IpFamily(t *testing.T) {
 		}
 
 		UpdateClientReliabilityScores(ctx, server.NowUtc().Add(time.Hour), true)
+		testing_providerReliabilityPasses(ctx, slices.Collect(maps.Values(clientIds))...)
 		err := UpdateClientScores(ctx, 5*time.Minute, 1)
 		connect.AssertEqual(t, err, nil)
 

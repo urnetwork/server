@@ -21,8 +21,8 @@ func TestFullBudgetIncludesBoundedCanaryRequests(t *testing.T) {
 	t.Cleanup(func() { egresshealth.DefaultConcurrency = previous })
 	args := providerEgressProbeArgs(testProviderEgressProbeSettings(1), 0)
 	opts := providerEgressFullHealthOptions(args)
-	want := opts.RunBudget(egresshealth.SamplePerRun()+egresshealth.MaxSampledCanaries) + time.Duration(args.Full.ProbeTimeoutSeconds)*time.Second
-	without := opts.RunBudget(egresshealth.SamplePerRun()) + time.Duration(args.Full.ProbeTimeoutSeconds)*time.Second
+	want := opts.RunBudget(egresshealth.SampleTargetPerRun()+egresshealth.MaxSampledCanaries) + time.Duration(args.Full.ProbeTimeoutSeconds)*time.Second
+	without := opts.RunBudget(egresshealth.SampleTargetPerRun()) + time.Duration(args.Full.ProbeTimeoutSeconds)*time.Second
 	if want <= without || providerEgressFullRunBudget(args) != want {
 		t.Fatalf("canary requests escaped admission budget: got=%s want=%s without=%s", providerEgressFullRunBudget(args), want, without)
 	}

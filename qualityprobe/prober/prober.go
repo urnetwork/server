@@ -20,8 +20,12 @@ import (
 // (see egresshealth.Options.ProviderPlace). A provider with no place excludes
 // nothing.
 type Provider struct {
-	ClientId string
-	Place    egresshealth.Place
+	ClientId             string
+	Place                egresshealth.Place
+	SuccessesNeeded      int
+	CycleStartedAt       time.Time
+	OutcomeCount         int
+	SecurityDestinations []egresshealth.Destination
 }
 
 // Opens a tunnel to one provider and returns an http.Client that
@@ -78,10 +82,9 @@ const (
 	// checker, no budget left, a structural error, or the pass ended under it.
 	// Nothing was measured, so nothing was submitted.
 	FailureHealthNotRun = "health_not_run"
-	// The run happened but measured nothing -- its tunnel
-	// died and could not be re-created within any load's attempts. It is not a
-	// fault of the provider's traffic; nothing is submitted, and the attempt
-	// backoff brings the provider round again.
+	// The run happened but no quality trial was measurable. A local tunnel or
+	// measurement limitation cannot accuse the provider's traffic. Independent
+	// URL authentication can still be published before a paced retry.
 	FailureNotMeasured = "run_not_measured"
 	// Legacy pre-sampled-only failure class, retained to read historical rows.
 	// Missing optional exit evidence no longer fails acknowledged website quality.
@@ -94,7 +97,7 @@ const (
 // ProbeOne's error for a run that measured nothing (see
 // FailureNotMeasured), so a caller counting outcomes can tell it from a
 // failure of the provider.
-var ErrNotMeasured = errors.New("prober: the run measured nothing; its tunnel could not be re-created in time")
+var ErrNotMeasured = errors.New("prober: no quality trial was measured; the local path or measurement was unavailable")
 
 // Wires a tunnel opener, the health check, a submitter and an attempt
 // reporter. Each dependency is injected so the flow is testable without a live
@@ -247,8 +250,8 @@ func (self *Prober) maxLoggedDistinctErrors() int {
 	return 10
 }
 
-// Probes a single provider. The tunnel is always closed, and nothing
-// is submitted about a run that measured nothing.
+// Probes a single provider. The tunnel is always closed. An unmeasured URL
+// outcome may still publish independently validated per-hop security evidence.
 //
 // The attempt is reported afterwards whatever happened, success or failure.
 // That is not bookkeeping: the server defers a provider from the due queue when
@@ -315,6 +318,11 @@ func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 			log.Printf("egress-health: provider=%s did not run: %s", providerClientId, err)
 			return nil, FailureHealthNotRun, fmt.Errorf("egress health did not run: %w", err)
 		}
+		// A checker may reuse immutable evidence across callers. Admission and
+		// receipt identity belong to this turn, never to that shared input.
+		reported := *res
+		res = &reported
+		res.CycleStartedAt = provider.CycleStartedAt
 
 		// The line reads:
 		//
@@ -349,11 +357,20 @@ func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 			line += " canary-failed=" + strings.Join(res.CanaryFailedNames(), ",")
 		}
 
-		// A run that measured nothing is not submitted: 0/0 is not evidence of
-		// anything, and its not-measured loads are the prober's lost tunnel, not
-		// the provider's traffic. Returning a failure class instead lets the
-		// attempt backoff bring the provider round again.
+		// An unmeasured quality load is not a provider error. Authenticated TLS
+		// may still have happened before that local failure, and must reach the
+		// independent same-URL security projection without inventing a trial.
 		if res.Total == 0 {
+			if evidence := res.UrlProbeEvidence; evidence != nil && len(evidence.Security) > 0 {
+				if err := evidence.ValidateOutcome(res.OkCount, res.Total, res.TlsAuthenticationFailure); err != nil {
+					return nil, FailureHealthNotRun, fmt.Errorf("invalid URL security evidence: %w", err)
+				}
+				log.Print(line + " -- quality unmeasured; publishing independent URL security evidence")
+				if err := reportEgressHealth(res); err != nil {
+					return nil, FailureSubmit, fmt.Errorf("submit URL security evidence: %w", err)
+				}
+				return nil, FailureNotMeasured, ErrNotMeasured
+			}
 			log.Print(line + " -- nothing measured; not submitted")
 			return nil, FailureNotMeasured, ErrNotMeasured
 		}

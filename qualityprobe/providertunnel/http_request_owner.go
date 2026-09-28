@@ -15,6 +15,8 @@ type providerHttpTransport struct {
 	*http.Transport
 	registration        *providerRegistrationState
 	contractAcquisition interface{ ProviderContractAcquisitionUnavailable() bool }
+	// Verification-only pins for redirect targets. They grant no dial authority.
+	redirectPins map[string][]string
 }
 
 // This monotonic proof is deliberately separate from error chains, which

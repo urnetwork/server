@@ -44,10 +44,10 @@ func getProviderBlackholeCheckDueWithQuery(
 		WHERE nc.active AND nc.source_client_id IS NULL AND nclr.connected AND nclr.valid
 		  AND EXISTS (SELECT 1 FROM provide_key pk WHERE pk.client_id = pbc.client_id AND pk.provide_mode = $1)
 		  AND COALESCE(pbc.next_due_at, pbc.checked_at + interval '%d seconds') <= $2
-		  AND ($4 <= 1 OR ((hashtext(pbc.client_id::text) %% $4) + $4) %% $4 = $5)
+		  AND ($4 <= 1 OR %s = $5)
 		ORDER BY COALESCE(pbc.next_due_at, pbc.checked_at + interval '%d seconds'), pbc.client_id
 		LIMIT $3
-	`, int64(ProviderBlackholeCheckDueAge/time.Second), int64(ProviderBlackholeCheckDueAge/time.Second)),
+	`, int64(ProviderBlackholeCheckDueAge/time.Second), providerUrlProbeShardSql("pbc.client_id", "$4"), int64(ProviderBlackholeCheckDueAge/time.Second)),
 		ProvideModePublic, now.UTC(), limit, shardCount, shardIndex)
 	// Preserve retry priority for a one-slot caller and avoid an unused read.
 	if limit == 1 && len(checked) == 1 {
@@ -60,7 +60,7 @@ func getProviderBlackholeCheckDueWithQuery(
 		WHERE nc.active AND nc.source_client_id IS NULL AND nclr.connected AND nclr.valid
 		  AND EXISTS (SELECT 1 FROM provide_key pk WHERE pk.client_id = nclr.client_id AND pk.provide_mode = $1)
 		  AND NOT EXISTS (SELECT 1 FROM provider_blackhole_check pbc WHERE pbc.client_id = nclr.client_id)
-		  AND ($3 <= 1 OR ((hashtext(nclr.client_id::text) % $3) + $3) % $3 = $4)
+		  AND ($3 <= 1 OR `+providerUrlProbeShardSql("nclr.client_id", "$3")+` = $4)
 		ORDER BY nclr.client_id
 		LIMIT $2
 	`, ProvideModePublic, limit, shardCount, shardIndex)

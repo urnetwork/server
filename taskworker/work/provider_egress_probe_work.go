@@ -9,6 +9,7 @@ import (
 	"log"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,15 +39,12 @@ const (
 // Admission refusal is not task cancellation or a successful empty pass.
 var errProviderEgressBlackholeAdmissionBudget = errors.New("insufficient remaining task budget for blackhole admission")
 
-// ProviderEgressProbeBatchArgs is one kind of work inside a shard pass. Full
-// and blackhole probes deliberately share the same recurring task; their due
-// queries retain separate ages and make whichever work is currently due cheap.
+// ProviderEgressProbeBatchArgs bounds one URL worker pool. Deprecated fields
+// remain decodable while pending task snapshots are replaced.
 type ProviderEgressProbeBatchArgs struct {
 	Limit int `json:"limit" yaml:"limit"`
-	// Concurrency is how many providers are probed at once, each on its own
-	// tunnel. Since GEOMAP step 7 a tunnel mostly waits -- between a load's
-	// spaced retries, minutes apart -- so this is sized against the prober
-	// host's memory (each tunnel carries its own network stack), not its CPU.
+	// Concurrency bounds providers with open tunnels. Every URL turn releases
+	// its worker before durable success/failure pacing begins.
 	Concurrency         int  `json:"concurrency" yaml:"concurrency"`
 	ProbeTimeoutSeconds int  `json:"probe_timeout_seconds" yaml:"probe_timeout_seconds"`
 	AllDestinations     bool `json:"all_destinations,omitempty" yaml:"all_destinations"`
@@ -65,16 +63,18 @@ type ProviderEgressProbeBatchArgs struct {
 // pass. The task system is the deployment unit: any taskworker can claim these
 // arguments, and no edge host owns a shard.
 type ProviderEgressProbeArgs struct {
-	ShardIndex       int                          `json:"shard_index"`
-	ShardCount       int                          `json:"shard_count"`
-	IdleDelaySeconds int                          `json:"idle_delay_seconds"`
-	MaxTimeSeconds   int                          `json:"max_time_seconds"`
-	Full             ProviderEgressProbeBatchArgs `json:"full"`
-	Blackhole        ProviderEgressProbeBatchArgs `json:"blackhole"`
-	APIURL           string                       `json:"api_url"`
-	PlatformURL      string                       `json:"platform_url"`
-	PublicAPIURL     string                       `json:"public_api_url,omitempty"`
-	BandwidthCDNURL  string                       `json:"bandwidth_cdn_url,omitempty"`
+	ShardIndex       int                           `json:"shard_index"`
+	ShardCount       int                           `json:"shard_count"`
+	IdleDelaySeconds int                           `json:"idle_delay_seconds"`
+	MaxTimeSeconds   int                           `json:"max_time_seconds"`
+	UrlProbe         *ProviderEgressProbeBatchArgs `json:"url_probe,omitempty"`
+	// Deprecated task snapshots; the production runner only uses UrlProbe.
+	Full            ProviderEgressProbeBatchArgs `json:"full"`
+	Blackhole       ProviderEgressProbeBatchArgs `json:"blackhole"`
+	APIURL          string                       `json:"api_url"`
+	PlatformURL     string                       `json:"platform_url"`
+	PublicAPIURL    string                       `json:"public_api_url,omitempty"`
+	BandwidthCDNURL string                       `json:"bandwidth_cdn_url,omitempty"`
 	// LoadAttempts, LoadRetryMeanIntervalSeconds and TunnelRecreateAttempts
 	// are the load rules of GEOMAP §11.3, passed through to every run and
 	// check: how many tries a load gets, the mean of the random spacing
@@ -91,6 +91,10 @@ type ProviderEgressProbeArgs struct {
 // ProviderEgressProbeResult records enough of the pass to drive its successor
 // and diagnose whether useful work happened.
 type ProviderEgressProbeResult struct {
+	Backlog        bool `json:"backlog"`
+	UrlDue         int  `json:"url_due"`
+	UrlNotMeasured int  `json:"url_not_measured"`
+	// Deprecated result fields for existing task snapshots and diagnostics.
 	Full                  bool `json:"full"`
 	Stale                 bool `json:"stale"`
 	FullDue               int  `json:"full_due"`
@@ -109,14 +113,16 @@ type ProviderEgressProbeResult struct {
 
 // Deployment settings are snapshotted into each task's durable arguments.
 type providerEgressProbeSettings struct {
-	Enabled                      bool                         `yaml:"enabled"`
-	ShardCount                   int                          `yaml:"shard_count"`
-	IdleDelaySeconds             int                          `yaml:"idle_delay_seconds"`
-	MaxTimeSeconds               int                          `yaml:"max_time_seconds"`
-	APIURL                       string                       `yaml:"api_url"`
-	PlatformURL                  string                       `yaml:"platform_url"`
-	PublicAPIURL                 string                       `yaml:"public_api_url"`
-	BandwidthCDNURL              string                       `yaml:"bandwidth_cdn_url"`
+	Enabled          bool                          `yaml:"enabled"`
+	ShardCount       int                           `yaml:"shard_count"`
+	IdleDelaySeconds int                           `yaml:"idle_delay_seconds"`
+	MaxTimeSeconds   int                           `yaml:"max_time_seconds"`
+	APIURL           string                        `yaml:"api_url"`
+	PlatformURL      string                        `yaml:"platform_url"`
+	PublicAPIURL     string                        `yaml:"public_api_url"`
+	BandwidthCDNURL  string                        `yaml:"bandwidth_cdn_url"`
+	UrlProbe         *ProviderEgressProbeBatchArgs `yaml:"url_probe"`
+	// Deprecated config inputs retained while old task snapshots retire.
 	Full                         ProviderEgressProbeBatchArgs `yaml:"full"`
 	Blackhole                    ProviderEgressProbeBatchArgs `yaml:"blackhole"`
 	LoadAttempts                 int                          `yaml:"load_attempts"`
@@ -133,16 +139,17 @@ func defaultProviderEgressProbeSettings(domain string) providerEgressProbeSettin
 	return providerEgressProbeSettings{
 		Enabled:          true,
 		ShardCount:       defaultProviderEgressProbeShardCount,
-		IdleDelaySeconds: 5 * 60,
-		// a full run whose loads all keep failing spans its whole retry
-		// schedule, about 36 minutes, and a blackhole batch still in flight
-		// when the full batch ends may take a check's, about 32 more; see
-		// providerEgressProbeMinMaxTime
-		MaxTimeSeconds:  75 * 60,
-		APIURL:          apiURL,
-		PlatformURL:     "wss://connect." + domain,
-		PublicAPIURL:    apiURL,
-		BandwidthCDNURL: bandwidth.CdnTestUrl,
+		IdleDelaySeconds: 5,
+		MaxTimeSeconds:   15 * 60,
+		APIURL:           apiURL,
+		PlatformURL:      "wss://connect." + domain,
+		PublicAPIURL:     apiURL,
+		BandwidthCDNURL:  bandwidth.CdnTestUrl,
+		UrlProbe: &ProviderEgressProbeBatchArgs{
+			Limit:               8,
+			Concurrency:         8,
+			ProbeTimeoutSeconds: 60,
+		},
 		Full: ProviderEgressProbeBatchArgs{
 			Limit: 8,
 			// one round: every provider of a batch waits out its retries
@@ -214,10 +221,7 @@ func providerEgressFullHealthOptions(args *ProviderEgressProbeArgs) egresshealth
 // One full provider's bounded sampled work, cold generations and tunnel open.
 func providerEgressFullRunBudget(args *ProviderEgressProbeArgs) time.Duration {
 	fullOptions := providerEgressFullHealthOptions(args)
-	loads := egresshealth.SamplePerRun() + egresshealth.MaxSampledCanaries
-	if args.Full.AllDestinations {
-		loads = len(egresshealth.Destinations())
-	}
+	loads := egresshealth.SampleTargetPerRun() + egresshealth.MaxSampledCanaries
 	probeTimeout := time.Duration(args.Full.ProbeTimeoutSeconds) * time.Second
 	full := fullOptions.RunBudget(loads) + probeTimeout
 
@@ -248,6 +252,9 @@ func providerEgressProbeMinMaxTime(args *ProviderEgressProbeArgs) time.Duration 
 // durable row: shard geometry, deadlines, endpoints, the load and dark rules,
 // the health sampler's per-request floor, and a max time that covers a run.
 func validateProviderEgressProbeArgsConfig(args *ProviderEgressProbeArgs) error {
+	if args.UrlProbe != nil {
+		return validateProviderUrlProbeArgs(args)
+	}
 	if args.ShardCount < 1 || maxProviderEgressProbeShardCount < args.ShardCount {
 		return fmt.Errorf("provider egress probe shard_count must be in [1,%d] (got %d)", maxProviderEgressProbeShardCount, args.ShardCount)
 	}
@@ -337,11 +344,17 @@ func providerEgressProbeArgs(
 ) *ProviderEgressProbeArgs {
 	rules := settings.ProviderEgressRules
 	rules.DarkBackoffSeconds = append([]int(nil), settings.DarkBackoffSeconds...)
+	var urlProbe *ProviderEgressProbeBatchArgs
+	if settings.UrlProbe != nil {
+		batch := *settings.UrlProbe
+		urlProbe = &batch
+	}
 	return &ProviderEgressProbeArgs{
 		ShardIndex:                   shardIndex,
 		ShardCount:                   settings.ShardCount,
 		IdleDelaySeconds:             settings.IdleDelaySeconds,
 		MaxTimeSeconds:               settings.MaxTimeSeconds,
+		UrlProbe:                     urlProbe,
 		Full:                         settings.Full,
 		Blackhole:                    settings.Blackhole,
 		APIURL:                       settings.APIURL,
@@ -441,12 +454,16 @@ func providerEgressProbeArgsMatchSettings(args *ProviderEgressProbeArgs, setting
 	return args.ShardCount == settings.ShardCount &&
 		args.IdleDelaySeconds == settings.IdleDelaySeconds &&
 		args.MaxTimeSeconds == settings.MaxTimeSeconds &&
+		providerUrlProbeBatchMatches(args.UrlProbe, settings.UrlProbe) &&
 		args.Full == settings.Full && args.Blackhole == settings.Blackhole &&
 		args.APIURL == settings.APIURL && args.PlatformURL == settings.PlatformURL &&
 		args.PublicAPIURL == settings.PublicAPIURL && args.BandwidthCDNURL == settings.BandwidthCDNURL &&
 		args.LoadAttempts == settings.LoadAttempts &&
 		args.LoadRetryMeanIntervalSeconds == settings.LoadRetryMeanIntervalSeconds &&
 		args.TunnelRecreateAttempts == settings.TunnelRecreateAttempts &&
+		args.UrlProbeResultVersion == settings.UrlProbeResultVersion &&
+		args.UrlSuccessIntervalSeconds == settings.UrlSuccessIntervalSeconds &&
+		args.UrlFailureIntervalSeconds == settings.UrlFailureIntervalSeconds &&
 		args.DarkConsecutiveFailures == settings.DarkConsecutiveFailures &&
 		args.DarkMinimumSpanSeconds == settings.DarkMinimumSpanSeconds &&
 		slices.Equal(args.DarkBackoffSeconds, settings.DarkBackoffSeconds) &&
@@ -472,6 +489,13 @@ func ProviderEgressProbe(
 	// path, which is where identity, Vault credentials, and network clients are
 	// acquired.
 	if !settings.Enabled {
+		return &ProviderEgressProbeResult{Stale: true}, nil
+	}
+	// Old persisted snapshots never enter either their former worker geometry
+	// or a retry loop caused by the new policy validator. Post replaces the
+	// same logical shard owner with the current explicit URL arguments.
+	if args != nil && ((settings.UrlProbe != nil && args.UrlProbe == nil) ||
+		args.UrlProbeResultVersion != settings.UrlProbeResultVersion) {
 		return &ProviderEgressProbeResult{Stale: true}, nil
 	}
 	// a durable snapshot written before the load and dark rules were part of
@@ -521,7 +545,7 @@ func ProviderEgressProbePost(
 
 	nextArgs := providerEgressProbeArgs(settings, args.ShardIndex)
 	runAt := server.NowUtc()
-	if !result.Stale && !result.Full {
+	if !result.Stale && !result.Backlog && !result.Full {
 		runAt = runAt.Add(time.Duration(nextArgs.IdleDelaySeconds) * time.Second)
 	}
 	scheduleProviderEgressProbeAt(clientSession, tx, nextArgs, runAt)
@@ -555,6 +579,9 @@ func providerEgressIpEchoUrl(args *ProviderEgressProbeArgs) string {
 // the two independent probe schedules cannot starve each other when one fails.
 // It is safe for concurrent use after construction.
 type providerEgressProbePass struct {
+	// Production uses one paced URL scheduler; legacy diagnostic lanes remain
+	// available only to compatibility callers.
+	urlProbes    bool
 	readiness    *providerEgressProbeReadiness
 	blackholeDue func(context.Context, int) ([]ingest.DueProvider, error)
 	fullDue      func(context.Context, int) ([]ingest.DueProvider, error)
@@ -1128,12 +1155,11 @@ func (self *providerEgressFullBatch) release(
 		publicationFailed := false
 		if entry.health != nil {
 			scored := scoreEgressHealthResult(entry.health, place, scoring)
-			// a run left with no scored load measured nothing that may count,
-			// and is not submitted over the provider's last real run; its
-			// loads still go to the tally, which judges the sites that were
-			// left out
+			// No scored load means no quality trial. Independently validated
+			// per-URL authentication still reaches its security projection;
+			// a zero denominator cannot acquire quality or quota credit.
 			submitted := false
-			if 0 < scored.Total {
+			if 0 < scored.Total || providerUrlProbeHasSecurityEvidence(scored) {
 				submitted = self.sink.submitEgressHealthScored(ctx, providerClientId, entry.health, scored) == nil
 				if !submitted {
 					self.releaseHealthFailures++
@@ -1204,7 +1230,7 @@ func (self *providerEgressProbePass) runFullBatch(
 	}
 	var scoring *model.ProviderEgressHealthScoring
 	siteSettings := model.DefaultProviderEgressSiteSettings()
-	if self.loadScoring != nil {
+	if self.loadScoring != nil && !self.urlProbes {
 		scoring, siteSettings = self.loadScoring(ctx)
 	}
 	places := map[string]model.ProviderEgressPlace{}
@@ -1221,6 +1247,7 @@ func (self *providerEgressProbePass) runFullBatch(
 		readiness:         self.readiness,
 	}
 	options := self.fullOptions
+	options.UrlProbe = self.urlProbes
 	observer := options.ObserveProgress
 	options.ObserveProgress = func(event prober.Progress) {
 		progress.observe(event)
@@ -1253,9 +1280,16 @@ func (self *providerEgressProbePass) runFullBatch(
 	// probationary nor incompatible loads may trip or dilute the guard
 	scoredRuns := []*egresshealth.Result{}
 	for providerClientId, run := range batch.resultsByProvider() {
+		if self.urlProbes && run.Total > 0 && run.UrlSource != "" {
+			urlProbeSources.WithLabelValues(run.UrlSource).Inc()
+		}
 		scoredRuns = append(scoredRuns, scoreEgressHealthResult(run, places[providerClientId], scoring))
 	}
 	share, tripped := providerEgressRunGuard(scoredRuns, args.ProviderEgressRules)
+	if self.urlProbes {
+		// Individual accepted URL errors belong in the history denominator.
+		tripped = false
+	}
 	egressProbeBatchShare.WithLabelValues("full").Set(share)
 	if tripped {
 		egressProbeBatchGuardTripsTotal.WithLabelValues("full").Inc()
@@ -1394,6 +1428,9 @@ func (self *providerEgressProbePass) run(
 	ctx context.Context,
 	args *ProviderEgressProbeArgs,
 ) (*ProviderEgressProbeResult, error) {
+	if self.urlProbes {
+		return self.runUrlProbes(ctx, args)
+	}
 	if _, bounded := ctx.Deadline(); bounded {
 		args = providerEgressProbeExecutionArgs(args)
 	}
@@ -1723,7 +1760,7 @@ func runProviderEgressProbe(
 	// All shards use this one internal network. Size its credit from this
 	// shard's selected cohort and the total simultaneous shard count, then
 	// serialize conditional grants before any tunnel is admitted.
-	minimumCredit, err := providerEgressProbeCreditMinimum(args)
+	minimumCredit, err := providerUrlProbeCreditMinimum(args)
 	if err != nil {
 		return nil, err
 	}
@@ -1761,9 +1798,9 @@ func runProviderEgressProbe(
 	readiness := newProviderEgressProbeReadiness(*identity.NetworkId)
 
 	pass := &providerEgressProbePass{
-		readiness:    readiness,
-		blackholeDue: operator.BlackholeDue,
-		fullDue:      operator.Due,
+		urlProbes: true,
+		readiness: readiness,
+		fullDue:   operator.Due,
 		loadPins: func(ctx context.Context) (map[string][]string, error) {
 			servedPins, err := operator.GeolocationPins(ctx)
 			if err != nil {
@@ -1774,44 +1811,36 @@ func runProviderEgressProbe(
 		loadPool: func(ctx context.Context) (*egresshealth.Pool, error) {
 			return fleetprobe.LoadPool(ctx, operator.Http, fleetprobe.PoolUrl(args.APIURL), operatorSecret)
 		},
-		loadScoring:               loadProviderEgressHealthScoring,
-		submitBlackholeChecks:     reporter.SubmitBlackholeChecks,
-		publishSafeBlackholeEarly: true,
-		blackholeOptions: fleetprobe.BlackholeOptions{
-			TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, args.Blackhole),
-		},
 		fullOptions: fleetprobe.FullOptions{
-			TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, args.Full),
+			UrlProbe:     true,
+			TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, providerUrlProbeBatch(args)),
 		},
 		fullSink:     reporter,
 		recordTally:  recordProviderEgressRunTally,
-		runBlackhole: fleetprobe.RunBlackhole,
-		runFull:      fleetprobe.RunFull,
-		refreshFleet: refreshEgressProbeFleetMetrics,
+		runFull:      fleetprobe.RunUrlProbes,
+		refreshFleet: providerUrlProbeFleetHeartbeat(args),
 	}
-	result, err := runWithProviderEgressFleetHeartbeat(ctx, providerEgressFleetHeartbeatInterval,
+	result, err := runWithProviderEgressFleetHeartbeat(ctx, time.Minute,
 		pass.refreshFleet, func() (*ProviderEgressProbeResult, error) { return pass.run(ctx, args) })
+	outcome := "ok"
+	if err != nil {
+		outcome = "error"
+	}
+	urlProbeShardPasses.WithLabelValues(strconv.Itoa(args.ShardIndex), outcome).Inc()
 	if result == nil {
 		return nil, err
 	}
 
 	log.Printf(
-		"provider-egress task: shard=%d/%d full_due=%d attempted=%d submitted=%d failed=%d not_measured=%d guard=%t blackhole_due=%d checked=%d dark=%d tunnel_failed=%d not_measured=%d guard_trips=%d backlog=%t",
+		"provider-url-probe task: shard=%d/%d due=%d attempted=%d accepted=%d local_failure=%d not_measured=%d backlog=%t",
 		args.ShardIndex,
 		args.ShardCount,
-		result.FullDue,
+		result.UrlDue,
 		result.Attempted,
 		result.Submitted,
 		result.Failed,
-		result.FullNotMeasured,
-		result.FullGuardTripped,
-		result.BlackholeDue,
-		result.Checked,
-		result.Dark,
-		result.TunnelFailed,
-		result.BlackholeNotMeasured,
-		result.BlackholeGuardTripped,
-		result.Full,
+		result.UrlNotMeasured,
+		result.Backlog,
 	)
 	return result, err
 }

@@ -47,19 +47,32 @@ func GetLocationForIp(ctx context.Context, clientIp string) (*model.Location, *m
 		return nil, nil, err
 	}
 
-	// GeoLite2 has no ip-quality verdicts, so this path leaves NetTypeHosting,
-	// NetTypePrivacy and NetTypeVirtual at 0 -- unknown, not clean. The egress
-	// probe is the only source of hosting and privacy: SetConnectionLocation
-	// (network_client_controller.go) applies a fresh probe's flags to these
-	// scores whichever location it stores, this one included, so only a
-	// connection without a fresh probe keeps the zeros. Nothing sets
-	// NetTypeVirtual.
+	// Legacy net-type columns stay neutral. Reviewed hosting and geographic
+	// exceptions come from the actual connected address's ARIN lookup below;
+	// a location probe cannot substitute its country or vendor flags.
+	arinInfo, err := server.GetArinInfo(addr)
+	if err != nil {
+		return nil, nil, err
+	}
 	connectionLocationScores := &model.ConnectionLocationScores{
 		NetTypeForeign: arinForeignScore(addr, ipInfo.CountryCode),
 		AccuracyKm:     genesisAccuracyKm(ipInfo),
 	}
+	setArinConnectionFacts(connectionLocationScores, arinInfo)
 
 	return location, connectionLocationScores, nil
+}
+
+// Successful no-record lookups are explicitly evaluated unknowns. Overrides
+// that never queried the database cannot attest a generation or lookup time.
+func setArinConnectionFacts(scores *model.ConnectionLocationScores, info *server.ArinInfo) {
+	scores.ArinRisk, scores.ArinNonQuality = info.Risk, info.NonQuality
+	scores.ArinDatabaseBuildEpoch = info.DatabaseBuildEpoch
+	scores.ArinLookupAt = nil
+	if info.DatabaseBuildEpoch > 0 {
+		now := server.NowUtc()
+		scores.ArinLookupAt = &now
+	}
 }
 
 // The lookup's accuracy radius as the location rows store it

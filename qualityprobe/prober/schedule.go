@@ -17,11 +17,9 @@ type Summary struct {
 	Submitted int
 	Skipped   int
 	Failed    int
-	// Counts the probes, among Failed, whose run measured nothing
-	// because the tunnel died and could not be re-created in time (see
-	// ErrNotMeasured): the prober's lost path, not the providers' traffic, and
-	// worth watching apart from ordinary failures -- a pass full of them is a
-	// churning fleet or a prober that cannot hold tunnels up.
+	// Counts probes, among Failed, with no measurable quality trial (see
+	// ErrNotMeasured). Local path/instrumentation failures are separate from
+	// provider traffic errors and may still publish independent URL security.
 	NotMeasured int
 }
 

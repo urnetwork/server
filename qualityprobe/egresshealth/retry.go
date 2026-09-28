@@ -258,7 +258,11 @@ attempts:
 			continue
 		}
 		attemptCtx, stop := bound(ctx, signal)
-		result = fetchWithExitPolicy(attemptCtx, client, d, self.requestTimeout(client), self.profile, self.opts.now, self.opts.exitAddressAllowed)
+		if self.opts.UrlProbe {
+			result = fetchUrlProbe(attemptCtx, client, d, self.requestTimeout(client), self.profile, self.opts)
+		} else {
+			result = fetchWithExitPolicy(attemptCtx, client, d, self.requestTimeout(client), self.profile, self.opts.now, self.opts.exitAddressAllowed)
+		}
 		if 0 < result.StatusCode {
 			self.established(client)
 		}

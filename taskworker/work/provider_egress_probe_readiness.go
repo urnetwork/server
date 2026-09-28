@@ -144,6 +144,20 @@ func (self *providerEgressProbeReadinessReporter) ReportAttempt(ctx context.Cont
 func (self *providerEgressProbeReadinessReporter) SubmitEgressHealth(ctx context.Context, providerClientId string, result *egresshealth.Result) error {
 	if result != nil && !result.TlsAuthenticationFailure && (result.Total <= 0 || result.OkCount < result.Total) {
 		if err := self.readiness.check(ctx); err != nil {
+			if providerUrlProbeHasSecurityEvidence(result) {
+				// Preserve authenticated hops without assigning an uncertain
+				// quality trial. The original diagnostic remains immutable and
+				// the local readiness/publication errors remain observable.
+				securityOnly := *result
+				securityOnly.OkCount, securityOnly.Total = 0, 0
+				securityOnly.NotMeasured = max(1, result.NotMeasured+result.Total)
+				securityOnly.ByClass = nil
+				securityOnly.Checks = append([]egresshealth.CheckResult(nil), result.Checks...)
+				for i := range securityOnly.Checks {
+					securityOnly.Checks[i].Ok, securityOnly.Checks[i].NotMeasured = false, true
+				}
+				return errors.Join(err, self.egressProbeIngest.SubmitEgressHealth(ctx, providerClientId, &securityOnly))
+			}
 			return err
 		}
 	}

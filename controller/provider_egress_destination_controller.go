@@ -17,96 +17,8 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// The pool as data (connect/GEOMAP.md §11.4): this file joins the pool's rows
-// to the prober's wire. The prober's Destination is the load contract on both
-// sides -- the seed is converted from its built-in table, the candidates of
-// egress-sites.yml are validated with its own rules, and the route serves its
-// Pool type -- so a destination the server stores is one the prober can run,
-// or it is refused before it is stored.
-
-// What a built-in destination is representative of.
-type providerEgressSiteMeta struct {
-	category string
-	region   string
-}
-
-// providerEgressBuiltinSiteMeta assigns the built-in table's categories and
-// regions, which the module's table does not carry: the refresh promotes a
-// candidate of the category a retired site leaves, so every seeded row needs
-// one. The non-site classes are one category each, named for what the class
-// holds; the sites use the category vocabulary of egress-sites.yml.
-var providerEgressBuiltinSiteMeta = func() map[string]providerEgressSiteMeta {
-	meta := map[string]providerEgressSiteMeta{}
-	assign := func(category string, region string, names ...string) {
-		for _, name := range names {
-			meta[name] = providerEgressSiteMeta{category: category, region: region}
-		}
-	}
-	assign("resolver", "global", "cloudflare-doh", "google-doh", "adguard-doh", "dnssb-doh", "nextdns-doh")
-	assign("resolver", "east-asia", "alidns-doh", "dnspod-doh")
-	assign("portal", "global",
-		"google-generate-204", "google-connectivitycheck", "gstatic-204", "apple-captive-portal",
-		"ubuntu-connectivity-check", "firefox-detectportal", "gnome-nm-check", "cloudflare-cp-204",
-		"example-com-https",
-	)
-	assign("echo", "global", "cloudflare-trace", "aws-checkip", "ifconfig-me", "icanhazip", "ipify")
-	assign("cdn", "global",
-		"cloudflare-cdn", "cloudflare-sized-1kb", "fastly", "jsdelivr-fastly-mirror", "unpkg",
-		"google-hosted-libraries", "microsoft-azure-cdn", "amazon-cloudfront", "keycdn", "cdn77",
-		"sucuri-cdn", "cachefly",
-	)
-	assign("mirror", "global", "kernel-org-mirrors", "debian-cdn", "ubuntu-archive-plain-http", "alpine-cdn", "fedora-downloads")
-	assign("mirror", "europe", "ovh-proof-eu")
-
-	assign("search", "global", "google", "bing", "yahoo", "duckduckgo", "ecosia")
-	assign("search", "east-asia", "baidu", "naver")
-	assign("search", "russia", "yandex", "mail-ru")
-	assign("social", "global",
-		"facebook", "instagram", "twitter-x", "linkedin", "tiktok", "pinterest", "snapchat", "discord",
-		"telegram", "whatsapp", "mastodon", "bluesky", "reddit",
-	)
-	assign("social", "russia", "vk")
-	assign("social", "east-asia", "line", "qq")
-	assign("video", "global",
-		"youtube", "netflix", "twitch", "vimeo", "hulu", "disney", "spotify", "soundcloud", "dailymotion",
-	)
-	assign("shopping", "global", "amazon", "ebay", "walmart", "target", "shopify", "etsy")
-	assign("shopping", "east-asia", "alibaba", "aliexpress", "taobao", "jd-com")
-	assign("shopping", "latin-america", "mercadolibre")
-	assign("news", "global", "cnn", "bbc", "new-york-times", "the-guardian", "ap-news", "reuters")
-	assign("news", "middle-east", "al-jazeera")
-	assign("news", "europe", "deutsche-welle", "france-24")
-	assign("news", "east-asia", "sina")
-	assign("news", "south-asia", "times-of-india")
-	assign("news", "latin-america", "globo")
-	assign("news", "oceania", "abc-australia")
-	assign("news", "africa", "news24")
-	assign("documentation", "global",
-		"github", "github-api", "gitlab", "docker-hub", "npm-registry", "pypi", "rubygems", "python-org",
-		"go-dev", "kernel-org", "mdn", "stack-overflow", "wikipedia", "wordpress", "internet-archive",
-	)
-	assign("reference", "global", "imdb", "noaa-weather")
-	assign("technology", "global",
-		"cloudflare-one-one-one-one", "cloudflare-speed-test", "microsoft", "apple", "cloudflare", "aws",
-		"google-cloud", "digitalocean", "akamai",
-	)
-	assign("productivity", "global", "zoom", "slack", "dropbox", "notion", "trello", "atlassian", "figma", "canva")
-	assign("gaming", "global", "steam", "playstation", "xbox", "nintendo", "roblox", "riot-games", "epic-games")
-	return meta
-}()
-
-// providerEgressBuiltinUrlReplacements re-points the two built-in cdn entries
-// whose objects cost real wire bytes now that no request carries a Range header
-// (the prober reads a kilobyte and closes, but the server has a receive window
-// in flight by then): cachefly's 10 MB test file and the AWS SDK bundle. Each is
-// replaced by a small object the same operator serves -- CacheFly's own
-// robots.txt through its edge, and a CloudFront-served AWS favicon -- so the
-// class keeps the same operators at a fraction of the cost. Measured
-// 2026-09-24: 174 and 1150 bytes, both 200 with a body.
-var providerEgressBuiltinUrlReplacements = map[string]string{
-	"cachefly":          "https://www.cachefly.com/robots.txt",
-	"amazon-cloudfront": "https://a0.awsstatic.com/libra-css/images/site/fav/favicon.ico",
-}
+// URL contracts come from qualityprobe.yml. Stored rows contribute learned
+// retirement and place-compatibility state, never a compiled-in target list.
 
 // Converts one prober destination to a pool row, refusing it when the prober
 // could not run it (egresshealth's own Destination.Validate) or when its name
@@ -195,32 +107,18 @@ func ProviderEgressDestinationToWire(row *model.ProviderEgressDestination) (egre
 	return destination, nil
 }
 
-// The pool's first contents: the prober's built-in table, with the categories
-// and regions above and the two cdn entries re-pointed at small objects. A
-// built-in entry the category table does not name is still seeded, filed under
-// its class, so a prober release that adds a destination never makes the seed
-// fail.
+// The pool's first contents are the deployment's explicit URL contracts.
+// Missing or invalid configuration is an observation failure, never a silent
+// fallback to compiled-in destinations.
 func ProviderEgressDestinationSeed() ([]*model.ProviderEgressDestination, error) {
-	seed := []*model.ProviderEgressDestination{}
-	for _, destination := range egresshealth.Destinations() {
-		if url, ok := providerEgressBuiltinUrlReplacements[destination.Name]; ok {
-			destination.Url = url
-		}
-		meta, ok := providerEgressBuiltinSiteMeta[destination.Name]
-		if !ok {
-			meta = providerEgressSiteMeta{category: string(destination.Class), region: "global"}
-		}
-		row, err := ProviderEgressDestinationFromWire(destination, meta.category, meta.region, 0)
-		if err != nil {
-			return nil, err
-		}
-		row.Source = model.ProviderEgressDestinationSourceBuiltin
-		seed = append(seed, row)
+	sites, err := LoadProviderEgressSites()
+	if err != nil {
+		return nil, err
 	}
-	return seed, nil
+	return sites.Destinations, nil
 }
 
-// Seeds an empty pool from the built-in table, and reports whether it did.
+// Seeds an empty pool from configured destinations, and reports whether it did.
 func EnsureProviderEgressDestinationsSeeded(ctx context.Context) (bool, error) {
 	seed, err := ProviderEgressDestinationSeed()
 	if err != nil {
@@ -229,13 +127,18 @@ func EnsureProviderEgressDestinationsSeeded(ctx context.Context) (bool, error) {
 	return model.SeedProviderEgressDestinations(ctx, seed), nil
 }
 
-// The parsed egress-sites.yml: the refresh settings, the request profile the
-// prober loads sites with, and the operator's candidates.
+// The parsed qualityprobe.yml: refresh settings, request policy and the
+// operator-owned destination, country and candidate catalogs.
 type ProviderEgressSites struct {
 	Settings *model.ProviderEgressSiteSettings
+	// Only these configured URL contracts may be served. Database rows retain
+	// learned retirement state, not authority to invent or retain removed URLs.
+	Destinations []*model.ProviderEgressDestination
+	Countries    map[string][]egresshealth.Destination
 	// Profile is the served request profile; the prober module's default when
 	// the file names none.
-	Profile egresshealth.RequestProfile
+	Profile        egresshealth.RequestProfile
+	UrlProbePolicy egresshealth.UrlProbePolicy
 	// Candidates are the file's destinations, each validated as the prober
 	// would run it.
 	Candidates []*model.ProviderEgressDestination
@@ -268,11 +171,15 @@ type providerEgressSitesCandidateYaml struct {
 
 // The file's profile and candidates; the settings block is read apart.
 type providerEgressSitesYaml struct {
-	Profile *struct {
+	SchemaVersion  int                          `yaml:"schema_version"`
+	UrlProbePolicy *egresshealth.UrlProbePolicy `yaml:"url_probe_policy"`
+	Profile        *struct {
 		UserAgent string            `yaml:"user_agent"`
 		Headers   map[string]string `yaml:"headers"`
 	} `yaml:"profile"`
-	Candidates []providerEgressSitesCandidateYaml `yaml:"candidates"`
+	Candidates   []providerEgressSitesCandidateYaml            `yaml:"candidates"`
+	Destinations []providerEgressSitesCandidateYaml            `yaml:"destinations"`
+	Countries    map[string][]providerEgressSitesCandidateYaml `yaml:"countries"`
 }
 
 // Reads one egress-sites.yml. Every candidate must be one the prober can run
@@ -289,9 +196,19 @@ func ParseProviderEgressSites(unmarshal func(any) error) (*ProviderEgressSites, 
 	if err := unmarshal(&document); err != nil {
 		return nil, err
 	}
+	if document.SchemaVersion != 1 || len(document.Destinations) == 0 {
+		return nil, errors.New("qualityprobe.yml requires schema_version 1 and a nonempty destinations catalog")
+	}
 	sites := &ProviderEgressSites{
-		Settings: settings,
-		Profile:  egresshealth.DefaultRequestProfile(),
+		Settings:       settings,
+		Profile:        egresshealth.DefaultRequestProfile(),
+		UrlProbePolicy: egresshealth.DefaultUrlProbePolicy(),
+	}
+	if document.UrlProbePolicy != nil {
+		sites.UrlProbePolicy = *document.UrlProbePolicy
+	}
+	if err := sites.UrlProbePolicy.Validate(); err != nil {
+		return nil, err
 	}
 	if document.Profile != nil {
 		if strings.TrimSpace(document.Profile.UserAgent) == "" {
@@ -305,72 +222,100 @@ func ParseProviderEgressSites(unmarshal func(any) error) (*ProviderEgressSites, 
 		}
 	}
 
-	problems := []string{}
-	seen := map[string]bool{}
-	for i, entry := range document.Candidates {
-		var expect egresshealth.Expect
-		expectWord := entry.Expect
-		if expectWord == "" {
-			expectWord = "body"
+	parseDestinations := func(entries []providerEgressSitesCandidateYaml) ([]*model.ProviderEgressDestination, error) {
+		rows := []*model.ProviderEgressDestination{}
+		problems := []string{}
+		seen := map[string]bool{}
+		for i, entry := range entries {
+			var expect egresshealth.Expect
+			expectWord := entry.Expect
+			if expectWord == "" {
+				expectWord = "body"
+			}
+			if err := expect.UnmarshalText([]byte(expectWord)); err != nil {
+				problems = append(problems, fmt.Sprintf("candidate %d (%q): %s", i, entry.Name, err))
+				continue
+			}
+			destination := egresshealth.Destination{
+				Name:     entry.Name,
+				Class:    egresshealth.Class(entry.Class),
+				Url:      entry.Url,
+				Headers:  entry.Headers,
+				Expect:   expect,
+				Status:   entry.Status,
+				MaxBytes: entry.MaxBytes,
+				Verify:   egresshealth.BodyCheck{Kind: egresshealth.BodyCheckKind(entry.Verify.Kind), Text: entry.Verify.Text},
+			}
+			for _, place := range entry.Incompatible {
+				destination.Incompatible = append(destination.Incompatible, egresshealth.Place{
+					Country: strings.TrimSpace(place.Country),
+					Region:  strings.TrimSpace(place.Region),
+				})
+			}
+			if strings.TrimSpace(entry.Category) == "" {
+				problems = append(problems, fmt.Sprintf("candidate %d (%q): no category", i, entry.Name))
+				continue
+			}
+			if seen[entry.Name] {
+				problems = append(problems, fmt.Sprintf("candidate %d repeats the name %q", i, entry.Name))
+				continue
+			}
+			seen[entry.Name] = true
+			region := strings.TrimSpace(entry.Region)
+			if region == "" {
+				region = "global"
+			}
+			row, err := ProviderEgressDestinationFromWire(destination, strings.TrimSpace(entry.Category), region, entry.Revision)
+			if err != nil {
+				problems = append(problems, fmt.Sprintf("candidate %d: %s", i, err))
+				continue
+			}
+			row.Source = model.ProviderEgressDestinationSourceCandidates
+			rows = append(rows, row)
 		}
-		if err := expect.UnmarshalText([]byte(expectWord)); err != nil {
-			problems = append(problems, fmt.Sprintf("candidate %d (%q): %s", i, entry.Name, err))
-			continue
+		if 0 < len(problems) {
+			return nil, errors.New("qualityprobe catalog: " + strings.Join(problems, "; "))
 		}
-		destination := egresshealth.Destination{
-			Name:     entry.Name,
-			Class:    egresshealth.Class(entry.Class),
-			Url:      entry.Url,
-			Headers:  entry.Headers,
-			Expect:   expect,
-			Status:   entry.Status,
-			MaxBytes: entry.MaxBytes,
-			Verify:   egresshealth.BodyCheck{Kind: egresshealth.BodyCheckKind(entry.Verify.Kind), Text: entry.Verify.Text},
-		}
-		for _, place := range entry.Incompatible {
-			destination.Incompatible = append(destination.Incompatible, egresshealth.Place{
-				Country: strings.TrimSpace(place.Country),
-				Region:  strings.TrimSpace(place.Region),
-			})
-		}
-		if strings.TrimSpace(entry.Category) == "" {
-			problems = append(problems, fmt.Sprintf("candidate %d (%q): no category", i, entry.Name))
-			continue
-		}
-		if seen[entry.Name] {
-			problems = append(problems, fmt.Sprintf("candidate %d repeats the name %q", i, entry.Name))
-			continue
-		}
-		seen[entry.Name] = true
-		region := strings.TrimSpace(entry.Region)
-		if region == "" {
-			region = "global"
-		}
-		row, err := ProviderEgressDestinationFromWire(destination, strings.TrimSpace(entry.Category), region, entry.Revision)
-		if err != nil {
-			problems = append(problems, fmt.Sprintf("candidate %d: %s", i, err))
-			continue
-		}
-		row.Source = model.ProviderEgressDestinationSourceCandidates
-		sites.Candidates = append(sites.Candidates, row)
+		return rows, nil
 	}
-	if 0 < len(problems) {
-		return nil, errors.New("egress sites: " + strings.Join(problems, "; "))
+	if sites.Destinations, err = parseDestinations(document.Destinations); err != nil {
+		return nil, err
+	}
+	if sites.Candidates, err = parseDestinations(document.Candidates); err != nil {
+		return nil, err
+	}
+	sites.Countries = map[string][]egresshealth.Destination{}
+	for country, entries := range document.Countries {
+		rows, err := parseDestinations(entries)
+		if err != nil {
+			return nil, fmt.Errorf("country %s: %w", country, err)
+		}
+		for _, row := range rows {
+			destination, err := ProviderEgressDestinationToWire(row)
+			if err != nil {
+				return nil, err
+			}
+			sites.Countries[country] = append(sites.Countries[country], destination)
+		}
+	}
+	pool := &egresshealth.Pool{Countries: sites.Countries}
+	for _, row := range sites.Destinations {
+		destination, err := ProviderEgressDestinationToWire(row)
+		if err != nil {
+			return nil, err
+		}
+		pool.Destinations = append(pool.Destinations, destination)
+	}
+	if err := egresshealth.ValidatePool(pool); err != nil {
+		return nil, err
 	}
 	return sites, nil
 }
 
-// Reads the deployment's egress-sites.yml: the defaults and no candidates when
-// it is absent, an error when it is present and unusable.
+// Reads qualityprobe.yml; absent or unusable catalogs return an error.
 func LoadProviderEgressSites() (*ProviderEgressSites, error) {
 	resource, err := server.Config.SimpleResource(model.ProviderEgressSitesResourceName)
 	if err != nil {
-		if errors.Is(err, server.ErrResourceNotFound) {
-			return &ProviderEgressSites{
-				Settings: model.DefaultProviderEgressSiteSettings(),
-				Profile:  egresshealth.DefaultRequestProfile(),
-			}, nil
-		}
 		return nil, err
 	}
 	return ParseProviderEgressSites(resource.UnmarshalYamlE)
@@ -441,8 +386,8 @@ func BuildProviderEgressDestinationPool(
 }
 
 // Serves the pool (GET /network/provider-egress-destinations). A first request
-// seeds an empty pool from the built-in table, so the route never serves
-// nothing for want of a refresh having run.
+// seeds an empty pool from the configured contracts without waiting for the
+// refresh task; every response intersects stored state with current config.
 func GetProviderEgressDestinationPool(ctx context.Context) (*egresshealth.Pool, error) {
 	if _, err := EnsureProviderEgressDestinationsSeeded(ctx); err != nil {
 		return nil, err
@@ -452,11 +397,68 @@ func GetProviderEgressDestinationPool(ctx context.Context) (*egresshealth.Pool, 
 		return nil, err
 	}
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	return BuildProviderEgressDestinationPool(
-		model.GetProviderEgressDestinations(ctx),
+	pool, err := BuildProviderEgressDestinationPool(
+		sites.configuredRows(model.GetProviderEgressDestinations(ctx)),
 		sites.Profile,
 		server.NowUtc(),
 		sites.Settings.SiteRegionCanaryShare,
 		rng,
 	)
+	if err != nil {
+		return nil, err
+	}
+	pool.Countries = sites.Countries
+	pool.UrlProbePolicy = &sites.UrlProbePolicy
+	if err := egresshealth.ValidatePool(pool); err != nil {
+		return nil, err
+	}
+	// Country publication is part of the same generation as global contracts.
+	contents, err := json.Marshal(struct {
+		GeneralVersion int                                   `json:"general_version"`
+		Countries      map[string][]egresshealth.Destination `json:"countries"`
+		UrlProbePolicy egresshealth.UrlProbePolicy           `json:"url_probe_policy"`
+	}{GeneralVersion: pool.Version, Countries: pool.Countries, UrlProbePolicy: sites.UrlProbePolicy})
+	if err != nil {
+		return nil, err
+	}
+	hash := fnv.New32a()
+	hash.Write(contents)
+	pool.Version = int(hash.Sum32() & 0x7fffffff)
+	return pool, nil
+}
+
+// Config owns URL contracts; stored rows contribute only learned pool state.
+// Removing an entry takes effect immediately even if a stale DB row is active.
+func (self *ProviderEgressSites) configuredRows(stored []*model.ProviderEgressDestination) []*model.ProviderEgressDestination {
+	byName := map[string]*model.ProviderEgressDestination{}
+	for _, row := range stored {
+		byName[row.Name] = row
+	}
+	configured := map[string]*model.ProviderEgressDestination{}
+	for _, row := range self.Destinations {
+		configured[row.Name] = row
+	}
+	for _, row := range self.Candidates {
+		if _, active := configured[row.Name]; !active {
+			if existing := byName[row.Name]; existing == nil || !existing.Active {
+				continue
+			}
+		}
+		configured[row.Name] = row
+	}
+	rows := make([]*model.ProviderEgressDestination, 0, len(configured))
+	for name, row := range configured {
+		copy := *row
+		copy.Active = true
+		if existing := byName[name]; existing != nil {
+			copy.Active, copy.Probation = existing.Active, existing.Probation
+			for _, place := range existing.Incompatible {
+				if place.MarkedAt != nil {
+					copy.Incompatible = append(append([]model.ProviderEgressDestinationPlace(nil), copy.Incompatible...), place)
+				}
+			}
+		}
+		rows = append(rows, &copy)
+	}
+	return rows
 }

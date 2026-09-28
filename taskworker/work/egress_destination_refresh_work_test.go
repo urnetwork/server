@@ -21,6 +21,23 @@ import (
 // The refresh clock every pure test runs at.
 var testRefreshNow = time.Date(2026, time.September, 20, 6, 0, 0, 0, time.UTC)
 
+// Explicit catalog input keeps refresh tests independent of a workstation's config.
+const testRefreshCatalog = `
+schema_version: 1
+destinations:
+  - {name: synthetic-dns, class: dns, category: dns, url: "https://dns.example/dns-query?name=example.com&type=A", verify: {kind: dns_json}}
+  - {name: synthetic-connectivity, class: connectivity, category: connectivity, url: "https://connectivity.example/", verify: {kind: contains, text: synthetic-success}}
+  - {name: synthetic-cdn, class: cdn, category: cdn, url: "https://cdn.example/"}
+  - {name: synthetic-retiring-news, class: site, category: news, url: "https://retiring-news.example/"}
+  - {name: synthetic-steady-news, class: site, category: news, url: "https://steady-news.example/"}
+`
+
+const testRefreshCatalogSize = `
+settings:
+  site_pool_size: {dns: 1, connectivity: 1, cdn: 1, site: 2}
+  site_sample_size: {dns: 1, connectivity: 1, cdn: 1, site: 1}
+`
+
 // The default rules over a pool of one class: the other classes are empty,
 // and the site class is sized to the fixture, so no test gets an opening it
 // did not ask for.
@@ -496,7 +513,7 @@ func TestOrderEgressCandidatesPromotionOrder(t *testing.T) {
 	}
 }
 
-// One refresh against the database: the pool seeds from the built-in table,
+// One refresh against the database: the pool seeds from an explicit catalog,
 // the candidates sync in, a news site failing the healthy exits is retired,
 // the news candidate that loads cleanly from the host is promoted on
 // probation, and the served pool and the scoring follow. A second refresh the
@@ -504,7 +521,7 @@ func TestOrderEgressCandidatesPromotionOrder(t *testing.T) {
 func TestRefreshEgressDestinationsRetiresAndPromotesFromTheTally(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		pop := server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte(`
+		pop := server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte(testRefreshCatalog+testRefreshCatalogSize+`
 candidates:
   - name: news-candidate
     class: site
@@ -529,8 +546,8 @@ candidates:
 				name            string
 				loads, failures int
 			}{
-				{name: "cnn", loads: 250, failures: 150},
-				{name: "bbc", loads: 5000, failures: 0},
+				{name: "synthetic-retiring-news", loads: 250, failures: 150},
+				{name: "synthetic-steady-news", loads: 5000, failures: 0},
 			} {
 				server.RaisePgResult(tx.Exec(
 					ctx,
@@ -560,7 +577,7 @@ candidates:
 			t.Fatalf("refresh: %v", err)
 		}
 		if !result.Seeded || result.Synced != 2 || result.Retired != 1 || result.Promoted != 1 || result.Unfilled != 0 {
-			t.Fatalf("refresh result = %+v, want seeded, 2 synced, cnn retired and one promotion", result)
+			t.Fatalf("refresh result = %+v, want seeded, 2 synced, the failing site retired and one promotion", result)
 		}
 		slices.Sort(checked)
 		if !slices.Equal(checked, []string{"news-candidate", "video-candidate"}) {
@@ -571,8 +588,8 @@ candidates:
 		for _, d := range model.GetProviderEgressDestinations(ctx) {
 			byName[d.Name] = d
 		}
-		if cnn := byName["cnn"]; cnn.Active || cnn.RetireCount != 1 || cnn.RetiredTime == nil {
-			t.Fatalf("cnn after the refresh = %+v, want retired", cnn)
+		if retired := byName["synthetic-retiring-news"]; retired.Active || retired.RetireCount != 1 || retired.RetiredTime == nil {
+			t.Fatalf("failing site after the refresh = %+v, want retired", retired)
 		}
 		if promoted := byName["news-candidate"]; !promoted.Active || !promoted.Probation || promoted.PromotedTime == nil {
 			t.Fatalf("news-candidate after the refresh = %+v, want promoted on probation", promoted)
@@ -589,8 +606,8 @@ candidates:
 		for _, destination := range pool.Destinations {
 			served[destination.Name] = true
 		}
-		if served["cnn"] || !served["news-candidate"] || served["video-candidate"] {
-			t.Fatalf("served pool holds cnn=%t news-candidate=%t video-candidate=%t", served["cnn"], served["news-candidate"], served["video-candidate"])
+		if served["synthetic-retiring-news"] || !served["news-candidate"] || served["video-candidate"] {
+			t.Fatalf("served pool holds retired=%t news-candidate=%t video-candidate=%t", served["synthetic-retiring-news"], served["news-candidate"], served["video-candidate"])
 		}
 		if model.GetProviderEgressHealthScoring(ctx).Scores("news-candidate", model.ProviderEgressPlace{CountryCode: "de"}) {
 			t.Fatal("a site on probation scores")
@@ -610,7 +627,7 @@ candidates:
 // A max time that does not cover one host check refuses the refresh before
 // anything is read or written.
 func TestRefreshEgressDestinationsRefusesAMaxTimeShorterThanOneCheck(t *testing.T) {
-	pop := server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte(`
+	pop := server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte(testRefreshCatalog+`
 settings:
   site_refresh_max_time_seconds: 60
 `))
@@ -631,8 +648,8 @@ settings:
 func TestRefreshEgressDestinationsRefusesAnUnrunnableCandidateBeforeChecking(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		// no candidates from a workstation's egress-sites.yml
-		t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte("candidates: []\n")))
+		// no candidates from a workstation's qualityprobe.yml
+		t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte(testRefreshCatalog+testRefreshCatalogSize+"candidates: []\n")))
 		if _, err := controller.EnsureProviderEgressDestinationsSeeded(ctx); err != nil {
 			t.Fatal(err)
 		}
@@ -659,8 +676,8 @@ func TestRefreshEgressDestinationsRefusesAnUnrunnableCandidateBeforeChecking(t *
 				name            string
 				loads, failures int
 			}{
-				{name: "cnn", loads: 250, failures: 150},
-				{name: "bbc", loads: 5000, failures: 0},
+				{name: "synthetic-retiring-news", loads: 250, failures: 150},
+				{name: "synthetic-steady-news", loads: 5000, failures: 0},
 			} {
 				server.RaisePgResult(tx.Exec(
 					ctx,

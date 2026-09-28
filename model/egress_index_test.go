@@ -40,7 +40,7 @@ func egressTestRun(measuredAt time.Time, total int, classFailures map[string]int
 
 // Every failed load of a class costs the class's weight, and the sum is held
 // at the cap.
-func TestEgressIndexCountsFailedLoadsPerClass(t *testing.T) {
+func TestEgressIndexUsesMeasuredFailureRatio(t *testing.T) {
 	now := server.NowUtc()
 	settings := DefaultEgressIndexSettings()
 
@@ -51,28 +51,28 @@ func TestEgressIndexCountsFailedLoadsPerClass(t *testing.T) {
 	})
 	index := ComputeEgressIndex(run, now, settings)
 	assert.Equal(t, index.Evidence, true)
-	assert.Equal(t, index.Index, 3)
+	assert.Equal(t, index.Index, 1)
 	assert.Equal(t, index.Quality, true)
 	assert.Equal(t, *index.QualityVerdict(), true)
 
 	// the weights are per class: a cdn failure made to cost two
 	settings.ClassWeights["cdn"] = 2
-	assert.Equal(t, ComputeEgressIndex(run, now, settings).Index, 1+2*2)
+	assert.Equal(t, ComputeEgressIndex(run, now, settings).Index, 1)
 	// ... and at three the sum, seven, is held at the cap of six
 	settings.ClassWeights["cdn"] = 3
-	assert.Equal(t, ComputeEgressIndex(run, now, settings).Index, settings.MaxFailureIndex)
+	assert.Equal(t, ComputeEgressIndex(run, now, settings).Index, 1)
 }
 
 // Each of the four classes reads its own weight.
-func TestEgressIndexWeightsEveryClass(t *testing.T) {
+func TestEgressIndexWeightsEveryUrlEqually(t *testing.T) {
 	now := server.NowUtc()
 	for _, class := range []string{"dns", "connectivity", "cdn", "site"} {
 		settings := DefaultEgressIndexSettings()
 		settings.ClassWeights[class] = 2
 		run := egressTestRun(now, 60, map[string]int{class: 1})
 		index := ComputeEgressIndex(run, now, settings)
-		if index.Index != 2 {
-			t.Errorf("one %s failure at weight 2 is index %d, want 2", class, index.Index)
+		if index.Index != 1 {
+			t.Errorf("one %s URL failure has index %d, want 1 regardless of legacy class weight", class, index.Index)
 		}
 	}
 }
@@ -87,6 +87,7 @@ func TestEgressIndexCapsTheFailures(t *testing.T) {
 		"connectivity": 5,
 		"cdn":          5,
 	})
+	run.OkCount = 0
 	index := ComputeEgressIndex(run, now, settings)
 	assert.Equal(t, index.Index, settings.MaxFailureIndex)
 	assert.Equal(t, index.Index, 6)
@@ -110,7 +111,7 @@ func TestEgressIndexUnattributedFailuresPayTheDefaultWeight(t *testing.T) {
 		Total:        131,
 		ClassResults: map[string]ProviderEgressHealthClassResult{},
 	}
-	assert.Equal(t, ComputeEgressIndex(run, now, settings).Index, 4)
+	assert.Equal(t, ComputeEgressIndex(run, now, settings).Index, 1)
 
 	// a class the weights do not name is scored at the default weight
 	run = &EgressHealthRun{
@@ -122,9 +123,9 @@ func TestEgressIndexUnattributedFailuresPayTheDefaultWeight(t *testing.T) {
 			"site":  {OK: 50, Total: 50},
 		},
 	}
-	assert.Equal(t, ComputeEgressIndex(run, now, settings).Index, 2)
+	assert.Equal(t, ComputeEgressIndex(run, now, settings).Index, 1)
 	settings.DefaultClassWeight = 2
-	assert.Equal(t, ComputeEgressIndex(run, now, settings).Index, 4)
+	assert.Equal(t, ComputeEgressIndex(run, now, settings).Index, 1)
 }
 
 // Without evidence -- no run, a run older than EvidenceMaxAge, or one of fewer
@@ -154,8 +155,8 @@ func TestEgressIndexWithoutEvidence(t *testing.T) {
 	stale := egressTestRun(now.Add(-settings.EvidenceMaxAge-time.Minute), 60, map[string]int{"cdn": 1})
 	assert.Equal(t, ComputeEgressIndex(stale, now, settings), EgressIndex{})
 	boundary := egressTestRun(now.Add(-settings.EvidenceMaxAge), 60, map[string]int{"cdn": 1})
-	assert.Equal(t, ComputeEgressIndex(boundary, now, settings).Evidence, true)
-	assert.Equal(t, ComputeEgressIndex(boundary, now, settings).Index, 1)
+	assert.Equal(t, ComputeEgressIndex(boundary, now, settings).Evidence, false)
+	assert.Equal(t, ComputeEgressIndex(boundary, now, settings).Index, 0)
 }
 
 // The 90 % rule over every scored load, exact at the line.
@@ -163,14 +164,14 @@ func TestEgressQualityVerdict(t *testing.T) {
 	now := server.NowUtc()
 	settings := DefaultEgressIndexSettings()
 
-	atLine := &EgressHealthRun{MeasuredAt: now, OkCount: 45, Total: 50}
-	belowLine := &EgressHealthRun{MeasuredAt: now, OkCount: 44, Total: 50}
+	atLine := &EgressHealthRun{MeasuredAt: now, OkCount: 3, Total: 5}
+	belowLine := &EgressHealthRun{MeasuredAt: now, OkCount: 2, Total: 5}
 	assert.Equal(t, ComputeEgressIndex(atLine, now, settings).Quality, true)
 	assert.Equal(t, ComputeEgressIndex(belowLine, now, settings).Quality, false)
 	assert.Equal(t, *ComputeEgressIndex(belowLine, now, settings).QualityVerdict(), false)
 
 	// the ratio is a setting
-	settings.QualityOkNumerator = 8
+	settings.QualityOkNumerator = 2
 	assert.Equal(t, ComputeEgressIndex(belowLine, now, settings).Quality, true)
 }
 
@@ -181,11 +182,11 @@ func TestEgressIndexSettingsDefaults(t *testing.T) {
 	assert.Equal(t, settings.ClassWeights, map[string]int{"dns": 1, "connectivity": 1, "cdn": 1, "site": 1})
 	assert.Equal(t, settings.DefaultClassWeight, 1)
 	assert.Equal(t, settings.MaxFailureIndex, 6)
-	assert.Equal(t, settings.EvidenceMaxAge, ProviderEgressLocationMaxAge)
-	assert.Equal(t, settings.EvidenceMaxAge, 7*24*time.Hour)
-	assert.Equal(t, settings.QualityOkNumerator, 9)
-	assert.Equal(t, settings.QualityOkDenominator, 10)
-	assert.Equal(t, settings.MinScoredLoads, 50)
+	assert.Equal(t, settings.EvidenceMaxAge, ProviderEgressHealthMaxAge)
+	assert.Equal(t, settings.EvidenceMaxAge, 8*time.Hour)
+	assert.Equal(t, settings.QualityOkNumerator, 3)
+	assert.Equal(t, settings.QualityOkDenominator, 5)
+	assert.Equal(t, settings.MinScoredLoads, 1)
 	assert.Equal(t, settings.CountryGate, true)
 	// past the client's largest demerit at both edges of the borrowed band
 	assert.Equal(t, MaxNativeClientScoreTier, MaxClientScore/ClientScorePerTier)
@@ -194,7 +195,7 @@ func TestEgressIndexSettingsDefaults(t *testing.T) {
 	assert.Equal(t, settings.BackfillTierOffset, 11)
 	// a native demerited as far as the client goes ranks ahead of every
 	// borrowed provider
-	assert.Equal(t, MaxNativeClientScoreTier+MaxClientTierDemerit < settings.BackfillTierOffset, true)
+	assert.Equal(t, ClientScoreCutoffTier+MaxClientTierDemerit < settings.BackfillTierOffset, true)
 	// and a provider borrowed past its cutoffs, demerited as far, ahead of
 	// every online one
 	assert.Equal(t, ClientScoreCutoffTier+settings.BackfillTierOffset+MaxClientTierDemerit < 2*settings.BackfillTierOffset, true)
@@ -260,7 +261,8 @@ egress_index:
 	// provider tie with a native one
 	assert.Equal(t, invalid.BackfillTierOffset, defaults.BackfillTierOffset)
 	// and that is the floor, not the default
-	assert.Equal(t, load("egress_index:\n  backfill_tier_offset: 3\n").BackfillTierOffset, MaxNativeClientScoreTier+1)
+	assert.Equal(t, load("egress_index:\n  backfill_tier_offset: 3\n").BackfillTierOffset, defaults.BackfillTierOffset)
+	assert.Equal(t, load("egress_index:\n  backfill_tier_offset: 4\n").BackfillTierOffset, ClientScoreCutoffTier+1)
 
 	assert.Equal(t, load("egress_index:\n  evidence_max_age: soon\n").EvidenceMaxAge, defaults.EvidenceMaxAge)
 
@@ -283,121 +285,6 @@ func TestEgressEvidenceTimeIsTheNewerRun(t *testing.T) {
 	assert.Equal(t, *egressEvidenceTime(nil, &now), now)
 	assert.Equal(t, *egressEvidenceTime(run, &now), now)
 	assert.Equal(t, *egressEvidenceTime(&EgressHealthRun{MeasuredAt: now}, &older), now)
-}
-
-// Every combination of evidence the rules read, in both flag states.
-func TestDecideProviderEgress(t *testing.T) {
-	index := func(value int) *int {
-		return &value
-	}
-	verdict := func(value bool) *bool {
-		return &value
-	}
-
-	// a decision's observable fields, compared whole
-	type want struct {
-		reason       string
-		hardExcluded bool
-		quality      bool
-		speed        bool
-		online       bool
-		counted      bool
-	}
-	tests := []struct {
-		name  string
-		facts providerEgressFacts
-		// the decision with the flag off and on
-		off want
-		on  want
-	}{
-		{
-			name:  "blackhole wins over everything",
-			facts: providerEgressFacts{blackholed: true, tlsAuthenticationFailed: true, countryMismatch: true, egressIndex: index(0), egressQuality: verdict(true)},
-			off:   want{reason: ProviderExcludedBlackhole, hardExcluded: true},
-			on:    want{reason: ProviderExcludedBlackhole, hardExcluded: true},
-		},
-		{
-			name:  "tls",
-			facts: providerEgressFacts{tlsAuthenticationFailed: true, egressIndex: index(0), egressQuality: verdict(true)},
-			off:   want{reason: ProviderExcludedTls, hardExcluded: true},
-			on:    want{reason: ProviderExcludedTls, hardExcluded: true},
-		},
-		{
-			name:  "country gate, a minimum on every bucket and the counts",
-			facts: providerEgressFacts{countryMismatch: true, egressIndex: index(0), egressQuality: verdict(true)},
-			off:   want{reason: ProviderExcludedCountry},
-			on:    want{reason: ProviderExcludedCountry},
-		},
-		{
-			name:  "probed and passing",
-			facts: providerEgressFacts{egressIndex: index(1), egressQuality: verdict(true)},
-			off:   want{quality: true, speed: true, counted: true},
-			on:    want{quality: true, speed: true, counted: true},
-		},
-		{
-			name:  "probed and over the one-in-ten line: speed only, counted",
-			facts: providerEgressFacts{egressIndex: index(6), egressQuality: verdict(false)},
-			off:   want{reason: ProviderExcludedHealth, speed: true, counted: true},
-			on:    want{reason: ProviderExcludedHealth, speed: true, counted: true},
-		},
-		{
-			name:  "unprobed: online and counted, whatever the flag",
-			facts: providerEgressFacts{egressIndex: index(0)},
-			off:   want{reason: ProviderExcludedUnprobed, online: true, counted: true},
-			on:    want{reason: ProviderExcludedUnprobed, online: true, counted: true},
-		},
-		{
-			name:  "unprobed but mislocated: the gate holds the online bucket too",
-			facts: providerEgressFacts{countryMismatch: true, egressIndex: index(0)},
-			off:   want{reason: ProviderExcludedCountry},
-			on:    want{reason: ProviderExcludedCountry},
-		},
-		{
-			name:  "row before the index, healthy and located: the old rules pass it",
-			facts: providerEgressFacts{legacyHealthPasses: true, legacyHealthMeasured: true, legacyCounted: true},
-			off:   want{quality: true, speed: true, counted: true},
-			on:    want{quality: true, speed: true, counted: true},
-		},
-		{
-			name:  "row before the index, measured unhealthy: the old rules gate both buckets on the flag",
-			facts: providerEgressFacts{legacyHealthMeasured: true},
-			off:   want{quality: true, speed: true, counted: true},
-			on:    want{reason: ProviderExcludedHealth},
-		},
-		{
-			name:  "row before the index, never measured: fails closed under the flag, and is never online",
-			facts: providerEgressFacts{},
-			off:   want{quality: true, speed: true, counted: true},
-			on:    want{reason: ProviderExcludedUnprobed},
-		},
-		{
-			name:  "row before the index, healthy but not located: in the buckets, out of the old count",
-			facts: providerEgressFacts{legacyHealthPasses: true, legacyHealthMeasured: true},
-			off:   want{quality: true, speed: true, counted: true},
-			on:    want{quality: true, speed: true},
-		},
-	}
-	for _, test := range tests {
-		for _, flag := range []bool{false, true} {
-			expected := test.off
-			if flag {
-				expected = test.on
-			}
-			facts := test.facts
-			decision := decideProviderEgress(&facts, flag)
-			got := want{
-				reason:       decision.reason,
-				hardExcluded: decision.hardExcluded,
-				quality:      decision.quality,
-				speed:        decision.speed,
-				online:       decision.online,
-				counted:      decision.counted,
-			}
-			if got != expected {
-				t.Errorf("%s, flag %t: %+v, want %+v", test.name, flag, got, expected)
-			}
-		}
-	}
 }
 
 // Each rank mode borrows from the other one, and no other mode borrows.

@@ -11,9 +11,11 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/urnetwork/server/qualityprobe/controlplane"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 // The due queue and attempt reports, and the bounded string fields they
@@ -135,7 +137,11 @@ var defaultHttpClient = controlplane.NewHTTPClient(0)
 // exits (GEOMAP §11.3). Both place fields are optional; an entry without them
 // excludes nothing.
 type DueProvider struct {
-	ClientId string `json:"client_id"`
+	ClientId             string                     `json:"client_id"`
+	SuccessesNeeded      int                        `json:"successes_needed,omitempty"`
+	CycleStartedAt       time.Time                  `json:"cycle_started_at,omitzero"`
+	OutcomeCount         int                        `json:"outcome_count,omitempty"`
+	SecurityDestinations []egresshealth.Destination `json:"security_destinations,omitempty"`
 	// The lower-case ISO 3166-1 alpha-2 country.
 	CountryCode string `json:"country_code,omitempty"`
 	Region      string `json:"region,omitempty"`

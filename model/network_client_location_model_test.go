@@ -365,6 +365,7 @@ func TestFindProviders2WithExclude(t *testing.T) {
 		}
 
 		UpdateClientReliabilityScores(ctx, server.NowUtc().Add(time.Hour), true)
+		testing_providerReliabilityPasses(ctx, slices.Collect(maps.Keys(clientSessions))...)
 		// The TTL is the redis expiry on the score/sample keys FindProviders2
 		// reads, and a cache miss there returns zero providers with a nil error
 		// (see the counts-key `continue` in loadClientScores) — not an error and
@@ -974,6 +975,7 @@ func TestFindProviders2ProviderLocation(t *testing.T) {
 			stats,
 		)
 		UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
+		testing_providerReliabilityPasses(ctx, clientId)
 
 		err = UpdateClientScores(ctx, 5*time.Minute, 1)
 		connect.AssertEqual(t, err, nil)
@@ -2335,6 +2337,7 @@ func createCountryOnlyAndCityProviders(ctx context.Context, t testing.TB) (
 
 	UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
 	UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
+	testing_providerReliabilityPasses(ctx, countryOnlyClientId, cityClientId)
 	return
 }
 
@@ -2434,6 +2437,7 @@ func TestFindProviders2NetworkOnlyProviderVisibleOnlyToItsOwnNetwork(t *testing.
 
 		UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
 		UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
+		testing_providerReliabilityPasses(ctx, publicClientId, networkOnlyClientId)
 
 		err := UpdateClientScores(ctx, time.Hour, 1)
 		connect.AssertEqual(t, err, nil)
@@ -2682,6 +2686,7 @@ func connectProvidersOfEveryProvideMode(ctx context.Context, t testing.TB, locat
 
 	UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
 	UpdateClientReliabilityScores(ctx, server.NowUtc(), true)
+	testing_providerReliabilityPasses(ctx, publicClientId, networkOnlyClientId, streamOnlyClientId, keylessClientId)
 	return
 }
 
@@ -2996,21 +3001,13 @@ func assertPoolAdmitsOnlyContractableProviders(
 // perfectly *connected*.
 // ---------------------------------------------------------------------------
 
-// testing_setProviderEgressHealth records one egress-health measurement.
+// Individual URL outcomes use the current versioned success contract.
 func testing_setProviderEgressHealth(ctx context.Context, clientId server.Id, okCount int, total int) {
-	SetProviderEgressHealth(ctx, &ProviderEgressHealth{
-		ClientId:   clientId,
-		MeasuredAt: server.NowUtc(),
-		OKCount:    okCount,
-		Total:      total,
-	})
+	egressTestHealth(ctx, clientId, server.NowUtc(), total, total-okCount)
 }
 
-// testing_setProviderEgressHealthy marks providers measured healthy at the rate
-// the real healthy fleet measures. Every test that expects a provider to be
-// SELECTABLE has to call this: a provider with no health record at all is
-// excluded by design (fail closed -- out until you pass), so without it the
-// fixture is testing exclusion rather than whatever it meant to test.
+// Adds compatible positive history for tests exercising quality/speed supply.
+// Providers with no compatible history remain available in the online bucket.
 func testing_setProviderEgressHealthy(ctx context.Context, clientIds ...server.Id) {
 	for _, clientId := range clientIds {
 		testing_setProviderEgressHealth(ctx, clientId, 131, 131)
@@ -3170,9 +3167,7 @@ func testing_healthGateCity(ctx context.Context, t testing.TB) *Location {
 	return city
 }
 
-// A disabled gate restores the pre-egress-test selection rule. This covers
-// both missing evidence and explicit unhealthy evidence so the setting cannot
-// accidentally be implemented as only an empty-table fallback.
+// The retired rollout flag does not remove online supply with missing or failing evidence.
 func TestUpdateClientScoresDoesNotRequireEgressHealthWhenDisabled(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -3207,10 +3202,8 @@ func TestUpdateClientScoresDoesNotRequireEgressHealthWhenDisabled(t *testing.T) 
 	})
 }
 
-// Disabling broad egress qualification must not disable a current, explicit
-// blackhole verdict. The broad sweep is allowed to be absent during rollout;
-// a provider the fast check just proved dark is not unknown.
-func TestUpdateClientScoresExcludesCurrentBlackholeWhenEgressTestDisabled(t *testing.T) {
+// Legacy cheap-check telemetry cannot add a fourth common admission gate.
+func TestUpdateClientScoresLegacyBlackholeRemainsOnlineWhenEgressTestDisabled(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		t.Cleanup(server.Config.PushSimpleResource(
@@ -3240,16 +3233,13 @@ func TestUpdateClientScoresExcludesCurrentBlackholeWhenEgressTestDisabled(t *tes
 		if _, ok := clientScores[availableClientId]; !ok {
 			t.Fatal("a provider without a blackhole verdict was removed while broad egress qualification was disabled")
 		}
-		if _, ok := clientScores[blackholedClientId]; ok {
-			t.Fatal("a provider with a current blackhole verdict remained selectable while broad egress qualification was disabled")
+		if score, ok := clientScores[blackholedClientId]; !ok || !score.Online {
+			t.Fatal("legacy blackhole telemetry removed a provider from online")
 		}
 	})
 }
 
-// Broad percentage qualification can be disabled during rollout, but a fresh
-// authenticated-TLS failure is conclusive: the provider returned an identity
-// that did not authenticate the requested destination. It must not be diluted
-// by its otherwise passing score or published by the disabled-gate path.
+// The retired rollout flag cannot bypass the persistent security gate.
 func TestUpdateClientScoresExcludesTLSAuthenticationFailureWhenEgressTestDisabled(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -3287,9 +3277,7 @@ func TestUpdateClientScoresExcludesTLSAuthenticationFailureWhenEgressTestDisable
 	})
 }
 
-// Runs the reliability rollup, which is what carries a health run into the
-// egress index a pass ranks on (connect/GEOMAP.md §10.4):
-// a run recorded after the provider's last rollup is not yet evidence.
+// Publishes connection facts and the current URL-history ranking diagnostic.
 func testing_rollUpEgress(ctx context.Context) {
 	UpdateClientLocationReliabilities(ctx, server.NowUtc().Add(-time.Hour), server.NowUtc())
 }
@@ -3298,15 +3286,18 @@ func testing_rollUpEgress(ctx context.Context) {
 // provider the sample only carries for backfill.
 func testing_qualityNative(clientScores map[server.Id]*ClientScore, clientId server.Id) bool {
 	clientScore, ok := clientScores[clientId]
-	return ok && !clientScore.Online && clientScore.PassesMinimums[RankModeQuality]
+	return ok && clientScore.PassesMinimums[RankModeQuality]
 }
 
-// The whole point of the feature. A provider measured 0 of 131 -- every
-// destination blackholed, the exact reading 158 seeded beta proxies gave -- must
-// not be offered to a user as quality supply, while an identically-configured
-// provider measured healthy still is. Before the gate BOTH were selectable,
-// because a blackholed proxy is still connected and connectivity is all the
-// pre-existing minimums measure.
+// Non-reliability tests explicitly establish passing observed lookbacks.
+func testing_providerReliabilityPasses(ctx context.Context, clientIds ...server.Id) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `UPDATE client_connection_reliability_score
+			SET independent_reliability_weight=1, reliability_weight=1 WHERE client_id=ANY($1)`, clientIds))
+	})
+}
+
+// Measured URL failures remove native quality/speed membership, not online.
 func TestUpdateClientScoresExcludesMeasuredUnhealthyProviders(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -3327,8 +3318,11 @@ func TestUpdateClientScoresExcludesMeasuredUnhealthyProviders(t *testing.T) {
 		if !testing_qualityNative(clientScores, healthyClientId) {
 			t.Fatal("a provider measured 131/131 is not quality supply; the gate is excluding healthy providers")
 		}
-		if _, ok := clientScores[deadClientId]; ok {
-			t.Fatal("a provider measured 0/131 is still in the quality sample; the measurement is not being acted on")
+		if testing_qualityNative(clientScores, deadClientId) {
+			t.Fatal("a provider measured 0/131 is still native quality")
+		}
+		if score, ok := clientScores[deadClientId]; !ok || !score.Online {
+			t.Fatal("ordinary URL failures removed a provider from online")
 		}
 	})
 }
@@ -3369,13 +3363,8 @@ func TestUpdateClientScoresExcludesNeverMeasuredProviders(t *testing.T) {
 	})
 }
 
-// The egress index orders the quality bucket (connect/GEOMAP.md §10.3): two
-// providers identical in every scored respect but that one failed two of 131
-// loads come out with scores 40 apart -- the index is the failed loads -- and
-// yet with the same scaled weight, because the index orders through the tier
-// and never decides membership or the draw through the minimum. Both clear
-// the 90 % rule, so both are quality supply.
-func TestUpdateClientScoresHealthDoesNotRescoreQualifyingProviders(t *testing.T) {
+// Better URL ratios improve the normalized tier and weighted selection.
+func TestUpdateClientScoresHigherUrlRatioImprovesRanking(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		city := testing_healthGateCity(ctx, t)
@@ -3398,15 +3387,15 @@ func TestUpdateClientScoresHealthDoesNotRescoreQualifyingProviders(t *testing.T)
 		}
 		good, ok := clientScores[goodClientId]
 		if !ok || !testing_qualityNative(clientScores, goodClientId) {
-			t.Fatal("the 129/131 provider is not quality supply; 129/131 is well above the 90% bar")
+			t.Fatal("the 129/131 provider is not quality supply")
 		}
 
 		connect.AssertEqual(t, perfect.Scores[RankModeQuality], 0)
-		connect.AssertEqual(t, good.Scores[RankModeQuality], 2*ClientScorePerTier)
-		connect.AssertEqual(t, good.Tiers[RankModeQuality], 2)
-		if perfect.ScaledWeights[RankModeQuality] != good.ScaledWeights[RankModeQuality] {
+		connect.AssertEqual(t, good.Scores[RankModeQuality], ClientScorePerTier)
+		connect.AssertEqual(t, good.Tiers[RankModeQuality], 1)
+		if perfect.ScaledWeights[RankModeQuality] <= good.ScaledWeights[RankModeQuality] {
 			t.Fatalf(
-				"scaled weights diverged: 131/131 weighted %v, 129/131 weighted %v -- the index orders, it does not reweight the draw",
+				"higher URL ratio did not improve weight: 131/131 weighted %v, 129/131 weighted %v",
 				perfect.ScaledWeights[RankModeQuality],
 				good.ScaledWeights[RankModeQuality],
 			)
@@ -3421,10 +3410,7 @@ func TestUpdateClientScoresHealthDoesNotRescoreQualifyingProviders(t *testing.T)
 	})
 }
 
-// The boundary is at exactly 90%: >= passes, below fails. Written at a
-// denominator of 100 on purpose -- 90% of 131 is 117.9, so 131 destinations
-// cannot express the boundary at all and a test using it would prove nothing
-// about which side of the line `>=` falls on.
+// Exactly 3/5 passes the native ratio gate; below it remains online-only.
 func TestUpdateClientScoresEgressHealthBoundaryIsInclusive(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -3433,8 +3419,8 @@ func TestUpdateClientScoresEgressHealthBoundaryIsInclusive(t *testing.T) {
 		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
 		atBarClientId, belowBarClientId := clientIds[0], clientIds[1]
 
-		testing_setProviderEgressHealth(ctx, atBarClientId, 90, 100)
-		testing_setProviderEgressHealth(ctx, belowBarClientId, 89, 100)
+		testing_setProviderEgressHealth(ctx, atBarClientId, 60, 100)
+		testing_setProviderEgressHealth(ctx, belowBarClientId, 59, 100)
 		testing_rollUpEgress(ctx)
 
 		err := UpdateClientScores(ctx, time.Hour, 1)
@@ -3443,10 +3429,13 @@ func TestUpdateClientScoresEgressHealthBoundaryIsInclusive(t *testing.T) {
 		clientScores := testing_selectableClientScores(ctx, t, city, false)
 
 		if !testing_qualityNative(clientScores, atBarClientId) {
-			t.Fatal("a provider at exactly 90/100 is excluded; the bar is >= 90%, not > 90%")
+			t.Fatal("a provider at exactly 60/100 is excluded")
 		}
-		if _, ok := clientScores[belowBarClientId]; ok {
-			t.Fatal("a provider at 89/100 is in the quality sample; it is below the bar")
+		if testing_qualityNative(clientScores, belowBarClientId) {
+			t.Fatal("a provider at 59/100 is native quality")
+		}
+		if score, ok := clientScores[belowBarClientId]; !ok || !score.Online {
+			t.Fatal("a provider at 59/100 is missing from online")
 		}
 	})
 }
@@ -3506,14 +3495,13 @@ func TestUpdateClientScoresForceMinimumStillSeesHealthExcludedProviders(t *testi
 		err := UpdateClientScores(ctx, time.Hour, 1)
 		connect.AssertEqual(t, err, nil)
 
-		// the user-facing view has only the healthy one as quality supply,
-		// and the never-measured one as the online bucket's
+		// All three remain online; only the passing ratio is native quality.
 		strict := testing_selectableClientScores(ctx, t, city, false)
-		if len(strict) != 2 || !testing_qualityNative(strict, healthyClientId) || !strict[neverMeasuredClientId].Online {
-			t.Fatalf("user-facing pool holds %d providers, want the measured-healthy one native and the never-measured one online", len(strict))
+		if len(strict) != 3 || !testing_qualityNative(strict, healthyClientId) || !strict[neverMeasuredClientId].Online {
+			t.Fatalf("user-facing pool holds %d providers, want all three online and the healthy one native", len(strict))
 		}
-		if _, ok := strict[deadClientId]; ok {
-			t.Fatal("the measured-dead provider survived the user-facing gate")
+		if testing_qualityNative(strict, deadClientId) || !strict[deadClientId].Online {
+			t.Fatal("ordinary failures must leave the provider online-only")
 		}
 
 		// the operator census has all three
@@ -3539,18 +3527,7 @@ func TestUpdateClientScoresForceMinimumStillSeesHealthExcludedProviders(t *testi
 	})
 }
 
-// THE GRADUATION PATH. An excluded provider has to keep being probed, or it can
-// never measure healthy again and is stuck out permanently -- the gate would
-// become a one-way door.
-//
-// GetProviderEgressLocationDue reads network_client_location_reliability,
-// provide_key, provider_egress_location and provider_egress_probe_attempt. It
-// does not read PassesMinimums, the redis score sets, the egress columns or
-// provider_egress_health, so structurally it cannot see the gate. This test is
-// the regression guard on that: it asserts both halves at once -- gone from
-// the quality pool, still in the probe queue -- so a future change that wires
-// selection state into the queue fails here rather than silently stranding
-// every excluded provider.
+// A failing ratio must not prevent the probes needed to establish recovery.
 func TestProbeDueQueueIgnoresTheEgressHealthGate(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -3576,17 +3553,12 @@ func TestProbeDueQueueIgnoresTheEgressHealthGate(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 
 		clientScores := testing_selectableClientScores(ctx, t, city, false)
-		if _, ok := clientScores[deadClientId]; ok {
-			t.Fatal("fixture is wrong: the provider was not excluded, so this proves nothing about the queue")
+		if testing_qualityNative(clientScores, deadClientId) {
+			t.Fatal("fixture is wrong: the failing provider is native quality")
 		}
 
-		due := GetProviderEgressLocationDue(
-			ctx,
-			now.Add(-time.Minute),
-			now.Add(-time.Minute),
-			100,
-		)
-		if !slices.Contains(due, deadClientId) {
+		due := ClaimProviderUrlProbeDue(ctx, server.NowUtc(), 100, 0, 1)
+		if !slices.ContainsFunc(due, func(provider ProviderUrlProbeDue) bool { return provider.ClientId == deadClientId }) {
 			t.Fatal(
 				"an excluded provider is not in the probe due-queue: it can never be re-measured, " +
 					"so it can never graduate back into the public list",
@@ -3595,14 +3567,7 @@ func TestProbeDueQueueIgnoresTheEgressHealthGate(t *testing.T) {
 	})
 }
 
-// Recovery is automatic and needs no manual step: the rollup reads the health
-// table fresh on every pass, and SetProviderEgressHealth replaces the row, so
-// the next rollup and score pass after a good measurement put the provider
-// back.
-//
-// A stale BAD record is no evidence past EvidenceMaxAge, which hands the
-// provider to the online bucket rather than keeping it hidden, and the ungated
-// due-queue above is what guarantees the re-probe that makes it quality again.
+// Recovery uses the whole recent history, not just the most recent success.
 func TestUpdateClientScoresRestoresAProviderWhoseHealthRecovers(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -3616,13 +3581,13 @@ func TestUpdateClientScoresRestoresAProviderWhoseHealthRecovers(t *testing.T) {
 
 		err := UpdateClientScores(ctx, time.Hour, 1)
 		connect.AssertEqual(t, err, nil)
-		if _, ok := testing_selectableClientScores(ctx, t, city, false)[clientId]; ok {
-			t.Fatal("the blackholed provider was in the quality sample before it recovered")
+		if testing_qualityNative(testing_selectableClientScores(ctx, t, city, false), clientId) {
+			t.Fatal("the failing provider was native quality before recovery")
 		}
 
 		// a later probe finds it healthy. nothing else happens -- no operator
 		// action, no re-registration, no cache flush
-		testing_setProviderEgressHealth(ctx, clientId, 131, 131)
+		testing_setProviderEgressHealth(ctx, clientId, 262, 262)
 		testing_rollUpEgress(ctx)
 
 		err = UpdateClientScores(ctx, time.Hour, 1)
@@ -3633,133 +3598,28 @@ func TestUpdateClientScoresRestoresAProviderWhoseHealthRecovers(t *testing.T) {
 	})
 }
 
+// The same indexer ratio and common safety gates back diagnostic health checks.
 func TestProviderCountFilter(t *testing.T) {
 	healthy := server.NewId()
 	degraded := server.NewId()
 	unmeasured := server.NewId()
 	zeroTotal := server.NewId()
-	wrongCountry := server.NewId()
-	unobserved := server.NewId()
+	risky := server.NewId()
 
-	f := providerCountFilter{
+	filter := providerCountFilter{
 		healthCounts: map[server.Id]ProviderEgressHealthCounts{
-			// 118/131 is the first passing value: 10*118 >= 9*131 (1180 >= 1179)
-			healthy: {OKCount: 118, Total: 131},
-			// 117/131 is the last failing value: 1170 < 1179
-			degraded:     {OKCount: 117, Total: 131},
-			zeroTotal:    {OKCount: 0, Total: 0},
-			wrongCountry: {OKCount: 131, Total: 131},
-			unobserved:   {OKCount: 131, Total: 131},
+			healthy:   {OKCount: 3, Total: 5},
+			degraded:  {OKCount: 2, Total: 5},
+			zeroTotal: {OKCount: 0, Total: 0},
+			risky:     {OKCount: 5, Total: 5},
 		},
-		countryCodes: map[server.Id]string{
-			healthy:      "us",
-			degraded:     "us",
-			zeroTotal:    "us",
-			wrongCountry: "gb",
-			// unobserved deliberately absent
-		},
+		arinRisk: map[server.Id]bool{risky: true},
 	}
-
-	// the 90% boundary, asserted on the integer comparison
-	assert.Equal(t, f.passesHealth(healthy), true)
-	assert.Equal(t, f.passesHealth(degraded), false)
-
-	// fail closed: never probed, and probed-with-no-destinations
-	assert.Equal(t, f.passesHealth(unmeasured), false)
-	assert.Equal(t, f.passesHealth(zeroTotal), false)
-
-	// counts only where health passes AND the observed country matches
-	assert.Equal(t, f.countsTowardCountry(healthy, "us"), true)
-	assert.Equal(t, f.countsTowardCountry(degraded, "us"), false)
-
-	// healthy but egressing from somewhere else: not counted in the claim
-	assert.Equal(t, f.countsTowardCountry(wrongCountry, "us"), false)
-	// ...and it does count where it actually is
-	assert.Equal(t, f.countsTowardCountry(wrongCountry, "gb"), true)
-
-	// healthy but never located: fail closed
-	assert.Equal(t, f.countsTowardCountry(unobserved, "us"), false)
-
-	// comparison is case insensitive on the caller's side
-	assert.Equal(t, f.countsTowardCountry(healthy, "US"), true)
-}
-
-// TestProviderCountFilterShouldSkipCountGate covers the fleet-wide floor in
-// UpdateClientLocations: health and observed-country come from two
-// INDEPENDENT pipelines (an external push endpoint and a separate internal
-// job, respectively) that can stall separately, so either map being empty --
-// not just health -- must skip the count gate for the pass. This is pure
-// in-memory logic, no database required.
-func TestProviderCountFilterShouldSkipCountGate(t *testing.T) {
-	someProvider := server.NewId()
-
-	// both maps empty -- neither pipeline has produced anything: skip
-	assert.Equal(
-		t,
-		providerCountFilter{
-			healthCounts: map[server.Id]ProviderEgressHealthCounts{},
-			countryCodes: map[server.Id]string{},
-		}.shouldSkipCountGate(),
-		true,
-	)
-
-	// health empty, countryCodes populated -- the health pipeline alone
-	// stalled: skip
-	assert.Equal(
-		t,
-		providerCountFilter{
-			healthCounts: map[server.Id]ProviderEgressHealthCounts{},
-			countryCodes: map[server.Id]string{someProvider: "us"},
-		}.shouldSkipCountGate(),
-		true,
-	)
-
-	// countryCodes empty, health populated -- the location pipeline alone
-	// stalled: skip. This is the case the previous, health-only guard missed.
-	assert.Equal(
-		t,
-		providerCountFilter{
-			healthCounts: map[server.Id]ProviderEgressHealthCounts{someProvider: {OKCount: 131, Total: 131}},
-			countryCodes: map[server.Id]string{},
-		}.shouldSkipCountGate(),
-		true,
-	)
-
-	// neither empty -- both pipelines are producing data: do not skip, apply
-	// the gate normally
-	assert.Equal(
-		t,
-		providerCountFilter{
-			healthCounts: map[server.Id]ProviderEgressHealthCounts{someProvider: {OKCount: 131, Total: 131}},
-			countryCodes: map[server.Id]string{someProvider: "us"},
-		}.shouldSkipCountGate(),
-		false,
-	)
-}
-
-// TestProviderCountFilterShouldRecountUngated covers the OUTPUT-side half of
-// the fleet-wide floor. shouldSkipCountGate looks at the two input maps before
-// the pass; shouldRecountUngated looks at what the pass produced. Non-empty
-// inputs can still yield an empty count -- a fleet-wide claimed/observed
-// mismatch, or every claimed country resolving to NULL -- and an empty count
-// wipes every location out of redis. Pure in-memory logic, no database.
-func TestProviderCountFilterShouldRecountUngated(t *testing.T) {
-	// the failure this exists to catch: rows existed, the gate ate all of
-	// them, nothing counted anywhere. Do not publish that; recount ungated.
-	assert.Equal(t, shouldRecountUngated(true, 152, 0), true)
-
-	// the gate counted something: publish it, however small
-	assert.Equal(t, shouldRecountUngated(true, 152, 1), false)
-
-	// no connected + valid + Public rows at all. Supply really is gone and
-	// emptying the published list is the correct answer, not a fallback.
-	assert.Equal(t, shouldRecountUngated(true, 0, 0), false)
-
-	// the gate was already skipped for this pass (shouldSkipCountGate fired).
-	// An empty count is then the ungated answer already -- recounting would
-	// produce the identical result and loop the reasoning.
-	assert.Equal(t, shouldRecountUngated(false, 152, 0), false)
-	assert.Equal(t, shouldRecountUngated(false, 0, 0), false)
+	assert.Equal(t, filter.passesHealth(healthy), true)
+	assert.Equal(t, filter.passesHealth(degraded), false)
+	assert.Equal(t, filter.passesHealth(unmeasured), false)
+	assert.Equal(t, filter.passesHealth(zeroTotal), false)
+	assert.Equal(t, filter.passesHealth(risky), false)
 }
 
 // Testing_CreateProviderAtLocation inserts exactly the rows a provider needs
@@ -3873,18 +3733,8 @@ func Testing_CreateProviderAtLocation(
 	})
 }
 
-// TestUpdateClientLocationsCountIsGated is the core assertion for this task:
-// UpdateClientLocations must count a provider toward provider_count only where
-// a probe measured it healthy AND observed it egressing from the country it
-// claims. Before this change, connected + valid + a Public provide key was
-// enough on its own -- an unreachable or misrepresenting provider still
-// inflated the count.
-//
-// It covers all three exclusion paths against a real database, because each
-// one leans on SQL the in-memory providerCountFilter test cannot exercise: the
-// health check, the claimed-vs-observed MISMATCH, and a NULL claimed country
-// arriving from the LEFT JOIN onto `location`.
-func TestUpdateClientLocationsCountIsGated(t *testing.T) {
+// Counts advertise online supply, independent of ordinary URL or location observations.
+func TestUpdateClientLocationsCountIncludesAllCommonGatePasses(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		testing_enableProviderEgressTest(t)
@@ -3895,22 +3745,13 @@ func TestUpdateClientLocationsCountIsGated(t *testing.T) {
 		healthy := server.NewId()
 		unhealthy := server.NewId()
 		unprobed := server.NewId()
-		// healthy, but a probe watched it egress from GB while it claims US.
-		// This is the MISMATCH path: it exercises the LEFT JOIN onto
-		// `location`, the char(2) country_code round trip, and the
-		// strings.ToLower comparison inside countsTowardCountry -- none of
-		// which the in-memory filter test can reach.
+		// Probe-observed country is diagnostic, not a second ARIN risk gate.
 		wrongCountry := server.NewId()
-		// healthy AND observed exactly where it claims to be, but its
-		// country_location_id points at a `location` row that does not exist,
-		// so the LEFT JOIN yields a NULL claimed country. This is the
-		// NULL-claimed-country path: unverifiable against anything, so it must
-		// fail closed like an unobserved provider.
+		// A separate missing location row must not corrupt the valid location.
 		orphanClaim := server.NewId()
 		orphanCountryId := server.NewId()
 
-		// four providers in the claimed country, all connected with a Public
-		// provide key; only `healthy` is measured healthy and observed in US
+		// All four connected public providers pass the common gates.
 		for _, clientId := range []server.Id{healthy, unhealthy, unprobed, wrongCountry} {
 			Testing_CreateProviderAtLocation(ctx, networkId, clientId, countryId, "US")
 		}
@@ -3943,8 +3784,7 @@ func TestUpdateClientLocationsCountIsGated(t *testing.T) {
 		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
 			ClientId: unhealthy, OKCount: 0, Total: 131, MeasuredAt: server.NowUtc(),
 		})
-		// both new providers pass health, so health is not what excludes them:
-		// the claimed-vs-observed country check is.
+		// Neither differing nor absent observed locations affect membership.
 		for _, clientId := range []server.Id{wrongCountry, orphanClaim} {
 			SetProviderEgressHealth(ctx, &ProviderEgressHealth{
 				ClientId: clientId, OKCount: 131, Total: 131, MeasuredAt: server.NowUtc(),
@@ -3978,17 +3818,11 @@ func TestUpdateClientLocationsCountIsGated(t *testing.T) {
 		clientLocations, err := loadClientLocations(ctx, map[server.Id]bool{countryId: true})
 		assert.Equal(t, err, nil)
 
-		// only the measured-healthy, observed-in-US provider is counted.
-		// Before this change all three of the original providers counted; the
-		// GB-egressing and NULL-claimed-country providers must not add to it
-		// either, so the total is still exactly 1.
-		assert.Equal(t, clientLocations[countryId].ClientCount, 1)
+		assert.Equal(t, clientLocations[countryId].ClientCount, 4)
 	})
 }
 
-// Disabling the test bypasses the per-provider egress predicate even when the
-// probe tables are partially populated. Keeping one provider healthy prevents
-// the existing all-zero output fallback from making this assertion vacuous.
+// The retired rollout flag does not change online counts.
 func TestUpdateClientLocationsCountIsUngatedWhenEgressTestDisabled(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -4023,7 +3857,7 @@ func TestUpdateClientLocationsCountIsUngatedWhenEgressTestDisabled(t *testing.T)
 	})
 }
 
-func TestUpdateClientLocationsExcludesCurrentBlackholeWhenEgressTestDisabled(t *testing.T) {
+func TestUpdateClientLocationsLegacyBlackholeDoesNotChangeCount(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		t.Cleanup(server.Config.PushSimpleResource(
@@ -4046,7 +3880,7 @@ func TestUpdateClientLocationsExcludesCurrentBlackholeWhenEgressTestDisabled(t *
 
 		clientLocations, err := loadClientLocations(ctx, map[server.Id]bool{countryId: true})
 		assert.Equal(t, err, nil)
-		assert.Equal(t, clientLocations[countryId].ClientCount, 1)
+		assert.Equal(t, clientLocations[countryId].ClientCount, 2)
 	})
 }
 
@@ -4078,10 +3912,8 @@ func TestUpdateClientLocationsExcludesTLSAuthenticationFailureWhenEgressTestDisa
 	})
 }
 
-// A gated pass that counts nothing is retried without broad health/location
-// evidence. That safety fallback must still preserve an explicit blackhole
-// verdict instead of resurrecting the provider it just removed.
-func TestUpdateClientLocationsUngatedFallbackDoesNotRestoreCurrentBlackhole(t *testing.T) {
+// An empty count cannot restore a provider that fails a common gate.
+func TestUpdateClientLocationsEmptyCountDoesNotRestoreArinRisk(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		testing_enableProviderEgressTest(t)
@@ -4090,6 +3922,11 @@ func TestUpdateClientLocationsUngatedFallbackDoesNotRestoreCurrentBlackhole(t *t
 		countryId := server.NewId()
 		blackholedClientId := server.NewId()
 		Testing_CreateProviderAtLocation(ctx, networkId, blackholedClientId, countryId, "US")
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx,
+				`UPDATE network_client_location_reliability SET arin_risk = true WHERE client_id = $1`,
+				blackholedClientId))
+		})
 		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
 			ClientId: blackholedClientId, OKCount: 131, Total: 131,
 			MeasuredAt: server.NowUtc(),
@@ -4107,7 +3944,7 @@ func TestUpdateClientLocationsUngatedFallbackDoesNotRestoreCurrentBlackhole(t *t
 		clientLocations, err := loadClientLocations(ctx, map[server.Id]bool{countryId: true})
 		assert.Equal(t, err, nil)
 		if location, ok := clientLocations[countryId]; ok && 0 < location.ClientCount {
-			t.Fatalf("ungated safety fallback restored %d blackholed providers", location.ClientCount)
+			t.Fatalf("empty-count fallback restored %d ARIN-risk providers", location.ClientCount)
 		}
 	})
 }

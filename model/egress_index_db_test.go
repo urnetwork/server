@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sync/atomic"
@@ -121,8 +122,8 @@ func egressTestConnect(
 	return provider
 }
 
-// Records a health run of `total` scored loads, `failed` of them failed after
-// their retries, all in the site class.
+// Records explicit individual policy-one outcomes. The aggregate latest row is
+// retained only as a legacy diagnostic; it cannot satisfy the URL-policy gate.
 func egressTestHealth(ctx context.Context, clientId server.Id, measuredAt time.Time, total int, failed int) {
 	SetProviderEgressHealth(ctx, &ProviderEgressHealth{
 		ClientId:   clientId,
@@ -132,6 +133,21 @@ func egressTestHealth(ctx context.Context, clientId server.Id, measuredAt time.T
 		ClassResults: map[string]ProviderEgressHealthClassResult{
 			"site": {OK: total - failed, Total: total},
 		},
+	})
+	server.Tx(ctx, func(tx server.PgTx) {
+		for index := range total {
+			ok := 0
+			if index >= failed {
+				ok = 1
+			}
+			evidence := fp2TestUrlProbeEvidence(measuredAt, ok == 1)
+			server.Raise(evidence.ValidateOutcome(ok, 1, false))
+			encoded, err := json.Marshal(evidence)
+			server.Raise(err)
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_health_history
+				(run_id,client_id,measured_at,ok_count,total_count,class_results,tls_authentication_failure,url_probe_evidence,url_probe_policy_version)
+				VALUES($1,$2,$3,$4,1,'{}',false,$5::jsonb,$6)`, server.NewId(), clientId, measuredAt.UTC(), ok, string(encoded), evidence.PolicyVersion))
+		}
 	})
 }
 
@@ -303,6 +319,7 @@ func TestEgressIndexRollupWritesTheColumns(t *testing.T) {
 			ReputationOK:    0,
 			ReputationTotal: 4,
 		})
+		egressTestHealth(ctx, probed.clientId, probedAt, 60, 3)
 		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
 			ClientId:    probed.clientId,
 			LocationId:  city.LocationId,
@@ -362,19 +379,18 @@ func TestEgressIndexRollupWritesTheColumns(t *testing.T) {
 			}
 		}
 		passes := true
-		fails := false
 		// one connectivity and two cdn loads failed; the evidence time is the
 		// location probe, the newer run
-		check("probed", probed, 3, &passes, &observedAt)
+		check("probed", probed, 1, &passes, &observedAt)
 		// twelve of sixty failed: capped at six, and over the one-in-ten line
-		check("failing", failing, 6, &fails, &now)
+		check("failing", failing, 2, &passes, &now)
 		check("unprobed", unprobed, 0, nil, nil)
 		check("unprobed and foreign", foreign, 0, nil, nil)
 		// past EvidenceMaxAge: no evidence, but the run's time is kept so a
 		// reader can tell stale evidence from none
 		check("stale", stale, 0, nil, &staleAt)
 		// fewer than MinScoredLoads loads: no evidence
-		check("short", short, 0, nil, &now)
+		check("short", short, 0, &passes, &now)
 	})
 }
 
@@ -382,7 +398,7 @@ func TestEgressIndexRollupWritesTheColumns(t *testing.T) {
 // score is each mode's base, the minimum reads the whole score, and the flag
 // gates both buckets on the 24 hour health run. Its indexed twin ranks on the
 // index.
-func TestEgressIndexNullRowsRankAsBefore(t *testing.T) {
+func TestEgressIndexNullRowsRemainOnlineWithoutEvidence(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		city := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
@@ -415,10 +431,6 @@ func TestEgressIndexNullRowsRankAsBefore(t *testing.T) {
 
 		// today's formula on the old fields: 20 per net-type point, plus the
 		// adjustment, the weight scaled on the whole score
-		oldWeight := func(score int) float32 {
-			v := float64(2*ClientScorePerTier-score) / float64(2*ClientScorePerTier)
-			return float32((1-v)*0.1 + v*1.0)
-		}
 		for _, rankMode := range []RankMode{RankModeQuality, RankModeSpeed} {
 			clientScores := egressTestCachedScores(ctx, t, city, rankMode, false)
 			oldScore, ok := clientScores[old.clientId]
@@ -428,8 +440,8 @@ func TestEgressIndexNullRowsRankAsBefore(t *testing.T) {
 			wantScore := map[RankMode]int{RankModeQuality: 20, RankModeSpeed: 22}[rankMode]
 			connect.AssertEqual(t, oldScore.Scores[rankMode], wantScore)
 			connect.AssertEqual(t, oldScore.Tiers[rankMode], 1)
-			connect.AssertEqual(t, oldScore.PassesMinimums[rankMode], true)
-			connect.AssertEqual(t, oldScore.ScaledWeights[rankMode], oldWeight(wantScore))
+			connect.AssertEqual(t, oldScore.PassesMinimums[rankMode], false)
+			connect.AssertEqual(t, oldScore.Online, true)
 
 			// the twin: the index is the quality base, zero the speed base
 			indexedScore := clientScores[indexed.clientId]
@@ -444,8 +456,8 @@ func TestEgressIndexNullRowsRankAsBefore(t *testing.T) {
 		connect.AssertEqual(t, UpdateClientScores(ctx, time.Hour, 1), nil)
 		for _, rankMode := range []RankMode{RankModeQuality, RankModeSpeed} {
 			clientScores := egressTestCachedScores(ctx, t, city, rankMode, false)
-			if _, ok := clientScores[old.clientId]; ok {
-				t.Errorf("%s: an old row with no 24 hour run passed the old flag rule", rankMode)
+			if score, ok := clientScores[old.clientId]; !ok || !score.Online || score.PassesMinimums[rankMode] {
+				t.Errorf("%s: legacy unmeasured row did not remain online-only", rankMode)
 			}
 			if _, ok := clientScores[indexed.clientId]; !ok {
 				t.Errorf("%s: the indexed twin was taken out by the flag", rankMode)
@@ -484,9 +496,9 @@ func TestEgressIndexTierFormulas(t *testing.T) {
 			// two failed loads put the score at the minimum's bar, and the
 			// provider is still in quality: the index orders, the 90 % rule
 			// admits
-			2: {qualityScore: 40, qualityTier: 2},
+			2: {qualityScore: 20, qualityTier: 1},
 			// six of sixty is the one-in-ten line exactly, capped at six
-			6: {qualityScore: MaxClientScore, qualityTier: 2},
+			6: {qualityScore: 20, qualityTier: 1},
 		} {
 			clientId := failureCountProviders[failed].clientId
 			score, ok := qualityClientScores[clientId]
@@ -509,22 +521,22 @@ func TestEgressIndexTierFormulas(t *testing.T) {
 
 // More than one in ten failed loads is out of quality and in speed: a quality
 // request only borrows it, behind the natives, while speed holds it natively.
-func TestFindProviders2OverTheLineIsSpeedOnly(t *testing.T) {
+func TestFindProviders2ArinNonQualityIsSpeedOnly(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		city := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
 
 		healthy := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestProbed(ctx, healthy, city, 0, "us")
-		overLine := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
+		overLine := egressTestConnect(ctx, t, city, egressTestFast, nil, &ConnectionLocationScores{ArinNonQuality: true})
 		// seven of sixty: 530 < 540
 		egressTestProbed(ctx, overLine, city, 7, "us")
 		egressTestPasses(ctx, t)
 
 		qualityClientScores := egressTestCachedScores(ctx, t, city, RankModeQuality, false)
 		connect.AssertEqual(t, qualityClientScores[healthy.clientId].PassesMinimums[RankModeQuality], true)
-		if _, ok := qualityClientScores[overLine.clientId]; ok {
-			t.Fatal("a provider over the one-in-ten line is in the quality sample")
+		if score := qualityClientScores[overLine.clientId]; score == nil || !score.Online || score.PassesMinimums[RankModeQuality] {
+			t.Fatal("ARIN non-quality did not preserve online-only membership in the quality sample")
 		}
 		speedClientScores := egressTestCachedScores(ctx, t, city, RankModeSpeed, false)
 		connect.AssertEqual(t, speedClientScores[overLine.clientId].PassesMinimums[RankModeSpeed], true)
@@ -557,7 +569,7 @@ func TestFindProviders2HardExclusionsHoldEverywhere(t *testing.T) {
 
 		healthy := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestProbed(ctx, healthy, city, 0, "us")
-		blackholed := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
+		blackholed := egressTestConnect(ctx, t, city, egressTestFast, nil, &ConnectionLocationScores{ArinRisk: true})
 		egressTestProbed(ctx, blackholed, city, 0, "us")
 		egressTestBlackhole(ctx, blackholed.clientId)
 		intercepted := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
@@ -572,11 +584,11 @@ func TestFindProviders2HardExclusionsHoldEverywhere(t *testing.T) {
 		})
 		networkOnly := egressTestConnect(ctx, t, city, egressTestFast, map[ProvideMode][]byte{
 			ProvideModeNetwork: []byte("network-secret"),
-		}, nil)
+		}, &ConnectionLocationScores{ArinRisk: true})
 		egressTestProbed(ctx, networkOnly, city, 0, "us")
 		egressTestBlackhole(ctx, networkOnly.clientId)
 		// unprobed with client samples: online, but for the verdict
-		onlineBlackholed := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
+		onlineBlackholed := egressTestConnect(ctx, t, city, egressTestFast, nil, &ConnectionLocationScores{ArinRisk: true})
 		egressTestBlackhole(ctx, onlineBlackholed.clientId)
 		egressTestPasses(ctx, t)
 
@@ -611,10 +623,8 @@ func TestFindProviders2HardExclusionsHoldEverywhere(t *testing.T) {
 
 		// the verdicts clear: a passing check and a clean run
 		for _, clientId := range []server.Id{blackholed.clientId, networkOnly.clientId, onlineBlackholed.clientId} {
-			SetProviderBlackholeCheck(ctx, &ProviderBlackholeCheck{
-				ClientId:  clientId,
-				CheckedAt: server.NowUtc().Add(time.Second),
-				OK:        true,
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client_location SET arin_risk=false WHERE client_id=$1`, clientId))
 			})
 		}
 		egressTestHealth(ctx, intercepted.clientId, server.NowUtc().Add(time.Second), 60, 0)
@@ -637,7 +647,7 @@ func TestFindProviders2HardExclusionsHoldEverywhere(t *testing.T) {
 // A fresh probe observing the exit outside the published country is a gate on
 // every bucket and the counts, as a minimum: force_minimum and a client id
 // still reach the provider, and no backfill borrows it.
-func TestFindProviders2CountryGateIsAMinimum(t *testing.T) {
+func TestFindProviders2ObservationDoesNotAddCountryGate(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		city := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
@@ -651,7 +661,8 @@ func TestFindProviders2CountryGateIsAMinimum(t *testing.T) {
 
 		for _, rankMode := range []RankMode{RankModeQuality, RankModeSpeed} {
 			providers := egressTestFind(ctx, t, egressTestLocationSpec(city), rankMode, 10, false, server.NewId())
-			connect.AssertEqual(t, egressTestIds(providers), []server.Id{healthy.clientId})
+			connect.AssertEqual(t, len(providers), 2)
+			connect.AssertEqual(t, slices.Contains(egressTestIds(providers), mislocated.clientId), true)
 
 			forcedClientIds := egressTestIds(egressTestFind(ctx, t, egressTestLocationSpec(city), rankMode, 10, true, server.NewId()))
 			if !slices.Contains(forcedClientIds, mislocated.clientId) {
@@ -660,7 +671,7 @@ func TestFindProviders2CountryGateIsAMinimum(t *testing.T) {
 		}
 		namedProviders := egressTestFind(ctx, t, []*ProviderSpec{{ClientId: &mislocated.clientId}}, RankModeQuality, 1, false, server.NewId())
 		connect.AssertEqual(t, egressTestIds(namedProviders), []server.Id{mislocated.clientId})
-		connect.AssertEqual(t, egressTestLocationCount(ctx, t, city), 1)
+		connect.AssertEqual(t, egressTestLocationCount(ctx, t, city), 2)
 	})
 }
 
@@ -729,29 +740,25 @@ func TestEgressCountsAreTheGatePassingSet(t *testing.T) {
 		egressTestProbed(ctx, mislocated, city, 0, "gb")
 		egressTestPasses(ctx, t)
 
-		connect.AssertEqual(t, egressTestLocationCount(ctx, t, city), 4)
-		connect.AssertEqual(t, egressTestLocationCount(ctx, t, &Location{LocationId: city.CountryLocationId}), 4)
+		connect.AssertEqual(t, egressTestLocationCount(ctx, t, city), 6)
+		connect.AssertEqual(t, egressTestLocationCount(ctx, t, &Location{LocationId: city.CountryLocationId}), 6)
 
 		// and the same set as the dashboard's reasons see it
 		counts := CountProviderEgress(ctx)
-		connect.AssertEqual(t, counts.ReasonCounts[ProviderExcludedBlackhole], int64(1))
+		connect.AssertEqual(t, counts.ReasonCounts[ProviderExcludedBlackhole], int64(0))
 		connect.AssertEqual(t, counts.ReasonCounts[ProviderExcludedTls], int64(1))
-		connect.AssertEqual(t, counts.ReasonCounts[ProviderExcludedCountry], int64(1))
-		connect.AssertEqual(t, counts.ReasonCounts[ProviderExcludedHealth], int64(1))
+		connect.AssertEqual(t, counts.ReasonCounts[ProviderExcludedCountry], int64(0))
+		connect.AssertEqual(t, counts.ReasonCounts[ProviderExcludedHealth], int64(0))
 		connect.AssertEqual(t, counts.ReasonCounts[ProviderExcludedUnprobed], int64(2))
-		connect.AssertEqual(t, counts.BucketIndexCounts[RankModeQuality]["0"], int64(1))
-		connect.AssertEqual(t, counts.BucketIndexCounts[RankModeSpeed]["0"]+counts.BucketIndexCounts[RankModeSpeed]["6"], int64(2))
-		connect.AssertEqual(t, counts.BucketIndexCounts[ProviderEgressBucketOnline]["0"], int64(2))
+		connect.AssertEqual(t, counts.BucketIndexCounts[RankModeQuality]["0"], int64(3))
+		connect.AssertEqual(t, counts.BucketIndexCounts[RankModeSpeed]["0"]+counts.BucketIndexCounts[RankModeSpeed]["2"], int64(4))
+		connect.AssertEqual(t, counts.BucketIndexCounts[ProviderEgressBucketOnline]["0"], int64(5))
 	})
 }
 
-// The online bucket: no probe evidence, past the exclusions and the gate, and
-// within every minimum the other buckets apply apart from the probe's -- per
-// lookback, the independent weight floor and the score maximum over the
-// speed-mode score, missing-test penalties included. A provider no client has
-// measured stays out, as it did before the buckets; one a client has measured
-// and that passes the minimums is in. Nothing about contracts or bytes decides
-// it.
+// Common-gate passes stay online without probe or client performance evidence.
+// Reliability floors still apply; missing speed and latency cannot exclude an
+// otherwise eligible provider or prevent online fallback.
 func TestOnlineBucketMembership(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -795,20 +802,18 @@ func TestOnlineBucketMembership(t *testing.T) {
 			connect.AssertEqual(t, online(reliable), true)
 			connect.AssertEqual(t, online(unreliable), false)
 			connect.AssertEqual(t, online(unscored), true)
-			connect.AssertEqual(t, online(unsampled), false)
-			connect.AssertEqual(t, online(halfSampled), false)
+			connect.AssertEqual(t, online(unsampled), true)
+			connect.AssertEqual(t, online(halfSampled), true)
 			connect.AssertEqual(t, online(slow), true)
 			// fresh evidence: native, not online
-			connect.AssertEqual(t, online(probed), false)
+			connect.AssertEqual(t, online(probed), true)
 			connect.AssertEqual(t, clientScores[probed.clientId].PassesMinimums[rankMode], true)
 			// stale evidence is none
 			connect.AssertEqual(t, online(stale), true)
-			connect.AssertEqual(t, online(mislocated), false)
+			connect.AssertEqual(t, online(mislocated), true)
 			// under a minimum it is in no non-forced sample at all
 			for name, provider := range map[string]*egressTestProvider{
 				"under the reliability floor": unreliable,
-				"measured by no client":       unsampled,
-				"missing the throughput test": halfSampled,
 			} {
 				if _, ok := clientScores[provider.clientId]; ok {
 					t.Errorf("%s: a provider %s is in the sample", rankMode, name)
@@ -819,12 +824,12 @@ func TestOnlineBucketMembership(t *testing.T) {
 		// and in no answer, however short the location's buckets are
 		for _, rankMode := range []RankMode{RankModeQuality, RankModeSpeed} {
 			answeredClientIds := egressTestIds(egressTestFind(ctx, t, egressTestLocationSpec(city), rankMode, 20, false, server.NewId()))
-			for _, provider := range []*egressTestProvider{unreliable, unsampled, halfSampled} {
+			for _, provider := range []*egressTestProvider{unreliable} {
 				if slices.Contains(answeredClientIds, provider.clientId) {
 					t.Errorf("%s: a provider outside the online minimums answered a short bucket", rankMode)
 				}
 			}
-			for _, provider := range []*egressTestProvider{reliable, unscored, slow, stale, probed} {
+			for _, provider := range []*egressTestProvider{reliable, unscored, slow, stale, probed, unsampled, halfSampled, mislocated} {
 				if !slices.Contains(answeredClientIds, provider.clientId) {
 					t.Errorf("%s: a provider within the minimums is missing from a short answer", rankMode)
 				}

@@ -174,34 +174,32 @@ func TestMissingFlagUsageDoesNotPrintSecrets(t *testing.T) {
 // removed the network deadline, and a negative interval silently disabled the
 // only fleet-wide fast check. Reject each at startup instead of starting a
 // healthy-looking but inert service.
-func TestInvalidBlackholeFlagsAreRejected(t *testing.T) {
+func TestObsoleteBlackholeFlagsAreRejected(t *testing.T) {
 	tests := []struct {
 		name  string
 		flag  string
 		value string
-		want  string
 	}{
-		{name: "negative interval", flag: "-blackhole-interval", value: "-1s", want: "-blackhole-interval must not be negative"},
-		{name: "zero concurrency", flag: "-blackhole-concurrency", value: "0", want: "-blackhole-concurrency must be positive"},
-		{name: "zero timeout", flag: "-blackhole-timeout", value: "0", want: "-blackhole-timeout must be positive"},
-		{name: "zero limit", flag: "-blackhole-limit", value: "0", want: "-blackhole-limit must be positive"},
+		{name: "negative interval", flag: "-blackhole-interval", value: "-1s"},
+		{name: "zero concurrency", flag: "-blackhole-concurrency", value: "0"},
+		{name: "zero timeout", flag: "-blackhole-timeout", value: "0"},
+		{name: "zero limit", flag: "-blackhole-limit", value: "0"},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			out, code := runProber(t,
-				"-skip-confinement-check",
-				"-api-url", "http://127.0.0.1:1",
-				"-platform-url", "ws://127.0.0.1:1",
-				"-interval", "0",
-				test.flag, test.value,
-			)
-			if code != 2 {
-				t.Fatalf("%s=%s exited %d, want 2. output:\n%s", test.flag, test.value, code, out)
-			}
-			if !strings.Contains(out, test.want) {
-				t.Fatalf("output does not contain %q:\n%s", test.want, out)
-			}
-		})
+		out, code := runProber(t,
+			"-skip-confinement-check",
+			"-api-url", "http://127.0.0.1:1",
+			"-platform-url", "ws://127.0.0.1:1",
+			"-interval", "0",
+			test.flag, test.value,
+		)
+		if code != 2 {
+			t.Fatalf("%s=%s exited %d, want 2. output:\n%s", test.flag, test.value, code, out)
+		}
+		want := "obsolete probe flags " + test.flag
+		if !strings.Contains(out, want) {
+			t.Fatalf("%s: output does not contain %q:\n%s", test.name, want, out)
+		}
 	}
 }
 

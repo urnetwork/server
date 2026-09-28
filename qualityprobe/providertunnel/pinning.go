@@ -18,7 +18,15 @@ import (
 // intermediate -- is in the allowed set. A provider is the network path for
 // these requests, so for a pinned host pinning is what stops it forging an
 // answer with a certificate that is chain-valid but issued by someone else.
-var ErrPinMismatch = errors.New("providertunnel: certificate pin mismatch")
+var ErrPinMismatch = &providerPinMismatchError{}
+
+type providerPinMismatchError struct{}
+
+func (*providerPinMismatchError) Error() string { return "providertunnel: certificate pin mismatch" }
+
+// Consumers distinguish an identity failure from ordinary TLS/network errors
+// without importing this package or parsing its human-readable error text.
+func (*providerPinMismatchError) TLSAuthenticationFailure() bool { return true }
 
 // Returned by PinnedTlsConfig's verifier when it cannot
 // determine which host it is checking. This happens if the *tls.Config
@@ -51,7 +59,7 @@ func normalizeHost(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
-	return strings.ToLower(host)
+	return strings.TrimSuffix(strings.ToLower(host), ".")
 }
 
 // Normalizes pin map keys once (case and any stray :port

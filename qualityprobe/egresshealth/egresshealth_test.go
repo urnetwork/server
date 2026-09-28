@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"net/url"
 	"sort"
 	"strings"
@@ -25,6 +26,7 @@ import (
 // a run whose failing loads each wait minutes would otherwise take minutes.
 func fastOptions() Options {
 	return Options{
+		Destinations:      testCatalogDestinations(),
 		PerRequestTimeout: 200 * time.Millisecond,
 		Budget:            5 * time.Second,
 		Concurrency:       3,
@@ -304,7 +306,7 @@ func TestCheckTotalBlackhole(t *testing.T) {
 		t.Fatalf("OkCount = %d, want 0 for a total blackhole (%+v)", res.OkCount, res.Checks)
 	}
 	if res.Total != 12 {
-		t.Fatalf("Total = %d, want the 12 scored destinations", res.Total)
+		t.Fatalf("Total = %d, want the 12 scored testDestinations", res.Total)
 	}
 	if len(res.Checks) != len(dests) {
 		t.Fatalf("len(Checks) = %d, want %d; every destination must be attempted", len(res.Checks), len(dests))
@@ -334,7 +336,7 @@ func TestCheckTotalBlackhole(t *testing.T) {
 		t.Errorf("check(nil client) = (%v, %v), want (nil, ErrNilClient)", res, err)
 	}
 	if res, err := check(context.Background(), http.DefaultClient, nil, fastOptions()); !errors.Is(err, ErrNoDestinations) || res != nil {
-		t.Errorf("check(no destinations) = (%v, %v), want (nil, ErrNoDestinations)", res, err)
+		t.Errorf("check(no testDestinations) = (%v, %v), want (nil, ErrNoDestinations)", res, err)
 	}
 	// A run started on an already-dead context returns 0/9 for reasons that
 	// have nothing to do with the provider. Reporting that as a blackhole
@@ -398,7 +400,7 @@ func TestCheckSelectiveFailure(t *testing.T) {
 		}
 	}
 	if names := res.FailedNames(); strings.Join(names, ",") != "cdn-a,cdn-b,cdn-c" {
-		t.Errorf("FailedNames = %v, want the three cdn destinations in table order", names)
+		t.Errorf("FailedNames = %v, want the three cdn testDestinations in table order", names)
 	}
 }
 
@@ -481,7 +483,7 @@ func TestBodyCapHonoured(t *testing.T) {
 }
 
 // The pattern is the value, so a failure in
-// the middle of the table must not stop the destinations after it from being
+// the middle of the table must not stop the testDestinations after it from being
 // attempted.
 func TestOneFailureDoesNotAbortTheRun(t *testing.T) {
 	dests := stubDestinations(t, []spec{
@@ -645,8 +647,8 @@ func TestOptionsDefaults(t *testing.T) {
 	if got := zero.profile(); got.UserAgent != DefaultRequestProfile().UserAgent {
 		t.Errorf("profile user agent = %q, want the default profile's", got.UserAgent)
 	}
-	if len(zero.table()) != len(destinations) {
-		t.Errorf("table has %d destinations, want the built-in %d", len(zero.table()), len(destinations))
+	if len(zero.table()) != 0 {
+		t.Error("zero options invented a destination catalog")
 	}
 	neg := Options{PerRequestTimeout: -1, Budget: -1, Concurrency: -1, LoadAttempts: -1, LoadRetryMeanInterval: -1, IpEchoTimeout: -1}
 	if neg.perRequestTimeout() != DefaultPerRequestTimeout || neg.budget(50) != zero.RunBudget(50) || neg.concurrency() != DefaultConcurrency ||
@@ -659,8 +661,8 @@ func TestOptionsDefaults(t *testing.T) {
 // log line and any future storage key on, so they must be unique and non-empty,
 // and every destination must belong to a declared class.
 func TestDestinationsTable(t *testing.T) {
-	if len(destinations) < 8 {
-		t.Fatalf("len(destinations) = %d; the table is meant to span several classes and operators", len(destinations))
+	if len(testDestinations) < 8 {
+		t.Fatalf("len(testDestinations) = %d; the table is meant to span several classes and operators", len(testDestinations))
 	}
 	// Every class must be in Classes or it would sort after the declared ones in
 	// every summary -- and a pool carrying it would be refused.
@@ -670,12 +672,12 @@ func TestDestinationsTable(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	perClass := map[Class]int{}
-	for i, d := range destinations {
+	for i, d := range testDestinations {
 		if d.Name == "" {
-			t.Fatalf("destinations[%d] has no name", i)
+			t.Fatalf("testDestinations[%d] has no name", i)
 		}
 		if seen[d.Name] {
-			t.Fatalf("destinations[%d] repeats the name %q", i, d.Name)
+			t.Fatalf("testDestinations[%d] repeats the name %q", i, d.Name)
 		}
 		seen[d.Name] = true
 		if !declared[d.Class] {
@@ -696,7 +698,7 @@ func TestDestinationsTable(t *testing.T) {
 // that check while the check kept reporting a pass -- which is exactly why the
 // Quad9 DoH JSON endpoint (port 5053) was rejected for this table.
 func TestEveryDestinationIsHttpsOn443(t *testing.T) {
-	for _, d := range destinations {
+	for _, d := range testDestinations {
 		u, err := url.Parse(d.Url)
 		if err != nil {
 			t.Fatalf("destination %q has an unparseable URL %q: %s", d.Name, d.Url, err)
@@ -711,11 +713,11 @@ func TestEveryDestinationIsHttpsOn443(t *testing.T) {
 }
 
 // The point of the table is
-// that a provider which whitelists one vendor cannot pass. Two destinations in
+// that a provider which whitelists one vendor cannot pass. Two testDestinations in
 // the same class sharing a host would be one destination wearing two names.
 func TestDestinationsSpreadAcrossOperatorsWithinAClass(t *testing.T) {
 	perClass := map[Class]map[string]string{}
-	for _, d := range destinations {
+	for _, d := range testDestinations {
 		u, err := url.Parse(d.Url)
 		if err != nil {
 			t.Fatalf("destination %q: %s", d.Name, err)
@@ -724,7 +726,7 @@ func TestDestinationsSpreadAcrossOperatorsWithinAClass(t *testing.T) {
 			perClass[d.Class] = map[string]string{}
 		}
 		if other, dup := perClass[d.Class][u.Hostname()]; dup {
-			t.Errorf("destinations %q and %q are both class %q on host %q; one blocked host would fail both", other, d.Name, d.Class, u.Hostname())
+			t.Errorf("testDestinations %q and %q are both class %q on host %q; one blocked host would fail both", other, d.Name, d.Class, u.Hostname())
 		}
 		perClass[d.Class][u.Hostname()] = d.Name
 	}
@@ -736,11 +738,11 @@ func TestDestinationsSpreadAcrossOperatorsWithinAClass(t *testing.T) {
 // confinement check silently stops covering a real endpoint while still
 // reporting success.
 func TestDestinationHostsCoversEveryDestination(t *testing.T) {
-	hosts := DestinationHosts()
+	hosts := HostsOf(testDestinations)
 	if len(hosts) == 0 {
 		t.Fatal("DestinationHosts is empty; the confinement check would have nothing to test")
 	}
-	for _, d := range destinations {
+	for _, d := range testDestinations {
 		u, err := url.Parse(d.Url)
 		if err != nil {
 			t.Fatalf("destination %q has an unparseable URL %q: %s", d.Name, d.Url, err)
@@ -777,7 +779,7 @@ func TestDestinationHostsCoversEveryDestination(t *testing.T) {
 
 	// One entry per distinct host, no more and no fewer.
 	distinct := map[string]bool{}
-	for _, d := range destinations {
+	for _, d := range testDestinations {
 		u, _ := url.Parse(d.Url)
 		distinct[u.Hostname()] = true
 	}
@@ -883,13 +885,18 @@ func TestCheckUsesTheInjectedClientOnly(t *testing.T) {
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 // Implements http.RoundTripper.
-func (self roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return self(r) }
+func (self roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	if trace := httptrace.ContextClientTrace(r.Context()); trace != nil && trace.WroteRequest != nil {
+		trace.WroteRequest(httptrace.WroteRequestInfo{})
+	}
+	return self(r)
+}
 
 // Check must run a sample of the production
 // table -- not an empty one, not a stub one, and not the whole thing. It cannot
 // reach the real hosts here (no network is used), but the shape of the result
 // proves which table it drew from and that it drew rather than took.
-func TestCheckProductionTableIsWiredUp(t *testing.T) {
+func TestCheckExplicitCatalogIsSampled(t *testing.T) {
 	rt := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		return nil, errors.New("no network in tests")
 	})
@@ -899,21 +906,21 @@ func TestCheckProductionTableIsWiredUp(t *testing.T) {
 	}
 
 	// Total counts every destination of the sample: every class is scored.
-	scoredSample := SamplePerRun()
+	scoredSample := SamplePerRunOf(testDestinations)
 	if res.Total != scoredSample {
-		t.Fatalf("Total = %d, want the %d destinations of one sample", res.Total, scoredSample)
+		t.Fatalf("Total = %d, want the %d testDestinations of one sample", res.Total, scoredSample)
 	}
-	if len(res.Checks) != SamplePerRun() {
-		t.Fatalf("len(Checks) = %d, want SamplePerRun() = %d; every sampled destination must be ATTEMPTED and recorded", len(res.Checks), SamplePerRun())
+	if len(res.Checks) != SamplePerRunOf(testDestinations) {
+		t.Fatalf("len(Checks) = %d, want SamplePerRunOf(testDestinations) = %d; every sampled destination must be ATTEMPTED and recorded", len(res.Checks), SamplePerRunOf(testDestinations))
 	}
-	if len(destinations) <= len(res.Checks) {
-		t.Fatalf("Check ran %d of the %d destinations; it must SAMPLE the table, not fetch it -- the whole table costs 128 KiB per provider per run", len(res.Checks), len(destinations))
+	if len(testDestinations) <= len(res.Checks) {
+		t.Fatalf("Check ran %d of the %d testDestinations; it must SAMPLE the table, not fetch it -- the whole table costs 128 KiB per provider per run", len(res.Checks), len(testDestinations))
 	}
 
 	// Every name that came back must be a real production destination: a sample
 	// of a stub table would be small too.
 	inTable := map[string]bool{}
-	for _, d := range destinations {
+	for _, d := range testDestinations {
 		inTable[d.Name] = true
 	}
 	for _, c := range res.Checks {
@@ -921,10 +928,10 @@ func TestCheckProductionTableIsWiredUp(t *testing.T) {
 			t.Fatalf("Check ran %q, which is not in the production table", c.Name)
 		}
 	}
-	if res.TableTotal != len(destinations) {
-		t.Fatalf("TableTotal = %d, want the full table %d; the log line has to say what the sample was drawn from", res.TableTotal, len(destinations))
+	if res.TableTotal != len(testDestinations) {
+		t.Fatalf("TableTotal = %d, want the full table %d; the log line has to say what the sample was drawn from", res.TableTotal, len(testDestinations))
 	}
-	if want := fmt.Sprintf("table=%d", len(destinations)); !strings.Contains(res.Summary(), want) {
+	if want := fmt.Sprintf("table=%d", len(testDestinations)); !strings.Contains(res.Summary(), want) {
 		t.Errorf("Summary = %q, want it to carry %s, or dns=6/6 reads as a six-entry class", res.Summary(), want)
 	}
 
@@ -946,7 +953,7 @@ func TestCheckProductionTableIsWiredUp(t *testing.T) {
 // makes the summary lie about what was checked.
 func TestClassesCoversTheTable(t *testing.T) {
 	used := map[Class]bool{}
-	for _, d := range destinations {
+	for _, d := range testDestinations {
 		used[d.Class] = true
 	}
 	var unused []string
@@ -958,36 +965,6 @@ func TestClassesCoversTheTable(t *testing.T) {
 	sort.Strings(unused)
 	if len(unused) != 0 {
 		t.Fatalf("Classes declares %v, which no destination uses", unused)
-	}
-}
-
-// The production table must not be reachable for
-// mutation from outside. A caller that changed an entry -- or the Headers map
-// inside one -- would change what every subsequent probe measures, invisibly
-// from the table's own source.
-func TestDestinationsReturnsACopy(t *testing.T) {
-	got := Destinations()
-	if len(got) != len(destinations) {
-		t.Fatalf("Destinations() has %d entries, want %d", len(got), len(destinations))
-	}
-	for i := range got {
-		if got[i].Name != destinations[i].Name || got[i].Url != destinations[i].Url || got[i].Class != destinations[i].Class {
-			t.Fatalf("Destinations()[%d] = %+v, want %+v", i, got[i], destinations[i])
-		}
-	}
-
-	got[0].Url = "https://mutated.example/"
-	got[0].Name = "mutated"
-	for k := range got[0].Headers {
-		got[0].Headers[k] = "mutated"
-	}
-	if destinations[0].Url == "https://mutated.example/" || destinations[0].Name == "mutated" {
-		t.Fatal("mutating the returned slice changed the production table")
-	}
-	for k, v := range destinations[0].Headers {
-		if v == "mutated" {
-			t.Fatalf("mutating a returned entry's Headers changed the production table (%s)", k)
-		}
 	}
 }
 
@@ -1047,7 +1024,7 @@ func TestExpectStatusAcceptsAnEmptyBody(t *testing.T) {
 // through the sampling path rather than a hand-built table, because that is
 // what production runs. Every destination the draw lands on returns a bodiless
 // 200 -- what a provider that terminates connections itself produces -- and
-// every scored class must come back 0/n whichever destinations were drawn.
+// every scored class must come back 0/n whichever testDestinations were drawn.
 func TestCheckSamplesABlackholedProviderToZero(t *testing.T) {
 	rt := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: http.Header{}, Request: r}, nil
@@ -1063,7 +1040,7 @@ func TestCheckSamplesABlackholedProviderToZero(t *testing.T) {
 	// with or without a body. At 26 sites a run, about half of all runs draw
 	// one, so the count below is exact rather than zero.
 	byName := map[string]Destination{}
-	for _, d := range destinations {
+	for _, d := range testDestinations {
 		byName[d.Name] = d
 	}
 	reachable := 0
@@ -1080,7 +1057,7 @@ func TestCheckSamplesABlackholedProviderToZero(t *testing.T) {
 	if res.OkCount != reachable {
 		t.Fatalf("OkCount = %d, want only the %d ExpectReachable draw(s) (%s)", res.OkCount, reachable, res.Summary())
 	}
-	if res.Total != SamplePerRun() {
+	if res.Total != SamplePerRunOf(testDestinations) {
 		t.Fatalf("Total = %d; the whole sample is what must read zero, and it must not be empty", res.Total)
 	}
 	for _, c := range Classes {
@@ -1240,54 +1217,6 @@ func TestVerifyIpText(t *testing.T) {
 	}
 }
 
-// The eight destinations of the dissolved
-// reputation class, and the contract each keeps (GEOMAP §11.3).
-var formerReputationSites = map[string]Expect{
-	"akamai":         ExpectBody,
-	"ecosia":         ExpectBody,
-	"reddit":         ExpectBody,
-	"etsy":           ExpectBody,
-	"stack-overflow": ExpectStatus,
-	"reuters":        ExpectBody,
-	"canva":          ExpectBody,
-	"epic-games":     ExpectBody,
-}
-
-// The reputation class is
-// dissolved into site with its contracts unchanged -- stack-overflow keeps its
-// declared 302, the rest their body rule -- and nothing in the table is filed
-// under the old class name, which the server rejects inside class_results.
-func TestFormerReputationSitesLoadAsSiteEntries(t *testing.T) {
-	byName := map[string]Destination{}
-	for _, d := range destinations {
-		byName[d.Name] = d
-		if d.Class == Class("reputation") {
-			t.Errorf("destination %q is still filed under the dissolved reputation class", d.Name)
-		}
-	}
-	for name, expect := range formerReputationSites {
-		d, ok := byName[name]
-		if !ok {
-			t.Errorf("former reputation site %q is gone from the table; it was to become a site entry, not be dropped", name)
-			continue
-		}
-		if d.Class != ClassSite {
-			t.Errorf("%q is class %q, want %q", name, d.Class, ClassSite)
-		}
-		if d.Expect != expect {
-			t.Errorf("%q expects %s, want its existing %s", name, d.Expect, expect)
-		}
-		if name == "stack-overflow" && d.Status != http.StatusFound {
-			t.Errorf("stack-overflow declares %d, want its measured 302", d.Status)
-		}
-	}
-	for _, c := range Classes {
-		if c == Class("reputation") {
-			t.Fatal("Classes still declares reputation")
-		}
-	}
-}
-
 // The rule reversed on purpose. Those
 // sites refusing an exit used to be kept out of ok/total as a fact about a
 // vendor's ip feed; now a refusal is a failed site load like any other, and a
@@ -1298,8 +1227,8 @@ func TestFormerReputationSitesAreScored(t *testing.T) {
 		{name: "conn-a", class: ClassConnectivity, h: status204(), expect: ExpectStatus, status: http.StatusNoContent},
 		{name: "cdn-a", class: ClassCdn, h: okBody("/* css */")},
 		{name: "site-a", class: ClassSite, h: okBody("User-agent: *")},
-		{name: "akamai", class: ClassSite, h: statusWithBody(http.StatusForbidden, "Access Denied")},
-		{name: "reuters", class: ClassSite, h: statusWithBody(http.StatusUnauthorized, "unauthorized")},
+		{name: "synthetic-refused-a", class: ClassSite, h: statusWithBody(http.StatusForbidden, "Access Denied")},
+		{name: "synthetic-refused-b", class: ClassSite, h: statusWithBody(http.StatusUnauthorized, "unauthorized")},
 	})
 	res, err := check(context.Background(), http.DefaultClient, dests, fastOptions())
 	if err != nil {
@@ -1311,7 +1240,7 @@ func TestFormerReputationSitesAreScored(t *testing.T) {
 	if got, want := res.Summary(), "ok=4/6 dns=1/1 connectivity=1/1 cdn=1/1 site=1/3"; got != want {
 		t.Fatalf("Summary = %q, want %q", got, want)
 	}
-	if got, want := strings.Join(res.FailedNames(), ","), "akamai,reuters"; got != want {
+	if got, want := strings.Join(res.FailedNames(), ","), "synthetic-refused-a,synthetic-refused-b"; got != want {
 		t.Errorf("FailedNames = %q, want %q", got, want)
 	}
 	for _, c := range res.Checks {
@@ -1346,7 +1275,7 @@ func TestWorstCaseBytesPerRunFitsTheBudget(t *testing.T) {
 	// bounded by DefaultLoadAttempts times this plus the warm-up.
 	const perRound = 45056 // 44 KiB
 
-	for _, d := range destinations {
+	for _, d := range testDestinations {
 		if d.MaxBytes <= 0 {
 			t.Errorf("destination %q sets no MaxBytes; it would take the %d-byte default and the budget below stops being arithmetic", d.Name, MaxBodyBytes)
 		}
@@ -1356,10 +1285,10 @@ func TestWorstCaseBytesPerRunFitsTheBudget(t *testing.T) {
 	}
 
 	var worst, wholeTable int64
-	for _, c := range tableClasses(destinations) {
+	for _, c := range tableClasses(testDestinations) {
 		var largest, classTotal int64
 		pool := 0
-		for _, d := range destinations {
+		for _, d := range testDestinations {
 			if d.Class != c {
 				continue
 			}
@@ -1369,7 +1298,7 @@ func TestWorstCaseBytesPerRunFitsTheBudget(t *testing.T) {
 				largest = d.maxBytes()
 			}
 		}
-		n := int64(sampleCount(destinations, c, sampleSizes))
+		n := int64(sampleCount(testDestinations, c, sampleSizes))
 		worst += n * largest
 		wholeTable += classTotal
 		t.Logf("  %-12s %2d of %3d x %4d = %6d bytes", c, n, pool, largest, n*largest)
@@ -1397,7 +1326,7 @@ func TestWorstCaseBytesPerRunFitsTheBudget(t *testing.T) {
 // stay bounded, or a swallowing provider holds its tunnel open for nothing.
 func TestRunBudgetFitsTheScheduleAndStaysBounded(t *testing.T) {
 	opts := Options{IpEchoUrl: "https://api.example/my-ip-info"}
-	loads := SamplePerRun()
+	loads := SamplePerRunOf(testDestinations)
 	budget := opts.RunBudget(loads)
 
 	rounds := (loads + DefaultConcurrency - 1) / DefaultConcurrency
@@ -1436,12 +1365,12 @@ func TestRunBudgetFitsTheScheduleAndStaysBounded(t *testing.T) {
 // the sizes are asserted against it rather than merely recorded.
 func TestSampleSizesGiveFiftyScoredLoads(t *testing.T) {
 	const minScoredLoads = 50
-	if got := SamplePerRun(); got < minScoredLoads {
+	if got := SamplePerRunOf(testDestinations); got < minScoredLoads {
 		t.Fatalf("a run samples %d loads, below the %d the server's rule and index read", got, minScoredLoads)
 	}
 	want := map[Class]int{ClassDns: 6, ClassConnectivity: 8, ClassCdn: 10, ClassSite: 26}
 	for c, n := range want {
-		if got := sampleCount(destinations, c, sampleSizes); got != n {
+		if got := sampleCount(testDestinations, c, sampleSizes); got != n {
 			t.Errorf("class %q samples %d, want %d", c, got, n)
 		}
 	}
@@ -1452,7 +1381,7 @@ func TestSampleSizesGiveFiftyScoredLoads(t *testing.T) {
 // production table should ever be in -- site alone would put 93 requests on
 // every provider.
 func TestSampleSizesAreDeclaredForEveryClass(t *testing.T) {
-	for _, c := range tableClasses(destinations) {
+	for _, c := range tableClasses(testDestinations) {
 		n, declared := sampleSizes[c]
 		if !declared {
 			t.Errorf("class %q has no sample size; it would be probed whole on every run", c)
@@ -1464,7 +1393,7 @@ func TestSampleSizesAreDeclaredForEveryClass(t *testing.T) {
 			t.Errorf("class %q samples %d; below 3 a class verdict cannot separate one flaky endpoint from a class-wide fault", c, n)
 		}
 		pool := 0
-		for _, d := range destinations {
+		for _, d := range testDestinations {
 			if d.Class == c {
 				pool++
 			}
@@ -1475,7 +1404,7 @@ func TestSampleSizesAreDeclaredForEveryClass(t *testing.T) {
 	}
 	for c := range sampleSizes {
 		found := false
-		for _, tc := range tableClasses(destinations) {
+		for _, tc := range tableClasses(testDestinations) {
 			if tc == c {
 				found = true
 			}
@@ -1487,11 +1416,11 @@ func TestSampleSizesAreDeclaredForEveryClass(t *testing.T) {
 }
 
 // The first half of the sampling
-// contract: a run asks for exactly as many destinations of each class as the
+// contract: a run asks for exactly as many testDestinations of each class as the
 // package says it will, they are really from that class, and none is drawn
 // twice.
 func TestSampleDrawsTheConfiguredCountPerClass(t *testing.T) {
-	got := sampleDestinations(destinations, sampleSizes, rand.New(rand.NewSource(1)))
+	got := sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewSource(1)))
 
 	perClass := map[Class]int{}
 	seen := map[string]bool{}
@@ -1502,19 +1431,19 @@ func TestSampleDrawsTheConfiguredCountPerClass(t *testing.T) {
 		}
 		seen[d.Name] = true
 	}
-	for _, c := range tableClasses(destinations) {
-		if want := sampleCount(destinations, c, sampleSizes); perClass[c] != want {
+	for _, c := range tableClasses(testDestinations) {
+		if want := sampleCount(testDestinations, c, sampleSizes); perClass[c] != want {
 			t.Errorf("sample drew %d of class %q, want %d", perClass[c], c, want)
 		}
 	}
-	if len(got) != SamplePerRun() {
-		t.Errorf("sample is %d destinations, SamplePerRun() says %d", len(got), SamplePerRun())
+	if len(got) != SamplePerRunOf(testDestinations) {
+		t.Errorf("sample is %d testDestinations, SamplePerRunOf(testDestinations) says %d", len(got), SamplePerRunOf(testDestinations))
 	}
 
 	// Table order, so the log line and FailedNames stay diffable between runs
 	// whatever the draw was.
 	pos := map[string]int{}
-	for i, d := range destinations {
+	for i, d := range testDestinations {
 		pos[d.Name] = i
 	}
 	for i := 1; i < len(got); i++ {
@@ -1534,9 +1463,9 @@ func TestSampleDrawsTheConfiguredCountPerClass(t *testing.T) {
 // Each run gets a freshly seeded generator, because a *rand.Rand is stateful:
 // handing the same one to two runs is a different experiment (and would fail).
 func TestSampleIsReproducibleForASeed(t *testing.T) {
-	first := names(sampleDestinations(destinations, sampleSizes, rand.New(rand.NewSource(7))))
+	first := names(sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewSource(7))))
 	for i := 0; i < 20; i++ {
-		again := names(sampleDestinations(destinations, sampleSizes, rand.New(rand.NewSource(7))))
+		again := names(sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewSource(7))))
 		if again != first {
 			t.Fatalf("seed 7 drew a different sample on iteration %d:\n first: %s\n again: %s", i, first, again)
 		}
@@ -1571,20 +1500,20 @@ func TestSampleIsReproducibleForASeed(t *testing.T) {
 // class on purpose -- dns draws 6 of 7, which is only 7 possible subsets, so
 // two arbitrary seeds collide on that class often enough to flake.
 //
-// The property is not cosmetic. A provider that knows which destinations it
+// The property is not cosmetic. A provider that knows which testDestinations it
 // will be asked for can whitelist them and blackhole everything else; the
 // per-run draw is what takes that away, and it is only taken away if the draw
 // really varies.
 func TestSampleDiffersBetweenSeeds(t *testing.T) {
-	first := names(sampleDestinations(destinations, sampleSizes, rand.New(rand.NewSource(1))))
+	first := names(sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewSource(1))))
 	differed := 0
 	for seed := int64(2); seed <= 11; seed++ {
-		if names(sampleDestinations(destinations, sampleSizes, rand.New(rand.NewSource(seed)))) != first {
+		if names(sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewSource(seed)))) != first {
 			differed++
 		}
 	}
 	if differed < 9 {
-		t.Fatalf("only %d of 10 other seeds drew a different sample; the draw is not random, and a provider that can predict the destinations can whitelist them", differed)
+		t.Fatalf("only %d of 10 other seeds drew a different sample; the draw is not random, and a provider that can predict the testDestinations can whitelist them", differed)
 	}
 
 	// The widest class on its own, where a collision is vanishingly unlikely
@@ -1592,7 +1521,7 @@ func TestSampleDiffersBetweenSeeds(t *testing.T) {
 	// the classes happening to differ somewhere.
 	site := func(seed int64) string {
 		var out []string
-		for _, d := range sampleDestinations(destinations, sampleSizes, rand.New(rand.NewSource(seed))) {
+		for _, d := range sampleDestinations(testDestinations, sampleSizes, rand.New(rand.NewSource(seed))) {
 			if d.Class == ClassSite {
 				out = append(out, d.Name)
 			}
@@ -1634,7 +1563,7 @@ func names(dests []Destination) string {
 // ExpectBody entry (it would be silently ignored, so the author's intent would
 // not be what runs).
 func TestSuccessContractsAreDeclaredCoherently(t *testing.T) {
-	for _, d := range destinations {
+	for _, d := range testDestinations {
 		switch d.Expect {
 		case ExpectStatus:
 			if d.Status < 200 || 400 <= d.Status {
@@ -1666,7 +1595,7 @@ func TestSuccessContractsAreDeclaredCoherently(t *testing.T) {
 // distinction matters most -- name resolution is the shared precondition for
 // every other destination in the table.
 func TestEveryDnsDestinationVerifiesItsAnswer(t *testing.T) {
-	for _, d := range destinations {
+	for _, d := range testDestinations {
 		if d.Class != ClassDns {
 			continue
 		}
@@ -1683,7 +1612,7 @@ func TestEveryDnsDestinationVerifiesItsAnswer(t *testing.T) {
 	}
 	// Every DoH url must ask a question. A url without one answers 400 (or an
 	// empty answer) for every provider forever.
-	for _, d := range destinations {
+	for _, d := range testDestinations {
 		if d.Class == ClassDns && !strings.Contains(d.Url, "name=") {
 			t.Errorf("dns destination %q carries no name= query: %s", d.Name, d.Url)
 		}
@@ -1694,7 +1623,7 @@ func TestEveryDnsDestinationVerifiesItsAnswer(t *testing.T) {
 // signal in the table, and it is only cheap if it stays that way.
 func TestConnectivityClassIsCheapAndBroad(t *testing.T) {
 	var n, status204Count int
-	for _, d := range destinations {
+	for _, d := range testDestinations {
 		if d.Class != ClassConnectivity {
 			continue
 		}
@@ -1728,8 +1657,9 @@ func TestAllDestinationsRunsEveryDestination(t *testing.T) {
 
 	perRequest := 50 * time.Millisecond
 	concurrency := AllConcurrency
-	budget := time.Duration(RoundsForAllDestinations()) * perRequest
+	budget := time.Duration(((len(testDestinations) + AllConcurrency - 1) / AllConcurrency)) * perRequest
 	res, err := Check(context.Background(), &http.Client{Transport: rt}, Options{
+		Destinations:      testCatalogDestinations(),
 		AllDestinations:   true,
 		Budget:            budget,
 		Concurrency:       concurrency,
@@ -1739,11 +1669,11 @@ func TestAllDestinationsRunsEveryDestination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Check err = %v", err)
 	}
-	if len(res.Checks) != len(destinations) {
-		t.Errorf("ran %d destinations, want the whole table of %d", len(res.Checks), len(destinations))
+	if len(res.Checks) != len(testDestinations) {
+		t.Errorf("ran %d testDestinations, want the whole table of %d", len(res.Checks), len(testDestinations))
 	}
-	if len(res.Checks) <= SamplePerRun() {
-		t.Errorf("AllDestinations ran %d, no more than a sample (%d) -- it is still sampling", len(res.Checks), SamplePerRun())
+	if len(res.Checks) <= SamplePerRunOf(testDestinations) {
+		t.Errorf("AllDestinations ran %d, no more than a sample (%d) -- it is still sampling", len(res.Checks), SamplePerRunOf(testDestinations))
 	}
 }
 

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 	"github.com/urnetwork/server/qualityprobe/ingest"
 	"github.com/urnetwork/server/qualityprobe/providertunnel"
 )
@@ -575,7 +576,6 @@ func TestProberDoesNotProbeWhenTheStartupPinFetchFails(t *testing.T) {
 			"-platform-url", "ws://127.0.0.1:1",
 			"-interval", "0",
 			"-skip-confinement-check",
-			"-skip-bandwidth",
 		)
 		srv.Close()
 
@@ -600,8 +600,8 @@ func TestProberDoesNotProbeWhenTheStartupPinFetchFails(t *testing.T) {
 
 // No host is required to be pinned any
 // more, so a server with nothing observed answers 200 {} and the prober gets on
-// with the pass -- fetching the destination pool (the built-in table when the
-// server has none) and asking what is due.
+// with the pass, fetching the explicitly configured catalog and asking what
+// is due. Missing pins do not imply missing destination configuration.
 func TestProberStartsWithAnEmptyPinSet(t *testing.T) {
 	var stateLock sync.Mutex
 	dueCalls, poolCalls := 0, 0
@@ -614,7 +614,14 @@ func TestProberStartsWithAnEmptyPinSet(t *testing.T) {
 			stateLock.Lock()
 			poolCalls++
 			stateLock.Unlock()
-			http.NotFound(w, r)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(egresshealth.Pool{
+				Version:     1,
+				GeneratedAt: time.Now(),
+				Destinations: []egresshealth.Destination{{
+					Name: "synthetic-site", Class: egresshealth.ClassSite, Url: "https://synthetic.example/content",
+				}},
+			})
 		case "/network/provider-egress-due":
 			stateLock.Lock()
 			dueCalls++
@@ -632,7 +639,6 @@ func TestProberStartsWithAnEmptyPinSet(t *testing.T) {
 		"-platform-url", "ws://127.0.0.1:1",
 		"-interval", "0",
 		"-skip-confinement-check",
-		"-skip-bandwidth",
 	)
 	if code != 0 {
 		t.Errorf("exited %d with an empty pin set and nothing due.\n--- output ---\n%s", code, out)
@@ -642,8 +648,8 @@ func TestProberStartsWithAnEmptyPinSet(t *testing.T) {
 	if poolCalls != 1 || dueCalls != 1 {
 		t.Errorf("pool fetched %d time(s), due asked %d time(s); want one pass of each.\n--- output ---\n%s", poolCalls, dueCalls, out)
 	}
-	if !strings.Contains(out, "pass: ") || !strings.Contains(out, "built-in destination table") {
-		t.Errorf("the pass did not run on the built-in table.\n--- output ---\n%s", out)
+	if !strings.Contains(out, "pass: ") || !strings.Contains(out, "pool_version=1") {
+		t.Errorf("the pass did not use the configured catalog.\n--- output ---\n%s", out)
 	}
 	assertNoSecrets(t, "a start on an empty pin set", out)
 }

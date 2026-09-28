@@ -30,6 +30,9 @@ func (self *providerUrlResolver) dialContext(ctx context.Context, network, addre
 		return nil, err
 	}
 	if literal, err := netip.ParseAddr(host); err == nil {
+		if _, scoped := ctx.Value(providerUrlProbeKey{}).(providerUrlProbeTarget); scoped && !publicUrlProbeAddress(literal) {
+			return nil, &providerHttpStageError{stage: "policy", err: errors.New("provider URL resolved to a nonpublic address")}
+		}
 		return self.dial(ctx, network, address, []netip.Addr{literal.Unmap()})
 	}
 	observation.observe(connect.TunDialDnsStarted)
@@ -102,6 +105,13 @@ func (self *providerUrlResolver) dialContext(ctx context.Context, network, addre
 	}
 	if len(addrs) == 0 {
 		return nil, &net.DNSError{Err: "provider URL resolution exhausted", Name: host, IsNotFound: authoritative, IsTemporary: !authoritative}
+	}
+	if _, scoped := ctx.Value(providerUrlProbeKey{}).(providerUrlProbeTarget); scoped {
+		for _, address := range addrs {
+			if !publicUrlProbeAddress(address) {
+				return nil, &providerHttpStageError{stage: "policy", err: errors.New("provider URL resolved to a nonpublic address")}
+			}
+		}
 	}
 	observation.observe(connect.TunDialDnsAnswered)
 	return self.dial(ctx, network, address, addrs)

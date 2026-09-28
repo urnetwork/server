@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -92,7 +93,7 @@ func TestDueCarriesEachProvidersPlace(t *testing.T) {
 			{ClientId: "00000000-0000-0000-0000-000000000002", CountryCode: "de"},
 			{ClientId: "00000000-0000-0000-0000-000000000003"},
 		}
-		if !slices.Equal(due, want) {
+		if !reflect.DeepEqual(due, want) {
 			t.Errorf("%s: due = %+v, want %+v", endpoint.path, due, want)
 		}
 	}

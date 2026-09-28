@@ -53,7 +53,10 @@ type Config struct {
 	// of the allowlist (a pinned host may be dialed), so a caller must not hand
 	// it hosts the tunnel should not reach: fleetprobe restricts the served set
 	// to the hosts a probe dials before it opens a tunnel.
-	Pins              map[string][]string
+	Pins map[string][]string
+	// Full verification-only snapshot for authenticated redirect targets.
+	// Unlike Pins this never extends the initial dial allowlist.
+	RedirectPins      map[string][]string
 	DeviceDescription string
 	DeviceSpec        string
 	Version           string
@@ -218,6 +221,7 @@ type Tunnel struct {
 	clientStrategy  *connect.ClientStrategy
 	pumpDone        <-chan struct{}
 	pins            map[string][]string
+	redirectPins    map[string][]string
 	// Ends when the path to the provider goes away while the tunnel is
 	// open, or when it is closed; lose sets why. unwatch stops the
 	// multi-client subscription that watches for the provider leaving.
@@ -355,6 +359,10 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	for host, allowed := range cfg.Pins {
 		pins[host] = append([]string(nil), allowed...)
 	}
+	redirectPins := make(map[string][]string, len(cfg.RedirectPins))
+	for host, allowed := range cfg.RedirectPins {
+		redirectPins[host] = append([]string(nil), allowed...)
+	}
 
 	return &Tunnel{
 		cancelData:      cancelData,
@@ -365,6 +373,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		clientStrategy:  clientStrategy,
 		pumpDone:        pumpDone,
 		pins:            pins,
+		redirectPins:    redirectPins,
 		lost:            lost,
 		lose:            lose,
 		unwatch:         unwatch,
@@ -479,6 +488,7 @@ func (self *Tunnel) HttpClientForHosts(timeout time.Duration, extraHosts []strin
 	client := httpClientOverDialerWithResolver(self.tun.DialContext, resolver, self.pins, extraHosts, timeout)
 	client.Transport.(*providerHttpTransport).registration = self.registration
 	client.Transport.(*providerHttpTransport).contractAcquisition = self.multiClient
+	client.Transport.(*providerHttpTransport).redirectPins = self.redirectPins
 	return client
 }
 
@@ -647,6 +657,7 @@ func httpClientOverDialerWithResolver(dial dialContextFunc, resolver *providerUr
 		// regardless of what those two later become.
 		TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{},
 	}
+	probeTransport := &providerHttpTransport{Transport: tr, redirectPins: pins}
 	tr.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		ctx, done, err := beginProviderHttpDial(ctx)
 		if err != nil {
@@ -667,7 +678,15 @@ func httpClientOverDialerWithResolver(dial dialContextFunc, resolver *providerUr
 		// pinning verifier. This tunnel is the layer that actually knows
 		// the endpoint set is closed, so it is where "unknown host" can
 		// safely mean "reject" instead of "pass through".
-		if _, pinned := allowed[normalizeHost(host)]; !pinned {
+		_, admitted := allowed[normalizeHost(host)]
+		target, scoped := ctx.Value(providerUrlProbeKey{}).(providerUrlProbeTarget)
+		if scoped {
+			if target.host != normalizeHost(host) || resolver == nil {
+				return nil, &providerHttpStageError{stage: "policy", err: errors.New("provider URL request lost its exact target or private resolver")}
+			}
+			admitted = admitted || target.redirect
+		}
+		if !admitted {
 			return nil, &providerHttpStageError{stage: "policy", err: fmt.Errorf("%w: %s", ErrPinHostUnknown, host)}
 		}
 
@@ -693,7 +712,11 @@ func httpClientOverDialerWithResolver(dial dialContextFunc, resolver *providerUr
 			defer cancel()
 		}
 
-		cfg := PinnedTlsConfigForHost(pins, host)
+		tlsPins := pins
+		if scoped && target.redirect && len(probeTransport.redirectPins) > 0 {
+			tlsPins = probeTransport.redirectPins
+		}
+		cfg := PinnedTlsConfigForHost(tlsPins, host)
 		tlsConn := tls.Client(raw, cfg)
 		if trace != nil && trace.TLSHandshakeStart != nil {
 			trace.TLSHandshakeStart()
@@ -709,7 +732,7 @@ func httpClientOverDialerWithResolver(dial dialContextFunc, resolver *providerUr
 		return tlsConn, nil
 	}
 	return &http.Client{
-		Transport: &providerHttpTransport{Transport: tr},
+		Transport: probeTransport,
 		Timeout:   timeout,
 		// A sampled destination that redirects declares the
 		// redirect as its answer (egresshealth's ExpectStatus). Refusing

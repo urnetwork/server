@@ -193,11 +193,7 @@ func blackholeSample(dests []Destination, r *rand.Rand) []Destination {
 // standalone command also uses it for its defense-in-depth confinement check.
 // fleetprobe has no direct dialer to these hosts, so the taskworker's ordinary
 // LAN route cannot satisfy a check when the provider tunnel is dark.
-func BlackholeHosts() []string {
-	return BlackholeHostsOf(destinations)
-}
-
-// Like BlackholeHosts, for any table, such as a pool.
+// Legacy connectivity hosts from an explicitly supplied pool only.
 func BlackholeHostsOf(dests []Destination) []string {
 	connectivity := []Destination{}
 	for _, d := range dests {

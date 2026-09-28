@@ -86,10 +86,12 @@ func (self *providerEgressProbePass) drainFullPipeline(
 		if admissionCtx.Err() != nil {
 			stopped = true
 		}
-		select {
-		case <-blackholeFinished:
-			stopped = true
-		default:
+		if !self.urlProbes {
+			select {
+			case <-blackholeFinished:
+				stopped = true
+			default:
+			}
 		}
 		if !stopped && pending < parallel {
 			// A free cohort is one independent wave. Reserving the entire

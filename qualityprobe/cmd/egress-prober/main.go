@@ -1,30 +1,6 @@
-// Command egress-prober measures what each provider's exit actually carries,
-// and submits it to the operator's server. For every due provider it opens a
-// tunnel pinned to that provider and runs the egress-health check through it
-// (see egresshealth/): first the operator's own /ip echo -- the warm-up, whose
-// answer is the provider's exit address, which the server places with its own
-// GeoLite2 -- then a sample of real sites from the server's destination pool,
-// every load browser-shaped and retried at spaced intervals. The run is
-// submitted as the provider's egress health, and the exit address as its
-// probed location. No ip-intelligence source is consulted for anything
-// (GEOMAP §11.3).
-//
-// The same tunnel then carries an active bandwidth measurement (see
-// bandwidth/) against two independent targets -- the operator's own download
-// endpoint and a public CDN -- reported and stored separately, never averaged.
-// Every provider is measured, not only those without passive history: the
-// server's hourly byte budget is what regulates the spend, answering 429 once
-// the current hour's bucket is full, so a full fleet is covered across
-// successive hours rather than in one expensive pass.
-//
-// Beside it, on its own cadence, a blackhole sweep asks every provider the one
-// cheap question -- did any traffic get through -- with the same warm-up and
-// retries.
-//
-// The prober host never contacts a probe destination directly: every request
-// egresses through a provider tunnel. The only direct calls are to the
-// operator's own server (the due lists, the destination pool, the pins,
-// ingest).
+// Command egress-prober runs the server's claimed, paced URL-probe workflow.
+// Every provider receives one configured random URL per turn through its own
+// tunnel. The server owns durable four-hour quotas, eligibility, and retries.
 package main
 
 import (
@@ -61,8 +37,8 @@ import (
 )
 
 // Parses and validates the flags, runs the startup self-checks and fetches,
-// then runs full passes on -interval and, beside them, blackhole sweeps on
-// -blackhole-interval, until a signal or, with -interval 0, after one pass.
+// then claims paced URL-probe batches until a signal or, with -interval 0,
+// after one batch. Legacy independent measurement modes are rejected.
 func main() {
 	apiUrl := flag.String("api-url", "", "operator server api url, e.g. https://api.example.net (required)")
 	platformUrl := flag.String("platform-url", "", "operator platform websocket url, e.g. wss://connect.example.net (required)")
@@ -76,31 +52,35 @@ func main() {
 	// the way to keep secrets out of logs and ps.
 	byJwt := flag.String("by-jwt", "", "the prober's network client jwt; prefer the UR_PROBER_BY_JWT env var, which keeps it out of ps. Leave it EMPTY to fetch it from the server's /network/prober-credential endpoint using -operator-secret, which is the unattended mode: the server mints the prober's identity in a bootstrap task and this waits for it. An explicitly supplied value always wins and is never overwritten")
 	operatorSecret := flag.String("operator-secret", "", "ingest secret, must match ingest_secret in provider_egress.yml; prefer the UR_OPERATOR_SECRET env var, which keeps it out of ps (required)")
-	concurrency := flag.Int("concurrency", fleetprobe.DefaultFullConcurrency, "max simultaneous provider tunnels for full health runs. A run spends most of its wall clock waiting out spaced retries, so tunnels mostly wait: size this against the host's MEMORY -- every tunnel carries its own network stack -- not its CPU or bandwidth")
-	cacheTtl := flag.Duration("cache-ttl", 24*time.Hour, "do not re-probe a provider within this window. Only applies to the enumeration fallback used against a server with no due endpoint; when the server supplies the due list it owns the schedule")
-	interval := flag.Duration("interval", time.Hour, "sleep AFTER a pass finishes, not a fixed period: the cycle is pass-duration + interval, so throughput is -due-limit / (pass-duration + interval) rather than -due-limit per interval. A 500-provider pass taking ~30m at -interval 1h yields ~390/hour with the prober idle two thirds of every cycle. Size it against how long a pass actually takes; 0 runs a single pass and exits")
-	blackholeInterval := flag.Duration("blackhole-interval", time.Hour, "how often to sweep the WHOLE fleet with the cheap blackhole check (did any traffic get through). Separate from -interval on purpose: the full pass sweeps a fleet over hours to days, and a provider that goes dark keeps its last passing measurement for that whole window. 0 disables the sweep")
-	blackholeLimit := flag.Int("blackhole-limit", 500, "providers per blackhole sweep request; the server clamps it to its own maximum")
-	blackholeConcurrency := flag.Int("blackhole-concurrency", fleetprobe.DefaultBlackholeConcurrency, "simultaneous blackhole checks. A check whose loads fail waits minutes between retries, so these tunnels mostly wait too: size it against the host's memory, like -concurrency")
-	blackholeTimeout := flag.Duration("blackhole-timeout", 15*time.Second, "per-attempt hard deadline for established blackhole loads; first sampled requests share the tunnel generation's finite -probe-timeout cold-start window")
+	concurrency := flag.Int("concurrency", fleetprobe.DefaultFullConcurrency, "maximum simultaneously measured providers; each owns a bounded tunnel and one URL request")
+	flag.Duration("cache-ttl", 24*time.Hour, "obsolete: the server owns URL-probe pacing")
+	interval := flag.Duration("interval", 15*time.Second, "poll delay after a bounded due batch; the server owns per-provider pacing and quota. Zero runs one batch")
+	flag.Duration("blackhole-interval", 0, "obsolete: there is one URL-probe workflow")
+	flag.Int("blackhole-limit", 500, "obsolete: use -due-limit for URL probes")
+	flag.Int("blackhole-concurrency", fleetprobe.DefaultBlackholeConcurrency, "obsolete: use -concurrency for URL probes")
+	flag.Duration("blackhole-timeout", 15*time.Second, "obsolete: use -probe-timeout for URL probes")
 	probeTimeout := flag.Duration("probe-timeout", 60*time.Second, "shared cold-start window per tunnel generation, used directly by sampled URLs without a warm-up request; established egress-health attempts get the smaller of this and "+egresshealth.DefaultPerRequestTimeout.String())
 	skipConfinementCheck := flag.Bool("skip-confinement-check", false, "DANGEROUS: start even if this host can reach a probe destination directly. Only for a one-shot manual probe on a host you know is not the operator's; a direct request measures the OPERATOR's own egress instead of the provider's, and would certify a blackholing provider as healthy")
 	confinementTimeout := flag.Duration("confinement-timeout", 3*time.Second, "per-address deadline for the startup confinement self-check; a timeout counts as blocked. Must be at least "+confinement.MinTimeout.String())
 	var confinementAddrs addressList
-	publicApiUrl := flag.String("public-api-url", "", "deprecated automatic echo/bandwidth target input; provider probes now fetch only randomized destination-pool URLs")
-	egressHealthAll := flag.Bool("egress-health-all", false, "run EVERY destination of the pool (that works from the provider's place) instead of a random sample. The full table is the only way this exercises CONCURRENCY, since a sample never asks the provider to carry the full parallel load a real client would; it costs about three times the requests of a sample and gives up the sample's unpredictability, so it is for inspection, not scheduled passes")
-	flag.Var(&confinementAddrs, "confinement-address", "ip:port the confinement self-check should dial instead of resolving the probe hosts; repeatable. For a jail where dns is legitimately blocked: supply the address of every egress-health destination of the built-in table here and the check stays real. The host part must be an ip literal, not a name")
+	flag.String("public-api-url", "", "deprecated automatic echo/bandwidth target input; provider probes now fetch only randomized destination-pool URLs")
+	flag.Bool("egress-health-all", false, "obsolete: each claimed turn measures one random configured URL")
+	flag.Var(&confinementAddrs, "confinement-address", "ip:port the confinement self-check should dial instead of resolving configured catalog hosts; repeatable. Supply every catalog destination when local DNS is blocked. The host part must be an IP literal")
 	dueUrl := flag.String("due-url", "", "url of the server's due-provider endpoint; empty derives <api-url>/network/provider-egress-due")
 	dueLimit := flag.Int("due-limit", 100, "how many due providers to ask the server for per pass; the server clamps this to its own configured maximum, which defaults to 500 but is raised per deployment (provider_egress_due.yml)")
 	shardCount := flag.Int("shard-count", 1, "number of probers sharing this server's due queue. 1 (the default) means this prober takes the whole queue. Above 1 the server hands this prober only the slice matching -shard-index, so N probers divide the fleet instead of each probing all of it -- without this the queue hands the SAME rows to every prober and adding hosts buys nothing")
 	shardIndex := flag.Int("shard-index", 0, "which slice of the due queue this prober takes, 0 <= index < -shard-count. Ignored when -shard-count is 1")
-	skipBandwidth := flag.Bool("skip-bandwidth", false, "deprecated compatibility flag; automatic fixed-target bandwidth requests are disabled")
-	bandwidthTimeout := flag.Duration("bandwidth-timeout", bandwidth.DefaultTimeout, "deprecated automatic bandwidth timeout; retained for configuration compatibility only")
+	flag.Bool("skip-bandwidth", true, "deprecated compatibility flag; automatic fixed-target bandwidth requests are disabled")
+	flag.Duration("bandwidth-timeout", bandwidth.DefaultTimeout, "deprecated automatic bandwidth timeout; retained for configuration compatibility only")
 	pinRefreshInterval := flag.Duration("pin-refresh-interval", time.Hour, "how often to re-fetch the certificate pins from the server. A host the server serves a pin for is pinned; every other host is verified by ordinary WebPKI. The server re-observes them every 6h, so an hour is ample. A refresh that fails keeps the last good set, but a set that is never refreshed goes stale, so this is not disableable")
-	poolUrl := flag.String("pool-url", "", "url of the server's destination pool, fetched once per pass; empty derives <api-url>"+egresshealth.PoolPath+". A pass whose fetch fails runs the built-in table, which is the pool's seed")
-	ipEchoUrl := flag.String("ip-echo-url", "", "deprecated compatibility input; never fetched, and optional exit evidence can come only from an already-randomly-sampled successful HTTPS IP-text response")
-	bandwidthCdnUrl := flag.String("bandwidth-cdn-url", bandwidth.CdnTestUrl, "deprecated automatic bandwidth target input; never fetched by the sampled-only provider probe")
+	poolUrl := flag.String("pool-url", "", "configured catalog endpoint; empty derives <api-url>"+egresshealth.PoolPath+". A failed fetch stops this batch without provider evidence")
+	flag.String("ip-echo-url", "", "deprecated compatibility input; never fetched, and optional exit evidence can come only from an already-randomly-sampled successful HTTPS IP-text response")
+	flag.String("bandwidth-cdn-url", bandwidth.CdnTestUrl, "deprecated automatic bandwidth target input; never fetched by the sampled-only provider probe")
 	flag.Parse()
+	if err := validateUrlProbeFlags(flag.CommandLine); err != nil {
+		fmt.Fprintf(os.Stderr, "egress-prober: %s\n", err)
+		os.Exit(2)
+	}
 
 	// Env fallback, applied only after parsing so the secret is never a flag
 	// default and can never be rendered by flag.Usage(). An explicit flag
@@ -137,29 +117,6 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if *blackholeInterval < 0 {
-		fmt.Fprintf(os.Stderr, "egress-prober: -blackhole-interval must not be negative (got %s); use 0 to disable the sweep\n\n", *blackholeInterval)
-		flag.Usage()
-		os.Exit(2)
-	}
-	if 0 < *blackholeInterval {
-		if *blackholeConcurrency < 1 {
-			fmt.Fprintf(os.Stderr, "egress-prober: -blackhole-concurrency must be positive (got %d)\n\n", *blackholeConcurrency)
-			flag.Usage()
-			os.Exit(2)
-		}
-		if *blackholeTimeout <= 0 {
-			fmt.Fprintf(os.Stderr, "egress-prober: -blackhole-timeout must be positive (got %s)\n\n", *blackholeTimeout)
-			flag.Usage()
-			os.Exit(2)
-		}
-		if *blackholeLimit < 1 {
-			fmt.Fprintf(os.Stderr, "egress-prober: -blackhole-limit must be positive (got %d)\n\n", *blackholeLimit)
-			flag.Usage()
-			os.Exit(2)
-		}
-	}
-
 	// M5: -probe-timeout 0 disables both the http.Client.Timeout and the
 	// manual TLS handshake timeout in providertunnel's DialTLSContext (see
 	// providertunnel/tunnel.go: `if 0 < timeout`), since a zero
@@ -233,7 +190,7 @@ func main() {
 	// less than a cold one. Every load would then risk timing out and being
 	// recorded as a failed site the provider had nothing to do with. Refuse to
 	// start rather than manufacture that.
-	if opts := egressHealthOptions(*probeTimeout, *egressHealthAll); opts.PerRequestTimeout < egresshealth.DefaultPerRequestTimeout {
+	if opts := egressHealthOptions(*probeTimeout, false); opts.PerRequestTimeout < egresshealth.DefaultPerRequestTimeout {
 		fmt.Fprintf(os.Stderr,
 			"egress-prober: -probe-timeout %s leaves %s per egress-health load attempt, below the %s floor;\n"+
 				"  every load would be at risk of timing out and being recorded as a failed site.\n"+
@@ -242,24 +199,9 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-
-	// A negative cache ttl makes recentlyProbed always false, silently
-	// disabling the enumeration cache. Every other duration flag is validated;
-	// this one degraded quietly instead, which is the opposite of how the rest
-	// of this startup path treats a value it cannot honour.
-	if *cacheTtl < 0 {
-		fmt.Fprintf(os.Stderr, "egress-prober: -cache-ttl must not be negative (got %s); use 0 to disable the enumeration cache\n\n", *cacheTtl)
-		flag.Usage()
-		os.Exit(2)
-	}
-
-	// A non-positive bandwidth timeout would hand context.WithTimeout an
-	// already-expired deadline, so every measurement would fail instantly and
-	// still have spent a byte reservation getting there.
-	if *bandwidthTimeout <= 0 {
-		fmt.Fprintf(os.Stderr, "egress-prober: -bandwidth-timeout must be positive (got %s)\n\n", *bandwidthTimeout)
-		flag.Usage()
-		os.Exit(2)
+	if *skipConfinementCheck {
+		log.Printf("egress-prober: WARNING -skip-confinement-check is set: the startup confinement self-check is DISABLED.")
+		log.Printf("egress-prober: WARNING a failed tunnel must never fall back to the operator's own network. Do not disable this check on the operator deployment.")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -271,22 +213,6 @@ func main() {
 	// second Ctrl-C during the wind-down would be silently discarded and the
 	// operator could not force-quit a probe stuck in teardown.
 	context.AfterFunc(ctx, stop)
-
-	// The confinement self-check runs before anything else touches the
-	// network. See checkConfinement.
-	if *skipConfinementCheck {
-		log.Printf("egress-prober: WARNING -skip-confinement-check is set: the startup confinement self-check is DISABLED.")
-		log.Printf("egress-prober: WARNING if this host can reach a probe destination directly, a probe whose tunnel fails could measure the OPERATOR's own egress and certify a blackholing provider as healthy. Do not set this on the operator's deployment.")
-	} else if err := checkConfinement(ctx, (&net.Dialer{}).DialContext, net.DefaultResolver.LookupHost, confinementAddrs, *confinementTimeout, append(bandwidthProbeHosts(*skipBandwidth, *bandwidthCdnUrl), egresshealth.BlackholeHosts()...)...); err != nil {
-		log.Printf("egress-prober: confinement self-check failed: %s", err)
-		// ErrNoEvidence is not a claim that this host is unconfined -- it is
-		// the check saying it could not find out -- so the "go and confine it"
-		// advice would be misleading. Its own message carries the two remedies.
-		if !errors.Is(err, confinement.ErrNoEvidence) {
-			log.Printf("egress-prober: this process must not be able to reach a probe destination except through a provider tunnel. Confine it (a restricted docker network, or systemd IPAddressDeny=any with IPAddressAllow for the operator server only) and start it again.")
-		}
-		os.Exit(1)
-	}
 
 	// Built here rather than after the jwt because the credential fetch below
 	// needs it. Nothing in it depends on the jwt: it authenticates with the
@@ -308,10 +234,8 @@ func main() {
 	// process cannot use still fails loudly, right here, instead of becoming a
 	// fleet-wide outage that looks like nothing at all.
 	//
-	// It also sits below the confinement self-check, which must stay the first
-	// thing that touches the network. The operator's own server is the one
-	// direct call the prober is allowed to make, so this is the earliest point
-	// at which it may run.
+	// The operator's own control plane is the only permitted direct contact;
+	// the catalog fetched from it supplies the later confinement targets.
 	switch err := fetchByJwtIfEmpty(ctx, byJwt, operator, credentialPollInitial, credentialPollMax); {
 	case err == nil:
 	case ctx.Err() != nil:
@@ -389,91 +313,37 @@ func main() {
 	}
 	log.Printf("egress-prober: certificate pins fetched from the server for %d host(s): %s", len(initialPins), strings.Join(sortedHosts(initialPins), " "))
 
-	// The pool is fetched once per pass, below; the echo url is fixed. The
-	// echo is reached through each provider's tunnel, so it wants the api's
-	// public address, the same one the operator bandwidth target uses.
 	if strings.TrimSpace(*poolUrl) == "" {
 		*poolUrl = fleetprobe.PoolUrl(*apiUrl)
 	}
-	if strings.TrimSpace(*ipEchoUrl) == "" {
-		echoBase := *apiUrl
-		if strings.TrimSpace(*publicApiUrl) != "" {
-			echoBase = *publicApiUrl
-		}
-		*ipEchoUrl = fleetprobe.IpEchoUrl(echoBase)
-	}
 	pools := &poolSet{}
-	pools.set(egresshealth.BuiltinPool())
+	initialPool, err := fleetprobe.LoadPool(ctx, operator.Http, *poolUrl, operator.OperatorSecret)
+	if err != nil {
+		log.Printf("egress-prober: configured URL catalog unavailable: %s", err)
+		os.Exit(1)
+	}
+	pools.set(initialPool)
 
-	// Both bandwidth targets are reached through the provider tunnel, so both
-	// their hosts have to be in the tunnel's allowlist (see newProber) or the
-	// dialer refuses them before a byte moves.
-	//
-	// Note what this means for the operator target: the X-UR-Operator-Secret
-	// header now traverses a provider-controlled path. The connection is
-	// ordinary WebPKI-verified TLS, so a provider on the path cannot read it
-	// without a mis-issued certificate for the operator's own api host -- the
-	// same protection any https client has, and the same one the egress-health
-	// destinations rely on. It is called out because the consequence differs:
-	// that secret gates location ingest for the whole fleet, where an
-	// egress-health destination gates nothing. Pinning the api host would close
-	// it, but the pin is deployment-specific and not knowable here.
-	bandwidthSampler := (*bandwidth.Sampler)(nil)
-	bandwidthTargets := []bandwidth.Target{}
-	if !*skipBandwidth {
-		// The cdn target is always present; the operator target is dropped when
-		// no public api url is configured, because an internal name fails from
-		// the far side of the tunnel for every provider and reads as a
-		// fleet-wide fault rather than a misconfiguration.
-		bandwidthTargets = []bandwidth.Target{
-			{Name: "cdn", Source: bandwidth.SourceCdn, Url: *bandwidthCdnUrl},
-		}
-		if strings.TrimSpace(*publicApiUrl) != "" {
-			bandwidthTargets = append([]bandwidth.Target{
-				bandwidth.OperatorTarget(*publicApiUrl, *operatorSecret),
-			}, bandwidthTargets...)
-		} else {
-			log.Printf("egress-prober: no -public-api-url, measuring the cdn target only (the operator target cannot be reached through a provider tunnel by its internal name)")
-		}
-		bandwidthSampler = &bandwidth.Sampler{
-			Targets: bandwidthTargets,
-			Reserve: operator,
-			Submit:  operator,
-			Timeout: *bandwidthTimeout,
+	// The configured catalog supplies every confinement target. Only the
+	// operator control plane has been contacted before this check.
+	if !*skipConfinementCheck {
+		if err := checkConfinement(ctx, (&net.Dialer{}).DialContext, net.DefaultResolver.LookupHost, confinementAddrs, *confinementTimeout, poolHosts(pools.get())...); err != nil {
+			log.Printf("egress-prober: confinement self-check failed: %s", err)
+			// ErrNoEvidence is not a claim that this host is unconfined -- it is
+			// the check saying it could not find out -- so the "go and confine it"
+			// advice would be misleading. Its own message carries the two remedies.
+			if !errors.Is(err, confinement.ErrNoEvidence) {
+				log.Printf("egress-prober: this process must not be able to reach a probe destination except through a provider tunnel. Confine it (a restricted docker network, or systemd IPAddressDeny=any with IPAddressAllow for the operator server only) and start it again.")
+			}
+			os.Exit(1)
 		}
 	}
 
-	dueScheduler, enumScheduler := newSchedulers(
-		newProber(tunnelCfg, pins, pools, *probeTimeout, *ipEchoUrl, operator, *egressHealthAll, bandwidthSampler, bandwidth.TargetHosts(bandwidthTargets)),
+	dueScheduler, _ := newSchedulers(
+		newProber(tunnelCfg, pins, pools, *probeTimeout, "", operator, false, nil, nil),
 		*concurrency,
-		*cacheTtl,
+		0,
 	)
-
-	if 0 < *blackholeInterval {
-		sweeper := &blackholeSweeper{
-			operator:    operator,
-			tunnelCfg:   tunnelCfg,
-			pins:        pins,
-			poolUrl:     *poolUrl,
-			ipEchoUrl:   *ipEchoUrl,
-			timeout:     *blackholeTimeout,
-			echoTimeout: *probeTimeout,
-			concurrency: *blackholeConcurrency,
-			limit:       *blackholeLimit,
-		}
-		go sweeper.run(ctx, *blackholeInterval)
-	}
-
-	// Fetches the pool for one pass. A pass always gets a pool: the
-	// server's, or -- when it cannot be had -- the built-in table, the pool's own
-	// seed, which is logged so a server that stopped serving one is visible.
-	refreshPool := func(ctx context.Context, client *ingest.Client, pools *poolSet, poolUrl string) {
-		pool, err := fleetprobe.LoadPool(ctx, client.Http, poolUrl, client.OperatorSecret)
-		if err != nil {
-			log.Printf("egress-prober: running the built-in destination table this pass: %s", err)
-		}
-		pools.set(pool)
-	}
 
 	// I3: a single-shot run (-interval 0) is the mode the README recommends
 	// for external cron/systemd scheduling, which decides success or
@@ -491,6 +361,7 @@ func main() {
 	// through a transient server blip rather than dying, but it does still
 	// log clearly so the failure is visible (e.g. via journalctl) even
 	// though the process itself stays up.
+	firstPass := true
 	for {
 		// The refresh call site. Unlike the startup fetch it never exits and
 		// never clears the set: a server blip must not be able to stop the
@@ -499,9 +370,21 @@ func main() {
 		// rotation in the meantime.
 		refreshPins(ctx, operator, pins, *pinRefreshInterval)
 
-		// Once per pass: the server's pool, or the built-in table when it
-		// cannot be had. Every probe of the pass draws from what this sets.
-		refreshPool(ctx, operator, pools, *poolUrl)
+		// Missing configuration is a local visibility failure, never provider evidence.
+		if !firstPass {
+			pool, err := fleetprobe.LoadPool(ctx, operator.Http, *poolUrl, operator.OperatorSecret)
+			if err != nil {
+				log.Printf("egress-prober: configured URL catalog unavailable: %s", err)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(*interval):
+				}
+				continue
+			}
+			pools.set(pool)
+		}
+		firstPass = false
 
 		providers, serverDriven, err := selectProviders(ctx, operator, *dueLimit, *apiUrl, *byJwt)
 		if err != nil {
@@ -514,11 +397,7 @@ func main() {
 				os.Exit(1)
 			}
 		} else {
-			scheduler := enumScheduler
-			if serverDriven {
-				scheduler = dueScheduler
-			}
-			sum := scheduler.Run(ctx, providers)
+			sum := dueScheduler.Run(ctx, providers)
 			log.Printf("pass: server_driven=%t attempted=%d submitted=%d skipped=%d failed=%d not_measured=%d pool_version=%d",
 				serverDriven, sum.Attempted, sum.Submitted, sum.Skipped, sum.Failed, sum.NotMeasured, pools.get().Version)
 			// A pass cut short by SIGTERM is not a pass that failed. The
@@ -580,7 +459,9 @@ func newProber(
 		Pool:            pools.get,
 		ProbeTimeout:    probeTimeout,
 		IpEchoUrl:       ipEchoUrl,
-		AllDestinations: allDestinations,
+		UrlProbe:        true,
+		LoadAttempts:    1,
+		AllDestinations: false,
 		Submit:          operator,
 		Attempts:        operator,
 		HealthResults:   operator,
@@ -653,9 +534,7 @@ func selectProviders(ctx context.Context, due dueLister, limit int, apiUrl strin
 	case err == nil:
 		return fleetprobe.ProvidersFromDue(entries), true, nil
 	case errors.Is(err, ingest.ErrDueUnsupported):
-		log.Printf("egress-prober: the server has no %s endpoint; falling back to enumerating every provider (upgrade the server to let it schedule probes)", "/network/provider-egress-due")
-		ids, err := listProviders(ctx, apiUrl, byJwt)
-		return fleetprobe.ProvidersFromClientIds(ids), false, err
+		return nil, false, fmt.Errorf("URL probes require the server's durable due-cycle endpoint; upgrade the server: %w", err)
 	case errors.Is(err, ingest.ErrUnauthorized):
 		return nil, false, fmt.Errorf("the server rejected the operator secret; check -operator-secret against ingest_secret in the server's provider_egress.yml: %w", err)
 	default:
@@ -671,36 +550,43 @@ func selectProviders(ctx context.Context, due dueLister, limit int, apiUrl strin
 // destination on another port would silently fall outside this check.
 const confinementPort = "443"
 
-// Every third-party host this process reaches through a tunnel
-// that is known at startup: the built-in table's egress-health destinations
-// and any extra hosts the caller names -- in practice the bandwidth CDN target,
-// which is third-party and configurable via -bandwidth-cdn-url. It is what the
-// confinement self-check must prove unreachable directly, and what an
-// operator translates into -confinement-address entries.
-//
-// The operator's own api host is deliberately absent, the /ip echo included:
-// it is not third-party, and a deployment may legitimately allow the prober to
-// reach it directly. The echo still only ever goes through a tunnel -- the
-// client that fetches it has no other dialer.
-//
-// The server's pool is not here either, because it is fetched per pass, after
-// this check has run, and changes daily. The built-in table is the pool's
-// seed, so a host confined against its ~140 hosts is confined against
-// essentially everything the pool will hold; a pooled host beyond it is kept
-// off the direct route by the same Go-level boundary as every other request --
-// the tunnel client is the only dialer a probe has.
-//
-// The list is derived from the table that owns it (egresshealth.
-// DestinationHosts): a hand-maintained second copy drifts on the first table
-// change, and the check keeps reporting a pass while no longer covering a real
-// endpoint. A direct egress-health request is the one mistake that inverts
-// the signal: it would pass -- the operator's own host can obviously reach
-// Cloudflare and Amazon -- and so would certify a blackholing provider as
-// healthy.
+// Explicit legacy measurement controls must not silently select a different workflow.
+func validateUrlProbeFlags(flags *flag.FlagSet) error {
+	var obsolete []string
+	flags.Visit(func(value *flag.Flag) {
+		if strings.HasPrefix(value.Name, "blackhole-") || strings.HasPrefix(value.Name, "bandwidth-") {
+			obsolete = append(obsolete, "-"+value.Name)
+			return
+		}
+		switch value.Name {
+		case "egress-health-all", "skip-bandwidth", "public-api-url", "ip-echo-url", "cache-ttl":
+			obsolete = append(obsolete, "-"+value.Name)
+		}
+	})
+	if len(obsolete) > 0 {
+		return fmt.Errorf("obsolete probe flags %s: use the URL-only workflow with the server's due-cycle endpoint and configured catalog", strings.Join(obsolete, ", "))
+	}
+	return nil
+}
+
+// The configured global and country catalogs together define confinement coverage.
+func poolHosts(pool *egresshealth.Pool) []string {
+	if pool == nil {
+		return nil
+	}
+	destinations := append([]egresshealth.Destination(nil), pool.Destinations...)
+	for _, countryDestinations := range pool.Countries {
+		destinations = append(destinations, countryDestinations...)
+	}
+	return egresshealth.HostsOf(destinations)
+}
+
+// Deduplicates only explicitly supplied catalog hosts. No destination is
+// compiled into the command; production obtains these from the served catalog.
 func probeHosts(extra ...string) []string {
 	seen := map[string]bool{}
 	var hosts []string
-	all := append(egresshealth.DestinationHosts(), extra...)
+	all := extra
 	for _, h := range all {
 		if h == "" || seen[h] {
 			continue

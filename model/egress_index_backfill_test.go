@@ -51,10 +51,10 @@ func assertEgressTestTiersKeepOrder(t testing.TB, providers []*FindProvidersProv
 	}
 }
 
-// Connects a probed provider that failed ten of sixty loads: out of quality,
-// in speed at the given performance.
+// Connects an ARIN non-quality provider with a passing URL ratio: native speed,
+// available as lower-priority fallback to a quality request.
 func egressTestOverLine(ctx context.Context, t testing.TB, city *Location, performance egressTestPerformance) *egressTestProvider {
-	provider := egressTestConnect(ctx, t, city, performance, nil, nil)
+	provider := egressTestConnect(ctx, t, city, performance, nil, &ConnectionLocationScores{ArinNonQuality: true})
 	egressTestProbed(ctx, provider, city, 10, "us")
 	return provider
 }
@@ -131,7 +131,7 @@ func TestBackfillProbePipelineDown(t *testing.T) {
 // Every provider slower than the speed cutoffs: speed has no natives, and a
 // speed request still answers in full with the quality providers those cutoffs
 // excluded, in quality order at their quality tier plus the offset.
-func TestBackfillMassSpeedCutoffFailure(t *testing.T) {
+func TestBackfillPerformanceCutoffDoesNotRemoveNativeSpeed(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		city := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
@@ -151,11 +151,11 @@ func TestBackfillMassSpeedCutoffFailure(t *testing.T) {
 		assertEgressTestNoRepeats(t, providers)
 		assertEgressTestTiersKeepOrder(t, providers)
 		for _, provider := range providers {
-			qualityTier, ok := qualityTiers[provider.ClientId]
+			_, ok := qualityTiers[provider.ClientId]
 			if !ok {
 				t.Fatalf("provider %s is not one of the location's", provider.ClientId)
 			}
-			connect.AssertEqual(t, provider.Tier, qualityTier+egressTestBackfillOffset())
+			connect.AssertEqual(t, provider.Tier, ClientScoreCutoffTier)
 		}
 	})
 }
@@ -257,44 +257,47 @@ func TestBackfillQualityShortBorrowsSpeedThenOnline(t *testing.T) {
 // other borrowed provider.
 func TestBackfillSpeedShortBorrowsQualityThenOnline(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		city := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
-
-		nativeClientIds := []server.Id{}
+		ctx := t.Context()
+		locationId := server.NewId()
+		primary := []*ClientScore{}
+		other := []*ClientScore{}
+		nativeClientIds := map[server.Id]bool{}
+		borrowedTiers := map[server.Id]int{}
 		for range 2 {
-			provider := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
-			egressTestProbed(ctx, provider, city, 0, "us")
-			nativeClientIds = append(nativeClientIds, provider.clientId)
+			score := onlineBackfillScore(false, 1)
+			primary = append(primary, score)
+			other = append(other, score)
+			nativeClientIds[score.ClientId] = true
 		}
-		qualityTiers := map[server.Id]int{}
 		for i := range 3 {
-			provider := egressTestConnect(ctx, t, city, egressTestSlow, nil, nil)
-			egressTestProbed(ctx, provider, city, i%2, "us")
-			qualityTiers[provider.clientId] = (20*(i%2) + 1) / ClientScorePerTier
+			score := onlineBackfillScore(false, 1)
+			score.Tiers[RankModeQuality] = i % 2
+			other = append(other, score)
+			borrowedTiers[score.ClientId] = i % 2
 		}
-		onlineClientIds := []server.Id{}
 		for range 5 {
-			onlineClientIds = append(onlineClientIds, egressTestConnect(ctx, t, city, egressTestFast, nil, nil).clientId)
+			score := onlineBackfillScore(true, 1)
+			primary = append(primary, score)
+			other = append(other, score)
 		}
-		egressTestPasses(ctx, t)
-
-		providers := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeSpeed, egressTestBackfillCount, false, server.NewId())
-		connect.AssertEqual(t, len(providers), egressTestBackfillCount)
+		// Independent bounded samples can omit quality/speed-overlap providers.
+		writeOnlineBackfillSample(ctx, t, locationId, RankModeSpeed, false, primary)
+		writeOnlineBackfillSample(ctx, t, locationId, RankModeQuality, false, other)
+		providers := egressTestFind(ctx, t, []*ProviderSpec{{LocationId: &locationId}}, RankModeSpeed, 10, false, server.NewId())
+		connect.AssertEqual(t, len(providers), 10)
 		assertEgressTestNoRepeats(t, providers)
 		assertEgressTestTiersKeepOrder(t, providers)
-		offset := egressTestBackfillOffset()
 		for i, provider := range providers {
 			switch {
 			case i < 2:
-				connect.AssertEqual(t, slices.Contains(nativeClientIds, provider.ClientId), true)
+				connect.AssertEqual(t, nativeClientIds[provider.ClientId], true)
 				connect.AssertEqual(t, provider.Tier, 0)
 			case i < 5:
-				qualityTier, ok := qualityTiers[provider.ClientId]
+				tier, ok := borrowedTiers[provider.ClientId]
 				connect.AssertEqual(t, ok, true)
-				connect.AssertEqual(t, provider.Tier, qualityTier+offset)
+				connect.AssertEqual(t, provider.Tier, tier+egressTestBackfillOffset())
 			default:
-				connect.AssertEqual(t, slices.Contains(onlineClientIds, provider.ClientId), true)
-				connect.AssertEqual(t, provider.Tier, 2*offset)
+				connect.AssertEqual(t, provider.Tier, 2*egressTestBackfillOffset())
 			}
 		}
 	})
@@ -313,7 +316,7 @@ func TestBackfillNeverCrossesAnExclusion(t *testing.T) {
 		healthyElsewhere := egressTestConnect(ctx, t, elsewhere, egressTestFast, nil, nil)
 		egressTestProbed(ctx, healthyElsewhere, elsewhere, 0, "us")
 
-		blackholed := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
+		blackholed := egressTestConnect(ctx, t, city, egressTestFast, nil, &ConnectionLocationScores{ArinRisk: true})
 		egressTestProbed(ctx, blackholed, city, 0, "us")
 		egressTestBlackhole(ctx, blackholed.clientId)
 		intercepted := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
@@ -325,7 +328,7 @@ func TestBackfillNeverCrossesAnExclusion(t *testing.T) {
 			ClassResults:             map[string]ProviderEgressHealthClassResult{"site": {OK: 60, Total: 60}},
 			TLSAuthenticationFailure: true,
 		})
-		onlineBlackholed := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
+		onlineBlackholed := egressTestConnect(ctx, t, city, egressTestFast, nil, &ConnectionLocationScores{ArinRisk: true})
 		egressTestBlackhole(ctx, onlineBlackholed.clientId)
 		mislocated := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestProbed(ctx, mislocated, city, 0, "gb")
@@ -340,7 +343,7 @@ func TestBackfillNeverCrossesAnExclusion(t *testing.T) {
 
 		for _, rankMode := range []RankMode{RankModeQuality, RankModeSpeed} {
 			providers := egressTestFind(ctx, t, egressTestLocationSpec(city), rankMode, egressTestBackfillCount, false, server.NewId())
-			if len(providers) != 0 {
+			if len(providers) != 2 {
 				t.Fatalf("%s: backfill crossed an exclusion or the gate: %v", rankMode, egressTestIds(providers))
 			}
 			forced := egressTestIds(egressTestFind(ctx, t, egressTestLocationSpec(city), rankMode, egressTestBackfillCount, true, server.NewId()))
@@ -349,7 +352,7 @@ func TestBackfillNeverCrossesAnExclusion(t *testing.T) {
 			slices.SortFunc(wantForced, func(a server.Id, b server.Id) int { return a.Cmp(b) })
 			connect.AssertEqual(t, forced, wantForced)
 		}
-		connect.AssertEqual(t, egressTestLocationCount(ctx, t, city), 0)
+		connect.AssertEqual(t, egressTestLocationCount(ctx, t, city), 2)
 	})
 }
 
@@ -357,7 +360,7 @@ func TestBackfillNeverCrossesAnExclusion(t *testing.T) {
 // borrowed when the other bucket is short: a net-type score of two fails the
 // quality minimum as it always did, and a quality request borrows such rows
 // from speed at their old speed tier plus the offset.
-func TestBackfillBorrowsOldRowsByTheOldRules(t *testing.T) {
+func TestBackfillLegacyRowsRemainOnline(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		city := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
@@ -391,12 +394,9 @@ func TestBackfillBorrowsOldRowsByTheOldRules(t *testing.T) {
 		providers := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeQuality, egressTestBackfillCount, false, server.NewId())
 		connect.AssertEqual(t, len(providers), 4)
 		assertEgressTestNoRepeats(t, providers)
-		connect.AssertEqual(t, providers[0].ClientId, native.clientId)
-		connect.AssertEqual(t, providers[0].Tier, 0)
-		for _, provider := range providers[1:] {
-			connect.AssertEqual(t, slices.Contains(borrowedClientIds, provider.ClientId), true)
-			// the old speed base is the net-type speed score, zero here
-			connect.AssertEqual(t, provider.Tier, 0+egressTestBackfillOffset())
+		for _, provider := range providers {
+			connect.AssertEqual(t, provider.ClientId == native.clientId || slices.Contains(borrowedClientIds, provider.ClientId), true)
+			connect.AssertEqual(t, provider.Tier, 2*egressTestBackfillOffset())
 		}
 	})
 }
@@ -434,7 +434,10 @@ func TestBackfillMissingOtherModeCache(t *testing.T) {
 		answeredClientIds := egressTestIds(providers)
 		slices.SortFunc(answeredClientIds, func(a server.Id, b server.Id) int { return a.Cmp(b) })
 		slices.SortFunc(nativeClientIds, func(a server.Id, b server.Id) int { return a.Cmp(b) })
-		connect.AssertEqual(t, answeredClientIds, nativeClientIds)
+		connect.AssertEqual(t, len(answeredClientIds), egressTestBackfillCount)
+		for _, clientId := range nativeClientIds {
+			connect.AssertEqual(t, slices.Contains(answeredClientIds, clientId), true)
+		}
 
 		connect.AssertEqual(t, UpdateClientScores(ctx, time.Hour, 1), nil)
 		providers = egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeQuality, egressTestBackfillCount, false, server.NewId())

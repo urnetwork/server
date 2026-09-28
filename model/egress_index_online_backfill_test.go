@@ -13,7 +13,10 @@ import (
 
 // A bounded synthetic cache page, admitted by the exporter before this request.
 func onlineBackfillScore(online bool, reliabilityWeight float64) *ClientScore {
+	validUntil := server.NowUtc().Add(time.Hour)
 	return &ClientScore{
+		EgressValidUntil:  &validUntil,
+		PassesMinimums:    map[string]bool{RankModeQuality: !online, RankModeSpeed: !online},
 		ClientId:          server.NewId(),
 		NetworkId:         server.NewId(),
 		IpFamilies:        ClientScoreIpFamilyV4,
@@ -78,6 +81,7 @@ func TestBackfillOnlineUnionsSamplesWithoutRepeatingEarlierTiers(t *testing.T) {
 		otherOnly := onlineBackfillScore(true, 1)
 		staleNative, staleBorrowed, otherShared := *native, *borrowed, *shared
 		staleNative.Online, staleBorrowed.Online = true, true
+		staleNative.PassesMinimums, staleBorrowed.PassesMinimums = nil, nil
 		otherShared.ReliabilityWeight = 9
 		writeOnlineBackfillSample(ctx, t, locationId, RankModeQuality, false, []*ClientScore{native, shared, ownOnly, &staleBorrowed})
 		writeOnlineBackfillSample(ctx, t, locationId, RankModeSpeed, false, []*ClientScore{borrowed, &otherShared, otherOnly, &staleNative})

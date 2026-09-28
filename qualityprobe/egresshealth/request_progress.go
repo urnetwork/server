@@ -21,6 +21,11 @@ type requestProgress struct {
 	dnsStart  time.Time
 	dnsEnd    time.Time
 	firstByte time.Time
+	tcpStart  time.Time
+	tcpEnd    time.Time
+	tlsStart  time.Time
+	tlsEnd    time.Time
+	written   time.Time
 }
 
 // Fixed-cardinality last-attempt aggregates keep timing visible without URLs,
@@ -107,20 +112,45 @@ func traceRequestProgressAt(ctx context.Context, now func() time.Time) (context.
 				progress.advance(requestPhaseAfterDNS)
 			}
 		},
-		ConnectStart: func(string, string) { progress.advance(requestPhaseDial) },
+		ConnectStart: func(string, string) {
+			progress.advance(requestPhaseDial)
+			progress.stateLock.Lock()
+			defer progress.stateLock.Unlock()
+			if progress.tcpStart.IsZero() {
+				progress.tcpStart = now()
+			}
+		},
 		ConnectDone: func(_, _ string, err error) {
+			progress.stateLock.Lock()
+			progress.tcpEnd = now()
+			progress.stateLock.Unlock()
 			if err == nil {
 				progress.advance(requestPhaseAfterDial)
 			}
 		},
-		TLSHandshakeStart: func() { progress.advance(requestPhaseTLS) },
+		TLSHandshakeStart: func() {
+			progress.advance(requestPhaseTLS)
+			progress.stateLock.Lock()
+			progress.tlsStart = now()
+			progress.stateLock.Unlock()
+		},
 		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
+			progress.stateLock.Lock()
+			progress.tlsEnd = now()
+			progress.stateLock.Unlock()
 			if err == nil {
 				progress.advance(requestPhaseAfterTLS)
 			}
 		},
-		GotConn:      func(httptrace.GotConnInfo) { progress.advance(requestPhaseConnected) },
-		WroteRequest: func(httptrace.WroteRequestInfo) { progress.advance(requestPhaseWritten) },
+		GotConn: func(httptrace.GotConnInfo) { progress.advance(requestPhaseConnected) },
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			if info.Err == nil {
+				progress.advance(requestPhaseWritten)
+				progress.stateLock.Lock()
+				progress.written = now()
+				progress.stateLock.Unlock()
+			}
+		},
 		GotFirstResponseByte: func() {
 			progress.advance(requestPhaseResponseByte)
 			progress.recordFirstByte(now())
@@ -143,6 +173,12 @@ func (self *requestProgress) recordTiming(result *CheckResult, start, end time.T
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	result.Latency = end.Sub(start)
+	if !self.tcpStart.IsZero() && !self.tcpEnd.IsZero() {
+		result.TcpConnectLatency = max(0, self.tcpEnd.Sub(self.tcpStart))
+	}
+	if !self.tlsStart.IsZero() && !self.tlsEnd.IsZero() {
+		result.TlsHandshakeLatency = max(0, self.tlsEnd.Sub(self.tlsStart))
+	}
 	if !self.dnsStart.IsZero() {
 		dnsEnd := self.dnsEnd
 		if dnsEnd.IsZero() {
@@ -153,6 +189,10 @@ func (self *requestProgress) recordTiming(result *CheckResult, start, end time.T
 	}
 	if !self.firstByte.IsZero() {
 		result.FirstByteReceived = true
+		if !self.written.IsZero() {
+			result.RequestWritten = true
+			result.RequestTimeToFirstByte = max(0, self.firstByte.Sub(self.written))
+		}
 		result.TimeToFirstByte = max(0, self.firstByte.Sub(start))
 		result.ConnectFirstByteLatency = max(0, result.TimeToFirstByte-result.DnsLookupLatency)
 		result.BodyDuration = max(0, end.Sub(self.firstByte))

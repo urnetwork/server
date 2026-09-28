@@ -26,11 +26,12 @@ func TestProbeKindsCarryProviderCountryBeforeOpening(t *testing.T) {
 	custom := &connect.DnsResolverSettings{EnableRemoteDns: true, RemoteDnsIpv4: []string{"192.0.2.53"}}
 	cfg := providertunnel.Config{DnsResolverSettings: custom}
 	provider := prober.Provider{ClientId: connect.NewId().String(), Place: egresshealth.Place{Country: "cn"}}
-	full := NewFullProber(FullOptions{TunnelConfig: cfg, ProbeTimeout: time.Minute})
+	pool := func() *egresshealth.Pool { return smallPool() }
+	full := NewFullProber(FullOptions{TunnelConfig: cfg, ProbeTimeout: time.Minute, Pool: pool})
 	if err := full.ProbeOne(t.Context(), provider); !errors.Is(err, stop) {
 		t.Fatalf("full boundary failed: %v", err)
 	}
-	if _, err := RunBlackhole(t.Context(), []prober.Provider{provider}, BlackholeOptions{TunnelConfig: cfg, Timeout: time.Second}); err != nil {
+	if _, err := RunBlackhole(t.Context(), []prober.Provider{provider}, BlackholeOptions{TunnelConfig: cfg, Timeout: time.Second, Pool: pool}); err != nil {
 		t.Fatal(err)
 	}
 	if len(captured) != 2 {

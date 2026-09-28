@@ -64,7 +64,9 @@ func TestFetchPoolSendsTheIngestOperatorSecretHeader(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen[r.URL.Path] = r.Header.Clone()
 		if r.URL.Path == egresshealth.PoolPath {
-			_ = json.NewEncoder(w).Encode(egresshealth.BuiltinPool())
+			_ = json.NewEncoder(w).Encode(&egresshealth.Pool{Destinations: []egresshealth.Destination{{
+				Name: "synthetic-site", Url: "https://site.example/", Class: egresshealth.ClassSite,
+			}}})
 			return
 		}
 		_, _ = w.Write([]byte(`{"client_ids":[]}`))

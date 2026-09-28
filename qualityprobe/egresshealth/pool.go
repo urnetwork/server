@@ -35,8 +35,7 @@ const maxPoolBytes = 4 * 1024 * 1024
 // class with their load contracts, and the request profile to load them with.
 // The server keeps it representative from the prober's own results (retiring
 // sites that fail healthy exits, promoting candidates), which is why it is
-// data rather than the compiled-in table; the table stays as the seed the
-// server's pool starts from and as the fallback when it cannot be fetched.
+// data loaded from config/<env>/qualityprobe.yml, never a compiled-in fallback.
 type Pool struct {
 	// Identifies the pool's contents, so a log line or a stored run
 	// can say which pool it was drawn from. BuiltinPool is version 0.
@@ -45,27 +44,19 @@ type Pool struct {
 	// Sampled per run exactly as the built-in table is (see
 	// sampleSizes); the blackhole check draws from its connectivity class.
 	Destinations []Destination `json:"destinations"`
+	// Country targets are disjoint from the general catalog. Absence is a
+	// catalog coverage gap, not a provider failure or an additional FP2 gate.
+	Countries map[string][]Destination `json:"countries,omitempty"`
 	// What every request carries. An empty UserAgent means the
 	// default (see RequestProfile.orDefault).
-	Profile RequestProfile `json:"profile"`
+	Profile        RequestProfile  `json:"profile"`
+	UrlProbePolicy *UrlProbePolicy `json:"url_probe_policy,omitempty"`
 }
 
 // Reports that the server did not answer the pool endpoint
-// with a pool that can be run. Every caller's response to it is the same: run
-// the built-in table instead (see fleetprobe.LoadPool). It is never a reason
-// to stop probing, because the built-in table is always a correct, if less
-// curated, measurement.
+// with a pool that can be run. No alternate URLs may be fabricated; callers
+// retry the catalog without reporting a negative provider result.
 var ErrPoolUnavailable = errors.New("egresshealth: could not get a usable destination pool from the server")
-
-// The compiled-in table as a pool: the seed the server's pool
-// starts from and the fallback when it cannot be fetched.
-func BuiltinPool() *Pool {
-	return &Pool{
-		Version:      0,
-		Destinations: Destinations(),
-		Profile:      DefaultRequestProfile(),
-	}
-}
 
 // Fetches the server's active destination pool from url with a GET,
 // authenticated with the operator secret exactly as the ingest submissions
@@ -113,7 +104,7 @@ func FetchPool(ctx context.Context, client *http.Client, url string, secret stri
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxPoolBytes)).Decode(&pool); err != nil {
 		return nil, fmt.Errorf("%w: decoding the response: %w", ErrPoolUnavailable, err)
 	}
-	if err := ValidateDestinations(pool.Destinations); err != nil {
+	if err := ValidatePool(&pool); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrPoolUnavailable, err)
 	}
 	return &pool, nil
@@ -138,7 +129,6 @@ func ValidateDestinations(dests []Destination) error {
 	}
 	var problems []string
 	seen := map[string]bool{}
-	perClass := map[Class]int{}
 	for i, d := range dests {
 		if err := d.Validate(); err != nil {
 			problems = append(problems, fmt.Sprintf("destination %d (%q): %s", i, d.Name, err))
@@ -149,15 +139,50 @@ func ValidateDestinations(dests []Destination) error {
 			continue
 		}
 		seen[d.Name] = true
-		perClass[d.Class]++
-	}
-	for _, c := range Classes {
-		if perClass[c] == 0 {
-			problems = append(problems, fmt.Sprintf("class %q has no destination", c))
-		}
 	}
 	if 0 < len(problems) {
 		return errors.New("the pool cannot be run: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// Validates independent country catalogs and prevents global targets from
+// being relabeled country-specific. Missing country coverage stays explicit.
+func ValidatePool(pool *Pool) error {
+	if pool != nil && pool.UrlProbePolicy != nil {
+		if err := pool.UrlProbePolicy.Validate(); err != nil {
+			return err
+		}
+	}
+	if pool == nil {
+		return ErrNoDestinations
+	}
+	if err := ValidateDestinations(pool.Destinations); err != nil {
+		return err
+	}
+	hosts := map[string]bool{}
+	names := map[string]bool{}
+	for _, destination := range pool.Destinations {
+		u, _ := url.Parse(destination.Url)
+		hosts[strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")] = true
+		names[destination.Name] = true
+	}
+	for country, destinations := range pool.Countries {
+		if len(country) != 2 || country[0] < 'a' || country[0] > 'z' || country[1] < 'a' || country[1] > 'z' {
+			return errors.New("country catalog key must be a lower-case two-letter code")
+		}
+		if len(destinations) == 0 {
+			continue
+		}
+		if err := ValidateDestinations(destinations); err != nil {
+			return fmt.Errorf("country %s: %w", country, err)
+		}
+		for _, destination := range destinations {
+			u, _ := url.Parse(destination.Url)
+			if names[destination.Name] || hosts[strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")] {
+				return fmt.Errorf("country %s overlaps the general catalog", country)
+			}
+		}
 	}
 	return nil
 }

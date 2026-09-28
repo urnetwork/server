@@ -41,12 +41,11 @@ func TestValidatePins(t *testing.T) {
 	}
 }
 
-// A pass always gets a pool it can
-// run -- the server's, or the built-in table with the reason -- and never
-// stops for want of one.
-func TestLoadPoolFallsBackToTheBuiltinTable(t *testing.T) {
-	served := egresshealth.BuiltinPool()
-	served.Version = 12
+// A failed catalog fetch returns a local error and no replacement targets.
+func TestLoadPoolRefusesUnavailableCatalog(t *testing.T) {
+	served := &egresshealth.Pool{Version: 12,
+		Destinations: []egresshealth.Destination{{Name: "synthetic-site", Class: egresshealth.ClassSite, Url: "https://site.example/"}},
+		Profile:      egresshealth.DefaultRequestProfile()}
 	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != egresshealth.PoolPath || r.Header.Get("X-UR-Operator-Secret") != "s3cret" {
 			http.Error(w, "no", http.StatusUnauthorized)
@@ -57,8 +56,8 @@ func TestLoadPoolFallsBackToTheBuiltinTable(t *testing.T) {
 	defer good.Close()
 
 	pool, err := LoadPool(context.Background(), good.Client(), PoolUrl(good.URL+"/"), "s3cret")
-	if err != nil || pool.Version != 12 {
-		t.Fatalf("LoadPool = version %d, %v; want the server's pool", pool.Version, err)
+	if err != nil || pool == nil || pool.Version != 12 {
+		t.Fatalf("LoadPool = %v, %v; want the server's pool", pool, err)
 	}
 
 	for name, url := range map[string]string{
@@ -73,8 +72,8 @@ func TestLoadPoolFallsBackToTheBuiltinTable(t *testing.T) {
 		if !errors.Is(err, egresshealth.ErrPoolUnavailable) {
 			t.Errorf("%s: err = %v, want ErrPoolUnavailable", name, err)
 		}
-		if pool == nil || pool.Version != 0 || len(pool.Destinations) != len(egresshealth.Destinations()) {
-			t.Errorf("%s: fell back to %+v, want the built-in table", name, pool)
+		if pool != nil {
+			t.Errorf("%s: invented fallback catalog %+v", name, pool)
 		}
 	}
 }
@@ -93,16 +92,15 @@ func TestOperatorUrls(t *testing.T) {
 	}
 }
 
-// No source, or one that has nothing, is the
-// built-in table.
-func TestPoolSourceFallsBack(t *testing.T) {
+// A missing source does not invent configured URLs.
+func TestPoolSourceNeverInventsCatalog(t *testing.T) {
 	var none PoolSource
-	if got := none.pool(); len(got.Destinations) != len(egresshealth.Destinations()) {
-		t.Error("a nil pool source is not the built-in table")
+	if got := none.pool(); len(got.Destinations) != 0 {
+		t.Error("a nil pool source invented destinations")
 	}
 	empty := PoolSource(func() *egresshealth.Pool { return nil })
-	if got := empty.pool(); len(got.Destinations) != len(egresshealth.Destinations()) {
-		t.Error("a pool source returning nil is not the built-in table")
+	if got := empty.pool(); len(got.Destinations) != 0 {
+		t.Error("a nil catalog invented destinations")
 	}
 }
 

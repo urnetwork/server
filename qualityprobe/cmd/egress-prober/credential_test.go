@@ -322,7 +322,6 @@ func TestProberStartsWithNoJwtAndFetchesOne(t *testing.T) {
 		"-platform-url", "ws://127.0.0.1:1",
 		"-interval", "0",
 		"-skip-confinement-check",
-		"-skip-bandwidth",
 	)
 
 	if strings.Contains(out, "missing required flag") {
@@ -372,7 +371,6 @@ func TestProberRunsAFetchedJwtThroughTheStartupCheck(t *testing.T) {
 		"-platform-url", "ws://127.0.0.1:1",
 		"-interval", "0",
 		"-skip-confinement-check",
-		"-skip-bandwidth",
 	)
 
 	if code == 0 {
@@ -409,7 +407,6 @@ func TestProberDoesNotFetchWhenAJwtIsSupplied(t *testing.T) {
 		"-platform-url", "ws://127.0.0.1:1",
 		"-interval", "0",
 		"-skip-confinement-check",
-		"-skip-bandwidth",
 	)
 
 	credentialCalls, pinCalls := stub.counts()

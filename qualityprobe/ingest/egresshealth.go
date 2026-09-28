@@ -8,6 +8,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
@@ -28,11 +31,14 @@ type egressHealthClassBody struct {
 //
 // The server rejects unknown fields, so this struct's json tags are not a
 // convention here -- they are the wire format, and a rename on either side
-// makes every submission 400. There is deliberately no measured_at: the server
-// stamps arrival time, so a skewed prober clock cannot write a row that looks
-// stale or future-dated.
+// makes every submission 400. Legacy reports use server arrival time; explicit
+// URL evidence carries its validated actual measurement time so publication
+// retries cannot rejuvenate a rolling success or security event.
 type submitEgressHealthBody struct {
-	ClientId string `json:"client_id"`
+	ClientId         string                         `json:"client_id"`
+	RunId            string                         `json:"run_id"`
+	CycleStartedAt   time.Time                      `json:"cycle_started_at,omitempty"`
+	UrlProbeEvidence *egresshealth.UrlProbeEvidence `json:"url_probe_evidence,omitempty"`
 	// With TotalCount, covers every class over the loads this run sampled and
 	// measured, after their retries: ok is a load that passed on some attempt,
 	// total - ok a load that failed every one, which is what the index and the
@@ -85,9 +91,9 @@ type submitEgressHealthBody struct {
 //
 // The run is submitted over the loads it measured: a run whose tunnel died
 // and could not be re-created for some of its loads is still a measurement of
-// the rest, and those loads are named apart. A run that measured nothing is
-// not submitted at all -- the prober holds it back (see prober) -- because
-// 0/0 is not evidence of anything.
+// the rest, and those loads are named apart. A zero-total URL receipt may still
+// carry independent validated TLS events, without adding a quality trial or
+// satisfying the rolling quota.
 func (self *Client) SubmitEgressHealth(
 	ctx context.Context,
 	providerClientId string,
@@ -98,6 +104,9 @@ func (self *Client) SubmitEgressHealth(
 		// from a total blackhole, which is a false accusation against a
 		// provider whose check simply did not run.
 		return nil
+	}
+	if res.RunId == "" {
+		res.RunId = connect.NewId().String()
 	}
 
 	classResults := map[string]egressHealthClassBody{}
@@ -111,6 +120,9 @@ func (self *Client) SubmitEgressHealth(
 
 	buf, err := json.Marshal(submitEgressHealthBody{
 		ClientId:                 providerClientId,
+		RunId:                    res.RunId,
+		CycleStartedAt:           res.CycleStartedAt,
+		UrlProbeEvidence:         res.UrlProbeEvidence,
 		OkCount:                  res.OkCount,
 		TotalCount:               res.Total,
 		ClassResults:             classResults,

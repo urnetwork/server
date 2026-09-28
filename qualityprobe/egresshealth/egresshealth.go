@@ -1,155 +1,7 @@
-// Package egresshealth checks whether a provider actually carries traffic to
-// the real internet, across several independent classes of destination.
-//
-// All network access goes through an injected *http.Client; this package never
-// constructs a client, transport, or dialer. fleetprobe supplies a client whose
-// only dial boundary is the selected provider's userspace TUN, with no host
-// fallback. A broken tunnel therefore fails the request even when the host has
-// ordinary LAN egress. The standalone command's confinement check remains
-// defense in depth; correctness does not depend on a special host route.
-//
-// # Why this exists
-//
-// Provider reliability scoring on the server is presence-based:
-// reliabilityRunningAggSql counts reported time blocks and sums
-// 1.0/valid_client_count, and never consults delivered bytes. A provider that
-// stays connected 24/7 while blackholing every byte therefore scores perfectly
-// and stays selectable. That is not hypothetical -- a mainnet capture showed a
-// provider accepting 87 KB and returning 0 bytes while connected = true and
-// valid = true.
-//
-// It is also, since GEOMAP step 7, the prober's only instrument. What real
-// sites do with an exit is the only verdict the prober records about it: no
-// ip-intelligence source is consulted for anything (D24). Where the exit is
-// is independent evidence: a website response does not identify its source IP.
-// Health remains publishable without an exit-location observation.
-//
-// # Classes
-//
-// Destinations are grouped so a partial failure is diagnosable. "ok=44/50"
-// alone says nothing; "dns=6/6 cdn=0/10 site=26/26" says the tunnel carries
-// bytes and resolves names but is being refused by content providers, which
-// is the datacenter-IP-rejection case -- a completely different fault from a
-// total blackhole (ok=0/50), and a different fault again from one flaky
-// destination.
-//
-// The table deliberately spreads across different operators within each class,
-// so a provider that special-cases one vendor's ranges cannot pass a class.
-//
-// Every class is scored. The sites that used to form an unscored "reputation"
-// class -- large properties known to refuse addresses they take for
-// datacenters -- are ordinary site destinations now, sampled and scored like
-// the rest, and their refusals are failures like any other: a site a user
-// cannot reach through an exit is a site a user cannot reach, whatever the
-// site's reason (GEOMAP §10.3).
-//
-// # Sampling: the table is large, a run is not
-//
-// The table is 139 destinations. A run fetches a bounded random sample of each
-// class rather than the whole thing (see sampleSizes for the arithmetic), so
-// coverage accumulates across runs instead of being paid on every one. The
-// server's pool (see Pool), when there is one, is sampled the same way.
-//
-// This is one code path with one set of constants for every deployment. There
-// is no "small table for mainstream, big table for beta" switch and there must
-// not be one: a knob that only one environment exercises is how a gap goes
-// unnoticed here -- the untested branch is the one that runs against 100k
-// providers.
-//
-// Sampling also buys a property a fixed table cannot have, and it is a security
-// property rather than a cost one. A provider cannot know which destinations it
-// will be asked for, because the draw happens at run time from the prober's own
-// randomness. Whitelisting a handful of well-known hosts -- which defeats any
-// fixed table, and defeated the fixed nine-entry table this descends from --
-// now fails: to pass reliably a provider has to carry traffic to essentially
-// the whole table, which is the thing being measured. That is a reason to
-// prefer sampling a wide table over simply carrying a narrow one.
-//
-// # Every load gets its tries, spaced
-//
-// A destination is fetched up to Options.LoadAttempts times (default 3) and
-// fails only when every attempt failed. After a failed attempt the next one
-// waits a random delay drawn from an exponential distribution with mean
-// Options.LoadRetryMeanInterval (default 5 minutes), capped at three times the
-// mean, so a site's momentary block, a rate limit or a flapping path is not hit
-// three times in one second, and the requests to any one site look like a
-// person coming back to it rather than a scanner. A TLS-authentication failure
-// is terminal: a forged certificate is a failure whatever a retry does.
-//
-// Each load's retry chain is its own goroutine and holds a concurrency slot
-// only while it fetches, so the loads of a run interleave rather than queue: a
-// run whose loads all pass finishes in its first round, and one with a site
-// that keeps failing spans about ten to fifteen minutes. Its tunnel stays open
-// that long and mostly idle, which is what the prober's per-shard concurrency
-// is sized against (see fleetprobe).
-//
-// # Cold-start ownership
-//
-// Sampled URLs start immediately. Every tunnel generation shares one bounded
-// establishment allowance; no fixed echo or bandwidth URL precedes or follows
-// the sample. DNS retries and connection work stay inside the request deadline.
-//
-// # DNS
-//
-// The dns class is seven DNS-over-HTTPS endpoints. It is not, and cannot
-// currently be, a test of resolvers as such: the owner's list names 23 bare
-// resolver addresses (8.8.8.8, 1.1.1.1, ...), and a resolver is queried over
-// UDP/53 or TCP/53, which this package has no way to reach -- the tunnel is
-// exposed to it as an *http.Client and nothing else. Genuine resolver coverage
-// needs a UDP path through the tunnel, which is a different piece of work; the
-// bare-IP rows are ignored here rather than fetched over http, which would test
-// something else entirely and pass or fail for reasons unrelated to resolution.
-//
-// What the DoH entries do prove is that a name was resolved end to end through
-// the tunnel, because every one of them parses its answer (see verifyDnsJson).
-// A captive portal answers 200 with bytes; only an answer section proves
-// resolution.
-//
-// # Ambiguity this cannot resolve on its own
-//
-// Name resolution is a shared precondition: the tunnel resolves every hostname
-// through in-tunnel DoH (connect's DefaultDnsResolverSettings, which uses
-// 1.1.1.1, 8.8.8.8, 9.9.9.9 and 208.67.222.222), and providertunnel
-// deliberately disables the off-tunnel fallback. So a run that comes back 0/50
-// is "this provider carried nothing useful", which covers both a blackhole and
-// an in-tunnel DoH failure. The per-check Err strings are what separate them:
-// a resolution failure names the lookup, a blackhole times out on the request.
-// Do not read 0/50 as proof of a blackhole without them.
-//
-// # Byte budget
-//
-// Each attempt is a small GET whose body read is capped -- per destination via
-// Destination.MaxBytes, and never above MaxBodyBytes, which is 1024 bytes --
-// and then closed. The arithmetic for one attempt of every sampled load is on
-// sampleSizes and is asserted by TestWorstCaseBytesPerRunFitsTheBudget:
-//
-//	dns           6 x  768 =  4608
-//	connectivity  8 x  256 =  2048
-//	cdn          10 x 1024 = 10240
-//	site         26 x 1024 = 26624
-//	                        ------
-//	per attempt round      = 43520 bytes = 42.5 KiB
-//
-// A retry reads at most the same cap again, so a run in which every load fails
-// every attempt after reading its whole cap reads at most three times that,
-// 127.5 KiB. There is no additional echo request.
-//
-// No request carries a Range header any more (see neverSent), so the capped
-// read is the only bound, and it bounds what is kept rather than what is sent:
-// a server can put up to one TCP receive window in flight before the capped
-// read closes the connection. For most of the table that is the whole response
-// anyway -- front pages and robots.txt files a few KiB long, gzip-encoded now
-// that the transport may ask for it -- but two cdn entries are large assets
-// (cachefly's 10 MB test file and the AWS SDK bundle), and each can cost one
-// window on the provider's link when it is drawn. That is the price of not
-// sending byte-range requests, which bot managers refuse.
-//
-// This rides the same budget as the server's active bandwidth probe, which
-// spends model.MaxProviderBandwidthBytesPerProbe = 16 MiB per probe (8
-// parallel streams of 2 MiB -- see bandwidth.StreamCount for why one stream
-// measured the congestion window rather than the provider). A health run's
-// capped reads are under 1% of one bandwidth probe; its wire cost, with the
-// windows above, stays a small fraction of one.
+// Package egresshealth records accepted URL outcomes through an injected client.
+// Production callers supply a validated configuration-owned catalog and probe
+// one randomized URL at a time. Missing catalog data fails before network work.
+// Legacy batch helpers retain historical wire compatibility, never a URL fallback.
 package egresshealth
 
 import (
@@ -212,50 +64,8 @@ const (
 // also the closed set a pooled destination's class must come from.
 var Classes = []Class{ClassDns, ClassConnectivity, ClassCdn, ClassSite}
 
-// How many destinations of each class one run draws. It is a
-// package constant, identical in every deployment -- see the package comment on
-// why there is no per-environment knob.
-//
-// The sizes are set by what the server reads, not by what a run can afford.
-// The one-in-ten rule and the egress index read runs of at least 50 scored
-// loads (GEOMAP §10.5, MinScoredLoads): at the 26 loads a run used to draw, the
-// one-in-ten line was a two-failure line, and one site's policy was a
-// provider's verdict. So the sizes sum to 50, roughly doubling the old
-// 4/5/5/12:
-//
-//	dns 6 of 7, connectivity 8 of 14, cdn 10 of 18, site 26 of 100
-//
-// dns stops at six because the class holds seven: a sample must be drawn from
-// more than it takes, or it is a fixed table wearing a sample's name
-// (TestSampleSizesAreDeclaredForEveryClass), and six of seven still leaves a
-// provider unable to know which DoH operator it will not be asked for. The
-// site class takes what dns cannot, being the widest pool and the class whose
-// verdict the index weighs most directly.
-//
-// The wall clock no longer binds these numbers. It used to -- a whole run had
-// to fit in one probe timeout -- but a run now spans minutes by design (every
-// load gets its spaced tries), and a load holds a concurrency slot only while
-// it fetches. A first round of 50 at DefaultConcurrency is ceil(50/6) = 9
-// rounds, 90 seconds at the worst, against a run that waits five minutes
-// between attempts. Options.RunBudget is the whole bound.
-//
-// Bytes stay cheap: 43,520 bytes for one attempt of every load, on the package
-// comment.
-//
-// Three is the floor for any class, and none of these is near it. A class
-// verdict has to separate one flaky endpoint from a class-wide fault: at 1 the
-// class is a single destination wearing a class name, at 2 one flake is half
-// the class and cdn=1/2 says nothing, and at 3 "cdn=0/3" means three
-// independently operated endpoints all refused in the same run -- which is a
-// statement.
-//
-// Coverage is a rate, not a promise: site draws 26 of 100, so a given site
-// destination is asked for on about one run in four. What accumulates quickly
-// is fleet-wide coverage, because every provider draws independently.
-//
-// A class with no entry here is probed whole. That is the safe direction: a
-// class added to the table without a sample size costs visible bytes rather
-// than silently never being probed.
+// Legacy batch sample targets, independent of the configured URL catalog.
+// Scheduled URL probes use one randomized destination per turn.
 var sampleSizes = map[Class]int{
 	ClassDns:          6,
 	ClassConnectivity: 8,
@@ -491,1140 +301,6 @@ const (
 	maxAssetBytes        = 1024 // = MaxBodyBytes; everything else
 )
 
-// The built-in table: the owner's curated 159-row list,
-// minus the rows that cannot be checked over an *http.Client, plus the seven
-// DoH endpoints. A run does not fetch it -- see sampleSizes. It is the seed the
-// server's pool starts from and the fallback when the pool cannot be fetched
-// (see Pool); a run over the pool follows every rule below, which
-// Destination.Validate restates for data.
-//
-// Every URL is https and on the default port 443. That is a hard requirement,
-// not a coincidence -- the confinement self-check dials one fixed port
-// (cmd/egress-prober's confinementPort), so a destination on any other port
-// would silently fall outside the check. TestEveryDestinationIsHttpsOn443
-// enforces it.
-//
-// Every entry was measured from a datacenter host with the identifying user
-// agent this package used to send, and its contract is what that measurement
-// says: a 200 with a body takes the default ExpectBody rule, and 202/204/3xx
-// declare their status. The rules the measurements forced, in the order they
-// matter:
-//
-//   - A 4xx or 5xx is never declared with ExpectStatus. Six of the site
-//     entries that came from the dissolved reputation class answer 403/401
-//     from a datacenter exit; declaring those would turn a refusal into a
-//     pass, which is the one thing a site load must never do.
-//
-//   - A 200 with a zero-length body cannot be declared either, because it is
-//     the blackhole signature itself. Two endpoints measured that way
-//     (d1.awsstatic.com and cachefly.cachefly.net's bare host); both are
-//     re-pointed at a url on the same operator that serves a real body, and
-//     neither is whitelisted by status. See their entries.
-//
-//   - A destination whose status is not stable cannot be declared, and this is
-//     not hypothetical. Three of the owner's 21 zero-body endpoints answered
-//     differently when this table was built, from the same host and address
-//     days later: netflix 302 -> 200, cnn 302 -> 200, hulu 302 -> 301. A
-//     fourth (timesofindia) went the other way, answering 301-with-no-body
-//     where the staged run had a body. Those four are re-pointed at
-//     /robots.txt, which is a real body and does not move. The exits that will
-//     actually run this are providers in arbitrary countries, so a
-//     geography-dependent redirect status is a false failure waiting to
-//     happen. The rest of the zero-body list is declared as measured, per the
-//     owner's instruction.
-//
-//   - Redirects are declared, never chased: the production client refuses to
-//     follow them (providertunnel's CheckRedirect), which is what makes a 3xx
-//     an answer about this url rather than about wherever it pointed.
-//
-// Other choices worth recording, because the obvious pick was wrong in a way
-// only measurement showed:
-//
-//   - The nine http:// rows in the list are here as https, all of them verified
-//     answering the same status over TLS (the five generate_204 endpoints, the
-//     three fixed-text portal checks, archive.ubuntu.com). A plaintext
-//     destination is not an option: it could be forged by the provider on the
-//     path, which is precisely the party under test. Two rows could not survive
-//     that: speedtest.tele2.net has no https listener at all (measured: no
-//     connection), and the "Example.com Plain HTTP" row duplicates the https
-//     one. Both are dropped.
-//
-//   - ifconfig.me is asked for /ip, not /. The bare host serves an HTML page to
-//     anything that does not look like curl -- measured, 10915 bytes of it --
-//     and /ip always answers with the address, which is what verifyIpText can
-//     actually prove.
-//
-//   - one.one.one.one and speed.cloudflare.com are in ClassSite rather than
-//     ClassConnectivity, where the source list files them. They answer with an
-//     ordinary web page rather than a fixed portal-detection token, so they
-//     cannot carry this class's body check, and a connectivity entry without
-//     one would pass for a captive portal.
-//
-//   - dns.alidns.com serves the JSON form on /resolve only. Its /dns-query path
-//     answers `400 no 'dns' query parameter found` -- it is wire-format only.
-//     doh.dns.sb is the mirror image: /dns-query serves JSON, /resolve is a 301.
-//     The path is not interchangeable between operators and cannot be guessed.
-//
-//   - Quad9, OpenDNS, CleanBrowsing, Mullvad and Control D were all rejected as
-//     DoH entries. Quad9 and Mullvad serve only RFC 8484 wire format on 443
-//     (400 to a JSON GET) and Quad9's JSON API is on port 5053, which breaks the
-//     443-only rule above; Control D answers 200 with a non-JSON body, which is
-//     precisely the shape a body check exists to reject.
-//
-//   - Operators repeat inside a class, and that is tolerated here where the
-//     narrow table refused it: connectivity carries three Google-operated
-//     generate_204 hostnames and three Cloudflare-operated endpoints, because
-//     the owner's list carries them and dropping them would narrow the pool a
-//     sample is drawn from. What protects the class is the draw: eight of
-//     fourteen, chosen per run, so no single operator can be relied on to
-//     appear. Do not read "14 destinations" as "14 operators".
-var destinations = []Destination{
-	// DNS-over-HTTPS, JSON GET form, seven distinct operators including two
-	// Chinese ones (dns.alidns.com, doh.pub) for deliberate jurisdictional
-	// diversity: a provider whose upstream filters western resolvers, or the
-	// reverse, shows up as a partial class rather than a clean pass. A provider
-	// that blocks DoH breaks name resolution for every client that uses it.
-	//
-	// Every entry carries a dns_json body check: a 200 with bytes is not proof
-	// that a name was resolved, because a captive portal or an interception box
-	// returns exactly that. Only a parseable answer is. These bodies are small,
-	// and the cap is sized so a whole answer always fits: a truncated one would
-	// not parse.
-	{
-		Name:     "cloudflare-doh",
-		Class:    ClassDns,
-		Url:      "https://cloudflare-dns.com/dns-query" + dnsQuery,
-		Headers:  map[string]string{"Accept": acceptDnsJson},
-		MaxBytes: maxDnsBytes,
-		Verify:   BodyCheck{Kind: BodyCheckDnsJson},
-	},
-	{
-		Name:     "google-doh",
-		Class:    ClassDns,
-		Url:      "https://dns.google/resolve" + dnsQuery,
-		Headers:  map[string]string{"Accept": acceptDnsJson},
-		MaxBytes: maxDnsBytes,
-		Verify:   BodyCheck{Kind: BodyCheckDnsJson},
-	},
-	{
-		Name:     "adguard-doh",
-		Class:    ClassDns,
-		Url:      "https://dns.adguard-dns.com/resolve" + dnsQuery,
-		Headers:  map[string]string{"Accept": acceptDnsJson},
-		MaxBytes: maxDnsBytes,
-		Verify:   BodyCheck{Kind: BodyCheckDnsJson},
-	},
-	{
-		Name:     "dnssb-doh",
-		Class:    ClassDns,
-		Url:      "https://doh.dns.sb/dns-query" + dnsQuery,
-		Headers:  map[string]string{"Accept": acceptDnsJson},
-		MaxBytes: maxDnsBytes,
-		Verify:   BodyCheck{Kind: BodyCheckDnsJson},
-	},
-	{
-		Name:     "nextdns-doh",
-		Class:    ClassDns,
-		Url:      "https://dns.nextdns.io/dns-query" + dnsQuery,
-		Headers:  map[string]string{"Accept": acceptDnsJson},
-		MaxBytes: maxDnsBytes,
-		Verify:   BodyCheck{Kind: BodyCheckDnsJson},
-	},
-	{
-		Name:     "alidns-doh",
-		Class:    ClassDns,
-		Url:      "https://dns.alidns.com/resolve" + dnsQuery,
-		Headers:  map[string]string{"Accept": acceptDnsJson},
-		MaxBytes: maxDnsBytes,
-		Verify:   BodyCheck{Kind: BodyCheckDnsJson},
-	},
-	{
-		Name:     "dnspod-doh",
-		Class:    ClassDns,
-		Url:      "https://doh.pub/dns-query" + dnsQuery,
-		Headers:  map[string]string{"Accept": acceptDnsJson},
-		MaxBytes: maxDnsBytes,
-		Verify:   BodyCheck{Kind: BodyCheckDnsJson},
-	},
-	// Connectivity checks: the endpoints operating systems use to detect captive
-	// portals, plus the echo services that answer with the exit address. None is
-	// authenticated, none is behind anti-bot machinery, and all of them answer in
-	// well under 256 bytes.
-	//
-	// The generate_204 entries are the reason Expect exists: 204 with no body is
-	// the correct answer, and the ExpectBody rule would have scored all of them
-	// as failures. They are also the strictest entries in the table -- an exact
-	// status match, so a provider that synthesizes a bare 200 fails them.
-	//
-	// Every body-bearing entry carries a body check, for the captive-portal case
-	// these endpoints were literally designed to detect: a portal returns 200
-	// with a login page, which is non-empty and would otherwise pass. That rule
-	// is what moved one.one.one.one and speed.cloudflare.com out of this class
-	// -- they answer with an ordinary page there is nothing fixed to check.
-	//
-	// These bodies are smaller than the cap already, so the capped read takes
-	// them whole.
-	{
-		Name:     "google-generate-204",
-		Class:    ClassConnectivity,
-		Url:      "https://www.google.com/generate_204",
-		Expect:   ExpectStatus,
-		Status:   204,
-		MaxBytes: maxConnectivityBytes,
-	},
-	{
-		Name:     "google-connectivitycheck",
-		Class:    ClassConnectivity,
-		Url:      "https://connectivitycheck.gstatic.com/generate_204",
-		Expect:   ExpectStatus,
-		Status:   204,
-		MaxBytes: maxConnectivityBytes,
-	},
-	{
-		Name:     "gstatic-204",
-		Class:    ClassConnectivity,
-		Url:      "https://www.gstatic.com/generate_204",
-		Expect:   ExpectStatus,
-		Status:   204,
-		MaxBytes: maxConnectivityBytes,
-	},
-	{
-		Name:     "apple-captive-portal",
-		Class:    ClassConnectivity,
-		Url:      "https://captive.apple.com/hotspot-detect.html",
-		MaxBytes: maxConnectivityBytes,
-		Verify:   BodyCheck{Kind: BodyCheckContains, Text: "Success"},
-	},
-	{
-		Name:     "ubuntu-connectivity-check",
-		Class:    ClassConnectivity,
-		Url:      "https://connectivity-check.ubuntu.com",
-		Expect:   ExpectStatus,
-		Status:   204,
-		MaxBytes: maxConnectivityBytes,
-	},
-	{
-		Name:     "firefox-detectportal",
-		Class:    ClassConnectivity,
-		Url:      "https://detectportal.firefox.com/success.txt",
-		MaxBytes: maxConnectivityBytes,
-		Verify:   BodyCheck{Kind: BodyCheckContains, Text: "success"},
-	},
-	{
-		Name:     "gnome-nm-check",
-		Class:    ClassConnectivity,
-		Url:      "https://nmcheck.gnome.org/check_network_status.txt",
-		MaxBytes: maxConnectivityBytes,
-		Verify:   BodyCheck{Kind: BodyCheckContains, Text: "online"},
-	},
-	{
-		Name:     "cloudflare-cp-204",
-		Class:    ClassConnectivity,
-		Url:      "https://cp.cloudflare.com/generate_204",
-		Expect:   ExpectStatus,
-		Status:   204,
-		MaxBytes: maxConnectivityBytes,
-	},
-	{
-		Name:     "cloudflare-trace",
-		Class:    ClassConnectivity,
-		Url:      "https://1.1.1.1/cdn-cgi/trace",
-		MaxBytes: maxConnectivityBytes,
-		Verify:   BodyCheck{Kind: BodyCheckContains, Text: "ip="},
-	},
-	{
-		Name:     "aws-checkip",
-		Class:    ClassConnectivity,
-		Url:      "https://checkip.amazonaws.com",
-		MaxBytes: maxConnectivityBytes,
-		Verify:   BodyCheck{Kind: BodyCheckIpText},
-	},
-	{
-		Name:     "ifconfig-me",
-		Class:    ClassConnectivity,
-		Url:      "https://ifconfig.me/ip",
-		MaxBytes: maxConnectivityBytes,
-		Verify:   BodyCheck{Kind: BodyCheckIpText},
-	},
-	{
-		Name:     "icanhazip",
-		Class:    ClassConnectivity,
-		Url:      "https://icanhazip.com",
-		MaxBytes: maxConnectivityBytes,
-		Verify:   BodyCheck{Kind: BodyCheckIpText},
-	},
-	{
-		Name:     "ipify",
-		Class:    ClassConnectivity,
-		Url:      "https://api.ipify.org",
-		MaxBytes: maxConnectivityBytes,
-		Verify:   BodyCheck{Kind: BodyCheckIpText},
-	},
-	// The list's ipinfo row is not here. ipinfo.io is an ip-intelligence
-	// vendor, and the prober consults no ip-intelligence source for anything
-	// (GEOMAP D24) -- not even as a reachability target, where a vendor that
-	// classifies the exit on sight could answer it differently from the echo
-	// services beside it. The class keeps four other echo services.
-	{
-		Name:     "example-com-https",
-		Class:    ClassConnectivity,
-		Url:      "https://example.com",
-		MaxBytes: maxConnectivityBytes,
-		Verify:   BodyCheck{Kind: BodyCheckContains, Text: "Example Domain"},
-	},
-
-	// Content delivery: CDN edges, distribution mirrors and bulk-download hosts.
-	// Eighteen destinations across Cloudflare, Fastly, jsDelivr, unpkg, Google,
-	// Microsoft, CloudFront, KeyCDN, CDN77, Sucuri, CacheFly, OVH and five OS
-	// distribution mirrors. This is the class that fails when a provider's egress
-	// range sits on a CDN blocklist.
-	//
-	// The four asset urls (cdnjs, googleapis, jsdelivr, sdk.amazonaws) are
-	// version-pinned on purpose -- an unversioned url would move under us -- with
-	// the tradeoff that if a vendor ever prunes one it becomes a permanent 404
-	// and a permanent false failure. If one named entry fails across the whole
-	// fleet while its class passes, suspect the URL before suspecting the
-	// providers. They are asset urls rather than front pages because a CDN entry
-	// should prove the edge serves bytes, which a marketing page fronted by the
-	// same CDN does not do as directly.
-	{
-		Name:     "cloudflare-cdn",
-		Class:    ClassCdn,
-		Url:      "https://cdnjs.cloudflare.com/ajax/libs/normalize/8.0.1/normalize.min.css",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "cloudflare-sized-1kb",
-		Class:    ClassCdn,
-		Url:      "https://speed.cloudflare.com/__down?bytes=1024",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "fastly",
-		Class:    ClassCdn,
-		Url:      "https://www.fastly.net",
-		Expect:   ExpectStatus,
-		Status:   301,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "jsdelivr-fastly-mirror",
-		Class:    ClassCdn,
-		Url:      "https://fastly.jsdelivr.net/npm/normalize.css@8.0.1/normalize.min.css",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "unpkg",
-		Class:    ClassCdn,
-		Url:      "https://unpkg.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "google-hosted-libraries",
-		Class:    ClassCdn,
-		Url:      "https://ajax.googleapis.com/ajax/libs/jquery/3.7.1/jquery.min.js",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "microsoft-azure-cdn",
-		Class:    ClassCdn,
-		Url:      "https://ajax.aspnetcdn.com",
-		Expect:   ExpectStatus,
-		Status:   301,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		// d1.awsstatic.com, which the list names, answered 200 with a zero-length
-		// body on every measurement -- indistinguishable from the blackhole
-		// signature, so it cannot be judged by status and must not be
-		// whitelisted into one. Its /robots.txt answers 403. This is the same
-		// operator (CloudFront) on the url the previous table measured serving a
-		// real body. It is a multi-megabyte bundle, so without a Range header the
-		// edge starts sending all of it: the capped read keeps the first KiB and
-		// closes, and up to one receive window of the rest can still cross the
-		// provider's link first (see the byte budget on the package). A smaller
-		// CloudFront-served object in the server's pool would retire that cost.
-		Name:     "amazon-cloudfront",
-		Class:    ClassCdn,
-		Url:      "https://sdk.amazonaws.com/js/aws-sdk-2.1691.0.min.js",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "keycdn",
-		Class:    ClassCdn,
-		Url:      "https://www.keycdn.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "cdn77",
-		Class:    ClassCdn,
-		Url:      "https://www.cdn77.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		// Re-pointed at robots.txt: the bare host ignores Range and returns
-		// 399,407 B. Measured on the beta fleet it was the single largest source
-		// of failures (14 of 40 providers) -- not because those providers were
-		// unhealthy, but because moving 390 KB inside the per-request timeout is
-		// a bandwidth test wearing a health test's clothes. robots.txt is 24
-		// bytes, so the capped read takes it whole.
-		Name:     "sucuri-cdn",
-		Class:    ClassCdn,
-		Url:      "https://www.sucuri.net/robots.txt",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		// The list's bare host answered 200 with a zero-length body. CacheFly's own
-		// test asset exists to be fetched. It used to be asked for with a Range
-		// header, which it honors (206, 1024 bytes), so the 10 MB behind it never
-		// left their edge. Without one the capped read still keeps only the first
-		// KiB, but up to one receive window of the file can cross the provider's
-		// link before the close lands -- the largest wire cost left in the table,
-		// and the first entry the server's pool should replace with a small
-		// object on the same edge.
-		Name:     "cachefly",
-		Class:    ClassCdn,
-		Url:      "https://cachefly.cachefly.net/10mb.test",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "ovh-proof-eu",
-		Class:    ClassCdn,
-		Url:      "https://proof.ovh.net",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "kernel-org-mirrors",
-		Class:    ClassCdn,
-		Url:      "https://mirrors.kernel.org",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "debian-cdn",
-		Class:    ClassCdn,
-		Url:      "https://deb.debian.org",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "ubuntu-archive-plain-http",
-		Class:    ClassCdn,
-		Url:      "https://archive.ubuntu.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "alpine-cdn",
-		Class:    ClassCdn,
-		Url:      "https://dl-cdn.alpinelinux.org",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "fedora-downloads",
-		Class:    ClassCdn,
-		Url:      "https://dl.fedoraproject.org",
-		Expect:   ExpectStatus,
-		Status:   302,
-		MaxBytes: maxAssetBytes,
-	},
-
-	// Ordinary web properties: search, social, video, commerce, developer
-	// infrastructure, news, reference, productivity, gaming, and the regional
-	// properties that carry the same traffic outside the US and EU. site=0/26
-	// means the tunnel is not carrying ordinary web traffic at all.
-	//
-	// Chosen for availability -- every one of them answered on four consecutive
-	// runs from a datacenter host -- with the exception of the last eight,
-	// below, which were chosen for the opposite reason.
-	//
-	// The 3xx entries here declare the status they were measured answering. Read
-	// the rule on the table above before adding another: a declared status is
-	// weaker evidence than a body, and a status that varies by the exit's
-	// geography is not declarable at all.
-	{
-		Name:     "cloudflare-one-one-one-one",
-		Class:    ClassSite,
-		Url:      "https://one.one.one.one",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "cloudflare-speed-test",
-		Class:    ClassSite,
-		Url:      "https://speed.cloudflare.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "google",
-		Class:    ClassSite,
-		Url:      "https://www.google.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "bing",
-		Class:    ClassSite,
-		Url:      "https://www.bing.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "yahoo",
-		Class:    ClassSite,
-		Url:      "https://www.yahoo.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "duckduckgo",
-		Class:    ClassSite,
-		Url:      "https://duckduckgo.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "baidu",
-		Class:    ClassSite,
-		Url:      "https://www.baidu.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "yandex",
-		Class:    ClassSite,
-		Url:      "https://yandex.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "facebook",
-		Class:    ClassSite,
-		Url:      "https://www.facebook.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "instagram",
-		Class:    ClassSite,
-		Url:      "https://www.instagram.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "twitter-x",
-		Class:    ClassSite,
-		Url:      "https://x.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "linkedin",
-		Class:    ClassSite,
-		Url:      "https://www.linkedin.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "tiktok",
-		Class:    ClassSite,
-		Url:      "https://www.tiktok.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "pinterest",
-		Class:    ClassSite,
-		Url:      "https://www.pinterest.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "snapchat",
-		Class:    ClassSite,
-		Url:      "https://www.snapchat.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "discord",
-		Class:    ClassSite,
-		Url:      "https://discord.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "telegram",
-		Class:    ClassSite,
-		Url:      "https://telegram.org",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "whatsapp",
-		Class:    ClassSite,
-		Url:      "https://www.whatsapp.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "mastodon",
-		Class:    ClassSite,
-		Url:      "https://mastodon.social",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "bluesky",
-		Class:    ClassSite,
-		Url:      "https://bsky.app",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "youtube",
-		Class:    ClassSite,
-		Url:      "https://www.youtube.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		// Re-pointed, and this is the finding that justifies the rule above: the
-		// staged measurement recorded 302-with-no-body four times, and this host
-		// measured 200 with 3.2 MB days later. Same host, same address. A status
-		// that flips like that cannot be declared, and the exit that matters here
-		// is a provider's, in an arbitrary country. robots.txt is 3790 bytes of
-		// real body and does not move.
-		Name:     "netflix",
-		Class:    ClassSite,
-		Url:      "https://www.netflix.com/robots.txt",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "twitch",
-		Class:    ClassSite,
-		Url:      "https://www.twitch.tv",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "vimeo",
-		Class:    ClassSite,
-		Url:      "https://vimeo.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		// hulu answers 302-with-empty-body on both the bare host and
-		// /robots.txt, so it can never satisfy ExpectBody. Declared as the
-		// redirect it actually is. Measured on the beta fleet: 4 of 40
-		// providers failed on this entry alone before the fix.
-		// Measured 302 from one vantage but 301 through provider tunnels: the
-		// exact status depends on where the client exits, so it cannot be
-		// declared. Reachability is the question this class actually asks.
-		Name:     "hulu",
-		Class:    ClassSite,
-		Url:      "https://www.hulu.com",
-		Expect:   ExpectReachable,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "disney",
-		Class:    ClassSite,
-		Url:      "https://www.disneyplus.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "spotify",
-		Class:    ClassSite,
-		Url:      "https://open.spotify.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "soundcloud",
-		Class:    ClassSite,
-		Url:      "https://soundcloud.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "dailymotion",
-		Class:    ClassSite,
-		Url:      "https://www.dailymotion.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "amazon",
-		Class:    ClassSite,
-		Url:      "https://www.amazon.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "ebay",
-		Class:    ClassSite,
-		Url:      "https://www.ebay.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "walmart",
-		Class:    ClassSite,
-		Url:      "https://www.walmart.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "alibaba",
-		Class:    ClassSite,
-		Url:      "https://www.alibaba.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "aliexpress",
-		Class:    ClassSite,
-		Url:      "https://www.aliexpress.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "target",
-		Class:    ClassSite,
-		Url:      "https://www.target.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "shopify",
-		Class:    ClassSite,
-		Url:      "https://www.shopify.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		// 206/1024B to a datacenter host, 302/0B through all 40 provider
-		// tunnels: a locale redirect keyed on the exit ip. See ExpectReachable.
-		Name:     "microsoft",
-		Class:    ClassSite,
-		Url:      "https://www.microsoft.com",
-		Expect:   ExpectReachable,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "apple",
-		Class:    ClassSite,
-		Url:      "https://www.apple.com/robots.txt",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "github",
-		Class:    ClassSite,
-		Url:      "https://github.com/robots.txt",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "github-api",
-		Class:    ClassSite,
-		Url:      "https://api.github.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "gitlab",
-		Class:    ClassSite,
-		Url:      "https://gitlab.com",
-		Expect:   ExpectStatus,
-		Status:   301,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "cloudflare",
-		Class:    ClassSite,
-		Url:      "https://www.cloudflare.com/robots.txt",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "aws",
-		Class:    ClassSite,
-		Url:      "https://aws.amazon.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "google-cloud",
-		Class:    ClassSite,
-		Url:      "https://cloud.google.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "digitalocean",
-		Class:    ClassSite,
-		Url:      "https://www.digitalocean.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "docker-hub",
-		Class:    ClassSite,
-		Url:      "https://hub.docker.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "npm-registry",
-		Class:    ClassSite,
-		Url:      "https://registry.npmjs.org",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "pypi",
-		Class:    ClassSite,
-		Url:      "https://pypi.org",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "rubygems",
-		Class:    ClassSite,
-		Url:      "https://rubygems.org",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "python-org",
-		Class:    ClassSite,
-		Url:      "https://www.python.org",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "go-dev",
-		Class:    ClassSite,
-		Url:      "https://go.dev",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "kernel-org",
-		Class:    ClassSite,
-		Url:      "https://www.kernel.org",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "mdn",
-		Class:    ClassSite,
-		Url:      "https://developer.mozilla.org",
-		Expect:   ExpectStatus,
-		Status:   302,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		// Re-pointed for the same reason as netflix: staged 302-with-no-body,
-		// measured here as 200 with 4.9 MB.
-		Name:     "cnn",
-		Class:    ClassSite,
-		Url:      "https://www.cnn.com/robots.txt",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "bbc",
-		Class:    ClassSite,
-		Url:      "https://www.bbc.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "new-york-times",
-		Class:    ClassSite,
-		Url:      "https://www.nytimes.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "the-guardian",
-		Class:    ClassSite,
-		Url:      "https://www.theguardian.com",
-		Expect:   ExpectStatus,
-		Status:   302,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "ap-news",
-		Class:    ClassSite,
-		Url:      "https://apnews.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "al-jazeera",
-		Class:    ClassSite,
-		Url:      "https://www.aljazeera.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "deutsche-welle",
-		Class:    ClassSite,
-		Url:      "https://www.dw.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "france-24",
-		Class:    ClassSite,
-		Url:      "https://www.france24.com",
-		Expect:   ExpectStatus,
-		Status:   302,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		// The favicon, not the front page: the front page is 120 KB and Wikimedia's
-		// ATS does not honor Range (measured: 200, whole asset), so it is the one
-		// destination that would routinely exceed the wire budget even though the
-		// read cap bounds what is kept.
-		Name:     "wikipedia",
-		Class:    ClassSite,
-		Url:      "https://www.wikipedia.org/static/favicon/wikipedia.ico",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "wordpress",
-		Class:    ClassSite,
-		Url:      "https://wordpress.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "imdb",
-		Class:    ClassSite,
-		Url:      "https://www.imdb.com",
-		Expect:   ExpectStatus,
-		Status:   202,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "internet-archive",
-		Class:    ClassSite,
-		Url:      "https://archive.org",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "noaa-weather",
-		Class:    ClassSite,
-		Url:      "https://www.weather.gov",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "qq",
-		Class:    ClassSite,
-		Url:      "https://www.qq.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "sina",
-		Class:    ClassSite,
-		Url:      "https://www.sina.com.cn",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "taobao",
-		Class:    ClassSite,
-		Url:      "https://www.taobao.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "jd-com",
-		Class:    ClassSite,
-		Url:      "https://www.jd.com",
-		Expect:   ExpectStatus,
-		Status:   301,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "mail-ru",
-		Class:    ClassSite,
-		Url:      "https://mail.ru",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "vk",
-		Class:    ClassSite,
-		Url:      "https://vk.com",
-		Expect:   ExpectStatus,
-		Status:   302,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "naver",
-		Class:    ClassSite,
-		Url:      "https://www.naver.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "line",
-		Class:    ClassSite,
-		Url:      "https://line.me",
-		Expect:   ExpectStatus,
-		Status:   302,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		// Re-pointed: measured here as 301 with no body, while the staged run had
-		// it answering with one. Unstable in the same way, caught from the other
-		// direction (it is absent from the zero-body list).
-		Name:     "times-of-india",
-		Class:    ClassSite,
-		Url:      "https://timesofindia.indiatimes.com/robots.txt",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "globo",
-		Class:    ClassSite,
-		Url:      "https://www.globo.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "mercadolibre",
-		Class:    ClassSite,
-		Url:      "https://www.mercadolibre.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "abc-australia",
-		Class:    ClassSite,
-		Url:      "https://www.abc.net.au",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "news24",
-		Class:    ClassSite,
-		Url:      "https://www.news24.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "zoom",
-		Class:    ClassSite,
-		Url:      "https://zoom.us",
-		Expect:   ExpectStatus,
-		Status:   301,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "slack",
-		Class:    ClassSite,
-		Url:      "https://slack.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "dropbox",
-		Class:    ClassSite,
-		Url:      "https://www.dropbox.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "notion",
-		Class:    ClassSite,
-		Url:      "https://www.notion.so",
-		Expect:   ExpectStatus,
-		Status:   307,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "trello",
-		Class:    ClassSite,
-		Url:      "https://trello.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "atlassian",
-		Class:    ClassSite,
-		Url:      "https://www.atlassian.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "figma",
-		Class:    ClassSite,
-		Url:      "https://www.figma.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "steam",
-		Class:    ClassSite,
-		Url:      "https://store.steampowered.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "playstation",
-		Class:    ClassSite,
-		Url:      "https://www.playstation.com",
-		Expect:   ExpectStatus,
-		Status:   301,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "xbox",
-		Class:    ClassSite,
-		Url:      "https://www.xbox.com",
-		Expect:   ExpectStatus,
-		Status:   307,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "nintendo",
-		Class:    ClassSite,
-		Url:      "https://www.nintendo.com",
-		Expect:   ExpectStatus,
-		Status:   301,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "roblox",
-		Class:    ClassSite,
-		Url:      "https://www.roblox.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "riot-games",
-		Class:    ClassSite,
-		Url:      "https://www.riotgames.com",
-		Expect:   ExpectStatus,
-		Status:   302,
-		MaxBytes: maxAssetBytes,
-	},
-
-	// The former reputation class, dissolved into site (GEOMAP §11.3) with its
-	// contracts unchanged. Six of these eight refused a datacenter exit outright
-	// when the table was built (403, except reuters at 401), and on main they
-	// refused over 2,600 of 6,577 healthy providers each under the probe's old
-	// self-describing request. They were kept out of the score as a verdict on
-	// a vendor's ip feed rather than on the exit. They are scored now because
-	// that distinction does not survive contact with a user: a site the exit
-	// cannot reach is a site the user cannot reach, whatever the reason, and
-	// the index pays for it exactly as it would for a site that timed out. The
-	// browser-shaped request and the spaced retries are what should separate a
-	// refusal of the exit from a refusal of the probe; the field data will say
-	// which these were.
-	//
-	// Two carry a note. reddit answered three different ways from one host and
-	// address in one day (403 to curl's default agent, 200 to the Go prober
-	// through a provider, 206 to curl carrying the prober's old agent): it is
-	// the clearest case of a site judging the client as much as the address.
-	// stackoverflow never refused anything -- it redirects everyone.
-	{
-		Name:     "akamai",
-		Class:    ClassSite,
-		Url:      "https://www.akamai.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		// The staged runs recorded ecosia as not refusing; this host measured 403
-		// with 4472 bytes on the same day the table was built. An answer that
-		// differs run to run is what the retries are for.
-		Name:     "ecosia",
-		Class:    ClassSite,
-		Url:      "https://www.ecosia.org",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "reddit",
-		Class:    ClassSite,
-		Url:      "https://www.reddit.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "etsy",
-		Class:    ClassSite,
-		Url:      "https://www.etsy.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		// 302 with an empty body, four staged runs and one here, and it keeps
-		// that declared contract. stackoverflow did not refuse the datacenter
-		// exit it was filed under reputation for -- it redirects everyone. Before
-		// this entry declared its status it failed every run, which reads in a log
-		// exactly like a refusal of the exit and is not one. Check the status
-		// before reading a stack-overflow failure as anything about the exit.
-		Name:     "stack-overflow",
-		Class:    ClassSite,
-		Url:      "https://stackoverflow.com",
-		Expect:   ExpectStatus,
-		Status:   302,
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "reuters",
-		Class:    ClassSite,
-		Url:      "https://www.reuters.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "canva",
-		Class:    ClassSite,
-		Url:      "https://www.canva.com",
-		MaxBytes: maxAssetBytes,
-	},
-	{
-		Name:     "epic-games",
-		Class:    ClassSite,
-		Url:      "https://www.epicgames.com",
-		MaxBytes: maxAssetBytes,
-	},
-}
-
 // Proves a DoH response actually resolved the name, which a
 // status code cannot: a captive portal, a transparent proxy or an interception
 // box all answer 200 with a body. Only an answer section proves resolution.
@@ -1707,11 +383,12 @@ func truncate(s string, n int) string {
 // StatusCode, ByteCount, Latency and Err describe the last attempt made;
 // Attempts and LastFailure say how it got there.
 type CheckResult struct {
-	Name       string
-	Class      Class
-	Ok         bool
-	StatusCode int   // 0 when the request never produced a response
-	ByteCount  int64 // bytes of body actually read, capped; set on failures too
+	Name          string
+	Class         Class
+	Ok            bool
+	StatusCode    int   // 0 when the request never produced a response
+	ByteCount     int64 // bytes of body actually read, capped; set on failures too
+	WireByteCount int64 // URL-mode encoded response-body bytes; never inferred from decoded size
 	// Total bounded fetch duration, preserving the historical metric contract.
 	Latency time.Duration
 	// Time to the first response byte, including DNS and connection setup.
@@ -1722,8 +399,22 @@ type CheckResult struct {
 	ConnectFirstByteLatency time.Duration
 	FirstByteReceived       bool
 	// Capped sampled-body diagnostics, not a calibrated bulk bandwidth sample.
-	BodyDuration       time.Duration
-	BodyBytesPerSecond float64
+	BodyDuration        time.Duration
+	BodyBytesPerSecond  float64
+	WireSampleByteCount int64
+	BodyFirstByteWait   time.Duration
+	// URL-mode diagnostics describe only the final request. Redirect time is
+	// separate, and a content/challenge verdict is never a TLS finding.
+	RequestTimeToFirstByte    time.Duration
+	RequestWritten            bool
+	TcpConnectLatency         time.Duration
+	TlsHandshakeLatency       time.Duration
+	RedirectCount             int
+	ContentClassification     string
+	PerformanceClassification string
+	BodyComplete              bool
+	BodySampled               bool
+	UrlProbeSecurity          []UrlProbeSecurityEvent
 	// Only an already-sampled successful HTTPS IP-text connectivity response
 	// may carry these; DNS answers and provider claims are never exit evidence.
 	ObservedExitIp string    `json:"-"`
@@ -1764,6 +455,12 @@ type ClassSummary struct {
 
 // One full run.
 type Result struct {
+	// Stable report identity and the server-issued durable cycle token.
+	RunId          string
+	CycleStartedAt time.Time
+	// Scheduled URL source, including an explicit country-coverage gap.
+	UrlSource        string
+	UrlProbeEvidence *UrlProbeEvidence
 	// Every sampled destination's outcome after retries, in table
 	// order.
 	Checks []CheckResult
@@ -1811,6 +508,19 @@ type Result struct {
 // Tunes a single Check or Blackhole call. The zero value is valid and
 // uses the defaults below.
 type Options struct {
+	// Scheduled mode records one random URL outcome. The server owns retry
+	// pacing and the ten-success cycle; no per-URL retry hides an error.
+	UrlProbe bool
+	// Per-attempt content, redirect and timing contract served with the catalog.
+	UrlProbePolicy *UrlProbePolicy
+	// Unresolved exact-URL TLS targets are sampled with equal probability to
+	// the normal pool. Their presence never disables normal URL observations.
+	SecurityDestinations []Destination
+	// Accepted durable outcome count is diagnostic progress, not source order.
+	// Normal selection independently draws general/country with equal probability;
+	// missing country coverage uses general URLs without an admission gate.
+	OutcomeCount        int
+	CountryDestinations []Destination
 	// Bounds each attempt of each load. Zero or negative
 	// uses DefaultPerRequestTimeout.
 	PerRequestTimeout time.Duration
@@ -1852,9 +562,8 @@ type Options struct {
 	// with the table on its own.
 	AllDestinations bool
 
-	// The table the run draws from. Nil means the built-in
-	// table, which stays the seed of the server's pool and the fallback when
-	// the pool cannot be fetched (see Pool, fleetprobe.LoadPool).
+	// The configured catalog. A missing catalog fails before network work;
+	// there is no compiled-in fallback.
 	Destinations []Destination
 	// The browser shape every request carries. Nil -- or one with
 	// no user agent -- means DefaultRequestProfile. See RequestProfile.
@@ -1993,8 +702,8 @@ var ErrUnsupported = errors.New("egresshealth: the server does not implement the
 // Runs a random sample of the destination table through client and
 // returns the full pattern of what worked, after every load's tries.
 //
-// The table is Options.Destinations -- the server's pool, when the caller has
-// one -- or the built-in table. The sample is drawn per call and per class
+// The table is the explicit Options.Destinations catalog. URL mode selects
+// one destination; the legacy batch sample is drawn per call and per class
 // (see sampleDestinations and sampleSizes): the same provider probed twice is
 // asked for different destinations, and no provider can know in advance which
 // ones. Coverage of the table accumulates across runs and across the fleet
@@ -2012,6 +721,9 @@ var ErrUnsupported = errors.New("egresshealth: the server does not implement the
 // measures is that provider's willingness and ability to carry ordinary
 // traffic.
 func Check(ctx context.Context, client *http.Client, opts Options) (*Result, error) {
+	if opts.UrlProbe {
+		return checkUrlProbe(ctx, client, opts)
+	}
 	table := opts.table()
 	// One generator for the whole run, drawn first for the sample and then
 	// for the retry spacing, so a caller-supplied seed reproduces both.
@@ -2081,16 +793,13 @@ const AllConcurrency = 10
 // fixed cap bounds extra requests and is included in outer admission budgets.
 const MaxSampledCanaries = 2
 
-// How many sequential rounds one attempt of every
-// destination in the built-in table takes at AllConcurrency.
-func RoundsForAllDestinations() int {
-	return (len(destinations) + AllConcurrency - 1) / AllConcurrency
-}
-
-// How many loads one run of the built-in table makes: the sum
-// of the per-class sample sizes, bounded by what the table actually holds.
-func SamplePerRun() int {
-	return SamplePerRunOf(destinations)
+// The legacy batch budget target, independent of any configured URL catalog.
+func SampleTargetPerRun() int {
+	count := 0
+	for _, size := range sampleSizes {
+		count += size
+	}
+	return count
 }
 
 // Like SamplePerRun, for any table, such as a pool.
@@ -2202,12 +911,9 @@ func (self Options) ipEchoTimeout() time.Duration {
 	return DefaultIpEchoTimeout
 }
 
-// Returns the table a run draws from: Destinations, or the built-in table.
+// Every caller must supply its configuration-owned catalog.
 func (self Options) table() []Destination {
-	if self.Destinations != nil {
-		return self.Destinations
-	}
-	return destinations
+	return self.Destinations
 }
 
 // Returns the profile every request carries: Profile, or the default profile
@@ -2519,6 +1225,10 @@ func fetchWithExitPolicy(ctx context.Context, client *http.Client, d Destination
 // including the provider tunnel's pinning path, which can return the underlying
 // verification error directly.
 func isTlsAuthenticationFailure(err error) bool {
+	var explicit interface{ TLSAuthenticationFailure() bool }
+	if errors.As(err, &explicit) && explicit.TLSAuthenticationFailure() {
+		return true
+	}
 	var verificationErr *tls.CertificateVerificationError
 	if errors.As(err, &verificationErr) {
 		return true
@@ -2589,31 +1299,11 @@ func (self Destination) judge(status int, body []byte) error {
 	return nil
 }
 
-// Returns the host of every destination in the built-in
-// table, de-duplicated and in table order.
-//
-// Nothing outside this package should keep a second copy of the endpoint
-// list. The prober's container cannot resolve DNS, so the operator passes
-// explicit addresses to the confinement self-check with -confinement-address,
-// and this is how they obtain the host list to translate. A hand-maintained
-// copy would drift on the first table change while the check kept reporting
-// success.
-//
-// It covers the whole table, not a sample: any destination can be drawn on any
-// run, so the confinement check has to prove every one of them unreachable
-// directly, and the tunnel client has to be allowed to reach every one of them.
-// The hosts of a server pool are HostsOf that pool.
-func DestinationHosts() []string {
-	return HostsOf(destinations)
-}
-
 // Returns the host of every destination in dests, de-duplicated and in
 // order. It is the tunnel allowlist a run over dests needs.
 //
 // A URL that does not parse, or carries no host, is skipped rather than
-// panicking -- the built-in table is a compile-time constant that
-// TestDestinationHostsCoversEveryDestination holds, and a pool is refused at
-// FetchPool unless every url parses.
+// panicking. Catalog validation rejects malformed URLs before production use.
 func HostsOf(dests []Destination) []string {
 	seen := map[string]bool{}
 	hosts := make([]string, 0, len(dests))
@@ -2630,32 +1320,6 @@ func HostsOf(dests []Destination) []string {
 		hosts = append(hosts, host)
 	}
 	return hosts
-}
-
-// Returns a copy of the built-in table -- all of it, not one
-// run's sample.
-//
-// A copy, not the table: a caller that mutated it -- or the Headers map inside
-// an entry -- would silently change what every subsequent probe measures, and
-// the drift would be invisible in the table's own source. Callers that only
-// need the host list want DestinationHosts; callers sizing a run want
-// SamplePerRun. The server seeds its pool from this.
-func Destinations() []Destination {
-	out := make([]Destination, len(destinations))
-	for i, d := range destinations {
-		out[i] = d
-		if d.Headers != nil {
-			headers := make(map[string]string, len(d.Headers))
-			for k, v := range d.Headers {
-				headers[k] = v
-			}
-			out[i].Headers = headers
-		}
-		if d.Incompatible != nil {
-			out[i].Incompatible = append([]Place(nil), d.Incompatible...)
-		}
-	}
-	return out
 }
 
 // Counts the loads that passed only after a failed attempt: the

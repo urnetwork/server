@@ -82,24 +82,24 @@ func TestSelectProvidersUsesTheServerDueList(t *testing.T) {
 
 // Keeps the prober working
 // against a server that has not deployed the due endpoint.
-func TestSelectProvidersFallsBackWhenTheEndpointIsMissing(t *testing.T) {
+func TestSelectProvidersRequiresDurableDueEndpoint(t *testing.T) {
 	var enumCalled bool
 	srv := enumerationServer(t, &enumCalled)
 	defer srv.Close()
 
 	due := &stubDueLister{err: ingest.ErrDueUnsupported}
 	providers, serverDriven, err := selectProviders(context.Background(), due, 100, srv.URL, "jwt")
-	if err != nil {
-		t.Fatalf("selectProviders err = %v", err)
+	if !errors.Is(err, ingest.ErrDueUnsupported) {
+		t.Fatalf("selectProviders err = %v, want an upgrade error", err)
 	}
 	if serverDriven {
 		t.Error("serverDriven = true, want false on the fallback path")
 	}
-	if !enumCalled {
-		t.Fatal("the enumeration fallback did not run; the prober would do nothing against an older server")
+	if enumCalled {
+		t.Fatal("enumeration bypassed durable probe eligibility and quota")
 	}
-	if len(providers) != 1 || providers[0].ClientId != "enumerated-1" {
-		t.Fatalf("providers = %v, want the enumerated provider", providers)
+	if len(providers) != 0 {
+		t.Fatalf("providers = %v without durable quota", providers)
 	}
 }
 

@@ -4,7 +4,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"math/rand"
 	"strings"
 	"testing"
@@ -21,32 +20,17 @@ import (
 // The seed is the prober's whole built-in table, every row with a category
 // and a region, the two costly cdn objects re-pointed, and every row one the
 // prober can run.
-func TestProviderEgressDestinationSeedIsTheBuiltinTable(t *testing.T) {
-	seed, err := ProviderEgressDestinationSeed()
+func TestProviderEgressDestinationSeedUsesConfiguredContracts(t *testing.T) {
+	sites, err := testParseProviderEgressSites("")
 	if err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	if len(seed) != len(egresshealth.Destinations()) {
-		t.Fatalf("seed rows = %d, want the %d built-in destinations", len(seed), len(egresshealth.Destinations()))
+	if len(sites.Destinations) != 1 || sites.Destinations[0].Name != "synthetic-catalog-site" {
+		t.Fatal("configured seed was replaced by another catalog")
 	}
-	for _, row := range seed {
-		if row.Category == "" || row.Region == "" || row.Source != model.ProviderEgressDestinationSourceBuiltin || row.Revision != 0 {
-			t.Errorf("seed row %s = category %q region %q source %q revision %d", row.Name, row.Category, row.Region, row.Source, row.Revision)
-		}
+	for _, row := range sites.Destinations {
 		if _, err := ProviderEgressDestinationToWire(row); err != nil {
 			t.Errorf("seed row %s cannot be served: %v", row.Name, err)
-		}
-		if url, ok := providerEgressBuiltinUrlReplacements[row.Name]; ok && row.Url != url {
-			t.Errorf("seed row %s url = %q, want the small object %q", row.Name, row.Url, url)
-		}
-	}
-	for name := range providerEgressBuiltinSiteMeta {
-		found := false
-		for _, row := range seed {
-			found = found || row.Name == name
-		}
-		if !found {
-			t.Errorf("the category table names %s, which the built-in table does not hold", name)
 		}
 	}
 }
@@ -95,6 +79,15 @@ func TestProviderEgressDestinationWireRoundTrip(t *testing.T) {
 
 // One egress-sites.yml document, parsed as the refresh parses it.
 func testParseProviderEgressSites(text string) (*ProviderEgressSites, error) {
+	if !strings.Contains(text, "schema_version:") {
+		text = `schema_version: 1
+destinations:
+  - name: synthetic-catalog-site
+    class: site
+    category: reference
+    url: https://catalog.example/
+` + text
+	}
 	return ParseProviderEgressSites(func(out any) error {
 		return yaml.Unmarshal([]byte(text), out)
 	})
@@ -200,25 +193,21 @@ candidates:
 
 // The file shipped in the config repository parses with the prober's rules,
 // holds the two cdn overrides and fills every class it names.
-func TestLoadProviderEgressSitesAcceptsTheDeployedFile(t *testing.T) {
-	if _, err := server.Config.SimpleResource(model.ProviderEgressSitesResourceName); errors.Is(err, server.ErrResourceNotFound) {
-		t.Skip("no egress-sites.yml in this environment's config")
-	}
-	sites, err := LoadProviderEgressSites()
+func TestConfiguredCandidateCanUpdateGlobalContract(t *testing.T) {
+	sites, err := testParseProviderEgressSites(`
+candidates:
+  - name: synthetic-catalog-site
+    class: site
+    category: reference
+    url: https://catalog.example/corrected
+    revision: 1
+`)
 	if err != nil {
-		t.Fatalf("the deployed egress-sites.yml is unusable: %v", err)
+		t.Fatal(err)
 	}
-	byName := map[string]*model.ProviderEgressDestination{}
-	for _, candidate := range sites.Candidates {
-		byName[candidate.Name] = candidate
-	}
-	for _, name := range []string{"cachefly", "amazon-cloudfront"} {
-		if candidate, ok := byName[name]; !ok || candidate.Revision < 1 || candidate.Url != providerEgressBuiltinUrlReplacements[name] {
-			t.Errorf("the deployed file does not override %s with its small object: %+v", name, candidate)
-		}
-	}
-	if len(sites.Candidates) < 40 {
-		t.Errorf("the deployed file holds %d candidates, want the forty or so the refresh promotes from", len(sites.Candidates))
+	rows := sites.configuredRows(nil)
+	if len(rows) != 1 || rows[0].Revision != 1 || rows[0].Url != "https://catalog.example/corrected" {
+		t.Fatal("configured correction did not replace the older global contract")
 	}
 }
 
@@ -328,13 +317,25 @@ func TestBuildProviderEgressDestinationPoolRefusesAPoolTheProberWouldRefuse(t *t
 // seed happens once, and a row taken out of the pool is no longer served.
 func TestGetProviderEgressDestinationPoolSeedsAndServes(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		catalog := []byte(`schema_version: 1
+destinations:
+  - name: first-synthetic-site
+    class: site
+    category: reference
+    url: https://first.example/
+  - name: second-synthetic-site
+    class: site
+    category: reference
+    url: https://second.example/
+`)
+		t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, catalog))
 		ctx := context.Background()
 		pool, err := GetProviderEgressDestinationPool(ctx)
 		if err != nil {
 			t.Fatalf("pool: %v", err)
 		}
-		if len(pool.Destinations) != len(egresshealth.Destinations()) {
-			t.Fatalf("served %d destinations, want the %d built-in ones", len(pool.Destinations), len(egresshealth.Destinations()))
+		if len(pool.Destinations) != 2 {
+			t.Fatalf("served %d destinations, want the two configured entries", len(pool.Destinations))
 		}
 		seeded, err := EnsureProviderEgressDestinationsSeeded(ctx)
 		if err != nil || seeded {
@@ -354,7 +355,7 @@ func TestGetProviderEgressDestinationPoolSeedsAndServes(t *testing.T) {
 				t.Fatalf("the retired row %s is still served", retired.Name)
 			}
 		}
-		if len(pool.Destinations) != len(egresshealth.Destinations())-1 {
+		if len(pool.Destinations) != 1 {
 			t.Fatalf("served %d destinations, want one fewer than the table", len(pool.Destinations))
 		}
 	})

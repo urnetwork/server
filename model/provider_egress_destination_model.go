@@ -825,7 +825,7 @@ func ValidateProviderEgressDestinationName(name string) error {
 // (connect/GEOMAP.md §11.4). It lives in config/all, beside nothing
 // environment-specific, since what makes a site representative does not
 // depend on the deployment.
-const ProviderEgressSitesResourceName = "egress-sites.yml"
+const ProviderEgressSitesResourceName = "qualityprobe.yml"
 
 // The pool refresh's rules (connect/GEOMAP.md §11.4). Every field is a
 // setting: the `settings` block of egress-sites.yml overrides it. Durations

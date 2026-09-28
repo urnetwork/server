@@ -41,7 +41,7 @@ func lookupFails(ctx context.Context, host string) ([]string, error) {
 // egress-health destinations -- its own documentation-range address, so a test
 // can assert that the check covered exactly that set.
 func lookupPerHost(ctx context.Context, host string) ([]string, error) {
-	for i, h := range probeHosts() {
+	for i, h := range probeHosts(testProbeHosts...) {
 		if h == host {
 			return []string{fmt.Sprintf("203.0.113.%d", i+1)}, nil
 		}
@@ -78,11 +78,11 @@ func TestCheckConfinementProbesEveryProbeHost(t *testing.T) {
 		return nil, errors.New("connect: network is unreachable")
 	}
 
-	if err := checkConfinement(context.Background(), dial, lookupPerHost, nil, time.Second); err != nil {
+	if err := checkTestConfinement(context.Background(), dial, lookupPerHost, nil, time.Second); err != nil {
 		t.Fatalf("checkConfinement: %s", err)
 	}
 
-	hosts := probeHosts()
+	hosts := probeHosts(testProbeHosts...)
 	if len(hosts) == 0 {
 		t.Fatal("probeHosts is empty; the check would have nothing to test")
 	}
@@ -106,7 +106,7 @@ func TestCheckConfinementRefusesWhenReachable(t *testing.T) {
 		c1, _ := net.Pipe()
 		return c1, nil
 	}
-	err := checkConfinement(context.Background(), dial, lookupPerHost, nil, time.Second)
+	err := checkTestConfinement(context.Background(), dial, lookupPerHost, nil, time.Second)
 	if err == nil {
 		t.Fatal("checkConfinement returned nil while a probe address was directly reachable")
 	}
@@ -129,7 +129,7 @@ func TestCheckConfinementUsesResolvedAddressesWhenDnsWorks(t *testing.T) {
 		dialed = append(dialed, addr)
 		return nil, errors.New("connect: network is unreachable")
 	}
-	if err := checkConfinement(context.Background(), dial, lookup, nil, time.Second); err != nil {
+	if err := checkTestConfinement(context.Background(), dial, lookup, nil, time.Second); err != nil {
 		t.Fatalf("checkConfinement: %s", err)
 	}
 	if len(dialed) != 1 || dialed[0] != "203.0.113.9:"+confinementPort {
@@ -153,7 +153,7 @@ func TestCheckConfinementRefusesWhenNothingResolves(t *testing.T) {
 		return nil, errors.New("connect: network is unreachable")
 	}
 
-	err := checkConfinement(context.Background(), dial, lookupFails, nil, time.Second)
+	err := checkTestConfinement(context.Background(), dial, lookupFails, nil, time.Second)
 	if err == nil {
 		t.Fatal("checkConfinement returned nil although not one probe host resolved; it tested nothing and must refuse to start")
 	}
@@ -177,7 +177,7 @@ func TestCheckConfinementRefusesWhenNothingResolves(t *testing.T) {
 // resolved hosts are still tested; the gap is named.
 func TestCheckConfinementWarnsWhenSomeHostsDoNotResolve(t *testing.T) {
 	logs := captureLog(t)
-	hosts := probeHosts()
+	hosts := probeHosts(testProbeHosts...)
 	if len(hosts) < 2 {
 		t.Skip("need at least two probe hosts for a partial-resolution case")
 	}
@@ -194,7 +194,7 @@ func TestCheckConfinementWarnsWhenSomeHostsDoNotResolve(t *testing.T) {
 		return nil, errors.New("connect: network is unreachable")
 	}
 
-	if err := checkConfinement(context.Background(), dial, lookup, nil, time.Second); err != nil {
+	if err := checkTestConfinement(context.Background(), dial, lookup, nil, time.Second); err != nil {
 		t.Fatalf("checkConfinement: %s; the hosts that did resolve are still real evidence and must still be checked", err)
 	}
 	if len(dialed) != len(hosts)-1 {
@@ -227,7 +227,7 @@ func TestCheckConfinementUsesExplicitAddressesWithoutResolving(t *testing.T) {
 	}
 
 	explicit := []string{"198.51.100.7:443", "198.51.100.8:443"}
-	if err := checkConfinement(context.Background(), dial, lookup, explicit, time.Second); err != nil {
+	if err := checkTestConfinement(context.Background(), dial, lookup, explicit, time.Second); err != nil {
 		t.Fatalf("checkConfinement: %s", err)
 	}
 	if resolved {
@@ -246,7 +246,7 @@ func TestCheckConfinementStillRefusesWithExplicitAddresses(t *testing.T) {
 		c1, _ := net.Pipe()
 		return c1, nil
 	}
-	err := checkConfinement(context.Background(), dial, lookupFails, []string{"198.51.100.7:443"}, time.Second)
+	err := checkTestConfinement(context.Background(), dial, lookupFails, []string{"198.51.100.7:443"}, time.Second)
 	if !errors.Is(err, confinement.ErrNotConfined) {
 		t.Fatalf("checkConfinement error = %v, want ErrNotConfined", err)
 	}
@@ -376,7 +376,7 @@ func runProber(t *testing.T, args ...string) (string, int) {
 // would certify a blackholing provider as healthy. That is the inversion of the
 // signal, not a degradation of it.
 func TestProbeHostsCoversTheTable(t *testing.T) {
-	hosts := probeHosts()
+	hosts := probeHosts(testProbeHosts...)
 	index := map[string]int{}
 	for _, h := range hosts {
 		index[h]++
@@ -386,13 +386,13 @@ func TestProbeHostsCoversTheTable(t *testing.T) {
 			t.Fatalf("probeHosts lists %q %d times: %v", h, index[h], hosts)
 		}
 	}
-	for _, h := range egresshealth.DestinationHosts() {
+	for _, h := range testProbeHosts {
 		if index[h] == 0 {
 			t.Errorf("egress-health destination host %q is not in probeHosts %v; the confinement check would not cover it, and an operator reading -confinement-address guidance would never learn it exists", h, hosts)
 		}
 	}
-	if len(hosts) != len(egresshealth.DestinationHosts()) {
-		t.Fatalf("probeHosts (%d) differs from the egress-health table (%d) with no extra hosts named", len(hosts), len(egresshealth.DestinationHosts()))
+	if len(hosts) != len(testProbeHosts) {
+		t.Fatalf("probeHosts (%d) differs from the egress-health table (%d) with no extra hosts named", len(hosts), len(testProbeHosts))
 	}
 }
 
@@ -406,7 +406,7 @@ func TestServedPinsAreKeptAsServed(t *testing.T) {
 		"api.example.net": {Leaf: "leaf-api", Intermediate: "int-api"},
 		"retired.example": {Leaf: "leaf-retired", Intermediate: "int-retired"},
 	}
-	for _, h := range egresshealth.DestinationHosts()[:3] {
+	for _, h := range testProbeHosts[:3] {
 		served[h] = ingest.GeolocationPin{Leaf: "leaf-" + h, Intermediate: "int-" + h}
 	}
 	endpoint := &pinEndpoint{served: served}
@@ -471,19 +471,16 @@ func TestProbeTimeoutBelowTheFloorIsRejected(t *testing.T) {
 	}
 }
 
-// The full table is the default because it is the only configuration that
-// exercises concurrency: a sample asks the provider to carry ~30 parallel
-// requests, where a real client under load looks far more like the whole
-// table. Sampling remains available and is cheaper, but it cannot test that.
-func TestEgressHealthAllDefaultsOn(t *testing.T) {
+// Scheduled probes cannot switch into a whole-table measurement mode.
+func TestEgressHealthAllModeIsRejected(t *testing.T) {
 	fs := flag.NewFlagSet("egress-prober", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	all := fs.Bool("egress-health-all", true, "")
-	if err := fs.Parse(nil); err != nil {
+	fs.Bool("egress-health-all", false, "")
+	if err := fs.Parse([]string{"-egress-health-all"}); err != nil {
 		t.Fatalf("parse: %s", err)
 	}
-	if !*all {
-		t.Error("-egress-health-all defaults off; every provider test must run the full table")
+	if err := validateUrlProbeFlags(fs); err == nil {
+		t.Error("an obsolete whole-table measurement flag was accepted")
 	}
 }
 

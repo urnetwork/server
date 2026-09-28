@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,11 +59,13 @@ var (
 // dependency is explicit so tests can substitute it without a provider, and a
 // task can remain a small scheduling adapter.
 type FullOptions struct {
+	// Scheduled mode records one random URL and returns its tunnel immediately.
+	UrlProbe     bool
 	TunnelConfig providertunnel.Config
 	// The served pin set, restricted per probe to the hosts it dials.
 	Pins PinSource
-	// The pass's destination pool (see LoadPool); nil is the built-in
-	// table.
+	// The configured destination pool (see LoadPool). Missing catalogs fail
+	// before a provider tunnel opens; there is no built-in table fallback.
 	Pool PoolSource
 	// Shared cold-start allowance per tunnel generation. Sampled loads start
 	// directly; established requests use the ordinary smaller timeout.
@@ -130,8 +133,10 @@ func validateFullOptions(options FullOptions) error {
 // run and the bandwidth sample use exactly what the tunnel's allowlist was
 // built for, whatever the pool source says by then.
 type probeState struct {
-	path *probePath
-	pool *egresshealth.Pool
+	path                 *probePath
+	pool                 *egresshealth.Pool
+	outcomeCount         int
+	securityDestinations []egresshealth.Destination
 }
 
 // Finds a probe's state from the client the prober hands its
@@ -179,16 +184,24 @@ func NewFullProber(options FullOptions) *prober.Prober {
 				return nil, nil, err
 			}
 			pool := options.Pool.pool()
-			hosts := egresshealth.HostsOf(pool.Destinations)
+			if pool == nil || len(pool.Destinations) == 0 {
+				return nil, nil, egresshealth.ErrNoDestinations
+			}
+			destinations := append([]egresshealth.Destination(nil), pool.Destinations...)
+			destinations = append(destinations, pool.Countries[strings.ToLower(provider.Place.Country)]...)
+			destinations = append(destinations, provider.SecurityDestinations...)
+			hosts := egresshealth.HostsOf(destinations)
 			tunnelConfig := options.TunnelConfig
 			tunnelConfig.Pins = options.Pins.pins()
+			tunnelConfig.RedirectPins = tunnelConfig.Pins
 			tunnelConfig.ProviderCountry = provider.Place.Country
 			path, err := openProbePath(ctx, providerTunnelOpener(tunnelConfig, clientId, hosts), hosts, options.ProbeTimeout)
 			if err != nil {
 				return nil, nil, err
 			}
 			client, _ := path.Current()
-			probes.put(client, &probeState{path: path, pool: pool})
+			probes.put(client, &probeState{path: path, pool: pool, outcomeCount: provider.OutcomeCount,
+				securityDestinations: provider.SecurityDestinations})
 			return client, func() error {
 				probes.remove(client)
 				if reopens := path.reopens(); 0 < reopens {
@@ -199,6 +212,7 @@ func NewFullProber(options FullOptions) *prober.Prober {
 		},
 		Health: func(ctx context.Context, client *http.Client, place egresshealth.Place) (*egresshealth.Result, error) {
 			opts := EgressHealthOptions(options.ProbeTimeout, options.AllDestinations)
+			opts.UrlProbe = options.UrlProbe
 			opts.LoadAttempts = options.LoadAttempts
 			opts.LoadRetryMeanInterval = options.LoadRetryMeanInterval
 			opts.TunnelRecreateAttempts = options.TunnelRecreateAttempts
@@ -207,8 +221,15 @@ func NewFullProber(options FullOptions) *prober.Prober {
 			if state := probes.get(client); state != nil {
 				pool = state.pool
 				opts.Path = state.path
+				opts.OutcomeCount = state.outcomeCount
+				opts.SecurityDestinations = state.securityDestinations
+			}
+			if pool == nil || len(pool.Destinations) == 0 {
+				return nil, egresshealth.ErrNoDestinations
 			}
 			opts.Destinations = pool.Destinations
+			opts.UrlProbePolicy = pool.UrlProbePolicy
+			opts.CountryDestinations = pool.Countries[strings.ToLower(place.Country)]
 			opts.Profile = profileOf(pool)
 			return egresshealth.Check(ctx, client, opts)
 		},
@@ -243,11 +264,11 @@ func RunFull(ctx context.Context, providers []prober.Provider, options FullOptio
 
 // Returns how many sequential request rounds one attempt
 // of every load of a health run needs at its configured sampling geometry.
-func EgressHealthRounds(allDestinations bool) int {
-	requestCount := egresshealth.SamplePerRun() + egresshealth.MaxSampledCanaries
+func EgressHealthRounds(destinations []egresshealth.Destination, allDestinations bool) int {
+	requestCount := egresshealth.SamplePerRunOf(destinations) + egresshealth.MaxSampledCanaries
 	concurrency := egresshealth.DefaultConcurrency
 	if allDestinations {
-		requestCount = len(egresshealth.Destinations())
+		requestCount = len(destinations)
 		concurrency = egresshealth.AllConcurrency
 	}
 	if rounds := (requestCount + concurrency - 1) / concurrency; 1 < rounds {

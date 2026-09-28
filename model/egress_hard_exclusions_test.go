@@ -13,7 +13,7 @@ import (
 
 // The marker is not a provider id. Keeping its wire value here lets the same
 // test compile against the pre-fix reader and writer for causal RED.
-const hardExclusionReadyMemberForTest = "ready:v1"
+const hardExclusionReadyMemberForTest = "ready:v2"
 
 // Removes only this fixture's cache key; a database read-through must not
 // replace it with a partial set containing only the requested candidates.
@@ -46,7 +46,7 @@ func TestProviderHardExclusionsMissingCacheKeepsDirectSafety(t *testing.T) {
 				providers := egressTestFind(ctx, t, []*ProviderSpec{{ClientId: &clientId}},
 					RankModeQuality, 1, forceMinimum, server.NewId())
 				want := 0
-				if clientId == healthy.clientId {
+				if clientId != tls.clientId {
 					want = 1
 				}
 				if len(providers) != want {
@@ -79,7 +79,7 @@ func TestProviderHardExclusionsLegacyCacheReadsThrough(t *testing.T) {
 			}
 		})
 		excluded, err := getProviderHardExclusions(ctx, []server.Id{dark, tls, healthy})
-		if err != nil || len(excluded) != 2 || !excluded[dark] || !excluded[tls] || excluded[healthy] {
+		if err != nil || len(excluded) != 1 || excluded[dark] || !excluded[tls] || excluded[healthy] {
 			t.Fatalf("legacy cache was treated as complete: dark=%t tls=%t healthy=%t count=%d err=%v",
 				excluded[dark], excluded[tls], excluded[healthy], len(excluded), err)
 		}
@@ -177,7 +177,7 @@ func TestProviderHardExclusionsMissingCacheUsesExactRules(t *testing.T) {
 		if rules.DarkConsecutiveFailures <= 1 {
 			t.Fatal("fixture requires the ordinary multi-check dark rule")
 		}
-		if len(excluded) != 2 || !excluded[freshDark] || !excluded[oldTls] {
+		if len(excluded) != 1 || excluded[freshDark] || !excluded[oldTls] {
 			t.Fatalf("read-through changed durable hard-exclusion rules: count=%d dark=%t old_tls=%t",
 				len(excluded), excluded[freshDark], excluded[oldTls])
 		}
@@ -216,7 +216,7 @@ func TestProviderHardExclusionsReadThroughCandidateScope(t *testing.T) {
 		}
 		outside := server.NewId()
 		for _, clientId := range []server.Id{clientIds[0], clientIds[len(clientIds)-1], outside} {
-			egressTestBlackhole(ctx, clientId)
+			SetProviderEgressHealth(ctx, &ProviderEgressHealth{ClientId: clientId, MeasuredAt: server.NowUtc(), Total: 1, TLSAuthenticationFailure: true})
 		}
 		clientIds = append(clientIds, clientIds[0], clientIds[len(clientIds)-1])
 		hardExclusionTestClear(ctx, t)

@@ -16,66 +16,34 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The egress index (connect/GEOMAP.md §10, D23) replaces the net-type score as
-// the quality base of FindProviders2. It is what the egress probe found wrong
-// with a provider, as one small number: every scored load of its latest health
-// run that failed each of its retries costs its class's weight, and the sum is
-// capped. The reliability rollup computes it per provider, with the run's 90 %
-// verdict and the time of the evidence, onto network_client_location_reliability
-// (UpdateClientLocationReliabilities); a provider without a usable run gets an
-// index of 0 and no verdict, and the NULL verdict is what routes it to the
-// online bucket. The client-score job reads the three into the tiers
-// (UpdateClientScores).
-//
-// The rules that decide which bucket a provider is in at all live here too
-// (decideProviderEgress), so the score cache, the location counts, the
-// dashboard and `bringyourctl provider inspect` read one decision:
-//
-//   - a current blackhole verdict or a TLS-authentication failure is a hard
-//     exclusion: the provider is absent everywhere, force_minimum and an
-//     explicit client id included;
-//   - a fresh probe that observed the exit outside the country the provider is
-//     published under is a gate on both buckets and the counts, as a minimum
-//     that force_minimum and an explicit client id still pass;
-//   - quality is the probed providers whose run passes the 90 % rule, speed
-//     every probed provider past the two above, and online, which no request
-//     names, every unprobed one that passes the minimums the other buckets
-//     apply apart from the probe's -- the reliability floors and the
-//     speed-mode score maximum, so a provider no client has measured stays
-//     out; a short bucket borrows from the others (FindProviders2), and the
-//     rollout flag speaks only for a rollup row written before the index.
+// Provider serving eligibility is shared by score export, location counts,
+// request hard exclusions and diagnostics. Reliability, ARIN risk and persistent
+// URL security exceptions gate every bucket. Online includes every common-gate
+// pass; quality and speed additionally require a passing ratio of accepted URL
+// outcomes within eight hours. Only quality excludes ARIN non-quality entries.
+// Performance and the success ratio order admitted providers, never add gates.
 
 // The weights of the index and the bounds of its evidence, with the other
 // tunables of the egress rules. The `egress_index` block of provider.yml,
 // beside the rollout flag, overrides any of the index's (egressIndexSettings).
 type EgressIndexSettings struct {
-	// what one scored load that failed every one of its retries costs, per
-	// class, so a dns failure can be made to cost more than a cdn one once
-	// real data says it should
+	// Legacy configuration compatibility; measured URLs now have equal weight.
 	ClassWeights map[string]int
-	// the cost of a failed load in a class ClassWeights does not name, and of
-	// a failure the run's class tally does not account for: a class the prober
-	// adds later is scored before it is weighted, and a run without a class
-	// breakdown still pays for its failures
+	// Legacy configuration compatibility, unused by the URL success ratio.
 	DefaultClassWeight int
-	// caps the weighted failures, so a broken run cannot bury the performance
-	// adjustment under it
+	// Maximum ranking penalty for a measured failure ratio of one.
 	MaxFailureIndex int
-	// how long a health run stays evidence. A provider without a run within
-	// it, or with a run of fewer than MinScoredLoads loads, has no evidence:
-	// it is in the online bucket, not ranked by an index.
+	// Evidence lifetime, capped at eight hours; the exact boundary is stale.
 	EvidenceMaxAge time.Duration
-	// The 90 % rule: a run passes when
+	// A window passes when
 	// QualityOkNumerator·total ≤ QualityOkDenominator·ok over all its scored
 	// loads, compared in integers so the boundary is exact for every total.
 	QualityOkNumerator   int
 	QualityOkDenominator int
-	// the fewest scored loads a run must have to be evidence. Over a sample of
-	// 26 the one-in-ten line is a two-failure line (GEOMAP §10.5), which says
-	// more about the sample than about the exit.
+	// Legacy configuration compatibility; any measured denominator above zero
+	// is evidence, regardless of the former minimum sample size.
 	MinScoredLoads int
-	// the gate of a fresh probe that observed the exit in a country other than
-	// the one the provider is published under
+	// Legacy diagnostic setting. Only ARIN risk gates country admission.
 	CountryGate bool
 	// added to the tier of a provider FindProviders2
 	// borrows from the other bucket when a request's own bucket comes up short
@@ -85,10 +53,10 @@ type EgressIndexSettings struct {
 	// default holds both edges of the borrowed band with every demerit added
 	// on the better side and none on the worse:
 	//
-	//   - a native carries at most MaxNativeClientScoreTier (2), so at most 9
+	//   - a native carries at most ClientScoreCutoffTier (3), so at most 10
 	//     demerited, and a borrowed provider at least the offset: a demerited
 	//     native ranks ahead of every borrowed provider from an offset of
-	//     2 + 1 + 7 = 10;
+	//     3 + 1 + 7 = 11;
 	//   - a provider borrowed from the other bucket carries at most
 	//     ClientScoreCutoffTier (3) plus the offset, so at most the offset
 	//     plus 10 demerited, and an online one twice the offset: a demerited
@@ -98,7 +66,7 @@ type EgressIndexSettings struct {
 	// The default is the larger, 11, with online at 22, and the borrowed keep
 	// their order among themselves. The client bounds no tier -- a larger one
 	// only ranks later -- so it can be raised. It is never set below
-	// MaxNativeClientScoreTier + 1 (3), the least that keeps every native
+	// ClientScoreCutoffTier + 1 (4), the least that keeps every native
 	// ahead of every borrowed provider before demerits.
 	BackfillTierOffset int
 	// how old the settings a request path reads may be. The passes read
@@ -127,10 +95,10 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 		},
 		DefaultClassWeight:    1,
 		MaxFailureIndex:       6,
-		EvidenceMaxAge:        ProviderEgressLocationMaxAge,
-		QualityOkNumerator:    9,
-		QualityOkDenominator:  10,
-		MinScoredLoads:        50,
+		EvidenceMaxAge:        ProviderEgressHealthMaxAge,
+		QualityOkNumerator:    3,
+		QualityOkDenominator:  5,
+		MinScoredLoads:        1,
 		CountryGate:           true,
 		BackfillTierOffset:    ClientScoreCutoffTier + 1 + MaxClientTierDemerit,
 		RequestSettingsMaxAge: time.Minute,
@@ -198,7 +166,7 @@ func egressIndexSettings() *EgressIndexSettings {
 	setInt("min_scored_loads", overrides.MinScoredLoads, 1, &settings.MinScoredLoads)
 	// below one past the highest native tier a borrowed provider could tie
 	// with, or rank ahead of, a native one even before the client's demerits
-	setInt("backfill_tier_offset", overrides.BackfillTierOffset, MaxNativeClientScoreTier+1, &settings.BackfillTierOffset)
+	setInt("backfill_tier_offset", overrides.BackfillTierOffset, ClientScoreCutoffTier+1, &settings.BackfillTierOffset)
 
 	numerator := settings.QualityOkNumerator
 	denominator := settings.QualityOkDenominator
@@ -275,7 +243,7 @@ type EgressIndex struct {
 	Index int
 	// whether a usable run decided the index
 	Evidence bool
-	// the 90 % verdict over the run's scored loads, meaningful only with
+	// the success-ratio verdict over measured URLs, meaningful only with
 	// Evidence
 	Quality bool
 }
@@ -291,55 +259,47 @@ func (self EgressIndex) QualityVerdict() *bool {
 	return &quality
 }
 
-// The index of GEOMAP §10.3 for a provider whose latest health run is `run`,
-// nil for none. A run is evidence with at least MinScoredLoads scored loads,
-// measured within EvidenceMaxAge. Without evidence the index is 0 and there is
-// no verdict: such a provider is not ordered by an index at all, it is in the
-// online bucket, and a written 0 keeps the column's NULL for the one case that
-// must stay distinguishable, a row the new rollup has not reached.
-//
-// The index is the weighted, capped count of the run's failed loads. A load
-// counts once whatever made it fail: a site a user could not reach through the
-// exit is the fact, and the sites vendors used to call "reputation" pay here
-// exactly as a site that timed out does. The verdict is the 90 % rule over all
-// the run's scored loads.
+// Computes admission and ranking from accepted URL outcomes in the evidence
+// window. Zero measured outcomes are unknown. The index is the ceiling of the
+// failure fraction times MaxFailureIndex; every measured URL has equal weight.
 func ComputeEgressIndex(run *EgressHealthRun, now time.Time, settings *EgressIndexSettings) EgressIndex {
-	if run == nil || run.Total < settings.MinScoredLoads || run.MeasuredAt.Before(now.Add(-settings.EvidenceMaxAge)) {
+	if run == nil || run.Total <= 0 || !run.MeasuredAt.After(now.Add(-min(settings.EvidenceMaxAge, ProviderEgressHealthMaxAge))) {
 		return EgressIndex{}
 	}
 
-	weightedFailures := 0
-	attributedFailures := 0
-	for class, tally := range run.ClassResults {
-		failures := max(0, tally.Total-tally.OK)
-		attributedFailures += failures
-		weightedFailures += settings.classWeight(class) * failures
-	}
-	// the ingest requires the class tally to sum to the run, but a row written
-	// before that check, or with no class breakdown at all, still pays for
-	// every failed load it does not attribute
-	unattributedFailures := max(0, (run.Total-run.OkCount)-attributedFailures)
-	weightedFailures += settings.DefaultClassWeight * unattributedFailures
-
+	// Normalize by measured URLs so collecting more samples cannot turn the
+	// same success ratio into a worse tier merely by accumulating failures.
+	failures := max(0, run.Total-run.OkCount)
+	failureIndex := (int64(failures)*int64(settings.MaxFailureIndex) + int64(run.Total) - 1) / int64(run.Total)
 	return EgressIndex{
-		Index:    min(weightedFailures, settings.MaxFailureIndex, math.MaxInt16),
+		Index:    int(min(failureIndex, int64(settings.MaxFailureIndex), int64(math.MaxInt16))),
 		Evidence: true,
 		Quality:  settings.QualityOkNumerator*run.Total <= settings.QualityOkDenominator*run.OkCount,
 	}
 }
 
-// The reasons a provider is out of a bucket (GEOMAP §10.4), in the order the
-// rules apply, so the first that holds is the one reported: a provider that is
-// both dark and mislocated is reported dark. Blackhole and tls remove a
-// provider from everything, country from every bucket and the counts, health
-// from quality alone, and unprobed from quality and speed, leaving it to the
-// online bucket.
+// A measured success ratio contributes a positive selection weight alongside
+// reliability. Missing evidence is neutral and remains available online.
+func providerUrlProbeSuccessWeight(counts ProviderEgressHealthCounts) float64 {
+	if counts.Total <= 0 {
+		return 1
+	}
+	ratio := max(0.0, min(1.0, float64(counts.OKCount)/float64(counts.Total)))
+	return 0.1 + 0.9*ratio
+}
+
+// Common gate failures exclude every bucket. Health/unprobed and ARIN
+// non-quality explain missing native membership while preserving online supply.
+// Legacy blackhole/country reason labels remain for metric compatibility only.
 const (
-	ProviderExcludedBlackhole = "blackhole"
-	ProviderExcludedTls       = "tls"
-	ProviderExcludedCountry   = "country"
-	ProviderExcludedHealth    = "health"
-	ProviderExcludedUnprobed  = "unprobed"
+	ProviderExcludedBlackhole      = "blackhole"
+	ProviderExcludedTls            = "tls"
+	ProviderExcludedCountry        = "country"
+	ProviderExcludedHealth         = "health"
+	ProviderExcludedUnprobed       = "unprobed"
+	ProviderExcludedArinRisk       = "arin_risk"
+	ProviderExcludedArinNonQuality = "arin_non_quality"
+	ProviderExcludedReliability    = "reliability"
 )
 
 // The reasons in the order the rules apply.
@@ -349,24 +309,23 @@ var ProviderExcludedReasons = []string{
 	ProviderExcludedCountry,
 	ProviderExcludedHealth,
 	ProviderExcludedUnprobed,
+	ProviderExcludedArinRisk,
+	ProviderExcludedArinNonQuality,
+	ProviderExcludedReliability,
 }
 
 // What the rules read about one provider.
 type providerEgressFacts struct {
+	arinRisk                bool
+	arinNonQuality          bool
+	reliabilityFailed       bool
 	blackholed              bool
 	tlsAuthenticationFailed bool
 	// a fresh probe observed the exit in a country other than the published one
 	countryMismatch bool
-	// the rollup's columns. A nil index is a row the new rollup has not
-	// written, which the rules before the index decide.
+	// The rollup index is a ranking diagnostic; the verdict uses current history.
 	egressIndex   *int
 	egressQuality *bool
-	// the rules before the index, read only while egressIndex is nil: the 24
-	// hour health gate, whether there was a run within it, and the count rule
-	// (healthy, and observed by a fresh probe where it is published)
-	legacyHealthPasses   bool
-	legacyHealthMeasured bool
-	legacyCounted        bool
 }
 
 // What the rules do with one provider.
@@ -376,15 +335,10 @@ type providerEgressDecision struct {
 	// absent from every result and count, force_minimum and an explicit client
 	// id included
 	hardExcluded bool
-	// whether the provider passes each bucket's membership and counts toward
-	// the location counts. Each is a minimum: force_minimum re-admits a
-	// provider that fails one unless it is hard excluded.
+	// Native membership in each request mode; performance adds no gate.
 	quality bool
 	speed   bool
-	// the online bucket: no probe verdict at all. It is never requested; a
-	// short bucket borrows from it last, and the client-score job admits only
-	// those of it that pass the reliability floors and the speed-mode score
-	// maximum.
+	// Every common-gate pass belongs to online and advertised supply.
 	online  bool
 	counted bool
 }
@@ -401,8 +355,15 @@ func (self providerCountFilter) egressFacts(
 ) *providerEgressFacts {
 	publishedCountryCode := normalizeCountryCode(rollupCountryCode)
 	observedCountryCode := self.countryCodes[clientId]
-	_, measured := self.healthCounts[clientId]
+	// Read accepted health directly so an old rollup cannot extend freshness.
+	var quality *bool
+	if counts, ok := self.healthCounts[clientId]; ok {
+		quality = ComputeEgressIndex(&EgressHealthRun{MeasuredAt: counts.MeasuredAt, OkCount: counts.OKCount, Total: counts.Total}, self.now, settings).QualityVerdict()
+	}
 	return &providerEgressFacts{
+		arinRisk:                self.arinRisk[clientId],
+		arinNonQuality:          self.arinNonQuality[clientId],
+		reliabilityFailed:       self.reliabilityFailed[clientId],
 		blackholed:              self.isBlackholed(clientId),
 		tlsAuthenticationFailed: self.tlsAuthenticationFailed[clientId],
 		// a provider nobody has located, or whose own country is unknown,
@@ -411,25 +372,23 @@ func (self providerCountFilter) egressFacts(
 			observedCountryCode != "" &&
 			publishedCountryCode != "" &&
 			observedCountryCode != publishedCountryCode,
-		egressIndex:          egressIndex,
-		egressQuality:        egressQuality,
-		legacyHealthPasses:   self.passesHealth(clientId),
-		legacyHealthMeasured: measured,
-		// an unknown published country cannot be verified against anything,
-		// so the old count rule fails it closed
-		legacyCounted: publishedCountryCode != "" && self.countsTowardCountry(clientId, publishedCountryCode),
+		egressIndex:   egressIndex,
+		egressQuality: quality,
 	}
 }
 
-// Applies the rules of GEOMAP §10.3 to one provider. egressTestEnabled is the
-// rollout flag as the caller's pass applies it, which decides only a row the
-// new rollup has not written: the online bucket took over its decision about
-// the unprobed.
+// Decides bucket membership once. The historical rollout flag has no authority
+// to admit unmeasured rows or bypass common gates.
 func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) providerEgressDecision {
 	switch {
-	case facts.blackholed:
+	case facts.reliabilityFailed:
 		return providerEgressDecision{
-			reason:       ProviderExcludedBlackhole,
+			reason:       ProviderExcludedReliability,
+			hardExcluded: true,
+		}
+	case facts.arinRisk:
+		return providerEgressDecision{
+			reason:       ProviderExcludedArinRisk,
 			hardExcluded: true,
 		}
 	case facts.tlsAuthenticationFailed:
@@ -437,31 +396,6 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 			reason:       ProviderExcludedTls,
 			hardExcluded: true,
 		}
-	case facts.countryMismatch:
-		// reachable and safe, just not where it is listed
-		return providerEgressDecision{
-			reason: ProviderExcludedCountry,
-		}
-	}
-
-	if facts.egressIndex == nil {
-		// a row the new rollup has not written keeps the rules it had: the
-		// flag gates both buckets on the 24 hour health run, and the counts
-		// also on a probe having observed the provider where it is published
-		passes := !egressTestEnabled || facts.legacyHealthPasses
-		decision := providerEgressDecision{
-			quality: passes,
-			speed:   passes,
-			counted: !egressTestEnabled || facts.legacyCounted,
-		}
-		if !passes {
-			if facts.legacyHealthMeasured {
-				decision.reason = ProviderExcludedHealth
-			} else {
-				decision.reason = ProviderExcludedUnprobed
-			}
-		}
-		return decision
 	}
 
 	switch {
@@ -475,20 +409,23 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 			counted: true,
 		}
 	case !*facts.egressQuality:
-		// probed, and more than one in ten of its loads failed: out of
-		// quality, still in speed, and counted, since the counts are the
-		// supply a user can use
+		// A measured failing ratio belongs to online, not quality or speed.
 		return providerEgressDecision{
 			reason:  ProviderExcludedHealth,
-			speed:   true,
+			online:  true,
 			counted: true,
 		}
 	default:
-		return providerEgressDecision{
-			quality: true,
+		decision := providerEgressDecision{
+			quality: !facts.arinNonQuality,
 			speed:   true,
+			online:  true,
 			counted: true,
 		}
+		if facts.arinNonQuality {
+			decision.reason = ProviderExcludedArinNonQuality
+		}
+		return decision
 	}
 }
 
@@ -524,18 +461,13 @@ var findProviders2AnsweredProviders = prometheus.NewCounterVec(prometheus.Counte
 	Help: "Providers FindProviders2 location answers held, native and borrowed, per requested rank mode",
 }, []string{"rank_mode"})
 
-// The set of providers a current blackhole verdict or TLS-authentication
-// failure excludes (GEOMAP §10.3), written whole by every location count pass
-// (UpdateClientLocations) and read by FindProviders2 where it assembles a
-// result. The score cache already leaves these providers out, but it is only
-// as current as its last export, and a provider named by client id never
-// passes through the cache: the set is what holds the exclusion on every path,
-// within one count pass of the verdict. One key, so the read is one command.
+// A complete cached snapshot of common gate failures covers normal, explicit
+// client and force_minimum paths. Missing snapshots use bounded candidate reads.
 const providerHardExclusionsKey = "{provider_hard_exclusions}"
 
 // The same atomic set carries evidence that even an empty publication exists.
 // This reserved member cannot be a provider id. Older writers omit it.
-const providerHardExclusionsReadyMember = "ready:v1"
+const providerHardExclusionsReadyMember = "ready:v2"
 
 // Which candidates the complete cached set excludes. A missing, expired or
 // legacy snapshot has unknown coverage, so read only these candidates from
@@ -580,7 +512,7 @@ func getProviderHardExclusions(ctx context.Context, clientIds []server.Id) (excl
 	return
 }
 
-// Read-through uses the exporter's exact dark and TLS rules without loading
+// Read-through uses the exporter's reliability, ARIN-risk and security rules without loading
 // the fleet. Each query has at most 256 distinct candidates and result rows;
 // it observes the caller's context and never publishes a partial global set.
 func readProviderHardExclusions(ctx context.Context, clientIds []server.Id) (map[server.Id]bool, error) {
@@ -597,17 +529,17 @@ func readProviderHardExclusions(ctx context.Context, clientIds []server.Id) (map
 	if len(uniqueClientIds) == 0 {
 		return excludedClientIds, nil
 	}
-	minCheckedAt := server.NowUtc().Add(-ProviderBlackholeCheckMaxAge)
-	rules := GetProviderEgressRules()
 	query := `
 		SELECT client_id
-		FROM provider_blackhole_check
-		WHERE client_id = ANY($1)
-		  AND ` + ProviderBlackholeDarkSql("provider_blackhole_check", "$2", rules) + `
+		FROM network_client_location_reliability AS provider_location
+		WHERE client_id = ANY($1) AND NOT (` + providerEgressEligibilitySql("provider_location") + `)
 		UNION
 		SELECT client_id
 		FROM provider_egress_health
 		WHERE client_id = ANY($1) AND tls_authentication_failure = true
+		UNION
+		SELECT client_id FROM provider_egress_url_security
+		WHERE client_id = ANY($1) AND tls_failure
 	`
 	var returnErr error
 	// This is a safety decision, not an analytics read: do not use a replica
@@ -623,7 +555,7 @@ func readProviderHardExclusions(ctx context.Context, clientIds []server.Id) (map
 				returnErr = err
 				return
 			}
-			rows, err := conn.Query(ctx, query, chunkClientIds, minCheckedAt.UTC())
+			rows, err := conn.Query(ctx, query, chunkClientIds)
 			if err != nil {
 				returnErr = err
 				return
@@ -691,8 +623,7 @@ var ProviderEgressBuckets = []string{
 // leaves out.
 type ProviderEgressCounts struct {
 	// bucket (a rank mode, or online), then index label, to providers.
-	// Membership is the rules' alone, before the reliability and performance
-	// minimums of the score cache.
+	// Membership uses the shared common gates and URL ratio.
 	BucketIndexCounts map[string]map[string]int64
 	// reason to providers, each under the first rule that took it out of a
 	// bucket, every reason present
@@ -810,6 +741,11 @@ type ProviderEgressInspection struct {
 	ObservedCountryCode     string
 	Blackholed              bool
 	TlsAuthenticationFailed bool
+	ArinRisk                bool
+	ArinNonQuality          bool
+	ReliabilityFailed       bool
+	UrlSuccessCount         int
+	UrlErrorCount           int
 	EgressTestEnabled       bool
 	Settings                *EgressIndexSettings
 	// the decision, as the client-score job makes it
@@ -821,10 +757,8 @@ type ProviderEgressInspection struct {
 	Counted      bool
 }
 
-// Reads one provider's rollup row and evidence and decides it, or returns nil
-// when the provider has no rollup row. It loads the whole blackhole, TLS and
-// observed-country sets, as a pass does, so it is for an operator's one-off
-// question and not for a request path.
+// Reads one provider's rollup and accepted URL evidence for operator inspection.
+// This diagnostic uses the same bulk eligibility facts as the publication pass.
 func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgressInspection {
 	var inspection *ProviderEgressInspection
 	var publishedCountryCode *string
@@ -886,6 +820,9 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 	inspection.ObservedCountryCode = countFilter.countryCodes[clientId]
 	inspection.Blackholed = facts.blackholed
 	inspection.TlsAuthenticationFailed = facts.tlsAuthenticationFailed
+	inspection.ArinRisk = facts.arinRisk
+	inspection.ArinNonQuality = facts.arinNonQuality
+	inspection.ReliabilityFailed = facts.reliabilityFailed
 	inspection.Reason = decision.reason
 	inspection.HardExcluded = decision.hardExcluded
 	inspection.Quality = decision.quality
@@ -895,12 +832,13 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 
 	inspection.HealthRun = GetProviderEgressHealth(ctx, clientId)
 	var run *EgressHealthRun
-	if inspection.HealthRun != nil {
+	if counts, ok := countFilter.healthCounts[clientId]; ok {
+		inspection.UrlSuccessCount = counts.OKCount
+		inspection.UrlErrorCount = counts.Total - counts.OKCount
 		run = &EgressHealthRun{
-			MeasuredAt:   inspection.HealthRun.MeasuredAt,
-			OkCount:      inspection.HealthRun.OKCount,
-			Total:        inspection.HealthRun.Total,
-			ClassResults: inspection.HealthRun.ClassResults,
+			MeasuredAt: counts.MeasuredAt,
+			OkCount:    counts.OKCount,
+			Total:      counts.Total,
 		}
 	}
 	inspection.CurrentIndex = ComputeEgressIndex(run, server.NowUtc(), inspection.Settings)

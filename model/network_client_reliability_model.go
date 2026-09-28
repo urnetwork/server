@@ -2337,8 +2337,10 @@ type cityRegionCountry struct {
 }
 
 type clientLocationReliability struct {
-	networkId server.Id
-	connected bool
+	arinRisk       bool
+	arinNonQuality bool
+	networkId      server.Id
+	connected      bool
 	// locations is bucketed by what each connection proved (connect/IPV6.md
 	// A8): the location row is taken from the v4-proven and legacy
 	// connections when any exist, else from the rest (v6-proven or
@@ -2389,6 +2391,8 @@ func newClientLocationReliability(networkId server.Id, connected bool) *clientLo
 // clientLocationReliabilityRow is one connection row as both aggregation
 // queries below select it, in column order.
 type clientLocationReliabilityRow struct {
+	arinRisk              bool
+	arinNonQuality        bool
 	clientId              server.Id
 	networkId             server.Id
 	clientAddressHash     [32]byte
@@ -2420,6 +2424,8 @@ func scanClientLocationReliabilityRow(result server.PgResult) (row clientLocatio
 		&row.relativeLatencyMillis,
 		&row.hasSpeedTest,
 		&row.hasLatencyTest,
+		&row.arinRisk,
+		&row.arinNonQuality,
 	))
 	// scanning assigns a fresh slice, so copy into the fixed-size key
 	copy(row.clientAddressHash[:], clientAddressHashSlice)
@@ -2428,6 +2434,8 @@ func scanClientLocationReliabilityRow(result server.PgResult) (row clientLocatio
 
 // add folds one connection row into the client's summary.
 func (self *clientLocationReliability) add(row clientLocationReliabilityRow) {
+	self.arinRisk = self.arinRisk || row.arinRisk
+	self.arinNonQuality = self.arinNonQuality || row.arinNonQuality
 	switch ConnectionProvenIpFamily(row.ipVersion, row.ipFamilyIntent) {
 	case 4:
 		self.ipv4Proven = true
@@ -2493,7 +2501,7 @@ func (self *clientLocationReliability) Values() []any {
 	// [16] egress_quality
 	// [17] egress_evidence_time
 
-	values := make([]any, 18)
+	values := make([]any, 20)
 
 	values[0] = self.networkId
 
@@ -2538,6 +2546,8 @@ func (self *clientLocationReliability) Values() []any {
 	values[15] = self.egressIndex
 	values[16] = self.egressQuality
 	values[17] = self.egressEvidenceTime
+	values[18] = self.arinRisk
+	values[19] = self.arinNonQuality
 
 	return values
 }
@@ -2609,7 +2619,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			COALESCE(network_client_speed.bytes_per_second, 0) AS bytes_per_second,
 			COALESCE(network_client_latency.latency_ms - network_client_connection.expected_latency_ms, 0) AS relative_latency_ms,
 			network_client_speed.bytes_per_second IS NOT NULL AS has_speed_test,
-			network_client_latency.latency_ms IS NOT NULL AS has_latency_test
+			network_client_latency.latency_ms IS NOT NULL AS has_latency_test,
+			network_client_location.arin_risk,
+			network_client_location.arin_non_quality
 
 		FROM network_client_connection
 
@@ -2665,7 +2677,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			COALESCE(network_client_speed.bytes_per_second, 0) AS bytes_per_second,
 			COALESCE(network_client_latency.latency_ms - network_client_connection.expected_latency_ms, 0) AS relative_latency_ms,
 			network_client_speed.bytes_per_second IS NOT NULL AS has_speed_test,
-			network_client_latency.latency_ms IS NOT NULL AS has_latency_test
+			network_client_latency.latency_ms IS NOT NULL AS has_latency_test,
+			network_client_location.arin_risk,
+			network_client_location.arin_non_quality
 
 		FROM network_client_connection
 
@@ -2709,30 +2723,18 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		}
 	})
 
-	// the egress index (connect/GEOMAP.md §10.4), from each provider's latest
-	// health run and location probe, in the same pass that fills the net-type
-	// maxima. Both tables hold one row per ever-probed provider, so each is
-	// read whole once for the pass rather than once per provider. Nothing of
-	// the net-type score enters it: a provider without evidence is written an
-	// index of 0 and no verdict, which puts it in the online bucket. The
-	// blackhole and TLS sets are not folded in: they are exclusions, read where
-	// the pool is built and the result assembled, since a verdict must not
-	// wait for this pass to take effect or to lift.
+	// Aggregate accepted URL outcomes in the evidence window. Missing evidence
+	// leaves the provider online-only. Security remains a separate common gate.
 	egressSettings := egressIndexSettings()
 	egressNow := server.NowUtc()
 	clientIdHealthRuns := func() map[server.Id]*EgressHealthRun {
 		clientIdHealthRuns := map[server.Id]*EgressHealthRun{}
 		result, err := tx.Query(
 			ctx,
-			`
-			SELECT
-				client_id,
-				measured_at,
-				ok_count,
-				total_count,
-				class_results
-			FROM provider_egress_health
-			`,
+			`SELECT client_id, MAX(measured_at), SUM(ok_count), SUM(total_count), '{}'::jsonb
+			FROM (`+providerEgressHealthWindowSql()+`) AS evidence GROUP BY client_id`,
+			egressNow.Add(-min(egressSettings.EvidenceMaxAge, ProviderEgressHealthMaxAge)).UTC(),
+			egressNow.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -2754,7 +2756,21 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 					glog.Infof("[egress]client %s class results are unreadable (%s)\n", clientId, err)
 					healthRun.ClassResults = map[string]ProviderEgressHealthClassResult{}
 				}
-				clientIdHealthRuns[clientId] = healthRun
+				if previous := clientIdHealthRuns[clientId]; previous != nil {
+					previous.OkCount += healthRun.OkCount
+					previous.Total += healthRun.Total
+					if previous.MeasuredAt.Before(healthRun.MeasuredAt) {
+						previous.MeasuredAt = healthRun.MeasuredAt
+					}
+					for class, tally := range healthRun.ClassResults {
+						combined := previous.ClassResults[class]
+						combined.OK += tally.OK
+						combined.Total += tally.Total
+						previous.ClassResults[class] = combined
+					}
+				} else {
+					clientIdHealthRuns[clientId] = healthRun
+				}
 			}
 		})
 		return clientIdHealthRuns
@@ -2766,10 +2782,13 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		result, err := tx.Query(
 			ctx,
 			`
-			SELECT
-				client_id,
-				observed_at
-			FROM provider_egress_location
+			SELECT client_id, MAX(observed_at)
+			FROM (
+				SELECT client_id, observed_at FROM provider_egress_location
+				UNION ALL
+				SELECT client_id, measured_at AS observed_at FROM provider_egress_health
+			) AS latest_evidence
+			GROUP BY client_id
 			`,
 		)
 		server.WithPgResult(result, err, func() {
@@ -2821,7 +2840,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			    ipv6_proven bool,
 			    egress_index smallint NULL,
 			    egress_quality bool NULL,
-			    egress_evidence_time timestamp NULL
+			    egress_evidence_time timestamp NULL,
+			    arin_risk bool,
+			    arin_non_quality bool
 	        )
 	    `,
 		clientLocationReliabilities,
@@ -2850,7 +2871,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        ipv6_proven,
 	        egress_index,
 	        egress_quality,
-	        egress_evidence_time
+	        egress_evidence_time,
+	        arin_risk,
+	        arin_non_quality
 	    )
 	    SELECT
 	    	client_id,
@@ -2872,7 +2895,9 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        ipv6_proven,
 	        egress_index,
 	        egress_quality,
-	        egress_evidence_time
+	        egress_evidence_time,
+	        arin_risk,
+	        arin_non_quality
 	    FROM temp_network_client_location_reliability
 	    ORDER BY client_id
 	    ON CONFLICT (client_id) DO UPDATE
@@ -2895,10 +2920,27 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	        ipv6_proven = EXCLUDED.ipv6_proven,
 	        egress_index = EXCLUDED.egress_index,
 	        egress_quality = EXCLUDED.egress_quality,
-	        egress_evidence_time = EXCLUDED.egress_evidence_time
+	        egress_evidence_time = EXCLUDED.egress_evidence_time,
+	        arin_risk = EXCLUDED.arin_risk,
+	        arin_non_quality = EXCLUDED.arin_non_quality
 	    `,
 		updateBlockNumber,
 	))
+
+	// Seed quota scheduling once per existing location pass, not once per due
+	// request. Conflict leaves the current cycle and its retry deadline intact.
+	server.RaisePgResult(tx.Exec(ctx, `
+		INSERT INTO provider_egress_probe_cycle (client_id, cycle_started_at, next_attempt_at, eligible)
+		SELECT provider_location.client_id, $1, $1, true
+		FROM network_client_location_reliability AS provider_location
+		JOIN temp_network_client_location_reliability AS updated USING (client_id)
+		JOIN network_client AS provider ON provider.client_id = provider_location.client_id
+		WHERE provider_location.connected AND provider_location.valid
+		AND (provider_location.ipv4_proven OR NOT provider_location.ipv6_proven)
+		AND provider.active AND provider.source_client_id IS NULL
+		AND EXISTS (SELECT 1 FROM provide_key WHERE provide_key.client_id = provider_location.client_id AND provide_mode = $2)
+		AND `+providerProbeEligibilitySql("provider_location")+`
+		ON CONFLICT (client_id) DO NOTHING`, egressNow.UTC(), ProvideModePublic))
 
 	// TODO on pg17 this could be part of a MERGE with source missing
 	server.RaisePgResult(tx.Exec(
@@ -2920,6 +2962,8 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	    	network_client_location_reliability.connected = true
 	    `,
 	))
+
+	updateProviderUrlProbeEligibility(ctx, tx)
 
 	// result, err = tx.Query(
 	// 	ctx,

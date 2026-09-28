@@ -2,6 +2,7 @@ package fleetprobe
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -108,9 +109,8 @@ func TestFullProberHealthRunsThePassPoolForTheProvidersPlace(t *testing.T) {
 	}
 }
 
-// No pool source is the built-in
-// table, never an empty run.
-func TestFullProberFallsBackToTheBuiltinTable(t *testing.T) {
+// Missing catalog data is a local error, never a fallback request.
+func TestFullProberRefusesMissingCatalog(t *testing.T) {
 	transport := &recordingRoundTripper{}
 	providerProber := NewFullProber(FullOptions{
 		TunnelConfig: providertunnel.Config{ApiUrl: "https://api.operator.example"},
@@ -118,11 +118,8 @@ func TestFullProberFallsBackToTheBuiltinTable(t *testing.T) {
 		LoadAttempts: 1,
 	})
 	res, err := providerProber.Health(context.Background(), &http.Client{Transport: transport}, egresshealth.Place{})
-	if err != nil {
-		t.Fatalf("Health: %v", err)
-	}
-	if res.TableTotal != len(egresshealth.Destinations()) || res.Total+res.NotMeasured != egresshealth.SamplePerRun() {
-		t.Fatalf("TableTotal = %d, loads = %d, want the built-in table's %d and its %d-load sample", res.TableTotal, res.Total, len(egresshealth.Destinations()), egresshealth.SamplePerRun())
+	if !errors.Is(err, egresshealth.ErrNoDestinations) || res != nil || len(transport.hosts) != 0 {
+		t.Fatalf("missing catalog result=%v error=%v requests=%d", res != nil, err, len(transport.hosts))
 	}
 }
 

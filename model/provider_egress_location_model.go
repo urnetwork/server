@@ -12,6 +12,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 // ProviderEgressProbeResourceName is the deployment's probe configuration. The
@@ -31,6 +32,11 @@ const ProviderEgressProbeResourceName = "provider_egress_probe.yml"
 // argument snapshot's, so both can embed this struct and neither restates a
 // key.
 type ProviderEgressRules struct {
+	// Read the same exact version for quality ranking and rolling probe quota.
+	UrlProbeResultVersion int `yaml:"url_probe_result_version" json:"url_probe_result_version"`
+	// URL turns release their tunnel before waiting for these durable intervals.
+	UrlSuccessIntervalSeconds int `yaml:"url_success_interval_seconds" json:"url_success_interval_seconds"`
+	UrlFailureIntervalSeconds int `yaml:"url_failure_interval_seconds" json:"url_failure_interval_seconds"`
 	// DarkConsecutiveFailures is how many failed checks in a row make a
 	// provider dark. One failed check is a failure, not a verdict: a slow cold
 	// start or a reconnect mid-check fails a single check for reasons that
@@ -74,20 +80,35 @@ type ProviderEgressRules struct {
 // The rules of connect/GEOMAP.md §11.3.
 func DefaultProviderEgressRules() ProviderEgressRules {
 	return ProviderEgressRules{
-		DarkConsecutiveFailures: 3,
-		DarkMinimumSpanSeconds:  30 * 60,
-		DarkBackoffSeconds:      []int{5 * 60, 15 * 60, 30 * 60},
-		DarkBatchGuard:          0.2,
-		DarkBatchGuardMinChecks: 10,
-		RunBatchGuard:           0.3,
-		RunBatchGuardMinRuns:    3,
-		CityConfidentRadiusKm:   25,
+		UrlProbeResultVersion:     egresshealth.UrlProbePolicyVersion,
+		UrlSuccessIntervalSeconds: 20 * 60,
+		UrlFailureIntervalSeconds: 60,
+		DarkConsecutiveFailures:   3,
+		DarkMinimumSpanSeconds:    30 * 60,
+		DarkBackoffSeconds:        []int{5 * 60, 15 * 60, 30 * 60},
+		DarkBatchGuard:            0.2,
+		DarkBatchGuardMinChecks:   10,
+		RunBatchGuard:             0.3,
+		RunBatchGuardMinRuns:      3,
+		CityConfidentRadiusKm:     25,
 	}
 }
 
 // Reports why the rules cannot be applied, or nil.
 func (self ProviderEgressRules) Validate() error {
 	var problems []string
+	if self.UrlProbeResultVersion != egresshealth.UrlProbePolicyVersion {
+		problems = append(problems, fmt.Sprintf("url_probe_result_version %d is unsupported", self.UrlProbeResultVersion))
+	}
+	if self.UrlSuccessIntervalSeconds < 0 || self.UrlFailureIntervalSeconds < 0 {
+		problems = append(problems, "URL probe intervals must not be negative")
+	}
+	if self.UrlSuccessIntervalSeconds >= int(ProviderEgressProbeRefreshAge/time.Second)*10/(11*(ProviderEgressProbeSuccessTarget-1)) {
+		problems = append(problems, "URL success interval with jitter cannot complete ten probes within four hours")
+	}
+	if self.UrlFailureIntervalSeconds >= int(ProviderEgressProbeRefreshAge/time.Second) {
+		problems = append(problems, "URL failure retry must remain inside the four-hour cycle")
+	}
 	if self.DarkConsecutiveFailures < 1 {
 		problems = append(problems, fmt.Sprintf("dark_consecutive_failures %d must be at least 1", self.DarkConsecutiveFailures))
 	}
@@ -172,6 +193,7 @@ func ProviderEgressRulesFromResource(resource *server.SimpleResource, err error)
 type providerEgressRulesSnapshot struct {
 	rules    ProviderEgressRules
 	loadTime time.Time
+	err      error
 }
 
 // providerEgressRulesStaleAfter bounds how old the rules a request path reads
@@ -203,10 +225,22 @@ func GetProviderEgressRules() ProviderEgressRules {
 		snapshot = &providerEgressRulesSnapshot{
 			rules:    rules,
 			loadTime: time.Now(),
+			err:      err,
 		}
 		currentProviderEgressRules.Store(snapshot)
 	}
 	return snapshot.rules
+}
+
+// One exact selector is shared by eight-hour ranking and four-hour quota.
+// Unsupported or unreadable configuration selects no evidence; it cannot
+// silently revert to an older contract or mean "this version or anything newer".
+func SelectedProviderUrlProbePolicyVersion() int {
+	rules := GetProviderEgressRules()
+	if snapshot := currentProviderEgressRules.Load(); snapshot != nil && snapshot.err != nil {
+		return -1
+	}
+	return rules.UrlProbeResultVersion
 }
 
 // ProviderEgressLocationMaxAge bounds how long a probed egress location is
@@ -214,15 +248,16 @@ func GetProviderEgressRules() ProviderEgressRules {
 // mmdb lookup on the observed control ip.
 const ProviderEgressLocationMaxAge = 7 * 24 * time.Hour
 
-// ProviderEgressProbeAttemptBackoff is how long a probe *attempt* defers a
-// provider from being offered up again, whether or not the attempt succeeded.
-//
-// It is much shorter than the staleness window a successful probe buys
-// (providerEgressDueAge in api/handlers, half ProviderEgressLocationMaxAge): a
-// provider that fails to probe should be retried periodically -- the fault may
-// be transient -- just not on every single poll, which is what starves the rest
-// of the queue.
-const ProviderEgressProbeAttemptBackoff = 6 * time.Hour
+// Accepted full-quality evidence is refreshed halfway to its eight-hour
+// expiry. Location evidence has its own independent lifetime.
+const ProviderEgressProbeRefreshAge = 4 * time.Hour
+
+// Accepted successful URL measurements needed to finish one provider cycle.
+const ProviderEgressProbeSuccessTarget = 10
+
+// An incomplete attempt gets a bounded retry without occupying every poll.
+// A setup or publication failure must not consume the four-hour refresh cycle.
+const ProviderEgressProbeAttemptBackoff = 15 * time.Minute
 
 // ProbeRunBatchGuardClass is the attempt failure class of a full batch the run
 // guard held back (ProviderEgressRules.RunBatchGuard): the batch's providers
@@ -376,7 +411,7 @@ type ProviderEgressProbeAttempt struct {
 // hand it back to the prober early.
 func SetProviderEgressProbeAttempt(ctx context.Context, a *ProviderEgressProbeAttempt) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
+		stored, err := tx.Exec(
 			ctx,
 			`
 			INSERT INTO provider_egress_probe_attempt (
@@ -397,7 +432,19 @@ func SetProviderEgressProbeAttempt(ctx context.Context, a *ProviderEgressProbeAt
 			a.AttemptAt.UTC(),
 			a.ProbeFailure,
 			server.NowUtc(),
-		))
+		)
+		server.Raise(err)
+		if stored.RowsAffected() > 0 && a.ProbeFailure != "" {
+			// Setup/publication failures preserve evidence and quota. Release the
+			// claim into paced retry without inventing a failed URL measurement.
+			server.RaisePgResult(tx.Exec(ctx, `
+				UPDATE provider_egress_probe_cycle SET next_attempt_at = `+
+				providerUrlProbePacedAttemptSql("provider_egress_probe_cycle", "$2", "0")+`
+				WHERE client_id=$1 AND cycle_started_at <= $2
+				AND (success_count < $3 OR (`+providerHasUrlSecurityExceptionSql("provider_egress_probe_cycle.client_id")+`))
+				AND (latest_result_at IS NULL OR latest_result_at < $2)`,
+				a.ClientId, a.AttemptAt.UTC(), ProviderEgressProbeSuccessTarget))
+		}
 	})
 }
 
@@ -712,10 +759,8 @@ func GetProviderEgressPlaces(ctx context.Context, clientIds []server.Id) map[ser
 	return places
 }
 
-// providerEgressStaleHealthDueQuery is formatted with the current-dark
-// predicate (%[1]s, see ProviderBlackholeDarkSql) and the attempt-backoff
-// predicate (%[2]s, see providerEgressAttemptDeferredSql) before it is run,
-// so its own modulo operators are written %% to survive the formatting.
+// Bounded oldest-health head, formatted with common eligibility and attempt
+// backoff before execution. Modulo operators survive that formatting.
 const providerEgressStaleHealthDueQuery = `
 	SELECT
 		provider_egress_health.client_id,
@@ -732,6 +777,8 @@ const providerEgressStaleHealthDueQuery = `
 		network_client.source_client_id IS NULL AND
 		network_client_location_reliability.connected = true AND
 		network_client_location_reliability.valid = true AND
+		(network_client_location_reliability.ipv4_proven OR NOT network_client_location_reliability.ipv6_proven) AND
+		%[1]s AND
 		EXISTS (
 			SELECT 1 FROM provide_key
 			WHERE
@@ -744,15 +791,9 @@ const providerEgressStaleHealthDueQuery = `
 				provider_egress_probe_attempt.client_id = provider_egress_health.client_id AND
 				%[2]s
 		) AND
-		NOT EXISTS (
-			SELECT 1 FROM provider_blackhole_check
-			WHERE
-				provider_blackhole_check.client_id = provider_egress_health.client_id AND
-				%[1]s
-		) AND
 		(
 			$5 <= 1 OR
-			((hashtext(provider_egress_health.client_id::text) %% $5) + $5) %% $5 = $6
+			%[3]s = $6
 		)
 
 	ORDER BY
@@ -761,95 +802,12 @@ const providerEgressStaleHealthDueQuery = `
 	LIMIT $4
 `
 
-// GetProviderEgressLocationDue returns the client ids of providers whose full
-// egress probe is due because sampled-site health is stale or absent, subject
-// to attempt backoff. Exit location is independent evidence: its absence or
-// staleness never makes a provider with fresh health due by itself.
-//
-// This is the durable replacement for the prober's in-memory ttl cache: the
-// schedule lives in the database, so a prober restart resumes where it left
-// off instead of re-probing everything.
-//
-// Three things about the shape of this query matter.
-//
-// First, every lane is joined back to the live provider population: active
-// top-level clients with a connected + valid location-reliability row. The
-// unlocated lane is sourced from that population directly because its dominant
-// case has no provider_egress_location row at all.
-//
-// Second, only providers holding a Public provide key are returned. Probing
-// tunnels through the provider itself, which means opening a contract from
-// outside the provider's own network -- something a provider without a Public
-// key refuses. Offering one to the prober would burn a probe slot on a
-// guaranteed failure. This is the same filter UpdateClientLocations and
-// UpdateClientScores apply (network_client_location_model.go).
-//
-// Third, a recent *attempt* defers a provider the same way a recent success
-// does. Without that, a provider that connects and holds a Public provide key
-// but always fails to probe -- for any reason other than the missing Public key
-// screened for above -- never gets an egress row, so its observed_at stays
-// NULL, so it sorts ahead of every stale-but-refreshable provider on every
-// single poll, forever. Enough such providers to fill a batch and no healthy
-// provider is ever refreshed again, while this endpoint goes on returning a
-// full, plausible-looking batch. The in-memory ttl cache this replaced was
-// incidentally immune, because it marked a provider probed whether or not the
-// probe worked; moving the schedule server-side dropped that protection, and
-// provider_egress_probe_attempt is what restores it.
-//
-// Fourth, a current dark verdict defers the expensive full probe: the
-// consecutive failed checks of GEOMAP §11.3 (ProviderBlackholeDarkSql), not a
-// single failed check, which is only a failure and may be a slow cold start.
-// The cheap blackhole queue remains independent and retries failures on its
-// short backoff, so a passing recheck makes the provider immediately
-// full-probeable again. If that queue stalls, its verdict ages out after
-// ProviderBlackholeCheckMaxAge and this queue fails open. Missing checks, stale
-// checks, a run of failures short of dark, and current passing checks never
-// exclude a provider.
-//
-// The observed-at and attempt-at cutoffs are computed by the caller in Go and
-// bound as parameters. The health and current-blackhole cutoffs are likewise
-// computed in Go from their model lifetimes. All four timestamps are naive
-// `timestamp` values holding UTC; comparing them to SQL now() would cast
-// through the session timezone.
-//
-// # Bounded indexed heads, not one outer-join sort
-//
-// A single statement over the complete live-provider population cannot use the
-// evidence timestamps' ordered indexes for a global deadline sort. Instead,
-// the location and health tables supply bounded oldest-evidence heads through
-// (timestamp, client_id), with the location head excluding fresh health. A
-// third output-bounded anti-health head finds
-// providers whose accepted location has no health row, which is possible
-// because health reporting is non-fatal to location submission. Absence in a
-// different table has no observed_at range key; PostgreSQL may correctly scan
-// and sort the small location table when missing-health rows are rare. The
-// health head does not require an exit location, so retained stale health after
-// location cleanup remains deadline-ordered. Go deduplicates
-// those heads and merges them by absolute hard expiry: observed_at +
-// ProviderEgressLocationMaxAge, measured_at + ProviderEgressHealthMaxAge, or
-// observed_at + ProviderEgressHealthMaxAge for missing health. Equal deadlines
-// use client_id, so every limit is deterministic. Taking the requested limit
-// from each head is sufficient even when they overlap: a head that reaches the
-// limit alone supplies that many distinct rows, while a shorter head has
-// exposed all candidates in its lane.
-//
-// Urgent evidence refreshes are admitted before the unlocated lane. The latter
-// contains providers with neither location nor health, remains a separately
-// bounded anti-join ordered by client_id, and fills only unused capacity. Its
-// six-hour attempt floor still prevents an immediate
-// failed retry from occupying every poll. This ordering deliberately does not
-// choose the unresolved policy between first attempts and retries inside the
-// unlocated lane; retaining their latest attempt rows preserves the evidence a
-// later explicit policy can use.
-//
-// Every head repeats the same active, top-level, connected, valid, Public-key,
-// recent-attempt, and normalized-shard predicates. Separate statements can see
-// a provider cross categories between snapshots, so the Go merge also
-// deduplicates unlocated rows before returning them.
-//
-// GetProviderEgressLocationDue is the unsharded queue: one prober takes the
-// whole fleet. Equivalent to GetProviderEgressLocationDueSharded with a single
-// shard, and kept so existing callers are unaffected.
+// Read-only compatibility view of missing or stale URL evidence. All lanes
+// share reliability and ARIN risk eligibility; cheap reachability telemetry
+// cannot suppress revalidation. Production uses ClaimProviderUrlProbeDue
+// for durable ten-success cycles, pacing, and duplicate admission protection.
+// The indexed evidence heads retain deterministic deadline ordering here for
+// diagnostics and older callers; location alone never proves URL success.
 func GetProviderEgressLocationDue(
 	ctx context.Context,
 	minObservedAt time.Time,
@@ -899,12 +857,11 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 ) ([]server.Id, ProviderEgressDueDiagnostics) {
 	now := server.NowUtc()
 	rules := GetProviderEgressRules()
-	minBlackholeCheckedAt := now.Add(-ProviderBlackholeCheckMaxAge)
 	// a batch the run guard held back measured nothing about its providers,
 	// so they come round again after the first backoff step rather than the
 	// ordinary attempt backoff
 	minGuardAttemptAt := now.Add(-rules.DarkBackoff(0))
-	minMeasuredAt := now.Add(-ProviderEgressHealthMaxAge / 2)
+	minMeasuredAt := now.Add(-ProviderEgressProbeRefreshAge)
 	clientIds := []server.Id{}
 	diagnostics := ProviderEgressDueDiagnostics{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -945,16 +902,18 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 				NOT EXISTS (
 					SELECT 1 FROM provider_egress_health
 					WHERE provider_egress_health.client_id = provider_egress_location.client_id
-					  AND provider_egress_health.measured_at >= $9
+					  AND provider_egress_health.measured_at >= $8
 					  AND NOT (
 					      provider_egress_location.update_time > provider_egress_health.measured_at
-					      AND EXTRACT(EPOCH FROM (provider_egress_location.update_time - provider_egress_location.observed_at)) >= $10
+					      AND EXTRACT(EPOCH FROM (provider_egress_location.update_time - provider_egress_location.observed_at)) >= $9
 					  )
 				) AND
 				network_client.active = true AND
 				network_client.source_client_id IS NULL AND
 				network_client_location_reliability.connected = true AND
 				network_client_location_reliability.valid = true AND
+				(network_client_location_reliability.ipv4_proven OR NOT network_client_location_reliability.ipv6_proven) AND
+				`+providerProbeEligibilitySql("network_client_location_reliability")+` AND
 				EXISTS (
 					SELECT 1 FROM provide_key
 					WHERE
@@ -965,17 +924,11 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 					SELECT 1 FROM provider_egress_probe_attempt
 					WHERE
 						provider_egress_probe_attempt.client_id = provider_egress_location.client_id AND
-						`+providerEgressAttemptDeferredSql("provider_egress_probe_attempt", "$3", "$8")+`
-				) AND
-				NOT EXISTS (
-					SELECT 1 FROM provider_blackhole_check
-					WHERE
-						provider_blackhole_check.client_id = provider_egress_location.client_id AND
-						`+ProviderBlackholeDarkSql("provider_blackhole_check", "$7", rules)+`
+						`+providerEgressAttemptDeferredSql("provider_egress_probe_attempt", "$3", "$7")+`
 				) AND
 				(
 					$5 <= 1 OR
-					((hashtext(provider_egress_location.client_id::text) % $5) + $5) % $5 = $6
+					`+providerUrlProbeShardSql("provider_egress_location.client_id", "$5")+` = $6
 				)
 
 			ORDER BY
@@ -989,7 +942,6 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 			headLimit,
 			shardCount,
 			shardIndex,
-			minBlackholeCheckedAt.UTC(),
 			minGuardAttemptAt.UTC(),
 			minMeasuredAt.UTC(),
 			providerClientVerdictProbeDueAge.Seconds(),
@@ -1014,8 +966,9 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 			ctx,
 			fmt.Sprintf(
 				providerEgressStaleHealthDueQuery,
-				ProviderBlackholeDarkSql("provider_blackhole_check", "$7", rules),
-				providerEgressAttemptDeferredSql("provider_egress_probe_attempt", "$3", "$8"),
+				providerProbeEligibilitySql("network_client_location_reliability"),
+				providerEgressAttemptDeferredSql("provider_egress_probe_attempt", "$3", "$7"),
+				providerUrlProbeShardSql("provider_egress_health.client_id", "$5"),
 			),
 			ProvideModePublic,
 			minMeasuredAt.UTC(),
@@ -1023,7 +976,6 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 			headLimit,
 			shardCount,
 			shardIndex,
-			minBlackholeCheckedAt.UTC(),
 			minGuardAttemptAt.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
@@ -1069,6 +1021,8 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 				network_client.source_client_id IS NULL AND
 				network_client_location_reliability.connected = true AND
 				network_client_location_reliability.valid = true AND
+				(network_client_location_reliability.ipv4_proven OR NOT network_client_location_reliability.ipv6_proven) AND
+				`+providerProbeEligibilitySql("network_client_location_reliability")+` AND
 				EXISTS (
 					SELECT 1 FROM provide_key
 					WHERE
@@ -1084,17 +1038,11 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 					SELECT 1 FROM provider_egress_probe_attempt
 					WHERE
 						provider_egress_probe_attempt.client_id = provider_egress_location.client_id AND
-						`+providerEgressAttemptDeferredSql("provider_egress_probe_attempt", "$2", "$7")+`
-				) AND
-				NOT EXISTS (
-					SELECT 1 FROM provider_blackhole_check
-					WHERE
-						provider_blackhole_check.client_id = provider_egress_location.client_id AND
-						`+ProviderBlackholeDarkSql("provider_blackhole_check", "$6", rules)+`
+						`+providerEgressAttemptDeferredSql("provider_egress_probe_attempt", "$2", "$6")+`
 				) AND
 				(
 					$4 <= 1 OR
-					((hashtext(provider_egress_location.client_id::text) % $4) + $4) % $4 = $5
+					`+providerUrlProbeShardSql("provider_egress_location.client_id", "$4")+` = $5
 				)
 
 			ORDER BY
@@ -1107,7 +1055,6 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 			headLimit,
 			shardCount,
 			shardIndex,
-			minBlackholeCheckedAt.UTC(),
 			minGuardAttemptAt.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
@@ -1162,6 +1109,8 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 				network_client.source_client_id IS NULL AND
 				network_client_location_reliability.connected = true AND
 				network_client_location_reliability.valid = true AND
+				(network_client_location_reliability.ipv4_proven OR NOT network_client_location_reliability.ipv6_proven) AND
+				`+providerProbeEligibilitySql("network_client_location_reliability")+` AND
 				EXISTS (
 					SELECT 1 FROM provide_key
 					WHERE
@@ -1181,19 +1130,12 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 					SELECT 1 FROM provider_egress_probe_attempt
 					WHERE
 						provider_egress_probe_attempt.client_id = network_client_location_reliability.client_id AND
-						`+providerEgressAttemptDeferredSql("provider_egress_probe_attempt", "$2", "$7")+`
+						`+providerEgressAttemptDeferredSql("provider_egress_probe_attempt", "$2", "$6")+`
 				) AND
-				NOT EXISTS (
-					SELECT 1 FROM provider_blackhole_check
-					WHERE
-						provider_blackhole_check.client_id = network_client_location_reliability.client_id AND
-						`+ProviderBlackholeDarkSql("provider_blackhole_check", "$6", rules)+`
-				) AND
-				-- hashtext is signed and '%' preserves the sign, so normalize
-				-- the modulo into [0, shardCount).
+				-- Compatibility readers retain the same logical slot ownership.
 				(
 					$4 <= 1 OR
-					((hashtext(network_client_location_reliability.client_id::text) % $4) + $4) % $4 = $5
+					`+providerUrlProbeShardSql("network_client_location_reliability.client_id", "$4")+` = $5
 				)
 
 			ORDER BY network_client_location_reliability.client_id ASC
@@ -1204,7 +1146,6 @@ func GetProviderEgressLocationDueShardedWithDiagnostics(
 			limit,
 			shardCount,
 			shardIndex,
-			minBlackholeCheckedAt.UTC(),
 			minGuardAttemptAt.UTC(),
 		)
 		server.WithPgResult(result, err, func() {

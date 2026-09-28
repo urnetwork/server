@@ -23,6 +23,11 @@ import (
 func testProviderEgressProbeSettings(shardCount int) providerEgressProbeSettings {
 	settings := defaultProviderEgressProbeSettings("example.test")
 	settings.ShardCount = shardCount
+	// These fixtures exercise old pending-task compatibility. URL scheduling
+	// has separate fixtures that use the current production defaults.
+	settings.UrlProbe = nil
+	settings.MaxTimeSeconds = 75 * 60
+	settings.IdleDelaySeconds = 5 * 60
 	return settings
 }
 
