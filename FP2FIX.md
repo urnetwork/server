@@ -205,8 +205,12 @@ then emit explicit, auditable exceptions:
 - `risk`: the registration country's credible country set and GeoLite2's
   associated country disagree. Unknown/ambiguous countries are *unknown*, not
   automatically risky; document multi-country organizations and overrides.
-- `non_quality`: known hosting, data center, transit, VPS, cloud, or other
-  non-consumer/non-business access networks. Start with conservative, reviewed
+- `non_quality`: verified cloud, CDN, hosting, data center, transit, VPN/proxy
+  infrastructure, VPS, or other machine-hosted egress rather than individual
+  subscriber or business end-user access. Verified cloud/CDN-operator ranges
+  with ambiguous office-versus-hosted use are also excluded, as clarified by
+  the user; a reviewed more-specific clean business/access exception may clear
+  them. This is quality-only, not a risk finding. Start with reviewed
   organization/prefix rules and test against measured providers; do not use a
   broad organization-name substring as an unreviewed mass exclusion.
 - An unclassified child inherits a known hosting parent's `non_quality`
@@ -240,6 +244,26 @@ valid no-record result. An explicit IP override must not claim such a lookup.
 After rollout, measure aggregate current-public-connection coverage against
 the deployed ARIN database epoch and cutover time. Do not call the new risk
 rules effective merely because the database file or Connect image changed.
+
+The 2026-09-28 exact-owner review found omitted Google Cloud customer
+`GOOGL-2`, Alibaba Cloud `AL-3` and IBM Cloud/SoftLayer `IBMC-24`/`SOFTL`
+registrations. Independent permanent omission tests fail the old catalog and
+pass the corrected candidate with existing cloud/access and quality-only
+serving controls. The three added rules do not activate a new resource or
+measure current provider impact. Native Quality's eight-hour success ratio
+still permits one success out of one observation; the ten-success/four-hour
+collection quota is not an additional admission gate. High native counts are
+not by themselves proof of a classifier error or sufficient evidence coverage.
+
+Complete non-ARIN/global-cloud prefix coverage and independently registered
+network-child inheritance remain explicit review gaps; an organization-parent
+inheritance test does not prove allocation-parent inheritance. See
+`arindbctl/CLASSIFICATION.md` for exact evidence, tests and the resource-build,
+provider-shadow and lookup-epoch activation sequence. Official feed imports and
+third-party proxy evidence remain separate candidates until their scope,
+freshness, overlap and clean-access controls are reviewed. Never infer that a
+customer origin is CDN infrastructure just because a CDN fronts its hostname.
+Missing ARIN coverage remains no exception, not positive proof of access use.
 
 ## Probe URL configuration and execution
 

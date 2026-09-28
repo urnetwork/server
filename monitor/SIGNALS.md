@@ -10330,6 +10330,44 @@ credit/reliability/risk/security checks. Closure requires two fresh coherent
 cadences, per-provider rolling quota recovery, full shard observations, and
 independent FP2 availability and PostgreSQL CPU verification after rollout.
 
+#### Known ARIN classifier-coverage gap in this probe
+
+Status: bounded offline release controls exist; no automatic runtime
+classifier-coverage probe is implemented by this section. Migration checks
+722/730/731 attest columns and indexes, not major-cloud coverage, current MMDB
+use, or a known infrastructure provider leaking into native Quality.
+
+`TestReviewedArinMajorCloudOwners` independently requires reviewed public
+cloud-owner handles in the exact release catalog. Before the 2026-09-28
+correction it fails four missing-owner and four inherited-organization-child
+cases; the corrected catalog passes the full builder race suite. Healthy
+reviewed access children, unrelated synthetic access/near-name controls,
+most-specific-prefix controls, external-RIR/unknown-country controls and the
+quality-only FP2 serving matrix must remain healthy. Enumerating only rules
+already present would miss the omission. These tests do not attest deployed
+resource bytes or actual live provider ownership.
+
+Quality is subscriber/business end-user access. Verified cloud, CDN, hosting,
+transit and VPN/proxy infrastructure, including ambiguous office-versus-hosted
+use within a verified cloud/CDN operator, is non-quality unless a reviewed
+more-specific clean-access exception applies. This is not geographic/security
+risk and does not exclude otherwise eligible Speed/Online fallback or probes.
+An unknown registration, registry referral, high Quality gauge or an unrelated
+origin behind a CDN is not affirmative infrastructure evidence.
+
+A future bounded runtime discriminator must join one complete native-index
+generation with the actual classifier-resource epoch/rules hash, successful
+census time and current provider ownership evidence. Missing epoch, stale
+refresh or unavailable ownership is unknown, not zero leaks. Require actual
+post-boundary lookup coverage; fresh metric pushes and default-false flags are
+insufficient. Do not add a read-on-dashboard fleet SQL scan or sum repeated
+location/group manifests. A known cloud present only in legitimate Speed/Online
+fallback is a healthy negative control, not a Quality-classifier incident.
+Keep per-country/operator shadow results aggregate and identifiers private;
+no arbitrary operator/provider labels in runtime metrics. Catalog prefix or
+address counts cannot substitute for eligible provider counts. Resource
+activation and epoch readback are specified in `arindbctl/CLASSIFICATION.md`.
+
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`
 

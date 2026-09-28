@@ -6,6 +6,16 @@ classify named cloud/VPS/hosting owners as `non_quality`, not as geographic
 directory or proof that every address of a diversified corporation hosts VMs.
 The candidate must pass the shadow review below before activation.
 
+Quality means individual-subscriber or business end-user access. Verified
+cloud, CDN, hosting, transit, VPN/proxy infrastructure and other machine-hosted
+egress are `non_quality`, even when fast. The 2026-09-28 user clarification also
+excludes verified cloud/CDN-operator ranges whose office-versus-hosted use is
+ambiguous; a reviewed more-specific consumer/business-access exception may
+override. This is a conservative quality policy, not proof that the address
+hosts a VM or poses a security risk. Unknown ownership is not positive evidence
+of hosting. These exceptions do not change Speed, Online or paced URL-probe
+eligibility, which retain their independent risk/reliability/security gates.
+
 ## Evidence and scope
 
 Each YAML rule embeds the exact primary registration and operator sources.
@@ -20,6 +30,9 @@ the reviewed policy inference, rather than an assertion made by ARIN itself.
 | Oracle Public Cloud | Exact `OC-195` registration, not the Oracle corporate owners | [ARIN cloud identity](https://whois.arin.net/rest/org/OC-195.html), [OCI compute](https://www.oracle.com/cloud/compute/) |
 | Microsoft | `MSFT` | [Azure virtual machines](https://azure.microsoft.com/en-us/products/virtual-machines/) |
 | Google | `GOGL`, with a more-specific Fiber exception | [Google Cloud compute](https://cloud.google.com/products/compute) |
+| Google Cloud customers | Exact `GOOGL-2`, whose registration explicitly identifies customer-cloud address use | [ARIN customer-cloud attribution](https://whois.arin.net/rest/org/GOOGL-2.html) |
+| Alibaba Cloud | Exact `AL-3`, not an Alibaba brand substring or APNIC referral | [ARIN owner](https://whois.arin.net/rest/org/AL-3.html), [ECS virtual servers](https://www.alibabacloud.com/help/en/ecs/user-guide/what-is-ecs) |
+| IBM Cloud / SoftLayer | Exact `IBMC-24` and `SOFTL`, not every IBM corporate allocation | [IBM Cloud registration](https://whois.arin.net/rest/org/IBMC-24.html), [SoftLayer registration](https://whois.arin.net/rest/org/softl.html), [IBM's SoftLayer infrastructure API](https://cloud.ibm.com/docs/virtual-servers?topic=virtual-servers-api-reference) |
 | DigitalOcean | `DO-13` | [Droplets virtual machines](https://www.digitalocean.com/products/droplets) |
 | Linode | `LINOD` | [Akamai compute instances](https://techdocs.akamai.com/cloud-computing/docs/compute-instance) |
 | Vultr | `CHOOP-1` / The Constant Company | [Constant cloud compute](https://www.constant.com/products/cloud-compute/) |
@@ -36,8 +49,12 @@ Google Fiber's verified `GF`, `GF-231`, and `GF-238` registrations and anchored
 exact name have `non_quality: false`: [ARIN](https://rdap.arin.net/registry/entity/GF)
 and [the operator's home internet offering](https://fiber.google.com/internet/).
 This explicit owner exception overrides a Google ancestor, but does not bypass
-the independent reliability, risk, TLS, or URL-success gates. Unknown direct
-children inherit a reviewed hosting parent as specified by the classifier.
+the independent reliability, risk, TLS, or URL-success gates. Unknown
+organization children inherit a reviewed hosting organization ancestor.
+Do not generalize this to all network children: allocation precedence can
+select an independently registered network child whose organization has no
+`parentOrgHandle` link to the hosting owner. That boundary remains an explicit
+coverage-review item, not a correction implemented by the catalog additions.
 
 The initial rules omitted `AMAZO-4` (the earlier text misspelled it
 `AMAZON-4`) out of concern about blanket Amazon classification. The 2026-09-28
@@ -55,6 +72,25 @@ or automatically replace a deployed database. A subsequent resource build must
 bind the new rules, review its classification diff, and observe a new Config
 and connection-classification epoch. A quality-only change cannot alter the
 eligibility of a row already excluded by risk from all buckets and URL admission.
+
+The next 2026-09-28 review independently required `GOOGL-2`, `AL-3`, `IBMC-24`
+and `SOFTL`. All four were absent despite existing Google/other cloud rules.
+The permanent `TestReviewedArinMajorCloudOwners` fails the old rules on all
+four exact-owner and four inherited-child cases, while existing cloud and
+reviewed access controls remain healthy. The corrected candidate passes the
+complete `arindbctl` race suite and the pure FP2 common/quality-only gate
+control. This establishes a catalog omission, not its current fleet impact.
+
+This is not complete worldwide cloud coverage. The current catalog does not
+yet supply reviewed complete Akamai/CDN, Cloudflare, Tencent or other regional
+cloud allocations; a service API listing only an account's addresses is not a
+global feed. Official provider prefix publications are being reviewed as
+separately versioned evidence, with source scope, hashes, freshness, overlap and
+clean-access controls. Their absence, an external-RIR referral, or a high native
+Quality gauge cannot by itself prove a particular live provider is misclassified.
+No dynamic feed or third-party proxy list is activated by this change. An
+unrelated customer's origin is not Cloudflare/Akamai infrastructure merely
+because a CDN serves its hostname.
 
 Multinational registration country is not proof of a user's physical location.
 `risk` is computed separately from authoritative ARIN registration and actual
@@ -146,13 +182,17 @@ Run the release-catalog controls against the exact config artifact:
 
 ```sh
 ARIN_REVIEWED_RULES_PATH=/absolute/path/to/config/main/arindb.yml \
-  go test ./arindbctl -run '^TestReviewedArinRules$' -count=1
+  go test ./arindbctl -run '^TestReviewedArin(Rules|MajorCloudOwners)$' -count=1
 ```
 
 An independently reviewed owner-expectation document also detects a rule that
 was omitted entirely; enumerating only existing rules cannot detect that error.
-Keep actual owner identities in the explicit offline review input, not synthetic
-test fixtures. Its version-one JSON contains `expectations` with `org_handle`,
+The permanent major-cloud control contains public ARIN policy handles and
+synthetic addresses/organizations, never private provider IDs, real provider
+IPs, hostnames or secrets. It requires the selected Config artifact through
+`ARIN_REVIEWED_RULES_PATH` or an adjacent Config checkout; missing input fails
+rather than silently skipping CI coverage. An optional broader offline
+review input's version-one JSON contains `expectations` with `org_handle`,
 `rule_name`, and `non_quality`. Run it against both the old and candidate rules
 to retain the omission failure and corrected result:
 
@@ -176,6 +216,17 @@ provider cohorts and unexplained country losses, especially multinational
 operators and inherited children. Do not print raw provider addresses or treat
 the absence of a rule as proof of consumer access. Preserve the previous bundle
 for rollback. Classification expansion needs this review again.
+
+For these exact-owner additions, activation is a separate resource operation:
+commit the tested rules and test together; build a new immutable ARIN MMDB
+against the attested ARIN/GeoLite source hashes; inspect the old/new per-rule,
+country and prefix/address diff; then obtain an actual-provider shadow at the
+lookup boundary with current raw addresses kept in memory only. Catalog address
+weights are not provider counts. Root/operator approval is required before
+publishing that Config resource and cycling the owning Connect lookup
+generation. Attest loaded resource bytes/build epoch, post-boundary connection
+lookup coverage, the subsequent rollup and one complete native-index generation.
+A YAML-only commit does not alter the currently deployed MMDB or any provider.
 
 ## Connection classification readiness
 
