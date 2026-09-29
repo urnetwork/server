@@ -3118,3 +3118,31 @@ diagnostic completed without an ACK-lifetime exit (sealed receipt SHA256
 `70513720e7b0f142ff4610ff0ff7a4b5833d312a656aeddaebbcd82423aa8859`).
 That diagnostic is not a performance gate or a causal repair. Remaining
 normal/race Connect and other owning release gates are pending.
+
+At the user's direction, the long-running release tests were stopped before
+the service build. Connect bucket 4 had 11 passes, one intentionally
+interrupted run and 37 unstarted runs; that interruption is not a product
+failure. The bucket 3 TCP performance failure remains open. The frozen
+release source was Server `6ba71b7e` with clean linked repositories.
+
+The local release build compiled and scanned the Linux binaries, then
+published eight Main images: `config-updater`, `api`, `taskworker`,
+`connect`, `proxy`, `mcp`, `gossip` and `alt`. Each published manifest has
+both `linux/amd64` and `linux/arm64`; exact tags and index digests are in
+`/home/by/urnetwork/temp/fp2-release-tools.adwfff8e/main-published-images.json`.
+The config-updater image contains `restart: false`. Initial pushes that
+had captured the old Docker Hub token failed with HTTP 401. The replacement
+token had `pull,push` scope for all eight repositories, and the failed
+pushes were retried from the already compiled and scanned build outputs.
+
+The deployment control step is still blocked. Warpctl advanced only the
+`main-config-updater:main-latest` registry alias to the new image, then
+failed before updating the `deployment-blocks` DynamoDB row. Without an
+AWS credential, its PutItem could not authenticate; the local Main IAM
+credential received `AccessDeniedException`, and the available security
+credential received `UnrecognizedClientException`. A subsequent read of
+the `main-config-updater-main` row still returned
+`2026.9.28-outerwerld+1057841730`. RunWorker selects the exact image
+version from DynamoDB, so the alias alone is not proof of any running
+service change. No service deployment or FP2 recovery is claimed. A
+write-capable deployment credential is needed to resume the rollout.
