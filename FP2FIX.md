@@ -3569,3 +3569,52 @@ concurrency ramp. Re-measure the current cohort and total measured acceptance,
 prove lane occupancy and stage bottlenecks, and retain per-host CPU/memory,
 latency and TLS/availability gates. The documented hot-host placement and sticky
 residents remain independent limits. No uniform 2,048-lane ramp is validated here.
+
+## 2026-09-29 Main measured-run rollout checkpoint
+
+The measured-run correction is committed on Main as `9d890f6d`; the independent
+TLS deadline test correction is `2fbe91bf`. The merged focused gate passed all
+49 selected roots in normal and race modes, with no race finding, and vet passed.
+Migration 741 ran once against the inventory-bound Main primary from 22:18:45.797
+to 22:19:03.905Z. Its terminal receipt is
+`5b95a237527313416829cc8ffeb792406c62cbdf15c6e16fef9ca0e367d21f8b`.
+A separate read-only postflight at 22:19:21Z found successful head 741 and the
+new 128.6 MB measured-run index valid, ready and live; the older success-only
+index remained valid. No index builder or blocker was present.
+
+The local API image `2026.9.29-planetoid-1059198330` was published with
+manifest `sha256:16a26d580a80b308a294c9d0245b69fe8067f02127ffe1a1eafbcdd992994ce5`;
+the Taskworker image `2026.9.29-planetoid-1059198720` with manifest
+`sha256:dae38cfd9c2a5aca5babb998678c3de5cdaa0c31be4f87b560f58dac6ffac80f`.
+Warpctl deploy exited zero for API by 22:23:05.601Z and Taskworker by
+22:25:39.512Z, each ending at 20/20 new-version service-status paths. This is
+version-path convergence, not immutable running-container proof. This patch
+changed API quota admission/ingest and Taskworker fleet telemetry; no Connect,
+proxy or config-updater source was changed in this rollout.
+
+The bounded current-process read at 22:32:01–03Z found all eight enabled
+Taskworker shard owners uniquely current on edge0/1/3/4, all capability 2 with
+configured shard count 8. One coherent shard-zero census observed at 22:31:52Z
+reported `eligible=108936`, `quota_complete=0`, `secure_complete=0`,
+`due=68495`, `overdue=108921`, `warming=15`, `runs_needed=658358`,
+`security_pending=14`, `security_unknown_targets=5`, `uninitialized=2`.
+The receipt is
+`159a2c707da051c3efc33bba7d2988c0f8b949d5d413733dffe758c5c15b4ae5`.
+This is the new total-measured-run contract, not the earlier success-only
+projection. It establishes a large quota deficit, not an accepted rate or
+individual provider recovery guarantee.
+
+The old capability-1 watcher stopped at 22:32:56Z with its parent and all 13
+captured descendants reaped. One new capability-2, enabled-host watcher started
+at 22:33:03Z as the durable user service
+`fp2-main-monitor-cap2-20260929.service`, PID 781613, with ten standing tails,
+zero restarts and an explicit 15-minute first-probe floor. The last old active
+start was 22:25:13Z, so the new first active probe cannot start before 22:48:03Z.
+The brief log-collection gap and process-local Sustain reset are explicit;
+first new active probe, hourly range completeness and recovery remain pending.
+
+At this census denominator the numerical floor is 75.65 unique accepted measured
+runs/s. The prior fixed five-minute durable rate of 42.5533/s predates this
+quota rollout and cannot be used as its outcome. Fresh post-rollout durable rate,
+per-provider rolling recovery, CPU attribution, 2,048-lane admission, native
+quality/speed buckets, and the separate reliability covering index remain open.
