@@ -3066,3 +3066,55 @@ coherent pair. This is a producer-reported recent destination check; no
 independent ciphertext rehash, decrypt or restore was done, and the
 user-authorized host-key bypass leaves cryptographic host identity
 unverified. No archive bytes or production data were changed.
+
+The twenty-ninth through thirty-first scheduled watcher frames began at
+16:10:09Z, 16:25:09Z and 16:40:09Z, with the same watcher process and no
+restart. The migration alert still saw head 731 before the separate 732
+application, then independently saw 732 at 16:44:42Z. PostgreSQL used
+36.729, 32.654 and 36.812 of 96 logical cores in the frames' separate
+five-second samples; none identifies a query owner or quota-normalized
+load. Each frame had a coherent current URL census with zero providers
+meeting the ten-success quota, and hourly process/throughput coverage
+remained incomplete. In frame 31, eligible providers fell from 107,998 to
+107,183, warming fell from 1,085 to 24, and oldest due rose from 4,665 to
+122,865 seconds. Bounded offline triage (SHA256
+`7786759107b8d55adfc6d07de69e2ddc5d05abe83eca2ce9ebd034b830dbe7fb`)
+found that warming can age across the refresh boundary and oldest due is a
+maximum over the changing eligible cohort. The retained alerts omit the
+producer identity, exact census timestamp and per-provider due rows, so
+they cannot attribute that jump to a process restart, a specific provider
+or a scheduler failure. Picker coverage remained 20 of 25 API slots. The
+watcher began frame 32 at 16:55:09Z.
+
+User-authorized Main migrations then reached required head **740** from
+committed Server source `672063de` using the pinned migration adapter.
+Independent direct-primary postflights confirmed metadata stage 732,
+online index stages 733–738 with six new indexes valid and ready, stage
+739 with the seventh valid and ready, and metadata stage 740 at 17:04:56Z.
+The final catalog showed all seven new indexes valid and ready, the prior
+731 ARIN index present, and no active index build. Stage and postflight
+receipts are recorded in the primary ledger under
+`main-fp2-linux-migration-732-applied-and-postflight-20260929T163033Z`,
+`main-fp2-linux-migration-738-applied-20260929T170313Z`,
+`main-fp2-linux-migration-739-applied-and-postflight-20260929T170425Z`
+and `main-fp2-linux-migration-740-applied-and-postflight-20260929T170453Z`.
+This verifies the schema stage, not service rollout or FP2 recovery; the
+release build and owning gates remain separate.
+
+The final-source Server Connect normal gates are running serially under
+the 9 GiB cap with pinned local NGINX 1.31.4. Buckets 0 and 1 passed all
+55 and 50 runs. Bucket 2 finished native zero before its 30-minute cap:
+62 runs, 61 passes, no failure and one intentional skip,
+`TestStreamRoutePerformanceComparison`, which requires the separate
+`CONNECT_STREAM_ROUTE_PERFORMANCE_MEASURE=1` opt-in. Its log SHA256 is
+`c5fb0fb1403168ab190362716963a1c70c2c887534bb71d207730091ef3acb89`;
+all 731 first-party compiled inputs matched the frozen source manifest.
+The pinned full bucket 3 remains red because
+`TestConnectMultiClientTcpPerformance` completed zero of five samples,
+although its NGINX-backed TCP fixture passed. A same-source isolated run
+completed one of four samples and does not clear the full bucket. Private
+ACK-lineage controls passed normally and under race; one 100 MiB
+diagnostic completed without an ACK-lifetime exit (sealed receipt SHA256
+`70513720e7b0f142ff4610ff0ff7a4b5833d312a656aeddaebbcd82423aa8859`).
+That diagnostic is not a performance gate or a causal repair. Remaining
+normal/race Connect and other owning release gates are pending.
