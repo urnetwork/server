@@ -2975,3 +2975,27 @@ password, so the diagnostic did not start and no sidecar, journal, script
 or archive bytes were read. Latest backup completion remains unknown; this
 failure is not evidence of a corrupt or missed archive. There was no retry
 in that wave and no Main mutation.
+
+The twenty-fifth scheduled frame began at 15:10:09Z. Migration remained
+731 versus required 740, and PostgreSQL used 42.651 of 96 logical cores
+in a separate 5.02-second service sample without query-owner or quota
+attribution. The URL signal found two fresh owner candidates on each of
+shards 0 and 2 at 15:21:33Z, so the current global eligible and quota
+counts are unknown, not zero. The amended bounded offline owner triage
+(SHA256 `e053c2873b057336e6a78ad073482890b8f57221fd236aea6d9640427f11ec94`)
+compares earlier coherent and ambiguous frames but has no current producer
+identity or proof of concurrent work. Picker observation paired 20 of 25
+API slots, with 470 initial nonempty outcomes, nine initial errors and
+seven initial plus two filter read errors. The same watcher began frame
+26 at 15:25:09Z. The credentialed backup read was deferred because no
+safe post-core window remained; no extra Main contact or probe occurred.
+An offline review (sealed SHA256
+`c8abf8cccee788b45394406907ce94b26d1b44d5e91b70b1b3a82c43a74fd027`)
+of that owner alert found no new source defect or release-changing evidence.
+The coherent numeric frames 21–24 identify a unique shard-zero census at
+their own instants, not unique ownership on every shard or continuity
+between frames. Shard 2 was absent from the wave 13 and 20 duplicate lists
+but appeared in an earlier retained handoff. Aggregate candidates do not
+establish simultaneous work or its cause; a temporal owner read remains
+deferred until a verified corrected-artifact rollout or a decision that
+requires it. The review made no new Main contact.
