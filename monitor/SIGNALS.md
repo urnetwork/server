@@ -5668,6 +5668,19 @@ the successful control without changing Redis. An absent native-source schema
 metric on the observed API processes remains instrumentation/deployment
 uncertainty, not zero native-source events.
 
+At 00:15:20Z a separate indexed prefix control limited discovery to the first
+4,096 valid, connected client IDs before filtering the US target. Its 3,136
+target rows contained 3,048 selectable top-level candidates and zero stored
+IPv6 proofs. All 3,144 sampled connections had legacy intent, including 16
+IPv6 sockets. The owning rule deliberately counts intent zero as legacy v4;
+IPv6 requires both observed family six and declared intent six. This supports
+an upstream intent boundary in that sample, not a cache publication omission
+or a complete US-family census. The ID prefix is biased. The uniform update
+block represents 23:57Z, the job's captured input time rather than its commit;
+18 minutes of age alone does not prove a stall under its current scheduling
+contract of 30 minutes after completion. Distinguish legacy clients, provider
+standby transports and the effective serving artifact before changing proof.
+
 Exclusion-budget qualifier (2026-09-27 source correction): request-time
 exclusions used to consume the fixed sampled-row budget before selection. A
 deterministic 2,000-entry v4 cache with 1,980 excluded IDs returned ten of its
@@ -16692,6 +16705,19 @@ that digest. SIGNALS.md §8.12 (`provenance`) maps to
 mixed-service fleet, draining-generation suppression, missing and stale source
 families, a fresh RSS identity without process start, accepted modified source,
 malformed provenance, and a conflicting digest.
+
+**Bounded live source audit (2026-09-29 00:21:10Z):** a strict edge1 Mimir
+read joined all four fresh families for 20 observed API, 20 Connect and eight
+Taskworker processes. API reported clean `253977f2`; Connect reported modified
+`d479eccd`; Taskworker reported modified `4949f5f9`, with one reported image
+digest per service. The clean API source predates the settlement fix
+`e2356969` and the native-source schema metric, which explains the latter's
+absence on that cohort. Modified base ancestry cannot establish the effective
+changes in the other two services. All three bases already contain family
+intent plumbing. A subsequent edge1 peer inspection stopped at unavailable
+noninteractive sudo before Docker or process-binary reads, so independent
+runtime corroboration remains open, especially on saturated edges3/4. This
+48-process metric witness does not close the separate 20/25 API coverage gap.
 
 ### 8.13 Warpctl local-checkout executable identity
 

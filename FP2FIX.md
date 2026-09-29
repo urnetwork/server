@@ -1656,3 +1656,88 @@ carried legacy intent and the same update block 29,843,997. This aligns
 with the published US IPv6 cache-empty result and points to family marking
 in the sampled source cohort. Because IDs were sampled as a prefix, it
 cannot establish full-US or fleet counts. No full-table census ran.
+
+The sampled update block 29,843,997 corresponds to 23:57:00 UTC and is the
+reliability job's captured `maxTime`, not its commit time. Its age at the
+sample does not alone prove a stalled writer: the current job reschedules
+30 minutes after completion. Source review found that
+`ConnectionProvenIpFamily` deliberately maps any intent-zero row, including
+one with an IPv6 socket, to legacy IPv4; IPv6 eligibility requires both
+observed and declared IPv6. The sampled source therefore fits missing
+declared-family intent upstream, without proving a cache fanout omission.
+Current H1 `X-UR-IpFamily` and H3/Auth intent paths exist; deployed Connect
+artifact and client-intent ownership remain to be distinguished. IPv6
+eligibility must not be widened on socket shape alone.
+
+The sixth watcher wave continued to page on infrastructure load: at
+00:14:40 UTC one edge host had load-1 174.77 against 72 logical CPUs
+(normalized 2.427), execution ratio 0.9446 and available-memory fraction
+0.4889. At 00:14:50 eight edge-3/edge-4 Connect processes still paged;
+the largest observed values in that frame were 150.06 GB RSS, 929,342
+goroutines and a 6.449-core five-minute CPU rate. At 00:16:59,
+PostgreSQL used 49.930 of 96 logical-core equivalents (52.01%) over its
+short sample. Migration head 731 and missing covering reliability index
+also persisted. These are active Main performance problems; process
+ownership and causal relationships remain under investigation.
+
+The saturated host was enabled `by-us-fmt-5-edge-3`. Its five-minute
+execution ratio means about 94.46% non-idle, non-iowait CPU time across
+node modes, not a per-process share; paired load 2.427 per logical CPU
+and zero iowait support host CPU saturation. The separate missing-metric
+VPN/planetoid host findings remain unknown rather than cleared.
+
+The sixth picker frame at 00:18:51 UTC remained incomplete at 20/25 API
+processes. In its sampled five-minute window, initial outcomes were 199
+nonempty/three error with no empty, search 25 nonempty and direct two
+nonempty; one read-initial and one read-filters error remained. This does
+not clear the earlier request-local IPv6 empty cohorts or establish fleet
+health. The URL signal at 00:19:11 warned that shards 0, 1, 3, 5 and 6
+each had two reported owners and lacked a fresh coherent global census;
+the sixth-wave quota cohort was still pending. Owner duplication needs
+generation/source reconciliation before deriving a fleet throughput rate.
+
+The completed sixth URL signal did not produce a coherent quota cohort;
+its verdict remained unobservable because of the duplicate owner and
+missing census evidence. Therefore sixth-wave quota status is unknown,
+not a new zero-quota observation. The fifth-wave direct DB cohort above
+remains the latest trustworthy one-instant count.
+
+The corrected third full Model partition passed in 1,062.372 seconds.
+Partitions zero, one and two of four are green; the final normal Model
+partition, Work normal and race gates still remain.
+
+The strict edge-1 peer image check stopped before Docker or process reads:
+`sudo -n` required a password. It did not retry or mutate anything.
+Therefore independent running-container/binary identity remains unknown;
+the fresh 48-process exported provenance above is still the strongest
+available witness. A local decoder control matched `go version -m` on
+the pinned watcher after correcting module-info framing, but this is not
+Main binary evidence.
+
+The seventh watcher wave began at 00:27:35 UTC on the 15-minute cadence.
+Its early §8.10/§8.9 checks again found the old non-covering reliability
+parent across 34 partitions, no desired attached children, and migration
+head 731 against required 740. Other seventh-wave results were pending
+at this checkpoint; no schema mutation was observed.
+
+A bounded fresh executable-exported provenance read at 00:21:10 UTC
+identified all 48 observed service processes by start/build/source/RSS
+metrics: 20 API processes report revision `253977f2a713` with
+`modified=false`; 20 Connect report `d479eccdfdc0` with `modified=true`;
+eight Taskworker report `4949f5f93566` with `modified=true`. Each service
+had one reported source/image identity. These are running-process exported
+labels, stronger than an assumed rollout version, but modified builds
+still need independent artifact/digest review before claiming exact code.
+The five API processes missing from picker pairing require separate
+coverage analysis; this provenance observation alone does not clear them.
+
+The three reported base revisions exist locally. Clean API `253977f2`
+predates both the `e2356969` settlement-query replacement and the
+native-source telemetry addition, explaining why its observed processes
+export no native-source schema. Connect `d479eccd` and Taskworker
+`4949f5f9` bases also predate the settlement fix, but their
+`modified=true` effective deltas are unknown. All three base sources
+already contain H1/H3 family-intent plumbing and `ipv6_proven`
+aggregation, so version ancestry alone does not prove an absent intent
+feature or identify which process emitted the old SQL. Independent running
+artifact and caller evidence remain required.
