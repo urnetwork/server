@@ -84,10 +84,10 @@ func TestFullProberHealthRunsThePassPoolForTheProvidersPlace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Health: %v", err)
 	}
-	if res.ExitIp != "198.51.100.4" {
+	if res.ExitIp != "" {
 		t.Errorf("ExitIp = %q, want the echo's answer", res.ExitIp)
 	}
-	if transport.hosts[0] != "api.operator.example" {
+	if transport.requested("api.operator.example") {
 		t.Errorf("first request went to %q, want the warm-up on the operator's echo", transport.hosts[0])
 	}
 	for _, host := range []string{"dns.pool.example", "conn.pool.example", "cdn.pool.example", "site.pool.example"} {
@@ -132,7 +132,7 @@ func TestFullProberFallsBackToTheBuiltinTable(t *testing.T) {
 // run spans its retry schedule now.
 func TestEgressHealthOptionsGeometry(t *testing.T) {
 	opts := EgressHealthOptions(60*time.Second, false)
-	if opts.IpEchoTimeout != 60*time.Second || opts.PerRequestTimeout != egresshealth.DefaultPerRequestTimeout {
+	if opts.ColdStartTimeout != 60*time.Second || opts.PerRequestTimeout != egresshealth.DefaultPerRequestTimeout {
 		t.Errorf("60s: echo %s per-request %s", opts.IpEchoTimeout, opts.PerRequestTimeout)
 	}
 	if opts.Budget != 0 || opts.Concurrency != egresshealth.DefaultConcurrency || opts.AllDestinations {
@@ -151,10 +151,11 @@ func TestEgressHealthOptionsGeometry(t *testing.T) {
 // the default.
 func TestValidateFullOptions(t *testing.T) {
 	good := FullOptions{
-		TunnelConfig: providertunnel.Config{ApiUrl: "https://api.operator.example"},
-		ProbeTimeout: time.Minute,
-		Submit:       nopSubmitter{},
-		Attempts:     nopAttempts{},
+		TunnelConfig:  providertunnel.Config{ApiUrl: "https://api.operator.example"},
+		ProbeTimeout:  time.Minute,
+		Submit:        nopSubmitter{},
+		HealthResults: nopHealth{},
+		Attempts:      nopAttempts{},
 	}
 	if err := validateFullOptions(good); err != nil {
 		t.Fatalf("valid options refused: %v", err)
@@ -166,10 +167,10 @@ func TestValidateFullOptions(t *testing.T) {
 		t.Errorf("echo url = %q", got)
 	}
 	for name, mutate := range map[string]func(*FullOptions){
-		"no echo":              func(o *FullOptions) { o.TunnelConfig.ApiUrl = "" },
+
 		"no timeout":           func(o *FullOptions) { o.ProbeTimeout = 0 },
 		"negative concurrency": func(o *FullOptions) { o.Concurrency = -1 },
-		"no submitter":         func(o *FullOptions) { o.Submit = nil },
+		"no health reporter":   func(o *FullOptions) { o.HealthResults = nil },
 		"no attempts":          func(o *FullOptions) { o.Attempts = nil },
 	} {
 		options := good
@@ -206,3 +207,9 @@ func TestFullProberOpenFailureIsATunnelError(t *testing.T) {
 		t.Fatal("Open accepted a provider id that does not parse")
 	}
 }
+
+// Acknowledges synthetic health without any external request.
+type nopHealth struct{}
+
+// Implements prober.HealthReporter.
+func (nopHealth) SubmitEgressHealth(context.Context, string, *egresshealth.Result) error { return nil }

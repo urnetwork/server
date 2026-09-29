@@ -13,9 +13,10 @@ import (
 func TestRunFullForwardsActualProgress(t *testing.T) {
 	var events []prober.Progress
 	options := FullOptions{
-		ProbeTimeout: time.Minute,
-		IpEchoUrl:    "https://echo.probe.example/ip",
-		Submit:       nopSubmitter{}, Attempts: nopAttempts{}, Concurrency: 1,
+		ProbeTimeout:  time.Minute,
+		HealthResults: nopHealth{},
+		IpEchoUrl:     "https://echo.probe.example/ip",
+		Submit:        nopSubmitter{}, Attempts: nopAttempts{}, Concurrency: 1,
 		ObserveProgress: func(event prober.Progress) { events = append(events, event) },
 	}
 	// A deliberately malformed synthetic id fails inside the real Open path,

@@ -80,10 +80,6 @@ func lost(signal context.Context) bool {
 // Safe for concurrent use by every load of the run.
 type pathTracker struct {
 	path Path
-	// Runs on every re-opened client before any load uses it: a new
-	// tunnel is as cold as the first one, and the cold start is the warm-up's
-	// to pay, not a scored load's (see warmUp).
-	warm func(ctx context.Context, client *http.Client)
 	// How many re-creations the run may ask for; reopenCount is how many it
 	// has. Every call counts, a failed one too: whether or not it came up,
 	// it may have cost the provider a device and a contract.
@@ -174,12 +170,6 @@ func (self *pathTracker) live(ctx context.Context) (*http.Client, context.Contex
 	}
 
 	call.err = self.path.Reopen(ctx)
-	if call.err == nil && self.warm != nil {
-		reopenedClient, reopenedSignal := self.path.Current()
-		warmCtx, stop := bound(ctx, reopenedSignal)
-		self.warm(warmCtx, reopenedClient)
-		stop()
-	}
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()

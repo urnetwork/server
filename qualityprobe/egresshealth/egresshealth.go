@@ -21,8 +21,8 @@
 // It is also, since GEOMAP step 7, the prober's only instrument. What real
 // sites do with an exit is the only verdict the prober records about it: no
 // ip-intelligence source is consulted for anything (D24). Where the exit is
-// comes from the run's warm-up -- the operator's own /ip echo, whose address
-// the server places with its own GeoLite2 -- and nothing else.
+// is independent evidence: a website response does not identify its source IP.
+// Health remains publishable without an exit-location observation.
 //
 // # Classes
 //
@@ -83,12 +83,11 @@
 // that long and mostly idle, which is what the prober's per-shard concurrency
 // is sized against (see fleetprobe).
 //
-// # The warm-up
+// # Cold-start ownership
 //
-// The first fetch of every run, and of every blackhole check, is the
-// operator's /ip echo (Options.IpEchoUrl) with its own timeout -- see warmUp
-// for why the tunnel needs it. It is never scored. Its answer is the exit
-// address (Result.ExitIp), which is all the location submission carries.
+// Sampled URLs start immediately. Every tunnel generation shares one bounded
+// establishment allowance; no fixed echo or bandwidth URL precedes or follows
+// the sample. DNS retries and connection work stay inside the request deadline.
 //
 // # DNS
 //
@@ -133,7 +132,7 @@
 //
 // A retry reads at most the same cap again, so a run in which every load fails
 // every attempt after reading its whole cap reads at most three times that,
-// 127.5 KiB, plus the warm-up's maxIpEchoBytes.
+// 127.5 KiB. There is no additional echo request.
 //
 // No request carries a Range header any more (see neverSent), so the capped
 // read is the only bound, and it bounds what is kept rather than what is sent:
@@ -166,6 +165,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strings"
@@ -1712,8 +1712,23 @@ type CheckResult struct {
 	Ok         bool
 	StatusCode int   // 0 when the request never produced a response
 	ByteCount  int64 // bytes of body actually read, capped; set on failures too
-	Latency    time.Duration
-	Err        string // "" when OK
+	// Total bounded fetch duration, preserving the historical metric contract.
+	Latency time.Duration
+	// Time to the first response byte, including DNS and connection setup.
+	// Unset on a no-byte failure; FirstByteReceived distinguishes that case.
+	TimeToFirstByte         time.Duration
+	DnsLookupLatency        time.Duration
+	DnsMeasured             bool
+	ConnectFirstByteLatency time.Duration
+	FirstByteReceived       bool
+	// Capped sampled-body diagnostics, not a calibrated bulk bandwidth sample.
+	BodyDuration       time.Duration
+	BodyBytesPerSecond float64
+	// Only an already-sampled successful HTTPS IP-text connectivity response
+	// may carry these; DNS answers and provider claims are never exit evidence.
+	ObservedExitIp string    `json:"-"`
+	ExitObservedAt time.Time `json:"-"`
+	Err            string    // "" when OK
 	// Local-only, bounded diagnostic for the last attempt. Never sent to the
 	// ingestion API: raw Err may contain a URL, while this is a fixed stage.
 	FailureStage             string `json:"-"`
@@ -1751,18 +1766,15 @@ type Result struct {
 	// Every sampled destination's outcome after retries, in table
 	// order.
 	Checks []CheckResult
-	// The address the operator's /ip echo saw the warm-up come
-	// from: the provider's exit, in canonical form, and the only thing the
-	// location submission carries. "" when no echo was configured or it did
-	// not answer (IpEchoErr says why).
+	// Optional independent evidence from already-sampled successful HTTPS
+	// IP-text connectivity responses. Empty if none were sampled/answered,
+	// an address was not public unicast, or the valid observations disagree.
 	ExitIp string
-	// When the echo answered, on the Options clock.
+	// Actual response observation time on the Options clock, never DNS time.
 	ExitObservedAt time.Time
-	// Why the warm-up yielded no exit address; "" when it did,
-	// or when no echo was configured.
+	// Deprecated compatibility field. No predictable echo request is made.
 	IpEchoErr string
-	// True when any sampled HTTPS peer -- or the
-	// warm-up's, which is the operator's own api host -- failed
+	// True when any sampled HTTPS peer failed
 	// certificate-chain or hostname verification. It is intentionally separate
 	// from the score: one forged identity is a hard integrity failure and must
 	// not be diluted by unrelated successful destinations.
@@ -1855,15 +1867,15 @@ type Options struct {
 	// mean). Zero or negative uses DefaultLoadRetryMeanInterval.
 	LoadRetryMeanInterval time.Duration
 
-	// The operator's /ip echo, fetched first, as the warm-up, on
-	// every run and every blackhole check: <api url> + IpEchoPath, reached
-	// through the tunnel. Empty skips the warm-up, and with it the exit
-	// address -- tests use that; the prober always sets it.
+	// Deprecated compatibility input. Never requested: only sampled URLs
+	// traverse the provider. Website quality does not imply exit-location evidence.
 	IpEchoUrl string
-	// Bounds the warm-up alone. It is its own setting because
-	// it absorbs the cold start (see warmUp), which a load's timeout is not
-	// sized for. Zero or negative uses DefaultIpEchoTimeout.
+	// Deprecated spelling of ColdStartTimeout, accepted for existing callers.
 	IpEchoTimeout time.Duration
+	// One shared establishment window per tunnel generation, starting with
+	// its first sampled request. Success ends the allowance for later requests;
+	// failures never renew it. Zero leaves the ordinary request timeout in force.
+	ColdStartTimeout time.Duration
 
 	// When set, the tunnel the run rides and a way to re-create it when it
 	// dies part-way (see Path); the client passed to Check or
@@ -1890,14 +1902,16 @@ type Options struct {
 	// The run's wait, with Now. It must return the context's error, and
 	// return early, when the context ends first.
 	Sleep func(ctx context.Context, d time.Duration) error
+	// Package-private synthetic address seam; production always uses the
+	// special-purpose-aware public exit policy.
+	exitAddressAllowed func(netip.Addr) bool
 }
 
 // Defaults for Options. They are vars so tests can lower them.
 var (
-	// Bounds one attempt of one load. By the time a
-	// load starts the warm-up has brought the path up, so it no longer has to
-	// cover a cold start -- only an in-tunnel DoH resolution, a TCP connect and
-	// a TLS handshake per request, since keep-alives are disabled. Treat it as
+	// Bounds one attempt on an established path, including in-tunnel DNS,
+	// TCP, TLS and the capped response body. The first sampled requests share
+	// a finite cold-start allowance instead of using a separate warm-up. Treat it as
 	// a floor rather than a preference: a load that times out is retried, but
 	// only minutes later.
 	DefaultPerRequestTimeout = 10 * time.Second
@@ -1909,8 +1923,8 @@ var (
 	// spread over minutes, rarely contend at all.
 	//
 	// The field signal that this is set too high is specific: first-attempt
-	// timeouts spread evenly across all classes, on providers whose warm-up
-	// succeeded. That means lower it, not that the providers are bad.
+	// timeouts spread evenly across all classes after a sampled URL passed.
+	// That calls for measuring contention, not declaring every provider bad.
 	DefaultConcurrency = 6
 	// How many times a load is tried (GEOMAP §11.3).
 	// Three independent failures of a destination that answers 93 % of the
@@ -1926,7 +1940,7 @@ var (
 	// reconnects once or twice in a fifteen-minute run; one that needs more is
 	// not holding a path up, and what it leaves unmeasured is honest.
 	DefaultTunnelRecreateAttempts = 2
-	// Bounds the warm-up. It is the cold-start budget --
+	// Legacy name for the default shared cold-start window --
 	// the provider window, the contract, the in-tunnel DNS resolution and the
 	// TLS handshake of a tunnel whose open returned before any path existed --
 	// and is sized like the per-source geolocation deadline that used to
@@ -1967,8 +1981,8 @@ var ErrInterrupted = errors.New("egresshealth: the caller's context ended before
 // shipped the endpoint yet" from a real submission failure without importing
 // the submitter implementation its interfaces exist to keep out.
 //
-// It is a clean skip, not a failure. A prober pointed at an older server keeps
-// probing and keeps logging health; it simply records none.
+// An unsupported endpoint leaves quality unacknowledged. The prober logs the
+// measurement, but must not count the attempt as accepted health coverage.
 var ErrUnsupported = errors.New("egresshealth: the server does not implement the provider egress health endpoint")
 
 // Runs a random sample of the destination table through client and
@@ -2018,6 +2032,13 @@ func Check(ctx context.Context, client *http.Client, opts Options) (*Result, err
 		}
 	}
 	if 0 < len(canaries) {
+		// Recovery evidence accumulates across providers and passes. A country
+		// with many incompatible sites must not add an unbounded fixed workload.
+		permutation := opts.Rand.Perm(len(canaries))
+		selectedCanaries := make([]Destination, 0, min(len(canaries), MaxSampledCanaries))
+		for _, index := range permutation[:min(len(canaries), MaxSampledCanaries)] {
+			selectedCanaries = append(selectedCanaries, canaries[index])
+		}
 		// The sample and the canaries in table order: Checks, FailedNames and
 		// the log line read in the order the table declares whatever was
 		// drawn, canaries included.
@@ -2025,7 +2046,7 @@ func Check(ctx context.Context, client *http.Client, opts Options) (*Result, err
 		for _, d := range chosen {
 			pickedNames[d.Name] = true
 		}
-		for _, d := range canaries {
+		for _, d := range selectedCanaries {
 			pickedNames[d.Name] = true
 		}
 		chosen = make([]Destination, 0, len(pickedNames))
@@ -2051,6 +2072,10 @@ func Check(ctx context.Context, client *http.Client, opts Options) (*Result, err
 // measures the overload.
 const AllConcurrency = 10
 
+// Unscored place-recovery controls are drawn independently each run. The small
+// fixed cap bounds extra requests and is included in outer admission budgets.
+const MaxSampledCanaries = 2
+
 // How many sequential rounds one attempt of every
 // destination in the built-in table takes at AllConcurrency.
 func RoundsForAllDestinations() int {
@@ -2073,11 +2098,12 @@ func SamplePerRunOf(dests []Destination) int {
 }
 
 // The longest a run of loads loads can take under these options,
-// and what Budget defaults to: the warm-up, then every load's every attempt in
+// and what Budget defaults to: every load's every attempt in
 // rounds of Concurrency -- as if every retry landed at the same moment, the
 // worst the random spacing can produce -- and the longest spacing between
-// attempts, which is the cap. At the defaults and a 50-load sample that is
-// 60s + 3 x 9 x 10s + 2 x 15m, about 35 minutes; a run that passes everything
+// attempts, plus one finite cold-start allowance per possible tunnel generation.
+// At the defaults with a 60s cold window and a 50-load sample that is
+// 3 x 9 x 10s + 2 x 15m + 3 x (60s - 10s), 37 minutes; a run that passes everything
 // takes its first round, and one with a site that keeps failing about ten to
 // fifteen minutes.
 //
@@ -2095,10 +2121,23 @@ func (self Options) RunBudget(loads int) time.Duration {
 	attempts := self.loadAttempts()
 	budget := time.Duration(attempts*rounds) * self.perRequestTimeout()
 	budget += time.Duration(attempts-1) * retryDelayCapFactor * self.loadRetryMeanInterval()
-	if self.IpEchoUrl != "" {
-		budget += self.ipEchoTimeout()
-	}
+	generations := 1 + self.tunnelRecreateAttempts()
+	budget += time.Duration(generations) * max(0, self.coldStartTimeout()-self.perRequestTimeout())
 	return budget
+}
+
+// Retains the configured establishment allowance without making an echo request.
+func (self Options) coldStartTimeout() time.Duration {
+	if 0 < self.ColdStartTimeout {
+		return self.ColdStartTimeout
+	}
+	if 0 < self.IpEchoTimeout {
+		return self.IpEchoTimeout
+	}
+	if self.IpEchoUrl != "" {
+		return DefaultIpEchoTimeout
+	}
+	return self.perRequestTimeout()
 }
 
 // Returns the per-attempt timeout, or DefaultPerRequestTimeout when unset.
@@ -2333,29 +2372,13 @@ func check(ctx context.Context, client *http.Client, dests []Destination, opts O
 	defer cancel()
 
 	res := &Result{}
-	exit := &exitRecord{}
-	r := newRun(path, opts, opts.concurrency(), budget, opts.rng(), exit)
-	r.warmUp(ctx)
+	r := newRun(path, opts, opts.concurrency(), budget, opts.rng())
 
 	res.Checks = r.loadAll(ctx, dests)
 	if err := parent.Err(); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInterrupted, err)
 	}
-	// Open returns before the provider path is ready. A cold /my-ip-info may
-	// therefore fail even though a subsequent scored load proves the tunnel
-	// became usable. Recover the exit once on that positive evidence; without
-	// it the server cannot place an otherwise successful provider. A TLS
-	// authentication failure remains a hard failure, and a dead run or path
-	// gets no extra work.
-	if exitIp, _, _, tlsFailure := exit.read(); exitIp == "" && !tlsFailure && ctx.Err() == nil {
-		for _, check := range res.Checks {
-			if check.Ok {
-				r.warmUp(ctx)
-				break
-			}
-		}
-	}
-	res.ExitIp, res.ExitObservedAt, res.IpEchoErr, res.TlsAuthenticationFailure = exit.read()
+	collectSampledExit(res)
 
 	// ByClass is seeded from the sample, not from the results that happened to
 	// come back, so a class in which every single check failed still appears
@@ -2400,16 +2423,21 @@ func (self Options) path(client *http.Client) Path {
 // Performs one attempt of one destination's check. It never returns an
 // error: a failed attempt is a result, and the run keeps going.
 func fetch(ctx context.Context, client *http.Client, d Destination, timeout time.Duration, profile RequestProfile, now func() time.Time) CheckResult {
+	return fetchWithExitPolicy(ctx, client, d, timeout, profile, now, nil)
+}
+
+// The test-only address predicate never changes request, TLS or scoring policy.
+func fetchWithExitPolicy(ctx context.Context, client *http.Client, d Destination, timeout time.Duration, profile RequestProfile, now func() time.Time, exitAllowed func(netip.Addr) bool) CheckResult {
 	r := CheckResult{Name: d.Name, Class: d.Class}
 	start := now()
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	ctx, progress := traceRequestProgress(ctx)
+	ctx, progress := traceRequestProgressAt(ctx, now)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.Url, nil)
 	if err != nil {
-		r.Latency = now().Sub(start)
+		progress.recordTiming(&r, start, now())
 		r.Err = err.Error()
 		r.FailureStage = "request_build"
 		return r
@@ -2418,7 +2446,7 @@ func fetch(ctx context.Context, client *http.Client, d Destination, timeout time
 
 	resp, err := client.Do(req)
 	if err != nil {
-		r.Latency = now().Sub(start)
+		progress.recordTiming(&r, start, now())
 		r.Err = err.Error()
 		r.FailureStage = echoRequestStage(err)
 		if r.FailureStage == "request_timeout" {
@@ -2431,6 +2459,9 @@ func fetch(ctx context.Context, client *http.Client, d Destination, timeout time
 	// kilobyte is the whole question (see MaxBodyBytes and neverSent).
 	defer resp.Body.Close()
 	r.StatusCode = resp.StatusCode
+	// Standard transports emit GotFirstResponseByte. A custom transport that
+	// does not trace still proves first byte no later than response headers.
+	progress.recordFirstByte(now())
 
 	// The body is read even on an error status, and ByteCount is recorded
 	// either way: a 403 with a page of explanation proves the tunnel carried
@@ -2438,7 +2469,7 @@ func fetch(ctx context.Context, client *http.Client, d Destination, timeout time
 	// different fault from nothing coming back at all.
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, d.maxBytes()))
 	r.ByteCount = int64(len(body))
-	r.Latency = now().Sub(start)
+	progress.recordTiming(&r, start, now())
 
 	if readErr != nil {
 		r.Err = readErr.Error()
@@ -2451,6 +2482,12 @@ func fetch(ctx context.Context, client *http.Client, d Destination, timeout time
 		return r
 	}
 	r.Ok = true
+	if d.Class == ClassConnectivity && d.Verify.Kind == BodyCheckIpText && req.URL.Scheme == "https" {
+		if ip := sampledExitWithPolicy(string(body), exitAllowed); ip != "" {
+			r.ObservedExitIp = ip
+			r.ExitObservedAt = now()
+		}
+	}
 	return r
 }
 
@@ -2632,7 +2669,8 @@ func (self *Result) Retried() int {
 // was gone for their last attempt and could not be re-created in time (they
 // are in no tally); short= the classes too thin, for the provider's place, to
 // fill their sample; canary=passed/loaded the unscored canaries; and
-// exit=unobserved says the warm-up yielded no exit address. The address itself
+// exit=unobserved is retained only for legacy results carrying IpEchoErr; the
+// sampled-only path does not treat optional exit absence as failure. The address itself
 // is never on the line: the server does not store it either, and a log is a
 // worse place for it.
 //
@@ -2723,7 +2761,7 @@ func (self *Result) FailureStageSummary() string {
 }
 
 func failureStageSummary(checks []CheckResult) string {
-	order := []string{"dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "run_ended", "unknown"}
+	order := []string{"dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "run_ended", "unknown"}
 	counts := map[string]int{}
 	for _, check := range checks {
 		if check.Ok {
@@ -2731,7 +2769,7 @@ func failureStageSummary(checks []CheckResult) string {
 		}
 		stage := check.FailureStage
 		switch stage {
-		case "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "run_ended":
+		case "dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "run_ended":
 		default:
 			stage = "unknown"
 		}

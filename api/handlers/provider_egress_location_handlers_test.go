@@ -380,12 +380,14 @@ func TestProviderEgressLocationDueHonoursStalenessCutoff(t *testing.T) {
 			ClientId: stale, LocationId: city.LocationId,
 			CountryCode: "us", ObservedAt: now.Add(-providerEgressDueAge - time.Hour),
 		})
-		for _, clientId := range []server.Id{fresh, stale} {
-			model.SetProviderEgressHealth(ctx, &model.ProviderEgressHealth{
-				ClientId: clientId, MeasuredAt: now,
-				OKCount: 1, Total: 1,
-			})
-		}
+		model.SetProviderEgressHealth(ctx, &model.ProviderEgressHealth{
+			ClientId: fresh, MeasuredAt: now,
+			OKCount: 1, Total: 1,
+		})
+		model.SetProviderEgressHealth(ctx, &model.ProviderEgressHealth{
+			ClientId: stale, MeasuredAt: now.Add(-model.ProviderEgressHealthMaxAge),
+			OKCount: 1, Total: 1,
+		})
 
 		req := httptest.NewRequest(http.MethodGet, "/network/provider-egress-due?limit=100", nil)
 		req.Header.Set(operatorSecretHeader, secret)

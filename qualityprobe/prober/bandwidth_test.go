@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 // Tests of the bandwidth sample riding a probe: the same tunnel, never failing
@@ -27,7 +29,7 @@ func (self *stubAttempts) ReportAttempt(ctx context.Context, id string, probeFai
 func bandwidthProber(t *testing.T, sub *stubSubmitter) (*Prober, *http.Client) {
 	t.Helper()
 	tunnelClient := &http.Client{}
-	return &Prober{
+	return &Prober{HealthResults: &stubHealthReporter{},
 		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
 			return tunnelClient, func() error { return nil }, nil
 		},
@@ -123,8 +125,7 @@ func TestProbeOneBandwidthOutcomeNeverFailsTheProbe(t *testing.T) {
 // each measurement is real paid traffic, so it is not spent on a tunnel that
 // has already failed to carry the probe.
 func TestProbeOneSkipsBandwidthWhenTheProbeFailed(t *testing.T) {
-	noExit := exitResult()
-	noExit.ExitIp, noExit.IpEchoErr = "", "the /ip echo answered status 502"
+	unmeasured := &egresshealth.Result{NotMeasured: 1}
 	cases := []struct {
 		name   string
 		open   TunnelOpener
@@ -138,8 +139,8 @@ func TestProbeOneSkipsBandwidthWhenTheProbeFailed(t *testing.T) {
 			},
 		},
 		{
-			name:   "no exit address",
-			health: answers(noExit),
+			name:   "nothing measured",
+			health: answers(unmeasured),
 		},
 		{
 			name:  "submission rejected",
@@ -155,6 +156,9 @@ func TestProbeOneSkipsBandwidthWhenTheProbeFailed(t *testing.T) {
 		}
 		if c.health != nil {
 			p.Health = c.health
+		}
+		if c.submi != nil {
+			p.HealthResults = &stubHealthReporter{err: c.submi}
 		}
 		p.Bandwidth = func(ctx context.Context, id string, client *http.Client) {
 			t.Errorf("%s: bandwidth must not be sampled for a probe that did not succeed", c.name)

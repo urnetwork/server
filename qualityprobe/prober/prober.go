@@ -1,7 +1,5 @@
-// Package prober probes one provider: open a tunnel pinned to it, run the
-// egress-health check through it -- whose warm-up, the operator's own /ip
-// echo, is also where the exit address comes from -- and submit what it
-// measured.
+// Package prober opens a provider-pinned tunnel and publishes sampled website
+// quality. Acknowledged health is independent of optional sampled exit evidence.
 package prober
 
 import (
@@ -36,8 +34,8 @@ type TunnelOpener func(ctx context.Context, providerClientId string) (*http.Clie
 type EgressHealthChecker func(ctx context.Context, client *http.Client, place egresshealth.Place) (*egresshealth.Result, error)
 
 // Measures the provider's throughput over the tunnel the
-// probe already opened, and records what it measured. In production this is
-// bandwidth.Sampler.Sample plus the log line, wired by fleetprobe.
+// probe already opened, and records what it measured. This is a standalone
+// diagnostic hook; fleetprobe does not attach fixed bandwidth URL requests.
 //
 // It returns nothing, deliberately. Bandwidth is a diagnostic riding along on
 // a probe: no outcome of the measurement -- not a skipped budget reservation,
@@ -45,8 +43,8 @@ type EgressHealthChecker func(ctx context.Context, client *http.Client, place eg
 // succeeded or what failure class was reported for it.
 type BandwidthSampler func(ctx context.Context, providerClientId string, client *http.Client)
 
-// Records where a provider's traffic exits: the address the
-// operator's own /ip echo saw through its tunnel, and when. The server places
+// Records where a provider's traffic exits when an already-randomly-sampled
+// HTTPS IP-text response provided valid independent evidence. The server places
 // it with its own GeoLite2 (GEOMAP §11.3). In production this is
 // *ingest.Client.
 type Submitter interface {
@@ -85,16 +83,11 @@ const (
 	// fault of the provider's traffic; nothing is submitted, and the attempt
 	// backoff brings the provider round again.
 	FailureNotMeasured = "run_not_measured"
-	// The run measured loads but its warm-up never got an
-	// answer from the operator's /ip echo, so there is no exit address to
-	// submit. The health run itself was submitted.
+	// Legacy pre-sampled-only failure class, retained to read historical rows.
+	// Missing optional exit evidence no longer fails acknowledged website quality.
 	FailureNoExitIp = "no_exit_ip"
-	// The exit address was observed and submitting it still
-	// failed. Usually the server would not take it (a rejection, a 5xx, a dead
-	// connection), but the submitter also refuses some locally, before any
-	// request -- ingest.ErrMissingExitIp and ingest.ErrMissingProbedAt.
-	// Either way the provider has no recorded location, which is what this
-	// class reports.
+	// Website health was measured but its ingest did not acknowledge it.
+	// Older artifacts also used this class for an independent location failure.
 	FailureSubmit = "submit_failed"
 )
 
@@ -108,21 +101,15 @@ var ErrNotMeasured = errors.New("prober: the run measured nothing; its tunnel co
 // provider or server.
 type Prober struct {
 	Open TunnelOpener
-	// Runs the egress-health check over the tunnel. Required: its
-	// warm-up is where the exit address comes from, so there is no probe
-	// without it.
-	//
-	// The result is logged and, if HealthResults is set, submitted: the
+	// Runs the required sampled website check over the tunnel.
+	// The result is logged and acknowledged by HealthResults: the
 	// server's egress index and one-in-ten rule read it. No verdict is derived
 	// from it here.
 	Health EgressHealthChecker
-	// Records the exit address the health run's warm-up saw.
+	// Optional independent location reporter for sampled public-IP evidence.
 	Submit Submitter
-	// Records each egress-health run so it outlives the log line.
-	// Optional -- a nil reporter simply skips submitting.
-	//
-	// Fire-and-forget, exactly like Attempts: a submission failure is logged
-	// once per distinct error and never changes the probe's outcome.
+	// Required: quality succeeds only after this reporter acknowledges evidence.
+	// A failure is deduplicated in logs and reported as submit_failed.
 	HealthResults HealthReporter
 	// Measures throughput over the same tunnel, after the exit has
 	// been submitted. Optional -- a nil sampler skips it entirely.
@@ -169,6 +156,8 @@ type Prober struct {
 	// not consume the log budget that would otherwise have surfaced the first
 	// health or attempt failure.
 	closeErr errGate
+	// Optional location failures never revoke already-acknowledged quality.
+	locationErr errGate
 }
 
 // Deduplicates error messages within one pass and bounds how many
@@ -238,6 +227,7 @@ func (self *Prober) ResetErrorLogging() {
 		"probe-attempt report": &self.attemptErr,
 		"egress-health submit": &self.healthErr,
 		"tunnel teardown":      &self.closeErr,
+		"location submit":      &self.locationErr,
 	} {
 		if n := gate.reset(); 0 < n {
 			log.Printf("prober: suppressed %d further distinct %s error(s) in the previous pass (detail is capped at %d per pass)", n, what, self.maxLoggedDistinctErrors())
@@ -272,30 +262,24 @@ func (self *Prober) maxLoggedDistinctErrors() int {
 func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 	providerClientId := provider.ClientId
 
-	// Submits one health run, fire-and-forget. It returns
-	// nothing and can fail nothing: a diagnostic submission must never be able to
-	// change what the probe reports.
-	//
-	// A server that does not implement the endpoint answers
-	// egresshealth.ErrUnsupported, which is a clean skip rather than an error --
-	// the prober keeps working against an older deployment, it just records no
-	// health. Every other failure is logged once per distinct message, because it
-	// will be the same failure for every provider in the pass.
-	reportEgressHealth := func(res *egresshealth.Result) {
+	// A measurement is not coverage until its required ingest acknowledges it.
+	// Unsupported and failed endpoints retain their distinct diagnostic errors.
+	reportEgressHealth := func(res *egresshealth.Result) error {
 		if self.HealthResults == nil {
-			return
+			return errors.New("prober: health reporter is required for acknowledged quality")
 		}
 		err := self.HealthResults.SubmitEgressHealth(ctx, providerClientId, res)
 		if err == nil {
-			return
+			return nil
 		}
 		if errors.Is(err, egresshealth.ErrUnsupported) {
-			// not a failure: this deployment has not shipped the endpoint. Still
-			// deduplicated, since it holds for every provider in the pass.
+			// No acknowledged health on this deployment. Deduplicate the diagnostic
+			// since it can hold for every provider in the pass.
 			self.logHealthErrOnce(err, fmt.Sprintf("prober: this server does not store egress-health results (%s) -- health is logged but not persisted. Logged once.", err))
-			return
+			return err
 		}
 		self.logHealthErrOnce(err, fmt.Sprintf("prober: could not submit an egress-health result (provider=%s): %s -- while this persists, the health signal exists only in these logs and rolls off with them. Logged once per distinct error.", providerClientId, err))
+		return err
 	}
 
 	// Runs the egress-health check, logs one line per provider,
@@ -311,7 +295,7 @@ func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 	// honest about why nothing ran.
 	checkEgressHealth := func(client *http.Client) (*egresshealth.Result, string, error) {
 		if self.Health == nil {
-			return nil, FailureHealthNotRun, errors.New("prober: no egress-health checker is configured, and the exit address comes from its warm-up")
+			return nil, FailureHealthNotRun, errors.New("prober: no egress-health checker is configured")
 		}
 		if err := ctx.Err(); err != nil {
 			log.Printf("egress-health: provider=%s skipped: no budget left in this probe (%s) -- a run on an expired deadline would fail every destination and be indistinguishable from a blackhole", providerClientId, err)
@@ -319,6 +303,9 @@ func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 		}
 
 		res, err := self.Health(ctx, client, provider.Place)
+		if err == nil && res == nil {
+			err = errors.New("prober: health checker returned no evidence")
+		}
 		if err != nil {
 			// Structural: the check did not happen. Deliberately not rendered as a
 			// zero score, for the same reason as above.
@@ -346,6 +333,9 @@ func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 		if stages := res.FailureStageSummary(); stages != "" {
 			line += " failure_stages=" + stages
 		}
+		if timing := res.TimingSummary(); timing != "" {
+			line += " " + timing
+		}
 		if failed := res.FailedNames(); 0 < len(failed) {
 			line += " failed=" + strings.Join(failed, ",")
 		}
@@ -360,7 +350,7 @@ func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 		// anything, and its not-measured loads are the prober's lost tunnel, not
 		// the provider's traffic. Returning a failure class instead lets the
 		// attempt backoff bring the provider round again.
-		if res.Total == 0 && 0 < res.NotMeasured {
+		if res.Total == 0 {
 			log.Print(line + " -- nothing measured; not submitted")
 			return nil, FailureNotMeasured, ErrNotMeasured
 		}
@@ -370,7 +360,9 @@ func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 		// Neither early return above has one, and sending a zero for them would be
 		// indistinguishable from a total blackhole -- a false accusation against a
 		// provider whose check was skipped for the prober's own exhausted deadline.
-		reportEgressHealth(res)
+		if err := reportEgressHealth(res); err != nil {
+			return nil, FailureSubmit, fmt.Errorf("submit health: %w", err)
+		}
 		return res, "", nil
 	}
 
@@ -408,15 +400,15 @@ func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 			return failure, err
 		}
 
-		// The exit is the health run's warm-up answer: the address the operator's
-		// own /ip echo saw through this tunnel. Without it there is nothing to
-		// place the provider by, and the health run -- already submitted -- is all
-		// this probe produced.
-		if res.ExitIp == "" {
-			return FailureNoExitIp, fmt.Errorf("the /ip echo gave no exit address: %s", res.IpEchoErr)
-		}
-		if err := self.Submit.Submit(ctx, providerClientId, res.ExitIp, res.ExitObservedAt); err != nil {
-			return FailureSubmit, err
+		// Only a successful sampled IP-text response can supply this independent
+		// evidence. Its absence, conflict or publication error cannot revoke the
+		// website health already acknowledged above.
+		if res.ExitIp != "" && !res.ExitObservedAt.IsZero() && self.Submit != nil {
+			if err := self.Submit.Submit(ctx, providerClientId, res.ExitIp, res.ExitObservedAt); err != nil {
+				if self.locationErr.allow(err, self.maxLoggedDistinctErrors()) {
+					log.Printf("prober: optional location submission failed; acknowledged health remains valid: %v", err)
+				}
+			}
 		}
 
 		// The bandwidth sample rides the tunnel that is still open, never a second

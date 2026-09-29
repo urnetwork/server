@@ -62,6 +62,13 @@ func (self *providerEgressProbePass) drainFull(
 	firstFinished chan<- struct{},
 	blackholeFinished <-chan struct{},
 ) providerEgressFullOutcome {
+	if _, bounded := ctx.Deadline(); bounded &&
+		args.Full.Concurrency == args.Full.Limit &&
+		providerEgressFullGuardCohortSize < args.Full.Concurrency &&
+		args.Full.Concurrency%providerEgressFullGuardCohortSize == 0 &&
+		len(initialDue) == args.Full.Limit && args.Full.Limit <= providerEgressFullSelectedLimit {
+		return self.drainFullPipeline(ctx, args, pinSource, poolSource, initialDue, firstFinished, blackholeFinished)
+	}
 	outcome := self.runFullCohorts(ctx, args, pinSource, poolSource, initialDue)
 	close(firstFinished)
 	if outcome.err != nil {
@@ -88,73 +95,16 @@ func (self *providerEgressProbePass) drainFull(
 		if !providerEgressFullSuccessorFits(args, args.Full.Limit, deadline) {
 			return outcome
 		}
-		// Only an all-seen saturated response earns one bounded lookahead.
-		// Retained/re-due rows must not strand unseen work behind that prefix.
-		// This never widens admission, retries a provider, or scans unboundedly.
-		lookupLimit, lookupMax := args.Full.Limit, args.Full.Limit
-		if args.Full.Limit < 5000 {
-			lookupMax += min(len(seen), 5000-args.Full.Limit)
+		next, err := self.selectFullSuccessor(ctx, args, seen, blackholeFinished)
+		if err != nil {
+			outcome.err = err
+			return outcome
 		}
-		var next []ingest.DueProvider
-		var selected map[string]bool
-		for {
-			due, err := self.fullDue(ctx, lookupLimit)
-			if err != nil {
-				egressProbePassErrorsTotal.WithLabelValues("full_due").Inc()
-				outcome.err = fmt.Errorf("get full-probe due providers: %w", err)
-				return outcome
-			}
-			if err := ctx.Err(); err != nil {
-				outcome.err = err
-				return outcome
-			}
-			select {
-			case <-blackholeFinished:
-				return outcome
-			default:
-			}
-			if lookupLimit < len(due) {
-				egressProbePassErrorsTotal.WithLabelValues("full_due").Inc()
-				outcome.err = fmt.Errorf("get full-probe due providers: response exceeds the requested limit")
-				return outcome
-			}
-			next = make([]ingest.DueProvider, 0, min(args.Full.Limit, len(due)))
-			selected = make(map[string]bool, cap(next))
-			retained := 0
-			for _, provider := range due {
-				if provider.ClientId == "" {
-					continue
-				}
-				if seen[provider.ClientId] {
-					retained++
-				} else if !selected[provider.ClientId] {
-					next = append(next, provider)
-					selected[provider.ClientId] = true
-					if len(next) == args.Full.Limit {
-						break
-					}
-				}
-			}
-			if len(next) == 0 && retained == len(due) && len(due) == lookupLimit && lookupLimit < lookupMax {
-				egressProbeFullProgress.selection(0)
-				lookupLimit = lookupMax
-				continue
-			}
-			break
-		}
-		if lookupLimit != args.Full.Limit {
-			if len(next) == 0 {
-				egressProbeFullProgress.selection(2)
-			} else {
-				egressProbeFullProgress.selection(1)
-			}
-		}
-		egressProbePassDue.WithLabelValues("full").Set(float64(len(next)))
 		if !providerEgressFullSuccessorFits(args, len(next), deadline) {
 			return outcome
 		}
-		for id := range selected {
-			seen[id] = true
+		for _, provider := range next {
+			seen[provider.ClientId] = true
 		}
 		batchPass := *self
 		batchPass.fullReleaseDeadline = deadline
@@ -172,4 +122,70 @@ func (self *providerEgressProbePass) drainFull(
 			return outcome
 		}
 	}
+}
+
+// Only an all-seen saturated response earns one bounded lookahead. Both the
+// sequential and cohort-refill owners use this same due-source contract.
+func (self *providerEgressProbePass) selectFullSuccessor(
+	ctx context.Context,
+	args *ProviderEgressProbeArgs,
+	seen map[string]bool,
+	blackholeFinished <-chan struct{},
+) ([]ingest.DueProvider, error) {
+	lookupLimit, lookupMax := args.Full.Limit, args.Full.Limit
+	if args.Full.Limit < 5000 {
+		lookupMax += min(len(seen), 5000-args.Full.Limit)
+	}
+	var next []ingest.DueProvider
+	for {
+		due, err := self.fullDue(ctx, lookupLimit)
+		if err != nil {
+			egressProbePassErrorsTotal.WithLabelValues("full_due").Inc()
+			return nil, fmt.Errorf("get full-probe due providers: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		select {
+		case <-blackholeFinished:
+			return nil, nil
+		default:
+		}
+		if lookupLimit < len(due) {
+			egressProbePassErrorsTotal.WithLabelValues("full_due").Inc()
+			return nil, fmt.Errorf("get full-probe due providers: response exceeds the requested limit")
+		}
+		next = make([]ingest.DueProvider, 0, min(args.Full.Limit, len(due)))
+		selected := make(map[string]bool, cap(next))
+		retained := 0
+		for _, provider := range due {
+			if provider.ClientId == "" {
+				continue
+			}
+			if seen[provider.ClientId] {
+				retained++
+			} else if !selected[provider.ClientId] {
+				next = append(next, provider)
+				selected[provider.ClientId] = true
+				if len(next) == args.Full.Limit {
+					break
+				}
+			}
+		}
+		if len(next) == 0 && retained == len(due) && len(due) == lookupLimit && lookupLimit < lookupMax {
+			egressProbeFullProgress.selection(0)
+			lookupLimit = lookupMax
+			continue
+		}
+		break
+	}
+	if lookupLimit != args.Full.Limit {
+		if len(next) == 0 {
+			egressProbeFullProgress.selection(2)
+		} else {
+			egressProbeFullProgress.selection(1)
+		}
+	}
+	egressProbePassDue.WithLabelValues("full").Set(float64(len(next)))
+	return next, nil
 }

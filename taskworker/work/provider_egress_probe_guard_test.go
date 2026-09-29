@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -336,9 +337,10 @@ func TestEgressHealthSiteLoadsJudgesEachLoadOnTheOtherSites(t *testing.T) {
 	}
 }
 
-// An ingest that records every call in order, and refuses the location
-// submissions of the named providers.
+// Concurrent-safe recording ingest for independently publishing cohorts.
+// Read recorded fields only after all owners have joined.
 type recordingEgressProbeIngest struct {
+	stateLock    sync.Mutex
 	calls        []string
 	health       map[string]*egresshealth.Result
 	refuseSubmit map[string]bool
@@ -358,6 +360,8 @@ func newRecordingEgressProbeIngest(refused ...string) *recordingEgressProbeInges
 
 // Implements prober.Submitter.
 func (self *recordingEgressProbeIngest) Submit(_ context.Context, providerClientId string, exitIp string, _ time.Time) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	self.calls = append(self.calls, "submit "+providerClientId+" "+exitIp)
 	if self.refuseSubmit[providerClientId] {
 		return errors.New("synthetic refused submission")
@@ -367,12 +371,16 @@ func (self *recordingEgressProbeIngest) Submit(_ context.Context, providerClient
 
 // Implements prober.AttemptReporter.
 func (self *recordingEgressProbeIngest) ReportAttempt(_ context.Context, providerClientId string, probeFailure string) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	self.calls = append(self.calls, "attempt "+providerClientId+" "+probeFailure)
 	return nil
 }
 
 // Implements prober.HealthReporter.
 func (self *recordingEgressProbeIngest) SubmitEgressHealth(_ context.Context, providerClientId string, res *egresshealth.Result) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	self.calls = append(self.calls, "health "+providerClientId)
 	self.health[providerClientId] = res
 	return nil
@@ -390,6 +398,8 @@ func (self *recordingEgressProbeIngest) SubmitBandwidth(context.Context, string,
 
 // Records the checks as one call.
 func (self *recordingEgressProbeIngest) SubmitBlackholeChecks(_ context.Context, checks []ingest.BlackholeCheck) error {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
 	self.calls = append(self.calls, fmt.Sprintf("blackhole %d", len(checks)))
 	return nil
 }
@@ -403,8 +413,8 @@ func testFullBatchSink(inner egressProbeIngest) *egressProbeMetricsReporter {
 }
 
 // Fills a batch the way the prober's reporters would: a provider with a
-// health run, an exit and an attempt; one whose tunnel failed; and one whose
-// exit the server will refuse.
+// health run, an exit and an attempt; one whose tunnel failed; and an invalid
+// exit-only row, which cannot certify website health.
 func testFillFullBatch(t *testing.T, batch *providerEgressFullBatch) {
 	t.Helper()
 	ctx := context.Background()
@@ -426,8 +436,8 @@ func testFillFullBatch(t *testing.T, batch *providerEgressFullBatch) {
 }
 
 // A released batch goes on provider by provider in the order it was measured:
-// the health run scored and tallied, then the exit, then the attempt, which a
-// refused exit turns into submit_failed.
+// the health run scored and tallied, then the optional exit, then the attempt.
+// An exit-only row cannot count as accepted quality.
 func TestProviderEgressFullBatchReleaseSubmitsInOrderAndTallies(t *testing.T) {
 	inner := newRecordingEgressProbeIngest("provider-c")
 	batch := newProviderEgressFullBatch(testFullBatchSink(inner))
@@ -449,7 +459,7 @@ func TestProviderEgressFullBatchReleaseSubmitsInOrderAndTallies(t *testing.T) {
 		},
 	)
 	if submitFailures != 1 {
-		t.Fatalf("submit failures = %d, want the one refused exit", submitFailures)
+		t.Fatalf("exit-only row certified health: failures=%d", submitFailures)
 	}
 	want := []string{
 		"health provider-a",
@@ -457,7 +467,7 @@ func TestProviderEgressFullBatchReleaseSubmitsInOrderAndTallies(t *testing.T) {
 		"attempt provider-a ",
 		"attempt provider-b " + prober.FailureTunnel,
 		"submit provider-c 203.0.113.9",
-		"attempt provider-c " + prober.FailureSubmit,
+		"attempt provider-c " + prober.FailureNotMeasured,
 	}
 	if !slices.Equal(inner.calls, want) {
 		t.Fatalf("released calls = %q, want %q", inner.calls, want)
@@ -584,7 +594,7 @@ func TestProviderEgressFullBatchReleaseSkipsARunWithNothingScored(t *testing.T) 
 			tallied += len(loads)
 		},
 	)
-	if !slices.Equal(inner.calls, []string{"attempt provider-a "}) {
+	if !slices.Equal(inner.calls, []string{"attempt provider-a " + prober.FailureNotMeasured}) {
 		t.Fatalf("released calls = %q, want the attempt alone", inner.calls)
 	}
 	if tallied != 1 {

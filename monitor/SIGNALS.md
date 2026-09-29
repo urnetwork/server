@@ -2183,6 +2183,41 @@ is not recovery; successful bounded reads still have their existing query-cap,
 parsing, and freshness limits. This source repair does not certify every live
 observer generation or alter the standing tailer's separate shutdown policy.
 
+Bounded Warpctl log-query failures also retain a privacy-safe terminal cause.
+The local command runner keeps stdout separate from a bounded 64 KiB stderr
+diagnostic prefix for classification while preserving the existing combined
+output contract. Only a failed `warpctl logs` query can acquire the fixed
+classes `observation-log-query-http-429`, `observation-log-query-http-502`,
+`observation-log-query-http-503`, `observation-log-query-http-504`, or
+`observation-log-query-config-schema`. The HTTP classes require Warpctl's
+terminal `panic: Loki query error (...)` header; the config/schema class
+requires a terminal JSON/YAML parsing shape. Native cancellation and the
+monitor's command deadline retain `observation-canceled` and
+`observation-timeout`; a terminal GET timeout has the same timeout class.
+Unknown, oversized, or ambiguous diagnostics remain
+`observation-command-failed`. Earlier retry records, remote stdout, and
+timestamp-framed records cannot establish the terminal query cause. A
+successful command remains successful even when stderr records failed retries.
+
+Only the fixed class and optional native numeric exit status enter the safe
+error; arguments, selectors, response bodies, raw stderr, addresses, and
+credentials are not copied. Reconciliation strips block/continuation wrappers
+around this typed error before storing alert text. Existing `tailer-reconcile`
+and one-shot `cannot-observe` identities, WARN severity, two-cadence sustain,
+partial-output rejection, and successful-query recovery remain unchanged.
+False-positive qualifier: a query HTTP status does not identify which gateway
+or backend returned it, and a JSON/YAML panic does not distinguish local
+configuration from an invalid upstream payload. Neither proves that the
+observed service panicked. False-negative qualifier: a changed producer error
+format, oversized stderr, or missing terminal header loses the narrower cause,
+but never turns the failed query healthy. Diagnose through bounded independent
+query/backend controls; do not restart the observed service from this class.
+Require the existing two complete reconciliation windows and independent live
+tail freshness for recovery. Deterministic controls in
+`conn_warpctl_log_error_test.go` cover each class, cancellation, native exit
+status, concurrent stdout/stderr capture, private-text exclusion, unknown and
+successful controls, and unchanged one-shot/standing visibility identities.
+
 The stderr boundary still needs narrow self-health parsing. Warpctl reconnects
 an interrupted WebSocket internally, so an explicit `Tail read error ... no
 route to host ... Reconnecting` does not exit the child or increment the
@@ -5933,6 +5968,42 @@ correlation only and cannot assign process allocation ownership.
 Implementation convention: SIGNALS.md §2.12a (`worker-churn`) maps to
 `signal_worker_churn.go` and `signal_worker_churn_test.go`.
 
+### 2.12b Taskworker scheduler capacity — process cap is not host headroom
+Probe: `worker-cap`
+
+Join source-fresh `rate(process_cpu_seconds_total[5m])`,
+`go_sched_gomaxprocs_threads`, and `go_goroutines` by the **same**
+Taskworker host, block, and runtime instance. Filter each raw source timestamp
+to the last 90 seconds before accepting the instant-query result. WARN after
+two one-minute observations when CPU consumes at least 90% of that process's
+GOMAXPROCS and at least 10,000 goroutines are present. A missing, stale,
+invalid, duplicate, or mixed-instance member is `worker-scheduler-unobservable`, never
+proof of spare capacity. Preserve the separate §2.12a CPU/allocation-churn
+threshold: scheduler pressure does not require exceptional allocation.
+
+The 2026-09-26 Main probe load supplied the discriminator: one 128-full,
+1,000-cheap Taskworker consumed 3.71 CPU cores with `GOMAXPROCS=4` and
+approximately 105,000 goroutines while PostgreSQL still had host-level CPU
+headroom. The four-core value came from the Taskworker service's `cores`
+setting through Warpctl's `--core-limit` to `GOMAXPROCS`, not a Docker CPU
+quota. Thus host CPU percentage is a **false negative** for process-local
+scheduler saturation. High process CPU alone can be healthy useful work; the
+goroutine floor and joined §2.19 due/throughput evidence qualify the finding,
+not prove that every goroutine is runnable or that the scheduler is the sole
+cause of low coverage.
+
+Do not lift the cap as an isolated repair: pinned gVisor starts TCP dispatcher
+workers per private tunnel using `runtime.GOMAXPROCS(0)`. Raising it from 4
+to a 96-core host default could multiply those baseline workers by 24 while
+probes still hold tunnels through spaced retry chains. First bound detached
+DoH dials, verify per-process shard ownership and tunnel residency, and
+compare measured provider checks/hour with §2.19. Increasing shard count
+without admission balancing is not a placement guarantee: one Taskworker can
+claim several shards and mixed old/new shard counts can overlap provider
+partitions until old runs retire. Retain this WARN until two fresh exact-process
+cadences show pressure below threshold **and** coverage improves without
+PostgreSQL, API, or host regression.
+
 ### 2.13 Maintenance reboot collision — process exit is not task completion
 Probe: `reboot-collision`
 
@@ -6313,6 +6384,10 @@ server-side race wait. Server `c8dfe570` also added
 sender role plus server-derived source owner, request-time resolution,
 relationship, and source/destination lifecycle snapshot already read by
 `CreateContract`; it performs no identifier-bearing diagnostic query. The
+newer API also exports bounded `destination_owner` from that same snapshot;
+older API cohorts retain `destination_owner=unattributed` in the monitor, not
+`other` or a fabricated zero. This dimension distinguishes a prober-owned
+return destination from a request originating at the prober. The
 probe requests the aggregate and detail cohorts in one Mimir evaluation, only
 for requests whose original wire bit was false:
 
@@ -6325,7 +6400,7 @@ label_replace(
 )
 or
 label_replace(
-  sum by (sender_role,source_owner,resolution,relationship,source_lifecycle,destination_lifecycle) (
+  sum by (sender_role,source_owner,destination_owner,resolution,relationship,source_lifecycle,destination_lifecycle) (
     rate(urnetwork_connect_missing_origin_details_total{
       env="main",request_companion="false"
     }[5m])
@@ -6344,6 +6419,8 @@ It is never accepted from a request. `resolution` is one of
 `rejected`, or `unknown`; `relationship` is `network`, `friends_family`,
 `public`, or `unknown`; and each lifecycle is `missing`, `active_top`,
 `inactive_top`, `active_derived`, `inactive_derived`, `control`, or `unknown`.
+`destination_owner` uses the same fixed `egress_prober`, `other`, or `unknown`
+producer vocabulary as `source_owner`, and is independently server-derived.
 Mimir sums away API process/instance labels before the monitor sees the
 response. No customer, client, network, device, contract, or destination
 identity enters the cohort; the standard bounded monitor gateway name remains
@@ -6379,12 +6456,15 @@ using the cohorts:
   nonnegative finite rate. Its sum must reconcile with the aggregate within the
   larger of 1/min or 2%; that narrow allowance covers a scrape landing between
   the two adjacent counter increments. The old five-label schema may coexist
-  during a rolling range; the monitor retains both missing attribution labels
-  as the synthetic fixed class `unattributed`, never folds that rate into
-  `other`, and rejects a half-upgraded or producer-emitted `unattributed`
-  schema. Only in this state may the alert export the dominant joint sender/
-  source-owner/resolution/relationship/lifecycle cohort and its rate. A
-  reconciled `unattributed` cohort is rate-complete but not ownership evidence.
+  during a rolling range; the monitor retains missing `sender_role`,
+  `source_owner`, and `destination_owner` as the synthetic fixed class
+  `unattributed`. The intermediate seven-label schema retains only
+  `destination_owner=unattributed`. Neither is folded into
+  `other`; a half-upgraded or producer-emitted `unattributed` schema is rejected.
+  Only in this state may the alert export the dominant joint sender/source-
+  owner/destination-owner/resolution/relationship/lifecycle cohort and its rate.
+  A reconciled `unattributed` cohort is rate-complete but not ownership evidence
+  for its missing dimension.
 - `detail_status=partial`: structurally valid cohorts sum materially below the
   aggregate. This is a mixed API rollout or incomplete ingestion window; do not
   assign the incident from the visible subset.
@@ -6407,16 +6487,37 @@ compare the onset with score publications, service rollout/drain boundaries,
 connection churn, successful contract creation, and the client-window lifetime.
 Windows selected before a repaired publication must age out naturally. For a
 complete detail snapshot, use its joint sender role, server-derived source
-owner, source lifecycle, destination lifecycle, relationship, and resolution
+owner, destination owner, source lifecycle, destination lifecycle, relationship, and resolution
 cohort to distinguish the internal prober from other selection/return traffic
 without raw client pairs. `source_owner=egress_prober` selects only the
 server-owned singleton for direct correlation. `source_owner=other` excludes
 that singleton but does not identify a product, application, device, or
-artifact. A complete older-schema cohort is retained as `unattributed`, never
+artifact. `destination_owner=egress_prober` can identify the prober-owned
+return destination when the source is another network; `source_owner=other`
+alone cannot exclude that path. A complete older-schema cohort is retained as `unattributed`, never
 folded into `other`. An absent, partial, ambiguous, or ownership-unattributed
 snapshot must not be used as causal proof. Do not log identifiers, edit Redis
 blobs, weaken provider gates, restart clients, or increase the companion wait
 merely to hide the rate.
+
+2026-09-26 Main diagnostic discriminator: the bounded five-minute cohort ran
+near 1,402 missing-origin failures/s with `requested_companion=false`,
+`sender_role=absent`, `source_owner=other`, `resolution=stream_fallback`,
+`relationship=public`, and `active_top→active_derived`. Only about 0.97/s had
+`source_owner=egress_prober`. This does **not** exonerate the prober: a provider
+reply can have another source and a prober-owned derived destination. The old
+metric has no destination-owner dimension, so it is a false-negative qualifier
+for prober attribution. The source path retries a missing origin about every
+100 ms for three seconds, normally running both the plain-origin and companion-
+origin PostgreSQL lookups, while the dominant origin SELECT ran roughly
+24,000–39,000 times/s and rarely returned a row. The retry multiplier is a
+confirmed database-load mechanism, not proof that every missing origin is
+impossible or that the query rate is exclusively from this cohort. Distinguish
+proven terminal failures from legitimate subsecond creation races; do not
+shorten the race window or skip its final authoritative database check merely
+to reduce load. An event-assisted wait must be post-commit, bounded per owner,
+safe across subscribe/commit races and missed Redis notifications, and must
+degrade to bounded database checks when Redis or an older writer is unavailable.
 
 2026-09-02 production evidence showed why this must be a first-class monitor
 signal rather than only a dashboard rule. After the eligibility export, the
@@ -6528,9 +6629,10 @@ missing-origin mechanism. Deploy it to every API instance, wait one complete
 five-minute range, and require zero `unattributed` rate before selecting the
 internal-prober or other-source branch.
 
-Verification requires every API instance to export the seven-label detail
-family, one complete five-minute range with zero ownership-unattributed rate,
-and independently proven adoption of the applicable Connect ancestry:
+Verification requires every API instance to export the eight-label detail
+family (including `destination_owner`), one complete five-minute range with zero
+ownership-unattributed rate, and independently proven adoption of the applicable
+Connect ancestry:
 `ec34ce1` for selected/discovery windows, `55daddb` for provider-return source
 owners, or both while the path remains unattributed. Only then does a maximum
 client-window lifetime become a useful observation interval. A still-installed
@@ -6556,6 +6658,62 @@ schema rejection, partial mixed-rollout coverage, duplicate/skewed/unknown/
 extra-label ambiguity, identifier redaction, the exact healthy boundary,
 absent and duplicate aggregate visibility, stale samples, invalid rates, query
 scoping, and detailed Markdown rendering without identifiers.
+
+### 2.17a Companion-origin wait amplification and notification loss
+Probe: `origin-wait`
+
+After the event-assisted wait is deployed, join source-fresh five-minute rates
+of `urnetwork_connect_companion_origin_lookups_total{source=initial|event|fallback|deadline}`,
+`urnetwork_connect_companion_origin_wait_wakes_total{source=event|fallback|deadline|cancel}`,
+`urnetwork_contract_origin_notifications_total{event=<fixed vocabulary>}`, and
+`urnetwork_connect_companion_origin_lookups_per_request_count`. Every raw
+source must have been scraped inside 90 seconds; a fresh Mimir evaluation time
+alone is not enough. Counter children are preinitialized by the producer.
+Absent, stale, duplicate, extra-label, invalid, or partially deployed metrics
+are `origin-wait-unobservable`, not zero retries or healthy Redis delivery.
+Running API/Connect artifact convergence is a separate source-completeness
+gate: a complete metric family from only some instances can undercount.
+
+`origin-wait-db-amplification` WARNs after two one-minute cadences if fallback
+and deadline lookups exceed 500/min and total authoritative lookups average at
+least three per completed companion request. This is a database-work signal,
+not evidence that the absent origin could never arrive. Each lookup can issue
+both plain-origin and chained-companion SQL reads. Correlate with §2.17's
+server-derived source **and destination** owners, actual PostgreSQL statement
+deltas, cold-start success, and the provider-coverage controls. A low average
+can be a **false negative** if many immediate successes dilute a smaller but
+highly amplified failing cohort; the fixed source counters and §2.17 failure
+rate remain independent controls. A high average can reflect legitimate
+simultaneous cold starts; require the sustained rate and successful-contract
+control before calling it a defect.
+
+`origin-notification-loss` WARNs after two one-minute cadences when the sum of
+`queue_full`, `publish_failed`, `subscription_failed`,
+`registration_declined`, and `invalid_message` exceeds one/minute. A missed
+advisory notification forces bounded PostgreSQL fallback but must not change
+the committed contract result. `owner_closed` during orderly drain and
+`unowned` non-router/test callers are not loss by themselves. `subscribed`,
+`reconnected`, `received`, `enqueued`, and `published` are bounded diagnostic
+context, not a promise that every wait woke from Redis. Mixed old/new writers
+can fail to publish without incrementing the new metric; the timed and final
+database reads preserve correctness, and exact artifact inventory remains
+necessary to close that false negative.
+
+Retain an immediate lookup, a fast first retry, event/ack-triggered rechecks,
+bounded timed fallback, and a final authoritative lookup at the existing
+three-second deadline. An event publisher runs only after a successful
+PostgreSQL commit; queue/Redis failure cannot fail a committed contract.
+Subscriptions are multiplexed within an explicitly owned API/Connect instance
+and bounded independently per instance. Never add one Redis connection per
+waiting request or a process-global Connect admission budget. Verification
+requires two complete five-minute post-convergence windows with low loss and
+reduced fallback/SQL amplification, preserved cold-start contract success,
+and no regression in provider coverage or database CPU.
+
+Implementation convention: SIGNALS.md §2.17a (`origin-wait`) maps to
+`signal_origin_wait.go` and `signal_origin_wait_test.go`. Synthetic tests cover
+amplification, notification loss, missing child visibility, and identifier-
+unsafe metric labels without real secrets, addresses, or hosts.
 
 ### 2.18 Stale contract destination rejection — dead routes must not authorize
 Probe: `stale-destination`
@@ -6802,6 +6960,87 @@ cohort.
 ### 2.19 Provider egress probe coverage — every durable shard must advance
 Probe: `egress-coverage`
 
+Source architecture checkpoint (2026-09-27, sampled-only probe; verify the
+running API **and** Taskworker artifacts before applying these semantics):
+
+- Full and cheap checks start directly with randomized destination-pool URLs.
+  There is no separate `/ip` or `/my-ip-info` warm-up and no automatic operator
+  or CDN bulk-bandwidth fetch. Legacy task settings remain decodable but do not
+  authorize those requests. The sampled DNS, connectivity/captive-portal, CDN,
+  and ordinary-site classes retain their existing response contracts. Country
+  canaries are an additional random sample of at most two pool members, never
+  scored, included in the request budget; they are not an unbounded fixed set.
+  This is a source-proven boundedness correction, not evidence canaries caused
+  Main's location-specific provider-list incident.
+- Each sampled hostname has an explicit IPv4 name-resolution phase using its
+  own tunnel's DoH cache, followed by target TCP/TLS and response work. Up to
+  three transient DNS lookup attempts share the request's hard deadline, with
+  bounded 50–200 ms jitter and time reserved for the connection. An authoritative
+  negative is not immediately repeated; the existing spaced per-site retries
+  still apply. Fixed DoH resolver infrastructure is distinct from an added
+  application warm-up URL. A failure of one DoH transport leg is not a failed
+  logical lookup, and exhausted lookup retries do not alone distinguish shared
+  resolver/control-plane failure from a provider swallowing egress traffic.
+- The first sampled requests share one finite cold-start window per tunnel
+  generation. A response ends that allowance for later requests; failure does
+  not renew it. Hard request/run deadlines, per-provider concurrency, three
+  spaced load attempts, bounded tunnel recreation, TLS authentication, host
+  allowlists/pins, batch guards, and cheap dark-streak policy remain enforced.
+  The cold-generation reserve is included in admission math; at the default
+  full geometry the conservative envelope is 37 minutes of health work plus
+  one minute of tunnel opening, **not** a measured per-provider service time.
+- `CheckResult.Latency` and `urnetwork_egress_probe_health_check_seconds` retain
+  total bounded fetch duration. Separate request-local `DnsLookupLatency`,
+  `TimeToFirstByte` (DNS included), and `ConnectFirstByteLatency` distinguish
+  lookup from connection/TLS/request/first-byte work. Fixed summary fields
+  `dns_timed`, `dns_ms`, `first_byte`, `connect_ttfb_ms`, and `ttfb_ms` aggregate
+  last attempts only. Body throughput starts at the first response byte; a
+  no-first-byte timeout reports no speed. Capped small-body rate is diagnostic,
+  **not** the former calibrated bulk-bandwidth sample or a speed-score update.
+- Full success/`full_submitted` means nonempty scored website health survived
+  the batch guard and its reporter acknowledged publication. An unsupported
+  or failed health endpoint, empty result, or failed final buffered release
+  cannot certify success. Pre-submit measurement and attempt counters remain
+  non-ACK evidence; an error can follow a durable write whose reply was lost.
+  `submit_failed` now concerns health publication; older artifacts also used it
+  for location submission. Correlate §2.19a's separate acknowledgment controls,
+  not historical location-only meanings of the same pass-summary field.
+- Location is independent and optional: only an already-selected, successful
+  HTTPS connectivity `BodyCheckIpText` response may contribute an actual public
+  exit-IP observation. No extra request or first-position preference is added.
+  Special-purpose/nonpublic addresses are rejected conservatively; conflicting
+  valid observations produce no location. DNS answers, control IPs, and provider
+  claims are never substituted. Missing or rejected location publication does
+  not revoke acknowledged health. If no usable sample is obtained, existing
+  exit-location rows can age past seven days and ordinary connection-IP
+  geolocation fallback may describe a different exit. Health freshness does
+  not certify country/city placement. Optional sample absence is **not** an
+  echo failure: historical `provider_egress_place_tally.echo_failure_count` is
+  deprecated and receives no new echo events from this architecture.
+
+API due selection and fleet reconstruction must use independently fresh health
+after this change; deploying Taskworker alone does not activate those API/model
+semantics. Never interpret an older location-only outcome query's `inconsistent`
+rows as lost website-health publication. This change does not redefine the
+four-hour target: it is a complete **measured cheap blackhole** sweep of the
+eligible fleet, not the deep Full schedule and not attempted/unknown coverage.
+Validate distinct acknowledged measured providers, guard losses, shard placement,
+closed-cohort slot-seconds, CPU/memory and source artifacts over multiple
+cadences. Local tests and lower request counts alone do not establish four-hour
+capacity or explain the location-specific FindProviders2 regression.
+
+Brittle-gate audit left intentionally unchanged: a missing trusted pin snapshot
+fails the pass closed (do not recover by silently unpinning); a terminal TLS
+authentication failure remains integrity evidence; country-incompatible sites
+are unscored and only bounded canaries test recovery; shared-failure batch guards
+still contain false provider negatives. The latest-run 90% quality admission
+gate can exclude a 50-load provider after six final failed destinations, and
+country counts additionally need trustworthy exit-location evidence. With sparse
+Full coverage this may underfill particular target cohorts even when global
+best-available remains populated, but aggregate caller-country outcome bands
+do not prove that causal join. Do not relax country/security gates or attribute
+the live outage without target-level privacy-safe evidence and a tested policy.
+
 The provider-egress pipeline now runs as recurring `pending_task` shards rather
 than as host-owned edge services. Generic task health (§1.2/§8.9) can detect a
 row that is parked, overdue, or failing, but cannot prove that every hash slice
@@ -6905,6 +7144,33 @@ For each shard, aggregate without exporting identifiers:
   by the provider's current category would manufacture zero progress. This
   gross last-hour attempt rate deliberately remains unfiltered by current-dark
   state for rollout comparability.
+
+Full-attempt false-positive/false-negative qualification: the last-hour count
+is success-inclusive but still restricted to the **current eligible
+population**, not every worker execution or acknowledged API write. A provider
+that disconnects during or after a long run can retain its accepted attempt
+while leaving this denominator. A reconnect can restore the same recent row
+without another report, and repeated attempts on one provider collapse to its
+latest row. A lower eligible-row count than the producer counter is therefore
+not evidence of lost publication or of an equivalent fall in raw execution
+throughput. Conversely, a high acknowledged-attempt counter, especially when
+the run guard withheld health/location results, does not establish successful
+coverage of the current fleet or clear its deadline debt. The adjacent full
+deadline-prefix projections use the same eligibility-filtered rate.
+
+At 2026-09-27 00:52:03 UTC, a bounded read-only Main join found 401 unique
+latest full attempts from the previous hour, all `run_batch_guard`: 139 were
+currently eligible and 262 (65.3%) were currently disconnected. Same-process
+Taskworker observation showed acknowledged attempts with no unsupported,
+canceled, or error outcome in its sampled hour. This explains a substantial
+current-population exclusion, not an exact counter-to-row join across
+different observation windows, the time of each disconnect, or its cause.
+Reconcile same-window acknowledgements, bounded current-eligibility cohorts,
+and guard outcomes before assigning a publication or capacity fault. Keep the
+current eligibility predicate: adding disconnected attempts to its rate would
+hide connected-provider exposure. Do not cancel long probes or suppress
+retries from one disconnected snapshot; durable status freshness, reconnect
+semantics, and already-earned evidence need their own correctness proof.
 
 The due ages are the application contract: full location refresh begins at
 half the seven-day location lifetime, existing-health refresh begins at half
@@ -7452,6 +7718,15 @@ provider-tunnel dialer can do DNS inside its dial callback, so
 because it was the last specific phase observed. These stages are diagnostic
 subsets, not replacement success/failure verdicts or evidence that packet
 routing through the provider has been repaired.
+Connect `dacc8bdc` and Server `661a2801` add a request-local target-dial
+observer so instrumented failures can report fixed `dial_dns` (no usable
+answer before the failure) or `dial_tcp` (target TCP was launched). Uninstrumented
+custom dialers retain `dial_dns_or_socket`; private DoH transport dials cannot
+impersonate the requested target's TCP progress. `dial_tcp` is the furthest
+positive stage, **not** exclusive blame on TCP when another DNS family is
+still pending. Compare these fixed classes only after attesting the running
+Taskworker binary contains both changes; an older or mixed artifact cannot
+be interpreted as a measured zero for the new classes.
 A direct 11:24 UTC read-only PostgreSQL census used the exact eligible and
 `blackhole_measured` predicates from this probe: 122,961 distinct eligible
 providers, 83,562 with a measured check inside eight hours, 57,988 inside
@@ -7496,6 +7771,45 @@ live work; task arguments alone cannot distinguish them. No service-wide cap
 or provider policy changes. Validate the additional eight concurrent checks
 per shard against actual Taskworker/Proxy/API/datastore resource and verdict
 controls, not against a transport budget treated as an RSS reservation.
+
+2026-09-26 late Main correction to the cheap-scan capacity diagnosis: one
+exact-process, closed 4,000-provider pass lasted 53 minutes and occupied
+1,936,275 worker-slot seconds. Its 4,000 completions averaged 484.07 seconds
+of slot ownership, but only 3,004 became measured results; the other 996 were
+withheld by the dark-batch guard. The seven guarded 250-provider cohorts had
+pre-guard dark shares of 38.0%, 44.0%, 48.8%, 43.6%, 47.2%, 90.0%, and
+87.2%. Their discarded-negative counts sum exactly to 996. This is **not**
+a set of marginal crossings above the configured 20% guard. The guard retained
+passing and independent TLS-authentication evidence as designed. It is a
+false-positive conclusion to call every guarded negative a genuinely dark
+provider, and a false-negative coverage conclusion to count its completed
+worker call or `not_measured` submission as a durable measurement.
+
+The due selector alternates a bounded oldest-retry head with a never-checked
+head. This is deliberately fairer than the old retry-only selection, but its
+cohorts are not representative random samples of all eligible providers.
+A bounded *current*, read-only head census after the closed pass found one
+shard with 188 prior failures and 335 prior unknown results among its next
+2,000 retry candidates, plus 476 available never-checked candidates. The
+seven guarded batches came from that shard. The guard itself has already
+changed those rows, so the current queue cannot reconstruct historical batch
+membership or prove whether transport failure or dark-enriched selection
+caused each batch. Do not tune the 20% guard from the fleet-wide dark fraction
+alone. Separate selected retry/first-check composition, per-attempt DNS versus
+TCP versus tunnel stages, independent passing controls, and process generation
+before changing how negatives are admitted.
+
+At the closed pass's failure mix, 4,000 perfectly occupied slots could produce
+only about 22,340 measured checks/hour, below the roughly 29,230/hour needed
+to cover 116,900 eligible providers in four hours. The old lifetime
+16-cohort selection cap also left capacity idle after early ACKs. A tested
+40-selected/16-retained cohort split can address that admission idle time
+without increasing the 1,000-worker-per-shard cap, changing retries, or
+weakening the guard; it **cannot** alone establish four-hour measured coverage.
+Judge a rollout by a complete post-convergence hour of distinct persisted
+`checked_at` gains and all-shard progress, not by selected, started, or
+completed counters. The deep URL-quality lane retains its separate seven-day
+schedule; no four-hour throughput claim applies to it.
 
 This is a rate/capacity invariant, not a percentage floor. A first sweep may be
 incomplete without fault when its measured rate can finish before evidence
@@ -9627,14 +9941,18 @@ contract as §2.19:
 - it holds a Public provide key (`provide_mode=3`), tested with `EXISTS` so
   multiple keys cannot duplicate the denominator.
 
-The query joins each eligible provider to its single location and attempt rows,
-then emits only one fixed aggregate. A nonempty attempt inside the six-hour
-retry window is a current failure when there is no trusted location or its
-server-written update time is later than the location update. A trusted
-location is success only when no retained attempt exists or the retained
-attempt itself reports success. A retained nonempty failure older than six
-hours is `unobserved`, not permission to resurrect an older success. A current
-success attempt without a trusted location is `inconsistent`.
+The query joins each eligible provider to its sampled-site health, location,
+and attempt rows, then emits only one fixed aggregate. A nonempty attempt
+inside the six-hour retry window is a current failure when neither a newer
+fresh health measurement nor a newer trusted location supersedes it. A fresh
+health measurement is success without requiring exit-IP evidence when there
+is no newer failed attempt; legacy fresh location is still accepted with no
+retained failure or an empty failure class. A retained nonempty failure older
+than six hours is `unobserved`, not permission to resurrect an older success.
+A current success attempt without trusted health **or** location is
+`inconsistent`. This is a deployment-generation-sensitive transition: verify
+both Taskworker publication and the API/monitor reader artifacts before using
+the new meaning to judge recovery.
 
 Location `update_time` is deliberately one-way evidence. Client-verdict quorum
 handling can reprioritize a location by backdating `observed_at` and writing a
@@ -9651,9 +9969,10 @@ The only exported outcome vocabulary is success, `tunnel_failed`, legacy
 `no_consensus`, `locate_failed` and `not_confident` are the retired vendor
 consensus's and appear only on attempts written before connect/GEOMAP.md
 §11.3; `health_not_run` and `run_not_measured` are runs that did not start or
-measured nothing, `no_exit_ip` a run without a usable exit-IP observation
-from the operator's `/ip` echo, and `run_batch_guard` a full batch the run
-guard held back. Raw
+measured nothing, `no_exit_ip` a legacy run without a usable exit-IP
+observation (the sampled-only producer does not issue a separate echo request
+and does not use that class for missing optional location), and
+`run_batch_guard` a full batch the run guard held back. Raw
 failure text is normalized inside PostgreSQL. `unknown_failure` counts toward
 the total failure share but can never become the dominant common class because
 several distinct raw values may have collapsed into that one redacted bucket.
@@ -9703,20 +10022,21 @@ evidence floor:
   `health_not_run`, `run_batch_guard`), site pool (§2.19b), and submission
   evidence before acting.
 - `egress-outcome-inconsistent` (WARN after two samples): a current attempt
-  says success but no trusted location exists. Trace submission/report ordering,
-  monotonic upserts, retention, and direct mutations; never create a location
-  or delete an attempt to clear the alert.
+  says success but no trusted sampled-site health or legacy location exists.
+  Trace health acknowledgment/report ordering, monotonic upserts, retention,
+  and direct mutations; never synthesize a record or delete an attempt to
+  clear the alert.
 - `egress-outcome-unknown` (WARN after two samples): the producer and reader
   failure vocabularies differ or an invalid class was stored. Compare exact
   artifacts and add a reviewed bounded class when intentional; the raw value
   remains private.
 
-A dominant `no_exit_ip` class is a shared observation-stage pattern, not
-an identified failing component. It does not isolate echo reachability,
-certificate or response validation, provider-tunnel admission,
-provider-specific paths or shared route capacity. Direct healthy echo
-traffic does not certify the provider-tunnel path. Require bounded
-same-attempt phase/outcome evidence and running-artifact identity before
+A dominant `no_exit_ip` class is a legacy shared observation-stage pattern,
+not an identified failing component or evidence that sampled-site reachability
+failed. It does not isolate echo reachability, certificate or response
+validation, provider-tunnel admission, provider-specific paths, or shared
+route capacity. Require bounded same-attempt phase/outcome evidence and
+running-artifact identity before
 causal attribution or a corrective change; thresholds and due-window
 handling do not change.
 
@@ -9725,9 +10045,9 @@ faults: successful providers legitimately probe less often. Use §2.19 for
 durable shard geometry, due work, and advancement. Likewise, alert absence is
 not sufficient recovery: failed rows legitimately remain deferred for six
 hours, while simply aging past that backoff can turn them into `unobserved`.
-The next applicable due cycle is six hours for an absent or stale location, but
-can be as late as the 12-hour health due age when a failed full-probe pass
-refreshed health without replacing a still-fresh location. After repairing the
+The next applicable due cycle is six hours for a failed attempt, but
+can be as late as the 12-hour health due age after acknowledged sampled-site
+health. After repairing the
 proved shared boundary, require §2.19 to keep advancing through that applicable
 due cycle plus configured shard `max_time`, `idle_delay`, and one monitor
 cadence, and require replacement success/current evidence. Keep the
@@ -13095,9 +13415,11 @@ Tier-1 (warn):
 | pgbouncer-write-stall | logs+host | 2.11 app write timeout to `:6432` | any route/host cluster sustained 2 min |
 | worker-memory-skew | mimir | 2.12 fresh taskworker allocated heap by host/block/instance | >= 8GiB and >= 4× fleet median for 2 probes; sparse-fleet fallback >= 16GiB |
 | worker-cpu-allocation-churn | mimir+task logs | 2.12a paired one-minute taskworker CPU/allocation rates by host/block/instance; score phase enrichment requires the complete source-fresh fixed family, independently of the global alias marker | >= 3.8 cores and >= 256MiB/s and both >= 8× fleet medians for 2 probes; missing/mixed phase series remain unobservable |
+| worker-scheduler-capacity / worker-scheduler-unobservable | loopback Mimir | §2.12b exact Taskworker instance's source-fresh five-minute process CPU, GOMAXPROCS, and goroutines | CPU >= 90% of own GOMAXPROCS with >= 10,000 goroutines for 2 probes; missing/stale/mixed tuple is visibility WARN, not spare capacity |
 | selection-stale | pg | 2.8 UpdateClientScores completion gap | > 90 min (page at > 3h — ttl cliff at 5h) |
 | contract-balance-failure-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="insufficient_balance"}` 5-minute rate | > 4,000/min for 5 min |
-| missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin",companion="false"}` 5-minute rate plus bounded/reconciled sender-role, server-derived source-owner, resolution, relationship, and lifecycle cohorts | > 500/min on one validated rolling-[5m] sample, WARN/Sustain1; two comparable complete five-minute windows are recovery verification, not extra trigger sustain; `companion=true` is not covered, missing detail never means zero, and legacy `unattributed` cohorts never establish ownership |
+| missing-origin-rate | Mimir/Grafana | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin",companion="false"}` 5-minute rate plus bounded/reconciled sender-role, server-derived source/destination-owner, resolution, relationship, and lifecycle cohorts | > 500/min on one validated rolling-[5m] sample, WARN/Sustain1; two comparable complete five-minute windows are recovery verification, not extra trigger sustain; `companion=true` is not covered, missing detail never means zero, and legacy `unattributed` cohorts never establish ownership |
+| origin-wait-db-amplification / origin-notification-loss / origin-wait-unobservable | Mimir/Grafana | §2.17a source-fresh fixed-class lookup, wait, notification, and completed-request rates | >= 500 fallback+deadline lookups/min and >= 3 lookups/request, or >= 1 notification-loss event/min, each for 2 one-minute probes; absent/mixed metrics are visibility WARN, not healthy zero |
 | keyevent-config-drift | redis | 9.1 notify-keyspace-events class SET per node | any node divergent from the fleet (all-off = healthy dark state) |
 | pubsub-conn-shape | redis | 9.1 CLIENT LIST TYPE pubsub count per node | warn > 300; page > 1,000 (O(clients) = the v1 outage shape) |
 | required-vault-resource | logs+route | 8.7 `Resource not found in vault` plus dependent-route probe | any active generation; payload includes resource, route, config generation |

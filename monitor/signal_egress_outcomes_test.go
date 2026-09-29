@@ -7,8 +7,37 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
+
+// The synthetic source tests alert semantics; this also makes PostgreSQL
+// prepare and run the exact production aggregate after schema migration.
+func TestEgressOutcomesQueryExecutesOnSchema(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		server.Db(context.Background(), func(conn server.PgConn) {
+			rows, err := conn.Query(context.Background(), egressOutcomesQuery())
+			if err != nil {
+				tb.Fatal(err)
+			}
+			defer rows.Close()
+			if !rows.Next() {
+				tb.Fatal("egress outcome aggregate returned no row")
+			}
+			var columns [19]string
+			fields := make([]any, len(columns))
+			for index := range columns {
+				fields[index] = &columns[index]
+			}
+			if err := rows.Scan(fields...); err != nil {
+				tb.Fatal(err)
+			}
+			if err := rows.Err(); err != nil {
+				tb.Fatal(err)
+			}
+		})
+	})
+}
 
 func syntheticEgressOutcomeRow(snapshot egressOutcomeSnapshot) Row {
 	values := []any{
@@ -179,7 +208,7 @@ func TestEgressOutcomesUnknownClassesCannotManufactureDominance(t *testing.T) {
 	}
 }
 
-func TestEgressOutcomesWarnsOnSuccessWithoutTrustedLocation(t *testing.T) {
+func TestEgressOutcomesWarnsOnSuccessWithoutTrustedHealthOrLocation(t *testing.T) {
 	alerts := runSyntheticEgressOutcomes(t, egressOutcomeSnapshot{
 		eligible: 1, observed: 0, inconsistent: 1, unobserved: 0,
 		newestOutcomeAgeSeconds: -1, oldestOutcomeAgeSeconds: -1,
@@ -267,6 +296,11 @@ func TestEgressOutcomesQueryPinsPopulationFreshnessAndPrivacy(t *testing.T) {
 		"pk.provide_mode = 3",
 		fmt.Sprintf("interval '%d seconds'", int64(model.ProviderEgressProbeAttemptBackoff/time.Second)),
 		fmt.Sprintf("interval '%d seconds'", int64(model.ProviderEgressLocationMaxAge/time.Second)),
+		fmt.Sprintf("interval '%d seconds'", int64(model.ProviderEgressHealthMaxAge/time.Second)),
+		"LEFT JOIN provider_egress_health peh USING (client_id)",
+		"WHEN health_current",
+		"attempt_at < measured_at",
+		"GREATEST(observed_at, measured_at, attempt_at)",
 		"attempt_update > location_update",
 		"ELSE 'unknown_failure'",
 	} {
@@ -322,7 +356,7 @@ func TestEgressOutcomesKnowsTheCurrentProberClasses(t *testing.T) {
 		noExitIp: 19, newestOutcomeAgeSeconds: 30, oldestOutcomeAgeSeconds: 600,
 	})
 	alert := requireAlertClass(t, alerts, "egress-common-mode")
-	if !strings.Contains(alert.Markdown(), "/ip echo") || !strings.Contains(alert.Observed, "no_exit_ip=19") {
-		t.Fatalf("a common no_exit_ip observation lost its echo-stage context:\n%s", alert.Markdown())
+	if !strings.Contains(alert.Markdown(), "older runs") || !strings.Contains(alert.Observed, "no_exit_ip=19") {
+		t.Fatalf("a common no_exit_ip observation lost its legacy-generation qualifier:\n%s", alert.Markdown())
 	}
 }

@@ -453,6 +453,42 @@ func TestGetProviderEgressProbeFleetOutcomeTallyReconstructsEligibleState(t *tes
 	})
 }
 
+func TestProbeFleetCountsAcknowledgedHealthWithoutExitLocation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		location := &Location{
+			LocationType: LocationTypeCountry,
+			Country:      "Synthetic Country",
+			CountryCode:  "zz",
+		}
+		CreateLocation(ctx, location)
+		measured := server.NewId()
+		failedAfterMeasurement := server.NewId()
+		for index, clientId := range []server.Id{measured, failedAfterMeasurement} {
+			testing_connectProbeableProvider(t, ctx, clientId, location.LocationId,
+				fmt.Sprintf("192.0.2.%d:0", index+1), ProvideModePublic)
+		}
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+		for _, clientId := range []server.Id{measured, failedAfterMeasurement} {
+			SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+				ClientId: clientId, MeasuredAt: now.Add(-time.Minute),
+				OKCount: 1, Total: 1,
+			})
+		}
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: measured, AttemptAt: now, ProbeFailure: "",
+		})
+		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{
+			ClientId: failedAfterMeasurement, AttemptAt: now, ProbeFailure: "tunnel_failed",
+		})
+		got := GetProviderEgressProbeFleetOutcomeTally(ctx)
+		if got[ProbeAttemptSuccessClass] != 1 || got["tunnel_failed"] != 1 {
+			t.Fatalf("fleet outcomes = %v, want acknowledged health success and later tunnel failure", got)
+		}
+	})
+}
+
 // The database-backed diagnosis must agree with the pure rule applied to the
 // reconstructed eligible population. It must never fall back to the retained,
 // survivor-biased attempt table.

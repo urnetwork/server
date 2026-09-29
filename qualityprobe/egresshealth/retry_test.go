@@ -314,7 +314,7 @@ func TestLoadsInterleaveUnderConcurrency(t *testing.T) {
 			return ctx.Err()
 		}
 	}
-	r := newRun(staticPath{client: http.DefaultClient}, opts, 1, time.Minute, rand.New(rand.NewSource(1)), &exitRecord{})
+	r := newRun(staticPath{client: http.DefaultClient}, opts, 1, time.Minute, rand.New(rand.NewSource(1)))
 
 	flakyDone := make(chan CheckResult, 1)
 	go func() { flakyDone <- r.load(context.Background(), dests[0]) }()

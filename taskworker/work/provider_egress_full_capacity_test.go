@@ -8,9 +8,25 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 	"github.com/urnetwork/server/qualityprobe/fleetprobe"
 	"github.com/urnetwork/server/qualityprobe/prober"
 )
+
+// Outer admission must include the bounded unscored control sample, even when
+// a smaller request concurrency makes it add a complete extra round.
+func TestFullBudgetIncludesBoundedCanaryRequests(t *testing.T) {
+	previous := egresshealth.DefaultConcurrency
+	egresshealth.DefaultConcurrency = 2
+	t.Cleanup(func() { egresshealth.DefaultConcurrency = previous })
+	args := providerEgressProbeArgs(testProviderEgressProbeSettings(1), 0)
+	opts := providerEgressFullHealthOptions(args)
+	want := opts.RunBudget(egresshealth.SamplePerRun()+egresshealth.MaxSampledCanaries) + time.Duration(args.Full.ProbeTimeoutSeconds)*time.Second
+	without := opts.RunBudget(egresshealth.SamplePerRun()) + time.Duration(args.Full.ProbeTimeoutSeconds)*time.Second
+	if want <= without || providerEgressFullRunBudget(args) != want {
+		t.Fatalf("canary requests escaped admission budget: got=%s want=%s without=%s", providerEgressFullRunBudget(args), want, without)
+	}
+}
 
 func TestFullSuccessorLongRetryEnvelopePreservesPublicationReserve(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -21,7 +37,7 @@ func TestFullSuccessorLongRetryEnvelopePreservesPublicationReserve(t *testing.T)
 		h.args.Full.Bandwidth = true
 		h.args.Full.BandwidthTimeoutSeconds = 5
 		h.args.LoadAttempts, h.args.LoadRetryMeanIntervalSeconds = 3, 300
-		if budget := providerEgressFullRunBudget(h.args); budget != 36*time.Minute+35*time.Second {
+		if budget := providerEgressFullRunBudget(h.args); budget != 38*time.Minute {
 			t.Fatalf("retry/tunnel/sample envelope changed: %s", budget)
 		}
 		deadline, _ := h.ctx.Deadline()

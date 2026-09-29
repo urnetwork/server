@@ -67,7 +67,7 @@ func provider(id string) Provider {
 func TestProbeOneHappyPathSubmitsTheExitAndCloses(t *testing.T) {
 	closed := false
 	sub := &stubSubmitter{}
-	p := &Prober{
+	p := &Prober{HealthResults: &stubHealthReporter{},
 		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
 			return &http.Client{}, func() error { closed = true; return nil }, nil
 		},
@@ -89,7 +89,7 @@ func TestProbeOneHappyPathSubmitsTheExitAndCloses(t *testing.T) {
 // is what the health run draws its sample against.
 func TestProbeOnePassesTheProvidersPlaceToTheRun(t *testing.T) {
 	var got egresshealth.Place
-	p := &Prober{
+	p := &Prober{HealthResults: &stubHealthReporter{},
 		Open: okOpen,
 		Health: func(ctx context.Context, c *http.Client, place egresshealth.Place) (*egresshealth.Result, error) {
 			got = place
@@ -113,10 +113,10 @@ func TestProbeOneWithoutAnExitDoesNotSubmitALocation(t *testing.T) {
 	res := exitResult()
 	res.ExitIp, res.IpEchoErr = "", "the /ip echo answered status 502"
 	sub := &stubSubmitter{}
-	p := &Prober{Open: okOpen, Health: answers(res), Submit: sub}
+	p := &Prober{HealthResults: &stubHealthReporter{}, Open: okOpen, Health: answers(res), Submit: sub}
 	err := p.ProbeOne(context.Background(), provider("p1"))
-	if err == nil {
-		t.Fatal("a probe with no exit address succeeded")
+	if err != nil {
+		t.Fatalf("acknowledged health without exit failed: %v", err)
 	}
 	if sub.calls != 0 {
 		t.Fatal("a location was submitted with no exit address")
@@ -127,7 +127,7 @@ func TestProbeOneWithoutAnExitDoesNotSubmitALocation(t *testing.T) {
 // must short-circuit the probe.
 func TestProbeOneTunnelFailureSkipsHealthAndSubmit(t *testing.T) {
 	sub := &stubSubmitter{}
-	p := &Prober{
+	p := &Prober{HealthResults: &stubHealthReporter{},
 		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
 			return nil, nil, errors.New("no route to provider")
 		},
@@ -149,7 +149,7 @@ func TestProbeOneTunnelFailureSkipsHealthAndSubmit(t *testing.T) {
 // health run's warm-up, so a prober without one has nothing to probe with.
 func TestProbeOneWithoutAHealthCheckerFails(t *testing.T) {
 	sub := &stubSubmitter{}
-	p := &Prober{Open: okOpen, Submit: sub}
+	p := &Prober{HealthResults: &stubHealthReporter{}, Open: okOpen, Submit: sub}
 	if err := p.ProbeOne(context.Background(), provider("p1")); err == nil {
 		t.Fatal("a prober with no health checker reported success")
 	}

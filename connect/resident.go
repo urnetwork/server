@@ -669,7 +669,8 @@ type Exchange struct {
 
 	// the shared key-event subscriber (PEERSSTREAMS2.md); nil unless
 	// KeyEventDelivery.Enabled
-	keyEventSubscriber *keyEventSubscriber
+	keyEventSubscriber          *keyEventSubscriber
+	contractOriginNotifications *model.ContractOriginNotifications
 
 	// set once `Drain` starts. While draining, new connections are refused
 	// (`ConnectHandler.Connect` 503s and `NominateLocalResident` declines) so
@@ -779,6 +780,7 @@ func newExchange(
 		// residents register their listeners with it in `Resident.Run`
 		exchange.keyEventSubscriber = newKeyEventSubscriber(cancelCtx, &settings.KeyEventDelivery)
 	}
+	exchange.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, model.DefaultContractOriginNotificationSettings())
 
 	go server.HandleError(exchange.Run, cancel)
 
@@ -1991,6 +1993,9 @@ func (self *Exchange) Close() {
 	self.connectionWorkerLock.Lock()
 	self.connectionWorkersClosed = true
 	self.connectionWorkerLock.Unlock()
+	// Stop active resident work before any socket or notification-owner join;
+	// a slow Redis close must not postpone the exchange's cancellation edge.
+	self.cancel()
 	// Close supplied sockets synchronously. Cancellation cannot own this edge:
 	// Close can win before Run admits the listener worker, in which case no
 	// worker exists to observe cancellation or execute its deferred Close.
@@ -2004,7 +2009,9 @@ func (self *Exchange) Close() {
 	if self.keyEventSubscriber != nil {
 		self.keyEventSubscriber.Close()
 	}
-	self.cancel()
+	if self.contractOriginNotifications != nil {
+		self.contractOriginNotifications.Close()
+	}
 }
 
 // WaitForIdle waits until every admitted resident, listener, and accepted
@@ -3438,7 +3445,7 @@ func NewResident(
 	)
 
 	residentController := newResidentController(
-		cancelCtx,
+		model.WithContractOriginNotifications(cancelCtx, exchange.contractOriginNotifications),
 		clientId,
 		residentContractManager,
 		exchange.settings,

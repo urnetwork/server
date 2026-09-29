@@ -1152,7 +1152,7 @@ func TestEgressCoverageSignalSyntheticFullCapacity(t *testing.T) {
 	for _, want := range []string{
 		"current_percent=4.0", "due=960", "deferred_current_dark_due=30", "attempted_last_hour=5",
 		"required_per_hour=6", "projected_drain=192h0m0s",
-		"configured_total_full_concurrency=2", "gross full-probe execution capacity",
+		"configured_total_full_concurrency=2", "current-eligible full-attempt capacity",
 		"desired scheduler-state accounting", "candidate suppression opportunity",
 		"one-hour gross-rate rollout window clears",
 		"no product decision for a maximum retry interval", "Do not invent fixed lane weights",

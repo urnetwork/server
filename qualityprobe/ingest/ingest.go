@@ -20,7 +20,7 @@ import (
 // exit address. It is refused before any request is made: the address is the
 // whole submission now, and the server rejects one without it, so a doomed
 // POST would only be a slower way to the same answer.
-var ErrMissingExitIp = errors.New("ingest: the location submission needs the exit address the /ip echo saw")
+var ErrMissingExitIp = errors.New("ingest: the location submission needs an independently observed exit address")
 
 // Returned when the server rejects a submission.
 var ErrRejected = errors.New("ingest: server rejected the submission")
@@ -62,10 +62,9 @@ type Client struct {
 // The wire body of a location submission.
 type submitBody struct {
 	ClientId string `json:"client_id"`
-	// The address the operator's own /ip echo saw the probe come
-	// from through the provider's tunnel. It is the whole submission now: the
-	// server places it with its own GeoLite2 (GEOMAP §11.3), and nothing
-	// about the exit is asked of anyone else.
+	// The independently observed public address from an already-sampled HTTPS
+	// IP-text response through the provider. The server places it with GeoLite2;
+	// DNS answers and connection-control IPs are not substituted for this evidence.
 	ExitIp string `json:"exit_ip"`
 	// The fields below are what the prober's vendor consensus used to fill.
 	// They stay on the wire for one release so a server that still declares

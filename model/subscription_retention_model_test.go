@@ -123,6 +123,23 @@ func testingSettledPayoutContracts(ctx context.Context, t testing.TB) (
 	return
 }
 
+// Simulates a missing billing sweep after a genuine bilateral settlement.
+// The terminal timestamp and provider usage stay under the installed guard.
+func testingSettleSweeplessContract(t testing.TB, ctx context.Context, contractId, sourceId, destinationId server.Id, byteCount ByteCount) {
+	t.Helper()
+	for _, clientId := range []server.Id{sourceId, destinationId} {
+		if err := CloseContract(ctx, contractId, clientId, byteCount, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		tag := server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_escrow_sweep WHERE contract_id=$1`, contractId))
+		if tag.RowsAffected() == 0 {
+			t.Fatal("sweepless fixture did not remove an actual settled billing row")
+		}
+	})
+}
+
 // After a payment completes, RemoveCompletedContracts must hard delete each of
 // its contracts together with the contract_close/transfer_escrow/
 // transfer_escrow_sweep rows in the same pass (no orphans for a later sweep) --
@@ -861,18 +878,7 @@ func TestRemoveStragglerContracts(t *testing.T) {
 		// path) is also a straggler, reaped only once it ages past the window
 		sweeplessEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, ByteCount(1024))
 		connect.AssertEqual(t, err, nil)
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`
-				UPDATE transfer_contract
-				SET outcome = $2, close_time = now()
-				WHERE contract_id = $1
-				`,
-				sweeplessEscrow.ContractId,
-				ContractOutcomeSettled,
-			))
-		})
+		testingSettleSweeplessContract(t, ctx, sweeplessEscrow.ContractId, sourceId, destinationId, 1024)
 
 		countPendingPayments := func() int {
 			c := 0
@@ -1044,14 +1050,14 @@ func TestBackfillContractReapTime(t *testing.T) {
 				ctx,
 				`
 				UPDATE transfer_contract
-				SET outcome = $2, close_time = now(), create_time = $3
+				SET create_time = $2
 				WHERE contract_id = $1
 				`,
 				sweeplessEscrow.ContractId,
-				ContractOutcomeSettled,
 				server.NowUtc().Add(-StragglerContractExpiration-24*time.Hour),
 			))
 		})
+		testingSettleSweeplessContract(t, ctx, sweeplessEscrow.ContractId, sourceId, destinationId, 1024)
 		connect.AssertEqual(t, testingReapTime(ctx, sweeplessEscrow.ContractId) == nil, true)
 
 		before := server.NowUtc()
@@ -1273,21 +1279,25 @@ func TestRemoveContractBatchesDrainsDuplicateCandidates(t *testing.T) {
 		networkId := server.NewId()
 		contractIds := []server.Id{server.NewId(), server.NewId(), server.NewId()}
 		oldCreateTime := server.NowUtc().Add(-30 * 24 * time.Hour)
+		usage := &contractUsageSnapshot{Version: 1, ByteCount: 1024,
+			Providers: []contractProviderUsage{{ClientId: networkId, NetworkId: networkId, ByteCount: 1024}}}
 
 		server.Tx(ctx, func(tx server.PgTx) {
 			for _, contractId := range contractIds {
-				// closed contract (outcome set -> open = false)
+				// Historical terminal inputs carry their original time and
+				// complete usage in the first insert; retention may not invent them.
 				server.RaisePgResult(tx.Exec(
 					ctx,
 					`
 					INSERT INTO transfer_contract (
 						contract_id, source_network_id, source_id,
 						destination_network_id, destination_id,
-						transfer_byte_count, create_time, outcome
+						transfer_byte_count, create_time, close_time, outcome,
+						provider_usage, usage_origin_is_source
 					)
-					VALUES ($1, $2, $2, $2, $2, $3, $4, $5)
+					VALUES ($1, $2, $2, $2, $2, $3, $4, $4, $5, $6, TRUE)
 					`,
-					contractId, networkId, 1024, oldCreateTime, ContractOutcomeSettled,
+					contractId, networkId, 1024, oldCreateTime, ContractOutcomeSettled, usage,
 				))
 				// two sweeps per contract -> duplicate candidate contract_ids, so a
 				// full batch of two sweep rows can be a single contract
@@ -1301,7 +1311,7 @@ func TestRemoveContractBatchesDrainsDuplicateCandidates(t *testing.T) {
 						)
 						VALUES ($1, $2, $3, $4, $5)
 						`,
-						contractId, server.NewId(), networkId, 1024, 0,
+						contractId, server.NewId(), networkId, 512, 0,
 					))
 				}
 			}
@@ -1375,23 +1385,27 @@ func TestAssignStragglerReapTimeRespectsBudget(t *testing.T) {
 		networkId := server.NewId()
 		aged := server.NowUtc().Add(-StragglerContractExpiration - 24*time.Hour)
 		contractIds := []server.Id{}
+		usage := &contractUsageSnapshot{Version: 1, ByteCount: 1024,
+			Providers: []contractProviderUsage{{ClientId: networkId, NetworkId: networkId, ByteCount: 1024}}}
 		server.Tx(ctx, func(tx server.PgTx) {
 			for range 5 {
 				contractId := server.NewId()
 				// closed (outcome set -> open = false; close_time set) and never
 				// reaped (reap_time IS NULL), aged past the straggler window -> a
-				// straggler the assign pass targets
+				// straggler the assign pass targets. Its original terminal usage
+				// is complete before the retention pass receives the row.
 				server.RaisePgResult(tx.Exec(
 					ctx,
 					`
 					INSERT INTO transfer_contract (
 						contract_id, source_network_id, source_id,
 						destination_network_id, destination_id,
-						transfer_byte_count, create_time, close_time, outcome
+						transfer_byte_count, create_time, close_time, outcome,
+						provider_usage, usage_origin_is_source
 					)
-					VALUES ($1, $2, $2, $2, $2, $3, $4, $4, $5)
+					VALUES ($1, $2, $2, $2, $2, $3, $4, $4, $5, $6, TRUE)
 					`,
-					contractId, networkId, 1024, aged, ContractOutcomeSettled,
+					contractId, networkId, 1024, aged, ContractOutcomeSettled, usage,
 				))
 				contractIds = append(contractIds, contractId)
 			}

@@ -20,7 +20,7 @@ func TestSchedulerProgressSpansOpenAndTeardown(t *testing.T) {
 		var events []Progress
 		scheduler := &Scheduler{
 			Concurrency: 1,
-			Prober: &Prober{
+			Prober: &Prober{HealthResults: &stubHealthReporter{},
 				Open: func(context.Context, string) (*http.Client, func() error, error) {
 					<-openRelease
 					return &http.Client{}, func() error { <-closeRelease; return nil }, nil
@@ -61,7 +61,7 @@ func TestSchedulerProgressDistinguishesFailureFromNonAdmission(t *testing.T) {
 	var events []Progress
 	scheduler := &Scheduler{
 		Concurrency: 1,
-		Prober: &Prober{
+		Prober: &Prober{HealthResults: &stubHealthReporter{},
 			Open: func(context.Context, string) (*http.Client, func() error, error) {
 				return nil, nil, errors.New("synthetic open failure")
 			},

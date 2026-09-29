@@ -525,12 +525,17 @@ func subtractH3FullTunQuic(
 			start.DroppedPayloadDecryptBeforeKeyUpdateCount,
 		DroppedPayloadDecryptAfterKeyUpdateCount: end.DroppedPayloadDecryptAfterKeyUpdateCount -
 			start.DroppedPayloadDecryptAfterKeyUpdateCount,
-		LocalKeyUpdateCount:  end.LocalKeyUpdateCount - start.LocalKeyUpdateCount,
-		RemoteKeyUpdateCount: end.RemoteKeyUpdateCount - start.RemoteKeyUpdateCount,
-		KeyDiscardCount:      end.KeyDiscardCount - start.KeyDiscardCount,
-		LostPacketCount:      end.LostPacketCount - start.LostPacketCount,
-		MtuUpdateCount:       end.MtuUpdateCount - start.MtuUpdateCount,
-		CurrentMtu:           end.CurrentMtu,
+		LocalKeyUpdateCount:               end.LocalKeyUpdateCount - start.LocalKeyUpdateCount,
+		RemoteKeyUpdateCount:              end.RemoteKeyUpdateCount - start.RemoteKeyUpdateCount,
+		KeyDiscardCount:                   end.KeyDiscardCount - start.KeyDiscardCount,
+		LostPacketCount:                   end.LostPacketCount - start.LostPacketCount,
+		ProbeTimeoutCount:                 end.ProbeTimeoutCount - start.ProbeTimeoutCount,
+		HandshakeAttemptCount:             end.HandshakeAttemptCount - start.HandshakeAttemptCount,
+		HandshakeSuccessCount:             end.HandshakeSuccessCount - start.HandshakeSuccessCount,
+		HandshakeFailureCount:             end.HandshakeFailureCount - start.HandshakeFailureCount,
+		HandshakeSentWithoutResponseCount: end.HandshakeSentWithoutResponseCount - start.HandshakeSentWithoutResponseCount,
+		MtuUpdateCount:                    end.MtuUpdateCount - start.MtuUpdateCount,
+		CurrentMtu:                        end.CurrentMtu,
 	}
 }
 
@@ -683,36 +688,107 @@ func snapshotH3FullTunClients(path *fullTunPath) h3FullTunClientSnapshot {
 	return snapshot
 }
 
+// A replacement is a different counter generation. Sample the original
+// client's lifetime counters through its retained pointer while preserving
+// the identity and flow attribution captured at the measurement boundary.
+// The current snapshot remains separate evidence about the replacement.
+func snapshotH3FullTunOriginalDevice(
+	start h3FullTunClientSnapshot,
+	current h3FullTunClientSnapshot,
+) h3FullTunClientSnapshot {
+	if start.deviceClient == nil {
+		return current
+	}
+	original := current
+	original.deviceClient = start.deviceClient
+	original.deviceClientId = start.deviceClientId
+	original.deviceClientFlow = start.deviceClientFlow
+	original.deviceSource = start.deviceSource
+	original.deviceRecovery = start.deviceClient.SendRecoveryStats()
+	original.deviceReceive = start.deviceClient.ReceiveStats()
+	return original
+}
+
+// Monotonic counters are interval differences. Queue maxima, current route
+// state, ages and sampled stall metadata retain the end-of-interval value;
+// subtracting those gauges would hide an existing stall or underflow on drain.
 func subtractH3FullTunRecovery(
 	start clientconnect.ClientSendRecoveryStatsSnapshot,
 	end clientconnect.ClientSendRecoveryStatsSnapshot,
 ) clientconnect.ClientSendRecoveryStatsSnapshot {
-	return clientconnect.ClientSendRecoveryStatsSnapshot{
-		TimeoutResendWriteCount:               end.TimeoutResendWriteCount - start.TimeoutResendWriteCount,
-		CarrierChangeWriteCount:               end.CarrierChangeWriteCount - start.CarrierChangeWriteCount,
-		SelectiveGapWriteCount:                end.SelectiveGapWriteCount - start.SelectiveGapWriteCount,
-		AckTailProbeWriteCount:                end.AckTailProbeWriteCount - start.AckTailProbeWriteCount,
-		CumulativeProbeWriteCount:             end.CumulativeProbeWriteCount - start.CumulativeProbeWriteCount,
-		RecoveryWriteErrorCount:               end.RecoveryWriteErrorCount - start.RecoveryWriteErrorCount,
-		MissingContractWriteCount:             end.MissingContractWriteCount - start.MissingContractWriteCount,
-		MissingContractRequestCount:           end.MissingContractRequestCount - start.MissingContractRequestCount,
-		CompactRecoveryAckCount:               end.CompactRecoveryAckCount - start.CompactRecoveryAckCount,
-		CompactRecoveryContractCount:          end.CompactRecoveryContractCount - start.CompactRecoveryContractCount,
-		UnreliableFlowIsolationBypassCount:    end.UnreliableFlowIsolationBypassCount - start.UnreliableFlowIsolationBypassCount,
-		UnreliableNoAckAdmissionBypassCount:   end.UnreliableNoAckAdmissionBypassCount - start.UnreliableNoAckAdmissionBypassCount,
-		UnreliableFlowReserveSelectionCount:   end.UnreliableFlowReserveSelectionCount - start.UnreliableFlowReserveSelectionCount,
-		UnreliableFlowReserveUseCount:         end.UnreliableFlowReserveUseCount - start.UnreliableFlowReserveUseCount,
-		UnreliableFlightWaitCount:             end.UnreliableFlightWaitCount - start.UnreliableFlightWaitCount,
-		UnreliableFlightWaitDuration:          end.UnreliableFlightWaitDuration - start.UnreliableFlightWaitDuration,
-		UnreliableFlightMaximumWaitDuration:   end.UnreliableFlightMaximumWaitDuration,
-		UnreliableFlightGapCount:              end.UnreliableFlightGapCount - start.UnreliableFlightGapCount,
-		UnreliableFlightTimeoutCount:          end.UnreliableFlightTimeoutCount - start.UnreliableFlightTimeoutCount,
-		UnreliableFlightReductionCount:        end.UnreliableFlightReductionCount - start.UnreliableFlightReductionCount,
-		UnreliableFlightMaximumByteCount:      end.UnreliableFlightMaximumByteCount,
-		UnreliableFlightMaximumLimitByteCount: end.UnreliableFlightMaximumLimitByteCount,
-		UnreliableFlightMaximumMessageCount:   end.UnreliableFlightMaximumMessageCount,
-		UnreliableFlightMaximumMessageLimit:   end.UnreliableFlightMaximumMessageLimit,
+	result := clientconnect.ClientSendRecoveryStatsSnapshot{
+		InitialWriteCount:                           end.InitialWriteCount - start.InitialWriteCount,
+		InitialFrameCount:                           end.InitialFrameCount - start.InitialFrameCount,
+		InitialMessageByteCount:                     end.InitialMessageByteCount - start.InitialMessageByteCount,
+		TimeoutResendWriteCount:                     end.TimeoutResendWriteCount - start.TimeoutResendWriteCount,
+		AckPendingResendPreemptCount:                end.AckPendingResendPreemptCount - start.AckPendingResendPreemptCount,
+		TimeoutResendDeferCount:                     end.TimeoutResendDeferCount - start.TimeoutResendDeferCount,
+		CarrierChangeWriteCount:                     end.CarrierChangeWriteCount - start.CarrierChangeWriteCount,
+		CarrierChangeSelectiveAckVoidCount:          end.CarrierChangeSelectiveAckVoidCount - start.CarrierChangeSelectiveAckVoidCount,
+		SendEvictionResendCount:                     end.SendEvictionResendCount - start.SendEvictionResendCount,
+		ContractAheadAnnounceCount:                  end.ContractAheadAnnounceCount - start.ContractAheadAnnounceCount,
+		ContractAheadAcknowledgedCount:              end.ContractAheadAcknowledgedCount - start.ContractAheadAcknowledgedCount,
+		ContractAheadSwitchCount:                    end.ContractAheadSwitchCount - start.ContractAheadSwitchCount,
+		ContractAheadUnacknowledgedSwitchCount:      end.ContractAheadUnacknowledgedSwitchCount - start.ContractAheadUnacknowledgedSwitchCount,
+		SelectiveGapWriteCount:                      end.SelectiveGapWriteCount - start.SelectiveGapWriteCount,
+		AckTailProbeWriteCount:                      end.AckTailProbeWriteCount - start.AckTailProbeWriteCount,
+		CumulativeProbeWriteCount:                   end.CumulativeProbeWriteCount - start.CumulativeProbeWriteCount,
+		RecoveryWriteErrorCount:                     end.RecoveryWriteErrorCount - start.RecoveryWriteErrorCount,
+		MissingContractWriteCount:                   end.MissingContractWriteCount - start.MissingContractWriteCount,
+		MissingContractRequestCount:                 end.MissingContractRequestCount - start.MissingContractRequestCount,
+		CompactRecoveryAckCount:                     end.CompactRecoveryAckCount - start.CompactRecoveryAckCount,
+		CompactRecoveryContractCount:                end.CompactRecoveryContractCount - start.CompactRecoveryContractCount,
+		UnreliableFlowIsolationBypassCount:          end.UnreliableFlowIsolationBypassCount - start.UnreliableFlowIsolationBypassCount,
+		UnreliableNoAckAdmissionBypassCount:         end.UnreliableNoAckAdmissionBypassCount - start.UnreliableNoAckAdmissionBypassCount,
+		UnreliableFlowReserveSelectionCount:         end.UnreliableFlowReserveSelectionCount - start.UnreliableFlowReserveSelectionCount,
+		UnreliableFlowReserveUseCount:               end.UnreliableFlowReserveUseCount - start.UnreliableFlowReserveUseCount,
+		UnreliableFlightWaitCount:                   end.UnreliableFlightWaitCount - start.UnreliableFlightWaitCount,
+		UnreliableFlightWaitDuration:                end.UnreliableFlightWaitDuration - start.UnreliableFlightWaitDuration,
+		UnreliableFlightMaximumWaitDuration:         end.UnreliableFlightMaximumWaitDuration,
+		UnreliableFlightGapCount:                    end.UnreliableFlightGapCount - start.UnreliableFlightGapCount,
+		UnreliableFlightTimeoutCount:                end.UnreliableFlightTimeoutCount - start.UnreliableFlightTimeoutCount,
+		UnreliableFlightReductionCount:              end.UnreliableFlightReductionCount - start.UnreliableFlightReductionCount,
+		UnreliableFlightMaximumByteCount:            end.UnreliableFlightMaximumByteCount,
+		UnreliableFlightMaximumLimitByteCount:       end.UnreliableFlightMaximumLimitByteCount,
+		UnreliableFlightMaximumMessageCount:         end.UnreliableFlightMaximumMessageCount,
+		UnreliableFlightMaximumMessageLimit:         end.UnreliableFlightMaximumMessageLimit,
+		UnreliableFlightBlockedWithReliableCapacity: end.UnreliableFlightBlockedWithReliableCapacity - start.UnreliableFlightBlockedWithReliableCapacity,
+		UnreliableFlightGapReorderSuspected:         end.UnreliableFlightGapReorderSuspected - start.UnreliableFlightGapReorderSuspected,
+		TimeoutResendWithRecentCumulativeProgress:   end.TimeoutResendWithRecentCumulativeProgress - start.TimeoutResendWithRecentCumulativeProgress,
+		RouteGenerationChangeCount:                  end.RouteGenerationChangeCount - start.RouteGenerationChangeCount,
+		LaneProbeWriteCount:                         end.LaneProbeWriteCount - start.LaneProbeWriteCount,
+		LaneProbeRideCount:                          end.LaneProbeRideCount - start.LaneProbeRideCount,
+		LaneProvenTimeoutWriteCount:                 end.LaneProvenTimeoutWriteCount - start.LaneProvenTimeoutWriteCount,
+		LaneHeadPromotionCount:                      end.LaneHeadPromotionCount - start.LaneHeadPromotionCount,
+		RouteUnacknowledgedDuration:                 end.RouteUnacknowledgedDuration,
+		RouteRetainedItemCount:                      end.RouteRetainedItemCount,
+		ReliableLaneLongestAckGap:                   end.ReliableLaneLongestAckGap,
+		ReliableLaneStallOnsetInterval:              end.ReliableLaneStallOnsetInterval,
+		ReliableLaneStallOnsetOutstanding:           end.ReliableLaneStallOnsetOutstanding,
+		ReliableLaneStallOnsetOffset:                end.ReliableLaneStallOnsetOffset,
+		ReliableAdmissionWaitCount:                  end.ReliableAdmissionWaitCount - start.ReliableAdmissionWaitCount,
+		ReliableAdmissionWaitDuration:               end.ReliableAdmissionWaitDuration - start.ReliableAdmissionWaitDuration,
+		ReliableAdmissionByteLimitMinimum:           end.ReliableAdmissionByteLimitMinimum,
+		UnreliableCarrierLastAckAge:                 end.UnreliableCarrierLastAckAge,
 	}
+	for index := range result.SelectiveGapWritesOfDeferredItems {
+		result.SelectiveGapWritesOfDeferredItems[index] = end.SelectiveGapWritesOfDeferredItems[index] - start.SelectiveGapWritesOfDeferredItems[index]
+	}
+	return result
+}
+
+func subtractH3FullTunCarrierCounters[T ~uint64 | ~int64](
+	start map[clientconnect.TransportType]T,
+	end map[clientconnect.TransportType]T,
+) map[clientconnect.TransportType]T {
+	if end == nil {
+		return nil
+	}
+	result := make(map[clientconnect.TransportType]T, len(end))
+	for carrier, value := range end {
+		result[carrier] = value - start[carrier]
+	}
+	return result
 }
 
 func subtractH3FullTunReceive(
@@ -720,9 +796,47 @@ func subtractH3FullTunReceive(
 	end clientconnect.ClientReceiveStatsSnapshot,
 ) clientconnect.ClientReceiveStatsSnapshot {
 	return clientconnect.ClientReceiveStatsSnapshot{
-		PackHandoffDropCount:     end.PackHandoffDropCount - start.PackHandoffDropCount,
-		PackHandoffDropByteCount: end.PackHandoffDropByteCount - start.PackHandoffDropByteCount,
-		AckHandoffDropCount:      end.AckHandoffDropCount - start.AckHandoffDropCount,
+		PackHandoffDropCount:                   end.PackHandoffDropCount - start.PackHandoffDropCount,
+		PackHandoffDropByteCount:               end.PackHandoffDropByteCount - start.PackHandoffDropByteCount,
+		PackHandoffWaitCount:                   end.PackHandoffWaitCount - start.PackHandoffWaitCount,
+		PackHandoffWaitSuccess:                 end.PackHandoffWaitSuccess - start.PackHandoffWaitSuccess,
+		PackHandoffMaxCount:                    end.PackHandoffMaxCount,
+		PackHandoffMaxByteCount:                end.PackHandoffMaxByteCount,
+		PackHandoffSaturationCount:             end.PackHandoffSaturationCount - start.PackHandoffSaturationCount,
+		PackHandoffDepthGrowCount:              end.PackHandoffDepthGrowCount - start.PackHandoffDepthGrowCount,
+		PackHandoffDeepenedFlows:               end.PackHandoffDeepenedFlows - start.PackHandoffDeepenedFlows,
+		PackHandoffAdaptiveMaxDepth:            end.PackHandoffAdaptiveMaxDepth,
+		PackHandoffAdaptiveMaxByteCount:        end.PackHandoffAdaptiveMaxByteCount,
+		ReceiveQueueDropCount:                  end.ReceiveQueueDropCount - start.ReceiveQueueDropCount,
+		ReceiveQueueDropByteCount:              end.ReceiveQueueDropByteCount - start.ReceiveQueueDropByteCount,
+		ReceiveQueueEvictionCount:              end.ReceiveQueueEvictionCount - start.ReceiveQueueEvictionCount,
+		ReceiveQueueEvictionByteCount:          end.ReceiveQueueEvictionByteCount - start.ReceiveQueueEvictionByteCount,
+		ReceiveQueueTentativeEvictionCount:     end.ReceiveQueueTentativeEvictionCount - start.ReceiveQueueTentativeEvictionCount,
+		ReceiveQueueTentativeEvictionByteCount: end.ReceiveQueueTentativeEvictionByteCount - start.ReceiveQueueTentativeEvictionByteCount,
+		ReceiveQueueCommitCount:                end.ReceiveQueueCommitCount - start.ReceiveQueueCommitCount,
+		SendNoAckOfferedCount:                  end.SendNoAckOfferedCount - start.SendNoAckOfferedCount,
+		SendNoAckWriteCount:                    end.SendNoAckWriteCount - start.SendNoAckWriteCount,
+		SendNoAckRefusedCount:                  end.SendNoAckRefusedCount - start.SendNoAckRefusedCount,
+		SendNoAckDiscardCount:                  end.SendNoAckDiscardCount - start.SendNoAckDiscardCount,
+		SendNoAckFastPathWriteCount:            end.SendNoAckFastPathWriteCount - start.SendNoAckFastPathWriteCount,
+		SendPackDeadlineDropCount:              end.SendPackDeadlineDropCount - start.SendPackDeadlineDropCount,
+		ResendQueueUnackedItemCount:            end.ResendQueueUnackedItemCount - start.ResendQueueUnackedItemCount,
+		ReceiveQueueEvictionNoticeOverflow:     end.ReceiveQueueEvictionNoticeOverflow - start.ReceiveQueueEvictionNoticeOverflow,
+		SendEvictionResendCount:                end.SendEvictionResendCount - start.SendEvictionResendCount,
+		AckHandoffDropCount:                    end.AckHandoffDropCount - start.AckHandoffDropCount,
+		AckHandoffQueueFullCount:               end.AckHandoffQueueFullCount - start.AckHandoffQueueFullCount,
+		AckHandoffMissCount:                    end.AckHandoffMissCount - start.AckHandoffMissCount,
+		AckHandoffWaitCount:                    end.AckHandoffWaitCount - start.AckHandoffWaitCount,
+		AckHandoffWaitSuccess:                  end.AckHandoffWaitSuccess - start.AckHandoffWaitSuccess,
+		AckRouteWriteCount:                     end.AckRouteWriteCount - start.AckRouteWriteCount,
+		AckRoutePriorityWriteCount:             end.AckRoutePriorityWriteCount - start.AckRoutePriorityWriteCount,
+		AckRouteWriteBlockedCount:              end.AckRouteWriteBlockedCount - start.AckRouteWriteBlockedCount,
+		AckRouteWriteErrorCount:                end.AckRouteWriteErrorCount - start.AckRouteWriteErrorCount,
+		AckRouteWriteWaitDuration:              end.AckRouteWriteWaitDuration - start.AckRouteWriteWaitDuration,
+		AckRouteWriteMaxWait:                   end.AckRouteWriteMaxWait,
+		AckRouteWriteCountByTransport:          subtractH3FullTunCarrierCounters(start.AckRouteWriteCountByTransport, end.AckRouteWriteCountByTransport),
+		AckRouteWriteWaitByTransport:           subtractH3FullTunCarrierCounters(start.AckRouteWriteWaitByTransport, end.AckRouteWriteWaitByTransport),
+		AckRouteWriteTimeoutByTransport:        subtractH3FullTunCarrierCounters(start.AckRouteWriteTimeoutByTransport, end.AckRouteWriteTimeoutByTransport),
 	}
 }
 
@@ -1216,11 +1330,7 @@ func testH3LowBarFullTcpPacketTrackMtu(
 		)
 		serverDatagramEnd := serverDatagramStats.Snapshot()
 		providerCongestionEnd := fixture.path.providerRemoteNat.CongestionDropStats()
-		originalDeviceEnd := clientEnd
-		if clientStart.deviceClient != nil {
-			originalDeviceEnd.deviceRecovery = clientStart.deviceClient.SendRecoveryStats()
-			originalDeviceEnd.deviceReceive = clientStart.deviceClient.ReceiveStats()
-		}
+		originalDeviceEnd := snapshotH3FullTunOriginalDevice(clientStart, clientEnd)
 		datagrams := observeH3FullTunDatagrams(start, end)
 		lanes := subtractH3FullTunLanes(laneStart, laneEnd)
 		deviceDatagrams := subtractH3FullTunDatagrams(start.device, end.device)

@@ -160,6 +160,10 @@ func classifyObservationError(err error) string {
 	if errors.Is(err, context.Canceled) {
 		return observationErrorClassCanceled
 	}
+	var logQueryError *warpctlLogQueryError
+	if errors.As(err, &logQueryError) {
+		return logQueryError.class
+	}
 
 	lower := strings.ToLower(err.Error())
 	var sshFailure *sshCommandError

@@ -152,15 +152,7 @@ func InitTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 
 // initTaskWorkerWithSettings selects targets before the worker can claim rows.
 func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSettings, profile WorkloadProfile) *task.TaskWorker {
-	if settings == nil {
-		settings = task.DefaultTaskWorkerSettings()
-	}
-	if profile == WorkloadProfileSubnetOperator {
-		profileSettings := *settings
-		profileSettings.ClaimRegisteredTargetsOnly = true
-		settings = &profileSettings
-	}
-	taskWorker := task.NewTaskWorker(ctx, settings)
+	taskWorker := task.NewTaskWorker(ctx, taskWorkerSettingsForProfile(settings, profile))
 
 	// 2024.11.15 migration from "bringyour.com" to new package
 

@@ -295,7 +295,7 @@ func TestBlackholeEveryLoadFailingEveryAttemptIsAllDestinationsFailed(t *testing
 // The check opens with the warm-up, before any load, and carries its exit
 // address -- but the echo alone never makes a provider OK: a provider could
 // carry the one well-known operator host and blackhole everything else.
-func TestBlackholeWarmsUpFirstAndCarriesTheExitIp(t *testing.T) {
+func TestBlackholeIgnoresConfiguredEchoEvenWhenLoadsFail(t *testing.T) {
 	var stateLock sync.Mutex
 	var order []string
 	mux := http.NewServeMux()
@@ -319,7 +319,7 @@ func TestBlackholeWarmsUpFirstAndCarriesTheExitIp(t *testing.T) {
 		Sleep:     noSleep,
 		IpEchoUrl: srv.URL + IpEchoPath,
 	})
-	if res.ExitIp != "198.51.100.9" || res.IpEchoErr != "" {
+	if res.ExitIp != "" || res.IpEchoErr != "" {
 		t.Fatalf("ExitIp = %q (err %q), want the echo's address", res.ExitIp, res.IpEchoErr)
 	}
 	if res.Ok {
@@ -327,10 +327,10 @@ func TestBlackholeWarmsUpFirstAndCarriesTheExitIp(t *testing.T) {
 	}
 	stateLock.Lock()
 	defer stateLock.Unlock()
-	if len(order) == 0 || order[0] != "echo" {
-		t.Fatalf("requests arrived as %v, want the warm-up first", order)
+	if len(order) != 9 {
+		t.Fatalf("requests arrived as %v, want three sampled URLs with three tries", order)
 	}
-	for _, o := range order[1:] {
+	for _, o := range order {
 		if o == "echo" {
 			t.Fatalf("the warm-up ran more than once: %v", order)
 		}

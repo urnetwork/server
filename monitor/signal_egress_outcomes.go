@@ -33,6 +33,7 @@ func (egressOutcomesProbe) cadence() time.Duration { return 5 * time.Minute }
 func egressOutcomesQuery() string {
 	attemptSeconds := int64(model.ProviderEgressProbeAttemptBackoff / time.Second)
 	locationSeconds := int64(model.ProviderEgressLocationMaxAge / time.Second)
+	healthSeconds := int64(model.ProviderEgressHealthMaxAge / time.Second)
 	return fmt.Sprintf(`
 /* monitor-signal-2.23-egress-outcomes */
 WITH clock AS MATERIALIZED (
@@ -60,21 +61,24 @@ WITH clock AS MATERIALIZED (
            pel.client_id AS location_client_id,
            pel.observed_at,
            pel.update_time AS location_update,
+           peh.measured_at,
            clock.utc_now,
            COALESCE(pea.attempt_at >= clock.utc_now - interval '%d seconds', false) AS attempt_current,
-           COALESCE(pel.observed_at >= clock.utc_now - interval '%d seconds', false) AS location_current
+           COALESCE(pel.observed_at >= clock.utc_now - interval '%d seconds', false) AS location_current,
+           COALESCE(peh.measured_at >= clock.utc_now - interval '%d seconds', false) AS health_current
     FROM eligible e
     CROSS JOIN clock
     LEFT JOIN provider_egress_probe_attempt pea USING (client_id)
     LEFT JOIN provider_egress_location pel USING (client_id)
+    LEFT JOIN provider_egress_health peh USING (client_id)
 ), classified AS MATERIALIZED (
     SELECT joined.*,
            CASE
                WHEN attempt_current
                 AND probe_failure <> ''
                 AND (
-                    NOT location_current OR
-                    attempt_update > location_update
+                    (NOT health_current OR attempt_at >= measured_at)
+                    AND (NOT location_current OR attempt_update > location_update)
                 )
                THEN CASE probe_failure
                    WHEN 'tunnel_failed' THEN 'tunnel_failed'
@@ -89,6 +93,9 @@ WITH clock AS MATERIALIZED (
                    WHEN 'run_batch_guard' THEN 'run_batch_guard'
                    ELSE 'unknown_failure'
                END
+               WHEN health_current
+                AND (attempt_client_id IS NULL OR probe_failure = '' OR attempt_at < measured_at)
+               THEN ''
                WHEN location_current
                 AND (attempt_client_id IS NULL OR probe_failure = '')
                THEN ''
@@ -100,7 +107,7 @@ WITH clock AS MATERIALIZED (
 ), states AS MATERIALIZED (
     SELECT classified.*,
            CASE
-               WHEN outcome_class = '' THEN GREATEST(observed_at, attempt_at)
+               WHEN outcome_class = '' THEN GREATEST(observed_at, measured_at, attempt_at)
                WHEN outcome_class NOT IN ('unobserved', 'inconsistent') THEN attempt_at
                ELSE NULL
            END AS outcome_at
@@ -151,7 +158,7 @@ SELECT eligible::text,
        newest_outcome_age_seconds::text,
        oldest_outcome_age_seconds::text
 FROM aggregate;
-`, attemptSeconds, locationSeconds)
+`, attemptSeconds, locationSeconds, healthSeconds)
 }
 
 type egressOutcomeSnapshot struct {
@@ -309,9 +316,9 @@ func egressCommonModeFinding(target string, snapshot egressOutcomeSnapshot, diag
 		playbook:  "SIGNALS.md §2.23, §2.19, and §8.9",
 	}
 	if diagnosis.DominantClass == "no_exit_ip" {
-		f.mechanism = "At least 20 outcomes are observed and no_exit_ip covers at least 90% of the complete current eligible population. This establishes a shared failed observation stage, but does not isolate echo service, provider tunnel admission, provider-specific route, shared route or response-validation cause. Unobserved and inconsistent providers remain in the denominator."
+		f.mechanism = "At least 20 outcomes are observed and no_exit_ip covers at least 90% of the complete current eligible population. This is a legacy failure class from probes that required an exit-IP observation; it does not by itself establish failed sampled-site reachability and does not isolate the failing component. Check the deployed producer generation before attributing it to providers. Unobserved and inconsistent providers remain in the denominator."
 		f.baseline = "No_exit_ip covers less than 90% of the complete eligible population; at least 20 observed outcomes are required to report the pattern, not to establish a causal component."
-		f.context = "Same class is not a same-attempt phase trace or proof of a deployed artifact. A direct healthy echo control alone does not certify its provider-tunnel path, and retained failure aging is not recovery."
+		f.context = "Same class is not a same-attempt phase trace or proof of a deployed artifact. New sampled-only probes do not require a separate IP-echo request. Retained failure aging is not recovery."
 		f.verify = strings.Replace(f.verify, "After repairing the proved shared boundary,", "After identifying and repairing the failed stage,", 1)
 	}
 	return f
@@ -324,9 +331,9 @@ func egressCommonModeAction(class string) string {
 	case "locate_failed", "not_confident":
 		// retired with the vendor consensus (connect/GEOMAP.md §11.3); only
 		// attempts written before that release still carry them
-		return "These classes come only from probers that predate the operator's own /ip echo; confirm every Taskworker runs the current prober, whose runs report no_exit_ip instead. Do not investigate individual provider locations."
+		return "These classes come from older prober generations. Confirm every Taskworker runs the sampled-only prober and inspect its sampled-site health results; do not investigate individual provider locations first."
 	case "no_exit_ip":
-		return "The run fetches the operator's /ip echo through the provider's tunnel (public_api_url). Compare bounded same-attempt tunnel admission, route and echo response/validation evidence with independent echo reachability and certificate controls. The aggregate does not isolate the echo or exonerate providers; do not change gates or routes before the failing stage is established."
+		return "Identify the deployed Taskworker generation first. This class belongs to older runs that required an exit-IP observation; sampled-only runs treat missing exit evidence independently of sampled-site health. Compare bounded same-attempt tunnel admission and sampled-site results before changing provider gates or routes."
 	case "health_not_run", "run_not_measured":
 		return "A run that did not start or measured nothing is the prober's, not the provider's: inspect the Taskworker pass errors, the transport and tunnel re-creation budgets, platform reachability, and whether the shard's max time still covers a run at the load rules (§2.19)."
 	case model.ProbeRunBatchGuardClass:
@@ -339,7 +346,7 @@ func egressCommonModeAction(class string) string {
 }
 
 func egressOutcomeVerify() string {
-	return "After repairing the proved shared boundary, keep §2.19 advancing and wait for each provider's next applicable due cycle: the six-hour failure backoff for an absent or stale location, or up to the 12-hour health due age when the failed pass refreshed health but not a fresh location. Then allow the configured shard max_time, idle_delay, and one monitor cadence for replacement outcomes. Confirm the reconstructed population is healthy on two later cadences. Alert absence caused only by failures aging to unobserved is not recovery; never delete or rewrite attempt rows to clear it."
+	return "After repairing the proved shared boundary, keep §2.19 advancing and wait for each provider's next applicable due cycle: the six-hour failure backoff for a failed pass, or up to the 12-hour health due age after a successful sampled-site pass. Then allow the configured shard max_time, idle_delay, and one monitor cadence for replacement outcomes. Confirm the reconstructed population is healthy on two later cadences. Alert absence caused only by failures aging to unobserved is not recovery; never delete or rewrite attempt rows to clear it."
 }
 
 func egressMixedFailureFinding(target string, snapshot egressOutcomeSnapshot) finding {
@@ -360,14 +367,14 @@ func egressMixedFailureFinding(target string, snapshot egressOutcomeSnapshot) fi
 func egressInconsistentFinding(target string, snapshot egressOutcomeSnapshot) finding {
 	return finding{
 		probeId: "pg/egress-outcomes", tier: tierWarn, class: "egress-outcome-inconsistent", target: target, sustain: 2,
-		symptom:   fmt.Sprintf("%d currently eligible provider(s) have a current successful attempt but no trusted egress location", snapshot.inconsistent),
-		mechanism: "A success attempt is reported only after location submission succeeds, and the location outlives the attempt row. This state therefore proves an ingestion, persistence, deletion, timestamp, or ordering invariant failure; it is not a normal retry-cadence gap.",
-		baseline:  "Every current empty failure class has a trusted egress location; providers without a current outcome remain explicitly unobserved.",
+		symptom:   fmt.Sprintf("%d currently eligible provider(s) have a current successful attempt but no trusted sampled-site health or egress location", snapshot.inconsistent),
+		mechanism: "A successful Full attempt requires an acknowledged sampled-site health submission; legacy attempts may have trusted location evidence. Neither exists for these providers, indicating an ingestion, persistence, deletion, timestamp, or ordering invariant failure rather than a normal retry-cadence gap.",
+		baseline:  "Every current empty failure class has trusted sampled-site health or legacy location evidence; providers without a current outcome remain explicitly unobserved.",
 		observed:  egressOutcomeObserved(snapshot),
 		evidence:  "The invariant is counted inside PostgreSQL and exports no provider, location, endpoint, payload, or credential identity.",
 		context:   "This is a software data-integrity alert. It does not establish that the provider itself failed and cannot be fixed with additional Proxy hardware.",
-		action:    "Trace the bounded location-submit and attempt-report ordering, monotonic upserts, retention task, and any direct mutation for the same interval. Preserve both tables; do not synthesize a location or delete the attempt to make the aggregate green.",
-		verify:    "A normal probe writes a trusted location before its empty failure class, no inconsistent state remains for two cadences, and §2.19 continues advancing without manual table edits.",
+		action:    "Trace the bounded health-submit acknowledgment and attempt-report ordering, monotonic upserts, retention task, and any direct mutation for the same interval. Preserve all evidence tables; do not synthesize health or delete the attempt to make the aggregate green.",
+		verify:    "A normal probe writes trusted sampled-site health before its empty failure class, no inconsistent state remains for two cadences, and §2.19 continues advancing without manual table edits.",
 		playbook:  "SIGNALS.md §2.23 and §2.19",
 	}
 }

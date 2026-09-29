@@ -7,15 +7,29 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/urnetwork/server/qualityprobe/fleetprobe"
 	"github.com/urnetwork/server/qualityprobe/ingest"
 )
 
-// Bound retained identities/results per invocation, not the service. A full
-// result immediately rearms the durable task, so reaching this work bound does
-// not add an idle delay. Pending cohorts share one fixed check-worker pool.
-const providerEgressBlackholeSelectedCohorts = 16
+// Separate live guard/result ownership from total selected work. An ACKed
+// cohort no longer retains a result or tunnel and may free its capacity for
+// another cohort. Both bounds belong to one invocation, not the service.
+// Saturation immediately rearms the durable task without an idle delay.
+const (
+	providerEgressBlackholeWorkerCohorts   = 16
+	providerEgressBlackholeRetainedCohorts = 32
+	providerEgressBlackholeSelectedCohorts = 40
+)
+
+// Cohorts finalize concurrently, but each early publisher serializes its own
+// batches before the final guarded submission. Keep the existing eight-minute
+// reserve floor; metadata retention must not move the admission cutoff earlier.
+func providerEgressBlackholePublicationBudget(selected int) time.Duration {
+	rounds := max(16, selected/providerEgressBlackholeEarlyBatchSize+1)
+	return time.Duration(rounds) * providerEgressBlackholeSubmitTimeout
+}
 
 // The initial cohort keeps its old guard-sized minimum and budgets. Only the
 // bounded saturated geometry overlaps successors, regardless of healthy full
@@ -52,7 +66,7 @@ func (self *providerEgressProbePass) drainBlackhole(
 
 	// This cutoff only stops fresh checks. Active checks retain ctx and their
 	// per-provider budgets; every bounded pending cohort has publication time.
-	reserve := providerEgressBlackholeCheckBudget(args) + providerEgressBlackholeSelectedCohorts*providerEgressBlackholeSubmitTimeout
+	reserve := providerEgressBlackholeCheckBudget(args) + providerEgressBlackholePublicationBudget(args.Blackhole.Limit)
 	admissionCtx, stopAdmission := context.WithDeadline(ctx, deadline.Add(-reserve))
 	defer stopAdmission()
 	// Serial/no-full setup may reserve an earlier cutoff for serial full work.
@@ -74,7 +88,7 @@ func (self *providerEgressProbePass) drainBlackhole(
 		guardTripped bool
 		err          error
 	}
-	completed := make(chan cohortOutcome, providerEgressBlackholeSelectedCohorts)
+	completed := make(chan cohortOutcome, providerEgressBlackholeRetainedCohorts)
 	var latestSignal <-chan struct{}
 	latestReady := false
 	seen := make(map[string]bool, 2*args.Blackhole.Limit)
@@ -130,6 +144,7 @@ func (self *providerEgressProbePass) drainBlackhole(
 	}
 	start(initialDue, true)
 	stopLookups := false
+	waitingForPublication := false
 	admissionSignal := admissionCtx.Done()
 	ownerSignal := admissionDone
 	for {
@@ -148,7 +163,7 @@ func (self *providerEgressProbePass) drainBlackhole(
 		// Every extra cohort has its own original-size guard. The lookahead is
 		// selection only: never run one combined500-result guard or duplicate
 		// the already selected oldest rows which remain due until publication.
-		if latestReady && pending < providerEgressBlackholeSelectedCohorts && !stopLookups && cohorts < providerEgressBlackholeSelectedCohorts && admissionCtx.Err() == nil {
+		if latestReady && pending < providerEgressBlackholeRetainedCohorts && !stopLookups && cohorts < providerEgressBlackholeSelectedCohorts && admissionCtx.Err() == nil {
 			// Earlier selected rows can remain due after an ACK (for example,
 			// an equal-time merge). Look beyond that bounded local prefix, not
 			// just the oldest two cohorts, while respecting the API response cap.
@@ -196,6 +211,15 @@ func (self *providerEgressProbePass) drainBlackhole(
 				}
 			}
 			egressProbePassDue.WithLabelValues("blackhole").Set(float64(len(next)))
+			if limit == 5000 && len(due) == limit && len(next) < args.Blackhole.Limit && 0 < pending {
+				// A full API response can be an entirely selected prefix. Wait
+				// for one retained cohort to finalize before looking past it;
+				// neither a larger query nor an immediate retry is bounded work.
+				waitingForPublication = true
+				latestReady = false
+				latestSignal = nil
+				continue
+			}
 			if len(next) < args.Blackhole.Limit {
 				stopLookups = true
 				if len(next) == 0 {
@@ -241,7 +265,8 @@ func (self *providerEgressProbePass) drainBlackhole(
 			}
 		case batch := <-completed:
 			pending--
-			if batch.ordinal == cohorts {
+			if batch.ordinal == cohorts || waitingForPublication {
+				waitingForPublication = false
 				latestReady = true
 				latestSignal = nil
 			}

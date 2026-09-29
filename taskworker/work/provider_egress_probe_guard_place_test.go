@@ -126,6 +126,7 @@ func testEgressGuardPlaceBatch(t *testing.T, rows []testEgressGuardPlaceRow, sco
 		t.Fatalf("guard tripped = %t, want %t using each provider's scored place", outcome.guardTripped, wantTripped)
 	}
 	wantCalls := []string{}
+	wantNotMeasured := 0
 	for i := len(rows) - 1; 0 <= i; i-- {
 		row := rows[i]
 		clientId := row.due.ClientId
@@ -144,7 +145,12 @@ func testEgressGuardPlaceBatch(t *testing.T, rows []testEgressGuardPlaceRow, sco
 			}
 			wantCalls = append(wantCalls, "health "+clientId)
 		}
-		wantCalls = append(wantCalls, "submit "+clientId+" "+row.run.ExitIp, "attempt "+clientId+" ")
+		failure := ""
+		if row.wantTotal == 0 {
+			failure = prober.FailureNotMeasured
+			wantNotMeasured++
+		}
+		wantCalls = append(wantCalls, "submit "+clientId+" "+row.run.ExitIp, "attempt "+clientId+" "+failure)
 	}
 	if !slices.Equal(inner.calls, wantCalls) {
 		t.Fatalf("publication order = %q, want %q", inner.calls, wantCalls)
@@ -153,7 +159,7 @@ func testEgressGuardPlaceBatch(t *testing.T, rows []testEgressGuardPlaceRow, sco
 		if outcome.summary.Submitted != 0 || outcome.summary.Failed != len(rows) || len(tallies) != 0 || len(inner.health) != 0 {
 			t.Fatalf("a tripped guard leaked publication: summary %+v tallies %d health %d", outcome.summary, len(tallies), len(inner.health))
 		}
-	} else if outcome.summary.Submitted != len(rows) || outcome.summary.Failed != 0 || len(tallies) != len(rows) {
+	} else if outcome.summary.Submitted != len(rows)-wantNotMeasured || outcome.summary.Failed != wantNotMeasured || len(tallies) != len(rows) {
 		t.Fatalf("accepted batch summary %+v tallies %d, want %d published providers", outcome.summary, len(tallies), len(rows))
 	}
 	rawAfter, err := json.Marshal(rawRuns)

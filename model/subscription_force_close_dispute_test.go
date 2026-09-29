@@ -80,6 +80,11 @@ func newForceCloseDisputeFixture(
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx,
 			`UPDATE transfer_contract SET create_time = $2 WHERE contract_id = $1`, contractId, createTime))
+		// Expiry requires a quiet period after both creation and the latest
+		// real report. Keep the entire synthetic fixture stale, while sibling
+		// contracts created later remain ineligible for this fixed cutoff.
+		server.RaisePgResult(tx.Exec(ctx,
+			`UPDATE contract_close SET close_time = $2 WHERE contract_id = $1`, contractId, createTime))
 	}, server.TxReadCommitted)
 	return &forceCloseDisputeFixture{
 		contractId:           contractId,

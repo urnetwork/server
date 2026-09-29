@@ -5,12 +5,21 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 )
 
 func ConnectControl(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireClient(controller.ConnectControl, w, r)
+}
+
+// Bind the router-owned notifier without creating a request-owned subscription
+// service or replacing the HTTP request's cancellation and deadline.
+func ConnectControlWithOriginNotifications(notifications *model.ContractOriginNotifications) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ConnectControl(w, r.WithContext(model.WithContractOriginNotifications(r.Context(), notifications)))
+	}
 }
 
 // GetClientKey backs `GET /key/<client_id>`. Unauthenticated by design: the

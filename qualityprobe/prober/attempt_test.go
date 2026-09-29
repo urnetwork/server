@@ -56,7 +56,7 @@ func okOpen(ctx context.Context, id string) (*http.Client, func() error, error) 
 // prober that forgets.
 func TestProbeOneReportsAttemptOnSuccess(t *testing.T) {
 	rep := &stubReporter{}
-	p := &Prober{
+	p := &Prober{HealthResults: &stubHealthReporter{},
 		Open:     okOpen,
 		Health:   answers(exitResult()),
 		Submit:   &stubSubmitter{},
@@ -102,7 +102,7 @@ func TestProbeOneReportsAttemptOnEveryFailureStage(t *testing.T) {
 		{
 			name: "tunnel",
 			prober: func(rep *stubReporter) *Prober {
-				return &Prober{
+				return &Prober{HealthResults: &stubHealthReporter{},
 					Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
 						return nil, nil, errors.New("no contract")
 					},
@@ -116,7 +116,7 @@ func TestProbeOneReportsAttemptOnEveryFailureStage(t *testing.T) {
 		{
 			name: "health did not run",
 			prober: func(rep *stubReporter) *Prober {
-				return &Prober{
+				return &Prober{HealthResults: &stubHealthReporter{},
 					Open: okOpen,
 					Health: func(context.Context, *http.Client, egresshealth.Place) (*egresshealth.Result, error) {
 						return nil, egresshealth.ErrNoDestinations
@@ -130,21 +130,21 @@ func TestProbeOneReportsAttemptOnEveryFailureStage(t *testing.T) {
 		{
 			name: "nothing measured",
 			prober: func(rep *stubReporter) *Prober {
-				return &Prober{Open: okOpen, Health: answers(unmeasured), Submit: &stubSubmitter{}, Attempts: rep}
+				return &Prober{HealthResults: &stubHealthReporter{}, Open: okOpen, Health: answers(unmeasured), Submit: &stubSubmitter{}, Attempts: rep}
 			},
 			wantFailure: FailureNotMeasured,
 		},
 		{
-			name: "no exit address",
+			name: "no health acknowledgement",
 			prober: func(rep *stubReporter) *Prober {
-				return &Prober{Open: okOpen, Health: answers(noExit), Submit: &stubSubmitter{}, Attempts: rep}
+				return &Prober{HealthResults: nil, Open: okOpen, Health: answers(noExit), Submit: &stubSubmitter{}, Attempts: rep}
 			},
-			wantFailure: FailureNoExitIp,
+			wantFailure: FailureSubmit,
 		},
 		{
-			name: "submit",
+			name: "health submit",
 			prober: func(rep *stubReporter) *Prober {
-				return &Prober{
+				return &Prober{HealthResults: &stubHealthReporter{err: errors.New("synthetic health rejected")},
 					Open:     okOpen,
 					Health:   answers(exitResult()),
 					Submit:   &stubSubmitter{err: errors.New("status 500")},
@@ -188,7 +188,7 @@ func TestFailureClassesFitTheServerColumn(t *testing.T) {
 // is already recorded server-side.
 func TestProbeOneDoesNotFailTheProbeWhenReportingFails(t *testing.T) {
 	rep := &stubReporter{err: errors.New("attempt endpoint down")}
-	p := &Prober{
+	p := &Prober{HealthResults: &stubHealthReporter{},
 		Open:     okOpen,
 		Health:   answers(exitResult()),
 		Submit:   &stubSubmitter{},
@@ -203,7 +203,7 @@ func TestProbeOneDoesNotFailTheProbeWhenReportingFails(t *testing.T) {
 // that has no reporter (a test, a one-shot manual probe) is not broken by it.
 func TestProbeOneWithoutAReporterStillProbes(t *testing.T) {
 	sub := &stubSubmitter{}
-	p := &Prober{
+	p := &Prober{HealthResults: &stubHealthReporter{},
 		Open:   okOpen,
 		Health: answers(exitResult()),
 		Submit: sub,
@@ -239,7 +239,7 @@ func TestReportAttemptErrorLoggingIsBounded(t *testing.T) {
 	log.SetOutput(&buf)
 	defer log.SetOutput(orig)
 
-	p := &Prober{Open: okOpen, Attempts: &varyingReporter{}}
+	p := &Prober{HealthResults: &stubHealthReporter{}, Open: okOpen, Attempts: &varyingReporter{}}
 	maxLoggedDistinctErrors := p.maxLoggedDistinctErrors()
 	const probes = 200
 	for i := 0; i < probes; i++ {
@@ -268,7 +268,7 @@ func TestHealthSubmitErrorLoggingIsBounded(t *testing.T) {
 	log.SetOutput(&buf)
 	defer log.SetOutput(orig)
 
-	p := &Prober{Open: okOpen}
+	p := &Prober{HealthResults: &stubHealthReporter{}, Open: okOpen}
 	maxLoggedDistinctErrors := p.maxLoggedDistinctErrors()
 	for i := 0; i < 200; i++ {
 		p.logHealthErrOnce(fmt.Errorf("ingest: rejected: status 503: request-id %d", i), "prober: could not submit an egress-health result")
@@ -290,7 +290,7 @@ func TestHealthSubmitErrorLoggingIsBounded(t *testing.T) {
 // of one failure mode and a genuinely different eleventh error was suppressed.
 // The id is already in the log line's provider= field.
 func TestTunnelFailureErrorDoesNotEmbedTheProviderId(t *testing.T) {
-	p := &Prober{
+	p := &Prober{HealthResults: &stubHealthReporter{},
 		Open: func(ctx context.Context, id string) (*http.Client, func() error, error) {
 			return nil, nil, errors.New("dial platform: connection refused")
 		},
@@ -319,7 +319,7 @@ func TestErrorLogGatesReArmEachPass(t *testing.T) {
 	log.SetOutput(&buf)
 	defer log.SetOutput(orig)
 
-	p := &Prober{Open: okOpen, Attempts: &varyingReporter{}}
+	p := &Prober{HealthResults: &stubHealthReporter{}, Open: okOpen, Attempts: &varyingReporter{}}
 	maxLoggedDistinctErrors := p.maxLoggedDistinctErrors()
 	// Pass one burns the whole budget on transient, all-distinct errors.
 	for i := 0; i < 50; i++ {

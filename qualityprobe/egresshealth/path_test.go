@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -234,7 +235,7 @@ func TestTunnelThatCannotBeReopenedLeavesTheRestNotMeasured(t *testing.T) {
 // A re-created tunnel is as cold
 // as the first, so it gets the warm-up before any load uses it -- the cold
 // start is the warm-up's to pay, not a scored load's.
-func TestReopenedTunnelIsWarmedUpBeforeItsLoads(t *testing.T) {
+func TestReopenedTunnelRequestsOnlySampledUrls(t *testing.T) {
 	path := newFakePath()
 	srv := newTunnelServer(t, path)
 	opts := pathOptions(path, 1)
@@ -244,7 +245,7 @@ func TestReopenedTunnelIsWarmedUpBeforeItsLoads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("check err = %v", err)
 	}
-	if res.ExitIp != "203.0.113.7" {
+	if res.ExitIp != "" {
 		t.Errorf("ExitIp = %q", res.ExitIp)
 	}
 	srv.stateLock.Lock()
@@ -252,13 +253,16 @@ func TestReopenedTunnelIsWarmedUpBeforeItsLoads(t *testing.T) {
 	srv.stateLock.Unlock()
 	firstOnSecond := -1
 	for i, entry := range order {
+		if strings.Contains(entry, IpEchoPath) {
+			t.Fatalf("recreated path requested fixed echo: %v", order)
+		}
 		if entry[len(entry)-1] == '2' {
 			firstOnSecond = i
 			break
 		}
 	}
-	if firstOnSecond < 0 || order[firstOnSecond] != IpEchoPath+"@2" {
-		t.Fatalf("requests arrived as %v; the first through the re-created tunnel must be its warm-up", order)
+	if firstOnSecond < 0 {
+		t.Fatalf("no sampled request used recreated tunnel: %v", order)
 	}
 }
 

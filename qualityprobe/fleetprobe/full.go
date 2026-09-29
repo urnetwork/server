@@ -64,17 +64,14 @@ type FullOptions struct {
 	// The pass's destination pool (see LoadPool); nil is the built-in
 	// table.
 	Pool PoolSource
-	// The cold-start allowance: the warm-up's timeout, and the
-	// ceiling of any one request. Each load attempt gets the smaller of it and
-	// egresshealth.DefaultPerRequestTimeout (see EgressHealthOptions).
+	// Shared cold-start allowance per tunnel generation. Sampled loads start
+	// directly; established requests use the ordinary smaller timeout.
 	ProbeTimeout time.Duration
 	// How many providers are probed at once. Zero uses
 	// DefaultFullConcurrency.
 	Concurrency     int
 	AllDestinations bool
-	// The operator's /ip echo, reached through each tunnel. Empty
-	// derives it from TunnelConfig.ApiUrl (IpEchoUrl), which must then be the
-	// api's public address.
+	// Deprecated compatibility input. Never requested.
 	IpEchoUrl string
 	// Passed through to egresshealth.Options, like the two fields below;
 	// zero uses its defaults (3, 5 minutes, 2).
@@ -84,8 +81,10 @@ type FullOptions struct {
 	Submit                 prober.Submitter
 	Attempts               prober.AttemptReporter
 	HealthResults          prober.HealthReporter
-	Bandwidth              *bandwidth.Sampler
-	BandwidthHosts         []string
+	// Deprecated automatic bandwidth inputs. Fixed target requests are never
+	// attached to a Full provider probe; only randomized pool URLs are fetched.
+	Bandwidth      *bandwidth.Sampler
+	BandwidthHosts []string
 	// Identity-free actual worker entry/return, before batch guard/release.
 	// Called concurrently outside scheduler locks; must be nonblocking.
 	ObserveProgress func(prober.Progress)
@@ -117,11 +116,8 @@ func validateFullOptions(options FullOptions) error {
 	if options.Concurrency < 0 {
 		return fmt.Errorf("fleetprobe: concurrency must not be negative (got %d)", options.Concurrency)
 	}
-	if options.ipEchoUrl() == "" {
-		return fmt.Errorf("fleetprobe: no /ip echo url: set TunnelConfig.ApiUrl or IpEchoUrl -- without it no probe has an exit address to submit")
-	}
-	if options.Submit == nil {
-		return fmt.Errorf("fleetprobe: location submitter is required")
+	if options.HealthResults == nil {
+		return fmt.Errorf("fleetprobe: health reporter is required")
 	}
 	if options.Attempts == nil {
 		return fmt.Errorf("fleetprobe: attempt reporter is required")
@@ -173,7 +169,6 @@ func (self *probeRegistry) remove(client *http.Client) {
 // part-way -- and runs every measurement over it. Callers that need
 // validation and bounded scheduling should normally use RunFull.
 func NewFullProber(options FullOptions) *prober.Prober {
-	echoUrl := options.ipEchoUrl()
 	probes := &probeRegistry{}
 
 	providerProber := &prober.Prober{
@@ -183,7 +178,7 @@ func NewFullProber(options FullOptions) *prober.Prober {
 				return nil, nil, err
 			}
 			pool := options.Pool.pool()
-			hosts := dialHosts(egresshealth.HostsOf(pool.Destinations), echoUrl, options.BandwidthHosts...)
+			hosts := egresshealth.HostsOf(pool.Destinations)
 			tunnelConfig := options.TunnelConfig
 			tunnelConfig.Pins = options.Pins.pins()
 			path, err := openProbePath(ctx, providerTunnelOpener(tunnelConfig, clientId, hosts), hosts, options.ProbeTimeout)
@@ -202,7 +197,6 @@ func NewFullProber(options FullOptions) *prober.Prober {
 		},
 		Health: func(ctx context.Context, client *http.Client, place egresshealth.Place) (*egresshealth.Result, error) {
 			opts := EgressHealthOptions(options.ProbeTimeout, options.AllDestinations)
-			opts.IpEchoUrl = echoUrl
 			opts.LoadAttempts = options.LoadAttempts
 			opts.LoadRetryMeanInterval = options.LoadRetryMeanInterval
 			opts.TunnelRecreateAttempts = options.TunnelRecreateAttempts
@@ -219,18 +213,6 @@ func NewFullProber(options FullOptions) *prober.Prober {
 		Submit:        options.Submit,
 		Attempts:      options.Attempts,
 		HealthResults: options.HealthResults,
-	}
-
-	if options.Bandwidth != nil {
-		providerProber.Bandwidth = func(ctx context.Context, providerClientId string, client *http.Client) {
-			// The tunnel may have been re-created during the health run; the
-			// sample rides the one that is up now.
-			if state := probes.get(client); state != nil {
-				client, _ = state.path.Current()
-			}
-			results := options.Bandwidth.Sample(ctx, providerClientId, client)
-			log.Printf("bandwidth: provider=%s %s", providerClientId, bandwidth.Summary(results))
-		}
 	}
 
 	return providerProber
@@ -255,7 +237,7 @@ func RunFull(ctx context.Context, providers []prober.Provider, options FullOptio
 // Returns how many sequential request rounds one attempt
 // of every load of a health run needs at its configured sampling geometry.
 func EgressHealthRounds(allDestinations bool) int {
-	requestCount := egresshealth.SamplePerRun()
+	requestCount := egresshealth.SamplePerRun() + egresshealth.MaxSampledCanaries
 	concurrency := egresshealth.DefaultConcurrency
 	if allDestinations {
 		requestCount = len(egresshealth.Destinations())
@@ -269,11 +251,11 @@ func EgressHealthRounds(allDestinations bool) int {
 
 // The health run's geometry for one probe timeout.
 //
-// The probe timeout is the cold-start allowance: it is the warm-up's own
-// timeout (the fetch that pays the tunnel's cold start, see egresshealth), and
-// each load attempt gets the smaller of it and
-// egresshealth.DefaultPerRequestTimeout -- a load starts on a warm path, and a
-// slow one is retried minutes later rather than waited on. The run's budget is
+// The probe timeout is one shared cold-start window per tunnel generation,
+// paid by its first randomized sampled requests, not a separate warm-up URL.
+// Established load attempts get the smaller of it and
+// egresshealth.DefaultPerRequestTimeout; slow loads retry minutes later.
+// The run's budget is
 // left to egresshealth.Options.RunBudget, which is derived from the retry
 // schedule: a run spans minutes by design now, and no longer has to fit in one
 // probe timeout the way it did when every load had one try.
@@ -288,7 +270,7 @@ func EgressHealthOptions(probeTimeout time.Duration, allDestinations bool) egres
 	}
 	return egresshealth.Options{
 		PerRequestTimeout: min(probeTimeout, egresshealth.DefaultPerRequestTimeout),
-		IpEchoTimeout:     probeTimeout,
+		ColdStartTimeout:  probeTimeout,
 		AllDestinations:   allDestinations,
 		Concurrency:       concurrency,
 	}

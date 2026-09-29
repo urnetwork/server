@@ -39,10 +39,7 @@ type BlackholeResult struct {
 	// Attempts, LastFailure and NotMeasured, for logging. A caller that
 	// reports only the bit throws away the reason.
 	Results []CheckResult
-	// The address the warm-up's /ip echo saw, "" when it did not
-	// answer (IpEchoErr says why) or no echo was configured. It does not
-	// decide OK: the check asks whether ordinary destinations are reachable,
-	// and a provider could carry the one operator host and nothing else.
+	// Deprecated compatibility fields. Cheap checks do not issue an exit echo.
 	ExitIp    string
 	IpEchoErr string
 	// How many of the check's loads could not be measured
@@ -66,8 +63,7 @@ const (
 	// Means every sampled destination failed every
 	// one of its attempts.
 	FailureAllDestinationsFailed = "all_destinations_failed"
-	// Means a sampled HTTPS peer -- or the warm-up's,
-	// the operator's own api host -- could not authenticate the requested
+	// Means a sampled HTTPS peer could not authenticate the requested
 	// host. It is a hard integrity failure even when a different destination
 	// worked.
 	FailureTlsAuthentication = "tls_authentication_failed"
@@ -93,10 +89,9 @@ const (
 // outside.
 //
 // So this is deliberately the cheapest useful check, and since GEOMAP step 7 a
-// patient one. It opens with the warm-up (see warmUp), because a check whose
-// first and only attempt had to absorb the tunnel's cold start is how half the
-// fleet came to read dark (§11.2). Then three connectivity loads, each with
-// the retries and spacing of Check, all concurrent: the check takes one round
+// patient one. Three randomized connectivity loads start directly and share a
+// finite cold-start window for their tunnel generation. Each retains the
+// retries and spacing of Check, all concurrent: the check takes one round
 // when anything answers and up to about fifteen minutes when nothing does. It
 // reuses fetch, and therefore the destinations' headers, body caps and checks
 // -- a captive portal that answers 200 with its own body fails here exactly as
@@ -136,18 +131,9 @@ func blackhole(ctx context.Context, client *http.Client, dests []Destination, op
 	budget := opts.budget(len(sample))
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	exit := &exitRecord{}
-	r := newRun(opts.path(client), opts, max(1, len(sample)), budget, rng, exit)
-	r.warmUp(ctx)
+	r := newRun(opts.path(client), opts, max(1, len(sample)), budget, rng)
 
 	result.Results = r.loadAll(ctx, sample)
-	var echoTlsFailure bool
-	result.ExitIp, _, result.IpEchoErr, echoTlsFailure = exit.read()
-
-	if echoTlsFailure {
-		result.Failure = FailureTlsAuthentication
-		return result
-	}
 	sawSuccess, measured := false, 0
 	for _, cr := range result.Results {
 		if cr.TlsAuthenticationFailure {

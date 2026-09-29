@@ -3,6 +3,7 @@ package api
 import (
 	"github.com/urnetwork/server/api/handlers"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
 )
@@ -23,7 +24,11 @@ func Routes() []*router.Route {
 
 // Only the API lifecycle supplies this authenticated cache; the route never
 // starts a background owner or dials a provider on an upload request.
-func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUpload) []*router.Route {
+func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUpload, notifications ...*model.ContractOriginNotifications) []*router.Route {
+	connectControl := handlers.ConnectControl
+	if len(notifications) > 0 {
+		connectControl = handlers.ConnectControlWithOriginNotifications(notifications[0])
+	}
 	routes := []*router.Route{
 		router.NewRoute("GET", "/privacy.txt", router.Txt),
 		router.NewRoute("GET", "/terms.txt", router.Txt),
@@ -84,6 +89,7 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/auth/regenerate-seedphrase", handlers.AuthRegenerateSeedphrase),
 		router.NewRoute("POST", "/auth/generate-seedphrase", handlers.AuthGenerateSeedphrase),
 		router.NewRoute("POST", "/network/auth-client", handlers.AuthNetworkClient),
+		router.NewRoute("POST", "/network/register-client-v1", handlers.RegisterNetworkClient),
 		router.NewRoute("POST", "/network/remove-client", handlers.RemoveNetworkClient),
 		router.NewRoute("POST", "/network/remove-clients", handlers.RemoveNetworkClients),
 		// a provider offering itself as an extender; the handler probes the
@@ -231,7 +237,7 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/device/associations", handlers.DeviceAssociations),
 		router.NewRoute("POST", "/device/remove-association", handlers.DeviceRemoveAssociation),
 		router.NewRoute("POST", "/device/set-association-name", handlers.DeviceSetAssociationName),
-		router.NewRoute("POST", "/device/set-name", handlers.DeviceSetName), router.NewRoute("POST", "/connect/control", handlers.ConnectControl),
+		router.NewRoute("POST", "/device/set-name", handlers.DeviceSetName), router.NewRoute("POST", "/connect/control", connectControl),
 		// Unauthenticated public-key lookup; see handlers.GetClientKey.
 		router.NewRoute("GET", "/key/([^/]+)", handlers.GetClientKey),
 		// Signed registration history for a client id. Empty list, not an

@@ -525,7 +525,9 @@ type ProviderEgressRunTally struct {
 	Place ProviderEgressPlace
 	// Healthy is whether the run passed nine in ten of its scored sites.
 	Healthy bool
-	// EchoFailed is a warm-up the operator's /ip echo never answered.
+	// EchoFailed is retained for historical place-tally rows. Automatic probes
+	// no longer request a fixed echo URL, so new runs leave it false; absence of
+	// an optional sampled-IP observation is not a failed health check.
 	EchoFailed bool
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -175,54 +176,16 @@ func TestPlanPaymentsMaxDuration(t *testing.T) {
 		err = SetPayoutWallet(ctx, destinationNetworkId, *walletId)
 		connect.AssertEqual(t, err, nil)
 
-		// close a cohort of contracts whose total provider revenue share clears
-		// the wallet minimum, so the cohort is never withheld for being small.
-		usedTransferByteCount := ByteCount(50 * 1024 * 1024 * 1024) // 50 GiB
-		closeCohort := func() {
-			paid := NanoCents(0)
-			for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
-				transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
-				connect.AssertEqual(t, err, nil)
-				err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
-				connect.AssertEqual(t, err, nil)
-				err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
-				connect.AssertEqual(t, err, nil)
-				paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
-			}
+		// Seed historical cohorts whose provider share clears the wallet
+		// minimum, so neither cohort is withheld for being small.
+		historical := historicalPaymentCohort{
+			sourceNetworkId: sourceNetworkId, sourceId: sourceId,
+			destinationNetworkId: destinationNetworkId, destinationId: destinationId,
+			usedByteCount: 50 * 1024 * 1024 * 1024,
+			payoutRevenue: NanoCents(float64(netRevenue) * 50 / 1024),
 		}
 
-		// backdate the currently-unpaid cohort's contract create/close time into a
-		// chosen historical window. The bound is on close_time, so this is what
-		// places a cohort inside or outside a plan's slice; create_time is set
-		// behind close_time so the cohort still spans enough time to form a
-		// subsidy epoch. When onlyClosedAfter is set, only contracts still closing
-		// at/after it are moved, which targets just the freshly-created cohort and
-		// leaves earlier, already-backdated cohorts in place.
-		moveUnpaidContracts := func(createTime, closeTime time.Time, onlyClosedAfter *time.Time) {
-			server.Tx(ctx, func(tx server.PgTx) {
-				if onlyClosedAfter == nil {
-					server.RaisePgResult(tx.Exec(ctx,
-						`UPDATE transfer_contract SET create_time = $1, close_time = $2
-						 WHERE contract_id IN (
-						     SELECT contract_id FROM transfer_escrow_sweep WHERE payment_id IS NULL
-						 )`,
-						createTime, closeTime,
-					))
-				} else {
-					server.RaisePgResult(tx.Exec(ctx,
-						`UPDATE transfer_contract SET create_time = $1, close_time = $2
-						 WHERE contract_id IN (
-						     SELECT contract_id FROM transfer_escrow_sweep WHERE payment_id IS NULL
-						 ) AND close_time >= $3`,
-						createTime, closeTime, *onlyClosedAfter,
-					))
-				}
-			})
-		}
-
-		// seed a prior subsidy epoch [startTime, endTime]. A bounded plan anchors
-		// on the most recent subsidy end, so this is the frontier the drain
-		// continues from (a fresh deployment with no epoch plans unbounded).
+		// A bounded plan continues from the most recent subsidy end.
 		seedSubsidyEpoch := func(startTime, endTime time.Time) {
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx,
@@ -260,18 +223,16 @@ func TestPlanPaymentsMaxDuration(t *testing.T) {
 
 		// cohort A closes inside the first slice [subsidyEnd, subsidyEnd+maxDuration
 		// = now-40d): closed now-50d, created now-58d.
-		closeCohort()
-		moveUnpaidContracts(now.Add(-58*24*time.Hour), now.Add(-50*24*time.Hour), nil)
+		historical.insert(t, ctx, now.Add(-58*24*time.Hour), now.Add(-50*24*time.Hour))
 		expectedBytesA := sumUnpaidBytes()
 		connect.AssertEqual(t, 0 < expectedBytesA, true)
 
-		// cohort B closes after the first slice (now-38d), so it is deferred to a
-		// later plan. Only the freshly-created, not-yet-backdated contracts move.
-		closeCohort()
-		recentThreshold := now.Add(-24 * time.Hour)
-		moveUnpaidContracts(now.Add(-45*24*time.Hour), now.Add(-38*24*time.Hour), &recentThreshold)
+		// Cohort B closes after the first slice (now-38d), so its original
+		// terminal rows remain untouched until the later payment plan.
+		historical.insert(t, ctx, now.Add(-45*24*time.Hour), now.Add(-38*24*time.Hour))
 		expectedBytesB := sumUnpaidBytes() - expectedBytesA
 		connect.AssertEqual(t, 0 < expectedBytesB, true)
+		testingHistoricalPaymentAttributionImmutable(t, ctx)
 
 		// baseline: an unbounded plan would pay both cohorts at once. Use a dry
 		// run so it persists nothing and the real bounded plans below still see
@@ -352,40 +313,11 @@ func TestPlanPaymentsMaxDurationLoop(t *testing.T) {
 		err = SetPayoutWallet(ctx, destinationNetworkId, *walletId)
 		connect.AssertEqual(t, err, nil)
 
-		usedTransferByteCount := ByteCount(50 * 1024 * 1024 * 1024) // 50 GiB
-		closeCohort := func() {
-			paid := NanoCents(0)
-			for paid < UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd) {
-				transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
-				connect.AssertEqual(t, err, nil)
-				err = CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
-				connect.AssertEqual(t, err, nil)
-				err = CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
-				connect.AssertEqual(t, err, nil)
-				paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
-			}
-		}
-
-		moveUnpaidContracts := func(createTime, closeTime time.Time, onlyClosedAfter *time.Time) {
-			server.Tx(ctx, func(tx server.PgTx) {
-				if onlyClosedAfter == nil {
-					server.RaisePgResult(tx.Exec(ctx,
-						`UPDATE transfer_contract SET create_time = $1, close_time = $2
-						 WHERE contract_id IN (
-						     SELECT contract_id FROM transfer_escrow_sweep WHERE payment_id IS NULL
-						 )`,
-						createTime, closeTime,
-					))
-				} else {
-					server.RaisePgResult(tx.Exec(ctx,
-						`UPDATE transfer_contract SET create_time = $1, close_time = $2
-						 WHERE contract_id IN (
-						     SELECT contract_id FROM transfer_escrow_sweep WHERE payment_id IS NULL
-						 ) AND close_time >= $3`,
-						createTime, closeTime, *onlyClosedAfter,
-					))
-				}
-			})
+		historical := historicalPaymentCohort{
+			sourceNetworkId: sourceNetworkId, sourceId: sourceId,
+			destinationNetworkId: destinationNetworkId, destinationId: destinationId,
+			usedByteCount: 50 * 1024 * 1024 * 1024,
+			payoutRevenue: NanoCents(float64(netRevenue) * 50 / 1024),
 		}
 
 		seedSubsidyEpoch := func(startTime, endTime time.Time) {
@@ -423,16 +355,14 @@ func TestPlanPaymentsMaxDurationLoop(t *testing.T) {
 		seedSubsidyEpoch(subsidyEnd.Add(-5*24*time.Hour), subsidyEnd)
 
 		// cohort A closes inside the first slice; cohort B one slice later.
-		closeCohort()
-		moveUnpaidContracts(now.Add(-58*24*time.Hour), now.Add(-50*24*time.Hour), nil)
+		historical.insert(t, ctx, now.Add(-58*24*time.Hour), now.Add(-50*24*time.Hour))
 		expectedBytesA := sumUnpaidBytes()
 		connect.AssertEqual(t, 0 < expectedBytesA, true)
 
-		closeCohort()
-		recentThreshold := now.Add(-24 * time.Hour)
-		moveUnpaidContracts(now.Add(-45*24*time.Hour), now.Add(-38*24*time.Hour), &recentThreshold)
+		historical.insert(t, ctx, now.Add(-45*24*time.Hour), now.Add(-38*24*time.Hour))
 		expectedBytesB := sumUnpaidBytes() - expectedBytesA
 		connect.AssertEqual(t, 0 < expectedBytesB, true)
+		testingHistoricalPaymentAttributionImmutable(t, ctx)
 
 		// a single loop call drains the whole backlog, slice by slice.
 		var sliceEnds []time.Time
@@ -468,6 +398,69 @@ func TestPlanPaymentsMaxDurationLoop(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		for _, p := range plans2 {
 			connect.AssertEqual(t, len(p.NetworkPayments), 0)
+		}
+	})
+}
+
+// Historical payout tests own terminal input rows, not the live settlement
+// clock. Their original timestamps and complete usage arrive in the first insert.
+type historicalPaymentCohort struct {
+	sourceNetworkId      server.Id
+	sourceId             server.Id
+	destinationNetworkId server.Id
+	destinationId        server.Id
+	usedByteCount        ByteCount
+	payoutRevenue        NanoCents
+}
+
+// Install the planner's terminal inputs with complete custody under the current
+// schema. No terminal row needs to be rewritten to place it in an older slice.
+func (self historicalPaymentCohort) insert(t testing.TB, ctx context.Context, createTime, closeTime time.Time) {
+	t.Helper()
+	balances := GetActiveTransferBalances(ctx, self.sourceNetworkId)
+	if len(balances) != 1 || !balances[0].Paid || self.payoutRevenue <= 0 || !createTime.Before(closeTime) {
+		t.Fatal("historical payout fixture lacks one paid balance and ordered original times")
+	}
+	usage := &contractUsageSnapshot{Version: 1, ByteCount: self.usedByteCount,
+		Providers: []contractProviderUsage{{ClientId: self.destinationId, NetworkId: self.destinationNetworkId, ByteCount: self.usedByteCount}}}
+	paid := NanoCents(0)
+	minimum := UsdToNanoCents(EnvSubsidyConfig().MinWalletPayoutUsd)
+	for paid < minimum {
+		contractId := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
+				(contract_id,source_network_id,source_id,destination_network_id,destination_id,
+				 transfer_byte_count,create_time,close_time,outcome,provider_usage,usage_origin_is_source)
+				VALUES($1,$2,$3,$4,$5,$6,$7,$8,'settled',$9,true)`,
+				contractId, self.sourceNetworkId, self.sourceId, self.destinationNetworkId, self.destinationId,
+				self.usedByteCount, createTime, closeTime, usage))
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_escrow_sweep
+				(contract_id,balance_id,network_id,destination_id,payout_byte_count,payout_net_revenue_nano_cents,sweep_time)
+				VALUES($1,$2,$3,$4,$5,$6,$7)`, contractId, balances[0].BalanceId,
+				self.destinationNetworkId, self.destinationId, self.usedByteCount, self.payoutRevenue, closeTime))
+		})
+		paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(self.payoutRevenue))
+	}
+}
+
+// Verify the current database rejects reattribution of the historical fixture
+// and keeps the original proof/time before the real payment planner consumes it.
+func testingHistoricalPaymentAttributionImmutable(t testing.TB, ctx context.Context) {
+	t.Helper()
+	server.Db(ctx, func(conn server.PgConn) {
+		var contractId server.Id
+		var before, after time.Time
+		var usageBefore, usageAfter string
+		server.Raise(conn.QueryRow(ctx, `SELECT contract_id,close_time,provider_usage::text
+			FROM transfer_contract WHERE outcome='settled' ORDER BY contract_id LIMIT 1`).Scan(&contractId, &before, &usageBefore))
+		if _, err := conn.Exec(ctx, `UPDATE transfer_contract SET close_time=close_time+interval '1 second'
+			WHERE contract_id=$1`, contractId); err == nil || !strings.Contains(err.Error(), "contract terminal usage attribution is immutable") {
+			t.Fatalf("historical payment fixture lost the current terminal guard: %v", err)
+		}
+		server.Raise(conn.QueryRow(ctx, `SELECT close_time,provider_usage::text FROM transfer_contract
+			WHERE contract_id=$1`, contractId).Scan(&after, &usageAfter))
+		if !before.Equal(after) || usageBefore != usageAfter {
+			t.Fatal("refused historical payment rewrite changed retained attribution")
 		}
 	})
 }

@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/proto"
@@ -75,9 +74,9 @@ var missingOriginDetailsCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "missing_origin_details_total",
-		Help:      "Missing companion-origin failures partitioned by bounded server-derived source owner, sender lane, request resolution, and endpoint lifecycle classes",
+		Help:      "Missing companion-origin failures partitioned by bounded server-derived endpoint owners, sender lane, request resolution, and endpoint lifecycle classes",
 	},
-	[]string{"request_companion", "sender_role", "source_owner", "resolution", "relationship", "source_lifecycle", "destination_lifecycle"},
+	[]string{"request_companion", "sender_role", "source_owner", "destination_owner", "resolution", "relationship", "source_lifecycle", "destination_lifecycle"},
 )
 
 var inactiveDestinationDetailsCounter = prometheus.NewCounterVec(
@@ -85,9 +84,9 @@ var inactiveDestinationDetailsCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "inactive_destination_details_total",
-		Help:      "Inactive contract destination failures partitioned by bounded server-derived source owner, sender lane, request resolution, and endpoint lifecycle classes",
+		Help:      "Inactive contract destination failures partitioned by bounded server-derived endpoint owners, sender lane, request resolution, and endpoint lifecycle classes",
 	},
-	[]string{"request_companion", "sender_role", "source_owner", "resolution", "relationship", "source_lifecycle", "destination_lifecycle"},
+	[]string{"request_companion", "sender_role", "source_owner", "destination_owner", "resolution", "relationship", "source_lifecycle", "destination_lifecycle"},
 )
 
 var controlFrameFailureCounter = prometheus.NewCounterVec(
@@ -245,7 +244,8 @@ func recordContractFailureResolved(
 		missingOriginDetailsCounter.WithLabelValues(
 			companionLabel,
 			contractSenderRoleLabel(resolution.senderRole),
-			contractSourceOwnerLabel(resolution.sourceOwner),
+			contractClientOwnerLabel(resolution.sourceOwner),
+			contractClientOwnerLabel(resolution.destinationOwner),
 			contractResolutionLabel(resolution.path),
 			provideRelationshipLabel(resolution.relationship),
 			clientLifecycleLabel(resolution.sourceLifecycle),
@@ -256,7 +256,8 @@ func recordContractFailureResolved(
 		inactiveDestinationDetailsCounter.WithLabelValues(
 			companionLabel,
 			contractSenderRoleLabel(resolution.senderRole),
-			contractSourceOwnerLabel(resolution.sourceOwner),
+			contractClientOwnerLabel(resolution.sourceOwner),
+			contractClientOwnerLabel(resolution.destinationOwner),
 			contractResolutionLabel(resolution.path),
 			provideRelationshipLabel(resolution.relationship),
 			clientLifecycleLabel(resolution.sourceLifecycle),
@@ -506,6 +507,7 @@ type contractResolution struct {
 	sourceLifecycle      model.NetworkClientLifecycle
 	destinationLifecycle model.NetworkClientLifecycle
 	sourceOwner          model.NetworkClientSourceOwner
+	destinationOwner     model.NetworkClientSourceOwner
 	senderRole           *protocol.SequenceRole
 }
 
@@ -576,16 +578,16 @@ func contractSenderRoleLabel(senderRole *protocol.SequenceRole) string {
 	}
 }
 
-// contractSourceOwnerLabel accepts only the server-derived source-owner
+// Accepts only the server-derived endpoint-owner
 // vocabulary. Unlike sender_role, this label never comes from a wire field: it
-// is resolved from the source identity and the durable prober singleton in the
+// is resolved from the endpoint identity and the durable prober singleton in the
 // same PostgreSQL snapshot as the lifecycle classes.
-func contractSourceOwnerLabel(sourceOwner model.NetworkClientSourceOwner) string {
-	switch sourceOwner {
+func contractClientOwnerLabel(owner model.NetworkClientSourceOwner) string {
+	switch owner {
 	case model.NetworkClientSourceOwnerEgressProber,
 		model.NetworkClientSourceOwnerOther,
 		model.NetworkClientSourceOwnerUnknown:
-		return string(sourceOwner)
+		return string(owner)
 	default:
 		return "unknown"
 	}
@@ -656,6 +658,7 @@ func CreateContract(
 		sourceLifecycle:      relationshipDetails.SourceLifecycle,
 		destinationLifecycle: relationshipDetails.DestinationLifecycle,
 		sourceOwner:          relationshipDetails.SourceOwner,
+		destinationOwner:     relationshipDetails.DestinationOwner,
 		senderRole:           createContract.SenderRole,
 	}
 
@@ -868,16 +871,6 @@ func CreateContract(
 	return []*protocol.Frame{frame}, nil
 }
 
-// CompanionOriginWaitTimeout bounds how long a companion contract request
-// waits for its origin contract to appear before the miss is answered as
-// terminal. The race window is milliseconds (see the retry loop's comment);
-// the bound only exists so a genuinely one-sided request cannot hold the
-// control frame open indefinitely.
-const CompanionOriginWaitTimeout = 3 * time.Second
-
-// CompanionOriginWaitPollTimeout is the poll interval inside that wait.
-const CompanionOriginWaitPollTimeout = 100 * time.Millisecond
-
 func nextContract(
 	ctx context.Context,
 	clientId server.Id,
@@ -1058,11 +1051,10 @@ func newContract(
 		// sub-second latency in the worst observed case (origins land within
 		// ~111-661ms of the losing request) and nothing when the origin
 		// already exists.
-		var escrow *model.TransferEscrow
-		var err error
-		deadline := time.Now().Add(CompanionOriginWaitTimeout)
-		for {
-			escrow, err = model.CreateCompanionTransferEscrow(
+		originWatch := model.GetContractOriginNotifications(ctx).Watch(destinationId, sourceId)
+		defer originWatch.Close()
+		escrow, err := waitForCompanionOrigin(ctx, func() (*model.TransferEscrow, error) {
+			return model.CreateCompanionTransferEscrow(
 				ctx,
 				sourceNetworkId,
 				sourceId,
@@ -1071,21 +1063,7 @@ func newContract(
 				contractTransferByteCount,
 				contractManagerSettings.OriginContractLinger,
 			)
-			if !errors.Is(err, model.ErrMissingCompanionOrigin) {
-				break
-			}
-			if deadline.Before(time.Now()) {
-				// genuinely no origin (a one-sided companion request):
-				// answer the terminal cause as before
-				break
-			}
-			select {
-			case <-ctx.Done():
-				returnErr = ctx.Err()
-				return
-			case <-time.After(CompanionOriginWaitPollTimeout):
-			}
-		}
+		}, originWatch.Update)
 		if err != nil {
 			returnErr = err
 			return

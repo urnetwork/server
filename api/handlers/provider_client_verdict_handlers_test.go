@@ -381,6 +381,15 @@ func TestProviderClientVerdictQuorumMakesTheProviderDue(t *testing.T) {
 		if slices.Contains(due(), quiet) {
 			t.Fatal("an unreported provider became due")
 		}
+		// A new sampled-site health report clears the forced recheck without
+		// requiring an exit-IP observation or a refreshed location row.
+		model.SetProviderEgressHealth(ctx, &model.ProviderEgressHealth{
+			ClientId: reported, MeasuredAt: server.NowUtc(),
+			OKCount: 1, Total: 1,
+		})
+		if slices.Contains(due(), reported) {
+			t.Fatal("a new health report did not clear the forced recheck")
+		}
 
 		// AND NOTHING IN THE SELECTION PATH MOVED. The location still resolves,
 		// with the same location id, country and verdict -- a met quorum

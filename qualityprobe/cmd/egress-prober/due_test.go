@@ -184,14 +184,14 @@ func TestNewProberReportsAttempts(t *testing.T) {
 // With a sampler configured the hook
 // has to be installed, or every provider is probed for health and none is
 // ever measured -- silently, since nothing else in the pass output would say so.
-func TestNewProberWiresBandwidthWhenEnabled(t *testing.T) {
+func TestNewProberRefusesFixedBandwidthHookEvenWhenConfigured(t *testing.T) {
 	operator := &ingest.Client{ServerUrl: "http://unused.invalid"}
 	targets := bandwidth.DefaultTargets("https://api.example.net", "secret")
 	sampler := &bandwidth.Sampler{Targets: targets, Reserve: operator, Submit: operator}
 
 	p := newProber(providertunnel.Config{}, &pinSet{}, &poolSet{}, time.Minute, "https://api.example.net/my-ip-info", operator, false, sampler, bandwidth.TargetHosts(targets))
-	if p.Bandwidth == nil {
-		t.Fatal("newProber did not install the bandwidth hook, so no provider would ever be measured")
+	if p.Bandwidth != nil {
+		t.Fatal("newProber installed fixed application URLs outside the sampled pool")
 	}
 	if len(sampler.Targets) != 2 {
 		t.Fatalf("the production sampler has %d targets, want 2 (operator and cdn) -- one target cannot show a provider prioritising one path over the other", len(sampler.Targets))

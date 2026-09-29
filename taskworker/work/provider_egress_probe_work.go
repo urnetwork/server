@@ -50,10 +50,8 @@ type ProviderEgressProbeBatchArgs struct {
 	Concurrency         int  `json:"concurrency" yaml:"concurrency"`
 	ProbeTimeoutSeconds int  `json:"probe_timeout_seconds" yaml:"probe_timeout_seconds"`
 	AllDestinations     bool `json:"all_destinations,omitempty" yaml:"all_destinations"`
-	// IpEchoTimeoutSeconds bounds a blackhole check's warm-up -- the operator's
-	// /ip echo, which pays the tunnel's cold start before any load starts its
-	// clock (GEOMAP §11.3). Blackhole only: a full run's warm-up is its probe
-	// timeout.
+	// Legacy durable spelling for a blackhole tunnel's shared cold-start
+	// window. It adds no echo request. Full uses ProbeTimeoutSeconds instead.
 	IpEchoTimeoutSeconds    int  `json:"ip_echo_timeout_seconds,omitempty" yaml:"ip_echo_timeout_seconds"`
 	Bandwidth               bool `json:"bandwidth,omitempty" yaml:"bandwidth"`
 	BandwidthTimeoutSeconds int  `json:"bandwidth_timeout_seconds,omitempty" yaml:"bandwidth_timeout_seconds"`
@@ -177,13 +175,13 @@ func validateProviderEgressProbeBatchArgs(name string, args ProviderEgressProbeB
 		return fmt.Errorf("provider egress probe %s concurrency must be positive", name)
 	}
 	if name == "blackhole" {
-		// The fixed pool serves up to sixteen independent guard cohorts. A
-		// smaller cohort can publish without waiting for another cohort's
-		// slowest check, while the pass still owns one bounded worker pool.
+		// Keep the original sixteen-cohort worker bound independent of result
+		// retention: allowing more slow-tail metadata does not authorize more
+		// simultaneous tunnels or change the probe's credit geometry.
 		// Divide instead of multiplying to keep malformed large settings from
 		// overflowing the bound.
-		if (args.Concurrency-1)/providerEgressBlackholeSelectedCohorts >= args.Limit {
-			return fmt.Errorf("provider egress probe blackhole concurrency exceeds %d selected cohorts", providerEgressBlackholeSelectedCohorts)
+		if (args.Concurrency-1)/providerEgressBlackholeWorkerCohorts >= args.Limit {
+			return fmt.Errorf("provider egress probe blackhole concurrency exceeds %d worker cohorts", providerEgressBlackholeWorkerCohorts)
 		}
 	} else if args.Limit < args.Concurrency {
 		return fmt.Errorf("provider egress probe %s concurrency must be in [1,limit]", name)
@@ -201,7 +199,7 @@ func validateProviderEgressProbeBatchArgs(name string, args ProviderEgressProbeB
 	return nil
 }
 
-// A full run's health geometry: the warm-up is its probe timeout, each load
+// A full run's health geometry: the shared cold window is its probe timeout, each load
 // attempt the smaller of that and the module's per-request floor, with the
 // load rules the arguments carry.
 func providerEgressFullHealthOptions(args *ProviderEgressProbeArgs) egresshealth.Options {
@@ -213,37 +211,30 @@ func providerEgressFullHealthOptions(args *ProviderEgressProbeArgs) egresshealth
 	return options
 }
 
-// One full provider's modeled retry schedule, tunnel open and bandwidth sample.
+// One full provider's bounded sampled work, cold generations and tunnel open.
 func providerEgressFullRunBudget(args *ProviderEgressProbeArgs) time.Duration {
 	fullOptions := providerEgressFullHealthOptions(args)
-	// the budget counts the warm-up only for a run that has one, which every
-	// production run does
-	fullOptions.IpEchoUrl = egresshealth.IpEchoPath
-	loads := egresshealth.SamplePerRun()
+	loads := egresshealth.SamplePerRun() + egresshealth.MaxSampledCanaries
 	if args.Full.AllDestinations {
 		loads = len(egresshealth.Destinations())
 	}
 	probeTimeout := time.Duration(args.Full.ProbeTimeoutSeconds) * time.Second
 	full := fullOptions.RunBudget(loads) + probeTimeout
-	if args.Full.Bandwidth {
-		full += time.Duration(args.Full.BandwidthTimeoutSeconds) * time.Second
-	}
 
 	return full
 }
 
-// One blackhole provider's modeled retry schedule, warm-up and tunnel open.
+// One blackhole provider's retry schedule, shared cold windows and tunnel open.
 func providerEgressBlackholeCheckBudget(args *ProviderEgressProbeArgs) time.Duration {
 	checkOptions := egresshealth.Options{
 		PerRequestTimeout:      time.Duration(args.Blackhole.ProbeTimeoutSeconds) * time.Second,
-		IpEchoUrl:              egresshealth.IpEchoPath,
-		IpEchoTimeout:          time.Duration(args.Blackhole.IpEchoTimeoutSeconds) * time.Second,
+		ColdStartTimeout:       time.Duration(args.Blackhole.IpEchoTimeoutSeconds) * time.Second,
 		LoadAttempts:           args.LoadAttempts,
 		LoadRetryMeanInterval:  time.Duration(args.LoadRetryMeanIntervalSeconds) * time.Second,
 		TunnelRecreateAttempts: args.TunnelRecreateAttempts,
 	}
 	return checkOptions.RunBudget(egresshealth.BlackholeSampleSize) +
-		max(checkOptions.PerRequestTimeout, checkOptions.IpEchoTimeout)
+		max(checkOptions.PerRequestTimeout, checkOptions.ColdStartTimeout)
 }
 
 // The argument floor covers one full provider and one check, not an entire
@@ -550,9 +541,8 @@ func readProviderEgressOperatorSecret() (string, error) {
 	return values[0], nil
 }
 
-// The operator's /ip echo on the api's public address: every run and check
-// fetches it through the provider's tunnel, so the request leaves from the
-// provider and must reach the api from the open internet.
+// Legacy URL derivation for the ignored FullOptions compatibility field. This
+// never adds an operator request to the randomized sample.
 func providerEgressIpEchoUrl(args *ProviderEgressProbeArgs) string {
 	if strings.TrimSpace(args.PublicAPIURL) != "" {
 		return fleetprobe.IpEchoUrl(args.PublicAPIURL)
@@ -703,7 +693,6 @@ func (self *providerEgressProbePass) runBlackholeBatch(
 	options.Pool = poolSource
 	options.Timeout = time.Duration(args.Blackhole.ProbeTimeoutSeconds) * time.Second
 	options.IpEchoTimeout = time.Duration(args.Blackhole.IpEchoTimeoutSeconds) * time.Second
-	options.IpEchoUrl = providerEgressIpEchoUrl(args)
 	options.LoadAttempts = args.LoadAttempts
 	options.LoadRetryMeanInterval = time.Duration(args.LoadRetryMeanIntervalSeconds) * time.Second
 	options.TunnelRecreateAttempts = args.TunnelRecreateAttempts
@@ -880,6 +869,7 @@ type providerEgressFullBatch struct {
 	// release is called once after all workers join. Attempt-report failures
 	// must not turn a batch into a successful task with no durable attempt row.
 	releaseAttemptFailures int
+	releaseHealthFailures  int
 
 	stateLock  sync.Mutex
 	order      []string
@@ -1074,10 +1064,10 @@ func egressHealthSiteLoads(
 // its attempts, each as the run guard's class, so its providers come round
 // again after the first backoff step rather than the ordinary attempt backoff
 // (model.ProbeRunBatchGuardClass). Otherwise every provider's health run goes
-// on scored (scoreEgressHealthResult) and is tallied, its exit is submitted --
-// a submission the server refuses turns its attempt into submit_failed, as the
-// prober would have reported it -- and its attempt follows. It returns how
-// many location submissions failed.
+// on scored (scoreEgressHealthResult) and is tallied after acknowledgment.
+// Missing/empty health or failed health acknowledgment revokes provisional
+// success. Optional sampled location is independent and cannot revoke it.
+// It returns the count of provisional successes that lost health publication.
 func (self *providerEgressFullBatch) release(
 	ctx context.Context,
 	tripped bool,
@@ -1110,6 +1100,11 @@ func (self *providerEgressFullBatch) release(
 			continue
 		}
 		place := places[providerClientId]
+		failure := ""
+		if entry.attempt != nil {
+			failure = *entry.attempt
+		}
+		publicationFailed := false
 		if entry.health != nil {
 			scored := scoreEgressHealthResult(entry.health, place, scoring)
 			// a run left with no scored load measured nothing that may count,
@@ -1119,25 +1114,34 @@ func (self *providerEgressFullBatch) release(
 			submitted := false
 			if 0 < scored.Total {
 				submitted = self.sink.submitEgressHealthScored(ctx, providerClientId, entry.health, scored) == nil
+				if !submitted {
+					self.releaseHealthFailures++
+					publicationFailed = true
+					failure = prober.FailureSubmit
+				}
+			} else if failure == "" {
+				failure = prober.FailureNotMeasured
+				publicationFailed = true
 			}
 			if (submitted || scored.Total < 1) && recordTally != nil {
 				loads, runHealthy := egressHealthSiteLoads(entry.health, place, scoring, healthyShare)
 				recordTally(ctx, server.NowUtc(), model.ProviderEgressRunTally{
 					Place:      place,
 					Healthy:    runHealthy,
-					EchoFailed: entry.health.ExitIp == "",
+					EchoFailed: false,
 				}, loads)
 			}
-		}
-		failure := ""
-		if entry.attempt != nil {
-			failure = *entry.attempt
+		} else if failure == "" {
+			failure = prober.FailureNotMeasured
+			publicationFailed = true
 		}
 		if entry.exit != nil {
-			if err := self.sink.Submit(ctx, providerClientId, entry.exit.exitIp, entry.exit.observedAt); err != nil {
-				submitFailures++
-				failure = prober.FailureSubmit
-			}
+			// Location has its own acknowledged metric and retry/freshness
+			// semantics. Its failure cannot revoke accepted website quality.
+			_ = self.sink.Submit(ctx, providerClientId, entry.exit.exitIp, entry.exit.observedAt)
+		}
+		if publicationFailed && entry.attempt != nil && *entry.attempt == "" {
+			submitFailures++
 		}
 		if entry.attempt != nil {
 			if self.sink.ReportAttempt(ctx, providerClientId, failure) != nil {
@@ -1270,6 +1274,10 @@ func (self *providerEgressProbePass) runFullBatch(
 	if batch.releaseAttemptFailures > 0 {
 		measurementErr = errors.Join(measurementErr,
 			fmt.Errorf("full-probe attempt publication failed for %d providers", batch.releaseAttemptFailures))
+	}
+	if batch.releaseHealthFailures > 0 {
+		measurementErr = errors.Join(measurementErr,
+			fmt.Errorf("full-probe health publication failed for %d providers", batch.releaseHealthFailures))
 	}
 	if err := releaseCtx.Err(); err != nil {
 		measurementErr = errors.Join(measurementErr, fmt.Errorf("full-probe successor publication: %w", err))
@@ -1583,7 +1591,7 @@ func providerEgressProbeExecutionArgs(args *ProviderEgressProbeArgs) *ProviderEg
 	execution := *args
 	const preferredCohort = 250
 	if preferredCohort < args.Blackhole.Limit && preferredCohort < args.Blackhole.Concurrency {
-		minimumCohort := 1 + (args.Blackhole.Concurrency-1)/providerEgressBlackholeSelectedCohorts
+		minimumCohort := 1 + (args.Blackhole.Concurrency-1)/providerEgressBlackholeWorkerCohorts
 		execution.Blackhole.Limit = min(args.Blackhole.Limit,
 			max(preferredCohort, minimumCohort, args.DarkBatchGuardMinChecks))
 	}
@@ -1591,7 +1599,7 @@ func providerEgressProbeExecutionArgs(args *ProviderEgressProbeArgs) *ProviderEg
 }
 
 // The prober has one shared account, not exclusive per-shard reservations.
-// Plan for every retained cohort and tunnel generation, allowing current,
+// Plan for every selected cohort and tunnel generation, allowing current,
 // announced-ahead and prefetched contracts in both directions. The floor adds
 // overlap headroom, not an exact bound on all lanes, renewals or later full
 // successors; periodic replenishment and live available-credit checks remain
@@ -1607,7 +1615,7 @@ func providerEgressProbeCreditMinimum(args *ProviderEgressProbeArgs) (model.Byte
 	if int64(args.TunnelRecreateAttempts) == math.MaxInt64 {
 		return 0, fmt.Errorf("provider egress probe credit geometry overflows")
 	}
-	// Check every product before multiplication, including the retained
+	// Check every product before multiplication, including the selected
 	// cohort count and tunnel recreations. Do not wrap an underfunded minimum.
 	reserve := func(contract, selected, cohorts int64) (int64, error) {
 		amount := contract
@@ -1724,29 +1732,6 @@ func runProviderEgressProbe(
 	reporter := newEgressProbeMetricsReporter(operator, lookupProviderEgressCountry)
 	readiness := newProviderEgressProbeReadiness(*identity.NetworkId)
 
-	var bandwidthSampler *bandwidth.Sampler
-	bandwidthTargets := []bandwidth.Target{}
-	if args.Full.Bandwidth {
-		if strings.TrimSpace(args.PublicAPIURL) != "" {
-			bandwidthTargets = append(bandwidthTargets, bandwidth.OperatorTarget(args.PublicAPIURL, operatorSecret))
-		}
-		cdnURL := args.BandwidthCDNURL
-		if strings.TrimSpace(cdnURL) == "" {
-			cdnURL = bandwidth.CdnTestUrl
-		}
-		bandwidthTargets = append(bandwidthTargets, bandwidth.Target{
-			Name:   "cdn",
-			Source: bandwidth.SourceCdn,
-			Url:    cdnURL,
-		})
-		bandwidthSampler = &bandwidth.Sampler{
-			Targets: bandwidthTargets,
-			Reserve: reporter,
-			Submit:  reporter,
-			Timeout: time.Duration(args.Full.BandwidthTimeoutSeconds) * time.Second,
-		}
-	}
-
 	pass := &providerEgressProbePass{
 		readiness:    readiness,
 		blackholeDue: operator.BlackholeDue,
@@ -1768,9 +1753,7 @@ func runProviderEgressProbe(
 			TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, args.Blackhole),
 		},
 		fullOptions: fleetprobe.FullOptions{
-			TunnelConfig:   providerEgressProbeTunnelConfig(tunnelConfig, args.Full),
-			Bandwidth:      bandwidthSampler,
-			BandwidthHosts: bandwidth.TargetHosts(bandwidthTargets),
+			TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, args.Full),
 		},
 		fullSink:     reporter,
 		recordTally:  recordProviderEgressRunTally,

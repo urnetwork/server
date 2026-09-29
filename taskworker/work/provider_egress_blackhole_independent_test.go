@@ -286,31 +286,58 @@ func TestBlackholeIndependentDecisionMetricsHaveFixedDomain(t *testing.T) {
 	}
 }
 
+// The API prefix bounds this fixture before the metadata ceiling. One ACK
+// exposes its successor; cancellation must still join every remaining owner
+// and publish its completed pass/TLS evidence independently.
 func TestBlackholeIndependentTailOwnersStayBoundedAndJoinCancellation(t *testing.T) {
 	args := testProviderEgressParallelArgs(t)
 	synctest.Test(t, func(t *testing.T) {
-		h := newTestBlackholePipeline(t, args, providerEgressBlackholeSelectedCohorts+2)
+		cohortSize := args.Blackhole.Limit
+		prefixCohorts := 5000 / cohortSize
+		if providerEgressBlackholeRetainedCohorts <= prefixCohorts {
+			t.Fatal("fixture must reach the API prefix before the metadata ceiling")
+		}
+		h := newTestBlackholePipeline(t, args, providerEgressBlackholeRetainedCohorts+2)
+		releaseFirstTail := make(chan struct{})
 		h.check = func(index int, p prober.Provider) fleetprobe.BlackholeResult {
-			if index%250 == 249 {
-				<-h.ctx.Done()
+			if index%cohortSize == cohortSize-1 {
+				if index < cohortSize {
+					select {
+					case <-releaseFirstTail:
+					case <-h.ctx.Done():
+					}
+				} else {
+					<-h.ctx.Done()
+				}
 			}
-			if index%250 == 0 {
+			if index%cohortSize == 0 {
 				return testBlackholeAdmissionTls(p)
 			}
 			return testBlackholeAdmissionPass(p)
 		}
 		close(h.firstRelease)
+		close(h.firstTail)
 		close(h.laterRelease)
 		h.start()
 		synctest.Wait()
-		if h.startedCount(0, len(h.due)) != providerEgressBlackholeSelectedCohorts*250 || h.peak.Load() > 250 || len(h.submissions) != 0 {
-			t.Errorf("independent tails exceeded bounds or pinned admission: started=%d peak=%d ACKs=%d", h.startedCount(0, len(h.due)), h.peak.Load(), len(h.submissions))
+		if h.startedCount(0, len(h.due)) != prefixCohorts*cohortSize || h.active.Load() != int32(prefixCohorts) || h.peak.Load() > int32(args.Blackhole.Concurrency) || len(h.submissions) != 0 || h.maxLookup != 5000 {
+			t.Errorf("independent tails did not respect the API prefix: started=%d active=%d peak=%d ACKs=%d lookup=%d", h.startedCount(0, len(h.due)), h.active.Load(), h.peak.Load(), len(h.submissions), h.maxLookup)
+		}
+		close(releaseFirstTail)
+		synctest.Wait()
+		selectedCohorts := prefixCohorts + 1
+		if h.startedCount(0, len(h.due)) != selectedCohorts*cohortSize || h.active.Load() != int32(prefixCohorts) || len(h.submittedCohort(0)) != cohortSize || len(h.submissions) != 1 {
+			t.Error("publication did not replace exactly one independently retained cohort")
 		}
 		h.cancel()
 		h.finish()
-		for cohort := range providerEgressBlackholeSelectedCohorts {
+		for cohort := range selectedCohorts {
 			checks := h.submittedCohort(cohort)
-			if len(checks) != 249 {
+			wantChecks := cohortSize - 1
+			if cohort == 0 {
+				wantChecks = cohortSize
+			}
+			if len(checks) != wantChecks {
 				t.Errorf("cohort%d lost completed evidence: %d", cohort, len(checks))
 				continue
 			}
@@ -320,7 +347,8 @@ func TestBlackholeIndependentTailOwnersStayBoundedAndJoinCancellation(t *testing
 				}
 			}
 		}
-		if !errors.Is(h.err, context.Canceled) || h.active.Load() != 0 || h.result.Checked != providerEgressBlackholeSelectedCohorts*249 || len(h.submissions) != providerEgressBlackholeSelectedCohorts {
+		wantChecked := cohortSize + prefixCohorts*(cohortSize-1)
+		if !errors.Is(h.err, context.Canceled) || h.active.Load() != 0 || h.result.Checked != wantChecked || len(h.submissions) != selectedCohorts || h.startedCount(selectedCohorts*cohortSize, len(h.due)) != 0 {
 			t.Errorf("bounded tail cancellation lost retained passes or join: checked=%d ACKs=%d active=%d err=%v", h.result.Checked, len(h.submissions), h.active.Load(), h.err)
 		}
 	})
@@ -428,10 +456,18 @@ func TestBlackholeIndependentEightPendingGuardsRemainIsolated(t *testing.T) {
 	})
 }
 
+// A successfully guarded ACK may unblock a full selected prefix. Losing
+// credit afterward must retain that prior ACK while suppressing ordinary
+// negatives from every still-pending cohort and stopping further admission.
 func TestBlackholeIndependentPendingCreditLossKeepsOnlySafeEvidence(t *testing.T) {
 	args := testProviderEgressParallelArgs(t)
 	synctest.Test(t, func(t *testing.T) {
-		h := newTestBlackholePipeline(t, args, providerEgressBlackholeSelectedCohorts+2)
+		cohortSize := args.Blackhole.Limit
+		prefixCohorts := 5000 / cohortSize
+		if providerEgressBlackholeRetainedCohorts <= prefixCohorts {
+			t.Fatal("fixture must reach the API prefix before the metadata ceiling")
+		}
+		h := newTestBlackholePipeline(t, args, providerEgressBlackholeRetainedCohorts+2)
 		h.pass.fullDue = func(context.Context, int) ([]ingest.DueProvider, error) { return nil, nil }
 		var depleted atomic.Bool
 		h.pass.readiness = &providerEgressProbeReadiness{minimum: 1, available: func(context.Context) (model.ByteCount, error) {
@@ -440,35 +476,56 @@ func TestBlackholeIndependentPendingCreditLossKeepsOnlySafeEvidence(t *testing.T
 			}
 			return 1, nil
 		}}
+		releaseFirstTail := make(chan struct{})
 		releaseTails := make(chan struct{})
 		h.check = func(index int, p prober.Provider) fleetprobe.BlackholeResult {
-			switch index % 250 {
+			switch index % cohortSize {
 			case 0:
 				return testBlackholeAdmissionPass(p)
 			case 1:
 				return testBlackholeAdmissionTls(p)
-			case 249:
-				<-releaseTails
+			case cohortSize - 1:
+				release := releaseTails
+				if index < cohortSize {
+					release = releaseFirstTail
+				}
+				select {
+				case <-release:
+				case <-h.ctx.Done():
+				}
 			}
 			return testBlackholeAdmissionDark(p)
 		}
 		close(h.firstRelease)
+		close(h.firstTail)
 		close(h.laterRelease)
 		h.start()
 		synctest.Wait()
-		if h.startedCount(0, len(h.due)) != providerEgressBlackholeSelectedCohorts*250 || len(h.submissions) != 0 {
-			t.Error("credit-loss fixture did not reach all buffered guard owners")
+		if h.startedCount(0, len(h.due)) != prefixCohorts*cohortSize || h.active.Load() != int32(prefixCohorts) || len(h.submissions) != 0 || h.maxLookup != 5000 {
+			t.Error("credit-loss fixture did not reach the bounded API prefix")
+		}
+		close(releaseFirstTail)
+		synctest.Wait()
+		selectedCohorts := prefixCohorts + 1
+		firstChecks := h.submittedCohort(0)
+		if h.startedCount(0, len(h.due)) != selectedCohorts*cohortSize || h.active.Load() != int32(prefixCohorts) || len(firstChecks) != cohortSize || len(h.submissions) != 1 {
+			t.Error("first guarded ACK did not expose its successor before credit loss")
+		}
+		for index, check := range firstChecks {
+			if (index == 0 && !check.Ok) || (index == 1 && (check.Failure != "tls_authentication_failed" || check.NotMeasured)) || (1 < index && !check.NotMeasured) {
+				t.Error("pre-depletion cohort bypassed its independent dark guard")
+			}
 		}
 		depleted.Store(true)
 		close(releaseTails)
 		h.finish()
-		for cohort := range providerEgressBlackholeSelectedCohorts {
+		for cohort := 1; cohort < selectedCohorts; cohort++ {
 			checks := h.submittedCohort(cohort)
 			if len(checks) != 2 || !checks[0].Ok || checks[1].Failure != "tls_authentication_failed" || checks[1].NotMeasured {
 				t.Errorf("cohort%d published credit-invalid negatives or lost pass/TLS evidence: count=%d", cohort, len(checks))
 			}
 		}
-		if !errors.Is(h.err, errProviderEgressProbeUnfunded) || h.result.Checked != 2*providerEgressBlackholeSelectedCohorts || h.startedCount(providerEgressBlackholeSelectedCohorts*250, (providerEgressBlackholeSelectedCohorts+2)*250) != 0 || h.active.Load() != 0 {
+		if !errors.Is(h.err, errProviderEgressProbeUnfunded) || h.result.Checked != cohortSize+2*prefixCohorts || len(h.submissions) != selectedCohorts || h.startedCount(selectedCohorts*cohortSize, len(h.due)) != 0 || h.active.Load() != 0 || h.peak.Load() > int32(args.Blackhole.Concurrency) {
 			t.Errorf("credit-loss failure/admission/join contract lost: checked=%d err=%v", h.result.Checked, h.err)
 		}
 	})

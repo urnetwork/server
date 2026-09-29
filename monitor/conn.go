@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -235,6 +236,7 @@ type runner struct {
 	cfg                 *monitorConfig
 	remoteCommands      *hostCommandLimiter
 	runSSH              sshCommandRunner
+	runLocal            localCommandRunner
 	operatorDiagnostics io.Writer
 }
 
@@ -247,6 +249,7 @@ func newRunner(cfg *monitorConfig) *runner {
 		cfg:                 cfg,
 		remoteCommands:      remoteCommands,
 		runSSH:              runSSHCommand,
+		runLocal:            runLocalCommand,
 		operatorDiagnostics: os.Stderr,
 	}
 }
@@ -459,24 +462,31 @@ func (self *runner) shell(ctx context.Context, h *host, remoteCmd string) (strin
 // stdout+stderr because several operational tools emit useful structured
 // context on stderr even on success.
 func (self *runner) local(ctx context.Context, name string, args ...string) (string, error) {
+	logQuery := isBoundedWarpctlLogQuery(name, args)
+	if logQuery && ctx.Err() != nil {
+		return "", newWarpctlLogQueryError(ctx.Err(), "")
+	}
 	timeout := self.cfg.commandTimeout
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, name, args...)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	err := cmd.Run()
+	runCommand := self.runLocal
+	if runCommand == nil {
+		runCommand = runLocalCommand
+	}
+	out, stderr, err := runCommand(cmdCtx, name, args...)
+	if logQuery && (err != nil || cmdCtx.Err() != nil) {
+		return out, newWarpctlLogQueryError(errors.Join(cmdCtx.Err(), err), stderr)
+	}
 	if cmdCtx.Err() == context.DeadlineExceeded {
-		return out.String(), fmt.Errorf("%s timeout after %s", name, timeout)
+		return out, fmt.Errorf("%s timeout after %s", name, timeout)
 	}
 	if err != nil {
-		return out.String(), fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+		return out, fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
 	}
-	return out.String(), nil
+	return out, nil
 }
 
 func (self *runner) tcpExchange(ctx context.Context, network, address string, payload []byte, responseBytes int) ([]byte, error) {
