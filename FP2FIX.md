@@ -3647,6 +3647,41 @@ slots even with perfect measured acceptance. This is a lower bound, not a safe
 configured concurrency or linear scaling prediction. Same-window host CPU and
 admission witnesses remain pending.
 
+The proposed uniform 2,048-slot setting is held. Source accepts 256 workers
+per shard, but the one shared shard setting would raise concurrency on hot and
+cool hosts alike; the prober credit floor would rise from 2 TiB at 64/shard to
+4.5 TiB at 256/shard. A source-bound fixed-window per-host Taskworker/node CPU
+read failed closed twice on unexpected metric label shapes (first a missing
+node `instance`, then replacement process series outside the allowed early
+witness), so no process CPU fractions were admitted. These failures are retained
+without a third broad retry. The existing enabled-host placement has no
+host-specific URL concurrency knob, and a larger fleet-wide setting or host
+move awaits resource attribution and a staged rollout plan. The existing
+512-slot setting remains in place.
+
+An indexed, capped, read-only aggregate over the same 22:26–22:31Z accepted
+cohort retained exactly 15,747 results. Positive final-hop DNS clocks appeared
+on 12,233 successes (mean 2.365 seconds, p50 1.310, p95 8.238) and 3,399
+failures (mean 22.315 seconds, p50 15.634, p95 45.153). Of the 3,415 failures,
+1,509 were classified `dial_dns`; their positive DNS clocks totaled 68,020
+seconds, about 45.1 seconds per such failure. Observed wire-body span totaled
+2,056.6 seconds across 12,332 successes and 186.7 seconds across 1,333
+failures with body bytes. These clocks make DNS a stronger bottleneck candidate
+than body transfer, but they retain only the final attempted hop and are from
+accepted results, not every worker turn; they do not prove full fetch elapsed
+or CPU use. Query execution was 0.799 seconds under a two-second bound;
+receipt `10e66f05dffb78d25b7c8a681744ab3128029001f2116b92906872f2b9dfe820`.
+The owning DNS/DoH path and a correctness-preserving repair are under review.
+
+The first successor capability-2 active frame began at 22:48:13Z, after the
+explicit 15-minute floor. Its coherent 22:50:58Z census found `eligible=109392`,
+`quota_complete=0`, `secure_complete=0`, `due=63290`, `overdue=109383`, and
+`runs_needed=635274`; the current numerical floor is about 75.97 accepted
+measured runs/s. Enabled-host picker pairing was 20/20 at 22:53:07Z, with one
+initial read error still surfaced. The new process-hourly counter range is
+expectedly incomplete until a full hour of coverage; neither zero quota
+completions nor a short-window aggregate can be relabeled as recovery.
+
 A bounded historical final-clock read aligned to the earlier 21:46:27–21:51:27Z
 accepted-result window found 102 of 12,766 outcomes with final TTFB over two
 seconds, all measured failures with wire body observed. This is only 0.8% of
