@@ -2873,3 +2873,43 @@ probe followed from this frame. The bounded offline follow-up is sealed as
 SHA256 `c65de955ca91e42fa782b02259daae4c286594f12980d9d370b3c02e785f442f`;
 it found no new source fix or reason for another active read before staged
 retirement-correction rollout.
+
+The twenty-first scheduled frame began at 14:10:09Z with migration still
+731 versus required 740. PostgreSQL consumed 38.798 of 96 logical cores in
+an independent five-second sample; the query owner remains unknown. A
+coherent URL census had 112,909 eligible providers, zero quota-complete,
+111,540 overdue and 1,369 warming, while hourly process and throughput
+coverage remained incomplete. Picker observation paired 20 of 25 API slots,
+with 451 initial nonempty outcomes, 12 initial errors and nine initial plus
+two filter read errors. Compared with the nineteenth coherent census,
+warming rose by 1,341 while eligible grew by 870 and overdue fell by 471.
+Source defines warming as incomplete cycles started within four hours;
+aggregate counts do not identify provider transitions or the cause. The
+twenty-second scheduled frame began at 14:25:09Z with the same watcher PID.
+An offline source review (sealed SHA256
+`18cfdf5efe7f661d7ffeae221afdf5be4b63de9d1e3eaf8076e535560e0fad5c`)
+found that cycle tokens are seeded once, while due claims can lower the
+oldest-due age before any successful measurement. The implied capped
+rolling-success stock fell by 5,057 across the two coherent frames; no
+new source defect or release-changing reason for another active read was
+established. No extra monitor probe or Main rollout was performed.
+
+A separate strict, read-only primary admission check completed at 14:24:05Z
+and kept migration on **HOLD** (sealed receipt SHA256
+`7311391cc0caa529e5908ac17af12d99e47e57602f1629a0d5ca713b105dc0f7`).
+The head and catalog were 731, with the 731 ARIN index valid and ready,
+candidate indexes for 733–739 absent, and no active index build, prepared
+transaction, replication slot, COPY or vacuum in the
+bounded snapshot. Backup service was inactive; the latest source archive
+was about 41.6 hours old, and metadata alone did not prove restore or
+writer authority. PGDATA had about 1.00 TB available, but CPU quota and
+cpuset were unobserved, and the capped transaction sample could not
+exclude older NULL-xmin sessions. Every migration stage needs fresh
+admission before DDL; this check performed no DDL or deployment.
+
+A separate one-shot edge1 access check passed its hostname gate and
+authenticated read-only root privilege, with Docker executable and socket
+present (receipt SHA256
+`48a5d31210b00ca60c16ef65c3b162f8febb01d26bb282d225828b742f9a4cd2`).
+It ran no Docker command or process census, so live image and executable
+identity across the enabled fleet remain unverified.
