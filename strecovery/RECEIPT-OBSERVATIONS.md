@@ -12,6 +12,11 @@ state means only that the supplied receipt matches the source's supplied
 canonical block and lies at or below its supplied EVM boundary. Those source
 claims still require independent authentication.
 
+The additive [`verify-receipts` command](RECEIPT-COMMITMENTS.md) now verifies
+transaction/receipt trie membership and raw-header ancestry for retained
+observations. It still leaves independent native finality, mapping and actual
+runtime fee debits unresolved; it does not change this command's authority.
+
 The output always sets these four fields to false:
 
 - `finality_authenticated`

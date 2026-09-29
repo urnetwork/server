@@ -8,6 +8,9 @@ selected retained transaction stores. It never signs, estimates new transaction
 fees, reserves a nonce, broadcasts, changes database status or contacts a
 chain RPC endpoint. The separate `reconcile` command computes conditional gas
 fees from pinned observation inputs; it cannot authenticate their finality.
+The [`verify-receipts` command](RECEIPT-COMMITMENTS.md) checks retained raw
+headers and transaction/receipt proofs, including gas derived from committed
+cumulative values. Actual runtime fees and independent finality remain unknown.
 
 The incident motivating this path was a continuation collector that had 226 of
 230 database signatures. Four original signatures needed manual restoration.
@@ -207,3 +210,7 @@ The receipt-observation candidate has its own frozen-source gate in
 use synthetic signatures and private temporary files only; they require no
 chain or database service. The earlier census and adjacent controller/model
 gates still require the isolated fixture harness specified in their handoff.
+
+The additive commitment verifier has its exact root selectors, dependency pins
+and causal controls in
+[COMMITMENT-QUALIFICATION-HANDOFF.md](COMMITMENT-QUALIFICATION-HANDOFF.md).
