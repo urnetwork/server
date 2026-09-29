@@ -3672,6 +3672,13 @@ accepted results, not every worker turn; they do not prove full fetch elapsed
 or CPU use. Query execution was 0.799 seconds under a two-second bound;
 receipt `10e66f05dffb78d25b7c8a681744ab3128029001f2116b92906872f2b9dfe820`.
 The owning DNS/DoH path and a correctness-preserving repair are under review.
+Two independently gated historical DNS-counter reads failed closed: the first
+exceeded its reviewed metric-row cap, and a narrower exact-process read fit
+3,606 rows/1.08 MB but encountered an unexpected source label. No route-state
+or path-state aggregate was admitted from either read; the accepted-result
+DNS clocks above remain the durable evidence. The next step is an offline
+exporter-label audit or a separately scoped shape discriminator, not a blind
+retry or an inferred zero.
 
 A separate deterministic provider-path correctness bug was reproduced: the
 monitor may coalesce an admitted client's `Added` then `Removed` events into
@@ -3684,7 +3691,30 @@ does not infer admission from an empty or overflow-reset snapshot. The
 independent Sol gate observed the expected sole failing baseline root, then
 all eight selected candidate roots passed normal and race modes with vet
 clean. This is a classification correction, not a claimed throughput gain;
-Main rollout and post-deploy verification remain pending.
+post-deploy verification remains pending.
+
+The correction was committed as `5e9a4144` and built/pushed as Main Taskworker
+`2026.9.29-planetoid-1059244520`, manifest
+`sha256:385dd0924823a741883bc554f6680ca8755f01c1e1a5c9ceee0348376068fe27`.
+Both Linux release-binary vulnerability scans passed. The exact-version
+Warpctl deploy exited zero by 23:38:57.979Z with 20/20 target service-status
+paths after updating both `g1` and `g2` tags. This is control-plane version
+convergence; current eight-process generation, immutable running containers,
+and the correction's Main outcome effect still need independent verification.
+The existing capability-2 watcher remains active through the rollout, so its
+during-rollout owner gaps are scoped rather than silently counted as recovery.
+
+One bounded current-process read at 23:41:49–52Z found exactly eight newest
+fresh enabled-host Taskworker processes, all capability 2/configured eight,
+with eight unique fresh shard owners. Every process start followed its `g1`
+or `g2` tag update; eight predecessors were excluded by the reader's now-only
+rules. A coherent shard-zero census observed at 23:41:11Z reported
+`eligible=109535`, `runs_needed=598286`, `quota_complete=0`, and
+`secure_complete=0`. The receipt is
+`012ea8c4dc29d3dec5642d5fe44bd5208e6b7c3ce10e77b33b34098401821a4b`.
+This proves fresh runtime generation, capability and shard ownership, not the
+running containers' immutable digest or the correction's Main effect. A fresh
+full five-minute post-convergence acceptance window remains pending.
 
 The first successor capability-2 active frame began at 22:48:13Z, after the
 explicit 15-minute floor. Its coherent 22:50:58Z census found `eligible=109392`,
