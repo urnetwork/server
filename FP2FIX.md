@@ -3053,3 +3053,16 @@ so neither archive status file was read and backup destination integrity
 remains unknown. This attempt used the user-authorized SSH host-key bypass;
 the remote host's cryptographic identity was therefore unverified. The
 attempt was not another active monitor probe and made no archive mutation.
+
+A later bounded noninteractive-sudo read of the same two small Planetoid
+status files succeeded once (receipt SHA256
+`2c4cae479239cfe185e735fdb8385de04832743fe810ae000ccacd7a693d242b`;
+sanitized result SHA256
+`dfdee8418842f81f1aa09504d8f161fe73a72792093b17036b35faea7a111fb6`).
+The producer reports a matching September 27 PostgreSQL generation in its
+latest and integrity rows, `pg-gpg-sha256` verified about 5 hours 22 minutes
+before the read, and `in_progress=0`. Stable file metadata supports a
+coherent pair. This is a producer-reported recent destination check; no
+independent ciphertext rehash, decrypt or restore was done, and the
+user-authorized host-key bypass leaves cryptographic host identity
+unverified. No archive bytes or production data were changed.
