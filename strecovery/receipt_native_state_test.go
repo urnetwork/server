@@ -5,6 +5,7 @@ package strecovery
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -36,8 +37,19 @@ func nativeStorageOracle(t testing.TB) []nativeStorageOracleCase {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if digest(raw) != "b875b9eb1aa497233f68bb4cae02b4331320fcaeeaaefbefe867658f2aebaecd" {
-		t.Fatal("native SDK oracle bytes changed")
+	oracle, err := decodeNativeStorageOracle(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return oracle
+}
+
+// The independent file receipt uses bare SHA-256 hex; recovery protocol object
+// digests use a sha256: prefix. Keep these domains explicit before JSON decoding.
+func decodeNativeStorageOracle(raw []byte) ([]nativeStorageOracleCase, error) {
+	hash := sha256.Sum256(raw)
+	if hex.EncodeToString(hash[:]) != "b875b9eb1aa497233f68bb4cae02b4331320fcaeeaaefbefe867658f2aebaecd" {
+		return nil, errors.New("native SDK oracle bytes changed")
 	}
 	var oracle struct {
 		Schema string                    `json:"schema"`
@@ -45,12 +57,12 @@ func nativeStorageOracle(t testing.TB) []nativeStorageOracleCase {
 		Cases  []nativeStorageOracleCase `json:"cases"`
 	}
 	if err := decodeJson(raw, &oracle); err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
 	if oracle.Schema != "urnetwork-native-storage-sdk-oracle-v1" || oracle.Sdk != NativeFinalitySdkSource || len(oracle.Cases) != 18 {
-		t.Fatal("native SDK oracle census changed")
+		return nil, errors.New("native SDK oracle census changed")
 	}
-	return oracle.Cases
+	return oracle.Cases, nil
 }
 
 // Selecting a case fails explicitly, so fixture drift cannot silently skip it.
@@ -91,6 +103,28 @@ func nativeStorageFinalityFixture(t testing.TB, vector nativeStorageOracleCase) 
 		Reads: vector.Reads, Nodes: vector.Nodes,
 	}
 	return fixture, witness
+}
+
+// Reproduce the original checksum-domain mistake without hiding it behind a
+// fatal fixture helper. Even a semantically harmless byte change breaks the pin.
+func TestNativeStorageProofOracleChecksumDomains(t *testing.T) {
+	raw, err := os.ReadFile("testdata/native-storage-sdk-oracle.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const filePin = "b875b9eb1aa497233f68bb4cae02b4331320fcaeeaaefbefe867658f2aebaecd"
+	if digest(raw) != "sha256:"+filePin || digest(raw) == filePin {
+		t.Fatal("native oracle regression lost its distinct protocol digest domain")
+	}
+	oracle, err := decodeNativeStorageOracle(raw)
+	if err != nil || len(oracle) != 18 {
+		t.Fatalf("native oracle file pin was confused with protocol digest: %v", err)
+	}
+	changed := append(slices.Clone(raw), ' ')
+	oracle, err = decodeNativeStorageOracle(changed)
+	if err == nil || oracle != nil || !strings.Contains(err.Error(), "bytes changed") {
+		t.Fatalf("native oracle accepted changed file bytes: %v", err)
+	}
 }
 
 // Both layouts share a reader; all nine SDK scenarios must agree byte for byte.

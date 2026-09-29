@@ -75,6 +75,16 @@ oracle receipt manifest is
 This qualifies the oracle, not the Go implementation. The candidate's Go behavior
 and causal controls require separate independent qualification after source freeze.
 
+The first Go candidate, `b0ca782ae80976bc7f7a1312351d79aa7d47ba08`, failed setup in
+fourteen of fifteen selected normal roots: its fixture helper compared the
+recovery protocol's `sha256:<hex>` digest with this receipt's bare hex checksum.
+The original vector bytes matched; no verifier qualification followed. The child
+fixture fix uses explicit standard SHA-256 for the bare file checksum and tests
+both digest domains plus rejection of a whitespace-only byte change. Production
+verifier code is unchanged. Sol's original failed stream is preserved at
+`/mnt/data/sn-testnet/qualification/native-storage-proof-verifier-sol-20260929/frozen-b0ca`,
+manifest `a296fd109912ee5dd561499f72ae2cb0d9210c39187c1650dd8429211784de06`.
+
 ## Remaining launch dependencies
 
 Successful output is an `unapproved_observation` with native header/storage math
