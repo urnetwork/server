@@ -3692,6 +3692,21 @@ different outcome mixes and changing eligible cohort are retained without
 causal attribution. Aggregate throughput still cannot establish per-provider
 rolling completion.
 
+A bounded read of the complete published native-score census at 23:15:12Z
+found 92,152 public native-quality providers, 94,643 public native-speed
+providers, and 109,378 online providers. The source snapshot completed at
+23:00:22.948Z, about 14 minutes 50 seconds before the read; publication was
+23:07:45.183Z. A provider can appear in more than one bucket, so these counts
+are not additive. The six denominator bands describe accepted selected-policy
+outcomes in the trailing eight hours, **not** the new ten-run/four-hour quota:
+quality `0/64/43/82/91963/0`, speed `0/67/46/85/94445/0`, and online
+`1017/133/110/219/107808/91` for zero/one/two/three-to-four/five-to-nine/
+ten-plus respectively. The first bounded GET reached the key but its older
+Python parser rejected a valid Go fractional timestamp; a separately reviewed
+read with a source-proven parser and local controls succeeded. Both receipts
+are retained. The successful private result SHA256 is
+`f61e17249c5ef7111ffd3eeab8d65daf400c7d544df8ed5af4608bf85d445496`.
+
 A bounded historical final-clock read aligned to the earlier 21:46:27–21:51:27Z
 accepted-result window found 102 of 12,766 outcomes with final TTFB over two
 seconds, all measured failures with wire body observed. This is only 0.8% of
