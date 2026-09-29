@@ -3682,6 +3682,16 @@ initial read error still surfaced. The new process-hourly counter range is
 expectedly incomplete until a full hour of coverage; neither zero quota
 completions nor a short-window aggregate can be relabeled as recovery.
 
+A second nonoverlapping indexed history window, 22:40–22:45Z, found 13,766
+unique accepted measured runs: 10,398 successes and 3,368 failures, or
+**45.8867/s**. Its read completed in 0.233 seconds under a two-second bound;
+receipt `5b2785543731a4104ef095ac35b650e18675fe31bfbf885dda36ed98fb9f71c7`.
+The earlier 52.49/s was not a persistent flat rate; neither five-minute
+window reaches the later cohort's roughly 75.97/s numerical floor. The
+different outcome mixes and changing eligible cohort are retained without
+causal attribution. Aggregate throughput still cannot establish per-provider
+rolling completion.
+
 A bounded historical final-clock read aligned to the earlier 21:46:27–21:51:27Z
 accepted-result window found 102 of 12,766 outcomes with final TTFB over two
 seconds, all measured failures with wire body observed. This is only 0.8% of
