@@ -3033,3 +3033,23 @@ plus two filter read errors. The same watcher began frame 28 at 15:55:09Z.
 The separately prepared host and backup reads were deferred because bounded
 watcher SSH children remained after picker and the safe cadence margin
 expired. No extra Main contact or probe occurred.
+
+The twenty-eighth scheduled frame began at 15:55:09Z. Migration remained
+731 versus required 740. PostgreSQL used 31.783 of 96 logical cores in
+its independent 5.02-second sample, without query-owner or quota
+attribution. A coherent URL census at 16:07:07Z had 108,003 eligible,
+zero quota-complete, 106,910 overdue and 1,093 warming; the oldest-due
+value was 4,400.6 seconds. Those state values changed sharply from frame
+27, but the retained alert has no producer or process join that explains
+why. Hourly process and throughput coverage remained incomplete. Picker
+paired 20 of 25 API slots, with 549 initial nonempty outcomes, 16 initial
+errors, three search errors and 16 initial read errors. The watcher began
+frame 29 at 16:10:09Z; no separate read fit the frame-28 post-core
+cadence margin.
+
+A separately authorized, one-shot Planetoid two-file read was attempted
+after frame 29 began. Its unprivileged file open hit a permission boundary,
+so neither archive status file was read and backup destination integrity
+remains unknown. This attempt used the user-authorized SSH host-key bypass;
+the remote host's cryptographic identity was therefore unverified. The
+attempt was not another active monitor probe and made no archive mutation.
