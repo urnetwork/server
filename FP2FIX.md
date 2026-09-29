@@ -2777,3 +2777,13 @@ remained incomplete. Picker observation paired 20 of 25 API slots, with
 filter read error. Bounded watcher children settled by 12:37:29Z, with
 the same watcher PID and ten standing tails. This frame does not repair the
 prior unknown census, prove sustained recovery, or show a deployed release.
+
+The fifteenth scheduled frame still found migration head 731 versus 740.
+PostgreSQL service CPU measured 50.886 of 96 logical cores over 5.02
+seconds, without query attribution. A coherent URL census had 107,767
+eligible providers and zero quota-complete providers, while hourly process
+and throughput coverage remained incomplete. Picker observation paired 20
+of 25 API slots, with 486 initial nonempty outcomes, seven initial errors,
+and six initial plus one filter read error. Bounded watcher children settled
+by 12:53:04Z; the watcher retained its PID and ten standing tails. This
+scoped frame does not establish sustained recovery or a deployed release.
