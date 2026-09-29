@@ -2035,3 +2035,176 @@ nonempty and one empty; direct one nonempty, with one read-initial
 error. This partial process/request observation does not clear native
 IPv6 supply or request failures. Tenth URL and prober cleanup frames
 were still pending.
+
+The tenth URL frame at 01:20:01 UTC still paged: 110,174 eligible,
+zero quota-complete and zero secure-complete, 93,485 due, 110,094
+overdue, 915,417 accepted successes needed and oldest due age about
+16.8 hours. Hourly throughput/process coverage remained incomplete;
+the legacy TLS recovery target still warned. The 01:20:48 prober
+cleanup frame found 857,331 mature children, 857,315 inactive and 16
+active disconnected, all never connected; 135 newer active children
+were outside the mature cohort and no deactivate timestamp was missing.
+Its unused-args WARN remains a current residual, without a per-child
+join to the cache-cancellation mechanism. The changed cohort and oldest
+due age do not establish sustained improvement.
+
+The full final-source monitor normal package passed in 98.931 seconds.
+Full monitor race and vet are running, followed by the disjoint Model and
+Work broad gates.
+
+The repair and diagnosis were committed directly to Server `main` as
+`679d136c`, pulled with no incoming changes and pushed; the worktree
+matched `origin/main`. The post-commit local migration adapter rebuild
+retained executable SHA-256
+`ab1fd25b5ffa42595dd9f75718f70723e853ab14272db7e46a93064716345152`
+and the same 732–740 migration manifest SHA-256
+`2448e0b0242f52665dc3cc9be2d5cd19ad211e2b1539c40696c6a7823942833b`.
+Final-source `go vet ./model ./taskworker/work` and `go vet ./monitor`
+both passed. Main migration head remains 731; no schema or service
+mutation followed this commit.
+
+The full final-source monitor race package passed in 188.160 seconds;
+monitor normal, race and vet are now green. Model bucket zero normal
+(296 tests) and full Work normal started under distinct local PostgreSQL
+and Redis test leases, with one heavy Model bucket at a time. The
+committed root/Model source digest still matches the final manifest.
+
+A separate bounded fixed-label Taskworker URL control at 01:24:21 UTC
+observed all eight processes, 504 series rows, fresh scrapes within
+12.1 seconds, complete five-minute and one-hour ranges and no counter
+resets. The observed hourly successful-report ACK count was about
+53,870 versus at least 275,435 per hour needed for ten successes per
+110,174 eligible providers over four hours. At most 19.6% of that
+required rate is represented by successful ACKs even if every one became
+new accepted history; a commit followed by a lost ACK could add durable
+rows outside this counter. The five-minute sample had about 5,929
+successful and 1,486 error ACKs, 7,431 completed turns and mean turn
+occupancy 16.34 seconds;
+local failures were about 5.22, mostly classified as
+`general_country_unavailable`. ACKs are not a count of newly accepted
+unique provider results, and these aggregates do not establish worker
+capacity or per-provider fairness. They do establish a throughput
+shortfall in acknowledged work independently of the monitor's previously
+incomplete hourly coverage. The exact accepted-history rate, source
+ownership and per-provider fairness still need a durable receipt window.
+
+The full Work normal package on the committed final source then passed
+in 339.217 seconds while Model bucket zero normal ran under a separate
+local test lease. Work race and all full Model partitions remain.
+
+The eleventh active watcher began at the 01:27:35 UTC floor. Its
+01:28:21–24 catalog frame again found migration head 731 against 740
+and the old non-covering reliability parent, with no desired parent
+or attached child indexes across 34 partitions. Edge-3 and edge-4
+still paged for CPU saturation at 01:30:36 UTC: one-minute loads
+183.60/72 and 216.53/72 logical CPUs, five-minute execution ratios
+0.9238 and 0.9358, and zero iowait. Eight enabled Connect processes
+on those hosts again paged; edge-4/g2 peaked at 147.30 GB RSS,
+941,010 goroutines and a 6.473-core five-minute rate. vpn0 node
+metrics were absent and planetoid warned separately. Eleventh
+PostgreSQL CPU, picker and URL results were pending; these host
+signals do not assign the SQL or goroutine cause.
+
+The local desired Main URL configuration declares eight shards with
+64 workers each, a 60-second turn deadline, two tunnel recreations,
+and 134 general destination entries but no country-specific catalogs.
+That explains why `general_country_unavailable` can appear as a local
+classification without establishing a network-latency cause; general
+probes continue. At the measured 16.34-second completed-turn mean,
+512 continuously busy workers would support only about 112,800 turns
+per hour before failures, below the current cohort's roughly 275,435
+needed successes per hour. This is a conditional sizing calculation,
+not proof of effective running worker arguments, occupancy, or safe
+capacity to raise limits. The running configuration and a bounded
+durable receipt-timing sample are the next evidence boundaries.
+
+A plan-gated direct-primary URL receipt read at 01:33:58 UTC used a
+non-executing index plan, then selected only the newest 1,024 accepted
+history rows by measured time. That capped prefix spans 50.916 seconds,
+contains 1,024 distinct providers and all current policy/evidence
+fields, and has 750 successes (73.24%). Among failures, 130 were
+other/unavailable, 127 content, nine TLS authentication, six
+connect/DNS/TLS, and two performance. Encoded mean DNS timing was about
+11.48 seconds among successes and 42.18 seconds among
+other/unavailable. The direct-primary tunnel was closed after the read.
+This is a biased completed-receipt prefix, not an exact fleet insert
+rate or a phase attribution; the timing fields require source-qualified
+stage interpretation before changing retries or worker counts.
+
+The eleventh picker at 01:34:55 UTC still paired only 20/25 API slots:
+five-minute sampled initial outcomes 251 nonempty, zero empty and two
+error; search 37 nonempty and zero empty; one read-initial error.
+This partial sample cannot clear the earlier request-local IPv6 empty
+cohorts. The 01:35:13 URL frame still paged with 110,167 eligible,
+zero quota-complete and zero secure-complete, 91,158 due, 110,089
+overdue, 913,161 accepted successes needed and oldest due age about
+17.1 hours. Hourly process/throughput coverage was incomplete, and
+legacy TLS recovery still warned. The eleventh PostgreSQL CPU frame
+and prober cleanup frame were not yet sealed; their absence here is
+unknown, not a healthy measurement.
+
+Source review qualifies the receipt `dns_ms` field: it spans the
+resolver's first DNS start through a positive IPv4 answer and can
+include up to three private in-tunnel DoH waves plus inter-wave
+jitter. It is not a direct upstream nameserver RTT, and the resolver's
+lookup context deliberately does not carry target HTTP trace phase
+values. Zero or near-zero TLS timing may involve duplicate target
+TLS callbacks; that requires a deterministic control before assigning
+a production phase-cost cause. No timeout or worker limit was changed.
+
+A second plan-gated direct-primary read at 01:37:10 UTC found all eight
+expected `RunOnce` URL shards with matching function/argument/result
+versions. Each current task declared shard count eight, URL limit and
+concurrency 64, per-probe timeout 60 seconds, task maximum 900 seconds,
+idle delay five seconds and two tunnel recreations; no reschedule error
+was recorded. Claim ages were 0.93–7.50 seconds and release times
+292.5–299.1 seconds ahead. Eight distinct sessions each held exactly
+one sampled advisory ownership lock, below the bounded 4,097-lock cap.
+The tunnel closed after the read. This verifies current task arguments
+and one-instant ownership, not process/image provenance, actual inflight
+occupancy or a sustained throughput rate. Earlier duplicate-owner
+watcher frames may represent different instants and remain separate.
+
+The eleventh prober cleanup frame at 01:35:54 UTC still warned: 861,642
+mature children, 861,626 inactive and 16 active disconnected, all
+never connected. Another 876 active children were newer than the
+ten-minute grace. No deactivate timestamp was missing; the oldest
+residual was about 18,935 seconds old. The eleventh PostgreSQL CPU
+signal had no sealed Alert, so its numerical value remains unknown
+here rather than zero or healthy.
+
+The full Work race package on the committed final source passed in
+437.135 seconds while Model bucket zero normal continued in a separate
+fixture lease. Work normal and race are now green on the repaired source;
+the four Model normal and race partitions remain.
+
+A separate local TLS timing regression then found that the custom
+provider tunnel's completed handshake emits two start/done callback
+pairs. The request progress clock overwrote the first start, recording
+zero TLS duration for a synthetic seven-second handshake. Unchanged
+source failed only the completed custom-handshake control; standard
+transport and failed-custom controls passed. A private patch retaining
+the first TLS start/end passed normal and race controls. Source review
+shows this duration feeds the `tls_ms` diagnostic field; provider verdict
+performance gates use written-request TTFB/body measurements instead.
+The Model bucket zero passed in 1,176.298 seconds as a pre-TLS baseline
+only. The tracked correction now retains the first TLS start and end
+under the existing mutex. Its durable real-transport regression passed
+normal and race. Both owning packages,
+`qualityprobe/egresshealth` and `qualityprobe/providertunnel`, passed
+focused normal and race suites; vet for them, Model and Work passed.
+`tls_ms` is diagnostic evidence and is checked for finite/nonnegative
+encoding, so this repair does not itself change provider verdicts or
+quota capacity. Model and Work import the changed package and require
+renewed broad gates on a dependency-complete final source digest.
+
+The twelfth watcher began at the 01:42:35 UTC cadence. Its early
+catalog frame at 01:43:23–28 still found migration head 731 against
+740 and the old non-covering reliability parent, with no desired
+covering parent or child indexes across 34 partitions. At 01:45:48,
+edge-3 and edge-4 again paged for CPU saturation: one-minute loads
+214.34/72 and 211.85/72 logical CPUs, five-minute execution ratios
+0.9324 and 0.9392, zero iowait, and available-memory ratios 0.4805
+and 0.4533. Taskworker DoH dial timeouts also paged at about 11/min.
+These are source-fresh host/transport symptoms, not a process or
+provider verdict; the twelfth FP2 and PostgreSQL frames were pending.

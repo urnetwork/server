@@ -10534,6 +10534,27 @@ and a missing process can hide throughput. This probe does not prove ARIN
 classification, per-country catalog freshness, request-specific FP2 refill,
 or that PostgreSQL returned to its usual CPU band.
 
+Phase timing needs its owning clock. The provider URL resolver's `dns_ms`
+includes its bounded private DoH attempts, retry jitter, and tunnel work while
+resolving the target; it is not an upstream DNS-server RTT. A capped newest
+receipt prefix samples completed work and can miss slow unfinished attempts.
+Do not turn its mean phase durations into fleet throughput or a request-owner
+CPU attribution.
+
+A 2026-09-29 local real-transport control reproduced a TLS diagnostic defect:
+the provider's custom `DialTLSContext` completed and timed the real handshake,
+then `net/http` emitted another start/done pair for its no-op verification of
+the returned `*tls.Conn`. Replacing both timestamps erased the real interval.
+The corrected recorder preserves the first pair. The durable loopback test
+`TestRequestTLSClockSurvivesCompletedCustomHandshake` advances an injected
+clock during the actual handshake and covers completed-custom, ordinary, and
+failed-custom transports under normal and race execution. `tls_ms` is finite,
+nonnegative diagnostic evidence; the URL success decision still uses content,
+request-written TTFB, and body throughput. This repair does not establish lower
+DNS occupancy, change authentication, or recover quota. Near-zero historical
+TLS values are not proof of a fast real handshake; require the corrected
+running artifact and fresh receipts before trusting that phase attribution.
+
 Investigate slot-index query work, oldest-due fairness, private tunnel/DNS/HTTP
 stage occupancy, accepted receipts, catalog compatibility and URL-scoped TLS
 recovery. An empty bounded due response does not prove the eligible fleet is
