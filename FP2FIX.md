@@ -2625,3 +2625,23 @@ the current source. Worker membership and SQL elapsed time do not establish a
 CPU fraction or the emitting service; the deployed modified binaries are
 unresolved. This analysis used retained private evidence without another
 Main read, and the eighth wave has no extra diagnostic scheduled.
+
+The settled eighth watcher frame still had migration head 731 versus 740,
+PostgreSQL service CPU at 39.501 of 96 logical cores over five seconds, and
+zero quota-complete providers among 103,533 in a coherent URL census. Hourly
+URL throughput/process coverage remained incomplete. Picker observations
+paired 20 of 25 API slots, with 488 initial nonempty outcomes and nine
+initial read errors in that subset. The watcher kept the same PID and ten
+standing tails after a same-name user-systemd restart drop-in was attached;
+its persistent boot unit and lingering user are staged, but a live restart
+and boot recovery were not exercised. No extra Main probe was run.
+
+An offline review found no new source defect in the staged 732–740 migration
+path. It does not clear the production apply: the last detailed admission
+preflight is stale, and every concurrent index build in 733–739 needs fresh
+old-snapshot, backup, resource and catalog checks. A caller deadline can
+precede the detached commit's terminal state by up to 30 seconds, so a failed
+call cannot be blindly retried. Migration 740 forces client 5-minute, 1-hour
+and 12-hour observation reanchors; it does not by itself force the seven-day
+network reanchor. The numbered migration review receipt is in the monitor
+ledger; Main remains at 731 and no migration was applied.
