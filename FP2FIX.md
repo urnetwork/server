@@ -3410,13 +3410,16 @@ index build would confound the ongoing capacity/resource comparison.
 The first post-convergence phase diagnostic at 20:21:50Z had 9,856.4
 DNS route waves in a complete five-minute, eight-process window. About
 3,549.6 waves (36.0%) timed out with unready route endpoints, accounting
-for 53,930.7 of 105,274.3 measured DNS route seconds (51.2%). Another
-bounded window at 20:23:20Z classified timeout waves mainly as forming
+for 53,085.8 of 105,274.3 measured DNS route seconds (50.4%). The earlier
+53,930.7-second timeout sum also includes 844.8 seconds classified as a
+changed or ambiguous route. Another bounded window at 20:23:20Z
+classified timeout waves mainly as forming
 (2,227.9) or provider-unresponsive (1,546.1), with 194.4 on active paths;
 all 5,991.3 answer waves were active. Several DNS waves may belong to one
 URL turn, and the windows are not an identity join. These signals place
-substantial time in recurrent private tunnel/endpoint readiness, but do
-not yet establish a fix or an exact lost-success count.
+substantial time before an observed active private route. "Forming" covers
+control registration and evaluation, so these counters do not establish
+a specific fix or an exact lost-success count.
 
 A fresh four-host node-exporter read at 20:24:20Z found CPU execution
 34.5% on edge0, 42.7% on edge1, 91.3% on edge3 and 94.6% on edge4;
@@ -3426,3 +3429,26 @@ point measurements do not attribute the host load to URL probes, but
 they withhold a safe uniform concurrency increase. The proposed first
 64-to-72-per-shard canary and the 2,048-slot target are held while the
 running-stage latency and host placement are diagnosed.
+
+A same-process five-minute 20:25:39Z timing read measured a 17.97-second
+mean inner full pass, including joined tunnel close, against a 20.28-second
+mean URL turn. The roughly 2.31-second difference is an approximation from
+independent Prometheus windows, not exact per-turn subtraction. Most
+observed residence is inside the inner pass, rather than an outer
+publication-only wait. A direct 20:28:04–29Z placement read found two
+Taskworkers per enabled edge: mean URL turns of 15.19/16.96 seconds on
+edge0/1 and 18.20/18.02 seconds on edge3/4. Edge3/4 CPU remained
+92.3%/93.1% with larger Connect RSS and goroutine totals than edge0/1.
+This host association does not prove that Connect load caused each
+Taskworker turn or that relocating shards would improve the private path.
+
+The fixed-label Connect owner read at 20:30:21Z found connected transport
+clients of 22,035/18,021/45,836/56,232 on edge0/1/3/4, respectively.
+Resident-device counts were 29,552/26,788/112,512/180,237. The same
+hosts had 0.846/0.716/2.324/3.475 million Connect goroutines and
+48.4/53.5/284.9/401.8 GB Connect RSS. Thus edge3/4 carry much more
+current client/resident work, though the metric populations differ and
+their source does not identify the ingress-placement cause. Existing
+Taskworker claim admission allows one live URL shard per instance and
+has no host affinity; stopping edge3/4 workers would halve the available
+URL shard owners rather than rebalance them safely.
