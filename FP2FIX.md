@@ -2675,3 +2675,24 @@ state after rollout should be checked first. A separately reviewed bounded
 identity-free live-work and SearchLocal structure diagnostic is an option if
 that still leaves the tail unexplained; it has not been implemented, deployed
 or used against Main.
+
+Post-rollout runtime artifact proof has two separate parts for the reviewed
+48 enabled API, Connect and Taskworker slots: two fresh matching exported
+source-tuple observations per slot, followed by independent bounded reads of
+the running container image and executable bytes on all four enabled hosts.
+No authenticated host-local Docker/process read path has been verified for
+the full host set. Edge0 overlay trust, edge1 noninteractive sudo, edge3
+direct reachability and edge4 authenticated key remain distinct gaps; no
+relay is verified. The offline procedure is sealed in the monitor ledger,
+but the all-slot collector has not been implemented or run. Exported version
+labels alone cannot establish deployed binary identity.
+
+The tenth scheduled watcher frame again found migration head 731 versus 740.
+Its five-second PostgreSQL service sample measured 44.994 of 96 logical
+cores. A coherent current URL census had 103,067 eligible providers and zero
+quota-complete providers; hourly success/process coverage remained
+incomplete. Picker observation paired 20 of 25 API slots, with 432 initial
+nonempty outcomes, nine initial errors, and eight initial plus one filter
+read error in that subset. The eligible cohort changed from the prior frame,
+but the cause is not established. The single watcher kept its PID and ten
+standing tails; no probe or deployment was added.
