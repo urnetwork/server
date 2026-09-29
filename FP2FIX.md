@@ -3335,11 +3335,94 @@ cluster WAL 6.80 MB/s. An exact privileged filesystem metadata read at
 available. The latest source backup remained the September 27 completed
 generation under its Thursday/Sunday schedule, with the next due October
 1; destination integrity and restore remain unverified. These reads did
-not change production. The private phased covering-index operator is
-awaiting current-source local controls and an immediate per-phase resource
-admission. No covering-index DDL has run.
+not change production. The private phased covering-index operator awaits
+an immediate per-phase resource admission. No covering-index DDL has run.
 
 At 19:48:13–16Z, the Connect rollout had 17 new and three old ready
 paths, all 20 pinned paths HTTP 200. The remaining old paths were edge3
 g1/g3 and edge4 g1. Runtime image identity for transparent blocks and
 full Connect convergence remain unproved.
+
+The final pinned Connect path advanced at 20:06:50–53Z: all 20 enabled
+host/block paths returned HTTP 200, the new startup version and ready.
+This completes sampled version convergence, not an immutable running-image
+digest or proof that overlapping old containers have exited. Repeated
+Connect status polling stopped after that result.
+
+The 19:55:47Z scheduled Main URL census had 109,157 eligible providers,
+zero four-hour quota-complete, 109,125 overdue, 881,834 accepted successes
+still needed and oldest due 119,010.2 seconds. At that denominator the
+steady ten-success/four-hour target needs at least 75.80 accepted fleet
+successes per second. The 20:00:51Z complete eight-process Taskworker
+five-minute counter window measured 6,233.6 successful outcome ACKs,
+8,855.9 attempted turns and a 16.85-second mean completed turn. Its ACK
+rate was 20.78/second; ACKs are not an exact count of new durable,
+unique-provider accepted history. A complete post-sampled-Connect window
+at 20:15:19Z had 4,486.5 successful ACKs, 6,372.0 attempts and a
+20.33-second mean turn, or 14.96 ACK successes/second. All eight process
+identities were unchanged; each had a lower rate and longer mean turn,
+while aggregate ACK yield stayed near 70.4%. This cross-window association
+does not attribute the slowdown to the Connect rollout.
+
+A direct 20:18:55Z fixed-cardinality Taskworker gauge read observed eight
+current processes, 487 active full batches, 430 running providers, 12
+queued and 45 finished-waiting. These full-batch gauges and the separate
+completed-turn worker-time equivalents support a nearly occupied configured
+512-lane pool, rather than a broad idle scheduler, but running includes
+setup, URL/DNS and joined tunnel cleanup. The same point read summed
+Connect process CPU at 77.02 core equivalents, RSS at 696.05 GB and
+goroutines at 6.824 million across 20 processes; it does not assign that
+load to URL probes or establish host spare capacity.
+
+The eight-shard URL configuration caps each shard at 64 simultaneous turns.
+The user asked to evaluate 256 per shard, or 2,048 total. Current source
+accepts that geometry, and private exact-256 ownership, old-task retirement,
+refill and credit tests passed normally and under race without Main contact.
+At the 20:00 mean/yield, an ideal fully occupied 2,048 lanes would yield
+about 85.6 successful ACKs/second; at the later 20:15 mean/yield, only
+about 71/second, below the 75.8/second accepted-success target even before
+durability, fairness or overhead. The internal prober transfer-credit floor
+would rise from 2 TiB to 4.5 TiB. No capacity configuration was changed.
+Fresh direct in-flight phase and host/credit/PG headroom remain admission
+checks before even a measured 64-to-72-per-shard canary; a fourfold jump
+is not supported by these observations.
+
+A 20:08:28Z strict, read-only Redis-cluster GET retrieved the most recent
+complete native score publication (source completed 19:58:51Z, published
+20:05:26Z). Deduplicated public target membership was 91,658 quality,
+94,119 speed and 109,114 online; these bucket memberships may overlap.
+Eight-hour selected-policy outcome denominator bands were quality
+0/40/57/1,445/90,116/0 and speed 0/41/60/1,508/92,510/0 for bands
+zero/one/two/three-to-four/five-to-nine/ten-plus respectively. They are
+neither four-hour successful-probe quotas nor a live recomputation.
+
+The private phased covering-index operator was source-tested on current
+Server head in a local PostgreSQL 18 fixture. Its initial wrapper paired
+equal transaction and statement timeouts, which disables the intended
+statement timer; a local causal control reproduced this. The corrected
+private candidate sets transaction timeout to zero while retaining a
+bounded statement timeout and outer context, and rejects wrong-kind index
+names before touching a child. Its focused normal/race, source-bound
+timeout, vet and build gates all passed. The prepared empty-future-partition
+pilot remains unapplied: it would not improve current URL turns, and an
+index build would confound the ongoing capacity/resource comparison.
+
+The first post-convergence phase diagnostic at 20:21:50Z had 9,856.4
+DNS route waves in a complete five-minute, eight-process window. About
+3,549.6 waves (36.0%) timed out with unready route endpoints, accounting
+for 53,930.7 of 105,274.3 measured DNS route seconds (51.2%). Another
+bounded window at 20:23:20Z classified timeout waves mainly as forming
+(2,227.9) or provider-unresponsive (1,546.1), with 194.4 on active paths;
+all 5,991.3 answer waves were active. Several DNS waves may belong to one
+URL turn, and the windows are not an identity join. These signals place
+substantial time in recurrent private tunnel/endpoint readiness, but do
+not yet establish a fix or an exact lost-success count.
+
+A fresh four-host node-exporter read at 20:24:20Z found CPU execution
+34.5% on edge0, 42.7% on edge1, 91.3% on edge3 and 94.6% on edge4;
+edge3/4 one-minute loads were 102.6/223.9 against 72 logical CPUs each.
+Memory available was 930.3/669.1/664.7/536.4 GB respectively. These
+point measurements do not attribute the host load to URL probes, but
+they withhold a safe uniform concurrency increase. The proposed first
+64-to-72-per-shard canary and the 2,048-slot target are held while the
+running-stage latency and host placement are diagnosed.
