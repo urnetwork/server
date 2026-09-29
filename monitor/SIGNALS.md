@@ -5681,6 +5681,34 @@ the successful control without changing Redis. An absent native-source schema
 metric on the observed API processes remains instrumentation/deployment
 uncertainty, not zero native-source events.
 
+Native-reader activation boundary (2026-09-29 source correction):
+`provider.yml` → `egress_index.native_reader_enabled` defaults to false;
+missing, unreadable or malformed configuration keeps union-cache reads. A
+request captures the cached setting once for both primary and alternate loads;
+refreshing it between those loads cannot mix activation states. An explicit
+true enables the existing native-page, partial-source and online-fallback
+behavior. Forced-minimum requests still use their legacy cache path. The
+unlabeled `urnetwork_findproviders2_native_reader_enabled` gauge reports the
+same effective local-config snapshot (at most one minute old), including on
+quiet API processes. It performs no provider-storage read. Gauge absence is
+unknown capability/visibility, not disabled; gauge one is configured activation,
+not proof of complete publication, native supply or successful requests. An
+in-flight request may finish with its prior snapshot after the gauge changes.
+Existing native-source outcome counters can also describe bucket membership
+from compatibility union reads while the activation gauge is zero.
+
+Roll out the receipt-capable API with this setting false, converge its writers,
+then roll out completion-capable Taskworkers and attest complete, fresh native
+target/facet manifests before separately activating API readers. Keep the
+completion-priority epoch disabled until writer convergence and a full four-hour
+delivered receipt window are independently proven. Do not infer that window
+from an old epoch or infer native activation from the diagnostic schema gauge.
+The flag adds no migration or detector-threshold change. Local causal controls
+cover missing/false/malformed settings, explicit true, both config transitions
+after a real primary read, forced minimum, both rank modes, unchanged online
+availability and one fixed metric cell. They establish the rollout boundary,
+not deployment or production recovery.
+
 At 00:15:20Z a separate indexed prefix control limited discovery to the first
 4,096 valid, connected client IDs before filtering the US target. Its 3,136
 target rows contained 3,048 selectable top-level candidates and zero stored
@@ -8618,6 +8646,37 @@ and sampled IPv4 DoH dial outcomes to discriminate transport silence from
 authoritative DNS negatives, then inspect auth/provide-registration and
 return-contract controls; neither signal alone convicts a provider.
 
+The same observer also exposes
+`urnetwork_egress_probe_dns_route_waves_total{result,route}` (35 cells) and
+`urnetwork_egress_probe_dns_route_seconds_total{result,route,phase}` (105 cells).
+These use the five existing result labels. `route` is `unknown`, `stable_route`,
+`current_route_admitted`, `unready_endpoints`, `changed_or_ambiguous`, `lost`, or
+`closed`; `phase` is `before_current_admission`, `after_current_admission`, or
+`unattributed`. All zero cells are exported. An absent family is unavailable
+instrumentation. The new counters retain no identity or endpoint labels and
+add no logs, callbacks, polling, shared cache or routing/admission behavior.
+
+Each wave brackets its own `QueryResult` with a monotonic clock and synchronous
+same-tunnel monitor snapshots. A stable single route requires the same local
+client and unchanged nonzero `Added.EventTime` at both endpoints, with admission
+no later than wave start. A newly observed single route whose admission clock
+falls inside the wave permits a split around that **current route's** admission.
+It does not prove that no earlier transient route existed. Two unready endpoints
+likewise do not prove uninterrupted unavailability between snapshots. Changed
+or multiple routes, missing/contradictory clocks, loss and closure leave time
+unattributed. Metadata-only updates preserve admission time. The deterministic
+warm, cold-to-ready, never-ready, transient, lost/closed and ambiguous controls
+preserve the resolver's outcome, retry and target-socket admission behavior.
+
+After-admission time is still private-tunnel DNS/cache/transport work, including
+scheduling, queueing and provider forwarding; it is not pure DoH wire latency.
+The wave clock excludes retry jitter and target TCP/TLS/HTTP work, while the
+outer request's `dns_ms` includes the whole resolution chain. Independent atomic
+count/time cells require the same complete process window for comparisons.
+Deployment and fresh paired data are needed to discriminate setup from work
+with an admitted route; source tests do not establish Main's latency mechanism,
+provider blame, lower probe occupancy or recovered URL quota.
+
 The 2026-09-29 00:37Z source-fresh eight-Taskworker control found about 5,774
 `active/answer` waves and 1,874 `active/timeout` waves over five minutes, plus
 413 `forming/timeout` and 952 `provider_unresponsive/timeout`, with no resets.
@@ -10458,8 +10517,20 @@ The capable producer exposes `urnetwork_url_probe_capability=1`, an explicit
 `urnetwork_url_probe_configured_shards`, and one
 `urnetwork_url_probe_shard_observed_timestamp_seconds{shard}` for each actual
 task owner. Require exactly one fresh owner for every configured shard.
-Heartbeat proves ownership, not completed probes. The shard-zero owner alone
-periodically produces the global census:
+Heartbeat proves ownership, not completed probes.
+A completed URL pass must stop and join its heartbeat refresher, then publish
+zero for its shard if no other invocation in that process still owns it. A
+nonzero final timestamp left by a completed pass can remain fresh for the
+180-second owner window and make a later pass look like a second shard owner;
+that makes the coherent global census unobservable. A local overlap must keep
+the timestamp until its last active invocation exits. Zero publication is a
+normal-exit ownership signal, not proof of completion, successful measurement,
+or a durable fleet lease: a process crash may skip it, and a scrape may miss
+the zero before the series disappears. Continue to require a unique fresh owner
+and an independently coherent census; do not convert ambiguous ownership into
+a zero quota or carry forward a previous census as a current observation.
+
+The shard-zero owner alone periodically produces the global census:
 
 - `urnetwork_url_probe_fleet{state}` contains `eligible`, `due`, `overdue`,
   `warming`, `uninitialized`, `successes_needed`, `quota_complete`,
@@ -10502,14 +10573,17 @@ URLs, task completions, legacy full runs, or successful API submissions that
 were rejected as measurements.
 
 The worker counter records acknowledged outcomes, not an authoritative count
-of newly inserted history rows: an idempotent replay also receives HTTP 200.
-Treat its rate as an upper bound on unique accepted throughput. A low
-acknowledged rate proves insufficient capacity under the stated source
-conditions; a high rate cannot establish quota recovery. During rollout,
-corroborate it with selected-policy unique history counts over the same fixed
-measurement interval and the per-provider census. `measured_at` is a
-measurement timestamp, not an arrival timestamp, and changing intervals or
-retention can invalidate that comparison. The existing synthetic
+of newly inserted history rows: an idempotent replay also receives HTTP 200,
+and a lost acknowledgement can follow a committed insert. It is an upper bound
+on unique inserts **among acknowledged submissions**, not an unconditional
+ceiling on all durable accepted history. A low rate identifies an observed
+acknowledged-capacity shortfall under the stated source conditions; investigate
+submission/acknowledgement loss before assigning an exact durable insertion
+rate. Neither a high nor low acknowledgement rate establishes quota recovery.
+During rollout, corroborate it with selected-policy unique history counts over
+the same fixed measurement interval and the per-provider census. `measured_at`
+is a measurement timestamp, not an arrival timestamp, and changing intervals
+or retention can invalidate that comparison. The existing synthetic
 `TestUrlProbeCoverageHighAggregateRateCannotHideStarvedProviders` preserves
 the coverage PAGE even when acknowledged throughput is high.
 
@@ -10540,6 +10614,19 @@ resolving the target; it is not an upstream DNS-server RTT. A capped newest
 receipt prefix samples completed work and can miss slow unfinished attempts.
 Do not turn its mean phase durations into fleet throughput or a request-owner
 CPU attribution.
+
+A bounded 2026-09-29 01:58Z first-byte log reducer retained 512 completed
+records from six streams. Its 340 successful records had mean DNS time 18.284s
+and mean remaining TCP/TLS/HTTP-first-byte time 1.115s; DNS accounted for 94.25%
+of their summed first-byte duration. This is a biased capped completion sample,
+not a fleet rate or an accepted-history join. A separate 02:06Z five-minute
+control across 20 enabled API slots measured `probe_claimed` request mean 0.533s
+versus `unmarked` 3.608s. The marker is caller annotation, requests are not probe
+turns, and provider-side return-path calls can be unmarked. Different windows
+and absent request joins prevent subtracting those means or assigning generic
+API residence to each DNS wave. The route-admission counters in §2.19 provide
+the next measured boundary; they do not themselves fix throughput or justify
+more concurrent probes on saturated hosts.
 
 A 2026-09-29 local real-transport control reproduced a TLS diagnostic defect:
 the provider's custom `DialTLSContext` completed and timed the real handshake,

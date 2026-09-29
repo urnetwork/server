@@ -140,6 +140,7 @@ func TestNativeCensusDistinguishesZeroUnknownAndFreshness(t *testing.T) {
 // bucket, even when that union begins with thousands of online-only rows.
 func TestNativeFindProvidersUsesOtherNativesBeforeOnline(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		nativeTestEnableReader(t)
 		location := server.NewId()
 		scores := map[ipFamilyFacet][]*ClientScore{}
 		wanted := map[server.Id]int{}
@@ -180,6 +181,7 @@ func TestNativeFindProvidersUsesOtherNativesBeforeOnline(t *testing.T) {
 // uses online fallback without pretending that native supply is exhausted.
 func TestNativeFindProvidersUnavailableOtherSourceKeepsPrimary(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		nativeTestEnableReader(t)
 		location := server.NewId()
 		scores := map[ipFamilyFacet][]*ClientScore{}
 		for range 5 {

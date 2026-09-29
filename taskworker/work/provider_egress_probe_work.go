@@ -1821,7 +1821,7 @@ func runProviderEgressProbe(
 		runFull:      fleetprobe.RunUrlProbes,
 		refreshFleet: providerUrlProbeFleetHeartbeat(args),
 	}
-	result, err := runWithProviderEgressFleetHeartbeat(ctx, time.Minute,
+	result, err := runWithProviderUrlProbeFleetHeartbeat(ctx, args,
 		pass.refreshFleet, func() (*ProviderEgressProbeResult, error) { return pass.run(ctx, args) })
 	outcome := "ok"
 	if err != nil {

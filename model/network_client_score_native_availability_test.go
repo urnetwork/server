@@ -82,6 +82,7 @@ func nativeTestChangeSchema(t testing.TB, location server.Id, mode RankMode, sta
 // cannot. A full 20-provider response must still expose that difference.
 func TestNativeFindProvidersUnavailableSourcesPreserveAvailability(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		nativeTestEnableReader(t)
 		for _, requested := range []RankMode{RankModeQuality, RankModeSpeed} {
 			alternate, _ := backfillRankMode(requested)
 			for _, testCase := range []struct {
@@ -173,6 +174,7 @@ func TestNativeFindProvidersUnavailableSourcesPreserveAvailability(t *testing.T)
 // verified pages when a sibling is damaged; corrupted rows never enter output.
 func TestNativeFindProvidersPartialSourceKeepsValidatedPages(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		nativeTestEnableReader(t)
 		for _, failure := range []string{"page", "target"} {
 			location := server.NewId()
 			scores := map[ipFamilyFacet][]*ClientScore{}
@@ -230,6 +232,7 @@ func TestNativeFindProvidersPartialSourceKeepsValidatedPages(t *testing.T) {
 // own backend errors and caller cancellation into a successful fallback result.
 func TestNativeFindProvidersDegradedFallbackKeepsFiltersAndErrors(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		nativeTestEnableReader(t)
 		location := server.NewId()
 		allowed := map[server.Id]bool{}
 		scores := map[ipFamilyFacet][]*ClientScore{}

@@ -4292,15 +4292,15 @@ func (self *Resident) AddForward() (
 	closeForward func(),
 	returnErr error,
 ) {
-	return self.addForwardWithReceive(func(message []byte) bool {
-		return self.client.ForwardWithTimeout(message, self.exchange.settings.WriteTimeout)
+	return self.addForwardWithReceive(func(ctx context.Context, message []byte) bool {
+		return self.client.ForwardWithTimeout(message, self.exchange.settings.WriteTimeout, connect.Ctx(ctx))
 	})
 }
 
 // addForwardWithReceive creates the accept-side forward queue. Tests provide
 // a controlled receiver to verify teardown while a delivery is in progress.
 func (self *Resident) addForwardWithReceive(
-	receive func(message []byte) bool,
+	receive func(context.Context, []byte) bool,
 ) (
 	forward chan []byte,
 	closeForward func(),
@@ -4324,7 +4324,7 @@ func (self *Resident) addForwardWithReceive(
 				if !ok {
 					return
 				}
-				if !receive(message) {
+				if !receive(forwardCtx, message) {
 					forwardReceiveDroppedCounter.Inc()
 					if glog.V(1) {
 						glog.Infof("[rf]drop receive full %s\n", self.clientId)

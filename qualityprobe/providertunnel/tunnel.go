@@ -484,9 +484,9 @@ func (self *Tunnel) HttpClientForHosts(timeout time.Duration, extraHosts []strin
 		query:        self.tun.DohCache().QueryResult,
 		dial:         self.tun.DialResolvedContext,
 		observations: self.dnsObservations,
-		pathState: func() dnsPathState {
+		routeState: func() dnsRouteSnapshot {
 			window, providers := self.multiClient.Monitor().Events()
-			return dnsPathFromMonitor(self.lost, window, providers)
+			return dnsRouteFromMonitor(self.lost, window, providers)
 		},
 	}
 	client := httpClientOverDialerWithResolver(self.tun.DialContext, resolver, self.pins, extraHosts, timeout)

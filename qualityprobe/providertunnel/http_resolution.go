@@ -19,6 +19,7 @@ type providerUrlResolver struct {
 	dial         func(context.Context, string, string, []netip.Addr) (net.Conn, error)
 	observations *DnsObservations
 	pathState    func() dnsPathState
+	routeState   func() dnsRouteSnapshot
 }
 
 // Retries resolver failures before attempting a socket. All attempts share the
@@ -60,10 +61,24 @@ func (self *providerUrlResolver) dialContext(ctx context.Context, network, addre
 		if ctx.Err() != nil {
 			cancel()
 		}
+		var waveStart, waveEnd time.Time
+		var before, after dnsRouteSnapshot
+		if self.observations != nil {
+			if self.routeState != nil {
+				before = self.routeState()
+			}
+			waveStart = time.Now()
+		}
 		addrs, authoritative = self.query(lookupCtx, "A", host)
 		lookupErr := lookupCtx.Err()
+		if self.observations != nil {
+			waveEnd = time.Now()
+		}
 		stop()
 		cancel()
+		if self.observations != nil && self.routeState != nil {
+			after = self.routeState()
+		}
 		ipv4 := make([]netip.Addr, 0, len(addrs))
 		for _, addr := range addrs {
 			if addr.Unmap().Is4() {
@@ -84,10 +99,13 @@ func (self *providerUrlResolver) dialContext(ctx context.Context, network, addre
 				result = dnsTimeout
 			}
 			path := dnsPathUnknown
-			if self.pathState != nil {
+			if self.routeState != nil {
+				path = after.path
+			} else if self.pathState != nil {
 				path = self.pathState()
 			}
 			self.observations.record(result, path)
+			self.observations.recordRouteTiming(result, waveStart, waveEnd, before, after)
 		}
 		if len(addrs) != 0 || authoritative {
 			break
