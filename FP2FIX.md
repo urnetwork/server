@@ -3314,3 +3314,32 @@ was not requested. Both comparison runs cleaned up their temporary
 databases and closed the tunnel. This does not install the separate
 partitioned reliability covering index, which is owned by the explicit
 model maintenance upgrade rather than numbered migrations or schema audit.
+
+A bounded direct-primary read at 19:47:03Z confirmed that the desired
+`client_reliability_valid_bnch_net_client` parent is absent and no
+partition has a standalone covering child. The valid legacy parent still
+has 34 attached children. The 34 reliability partitions have estimated
+3.91 billion rows, 695.5 GiB of heap and 409.2 GiB of existing indexes;
+the three future partitions dated September 30 through October 2 are
+currently empty. This is a model-maintained physical index gap, not a
+missing numbered migration. All four sampled window markers carried
+observation and degraded-classification tokens. There were no active
+index builds or lock waiters; one autovacuum worker held a roughly
+54-minute snapshot without a target-relation lock. These are point-in-time
+observations, not admission for a large concurrent build.
+
+The fresh 19:50:33Z resource window measured PostgreSQL at 34.20 of 96
+logical cores, PGDATA device busy 97.19%, device writes 57.8 MB/s, and
+cluster WAL 6.80 MB/s. An exact privileged filesystem metadata read at
+19:51:07Z found PGDATA and `pg_wal` on the same filesystem with 976.16 GB
+available. The latest source backup remained the September 27 completed
+generation under its Thursday/Sunday schedule, with the next due October
+1; destination integrity and restore remain unverified. These reads did
+not change production. The private phased covering-index operator is
+awaiting current-source local controls and an immediate per-phase resource
+admission. No covering-index DDL has run.
+
+At 19:48:13–16Z, the Connect rollout had 17 new and three old ready
+paths, all 20 pinned paths HTTP 200. The remaining old paths were edge3
+g1/g3 and edge4 g1. Runtime image identity for transparent blocks and
+full Connect convergence remain unproved.
