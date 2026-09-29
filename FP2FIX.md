@@ -2828,3 +2828,30 @@ remained incomplete. Picker observation paired 20 of 25 API slots, with
 filter read errors. Bounded watcher children settled by 13:39:44Z; the
 watcher retained its PID and ten standing tails. This frame does not show
 sustained recovery or a deployed release.
+
+Fresh final-source Work normal and race gates both passed under the serial
+9 GiB cap: each reported 451 passing runs, zero failures, and one optional
+`TestDeriveLocationsAtAFractionOfTheTarget` skip; the race run reported no
+race warning. All 757 compiled first-party input files still matched the
+manifest after both modes. Work imports the changed native-reader Model
+production files, so an earlier broad Work receipt could not be reused;
+the later proxy-client Model test fixture is outside Work's compiled inputs.
+Taskworker CLI and the other owning package gates remain separate.
+
+The final-source Taskworker package passed all 19 tests in both normal and
+race modes with no skip, failure or race warning. Its CLI built into a
+private local binary, and owning vet passed with empty output. All 698
+compiled first-party input files still matched the manifest after these
+serial gates. The binary has not been packaged into an image or deployed;
+Server Connect, Monitor, Connect module and Main rollout remain separate.
+
+The nineteenth recovery watcher frame began at 13:40:09Z and settled before
+the next scheduled frame at 13:55:09Z. Main migration remained 731 versus
+required 740. A five-second PostgreSQL sample used 39.511 of 96 cores,
+without query or service ownership attribution. The coherent URL census at
+13:50:17Z found 112,039 eligible providers and zero quota-complete providers;
+hourly process and throughput coverage remained incomplete. Picker observation
+paired 20 of 25 API slots, with 496 initial nonempty outcomes, nine initial
+errors, eight initial read errors and one filter read error. The same watcher
+PID and ten standing tails persisted. This scoped frame is neither a release
+verification nor evidence of sustained recovery.
