@@ -18,6 +18,12 @@ create-only file after full offline verification. `verify-collection` replays
 that file offline. Both retain unapproved node/mapping status and unknown actual
 fees; these added commands do not change original custody or operator databases.
 
+The offline [`verify-finality` command](NATIVE-FINALITY.md) joins that exact
+collection to GRANDPA weighted certificates, scheduled authority handoffs and
+the native Frontier digest relative to a separately pinned checkpoint. It keeps
+checkpoint, genesis and runtime approval explicitly absent and actual fees null.
+It adds no signing, RPC, database or custody mutation to verification.
+
 The incident motivating this path was a continuation collector that had 226 of
 230 database signatures. Four original signatures needed manual restoration.
 The live account reconciler is deliberately status-filtered and cannot serve
