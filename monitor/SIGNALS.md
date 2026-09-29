@@ -1943,6 +1943,19 @@ Prove the emitting artifact and inspect preserved disputed reports/reservations;
 do not bypass the escrow guard, infer terminal progress from raw close counts,
 or connect the error to a full-probe pass without a same-attempt discriminator.
 
+The 2026-09-29 00:52Z bounded Taskworker Loki control confirmed that error
+class again: 64 structured records in a capped 128-record slice contained the
+ForceClose frame and exact escrow-insufficiency `errors.errorString`. A
+separate batch-only query found the same hashed container stream reporting
+25,000 terminal verified closes, 129 unresolved accounting rejections, zero
+quarantines, and a 2,936ms retry delay about 0.25s later. Positive cleanup
+progress coexists with the accounting failure; the full-batch retry band uses
+verified progress, not rejected rows. The cap, duplicate diagnostics and Loki
+visibility gaps prevent a unique-contract count or negative inference. A
+container-stream match does not independently attest a PID/image or attribute
+database CPU. Preserve the accounting rejection and progress as separate facts;
+do not fund, bypass, or quarantine from log counts alone.
+
 The 2026-09-23 Main Taskworker sample also exposed a versioned-root
 attribution false positive: `server/v2026.HandleError` was counted as the
 owner because wrapper recognition handled only `server.HandleError`. The
@@ -7283,6 +7296,30 @@ origin waits, request resolution and the five unobserved API slots open.
 Do not remove authoritative fallback or broaden waits from this aggregate;
 reconcile the exact failure cohorts and source-matched SQL work first.
 
+At 2026-09-29 00:32Z the fixed joint detail reconciled to about 916,024
+original non-companion failures over five minutes on the 20 observed API
+processes. About 93.26% were public stream fallbacks from active top-level
+non-prober sources to active derived **egress-prober destinations**; only
+about two failures had originally requested a companion. Most of that prober
+destination cohort omitted `sender_role`, which proves no producer identity
+or recovery-code ancestry. This narrows the measured owner boundary without
+joining a request to a client, proving a retry defect, or assigning CPU.
+
+The 00:37Z Taskworker control found successful internal mint and retirement
+calls with zero retirement errors/timeouts/cancellations on all eight observed
+processes. Retirement success follows the model's deactivation transaction;
+the counter cannot observe a transport/client/OOB drain that never reaches
+that call. A plan-gated oldest/newest 128-client sample at 00:48Z found 127 old
+active derived prober clients without connected rows, with median auth age
+24.90 days, alongside newly created clients without connections yet. Current
+source and the reported Taskworker base both specify a 30-day `auth_time`
+retention window for disconnected children; the modified binary's effective
+delta remains unknown. Those old rows predate all Taskworker starts recorded
+in the 00:21Z witness. They are retained residue, not proof that the idle reaper
+or current retirement failed. The prefixes are biased and not a population
+census or a join to the failing-request cohort. Do not shorten retention, skip
+cleanup joins, or broaden origin waits from these aggregates.
+
 Retain an immediate lookup, a fast first retry, event/ack-triggered rechecks,
 bounded timed fallback, and a final authoritative lookup at the existing
 three-second deadline. An event publisher runs only after a successful
@@ -8580,6 +8617,18 @@ DNS flow. Compare same-generation Connect `tun/address` resolver outcomes
 and sampled IPv4 DoH dial outcomes to discriminate transport silence from
 authoritative DNS negatives, then inspect auth/provide-registration and
 return-contract controls; neither signal alone convicts a provider.
+
+The 2026-09-29 00:37Z source-fresh eight-Taskworker control found about 5,774
+`active/answer` waves and 1,874 `active/timeout` waves over five minutes, plus
+413 `forming/timeout` and 952 `provider_unresponsive/timeout`, with no resets.
+This establishes logical DNS timeouts alongside a positive answer control;
+individual racing DoH dials alone could not establish that boundary. An
+`active` snapshot still proves route admission rather than successful return
+traffic. Successful internal credential retirement in the same aggregate
+window neither joins a particular wave nor proves every earlier cleanup
+owner terminated. Preserve missing request/process joins and provider
+attribution as unknown; this control does not authorize off-tunnel DNS,
+larger waits, or a provider verdict.
 
 `urnetwork_egress_probe_auth_requests_total{phase,result}` is the opt-in
 control-plane discriminator for those probe tunnels. It exports all 36 fixed

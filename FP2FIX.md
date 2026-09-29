@@ -1720,6 +1720,170 @@ parent across 34 partitions, no desired attached children, and migration
 head 731 against required 740. Other seventh-wave results were pending
 at this checkpoint; no schema mutation was observed.
 
+The seventh edge/runtime frame at 00:29:52–00:30:02 UTC paged on both
+edge-3 and edge-4 CPU saturation: edge-3 load-1 194.62/72 logical CPUs
+(2.703 normalized), five-minute execution ratio 0.9577; edge-4 load-1
+232.28/72 (3.226 normalized), execution ratio 0.9127. Both reported
+zero iowait. Eight enabled Connect processes on those hosts still paged;
+edge-4/g2 reached 153.88 GB RSS, 1,014,398 goroutines and a 6.589-core
+five-minute rate. These are active runtime problems, not proof of a
+particular callsite, leak slope or safe hard cap. The missing vpn0 and
+planetoid node series are separate unknowns.
+
+The seventh PostgreSQL CPU signal at 00:32:05 UTC remained high at
+48.718 core-equivalents of 96 (50.75%) over 5.03 seconds. It is another
+short load point, not statement or service CPU attribution.
+
+A fixed-label API failure cohort at 00:32:37 UTC narrowed the repeated
+fallback work. Across 20 processes with no counter resets, five-minute
+missing-origin increases were about 916,024 for originally noncompanion
+requests and only 2.09 for requested companions. Of the noncompanion
+failures, about 854,275 (93.26%) were `stream_fallback` on a public
+relationship from active-top/other source to active-derived
+`egress_prober` destination; about 852,381 carried absent sender role
+and 1,893 client sender role. The dominant measured work therefore targets
+durable prober-owned derived clients, rather than ordinary requested-
+companion cold starts. This is outcome/ownership attribution, not CPU
+share or proof of a particular deployed Taskworker artifact. Prober
+teardown and origin ownership are the next source boundary.
+
+The seventh picker/URL frame at 00:34:02–23 UTC still paired only 20/25
+API slots. Its five-minute sampled picker outcomes were 209 initial
+nonempty/ten error, 29 search nonempty, no direct result and no sampled
+empty, with nine read-initial and one read-filters error; this partial
+sample cannot clear the earlier request-local IPv6 empties. The URL
+source did return a fresh DB cohort: 111,319 eligible, zero quota-complete
+and zero secure-complete, 91,659 due, 110,109 overdue, 1,210 warming,
+none uninitialized and 933,919 accepted successes still needed. Security
+pending was 11 and unknown target seven; oldest due age was about 6,574.8
+seconds. The hourly success range/process coverage was still incomplete,
+and legacy TLS recovery lacked a trustworthy target. The changed oldest-
+due value alone cannot establish quota or throughput recovery; the cohort
+still shows a severe completion deficit.
+
+Source comparison adds a guard against an easy but unsupported fix: the
+serving clean API revision already has active-destination checks,
+`ContractError_Reliability` for missing origins and a 500 ms event-assisted
+fallback. Merely redeploying API cannot be assumed to repair the measured
+active-derived return failures. About 99.78% of the prober-target failure
+cohort carried absent sender role; that is capability/producer evidence,
+not a device or version identity. Provider-return source-gate adoption,
+prober retirement and control outcomes need independent checks before
+assigning an old-client or teardown cause.
+
+A bounded Taskworker owner control at 00:37:58 UTC saw all eight processes
+with initialized counters and no resets. Over five minutes, internal
+credential mint completed about 11,225 times (9.41 canceled), and retire
+completed about 11,650 times with zero measured error, timeout or
+cancellation. This rejects aggregate retirement-call failure as the
+measured current explanation for the API fallback cohort; it is not a
+per-derived-client lifecycle join. Separate owned DNS waves had about
+5,774 answers and one authoritative empty result, but active-path
+timeouts remained about 1,874, forming timeouts 413 and provider-
+unresponsive 952, with canceled/unanswered zero. These are completed
+logical DNS waves, not raw DoH dial lines or final provider verdicts.
+
+The source lifecycle trace qualifies that result: internal retire=ok follows
+the transaction that marks the model client inactive, but the retirement
+metric begins only once removal is reached. Earlier transport, client and
+out-of-band joins can retain an active derived child without incrementing
+retire failures. A read-only, plan-gated comparison of the oldest/newest
+128 active prober-network clients is prepared with at most nine connection
+rows and keyed handler reads per sampled client under a three-second
+deadline. It will emit aggregates only. No cleanup or wait change is
+justified before this ownership boundary is measured.
+
+The plan-approved direct-primary read at 00:48:52 UTC sampled the oldest
+and newest 128 active clients in the singleton durable prober network.
+Among the oldest, 127 were derived and older than a day (median create
+age about 24.90 days, maximum 31.29 days); none of those 127 had a
+connected row or fresh handler. The newest 128 were all derived, median
+age 2.34 seconds and oldest 2.81 seconds, also not yet connected in a
+normal setup-in-progress control. This proves stale active derived objects
+coexist with fresh creation, but the biased prefixes are not a population
+census, leak rate or join to failing API requests. Some oldest residue
+may predate the current cleanup artifact. Idle reaper and deployed-base
+cleanup timing remain to be checked; no manual retirement was performed.
+
+Source and the running Taskworker base clarify retention: disconnected
+derived clients remain active until `auth_time` is 30 days old; the
+top-level idle marker is also 30 days, while connection history is eight
+hours. The sampled derived clients' median auth age of about 24.90 days
+is within that intended window, so the prefix is **not** proof of reaper
+failure. The oldest sampled maximum of 31.29 days includes a non-derived
+parent and cannot be assigned to a derived child. All eight observed
+Taskworker processes started on September 28 around 09:25–09:27 UTC,
+after the old residue began. Old retained rows and recent successful
+retire calls can therefore coexist correctly. A small negative age on
+the newest sample reflects transaction-start versus later visibility,
+not proven clock skew. Exact request-to-child linkage and pre-removal
+worker ownership remain unknown; no cleanup patch is justified.
+
+The first full Work normal run ended red in 288.165 seconds on two tests
+that both panicked because the local test fixture lacked
+`arindb/arin.mmdb`: `TestDeriveLocationsRemovesTheRowOfANodeWithNoPings`
+and `TestRemoveExpiredPingsFallsBackTheReadPath`. No product assertion
+failure was identified in that run. The private fixture is being repaired
+from the versioned Config source, then those tests and full Work normal
+will be rerun before the race gates.
+
+The two focused Work controls then passed with the private ARIN fixture,
+and the full Work normal rerun passed in 270.518 seconds. All four full
+Model normal partitions and Work normal are now green on the unchanged
+source; Model/Work race gates remain.
+
+The eighth PostgreSQL sample at 00:47:13 UTC remained high at 46.406 of
+96 logical-core equivalents (48.34%) over 5.02 seconds. Its picker frame
+at 00:49:17 still paired only 20/25 API processes and warned on read
+errors: 186 sampled initial nonempty/five error, 18 search nonempty/four
+empty, one direct nonempty, and five read-initial errors. This is partial
+process/request evidence and does not clear the IPv6 empty cohorts. The
+eighth URL result was still pending at that time.
+
+The completed eighth URL frame at 00:49:37 UTC paged with a fresh DB
+cohort of 110,206 eligible providers, zero quota-complete and zero
+secure-complete, 91,153 due, 110,133 overdue, 73 warming, 19
+uninitialized and 921,963 accepted successes still needed. Security
+pending was 10, unknown target seven, and oldest due age about 65,149
+seconds (18.1 hours). Throughput/process coverage stayed incomplete;
+shards 2, 3, 5 and 7 each reported two owners, and the legacy TLS
+recovery target remained untrustworthy. This cohort is a current
+completion deficit, not a measured fleet throughput rate.
+
+A bounded read-only Taskworker Loki discriminator at 00:52:40 UTC hit its
+128-record cap in about 236 ms of one hashed container stream. Of the
+matching lines, 64 parsed structured records contained
+`ForceCloseOpenContractIds` and exact escrow-insufficiency `errorString`
+fields; 64 others were unparsed. This confirms a real accounting
+rejection class in that stream, not a PostgreSQL SQLSTATE or process
+crash. The cap reached before a completed-batch control, so its absence
+cannot prove no progress. The 64 lines are not 64 unique contracts, and
+the exact process/image join remains unknown. No raw logs were retained.
+
+A separate bounded completed-batch control at 00:53:54 UTC found one
+record from the same hashed container stream, about 0.252 seconds after
+the sampled error burst. It reported 25,000 terminal-verified contracts,
+129 unresolved accounting items, zero quarantined accounting items and
+2,936 ms retry delay. Verified progress and unresolved accounting thus
+coexist in that batch; the stream is not totally stalled. This does not
+count unique failed contracts, identify the exact PID/image or assign
+CPU share. Current source intentionally uses a two-to-four-second retry
+when verified count is at least 6,250; these 129 rejections did not
+trigger an empty-batch fast retry. No financial mutation or retry-policy
+change is justified by this bounded control.
+
+The fourth and final disjoint full Model normal partition passed in
+954.992 seconds. All four normal Model partitions now pass on the final
+source digest. Work package normal and Model/Work race gates remain.
+
+The eighth watcher at 00:44:54–00:45:05 UTC still paged on edge-3 CPU
+saturation (load-1 198.82/72 CPUs, five-minute execution ratio 0.9631,
+zero iowait) and eight enabled edge-3/edge-4 Connect processes. The
+peak affected edge-4/g2 process had 144.37 GB RSS, 934,615 goroutines
+and a 6.410-core five-minute rate. This frame did not establish
+resolution on any unpaged host; vpn0 and planetoid fresh node metrics
+were separately absent. Migration/index drift remained unchanged.
+
 A bounded fresh executable-exported provenance read at 00:21:10 UTC
 identified all 48 observed service processes by start/build/source/RSS
 metrics: 20 API processes report revision `253977f2a713` with
