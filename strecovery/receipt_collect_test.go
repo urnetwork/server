@@ -371,22 +371,80 @@ func TestReceiptCollectionPublicationIsPrivateVerifiedAndCreateOnly(t *testing.T
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, "collection.json")
-	for i := 0; i < 2; i++ {
-		if err := WriteReceiptCollection(context.Background(), path, fixture.archive, collection); err != nil {
-			t.Fatal(err)
-		}
+	if err := WriteReceiptCollection(context.Background(), path, fixture.archive, collection); err != nil {
+		t.Fatal(err)
+	}
+	firstInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteReceiptCollection(context.Background(), path, fixture.archive, collection); err != nil {
+		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(path)
-	if err != nil || info.Mode().Perm() != 0600 {
-		t.Fatal("evidence publication is not private")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The shared publisher seals the writable temporary file to 0400 before
+	// fsync/rename. An identical retry must reuse that original sealed inode.
+	if info.Mode().Perm() != 0400 || !info.Mode().IsRegular() || !os.SameFile(firstInfo, info) {
+		t.Fatalf("evidence publication must preserve one read-only private regular inode: mode %v", info.Mode())
 	}
 	loaded, err := LoadReceiptCollection(context.Background(), FileReference{Path: path, Sha256: digest(raw)})
 	if err != nil || loaded.ContentHash != collection.ContentHash {
 		t.Fatalf("pinned evidence replay failed: %v", err)
+	}
+	// A correct seal cannot bypass physical privacy/alias checks on either
+	// replay or an identical publication to an already existing destination.
+	if err := os.Chmod(path, 0440); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteReceiptCollection(context.Background(), path, fixture.archive, collection); err == nil {
+		t.Fatal("exposed existing evidence was reused")
+	}
+	if _, err := LoadReceiptCollection(context.Background(), FileReference{Path: path, Sha256: digest(raw)}); err == nil {
+		t.Fatal("exposed evidence was loaded")
+	}
+	if err := os.Chmod(path, 0400); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(directory, "alias.json")
+	if err := os.Symlink(path, alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteReceiptCollection(context.Background(), alias, fixture.archive, collection); err == nil {
+		t.Fatal("symlink destination was reused")
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(path, alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteReceiptCollection(context.Background(), path, fixture.archive, collection); err == nil {
+		t.Fatal("hard-linked destination was reused")
+	}
+	if _, err := LoadReceiptCollection(context.Background(), FileReference{Path: path, Sha256: digest(raw)}); err == nil {
+		t.Fatal("hard-linked evidence was loaded")
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(directory, 0710); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteReceiptCollection(context.Background(), path, fixture.archive, collection); err == nil {
+		t.Fatal("nonprivate destination directory was reused")
+	}
+	if err := os.Chmod(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteReceiptCollection(context.Background(), path, fixture.archive, collection); err != nil {
+		t.Fatalf("restored private physical custody was not reusable: %v", err)
 	}
 	collection.Observations.Source = "another-observer"
 	collection.Commitments.ObservationHash = objectDigest(collection.Observations)

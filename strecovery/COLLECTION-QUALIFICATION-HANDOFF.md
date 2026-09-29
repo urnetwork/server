@@ -5,6 +5,20 @@ Branch: `fix/mg03-receipt-collector-20260929`.
 Worktree: `/home/by/urnetwork/temp/server-mg03-receipt-collector-20260929/server`.
 Use the frozen commit delivered with this handoff; no shared root was edited.
 
+Publication-fixture successor: implementation commit
+`48a1878ee36214df627642b27306cfe715f49527` remains frozen. The follow-up branch
+`fix/mg03-receipt-collector-publication-fixture-20260929`, at
+`/home/by/urnetwork/temp/server-mg03-receipt-collector-publication-fixture-20260929/server`,
+changes tests/docs only. Sol's first new-root normal run correctly exposed the
+new test's wrong `0600` final-mode expectation: the unchanged shared publisher
+has always sealed new evidence to `0400` before fsync/rename. Its raw failure is
+retained at the qualification directory's `sol/new-strecovery-normal.json`.
+Production bytes are unchanged. The corrected test requires a regular `0400`
+file, unchanged inode on identical retry, and refusal of exposed permission,
+symlink, hard-link and nonprivate-directory reuse through the collection API.
+No root counts/selectors change; rerun the affected qualification on the exact
+successor commit supplied with this handoff. No prior failed run becomes green.
+
 The additive `collect-receipts` command and `CollectReceiptEvidence` API read
 an explicit owned endpoint and explicit native/EVM boundary claims, authenticate
 complete raw EVM bodies/receipt vectors, construct proofs, and invoke the
@@ -93,3 +107,9 @@ do not count. Preserve failures and report source/fixture defects to Astra for
 a new frozen commit rather than changing expectations. Production owned-node
 capability, independent finality/mapping, exact runtime fees, service adoption
 and live recovery still require their separate authority and qualification.
+
+For the fixture successor, also change only `file.Chmod(0400)` to
+`file.Chmod(0600)` in the shared publisher inside an isolated causal control.
+`TestReceiptCollectionPublicationIsPrivateVerifiedAndCreateOnly` must fail at
+the explicit final mode/inode assertion. This confirms the corrected expectation
+is the sealed publication contract, not an arbitrary relaxation of privacy.

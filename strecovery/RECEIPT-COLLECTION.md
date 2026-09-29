@@ -106,7 +106,9 @@ retry. Requests, results and input JSON reject ambiguous duplicate/case-folded
 keys; no RPC payload or endpoint credentials are emitted in error text.
 
 Private-file, directory-lock, atomic create-only and fsync rules are the same as
-the existing census publication path. Identical files are idempotent; different
+the existing census publication path. New files are sealed owner-read-only
+(`0400`) before fsync and publication; the temporary inode starts writable
+(`0600`). Identical files preserve the existing private inode; different
 evidence cannot overwrite an existing path. Collection failures publish no
 artifact or successful report. An interruption after completed durable file
 publication can leave that fully verified file without a printed report;
