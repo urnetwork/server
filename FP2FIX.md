@@ -3204,14 +3204,28 @@ Observed Connect convergence is partial and progressing, with no sampled
 unready response. The service-scoped host drain lock can serialize block
 replacement for up to the configured drain timeout, but the exact drain
 owner on each host was not observed.
+
 At 19:06:23–25Z, MCP beta and g1 also returned the new MCP and config
 versions with HTTP 200 and ready status on all four enabled edges, with
-matching pinned host identities. The status route has not enumerated all
-MCP blocks or overlapping generations. Alt and Proxy are assigned to
+matching pinned host identities. That read did not enumerate all MCP
+blocks or overlapping generations. At 19:15:01–09Z, a later pinned
+read returned new and ready MCP g2/g3/g4 on all four enabled edges, and
+new and ready API g3 on all four; taken with earlier reads, every
+configured API and MCP block has at least one new, ready sampled path
+on each enabled edge at its respective observation time. These samples
+still do not enumerate overlapping generations. Alt and Proxy are assigned to
 Fireside/Crisp transparent hosts; Gossip has no status route. Supported
 pinned-LB status reads therefore cannot prove their running images, and
 the prior direct host reads did not succeed. Their alias and DynamoDB
 selection is proven, but their runtime versions remain unverified.
+
+At 19:10:19–23Z, another bounded pinned Connect read found seven of 20
+block/host paths new and ready, up from three of 20; the other 13 were
+old and ready, and all 20 returned HTTP 200 with matching host identity.
+This remains a sampled rolling state, not complete convergence.
+At 19:15:01–09Z, Connect advanced to ten of 20 new, ready paths, with
+the other ten old and ready; all 20 returned HTTP 200. The new-path
+counts by edge0/1/3/4 were 4/4/1/1.
 
 The user directed deployment to proceed without waiting for the long
 Connect test queue. Buckets 0, 1, 2, 4 and 5 have since passed their
@@ -3220,6 +3234,16 @@ normal runs (bucket 2 has its intentional opt-in skip). Bucket 3's
 was intentionally interrupted after 12 passes with no test failure; its
 remaining cases and bucket 7 are pending. This deployment does not clear
 the failed performance gate or establish sustained FP2 recovery.
+
+A test-only correction in Server `e3d4fb42` snapshots gVisor TCP counter
+values before computing per-run deltas in the failing multi-client TCP
+performance diagnostic. The old code retained live counter pointers and
+could print false zero deltas after the counters advanced. An exact-root
+scalar snapshot control passed normally and under race in an isolated
+worktree (receipts SHA256
+`1aba12310f7d266b7630d02071e24ccd5d818d06d016bb7cd54880883cfe830e`
+and `2ef39b3024248e4e5019f30654d443c39711a27513d399a4bbf47f43272852da`).
+This repairs diagnostic visibility, not the TCP performance failure.
 
 The sole scheduled Main watcher continued at its 15-minute active-probe
 cadence throughout rollout. Its thirty-ninth scoped record began at
@@ -3230,3 +3254,10 @@ fresh URL-census owner, so current eligible, quota-complete and throughput
 values were **unknown**, not zero. The picker observed 16 of 25 expected
 API slots; five remote release-builder reads failed SSH. These timestamps
 overlap the service rollout but do not establish its effect on FP2.
+The fortieth scheduled record began at 18:55:09Z. Its independent
+PostgreSQL sample at 19:06:22Z used 31.233 of 96 logical cores, still
+above the 25% warning threshold without query-owner attribution. The URL
+census was coherent again at 19:09:54Z: 108,779 eligible, zero
+quota-complete, 108,757 overdue and 22 warming. The picker paired 20 of
+25 API slots. This one post-deploy census restores numeric visibility but
+does not establish sustained coverage, throughput or FP2 recovery.
