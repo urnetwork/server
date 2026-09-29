@@ -2902,7 +2902,9 @@ candidate indexes for 733–739 absent, and no active index build, prepared
 transaction, replication slot, COPY or vacuum in the
 bounded snapshot. Backup service was inactive; the latest source archive
 was about 41.6 hours old, and metadata alone did not prove restore or
-writer authority. PGDATA had about 1.00 TB available, but CPU quota and
+writer authority. The source backup schedule is Sunday/Thursday, so an
+inactive Tuesday unit and that file age alone do not establish a missed
+scheduled run. PGDATA had about 1.00 TB available, but CPU quota and
 cpuset were unobserved, and the capped transaction sample could not
 exclude older NULL-xmin sessions. Every migration stage needs fresh
 admission before DDL; this check performed no DDL or deployment.
@@ -2913,3 +2915,30 @@ present (receipt SHA256
 `48a5d31210b00ca60c16ef65c3b162f8febb01d26bb282d225828b742f9a4cd2`).
 It ran no Docker command or process census, so live image and executable
 identity across the enabled fleet remain unverified.
+
+The twenty-second scheduled frame began at 14:25:09Z and again showed
+migration 731 versus required 740. PostgreSQL used 36.646 of 96 logical
+cores in its separate five-second sample, without a query-owner join. A
+coherent URL census had 111,496 eligible providers, zero quota-complete,
+111,474 overdue and 22 warming; hourly process and throughput coverage
+remained incomplete. Picker observation paired 20 of 25 API slots with
+527 initial nonempty outcomes, 13 initial errors, nine initial read errors
+and one filter read error. Warming thus returned near its nineteenth-frame
+level after the twenty-first-frame spike, but the separate aggregate
+censuses do not identify the changing providers or producer process. An
+offline source review sealed as SHA256
+`6192af09321e3fc88db5f1d33c9cd3fa116f4025cafa8973e3eb3a8513c6f07d`
+found no proved new source defect or release-changing reason for another
+active read. The same watcher began frame 23 at 14:40:09Z; no Main rollout
+or extra monitor probe occurred.
+
+One separately authorized, bounded read of four exact archive-integrity
+metric names in the post-core window returned a valid empty vector (sealed
+receipt SHA256
+`a2bc9c52416ae89d226d2213b4de809a4cb81c1bbbe6afa527c3a71de135459f`).
+It did not observe integrity, check time or producer boot for the latest
+September 27 source archive; zero series does not show that archive is
+absent or corrupt, or that backup stopped. The source backup runs on
+Sunday/Thursday; a separate archive pull is daily. A verified September 24
+archive cannot certify the September 27 artifact. No archive bytes or
+scripts were read, and no Main mutation followed.
