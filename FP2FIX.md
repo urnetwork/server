@@ -2766,3 +2766,14 @@ unchanged processes; an earlier frozen-predecessor mechanism is compatible
 but not proved in this frame. The current retirement source and tests still
 match their prior causal receipt. A bounded retrospective discriminator was
 designed but not run. No new source defect or current quota value was proved.
+
+The fourteenth scheduled frame kept migration at 731 versus required 740.
+PostgreSQL service CPU measured 48.394 of 96 logical cores over 5.02
+seconds, without query attribution. URL coverage regained a coherent
+current census: 102,330 eligible providers, zero quota-complete, and
+683,587 accepted successes needed; hourly process and throughput coverage
+remained incomplete. Picker observation paired 20 of 25 API slots, with
+454 initial nonempty outcomes, 13 initial errors, and ten initial plus one
+filter read error. Bounded watcher children settled by 12:37:29Z, with
+the same watcher PID and ten standing tails. This frame does not repair the
+prior unknown census, prove sustained recovery, or show a deployed release.
