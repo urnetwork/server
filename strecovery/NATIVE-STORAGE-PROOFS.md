@@ -85,6 +85,17 @@ verifier code is unchanged. Sol's original failed stream is preserved at
 `/mnt/data/sn-testnet/qualification/native-storage-proof-verifier-sol-20260929/frozen-b0ca`,
 manifest `a296fd109912ee5dd561499f72ae2cb0d9210c39187c1650dd8429211784de06`.
 
+The next candidate, `4ffecfb393833a2878030edfd483ecca9293699a`, passed sixteen
+focused and six adjacent roots in both modes, but its `ignore-file-pin` normal
+control incorrectly passed: the negative fixture supplied a malformed bare pin,
+so syntax validation refused it before byte comparison. That control is invalid;
+the candidate remains unqualified. Its raw evidence stays in the sibling
+`frozen-4ffe` qualification directory. The next fixture-only child uses a canonical
+mismatched pin, requires the byte-comparison error explicitly and tests malformed
+syntax separately. Witness association substitutions also use canonical protocol
+digests. Production verifier bytes remain unchanged; qualification must be sealed
+on the corrected child before integration.
+
 ## Remaining launch dependencies
 
 Successful output is an `unapproved_observation` with native header/storage math

@@ -410,11 +410,11 @@ func TestReceiptNativeStateRejectsWitnessContextSubstitution(t *testing.T) {
 		fixture, witness := nativeStorageFinalityFixture(t, nativeStorageCase(t, "layout1-present-empty"))
 		switch fault {
 		case "collection":
-			witness.CollectionHash = strings.Repeat("1", 64)
+			witness.CollectionHash = "sha256:" + strings.Repeat("1", 64)
 		case "checkpoint":
-			witness.CheckpointHash = strings.Repeat("1", 64)
+			witness.CheckpointHash = "sha256:" + strings.Repeat("1", 64)
 		case "finality":
-			witness.FinalityHash = strings.Repeat("1", 64)
+			witness.FinalityHash = "sha256:" + strings.Repeat("1", 64)
 		case "native-hash":
 			witness.NativeBlock.Hash = "0x" + strings.Repeat("1", 64)
 		case "native-number":
@@ -480,7 +480,7 @@ func TestReceiptNativeStateLoaderPinsPrivateStrictBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, "storage.json")
-	for _, fault := range []string{"valid", "pin", "duplicate", "unknown", "trailing", "public", "symlink"} {
+	for _, fault := range []string{"valid", "pin", "malformed-pin", "duplicate", "unknown", "trailing", "public", "symlink"} {
 		encoded := slices.Clone(raw)
 		switch fault {
 		case "duplicate":
@@ -498,6 +498,12 @@ func TestReceiptNativeStateLoaderPinsPrivateStrictBytes(t *testing.T) {
 		}
 		reference := FileReference{Path: path, Sha256: digest(encoded)}
 		if fault == "pin" {
+			reference.Sha256 = "sha256:" + strings.Repeat("1", 64)
+			if !canonicalDigest(reference.Sha256) || reference.Sha256 == digest(encoded) {
+				t.Fatal("native storage wrong-pin fixture must reach the byte comparison")
+			}
+		}
+		if fault == "malformed-pin" {
 			reference.Sha256 = strings.Repeat("1", 64)
 		}
 		if fault == "public" {
@@ -518,6 +524,10 @@ func TestReceiptNativeStateLoaderPinsPrivateStrictBytes(t *testing.T) {
 			}
 		} else if err == nil || result != nil {
 			t.Fatalf("native storage loader accepted %s evidence", fault)
+		} else if fault == "pin" && err.Error() != "native storage witness differs from its byte pin" {
+			t.Fatalf("native storage pin mismatch did not reach the byte comparison: %v", err)
+		} else if fault == "malformed-pin" && err.Error() != "native storage witness requires a context and exact byte pin" {
+			t.Fatalf("native storage malformed pin did not reach syntax validation: %v", err)
 		}
 	}
 }
