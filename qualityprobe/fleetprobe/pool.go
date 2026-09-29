@@ -67,6 +67,7 @@ func ProvidersFromDue(due []ingest.DueProvider) []prober.Provider {
 	for _, entry := range due {
 		providers = append(providers, prober.Provider{
 			ClientId:             entry.ClientId,
+			RunsNeeded:           max(entry.RunsNeeded, entry.SuccessesNeeded),
 			SuccessesNeeded:      entry.SuccessesNeeded,
 			CycleStartedAt:       entry.CycleStartedAt,
 			OutcomeCount:         entry.OutcomeCount,

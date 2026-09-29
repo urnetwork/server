@@ -16,7 +16,7 @@ func TestUrlProbeFleetScrapeUsesOneAtomicGeneration(t *testing.T) {
 	metrics := make(chan prometheus.Metric)
 	collector.snapshot.Store(&providerUrlProbeFleetSnapshot{
 		fleet: model.ProviderUrlProbeFleet{Eligible: 1, Due: 1, Complete: 1, QuotaComplete: 1,
-			Overdue: 1, SuccessesNeeded: 1, SecurityExceptions: 1, SecurityUnknownTargets: 1, OldestDueSeconds: 1,
+			Overdue: 1, RunsNeeded: 1, SecurityExceptions: 1, SecurityUnknownTargets: 1, OldestDueSeconds: 1,
 			Warming: 1, MissingCycles: 1, CohortStartedAtSeconds: 1},
 		observedAt: time.Unix(1, 0),
 	})
@@ -42,8 +42,8 @@ func TestUrlProbeFleetScrapeUsesOneAtomicGeneration(t *testing.T) {
 		assertOld(metric)
 		count++
 	}
-	if count != 14 {
-		t.Fatalf("incomplete fleet scrape: got %d series, want14", count)
+	if count != 15 {
+		t.Fatalf("incomplete fleet scrape: got %d series, want15", count)
 	}
 }
 
@@ -94,7 +94,7 @@ func TestUrlProbeMetricsExposeFiniteZeroCounterChildren(t *testing.T) {
 	capable, configured := false, false
 	for _, family := range families {
 		if family.GetName() == "urnetwork_url_probe_capability" {
-			capable = len(family.Metric) == 1 && family.Metric[0].GetGauge().GetValue() == 1
+			capable = len(family.Metric) == 1 && family.Metric[0].GetGauge().GetValue() == 2
 		}
 		if family.GetName() == "urnetwork_url_probe_configured_shards" {
 			configured = len(family.Metric) == 1

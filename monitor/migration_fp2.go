@@ -81,6 +81,12 @@ var migrationFp2UrlColumns = migrationFp2Columns("provider_egress_health_history
 	migrationFp2Columns("provider_egress_probe_cycle",
 		migrationFp2Column{name: "outcome_count", kind: "bigint", notNull: true, defaultExpression: "0"})
 
+// v741 adds the measured-run quota lookup; the existing success projection is
+// retained and must not be silently redefined during a rolling deployment.
+var migrationUrlProbeMeasuredQuotaArtifactQuery = migrationFp2Index("provider_egress_health_history",
+	"provider_egress_health_history_url_run", "client_id, measured_at DESC",
+	"(url_probe AND (url_probe_policy_version = 1) AND (total_count = 1) AND ((ok_count = 0) OR (ok_count = 1)))", false)
+
 // Order is the migration's positional row protocol: versions722 through730.
 var migrationFp2ArtifactQueries = []string{
 	// 722: both stored address facts and the serving rollup must exist.

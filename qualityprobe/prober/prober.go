@@ -23,7 +23,8 @@ import (
 type Provider struct {
 	ClientId             string
 	Place                egresshealth.Place
-	SuccessesNeeded      int
+	RunsNeeded           int
+	SuccessesNeeded      int // deprecated compatibility alias for old due responses
 	CycleStartedAt       time.Time
 	OutcomeCount         int
 	ClaimOrdinal         int64

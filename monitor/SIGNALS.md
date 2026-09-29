@@ -10494,7 +10494,7 @@ this signal. Recovery requires two clean fresh cadences and improving
 acknowledged **distinct** measured providers; the four-hour fleet-scan goal
 is not satisfied by fewer RPCs, successful auth or buffered worker completions.
 
-### 2.19f Rolling URL-probe coverage and accepted-success capacity
+### 2.19f Rolling URL-probe coverage and measured-run capacity
 Probe: `url-probe-coverage`
 
 This is the URL-only `FP2FIX.md` contract, not a renamed legacy cheap/full
@@ -10518,19 +10518,22 @@ unknown starts, tied process generations, and unavailable transport remain
 unobservable. Do not export instance IDs or provider/destination identities.
 
 Range-query results can survive a retired process after its instant start and
-gauges disappear. A valid process containing only historical success
+gauges disappear. A valid process containing only historical success/error
 increase/sample-count fields is therefore excluded from current-owner
-selection, and its successes are never borrowed by a successor. Any instant
+selection, and its outcomes are never borrowed by a successor. Any instant
 family without a trustworthy start, malformed observation, duplicate or
-ambiguous current source remains unobservable. This distinction does not reduce
-desired placement to enabled placement: excluded desired slots still prevent a
-complete hourly fleet-rate verdict, while a uniquely owned coherent shard-zero
-census can independently establish the quota deficit.
+ambiguous current source remains unobservable. Every enabled expected slot
+must have a current owner for a complete hourly fleet-rate verdict, while a
+uniquely owned coherent shard-zero census can independently establish the quota
+deficit. Disabled edge5 remains outside the expected Main slot set.
 
-The capable producer exposes `urnetwork_url_probe_capability=1`, an explicit
+The capable producer exposes `urnetwork_url_probe_capability=2`, an explicit
 `urnetwork_url_probe_configured_shards`, and one
 `urnetwork_url_probe_shard_observed_timestamp_seconds{shard}` for each actual
 task owner. Require exactly one fresh owner for every configured shard.
+Capability1 is the superseded success-only quota contract and cannot prove this
+measured-run target. The old `successes_needed` label is retained as a deprecated
+alias equal to `runs_needed`; reject inconsistent aliases or mixed contracts.
 Heartbeat proves ownership, not completed probes.
 A completed URL pass must stop and join its heartbeat refresher, then publish
 zero for its shard if no other invocation in that process still owns it. A
@@ -10547,14 +10550,14 @@ a zero quota or carry forward a previous census as a current observation.
 The shard-zero owner alone periodically produces the global census:
 
 - `urnetwork_url_probe_fleet{state}` contains `eligible`, `due`, `overdue`,
-  `warming`, `uninitialized`, `successes_needed`, `quota_complete`,
+  `warming`, `uninitialized`, `runs_needed`, compatibility `successes_needed`, `quota_complete`,
   `secure_complete`, compatibility `complete`, `security_pending`, and
   `security_unknown_targets`.
-- `quota_complete` requires ten unique accepted successes of the selected
+- `quota_complete` requires ten unique accepted measured runs (success plus failure) of the selected
   evidence-policy version measured strictly in the trailing four hours.
   `secure_complete` additionally requires no unresolved TLS exception;
   `complete` has the same value. Old-policy, unmeasured, duplicate, and future
-  outcomes cannot satisfy the target. Ten successes accumulated over an
+  outcomes cannot satisfy the target. Setup-only completed turns do not count. Ten runs accumulated over an
   overdue cycle are not rolling completion.
 - `urnetwork_url_probe_fleet_observed_timestamp_seconds`,
   `urnetwork_url_probe_cohort_started_timestamp_seconds` and
@@ -10575,13 +10578,14 @@ quarantine has no trustworthy destination for same-URL recovery. A different
 URL's success, expired history, or a new policy version does not clear TLS.
 
 Hourly capacity uses reset-aware one-hour increases of
-`urnetwork_url_probe_outcomes_total{outcome="success"}` from **every expected
+both `urnetwork_url_probe_outcomes_total{outcome="success"}` and
+`urnetwork_url_probe_outcomes_total{outcome="error"}` from **every expected
 current Taskworker process**, with capability, fresh underlying counter
 samples, at least 30 samples in the hour and one in its first five minutes,
 and a process at least one hour old. Capable producers preinitialize finite
 counter children: missing is not zero. Require complete unique shard-owner
 coverage as well. Emit `url-probe-throughput-deficit` WARN, sustained twice,
-when accepted successes/hour is below `10 * eligible / 4`; expose the
+when acknowledged measured success plus error/hour is below `10 * eligible / 4`; expose the
 necessary rate and the conditional projected hours. This is not attempted
 URLs, task completions, legacy full runs, or successful API submissions that
 were rejected as measurements.

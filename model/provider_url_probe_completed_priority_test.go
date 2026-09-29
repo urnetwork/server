@@ -82,7 +82,7 @@ func TestUrlCompletedPriorityPreservesQuotaSecurityAndFreshness(t *testing.T) {
 		startedAt := now.Add(-9 * time.Hour)
 		clients := testingUrlCompletionClients(t, startedAt, 4)
 		for index, clientId := range clients[:3] {
-			for success := range ProviderEgressProbeSuccessTarget {
+			for success := range ProviderUrlProbeRunTarget {
 				at := now.Add(-time.Hour + time.Duration(success)*time.Minute)
 				if index == 2 {
 					at = startedAt.Add(time.Duration(success) * time.Minute)
@@ -110,8 +110,8 @@ func TestUrlCompletedPriorityPreservesQuotaSecurityAndFreshness(t *testing.T) {
 		}
 		security, securityOk := seen[clients[1]]
 		expired, expiredOk := seen[clients[2]]
-		if !securityOk || security.SuccessesNeeded != 0 || len(security.SecurityDestinations) != 1 ||
-			!expiredOk || expired.SuccessesNeeded != ProviderEgressProbeSuccessTarget {
+		if !securityOk || security.RunsNeeded != 0 || len(security.SecurityDestinations) != 1 ||
+			!expiredOk || expired.RunsNeeded != ProviderUrlProbeRunTarget {
 			t.Fatalf("security exception or expired success window lost: %+v", result.Providers)
 		}
 		full := testingReadUrlCompletionCycle(t, ctx, clients[0])
@@ -121,7 +121,7 @@ func TestUrlCompletedPriorityPreservesQuotaSecurityAndFreshness(t *testing.T) {
 		for _, due := range result.Providers {
 			testingCompleteUrlClaim(t, ctx, due, now.Add(time.Second), "tunnel_failed")
 			cycle := testingReadUrlCompletionCycle(t, ctx, due.ClientId)
-			if cycle.count != 1 || cycle.successes != ProviderEgressProbeSuccessTarget-due.SuccessesNeeded {
+			if cycle.count != 1 || cycle.successes != ProviderUrlProbeRunTarget-due.RunsNeeded {
 				t.Fatalf("completion count changed independent URL quota: %+v", cycle)
 			}
 		}

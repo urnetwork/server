@@ -36,7 +36,7 @@ func TestUrlProbeDueHundredThousandProviders(t *testing.T) {
 		t.Logf("100k providers: ten 100-provider claims took %s (%s per claim); 1000 unique reservations", time.Since(startedAt), time.Since(startedAt)/10)
 		server.Db(ctx, func(conn server.PgConn) {
 			rows, err := conn.Query(ctx, "EXPLAIN (ANALYZE, BUFFERS) "+providerUrlProbeDueSql(0, 1),
-				now, ProvideModePublic, 100, 1, 0, ProviderEgressProbeSuccessTarget, now.Add(ProviderEgressProbeAttemptBackoff))
+				now, ProvideModePublic, 100, 1, 0, ProviderUrlProbeRunTarget, now.Add(ProviderEgressProbeAttemptBackoff))
 			server.WithPgResult(rows, err, func() {
 				for rows.Next() {
 					var line string
@@ -87,7 +87,7 @@ func TestUrlProbeDueHundredThousandProviders(t *testing.T) {
 		startedAt = time.Now()
 		fleet := testingGetUrlProbeFleet(t, snapshotCtx, now)
 		t.Logf("100k eligible providers with one million accepted successes: complete rolling/security census took %s", time.Since(startedAt))
-		if fleet.Eligible != 100000 || fleet.QuotaComplete != 100000 || fleet.Complete != 100000 || fleet.SuccessesNeeded != 0 || fleet.SecurityExceptions != 0 {
+		if fleet.Eligible != 100000 || fleet.QuotaComplete != 100000 || fleet.Complete != 100000 || fleet.RunsNeeded != 0 || fleet.SecurityExceptions != 0 {
 			t.Fatalf("100k full census lost accepted rolling evidence: %+v", fleet)
 		}
 	})
@@ -142,12 +142,12 @@ func TestUrlProbeDueEmptyShardPlan(t *testing.T) {
 					var plan testingUrlCompletedPlan
 					if mode == "generic" {
 						arguments := fmt.Sprintf("%s,%d,%d,%d,0,%d,%s", testingUrlCompletedTimestampLiteral(now),
-							ProvideModePublic, scenario.limit, shardCount, ProviderEgressProbeSuccessTarget,
+							ProvideModePublic, scenario.limit, shardCount, ProviderUrlProbeRunTarget,
 							testingUrlCompletedTimestampLiteral(now.Add(ProviderEgressProbeAttemptBackoff)))
 						plan = testingExplainUrlCompletedGeneric(t, scenario.name, providerUrlProbeDueSql(0, shardCount), arguments)
 					} else {
 						plan = testingExplainUrlCompleted(t, providerUrlProbeDueSql(0, shardCount),
-							now, ProvideModePublic, scenario.limit, shardCount, 0, ProviderEgressProbeSuccessTarget, now.Add(ProviderEgressProbeAttemptBackoff))
+							now, ProvideModePublic, scenario.limit, shardCount, 0, ProviderUrlProbeRunTarget, now.Add(ProviderEgressProbeAttemptBackoff))
 					}
 					var slotRows, filtered float64
 					indexed, merged := false, false
@@ -253,7 +253,7 @@ func testingUrlProbeBoundedPlan(t testing.TB, now time.Time) {
 	}
 	server.Db(t.Context(), func(conn server.PgConn) {
 		rows, err := conn.Query(t.Context(), "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+providerUrlProbeDueSql(0, 1),
-			now, ProvideModePublic, 100, 1, 0, ProviderEgressProbeSuccessTarget, now.Add(ProviderEgressProbeAttemptBackoff))
+			now, ProvideModePublic, 100, 1, 0, ProviderUrlProbeRunTarget, now.Add(ProviderEgressProbeAttemptBackoff))
 		server.WithPgResult(rows, err, func() {
 			if !rows.Next() {
 				t.Fatal("missing due query plan")
@@ -343,7 +343,7 @@ func TestUrlProbeRollingHistoryLookupIsBounded(t *testing.T) {
 			inspect = func(node planNode) {
 				if node.IndexName == "provider_egress_health_history_url_success" {
 					indexed = true
-					if node.ActualRows*node.ActualLoops > ProviderEgressProbeSuccessTarget {
+					if node.ActualRows*node.ActualLoops > ProviderUrlProbeRunTarget {
 						t.Fatalf("rolling quota examined more than ten success rows: %+v", node)
 					}
 				}
@@ -357,6 +357,80 @@ func TestUrlProbeRollingHistoryLookupIsBounded(t *testing.T) {
 			}
 			if !indexed {
 				t.Fatal("rolling quota did not use its partial success index")
+			}
+		})
+	})
+}
+
+// Failed measurements use the same bounded latest-ten access as successful runs.
+func TestUrlProbeMeasuredQuotaHistoryLookupIsBounded(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		clientId := server.NewId()
+		now := server.NowUtc().Truncate(time.Microsecond)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_health_history
+				(run_id,client_id,measured_at,ok_count,total_count,class_results,tls_authentication_failure,url_probe,url_probe_policy_version)
+				SELECT md5('synthetic-url-history-' || i)::uuid,$1,
+					CASE WHEN i<=50000 THEN $2::timestamp-interval '1 hour'
+						WHEN i<=99980 THEN $2::timestamp-interval '5 hours'
+						ELSE $2::timestamp-(100000-i)*interval '1 minute' END,
+					CASE WHEN i<=50000 OR i>99980 THEN 0 ELSE 1 END,1,'{}'::jsonb,false,true,1
+				FROM generate_series(1,100000) AS i`, clientId, now))
+			server.RaisePgResult(tx.Exec(ctx, `ANALYZE provider_egress_health_history`))
+		})
+		query := providerUrlProbeRunWindowSql("$1", "$2")
+		server.Db(ctx, func(conn server.PgConn) {
+			rows, err := conn.Query(ctx, query, clientId, now)
+			server.WithPgResult(rows, err, func() {
+				if !rows.Next() {
+					t.Fatal("missing rolling aggregate")
+				}
+				var runs int
+				var oldest time.Time
+				server.Raise(rows.Scan(&runs, &oldest))
+				if runs != 10 || !oldest.Equal(now.Add(-9*time.Minute)) {
+					t.Fatalf("rolling lookup did not select the ten newest runs: runs=%d oldest=%s", runs, oldest)
+				}
+			})
+			type planNode struct {
+				IndexName   string     `json:"Index Name"`
+				ActualRows  float64    `json:"Actual Rows"`
+				ActualLoops float64    `json:"Actual Loops"`
+				Plans       []planNode `json:"Plans"`
+			}
+			var plans []struct {
+				Plan          planNode
+				ExecutionTime float64 `json:"Execution Time"`
+			}
+			rows, err = conn.Query(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, clientId, now)
+			server.WithPgResult(rows, err, func() {
+				if !rows.Next() {
+					t.Fatal("missing rolling history plan")
+				}
+				var raw []byte
+				server.Raise(rows.Scan(&raw))
+				server.Raise(json.Unmarshal(raw, &plans))
+			})
+			indexed := false
+			var inspect func(planNode)
+			inspect = func(node planNode) {
+				if node.IndexName == "provider_egress_health_history_url_run" {
+					indexed = true
+					if node.ActualRows*node.ActualLoops > ProviderUrlProbeRunTarget {
+						t.Fatalf("rolling quota examined more than ten measured rows: %+v", node)
+					}
+				}
+				for _, child := range node.Plans {
+					inspect(child)
+				}
+			}
+			for _, plan := range plans {
+				inspect(plan.Plan)
+				t.Logf("100k mixed history outcomes: latest-ten indexed lookup executed in %.3fms", plan.ExecutionTime)
+			}
+			if !indexed {
+				t.Fatal("rolling quota did not use its partial measured-run index")
 			}
 		})
 	})

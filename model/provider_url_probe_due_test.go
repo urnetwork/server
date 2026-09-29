@@ -33,7 +33,7 @@ func testingGetUrlProbeFleet(t testing.TB, ctx context.Context, now time.Time) P
 	return fleet
 }
 
-// Ten accepted successes finish inside four hours despite jitter and errors.
+// Ten accepted measured runs finish inside four hours, counting successes and errors.
 // Every call models a fresh worker, so no process-local quota can satisfy it.
 func TestUrlProbeDurablePacingAndQuota(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -44,7 +44,7 @@ func TestUrlProbeDurablePacingAndQuota(t *testing.T) {
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		now = server.NowUtc().Add(time.Second).Truncate(time.Microsecond)
 		var cycleStartedAt, firstSuccessAt time.Time
-		for turn := range 11 {
+		for turn := range 10 {
 			due := ClaimProviderUrlProbeDue(ctx, now, 1, 0, 1)
 			if len(due) != 1 || due[0].ClientId != provider.clientId {
 				t.Fatalf("turn %d: due=%+v", turn, due)
@@ -88,7 +88,7 @@ func TestUrlProbeDurablePacingAndQuota(t *testing.T) {
 			if successes != turn+1-wantErrors || errors != wantErrors {
 				t.Fatalf("turn %d replay changed progress: successes=%d errors=%d", turn, successes, errors)
 			}
-			if successes == ProviderEgressProbeSuccessTarget {
+			if turn+1 == ProviderUrlProbeRunTarget {
 				if !now.Before(firstSuccessAt.Add(ProviderEgressProbeRefreshAge)) || !next.Equal(firstSuccessAt.Add(ProviderEgressProbeRefreshAge)) {
 					t.Fatalf("rolling quota missed its oldest-success expiry: completion=%s next=%s first=%s", now, next, firstSuccessAt)
 				}
@@ -107,7 +107,7 @@ func TestUrlProbeDurablePacingAndQuota(t *testing.T) {
 			now = next
 		}
 		replacement := ClaimProviderUrlProbeDue(ctx, now, 1, 0, 1)
-		if len(replacement) != 1 || replacement[0].SuccessesNeeded != 1 || replacement[0].OutcomeCount != 11 || !replacement[0].CycleStartedAt.Equal(cycleStartedAt) {
+		if len(replacement) != 1 || replacement[0].RunsNeeded != 1 || replacement[0].OutcomeCount != 10 || !replacement[0].CycleStartedAt.Equal(cycleStartedAt) {
 			t.Fatalf("oldest-success expiry reset the rolling quota or receipt identity: %+v", replacement)
 		}
 	})
@@ -130,7 +130,7 @@ func TestUrlProbeDueUsesReliabilityAndArinRisk(t *testing.T) {
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		fleet := testingGetUrlProbeFleet(t, ctx, server.NowUtc().Add(time.Second))
-		if fleet.Eligible != 3 || fleet.Due != 3 || fleet.Complete != 0 || fleet.SuccessesNeeded != 30 {
+		if fleet.Eligible != 3 || fleet.Due != 3 || fleet.Complete != 0 || fleet.RunsNeeded != 30 {
 			t.Fatalf("URL fleet denominator includes excluded providers or lost quota: %+v", fleet)
 		}
 		due := ClaimProviderUrlProbeDue(ctx, server.NowUtc().Add(time.Second), 10, 0, 1)
@@ -179,7 +179,7 @@ func TestUrlProbeLocalFailurePreservesQuotaAndEvidence(t *testing.T) {
 			t.Fatalf("local failure changed evidence or missed retry pace: successes=%d errors=%d history=%d next=%s", successes, errors, history, next.Sub(now))
 		}
 		retry := ClaimProviderUrlProbeDue(ctx, next, 1, 0, 1)
-		if len(retry) != 1 || retry[0].SuccessesNeeded != 10 || retry[0].OutcomeCount != 0 || !retry[0].CycleStartedAt.Equal(due[0].CycleStartedAt) {
+		if len(retry) != 1 || retry[0].RunsNeeded != 10 || retry[0].OutcomeCount != 0 || !retry[0].CycleStartedAt.Equal(due[0].CycleStartedAt) {
 			t.Fatalf("local retry lost durable quota or source ordinal: %+v", retry)
 		}
 	})
@@ -220,7 +220,7 @@ func TestUrlProbeEligibilityHintPreservesPacing(t *testing.T) {
 		}
 		setRisk(false, true)
 		retry := ClaimProviderUrlProbeDue(ctx, claimAt, 1, 0, 1)
-		if len(retry) != 1 || retry[0].OutcomeCount != 1 || retry[0].SuccessesNeeded != 10 || !retry[0].CycleStartedAt.Equal(due[0].CycleStartedAt) {
+		if len(retry) != 1 || retry[0].OutcomeCount != 1 || retry[0].RunsNeeded != 9 || !retry[0].CycleStartedAt.Equal(due[0].CycleStartedAt) {
 			t.Fatalf("eligibility transition reset or delayed durable progress: %+v", retry)
 		}
 	})
@@ -248,11 +248,11 @@ func TestUrlProbeRollingWindowExpiresOldSuccesses(t *testing.T) {
 				CycleStartedAt: startedAt, MeasuredAt: measuredAt, OKCount: 1, Total: 1})
 		}
 		due := ClaimProviderUrlProbeDue(ctx, now.Add(23*time.Minute), 1, 0, 1)
-		if len(due) != 1 || due[0].SuccessesNeeded != 9 || due[0].OutcomeCount != 10 || !due[0].CycleStartedAt.Equal(startedAt) {
+		if len(due) != 1 || due[0].RunsNeeded != 9 || due[0].OutcomeCount != 10 || !due[0].CycleStartedAt.Equal(startedAt) {
 			t.Fatalf("aged successes satisfied a rolling quota or reset receipt identity: %+v", due)
 		}
 		fleet := testingGetUrlProbeFleet(t, ctx, now.Add(23*time.Minute))
-		if fleet.Complete != 0 || fleet.SuccessesNeeded != 9 {
+		if fleet.Complete != 0 || fleet.RunsNeeded != 9 {
 			t.Fatalf("fleet snapshot counted aged successes as rolling completion: %+v", fleet)
 		}
 	})
@@ -278,17 +278,17 @@ func TestUrlProbeUnversionedOutcomesNeverFillQuota(t *testing.T) {
 		}
 		now = now.Add(ProviderEgressProbeAttemptBackoff)
 		due := ClaimProviderUrlProbeDue(ctx, now, 1, 0, 1)
-		if len(due) != 1 || due[0].SuccessesNeeded != 10 || due[0].OutcomeCount != 0 {
+		if len(due) != 1 || due[0].RunsNeeded != 10 || due[0].OutcomeCount != 0 {
 			t.Fatalf("unsupported history acquired current URL quota credit: %+v", due)
 		}
 		fleet := testingGetUrlProbeFleet(t, ctx, now)
-		if fleet.Complete != 0 || fleet.QuotaComplete != 0 || fleet.SuccessesNeeded != 10 {
+		if fleet.Complete != 0 || fleet.QuotaComplete != 0 || fleet.RunsNeeded != 10 {
 			t.Fatalf("census interpreted legacy status as current success evidence: %+v", fleet)
 		}
 		testingSetUrlProbeHealth(ctx, &ProviderEgressHealth{RunId: server.NewId(), ClientId: provider.clientId,
 			CycleStartedAt: due[0].CycleStartedAt, MeasuredAt: now, OKCount: 1, Total: 1})
 		due = ClaimProviderUrlProbeDue(ctx, now.Add(23*time.Minute), 1, 0, 1)
-		if len(due) != 1 || due[0].SuccessesNeeded != 9 || due[0].OutcomeCount != 1 {
+		if len(due) != 1 || due[0].RunsNeeded != 9 || due[0].OutcomeCount != 1 {
 			t.Fatalf("compatible URL receipt did not advance its independent quota: %+v", due)
 		}
 	})
@@ -372,7 +372,7 @@ func TestUrlProbeSecurityRechecksContinueAfterRollingQuota(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_cycle SET next_attempt_at=$1`, now))
 		})
 		fleet := testingGetUrlProbeFleet(t, ctx, now)
-		if fleet.QuotaComplete != 2 || fleet.Complete != 0 || fleet.SecurityExceptions != 2 || fleet.SecurityUnknownTargets != 1 || fleet.SuccessesNeeded != 0 {
+		if fleet.QuotaComplete != 2 || fleet.Complete != 0 || fleet.SecurityExceptions != 2 || fleet.SecurityUnknownTargets != 1 || fleet.RunsNeeded != 0 {
 			t.Fatalf("quota success hid unresolved security: %+v", fleet)
 		}
 		due := ClaimProviderUrlProbeDue(ctx, now, 2, 0, 1)
@@ -380,7 +380,7 @@ func TestUrlProbeSecurityRechecksContinueAfterRollingQuota(t *testing.T) {
 			t.Fatalf("ten successes suppressed TLS revalidation: %+v", due)
 		}
 		for _, provider := range due {
-			if provider.SuccessesNeeded != 0 {
+			if provider.RunsNeeded != 0 {
 				t.Fatal("security recheck invented a URL quota deficit")
 			}
 			if provider.ClientId == known.clientId && (len(provider.SecurityDestinations) != 1 || provider.SecurityDestinations[0].Url != destination.Url) {
@@ -437,7 +437,7 @@ func TestUrlProbeFleetTracksMissingWarmupAndRollingExpiry(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM provider_egress_probe_cycle WHERE client_id=$1`, provider.clientId))
 		})
 		fleet = testingGetUrlProbeFleet(t, ctx, now)
-		if fleet.Eligible != 1 || fleet.Due != 1 || fleet.MissingCycles != 1 || fleet.Overdue != 1 || fleet.Warming != 0 || fleet.SuccessesNeeded != 10 || fleet.CohortStartedAtSeconds != 0 {
+		if fleet.Eligible != 1 || fleet.Due != 1 || fleet.MissingCycles != 1 || fleet.Overdue != 1 || fleet.Warming != 0 || fleet.RunsNeeded != 10 || fleet.CohortStartedAtSeconds != 0 {
 			t.Fatalf("missing admission became healthy or received invented warmup: %+v", fleet)
 		}
 		token := now.Add(-5 * time.Hour)
@@ -477,11 +477,11 @@ func TestUrlProbeFleetTracksMissingWarmupAndRollingExpiry(t *testing.T) {
 		setRisk(false)
 		afterExpiry := now.Add(2 * time.Minute)
 		due := ClaimProviderUrlProbeDue(ctx, afterExpiry, 1, 0, 1)
-		if len(due) != 1 || !due[0].CycleStartedAt.Equal(token) || due[0].OutcomeCount != 10 || due[0].SuccessesNeeded != 10 {
+		if len(due) != 1 || !due[0].CycleStartedAt.Equal(token) || due[0].OutcomeCount != 10 || due[0].RunsNeeded != 10 {
 			t.Fatalf("re-eligibility reset rolling receipt state: %+v", due)
 		}
 		fleet = testingGetUrlProbeFleet(t, ctx, afterExpiry)
-		if fleet.Eligible != 1 || fleet.Overdue != 1 || fleet.Warming != 0 || fleet.Complete != 0 || fleet.SuccessesNeeded != 10 {
+		if fleet.Eligible != 1 || fleet.Overdue != 1 || fleet.Warming != 0 || fleet.Complete != 0 || fleet.RunsNeeded != 10 {
 			t.Fatalf("expired rolling evidence received a new warmup: %+v", fleet)
 		}
 	})

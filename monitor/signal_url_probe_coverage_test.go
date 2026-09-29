@@ -67,11 +67,12 @@ func TestEgressCoverageUrlOnlyHandsOffWithoutLegacyDatabaseQueries(t *testing.T)
 // evaluation time, so retained values cannot masquerade as a fresh census.
 func urlProbeCoverageFixture(now time.Time, host string, shard int) *urlProbeCoverageProcess {
 	values := map[string]float64{
-		"start": float64(now.Add(-2 * time.Hour).Unix()), "configured": 2, "capability": 1,
+		"start": float64(now.Add(-2 * time.Hour).Unix()), "configured": 2, "capability": urlProbeCoverageCapability,
 		"success": 13000, "success_samples": 120, "success_early": 10,
+		"error": 0, "error_samples": 120, "error_early": 10,
 	}
 	scrape := float64(now.Add(-15 * time.Second).Unix())
-	for _, name := range []string{"start_time", "configured_time", "success_time", "capability_time"} {
+	for _, name := range []string{"start_time", "configured_time", "success_time", "error_time", "capability_time"} {
 		values[name] = scrape
 	}
 	values["heartbeat:"+fmt.Sprint(shard)] = float64(now.Add(-time.Minute).Unix())
@@ -98,6 +99,9 @@ func urlProbeCoverageFixtureJson(t *testing.T, now time.Time, processes ...*urlP
 	t.Helper()
 	rows := []any{}
 	for _, process := range processes {
+		if value, present := process.values["fleet:runs_needed"]; present {
+			process.values["fleet:successes_needed"] = value
+		}
 		for name, value := range process.values {
 			labels := map[string]string{"env": "synthetic", "job": "taskworker", "host": process.host, "block": process.block, "instance": process.instance}
 			parts := strings.SplitN(name, ":", 2)
@@ -164,7 +168,7 @@ func TestUrlProbeCoverageHighAggregateRateCannotHideStarvedProviders(t *testing.
 	for _, state := range []string{"complete", "secure_complete", "quota_complete"} {
 		first.values["fleet:"+state] = 8000
 	}
-	first.values["fleet:successes_needed"] = 20000
+	first.values["fleet:runs_needed"] = 20000
 	first.values["fleet:overdue"] = 1000
 	first.values["fleet:warming"] = 1000
 	first.values["fleet:due"] = 2000
@@ -174,7 +178,7 @@ func TestUrlProbeCoverageHighAggregateRateCannotHideStarvedProviders(t *testing.
 	if len(alerts) != 1 || alert.Severity != Severity(tierPage) || alert.Sustain != 2 {
 		t.Fatalf("per-provider starvation was hidden by aggregate successes: %+v", alerts)
 	}
-	for _, text := range []string{"eligible=10000", "secure_complete=8000", "successes_needed=20000", "never summed", "not attempted requests", "ordinary URL failure", "SIGNALS.md §2.19f"} {
+	for _, text := range []string{"eligible=10000", "secure_complete=8000", "runs_needed=20000", "never summed", "not attempted requests", "ordinary URL failure", "SIGNALS.md §2.19f"} {
 		if !strings.Contains(strings.ToLower(alert.Markdown()), strings.ToLower(text)) {
 			t.Fatalf("missing coverage discriminator %q", text)
 		}
@@ -194,12 +198,12 @@ func TestUrlProbeCoverageQuotaDoesNotClearTlsAndUnknownTargets(t *testing.T) {
 	alerts := runUrlProbeCoverageFixture(t, now, urlProbeCoverageFixtureJson(t, now, first, second))
 	alert := requireAlertClass(t, alerts, "url-probe-coverage-deficit")
 	requireAlertClass(t, alerts, "url-probe-security-recovery-unknown")
-	if len(alerts) != 2 || alert.Severity != Severity(tierWarn) || !strings.Contains(alert.Observed, "successes_needed=0") {
+	if len(alerts) != 2 || alert.Severity != Severity(tierWarn) || !strings.Contains(alert.Observed, "runs_needed=0") {
 		t.Fatalf("quota-full security recovery disappeared: %+v", alerts)
 	}
 }
 
-func TestUrlProbeCoverageHourlyAcceptedSuccessRateNotLegacyAttempts(t *testing.T) {
+func TestUrlProbeCoverageHourlyAcceptedMeasuredRateNotLegacyAttempts(t *testing.T) {
 	now := time.Date(2026, 9, 27, 18, 0, 0, 0, time.UTC)
 	first := urlProbeCoverageFixture(now, "worker-a.example", 0)
 	second := urlProbeCoverageFixture(now, "worker-b.example", 1)
@@ -207,12 +211,12 @@ func TestUrlProbeCoverageHourlyAcceptedSuccessRateNotLegacyAttempts(t *testing.T
 		first.values["success"], second.values["success"] = value, value
 		alerts := runUrlProbeCoverageFixture(t, now, urlProbeCoverageFixtureJson(t, now, first, second))
 		alert := requireAlertClass(t, alerts, "url-probe-throughput-deficit")
-		if len(alerts) != 1 || alert.Sustain != 2 || !strings.Contains(alert.Observed, "required_successes_per_hour=25000.0") {
+		if len(alerts) != 1 || alert.Sustain != 2 || !strings.Contains(alert.Observed, "required_measured_runs_per_hour=25000.0") {
 			t.Fatalf("hourly throughput deficit was not detected: %+v", alerts)
 		}
 	}
 	query := urlProbeCoverageQuery("synthetic")
-	for _, want := range []string{`outcome="success"`, "increase(", "[1h]", "offset 55m", "timestamp(", `job="taskworker"`} {
+	for _, want := range []string{`outcome="success"`, `outcome="error"`, "increase(", "[1h]", "offset 55m", "timestamp(", `job="taskworker"`} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("missing source/time contract %q", want)
 		}
@@ -227,7 +231,7 @@ func TestUrlProbeCoverageMissingWorkerCannotBecomeLowThroughput(t *testing.T) {
 	first := urlProbeCoverageFixture(now, "worker-a.example", 0)
 	first.values["success"] = 0
 	first.values["fleet:complete"], first.values["fleet:secure_complete"], first.values["fleet:quota_complete"] = 0, 0, 0
-	first.values["fleet:successes_needed"] = 100000
+	first.values["fleet:runs_needed"] = 100000
 	first.values["fleet:overdue"] = 10000
 	alerts := runUrlProbeCoverageFixture(t, now, urlProbeCoverageFixtureJson(t, now, first))
 	requireAlertClass(t, alerts, "url-probe-coverage-deficit")
@@ -247,7 +251,7 @@ func TestUrlProbeCoverageRetainedAndIncoherentCensusCannotAppearHealthy(t *testi
 		{key: "observed", value: float64(now.Add(31 * time.Second).Unix())},
 		{key: "fleet_time:eligible", value: float64(now.Add(-30 * time.Second).Unix())},
 		{key: "fleet:complete", value: 9999},
-		{key: "fleet:successes_needed", value: 1},
+		{key: "fleet:runs_needed", value: 1},
 		{key: "fleet:eligible", value: 9999.5},
 		{key: "fleet:security_unknown_targets", value: 1},
 		{key: "oldest_time", value: 0},
@@ -288,7 +292,7 @@ func TestUrlProbeCoverageCensusCannotLoseOrDoubleCountCohort(t *testing.T) {
 		for _, state := range []string{"complete", "secure_complete", "quota_complete"} {
 			first.values["fleet:"+state] = 8000
 		}
-		first.values["fleet:successes_needed"] = 20000
+		first.values["fleet:runs_needed"] = 20000
 		first.values["fleet:overdue"] = 1000
 		first.values["fleet:warming"] = warming
 		alerts := runUrlProbeCoverageFixture(t, now, urlProbeCoverageFixtureJson(t, now, first, second))

@@ -122,7 +122,7 @@ func TestUrlCompletedPriority100kGenericClaimPlans(t *testing.T) {
 				server.RaisePgResult(conn.Exec(ctx, `ANALYZE provider_url_probe_run`))
 			})
 			arguments := fmt.Sprintf("%s,%d,%d,%d,0,%d,%s", testingUrlCompletedTimestampLiteral(now),
-				ProvideModePublic, scenario.limit, scenario.shardCount, ProviderEgressProbeSuccessTarget,
+				ProvideModePublic, scenario.limit, scenario.shardCount, ProviderUrlProbeRunTarget,
 				testingUrlCompletedTimestampLiteral(now.Add(ProviderEgressProbeAttemptBackoff)))
 			plan := testingExplainUrlCompletedGeneric(t, scenario.name, providerUrlProbeDueSql(0, scenario.shardCount, true), arguments)
 			empty := scenario.name == "all_future" || scenario.name == "empty_owned"

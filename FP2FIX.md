@@ -1,6 +1,17 @@
 # FindProviders2 supply and quality-probe repair plan
 
-Status: implementation and Main validation in progress, 2026-09-28. This
+Latest user override, 2026-09-29: each eligible provider needs **ten total
+accepted measured URL runs (success plus failure) in the rolling four hours**.
+A completed turn with no accepted measured URL result does **not** count.
+Setup failures, claims, abandoned work, security-only zero-total reports and
+publication retries cannot manufacture quota credit. The previous success-only
+target and its completion/rate interpretations are superseded. Dated checkpoints
+below retain their original measurements and labels as history; a reported zero
+ten-success census is not evidence of zero completion under this new target.
+Bucket admission, eight-hour success-ratio ranking, common eligibility gates,
+and independent same-URL TLS recovery are unchanged.
+
+Status: implementation and Main validation in progress, 2026-09-29. This
 document defines the quality-probe/indexing contract. The checkpoint below
 distinguishes deployed changes from remaining production acceptance; code or
 deployment completion alone does not establish the four-hour quota or CPU
@@ -132,7 +143,7 @@ and ARIN flags are gates; they must not be averaged away into a good score.
 | Throughput | Successful transferred bytes divided by transfer duration after first response byte | Speed ordering; DNS/connection wait is not transfer time |
 | Evidence age | Measurement timestamps and their eight-hour expiry, not ingest/retry timestamps | Removes expired outcomes from the ratio; missing/stale measurements do not imply failure |
 | Four-hour progress | Unique accepted URL successes measured strictly within the trailing four hours, capped at ten for coverage reporting | Rolling scheduling/coverage metric, not an additional admission gate; secure completion additionally requires no unresolved TLS exceptions |
-| Four-hour scheduling count | Unique completed URL-probe attempts in the trailing four hours, including failures and zero-attempt providers | Lowest count first among currently eligible, paced-due providers; distinct from successful quota and eight-hour admission evidence |
+| Four-hour scheduling count | Unique completed URL-probe attempts in the trailing four hours, including failures and zero-attempt providers | Lowest count first among currently eligible, paced-due providers; distinct from measured-run quota and eight-hour admission evidence |
 
 For quality/speed, the initial selection weight is
 `reliabilityScale * reliabilityWeight * performanceScale * urlRankingWeight`.
@@ -157,11 +168,12 @@ success. ARIN quality exceptions exclude only quality, never speed or online.
 
 Bucket priority precedes these within-bucket metrics: quality → speed → online
 or speed → quality → online, with deduplication and preserved request filters.
-The ten-success scheduling target is distinct from the ratio gate: ten
-successes within the trailing four hours satisfy the success quota, but
+The ten-run scheduling target is distinct from the ratio gate: ten accepted
+measured successes or failures within the trailing four hours satisfy quota.
+Ten errors can complete collection while leaving the provider online-only;
 ten successes and ten errors in the eight-hour history give `r = 0.5`, so that
-provider remains online-only until its history meets the success threshold.
-Ten successes are a collection target, not an additional quality/speed gate;
+provider also remains online-only until its history meets the success threshold.
+Ten measured runs are a collection target, not an additional quality/speed gate;
 for example, three successes and two errors already pass the URL ratio gate.
 Probing pauses only when the rolling quota is met **and** all TLS exceptions
 have cleared; a quota-complete but quarantined provider still needs work.
@@ -325,7 +337,7 @@ registrations. Independent permanent omission tests fail the old catalog and
 pass the corrected candidate with existing cloud/access and quality-only
 serving controls. The three added rules do not activate a new resource or
 measure current provider impact. Native Quality's eight-hour success ratio
-still permits one success out of one observation; the ten-success/four-hour
+still permits one success out of one observation; the ten-measured-run/four-hour
 collection quota is not an additional admission gate. High native counts are
 not by themselves proof of a classifier error or sufficient evidence coverage.
 
@@ -454,7 +466,7 @@ from the failed-TLS URL pool and 50% from the normal pool**. Within the normal
 half, retain equal general/country sampling when both are available. Thus the
 typical mixture is 50% security rechecks, 25% general, and 25% country URLs;
 without failures it is 50% general and 50% country. Continue paced work until
-ten successes remain within the rolling four-hour window **and no TLS
+ten accepted measured runs remain within the rolling four-hour window **and no TLS
 exceptions remain**. A security recheck's quality result can count normally,
 but authenticated TLS clearing does not require quality success.
 
@@ -471,31 +483,39 @@ errors.
 There is one URL-probe workflow, with no full/fast or independent blackhole
 probe classes. Count the *currently eligible* public providers after the shared
 reliability and ARIN risk gates; call this `N`. Each provider receives paced
-URL probes until it has 10 accepted successful URL outcomes in the **rolling
-trailing four hours** and no unresolved TLS exceptions, as selected by the user.
-At exactly four hours an
-outcome stops contributing to this target; a delayed report uses measurement
-time, not arrival time. Persist accepted history and pacing across worker
-restarts. Neither a fixed period nor a long-running unfinished cycle may carry
-old successes forward and claim four-hour completion. Keep failures in the
-eight-hour ranking history and retry fairly while the rolling target is
-incomplete. Replenish successes as they expire; reaching ten must not cause
-an unconditional four-hour pause after the tenth success. The minimum fleet success throughput is
-`10*N/4` URL successes per hour, with headroom for errors and retries.
-Publish the denominator, eligible-due backlog, unique completions/hour,
-oldest eligible evidence age, p50/p95 attempt duration by stage, attempted
-versus accepted URL reports, completed ten-success quotas, security-clear
-completions, unresolved/unknown-target security recovery, and estimated cycle
-time. Fleet census states and their observation timestamp must be one coherent
-atomic snapshot; a canceled/partial/stale census cannot advance freshness.
+URL probes until it has ten unique accepted measured URL runs, **success plus
+failure**, in the rolling trailing four hours and no unresolved TLS exceptions.
+Use immutable accepted `run_id` history with `url_probe=true`, the exact selected
+policy version, `total_count=1` and `ok_count` either zero or one. The failed
+count is `total_count-ok_count`. A completed setup/no-result turn, a zero-total
+security-only report, a claim, an abandoned turn, grouped/old-policy history
+and a publication replay cannot satisfy quota.
+
+At exactly four hours a run stops contributing; exclude future measurements
+and use measurement time rather than report arrival. Persist history and pacing
+across restarts. A fixed period or long-running cycle cannot carry aged runs
+forward. While incomplete, both success and failed measurements count toward
+ten, with existing success/failure pacing and fairness. At quota, schedule the
+oldest retained run's expiry; do not pause for four hours after run ten. TLS
+revalidation remains independently due, even for a quota-complete provider.
+
+The minimum fleet throughput is `10*N/4` accepted measured runs per hour,
+or `10*N/14400` per second. Failures consume this quota normally; headroom is
+needed for unmeasured setup work, security rechecks, publication loss, uneven
+providers and worker occupancy. Track unique durable accepted success plus
+failure separately from acknowledged worker outcomes and completed turns.
+Publish the denominator, eligible-due backlog, oldest due age, p50/p95 stage
+duration, measured-run deficit, quota completion, security-clear completion,
+and unresolved/unknown-target security recovery. One coherent atomic census
+must include its observation timestamp; canceled/partial/stale censuses cannot
+advance freshness. An aggregate rate alone never proves per-provider coverage.
+
 Replace the two old schedules with one URL-evidence workflow, preserving
-historical telemetry during migration. For historical context, an earlier
-pre-repair Main sweep found cheap checks covered 57,907/120,037 providers at roughly
-7,199/hour, whereas full-quality probes were only 6,428/120,037 and roughly
-411 attempts/hour. Those old measurements describe different populations and
-must not be relabeled as unified URL-probe throughput. The new eligible `N`
-must be measured before setting concurrency; simply raising worker count has
-already produced millions of goroutines and timeouts without a faster cycle.
+historical telemetry. Earlier cheap/full probe measurements and success-only
+quotas describe different populations or contracts and cannot be relabeled as
+current measured-run coverage. Measure current eligible `N` and stage/resource
+limits before changing concurrency; raising workers has previously increased
+goroutines and timeouts without a faster cycle.
 
 Make due admission one cheap, indexed, bounded operation per batch, excluding
 providers that cannot enter the target index *before* opening a tunnel. Use
@@ -507,7 +527,7 @@ Count a completed failed run as well as a successful run, once across report
 retries; a claim or an abandoned in-flight run is not a completed attempt.
 Do not substitute the lifetime receipt ordinal, successful-outcome count, or
 eight-hour admission denominator. Preserve stable jitter, claim exclusivity,
-the rolling ten-success quota, and outstanding URL-specific TLS recovery.
+the rolling ten-measured-run quota, and outstanding URL-specific TLS recovery.
 Local setup failures still do not manufacture measured URL evidence. Maintain
 the scheduling window with bounded indexed state and exact aging at four
 hours; do not rescan every provider's history in the claim hot path. This
@@ -545,8 +565,8 @@ returns toward its usual ~30% CPU, query buffers/call and latency fall, and
 app-facing provider counts do not regress.
 
 Pre-fleet-ramp retention boundary: the new immutable URL history currently
-has no cleanup owner. At 100,000 providers and ten successes per four hours,
-it will grow by at least six million rows/day, before failed attempts. A small
+has no cleanup owner. At 100,000 providers and ten measured runs per four hours,
+it will grow by at least six million rows/day, before extra security rechecks. A small
 measurement canary can retain every row; sustained full-fleet operation needs
 an explicit bounded history policy and indexed incremental cleanup. Enforce
 the accepted past-report/replay horizon before deleting deduplication rows.
@@ -562,7 +582,7 @@ Resolved: coverage uses rolling four hours; unknown URL history has neutral
 ranking factor `1`; final-load real content, at most five redirects, 1 MiB
 maximum read, 2-second TTFB, and 100-kbps throughput with a genuine small-body
 exemption; same-URL authenticated TLS clears independently of quality; 50%
-failed-TLS rechecks while exceptions exist; stop only at rolling ten successes
+failed-TLS rechecks while exceptions exist; stop only at rolling ten accepted measured runs
 and no security exceptions; unknown children inherit known hosting parents
 until a reviewed clean-ISP override. The common bucket gates and quality-only
 ARIN exception rule remain unchanged.
@@ -986,7 +1006,8 @@ stage boundaries separate from native membership and selection.
 ## Agent transition checkpoint: 2026-09-28 20:25 UTC
 
 This section supersedes the *status* in the 14:15 checkpoint above, not its
-product contract. The three active goals remain open: complete ten successful
+product contract. At this historical checkpoint the success-only goal (superseded
+by the 2026-09-29 measured-run override above) remained open: complete ten successful
 URL probes per otherwise eligible provider in each rolling four hours; make
 FindProviders2 consume native Quality/Speed supply before fallback without
 starving users; and bring Main PostgreSQL CPU toward its usual ~30% level.
@@ -3486,3 +3507,65 @@ records totaling 220 weight could not be bound to current inventory
 addresses. A live host-local LB read was also incomplete (three SSH
 transport failures and one reader inventory-binding failure). No DNS,
 router, LB or resident placement was changed.
+
+
+## 2026-09-29 measured-run quota correction and current diagnostic evidence
+
+The current user contract is ten accepted measured runs, success plus failure,
+per eligible provider in the strict rolling four-hour window. Earlier dated
+success-only completion counts, throughput deficits and 2,048-lane acceptance
+calculations above are superseded as interpretations of the user target; their
+raw success/error measurements remain historical evidence. Bucket admission
+and ranking policy do not change.
+
+The private correction reads accepted history through a new bounded latest-ten
+measured-run index (migration 741), retains `success_count` and its existing
+index as success-only diagnostics, and retains `completed_run_count` as the
+separate all-turn fairness ledger. Ingest, claims, attempt pacing and the fleet
+census use the measured quota; setup receipts cannot reopen a full measured
+quota. `runs_needed` is the new response/metric field; `successes_needed` remains
+a deprecated compatibility alias for the same deficit under coverage capability 2.
+`quota_complete`, `secure_complete` and `complete` keep their names. New monitors
+require capability 2 and both explicit success/error counter families; mixed or
+old success-only telemetry is unobservable rather than new-contract proof.
+
+Install and attest the additive concurrent index before new quota readers:
+`provider_egress_health_history_url_run(client_id, measured_at DESC)` with
+predicate `url_probe AND url_probe_policy_version=1 AND total_count=1 AND
+(ok_count=0 OR ok_count=1)`. Retain the existing success index and receipt schema.
+There is no history rewrite or new provider-admission gate. Rollout requires
+reviewed migration 741, converged API quota writers/readers, Taskworker capability 2
+census/metrics, then the matching monitor. Until convergence, an old success-only
+writer can re-pace a provider under its old quota; no mixed interval proves the
+new target. No quota correction or migration is yet applied to Main by this patch.
+
+The preceding timing-only Taskworker release is Server `d85261d9`, image
+`2026.9.29-planetoid+1059178590`, pushed manifest
+`sha256:54762c6995cb5a129eb61e3203047533f88e107f19068922c623af09463fb725`.
+Warpctl reported all 20 status paths new at 21:46:08Z; that status convergence is
+not immutable container identity proof. Eight exact processes in the fixed
+21:46:27–21:51:27Z diagnostic window exposed timing capability 1 and 43 series,
+41.70 completed turns/s, mean 11.126s worker occupancy, and 9.585s check-plus-buffer
+stage. Those completed turns do not prove accepted measured quota, and host CPU
+has not been causally attributed to this release.
+
+A separate bounded read of durable selected-policy `url_probe,total_count=1`
+history over 21:46:27.283940–21:51:27.283940Z found 12,766 unique run IDs from 12,766
+providers: 10,304 successes plus 2,462 failures, **42.5533 measured runs/s**.
+Its receipt SHA256 is
+`0a4d726ad507778fc1ff7d7bdfc481ad8713d27956b26ba9ed1ec1f58225c3e1`;
+stdout SHA256 is
+`0a3b715cd8a8b7bae062738838757677f09156f089b83747c1ea991cca153ffe`.
+This is a fixed short interval, not rolling per-provider ten-run completion.
+Its measurement clock differs from completed-turn publication, so dividing these
+two rates does not establish an acceptance yield.
+
+Reevaluate 2,048 lanes against total accepted measurements. For the dated 19:55
+cohort of 109,157 providers, the numerical floor was 75.80/s, now measured runs
+rather than successes. At 11.126s mean occupancy, 2,048 fully busy lanes have an
+ideal raw-turn ceiling of about184.1/s; it is not a measured acceptance forecast.
+The observed 42.5533 durable runs/s cannot be extrapolated linearly across a
+concurrency ramp. Re-measure the current cohort and total measured acceptance,
+prove lane occupancy and stage bottlenecks, and retain per-host CPU/memory,
+latency and TLS/availability gates. The documented hot-host placement and sticky
+residents remain independent limits. No uniform 2,048-lane ramp is validated here.

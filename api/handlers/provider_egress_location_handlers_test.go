@@ -453,10 +453,10 @@ func TestProviderEgressLocationDueHonoursStalenessCutoff(t *testing.T) {
 		if _, included := byId[complete]; included {
 			t.Fatal("ten current URL successes must defer a provider despite its stale location")
 		}
-		if provider, included := byId[legacyFresh]; !included || provider.SuccessesNeeded != 10 || provider.OutcomeCount != 0 {
+		if provider, included := byId[legacyFresh]; !included || provider.RunsNeeded != 10 || provider.OutcomeCount != 0 {
 			t.Fatal("fresh legacy-only evidence must remain due for ten URL successes")
 		}
-		if provider, included := byId[expired]; !included || provider.SuccessesNeeded != 1 || provider.OutcomeCount != 10 {
+		if provider, included := byId[expired]; !included || provider.RunsNeeded != 1 || provider.OutcomeCount != 10 {
 			t.Fatal("nine current URL successes plus one expired success must remain due for one")
 		}
 		if got := due(t, secret); len(got) != 0 {

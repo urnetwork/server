@@ -9374,4 +9374,21 @@ var migrations = []any{
 			BEFORE INSERT OR UPDATE ON client_reliability_running_window
 			FOR EACH ROW EXECUTE FUNCTION client_reliability_running_window_observation_guard();
 	`),
+
+	// The rolling quota counts accepted measured URL success and failure. Keep
+	// the old success index for its diagnostic projection and rolling upgrades;
+	// this exact predicate bounds quota lookups without scanning local/legacy
+	// reports. Install before readers switch to the total measured-run target.
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS provider_egress_health_history_url_run
+	`, `
+		CREATE INDEX CONCURRENTLY provider_egress_health_history_url_run
+			ON provider_egress_health_history(client_id, measured_at DESC)
+			WHERE url_probe AND url_probe_policy_version=1 AND total_count=1 AND (ok_count=0 OR ok_count=1)
+	`, `
+		DROP INDEX IF EXISTS provider_egress_health_history_url_run;
+		CREATE INDEX provider_egress_health_history_url_run
+			ON provider_egress_health_history(client_id, measured_at DESC)
+			WHERE url_probe AND url_probe_policy_version=1 AND total_count=1 AND (ok_count=0 OR ok_count=1)
+	`),
 }
