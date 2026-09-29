@@ -2696,3 +2696,13 @@ nonempty outcomes, nine initial errors, and eight initial plus one filter
 read error in that subset. The eligible cohort changed from the prior frame,
 but the cause is not established. The single watcher kept its PID and ten
 standing tails; no probe or deployment was added.
+
+The eleventh scheduled frame still found migration head 731 versus 740.
+PostgreSQL service CPU measured 51.047 of 96 logical cores over five seconds.
+A coherent URL census had 103,065 eligible providers and zero quota-complete
+providers, with hourly throughput/process coverage incomplete. Picker
+observation paired 20 of 25 API slots, with 465 initial nonempty outcomes,
+three initial errors, and two initial plus one filter read error in that
+subset. Bounded watcher children settled before the next cadence floor; the
+single watcher retained its PID and ten standing tails. These observations
+do not show sustained recovery or a deployed release.
