@@ -2855,3 +2855,21 @@ paired 20 of 25 API slots, with 496 initial nonempty outcomes, nine initial
 errors, eight initial read errors and one filter read error. The same watcher
 PID and ten standing tails persisted. This scoped frame is neither a release
 verification nor evidence of sustained recovery.
+
+The twentieth scheduled recovery frame began at 13:55:09Z. Migration stayed
+at 731 versus required 740, and PostgreSQL used 37.266 of 96 logical cores
+over an independent five-second sample without query ownership attribution.
+The URL signal found two fresh owner candidates on shards 0, 4, 6 and 7,
+so its current eligible and quota counts are unknown; hourly coverage is
+also incomplete. Picker observation paired 20 of 25 API slots, with 538
+initial nonempty outcomes, 14 initial errors and 12 initial plus two filter
+read errors. Scheduled release-builder provenance was unobservable on five
+remote targets, and backup-archives observation failed; neither proves
+release identity or a fresh backup. The same watcher began its next scheduled
+frame at 14:10:09Z. A bounded offline comparison to the thirteenth frame
+found recurring ambiguous shard candidates but no proof of persistent
+processes or simultaneous task execution. No Main rollout or extra monitor
+probe followed from this frame. The bounded offline follow-up is sealed as
+SHA256 `c65de955ca91e42fa782b02259daae4c286594f12980d9d370b3c02e785f442f`;
+it found no new source fix or reason for another active read before staged
+retirement-correction rollout.
