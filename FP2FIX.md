@@ -3713,8 +3713,21 @@ rules. A coherent shard-zero census observed at 23:41:11Z reported
 `secure_complete=0`. The receipt is
 `012ea8c4dc29d3dec5642d5fe44bd5208e6b7c3ce10e77b33b34098401821a4b`.
 This proves fresh runtime generation, capability and shard ownership, not the
-running containers' immutable digest or the correction's Main effect. A fresh
-full five-minute post-convergence acceptance window remains pending.
+running containers' immutable digest or the correction's Main effect.
+
+The first fixed post-convergence history window, 23:39–23:44Z, then found
+9,393 unique accepted measured runs: 6,992 successes and 2,401 failures, or
+**31.31/s**. The indexed read took 0.232 seconds under a two-second bound;
+receipt `4be3a2a8e4f4acef099f1e19825dfd1274c0464539fdf784a892f543263ad01c`.
+At the contemporaneous 109,535-provider denominator the numerical floor is
+76.07/s, so this short interval supplied about 41.2% of that floor. The rate
+is lower than earlier nonoverlapping 52.49 and 45.8867/s windows, but source
+cohorts, process ages and measurement clocks differ; a causal effect of the
+route-loss correction is **not** established. A second settled window and
+same-window completed-turn/local-failure evidence are required before deciding
+whether this reflects reclassification, transient rollout pressure or another
+capacity change. Correctly unmeasured lost-tunnel turns must not be counted
+as accepted failures merely to raise throughput.
 
 The first successor capability-2 active frame began at 22:48:13Z, after the
 explicit 15-minute floor. Its coherent 22:50:58Z census found `eligible=109392`,
