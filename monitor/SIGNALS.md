@@ -1572,6 +1572,22 @@ new accounting or reservation failure. Worker absence alone cannot close a
 wait, write-amplification, capacity, or FP2 availability finding; reduced calls
 caused by failed or missing traffic cannot serve as the healthy control.
 
+The 2026-09-28 23:33:58–23:34:06Z source bracket measured 36.84 PostgreSQL
+core-equivalents but retained only 16.77 cores in stable child PIDs, with
+174 exits and 176 new children. No statement retained the same query hash
+and start across the activity endpoints. Hundreds of young idle transactions
+were positively matched to the ordinary pgx repeatable-read `BEGIN`; neither
+their last statement nor the unmatched CPU identifies a query CPU owner.
+A separate matched-reset statement interval at 23:42:01–09Z identified the
+still-executing pre-`e2356969` settlement join by its exact normalized source
+hash: 1,867 calls, 1,921 rows and 51.316 summed execution seconds. The two
+`CreateCompanionTransferEscrow` origin lookups separately made 135,972 and
+130,976 calls, returning 4,997 and two rows. These are observed work rates,
+not CPU shares or proof of an emitting artifact. Raw/running reliability
+recorded no completed work in that short interval; this does not exclude
+work outside it or an uncompleted long statement. Preserve the high CPU
+finding and require deployed-source and successful-traffic controls.
+
 The 2026-09-26 discriminator established the source and threshold boundary.
 The inventory-owned active PostgreSQL service had CPU accounting enabled and
 a numeric counter with a stable invocation. Direct cgroup intervals measured
@@ -5634,6 +5650,24 @@ evidence, expired and missing clocks, already-online and never-admitted records.
 This establishes a cache-consumption mechanism, not its prevalence on Main;
 verify the serving API artifact and actual request boundary separately.
 
+Published-empty qualifier (2026-09-28/29): schema-2 `cache_empty` is zero
+decoded candidates loaded before request-time expiry, hard, network, family
+or explicit filtering; those later filters do not explain this reason by
+themselves. A bounded Main control at 00:03:42–53Z read only count documents,
+aliases and TTLs for the known US target. Both normal and forced Quality/Speed
+had present, encoded-empty dualstack and IPv6-only arrays; the IPv4 control
+had 73,259 candidates (the older forced-Speed publication had 73,008).
+US-caller aliases selected the baseline and the schema markers stayed ready,
+so absent duplicate caller and legacy keys were expected, not missing supply.
+This establishes that target's published family boundary, not fleet absence,
+native membership, a coherent whole-cache generation, or the target of every
+US-caller request in §2.9a. Trace stored family proof and the publisher cohort
+before attributing an omission. The earlier direct-overlay Redis timeout was
+an observer-path failure; an inventory-bound, strict SSH gateway route supplied
+the successful control without changing Redis. An absent native-source schema
+metric on the observed API processes remains instrumentation/deployment
+uncertainty, not zero native-source events.
+
 Exclusion-budget qualifier (2026-09-27 source correction): request-time
 exclusions used to consume the fixed sampled-row budget before selection. A
 deterministic 2,000-entry v4 cache with 1,980 excluded IDs returned ten of its
@@ -7222,6 +7256,19 @@ context, not a promise that every wait woke from Redis. Mixed old/new writers
 can fail to publish without incrementing the new metric; the timed and final
 database reads preserve correctness, and exact artifact inventory remains
 necessary to close that false negative.
+
+The 2026-09-28 23:49–23:52Z fixed-label controls attributed the observed
+amplification to 20 API processes: about 3.155 million fallback and 0.501
+million deadline lookups in five minutes, about 4.32 lookups per completed
+request, and only one event lookup. Connect and Taskworker exported initialized
+zero activity. A separate notification control found about 105,682 API
+publications and 2.114 million subscriber deliveries, with all measured loss
+classes and `unowned` zero and no resets. Subscriber deliveries are broadcast
+copies, not unique origins. This rejects measured notification loss as the
+explanation for those API fallback counts, while leaving unmatched/absent
+origin waits, request resolution and the five unobserved API slots open.
+Do not remove authoritative fallback or broaden waits from this aggregate;
+reconcile the exact failure cohorts and source-matched SQL work first.
 
 Retain an immediate lookup, a fast first retry, event/ack-triggered rechecks,
 bounded timed fallback, and a final authoritative lookup at the existing
@@ -17057,6 +17104,23 @@ resident/forward lifecycle as a contributor; a high unattributed remainder
 keeps the call-site boundary open.  Missing, stale, malformed, or duplicated
 ownership gauges are explicitly `missing`, `invalid`, or `mixed`, never
 treated as zero and never used to clear the independent raw runtime PAGE.
+
+A 2026-09-28 23:54:42Z bounded control retained 20 current process vectors,
+including smaller peers omitted by alert-only output. All proved lazy ingress.
+Edge0/1 g1–g4 had roughly 4.6–6.2 thousand residents, 29.5–35.7 goroutines per
+resident and 1.97–3.08 MB heap per resident; large edge3/4 peers had roughly
+21.2–43.1 thousand residents, 20.0–29.5 goroutines per resident and
+1.62–2.91 MB heap per resident. Population correlated with high process totals;
+this control did not show inflated per-resident cost in the largest processes.
+It does not prove a leak is absent, equivalent traffic, adequate host capacity,
+or a safe resident limit. Most goroutines remained outside the three owned
+gauges, and exact running source remained unavailable. A separate local
+32-client constructor control added about four goroutines and 33 KB live heap
+per bare internal client and joined them on close; it omitted full residents,
+transports and active traffic and is not a Main reproduction. Retain every
+runtime PAGE while finding those active owners. Current owning Connect source
+has no production pprof route, and SIGQUIT participates in service shutdown;
+do not invent a profile endpoint or use a shutdown signal as a profile read.
 
 `connect-resident-cost-unobservable` WARNs immediately when the newest Connect
 population join is missing/stale, duplicated, invalid, or cannot select an

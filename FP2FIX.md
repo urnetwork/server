@@ -1578,3 +1578,81 @@ the 20 instrumented API processes, with no counter reset. The measured
 3.155 million fallback lookups therefore are not explained by measured
 notification loss in those processes. Five API slots are missing and there
 is no per-request join, so the full-fleet cause is still unknown.
+
+The implementation and this checkpoint were committed directly on Server
+`main` as `d4eada4f`, pulled with no incoming changes and pushed; local
+`main` and `origin/main` matched with a clean worktree. A locally rebuilt
+and pinned migration adapter from that commit reports migration count 740
+and identities for all nine pending versions 732–740. At 23:59:26 UTC its
+read-only, strict inventory-bound direct-primary preflight verified primary
+port 5432, current head 731, zero active index builds, zero other adapter
+sessions, five-second statement and one-second lock deadlines, and no DDL.
+The temporary tunnel was then closed. This catalog check does not establish
+backup, disk, old-snapshot or CPU capacity for the apply stages; Model/Work
+gates and fresh resource preflight remain pending.
+
+The fifth watcher wave began at 23:57:35 UTC on cadence. Migration lag and
+reliability-index drift repeated. At 23:59:31, eight Connect processes
+on edge-3/edge-4 paged; edge-3/g1 joined the prior seven with 127.65 GB
+RSS, 742,289 goroutines and a five-minute 5.478-core CPU rate. Edge-4/g2
+remained the peak at 163.00 GB, 950,545 goroutines and 5.978 cores. All
+reported the lazy-forward capability enabled and one same-block generation;
+neither fact identifies the active goroutine owner or proves a leak.
+
+The exact-key cache reader attempted only its initial cluster PING through
+the enabled edge-6 overlay Redis endpoint at 23:59:51–00:00:02 UTC and
+timed out. It read no count or alias keys, wrote nothing and did not retry.
+This is an observation-path failure from this host, not proof that Redis,
+its publication pipeline or IPv6 provider supply is down. The bounded
+reader and private exact US target are retained for an attested reachable
+route; the cache publication/read boundary remains unknown.
+
+A separate, attested edge-1 forward to the inventory edge-6 LAN address
+reached the Redis entry and boundary node ports. One bounded 33-forward
+session read only exact count/schema/alias keys for the known **US provider
+target** at 00:03:42–53 UTC, then closed. All three schema markers were
+ready. Normal and forced Quality/Speed count arrays were encoded empty for
+dual-stack and IPv6-only; the IPv4 control held 73,259 providers (forced
+Speed 73,008, with an older publication TTL). Caller aliases selected the
+baseline correctly. This establishes a published US-target IPv6
+`cache_empty` boundary rather than a Redis read failure or a request-time
+family filter. It does not prove fleet-wide IPv6 absence or explain why the
+publisher found no family members. The Main request metrics label **US
+callers**, not US provider targets, so those requests still cannot be joined
+to this cache target without their target IDs.
+
+The fifth watcher product frame at 00:03:17–41 UTC independently found
+zero providers on 58/58 best-available and 126/126 location IPv6/Quality
+ordinary requests with US callers. Picker paired only 20/25 API processes:
+initial outcomes were 177 nonempty/five error, search 18 nonempty/one
+empty, with three read-initial and one read-filters diagnostic. A later
+URL cohort contained 110,721 eligible, zero quota-complete and zero
+secure-complete, 94,997 due, 110,440 overdue and 923,953 accepted
+successes still needed; throughput remained incompletely observable.
+These are sampled/cohort facts, not a global provider-supply rate.
+
+The eight fifth-wave incomplete `_ccnew` reindex artifacts belong only to
+`user_auth_reset`, `device_add_history` and `competition_job_event`
+(including their TOAST tables), total about 8.53 MB. They do not overlap
+the pending FP2 migration 733–739 table or index names, though this does
+not resolve Main's high load or large-index capacity.
+
+An exact-US publisher-source family census was stopped at a non-executing
+`EXPLAIN`: Main would scan the global valid/connected client index and
+apply the US country ID as a residual filter, with estimated cost 431,540
+and further global provide-key probes. Under the current PostgreSQL load,
+that is not a bounded-country read. No census query ran and writer-family
+membership remains unknown; a narrower index-ordered discriminator is needed.
+
+The corrected second full Model partition passed in 1,180.705 seconds with
+no failures. Partitions zero and one of four are green; partition two is
+running. Work package normal and Model/Work race gates remain.
+
+A later explicitly biased 4,096-ID prefix sample at 00:15:20 UTC contained
+3,136 US rows and 3,048 top-level selectable candidates, but zero stored
+or candidate IPv6 proof. Among 3,144 connected rows, 16 had IPv6 sockets,
+yet none had IPv6 intent, proven family or fresh located proof; all 3,144
+carried legacy intent and the same update block 29,843,997. This aligns
+with the published US IPv6 cache-empty result and points to family marking
+in the sampled source cohort. Because IDs were sampled as a prefix, it
+cannot establish full-US or fleet counts. No full-table census ran.
