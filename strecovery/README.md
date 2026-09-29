@@ -5,12 +5,18 @@ restoration and offline receipt-observation reconciliation. It reads every
 intent generation and every signed attempt from each explicitly selected
 operator database, without filtering status or time, and joins them with
 selected retained transaction stores. It never signs, estimates new transaction
-fees, reserves a nonce, broadcasts, changes database status or contacts a
-chain RPC endpoint. The separate `reconcile` command computes conditional gas
+fees, reserves a nonce, broadcasts or changes database status. The custody
+commands do not contact chain RPC. The separate `reconcile` command computes conditional gas
 fees from pinned observation inputs; it cannot authenticate their finality.
 The [`verify-receipts` command](RECEIPT-COMMITMENTS.md) checks retained raw
 headers and transaction/receipt proofs, including gas derived from committed
 cumulative values. Actual runtime fees and independent finality remain unknown.
+
+The separate [`collect-receipts` command](RECEIPT-COLLECTION.md) performs bounded
+owned-RPC reads to produce those observation/proof inputs in one private,
+create-only file after full offline verification. `verify-collection` replays
+that file offline. Both retain unapproved node/mapping status and unknown actual
+fees; these added commands do not change original custody or operator databases.
 
 The incident motivating this path was a continuation collector that had 226 of
 230 database signatures. Four original signatures needed manual restoration.

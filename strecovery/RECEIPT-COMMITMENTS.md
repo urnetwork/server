@@ -94,8 +94,11 @@ products do not prove the runtime's actual debit or native-unit conversion.
 The existing conditional fee totals are retained only in
 `conditional_observations` and are never promoted to actual spending evidence.
 
-The command is a verifier for retained proofs, not a live observation producer.
-An independently approved bounded collector, native finality/mapping verifier,
+The command is a verifier for retained proofs. The separate
+[bounded collector](RECEIPT-COLLECTION.md) now produces its two input objects
+from explicit owned-RPC reads and publishes them together after offline replay.
+Its source and mapping remain unapproved observations. Owned-node capability
+qualification, a native finality/mapping verifier,
 exact runtime fee evidence, production service adoption and cross-host custody
 qualification remain open MG03/PF03 work. Found orphan/future receipts cannot be
 proved under this selected boundary and refuse this command; the original

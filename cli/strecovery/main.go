@@ -32,7 +32,10 @@ func main() {
 // tests to prove rejected input never reaches a database connection.
 func run(ctx context.Context, args []string, stdout io.Writer, reader strecovery.SnapshotReader) error {
 	if len(args) == 0 {
-		return errors.New("usage: strecovery collect|inspect|restore|reconcile|verify-receipts [flags]")
+		return errors.New("usage: strecovery collect|inspect|restore|reconcile|verify-receipts|collect-receipts|verify-collection [flags]")
+	}
+	if args[0] == "collect-receipts" || args[0] == "verify-collection" {
+		return runReceiptCollectionCommand(ctx, args, stdout)
 	}
 	command := args[0]
 	flags := flag.NewFlagSet("strecovery "+command, flag.ContinueOnError)
