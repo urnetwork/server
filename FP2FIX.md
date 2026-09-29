@@ -2645,3 +2645,33 @@ call cannot be blindly retried. Migration 740 forces client 5-minute, 1-hour
 and 12-hour observation reanchors; it does not by itself force the seven-day
 network reanchor. The numbered migration review receipt is in the monitor
 ledger; Main remains at 731 and no migration was applied.
+
+Offline URL review separates a durable quota deficit from a visibility gap.
+At the coherent 10:46 census, 103,531 eligible providers had 366,522 current
+qualifying successes in total, an average of 3.54 each; none had the required
+ten. Holding that cohort at quota needs at least about 71.90 accepted unique
+successes per second across a four-hour window. Local desired Taskworker
+placement has ten slots, while monitor inventory disables one two-slot host;
+the two desired gaps keep hourly/process coverage incomplete until placement
+intent or authorized reachability changes. Current heartbeat retirement and
+range-only counter fixes address visibility, not durable quota credit. Exact
+remote effective placement, DNS/route owner and throughput remain unproved;
+the offline receipt adds no Main contact or code change.
+
+The ninth scheduled watcher frame kept migration head at 731 versus 740.
+Its independent five-second PostgreSQL sample measured 44.566 of 96 logical
+cores. A coherent URL census had 103,534 eligible providers and zero
+quota-complete providers, while hourly success/process coverage remained
+incomplete. Picker observation paired 20 of 25 API slots, with 537 initial
+nonempty outcomes, 13 initial errors, and seven initial plus two filter read
+errors in that subset. The single watcher stayed on its original PID and
+none of these scoped observations establishes sustained recovery.
+
+An offline API heap review still found no allocation owner or production
+patch. Ordinary location reads share the map; sampled occupancy and completed
+request residence have different denominators, so completed means cannot
+bound unfinished or canceled request work. Exact-process artifact and reader
+state after rollout should be checked first. A separately reviewed bounded
+identity-free live-work and SearchLocal structure diagnostic is an option if
+that still leaves the tail unexplained; it has not been implemented, deployed
+or used against Main.
