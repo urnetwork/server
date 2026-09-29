@@ -12,6 +12,7 @@ import (
 
 const NativeFinalityCheckpointSchema = "urnetwork-native-finality-checkpoint-v1"
 const ReceiptFinalityProofSchema = "urnetwork-operator-receipt-finality-proof-v1"
+const ReceiptFinalityDescendantProofSchema = "urnetwork-operator-receipt-finality-proof-v2"
 const ReceiptFinalityReconciliationSchema = "urnetwork-operator-receipt-finality-reconciliation-v1"
 const NativeFinalityCodecProfile = "subtensor-u32-blake2-grandpa-ed25519-scheduled-v1"
 const NativeFinalityRuntimeSource = "67dcf7f791dc495064c293f080a0702cb433e51e"
@@ -61,8 +62,10 @@ type GrandpaFinalitySegment struct {
 	JustificationScale string   `json:"justification_scale"`
 }
 
-// Both independent input identities are bound before cryptographic work. The
-// collection's old external mapping label is retained but never trusted here.
+// Both independent input identities are bound before cryptographic work. V1
+// ends exactly at the collection boundary; v2 may certify a later descendant
+// while binding that boundary's exact header on the complete signed ancestry.
+// The collection's old external mapping label is retained but never trusted.
 type ReceiptFinalityProof struct {
 	Schema         string                   `json:"schema"`
 	CollectionHash string                   `json:"collection_hash"`
@@ -71,7 +74,10 @@ type ReceiptFinalityProof struct {
 }
 
 // These are proof facts relative to the pinned checkpoint, not chain admission.
-// The unchanged receipt report preserves exact histories and null actual fees.
+// NativeFinalized/NativeStateRoot always identify the original collection.
+// V2's NativeCertified identifies the tip owning NextSetId/NextAuthorities and
+// PendingChange; v1 omits it and retains its original output shape. The unchanged
+// receipt report preserves exact histories and null actual fees.
 type ReceiptFinalityReconciliation struct {
 	Schema                           string                           `json:"schema"`
 	Admission                        string                           `json:"admission"`
@@ -83,6 +89,7 @@ type ReceiptFinalityReconciliation struct {
 	CollectionHash                   string                           `json:"collection_hash"`
 	NativeCheckpoint                 ObservedBlockIdentity            `json:"native_checkpoint"`
 	NativeFinalized                  ObservedBlockIdentity            `json:"native_finalized"`
+	NativeCertified                  *ObservedBlockIdentity           `json:"native_certified,omitempty"`
 	NativeStateRoot                  string                           `json:"native_state_root"`
 	EvmFinalized                     ObservedBlockIdentity            `json:"evm_finalized"`
 	FrontierPostLogVariant           uint8                            `json:"frontier_post_log_variant"`
@@ -207,7 +214,7 @@ func VerifyReceiptFinality(ctx context.Context, archive *Archive, collection *Re
 	if err != nil {
 		return nil, err
 	}
-	if proof == nil || proof.Schema != ReceiptFinalityProofSchema || proof.CheckpointHash != checkpoint.Hash() || proof.CollectionHash != collection.ContentHash || len(proof.Segments) == 0 || len(proof.Segments) > maximumGrandpaCertificates {
+	if proof == nil || (proof.Schema != ReceiptFinalityProofSchema && proof.Schema != ReceiptFinalityDescendantProofSchema) || proof.CheckpointHash != checkpoint.Hash() || proof.CollectionHash != collection.ContentHash || len(proof.Segments) == 0 || len(proof.Segments) > maximumGrandpaCertificates {
 		return nil, errors.New("native finality proof context or certificate count differs")
 	}
 	boundary := collection.Observations.NativeFinalized
@@ -215,6 +222,7 @@ func VerifyReceiptFinality(ctx context.Context, archive *Archive, collection *Re
 		return nil, errors.New("native finality selected boundary is outside the rolling checkpoint interval")
 	}
 	cursor := anchor
+	var boundaryHeader *nativeFinalityHeader
 	setId, authorities, pending := checkpoint.SetId, checkpoint.Authorities, checkpoint.PendingChange
 	certificates := make([]GrandpaCertificateResult, 0, len(proof.Segments))
 	transitions := 0
@@ -233,8 +241,16 @@ func VerifyReceiptFinality(ctx context.Context, archive *Archive, collection *Re
 			if err != nil {
 				return nil, err
 			}
-			if header.identity.Number != cursor.identity.Number+1 || header.parent != cursor.identity.Hash || header.identity.Number > boundary.Number {
+			if header.identity.Number != cursor.identity.Number+1 || header.parent != cursor.identity.Hash ||
+				header.identity.Number-anchor.identity.Number >= maximumNativeFinalityHeaders ||
+				proof.Schema == ReceiptFinalityProofSchema && header.identity.Number > boundary.Number {
 				return nil, errors.New("native finality header ancestry is disconnected or outside the collection boundary")
+			}
+			if header.identity.Number == boundary.Number {
+				if header.identity != boundary {
+					return nil, errors.New("native finality certified ancestry differs from the exact collection boundary")
+				}
+				boundaryHeader = header
 			}
 			if pending != nil && header.identity.Number > pending.EnactmentNumber {
 				return nil, errors.New("native finality segment skips the outgoing authority enactment certificate")
@@ -269,10 +285,10 @@ func VerifyReceiptFinality(ctx context.Context, archive *Archive, collection *Re
 			transitions++
 		}
 	}
-	if cursor.identity != boundary {
-		return nil, errors.New("native finality certificate chain does not end at the exact collection boundary")
+	if boundaryHeader == nil || proof.Schema == ReceiptFinalityProofSchema && cursor.identity != boundary {
+		return nil, errors.New("native finality certificate chain does not cover the exact collection boundary")
 	}
-	evmHash, variant, err := cursor.frontierHash()
+	evmHash, variant, err := boundaryHeader.frontierHash()
 	if err != nil {
 		return nil, err
 	}
@@ -290,9 +306,14 @@ func VerifyReceiptFinality(ctx context.Context, archive *Archive, collection *Re
 		copy.Authorities = slices.Clone(pending.Authorities)
 		nextPending = &copy
 	}
+	var certified *ObservedBlockIdentity
+	if proof.Schema == ReceiptFinalityDescendantProofSchema {
+		identity := cursor.identity
+		certified = &identity
+	}
 	return &ReceiptFinalityReconciliation{Schema: ReceiptFinalityReconciliationSchema, Admission: "unapproved_checkpoint_proof", CodecProfile: NativeFinalityCodecProfile,
 		CodecRuntimeSource: NativeFinalityRuntimeSource, CodecSdkSource: NativeFinalitySdkSource, CheckpointHash: checkpoint.Hash(), ProofHash: objectDigest(proof), CollectionHash: collection.ContentHash,
-		NativeCheckpoint: anchor.identity, NativeFinalized: cursor.identity, NativeStateRoot: cursor.stateRoot, EvmFinalized: collection.Observations.EvmFinalized, FrontierPostLogVariant: variant,
+		NativeCheckpoint: anchor.identity, NativeFinalized: boundaryHeader.identity, NativeCertified: certified, NativeStateRoot: boundaryHeader.stateRoot, EvmFinalized: collection.Observations.EvmFinalized, FrontierPostLogVariant: variant,
 		Certificates: certificates, AuthorityTransitions: transitions, NextSetId: setId, NextAuthorities: slices.Clone(authorities), PendingChange: nextPending,
 		GrandpaCertificatesVerified: true, NativeHeaderAncestryVerified: true, NativeEvmCommitmentVerified: true, Receipts: receipts,
 		MissingAuthorities: []string{"independent genesis and initial checkpoint approval, including active set ID, weighted keys, live voter state and any pending transition", "deployed runtime/code and Frontier digest semantics admission for the verified interval", "authenticated native runtime transaction debit/refund evidence; actual fees remain null", "account nonce state proofs, service adoption and live custody/restart qualification; no recovery spend is authorized"}}, nil

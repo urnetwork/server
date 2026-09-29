@@ -7,6 +7,12 @@ and the EVM header commitment **relative to a separately pinned checkpoint**.
 It does not approve that checkpoint, genesis, deployed runtime or recovery spend.
 No independently approved mainnet checkpoint is shipped with this code.
 
+[`capture-finality`](NATIVE-FINALITY-CAPTURE.md) captures bounded native proof
+bytes from an operator-selected owned archive route into private resumable
+custody. Capture requires the same separately pinned checkpoint and never
+derives its authority from a node reply. Its v2 proofs can certify a descendant
+when the collection's exact native boundary has no stored justification.
+
 ```text
 strecovery verify-finality \
   --archive /private.example/archive.json \
@@ -67,6 +73,14 @@ collection's existing content seal. Each segment contains:
   header: u64 round, commit `(H256, u32, Vec<SignedPrecommit>)`, and ancestry
   `Vec<Header>`.
 
+`urnetwork-operator-receipt-finality-proof-v2` has the same fields and certificate
+rules, but permits the last certified header to be a descendant of the exact
+collection boundary. The complete consecutive ancestry must contain that
+boundary's number **and hash**. A later quorum cannot substitute a different
+ancestor. The original collection, EVM boundary and retained history stay intact.
+The checkpoint-to-certified-tip interval still advances fewer than 4096 blocks,
+and all path/vote-ancestry headers share the existing count and byte bounds.
+
 Each precommit contains `(H256, u32)`, a 64-byte signature and a 32-byte public
 key. Ed25519 verification covers SCALE `(Message::Precommit, round, set_id)`:
 index `1`, target hash, little-endian u32 height, u64 round and u64 set ID.
@@ -88,11 +102,13 @@ changes, disabled voters and pause/resume are terminal for this profile.
 A fresh independently approved checkpoint is needed after an unsupported
 transition; a runtime reply cannot grant that approval.
 
-The last certified native header must equal the collection's native boundary.
-Its single `Consensus(fron, PostLog)` must use reviewed variant `1` (block hash
+V1's last certified native header must equal the collection's native boundary;
+its exact-boundary semantics and report shape are unchanged. V2 can certify a
+later tip, but both versions authenticate the collection boundary's single
+`Consensus(fron, PostLog)`, which must use reviewed variant `1` (block hash
 and complete transaction-hash vector) or `3` (block hash). The vector is bounded
 and completely decoded; transaction membership still comes from trie proofs.
-The digest's EVM hash must equal the exact final RLP15 header authenticated by
+The boundary digest's EVM hash must equal the exact final RLP15 header authenticated by
 `VerifyReceiptCollection`. EVM height comes from that EVM header; native height
 never selects an EVM block. Every archived signed transaction/receipt proof is
 replayed, so a native certificate cannot bypass existing evidence checks.
@@ -127,6 +143,13 @@ whenever an unsupported transition or provenance gap breaks that chain.
 Ordinary scheduled rotation is covered cryptographically; keys are not manually
 replaced in the middle of a proof.
 
+For v2, `native_finalized` and `native_state_root` still identify the original
+collection boundary. The additional `native_certified` identifies the last
+certificate target. The next authority fields belong to **that certified tip**,
+including a rotation after the collection boundary. A rolling checkpoint uses
+the last segment's last raw header and `native_certified`, never the older
+collection header with later authority state. V1 omits `native_certified`.
+
 This code has no approval flag or approval adapter. Its report always says
 `admission: unapproved_checkpoint_proof` and leaves
 `authority_checkpoint_authenticated`, `genesis_authenticated`,
@@ -152,8 +175,8 @@ This increment supplies the native state-root commitment relative to the
 checkpoint. It supplies no authenticated storage/events, execution metadata,
 source-to-deployed-Wasm admission or transaction-scoped debit/refund evidence.
 Every `actual_gas_fee` remains null. Receipt gas times a claimed price remains
-conditional arithmetic. Account nonce proofs, a bounded proof-capture adapter,
-owned-node RPC capability, production service adoption, release composition and
+conditional arithmetic. Account nonce proofs, deployed owned-node capture
+capability, production service adoption, release composition and
 live custody/restart qualification remain open MG-03/PF-03 dependencies.
 
 The [actual-fee dependency decision](ACTUAL-FEE-DEPENDENCIES.md) examines generic

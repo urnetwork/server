@@ -24,6 +24,12 @@ the native Frontier digest relative to a separately pinned checkpoint. It keeps
 checkpoint, genesis and runtime approval explicitly absent and actual fees null.
 It adds no signing, RPC, database or custody mutation to verification.
 
+[`capture-finality`](NATIVE-FINALITY-CAPTURE.md) reads an explicit owned archive
+route into a bounded private journal, preserves partial evidence across restart,
+and publishes a pinned proof only after offline verification. A bounded certified
+descendant can cover a boundary with no stored justification while preserving
+the original collection. Independent authority approval remains absent.
+
 The incident motivating this path was a continuation collector that had 226 of
 230 database signatures. Four original signatures needed manual restoration.
 The live account reconciler is deliberately status-filtered and cannot serve

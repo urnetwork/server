@@ -24,6 +24,7 @@ import (
 type finalityTestHeader struct {
 	raw      []byte
 	identity ObservedBlockIdentity
+	digests  [][]byte
 }
 
 // Independent SCALE encoding covers the u32 compact domain used by headers.
@@ -51,7 +52,7 @@ func finalityTestNativeHeader(number uint32, parent string, digests ...[]byte) *
 		raw = append(raw, digest...)
 	}
 	hash := blake2b.Sum256(raw)
-	return &finalityTestHeader{raw: raw, identity: ObservedBlockIdentity{Number: uint64(number), Hash: "0x" + hex.EncodeToString(hash[:])}}
+	return &finalityTestHeader{raw: raw, identity: ObservedBlockIdentity{Number: uint64(number), Hash: "0x" + hex.EncodeToString(hash[:])}, digests: digests}
 }
 
 // This encodes Consensus(engine, payload), including both SCALE lengths.

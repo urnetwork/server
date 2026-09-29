@@ -23,8 +23,9 @@ const maximumCollectionRequests = 32768
 
 var errReceiptCollectorRedirect = errors.New("receipt collector refuses redirects")
 
-// No client/cache is shared across invocations. The wait port is private and
-// lets tests force retry cancellation without timing or scheduler assumptions.
+// No client/cache is shared across invocations. Native capture selects its own
+// read profile and durable request/response hooks; the old collector has none.
+// The private wait port allows deterministic retry cancellation in tests.
 type receiptCollectorRpc struct {
 	url         string
 	client      *http.Client
@@ -32,6 +33,9 @@ type receiptCollectorRpc struct {
 	requests    int
 	remaining   int
 	retryWindow time.Duration
+	finality    bool
+	beforeRead  func(context.Context, int, []byte) error
+	afterRead   func(context.Context, int, int) error
 }
 
 // Credentials and redirect/proxy routes cannot silently change the explicit
@@ -67,10 +71,18 @@ func newReceiptCollectorRpc(endpoint string) *receiptCollectorRpc {
 // Result decoding may use a projection, but duplicate/case-folded keys are
 // rejected over the entire reply, including fields absent from that projection.
 func (self *receiptCollectorRpc) call(ctx context.Context, method string, params []any) (json.RawMessage, error) {
-	switch method {
-	case "eth_chainId", "system_chain", "chain_getBlockHash", "eth_getBlockByNumber", "eth_getTransactionReceipt", "eth_getTransactionCount", "debug_getRawHeader", "debug_getRawBlock", "debug_getRawReceipts":
-	default:
-		return nil, errors.New("method is outside the receipt collection read profile")
+	if self.finality {
+		switch method {
+		case "chain_getBlockHash", "chain_getHeader", "chain_getBlock":
+		default:
+			return nil, errors.New("method is outside the native finality capture read profile")
+		}
+	} else {
+		switch method {
+		case "eth_chainId", "system_chain", "chain_getBlockHash", "eth_getBlockByNumber", "eth_getTransactionReceipt", "eth_getTransactionCount", "debug_getRawHeader", "debug_getRawBlock", "debug_getRawReceipts":
+		default:
+			return nil, errors.New("method is outside the receipt collection read profile")
+		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, self.retryWindow)
 	defer cancel()
@@ -91,6 +103,11 @@ func (self *receiptCollectorRpc) call(ctx context.Context, method string, params
 		}{Version: "2.0", Id: id, Method: method, Params: params})
 		if err != nil {
 			return nil, err
+		}
+		if self.beforeRead != nil {
+			if err := self.beforeRead(ctx, id, payload); err != nil {
+				return nil, err
+			}
 		}
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, self.url, bytes.NewReader(payload))
 		if err != nil {
@@ -123,6 +140,11 @@ func (self *receiptCollectorRpc) call(ctx context.Context, method string, params
 				if !retry {
 					return nil, fmt.Errorf("receipt collection %s refused HTTP status %d", method, response.StatusCode)
 				}
+			}
+		}
+		if self.afterRead != nil {
+			if err := self.afterRead(ctx, id, len(raw)); err != nil {
+				return nil, err
 			}
 		}
 		if err := ctx.Err(); err != nil {

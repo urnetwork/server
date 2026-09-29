@@ -35,9 +35,9 @@ func finalityCommandDigest(t *testing.T, value any) string {
 	return fmt.Sprintf("sha256:%x", sha256.Sum256(raw))
 }
 
-// Successful output remains provisional and byte-identical on repeated replay.
-// A correctly re-pinned forged certificate emits no output or custody mutation.
-func TestRecoveryCommandVerifiesNativeFinalityOfflineWithoutSelfApproval(t *testing.T) {
+// Independent native SCALE encoding supplies reusable private CLI evidence.
+func finalityCommandInputs(t *testing.T) ([]string, *commandReader, map[string][]byte, *strecovery.ReceiptFinalityProof, []byte) {
+	t.Helper()
 	configPath, archivePath, _ := commandConfig(t)
 	reader := &commandReader{}
 	if err := run(context.Background(), []string{"collect", "--config", configPath, "--archive", archivePath}, new(bytes.Buffer), reader); err != nil {
@@ -110,6 +110,13 @@ func TestRecoveryCommandVerifiesNativeFinalityOfflineWithoutSelfApproval(t *test
 		retainedFiles[path] = raw
 		args = append(args, "--"+input.name, path, "--"+input.name+"-sha256", fmt.Sprintf("sha256:%x", sha256.Sum256(raw)))
 	}
+	return args, reader, retainedFiles, proof, certificate
+}
+
+// Successful output remains provisional and byte-identical on repeated replay.
+// A correctly re-pinned forged certificate emits no output or custody mutation.
+func TestRecoveryCommandVerifiesNativeFinalityOfflineWithoutSelfApproval(t *testing.T) {
+	args, reader, retainedFiles, proof, certificate := finalityCommandInputs(t)
 	var first []byte
 	for range 2 {
 		var output bytes.Buffer
