@@ -11691,6 +11691,49 @@ cross the old deadline with an actual join barrier, verify no premature
 revocation or slot release, and then prove authenticated retirement after the
 barrier opens. Never expose raw credential errors in a final close error.
 
+A 2026-09-29 Main control kept the current residual separate from historical
+stock. At 00:50:33Z, the exact recent cohort contained 877,732 mature children:
+877,715 were inactive and 17 were active, disconnected, and never connected.
+The oldest residual was 20,162 seconds old. This is the independent
+`probe-unused-args-retirement` WARN, even though nearly all mature children
+were retired. An older, biased prefix sample with a median age of 24.9 days
+was outside this six-hour denominator and inside the source's 30-day derived
+client idle-reaper interval; it does not establish a failure of current
+retirement or justify shortening retention.
+
+A deterministic real-writer regression then established a separate mint
+failure boundary in Server. `AuthNetworkClient` commits the child and signs
+its credential before filling the optional identity cache. Redis acquisition
+performs a PING which can raise on caller cancellation, including after a
+separate PostgreSQL connection can already see the committed active child.
+The internal credential wrapper converted that panic to a canceled mint with
+no returned identity, leaving the generator nothing to retire. Successful
+retirement counters do not cover this lost-return path, and a canceled mint
+counter alone does not establish whether a child committed. The unguarded
+post-commit cache call originated in `fdcd02081`; running artifact ancestry
+and any participating modified source must be checked before assigning this
+mechanism to production.
+
+The source correction makes only the optional cache fill best effort, including
+its acquisition/PING boundary, so a cache failure cannot discard a committed
+identity. It preserves database commit/error handling, cache TTL and read-through
+refill, credential roles, request cancellation, and ordinary network-fenced
+retirement. The regression cancels exactly at the cache PING after an independent
+PostgreSQL read proves the child committed, requires the returned credential,
+and then verifies durable retirement through the normal API model. Healthy
+minting and cancellation before the transaction are separate controls; the
+latter must still commit no child. No sleep, longer timeout, retry, retention
+change, or production data correction is part of this fix.
+
+The 17-child aggregate cannot identify which mint or cleanup step failed.
+Keep the existing joined direct-removal and reached-channel controls, compare
+the exact running artifact before recommending any prior correction, and
+require a post-convergence cohort through the ten-minute grace for live
+attribution. Deployment and that observation window remain necessary even
+after the local committed-child regression passes. Missing request-level
+commit/return ownership is an explicit attribution limit, not evidence that
+the residual is harmless or that every canceled mint leaked a child.
+
 Do not bulk-delete or deactivate production children to clear either alert.
 Software fixes prevent new leakage; historical active stock needs a separately
 reviewed, bounded reaper or operational cleanup. Begin an explicit post-rollout

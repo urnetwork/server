@@ -91,6 +91,38 @@ func TestProbeCleanupSignalSyntheticReachedChannelLeak(t *testing.T) {
 	}
 }
 
+func TestProbeCleanupSignalSyntheticSparseUnusedArgsKeepsCauseUnknown(t *testing.T) {
+	// A small residual in an otherwise retired recent cohort must retain its
+	// own warning without claiming a specific mint or cleanup step failed.
+	row := Row{"1", "903514", "877732", "877715", "0", "17", "751", "0", "20162", "17", "0"}
+	alerts, err := NewProbeCleanupSignal().Run(
+		context.Background(), syntheticSettings(syntheticProbeCleanupSource(row)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert := requireAlertClass(t, alerts, "probe-unused-args-retirement")
+	if alert.Severity != SeverityWarn {
+		t.Fatalf("sparse residual severity=%s, want warn", alert.Severity)
+	}
+	for _, want := range []string{
+		"17 of 877732 mature",
+		"The aggregate does not identify which mint or cleanup step failed",
+		"Compare the running artifact",
+		"optional Redis cache fill",
+		"committed child identity",
+		"separate PostgreSQL connection",
+		"before and after commit",
+	} {
+		if !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("sparse cleanup alert missing causal qualifier %q", want)
+		}
+	}
+	if hasProbeCleanupAlertClass(alerts, "probe-child-retirement") {
+		t.Fatal("never-connected residual was assigned to reached-channel teardown")
+	}
+}
+
 func TestProbeCleanupSignalSyntheticBranchesAlertIndependently(t *testing.T) {
 	row := Row{"1", "250", "200", "169", "10", "21", "25", "0", "901", "1", "20"}
 	alerts, err := NewProbeCleanupSignal().Run(

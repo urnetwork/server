@@ -1905,3 +1905,133 @@ already contain H1/H3 family-intent plumbing and `ipv6_proven`
 aggregation, so version ancestry alone does not prove an absent intent
 feature or identify which process emitted the old SQL. Independent running
 artifact and caller evidence remain required.
+
+The next documentation checkpoint was committed on Main as `d616f38b`,
+pulled with no incoming changes and pushed; the worktree matched
+`origin/main`. The local migration adapter was rebuilt from that exact
+commit. Its executable SHA-256 is
+`ab1fd25b5ffa42595dd9f75718f70723e853ab14272db7e46a93064716345152`;
+its nine versioned identities for 732–740 retain manifest SHA-256
+`2448e0b0242f52665dc3cc9be2d5cd19ad211e2b1539c40696c6a7823942833b`.
+This is a source identity check, not a Main migration; the numbered schema
+head remains 731 at the ninth watcher start.
+
+The full Work race run then passed in 328.183 seconds on the same private
+PostgreSQL, Redis, GeoLite2 and ARIN fixtures. Work normal and race plus
+all four disjoint Model normal partitions are green. Model race partition
+zero is running; the remaining Model race partitions and a fresh Main
+resource/horizon preflight are still required before staged migration.
+
+The ninth watcher began no earlier than 00:57:35 UTC, preserving the
+15-minute active-probe floor. At 00:58:11–15 the reliability parent still
+had the old non-covering definition with no desired covering parent or
+attached children across 34 partitions; numbered migration head was 731
+against code-required 740. At 01:00:11–31 edge-3 still paged for CPU
+saturation (load-1 188.69/72 logical CPUs, five-minute execution ratio
+0.9580, zero iowait), and eight edge-3/edge-4 Connect processes still
+paged. Edge-4/g2 reached 137.88 GB RSS, 842,102 goroutines and a
+5.922-core five-minute rate. This is continuing load, not callsite or
+leak attribution. Ninth PostgreSQL CPU, picker and URL frames were still
+pending at this checkpoint.
+
+The watcher also supplies a current-cohort lifecycle control distinct from
+the biased oldest-client prefix: at 00:50:33 UTC its six-hour prober cohort
+had 877,732 mature clients, 877,715 inactive and 17 active disconnected,
+all never connected. The `probe-unused-args-retirement` WARN identifies
+those 17 as a real residual, with oldest age about 20,162 seconds, while
+the overwhelmingly inactive mature cohort contradicts a blanket current
+retirement failure. These recent rows do not measure retention of the
+24.9-day-old prefix or join to missing-origin API requests. Their exact
+setup/cancellation owner is under source review; no cleanup mutation has
+been made.
+
+The fresh read-only direct-primary migration preflight at 01:03–04 UTC
+confirmed PostgreSQL 18.4 on port 5432, successful migration head 731,
+zero new migration starts in two hours, zero active index builds and no
+733–739 candidate indexes. The old sparse ARIN exception index remained
+valid/ready. Estimated target sizes were 9.41 million `transfer_balance`
+rows (1.375 GB heap), 132,000 probe-cycle rows (29.85 MB heap) and
+988,000 reliability-running rows (221.8 MB heap). No `pg_dump` COPY,
+prepared transaction or replication slot was observed. The oldest
+snapshot belonged to an active autovacuum worker about 3,160 seconds old
+with `VacuumDelay` and xmin age about 10.17 million; the next client
+transaction was about 10.2 seconds old in the bounded top 16. Host
+backup unit was inactive and PostgreSQL active. The PGDATA mount had
+about 1.37 TB free; WAL held about 10.65 GB in 635 files, archive mode
+was off, and there were no active senders. The cgroup CPU quota could
+not be observed, so host resource evidence remains incomplete. The
+strict inventory-bound tunnel was closed after the read. This fresh
+preflight removes the earlier unclassified long client transaction from
+the observed top horizon, but the old autovacuum and high PostgreSQL CPU
+still require a staged migration admission decision after race gates.
+
+The remaining ninth watcher frames did not establish recovery. PostgreSQL
+used 37.531 of 96 logical-core equivalents (39.09%) over five seconds at
+01:02:19 UTC. Picker at 01:04:30 still paired only 20/25 API slots:
+246 sampled initial nonempty and nine error, 62 search nonempty, with
+four read-initial and three read-filters errors. This partial request
+sample cannot clear the earlier IPv6 empty cohorts. The URL frame at
+01:04:49 still paged: 110,206 eligible, zero quota-complete and zero
+secure-complete, 92,752 due, 110,133 overdue, 919,545 accepted
+successes needed and oldest due age about 18.3 hours. Hourly
+throughput/process coverage remained incomplete and the legacy TLS
+recovery target untrustworthy. These counts do not measure a fleet
+throughput rate or prove which worker is responsible.
+
+A private three-control regression isolated one concrete prober residual
+mechanism without touching Main. In unchanged source, cancellation
+delivered after `AuthNetworkClient` commits but before its optional Redis
+identity-cache fill left one committed active child while the caller
+received an error and no child result. The healthy and pre-transaction
+cancellation controls did not fail. An overlay containing only error
+containment around that optional cache fill passed all three controls;
+the post-commit child identity remained available to its caller. This
+proves the source ordering defect and the proposed local repair in the
+fixture, not that the 17 Main residuals all share this cause. A tracked
+fix and final-source test gates are underway; no Main service artifact
+has changed.
+
+The tracked correction now contains only the optional identity-cache
+fill's Redis wrapper error, preserving the already-committed child result.
+The new regression additionally uses ordinary network-fenced removal and
+checks the returned child becomes durably inactive. It and the adjacent
+cache-miss/refill control passed together in 12.414 seconds normal and
+18.535 seconds under race. The prober unused-args alert and `SIGNALS.md`
+now name both the committed-mint/cache boundary and the older
+direct-removal lifecycle, while requiring artifact comparison before
+assigning the 17 Main residuals to either. Its severity, cohort SQL and
+thresholds remain unchanged. Full final-source Model, Work and monitor
+gates are being regenerated and run; no Main rollout has occurred.
+
+The tenth active watcher began at the 01:12:35 UTC cadence. Its
+01:13:17–21 catalog frame still found the old non-covering reliability
+index and migration head 731 against required 740. At 01:15:24 UTC,
+edge-3 and edge-4 again paged for CPU saturation: one-minute loads
+210.20/72 and 195.63/72 logical CPUs, with five-minute execution
+ratios 0.9575 and 0.9137 and zero iowait. All eight enabled Connect
+processes on those two hosts paged at 01:15:42; edge-4/g2 reached
+140.63 GB RSS, 865,263 goroutines and a 5.965-core five-minute rate.
+The separate vpn0 node series was still absent. Tenth PostgreSQL CPU,
+picker and URL frames were pending at this checkpoint; the runtime
+pages do not identify a leak callsite or ownership of SQL CPU.
+
+The final-source Model manifest now enumerates 1,191 unique disjoint
+top-level tests in four buckets of 296, 305, 311 and 279. The one added
+test is the committed-child/cache cancellation regression; no prior test
+was removed. The manifest SHA-256 is
+`c49361eee0cf13be01b839ff4fcf07b73dd26348bef5f1f9bdb5038749e92ca1`
+and the 453-file root/Model source digest is
+`9d116fdd2a0016195f26953e371095491a41d13465c7f50b823db6fda8a124ba`.
+`go vet ./model ./taskworker/work` passed. The focused prober alert
+synthetic passed normal and race in 3.174 and 4.693 seconds; full
+monitor normal/race, Model partitions and Work normal/race remain final
+release gates for this source.
+
+The tenth PostgreSQL CPU frame at 01:17:26 UTC was 40.522 of 96
+logical-core equivalents (42.21%) over 5.02 seconds. Picker at
+01:19:43 still paired only 20/25 API slots: five-minute sampled
+initial outcomes 185 nonempty, zero empty and one error; search 24
+nonempty and one empty; direct one nonempty, with one read-initial
+error. This partial process/request observation does not clear native
+IPv6 supply or request failures. Tenth URL and prober cleanup frames
+were still pending.

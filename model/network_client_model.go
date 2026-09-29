@@ -1852,10 +1852,15 @@ func setClientIdentityCache(ctx context.Context, clientId server.Id, identity *C
 	if err != nil {
 		return
 	}
-	server.Redis(ctx, func(r server.RedisClient) {
-		// the identity is immutable post-create; the ttl only bounds the
-		// cache -- `GetClientIdentity` refills it from the db on a miss
-		r.Set(ctx, clientIdentityKey(clientId), identityJson, provideMirrorTtl)
+	// This optional fill can run after the client and its credential commit.
+	// Even the Redis wrapper's acquisition/PING can raise on cancellation;
+	// it must not discard the committed identity before its owner can retire it.
+	server.HandleError(func() {
+		server.Redis(ctx, func(r server.RedisClient) {
+			// the identity is immutable post-create; the ttl only bounds the
+			// cache -- `GetClientIdentity` refills it from the db on a miss
+			r.Set(ctx, clientIdentityKey(clientId), identityJson, provideMirrorTtl)
+		})
 	})
 }
 
