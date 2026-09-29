@@ -3146,3 +3146,7 @@ the `main-config-updater-main` row still returned
 version from DynamoDB, so the alias alone is not proof of any running
 service change. No service deployment or FP2 recovery is claimed. A
 write-capable deployment credential is needed to resume the rollout.
+The `main-latest` alias was subsequently restored to the DynamoDB-selected
+old image (index digest
+`sha256:1501bc8e6e69e995b77f4276d10840a6e0897220dfbbb4eae962e3ee2c104515`),
+and the unchanged DynamoDB row was read back again.
