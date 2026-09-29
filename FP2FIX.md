@@ -3226,6 +3226,19 @@ This remains a sampled rolling state, not complete convergence.
 At 19:15:01–09Z, Connect advanced to ten of 20 new, ready paths, with
 the other ten old and ready; all 20 returned HTTP 200. The new-path
 counts by edge0/1/3/4 were 4/4/1/1.
+At 19:20:15–19Z, Connect reached 12 new and eight old ready paths, and
+at 19:25:39–44Z it reached 13 new and seven old ready paths. All 20
+sampled paths returned HTTP 200 in both reads; edge0/1 had all five
+blocks new by 19:20, while the remaining old paths were on edges 3/4.
+The 19:29:44–47Z bounded repeat was unchanged at 13 new and seven old,
+all 20 ready; the old paths were edge3 beta/g1/g3 and edge4
+beta/g1/g2/g4. A service-scoped drain may still be in progress, but its
+remote lock and old-generation ownership were not directly observed.
+At 19:37:25–29Z the sampled Connect rollout reached 14 new and six old
+ready paths; at 19:42:47–51Z it reached 16 new and four old ready
+paths. Every sampled path returned HTTP 200 and matched its pinned host.
+The four old paths were edge3 g1/g3 and edge4 g1/g2; old-generation
+drain remains incomplete.
 
 The user directed deployment to proceed without waiting for the long
 Connect test queue. Buckets 0, 1, 2, 4 and 5 have since passed their
@@ -3244,6 +3257,16 @@ worktree (receipts SHA256
 `1aba12310f7d266b7630d02071e24ccd5d818d06d016bb7cd54880883cfe830e`
 and `2ef39b3024248e4e5019f30654d443c39711a27513d399a4bbf47f43272852da`).
 This repairs diagnostic visibility, not the TCP performance failure.
+An isolated ten-case virtual-time ACK control then passed its pure-ACK,
+future-ACK, payload-order, receipt-prefix and cleanup cases normally and
+under race. Its candidate piggyback-ACK cases failed exactly four expected
+IPv4/IPv6 window-progress assertions, in normal and race runs: when the
+payload queue was full, a valid ACK carried with payload did not advance
+the modeled return window, while a pure ACK did. The sealed receipt is
+SHA256 `eba9b68d9f3b9247da21bd5afe764f34d1543cd34827360e35df512e9d767f70`.
+This localizes a modeled ACK-half admission dependency; it does not yet
+prove the cause of the historical 30-second TCP stall, because provider
+return replay may rescue progress. No production ACK behavior changed.
 
 The sole scheduled Main watcher continued at its 15-minute active-probe
 cadence throughout rollout. Its thirty-ninth scoped record began at
@@ -3254,6 +3277,7 @@ fresh URL-census owner, so current eligible, quota-complete and throughput
 values were **unknown**, not zero. The picker observed 16 of 25 expected
 API slots; five remote release-builder reads failed SSH. These timestamps
 overlap the service rollout but do not establish its effect on FP2.
+
 The fortieth scheduled record began at 18:55:09Z. Its independent
 PostgreSQL sample at 19:06:22Z used 31.233 of 96 logical cores, still
 above the 25% warning threshold without query-owner attribution. The URL
@@ -3261,3 +3285,32 @@ census was coherent again at 19:09:54Z: 108,779 eligible, zero
 quota-complete, 108,757 overdue and 22 warming. The picker paired 20 of
 25 API slots. This one post-deploy census restores numeric visibility but
 does not establish sustained coverage, throughput or FP2 recovery.
+The next scheduled coherent URL census at 19:25:15Z still found zero
+quota-complete among 108,780 eligible providers, with 108,758 overdue
+and 22 warming. A separate 5.02-second PostgreSQL sample at 19:21:28Z
+used 35.088 of 96 logical cores (36.55%), without query-owner or
+quota-normalized attribution.
+The forty-second scoped monitor record was appended after its scheduled
+19:36:35Z PostgreSQL sample used 36.017 of 96 logical cores (37.52%).
+Its coherent 19:40:35Z URL census had 109,838 eligible, zero quota-complete,
+108,991 overdue and 847 warming; oldest due was 13,807.1 seconds. The
+large warming and due-state shift from the prior frame has no retained
+per-provider/process join, and the audit's timestamp overlap does not
+identify its cause. Picker coverage remained 20/25.
+The forty-first scoped record containing that scheduled sample and census
+was appended to the primary ledger. A separate scheduled reliability-index
+check at 19:28:27Z still reported its desired covering index absent with
+34 partitions and zero attached children. This access-path gap is
+unresolved; it is not yet a causal attribution for the measured CPU load.
+
+At the user's request, current-source `bringyourctl db audit` ran against
+the verified Main primary through a direct maintenance tunnel. The dry
+run completed at recorded/local migration head 740 with zero pending
+migrations and **no missing additive schema objects**; it reported six
+extra indexes only. The subsequent `bringyourctl db audit --fix` completed
+successfully and printed `Nothing to apply` and `0 migration(s) need to be
+applied`. It did not drop the six extras because `--force-drop-indexes`
+was not requested. Both comparison runs cleaned up their temporary
+databases and closed the tunnel. This does not install the separate
+partitioned reliability covering index, which is owned by the explicit
+model maintenance upgrade rather than numbered migrations or schema audit.
