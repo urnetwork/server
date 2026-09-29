@@ -2999,3 +2999,25 @@ but appeared in an earlier retained handoff. Aggregate candidates do not
 establish simultaneous work or its cause; a temporal owner read remains
 deferred until a verified corrected-artifact rollout or a decision that
 requires it. The review made no new Main contact.
+
+The twenty-sixth scheduled frame began at 15:25:09Z. Migration remained
+731 versus required 740; PostgreSQL used 40.486 of 96 logical cores over
+an independent 5.01-second service sample, without query-owner or quota
+attribution. A coherent URL census at 15:36:45Z had 112,006 eligible
+providers, zero quota-complete, 111,975 overdue and 31 warming; this is
+one current instant after frame 25's ambiguity, with hourly process and
+throughput coverage still incomplete. Picker observation paired 20 of 25
+API slots, with 563 initial nonempty outcomes, 18 initial errors and 14
+initial plus two filter read errors. The same watcher began frame 27 at
+15:40:09Z; these samples do not prove sustained recovery.
+
+A separately authorized source-local backup read in the post-core window
+completed once and sealed as SHA256
+`9ccecf013cb5b182e8fb794fb9460d7d22f85f37ac4088d6b376cb8635ab9206`.
+The September 27 unit shows a 00:00 start and successful 21:50:01 exit;
+the deployed writer hash matched reviewed source, and the source archive
+and strict sidecars had stable publication metadata. This supports a
+recent source-backup completion, while the current ciphertext checksum,
+destination copy, decrypt and restore remain unverified. The bounded historical
+journal query returned no rows, which leaves retention and visibility
+unknown. No archive bytes, mutation, DDL or extra monitor probe occurred.
