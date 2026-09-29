@@ -2566,3 +2566,43 @@ aggregate attribution; it was not retried. These scoped records are in the
 append-only monitor ledger and do not establish sustained recovery or a
 deployed release. The single watcher and its ten standing tails remained live
 on the 15-minute floor.
+
+An isolated race run of `TestCreateProxyClient` hit its 9 GiB memory cgroup
+and 1 GiB swap cap while its fixture queued 10,000,000 proxy IPv4 addresses,
+before client assertions began. The host, watcher and portable test services
+survived. This is an incomplete resource gate, not a product assertion failure;
+the remaining Model race buckets are running serially while a bounded private
+fixture receives focused normal and race controls. The sixth scheduled wave's
+one authorized matched PostgreSQL owner read also failed closed: its host
+sampler exited successfully, but the SQL helper returned SQLSTATE 22P02 in the
+bounded-read phase. It supplied no query-owner attribution and was not retried.
+The private receipt is recorded in the append-only monitor ledger.
+
+The sixth scheduled recovery wave still found migration head 731 against 740
+and PostgreSQL service CPU at 36.937 of 96 logical cores over five seconds.
+Its URL probe coverage lacked a fresh coherent global census, so it supplied
+no eligible-cohort or quota-complete count. Picker observation was incomplete
+at 20 of 25 expected API slots, with 569 initial nonempty outcomes, five
+initial errors and five initial read errors in the observed subset. The scoped
+sixth-wave record in the ledger preserves those unknowns; it does not prove
+recovery, deployment or PostgreSQL query ownership.
+
+The proxy-client test fixture now seeds only the 1,024 addresses needed for
+its 1,024-client lifecycle check. The tracked test-only change matched its
+private overlay byte for byte; focused normal and race runs passed, including
+all client iterations. Production IPv4 reset behavior is unchanged. This edit
+was committed as Server `daf30bc7` after the 16-bucket Model normal gate and
+the first race bucket, so those earlier broad receipts are historical source
+evidence. A refreshed 1,194-test inventory has identical test names, and new
+final-source normal and race gates remain pending. The source manifest and
+focused receipt are recorded in the ledger.
+
+The seventh wave's single authorized matched PostgreSQL diagnostic completed
+over 6.243 seconds. Its service unit used 269.415 CPU-seconds (43.154 cores).
+Stable interior process samples covered 151.77 CPU-seconds; 117.645 unit
+CPU-seconds lay outside that coverage. Only 3.23 CPU-seconds had a qualified
+unique join to the raw-reliability statement family. Changing or inactive
+queries, missing activity ownership and timing gaps leave the larger share
+unattributed. This sample supports a narrow observed subset, not an upper
+bound or a total query-owner conclusion; statement elapsed-time deltas are
+not CPU time. The read-only aggregate receipt is sealed in the monitor ledger.
