@@ -2606,3 +2606,22 @@ queries, missing activity ownership and timing gaps leave the larger share
 unattributed. This sample supports a narrow observed subset, not an upper
 bound or a total query-owner conclusion; statement elapsed-time deltas are
 not CPU time. The read-only aggregate receipt is sealed in the monitor ledger.
+
+The settled seventh watcher frame still had migration head 731 versus 740.
+Its independent five-second PostgreSQL service sample measured 37.522 of 96
+logical cores. A coherent URL census had 103,531 eligible providers and zero
+quota-complete providers, while hourly success and expected-process coverage
+remained incomplete. Picker observations paired 20 of 25 expected API slots,
+with 455 initial nonempty outcomes and four initial read errors in that
+subset. These are scoped observations, not a sustained or deployed result.
+
+Offline analysis of the seventh-wave matched sample linked a legacy
+settlement query fingerprint to pre-fix repository source: 6,533 completed
+calls had 226.64 seconds of summed SQL elapsed time in a 7.12-second counter
+window. Of 104 observed parallel-worker rows, 68 joined a matching leader in
+the same snapshot, 16 carried their own matching query identity, and 20
+remained unjoined. The reviewed settlement query fix is already an ancestor of
+the current source. Worker membership and SQL elapsed time do not establish a
+CPU fraction or the emitting service; the deployed modified binaries are
+unresolved. This analysis used retained private evidence without another
+Main read, and the eighth wave has no extra diagnostic scheduled.
