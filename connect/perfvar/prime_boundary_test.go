@@ -50,12 +50,14 @@ func testFullTunP2pPrimePackBoundary(
 	}
 	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
 	testEnvironment.Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		lifetime := newPrimeBoundaryLifetime(context.Background(), 5*time.Minute)
+		defer lifetime.cancelEnvironment()
+		ctx := lifetime.constructionCtx
 		profile := initialNetworkProfiles(
 			2026081121 + int64(targetProbeNumber) + int64(p2pHopCount),
 		)["clean-lan"]
 		environment := newRouteEnvironmentWithNetworkPeers(
-			ctx,
+			lifetime.environmentCtx,
 			t,
 			profile,
 			p2pHopCount == 1,
@@ -227,12 +229,12 @@ func testFullTunP2pPrimePackBoundary(
 			return constructionResult
 		}
 		defer func() {
-			cancel()
-			result := joinConstruction()
-			if result.path != nil {
-				result.path.close()
-			}
-			environment.close()
+			lifetime.close(func() {
+				result := joinConstruction()
+				if result.path != nil {
+					result.path.close()
+				}
+			}, environment.close)
 		}()
 
 		var result primeBoundaryConstructionResult
