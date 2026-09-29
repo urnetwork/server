@@ -3618,3 +3618,39 @@ runs/s. The prior fixed five-minute durable rate of 42.5533/s predates this
 quota rollout and cannot be used as its outcome. Fresh post-rollout durable rate,
 per-provider rolling recovery, CPU attribution, 2,048-lane admission, native
 quality/speed buckets, and the separate reliability covering index remain open.
+
+The first fixed post-rollout durable-history window, 22:26:00–22:31:00Z,
+contained 15,747 unique accepted selected-policy measured runs from 15,747
+providers: 12,332 successes and 3,415 failures, or **52.49 runs/s**. The bounded
+read receipt is `7d5965c699a058beccdb2c7036607601064c28fe80ca3c0b0d8043b0b1350ef9`.
+This window is wholly after the Taskworker version-path deploy, but does not
+prove an individual provider's rolling quota or immutable running images. Its
+rate is about 69.4% of the current 75.65/s numerical floor; the change from
+the earlier 42.5533/s window is not causally attributed to the quota release.
+The eight configured URL shard pools have 64 concurrent workers each (512
+configured slots); edge3 and edge4 were near 93–95% CPU in recent watcher
+samples. Same-window occupancy, CPU attribution, and a safe ramp decision
+remain open.
+
+An independent fixed-window Taskworker capability-2 timing read for the same
+22:26–22:31Z interval found 52.2253 timed completed turns/s across all eight
+current shard processes. Mean turn occupancy was 9.28947 seconds, of which
+9.12374 seconds was check-and-buffer; publication, close-join, and readiness
+means were 0.08493, 0.04811, and 0.02895 seconds respectively. Rate times
+mean occupancy implies about 485 worker slots occupied on average of 512
+configured (roughly 94.8%). The Prometheus timing cohort and durable-history
+measurement cohort have different clocks and cannot be divided into an
+accepted-result yield. Read receipt
+`d083e389b7e5ea6a9db33981742fecbb349651a7434290f26371bfefed4729ca`;
+at that mean turn time the 75.65/s target would need at least about 703 busy
+slots even with perfect measured acceptance. This is a lower bound, not a safe
+configured concurrency or linear scaling prediction. Same-window host CPU and
+admission witnesses remain pending.
+
+A bounded historical final-clock read aligned to the earlier 21:46:27–21:51:27Z
+accepted-result window found 102 of 12,766 outcomes with final TTFB over two
+seconds, all measured failures with wire body observed. This is only 0.8% of
+accepted outcomes and does not justify deploying the private TTFB shortcut as
+the throughput repair. The accepted-only sample cannot rule out time spent on
+turns that produced no accepted measurement; current worker timing is being
+measured separately.
