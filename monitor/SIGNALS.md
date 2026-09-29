@@ -5499,12 +5499,26 @@ five minutes earlier, reset witnesses and range-presence witnesses. A process
 contributes deltas only when all eleven children and process-start fields are
 paired, source-fresh (90s, at most 30s future clock skew), from the same scrape
 at each bound, monotonic and reset-free. New/mixed/transient generations, old
-producers, disabled/unenrolled desired slots and missing children stay unknown.
-The query permits at most 32 desired slots, four generations per slot, 8,192
+producers, temporarily excluded/unenrolled desired slots and missing children
+stay unknown.
+The query permits at most 32 expected slots, four generations per slot, 8,192
 rows and 4MiB; one gateway, a 15s transport timeout, no retry or failover.
 Schema/warnings/nonfinite values/duplicate rows fail closed without exposing
 response labels or bodies. Positive complete-process deltas survive a missing
 sibling, but are explicitly an observed-process subset, not fleet totals.
+
+Expected API slots are the active service-placement host/block identities after
+omitting hosts explicitly disabled in monitor inventory. An intentionally offline
+host is outside this observation cohort until re-enabled; this does not certify
+that host's service or restore its product supply. Temporary observation exclusions
+and unenrolled desired hosts remain expected and unknown. Re-enabling a host
+immediately restores every configured block requirement, which must acquire its
+own fresh paired window. Completeness is checked by exact enabled host/block
+identity, never by comparing aggregate process counts: duplicate generations cannot
+replace a missing enabled slot. An empty expected cohort remains unavailable.
+The shared scope applies to provider-selection (§2.9c) as well; it preserves each
+signal's generation/schema checks, traffic floors, failure thresholds and partial
+positive-subset findings. Global service-placement configuration remains intact.
 
 - PAGE `provider-picker-effective-empty`: at least 20 successful initial GET
   outcomes in five minutes, at least 80% with no rendered initial rows.

@@ -33,7 +33,9 @@ func (providerPickerProbe) tier() string           { return tierPage }
 func (providerPickerProbe) cadence() time.Duration { return time.Minute }
 
 // Inventory comes from the same API placement authority as the log collector.
-// Excluded/unenrolled desired slots remain unknown rather than disappearing.
+// Inventory-disabled hosts are intentionally outside the expected cohort.
+// Temporarily excluded or unenrolled desired slots still remain unknown;
+// observations never redefine which enabled host/block identities are required.
 type providerPickerScope struct {
 	slots         map[string]bool
 	hosts, blocks []string
@@ -48,11 +50,19 @@ func pickerScope(env *probeEnv) providerPickerScope {
 		}
 	}
 	configured := map[string]bool{}
+	enabled, disabled := map[string]bool{}, map[string]bool{}
 	for _, h := range env.cfg.scopeHosts() {
 		configured[h.name] = true
+		enabled[h.name] = enabled[h.name] || !h.disabled
+		disabled[h.name] = disabled[h.name] || h.disabled
 		scope.excluded[h.name] = scope.excluded[h.name] || h.disabled
 	}
 	for _, name := range env.cfg.logServiceHosts["api"] {
+		// Only explicit inventory disability removes a requirement. If the
+		// inventory contradicts itself, keep that enabled slot unknown.
+		if disabled[name] && !enabled[name] {
+			continue
+		}
 		allowed := configured[name] && !scope.excluded[name]
 		if allowed {
 			scope.hosts = append(scope.hosts, name)
@@ -283,7 +293,7 @@ func providerPickerVisibility(reason string, paired, expected int) finding {
 	return finding{probeId: "mimir/provider-picker", tier: tierWarn, class: "provider-picker-unobservable", target: "api-fleet", sustain: 1,
 		symptom: "App location picker availability cannot be fully observed", observed: fmt.Sprintf("reason=%s paired_processes=%d expected_slots=%d", reason, paired, expected),
 		mechanism: "Missing, stale, reset or mixed-generation picker counters cannot prove an empty or healthy picker. HTTP 200 and response bytes are transport evidence only.",
-		baseline:  "Complete desired API placement with eleven preinitialized children paired over five minutes, fresh process/start and source clocks, no reset, and at least 20 successful initial outcomes for health.",
+		baseline:  "Complete inventory-enabled API placement with eleven preinitialized children paired over five minutes, fresh process/start and source clocks, no reset, and at least 20 successful initial outcomes for health.",
 		evidence:  "Only fixed reason and count fields are retained; raw response labels, cache keys and error bodies are not rendered.",
 		context:   "Unknown coverage does not erase an independently observed failing subset or prove that the app list is empty. A quiet initial endpoint cannot certify recovery.",
 		action:    "Verify API picker producer rollout, complete permitted API placement, paired process/start and raw sample clocks, and Mimir admission/query continuity. Do not manufacture zero counters or replay customer requests.",

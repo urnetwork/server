@@ -207,7 +207,7 @@ func parseProviderSelection(raw, environment string, now time.Time, scope provid
 	return evidence
 }
 
-// Uses the configured API slots, not surviving series, as the denominator.
+// Uses inventory-enabled API slots, not surviving series, as the denominator.
 func (providerSelectionProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -243,8 +243,8 @@ func providerSelectionFindings(evidence providerSelectionEvidence) []finding {
 		findings = append(findings, finding{
 			probeId: "mimir/provider-selection", tier: tierWarn, class: "provider-selection-unavailable", target: "api-fleet", frame: frame, sustain: 1,
 			symptom:   "Provider-selection stage and zero-reason attribution is incomplete",
-			mechanism: "A fresh supported producer and unchanged process generation must cover both ends of the five-minute window for every configured API slot. Schema 1 retains zero-reason authority; schema 2 is required for small-list and exclusion-source attribution. Old, missing, excluded, restarted, stale or reset evidence remains unknown.",
-			baseline:  "One fresh same-generation schema-1 or schema-2 process per configured API host/block, plus valid observed counter partitions; complete response-shape attribution requires schema 2 everywhere.",
+			mechanism: "A fresh supported producer and unchanged process generation must cover both ends of the five-minute window for every inventory-enabled API slot. Schema 1 retains zero-reason authority; schema 2 is required for small-list and exclusion-source attribution. Old, missing, excluded, restarted, stale or reset evidence remains unknown.",
+			baseline:  "One fresh same-generation schema-1 or schema-2 process per inventory-enabled API host/block, plus valid observed counter partitions; complete response-shape attribution requires schema 2 everywhere.",
 			observed:  fmt.Sprintf("paired_processes=%d shape_paired_processes=%d expected_slots=%d reason=%s", evidence.paired, evidence.shapePaired, evidence.expected, reason),
 			evidence:  "Bounded Mimir query; private process join, fixed schema and source timestamps. No target IDs or raw producer strings enter this alert.",
 			context:   "Observed-subset invariant findings remain valid, but a missing partition cannot become healthy zero. Destination-tail exclusions can be healthy-window refill requests; client-ID exclusions can be runtime removals or durable policy. Neither proves client health, and schema-2 reasons never suppress the independent provider-count finding. Lazy counter series can omit a first event, and quiet traffic does not establish location availability.",
