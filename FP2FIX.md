@@ -3150,3 +3150,63 @@ The `main-latest` alias was subsequently restored to the DynamoDB-selected
 old image (index digest
 `sha256:1501bc8e6e69e995b77f4276d10840a6e0897220dfbbb4eae962e3ee2c104515`),
 and the unchanged DynamoDB row was read back again.
+
+On September 29 at 18:43Z, the user supplied a new local AWS credential.
+A conditional PutItem preflight proved write authorization without changing
+the table. Warpctl then deployed config-updater's `main` block and API's
+`beta` block, followed by the remaining planned API, Taskworker, Connect,
+MCP, Proxy, Gossip and Alt blocks. All 30 planned registry aliases were
+created successfully. Independent Docker Hub inspection found **30/30**
+alias index digests equal to the published source index digests; independent
+DynamoDB readback found **30/30** deployment rows at their intended new
+versions. The frozen release source is Server `6ba71b7e` and the exact
+versions and index digests are recorded in the local rollout plan at
+`/home/by/urnetwork/temp/fp2-release-tools.adwfff8e/main-rollout-plan.json`.
+The two independent postflight outputs are
+`main-dynamo-after-deploy.txt` and `main-alias-digests-after-deploy.json`
+in that same directory. These results establish deployment control-plane
+selection and registry publication, not complete running-host convergence.
+
+Warpctl status polling after the updates showed mixed old/new running
+versions: API beta reached 9/20 new responses by 18:46:24Z, while the
+other four API blocks reached 40/80 new responses by 18:48:34Z. Those are
+HTTP response samples, not counts of unique hosts or containers. A later
+per-block API sample still showed beta and g1 entirely on the old API and
+config versions, g2 and g4 entirely on the new API and config versions,
+and g3 on the old API with new config. Direct independent container-image
+reads on enabled edges 0, 3 and 4 timed out at SSH connect; edge1 reached
+the expected host but denied noninteractive sudo. Thus actual image
+versions on those hosts remain unverified, and a mixed status sample is
+not sufficient to claim full rollout. Edge5 remains disabled/offline by
+the user's instruction and was not contacted.
+At 18:56:07–10Z, a bounded public-LB sample returned the new API version
+with status `ok` for beta and g1–g4, but all 20 responses self-identified
+as edge0. This proves a new, ready API path on that observed host only;
+it does not enumerate the other enabled hosts or certify their images.
+Pinned public-interface status reads at 18:58:40–44Z then preserved the
+main-LB Host/SNI and received matching host identities from edges 1, 3
+and 4. API beta/g1/g2/g4 and Taskworker g1 returned their new versions
+with status `ok` on all four enabled edges, including the earlier edge0
+read. Connect g1 still returned the old version with status `ok` on all
+four; its config version was new on edges 0/1 and old on edges 3/4.
+These are sampled ready paths, not a complete container census or proof
+that old generations have drained. Connect's runtime rollout remains
+under investigation despite its updated registry alias and DynamoDB row.
+
+The user directed deployment to proceed without waiting for the long
+Connect test queue. Buckets 0, 1, 2, 4 and 5 have since passed their
+normal runs (bucket 2 has its intentional opt-in skip). Bucket 3's
+`TestConnectMultiClientTcpPerformance` failure remains open. Bucket 6
+was intentionally interrupted after 12 passes with no test failure; its
+remaining cases and bucket 7 are pending. This deployment does not clear
+the failed performance gate or establish sustained FP2 recovery.
+
+The sole scheduled Main watcher continued at its 15-minute active-probe
+cadence throughout rollout. Its thirty-ninth scoped record began at
+18:40:09Z and was appended to the primary ledger. PostgreSQL used 64.173
+of 96 logical cores in a separate 5.03-second sample at 18:51:14Z,
+without query-owner or quota attribution. At 18:54:37Z, no shard had a
+fresh URL-census owner, so current eligible, quota-complete and throughput
+values were **unknown**, not zero. The picker observed 16 of 25 expected
+API slots; five remote release-builder reads failed SSH. These timestamps
+overlap the service rollout but do not establish its effect on FP2.
