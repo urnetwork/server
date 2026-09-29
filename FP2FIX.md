@@ -3021,3 +3021,15 @@ recent source-backup completion, while the current ciphertext checksum,
 destination copy, decrypt and restore remain unverified. The bounded historical
 journal query returned no rows, which leaves retention and visibility
 unknown. No archive bytes, mutation, DDL or extra monitor probe occurred.
+
+The twenty-seventh scheduled frame began at 15:40:09Z. Migration remained
+731 versus required 740. PostgreSQL used 35.790 of 96 logical cores over
+an independent 5.02-second sample, without query-owner or quota
+attribution. A coherent URL census at 15:51:56Z had 112,009 eligible,
+zero quota-complete, 111,978 overdue and 31 warming; hourly process and
+throughput coverage remained incomplete. Picker paired 20 of 25 API slots,
+with 618 initial nonempty outcomes, ten initial errors and five initial
+plus two filter read errors. The same watcher began frame 28 at 15:55:09Z.
+The separately prepared host and backup reads were deferred because bounded
+watcher SSH children remained after picker and the safe cadence margin
+expired. No extra Main contact or probe occurred.
