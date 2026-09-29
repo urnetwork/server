@@ -2737,3 +2737,32 @@ observation paired 20 of 25 API slots, with 602 initial nonempty outcomes,
 Bounded watcher children settled by 12:09:42Z; the single watcher retained
 its PID and ten standing tails. This is scoped observation, not sustained
 recovery or a deployed release.
+
+A private no-DB Connect accepted-handler control passed all four current-source
+closure, sibling and final-zero gauge cases in both normal and race modes.
+Omitting the Server caller context reproduced caller and sibling gauge
+retention after stream close while healthy controls stayed green. The older
+Connect mutex counterfactual timed out in its private test harness, so it
+has no clean causal verdict; the combined variant was stopped. This control
+made no tracked change or Main contact and does not identify production CPU
+ownership.
+
+The thirteenth scheduled frame again found migration head 731 versus 740.
+PostgreSQL service CPU measured 53.716 of 96 logical cores over 5.03
+seconds, without query attribution. URL coverage could not report a coherent
+current cohort: shards 0, 1, 3, 4 and 7 each had two eligible owner
+candidates, so current eligible and quota counts are unknown, not zero.
+The aggregate cannot distinguish cross-slot handoff from a freshness or
+scrape artifact; a private offline triage manifest records the source
+filters and limits. Picker observation paired 20 of 25 API slots, with 433
+initial nonempty outcomes, nine initial errors and eight initial read
+errors. The watcher retained its PID and ten standing tails, and the next
+scheduled wave began at 12:25:09Z. No Main mutation or extra probe occurred.
+
+An offline follow-up of that URL alert confirmed the two candidates are
+distinct configured-slot metric candidates after the monitor's freshness
+and per-slot generation checks. Ordinary shard passes can move between
+unchanged processes; an earlier frozen-predecessor mechanism is compatible
+but not proved in this frame. The current retirement source and tests still
+match their prior causal receipt. A bounded retrospective discriminator was
+designed but not run. No new source defect or current quota value was proved.
