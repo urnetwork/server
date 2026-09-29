@@ -3452,3 +3452,22 @@ their source does not identify the ingress-placement cause. Existing
 Taskworker claim admission allows one live URL shard per instance and
 has no host affinity; stopping edge3/4 workers would halve the available
 URL shard owners rather than rebalance them safely.
+
+The scheduled 20:55Z monitor frame found a coherent 20:57:18Z cohort of
+108,692 eligible providers, zero complete ten-success/four-hour quotas,
+108,654 overdue and 833,416 selected-policy successes still needed.
+Hourly process coverage remained incomplete, so the change in this stock
+is not a measured accepted-success rate. Its 21:09:50Z host sample again
+found edge3/4 CPU execution at 93.60%/90.66% of 72 logical CPUs and
+one-minute load normalized to 2.207/2.382. PostgreSQL's separate
+21:07:17Z sample used 34.598 of 96 cores without query attribution.
+These observations continue to hold a uniform URL-worker ramp. At the
+latest 20.33-second mean URL turn and 70.4% outcome-ACK yield, ideal
+2,048-lane occupancy projects about 70.93 ACK successes/second versus
+the current eligible-cohort maintenance floor of 75.48 accepted unique
+successes/second; ACKs do not prove that durable per-provider rate.
+The Main URL configuration is still eight shards at 64 turns each (512
+configured slots), and no 1,800-slot URL setting was found. A private
+same-turn registration/admission timing diagnostic and bounded live
+placement read are in preparation; neither has changed Main or proved
+the cause of the long turns.
