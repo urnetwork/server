@@ -2706,3 +2706,34 @@ three initial errors, and two initial plus one filter read error in that
 subset. Bounded watcher children settled before the next cadence floor; the
 single watcher retained its PID and ten standing tails. These observations
 do not show sustained recovery or a deployed release.
+
+An offline settlement-hotfix review found that the current combined API,
+Connect and Taskworker images all require migration head 740 at startup;
+leaving native reads off does not bypass readiness or their real schema
+dependencies. The reviewed settlement-query change could be backported into
+an isolated older source at head 731, but no release-ready hotfix exists.
+Historical dirty service inputs and replacement modules remain unknown, and
+such a candidate would need its own exact-source tests, builds, artifact
+proof and all-caller rollout. Current-main gates cannot certify it. The
+emitting service and CPU share remain unproved, and no Main change was made.
+
+The refreshed final-source Model race gate passed all 16 serial buckets on
+the committed bounded proxy-client fixture. It reported 1,379 passing runs,
+zero failures or race warnings, and six optional top-level skips: five need
+the absent `pro.yml`, while one needs a sibling operator-proxy checkout. The
+1,024-client proxy test passed inside its full race bucket; the earlier
+10-million-address cgroup OOM remains historical resource evidence. The
+source digest was reverified after the gate, and every bucket exited zero
+under its 9 GiB memory cap. Final-source Model normal and the other owning
+package gates remain separate.
+
+The twelfth scheduled frame still found migration head 731 versus required
+740. PostgreSQL service CPU measured 47.842 of 96 logical cores over 5.02
+seconds; this sample does not identify a query owner. A coherent URL census
+had 103,539 eligible providers and zero meeting the ten-result quota, while
+hourly process and throughput coverage remained incomplete. Picker
+observation paired 20 of 25 API slots, with 602 initial nonempty outcomes,
+23 initial errors, and 21 initial plus one filter read error in that subset.
+Bounded watcher children settled by 12:09:42Z; the single watcher retained
+its PID and ten standing tails. This is scoped observation, not sustained
+recovery or a deployed release.
