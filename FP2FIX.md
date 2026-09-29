@@ -3471,3 +3471,18 @@ configured slots), and no 1,800-slot URL setting was found. A private
 same-turn registration/admission timing diagnostic and bounded live
 placement read are in preparation; neither has changed Main or proved
 the cause of the long turns.
+
+A separate read-only Route53 exact-name and alias-leaf check at
+21:16:50–21:22:28Z mapped all ten live, health-checked `main-lb` A
+records to enabled Main hosts. Every mapped IPv4 health check was wholly
+healthy. Edge0/1 had 120/120 configured and healthy weight, while
+edge3/4 had 200/200: 62.5% of weighted IPv4 ingress favored the two
+already CPU-saturated hosts. This is a live DNS placement fact, not a
+measured share of new connections or an attribution of existing resident
+load. Existing Connect residents remain sticky across DNS changes. The
+corresponding AAAA read was incomplete as a host census: edge3's mapped
+200 weight was unhealthy, edge4's mapped 200 healthy, and four healthy
+records totaling 220 weight could not be bound to current inventory
+addresses. A live host-local LB read was also incomplete (three SSH
+transport failures and one reader inventory-binding failure). No DNS,
+router, LB or resident placement was changed.
