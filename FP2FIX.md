@@ -2942,3 +2942,36 @@ absent or corrupt, or that backup stopped. The source backup runs on
 Sunday/Thursday; a separate archive pull is daily. A verified September 24
 archive cannot certify the September 27 artifact. No archive bytes or
 scripts were read, and no Main mutation followed.
+
+The twenty-third scheduled watcher frame began at 14:40:09Z. Migration
+remained 731 versus 740. PostgreSQL consumed 47.564 of 96 logical cores
+in its independent five-second sample, with no query-owner attribution;
+one higher sample does not establish a trend. A coherent URL census again
+had 111,496 eligible and zero quota-complete providers, with 111,474
+overdue and 22 warming. Those state counts matched frame 22, while due
+and rolling-success deficit changed; hourly process/throughput coverage
+remained incomplete. Picker observation paired 20 of 25 API slots with
+586 initial nonempty outcomes, nine initial errors and seven initial plus
+two filter read errors. The same watcher began frame 24 at 14:55:09Z.
+These separate samples do not identify URL producer identity, provider
+transitions or the PostgreSQL query owner.
+
+The twenty-fourth scheduled frame began at 14:55:09Z. Migration remained
+731 versus required 740; PostgreSQL used 37.509 of 96 logical cores in its
+independent five-second sample, without query attribution. A coherent URL
+census had 111,329 eligible providers, zero quota-complete, 111,305 overdue
+and 24 warming; hourly process/throughput coverage remained incomplete.
+Picker observation paired 20 of 25 API slots, with 502 initial nonempty
+outcomes, 13 initial errors and 11 initial plus two filter read errors.
+The scheduled backup-archives signal also could not observe its target.
+The same watcher began frame 25 at 15:10:09Z; none of these scoped samples
+proves a deployed fix or sustained recovery.
+
+A separate bounded source-backup completion read in that post-core window
+failed closed at the privilege boundary (sealed receipt SHA256
+`89a90360767bf9bf5a7d308fca36df597eebd246a3fd1a7ad18b6c7e211f74fa`).
+The strict edge2 SSH and hostname gate passed, but remote sudo required a
+password, so the diagnostic did not start and no sidecar, journal, script
+or archive bytes were read. Latest backup completion remains unknown; this
+failure is not evidence of a corrupt or missed archive. There was no retry
+in that wave and no Main mutation.
