@@ -3192,6 +3192,26 @@ four; its config version was new on edges 0/1 and old on edges 3/4.
 These are sampled ready paths, not a complete container census or proof
 that old generations have drained. Connect's runtime rollout remains
 under investigation despite its updated registry alias and DynamoDB row.
+Further pinned reads at 19:00:21–24Z found Connect g2 new and ready on
+edge0 while the other 15 sampled Connect paths remained old and ready.
+At 19:04:21–25Z, Connect was new and ready on 3 of 20 sampled block/host
+paths (edge0 g1/g2, edge1 g2); the other 17 were old and ready. Taskworker
+g2 was new and ready on all four enabled hosts, complementing the earlier
+g1 result. A bounded 20-minute Loki search at 19:05:23–26Z found no
+matching Connect startup-not-ready, ingress-init, panic or fatal records;
+that search cannot certify full log coverage or host RunWorker state.
+Observed Connect convergence is partial and progressing, with no sampled
+unready response. The service-scoped host drain lock can serialize block
+replacement for up to the configured drain timeout, but the exact drain
+owner on each host was not observed.
+At 19:06:23–25Z, MCP beta and g1 also returned the new MCP and config
+versions with HTTP 200 and ready status on all four enabled edges, with
+matching pinned host identities. The status route has not enumerated all
+MCP blocks or overlapping generations. Alt and Proxy are assigned to
+Fireside/Crisp transparent hosts; Gossip has no status route. Supported
+pinned-LB status reads therefore cannot prove their running images, and
+the prior direct host reads did not succeed. Their alias and DynamoDB
+selection is proven, but their runtime versions remain unverified.
 
 The user directed deployment to proceed without waiting for the long
 Connect test queue. Buckets 0, 1, 2, 4 and 5 have since passed their
