@@ -2807,3 +2807,24 @@ throughput coverage remained incomplete. Picker observation paired 20 of
 seven initial read errors. Bounded watcher children settled by 13:24:34Z;
 the watcher retained its PID and ten standing tails. This scoped frame does
 not establish sustained recovery or a deployed release.
+
+The refreshed final-source Model normal gate also passed all 16 serial
+buckets on the committed bounded proxy-client fixture. It reported 1,379
+passing runs, zero failures, and the same six optional top-level skips as
+the race gate: five require absent `pro.yml`, and one requires a sibling
+operator-proxy checkout. All buckets exited zero under the 9 GiB cap, and
+all 1,643 participating source inputs still matched the manifest after
+the run. Normal and race now cover the same tracked Model source; Work,
+Taskworker CLI, Server Connect, Monitor, Connect module and Main rollout
+remain separate gates.
+
+The eighteenth scheduled frame still found migration head 731 versus 740.
+PostgreSQL service CPU measured 58.311 of 96 logical cores over 5.03
+seconds, without query attribution; one higher sample does not establish a
+trend. A coherent URL census had 110,694 eligible providers and zero
+quota-complete providers, while hourly process and throughput coverage
+remained incomplete. Picker observation paired 20 of 25 API slots, with
+511 initial nonempty outcomes, 11 initial errors, and nine initial plus two
+filter read errors. Bounded watcher children settled by 13:39:44Z; the
+watcher retained its PID and ten standing tails. This frame does not show
+sustained recovery or a deployed release.
