@@ -2208,3 +2208,99 @@ edge-3 and edge-4 again paged for CPU saturation: one-minute loads
 and 0.4533. Taskworker DoH dial timeouts also paged at about 11/min.
 These are source-fresh host/transport symptoms, not a process or
 provider verdict; the twelfth FP2 and PostgreSQL frames were pending.
+
+The twelfth picker at 01:50:07 UTC still paired only 20/25 API slots.
+Its sampled initial outcomes were 191 nonempty, zero empty and one
+error; search 32 nonempty and one empty, with no direct result and one
+read-initial error. Separate request-local US IPv6 Quality probes
+remained effectively empty, and RU Quality small-list findings persisted;
+the subset metrics do not supply a full-fleet explanation. The 01:50:24
+URL frame again paged: 109,806 eligible, zero quota-complete and zero
+secure-complete, 88,149 due, 109,554 overdue, 908,880 accepted
+successes needed and oldest due about 19.1 hours. Hourly throughput
+and process coverage were incomplete. The 01:51:03 prober cleanup
+frame had 847,298 mature children, 847,282 inactive and 16 active
+disconnected, all never connected; none lacked a deactivate timestamp.
+The PostgreSQL idle-in-transaction frame counted 574 such sessions,
+with oldest transaction age about ten seconds and 59 active sessions.
+The twelfth PG CPU value was not yet sealed. These observations keep
+product, lifecycle and DB load findings open without assigning one
+common cause.
+
+A bounded all-eight Taskworker progress read at 01:52:51 UTC found
+fresh, finite counters/gauges and complete five-minute ranges with
+no resets. Summed per-process sampled means were about 473 active
+batches of the configured 512 lanes, 426 running, three queued and
+44 finished waiting; a separate current scrape totaled 283 active,
+including 262 running. Provider-finished and batch-finished counters
+rose by about 8,534 and 8,563 over five minutes, respectively. This
+rejects a mostly idle claim scheduler during that sample. `running`
+includes setup, network work and teardown; `finished_waiting` spans
+post-return guard/publication/release. The gauges do not isolate DNS,
+HTTP, database or API time, and per-process sampled extrema are not
+simultaneous fleet bounds. With Main edge and PostgreSQL load still
+high, raising concurrency is not a justified first correction.
+
+The TLS timing repair was committed directly on Server `main` as
+`99cecad8`, pulled with no incoming changes and pushed. The local
+migration adapter rebuilt from that exact checkout still has executable
+SHA-256 `ab1fd25b5ffa42595dd9f75718f70723e853ab14272db7e46a93064716345152`
+and 732–740 manifest SHA-256
+`2448e0b0242f52665dc3cc9be2d5cd19ad211e2b1539c40696c6a7823942833b`.
+The new final test manifest includes all first-party transitive Model
+and Work dependencies: 1,191 disjoint Model tests in four buckets,
+manifest SHA-256
+`aefed8367dfed60d42181aa9a0ed42cba9ba549ecaf75372580f75d3d35b9d09`,
+and 1,069 Go files across 26 package directories under digest
+`afa4b53c02a38e4d97efc71578412f02b3b3936c416468ef8c1b795d868ff1cb`.
+Owning egress-health/provider-tunnel normal/race suites and relevant vet
+passed. Full Work normal on this committed source then passed in
+338.943 seconds alongside Model bucket zero normal; Work race and the
+Model broad gates remain. No Main schema or service mutation occurred.
+
+A bounded paired first-byte log reduction at 01:58:04 UTC narrowed URL
+lane occupancy. The newest 512 matching summaries hit the cap across
+six container streams and spanned 55.58 seconds. Among 340 successful
+one-check summaries, mean encoded DNS phase was 18.284 seconds versus
+1.115 seconds from DNS completion through actual first response byte;
+DNS accounted for 94.25% of their summed first-byte time. Median DNS
+was 18.467 seconds and p95 37.907 seconds. Another 133 failures with
+no response byte averaged 44.098 seconds of DNS phase; 39 failures
+with a byte also had 94.71% DNS share. The remainder derives from
+actual first-byte timing, independent of the corrected `tls_ms` field.
+This capped six-stream prefix is not a fleet census or an accepted-
+history join; setup before the DNS clock, teardown and body time sit
+outside this split. It identifies target-resolution phase as the
+dominant observed first-byte cost, while the specific tunnel/DoH
+substage and safe remedy remain under investigation.
+
+The thirteenth watcher early log frame at 01:57:36 UTC still paged on
+Taskworker panic-shaped lines, about 130/min, with recognized owner
+`server/model.ForceCloseOpenContractIds` and error type
+`*errors.errorString`; PostgreSQL SQLSTATE and process-crash status
+were not established. The aggregate and owner buckets overlap and
+must not be added. A separate 01:58:36 escrow-reconcile WARN recorded
+a failed 125-second run with `postgres-statement-timeout` on edge-1/g1
+at 01:36:54. Its phase and version impact require their own check.
+Thirteenth product, host and PostgreSQL frames were still pending.
+
+The thirteenth 02:01 UTC host frame kept edge-3 at load-1 134.73/72
+logical CPUs with five-minute execution ratio 0.9042, and edge-4 at
+222.43/72 with ratio 0.9322. Eight Connect process alerts persisted;
+edge-4/g2 reached 145.61 GB RSS, 949,059 goroutines, a 6.113-core
+five-minute CPU rate and about 212.75 MB/s allocation. PostgreSQL
+idle-in-transaction count was 599 with oldest transaction about nine
+seconds and 28 active sessions. These observations do not apportion
+host CPU to Connect, identify goroutine owners or establish a leak
+slope. Thirteenth URL, picker and PostgreSQL CPU results were pending.
+
+Full Work race on the committed TLS source passed in 440.278 seconds.
+Together with Work normal (338.943 seconds) and final-source vet, the
+Work release gate is green; the four full Model normal/race partitions
+remain.
+
+The thirteenth PostgreSQL CPU frame at 02:02:45 UTC measured 46.631
+of 96 logical-core equivalents (48.57%) over a paired 5.02-second
+service-cgroup sample, with one active PostgreSQL service and matching
+host/unit identity. It is continuing elevated database consumption,
+not a query or service attribution or a quota-normalized peak.
