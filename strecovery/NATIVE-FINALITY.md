@@ -156,6 +156,11 @@ conditional arithmetic. Account nonce proofs, a bounded proof-capture adapter,
 owned-node RPC capability, production service adoption, release composition and
 live custody/restart qualification remain open MG-03/PF-03 dependencies.
 
+The [actual-fee dependency decision](ACTUAL-FEE-DEPENDENCIES.md) examines generic
+balance-event attribution, failed refunds, block balance deltas and the next
+bounded native-state/execution-witness interfaces. It is source analysis, not
+additional proof implementation or fee qualification.
+
 ## Exact reviewed sources
 
 Codec and fee analysis uses Subtensor
