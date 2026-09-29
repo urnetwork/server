@@ -3673,6 +3673,19 @@ or CPU use. Query execution was 0.799 seconds under a two-second bound;
 receipt `10e66f05dffb78d25b7c8a681744ab3128029001f2116b92906872f2b9dfe820`.
 The owning DNS/DoH path and a correctness-preserving repair are under review.
 
+A separate deterministic provider-path correctness bug was reproduced: the
+monitor may coalesce an admitted client's `Added` then `Removed` events into
+one delivered `Removed` diff while the probe callback is delayed. Inspecting
+only the current active set loses proof that the tunnel had a route, so the
+turn may time out as a measured provider failure instead of following the
+existing lost-tunnel no-result path. The small source correction consumes
+delivered admission/removal proof before checking current replacements; it
+does not infer admission from an empty or overflow-reset snapshot. The
+independent Sol gate observed the expected sole failing baseline root, then
+all eight selected candidate roots passed normal and race modes with vet
+clean. This is a classification correction, not a claimed throughput gain;
+Main rollout and post-deploy verification remain pending.
+
 The first successor capability-2 active frame began at 22:48:13Z, after the
 explicit 15-minute floor. Its coherent 22:50:58Z census found `eligible=109392`,
 `quota_complete=0`, `secure_complete=0`, `due=63290`, `overdue=109383`, and

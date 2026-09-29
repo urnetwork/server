@@ -425,7 +425,16 @@ func (self *Tunnel) Lost() context.Context {
 // state lock, so reading the current events from inside one is safe.
 func watchProviderPath(monitor connect.MultiClientMonitor, lose context.CancelCauseFunc) func() {
 	var wasAdded atomic.Bool
-	return monitor.AddMonitorEventCallback(func(*connect.WindowExpandEvent, map[connect.Id]*connect.ProviderEvent, bool) {
+	return monitor.AddMonitorEventCallback(func(_ *connect.WindowExpandEvent, events map[connect.Id]*connect.ProviderEvent, _ bool) {
+		// Diffs may coalesce Added into Removed before this observer runs.
+		// Removed is emitted only for a client that occupied the live window;
+		// evaluation failures and declined candidates do not prove a path.
+		for _, event := range events {
+			if event != nil && (event.State.IsActive() || event.State == connect.ProviderStateRemoved) {
+				wasAdded.Store(true)
+			}
+		}
+		// A live replacement still outranks an older delivered removal.
 		for _, event := range monitor.ProviderEvents() {
 			if event.State.IsActive() {
 				wasAdded.Store(true)

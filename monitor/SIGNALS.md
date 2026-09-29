@@ -10626,6 +10626,28 @@ and a missing process can hide throughput. This probe does not prove ARIN
 classification, per-country catalog freshness, request-specific FP2 refill,
 or that PostgreSQL returned to its usual CPU band.
 
+Provider-path loss is a measurement-validity boundary. A 2026-09-29 local
+control of the real direct and merged monitor workers reproduced delayed
+callback coalescing: `Added` followed by `Removed` arrived as `Removed` alone,
+after the active snapshot was already empty. The old watcher discarded that
+proof and could let a lost-tunnel attempt become a measured timeout. The
+corrected watcher retains admission proof from delivered `Added` or `Removed`,
+then checks the current active set; a live replacement still wins. Source
+`Removed` is emitted only for a client removed from the live window. The
+existing lost-tunnel retry/not-measured contract then applies; an unmeasured
+result never satisfies the ten-run quota.
+
+False-positive qualifier: evaluation failure, declined admission, an empty
+snapshot, or another tunnel's removal is not proof that this tunnel lost a
+previously admitted path. Controls preserve those boundaries, live replacement
+and healthy 35-second DNS recovery. False-negative qualifier: an overflow reset
+can discard all terminal diffs; without surviving admission proof, this repair
+does not reconstruct loss history. Compare running artifact ancestry with the
+coalesced-loss regression before relying on corrected classification. The
+local reproduction establishes a correctness defect, not its Main frequency,
+DNS occupancy, CPU cost or a throughput gain. Keep the coverage deficit open
+until the independent rolling census and capacity contract recover.
+
 Phase timing needs its owning clock. The provider URL resolver's `dns_ms`
 includes its bounded private DoH attempts, retry jitter, and tunnel work while
 resolving the target; it is not an upstream DNS-server RTT. A capped newest
