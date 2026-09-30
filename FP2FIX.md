@@ -4194,3 +4194,29 @@ and tracked-tree attestation SHA256
 `567e8a788429fa3a880d16d2ff6f8ad083d18a5b217302d0cb4ebfcd37c64a26`
 record the evidence. This is local resource reclamation; a guarded Main
 canary and unchanged-workload post-release measurement are still required.
+
+The change was committed and pushed as Connect `fee85be2` and Server
+`3e852af2`. The clean Main Taskworker image
+`bringyour/main-taskworker:2026.9.30-planetoid-1059603990` was built and
+published as manifest SHA256
+`4020f5901a51b3e2158482ad14f3349bbabbd7b3c70dae7d9ede2395d238784a`.
+Both Linux release-binary vulnerability scans found no reachable
+vulnerabilities; the amd64 binary reports Server revision `3e852af2` and
+`vcs.modified=false`. Warpctl selected the image for g1 at 09:33:20Z and
+g2 at 09:48:43Z. Each block's sampled status paths converged 20/20 to the
+target version, and both registry block tags resolve to the published
+manifest. The g2 deploy log SHA256 is
+`8b6621ae526f78420812ddf0111b2c52b2fa651a35e968621d532353dd7902e8`.
+
+A single bounded post-rollout metrics read at 09:57:32–35Z selected exactly
+eight current capability-2/configured-eight Taskworkers with eight unique
+shard owners. All four g1 process starts followed its tag update; all four
+g2 starts followed its tag update. The read's atomically published census
+reported `eligible=112305`, `quota_complete=0`, and
+`runs_needed=621657`. Its receipt SHA256 is
+`141b520ca9b8e5b2729dabffeec69bd2bf1c2d74652ab895723cf003b6d8fde0`.
+Process metrics do not prove the immutable digest of each running container.
+The 09:33 scheduled monitor frame still had quota zero and sampled edge3
+host CPU at 97.42%; it overlapped g2 cutover and did not provide a numeric
+edge4 sample. Post-rollout accepted-run rate and host impact still need a
+fixed complete window; no capacity ramp is justified by this deployment.
