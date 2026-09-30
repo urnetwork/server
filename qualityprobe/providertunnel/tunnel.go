@@ -48,6 +48,8 @@ type Config struct {
 	// Platform-owned workers may mint/retire their derived clients locally.
 	// Nil keeps standalone/operator probes on the normal public API lifecycle.
 	ClientCredentials connect.NetworkClientCredentials
+	// Explicit platform-owned local control; nil preserves standalone HTTP.
+	ClientControl connect.NetworkClientControl
 	// Certificate pins per host: a pinned host must present a chain
 	// with one of its pinned keys on the verified path, on top of ordinary
 	// WebPKI verification. They are optional -- a host without an entry is
@@ -276,6 +278,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	}
 	generatorSettings := connect.DefaultApiMultiClientGeneratorSettings()
 	generatorSettings.ClientCredentials = cfg.ClientCredentials
+	generatorSettings.ClientControl = cfg.ClientControl
 	generatorSettings.ControlTelemetryProbe = true
 	generatorSettings.PlatformTransportSettingsGenerator = func() *connect.PlatformTransportSettings {
 		settings := connect.DefaultPlatformTransportSettings()

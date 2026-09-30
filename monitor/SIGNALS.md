@@ -10486,6 +10486,25 @@ proven non-probe traffic. Absence of the new collector or producer option is
 unknown attribution, not zero probe load. Tests pin marker confinement,
 retry/cleanup ownership and unchanged authentication rejection.
 
+Taskworker passes using the explicit local OOB executor preserve the current
+child-JWT authentication and normal controller/accounting path but issue no
+Connect-control HTTP request for those operations. Their frame observations
+use `ingress=internal` on the Taskworker process; they are not API HTTP or
+`probe_claimed` samples. Standalone probes and SDK callers with a nil executor
+retain HTTP. The same pass owns a bounded contract-origin notifier until every
+tunnel, caller-context cleanup request, callback and derived retirement is
+terminal; parent cancellation does not detach that publisher beyond the pass.
+
+False-positive qualifier: falling API probe-claimed load after this explicit
+mode change is expected boundary relocation and does not prove reduced DNS
+latency, more accepted measurements or resolved fleet coverage. False-negative
+qualifier: an API-only frame query omits these Taskworker internal frames; a
+quiet API probe counter cannot establish absence of probe control work. Require
+exact executable/mode and separate Taskworker process evidence before comparing
+these denominators. Local parity/performance controls are not production
+accepted-result rate evidence; buffered successes and failures count toward
+quota only after durable acceptance.
+
 Correlate exact source/image with probe internal mint, same-tunnel DNS path
 states, provide-secret registration/ping, guard outcomes and durable measured
 coverage. Setup failures reported as `provider_unresponsive` are not proof of

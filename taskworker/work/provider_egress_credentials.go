@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/connect"
@@ -33,6 +34,7 @@ func init() {
 // arguments or the provider under test. Function fields are per-owner seams
 // for deterministic tests; production uses the ordinary JWT/model boundaries.
 type providerEgressCredentials struct {
+	children  sync.Map // only identities minted by this immutable owner
 	networkId server.Id
 	userId    server.Id
 	clientId  server.Id
@@ -118,6 +120,7 @@ func (self *providerEgressCredentials) AuthNetworkClient(ctx context.Context, ar
 		if minted.ClientId == nil || *minted.ClientId == self.clientId || minted.ByClientJwt == nil || *minted.ByClientJwt == "" {
 			return nil, errors.New("provider egress mint returned no derived credential")
 		}
+		self.children.Store(*minted.ClientId, struct{}{})
 		return &connect.AuthNetworkClientResult{ByClientJwt: *minted.ByClientJwt}, nil
 	}, func(err error) (*connect.AuthNetworkClientResult, error) {
 		if ctx.Err() != nil {
@@ -150,6 +153,7 @@ func (self *providerEgressCredentials) RemoveNetworkClient(ctx context.Context, 
 		if retired.Error != nil {
 			return nil, fmt.Errorf("provider egress retirement refused: %s", retired.Error.Message)
 		}
+		self.children.Delete(server.Id(args.ClientId))
 		return &connect.RemoveNetworkClientResult{}, nil
 	}, func(err error) (*connect.RemoveNetworkClientResult, error) {
 		if ctx.Err() != nil {
