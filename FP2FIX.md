@@ -3863,6 +3863,21 @@ shard ownership, not immutable container digest or a gap-free rollout history.
 The eligible cohort has changed again; no post-packet-pool accepted-run rate or
 CPU saving has been established.
 
+Two settled post-packet-pool fixed history windows remain below target. The
+01:13–01:18Z window had 5,847 unique accepted measured runs (3,336 successes,
+2,511 failures), **19.49/s**; indexed receipt
+`2985a35da6fdffd258e36e9c3b4823dbd1a8fd0911df63401357e5eb845a222d`.
+The nonoverlapping 01:18–01:23Z window had 8,762 (6,850 successes, 1,912
+failures), **29.2067/s**; indexed receipt
+`1e271d8151d278e541f2e9de7d33d1f161e5a44071dfc25a8a23646721af0b27`.
+Both exclude setup-only turns. The second window's partial rebound and changed
+providers/destinations/process ages prevent attributing the swing to the
+packet-return correction. The eleventh scheduled census at 01:24:36Z found
+`eligible=111865`, `quota_complete=0` and `runs_needed=608086`; this cohort's
+numerical maintenance floor is 77.68 accepted measured runs/s. Same-window
+worker stage and operational counters are required to distinguish slower turns
+from fewer attempts or accepted results.
+
 The first successor capability-2 active frame began at 22:48:13Z, after the
 explicit 15-minute floor. Its coherent 22:50:58Z census found `eligible=109392`,
 `quota_complete=0`, `secure_complete=0`, `due=63290`, `overdue=109383`, and
