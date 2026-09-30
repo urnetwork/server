@@ -3237,9 +3237,13 @@ func (self *ResidentForward) Run() {
 		}
 	}
 
+	initialLookup := true
 	for {
 		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
-		resident := model.GetResidentForClient(self.ctx, self.clientId, self.exchange.settings.ExchangeResidentTtl)
+		resident := defaultResidentForwardLookupMetrics.observe(initialLookup, len(self.send) > 0, func() *model.NetworkClientResident {
+			return model.GetResidentForClient(self.ctx, self.clientId, self.exchange.settings.ExchangeResidentTtl)
+		})
+		initialLookup = false
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			header := ExchangeHeader{
