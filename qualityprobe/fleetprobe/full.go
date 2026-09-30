@@ -196,6 +196,9 @@ func NewFullProber(options FullOptions) *prober.Prober {
 			destinations = append(destinations, provider.SecurityDestinations...)
 			hosts := egresshealth.HostsOf(destinations)
 			tunnelConfig := options.TunnelConfig
+			// URL probes evaluate the selected provider by resolving DNS and
+			// loading the URL. Other full probes keep their selection pings.
+			tunnelConfig.DataOnlyProbe = options.UrlProbe
 			tunnelConfig.Pins = options.Pins.pins()
 			tunnelConfig.RedirectPins = tunnelConfig.Pins
 			tunnelConfig.ProviderCountry = provider.Place.Country

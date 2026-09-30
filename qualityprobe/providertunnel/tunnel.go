@@ -27,6 +27,11 @@ import (
 // build tunnels. ClientId is the prober's own client id (so it can exclude
 // itself when selecting providers); ByJwt is its network client jwt.
 type Config struct {
+	// DataOnlyProbe admits the fixed provider after processed registration so
+	// the caller's DNS and URL traffic owns evaluation, without provider IpPing.
+	// The default retains the ordinary initial/continuous ping behavior.
+	DataOnlyProbe bool
+
 	ApiUrl      string
 	PlatformUrl string
 	ByJwt       string
@@ -153,8 +158,13 @@ var newApiMultiClientGenerator = connect.NewApiMultiClientGenerator
 // Start from the shared defaults so every transport behavior stays aligned,
 // and disable only the redundant inner authority.
 func providerTunnelMultiClientSettings() *connect.MultiClientSettings {
+	return providerTunnelMultiClientSettingsForConfig(Config{})
+}
+
+func providerTunnelMultiClientSettingsForConfig(cfg Config) *connect.MultiClientSettings {
 	settings := connect.DefaultMultiClientSettings()
 	settings.ProviderProbe = false
+	settings.DataOnlyProviderProbe = cfg.DataOnlyProbe
 	return settings
 }
 
@@ -331,7 +341,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 
 	registration := &providerRegistrationState{}
 	setup := newProviderSetupState(cfg.SetupObservations, providerClientId)
-	multiClientSettings := providerTunnelMultiClientSettings()
+	multiClientSettings := providerTunnelMultiClientSettingsForConfig(cfg)
 	multiClientSettings.InitialPingObservations = cfg.InitialPingObservations
 	multiClient := connect.NewRemoteUserNatMultiClient(
 		dataCtx,
