@@ -20972,6 +20972,9 @@ deletion and about 12 seconds old at collection. The four published integrity
 results were verified and matched their latest-generation hashes. This proves
 fresh archive telemetry at that Mimir endpoint, but not continuous delivery,
 revalidation of backup artifacts, or the identity of every publisher hop.
+The GitHub heartbeat value itself still referred to 17:22:42Z even though
+its metric scrape was fresh; do not confuse ingestion freshness with a new
+backup generation or fresh source heartbeat.
 Continue watching for the address being re-added and for the next source
 backup's free-space trough and final publication.
 
