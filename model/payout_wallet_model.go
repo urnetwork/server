@@ -75,6 +75,10 @@ func SetPayoutWallet(ctx context.Context, networkId server.Id, walletId server.I
 	return
 }
 
+// returns the payout wallet only when it is an active wallet owned by the
+// network, matching the wallet the payout planner will use. A stale or corrupt
+// `payout_wallet` row (e.g. pointing at a removed wallet or another network's
+// wallet) reads as no payout wallet, so connecting a wallet replaces it
 func GetPayoutWalletId(ctx context.Context, networkId server.Id) *server.Id {
 	var walletId *server.Id
 	server.Db(ctx, func(conn server.PgConn) {
@@ -82,10 +86,14 @@ func GetPayoutWalletId(ctx context.Context, networkId server.Id) *server.Id {
 			ctx,
 			`
 				SELECT
-						wallet_id
+						payout_wallet.wallet_id
 				FROM payout_wallet
+				INNER JOIN account_wallet ON
+						account_wallet.wallet_id = payout_wallet.wallet_id AND
+						account_wallet.network_id = payout_wallet.network_id AND
+						account_wallet.active = true
 				WHERE
-						network_id = $1
+						payout_wallet.network_id = $1
 			`,
 			networkId,
 		)
