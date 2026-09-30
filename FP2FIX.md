@@ -4580,5 +4580,17 @@ descriptively 27.88% higher; its success count is 6.71% higher, while the
 success share fell from 86.27% to 71.99%. These are different-time fleet
 cohorts and do not isolate the timeout effect or prove rolling quota recovery.
 At the latest 108,588 eligible-provider census, ten accepted outcomes per
-provider per four hours requires about 75.41/s in steady state. Failure-stage
-mix and a second settled post-change window remain pending.
+provider per four hours requires about 75.41/s in steady state. A second
+settled post-change rate window remains pending.
+A subsequent one-statement, read-only indexed failure-stage count used the
+same database snapshot for three fixed windows. The additional pre-timeout
+18:27–18:32Z window held 10,250 accepted outcomes (8,516 successes, 1,734
+failures), or 34.17/s. DNS-class failures were 171/12,945 in the earlier
+18:07–18:12Z pre-timeout window, 402/10,250 in the later pre-timeout window,
+and 2,898/16,554 in the post-timeout 19:07–19:12Z window. These finite DNS
+buckets include `dial_dns` and `request_dns_timeout`; missing, null and
+unrecognized stages were zero in all three windows. Of the 2,860 additional
+failures in the post versus earlier pre window, 2,727 were DNS-class, while
+the success count increased by 749. This is a descriptive DNS-stage shift
+consistent with the 15-second cap, not a measured late-recovery fraction or
+an isolated causal effect. The second post-change rate window remains pending.
