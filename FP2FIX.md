@@ -4397,3 +4397,32 @@ sibling. Three normal roots, three race roots and vet passed with production
 source unchanged. This is a local exclusion of the mixed-batch hypothesis,
 not a Main throughput measurement. Evidence manifest SHA256 is
 `bd88048222767521aa58a45c52063a7486f5d98e77098b1837f41a71060853e6`.
+
+Local real-path controls showed that the earlier `write_attempted` initial-
+ping label can occur before the initial ping has a successful route write.
+An unread carrier, accepted outbound loss, lost reverse ACK, and a held
+successful ACK callback all produced deadline expiries under distinct
+conditions; 25-second recovery controls still admitted. The production
+route/ACK observer therefore adds 48 fixed aggregate series per Taskworker
+process (97 total), separating successful local route-writer acceptance of
+the exact initial ping from its ACK callback entry. These are terminal
+snapshots, not proof of remote receipt or elapsed phase durations. No
+deadline, admission, retry, failure-authority or provider-contact policy
+changed. The private candidate passed 16 normal roots, 16 race roots and
+vet, then independent Sol gates; its manifest SHA256 is
+`fabf081d710f8b7af18beaf549fc008bc5b2c5e09e137831a442aa0b1d202410`.
+
+The exact patch was committed and pushed as Connect `ab6f0bcd` and Server
+`2a0d15f3`, with tracked 16 normal/16 race roots and vet green. A clean
+multi-architecture Main Taskworker image
+`bringyour/main-taskworker:2026.9.30-planetoid-1059780540` was published
+as manifest SHA256
+`f3ae5c4a71083c9df8a58a541fc02f66f7112a195825c12de6ceb0fe54b13e47`.
+The embedded Server revision is `2a0d15f3`, `vcs.modified=false`, and both
+Linux binary vulnerability scans found no reachable vulnerabilities. Only
+Taskworker g1 was selected at 14:28:00Z; sampled status paths converged
+20/20, and the g1 registry tag resolves to the published manifest. Deploy
+log SHA256 is
+`802730525a7909dfd90f4e6caa0a1e408b0ab81ddb81c549e40e3450113cf888`.
+A fixed post-start 97-cell Main read is still needed; no route, ACK, CPU,
+accepted-run or quota improvement has been inferred from this release.
