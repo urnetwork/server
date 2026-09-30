@@ -4517,7 +4517,8 @@ URL. With a valid DNS answer at 20 seconds, a 15-second cap produced measured
 20.047 seconds. With valid recovery at 35 seconds, the current allowance
 loaded the URL at 35.037 seconds while a 30-second cap failed at 30.008
 seconds. Four locally acknowledged measured outcomes, 42 virtual timing
-cells, 14 normal/race roots and vet passed; the timeout patch remains private.
+cells, 14 normal/race roots and vet passed; that paired experiment's timeout
+patch remained private, distinct from the subsequent production change below.
 These controls prove both shorter hard caps can create false negatives under
 healthy late recovery, without measuring how often Main experiences it.
 
@@ -4546,3 +4547,24 @@ pre-canary window (30.1567/s). These are different-time all-fleet cohorts;
 neither comparison isolates the initial-ping removal from traffic mix,
 upstream Connect changes or process-drain timing. The count is an accepted
 outcome rate, not evidence that the rolling per-provider quota has recovered.
+
+The operator subsequently chose 15-second URL network-phase limits, accepting
+the late-positive loss demonstrated by the paired DNS controls above. Server
+commit `50637792` applies separate 15-second budgets to URL DNS resolution
+(including route wait and retries), target TCP connect and TLS handshake,
+plus a 15-second idle limit per target response socket read. A shorter caller
+deadline still wins, and the existing overall 60-second cold request owner
+remains. These changes are scoped to sampled URL probes; the shared Connect
+transport and non-URL tunnel callers retain their previous limits. A timed-out
+read closes its raw socket promptly, avoiding TLS close-notify delay.
+Independent local validation passed 33 normal and 33 race cases and package
+vet; two Linux binary vulnerability scans found no reachable vulnerabilities.
+The clean multiarch Taskworker image
+`bringyour/main-taskworker:2026.9.30-planetoid-1059946840` has manifest
+`sha256:b50287b735fc93e77ecf029c6dd63ddc3de22c199ebd3d9e87177b19e9648b57`.
+It was selected for `g1` at 19:01:14Z and for `g2` at 19:02:38Z on September
+30. Both deploy commands exited successfully; subsequent sampled version
+reads reported 20/20 new-version status paths for each group. Fresh
+process-start and accepted-outcome/failure-stage reads after the rollout are
+pending; sampled convergence alone does not establish the running image or
+the throughput effect.
