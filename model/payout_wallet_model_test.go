@@ -131,3 +131,83 @@ func TestSetPayoutWalletValidatesOwnership(t *testing.T) {
 
 	})
 }
+
+// a stale `payout_wallet` row that the payout planner ignores must not read as
+// a set payout wallet, otherwise connecting a new wallet does not replace it
+// and the network keeps getting missing-wallet notices (support inbox 897)
+func TestGetPayoutWalletIdIgnoresStaleRows(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+
+		ctx := context.Background()
+
+		networkAId := server.NewId()
+		clientAId := server.NewId()
+		networkBId := server.NewId()
+		clientBId := server.NewId()
+
+		sessionA := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkAId,
+			ClientId:  &clientAId,
+		})
+		sessionB := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkBId,
+			ClientId:  &clientBId,
+		})
+
+		walletAId := CreateAccountWalletExternal(sessionA, &CreateAccountWalletExternalArgs{
+			NetworkId:        networkAId,
+			Blockchain:       "matic",
+			WalletAddress:    "0xaaaa",
+			DefaultTokenType: "usdc",
+		})
+		connect.AssertNotEqual(t, walletAId, nil)
+
+		setRawPayoutWallet := func(networkId server.Id, walletId server.Id) {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+						INSERT INTO payout_wallet (network_id, wallet_id)
+						VALUES ($1, $2)
+						ON CONFLICT (network_id) DO UPDATE
+						SET wallet_id = $2
+					`,
+					networkId,
+					walletId,
+				))
+			})
+		}
+
+		// corrupt row: network B points at network A's wallet
+		setRawPayoutWallet(networkBId, *walletAId)
+		connect.AssertEqual(t, GetPayoutWalletId(ctx, networkBId), nil)
+
+		// connecting a wallet can now replace the stale row
+		walletBId := CreateAccountWalletExternal(sessionB, &CreateAccountWalletExternalArgs{
+			NetworkId:        networkBId,
+			Blockchain:       "matic",
+			WalletAddress:    "0xbbbb",
+			DefaultTokenType: "usdc",
+		})
+		connect.AssertNotEqual(t, walletBId, nil)
+		err := SetPayoutWallet(ctx, networkBId, *walletBId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, *GetPayoutWalletId(ctx, networkBId), *walletBId)
+
+		// stale row: the payout wallet was deactivated
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE account_wallet SET active = false WHERE wallet_id = $1`,
+				*walletBId,
+			))
+		})
+		connect.AssertEqual(t, GetPayoutWalletId(ctx, networkBId), nil)
+
+		// the owner's own active payout wallet is still returned
+		connect.AssertEqual(t, GetPayoutWalletId(ctx, networkAId), nil)
+		err = SetPayoutWallet(ctx, networkAId, *walletAId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, *GetPayoutWalletId(ctx, networkAId), *walletAId)
+	})
+}
