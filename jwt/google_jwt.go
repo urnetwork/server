@@ -91,9 +91,11 @@ func parseGoogleJwtWithKeys(jwtSigned string, keys []any, allowedClientIds []str
 			if !ssoEmailVerified(claims) {
 				return nil, errors.New("Email not verified.")
 			}
-			userNameString, ok = claims["name"].(string)
-			if !ok {
-				return nil, errors.New("Malformed jwt.")
+			// `name` is optional in google id tokens: it is only present
+			// with the profile scope and when the account has a display name.
+			// A missing name must not reject the login (apple has none).
+			if name, ok := claims["name"].(string); ok {
+				userNameString = name
 			}
 
 			jwt := &GoogleJwt{
@@ -131,9 +133,9 @@ func ParseGoogleJwtUnverified(jwtStr string) (*GoogleJwt, error) {
 	if !ok {
 		return nil, errors.New("Malformed jwt.")
 	}
-	userNameString, ok = (*claims)["name"].(string)
-	if !ok {
-		return nil, errors.New("Malformed jwt.")
+	// `name` is optional (see `parseGoogleJwtWithKeys`)
+	if name, ok := (*claims)["name"].(string); ok {
+		userNameString = name
 	}
 
 	jwt := &GoogleJwt{

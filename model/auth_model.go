@@ -141,21 +141,21 @@ func AuthLogin(
 		 * we allow the login and associate the new SSO auth
 		 */
 
-		authJwt, _ := ParseAuthJwt(*login.AuthJwt, AuthType(*login.AuthJwtType))
+		authJwt := parseSsoAuthJwt("login", *login.AuthJwt, AuthType(*login.AuthJwtType))
 
-		if authJwt != nil {
-
-			return handleLoginParsedAuthJwt(
-				&HandleLoginParsedAuthJwtArgs{
-					AuthJwt: *authJwt,
-					// AuthJwtType:       SsoAuthType(*login.AuthJwtType),
-					AuthJwtStr:        *login.AuthJwt,
-					UserAuthAttemptId: userAuthAttemptId,
-				},
-				session.Ctx,
-			)
-
+		if authJwt == nil {
+			return ssoAuthJwtRejectedLoginResult(), nil
 		}
+
+		return handleLoginParsedAuthJwt(
+			&HandleLoginParsedAuthJwtArgs{
+				AuthJwt: *authJwt,
+				// AuthJwtType:       SsoAuthType(*login.AuthJwtType),
+				AuthJwtStr:        *login.AuthJwt,
+				UserAuthAttemptId: userAuthAttemptId,
+			},
+			session.Ctx,
+		)
 	} else if login.WalletAuth != nil {
 
 		result, err := handleLoginWallet(
@@ -299,6 +299,31 @@ func loginUserAuth(
 		}
 		return result, nil
 	}
+}
+
+// ssoAuthJwtRejectedMessage is returned when a provider (google, apple) id
+// token fails verification. It is distinct from the generic credentials error
+// so a failed SSO sign in can be told apart from a bad request.
+const ssoAuthJwtRejectedMessage = "Could not verify your sign in. Please try again."
+
+func ssoAuthJwtRejectedLoginResult() *AuthLoginResult {
+	return &AuthLoginResult{
+		Error: &AuthLoginResultError{
+			Message: ssoAuthJwtRejectedMessage,
+		},
+	}
+}
+
+// parseSsoAuthJwt verifies a provider id token and logs why it was rejected.
+// The token and its claims (email, name) are never logged: the verification
+// errors are fixed reason strings (issuer, audience, expiry, signature, ...).
+func parseSsoAuthJwt(op string, authJwt string, authJwtType AuthType) *AuthJwt {
+	parsed, err := ParseAuthJwt(authJwt, authJwtType)
+	if err != nil {
+		glog.Infof("[auth]%s sso jwt rejected (type=%q): %q\n", op, authJwtType, err.Error())
+		return nil
+	}
+	return parsed
 }
 
 type HandleLoginParsedAuthJwtArgs struct {
