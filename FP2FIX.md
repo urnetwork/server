@@ -4669,3 +4669,20 @@ than a pass-level wait or drain, as the immediate scheduler-owned limit.
 They do not split API time, model transaction/SQL, post-commit cleanup or
 worker CPU, and cannot alone establish causal throughput gain. The next
 diagnostic must isolate those Due subphases under loaded Main conditions.
+A bounded local diagnostic then exercised the real loopback Due HTTP handler,
+model and database with 100,000 providers, 100,000 accepted-history rows,
+400,000 retained receipts and eight concurrent shard lanes. Across eight
+calls per lane at limit four, HTTP Due mean was 44.403 ms with completed-run
+priority off and 59.989 ms with it ready (p95 70.48 and 107.14 ms). All 512
+claims were uniquely fenced and durable; no URL probes ran. Claim SQL plus
+decode averaged about 16.5 ms in either mode, while empty retention
+transactions averaged 0.5–0.6 ms. Fresh custom/generic plans for five
+complex statements had 4.67–8.33 ms planning time and 0.57–0.99 ms
+no-work execution; the claim statement executed in about 2.0–2.1 ms in
+that control. This local fixture does not reproduce the roughly 550 ms
+Main Due mean, so it does not justify a SQL rewrite or prove Main's owner.
+A source-bound Main HTTP/statement/pool comparison is the next discriminator.
+The scheduled 21:27:22Z census reported the first nonzero quota count in
+the current sequence: 61 quota-complete and secure-complete providers of
+107,834 eligible, with 459,929 accepted runs still needed. This is an
+unjoined rolling-cohort snapshot, not a causal rollout comparison.
