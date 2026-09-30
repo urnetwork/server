@@ -124,8 +124,33 @@ func TestParseGoogleJwt(t *testing.T) {
 	connect.AssertEqual(t, googleJwt.UserAuth, "xcolwell@gmail.com")
 	connect.AssertEqual(t, googleJwt.UserName, "Brien Colwell")
 
-	// alternate issuer form
+	// `name` is optional in google id tokens (it is only present with the
+	// profile scope and when the account has a display name). A token
+	// without it must still authenticate, with an empty name like apple.
 	claims := testingGoogleClaims()
+	delete(claims, "name")
+	googleJwt, err = parseGoogleJwtWithKeys(sign(claims), keys, []string{clientId})
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, googleJwt.UserAuth, "xcolwell@gmail.com")
+	connect.AssertEqual(t, googleJwt.UserName, "")
+
+	// the stored token re-read path accepts the same nameless token
+	claims = testingGoogleClaims()
+	delete(claims, "name")
+	googleJwt, err = ParseGoogleJwtUnverified(sign(claims))
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, googleJwt.UserAuth, "xcolwell@gmail.com")
+	connect.AssertEqual(t, googleJwt.UserName, "")
+
+	// a present but non-string name is ignored, not fatal
+	claims = testingGoogleClaims()
+	claims["name"] = 42
+	googleJwt, err = parseGoogleJwtWithKeys(sign(claims), keys, []string{clientId})
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, googleJwt.UserName, "")
+
+	// alternate issuer form
+	claims = testingGoogleClaims()
 	claims["iss"] = "accounts.google.com"
 	_, err = parseGoogleJwtWithKeys(sign(claims), keys, []string{clientId})
 	connect.AssertEqual(t, err, nil)

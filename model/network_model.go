@@ -440,7 +440,7 @@ func NetworkCreate(
 	} else if networkCreate.AuthJwt != nil && networkCreate.AuthJwtType != nil {
 		// user is creating a network via social login
 
-		authJwt, _ := ParseAuthJwt(*networkCreate.AuthJwt, AuthType(*networkCreate.AuthJwtType))
+		authJwt := parseSsoAuthJwt("network create", *networkCreate.AuthJwt, AuthType(*networkCreate.AuthJwtType))
 
 		if authJwt != nil {
 
