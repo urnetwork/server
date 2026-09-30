@@ -356,7 +356,10 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 				reportTunReadError(dataCtx, err, log.Println)
 				return
 			}
-			multiClient.SendPacket(source, protocol.ProvideMode_Network, packet, packetSendTimeout)
+			if !multiClient.SendPacket(source, protocol.ProvideMode_Network, packet, packetSendTimeout) {
+				// Rejection leaves the Tun.Read packet owned by this pump.
+				connect.MessagePoolReturn(packet)
+			}
 		}
 	}()
 

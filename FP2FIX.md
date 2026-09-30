@@ -3821,6 +3821,23 @@ independent and cannot be divided by the 11,522 durable accepted URL rows or
 used as a CPU attribution. The large unready timeout burden is a lead for
 source-level route-lifecycle diagnosis, not yet a proven throughput cause.
 
+The route-readiness source review found that placing a wait inside the
+existing DNS wave relocates the same never-ready allowance and has no direct
+occupied-slot saving. Healthy late admission retains its third-wave recovery
+opportunity; earlier real-DoH controls preserved 5/16-second success and
+roughly 45-second never-ready timing while suppressing pre-admission dial
+allocations. A gain from reduced packet or socket contention remains
+unmeasured, so the route-wait change is held for a finite real-gVisor control.
+
+A separate provider-tunnel pump ownership control proved that `Tun.Read`
+returns caller-owned pooled packet storage and a rejected `SendPacket` leaves
+it with the caller. The old pump ignored rejection. A narrow correction returns
+only rejected packets to `MessagePoolReturn`; accepted packets still transfer
+ownership. The private baseline failed exactly two rejected-owner cases, while
+the candidate passed eight focused server/Connect roots under normal and race
+runs, plus vet. This restores pool reuse; it does not shorten the 15-second
+send allowance or establish a Main throughput or CPU gain.
+
 The first successor capability-2 active frame began at 22:48:13Z, after the
 explicit 15-minute floor. Its coherent 22:50:58Z census found `eligible=109392`,
 `quota_complete=0`, `secure_complete=0`, `due=63290`, `overdue=109383`, and
