@@ -3766,6 +3766,22 @@ two completed-negative cases; the candidate passed four focused roots under
 normal and race runs plus vet. Frequency in Main and throughput impact remain
 unknown pending the tracked change's release and new measurement.
 
+The completed-negative correction and ten-case control were committed as
+`8666931b` and pushed to Main. The tracked four-root focused gate passed;
+the isolated candidate had also passed normal, race and vet gates. Taskworker
+was the only affected service. Local Warpctl built and pushed image
+`2026.9.29-planetoid-1059274730`, manifest
+`sha256:d305ab076a66d46d704fb8de9cdf90e0291a81b2ccdbf80ac458ca3dda2aed12`,
+with both Linux binary vulnerability gates reporting no called vulnerable
+symbols. Build log SHA is
+`3b11701f3e1490b5ff878c5bc6c7271cdf6937a8334fb3e62e23f809bcf6bb29`.
+Warpctl deploy exited zero and service status converged 20/20 enabled paths to
+that version by approximately 00:23Z on September 30 (deploy log SHA
+`8390c596fa6524931cdde4a469d8630901d8fd3468fc388546717d18fcf60bc2`).
+Current-process runtime identity, immutable container digest and post-release
+accepted-run effect require separate proof; scheduled frames overlapping this
+rollout cannot establish a gap-free history.
+
 The first successor capability-2 active frame began at 22:48:13Z, after the
 explicit 15-minute floor. Its coherent 22:50:58Z census found `eligible=109392`,
 `quota_complete=0`, `secure_complete=0`, `due=63290`, `overdue=109383`, and
