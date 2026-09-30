@@ -504,6 +504,9 @@ func (self *Tunnel) HttpClient(timeout time.Duration) *http.Client {
 // this widens the closed set rather than opening it.
 func (self *Tunnel) HttpClientForHosts(timeout time.Duration, extraHosts []string) *http.Client {
 	resolver := &providerUrlResolver{
+		waitRoute: func(ctx context.Context) error {
+			return waitProviderRoute(ctx, self.lost, self.multiClient.Monitor())
+		},
 		query:        self.tun.DohCache().QueryResult,
 		dial:         self.tun.DialResolvedContext,
 		observations: self.dnsObservations,

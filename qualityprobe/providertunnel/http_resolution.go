@@ -15,6 +15,7 @@ import (
 // Each independent tunnel supplies its own cache and socket dialer. Probe
 // tunnels are IPv4-only; this does not change general Connect resolution.
 type providerUrlResolver struct {
+	waitRoute    func(context.Context) error
 	query        func(context.Context, string, string) ([]netip.Addr, bool)
 	dial         func(context.Context, string, string, []netip.Addr) (net.Conn, error)
 	observations *DnsObservations
@@ -69,7 +70,9 @@ func (self *providerUrlResolver) dialContext(ctx context.Context, network, addre
 			}
 			waveStart = time.Now()
 		}
-		addrs, authoritative = self.query(lookupCtx, "A", host)
+		if self.waitRoute == nil || self.waitRoute(lookupCtx) == nil {
+			addrs, authoritative = self.query(lookupCtx, "A", host)
+		}
 		lookupErr := lookupCtx.Err()
 		if self.observations != nil {
 			waveEnd = time.Now()
