@@ -3793,7 +3793,33 @@ This establishes current generation and shard ownership, not immutable
 container digests or uninterrupted coverage. The seventh scheduled census at
 00:23:49Z missed shard owner 3 after the deploy command had ended; that
 post-terminal source-convergence gap remains recorded separately. A settled
-post-release accepted-run rate is still needed.
+post-release accepted-run rate is evaluated separately below.
+
+The first settled post-release fixed history window, 00:25–00:30Z, found
+11,522 unique accepted measured URL runs: 9,003 successes and 2,519 failures,
+or **38.4067/s**. The indexed read completed in 0.253 seconds (receipt
+`0626dc16822fe0efe37949c3f091e44869c34d7a683e6556e3114852244529eb`).
+This excludes setup-only turns and remains well below the current maintenance
+floor. The eighth census at 00:39:01Z had a changed 111,220-provider eligible
+cohort, `runs_needed=594629` and zero quota-complete providers, implying a
+77.24/s numerical maintenance floor. The earlier 28.2733/s window belongs
+to a different image/process and provider cohort; the rise does not establish
+a causal throughput benefit from the completed-negative correction.
+
+One bounded 74-cell Taskworker DNS read for the same 00:25–00:30Z selected
+eight-process window passed source, service-label, reset and freshness guards
+(receipt `eab40b699fe40294f28d280ea8ea74a9ef847fa37928401b6176b239397616b6`).
+Among completed timeout waves, the `unready_endpoints/unattributed` cell
+accumulated **50,940.81 wave-seconds**; `changed_or_ambiguous/unattributed`
+accumulated 5,984.49, and the current-route-admitted before/after cells
+accumulated 838.50/1,655.87 seconds. The unready class means both known
+endpoint snapshots had zero active endpoints, after lost/closed precedence;
+it does not prove continuous absence of a route between snapshots or an
+admission wait of that duration. The read covers only answer/timeout DNS waves,
+which can multiply per turn and include unaccepted work. Counter cells are
+independent and cannot be divided by the 11,522 durable accepted URL rows or
+used as a CPU attribution. The large unready timeout burden is a lead for
+source-level route-lifecycle diagnosis, not yet a proven throughput cause.
 
 The first successor capability-2 active frame began at 22:48:13Z, after the
 explicit 15-minute floor. Its coherent 22:50:58Z census found `eligible=109392`,
