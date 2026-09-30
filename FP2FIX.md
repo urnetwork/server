@@ -4357,3 +4357,17 @@ prove remote receipt, attribute each second to its terminal dependency, or
 equate an initial-ping evaluation with an accepted URL result. The
 fixed-window receipt SHA256 is
 `a95fd87dce0257f6ab0ca595cc307e6e630cc2dccf6a9e0fab20998c160b5b0e`.
+
+An independent, indexed read of durable accepted measured URL outcomes for
+the same fixed 12:25–12:30Z window counted 7,765 unique runs: 6,078
+successes and 1,687 completed failures, or **25.8833/s** fleet-wide. Setup
+and no-result turns were excluded. The primary query took about 0.234
+seconds with read-only, two-second and no-parallel guards; it ran once and
+finished before the next scheduled monitor probe. Receipt SHA256 is
+`91c283faecdc2062d834fa5f9957a7dfd49bfdeb82aa4418dd245a17769bc71c`.
+The earlier 09:52–09:57Z fixed window measured 32.8367/s, but different
+traffic, cohorts, ingestion timing and one-block observer selection prevent
+a causal comparison. This fleet-wide accepted-run denominator cannot be
+divided by the four-process g1 initial-ping population. Both fixed rates
+remain well below the roughly 76–78/s quota maintenance floor; the latest
+scheduled census still has zero quota-complete providers.
