@@ -4449,3 +4449,45 @@ Connect/resident forwarding, provider validation, Transfer ACK return and
 local callback processing remain separate possible boundaries. These
 initial-ping cells cannot be divided by fleet-wide durable URL outcomes or
 attributed to controller/model/API cost without a joined witness.
+
+The URL probe now has an explicit fixed-one-hop, URL-only mode: after
+registration it admits the provider channel through the existing owner and
+hard-cap gate, then the real in-tunnel DNS and HTTPS traffic supplies the
+first data/Transfer ACK. It omits the one-time admission `IpPing`, continuous
+provider pings, and the optional active stall ping for this mode only. Normal
+SDK users retain their prior behavior; contract, auth, encryption, terminal
+and no-result handling remain in force. A real local Open control across two
+provider networks produced the same six outcomes in each mode (two URL
+successes, two completed HTTP failures, two TLS-pin failures), with 12
+provider pings before and zero in URL-only mode. Mean local turn time was
+107.2 versus 98.0 ms; that small control is not a Main rate estimate.
+
+Connect `05822164` and Server `e306d36e` are committed and pushed. A
+concurrent upstream Connect merge brought outage window-expansion gating,
+a degraded race cap and dial backoff into the same image; the merged source
+passed 47 focused normal roots, 47 race roots and four-package vet. The clean
+multi-architecture Taskworker image
+`bringyour/main-taskworker:2026.9.30-planetoid-1059870910` has manifest
+SHA256 `83d5c06921044d8993f8e755b309cd5da33fdbc5946514c37130541f2862e5cd`,
+embedded Server revision `e306d36e` with `vcs.modified=false`, and zero
+reachable vulnerabilities in both Linux binary scans. Only g1 was selected
+at 17:00:05Z on September 30; sampled blocks converged 20/20 by
+17:01:10Z, and `g1-latest` resolves to that manifest. g2 and the 512-slot
+configuration were unchanged. The prior g1 version
+`2026.9.30-planetoid+1059780540` is the rollback point. Deploy log SHA256 is
+`473ff77c5741eaed6b1d1b6d35c2d213ee780f9d09007086320fad8f4f61c6f6`.
+This deployment establishes neither accepted-outcome improvement nor an
+isolated ping-removal effect, because the upstream Connect controls also
+changed. Fresh exact-process proof and settled pre/post accepted-outcome,
+turn, residence, DNS and no-result reads are pending.
+
+A separate proposed 15-second total DNS cap is not part of this image. The
+current resolver can use several DNS waves inside a 60-second HTTP deadline.
+A valid answer at 20 seconds would be lost by a hard 15-second total cap but
+preserved by 30 seconds. In a capped September 29 local-success log sample,
+at least 170 of 340 checks had first-to-last DNS trace time over 15 seconds;
+that timing can include redirects, has no exact provider/process or durable
+accepted-history join, and is not a private DoH-wave distribution. No exact
+accepted-success 15–30-second band is available from retained aggregates.
+The paired 15/30 experiment must report late-success loss explicitly before
+any timeout change can claim unchanged negatives or no false negatives.
