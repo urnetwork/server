@@ -4619,3 +4619,20 @@ and unweighted scrape means, not a continuous occupancy integral or an
 exact durable-history join. They point to longer turns and less-filled slots
 as the immediate observed rate difference; claim/refill, terminal waiting,
 and Connect-side work still need owner-specific discrimination.
+
+The scheduler admission-boundary correction and bounded observability were
+committed as `5ffa265626e1af398dc2ca590821b2a675fa00a0`. After a
+synchronous due response, a claim that has crossed the pass deadline is now
+completed as unstarted with its identity and publication receipt joined;
+it does not enter the tunnel, create a measured URL outcome, or gain quota
+credit. The original deadline and 310-second reserve remain in force. The
+new collector exposes 39 fixed, identity-free series for scheduler phases,
+stop reasons, due-call results and claim disposition. Independent normal and
+race checks each passed 21 tests and vet was clean. The clean multi-platform
+Taskworker image `2026.9.30-planetoid-1060010880` has manifest digest
+`sha256:fa7cbd200650b384aca8228060927873a934d2bd95b9e9604ecf7bc994de9f4b`
+and embeds the commit with `vcs.modified=false`. Both `g1` and `g2` deploy
+commands exited zero and sampled 20/20 on the new version; both block tags
+resolve to that digest. This is deployment evidence, not yet a full-eight
+process-identity proof or a measured throughput improvement. A settled
+post-rollout scheduler/rate comparison remains pending.
