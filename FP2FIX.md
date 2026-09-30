@@ -3952,3 +3952,36 @@ The independent 04:08:50Z database sample measured 39.181 PostgreSQL CPU
 cores of 96 logical cores (40.81%) over 5.02 seconds, without query-owner or
 CPU-quota attribution. No concurrency ramp or reliability-index build is
 admitted by these observations.
+
+Two separately prepared, bounded, read-only discriminators subsequently
+completed for the same fixed 01:13–01:18Z eight-process Taskworker window.
+The CPU reader covered all 28 selected Taskworker and Connect process slots,
+with 284 source rows, complete reference generations and no raw metrics
+retained (receipt stdout SHA256
+`460419ab044b12e2ae6ef544301b7f77c75c31fd3459ee32c1f9134598d3070d`).
+The eight Taskworkers used about **8.75 CPU cores** in aggregate; the 20
+Connect processes used about **70.35 cores**. Edge-3 and edge-4 Connect used
+22.85 and 23.87 cores, versus 3.70 and 1.37 for their Taskworkers. One
+edge-3/g2 Taskworker used 3.09 cores against a reported `GOMAXPROCS=4`;
+the other seven were lower. These are process CPU rates, not URL-path CPU or
+a whole-host census, and cannot assign the host load or slower turns to
+Connect. All 28 selected process generations were complete in this historical
+window; their later continuity and immutable image digests remain unproved.
+
+The paired DNS reader selected the exact eight Taskworker process identities
+and all 74 cells, with 3,600 source rows and complete guarded reduction
+(receipt stdout SHA256
+`0d7bebcb8b4dca5f7a6105cb681a27c0eaa3c58cbe017a7fe461b5e326288b09`).
+About 5,685.76 completed timeout waves had `unready_endpoints` at both route
+snapshots, accumulating 85,040.86 seconds of unattributed wave time across
+parallel turns. The `current_route_admitted` answer-wave class accumulated
+16,288.21 seconds before the observed admission and 10,603.49 seconds after
+it; timeout waves accumulated 1,328.90 and 2,106.02 seconds respectively.
+The independent path-end timeout labels were about 486.02 active, 3,758.48
+forming and 1,925.68 provider-unresponsive waves. Endpoint snapshots do not
+prove continuous absence, path and route cells cannot be joined wave by wave,
+and a turn can have multiple DNS waves. These DNS clocks cannot be divided by
+the accepted-result count or treated as an exact fraction of the 25.95-second
+completed-turn mean. They do identify route readiness as a large measured
+resource/timing discriminator for local source experiments; no readiness-gate
+change or capacity ramp has been released.
