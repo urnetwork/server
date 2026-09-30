@@ -1231,12 +1231,28 @@ type AuthPasswordSetArgs struct {
 // The result of setting the password must not reveal the user auth to the client, in case the reset code was guessed
 type AuthPasswordSetResult struct {
 	NetworkId server.Id
+	Error     *AuthPasswordSetError
+}
+
+type AuthPasswordSetError struct {
+	Message string `json:"message"`
 }
 
 func AuthPasswordSet(
 	passwordSet AuthPasswordSetArgs,
 	session *session.ClientSession,
 ) (*AuthPasswordSetResult, error) {
+	// apply the same password policy as adding a password auth method.
+	// This is checked before the reset code so the response does not depend on
+	// whether the code is valid, and an invalid password leaves the code unused.
+	if !passwordValid(passwordSet.Password) {
+		return &AuthPasswordSetResult{
+			Error: &AuthPasswordSetError{
+				Message: fmt.Sprintf("Password must have at least %d characters", MinPasswordLength),
+			},
+		}, nil
+	}
+
 	userAuthAttemptId, allow := UserAuthAttempt(nil, session)
 	if !allow {
 		// nil user auth: the reset code must not reveal which account it
