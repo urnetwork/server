@@ -4247,3 +4247,30 @@ then 25 focused roots from the exact tracked tree; attestations SHA256
 and `d2d7f5f0c534c6cf966d5c8388b44bbefbdff58c38ce8240cefb71fecabb1c62`.
 The change has no measured Main RSS, CPU or quota effect yet. A fixed
 post-Taskworker Connect baseline is needed before a service canary.
+
+The Connect allocation fix was committed and pushed as Server `2f361252`.
+The clean Main Connect image
+`bringyour/main-connect:2026.9.30-planetoid-1059642290` was published at
+manifest SHA256
+`ddeeeac0f6584410aa700e90a973d73d43fcc95fba521e923aa2590e99100a3e`,
+with `vcs.modified=false` and both Linux binary vulnerability scans clean.
+Only Connect g2 was selected at 10:59:22Z; its sampled status paths reached
+20/20 on the target version. The g2 deploy log SHA256 is
+`08f5c56731c66dd6d6befcc0653dbc3fd811f640180c3b5305fa2d782426f2ac`.
+Other Connect blocks remain on their prior tags.
+
+One bounded, complete 20-slot Connect metrics read of the 10:20–10:25Z
+pre-canary window measured 81.1897 process CPU cores fleet-wide, including
+20.2586 for g2, and 1.58023 GB/s fleet process allocations. Its receipt
+SHA256 is `305bb0d4fc9f3a9a13af48fe0bb377582899c4846c66370e9ffcfc21acb630ab`.
+The matched-definition 11:05–11:10Z post-canary read qualified four fresh
+g2 process identities and the 16 unchanged other-block references. New g2
+processes used 13.8060 CPU cores and allocated 568.311 MB/s versus 20.2586
+cores and 648.744 MB/s in the pre window. Two older g2 generations on
+edge3/4 also appeared in the post window: all observed g2 generations used
+22.0584 cores, while all observed Connect generations used 81.870 cores,
+versus 81.1897 before. The post-read receipt SHA256 is
+`477ecc8c5f1ab06ccc4898d8fe311f3c9e69e5762543f9edce9cae28e21ad44a`.
+Traffic, generation age, and overlap differ; the read does not prove a
+causal Main CPU, URL-rate or quota improvement. The other blocks are held
+until the old drains and a complete steady comparison are understood.
