@@ -35,15 +35,23 @@ func (self *providerUrlResolver) dialContext(ctx context.Context, network, addre
 		if _, scoped := ctx.Value(providerUrlProbeKey{}).(providerUrlProbeTarget); scoped && !publicUrlProbeAddress(literal) {
 			return nil, &providerHttpStageError{stage: "policy", err: errors.New("provider URL resolved to a nonpublic address")}
 		}
-		return self.dial(ctx, network, address, []netip.Addr{literal.Unmap()})
+		return self.dialResolved(ctx, network, address, []netip.Addr{literal.Unmap()})
 	}
 	observation.observe(connect.TunDialDnsStarted)
+	// One URL-only budget covers route waiting, all resolver waves and jitter.
+	// It must never become the target TCP/TLS/body deadline.
+	resolutionCtx, resolutionCancel := providerUrlPhaseContext(ctx)
+	defer resolutionCancel()
 	const attempts = 3
 	var addrs []netip.Addr
 	var authoritative bool
+resolution:
 	for attempt := 0; attempt < attempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if resolutionCtx.Err() != nil {
+			break
 		}
 		lookupTimeout := 10 * time.Second
 		if deadline, ok := ctx.Deadline(); ok {
@@ -52,14 +60,17 @@ func (self *providerUrlResolver) dialContext(ctx context.Context, network, addre
 			// exhaust retries while that window still has usable time left.
 			lookupTimeout = time.Until(deadline) / time.Duration(attempts-attempt+1)
 		}
+		if deadline, ok := resolutionCtx.Deadline(); ok {
+			lookupTimeout = min(lookupTimeout, time.Until(deadline))
+		}
 		if lookupTimeout <= 0 {
 			return nil, context.DeadlineExceeded
 		}
 		// Resolver-internal DoH HTTP/TCP traces must never impersonate progress
 		// of the sampled website. Carry cancellation/deadline, not trace values.
 		lookupCtx, cancel := context.WithTimeout(context.Background(), lookupTimeout)
-		stop := context.AfterFunc(ctx, cancel)
-		if ctx.Err() != nil {
+		stop := context.AfterFunc(resolutionCtx, cancel)
+		if resolutionCtx.Err() != nil {
 			cancel()
 		}
 		var waveStart, waveEnd time.Time
@@ -74,6 +85,11 @@ func (self *providerUrlResolver) dialContext(ctx context.Context, network, addre
 			addrs, authoritative = self.query(lookupCtx, "A", host)
 		}
 		lookupErr := lookupCtx.Err()
+		if resolutionCtx.Err() != nil {
+			// A late answer cannot reopen an expired phase.
+			addrs, authoritative = nil, false
+			lookupErr = resolutionCtx.Err()
+		}
 		if self.observations != nil {
 			waveEnd = time.Now()
 		}
@@ -115,14 +131,20 @@ func (self *providerUrlResolver) dialContext(ctx context.Context, network, addre
 		}
 		if attempt+1 < attempts {
 			select {
-			case <-ctx.Done():
-				return nil, context.Cause(ctx)
+			case <-resolutionCtx.Done():
+				if ctx.Err() != nil {
+					return nil, context.Cause(ctx)
+				}
+				break resolution
 			case <-time.After(50*time.Millisecond + time.Duration(rand.Int64N(int64(150*time.Millisecond)))):
 			}
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if resolutionCtx.Err() != nil {
+		return nil, &net.DNSError{Err: "provider URL resolution timed out", Name: host, IsTimeout: true, IsTemporary: true}
 	}
 	if len(addrs) == 0 {
 		return nil, &net.DNSError{Err: "provider URL resolution exhausted", Name: host, IsNotFound: authoritative, IsTemporary: !authoritative}
@@ -135,5 +157,13 @@ func (self *providerUrlResolver) dialContext(ctx context.Context, network, addre
 		}
 	}
 	observation.observe(connect.TunDialDnsAnswered)
-	return self.dial(ctx, network, address, addrs)
+	return self.dialResolved(ctx, network, address, addrs)
+}
+
+// Starts a fresh socket budget after DNS; it cannot extend a shorter caller
+// deadline or affect the successfully returned connection's lifetime.
+func (self *providerUrlResolver) dialResolved(ctx context.Context, network, address string, addrs []netip.Addr) (net.Conn, error) {
+	dialCtx, cancel := providerUrlPhaseContext(ctx)
+	defer cancel()
+	return self.dial(dialCtx, network, address, addrs)
 }

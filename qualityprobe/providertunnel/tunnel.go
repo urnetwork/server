@@ -764,10 +764,20 @@ func httpClientOverDialerWithResolver(dial dialContextFunc, resolver *providerUr
 		}
 
 		handshakeCtx := ctx
-		if 0 < timeout {
+		handshakeTimeout := timeout
+		if scoped && (handshakeTimeout <= 0 || urlProbePhaseTimeout < handshakeTimeout) {
+			handshakeTimeout = urlProbePhaseTimeout
+		}
+		if 0 < handshakeTimeout {
 			var cancel context.CancelFunc
-			handshakeCtx, cancel = context.WithTimeout(ctx, timeout)
+			handshakeCtx, cancel = context.WithTimeout(ctx, handshakeTimeout)
 			defer cancel()
+		}
+		var readConn *providerUrlReadConn
+		if scoped {
+			deadline, _ := ctx.Deadline()
+			readConn = &providerUrlReadConn{Conn: raw, ownerDeadline: deadline}
+			raw = readConn
 		}
 
 		tlsPins := pins
@@ -786,6 +796,9 @@ func httpClientOverDialerWithResolver(dial dialContextFunc, resolver *providerUr
 		if err != nil {
 			raw.Close()
 			return nil, &providerHttpStageError{stage: "tls", err: err}
+		}
+		if readConn != nil {
+			readConn.idleTimeout = urlProbePhaseTimeout
 		}
 		return tlsConn, nil
 	}

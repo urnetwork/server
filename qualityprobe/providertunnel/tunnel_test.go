@@ -134,10 +134,11 @@ func generateTestCa() (*x509.Certificate, *ecdsa.PrivateKey, error) {
 		return nil, nil, err
 	}
 	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "providertunnel test root CA"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(time.Hour),
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "providertunnel test root CA"},
+		// Cover both the wall clock and testing/synctest's virtual clock.
+		NotBefore:             time.Unix(0, 0),
+		NotAfter:              time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC),
 		IsCA:                  true,
 		BasicConstraintsValid: true,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
