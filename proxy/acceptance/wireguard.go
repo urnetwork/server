@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/urnetwork/server/proxy/internal/dnsudp"
 	"github.com/urnetwork/userwireguard/conn"
 	uwgdevice "github.com/urnetwork/userwireguard/device"
 	"github.com/urnetwork/userwireguard/logger"
@@ -132,13 +133,14 @@ func newWireGuardTransport(ctx context.Context, proxyHost string, config *wireGu
 }
 
 type wireGuardStack struct {
-	stack      *stack.Stack
-	nicID      tcpip.NICID
-	clientIPv4 netip.Addr
-	dnsServer  netip.Addr
-	resolver   *net.Resolver
-	statsLock  sync.Mutex
-	stats      wireGuardPacketStats
+	stack       *stack.Stack
+	nicID       tcpip.NICID
+	clientIPv4  netip.Addr
+	dnsServer   netip.Addr
+	resolver    *net.Resolver
+	statsLock   sync.Mutex
+	stats       wireGuardPacketStats
+	dnsRequests [wireGuardDNSCap]*wireGuardDNSRequest
 }
 
 // The provisioned wg-quick profile specifies the resolver used by a real
@@ -173,6 +175,7 @@ type wireGuardDNSConn struct {
 	ctx             context.Context
 	stopCancel      func() bool
 	closedByContext atomic.Bool
+	dns             *wireGuardDNSExchange
 }
 
 func (c *wireGuardDNSConn) contextError(err error) error {
@@ -187,17 +190,23 @@ func (c *wireGuardDNSConn) contextError(err error) error {
 
 func (c *wireGuardDNSConn) Read(buffer []byte) (int, error) {
 	n, err := c.Conn.Read(buffer)
-	return n, c.contextError(err)
+	err = c.contextError(err)
+	c.dns.ioEvent(n, err, false)
+	return n, err
 }
 
 func (c *wireGuardDNSConn) Write(buffer []byte) (int, error) {
 	n, err := c.Conn.Write(buffer)
-	return n, c.contextError(err)
+	err = c.contextError(err)
+	c.dns.ioEvent(n, err, true)
+	return n, err
 }
 
 func (c *wireGuardDNSConn) Close() error {
 	c.stopCancel()
-	return c.Conn.Close()
+	err := c.Conn.Close()
+	c.dns.close()
+	return err
 }
 
 // Preserve net.PacketConn on UDP. net.Resolver uses that interface to choose
@@ -208,12 +217,16 @@ type wireGuardDNSPacketConn struct {
 
 func (c *wireGuardDNSPacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) {
 	n, address, err := c.Conn.(net.PacketConn).ReadFrom(buffer)
-	return n, address, c.contextError(err)
+	err = c.contextError(err)
+	c.dns.ioEvent(n, err, false)
+	return n, address, err
 }
 
 func (c *wireGuardDNSPacketConn) WriteTo(buffer []byte, address net.Addr) (int, error) {
 	n, err := c.Conn.(net.PacketConn).WriteTo(buffer, address)
-	return n, c.contextError(err)
+	err = c.contextError(err)
+	c.dns.ioEvent(n, err, true)
+	return n, err
 }
 
 func (s *wireGuardStack) dialDNSContext(ctx context.Context, network, _ string) (net.Conn, error) {
@@ -225,7 +238,7 @@ func (s *wireGuardStack) dialDNSContext(ctx context.Context, network, _ string) 
 	var err error
 	switch network {
 	case "udp", "udp4":
-		connection, err = gonet.DialUDP(s.stack, nil, &address, ipv4.ProtocolNumber)
+		connection, err = dnsudp.Dial(s.stack, address)
 	case "tcp", "tcp4":
 		connection, err = gonet.DialContextTCP(ctx, s.stack, address, ipv4.ProtocolNumber)
 	default:
@@ -235,9 +248,13 @@ func (s *wireGuardStack) dialDNSContext(ctx context.Context, network, _ string) 
 		return nil, err
 	}
 	wrapped := &wireGuardDNSConn{Conn: connection, ctx: ctx}
+	if trace, ok := ctx.Value(wireGuardDNSContextKey{}).(*wireGuardDNSRequest); ok {
+		wrapped.dns = trace.exchange(connection, network == "tcp" || network == "tcp4")
+	}
 	wrapped.stopCancel = context.AfterFunc(ctx, func() {
 		wrapped.closedByContext.Store(true)
 		connection.Close()
+		wrapped.dns.close()
 	})
 	if _, datagram := connection.(net.PacketConn); datagram {
 		return &wireGuardDNSPacketConn{wireGuardDNSConn: wrapped}, nil
@@ -491,6 +508,7 @@ type wireGuardDiagnosticBody struct {
 	bind        *wireGuardTrackingBind
 	outer       wireGuardOuterPacketStats
 	dialAttempt *atomic.Uint64
+	dnsTrace    string
 }
 
 type wireGuardDialAttemptContextKey struct{}
@@ -524,15 +542,18 @@ func (b *wireGuardDiagnosticBody) wrapError(err error) error {
 		return err
 	}
 	return fmt.Errorf(
-		"%w; %s",
+		"%w; %s%s",
 		err,
 		wireGuardPacketTrace(b.before, wireGuardRequestPacketStats(b.stack.packetStats(), b.dialAttempt), b.bind, b.outer, time.Now()),
+		wireGuardDNSSuffix(b.dnsTrace),
 	)
 }
 
 func (t *wireGuardDiagnosticTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	dialAttempt := new(atomic.Uint64)
 	request = request.WithContext(context.WithValue(request.Context(), wireGuardDialAttemptContextKey{}, dialAttempt))
+	dnsTrace := t.stack.startDNSRequest()
+	request = request.WithContext(context.WithValue(request.Context(), wireGuardDNSContextKey{}, dnsTrace))
 	before := t.stack.packetStats()
 	outerBefore := wireGuardOuterPacketStats{}
 	if t.bind != nil {
@@ -547,6 +568,8 @@ func (t *wireGuardDiagnosticTransport) RoundTrip(request *http.Request) (*http.R
 	}
 	response, err := roundTripper.RoundTrip(request)
 	after := t.stack.packetStats()
+	// Freeze before any error cleanup/Close can publish late packets or I/O.
+	dnsSummary := dnsTrace.freeze()
 	if err == nil {
 		if foreignErr := wireGuardForeignReturnError(after, time.Now()); foreignErr != nil {
 			if response != nil && response.Body != nil {
@@ -562,11 +585,12 @@ func (t *wireGuardDiagnosticTransport) RoundTrip(request *http.Request) (*http.R
 				bind:        t.bind,
 				outer:       outerBefore,
 				dialAttempt: dialAttempt,
+				dnsTrace:    dnsSummary,
 			}
 		}
 		return response, nil
 	}
-	return response, fmt.Errorf("%w; %s", err, wireGuardPacketTrace(before, wireGuardRequestPacketStats(after, dialAttempt), t.bind, outerBefore, time.Now()))
+	return response, fmt.Errorf("%w; %s%s", err, wireGuardPacketTrace(before, wireGuardRequestPacketStats(after, dialAttempt), t.bind, outerBefore, time.Now()), wireGuardDNSSuffix(dnsSummary))
 }
 
 func wireGuardPacketTrace(
@@ -610,6 +634,9 @@ func (s *wireGuardStack) observePacket(packet []byte, outbound bool) {
 	stats.Packets++
 	stats.Bytes += uint64(len(packet))
 	stats.LastPacketNanos = now.UnixNano()
+	if !outbound {
+		s.observeDNSPacketLocked(packet)
+	}
 
 	if len(packet) < 20 || packet[0]>>4 != 4 {
 		return
@@ -1107,7 +1134,10 @@ func (s *wireGuardStack) DialContext(ctx context.Context, network, address strin
 			return nil, fmt.Errorf("WireGuard tunnel DNS is not configured")
 		}
 		// Treat target names as absolute, without the host's DNS search suffixes.
+		dnsTrace, _ := ctx.Value(wireGuardDNSContextKey{}).(*wireGuardDNSRequest)
+		dnsTrace.lookupEvent(true, nil)
 		ips, err := s.resolver.LookupIP(ctx, "ip4", strings.TrimSuffix(host, ".")+".")
+		dnsTrace.lookupEvent(false, err)
 		if err != nil {
 			var dnsError *net.DNSError
 			if errors.As(err, &dnsError) {
