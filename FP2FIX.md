@@ -3935,3 +3935,20 @@ accepted outcomes and does not justify deploying the private TTFB shortcut as
 the throughput repair. The accepted-only sample cannot rule out time spent on
 turns that produced no accepted measurement; current worker timing is being
 measured separately.
+
+The continuing 15-minute Main monitor remains active without a restart. Its
+01:54:59Z URL frame could not identify fresh shard-0 or shard-6 owners and
+therefore did **not** establish a current global quota count for that frame.
+The later 04:12:17Z frame again had a coherent shard-zero census and reported
+`eligible=111912`, `quota_complete=0`, `runs_needed=700329`, and
+`overdue=111837`. That later observation resolves the particular missing-owner
+snapshot, but does not prove uninterrupted ownership between frames. Its
+current-process hourly measured-run ranges or expected-process coverage remain
+incomplete, so it cannot support a whole-fleet hourly throughput projection.
+The deficit increased relative to the 01:39:48Z census, with a changing cohort;
+the latest numerical maintenance floor is about 77.72 accepted measured
+success-or-failure URL results per second. Setup/no-result turns do not count.
+The independent 04:08:50Z database sample measured 39.181 PostgreSQL CPU
+cores of 96 logical cores (40.81%) over 5.02 seconds, without query-owner or
+CPU-quota attribution. No concurrency ramp or reliability-index build is
+admitted by these observations.
