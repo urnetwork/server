@@ -4520,3 +4520,15 @@ seconds. Four locally acknowledged measured outcomes, 42 virtual timing
 cells, 14 normal/race roots and vet passed; the timeout patch remains private.
 These controls prove both shorter hard caps can create false negatives under
 healthy late recovery, without measuring how often Main experiences it.
+
+On September 30 at 18:05:33Z, at the user's request to simplify the
+all-fleet rate measurement, the same Taskworker image was selected for `g2`.
+The deploy command exited successfully and sampled `g2` converged 20/20;
+subsequent sampled version reads showed both `g1` and `g2` at
+`2026.9.30-planetoid+1059870910` on all 20 sampled status paths each.
+`g2-latest` resolves to the published multiarch manifest
+`sha256:83d5c06921044d8993f8e755b309cd5da33fdbc5946514c37130541f2862e5cd`.
+The previous `g2` version was `2026.9.30-planetoid+1059603990`.
+The 18:05 selection is a control-plane and sampled convergence fact; a
+fresh process-start fence and settled, exact-window accepted-outcome read are
+required before attributing a subsequent Main rate to the all-block rollout.
