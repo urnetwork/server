@@ -4634,5 +4634,18 @@ Taskworker image `2026.9.30-planetoid-1060010880` has manifest digest
 and embeds the commit with `vcs.modified=false`. Both `g1` and `g2` deploy
 commands exited zero and sampled 20/20 on the new version; both block tags
 resolve to that digest. This is deployment evidence, not yet a full-eight
-process-identity proof or a measured throughput improvement. A settled
-post-rollout scheduler/rate comparison remains pending.
+process-identity proof or a measured throughput improvement at the rollout
+boundary.
+The first fixed post-rollout 20:51–20:56Z window was subsequently qualified
+by a guarded all-eight-process read: both `g1` and `g2` starts were after their
+retags and before 20:51Z, and every process reported capability 2 and eight
+configured shards. A separate, source-reviewed indexed history read counted
+15,262 unique accepted measured outcomes, 10,635 successes and 4,627 failures,
+or 50.8733/s (69.68% successful). This is descriptively 8.58% above the
+later 46.8533/s pre-scheduler window and 7.80% below the earlier 55.18/s
+window. Different-time fleet/provider cohorts do not isolate scheduler
+causality, and the rate remains below the approximately 75/s steady demand
+implied by the current eligible-provider count. Exact scheduler phase, due,
+stop and claim-disposition measurements remain pending. The process read
+qualifies time and capability; it does not directly attest a binary digest
+for every PID.
