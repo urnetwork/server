@@ -4754,3 +4754,29 @@ before its fixed outcome window, then compare its own accepted successes,
 failures and failure stages. A later complete native publication is needed
 to observe bucket change; neither cohort alone proves a causal timeout
 effect or the eventual eight-hour equilibrium.
+
+A guarded current-process read found all eight enabled Taskworker processes
+started after their respective `g1`/`g2` retags, with capability 2 and eight
+configured shards, before the fixed 22:55–23:00Z post-change window. This
+proves a current start fence, but does not attest immutable per-process image
+identity or uninterrupted process residency throughout that window. The
+post-change window held 21,019 accepted selected-v1 measured URL outcomes:
+8,805 successes and 12,214 failures. Throughput was 70.0633 accepted/s,
+37.18% above the 51.0733/s pre-change window; successful checks fell from
+37.4133/s to 29.3500/s, and success share fell from 73.254% to 41.891%.
+The largest failure-stage difference was DNS-class (`dial_dns` plus
+`request_dns_timeout`), 2,530 before versus 10,920 after. TCP failures were
+128 versus 152 and TLS failures 140 versus 101. Different times and provider
+cohorts make these descriptive fleet observations, not isolated causal
+effects or proof that a particular DNS outcome would have succeeded at 15s.
+
+Every provider in each fixed five-minute accepted-history window had exactly
+one measured outcome. Consequently, among the 21,019 providers observed
+after the change, **8,805 (41.891%) pass an S/N ≥ 0.6 threshold** and
+12,214 fail it for that one-observation window. Before the change, 11,224
+of 15,322 observed providers (73.254%) pass by the same one-observation
+method. These are fresh five-minute cohorts, not the production eight-hour
+native Quality or Speed bucket counts. They exclude setup/no-result attempts,
+do not join the same providers across windows, and cannot predict the final
+rolling eight-hour pass count until the old evidence ages out. A fresh native
+bucket publication is still required to measure the operational count.
