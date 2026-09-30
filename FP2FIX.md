@@ -3838,6 +3838,19 @@ the candidate passed eight focused server/Connect roots under normal and race
 runs, plus vet. This restores pool reuse; it does not shorten the 15-second
 send allowance or establish a Main throughput or CPU gain.
 
+The packet-pool correction was committed and pushed as `fd87d5fa`. The local
+Taskworker build passed both Linux binary vulnerability gates and pushed
+`2026.9.29-planetoid-1059303750`, manifest
+`sha256:aa560dd47abaa6e24558ae2fcc4e785e17c3d72cd0ad29649f9e983cf1b50ced`
+(build log SHA `e9330bad9cd6653bc1e731d705cc9495c6b72ef79c934696b314bda1a5601007`).
+Warpctl updated `g1` at 01:09:06Z and `g2` at 01:09:09Z on September 30;
+deploy exited zero with service status 20/20 enabled Taskworker paths on the
+new version by 01:11:18Z (deploy log SHA
+`62f5e099cf994fd6d94cc1627c0ab234867e1a9638993175b8f03c310267cd34`).
+Current-process identity and a settled post-release rate remain separate
+verification tasks. The tenth scheduled monitor frame overlaps the rollout,
+so temporary owner gaps there cannot be silently counted as recovery.
+
 The first successor capability-2 active frame began at 22:48:13Z, after the
 explicit 15-minute floor. Its coherent 22:50:58Z census found `eligible=109392`,
 `quota_complete=0`, `secure_complete=0`, `due=63290`, `overdue=109383`, and
