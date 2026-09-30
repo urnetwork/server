@@ -20928,6 +20928,34 @@ on-host reducer closes that visibility gap: the alert can report
 `failure_journal_lines=11`, `storage_eio_lines=10`, and
 `unclassified_lines=1`, with every raw message and identity withheld.
 
+On 2026-09-30, edge-2's root filesystem reached 88% used with 837 GiB free.
+The PostgreSQL data directory held about 4.3 TiB of table/index data and 14
+GiB of WAL; archiving was disabled and no replication slot retained WAL. Its
+two complete local encrypted backup generations used 987 GiB. The unexpected
+consumer was `/var/log/postgresql`: 550 GiB, including one 530 GiB compressed
+PostgreSQL log from August 9 retained by the package's weekly ten-copy
+logrotate policy. Xops `069933e` replaced that policy with an isolated
+`run-dbs.sh --logging-only` deployment: hourly size checks, 256 MiB per-log
+rotation, eight compressed copies for PostgreSQL and 32 PgBouncer logs. The
+first rotation completed successfully without restarting PostgreSQL; logs fell
+to 8.1 GiB, filesystem free space rose to 1.4 TiB, and PostgreSQL continued
+accepting connections. This is an approximate retention budget across 33 logs,
+not a hard cap against more than 100 GiB emitted within one hour. The cause of
+the old log emission was not recovered from the expired artifact.
+
+The next source backup starts October 1 00:00 UTC. Its two newest encrypted
+generations are about 515 and 544 GB, and its script temporarily holds a new
+compressed dump and encrypted copy concurrently. The reclaimed space removes
+the immediate same-size backup ENOSPC risk, but watch the next run's free-space
+trough and successful final publication. A direct Planetoid read found the
+archive mounted read-write with 2.7 TiB free; the September 27 PostgreSQL
+generation had a fresh `pg-gpg-sha256` verified result, and direct `du` of its
+four hard-link-aware tiers exactly matched the exported 3,908,401,164,288-byte
+PostgreSQL storage total. The standing monitor still reported Planetoid SSH
+exit 255, so its `backup-archives` coverage is unknown until that separate
+strict-host-key access path is repaired and a scheduled probe succeeds. Do not
+reinterpret this one direct check as recovered scheduled monitor coverage.
+
 ---
 
 ## 12. Taskworker drain (deploy) — TASKDRAIN1
