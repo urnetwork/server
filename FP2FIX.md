@@ -4288,3 +4288,38 @@ maintenance floor at the observed 110–112k eligible cohort. The window
 does not establish arrival-time completeness, a rolling quota recovery, or
 causal benefit from the Taskworker release; different fixed windows have
 different traffic and cohort conditions. No extra active URL probe was run.
+
+The complete 20-slot Connect comparison for the later 11:25–11:30Z window
+measured 82.4446 process CPU cores fleet-wide versus 81.1897 in the fixed
+10:20–10:25Z pre-canary window (+1.55%). G2 used 20.8616 versus 20.2586
+cores (+2.98%) and allocated 849.800 versus 648.744 MB/s (+30.99%); its
+forward-worker and outbound-endpoint populations also rose 8.90% and 6.67%.
+The read returned the 20 expected current process metric groups and no older
+g2 metric group. Metric absence does not prove OS/container exit. Different
+traffic, process ages and populations prevent a causal CPU or allocation
+conclusion; in particular, local constructor savings have not established a
+Main fleet CPU benefit. Other Connect blocks remain on their previous image.
+The bounded read receipt SHA256 is
+`4ca4278fa3e6ba09692cbf3ffcfc2206e6fc1b09ef7607a3696e779f25accb23`.
+
+Initial-ping dependency observation was committed and pushed as Connect
+`8fc48acc` and Server `b9cd123e`. It records 49 fixed aggregate scalar
+series per Taskworker process, with no provider, client, destination or URL
+labels and no timeout, admission or retry changes. The exact tracked source
+passed 30 focused normal and 30 race test roots plus vet; integration
+attestation SHA256 is
+`762157c479981edb67adf5035080c823e15ef3b2a6f2fe038a03cde9feb8e501`.
+The clean multi-architecture Taskworker image
+`bringyour/main-taskworker:2026.9.30-planetoid-1059705550` was published
+as manifest SHA256
+`febae1e23c128fbbac1a09bd62e2835537ffdd1cf5a062dab6591f973b5a2e45`;
+its embedded Server revision is `b9cd123e`, `vcs.modified=false`, and both
+Linux binary vulnerability scans found no reachable vulnerabilities. Only
+Taskworker g1 was selected at 12:21:23Z. Its sampled status paths converged
+20/20 on the new image, and the g1 registry tag resolves to the same
+manifest. Deploy log SHA256 is
+`988b5dbbd62424f11a239619aa48f19f94eb296dc1b5e4566c66fe3bb996fd9c`.
+The counters need a settled fixed Main window before drawing a phase or
+throughput conclusion. The backend-degradation retry hypothesis remains
+unsupported: a real local Open control dispatched its first prewarmed
+contract in 0.304 ms and completed a measured URL result in 1.205 seconds.
