@@ -4593,4 +4593,13 @@ unrecognized stages were zero in all three windows. Of the 2,860 additional
 failures in the post versus earlier pre window, 2,727 were DNS-class, while
 the success count increased by 749. This is a descriptive DNS-stage shift
 consistent with the 15-second cap, not a measured late-recovery fraction or
-an isolated causal effect. The second post-change rate window remains pending.
+an isolated causal effect. A later post-change rate window was read separately.
+The later fixed 19:20–19:25Z post-change window held 14,056 accepted outcomes
+(10,736 successes, 3,320 failures), or 46.8533/s, in a separately guarded
+read. This was 15.09% below the first post-change window's 55.18/s, so the
+initial higher rate did not persist in this later five-minute cohort. It
+remained above the 43.15/s earlier pre-timeout cohort, but the windows differ
+in time and provider mix. Neither post-change window meets the approximately
+75.41/s steady rate implied by the latest 108,588 eligible-provider census.
+Current exact-shard stage and CPU/PG-acquisition measurements are needed to
+locate the remaining capacity limit before another code or slot change.
