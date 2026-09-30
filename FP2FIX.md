@@ -3782,6 +3782,19 @@ Current-process runtime identity, immutable container digest and post-release
 accepted-run effect require separate proof; scheduled frames overlapping this
 rollout cannot establish a gap-free history.
 
+One bounded now-only read at 00:32:10–13Z then found eight current enabled
+Taskworker processes, capability 2/configured eight, with eight unique fresh
+shard owners. Process starts ranged 00:21:03.720–00:22:31.870Z, each after
+its block's `g1`/`g2` tag update. The coherent shard-zero census observed at
+00:31:35Z reported `eligible=109873`, `runs_needed=576537` and
+`quota_complete=0` (receipt
+`00298b0802437a41b67e9b2de161ef8d9489c9aea859d2972c261ebb9e53e5d8`).
+This establishes current generation and shard ownership, not immutable
+container digests or uninterrupted coverage. The seventh scheduled census at
+00:23:49Z missed shard owner 3 after the deploy command had ended; that
+post-terminal source-convergence gap remains recorded separately. A settled
+post-release accepted-run rate is still needed.
+
 The first successor capability-2 active frame began at 22:48:13Z, after the
 explicit 15-minute floor. Its coherent 22:50:58Z census found `eligible=109392`,
 `quota_complete=0`, `secure_complete=0`, `due=63290`, `overdue=109383`, and
