@@ -4601,5 +4601,21 @@ initial higher rate did not persist in this later five-minute cohort. It
 remained above the 43.15/s earlier pre-timeout cohort, but the windows differ
 in time and provider mix. Neither post-change window meets the approximately
 75.41/s steady rate implied by the latest 108,588 eligible-provider census.
-Current exact-shard stage and CPU/PG-acquisition measurements are needed to
+Current exact-shard stage and CPU/PG-acquisition measurements were needed to
 locate the remaining capacity limit before another code or slot change.
+A guarded paired exact-eight-shard read subsequently compared the fixed
+19:07–19:12Z and 19:20–19:25Z windows. All core, progress, whole-Taskworker
+CPU and default-PG-pool groups qualified independently in both windows.
+Accepted-turn counter rates moved from 55.095 to 46.538/s. Completed timed
+turn means rose from 8.658 to 9.314 seconds: `check_and_buffer` 7.535 to
+7.811, publication 0.699 to 0.949 and close/join 0.332 to 0.435 seconds.
+Shared-lane active-batch scrape means fell from 476.64 to 444.31 of 512
+configured slots; running fell from 433.72 to 391.63 while finished-waiting
+rose from 38.17 to 47.53. The running decline appeared on all eight shards,
+not one edge. Whole-Taskworker CPU fell from 15.03 to 13.63 cores. Mean
+default-PG acquire residence rose from 0.953 to 2.214 milliseconds, but this
+does not measure statement time. These are fixed-window counter estimates
+and unweighted scrape means, not a continuous occupancy integral or an
+exact durable-history join. They point to longer turns and less-filled slots
+as the immediate observed rate difference; claim/refill, terminal waiting,
+and Connect-side work still need owner-specific discrimination.
