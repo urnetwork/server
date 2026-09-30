@@ -4686,6 +4686,11 @@ The scheduled 21:27:22Z census reported the first nonzero quota count in
 the current sequence: 61 quota-complete and secure-complete providers of
 107,834 eligible, with 459,929 accepted runs still needed. This is an
 unjoined rolling-cohort snapshot, not a causal rollout comparison.
+The later census in the complete 21:18 monitor frame
+reported 332 quota-complete providers of 108,049 eligible. This is another
+unjoined, changing-cohort snapshot; it shows some current providers meeting
+the quota, while the overwhelming majority remain incomplete, and does not
+attribute the increase to the scheduler release.
 Capacity also limits what Due refill alone can achieve. If the last measured
 roughly nine-second turn residence remained representative, filling all 512
 configured URL slots from the 466.09 active-slot scrape mean would raise the
