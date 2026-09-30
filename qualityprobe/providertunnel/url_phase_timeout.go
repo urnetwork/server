@@ -7,9 +7,9 @@ import (
 	"time"
 )
 
-// URL probes accept a negative result after fifteen seconds in any network
-// phase. The request's original total deadline remains the outer owner.
-const urlProbePhaseTimeout = 15 * time.Second
+// URL probes cap DNS, TCP connect, TLS handshake and per-read idle time at
+// five seconds. The request's original total deadline remains the outer owner.
+const urlProbePhaseTimeout = 5 * time.Second
 
 func providerUrlPhaseContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, scoped := ctx.Value(providerUrlProbeKey{}).(providerUrlProbeTarget); scoped {
