@@ -4386,3 +4386,14 @@ the next scheduled probe, but the intended safe gate did not pass. The
 result was not rerun; a replacement private wrapper now tests that a
 rejected second audit issues zero queries. Result receipt SHA256 is
 `2067d6c2e6120ca7b30159fd4dca3d45bcd68a75e77b3756ed558d3ab7dde4db`.
+
+A local mixed-batch control ruled out one proposed URL idle cause. Production
+URL rows declare a 900-second maximum, and the existing task picker isolates
+tasks whose declared maximum exceeds two minutes. With a real production-
+shaped URL row, both `EvalTasks(2)` and `EvalTasks(1)` finalized the URL and
+admitted its successor while an ordinary sibling remained blocked. Only a
+deliberately counterfactual 120-second URL row co-batched and waited for the
+sibling. Three normal roots, three race roots and vet passed with production
+source unchanged. This is a local exclusion of the mixed-batch hypothesis,
+not a Main throughput measurement. Evidence manifest SHA256 is
+`bd88048222767521aa58a45c52063a7486f5d98e77098b1837f41a71060853e6`.
