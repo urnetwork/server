@@ -20951,10 +20951,21 @@ trough and successful final publication. A direct Planetoid read found the
 archive mounted read-write with 2.7 TiB free; the September 27 PostgreSQL
 generation had a fresh `pg-gpg-sha256` verified result, and direct `du` of its
 four hard-link-aware tiers exactly matched the exported 3,908,401,164,288-byte
-PostgreSQL storage total. The standing monitor still reported Planetoid SSH
-exit 255, so its `backup-archives` coverage is unknown until that separate
-strict-host-key access path is repaired and a scheduled probe succeeds. Do not
-reinterpret this one direct check as recovered scheduled monitor coverage.
+PostgreSQL storage total. The strict Planetoid host-key path was subsequently
+repaired and scheduled `backup-archives` SSH and mount checks succeeded, but
+the fresh Mimir archive sample count remained zero. The deployed alert-only
+adapter drops healthy callbacks, so quiet output cannot prove telemetry
+delivery. Direct Planetoid exporter files were fresh; its Fluent Bit journal
+reported remote-write timeouts to Fireside/Crisp rather than an export or
+parse failure. A scoped Fireside read found Planetoid's VPN address as the
+sole member of the `ip sshguard attackers` set, with an input-chain rule
+dropping members before the Mimir listener. On September 30 at
+20:49:58–20:50:00Z, an exact one-element `nft delete element` removed that
+member after a fresh precondition check. Immediate readback found an empty
+set, unchanged rule/chain structure, and stable SSHGuard service generation;
+there was no retry, restart, configuration edit, or application probe. The
+original block trigger and remote-write recovery remain unverified until a
+fresh archive series is observed. Watch for the address being re-added.
 
 ---
 
