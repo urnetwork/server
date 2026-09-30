@@ -3985,3 +3985,68 @@ the accepted-result count or treated as an exact fraction of the 25.95-second
 completed-turn mean. They do identify route readiness as a large measured
 resource/timing discriminator for local source experiments; no readiness-gate
 change or capacity ramp has been released.
+
+## 2026-09-30 Connect CPU and route-readiness checkpoint
+
+The continuing 15-minute Main monitor's coherent 06:13:54Z census reported
+`eligible=111992`, `quota_complete=0`, `runs_needed=687651`, and
+`overdue=111984`. The quota remains ten accepted measured URL outcomes,
+success plus failure, per eligible provider in a strict rolling four hours;
+setup-only turns do not count. Current-process hourly coverage is still
+incomplete. The 06:03 frame overlapped the Connect g2 metrics rollout, so its
+later callbacks cannot be used as a clean before/after performance comparison.
+
+Historical 01:13–01:18Z counters for two exact Connect generations support a
+retained-forward workload investigation. Edge0/g2 averaged 4,739.95 forward
+workers, 4,594.80 outbound endpoints, 2.8814 CPU cores and 14.618 MB/s
+allocated. Edge4/g2 averaged 15,098.47 workers, 14,285.84 endpoints, 5.8049
+cores and 116.563 MB/s allocated. Their sent ping rates were 17,053.36/s and
+55,659.95/s. These counters cover all exchange traffic; neither their CPU nor
+their worker counts identify FP2-only work or exact disconnected owners.
+The read receipt SHA256 is
+`4ea0f7729275e3f9ea03f38d65c07c6fa4cafba9b9c106c657cf0afaa941876a`.
+
+Two source defects were fixed in Server commit `fb1d1eb7` and pushed to main.
+Disconnected `ResidentForward` owners now wait for a queued payload before
+resident lookup or redial, while retaining queued recovery, FIFO order and
+pooled-buffer ownership. The existing 15-minute payload-idle policy now waits
+for the remaining deadline instead of checking only every 15 minutes. A local
+network/Redis fixture previously kept a forward alive for 1,799 seconds after
+its last payload; the candidate closes it at 900 seconds. Five paired local
+32-connection, 1,800-second virtual-horizon runs reduced median CPU by 47.86%,
+allocated bytes by 42.23% and sent ping operations by 49.98%. These are local
+mechanism measurements, not Main savings. Sol independently passed 27 normal
+and 27 race test roots plus vet on the integrated source, attestation SHA256
+`1d1a3ec0c3697891888949612f4847eac4da963f74a2092e3489cce8ed1f3235`.
+
+The lookup instrumentation image
+`bringyour/main-connect:2026.9.29-planetoid-1059458480` was published with
+manifest SHA256 `1df461698f99812a7331cd9051dd311c36ccc06562d3a5e553377c15d8d327b5`
+and selected for the shared g2 block at 06:11Z. Its LB block status reached
+20/20 repeated successful **g2 samples**; this is neither a 20-container count
+nor proof of the other blocks. Exact image proof on each enabled g2 host and a
+source-bound lookup/CPU baseline are still pending. The running prior
+edge1/g2 image was bound to its previous build record. The new image's own Go
+build info identifies Server commit `2affcd32` as unmodified; its local
+Connect dependency has only a qualified time-based source link. The rollback
+version is `2026.9.29-planetoid-1059025240`. The behavior-fix image was built
+and published as `bringyour/main-connect:2026.9.29-planetoid-1059497230`
+with manifest SHA256
+`031dc6a5bcba3fcf161691422d07781344e20e1337f1b8dc036f426e1c31a2e8`;
+its build log SHA256 is
+`6fc0eef6ea5f4f28c6f08accc78e7f53d54a2d1eb48f370f0e41fb61195ddff2`.
+It has not been selected on Main at this checkpoint.
+
+Real local `providertunnel.Open` controls with delayed provider route
+admission preserved measured success or failure and existing deadlines. At
+35-second admission, an experimental route-readiness gate reduced generated
+SYNs from 105 to 5, provider TCP dials from 25 to 5, and SYNs accepted from a
+terminal local source endpoint from 8 to 0. Its paired total times were 35.590
+and 35.291 seconds, a single jittered comparison with no latency-gain claim.
+The 5- and 16-second admission pairs likewise found work reduction but no
+latency gain. The never-ready turn produced a measured failure at its existing
+deadline; cancellation produced no measured result or credit. The local gate
+is **not deployed**: one virtual TLS/H2
+teardown test remains under investigation, and no Main capacity or quota
+improvement has been demonstrated. No 2,048-slot ramp is admitted by this
+evidence.
