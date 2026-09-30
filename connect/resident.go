@@ -3184,7 +3184,23 @@ func NewResidentForward(
 }
 
 func (self *ResidentForward) Run() {
+	self.runWithResidentLookup(model.GetResidentForClient)
+}
+
+// Keep resident discovery at the forward owner; the argument permits isolated
+// lifecycle tests without a shared global hook or a live Redis connection.
+func (self *ResidentForward) runWithResidentLookup(
+	lookup func(context.Context, server.Id, time.Duration) *model.NetworkClientResident,
+) {
+	// A disconnected forward owns at most one dequeued packet while looking
+	// for its destination. No packet means no reason to refresh or redial a
+	// departed resident. The idle reaper remains the lifetime authority.
+	var pending []byte
+	var hasPending bool
 	defer func() {
+		if hasPending {
+			connect.MessagePoolReturn(pending)
+		}
 		self.sendAdmission.close()
 		self.cancel()
 		self.sendAdmission.wait()
@@ -3213,35 +3229,53 @@ func (self *ResidentForward) Run() {
 		writeTimer := time.NewTimer(0)
 		defer writeTimer.Stop()
 		for {
-			select {
-			case <-handleCtx.Done():
-				return
-			case message, ok := <-self.send:
-				if !ok {
-					// transport closed
+			var message []byte
+			if hasPending {
+				message, pending, hasPending = pending, nil, false
+			} else {
+				select {
+				case <-handleCtx.Done():
 					return
-				}
-				sendResult := connection.sendMessage(
-					handleCtx.Done(),
-					message,
-					writeTimer,
-					self.exchange.settings.WriteTimeout,
-				)
-				if !pooledMessageSendKeepsGeneration(sendResult) {
-					if sendResult == pooledMessageSendDropped && glog.V(1) {
-						glog.Infof("[rf]retire saturated exchange %s->\n", self.clientId)
+				case next, ok := <-self.send:
+					if !ok {
+						return
 					}
-					return
+					message = next
 				}
+			}
+			// sendMessage consumes this exact owner on every outcome.
+			sendResult := connection.sendMessage(
+				handleCtx.Done(), message, writeTimer, self.exchange.settings.WriteTimeout,
+			)
+			if !pooledMessageSendKeepsGeneration(sendResult) {
+				if sendResult == pooledMessageSendDropped && glog.V(1) {
+					glog.Infof("[rf]retire saturated exchange %s->\n", self.clientId)
+				}
+				return
 			}
 		}
 	}
 
 	initialLookup := true
 	for {
+		if !hasPending {
+			select {
+			case <-self.ctx.Done():
+				return
+			case message, ok := <-self.send:
+				if !ok {
+					return
+				}
+				pending, hasPending = message, true
+			}
+		}
+		// A ready queue must not win over a completed owner and start fresh I/O.
+		if self.ctx.Err() != nil {
+			return
+		}
 		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
-		resident := defaultResidentForwardLookupMetrics.observe(initialLookup, len(self.send) > 0, func() *model.NetworkClientResident {
-			return model.GetResidentForClient(self.ctx, self.clientId, self.exchange.settings.ExchangeResidentTtl)
+		resident := defaultResidentForwardLookupMetrics.observe(initialLookup, hasPending || len(self.send) > 0, func() *model.NetworkClientResident {
+			return lookup(self.ctx, self.clientId, self.exchange.settings.ExchangeResidentTtl)
 		})
 		initialLookup = false
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
@@ -3309,6 +3343,30 @@ func (self *ResidentForward) CancelIfIdle() bool {
 		return true
 	}
 	return false
+}
+
+// Owns idle expiry independently from socket liveness. Forward activity is
+// payload admission; exchange keepalives do not extend this deadline.
+func (self *ResidentForward) runIdleWatcher(sourceId server.Id) {
+	timer := time.NewTimer(self.exchange.settings.ForwardIdleTimeout)
+	defer timer.Stop()
+	for {
+		if self.CancelIfIdle() {
+			if glog.V(1) {
+				glog.Infof("[rf]idle %s->%s\n", sourceId, self.clientId)
+			}
+			return
+		}
+		// Activity can move the deadline after the prior timer was armed.
+		// Recheck then wait only for the remaining existing idle allowance.
+		remaining := self.exchange.settings.ForwardIdleTimeout - time.Since(time.Unix(0, self.lastActivityNanos.Load()))
+		timer.Reset(max(0, remaining))
+		select {
+		case <-self.Done():
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 func (self *ResidentForward) IsDone() bool {
@@ -4088,20 +4146,7 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 		residentForwardIdleWatchersGauge.Inc()
 		go server.HandleError(func() {
 			defer residentForwardIdleWatchersGauge.Dec()
-			for {
-				if forward.CancelIfIdle() {
-					if glog.V(1) {
-						glog.Infof("[rf]idle %s->%s\n", sourceId, destinationId)
-					}
-					return
-				}
-
-				select {
-				case <-forward.Done():
-					return
-				case <-time.After(self.exchange.settings.ForwardIdleTimeout):
-				}
-			}
+			forward.runIdleWatcher(sourceId)
 		})
 
 		// Install. Another goroutine may have raced ahead with a live forward
