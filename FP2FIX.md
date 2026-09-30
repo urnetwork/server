@@ -3851,6 +3851,18 @@ Current-process identity and a settled post-release rate remain separate
 verification tasks. The tenth scheduled monitor frame overlaps the rollout,
 so temporary owner gaps there cannot be silently counted as recovery.
 
+A bounded now-only read at 01:16:42–44Z found eight current enabled Taskworker
+processes, capability 2/configured eight, with eight unique fresh shard owners.
+Every process started after its block tag update; starts ranged
+01:09:14.210–01:10:50.890Z. The coherent shard-zero census observed at
+01:14:55Z reported `eligible=112089`, `quota_complete=0` and
+`runs_needed=609152` (receipt
+`acdef78b6b4e96c36eebcae0bd1a931cf8d8d513da527bf8635a1e60b165c2e9`).
+Three older metadata groups were excluded. This proves current generation and
+shard ownership, not immutable container digest or a gap-free rollout history.
+The eligible cohort has changed again; no post-packet-pool accepted-run rate or
+CPU saving has been established.
+
 The first successor capability-2 active frame began at 22:48:13Z, after the
 explicit 15-minute floor. Its coherent 22:50:58Z census found `eligible=109392`,
 `quota_complete=0`, `secure_complete=0`, `due=63290`, `overdue=109383`, and
