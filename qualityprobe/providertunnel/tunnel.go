@@ -42,6 +42,8 @@ type Config struct {
 	DnsObservations *DnsObservations
 	// Optional probe-owned completed setup diagnostics; never shared across probes.
 	SetupObservations *SetupObservations
+	// Optional initial-ping aggregate from this tunnel, with no identity labels.
+	InitialPingObservations *connect.InitialPingObservations
 	// Optional fixed auth-request aggregate. Only this tunnel's synchronous
 	// client-mint calls opt in; no application URL or identity is recorded.
 	AuthObservations *connect.AuthNetworkClientObservations
@@ -329,6 +331,8 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 
 	registration := &providerRegistrationState{}
 	setup := newProviderSetupState(cfg.SetupObservations, providerClientId)
+	multiClientSettings := providerTunnelMultiClientSettings()
+	multiClientSettings.InitialPingObservations = cfg.InitialPingObservations
 	multiClient := connect.NewRemoteUserNatMultiClient(
 		dataCtx,
 		&providerRegistrationGenerator{ApiMultiClientGenerator: generator, registration: registration, setup: setup},
@@ -336,7 +340,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 			_, _ = tun.Write(packet)
 		},
 		protocol.ProvideMode_Network,
-		providerTunnelMultiClientSettings(),
+		multiClientSettings,
 	)
 
 	// Independent of every other context here on purpose: it must outlive a

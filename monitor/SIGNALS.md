@@ -10685,6 +10685,32 @@ sample that stops before peer EOF does not establish this exception. Explicit
 `NotMeasured` and missing-clock decisions remain authoritative; funding,
 security validation and publication gates still apply.
 
+Optional initial-ping diagnostics are a separate process aggregate:
+`urnetwork_egress_probe_initial_ping_evaluations_total{outcome,dependency}`,
+`urnetwork_egress_probe_initial_ping_seconds_total{outcome,dependency}` and
+`urnetwork_egress_probe_initial_ping_started_total`. Require all 49 fixed
+cells, exact process identity, freshness and reset-safe windows before reading
+them. Four outcomes crossed with six dependency snapshots describe completed
+initial-ping evaluations after successful construction. `acknowledged` does
+not prove route admission; pending, canceled, repeated and surplus evaluations
+do not equal accepted measured URL outcomes. A carrier snapshot is an endpoint
+observation; `carrier_absent` does not prove continuous absence, and an attempted
+write does not prove provider receipt. The terminal dependency label does not
+attribute the entire residence interval. Contract wait/failure without a prior
+selected-destination write is local control evidence, with the existing
+provider-verdict policy unchanged. The fixed counters contain no provider,
+client, destination, URL or arbitrary error labels. They do not change the
+quota requirement of ten unique accepted measured success plus failure runs.
+
+False-positive qualifier: carrier presence means any registered send or receive
+route at the terminal snapshot, not continuous bidirectional delivery. The
+started, terminal-count and duration counters are independent atomic reads;
+they are not an atomic event ledger. False-negative qualifier: route-lock
+contention produces `carrier_unknown`, and unfinished evaluations have no
+terminal duration. Missing cells or an unknown dependency remain unknown.
+These observation-only counters change no retry, deadline, admission, security,
+provider-verdict or ownership policy; an ordinary nil observer remains inert.
+
 Phase timing needs its owning clock. The provider URL resolver's `dns_ms`
 includes its bounded private DoH attempts, retry jitter, and tunnel work while
 resolving the target; it is not an upstream DNS-server RTT. A capped newest

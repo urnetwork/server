@@ -1816,17 +1816,18 @@ func runProviderEgressProbe(
 	}
 	return runWithProviderEgressControl(ctx, credentials, func(localControl connect.NetworkClientControl) (*ProviderEgressProbeResult, error) {
 		tunnelConfig := providertunnel.Config{
-			ApiUrl:            args.APIURL,
-			PlatformUrl:       args.PlatformURL,
-			ByJwt:             identity.ByClientJwt,
-			ClientId:          connect.Id(*identity.ClientId),
-			DeviceDescription: model.ProberClientDescription,
-			DeviceSpec:        model.ProberClientDeviceSpec,
-			Version:           server.RequireVersion(),
-			DnsObservations:   &egressProbeDns.observations,
-			AuthObservations:  &egressProbeAuth.observations,
-			ClientCredentials: credentials,
-			ClientControl:     localControl,
+			ApiUrl:                  args.APIURL,
+			PlatformUrl:             args.PlatformURL,
+			ByJwt:                   identity.ByClientJwt,
+			ClientId:                connect.Id(*identity.ClientId),
+			DeviceDescription:       model.ProberClientDescription,
+			DeviceSpec:              model.ProberClientDeviceSpec,
+			Version:                 server.RequireVersion(),
+			DnsObservations:         &egressProbeDns.observations,
+			AuthObservations:        &egressProbeAuth.observations,
+			InitialPingObservations: &egressProbeInitialPing.observations,
+			ClientCredentials:       credentials,
+			ClientControl:           localControl,
 		}
 
 		// every finding the prober submits passes through the metrics reporter
