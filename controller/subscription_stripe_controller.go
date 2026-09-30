@@ -1849,6 +1849,16 @@ func StripeCreateCheckoutSession(
 	switch args.ItemId {
 
 	case StripeItemProMonthly, StripeItemProYearly:
+		// never start a second subscription while one is active (see StripePaymentSheet)
+		customerId := ""
+		if existing, _ := model.GetStripeCustomer(clientSession); existing != nil {
+			customerId = *existing
+		}
+		if stripeNetworkHasActiveSubscription(clientSession, customerId) {
+			glog.Infof("[stripe]checkout: network %s already has an active subscription\n", networkId)
+			return stripeCheckoutError(stripeAlreadySubscribedMessage), nil
+		}
+
 		// the caller's regional tier price, and the welcome-offer coupon when
 		// the offer is redeemable (yearly only)
 		priceId, discounts, onboardingMetadata, err := stripeCheckoutTierAndDiscount(args.ItemId, args.StorefrontCountry, clientSession)
