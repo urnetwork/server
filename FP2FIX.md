@@ -4424,5 +4424,28 @@ Taskworker g1 was selected at 14:28:00Z; sampled status paths converged
 20/20, and the g1 registry tag resolves to the published manifest. Deploy
 log SHA256 is
 `802730525a7909dfd90f4e6caa0a1e408b0ab81ddb81c549e40e3450113cf888`.
-A fixed post-start 97-cell Main read is still needed; no route, ACK, CPU,
-accepted-run or quota improvement has been inferred from this release.
+The release itself did not establish route, ACK, CPU, accepted-run or quota
+improvement; a fixed post-start 97-cell Main read follows below.
+
+The fixed 14:35–14:40Z g1 path read completed once at 15:33:44–48Z after
+two passing overlap audits. All four new g1 process references and their 97
+fixed scalar series qualified, with fresh prior/end witnesses and no observed
+counter resets. PromQL counter increases estimate 6,842.49 path terminal
+evaluations. The only expiry cell was `route_write=accepted` and
+`ack_callback=pending`: about 578.00 evaluations, mean 30.001 seconds and
+17,340.83 evaluation-seconds. No expiry lacked a successful local route
+write of the exact initial ping, and none had entered a successful or error
+ACK callback at its terminal snapshot. About 5,622.90 evaluations were
+acknowledged with local route acceptance and callback success (mean 0.915
+seconds). The other nonzero cells were canceled/ended or about one error.
+Receipt SHA256 is
+`7bb6fce1abe2845dc693bf768ded0dc6853c63efe7bad21bbe2753cdc3d4b7b4`.
+The old 49-cell and new 48-cell families are independent estimates of the
+same evaluations, not additive populations. Local route acceptance can be
+queue acceptance; it does not prove physical delivery or provider receipt.
+This cohort rules out failure to accept the initial ping into a local route
+as the primary source of its 30-second expiries. Carrier delivery,
+Connect/resident forwarding, provider validation, Transfer ACK return and
+local callback processing remain separate possible boundaries. These
+initial-ping cells cannot be divided by fleet-wide durable URL outcomes or
+attributed to controller/model/API cost without a joined witness.
