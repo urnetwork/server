@@ -4323,3 +4323,17 @@ The counters need a settled fixed Main window before drawing a phase or
 throughput conclusion. The backend-degradation retry hypothesis remains
 unsupported: a real local Open control dispatched its first prewarmed
 contract in 0.304 ms and completed a measured URL result in 1.205 seconds.
+
+One separately bounded Connect composition read compared edge4 g2 and its
+unchanged g1 context in the same fixed pre-canary and steady windows. All
+four window/block groups and 52 derived comparisons qualified. G2 process
+RSS summed 155.98→102.53 GB and heap-in-use 124.09→78.89 GB, while its
+allocation rate rose 297.87→486.81 MB/s. Reported free message-pool backing
+fell 13.16→0.79 GB; heap allocation excluding that reported pool actually
+rose by about 4.71 GB. G2 received data bytes rose 47.4%, handshake frames
+52%, and its process age differed substantially (about 202 minutes before
+versus 30 minutes after). This read explains why constructor savings cannot
+be inferred from process allocation rate, but it does not attribute memory,
+GC, CPU or quota changes to the patch. Other Connect blocks remain held.
+The single-read receipt SHA256 is
+`2f3d7c54db11fecd6c3138b41a168f0e152eb39ba672713b99bc832824cd8e8f`.
