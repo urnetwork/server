@@ -4532,3 +4532,17 @@ The previous `g2` version was `2026.9.30-planetoid+1059603990`.
 The 18:05 selection is a control-plane and sampled convergence fact; a
 fresh process-start fence and settled, exact-window accepted-outcome read are
 required before attributing a subsequent Main rate to the all-block rollout.
+The corrected guarded current-process read at 18:21:54–56Z found exactly
+eight current shard owners, each with capability 2 and configuration 8.
+All four new `g2` process starts were 18:05:39–18:05:46Z: after the 18:05:36
+tag retag and before the fixed 18:07–18:12Z outcome window. The four `g1`
+processes had remained active since 17:00:12–17:00:18Z. This is fresh
+process-start and shard-ownership proof, not an immutable image-to-PID join.
+The separately gated indexed read of that settled window counted 12,945
+unique accepted measured URL outcomes: 11,168 successes and 1,777 failures,
+or 43.15/s. This is descriptively 22.96% above the prior 17:05–17:10Z
+g1-only fleet window (35.0933/s), and 43.09% above the 16:50–16:55Z
+pre-canary window (30.1567/s). These are different-time all-fleet cohorts;
+neither comparison isolates the initial-ping removal from traffic mix,
+upstream Connect changes or process-drain timing. The count is an accepted
+outcome rate, not evidence that the rolling per-provider quota has recovered.
