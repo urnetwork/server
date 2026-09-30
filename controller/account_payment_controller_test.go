@@ -119,7 +119,7 @@ func TestCollectMissingWalletNoticesDeduplicatesAcrossSlices(t *testing.T) {
 				},
 			},
 		},
-	})
+	}, 0)
 
 	if len(notices) != 1 {
 		t.Fatalf("missing-wallet notices = %v, want one network", notices)
@@ -133,6 +133,57 @@ func TestCollectMissingWalletNoticesDeduplicatesAcrossSlices(t *testing.T) {
 	}
 	if notice.payout != 500 {
 		t.Fatalf("notice payout = %d, want 500", notice.payout)
+	}
+}
+
+func TestCollectMissingWalletNoticesSkipsPayoutsBelowMinimum(t *testing.T) {
+	minPayout := missingWalletNoticeMinPayout(0.20)
+	if minPayout != model.UsdToNanoCents(0.20) {
+		t.Fatalf("min payout = %d, want %d", minPayout, model.UsdToNanoCents(0.20))
+	}
+	// with no configured minimum the notice still never reads 0.00 USDC
+	if got := missingWalletNoticeMinPayout(0); got != model.UsdToNanoCents(0.01) {
+		t.Fatalf("zero-config min payout = %d, want one cent", got)
+	}
+
+	subCentNetworkId := server.NewId()
+	smallNetworkId := server.NewId()
+	splitNetworkId := server.NewId()
+	largeNetworkId := server.NewId()
+
+	notices := collectMissingWalletNotices([]*model.PaymentPlan{
+		{
+			NetworkPayments: map[server.Id]*model.AccountPayment{
+				// "You earned 0.00 USDC" (support inbox 981)
+				subCentNetworkId: {PaymentId: server.NewId(), Payout: model.UsdToNanoCents(0.004)},
+				// "You earned 0.01 USDC" (support inbox 897)
+				smallNetworkId: {PaymentId: server.NewId(), Payout: model.UsdToNanoCents(0.01)},
+				splitNetworkId: {PaymentId: server.NewId(), Payout: model.UsdToNanoCents(0.15)},
+				largeNetworkId: {PaymentId: server.NewId(), Payout: model.UsdToNanoCents(1.25)},
+			},
+		},
+		{
+			NetworkPayments: map[server.Id]*model.AccountPayment{
+				// the run total reaches the minimum across slices
+				splitNetworkId: {PaymentId: server.NewId(), Payout: model.UsdToNanoCents(0.05)},
+			},
+		},
+	}, minPayout)
+
+	if _, ok := notices[subCentNetworkId]; ok {
+		t.Fatal("sub-cent payout produced a missing-wallet notice")
+	}
+	if _, ok := notices[smallNetworkId]; ok {
+		t.Fatal("payout below the wallet minimum produced a missing-wallet notice")
+	}
+	if notice := notices[splitNetworkId]; notice == nil || notice.payout != model.UsdToNanoCents(0.20) {
+		t.Fatalf("split payout notice = %v, want 0.20 USDC total", notice)
+	}
+	if notice := notices[largeNetworkId]; notice == nil || notice.payout != model.UsdToNanoCents(1.25) {
+		t.Fatalf("large payout notice = %v, want 1.25 USDC", notice)
+	}
+	if len(notices) != 2 {
+		t.Fatalf("missing-wallet notices = %d, want 2", len(notices))
 	}
 }
 

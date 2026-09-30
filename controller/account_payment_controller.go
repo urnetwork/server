@@ -89,7 +89,16 @@ type missingWalletNotice struct {
 	payout    model.NanoCents
 }
 
-func collectMissingWalletNotices(plans []*model.PaymentPlan) map[server.Id]*missingWalletNotice {
+// missingWalletNoticeMinPayout is the smallest withheld total that earns a
+// missing-wallet notice. It is the wallet payout minimum, and never less than
+// one cent, so a notice never reads "0.00 USDC".
+func missingWalletNoticeMinPayout(minWalletPayoutUsd float64) model.NanoCents {
+	return max(model.UsdToNanoCents(minWalletPayoutUsd), model.UsdToNanoCents(0.01))
+}
+
+// collects one notice per wallet-less network across all plan slices. Networks
+// whose total withheld payout is below `minPayout` are not notified.
+func collectMissingWalletNotices(plans []*model.PaymentPlan, minPayout model.NanoCents) map[server.Id]*missingWalletNotice {
 	notices := map[server.Id]*missingWalletNotice{}
 	for _, plan := range plans {
 		for networkId, payment := range plan.NetworkPayments {
@@ -102,6 +111,11 @@ func collectMissingWalletNotices(plans []*model.PaymentPlan) map[server.Id]*miss
 				notices[networkId] = notice
 			}
 			notice.payout += payment.Payout
+		}
+	}
+	for networkId, notice := range notices {
+		if notice.payout < minPayout {
+			delete(notices, networkId)
 		}
 	}
 	return notices
@@ -120,7 +134,10 @@ func sendPaymentsWithPlanner(clientSession *session.ClientSession, planner payme
 
 	// Several slices can include the same network. Notify it at most once per
 	// payout run instead of once per committed slice.
-	missingWalletNotices := collectMissingWalletNotices(plans)
+	missingWalletNotices := collectMissingWalletNotices(
+		plans,
+		missingWalletNoticeMinPayout(model.EnvSubsidyConfig().MinWalletPayoutUsd),
+	)
 
 	// For any network that is missing a wallet id, send one notice carrying the
 	// total withheld across every slice in this run.
