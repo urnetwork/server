@@ -3847,6 +3847,7 @@ type providerCountFilter struct {
 	arinNonQuality    map[server.Id]bool
 	reliabilityFailed map[server.Id]bool
 	healthCounts      map[server.Id]ProviderEgressHealthCounts
+	healthWindowEnd   time.Time
 	countryCodes      map[server.Id]string
 	// Legacy diagnostic only; it never changes bucket admission.
 	blackholed map[server.Id]bool
@@ -3884,8 +3885,8 @@ func newProviderCountFilter(ctx context.Context, loadEgressEvidence bool) provid
 		reliabilityFailed:       map[server.Id]bool{},
 		tlsAuthenticationFailed: GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx),
 		countryCodes:            GetAllProviderEgressCountryCodes(ctx),
-		healthCounts:            GetAllProviderEgressHealthCounts(ctx),
 	}
+	f.healthCounts, f.healthWindowEnd = getAllProviderEgressHealthCountsSnapshot(ctx)
 	server.Db(ctx, func(conn server.PgConn) {
 		rows, err := conn.Query(ctx, providerCountFilterCommonSql())
 		server.WithPgResult(rows, err, func() {
@@ -5691,7 +5692,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			migrateClientScore(clientScore)
 		}
 	}
-	nativeCensus := newClientScoreNativeCensus(nativeSourceStartedAt, server.NowUtc(), countFilter.healthCounts, locationClientScores, locationGroupClientScores)
+	nativeCensus := newClientScoreNativeCensus(nativeSourceStartedAt, server.NowUtc(), countFilter.healthWindowEnd, countFilter.healthCounts, locationClientScores, locationGroupClientScores)
 	// splitClientScoreSamples shuffles and buckets one list of scores into
 	// ClientScoreSampleCount-sized samples. Encode on demand so 48 parallel
 	// caller-location exporters retain at most one sample each, rather than
