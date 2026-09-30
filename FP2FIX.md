@@ -4649,3 +4649,23 @@ implied by the current eligible-provider count. Exact scheduler phase, due,
 stop and claim-disposition measurements remain pending. The process read
 qualifies time and capability; it does not directly attest a binary digest
 for every PID.
+A separately guarded, exact-eight-process scheduler read for the same
+20:51–20:56Z window qualified all groups and retained older metadata rows as
+excluded evidence. Synchronous Due occupied 2,359.61 of 2,399.99 observed
+scheduler-owned seconds (98.317%); scheduler wait occupied 40.28 seconds
+(1.678%) and drain was zero. All eight processes were in Due at the window
+boundaries and across scrape means. Extrapolated completed-Due counters
+estimated 4,294.03 calls in 2,361.11 seconds, averaging 0.54986 seconds
+per call; 4,232.41 were full, 58.52 partial and 3.10 empty, with zero
+observed error, invalid or maintenance outcomes. Estimated claims admitted
+were 15,311.24, with zero unstarted/ack-failed
+claims; completed stop reasons were zero, which is expected to be possible
+because five minutes need not span a 900-second pass. Independent turn
+counters estimated about 51.044 accepted/s and zero local failures. The
+shared-lane scrape means were 466.09 active, 414.95 running, 43.33
+finished-waiting and 7.82 queued slots of 512. These counter deltas and
+unweighted scrape means point to synchronous Due refill latency, rather
+than a pass-level wait or drain, as the immediate scheduler-owned limit.
+They do not split API time, model transaction/SQL, post-commit cleanup or
+worker CPU, and cannot alone establish causal throughput gain. The next
+diagnostic must isolate those Due subphases under loaded Main conditions.
