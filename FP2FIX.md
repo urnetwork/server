@@ -4349,9 +4349,11 @@ acknowledged (mean 1.454 seconds), 416.51 expired at the 30-second deadline
 seconds). Every estimated expiry ended with a terminal snapshot classified
 `carrier_present_write_attempted`; the two carrier-present contract-wait or
 contract-failure-without-write cells were zero. The expiries consumed about
-52.5% of observed terminal evaluation seconds. This identifies the
-post-write/delivery/acknowledgment path as the next diagnostic boundary,
-without proving remote receipt, attributing each second to that dependency,
-or equating an initial-ping evaluation with an accepted URL result. The
+52.5% of observed terminal evaluation seconds. The write-attempt witness is
+set before the route writer runs, so it does not prove any carrier channel
+accepted bytes. This identifies route disposition, delivery and
+acknowledgment as the next diagnostic boundaries. These counters do not
+prove remote receipt, attribute each second to its terminal dependency, or
+equate an initial-ping evaluation with an accepted URL result. The
 fixed-window receipt SHA256 is
 `a95fd87dce0257f6ab0ca595cc307e6e630cc2dccf6a9e0fab20998c160b5b0e`.
