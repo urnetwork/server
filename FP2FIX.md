@@ -4154,3 +4154,43 @@ samples at its next callback. Persistent empty US IPv6 quality location and
 best-available lists are a separate API-model finding: FP2 URL due claims
 exact fixed provider client IDs and does not use those ordinary discovery
 lists.
+
+The later 09:16:47Z coherent census remained at `quota_complete=0` with
+`eligible=111670` and `runs_needed=634720`. Shard-2 and shard-6 owner sources
+were zero in that sample, so current-process hourly coverage was incomplete;
+this does not establish a durable lease gap. The 09:21:01Z host callback
+sampled edge3 and edge4 CPU at 96.83% and 93.43%. The 09:11:39Z PostgreSQL
+sample was 28.954/96 logical cores (30.16%); neither host nor database CPU
+sample attributes cost to URL probes. The standing Main monitor remains on
+its 15-minute probe cadence.
+
+A local actual-Open comparison reproduced retained probe residency after
+teardown. In both modes, 96 locally acknowledged URL results completed (48
+successes, 48 completed failures). After 64 retired turns and 90 seconds,
+retired residents were 64 without cleanup and zero with generation-safe
+cleanup. Final ten-second Connect/control CPU fell from 0.673222 to 0.071803
+CPU-seconds, with sent pings falling from 2,599 to 38. Across the full
+90-second idle horizon, CPU instead rose from 4.95497 to 5.28094 seconds;
+the experiment does not demonstrate a whole-workload CPU, Main throughput,
+or quota gain. Residual pending forwards and queued messages remain. The
+comparison summary SHA256 is
+`24929bd78eee932bdb8c8a1eb9eb09c21b45cb58e65f9a2ca7bf2ccca9a4546d`.
+
+The generation-safe retirement change captures the exact existing Redis
+resident before teardown and deletes it by original-value compare-and-swap
+only after successful SQL retirement and existing tunnel joins. A dedicated
+context-aware Redis pool bounds optional capture and commit operations
+separately to one second; process-owned pool maintenance can outlive them.
+A native stalled-read control exposed a 15-second close path in the first
+candidate, which the bounded pool corrected. The final sealed candidate
+passed 35 independent normal roots, 35 race roots, four vet packages, and
+a four-turn actual-Open smoke with two measured successes and two completed
+failures. The exact tracked-tree integration also passed 35 focused normal
+roots. Source/smoke attestation SHA256
+`a7134ae70f04514ebea838a2576f9d9ac7a22a95ad447fa09573a48264792b77`,
+independent gate attestation SHA256
+`31f5a0c16a28b37ec77eabe942b68f6c37fb1d7cfbda8770f78e9d6569f86d7f`,
+and tracked-tree attestation SHA256
+`567e8a788429fa3a880d16d2ff6f8ad083d18a5b217302d0cb4ebfcd37c64a26`
+record the evidence. This is local resource reclamation; a guarded Main
+canary and unchanged-workload post-release measurement are still required.

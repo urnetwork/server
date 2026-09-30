@@ -28,9 +28,10 @@ const RedisNil = redis.Nil
 const NoTtl = time.Duration(0)
 
 type safeRedisClient struct {
-	mutex               sync.Mutex
-	client              redis.UniversalClient
-	disableCommandRetry bool
+	mutex                 sync.Mutex
+	client                redis.UniversalClient
+	disableCommandRetry   bool
+	contextTimeoutEnabled bool
 }
 
 func (self *safeRedisClient) open() redis.UniversalClient {
@@ -108,6 +109,17 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 		dialTimeout := 5 * time.Second
 		dialRetries := 4
 
+		if self.contextTimeoutEnabled {
+			// This pool is only for optional, one-second cleanup. Native caps
+			// also bound driver maintenance that does not carry a caller ctx.
+			readTimeout = time.Second
+			writeTimeout = time.Second
+			poolTimeout = time.Second
+			dialTimeout = time.Second
+			dialRetries = 1                                 // go-redis counts dial attempts, not extra retries
+			maxConnections = max(1, min(maxConnections, 8)) // per node in cluster mode
+		}
+
 		dialer := NewDialer(dialTimeout)
 		authority := redisKeys.RequireString("authority")
 		password := localEvaluationCredential("EVALUATION_REDIS_PASSWORD", redisKeys.RequireString("password"))
@@ -137,11 +149,14 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 				ConnMaxIdleTime: connectionMaxIdleTimeDuration,
 				// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
 				// see https://uptrace.dev/blog/golang-context-timeout.html
-				ContextTimeoutEnabled: false,
-				ReadTimeout:           readTimeout,
-				WriteTimeout:          writeTimeout,
-				PoolTimeout:           poolTimeout,
-				Dialer:                dialContext,
+				ContextTimeoutEnabled: self.contextTimeoutEnabled,
+				// PING and single-key GET/EVAL use direct slot routing. Policy
+				// discovery otherwise detaches COMMAND from the caller deadline.
+				DisableRoutingPolicies: self.contextTimeoutEnabled,
+				ReadTimeout:            readTimeout,
+				WriteTimeout:           writeTimeout,
+				PoolTimeout:            poolTimeout,
+				Dialer:                 dialContext,
 				// DialerRetries: maxRetries,
 				DialTimeout:   dialTimeout,
 				DialerRetries: dialRetries,
@@ -168,7 +183,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 				ConnMaxIdleTime: connectionMaxIdleTimeDuration,
 				// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
 				// see https://uptrace.dev/blog/golang-context-timeout.html
-				ContextTimeoutEnabled: false,
+				ContextTimeoutEnabled: self.contextTimeoutEnabled,
 				ReadTimeout:           readTimeout,
 				WriteTimeout:          writeTimeout,
 				PoolTimeout:           poolTimeout,
@@ -209,6 +224,11 @@ func (self *safeRedisClient) reset() {
 var safeClient = &safeRedisClient{}
 var safeNoCommandRetryClient = &safeRedisClient{disableCommandRetry: true}
 
+// Optional deadline-bound work has a separate, lazily opened pool. It keeps a
+// zero idle connection floor and disables command/redirect retries. Existing
+// credential and accounting pools retain their original timeout policies.
+var safeDeadlineClient = &safeRedisClient{disableCommandRetry: true, contextTimeoutEnabled: true}
+
 var redisKeyEventMergeDrops = prometheus.NewCounter(prometheus.CounterOpts{
 	Name: "urnetwork_redis_key_event_merge_drops_total",
 	Help: "Keyspace notifications dropped at the process-wide merge; each drop terminates the subscription epoch and forces a full resync",
@@ -221,7 +241,7 @@ func init() {
 	poolStat := func(f func(*redis.PoolStats) float64) func() float64 {
 		return func() float64 {
 			value := float64(0)
-			for _, pool := range []*safeRedisClient{safeClient, safeNoCommandRetryClient} {
+			for _, pool := range []*safeRedisClient{safeClient, safeNoCommandRetryClient, safeDeadlineClient} {
 				if client := pool.current(); client != nil {
 					value += f(client.PoolStats())
 				}
@@ -259,6 +279,7 @@ func init() {
 func RedisReset() {
 	safeClient.reset()
 	safeNoCommandRetryClient.reset()
+	safeDeadlineClient.reset()
 }
 
 // func client() redis.UniversalClient {
@@ -344,6 +365,43 @@ func RedisDoOnce(ctx context.Context, callback func(RedisClient)) {
 	} else {
 		c()
 	}
+}
+
+// RedisWithDeadline is the non-retrying boundary for optional cleanup with an
+// explicit caller deadline. Its dedicated pool applies that deadline to socket
+// reads and writes for both standalone and cluster clients. The callback must
+// pass the same ctx to every command. RedisReset and pool telemetry own this
+// pool just like the ordinary pools; no per-operation client is leaked.
+// This pool is restricted to PING and single-key GET/EVAL cleanup; it bypasses
+// cluster command-policy discovery and must not route multi-shard operations.
+func RedisWithDeadline(ctx context.Context, callback func(RedisClient) error) (returnErr error) {
+	if _, bounded := ctx.Deadline(); !bounded {
+		return fmt.Errorf("RedisWithDeadline requires an explicit deadline")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// The ordinary wrapper raises connection failures. Optional cleanup must
+	// return them without treating an expected deadline as an unexpected panic.
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if err, ok := recovered.(error); ok {
+				returnErr = err
+			} else {
+				returnErr = fmt.Errorf("deadline-bound Redis operation failed")
+			}
+		}
+		if ctx.Err() != nil {
+			returnErr = ctx.Err()
+		} else if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+			// A socket deadline can fire before the context timer is scheduled.
+			returnErr = context.DeadlineExceeded
+		}
+	}()
+	redisWithClient(ctx, safeDeadlineClient, func(client RedisClient) {
+		returnErr = callback(client)
+	}, OptNoRetry())
+	return
 }
 
 func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(RedisClient), options ...any) {

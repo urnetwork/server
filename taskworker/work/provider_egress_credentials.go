@@ -34,15 +34,17 @@ func init() {
 // arguments or the provider under test. Function fields are per-owner seams
 // for deterministic tests; production uses the ordinary JWT/model boundaries.
 type providerEgressCredentials struct {
-	children  sync.Map // only identities minted by this immutable owner
-	networkId server.Id
-	userId    server.Id
-	clientId  server.Id
-	parentJwt string
-	parse     func(context.Context, string, string) (*jwt.ByJwt, error)
-	validate  func(context.Context, *jwt.ByJwt, bool) error
-	mint      func(*model.AuthNetworkClientArgs, *session.ClientSession) (*model.AuthNetworkClientResult, error)
-	retire    func(*model.RemoveNetworkClientArgs, *session.ClientSession) (*model.RemoveNetworkClientResult, error)
+	children        sync.Map // only identities minted by this immutable owner
+	networkId       server.Id
+	userId          server.Id
+	clientId        server.Id
+	parentJwt       string
+	parse           func(context.Context, string, string) (*jwt.ByJwt, error)
+	validate        func(context.Context, *jwt.ByJwt, bool) error
+	mint            func(*model.AuthNetworkClientArgs, *session.ClientSession) (*model.AuthNetworkClientResult, error)
+	retire          func(*model.RemoveNetworkClientArgs, *session.ClientSession) (*model.RemoveNetworkClientResult, error)
+	captureResident func(context.Context, server.Id, server.Id) (*model.NetworkClientResidentRetirement, error)
+	removeResident  func(context.Context, *model.NetworkClientResidentRetirement) (bool, error)
 }
 
 func newProviderEgressCredentials(identity *model.ProberIdentity) (*providerEgressCredentials, error) {
@@ -54,6 +56,7 @@ func newProviderEgressCredentials(identity *model.ProberIdentity) (*providerEgre
 		networkId: *identity.NetworkId, userId: *identity.UserId, clientId: *identity.ClientId, parentJwt: identity.ByClientJwt,
 		parse: jwt.ParseByJwtForAudience, validate: jwt.ValidateByJwtState,
 		mint: model.AuthNetworkClient, retire: model.RemoveNetworkClient,
+		captureResident: model.CaptureResidentForClientRetirement, removeResident: model.RemoveCapturedResidentForClient,
 	}, nil
 }
 
