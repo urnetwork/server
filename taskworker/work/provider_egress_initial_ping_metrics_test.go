@@ -16,7 +16,7 @@ func TestProviderEgressInitialPingFiniteMetrics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(families) != 3 {
+	if len(families) != 5 {
 		t.Fatalf("metric family count=%d", len(families))
 	}
 	series := 0
@@ -25,6 +25,7 @@ func TestProviderEgressInitialPingFiniteMetrics(t *testing.T) {
 			t.Fatal("unexpected metric family")
 		}
 		started := strings.HasSuffix(family.GetName(), "_started_total")
+		path := strings.Contains(family.GetName(), "_path_")
 		want := 24
 		if started {
 			want = 1
@@ -45,6 +46,16 @@ func TestProviderEgressInitialPingFiniteMetrics(t *testing.T) {
 				if len(labels) != 0 {
 					t.Fatal("started counter has identity labels")
 				}
+			} else if path {
+				if len(labels) != 3 || !validInitialPingMetricValue(labels["outcome"], "acknowledged", "expired", "error", "canceled_or_ended") ||
+					!validInitialPingMetricValue(labels["route_write"], "not_observed", "accepted") || !validInitialPingMetricValue(labels["ack_callback"], "pending", "success", "error") {
+					t.Fatal("unexpected path diagnostic label schema/vocabulary")
+				}
+				key := labels["outcome"] + "/" + labels["route_write"] + "/" + labels["ack_callback"]
+				if seen[key] {
+					t.Fatal("duplicate path diagnostic cell")
+				}
+				seen[key] = true
 			} else {
 				if len(labels) != 2 || labels["outcome"] == "" || labels["dependency"] == "" {
 					t.Fatal("unexpected diagnostic label schema")
@@ -58,7 +69,16 @@ func TestProviderEgressInitialPingFiniteMetrics(t *testing.T) {
 			series++
 		}
 	}
-	if series != 49 {
+	if series != 97 {
 		t.Fatalf("series cardinality=%d", series)
 	}
+}
+
+func validInitialPingMetricValue(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }

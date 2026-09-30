@@ -10711,6 +10711,34 @@ terminal duration. Missing cells or an unknown dependency remain unknown.
 These observation-only counters change no retry, deadline, admission, security,
 provider-verdict or ownership policy; an ordinary nil observer remains inert.
 
+Optional exact initial-ping path diagnostics add
+`urnetwork_egress_probe_initial_ping_path_evaluations_total` and
+`urnetwork_egress_probe_initial_ping_path_seconds_total`, both labeled only by
+`outcome`, `route_write` (`not_observed` or `accepted`) and `ack_callback`
+(`pending`, `success` or `error`). Require all 48 new cells alongside the
+original 49, bound to the same process and reset-safe fresh window. The new
+witnesses belong to the original admission ping Pack; periodic pings, contract
+heads and crypto controls cannot supply its positive route-write witness.
+A later successful retry can supply it. ACK callback entry is sampled before
+its existing admission lock and does not change callback ownership.
+
+False-positive qualifier: `accepted` proves local route-writer acceptance,
+not provider receipt. `not_observed` proves absence of that positive witness
+at the terminal sample, not absence of delivered bytes. Independent witness
+reads can straddle concurrent route and callback publication, so the complete
+vocabulary retains even a success/not-observed combination. Callback success
+still does not prove admission; success at an expired evaluation can be an
+ordinary deadline race, not proof of prolonged callback or lock delay. These
+seconds bucket the full evaluation residence by terminal witnesses and are
+not phase durations. The unchanged
+selected-destination write-attempt marker can be set before a route accepts
+bytes and by a control head; it must not be substituted for the new witness.
+False-negative qualifier: accepted bytes with a pending ACK callback do not
+identify forward loss, delayed provider handling, return-path loss or queued
+local ACK processing. Missing new cells, unfinished evaluations or unmatched
+generations remain unknown. No path cell changes the 30s default evaluation
+budget, retries, failure authority, authenticated transport or measured quota.
+
 Phase timing needs its owning clock. The provider URL resolver's `dns_ms`
 includes its bounded private DoH attempts, retry jitter, and tunnel work while
 resolving the target; it is not an upstream DNS-server RTT. A capped newest
