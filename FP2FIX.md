@@ -3878,6 +3878,22 @@ numerical maintenance floor is 77.68 accepted measured runs/s. Same-window
 worker stage and operational counters are required to distinguish slower turns
 from fewer attempts or accepted results.
 
+The exact eight-process capability-2 counter read for the low 01:13–01:18Z
+window subsequently passed all 49-cell guards (receipt
+`b412024554965c35cef2e5ca80b8f1d7f53326b56f624466b6a0e0edcb6d40dd`).
+Its own completed-turn counter was about 5,669.5 turns, **18.8983/s**, with
+mean total 25.95 seconds: check-and-buffer 22.84, publication 1.63 and
+close-join 1.35 seconds. Attempted and accepted turn counter increases were
+both about 5,654.9, with zero local-failure increases. The separate ACK
+counters and durable 5,847 history rows have different clocks and cannot be
+combined into an acceptance yield. Relative to the earlier different-cohort
+14.96-second mean, this establishes longer measured residence, not why it
+grew or whether the packet-pool edit caused it. Completed-turn rate times
+mean duration is about 490.5 occupied slot-seconds/s, near the 512 configured
+slots. At unchanged duration, an idealized zero-loss maintenance calculation
+already needs roughly 2,021 slots for the 112,089-provider floor, so 2,048
+offers almost no margin and is not an admitted ramp on hot edge hosts.
+
 The first successor capability-2 active frame began at 22:48:13Z, after the
 explicit 15-minute floor. Its coherent 22:50:58Z census found `eligible=109392`,
 `quota_complete=0`, `secure_complete=0`, `due=63290`, `overdue=109383`, and
