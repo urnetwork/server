@@ -4719,3 +4719,25 @@ reviewed survivor-entry measurement that warns on unrelated global churn but
 still rejects lost/recreated tracked entries or a reset. Such a delta would
 cover only continuously observed entries, not short-lived statements born
 and evicted between snapshots. No replacement Main read has yet run.
+The operator then requested a higher network service bar: sampled URL DNS,
+TCP connect, TLS handshake and per-response-read idle limits are five seconds
+each. Server `d881152a` changes only the URL-scoped phase constant and its
+focused controls; the caller deadline, 60-second cold owner, non-URL paths,
+TLS trust, no-result handling and evidence policy version 1 remain. Phase
+budgets are outside the v1 policy payload, which versions redirects, body,
+TTFB and throughput. A bare v2 switch would make old API binaries reject new
+results and exclude existing v1 quality/quota history; the production
+eight-hour ratio and four-hour quota will instead mix old and new deadlines
+until earlier results expire. Own and independent validation each passed 33
+normal and 33 race controls plus vet. The clean multiarch Taskworker image
+`2026.9.30-planetoid-1060083850` has manifest digest
+`sha256:c46e9c26417aae45559aef2a86224c256788976d49ffa2428f843d5bd5be3e13`
+and embeds `d881152a` with `vcs.modified=false`. Main `g1` selected the image
+at 22:49:16Z and retagged at 22:49:19Z; `g2` selected at 22:50:46Z and
+retagged at 22:50:49Z. Both deploys exited zero, sampled 20/20 on the new
+version, and both registry block tags resolve to the manifest digest. A
+full-eight-process start proof and fixed post-change accepted/failure-stage
+measurement remain required before attributing outcomes to the new limit.
+The last complete pre-change 22:18 monitor frame already counted 7,002
+quota-complete providers of 108,069 eligible; this unjoined census preceded
+the five-second rollout and is not its effect.
