@@ -4646,8 +4646,8 @@ later 46.8533/s pre-scheduler window and 7.80% below the earlier 55.18/s
 window. Different-time fleet/provider cohorts do not isolate scheduler
 causality, and the rate remains below the approximately 75/s steady demand
 implied by the current eligible-provider count. Exact scheduler phase, due,
-stop and claim-disposition measurements remain pending. The process read
-qualifies time and capability; it does not directly attest a binary digest
+stop and claim-disposition measurements were still pending at that read. The
+process read qualifies time and capability; it does not directly attest a binary digest
 for every PID.
 A separately guarded, exact-eight-process scheduler read for the same
 20:51–20:56Z window qualified all groups and retained older metadata rows as
@@ -4691,6 +4691,10 @@ reported 332 quota-complete providers of 108,049 eligible. This is another
 unjoined, changing-cohort snapshot; it shows some current providers meeting
 the quota, while the overwhelming majority remain incomplete, and does not
 attribute the increase to the scheduler release.
+The next complete 21:33 monitor frame counted 649 quota-complete providers
+of 108,049 eligible, again without a joined stable provider cohort. Its
+edge3 host CPU sample was high, while edge4 had no positive current callback;
+the frame explicitly leaves edge4 current host coverage unavailable.
 Capacity also limits what Due refill alone can achieve. If the last measured
 roughly nine-second turn residence remained representative, filling all 512
 configured URL slots from the 466.09 active-slot scrape mean would raise the
@@ -4701,3 +4705,17 @@ a post-rollout residence measurement or proof that 2,048 slots are safe.
 Increasing geometry also raises reserved transfer credit and load on shared
 Connect hosts. A staged, host-qualified ramp is still needed after the
 loaded-Main Due attribution; the deployed setting remains 512 slots.
+A first source-bound Main `pg_stat_statements` attempt stopped at its first
+endpoint on a combined global reset-or-deallocation continuity guard. The
+reader exited nonzero, admitted no Due-family delta, did not run its second
+snapshot and was not retried. The retained result cannot tell whether a
+global reset or unrelated statement eviction caused the guard; it does not
+attribute the roughly 550 ms Due time to SQL. An isolated PostgreSQL 18.6
+control then observed 29 global deallocations while a hot tracked entry kept
+the same key and `stats_since` and rose from 50 to 400 calls. An evicted and
+recreated cold entry changed `stats_since` despite a larger call count, and a
+global reset also changed the guard. These controls justify a separately
+reviewed survivor-entry measurement that warns on unrelated global churn but
+still rejects lost/recreated tracked entries or a reset. Such a delta would
+cover only continuously observed entries, not short-lived statements born
+and evicted between snapshots. No replacement Main read has yet run.
