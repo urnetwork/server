@@ -4371,3 +4371,18 @@ a causal comparison. This fleet-wide accepted-run denominator cannot be
 divided by the four-process g1 initial-ping population. Both fixed rates
 remain well below the roughly 76–78/s quota maintenance floor; the latest
 scheduled census still has zero quota-complete providers.
+
+The 13:20Z scheduled census reported zero visible owners for shard 7. One
+bounded 13:18–13:23Z historical owner-grid read later found a unique owner
+for shards 0–6 at 21/21 sampled points and for shard 7 at 20/21. Shard 7's
+sole zero was at 13:20:00 on the same process: a completed pass retired,
+then a new heartbeat value from 13:20:03.207 was visible at 13:20:15.
+This supports a brief between-pass heartbeat gap, not sustained worker
+loss; it does not measure durable lease ownership or exact idle duration.
+The read has a recorded execution exception: its second concurrency audit
+rejected an overlapping scheduled SSH read, but the private shell wrapper
+continued anyway. The queries used separate gateways and finished before
+the next scheduled probe, but the intended safe gate did not pass. The
+result was not rerun; a replacement private wrapper now tests that a
+rejected second audit issues zero queries. Result receipt SHA256 is
+`2067d6c2e6120ca7b30159fd4dca3d45bcd68a75e77b3756ed558d3ab7dde4db`.
