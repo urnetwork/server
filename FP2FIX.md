@@ -4476,10 +4476,32 @@ at 17:00:05Z on September 30; sampled blocks converged 20/20 by
 configuration were unchanged. The prior g1 version
 `2026.9.30-planetoid+1059780540` is the rollback point. Deploy log SHA256 is
 `473ff77c5741eaed6b1d1b6d35c2d213ee780f9d09007086320fad8f4f61c6f6`.
-This deployment establishes neither accepted-outcome improvement nor an
-isolated ping-removal effect, because the upstream Connect controls also
-changed. Fresh exact-process proof and settled pre/post accepted-outcome,
-turn, residence, DNS and no-result reads are pending.
+The corrected current-process proof at 17:24Z qualified eight fresh slots,
+capability 2, configuration 8 and unique current shard ownership. The four
+g1 process starts were 17:00:12–17:00:18Z, all after selection; g2 retained
+its earlier starts. That binds the post interval to new g1 processes but is
+not immutable image-to-PID proof. The first preparatory `--check` invocation
+of a copied reader incorrectly made one read-only metrics POST without the
+required two-audit gate; it launched no active URL probe or mutation. Its
+result remains unqualified and excluded. A corrected entrypoint passed
+zero-contact controls and an independent review before the later guarded
+proof. The matched pre-count reader's first run then opened a bounded SSH
+tunnel but made no SQL query because its copied binary lacked execute mode;
+its corrected preflight rejects that condition before contact. These two
+exceptions are preserved, not retroactive proof of safe execution.
+
+Guarded, fixed fleet-wide accepted-history reads found 9,047 unique measured
+URL outcomes in 16:50–16:55Z (6,469 success, 2,578 failure; 30.1567/s) and
+10,528 in 17:05–17:10Z (8,533 success, 1,995 failure; 35.0933/s). Thus
+accepted outcome rate was descriptively 16.37% higher after g1 selection.
+Both queries used the same indexed measured-at window and read-only two-second
+bound; source and receipts are retained privately. These are all-fleet
+different-time cohorts, not a g1 treatment/control join. A simultaneous
+eligibility census changed from 108,797 to 101,520, and the upstream Connect
+controls changed with this image. The 16.37% comparison therefore does not
+isolate ping removal, nor does it prove the per-provider rolling quota is
+recovered; the quota-complete count remains zero. Exact g1/g2 turn, residence,
+DNS and no-result measurements remain pending before widening the canary.
 
 A separate proposed 15-second total DNS cap is not part of this image. The
 current resolver can use several DNS waves inside a 60-second HTTP deadline.
@@ -4489,5 +4511,12 @@ at least 170 of 340 checks had first-to-last DNS trace time over 15 seconds;
 that timing can include redirects, has no exact provider/process or durable
 accepted-history join, and is not a private DoH-wave distribution. No exact
 accepted-success 15–30-second band is available from retained aggregates.
-The paired 15/30 experiment must report late-success loss explicitly before
-any timeout change can claim unchanged negatives or no false negatives.
+An authenticated local real-Open paired experiment kept the same provider and
+URL. With a valid DNS answer at 20 seconds, a 15-second cap produced measured
+`dial_dns` failure at 15.016 seconds while a 30-second cap loaded the URL at
+20.047 seconds. With valid recovery at 35 seconds, the current allowance
+loaded the URL at 35.037 seconds while a 30-second cap failed at 30.008
+seconds. Four locally acknowledged measured outcomes, 42 virtual timing
+cells, 14 normal/race roots and vet passed; the timeout patch remains private.
+These controls prove both shorter hard caps can create false negatives under
+healthy late recovery, without measuring how often Main experiences it.
