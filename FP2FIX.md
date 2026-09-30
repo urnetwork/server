@@ -4274,3 +4274,17 @@ versus 81.1897 before. The post-read receipt SHA256 is
 Traffic, generation age, and overlap differ; the read does not prove a
 causal Main CPU, URL-rate or quota improvement. The other blocks are held
 until the old drains and a complete steady comparison are understood.
+
+A separately reviewed, bounded read-only indexed query of the fixed
+09:52–09:57Z post-Taskworker/pre-Connect-storage history window completed
+once at 11:34:44–46Z. It counted 9,851 unique accepted measured URL runs:
+7,342 successes and 2,509 completed failures, or **32.8367/s**. Setup and
+no-result turns are excluded. The primary-side query used the leading
+`measured_at` index with parallel execution disabled and took 0.2225 seconds
+under a two-second statement cap. Receipt SHA256
+`61c47e34259582ceb4cd2f2d98baec90375a78a97f597c6577fcd6ec46a56183`.
+This historical rate is well below the roughly 76–78 accepted runs/s
+maintenance floor at the observed 110–112k eligible cohort. The window
+does not establish arrival-time completeness, a rolling quota recovery, or
+causal benefit from the Taskworker release; different fixed windows have
+different traffic and cohort conditions. No extra active URL probe was run.
