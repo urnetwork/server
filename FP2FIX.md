@@ -4686,3 +4686,13 @@ The scheduled 21:27:22Z census reported the first nonzero quota count in
 the current sequence: 61 quota-complete and secure-complete providers of
 107,834 eligible, with 459,929 accepted runs still needed. This is an
 unjoined rolling-cohort snapshot, not a causal rollout comparison.
+Capacity also limits what Due refill alone can achieve. If the last measured
+roughly nine-second turn residence remained representative, filling all 512
+configured URL slots from the 466.09 active-slot scrape mean would raise the
+roughly 51/s accepted rate only to about 56/s. About 675–700 occupied slots
+would be required for 75/s before allowance for setup-only turns, publication
+tails and changing provider mix. This is a conditional arithmetic bound, not
+a post-rollout residence measurement or proof that 2,048 slots are safe.
+Increasing geometry also raises reserved transfer credit and load on shared
+Connect hosts. A staged, host-qualified ramp is still needed after the
+loaded-Main Due attribution; the deployed setting remains 512 slots.
