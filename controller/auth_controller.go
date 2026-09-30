@@ -192,12 +192,18 @@ func AuthPasswordReset(
 }
 
 type AuthPasswordSetResult struct {
+	Error *model.AuthPasswordSetError `json:"error,omitempty"`
 }
 
 func AuthPasswordSet(passwordSet model.AuthPasswordSetArgs, session *session.ClientSession) (*AuthPasswordSetResult, error) {
 	passwordSetResult, err := model.AuthPasswordSet(passwordSet, session)
 	if err != nil {
 		return nil, err
+	}
+	if passwordSetResult.Error != nil {
+		return &AuthPasswordSetResult{
+			Error: passwordSetResult.Error,
+		}, nil
 	}
 	userAuth, err := model.GetUserAuth(session.Ctx, passwordSetResult.NetworkId)
 	if err != nil {

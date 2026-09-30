@@ -115,6 +115,25 @@ func TestResetPassword(t *testing.T) {
 		)
 		connect.AssertEqual(t, err, nil)
 
+		// a password that fails the password policy is rejected and does not
+		// consume the reset code
+		shortResult, err := AuthPasswordSet(
+			AuthPasswordSetArgs{
+				ResetCode: *passwordResetCreateCodeResult.ResetCode,
+				Password:  "short",
+			},
+			clientSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, shortResult.Error, nil)
+
+		userAuths, err := getUserAuths(userId, ctx)
+		connect.AssertEqual(t, err, nil)
+		for _, userAuth := range userAuths {
+			loginPasswordHash := computePasswordHashV1([]byte(password), userAuth.PasswordSalt)
+			connect.AssertEqual(t, bytes.Equal(userAuth.PasswordHash, loginPasswordHash), true)
+		}
+
 		newPassword := "testagain"
 
 		result, err := AuthPasswordSet(
@@ -125,9 +144,10 @@ func TestResetPassword(t *testing.T) {
 			clientSession,
 		)
 		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
 		connect.AssertNotEqual(t, result.NetworkId, nil)
 
-		userAuths, err := getUserAuths(userId, ctx)
+		userAuths, err = getUserAuths(userId, ctx)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(userAuths), 2)
 
@@ -137,6 +157,28 @@ func TestResetPassword(t *testing.T) {
 		}
 
 	})
+}
+
+// TestAuthPasswordSetRejectsWeakPassword checks the password policy is
+// applied before the reset code is looked up, so it needs no database.
+func TestAuthPasswordSetRejectsWeakPassword(t *testing.T) {
+	ctx := context.Background()
+	clientSession := session.NewLocalClientSession(ctx, "127.0.0.1:0", nil)
+	defer clientSession.Cancel()
+
+	for _, password := range []string{"", "a", "12345"} {
+		result, err := AuthPasswordSet(
+			AuthPasswordSetArgs{
+				ResetCode: "not-a-reset-code",
+				Password:  password,
+			},
+			clientSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result, nil)
+		connect.AssertNotEqual(t, result.Error, nil)
+		connect.AssertEqual(t, result.Error.Message, fmt.Sprintf("Password must have at least %d characters", MinPasswordLength))
+	}
 }
 
 func TestAuthCode(t *testing.T) {
