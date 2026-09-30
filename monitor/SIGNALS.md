@@ -20964,8 +20964,16 @@ dropping members before the Mimir listener. On September 30 at
 member after a fresh precondition check. Immediate readback found an empty
 set, unchanged rule/chain structure, and stable SSHGuard service generation;
 there was no retry, restart, configuration edit, or application probe. The
-original block trigger and remote-write recovery remain unverified until a
-fresh archive series is observed. Watch for the address being re-added.
+original block trigger remains unknown. A separately gated read-only check
+at 21:19:30Z found the set still empty and queried the Fireside Mimir
+listener. It returned all 14 required Planetoid archive series with 28
+value/source rows; every scrape timestamp was 21:19:17.827Z, after the
+deletion and about 12 seconds old at collection. The four published integrity
+results were verified and matched their latest-generation hashes. This proves
+fresh archive telemetry at that Mimir endpoint, but not continuous delivery,
+revalidation of backup artifacts, or the identity of every publisher hop.
+Continue watching for the address being re-added and for the next source
+backup's free-space trough and final publication.
 
 ---
 
