@@ -282,6 +282,13 @@ attempts:
 		}
 		lastFailure = result.Err
 		tunnelGone = lost(signal) || result.NotMeasured
+		// A fully received URL response independently proves its content or
+		// performance judgment even if the path disappears after the body.
+		// Partial bodies and missing clocks still lack measurement authority.
+		if self.opts.UrlProbe && !result.NotMeasured && result.BodyComplete &&
+			(result.FailureStage == "response_content" || result.FailureStage == "response_performance") {
+			tunnelGone = false
+		}
 	}
 	if result.Attempts == 0 && result.Err == "" {
 		// The run ended before this load's first attempt could start. On the

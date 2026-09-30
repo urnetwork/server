@@ -3740,6 +3740,32 @@ the decline. A same-window worker-counter read was rejected by its strict
 process-series guard (`nonreference-current-or-range-series`, 2,342 rows),
 so no attempted/accepted/local-failure or stage totals are admitted from it.
 
+A corrected reader then accepted only complete witness pairs for strictly older
+processes, while rejecting foreign counters and retaining the same eight pinned
+new processes. Its one bounded 23:39–23:44Z process-counter read passed all
+49-cell guards (receipt
+`4907e54c6b3431dea71d1ecd799bc28a9fc5912f9df58a594ad17f3a6064e23a`).
+The window contained about 9,198 attempted turns, 9,197 accepted turns and
+one local failure; 9,201 timed completed turns give 30.67 turns/s and mean
+14.96 seconds per turn. Mean check-and-buffer was 12.83 seconds, publication
+1.07 seconds and close-join 0.96 seconds. These are counter increases from
+the pinned new processes, not the durable 9,393 accepted history rows; their
+clocks and denominators differ, so they cannot be divided or subtracted into
+an acceptance yield. The older process witnesses retained by the metrics
+backend do not prove that predecessors were absent. Relative to the earlier
+nonoverlapping 9.29-second mean, the longer turn time is a diagnostic lead,
+not a causal attribution to the path-loss change.
+
+A separate direct control exposed an existing classification error: a fully
+read negative URL response could be made `NotMeasured` if the tunnel-loss
+signal arrived during body close. The narrow correction preserves complete
+content/performance failures only after observed peer EOF; partial bodies,
+unknown clocks, setup failures, completed successes and TLS failures retain
+their respective classifications. The isolated baseline failed exactly its
+two completed-negative cases; the candidate passed four focused roots under
+normal and race runs plus vet. Frequency in Main and throughput impact remain
+unknown pending the tracked change's release and new measurement.
+
 The first successor capability-2 active frame began at 22:48:13Z, after the
 explicit 15-minute floor. Its coherent 22:50:58Z census found `eligible=109392`,
 `quota_complete=0`, `secure_complete=0`, `due=63290`, `overdue=109383`, and
