@@ -4024,18 +4024,30 @@ The lookup instrumentation image
 manifest SHA256 `1df461698f99812a7331cd9051dd311c36ccc06562d3a5e553377c15d8d327b5`
 and selected for the shared g2 block at 06:11Z. Its LB block status reached
 20/20 repeated successful **g2 samples**; this is neither a 20-container count
-nor proof of the other blocks. Exact image proof on each enabled g2 host and a
-source-bound lookup/CPU baseline are still pending. The running prior
+nor proof of the other blocks. At that checkpoint, exact image proof on each
+enabled g2 host and a source-bound lookup/CPU baseline were pending. The running prior
 edge1/g2 image was bound to its previous build record. The new image's own Go
 build info identifies Server commit `2affcd32` as unmodified; its local
 Connect dependency has only a qualified time-based source link. The rollback
-version is `2026.9.29-planetoid-1059025240`. The behavior-fix image was built
-and published as `bringyour/main-connect:2026.9.29-planetoid-1059497230`
-with manifest SHA256
-`031dc6a5bcba3fcf161691422d07781344e20e1337f1b8dc036f426e1c31a2e8`;
+version is `2026.9.29-planetoid-1059025240`. The first behavior-fix image,
+`2026.9.29-planetoid-1059497230`, was superseded before selection because a
+concurrent documentation edit made its binary report `vcs.modified=true`.
+The clean rebuild `bringyour/main-connect:2026.9.29-planetoid-1059505090`
+passed build and vulnerability gates and was published with manifest SHA256
+`62f148be0d68242e90086ce7b421d3815d9444032b241be439c401607db2984d`;
 its build log SHA256 is
-`6fc0eef6ea5f4f28c6f08accc78e7f53d54a2d1eb48f370f0e41fb61195ddff2`.
-It has not been selected on Main at this checkpoint.
+`bfbb19110d6240502fa70f6bf1094df08736ec21fbb00094c26a575035226299`.
+The clean image was selected for the shared g2 block at 07:02:37Z. Warpctl returned 20/20
+repeated successful g2 LB samples on the new version. A strictly authenticated
+read at 07:08:56–59Z proved that edge1/g2's actual running image matched
+manifest SHA256
+`62f148be0d68242e90086ce7b421d3815d9444032b241be439c401607db2984d`
+and its binary reported Server `5971e48b`, `vcs.modified=false`. The other
+three enabled hosts could not be read over their configured management TCP
+paths; three one-shot connection timeouts are preserved without retries.
+The direct rollback target for g2 is the prior metrics image
+`2026.9.29-planetoid-1059458480`. Block samples and one host proof do not
+establish four-host runtime image convergence.
 
 Real local `providertunnel.Open` controls with delayed provider route
 admission preserved measured success or failure and existing deadlines. At
@@ -4046,7 +4058,72 @@ and 35.291 seconds, a single jittered comparison with no latency-gain claim.
 The 5- and 16-second admission pairs likewise found work reduction but no
 latency gain. The never-ready turn produced a measured failure at its existing
 deadline; cancellation produced no measured result or credit. The local gate
-is **not deployed**: one virtual TLS/H2
-teardown test remains under investigation, and no Main capacity or quota
-improvement has been demonstrated. No 2,048-slot ramp is admitted by this
-evidence.
+is **not deployed**. Its private virtual TLS/H2 fixture issue was resolved,
+and Sol independently passed 20 normal and 20 race roots plus vet on the
+source-pinned candidate (attestation SHA256
+`db8ba6dfcc13d6039f788df9becdc1b437df566398a2c5e73855a33eed4a6155`).
+No Main capacity or quota improvement has been demonstrated. No 2,048-slot
+ramp is admitted by this evidence.
+
+### 2026-09-30 07:50Z Main behavior canary measurement
+
+The fixed 06:20–06:25Z lookup baseline admitted three current g2 process
+generations, but withheld a four-host aggregate: edge4 had 18 samples against
+the unchanged 19-sample threshold, and older edge3/4 generations appeared
+within that window. Across the three qualified current processes,
+`reconnect_empty` lookup attempts were 15.0922/s versus 6,705.1581/s for
+`reconnect_pending`, only 0.2246% empty. The demand-driven empty-lookup fix
+therefore targets a small observed branch; this metric does not identify the
+CPU share or outcome of pending lookups. The bounded lookup result SHA256 is
+`8865e228e376ba68a53f450b94312c38f530976567c57841f5974ac564a141c2`.
+
+The separately guarded pre-rollout 06:20–06:25Z CPU/ping read qualified edge0,
+edge1 and edge3, with CPU rates 3.08766, 3.12688 and 8.86012 cores and sent
+ping rates 8,666.61, 8,765.54 and 35,468.59/s. Edge4 was again withheld.
+The early post-rollout 07:10–07:15Z read qualified all four **new** g2 metric
+generations. Their CPU total was 15.83894 cores; the same three new processes
+used 2.64094, 2.52036 and 5.69677 cores and sent 5,862.21, 5,746.38 and
+16,812.01 pings/s. Two older edge3/4 metric generations were still active
+in the same response, together using 9.85490 cores and sending 82,234.22
+pings/s. The complete six-generation queried population used 25.69384 cores.
+These are whole-process and all-exchange measurements across changing process
+ages and traffic, not a causal CPU attribution to the idle fix.
+
+The steady 07:25–07:30Z read qualified the exact four early-post generation
+hashes. Their total CPU rose to 21.89085 cores; edge0/1/3/4 used
+2.80627/3.17111/8.14468/7.76880 cores and sent
+10,448.21/10,356.64/53,604.64/48,004.43 pings/s. No older metric groups
+were returned in that response, which does **not** prove their containers
+exited. Edge3's steady ping rate exceeded its qualified pre-rollout rate;
+there is no demonstrated sustained Main CPU or capacity saving. The steady
+result SHA256 is
+`ae9373cbb4d45c6211410e5c477d78c15df7d8aea56cd201cc447da48f436fa4`.
+
+The 07:45:21Z coherent census still reported `eligible=112133`,
+`quota_complete=0`, and `runs_needed=669823`. Earlier 07:30Z visibility
+sampled no shard-2 owners, but later frames had no missing-owner detail;
+neither observation proves a durable lease change. Current-process hourly
+coverage remains incomplete. The standing monitor continues at 15-minute
+active floors. Capacity remains at 512 slots while persistent pending
+reconnect/ping work and route-readiness residence are investigated. A
+concurrent `provide_key` reindex and PostgreSQL connection-capacity log lines
+are monitored separately; neither is assigned as the probe bottleneck from
+these samples.
+
+A separate source-pinned owner-grid read of 07:40–07:45Z found one sampled
+zero-owner point in each of shards 0, 2, 4, 5 and 7; all eight shard metadata
+streams qualified, and those five owner counts returned to one. This is
+sampled metric visibility, not durable lease duty or a reason to count fewer
+accepted URL results. Result SHA256 is
+`4ca5c91a1784acf5d47d9da15e3ee1c742357145783d3ab56fc1a3f329d51a89`.
+
+Current source tracing identifies a possible persistent-work mechanism: after
+a probe's carrier, client and local-control owners join and its SQL client is
+retired, the adapter does not compare-and-remove that generation's Redis
+resident. Inbound forward pings and polling can keep the old resident active,
+and pending reconnect lookups can refresh its TTL. A generation-safe
+capture-and-CAS retirement repair is being tested locally; it is **not** yet
+committed or deployed, and Main CPU causation has not been established. Older
+g2 metric generations also continued consuming CPU and pings during the
+07:10–07:15Z rollout window; later absence from metrics does not prove the
+containers exited. Drain-phase evidence is still needed.
