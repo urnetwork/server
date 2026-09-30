@@ -4780,3 +4780,13 @@ native Quality or Speed bucket counts. They exclude setup/no-result attempts,
 do not join the same providers across windows, and cannot predict the final
 rolling eight-hour pass count until the old evidence ages out. A fresh native
 bucket publication is still required to measure the operational count.
+
+The first qualified post-rollout native-score publication evaluated at
+23:08:32–23:08:52Z and published at 23:19:18Z, after both Taskworker block
+retags. It counted 86,350 native Quality and 88,960 native Speed providers
+among 106,533 online. Relative to the pre-rollout source snapshot, these
+counts are lower by 2,160 Quality, 2,165 Speed and 1,555 online. Native
+buckets overlap and apply other score and tag gates as well as the rolling
+eight-hour measured URL ratio. The publication still includes old timeout
+evidence and a changing provider population, so its differences do not
+isolate the five-second setting or give the eventual steady-state pass count.
