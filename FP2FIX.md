@@ -4565,6 +4565,20 @@ The clean multiarch Taskworker image
 It was selected for `g1` at 19:01:14Z and for `g2` at 19:02:38Z on September
 30. Both deploy commands exited successfully; subsequent sampled version
 reads reported 20/20 new-version status paths for each group. Fresh
-process-start and accepted-outcome/failure-stage reads after the rollout are
-pending; sampled convergence alone does not establish the running image or
+process-start and accepted-outcome/failure-stage reads after the rollout were
+required; sampled convergence alone does not establish the running image or
 the throughput effect.
+The guarded 19:19Z current-process read subsequently found exactly eight
+fresh shard owners, capability 2 and configuration 8. All `g1` starts were
+19:01:24–19:01:32Z and all `g2` starts were 19:02:44–19:02:55Z, after their
+respective retags and before the fixed 19:07–19:12Z window. A separately
+guarded indexed history read counted 16,554 unique accepted measured URL
+outcomes in that window: 11,917 successes and 4,637 failures, or 55.18/s.
+The earlier full-block, pre-timeout 18:07–18:12Z window had 12,945 outcomes
+(11,168 successes, 1,777 failures), or 43.15/s. The newer total rate is
+descriptively 27.88% higher; its success count is 6.71% higher, while the
+success share fell from 86.27% to 71.99%. These are different-time fleet
+cohorts and do not isolate the timeout effect or prove rolling quota recovery.
+At the latest 108,588 eligible-provider census, ten accepted outcomes per
+provider per four hours requires about 75.41/s in steady state. Failure-stage
+mix and a second settled post-change window remain pending.
