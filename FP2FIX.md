@@ -4127,3 +4127,30 @@ committed or deployed, and Main CPU causation has not been established. Older
 g2 metric generations also continued consuming CPU and pings during the
 07:10–07:15Z rollout window; later absence from metrics does not prove the
 containers exited. Drain-phase evidence is still needed.
+
+The route-readiness gate was subsequently committed and pushed as Server
+`ac985578`; shared-source Sol gates passed 19 focused normal roots, 19 race
+roots and vet, with its separate private timer control already attested.
+It remains **unselected on Main**. A clean Taskworker image containing that
+gate and the local OOB control path was built and published as
+`bringyour/main-taskworker:2026.9.30-planetoid-1059558190`, manifest SHA256
+`74547d0bbc7e31794eab8eb9dfe5b8b304641566714deac658a08a300f1a6f10`,
+binary Server revision `ac985578`, `vcs.modified=false`. The build log SHA256
+is `f9d4a421e525d567aa24890a0c0e57d06d36b89daf4f43b5984fef7ffaa056d5`.
+Main Taskworkers have not been changed to that image while the resident
+cleanup and scheduler-state change are investigated.
+
+The 08:15:48Z coherent census still had `eligible=112465`,
+`quota_complete=0`, and `runs_needed=663450`. Its warming count rose from 6
+to 548 and its oldest current due deadline age fell sharply. Source review
+found that `oldest_due` reads the maximum lateness of **current** eligible
+deadlines: a claim or pacing update can advance it before a measured result.
+Ordinary reliability rollup seeds new rows without resetting existing cycle
+starts. The changed eligible cohort and recent-cycle entrants are compatible
+with the observed shift, but exact provider-row cause is unjoined; neither a
+quota recovery nor a wholesale scheduler reset follows from this census.
+The scheduled initial picker remained nonempty in all 20 enabled-block
+samples at its next callback. Persistent empty US IPv6 quality location and
+best-available lists are a separate API-model finding: FP2 URL due claims
+exact fixed provider client IDs and does not use those ordinary discovery
+lists.
