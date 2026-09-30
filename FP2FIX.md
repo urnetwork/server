@@ -4741,3 +4741,16 @@ measurement remain required before attributing outcomes to the new limit.
 The last complete pre-change 22:18 monitor frame already counted 7,002
 quota-complete providers of 108,069 eligible; this unjoined census preceded
 the five-second rollout and is not its effect.
+The fixed 22:35–22:40Z pre-change accepted-history window held 15,322
+selected-policy measured outcomes, 11,224 successes and 4,098 failures,
+or 51.0733/s with a 73.253% success share. A complete cached native-score
+publication with source interval 22:34:16–22:34:41Z and publish time
+22:46:18Z, all before the first `g1` selection, counted 88,510 native
+Quality, 91,125 native Speed and 108,088 online providers. The buckets
+overlap; their counts are not additive. This is a pre-change source snapshot
+with mixed prior eight-hour v1 history, not an exact ratio-only pass count.
+The post-change measurement must use starts after both block retags and
+before its fixed outcome window, then compare its own accepted successes,
+failures and failure stages. A later complete native publication is needed
+to observe bucket change; neither cohort alone proves a causal timeout
+effect or the eventual eight-hour equilibrium.
