@@ -3729,6 +3729,17 @@ whether this reflects reclassification, transient rollout pressure or another
 capacity change. Correctly unmeasured lost-tunnel turns must not be counted
 as accepted failures merely to raise throughput.
 
+A second nonoverlapping fixed history window, 23:44–23:49Z, found 8,482
+unique accepted measured runs: 6,055 successes and 2,427 failures, or
+**28.2733/s**. The indexed read took 0.266 seconds; receipt
+`d400eb07f3b35833a97d0ee3e844f3f66fec61038493b67d8df8798f829e3511`.
+These two settled post-correction windows remain below the roughly 76.07/s
+maintenance floor at 109,535 eligible providers. They do not by themselves
+establish whether the correction, local failures, or changing work mix caused
+the decline. A same-window worker-counter read was rejected by its strict
+process-series guard (`nonreference-current-or-range-series`, 2,342 rows),
+so no attempted/accepted/local-failure or stage totals are admitted from it.
+
 The first successor capability-2 active frame began at 22:48:13Z, after the
 explicit 15-minute floor. Its coherent 22:50:58Z census found `eligible=109392`,
 `quota_complete=0`, `secure_complete=0`, `due=63290`, `overdue=109383`, and
