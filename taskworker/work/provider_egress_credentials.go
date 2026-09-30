@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/connect"
@@ -33,14 +34,17 @@ func init() {
 // arguments or the provider under test. Function fields are per-owner seams
 // for deterministic tests; production uses the ordinary JWT/model boundaries.
 type providerEgressCredentials struct {
-	networkId server.Id
-	userId    server.Id
-	clientId  server.Id
-	parentJwt string
-	parse     func(context.Context, string, string) (*jwt.ByJwt, error)
-	validate  func(context.Context, *jwt.ByJwt, bool) error
-	mint      func(*model.AuthNetworkClientArgs, *session.ClientSession) (*model.AuthNetworkClientResult, error)
-	retire    func(*model.RemoveNetworkClientArgs, *session.ClientSession) (*model.RemoveNetworkClientResult, error)
+	children        sync.Map // only identities minted by this immutable owner
+	networkId       server.Id
+	userId          server.Id
+	clientId        server.Id
+	parentJwt       string
+	parse           func(context.Context, string, string) (*jwt.ByJwt, error)
+	validate        func(context.Context, *jwt.ByJwt, bool) error
+	mint            func(*model.AuthNetworkClientArgs, *session.ClientSession) (*model.AuthNetworkClientResult, error)
+	retire          func(*model.RemoveNetworkClientArgs, *session.ClientSession) (*model.RemoveNetworkClientResult, error)
+	captureResident func(context.Context, server.Id, server.Id) (*model.NetworkClientResidentRetirement, error)
+	removeResident  func(context.Context, *model.NetworkClientResidentRetirement) (bool, error)
 }
 
 func newProviderEgressCredentials(identity *model.ProberIdentity) (*providerEgressCredentials, error) {
@@ -52,6 +56,7 @@ func newProviderEgressCredentials(identity *model.ProberIdentity) (*providerEgre
 		networkId: *identity.NetworkId, userId: *identity.UserId, clientId: *identity.ClientId, parentJwt: identity.ByClientJwt,
 		parse: jwt.ParseByJwtForAudience, validate: jwt.ValidateByJwtState,
 		mint: model.AuthNetworkClient, retire: model.RemoveNetworkClient,
+		captureResident: model.CaptureResidentForClientRetirement, removeResident: model.RemoveCapturedResidentForClient,
 	}, nil
 }
 
@@ -118,6 +123,7 @@ func (self *providerEgressCredentials) AuthNetworkClient(ctx context.Context, ar
 		if minted.ClientId == nil || *minted.ClientId == self.clientId || minted.ByClientJwt == nil || *minted.ByClientJwt == "" {
 			return nil, errors.New("provider egress mint returned no derived credential")
 		}
+		self.children.Store(*minted.ClientId, struct{}{})
 		return &connect.AuthNetworkClientResult{ByClientJwt: *minted.ByClientJwt}, nil
 	}, func(err error) (*connect.AuthNetworkClientResult, error) {
 		if ctx.Err() != nil {
@@ -150,6 +156,7 @@ func (self *providerEgressCredentials) RemoveNetworkClient(ctx context.Context, 
 		if retired.Error != nil {
 			return nil, fmt.Errorf("provider egress retirement refused: %s", retired.Error.Message)
 		}
+		self.children.Delete(server.Id(args.ClientId))
 		return &connect.RemoveNetworkClientResult{}, nil
 	}, func(err error) (*connect.RemoveNetworkClientResult, error) {
 		if ctx.Err() != nil {

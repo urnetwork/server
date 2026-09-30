@@ -48,7 +48,7 @@ func TestUrlProbeReportRetryKeepsRunAndCycleIdentity(t *testing.T) {
 // A quota-full security recheck still carries its durable receipt identity and
 // the original configured URL even when that URL has left the current catalog.
 func TestUrlProbeDueCarriesRollingIdentityAndSecuritySnapshots(t *testing.T) {
-	want := []DueProvider{{ClientId: connect.NewId().String(), SuccessesNeeded: 0,
+	want := []DueProvider{{ClientId: connect.NewId().String(), RunsNeeded: 0,
 		CycleStartedAt: time.Unix(1_800_000_000, 0).UTC(), OutcomeCount: 21, CountryCode: "zz",
 		SecurityDestinations: []egresshealth.Destination{{Name: "retired-synthetic", Class: egresshealth.ClassSite,
 			Url: "https://synthetic-security.example/original", Expect: egresshealth.ExpectBody, MaxBytes: 12345}}}}

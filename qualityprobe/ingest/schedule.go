@@ -141,7 +141,8 @@ var defaultHttpClient = controlplane.NewHTTPClient(0)
 // excludes nothing.
 type DueProvider struct {
 	ClientId             string                     `json:"client_id"`
-	SuccessesNeeded      int                        `json:"successes_needed,omitempty"`
+	RunsNeeded           int                        `json:"runs_needed,omitempty"`
+	SuccessesNeeded      int                        `json:"successes_needed,omitempty"` // deprecated wire alias
 	CycleStartedAt       time.Time                  `json:"cycle_started_at,omitzero"`
 	OutcomeCount         int                        `json:"outcome_count,omitempty"`
 	ClaimOrdinal         int64                      `json:"claim_ordinal,omitempty"`

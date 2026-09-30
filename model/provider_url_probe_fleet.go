@@ -9,11 +9,13 @@ import (
 )
 
 type ProviderUrlProbeFleet struct {
-	Eligible               int
-	Due                    int
-	Complete               int
-	QuotaComplete          int
-	Overdue                int
+	Eligible      int
+	Due           int
+	Complete      int
+	QuotaComplete int
+	Overdue       int
+	RunsNeeded    int
+	// Deprecated compatibility alias; use RunsNeeded for the v2 quota.
 	SuccessesNeeded        int
 	SecurityExceptions     int
 	SecurityUnknownTargets int
@@ -29,14 +31,14 @@ func GetProviderUrlProbeFleet(ctx context.Context, now time.Time) ProviderUrlPro
 	fleet := ProviderUrlProbeFleet{}
 	server.Db(ctx, func(conn server.PgConn) {
 		rows, err := conn.Query(ctx, `WITH cohort AS MATERIALIZED (
-			SELECT cycle.client_id,cycle.cycle_started_at,cycle.next_attempt_at,recent.success_count,
+			SELECT cycle.client_id,cycle.cycle_started_at,cycle.next_attempt_at,recent.run_count,
 				`+providerHasUrlSecurityExceptionSql("provider.client_id")+` AS security_exception,
 				EXISTS(SELECT 1 FROM provider_egress_health AS health
 					WHERE health.client_id=provider.client_id AND health.legacy_tls_authentication_failure) AS unknown_security_target
 			FROM network_client_location_reliability AS provider
 			JOIN network_client AS client USING (client_id)
 			LEFT JOIN provider_egress_probe_cycle AS cycle USING (client_id)
-			CROSS JOIN LATERAL (`+providerUrlProbeSuccessWindowSql("provider.client_id", "$1")+`) AS recent
+			CROSS JOIN LATERAL (`+providerUrlProbeRunWindowSql("provider.client_id", "$1")+`) AS recent
 			WHERE provider.connected AND provider.valid
 			AND (provider.ipv4_proven OR NOT provider.ipv6_proven)
 			AND client.active AND client.source_client_id IS NULL
@@ -45,25 +47,26 @@ func GetProviderUrlProbeFleet(ctx context.Context, now time.Time) ProviderUrlPro
 			)
 			SELECT COUNT(*),
 				COUNT(*) FILTER (WHERE next_attempt_at <= $1 OR client_id IS NULL),
-				COUNT(*) FILTER (WHERE success_count >= $3 AND NOT security_exception),
-				COUNT(*) FILTER (WHERE (success_count < $3 OR security_exception) AND (cycle_started_at <= $4 OR client_id IS NULL)),
-				COALESCE(SUM(GREATEST(0,$3-success_count)),0),
+				COUNT(*) FILTER (WHERE run_count >= $3 AND NOT security_exception),
+				COUNT(*) FILTER (WHERE (run_count < $3 OR security_exception) AND (cycle_started_at <= $4 OR client_id IS NULL)),
+				COALESCE(SUM(GREATEST(0,$3-run_count)),0),
 				COALESCE(MAX(EXTRACT(EPOCH FROM ($1-next_attempt_at))) FILTER (WHERE next_attempt_at <= $1),0),
 				COUNT(*) FILTER (WHERE security_exception),
 				COUNT(*) FILTER (WHERE unknown_security_target),
-				COUNT(*) FILTER (WHERE success_count >= $3),
-				COUNT(*) FILTER (WHERE (success_count < $3 OR security_exception) AND cycle_started_at > $4),
+				COUNT(*) FILTER (WHERE run_count >= $3),
+				COUNT(*) FILTER (WHERE (run_count < $3 OR security_exception) AND cycle_started_at > $4),
 				COUNT(*) FILTER (WHERE client_id IS NULL),
 				COALESCE(MIN(EXTRACT(EPOCH FROM cycle_started_at)),0)
-			FROM cohort`, now.UTC(), ProvideModePublic, ProviderEgressProbeSuccessTarget,
+			FROM cohort`, now.UTC(), ProvideModePublic, ProviderUrlProbeRunTarget,
 			now.Add(-ProviderEgressProbeRefreshAge).UTC())
 		server.WithPgResult(rows, err, func() {
 			if rows.Next() {
-				server.Raise(rows.Scan(&fleet.Eligible, &fleet.Due, &fleet.Complete, &fleet.Overdue, &fleet.SuccessesNeeded, &fleet.OldestDueSeconds,
+				server.Raise(rows.Scan(&fleet.Eligible, &fleet.Due, &fleet.Complete, &fleet.Overdue, &fleet.RunsNeeded, &fleet.OldestDueSeconds,
 					&fleet.SecurityExceptions, &fleet.SecurityUnknownTargets, &fleet.QuotaComplete,
 					&fleet.Warming, &fleet.MissingCycles, &fleet.CohortStartedAtSeconds))
 			}
 		})
 	})
+	fleet.SuccessesNeeded = fleet.RunsNeeded
 	return fleet
 }

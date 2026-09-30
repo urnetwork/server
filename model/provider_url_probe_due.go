@@ -12,13 +12,16 @@ import (
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
-// A durable admission token and trailing-four-hour success deficit travel with
+// A durable admission token and trailing-four-hour measured-run deficit travel with
 // the existing provider place. OutcomeCount is a monotonic receipt ordinal.
 type ProviderUrlProbeDue struct {
-	ClientId             server.Id                  `json:"client_id"`
-	CountryCode          string                     `json:"country_code,omitempty"`
-	Region               string                     `json:"region,omitempty"`
-	CycleStartedAt       time.Time                  `json:"cycle_started_at"`
+	ClientId       server.Id `json:"client_id"`
+	CountryCode    string    `json:"country_code,omitempty"`
+	Region         string    `json:"region,omitempty"`
+	CycleStartedAt time.Time `json:"cycle_started_at"`
+	RunsNeeded     int       `json:"runs_needed"`
+	// Deprecated wire alias for rolling upgrades; capability v2 defines both
+	// fields as the measured-run deficit, including accepted failures.
 	SuccessesNeeded      int                        `json:"successes_needed"`
 	OutcomeCount         int                        `json:"outcome_count"`
 	ClaimOrdinal         int64                      `json:"claim_ordinal"`
@@ -39,7 +42,7 @@ func providerUrlProbeShardSql(clientExpression, shardCountExpression string) str
 }
 
 // Stable per-provider jitter spreads recurring work without retaining a timer
-// or tunnel. Quota-full scheduling is separately tied to the oldest success.
+// or tunnel. Quota-full scheduling is separately tied to the oldest counted run.
 func providerUrlProbePacedAttemptSql(cycleAlias, measuredAtParam, acceptedSuccessesParam string) string {
 	rules := GetProviderEgressRules()
 	defaults := DefaultProviderEgressRules()
@@ -56,8 +59,8 @@ func providerUrlProbePacedAttemptSql(cycleAlias, measuredAtParam, acceptedSucces
 		successSeconds, failureSeconds)
 }
 
-// The partial index excludes errors and grouped legacy reports before the
-// bounded descending lookup. Future timestamps never satisfy a present quota.
+// This success-only projection remains diagnostic. It cannot satisfy the
+// measured-run quota by itself or change the separate eight-hour quality ratio.
 func providerUrlProbeSuccessWindowSql(clientIdExpression, nowExpression string) string {
 	return fmt.Sprintf(`SELECT COUNT(*)::integer AS success_count, MIN(measured_at) AS oldest_success_at
 		FROM (SELECT measured_at FROM provider_egress_health_history
@@ -65,14 +68,31 @@ func providerUrlProbeSuccessWindowSql(clientIdExpression, nowExpression string) 
 			AND measured_at > %s::timestamp - interval '%d seconds'
 			AND measured_at <= %s::timestamp
 			ORDER BY measured_at DESC LIMIT %d) AS recent_successes`, clientIdExpression, SelectedProviderUrlProbePolicyVersion(), nowExpression,
-		int(ProviderEgressProbeRefreshAge/time.Second), nowExpression, ProviderEgressProbeSuccessTarget)
+		int(ProviderEgressProbeRefreshAge/time.Second), nowExpression, ProviderUrlProbeRunTarget)
+}
+
+// One accepted, admitted, selected-policy measurement is either success or
+// failure: E=total_count-ok_count. Setup/attempt-only and security-only reports
+// have no measured row or total_count=0; grouped/legacy versions do not count.
+// The partial index bounds reads to the latest ten runs, with strict expiry
+// and no future credit. Immutable run_id identity deduplicates publication.
+func providerUrlProbeRunWindowSql(clientIdExpression, nowExpression string) string {
+	return fmt.Sprintf(`SELECT COUNT(*)::integer AS run_count, MIN(measured_at) AS oldest_run_at
+		FROM (SELECT measured_at FROM provider_egress_health_history
+			WHERE client_id=%s AND url_probe AND url_probe_policy_version=%d
+			AND total_count=1 AND (ok_count=0 OR ok_count=1)
+			AND measured_at > %s::timestamp - interval '%d seconds'
+			AND measured_at <= %s::timestamp
+			ORDER BY measured_at DESC LIMIT %d) AS recent_runs`, clientIdExpression, SelectedProviderUrlProbePolicyVersion(), nowExpression,
+		int(ProviderEgressProbeRefreshAge/time.Second), nowExpression, ProviderUrlProbeRunTarget)
 }
 
 // The rollup seeds never-probed providers once. Its ordered next-attempt index
 // supplies a bounded candidate head; row locks prevent duplicate admission and
 // advance the retry deadline atomically. Rejected stale hints leave the ordered
-// head without changing progress. Failed/local attempts leave the quota intact.
-// Successes expire individually; the admission token never resets.
+// head without changing progress. Accepted measured failures count; local
+// setup and attempt-only reports do not. Runs expire individually; the
+// admission token never resets.
 func ClaimProviderUrlProbeDue(ctx context.Context, now time.Time, limit, shardIndex, shardCount int) []ProviderUrlProbeDue {
 	return ClaimProviderUrlProbeDueWithStatus(ctx, now, limit, shardIndex, shardCount).Providers
 }
@@ -109,15 +129,16 @@ func ClaimProviderUrlProbeDueWithStatus(ctx context.Context, now time.Time, limi
 		}
 		rows, err := tx.Query(ctx, providerUrlProbeDueSql(shardIndex, shardCount, result.CompletedRunPriorityReady),
 			now.UTC(), ProvideModePublic, limit, shardCount, shardIndex,
-			ProviderEgressProbeSuccessTarget, now.Add(ProviderEgressProbeAttemptBackoff).UTC())
+			ProviderUrlProbeRunTarget, now.Add(ProviderEgressProbeAttemptBackoff).UTC())
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				var provider ProviderUrlProbeDue
 				var securityDestinations []byte
-				server.Raise(rows.Scan(&provider.ClientId, &provider.CycleStartedAt, &provider.SuccessesNeeded, &provider.OutcomeCount,
+				server.Raise(rows.Scan(&provider.ClientId, &provider.CycleStartedAt, &provider.RunsNeeded, &provider.OutcomeCount,
 					&provider.CountryCode, &provider.Region, &securityDestinations,
 					&provider.ClaimOrdinal, &provider.ClaimedAt, &provider.CompletedRunCount))
 				server.Raise(json.Unmarshal(securityDestinations, &provider.SecurityDestinations))
+				provider.SuccessesNeeded = provider.RunsNeeded
 				result.Providers = append(result.Providers, provider)
 			}
 		})
@@ -205,28 +226,29 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 				AND NOT EXISTS (SELECT 1 FROM candidates WHERE candidates.client_id = head.client_id)
 				RETURNING cycle.client_id
 			), measured AS MATERIALIZED (
-				SELECT candidates.*, recent.success_count, recent.oldest_success_at,
+				SELECT candidates.*, recent.run_count, recent.oldest_run_at, successes.success_count,
 					security.security_exception
 				FROM candidates CROSS JOIN LATERAL (%s) AS recent
+				CROSS JOIN LATERAL (%s) AS successes
 				CROSS JOIN LATERAL (SELECT (%s) AS security_exception OFFSET 0) AS security
 			), claimed AS (
 				UPDATE provider_egress_probe_cycle AS cycle SET
 					success_count = measured.success_count,
 					completed_priority_ready = false,
-					claim_ordinal = cycle.claim_ordinal + CASE WHEN measured.success_count < $6 OR measured.security_exception THEN 1 ELSE 0 END,
-					next_attempt_at = CASE WHEN measured.success_count >= $6 AND NOT measured.security_exception
-						THEN measured.oldest_success_at + interval '%d seconds' ELSE $7 END
+					claim_ordinal = cycle.claim_ordinal + CASE WHEN measured.run_count < $6 OR measured.security_exception THEN 1 ELSE 0 END,
+					next_attempt_at = CASE WHEN measured.run_count >= $6 AND NOT measured.security_exception
+						THEN measured.oldest_run_at + interval '%d seconds' ELSE $7 END
 				FROM measured WHERE cycle.client_id=measured.client_id
 				AND cycle.client_id=ANY(ARRAY(SELECT client_id FROM measured))
 				RETURNING cycle.client_id, cycle.cycle_started_at, cycle.success_count, cycle.outcome_count, cycle.claim_ordinal,
-					measured.security_exception
+					measured.security_exception, measured.run_count
 			), issued AS (
 				INSERT INTO provider_url_probe_run(client_id,claim_ordinal,claimed_at)
 				SELECT client_id,claim_ordinal,$1 FROM claimed
-				WHERE claimed.success_count<$6 OR claimed.security_exception
+				WHERE claimed.run_count<$6 OR claimed.security_exception
 				RETURNING client_id,claim_ordinal,claimed_at
 			)
-			SELECT claimed.client_id, claimed.cycle_started_at, GREATEST(0, $6-claimed.success_count),
+			SELECT claimed.client_id, claimed.cycle_started_at, GREATEST(0, $6-claimed.run_count),
 				claimed.outcome_count,
 				COALESCE(country.country_code, ''), COALESCE(region.location_name, ''),
 				COALESCE((SELECT jsonb_agg(security.destination ORDER BY security.url_key)
@@ -239,8 +261,9 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 				WHERE location_id=candidates.country_location_id OFFSET 0) AS country ON true
 			LEFT JOIN LATERAL (SELECT location_name FROM location
 				WHERE location_id=candidates.region_location_id OFFSET 0) AS region ON true
-			WHERE claimed.success_count < $6 OR claimed.security_exception
+			WHERE claimed.run_count < $6 OR claimed.security_exception
 			ORDER BY %s
-		`, providerProbeEligibilitySql("provider"), providerUrlProbeSuccessWindowSql("candidates.client_id", "$1"),
+		`, providerProbeEligibilitySql("provider"), providerUrlProbeRunWindowSql("candidates.client_id", "$1"),
+		providerUrlProbeSuccessWindowSql("candidates.client_id", "$1"),
 		providerHasUrlSecurityExceptionSql("candidates.client_id"), int(ProviderEgressProbeRefreshAge/time.Second), countProjection, resultOrder)
 }

@@ -405,16 +405,16 @@ func loadNativeClientScoresWithCursor(ctx context.Context, mode RankMode, locati
 	return
 }
 
-// Old readers keep their union keys. A new reader uses native pages only when
+// Old readers keep their union keys. An explicitly enabled reader uses native pages only when
 // every required target has the schema. A damaged generation can also use a
 // bounded legacy read, retaining independently validated native rows. Such a
 // source remains explicitly incomplete even when fallback restores availability.
-func loadPreferredClientScoresWithCursor(forceMinimum bool, mode RankMode, ctx context.Context, locations, groups map[server.Id]bool, caller server.Id, n int, facets []ipFamilyFacet, observations ...*findProviders2LoadObservation) (scores map[server.Id]*ClientScore, cursor *clientScoreCursor, returnErr error) {
+func loadPreferredClientScoresWithCursor(nativeReaderEnabled, forceMinimum bool, mode RankMode, ctx context.Context, locations, groups map[server.Id]bool, caller server.Id, n int, facets []ipFamilyFacet, observations ...*findProviders2LoadObservation) (scores map[server.Id]*ClientScore, cursor *clientScoreCursor, returnErr error) {
 	var observation *findProviders2LoadObservation
 	if 0 < len(observations) {
 		observation = observations[0]
 	}
-	if !forceMinimum {
+	if nativeReaderEnabled && !forceMinimum {
 		var available bool
 		scores, cursor, available, returnErr = loadNativeClientScoresWithCursor(ctx, mode, locations, groups, caller, n, facets, observation)
 		if ctx.Err() != nil {

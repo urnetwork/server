@@ -40,8 +40,11 @@ func runWithProviderEgressFleetHeartbeat(
 			}
 		}
 	}()
-	result, err := run()
-	cancel()
-	<-done
-	return result, err
+	// Stop and join on every exit, including a recovered task panic. The
+	// caller may retire its published owner only after refresh has stopped.
+	defer func() {
+		cancel()
+		<-done
+	}()
+	return run()
 }

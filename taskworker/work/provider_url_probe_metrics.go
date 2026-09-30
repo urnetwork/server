@@ -59,7 +59,7 @@ type providerUrlProbeFleetCollector struct {
 func newProviderUrlProbeFleetCollector() *providerUrlProbeFleetCollector {
 	return &providerUrlProbeFleetCollector{
 		fleet: prometheus.NewDesc("urnetwork_url_probe_fleet",
-			"Current reliability and ARIN-risk eligible URL cohort, rolling success quota, and unresolved TLS state", []string{"state"}, nil),
+			"Current reliability and ARIN-risk eligible URL cohort, rolling measured-run quota, and unresolved TLS state", []string{"state"}, nil),
 		oldest: prometheus.NewDesc("urnetwork_url_probe_oldest_due_seconds",
 			"Age of the oldest eligible URL turn beyond its paced due time", nil, nil),
 		observed: prometheus.NewDesc("urnetwork_url_probe_fleet_observed_timestamp_seconds",
@@ -85,7 +85,10 @@ func (self *providerUrlProbeFleetCollector) Collect(metrics chan<- prometheus.Me
 	for state, value := range map[string]int{
 		"eligible": fleet.Eligible, "due": fleet.Due, "complete": fleet.Complete,
 		"quota_complete": fleet.QuotaComplete, "secure_complete": fleet.Complete,
-		"overdue": fleet.Overdue, "successes_needed": fleet.SuccessesNeeded,
+		"overdue": fleet.Overdue, "runs_needed": fleet.RunsNeeded,
+		// Compatibility alias only; capability2 prevents a success-only
+		// monitor from accepting this generation as its old quota contract.
+		"successes_needed": fleet.RunsNeeded,
 		"security_pending": fleet.SecurityExceptions, "security_unknown_targets": fleet.SecurityUnknownTargets,
 		"warming": fleet.Warming, "uninitialized": fleet.MissingCycles,
 	} {
@@ -121,7 +124,7 @@ var urlProbeConfiguredShards = prometheus.NewGauge(prometheus.GaugeOpts{
 
 var urlProbeCapability = prometheus.NewGauge(prometheus.GaugeOpts{
 	Name: "urnetwork_url_probe_capability",
-	Help: "This process supports the unified URL probe metrics contract, including explicit zero outcome counters",
+	Help: "URL coverage contract version: 2 counts accepted measured successes and failures toward quota, with explicit zero outcome counters",
 })
 
 var urlProbeShardObservedAt = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -171,7 +174,7 @@ func providerUrlProbeFleetHeartbeat(args *ProviderEgressProbeArgs) func(context.
 
 // Metrics are aggregate; no provider identifier or URL enters a label.
 func init() {
-	urlProbeCapability.Set(1)
+	urlProbeCapability.Set(2)
 	for _, outcome := range []string{"attempted", "accepted", "local_failure"} {
 		urlProbeTurns.WithLabelValues(outcome)
 	}

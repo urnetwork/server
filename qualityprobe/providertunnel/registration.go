@@ -53,33 +53,42 @@ func (self *providerRegistrationState) unavailable() bool {
 type providerRegistrationGenerator struct {
 	*connect.ApiMultiClientGenerator
 	registration *providerRegistrationState
+	setup        *providerSetupState
 }
 
 // Observe the legacy entrypoint without changing its parent-context ownership.
 func (self *providerRegistrationGenerator) NewClientArgs() (*connect.MultiClientGeneratorClientArgs, error) {
+	setupCall := self.setup.beginCredential()
 	args, err := self.ApiMultiClientGenerator.NewClientArgs()
 	self.registration.recordClientArgs(args, err)
+	self.setup.finishCredential(setupCall, args, err, nil)
 	return args, err
 }
 
 // Preserve the caller's bounded credential acquisition and its exact error.
 func (self *providerRegistrationGenerator) NewClientArgsContext(ctx context.Context) (*connect.MultiClientGeneratorClientArgs, error) {
+	setupCall := self.setup.beginCredential()
 	args, err := self.ApiMultiClientGenerator.NewClientArgsContext(ctx)
 	self.registration.recordClientArgs(args, err)
+	self.setup.finishCredential(setupCall, args, err, nil)
 	return args, err
 }
 
 // Destination-aware windows keep the real generator's identity/reuse behavior.
 func (self *providerRegistrationGenerator) NewClientArgsForDestination(destination connect.MultiHopId) (*connect.MultiClientGeneratorClientArgs, error) {
+	setupCall := self.setup.beginCredential()
 	args, err := self.ApiMultiClientGenerator.NewClientArgsForDestination(destination)
 	self.registration.recordClientArgs(args, err)
+	self.setup.finishCredential(setupCall, args, err, &destination)
 	return args, err
 }
 
 // Observe the context-aware destination path before any constructor can run.
 func (self *providerRegistrationGenerator) NewClientArgsForDestinationContext(ctx context.Context, destination connect.MultiHopId) (*connect.MultiClientGeneratorClientArgs, error) {
+	setupCall := self.setup.beginCredential()
 	args, err := self.ApiMultiClientGenerator.NewClientArgsForDestinationContext(ctx, destination)
 	self.registration.recordClientArgs(args, err)
+	self.setup.finishCredential(setupCall, args, err, &destination)
 	return args, err
 }
 
@@ -90,7 +99,9 @@ func (self *providerRegistrationGenerator) NewClient(ctx context.Context, args *
 
 // Observe, but do not alter, the real constructor's cause or cleanup ownership.
 func (self *providerRegistrationGenerator) NewClientContext(ctx context.Context, callCtx context.Context, args *connect.MultiClientGeneratorClientArgs, settings *connect.ClientSettings) (*connect.Client, error) {
+	setupCall := self.setup.beginConstructor(args)
 	client, err := self.ApiMultiClientGenerator.NewClientContext(ctx, callCtx, args, settings)
 	self.registration.record(client, err)
+	self.setup.finishConstructor(setupCall, client, err)
 	return client, err
 }

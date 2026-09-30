@@ -23,7 +23,8 @@ import (
 type Provider struct {
 	ClientId             string
 	Place                egresshealth.Place
-	SuccessesNeeded      int
+	RunsNeeded           int
+	SuccessesNeeded      int // deprecated compatibility alias for old due responses
 	CycleStartedAt       time.Time
 	OutcomeCount         int
 	ClaimOrdinal         int64
@@ -105,7 +106,10 @@ var ErrNotMeasured = errors.New("prober: no quality trial was measured; the loca
 // reporter. Each dependency is injected so the flow is testable without a live
 // provider or server.
 type Prober struct {
-	Open TunnelOpener
+	// Optional identity-free timing of one returned call, including joined Close.
+	// Called concurrently outside locks; it must not block or perform I/O.
+	ObserveTiming func(ProbeTiming)
+	Open          TunnelOpener
 	// Optional place-aware opener. When set, it takes precedence over Open so
 	// the private tunnel can select the provider country's resolver at birth.
 	OpenProvider func(context.Context, Provider) (*http.Client, func() error, error)
@@ -269,6 +273,13 @@ func (self *Prober) maxLoggedDistinctErrors() int {
 // Legacy/manual attempt reporting is best effort. A claimed URL turn requires
 // an identity-bearing completion acknowledgement, independent of health credit.
 func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
+	timing := newProbeTimingRecorder(self.ObserveTiming)
+	err := self.probeOne(ctx, provider, timing)
+	timing.finish()
+	return err
+}
+
+func (self *Prober) probeOne(ctx context.Context, provider Provider, timing *probeTimingRecorder) error {
 	providerClientId := provider.ClientId
 
 	// A measurement is not coverage until its required ingest acknowledges it.
@@ -392,6 +403,7 @@ func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 	// Runs the probe and returns the failure class ("" on success)
 	// alongside the error, so the attempt is reported for every outcome.
 	probe := func() (string, error) {
+		timing.enter(probeTimingOpen)
 		var client *http.Client
 		var closeTunnel func() error
 		var err error
@@ -412,7 +424,9 @@ func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 			// caller's log line, as provider=.
 			return FailureTunnel, fmt.Errorf("open tunnel: %w", err)
 		}
+		timing.enter(probeTimingCheck)
 		defer func() {
+			timing.enter(probeTimingClose)
 			if closeTunnel == nil {
 				return
 			}
@@ -453,6 +467,7 @@ func (self *Prober) ProbeOne(ctx context.Context, provider Provider) error {
 	}
 
 	failure, err := probe()
+	timing.enter(probeTimingAttempt)
 	if provider.ClaimOrdinal > 0 {
 		completion := qualityprobe.UrlProbeCompletion{
 			ClientId: providerClientId, ClaimOrdinal: provider.ClaimOrdinal,

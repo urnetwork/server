@@ -106,7 +106,7 @@ func (self ProviderEgressRules) Validate() error {
 	if self.UrlSuccessIntervalSeconds < 0 || self.UrlFailureIntervalSeconds < 0 {
 		problems = append(problems, "URL probe intervals must not be negative")
 	}
-	if self.UrlSuccessIntervalSeconds >= int(ProviderEgressProbeRefreshAge/time.Second)*10/(11*(ProviderEgressProbeSuccessTarget-1)) {
+	if self.UrlSuccessIntervalSeconds >= int(ProviderEgressProbeRefreshAge/time.Second)*10/(11*(ProviderUrlProbeRunTarget-1)) {
 		problems = append(problems, "URL success interval with jitter cannot complete ten probes within four hours")
 	}
 	if self.UrlFailureIntervalSeconds >= int(ProviderEgressProbeRefreshAge/time.Second) {
@@ -255,8 +255,12 @@ const ProviderEgressLocationMaxAge = 7 * 24 * time.Hour
 // expiry. Location evidence has its own independent lifetime.
 const ProviderEgressProbeRefreshAge = 4 * time.Hour
 
-// Accepted successful URL measurements needed to finish one provider cycle.
-const ProviderEgressProbeSuccessTarget = 10
+// Accepted measured URL runs, success or failure, in the rolling four hours.
+const ProviderUrlProbeRunTarget = 10
+
+// Deprecated: the quota now counts accepted measured successes and failures.
+// Retain this source alias for callers upgrading independently.
+const ProviderEgressProbeSuccessTarget = ProviderUrlProbeRunTarget
 
 // An incomplete attempt gets a bounded retry without occupying every poll.
 // A setup or publication failure must not consume the four-hour refresh cycle.
@@ -451,9 +455,10 @@ func setProviderEgressProbeAttemptInTx(ctx context.Context, tx server.PgTx, a *P
 			UPDATE provider_egress_probe_cycle SET next_attempt_at = `+
 			providerUrlProbePacedAttemptSql("provider_egress_probe_cycle", "$2", "0")+`
 			WHERE client_id=$1 AND cycle_started_at <= $2
-			AND (success_count < $3 OR (`+providerHasUrlSecurityExceptionSql("provider_egress_probe_cycle.client_id")+`))
+			AND ((SELECT run_count < $3 FROM (`+providerUrlProbeRunWindowSql("provider_egress_probe_cycle.client_id", "$2")+`) AS recent)
+				OR (`+providerHasUrlSecurityExceptionSql("provider_egress_probe_cycle.client_id")+`))
 			AND (latest_result_at IS NULL OR latest_result_at < $2)`,
-			a.ClientId, a.AttemptAt.UTC(), ProviderEgressProbeSuccessTarget))
+			a.ClientId, a.AttemptAt.UTC(), ProviderUrlProbeRunTarget))
 	}
 }
 

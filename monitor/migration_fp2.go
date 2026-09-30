@@ -18,7 +18,8 @@ const migrationFp2CatalogQuery = `fp2_column_artifact AS (
 	LEFT JOIN pg_attrdef AS defaults ON defaults.adrelid=attribute.attrelid AND defaults.adnum=attribute.attnum
 	WHERE namespace.nspname='public' AND attribute.attnum>0 AND NOT attribute.attisdropped
 	AND relation.relname IN ('network_client_location','network_client_location_reliability',
-		'provider_egress_health','provider_egress_health_history','provider_egress_probe_cycle','provider_egress_url_security')
+		'provider_egress_health','provider_egress_health_history','provider_egress_probe_cycle','provider_egress_url_security',
+		'provider_url_probe_run','client_reliability_running','client_reliability_running_window')
 )`
 
 // Expected fields are source-owned literals; SQL never incorporates live input.
@@ -56,7 +57,7 @@ func migrationFp2Index(table, name, keys, predicate string, unique bool) string 
 		predicateSql = "'" + strings.ReplaceAll(predicate, "'", "''") + "'"
 	}
 	return fmt.Sprintf(`EXISTS (SELECT 1 FROM index_artifact
-		WHERE table_name='%s' AND index_name='%s' AND definition='%s'
+		WHERE table_name = '%s' AND index_name = '%s' AND definition = '%s'
 		AND predicate_definition IS NOT DISTINCT FROM %s AND indisvalid AND indisready)`,
 		table, name, strings.ReplaceAll(definition, "'", "''"), predicateSql)
 }
@@ -79,6 +80,12 @@ var migrationFp2UrlColumns = migrationFp2Columns("provider_egress_health_history
 	migrationFp2Column{name: "url_probe", kind: "boolean", notNull: true, defaultExpression: "false"}) + " AND " +
 	migrationFp2Columns("provider_egress_probe_cycle",
 		migrationFp2Column{name: "outcome_count", kind: "bigint", notNull: true, defaultExpression: "0"})
+
+// v741 adds the measured-run quota lookup; the existing success projection is
+// retained and must not be silently redefined during a rolling deployment.
+var migrationUrlProbeMeasuredQuotaArtifactQuery = migrationFp2Index("provider_egress_health_history",
+	"provider_egress_health_history_url_run", "client_id, measured_at DESC",
+	"(url_probe AND (url_probe_policy_version = 1) AND (total_count = 1) AND ((ok_count = 0) OR (ok_count = 1)))", false)
 
 // Order is the migration's positional row protocol: versions722 through730.
 var migrationFp2ArtifactQueries = []string{

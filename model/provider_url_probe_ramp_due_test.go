@@ -46,7 +46,7 @@ func TestUrlProbeRampEightShardAffinityAndSixtyFourDueCap(t *testing.T) {
 				}
 				for _, provider := range due {
 					if provider.ClientId != want[received] || seen[provider.ClientId] ||
-						!provider.CycleStartedAt.Equal(now) || provider.OutcomeCount != 0 || provider.SuccessesNeeded != ProviderEgressProbeSuccessTarget {
+						!provider.CycleStartedAt.Equal(now) || provider.OutcomeCount != 0 || provider.RunsNeeded != ProviderUrlProbeRunTarget {
 						t.Fatal("ramp changed slot affinity, order, lease exclusion, or durable quota identity")
 					}
 					seen[provider.ClientId] = true
@@ -66,7 +66,7 @@ func TestUrlProbeRampEightShardAffinityAndSixtyFourDueCap(t *testing.T) {
 				t.Fatal("normal lease expiry did not refill the bounded shard")
 			}
 			for _, provider := range due {
-				if !provider.CycleStartedAt.Equal(now) || provider.OutcomeCount != 0 || provider.SuccessesNeeded != ProviderEgressProbeSuccessTarget {
+				if !provider.CycleStartedAt.Equal(now) || provider.OutcomeCount != 0 || provider.RunsNeeded != ProviderUrlProbeRunTarget {
 					t.Fatal("lease expiry reset or manufactured URL progress")
 				}
 			}

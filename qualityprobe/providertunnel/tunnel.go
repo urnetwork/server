@@ -40,12 +40,18 @@ type Config struct {
 	// Optional fixed aggregate observer. It records completed DNS waves and
 	// their own tunnel's setup state without blocking on a metrics consumer.
 	DnsObservations *DnsObservations
+	// Optional probe-owned completed setup diagnostics; never shared across probes.
+	SetupObservations *SetupObservations
+	// Optional initial-ping aggregate from this tunnel, with no identity labels.
+	InitialPingObservations *connect.InitialPingObservations
 	// Optional fixed auth-request aggregate. Only this tunnel's synchronous
 	// client-mint calls opt in; no application URL or identity is recorded.
 	AuthObservations *connect.AuthNetworkClientObservations
 	// Platform-owned workers may mint/retire their derived clients locally.
 	// Nil keeps standalone/operator probes on the normal public API lifecycle.
 	ClientCredentials connect.NetworkClientCredentials
+	// Explicit platform-owned local control; nil preserves standalone HTTP.
+	ClientControl connect.NetworkClientControl
 	// Certificate pins per host: a pinned host must present a chain
 	// with one of its pinned keys on the verified path, on top of ordinary
 	// WebPKI verification. They are optional -- a host without an entry is
@@ -234,6 +240,8 @@ type Tunnel struct {
 	closeErr        error
 	dnsObservations *DnsObservations
 	registration    *providerRegistrationState
+	setup           *providerSetupState
+	unwatchSetup    func()
 }
 
 // An owner whose retirement Close joins.
@@ -272,6 +280,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	}
 	generatorSettings := connect.DefaultApiMultiClientGeneratorSettings()
 	generatorSettings.ClientCredentials = cfg.ClientCredentials
+	generatorSettings.ClientControl = cfg.ClientControl
 	generatorSettings.ControlTelemetryProbe = true
 	generatorSettings.PlatformTransportSettingsGenerator = func() *connect.PlatformTransportSettings {
 		settings := connect.DefaultPlatformTransportSettings()
@@ -321,14 +330,17 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	}
 
 	registration := &providerRegistrationState{}
+	setup := newProviderSetupState(cfg.SetupObservations, providerClientId)
+	multiClientSettings := providerTunnelMultiClientSettings()
+	multiClientSettings.InitialPingObservations = cfg.InitialPingObservations
 	multiClient := connect.NewRemoteUserNatMultiClient(
 		dataCtx,
-		&providerRegistrationGenerator{ApiMultiClientGenerator: generator, registration: registration},
+		&providerRegistrationGenerator{ApiMultiClientGenerator: generator, registration: registration, setup: setup},
 		func(source connect.TransferPath, provideMode protocol.ProvideMode, ipPath *connect.IpPath, packet []byte) {
 			_, _ = tun.Write(packet)
 		},
 		protocol.ProvideMode_Network,
-		providerTunnelMultiClientSettings(),
+		multiClientSettings,
 	)
 
 	// Independent of every other context here on purpose: it must outlive a
@@ -336,6 +348,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	// ctx -- the caller ending is its own signal, not the tunnel's loss.
 	lost, lose := context.WithCancelCause(context.Background())
 	unwatch := watchProviderPath(multiClient.Monitor(), lose)
+	unwatchSetup := setup.watch(multiClient.Monitor())
 
 	// pump tun -> provider
 	source := connect.SourceId(cfg.ClientId)
@@ -350,7 +363,10 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 				reportTunReadError(dataCtx, err, log.Println)
 				return
 			}
-			multiClient.SendPacket(source, protocol.ProvideMode_Network, packet, packetSendTimeout)
+			if !multiClient.SendPacket(source, protocol.ProvideMode_Network, packet, packetSendTimeout) {
+				// Rejection leaves the Tun.Read packet owned by this pump.
+				connect.MessagePoolReturn(packet)
+			}
 		}
 	}()
 
@@ -384,6 +400,8 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		closeTimeout:    cfg.closeTimeout(),
 		dnsObservations: cfg.DnsObservations,
 		registration:    registration,
+		setup:           setup,
+		unwatchSetup:    unwatchSetup,
 	}, nil
 }
 
@@ -417,7 +435,16 @@ func (self *Tunnel) Lost() context.Context {
 // state lock, so reading the current events from inside one is safe.
 func watchProviderPath(monitor connect.MultiClientMonitor, lose context.CancelCauseFunc) func() {
 	var wasAdded atomic.Bool
-	return monitor.AddMonitorEventCallback(func(*connect.WindowExpandEvent, map[connect.Id]*connect.ProviderEvent, bool) {
+	return monitor.AddMonitorEventCallback(func(_ *connect.WindowExpandEvent, events map[connect.Id]*connect.ProviderEvent, _ bool) {
+		// Diffs may coalesce Added into Removed before this observer runs.
+		// Removed is emitted only for a client that occupied the live window;
+		// evaluation failures and declined candidates do not prove a path.
+		for _, event := range events {
+			if event != nil && (event.State.IsActive() || event.State == connect.ProviderStateRemoved) {
+				wasAdded.Store(true)
+			}
+		}
+		// A live replacement still outranks an older delivered removal.
 		for _, event := range monitor.ProviderEvents() {
 			if event.State.IsActive() {
 				wasAdded.Store(true)
@@ -481,12 +508,15 @@ func (self *Tunnel) HttpClient(timeout time.Duration) *http.Client {
 // this widens the closed set rather than opening it.
 func (self *Tunnel) HttpClientForHosts(timeout time.Duration, extraHosts []string) *http.Client {
 	resolver := &providerUrlResolver{
+		waitRoute: func(ctx context.Context) error {
+			return waitProviderRoute(ctx, self.lost, self.multiClient.Monitor())
+		},
 		query:        self.tun.DohCache().QueryResult,
 		dial:         self.tun.DialResolvedContext,
 		observations: self.dnsObservations,
-		pathState: func() dnsPathState {
+		routeState: func() dnsRouteSnapshot {
 			window, providers := self.multiClient.Monitor().Events()
-			return dnsPathFromMonitor(self.lost, window, providers)
+			return dnsRouteFromMonitor(self.lost, window, providers)
 		},
 	}
 	client := httpClientOverDialerWithResolver(self.tun.DialContext, resolver, self.pins, extraHosts, timeout)
@@ -504,6 +534,9 @@ func (self *Tunnel) Close() error {
 		// the multi-client, which is not the path being lost. Anything still
 		// holding Lost learns the tunnel is closed instead.
 		self.unwatch()
+		if self.unwatchSetup != nil {
+			self.unwatchSetup()
+		}
 		self.lose(ErrTunnelClosed)
 		ctx, cancel := context.WithTimeout(context.Background(), self.closeTimeout)
 		defer cancel()
@@ -517,6 +550,7 @@ func (self *Tunnel) Close() error {
 			self.clientStrategy.Close,
 			self.cancelLifecycle,
 		)
+		self.setup.finish(self.closeErr)
 	})
 	return self.closeErr
 }

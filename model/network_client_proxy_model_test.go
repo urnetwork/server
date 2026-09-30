@@ -63,15 +63,37 @@ func TestCreateProxyClient(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
-		ResetProxyClientIpv4(ctx)
+		const n = 1024
+		// This test exercises client creation, not the ten-million-address
+		// maintenance reset. The allocator starts below 31/32 of the sequence
+		// range, so this bounded tail has enough rows for every random start,
+		// even when all clients land on the same host and block.
+		firstSequence := ProxyClientIpv4Count - n
+		if firstSequence < (31*ProxyClientIpv4Count)/32 {
+			t.Fatal("fixture must cover every allocation start")
+		}
+		firstIpv4 := Ipv4ToInt(netip.MustParseAddr("10.255.0.1"))
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM proxy_client_ipv4`))
+			server.RaisePgResult(tx.Exec(ctx, `
+				INSERT INTO proxy_client_ipv4 (sequence_id, client_ipv4)
+				SELECT $1::bigint + i, $2::bigint + i
+				FROM generate_series(0, $3::integer - 1) AS fixture(i)
+			`, firstSequence, firstIpv4, n))
+		})
 
-		// create n proxy clients
-		n := 1024
+		type allocation struct {
+			host, block string
+			address     netip.Addr
+		}
+		allocations := map[allocation]bool{}
+		proxyIds := make([]server.Id, 0, n)
 		for i := range n {
 			proxyDeviceConfig := &ProxyDeviceConfig{}
 			proxyDeviceConfig.ClientId = server.NewId()
 			err := CreateProxyDeviceConfig(ctx, proxyDeviceConfig)
 			connect.AssertEqual(t, err, nil)
+			proxyIds = append(proxyIds, proxyDeviceConfig.ProxyId)
 
 			proxyClient, err := CreateProxyClient(
 				ctx,
@@ -84,6 +106,22 @@ func TestCreateProxyClient(t *testing.T) {
 			)
 			connect.AssertEqual(t, err, nil)
 			connect.AssertNotEqual(t, proxyClient, nil)
+			if proxyClient.WgConfig == nil {
+				t.Fatal("WireGuard-enabled client has no WireGuard config")
+			}
+			address := proxyClient.WgConfig.ClientIpv4
+			if !address.Is4() || !address.IsPrivate() {
+				t.Fatalf("allocated address is not private IPv4: %s", address)
+			}
+			ipv4 := Ipv4ToInt(address)
+			if ipv4 < firstIpv4 || firstIpv4+n <= ipv4 {
+				t.Fatalf("allocated address is outside the fixture: %s", address)
+			}
+			key := allocation{proxyClient.ProxyHost, proxyClient.Block, address}
+			if allocations[key] {
+				t.Fatalf("duplicate allocation for one host and block: %s", address)
+			}
+			allocations[key] = true
 
 			// the client config must keep an idle client sending so it detects a
 			// dead session (e.g. proxy instance restart) and re-handshakes
@@ -91,6 +129,17 @@ func TestCreateProxyClient(t *testing.T) {
 
 			glog.Infof("[ncpm][%d/%d]ip=%s\n", i+1, n, proxyClient.WgConfig.ClientIpv4)
 		}
+		var poolCount, clientCount int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `
+				SELECT
+					(SELECT count(*) FROM proxy_client_ipv4),
+					(SELECT count(*) FROM proxy_client WHERE proxy_id = ANY($1) AND client_ipv4 IS NOT NULL)
+			`, proxyIds).Scan(&poolCount, &clientCount))
+		})
+		connect.AssertEqual(t, poolCount, n)
+		connect.AssertEqual(t, clientCount, n)
+		connect.AssertEqual(t, len(allocations), n)
 	})
 }
 

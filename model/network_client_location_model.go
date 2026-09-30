@@ -6396,6 +6396,7 @@ func FindProviders2(
 
 	if 0 < len(locationIds) || 0 < len(locationGroupIds) {
 		observation.discovery = true
+		requestSettings := requestEgressIndexSettings()
 		// use a min block size to reduce db activity
 		var count int
 		if findProviders2.ForceCount {
@@ -6440,6 +6441,7 @@ func FindProviders2(
 		observation.enter("load_primary")
 		loadStartTime := time.Now()
 		clientScores, primaryCursor, err := loadPreferredClientScoresWithCursor(
+			requestSettings.NativeReaderEnabled,
 			findProviders2.ForceMinimum,
 			rankMode,
 			session.Ctx,
@@ -6533,6 +6535,12 @@ func FindProviders2(
 			now := server.NowUtc()
 			for _, clientScore := range clientScores {
 				if clientScore.EgressValidUntil == nil || !now.Before(*clientScore.EgressValidUntil) {
+					// Older native cache records may not also set Online. Their
+					// prior native admission also admitted online fallback. Expiry
+					// removes only native evidence; request filters still run below.
+					if clientScore.PassesMinimums[RankModeQuality] || clientScore.PassesMinimums[RankModeSpeed] {
+						clientScore.Online = true
+					}
 					clientScore.PassesMinimums = nil
 					clientScore.UrlProbeSuccessWeight = 1
 				}
@@ -6826,22 +6834,11 @@ func FindProviders2(
 				borrowedClientIds = append(borrowedClientIds, clientScore.ClientId)
 			}
 			if 0 < remainingCount() {
-				// the settings as a request path reads them: at most their own
-				// RequestSettingsMaxAge old, re-read by the first request past
-				// that age (two racing past it both read the file, which is
-				// harmless)
-				settingsSnapshot := requestEgressIndexSettingsSnapshot.Load()
-				if settingsSnapshot == nil || settingsSnapshot.settings.RequestSettingsMaxAge <= time.Since(settingsSnapshot.loadTime) {
-					settingsSnapshot = &egressIndexSettingsSnapshot{
-						settings: egressIndexSettings(),
-						loadTime: time.Now(),
-					}
-					requestEgressIndexSettingsSnapshot.Store(settingsSnapshot)
-				}
-				backfillTierOffset := settingsSnapshot.settings.BackfillTierOffset
+				backfillTierOffset := requestSettings.BackfillTierOffset
 
 				observation.enter("load_backfill")
 				otherClientScores, otherCursor, err := loadPreferredClientScoresWithCursor(
+					requestSettings.NativeReaderEnabled,
 					false,
 					otherRankMode,
 					session.Ctx,

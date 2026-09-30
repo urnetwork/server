@@ -809,7 +809,7 @@ func TestResidentAddForwardCloseJoinsConsumerAndDrainsQueue(t *testing.T) {
 	consumerEntered := make(chan struct{})
 	releaseConsumer := make(chan struct{})
 	var enterOnce sync.Once
-	forward, closeForward, err := resident.addForwardWithReceive(func([]byte) bool {
+	forward, closeForward, err := resident.addForwardWithReceive(func(context.Context, []byte) bool {
 		enterOnce.Do(func() {
 			close(consumerEntered)
 		})

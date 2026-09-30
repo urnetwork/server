@@ -42,7 +42,8 @@ var dnsPathLabels = [...]string{"unknown", "active", "forming", "platform_unreac
 // a probe. It retains no tunnel identities, DNS state, or admission budgets.
 // Safe for concurrent use; do not copy after first use.
 type DnsObservations struct {
-	counts [len(dnsResultLabels)][len(dnsPathLabels)]atomic.Uint64
+	counts      [len(dnsResultLabels)][len(dnsPathLabels)]atomic.Uint64
+	routeTiming [len(dnsResultLabels)][len(dnsRouteLabels)]dnsRouteTimingCell
 }
 
 // One fixed-cardinality row. Labels are defined here, never copied from an

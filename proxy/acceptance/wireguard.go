@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/userwireguard/conn"
@@ -169,7 +170,29 @@ func wireGuardProfileDNS(profile string) (netip.Addr, error) {
 
 type wireGuardDNSConn struct {
 	net.Conn
-	stopCancel func() bool
+	ctx             context.Context
+	stopCancel      func() bool
+	closedByContext atomic.Bool
+}
+
+func (c *wireGuardDNSConn) contextError(err error) error {
+	// gonet reports EOF when Close interrupts a blocked UDP read. Only our
+	// context-driven close changes that attribution; live-connection EOFs and
+	// successful I/O retain their original meaning (and byte counts).
+	if err != nil && c.closedByContext.Load() {
+		return c.ctx.Err()
+	}
+	return err
+}
+
+func (c *wireGuardDNSConn) Read(buffer []byte) (int, error) {
+	n, err := c.Conn.Read(buffer)
+	return n, c.contextError(err)
+}
+
+func (c *wireGuardDNSConn) Write(buffer []byte) (int, error) {
+	n, err := c.Conn.Write(buffer)
+	return n, c.contextError(err)
 }
 
 func (c *wireGuardDNSConn) Close() error {
@@ -184,11 +207,13 @@ type wireGuardDNSPacketConn struct {
 }
 
 func (c *wireGuardDNSPacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) {
-	return c.Conn.(net.PacketConn).ReadFrom(buffer)
+	n, address, err := c.Conn.(net.PacketConn).ReadFrom(buffer)
+	return n, address, c.contextError(err)
 }
 
 func (c *wireGuardDNSPacketConn) WriteTo(buffer []byte, address net.Addr) (int, error) {
-	return c.Conn.(net.PacketConn).WriteTo(buffer, address)
+	n, err := c.Conn.(net.PacketConn).WriteTo(buffer, address)
+	return n, c.contextError(err)
 }
 
 func (s *wireGuardStack) dialDNSContext(ctx context.Context, network, _ string) (net.Conn, error) {
@@ -209,7 +234,11 @@ func (s *wireGuardStack) dialDNSContext(ctx context.Context, network, _ string) 
 	if err != nil {
 		return nil, err
 	}
-	wrapped := &wireGuardDNSConn{Conn: connection, stopCancel: context.AfterFunc(ctx, func() { connection.Close() })}
+	wrapped := &wireGuardDNSConn{Conn: connection, ctx: ctx}
+	wrapped.stopCancel = context.AfterFunc(ctx, func() {
+		wrapped.closedByContext.Store(true)
+		connection.Close()
+	})
 	if _, datagram := connection.(net.PacketConn); datagram {
 		return &wireGuardDNSPacketConn{wireGuardDNSConn: wrapped}, nil
 	}
@@ -247,21 +276,27 @@ type wireGuardPacketStats struct {
 	DialFlow        wireGuardTCPFlow
 	EventSequence   uint64
 	RecentTCPEvents [wireGuardTCPPacketEventCount]wireGuardTCPPacketEvent
+	// The last resolved flow can continue emitting packets while a later dial
+	// is still resolving. Keep its accounting, but do not label it as the new
+	// request's target or TCP history.
+	DialAttemptSequence         uint64
+	ResolvedDialAttemptSequence uint64
 }
 
 const wireGuardTCPPacketEventCount = 32
 
 type wireGuardTCPPacketEvent struct {
-	EventSequence   uint64
-	Nanos           int64
-	Outbound        bool
-	SourcePort      uint16
-	DestinationPort uint16
-	TCPSequence     uint32
-	Acknowledgment  uint32
-	Flags           header.TCPFlags
-	PayloadBytes    int
-	ChecksumValid   bool
+	EventSequence       uint64
+	DialAttemptSequence uint64
+	Nanos               int64
+	Outbound            bool
+	SourcePort          uint16
+	DestinationPort     uint16
+	TCPSequence         uint32
+	Acknowledgment      uint32
+	Flags               header.TCPFlags
+	PayloadBytes        int
+	ChecksumValid       bool
 }
 
 // wireGuardOuterPacketStats is the encrypted UDP boundary immediately below
@@ -451,10 +486,25 @@ type wireGuardDiagnosticTransport struct {
 
 type wireGuardDiagnosticBody struct {
 	io.ReadCloser
-	stack  *wireGuardStack
-	before wireGuardPacketStats
-	bind   *wireGuardTrackingBind
-	outer  wireGuardOuterPacketStats
+	stack       *wireGuardStack
+	before      wireGuardPacketStats
+	bind        *wireGuardTrackingBind
+	outer       wireGuardOuterPacketStats
+	dialAttempt *atomic.Uint64
+}
+
+type wireGuardDialAttemptContextKey struct{}
+
+// Stats and packets are transport-wide. A request that never dialed, or whose
+// dial was superseded by a concurrent request, must not borrow that other
+// request's target/history. Mask only the copied diagnostic view, not accounting.
+func wireGuardRequestPacketStats(stats wireGuardPacketStats, attempt *atomic.Uint64) wireGuardPacketStats {
+	if sequence := attempt.Load(); sequence == 0 || sequence != stats.DialAttemptSequence {
+		stats.DialAddr = netip.Addr{}
+		stats.DialPort = 0
+		stats.RecentTCPEvents = [wireGuardTCPPacketEventCount]wireGuardTCPPacketEvent{}
+	}
+	return stats
 }
 
 func (b *wireGuardDiagnosticBody) Read(p []byte) (int, error) {
@@ -476,11 +526,13 @@ func (b *wireGuardDiagnosticBody) wrapError(err error) error {
 	return fmt.Errorf(
 		"%w; %s",
 		err,
-		wireGuardPacketTrace(b.before, b.stack.packetStats(), b.bind, b.outer, time.Now()),
+		wireGuardPacketTrace(b.before, wireGuardRequestPacketStats(b.stack.packetStats(), b.dialAttempt), b.bind, b.outer, time.Now()),
 	)
 }
 
 func (t *wireGuardDiagnosticTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	dialAttempt := new(atomic.Uint64)
+	request = request.WithContext(context.WithValue(request.Context(), wireGuardDialAttemptContextKey{}, dialAttempt))
 	before := t.stack.packetStats()
 	outerBefore := wireGuardOuterPacketStats{}
 	if t.bind != nil {
@@ -504,16 +556,17 @@ func (t *wireGuardDiagnosticTransport) RoundTrip(request *http.Request) (*http.R
 		}
 		if response != nil && response.Body != nil {
 			response.Body = &wireGuardDiagnosticBody{
-				ReadCloser: response.Body,
-				stack:      t.stack,
-				before:     before,
-				bind:       t.bind,
-				outer:      outerBefore,
+				ReadCloser:  response.Body,
+				stack:       t.stack,
+				before:      before,
+				bind:        t.bind,
+				outer:       outerBefore,
+				dialAttempt: dialAttempt,
 			}
 		}
 		return response, nil
 	}
-	return response, fmt.Errorf("%w; %s", err, wireGuardPacketTrace(before, after, t.bind, outerBefore, time.Now()))
+	return response, fmt.Errorf("%w; %s", err, wireGuardPacketTrace(before, wireGuardRequestPacketStats(after, dialAttempt), t.bind, outerBefore, time.Now()))
 }
 
 func wireGuardPacketTrace(
@@ -646,16 +699,17 @@ func (s *wireGuardStack) observePacket(packet []byte, outbound bool) {
 	if s.tcpPacketMatchesDial(tcpPacket, outbound) {
 		s.stats.EventSequence++
 		event := wireGuardTCPPacketEvent{
-			EventSequence:   s.stats.EventSequence,
-			Nanos:           now.UnixNano(),
-			Outbound:        outbound,
-			SourcePort:      tcpPacket.SourcePort,
-			DestinationPort: tcpPacket.DestinationPort,
-			TCPSequence:     tcpPacket.Sequence,
-			Acknowledgment:  tcpPacket.Acknowledgment,
-			Flags:           tcpPacket.Flags,
-			PayloadBytes:    payloadBytes,
-			ChecksumValid:   tcpPacket.ChecksumValid,
+			EventSequence:       s.stats.EventSequence,
+			DialAttemptSequence: s.stats.ResolvedDialAttemptSequence,
+			Nanos:               now.UnixNano(),
+			Outbound:            outbound,
+			SourcePort:          tcpPacket.SourcePort,
+			DestinationPort:     tcpPacket.DestinationPort,
+			TCPSequence:         tcpPacket.Sequence,
+			Acknowledgment:      tcpPacket.Acknowledgment,
+			Flags:               tcpPacket.Flags,
+			PayloadBytes:        payloadBytes,
+			ChecksumValid:       tcpPacket.ChecksumValid,
 		}
 		s.stats.RecentTCPEvents[(event.EventSequence-1)%uint64(len(s.stats.RecentTCPEvents))] = event
 	}
@@ -860,22 +914,32 @@ func wireGuardPacketStatsDelta(before, after wireGuardPacketStats, now time.Time
 		}
 		return detail
 	}
+	target := "unavailable"
+	if after.DialAttemptSequence == after.ResolvedDialAttemptSequence && after.DialAddr.IsValid() {
+		target = netip.AddrPortFrom(after.DialAddr, after.DialPort).String()
+	}
 	detail := fmt.Sprintf(
-		"target=%s out{%s} in{%s}",
-		netip.AddrPortFrom(after.DialAddr, after.DialPort),
+		"target=%s packet_scope=transport out{%s} in{%s}",
+		target,
 		format(subtractWireGuardDirection(before.Outbound, after.Outbound)),
 		format(subtractWireGuardDirection(before.Inbound, after.Inbound)),
 	)
 	if recent := formatWireGuardTCPEvents(before, after); recent != "none" {
-		detail += " tcp_recent=[" + recent + "]"
+		// This bounded history matches remote address/port, not a complete TCP
+		// tuple. Older local-port traffic to the same origin can be included.
+		detail += " tcp_recent_scope=resolved_remote_target tcp_recent=[" + recent + "]"
 	}
 	return detail
 }
 
 func formatWireGuardTCPEvents(before, after wireGuardPacketStats) string {
+	if after.DialAttemptSequence != after.ResolvedDialAttemptSequence {
+		return "none"
+	}
 	events := make([]wireGuardTCPPacketEvent, 0, len(after.RecentTCPEvents))
 	for _, event := range after.RecentTCPEvents {
-		if before.EventSequence < event.EventSequence && event.EventSequence <= after.EventSequence {
+		if before.EventSequence < event.EventSequence && event.EventSequence <= after.EventSequence &&
+			event.DialAttemptSequence == after.DialAttemptSequence {
 			events = append(events, event)
 		}
 	}
@@ -1018,6 +1082,13 @@ func (s *wireGuardStack) Close() {
 }
 
 func (s *wireGuardStack) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	s.statsLock.Lock()
+	s.stats.DialAttemptSequence++
+	dialAttempt := s.stats.DialAttemptSequence
+	if attempt, ok := ctx.Value(wireGuardDialAttemptContextKey{}).(*atomic.Uint64); ok {
+		attempt.Store(dialAttempt)
+	}
+	s.statsLock.Unlock()
 	if !strings.HasPrefix(network, "tcp") {
 		return nil, fmt.Errorf("unsupported WireGuard dial network %q", network)
 	}
@@ -1064,9 +1135,12 @@ func (s *wireGuardStack) DialContext(ctx context.Context, network, address strin
 		Port: uint16(port),
 	}
 	s.statsLock.Lock()
-	s.stats.DialAddr, _ = netip.AddrFromSlice(ipv4Address)
-	s.stats.DialPort = uint16(port)
-	s.stats.DialFlow = wireGuardTCPFlow{}
+	if s.stats.DialAttemptSequence == dialAttempt {
+		s.stats.ResolvedDialAttemptSequence = dialAttempt
+		s.stats.DialAddr, _ = netip.AddrFromSlice(ipv4Address)
+		s.stats.DialPort = uint16(port)
+		s.stats.DialFlow = wireGuardTCPFlow{}
+	}
 	s.statsLock.Unlock()
 	connection, err := gonet.DialContextTCP(ctx, s.stack, fullAddress, ipv4.ProtocolNumber)
 	if err == nil {

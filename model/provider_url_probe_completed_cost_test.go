@@ -15,6 +15,8 @@ type testingUrlCompletedPlanNode struct {
 	NodeType      string                        `json:"Node Type"`
 	RelationName  string                        `json:"Relation Name"`
 	IndexName     string                        `json:"Index Name"`
+	IndexCond     string                        `json:"Index Cond"`
+	Filter        string                        `json:"Filter"`
 	ActualRows    float64                       `json:"Actual Rows"`
 	ActualLoops   float64                       `json:"Actual Loops"`
 	RowsRemoved   float64                       `json:"Rows Removed by Filter"`
@@ -223,7 +225,7 @@ func TestUrlCompletedPriority100kBoundedPromotionAndClaimPlans(t *testing.T) {
 			})
 			plan := testingExplainUrlCompleted(t, providerUrlProbeDueSql(0, scenario.shardCount, true),
 				now, ProvideModePublic, scenario.limit, scenario.shardCount, 0,
-				ProviderEgressProbeSuccessTarget, now.Add(ProviderEgressProbeAttemptBackoff))
+				ProviderUrlProbeRunTarget, now.Add(ProviderEgressProbeAttemptBackoff))
 			empty := scenario.name == "all_future" || scenario.name == "empty_owned"
 			work, err := testingCheckUrlCompletedClaimPlan(plan, scenario.limit, scenario.shardCount, empty)
 			if err != nil {
@@ -243,7 +245,7 @@ func TestUrlCompletedPriority100kBoundedPromotionAndClaimPlans(t *testing.T) {
 				query = strings.Replace(query, " AND cycle.completed_priority_ready", "", 1)
 				query = strings.Replace(query, "cycle.next_attempt_at <= $1", "(cycle.next_attempt_at + interval '0 seconds') <= $1", 1)
 				mutant := testingExplainUrlCompleted(t, query, now, ProvideModePublic, scenario.limit, 1, 0,
-					ProviderEgressProbeSuccessTarget, now.Add(ProviderEgressProbeAttemptBackoff))
+					ProviderUrlProbeRunTarget, now.Add(ProviderEgressProbeAttemptBackoff))
 				mutantWork, mutantErr := testingCheckUrlCompletedClaimPlan(mutant, scenario.limit, 1, true)
 				if mutant.Plan.ActualRows != 0 || mutantWork.CycleExamined < 100000 || mutantErr == nil {
 					t.Fatalf("empty oracle did not reject actual zero-output population work: work=%+v err=%v plan=%+v", mutantWork, mutantErr, mutant)

@@ -128,15 +128,22 @@ func traceRequestProgressAt(ctx context.Context, now func() time.Time) (context.
 				progress.advance(requestPhaseAfterDial)
 			}
 		},
+		// The provider's DialTLSContext reports its owned handshake before
+		// net/http verifies the returned *tls.Conn with a second no-op
+		// handshake. Preserve the first interval across those duplicate events.
 		TLSHandshakeStart: func() {
 			progress.advance(requestPhaseTLS)
 			progress.stateLock.Lock()
-			progress.tlsStart = now()
+			if progress.tlsStart.IsZero() {
+				progress.tlsStart = now()
+			}
 			progress.stateLock.Unlock()
 		},
 		TLSHandshakeDone: func(_ tls.ConnectionState, err error) {
 			progress.stateLock.Lock()
-			progress.tlsEnd = now()
+			if progress.tlsEnd.IsZero() {
+				progress.tlsEnd = now()
+			}
 			progress.stateLock.Unlock()
 			if err == nil {
 				progress.advance(requestPhaseAfterTLS)

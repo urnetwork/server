@@ -91,6 +91,7 @@ func nativeTestPublishLocation(t testing.TB, location server.Id, mode RankMode, 
 // have the same deterministic late-native boundary and no shuffled escape.
 func TestNativeFindProvidersSkipsOnlineDilution(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		nativeTestEnableReader(t)
 		for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
 			location := server.NewId()
 			scores := map[ipFamilyFacet][]*ClientScore{}
@@ -131,6 +132,7 @@ func TestNativeFindProvidersSkipsOnlineDilution(t *testing.T) {
 // rejected row lies in the earlier facet, so this requires real extra pages.
 func TestNativeFindProvidersRefillsPastFilteredAllowance(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		nativeTestEnableReader(t)
 		for _, cause := range []string{"network", "hard", "explicit", "duplicate"} {
 			location, callerNetwork := server.NewId(), server.NewId()
 			scores := map[ipFamilyFacet][]*ClientScore{}
@@ -186,6 +188,7 @@ func TestNativeFindProvidersRefillsPastFilteredAllowance(t *testing.T) {
 // when its online union is much larger than the native compatibility cap.
 func TestNativeFindProvidersEmptyNativesKeepOnlineFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		nativeTestEnableReader(t)
 		location := server.NewId()
 		scores := map[ipFamilyFacet][]*ClientScore{}
 		for range 6000 {

@@ -21,10 +21,11 @@ import (
 
 const urlProbeCoverageFreshness = 3 * time.Minute
 const urlProbeCoverageResponseMax = 2 * 1024 * 1024
+const urlProbeCoverageCapability = 2
 
 var urlProbeFleetStates = [...]string{
 	"eligible", "due", "complete", "quota_complete", "secure_complete", "overdue",
-	"successes_needed", "security_pending", "security_unknown_targets",
+	"runs_needed", "successes_needed", "security_pending", "security_unknown_targets",
 	"warming", "uninitialized",
 }
 
@@ -109,11 +110,13 @@ func urlProbeCoverageQuery(environment string) string {
 		add(metric.name, metric.selector)
 		add(metric.name+"_time", "timestamp("+metric.selector+")")
 	}
-	success := "urnetwork_url_probe_outcomes_total{" + base + `,outcome="success"}`
-	add("success", "increase("+success+"[1h])")
-	add("success_time", "timestamp("+success+")")
-	add("success_samples", "count_over_time("+success+"[1h])")
-	add("success_early", "count_over_time("+success+"[5m] offset 55m)")
+	for _, outcome := range []string{"success", "error"} {
+		counter := "urnetwork_url_probe_outcomes_total{" + base + ",outcome=" + strconv.Quote(outcome) + "}"
+		add(outcome, "increase("+counter+"[1h])")
+		add(outcome+"_time", "timestamp("+counter+")")
+		add(outcome+"_samples", "count_over_time("+counter+"[1h])")
+		add(outcome+"_early", "count_over_time("+counter+"[5m] offset 55m)")
+	}
 	return strings.Join(parts, " or ")
 }
 
@@ -182,7 +185,7 @@ func parseUrlProbeCoverage(payload, environment string, now time.Time) ([]*urlPr
 		}
 		name := labels["monitor_metric"]
 		switch name {
-		case "start", "start_time", "configured", "configured_time", "capability", "capability_time", "observed", "observed_time", "oldest", "oldest_time", "cohort_started", "cohort_started_time", "success", "success_time", "success_samples", "success_early":
+		case "start", "start_time", "configured", "configured_time", "capability", "capability_time", "observed", "observed_time", "oldest", "oldest_time", "cohort_started", "cohort_started_time", "success", "success_time", "success_samples", "success_early", "error", "error_time", "error_samples", "error_early":
 		case "fleet", "fleet_time":
 			valid := false
 			for _, state := range urlProbeFleetStates {
@@ -237,7 +240,7 @@ func currentUrlProbeProcesses(processes []*urlProbeCoverageProcess, expected map
 		rangeOnly := !process.invalid && len(process.values) > 0
 		for name := range process.values {
 			switch name {
-			case "success", "success_samples", "success_early":
+			case "success", "success_samples", "success_early", "error", "error_samples", "error_early":
 			default:
 				rangeOnly = false
 			}
@@ -290,8 +293,8 @@ func urlProbeCoverageCensusValid(process *urlProbeCoverageProcess, now time.Time
 		}
 	}
 	quota, complete, security := values["fleet:quota_complete"], values["fleet:secure_complete"], values["fleet:security_pending"]
-	deficit := values["fleet:successes_needed"]
-	return values["cohort_started"] <= observed && values["fleet:complete"] == complete && complete <= quota && complete+security <= eligible &&
+	deficit := values["fleet:runs_needed"]
+	return values["fleet:successes_needed"] == deficit && values["cohort_started"] <= observed && values["fleet:complete"] == complete && complete <= quota && complete+security <= eligible &&
 		values["fleet:security_unknown_targets"] <= security && values["fleet:overdue"] <= eligible-complete &&
 		complete+values["fleet:overdue"]+values["fleet:warming"] == eligible &&
 		deficit >= eligible-quota && deficit <= 10*(eligible-quota) && quota-complete <= security
@@ -306,7 +309,7 @@ func evaluateUrlProbeCoverage(processes []*urlProbeCoverageProcess, expected map
 	unexpectedShard := false
 	for _, process := range current {
 		values := process.values
-		if values["capability"] != 1 || !urlProbeCoverageFresh(values["capability_time"], now) || values["configured"] != float64(shardCount) || !urlProbeCoverageFresh(values["configured_time"], now) {
+		if values["capability"] != urlProbeCoverageCapability || !urlProbeCoverageFresh(values["capability_time"], now) || values["configured"] != float64(shardCount) || !urlProbeCoverageFresh(values["configured_time"], now) {
 			continue
 		}
 		for name, value := range values {
@@ -339,47 +342,53 @@ func evaluateUrlProbeCoverage(processes []*urlProbeCoverageProcess, expected map
 	values := owners[0][0].values
 	eligible := values["fleet:eligible"]
 	complete := values["fleet:secure_complete"]
-	observed := fmt.Sprintf("eligible=%.0f quota_complete=%.0f secure_complete=%.0f due=%.0f overdue=%.0f warming=%.0f uninitialized=%.0f successes_needed=%.0f security_pending=%.0f security_unknown_targets=%.0f oldest_due_seconds=%.1f",
-		eligible, values["fleet:quota_complete"], complete, values["fleet:due"], values["fleet:overdue"], values["fleet:warming"], values["fleet:uninitialized"], values["fleet:successes_needed"], values["fleet:security_pending"], values["fleet:security_unknown_targets"], values["oldest"])
+	observed := fmt.Sprintf("eligible=%.0f quota_complete=%.0f secure_complete=%.0f due=%.0f overdue=%.0f warming=%.0f uninitialized=%.0f runs_needed=%.0f security_pending=%.0f security_unknown_targets=%.0f oldest_due_seconds=%.1f",
+		eligible, values["fleet:quota_complete"], complete, values["fleet:due"], values["fleet:overdue"], values["fleet:warming"], values["fleet:uninitialized"], values["fleet:runs_needed"], values["fleet:security_pending"], values["fleet:security_unknown_targets"], values["oldest"])
 	if eligible > complete {
 		tier, sustain := tierWarn, 1
 		if values["fleet:overdue"] >= 0.10*eligible {
 			tier, sustain = tierPage, 2
 		}
 		findings = append(findings, urlProbeCoverageFinding("url-probe-coverage-deficit", tier, sustain, observed,
-			"Eligible providers lack ten successful URL measurements in the rolling four-hour window or still have unresolved TLS exceptions.",
-			"Every currently eligible provider should meet the rolling ten-success quota and have no TLS exceptions. WARN for any deficit; PAGE when at least 10% are overdue, sustained twice."))
+			"Eligible providers lack ten accepted measured URL runs, success or failure, in the rolling four-hour window or still have unresolved TLS exceptions.",
+			"Every currently eligible provider should meet the rolling ten-run quota and have no TLS exceptions. WARN for any deficit; PAGE when at least 10% are overdue, sustained twice."))
 	}
 	if values["fleet:security_unknown_targets"] > 0 {
 		findings = append(findings, urlProbeCoverageFinding("url-probe-security-recovery-unknown", tierWarn, 1, observed,
 			"Legacy TLS quarantine lacks a trustworthy destination for a same-URL recovery check.",
 			"No unresolved legacy security exception with unknown URL identity; unrelated successes or elapsed time cannot clear one."))
 	}
-	successesPerHour := 0.0
+	runsPerHour := 0.0
 	rateComplete := len(current) == len(expected)
 	for _, process := range current {
 		values := process.values
-		successes, present := values["success"]
-		if !present || values["capability"] != 1 || !urlProbeCoverageFresh(values["capability_time"], now) || !urlProbeCoverageFresh(values["success_time"], now) || values["success_samples"] < 30 || values["success_early"] < 1 || float64(now.Unix())-values["start"] < time.Hour.Seconds() {
+		if values["capability"] != urlProbeCoverageCapability || !urlProbeCoverageFresh(values["capability_time"], now) || float64(now.Unix())-values["start"] < time.Hour.Seconds() {
 			rateComplete = false
 			continue
 		}
-		successesPerHour += successes
+		for _, outcome := range []string{"success", "error"} {
+			runs, present := values[outcome]
+			if !present || !urlProbeCoverageFresh(values[outcome+"_time"], now) || values[outcome+"_samples"] < 30 || values[outcome+"_early"] < 1 {
+				rateComplete = false
+				continue
+			}
+			runsPerHour += runs
+		}
 	}
 	if eligible > 0 && rateComplete && len(gaps) == 0 {
 		required := 10 * eligible / 4
-		if successesPerHour < required {
+		if runsPerHour < required {
 			projection := "unbounded"
-			if successesPerHour > 0 {
-				projection = fmt.Sprintf("%.2f", 10*eligible/successesPerHour)
+			if runsPerHour > 0 {
+				projection = fmt.Sprintf("%.2f", 10*eligible/runsPerHour)
 			}
 			findings = append(findings, urlProbeCoverageFinding("url-probe-throughput-deficit", tierWarn, 2,
-				fmt.Sprintf("%s accepted_successes_per_hour=%.1f required_successes_per_hour=%.1f projected_quota_hours=%s", observed, successesPerHour, required, projection),
-				"Acknowledged successful URL throughput is below the necessary rate for the rolling fleet target.",
-				"At least 10 times the eligible provider count per four hours in accepted URL successes; aggregate rate is necessary but cannot prove per-provider fairness."))
+				fmt.Sprintf("%s acknowledged_measured_runs_per_hour=%.1f required_measured_runs_per_hour=%.1f projected_quota_hours=%s", observed, runsPerHour, required, projection),
+				"Acknowledged measured URL throughput, success plus error, is below the necessary rate for the rolling fleet target.",
+				"At least 10 times the eligible provider count per four hours in accepted measured URL runs; aggregate acknowledgement rate is necessary but cannot prove durable unique coverage or per-provider fairness."))
 		}
 	} else if eligible > 0 && !rateComplete {
-		gaps = append(gaps, "hourly_success_range_or_expected_process_coverage_incomplete")
+		gaps = append(gaps, "hourly_measured_run_ranges_or_expected_process_coverage_incomplete")
 	}
 	if len(gaps) > 0 {
 		sort.Strings(gaps)
@@ -393,11 +402,11 @@ func urlProbeCoverageFinding(class, tier string, sustain int, observed, symptom,
 		probeId: "runtime/url-probe-coverage", tier: tier, class: class,
 		target: "provider-url-fleet", frame: "rolling-four-hours", sustain: sustain,
 		symptom: symptom, baseline: baseline, observed: observed,
-		mechanism: "The URL workflow serves the same reliability and ARIN-risk eligible cohort as FP2. Accepted successes, not attempted requests or legacy full/blackhole counters, replenish its rolling quota; TLS recovery remains independent of content quality.",
+		mechanism: "The URL workflow serves the same reliability and ARIN-risk eligible cohort as FP2. Accepted measured success and failure, not attempted requests, setup-only turns or legacy full/blackhole counters, replenish its rolling quota; TLS recovery remains independent of content quality.",
 		evidence:  "One atomic global census from the uniquely observed shard-zero owner; process identities, underlying scrape times, and durable observation time are checked independently. Global fleet gauges are never summed across processes.",
 		context:   "Newly eligible providers can need warmup; ordinary URL failure does not independently exclude online fallback. Hourly rate is a forecast and does not prove unique provider coverage. Missing/ambiguous sources remain unobservable. These thresholds are alerts, not hard service limits.",
 		action:    "Compare fixed-slot due selection and oldest-work fairness, private tunnel/DNS/HTTP stages, accepted receipt rate, and PG CPU/query work. Check URL catalog compatibility and per-URL TLS recovery. Do not relabel local setup errors as provider failures or weaken the common reliability/risk/security gates.",
-		verify:    "Require fresh unique owners for every configured shard, coherent complete censuses across two cadences, and rolling per-provider quota recovery. Confirm FP2 online backfill and normal PG CPU independently; a fast aggregate rate or ten historical successes is insufficient.",
+		verify:    "Require fresh unique owners for every configured shard, coherent complete censuses across two cadences, and rolling per-provider quota recovery. Confirm FP2 online backfill and normal PG CPU independently; a fast aggregate rate or ten historical runs is insufficient.",
 		playbook:  "SIGNALS.md §2.19f",
 	}
 }

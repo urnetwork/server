@@ -306,6 +306,16 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "URL policy version and exact selected-success index", requiredVersion: 729, rowColumn: 140},
 	{name: "connection ARIN lookup provenance", requiredVersion: 730, rowColumn: 141},
 	{name: "network_client_location_reliability_arin_exceptions", requiredVersion: 731, rowColumn: 142},
+	{name: "URL completion receipts and exact readiness invalidation", requiredVersion: 732, rowColumn: 143},
+	{name: "provider_probe_cycle_completed_ready", requiredVersion: 733, rowColumn: 144},
+	{name: "provider_probe_cycle_slot_completed_ready", requiredVersion: 734, rowColumn: 145},
+	{name: "provider_probe_cycle_completed_waiting", requiredVersion: 735, rowColumn: 146},
+	{name: "provider_probe_cycle_slot_completed_waiting", requiredVersion: 736, rowColumn: 147},
+	{name: "provider_probe_cycle_completed_expiry", requiredVersion: 737, rowColumn: 148},
+	{name: "provider_probe_cycle_slot_completed_expiry", requiredVersion: 738, rowColumn: 149},
+	{name: "transfer_balance_active_network_end_start_id", requiredVersion: 739, rowColumn: 150},
+	{name: "observed reliability counts and exact checkpoint invalidation", requiredVersion: 740, rowColumn: 151},
+	{name: "selected-policy measured URL run quota index", requiredVersion: 741, rowColumn: 152},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -2021,7 +2031,10 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		             AND definition = 'CREATE INDEX network_client_location_reliability_arin_exceptions ON public.network_client_location_reliability USING btree (client_id) INCLUDE (arin_risk, arin_non_quality) WHERE (arin_risk OR arin_non_quality)'
 		             AND predicate_definition = '(arin_risk OR arin_non_quality)'
 		             AND indisvalid AND indisready
-		       )
+		       ),
+		       `+strings.Join(migrationUrlCompletionArtifactQueries, ",\n")+`,
+		       `+migrationReliabilityObservationArtifactQuery+`,
+		       `+migrationUrlProbeMeasuredQuotaArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {

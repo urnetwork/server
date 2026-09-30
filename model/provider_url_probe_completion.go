@@ -103,12 +103,13 @@ func CompleteProviderUrlProbeRun(ctx context.Context, completion ProviderUrlProb
 				THEN LEAST(COALESCE(completed_next_expiry_at,$5),$5) ELSE completed_next_expiry_at END,
 			completed_priority_ready=false,
 			next_attempt_at=CASE WHEN $6 AND $7<>'' AND cycle.claim_ordinal=$2
-				AND (cycle.success_count<$8 OR (`+providerHasUrlSecurityExceptionSql("cycle.client_id")+`))
+				AND ((SELECT run_count<$8 FROM (`+providerUrlProbeRunWindowSql("cycle.client_id", "$3")+`) AS recent)
+					OR (`+providerHasUrlSecurityExceptionSql("cycle.client_id")+`))
 				AND (cycle.latest_result_at IS NULL OR cycle.latest_result_at<$3)
 				THEN `+providerUrlProbePacedAttemptSql("cycle", "$3", "0")+` ELSE cycle.next_attempt_at END
 			WHERE cycle.client_id=$1`,
 			completion.ClientId, completion.ClaimOrdinal, effectiveAt, increment,
-			effectiveAt.Add(ProviderUrlProbeCompletedWindow), completion.AllowPacing, completion.ProbeFailure, ProviderEgressProbeSuccessTarget))
+			effectiveAt.Add(ProviderUrlProbeCompletedWindow), completion.AllowPacing, completion.ProbeFailure, ProviderUrlProbeRunTarget))
 		receipt = &ProviderUrlProbeCompletionReceipt{CompletedAt: effectiveAt, ReceivedAt: receivedAt}
 	})
 	if returnErr != nil || receipt == nil {

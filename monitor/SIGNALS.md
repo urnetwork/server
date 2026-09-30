@@ -1572,6 +1572,22 @@ new accounting or reservation failure. Worker absence alone cannot close a
 wait, write-amplification, capacity, or FP2 availability finding; reduced calls
 caused by failed or missing traffic cannot serve as the healthy control.
 
+The 2026-09-28 23:33:58–23:34:06Z source bracket measured 36.84 PostgreSQL
+core-equivalents but retained only 16.77 cores in stable child PIDs, with
+174 exits and 176 new children. No statement retained the same query hash
+and start across the activity endpoints. Hundreds of young idle transactions
+were positively matched to the ordinary pgx repeatable-read `BEGIN`; neither
+their last statement nor the unmatched CPU identifies a query CPU owner.
+A separate matched-reset statement interval at 23:42:01–09Z identified the
+still-executing pre-`e2356969` settlement join by its exact normalized source
+hash: 1,867 calls, 1,921 rows and 51.316 summed execution seconds. The two
+`CreateCompanionTransferEscrow` origin lookups separately made 135,972 and
+130,976 calls, returning 4,997 and two rows. These are observed work rates,
+not CPU shares or proof of an emitting artifact. Raw/running reliability
+recorded no completed work in that short interval; this does not exclude
+work outside it or an uncompleted long statement. Preserve the high CPU
+finding and require deployed-source and successful-traffic controls.
+
 The 2026-09-26 discriminator established the source and threshold boundary.
 The inventory-owned active PostgreSQL service had CPU accounting enabled and
 a numeric counter with a stable invocation. Direct cgroup intervals measured
@@ -1926,6 +1942,19 @@ the generic aggregate and owner PAGEs plus the separate accounting failure.
 Prove the emitting artifact and inspect preserved disputed reports/reservations;
 do not bypass the escrow guard, infer terminal progress from raw close counts,
 or connect the error to a full-probe pass without a same-attempt discriminator.
+
+The 2026-09-29 00:52Z bounded Taskworker Loki control confirmed that error
+class again: 64 structured records in a capped 128-record slice contained the
+ForceClose frame and exact escrow-insufficiency `errors.errorString`. A
+separate batch-only query found the same hashed container stream reporting
+25,000 terminal verified closes, 129 unresolved accounting rejections, zero
+quarantines, and a 2,936ms retry delay about 0.25s later. Positive cleanup
+progress coexists with the accounting failure; the full-batch retry band uses
+verified progress, not rejected rows. The cap, duplicate diagnostics and Loki
+visibility gaps prevent a unique-contract count or negative inference. A
+container-stream match does not independently attest a PID/image or attribute
+database CPU. Preserve the accounting rejection and progress as separate facts;
+do not fund, bypass, or quarantine from log counts alone.
 
 The 2026-09-23 Main Taskworker sample also exposed a versioned-root
 attribution false positive: `server/v2026.HandleError` was counted as the
@@ -5470,12 +5499,26 @@ five minutes earlier, reset witnesses and range-presence witnesses. A process
 contributes deltas only when all eleven children and process-start fields are
 paired, source-fresh (90s, at most 30s future clock skew), from the same scrape
 at each bound, monotonic and reset-free. New/mixed/transient generations, old
-producers, disabled/unenrolled desired slots and missing children stay unknown.
-The query permits at most 32 desired slots, four generations per slot, 8,192
+producers, temporarily excluded/unenrolled desired slots and missing children
+stay unknown.
+The query permits at most 32 expected slots, four generations per slot, 8,192
 rows and 4MiB; one gateway, a 15s transport timeout, no retry or failover.
 Schema/warnings/nonfinite values/duplicate rows fail closed without exposing
 response labels or bodies. Positive complete-process deltas survive a missing
 sibling, but are explicitly an observed-process subset, not fleet totals.
+
+Expected API slots are the active service-placement host/block identities after
+omitting hosts explicitly disabled in monitor inventory. An intentionally offline
+host is outside this observation cohort until re-enabled; this does not certify
+that host's service or restore its product supply. Temporary observation exclusions
+and unenrolled desired hosts remain expected and unknown. Re-enabling a host
+immediately restores every configured block requirement, which must acquire its
+own fresh paired window. Completeness is checked by exact enabled host/block
+identity, never by comparing aggregate process counts: duplicate generations cannot
+replace a missing enabled slot. An empty expected cohort remains unavailable.
+The shared scope applies to provider-selection (§2.9c) as well; it preserves each
+signal's generation/schema checks, traffic floors, failure thresholds and partial
+positive-subset findings. Global service-placement configuration remains intact.
 
 - PAGE `provider-picker-effective-empty`: at least 20 successful initial GET
   outcomes in five minutes, at least 80% with no rendered initial rows.
@@ -5489,6 +5532,21 @@ sibling, but are explicitly an observed-process subset, not fleet totals.
 - A legitimate empty search or direct lookup is diagnostic, not a supply PAGE.
   Nonempty direct output proves only a syntactically accepted ID, not a live
   provider. Search misses do not invalidate a separately healthy initial list.
+
+The 2026-09-28 observer control found an unreachable first services gateway
+and missing local SSH identity/host-key setup for reachable siblings. On an
+inventory-authorized sibling, strict authenticated SSH then returned a healthy
+`vector(1)` and the exact bounded picker query (HTTP 200, 1,200 vector rows,
+no warnings). This establishes an observation-path defect, not empty provider
+supply or Mimir failure. Picker now tries the existing authorized services
+gateways in order, retaining the identical query, evaluation time and desired
+API inventory. Disabled and operator-excluded hosts remain uncontacted. Only
+a transport failure permits the next gateway; a received malformed, partial
+or stale response remains unknown under the existing reducer. Healthy and
+genuinely empty sibling controls preserve their distinct verdicts, and loss of
+every gateway cannot clear visibility. Correct observer key permissions and
+host-key trust before promotion; a reachable socket alone proves neither
+authenticated transport nor complete process coverage.
 
 False positives: intentional caller-country exclusions can produce a truly
 empty initial list without global supply loss; invalid queries and legitimate
@@ -5606,6 +5664,77 @@ filters establish a contribution rather than the sole cause or number removed.
 Missing cache evidence takes precedence over filter attribution. Destination-tail
 exclusions are compatible with healthy-window refills but do not prove health;
 client-ID exclusions combine runtime removals and durable policy.
+
+Cache-expiry qualifier (2026-09-28): an admitted native cache record may carry
+the older `Online=false` encoding. Clearing its native flags when the URL
+evidence expires or its clock is absent previously also removed online
+fallback, so a fresh cache alone did not prove request availability. The
+request now preserves online membership from either previously admitted native
+mode before clearing the expired flags. A record with neither native nor online
+admission remains excluded; current hard, network, family and explicit filters
+still apply. Deterministic controls cover both requested modes, fresh native
+evidence, expired and missing clocks, already-online and never-admitted records.
+This establishes a cache-consumption mechanism, not its prevalence on Main;
+verify the serving API artifact and actual request boundary separately.
+
+Published-empty qualifier (2026-09-28/29): schema-2 `cache_empty` is zero
+decoded candidates loaded before request-time expiry, hard, network, family
+or explicit filtering; those later filters do not explain this reason by
+themselves. A bounded Main control at 00:03:42–53Z read only count documents,
+aliases and TTLs for the known US target. Both normal and forced Quality/Speed
+had present, encoded-empty dualstack and IPv6-only arrays; the IPv4 control
+had 73,259 candidates (the older forced-Speed publication had 73,008).
+US-caller aliases selected the baseline and the schema markers stayed ready,
+so absent duplicate caller and legacy keys were expected, not missing supply.
+This establishes that target's published family boundary, not fleet absence,
+native membership, a coherent whole-cache generation, or the target of every
+US-caller request in §2.9a. Trace stored family proof and the publisher cohort
+before attributing an omission. The earlier direct-overlay Redis timeout was
+an observer-path failure; an inventory-bound, strict SSH gateway route supplied
+the successful control without changing Redis. An absent native-source schema
+metric on the observed API processes remains instrumentation/deployment
+uncertainty, not zero native-source events.
+
+Native-reader activation boundary (2026-09-29 source correction):
+`provider.yml` → `egress_index.native_reader_enabled` defaults to false;
+missing, unreadable or malformed configuration keeps union-cache reads. A
+request captures the cached setting once for both primary and alternate loads;
+refreshing it between those loads cannot mix activation states. An explicit
+true enables the existing native-page, partial-source and online-fallback
+behavior. Forced-minimum requests still use their legacy cache path. The
+unlabeled `urnetwork_findproviders2_native_reader_enabled` gauge reports the
+same effective local-config snapshot (at most one minute old), including on
+quiet API processes. It performs no provider-storage read. Gauge absence is
+unknown capability/visibility, not disabled; gauge one is configured activation,
+not proof of complete publication, native supply or successful requests. An
+in-flight request may finish with its prior snapshot after the gauge changes.
+Existing native-source outcome counters can also describe bucket membership
+from compatibility union reads while the activation gauge is zero.
+
+Roll out the receipt-capable API with this setting false, converge its writers,
+then roll out completion-capable Taskworkers and attest complete, fresh native
+target/facet manifests before separately activating API readers. Keep the
+completion-priority epoch disabled until writer convergence and a full four-hour
+delivered receipt window are independently proven. Do not infer that window
+from an old epoch or infer native activation from the diagnostic schema gauge.
+The flag adds no migration or detector-threshold change. Local causal controls
+cover missing/false/malformed settings, explicit true, both config transitions
+after a real primary read, forced minimum, both rank modes, unchanged online
+availability and one fixed metric cell. They establish the rollout boundary,
+not deployment or production recovery.
+
+At 00:15:20Z a separate indexed prefix control limited discovery to the first
+4,096 valid, connected client IDs before filtering the US target. Its 3,136
+target rows contained 3,048 selectable top-level candidates and zero stored
+IPv6 proofs. All 3,144 sampled connections had legacy intent, including 16
+IPv6 sockets. The owning rule deliberately counts intent zero as legacy v4;
+IPv6 requires both observed family six and declared intent six. This supports
+an upstream intent boundary in that sample, not a cache publication omission
+or a complete US-family census. The ID prefix is biased. The uniform update
+block represents 23:57Z, the job's captured input time rather than its commit;
+18 minutes of age alone does not prove a stall under its current scheduling
+contract of 30 minutes after completion. Distinguish legacy clients, provider
+standby transports and the effective serving artifact before changing proof.
 
 Exclusion-budget qualifier (2026-09-27 source correction): request-time
 exclusions used to consume the fixed sampled-row budget before selection. A
@@ -6755,6 +6884,21 @@ availability evidence, not proof of Internet/DNS/URL egress or native Quality.
 The URL success-ratio and non-quality classification gates remain separate;
 this freshness diagnostic does not conflate them or infer false positives.
 
+The 2026-09-28 deterministic writer-to-FP2 control established a separate
+correctness failure: usable all-invalid observations produced no score rows,
+so the intentional missing-history neutrality admitted measured failures.
+The corrected writer retains an observed-row count and publishes an explicit
+zero for each such client window. Truly absent usable history stays missing;
+invalid rows do not dilute another client's valid shared-IP numerator, and
+network payout sums keep their existing valid-only semantics. Migration 740
+and an observation-aware re-anchor precede use of these counts. A separate
+checkpoint token exposes a legacy writer even when its degraded-block token
+is current. Missing or unchanged observation tokens force repair independently
+of optional maintenance deferral. This local RED-to-GREEN control proves the
+writer mechanism, not its prevalence on Main. Fresh physical score timestamps
+alone cannot establish this semantic correction: require exact writer
+ancestry and current observation checkpoints after rollout.
+
 `boundary=running-window-lag` means the sample's score and running markers
 have not caught up; `score-publication-lag` means running state advanced past
 the oldest sampled score. A fresh claim plus lease is labelled active work,
@@ -7180,6 +7324,43 @@ context, not a promise that every wait woke from Redis. Mixed old/new writers
 can fail to publish without incrementing the new metric; the timed and final
 database reads preserve correctness, and exact artifact inventory remains
 necessary to close that false negative.
+
+The 2026-09-28 23:49–23:52Z fixed-label controls attributed the observed
+amplification to 20 API processes: about 3.155 million fallback and 0.501
+million deadline lookups in five minutes, about 4.32 lookups per completed
+request, and only one event lookup. Connect and Taskworker exported initialized
+zero activity. A separate notification control found about 105,682 API
+publications and 2.114 million subscriber deliveries, with all measured loss
+classes and `unowned` zero and no resets. Subscriber deliveries are broadcast
+copies, not unique origins. This rejects measured notification loss as the
+explanation for those API fallback counts, while leaving unmatched/absent
+origin waits, request resolution and the five unobserved API slots open.
+Do not remove authoritative fallback or broaden waits from this aggregate;
+reconcile the exact failure cohorts and source-matched SQL work first.
+
+At 2026-09-29 00:32Z the fixed joint detail reconciled to about 916,024
+original non-companion failures over five minutes on the 20 observed API
+processes. About 93.26% were public stream fallbacks from active top-level
+non-prober sources to active derived **egress-prober destinations**; only
+about two failures had originally requested a companion. Most of that prober
+destination cohort omitted `sender_role`, which proves no producer identity
+or recovery-code ancestry. This narrows the measured owner boundary without
+joining a request to a client, proving a retry defect, or assigning CPU.
+
+The 00:37Z Taskworker control found successful internal mint and retirement
+calls with zero retirement errors/timeouts/cancellations on all eight observed
+processes. Retirement success follows the model's deactivation transaction;
+the counter cannot observe a transport/client/OOB drain that never reaches
+that call. A plan-gated oldest/newest 128-client sample at 00:48Z found 127 old
+active derived prober clients without connected rows, with median auth age
+24.90 days, alongside newly created clients without connections yet. Current
+source and the reported Taskworker base both specify a 30-day `auth_time`
+retention window for disconnected children; the modified binary's effective
+delta remains unknown. Those old rows predate all Taskworker starts recorded
+in the 00:21Z witness. They are retained residue, not proof that the idle reaper
+or current retirement failed. The prefixes are biased and not a population
+census or a join to the failing-request cohort. Do not shorten retention, skip
+cleanup joins, or broaden origin waits from these aggregates.
 
 Retain an immediate lookup, a fast first retry, event/ack-triggered rechecks,
 bounded timed fallback, and a final authoritative lookup at the existing
@@ -8478,6 +8659,49 @@ DNS flow. Compare same-generation Connect `tun/address` resolver outcomes
 and sampled IPv4 DoH dial outcomes to discriminate transport silence from
 authoritative DNS negatives, then inspect auth/provide-registration and
 return-contract controls; neither signal alone convicts a provider.
+
+The same observer also exposes
+`urnetwork_egress_probe_dns_route_waves_total{result,route}` (35 cells) and
+`urnetwork_egress_probe_dns_route_seconds_total{result,route,phase}` (105 cells).
+These use the five existing result labels. `route` is `unknown`, `stable_route`,
+`current_route_admitted`, `unready_endpoints`, `changed_or_ambiguous`, `lost`, or
+`closed`; `phase` is `before_current_admission`, `after_current_admission`, or
+`unattributed`. All zero cells are exported. An absent family is unavailable
+instrumentation. The new counters retain no identity or endpoint labels and
+add no logs, callbacks, polling, shared cache or routing/admission behavior.
+
+Each wave brackets its own `QueryResult` with a monotonic clock and synchronous
+same-tunnel monitor snapshots. A stable single route requires the same local
+client and unchanged nonzero `Added.EventTime` at both endpoints, with admission
+no later than wave start. A newly observed single route whose admission clock
+falls inside the wave permits a split around that **current route's** admission.
+It does not prove that no earlier transient route existed. Two unready endpoints
+likewise do not prove uninterrupted unavailability between snapshots. Changed
+or multiple routes, missing/contradictory clocks, loss and closure leave time
+unattributed. Metadata-only updates preserve admission time. The deterministic
+warm, cold-to-ready, never-ready, transient, lost/closed and ambiguous controls
+preserve the resolver's outcome, retry and target-socket admission behavior.
+
+After-admission time is still private-tunnel DNS/cache/transport work, including
+scheduling, queueing and provider forwarding; it is not pure DoH wire latency.
+The wave clock excludes retry jitter and target TCP/TLS/HTTP work, while the
+outer request's `dns_ms` includes the whole resolution chain. Independent atomic
+count/time cells require the same complete process window for comparisons.
+Deployment and fresh paired data are needed to discriminate setup from work
+with an admitted route; source tests do not establish Main's latency mechanism,
+provider blame, lower probe occupancy or recovered URL quota.
+
+The 2026-09-29 00:37Z source-fresh eight-Taskworker control found about 5,774
+`active/answer` waves and 1,874 `active/timeout` waves over five minutes, plus
+413 `forming/timeout` and 952 `provider_unresponsive/timeout`, with no resets.
+This establishes logical DNS timeouts alongside a positive answer control;
+individual racing DoH dials alone could not establish that boundary. An
+`active` snapshot still proves route admission rather than successful return
+traffic. Successful internal credential retirement in the same aggregate
+window neither joins a particular wave nor proves every earlier cleanup
+owner terminated. Preserve missing request/process joins and provider
+attribution as unknown; this control does not authorize off-tunnel DNS,
+larger waits, or a provider verdict.
 
 `urnetwork_egress_probe_auth_requests_total{phase,result}` is the opt-in
 control-plane discriminator for those probe tunnels. It exports all 36 fixed
@@ -10262,6 +10486,25 @@ proven non-probe traffic. Absence of the new collector or producer option is
 unknown attribution, not zero probe load. Tests pin marker confinement,
 retry/cleanup ownership and unchanged authentication rejection.
 
+Taskworker passes using the explicit local OOB executor preserve the current
+child-JWT authentication and normal controller/accounting path but issue no
+Connect-control HTTP request for those operations. Their frame observations
+use `ingress=internal` on the Taskworker process; they are not API HTTP or
+`probe_claimed` samples. Standalone probes and SDK callers with a nil executor
+retain HTTP. The same pass owns a bounded contract-origin notifier until every
+tunnel, caller-context cleanup request, callback and derived retirement is
+terminal; parent cancellation does not detach that publisher beyond the pass.
+
+False-positive qualifier: falling API probe-claimed load after this explicit
+mode change is expected boundary relocation and does not prove reduced DNS
+latency, more accepted measurements or resolved fleet coverage. False-negative
+qualifier: an API-only frame query omits these Taskworker internal frames; a
+quiet API probe counter cannot establish absence of probe control work. Require
+exact executable/mode and separate Taskworker process evidence before comparing
+these denominators. Local parity/performance controls are not production
+accepted-result rate evidence; buffered successes and failures count toward
+quota only after durable acceptance.
+
 Correlate exact source/image with probe internal mint, same-tunnel DNS path
 states, provide-secret registration/ping, guard outcomes and durable measured
 coverage. Setup failures reported as `provider_unresponsive` are not proof of
@@ -10270,7 +10513,7 @@ this signal. Recovery requires two clean fresh cadences and improving
 acknowledged **distinct** measured providers; the four-hour fleet-scan goal
 is not satisfied by fewer RPCs, successful auth or buffered worker completions.
 
-### 2.19f Rolling URL-probe coverage and accepted-success capacity
+### 2.19f Rolling URL-probe coverage and measured-run capacity
 Probe: `url-probe-coverage`
 
 This is the URL-only `FP2FIX.md` contract, not a renamed legacy cheap/full
@@ -10294,31 +10537,46 @@ unknown starts, tied process generations, and unavailable transport remain
 unobservable. Do not export instance IDs or provider/destination identities.
 
 Range-query results can survive a retired process after its instant start and
-gauges disappear. A valid process containing only historical success
+gauges disappear. A valid process containing only historical success/error
 increase/sample-count fields is therefore excluded from current-owner
-selection, and its successes are never borrowed by a successor. Any instant
+selection, and its outcomes are never borrowed by a successor. Any instant
 family without a trustworthy start, malformed observation, duplicate or
-ambiguous current source remains unobservable. This distinction does not reduce
-desired placement to enabled placement: excluded desired slots still prevent a
-complete hourly fleet-rate verdict, while a uniquely owned coherent shard-zero
-census can independently establish the quota deficit.
+ambiguous current source remains unobservable. Every enabled expected slot
+must have a current owner for a complete hourly fleet-rate verdict, while a
+uniquely owned coherent shard-zero census can independently establish the quota
+deficit. Disabled edge5 remains outside the expected Main slot set.
 
-The capable producer exposes `urnetwork_url_probe_capability=1`, an explicit
+The capable producer exposes `urnetwork_url_probe_capability=2`, an explicit
 `urnetwork_url_probe_configured_shards`, and one
 `urnetwork_url_probe_shard_observed_timestamp_seconds{shard}` for each actual
 task owner. Require exactly one fresh owner for every configured shard.
-Heartbeat proves ownership, not completed probes. The shard-zero owner alone
-periodically produces the global census:
+Capability1 is the superseded success-only quota contract and cannot prove this
+measured-run target. The old `successes_needed` label is retained as a deprecated
+alias equal to `runs_needed`; reject inconsistent aliases or mixed contracts.
+Heartbeat proves ownership, not completed probes.
+A completed URL pass must stop and join its heartbeat refresher, then publish
+zero for its shard if no other invocation in that process still owns it. A
+nonzero final timestamp left by a completed pass can remain fresh for the
+180-second owner window and make a later pass look like a second shard owner;
+that makes the coherent global census unobservable. A local overlap must keep
+the timestamp until its last active invocation exits. Zero publication is a
+normal-exit ownership signal, not proof of completion, successful measurement,
+or a durable fleet lease: a process crash may skip it, and a scrape may miss
+the zero before the series disappears. Continue to require a unique fresh owner
+and an independently coherent census; do not convert ambiguous ownership into
+a zero quota or carry forward a previous census as a current observation.
+
+The shard-zero owner alone periodically produces the global census:
 
 - `urnetwork_url_probe_fleet{state}` contains `eligible`, `due`, `overdue`,
-  `warming`, `uninitialized`, `successes_needed`, `quota_complete`,
+  `warming`, `uninitialized`, `runs_needed`, compatibility `successes_needed`, `quota_complete`,
   `secure_complete`, compatibility `complete`, `security_pending`, and
   `security_unknown_targets`.
-- `quota_complete` requires ten unique accepted successes of the selected
+- `quota_complete` requires ten unique accepted measured runs (success plus failure) of the selected
   evidence-policy version measured strictly in the trailing four hours.
   `secure_complete` additionally requires no unresolved TLS exception;
   `complete` has the same value. Old-policy, unmeasured, duplicate, and future
-  outcomes cannot satisfy the target. Ten successes accumulated over an
+  outcomes cannot satisfy the target. Setup-only completed turns do not count. Ten runs accumulated over an
   overdue cycle are not rolling completion.
 - `urnetwork_url_probe_fleet_observed_timestamp_seconds`,
   `urnetwork_url_probe_cohort_started_timestamp_seconds` and
@@ -10339,26 +10597,30 @@ quarantine has no trustworthy destination for same-URL recovery. A different
 URL's success, expired history, or a new policy version does not clear TLS.
 
 Hourly capacity uses reset-aware one-hour increases of
-`urnetwork_url_probe_outcomes_total{outcome="success"}` from **every expected
+both `urnetwork_url_probe_outcomes_total{outcome="success"}` and
+`urnetwork_url_probe_outcomes_total{outcome="error"}` from **every expected
 current Taskworker process**, with capability, fresh underlying counter
 samples, at least 30 samples in the hour and one in its first five minutes,
 and a process at least one hour old. Capable producers preinitialize finite
 counter children: missing is not zero. Require complete unique shard-owner
 coverage as well. Emit `url-probe-throughput-deficit` WARN, sustained twice,
-when accepted successes/hour is below `10 * eligible / 4`; expose the
+when acknowledged measured success plus error/hour is below `10 * eligible / 4`; expose the
 necessary rate and the conditional projected hours. This is not attempted
 URLs, task completions, legacy full runs, or successful API submissions that
 were rejected as measurements.
 
 The worker counter records acknowledged outcomes, not an authoritative count
-of newly inserted history rows: an idempotent replay also receives HTTP 200.
-Treat its rate as an upper bound on unique accepted throughput. A low
-acknowledged rate proves insufficient capacity under the stated source
-conditions; a high rate cannot establish quota recovery. During rollout,
-corroborate it with selected-policy unique history counts over the same fixed
-measurement interval and the per-provider census. `measured_at` is a
-measurement timestamp, not an arrival timestamp, and changing intervals or
-retention can invalidate that comparison. The existing synthetic
+of newly inserted history rows: an idempotent replay also receives HTTP 200,
+and a lost acknowledgement can follow a committed insert. It is an upper bound
+on unique inserts **among acknowledged submissions**, not an unconditional
+ceiling on all durable accepted history. A low rate identifies an observed
+acknowledged-capacity shortfall under the stated source conditions; investigate
+submission/acknowledgement loss before assigning an exact durable insertion
+rate. Neither a high nor low acknowledgement rate establishes quota recovery.
+During rollout, corroborate it with selected-policy unique history counts over
+the same fixed measurement interval and the per-provider census. `measured_at`
+is a measurement timestamp, not an arrival timestamp, and changing intervals
+or retention can invalidate that comparison. The existing synthetic
 `TestUrlProbeCoverageHighAggregateRateCannotHideStarvedProviders` preserves
 the coverage PAGE even when acknowledged throughput is high.
 
@@ -10383,6 +10645,134 @@ and a missing process can hide throughput. This probe does not prove ARIN
 classification, per-country catalog freshness, request-specific FP2 refill,
 or that PostgreSQL returned to its usual CPU band.
 
+Provider-path loss is a measurement-validity boundary. A 2026-09-29 local
+control of the real direct and merged monitor workers reproduced delayed
+callback coalescing: `Added` followed by `Removed` arrived as `Removed` alone,
+after the active snapshot was already empty. The old watcher discarded that
+proof and could let a lost-tunnel attempt become a measured timeout. The
+corrected watcher retains admission proof from delivered `Added` or `Removed`,
+then checks the current active set; a live replacement still wins. Source
+`Removed` is emitted only for a client removed from the live window. The
+existing lost-tunnel retry/not-measured contract then applies; an unmeasured
+result never satisfies the ten-run quota.
+
+False-positive qualifier: evaluation failure, declined admission, an empty
+snapshot, or another tunnel's removal is not proof that this tunnel lost a
+previously admitted path. Controls preserve those boundaries, live replacement
+and healthy 35-second DNS recovery. False-negative qualifier: an overflow reset
+can discard all terminal diffs; without surviving admission proof, this repair
+does not reconstruct loss history. Compare running artifact ancestry with the
+coalesced-loss regression before relying on corrected classification. The
+local reproduction establishes a correctness defect, not its Main frequency,
+DNS occupancy, CPU cost or a throughput gain. Keep the coverage deficit open
+until the independent rolling census and capacity contract recover.
+
+A 2026-09-30 local control identified a narrower result-authority boundary:
+a complete negative URL response could be marked unmeasured when the path was
+lost during body close, after the reader had established peer EOF. The corrected
+URL retry path preserves a non-`NotMeasured` `response_content` or
+`response_performance` judgment with verified `BodyComplete`. Existing completed
+success and TLS-authentication-failure behavior remains intact. The ten-case
+control distinguishes post-EOF loss from unfinished-body loss, including slow
+headers and missing request clocks. Quality quota credit still requires durable
+acceptance; neither a retained local result nor a no-result turn satisfies it.
+
+False-positive qualifier: this local classification defect does not establish
+its Main frequency or explain an observed throughput decline. Require the
+corrected running artifact before relying on the boundary. False-negative
+qualifier: received headers, slow first byte, a partial/truncated body, or a
+sample that stops before peer EOF does not establish this exception. Explicit
+`NotMeasured` and missing-clock decisions remain authoritative; funding,
+security validation and publication gates still apply.
+
+Optional initial-ping diagnostics are a separate process aggregate:
+`urnetwork_egress_probe_initial_ping_evaluations_total{outcome,dependency}`,
+`urnetwork_egress_probe_initial_ping_seconds_total{outcome,dependency}` and
+`urnetwork_egress_probe_initial_ping_started_total`. Require all 49 fixed
+cells, exact process identity, freshness and reset-safe windows before reading
+them. Four outcomes crossed with six dependency snapshots describe completed
+initial-ping evaluations after successful construction. `acknowledged` does
+not prove route admission; pending, canceled, repeated and surplus evaluations
+do not equal accepted measured URL outcomes. A carrier snapshot is an endpoint
+observation; `carrier_absent` does not prove continuous absence, and an attempted
+write does not prove provider receipt. The terminal dependency label does not
+attribute the entire residence interval. Contract wait/failure without a prior
+selected-destination write is local control evidence, with the existing
+provider-verdict policy unchanged. The fixed counters contain no provider,
+client, destination, URL or arbitrary error labels. They do not change the
+quota requirement of ten unique accepted measured success plus failure runs.
+
+False-positive qualifier: carrier presence means any registered send or receive
+route at the terminal snapshot, not continuous bidirectional delivery. The
+started, terminal-count and duration counters are independent atomic reads;
+they are not an atomic event ledger. False-negative qualifier: route-lock
+contention produces `carrier_unknown`, and unfinished evaluations have no
+terminal duration. Missing cells or an unknown dependency remain unknown.
+These observation-only counters change no retry, deadline, admission, security,
+provider-verdict or ownership policy; an ordinary nil observer remains inert.
+
+Optional exact initial-ping path diagnostics add
+`urnetwork_egress_probe_initial_ping_path_evaluations_total` and
+`urnetwork_egress_probe_initial_ping_path_seconds_total`, both labeled only by
+`outcome`, `route_write` (`not_observed` or `accepted`) and `ack_callback`
+(`pending`, `success` or `error`). Require all 48 new cells alongside the
+original 49, bound to the same process and reset-safe fresh window. The new
+witnesses belong to the original admission ping Pack; periodic pings, contract
+heads and crypto controls cannot supply its positive route-write witness.
+A later successful retry can supply it. ACK callback entry is sampled before
+its existing admission lock and does not change callback ownership.
+
+False-positive qualifier: `accepted` proves local route-writer acceptance,
+not provider receipt. `not_observed` proves absence of that positive witness
+at the terminal sample, not absence of delivered bytes. Independent witness
+reads can straddle concurrent route and callback publication, so the complete
+vocabulary retains even a success/not-observed combination. Callback success
+still does not prove admission; success at an expired evaluation can be an
+ordinary deadline race, not proof of prolonged callback or lock delay. These
+seconds bucket the full evaluation residence by terminal witnesses and are
+not phase durations. The unchanged
+selected-destination write-attempt marker can be set before a route accepts
+bytes and by a control head; it must not be substituted for the new witness.
+False-negative qualifier: accepted bytes with a pending ACK callback do not
+identify forward loss, delayed provider handling, return-path loss or queued
+local ACK processing. Missing new cells, unfinished evaluations or unmatched
+generations remain unknown. No path cell changes the 30s default evaluation
+budget, retries, failure authority, authenticated transport or measured quota.
+
+Phase timing needs its owning clock. The provider URL resolver's `dns_ms`
+includes its bounded private DoH attempts, retry jitter, and tunnel work while
+resolving the target; it is not an upstream DNS-server RTT. A capped newest
+receipt prefix samples completed work and can miss slow unfinished attempts.
+Do not turn its mean phase durations into fleet throughput or a request-owner
+CPU attribution.
+
+A bounded 2026-09-29 01:58Z first-byte log reducer retained 512 completed
+records from six streams. Its 340 successful records had mean DNS time 18.284s
+and mean remaining TCP/TLS/HTTP-first-byte time 1.115s; DNS accounted for 94.25%
+of their summed first-byte duration. This is a biased capped completion sample,
+not a fleet rate or an accepted-history join. A separate 02:06Z five-minute
+control across 20 enabled API slots measured `probe_claimed` request mean 0.533s
+versus `unmarked` 3.608s. The marker is caller annotation, requests are not probe
+turns, and provider-side return-path calls can be unmarked. Different windows
+and absent request joins prevent subtracting those means or assigning generic
+API residence to each DNS wave. The route-admission counters in §2.19 provide
+the next measured boundary; they do not themselves fix throughput or justify
+more concurrent probes on saturated hosts.
+
+A 2026-09-29 local real-transport control reproduced a TLS diagnostic defect:
+the provider's custom `DialTLSContext` completed and timed the real handshake,
+then `net/http` emitted another start/done pair for its no-op verification of
+the returned `*tls.Conn`. Replacing both timestamps erased the real interval.
+The corrected recorder preserves the first pair. The durable loopback test
+`TestRequestTLSClockSurvivesCompletedCustomHandshake` advances an injected
+clock during the actual handshake and covers completed-custom, ordinary, and
+failed-custom transports under normal and race execution. `tls_ms` is finite,
+nonnegative diagnostic evidence; the URL success decision still uses content,
+request-written TTFB, and body throughput. This repair does not establish lower
+DNS occupancy, change authentication, or recover quota. Near-zero historical
+TLS values are not proof of a fast real handshake; require the corrected
+running artifact and fresh receipts before trusting that phase attribution.
+
 Investigate slot-index query work, oldest-due fairness, private tunnel/DNS/HTTP
 stage occupancy, accepted receipts, catalog compatibility and URL-scoped TLS
 recovery. An empty bounded due response does not prove the eligible fleet is
@@ -10399,7 +10789,18 @@ and ARIN non-quality providers remain eligible for URL revalidation.
 The deterministic 100k-provider control exposed a residual shard
 filter scanning other shards' due rows; an indexed fixed-slot/lazy-head merge
 removes that scan, but dead index tuples still require ordinary vacuum and
-live query/buffer validation. Do not add a global connection cap or weaken
+live query/buffer validation. A 2026-09-28 PostgreSQL 18.6 release control
+initially rejected the later dense-shard client recheck solely because the
+planner used the global `(next_attempt_at, client_id)` index. The owned empty
+head had passed. The dense recheck had an explicit outer-client-key index
+condition, one row per loop, no filtered rows, and 620 buffers for 100 loops;
+it was bounded point work, not a global due-head scan. The corrected oracle
+requires that exact indexed key plus per-loop row and buffer bounds, and still
+rejects global heads, residual key filters, population-sized buffers and
+missing conditions. Normal and forced-generic controls cover empty, dense,
+large and hot-slot heads on four and 256 shards. This local planner choice
+does not establish Main's current query cost or explain its CPU load.
+Do not add a global connection cap or weaken
 credit/reliability/risk/security checks. Closure requires two fresh coherent
 cadences, per-provider rolling quota recovery, full shard observations, and
 independent FP2 availability and PostgreSQL CPU verification after rollout.
@@ -11528,6 +11929,49 @@ keeping never-connected and previously-connected children separate. Tests must
 cross the old deadline with an actual join barrier, verify no premature
 revocation or slot release, and then prove authenticated retirement after the
 barrier opens. Never expose raw credential errors in a final close error.
+
+A 2026-09-29 Main control kept the current residual separate from historical
+stock. At 00:50:33Z, the exact recent cohort contained 877,732 mature children:
+877,715 were inactive and 17 were active, disconnected, and never connected.
+The oldest residual was 20,162 seconds old. This is the independent
+`probe-unused-args-retirement` WARN, even though nearly all mature children
+were retired. An older, biased prefix sample with a median age of 24.9 days
+was outside this six-hour denominator and inside the source's 30-day derived
+client idle-reaper interval; it does not establish a failure of current
+retirement or justify shortening retention.
+
+A deterministic real-writer regression then established a separate mint
+failure boundary in Server. `AuthNetworkClient` commits the child and signs
+its credential before filling the optional identity cache. Redis acquisition
+performs a PING which can raise on caller cancellation, including after a
+separate PostgreSQL connection can already see the committed active child.
+The internal credential wrapper converted that panic to a canceled mint with
+no returned identity, leaving the generator nothing to retire. Successful
+retirement counters do not cover this lost-return path, and a canceled mint
+counter alone does not establish whether a child committed. The unguarded
+post-commit cache call originated in `fdcd02081`; running artifact ancestry
+and any participating modified source must be checked before assigning this
+mechanism to production.
+
+The source correction makes only the optional cache fill best effort, including
+its acquisition/PING boundary, so a cache failure cannot discard a committed
+identity. It preserves database commit/error handling, cache TTL and read-through
+refill, credential roles, request cancellation, and ordinary network-fenced
+retirement. The regression cancels exactly at the cache PING after an independent
+PostgreSQL read proves the child committed, requires the returned credential,
+and then verifies durable retirement through the normal API model. Healthy
+minting and cancellation before the transaction are separate controls; the
+latter must still commit no child. No sleep, longer timeout, retry, retention
+change, or production data correction is part of this fix.
+
+The 17-child aggregate cannot identify which mint or cleanup step failed.
+Keep the existing joined direct-removal and reached-channel controls, compare
+the exact running artifact before recommending any prior correction, and
+require a post-convergence cohort through the ten-minute grace for live
+attribution. Deployment and that observation window remain necessary even
+after the local committed-child regression passes. Missing request-level
+commit/return ownership is an explicit attribution limit, not evidence that
+the residual is harmless or that every canceled mint leaked a child.
 
 Do not bulk-delete or deactivate production children to clear either alert.
 Software fixes prevent new leakage; historical active stock needs a separately
@@ -15836,6 +16280,15 @@ This is the version-to-artifact contract checked by the probe:
 | 729 | Required zero-default policy-version column and version-one URL-success partial index, retaining the persistent URL marker/outcome obligations of 726 |
 | 730 | Nullable actual-lookup timestamp and required zero-default ARIN database epoch on connection location |
 | 731 | Valid/ready nonunique btree `network_client_location_reliability_arin_exceptions` on `(client_id)`, including `(arin_risk, arin_non_quality)`, with exactly `(arin_risk OR arin_non_quality)` as its predicate |
+| 732 | Durable issued URL receipts keyed by `(client_id, claim_ordinal)`, bounded failure strings, nullable raw/completion/receipt clocks, validated completion/count constraints, exact active/retention indexes, zero-default cycle counts, and the enabled, unconditional readiness trigger bound to its exact published body and update columns |
+| 733 | Valid/ready nonunique completed-priority index on `(completed_run_count, next_attempt_at, client_id)` with exactly `(eligible AND completed_priority_ready)` |
+| 734 | The same completed-priority index with `slot_id` preceding the count/due/ID keys |
+| 735 | Valid/ready waiting index on `(next_attempt_at, client_id)` with exactly `(eligible AND (NOT completed_priority_ready))` |
+| 736 | The same waiting index with `slot_id` preceding the due/ID keys |
+| 737 | Valid/ready expiry index on `(completed_next_expiry_at, client_id)` restricted to nonnull expiry clocks |
+| 738 | The same expiry index with `slot_id` preceding the expiry/ID keys |
+| 739 | Valid/ready nonunique `transfer_balance_active_network_end_start_id` on `(network_id, end_time, start_time, balance_id)` with exactly `active` and no included balance amounts |
+| 740 | Required zero-default nonnegative bigint observed count on client running sums, required zero-default smallint observation version and nullable no-default UUID token on running windows, plus an enabled unconditional before-insert/update trigger bound to the exact checkpoint invalidation body |
 
 FP2's 722–731 contract separates schema readiness from live evidence. A numeric
 731 alone cannot prove exact partial-index predicates, generated-slot semantics,
@@ -15861,6 +16314,39 @@ use the reviewed append-only recovery path, never a hand-created substitute or
 an edited audit head. Catalog readiness does not prove index use, successful
 publication or cache freshness. The deterministic missing-731 coverage failure
 was a monitor catalog omission, not evidence that Main's index was absent.
+
+The 2026-09-28 merged-source gate found eight missing detector contracts for
+versions 732–739. That local failure established an observation gap, not missing
+Main schema. Their new guards execute the emitted catalog SQL against real
+locally migrated tables and controlled missing or changed artifacts, with
+rollback proving recovery. Receipt identity, clock bounds, zero/default state,
+active/retention predicates and readiness invalidation are separate obligations:
+a present table or trigger name cannot substitute for its operative shape.
+Index guards also reject invalid/not-ready builds, wrong key order, extra
+included columns and changed predicates. The trigger must run before row
+updates of both `next_attempt_at` and `eligible`; disabled, conditional, late,
+misbound and no-op lookalikes fail the same published-version guard.
+False-positive qualifiers: future artifacts remain pending until their
+recorded version, and canonical whitespace or a later additive column does
+not change the contract. False-negative qualifiers: absent/partial catalog
+evidence cannot clear the gate, and schema readiness says nothing about
+receipt-writer convergence, four hours of delivered completions, exact current
+rolling counts, planner work or grant availability. Keep those runtime gates
+independent; do not activate completed-run priority from migration success or
+an epoch's age alone. All catalog inspection remains read-only and safe when
+future relations or functions are absent.
+
+Version 740 preserves the distinction between observed-invalid client history
+and truly missing history. Its catalog guard rejects count/default/type/check
+drift, fabricated token defaults, and disabled, late, conditional, partial or
+no-op invalidation triggers. Future absence remains pending before head 740;
+missing or partial catalog evidence cannot clear a published version. Schema
+readiness does not prove that every active writer understands observations or
+that existing windows were re-anchored. Publish zero weights only from usable
+raw observations after an observation-aware checkpoint; retain the existing
+no-usable-denominator behavior and verify the writer boundary separately under
+§2.15a. A legacy writer must invalidate the observation version even if it
+continues to stamp the older degraded-classification token.
 
 Version 721 adds explicit operator approval for a finalized, uncanceled staging
 winner; it does not approve production candidates or reopen winner selection.
@@ -16181,6 +16667,51 @@ query's covering payload was added. Changing the builder to
 `INCLUDE (network_id, client_id)` did not change the already-created index:
 `CREATE INDEX IF NOT EXISTS` checks identity, not definition, and cannot
 reshape a parent index or its partition children.
+
+The 2026-09-28 23:02:58Z catalog cross-check found a different state from the
+historical finalization-only incident below: Main's successful schema head was
+731, the valid/ready legacy parent had exactly the three keys without INCLUDE,
+the desired parent was absent, and none of the 34 table partitions had an
+attached or standalone covering-shape child. All 68 child indexes belonged to
+other shapes. That state requires the full supported partition upgrade;
+ordinary migrations through 740 do not perform it. Catalog absence does not
+establish when or why a previous replacement disappeared. The earlier long
+client SELECT was no longer present; an autovacuum was still vacuuming indexes
+on `transfer_contract`. PostgreSQL excludes lazy vacuum from the final
+concurrent-index old-snapshot wait, so its xmin alone is not proof of that
+blocker. A later 23:03Z host sample found 1.042 TB available on the PGDATA
+mount and about 6.04 PostgreSQL CPU cores over 2.095 seconds on a 96-core host;
+that short host-relative sample does not establish the PostgreSQL cgroup's
+effective quota or sustained I/O headroom. The 23:07:47Z catalog size check
+found about 3.869 billion estimated rows, 737.47 GB of heap, 434.55 GB of
+existing indexes, and 100.17 GB in the legacy secondary family across the 34
+partitions. The two 16-byte INCLUDE columns alone represent about 123.8 GB of
+additional logical payload, and B-tree INCLUDE disables deduplication. The
+old family's size is not an upper bound for its replacement. Budget the
+complete replacement while retaining the old family, one partition's sort
+space, WAL/retention, ordinary growth, and any overlapping backup artifacts;
+the free-space point sample is not proof that this peak fits.
+
+Later observations superseded the brief low-CPU sample: the active monitor
+measured 51.55 PostgreSQL cores over 5.02 seconds at 23:16:09Z, and a direct
+23:24:08–13Z unit pair measured 50.18 cores. Only 26.72 cores belonged to the
+stable child-process subset in that second interval; 145 child PIDs turned
+over, and the paired SQL attribution source was unavailable. These facts
+establish current substantial CPU use but do not assign it to reliability,
+URL scheduling, or any particular statement. Hold a large maintenance start
+until the workload and capacity boundary is understood. At 23:16:53Z the
+backup service was inactive and PGDATA had 1.039 TB available; effective
+PostgreSQL quota remained unknown.
+
+Use the supported resumable path with an explicit reviewed maintenance window
+and bounded partition concurrency. Its CLI defaults to six partition builds,
+the observed server allowed sixteen parallel maintenance workers per build,
+and the child builder explicitly sets `statement_timeout=0`; an inherited
+statement timeout is therefore not a build deadline. Review the actual
+session and operation bounds before starting. Do not overlap this upgrade
+with migration 739's separate grant-index build. The local million-row observation-writer control
+used the desired covering shape and therefore does not establish Main's cost
+on this legacy physical layout; verify the actual plan before writer rollout.
 
 The live 2026-08-31 signature was 29 identical `[crp]secondary index drift`
 warnings in a bounded 30-minute taskworker window. They moved among every
@@ -16505,6 +17036,19 @@ that digest. SIGNALS.md §8.12 (`provenance`) maps to
 mixed-service fleet, draining-generation suppression, missing and stale source
 families, a fresh RSS identity without process start, accepted modified source,
 malformed provenance, and a conflicting digest.
+
+**Bounded live source audit (2026-09-29 00:21:10Z):** a strict edge1 Mimir
+read joined all four fresh families for 20 observed API, 20 Connect and eight
+Taskworker processes. API reported clean `253977f2`; Connect reported modified
+`d479eccd`; Taskworker reported modified `4949f5f9`, with one reported image
+digest per service. The clean API source predates the settlement fix
+`e2356969` and the native-source schema metric, which explains the latter's
+absence on that cohort. Modified base ancestry cannot establish the effective
+changes in the other two services. All three bases already contain family
+intent plumbing. A subsequent edge1 peer inspection stopped at unavailable
+noninteractive sudo before Docker or process-binary reads, so independent
+runtime corroboration remains open, especially on saturated edges3/4. This
+48-process metric witness does not close the separate 20/25 API coverage gap.
 
 ### 8.13 Warpctl local-checkout executable identity
 
@@ -16917,6 +17461,23 @@ resident/forward lifecycle as a contributor; a high unattributed remainder
 keeps the call-site boundary open.  Missing, stale, malformed, or duplicated
 ownership gauges are explicitly `missing`, `invalid`, or `mixed`, never
 treated as zero and never used to clear the independent raw runtime PAGE.
+
+A 2026-09-28 23:54:42Z bounded control retained 20 current process vectors,
+including smaller peers omitted by alert-only output. All proved lazy ingress.
+Edge0/1 g1–g4 had roughly 4.6–6.2 thousand residents, 29.5–35.7 goroutines per
+resident and 1.97–3.08 MB heap per resident; large edge3/4 peers had roughly
+21.2–43.1 thousand residents, 20.0–29.5 goroutines per resident and
+1.62–2.91 MB heap per resident. Population correlated with high process totals;
+this control did not show inflated per-resident cost in the largest processes.
+It does not prove a leak is absent, equivalent traffic, adequate host capacity,
+or a safe resident limit. Most goroutines remained outside the three owned
+gauges, and exact running source remained unavailable. A separate local
+32-client constructor control added about four goroutines and 33 KB live heap
+per bare internal client and joined them on close; it omitted full residents,
+transports and active traffic and is not a Main reproduction. Retain every
+runtime PAGE while finding those active owners. Current owning Connect source
+has no production pprof route, and SIGQUIT participates in service shutdown;
+do not invent a profile endpoint or use a shutdown signal as a profile read.
 
 `connect-resident-cost-unobservable` WARNs immediately when the newest Connect
 population join is missing/stale, duplicated, invalid, or cannot select an

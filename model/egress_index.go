@@ -27,6 +27,9 @@ import (
 // tunables of the egress rules. The `egress_index` block of provider.yml,
 // beside the rollout flag, overrides any of the index's (egressIndexSettings).
 type EgressIndexSettings struct {
+	// Explicit reader activation after complete native publication is attested.
+	// False keeps union-cache reads while receipt writers and publishers roll out.
+	NativeReaderEnabled bool
 	// Legacy configuration compatibility; measured URLs now have equal weight.
 	ClassWeights map[string]int
 	// Legacy configuration compatibility, unused by the URL success ratio.
@@ -109,6 +112,7 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 // one keeps its default.
 type egressIndexSettingsDocument struct {
 	EgressIndex *struct {
+		NativeReaderEnabled  *bool          `yaml:"native_reader_enabled"`
 		ClassWeights         map[string]int `yaml:"class_weights"`
 		DefaultClassWeight   *int           `yaml:"default_class_weight"`
 		MaxFailureIndex      *int           `yaml:"max_failure_index"`
@@ -141,6 +145,10 @@ func egressIndexSettings() *EgressIndexSettings {
 	overrides := document.EgressIndex
 	if overrides == nil {
 		return settings
+	}
+
+	if overrides.NativeReaderEnabled != nil {
+		settings.NativeReaderEnabled = *overrides.NativeReaderEnabled
 	}
 
 	// every value is stored or multiplied into a smallint score, so each is
@@ -204,10 +212,33 @@ type egressIndexSettingsSnapshot struct {
 // it both read the file, which is harmless.
 var requestEgressIndexSettingsSnapshot atomic.Pointer[egressIndexSettingsSnapshot]
 
+// One immutable settings pointer is captured by each discovery request, so a
+// refresh cannot switch cache schemas between its primary and alternate loads.
+func requestEgressIndexSettings() *EgressIndexSettings {
+	snapshot := requestEgressIndexSettingsSnapshot.Load()
+	if snapshot == nil || snapshot.settings.RequestSettingsMaxAge <= time.Since(snapshot.loadTime) {
+		snapshot = &egressIndexSettingsSnapshot{settings: egressIndexSettings(), loadTime: time.Now()}
+		requestEgressIndexSettingsSnapshot.Store(snapshot)
+	}
+	return snapshot.settings
+}
+
+// Quiet processes also expose their effective setting. Scraping uses the same
+// bounded local-config cache as requests; it does not read provider storage.
+var findProviders2NativeReaderEnabled = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+	Name: "urnetwork_findproviders2_native_reader_enabled",
+	Help: "Effective cached native-reader configuration for non-forced discovery requests; does not attest publication or request outcomes",
+}, func() float64 {
+	if requestEgressIndexSettings().NativeReaderEnabled {
+		return 1
+	}
+	return 0
+})
+
 // Registers the backfill metrics, and forgets the request settings on a test
 // reset so a test's provider.yml is read.
 func init() {
-	prometheus.MustRegister(findProviders2BackfillProviders, findProviders2AnsweredProviders)
+	prometheus.MustRegister(findProviders2BackfillProviders, findProviders2AnsweredProviders, findProviders2NativeReaderEnabled)
 	server.OnReset(func() {
 		requestEgressIndexSettingsSnapshot.Store(nil)
 	})

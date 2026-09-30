@@ -100,21 +100,25 @@ func TestFp2UrlPolicySelectorValidation(t *testing.T) {
 
 // Security can recover independently of a measured quality outcome. A clean
 // security-only receipt must release the claim reservation at the real quota
-// expiry, without inventing an eleventh successful or failed URL outcome.
+// expiry, without inventing another successful or failed URL outcome. The
+// preceding measured TLS failure counts toward the ten-run quota, so expiry
+// of the earliest success alone does not reopen it.
 func TestFp2UrlSecurityOnlyRecoveryRecomputesQuotaDeadline(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		clientId := server.NewId()
 		now := server.NowUtc().Truncate(time.Microsecond)
 		cycleStartedAt := now.Add(-4 * time.Hour)
-		oldest := now.Add(-4*time.Hour + 2*time.Minute)
+		oldestSuccessAt := now.Add(-4*time.Hour + 2*time.Minute)
+		oldestQuotaRunAt := now.Add(-3*time.Hour + time.Minute)
+		quotaExpiresAt := oldestQuotaRunAt.Add(ProviderEgressProbeRefreshAge)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_probe_cycle(client_id,cycle_started_at,next_attempt_at) VALUES($1,$2,$2)`, clientId, cycleStartedAt))
 		})
 		for index := range 10 {
 			at := now.Add(-3*time.Hour + time.Duration(index)*time.Minute)
 			if index == 0 {
-				at = oldest
+				at = oldestSuccessAt
 			}
 			SetProviderEgressHealth(ctx, &ProviderEgressHealth{RunId: server.NewId(), ClientId: clientId, CycleStartedAt: cycleStartedAt,
 				MeasuredAt: at, OKCount: 1, Total: 1, UrlProbeEvidence: fp2TestUrlProbeEvidence(at, true)})
@@ -145,10 +149,27 @@ func TestFp2UrlSecurityOnlyRecoveryRecomputesQuotaDeadline(t *testing.T) {
 				var successes, failures, outcomes int
 				var next time.Time
 				server.Raise(rows.Scan(&successes, &failures, &outcomes, &next))
-				if successes != 10 || failures != 1 || outcomes != 11 || !next.Equal(oldest.Add(4*time.Hour)) {
-					t.Fatalf("security-only receipt changed outcomes or retained reservation: successes=%d failures=%d outcomes=%d next=%s", successes, failures, outcomes, next)
+				if successes != 10 || failures != 1 || outcomes != 11 || !next.Equal(quotaExpiresAt) {
+					t.Fatalf("security-only receipt changed outcomes or measured quota deadline: successes=%d failures=%d outcomes=%d next=%s want=%s", successes, failures, outcomes, next, quotaExpiresAt)
 				}
 			})
+			for _, boundary := range []struct {
+				at   time.Time
+				want int
+			}{
+				{oldestSuccessAt.Add(ProviderEgressProbeRefreshAge), 10},
+				{quotaExpiresAt.Add(-time.Microsecond), 10},
+				{quotaExpiresAt, 9},
+			} {
+				var measured int
+				server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM provider_egress_health_history
+					WHERE client_id=$1 AND url_probe AND url_probe_policy_version=$2 AND total_count=1
+					AND measured_at>$3 AND measured_at<=$4`, clientId, SelectedProviderUrlProbePolicyVersion(),
+					boundary.at.Add(-ProviderEgressProbeRefreshAge), boundary.at).Scan(&measured))
+				if measured != boundary.want {
+					t.Fatalf("wrong accepted measured count at %s: got=%d want=%d", boundary.at, measured, boundary.want)
+				}
+			}
 		})
 	})
 }

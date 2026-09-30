@@ -416,21 +416,21 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 	}
 	defer stopCpuProfile()
 
-	// tcpStackStats prints the delta of the tun's gvisor TCP counters across a
-	// run, so a slow or stalled run is diagnosable from the log: retransmit/rto
-	// counts implicate loss or scheduling stalls on the path, while a clean
-	// counter set implicates raw host throughput.
-	lastStackStats := tun.Stats()
+	// Sample numeric counter values at each stream boundary. These counters
+	// describe inner TCP recovery; they do not identify Transfer ACK progress
+	// or by themselves distinguish path loss from local scheduling delays.
+	lastStackStats := snapshotLocalPerformanceTCPCounters(tun.Stats().TCP)
 	tcpStackStats := func(label string) {
-		stats := tun.Stats()
+		stats := snapshotLocalPerformanceTCPCounters(tun.Stats().TCP)
+		delta := stats.since(lastStackStats)
 		fmt.Printf(
 			"[mctcp]%s tcp stack delta: retransmits=%d rto=%d fastRetransmit=%d sackRecovery=%d sendErrors=%d\n",
 			label,
-			stats.TCP.Retransmits.Value()-lastStackStats.TCP.Retransmits.Value(),
-			stats.TCP.Timeouts.Value()-lastStackStats.TCP.Timeouts.Value(),
-			stats.TCP.FastRetransmit.Value()-lastStackStats.TCP.FastRetransmit.Value(),
-			stats.TCP.SACKRecovery.Value()-lastStackStats.TCP.SACKRecovery.Value(),
-			stats.TCP.SegmentSendErrors.Value()-lastStackStats.TCP.SegmentSendErrors.Value(),
+			delta.retransmits,
+			delta.timeouts,
+			delta.fastRetransmit,
+			delta.sackRecovery,
+			delta.sendErrors,
 		)
 		lastStackStats = stats
 	}
@@ -442,14 +442,10 @@ func testConnectMultiClientTcpPerformance(t testing.TB) {
 	// A stalled (not merely slow) run is dropped rather than fatal, matching
 	// the udp/download phases: the best of the completed runs is asserted
 	// below, and only an all-runs-fail outcome is treated as a real collapse.
-	// The stall this rides out is genuine but transient -- a single bulk stream
-	// saturates the lossy relay in both directions at once, and when a burst is
-	// dropped the userspace tcp stack backs its rto off toward the 120s gvisor
-	// cap, so one no-progress window can exceed the 60s write deadline
-	// (especially under -race on the build server). Each run dials its own conn
-	// so a partial-write timeout can't desync the next run's stream, and a
-	// fresh conn starts with default rto state, so the runs are independent
-	// samples.
+	// Each run dials its own connection so a partial-write timeout cannot
+	// desynchronize the next stream. The TUN, multi-client, provider and
+	// exchange remain shared across runs, so the samples are not independent
+	// full-stack reproductions and their drop reason still needs diagnosis.
 	runStream := func() (float64, bool) {
 		dialCtx, dialCancel := context.WithTimeout(ctx, 30*time.Second)
 		conn, err := tun.DialContext(dialCtx, "tcp", echoAddr)

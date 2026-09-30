@@ -110,7 +110,7 @@ func TestPrivateUrlRangeOnlyPreservesDesiredSlotGaps(t *testing.T) {
 	}
 	findings := evaluateUrlProbeCoverage(parsed, expected, 8, now)
 	if len(findings) != 1 || findings[0].class != "url-probe-coverage-unobservable" ||
-		!strings.Contains(findings[0].observed, "hourly_success_range_or_expected_process_coverage_incomplete") ||
+		!strings.Contains(findings[0].observed, "hourly_measured_run_ranges_or_expected_process_coverage_incomplete") ||
 		strings.Contains(findings[0].observed, "owners=") || strings.Contains(findings[0].observed, "census_unavailable") {
 		t.Fatalf("range filtering erased desired gaps or valid owners/census: %+v", findings)
 	}

@@ -91,6 +91,9 @@ type FullOptions struct {
 	// Identity-free actual worker entry/return, before batch guard/release.
 	// Called concurrently outside scheduler locks; must be nonblocking.
 	ObserveProgress func(prober.Progress)
+	// Optional same-call wall timing after ProbeOne returns, including cleanup.
+	// Called concurrently; it must not block or perform I/O.
+	ObserveTiming func(prober.ProbeTiming)
 }
 
 // Returns Concurrency, or DefaultFullConcurrency when unset.
@@ -177,6 +180,7 @@ func NewFullProber(options FullOptions) *prober.Prober {
 	probes := &probeRegistry{}
 
 	providerProber := &prober.Prober{
+		ObserveTiming: options.ObserveTiming,
 		OpenProvider: func(ctx context.Context, provider prober.Provider) (*http.Client, func() error, error) {
 			providerClientId := provider.ClientId
 			clientId, err := connect.ParseId(providerClientId)
