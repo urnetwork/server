@@ -10648,6 +10648,24 @@ local reproduction establishes a correctness defect, not its Main frequency,
 DNS occupancy, CPU cost or a throughput gain. Keep the coverage deficit open
 until the independent rolling census and capacity contract recover.
 
+A 2026-09-30 local control identified a narrower result-authority boundary:
+a complete negative URL response could be marked unmeasured when the path was
+lost during body close, after the reader had established peer EOF. The corrected
+URL retry path preserves a non-`NotMeasured` `response_content` or
+`response_performance` judgment with verified `BodyComplete`. Existing completed
+success and TLS-authentication-failure behavior remains intact. The ten-case
+control distinguishes post-EOF loss from unfinished-body loss, including slow
+headers and missing request clocks. Quality quota credit still requires durable
+acceptance; neither a retained local result nor a no-result turn satisfies it.
+
+False-positive qualifier: this local classification defect does not establish
+its Main frequency or explain an observed throughput decline. Require the
+corrected running artifact before relying on the boundary. False-negative
+qualifier: received headers, slow first byte, a partial/truncated body, or a
+sample that stops before peer EOF does not establish this exception. Explicit
+`NotMeasured` and missing-clock decisions remain authoritative; funding,
+security validation and publication gates still apply.
+
 Phase timing needs its owning clock. The provider URL resolver's `dns_ms`
 includes its bounded private DoH attempts, retry jitter, and tunnel work while
 resolving the target; it is not an upstream DNS-server RTT. A capped newest
