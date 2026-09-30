@@ -4220,3 +4220,30 @@ The 09:33 scheduled monitor frame still had quota zero and sampled edge3
 host CPU at 97.42%; it overlapped g2 cutover and did not provide a numeric
 edge4 sample. Post-rollout accepted-run rate and host impact still need a
 fixed complete window; no capacity ramp is justified by this deployment.
+
+The first fully post-Taskworker scheduled census at 10:02:24Z still had
+`quota_complete=0`, `eligible=112064`, and `runs_needed=622594`.
+The 10:22:07Z host callback sampled edge3 CPU at 97.03%; that frame had no
+numeric edge4 sample. These observations do not show a fleet quota or host
+CPU recovery from resident cleanup. A separately scoped indexed read of
+durable accepted results in a fixed post-rollout window is prepared but has
+not contacted Main; scheduled SSH work prevented the guarded attempt.
+
+A separate Connect forward-allocation issue was reproduced locally. The
+forward receive ring is closed immediately and never enqueues a payload,
+yet the old constructor allocated a 98,304-byte backing for it and a
+64 KiB reader before the echoed header. A narrow candidate removes the
+unused ring and limits the forward reader to 4 KiB without changing the
+16 KiB frame ceiling, send capacity, deadlines or wire protocol. Five
+paired 512-operation local runs measured successful forward allocations
+at 365,274→205,388 bytes/operation and constructor/framing CPU at
+245.77→181.56 microseconds/operation. Refused handshakes also fell from
+148,421→88,493 bytes/operation. The source and profile review are sealed
+under manifest SHA256
+`0e0ee789897728c486ac9d9f4fe8fd443828667d46f1a1d25cca10ab4cd7de4d`.
+Sol independently passed 25 focused normal roots, 25 race roots and vet,
+then 25 focused roots from the exact tracked tree; attestations SHA256
+`0844a9377880be9365c32caf334058f3134b612df0dfe52d64f031c4a7b643db`
+and `d2d7f5f0c534c6cf966d5c8388b44bbefbdff58c38ce8240cefb71fecabb1c62`.
+The change has no measured Main RSS, CPU or quota effect yet. A fixed
+post-Taskworker Connect baseline is needed before a service canary.

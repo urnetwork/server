@@ -2047,6 +2047,9 @@ type ExchangeBuffer struct {
 	// (header and messages), or buffered bytes would be lost.
 	reader     *bufio.Reader
 	readerConn net.Conn
+	// A ping-only outbound forward can cap scratch without changing framing.
+	// Zero preserves the configured transport read buffer.
+	readBufferLimit int
 
 	// reusable writev iovec backing for WriteMessages. like the reader, a
 	// buffer writes from a single goroutine, so the backing is reused across
@@ -2072,7 +2075,11 @@ func NewReceiveOnlyExchangeBuffer(settings *ExchangeSettings) *ExchangeBuffer {
 
 func (self *ExchangeBuffer) connReader(conn net.Conn) *bufio.Reader {
 	if self.readerConn != conn {
-		self.reader = bufio.NewReaderSize(conn, self.settings.ExchangeReadBufferByteCount)
+		readBufferByteCount := self.settings.ExchangeReadBufferByteCount
+		if 0 < self.readBufferLimit {
+			readBufferByteCount = min(readBufferByteCount, self.readBufferLimit)
+		}
+		self.reader = bufio.NewReaderSize(conn, readBufferByteCount)
 		self.readerConn = conn
 	}
 	return self.reader
@@ -2348,6 +2355,15 @@ func NewExchangeConnection(
 
 	sendBuffer := NewDefaultExchangeBuffer(settings)
 	receiveBuffer := NewReceiveOnlyExchangeBuffer(settings)
+	receiveQueueSize := settings.ExchangeBufferSize
+	if header.Op == ExchangeOpForward {
+		// Forward endpoints only read pings and discard unexpected payloads.
+		// Run closes receive without ever queueing a message, so it needs no
+		// payload ring. Keep one reader from header through close to preserve
+		// any bytes read ahead by the handshake.
+		receiveQueueSize = 0
+		receiveBuffer.readBufferLimit = 4 * 1024
+	}
 
 	// write header
 	err = sendBuffer.WriteHeader(ctx, conn, &header)
@@ -2375,7 +2391,7 @@ func NewExchangeConnection(
 		sendBuffer:        sendBuffer,
 		receiveBuffer:     receiveBuffer,
 		send:              make(chan []byte, settings.ExchangeBufferSize),
-		receive:           make(chan []byte, settings.ExchangeBufferSize),
+		receive:           make(chan []byte, receiveQueueSize),
 		settings:          settings,
 		header:            header,
 		host:              host,
