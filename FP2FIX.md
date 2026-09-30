@@ -4337,3 +4337,21 @@ be inferred from process allocation rate, but it does not attribute memory,
 GC, CPU or quota changes to the patch. Other Connect blocks remain held.
 The single-read receipt SHA256 is
 `2f3d7c54db11fecd6c3138b41a168f0e152eb39ba672713b99bc832824cd8e8f`.
+
+The g1 initial-ping observer was read once for the fixed 12:25–12:30Z
+post-deployment window, after a separate current-process proof found four
+g1 starts at 12:21:31–35Z. All 49 fixed cells per current g1 process,
+source freshness and reset checks qualified; four older generations were
+excluded from the window. The PromQL counter increases estimate 4,342.60
+terminal evaluations and 23,793.82 elapsed seconds. About 3,487.96 were
+acknowledged (mean 1.454 seconds), 416.51 expired at the 30-second deadline
+(mean 30.001 seconds), and 438.13 were canceled or ended (mean 14.213
+seconds). Every estimated expiry ended with a terminal snapshot classified
+`carrier_present_write_attempted`; the two carrier-present contract-wait or
+contract-failure-without-write cells were zero. The expiries consumed about
+52.5% of observed terminal evaluation seconds. This identifies the
+post-write/delivery/acknowledgment path as the next diagnostic boundary,
+without proving remote receipt, attributing each second to that dependency,
+or equating an initial-ping evaluation with an accepted URL result. The
+fixed-window receipt SHA256 is
+`a95fd87dce0257f6ab0ca595cc307e6e630cc2dccf6a9e0fab20998c160b5b0e`.
