@@ -99,7 +99,7 @@ func DefaultEgressIndexSettings() *EgressIndexSettings {
 		DefaultClassWeight:    1,
 		MaxFailureIndex:       6,
 		EvidenceMaxAge:        ProviderEgressHealthMaxAge,
-		QualityOkNumerator:    3,
+		QualityOkNumerator:    4,
 		QualityOkDenominator:  5,
 		MinScoredLoads:        1,
 		CountryGate:           true,

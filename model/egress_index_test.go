@@ -159,19 +159,19 @@ func TestEgressIndexWithoutEvidence(t *testing.T) {
 	assert.Equal(t, ComputeEgressIndex(boundary, now, settings).Index, 0)
 }
 
-// The 90 % rule over every scored load, exact at the line.
+// The 80% rule over every accepted measured URL, exact at the line.
 func TestEgressQualityVerdict(t *testing.T) {
 	now := server.NowUtc()
 	settings := DefaultEgressIndexSettings()
 
-	atLine := &EgressHealthRun{MeasuredAt: now, OkCount: 3, Total: 5}
-	belowLine := &EgressHealthRun{MeasuredAt: now, OkCount: 2, Total: 5}
+	atLine := &EgressHealthRun{MeasuredAt: now, OkCount: 4, Total: 5}
+	belowLine := &EgressHealthRun{MeasuredAt: now, OkCount: 3, Total: 5}
 	assert.Equal(t, ComputeEgressIndex(atLine, now, settings).Quality, true)
 	assert.Equal(t, ComputeEgressIndex(belowLine, now, settings).Quality, false)
 	assert.Equal(t, *ComputeEgressIndex(belowLine, now, settings).QualityVerdict(), false)
 
 	// the ratio is a setting
-	settings.QualityOkNumerator = 2
+	settings.QualityOkNumerator = 3
 	assert.Equal(t, ComputeEgressIndex(belowLine, now, settings).Quality, true)
 }
 
@@ -184,7 +184,7 @@ func TestEgressIndexSettingsDefaults(t *testing.T) {
 	assert.Equal(t, settings.MaxFailureIndex, 6)
 	assert.Equal(t, settings.EvidenceMaxAge, ProviderEgressHealthMaxAge)
 	assert.Equal(t, settings.EvidenceMaxAge, 8*time.Hour)
-	assert.Equal(t, settings.QualityOkNumerator, 3)
+	assert.Equal(t, settings.QualityOkNumerator, 4)
 	assert.Equal(t, settings.QualityOkDenominator, 5)
 	assert.Equal(t, settings.MinScoredLoads, 1)
 	assert.Equal(t, settings.CountryGate, true)
@@ -221,8 +221,8 @@ egress_index:
   default_class_weight: 2
   max_failure_index: 9
   evidence_max_age: 72h
-  quality_ok_numerator: 4
-  quality_ok_denominator: 5
+  quality_ok_numerator: 2
+  quality_ok_denominator: 3
   min_scored_loads: 20
   country_gate: false
   backfill_tier_offset: 5
@@ -231,8 +231,8 @@ egress_index:
 	assert.Equal(t, overridden.DefaultClassWeight, 2)
 	assert.Equal(t, overridden.MaxFailureIndex, 9)
 	assert.Equal(t, overridden.EvidenceMaxAge, 72*time.Hour)
-	assert.Equal(t, overridden.QualityOkNumerator, 4)
-	assert.Equal(t, overridden.QualityOkDenominator, 5)
+	assert.Equal(t, overridden.QualityOkNumerator, 2)
+	assert.Equal(t, overridden.QualityOkDenominator, 3)
 	assert.Equal(t, overridden.MinScoredLoads, 20)
 	assert.Equal(t, overridden.CountryGate, false)
 	assert.Equal(t, overridden.BackfillTierOffset, 5)

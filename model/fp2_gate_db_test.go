@@ -24,9 +24,9 @@ func TestFp2BucketMembershipAndCommonGates(t *testing.T) {
 		tls := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		unreliable := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		for _, provider := range []*egressTestProvider{passing, nonQuality, risk, mislocated, unreliable} {
-			egressTestHealth(ctx, provider.clientId, server.NowUtc(), 5, 2)
+			egressTestHealth(ctx, provider.clientId, server.NowUtc(), 5, 1)
 		}
-		egressTestHealth(ctx, failing.clientId, server.NowUtc(), 2, 1)
+		egressTestHealth(ctx, failing.clientId, server.NowUtc(), 5, 2)
 		egressTestBlackhole(ctx, dark.clientId)
 		SetProviderEgressLocation(ctx, &ProviderEgressLocation{ClientId: mislocated.clientId, LocationId: city.LocationId, CountryCode: "yy", ObservedAt: server.NowUtc()})
 		SetProviderEgressHealth(ctx, &ProviderEgressHealth{ClientId: tls.clientId, MeasuredAt: server.NowUtc(), OKCount: 3, Total: 3, TLSAuthenticationFailure: true})
@@ -103,8 +103,8 @@ func TestFp2UrlHistoryIsIdempotentAndWindowed(t *testing.T) {
 		if counts.OKCount != 3 || counts.Total != 5 {
 			t.Fatalf("history counts=%+v, want3/5", counts)
 		}
-		if !ComputeEgressIndex(&EgressHealthRun{MeasuredAt: counts.MeasuredAt, OkCount: counts.OKCount, Total: counts.Total}, now, DefaultEgressIndexSettings()).Quality {
-			t.Fatal("aggregate3/5 should qualify despite most recent measured run1/1 and unmeasured attempts")
+		if ComputeEgressIndex(&EgressHealthRun{MeasuredAt: counts.MeasuredAt, OkCount: counts.OKCount, Total: counts.Total}, now, DefaultEgressIndexSettings()).Quality {
+			t.Fatal("aggregate 3/5 must fail the 4/5 gate despite the most recent measured run 1/1 and unmeasured attempts")
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			rows, err := conn.Query(ctx, `SELECT SUM(total_count) FROM (`+providerEgressHealthWindowSql()+`) AS evidence WHERE client_id=$3`, now.Add(-2*time.Hour), now, clientId)

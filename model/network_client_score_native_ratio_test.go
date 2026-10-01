@@ -23,6 +23,8 @@ func TestNativeCensusRatioExactConfiguredBoundaries(t *testing.T) {
 		{"exact equality", 3, 5, 3, 5, 1, 0, 0},
 		{"below equality", 2, 5, 3, 5, 0, 1, 0},
 		{"configured bar", 3, 5, 4, 5, 0, 1, 0},
+		{"four fifths equality", 4, 5, 4, 5, 1, 0, 0},
+		{"below four fifths", 79, 100, 4, 5, 0, 1, 0},
 		{"zero bar observed", 0, 1, 0, 5, 1, 0, 0},
 		{"zero bar no evidence", 0, 0, 0, 5, 0, 0, 1},
 		{"large exact pass", firstPassing, maxInt, 3, 5, 1, 0, 0},
@@ -86,7 +88,7 @@ func TestNativeCensusRatioSeparatesPublicOnlineAndSourceMap(t *testing.T) {
 }
 
 func TestNativeCensusRatioUsesPublicationConfiguration(t *testing.T) {
-	pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte("egress_index:\n  quality_ok_numerator: 4\n  quality_ok_denominator: 5\n"))
+	pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte("egress_index:\n  quality_ok_numerator: 3\n  quality_ok_denominator: 5\n"))
 	defer pop()
 	now := time.Date(2026, 9, 30, 23, 0, 0, 0, time.UTC)
 	score := nativeTestScore(RankModeSpeed, ipFamilyFacetV4Only)
@@ -94,7 +96,7 @@ func TestNativeCensusRatioUsesPublicationConfiguration(t *testing.T) {
 	census := newClientScoreNativeCensus(now, now.Add(time.Minute), now,
 		map[server.Id]ProviderEgressHealthCounts{score.ClientId: {OKCount: 3, Total: 5}},
 		map[server.Id]map[server.Id]*ClientScore{server.NewId(): {score.ClientId: score}})
-	if ratio := census.EgressRatio; ratio == nil || ratio.OKNumerator != 4 || ratio.OKDenominator != 5 || ratio.PublicOnline == nil || ratio.PublicOnline.Passed != 0 || ratio.PublicOnline.Failed != 1 {
+	if ratio := census.EgressRatio; ratio == nil || ratio.OKNumerator != 3 || ratio.OKDenominator != 5 || ratio.PublicOnline == nil || ratio.PublicOnline.Passed != 1 || ratio.PublicOnline.Failed != 0 {
 		t.Fatalf("publication ignored configured threshold: %+v", ratio)
 	}
 }

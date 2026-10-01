@@ -53,14 +53,21 @@ func TestFp2UrlSuccessRatio(t *testing.T) {
 		evidence, quality bool
 	}{
 		{ok: 0, total: 0},
-		{ok: 3, total: 5, evidence: true, quality: true},
-		{ok: 2, total: 3, evidence: true, quality: true},
+		{ok: 1, total: 1, evidence: true, quality: true},
+		{ok: 4, total: 5, evidence: true, quality: true},
+		{ok: 79, total: 100, evidence: true},
+		{ok: 3, total: 5, evidence: true},
+		{ok: 2, total: 3, evidence: true},
 		{ok: 1, total: 2, evidence: true},
 		{ok: 0, total: 3, evidence: true},
 	} {
 		index := ComputeEgressIndex(&EgressHealthRun{MeasuredAt: now, OkCount: c.ok, Total: c.total}, now, DefaultEgressIndexSettings())
 		if index.Evidence != c.evidence || index.Quality != c.quality {
 			t.Errorf("%d/%d: got %+v, want evidence=%t quality=%t", c.ok, c.total, index, c.evidence, c.quality)
+		}
+		decision := decideProviderEgress(&providerEgressFacts{egressQuality: index.QualityVerdict()}, false)
+		if decision.quality != c.quality || decision.speed != c.quality || !decision.online || !decision.counted || decision.hardExcluded {
+			t.Errorf("%d/%d: shared ratio gate changed bucket membership: %+v", c.ok, c.total, decision)
 		}
 	}
 }
@@ -89,10 +96,10 @@ func TestFp2UrlProbeSuccessImprovesRanking(t *testing.T) {
 	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
 	previousWeight := 0.0
 	previousIndex := 100
-	for _, okCount := range []int{60, 70, 90, 100} {
+	for _, okCount := range []int{60, 70, 80, 90, 100} {
 		weight := providerUrlProbeSuccessWeight(ProviderEgressHealthCounts{OKCount: okCount, Total: 100})
 		index := ComputeEgressIndex(&EgressHealthRun{MeasuredAt: now, OkCount: okCount, Total: 100}, now, DefaultEgressIndexSettings())
-		if weight <= previousWeight || index.Index > previousIndex || !index.Quality {
+		if weight <= previousWeight || index.Index > previousIndex || index.Quality != (80 <= okCount) {
 			t.Fatalf("success=%d/100 weight=%f index=%+v", okCount, weight, index)
 		}
 		previousWeight, previousIndex = weight, index.Index

@@ -3466,17 +3466,18 @@ func TestUpdateClientScoresHigherUrlRatioImprovesRanking(t *testing.T) {
 	})
 }
 
-// Exactly 3/5 passes the native ratio gate; below it remains online-only.
+// Exactly 4/5 passes both native ratio gates; below it remains online-only.
 func TestUpdateClientScoresEgressHealthBoundaryIsInclusive(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		city := testing_healthGateCity(ctx, t)
 
-		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
-		atBarClientId, belowBarClientId := clientIds[0], clientIds[1]
+		clientIds := testing_connectQualifyingProviders(ctx, t, city, 3)
+		atBarClientId, belowBarClientId, oldBarClientId := clientIds[0], clientIds[1], clientIds[2]
 
-		testing_setProviderEgressHealth(ctx, atBarClientId, 60, 100)
-		testing_setProviderEgressHealth(ctx, belowBarClientId, 59, 100)
+		testing_setProviderEgressHealth(ctx, atBarClientId, 4, 5)
+		testing_setProviderEgressHealth(ctx, belowBarClientId, 79, 100)
+		testing_setProviderEgressHealth(ctx, oldBarClientId, 3, 5)
 		testing_rollUpEgress(ctx)
 
 		err := UpdateClientScores(ctx, time.Hour, 1)
@@ -3484,14 +3485,31 @@ func TestUpdateClientScoresEgressHealthBoundaryIsInclusive(t *testing.T) {
 
 		clientScores := testing_selectableClientScores(ctx, t, city, false)
 
-		if !testing_qualityNative(clientScores, atBarClientId) {
-			t.Fatal("a provider at exactly 60/100 is excluded")
+		for _, clientId := range clientIds {
+			score := clientScores[clientId]
+			if score == nil || !score.Online {
+				t.Fatal("the ratio gate removed a provider from online")
+			}
+			for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
+				if score.PassesMinimums[mode] != (clientId == atBarClientId) {
+					t.Fatalf("mode=%s native=%t; only exactly 4/5 should pass, 79/100 and 3/5 must fail", mode, score.PassesMinimums[mode])
+				}
+			}
 		}
-		if testing_qualityNative(clientScores, belowBarClientId) {
-			t.Fatal("a provider at 59/100 is native quality")
+		census, err := GetClientScoreNativeCensus(ctx)
+		connect.AssertEqual(t, err, nil)
+		if census == nil || census.EgressRatio == nil || census.EgressRatio.OKNumerator != 4 || census.EgressRatio.OKDenominator != 5 ||
+			census.EgressRatio.PublicOnline == nil || census.EgressRatio.PublicOnline.Passed != 1 || census.EgressRatio.PublicOnline.Failed != 2 {
+			t.Fatalf("publication did not attest the 4/5 gate: %+v", census)
 		}
-		if score, ok := clientScores[belowBarClientId]; !ok || !score.Online {
-			t.Fatal("a provider at 59/100 is missing from online")
+		for _, mode := range []string{RankModeQuality, RankModeSpeed, ProviderEgressBucketOnline} {
+			want := 1
+			if mode == ProviderEgressBucketOnline {
+				want = 3
+			}
+			if census.Buckets[mode].Providers != want {
+				t.Fatalf("native publication mode=%s providers=%d, want %d", mode, census.Buckets[mode].Providers, want)
+			}
 		}
 	})
 }
@@ -3642,8 +3660,9 @@ func TestUpdateClientScoresRestoresAProviderWhoseHealthRecovers(t *testing.T) {
 		}
 
 		// a later probe finds it healthy. nothing else happens -- no operator
-		// action, no re-registration, no cache flush
-		testing_setProviderEgressHealth(ctx, clientId, 262, 262)
+		// action, no re-registration, no cache flush. Four successes for each
+		// earlier failure bring the whole history to exactly 4/5.
+		testing_setProviderEgressHealth(ctx, clientId, 524, 524)
 		testing_rollUpEgress(ctx)
 
 		err = UpdateClientScores(ctx, time.Hour, 1)
@@ -3664,8 +3683,8 @@ func TestProviderCountFilter(t *testing.T) {
 
 	filter := providerCountFilter{
 		healthCounts: map[server.Id]ProviderEgressHealthCounts{
-			healthy:   {OKCount: 3, Total: 5},
-			degraded:  {OKCount: 2, Total: 5},
+			healthy:   {OKCount: 4, Total: 5},
+			degraded:  {OKCount: 3, Total: 5},
 			zeroTotal: {OKCount: 0, Total: 0},
 			risky:     {OKCount: 5, Total: 5},
 		},
