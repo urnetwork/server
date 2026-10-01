@@ -49,6 +49,7 @@ func captureRuntimeImageBuild(t *testing.T, directory, epoch string) ([]string, 
 }
 
 // File timestamp normalization and config timestamp pinning are both required.
+// Docker-backed builders must not unpack timestamp-rewritten image layers.
 func checkRuntimeImageArguments(args []string, epoch string) error {
 	if len(args) < 3 || args[0] != "buildx" || args[1] != "build" || args[len(args)-1] != "." {
 		return errors.New("unexpected image builder")
@@ -73,8 +74,8 @@ func checkRuntimeImageArguments(args []string, epoch string) error {
 			outputArg, isOutput = args[index+1], true
 		}
 		if isOutput {
-			if outputArg != "type=image,push=true,rewrite-timestamp=true" {
-				return errors.New("exporter lost timestamp normalization")
+			if outputArg != "type=image,push=true,rewrite-timestamp=true,unpack=false" {
+				return errors.New("exporter must publish timestamp-normalized layers without unpacking")
 			}
 			outputCount++
 		}
@@ -132,14 +133,21 @@ func TestRuntimeImageBuildPinsEpochAndRewritesLayers(t *testing.T) {
 		if role == "api" && (!slices.Contains(args, "--provenance=mode=max") || !slices.Contains(args, "--sbom=true")) {
 			t.Fatal("determinism must not drop API publication attestations")
 		}
-		for _, fault := range []string{"epoch", "rewrite", "implicit-exporter", "duplicate-exporter", "duplicate-epoch"} {
+		for _, fault := range []string{"epoch", "rewrite", "unpack-default", "unpack-enabled", "implicit-exporter", "duplicate-exporter", "duplicate-epoch"} {
 			changed := slices.Clone(args)
 			for index, arg := range changed {
 				if fault == "epoch" && arg == "SOURCE_DATE_EPOCH="+epoch {
 					changed[index] = "SOURCE_DATE_EPOCH="
 				}
-				if fault == "rewrite" && arg == "type=image,push=true,rewrite-timestamp=true" {
-					changed[index] = "type=image,push=true"
+				if arg == "type=image,push=true,rewrite-timestamp=true,unpack=false" {
+					switch fault {
+					case "rewrite":
+						changed[index] = "type=image,push=true,unpack=false"
+					case "unpack-default":
+						changed[index] = "type=image,push=true,rewrite-timestamp=true"
+					case "unpack-enabled":
+						changed[index] = "type=image,push=true,rewrite-timestamp=true,unpack=true"
+					}
 				}
 			}
 			if fault == "implicit-exporter" {

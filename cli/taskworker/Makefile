@@ -29,5 +29,5 @@ warp_build_image:
 		--platform linux/arm64/v8,linux/amd64 \
 		-t ${WARP_DOCKER_NAMESPACE}/${WARP_DOCKER_IMAGE}:${WARP_DOCKER_VERSION} \
 		--no-cache \
-		--output type=image,push=true,rewrite-timestamp=true \
+		--output type=image,push=true,rewrite-timestamp=true,unpack=false \
 		.

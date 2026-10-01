@@ -48,8 +48,8 @@ func writeSubscriberFactsForScores(ctx context.Context, scores []*ClientScore) {
 		`, ids, handler))
 		server.RaisePgResult(tx.Exec(ctx, `
 			INSERT INTO network_client_location
-				(client_id, connection_id, city_location_id, region_location_id, country_location_id, arin_quality_verified)
-			SELECT DISTINCT id, id, $2::uuid, $2::uuid, $2::uuid, true
+				(client_id, connection_id, city_location_id, region_location_id, country_location_id, arin_quality_verified, arin_quality_write_token)
+			SELECT DISTINCT id, id, $2::uuid, $2::uuid, $2::uuid, true, id
 			FROM unnest($1::uuid[]) AS id ON CONFLICT (connection_id) DO NOTHING
 		`, ids, server.NewId()))
 	})

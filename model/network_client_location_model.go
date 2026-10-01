@@ -3481,6 +3481,8 @@ type ConnectionLocationScores struct {
 	GenesisLocationId *server.Id
 }
 
+// Persist location and classification together. A fresh token on every write
+// lets the database revoke positive facts when an older writer updates the row.
 func SetConnectionLocation(
 	ctx context.Context,
 	connectionId server.Id,
@@ -3592,9 +3594,10 @@ func SetConnectionLocation(
 		            arin_non_quality,
 		            arin_lookup_at,
 		            arin_database_build_epoch,
-		            arin_quality_verified
+		            arin_quality_verified,
+		            arin_quality_write_token
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
                 ON CONFLICT (connection_id) DO UPDATE
                 SET
                     client_id = $2,
@@ -3612,7 +3615,8 @@ func SetConnectionLocation(
                     arin_non_quality = $14,
                     arin_lookup_at = $15,
                     arin_database_build_epoch = $16,
-                    arin_quality_verified = $17
+                    arin_quality_verified = $17,
+                    arin_quality_write_token = $18
             `,
 			connectionId,
 			clientId,
@@ -3631,6 +3635,7 @@ func SetConnectionLocation(
 			connectionLocationScores.ArinLookupAt,
 			connectionLocationScores.ArinDatabaseBuildEpoch,
 			connectionLocationScores.ArinQualityVerified,
+			server.NewId(),
 		))
 	})
 	return

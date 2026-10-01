@@ -9440,4 +9440,7 @@ var migrations = []any{
 		ALTER TABLE network_client_location
 			ADD COLUMN arin_quality_verified boolean NOT NULL DEFAULT false;
 	`),
+	// Old upserts omit the positive fact on conflict and would retain a previous
+	// true value. Fence every write, including schema-750 writers and no-op updates.
+	newSqlMigration(subscriberQualityWriteGuardSchemaSql),
 }

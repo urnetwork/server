@@ -27,7 +27,7 @@ func TestGossipContainerBuildContract(t *testing.T) {
 		"GOOS=linux GOARCH=amd64 ${GOBUILD} -o build/linux/amd64/gossip",
 		"--platform linux/arm64/v8,linux/amd64",
 		"-t ${WARP_DOCKER_NAMESPACE}/${WARP_DOCKER_IMAGE}:${WARP_DOCKER_VERSION}",
-		"--output type=image,push=true,rewrite-timestamp=true",
+		"--output type=image,push=true,rewrite-timestamp=true,unpack=false",
 	} {
 		if !strings.Contains(makefile, required) {
 			t.Errorf("Gossip Makefile is missing %q", required)
