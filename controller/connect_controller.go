@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"google.golang.org/protobuf/proto"
@@ -743,28 +742,15 @@ func CreateContract(
 	// the per-peer TLS handshake (nil chain → skip), and cross-checks the public
 	// key against the unauthenticated `/key/<client_id>` lookup to defeat a
 	// man-in-the-middle platform that swaps both cert and key in lockstep.
-	var provideTlsCertificatePem []byte
-	var clientKeySignedTlsCertificate []byte
-	var destinationClientPublicKey []byte
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go server.HandleError(func() {
-		defer wg.Done()
-		certPem, sig, err := model.GetClientTlsCertificateAndSignature(ctx, destinationId)
-		if err == nil {
-			provideTlsCertificatePem = certPem
-			clientKeySignedTlsCertificate = sig
-		}
+	var metadata model.ClientContractMetadata
+	server.HandleError(func() {
+		// As before, optional metadata failure does not reject the contract.
+		// A public-key verification/fallback error preserves the valid cert.
+		metadata, _ = model.GetClientContractMetadata(ctx, destinationId)
 	})
-	go server.HandleError(func() {
-		defer wg.Done()
-		pub, err := model.GetClientPublicKey(ctx, destinationId)
-		if err == nil {
-			destinationClientPublicKey = pub
-		}
-	})
-	wg.Wait()
+	provideTlsCertificatePem := metadata.TLSCertificatePEM
+	clientKeySignedTlsCertificate := metadata.ClientKeySignedTLSCertificate
+	destinationClientPublicKey := metadata.PublicKey
 
 	provideTlsCertificate := splitPemBlocks(provideTlsCertificatePem)
 
