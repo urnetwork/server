@@ -3219,6 +3219,50 @@ was observed completing normally after 420s. The active probe treats those
 statements as known bounded maintenance until the same two-hour limit, after
 which it warns; task canaries report the resulting maintenance error as well.
 
+### 2.1a Bounded query/load observation
+Probe: `pg-query-sample`
+
+An incomplete attempt emits `pg-query-sample-unavailable`; it never clears an
+existing database incident. Default off. An explicit
+`-pg-query-sample-until <RFC3339 UTC clock>` arms one
+attempt before that expiry (at most 24 hours ahead). Keep the authoritative
+watcher's 15-minute cadence floor: this probe uses the same RunLoop slots,
+shared host limiter and queue-inclusive 40-second context. Do not start a
+second watcher or bypass SSH admission to obtain this sample. Promote a tested
+monitor binary through the singleton handoff before enabling this option.
+
+The direct-primary session is read-only, verifies the remote hostname,
+primary role, database and read-only setting, and collects 12 activity snapshots
+separated by two seconds. One SSH/psql process has a bounded stdin/output owner,
+three-second statement timeout, a 32-second remote owner and a 35-second outer
+kill bound. Catalog queries only: no application-table scan, EXPLAIN ANALYZE,
+DDL, query cancellation or pool change. An exclusive local attempt marker,
+fsynced with its directory before contact, prevents automatic retry after a source, admission or projection failure.
+
+The private `pg-query-sample` receipt retains finite state/wait/backend groups,
+separate query/transaction/state ages, current-database completed-runtime
+counter endpoints and one final blocker snapshot. SQL text never leaves the
+server-side classification expression; raw query IDs/PIDs are converted to
+run-local ordinal tokens before persistence. Exact source families are aids
+for attribution, not artifact or task identity. Local/loopback backend clients
+and declared application labels cannot establish the originating API,
+Taskworker, Proxy or customer process through PgBouncer.
+
+False-positive qualifiers: repeated backend-samples are not distinct requests,
+continuous wait residence, or CPU time. A lock victim does not identify the
+initiating workload. Completed execution time includes waits, and a later
+quieter sample does not clear an earlier capacity rejection. Completed-runtime
+values describe endpoint entry lifetimes, not this sample window or a particular
+backend owner. Interval deltas are withheld: unchanged global reset and rising
+counters cannot prove continuity across eviction/recreation or selective reset.
+False-negative qualifiers: completed history excludes unfinished/canceled and
+some utility statements; only the 5,000 largest lifetime execution-time query
+IDs are retained at each endpoint. Each activity snapshot caps 128 groups and
+retains their denominator; the receipt ranks at most 80 groups and 30 final
+completed-entry lifetime totals. The blocker snapshot selects at most 16 oldest lock waiters and 16
+blockers per waiter. Truncated, absent, expired or failed observations remain
+incomplete evidence, never healthy database coverage.
+
 ### 2.2 Wait events on active queries
 Probe: `wait-events`
 

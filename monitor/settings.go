@@ -411,7 +411,9 @@ type SignalSettings struct {
 	// APIReleaseProof is an explicit, finite local release expectation. Nil
 	// leaves the optional release diagnostic off without remote contact.
 	APIReleaseProof *APIReleaseProofSettings
-	StateDir        string
+	// PGQuerySampleUntil arms one finite catalog sample, default off.
+	PGQuerySampleUntil time.Time
+	StateDir           string
 	// SettingsGenerationCheck is armed by LoadSignalSettings. Embedders that
 	// assemble SignalSettings directly may omit it; synthetic tests inject it
 	// without touching Config or Vault.
@@ -507,6 +509,12 @@ func (s SignalSettings) withRuntime() SignalSettings {
 func (s SignalSettings) Validate() error { return s.withDefaults().validate() }
 
 func (s SignalSettings) validate() error {
+	if !s.PGQuerySampleUntil.IsZero() && s.PGQuerySampleUntil.After(s.Now().Add(24*time.Hour)) {
+		return fmt.Errorf("monitor: bounded PG query sample expiry exceeds 24 hours")
+	}
+	if !s.PGQuerySampleUntil.IsZero() && s.StateDir == "" {
+		return fmt.Errorf("monitor: bounded PG query sample requires a private state directory")
+	}
 	if s.APIReleaseProof != nil {
 		if err := s.APIReleaseProof.validate(); err != nil {
 			return err
@@ -632,6 +640,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		dnsAliases:             cloneDNSAliasSettings(settings.DNSAliases),
 		mimirPublishers:        cloneMimirPublisherSettings(settings.MimirPublishers),
 		apiReleaseProof:        cloneAPIReleaseProofSettings(settings.APIReleaseProof),
+		pgQuerySampleUntil:     settings.PGQuerySampleUntil,
 		publicUdp:              clonePublicUdpSettings(settings.PublicUdp),
 		stateDir:               settings.StateDir,
 		sshConnectTimeout:      settings.SSHConnectTimeout,

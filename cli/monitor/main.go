@@ -42,6 +42,7 @@ type monitorOptions struct {
 	excludedEdgeIPv6Hosts stringFlags
 	minimumProbeCadence   time.Duration
 	apiReleaseProofFile   string
+	pgQuerySampleUntil    string
 }
 
 // Exit only after the command-owned process lifecycle has returned.
@@ -84,6 +85,13 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 		}
 	}
 
+	var pgSampleUntil time.Time
+	if opts.pgQuerySampleUntil != "" {
+		pgSampleUntil, err = time.Parse(time.RFC3339, opts.pgQuerySampleUntil)
+		if err != nil {
+			return errors.New("monitor: invalid -pg-query-sample-until clock")
+		}
+	}
 	signals := servermonitor.NewSignals()
 	if opts.listSignals {
 		return writeSignalList(stdout, signals)
@@ -97,6 +105,15 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 		return err
 	}
 
+	if !pgSampleUntil.IsZero() {
+		selected := false
+		for _, signal := range signals {
+			selected = selected || signal.Key() == "pg-query-sample"
+		}
+		if !selected {
+			return errors.New("monitor: configured bounded PG query sample signal is excluded")
+		}
+	}
 	if releaseProof != nil {
 		selected := false
 		for _, signal := range signals {
@@ -112,6 +129,7 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 			return servermonitor.SignalSettings{}, err
 		}
 		settings.APIReleaseProof = releaseProof
+		settings.PGQuerySampleUntil = pgSampleUntil
 		return applyMonitorSettingsOptions(settings, opts)
 	}
 	settings, err := loadEffectiveSettings()
@@ -173,6 +191,7 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	flags.StringVar(&opts.mode, "mode", "", "SSH address mode: lan or overlay")
 	flags.StringVar(&opts.format, "format", alertFormatMarkdown, "alert output format: markdown or jsonl")
 	flags.StringVar(&opts.output, "output", "", "write one-shot alert output directly to this file")
+	flags.StringVar(&opts.pgQuerySampleUntil, "pg-query-sample-until", "", "UTC expiry for one optional bounded PostgreSQL query/load sample")
 	flags.StringVar(&opts.apiReleaseProofFile, "api-release-proof", "", "private local JSON expectation for the optional bounded API release proof")
 	flags.DurationVar(&opts.minimumProbeCadence, "min-probe-cadence", 0, "continuous active-probe cadence floor and first-run delay; standing logs are unchanged")
 	flags.Var(&opts.keys, "ssh-key", "SSH identity path; may be repeated")
@@ -185,6 +204,12 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	}
 	if opts.minimumProbeCadence < 0 {
 		return monitorOptions{}, errors.New("monitor: -min-probe-cadence must not be negative")
+	}
+	if opts.pgQuerySampleUntil != "" && (opts.once || opts.minimumProbeCadence < 15*time.Minute) {
+		return monitorOptions{}, errors.New("monitor: -pg-query-sample-until requires continuous mode with at least15m cadence floor")
+	}
+	if opts.pgQuerySampleUntil != "" && opts.listSignals {
+		return monitorOptions{}, errors.New("monitor: -pg-query-sample-until cannot be used with -list-signals")
 	}
 	if opts.apiReleaseProofFile != "" && opts.listSignals {
 		return monitorOptions{}, errors.New("monitor: -api-release-proof cannot be used with -list-signals")

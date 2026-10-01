@@ -54,6 +54,7 @@ func NewSignals() []Signal {
 		NewLogErrorsSignal(),
 		NewSettingsFreshnessSignal(),
 		NewActiveQueriesSignal(),
+		NewPgQuerySampleSignal(),
 		NewWaitEventsSignal(),
 		NewReindexDebrisSignal(),
 		NewPlannerFlipsSignal(),
