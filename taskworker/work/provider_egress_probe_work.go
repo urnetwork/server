@@ -1779,107 +1779,127 @@ func recordProviderEgressRunTally(ctx context.Context, measuredAt time.Time, run
 func runProviderEgressProbe(
 	ctx context.Context,
 	args *ProviderEgressProbeArgs,
-) (*ProviderEgressProbeResult, error) {
-	identity := model.GetProberIdentity(ctx)
-	if identity == nil || identity.NetworkId == nil || identity.ClientId == nil || identity.ByClientJwt == "" {
-		return nil, fmt.Errorf("provider egress prober identity is not bootstrapped")
-	}
-	credentials, err := newProviderEgressCredentials(identity)
-	if err != nil {
-		return nil, err
+) (result *ProviderEgressProbeResult, returnErr error) {
+	execution, ok := task.ExecutionIdentityFromContext(ctx)
+	if !ok {
+		return nil, fmt.Errorf("provider egress probe requires a durable task execution owner")
 	}
 	operatorSecret, err := readProviderEgressOperatorSecret()
 	if err != nil {
 		return nil, err
 	}
-	// All shards use this one internal network. Size its credit from this
-	// shard's selected cohort and the total simultaneous shard count, then
-	// serialize conditional grants before any tunnel is admitted.
-	minimumCredit, err := providerUrlProbeCreditMinimum(args)
+	key := model.ProberShardKey{TaskId: execution.TaskId, Epoch: execution.Epoch, ShardIndex: args.ShardIndex, ShardCount: args.ShardCount}
+	return runWithProviderEgressShard(ctx, key, args, func(identity *model.ProberIdentity) (*ProviderEgressProbeResult, error) {
+		credentials, err := newProviderEgressCredentials(identity)
+		if err != nil {
+			return nil, err
+		}
+		operator := &ingest.Client{
+			ServerUrl:      args.APIURL,
+			OperatorSecret: operatorSecret,
+			ShardIndex:     args.ShardIndex,
+			ShardCount:     args.ShardCount,
+			Http:           controlplane.NewHTTPClient(providerEgressControlPlaneTimeout),
+		}
+		return runWithProviderEgressControl(ctx, credentials, func(localControl connect.NetworkClientControl) (*ProviderEgressProbeResult, error) {
+			tunnelConfig := providertunnel.Config{
+				ApiUrl:                  args.APIURL,
+				PlatformUrl:             args.PlatformURL,
+				ByJwt:                   identity.ByClientJwt,
+				ClientId:                connect.Id(*identity.ClientId),
+				DeviceDescription:       model.ProberClientDescription,
+				DeviceSpec:              model.ProberClientDeviceSpec,
+				Version:                 server.RequireVersion(),
+				DnsObservations:         &egressProbeDns.observations,
+				AuthObservations:        &egressProbeAuth.observations,
+				InitialPingObservations: &egressProbeInitialPing.observations,
+				ClientCredentials:       credentials,
+				ClientControl:           localControl,
+			}
+
+			// every finding the prober submits passes through the metrics reporter
+			// first (see provider_egress_probe_metrics.go), then to the operator
+			reporter := newEgressProbeMetricsReporter(operator, lookupProviderEgressCountry)
+			readiness := newProviderEgressProbeReadiness(*identity.NetworkId)
+
+			pass := &providerEgressProbePass{
+				urlProbes: true,
+				readiness: readiness,
+				fullDue:   operator.Due,
+				loadPins: func(ctx context.Context) (map[string][]string, error) {
+					servedPins, err := operator.GeolocationPins(ctx)
+					if err != nil {
+						return nil, err
+					}
+					return fleetprobe.ValidatePins(servedPins)
+				},
+				loadPool: func(ctx context.Context) (*egresshealth.Pool, error) {
+					return fleetprobe.LoadPool(ctx, operator.Http, fleetprobe.PoolUrl(args.APIURL), operatorSecret)
+				},
+				fullOptions: fleetprobe.FullOptions{
+					UrlProbe:     true,
+					TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, providerUrlProbeBatch(args)),
+				},
+				fullSink:     reporter,
+				recordTally:  recordProviderEgressRunTally,
+				runFull:      fleetprobe.RunUrlProbes,
+				refreshFleet: providerUrlProbeFleetHeartbeat(args),
+			}
+			result, err := runWithProviderUrlProbeFleetHeartbeat(ctx, args,
+				pass.refreshFleet, func() (*ProviderEgressProbeResult, error) { return pass.run(ctx, args) })
+			outcome := "ok"
+			if err != nil {
+				outcome = "error"
+			}
+			urlProbeShardPasses.WithLabelValues(strconv.Itoa(args.ShardIndex), outcome).Inc()
+			if result == nil {
+				return nil, err
+			}
+
+			log.Printf(
+				"provider-url-probe task: shard=%d/%d due=%d attempted=%d accepted=%d local_failure=%d not_measured=%d backlog=%t",
+				args.ShardIndex,
+				args.ShardCount,
+				result.UrlDue,
+				result.Attempted,
+				result.Submitted,
+				result.Failed,
+				result.UrlNotMeasured,
+				result.Backlog,
+			)
+			return result, err
+		})
+	})
+}
+
+// The callback owns and joins its tunnels/control client before returning. This
+// boundary persists cleanup even when the caller cancels or a callback fails.
+func runWithProviderEgressShard(ctx context.Context, key model.ProberShardKey, args *ProviderEgressProbeArgs, run func(*model.ProberIdentity) (*ProviderEgressProbeResult, error)) (result *ProviderEgressProbeResult, returnErr error) {
+	credit, err := providerUrlProbeShardCredit(args)
 	if err != nil {
 		return nil, err
 	}
-	creditGranted, err := model.EnsureProberTransferBalance(ctx, minimumCredit)
+	owner, err := model.BeginProberShard(ctx, key, credit, time.Duration(args.MaxTimeSeconds)*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("provider egress prober credit preflight: %w", err)
+		return nil, fmt.Errorf("provider egress shard allocation: %w", err)
 	}
-	if creditGranted {
-		glog.Infof("[egressprobe]replenished shared internal prober credit before shard %d/%d; minimum available=%s\n",
-			args.ShardIndex, args.ShardCount, model.ByteCountHumanReadable(minimumCredit))
+	defer func() {
+		// runWithProviderEgressControl and its tunnel owners have joined before
+		// this cleanup runs. Cancellation still records draining durably; the
+		// recurring reaper owns any unsettled or interrupted remainder.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancel()
+		if err := model.DrainProberShard(cleanupCtx, key); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("provider egress shard drain: %w", err))
+			return
+		}
+		if _, err := model.ReapProberShard(cleanupCtx, key); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("provider egress shard cleanup: %w", err))
+		}
+	}()
+	identity, err := model.ProberShardIdentity(ctx, owner)
+	if err != nil {
+		return nil, err
 	}
-	operator := &ingest.Client{
-		ServerUrl:      args.APIURL,
-		OperatorSecret: operatorSecret,
-		ShardIndex:     args.ShardIndex,
-		ShardCount:     args.ShardCount,
-		Http:           controlplane.NewHTTPClient(providerEgressControlPlaneTimeout),
-	}
-	return runWithProviderEgressControl(ctx, credentials, func(localControl connect.NetworkClientControl) (*ProviderEgressProbeResult, error) {
-		tunnelConfig := providertunnel.Config{
-			ApiUrl:                  args.APIURL,
-			PlatformUrl:             args.PlatformURL,
-			ByJwt:                   identity.ByClientJwt,
-			ClientId:                connect.Id(*identity.ClientId),
-			DeviceDescription:       model.ProberClientDescription,
-			DeviceSpec:              model.ProberClientDeviceSpec,
-			Version:                 server.RequireVersion(),
-			DnsObservations:         &egressProbeDns.observations,
-			AuthObservations:        &egressProbeAuth.observations,
-			InitialPingObservations: &egressProbeInitialPing.observations,
-			ClientCredentials:       credentials,
-			ClientControl:           localControl,
-		}
-
-		// every finding the prober submits passes through the metrics reporter
-		// first (see provider_egress_probe_metrics.go), then to the operator
-		reporter := newEgressProbeMetricsReporter(operator, lookupProviderEgressCountry)
-		readiness := newProviderEgressProbeReadiness(*identity.NetworkId)
-
-		pass := &providerEgressProbePass{
-			urlProbes: true,
-			readiness: readiness,
-			fullDue:   operator.Due,
-			loadPins: func(ctx context.Context) (map[string][]string, error) {
-				servedPins, err := operator.GeolocationPins(ctx)
-				if err != nil {
-					return nil, err
-				}
-				return fleetprobe.ValidatePins(servedPins)
-			},
-			loadPool: func(ctx context.Context) (*egresshealth.Pool, error) {
-				return fleetprobe.LoadPool(ctx, operator.Http, fleetprobe.PoolUrl(args.APIURL), operatorSecret)
-			},
-			fullOptions: fleetprobe.FullOptions{
-				UrlProbe:     true,
-				TunnelConfig: providerEgressProbeTunnelConfig(tunnelConfig, providerUrlProbeBatch(args)),
-			},
-			fullSink:     reporter,
-			recordTally:  recordProviderEgressRunTally,
-			runFull:      fleetprobe.RunUrlProbes,
-			refreshFleet: providerUrlProbeFleetHeartbeat(args),
-		}
-		result, err := runWithProviderUrlProbeFleetHeartbeat(ctx, args,
-			pass.refreshFleet, func() (*ProviderEgressProbeResult, error) { return pass.run(ctx, args) })
-		outcome := "ok"
-		if err != nil {
-			outcome = "error"
-		}
-		urlProbeShardPasses.WithLabelValues(strconv.Itoa(args.ShardIndex), outcome).Inc()
-		if result == nil {
-			return nil, err
-		}
-
-		log.Printf(
-			"provider-url-probe task: shard=%d/%d due=%d attempted=%d accepted=%d local_failure=%d not_measured=%d backlog=%t",
-			args.ShardIndex,
-			args.ShardCount,
-			result.UrlDue,
-			result.Attempted,
-			result.Submitted,
-			result.Failed,
-			result.UrlNotMeasured,
-			result.Backlog,
-		)
-		return result, err
-	})
+	return run(identity)
 }

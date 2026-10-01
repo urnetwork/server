@@ -1420,6 +1420,9 @@ func createTransferEscrowInTx(
 	if contractTransferByteCount < 0 {
 		return nil, nil, fmt.Errorf("negative contract transfer byte count")
 	}
+	if err := validateProberShardPayerInTx(ctx, tx, sourceNetworkId, destinationNetworkId, payerNetworkId); err != nil {
+		return nil, nil, err
+	}
 	if err := lockActiveContractClientsInTx(
 		ctx,
 		tx,
@@ -1789,7 +1792,8 @@ func CreateCompanionTransferEscrow(
 			ctx,
 			`
                 SELECT contract_id,
-                    CASE WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4)
+                    CASE WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4
+                        UNION ALL SELECT 1 FROM prober_shard_run WHERE network_id = $4)
                     THEN GREATEST(transfer_byte_count, (
                         SELECT max(transfer_byte_count)
                         FROM (
@@ -1879,7 +1883,8 @@ func CreateCompanionTransferEscrow(
 				ctx,
 				`
                     SELECT contract_id,
-                        CASE WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4)
+                        CASE WHEN EXISTS (SELECT 1 FROM prober_identity WHERE singleton AND network_id = $4
+                            UNION ALL SELECT 1 FROM prober_shard_run WHERE network_id = $4)
                         THEN GREATEST(transfer_byte_count, (
                             SELECT max(transfer_byte_count)
                             FROM (
@@ -2155,6 +2160,11 @@ func createContractNoEscrowInTx(
 	contractTransferByteCount ByteCount,
 	usageOriginIsSource bool,
 ) (contractId server.Id, returnErr error) {
+	// A shard-owned probe always pays from its private grant. Ordinary network
+	// and friends-and-family contracts keep their existing no-payer behavior.
+	if err := validateProberShardPayerInTx(ctx, tx, sourceNetworkId, destinationNetworkId, server.Id{}); err != nil {
+		return server.Id{}, err
+	}
 	if err := lockActiveContractClientsInTx(
 		ctx,
 		tx,
@@ -4878,7 +4888,10 @@ func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 			`
 			DELETE FROM transfer_balance
 			WHERE
-				end_time <= $1
+				end_time <= $1 AND NOT EXISTS (
+					SELECT 1 FROM prober_shard_run r
+					WHERE r.balance_id=transfer_balance.balance_id AND r.state<>'closed'
+				)
 			RETURNING balance_id
 			`,
 			minTime.UTC(),

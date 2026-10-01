@@ -411,6 +411,7 @@ func (self *ConnectionAnnounce) run() {
 		self.handlerId,
 		self.settings.LocationRetryTimeout,
 		self.ipFamilyIntent,
+		self.networkId,
 	)
 	if err != nil {
 		glog.Infof("[t][%s]could not connect client. err = %s\n", hex.EncodeToString(clientAddressHash[:]), err)
