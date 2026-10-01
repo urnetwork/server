@@ -49,15 +49,17 @@ type providerUrlProbeFleetSnapshot struct {
 }
 
 type providerUrlProbeFleetCollector struct {
-	snapshot atomic.Pointer[providerUrlProbeFleetSnapshot]
-	fleet    *prometheus.Desc
-	oldest   *prometheus.Desc
-	observed *prometheus.Desc
-	started  *prometheus.Desc
+	snapshot       atomic.Pointer[providerUrlProbeFleetSnapshot]
+	fleet          *prometheus.Desc
+	oldest         *prometheus.Desc
+	observed       *prometheus.Desc
+	started        *prometheus.Desc
+	refreshMetrics *providerUrlProbeFleetRefreshCollectors
 }
 
 func newProviderUrlProbeFleetCollector() *providerUrlProbeFleetCollector {
 	return &providerUrlProbeFleetCollector{
+		refreshMetrics: urlProbeFleetRefreshMetrics,
 		fleet: prometheus.NewDesc("urnetwork_url_probe_fleet",
 			"Current reliability and ARIN-risk eligible URL cohort, rolling measured-run quota, and unresolved TLS state", []string{"state"}, nil),
 		oldest: prometheus.NewDesc("urnetwork_url_probe_oldest_due_seconds",
@@ -103,9 +105,13 @@ var urlProbeFleetMetrics = newProviderUrlProbeFleetCollector()
 
 // Accepted URL history and unresolved TLS are read in one SQL snapshot at the
 // supplied comparison clock. A failed or late census retains the old generation.
-func (self *providerUrlProbeFleetCollector) refresh(ctx context.Context, observedAt time.Time, read func(context.Context, time.Time) model.ProviderUrlProbeFleet) error {
+func (self *providerUrlProbeFleetCollector) refresh(ctx context.Context, observedAt time.Time, read func(context.Context, time.Time) model.ProviderUrlProbeFleet) (refreshErr error) {
 	snapshotCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
+	started := time.Now()
+	// Observe before the deferred cleanup cancellation; retained generations
+	// keep their original comparison clock and fifteen-series atomic shape.
+	defer func() { self.refreshMetrics.observe(snapshotCtx, refreshErr, time.Since(started)) }()
 	var fleet model.ProviderUrlProbeFleet
 	if failure := server.HandleError(func() { fleet = read(snapshotCtx, observedAt) }); failure != nil {
 		return fmt.Errorf("URL fleet census failed: %v", failure)
