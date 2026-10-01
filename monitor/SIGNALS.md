@@ -10615,6 +10615,50 @@ this signal. Recovery requires two clean fresh cadences and improving
 acknowledged **distinct** measured providers; the four-hour fleet-scan goal
 is not satisfied by fewer RPCs, successful auth or buffered worker completions.
 
+The bounded 2026-10-01 16:32 UTC API control paired all 20 configured processes.
+The 16 non-beta pools had 512 total connections, no idle connections, 200–353
+acquired connections and 159–312 constructing connections per process. Total
+pool occupancy is not acquired occupancy: pgx counts connection construction
+in its total. Successful pool acquisitions averaged 7.9–10.3 seconds on edge-3
+and edge-4, alongside 19–21-second control-handler means. Across the fleet,
+649,836 of 734,331 control completions were canceled in the endpoint window;
+these are HTTP-handler counts, not distinct logical contract attempts. Existing
+exact FP2-route log evidence separately identified PgBouncer's cached
+PostgreSQL `too many clients` rejection. That evidence does not identify the
+backend owner, initiating query, wait residence, or origin of every canceled
+request. A 17:00 UTC control had zero constructing connections and 5,673 idle
+connections across the API fleet: the earlier state must not be described as
+continuously present or cleared by a later source-only change.
+
+The owning contract path previously acquired two PostgreSQL connections in
+parallel for a destination's TLS certificate and signed public key. The
+combined metadata reader uses one indexed SELECT and releases its connection
+before signed-record verification and any legacy Redis fallback. Signed
+retirement, inactive-client state and tombstones retain authority over legacy
+Redis; malformed signed data never falls back to an unsigned key. A key-only
+failure preserves a valid certificate, as the independent readers did. Real
+SQL/Redis differential tests check the actual acquisition count (two to one),
+rotation/absence authority and optional-field failures. A combined SQL failure
+gets one certificate-only fallback if the caller remains live; it never uses
+an unsigned Redis key after failure to read signed authority. This adds at most
+one certificate-only fallback invocation; each database invocation retains the
+existing retry policy. The healthy path uses one acquisition, and a fixed
+nonretrying SQL fault uses two. The zero control identity retains its
+certificate lookup and public-key rejection. This reduces metadata work; it
+does not establish that metadata reads exhausted backend slots or
+replace §1.3a's direct owner/wait/headroom closure gates. Authentication still
+validates current account/client state, and accounting transactions are
+unchanged. The current code requires no additional schema for this read, but a
+release must preserve the deployed schema catalog and dependency closure.
+
+False-positive qualifier: the pool's created counter increments constructor
+attempts before connection establishment, so its delta is not successful
+backend replacements. Lifetime/idle-destruction counters omit other close
+causes. False-negative qualifier: a fresh idle-pool snapshot cannot reconstruct
+the pressure peak, explain initial-list read failures, or prove sustained
+recovery. Existing same-request coalescing must be checked in the actual
+producer's dependency closure before proposing another retry/coalescing fix.
+
 ### 2.19f Rolling URL-probe coverage and measured-run capacity
 Probe: `url-probe-coverage`
 
