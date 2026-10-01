@@ -4851,3 +4851,18 @@ contains pre-five-second checks. This is one publication from a changing
 population, not proof that old writer processes retired or that every future
 publication will stay at 4/5. A later stable publication and current writer
 retirement check should close that gap.
+
+A second distinct complete score publication evaluated 01:40:56.097–
+01:41:35.720Z and published 01:46:22.829Z. It also reported the exact 4/5
+ratio. Among 107,747 public online providers, 20,602 passed (19.121%),
+86,955 failed and 190 had no measured URL evidence; native Quality was
+19,406 and native Speed 20,602. Its exact accepted-history window was
+`(2026-09-30T17:40:56.436549Z, 2026-10-01T01:40:56.436549Z]`.
+The first-to-second aggregate changes include 1,548 more online providers
+and 976 fewer ratio passes. These are unjoined changing populations; they
+do not identify which providers changed state or isolate the higher threshold
+from continuing five-second evidence turnover. Both publications establish
+that the active score export used 4/5 at their source times, while complete
+old-writer retirement remains unproved. A second bounded mounted-config
+attestation stopped at its first host with SSH exit 255 and produced no
+qualified host row; it neither proves nor disproves a mounted override.
