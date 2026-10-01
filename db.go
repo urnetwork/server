@@ -550,6 +550,7 @@ func closePgConnection(ctx context.Context, conn interface {
 func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), options ...any) {
 	retryOptions := OptRetryDefault()
 	rwOptions := OptReadOnly()
+	var timing *DbTiming
 	// debugOptions := OptNoDebug()
 	for _, option := range options {
 		switch v := option.(type) {
@@ -557,6 +558,8 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 			retryOptions = v
 		case DbReadWriteOptions:
 			rwOptions = v
+		case *DbTiming:
+			timing = v
 			// case DbDebugOptions:
 			// 	debugOptions = v
 		}
@@ -571,13 +574,18 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 		callbackStarted := false
 		callbackWrites := pgWriteSnapshot{}
 		connectionRetrySafe := false
+		acquireStarted := timing.start()
 		conn, connErr := pool.open().Acquire(ctx)
+		timing.finish(DbTimingAcquire, acquireStarted)
 		if connErr != nil {
 			if retryOptions.rerunOnConnectionError {
+				waitStarted := timing.start()
 				select {
 				case <-ctx.Done():
+					timing.finish(DbTimingRetryWait, waitStarted)
 					panic(DbContextDoneError)
 				case <-time.After(backoff.NextRetryTimeout()):
+					timing.finish(DbTimingRetryWait, waitStarted)
 					if retryEndTime.Before(NowUtc()) {
 						panic(connErr)
 					}
@@ -630,10 +638,13 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 
 		if pgErr != nil {
 			if isTransientError(pgErr) && retryOptions.rerunOnTransientError {
+				waitStarted := timing.start()
 				select {
 				case <-ctx.Done():
+					timing.finish(DbTimingRetryWait, waitStarted)
 					panic(DbContextDoneError)
 				case <-time.After(backoff.NextRetryTimeout()):
+					timing.finish(DbTimingRetryWait, waitStarted)
 					if retryEndTime.Before(NowUtc()) {
 						panic(pgErr)
 					}
@@ -652,10 +663,13 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				panic(DbContextDoneError)
 			}
 			if retryOptions.rerunOnConnectionError && connectionRetrySafe && canRetryConnectionError(connErr) {
+				waitStarted := timing.start()
 				select {
 				case <-ctx.Done():
+					timing.finish(DbTimingRetryWait, waitStarted)
 					panic(DbContextDoneError)
 				case <-time.After(backoff.NextRetryTimeout()):
+					timing.finish(DbTimingRetryWait, waitStarted)
 					if retryEndTime.Before(NowUtc()) {
 						panic(connErr)
 					}
@@ -719,6 +733,7 @@ func rollbackTx(ctx context.Context, tx PgTx) {
 
 func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), options ...any) {
 	retryOptions := OptRetryDefault()
+	var timing *DbTiming
 	// by default use RepeatableRead isolation
 	// https://www.postgresql.org/docs/current/transaction-iso.html
 	txOptions := pgx.TxOptions{
@@ -731,6 +746,8 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 		switch v := option.(type) {
 		case DbRetryOptions:
 			retryOptions = v
+		case *DbTiming:
+			timing = v
 		case pgx.TxOptions:
 			txOptions = v
 		case pgx.TxIsoLevel:
@@ -751,7 +768,9 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 		var pgErr error
 		var commitErr error
 		dbWithPool(ctx, pool, func(conn PgConn) {
+			beginStarted := timing.start()
 			tx, err := conn.BeginTx(ctx, txOptions)
+			timing.finish(DbTimingBegin, beginStarted)
 			if err != nil {
 				panic(err)
 			}
@@ -760,7 +779,9 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 			// }
 			defer func() {
 				if err := recover(); err != nil {
+					rollbackStarted := timing.start()
 					rollbackTx(ctx, tx)
+					timing.finish(DbTimingRollback, rollbackStarted)
 					panic(err)
 				}
 			}()
@@ -798,19 +819,26 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 					context.WithoutCancel(ctx),
 					PgCommitTimeout,
 				)
+				commitStarted := timing.start()
 				commitErr = tx.Commit(commitCtx)
+				timing.finish(DbTimingCommit, commitStarted)
 				commitCancel()
 			} else {
+				rollbackStarted := timing.start()
 				rollbackTx(ctx, tx)
+				timing.finish(DbTimingRollback, rollbackStarted)
 			}
 		}, options...)
 
 		if pgErr != nil {
 			if isTransientError(pgErr) && retryOptions.rerunOnTransientError {
+				waitStarted := timing.start()
 				select {
 				case <-ctx.Done():
+					timing.finish(DbTimingRetryWait, waitStarted)
 					panic(DbContextDoneError)
 				case <-time.After(backoff.NextRetryTimeout()):
+					timing.finish(DbTimingRetryWait, waitStarted)
 				}
 				if retryEndTime.Before(NowUtc()) {
 					panic(pgErr)
@@ -826,10 +854,13 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 		}
 		if commitErr != nil {
 			if retryOptions.rerunOnCommitError && canRetryCommitError(commitErr) {
+				waitStarted := timing.start()
 				select {
 				case <-ctx.Done():
+					timing.finish(DbTimingRetryWait, waitStarted)
 					panic(DbContextDoneError)
 				case <-time.After(backoff.NextRetryTimeout()):
+					timing.finish(DbTimingRetryWait, waitStarted)
 				}
 				if retryEndTime.Before(NowUtc()) {
 					panic(commitErr)

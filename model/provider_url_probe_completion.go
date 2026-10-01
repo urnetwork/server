@@ -135,14 +135,22 @@ func providerUrlProbeCompletedPriorityReady(now time.Time) bool {
 // A retained issued claim is the idempotency authority. Once retired, an old
 // completion is rejected, never recreated with a new timestamp or count.
 func RemoveExpiredProviderUrlProbeRuns(ctx context.Context, now time.Time, limit int) (removed int64) {
+	return removeExpiredProviderUrlProbeRuns(ctx, now, limit, nil)
+}
+
+func removeExpiredProviderUrlProbeRuns(ctx context.Context, now time.Time, limit int, observation *ProviderUrlProbeDueObservation) (removed int64) {
 	if limit <= 0 {
 		return
 	}
-	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Exec(ctx, providerUrlProbeRunRetentionSql,
-			now.Add(-providerUrlProbeRunRetention).UTC(), limit)
-		server.Raise(err)
-		removed = result.RowsAffected()
+	observation.measure(ProviderUrlProbeDueRetentionTransaction, func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			observation.measure(ProviderUrlProbeDueRetentionQuery, func() {
+				result, err := tx.Exec(ctx, providerUrlProbeRunRetentionSql,
+					now.Add(-providerUrlProbeRunRetention).UTC(), limit)
+				server.Raise(err)
+				removed = result.RowsAffected()
+			})
+		}, observation.database(true))
 	})
 	return
 }

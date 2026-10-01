@@ -109,6 +109,19 @@ type ProviderUrlProbeDueResult struct {
 // Maintains owned counts before priority selection. Both legacy and priority
 // order issue durable run identities, so receipt ingestion precedes activation.
 func ClaimProviderUrlProbeDueWithStatus(ctx context.Context, now time.Time, limit, shardIndex, shardCount int) ProviderUrlProbeDueResult {
+	return ClaimProviderUrlProbeDueWithObservation(ctx, now, limit, shardIndex, shardCount, nil)
+}
+
+// Observation is optional and request-local; it never changes the wire result
+// or the transaction, statement, claim, and cleanup ordering.
+func ClaimProviderUrlProbeDueWithObservation(ctx context.Context, now time.Time, limit, shardIndex, shardCount int, observation *ProviderUrlProbeDueObservation) (result ProviderUrlProbeDueResult) {
+	observation.measure(ProviderUrlProbeDueModel, func() {
+		result = claimProviderUrlProbeDue(ctx, now, limit, shardIndex, shardCount, observation)
+	})
+	return
+}
+
+func claimProviderUrlProbeDue(ctx context.Context, now time.Time, limit, shardIndex, shardCount int, observation *ProviderUrlProbeDueObservation) ProviderUrlProbeDueResult {
 	result := ProviderUrlProbeDueResult{Providers: []ProviderUrlProbeDue{}}
 	if limit <= 0 || shardCount < 1 || ProviderUrlProbeSlotCount < shardCount || shardIndex < 0 || shardIndex >= shardCount {
 		return result
@@ -118,34 +131,40 @@ func ClaimProviderUrlProbeDueWithStatus(ctx context.Context, now time.Time, limi
 		result.CompletedRunPrioritySince = &since
 	}
 	result.CompletedRunPriorityReady = providerUrlProbeCompletedPriorityReady(now)
-	server.Tx(ctx, func(tx server.PgTx) {
-		// A serialization/deadlock retry must discard the rolled-back result.
-		result.Providers = []ProviderUrlProbeDue{}
-		result.PriorityMaintenancePending = false
-		maintained := maintainProviderUrlProbeCompletedPriority(ctx, tx, now, shardIndex, shardCount, result.CompletedRunPriorityReady)
-		if result.CompletedRunPriorityReady && !maintained {
-			result.PriorityMaintenancePending = true
-			return
-		}
-		rows, err := tx.Query(ctx, providerUrlProbeDueSql(shardIndex, shardCount, result.CompletedRunPriorityReady),
-			now.UTC(), ProvideModePublic, limit, shardCount, shardIndex,
-			ProviderUrlProbeRunTarget, now.Add(ProviderEgressProbeAttemptBackoff).UTC())
-		server.WithPgResult(rows, err, func() {
-			for rows.Next() {
-				var provider ProviderUrlProbeDue
-				var securityDestinations []byte
-				server.Raise(rows.Scan(&provider.ClientId, &provider.CycleStartedAt, &provider.RunsNeeded, &provider.OutcomeCount,
-					&provider.CountryCode, &provider.Region, &securityDestinations,
-					&provider.ClaimOrdinal, &provider.ClaimedAt, &provider.CompletedRunCount))
-				server.Raise(json.Unmarshal(securityDestinations, &provider.SecurityDestinations))
-				provider.SuccessesNeeded = provider.RunsNeeded
-				result.Providers = append(result.Providers, provider)
-			}
-		})
+	observation.measure(ProviderUrlProbeDueClaimTransaction, func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			observation.measure(ProviderUrlProbeDueClaimBody, func() {
+				// A serialization/deadlock retry must discard the rolled-back result.
+				result.Providers = []ProviderUrlProbeDue{}
+				result.PriorityMaintenancePending = false
+				maintained := maintainProviderUrlProbeCompletedPriority(ctx, tx, now, shardIndex, shardCount, result.CompletedRunPriorityReady, observation)
+				if result.CompletedRunPriorityReady && !maintained {
+					result.PriorityMaintenancePending = true
+					return
+				}
+				observation.measure(ProviderUrlProbeDueClaimQueryRows, func() {
+					rows, err := tx.Query(ctx, providerUrlProbeDueSql(shardIndex, shardCount, result.CompletedRunPriorityReady),
+						now.UTC(), ProvideModePublic, limit, shardCount, shardIndex,
+						ProviderUrlProbeRunTarget, now.Add(ProviderEgressProbeAttemptBackoff).UTC())
+					server.WithPgResult(rows, err, func() {
+						for rows.Next() {
+							var provider ProviderUrlProbeDue
+							var securityDestinations []byte
+							server.Raise(rows.Scan(&provider.ClientId, &provider.CycleStartedAt, &provider.RunsNeeded, &provider.OutcomeCount,
+								&provider.CountryCode, &provider.Region, &securityDestinations,
+								&provider.ClaimOrdinal, &provider.ClaimedAt, &provider.CompletedRunCount))
+							server.Raise(json.Unmarshal(securityDestinations, &provider.SecurityDestinations))
+							provider.SuccessesNeeded = provider.RunsNeeded
+							result.Providers = append(result.Providers, provider)
+						}
+					})
+				})
+			})
+		}, observation.database(false))
 	})
 	// Retire at least as many old receipt slots as this admission can issue.
 	// Cleanup remains bounded even when a mostly empty shard is polled.
-	RemoveExpiredProviderUrlProbeRuns(ctx, now, limit)
+	removeExpiredProviderUrlProbeRuns(ctx, now, limit, observation)
 	return result
 }
 

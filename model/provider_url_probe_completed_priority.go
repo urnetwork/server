@@ -118,23 +118,31 @@ func providerUrlProbePromoteSql(shardIndex, shardCount int) string {
 
 // One fixed observation time covers maintenance and the following claim.
 // False means more bounded work is required, not that the due cohort is empty.
-func maintainProviderUrlProbeCompletedPriority(ctx context.Context, tx server.PgTx, now time.Time, shardIndex, shardCount int, priority bool) bool {
+func maintainProviderUrlProbeCompletedPriority(ctx context.Context, tx server.PgTx, now time.Time, shardIndex, shardCount int, priority bool, observation *ProviderUrlProbeDueObservation) bool {
 	var changed int
-	server.Raise(tx.QueryRow(ctx, providerUrlProbeExpirySql(shardIndex, shardCount),
-		now.UTC(), providerUrlProbeExpiryClients).Scan(&changed))
+	observation.measure(ProviderUrlProbeDueExpiry, func() {
+		server.Raise(tx.QueryRow(ctx, providerUrlProbeExpirySql(shardIndex, shardCount),
+			now.UTC(), providerUrlProbeExpiryClients).Scan(&changed))
+	})
 	var pending bool
-	server.Raise(tx.QueryRow(ctx, providerUrlProbeMaintenancePendingSql(
-		"cycle.completed_next_expiry_at<=$1", "completed_next_expiry_at", shardIndex, shardCount), now.UTC()).Scan(&pending))
+	observation.measure(ProviderUrlProbeDueExpiryPending, func() {
+		server.Raise(tx.QueryRow(ctx, providerUrlProbeMaintenancePendingSql(
+			"cycle.completed_next_expiry_at<=$1", "completed_next_expiry_at", shardIndex, shardCount), now.UTC()).Scan(&pending))
+	})
 	if pending {
 		return false
 	}
 	if !priority {
 		return true
 	}
-	server.Raise(tx.QueryRow(ctx, providerUrlProbePromoteSql(shardIndex, shardCount),
-		now.UTC(), providerUrlProbePromoteLimit).Scan(&changed))
-	server.Raise(tx.QueryRow(ctx, providerUrlProbeMaintenancePendingSql(
-		"cycle.eligible AND NOT cycle.completed_priority_ready AND cycle.next_attempt_at<=$1",
-		"next_attempt_at", shardIndex, shardCount), now.UTC()).Scan(&pending))
+	observation.measure(ProviderUrlProbeDuePromote, func() {
+		server.Raise(tx.QueryRow(ctx, providerUrlProbePromoteSql(shardIndex, shardCount),
+			now.UTC(), providerUrlProbePromoteLimit).Scan(&changed))
+	})
+	observation.measure(ProviderUrlProbeDuePromotePending, func() {
+		server.Raise(tx.QueryRow(ctx, providerUrlProbeMaintenancePendingSql(
+			"cycle.eligible AND NOT cycle.completed_priority_ready AND cycle.next_attempt_at<=$1",
+			"next_attempt_at", shardIndex, shardCount), now.UTC()).Scan(&pending))
+	})
 	return !pending
 }

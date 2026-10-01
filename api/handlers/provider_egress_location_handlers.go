@@ -289,12 +289,6 @@ func ProviderEgressLocationDue(w http.ResponseWriter, r *http.Request) {
 		shardIndex = parsed
 	}
 
-	// Stored timestamps hold UTC without a timezone; pass an explicit UTC clock.
-	now := server.NowUtc()
-	result := model.ClaimProviderUrlProbeDueWithStatus(r.Context(), now, limit, shardIndex, shardCount)
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(result); err != nil {
-		glog.Infof("[pegl]could not write response. err = %s\n", err)
-	}
+	respondProviderUrlProbeDue(w, r, limit, shardIndex, shardCount,
+		model.ClaimProviderUrlProbeDueWithObservation, providerUrlProbeDueTiming)
 }
