@@ -17,6 +17,7 @@ func TestOAuthPlatformForState(t *testing.T) {
 	cases := map[string]string{
 		appleOAuthTestState("windows"):                                    "windows",
 		appleOAuthTestState("linux"):                                      "linux",
+		appleOAuthTestState("macos"):                                      "macos",
 		appleOAuthTestState("android"):                                    "android",
 		appleOAuthTestState("Windows"):                                    "windows",
 		base64.URLEncoding.EncodeToString([]byte(`{"platform":"linux"}`)): "linux",
@@ -38,6 +39,8 @@ func TestOAuthSchemeForState(t *testing.T) {
 		appleOAuthTestState("android"): "ur",
 		appleOAuthTestState("windows"): "urnetwork",
 		appleOAuthTestState("linux"):   "urnetwork",
+		appleOAuthTestState("macos"):   "urnetwork",
+		appleOAuthTestState("macOS"):   "urnetwork",
 		appleOAuthTestState("ios"):     "ur",
 		"opaque":                       "ur",
 	}

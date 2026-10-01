@@ -32,8 +32,8 @@ import (
 // key, that key picks the redirect scheme (oauthSchemeForState, shared with
 // the Google callback). Without it the android scheme is used.
 //
-//	android (default)  ur://oauth/apple
-//	windows, linux     urnetwork://oauth/apple
+//	android (default)      ur://oauth/apple
+//	windows, linux, macos  urnetwork://oauth/apple
 
 const appleOAuthCallbackMaxBodyBytes = 64 * 1024
 
@@ -45,6 +45,10 @@ var oauthSchemes = map[string]string{
 	"android": "ur",
 	"windows": "urnetwork",
 	"linux":   "urnetwork",
+	// the macOS direct-download build (com.bringyour.urnetwork), which has
+	// no native Google or Apple flow and signs in through the browser like
+	// the other desktops
+	"macos": "urnetwork",
 }
 
 const oauthDefaultScheme = "ur"
