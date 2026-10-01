@@ -55,7 +55,7 @@ func newCountryEvidenceFixture(t *testing.T) *countryEvidenceFixture {
 		rulesPath: filepath.Join(directory, "rules.yml"), buildTime: buildTime,
 		rules: classificationRules{
 			Version: 1,
-			Rules: []classificationRule{{Name: "synthetic-hosting", OrgHandles: []string{"TEST-HOSTING"}, NonQuality: true,
+			Rules: []classificationRule{{Name: "synthetic-hosting", OrgHandles: []string{"TEST-HOSTING"}, NonQuality: new(true),
 				Reason: "synthetic reviewed hosting ancestor", Source: "https://evidence.example/hosting"}},
 			CountryPolicyVersion: 2,
 			CountrySources: []countryEvidenceSource{{Id: "synthetic-geography", Url: "https://evidence.example/geography.csv",

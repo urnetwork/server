@@ -81,6 +81,7 @@ func arinBlockRegistrationScope(blockType string) string {
 // over organization rules, allowing a verified access ISP inside a hosting parent.
 type classificationRules struct {
 	Version              uint32                  `yaml:"version"`
+	QualityPolicyVersion uint32                  `yaml:"quality_policy_version"`
 	Rules                []classificationRule    `yaml:"rules"`
 	CountryPolicyVersion uint32                  `yaml:"country_policy_version"`
 	CountrySources       []countryEvidenceSource `yaml:"country_sources"`
@@ -91,7 +92,8 @@ type classificationRule struct {
 	OrgHandles     []string `yaml:"org_handles"`
 	OrgNamePattern string   `yaml:"org_name_pattern"`
 	Prefixes       []string `yaml:"prefixes"`
-	NonQuality     bool     `yaml:"non_quality"`
+	NonQuality     *bool    `yaml:"non_quality"`
+	RiskCategory   string   `yaml:"risk_category"`
 	Reason         string   `yaml:"reason"`
 	Source         string   `yaml:"source"`
 	pattern        *regexp.Regexp
@@ -260,11 +262,22 @@ func loadClassificationRules(path string) (classificationRules, error) {
 	if rules.Version != 1 || len(rules.Rules) == 0 {
 		return rules, errors.New("ARIN classifier requires version1 and reviewed rules")
 	}
+	if rules.QualityPolicyVersion != 0 && rules.QualityPolicyVersion != 2 {
+		return rules, errors.New("unsupported ARIN quality policy version")
+	}
 	names := map[string]bool{}
 	for i := range rules.Rules {
 		rule := &rules.Rules[i]
 		if rule.Name == "" || names[rule.Name] || rule.Reason == "" || rule.Source == "" {
 			return rules, errors.New("ARIN rule requires a unique name, reason and source")
+		}
+		if rule.NonQuality == nil {
+			return rules, errors.New("ARIN rule requires an explicit non_quality decision")
+		}
+		if rule.RiskCategory != "" {
+			if !*rule.NonQuality || !slices.Contains([]string{"virtual_isp", "proxy", "vpn", "tor"}, rule.RiskCategory) {
+				return rules, errors.New("ARIN risk category requires an excluded virtual ISP, proxy, VPN or Tor rule")
+			}
 		}
 		names[rule.Name] = true
 		if len(rule.Prefixes) == 0 && len(rule.OrgHandles) == 0 && rule.OrgNamePattern == "" {
@@ -296,22 +309,52 @@ func loadClassificationRules(path string) (classificationRules, error) {
 // The matched rule and organization remain auditable even when the direct
 // allocation owner inherits its classification from a reviewed parent.
 type arinClassification struct {
-	nonQuality bool
-	reason     string
-	ruleName   string
-	source     string
-	orgHandle  string
+	qualityState string
+	nonQuality   bool
+	reason       string
+	ruleName     string
+	source       string
+	orgHandle    string
 }
 
-// Organizations arrive parent-first. A more-specific reviewed owner overrides
-// inherited facts; unknown children retain them. Prefix rules override both.
+// Organizations arrive parent-first. A reviewed child and then a narrower
+// prefix override ancestor use. Equally specific contradictory evidence is
+// ambiguous under policy two, never an allow selected by file order.
 func (self classificationRules) classify(organizations []arinOrganization, address netip.Addr) arinClassification {
-	classification := arinClassification{}
+	fromRule := func(rule classificationRule, owner string) arinClassification {
+		state := ""
+		if self.QualityPolicyVersion == 2 {
+			state = "excluded"
+			if !*rule.NonQuality {
+				state = "subscriber"
+			}
+		}
+		return arinClassification{nonQuality: *rule.NonQuality, qualityState: state,
+			reason: rule.Reason, ruleName: rule.Name, source: rule.Source, orgHandle: owner}
+	}
+	mergeEqual := func(previous, next arinClassification) arinClassification {
+		if self.QualityPolicyVersion != 2 || previous.qualityState == next.qualityState {
+			return next
+		}
+		sources := []string{previous.source, next.source}
+		slices.Sort(sources)
+		return arinClassification{nonQuality: true, qualityState: "ambiguous", ruleName: "rule-conflict",
+			reason: "equally specific reviewed rules disagree on network use", source: strings.Join(sources, " "), orgHandle: next.orgHandle}
+	}
+	classification := self.unknownClassification()
 	for _, org := range organizations {
+		// A subscriber parent does not establish the use of a reassigned child.
+		if self.QualityPolicyVersion == 2 && !classification.nonQuality {
+			classification = self.unknownClassification()
+		}
+		matched := false
 		for _, rule := range self.Rules {
 			if slices.Contains(rule.OrgHandles, org.Handle) || rule.pattern != nil && rule.pattern.MatchString(org.Name) {
-				classification = arinClassification{nonQuality: rule.NonQuality, reason: rule.Reason,
-					ruleName: rule.Name, source: rule.Source, orgHandle: org.Handle}
+				next := fromRule(rule, org.Handle)
+				if matched {
+					next = mergeEqual(classification, next)
+				}
+				classification, matched = next, true
 			}
 		}
 	}
@@ -319,13 +362,22 @@ func (self classificationRules) classify(organizations []arinOrganization, addre
 	for _, rule := range self.Rules {
 		for _, prefix := range rule.prefixes {
 			if prefix.Bits() >= best && prefix.Contains(address) {
-				best = prefix.Bits()
-				classification = arinClassification{nonQuality: rule.NonQuality, reason: rule.Reason,
-					ruleName: rule.Name, source: rule.Source}
+				next := fromRule(rule, "")
+				if prefix.Bits() == best {
+					next = mergeEqual(classification, next)
+				}
+				classification, best = next, prefix.Bits()
 			}
 		}
 	}
 	return classification
+}
+
+func (self classificationRules) unknownClassification() arinClassification {
+	if self.QualityPolicyVersion == 2 {
+		return arinClassification{nonQuality: true, qualityState: "unknown", reason: "no reviewed subscriber-access evidence"}
+	}
+	return arinClassification{}
 }
 
 // Splits only the branch containing an override. An allow exception for a /24
@@ -534,9 +586,25 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 	if err != nil {
 		return err
 	}
+	if rules.QualityPolicyVersion == 2 {
+		// Uncovered addresses also carry an explicit unknown policy decision.
+		// Existing boolean readers then exclude them from Quality as well.
+		for _, prefix := range []string{"0.0.0.0/0", "::/0"} {
+			_, network, _ := net.ParseCIDR(prefix)
+			if err := writer.Insert(network, mmdbtype.Map{
+				"classifier_version": mmdbtype.Uint32(rules.Version), "quality_policy_version": mmdbtype.Uint32(2),
+				"quality_state": mmdbtype.String("unknown"), "non_quality": mmdbtype.Bool(true), "risk": mmdbtype.Bool(false),
+				"reason": mmdbtype.String("no authoritative allocation with reviewed subscriber-access evidence"),
+			}); err != nil {
+				return err
+			}
+		}
+	}
 	var partitions, riskCount, nonQualityCount int
 	var multipleOwnerAllocations, conflictingCountryAllocations, unknownCountryAllocations, ambiguousQualityPartitions int
 	countryEvidencePartitions := map[string]int{}
+	qualityStates := map[string]int{}
+	var networkRiskCount int
 	registrationScopes := map[string]int{"arin": 0, "referral": 0, "registry": 0, "reserved": 0, "unknown": 0}
 	for _, group := range allocationGroups {
 		if err := ctx.Err(); err != nil {
@@ -634,10 +702,16 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 			registrationMismatch := registeredCountry != "" && info.CountryCode != "" && registeredCountry != info.CountryCode
 			for _, prefix := range rules.partitions(prefix) {
 				countryEvidence := rules.countryEvidence(group, prefix.Addr())
-				risk := countryEvidence.risk(info.CountryCode, registrationMismatch)
+				geographicRisk := countryEvidence.risk(info.CountryCode, registrationMismatch)
+				riskAncestors := make([][]arinOrganization, 0, len(owners))
+				for _, owner := range owners {
+					riskAncestors = append(riskAncestors, owner.ancestors)
+				}
+				riskEvidence := rules.networkRiskEvidence(riskAncestors, prefix.Addr())
+				risk := geographicRisk || len(riskEvidence) != 0
 				classification := rules.classify(firstOwner.ancestors, prefix.Addr())
 				commonClassification := true
-				qualityAmbiguous := false
+				qualityAmbiguous := classification.qualityState == "ambiguous"
 				ownerRecords := mmdbtype.Slice{}
 				sources := []string{}
 				for _, owner := range owners {
@@ -645,7 +719,7 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 					if ownerClassification != classification {
 						commonClassification = false
 					}
-					if ownerClassification.nonQuality != classification.nonQuality {
+					if ownerClassification.nonQuality != classification.nonQuality || ownerClassification.qualityState != classification.qualityState {
 						qualityAmbiguous = true
 					}
 					if ownerClassification.source != "" && !slices.Contains(sources, ownerClassification.source) {
@@ -663,16 +737,22 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 							"non_quality": mmdbtype.Bool(ownerClassification.nonQuality), "classification_rule": mmdbtype.String(ownerClassification.ruleName),
 							"classification_source": mmdbtype.String(ownerClassification.source), "reason": mmdbtype.String(ownerClassification.reason),
 							"classification_org_handle": mmdbtype.String(ownerClassification.orgHandle),
+							"quality_state":             mmdbtype.String(ownerClassification.qualityState),
 						})
 					}
 				}
 				if !commonClassification {
-					if !qualityAmbiguous && classification.nonQuality {
+					if !qualityAmbiguous && (classification.nonQuality || rules.QualityPolicyVersion == 2) {
 						slices.Sort(sources)
-						classification = arinClassification{nonQuality: true, ruleName: "owner-consensus", source: strings.Join(sources, " "),
-							reason: "all incomparable direct owners match reviewed hosting rules; see owner_evidence"}
+						classification = arinClassification{nonQuality: classification.nonQuality, qualityState: classification.qualityState,
+							ruleName: "owner-consensus", source: strings.Join(sources, " "),
+							reason: "all incomparable direct owners agree on reviewed network use; see owner_evidence"}
 					} else {
-						classification = arinClassification{}
+						classification = rules.unknownClassification()
+						if rules.QualityPolicyVersion == 2 {
+							classification.qualityState = "ambiguous"
+							classification.reason = "incomparable direct owners disagree on network use; see owner_evidence"
+						}
 					}
 				}
 				data := mmdbtype.Map{
@@ -686,6 +766,17 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 					"multiple_registration_owners": mmdbtype.Bool(len(owners) > 1), "country_ambiguous": mmdbtype.Bool(countryAmbiguous),
 					"non_quality_ambiguous": mmdbtype.Bool(qualityAmbiguous),
 				}
+				if rules.QualityPolicyVersion == 2 {
+					data["quality_policy_version"] = mmdbtype.Uint32(2)
+					data["quality_state"] = mmdbtype.String(classification.qualityState)
+					qualityStates[classification.qualityState]++
+				}
+				if len(riskEvidence) != 0 {
+					data["network_risk"] = mmdbtype.Bool(true)
+					data["network_risk_evidence"] = riskEvidence
+					networkRiskCount++
+				}
+				data["geographic_risk"] = mmdbtype.Bool(geographicRisk)
 				countryEvidence.addRecordFields(data)
 				if countryEvidence.state != "" {
 					data["registration_mismatch"] = mmdbtype.Bool(registrationMismatch)
@@ -752,6 +843,11 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 		return err
 	}
 	manifest := map[string]any{"source": "ARIN bulk Whois", "source_url": arinDownloadUrl, "inputs_sha256": inputHashes, "built_at": buildTime, "geolite2_build_time": geoDb.BuildTime().UTC(), "classifier_version": rules.Version, "organizations": len(organizations), "source_allocations": sourceAllocationCount, "allocations": len(allocationGroups), "coalesced_equal_prefix_allocations": sourceAllocationCount - len(allocationGroups), "multiple_owner_allocations": multipleOwnerAllocations, "conflicting_country_allocations": conflictingCountryAllocations, "unknown_country_allocations": unknownCountryAllocations, "registration_scope_allocations": registrationScopes, "emitted_partitions": partitions, "risk_partitions": riskCount, "non_quality_partitions": nonQualityCount, "ambiguous_non_quality_partitions": ambiguousQualityPartitions}
+	if rules.QualityPolicyVersion == 2 {
+		manifest["quality_policy_version"] = rules.QualityPolicyVersion
+		manifest["quality_state_partitions"] = qualityStates
+	}
+	manifest["network_risk_partitions"] = networkRiskCount
 	if len(rules.CountryRules) > 0 {
 		manifest["country_policy_version"] = rules.CountryPolicyVersion
 		manifest["country_evidence_sources"] = rules.CountrySources

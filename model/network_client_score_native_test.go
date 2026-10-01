@@ -50,6 +50,7 @@ func nativeTestPublishLocation(t testing.TB, location server.Id, mode RankMode, 
 	ctx := t.Context()
 	natives := map[ipFamilyFacet][]*ClientScore{}
 	for facet, members := range scores {
+		writeSubscriberFactsForScores(ctx, members)
 		for _, score := range members {
 			if score.PassesMinimums[mode] {
 				natives[facet] = append(natives[facet], score)

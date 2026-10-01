@@ -28,10 +28,38 @@ func onlineBackfillScore(online bool, reliabilityWeight float64) *ClientScore {
 	}
 }
 
-// Each mode deliberately has one different page. There is no random page draw,
-// real provider, exporter timing race, or production key in this fixture.
+// Synthetic cache members still require affirmative current subscriber facts.
+// Insert only absent fixture rows so a deliberately revoked fact stays revoked.
+func writeSubscriberFactsForScores(ctx context.Context, scores []*ClientScore) {
+	if len(scores) == 0 {
+		return
+	}
+	ids := make([]server.Id, 0, len(scores))
+	for _, score := range scores {
+		ids = append(ids, score.ClientId)
+	}
+	handler := CreateNetworkClientHandler(ctx)
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `
+			INSERT INTO network_client_connection
+				(client_id, connection_id, connect_time, connection_host, connection_service, connection_block, handler_id)
+			SELECT DISTINCT id, id, now(), 'synthetic', 'synthetic', 'synthetic', $2::uuid
+			FROM unnest($1::uuid[]) AS id ON CONFLICT (connection_id) DO NOTHING
+		`, ids, handler))
+		server.RaisePgResult(tx.Exec(ctx, `
+			INSERT INTO network_client_location
+				(client_id, connection_id, city_location_id, region_location_id, country_location_id, arin_quality_verified)
+			SELECT DISTINCT id, id, $2::uuid, $2::uuid, $2::uuid, true
+			FROM unnest($1::uuid[]) AS id ON CONFLICT (connection_id) DO NOTHING
+		`, ids, server.NewId()))
+	})
+}
+
+// Each mode deliberately has one different page. No random page draw or
+// exporter timing race controls this fixture's candidate population.
 func writeOnlineBackfillSample(ctx context.Context, t testing.TB, locationId server.Id, rankMode RankMode, forceMinimum bool, scores []*ClientScore) {
 	t.Helper()
+	writeSubscriberFactsForScores(ctx, scores)
 	callerLocationIds := []server.Id{{}}
 	for _, countryLocationId := range countryCodeLocationIds() {
 		callerLocationIds = append(callerLocationIds, countryLocationId)
@@ -53,6 +81,7 @@ func writeOnlineBackfillSample(ctx context.Context, t testing.TB, locationId ser
 // requested mode's independently sampled page contains no eligible candidates.
 func TestBackfillOnlineUsesOtherModeSample(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		enableSubscriberQualityPolicy(t)
 		ctx := t.Context()
 		for _, rankMode := range []RankMode{RankModeQuality, RankModeSpeed} {
 			otherRankMode, _ := backfillRankMode(rankMode)
@@ -72,6 +101,7 @@ func TestBackfillOnlineUsesOtherModeSample(t *testing.T) {
 // on overlap, and never repeats a provider already selected from either mode.
 func TestBackfillOnlineUnionsSamplesWithoutRepeatingEarlierTiers(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		enableSubscriberQualityPolicy(t)
 		ctx := t.Context()
 		locationId := server.NewId()
 		native := onlineBackfillScore(false, 1)
@@ -110,6 +140,7 @@ func TestBackfillOnlineUnionsSamplesWithoutRepeatingEarlierTiers(t *testing.T) {
 // explicit-destination, and family exclusions as the original mode's sample.
 func TestBackfillOnlineOtherModePreservesRequestFilters(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		enableSubscriberQualityPolicy(t)
 		ctx := t.Context()
 		locationId, callerNetworkId := server.NewId(), server.NewId()
 		allowed := onlineBackfillScore(true, 2)
@@ -151,6 +182,7 @@ func TestBackfillOnlineOtherModePreservesRequestFilters(t *testing.T) {
 // ordinary other-mode sample contains an otherwise eligible online provider.
 func TestBackfillOnlineForceMinimumDoesNotBorrow(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		enableSubscriberQualityPolicy(t)
 		ctx := t.Context()
 		locationId := server.NewId()
 		native, otherOnline := onlineBackfillScore(false, 1), onlineBackfillScore(true, 1)

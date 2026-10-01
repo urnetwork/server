@@ -2677,6 +2677,8 @@ func UpdateClientLocationReliabilities(ctx context.Context, minTime time.Time, m
 // this should be called regularly
 // a valid client will have one connected location and one connected address hash
 func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, minTime time.Time, maxTime time.Time) {
+	requireSubscriber, policyErr := subscriberQualityPolicyEnabled()
+	server.Raise(policyErr)
 	updateBlockNumber := maxTime.UTC().UnixMilli() / int64(ReliabilityBlockDuration/time.Millisecond)
 	minHandlerHeartbeatTime := server.NowUtc().Add(-2 * NetworkClientHandlerHeartbeatTimeout)
 
@@ -2707,7 +2709,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			network_client_speed.bytes_per_second IS NOT NULL AS has_speed_test,
 			network_client_latency.latency_ms IS NOT NULL AS has_latency_test,
 			network_client_location.arin_risk,
-			network_client_location.arin_non_quality
+			(network_client_location.arin_non_quality OR ($2::boolean AND NOT network_client_location.arin_quality_verified)) AS arin_non_quality
 
 		FROM network_client_connection
 
@@ -2731,6 +2733,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			network_client_connection.connected = true
 		`,
 		minHandlerHeartbeatTime,
+		requireSubscriber,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
@@ -2765,7 +2768,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 			network_client_speed.bytes_per_second IS NOT NULL AS has_speed_test,
 			network_client_latency.latency_ms IS NOT NULL AS has_latency_test,
 			network_client_location.arin_risk,
-			network_client_location.arin_non_quality
+			(network_client_location.arin_non_quality OR ($3::boolean AND NOT network_client_location.arin_quality_verified)) AS arin_non_quality
 
 		FROM network_client_connection
 
@@ -2795,6 +2798,7 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 		`,
 		minTime,
 		maxTime,
+		requireSubscriber,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {

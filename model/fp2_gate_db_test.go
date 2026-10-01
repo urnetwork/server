@@ -12,6 +12,7 @@ import (
 // Every common-gate pass stays online even without client performance samples.
 func TestFp2BucketMembershipAndCommonGates(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		enableSubscriberQualityPolicy(t)
 		ctx := t.Context()
 		city := egressTestCity(ctx, "Example City", "Example Region", "Example Country", "zz")
 		passing := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
@@ -58,8 +59,12 @@ func TestFp2BucketMembershipAndCommonGates(t *testing.T) {
 				}
 			}
 			providers := egressTestFind(ctx, t, []*ProviderSpec{{LocationId: &city.LocationId}}, mode, len(common), false, server.NewId())
-			if len(providers) != len(common) {
-				t.Fatalf("mode=%s returned=%d want=%d", mode, len(providers), len(common))
+			wantCount := len(common)
+			if mode == RankModeQuality {
+				wantCount-- // non-subscriber access cannot enter Quality through Online.
+			}
+			if len(providers) != wantCount {
+				t.Fatalf("mode=%s returned=%d want=%d", mode, len(providers), wantCount)
 			}
 			assertEgressTestNoRepeats(t, providers)
 			assertEgressTestTiersKeepOrder(t, providers)
@@ -301,7 +306,8 @@ func TestFp2PublishedUrlRatioWeights(t *testing.T) {
 		city := egressTestCity(ctx, "Example City", "Example Region", "Example Country", "zz")
 		lower := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		higher := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
-		egressTestHealth(ctx, lower.clientId, server.NowUtc(), 5, 2)
+		// Compare two native-eligible ratios: 4/5 and 9/10.
+		egressTestHealth(ctx, lower.clientId, server.NowUtc(), 5, 1)
 		egressTestHealth(ctx, higher.clientId, server.NowUtc(), 10, 1)
 		egressTestPasses(ctx, t)
 		for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
@@ -349,7 +355,7 @@ func TestFp2ArinRollupForgetsDisconnectedRisk(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := SetConnectionLocation(ctx, cleanConnectionId, city.LocationId, &ConnectionLocationScores{}); err != nil {
+		if err := SetConnectionLocation(ctx, cleanConnectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true}); err != nil {
 			t.Fatal(err)
 		}
 		assertFlags := func(want bool) {

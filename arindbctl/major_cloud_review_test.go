@@ -49,8 +49,8 @@ func TestReviewedArinMajorCloudOwners(t *testing.T) {
 	}
 	for _, name := range []string{"Synthetic Residential Access", "Synthetic Business Access", "Synthetic Cloud Hosting Access"} {
 		owner := arinOrganization{Handle: "TEST-UNREVIEWED", Name: name}
-		if unknown := rules.classify([]arinOrganization{owner}, address); unknown.nonQuality || unknown.ruleName != "" {
-			t.Errorf("unreviewed synthetic access acquired hosting exception: %s", name)
+		if unknown := rules.classify([]arinOrganization{owner}, address); unknown.nonQuality != (rules.QualityPolicyVersion == 2) || unknown.ruleName != "" {
+			t.Errorf("unreviewed synthetic access lost its unknown classification: %s", name)
 		}
 	}
 }

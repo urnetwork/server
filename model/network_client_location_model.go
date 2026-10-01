@@ -3458,6 +3458,7 @@ type ConnectionLocationScores struct {
 	// Explicit exceptions from the ARIN database, independent of ranking scores.
 	ArinRisk               bool
 	ArinNonQuality         bool
+	ArinQualityVerified    bool
 	ArinLookupAt           *time.Time
 	ArinDatabaseBuildEpoch int64
 	NetTypeHosting         int
@@ -3590,9 +3591,10 @@ func SetConnectionLocation(
 		            arin_risk,
 		            arin_non_quality,
 		            arin_lookup_at,
-		            arin_database_build_epoch
+		            arin_database_build_epoch,
+		            arin_quality_verified
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                 ON CONFLICT (connection_id) DO UPDATE
                 SET
                     client_id = $2,
@@ -3609,7 +3611,8 @@ func SetConnectionLocation(
                     arin_risk = $13,
                     arin_non_quality = $14,
                     arin_lookup_at = $15,
-                    arin_database_build_epoch = $16
+                    arin_database_build_epoch = $16,
+                    arin_quality_verified = $17
             `,
 			connectionId,
 			clientId,
@@ -3627,6 +3630,7 @@ func SetConnectionLocation(
 			connectionLocationScores.ArinNonQuality,
 			connectionLocationScores.ArinLookupAt,
 			connectionLocationScores.ArinDatabaseBuildEpoch,
+			connectionLocationScores.ArinQualityVerified,
 		))
 	})
 	return
@@ -6330,6 +6334,10 @@ func FindProviders2(
 	observation := newFindProviders2SelectionObservation(findProviders2)
 	defer observation.finish(session.Ctx)
 	providers := []*FindProvidersProvider{}
+	rankMode := RankModeQuality
+	if findProviders2.RankMode != "" {
+		rankMode = findProviders2.RankMode
+	}
 	callerCountryCode := ""
 
 	// an unknown filter is refused before any spec is read: a filter this
@@ -6413,11 +6421,6 @@ func FindProviders2(
 		// 3. band based on tier and keep the top `count`
 		loadCount := findProviders2LoadCount(count, len(excludeFinalDestinations()))
 
-		rankMode := RankModeQuality
-		if findProviders2.RankMode != "" {
-			rankMode = findProviders2.RankMode
-		}
-
 		// the caller ip is used to match against provider excluded lists
 		observation.enter("caller_location")
 		clientIp, _, err := session.ParseClientIpPort()
@@ -6494,7 +6497,7 @@ func FindProviders2(
 			candidateClientIds = append(candidateClientIds, clientId)
 		}
 		observation.enter("hard_exclusions")
-		hardExcludedClientIds, err := getProviderHardExclusions(session.Ctx, candidateClientIds)
+		hardExcludedClientIds, err := getProviderRequestExclusions(session.Ctx, candidateClientIds, rankMode)
 		if err != nil {
 			return nil, err
 		}
@@ -6662,7 +6665,7 @@ func FindProviders2(
 					}
 				}
 				observation.enter("hard_exclusions")
-				extraHardExclusions, err := getProviderHardExclusions(session.Ctx, unreadClientIds)
+				extraHardExclusions, err := getProviderRequestExclusions(session.Ctx, unreadClientIds, rankMode)
 				if err != nil {
 					return err
 				}
@@ -6871,7 +6874,7 @@ func FindProviders2(
 					}
 				}
 				observation.enter("hard_exclusions")
-				otherHardExcludedClientIds, err := getProviderHardExclusions(session.Ctx, unreadClientIds)
+				otherHardExcludedClientIds, err := getProviderRequestExclusions(session.Ctx, unreadClientIds, rankMode)
 				if err != nil {
 					return nil, err
 				}
@@ -6952,7 +6955,7 @@ func FindProviders2(
 								}
 							}
 							observation.enter("hard_exclusions")
-							extraHardExclusions, err := getProviderHardExclusions(session.Ctx, unreadClientIds)
+							extraHardExclusions, err := getProviderRequestExclusions(session.Ctx, unreadClientIds, rankMode)
 							if err != nil {
 								return nil, err
 							}
@@ -7003,7 +7006,7 @@ func FindProviders2(
 		}
 	} else {
 		observation.enter("hard_exclusions")
-		hardExcludedClientIds, err := getProviderHardExclusions(session.Ctx, specClientIds)
+		hardExcludedClientIds, err := getProviderRequestExclusions(session.Ctx, specClientIds, rankMode)
 		if err != nil {
 			return nil, err
 		}

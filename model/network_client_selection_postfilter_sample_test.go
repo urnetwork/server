@@ -52,6 +52,7 @@ func TestFindProviders2PostFilterRefillReachesSameTargetOnline(t *testing.T) {
 					allowed[score.ClientId] = true
 				}
 			}
+			writeSubscriberFactsForScores(ctx, append(preferred, fallback...))
 			server.Redis(ctx, func(r server.RedisClient) {
 				pipe := r.Pipeline()
 				for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
@@ -129,6 +130,7 @@ func TestFindProviders2RefillReadErrorsPreserveModeBoundary(t *testing.T) {
 							}
 							page = append(page, score)
 						}
+						writeSubscriberFactsForScores(ctx, page)
 						pipe.Set(ctx, clientScoreLocationFacetSampleKey(false, mode, locationId, server.Id{}, ipFamilyFacetDualstack, len(counts)), gobEncodeForTest(t, page), time.Minute)
 						counts = append(counts, len(page))
 					}

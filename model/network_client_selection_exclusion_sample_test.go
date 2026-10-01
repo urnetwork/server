@@ -70,6 +70,7 @@ func TestFindProviders2BroadExclusionsReachOnlineFallback(t *testing.T) {
 			hard, network := onlineBackfillScore(true, 2), onlineBackfillScore(true, 2)
 			network.NetworkOnly = true
 			fallback = append(fallback, hard, network)
+			writeSubscriberFactsForScores(ctx, append(preferred, fallback...))
 			server.Redis(ctx, func(r server.RedisClient) {
 				pipe := r.Pipeline()
 				for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
@@ -136,6 +137,7 @@ func TestFindProviders2BroadExclusionsFillSingleFamilySample(t *testing.T) {
 				}
 			}
 			pages = append(pages, page)
+			writeSubscriberFactsForScores(ctx, page)
 		}
 		server.Redis(ctx, func(r server.RedisClient) {
 			pipe := r.Pipeline()

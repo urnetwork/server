@@ -85,7 +85,7 @@ func egressTestConnect(
 		modes = egressTestPublicAndNetwork
 	}
 	if scores == nil {
-		scores = &ConnectionLocationScores{}
+		scores = &ConnectionLocationScores{ArinQualityVerified: true}
 	}
 	provider := &egressTestProvider{
 		clientId:  server.NewId(),
@@ -298,7 +298,7 @@ func TestEgressIndexRollupWritesTheColumns(t *testing.T) {
 		probed := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		failing := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		unprobed := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
-		foreign := egressTestConnect(ctx, t, city, egressTestFast, nil, &ConnectionLocationScores{NetTypeForeign: 1})
+		foreign := egressTestConnect(ctx, t, city, egressTestFast, nil, &ConnectionLocationScores{ArinQualityVerified: true, NetTypeForeign: 1})
 		stale := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		short := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 
@@ -520,9 +520,10 @@ func TestEgressIndexTierFormulas(t *testing.T) {
 }
 
 // More than one in ten failed loads is out of quality and in speed: a quality
-// request only borrows it, behind the natives, while speed holds it natively.
+// request excludes it, including fallback, while speed holds it natively.
 func TestFindProviders2ArinNonQualityIsSpeedOnly(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		enableSubscriberQualityPolicy(t)
 		ctx := context.Background()
 		city := egressTestCity(ctx, "Palo Alto", "California", "United States", "us")
 
@@ -550,11 +551,10 @@ func TestFindProviders2ArinNonQualityIsSpeedOnly(t *testing.T) {
 		connect.AssertEqual(t, clientIdSpeedTiers[healthy.clientId], 0)
 		connect.AssertEqual(t, clientIdSpeedTiers[overLine.clientId], 0)
 
-		// quality: the healthy one native, the other borrowed from speed
+		// quality: only the verified subscriber, without non-quality backfill
 		providers := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeQuality, 10, false, server.NewId())
-		connect.AssertEqual(t, egressTestIds(providers), []server.Id{healthy.clientId, overLine.clientId})
+		connect.AssertEqual(t, egressTestIds(providers), []server.Id{healthy.clientId})
 		connect.AssertEqual(t, providers[0].Tier, 0)
-		connect.AssertEqual(t, providers[1].Tier, 0+DefaultEgressIndexSettings().BackfillTierOffset)
 	})
 }
 
@@ -571,7 +571,7 @@ func TestFindProviders2HardExclusionsHoldEverywhere(t *testing.T) {
 
 		healthy := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestProbed(ctx, healthy, city, 0, "us")
-		blackholed := egressTestConnect(ctx, t, city, egressTestFast, nil, &ConnectionLocationScores{ArinRisk: true})
+		blackholed := egressTestConnect(ctx, t, city, egressTestFast, nil, &ConnectionLocationScores{ArinQualityVerified: true, ArinRisk: true})
 		egressTestProbed(ctx, blackholed, city, 0, "us")
 		egressTestBlackhole(ctx, blackholed.clientId)
 		intercepted := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
@@ -586,11 +586,11 @@ func TestFindProviders2HardExclusionsHoldEverywhere(t *testing.T) {
 		})
 		networkOnly := egressTestConnect(ctx, t, city, egressTestFast, map[ProvideMode][]byte{
 			ProvideModeNetwork: []byte("network-secret"),
-		}, &ConnectionLocationScores{ArinRisk: true})
+		}, &ConnectionLocationScores{ArinQualityVerified: true, ArinRisk: true})
 		egressTestProbed(ctx, networkOnly, city, 0, "us")
 		egressTestBlackhole(ctx, networkOnly.clientId)
 		// unprobed with client samples: online, but for the verdict
-		onlineBlackholed := egressTestConnect(ctx, t, city, egressTestFast, nil, &ConnectionLocationScores{ArinRisk: true})
+		onlineBlackholed := egressTestConnect(ctx, t, city, egressTestFast, nil, &ConnectionLocationScores{ArinQualityVerified: true, ArinRisk: true})
 		egressTestBlackhole(ctx, onlineBlackholed.clientId)
 		egressTestPasses(ctx, t)
 

@@ -64,10 +64,10 @@ func TestReviewedArinRules(t *testing.T) {
 		}
 		for _, owner := range owners {
 			classification := rules.classify([]arinOrganization{owner}, address)
-			if classification.nonQuality != rule.NonQuality || classification.ruleName != rule.Name || classification.source == "" || classification.reason == "" {
+			if classification.nonQuality != *rule.NonQuality || classification.ruleName != rule.Name || classification.source == "" || classification.reason == "" {
 				t.Fatal("a reviewed rule lost its classification or provenance")
 			}
-			if rule.NonQuality {
+			if *rule.NonQuality {
 				copy := owner
 				hostingOwner = &copy
 			} else {
@@ -80,8 +80,8 @@ func TestReviewedArinRules(t *testing.T) {
 		t.Fatal("reviewed catalog needs hosting positives and an explicit access-owner control")
 	}
 	unknown := arinOrganization{Handle: "TEST-UNREVIEWED", Name: "Synthetic cloud hosting and consumer broadband"}
-	if rules.classify([]arinOrganization{unknown}, address).nonQuality {
-		t.Fatal("unreviewed names were classified by a generic hosting heuristic")
+	if unknownClass := rules.classify([]arinOrganization{unknown}, address); unknownClass.nonQuality != (rules.QualityPolicyVersion == 2) || unknownClass.ruleName != "" {
+		t.Fatal("unreviewed names lost the explicit unknown policy")
 	}
 	if !rules.classify([]arinOrganization{*hostingOwner, unknown}, address).nonQuality {
 		t.Fatal("a reviewed hosting owner did not pass classification to an unknown child")

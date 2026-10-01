@@ -31,6 +31,7 @@ func TestArinCandidateReadback(t *testing.T) {
 	}
 	var manifest struct {
 		ClassifierVersion    uint32            `json:"classifier_version"`
+		QualityPolicyVersion uint32            `json:"quality_policy_version"`
 		CountryPolicyVersion uint32            `json:"country_policy_version"`
 		InputHashes          map[string]string `json:"inputs_sha256"`
 		Hashes               map[string]string `json:"sha256"`
@@ -107,7 +108,8 @@ func TestArinCandidateReadback(t *testing.T) {
 		ByCountry                map[string]count `json:"by_associated_country"`
 		ByScope                  map[string]count `json:"by_registration_scope"`
 		ByCountryEvidence        map[string]count `json:"by_country_evidence_state"`
-	}{BuildEpoch: db.Metadata.BuildTime().Unix(), ByRule: map[string]count{}, ByCountry: map[string]count{}, ByScope: map[string]count{}, ByCountryEvidence: map[string]count{}}
+		ByQualityState           map[string]count `json:"by_quality_state"`
+	}{BuildEpoch: db.Metadata.BuildTime().Unix(), ByRule: map[string]count{}, ByCountry: map[string]count{}, ByScope: map[string]count{}, ByCountryEvidence: map[string]count{}, ByQualityState: map[string]count{}}
 	add := func(value count, info *ArinInfo) count {
 		value.Prefixes++
 		if info.Risk {
@@ -124,17 +126,25 @@ func TestArinCandidateReadback(t *testing.T) {
 			Org string `maxminddb:"org_handle"`
 		}
 		var record struct {
-			Net                  string   `maxminddb:"net_handle"`
-			Org                  string   `maxminddb:"org_handle"`
-			RegisteredCountry    string   `maxminddb:"registered_country"`
-			AssociatedCountry    string   `maxminddb:"associated_country"`
-			Scope                string   `maxminddb:"registration_scope"`
-			Rule                 string   `maxminddb:"classification_rule"`
-			Source               string   `maxminddb:"classification_source"`
-			Reason               string   `maxminddb:"reason"`
-			MultipleOwners       bool     `maxminddb:"multiple_registration_owners"`
-			CountryAmbiguous     bool     `maxminddb:"country_ambiguous"`
-			QualityAmbiguous     bool     `maxminddb:"non_quality_ambiguous"`
+			Net                 string `maxminddb:"net_handle"`
+			Org                 string `maxminddb:"org_handle"`
+			RegisteredCountry   string `maxminddb:"registered_country"`
+			AssociatedCountry   string `maxminddb:"associated_country"`
+			Scope               string `maxminddb:"registration_scope"`
+			Rule                string `maxminddb:"classification_rule"`
+			Source              string `maxminddb:"classification_source"`
+			Reason              string `maxminddb:"reason"`
+			MultipleOwners      bool   `maxminddb:"multiple_registration_owners"`
+			CountryAmbiguous    bool   `maxminddb:"country_ambiguous"`
+			QualityAmbiguous    bool   `maxminddb:"non_quality_ambiguous"`
+			NetworkRisk         bool   `maxminddb:"network_risk"`
+			GeographicRisk      bool   `maxminddb:"geographic_risk"`
+			NetworkRiskEvidence []struct {
+				Rule     string `maxminddb:"rule"`
+				Category string `maxminddb:"category"`
+				Source   string `maxminddb:"source"`
+				Reason   string `maxminddb:"reason"`
+			} `maxminddb:"network_risk_evidence"`
 			RegistrationMismatch bool     `maxminddb:"registration_mismatch"`
 			CountryPolicyVersion uint32   `maxminddb:"country_policy_version"`
 			CountryEvidenceState string   `maxminddb:"country_evidence_state"`
@@ -149,10 +159,11 @@ func TestArinCandidateReadback(t *testing.T) {
 				Owners      []countryOwner `maxminddb:"owners"`
 			} `maxminddb:"country_evidence"`
 			Owners []struct {
-				Net        string `maxminddb:"net_handle"`
-				Org        string `maxminddb:"org_handle"`
-				Country    string `maxminddb:"registered_country"`
-				NonQuality bool   `maxminddb:"non_quality"`
+				Net          string `maxminddb:"net_handle"`
+				Org          string `maxminddb:"org_handle"`
+				Country      string `maxminddb:"registered_country"`
+				NonQuality   bool   `maxminddb:"non_quality"`
+				QualityState string `maxminddb:"quality_state"`
 			} `maxminddb:"owner_evidence"`
 		}
 		if err := result.Decode(&record); err != nil {
@@ -221,6 +232,21 @@ func TestArinCandidateReadback(t *testing.T) {
 		} else if record.CountryPolicyVersion != 0 || record.CountryEvidenceState != "" || len(record.CountryEvidence) > 0 || len(record.CredibleCountries) > 0 {
 			t.Fatal("candidate uses unsupported or unversioned country evidence")
 		}
+		if info.QualityPolicyVersion != manifest.QualityPolicyVersion {
+			t.Fatal("candidate record and manifest disagree on subscriber policy")
+		}
+		if record.NetworkRisk != (len(record.NetworkRiskEvidence) != 0) {
+			t.Fatal("network risk has no matching reviewed evidence")
+		}
+		for _, evidence := range record.NetworkRiskEvidence {
+			if evidence.Rule == "" || evidence.Source == "" || evidence.Reason == "" || !slices.Contains([]string{"virtual_isp", "proxy", "vpn", "tor"}, evidence.Category) {
+				t.Fatal("candidate network risk has invalid attribution")
+			}
+		}
+		if info.QualityPolicyVersion == 2 && record.GeographicRisk != wantRisk {
+			t.Fatal("candidate mixed geographic and network-use risk provenance")
+		}
+		wantRisk = wantRisk || record.NetworkRisk
 		if info.Risk != wantRisk {
 			t.Fatal("candidate risk disagrees with its authoritative country evidence")
 		}
@@ -231,16 +257,16 @@ func TestArinCandidateReadback(t *testing.T) {
 			counts.MultipleOwnerPrefixes++
 			country := record.Owners[0].Country
 			nonQuality := record.Owners[0].NonQuality
-			countryAmbiguous, qualityAmbiguous := false, false
+			countryAmbiguous, qualityAmbiguous := false, record.Owners[0].QualityState == "ambiguous"
 			for _, owner := range record.Owners[1:] {
 				countryAmbiguous = countryAmbiguous || owner.Country != country
-				qualityAmbiguous = qualityAmbiguous || owner.NonQuality != nonQuality
+				qualityAmbiguous = qualityAmbiguous || owner.NonQuality != nonQuality || owner.QualityState != record.Owners[0].QualityState
 			}
 			if countryAmbiguous {
 				country = ""
 			}
 			if qualityAmbiguous {
-				nonQuality = false
+				nonQuality = info.QualityPolicyVersion == 2
 			}
 			if record.RegisteredCountry != country || info.NonQuality != nonQuality || record.CountryAmbiguous != countryAmbiguous || record.QualityAmbiguous != qualityAmbiguous {
 				t.Fatal("candidate substituted an arbitrary owner for fact consensus")
@@ -252,12 +278,13 @@ func TestArinCandidateReadback(t *testing.T) {
 		if record.QualityAmbiguous {
 			counts.QualityAmbiguousPrefixes++
 		}
-		if info.NonQuality && (record.Rule == "" || record.Source == "" || record.Reason == "") {
-			t.Fatal("candidate hosting exception lacks reviewed rule provenance")
+		if info.NonQuality && info.QualityState != "unknown" && info.QualityState != "ambiguous" && (record.Rule == "" || record.Source == "" || record.Reason == "") {
+			t.Fatal("candidate network-use exclusion lacks reviewed rule provenance")
 		}
 		if record.Rule != "" && !info.NonQuality {
 			counts.ReviewedAccessPrefixes++
 		}
+		counts.ByQualityState[info.QualityState] = add(counts.ByQualityState[info.QualityState], info)
 		counts.All = add(counts.All, info)
 		counts.ByRule[record.Rule] = add(counts.ByRule[record.Rule], info)
 		counts.ByCountry[record.AssociatedCountry] = add(counts.ByCountry[record.AssociatedCountry], info)

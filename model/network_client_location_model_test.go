@@ -211,7 +211,7 @@ func TestBestAvailableProviders(t *testing.T) {
 		}
 		CreateLocation(ctx, city)
 
-		SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+		SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 
 		createLocationGroup := &LocationGroup{
 			Name:     StrongPrivacyLaws,
@@ -345,7 +345,7 @@ func TestFindProviders2WithExclude(t *testing.T) {
 
 			SetProvide(ctx, clientId, secretKeys)
 
-			SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+			SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 
 			clientAddressHash, _, err := clientSession.ClientAddressHashPort()
 			connect.AssertEqual(t, err, nil)
@@ -577,7 +577,7 @@ func TestClientLocationScoreCacheRoundTrip(t *testing.T) {
 		}
 		CreateLocationGroup(ctx, createLocationGroup)
 
-		SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+		SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 
 		clientAddressHash, _, err := clientSession.ClientAddressHashPort()
 		connect.AssertEqual(t, err, nil)
@@ -965,7 +965,7 @@ func TestFindProviders2ProviderLocation(t *testing.T) {
 		}
 		SetProvide(ctx, clientId, secretKeys)
 
-		SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+		SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 
 		clientAddressHash, _, err := clientSession.ClientAddressHashPort()
 		connect.AssertEqual(t, err, nil)
@@ -1132,7 +1132,7 @@ func TestFindProviders2ReliabilityFlushLag(t *testing.T) {
 			SetProvide(ctx, clientId, map[ProvideMode][]byte{
 				ProvideModePublic: make([]byte, 32),
 			})
-			err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+			err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 			connect.AssertEqual(t, err, nil)
 
 			// good latency and speed tests so the quality score gate passes
@@ -1353,7 +1353,7 @@ func TestFindProviders2ReliabilityDeployGap(t *testing.T) {
 			SetProvide(ctx, clientId, map[ProvideMode][]byte{
 				ProvideModePublic: make([]byte, 32),
 			})
-			err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+			err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 			connect.AssertEqual(t, err, nil)
 
 			server.Tx(ctx, func(tx server.PgTx) {
@@ -1549,7 +1549,7 @@ func TestUpdateClientLocationsCountsClientsWithoutReliabilityScores(t *testing.T
 		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "192.0.2.1:0", handlerId)
 		connect.AssertEqual(t, err, nil)
 
-		err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+		err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 		connect.AssertEqual(t, err, nil)
 
 		// only clients holding a Public provide key are counted (see
@@ -1661,7 +1661,7 @@ func TestUpdateClientScoresCountsClientsWithoutReliabilityScores(t *testing.T) {
 		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "192.0.2.1:0", handlerId)
 		connect.AssertEqual(t, err, nil)
 
-		err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+		err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 		connect.AssertEqual(t, err, nil)
 
 		// only clients holding a Public provide key are counted (see
@@ -1750,7 +1750,7 @@ func TestSetConnectionLocationToleratesCountryOnlyLocation(t *testing.T) {
 
 		// this call panicked before the fix; now it must succeed and store
 		// the connection at country granularity
-		err = SetConnectionLocation(ctx, connectionId, country.LocationId, &ConnectionLocationScores{})
+		err = SetConnectionLocation(ctx, connectionId, country.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 		connect.AssertEqual(t, err, nil)
 
 		var city, region, cty *server.Id
@@ -1798,7 +1798,7 @@ func TestUpdateClientLocationsCountsOnlyPublicProviders(t *testing.T) {
 			Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 			connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "192.0.2.1:0", handlerId)
 			connect.AssertEqual(t, err, nil)
-			err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+			err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 			connect.AssertEqual(t, err, nil)
 			if modes != nil {
 				SetProvide(ctx, clientId, modes)
@@ -2086,7 +2086,7 @@ func connectPublicAndNetworkOnlyProviders(
 		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "192.0.2.1:0", handlerId)
 		connect.AssertEqual(t, err, nil)
-		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
+		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 		connect.AssertEqual(t, err, nil)
 		SetProvide(ctx, clientId, modes)
 
@@ -2282,7 +2282,7 @@ func createCountryOnlyAndCityProviders(ctx context.Context, t testing.TB) (
 		Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, ip, handlerId)
 		connect.AssertEqual(t, err, nil)
-		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
+		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 		connect.AssertEqual(t, err, nil)
 		SetProvide(ctx, clientId, map[ProvideMode][]byte{
 			ProvideModePublic: []byte("public-secret"),
@@ -2392,7 +2392,7 @@ func TestFindProviders2NetworkOnlyProviderVisibleOnlyToItsOwnNetwork(t *testing.
 			Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 			connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, ip, handlerId)
 			connect.AssertEqual(t, err, nil)
-			err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+			err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 			connect.AssertEqual(t, err, nil)
 			SetProvide(ctx, clientId, modes)
 
@@ -2523,7 +2523,7 @@ func TestLoadLocationStablesHonoursForceMinimum(t *testing.T) {
 		connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, "192.0.2.1:0", handlerId)
 		connect.AssertEqual(t, err, nil)
 
-		err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+		err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 		connect.AssertEqual(t, err, nil)
 
 		// a provider a stranger can actually use, so the provide-mode filter is
@@ -2676,7 +2676,7 @@ func connectProvidersOfEveryProvideMode(ctx context.Context, t testing.TB, locat
 			handlerId,
 		)
 		connect.AssertEqual(t, err, nil)
-		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
+		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 		connect.AssertEqual(t, err, nil)
 		if modes != nil {
 			SetProvide(ctx, clientId, modes)
@@ -2821,7 +2821,7 @@ func TestUpdateClientScoresExcludesDerivedAndInactiveClients(t *testing.T) {
 		connectCandidate := func(clientId server.Id, clientAddress string) {
 			connectionId, _, _, _, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
 			connect.AssertEqual(t, err, nil)
-			err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+			err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 			connect.AssertEqual(t, err, nil)
 			SetProvide(ctx, clientId, map[ProvideMode][]byte{
 				ProvideModePublic:  []byte("public-secret"),
@@ -3155,7 +3155,7 @@ func testing_connectQualifyingProviders(
 			handlerId,
 		)
 		connect.AssertEqual(t, err, nil)
-		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
+		err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 		connect.AssertEqual(t, err, nil)
 
 		SetProvide(ctx, clientId, map[ProvideMode][]byte{
@@ -4065,6 +4065,7 @@ func TestFindProviders2ClientIdBypassesHealthGate(t *testing.T) {
 		unhealthy := server.NewId()
 
 		Testing_CreateProviderAtLocation(ctx, networkId, unhealthy, countryId, "US")
+		writeSubscriberFactsForScores(ctx, []*ClientScore{{ClientId: unhealthy}})
 		// measured comprehensively dead, so the gate excludes it everywhere else
 		SetProviderEgressHealth(ctx, &ProviderEgressHealth{
 			ClientId: unhealthy, OKCount: 0, Total: 131, MeasuredAt: server.NowUtc(),

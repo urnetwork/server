@@ -66,7 +66,9 @@ func GetLocationForIp(ctx context.Context, clientIp string) (*model.Location, *m
 // Successful no-record lookups are explicitly evaluated unknowns. Overrides
 // that never queried the database cannot attest a generation or lookup time.
 func setArinConnectionFacts(scores *model.ConnectionLocationScores, info *server.ArinInfo) {
-	scores.ArinRisk, scores.ArinNonQuality = info.Risk, info.NonQuality
+	scores.ArinRisk = info.Risk
+	scores.ArinQualityVerified = info.QualityVerified()
+	scores.ArinNonQuality = info.NonQuality
 	scores.ArinDatabaseBuildEpoch = info.DatabaseBuildEpoch
 	scores.ArinLookupAt = nil
 	if info.DatabaseBuildEpoch > 0 {

@@ -61,6 +61,7 @@ func TestFindProviders2SelectionSmallResultBoundaries(t *testing.T) {
 			case "mixed_direct":
 				scores = scores[:1]
 				directId := server.NewId()
+				writeSubscriberFactsForScores(ctx, []*ClientScore{{ClientId: directId}})
 				args.Specs = append(args.Specs, &ProviderSpec{ClientId: &directId})
 			}
 			if testCase.boundary == "destinations" || testCase.boundary == "both" {

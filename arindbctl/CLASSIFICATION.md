@@ -6,15 +6,224 @@ classify named cloud/VPS/hosting owners as `non_quality`, not as geographic
 directory or proof that every address of a diversified corporation hosts VMs.
 The candidate must pass the shadow review below before activation.
 
-Quality means individual-subscriber or business end-user access. Verified
-cloud, CDN, hosting, transit, VPN/proxy infrastructure and other machine-hosted
-egress are `non_quality`, even when fast. The 2026-09-28 user clarification also
-excludes verified cloud/CDN-operator ranges whose office-versus-hosted use is
-ambiguous; a reviewed more-specific consumer/business-access exception may
-override. This is a conservative quality policy, not proof that the address
-hosts a VM or poses a security risk. Unknown ownership is not positive evidence
-of hosting. These exceptions do not change Speed, Online or paced URL-probe
-eligibility, which retain their independent risk/reliability/security gates.
+The complete new policy is staged only in
+`config/main/arindb-quality-v2.candidate.yml`. Active `main/arindb.yml` and the
+all-release default refresh input are unchanged. Candidate builds and catalog
+tests must name the candidate path explicitly. No resource was published.
+
+Quality means residential-subscriber or business-subscriber access. The
+2026-10-01 review makes that an affirmative requirement: unknown use, conflicting
+ownership, hosting, CDN, transit, leased-address ambiguity and proxy infrastructure
+are excluded from Quality. An excluded unknown is not asserted to be hosting.
+The new `quality_policy_version: 2` is independent of the compatible
+`classifier_version: 1` record format. Read the research and rollout requirements
+below before building or activating this stricter policy.
+
+Verified ISP-branded proxy infrastructure (the operational meaning of
+`virtual_isp` here), proxy services, VPN services and Tor exits can additionally
+carry an explicit `risk_category`. Their network-use exclusion is independent of
+geographic risk and applies to Speed, Online and URL-probe admission too. A
+legitimate wholesale-access reseller or MVNO is not automatically such a network;
+its name, lack of owned last-mile plant, or ARIN ISP status is insufficient.
+
+## Subscriber and proxy research, 2026-10-01
+
+| Signal | Evidence and interpretation | Policy |
+| --- | --- | --- |
+| ARIN organization, assignment and ISP/LIR status | ARIN's [request guide](https://www.arin.net/resources/guide/request/) includes hosting, colocation, VPS and VPN within ISP services. Registry status identifies administrative relationships, not subscriber use. | Bind reviewed operator evidence to exact organizations or prefixes. Never allow all ISP allocations or names containing `residential`, `broadband`, or `business`. |
+| ISP-branded/static residential proxies | [IPRoyal](https://iproyal.com/isp-proxies/) sells ISP proxies. [Oxylabs](https://oxylabs.io/pricing/isp-proxies) explicitly describes ISP registration on datacenter servers. | An ISP owner or consumer ASN cannot waive positive proxy evidence. Exclude verified virtual-ISP/proxy egress through independent network risk. |
+| Residential proxy participation | [PacketStream](https://packetstream.io/) describes proxy traffic through participating household connections. Residential access and proxy participation can therefore coexist. | Positive subscriber evidence is necessary but cannot override a proxy finding. An operator rule covers its registrations, not every peer under unrelated consumer ISPs. |
+| Anonymizer flags | [MaxMind's binary schema](https://dev.maxmind.com/geoip/docs/databases/anonymous-ip/binary/) distinguishes VPN, public proxy, residential proxy, Tor and hosting. Its residential-proxy flag does not cover peer-to-peer proxy addresses. | Use reviewed positives at the observed address/prefix. Hosting is Quality-only unless additional proxy/virtual-ISP evidence exists. Missing flags are not proof of subscriber access or absence of proxies. |
+| Fresh residential-proxy sightings | [MaxMind's Residential Proxy feed](https://dev.maxmind.com/geoip/docs/databases/residential-proxy/) supplies provider attribution, confidence and last-seen dates, commonly at IPv4 /32 or IPv6 /64 scope; provider coverage is partial. | Highest-value next input for proxies hiding under real access ISPs. Preserve observed prefix, observation time, confidence, source generation and expiry. Stale, missing or low-confidence data must never promote unknown use to Quality. No paid feed is installed by this change. |
+| Leased-address owner | [IPXO's operator instructions](https://www.ipxo.com/kb/technical-guides/adding-subnets-to-ipxo-from-arin/) explicitly bind its leasing marketplace to ARIN `IL-845`. | Exclude unresolved lessee/subscriber use from Quality. Leasing itself does not establish proxy risk; reviewed direct-child access can qualify independently. |
+| Origin ASN, RPKI and IRR | [ARIN's RPKI documentation](https://www.arin.net/resources/manage/rpki/) describes authorization of origin ASNs for prefixes. That is routing authorization, not endpoint-use attestation. | Corroborate prefix authority and detect changes requiring review. RPKI-valid, an access ASN, or a small/large ASN is never enough to allow Quality or set proxy risk. |
+| PeeringDB type and facilities | [PeeringDB's FAQ](https://docs.peeringdb.com/faq/) describes a database maintained by its participating networks. Presence or self-description does not identify the use of one subscriber address. | Review aid only; no admission from `Cable/DSL/ISP`, and no exclusion merely from an IXP/facility presence. |
+| Geofeed and country agreement | [RFC 8805](https://datatracker.ietf.org/doc/html/rfc8805#section-3) calls for authority, accuracy and refresh review of self-published location data. | Country evidence refines geographic risk only. Matching country does not clear proxy risk or establish residential/business use. |
+| DNS, latency, bandwidth and URL success | These measurements establish reachability and performance of the observed connection, not who supplies subscriber access. | Retain their existing independent gates; successful probes never turn an unknown or proxy network into Quality. |
+
+These are policy inferences from the sources' defined scope, not claims that
+registration or a commercial label proves each address's physical use. We do
+not add broad consumer-ISP allows: a mixed ISP may lease prefixes or carry proxy
+participants. The current affirmative catalog remains the already reviewed
+Google Fiber identities; expanding it requires direct access-service evidence
+for the exact owner/prefix, reassignment review and proxy evidence review.
+Therefore this conservative policy can sharply reduce Quality coverage. It is
+acceptable to return fewer Quality providers; Speed remains independently usable.
+
+The initial additional catalog contains:
+
+- `IL-909` — [ARIN IPRoyal identity](https://whois.arin.net/rest/org/IL-909.html),
+  paired with its ISP-proxy product above: `non_quality: true`,
+  `risk_category: virtual_isp`.
+- `PL-1198` — [ARIN PacketStream identity](https://rdap.arin.net/registry/entity/PL-1198),
+  paired with its proxy-network description: `non_quality: true`,
+  `risk_category: proxy`.
+- `IL-845` — [ARIN IPXO identity](https://whois.arin.net/rest/org/IL-845.html),
+  paired with its exact-handle reallocation instructions: `non_quality: true`,
+  no network-risk category.
+
+Applying operator evidence to its exact registered infrastructure is the
+conservative reviewed inference. These three entries are not a comprehensive
+proxy directory. No claim is made that every IPXO lessee is a proxy or that all
+PacketStream household exits are registered to PacketStream. Coverage outside
+ARIN and proxies embedded in otherwise allowed access networks remain gaps
+until authoritative and current address-level inputs are integrated.
+
+## Additional-signal deployment matrix
+
+These are the next inputs to evaluate beyond exact reviewed organizations. The
+status column describes this source change, not a live deployment. “Virtual
+ISP” is an ambiguous industry label: `virtual_isp` here specifically identifies
+ISP-branded proxy egress, including static residential/ISP proxies hosted on
+server infrastructure. It does not assert that every reseller, leased prefix,
+business connection, MVNO or hosting ASN is a proxy.
+
+| Signal | Authoritative availability | False-positive or coverage limit | Use and implementation status |
+| --- | --- | --- | --- |
+| Direct delegated organization | ARIN bulk Whois and RDAP provide the allocation/reassignment hierarchy; [ARIN's guide](https://www.arin.net/resources/registry/reassignments/) explains direct allocation versus reallocation/reassignment. | A registry relationship is administrative. Smaller delegations may not be reported; residential records have special reporting rules. A child can change use independently of its parent. | **Implemented:** direct-owner precedence, no inherited subscriber allow for unreviewed children, and conflict exclusion. Positive service evidence still requires review. Foreign-RIR/customer ingestion is deferred; ARIN referrals never manufacture that authority. |
+| Reassignment and leased address space | The same registry hierarchy, corroborated by the lessor's own exact-handle instructions, is available now. IPXO explicitly names `IL-845` as its reallocation destination. | Leasing can serve legitimate access, business networks, hosting or proxies. The lessor does not establish every lessee's use. Unreported subleases can remain invisible. | **Implemented:** the IPXO identity is Quality-only excluded pending specific reviewed access. **Not implemented:** treating every lessor or its ASN as hard risk. IPXO evidence does not meet the proxy-risk criterion by itself. |
+| Origin ASN | A current routing collector establishes observed origin; [GeoLite ASN](https://dev.maxmind.com/geoip/docs/databases/asn/) supplies downloadable IP-to-AS-number/name data. These have different authority and freshness. | A single ASN can carry consumer access, business access, leased blocks and proxies. The registered organization, origin operator and endpoint user can differ. | **Deferred:** snapshot an origin input with time and hash, then use changes or conflicts to queue review. Neither ASN branding nor routing through an access ISP can allow Quality or clear risk. A global ASN deny needs exact independent use evidence. |
+| RPKI/ROA | [ARIN RPKI](https://www.arin.net/resources/manage/rpki/) supports cryptographic prefix-origin authorization; a validated, time-bound VRP snapshot is deployable. | Route authorization proves neither subscriber use nor the absence of proxies. Invalid/unknown validation can also be an operational routing issue, not anonymizer evidence. | **Deferred:** corroboration and change detection only. No proxy risk or subscriber allow from RPKI state alone; no validator/feed is added here. |
+| Operator prefix publications | [AWS publishes JSON](https://docs.aws.amazon.com/vpc/latest/userguide/aws-ip-ranges.html); [Google distinguishes cloud customer ranges from broader Google service ranges](https://docs.cloud.google.com/vpc/docs/configure-private-google-access#ip-addr-defaults). Public TLS downloads are available. | AWS documents incomplete service coverage and missing BYOIP ranges. A broad corporate/service list is not equivalent to hosted customer egress, and cloud is not automatically proxy risk. | **Deferred ingestion; reviewed prefix rules already supported.** Prefer service-scoped cloud customer prefixes as Quality exclusions. Add input hashes, publication times, refresh/expiry, overlap checks and release diffs before automating; never infer clean access from absence. |
+| Commercial user type | [GeoIP Enterprise](https://dev.maxmind.com/geoip/docs/databases/enterprise/) provides `user_type`, including `business`, `residential`, `hosting`, `consumer_privacy_network` and other classes. | A vendor's user label is not a guarantee of individual endpoint use. Residential and business access can also carry proxy traffic; omitted/unknown classes are ambiguous. GeoLite City does not supply this field. | **Recommended deferred licensed input** for broader affirmative coverage. Ingest exact prefix labels with database generation/hash and freshness limits; shadow false inclusions against direct-owner/use evidence and current proxy data before treating reviewed residential/business labels as supporting subscriber evidence. Never let a positive type override independent risk. |
+| Commercial connection type | [GeoIP Connection Type](https://dev.maxmind.com/geoip/docs/databases/connection-type/) supplies `Cable/DSL`, `Cellular`, `Corporate` and `Satellite`; Enterprise also includes connection type. | Transport/access category does not establish that a particular endpoint is a residential or business subscriber, or exclude a proxy on the same access network. `Corporate` is not an automatic business-subscriber allow. | **Recommended deferred licensed corroboration.** Require licensed snapshots, freshness and missing-value handling; combine with reviewed user type/ownership and anonymizer evidence. Do not infer these fields from GeoLite location data, reverse DNS or ISP branding. |
+| Anonymizer databases | [MaxMind Anonymous IP](https://dev.maxmind.com/geoip/docs/databases/anonymous-ip/binary/) documents distinct hosting, anonymous VPN, public proxy, residential proxy and Tor fields. | Its residential-proxy category does not cover peer-to-peer proxy networks. Hosting alone is not proof of a proxy, while missing flags mean unknown coverage. | **Deferred licensed input.** Specific positive VPN/proxy/Tor findings can populate independent risk; hosting remains Quality-only. The new risk categories/provenance can represent reviewed findings, but no commercial feed was purchased or installed. |
+| Fresh residential-proxy sightings | [MaxMind Residential Proxy](https://dev.maxmind.com/geoip/docs/databases/residential-proxy/) provides observed prefixes, confidence, last-seen and provider attribution. | Coverage is partial; IP reassignment and shared address use make temporal and prefix scope essential. It must not be expanded to all upstream ISP customers. | **Highest-priority deferred input** for proxies using real access ISPs. Require a licensed snapshot, reviewable confidence threshold, exact prefix scope, generation, observation and expiry before activation. Missing/stale data cannot create an allow. |
+| PeeringDB | [PeeringDB](https://docs.peeringdb.com/faq/) makes participant-maintained network, interconnection and facility metadata available. | Self-description and datacenter/IXP presence do not attest how a particular egress address is used. Legitimate access networks also colocate equipment. | **Deferred review aid only.** No automatic subscriber approval from network type, and no automatic proxy/hosting exclusion from facilities or peering. |
+
+[MaxMind's product guidance](https://support.maxmind.com/knowledge-base/articles/anonymizer-and-proxy-data-maxmind)
+distinguishes Anonymous/Anonymous Plus residential proxy flags from the newer
+residential-proxy sightings product; the former does not cover peer-to-peer
+proxy IPs. Pair user/connection-type evidence with the appropriate current
+anonymizer/sightings input rather than treating a false flag as proof of absence.
+No Enterprise, Connection Type, Anonymous Plus or sightings license/feed is
+installed here. The current GeoLite-only static catalog cannot prove broad
+subscriber quality.
+
+The two initial proxy-operator rules do not provide comprehensive virtual-ISP
+coverage. Independent address-level sightings are needed for proxy resellers,
+leased exits and household peers registered under unrelated access ISPs. A
+reviewed access rule establishes the necessary subscriber condition, not a
+guarantee that no device on that network participates in a proxy service.
+
+## Policy implementation
+
+Every rule now requires explicit `non_quality`; omission cannot become an
+accidental allow. Policy two emits `quality_state` as `subscriber`, `excluded`,
+`unknown` or `ambiguous`, and only `subscriber` has `non_quality: false`.
+Uncovered IPv4 and IPv6 receive explicit unknown default records. Unknown
+organization children keep reviewed negative parent evidence but do not inherit
+subscriber approval. A reviewed direct child or more-specific prefix can supply
+positive access evidence. Contradictory rules for the same owner or equally
+specific prefix are ambiguous regardless of file order. Incomparable owner
+disagreement excludes Quality and
+retains each owner's evidence; it does not invent hosting or geographic risk.
+
+`risk_category` accepts `virtual_isp`, `proxy`, `vpn` or `tor` only on an explicit
+non-quality rule. All matching positive risk rules accumulate independently of
+Quality precedence. Their categories, reasons, exact matched organization
+identities and sources survive in `network_risk_evidence`. The record stores
+`geographic_risk` separately; final `risk` is geographic OR network-use risk.
+Country waivers, unknown geography and subscriber overrides cannot clear a
+positive network-use exclusion. This does not infer risk for ordinary clouds
+or all leased addresses.
+
+The runtime reader validates policy/state consistency. A real, versioned
+subscriber lookup with no risk is persisted as `arin_quality_verified`; old
+records, missing records and manual location overrides cannot manufacture it.
+The appended migration defaults that connection fact to false. The controller
+keeps the database's raw `non_quality` flag separate from this new fact. With
+explicit policy activation, rollup treats any active unverified connection as
+non-quality. Activated Quality requests additionally
+read bounded current-connection facts from the primary database for every
+candidate, including explicit IDs, force-minimum, Speed borrowing and Online
+fallback. Every live connection must qualify; a missing location also excludes.
+This prevents stale cache/rollup evidence from admitting a new unknown address.
+Disconnected or stale-handler history does not prevent current qualification.
+
+Runtime activation is a separate `subscriber_quality_policy_version: 2` entry
+in `provider.yml`. Absent/zero preserves legacy rollup and Quality fallback
+semantics, so deploying compatible binaries does not silently empty Quality.
+Malformed or unsupported policy values fail the rollup/request instead of
+quietly downgrading an attempted activation. Both strict and default-off behavior
+are regression-tested through scoped config fixtures, including a warm legacy
+cache when activation switches on. The active Config tree does not enable it.
+
+Promote only after exact candidate input/output attestations, a provider shadow
+diff, sufficient affirmative coverage, the schema append, the new API fleet and
+an FP2/database-load canary have passed. Then make the reviewed candidate the
+explicit release input, acquire new Connect facts, refresh rollup/indexes, and
+switch the provider policy gate in a coordinated release. Until those checks
+pass, keep both candidate rules and activation setting out of the active inputs.
+
+Candidate catalog validation uses explicit paths, for example:
+
+```sh
+ARIN_REVIEWED_RULES_PATH=/absolute/path/config/main/arindb-quality-v2.candidate.yml \
+ARIN_SUBSCRIBER_RULES_PATH=/absolute/path/config/main/arindb-quality-v2.candidate.yml \
+go test -race ./arindbctl
+```
+
+The schema change appends migration index 749, taking the published head from
+749 to 750; existing migration identities remain unchanged. A disposable
+749-to-750 test verifies that both pre-existing rows and inserts from an old
+writer stay `arin_quality_verified=false`. Existing startup readiness checks
+require the new binary's migration head before it takes traffic. Old writers
+are SQL-compatible after the append, but their connections remain unverified.
+
+A mixed pool containing old API binaries cannot enforce the new Quality
+contract consistently, because old fallback code may still borrow non-quality
+providers. Do not declare the policy active until every API serving Quality
+uses the new guard and each intended subscriber connection has a real new-policy
+lookup. A rollback to old APIs rolls back that policy guarantee as well. Once
+activated, new APIs with legacy ARIN resources fail closed, so resource/provenance coverage
+must be measured before traffic switches. The current narrow positive catalog
+is a release hold: keep this candidate unpublished until a provider shadow diff
+shows adequate reviewed access supply, or expand exact reviewed access scopes
+before cutover. A near-empty Quality pool is not an activation success.
+
+This change requires the new migration before the new binaries. Build and
+shadow the exact policy-two resource first; compare subscriber/unknown/ambiguous
+and proxy-risk cohorts separately. Deploy Connect to acquire real lookup facts,
+then complete rollup and native-index refresh. After activation, legacy
+connections will be excluded from Quality until positively reclassified. No SQL reconstruction of
+raw IPs, automatic subscriber backfill, resource publication or Main activation
+is part of the source change. Measure the additional bounded primary read in
+Quality requests during the canary.
+
+## Request-guard performance review
+
+An opt-in disposable PostgreSQL test exercises the exact query against the
+actual migrated indexes with 20,000 synthetic providers, 40,000 live and 200,000
+historical connections, 239,000 locations and 128 current handlers. It includes
+unverified and missing location rows. On the review host, warm-cache request
+timings with activation enabled, including Redis membership, policy parsing
+and database calls, were (other regression tests shared the host):
+
+| Candidates | Bounded SQL calls | Median | p95 |
+| ---: | ---: | ---: | ---: |
+| 20 | 1 | 0.61 ms | 1.02 ms |
+| 256 | 1 | 3.26 ms | 4.63 ms |
+| 1,000 | 4 | 12.55 ms | 15.13 ms |
+| 4,000 | 16 | 48.39 ms | 59.28 ms |
+
+The original correlated aggregate repeated handler work per candidate and took
+19.71 ms median for 1,000 candidates. The final query materializes each bounded
+candidate/connection batch and joins handlers once per batch. `EXPLAIN
+(ANALYZE, BUFFERS)` uses `network_client_connection_connected_client_id` and
+`network_client_location_pkey`, without full connection/location scans. It
+reads the small handler relation once per batch. Duplicate candidates and
+already hard-excluded IDs do not incur another subscriber read. No new index
+or fleet-wide request query is introduced.
+
+These are synthetic warm-cache measurements, not production capacity evidence;
+Main's load, connection multiplicity, cache misses and concurrent request rate
+can change the cost. The added primary work remains a canary requirement. Check
+FP2 latency, database CPU/buffers, candidates examined, and result shortfalls
+before enabling the stricter policy broadly. Reproduce on a configured disposable
+test environment with `ARIN_SUBSCRIBER_BENCHMARK=1 go test ./model -run
+'^TestSubscriberGuardQueryPlan$' -count=1 -v`. The test prints aggregate timings
+and plan shape only, and skips by default.
 
 ## Evidence and scope
 
@@ -93,7 +302,7 @@ unrelated customer's origin is not Cloudflare/Akamai infrastructure merely
 because a CDN serves its hostname.
 
 Multinational registration country is not proof of a user's physical location.
-`risk` is computed separately from authoritative ARIN registration and actual
+Geographic risk is computed separately from authoritative ARIN registration and actual
 GeoLite2 prefix intersections. External-RIR referrals, registry administrative
 allocations, reserved blocks, and unknown block types cannot supply customer
 country. In particular no AFRINIC-wide exception is justified by ARIN referral
@@ -106,7 +315,9 @@ equal. Incomparable direct registrations remain together in `owner_evidence`;
 the builder never uses source order, handle spelling, or update timestamps to
 invent a unique owner. Only unanimous known authoritative country supplies
 `registered_country` and geographic risk. Conflicting or missing country facts
-remain unknown; differing hosting classifications cannot create `non_quality`.
+remain unknown. Under quality policy two, differing network-use classifications
+produce an ambiguous Quality exclusion; legacy policy retains its original
+boolean consensus for reproducible comparisons.
 The output records and manifest expose multi-owner and ambiguous-fact counts.
 Malformed cycles or contradictory facts within the same network record still
 stop publication.

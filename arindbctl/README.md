@@ -51,14 +51,31 @@ Do not substitute a blanket organization-name heuristic for evidence-backed
 hosting classifications. No production classifier or credentials are bundled
 with the tool.
 
+The complete subscriber/risk proposal is staged in
+`config/main/arindb-quality-v2.candidate.yml`. Active `main/arindb.yml` is
+unchanged and remains the all-release default. Candidate builds must supply the
+candidate path explicitly. Runtime enforcement additionally requires
+`subscriber_quality_policy_version: 2` in `provider.yml`; it defaults off and
+must remain off until coordinated promotion passes the coverage and performance
+review described below.
+
+`quality_policy_version: 2` requires affirmative reviewed subscriber access.
+Unreviewed, uncovered, conflicting, hosting and ambiguous leased use are excluded
+from Quality, with distinct `quality_state` metadata. An allow is not inherited
+by an unreviewed child. Rules must explicitly supply `non_quality`; omission is
+an error. The optional `risk_category` (`virtual_isp`, `proxy`, `vpn`, `tor`)
+adds an independent hard exclusion whose positive evidence cannot be cleared by
+an access or country override. See [the research and rollout requirements](CLASSIFICATION.md).
+
 Organization rules apply parent-first: an unknown child inherits a reviewed
 hosting parent's `non_quality` flag until a more-specific reviewed owner or
 prefix rule overrides it. To allow a verified access ISP within a hosting
 organization, name that child organization or a narrow prefix in a rule with
-`non_quality: false`. The last matching rule for each organization wins, a
-reviewed child overrides its ancestors, and the longest matching prefix
-overrides organization rules (the last rule breaks equal-prefix ties). Each
-rule must carry its evidence source and reason. The manifest binds the exact
+`non_quality: false`. A reviewed child overrides its ancestors, and the longest
+matching prefix overrides organization rules. Under policy two, contradictory
+rules for the same organization or equally specific prefix produce ambiguous
+exclusion; legacy policy retains last-rule precedence for reproducible comparisons.
+Each rule must carry its evidence source and reason. The manifest binds the exact
 reviewed rule file; each record retains the direct owner plus the matched rule,
 evidence source, reason, and inherited classification owner when applicable.
 

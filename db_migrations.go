@@ -9434,4 +9434,10 @@ var migrations = []any{
 	),
 	// Persist the server-issued identity atomically with resumable registration.
 	newSqlMigration(clientRegistrationSchemaSql),
+	// Positive subscriber evidence is absent on old writers and legacy rows.
+	// The rollup and Quality request guard exclude those rows until reclassified.
+	newSqlMigration(`
+		ALTER TABLE network_client_location
+			ADD COLUMN arin_quality_verified boolean NOT NULL DEFAULT false;
+	`),
 }

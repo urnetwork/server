@@ -100,6 +100,51 @@ func TestArinExceptionRejectsUnknownClassifierVersion(t *testing.T) {
 	}
 }
 
+func TestArinSubscriberEvidenceRequiresVersionedPositiveLookup(t *testing.T) {
+	for _, state := range []string{"subscriber", "excluded", "unknown", "ambiguous"} {
+		db, err := mmdb.OpenBytes(testExceptionDatabase(t, string(schemaTypeArinDb), map[string]mmdbtype.Map{
+			"192.0.2.0/24": {
+				"classifier_version": mmdbtype.Uint32(1), "quality_policy_version": mmdbtype.Uint32(2),
+				"quality_state": mmdbtype.String(state), "non_quality": mmdbtype.Bool(state != "subscriber"), "risk": mmdbtype.Bool(false),
+			},
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := getArinInfoFromDatabase(db, schemaTypeArinDb, netip.MustParseAddr("192.0.2.1"))
+		missing, missingErr := getArinInfoFromDatabase(db, schemaTypeArinDb, netip.MustParseAddr("198.51.100.1"))
+		db.Close()
+		if err != nil || missingErr != nil || info.QualityVerified() != (state == "subscriber") || missing.QualityVerified() {
+			t.Fatalf("%s: missing or explicit evidence lost semantics", state)
+		}
+		info.Risk = true
+		if info.QualityVerified() {
+			t.Fatal("subscriber evidence waived independent risk")
+		}
+	}
+	for _, record := range []mmdbtype.Map{
+		{"quality_policy_version": mmdbtype.Uint32(3)},
+		{"quality_state": mmdbtype.String("subscriber")},
+		{"quality_policy_version": mmdbtype.Uint32(2), "quality_state": mmdbtype.String("unknown")},
+		{"quality_policy_version": mmdbtype.Uint32(2), "quality_state": mmdbtype.String("subscriber"), "non_quality": mmdbtype.Bool(true)},
+	} {
+		if _, err := decodeArinTestRecord(t, record); err == nil {
+			t.Fatal("inconsistent subscriber evidence accepted")
+		}
+	}
+	for _, omitted := range []mmdbtype.String{"classifier_version", "risk", "non_quality"} {
+		record := mmdbtype.Map{"classifier_version": mmdbtype.Uint32(1), "quality_policy_version": mmdbtype.Uint32(2),
+			"quality_state": mmdbtype.String("subscriber"), "risk": mmdbtype.Bool(false), "non_quality": mmdbtype.Bool(false)}
+		delete(record, omitted)
+		if _, err := decodeArinTestRecord(t, record); err == nil {
+			t.Fatalf("missing %s became affirmative subscriber evidence", omitted)
+		}
+	}
+	if (&ArinInfo{DatabaseBuildEpoch: 123, ClassifierVersion: 1}).QualityVerified() || (&ArinInfo{}).QualityVerified() {
+		t.Fatal("legacy/default false flags became subscriber evidence")
+	}
+}
+
 // Country-policy provenance is additive; the existing reader trusts final flags
 // and never recomputes a reviewed exception from the retained registration chain.
 func TestArinCountryPolicyEvidenceKeepsExistingReaderFormat(t *testing.T) {

@@ -27,7 +27,7 @@ func testingConnectClientWithLocation(
 	handlerId := CreateNetworkClientHandler(ctx)
 	connectionId, _, _, clientAddressHash, err := ConnectNetworkClient(ctx, clientId, clientAddress, handlerId)
 	connect.AssertEqual(t, err, nil)
-	err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{})
+	err = SetConnectionLocation(ctx, connectionId, location.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 	connect.AssertEqual(t, err, nil)
 	return clientAddressHash
 }

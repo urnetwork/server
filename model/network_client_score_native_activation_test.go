@@ -14,7 +14,7 @@ import (
 // Publication tests and ordinary request tests retain the production default.
 func nativeTestEnableReader(t testing.TB) {
 	t.Helper()
-	pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte("egress_index:\n  native_reader_enabled: true\n"))
+	pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte("subscriber_quality_policy_version: 2\negress_index:\n  native_reader_enabled: true\n"))
 	requestEgressIndexSettingsSnapshot.Store(nil)
 	t.Cleanup(func() {
 		pop()

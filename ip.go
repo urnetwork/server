@@ -682,9 +682,11 @@ type ArinInfo struct {
 	schemaType      schemaType
 	OrgCountryCodes []string
 	// Explicit exceptions. A successful lookup without a record has neither.
-	Risk              bool
-	NonQuality        bool
-	ClassifierVersion uint32
+	Risk                 bool
+	NonQuality           bool
+	ClassifierVersion    uint32
+	QualityPolicyVersion uint32
+	QualityState         string
 	// Metadata of the database actually queried, even when no record matched.
 	// Explicit IP overrides do not query a database and retain zero here.
 	DatabaseBuildEpoch int64
@@ -710,6 +712,7 @@ func (self *ArinInfo) UnmarshalMaxMindDB(d *mmdbdata.Decoder) error {
 }
 
 func (self *ArinInfo) unmarshalArinDb(d *mmdbdata.Decoder) error {
+	var hasRisk, hasNonQuality bool
 	mapIter, _, err := d.ReadMap()
 	if err != nil {
 		return err
@@ -721,11 +724,17 @@ func (self *ArinInfo) unmarshalArinDb(d *mmdbdata.Decoder) error {
 
 		switch string(key) {
 		case "risk":
+			hasRisk = true
 			self.Risk, err = d.ReadBool()
 		case "non_quality":
+			hasNonQuality = true
 			self.NonQuality, err = d.ReadBool()
 		case "classifier_version":
 			self.ClassifierVersion, err = d.ReadUint32()
+		case "quality_policy_version":
+			self.QualityPolicyVersion, err = d.ReadUint32()
+		case "quality_state":
+			self.QualityState, err = d.ReadString()
 		case "org_country_codes":
 			iter, n, err := d.ReadSlice()
 			if err != nil {
@@ -754,7 +763,23 @@ func (self *ArinInfo) unmarshalArinDb(d *mmdbdata.Decoder) error {
 	if self.ClassifierVersion > 1 {
 		return fmt.Errorf("unsupported ARIN classifier version: %d", self.ClassifierVersion)
 	}
+	if self.QualityPolicyVersion != 0 && self.QualityPolicyVersion != 2 {
+		return fmt.Errorf("unsupported ARIN quality policy version: %d", self.QualityPolicyVersion)
+	}
+	if self.QualityPolicyVersion == 2 {
+		if self.ClassifierVersion != 1 || !hasRisk || !hasNonQuality || !slices.Contains([]string{"subscriber", "excluded", "unknown", "ambiguous"}, self.QualityState) || self.NonQuality != (self.QualityState != "subscriber") {
+			return fmt.Errorf("inconsistent ARIN subscriber classification")
+		}
+	} else if self.QualityState != "" {
+		return fmt.Errorf("unversioned ARIN subscriber classification")
+	}
 	return nil
+}
+
+// Legacy false exception bits, missing records and manual location overrides
+// never establish subscriber access. Risk remains an independent veto.
+func (self *ArinInfo) QualityVerified() bool {
+	return self != nil && self.DatabaseBuildEpoch > 0 && self.ClassifierVersion == 1 && self.QualityPolicyVersion == 2 && self.QualityState == "subscriber" && !self.NonQuality && !self.Risk
 }
 
 func GetArinInfoFromString(ip string) (*ArinInfo, error) {

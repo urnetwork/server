@@ -87,7 +87,7 @@ func TestFindProviders2IpFamily(t *testing.T) {
 			for j, c := range p.connections {
 				connectionId, _, _, hash, err := ConnectNetworkClientWithIpFamily(ctx, clientId, c.address, handlerId, c.intent)
 				connect.AssertEqual(t, err, nil)
-				err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{})
+				err = SetConnectionLocation(ctx, connectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true})
 				connect.AssertEqual(t, err, nil)
 				if j == 0 {
 					clientAddressHash = hash
