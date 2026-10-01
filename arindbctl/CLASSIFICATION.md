@@ -131,7 +131,8 @@ or all leased addresses.
 The runtime reader validates policy/state consistency. A real, versioned
 subscriber lookup with no risk is persisted as `arin_quality_verified`; old
 records, missing records and manual location overrides cannot manufacture it.
-The appended migration defaults that connection fact to false. The controller
+Migration 750 defaults that connection fact to false; migration 751 binds it to
+each location write and revokes all pre-751 positives. The controller
 keeps the database's raw `non_quality` flag separate from this new fact. With
 explicit policy activation, rollup treats any active unverified connection as
 non-quality. Activated Quality requests additionally
@@ -164,12 +165,66 @@ ARIN_SUBSCRIBER_RULES_PATH=/absolute/path/config/main/arindb-quality-v2.candidat
 go test -race ./arindbctl
 ```
 
-The schema change appends migration index 749, taking the published head from
-749 to 750; existing migration identities remain unchanged. A disposable
-749-to-750 test verifies that both pre-existing rows and inserts from an old
-writer stay `arin_quality_verified=false`. Existing startup readiness checks
-require the new binary's migration head before it takes traffic. Old writers
-are SQL-compatible after the append, but their connections remain unverified.
+Migration 750 (index 749) alone is insufficient for mixed writers. Its false
+default covers inserts, but an older `ON CONFLICT DO UPDATE` omits
+`arin_quality_verified` and retains a prior new-writer `true`. A deterministic
+schema-750 control reproduces that stale positive even when the old writer
+changes the location, and the strict eligibility expression still accepts it.
+The server `720e7c61` release retains this limitation; it does not include the
+successor correction below and cannot establish the v2 activation guarantee.
+
+Migration 751 (index 750) appends without changing any earlier identity. It adds
+nullable `arin_quality_write_token` with no default, clears every existing
+positive, and installs a row trigger in the same transaction/table lock. The
+new writer supplies a fresh token with the complete location/classification
+statement on every insert and conflict update, including repeated identical
+facts. The trigger forces the boolean false on inserts without a token and on
+updates with a missing or unchanged token. An invalidating update retains the
+last token, so immediately replaying it cannot re-attest after invalidation.
+The token identifies a write; it is not an authorization credential or a
+historical replay ledger. Only a new lookup and a fresh write can re-attest.
+
+This covers old server `0b8e758d` upserts, schema-750 writers that explicitly set
+the boolean but know no token, and direct updates that do not participate in the
+protocol. Even an identical or ancillary legacy update revokes the fact; value
+equality cannot distinguish a new lookup from an old writer. Older statements
+remain SQL-compatible. PostgreSQL runs the row update trigger on the conflict
+path as well as the insert trigger on the proposed insert
+([trigger semantics](https://www.postgresql.org/docs/18/trigger-definition.html)).
+The live request guard and rollup continue reading the same boolean, so already
+deployed readers also observe revocation. The append does no affirmative SQL
+backfill. Its one-time reset scans the location table and updates positive rows
+under the migration's table lock; qualify that lock duration and retained-row
+volume on the intended database before production scheduling.
+
+Use a successor release containing both migration 751 and the token writer.
+Keep `provider.yml` absent/zero, apply 751 with that release's migration tool,
+then deploy its serving/Connect/writer fleet. Successor startup refuses schema
+750. Readiness checks only a lower bound: old binaries requiring 749 or 750 can
+still report ready against 751, which does not establish policy readiness.
+Do not use an old migration tool against the newer catalog or remove the
+trigger for a binary rollback. With policy still off, old writers can overlap
+the deployment safely but cannot establish positive subscriber coverage. Before
+v2 activation, complete the guarded API fleet, capable writer fleet, actual
+lookup re-attestation, coverage/shadow/load gates, and rollup/index refresh.
+
+The October 1 successor qualification passes 27 selected roots in normal and
+race modes, without skips, across server/model/controller/router; all four
+packages pass vet. The tests cover 749/750 upgrades, the contaminated schema-750
+control and reset, migration restart without repeated revocation, missing/null/
+unchanged tokens, schema-750 inserts and upserts, identical and changed legacy
+upserts, repeated new-writer re-attestation, an old transaction committing after
+a new attestation, warm native/fallback/named guards, rollup, default-off policy,
+and startup readiness. Removing only the trigger makes both new model controls
+fail with a retained positive/live-join eligibility. The synthetic guard-plan
+fixture also passes with 20,000 providers, 40,000 current and 200,000 historical
+connections; this is not a production capacity or migration-lock approval.
+Evidence is retained at
+`/mnt/data/sn-testnet/astra-arin-mixed-writer-20261001/receipt.json` and
+`SHA256SUMS`. Initial broad runs lacked a synthetic documentation-range override
+and reached an absent GeoLite resource before coverage assertions; those logs
+remain beside the final successful runs. No production database, release image,
+active classifier resource or provider policy was changed.
 
 A mixed pool containing old API binaries cannot enforce the new Quality
 contract consistently, because old fallback code may still borrow non-quality

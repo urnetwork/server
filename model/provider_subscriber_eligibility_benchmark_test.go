@@ -30,9 +30,10 @@ func TestSubscriberGuardQueryPlan(t *testing.T) {
 					md5('subscriber-benchmark-handler-'||(n%128))::uuid
 				FROM generate_series(1,20000) AS n CROSS JOIN generate_series(1,12) AS generation`))
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client_location
-				(client_id,connection_id,city_location_id,region_location_id,country_location_id,arin_quality_verified)
+				(client_id,connection_id,city_location_id,region_location_id,country_location_id,arin_quality_verified,arin_quality_write_token)
 				SELECT md5('subscriber-benchmark-client-'||n)::uuid, md5('subscriber-benchmark-connection-'||n||':'||generation)::uuid,
-					$1::uuid,$1::uuid,$1::uuid, NOT (generation=2 AND n%10=0)
+					$1::uuid,$1::uuid,$1::uuid, NOT (generation=2 AND n%10=0),
+					md5('subscriber-benchmark-write-'||n||':'||generation)::uuid
 				FROM generate_series(1,20000) AS n CROSS JOIN generate_series(1,12) AS generation
 				WHERE NOT (generation=2 AND n%20=0)`, server.NewId()))
 			server.RaisePgResult(tx.Exec(ctx, `ANALYZE network_client_connection`))
