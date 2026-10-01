@@ -77,6 +77,13 @@ func decodeH1FailureExit(format string, args []any) (event h1FailureExit, matche
 	if event.Client, err = clientconnect.ParseId(clientTag); err != nil {
 		return event, false, false
 	}
+	// A device's SendControl keeps its ordinary client tag but targets the
+	// reserved control destination. Its ping expiry is not provider-flow
+	// evidence, whether the workload observer is armed or already disarmed.
+	// Keep this after typed decoding so malformed producer fields stay visible.
+	if event.Destination == clientconnect.ControlId {
+		return event, false, false
+	}
 	cause, ok := args[7].(error)
 	if args[5] != nil || args[6] != nil || !ok || !errors.Is(cause, context.DeadlineExceeded) ||
 		event.Lifetime != 30*time.Second || event.Pending <= 0 || event.Sends <= 0 ||
@@ -364,6 +371,60 @@ func h1FailureTestRecorder() (*h1FailureSnapshotRecorder, []any) {
 	recorder.pin.Store(&h1FailureActivePin{Client: client, Provider: provider, FlowCount: 2, Source: "flow", Phase: "loaded-start", ctx: context.Background()})
 	recorder.stack = func(buffer []byte, all bool) int { return copy(buffer, "bounded stack\n") }
 	return recorder, h1FailureTestArgs(client, provider)
+}
+
+// A device-originated control ping has an ordinary client UUID, unlike the
+// server's c(id) control client. The record36 replay's second process expired
+// such a ping after route readiness, when construction capture was disarmed.
+// It must remain an ordinary logged control error, not missing peer evidence.
+func TestH1FailureSnapshotControlChannelScope(t *testing.T) {
+	for _, tc := range []struct {
+		name                         string
+		control, unpinned, disarmed  bool
+		wrongProvider, malformed     bool
+		wantCapture                  bool
+		wantUnattributed, wantReject uint64
+		wantMalformed                uint64
+	}{
+		{name: "device-control-before-pin", control: true, unpinned: true},
+		{name: "device-control-armed", control: true},
+		{name: "device-control-after-readiness", control: true, disarmed: true},
+		{name: "peer-armed", wantCapture: true},
+		{name: "peer-before-pin-remains-unattributed", unpinned: true, wantUnattributed: 1},
+		{name: "peer-disarmed-remains-unattributed", disarmed: true, wantUnattributed: 1},
+		{name: "wrong-peer-remains-rejected", wrongProvider: true, wantReject: 1},
+		{name: "malformed-control-remains-visible", control: true, malformed: true, wantMalformed: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder, args := h1FailureTestRecorder()
+			// Match the ping expiry's distinguishing typed fields. Do not use
+			// the zero stream or changed carrier as a substitute for ownership:
+			// a real provider-bound expiry may also have either property.
+			args[4], args[8], args[10], args[11], args[21] = clientconnect.Id{}, 2, uint64(2), 5, true
+			if tc.control {
+				args[2] = clientconnect.ControlId
+			} else if tc.wrongProvider {
+				args[2] = clientconnect.NewId()
+			}
+			if tc.unpinned {
+				recorder.pin.Store(nil)
+			}
+			if tc.disarmed {
+				recorder.ready.Store(false)
+			}
+			if tc.malformed {
+				args[10] = int(2) // a changed producer type must still fail closed
+			}
+			recorder.observe(h1FailureExitFormat, args)
+			if capture := recorder.snapshot.Load() != nil; capture != tc.wantCapture ||
+				recorder.unattributed.Load() != tc.wantUnattributed || recorder.rejected.Load() != tc.wantReject ||
+				recorder.malformed.Load() != tc.wantMalformed || recorder.claimed.Load() != tc.wantCapture || recorder.duplicates.Load() != 0 {
+				t.Fatalf("control scope: captured=%t claimed=%t unattributed=%d rejected=%d malformed=%d duplicates=%d; want captured=%t unattributed=%d rejected=%d malformed=%d",
+					capture, recorder.claimed.Load(), recorder.unattributed.Load(), recorder.rejected.Load(), recorder.malformed.Load(), recorder.duplicates.Load(),
+					tc.wantCapture, tc.wantUnattributed, tc.wantReject, tc.wantMalformed)
+			}
+		})
+	}
 }
 
 func TestH1FailureSnapshotIdentityAndNegativeControls(t *testing.T) {

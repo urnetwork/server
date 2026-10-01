@@ -5,15 +5,18 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math/bits"
 	"net"
 	"net/netip"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/urnetwork/server/proxy/flowtrace"
 )
 
 const wireGuardDNSCap = 8
+const wireGuardDNSTextCap = 2048
 
 type wireGuardDNSContextKey struct{}
 
@@ -25,6 +28,7 @@ type wireGuardDNSFlow struct {
 	queryId       uint16
 	queryKnown    bool
 	queryRepeated bool
+	historyIndex  int
 }
 
 type wireGuardDNSPacket struct {
@@ -32,6 +36,10 @@ type wireGuardDNSPacket struct {
 	bytes                        uint16
 	quote                        uint8 // none, UDP header, short, malformed, fragmented, other
 	match                        uint8 // unmatched, unique active tuple, ambiguous active tuple
+	localEnvelope                bool
+	closestActive                uint16 // bitset of equally-close field-mismatch masks
+	closedCurrent                bool
+	prior                        uint8 // exact prior-request tuple: active=1, closed=2
 }
 
 type wireGuardDNSRequest struct {
@@ -48,6 +56,9 @@ type wireGuardDNSRequest struct {
 	freezeOnce       sync.Once
 	text             string
 	providerMetadata bool
+	window           *wireGuardDNSReadiness
+	windowRequest    uint64
+	started          time.Time
 }
 
 type wireGuardDNSExchange struct {
@@ -56,7 +67,14 @@ type wireGuardDNSExchange struct {
 }
 
 func (s *wireGuardStack) startDNSRequest() *wireGuardDNSRequest {
-	r := &wireGuardDNSRequest{stack: s}
+	return s.startDNSRequestInWindow(nil)
+}
+
+func (s *wireGuardStack) startDNSRequestInWindow(window *wireGuardDNSReadiness) *wireGuardDNSRequest {
+	r := &wireGuardDNSRequest{stack: s, window: window}
+	if window != nil {
+		r.windowRequest, r.started = window.begin()
+	}
 	s.statsLock.Lock()
 	defer s.statsLock.Unlock()
 	for i, active := range s.dnsRequests {
@@ -93,7 +111,7 @@ func (r *wireGuardDNSRequest) exchange(connection net.Conn, tcp bool) *wireGuard
 	if r == nil {
 		return nil
 	}
-	flow := wireGuardDNSFlow{local: dnsAddrPort(connection.LocalAddr()), remote: dnsAddrPort(connection.RemoteAddr()), active: true, tcp: tcp}
+	flow := wireGuardDNSFlow{local: dnsAddrPort(connection.LocalAddr()), remote: dnsAddrPort(connection.RemoteAddr()), active: true, tcp: tcp, historyIndex: -1}
 	r.stack.statsLock.Lock()
 	defer r.stack.statsLock.Unlock()
 	r.mu.Lock()
@@ -106,6 +124,9 @@ func (r *wireGuardDNSRequest) exchange(connection net.Conn, tcp bool) *wireGuard
 		return nil
 	}
 	x := &wireGuardDNSExchange{r, r.flowN}
+	if r.window != nil && !tcp {
+		flow.historyIndex = r.window.register(r.windowRequest, flow)
+	}
 	r.flows[r.flowN] = flow
 	r.flowN++
 	return x
@@ -122,6 +143,11 @@ func (x *wireGuardDNSExchange) close() {
 	defer r.mu.Unlock()
 	if !r.frozen {
 		r.flows[x.index].active = false
+	}
+	if r.window != nil {
+		// A request snapshot can freeze before its resolver Dial closes. Do
+		// not call that socket retired until its actual close is observed.
+		r.window.closeFlow(r.flows[x.index].historyIndex)
 	}
 }
 
@@ -296,6 +322,52 @@ func dnsPacket(packet []byte) (event wireGuardDNSPacket, flow wireGuardDNSFlow) 
 	return
 }
 
+// Field masks compare tuples, not packet ownership or generation. Several
+// equally close sockets can yield different masks; retain those alternatives
+// rather than selecting a convenient explanation for an unmatched quotation.
+func dnsTupleDifference(a, b wireGuardDNSFlow) uint8 {
+	var mask uint8
+	if a.local.Addr() != b.local.Addr() {
+		mask |= 1
+	}
+	if a.local.Port() != b.local.Port() {
+		mask |= 2
+	}
+	if a.remote.Addr() != b.remote.Addr() {
+		mask |= 4
+	}
+	if a.remote.Port() != b.remote.Port() {
+		mask |= 8
+	}
+	return mask
+}
+
+func dnsTupleFields(mask uint8) string {
+	if mask == 0 {
+		return "none"
+	}
+	var fields []string
+	for i, field := range []string{"source_address", "source_port", "remote_address", "remote_port"} {
+		if mask&(1<<i) != 0 {
+			fields = append(fields, field)
+		}
+	}
+	return strings.Join(fields, "+")
+}
+
+func dnsTupleAlternatives(masks uint16) string {
+	if masks == 0 {
+		return "not_observed"
+	}
+	var alternatives []string
+	for mask := range 16 {
+		if masks&(1<<mask) != 0 {
+			alternatives = append(alternatives, dnsTupleFields(uint8(mask)))
+		}
+	}
+	return strings.Join(alternatives, "|")
+}
+
 // statsLock -> request.mu is the only nested lock order. Every inbound packet
 // is window evidence; only the tuple comparison is specific to a DNS exchange.
 func (s *wireGuardStack) observeDNSPacketLocked(packet []byte) {
@@ -323,6 +395,30 @@ func (s *wireGuardStack) observeDNSPacketLocked(packet []byte) {
 		r.mu.Lock()
 		if !r.frozen {
 			copyEvent := event
+			copyEvent.localEnvelope = local
+			if flow.local.IsValid() && flow.remote.IsValid() {
+				closestDistance := 5
+				for _, candidate := range r.flows[:r.flowN] {
+					if candidate.tcp {
+						continue
+					}
+					mask := dnsTupleDifference(candidate, flow)
+					if !candidate.active {
+						copyEvent.closedCurrent = copyEvent.closedCurrent || mask == 0
+						continue
+					}
+					distance := bits.OnesCount8(mask)
+					if distance < closestDistance {
+						closestDistance, copyEvent.closestActive = distance, 0
+					}
+					if distance == closestDistance {
+						copyEvent.closestActive |= 1 << mask
+					}
+				}
+				if r.window != nil {
+					copyEvent.prior = r.window.priorTuple(r.windowRequest, flow)
+				}
+			}
 			if matches[i] {
 				copyEvent.match = 1
 				if count > 1 {
@@ -356,9 +452,20 @@ func (r *wireGuardDNSRequest) freeze() string {
 		for _, p := range r.packets[:r.packetN] {
 			shape := [...]string{"none", "udp_header", "short", "malformed", "fragmented", "other_protocol"}[p.quote]
 			match := [...]string{"unmatched", "matched", "ambiguous"}[p.match]
-			packets = append(packets, fmt.Sprintf("{proto=%d bytes=%d icmp=%d/%d quote_shape=%s active_dns_tuple=%s}", p.protocol, p.bytes, p.icmpType, p.icmpCode, shape, match))
+			prior := [...]string{"not_observed", "active", "closed", "active_and_closed"}[p.prior]
+			packets = append(packets, fmt.Sprintf("{proto=%d bytes=%d icmp=%d/%d quote_shape=%s active_dns_tuple=%s local_envelope=%t closest_active_fields=%s closed_current_tuple=%t prior_request_tuple=%s}", p.protocol, p.bytes, p.icmpType, p.icmpCode, shape, match, p.localEnvelope, dnsTupleAlternatives(p.closestActive), p.closedCurrent, prior))
 		}
-		r.text = fmt.Sprintf("WireGuard DNS metadata frozen=true packet_scope=request_window_not_ownership checksums=unchecked generation=unproven provider=unavailable exchanges=%d packet_observed_before_injection=[%s] socket_delivered_candidate{reads=%d with_data=%d bytes=%d read_errors=%d writes=%d written_bytes=%d write_errors=%d} lookup_authoritative{started=%d success=%d not_found=%d deadline=%d canceled=%d error=%d} limited=%t", r.flowN, strings.Join(packets, ","), r.io[0], r.io[1], r.io[2], r.io[5], r.io[3], r.io[4], r.io[6], r.lookup[0], r.lookup[1], r.lookup[2], r.lookup[3], r.lookup[4], r.lookup[5], r.limited)
+		for {
+			r.text = fmt.Sprintf("WireGuard DNS metadata frozen=true packet_scope=request_window_not_ownership checksums=unchecked generation=unproven provider=unavailable exchanges=%d packet_observed_before_injection=[%s] socket_delivered_candidate{reads=%d with_data=%d bytes=%d read_errors=%d writes=%d written_bytes=%d write_errors=%d} lookup_authoritative{started=%d success=%d not_found=%d deadline=%d canceled=%d error=%d} limited=%t text_limit=%t omitted_packets=%d", r.flowN, strings.Join(packets, ","), r.io[0], r.io[1], r.io[2], r.io[5], r.io[3], r.io[4], r.io[6], r.lookup[0], r.lookup[1], r.lookup[2], r.lookup[3], r.lookup[4], r.lookup[5], r.limited, len(packets) != r.packetN, r.packetN-len(packets))
+			if len(r.text) <= wireGuardDNSTextCap || len(packets) == 0 {
+				break
+			}
+			i := len(packets) / 2
+			packets = append(packets[:i], packets[i+1:]...)
+		}
+		if r.window != nil {
+			r.window.record(r)
+		}
 	})
 	return r.text
 }

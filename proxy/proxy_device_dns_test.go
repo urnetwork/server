@@ -142,6 +142,11 @@ type proxyDNSHarness struct {
 
 func newProxyDNSHarness(t *testing.T, readOrder ...string) *proxyDNSHarness {
 	t.Helper()
+	return newProxyDNSHarnessForDevice(t, nil, readOrder...)
+}
+
+func newProxyDNSHarnessForDevice(t *testing.T, device *ProxyDevice, readOrder ...string) *proxyDNSHarness {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	peer := natPeerAddr(t)
 	tun := tuntest.NewChannelTUN()
@@ -150,7 +155,9 @@ func newProxyDNSHarness(t *testing.T, readOrder ...string) *proxyDNSHarness {
 		cancel()
 		t.Fatal(err)
 	}
-	device := natTestDevice(t, true, peer)
+	if device == nil {
+		device = natTestDevice(t, true, peer)
+	}
 	device.ctx = ctx
 	device.tun, err = connect.CreateTunWithDefaults(ctx)
 	if err != nil {
@@ -315,26 +322,47 @@ func (h *proxyDNSHarness) send(packet []byte) []byte {
 
 func (h *proxyDNSHarness) deliver(packet []byte, wantHandoff bool) {
 	h.t.Helper()
-	owned := connect.MessagePoolCopy(packet)
-	h.device.deliverReturnPackets([][]byte{owned})
-	handed := false
-	select {
-	case shared := <-h.receive:
-		handed = true
-		copy := bytes.Clone(shared)
-		if connect.MessagePoolReturn(shared) {
-			h.t.Fatal("WireGuard handoff released the callback's owner")
+	want := 0
+	if wantHandoff {
+		want = 1
+	}
+	h.deliverBatch([][]byte{packet}, want)
+}
+
+func (h *proxyDNSHarness) deliverBatch(packets [][]byte, wantHandoffs int) [][]byte {
+	h.t.Helper()
+	owned := make([][]byte, len(packets))
+	for i, packet := range packets {
+		owned[i] = connect.MessagePoolCopy(packet)
+	}
+	defer func() {
+		for _, packet := range owned {
+			if !connect.MessagePoolReturn(packet) {
+				h.t.Error("return callback lost its final packet owner")
+			}
 		}
-		inbound := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(copy)})
-		h.client.endpoint.InjectInbound(header.IPv4ProtocolNumber, inbound)
-		inbound.DecRef()
-	default:
-	}
-	if !connect.MessagePoolReturn(owned) {
-		h.t.Fatal("return callback lost its final packet owner")
-	}
-	if handed != wantHandoff {
-		h.t.Fatalf("WireGuard return handoff = %v, want %v", handed, wantHandoff)
+	}()
+	h.device.deliverReturnPackets(owned)
+	handed := 0
+	var delivered [][]byte
+	for {
+		select {
+		case shared := <-h.receive:
+			handed++
+			copy := bytes.Clone(shared)
+			delivered = append(delivered, copy)
+			if connect.MessagePoolReturn(shared) {
+				h.t.Fatal("WireGuard handoff released the callback's owner")
+			}
+			inbound := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(copy)})
+			h.client.endpoint.InjectInbound(header.IPv4ProtocolNumber, inbound)
+			inbound.DecRef()
+		default:
+			if handed != wantHandoffs {
+				h.t.Fatalf("WireGuard return handoffs = %d, want %d", handed, wantHandoffs)
+			}
+			return delivered
+		}
 	}
 }
 

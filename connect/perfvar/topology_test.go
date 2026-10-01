@@ -192,6 +192,8 @@ type fullTunPath struct {
 	beforeWarmedTcpMeasuredForTest      func(bool)
 	readinessProbePayloadForTest        []byte
 	beforeReadinessClientWriteForTest   func()
+	readinessClientConnectionForTest    func(net.Conn)
+	readinessRequestReaderForTest       func(net.Conn) io.Reader
 	beforeReadinessServerCloseForTest   func()
 	beforeWorkloadServerCloseForTest    func()
 	workloadFlowServerSettingsForTest   *logicalTCPFlowServerSettings
@@ -278,6 +280,7 @@ type fullTunConstructionTestHooks struct {
 	configureProviderPlatformSettings func(*clientconnect.PlatformTransportSettings)
 	configureDeviceClientSettings     func(*clientconnect.ClientSettings)
 	configureDevicePlatformSettings   func(*clientconnect.PlatformTransportSettings)
+	configureDeviceGeneratorSettings  func(*clientconnect.ApiMultiClientGeneratorSettings)
 	configureApplicationTunSettings   func(*clientconnect.TunSettings)
 }
 
@@ -1391,18 +1394,20 @@ func (self *platformSendRouteController) hasLiveEndpointP2pRouteWithLock() bool 
 	return false
 }
 
-// Every connection receives a fresh wrapper sharing the controller's
-// immutable destination snapshot and the production receive route.
+// P2P scenarios use H1 for their separate platform connection, including the
+// discovery/readiness phase before P2P promotion. Preserve the physical type
+// through this matching-only wrapper: Unknown disables existing H1 pacing,
+// grouping and recovery policies even though the socket is really H1.
 func (self *platformSendRouteController) newTransportPair() (
 	sendTransport clientconnect.Transport,
 	receiveTransport clientconnect.Transport,
 ) {
 	return &platformDataSendTransport{
-		Transport:                     clientconnect.NewSendGatewayTransport(),
+		Transport:                     clientconnect.NewSendGatewayTransportWithType(clientconnect.TransportTypeH1),
 		policy:                        &self.policy,
 		rejectedDestinationMatchCount: &self.rejectedDestinationMatchCount,
 		fallbackViolationCount:        &self.fallbackViolationCount,
-	}, clientconnect.NewReceiveGatewayTransport()
+	}, clientconnect.NewReceiveGatewayTransportWithType(clientconnect.TransportTypeH1)
 }
 
 // Applying a state rematches existing selectors against the same live route.
@@ -3836,6 +3841,9 @@ func tryNewFullTunPathWithTopologyHooks(
 	var providerProbeTrace *p2pProbeEventTrace
 	var deviceProbeTrace *p2pProbeEventTrace
 	if isP2p {
+		if platformMode != clientconnect.TransportModeH1 {
+			return nil, fmt.Errorf("P2P platform route controller requires explicit H1, got %s", platformMode)
+		}
 		providerSendRoutes = newPlatformSendRouteController(clientconnect.Id(deviceClientId))
 		deviceSendRoutes = newPlatformSendRouteController(clientconnect.Id(providerClientId))
 		path.providerSendRoutes = providerSendRoutes
@@ -4070,6 +4078,9 @@ func tryNewFullTunPathWithTopologyHooks(
 	}
 	generatorSettings := clientconnect.DefaultApiMultiClientGeneratorSettings()
 	generatorSettings.PlatformTransportMode = platformMode
+	if hooks != nil && hooks.configureDeviceGeneratorSettings != nil {
+		hooks.configureDeviceGeneratorSettings(generatorSettings)
+	}
 	devicePlatformBudget := newFullTunEndpointPlatformBudget()
 	generatorSettings.PlatformTransportSettingsGenerator = func() *clientconnect.PlatformTransportSettings {
 		settings := fullTunPlatformSettings(
@@ -4457,6 +4468,7 @@ func probeFullTunPath(
 		payload,
 		&readinessEchoServerSettings{
 			beforeSuccessfulConnectionClose: path.beforeReadinessServerCloseForTest,
+			requestReaderForTest:            path.readinessRequestReaderForTest,
 			afterCompleteRequest: func() {
 				serverRequestNanos.Store(int64(time.Since(probeStartTime)))
 				serverStage.Store(2)
@@ -4493,6 +4505,9 @@ func probeFullTunPath(
 	observation.DialRetryCount = dialRetryCount
 	if err != nil {
 		return failure("dial readiness path", err)
+	}
+	if path.readinessClientConnectionForTest != nil {
+		path.readinessClientConnectionForTest(connection)
 	}
 	if noDelayConnection, ok := connection.(interface{ SetNoDelay(bool) error }); ok {
 		if err := noDelayConnection.SetNoDelay(true); err != nil {

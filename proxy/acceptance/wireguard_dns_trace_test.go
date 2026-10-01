@@ -396,7 +396,7 @@ func TestWireGuardDNSMetadataRealResolverBoundaries(t *testing.T) {
 					t.Fatal("changed origin request count")
 				}
 			}
-			dnsTraceContains(t, text, "packet_observed_before_injection=[{proto=17", "socket_delivered_candidate{reads=", "provider=unavailable")
+			dnsTraceContains(t, text, "packet_observed_before_injection=[{proto=17", "quote_shape=none active_dns_tuple=matched", "socket_delivered_candidate{reads=", "provider=unavailable")
 			if strings.Contains(text, "with_data=0") {
 				t.Fatal("successful DNS exchange had no delivered reads")
 			}

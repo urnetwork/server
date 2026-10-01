@@ -21,6 +21,7 @@ type readinessEchoServerSettings struct {
 	afterCompleteResponse           func()
 	afterAcceptForTest              func(net.Conn)
 	afterHandlerDoneForTest         func(net.Conn)
+	requestReaderForTest            func(net.Conn) io.Reader
 }
 
 // One listener serves every connection created by the TUN dial race. The first
@@ -145,7 +146,11 @@ func (self *readinessEchoServer) serve(connection net.Conn) {
 		}
 	}
 	request := make([]byte, len(self.payload))
-	if _, err := io.ReadFull(connection, request); err != nil {
+	var reader io.Reader = connection
+	if self.settings.requestReaderForTest != nil {
+		reader = self.settings.requestReaderForTest(connection)
+	}
+	if _, err := io.ReadFull(reader, request); err != nil {
 		self.recordError(fmt.Errorf("read readiness request: %w", err))
 		return
 	}

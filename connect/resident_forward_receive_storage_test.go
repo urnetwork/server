@@ -218,7 +218,64 @@ func TestForwardReceiveStorageRefusedHeader(t *testing.T) {
 }
 
 func privateStorageCpuMicros(r *syscall.Rusage) int64 {
-	return (r.Utime.Sec+r.Stime.Sec)*1000000 + r.Utime.Usec + r.Stime.Usec
+	// Timeval uses different field widths across platforms (Darwin Usec is
+	// int32). Widen every field before arithmetic, including the seconds sum.
+	return (int64(r.Utime.Sec)+int64(r.Stime.Sec))*1_000_000 + int64(r.Utime.Usec) + int64(r.Stime.Usec)
+}
+
+func TestForwardReceiveStorageCpuMicros(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		usage syscall.Rusage
+		want  int64
+	}{
+		{name: "zero"},
+		{
+			name:  "user only",
+			usage: syscall.Rusage{Utime: syscall.Timeval{Sec: 2, Usec: 345_678}},
+			want:  2_345_678,
+		},
+		{
+			name:  "system only",
+			usage: syscall.Rusage{Stime: syscall.Timeval{Sec: 3, Usec: 654_321}},
+			want:  3_654_321,
+		},
+		{
+			name: "mixed seconds and microseconds",
+			usage: syscall.Rusage{
+				Utime: syscall.Timeval{Sec: 2, Usec: 345_678},
+				Stime: syscall.Timeval{Sec: 3, Usec: 654_321},
+			},
+			want: 5_999_999,
+		},
+		{
+			name: "microsecond carry",
+			usage: syscall.Rusage{
+				Utime: syscall.Timeval{Usec: 999_999},
+				Stime: syscall.Timeval{Usec: 2},
+			},
+			want: 1_000_001,
+		},
+		{
+			name:  "microsecond total exceeds int32",
+			usage: syscall.Rusage{Utime: syscall.Timeval{Sec: 2_148}},
+			want:  2_148_000_000,
+		},
+		{
+			name: "seconds sum exceeds int32",
+			usage: syscall.Rusage{
+				Utime: syscall.Timeval{Sec: 2_000_000_000, Usec: 999_999},
+				Stime: syscall.Timeval{Sec: 1_000_000_000, Usec: 2},
+			},
+			want: 3_000_000_001_000_001,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := privateStorageCpuMicros(&test.usage); got != test.want {
+				t.Fatalf("process CPU microseconds = %d, want %d", got, test.want)
+			}
+		})
+	}
 }
 
 func TestForwardReceiveStorageChurnProfile(t *testing.T) {

@@ -1289,6 +1289,9 @@ func probeHTTPSCampaign(
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, retryWindow)
 	defer cancel()
+	dnsReadiness := new(wireGuardDNSReadiness)
+	probeCtx = context.WithValue(probeCtx, wireGuardDNSReadinessKey{}, dnsReadiness)
+	defer dnsReadiness.freeze()
 	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	var lastErr error
 	for {
@@ -1298,23 +1301,24 @@ func probeHTTPSCampaign(
 		}
 		var statusErr *targetHTTPStatusError
 		if errors.As(lastErr, &statusErr) && statusErr.statusCode == http.StatusTooManyRequests {
-			return 0, fmt.Errorf("%s readiness was rate limited: %w", protocol, lastErr)
+			return 0, fmt.Errorf("%s readiness was rate limited: %w", protocol, dnsReadiness.failure(lastErr))
 		}
 		if probeCtx.Err() != nil {
 			if ctx.Err() != nil {
 				return 0, ctx.Err()
 			}
-			lastErr = appendLocalNetworkFailureDiagnostic(lastErr, collectLocalNetworkFailure)
+			lastErr = appendLocalNetworkFailureDiagnostic(dnsReadiness.failure(lastErr), collectLocalNetworkFailure)
 			return 0, fmt.Errorf("%s path did not reach the HTTPS target within %s: %w", protocol, retryWindow, lastErr)
 		}
 		if err := wait(probeCtx, readinessRetryInterval); err != nil {
 			if ctx.Err() != nil {
 				return 0, ctx.Err()
 			}
-			lastErr = appendLocalNetworkFailureDiagnostic(lastErr, collectLocalNetworkFailure)
+			lastErr = appendLocalNetworkFailureDiagnostic(dnsReadiness.failure(lastErr), collectLocalNetworkFailure)
 			return 0, fmt.Errorf("%s path did not reach the HTTPS target within %s: %w", protocol, retryWindow, lastErr)
 		}
 	}
+	dnsReadiness.freeze() // successful readiness must not retain tuples through the soak
 
 	successfulRequests := 1
 	sustainedRequests := int(soakDuration / soakInterval)

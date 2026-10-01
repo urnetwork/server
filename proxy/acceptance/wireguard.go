@@ -554,7 +554,8 @@ func (b *wireGuardDiagnosticBody) wrapError(err error) error {
 func (t *wireGuardDiagnosticTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	dialAttempt := new(atomic.Uint64)
 	request = request.WithContext(context.WithValue(request.Context(), wireGuardDialAttemptContextKey{}, dialAttempt))
-	dnsTrace := t.stack.startDNSRequest()
+	window, _ := request.Context().Value(wireGuardDNSReadinessKey{}).(*wireGuardDNSReadiness)
+	dnsTrace := t.stack.startDNSRequestInWindow(window)
 	dnsTrace.providerMetadata, _ = request.Context().Value(flowTraceDnsContextKey{}).(bool)
 	request = request.WithContext(context.WithValue(request.Context(), wireGuardDNSContextKey{}, dnsTrace))
 	before := t.stack.packetStats()
@@ -563,6 +564,7 @@ func (t *wireGuardDiagnosticTransport) RoundTrip(request *http.Request) (*http.R
 		outerBefore = t.bind.packetStats()
 	}
 	if err := wireGuardForeignReturnError(before, time.Now()); err != nil {
+		dnsTrace.freeze()
 		return nil, err
 	}
 	roundTripper := t.roundTripper
