@@ -270,34 +270,7 @@ func currentUrlProbeProcesses(processes []*urlProbeCoverageProcess, expected map
 }
 
 func urlProbeCoverageCensusValid(process *urlProbeCoverageProcess, now time.Time) bool {
-	values := process.values
-	observed, present := values["observed"]
-	if !present || !urlProbeCoverageFresh(observed, now) || !urlProbeCoverageFresh(values["observed_time"], now) || observed < values["start"] {
-		return false
-	}
-	for _, state := range urlProbeFleetStates {
-		value, present := values["fleet:"+state]
-		if !present || value != math.Trunc(value) || value > 1e12 || values["fleet_time:"+state] != values["observed_time"] {
-			return false
-		}
-	}
-	for _, name := range []string{"oldest", "cohort_started"} {
-		if _, present := values[name]; !present || values[name+"_time"] != values["observed_time"] {
-			return false
-		}
-	}
-	eligible := values["fleet:eligible"]
-	for _, state := range []string{"due", "quota_complete", "secure_complete", "overdue", "security_pending", "security_unknown_targets", "warming", "uninitialized"} {
-		if values["fleet:"+state] > eligible {
-			return false
-		}
-	}
-	quota, complete, security := values["fleet:quota_complete"], values["fleet:secure_complete"], values["fleet:security_pending"]
-	deficit := values["fleet:runs_needed"]
-	return values["fleet:successes_needed"] == deficit && values["cohort_started"] <= observed && values["fleet:complete"] == complete && complete <= quota && complete+security <= eligible &&
-		values["fleet:security_unknown_targets"] <= security && values["fleet:overdue"] <= eligible-complete &&
-		complete+values["fleet:overdue"]+values["fleet:warming"] == eligible &&
-		deficit >= eligible-quota && deficit <= 10*(eligible-quota) && quota-complete <= security
+	return diagnoseUrlProbeCoverageCensus(process, now).reason == urlProbeCensusOK
 }
 
 // A complete global census can prove a deficit even if unrelated worker
@@ -335,8 +308,14 @@ func evaluateUrlProbeCoverage(processes []*urlProbeCoverageProcess, expected map
 			gaps = append(gaps, fmt.Sprintf("shard_%d_owners=%d", shard, len(candidates)))
 		}
 	}
-	if len(owners) == 0 || len(owners[0]) != 1 || !urlProbeCoverageCensusValid(owners[0][0], now) {
+	if len(owners) == 0 || len(owners[0]) != 1 {
 		gaps = append(gaps, "fresh_coherent_global_census_unavailable")
+		gaps = append(gaps, "source=census-owner census_reason=owner_unavailable")
+		return []finding{urlProbeCoverageUnknown(strings.Join(gaps, " "))}
+	}
+	census := diagnoseUrlProbeCoverageCensus(owners[0][0], now)
+	if census.reason != urlProbeCensusOK {
+		gaps = append(gaps, "fresh_coherent_global_census_unavailable", census.projection())
 		return []finding{urlProbeCoverageUnknown(strings.Join(gaps, " "))}
 	}
 	values := owners[0][0].values
@@ -344,6 +323,7 @@ func evaluateUrlProbeCoverage(processes []*urlProbeCoverageProcess, expected map
 	complete := values["fleet:secure_complete"]
 	observed := fmt.Sprintf("eligible=%.0f quota_complete=%.0f secure_complete=%.0f due=%.0f overdue=%.0f warming=%.0f uninitialized=%.0f runs_needed=%.0f security_pending=%.0f security_unknown_targets=%.0f oldest_due_seconds=%.1f",
 		eligible, values["fleet:quota_complete"], complete, values["fleet:due"], values["fleet:overdue"], values["fleet:warming"], values["fleet:uninitialized"], values["fleet:runs_needed"], values["fleet:security_pending"], values["fleet:security_unknown_targets"], values["oldest"])
+	observed += " " + census.projection()
 	if eligible > complete {
 		tier, sustain := tierWarn, 1
 		if values["fleet:overdue"] >= 0.10*eligible {
@@ -392,7 +372,7 @@ func evaluateUrlProbeCoverage(processes []*urlProbeCoverageProcess, expected map
 	}
 	if len(gaps) > 0 {
 		sort.Strings(gaps)
-		findings = append(findings, urlProbeCoverageUnknown(strings.Join(gaps, " ")))
+		findings = append(findings, urlProbeCoverageUnknown(strings.Join(gaps, " ")+" "+census.projection()))
 	}
 	return findings
 }
