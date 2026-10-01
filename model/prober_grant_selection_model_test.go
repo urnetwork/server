@@ -109,10 +109,10 @@ func TestDynamicProberGrantReservedWindowsAndExactFallback(t *testing.T) {
 				server.Raise(err)
 			})
 			server.RunPosts(ctx, posts...)
-			wantedIndex, wantedQueries, wantedRows := 48, 4, 128
+			wantedIndex, wantedQueries, wantedRows := 48, 3, 65
 			wantedPriority := Priority(UnpaidPriority)
 			if round == 1 {
-				wantedIndex, wantedQueries, wantedRows = 0, 5, 193
+				wantedIndex, wantedQueries, wantedRows = 0, 3, 129
 				wantedPriority = PaidPriority
 			}
 			if query.grantQueries != wantedQueries || query.grantRows != wantedRows {

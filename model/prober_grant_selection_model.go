@@ -1,6 +1,6 @@
 // Dynamic candidate reads keep internal-prober grant history off the contract
-// hot path. Every selected window is locked before a fresh database reservation
-// census. Failed windows release locks before the next window or full fallback.
+// hot path. The fast path locks only its selected grant before a fresh database
+// reservation census. Failed candidates release their speculative locks.
 package model
 
 import (
@@ -94,6 +94,13 @@ func lockTransferEscrowBalances(
 	ctx context.Context, tx server.PgTx, payerNetworkId server.Id, now time.Time,
 	candidateIds []server.Id, recheckExpiry bool,
 ) []*escrowTransferBalance {
+	return lockTransferEscrowBalanceRows(ctx, tx, payerNetworkId, now, candidateIds, recheckExpiry, false)
+}
+
+func lockTransferEscrowBalanceRows(
+	ctx context.Context, tx server.PgTx, payerNetworkId server.Id, now time.Time,
+	candidateIds []server.Id, recheckExpiry, skipLocked bool,
+) []*escrowTransferBalance {
 	if candidateIds != nil && len(candidateIds) == 0 {
 		return nil
 	}
@@ -105,7 +112,18 @@ func lockTransferEscrowBalances(
 			AND start_balance_byte_count >= $4`
 		args = append(args, candidateIds, ProberTransferBalanceTopUp)
 	}
-	sql += ` ORDER BY balance_id FOR UPDATE`
+	if skipLocked {
+		// Read at most one row from this bounded preference list. LIMIT stops
+		// row locking after one available grant; SKIP LOCKED lets a different
+		// client use another grant while its preferred grant is busy.
+		if len(candidateIds) == 0 || len(candidateIds) > proberGrantExtendedCount {
+			panic("speculative grant lock requires a bounded candidate window")
+		}
+		sql += ` ORDER BY array_position($3::uuid[], balance_id) LIMIT 1 FOR UPDATE SKIP LOCKED`
+	} else {
+		// Complete fallback retains its blocking, ordered authority check.
+		sql += ` ORDER BY balance_id FOR UPDATE`
+	}
 	balances := []*escrowTransferBalance{}
 	lockedBalanceIds := []server.Id{}
 	rows, err := tx.Query(ctx, sql, args...)
@@ -166,37 +184,41 @@ func loadTransferEscrowBalances(
 			if len(balances) == 0 {
 				return nil
 			}
-			// A failed window must not carry higher-id locks into a later window
-			// or full fallback; rollback releases only these speculative locks.
-			server.RaisePgResult(tx.Exec(ctx, `SAVEPOINT prober_grant_selection`))
 			candidateIds := make([]server.Id, 0, len(balances))
 			for _, balance := range balances {
 				candidateIds = append(candidateIds, balance.balanceId)
 			}
-			locked := lockTransferEscrowBalances(ctx, tx, payerNetworkId, now, candidateIds, true)
-			lockedBalanceIdBalances := map[server.Id]*escrowTransferBalance{}
-			for _, balance := range locked {
-				lockedBalanceIdBalances[balance.balanceId] = balance
-			}
-			balances = nil
-			for _, id := range candidateIds {
-				if balance := lockedBalanceIdBalances[id]; balance != nil {
-					balances = append(balances, balance)
+			// One bounded, unlocked census is only a selection hint. It avoids
+			// probing every fully reserved grant individually. A stale hint can
+			// miss a fast-path opportunity; complete fallback starts afresh.
+			hints := readNetEscrowSnapshots(ctx, tx, candidateIds)
+			start := int(payerClientId.Hash() % uint64(len(balances)))
+			candidateIds = nil
+			for offset := range balances {
+				candidate := balances[(start+offset)%len(balances)]
+				if max(0, candidate.balanceByteCount-hints[candidate.balanceId].reserved) < requestedBytes {
+					continue
 				}
+				candidateIds = append(candidateIds, candidate.balanceId)
 			}
-			if len(balances) == 0 {
-				server.RaisePgResult(tx.Exec(ctx, `ROLLBACK TO SAVEPOINT prober_grant_selection`))
-				server.RaisePgResult(tx.Exec(ctx, `RELEASE SAVEPOINT prober_grant_selection`))
+			if len(candidateIds) == 0 {
 				return nil
 			}
-			start := int(payerClientId.Hash() % uint64(len(balances)))
-			for offset := range balances {
-				balance := balances[(start+offset)%len(balances)]
-				if requestedBytes <= balance.balanceByteCount {
-					server.RaisePgResult(tx.Exec(ctx, `RELEASE SAVEPOINT prober_grant_selection`))
-					return balance
-				}
+			// Holding the whole window defeated payer-to-grant distribution:
+			// every request serialized on its smallest balance ID. Lock only one
+			// available candidate, then take a NEW reservation snapshot. Never
+			// authorize funds from the unlocked hint. One attempt per window
+			// keeps reservation reads bounded independently of its 16/48 grants.
+			server.RaisePgResult(tx.Exec(ctx, `SAVEPOINT prober_grant_selection`))
+			locked := lockTransferEscrowBalanceRows(ctx, tx, payerNetworkId, now,
+				candidateIds, true, true)
+			if len(locked) == 1 && requestedBytes <= locked[0].balanceByteCount {
+				server.RaisePgResult(tx.Exec(ctx, `RELEASE SAVEPOINT prober_grant_selection`))
+				return locked[0]
 			}
+			// A rejected candidate must not retain a higher-id lock before the
+			// next window or complete ordered fallback. A stale hint may miss a
+			// fast-path opportunity; the fallback's fresh census remains final.
 			server.RaisePgResult(tx.Exec(ctx, `ROLLBACK TO SAVEPOINT prober_grant_selection`))
 			server.RaisePgResult(tx.Exec(ctx, `RELEASE SAVEPOINT prober_grant_selection`))
 			return nil
