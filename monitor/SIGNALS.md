@@ -14154,6 +14154,35 @@ themselves. Never execute SQL copied from logs or add `ANALYZE` to these
 implicated relation and actual evidence, with explicit scope and deadline.
 Fresh analyze clocks alone do not establish correct selectivity or access paths.
 
+The 2026-10-01 22:04–22:22 UTC discriminator found two distinct loaded
+shapes after the first grant-lock fix. One complete grant-balance read had 239
+active tuple waiters and 21 transaction-ID waiters in one instantaneous
+projection; 56 other active backends had no wait event while running the exact
+`netEscrowReservationPageSQL` source statement. These are backend counts, not
+CPU seconds or completed-request rates. The subsequent plain generic plan used
+the intended unsettled-escrow and contract indexes, with an estimated 5,139
+escrow entries per requested balance and aggregate plan cost about 10,270 per
+balance. The old optimistic grant hint ran that exact census across 16 or 48
+balances before selecting one, so a valid index did not prevent large repeated
+work. The selected-grant correction removes the speculative page-wide census,
+retains a fresh authoritative one-grant check under the chosen row lock, and
+keeps complete ordered fallback for financial correctness. A 163,840-row real
+PostgreSQL fixture measured 17 grant censuses on the preceding source versus
+one on the correction for the successful path. Production benefit still needs
+same-process traffic and current wait/CPU evidence after every emitting service
+converges; a generic plan does not measure live per-call work or custom skew.
+
+The same catalog review found 25 invalid `_ccnew` remnants from interrupted
+concurrent rebuilds, each with a valid matching canonical index, no constraint
+dependency and no active build. The supported cleanup-only maintenance cycle
+used concurrent drops and verified zero remaining remnants at 22:41 UTC. The
+canonical escrow, grant, revision and contract indexes were valid and matched
+their expected definitions. A separate desired client-reliability covering
+parent was absent, with its old shape valid and 34 attached children; its
+per-partition concurrent upgrade is a distinct large operation and was not
+performed as part of debris cleanup. Neither successful debris removal nor
+the completed full-database `ANALYZE` established API or PostgreSQL recovery.
+
 Current completed-work deltas additionally require full statement-entry identity
 and lifetime continuity, including per-entry `stats_since` where supported and
 global reset/deallocation witnesses. Nondecreasing counters and an unchanged
