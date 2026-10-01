@@ -4790,3 +4790,23 @@ buckets overlap and apply other score and tag gates as well as the rolling
 eight-hour measured URL ratio. The publication still includes old timeout
 evidence and a changing provider population, so its differences do not
 isolate the five-second setting or give the eventual steady-state pass count.
+
+The existing complete score export already holds each provider's selected-v1
+accepted measured URL success/total pair for its exact trailing eight-hour
+query window. Server `e620ef06` adds an optional, source-clocked ratio census
+from that in-memory map without another Main history scan. It reports the
+configured success threshold for distinct publicly usable online providers,
+with passing, failing and no-evidence counts, plus separately labeled counts
+for all provider IDs in the source map. Older cached publications remain
+readable with the new field unknown. Author and independent focused normal,
+race, vet and build gates passed. The multiarch Taskworker image
+`2026.9.30-planetoid-1060119460` embeds clean `e620ef06`; its registry
+manifest is `sha256:8095fe115f937805b77923c8b42522ba25e8afea72a6528dc100d58ea0fecc01`,
+and both Linux binaries had no reachable vulnerabilities in the release scan.
+Main `g1` retagged at 00:09:37Z and `g2` at 00:12:32Z on 2026-10-01;
+both deploys exited zero and sampled 20/20 on the new version. Both block
+tags resolve to the manifest digest. Current-process starts and a complete
+post-retag score publication are still needed before a ratio count from this
+new field can be attributed to the deployed publisher. Until 06:50:49Z,
+even a qualified eight-hour publication mixes pre- and post-five-second
+checks; its source population also changes over time.
