@@ -60,12 +60,17 @@ Build logs retain package installation output for review. `SOURCE_DATE_EPOCH`
 alone does not normalize bytes inside a package log or an inode cache.
 
 All seven `warp_build_image` recipes pass a numeric `SOURCE_DATE_EPOCH` and use
-the explicit image exporter with `rewrite-timestamp=true`. The default epoch is
-the current source commit's Unix timestamp. An explicit override is another
-release input and must be recorded; empty and nonnumeric values fail before the
-builder runs. This value controls image config/history timestamps, while the
-exporter normalizes layer file timestamps. Use a clean checkout and the same
-recorded epoch, build context, toolchain and export settings when reproducing.
+the explicit image exporter with `push=true,rewrite-timestamp=true,unpack=false`.
+Explicitly disabling unpacking is required on Docker-backed builders: their
+default local unpack conflicts with timestamp rewriting because the original
+build reference does not point to the rewritten layers. Images are still stored
+and pushed with their attestations; only the builder's eager unpack is disabled.
+The default epoch is the current source commit's Unix timestamp. An explicit
+override is another release input and must be recorded; empty and nonnumeric
+values fail before the builder runs. This value controls image config/history
+timestamps, while the exporter normalizes layer file timestamps. Use a clean
+checkout and the same recorded epoch, build context, toolchain and export
+settings when reproducing.
 Direct `docker buildx` invocations must supply both options as well:
 
 ```sh

@@ -32,5 +32,5 @@ warp_build_image:
 		--provenance=mode=max \
 		--sbom=true \
 		--no-cache \
-		--output type=image,push=true,rewrite-timestamp=true \
+		--output type=image,push=true,rewrite-timestamp=true,unpack=false \
 		.
