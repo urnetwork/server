@@ -192,6 +192,7 @@ type monitorConfig struct {
 	dnsAliases         DNSAliasSettings
 	mimirPublishers    MimirPublisherSettings
 	apiReleaseProof    *APIReleaseProofSettings
+	pgQuerySampleUntil time.Time
 	publicUdp          PublicUdpSettings
 
 	// state dir for baselines and other local persistence
