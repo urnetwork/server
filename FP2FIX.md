@@ -4834,3 +4834,20 @@ publication with numerator 4 and denominator 5, sourced after the eight-start
 fence, is still required to confirm the effective Main threshold and count
 passing providers. Even then, its trailing eight-hour evidence remains mixed
 between prior and five-second phase limits until 06:50:49Z.
+
+The first qualified 4/5 score census evaluated from 01:15:26.418Z to
+01:15:56.898Z and published at 01:26:27.652Z, all after the verified
+01:14:16.510Z eight-process start floor. Among 106,199 distinct publicly
+usable online providers, 21,578 passed the inclusive rolling eight-hour URL
+success ratio (20.318%), 84,198 failed, and 423 had no measured URL evidence.
+Among the 105,776 with evidence, the pass share was 20.400%. The same
+publication reported 20,320 native Quality and 21,578 native Speed providers;
+the buckets overlap and include other admission gates. Its ratio metadata
+reports numerator 4 and denominator 5, establishing the effective threshold
+for this complete publication despite the earlier incomplete mounted-file
+attestation. The exact evidence window was
+`(2026-09-30T17:15:26.797695Z, 2026-10-01T01:15:26.797695Z]`, so it still
+contains pre-five-second checks. This is one publication from a changing
+population, not proof that old writer processes retired or that every future
+publication will stay at 4/5. A later stable publication and current writer
+retirement check should close that gap.
