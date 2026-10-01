@@ -9443,4 +9443,6 @@ var migrations = []any{
 	// Old upserts omit the positive fact on conflict and would retain a previous
 	// true value. Fence every write, including schema-750 writers and no-op updates.
 	newSqlMigration(subscriberQualityWriteGuardSchemaSql),
+	// Private probe passes own their disposable network and balance atomically.
+	newSqlMigration(proberShardSchemaSql),
 }

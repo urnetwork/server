@@ -348,6 +348,10 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 			registrationTxOptions = []any{server.TxReadCommitted}
 		}
 		server.Tx(session.Ctx, func(tx server.PgTx) {
+			if err := lockProberShardClientAdmissionInTx(session.Ctx, tx, session.ByJwt.NetworkId); err != nil {
+				authClientError = err
+				return
+			}
 			if registration != nil {
 				retained, found := registration.resumeInTx(tx, session, isPro, roles, principal)
 				if found {
@@ -714,6 +718,10 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 
 		// important: must check `network_id = session network_id`
 		server.Tx(session.Ctx, func(tx server.PgTx) {
+			if err := lockProberShardClientAdmissionInTx(session.Ctx, tx, session.ByJwt.NetworkId); err != nil {
+				authClientError = err
+				return
+			}
 			tag := server.RaisePgResult(tx.Exec(
 				session.Ctx,
 				`
@@ -1778,7 +1786,7 @@ func networkClientLifecycle(active *bool, sourceClientId *server.Id) NetworkClie
 // owner classes from that exact database snapshot. CreateContract already
 // needs this lookup; returning the extra columns makes failure telemetry causal
 // without an additional query on the hot path. Ownership compares the source's
-// network with the durable prober network, so client credential rotation and
+// network with the durable prober ownership, so client credential rotation and
 // arbitrarily nested derived clients retain the same bounded owner without
 // exposing either identity.
 func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, clientIdB server.Id) ProvideRelationshipDetails {
@@ -1804,7 +1812,9 @@ func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 				b.network_id,
 				b.active,
 				b.source_client_id,
-				prober.network_id
+				prober.network_id,
+				EXISTS (SELECT 1 FROM prober_shard_run WHERE network_id=a.network_id),
+				EXISTS (SELECT 1 FROM prober_shard_run WHERE network_id=b.network_id)
 			FROM (VALUES (true)) AS seed(value)
 			LEFT JOIN network_client a ON a.client_id = $1
 			LEFT JOIN network_client b ON b.client_id = $2
@@ -1822,6 +1832,7 @@ func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 				var activeB *bool
 				var sourceClientIdB *server.Id
 				var proberNetworkId *server.Id
+				var shardA, shardB bool
 				server.Raise(result.Scan(
 					&networkIdA,
 					&activeA,
@@ -1830,18 +1841,20 @@ func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 					&activeB,
 					&sourceClientIdB,
 					&proberNetworkId,
+					&shardA,
+					&shardB,
 				))
 				details.SourceLifecycle = networkClientLifecycle(activeA, sourceClientIdA)
 				details.DestinationLifecycle = networkClientLifecycle(activeB, sourceClientIdB)
-				if networkIdA != nil && proberNetworkId != nil {
-					if *networkIdA == *proberNetworkId {
+				if networkIdA != nil && (proberNetworkId != nil || shardA) {
+					if shardA || *networkIdA == *proberNetworkId {
 						details.SourceOwner = NetworkClientSourceOwnerEgressProber
 					} else {
 						details.SourceOwner = NetworkClientSourceOwnerOther
 					}
 				}
-				if networkIdB != nil && proberNetworkId != nil {
-					if *networkIdB == *proberNetworkId {
+				if networkIdB != nil && (proberNetworkId != nil || shardB) {
+					if shardB || *networkIdB == *proberNetworkId {
 						details.DestinationOwner = NetworkClientSourceOwnerEgressProber
 					} else {
 						details.DestinationOwner = NetworkClientSourceOwnerOther
@@ -2453,12 +2466,15 @@ func ConnectNetworkClient(
 // family the transport declared it intends to prove: 0 (legacy), 4 or 6. The
 // observed family is derived here from the client address and stored beside
 // the intent; see ConnectionProvenIpFamily for how the pair is judged.
+// Transport callers pass their authenticated network so a late handshake is
+// ordered with disposable probe-account teardown, even after client deletion.
 func ConnectNetworkClientWithIpFamily(
 	ctx context.Context,
 	clientId server.Id,
 	clientAddress string,
 	handlerId server.Id,
 	ipFamilyIntent int,
+	authenticatedNetworkIds ...server.Id,
 ) (
 	connectionId server.Id,
 	clientIp string,
@@ -2503,6 +2519,12 @@ func ConnectNetworkClientWithIpFamily(
 
 	connectTime := server.NowUtc()
 	server.Tx(ctx, func(tx server.PgTx) {
+		err = nil
+		for _, networkId := range authenticatedNetworkIds {
+			if err = lockProberShardClientAdmissionInTx(ctx, tx, networkId); err != nil {
+				return
+			}
+		}
 		connectionId = server.NewId()
 
 		host, _ := server.Host()
@@ -2588,6 +2610,9 @@ func ConnectNetworkClientWithIpFamily(
 		))
 	})
 
+	if err != nil {
+		return
+	}
 	// the durable connection history for the onboarding results: one
 	// connect.day event per network per UTC day, its own transaction after
 	// the connection is committed, cached per process, never failing this

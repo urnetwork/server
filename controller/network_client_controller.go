@@ -139,9 +139,10 @@ func ConnectNetworkClientWithIpFamily(
 	handlerId server.Id,
 	retryLocationTimeout time.Duration,
 	ipFamilyIntent int,
+	authenticatedNetworkIds ...server.Id,
 ) (connectionId server.Id, clientAddressHash [32]byte, err error) {
 	var clientIp string
-	connectionId, clientIp, _, clientAddressHash, err = model.ConnectNetworkClientWithIpFamily(ctx, clientId, clientAddress, handlerId, ipFamilyIntent)
+	connectionId, clientIp, _, clientAddressHash, err = model.ConnectNetworkClientWithIpFamily(ctx, clientId, clientAddress, handlerId, ipFamilyIntent, authenticatedNetworkIds...)
 	if err != nil {
 		return
 	}

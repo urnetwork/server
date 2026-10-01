@@ -1172,6 +1172,7 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 	runPost func(server.PgTx) error,
 	returnErr error,
 ) {
+	ctx = withExecutionIdentity(ctx, task.TaskId)
 	var args T
 	err := json.Unmarshal([]byte(task.ArgsJson), &args)
 	if err != nil {

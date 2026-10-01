@@ -54,6 +54,7 @@ const proberGrantSelectionSql = `
 	WITH allocation AS MATERIALIZED (
 		SELECT EXISTS (
 			SELECT 1 FROM prober_identity WHERE singleton AND network_id = $1
+			UNION ALL SELECT 1 FROM prober_shard_run WHERE network_id = $1
 		) AS internal_prober
 	)
 	SELECT selected.balance_id, selected.paid, selected.balance_byte_count,

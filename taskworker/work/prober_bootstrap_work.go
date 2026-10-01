@@ -60,6 +60,11 @@ func ProberBootstrap(
 	_ *ProberBootstrapArgs,
 	clientSession *session.ClientSession,
 ) (*ProberBootstrapResult, error) {
+	if _, err := model.ReapDueProberShards(clientSession.Ctx, 32); err != nil {
+		return nil, err
+	}
+	// Retain the legacy identity while pre-upgrade passes drain. New shard
+	// passes never use or replenish this shared account themselves.
 	status, err := model.BootstrapProberIdentity(clientSession)
 	if err != nil {
 		return nil, err

@@ -98,3 +98,23 @@ func providerUrlProbeCreditMinimum(args *ProviderEgressProbeArgs) (model.ByteCou
 	}
 	return model.ByteCount(amount * int64(args.ShardCount)), nil
 }
+
+// One private allocation covers the full bounded pass's contract reservations,
+// including both directions, prefetch and tunnel recreation. It is not
+// multiplied by ShardCount and never replenished from the shared account.
+// Unexpected extra consumption fails normal available-credit admission rather
+// than silently creating another grant or borrowing another shard's credit.
+func providerUrlProbeShardCredit(args *ProviderEgressProbeArgs) (model.ByteCount, error) {
+	if _, err := providerUrlProbeCreditMinimum(args); err != nil {
+		return 0, err
+	}
+	batch := providerUrlProbeBatch(args)
+	amount := int64(connect.DefaultContractManagerSettings().StandardContractTransferByteCount)
+	for _, factor := range []int64{int64(providerEgressFullSelectedLimit) + int64(batch.Concurrency), 6, int64(args.TunnelRecreateAttempts) + 1} {
+		if factor < 1 || amount > math.MaxInt64/factor {
+			return 0, fmt.Errorf("URL probe pass credit geometry overflows")
+		}
+		amount *= factor
+	}
+	return model.ByteCount(max(amount, int64(model.ProberShardTransferHeadroom))), nil
+}
