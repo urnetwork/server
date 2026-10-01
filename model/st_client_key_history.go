@@ -310,6 +310,41 @@ func LoadStClientKeyHistory(ctx context.Context, domain protocol.ClientKeyHistor
 
 // Current unsigned API callers may use Redis only for clients with no signed
 // history. A retired/tombstoned history is authoritative absence, not fallback.
+type stClientKeyCurrentProjection struct {
+	found, retired, clientExists bool
+	networkID                    server.Id
+	generation                   int64
+	registrationBytes            []byte
+	registrationHash             []byte
+	evidenceBytes                []byte
+	domainHash                   []byte
+	evidenceHash                 string
+}
+
+// Verification uses owned Scan results after the database connection has been
+// released. Neither signature verification nor a legacy Redis lookup needs to
+// retain a scarce PostgreSQL connection.
+func (p *stClientKeyCurrentProjection) publicKey(clientID server.Id) ([]byte, error) {
+	if !p.found || p.retired || !p.clientExists {
+		return nil, nil
+	}
+	record, err := decodeStClientKeyHistoryRecord(p.registrationBytes, p.registrationHash, p.evidenceBytes, p.evidenceHash)
+	if err != nil {
+		return nil, err
+	}
+	wantedDomain, err := record.Registration.Domain.Digest()
+	if err != nil {
+		return nil, err
+	}
+	if record.Registration.ClientID != [16]byte(clientID) || record.Registration.NetworkID != [16]byte(p.networkID) || p.generation <= 0 || record.Registration.Generation != uint64(p.generation) || !bytes.Equal(p.domainHash, wantedDomain[:]) {
+		return nil, errors.New("client-key current projection differs from the signed head")
+	}
+	if record.Registration.Present {
+		return bytes.Clone(record.Registration.PublicKey[:]), nil
+	}
+	return nil, nil
+}
+
 func stClientKeyCurrent(ctx context.Context, clientID server.Id) (publicKey []byte, found bool, resultErr error) {
 	if ctx == nil || clientID == (server.Id{}) {
 		return nil, false, errors.New("client-key current lookup identity is invalid")
@@ -327,38 +362,22 @@ func stClientKeyCurrent(ctx context.Context, clientID server.Id) (publicKey []by
 			publicKey, found = nil, false
 		}
 	}()
+	var projection stClientKeyCurrentProjection
 	server.Db(ctx, func(conn server.PgConn) {
-		var retired, clientExists bool
-		var networkID server.Id
-		var generation int64
-		var registrationBytes, registrationHash, evidenceBytes, domainHash []byte
-		var evidenceHash string
 		err := conn.QueryRow(ctx, `
 			SELECT h.retired, EXISTS (SELECT 1 FROM network_client n WHERE n.client_id = h.client_id AND n.network_id = h.network_id AND n.active = true),
 				h.network_id, h.generation, h.domain_hash, r.registration, r.registration_hash, r.evidence, r.evidence_hash
 			FROM st_client_key_head h JOIN st_client_key_history r ON r.client_id = h.client_id AND r.domain_hash = h.domain_hash AND r.generation = h.generation
 			WHERE h.client_id = $1 AND h.is_current
-		`, clientID).Scan(&retired, &clientExists, &networkID, &generation, &domainHash, &registrationBytes, &registrationHash, &evidenceBytes, &evidenceHash)
+		`, clientID).Scan(&projection.retired, &projection.clientExists, &projection.networkID, &projection.generation, &projection.domainHash, &projection.registrationBytes, &projection.registrationHash, &projection.evidenceBytes, &projection.evidenceHash)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return
 		}
 		server.Raise(err)
-		found = true
-		if retired || !clientExists {
-			return
-		}
-		record, err := decodeStClientKeyHistoryRecord(registrationBytes, registrationHash, evidenceBytes, evidenceHash)
-		server.Raise(err)
-		wantedDomain, err := record.Registration.Domain.Digest()
-		server.Raise(err)
-		if record.Registration.ClientID != [16]byte(clientID) || record.Registration.NetworkID != [16]byte(networkID) || generation <= 0 || record.Registration.Generation != uint64(generation) || !bytes.Equal(domainHash, wantedDomain[:]) {
-			server.Raise(errors.New("client-key current projection differs from the signed head"))
-		}
-		if record.Registration.Present {
-			publicKey = bytes.Clone(record.Registration.PublicKey[:])
-		}
+		projection.found = true
 	})
-	return publicKey, found, ctx.Err()
+	publicKey, resultErr = projection.publicKey(clientID)
+	return publicKey, projection.found, resultErr
 }
 
 // Non-authenticated deletion paths retire current access without inventing a

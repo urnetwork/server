@@ -28,6 +28,10 @@ func GetClientPublicKey(
 	if key, found, err := stClientKeyCurrent(ctx, clientId); err != nil || found {
 		return key, err
 	}
+	return getLegacyClientPublicKey(ctx, clientId)
+}
+
+func getLegacyClientPublicKey(ctx context.Context, clientId server.Id) (publicKey []byte, returnErr error) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		bytes, err := r.Get(ctx, clientPublicKeyRedisKey(clientId)).Bytes()
 		if err == nil {
