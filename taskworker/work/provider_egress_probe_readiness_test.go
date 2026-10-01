@@ -337,3 +337,43 @@ func TestProviderEgressProbeReadinessUnfundedTaskKeepsIdleRetryCadence(t *testin
 		}
 	})
 }
+
+// Exercise the production constructor through real balance and mirror reads.
+// A sufficient observation is never cached across checks, and a failed check
+// remains latched even if the shared payer is subsequently replenished.
+func TestProviderEgressProbeReadinessUsesFreshBalanceObservation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		networkId := server.NewId()
+		readiness := newProviderEgressProbeReadiness(networkId)
+		now := server.NowUtc()
+		balance := &model.TransferBalance{NetworkId: networkId,
+			StartTime: now.Add(-time.Hour), EndTime: now.Add(time.Hour),
+			StartBalanceByteCount: readiness.minimum, BalanceByteCount: readiness.minimum}
+		model.AddTransferBalance(ctx, balance)
+		if err := readiness.check(ctx); err != nil {
+			t.Fatalf("funded readiness failed: %v", err)
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=0 WHERE balance_id=$1`, balance.BalanceId))
+		})
+		if err := readiness.check(ctx); !errors.Is(err, errProviderEgressProbeUnfunded) {
+			t.Fatalf("depletion reused prior sufficient observation: %v", err)
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=$2 WHERE balance_id=$1`, balance.BalanceId, readiness.minimum))
+		})
+		if err := readiness.check(ctx); !errors.Is(err, errProviderEgressProbeUnfunded) {
+			t.Fatalf("replenishment removed this pass's funding-failure latch: %v", err)
+		}
+		if err := newProviderEgressProbeReadiness(networkId).check(ctx); err != nil {
+			t.Fatalf("new pass did not observe replenishment: %v", err)
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.Set(ctx, fmt.Sprintf("{escrow_%s}net", balance.BalanceId), "corrupt", time.Hour).Err())
+		})
+		if err := newProviderEgressProbeReadiness(networkId).check(ctx); !errors.Is(err, errProviderEgressProbeFundingUnknown) || errors.Is(err, errProviderEgressProbeUnfunded) {
+			t.Fatalf("unreadable credit lost unknown-readiness classification: %v", err)
+		}
+	})
+}

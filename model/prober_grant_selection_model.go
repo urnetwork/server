@@ -44,8 +44,9 @@ const escrowTransferBalanceSql = `
 // The existing active/network/start/end index supplies this order directly.
 // The limit precedes free-grant eligibility: unusual paid or small grants
 // cannot turn a bounded candidate read into an unbounded search for a match.
-// Ordinary payers have no candidate limit and use a complete locked reread,
-// then the existing earliest-expiry order. The persisted singleton is the scope.
+// Ordinary payers skip discovery and use the complete locked read, then the
+// existing earliest-expiry order. Reading their grants here would duplicate
+// that authoritative read. The persisted singleton is the scope.
 const proberGrantSelectionSql = `
 	WITH allocation AS MATERIALIZED (
 		SELECT EXISTS (
@@ -66,7 +67,7 @@ const proberGrantSelectionSql = `
 		FROM transfer_balance
 		WHERE network_id = $1 AND active AND start_time <= $2 AND $2 < end_time
 		ORDER BY start_time DESC, end_time DESC
-		LIMIT CASE WHEN allocation.internal_prober THEN $3::bigint ELSE NULL END
+		LIMIT CASE WHEN allocation.internal_prober THEN $3::bigint ELSE 0 END
 	) AS selected
 `
 

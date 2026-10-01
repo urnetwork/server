@@ -38,7 +38,9 @@ func newProviderEgressProbeReadiness(networkId server.Id) *providerEgressProbeRe
 					returnErr = errProviderEgressProbeFundingUnknown
 				}
 			}()
-			available = model.GetActiveTransferBalanceByteCount(ctx, networkId)
+			if model.HasActiveTransferBalance(ctx, networkId, controller.MinContractTransferByteCount) {
+				available = controller.MinContractTransferByteCount
+			}
 			return
 		},
 	}

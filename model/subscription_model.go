@@ -307,13 +307,7 @@ func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*Tran
 	return transferBalances
 }
 
-// Share the balance query with transaction owners without acquiring another
-// pool connection while they hold a row lock.
-func getActiveTransferBalanceRows(ctx context.Context, query server.PgCanQuery, networkId server.Id) []*TransferBalance {
-	transferBalances := []*TransferBalance{}
-	result, err := query.Query(
-		ctx,
-		`
+const activeTransferBalanceSql = `
                 SELECT
                     balance_id,
                     start_time,
@@ -328,7 +322,15 @@ func getActiveTransferBalanceRows(ctx context.Context, query server.PgCanQuery, 
                     network_id = $1 AND
                     active = true AND
                     start_time <= $2 AND $2 < end_time
-            `,
+            `
+
+// Share the balance query with transaction owners without acquiring another
+// pool connection while they hold a row lock.
+func getActiveTransferBalanceRows(ctx context.Context, query server.PgCanQuery, networkId server.Id) []*TransferBalance {
+	transferBalances := []*TransferBalance{}
+	result, err := query.Query(
+		ctx,
+		activeTransferBalanceSql,
 		networkId,
 		server.NowUtc(),
 	)
