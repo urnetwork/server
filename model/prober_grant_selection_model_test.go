@@ -73,6 +73,19 @@ func TestDynamicProberGrantReservedWindowsAndExactFallback(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		clients := newEscrowSelectionTestClients(t, ctx)
+		// Put the sole unreserved extended-window grant first in this payer's
+		// bounded preference order; the fallback round has no free candidate.
+		for suffix := range 65536 {
+			id := server.Id{0: 0xa9, 14: byte(suffix >> 8), 15: byte(suffix)}
+			if id.Hash()%proberGrantExtendedCount == 0 {
+				clients.payerId = id
+				break
+			}
+		}
+		if clients.payerId.Hash()%proberGrantExtendedCount != 0 {
+			t.Fatal("fixture did not choose deterministic extended preference")
+		}
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{clients.payerId: clients.payerNetworkId})
 		setDynamicProberIdentityForTest(t, ctx, clients)
 		now := server.NowUtc()
 		grants := []*TransferBalance{}
@@ -109,10 +122,10 @@ func TestDynamicProberGrantReservedWindowsAndExactFallback(t *testing.T) {
 				server.Raise(err)
 			})
 			server.RunPosts(ctx, posts...)
-			wantedIndex, wantedQueries, wantedRows := 48, 3, 65
+			wantedIndex, wantedQueries, wantedRows := 48, proberGrantAttemptsPerWindow+3, 65+proberGrantAttemptsPerWindow
 			wantedPriority := Priority(UnpaidPriority)
 			if round == 1 {
-				wantedIndex, wantedQueries, wantedRows = 0, 3, 129
+				wantedIndex, wantedQueries, wantedRows = 0, 2*proberGrantAttemptsPerWindow+3, 129+2*proberGrantAttemptsPerWindow
 				wantedPriority = PaidPriority
 			}
 			if query.grantQueries != wantedQueries || query.grantRows != wantedRows {

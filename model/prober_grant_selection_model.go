@@ -15,6 +15,9 @@ import (
 const proberGrantFirstCount = 16
 const proberGrantExtendedCount = 48
 
+// Cap exact reservation work when optimistic durable-credit candidates are full.
+const proberGrantAttemptsPerWindow = 4
+
 // One allocation owns these observations. Neither durable nor reserved bytes
 // are cached across requests, and no process-wide admission budget is added.
 type escrowTransferBalance struct {
@@ -184,43 +187,41 @@ func loadTransferEscrowBalances(
 			if len(balances) == 0 {
 				return nil
 			}
-			candidateIds := make([]server.Id, 0, len(balances))
-			for _, balance := range balances {
-				candidateIds = append(candidateIds, balance.balanceId)
-			}
-			// One bounded, unlocked census is only a selection hint. It avoids
-			// probing every fully reserved grant individually. A stale hint can
-			// miss a fast-path opportunity; complete fallback starts afresh.
-			hints := readNetEscrowSnapshots(ctx, tx, candidateIds)
+			// Durable credit is an optimistic hint only. An exact reservation
+			// census across all 16/48 candidates repeated thousands of escrow
+			// lookups per grant even when the first selected grant could fund us.
+			// Never authorize bytes until a fresh census AFTER locking one row.
 			start := int(payerClientId.Hash() % uint64(len(balances)))
-			candidateIds = nil
+			candidateIds := make([]server.Id, 0, len(balances))
 			for offset := range balances {
 				candidate := balances[(start+offset)%len(balances)]
-				if max(0, candidate.balanceByteCount-hints[candidate.balanceId].reserved) < requestedBytes {
-					continue
+				if candidate.balanceByteCount >= requestedBytes {
+					candidateIds = append(candidateIds, candidate.balanceId)
 				}
-				candidateIds = append(candidateIds, candidate.balanceId)
 			}
-			if len(candidateIds) == 0 {
-				return nil
-			}
-			// Holding the whole window defeated payer-to-grant distribution:
-			// every request serialized on its smallest balance ID. Lock only one
-			// available candidate, then take a NEW reservation snapshot. Never
-			// authorize funds from the unlocked hint. One attempt per window
-			// keeps reservation reads bounded independently of its 16/48 grants.
-			server.RaisePgResult(tx.Exec(ctx, `SAVEPOINT prober_grant_selection`))
-			locked := lockTransferEscrowBalanceRows(ctx, tx, payerNetworkId, now,
-				candidateIds, true, true)
-			if len(locked) == 1 && requestedBytes <= locked[0].balanceByteCount {
+			for attempt := 0; attempt < proberGrantAttemptsPerWindow && len(candidateIds) > 0; attempt++ {
+				// SKIP LOCKED chooses another available grant without joining a
+				// busy grant's queue. LIMIT 1 bounds each exact reservation census.
+				server.RaisePgResult(tx.Exec(ctx, `SAVEPOINT prober_grant_selection`))
+				locked := lockTransferEscrowBalanceRows(ctx, tx, payerNetworkId, now,
+					candidateIds, true, true)
+				if len(locked) == 1 && requestedBytes <= locked[0].balanceByteCount {
+					server.RaisePgResult(tx.Exec(ctx, `RELEASE SAVEPOINT prober_grant_selection`))
+					return locked[0]
+				}
+				// Release a rejected grant BEFORE touching another grant. This
+				// preserves the complete fallback/settlement lock order and keeps
+				// speculative attempts free of partial financial writes.
+				server.RaisePgResult(tx.Exec(ctx, `ROLLBACK TO SAVEPOINT prober_grant_selection`))
 				server.RaisePgResult(tx.Exec(ctx, `RELEASE SAVEPOINT prober_grant_selection`))
-				return locked[0]
+				if len(locked) == 0 {
+					break
+				}
+				rejected := locked[0].balanceId
+				candidateIds = slices.DeleteFunc(candidateIds, func(id server.Id) bool { return id == rejected })
 			}
-			// A rejected candidate must not retain a higher-id lock before the
-			// next window or complete ordered fallback. A stale hint may miss a
-			// fast-path opportunity; the fallback's fresh census remains final.
-			server.RaisePgResult(tx.Exec(ctx, `ROLLBACK TO SAVEPOINT prober_grant_selection`))
-			server.RaisePgResult(tx.Exec(ctx, `RELEASE SAVEPOINT prober_grant_selection`))
+			// Optimistic hints or SKIP LOCKED may miss available credit. The
+			// original blocking full read remains authoritative for funding.
 			return nil
 		}
 		if balance := selectBalance(); balance != nil {
