@@ -47,7 +47,7 @@ func TestStReleasePayoutMissingCloseTimeStopsBeforeChain(t *testing.T) {
 					server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_contract WHERE contract_id=$1`, id))
 				})
 			}
-			root, leaves, err := stComputeReleasePayout(ctx, cfg, client, 906, start, start.Add(time.Hour), 101, 401)
+			root, leaves, err := stComputeReleasePayout(ctx, cfg, client, 906, start, start.Add(time.Hour), 101, 401, nil)
 			if err == nil || !strings.Contains(err.Error(), id.String()) || root != ([32]byte{}) || leaves != 0 || client.bindingCalls != 0 {
 				t.Fatalf("archive=%t: incomplete custody reached payout: root=%x leaves=%d calls=%d error=%v", archive, root, leaves, client.bindingCalls, err)
 			}

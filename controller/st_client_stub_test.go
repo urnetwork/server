@@ -7,6 +7,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 	"time"
@@ -46,6 +47,10 @@ func newStubStClient(state *StEpochState) *stubStClient {
 
 func (self *stubStClient) Epoch(ctx context.Context) (*StEpochState, error) {
 	return self.state, nil
+}
+
+func (self *stubStClient) PayoutEpochAuthority(ctx context.Context, epoch uint64) (*StPayoutEpochAuthority, error) {
+	return nil, errors.New("stub has no authenticated payout epoch")
 }
 
 func (self *stubStClient) PendingEpoch(ctx context.Context) (uint64, error) {
