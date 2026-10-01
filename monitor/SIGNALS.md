@@ -5607,6 +5607,27 @@ exclusion-ready/TTL diagnostic cannot establish cache freshness or PG fallback.
 Keep intermittent initial/read errors separate from the fast successful GET
 mean; the search optimization does not close that availability issue.
 
+The 2026-10-01 initial-picker investigation supplied a separate transport
+control at 14:57:27 UTC: ten fresh-connection GETs through the same pinned,
+enabled LB front all returned HTTP 200 and equal finite response counts.
+Beta averaged 314.7ms (maximum 340.6ms), g1 321.5ms (maximum 379.5ms).
+This bounded external path did not reproduce the reported 5–10-second blank
+iPhone/iPad screen; it did not measure the reporting device, installed app,
+SDK route selection or rendering. Do not substitute typed-search timings or
+the FP2 candidate index for this initial GET boundary.
+
+Apple source exposed independent client-side blockers: the initial Combine
+empty-query emission could duplicate the sheet's initial fetch, a loading
+branch hid retained rows, and synchronous extension contract-status RPC could
+run on the main thread before the fetch started. The source corrections
+coalesce identical requests, retain cached rows during refresh, start the GET
+before background status refresh, and consume listener-provided status rather
+than synchronously fetching it again. Generation/cancellation controls prevent
+late results from replacing newer state. Source review and a successful app
+build are not simulator-test success, an App Store release, or proof that an
+installed device contains the correction. Preserve that client gate alongside
+the server's independent read/error and successful-row controls.
+
 The model exports `urnetwork_provider_picker_outcomes_total` with exactly nine
 preinitialized children: surface `initial`, `search`, `direct` crossed with
 outcome `nonempty`, `empty`, `error`. `initial` is GET only; POST (including a
@@ -5868,6 +5889,20 @@ cover missing/false/malformed settings, explicit true, both config transitions
 after a real primary read, forced minimum, both rank modes, unchanged online
 availability and one fixed metric cell. They establish the rollout boundary,
 not deployment or production recovery.
+
+The 2026-10-01 20:55:57 UTC control paired all 20 enabled API slots and observed
+this flag at zero everywhere. The default `any` family still returned ten or
+more candidates for 750 Quality and 908 Speed BestAvailable requests, plus
+587 Quality and 553 Speed country requests. Compatibility reads can therefore
+return native-tagged rows while the dedicated native reader is disabled.
+The separate global ratio census (3,184 Quality and 3,373 Speed rows) was a
+different publication/cohort boundary, not proof of a particular user's target
+or successful connection. No observed `any`-family cache-empty counter
+increment appeared in this window; destination-filtered zeroes remained a
+separate outcome. IPv6 supply was explicitly unavailable for this incident,
+so its empty outcomes did not justify a policy or family-intent change.
+Neither broad candidate availability nor a successful selection response
+establishes that the later contract and data paths completed (§2.19e).
 
 At 00:15:20Z a separate indexed prefix control limited discovery to the first
 4,096 valid, connected client IDs before filtering the US target. Its 3,136
@@ -10703,6 +10738,100 @@ the pressure peak, explain initial-list read failures, or prove sustained
 recovery. Existing same-request coalescing must be checked in the actual
 producer's dependency closure before proposing another retry/coalescing fix.
 
+The 2026-10-01 grant-allocation discriminator adds a concrete lock-fanout
+boundary. Twelve direct-primary snapshots at 19:21:38–19:22:06 UTC retained
+5,679 active lock-wait backend-samples versus 175 active no-wait samples;
+the output was capped, and these counts are neither distinct requests nor CPU
+time. One run-local query token dominated the lock group. Its exact query ID
+was deliberately discarded, so it cannot be equated to a later statement by
+token name. Separately retained oldest-waiter SQL prefixes at 19:25, 20:25 and
+21:10 matched the grant-balance read family. The final sample had 449 lock
+waiters and a truncated graph for the oldest sixteen; an unobserved blocker
+must not inherit the SQL projection's fallback owner/state/age values.
+
+The owning allocator read a bounded 16/48-grant candidate window, then locked
+the entire candidate set in balance-ID order before choosing one payer-hashed
+grant. Different clients choosing disjoint grants consequently serialized on
+the first shared row. A bounded candidate count did not bound lock fanout.
+The correction uses an unlocked reservation census only as a hint, locks at
+most one available preferred grant with `LIMIT 1 FOR UPDATE SKIP LOCKED`, and
+rechecks reservations and expiry after acquiring that lock. A rejected hint
+releases its speculative locks before the complete ordered blocking fallback.
+Hints never authorize money, skip required reservations, or turn a busy row
+into false insufficient balance. Ordinary payer and zero-byte paths retain
+their authority. Real PostgreSQL held-transaction controls prove that disjoint
+grants proceed, same-grant contention waits and rechecks, and stale hints cannot
+produce partial financial writes. Local concurrency speedups are not Main
+throughput measurements.
+
+Observe this boundary with same-generation API pool acquisition/residence,
+HTTP-ingress `create_contract` completions, all-status cancellations, direct
+grant-family waits and blocker ownership, plus the finite
+`urnetwork_prober_grant_selection_total{result}` outcomes. Those outcomes count
+allocator choices, not completed probes or paid transfers. An absent dynamic
+counter is unknown, not zero. An old allocator in another API, Connect or
+Taskworker process can retain the shared convoy during a partial rollout;
+attest every affected executable before claiming the source fix converged.
+
+The clean versioned grant candidate `8ec34603` preserved the recovered
+deployed source and dependency closure and changed only the reviewed three
+grant files. Beta selection completed at 21:21:00 UTC. Bounded observations at
+21:31:45–49 and 21:35:09–12 UTC each qualified all four enabled beta identities:
+the expected executable/image linkage, starts at 21:21:05–09, and readiness one.
+The same four process tokens appeared in both observations; the second observed
+one generation per beta slot. These are two fresh endpoint witnesses, not
+continuous readiness or direct remote-byte attestation.
+
+Both controls also paired each process's five-minute traffic endpoints. Beta
+had 21,411 and 21,325 control completions, respectively, with weighted mean
+7.36 seconds and 8.88%/9.14% cancellation. The eight old edge-3/4 slots had
+459,704/468,550 completions, 21.75/21.71-second means and 96.48%/96.50%
+cancellation. Beta's successful PG acquisition mean was 9.90/10.35ms versus
+7.17/7.19 seconds on those old slots. No beta create-frame error or panic
+increment was observed, but protocol insufficient-balance and missing-origin
+responses remained; `handler_ok` must not be counted as funded success.
+Traffic mixes and volumes differ, the two windows overlap, and beta's earlier
+historical baseline is not a matched experiment. This supported staged g1
+promotion with rollback available, not whole-fleet recovery or attribution of
+every failed connection to grant locking.
+
+G1 selection completed at 21:37:02 UTC. Observations at 21:40:44–47 and
+21:47:14–18 found the same four new, clean, expected-source processes, each
+started after selection and ready. The first had no five-minute pairs; the
+second did. Historical generation counts included the old range series and
+did not prove either live duplication or predecessor retirement. The second
+observation was a **negative recovery control**: new g1 on edges 3/4 completed
+113,655 control requests with a 21.55-second mean, 96.36% cancellation and
+7.15-second successful PG acquisition mean. Old g2–g4 on those hosts remained
+at 21.50 seconds, 96.37% cancellation and 7.18-second acquisition. G1 had 8,158
+current control requests in flight across those two slots. Its pool snapshots
+showed zero idle connections, but pool occupancy alone is not a successful
+capacity test. No new create-frame error/panic delta was observed; the absence
+of that regression did not establish useful contract completion. G2 promotion
+was held because the loaded cohort had not recovered. Preserve the beta/g1
+selection while investigating shared blockers and other loaded paths; do not
+infer either an automatic rollback trigger or whole-fleet recovery from
+source/readiness alone.
+
+An explicitly authorized `ANALYZE public.transfer_balance` completed at
+21:32:26.224–21:32:26.967 UTC (0.743 seconds, exit zero). The first beta control
+preceded it; the second five-minute window straddled it. Command completion is
+not a demonstrated plan repair or CPU recovery. Record both interventions and
+continue §1.3c/§5.8's independent plan, work-rate and successful-traffic gates.
+The subsequent explicitly requested full-database `ANALYZE` ran from
+21:43:55.873 to 21:45:26.168 UTC and hit its 90-second statement timeout
+(psql exit 3). It did **not** complete; partial statistics coverage was unknown.
+That operation overlapped the second g1 five-minute window. Neither its timeout
+nor the small-table command's success establishes plan quality or causality.
+
+Probe funding also retains a separate ownership boundary: shard preflight
+tops up the shared prober network, while contract allocation uses the generic
+grant selector. It does not yet bind one durable shard-pass/lease generation to
+one private balance. A shard-owned design must budget consumption plus peak
+outstanding reserves, fence reclaimed workers and late callbacks, and stop
+admission/join transfers/settle accounting before expiring or removing funding.
+Deleting a grant while escrows or settlement remain open is not cleanup.
+
 ### 2.19f Rolling URL-probe coverage and measured-run capacity
 Probe: `url-probe-coverage`
 
@@ -14005,6 +14134,27 @@ counter generation or the selected plan. The existing stats selection and
 delta/reset arithmetic are unchanged; protected current plan/index evidence
 and the core state/rate controls are still required before claiming recovery.
 
+For the 2026-10-01 recurrence, the observed grant lock convoy (§2.19e) and high
+PostgreSQL CPU are separate claims. Do not assign all CPU to blocked victims or
+infer a bad plan from host utilization alone. The smallest next discriminator
+is a direct-primary, read-only catalog snapshot for the source-owned grant,
+reservation and settlement relations: analyze clocks and modification counts,
+finite selectivity summaries, index validity, and at most three non-executing
+source-pinned JSON plans. Bound statement and lock time; retain only node
+types, allowlisted relation/index identities and numeric estimates. Generic
+plans need no customer parameters but cannot diagnose custom-plan skew by
+themselves. Never execute SQL copied from logs or add `ANALYZE` to these
+`EXPLAIN` statements. Choose any further statistics operation from the
+implicated relation and actual evidence, with explicit scope and deadline.
+Fresh analyze clocks alone do not establish correct selectivity or access paths.
+
+Current completed-work deltas additionally require full statement-entry identity
+and lifetime continuity, including per-entry `stats_since` where supported and
+global reset/deallocation witnesses. Nondecreasing counters and an unchanged
+global reset cannot rule out eviction/recreation or selective resets. Withhold
+an ambiguous delta. Calls, rows and buffer/WAL work distinguish demand and
+amplification; cumulative execution wall time remains distinct from CPU.
+
 ### 5.9 Providers/peers visible but cannot be pinged (grey dots)
 The 2026-07-17 evening composite: app connects, the provider/peer list
 arrives, no dot ever turns green — while EVERY aggregate is healthy. The
@@ -17195,6 +17345,29 @@ a large sample count does not establish extra capacity. The 2026-09-28
 Taskworker rollout independently verified eight actual slots despite forty
 successful version samples. The metric join above already uses process
 identities rather than this sampler count; do not replace its denominator.
+
+The 2026-10-01 release control exposed two local selection-command hazards.
+Bind both `WARP_HOME` and `WARP_VERSION_HOME` to the reviewed release home;
+an inherited nonexistent version home fails before Docker retagging. The
+deployed Warpctl conversion treats an explicit version argument as a Docker
+tag, replacing its last hyphen with `+`. A prerelease SemVer argument already
+containing `+` can therefore create two plus signs and panic. Use the exact
+immutable Docker-tag spelling for both selection and rollback and test that
+conversion against the pinned Warpctl source. The observed conversion panic
+preceded Docker command creation and the desired-version update; verify the
+selector remained unchanged rather than assuming every failed CLI was inert.
+Selecting a shared block tag affects all configured placements, including an
+offline host's future convergence, even when that host is excluded from
+current direct-contact and observation denominators.
+
+A Go VCS stamp can describe the outer release checkout rather than the inner
+versioned server module. The selected `99ab2c84`/modified stamp was recovered
+through its Build gitlink to server `d49d6c8e`; the immutable API executable was
+then byte-reproduced from that source and the complete dependency/build closure.
+That exact comparison resolved a source-content gap which a guessed Git
+ancestry or the modified bit alone could not. It did not attest current live
+placement. Preserve the selected index-to-platform-manifest-to-config linkage,
+extracted executable and running source/start/readiness witnesses separately.
 
 The production discriminator was a Taskworker release on 2026-09-01. Six
 directly observable blocks on enabled edges 0/1/3 executed config digest
