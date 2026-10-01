@@ -7,6 +7,10 @@ native header ancestry, GRANDPA certificates and exact Frontier mappings. A
 caller-supplied root or previous reconciliation cannot replace those inputs.
 Existing collection-boundary, fee-context and trie-verifier APIs are unchanged.
 
+The [bounded capture commands](HISTORICAL-NATIVE-CAPTURE.md) now produce this
+witness from exact-hash RPC storage reads with durable partial evidence and
+lifetime request/byte budgets. `verify-historical-state` replays it offline.
+
 ## Exact receipt and root role
 
 The witness schema is `urnetwork-receipt-historical-native-state-witness-v1` and

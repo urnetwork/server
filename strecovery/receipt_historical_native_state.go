@@ -106,29 +106,12 @@ func VerifyReceiptHistoricalNativeState(ctx context.Context, archive *Archive, c
 	if witness.CollectionHash != contexts.CollectionHash || witness.CheckpointHash != contexts.CheckpointHash || witness.FinalityHash != contexts.FinalityProofHash {
 		return nil, errors.New("historical native storage witness is not bound to the exact proof inputs")
 	}
-	var block *ReceiptFeeBlockContext
-	for index := range contexts.Blocks {
-		if contexts.Blocks[index].EvmBlock == witness.EvmBlock {
-			block = &contexts.Blocks[index]
-			break
-		}
+	native, stateBlock, stateRoot, err := historicalNativeStorageContext(contexts, witness.EvmBlock, witness.RootRole)
+	if err != nil {
+		return nil, err
 	}
-	if block == nil {
-		return nil, errors.New("historical native storage block has no committed receipt context")
-	}
-	if len(block.NativeContexts) != 1 || (block.State != "native_context_complete" && block.State != "native_parent_unavailable") {
-		return nil, errors.New("historical native storage requires one unambiguous native context")
-	}
-	native := block.NativeContexts[0]
-	if witness.NativeReceiptBlock != native.NativeBlock {
+	if witness.NativeReceiptBlock != native {
 		return nil, errors.New("historical native storage mapped child identity differs")
-	}
-	stateBlock, stateRoot := native.NativeBlock, native.NativeStateRoot
-	if witness.RootRole == NativeStorageRootParentExecution {
-		if block.State != "native_context_complete" || native.NativeParent == nil || native.NativeParentStateRoot == nil {
-			return nil, errors.New("historical native storage parent execution root is unavailable")
-		}
-		stateBlock, stateRoot = *native.NativeParent, *native.NativeParentStateRoot
 	}
 	if witness.NativeStateBlock != stateBlock {
 		return nil, errors.New("historical native storage selected state block differs from its root role")
@@ -143,7 +126,7 @@ func VerifyReceiptHistoricalNativeState(ctx context.Context, archive *Archive, c
 	result := &ReceiptHistoricalNativeStateReconciliation{
 		Schema: ReceiptHistoricalNativeStateReconciliationSchema, Admission: "unapproved_historical_storage_observation",
 		CodecProfile: NativeStorageCodecProfile, CodecSdkSource: NativeFinalitySdkSource, WitnessHash: objectDigest(witness),
-		EvmBlock: block.EvmBlock, NativeReceiptBlock: native.NativeBlock, RootRole: witness.RootRole,
+		EvmBlock: witness.EvmBlock, NativeReceiptBlock: native, RootRole: witness.RootRole,
 		NativeStateBlock: stateBlock, NativeStateRoot: stateRoot, Reads: reads,
 		HistoricalContextVerified: true, NativeHeaderStorageVerified: true, FeeContexts: contexts,
 		MissingAuthorities: []string{
@@ -158,4 +141,34 @@ func VerifyReceiptHistoricalNativeState(ctx context.Context, archive *Archive, c
 		return nil, err
 	}
 	return result, nil
+}
+
+// Both capture and verification select from a fresh full context replay. Neither
+// the endpoint nor a caller-supplied native identity can choose a convenient root.
+func historicalNativeStorageContext(contexts *ReceiptFeeContexts, evm ObservedBlockIdentity, role string) (ObservedBlockIdentity, ObservedBlockIdentity, string, error) {
+	var block *ReceiptFeeBlockContext
+	for index := range contexts.Blocks {
+		if contexts.Blocks[index].EvmBlock == evm {
+			block = &contexts.Blocks[index]
+			break
+		}
+	}
+	if block == nil {
+		return ObservedBlockIdentity{}, ObservedBlockIdentity{}, "", errors.New("historical native storage block has no committed receipt context")
+	}
+	if len(block.NativeContexts) != 1 || (block.State != "native_context_complete" && block.State != "native_parent_unavailable") {
+		return ObservedBlockIdentity{}, ObservedBlockIdentity{}, "", errors.New("historical native storage requires one unambiguous native context")
+	}
+	native := block.NativeContexts[0]
+	switch role {
+	case NativeStorageRootParentExecution:
+		if block.State != "native_context_complete" || native.NativeParent == nil || native.NativeParentStateRoot == nil {
+			return ObservedBlockIdentity{}, ObservedBlockIdentity{}, "", errors.New("historical native storage parent execution root is unavailable")
+		}
+		return native.NativeBlock, *native.NativeParent, *native.NativeParentStateRoot, nil
+	case NativeStorageRootChildPostState:
+		return native.NativeBlock, native.NativeBlock, native.NativeStateRoot, nil
+	default:
+		return ObservedBlockIdentity{}, ObservedBlockIdentity{}, "", errors.New("historical native storage root role is unsupported")
+	}
 }
