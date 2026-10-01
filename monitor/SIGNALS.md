@@ -10823,6 +10823,12 @@ The subsequent explicitly requested full-database `ANALYZE` ran from
 (psql exit 3). It did **not** complete; partial statistics coverage was unknown.
 That operation overlapped the second g1 five-minute window. Neither its timeout
 nor the small-table command's success establishes plan quality or causality.
+An explicitly requested retry with no statement or lock timeout completed the
+full database `ANALYZE` at 21:57:46.795 UTC after 468.731 seconds (exit zero).
+This proves that the command finished on the verified primary; it does not
+prove that the loaded API cohorts recovered or that any specific query uses a
+good plan. Compare fresh process-paired request outcomes and current plan,
+wait, and CPU evidence after this boundary before attributing an improvement.
 
 Probe funding also retains a separate ownership boundary: shard preflight
 tops up the shared prober network, while contract allocation uses the generic
