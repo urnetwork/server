@@ -4888,10 +4888,39 @@ GROUP BY 1 ORDER BY 1;
 ### 2.8 Provider-selection freshness — the score-cache staleness canary
 Probe: `selection-freshness`
 
-`FindProviders2` (the app's provider list) reads ONLY the redis
-`{cs_<fm>_<rank>_<callerLoc>_<targetLoc>}` score cache (counts `c_l`/`c_g`,
-filters `f_l`/`f_g`, samples `s_l_N`/`s_g_N`), and that cache has exactly ONE
-writer: the recurring `UpdateClientScores` task, writing with ttl 18000s (5h).
+`FindProviders2` reads candidate scores from the Redis
+`{cs_<fm>_<rank>_<callerLoc>_<targetLoc>}` cache (counts `c_l`/`c_g`,
+filters `f_l`/`f_g`, samples `s_l_N`/`s_g_N`). The explicitly enabled native
+reader first uses the corresponding `:native_v1` pointer, manifest and pages;
+its compatibility and Online fallback still use the legacy score cache.
+`UpdateClientScores` is the writer for these score sources, with ttl 18000s
+(5h). Score freshness alone does not establish a fast request or a healthy
+location picker: the app's `/network/provider-locations` and
+`/network/find-provider-locations` routes are separate from
+`/network/find-providers2`.
+
+The request also enforces common exclusions after loading candidates.
+`getProviderHardExclusions` reads candidate memberships and `ready:v2` in one
+Redis `SMISMEMBER` operation. A missing, expired or legacy exclusion snapshot
+has unknown coverage and invokes candidate-scoped **primary PostgreSQL** reads,
+with at most 256 distinct candidates per query; an error remains an error.
+`UpdateClientLocations` publishes that complete exclusion snapshot separately
+from the score writer. A fresh score cache therefore does not rule out request
+coupling to a busy primary. When the default-off subscriber-quality policy is
+explicitly activated, Quality also verifies current connection eligibility
+against the primary even with a complete exclusion snapshot; see
+`arindbctl/CLASSIFICATION.md` for its separate rollout gate.
+
+Use §2.9c's `load_primary`, `load_backfill` and `hard_exclusions` stage
+residence/inflight metrics to separate score reads from safety checks. The
+last stage includes both the Redis exclusion read and any primary fallback;
+its latency alone does not prove which backend ran. Pair it with a bounded
+ready-marker/TTL observation, current publisher source age, and exact deployed
+query identity before attributing database work. A non-atomic marker/TTL
+diagnostic describes its own observation window, not every earlier request.
+Compare the exact route's HTTP duration separately because model stages omit
+authentication and response delivery. Current source and a supported metric
+schema do not prove that every deployed API contains the same query-plan fix.
 
 The automated completion-gap aggregate requires exactly one signed scalar
 row. Successful-empty, missing-column or extra-row/column responses remain
@@ -5460,6 +5489,41 @@ response body does not prove a nonempty picker. The deprecated
 `/network/find-locations` endpoint is not included. Empty-picker user reports
 remain actionable below any metric volume floor; the floor is not a dismissal
 of an individual report.
+
+Latency needs the same route distinction. The shared SDK's empty browse filter
+uses the initial GET; a nonempty text filter uses the search POST. The Android
+browse control also debounces text for 250ms before sending it; verify the
+reporting app's version and screen before applying that delay to a user report.
+HTTP handler duration excludes that debounce, transport and rendering. The
+connected-provider window is another UI surface and does not itself identify
+either picker route or a `FindProviders2` request.
+
+A bounded historical control at 2026-10-01 07:39:07.489 UTC paired all 20 enabled
+API process slots over five minutes: initial GET had 430 handler completions
+with mean 15.9ms, search POST had 15 with mean 402.9ms, and
+`find-providers2` had 7,238 with mean 44.0ms. These are route means, not request
+percentiles or app latency; the small search sample is not a per-query baseline.
+FP2's `load_primary` stage averaged 32.1ms over 7,527 visits and
+`hard_exclusions` 2.86ms over 10,311 visits; multiple stage visits can belong to
+one request. Native-reader enablement was false on all 20 observed processes.
+The separate ready-marker/TTL projection was unavailable, so this control did
+not establish whether the exclusion cache or primary fallback served those
+requests. Metric schema coverage did not establish the image's exact source
+ancestry. None of these observations clears another screen or later window.
+
+After initial sync, a nonempty text query scans the local fuzzy index before
+Redis location metadata and eligibility filters are loaded. Cold-start queries
+use the PostgreSQL search fallback until sync completes. Local profiling against
+20,000 city entries from the existing GeoLite resource identified histogram
+map traversal as a substantial CPU cost. Immutable variant snapshots and
+compact sorted-rune histograms retain the same aliases, histogram predicate,
+edit distance and ranking; they avoid cloning every value's variant map on
+each query. The bounded four-query benchmark reduced median lookup time by
+26–37% and about 40,000 allocations per query. This is a local source control,
+not a measured Main improvement or proof that all observed search latency is
+CPU time. Verify the running image and compare the same route after a gated
+release; an in-memory search fix does not waive the binary's database migration
+readiness requirement.
 
 The model exports `urnetwork_provider_picker_outcomes_total` with exactly nine
 preinitialized children: surface `initial`, `search`, `direct` crossed with

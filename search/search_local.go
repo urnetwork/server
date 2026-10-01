@@ -31,15 +31,24 @@ type SearchLocalSettings struct {
 
 type aliasHisto struct {
 	alias int
-	histo map[rune]int
+	histo runeHistogram
 }
+
+type runeCount struct {
+	rune  rune
+	count int
+}
+
+// Sorted immutable counts avoid hash lookups and map iterators for every
+// candidate alias. Counts remain rune-based, including raw Unicode queries.
+type runeHistogram []runeCount
 
 type localProjection struct {
 	value        string
 	valueId      server.Id
 	valueVariant int
 
-	// len -> alias value -> histo
+	// byte length -> alias value -> histogram
 	lenValueHistos map[int]map[string]aliasHisto
 }
 
@@ -172,12 +181,15 @@ func (self *SearchLocal) index(update *SearchValueUpdate) {
 			lenValueHistos: lenValueHistos,
 		}
 
-		variantProjections, ok := self.valueIdVariantProjections[update.ValueId]
-		if !ok {
+		// Queries retain these maps after releasing stateLock. Publish a new
+		// variant map for this value so both serial and parallel readers can
+		// share an immutable snapshot without cloning the entire index.
+		variantProjections := maps.Clone(self.valueIdVariantProjections[update.ValueId])
+		if variantProjections == nil {
 			variantProjections = map[int]*localProjection{}
-			self.valueIdVariantProjections[update.ValueId] = variantProjections
 		}
 		variantProjections[update.ValueVariant] = p
+		self.valueIdVariantProjections[update.ValueId] = variantProjections
 	}
 }
 
@@ -316,7 +328,7 @@ func (self *SearchLocal) aroundIdsRawN(ctx context.Context, query string, distan
 				if n <= len(partitions[i]) {
 					i += 1
 				}
-				partitions[i] = append(partitions[i], maps.Clone(variantProjections))
+				partitions[i] = append(partitions[i], variantProjections)
 			}
 		} else {
 			partitions = [][]map[int]*localProjection{
@@ -426,22 +438,43 @@ func (self *SearchLocal) OrderedSearchValues(ctx context.Context, startValueId s
 	return self.impl.OrderedSearchValues(ctx, startValueId, limit)
 }
 
-func createHisto(v string) map[rune]int {
+func createHisto(v string) runeHistogram {
 	h := map[rune]int{}
 	for _, r := range v {
 		h[r] += 1
 	}
-	return h
+	counts := make(runeHistogram, 0, len(h))
+	for r, count := range h {
+		counts = append(counts, runeCount{rune: r, count: count})
+	}
+	slices.SortFunc(counts, func(a, b runeCount) int {
+		if a.rune < b.rune {
+			return -1
+		}
+		if b.rune < a.rune {
+			return 1
+		}
+		return 0
+	})
+	return counts
 }
 
-func minHistoDistance(a map[rune]int, b map[rune]int, distance int) bool {
+func minHistoDistance(a runeHistogram, b runeHistogram, distance int) bool {
 	minD := 0
 	// a is the larger histo
 	if len(a) < len(b) {
 		a, b = b, a
 	}
-	for r, ca := range a {
-		cb := b[r]
+	j := 0
+	for _, entry := range a {
+		for j < len(b) && b[j].rune < entry.rune {
+			j++
+		}
+		cb := 0
+		if j < len(b) && b[j].rune == entry.rune {
+			cb = b[j].count
+		}
+		ca := entry.count
 		if cb < ca {
 			// there must be deletion or change of these
 			minD += ca - cb
