@@ -1,0 +1,179 @@
+package controller
+
+import (
+	"sync"
+	"time"
+
+	"github.com/urnetwork/server/v2026"
+	"github.com/urnetwork/server/v2026/model"
+	"github.com/urnetwork/server/v2026/session"
+)
+
+/**
+ * Leaderboard
+ */
+type GetLeaderboardArgs struct {
+}
+
+func GetLeaderboard(
+	args *GetLeaderboardArgs,
+	session *session.ClientSession,
+) (*model.LeaderboardResult, error) {
+
+	earners, err := model.GetLeaderboard(session.Ctx)
+	if err != nil {
+		return &model.LeaderboardResult{
+			// Earners must be non-nil even on the error path: the client
+			// deserialises the whole result before reading Error, and a nil
+			// slice here marshals as `null`, which crashes the android client
+			// exactly as an empty leaderboard did. A transient query error must
+			// not take the app down.
+			Earners: []model.Earner{},
+			Error: &model.TopEarnersError{
+				Message: err.Error(),
+			},
+		}, nil
+	}
+
+	return &model.LeaderboardResult{
+		Earners: earners,
+	}, nil
+
+}
+
+/**
+ * Network leaderboard public settings
+ * Users can opt in or out of having their network displayed on the leaderboard
+ */
+
+type SetNetworkRankingPublicArgs struct {
+	IsPublic bool `json:"is_public"`
+}
+
+type SetNetworkRankingPublicResult struct {
+	Error *SetNetworkRankingPublicError `json:"error,omitempty"`
+}
+
+type SetNetworkRankingPublicError struct {
+	Message string `json:"message"`
+}
+
+func SetNetworkLeaderboardRankingPublic(
+	args SetNetworkRankingPublicArgs,
+	session *session.ClientSession,
+) (*SetNetworkRankingPublicResult, error) {
+
+	err := model.SetNetworkLeaderboardPublic(args.IsPublic, session)
+	if err != nil {
+		return &SetNetworkRankingPublicResult{
+			Error: &SetNetworkRankingPublicError{
+				Message: err.Error(),
+			},
+		}, nil
+	}
+
+	return &SetNetworkRankingPublicResult{}, nil
+
+}
+
+/**
+ * Network ranking
+ */
+
+type GetNetworkRankingResult struct {
+	NetworkRanking NetworkRankingWithPoints `json:"network_ranking"`
+	Error          *GetNetworkRankingError  `json:"error,omitempty"`
+}
+
+// NetworkRankingWithPoints is the data leaderboard ranking plus the network's
+// points leaderboard settings and ranks (android/POINTSLEADERBOARD.md), so
+// every platform's header reads one call. The points ranks are 0 until the
+// network has points and a snapshot exists.
+type NetworkRankingWithPoints struct {
+	model.NetworkRanking
+	PointsLeaderboardPublic bool   `json:"points_leaderboard_public"`
+	EmojiTag                string `json:"emoji_tag,omitempty"`
+	RankPoints              int64  `json:"rank_points"`
+	RankBlocks              int64  `json:"rank_blocks"`
+	RankStreak              int64  `json:"rank_streak"`
+}
+
+func networkRankingWithPoints(session *session.ClientSession, ranking model.NetworkRanking) NetworkRankingWithPoints {
+	ctx := session.Ctx
+	networkId := session.ByJwt.NetworkId
+	settings := model.GetNetworkPointsLeaderboardSettings(ctx, networkId)
+	out := NetworkRankingWithPoints{
+		NetworkRanking:          ranking,
+		PointsLeaderboardPublic: settings.PointsLeaderboardPublic,
+		EmojiTag:                settings.EmojiTag,
+	}
+	if snapshot := model.GetLatestPointsLeaderboardSnapshot(ctx); snapshot != nil {
+		if row := model.GetPointsLeaderboardNetworkRow(ctx, snapshot.SnapshotId, networkId); row != nil {
+			out.RankPoints = row.RankPoints
+			out.RankBlocks = row.RankBlocks
+			out.RankStreak = row.RankStreak
+		}
+	}
+	return out
+}
+
+type GetNetworkRankingError struct {
+	Message string `json:"message"`
+}
+
+// the full leaderboard ranking is O(all networks) to compute
+// (model.GetNetworkLeaderboardRankings). Payouts settle slowly, so the full map
+// is computed once and shared across callers for leaderboardRankingCacheTtl;
+// each request reads only its own network's entry. The model function stays
+// uncached (always fresh) for tests and direct callers.
+const leaderboardRankingCacheTtl = 5 * time.Minute
+
+var leaderboardRankingCache = struct {
+	stateLock sync.Mutex
+	rankings  map[server.Id]model.NetworkRanking
+	expiry    time.Time
+}{}
+
+func cachedNetworkLeaderboardRankings(session *session.ClientSession) (map[server.Id]model.NetworkRanking, error) {
+	fresh := func() map[server.Id]model.NetworkRanking {
+		leaderboardRankingCache.stateLock.Lock()
+		defer leaderboardRankingCache.stateLock.Unlock()
+		if leaderboardRankingCache.rankings != nil && server.NowUtc().Before(leaderboardRankingCache.expiry) {
+			return leaderboardRankingCache.rankings
+		}
+		return nil
+	}()
+	if fresh != nil {
+		return fresh, nil
+	}
+	rankings, err := model.GetNetworkLeaderboardRankings(session.Ctx)
+	if err != nil {
+		return nil, err
+	}
+	func() {
+		leaderboardRankingCache.stateLock.Lock()
+		defer leaderboardRankingCache.stateLock.Unlock()
+		leaderboardRankingCache.rankings = rankings
+		leaderboardRankingCache.expiry = server.NowUtc().Add(leaderboardRankingCacheTtl)
+	}()
+	return rankings, nil
+}
+
+func GetNetworkLeaderboardRanking(
+	session *session.ClientSession,
+) (*GetNetworkRankingResult, error) {
+
+	rankings, err := cachedNetworkLeaderboardRankings(session)
+	if err != nil {
+		return &GetNetworkRankingResult{
+			Error: &GetNetworkRankingError{
+				Message: err.Error(),
+			},
+		}, nil
+	}
+
+	return &GetNetworkRankingResult{
+		NetworkRanking: networkRankingWithPoints(session, rankings[session.ByJwt.NetworkId]),
+	}, nil
+
+}
