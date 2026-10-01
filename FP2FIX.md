@@ -4810,3 +4810,27 @@ post-retag score publication are still needed before a ratio count from this
 new field can be attributed to the deployed publisher. Until 06:50:49Z,
 even a qualified eight-hour publication mixes pre- and post-five-second
 checks; its source population also changes over time.
+
+The operator then raised the quality/speed URL success gate from inclusive
+3/5 to inclusive 4/5. Server `9e62c301` changes the shared default; Main's
+checked-out `provider.yml` has no ratio override, and no config-updater or
+API release is required by the source callsite audit. Focused independent
+normal and race runs passed 22 roots and 36 named subtests, including exact
+4/5 admission, 79/100 rejection, both native buckets and Online retention.
+The clean multiarch Taskworker image
+`2026.9.30-planetoid-1060155930` has manifest digest
+`sha256:0df16111de5c587d8d06ffe6eb9eedb3cd0f4d6c7b33b943b6fe18b5b71ccec2`
+and no reachable vulnerability findings in either Linux binary. Main `g1`
+retagged it at 01:12:30Z and `g2` at 01:14:04Z on 2026-10-01. Both deploys
+exited zero, sampled 20/20 on the new version, and both registry block tags
+resolve to that digest. A bounded current-process read found all eight enabled
+starts after their respective retags with capability 2; the latest start was
+01:14:16.510Z. That is the minimum source-start fence for a new 4/5 score
+publication. The read does not prove old writer retirement, immutable image
+identity per process, URL ownership or the effective mounted ratio override.
+A separate bounded mounted-config read ended incomplete before any host row
+qualified, so override presence remains unknown. A fresh complete census
+publication with numerator 4 and denominator 5, sourced after the eight-start
+fence, is still required to confirm the effective Main threshold and count
+passing providers. Even then, its trailing eight-hour evidence remains mixed
+between prior and five-second phase limits until 06:50:49Z.
