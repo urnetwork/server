@@ -1120,11 +1120,19 @@ func (self *ProxyDevice) Send(packet []byte) bool {
 		observeWireGuardPacket("client_to_destination", "dropped", len(packet))
 		return false
 	}
+	recorder := self.flowTrace.Load()
+	var dnsEvent flowtrace.Event
+	if recorder != nil {
+		dnsEvent = recorder.CaptureDnsEgress(ownedPacket, time.Now())
+	}
 	sent := false
 	if self.sendOwnedPacketForTest != nil {
 		sent = self.sendOwnedPacketForTest(ownedPacket)
 	} else {
 		sent = self.deviceLocal.SendPacketNoCopy(ownedPacket, int32(len(ownedPacket)))
+	}
+	if recorder != nil {
+		recorder.CompleteDnsEgress(dnsEvent, sent)
 	}
 	if sent {
 		observeWireGuardPacket("client_to_destination", "delivered", len(packet))
@@ -1161,11 +1169,19 @@ func (self *ProxyDevice) SendBorrowedBatch(packets [][]byte, offset int) int {
 		observeWireGuardPackets("client_to_destination", "dropped", packets, offset)
 		return 0
 	}
+	recorder := self.flowTrace.Load()
+	var dnsEvents map[int]flowtrace.Event
+	if recorder != nil {
+		dnsEvents = recorder.CaptureDnsBatch(ownedPackets, time.Now())
+	}
 	if self.sendOwnedPacketsForTest != nil {
 		sentPacketCount := min(
 			max(0, self.sendOwnedPacketsForTest(ownedPackets)),
 			len(ownedPackets),
 		)
+		if recorder != nil {
+			recorder.CompleteDnsBatch(dnsEvents, sentPacketCount, len(ownedPackets))
+		}
 		for _, ownedPacket := range ownedPackets[sentPacketCount:] {
 			connect.MessagePoolReturn(ownedPacket)
 		}
@@ -1176,6 +1192,9 @@ func (self *ProxyDevice) SendBorrowedBatch(packets [][]byte, offset int) int {
 	// DeviceLocal's batch contract consumes every pooled packet, including
 	// members rejected by the selected route.
 	sentPacketCount := min(max(0, self.deviceLocal.SendPacketsNoCopy(ownedPackets)), len(ownedPackets))
+	if recorder != nil {
+		recorder.CompleteDnsBatch(dnsEvents, sentPacketCount, len(ownedPackets))
+	}
 	observeWireGuardPackets("client_to_destination", "delivered", packets[:sentPacketCount], offset)
 	observeWireGuardPackets("client_to_destination", "dropped", packets[sentPacketCount:], offset)
 	return sentPacketCount

@@ -25,41 +25,49 @@ type Flow struct {
 }
 
 type Event struct {
-	Cursor   uint64    `json:"cursor"`
-	At       time.Time `json:"at"`
-	Kind     string    `json:"kind"`
-	Protocol string    `json:"protocol,omitempty"`
-	Flow     Flow      `json:"flow"`
-	Provider string    `json:"provider,omitempty"`
-	Sequence uint32    `json:"tcp_sequence,omitempty"`
-	Bytes    int       `json:"tcp_payload_bytes,omitempty"`
+	Cursor   uint64       `json:"cursor"`
+	At       time.Time    `json:"at"`
+	Kind     string       `json:"kind"`
+	Protocol string       `json:"protocol,omitempty"`
+	Flow     Flow         `json:"flow"`
+	Provider string       `json:"provider,omitempty"`
+	Sequence uint32       `json:"tcp_sequence,omitempty"`
+	Bytes    int          `json:"tcp_payload_bytes,omitempty"`
+	Dns      *DnsMetadata `json:"dns,omitempty"`
 }
 
 type Snapshot struct {
-	Session string    `json:"session"`
-	Now     time.Time `json:"now"`
-	Until   time.Time `json:"until"`
-	Cursor  uint64    `json:"cursor"`
-	Dropped uint64    `json:"dropped"`
-	Lost    bool      `json:"lost"`
-	Events  []Event   `json:"events"`
+	Session    string    `json:"session"`
+	Now        time.Time `json:"now"`
+	Until      time.Time `json:"until"`
+	Cursor     uint64    `json:"cursor"`
+	Dropped    uint64    `json:"dropped"`
+	Lost       bool      `json:"lost"`
+	Events     []Event   `json:"events"`
+	DnsEnabled bool      `json:"dns_enabled,omitempty"`
 }
 
 type StartRequest struct {
-	Port uint16 `json:"port"`
+	Port       uint16 `json:"port"`
+	IncludeDns bool   `json:"include_dns,omitempty"`
 }
 
 type Recorder struct {
-	mu      sync.Mutex
-	session string
-	until   time.Time
-	port    uint16
-	next    uint64
-	dropped atomic.Uint64
-	events  [Capacity]Event
+	mu         sync.Mutex
+	session    string
+	until      time.Time
+	port       uint16
+	dnsEnabled bool
+	next       uint64
+	dropped    atomic.Uint64
+	events     [Capacity]Event
 }
 
 func New(port uint16, now time.Time) (*Recorder, error) {
+	return NewWithDns(port, false, now)
+}
+
+func NewWithDns(port uint16, includeDns bool, now time.Time) (*Recorder, error) {
 	if port == 0 {
 		return nil, errors.New("target port is required")
 	}
@@ -67,7 +75,7 @@ func New(port uint16, now time.Time) (*Recorder, error) {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, err
 	}
-	return &Recorder{session: hex.EncodeToString(nonce[:]), until: now.Add(45 * time.Minute), port: port}, nil
+	return &Recorder{session: hex.EncodeToString(nonce[:]), until: now.Add(45 * time.Minute), port: port, dnsEnabled: includeDns}, nil
 }
 
 // Provider aliases identify the actual return-envelope source within this
@@ -82,7 +90,7 @@ func ProviderAlias(session string, id connect.Id) string {
 }
 
 func (r *Recorder) add(event Event) {
-	if r == nil || !event.At.Before(r.until) || event.Flow.Origin.Port() != r.port {
+	if r == nil || !event.At.Before(r.until) || (event.Flow.Origin.Port() != r.port && !(r.dnsEnabled && event.Dns != nil && event.Flow.Origin.Port() == 53)) {
 		return
 	}
 	// Never delay the borrowed final-injection callback behind an API read.
@@ -119,6 +127,13 @@ func (r *Recorder) Return(source connect.TransferPath, packets [][]byte, now tim
 	}
 	provider := ProviderAlias(r.session, source.SourceId)
 	for _, packet := range packets {
+		if r.dnsEnabled {
+			if event, ok := dnsEvent(packet, true, now); ok {
+				event.Provider = provider
+				r.add(event)
+				continue
+			}
+		}
 		path, err := connect.ParseIpPath(packet)
 		if err != nil || path.Protocol != connect.IpProtocolTcp || path.SourcePort != int(r.port) {
 			continue
@@ -138,7 +153,7 @@ func (r *Recorder) Return(source connect.TransferPath, packets [][]byte, now tim
 func (r *Recorder) Snapshot(after, afterDropped uint64, now time.Time) Snapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	result := Snapshot{Session: r.session, Now: now, Until: r.until, Cursor: r.next, Dropped: r.dropped.Load()}
+	result := Snapshot{Session: r.session, Now: now, Until: r.until, Cursor: r.next, Dropped: r.dropped.Load(), DnsEnabled: r.dnsEnabled}
 	oldest := uint64(1)
 	if r.next > Capacity {
 		oldest = r.next - Capacity + 1
@@ -156,7 +171,7 @@ func (r *Recorder) Snapshot(after, afterDropped uint64, now time.Time) Snapshot 
 func (r *Recorder) Cursor(now time.Time) Snapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return Snapshot{Session: r.session, Now: now, Until: r.until, Cursor: r.next, Dropped: r.dropped.Load()}
+	return Snapshot{Session: r.session, Now: now, Until: r.until, Cursor: r.next, Dropped: r.dropped.Load(), DnsEnabled: r.dnsEnabled}
 }
 
 // Attribute joins the exact proxy-side dial to its return packets. The

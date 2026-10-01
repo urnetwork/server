@@ -55,12 +55,12 @@ func TestUrlProbeDnsPhaseBudget(t *testing.T) {
 		want                         time.Duration
 		ok                           bool
 	}{
-		{name: "url_answer_14", scoped: true, answer: 14 * time.Second, owner: time.Minute, want: 14 * time.Second, ok: true},
-		{name: "url_late_20", scoped: true, answer: 20 * time.Second, owner: time.Minute, want: 15 * time.Second},
-		{name: "url_never", scoped: true, answer: time.Hour, owner: time.Minute, want: 15 * time.Second},
-		{name: "route_and_dns_share_budget", scoped: true, route: 14 * time.Second, answer: 2 * time.Second, owner: time.Minute, want: 15 * time.Second},
-		{name: "short_parent", scoped: true, answer: time.Hour, owner: 7 * time.Second},
-		{name: "no_parent_deadline", scoped: true, answer: time.Hour, want: 15 * time.Second},
+		{name: "url_answer_4", scoped: true, answer: 4 * time.Second, owner: time.Minute, want: 4 * time.Second, ok: true},
+		{name: "url_late_6", scoped: true, answer: 6 * time.Second, owner: time.Minute, want: 5 * time.Second},
+		{name: "url_never", scoped: true, answer: time.Hour, owner: time.Minute, want: 5 * time.Second},
+		{name: "route_and_dns_share_budget", scoped: true, route: 4 * time.Second, answer: 2 * time.Second, owner: time.Minute, want: 5 * time.Second},
+		{name: "short_parent", scoped: true, answer: time.Hour, owner: 3 * time.Second},
+		{name: "no_parent_deadline", scoped: true, answer: time.Hour, want: 5 * time.Second},
 		{name: "canceled", scoped: true, answer: time.Hour, owner: time.Minute, cancel: 2 * time.Second, want: 2 * time.Second},
 		{name: "non_url_35", answer: 35 * time.Second, owner: time.Minute, want: 35 * time.Second, ok: true},
 	} {
@@ -124,10 +124,10 @@ func TestUrlProbeTcpBudgetStartsAfterDns(t *testing.T) {
 		dns, tcp, owner, want    time.Duration
 		literal, scoped, success bool
 	}{
-		{name: "separate_budgets", dns: 14 * time.Second, tcp: 14 * time.Second, owner: time.Minute, want: 28 * time.Second, scoped: true, success: true},
-		{name: "tcp_timeout", dns: 14 * time.Second, tcp: 20 * time.Second, owner: time.Minute, want: 29 * time.Second, scoped: true},
-		{name: "short_owner", dns: 14 * time.Second, tcp: 14 * time.Second, owner: 20 * time.Second, want: 20 * time.Second, scoped: true},
-		{name: "literal", tcp: 20 * time.Second, owner: time.Minute, want: 15 * time.Second, literal: true, scoped: true},
+		{name: "separate_budgets", dns: 4 * time.Second, tcp: 4 * time.Second, owner: time.Minute, want: 8 * time.Second, scoped: true, success: true},
+		{name: "tcp_timeout", dns: 4 * time.Second, tcp: 6 * time.Second, owner: time.Minute, want: 9 * time.Second, scoped: true},
+		{name: "short_owner", dns: 4 * time.Second, tcp: 4 * time.Second, owner: 6 * time.Second, want: 6 * time.Second, scoped: true},
+		{name: "literal", tcp: 20 * time.Second, owner: time.Minute, want: 5 * time.Second, literal: true, scoped: true},
 		{name: "non_url", tcp: 20 * time.Second, owner: time.Minute, want: 20 * time.Second, success: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -265,9 +265,9 @@ func TestUrlProbeTlsPhaseBudget(t *testing.T) {
 		want         time.Duration
 		success      bool
 	}{
-		{name: "url_healthy", scoped: true, delay: 14 * time.Second, owner: time.Minute, want: 14 * time.Second, success: true},
-		{name: "url_late", scoped: true, delay: 20 * time.Second, owner: time.Minute, want: 15 * time.Second},
-		{name: "short_owner", scoped: true, delay: 20 * time.Second, owner: 10 * time.Second, want: 10 * time.Second},
+		{name: "url_healthy", scoped: true, delay: 4 * time.Second, owner: time.Minute, want: 4 * time.Second, success: true},
+		{name: "url_late", scoped: true, delay: 6 * time.Second, owner: time.Minute, want: 5 * time.Second},
+		{name: "short_owner", scoped: true, delay: 20 * time.Second, owner: 3 * time.Second, want: 3 * time.Second},
 		{name: "non_url", delay: 20 * time.Second, owner: time.Minute, want: 20 * time.Second, success: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -293,7 +293,7 @@ func TestUrlProbeTlsPhaseBudget(t *testing.T) {
 				if elapsed != tc.want || (err == nil) != tc.success {
 					t.Fatalf("elapsed=%s want=%s err=%v", elapsed, tc.want, err)
 				}
-				if !tc.success && tc.owner > 15*time.Second {
+				if !tc.success && tc.owner > 5*time.Second {
 					requireProbeHttpStage(t, err, "tls")
 				}
 			})
@@ -309,11 +309,11 @@ func TestUrlProbeReadIdleBudgetAndTotalOwner(t *testing.T) {
 		owner, want time.Duration
 		success     bool
 	}{
-		{name: "header_stall", scoped: true, fixture: &urlPhaseFixture{headers: time.Minute, body: "ok"}, owner: time.Minute, want: 15 * time.Second},
-		{name: "body_stall", scoped: true, fixture: &urlPhaseFixture{bodyGap: time.Minute, body: "ok"}, owner: time.Minute, want: 15 * time.Second},
-		{name: "progress_refreshes_read", scoped: true, fixture: &urlPhaseFixture{bodyGap: 14 * time.Second, body: "four", chunkSize: 1}, owner: time.Minute, want: 56 * time.Second, success: true},
-		{name: "short_owner", scoped: true, fixture: &urlPhaseFixture{bodyGap: time.Minute, body: "ok"}, owner: 10 * time.Second, want: 10 * time.Second},
-		{name: "cumulative_owner", scoped: true, fixture: &urlPhaseFixture{dns: 14 * time.Second, tcp: 14 * time.Second, handshake: 14 * time.Second, headers: 14 * time.Second, bodyGap: 14 * time.Second, body: "ok"}, owner: time.Minute, want: time.Minute},
+		{name: "header_stall", scoped: true, fixture: &urlPhaseFixture{headers: time.Minute, body: "ok"}, owner: time.Minute, want: 5 * time.Second},
+		{name: "body_stall", scoped: true, fixture: &urlPhaseFixture{bodyGap: time.Minute, body: "ok"}, owner: time.Minute, want: 5 * time.Second},
+		{name: "progress_refreshes_read", scoped: true, fixture: &urlPhaseFixture{bodyGap: 4 * time.Second, body: "four", chunkSize: 1}, owner: time.Minute, want: 16 * time.Second, success: true},
+		{name: "short_owner", scoped: true, fixture: &urlPhaseFixture{bodyGap: time.Minute, body: "ok"}, owner: 3 * time.Second, want: 3 * time.Second},
+		{name: "cumulative_owner", scoped: true, fixture: &urlPhaseFixture{dns: 4 * time.Second, tcp: 4 * time.Second, handshake: 4 * time.Second, headers: 4 * time.Second, bodyGap: 4 * time.Second, body: "sixteen-byte-body", chunkSize: 1}, owner: time.Minute, want: time.Minute},
 		{name: "non_url_read", fixture: &urlPhaseFixture{headers: 20 * time.Second, body: "ok"}, owner: time.Minute, want: 20 * time.Second, success: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -350,8 +350,10 @@ func TestUrlProbePhaseTimeoutMeasuredClassification(t *testing.T) {
 		name, stage string
 		fixture     *urlPhaseFixture
 	}{
-		{name: "late_dns", fixture: &urlPhaseFixture{dns: 20 * time.Second}, stage: "dial_dns"},
-		{name: "late_tls", fixture: &urlPhaseFixture{handshake: 20 * time.Second}, stage: "tls"},
+		{name: "late_dns", fixture: &urlPhaseFixture{dns: 6 * time.Second}, stage: "dial_dns"},
+		// This custom dialer has no Tun progress callback; retain the combined class.
+		{name: "late_tcp", fixture: &urlPhaseFixture{tcp: 6 * time.Second}, stage: "dial_dns_or_socket"},
+		{name: "late_tls", fixture: &urlPhaseFixture{handshake: 6 * time.Second}, stage: "tls"},
 		{name: "headers", fixture: &urlPhaseFixture{headers: time.Minute, body: "ok"}, stage: "request_response_timeout"},
 		{name: "body", fixture: &urlPhaseFixture{bodyGap: time.Minute, body: "ok"}, stage: "response_body"},
 	} {

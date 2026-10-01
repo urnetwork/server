@@ -36,7 +36,7 @@ reclassifying the fleet.
 | Pass reliability | Required | Required | Required |
 | No ARIN risk exception | Required | Required | Required |
 | No probe security exception | Required | Required | Required |
-| URL success ratio ≥ 0.6 | Required | Required | Not required |
+| URL success ratio ≥ 0.8 | Required | Required | Not required |
 | No ARIN quality exception | Required | Not required | Not required |
 
 This matrix is the bucket admission contract. Probe admission has a different
@@ -47,9 +47,9 @@ security-quarantined providers also need probes to establish recovery.
 The probe records URL successes, errors, and security exceptions. There is no
 separate blackhole definition or cheap-blackhole admission gate. The indexer
 aggregates accepted measured URL outcomes in the preceding eight hours and
-requires `success + error > 0` and `success / (success + error) >= 0.6` for
+requires `success + error > 0` and `success / (success + error) >= 0.8` for
 quality and speed. The threshold belongs to indexer configuration, alongside
-reliability. Use the exact inclusive 3/5 boundary; 2/3 also qualifies. A URL's
+reliability. Use the exact inclusive 4/5 boundary; 2/3 does not qualify. A URL's
 final measured outcome is counted once after its retries, with idempotent
 ingest so retries of a report do not bias the ratio. Zero denominators mean
 online-only; at exactly eight hours an outcome is stale. A transport/setup failure,
@@ -136,7 +136,7 @@ and ARIN flags are gates; they must not be averaged away into a good score.
 | URL successes `S` | Count of unique, accepted, measured URL successes newer than eight hours | Numerator and evidence volume |
 | URL errors `E` | Count of unique, accepted, measured URL errors in the same window | Denominator and evidence volume |
 | Measured URL count `N` | `S + E`; excludes unmeasured/local setup failures and duplicate reports | Distinguishes zero observations from observed failures |
-| URL success ratio `r` | `S / N` when `N > 0`; otherwise unknown | Quality/speed gate at `r >= 0.6`, and ranking factor |
+| URL success ratio `r` | `S / N` when `N > 0`; otherwise unknown | Quality/speed gate at `r >= 0.8`, and ranking factor |
 | URL ranking weight | Initially `0.1 + 0.9*r` for measured history; `1` when unknown | Multiplies existing reliability/performance selection weight; stays positive even for online providers with errors |
 | Quality failure index | `ceil(MaxFailureIndex * (1-r))` for measured history; undefined when `N = 0` | Sample-count-normalized quality-tier penalty; more observations at the same ratio cannot worsen the tier |
 | Relative latency | Existing measured relative latency; separately record DNS, connect, TLS, and TTFB timings for diagnosis | Performance ordering within eligible buckets |
@@ -159,8 +159,8 @@ intentionally the same as a measured ratio of `1`, although unknown history
 cannot admit a provider to quality or speed.
 
 Better measured URL success must never worsen ranking when
-reliability, performance, and bucket are equal. A provider at exactly `3/5`
-passes the URL gate for quality/speed and gets a URL weight of `0.64`; it must
+reliability, performance, and bucket are equal. A provider at exactly `4/5`
+passes the URL gate for quality/speed and gets a URL weight of `0.82`; it must
 still pass the other gates for that bucket. A `0/0` provider has no defined URL
 ratio and can enter only online, subject to the common gates. Security or ARIN
 risk failures cannot be offset by excellent reliability, throughput, or URL
@@ -593,7 +593,7 @@ The user also approved the measured-history ranking curve
 `0.1 + 0.9 * success_ratio` and the **16-KiB minimum meaningful throughput
 sample**. They preserve the requested monotonic ranking and small-complete-body
 exemption. Neither creates an additional online or quality/speed admission
-gate; the 0.6 ratio, 2-second TTFB, and 100-kbps meaningful-throughput thresholds
+gate; the 0.8 ratio, 2-second TTFB, and 100-kbps meaningful-throughput thresholds
 remain the explicit product requirements.
 
 The remaining research concerns evidence-backed virtual/hosting ISP rules and
@@ -929,8 +929,8 @@ metric delivery alone does not make those current eligibility counts. These
 gauges and a requested market's cached rank-document lengths also have
 different population/snapshot boundaries and must not be equated.
 
-Native URL-history admission currently requires selected-policy history with
-`N > 0` and success ratio at least `0.6` in the eight-hour evidence window,
+At that measurement, native URL-history admission required selected-policy
+history with `N > 0` and success ratio at least `0.6` in the eight-hour evidence window,
 plus the shared eligibility gates. A `1/1` history can qualify. Ten successes
 in four hours is the scheduling/coverage objective, not a minimum-history
 admission rule. The reported zero ten-success completions among 111,566
@@ -4601,5 +4601,236 @@ initial higher rate did not persist in this later five-minute cohort. It
 remained above the 43.15/s earlier pre-timeout cohort, but the windows differ
 in time and provider mix. Neither post-change window meets the approximately
 75.41/s steady rate implied by the latest 108,588 eligible-provider census.
-Current exact-shard stage and CPU/PG-acquisition measurements are needed to
+Current exact-shard stage and CPU/PG-acquisition measurements were needed to
 locate the remaining capacity limit before another code or slot change.
+A guarded paired exact-eight-shard read subsequently compared the fixed
+19:07–19:12Z and 19:20–19:25Z windows. All core, progress, whole-Taskworker
+CPU and default-PG-pool groups qualified independently in both windows.
+Accepted-turn counter rates moved from 55.095 to 46.538/s. Completed timed
+turn means rose from 8.658 to 9.314 seconds: `check_and_buffer` 7.535 to
+7.811, publication 0.699 to 0.949 and close/join 0.332 to 0.435 seconds.
+Shared-lane active-batch scrape means fell from 476.64 to 444.31 of 512
+configured slots; running fell from 433.72 to 391.63 while finished-waiting
+rose from 38.17 to 47.53. The running decline appeared on all eight shards,
+not one edge. Whole-Taskworker CPU fell from 15.03 to 13.63 cores. Mean
+default-PG acquire residence rose from 0.953 to 2.214 milliseconds, but this
+does not measure statement time. These are fixed-window counter estimates
+and unweighted scrape means, not a continuous occupancy integral or an
+exact durable-history join. They point to longer turns and less-filled slots
+as the immediate observed rate difference; claim/refill, terminal waiting,
+and Connect-side work still need owner-specific discrimination.
+
+The scheduler admission-boundary correction and bounded observability were
+committed as `5ffa265626e1af398dc2ca590821b2a675fa00a0`. After a
+synchronous due response, a claim that has crossed the pass deadline is now
+completed as unstarted with its identity and publication receipt joined;
+it does not enter the tunnel, create a measured URL outcome, or gain quota
+credit. The original deadline and 310-second reserve remain in force. The
+new collector exposes 39 fixed, identity-free series for scheduler phases,
+stop reasons, due-call results and claim disposition. Independent normal and
+race checks each passed 21 tests and vet was clean. The clean multi-platform
+Taskworker image `2026.9.30-planetoid-1060010880` has manifest digest
+`sha256:fa7cbd200650b384aca8228060927873a934d2bd95b9e9604ecf7bc994de9f4b`
+and embeds the commit with `vcs.modified=false`. Both `g1` and `g2` deploy
+commands exited zero and sampled 20/20 on the new version; both block tags
+resolve to that digest. This is deployment evidence, not yet a full-eight
+process-identity proof or a measured throughput improvement at the rollout
+boundary.
+The first fixed post-rollout 20:51–20:56Z window was subsequently qualified
+by a guarded all-eight-process read: both `g1` and `g2` starts were after their
+retags and before 20:51Z, and every process reported capability 2 and eight
+configured shards. A separate, source-reviewed indexed history read counted
+15,262 unique accepted measured outcomes, 10,635 successes and 4,627 failures,
+or 50.8733/s (69.68% successful). This is descriptively 8.58% above the
+later 46.8533/s pre-scheduler window and 7.80% below the earlier 55.18/s
+window. Different-time fleet/provider cohorts do not isolate scheduler
+causality, and the rate remains below the approximately 75/s steady demand
+implied by the current eligible-provider count. Exact scheduler phase, due,
+stop and claim-disposition measurements were still pending at that read. The
+process read qualifies time and capability; it does not directly attest a binary digest
+for every PID.
+A separately guarded, exact-eight-process scheduler read for the same
+20:51–20:56Z window qualified all groups and retained older metadata rows as
+excluded evidence. Synchronous Due occupied 2,359.61 of 2,399.99 observed
+scheduler-owned seconds (98.317%); scheduler wait occupied 40.28 seconds
+(1.678%) and drain was zero. All eight processes were in Due at the window
+boundaries and across scrape means. Extrapolated completed-Due counters
+estimated 4,294.03 calls in 2,361.11 seconds, averaging 0.54986 seconds
+per call; 4,232.41 were full, 58.52 partial and 3.10 empty, with zero
+observed error, invalid or maintenance outcomes. Estimated claims admitted
+were 15,311.24, with zero unstarted/ack-failed
+claims; completed stop reasons were zero, which is expected to be possible
+because five minutes need not span a 900-second pass. Independent turn
+counters estimated about 51.044 accepted/s and zero local failures. The
+shared-lane scrape means were 466.09 active, 414.95 running, 43.33
+finished-waiting and 7.82 queued slots of 512. These counter deltas and
+unweighted scrape means point to synchronous Due refill latency, rather
+than a pass-level wait or drain, as the immediate scheduler-owned limit.
+They do not split API time, model transaction/SQL, post-commit cleanup or
+worker CPU, and cannot alone establish causal throughput gain. The next
+diagnostic must isolate those Due subphases under loaded Main conditions.
+A bounded local diagnostic then exercised the real loopback Due HTTP handler,
+model and database with 100,000 providers, 100,000 accepted-history rows,
+400,000 retained receipts and eight concurrent shard lanes. Across eight
+calls per lane at limit four, HTTP Due mean was 44.403 ms with completed-run
+priority off and 59.989 ms with it ready (p95 70.48 and 107.14 ms). All 512
+claims were uniquely fenced and durable; no URL probes ran. Claim SQL plus
+decode averaged about 16.5 ms in either mode, while empty retention
+transactions averaged 0.5–0.6 ms. Fresh custom/generic plans for five
+complex statements had 4.67–8.33 ms planning time and 0.57–0.99 ms
+no-work execution; the claim statement executed in about 2.0–2.1 ms in
+that control. This local fixture does not reproduce the roughly 550 ms
+Main Due mean, so it does not justify a SQL rewrite or prove Main's owner.
+A source-bound Main HTTP/statement/pool comparison is the next discriminator.
+The scheduled 21:27:22Z census reported the first nonzero quota count in
+the current sequence: 61 quota-complete and secure-complete providers of
+107,834 eligible, with 459,929 accepted runs still needed. This is an
+unjoined rolling-cohort snapshot, not a causal rollout comparison.
+The later census in the complete 21:18 monitor frame
+reported 332 quota-complete providers of 108,049 eligible. This is another
+unjoined, changing-cohort snapshot; it shows some current providers meeting
+the quota, while the overwhelming majority remain incomplete, and does not
+attribute the increase to the scheduler release.
+The next complete 21:33 monitor frame counted 649 quota-complete providers
+of 108,049 eligible, again without a joined stable provider cohort. Its
+edge3 host CPU sample was high, while edge4 had no positive current callback;
+the frame explicitly leaves edge4 current host coverage unavailable.
+Capacity also limits what Due refill alone can achieve. If the last measured
+roughly nine-second turn residence remained representative, filling all 512
+configured URL slots from the 466.09 active-slot scrape mean would raise the
+roughly 51/s accepted rate only to about 56/s. About 675–700 occupied slots
+would be required for 75/s before allowance for setup-only turns, publication
+tails and changing provider mix. This is a conditional arithmetic bound, not
+a post-rollout residence measurement or proof that 2,048 slots are safe.
+Increasing geometry also raises reserved transfer credit and load on shared
+Connect hosts. A staged, host-qualified ramp is still needed after the
+loaded-Main Due attribution; the deployed setting remains 512 slots.
+A first source-bound Main `pg_stat_statements` attempt stopped at its first
+endpoint on a combined global reset-or-deallocation continuity guard. The
+reader exited nonzero, admitted no Due-family delta, did not run its second
+snapshot and was not retried. The retained result cannot tell whether a
+global reset or unrelated statement eviction caused the guard; it does not
+attribute the roughly 550 ms Due time to SQL. An isolated PostgreSQL 18.6
+control then observed 29 global deallocations while a hot tracked entry kept
+the same key and `stats_since` and rose from 50 to 400 calls. An evicted and
+recreated cold entry changed `stats_since` despite a larger call count, and a
+global reset also changed the guard. These controls justify a separately
+reviewed survivor-entry measurement that warns on unrelated global churn but
+still rejects lost/recreated tracked entries or a reset. Such a delta would
+cover only continuously observed entries, not short-lived statements born
+and evicted between snapshots. No replacement Main read has yet run.
+The operator then requested a higher network service bar: sampled URL DNS,
+TCP connect, TLS handshake and per-response-read idle limits are five seconds
+each. Server `d881152a` changes only the URL-scoped phase constant and its
+focused controls; the caller deadline, 60-second cold owner, non-URL paths,
+TLS trust, no-result handling and evidence policy version 1 remain. Phase
+budgets are outside the v1 policy payload, which versions redirects, body,
+TTFB and throughput. A bare v2 switch would make old API binaries reject new
+results and exclude existing v1 quality/quota history; the production
+eight-hour ratio and four-hour quota will instead mix old and new deadlines
+until earlier results expire. Own and independent validation each passed 33
+normal and 33 race controls plus vet. The clean multiarch Taskworker image
+`2026.9.30-planetoid-1060083850` has manifest digest
+`sha256:c46e9c26417aae45559aef2a86224c256788976d49ffa2428f843d5bd5be3e13`
+and embeds `d881152a` with `vcs.modified=false`. Main `g1` selected the image
+at 22:49:16Z and retagged at 22:49:19Z; `g2` selected at 22:50:46Z and
+retagged at 22:50:49Z. Both deploys exited zero, sampled 20/20 on the new
+version, and both registry block tags resolve to the manifest digest. A
+full-eight-process start proof and fixed post-change accepted/failure-stage
+measurement remain required before attributing outcomes to the new limit.
+The last complete pre-change 22:18 monitor frame already counted 7,002
+quota-complete providers of 108,069 eligible; this unjoined census preceded
+the five-second rollout and is not its effect.
+The fixed 22:35–22:40Z pre-change accepted-history window held 15,322
+selected-policy measured outcomes, 11,224 successes and 4,098 failures,
+or 51.0733/s with a 73.253% success share. A complete cached native-score
+publication with source interval 22:34:16–22:34:41Z and publish time
+22:46:18Z, all before the first `g1` selection, counted 88,510 native
+Quality, 91,125 native Speed and 108,088 online providers. The buckets
+overlap; their counts are not additive. This is a pre-change source snapshot
+with mixed prior eight-hour v1 history, not an exact ratio-only pass count.
+The post-change measurement must use starts after both block retags and
+before its fixed outcome window, then compare its own accepted successes,
+failures and failure stages. A later complete native publication is needed
+to observe bucket change; neither cohort alone proves a causal timeout
+effect or the eventual eight-hour equilibrium.
+
+A guarded current-process read found all eight enabled Taskworker processes
+started after their respective `g1`/`g2` retags, with capability 2 and eight
+configured shards, before the fixed 22:55–23:00Z post-change window. This
+proves a current start fence, but does not attest immutable per-process image
+identity or uninterrupted process residency throughout that window. The
+post-change window held 21,019 accepted selected-v1 measured URL outcomes:
+8,805 successes and 12,214 failures. Throughput was 70.0633 accepted/s,
+37.18% above the 51.0733/s pre-change window; successful checks fell from
+37.4133/s to 29.3500/s, and success share fell from 73.254% to 41.891%.
+The largest failure-stage difference was DNS-class (`dial_dns` plus
+`request_dns_timeout`), 2,530 before versus 10,920 after. TCP failures were
+128 versus 152 and TLS failures 140 versus 101. Different times and provider
+cohorts make these descriptive fleet observations, not isolated causal
+effects or proof that a particular DNS outcome would have succeeded at 15s.
+
+Every provider in each fixed five-minute accepted-history window had exactly
+one measured outcome. Consequently, among the 21,019 providers observed
+after the change, **8,805 (41.891%) pass an S/N ≥ 0.6 threshold** and
+12,214 fail it for that one-observation window. Before the change, 11,224
+of 15,322 observed providers (73.254%) pass by the same one-observation
+method. These are fresh five-minute cohorts, not the production eight-hour
+native Quality or Speed bucket counts. They exclude setup/no-result attempts,
+do not join the same providers across windows, and cannot predict the final
+rolling eight-hour pass count until the old evidence ages out. A fresh native
+bucket publication is still required to measure the operational count.
+
+The first qualified post-rollout native-score publication evaluated at
+23:08:32–23:08:52Z and published at 23:19:18Z, after both Taskworker block
+retags. It counted 86,350 native Quality and 88,960 native Speed providers
+among 106,533 online. Relative to the pre-rollout source snapshot, these
+counts are lower by 2,160 Quality, 2,165 Speed and 1,555 online. Native
+buckets overlap and apply other score and tag gates as well as the rolling
+eight-hour measured URL ratio. The publication still includes old timeout
+evidence and a changing provider population, so its differences do not
+isolate the five-second setting or give the eventual steady-state pass count.
+
+The existing complete score export already holds each provider's selected-v1
+accepted measured URL success/total pair for its exact trailing eight-hour
+query window. Server `e620ef06` adds an optional, source-clocked ratio census
+from that in-memory map without another Main history scan. It reports the
+configured success threshold for distinct publicly usable online providers,
+with passing, failing and no-evidence counts, plus separately labeled counts
+for all provider IDs in the source map. Older cached publications remain
+readable with the new field unknown. Author and independent focused normal,
+race, vet and build gates passed. The multiarch Taskworker image
+`2026.9.30-planetoid-1060119460` embeds clean `e620ef06`; its registry
+manifest is `sha256:8095fe115f937805b77923c8b42522ba25e8afea72a6528dc100d58ea0fecc01`,
+and both Linux binaries had no reachable vulnerabilities in the release scan.
+Main `g1` retagged at 00:09:37Z and `g2` at 00:12:32Z on 2026-10-01;
+both deploys exited zero and sampled 20/20 on the new version. Both block
+tags resolve to the manifest digest. Current-process starts and a complete
+post-retag score publication are still needed before a ratio count from this
+new field can be attributed to the deployed publisher. Until 06:50:49Z,
+even a qualified eight-hour publication mixes pre- and post-five-second
+checks; its source population also changes over time.
+
+The operator then raised the quality/speed URL success gate from inclusive
+3/5 to inclusive 4/5. Server `9e62c301` changes the shared default; Main's
+checked-out `provider.yml` has no ratio override, and no config-updater or
+API release is required by the source callsite audit. Focused independent
+normal and race runs passed 22 roots and 36 named subtests, including exact
+4/5 admission, 79/100 rejection, both native buckets and Online retention.
+The clean multiarch Taskworker image
+`2026.9.30-planetoid-1060155930` has manifest digest
+`sha256:0df16111de5c587d8d06ffe6eb9eedb3cd0f4d6c7b33b943b6fe18b5b71ccec2`
+and no reachable vulnerability findings in either Linux binary. Main `g1`
+retagged it at 01:12:30Z and `g2` at 01:14:04Z on 2026-10-01. Both deploys
+exited zero, sampled 20/20 on the new version, and both registry block tags
+resolve to that digest. A bounded current-process read found all eight enabled
+starts after their respective retags with capability 2; the latest start was
+01:14:16.510Z. That is the minimum source-start fence for a new 4/5 score
+publication. The read does not prove old writer retirement, immutable image
+identity per process, URL ownership or the effective mounted ratio override.
+A separate bounded mounted-config read ended incomplete before any host row
+qualified, so override presence remains unknown. A fresh complete census
+publication with numerator 4 and denominator 5, sourced after the eight-start
+fence, is still required to confirm the effective Main threshold and count
+passing providers. Even then, its trailing eight-hour evidence remains mixed
+between prior and five-second phase limits until 06:50:49Z.

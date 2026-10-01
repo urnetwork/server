@@ -381,6 +381,13 @@ func providerEgressHealthWindowSql() string {
 // Aggregates accepted URL successes and measured errors in the eight-hour
 // window. Unmeasured attempts and submission replays contribute nothing.
 func GetAllProviderEgressHealthCounts(ctx context.Context) map[server.Id]ProviderEgressHealthCounts {
+	healthCounts, _ := getAllProviderEgressHealthCountsSnapshot(ctx)
+	return healthCounts
+}
+
+// Keep the exact query endpoint with its already loaded map. Publication
+// diagnostics must not relabel the later export time as the evidence window.
+func getAllProviderEgressHealthCountsSnapshot(ctx context.Context) (map[server.Id]ProviderEgressHealthCounts, time.Time) {
 	healthCounts := map[server.Id]ProviderEgressHealthCounts{}
 
 	now := server.NowUtc()
@@ -410,7 +417,7 @@ func GetAllProviderEgressHealthCounts(ctx context.Context) map[server.Id]Provide
 		})
 	})
 
-	return healthCounts
+	return healthCounts, now
 }
 
 // GetAllProviderEgressTLSAuthenticationFailedClientIds returns every provider

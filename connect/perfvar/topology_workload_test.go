@@ -553,22 +553,13 @@ func measureFullTunUDPDirection(
 			targetProviderReturnByteCount,
 		)
 		if !boundaryOk || !path.providerReturns.waitThrough(ctx, providerReturnBoundary) {
-			return workloadResult{}, fmt.Errorf(
-				"provider return source did not complete flow %+v at %d packets and %d bytes: %w; observed_packets=%d observed_bytes=%d failures=%d congestion=%+v",
-				providerReturnFlowKey,
-				targetPacketCount,
-				targetProviderReturnByteCount,
-				ctx.Err(),
-				path.providerReturns.startedPacketCount.Load(),
-				path.providerReturns.startedByteCount.Load(),
-				path.providerReturns.failures.Load()-providerReturnFailureCountBefore,
-				path.providerRemoteNat.CongestionDropStats(),
-			)
+			return workloadResult{}, path.providerReturnSourceFailure(ctx, providerReturnBoundary,
+				boundaryOk, targetPacketCount, targetProviderReturnByteCount, providerReturnFailureCountBefore)
 		}
 	}
 	sourceSerializationBoundary, boundaryOk := sourceTracker.boundary(ctx)
 	if !boundaryOk {
-		return workloadResult{}, fmt.Errorf("snapshot UDP source serialization boundary: %w", ctx.Err())
+		return workloadResult{}, fmt.Errorf("snapshot UDP source serialization boundary: %w", sourceTracker.boundaryError(ctx))
 	}
 	if !sourceTracker.waitThrough(ctx, sourceSerializationBoundary) {
 		return workloadResult{}, fmt.Errorf(

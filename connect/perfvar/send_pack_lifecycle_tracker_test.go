@@ -45,14 +45,18 @@ type sendPackLifecycleTracker struct {
 	workloadRecoverableFailures        atomic.Uint64
 	workloadRecoveredAdmissionFailures atomic.Uint64
 	workloadDatagramFailures           atomic.Uint64
-	workloadStarted                    atomic.Uint64
-	workloadPublishing                 atomic.Int64
-	healthProbeStarted                 atomic.Uint64
-	healthProbeFailures                atomic.Uint64
-	nextClient                         atomic.Uint64
-	failureLock                        sync.Mutex
-	failureSamples                     []clientconnect.SendPackLifecycleObservation
-	workloadFailureSamples             []clientconnect.SendPackLifecycleObservation
+	// Raw categories intentionally overlap: an owned UDP admission refusal
+	// remains both recoverable and a datagram failure. The measured gate uses
+	// this explicit intersection when forming their allowed-failure union.
+	workloadRecoverableDatagramFailures atomic.Uint64
+	workloadStarted                     atomic.Uint64
+	workloadPublishing                  atomic.Int64
+	healthProbeStarted                  atomic.Uint64
+	healthProbeFailures                 atomic.Uint64
+	nextClient                          atomic.Uint64
+	failureLock                         sync.Mutex
+	failureSamples                      []clientconnect.SendPackLifecycleObservation
+	workloadFailureSamples              []clientconnect.SendPackLifecycleObservation
 
 	// Nil test barriers expose publication races without delaying production
 	// measurement callbacks.
@@ -393,6 +397,9 @@ func (self *sendPackLifecycleTracker) run() {
 					if !observation.AckRequired &&
 						observation.MessageType == protocol.MessageType_IpIpPacketFromProvider {
 						self.workloadDatagramFailures.Add(1)
+						if recoverableAttempt {
+							self.workloadRecoverableDatagramFailures.Add(1)
+						}
 					}
 					if len(self.workloadFailureSamples) < sendPackLifecycleFailureSampleCapacity {
 						self.workloadFailureSamples = append(

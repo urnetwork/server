@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/urnetwork/server/qualityprobe"
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 	"github.com/urnetwork/server/qualityprobe/ingest"
+	"github.com/urnetwork/server/qualityprobe/prober"
 )
 
 // Authentication is independently useful even when a local load failure left
@@ -22,8 +24,11 @@ func providerUrlProbeHasSecurityEvidence(result *egresshealth.Result) bool {
 // one URL, returns its tunnel, and publishes the outcome before another claim.
 // Missing catalogs are an operator failure and produce no provider verdict.
 func (self *providerEgressProbePass) runUrlProbes(ctx context.Context, args *ProviderEgressProbeArgs) (*ProviderEgressProbeResult, error) {
+	observation := urlProbeSchedulerMetrics.begin()
+	defer observation.close()
 	if self.refreshFleet != nil {
 		defer func() {
+			observation.enter(urlSchedulerFinalize)
 			if ctx.Err() == nil {
 				self.refreshFleet(ctx)
 			}
@@ -53,7 +58,7 @@ func (self *providerEgressProbePass) runUrlProbes(ctx context.Context, args *Pro
 	pass := *self
 	pass.fullReleaseDeadline, _ = ctx.Deadline()
 	startedAt := time.Now()
-	result, runErr := pass.drainUrlProbes(ctx, &execution, pins, pool)
+	result, runErr := pass.drainUrlProbes(ctx, &execution, pins, pool, observation)
 	urlProbePassSeconds.Observe(time.Since(startedAt).Seconds())
 	return result, runErr
 }
@@ -61,7 +66,7 @@ func (self *providerEgressProbePass) runUrlProbes(ctx context.Context, args *Pro
 // The durable claim owns repeat eligibility; only in-flight duplicates are
 // suppressed here. Each completed turn publishes before another claim, so a
 // slow provider cannot hold other results or an entire publication cohort.
-func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *ProviderEgressProbeArgs, pins map[string][]string, pool *egresshealth.Pool) (*ProviderEgressProbeResult, error) {
+func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *ProviderEgressProbeArgs, pins map[string][]string, pool *egresshealth.Pool, observation *providerUrlProbeSchedulerOwner) (*ProviderEgressProbeResult, error) {
 	result := &ProviderEgressProbeResult{}
 	type completedTurn struct {
 		clientId string
@@ -71,6 +76,10 @@ func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *P
 	active := map[string]bool{}
 	var runErr error
 	admit := true
+	stopAdmission := func(reason int) {
+		admit = false
+		observation.stopAdmission(reason)
+	}
 	collect := func(turn completedTurn) {
 		delete(active, turn.clientId)
 		result.Attempted += turn.outcome.summary.Attempted
@@ -82,10 +91,11 @@ func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *P
 		urlProbeTurns.WithLabelValues("local_failure").Add(float64(turn.outcome.summary.Failed))
 		if turn.outcome.err != nil {
 			runErr = errors.Join(runErr, turn.outcome.err)
-			admit = false
+			stopAdmission(urlSchedulerTurnError)
 		}
 	}
 	for {
+		observation.enter(urlSchedulerDispatch)
 		// Coalesce already-finished workers before claiming another bounded
 		// head. There is no wait for a slow peer and no per-provider due query
 		// when several slots are already free.
@@ -100,21 +110,29 @@ func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *P
 	collected:
 		if err := ctx.Err(); err != nil {
 			runErr = errors.Join(runErr, err)
-			admit = false
+			stopAdmission(urlSchedulerCanceled)
 		}
 		if deadline, bounded := ctx.Deadline(); bounded &&
 			time.Until(deadline) < providerUrlProbeRunBudget(args)+3*providerEgressControlPlaneTimeout {
-			admit = false
+			stopAdmission(urlSchedulerReserve)
 		}
 		remaining := providerEgressFullSelectedLimit - result.UrlDue
 		if remaining <= 0 {
-			admit = false
+			stopAdmission(urlSchedulerLimit)
 			result.Backlog = true
 		}
 		if admit && len(active) < args.Full.Concurrency {
 			limit := min(args.Full.Limit, args.Full.Concurrency-len(active), remaining)
+			// Keep the existing request owner and transport timeout. Canceling
+			// Due at the admission cutoff could lose a just-committed claim
+			// response and turn a normal pass boundary into task-error backoff.
+			observation.enter(urlSchedulerDue)
+			claimStarted := time.Now()
 			due, err := self.fullDue(ctx, limit)
+			claimElapsed := time.Since(claimStarted)
+			observation.enter(urlSchedulerDispatch)
 			if errors.Is(err, ingest.ErrDuePriorityMaintenancePending) {
+				observation.due(urlDueMaintenance, claimElapsed)
 				// The API completed one bounded maintenance page and issued no
 				// claims. Continue inside the existing task deadline, collecting
 				// finished workers above, rather than treating backlog as a long
@@ -123,21 +141,46 @@ func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *P
 				continue
 			}
 			if err != nil {
+				observation.due(urlDueError, claimElapsed)
 				runErr = errors.Join(runErr, fmt.Errorf("URL probe due claim: %w", err))
-				admit = false
+				stopAdmission(urlSchedulerDueError)
 			} else if len(due) > limit {
+				observation.due(urlDueInvalid, claimElapsed)
 				runErr = errors.Join(runErr, fmt.Errorf("URL probe due response exceeds requested limit"))
-				admit = false
+				stopAdmission(urlSchedulerInvalidDue)
 			} else {
+				dueResult := urlDuePartial
+				if len(due) == 0 {
+					dueResult = urlDueEmpty
+				} else if len(due) == limit {
+					dueResult = urlDueFull
+				}
+				observation.due(dueResult, claimElapsed)
 				result.Backlog = false
+				// The request can span the admission cutoff, and cancellation can
+				// race a successful response. Preserve every valid claim identity
+				// without opening a fresh tunnel on an exhausted owner.
+				if err := ctx.Err(); err != nil {
+					runErr = errors.Join(runErr, err)
+					stopAdmission(urlSchedulerCanceled)
+				} else if deadline, bounded := ctx.Deadline(); bounded &&
+					time.Until(deadline) < providerUrlProbeRunBudget(args)+3*providerEgressControlPlaneTimeout {
+					stopAdmission(urlSchedulerReserve)
+				}
+				var unstarted []ingest.DueProvider
 				for _, provider := range due {
 					if provider.ClientId == "" || active[provider.ClientId] {
 						runErr = errors.Join(runErr, fmt.Errorf("URL probe due response contains an empty or in-flight provider"))
-						admit = false
+						stopAdmission(urlSchedulerInvalidDue)
 						continue
 					}
 					active[provider.ClientId] = true
 					result.UrlDue++
+					if !admit {
+						unstarted = append(unstarted, provider)
+						continue
+					}
+					observation.claim(urlClaimAdmitted, 1)
 					go func() {
 						startedAt := time.Now()
 						turnArgs := *args
@@ -148,12 +191,83 @@ func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *P
 						completed <- completedTurn{clientId: provider.ClientId, outcome: outcome}
 					}()
 				}
+				if len(unstarted) > 0 {
+					observation.enter(urlSchedulerUnstarted)
+					runErr = errors.Join(runErr, self.completeUnstartedUrlClaims(ctx, unstarted, observation))
+					for _, provider := range unstarted {
+						delete(active, provider.ClientId)
+					}
+					result.Backlog = true
+				}
 			}
 		}
 		if len(active) == 0 {
+			if admit {
+				observation.stopAdmission(urlSchedulerEmpty)
+			}
 			break
+		}
+		if admit {
+			observation.enter(urlSchedulerWait)
+		} else {
+			observation.enter(urlSchedulerDrain)
 		}
 		collect(<-completed)
 	}
 	return result, runErr
+}
+
+// A returned durable claim remains owned even when no URL turn may start.
+// Completion records only local failure, with no quality, quota or retry-pacing
+// verdict. The original task deadline still bounds this joined publication.
+// A failed acknowledgment is explicit; the existing durable claim expiry is
+// the recovery authority, never an invented successful completion.
+func (self *providerEgressProbePass) completeUnstartedUrlClaims(ctx context.Context, due []ingest.DueProvider, observation *providerUrlProbeSchedulerOwner) error {
+	observation.claim(urlClaimUnstarted, len(due))
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), providerEgressControlPlaneTimeout)
+	defer cancel()
+	if deadline, bounded := ctx.Deadline(); bounded {
+		var cancelDeadline context.CancelFunc
+		releaseCtx, cancelDeadline = context.WithDeadline(releaseCtx, deadline)
+		defer cancelDeadline()
+	}
+	completed := make(chan error, len(due))
+	for _, provider := range due {
+		go func() {
+			var err error
+			defer func() {
+				// The country-label lookup can raise a datastore error. This
+				// owned cleanup still owes the scheduler a terminal result.
+				if recovered := recover(); recovered != nil {
+					if cause, ok := recovered.(error); ok {
+						err = fmt.Errorf("URL claim completion failed: %w", cause)
+					} else {
+						err = fmt.Errorf("URL claim completion failed with a non-error panic")
+					}
+				}
+				completed <- err
+			}()
+			if err = releaseCtx.Err(); err != nil {
+				return
+			}
+			if self.fullSink == nil || provider.ClaimOrdinal <= 0 {
+				err = qualityprobe.ErrUrlProbeCompletionUnsupported
+			} else {
+				err = self.fullSink.ReportUrlProbeCompletion(releaseCtx, qualityprobe.UrlProbeCompletion{
+					ClientId: provider.ClientId, ClaimOrdinal: provider.ClaimOrdinal,
+					CompletedAt: time.Now().UTC(), ProbeFailure: prober.FailureHealthNotRun, AllowPacing: false,
+				})
+			}
+		}()
+	}
+	var failures error
+	for range due {
+		if err := <-completed; err != nil {
+			observation.claim(urlClaimCompletionFailed, 1)
+			failures = errors.Join(failures, fmt.Errorf("complete unstarted URL claim: %w", err))
+		} else {
+			observation.claim(urlClaimCompletionAcknowledged, 1)
+		}
+	}
+	return failures
 }

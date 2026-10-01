@@ -64,6 +64,9 @@ func TestNativePublisherSeparatesGateCountsFromOnlineUnion(t *testing.T) {
 		if count := census.Buckets["online"]; count.Providers != 3 || count.Denominators["zero"] != 1 || count.Denominators["one"] != 2 {
 			t.Fatalf("online census summed overlapping targets or invented evidence: %+v", count)
 		}
+		if ratio := census.EgressRatio; ratio == nil || ratio.UnavailableReason != "" || *ratio.PublicOnline != (ClientScoreNativeEgressRatioCount{Providers: 3, Observed: 2, Passed: 1, Failed: 1, NoEvidence: 1}) || *ratio.SourceMap != (ClientScoreNativeEgressRatioCount{Providers: 2, Observed: 2, Passed: 1, Failed: 1}) {
+			t.Fatalf("publisher lost ratio-only source populations: %+v", ratio)
+		}
 		if scores := testing_selectableClientScores(ctx, t, city, false); len(scores) != 3 {
 			t.Fatalf("native publication changed legacy online availability: %d", len(scores))
 		}
@@ -86,7 +89,7 @@ func TestNativeCensusDeduplicatesTargetsAndPreservesDenominators(t *testing.T) {
 	private := nativeTestScore(RankModeQuality, ipFamilyFacetV4Only)
 	private.NetworkOnly = true
 	scores[private.ClientId] = private
-	census := newClientScoreNativeCensus(startedAt, completedAt, health,
+	census := newClientScoreNativeCensus(startedAt, completedAt, startedAt, health,
 		map[server.Id]map[server.Id]*ClientScore{server.NewId(): scores, server.NewId(): scores},
 		map[server.Id]map[server.Id]*ClientScore{server.NewId(): scores})
 	for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
@@ -112,7 +115,7 @@ func TestNativeCensusDistinguishesZeroUnknownAndFreshness(t *testing.T) {
 			t.Fatalf("missing census was not unknown: value=%v err=%v", census, err)
 		}
 		startedAt := server.NowUtc().Add(-time.Hour)
-		census := newClientScoreNativeCensus(startedAt, startedAt.Add(time.Minute), nil)
+		census := newClientScoreNativeCensus(startedAt, startedAt.Add(time.Minute), startedAt, nil)
 		if err := writeClientScoreNativeCensus(ctx, census, time.Hour); err != nil {
 			t.Fatal(err)
 		}

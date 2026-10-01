@@ -482,7 +482,7 @@ func (self *noAckSendTracker) run() {
 			if !ok || !entry.state.CompareAndSwap(0, 1) {
 				self.invalid.Store(true)
 			} else {
-				if observation.Err != nil {
+				if observation.Err != nil && !(observation.RecoveredByOwner && !observation.OwnerTrackingOverflow && observation.Err == clientconnect.ErrNoAckSendNotAdmitted) {
 					self.failureCount.Add(1)
 				}
 				self.completedCount.Add(1)
@@ -559,6 +559,22 @@ func (self *noAckSendTracker) waitThrough(
 // error rather than an apparent modeled packet loss.
 func (self *noAckSendTracker) failures() uint64 {
 	return self.failureCount.Load()
+}
+
+// An invalid observer history can fail a boundary while the workload context
+// is healthy. Keep that evidence distinct from cancellation and avoid wrapping
+// a nil context error into an unreadable failure diagnostic.
+func (self *noAckSendTracker) boundaryError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if self.invalid.Load() {
+		return fmt.Errorf("invalid NoAck observation history: started=%d completed=%d", self.startedCount.Load(), self.completedCount.Load())
+	}
+	if err := self.ctx.Err(); err != nil {
+		return fmt.Errorf("NoAck observer owner stopped: %w", err)
+	}
+	return errors.New("NoAck source boundary unavailable")
 }
 
 // Cancellation stops the owner without ever closing its producer-facing
@@ -3426,8 +3442,8 @@ func fullTunClientSettingsWithFeatures(
 		case perfvarFeatureLaneRule, perfvarFeatureNoLaneRule:
 			target, field = settings.SendBufferSettings, "ReliableLaneProvenRecovery"
 			value = feature == perfvarFeatureLaneRule
-		case perfvarFeatureUdpTransferAck:
-			// Applied to MultiClientSettings at its construction site below.
+		case perfvarFeatureUdpTransferAck, perfvarFeatureUdpTransferNoAck:
+			// Applied to the provider and MultiClient settings together below.
 			continue
 		default:
 			panic(fmt.Sprintf("unknown PERFVAR feature %q", feature))
@@ -3955,6 +3971,9 @@ func tryNewFullTunPathWithTopologyHooks(
 		return nil, err
 	}
 	providerRemoteNatSettings := clientconnect.DefaultRemoteUserNatProviderSettings()
+	if err := applyPerfvarUdpTransferPolicy(providerRemoteNatSettings, resources.Features); err != nil {
+		return nil, err
+	}
 	providerRemoteNatSettings.ReturnSendObserver = providerReturns.observe
 	providerRemoteNat := clientconnect.NewRemoteUserNatProvider(
 		providerClient,
@@ -4149,8 +4168,8 @@ func tryNewFullTunPathWithTopologyHooks(
 	multiClientCtx, multiClientCancel := context.WithCancel(ctx)
 	path.multiClientCancel = multiClientCancel
 	multiClientSettings := fullTunMultiClientSettings(readinessPath)
-	if slices.Contains(resources.Features, perfvarFeatureUdpTransferAck) {
-		multiClientSettings.UdpTransferNoAck = false
+	if err := applyPerfvarUdpTransferPolicy(multiClientSettings, resources.Features); err != nil {
+		return nil, err
 	}
 	multiClient := clientconnect.NewRemoteUserNatMultiClient(
 		multiClientCtx,
@@ -5327,7 +5346,9 @@ func (self *fullTunPath) validateMeasuredPackFailures(
 		packFailures.providerRecoverableFailureCount <
 			packFailureFloor.providerRecoverableFailureCount ||
 		packFailures.providerDatagramFailureCount <
-			packFailureFloor.providerDatagramFailureCount {
+			packFailureFloor.providerDatagramFailureCount ||
+		packFailures.providerRecoverableDatagramFailureCount <
+			packFailureFloor.providerRecoverableDatagramFailureCount {
 		return fmt.Errorf(
 			"Pack failure counters moved backward: start=%+v end=%+v",
 			*packFailureFloor,
@@ -5350,16 +5371,26 @@ func (self *fullTunPath) validateMeasuredPackFailures(
 	providerDatagramFailureCount :=
 		packFailures.providerDatagramFailureCount -
 			packFailureFloor.providerDatagramFailureCount
+	providerRecoverableDatagramFailureCount :=
+		packFailures.providerRecoverableDatagramFailureCount -
+			packFailureFloor.providerRecoverableDatagramFailureCount
+	if providerRecoverableDatagramFailureCount > providerRecoverableFailureCount ||
+		providerRecoverableDatagramFailureCount > providerDatagramFailureCount {
+		return fmt.Errorf("provider Pack failure overlap exceeded a category: start=%+v end=%+v", *packFailureFloor, packFailures)
+	}
 	providerAllowedFailureCount := providerRecoverableFailureCount
 	if allowProviderDatagramFailures {
-		providerAllowedFailureCount += providerDatagramFailureCount
+		// The same owned UDP refusal belongs to both raw categories. Count
+		// their union, never two allowances for one failed Pack attempt.
+		providerAllowedFailureCount += providerDatagramFailureCount - providerRecoverableDatagramFailureCount
 	}
 	if providerFailureCount < providerAllowedFailureCount {
 		return fmt.Errorf(
-			"provider allowed Pack failures exceeded all failures: total=%d recoverable=%d datagram=%d allow-datagram=%t start=%+v end=%+v",
+			"provider allowed Pack failures exceeded all failures: total=%d recoverable=%d datagram=%d overlap=%d allow-datagram=%t start=%+v end=%+v",
 			providerFailureCount,
 			providerRecoverableFailureCount,
 			providerDatagramFailureCount,
+			providerRecoverableDatagramFailureCount,
 			allowProviderDatagramFailures,
 			*packFailureFloor,
 			packFailures,
@@ -5386,13 +5417,14 @@ func (self *fullTunPath) validateMeasuredPackFailures(
 		providerFailureSamples = self.providerPackSends.workloadFailureSnapshot()
 	}
 	return fmt.Errorf(
-		"measured Pack terminal failures device=%d provider=%d device-recovered-admission=%d device-unrecovered=%d provider-recoverable=%d provider-datagram=%d allow-provider-datagram=%t provider-unrecoverable=%d start=%+v end=%+v lifetime-device-samples=%+v lifetime-provider-samples=%+v",
+		"measured Pack terminal failures device=%d provider=%d device-recovered-admission=%d device-unrecovered=%d provider-recoverable=%d provider-datagram=%d provider-overlap=%d allow-provider-datagram=%t provider-unrecoverable=%d start=%+v end=%+v lifetime-device-samples=%+v lifetime-provider-samples=%+v",
 		deviceFailureCount,
 		providerFailureCount,
 		deviceRecoveredAdmissionFailureCount,
 		deviceUnrecoveredFailureCount,
 		providerRecoverableFailureCount,
 		providerDatagramFailureCount,
+		providerRecoverableDatagramFailureCount,
 		allowProviderDatagramFailures,
 		providerUnrecoverableFailureCount,
 		*packFailureFloor,

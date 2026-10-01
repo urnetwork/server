@@ -114,8 +114,10 @@ external blocker is documented with the evidence needed to remove it.
 - Android `goRuntimeBytes` is the allocation surrogate for this campaign.
   Android whole-app PSS is diagnostic and does not prove the iOS Network
   Extension `phys_footprint` or jetsam boundary.
-- The Connect mobile ceiling is absolute: `goRuntimeBytes` must never exceed
-  25,165,824 bytes (24 MiB) in an acceptance sample. Statistical memory
+- The iOS-profile ceiling is absolute: `goRuntimeBytes` must never exceed
+  29,360,128 bytes (28 MiB) in an acceptance sample. Android MEMSTEADY must
+  select and attest `ios-memory-audit-v1`, retaining its 20-MiB admission target
+  and 32-MiB Go soft limit. Ordinary Android 28/40 is not this profile. Statistical memory
   improvement, a low p95, or later reclaim cannot override this gate.
 - Preserve unrelated working-tree changes. Build controls in temporary sibling
   worktrees; do not reset, switch, or clean an operator checkout. Do not pull,
@@ -313,7 +315,7 @@ default minimum practical effect is 5% for performance and 0.5 MiB for
 session-level Go-runtime memory unless the active baseline predeclares a more
 specific product threshold.
 
-The 24-MiB absolute ceiling is evaluated before statistics. Memory statistics
+The iOS-profile 28-MiB absolute ceiling is evaluated before statistics. Memory statistics
 can choose between two passing candidates; they can never make an over-ceiling
 candidate pass.
 
@@ -345,6 +347,22 @@ Hold seeds and scenario inputs fixed. Capture every `[perfvar]` JSON record,
 the command status, stderr, and aggregate. Reject numeric throughput evidence
 from incorrect, queue-refused, or calibration-invalid runs, but retain those
 runs in completion/failure statistics.
+
+The user-authorized `shaped-link-v1` experiment is selected in the runner by
+`simulator_gate: "shaped-link-v1"` (or by
+`CONNECT_PERFVAR_GATE_PROTOCOL=shaped-link-v1` for a direct instrument run).
+It emits schema 15 plus independent, same-process pre/post capacity receipts.
+Follow the exact demand, fidelity, provenance, and per-metric rules in
+[`PERFVAR.md`](PERFVAR.md#optional-separated-shaped-link-gates-schema-15).
+The static 360/72, dynamic 240/48 and clean-LAN 80/16 run/aggregate counts,
+six fresh processes per arm, and five nested repetitions are unchanged.
+Keep the legacy 10% flag and its filtered aggregate. Only independently
+qualified cell-edge latency/stall/wire/memory metrics may survive a
+headroom-only failure; throughput remains unqualified. A partial metric
+comparison cannot satisfy full PERF or promote any historical invalid record.
+Before opting a campaign into this protocol, freeze and record a fresh A/A
+capacity study and compatible workload baseline. Keep raw failures and source
+hashes in the private bundle and add findings to the tests ledger.
 
 Run the canonical static low-bar matrix exactly as defined by `PERFVAR.md`:
 
@@ -429,7 +447,7 @@ correctness failure, an invalid carrier observation, or a regression in either
 direction blocks the app rollout; it may not be averaged into the regular
 current/current static matrix. The record identity distinguishes the synthetic
 4 MiB device pools and current-provider pools from the legacy provider's nil
-pools and fixed receive hold; none are parented under the Android/iOS 24 MiB
+pools and fixed receive hold; none are parented under the Android iOS-profile
 budget or qualify device memory. This models the protocol facts an old provider can
 expose: a fixed transfer window plus no `receive_window_byte_count`,
 ACK-compression, or receiver-delay advertisement. The 1 MiB cell arm is a
@@ -518,13 +536,13 @@ speed until their planned rework has its own compatible baseline.
 Evaluate memory per session and role, not per 15-second sample as independent
 data:
 
-- **25,165,824 bytes (24 MiB) is an absolute `goRuntimeBytes` ceiling. Every clean sample during
+- **29,360,128 bytes (28 MiB) is an absolute iOS-profile `goRuntimeBytes` ceiling. Every clean sample during
   startup, active traffic, burst recovery, and the quiet connected window must
-  be at or below 24 MiB; one sample above the ceiling fails the cell.**
-- Report p50, p95, maximum, time to return below 24 MiB, and counts above 24
+  be at or below 28 MiB; one sample above the ceiling fails the cell.**
+- Report p50, p95, maximum, time to return below 28 MiB, and counts above 24
   and 28 MiB, but no percentile or later reclaim can excuse an over-ceiling
-  sample. The old 28-MiB threshold remains a severity diagnostic, not the
-  acceptance barrier;
+  sample. The 24-MiB count is historical comparison telemetry, not today's
+  acceptance barrier. Preserve previous 24-MiB verdicts; do not requalify old runs;
 - client and provider roles must pass independently;
 - packet roots must stay within the active policy bound, returned-pool storage
   must reconcile, reliable H1 carrier/Pack drops must remain zero, Pack waits
@@ -540,7 +558,7 @@ suggest reclaim; high live heap/goroutines with low pool retention suggests
 flow/topology; low live heap with high runtime suggests stacks, fragmentation,
 or allocator spans. Forced GC or trim is diagnostic, not a steady-memory fix.
 
-If a sample exceeds 24 MiB, preserve the clean run first. Then use a separately
+If a sample exceeds 28 MiB, preserve the clean run first. Then use a separately
 stamped `urnetworkMemoryProfileRateBytes=65536` build, take before/peak/after
 snapshots and a private heap profile, and reproduce the same bounded load in a
 simulator or host test. Never compare the profiled run's peak or forced-GC
@@ -549,7 +567,7 @@ recovery with the clean acceptance distribution.
 ## Regression deep dive and repair loop
 
 For every `REGRESSION`, `MIXED`, hard failure, corruption, timeout, video stall,
-or >24-MiB sample:
+or >28-MiB iOS-profile sample:
 
 1. Freeze the first failing artifacts and add a `diagnosing` entry to the tests
    ledger. Reproduce with the exact identity at least once; a disappearing
