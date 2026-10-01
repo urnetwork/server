@@ -1,0 +1,2610 @@
+// Connect transports terminate client H1 WebSocket and H3 QUIC connections,
+// then expose each connection as one route to its resident client.
+package connect
+
+import (
+	"bufio"
+	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	// "os"
+	"strings"
+	"time"
+	// "runtime/debug"
+	"encoding/binary"
+	mathrand "math/rand"
+	"sort"
+	"strconv"
+	"sync"
+
+	"github.com/gorilla/websocket"
+	quic "github.com/quic-go/quic-go"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/urnetwork/glog/v2026"
+
+	"github.com/urnetwork/connect/v2026"
+	"github.com/urnetwork/connect/v2026/protocol"
+	"github.com/urnetwork/server/v2026"
+	// "github.com/urnetwork/server/v2026/controller"
+	"github.com/urnetwork/server/v2026/jwt"
+	"github.com/urnetwork/server/v2026/model"
+	"github.com/urnetwork/server/v2026/session"
+)
+
+// each client connection is a transport for the resident client
+// there can be multiple simultaneous client connections from the same client instance
+// all connections from the same client will eventually terminate at the same resident,
+// where each connection will be a `connect.Transport` and traffic will be distributed across the transports
+
+var connectedGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "connected_clients",
+		Help:      "Number of connected clients",
+	},
+)
+
+var defaultConnectH1PlusStats = &connect.H1PlusStats{}
+
+var h3ListenerUpGauge = prometheus.NewGaugeVec(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "h3_listener_up",
+		Help:      "1 while an enabled QUIC listener is accepting connections, 0 otherwise",
+	},
+	[]string{"transport", "port"},
+)
+
+var h3ListenerRestartsCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "h3_listener_restarts_total",
+		Help:      "Unexpected QUIC listener exits followed by a supervised restart",
+	},
+	[]string{"transport", "port"},
+)
+
+var h3ListenerFailuresCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "h3_listener_failures_total",
+		Help:      "QUIC listener failures by transport and lifecycle stage",
+	},
+	[]string{"transport", "stage"},
+)
+
+var defaultConnectH3DatagramStats = &connect.H3DatagramStats{}
+
+// connectH3DatagramCollector exports the shared candidate-carrier counters
+// without putting Prometheus label lookup or locking on either packet pump.
+type connectH3DatagramCollector struct {
+	stats                 *connect.H3DatagramStats
+	eventDesc             *prometheus.Desc
+	byteDesc              *prometheus.Desc
+	queueMessageDesc      *prometheus.Desc
+	queueByteDesc         *prometheus.Desc
+	queueWaitDurationDesc *prometheus.Desc
+}
+
+// Creates the process-wide collector used by default ConnectHandler settings.
+func newConnectH3DatagramCollector(stats *connect.H3DatagramStats) *connectH3DatagramCollector {
+	return &connectH3DatagramCollector{
+		stats: stats,
+		eventDesc: prometheus.NewDesc(
+			"urnetwork_connect_h3_datagram_events_total",
+			"H3 DATAGRAM carrier events after authenticated capability negotiation",
+			[]string{"event"},
+			nil,
+		),
+		byteDesc: prometheus.NewDesc(
+			"urnetwork_connect_h3_datagram_bytes_total",
+			"H3 DATAGRAM envelope bytes passed to or received from quic-go",
+			[]string{"direction"},
+			nil,
+		),
+		queueMessageDesc: prometheus.NewDesc(
+			"urnetwork_connect_h3_hybrid_stream_queue_messages",
+			"Current and lifetime-maximum messages retained by bounded H3 hybrid stream handoffs",
+			[]string{"state"},
+			nil,
+		),
+		queueByteDesc: prometheus.NewDesc(
+			"urnetwork_connect_h3_hybrid_stream_queue_bytes",
+			"Current and lifetime-maximum backing bytes retained by bounded H3 hybrid stream handoffs",
+			[]string{"state"},
+			nil,
+		),
+		queueWaitDurationDesc: prometheus.NewDesc(
+			"urnetwork_connect_h3_hybrid_stream_queue_wait_seconds_total",
+			"Total time H3 lane dispatchers waited for bounded hybrid stream handoff capacity",
+			nil,
+			nil,
+		),
+	}
+}
+
+// Describe publishes the two bounded-label metric families.
+func (self *connectH3DatagramCollector) Describe(descriptions chan<- *prometheus.Desc) {
+	descriptions <- self.eventDesc
+	descriptions <- self.byteDesc
+	descriptions <- self.queueMessageDesc
+	descriptions <- self.queueByteDesc
+	descriptions <- self.queueWaitDurationDesc
+}
+
+// Collect snapshots atomics once and emits every closed-set event label.
+func (self *connectH3DatagramCollector) Collect(metrics chan<- prometheus.Metric) {
+	snapshot := self.stats.Snapshot()
+	events := []struct {
+		label string
+		value uint64
+	}{
+		{label: "sent_message", value: snapshot.SentMessageCount},
+		{label: "sent_fragment", value: snapshot.SentFragmentCount},
+		{label: "send_error", value: snapshot.SendErrorCount},
+		{label: "received_message", value: snapshot.ReceivedMessageCount},
+		{label: "received_fragment", value: snapshot.ReceivedFragmentCount},
+		{label: "duplicate_fragment", value: snapshot.DuplicateFragmentCount},
+		{label: "malformed_fragment", value: snapshot.MalformedFragmentCount},
+		{label: "checksum_failure", value: snapshot.ChecksumFailureCount},
+		{label: "reassembly_timeout", value: snapshot.ReassemblyTimeoutCount},
+		{label: "reassembly_limit", value: snapshot.ReassemblyLimitCount},
+		{label: "stream_sent_message", value: snapshot.StreamSentMessageCount},
+		{label: "stream_received_message", value: snapshot.StreamReceivedMessageCount},
+		{label: "hybrid_stream_queue_wait", value: snapshot.HybridStreamQueueWaitCount},
+		{label: "hybrid_stream_queue_oversize", value: snapshot.HybridStreamQueueOversizeCount},
+	}
+	for _, event := range events {
+		metrics <- prometheus.MustNewConstMetric(
+			self.eventDesc,
+			prometheus.CounterValue,
+			float64(event.value),
+			event.label,
+		)
+	}
+	metrics <- prometheus.MustNewConstMetric(
+		self.byteDesc,
+		prometheus.CounterValue,
+		float64(snapshot.SentByteCount),
+		"sent",
+	)
+	metrics <- prometheus.MustNewConstMetric(
+		self.byteDesc,
+		prometheus.CounterValue,
+		float64(snapshot.ReceivedByteCount),
+		"received",
+	)
+	metrics <- prometheus.MustNewConstMetric(
+		self.byteDesc,
+		prometheus.CounterValue,
+		float64(snapshot.StreamSentMessageByteCount),
+		"stream_sent",
+	)
+	metrics <- prometheus.MustNewConstMetric(
+		self.byteDesc,
+		prometheus.CounterValue,
+		float64(snapshot.StreamReceivedMessageByteCount),
+		"stream_received",
+	)
+	for _, queue := range []struct {
+		description *prometheus.Desc
+		current     uint64
+		maximum     uint64
+	}{
+		{
+			description: self.queueMessageDesc,
+			current:     snapshot.HybridStreamQueueCurrentMessageCount,
+			maximum:     snapshot.HybridStreamQueueMaximumMessageCount,
+		},
+		{
+			description: self.queueByteDesc,
+			current:     snapshot.HybridStreamQueueCurrentByteCount,
+			maximum:     snapshot.HybridStreamQueueMaximumByteCount,
+		},
+	} {
+		metrics <- prometheus.MustNewConstMetric(
+			queue.description,
+			prometheus.GaugeValue,
+			float64(queue.current),
+			"current",
+		)
+		metrics <- prometheus.MustNewConstMetric(
+			queue.description,
+			prometheus.GaugeValue,
+			float64(queue.maximum),
+			"maximum",
+		)
+	}
+	metrics <- prometheus.MustNewConstMetric(
+		self.queueWaitDurationDesc,
+		prometheus.CounterValue,
+		snapshot.HybridStreamQueueWaitDuration.Seconds(),
+	)
+}
+
+// FIXME without egress verification, we rely on the ingress address to match the egress address
+// FIXME turn this on to solve ipv6 aliasing abuse on the network
+// currently the network only supports v4 egress
+// egress verification and v6 support both need to be addressed in the future
+const AllowOnlyIpv4 = false
+
+const (
+	// Drain more ACK-sized messages without retaining a larger socket buffer.
+	// Payload traffic stops after 12 KiB, so one complete ordinary <=4-KiB H1
+	// data message fits the existing 16-KiB coalescer. A larger handshake
+	// carrier may make the bounded wrapper flush its prefix before the batch
+	// ends. The drain is ready-only: sparse traffic still writes immediately.
+	connectH1WriteBatchMaxMessageCount = 32
+	connectH1WriteBatchDrainByteCount  = 12 * 1024
+	connectH3WriteBatchMaxMessageCount = 16
+	connectH3WriteBatchMaxByteCount    = 64 * 1024
+)
+
+func connectH1WriteBatchCanDrain(messageCount int, messageByteCount int) bool {
+	return messageCount < connectH1WriteBatchMaxMessageCount &&
+		messageByteCount < connectH1WriteBatchDrainByteCount
+}
+
+// Mirrors the client-side pre-publication query. quic-go v0.61.0 cannot queue
+// a 2,048-byte DATAGRAM because its packet buffer is capped at 1,452 bytes, so
+// the returned DatagramTooLargeError safely exposes the current path ceiling
+// without emitting a probe message.
+func initialConnectH3DatagramPathByteCount(
+	configuredMaximum int,
+	send func([]byte) error,
+) int {
+	initialMaximum := min(configuredMaximum, connect.H3InitialDatagramByteCount)
+	var probe [2048]byte
+	err := send(probe[:])
+	var tooLargeErr *quic.DatagramTooLargeError
+	if !errors.As(err, &tooLargeErr) ||
+		int(tooLargeErr.MaxDatagramPayloadSize) <= connect.H3DatagramHeaderByteCount {
+		return initialMaximum
+	}
+	return min(configuredMaximum, int(tooLargeErr.MaxDatagramPayloadSize))
+}
+
+// Narrows Gorilla's writer to the operations shared by production and the
+// deterministic ready-batch ownership tests.
+type connectH1WebSocketWriter interface {
+	SetWriteDeadline(deadline time.Time) error
+	WriteMessage(messageType int, data []byte) error
+}
+
+// Brackets one ready-only byte batch above the connection's TLS boundary.
+type connectH1WriteBatch interface {
+	BeginWriteBatch()
+	AbortWriteBatch()
+	FlushWriteBatch() error
+}
+
+// Returns the batching boundary only when Gorilla retained the connection
+// installed at hijack. The explicit nil check prevents a failed assertion's
+// typed nil pointer from becoming a non-nil interface.
+func connectH1WriteBatchForConn(conn net.Conn) connectH1WriteBatch {
+	writeBatchConn, ok := conn.(*connect.WebSocketWriteBatchConn)
+	if !ok || writeBatchConn == nil {
+		return nil
+	}
+	return writeBatchConn
+}
+
+// Preserves the original HTTP response behavior while replacing only the
+// connection returned to Gorilla after the WebSocket hijack.
+type connectH1BatchResponseWriter struct {
+	http.ResponseWriter
+}
+
+// Delegates the hijack and inserts the shared pass-through batching wrapper.
+func (self *connectH1BatchResponseWriter) Hijack() (
+	net.Conn,
+	*bufio.ReadWriter,
+	error,
+) {
+	hijacker, ok := self.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("connect response writer does not support hijacking")
+	}
+	conn, readWriter, err := hijacker.Hijack()
+	if err != nil {
+		return nil, nil, err
+	}
+	return connect.NewWebSocketWriteBatchConn(conn), readWriter, nil
+}
+
+// Writes one user frame immediately, plus a bounded set of frames already
+// queued at the same instant. Every dequeued pooled buffer is returned after
+// the terminal flush; successful accounting is published only after that
+// flush reaches the delegated connection.
+func writeConnectH1UserReadyBatch(
+	ctx context.Context,
+	writer connectH1WebSocketWriter,
+	writeBatch connectH1WriteBatch,
+	receive <-chan []byte,
+	firstMessage []byte,
+	firstOpen bool,
+	writeTimeout time.Duration,
+	onSent func(ByteCount),
+) (open bool, err error) {
+	if !firstOpen {
+		return false, nil
+	}
+
+	var messageStorage [connectH1WriteBatchMaxMessageCount][]byte
+	messageStorage[0] = firstMessage
+	messageCount := 1
+	messageByteCount := len(firstMessage)
+	open = true
+	framedWriter, framed := writer.(interface{ WriteMessages([][]byte) error })
+	if writeBatch != nil || framed {
+	drainReady:
+		for connectH1WriteBatchCanDrain(messageCount, messageByteCount) {
+			select {
+			case <-ctx.Done():
+				open = false
+				break drainReady
+			case message, nextOpen := <-receive:
+				if !nextOpen {
+					open = false
+					break drainReady
+				}
+				messageStorage[messageCount] = message
+				messageCount += 1
+				messageByteCount += len(message)
+			default:
+				break drainReady
+			}
+		}
+	}
+	defer func() {
+		for _, message := range messageStorage[:messageCount] {
+			connect.MessagePoolReturn(message)
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return false, nil
+	default:
+	}
+
+	if err = writer.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
+		return open, err
+	}
+	if framed {
+		var payloads [connectH1WriteBatchMaxMessageCount][]byte
+		n := 0
+		for _, message := range messageStorage[:messageCount] {
+			if len(message) > 16 {
+				payloads[n] = message
+				n++
+			}
+		}
+		if err = framedWriter.WriteMessages(payloads[:n]); err != nil {
+			return open, err
+		}
+		if onSent != nil {
+			for _, message := range payloads[:n] {
+				onSent(ByteCount(len(message)))
+			}
+		}
+		return open, nil
+	}
+	if writeBatch != nil {
+		writeBatch.BeginWriteBatch()
+	}
+
+	var sentByteCounts [connectH1WriteBatchMaxMessageCount]ByteCount
+	sentCount := 0
+	for _, message := range messageStorage[:messageCount] {
+		if len(message) <= 16 {
+			glog.Infof("[rts]send message must be >16 bytes (%d)\n", len(message))
+			continue
+		}
+		if err = writer.WriteMessage(websocket.BinaryMessage, message); err != nil {
+			if writeBatch != nil {
+				writeBatch.AbortWriteBatch()
+			}
+			return open, err
+		}
+		sentByteCounts[sentCount] = ByteCount(len(message))
+		sentCount += 1
+	}
+	if writeBatch != nil {
+		if err = writeBatch.FlushWriteBatch(); err != nil {
+			writeBatch.AbortWriteBatch()
+			return open, err
+		}
+	}
+	if onSent != nil {
+		for _, sentByteCount := range sentByteCounts[:sentCount] {
+			onSent(sentByteCount)
+		}
+	}
+	return open, nil
+}
+
+// var serviceTransitionTime = time.Now().Add(30 * time.Second)
+
+func init() {
+	prometheus.MustRegister(server.NewH1PlusCollector("connect", connect.H1FramerProtocol, defaultConnectH1PlusStats))
+	prometheus.MustRegister(connectedGauge)
+	prometheus.MustRegister(h3ListenerUpGauge)
+	prometheus.MustRegister(h3ListenerRestartsCounter)
+	prometheus.MustRegister(h3ListenerFailuresCounter)
+	prometheus.MustRegister(newConnectH3DatagramCollector(defaultConnectH3DatagramStats))
+}
+
+func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
+	// platformTransportSettings := connect.DefaultPlatformTransportSettings()
+	return &ConnectHandlerSettings{
+		EnableH1Plus: true,
+		H1PlusStats:  defaultConnectH1PlusStats,
+		// use the min value from older version of the client
+		// `platformTransportSettings.PingTimeout`
+		MinPingTimeout:   1 * time.Second,
+		MaxPingTimeout:   15 * time.Second,
+		PingTrackerCount: 4,
+		WriteTimeout:     15 * time.Second,
+		ReadTimeout:      30 * time.Second,
+
+		// a single exchange message size is encoded as an `int32`
+		// because message must be serialized/deserialized from memory,
+		// there is a global limit on the size per message
+		// messages above this size will be ignored from clients and the exchange
+		// MaximumExchangeMessageByteCount: ByteCount(4096),
+
+		QuicConnectTimeout:   15 * time.Second,
+		QuicHandshakeTimeout: 15 * time.Second,
+
+		ListenH3Port: 443,
+		// Clients continue to use public UDP/53. New LBs forward it to private
+		// UDP/4053. Keep 8053 only when WARP_PORTS explicitly allocates it so a
+		// rolling Connect-first / LB-second migration has no compatibility hole.
+		ListenDnsPort:               4053,
+		ListenDnsCompatibilityPorts: []int{8053},
+		ListenerRestartInitialDelay: 100 * time.Millisecond,
+		ListenerRestartMaxDelay:     5 * time.Second,
+		EnableProxyProtocol:         true,
+		// Floor the framer at the connect runtime minimum message length: every
+		// framer on the resident exchange flow must admit the measured 4,950-byte
+		// handshake carrier. Also backs the websocket read limit.
+		FramerSettings:       connect.DefaultFramerSettings(int(connect.DefaultClientSettings().MinimumMessageLenLimit())),
+		TransportTlsSettings: server.DefaultTransportTlsSettings(),
+		EnableH3Datagrams:    true,
+		H3DatagramSettings:   connect.DefaultH3DatagramSettings(),
+		H3DatagramStats:      defaultConnectH3DatagramStats,
+
+		ConnectionAnnounceTimeout:   5 * time.Second,
+		ConnectionAnnounceSettings:  *DefaultConnectionAnnounceSettings(),
+		ConnectionRateLimitSettings: *DefaultConnectionRateLimitSettings(),
+
+		// Both windows keep quic-go's behavior until a deployment sets them:
+		// 512 KiB initial and 6 MiB maximum per stream, with no bound at all on
+		// the sum across connections.
+		H3MaxStreamReceiveWindow:          0,
+		H3MaxTotalConnectionReceiveWindow: 0,
+	}
+}
+
+type ConnectHandlerSettings struct {
+	// Accepts the custom H1+ carrier (connect/H1PLUS.md) in addition to
+	// WebSocket. On by default; false opts out, and clients fall back to
+	// WebSocket.
+	EnableH1Plus     bool
+	H1PlusStats      *connect.H1PlusStats
+	MinPingTimeout   time.Duration
+	MaxPingTimeout   time.Duration
+	PingTrackerCount int
+	WriteTimeout     time.Duration
+	ReadTimeout      time.Duration
+	// MaximumExchangeMessageByteCount ByteCount
+	QuicConnectTimeout          time.Duration
+	QuicHandshakeTimeout        time.Duration
+	ListenH3Port                int
+	ListenDnsPort               int
+	ListenDnsCompatibilityPorts []int
+	ListenerRestartInitialDelay time.Duration
+	ListenerRestartMaxDelay     time.Duration
+	EnableProxyProtocol         bool
+	FramerSettings              *connect.FramerSettings
+	TransportTlsSettings        *server.TransportTlsSettings
+	EnableH3Datagrams           bool
+	H3DatagramSettings          *connect.H3DatagramSettings
+	H3DatagramStats             *connect.H3DatagramStats
+	// H3QuicPacketStats enables opt-in packet/frame diagnostics without
+	// retaining qlog events or payloads. Nil keeps tracing disabled.
+	H3QuicPacketStats *connect.H3QuicPacketStats
+	// H3MaxStreamReceiveWindow is the largest stream-level receive window one
+	// connection may be auto-tuned up to. A stream cannot carry more than its
+	// receive window over the round trip, so quic-go's 6 MiB default stops a
+	// 200 ms client upload or provider hop near 31 MB/s whatever the path can
+	// actually carry. Zero keeps quic-go's defaults.
+	H3MaxStreamReceiveWindow uint64
+	// H3MaxTotalConnectionReceiveWindow bounds the connection-level window
+	// growth this listener may grant across all of its live connections. A
+	// receive window is credit, so raising the per-connection maximum costs the
+	// senders rather than this server; what this server holds is the credit a
+	// relayed connection has not consumed yet, and this is the only bound on
+	// the sum of it. Zero grants every increase, which is what quic-go does
+	// with no callback at all.
+	H3MaxTotalConnectionReceiveWindow uint64
+	ConnectionAnnounceTimeout         time.Duration
+	// per-connection latency/speed test schedule.
+	// nil selects a default based on the transport version.
+	ConnectionTestConfig *TestConfig
+	ConnectionAnnounceSettings
+	ConnectionRateLimitSettings
+	// Tests replace only the configuration loader so initialization failure can
+	// be held before any listener goroutine exists.
+	transportTlsLoader func(*server.TransportTlsSettings) (*server.TransportTls, error)
+}
+
+// Keeps server-resident Transfer recovery symmetric with the client H3 path.
+func connectH3TransferCarrierProperties(
+	useH3Datagrams bool,
+	settings *connect.H3DatagramSettings,
+	maxDatagramByteCount int,
+) connect.TransferCarrierProperties {
+	properties := connect.TransferCarrierProperties{
+		Unreliable:              useH3Datagrams,
+		UnreliableFlowIsolation: useH3Datagrams,
+		UnreliableFlowReserve:   useH3Datagrams,
+	}
+	if useH3Datagrams {
+		properties.UnreliableMaxMessageByteCount =
+			connect.H3DatagramTransferFrameByteLimit(settings, maxDatagramByteCount)
+	}
+	return properties
+}
+
+// Joins all per-connection workers before their handler releases shared state.
+type connectHandlerWorkers struct {
+	workers sync.WaitGroup
+}
+
+// Starts one owned per-connection worker.
+func (self *connectHandlerWorkers) start(run func()) {
+	self.workers.Add(1)
+	go server.HandleError(func() {
+		defer self.workers.Done()
+		run()
+	})
+}
+
+// Waits until every started worker has returned its local ownership.
+func (self *connectHandlerWorkers) wait() {
+	self.workers.Wait()
+}
+
+// Stops H1 connection resources before joining every worker that can retain a
+// dequeued resident message.
+func finishH1ConnectHandlerWorkers(workers *connectHandlerWorkers, stop func()) {
+	stop()
+	workers.wait()
+}
+
+// Stops H3 stream resources before joining the writer's pending batch owner
+// and every other per-stream worker.
+func finishH3ConnectHandlerWorkers(workers *connectHandlerWorkers, stop func()) {
+	stop()
+	workers.wait()
+}
+
+// Joins final connection registration cleanup before handler idle can expose
+// the model and database as safe to tear down.
+func finishConnectionAnnounce(announce *ConnectionAnnounce) {
+	announce.CloseAndWait()
+}
+
+// connectQuicWindowBudget bounds the connection-level receive window growth one
+// listener grants across all of its live connections.
+//
+// quic-go hands each connection its initial window directly and routes every
+// later increase through AllowConnectionWindowIncrease, so counting what the
+// callback admits bounds all of the growth above that per-connection baseline.
+// A nil budget is the inert default: no callback is installed and quic-go
+// grants every increase, as it does today.
+type connectQuicWindowBudget struct {
+	maximum uint64
+
+	lock    sync.Mutex
+	granted map[*quic.Conn]uint64
+	total   uint64
+}
+
+// Returns nil when no aggregate is configured.
+func newConnectQuicWindowBudget(maximum uint64) *connectQuicWindowBudget {
+	if maximum == 0 {
+		return nil
+	}
+	return &connectQuicWindowBudget{
+		maximum: maximum,
+		granted: map[*quic.Conn]uint64{},
+	}
+}
+
+// Admits one attempted window increase, charging it to the connection that
+// asked. Refusing costs the connection nothing but the increase: quic-go keeps
+// the window it already has.
+func (self *connectQuicWindowBudget) grant(conn *quic.Conn, delta uint64) bool {
+	if self == nil {
+		return true
+	}
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	if self.maximum-self.total < delta {
+		return false
+	}
+	self.total += delta
+	self.granted[conn] += delta
+	return true
+}
+
+// Returns everything one connection was granted. The caller runs this after the
+// connection is closed, so no further increase can be charged to it.
+func (self *connectQuicWindowBudget) release(conn *quic.Conn) {
+	if self == nil {
+		return
+	}
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	self.total -= self.granted[conn]
+	delete(self.granted, conn)
+}
+
+// The growth currently granted across all live connections.
+func (self *connectQuicWindowBudget) grantedByteCount() uint64 {
+	if self == nil {
+		return 0
+	}
+	self.lock.Lock()
+	defer self.lock.Unlock()
+	return self.total
+}
+
+// newConnectQuicConfig keeps the server half of H3 aligned with the client's
+// conservative startup packet and enabled DPLPMTUD behavior.
+func newConnectQuicConfig(
+	settings *ConnectHandlerSettings,
+	budget *connectQuicWindowBudget,
+) *quic.Config {
+	config := &quic.Config{
+		HandshakeIdleTimeout: settings.QuicConnectTimeout + settings.QuicHandshakeTimeout,
+		MaxIdleTimeout:       settings.MaxPingTimeout * 4,
+		// Keep hybrid liveness independent from the application writer. That
+		// writer can block behind quic-go's bounded DATAGRAM queue and must not
+		// starve the only connection-level probe on a constrained uplink.
+		KeepAlivePeriod:   settings.MaxPingTimeout,
+		Allow0RTT:         true,
+		InitialPacketSize: connect.H3InitialPacketByteCount,
+		EnableDatagrams:   settings.EnableH3Datagrams,
+	}
+	// One stream carries the connection, so the stream window is what bounds
+	// its rate, and the connection window has to stay above it or it becomes
+	// the binding limit instead. quic-go's own ratio between the two is 3/2.
+	//
+	// The initial windows are deliberately left alone. A new connection is not
+	// handed the maximum; it earns the way up through auto-tuning only while it
+	// keeps consuming, which is what keeps the cost of a high ceiling off the
+	// connections that never use it.
+	if 0 < settings.H3MaxStreamReceiveWindow {
+		config.MaxStreamReceiveWindow = settings.H3MaxStreamReceiveWindow
+		config.MaxConnectionReceiveWindow = settings.H3MaxStreamReceiveWindow * 3 / 2
+	}
+	if budget != nil {
+		config.AllowConnectionWindowIncrease = budget.grant
+	}
+	if settings.H3QuicPacketStats != nil {
+		config.Tracer = settings.H3QuicPacketStats.Tracer
+	}
+	return config
+}
+
+type ConnectHandler struct {
+	ctx       context.Context
+	cancel    context.CancelFunc
+	handlerId server.Id
+	exchange  *Exchange
+	settings  *ConnectHandlerSettings
+
+	transportTls               *server.TransportTls
+	serviceTransitionTime      time.Time
+	h3PacketConn               net.PacketConn
+	dnsPacketConn              net.PacketConn
+	packetEndpoints            []connectPacketEndpoint
+	h3DatagramReassemblyBudget *connect.H3DatagramReassemblyBudget
+	// One aggregate stands behind every front that terminates QUIC for this
+	// handler, including an external listener using NewQuicConfig.
+	quicWindowBudget *connectQuicWindowBudget
+
+	listenerStateLock sync.RWMutex
+	listenerStates    map[connectListenerKey]bool
+	// Optional synchronization hook for deterministic listener lifecycle
+	// tests. It runs after the guarded state transition and must not block.
+	listenerStateObserver func(connectListenerKey, bool)
+
+	activeLock  sync.Mutex
+	activeCount int
+	activeZero  chan struct{}
+	closing     bool
+}
+
+// ConnectHandlerPacketConns contains already-bound packet sockets for the QUIC
+// transports. The handler owns and closes every non-nil socket. Tests and
+// embedded servers use these to retain an OS-assigned port continuously
+// through startup instead of releasing a probe socket before rebinding it.
+type ConnectHandlerPacketConns struct {
+	H3  net.PacketConn
+	Dns net.PacketConn
+}
+
+const (
+	connectListenerTransportH3    = "h3"
+	connectListenerTransportH3Dns = "h3dns"
+)
+
+type connectListenerKey struct {
+	transport string
+	port      int
+}
+
+type connectPacketEndpoint struct {
+	key        connectListenerKey
+	packetConn net.PacketConn
+}
+
+func connectHandlerExplicitPortEnabled(port int) bool {
+	if port <= 0 {
+		return false
+	}
+	hostPorts, err := server.HostPorts()
+	if err != nil {
+		return false
+	}
+	_, ok := hostPorts[port]
+	return ok
+}
+
+func connectHandlerPacketEndpoints(
+	settings *ConnectHandlerSettings,
+	packetConns ConnectHandlerPacketConns,
+) []connectPacketEndpoint {
+	endpoints := []connectPacketEndpoint{}
+	if connectHandlerPacketEndpointEnabled(settings.ListenH3Port, packetConns.H3) {
+		endpoints = append(endpoints, connectPacketEndpoint{
+			key: connectListenerKey{
+				transport: connectListenerTransportH3,
+				port:      settings.ListenH3Port,
+			},
+			packetConn: packetConns.H3,
+		})
+	}
+
+	if connectHandlerPacketEndpointEnabled(settings.ListenDnsPort, packetConns.Dns) {
+		endpoints = append(endpoints, connectPacketEndpoint{
+			key: connectListenerKey{
+				transport: connectListenerTransportH3Dns,
+				port:      settings.ListenDnsPort,
+			},
+			packetConn: packetConns.Dns,
+		})
+	}
+	// Compatibility ports are deliberately enabled only by an explicit Warp
+	// allocation. Local/test servers without WARP_PORTS get one DNS listener,
+	// and removing the old allocation later removes the old listener without a
+	// second server rollout.
+	if 0 < settings.ListenDnsPort {
+		seen := map[int]bool{settings.ListenDnsPort: true}
+		for _, port := range settings.ListenDnsCompatibilityPorts {
+			if seen[port] || !connectHandlerExplicitPortEnabled(port) {
+				continue
+			}
+			seen[port] = true
+			endpoints = append(endpoints, connectPacketEndpoint{
+				key: connectListenerKey{
+					transport: connectListenerTransportH3Dns,
+					port:      port,
+				},
+			})
+		}
+	}
+	return endpoints
+}
+
+func NewConnectHandlerWithDefaults(ctx context.Context, handlerId server.Id, exchange *Exchange) *ConnectHandler {
+	return NewConnectHandler(ctx, handlerId, exchange, DefaultConnectHandlerSettings())
+}
+
+func NewConnectHandler(ctx context.Context, handlerId server.Id, exchange *Exchange, settings *ConnectHandlerSettings) *ConnectHandler {
+	return NewConnectHandlerWithPacketConns(
+		ctx,
+		handlerId,
+		exchange,
+		settings,
+		ConnectHandlerPacketConns{},
+	)
+}
+
+func NewConnectHandlerWithPacketConns(
+	ctx context.Context,
+	handlerId server.Id,
+	exchange *Exchange,
+	settings *ConnectHandlerSettings,
+	packetConns ConnectHandlerPacketConns,
+) *ConnectHandler {
+	handler, err := newConnectHandlerWithPacketConns(ctx, handlerId, exchange, settings, packetConns)
+	if err != nil {
+		panic(err)
+	}
+	return handler
+}
+
+// newConnectHandlerWithPacketConns is the checked construction path used by
+// process startup. TLS identity must exist before listener supervision begins:
+// an empty fallback loader can bind UDP and report ready while rejecting every
+// ClientHello with TLS internal_error.
+func newConnectHandlerWithPacketConns(
+	ctx context.Context,
+	handlerId server.Id,
+	exchange *Exchange,
+	settings *ConnectHandlerSettings,
+	packetConns ConnectHandlerPacketConns,
+) (*ConnectHandler, error) {
+	cancelCtx, cancel := context.WithCancel(ctx)
+	packetEndpoints := connectHandlerPacketEndpoints(settings, packetConns)
+	activeZero := make(chan struct{})
+	activeCount := len(packetEndpoints)
+	if activeCount == 0 {
+		close(activeZero)
+	}
+	listenerStates := make(map[connectListenerKey]bool, len(packetEndpoints))
+	for _, endpoint := range packetEndpoints {
+		listenerStates[endpoint.key] = false
+		h3ListenerUpGauge.WithLabelValues(
+			endpoint.key.transport,
+			strconv.Itoa(endpoint.key.port),
+		).Set(0)
+	}
+
+	transportTlsLoader := settings.transportTlsLoader
+	if transportTlsLoader == nil {
+		transportTlsLoader = server.NewTransportTlsFromConfig
+	}
+	transportTls, err := transportTlsLoader(settings.TransportTlsSettings)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("initialize Connect transport TLS: %w", err)
+	}
+	h3DatagramSettings := settings.H3DatagramSettings
+	if h3DatagramSettings == nil {
+		h3DatagramSettings = connect.DefaultH3DatagramSettings()
+	}
+	if settingsErr := h3DatagramSettings.Validate(); settingsErr != nil {
+		panic(settingsErr)
+	}
+	settings.H3DatagramSettings = h3DatagramSettings
+	if settings.H3DatagramStats == nil {
+		settings.H3DatagramStats = &connect.H3DatagramStats{}
+	}
+
+	// the announce registers the peer with the SAME ttl the resident
+	// heartbeat refreshes it (ExchangeResidentTtl); disconnect detection
+	// relies on the entry expiring at that cadence once heartbeats stop, so a
+	// larger registration ttl would delay disconnect by its full duration.
+	// Derive it from the exchange so the two can never drift.
+	settings.ConnectionAnnounceSettings.PeerRegisterTtl = exchange.settings.ExchangeResidentTtl
+	// The exchange flag is the single network-peers switch: propagate it into the
+	// announce settings so enabling peers in one place gates both the announce-time
+	// registration and the exchange-side listener/heartbeat/teardown.
+	settings.ConnectionAnnounceSettings.EnableNetworkPeers = exchange.settings.EnableNetworkPeers
+	// The exchange flag is the single drain-excuse switch: the exchange side
+	// writes the markers on drain, the announce side consumes them.
+	settings.ConnectionAnnounceSettings.EnableDrainExcuse = exchange.settings.EnableDrainExcuse
+
+	h := &ConnectHandler{
+		ctx:                   cancelCtx,
+		cancel:                cancel,
+		handlerId:             handlerId,
+		exchange:              exchange,
+		settings:              settings,
+		transportTls:          transportTls,
+		serviceTransitionTime: time.Now().Add(2 * exchange.settings.DrainAllTimeout),
+		h3PacketConn:          packetConns.H3,
+		dnsPacketConn:         packetConns.Dns,
+		packetEndpoints:       packetEndpoints,
+		listenerStates:        listenerStates,
+		h3DatagramReassemblyBudget: connect.NewH3DatagramReassemblyBudget(
+			h3DatagramSettings.ProcessReassemblyByteCount,
+		),
+		quicWindowBudget: newConnectQuicWindowBudget(
+			settings.H3MaxTotalConnectionReceiveWindow,
+		),
+		activeCount: activeCount,
+		activeZero:  activeZero,
+	}
+
+	go server.HandleError(h.run, cancel)
+
+	return h, nil
+}
+
+func (self *ConnectHandler) run() {
+	defer self.cancel()
+	defer self.markClosing()
+
+	for _, endpoint := range self.packetEndpoints {
+		endpoint := endpoint
+		go func() {
+			defer self.endHandle()
+			self.superviseQuicListener(endpoint)
+		}()
+	}
+
+	select {
+	case <-self.ctx.Done():
+	}
+}
+
+type connectListenerError struct {
+	stage string
+	err   error
+}
+
+func (self *connectListenerError) Error() string {
+	return fmt.Sprintf("%s: %s", self.stage, self.err)
+}
+
+func (self *connectListenerError) Unwrap() error {
+	return self.err
+}
+
+func runConnectListener(run func() error) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = &connectListenerError{
+				stage: "panic",
+				err:   fmt.Errorf("%v", recovered),
+			}
+		}
+	}()
+	return run()
+}
+
+func (self *ConnectHandler) setListenerUp(key connectListenerKey, up bool) {
+	self.listenerStateLock.Lock()
+	if _, enabled := self.listenerStates[key]; enabled {
+		self.listenerStates[key] = up
+	}
+	self.listenerStateLock.Unlock()
+
+	value := float64(0)
+	if up {
+		value = 1
+	}
+	h3ListenerUpGauge.WithLabelValues(key.transport, strconv.Itoa(key.port)).Set(value)
+	if self.listenerStateObserver != nil {
+		self.listenerStateObserver(key, up)
+	}
+}
+
+// ListenerReadyUdpPorts reports the dynamic state and logical UDP ports of
+// every listener enabled by the current WARP_PORTS allocation. The explicit
+// port list lets an LB prove that a newly forwarded service port (for example
+// 4053) exists, instead of accepting readiness from a stale unit that only
+// allocated an older compatibility port.
+func (self *ConnectHandler) ListenerReadyUdpPorts() ([]int, error) {
+	self.listenerStateLock.RLock()
+	down := make([]string, 0, len(self.listenerStates))
+	ports := make([]int, 0, len(self.listenerStates))
+	for key, up := range self.listenerStates {
+		if !up {
+			down = append(down, fmt.Sprintf("%s/%d", key.transport, key.port))
+		} else {
+			ports = append(ports, key.port)
+		}
+	}
+	self.listenerStateLock.RUnlock()
+	if len(down) == 0 {
+		sort.Ints(ports)
+		return ports, nil
+	}
+	sort.Strings(down)
+	return nil, fmt.Errorf("QUIC listener down: %s", strings.Join(down, ", "))
+}
+
+// ListenerReady is the allocation-wide readiness predicate used by local
+// callers that don't need the port capability list.
+func (self *ConnectHandler) ListenerReady() error {
+	_, err := self.ListenerReadyUdpPorts()
+	return err
+}
+
+func (self *ConnectHandler) superviseQuicListener(endpoint connectPacketEndpoint) {
+	delay := self.settings.ListenerRestartInitialDelay
+	if delay <= 0 {
+		delay = 100 * time.Millisecond
+	}
+	maxDelay := self.settings.ListenerRestartMaxDelay
+	if maxDelay < delay {
+		maxDelay = delay
+	}
+	portLabel := strconv.Itoa(endpoint.key.port)
+
+	for {
+		err := runConnectListener(func() error {
+			switch endpoint.key.transport {
+			case connectListenerTransportH3:
+				return self.listenH3(endpoint.key, endpoint.packetConn)
+			case connectListenerTransportH3Dns:
+				return self.listenH3Dns(endpoint.key, endpoint.packetConn)
+			default:
+				return &connectListenerError{
+					stage: "configure",
+					err:   fmt.Errorf("unknown transport %q", endpoint.key.transport),
+				}
+			}
+		})
+		self.setListenerUp(endpoint.key, false)
+		if self.ctx.Err() != nil {
+			return
+		}
+
+		stage := "exit"
+		var listenerErr *connectListenerError
+		if errors.As(err, &listenerErr) {
+			stage = listenerErr.stage
+		}
+		if err == nil {
+			err = errors.New("listener exited without an error")
+		}
+		h3ListenerFailuresCounter.WithLabelValues(endpoint.key.transport, stage).Inc()
+		h3ListenerRestartsCounter.WithLabelValues(endpoint.key.transport, portLabel).Inc()
+		glog.Errorf(
+			"[c]h3 listener %s/%d failed stage=%s err=%s; restart in %s\n",
+			endpoint.key.transport,
+			endpoint.key.port,
+			stage,
+			err,
+			delay,
+		)
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-self.ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if delay < maxDelay/2 {
+			delay *= 2
+		} else {
+			delay = maxDelay
+		}
+	}
+}
+
+func connectHandlerPortEnabled(port int) bool {
+	return 0 < port && server.HasPort(port)
+}
+
+func connectHandlerPacketEndpointEnabled(port int, packetConn net.PacketConn) bool {
+	return packetConn != nil || connectHandlerPortEnabled(port)
+}
+
+func (self *ConnectHandler) beginHandle() bool {
+	self.activeLock.Lock()
+	defer self.activeLock.Unlock()
+
+	if self.closing || self.ctx.Err() != nil {
+		return false
+	}
+	if self.activeCount == 0 {
+		self.activeZero = make(chan struct{})
+	}
+	self.activeCount += 1
+	return true
+}
+
+func (self *ConnectHandler) endHandle() {
+	self.activeLock.Lock()
+	defer self.activeLock.Unlock()
+
+	self.activeCount -= 1
+	if self.activeCount < 0 {
+		panic("connect handler active count became negative")
+	}
+	if self.activeCount == 0 {
+		close(self.activeZero)
+	}
+}
+
+func (self *ConnectHandler) startHandle(do func()) bool {
+	if !self.beginHandle() {
+		return false
+	}
+	go func() {
+		defer self.endHandle()
+		server.HandleError(do)
+	}()
+	return true
+}
+
+func (self *ConnectHandler) markClosing() {
+	self.activeLock.Lock()
+	defer self.activeLock.Unlock()
+	self.closing = true
+}
+
+func (self *ConnectHandler) Close() {
+	self.markClosing()
+	self.cancel()
+}
+
+func (self *ConnectHandler) WaitForIdle(ctx context.Context) bool {
+	self.activeLock.Lock()
+	activeZero := self.activeZero
+	self.activeLock.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-activeZero:
+		return true
+	}
+}
+
+// A rejected H1 deadline must stop the operation before the socket is read.
+func readConnectH1AuthWithDeadline(ws connect.H1MessageConn, timeout time.Duration) (int, []byte, error) {
+	if err := ws.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return 0, nil, err
+	}
+	return ws.ReadMessage()
+}
+
+func echoConnectH1AuthWithDeadline(ws connect.H1MessageConn, timeout time.Duration, authFrameBytes []byte) error {
+	if err := ws.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	return ws.WriteMessage(websocket.BinaryMessage, authFrameBytes)
+}
+
+func readConnectH1PooledWithDeadline(ws connect.H1MessageConn, timeout time.Duration, maximum int64) (int, []byte, error) {
+	if err := ws.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return 0, nil, err
+	}
+	return connect.ReadH1PooledMessage(ws, maximum)
+}
+
+func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
+	if !self.beginHandle() {
+		http.Error(w, "connect handler closed", http.StatusServiceUnavailable)
+		return
+	}
+	defer self.endHandle()
+
+	// a draining service refuses new connections, so a redialing client fails
+	// fast and lands on a sibling service via the lb (CONNECTDRAIN2.md §3.3)
+	if self.exchange.settings.EnableDrainCoordination && self.exchange.IsDraining() {
+		http.Error(w, "draining", http.StatusServiceUnavailable)
+		return
+	}
+
+	handleCtx, handleCancel := context.WithCancel(self.ctx)
+	// handleCancel := func() {
+	// 	defer handleCancel_()
+	// 	var first bool
+	// 	select {
+	// 	case <- handleCtx.Done():
+	// 		first = false
+	// 	default:
+	// 		first = true
+	// 	}
+	// 	if first {
+	// 		glog.Infof("[t]handle cancel: %s\n", server.ErrorJson(r, debug.Stack()))
+	// 	}
+	// }
+	var requestWorkers connectHandlerWorkers
+	defer func() {
+		handleCancel()
+		requestWorkers.wait()
+	}()
+
+	requestWorkers.start(func() {
+		defer handleCancel()
+		select {
+		case <-r.Context().Done():
+		case <-handleCtx.Done():
+		}
+	})
+
+	connectedGauge.Add(1)
+	defer connectedGauge.Sub(1)
+
+	// The fleet-standard resolver accepts only the header overwritten by Warp.
+	// Backend service ports must remain unreachable outside the ingress network.
+	clientAddress, resolveErr := session.ResolveClientAddressFromRequest(r)
+	if resolveErr != nil {
+		// unparseable remote address — keep the raw value; the parse below
+		// decides what to do with it, exactly as before
+		clientAddress = r.RemoteAddr
+	}
+
+	if addrPort, err := server.ParseClientAddress(clientAddress); err != nil {
+		return
+	} else if AllowOnlyIpv4 && !addrPort.Addr().Is4() {
+		return
+	}
+
+	rateLimit, err := NewConnectionRateLimit(
+		handleCtx,
+		clientAddress,
+		self.handlerId,
+		&self.settings.ConnectionRateLimitSettings,
+	)
+	if err != nil {
+		glog.Infof("[t]rate limit init err = %s\n", err)
+		return
+	}
+	err, disconnect := rateLimit.Connect()
+	defer disconnect()
+	if err != nil {
+		if glog.V(1) {
+			glog.Infof("[t]rate limit err = %s\n", err)
+		}
+		return
+	}
+
+	// attemp to parse the auth message from the header
+	// if that fails, expect the auth message as the first message
+	auth, transportVersion := func() (*protocol.Auth, int) {
+		if glog.V(2) {
+			glog.Infof("[c]header metadata: %v\n", server.SafeHttpHeadersForLog(r.Header))
+		}
+
+		headerAuth := r.Header.Get("Authorization")
+		headerAppVersion := r.Header.Get("X-UR-AppVersion")
+		headerInstanceId := r.Header.Get("X-UR-InstanceId")
+		headerTransportVersion := r.Header.Get("X-UR-TransportVersion")
+		headerIpFamily := r.Header.Get(connect.HeaderIpFamily)
+
+		transportVersion := 0
+		if i, err := strconv.Atoi(headerTransportVersion); err == nil {
+			transportVersion = i
+		}
+
+		bearerPrefix := "bearer "
+
+		if len(bearerPrefix) < len(headerAuth) && strings.ToLower(headerAuth[:len(bearerPrefix)]) == bearerPrefix {
+			jwt := headerAuth[len(bearerPrefix):]
+
+			instanceId, err := server.ParseId(headerInstanceId)
+			if err == nil {
+				return &protocol.Auth{
+					ByJwt:      jwt,
+					InstanceId: instanceId.Bytes(),
+					AppVersion: headerAppVersion,
+					IpFamily:   ipFamilyIntentFromHeader(headerIpFamily),
+				}, transportVersion
+			} else {
+				glog.Infof("[c]Bad header X-UR-InstanceId: %s\n", headerInstanceId)
+			}
+		}
+
+		return nil, transportVersion
+	}()
+
+	custom := connect.IsFramedUpgrade(r, connect.H1FramerProtocol)
+	upgradeStart := time.Now()
+	// Transfer Close ownership only after construction succeeds: a nil
+	// concrete pointer assigned to this interface would pass its nil check.
+	var ws connect.H1MessageConn
+	defer func() {
+		if ws != nil {
+			ws.Close()
+		}
+	}()
+	if custom {
+		if !self.settings.EnableH1Plus || !connect.H1PlusAvailable() {
+			http.Error(w, "upgrade unavailable", http.StatusUpgradeRequired)
+			return
+		}
+		if err := connect.ValidateFramedUpgradeRequest(r, connect.H1FramerProtocol); err != nil {
+			http.Error(w, "invalid upgrade", http.StatusBadRequest)
+			return
+		}
+		if auth == nil {
+			connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), &connect.HTTPUpgradeError{StatusCode: 401, Reason: "authorization", Terminal: true})
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	} else {
+		upgrader := websocket.Upgrader{
+			ReadBufferSize:  4 * 1024,
+			WriteBufferSize: 4 * 1024,
+		}
+
+		batchResponseWriter := &connectH1BatchResponseWriter{ResponseWriter: w}
+		websocketConn, upgradeErr := upgrader.Upgrade(batchResponseWriter, r, nil)
+		if upgradeErr != nil {
+			return
+		}
+		ws = websocketConn
+
+		// enforce the message size limit on messages in
+		// +4 for the framer's length header (the websocket carries the framed message).
+		ws.SetReadLimit(int64(self.settings.FramerSettings.MaxMessageLen + 4))
+
+		if auth == nil {
+			messageType, authFrameBytes, err := readConnectH1AuthWithDeadline(ws, self.settings.ReadTimeout)
+			if err != nil {
+				// server.Logger("TIMEOUT HA\n")
+				return
+			}
+			if messageType != websocket.BinaryMessage {
+				return
+			}
+
+			message, err := connect.DecodeFrame(authFrameBytes)
+			if err != nil {
+				return
+			}
+			var ok bool
+			auth, ok = message.(*protocol.Auth)
+			if !ok {
+				return
+			}
+
+			// echo the auth message on successful auth
+			err = echoConnectH1AuthWithDeadline(ws, self.settings.WriteTimeout, authFrameBytes)
+			if err != nil {
+				// server.Logger("TIMEOUT HC\n")
+				return
+			}
+		}
+	}
+	rejectCustomAuth := func(status int) {
+		if custom {
+			connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), &connect.HTTPUpgradeError{StatusCode: status, Reason: "authorization", Terminal: true})
+			http.Error(w, "unauthorized", status)
+		}
+	}
+
+	// auth failures are client-driven and unbounded in rate, so they are
+	// counted in the jwt package (urnetwork_auth_jwt_rejections_total) rather
+	// than logged per occurrence; the detail is at V(1)
+	byJwt, err := jwt.ParseByJwtForAudience(handleCtx, auth.ByJwt, jwt.ByJwtAudienceConnect)
+	if err != nil {
+		rejectCustomAuth(http.StatusUnauthorized)
+		if glog.V(1) {
+			glog.Infof("[t]auth jwt err = %s\n", err)
+		}
+		return
+	}
+
+	if byJwt.ClientId == nil {
+		rejectCustomAuth(http.StatusForbidden)
+		return
+	}
+	if err := jwt.ValidateByJwtState(handleCtx, byJwt, true); err != nil {
+		rejectCustomAuth(http.StatusUnauthorized)
+		if glog.V(1) {
+			glog.Infof("[t]inactive auth jwt: %s\n", err)
+		}
+		return
+	}
+
+	clientId := *byJwt.ClientId
+
+	instanceId, err := server.IdFromBytes(auth.InstanceId)
+	if err != nil {
+		rejectCustomAuth(http.StatusBadRequest)
+		return
+	}
+
+	// verify the client is still part of the network
+	// this will fail for example if the client has been removed
+	networkId := model.GetNetworkClientNetwork(handleCtx, clientId)
+	if networkId == nil || *networkId != byJwt.NetworkId {
+		rejectCustomAuth(http.StatusForbidden)
+		// server.Logger("ERROR HB\n")
+		return
+	}
+	if custom {
+		conn, upgradeErr := connect.AcceptFramedUpgrade(w, r, connect.H1FramerProtocol, self.settings.WriteTimeout)
+		connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), upgradeErr)
+		if upgradeErr != nil {
+			return
+		}
+		framedConn, framedErr := connect.NewFramedMessageConn(conn, connect.H1FramerProtocol, self.settings.FramerSettings.MaxMessageLen, self.settings.H1PlusStats)
+		if framedErr != nil {
+			conn.Close()
+			return
+		}
+		ws = framedConn
+	}
+
+	// the declared family rides with the connection record; the observed
+	// family is re-derived from the same address at the model
+	_, ipFamilyIntent := connectionIpFamily(clientId, clientAddress, auth)
+
+	connectionId := server.NewId()
+	self.exchange.registerConnection(clientId, connectionId, handleCancel)
+	defer self.exchange.unregisterConnection(clientId, connectionId)
+
+	c := func() {
+		announceTimeout := time.Duration(0)
+		if self.serviceTransitionTime.Before(time.Now()) {
+			// the service has transitioned all the connections from the old to new
+			// now we delay the announcement to make sure the transport is stable
+			announceTimeout = self.settings.ConnectionAnnounceTimeout
+		}
+		var testConfig *TestConfig
+		if self.settings.ConnectionTestConfig != nil {
+			testConfig = self.settings.ConnectionTestConfig
+		} else if transportVersion < 2 {
+			testConfig = V0TestConfig()
+		} else {
+			testConfig = DefaultTestConfig()
+		}
+		announce := NewConnectionAnnounceWithIpFamily(
+			handleCtx,
+			handleCancel,
+			byJwt.NetworkId,
+			clientId,
+			clientAddress,
+			ipFamilyIntent,
+			self.handlerId,
+			announceTimeout,
+			testConfig,
+			&self.settings.ConnectionAnnounceSettings,
+		)
+		defer finishConnectionAnnounce(announce)
+
+		residentTransport := NewResidentTransport(
+			handleCtx,
+			self.exchange,
+			clientId,
+			instanceId,
+		)
+		var workers connectHandlerWorkers
+		defer finishH1ConnectHandlerWorkers(&workers, func() {
+			handleCancel()
+			residentTransport.Close()
+			ws.Close()
+		})
+		workers.start(func() {
+			defer handleCancel()
+			residentTransport.Run()
+		})
+
+		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
+
+		workers.start(func() {
+			defer handleCancel()
+
+			var speedTest *SpeedTest
+
+			for {
+
+				messageType, message, err := readConnectH1PooledWithDeadline(ws, self.settings.ReadTimeout, int64(self.settings.FramerSettings.MaxMessageLen+4))
+				if err != nil {
+					// glog.Errorf("[t]read err = %s\n", err)
+					if connectionId := announce.ConnectionId(); connectionId != nil {
+						model.ClientError(handleCtx, *networkId, clientId, *connectionId, "read", err)
+					}
+					return
+				}
+
+				switch messageType {
+				case websocket.BinaryMessage:
+
+					// reliability tracking
+					announce.ReceiveMessage(ByteCount(len(message)))
+
+					if len(message) <= 16 {
+						if len(message) == 0 {
+							// ping
+							pingTracker.ReceivePing()
+						} else if len(message) == 5 {
+							switch message[0] {
+							case connect.TransportControlSpeedStart:
+								speedTest = &SpeedTest{
+									TestId: binary.BigEndian.Uint32(message[1:5]),
+								}
+							case connect.TransportControlSpeedStop:
+								announce.ReceiveSpeed(speedTest)
+								speedTest = nil
+							}
+						} else if len(message) == 16 {
+							// latency response
+							if testId, err := server.IdFromBytes(message); err == nil {
+								announce.ReceiveLatency(&LatencyTest{
+									TestId: testId,
+								})
+							}
+						}
+						connect.MessagePoolReturn(message)
+						continue
+					}
+					// during a speed test, count all incoming bytes (both
+					// the client's echoed chunks and any user traffic the
+					// client is concurrently sending) toward the throughput
+					// total. user traffic continues to flow rather than being
+					// dropped — speed test runs in parallel.
+					if speedTest != nil {
+						speedTest.TotalByteCount += model.ByteCount(len(message))
+					}
+
+					pingTracker.Receive()
+
+					messageByteCount := len(message)
+					sendResult := residentTransport.sendReceivedMessage(
+						handleCtx.Done(),
+						message,
+						connect.CarrierReliabilityReliable,
+					)
+					if sendResult == pooledMessageSendDone {
+						return
+					}
+					if sendResult == pooledMessageSendDropped {
+						recordReceiveQueueDrop(receiveQueueBoundaryConnectH1, messageByteCount)
+					}
+					if sendResult == pooledMessageSendDelivered {
+						if glog.V(2) {
+							glog.Infof("[rtr] <-%s\n", clientId)
+						}
+					}
+				}
+			}
+		})
+
+		workers.start(func() {
+			defer handleCancel()
+
+			recordWriteError := func(err error) {
+				// A WebSocket deadline or partial write is terminal; the Transfer
+				// sequence retries each logical message over a replacement route.
+				if connectionId := announce.ConnectionId(); connectionId != nil {
+					model.ClientError(handleCtx, *networkId, clientId, *connectionId, "write", err)
+				}
+			}
+			write := func(message []byte, returnToPool bool) error {
+				if returnToPool {
+					defer connect.MessagePoolReturn(message)
+				}
+				err := ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout))
+				if err == nil {
+					err = ws.WriteMessage(websocket.BinaryMessage, message)
+				}
+				if err != nil {
+					recordWriteError(err)
+					return err
+				}
+				announce.SendMessage(ByteCount(len(message)))
+				if glog.V(2) {
+					glog.Infof("[ts] ->%s\n", clientId)
+				}
+				return nil
+			}
+
+			writeBatchConn := connectH1WriteBatchForConn(ws.UnderlyingConn())
+			writeUser := func(message []byte, ok bool) bool {
+				open, err := writeConnectH1UserReadyBatch(
+					handleCtx,
+					ws,
+					writeBatchConn,
+					residentTransport.receive,
+					message,
+					ok,
+					self.settings.WriteTimeout,
+					func(sentByteCount ByteCount) {
+						announce.SendMessage(sentByteCount)
+						if glog.V(2) {
+							glog.Infof("[ts] ->%s\n", clientId)
+						}
+					},
+				)
+				if err != nil {
+					recordWriteError(err)
+					return false
+				}
+				return open
+			}
+
+			// speed test state: when non-zero, the writer is driving a speed
+			// test and should interleave chunk writes with user traffic so
+			// user packets aren't blocked. mirrors the client-side behavior.
+			var speedTestId uint32
+			speedTestChunksRemaining := 0
+			chunk := make([]byte, 1024)
+
+			// reusable ping timer (hot-path timer reuse): the slow select arms a
+			// timer each iteration user traffic is briefly idle between bursts.
+			pingTimer := time.NewTimer(0)
+			defer pingTimer.Stop()
+
+			for {
+				if 0 < speedTestChunksRemaining {
+					// drive the speed test in parallel with user traffic.
+					// each iteration writes exactly one chunk (guaranteed
+					// forward progress on the test even under heavy user
+					// traffic), then opportunistically drains any pending
+					// user messages before returning to the top.
+					select {
+					case <-handleCtx.Done():
+						return
+					case <-residentTransport.Done():
+						return
+					default:
+					}
+					mathrand.Read(chunk)
+					chunkCopy := connect.MessagePoolCopy(chunk)
+					if write(chunkCopy, true) != nil {
+						return
+					}
+					speedTestChunksRemaining -= 1
+					if speedTestChunksRemaining == 0 {
+						stopMessage := connect.MessagePoolGet(5)
+						stopMessage[0] = connect.TransportControlSpeedStop
+						binary.BigEndian.PutUint32(stopMessage[1:5], speedTestId)
+						if write(stopMessage, true) != nil {
+							return
+						}
+					}
+					// One bounded ready batch lets user traffic progress without
+					// postponing the next speed chunk under a continuous backlog.
+					select {
+					case <-handleCtx.Done():
+						return
+					case <-residentTransport.Done():
+						return
+					case message, ok := <-residentTransport.receive:
+						if !writeUser(message, ok) {
+							return
+						}
+					default:
+					}
+					continue
+				}
+
+				// fast path without arming the ping timer
+				select {
+				case message, ok := <-residentTransport.receive:
+					if !writeUser(message, ok) {
+						return
+					}
+					continue
+				default:
+				}
+
+				pingTimer.Reset(self.settings.heartbeatInterval(pingTracker))
+				select {
+				case <-handleCtx.Done():
+					return
+				case <-residentTransport.Done():
+					return
+				case message, ok := <-residentTransport.receive:
+					if !writeUser(message, ok) {
+						return
+					}
+
+				case <-pingTimer.C:
+					if write(make([]byte, 0), false) != nil {
+						return
+					}
+				case latencyTest := <-announce.PendingLatencyTest:
+					if announce.SendLatency(latencyTest) {
+						message := latencyTest.TestId.Bytes()
+						if write(message, false) != nil {
+							return
+						}
+					}
+				case speedTest := <-announce.PendingSpeedTest:
+					// client should echo control values and packets in speed test mode.
+					// after starting, the writer interleaves chunk writes with
+					// user traffic above so user packets aren't blocked. on the
+					// reader side, all bytes received during the test (chunks +
+					// user) count toward the throughput total.
+
+					if announce.SendSpeed(speedTest) {
+						startMessage := connect.MessagePoolGet(5)
+						startMessage[0] = connect.TransportControlSpeedStart
+						binary.BigEndian.PutUint32(startMessage[1:5], speedTest.TestId)
+						if write(startMessage, true) != nil {
+							return
+						}
+						speedTestId = speedTest.TestId
+						speedTestChunksRemaining = int((speedTest.TotalByteCount + model.ByteCount(len(chunk)-1)) / model.ByteCount(len(chunk)))
+					}
+				}
+			}
+		})
+
+		select {
+		case <-handleCtx.Done():
+			return
+		}
+	}
+	if glog.V(2) {
+		server.Trace(
+			fmt.Sprintf("[t]connect %s", clientId),
+			c,
+		)
+	} else {
+		c()
+	}
+}
+
+// note warp currently does not load balance h3 at nginx
+// it passes the quic stream to exactly one service (connect)
+// all tls is handled by this server
+
+func (self *ConnectHandler) runH3() {
+	_ = self.listenH3(
+		connectListenerKey{
+			transport: connectListenerTransportH3,
+			port:      self.settings.ListenH3Port,
+		},
+		self.h3PacketConn,
+	)
+}
+
+func (self *ConnectHandler) listenH3(
+	key connectListenerKey,
+	preboundPacketConn net.PacketConn,
+) error {
+	return self.listenQuic(
+		key,
+		preboundPacketConn,
+		func(packetConn net.PacketConn) (net.PacketConn, error) {
+			if self.settings.EnableProxyProtocol {
+				packetConn = NewPpPacketConn(packetConn, DefaultWarpPpSettings())
+			}
+			return packetConn, nil
+		},
+	)
+}
+
+func (self *ConnectHandler) runH3Dns() {
+	_ = self.listenH3Dns(
+		connectListenerKey{
+			transport: connectListenerTransportH3Dns,
+			port:      self.settings.ListenDnsPort,
+		},
+		self.dnsPacketConn,
+	)
+}
+
+func (self *ConnectHandler) listenH3Dns(
+	key connectListenerKey,
+	preboundPacketConn net.PacketConn,
+) error {
+	return self.listenQuic(
+		key,
+		preboundPacketConn,
+		func(packetConn net.PacketConn) (net.PacketConn, error) {
+			if self.settings.EnableProxyProtocol {
+				packetConn = NewPpPacketConn(packetConn, DefaultWarpPpSettings())
+			}
+			ptSettings := connect.DefaultPacketTranslationSettings()
+			// FIXME read from config
+			ptSettings.DnsTlds = [][]byte{[]byte("ur.xyz.")}
+			return connect.NewPacketTranslation(
+				self.ctx,
+				connect.PacketTranslationModeDecode53,
+				packetConn,
+				ptSettings,
+			)
+		},
+	)
+}
+
+func (self *ConnectHandler) listenQuic(
+	key connectListenerKey,
+	preboundPacketConn net.PacketConn,
+	connTransform func(net.PacketConn) (net.PacketConn, error),
+) error {
+	handleCtx, handleCancel := context.WithCancel(self.ctx)
+
+	defer handleCancel()
+
+	quicConfig := newConnectQuicConfig(self.settings, self.quicWindowBudget)
+
+	// type clientConfig struct {
+	// 	tlsConfig *tls.Config
+	// 	err error
+	// }
+	// clientConfigs := map[string]*clientConfig{}
+
+	tlsConfig := &tls.Config{
+		GetConfigForClient: self.transportTls.GetTlsConfigForClient,
+	}
+
+	serverConn := preboundPacketConn
+	listenAddress := ""
+	if serverConn == nil {
+		listenIpv4, _, listenPort := server.RequireListenIpPort(key.port)
+		listenAddress = net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort))
+
+		reusePort := false
+		listenConfig := net.ListenConfig{}
+		if reusePort {
+			listenConfig.Control = server.SoReusePort
+		}
+
+		var err error
+		serverConn, err = listenConfig.ListenPacket(
+			handleCtx,
+			"udp",
+			listenAddress,
+		)
+		if err != nil {
+			return &connectListenerError{stage: "bind", err: err}
+		}
+	} else {
+		listenAddress = serverConn.LocalAddr().String()
+	}
+	defer serverConn.Close()
+	packetConn, err := connTransform(serverConn)
+	if err != nil {
+		return &connectListenerError{stage: "transform", err: err}
+	}
+	defer packetConn.Close()
+	quicTransport := &quic.Transport{
+		Conn: packetConn,
+		// createdConn: true,
+		// isSingleUse: true,
+	}
+	defer quicTransport.Close()
+	listener, err := quicTransport.ListenEarly(tlsConfig, quicConfig)
+	if err != nil {
+		return &connectListenerError{stage: "listen_early", err: err}
+	}
+	defer listener.Close()
+	self.setListenerUp(key, true)
+	defer self.setListenerUp(key, false)
+	glog.Infof("[c]h3 listener up transport=%s port=%d address=%s\n", key.transport, key.port, listenAddress)
+
+	for {
+		if glog.V(2) {
+			glog.Infof("[c]h3 wait to accept connection %s\n", listenAddress)
+		}
+		conn, err := listener.Accept(handleCtx)
+		if err != nil {
+			return &connectListenerError{stage: "accept", err: err}
+		}
+
+		glog.Infof("[c]h3 accept connection %s\n", listenAddress)
+		if !self.startHandle(func() {
+			self.serveQuicConn(conn, listenAddress)
+		}) {
+			conn.CloseWithError(0, "")
+			return handleCtx.Err()
+		}
+	}
+}
+
+// Serves one accepted QUIC connection on the caller's goroutine and closes it
+// on return. Admission is the caller's: the handler's own listener holds a
+// started worker for it, and HandleQuicConn takes one for an external
+// dispatch.
+func (self *ConnectHandler) serveQuicConn(conn *quic.Conn, listenAddress string) {
+	// Declared before the close so it runs after it: releasing the connection's
+	// granted window while it could still attempt an increase would leave that
+	// increase charged to the aggregate with nothing left to release it.
+	defer self.quicWindowBudget.release(conn)
+	defer conn.CloseWithError(0, "")
+
+	err := self.connectQuic(conn)
+	if err != nil {
+		glog.Infof("[c]h3 connection exited %s err = %s\n", listenAddress, err)
+	} else {
+		glog.Infof("[c]h3 connection exited %s\n", listenAddress)
+	}
+}
+
+// HandleQuicConn serves one connection accepted by an external listener and
+// returns when it is finished, reporting false when the handler is closing.
+// The alt front terminates QUIC on its own sockets and dispatches by sni, so
+// this is the same admission and teardown the handler's own listener applies,
+// without its accept loop.
+func (self *ConnectHandler) HandleQuicConn(conn *quic.Conn) bool {
+	if !self.beginHandle() {
+		conn.CloseWithError(0, "")
+		return false
+	}
+	defer self.endHandle()
+	self.serveQuicConn(conn, conn.LocalAddr().String())
+	return true
+}
+
+// The certificate source this handler loaded. An external listener that
+// terminates TLS for the same connections shares it, so one certificate cache
+// and one allowed-host policy stand behind every front.
+func (self *ConnectHandler) TransportTls() *server.TransportTls {
+	return self.transportTls
+}
+
+// NewQuicConfig returns the server half of the H3 configuration, including this
+// handler's shared receive window aggregate. An external listener for the same
+// handler must not build a second, drifting one.
+func (self *ConnectHandler) NewQuicConfig() *quic.Config {
+	return newConnectQuicConfig(self.settings, self.quicWindowBudget)
+}
+
+// Reads one pooled H3 authentication frame and lends its exact wire bytes to
+// the callback. The frame is returned on every decode and callback result.
+type connectQuicDeadlineReader interface {
+	io.Reader
+	SetReadDeadline(time.Time) error
+}
+
+type connectQuicDeadlineWriter interface {
+	io.Writer
+	SetWriteDeadline(time.Time) error
+}
+
+func withConnectQuicAuthFrameWithDeadline(
+	framer *connect.Framer,
+	stream connectQuicDeadlineReader,
+	timeout time.Duration,
+	use func(auth *protocol.Auth, authFrameBytes []byte) error,
+) error {
+	if err := stream.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	return withConnectQuicAuthFrame(framer, stream, use)
+}
+
+func readConnectQuicFrameWithDeadline(framer *connect.Framer, stream connectQuicDeadlineReader, timeout time.Duration) ([]byte, error) {
+	if err := stream.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, err
+	}
+	return framer.Read(stream)
+}
+
+func writeConnectQuicAuthWithDeadline(framer *connect.Framer, stream connectQuicDeadlineWriter, timeout time.Duration, frame []byte) error {
+	if err := stream.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	return framer.Write(stream, frame)
+}
+
+// The batch owner releases all gathered messages on every result, including a
+// rejected deadline. Accounting only observes a completed write.
+func writeConnectQuicBatchWithDeadline(
+	framer *connect.Framer,
+	stream connectQuicDeadlineWriter,
+	timeout time.Duration,
+	messages [][]byte,
+	storage []byte,
+	release func([]byte),
+	record func([]byte),
+) error {
+	defer func() {
+		for _, message := range messages {
+			release(message)
+		}
+	}()
+	if err := stream.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	if err := framer.WriteBatchWithStorage(stream, messages, storage); err != nil {
+		return err
+	}
+	for _, message := range messages {
+		record(message)
+	}
+	return nil
+}
+
+func writeConnectQuicHeartbeatWithDeadline(framer *connect.Framer, stream connectQuicDeadlineWriter, timeout time.Duration, storage []byte) error {
+	if err := stream.SetWriteDeadline(time.Now().Add(timeout)); err != nil {
+		return err
+	}
+	return framer.WriteBatchWithStorage(stream, [][]byte{nil}, storage)
+}
+
+func withConnectQuicAuthFrame(
+	framer *connect.Framer,
+	reader io.Reader,
+	use func(auth *protocol.Auth, authFrameBytes []byte) error,
+) error {
+	return withObservedConnectQuicAuthFrame(framer, reader, nil, use)
+}
+
+// Reads one pooled H3 authentication frame and exposes its borrowed bytes to
+// an optional deterministic ownership observer before protocol decoding.
+func withObservedConnectQuicAuthFrame(
+	framer *connect.Framer,
+	reader io.Reader,
+	observe func(authFrameBytes []byte),
+	use func(auth *protocol.Auth, authFrameBytes []byte) error,
+) error {
+	authFrameBytes, err := framer.Read(reader)
+	if err != nil {
+		return err
+	}
+	defer connect.MessagePoolReturn(authFrameBytes)
+	if observe != nil {
+		observe(authFrameBytes)
+	}
+
+	message, err := connect.DecodeFrame(authFrameBytes)
+	if err != nil {
+		return err
+	}
+	auth, ok := message.(*protocol.Auth)
+	if !ok {
+		return fmt.Errorf("expected auth frame, got %T", message)
+	}
+	return use(auth, authFrameBytes)
+}
+
+func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
+	handleCtx, handleCancel := context.WithCancel(self.ctx)
+	var connectionWorkers connectHandlerWorkers
+	defer func() {
+		handleCancel()
+		conn.CloseWithError(0, "")
+		connectionWorkers.wait()
+	}()
+
+	connectionWorkers.start(func() {
+		defer handleCancel()
+		select {
+		case <-conn.Context().Done():
+		case <-handleCtx.Done():
+		}
+	})
+
+	// find the client ip:port from the addr
+	clientAddress := conn.RemoteAddr().String()
+
+	if addrPort, err := server.ParseClientAddress(clientAddress); err != nil {
+		return err
+	} else if AllowOnlyIpv4 && !addrPort.Addr().Is4() {
+		return fmt.Errorf("Only IPv4 is supported.")
+	}
+
+	rateLimit, err := NewConnectionRateLimit(
+		handleCtx,
+		clientAddress,
+		self.handlerId,
+		&self.settings.ConnectionRateLimitSettings,
+	)
+	if err != nil {
+		glog.Infof("[t]rate limit init err = %s\n", err)
+		return err
+	}
+	err, disconnect := rateLimit.Connect()
+	defer disconnect()
+	if err != nil {
+		glog.Infof("[t]rate limit err = %s\n", err)
+		return err
+	}
+
+	stream, err := conn.AcceptStream(handleCtx)
+	if err != nil {
+		return err
+	}
+
+	// an api name never reaches this handler: the alt front dispatches by sni
+	// before the connection is offered here, and behind the lb this listener
+	// only ever carries connect
+
+	framer := connect.NewFramer(self.settings.FramerSettings)
+
+	var byJwt *jwt.ByJwt
+	var clientId server.Id
+	var instanceId server.Id
+	var connectionId server.Id
+	ipFamilyIntent := 0
+	useH3Datagrams := false
+	connectionRegistered := false
+	defer func() {
+		if connectionRegistered {
+			self.exchange.unregisterConnection(clientId, connectionId)
+		}
+	}()
+	err = withConnectQuicAuthFrameWithDeadline(
+		framer,
+		stream,
+		self.settings.ReadTimeout,
+		func(auth *protocol.Auth, authFrameBytes []byte) error {
+			var authErr error
+			byJwt, authErr = jwt.ParseByJwtForAudience(
+				handleCtx,
+				auth.ByJwt,
+				jwt.ByJwtAudienceConnect,
+			)
+			if authErr != nil {
+				return authErr
+			}
+			if byJwt.ClientId == nil {
+				return fmt.Errorf("Missing client id.")
+			}
+			if authErr = jwt.ValidateByJwtState(handleCtx, byJwt, true); authErr != nil {
+				return authErr
+			}
+
+			clientId = *byJwt.ClientId
+			instanceId, authErr = server.IdFromBytes(auth.InstanceId)
+			if authErr != nil {
+				return authErr
+			}
+
+			// Verify the client is still part of the network.
+			networkId := model.GetNetworkClientNetwork(handleCtx, clientId)
+			if networkId == nil || *networkId != byJwt.NetworkId {
+				return fmt.Errorf("Client id is not part of network.")
+			}
+
+			_, ipFamilyIntent = connectionIpFamily(clientId, clientAddress, auth)
+
+			connectionId = server.NewId()
+			self.exchange.registerConnection(clientId, connectionId, handleCancel)
+			connectionRegistered = true
+
+			connectionState := conn.ConnectionState()
+			authResponse, accepted := connect.AcceptH3DatagramAuthOffer(
+				auth,
+				self.settings.EnableH3Datagrams,
+				connectionState.SupportsDatagrams.Local,
+				connectionState.SupportsDatagrams.Remote,
+			)
+			useH3Datagrams = accepted
+
+			if !useH3Datagrams {
+				// Byte-for-byte echo preserves old-client behavior. A new client
+				// talking to an old server sees accepted_version=0 and falls back.
+				return writeConnectQuicAuthWithDeadline(framer, stream, self.settings.WriteTimeout, authFrameBytes)
+			}
+			responseBytes, responseErr := connect.EncodeFrame(
+				authResponse,
+				connect.DefaultProtocolVersion,
+			)
+			if responseErr != nil {
+				return responseErr
+			}
+			defer connect.MessagePoolReturn(responseBytes)
+			return writeConnectQuicAuthWithDeadline(framer, stream, self.settings.WriteTimeout, responseBytes)
+		},
+	)
+	if err != nil {
+		return err
+	}
+
+	c := func() {
+		announceTimeout := time.Duration(0)
+		if self.serviceTransitionTime.Before(time.Now()) {
+			// the service has transitioned all the connections from the old to new
+			// now we delay the announcement to make sure the transport is stable
+			announceTimeout = self.settings.ConnectionAnnounceTimeout
+		}
+		announce := NewConnectionAnnounceWithIpFamily(
+			handleCtx,
+			handleCancel,
+			byJwt.NetworkId,
+			clientId,
+			clientAddress,
+			ipFamilyIntent,
+			self.handlerId,
+			announceTimeout,
+			V0TestConfig(),
+			&self.settings.ConnectionAnnounceSettings,
+		)
+		defer finishConnectionAnnounce(announce)
+
+		maxDatagramByteCount := 0
+		if useH3Datagrams {
+			maxDatagramByteCount = initialConnectH3DatagramPathByteCount(
+				self.settings.H3DatagramSettings.TargetDatagramByteCount,
+				conn.SendDatagram,
+			)
+		}
+		residentTransport := NewResidentTransportWithProperties(
+			handleCtx,
+			self.exchange,
+			clientId,
+			instanceId,
+			connectH3TransferCarrierProperties(
+				useH3Datagrams,
+				self.settings.H3DatagramSettings,
+				maxDatagramByteCount,
+			),
+		)
+		var datagramFragmenter *connect.H3DatagramFragmenter
+		var datagramReassembler *connect.H3DatagramReassembler
+		if useH3Datagrams {
+			var datagramErr error
+			datagramFragmenter, datagramErr = connect.NewH3DatagramFragmenter(
+				self.settings.H3DatagramSettings,
+				self.settings.H3DatagramStats,
+			)
+			if datagramErr != nil {
+				glog.Infof("[t]H3 DATAGRAM sender init error = %s\n", datagramErr)
+				return
+			}
+			datagramReassembler, datagramErr = connect.NewH3DatagramReassembler(
+				self.settings.H3DatagramSettings,
+				self.h3DatagramReassemblyBudget,
+				self.settings.H3DatagramStats,
+			)
+			if datagramErr != nil {
+				glog.Infof("[t]H3 DATAGRAM receiver init error = %s\n", datagramErr)
+				return
+			}
+			defer datagramReassembler.Close()
+		}
+		var workers connectHandlerWorkers
+		defer finishH3ConnectHandlerWorkers(&workers, func() {
+			handleCancel()
+			stream.CancelRead(0)
+			stream.CancelWrite(0)
+			residentTransport.Close()
+		})
+		workers.start(func() {
+			defer handleCancel()
+			residentTransport.Run()
+		})
+		workers.start(func() {
+			defer handleCancel()
+			select {
+			case <-handleCtx.Done():
+			case <-residentTransport.Done():
+			}
+		})
+
+		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
+		deliverRoutedMessage := func(
+			message []byte,
+			reliability connect.CarrierReliability,
+		) bool {
+			// Reliability tracking remains at the complete Transfer boundary,
+			// independent of the selected hybrid lane or DATAGRAM fragments.
+			announce.ReceiveMessage(ByteCount(len(message)))
+			pingTracker.Receive()
+			messageByteCount := len(message)
+			sendResult := residentTransport.sendReceivedMessage(
+				handleCtx.Done(),
+				message,
+				reliability,
+			)
+			if sendResult == pooledMessageSendDone {
+				return false
+			}
+			if sendResult == pooledMessageSendDropped {
+				recordReceiveQueueDrop(receiveQueueBoundaryConnectH3, messageByteCount)
+			}
+			if sendResult == pooledMessageSendDelivered && glog.V(2) {
+				glog.Infof("[rtr] <-%s\n", clientId)
+			}
+			return true
+		}
+
+		if useH3Datagrams {
+			// Authentication, liveness, and routed frames above the negotiated
+			// hybrid threshold share this reliable stream. DATAGRAM has its own
+			// receive pump below. The stream propagates fixed-queue backpressure;
+			// DATAGRAM admission remains nonblocking.
+			// Clear the authentication deadline because DATAGRAM activity does
+			// not satisfy a stream read deadline. QUIC's connection-level idle
+			// timeout owns peer liveness in hybrid mode, while handler cleanup
+			// cancels the stream to unblock this reader deterministically.
+			workers.start(func() {
+				defer handleCancel()
+				if err := stream.SetReadDeadline(time.Time{}); err != nil {
+					return
+				}
+				for {
+					message, err := framer.Read(stream)
+					if err != nil {
+						return
+					}
+					if len(message) != 0 {
+						self.settings.H3DatagramStats.RecordStreamReceived(len(message))
+						if !deliverRoutedMessage(
+							message,
+							connect.CarrierReliabilityReliable,
+						) {
+							return
+						}
+						continue
+					}
+					announce.ReceiveMessage(0)
+					connect.MessagePoolReturn(message)
+					pingTracker.ReceivePing()
+					datagramReassembler.Expire(time.Now())
+				}
+			})
+		}
+
+		workers.start(func() {
+			defer handleCancel()
+
+			for {
+				var message []byte
+				if useH3Datagrams {
+					datagram, err := conn.ReceiveDatagram(handleCtx)
+					if err != nil {
+						return
+					}
+					message = datagramReassembler.Accept(datagram, time.Now())
+					if message == nil {
+						continue
+					}
+				} else {
+					var err error
+					message, err = readConnectQuicFrameWithDeadline(framer, stream, self.settings.ReadTimeout)
+					if err != nil {
+						if glog.V(2) {
+							glog.Infof("[tr]h3 err = %s\n", err)
+						}
+						return
+					}
+					if 0 == len(message) {
+						// ping
+						pingTracker.ReceivePing()
+						connect.MessagePoolReturn(message)
+						continue
+					}
+				}
+
+				reliability := connect.CarrierReliabilityReliable
+				if useH3Datagrams {
+					reliability = connect.CarrierReliabilityUnreliable
+				}
+				if !deliverRoutedMessage(message, reliability) {
+					return
+				}
+			}
+		})
+
+		// Hybrid lane dispatch occurs before either physical writer can block.
+		// Its stream handoff is bounded by retained backing bytes as well as
+		// message count. Stream-only H3 retains the resident queue and historical
+		// batching path.
+		var streamSend chan []byte
+		var streamSendBudget *connect.H3HybridStreamSendBudget
+		streamInput := (<-chan []byte)(residentTransport.receive)
+		if useH3Datagrams {
+			streamSend = make(chan []byte, connect.H3HybridStreamQueueMessageCount)
+			streamSendBudget = connect.NewH3HybridStreamSendBudget(
+				connect.H3HybridStreamQueueMessageCount,
+				connect.H3HybridStreamQueueByteCount,
+				self.settings.H3DatagramStats,
+			)
+			streamInput = streamSend
+		}
+		releaseStreamMessage := func(message []byte) {
+			if streamSendBudget != nil {
+				streamSendBudget.Release(connect.H3HybridStreamRetainedByteCount(message))
+			}
+			connect.MessagePoolReturn(message)
+		}
+		sendDatagramMessage := func(message []byte) (useStream bool, sendErr error) {
+			var nextMaxDatagramByteCount int
+			useStream, nextMaxDatagramByteCount, sendErr = datagramFragmenter.SendHybrid(
+				message,
+				maxDatagramByteCount,
+				conn.SendDatagram,
+			)
+			maxDatagramByteCount = nextMaxDatagramByteCount
+			return useStream, sendErr
+		}
+
+		workers.start(func() {
+			defer handleCancel()
+			if streamSend != nil {
+				defer func() {
+					for message := range streamSend {
+						releaseStreamMessage(message)
+					}
+				}()
+			}
+			// Allocate the stream batch only when a large hybrid message actually
+			// selects it; a small-message-only connection retains DATAGRAM's
+			// bounded scratch profile.
+			var writeBatchStorage []byte
+			writeUserBatch := func(
+				firstMessage []byte,
+			) (receiveOpen bool, pendingMessage []byte, succeeded bool) {
+				var messageStorage [connectH3WriteBatchMaxMessageCount][]byte
+				messages := messageStorage[:1]
+				messages[0] = firstMessage
+				batchByteCount := len(firstMessage) + 4
+				receiveOpen = true
+			drainReady:
+				for len(messages) < cap(messages) {
+					select {
+					case <-handleCtx.Done():
+						receiveOpen = false
+						break drainReady
+					case message, ok := <-streamInput:
+						if !ok {
+							receiveOpen = false
+							break drainReady
+						}
+						framedByteCount := len(message) + 4
+						if connectH3WriteBatchMaxByteCount < batchByteCount+framedByteCount {
+							pendingMessage = message
+							break drainReady
+						}
+						messages = append(messages, message)
+						batchByteCount += framedByteCount
+					default:
+						break drainReady
+					}
+				}
+
+				if writeBatchStorage == nil {
+					writeBatchStorage = make([]byte, connectH3WriteBatchMaxByteCount)
+				}
+				err := writeConnectQuicBatchWithDeadline(
+					framer,
+					stream,
+					self.settings.WriteTimeout,
+					messages,
+					writeBatchStorage,
+					releaseStreamMessage,
+					func(message []byte) {
+						announce.SendMessage(ByteCount(len(message)))
+						if useH3Datagrams {
+							self.settings.H3DatagramStats.RecordStreamSent(len(message))
+						}
+					},
+				)
+				if err != nil {
+					if glog.V(2) {
+						glog.Infof("[ts]h3 err = %s\n", err)
+					}
+					return receiveOpen, pendingMessage, false
+				}
+				if glog.V(2) {
+					glog.Infof("[ts] ->%s batch=%d\n", clientId, len(messages))
+				}
+				return receiveOpen, pendingMessage, true
+			}
+
+			var pendingMessage []byte
+			pingTimer := time.NewTimer(0)
+			defer pingTimer.Stop()
+			resetPingTimer := func() {
+				pingTimer.Reset(self.settings.heartbeatInterval(pingTracker))
+			}
+			resetPingTimer()
+			defer func() {
+				if pendingMessage != nil {
+					releaseStreamMessage(pendingMessage)
+				}
+			}()
+			for {
+				message := pendingMessage
+				pendingMessage = nil
+				if message == nil {
+					select {
+					case <-handleCtx.Done():
+						return
+					case nextMessage, ok := <-streamInput:
+						if !ok {
+							return
+						}
+						message = nextMessage
+					case <-pingTimer.C:
+						// Heartbeats reuse existing stream scratch but never allocate
+						// the large reliable batch on an otherwise DATAGRAM-only lane.
+						err := writeConnectQuicHeartbeatWithDeadline(framer, stream, self.settings.WriteTimeout, writeBatchStorage)
+						if err != nil {
+							glog.Infof("[ts]err = %s\n", err)
+							return
+						}
+						announce.SendMessage(0)
+						resetPingTimer()
+						continue
+					}
+				}
+				receiveOpen, nextMessage, succeeded := writeUserBatch(message)
+				pendingMessage = nextMessage
+				if !succeeded || !receiveOpen {
+					return
+				}
+				resetPingTimer()
+			}
+		})
+
+		if useH3Datagrams {
+			workers.start(func() {
+				defer handleCancel()
+				defer close(streamSend)
+				offerStream := func(message []byte) bool {
+					retainedByteCount := connect.H3HybridStreamRetainedByteCount(message)
+					if streamSendBudget.MaxByteCount() < retainedByteCount &&
+						len(message) <= streamSendBudget.MaxByteCount()-connect.MessagePoolMetaByteCount {
+						compactMessage := connect.MessagePoolCopy(message)
+						connect.MessagePoolReturn(message)
+						message = compactMessage
+						retainedByteCount = connect.H3HybridStreamRetainedByteCount(message)
+					}
+					if !streamSendBudget.Acquire(handleCtx, retainedByteCount) {
+						connect.MessagePoolReturn(message)
+						if handleCtx.Err() == nil && glog.V(2) {
+							glog.Infof(
+								"[ts]H3 hybrid stream message retained bytes %d exceed queue limit %d\n",
+								retainedByteCount,
+								streamSendBudget.MaxByteCount(),
+							)
+						}
+						return false
+					}
+					select {
+					case <-handleCtx.Done():
+						streamSendBudget.Release(retainedByteCount)
+						connect.MessagePoolReturn(message)
+						return false
+					case streamSend <- message:
+						return true
+					}
+				}
+				for {
+					select {
+					case <-handleCtx.Done():
+						return
+					case message, ok := <-residentTransport.receive:
+						if !ok {
+							return
+						}
+						useDatagram := self.settings.H3DatagramSettings.UseDatagramForPath(
+							len(message),
+							maxDatagramByteCount,
+						)
+						if useDatagram {
+							useStream, sendErr := sendDatagramMessage(message)
+							if sendErr != nil {
+								connect.MessagePoolReturn(message)
+								if glog.V(2) {
+									glog.Infof("[ts]H3 DATAGRAM error = %s\n", sendErr)
+								}
+								return
+							}
+							if !useStream {
+								announce.SendMessage(ByteCount(len(message)))
+								connect.MessagePoolReturn(message)
+								continue
+							}
+						}
+						if !offerStream(message) {
+							return
+						}
+					}
+				}
+			})
+		}
+
+		select {
+		case <-handleCtx.Done():
+			return
+		case <-residentTransport.Done():
+			return
+		}
+	}
+	if glog.V(2) {
+		server.Trace(
+			fmt.Sprintf("[rt]connect %s", clientId),
+			c,
+		)
+	} else {
+		c()
+	}
+	return nil
+}
