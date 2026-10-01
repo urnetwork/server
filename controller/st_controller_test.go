@@ -635,11 +635,11 @@ func TestStDepositArtifactUsagePinsSignerIdentityAndFinalizedBoundaries(t *testi
 		t.Fatal(err)
 	}
 	record := &model.StPayoutArtifact{Epoch: 4, NoId: cfg.NoId, ContentHash: artifact.ContentHash, PayoutRoot: artifact.PayoutRoot}
-	usage, users, err := stDepositArtifactUsage(artifact, record, cfg, 4, 100, startHash, 200, endHash)
+	usage, users, err := stDepositArtifactUsage(artifact, record, cfg, 4, cfg.PolicyHash, 100, startHash, 200, endHash)
 	if err != nil || usage != 1234 || users != 567 {
 		t.Fatalf("artifact usage = %d bytes, %d users, %v", usage, users, err)
 	}
-	if _, _, err := stDepositArtifactUsage(artifact, record, cfg, 4, 100, [32]byte{9}, 200, endHash); err == nil {
+	if _, _, err := stDepositArtifactUsage(artifact, record, cfg, 4, cfg.PolicyHash, 100, [32]byte{9}, 200, endHash); err == nil {
 		t.Fatal("orphaned start boundary was accepted")
 	}
 	otherKey, err := crypto.GenerateKey()
@@ -650,7 +650,7 @@ func TestStDepositArtifactUsagePinsSignerIdentityAndFinalizedBoundaries(t *testi
 		t.Fatal(err)
 	}
 	record.ContentHash = artifact.ContentHash
-	if _, _, err := stDepositArtifactUsage(artifact, record, cfg, 4, 100, startHash, 200, endHash); err == nil {
+	if _, _, err := stDepositArtifactUsage(artifact, record, cfg, 4, cfg.PolicyHash, 100, startHash, 200, endHash); err == nil {
 		t.Fatal("unexpected artifact signer was accepted")
 	}
 }

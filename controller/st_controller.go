@@ -644,6 +644,9 @@ type StClient interface {
 	// EpochCloseBlock reads epochCloseBlock(e) — the intended boundary of a
 	// rolled (closed) epoch; 0 when the roll has not reached e yet.
 	EpochCloseBlock(ctx context.Context, epoch uint64) (uint64, error)
+	// PayoutEpochAuthority authenticates the closed epoch's retained policy
+	// and exact canonical window independently of current local policy files.
+	PayoutEpochAuthority(ctx context.Context, epoch uint64) (*StPayoutEpochAuthority, error)
 	// BlockTime reads a mined block header's timestamp.
 	BlockTime(ctx context.Context, block uint64) (time.Time, error)
 	// FinalizedHead is the only head accepted by the event index and epoch
@@ -2803,16 +2806,17 @@ func stDepositArtifactUsage(
 	record *model.StPayoutArtifact,
 	cfg *StConfig,
 	epoch uint64,
+	policyHash [32]byte,
 	startBlock uint64,
 	startHash [32]byte,
 	endBlock uint64,
 	endHash [32]byte,
 ) (usageBytes uint64, users uint64, err error) {
-	if artifact == nil || record == nil || cfg == nil || cfg.ArtifactKey == nil {
+	if artifact == nil || record == nil || cfg == nil || cfg.ArtifactKey == nil || policyHash == ([32]byte{}) {
 		return 0, 0, errors.New("deposit artifact identity is incomplete")
 	}
 	expectedSigner := crypto.PubkeyToAddress(cfg.ArtifactKey.PublicKey)
-	if artifact.DeploymentID != cfg.DeploymentId || artifact.ChainID != cfg.ChainId || artifact.Netuid != uint16(cfg.Netuid) || artifact.Coordinator != cfg.ContractAddress || artifact.SettlementVault != cfg.SettlementVault || artifact.Epoch != epoch || artifact.NoID != cfg.NoId || artifact.Signer != expectedSigner || !strings.EqualFold(artifact.GenesisHash, fmt.Sprintf("0x%x", cfg.GenesisHash)) || !strings.EqualFold(artifact.PolicyHash, fmt.Sprintf("0x%x", cfg.PolicyHash)) {
+	if artifact.DeploymentID != cfg.DeploymentId || artifact.ChainID != cfg.ChainId || artifact.Netuid != uint16(cfg.Netuid) || artifact.Coordinator != cfg.ContractAddress || artifact.SettlementVault != cfg.SettlementVault || artifact.Epoch != epoch || artifact.NoID != cfg.NoId || artifact.Signer != expectedSigner || !strings.EqualFold(artifact.GenesisHash, fmt.Sprintf("0x%x", cfg.GenesisHash)) || !strings.EqualFold(artifact.PolicyHash, fmt.Sprintf("0x%x", policyHash)) {
 		return 0, 0, fmt.Errorf("epoch %d payout artifact deployment identity mismatch", epoch)
 	}
 	if !strings.EqualFold(artifact.ContentHash, record.ContentHash) || artifact.PayoutRoot != record.PayoutRoot {
@@ -2863,10 +2867,13 @@ func (self *StDepositSizing) String() string {
 // stDepositArtifactTotals reads the previous epoch's immutable signed payout
 // artifact and returns its usage and user totals, or a retryable outcome when
 // it is not available yet.
-func stDepositArtifactTotals(ctx context.Context, cfg *StConfig, client StClient, state *StEpochState, sourceEpoch uint64) (usageBytes uint64, users uint64, failed *StPublishOutcome) {
-	_, _, prevStartBlock, prevEndBlock, err := stEpochWindow(ctx, cfg.DeploymentKey(), client, state, sourceEpoch, cfg.BlockSeconds)
+func stDepositArtifactTotals(ctx context.Context, cfg *StConfig, client StClient, sourceEpoch uint64) (usageBytes uint64, users uint64, failed *StPublishOutcome) {
+	authority, err := client.PayoutEpochAuthority(ctx, sourceEpoch)
 	if err != nil {
 		return 0, 0, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: err.Error(), Retry: true}
+	}
+	if authority == nil || authority.Epoch != sourceEpoch {
+		return 0, 0, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: "payout epoch authority is absent or differs", Retry: true}
 	}
 	artifactRecord := model.GetStPayoutArtifact(ctx, cfg.DeploymentKey(), sourceEpoch, cfg.NoId)
 	if artifactRecord == nil {
@@ -2880,15 +2887,7 @@ func stDepositArtifactTotals(ctx context.Context, cfg *StConfig, client StClient
 	if artifactErr != nil {
 		return 0, 0, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: fmt.Sprintf("epoch %d signed payout artifact: %v", sourceEpoch, artifactErr), Retry: true}
 	}
-	prevStartHash, hashErr := client.BlockHash(ctx, prevStartBlock)
-	if hashErr != nil {
-		return 0, 0, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: hashErr.Error(), Retry: true}
-	}
-	prevEndHash, hashErr := client.BlockHash(ctx, prevEndBlock)
-	if hashErr != nil {
-		return 0, 0, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: hashErr.Error(), Retry: true}
-	}
-	usageBytes, users, identityErr := stDepositArtifactUsage(artifact, artifactRecord, cfg, sourceEpoch, prevStartBlock, prevStartHash, prevEndBlock, prevEndHash)
+	usageBytes, users, identityErr := stDepositArtifactUsage(artifact, artifactRecord, cfg, sourceEpoch, authority.PolicyHash, authority.Start.Block, authority.Start.Hash, authority.End.Block, authority.End.Hash)
 	if identityErr != nil {
 		return 0, 0, &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: identityErr.Error(), Retry: true}
 	}
@@ -2908,7 +2907,7 @@ func stEpochDepositSizing(ctx context.Context, cfg *StConfig, client StClient, s
 		return sizing, nil, nil
 	}
 	sizing.SourceEpoch = epoch - 1
-	usageBytes, users, failed := stDepositArtifactTotals(ctx, cfg, client, state, sizing.SourceEpoch)
+	usageBytes, users, failed := stDepositArtifactTotals(ctx, cfg, client, sizing.SourceEpoch)
 	if failed != nil {
 		if !sizing.ZeroPrice {
 			return nil, failed, nil
@@ -3226,6 +3225,7 @@ func stComputeReleasePayout(
 	epoch uint64,
 	startTime, endTime time.Time,
 	startBlock, closeBlock uint64,
+	authority *StPayoutEpochAuthority,
 ) ([32]byte, int, error) {
 	if prior := model.GetStPayoutArtifact(ctx, cfg.DeploymentKey(), epoch, cfg.NoId); prior != nil {
 		return prior.PayoutRoot, len(model.GetStPayoutLeaves(ctx, cfg.DeploymentKey(), epoch, cfg.NoId)), nil
@@ -3237,6 +3237,20 @@ func stComputeReleasePayout(
 	usages, err = stCanonicalProviderUsages(usages)
 	if err != nil {
 		return [32]byte{}, 0, err
+	}
+	// The close path already owns the read which selected this exact window.
+	// Direct retained-window callers must obtain the same authority here.
+	if authority == nil {
+		authority, err = client.PayoutEpochAuthority(ctx, epoch)
+		if err != nil {
+			return [32]byte{}, 0, err
+		}
+	}
+	// The current configuration supplies the pricing and reliability rules.
+	// It cannot mint a historical artifact under a different policy. Existing
+	// signed artifacts above remain immutable and need no original local file.
+	if authority == nil || authority.Epoch != epoch || authority.PolicyHash != cfg.PolicyHash || authority.Start.Block != startBlock || authority.End.Block != closeBlock || !authority.StartTime.Equal(startTime) || !authority.EndTime.Equal(endTime) {
+		return [32]byte{}, 0, errors.New("st: payout policy or window differs from authenticated epoch authority")
 	}
 	reliabilityRows := model.GetStEpochClientReliability(ctx, startTime, endTime)
 	wallets := model.GetStProviderWalletsAt(ctx, endTime)
@@ -3260,25 +3274,17 @@ func stComputeReleasePayout(
 	if epochUsers < 0 {
 		return [32]byte{}, 0, fmt.Errorf("epoch %d user count is negative", epoch)
 	}
-	startHash, err := client.BlockHash(ctx, startBlock)
-	if err != nil {
-		return [32]byte{}, 0, err
-	}
-	endHash, err := client.BlockHash(ctx, closeBlock)
-	if err != nil {
-		return [32]byte{}, 0, err
-	}
-	operatorSnapshot := map[string]any{"no_id": cfg.NoId, "epoch": epoch, "policy_hash": fmt.Sprintf("0x%x", cfg.PolicyHash)}
+	operatorSnapshot := map[string]any{"no_id": cfg.NoId, "epoch": epoch, "policy_hash": fmt.Sprintf("0x%x", authority.PolicyHash)}
 	fleetSnapshot := make([]map[string]any, 0, len(providers))
 	for _, p := range providers {
 		fleetSnapshot = append(fleetSnapshot, map[string]any{"client_id": fmt.Sprintf("%x", p.ClientID), "head": p.HeadExcluded, "generation": p.BindingGeneration})
 	}
 	artifact, err := startifact.Build(startifact.BuildInput{
-		DeploymentID: cfg.DeploymentId, GenesisHash: fmt.Sprintf("0x%x", cfg.GenesisHash), PolicyHash: fmt.Sprintf("0x%x", cfg.PolicyHash),
+		DeploymentID: cfg.DeploymentId, GenesisHash: fmt.Sprintf("0x%x", cfg.GenesisHash), PolicyHash: fmt.Sprintf("0x%x", authority.PolicyHash),
 		ChainID: cfg.ChainId, Netuid: uint16(cfg.Netuid), Coordinator: cfg.ContractAddress,
 		SettlementVault: cfg.SettlementVault, Epoch: epoch, NoID: cfg.NoId,
-		Start:                startifact.Boundary{Number: startBlock, Hash: common.BytesToHash(startHash[:]).Hex()},
-		End:                  startifact.Boundary{Number: closeBlock, Hash: common.BytesToHash(endHash[:]).Hex()},
+		Start:                startifact.Boundary{Number: startBlock, Hash: common.Hash(authority.Start.Hash).Hex()},
+		End:                  startifact.Boundary{Number: closeBlock, Hash: common.Hash(authority.End.Hash).Hex()},
 		OperatorSnapshotHash: stSnapshotHash(operatorSnapshot), FleetSnapshotHash: stSnapshotHash(fleetSnapshot),
 		Providers:       providers,
 		TotalUsers:      uint64(epochUsers),
@@ -3346,14 +3352,19 @@ func StComputeEpochPayout(ctx context.Context, epoch uint64) (root [32]byte, lea
 		if outcome.Retry || outcome.Status == model.StPublishStatusFailed {
 			return root, 0, fmt.Errorf("st: epoch %d emission close not confirmed: %s", epoch, outcome)
 		}
+		authority, err := client.PayoutEpochAuthority(ctx, epoch)
+		if err != nil {
+			return root, 0, err
+		}
+		if authority == nil || authority.Epoch != epoch {
+			return root, 0, errors.New("st: payout epoch authority is absent or differs")
+		}
+		return stComputeReleasePayout(ctx, cfg, client, epoch, authority.StartTime, authority.EndTime, authority.Start.Block, authority.End.Block, authority)
 	}
 
 	startTime, endTime, startBlock, closeBlock, err := stEpochWindow(ctx, cfg.DeploymentKey(), client, state, epoch, cfg.BlockSeconds)
 	if err != nil {
 		return root, 0, err
-	}
-	if cfg.SettlementVault != (common.Address{}) {
-		return stComputeReleasePayout(ctx, cfg, client, epoch, startTime, endTime, startBlock, closeBlock)
 	}
 
 	usages, err := model.GetStEpochNetworkUsage(ctx, startTime, endTime)
