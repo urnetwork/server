@@ -5519,11 +5519,49 @@ map traversal as a substantial CPU cost. Immutable variant snapshots and
 compact sorted-rune histograms retain the same aliases, histogram predicate,
 edit distance and ranking; they avoid cloning every value's variant map on
 each query. The bounded four-query benchmark reduced median lookup time by
-26–37% and about 40,000 allocations per query. This is a local source control,
-not a measured Main improvement or proof that all observed search latency is
-CPU time. Verify the running image and compare the same route after a gated
-release; an in-memory search fix does not waive the binary's database migration
-readiness requirement.
+26–37% and about 40,000 allocations per query. That benchmark is a local source
+control; it does not attribute all observed search latency to CPU time. An
+in-memory search fix does not waive the binary's database migration readiness
+requirement.
+
+The schema-741 search-only backport `92e0d0ae` subsequently had two qualified
+Mimir snapshots, at 10:40 and 11:26 UTC on 2026-10-01, covering all four enabled
+beta slots. Both snapshots reported the same post-selection process generations,
+clean source revision, expected platform image identity and `api_ready=1`.
+The registry-extracted executable matched the independently reproduced release
+binary. These are operational source/deployment witnesses at their observation
+times, not cryptographic remote-byte attestation or continuous readiness proof.
+
+A separately authorized 12:57:05–12:57:17 UTC control sent 20 sequential search
+POSTs through one pinned, enabled **non-transparent** edge LB front: five public
+city names, twice per beta/g1 block, with adjacent pair order reversed between
+repetitions. All completed the TLS, HTTP-200 and response-schema checks. Beta
+averaged 458.8ms end to end versus 636.1ms for old g1, a 27.9% reduction; beta
+was faster in all ten matched pairs and their aggregate response counts agreed.
+Bodies and identifiers were discarded, so this does not compare result identity
+or ordering. Ten samples per block do not establish a population percentile.
+
+Each request opened a fresh connection. Beta's mean comprised 184.1ms through
+TLS completion, 272.8ms from TLS completion to first byte, and 1.9ms receiving
+the body; g1's corresponding values were 191.4ms, 442.7ms and 2.0ms. The remaining
+post-TLS interval includes network, LB, queue, search and Redis work, not just
+server CPU. App connection reuse can remove some connection setup, while typing
+debounce (300ms in current Apple source, 250ms in current Android source) and
+rendering sit outside these measurements. Verify the reporting app's version.
+
+The empty browse GET does not scan the fuzzy index: it reads the initial
+location document and pipelined eligibility filters from Redis. At 11:26 UTC,
+its beta handler mean was 14.7ms over eight completions; old blocks had 471
+completions with means 13.2–14.6ms. Nonempty search uses the local index after
+sync, two pipelined metadata reads (matches then related locations), and one
+filter pipeline. IP geolocation is local and the country-ID map is warmed once.
+Search warmup starts the index loader without waiting for initial sync, so
+`api_ready=1` alone does not prove that a request avoided the PostgreSQL search
+fallback. No qualified picker substage or index-ready metric was collected in
+these controls. FP2 stage timings cannot fill that gap, and the unavailable
+exclusion-ready/TTL diagnostic cannot establish cache freshness or PG fallback.
+Keep intermittent initial/read errors separate from the fast successful GET
+mean; the search optimization does not close that availability issue.
 
 The model exports `urnetwork_provider_picker_outcomes_total` with exactly nine
 preinitialized children: surface `initial`, `search`, `direct` crossed with
