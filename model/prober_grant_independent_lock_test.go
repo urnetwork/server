@@ -130,7 +130,7 @@ func (tx *grantHintTestTx) Query(ctx context.Context, query string, args ...any)
 	return tx.PgTx.Query(ctx, query, args...)
 }
 
-func TestDynamicProberStaleHintRechecksAndReleasesBeforeFallback(t *testing.T) {
+func TestDynamicProberOptimisticCreditRechecksAndReleasesBeforeAlternative(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
 	testEnv.Run(t, func(t testing.TB) {
@@ -146,42 +146,46 @@ func TestDynamicProberStaleHintRechecksAndReleasesBeforeFallback(t *testing.T) {
 		other := grants[(clients.payerId.Hash()%2+1)%2]
 		observer := acquireContractLifecycleTestConnection(t, ctx)
 		defer observer.Release()
-		inserted, fallback := false, false
+		locks := 0
 		server.Tx(ctx, func(tx server.PgTx) {
 			controlled := &grantHintTestTx{PgTx: tx}
 			controlled.beforeLock = func(args []any) {
-				if inserted {
-					t.Fatal("one window issued multiple candidate-lock attempts")
+				locks++
+				switch locks {
+				case 1:
+					if args[2].([]server.Id)[0] != preferred.BalanceId {
+						t.Fatal("optimistic selection changed payer order")
+					}
+					// Reserve AFTER discovery and BEFORE its lock. Durable credit
+					// must never stand in for fresh locked reservation authority.
+					clients.reserve(ctx, preferred.BalanceId, 1024)
+				case 2:
+					if ids := args[2].([]server.Id); len(ids) != 1 || ids[0] != other.BalanceId {
+						t.Fatal("rejected grant was retried or alternative was skipped")
+					}
+					if _, err := observer.Exec(ctx, `SELECT balance_id FROM transfer_balance WHERE balance_id=$1 FOR UPDATE NOWAIT`, preferred.BalanceId); err != nil {
+						t.Fatal("rejected candidate retained a lock before alternative")
+					}
+				default:
+					t.Fatal("candidate attempts were not bounded by available grants")
 				}
-				inserted = true
-				if args[2].([]server.Id)[0] != preferred.BalanceId {
-					t.Fatal("hint changed payer selection order")
-				}
-				// Commit a competing reservation AFTER the unlocked hint but
-				// BEFORE locking, so the old hint cannot authorize any bytes.
-				clients.reserve(ctx, preferred.BalanceId, 1024)
 			}
-			controlled.beforeFallback = func() {
-				fallback = true
-				if _, err := observer.Exec(ctx, `SELECT balance_id FROM transfer_balance WHERE balance_id=$1 FOR UPDATE NOWAIT`, preferred.BalanceId); err != nil {
-					t.Fatal("rejected candidate retained a lock before ordered fallback")
-				}
-			}
+			controlled.beforeFallback = func() { t.Fatal("available adjacent grant unnecessarily joined full locking fallback") }
 			escrow, err := independentGrantTestCreate(ctx, controlled, clients)
 			if err != nil || escrow == nil || len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != other.BalanceId {
-				t.Fatalf("stale hint authorized reserved credit or lost full fallback: %v", err)
+				t.Fatalf("optimistic hint authorized reserved credit or lost alternative: %v", err)
 			}
-			if controlled.reservationReads != 3 || controlled.reservationRows != 5 {
-				t.Fatalf("hint/locked/fallback census work changed: reads=%d rows=%d", controlled.reservationReads, controlled.reservationRows)
+			if controlled.reservationReads != 2 || controlled.reservationRows != 2 {
+				t.Fatalf("selected-grant census was amplified: reads=%d rows=%d", controlled.reservationReads, controlled.reservationRows)
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
-		if !inserted || !fallback {
-			t.Fatal("stale-hint control did not exercise both authority boundaries")
+		if locks != 2 {
+			t.Fatal("optimistic credit control did not exercise both grant locks")
 		}
 	})
 }
 
-func TestDynamicProberPessimisticHintStillUsesReleasedCredit(t *testing.T) {
+func TestDynamicProberRejectedCandidateStillUsesCreditReleasedBeforeFallback(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
 	testEnv.Run(t, func(t testing.TB) {
@@ -197,13 +201,11 @@ func TestDynamicProberPessimisticHintStillUsesReleasedCredit(t *testing.T) {
 		fallback := false
 		server.Tx(ctx, func(tx server.PgTx) {
 			controlled := &grantHintTestTx{PgTx: tx}
-			controlled.beforeLock = func([]any) {
-				t.Fatal("fully reserved hint unexpectedly attempted a speculative lock")
-			}
+
 			controlled.beforeFallback = func() {
 				fallback = true
 				// Release the prior reservation through real zero-use settlement
-				// after the hint read. Complete fallback must re-read funding.
+				// after the locked attempt. Full fallback must re-read funding.
 				settleNetEscrowOrderingTestContract(ctx, prior.ContractId)
 			}
 			escrow, err := independentGrantTestCreate(ctx, controlled, clients)
@@ -242,9 +244,10 @@ func TestDynamicProberReservationCensusCountIndependentOfWindow(t *testing.T) {
 			if escrow != nil || err == nil {
 				t.Fatal("fully reserved windows did not retain authoritative shortfall")
 			}
-			// Two bounded hints and one complete fallback; never one census
-			// per candidate, even when all 64 candidates are unavailable.
-			if controlled.reservationReads != 3 || controlled.reservationRows != 128 {
+			// At most four selected-grant attempts per window, then one
+			// complete fallback. Never census every speculative candidate.
+			if controlled.reservationReads != 2*proberGrantAttemptsPerWindow+1 ||
+				controlled.reservationRows != 2*proberGrantAttemptsPerWindow+proberGrantFirstCount+proberGrantExtendedCount {
 				t.Fatalf("reservation census became per-grant work: reads=%d rows=%d", controlled.reservationReads, controlled.reservationRows)
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
