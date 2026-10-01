@@ -36,7 +36,7 @@ reclassifying the fleet.
 | Pass reliability | Required | Required | Required |
 | No ARIN risk exception | Required | Required | Required |
 | No probe security exception | Required | Required | Required |
-| URL success ratio ≥ 0.6 | Required | Required | Not required |
+| URL success ratio ≥ 0.8 | Required | Required | Not required |
 | No ARIN quality exception | Required | Not required | Not required |
 
 This matrix is the bucket admission contract. Probe admission has a different
@@ -47,9 +47,9 @@ security-quarantined providers also need probes to establish recovery.
 The probe records URL successes, errors, and security exceptions. There is no
 separate blackhole definition or cheap-blackhole admission gate. The indexer
 aggregates accepted measured URL outcomes in the preceding eight hours and
-requires `success + error > 0` and `success / (success + error) >= 0.6` for
+requires `success + error > 0` and `success / (success + error) >= 0.8` for
 quality and speed. The threshold belongs to indexer configuration, alongside
-reliability. Use the exact inclusive 3/5 boundary; 2/3 also qualifies. A URL's
+reliability. Use the exact inclusive 4/5 boundary; 2/3 does not qualify. A URL's
 final measured outcome is counted once after its retries, with idempotent
 ingest so retries of a report do not bias the ratio. Zero denominators mean
 online-only; at exactly eight hours an outcome is stale. A transport/setup failure,
@@ -136,7 +136,7 @@ and ARIN flags are gates; they must not be averaged away into a good score.
 | URL successes `S` | Count of unique, accepted, measured URL successes newer than eight hours | Numerator and evidence volume |
 | URL errors `E` | Count of unique, accepted, measured URL errors in the same window | Denominator and evidence volume |
 | Measured URL count `N` | `S + E`; excludes unmeasured/local setup failures and duplicate reports | Distinguishes zero observations from observed failures |
-| URL success ratio `r` | `S / N` when `N > 0`; otherwise unknown | Quality/speed gate at `r >= 0.6`, and ranking factor |
+| URL success ratio `r` | `S / N` when `N > 0`; otherwise unknown | Quality/speed gate at `r >= 0.8`, and ranking factor |
 | URL ranking weight | Initially `0.1 + 0.9*r` for measured history; `1` when unknown | Multiplies existing reliability/performance selection weight; stays positive even for online providers with errors |
 | Quality failure index | `ceil(MaxFailureIndex * (1-r))` for measured history; undefined when `N = 0` | Sample-count-normalized quality-tier penalty; more observations at the same ratio cannot worsen the tier |
 | Relative latency | Existing measured relative latency; separately record DNS, connect, TLS, and TTFB timings for diagnosis | Performance ordering within eligible buckets |
@@ -159,8 +159,8 @@ intentionally the same as a measured ratio of `1`, although unknown history
 cannot admit a provider to quality or speed.
 
 Better measured URL success must never worsen ranking when
-reliability, performance, and bucket are equal. A provider at exactly `3/5`
-passes the URL gate for quality/speed and gets a URL weight of `0.64`; it must
+reliability, performance, and bucket are equal. A provider at exactly `4/5`
+passes the URL gate for quality/speed and gets a URL weight of `0.82`; it must
 still pass the other gates for that bucket. A `0/0` provider has no defined URL
 ratio and can enter only online, subject to the common gates. Security or ARIN
 risk failures cannot be offset by excellent reliability, throughput, or URL
@@ -593,7 +593,7 @@ The user also approved the measured-history ranking curve
 `0.1 + 0.9 * success_ratio` and the **16-KiB minimum meaningful throughput
 sample**. They preserve the requested monotonic ranking and small-complete-body
 exemption. Neither creates an additional online or quality/speed admission
-gate; the 0.6 ratio, 2-second TTFB, and 100-kbps meaningful-throughput thresholds
+gate; the 0.8 ratio, 2-second TTFB, and 100-kbps meaningful-throughput thresholds
 remain the explicit product requirements.
 
 The remaining research concerns evidence-backed virtual/hosting ISP rules and
@@ -929,8 +929,8 @@ metric delivery alone does not make those current eligibility counts. These
 gauges and a requested market's cached rank-document lengths also have
 different population/snapshot boundaries and must not be equated.
 
-Native URL-history admission currently requires selected-policy history with
-`N > 0` and success ratio at least `0.6` in the eight-hour evidence window,
+At that measurement, native URL-history admission required selected-policy
+history with `N > 0` and success ratio at least `0.6` in the eight-hour evidence window,
 plus the shared eligibility gates. A `1/1` history can qualify. Ten successes
 in four hours is the scheduling/coverage objective, not a minimum-history
 admission rule. The reported zero ten-success completions among 111,566
