@@ -34,6 +34,7 @@ type receiptCollectorRpc struct {
 	remaining   int
 	retryWindow time.Duration
 	finality    bool
+	storage     bool
 	beforeRead  func(context.Context, int, []byte) error
 	afterRead   func(context.Context, int, int) error
 }
@@ -71,7 +72,13 @@ func newReceiptCollectorRpc(endpoint string) *receiptCollectorRpc {
 // Result decoding may use a projection, but duplicate/case-folded keys are
 // rejected over the entire reply, including fields absent from that projection.
 func (self *receiptCollectorRpc) call(ctx context.Context, method string, params []any) (json.RawMessage, error) {
-	if self.finality {
+	if self.storage {
+		switch method {
+		case "chain_getBlockHash", "state_getStorage", "state_getReadProof":
+		default:
+			return nil, errors.New("method is outside the native storage capture read profile")
+		}
+	} else if self.finality {
 		switch method {
 		case "chain_getBlockHash", "chain_getHeader", "chain_getBlock":
 		default:
