@@ -30,7 +30,7 @@ func main() {
 	soakInterval := flag.Duration("soak-interval", 5*time.Second, "delay between sustained HTTPS requests")
 	overlapProtocols := flag.Bool("overlap-protocols", true, "repeat all three sustained campaigns concurrently on one proxy device")
 	trackHostedDevice := flag.Bool("track-hosted-device", true, "record redacted hosted-device provider state around failures")
-	traceTLSFlows := flag.Bool("trace-tls-flows", false, "arm bounded provider-to-TLS-flow diagnostics on this temporary proxy device")
+	traceTLSFlows := flag.Bool("trace-tls-flows", false, "arm bounded TLS and UDP DNS egress/return metadata on this temporary proxy device (requires matching server)")
 	flag.Parse()
 	// The runner reports purpose-built progress and failure timelines. Silence
 	// per-RPC SDK info logs so one-second diagnostic polling stays readable.

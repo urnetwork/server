@@ -73,6 +73,21 @@ func TestFlowTraceAPIIsScopedAndReadsNeverCreateDevices(t *testing.T) {
 			t.Errorf("read status=%d want=%d", response.Code, test.status)
 		}
 	}
+	if response := call(http.MethodDelete, "other", snapshot.Session); response.Code != http.StatusGone {
+		t.Fatalf("other caller disarmed trace: %d", response.Code)
+	}
+	if response := call(http.MethodDelete, "owner", "wrong-generation"); response.Code != http.StatusGone {
+		t.Fatalf("wrong generation disarmed trace: %d", response.Code)
+	}
+	if response := call(http.MethodGet, "owner", snapshot.Session); response.Code != http.StatusOK {
+		t.Fatalf("unauthorized disarm changed trace: %d", response.Code)
+	}
+	if response := call(http.MethodDelete, "owner", snapshot.Session); response.Code != http.StatusOK || device.flowTrace.Load() != nil {
+		t.Fatalf("owner disarm failed: %d", response.Code)
+	}
+	if response := call(http.MethodGet, "owner", snapshot.Session); response.Code != http.StatusGone {
+		t.Fatalf("disarmed trace remained readable: %d", response.Code)
+	}
 	if opens != 1 {
 		t.Fatalf("reads created devices: opens=%d", opens)
 	}

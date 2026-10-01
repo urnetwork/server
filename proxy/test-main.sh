@@ -8,6 +8,8 @@
 #   ./proxy/test-main.sh --soak-duration=10m --soak-interval=5s
 #   ./proxy/test-main.sh --overlap-protocols=false
 #   ./proxy/test-main.sh --trace-tls-flows=true
+#     Opt-in includes TLS and UDP DNS egress/provider-return metadata, sharing
+#     the 1024-event/45-minute cap. DNS capability must be advertised by the server.
 #   ./proxy/test-main.sh --skip-build
 #
 # Environment:

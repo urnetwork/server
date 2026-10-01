@@ -59,6 +59,20 @@ func combinedExchangeLink(forward linkProfile, reverse linkProfile) linkProfile 
 			(reverse.OuterMtu > forward.OuterMtu || reverse.AllowMtuDrops)
 	combined.DuplicateProbability = 1 - (1-forward.DuplicateProbability)*(1-reverse.DuplicateProbability)
 	combined.ReorderProbability = 1 - (1-forward.ReorderProbability)*(1-reverse.ReorderProbability)
+	// A declared loss-free segment is an exact identity. In particular, the
+	// clean provider access used by cell-edge exchange scenarios must not
+	// turn the device's burst loss into independent loss with the same mean.
+	// Those loss traces produce different TCP congestion/recovery behavior.
+	if reverse.LossModel == lossModelNone {
+		return combined
+	}
+	if forward.LossModel == lossModelNone {
+		combined.LossModel = reverse.LossModel
+		combined.LossProbability = reverse.LossProbability
+		combined.DropEveryPacketCount = reverse.DropEveryPacketCount
+		combined.BurstLoss = reverse.BurstLoss
+		return combined
+	}
 	combined.LossModel = lossModelIndependent
 	combined.LossProbability = 1 - (1-effectiveIndependentLoss(forward))*(1-effectiveIndependentLoss(reverse))
 	combined.DropEveryPacketCount = 0
@@ -108,8 +122,9 @@ func TestCombinedExchangeLinkRetainsStrictDropPolicies(t *testing.T) {
 	}
 }
 
-// Burst loss has no exact single-link equivalent; its stationary probability
-// gives calibration a documented, deterministic approximation.
+// Two lossy segments have no general exact single-link equivalent. Their
+// stationary probabilities give calibration a documented approximation;
+// composition with a loss-free segment preserves the original model above.
 func effectiveIndependentLoss(profile linkProfile) float64 {
 	switch profile.LossModel {
 	case lossModelNone:
@@ -1185,11 +1200,12 @@ func subtractPlatformTransportReceiveStats(
 // may prove final admission after a refused selection attempt; provider TCP
 // may retain or regenerate bytes. Both remain in the total failure diagnostics.
 type perfvarPackFailureCounts struct {
-	deviceFailureCount                   uint64
-	deviceRecoveredAdmissionFailureCount uint64
-	providerFailureCount                 uint64
-	providerRecoverableFailureCount      uint64
-	providerDatagramFailureCount         uint64
+	deviceFailureCount                      uint64
+	deviceRecoveredAdmissionFailureCount    uint64
+	providerFailureCount                    uint64
+	providerRecoverableFailureCount         uint64
+	providerDatagramFailureCount            uint64
+	providerRecoverableDatagramFailureCount uint64
 }
 
 // A boundary retains Client identity so lifetime receive and send-recovery
@@ -2110,6 +2126,8 @@ func snapshotPerfvarPackFailures(path *fullTunPath) perfvarPackFailureCounts {
 			path.providerPackSends.workloadRecoverableFailures.Load()
 		counts.providerDatagramFailureCount =
 			path.providerPackSends.workloadDatagramFailures.Load()
+		counts.providerRecoverableDatagramFailureCount =
+			path.providerPackSends.workloadRecoverableDatagramFailures.Load()
 	}
 	return counts
 }
@@ -3711,7 +3729,7 @@ func measurePerfvarRun(
 				record.InvalidReason = "calibration produced zero goodput"
 			}
 		} else if underlay.GoodputGigabits < 1.10*tunneled.GoodputGigabits && record.InvalidReason == "" {
-			record.InvalidReason = "calibration is not at least 10% faster than the tunneled result"
+			record.InvalidReason = perfvarHeadroomReason
 		}
 	}
 	if 0 < carrier.WireByteCount {
@@ -4649,6 +4667,31 @@ func TestPerformanceVariations(t *testing.T) {
 	}
 	testEnvironment := &server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}
 	testEnvironment.Run(t, func(t testing.TB) {
+		var shapedProcess perfvarShapedProcess
+		if config.GateProtocol == perfvarShapedLinkProtocol {
+			shapedProcess, err = newPerfvarShapedProcess()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			pre := measurePerfvarCapacity(ctx, shapedProcess, "pre")
+			cancel()
+			emitPerfvarCapacity(t, pre)
+			// Keep the complete workload denominator after a failed precheck;
+			// the process and consumer both retain its failed capacity verdict.
+			if !pre.Valid {
+				t.Errorf("PERFVAR pre-capacity check failed")
+			}
+			defer func() {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				post := measurePerfvarCapacity(ctx, shapedProcess, "post")
+				emitPerfvarCapacity(t, post)
+				if !post.Valid {
+					t.Errorf("PERFVAR post-capacity check failed")
+				}
+			}()
+		}
 		failureCount := 0
 		recordsByScenario := make([][]perfvarRunRecord, len(scenarios))
 		maximumRunCount := 0
@@ -4682,6 +4725,9 @@ func TestPerformanceVariations(t *testing.T) {
 						runIndex,
 						measureErr,
 					)
+				}
+				if config.GateProtocol == perfvarShapedLinkProtocol {
+					perfvarAnnotateShapedRun(&record, shapedProcess)
 				}
 				emitPerfvarRecord(t, record)
 				recordsByScenario[scenarioIndex] = append(recordsByScenario[scenarioIndex], record)

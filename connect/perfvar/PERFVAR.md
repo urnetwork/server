@@ -837,6 +837,14 @@ admitted. Probes therefore cannot keep that pre-load boundary perpetually busy.
 Every early-error path cancels and joins the nested bulk transfer before it
 returns.
 
+Pack failure diagnostics retain raw recoverable and provider-datagram counts.
+An owned UDP admission refusal can belong to both categories; an explicit
+monotonic overlap counter makes the allowed probe-scope gate their union,
+not their sum. Outside that scope only the existing recovery allowance applies.
+Invalid overlap/backward counters and unrecovered unclassified failures remain
+fatal. Probe attempt/success/failure counts and percentile sample rules are
+unchanged.
+
 Construction is transactional. Every acquisition boundary can inject a
 failure, and rollback synchronously closes the exact partial graph while
 continuing after independent cleanup errors. Transport callbacks publish route
@@ -862,11 +870,260 @@ The calibration profile is composed from the application and provider access
 segments for exchange. For P2P it uses the direct profile oriented from the
 application user's perspective.
 
+Composing a declared loss-free segment preserves the other segment's exact
+loss model and parameters, including burst state transitions and every-N
+packet loss. Only two lossy segments use the stationary independent-loss
+approximation. Previously, even clean provider access changed cell-edge burst
+loss into independent loss; measurements made before that correction are not
+interchangeable with corrected calibration. Freeze and rebuild both arms for
+a new comparison; retain earlier calibration-invalid records as failures.
+
+Direct latency-under-load bulk timing ends when the receiver consumes the
+payload, before mandatory probe-reader and sender/server joins. Cleanup time
+is not transferred-byte time and must not reduce the calibration goodput;
+the full-TUN bulk helper likewise fixes its result before probe cleanup.
+Earlier direct measurements included those joins, so a timing-fix comparison
+also requires both arms to be rebuilt and rerun from the same frozen source.
+
 A run is calibration-valid only when untunneled goodput is at least 10% above
 tunneled goodput. A correct but calibration-limited run keeps its measurements
 and receives an `invalid_reason`; it must not support a route-throughput claim.
 This 10% rule identifies obvious simulator ceilings but is weaker than the
 original aspirational two-times headroom target.
+
+### Optional separated shaped-link gates (schema 15)
+
+`CONNECT_PERFVAR_GATE_PROTOCOL=shaped-link-v1` is an explicit instrument
+change. It retains the schema-14 calibration flag, `invalid_reason`, filtered
+legacy aggregate, all workload bytes, and every attempted run. The new
+`invalid_kind: "headroom-limited"` means only that a correct tunnel came within
+10% of direct goodput. Queue refusal, corruption, missing ownership, missing
+samples, failed setup, and failed payloads cannot receive that classification.
+Historical schema-14 invalid runs remain invalid; changing a label on an old
+record cannot create a schema-15 observation.
+
+Every opted-in measurement process runs an independent fixed open-loop fixture
+before and after its complete matrix. It submits exactly 8,192 packets in
+32-packet bursts for each of three packet sizes: 64, 1,200 and 1,500 bytes. The
+64-byte cell shapes at 6.4 Mbit/s; the other two shape at 100 Mbit/s. Offered
+rate is twice the shaping rate, with a two-millisecond propagation delay and
+32-packet token burst. Demand never depends on the candidate's measured
+goodput. All cells use the same real `directionalLink` scheduler, verify
+payload/order and token/release arithmetic, and require exact drain with zero
+drops. Maximum generator lateness and release lateness are each 20 ms,
+release-lateness p99 is at most 5 ms, and completion must be no earlier than
+the declared serialization envelope and no more than 30 ms later. These
+tolerances and all demand inputs are hashed and frozen before A/A measurement.
+
+`[perfvar-capacity]` records must bracket the matrix in the same process. Both
+receipts and every workload record bind to the executable SHA-256, exact
+capacity-plan hash, Go/toolchain, CPU/GOMAXPROCS, and Server/Connect source
+metadata. A late generator, a missing postcheck, changed source, missing cell,
+reversed boundary, or false `valid` field fails the process. The consumer
+recomputes all gates from raw counts and times. A standalone capacity run is
+an instrument A/A diagnostic, never a substitute for workload coverage:
+
+```sh
+GOMAXPROCS=8 CONNECT_PERFVAR_CAPACITY_ONLY=1 \
+go test ./connect/perfvar -run '^TestPerfvarShapedLinkCapacityMeasurement$' \
+  -count=1 -timeout=1m -v
+```
+
+The fixture certifies raw scheduler service and fidelity for the bounded
+one-hop cell-edge profiles with access rates at most 5 Mbit/s, including their
+declared dynamic phases. It does not certify a 1-Gbit/s clean-LAN protocol
+ceiling, gVisor or Pion CPU capacity, physical radio service, or device memory.
+The added fixture also changes allocator/scheduler history, which is another
+reason fresh A/A and compatible source baselines are mandatory.
+
+With passing capacity receipts and complete correctness/ownership evidence,
+the additional `shaped_link` aggregate includes all five nested runs. The
+version-2 comparator qualifies latency/setup, stall counts, wire efficiency,
+and host memory separately from throughput. Goodput, duration, and the
+tunnel/direct efficiency ratio still require the legacy 10% headroom on
+every nested run. Outside the bounded shaped-link scope, every metric still
+requires that headroom. The consumer independently recomputes legacy and
+full-denominator aggregates and checks both against the emitted values.
+
+The comparison unit remains a fresh process, with six complete processes per
+arm and five nested repetitions. If any paired process cannot qualify a
+metric, that entire metric cohort stays unqualified; the comparator never
+selects a favorable subset. It reports planned, observed, correct, and
+qualified nested-run counts plus every exclusion reason. Other qualified
+metrics can expose regressions. `PARTIAL_METRIC_COVERAGE` preserves their
+statistics, but cannot issue a passing full-PERF receipt or promote a baseline.
+Even a statistically improved latency result does not promote unqualified
+throughput. Schema 14 remains the default until the new instrument's frozen
+A/A study and baseline are recorded in `tests/PERFVAR-MEASUREMENTS.md`.
+
+Unqualified metrics remain in the predeclared Holm family, equivalent to
+unavailable p-values of one. Their removal cannot make another metric's
+significance easier. With six paired processes, the two-sided exact
+randomization p-value cannot be below `2/64 = 0.03125`; Holm adjustment across
+the full matrix therefore cannot establish an improvement at alpha 0.05.
+The existing harmful-shift confidence-interval guard still blocks a material
+negative shift. This protocol preserves the agreed sample count and method;
+a larger, separately preregistered study is needed to establish improvements.
+An A/A capacity result or `INDISTINGUISHABLE` verdict is not proof of adequate
+power or automatic baseline promotion.
+
+### UDP provider-return admission diagnostic (2026-09-30)
+
+The retained `p2p-legacy` / `cell-edge-5m-down-1m-up` download diagnostic
+offered 468 datagrams in each of two repetitions. Its exact provider-return
+prefixes rejected 93 and 80 packets, with zero provider return-queue drops.
+The bounded Pack samples identify `pack-admission`, no ACK, zero timeout,
+and no enclosing-owner recovery. These are provider **source admission**
+failures, not Pion receive-credit or modeled-link receiver drops. The Pack
+sample prefix is not token-correlated with individual return items; it must
+not be represented as such. Both runs remain incorrect under the unchanged
+all-source-admitted gate.
+
+`connect/TestProviderUdpReturnAdmissionIdentifiesFullCarrierFallback`
+independently tests the actual provider singleton-batch, direct-write and
+fallback owners with an explicit physical-write barrier. A ready carrier
+admits all 468 offers directly. With service stopped, 212 direct admissions
+and 32 queued admissions precede 224 typed refusals; each refusal follows an
+attempted zero-wait direct write to the full carrier. Every admitted identity
+drains exactly once after release, and the source immediately recovers. The
+four route slots, 32 Pack slots, 256-KiB compact queue and shared reservation
+remain unchanged. This proves the capacity/refusal mechanism, not the exact
+historical SCTP service trace or that all available byte allowance is used.
+
+The existing detached real-SCTP cell-edge ledger also exposes refusal and
+retained-memory lower bounds above its fixed association allowance. Its clean
+warmup omits historical ICE/DTLS/control draws, so it is a discriminator, not
+a replacement PERFVAR result. Neither larger buffers, blocking shared UDP
+workers, nor bypassing logical-group ownership is justified by these results.
+That diagnostic did not change production policy or correctness/memory gates.
+
+The subsequent UDP socket-return implementation reserves bounded ownership
+from the existing parent before consuming a datagram. Exhausted
+credit pauses/rearms the exact socket registration; one prepaid read owner per
+flow remains recoverable through zero-wait Pack refusal. Established client
+UDP sends and actual provider UDP socket returns now both default to NoAck,
+following the matched-policy study below. Explicit ACK mode retains delivery
+past ordinary ACK timeout. Legacy public provider callbacks and ICMP retain
+their existing policy; this is not qualification of an all-IP-return invariant.
+
+Queued cancellation is joined before the original read owner is released.
+Once a reliable send item has been materialized, provider/flow teardown cannot
+withdraw that flight or its charge; it detaches and the later ACK/error
+retires it. Public borrowed batch observers use the existing bounded receive
+dispatcher, so an observer cannot block the shared socket reader. A full
+observer queue leaves the same prepaid read owner pending, without increasing
+queue capacity. Each detached ACK capsule charges 2 KiB from the unchanged
+parent allowance, including its bounded attribution/evidence graph; the
+deterministic known-structure-plus-runtime envelope is 1,504 bytes on the local
+64-bit build. This is an accounting envelope, not whole-process measurement.
+Kernel receive buffering remains finite: socket/OS loss is a
+separate observation, never an excuse for a software Pack-admission drop.
+
+Deterministic coverage is in `connect/ip_datagram_return_read_test.go`,
+`ip_provider_datagram_{ack,return,fanout}_test.go`, and
+`transfer_prepared_{memory,handoff}_test.go`. It includes no consumption before
+credit, descriptor-generation safety, fair rearm, cancellation before/after
+materialization and physical write, late ACK after provider close, receiver
+injection withholding ACK, exact credit release, and public callback ownership.
+The historical opt-in research-contract test is not a GREEN qualification of
+this narrower socket-only policy.
+
+The matched-policy study below informs this policy choice. The immutable old
+NoAck control retains its diagnostic history, but cannot establish an ACK-policy
+speedup because it used a different provider ownership mechanism. Compare
+source admission, delivery/service and loss, raw throughput/latency, wire and
+recovery work, kernel drops, and memory endpoints/peaks in the full denominator.
+The existing calibration, correctness, and absolute memory gates stay in force.
+Focused normal/race passes alone do not establish performance or memory
+non-regression, and the previous absolute memory failure is not excused by a
+relative improvement.
+
+### Matched UDP ACK-policy study
+
+`CONNECT_PERFVAR_FEATURE=udp-transfer-ack` selects ACK-required delivery for
+both established client UDP sends and actual provider UDP socket returns.
+`udp-transfer-noack` selects NoAck at both of those same boundaries. The flags
+are mutually exclusive and apply per fixture; a missing endpoint setting is
+an error. The ACK arm overrides direct-route and legacy UDP-collapse demotion.
+The NoAck arm retains the same prepaid socket-read owner and bounded local
+admission retry as the ACK arm. An accepted NoAck write is not peer-ACK evidence.
+Borrowed public provider callbacks, ICMP, initial provider-race control sends,
+and opening-contract reliability are outside the established-UDP policy switch.
+
+The source-identical arms replay identical impairment traces, while their
+scenario hashes and recorded features stay distinct. The focused matrix is
+`p2p-fast,p2p-legacy` ×
+`clean-lan,cell-edge-5m-down-1m-up,cell-edge-1m-down-250k-up` ×
+`upload,download`, with `udp`, one hop, default resources and the unchanged
+payload, offered rate, seed, deadline and memory allowances. Freeze six paired
+fresh processes per arm before execution, alternate ACK/NoAck order by pair,
+and retain five nested repetitions per cell: 60 runs per process, 360 per arm.
+Repetitions are nested observations, not independent processes. No old
+asymmetric result may be pooled into either arm. Canonical runner receipts
+continue to require their full no-feature matrices; this focused study is a
+separate diagnostic cohort and cannot replace a full campaign.
+
+Each process uses the ordinary `TestPerformanceVariations` entry point with
+`CONNECT_PERFVAR_MEASURE=1`, `CONNECT_PERFVAR_RUN_COUNT=5`,
+`CONNECT_PERFVAR_WORKLOAD=udp`, `CONNECT_PERFVAR_TOPOLOGY=one-hop`,
+`CONNECT_PERFVAR_ROUTE=p2p-fast,p2p-legacy`, both directions and the three
+profiles above. Set exactly one policy feature and record the effective
+`GOMAXPROCS=8`, source/tool hashes, process identity and arm order. The
+coordinator schedules CPU-exclusive performance processes.
+
+The prerequisite selectors are `TestUdpTransferMatchedWirePolicy`,
+`TestProviderDatagram*`, `TestDatagramAdmissionObservation*`,
+`TestPerfvarUdpTransferPolicy*`, `TestNoAckSendTrackerExactOwnerRecoveryOnly`,
+and `TestFullTunMatchedUdpTransferPolicies`, with normal and race coverage.
+The held-writer test proves that one refused input is retained and later
+delivered once, rather than treating arbitrary retries as successful delivery.
+Optional NoAck observations defer only synchronous admission refusal until
+that exact owner completes; overflow and accepted route-write errors remain
+failures. Packet loss on the modeled link stays separate from software loss.
+
+Compare delivered/offered datagrams, corruption/duplicates/reordering,
+software admission and receive drops, modeled underlay drops, Transfer resend
+and ACK work, useful throughput, p95 latency, wire cost, and Go memory
+endpoints/peaks. The ordinary provider-source gate requires every measured
+socket return to be accounted for; a shortfall may be OS/socket loss but must
+remain a failure with its observed boundary. The userspace harness cannot
+infer per-socket kernel-drop counts from a process-global host counter: report
+that limitation explicitly and collect platform-native socket-drop evidence
+where available. Keep all existing absolute correctness/memory gates.
+
+The completed diagnostic cohort and immutable evidence hashes are recorded in
+[`tests/PERFVAR-MEASUREMENTS.md`](../../../tests/PERFVAR-MEASUREMENTS.md)
+under record `udp-matched-policy-20260930-01`. All 720 runs were correct and
+valid under the UDP gates, with 360 matching trace pairs and no software,
+source-NAT or unexpected modeled drops. Across matched observations, the
+NoAck/ACK median useful-goodput ratio was `0.99994`, wire-byte ratio `0.91369`,
+and peak heap-plus-stack ratio `0.94989`; the lowest cell median goodput ratio
+was `0.99366`, with a lowest independent-process cell median of `0.95634`.
+These are descriptive userspace measurements, not a statistical
+equivalence or physical-device qualification. The p95 latency ratio `0.87428`
+is for delivered datagrams only and excludes lost datagrams. The P2P legacy
+cell-edge-1m upload cell had a `1.048` median p95 ratio, so this does not claim
+improved latency in every cell.
+
+NoAck delivered `115,409 / 115,620` datagrams; ACK delivered all `115,620`.
+The `211` missing NoAck datagrams (`0.1825%` of all offers) occurred only on
+shaped profiles: P2P fast lost 55 download/13 upload at cell-edge-1m and
+112 download/13 upload at cell-edge-5m; P2P legacy lost 1 download/17 upload
+at cell-edge-5m. Clean-LAN lost none. Socket/OS drops were not independently
+measured. Transfer recovery resend/probe writes fell from `5,955` to `42`, and
+compact recovery ACK observations from `30,992` to `618`. These carrier
+counters include setup/contract/control work, not only application UDP ACKs.
+
+Given the requested best-effort, bandwidth-limited UDP behavior, these results
+support symmetric established-UDP NoAck as the default. It preserves the
+bounded local admission owner while avoiding Transfer retransmission and
+head-of-line retention for ordinary datagrams. It accepts the demonstrated
+delivery loss instead of claiming reliability equivalent to ACK mode. Both
+endpoint settings remain selectable for the ACK control. Initial provider
+selection, contract opening, TCP, ICMP and public callback policies keep their
+explicit scopes above. Full PERF, absolute mobile memory gates and physical
+device acceptance still require their own retained-source qualification;
+this cohort did not promote a baseline.
 
 ## Result format
 

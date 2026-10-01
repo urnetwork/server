@@ -20,6 +20,7 @@ import (
 type flowTraceClient struct {
 	url, token, session string
 	client              *http.Client
+	dnsEnabled          bool
 }
 
 func startFlowTrace(ctx context.Context, config *proxyConfigResult, target string) (*flowTraceClient, error) {
@@ -42,14 +43,36 @@ func startFlowTrace(ctx context.Context, config *proxyConfigResult, target strin
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
-	body, _ := json.Marshal(flowtrace.StartRequest{Port: uint16(port)})
-	snapshot, err := client.call(ctx, http.MethodPost, "", body)
-	if err != nil {
+	if err := client.start(ctx, uint16(port)); err != nil {
 		client.client.CloseIdleConnections()
 		return nil, err
 	}
-	client.session = snapshot.Session
 	return client, nil
+}
+
+func (client *flowTraceClient) start(ctx context.Context, port uint16) error {
+	body, _ := json.Marshal(flowtrace.StartRequest{Port: port, IncludeDns: true})
+	snapshot, err := client.call(ctx, http.MethodPost, "", body)
+	if err != nil {
+		return err
+	}
+	if !snapshot.DnsEnabled {
+		return errors.New("deployed server does not support DNS flow diagnostics")
+	}
+	client.session = snapshot.Session
+	client.dnsEnabled = true
+	return nil
+}
+
+// Disarm this exact generation even when the probe's request context has
+// expired. A failed disarm is reported by the caller; server expiry remains a
+// bounded fallback, not the intended cleanup path.
+func (c *flowTraceClient) stop() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := c.call(ctx, http.MethodDelete, "", nil)
+	c.client.CloseIdleConnections()
+	return err
 }
 
 func (c *flowTraceClient) call(ctx context.Context, method, query string, body []byte) (flowtrace.Snapshot, error) {
@@ -85,7 +108,12 @@ type flowTraceTransport struct {
 	trace     *flowTraceClient
 }
 
+type flowTraceDnsContextKey struct{}
+
 func (t flowTraceTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if t.trace.dnsEnabled && t.protocol == "wireguard" {
+		request = request.WithContext(context.WithValue(request.Context(), flowTraceDnsContextKey{}, true))
+	}
 	return t.transport.RoundTrip(request)
 }
 
@@ -98,6 +126,7 @@ func (t flowTraceTransport) failure(ctx context.Context, trace *httpsRequestTrac
 	}
 	trace.stateLock.Lock()
 	origin, localPort := trace.originAddress, trace.originLocalPort
+	dnsQueries := append([]flowtrace.DnsQuery(nil), trace.dnsQueries...)
 	trace.stateLock.Unlock()
 	// Keep target timing and its error intact while obtaining the already
 	// recorded metadata. This read never retries the target request.
@@ -106,6 +135,9 @@ func (t flowTraceTransport) failure(ctx context.Context, trace *httpsRequestTrac
 	after, err := t.trace.call(diagnosticCtx, http.MethodGet, fmt.Sprintf("?after=%d&after_dropped=%d", before.Cursor, before.Dropped), nil)
 	if err != nil {
 		return fmt.Errorf("%w; flow_provenance={unavailable: %s}", requestErr, err)
+	}
+	if t.trace.dnsEnabled && t.protocol == "wireguard" {
+		requestErr = withDnsFlowEvidence(requestErr, after, dnsQueries)
 	}
 	flow, returns, attributionErr := flowtrace.Attribute(after, t.protocol, origin, localPort)
 	if attributionErr != nil {
@@ -129,6 +161,27 @@ func (t flowTraceTransport) failure(ctx context.Context, trace *httpsRequestTrac
 	}
 	return fmt.Errorf("%w; flow_provenance={scope=actual-return-flow origin=%s local=%s provider_count=%d first_providers=[%s] payload_events=%d first_events=[%s]}",
 		requestErr, flow.Origin, flow.Local, len(providerNames), strings.Join(providerNames[:min(8, len(providerNames))], ","), len(returns), strings.Join(events, " | "))
+}
+
+func withDnsFlowEvidence(cause error, snapshot flowtrace.Snapshot, queries []flowtrace.DnsQuery) error {
+	evidence, err := flowtrace.AttributeDns(snapshot, queries)
+	if err != nil {
+		return fmt.Errorf("%w; dns_flow_provenance={unavailable: %s}", cause, err)
+	}
+	items := make([]string, 0, len(evidence))
+	for index, item := range evidence {
+		if item.Unavailable != "" {
+			items = append(items, fmt.Sprintf("q%d unavailable=%s", index, item.Unavailable))
+			continue
+		}
+		returns := make([]string, 0, min(4, len(item.Replies)))
+		for _, event := range item.Replies[:min(4, len(item.Replies))] {
+			returns = append(returns, fmt.Sprintf("%s/provider=%s/bytes=%d", event.At.UTC().Format(time.RFC3339Nano), event.Provider, event.Dns.PacketBytes))
+		}
+		items = append(items, fmt.Sprintf("q%d local=%s resolver=%s socket_active_at_freeze=%t admission=%s replies=%d first_returns=[%s] other_id_replies=%d tuple_only_icmp_generation_unproven=%d",
+			index, item.Flow.Local, item.Flow.Origin, item.Query.Active, item.Admission, len(item.Replies), strings.Join(returns, ","), item.OtherIdReplies, item.TupleOnlyIcmp))
+	}
+	return fmt.Errorf("%w; dns_flow_provenance={scope=hosted-submission-and-authenticated-return correlation=tuple+dns-id-not-authenticated checksums=unchecked admission_not_upstream_write=true queries=[%s]}", cause, strings.Join(items, " | "))
 }
 
 func withFlowTrace(config *proxyConfigResult, protocol string, transport http.RoundTripper) http.RoundTripper {

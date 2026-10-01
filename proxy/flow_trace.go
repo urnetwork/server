@@ -52,7 +52,7 @@ func (h flowTraceHandler) ServeHTTP(w http.ResponseWriter, request *http.Request
 			http.Error(w, "invalid trace target", http.StatusBadRequest)
 			return
 		}
-		recorder, err := flowtrace.New(start.Port, time.Now())
+		recorder, err := flowtrace.NewWithDns(start.Port, start.IncludeDns, time.Now())
 		if err != nil {
 			http.Error(w, "trace unavailable", http.StatusServiceUnavailable)
 			return
@@ -64,7 +64,7 @@ func (h flowTraceHandler) ServeHTTP(w http.ResponseWriter, request *http.Request
 		}
 		device.flowTrace.Store(recorder)
 		snapshot = recorder.Cursor(time.Now())
-	case http.MethodGet:
+	case http.MethodGet, http.MethodDelete:
 		device := h.lookup(id)
 		if device == nil {
 			http.Error(w, "trace unavailable", http.StatusGone)
@@ -80,7 +80,12 @@ func (h flowTraceHandler) ServeHTTP(w http.ResponseWriter, request *http.Request
 			http.Error(w, "trace generation unavailable", http.StatusGone)
 			return
 		}
-		if request.URL.Query().Get("cursor_only") != "1" {
+		if request.Method == http.MethodDelete {
+			if !device.flowTrace.CompareAndSwap(recorder, nil) {
+				http.Error(w, "trace generation unavailable", http.StatusGone)
+				return
+			}
+		} else if request.URL.Query().Get("cursor_only") != "1" {
 			after, err := strconv.ParseUint(request.URL.Query().Get("after"), 10, 64)
 			if err != nil {
 				http.Error(w, "invalid cursor", http.StatusBadRequest)

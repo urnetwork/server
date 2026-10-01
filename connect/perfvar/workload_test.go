@@ -191,6 +191,7 @@ type workloadTCPFlowTestSettings struct {
 	beforeBulkSenderWaitHook    func()
 	beforeBulkReceiverDoneHook  func()
 	afterLoadedProbeAttemptHook func(int)
+	bulkNowForTest              func() time.Time
 }
 
 // Default resources retain production settings with enough ring space for calibration.
@@ -2740,6 +2741,10 @@ func measureLatencyUnderLoadWithFlowTestSettingsDirection(
 	startHook func(*tunPath) error,
 	testSettings *workloadTCPFlowTestSettings,
 ) (workloadResult, error) {
+	bulkNow := time.Now
+	if testSettings != nil && testSettings.bulkNowForTest != nil {
+		bulkNow = testSettings.bulkNowForTest
+	}
 	path, err := newTunPath(ctx, profile, resources)
 	if err != nil {
 		return workloadResult{}, err
@@ -2844,6 +2849,7 @@ func measureLatencyUnderLoadWithFlowTestSettingsDirection(
 	)
 	bulkReceiverReady := make(chan struct{})
 	bulkReceiverFinished := make(chan struct{})
+	var bulkReceiverEnd time.Time
 	var flowServerSettings *logicalTCPFlowServerSettings
 	if testSettings != nil {
 		flowServerSettings = testSettings.flowServerSettings
@@ -2868,6 +2874,10 @@ func measureLatencyUnderLoadWithFlowTestSettingsDirection(
 				testSettings.beforeBulkReceiverDoneHook != nil {
 				testSettings.beforeBulkReceiverDoneHook()
 			}
+			// Delivery ends the bulk interval. Joining the probe reader and
+			// sender below remains mandatory, but cannot inflate calibration
+			// time after the receiver already consumed the entire payload.
+			bulkReceiverEnd = bulkNow()
 			close(bulkReceiverFinished)
 			return copyErr
 		},
@@ -2923,7 +2933,7 @@ func measureLatencyUnderLoadWithFlowTestSettingsDirection(
 	}
 	bulkSenderDone := make(chan error, 1)
 	bulkSenderFinished := make(chan struct{})
-	bulkStart := time.Now()
+	bulkStart := bulkNow()
 	go func() {
 		defer close(bulkSenderFinished)
 		publishResult := func(err error) {
@@ -2999,7 +3009,8 @@ func measureLatencyUnderLoadWithFlowTestSettingsDirection(
 	if err := flowServer.Wait(); err != nil {
 		return workloadResult{}, contextBoundWorkloadError(ctx, err)
 	}
-	bulkDuration := time.Since(bulkStart)
+	<-bulkReceiverFinished
+	bulkDuration := bulkReceiverEnd.Sub(bulkStart)
 	postLoadSamples := probeMany(latencyProbePostLoadStartSequence, 12)
 	joinProbeServer()
 	_ = probeConnection.Close()

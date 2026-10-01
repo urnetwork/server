@@ -65,8 +65,9 @@ type Options struct {
 	// device-wide return-path switch that makes those protocols steal packets
 	// from one another.
 	OverlapProtocols bool
-	// TraceTLSFlows explicitly arms bounded provider-to-flow recording for
-	// this temporary fixture; it requires the matching diagnostic server API.
+	// TraceTLSFlows explicitly arms bounded TLS and UDP DNS egress/return
+	// metadata for this temporary fixture, using the same shared capacity.
+	// It requires a server that positively advertises DNS trace support.
 	TraceTLSFlows bool
 	// Progress receives identity-free, redacted campaign milestones. It is
 	// optional so package callers that only consume the result matrix remain
@@ -177,6 +178,7 @@ type httpsRequestTrace struct {
 	peerAddress       string
 	originAddress     netip.AddrPort
 	originLocalPort   uint16
+	dnsQueries        []flowtrace.DnsQuery
 	certificate       string
 	gotConn           bool
 	reused            bool
@@ -972,7 +974,13 @@ func (r *runner) runIteration(ctx context.Context) map[string]error {
 			if traceErr != nil {
 				r.progressf("provider flow diagnostics unavailable: %v", traceErr)
 			} else {
-				defer provisioned.ProxyConfigResult.flowTrace.client.CloseIdleConnections()
+				defer func() {
+					if err := provisioned.ProxyConfigResult.flowTrace.stop(); err != nil {
+						r.progressf("provider flow diagnostics disarm unconfirmed: %v", err)
+					} else {
+						r.progressf("provider flow diagnostics disarmed")
+					}
+				}()
 				r.progressf("provider flow diagnostics armed; local channel aliases are not provider identities")
 			}
 		}

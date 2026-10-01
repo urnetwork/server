@@ -9,6 +9,8 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+
+	"github.com/urnetwork/server/proxy/flowtrace"
 )
 
 const wireGuardDNSCap = 8
@@ -20,6 +22,9 @@ type wireGuardDNSContextKey struct{}
 type wireGuardDNSFlow struct {
 	local, remote netip.AddrPort
 	active, tcp   bool
+	queryId       uint16
+	queryKnown    bool
+	queryRepeated bool
 }
 
 type wireGuardDNSPacket struct {
@@ -30,18 +35,19 @@ type wireGuardDNSPacket struct {
 }
 
 type wireGuardDNSRequest struct {
-	stack      *wireGuardStack
-	mu         sync.Mutex
-	flows      [wireGuardDNSCap]wireGuardDNSFlow
-	flowN      int
-	packets    [wireGuardDNSCap]wireGuardDNSPacket
-	packetN    int
-	lookup     [6]uint16 // started, success, not-found, deadline, canceled, error
-	io         [7]uint16 // reads, delivered reads, read bytes, writes, write bytes, read errors, write errors
-	limited    bool
-	frozen     bool
-	freezeOnce sync.Once
-	text       string
+	stack            *wireGuardStack
+	mu               sync.Mutex
+	flows            [wireGuardDNSCap]wireGuardDNSFlow
+	flowN            int
+	packets          [wireGuardDNSCap]wireGuardDNSPacket
+	packetN          int
+	lookup           [6]uint16 // started, success, not-found, deadline, canceled, error
+	io               [7]uint16 // reads, delivered reads, read bytes, writes, write bytes, read errors, write errors
+	limited          bool
+	frozen           bool
+	freezeOnce       sync.Once
+	text             string
+	providerMetadata bool
 }
 
 type wireGuardDNSExchange struct {
@@ -87,7 +93,7 @@ func (r *wireGuardDNSRequest) exchange(connection net.Conn, tcp bool) *wireGuard
 	if r == nil {
 		return nil
 	}
-	flow := wireGuardDNSFlow{dnsAddrPort(connection.LocalAddr()), dnsAddrPort(connection.RemoteAddr()), true, tcp}
+	flow := wireGuardDNSFlow{local: dnsAddrPort(connection.LocalAddr()), remote: dnsAddrPort(connection.RemoteAddr()), active: true, tcp: tcp}
 	r.stack.statsLock.Lock()
 	defer r.stack.statsLock.Unlock()
 	r.mu.Lock()
@@ -153,6 +159,41 @@ func (x *wireGuardDNSExchange) ioEvent(n int, err error, write bool) {
 			r.add(&r.io[5], 1)
 		}
 	}
+}
+
+// Only the explicit provider trace needs a DNS ID. Keep the ordinary request
+// observer payload-free, and never retain the borrowed Write buffer.
+func (x *wireGuardDNSExchange) wroteQuery(packet []byte, n int, err error) {
+	if x == nil || !x.request.providerMetadata || err != nil || n != len(packet) || n < 12 || packet[2]&0x80 != 0 {
+		return
+	}
+	r := x.request
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.frozen || r.flows[x.index].tcp {
+		return
+	}
+	flow := &r.flows[x.index]
+	flow.queryRepeated = flow.queryKnown
+	flow.queryId, flow.queryKnown = binary.BigEndian.Uint16(packet[:2]), true
+}
+
+// Called after freeze. An incomplete or repeated local query fails closed;
+// inactive sockets remain explicitly inactive rather than claiming a late reply.
+func (r *wireGuardDNSRequest) providerQueries() []flowtrace.DnsQuery {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.providerMetadata || !r.frozen || r.limited {
+		return nil
+	}
+	var queries []flowtrace.DnsQuery
+	for _, flow := range r.flows[:r.flowN] {
+		if flow.tcp || !flow.queryKnown || flow.queryRepeated {
+			return nil
+		}
+		queries = append(queries, flowtrace.DnsQuery{LocalPort: flow.local.Port(), Resolver: flow.remote, Id: flow.queryId, Active: flow.active})
+	}
+	return queries
 }
 
 func (r *wireGuardDNSRequest) lookupEvent(start bool, err error) {

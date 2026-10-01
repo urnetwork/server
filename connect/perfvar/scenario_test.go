@@ -132,6 +132,7 @@ type perfvarScenario struct {
 // Parsed selection values are kept separate from scenario defaults.
 type perfvarConfig struct {
 	Enabled              bool
+	GateProtocol         string
 	Routes               map[string]bool
 	Profiles             map[string]bool
 	Workloads            map[string]bool
@@ -160,8 +161,10 @@ const (
 	perfvarFeatureNoFastPathSizeAware  = "no-fast-path-size-aware"
 	perfvarFeatureLaneRule             = "reliable-lane-proven-recovery"
 	perfvarFeatureNoLaneRule           = "no-reliable-lane-proven-recovery"
-	// Legacy established-UDP policy control for the datagram NoAck A/B.
-	perfvarFeatureUdpTransferAck = "udp-transfer-ack"
+	// Matched established-UDP policies apply to client sends and real provider
+	// socket returns together. Neither flag measures the old asymmetric path.
+	perfvarFeatureUdpTransferAck   = "udp-transfer-ack"
+	perfvarFeatureUdpTransferNoAck = "udp-transfer-noack"
 )
 
 // P2P topology names resolve to physical adjacent stream carriers. Split
@@ -439,18 +442,22 @@ func perfvarMemoryObservationFor(samples []uint64, heapMax uint64, sysMax uint64
 
 // Every run contains the calibration, tunneled result, and exact identities.
 type perfvarRunRecord struct {
-	SchemaVersion   int                       `json:"schema_version"`
-	ScheduleVersion int                       `json:"schedule_version"`
-	RecordType      string                    `json:"record_type"`
-	ScenarioHash    string                    `json:"scenario_hash"`
-	ProfileHash     string                    `json:"profile_hash"`
-	RunIndex        int                       `json:"run_index"`
-	Trace           perfvarTrace              `json:"trace"`
-	Scenario        perfvarScenario           `json:"scenario"`
-	Host            perfvarHostMetadata       `json:"host"`
-	Underlay        workloadResult            `json:"underlay"`
-	Tunneled        workloadResult            `json:"tunneled"`
-	Carrier         perfvarCarrierObservation `json:"carrier"`
+	SchemaVersion      int                       `json:"schema_version"`
+	GateProtocol       string                    `json:"gate_protocol,omitempty"`
+	BinarySHA256       string                    `json:"binary_sha256,omitempty"`
+	CapacityPlanSHA256 string                    `json:"capacity_plan_sha256,omitempty"`
+	InvalidKind        string                    `json:"invalid_kind,omitempty"`
+	ScheduleVersion    int                       `json:"schedule_version"`
+	RecordType         string                    `json:"record_type"`
+	ScenarioHash       string                    `json:"scenario_hash"`
+	ProfileHash        string                    `json:"profile_hash"`
+	RunIndex           int                       `json:"run_index"`
+	Trace              perfvarTrace              `json:"trace"`
+	Scenario           perfvarScenario           `json:"scenario"`
+	Host               perfvarHostMetadata       `json:"host"`
+	Underlay           workloadResult            `json:"underlay"`
+	Tunneled           workloadResult            `json:"tunneled"`
+	Carrier            perfvarCarrierObservation `json:"carrier"`
 	// Progress is sampled only for the TCP payload workloads; other
 	// workloads leave it empty.
 	Progress           perfvarProgressObservation `json:"progress"`
@@ -470,24 +477,26 @@ type perfvarRunRecord struct {
 
 // Aggregate values retain all comparison statistics requested by the plan.
 type perfvarAggregateRecord struct {
-	SchemaVersion     int             `json:"schema_version"`
-	ScheduleVersion   int             `json:"schedule_version"`
-	RecordType        string          `json:"record_type"`
-	ScenarioHash      string          `json:"scenario_hash"`
-	ProfileHash       string          `json:"profile_hash"`
-	Scenario          perfvarScenario `json:"scenario"`
-	RunCount          int             `json:"run_count"`
-	GoodputMedianGbps float64         `json:"goodput_median_gigabits_per_second"`
-	GoodputP95Gbps    float64         `json:"goodput_p95_gigabits_per_second"`
-	GoodputWorstGbps  float64         `json:"goodput_worst_gigabits_per_second"`
-	DurationMedian    time.Duration   `json:"duration_median_nanoseconds"`
-	DurationP95       time.Duration   `json:"duration_p95_nanoseconds"`
-	DurationWorst     time.Duration   `json:"duration_worst_nanoseconds"`
-	SetupMedian       time.Duration   `json:"setup_median_nanoseconds"`
-	LatencyP95Median  time.Duration   `json:"latency_p95_median_nanoseconds"`
-	LoadedP95Median   time.Duration   `json:"loaded_latency_p95_median_nanoseconds"`
-	EfficiencyMedian  float64         `json:"efficiency_median"`
-	WireEfficiency    float64         `json:"wire_efficiency_median"`
+	SchemaVersion     int                     `json:"schema_version"`
+	GateProtocol      string                  `json:"gate_protocol,omitempty"`
+	ShapedLink        *perfvarShapedAggregate `json:"shaped_link,omitempty"`
+	ScheduleVersion   int                     `json:"schedule_version"`
+	RecordType        string                  `json:"record_type"`
+	ScenarioHash      string                  `json:"scenario_hash"`
+	ProfileHash       string                  `json:"profile_hash"`
+	Scenario          perfvarScenario         `json:"scenario"`
+	RunCount          int                     `json:"run_count"`
+	GoodputMedianGbps float64                 `json:"goodput_median_gigabits_per_second"`
+	GoodputP95Gbps    float64                 `json:"goodput_p95_gigabits_per_second"`
+	GoodputWorstGbps  float64                 `json:"goodput_worst_gigabits_per_second"`
+	DurationMedian    time.Duration           `json:"duration_median_nanoseconds"`
+	DurationP95       time.Duration           `json:"duration_p95_nanoseconds"`
+	DurationWorst     time.Duration           `json:"duration_worst_nanoseconds"`
+	SetupMedian       time.Duration           `json:"setup_median_nanoseconds"`
+	LatencyP95Median  time.Duration           `json:"latency_p95_median_nanoseconds"`
+	LoadedP95Median   time.Duration           `json:"loaded_latency_p95_median_nanoseconds"`
+	EfficiencyMedian  float64                 `json:"efficiency_median"`
+	WireEfficiency    float64                 `json:"wire_efficiency_median"`
 	// Dead-window totals include failed runs: a collapse that reaches its
 	// deadline is the primary signal of the pinned-provider campaign.
 	DeadWindowCount    int     `json:"dead_window_count"`
@@ -510,6 +519,10 @@ type perfvarAggregateRecord struct {
 // A lookup function makes filter validation deterministic without mutating the
 // process environment in unit tests.
 func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
+	gateProtocol := strings.TrimSpace(getenv("CONNECT_PERFVAR_GATE_PROTOCOL"))
+	if gateProtocol != "" && gateProtocol != perfvarShapedLinkProtocol {
+		return perfvarConfig{}, fmt.Errorf("unknown CONNECT_PERFVAR_GATE_PROTOCOL %q", gateProtocol)
+	}
 	parsePositiveInt := func(name string, defaultValue int) (int, error) {
 		value := strings.TrimSpace(getenv(name))
 		if value == "" {
@@ -643,6 +656,7 @@ func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
 			perfvarFeatureLaneRule,
 			perfvarFeatureNoLaneRule,
 			perfvarFeatureUdpTransferAck,
+			perfvarFeatureUdpTransferNoAck,
 		},
 		[]string{},
 	)
@@ -650,6 +664,9 @@ func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
 		return perfvarConfig{}, err
 	}
 	features := slices.Sorted(maps.Keys(featureSet))
+	if _, _, err := perfvarUdpTransferPolicy(features); err != nil {
+		return perfvarConfig{}, err
+	}
 
 	runCount, err := parsePositiveInt("CONNECT_PERFVAR_RUN_COUNT", 5)
 	if err != nil {
@@ -690,6 +707,7 @@ func loadPerfvarConfig(getenv func(string) string) (perfvarConfig, error) {
 	}
 	return perfvarConfig{
 		Enabled:              getenv("CONNECT_PERFVAR_MEASURE") == "1",
+		GateProtocol:         gateProtocol,
 		Routes:               routes,
 		Profiles:             profiles,
 		Workloads:            workloads,
@@ -950,6 +968,15 @@ func perfvarTraceForRun(scenario perfvarScenario, runIndex int) (perfvarTrace, e
 	identityScenario := scenario
 	identityScenario.Route = ""
 	identityScenario.RunCount = 0
+	// Explicit matched UDP arms replay the same impairment trace. Their
+	// original scenario/feature hashes remain distinct result identities.
+	if _, explicit, err := perfvarUdpTransferPolicy(scenario.Features); err != nil {
+		return perfvarTrace{}, err
+	} else if explicit {
+		identityScenario.Features = slices.DeleteFunc(slices.Clone(scenario.Features), func(feature string) bool {
+			return feature == perfvarFeatureUdpTransferAck || feature == perfvarFeatureUdpTransferNoAck
+		})
+	}
 	// Warmup is one route-local BDP. Excluding its derived byte count keeps
 	// route comparisons on the same impairment trace even when their physical
 	// segment composition gives them slightly different BDPs.
@@ -1474,8 +1501,8 @@ func aggregatePerfvarRuns(records []perfvarRunRecord) perfvarAggregateRecord {
 		goodputWorst = slices.Min(goodputs)
 		durationWorst = slices.Max(durations)
 	}
-	return perfvarAggregateRecord{
-		SchemaVersion:             perfvarSchemaVersion,
+	result := perfvarAggregateRecord{
+		SchemaVersion:             first.SchemaVersion,
 		ScheduleVersion:           first.ScheduleVersion,
 		RecordType:                "aggregate",
 		ScenarioHash:              first.ScenarioHash,
@@ -1508,6 +1535,15 @@ func aggregatePerfvarRuns(records []perfvarRunRecord) perfvarAggregateRecord {
 		IndividualCorrect:         correct,
 		IndividualRunValid:        valid,
 	}
+	// Zero-valued unit fixtures retain the historical default schema.
+	if result.SchemaVersion == 0 {
+		result.SchemaVersion = perfvarSchemaVersion
+	}
+	if first.SchemaVersion == perfvarShapedLinkSchema {
+		result.GateProtocol = perfvarShapedLinkProtocol
+		result.ShapedLink = aggregatePerfvarShapedRuns(records)
+	}
+	return result
 }
 
 // Filter parsing rejects typos and retains the required five-run default.

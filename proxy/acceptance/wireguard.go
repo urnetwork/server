@@ -198,6 +198,7 @@ func (c *wireGuardDNSConn) Read(buffer []byte) (int, error) {
 func (c *wireGuardDNSConn) Write(buffer []byte) (int, error) {
 	n, err := c.Conn.Write(buffer)
 	err = c.contextError(err)
+	c.dns.wroteQuery(buffer, n, err)
 	c.dns.ioEvent(n, err, true)
 	return n, err
 }
@@ -225,6 +226,7 @@ func (c *wireGuardDNSPacketConn) ReadFrom(buffer []byte) (int, net.Addr, error) 
 func (c *wireGuardDNSPacketConn) WriteTo(buffer []byte, address net.Addr) (int, error) {
 	n, err := c.Conn.(net.PacketConn).WriteTo(buffer, address)
 	err = c.contextError(err)
+	c.dns.wroteQuery(buffer, n, err)
 	c.dns.ioEvent(n, err, true)
 	return n, err
 }
@@ -553,6 +555,7 @@ func (t *wireGuardDiagnosticTransport) RoundTrip(request *http.Request) (*http.R
 	dialAttempt := new(atomic.Uint64)
 	request = request.WithContext(context.WithValue(request.Context(), wireGuardDialAttemptContextKey{}, dialAttempt))
 	dnsTrace := t.stack.startDNSRequest()
+	dnsTrace.providerMetadata, _ = request.Context().Value(flowTraceDnsContextKey{}).(bool)
 	request = request.WithContext(context.WithValue(request.Context(), wireGuardDNSContextKey{}, dnsTrace))
 	before := t.stack.packetStats()
 	outerBefore := wireGuardOuterPacketStats{}
@@ -570,6 +573,13 @@ func (t *wireGuardDiagnosticTransport) RoundTrip(request *http.Request) (*http.R
 	after := t.stack.packetStats()
 	// Freeze before any error cleanup/Close can publish late packets or I/O.
 	dnsSummary := dnsTrace.freeze()
+	if dnsTrace.providerMetadata {
+		if trace, ok := request.Context().Value(httpsRequestTraceContextKey{}).(*httpsRequestTrace); ok {
+			trace.stateLock.Lock()
+			trace.dnsQueries = dnsTrace.providerQueries()
+			trace.stateLock.Unlock()
+		}
+	}
 	if err == nil {
 		if foreignErr := wireGuardForeignReturnError(after, time.Now()); foreignErr != nil {
 			if response != nil && response.Body != nil {
