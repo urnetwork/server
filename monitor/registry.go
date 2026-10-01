@@ -113,6 +113,7 @@ func NewSignals() []Signal {
 		NewContainerRuntimeSignal(),
 		NewJournalBufferSignal(),
 		NewProvenanceSignal(),
+		NewAPIReleaseProofSignal(),
 		NewReleaseBuilderSignal(),
 		NewHostLoadSignal(),
 		NewHostPressureSignal(),

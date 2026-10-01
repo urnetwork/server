@@ -257,15 +257,7 @@ func (self *Monitor) runLoopWithOptions(ctx context.Context, options RunLoopOpti
 					// distort the very rate window it is meant to measure.
 					alerts, err = signal.Run(ctx, self.settings)
 				} else {
-					select {
-					case runSlots <- struct{}{}:
-					case <-ctx.Done():
-						return
-					}
-					alerts, err = func() (Alerts, error) {
-						defer func() { <-runSlots }()
-						return signal.Run(ctx, self.settings)
-					}()
+					alerts, err = runSignalInSlot(ctx, runSlots, signal, self.settings)
 				}
 				// A probe interrupted by monitor shutdown has not lost visibility;
 				// it was deliberately stopped. Do not turn that lifecycle event
@@ -309,4 +301,25 @@ func (self *Monitor) runLoopWithOptions(ctx context.Context, options RunLoopOpti
 		}
 		return context.Cause(ctx)
 	}
+}
+
+// A bounded diagnostic's owner starts before the top-level queue. Its parent
+// deadline also reaches the shared host limiter and the transport. Cancellation
+// never releases a slot the caller did not acquire.
+func runSignalInSlot(ctx context.Context, slots chan struct{}, signal Signal, settings SignalSettings) (Alerts, error) {
+	if bounded, ok := signal.(interface{ runBudget() time.Duration }); ok && bounded.runBudget() > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, bounded.runBudget())
+		defer cancel()
+	}
+	select {
+	case slots <- struct{}{}:
+		defer func() { <-slots }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return signal.Run(ctx, settings)
 }

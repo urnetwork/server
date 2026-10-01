@@ -405,6 +405,9 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "st_provider_usage_archive exact atomic copy and append-only custody", requiredVersion: 746, rowColumn: 157},
 	{name: "net escrow durable snapshot revision and retention fences", requiredVersion: 747, rowColumn: 158},
 	{name: "terminal usage missing timestamp index", requiredVersion: 748, rowColumn: 159},
+	{name: "resumable client registration identity and retention", requiredVersion: 749, rowColumn: 160},
+	{name: "network_client_location.arin_quality_verified", requiredVersion: 750, rowColumn: 161},
+	{name: "subscriber quality write token and exact invalidation guard", requiredVersion: 751, rowColumn: 162},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -2141,7 +2144,10 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       `+contractUsageGuardArtifactQuery+`,
 		       `+providerUsageArchiveArtifactQuery+`,
 		       `+netEscrowRevisionArtifactQuery+`,
-		       `+providerUsageTimeIndexArtifactQuery+`
+		       `+providerUsageTimeIndexArtifactQuery+`,
+		       `+clientRegistrationArtifactQuery+`,
+		       `+subscriberQualityVerifiedArtifactQuery+`,
+		       `+subscriberQualityWriteGuardArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {

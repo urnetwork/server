@@ -408,7 +408,10 @@ type SignalSettings struct {
 	SourceAttribution SourceAttributionSettings
 	DNSAliases        DNSAliasSettings
 	MimirPublishers   MimirPublisherSettings
-	StateDir          string
+	// APIReleaseProof is an explicit, finite local release expectation. Nil
+	// leaves the optional release diagnostic off without remote contact.
+	APIReleaseProof *APIReleaseProofSettings
+	StateDir        string
 	// SettingsGenerationCheck is armed by LoadSignalSettings. Embedders that
 	// assemble SignalSettings directly may omit it; synthetic tests inject it
 	// without touching Config or Vault.
@@ -456,6 +459,7 @@ func ExcludeEdgeIPv6Hosts(settings SignalSettings, names ...string) (SignalSetti
 }
 
 func (s SignalSettings) withDefaults() SignalSettings {
+	s.APIReleaseProof = cloneAPIReleaseProofSettings(s.APIReleaseProof)
 	s.Routers = cloneRouterSettings(s.Routers)
 	s.PublicUdp = clonePublicUdpSettings(s.PublicUdp)
 	s.disabledHosts = cloneRouterScopeHosts(s.disabledHosts)
@@ -503,6 +507,14 @@ func (s SignalSettings) withRuntime() SignalSettings {
 func (s SignalSettings) Validate() error { return s.withDefaults().validate() }
 
 func (s SignalSettings) validate() error {
+	if s.APIReleaseProof != nil {
+		if err := s.APIReleaseProof.validate(); err != nil {
+			return err
+		}
+		if s.StateDir == "" {
+			return fmt.Errorf("monitor: API release proof requires a private state directory")
+		}
+	}
 	if s.AddressMode != AddressModeLAN && s.AddressMode != AddressModeOverlay {
 		return fmt.Errorf("monitor: unsupported address mode %q", s.AddressMode)
 	}
@@ -619,6 +631,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		expectedSourceIPv6:     settings.SourceAttribution.ExpectedIPv6,
 		dnsAliases:             cloneDNSAliasSettings(settings.DNSAliases),
 		mimirPublishers:        cloneMimirPublisherSettings(settings.MimirPublishers),
+		apiReleaseProof:        cloneAPIReleaseProofSettings(settings.APIReleaseProof),
 		publicUdp:              clonePublicUdpSettings(settings.PublicUdp),
 		stateDir:               settings.StateDir,
 		sshConnectTimeout:      settings.SSHConnectTimeout,

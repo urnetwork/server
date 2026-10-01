@@ -14,7 +14,7 @@ import (
 func TestMigrationsSignalMergedCatalogUsesExactColumns(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		for version := 741; version <= 749; version++ {
+		for version := 741; version <= server.MigrationCount(); version++ {
 			server.ApplyDbMigrationsUpTo(ctx, version)
 			_, drift := migrationPingDatabaseCheck(t, ctx)
 			if drift != "" {

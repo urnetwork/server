@@ -191,6 +191,7 @@ type monitorConfig struct {
 	expectedSourceIPv6 string
 	dnsAliases         DNSAliasSettings
 	mimirPublishers    MimirPublisherSettings
+	apiReleaseProof    *APIReleaseProofSettings
 	publicUdp          PublicUdpSettings
 
 	// state dir for baselines and other local persistence

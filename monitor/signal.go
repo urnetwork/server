@@ -37,7 +37,21 @@ func (s *signalAdapter) ID() string             { return s.probe.id() }
 func (s *signalAdapter) Name() string           { return s.name }
 func (s *signalAdapter) Cadence() time.Duration { return s.probe.cadence() }
 
+// Optional finite observations own their queue time as well as execution.
+// Other signals retain their existing timeout policy.
+func (s *signalAdapter) runBudget() time.Duration {
+	if bounded, ok := s.probe.(interface{ runBudget() time.Duration }); ok {
+		return bounded.runBudget()
+	}
+	return 0
+}
+
 func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (Alerts, error) {
+	if budget := s.runBudget(); budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
 	settings = settings.withDefaults()
 	if err := settings.validate(); err != nil {
 		return nil, err

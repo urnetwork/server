@@ -41,6 +41,7 @@ type monitorOptions struct {
 	excludedHosts         stringFlags
 	excludedEdgeIPv6Hosts stringFlags
 	minimumProbeCadence   time.Duration
+	apiReleaseProofFile   string
 }
 
 // Exit only after the command-owned process lifecycle has returned.
@@ -75,6 +76,13 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 	if err != nil {
 		return err
 	}
+	var releaseProof *servermonitor.APIReleaseProofSettings
+	if opts.apiReleaseProofFile != "" {
+		releaseProof, err = servermonitor.LoadAPIReleaseProofSettings(opts.apiReleaseProofFile)
+		if err != nil {
+			return err
+		}
+	}
 
 	signals := servermonitor.NewSignals()
 	if opts.listSignals {
@@ -89,11 +97,21 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 		return err
 	}
 
+	if releaseProof != nil {
+		selected := false
+		for _, signal := range signals {
+			selected = selected || signal.Key() == "api-release-proof"
+		}
+		if !selected {
+			return errors.New("monitor: configured API release proof signal is excluded")
+		}
+	}
 	loadEffectiveSettings := func() (servermonitor.SignalSettings, error) {
 		settings, err := loadSettings()
 		if err != nil {
 			return servermonitor.SignalSettings{}, err
 		}
+		settings.APIReleaseProof = releaseProof
 		return applyMonitorSettingsOptions(settings, opts)
 	}
 	settings, err := loadEffectiveSettings()
@@ -155,6 +173,7 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	flags.StringVar(&opts.mode, "mode", "", "SSH address mode: lan or overlay")
 	flags.StringVar(&opts.format, "format", alertFormatMarkdown, "alert output format: markdown or jsonl")
 	flags.StringVar(&opts.output, "output", "", "write one-shot alert output directly to this file")
+	flags.StringVar(&opts.apiReleaseProofFile, "api-release-proof", "", "private local JSON expectation for the optional bounded API release proof")
 	flags.DurationVar(&opts.minimumProbeCadence, "min-probe-cadence", 0, "continuous active-probe cadence floor and first-run delay; standing logs are unchanged")
 	flags.Var(&opts.keys, "ssh-key", "SSH identity path; may be repeated")
 	flags.Var(&opts.includedSignals, "include-signal", "signal key, number, or ID to run; may be repeated")
@@ -166,6 +185,9 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	}
 	if opts.minimumProbeCadence < 0 {
 		return monitorOptions{}, errors.New("monitor: -min-probe-cadence must not be negative")
+	}
+	if opts.apiReleaseProofFile != "" && opts.listSignals {
+		return monitorOptions{}, errors.New("monitor: -api-release-proof cannot be used with -list-signals")
 	}
 	if opts.minimumProbeCadence != 0 && (opts.once || opts.listSignals) {
 		return monitorOptions{}, errors.New("monitor: nonzero -min-probe-cadence requires continuous mode")

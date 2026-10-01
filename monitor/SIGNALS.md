@@ -16391,6 +16391,31 @@ This is the version-to-artifact contract checked by the probe:
 | 738 | The same expiry index with `slot_id` preceding the expiry/ID keys |
 | 739 | Valid/ready nonunique `transfer_balance_active_network_end_start_id` on `(network_id, end_time, start_time, balance_id)` with exactly `active` and no included balance amounts |
 | 740 | Required zero-default nonnegative bigint observed count on client running sums, required zero-default smallint observation version and nullable no-default UUID token on running windows, plus an enabled unconditional before-insert/update trigger bound to the exact checkpoint invalidation body |
+| 741 | Exact selected-policy measured URL-run quota index, retaining both accepted success and failure rows |
+| 742 | Transfer-contract subnet usage direction, unverified marker and nullable object-shaped usage document |
+| 743 | Valid/ready terminal transfer-contract usage index on `(close_time, contract_id)` |
+| 744 | Signed client-key policy namespaces and active head |
+| 745 | Exact immutable usage and terminal-attribution write guard |
+| 746 | Usage archive shape, atomic copy and append-only custody functions and triggers |
+| 747 | Durable net-escrow revision table, exact revision functions and transaction/retention triggers |
+| 748 | Exact valid/ready/live terminal usage missing-timestamp index |
+| 749 | Persistent resumable registration binding with exact required columns and digest bounds/checks, immediate identity uniqueness, and only the network-deletion cascade |
+| 750 | Required false-default boolean `network_client_location.arin_quality_verified` |
+| 751 | Nullable no-default UUID subscriber write token plus the exact enabled, unconditional before-insert/update invalidation function and trigger |
+
+The 2026-10-01 local monitor gate found missing artifact contracts for versions
+749–751 and three migration-query helpers incorrectly named as independent
+signals. Rename the helpers to match their role; do not register duplicate
+probes or weaken the registry and catalog coverage checks. This detector gap
+does not establish missing Main schema. The real-query fixture now visits
+every prefix from the observed historical head 741 through the source catalog
+head, including absent future functions. Separate local DDL faults prove that
+changed registration identity, retention, digest bounds, subscriber defaults,
+disabled/conditional/partial triggers and no-op function bodies fail their own
+published-version contracts. Future absence is still pending rollout. Exact
+schema does not prove subscriber evidence coverage, writer convergence, the
+success of the historical row reset, or activation of the default-off Quality
+policy; retain those independent release gates.
 
 FP2's 722–731 contract separates schema readiness from live evidence. A numeric
 731 alone cannot prove exact partial-index predicates, generated-slot semantics,
@@ -17151,6 +17176,87 @@ intent plumbing. A subsequent edge1 peer inspection stopped at unavailable
 noninteractive sudo before Docker or process-binary reads, so independent
 runtime corroboration remains open, especially on saturated edges3/4. This
 48-process metric witness does not close the separate 20/25 API coverage gap.
+
+### 8.12a Bounded API release identity and startup readiness
+
+Probe: `api-release-proof`
+
+Off unless explicitly configured.
+
+The ordinary provenance alert does not retain a healthy process projection,
+and a block's desired version does not establish its current process, immutable
+image or startup readiness. For a finite staged release, pass
+`-api-release-proof /private/release-expectation.json` to the existing singleton
+monitor. The JSON expectation has exactly these fields:
+
+| Field | Contract |
+| --- | --- |
+| `environment` | Exact environment being observed. |
+| `revision` | Reviewed clean Go VCS revision, full 40- or 64-hex object ID. |
+| `version` | Expected runtime build-info version, not only a desired tag. |
+| `image_digests` | One to eight independently linked OCI runtime image digests. |
+| `selection_floors` | One to eight block names mapped to the actual selection time in RFC3339. |
+| `expires_at` | Finite RFC3339 expiry, later than every floor and no more than 48 hours after any floor. |
+
+This optional clean-release policy is narrower than §8.12's general support
+for deliberate modified builds. Load the expectation once at process startup
+from a regular local file of at most 16 KiB; reject unknown, duplicate or aliased
+JSON fields. Preserve its source-file hash with the release handoff. The receipt
+also identifies the canonical parsed expectation by SHA-256. Editing the file
+does not hot-reload a running monitor. No expectation means no query, receipt or
+release alert; an expired expectation produces an unqualified receipt without
+remote contact. A configured expectation cannot silently exclude this signal.
+
+One fixed-time Mimir query reads only `process_start_time_seconds`,
+`urnetwork_source_info`, `urnetwork_build_info`, and `urnetwork_api_ready`, with
+each value's source timestamp. Derive required API host/block slots from the
+enabled service inventory (at most 32), retaining temporarily excluded or
+unenrolled desired slots as unknown. Use one enabled services gateway, verify
+its hostname, and query only gateway loopback; no redirect, environment proxy,
+fallback host or retry is permitted. Bound the remote read to 20 seconds,
+1 MiB and 1,024 rows. The 40-second signal owner includes waiting for both the
+existing top-level four-signal admission pool and the same live runtime's
+two-command-per-destination host limiter. Other signals retain their existing
+budgets. Shutdown cancels and joins this work through the existing monitor
+lifecycle; a second watcher or independent host limiter is not equivalent.
+
+Select the newest process only when every candidate has an unambiguous start
+and at most four generations occupy a slot. Missing or stale candidate starts
+cannot let an older healthy process supply proof. All four selected families
+must share one actual scrape timestamp no older than 90 seconds and no more
+than 30 seconds in the future. Each targeted block requires every inventory
+slot to have ready=1, the exact clean revision, an expected immutable image
+digest, the expected build-info version, and a start strictly after that
+block's selection floor. Controls retain current source/readiness counts
+without acquiring the targeted artifact's qualification.
+
+Every completed observation atomically replaces the private mode-0600
+`<StateDir>/api-release-proof/latest.json` (directory mode 0700). The finite
+receipt contains evaluation/completion time, expectation hash, source
+availability, per-block expected/current-ready/qualified counts, fixed reason
+counts, and `all_targeted_slots_qualified`. It contains no raw host, process,
+query, address, credential or provider label. A failed completed query replaces
+an earlier positive receipt; cancellation may leave the old receipt, so a
+reader must verify its clock and expectation before using it. WARN
+`api-release-unqualified` preserves missing, stale, conflicting and unavailable
+evidence. Alert silence, an absent receipt and source availability alone do not
+qualify a release.
+
+The cadence is at least 15 minutes after completion; the standing monitor's
+configured first-run delay still applies. Promote this monitor only through
+`RUN-MAIN.md`'s singleton handoff, preserving existing cadence floors, process
+identity, captured inventory and private state paths. Keep the new expectation
+and exact binary/source mapping in that reviewed handoff. Do not add a parallel
+monitor to work around an occupied SSH budget.
+
+This is a metric-based source/startup-readiness witness. It does not attest
+remote executable bytes, all draining-container exits, continuous health,
+search-index readiness, a five-minute latency window, or absence of application
+errors. §2.9b owns initial picker outcomes and §2.9 owns connection selection;
+typed-search performance cannot establish that the initial picker is healthy.
+Synthetic controls cover exact selection and freshness boundaries, unknown
+generations, source/image/version mismatches, private receipt replacement,
+redirect/proxy rejection, file bounds and shared admission cancellation.
 
 ### 8.13 Warpctl local-checkout executable identity
 
