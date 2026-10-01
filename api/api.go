@@ -89,6 +89,7 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/auth/regenerate-seedphrase", handlers.AuthRegenerateSeedphrase),
 		router.NewRoute("POST", "/auth/generate-seedphrase", handlers.AuthGenerateSeedphrase),
 		router.NewRoute("POST", "/network/auth-client", handlers.AuthNetworkClient),
+		router.NewRoute("POST", "/network/register-client-v1", handlers.RegisterNetworkClient),
 		router.NewRoute("POST", "/network/remove-client", handlers.RemoveNetworkClient),
 		router.NewRoute("POST", "/network/remove-clients", handlers.RemoveNetworkClients),
 		// a provider offering itself as an extender; the handler probes the

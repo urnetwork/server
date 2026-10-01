@@ -9391,4 +9391,47 @@ var migrations = []any{
 			ON provider_egress_health_history(client_id, measured_at DESC)
 			WHERE url_probe AND url_probe_policy_version=1 AND total_count=1 AND (ok_count=0 OR ok_count=1)
 	`),
+	// Main's published catalog ends at version 741. The mainnet hardening
+	// series follows intact at 742–749; existing catalog identities stay fixed.
+	// Subnet usage is independent of escrow/payment. NULL denotes legacy
+	// direction or usage that cannot be reconstructed safely after the fact.
+	newSqlMigration(`
+		ALTER TABLE transfer_contract
+			ADD COLUMN usage_origin_is_source boolean NULL,
+			ADD COLUMN usage_unverified boolean NOT NULL DEFAULT false,
+			ADD COLUMN provider_usage jsonb NULL;
+		ALTER TABLE transfer_contract
+			ADD CONSTRAINT transfer_contract_provider_usage_shape CHECK (
+				provider_usage IS NULL OR jsonb_typeof(provider_usage) = 'object'
+			) NOT VALID;
+	`),
+	newOnlineSqlMigration(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS transfer_contract_closed_usage
+		 ON transfer_contract (close_time, contract_id) WHERE outcome IS NOT NULL`,
+		`CREATE INDEX IF NOT EXISTS transfer_contract_closed_usage
+		 ON transfer_contract (close_time, contract_id) WHERE outcome IS NOT NULL`,
+	),
+	// Policy changes start a fresh signed segment without rewriting history.
+	newSqlMigration(clientKeyPolicyHistorySchemaSql),
+	// Mixed-version writers must not create new missing usage or rewrite credit.
+	newSqlMigration(contractUsageGuardSchemaSql),
+	// Billing cleanup retains original usage atomically, without historical backfill.
+	newSqlMigration(providerUsageArchiveSchemaSql),
+	// Commit cache ordering fences with every reservation transition.
+	newSqlMigration(netEscrowRevisionSchemaSql),
+	// A missing terminal close time is retained debt, not an empty usage epoch.
+	// Keep its existence probe off the ordinary open/canceled contract history.
+	// Retry an interrupted online build rather than preserving an invalid index.
+	newRestartableOnlineSqlMigration(
+		`DROP INDEX CONCURRENTLY IF EXISTS transfer_contract_usage_missing_time`,
+		`CREATE INDEX CONCURRENTLY transfer_contract_usage_missing_time
+		 ON transfer_contract (contract_id) WHERE close_time IS NULL AND
+		 outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')`,
+		`DROP INDEX IF EXISTS transfer_contract_usage_missing_time;
+		 CREATE INDEX transfer_contract_usage_missing_time
+		 ON transfer_contract (contract_id) WHERE close_time IS NULL AND
+		 outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')`,
+	),
+	// Persist the server-issued identity atomically with resumable registration.
+	newSqlMigration(clientRegistrationSchemaSql),
 }

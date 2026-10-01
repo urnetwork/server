@@ -1,0 +1,730 @@
+{
+  "schema": "urnetwork-native-storage-sdk-oracle-v1",
+  "sdk_source": "cacb4310f20c7cac83eb3ccd8ed5a5ad4212608a",
+  "cases": [
+    {
+      "name": "layout0-empty-trie",
+      "layout": "layout0",
+      "root": "0x03170a2e7597b7b7e3d84c05391d139a62b157e78786d8c082f29dcf4c111314",
+      "entries": [],
+      "reads": [
+        {
+          "key": "0x",
+          "value": null
+        },
+        {
+          "key": "0x12",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x00"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x00"
+      ]
+    },
+    {
+      "name": "layout1-empty-trie",
+      "layout": "layout1",
+      "root": "0x03170a2e7597b7b7e3d84c05391d139a62b157e78786d8c082f29dcf4c111314",
+      "entries": [],
+      "reads": [
+        {
+          "key": "0x",
+          "value": null
+        },
+        {
+          "key": "0x12",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x00"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x00"
+      ]
+    },
+    {
+      "name": "layout0-present-empty",
+      "layout": "layout0",
+      "root": "0x11aa0f690c3e2a3f2325d00f41429ac6cd1e9b951a70f15fabda0a1e0446d553",
+      "entries": [
+        {
+          "key": "0x12",
+          "value": "0x"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0x12",
+          "value": "0x"
+        },
+        {
+          "key": "0x13",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x421200"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x421200"
+      ]
+    },
+    {
+      "name": "layout1-present-empty",
+      "layout": "layout1",
+      "root": "0x11aa0f690c3e2a3f2325d00f41429ac6cd1e9b951a70f15fabda0a1e0446d553",
+      "entries": [
+        {
+          "key": "0x12",
+          "value": "0x"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0x12",
+          "value": "0x"
+        },
+        {
+          "key": "0x13",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x421200"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x421200"
+      ]
+    },
+    {
+      "name": "layout0-inline-branch",
+      "layout": "layout0",
+      "root": "0xc72cfcbb3dc548f34dea2ccf0213dd62f9b7bfe1860d19bb4d4a0149ca35c4e6",
+      "entries": [
+        {
+          "key": "0x12",
+          "value": "0x01"
+        },
+        {
+          "key": "0x13",
+          "value": "0x02"
+        },
+        {
+          "key": "0x14",
+          "value": "0x"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0x12",
+          "value": "0x01"
+        },
+        {
+          "key": "0x13",
+          "value": "0x02"
+        },
+        {
+          "key": "0x14",
+          "value": "0x"
+        },
+        {
+          "key": "0x15",
+          "value": null
+        },
+        {
+          "key": "0x",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x81011c000c4004010c400402084000"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x81011c00084000084000084000"
+      ]
+    },
+    {
+      "name": "layout1-inline-branch",
+      "layout": "layout1",
+      "root": "0xc72cfcbb3dc548f34dea2ccf0213dd62f9b7bfe1860d19bb4d4a0149ca35c4e6",
+      "entries": [
+        {
+          "key": "0x12",
+          "value": "0x01"
+        },
+        {
+          "key": "0x13",
+          "value": "0x02"
+        },
+        {
+          "key": "0x14",
+          "value": "0x"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0x12",
+          "value": "0x01"
+        },
+        {
+          "key": "0x13",
+          "value": "0x02"
+        },
+        {
+          "key": "0x14",
+          "value": "0x"
+        },
+        {
+          "key": "0x15",
+          "value": null
+        },
+        {
+          "key": "0x",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x81011c000c4004010c400402084000"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x81011c00084000084000084000"
+      ]
+    },
+    {
+      "name": "layout0-branch-value",
+      "layout": "layout0",
+      "root": "0xd3db462c7f0a6a995acf65e36a7091d41274a0eb1d0386e10a9d9a3668cfbdde",
+      "entries": [
+        {
+          "key": "0x12",
+          "value": "0x07"
+        },
+        {
+          "key": "0x1234",
+          "value": "0x08"
+        },
+        {
+          "key": "0x1256",
+          "value": "0x"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0x12",
+          "value": "0x07"
+        },
+        {
+          "key": "0x1234",
+          "value": "0x08"
+        },
+        {
+          "key": "0x1256",
+          "value": "0x"
+        },
+        {
+          "key": "0x1235",
+          "value": null
+        },
+        {
+          "key": "0x12ff",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0xc2122800040710410404080c410600"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x821228000c4104000c410600"
+      ]
+    },
+    {
+      "name": "layout1-branch-value",
+      "layout": "layout1",
+      "root": "0xd3db462c7f0a6a995acf65e36a7091d41274a0eb1d0386e10a9d9a3668cfbdde",
+      "entries": [
+        {
+          "key": "0x12",
+          "value": "0x07"
+        },
+        {
+          "key": "0x1234",
+          "value": "0x08"
+        },
+        {
+          "key": "0x1256",
+          "value": "0x"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0x12",
+          "value": "0x07"
+        },
+        {
+          "key": "0x1234",
+          "value": "0x08"
+        },
+        {
+          "key": "0x1256",
+          "value": "0x"
+        },
+        {
+          "key": "0x1235",
+          "value": null
+        },
+        {
+          "key": "0x12ff",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0xc2122800040710410404080c410600"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x821228000c4104000c410600"
+      ]
+    },
+    {
+      "name": "layout0-hashed-branch-value",
+      "layout": "layout0",
+      "root": "0xb6dc9fe8973449e5eb77bf6b049e77904a280566520bc1f8f1eb6a239a7c3adb",
+      "entries": [
+        {
+          "key": "0x12",
+          "value": "0xa7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7"
+        },
+        {
+          "key": "0x1234",
+          "value": "0xb8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8"
+        },
+        {
+          "key": "0x1256",
+          "value": "0xc9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0x12",
+          "value": "0xa7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7"
+        },
+        {
+          "key": "0x1234",
+          "value": "0xb8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8"
+        },
+        {
+          "key": "0x1256",
+          "value": "0xc9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9"
+        },
+        {
+          "key": "0x13",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x41040102b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8",
+        "0x410680c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
+        "0xc21228004101a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a780759ba63630d216f4bb87b5fb9abc191a9d1f8f5b6af322e6c135b4363a136bf7801757a80eb7f810dbf087850aa49e8a7e0f8cb9abcf05a4186775ce15c252b2c9"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x821228000000",
+        "0x410400",
+        "0x410600"
+      ]
+    },
+    {
+      "name": "layout1-hashed-branch-value",
+      "layout": "layout1",
+      "root": "0x1abaeff84d8fde30d7876dba68a5d231a41c99c26a566ff5bb8fb02b2e0ac848",
+      "entries": [
+        {
+          "key": "0x12",
+          "value": "0xa7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7"
+        },
+        {
+          "key": "0x1234",
+          "value": "0xb8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8"
+        },
+        {
+          "key": "0x1256",
+          "value": "0xc9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0x12",
+          "value": "0xa7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7"
+        },
+        {
+          "key": "0x1234",
+          "value": "0xb8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8"
+        },
+        {
+          "key": "0x1256",
+          "value": "0xc9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9"
+        },
+        {
+          "key": "0x13",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x12122800b6f7725e15814fb750b4b7b4bc113912cb9e4aa63077f28cc6413daa753c5ccb8075d829eb70d764e1d989df899b5015247eeaf51e589938473bbdd9e0f81c6ab7801757a80eb7f810dbf087850aa49e8a7e0f8cb9abcf05a4186775ce15c252b2c9",
+        "0x2104cb7a35a5d7e4f544a9b3c9ad3f539877900c7f1b4f6ec8a6d4c52b853d01a467",
+        "0x410680c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
+        "0xa7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
+        "0xb8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8b8"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x821228000000",
+        "0x410400",
+        "0x410600"
+      ]
+    },
+    {
+      "name": "layout0-value-threshold",
+      "layout": "layout0",
+      "root": "0xe7d7ae6242bf628ef6dc9f29ad272713fcbabbbf2b3b3edc04f2989e2b390c5c",
+      "entries": [
+        {
+          "key": "0x00",
+          "value": "0x0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "key": "0x01",
+          "value": "0x020202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "key": "0x02",
+          "value": "0x03030303030303030303030303030303030303030303030303030303030303030303"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0x00",
+          "value": "0x0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "key": "0x01",
+          "value": "0x020202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "key": "0x02",
+          "value": "0x03030303030303030303030303030303030303030303030303030303030303030303"
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x40800101010101010101010101010101010101010101010101010101010101010101",
+        "0x4084020202020202020202020202020202020202020202020202020202020202020202",
+        "0x408803030303030303030303030303030303030303030303030303030303030303030303",
+        "0x8100070080e3b3f46589e16b882cfa9a16fe094852f21b33a3fa69a74eee776cdfcfeca5ea8098ca20039c3137aff672d282f1eaa4de0126e5cc2c0b4db0fd22006638031b5a808d65eaa7aa9a42bbf9c3e8699199af41d5568e755135acf84c17620f1daa778c"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x81000700000000",
+        "0x4000",
+        "0x4000",
+        "0x4000"
+      ]
+    },
+    {
+      "name": "layout1-value-threshold",
+      "layout": "layout1",
+      "root": "0xd181875e4b592dda7405be89c351db1ecd643b0523e3d42b17821a3f5c244c4e",
+      "entries": [
+        {
+          "key": "0x00",
+          "value": "0x0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "key": "0x01",
+          "value": "0x020202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "key": "0x02",
+          "value": "0x03030303030303030303030303030303030303030303030303030303030303030303"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0x00",
+          "value": "0x0101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "key": "0x01",
+          "value": "0x020202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "key": "0x02",
+          "value": "0x03030303030303030303030303030303030303030303030303030303030303030303"
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x020202020202020202020202020202020202020202020202020202020202020202",
+        "0x03030303030303030303030303030303030303030303030303030303030303030303",
+        "0x2005a9fab41f29059e42177110211d6b2dd1dbd0dfff19ba4c78b653a0e2f940f2",
+        "0x2070d20790c6d05238dc6eb21053f6a7c0193e6f908160633861f44c435b20a655",
+        "0x40800101010101010101010101010101010101010101010101010101010101010101",
+        "0x8100070080e3b3f46589e16b882cfa9a16fe094852f21b33a3fa69a74eee776cdfcfeca5ea8018d523c1e72069362fe7f87cf24cd52e7288b477abf9a27f983db777c866e77980c2f666a9c476f2ff2fc9e4841fc796eb37a9e13695322d5a3671aae8679bc64c"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x81000700000000",
+        "0x4000",
+        "0x4000",
+        "0x4000"
+      ]
+    },
+    {
+      "name": "layout0-long-partial",
+      "layout": "layout0",
+      "root": "0x9dd471a465f7d8e47a74dd6a2832836435babf7252212a306a8223b9dff6b813",
+      "entries": [
+        {
+          "key": "0xabababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+          "value": "0x03030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+        },
+        {
+          "key": "0xacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac",
+          "value": "0x04040404040404040404040404040404040404040404040404040404040404040404040404040404"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0xabababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+          "value": "0x03030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+        },
+        {
+          "key": "0xacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac",
+          "value": "0x04040404040404040404040404040404040404040404040404040404040404040404040404040404"
+        },
+        {
+          "key": "0xabababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababac",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x7fff14ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab010103030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303",
+        "0x7fff14acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacaca004040404040404040404040404040404040404040404040404040404040404040404040404040404",
+        "0x810a001880b0f27195cbcb6580428c5feae2ffd5198403d5dac33e9ec77cc399b696bf7d2f8011c4338139d31cabf9abe07cbb4939b8e22d5226fe398d06e800672da55f217e"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x810a00180000",
+        "0x7fff14ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab00",
+        "0x7fff14acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac00"
+      ]
+    },
+    {
+      "name": "layout1-long-partial",
+      "layout": "layout1",
+      "root": "0xe74b362f071b6c420adf1067bf36eb3919a61003fee9ce30f72591fe1e609f59",
+      "entries": [
+        {
+          "key": "0xabababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+          "value": "0x03030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+        },
+        {
+          "key": "0xacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac",
+          "value": "0x04040404040404040404040404040404040404040404040404040404040404040404040404040404"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0xabababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+          "value": "0x03030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+        },
+        {
+          "key": "0xacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac",
+          "value": "0x04040404040404040404040404040404040404040404040404040404040404040404040404040404"
+        },
+        {
+          "key": "0xabababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababac",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x03030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303",
+        "0x04040404040404040404040404040404040404040404040404040404040404040404040404040404",
+        "0x3fff34ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab52c5feaf879f1dca6878b51e619da6833d6bdf2a82814c32ce5abf9255eaf5d7",
+        "0x3fff34acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac04a25a5715c22677ed713097d3da8031fa4016d1f2f797ab8111b3cb42ba75bd",
+        "0x810a00188019417a114ef8f42114005089883cf474cf674789f87c68fd01527a04aa37dbc380f5d3e05b47d390c01ceb684938ebf948a69898f1ceead9fd0a2d2dd49eabad0e"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x810a00180000",
+        "0x7fff14ababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab00",
+        "0x7fff14acacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacacac00"
+      ]
+    },
+    {
+      "name": "layout0-partial-proof",
+      "layout": "layout0",
+      "root": "0x8e387ab2f48aab8dd032855e1ed4f7d6a5bbbb88f6a372f97c7932f804052d22",
+      "entries": [
+        {
+          "key": "0x10101010",
+          "value": "0x0101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "key": "0x20202020",
+          "value": "0x0202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "key": "0x30303030",
+          "value": "0x0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0x10101010",
+          "value": "0x0101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "key": "0x40404040",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x470010101001020101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101",
+        "0x800e008003fb4d002547870303edfacd0e5f5d3afc1ccea38bcff6bb7496e6d65f764c7080b663f541838ce4f2f519e73d5992572be7cb8f210e07498468b1688c7e9f777b80375411b1611f1b929e7b79689fa06d0639027701e7b998abd7146e874044e4fb"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x800e000080b663f541838ce4f2f519e73d5992572be7cb8f210e07498468b1688c7e9f777b80375411b1611f1b929e7b79689fa06d0639027701e7b998abd7146e874044e4fb",
+        "0x470010101000"
+      ]
+    },
+    {
+      "name": "layout1-partial-proof",
+      "layout": "layout1",
+      "root": "0xa76520fac1eb706d0ead4db544e1e881f1dd0a4065d0b9f787a2344fbe3db9b3",
+      "entries": [
+        {
+          "key": "0x10101010",
+          "value": "0x0101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "key": "0x20202020",
+          "value": "0x0202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202020202"
+        },
+        {
+          "key": "0x30303030",
+          "value": "0x0303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0x10101010",
+          "value": "0x0101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101"
+        },
+        {
+          "key": "0x40404040",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x0101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101",
+        "0x2700101010fd75cfa278f05e5c6ffd7965c740b68ba58266cdb7a274cd02202c4cdaac1796",
+        "0x800e0080519f9c0e4842b1c57aea29d3dd0099e9e8207800930c0d12ad65ef764ce11f7080e28cffc92c9a4499953cb60cb4f650b8566714028536c289524d720ea0a39e1380ca47a03614bad6da8db7cb2a755df2b15a7e6693666854d34b25905a3105b9b6"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x800e000080e28cffc92c9a4499953cb60cb4f650b8566714028536c289524d720ea0a39e1380ca47a03614bad6da8db7cb2a755df2b15a7e6693666854d34b25905a3105b9b6",
+        "0x470010101000"
+      ]
+    },
+    {
+      "name": "layout0-empty-key-branch",
+      "layout": "layout0",
+      "root": "0xda61d28e12ecab4270d4c1c7efa2867b5d8ac5c3c246c28faf3be683eeecd2a5",
+      "entries": [
+        {
+          "key": "0x",
+          "value": "0x42"
+        },
+        {
+          "key": "0x12",
+          "value": "0x"
+        },
+        {
+          "key": "0x13",
+          "value": "0x0505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0x",
+          "value": "0x42"
+        },
+        {
+          "key": "0x12",
+          "value": "0x"
+        },
+        {
+          "key": "0x13",
+          "value": "0x0505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505"
+        },
+        {
+          "key": "0x14",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x40c80505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505",
+        "0x800c0008400080b4c15c683ba75307aa0ac882fb430491acfd22e110eff240b5cf1d756c2f7f5b",
+        "0xc00200044280e16ad9b187ca5ad6a09f03f8326120ca480ec183c3bdd33533e11f08365cc2da"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x80020000",
+        "0x800c0008400000",
+        "0x4000"
+      ]
+    },
+    {
+      "name": "layout1-empty-key-branch",
+      "layout": "layout1",
+      "root": "0x2209126877d6e9319450b7093e09c85d90caf437f534e7a35a7610881c403bf0",
+      "entries": [
+        {
+          "key": "0x",
+          "value": "0x42"
+        },
+        {
+          "key": "0x12",
+          "value": "0x"
+        },
+        {
+          "key": "0x13",
+          "value": "0x0505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505"
+        }
+      ],
+      "reads": [
+        {
+          "key": "0x",
+          "value": "0x42"
+        },
+        {
+          "key": "0x12",
+          "value": "0x"
+        },
+        {
+          "key": "0x13",
+          "value": "0x0505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505"
+        },
+        {
+          "key": "0x14",
+          "value": null
+        }
+      ],
+      "storage_proof_nodes": [
+        "0x0505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505050505",
+        "0x20b96ed59f6ba50623ef93aa6699ed410488876deecabe883b8601b1167f4a9f0e",
+        "0x800c0008400080b5c570d5300d183cc26655176d06d08d0801c6c4381221b1bf174fd9e2ec0522",
+        "0xc0020004428034a686a9bf3469cbade6cdc6bef415add0f20d25f516c469e611b3a2a722e33f"
+      ],
+      "generated_trie_proof_nodes": [
+        "0x80020000",
+        "0x800c0008400000",
+        "0x4000"
+      ]
+    }
+  ]
+}

@@ -98,8 +98,12 @@ func TestCreateTransferEscrowReadsOnlyCurrentGrants(t *testing.T) {
 				server.Raise(err)
 			})
 			server.RunPosts(ctx, posts...)
-			if query.grantQueries != 1 || query.grantRows != 2 {
-				t.Errorf("bytes=%d grant queries=%d rows=%d, want one query and two current rows", byteCount, query.grantQueries, query.grantRows)
+			wantQueries := 1
+			if byteCount > 0 {
+				wantQueries = 2 // Candidate read, then locked authoritative reread.
+			}
+			if query.grantQueries != wantQueries || query.grantRows != 2*wantQueries {
+				t.Errorf("bytes=%d grant queries=%d rows=%d, want %d reads of two current rows", byteCount, query.grantQueries, query.grantRows, wantQueries)
 			}
 			want := map[server.Id]ByteCount{firstId: 0}
 			wantPriority := Priority(PaidPriority)

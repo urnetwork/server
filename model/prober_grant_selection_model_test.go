@@ -54,8 +54,8 @@ func TestDynamicProberGrantBoundsRowsAndDiscoversReplenishment(t *testing.T) {
 				server.Raise(err)
 			})
 			server.RunPosts(ctx, posts...)
-			if query.grantQueries != 1 || query.grantRows > 16 {
-				t.Errorf("round %d: grant queries=%d rows=%d, want one query and at most 16 rows", round, query.grantQueries, query.grantRows)
+			if query.grantQueries != 2 || query.grantRows > 32 {
+				t.Errorf("round %d: grant queries=%d rows=%d, want candidate and lock reads of at most 16 rows each", round, query.grantQueries, query.grantRows)
 			}
 			if len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != newest.BalanceId || escrow.Balances[0].BalanceByteCount != 1024 || escrow.Priority != UnpaidPriority {
 				t.Fatalf("round %d: newest sufficient internal grant did not fund the unchanged contract", round)
@@ -84,6 +84,11 @@ func TestDynamicProberGrantReservedWindowsAndExactFallback(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET net_revenue_nano_cents=1 WHERE balance_id=$1`, grants[0].BalanceId))
 		})
 		deadline := now.Truncate(time.Second).Add(time.Hour)
+		for index, grant := range grants {
+			if index != 0 && index != 48 {
+				clients.reserve(ctx, grant.BalanceId, 4096)
+			}
+		}
 		server.Redis(ctx, func(r server.RedisClient) {
 			for index, grant := range grants {
 				if index != 0 && index != 48 {
@@ -104,10 +109,10 @@ func TestDynamicProberGrantReservedWindowsAndExactFallback(t *testing.T) {
 				server.Raise(err)
 			})
 			server.RunPosts(ctx, posts...)
-			wantedIndex, wantedQueries, wantedRows := 48, 2, 64
+			wantedIndex, wantedQueries, wantedRows := 48, 4, 128
 			wantedPriority := Priority(UnpaidPriority)
 			if round == 1 {
-				wantedIndex, wantedQueries, wantedRows = 0, 3, 129
+				wantedIndex, wantedQueries, wantedRows = 0, 5, 193
 				wantedPriority = PaidPriority
 			}
 			if query.grantQueries != wantedQueries || query.grantRows != wantedRows {
@@ -127,12 +132,15 @@ func TestDynamicProberGrantReservedWindowsAndExactFallback(t *testing.T) {
 				}
 				server.Raise(r.Set(ctx, netEscrowKey(grants[48].BalanceId), 4096, time.Hour).Err())
 			})
+			if round == 0 {
+				clients.reserve(ctx, grants[48].BalanceId, 3072)
+			}
 		}
 	})
 }
 
 // A matching identity is not a spending exemption. All funding predicates,
-// current durable bytes, and current Redis reservations remain authoritative.
+// current durable bytes, and committed reservations remain authoritative.
 func TestDynamicProberGrantEligibilityAndReservationSemantics(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -183,6 +191,9 @@ func TestDynamicProberGrantEligibilityAndReservationSemantics(t *testing.T) {
 				reserved = 3072
 			}
 			if reserved != 0 {
+				if reserved > 0 {
+					clients.reserve(ctx, candidate.BalanceId, reserved)
+				}
 				server.Redis(ctx, func(r server.RedisClient) {
 					server.Raise(r.Set(ctx, netEscrowKey(candidate.BalanceId), reserved, time.Hour).Err())
 				})
@@ -202,8 +213,8 @@ func TestDynamicProberGrantEligibilityAndReservationSemantics(t *testing.T) {
 	})
 }
 
-// Insufficient funds and malformed reservation data cannot leave durable
-// financial rows or mutate mirrors, including after fast-path exhaustion.
+// A real reservation shortfall cannot create new financial rows or mutate
+// mirrors, whether the cache is coherent or malformed.
 func TestDynamicProberGrantFailureHasNoWrites(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -212,6 +223,7 @@ func TestDynamicProberGrantFailureHasNoWrites(t *testing.T) {
 			setDynamicProberIdentityForTest(t, ctx, clients)
 			now := server.NowUtc()
 			grant := addDynamicProberGrantForTest(ctx, clients.payerNetworkId, now.Add(-time.Hour), now.Add(time.Hour), 1024)
+			clients.reserve(ctx, grant.BalanceId, 768)
 			mirror := "768"
 			if malformed {
 				mirror = "not-a-number"
@@ -222,14 +234,14 @@ func TestDynamicProberGrantFailureHasNoWrites(t *testing.T) {
 			var escrow *TransferEscrow
 			var err error
 			panicErr := server.HandleError(func() { escrow, err = clients.create(ctx, 512, false) })
-			if escrow != nil || (malformed && panicErr == nil) || (!malformed && (err == nil || panicErr != nil)) {
-				t.Fatal("invalid reservation or shortfall did not fail closed")
+			if escrow != nil || err == nil || panicErr != nil {
+				t.Fatal("durable shortfall did not fail closed independently of cache contents")
 			}
 			server.Db(ctx, func(conn server.PgConn) {
 				var contracts, escrows int
 				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE payer_network_id=$1`, clients.payerNetworkId).Scan(&contracts))
 				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_escrow WHERE balance_id=$1`, grant.BalanceId).Scan(&escrows))
-				if contracts != 0 || escrows != 0 {
+				if contracts != 1 || escrows != 1 {
 					t.Fatal("failed allocation committed financial rows")
 				}
 			})

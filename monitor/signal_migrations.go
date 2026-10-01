@@ -163,6 +163,88 @@ var competitionStagingBestWinnerArtifactQuery = func() string {
 	return strings.Replace(competitionStagingWinnerArtifactQuery, oldEligibility, newEligibility, 1)
 }()
 
+// These guards survive the policy namespace transition. The successor owns
+// them once the historical key shape is no longer required.
+const clientKeyHistoryGuardsArtifactQuery = `(
+	NOT EXISTS (
+		SELECT 1 FROM (VALUES
+			('st_client_key_history', 'st_client_key_history_immutable', 'st_client_key_history_immutable_guard'),
+			('st_client_key_head', 'st_client_key_head_identity', 'st_client_key_head_identity_guard'),
+			('network_client', 'st_client_key_retire_on_client_delete', 'st_client_key_retire_deleted_client')
+		) expected(table_name, trigger_name, function_name)
+		WHERE NOT EXISTS (
+			SELECT 1 FROM pg_trigger trigger_record
+			JOIN pg_class relation ON relation.oid = trigger_record.tgrelid
+			JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+			WHERE namespace.nspname = 'public' AND relation.relname = expected.table_name
+				AND trigger_record.tgname = expected.trigger_name
+				AND trigger_record.tgenabled = 'O'
+				AND trigger_record.tgfoid = to_regprocedure('public.' || expected.function_name || '()')
+				AND NOT trigger_record.tgisinternal
+		)
+	)
+)`
+
+// The policy namespace append changes identity keys but leaves signed rows
+// immutable; the active-head index admits exactly one live projection.
+const clientKeyPolicyNamespaceArtifactQuery = `(
+	EXISTS (
+		SELECT 1 FROM constraint_artifact
+		WHERE table_name = 'st_client_key_history' AND constraint_type = 'p'
+		  AND definition = 'PRIMARY KEY (client_id, domain_hash, generation)' AND validated
+	)
+	AND EXISTS (
+		SELECT 1 FROM constraint_artifact
+		WHERE table_name = 'st_client_key_head' AND constraint_type = 'p'
+		  AND definition = 'PRIMARY KEY (client_id, domain_hash)' AND validated
+	)
+	AND EXISTS (
+		SELECT 1 FROM constraint_artifact
+		WHERE table_name = 'st_client_key_head' AND constraint_type = 'f'
+		  AND definition LIKE '%(client_id, domain_hash, generation)%st_client_key_history(client_id, domain_hash, generation)%'
+		  AND validated
+	)
+	AND EXISTS (
+		SELECT 1 FROM information_schema.columns
+		WHERE table_schema = 'public' AND table_name = 'st_client_key_head'
+		  AND column_name = 'is_current' AND data_type = 'boolean' AND is_nullable = 'NO'
+	)
+	AND EXISTS (
+		SELECT 1 FROM index_artifact
+		WHERE table_name = 'st_client_key_head' AND index_name = 'st_client_key_head_current'
+		  AND definition = 'CREATE UNIQUE INDEX st_client_key_head_current ON public.st_client_key_head USING btree (client_id) WHERE is_current'
+		  AND predicate_definition = 'is_current' AND indisvalid AND indisready
+	)
+	AND to_regprocedure('public.st_client_key_head_identity_guard()') IS NOT NULL
+	AND regexp_replace(
+		pg_get_functiondef(to_regprocedure('public.st_client_key_head_identity_guard()')),
+		'[[:space:]]+', ' ', 'g'
+	) LIKE '%NOT OLD.is_current AND (NEW.is_current OR NEW.generation <> OLD.generation)%'
+	AND ` + clientKeyHistoryGuardsArtifactQuery + `
+)`
+
+// Admission pins the complete installed function, its relation and its enabled
+// insert/update trigger; a numeric head cannot hide a disabled custody guard.
+var contractUsageGuardArtifactQuery = `(
+    EXISTS (
+        SELECT 1 FROM pg_proc AS function_record
+        WHERE function_record.oid = to_regprocedure('public.transfer_contract_usage_guard()')
+          AND function_record.prorettype = 'trigger'::regtype
+          AND function_record.prolang = (SELECT oid FROM pg_language WHERE lanname = 'plpgsql')
+          AND function_record.prosrc = '` + strings.ReplaceAll(server.ContractUsageGuardFunctionBodySql, "'", "''") + `'
+    )
+    AND EXISTS (
+        SELECT 1 FROM pg_trigger AS trigger_record
+        WHERE trigger_record.tgrelid = to_regclass('public.transfer_contract')
+          AND trigger_record.tgname = 'transfer_contract_usage_guard'
+          AND trigger_record.tgfoid = to_regprocedure('public.transfer_contract_usage_guard()')
+          AND trigger_record.tgtype = 23 AND trigger_record.tgenabled = 'O'
+          AND trigger_record.tgnargs = 0 AND trigger_record.tgqual IS NULL
+          AND trigger_record.tgattr = ''::int2vector
+          AND NOT trigger_record.tgisinternal
+    )
+)`
+
 var migrationArtifacts = []migrationArtifact{
 	{name: "competition_round", requiredVersion: 588, rowColumn: 1},
 	{name: "competition_job_immutable_guard", requiredVersion: 589, rowColumn: 2},
@@ -225,7 +307,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "onboarding_results_daily", requiredVersion: 648, rowColumn: 59},
 	{name: "network_onboarding_experiment_state", requiredVersion: 649, rowColumn: 60},
 	{name: "network_onboarding_created_at", requiredVersion: 650, rowColumn: 61},
-	{name: "signed client-key history tables and guards", requiredVersion: 651, rowColumn: 62},
+	{name: "signed client-key history tables and guards", requiredVersion: 651, removedVersion: 744, rowColumn: 62},
 	{name: "repeatable competition staging lifecycle", requiredVersion: 652, rowColumn: 63},
 	{name: "competition_round.admission_closed_at and guard", requiredVersion: 653, rowColumn: 64},
 	{name: "network_points_leaderboard_snapshot.epoch_metrics_available", requiredVersion: 654, rowColumn: 65},
@@ -316,6 +398,13 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "transfer_balance_active_network_end_start_id", requiredVersion: 739, rowColumn: 150},
 	{name: "observed reliability counts and exact checkpoint invalidation", requiredVersion: 740, rowColumn: 151},
 	{name: "selected-policy measured URL run quota index", requiredVersion: 741, rowColumn: 152},
+	{name: "transfer_contract subnet usage columns and shape", requiredVersion: 742, rowColumn: 153},
+	{name: "transfer_contract_closed_usage lookup index", requiredVersion: 743, rowColumn: 154},
+	{name: "signed client-key policy namespaces and active head", requiredVersion: 744, rowColumn: 155},
+	{name: "transfer_contract immutable usage and terminal attribution guard", requiredVersion: 745, rowColumn: 156},
+	{name: "st_provider_usage_archive exact atomic copy and append-only custody", requiredVersion: 746, rowColumn: 157},
+	{name: "net escrow durable snapshot revision and retention fences", requiredVersion: 747, rowColumn: 158},
+	{name: "terminal usage missing timestamp index", requiredVersion: 748, rowColumn: 159},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -882,23 +971,7 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		                 AND definition LIKE '%(client_id, generation)%st_client_key_history(client_id, generation)%'
 		                 AND validated
 		           )
-		           AND NOT EXISTS (
-		               SELECT 1 FROM (VALUES
-		                   ('st_client_key_history', 'st_client_key_history_immutable', 'st_client_key_history_immutable_guard'),
-		                   ('st_client_key_head', 'st_client_key_head_identity', 'st_client_key_head_identity_guard'),
-		                   ('network_client', 'st_client_key_retire_on_client_delete', 'st_client_key_retire_deleted_client')
-		               ) expected(table_name, trigger_name, function_name)
-		               WHERE NOT EXISTS (
-		                   SELECT 1 FROM pg_trigger trigger_record
-		                   JOIN pg_class relation ON relation.oid = trigger_record.tgrelid
-		                   JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-		                   WHERE namespace.nspname = 'public' AND relation.relname = expected.table_name
-		                     AND trigger_record.tgname = expected.trigger_name
-		                     AND trigger_record.tgenabled = 'O'
-		                     AND trigger_record.tgfoid = to_regprocedure('public.' || expected.function_name || '()')
-		                     AND NOT trigger_record.tgisinternal
-		               )
-		           )
+		           AND `+clientKeyHistoryGuardsArtifactQuery+`
 		       ),
 		       (
 		           EXISTS (
@@ -2034,7 +2107,41 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       ),
 		       `+strings.Join(migrationUrlCompletionArtifactQueries, ",\n")+`,
 		       `+migrationReliabilityObservationArtifactQuery+`,
-		       `+migrationUrlProbeMeasuredQuotaArtifactQuery+`
+		       `+migrationUrlProbeMeasuredQuotaArtifactQuery+`,
+		       (
+		           (SELECT count(*) = 3 FROM (VALUES
+		               ('usage_origin_is_source', 'boolean', 'YES'),
+		               ('usage_unverified', 'boolean', 'NO'),
+		               ('provider_usage', 'jsonb', 'YES')
+		           ) AS expected(column_name, data_type, is_nullable)
+		           WHERE EXISTS (
+		               SELECT 1 FROM information_schema.columns AS actual
+		               WHERE actual.table_schema = 'public' AND actual.table_name = 'transfer_contract'
+		                 AND actual.column_name = expected.column_name
+		                 AND actual.data_type = expected.data_type
+		                 AND actual.is_nullable = expected.is_nullable
+		           ))
+		           AND EXISTS (
+		               SELECT 1 FROM constraint_artifact
+		               WHERE table_name = 'transfer_contract'
+		                 AND constraint_name = 'transfer_contract_provider_usage_shape'
+		                 AND constraint_type = 'c'
+		                 AND definition LIKE '%jsonb_typeof(provider_usage)%'
+		           )
+		       ),
+		       EXISTS (
+		           SELECT 1 FROM index_artifact
+		           WHERE table_name = 'transfer_contract'
+		             AND index_name = 'transfer_contract_closed_usage'
+		             AND definition = 'CREATE INDEX transfer_contract_closed_usage ON public.transfer_contract USING btree (close_time, contract_id) WHERE (outcome IS NOT NULL)'
+		             AND predicate_definition = '(outcome IS NOT NULL)'
+		             AND indisvalid AND indisready
+		       ),
+		       `+clientKeyPolicyNamespaceArtifactQuery+`,
+		       `+contractUsageGuardArtifactQuery+`,
+		       `+providerUsageArchiveArtifactQuery+`,
+		       `+netEscrowRevisionArtifactQuery+`,
+		       `+providerUsageTimeIndexArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {

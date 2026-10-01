@@ -3601,42 +3601,64 @@ func TestUpdateClientScoresForceMinimumStillSeesHealthExcludedProviders(t *testi
 	})
 }
 
-// A failing ratio must not prevent the probes needed to establish recovery.
+// A failing ratio must not prevent URL probes needed to establish recovery.
+// The legacy full-probe queue still respects fresh-health refresh deadlines.
 func TestProbeDueQueueIgnoresTheEgressHealthGate(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc()
 		city := testing_healthGateCity(ctx, t)
 
-		clientIds := testing_connectQualifyingProviders(ctx, t, city, 1)
-		deadClientId := clientIds[0]
+		clientIds := testing_connectQualifyingProviders(ctx, t, city, 2)
+		staleClientId, freshClientId := clientIds[0], clientIds[1]
 
-		// measured blackholed, and probed an hour ago -- so this goes through the
-		// stale-but-probed pass of the due query, which is the realistic state for
-		// a provider that has a health record at all
-		testing_setProviderEgressHealth(ctx, deadClientId, 0, 131)
-		SetProviderEgressLocation(ctx, &ProviderEgressLocation{
-			ClientId:    deadClientId,
-			LocationId:  city.LocationId,
-			CountryCode: "us",
-			ObservedAt:  now.Add(-time.Hour),
-		})
+		// Both bad measurements deny native quality. Only the older one is
+		// beyond the half-life refresh boundary; location age alone is not due.
+		for _, clientId := range clientIds {
+			measuredAt := now
+			if clientId == staleClientId {
+				measuredAt = now.Add(-3 * ProviderEgressHealthMaxAge / 4)
+			}
+			SetProviderEgressHealth(ctx, &ProviderEgressHealth{
+				ClientId: clientId, MeasuredAt: measuredAt, OKCount: 0, Total: 131,
+			})
+			SetProviderEgressLocation(ctx, &ProviderEgressLocation{
+				ClientId: clientId, LocationId: city.LocationId,
+				CountryCode: "us", ObservedAt: now.Add(-time.Hour),
+			})
+		}
 		testing_rollUpEgress(ctx)
 
 		err := UpdateClientScores(ctx, time.Hour, 1)
 		connect.AssertEqual(t, err, nil)
 
 		clientScores := testing_selectableClientScores(ctx, t, city, false)
-		if testing_qualityNative(clientScores, deadClientId) {
-			t.Fatal("fixture is wrong: the failing provider is native quality")
+		for _, clientId := range clientIds {
+			if testing_qualityNative(clientScores, clientId) {
+				t.Fatal("fixture is wrong: a failing provider is native quality")
+			}
 		}
 
-		due := ClaimProviderUrlProbeDue(ctx, server.NowUtc(), 100, 0, 1)
-		if !slices.ContainsFunc(due, func(provider ProviderUrlProbeDue) bool { return provider.ClientId == deadClientId }) {
+		due := GetProviderEgressLocationDue(
+			ctx,
+			now.Add(-time.Minute),
+			now.Add(-time.Minute),
+			100,
+		)
+		if !slices.Contains(due, staleClientId) {
 			t.Fatal(
 				"an excluded provider is not in the probe due-queue: it can never be re-measured, " +
 					"so it can never graduate back into the public list",
 			)
+		}
+		if slices.Contains(due, freshClientId) {
+			t.Fatal("fresh negative health bypassed the ordinary full-probe refresh schedule")
+		}
+		urlDue := ClaimProviderUrlProbeDue(ctx, server.NowUtc(), 100, 0, 1)
+		for _, clientId := range clientIds {
+			if !slices.ContainsFunc(urlDue, func(provider ProviderUrlProbeDue) bool { return provider.ClientId == clientId }) {
+				t.Fatal("failing health ratio prevented the URL probes needed for recovery")
+			}
 		}
 	})
 }

@@ -43,6 +43,21 @@ func (self escrowSelectionTestClients) create(ctx context.Context, byteCount Byt
 		self.providerNetworkId, self.providerId, byteCount)
 }
 
+// Availability tests need a durable reservation behind the mirrored bytes.
+// Redis-only amounts are drift, which an authoritative post correctly repairs.
+func (self escrowSelectionTestClients) reserve(ctx context.Context, balanceId server.Id, byteCount ByteCount) {
+	contractId := server.NewId()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `
+			INSERT INTO transfer_contract (contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,payer_network_id)
+			VALUES ($1,$2,$3,$4,$5,$6,$2)`, contractId,
+			self.payerNetworkId, self.payerId, self.providerNetworkId, self.providerId, byteCount))
+		server.RaisePgResult(tx.Exec(ctx, `
+			INSERT INTO transfer_escrow (contract_id,balance_id,balance_byte_count)
+			VALUES ($1,$2,$3)`, contractId, balanceId, byteCount))
+	}, server.TxReadCommitted)
+}
+
 // Exact and excessive reservations must not affect funding, priority, or
 // mirror deadlines in either origin or companion creation.
 func TestCreateTransferEscrowReservedGrantsDoNotAffectPriorityOrMirrors(t *testing.T) {
@@ -86,6 +101,7 @@ func TestCreateTransferEscrowReservedGrantsDoNotAffectPriorityOrMirrors(t *testi
 				AddTransferBalance(ctx, balance)
 				balances = append(balances, balance)
 				if 0 < reservedByteCounts[index] {
+					clients.reserve(ctx, balance.BalanceId, reservedByteCounts[index])
 					server.Redis(ctx, func(r server.RedisClient) {
 						key := netEscrowKey(balance.BalanceId)
 						server.Raise(r.Set(ctx, key, reservedByteCounts[index], 0).Err())
@@ -191,6 +207,7 @@ func TestCreateTransferEscrowZeroByteCompatibility(t *testing.T) {
 				if index == 0 {
 					firstBalanceId = balance.BalanceId
 					if test.reserved {
+						clients.reserve(ctx, firstBalanceId, 2048)
 						server.Redis(ctx, func(r server.RedisClient) {
 							server.Raise(r.Set(ctx, netEscrowKey(firstBalanceId), 2048, time.Hour).Err())
 						})
@@ -247,6 +264,8 @@ func TestCreateTransferEscrowReservedGrantShortfallHasNoWrites(t *testing.T) {
 				AddTransferBalance(ctx, balance)
 				balances = append(balances, balance)
 			}
+			clients.reserve(ctx, balances[0].BalanceId, 2048)
+			wantContractCount++
 			server.Redis(ctx, func(r server.RedisClient) {
 				server.Raise(r.Set(ctx, netEscrowKey(balances[0].BalanceId), 2048, time.Hour).Err())
 			})
@@ -258,8 +277,8 @@ func TestCreateTransferEscrowReservedGrantShortfallHasNoWrites(t *testing.T) {
 				var contractCount, escrowCount int
 				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_contract WHERE payer_network_id = $1`, clients.payerNetworkId).Scan(&contractCount))
 				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_escrow WHERE balance_id = ANY($1)`, []server.Id{balances[0].BalanceId, balances[1].BalanceId}).Scan(&escrowCount))
-				if contractCount != wantContractCount || escrowCount != 0 {
-					t.Fatalf("companion=%t: shortfall wrote contracts=%d escrows=%d, want %d/0", companion, contractCount, escrowCount, wantContractCount)
+				if contractCount != wantContractCount || escrowCount != 1 {
+					t.Fatalf("companion=%t: shortfall wrote contracts=%d escrows=%d, want %d/1", companion, contractCount, escrowCount, wantContractCount)
 				}
 			})
 			server.Redis(ctx, func(r server.RedisClient) {

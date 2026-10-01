@@ -298,6 +298,12 @@ func AuthNetworkClient(
 	authClient *AuthNetworkClientArgs,
 	session *session.ClientSession,
 ) (authClientResult *AuthNetworkClientResult, authClientError error) {
+	return authNetworkClient(authClient, session, nil)
+}
+
+// The optional registration owner is created only by the versioned endpoint.
+// Ordinary client creation retains its original request and response contract.
+func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.ClientSession, registration *networkClientRegistrationOwner) (authClientResult *AuthNetworkClientResult, authClientError error) {
 	if authClient.ClientId == nil {
 		roles, principal, message := validateClientIdentityArgs(authClient.Roles, authClient.Principal, session)
 		if message != "" {
@@ -317,8 +323,8 @@ func AuthNetworkClient(
 		// NetworkConcurrentClientsExceeded. Checked before the tx so the lookup does
 		// not hold it open. Connection activation applies the same limit; see
 		// CanConnectNetworkPeer.
-		if authClient.SourceClientId == nil &&
-			NetworkConcurrentClientsExceeded(session.Ctx, session.ByJwt.NetworkId) {
+		concurrentLimitExceeded := authClient.SourceClientId == nil && NetworkConcurrentClientsExceeded(session.Ctx, session.ByJwt.NetworkId)
+		if concurrentLimitExceeded && registration == nil {
 			authClientResult = &AuthNetworkClientResult{
 				Error: &AuthNetworkClientError{
 					ClientLimitExceeded: true,
@@ -335,7 +341,27 @@ func AuthNetworkClient(
 		// performs its own PostgreSQL read and Redis cache refresh.
 		isPro := IsProFresh(session.Ctx, &session.ByJwt.NetworkId)
 
+		var registrationTxOptions []any
+		if registration != nil {
+			// The first statement waits for the network's allocation lock.
+			// Its following lookup must see the preceding owner's commit.
+			registrationTxOptions = []any{server.TxReadCommitted}
+		}
 		server.Tx(session.Ctx, func(tx server.PgTx) {
+			if registration != nil {
+				retained, found := registration.resumeInTx(tx, session, isPro, roles, principal)
+				if found {
+					authClientResult = retained
+					if retained.ClientId != nil {
+						clientId = *retained.ClientId
+					}
+					return
+				}
+				if concurrentLimitExceeded {
+					authClientResult = &AuthNetworkClientResult{Error: &AuthNetworkClientError{ClientLimitExceeded: true, UpgradeRequired: true, Message: "Your plan's concurrent client limit is reached."}}
+					return
+				}
+			}
 			createTime := server.NowUtc()
 
 			clientId = server.NewId()
@@ -510,6 +536,9 @@ func AuthNetworkClient(
 					}
 				})
 			}
+			if registration != nil {
+				registration.bindInTx(tx, session, clientId, deviceId)
+			}
 
 			// re-derive Pro from the source of truth rather than copying the caller's
 			// (possibly stale) jwt claim: a network that turned Pro after the caller's
@@ -534,7 +563,7 @@ func AuthNetworkClient(
 				ByClientJwt: &byClientJwtSigned,
 				ClientId:    &clientId,
 			}
-		})
+		}, registrationTxOptions...)
 
 		if authClientResult != nil && authClientResult.Error == nil {
 			setClientIdentityCache(session.Ctx, clientId, &ClientIdentity{

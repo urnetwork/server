@@ -1,15 +1,14 @@
 // Dynamic candidate reads keep internal-prober grant history off the contract
-// hot path. Only read order changes; reservations and all financial writes use
-// the existing allocator, with its complete earliest-expiry fallback.
+// hot path. Every selected window is locked before a fresh database reservation
+// census. Failed windows release locks before the next window or full fallback.
 package model
 
 import (
 	"context"
-	"errors"
+	"slices"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
 )
 
@@ -45,8 +44,8 @@ const escrowTransferBalanceSql = `
 // The existing active/network/start/end index supplies this order directly.
 // The limit precedes free-grant eligibility: unusual paid or small grants
 // cannot turn a bounded candidate read into an unbounded search for a match.
-// Ordinary payers use the same single query with no limit, then the unchanged
-// earliest-expiry ordering in Go. The persisted singleton is the only scope.
+// Ordinary payers have no candidate limit and use a complete locked reread,
+// then the existing earliest-expiry order. The persisted singleton is the scope.
 const proberGrantSelectionSql = `
 	WITH allocation AS MATERIALIZED (
 		SELECT EXISTS (
@@ -86,29 +85,49 @@ const proberGrantExtendedSql = `
 	LIMIT $3 OFFSET $4
 `
 
-// Reads current reservation mirrors with exactly the general allocator's
-// missing/negative/error semantics. Nothing is reserved or refreshed here.
-func applyTransferEscrowReservations(ctx context.Context, balances []*escrowTransferBalance) {
-	server.Redis(ctx, func(r server.RedisClient) {
-		commands := map[server.Id]*redis.StringCmd{}
-		_, err := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
-			for _, balance := range balances {
-				commands[balance.balanceId] = pipe.Get(ctx, netEscrowKey(balance.balanceId))
-			}
-			return nil
-		})
-		if err != nil && !errors.Is(err, redis.Nil) {
-			server.Raise(err)
+// Locks a whole candidate set in the same id order as settlement. Nil selects
+// all current grants; a nonnil set rechecks the prober's free-grant predicates.
+// Read committed must take a new snapshot after any lock wait. Zero-byte
+// anchors retain the request's original time boundary and consume no credit.
+func lockTransferEscrowBalances(
+	ctx context.Context, tx server.PgTx, payerNetworkId server.Id, now time.Time,
+	candidateIds []server.Id, recheckExpiry bool,
+) []*escrowTransferBalance {
+	if candidateIds != nil && len(candidateIds) == 0 {
+		return nil
+	}
+	sql := escrowTransferBalanceSql
+	args := []any{payerNetworkId, now}
+	if candidateIds != nil {
+		sql += ` AND balance_id = ANY($3) AND NOT paid AND NOT pro
+			AND net_revenue_nano_cents = 0 AND subsidy_net_revenue_nano_cents = 0
+			AND start_balance_byte_count >= $4`
+		args = append(args, candidateIds, ProberTransferBalanceTopUp)
+	}
+	sql += ` ORDER BY balance_id FOR UPDATE`
+	balances := []*escrowTransferBalance{}
+	lockedBalanceIds := []server.Id{}
+	rows, err := tx.Query(ctx, sql, args...)
+	server.WithPgResult(rows, err, func() {
+		for rows.Next() {
+			balance := &escrowTransferBalance{}
+			server.Raise(rows.Scan(&balance.balanceId, &balance.paid, &balance.balanceByteCount,
+				&balance.startTime, &balance.endTime))
+			balances = append(balances, balance)
+			lockedBalanceIds = append(lockedBalanceIds, balance.balanceId)
 		}
-		for _, balance := range balances {
-			reserved, err := commands[balance.balanceId].Int64()
-			if errors.Is(err, redis.Nil) {
-				reserved = 0
-			} else {
-				server.Raise(err)
-			}
-			balance.balanceByteCount = max(0, balance.balanceByteCount-max(int64(0), reserved))
-		}
+	})
+	// This statement must remain separate from the locking query: its snapshot
+	// must include reservations committed by the preceding balance-lock owner.
+	reserved := readNetEscrowSnapshots(ctx, tx, lockedBalanceIds)
+	for _, balance := range balances {
+		balance.balanceByteCount = max(0, balance.balanceByteCount-reserved[balance.balanceId].reserved)
+	}
+	if recheckExpiry {
+		now = server.NowUtc()
+	}
+	return slices.DeleteFunc(balances, func(balance *escrowTransferBalance) bool {
+		return balance.startTime.After(now) || !now.Before(balance.endTime)
 	})
 }
 
@@ -137,24 +156,48 @@ func loadTransferEscrowBalances(
 			}
 		})
 		if !internalProber {
-			applyTransferEscrowReservations(ctx, balances)
-			return balances
+			return lockTransferEscrowBalances(ctx, tx, payerNetworkId, now, nil, true)
 		}
 
 		outcome := "error"
 		defer func() { proberGrantSelectionResults.WithLabelValues(outcome).Inc() }()
 		selectBalance := func() *escrowTransferBalance {
-			applyTransferEscrowReservations(ctx, balances)
 			if len(balances) == 0 {
+				return nil
+			}
+			// A failed window must not carry higher-id locks into a later window
+			// or full fallback; rollback releases only these speculative locks.
+			server.RaisePgResult(tx.Exec(ctx, `SAVEPOINT prober_grant_selection`))
+			candidateIds := make([]server.Id, 0, len(balances))
+			for _, balance := range balances {
+				candidateIds = append(candidateIds, balance.balanceId)
+			}
+			locked := lockTransferEscrowBalances(ctx, tx, payerNetworkId, now, candidateIds, true)
+			lockedBalanceIdBalances := map[server.Id]*escrowTransferBalance{}
+			for _, balance := range locked {
+				lockedBalanceIdBalances[balance.balanceId] = balance
+			}
+			balances = nil
+			for _, id := range candidateIds {
+				if balance := lockedBalanceIdBalances[id]; balance != nil {
+					balances = append(balances, balance)
+				}
+			}
+			if len(balances) == 0 {
+				server.RaisePgResult(tx.Exec(ctx, `ROLLBACK TO SAVEPOINT prober_grant_selection`))
+				server.RaisePgResult(tx.Exec(ctx, `RELEASE SAVEPOINT prober_grant_selection`))
 				return nil
 			}
 			start := int(payerClientId.Hash() % uint64(len(balances)))
 			for offset := range balances {
 				balance := balances[(start+offset)%len(balances)]
 				if requestedBytes <= balance.balanceByteCount {
+					server.RaisePgResult(tx.Exec(ctx, `RELEASE SAVEPOINT prober_grant_selection`))
 					return balance
 				}
 			}
+			server.RaisePgResult(tx.Exec(ctx, `ROLLBACK TO SAVEPOINT prober_grant_selection`))
+			server.RaisePgResult(tx.Exec(ctx, `RELEASE SAVEPOINT prober_grant_selection`))
 			return nil
 		}
 		if balance := selectBalance(); balance != nil {
@@ -184,18 +227,5 @@ func loadTransferEscrowBalances(
 		outcome = "fallback"
 	}
 
-	balances := []*escrowTransferBalance{}
-	rows, err := tx.Query(ctx, escrowTransferBalanceSql, payerNetworkId, now)
-	server.WithPgResult(rows, err, func() {
-		for rows.Next() {
-			balance := &escrowTransferBalance{}
-			server.Raise(rows.Scan(&balance.balanceId, &balance.paid, &balance.balanceByteCount,
-				&balance.startTime, &balance.endTime))
-			if !balance.startTime.After(now) && now.Before(balance.endTime) {
-				balances = append(balances, balance)
-			}
-		}
-	})
-	applyTransferEscrowReservations(ctx, balances)
-	return balances
+	return lockTransferEscrowBalances(ctx, tx, payerNetworkId, server.NowUtc(), nil, requestedBytes > 0)
 }

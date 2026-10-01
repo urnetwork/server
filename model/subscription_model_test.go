@@ -2079,6 +2079,14 @@ func TestForceCloseMalformedContractRemovesStreamAndReturnsError(t *testing.T) {
 		connect.AssertEqual(t, string(ContractOutcomeSettled), contractClose.Outcome)
 		_, _, streamFound = GetStream(ctx, contractId)
 		connect.AssertEqual(t, false, streamFound)
+		var usageData []byte
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT provider_usage FROM transfer_contract WHERE contract_id=$1`, contractId).Scan(&usageData))
+		})
+		snapshot, usageErr := decodeContractUsageSnapshot(usageData)
+		if usageErr != nil || snapshot.ByteCount != escrowByteCount || snapshot.Expiry == nil || snapshot.ExcludedReason != "" {
+			t.Fatalf("billing quarantine changed bounded original usage: %s, %v", usageData, usageErr)
+		}
 	})
 }
 
@@ -2119,8 +2127,6 @@ func TestReconcileNetEscrowCorrectsDrift(t *testing.T) {
 		})
 		// the drift makes the full balance appear unavailable
 		connect.AssertEqual(t, ByteCount(0), GetActiveTransferBalanceByteCount(ctx, networkId))
-		_, _, err := CreateContract(ctx, networkId, clientId, networkIdB, clientIdB, ByteCount(1024*1024))
-		connect.AssertNotEqual(t, nil, err)
 
 		// a dry run reports the drift but does not change anything
 		driftByNetworkId, _ := ReconcileNetEscrow(ctx, false)
@@ -2134,8 +2140,13 @@ func TestReconcileNetEscrowCorrectsDrift(t *testing.T) {
 		connect.AssertEqual(t, ByteCount(0), Testing_NetEscrowByteCount(ctx, balanceId))
 		connect.AssertEqual(t, initialBalance, GetActiveTransferBalanceByteCount(ctx, networkId))
 
-		// contracts work again, and the new reservation is mirrored in the counter
-		_, _, err = CreateContract(ctx, networkId, clientId, networkIdB, clientIdB, ByteCount(1024*1024))
+		// Even renewed cache drift cannot deny database-owned credit. The
+		// successful create post repairs the mirror to its real reservation.
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.IncrBy(ctx, netEscrowKey(balanceId), int64(initialBalance)).Err())
+		})
+		connect.AssertEqual(t, ByteCount(0), GetActiveTransferBalanceByteCount(ctx, networkId))
+		_, _, err := CreateContract(ctx, networkId, clientId, networkIdB, clientIdB, ByteCount(1024*1024))
 		connect.AssertEqual(t, nil, err)
 		connect.AssertEqual(t, ByteCount(1024*1024), Testing_NetEscrowByteCount(ctx, balanceId))
 
@@ -2152,8 +2163,8 @@ func TestReconcileNetEscrowCorrectsDrift(t *testing.T) {
 	})
 }
 
-// A fully reserved grant can remain active in PostgreSQL while its Redis
-// reservation leaves zero available bytes. It must not produce a zero-byte
+// A fully reserved grant can remain active in PostgreSQL while its open
+// reservations leave zero available bytes. It must not produce a zero-byte
 // escrow row for every new contract before the next usable grant is reached.
 func TestCreateTransferEscrowSkipsFullyReservedBalances(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -2178,13 +2189,10 @@ func TestCreateTransferEscrowSkipsFullyReservedBalances(t *testing.T) {
 		for _, balance := range balances {
 			if balance.StartBalanceByteCount == 3*1024*1024 {
 				usableId = balance.BalanceId
-				continue
 			}
-			server.Redis(ctx, func(r server.RedisClient) {
-				if err := r.IncrBy(ctx, netEscrowKey(balance.BalanceId), int64(balance.StartBalanceByteCount)).Err(); err != nil {
-					t.Fatal(err)
-				}
-			})
+		}
+		if _, err := CreateTransferEscrow(ctx, payerNetworkId, payerId, providerNetworkId, providerId, 3*1024*1024); err != nil {
+			t.Fatal(err)
 		}
 		const contractBytes = ByteCount(1024)
 		escrow, err := CreateTransferEscrow(ctx, payerNetworkId, payerId, providerNetworkId, providerId, contractBytes)
@@ -2283,8 +2291,8 @@ func TestNetEscrowKeyFormatAndTtl(t *testing.T) {
 			connect.AssertEqual(t, true, 59*day < ttl && ttl <= 60*day)
 		})
 
-		// reconcile apply rewrites the counter with the fallback ttl even if
-		// the ttl was lost
+		// Reconciliation restores the same precise deadline as creation when
+		// a counter loses its ttl, still capped by the rolling horizon.
 		server.Redis(ctx, func(r server.RedisClient) {
 			r.Persist(ctx, key)
 			r.IncrBy(ctx, key, int64(5*1024*1024))
@@ -2295,12 +2303,11 @@ func TestNetEscrowKeyFormatAndTtl(t *testing.T) {
 		connect.AssertEqual(t, contractByteCount, Testing_NetEscrowByteCount(ctx, balanceId))
 		server.Redis(ctx, func(r server.RedisClient) {
 			ttl := r.TTL(ctx, key).Val()
-			connect.AssertEqual(t, true, 89*day < ttl && ttl <= 90*day)
+			connect.AssertEqual(t, true, 59*day < ttl && ttl <= 60*day)
 		})
 
-		// A settle release against a missing mirror returns a negative value for
-		// diagnostics, but atomically deletes the recreated counter. A missing
-		// counter reads as zero and cannot overstate the available balance.
+		// Settlement against a missing mirror publishes current zero with its
+		// revision fence, without replaying an unowned negative delta.
 		Testing_DeleteNetEscrow(ctx, balanceId)
 		err = CloseContract(ctx, contractId, clientId, 0, false)
 		connect.AssertEqual(t, nil, err)

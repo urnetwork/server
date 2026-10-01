@@ -608,6 +608,10 @@ func TestMigrationArtifactCatalogPinsRecentSchemaShapes(t *testing.T) {
 			"('country_code', 'character varying', 'NO', quote_literal('') || '::character varying')",
 			"actual.column_default IS NOT DISTINCT FROM expected.column_default",
 			"definition = 'PRIMARY KEY (activation_id)'",
+			"definition = 'PRIMARY KEY (client_id, domain_hash, generation)'",
+			"index_name = 'st_client_key_head_current'",
+			"constraint_name = 'transfer_contract_provider_usage_shape'",
+			"index_name = 'transfer_contract_closed_usage'",
 			"definition = 'CREATE INDEX network_extender_activation_extender_id_activate_time ON public.network_extender_activation USING btree (extender_id, activate_time)'",
 		} {
 			if !strings.Contains(normalized, want) {

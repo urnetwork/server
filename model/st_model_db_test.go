@@ -788,19 +788,11 @@ func TestGetStEpochNetworkUsageWindow(t *testing.T) {
 		end := start.Add(time.Hour)
 
 		nA, nB := server.NewId(), server.NewId()
-		insertSweep := func(networkId server.Id, byteCount int64, sweepTime time.Time) {
-			server.Tx(ctx, func(tx server.PgTx) {
-				server.RaisePgResult(tx.Exec(
-					ctx,
-					`
-	                    INSERT INTO transfer_escrow_sweep (
-	                        contract_id, balance_id, network_id,
-	                        payout_byte_count, payout_net_revenue_nano_cents, sweep_time
-	                    )
-	                    VALUES ($1, $2, $3, $4, 0, $5)
-	                `,
-					server.NewId(), server.NewId(), networkId, byteCount, sweepTime,
-				))
+		insertSweep := func(networkId server.Id, byteCount int64, closeTime time.Time) {
+			addStContractUsageSnapshotTestRow(t, ctx, closeTime, &contractUsageSnapshot{
+				Version: 1, ByteCount: ByteCount(byteCount), Providers: []contractProviderUsage{
+					{ClientId: server.NewId(), NetworkId: networkId, ByteCount: ByteCount(byteCount)},
+				},
 			})
 		}
 		insertSweep(nA, 600, start)                     // inclusive start
@@ -810,7 +802,11 @@ func TestGetStEpochNetworkUsageWindow(t *testing.T) {
 		insertSweep(nB, 999, start.Add(-time.Second)) // before the window
 
 		got := map[server.Id]int64{}
-		for _, usage := range GetStEpochNetworkUsage(ctx, start, end) {
+		usages, err := GetStEpochNetworkUsage(ctx, start, end)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, usage := range usages {
 			got[usage.NetworkId] = usage.PayoutByteCount
 		}
 		if len(got) != 2 || got[nA] != 1000 || got[nB] != 250 {

@@ -140,6 +140,13 @@ func settlementReadFinancialArm(
 	const siblingReservation = int64(17)
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET checkpoint=false WHERE contract_id=$1`, fixture.contractId))
+		// The surviving sibling needs an open durable contract. Orphan escrow
+		// rows and Redis-only counters do not reserve database-owned credit.
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
+			(contract_id,source_network_id,source_id,destination_network_id,destination_id,
+			transfer_byte_count,payer_network_id)
+			SELECT $2,source_network_id,source_id,destination_network_id,destination_id,$3,payer_network_id
+			FROM transfer_contract WHERE contract_id=$1`, fixture.contractId, siblingId, siblingReservation*int64(len(balances))))
 		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 			for index, balance := range balances {
 				balanceId := balanceIds[index]

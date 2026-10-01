@@ -102,7 +102,9 @@ const (
 // st.yml config
 // ---------------------------------------------------------------------------
 
-// StConfig is the parsed `st.yml` vault resource:
+// StConfig is the parsed operator-local `st.yml` secrets-vault resource.
+// Each operator supplies its own deposit/root/artifact keys; the immutable
+// settlement vault holds claims custody and never supplies these secrets.
 //
 //	enabled: true
 //	rpc_urls:                      # ordered failover list (§11.1)
@@ -130,7 +132,7 @@ const (
 // Deposit sizing (PLAN.md §6 deposit policy): the automated per-epoch
 // deposit is `min(deposit_epoch_cap_rao, usage_gib × deposit_alpha_rao_per_gib)`
 // where usage is the previous epoch window's total settled payout bytes
-// (`transfer_escrow_sweep`). The rate is the off-chain reference rate of
+// (immutable completed-contract snapshots). The rate is the off-chain reference rate of
 // WHITEPAPER §7.1 expressed directly in rao per GiB — config, not oracle.
 type StConfig struct {
 	Profile                string
@@ -326,8 +328,8 @@ var stConfigFromVault = sync.OnceValue(func() (cfg *StConfig) {
 	if cfg.BlockSeconds <= 0 {
 		cfg.BlockSeconds = stDefaultBlockSeconds
 	}
-	// keys are optional for read-only deployments; the publish flows error
-	// per-call when the required key is absent
+	// An enabled operator requires all three distinct local role keys.
+	// Independent monitoring uses public inputs without this secrets resource.
 	return cfg
 })
 
@@ -981,6 +983,9 @@ func (self *CoreStClient) buildTransactionAttempt(
 	if !strings.EqualFold(from.Hex(), intent.FromAddress) {
 		return nil, fmt.Errorf("st: signing key address %s does not own intent account %s", from.Hex(), intent.FromAddress)
 	}
+	if err := self.validateDepositAttempt(ctx, client, intent, kind); err != nil {
+		return nil, err
+	}
 	to, calldata, gasLimit, err := stTransactionAttemptPayload(intent, from, kind)
 	if err != nil {
 		return nil, err
@@ -1116,23 +1121,23 @@ func (self *CoreStClient) observeTransactionAttempts(
 		cancel()
 		if errors.Is(err, ethereum.NotFound) {
 			if attempt.InclusionBlock != nil && attempt.InclusionHash != nil {
-				orphanErr := fmt.Errorf("st: receipt %s disappeared before finality", attempt.TxHash)
+				orphanErr := &stOrphanedTransactionReceiptError{message: fmt.Sprintf("st: receipt %s disappeared before finality", attempt.TxHash)}
 				model.MarkStTransactionOrphaned(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
 					*attempt.InclusionBlock, *attempt.InclusionHash, orphanErr)
 				attempt.Status = model.StTxUncertain
 				attempt.InclusionBlock, attempt.InclusionHash = nil, nil
-				lastErr = orphanErr
+				lastErr = errors.Join(lastErr, orphanErr)
 			}
 			continue
 		}
 		if err != nil {
-			lastErr = err
+			lastErr = errors.Join(lastErr, err)
 			continue
 		}
 		// An RPC receipt lookup does not authenticate the returned transaction
 		// hash. Refuse malformed/transplanted observations before durable writes.
 		if receipt == nil || receipt.TxHash != hash || receipt.BlockHash == (common.Hash{}) || receipt.BlockNumber == nil || !receipt.BlockNumber.IsInt64() || receipt.BlockNumber.Sign() <= 0 {
-			lastErr = fmt.Errorf("st: receipt response differs from requested transaction %s or has an invalid inclusion block", attempt.TxHash)
+			lastErr = errors.Join(lastErr, fmt.Errorf("st: receipt response differs from requested transaction %s or has an invalid inclusion block", attempt.TxHash))
 			continue
 		}
 		model.MarkStTransactionMined(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
@@ -1143,12 +1148,12 @@ func (self *CoreStClient) observeTransactionAttempts(
 		finalized, err := self.finalizedBlock(ctx)
 		if err != nil {
 			receiptPending = true
-			lastErr = err
+			lastErr = errors.Join(lastErr, err)
 			continue
 		}
 		if finalized.Number > math.MaxInt64 {
 			receiptPending = true
-			lastErr = errors.New("st: finalized transaction boundary exceeds postgres bigint")
+			lastErr = errors.Join(lastErr, errors.New("st: finalized transaction boundary exceeds postgres bigint"))
 			continue
 		}
 		if finalized.Number < receipt.BlockNumber.Uint64() {
@@ -1161,16 +1166,16 @@ func (self *CoreStClient) observeTransactionAttempts(
 		cancel()
 		if err != nil {
 			receiptPending = true
-			lastErr = err
+			lastErr = errors.Join(lastErr, err)
 			continue
 		}
 		if canonical.Hash != [32]byte(receipt.BlockHash) {
-			err = fmt.Errorf("st: receipt %s was orphaned before finality", attempt.TxHash)
+			err = &stOrphanedTransactionReceiptError{message: fmt.Sprintf("st: receipt %s was orphaned before finality", attempt.TxHash)}
 			model.MarkStTransactionOrphaned(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
 				receipt.BlockNumber.Uint64(), strings.ToLower(receipt.BlockHash.Hex()), err)
 			attempt.Status = model.StTxUncertain
 			attempt.InclusionBlock, attempt.InclusionHash = nil, nil
-			lastErr = err
+			lastErr = errors.Join(lastErr, err)
 			continue
 		}
 		finalizedHash := strings.ToLower(common.BytesToHash(finalized.Hash[:]).Hex())
@@ -1224,14 +1229,14 @@ func (self *CoreStClient) waitFinalizedAttempt(
 		}
 
 		current := attempts[0]
-		if !receiptPending && current.Attempt < stTxMaxAttempts && time.Now().After(current.CreateTime.Add(stTxReplacementDelay)) {
+		// A failed receipt census says nothing about the existing signatures.
+		// Only complete absence can grant a bounded fee replacement.
+		if stTransactionReceiptCensusComplete(err) && ctx.Err() == nil && !receiptPending && current.Attempt < stTxMaxAttempts && time.Now().After(current.CreateTime.Add(stTxReplacementDelay)) {
 			return current.TxHash, errStReplaceTransaction
 		}
 		select {
 		case <-ctx.Done():
-			if lastErr == nil {
-				lastErr = ctx.Err()
-			}
+			lastErr = errors.Join(lastErr, ctx.Err())
 			model.MarkStTransactionUncertain(context.WithoutCancel(ctx), intent.IntentId, current.Attempt, lastErr)
 			return current.TxHash, fmt.Errorf("st: transaction %s finality uncertain: %w", current.TxHash, lastErr)
 		case <-ticker.C:
@@ -1397,6 +1402,11 @@ func (self *CoreStClient) reconcileAccountIntents(
 				}
 				continue
 			}
+			// An advanced nonce cannot identify the winner of an incomplete
+			// receipt census. Keep every attempt discoverable for the next turn.
+			if !stTransactionReceiptCensusComplete(observeErr) {
+				return fmt.Errorf("st: reconcile retained attempts for nonce %d: %w", intent.Nonce, observeErr)
+			}
 			if receiptPending {
 				desiredKind := model.StTxAttemptExecution
 				if intent.DeploymentKey != self.cfg.DeploymentKey() {
@@ -1469,15 +1479,22 @@ func (self *CoreStClient) reconcileAccountIntents(
 // finalized inclusion.  `operation` must be stable for an idempotent logical
 // call (for example root:<epoch>:<noId>).
 func (self *CoreStClient) send(ctx context.Context, operation string, key *ecdsa.PrivateKey, to common.Address, calldata []byte) (string, error) {
-	if key == nil {
-		return "", fmt.Errorf("st: signing key not configured in st.yml")
-	}
 	if operation == "" || len(operation) > 96 {
 		return "", fmt.Errorf("st: invalid transaction operation key")
 	}
-	logicalKey, err := stTransactionLogicalKey(self.cfg, operation)
-	if err != nil {
+	if _, err := stTransactionLogicalKey(self.cfg, operation); err != nil {
 		return "", err
+	}
+	return self.sendPrepared(ctx, key, func(context.Context, *ethclient.Client) (string, common.Address, []byte, error) {
+		return operation, to, calldata, nil
+	})
+}
+
+// Dynamic deposit preparation runs after every lower retained account nonce
+// has been reconciled. It may return an empty operation when no spend remains.
+func (self *CoreStClient) sendPrepared(ctx context.Context, key *ecdsa.PrivateKey, prepare func(context.Context, *ethclient.Client) (string, common.Address, []byte, error)) (string, error) {
+	if key == nil {
+		return "", fmt.Errorf("st: signing key not configured in st.yml")
 	}
 
 	var client *ethclient.Client
@@ -1497,6 +1514,14 @@ func (self *CoreStClient) send(ctx context.Context, operation string, key *ecdsa
 
 	from := crypto.PubkeyToAddress(key.PublicKey)
 	if err := self.reconcileAccountIntents(ctx, client, key, from); err != nil {
+		return "", err
+	}
+	operation, to, calldata, err := prepare(ctx, client)
+	if err != nil || operation == "" {
+		return "", err
+	}
+	logicalKey, err := stTransactionLogicalKey(self.cfg, operation)
+	if err != nil {
 		return "", err
 	}
 	nonceCtx, cancelNonce := context.WithTimeout(ctx, stCallTimeout)
@@ -1815,20 +1840,25 @@ func stPackGetStake(hotkey [32]byte, coldkey [32]byte, netuid uint64) ([]byte, e
 
 func (self *CoreStClient) DepositPush(ctx context.Context, epoch uint64, alphaRao *big.Int) (string, error) {
 	if self.coordinator != nil {
-		n := new(big.Int).SetUint64(self.cfg.NoId)
-		nonce, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackNextDepositNonce(n), self.coordinator.UnpackNextDepositNonce)
-		if err != nil {
-			return "", fmt.Errorf("nextDepositNonce() for funding: %w", err)
-		}
-		selfColdkey, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackSelfColdkey(), self.coordinator.UnpackSelfColdkey)
-		if err != nil {
-			return "", fmt.Errorf("coordinator selfColdkey(): %w", err)
-		}
-		calldata, err := stPackTransferStake(selfColdkey, self.cfg.DepositHotkey, self.cfg.Netuid, alphaRao)
-		if err != nil {
-			return "", err
-		}
-		return self.send(ctx, fmt.Sprintf("deposit-fund:%d:%d:%s", epoch, self.cfg.NoId, nonce), self.cfg.DepositKey, stStakingPrecompileAddress, calldata)
+		return self.sendPrepared(ctx, self.cfg.DepositKey, func(ctx context.Context, client *ethclient.Client) (string, common.Address, []byte, error) {
+			state, err := self.readDepositCustody(ctx, client, &epoch)
+			if err != nil {
+				return "", common.Address{}, nil, err
+			}
+			if err := state.validateFunding(self.cfg, alphaRao); err != nil {
+				return "", common.Address{}, nil, err
+			}
+			calldata, err := stPackTransferStake(state.selfColdkey, self.cfg.DepositHotkey, self.cfg.Netuid, alphaRao)
+			operation := fmt.Sprintf("deposit-fund:%d:%d:%s", epoch, self.cfg.NoId, state.nonce)
+			if err == nil {
+				logicalKey, keyErr := stTransactionLogicalKey(self.cfg, operation)
+				if keyErr != nil {
+					return "", common.Address{}, nil, keyErr
+				}
+				err = stDepositRetainedCalldata(self.cfg, operation, stStakingPrecompileAddress, calldata, model.GetStTransactionIntent(ctx, logicalKey))
+			}
+			return operation, stStakingPrecompileAddress, calldata, err
+		})
 	}
 	// Legacy-only shared treasury staging.
 	destColdkey := ss58.EvmMirrorPubkey(self.cfg.ContractAddress)
@@ -1851,24 +1881,32 @@ func stDepositDeadline(epoch uint64, endBlock uint64, headBlock uint64) (uint64,
 
 func (self *CoreStClient) DepositCredit(ctx context.Context, epoch uint64, noId uint64, alphaRao *big.Int) (string, error) {
 	if self.coordinator != nil {
-		n := new(big.Int).SetUint64(noId)
-		nonce, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackNextDepositNonce(n), self.coordinator.UnpackNextDepositNonce)
-		if err != nil {
-			return "", fmt.Errorf("nextDepositNonce(): %w", err)
+		if noId != self.cfg.NoId {
+			return "", errors.New("st: deposit credit names another operator")
 		}
-		endBlock, err := self.EpochCloseBlock(ctx, epoch)
-		if err != nil {
-			return "", fmt.Errorf("epochEndBlock(%d): %w", epoch, err)
-		}
-		head, err := self.finalizedBlock(ctx)
-		if err != nil {
-			return "", err
-		}
-		deadline, err := stDepositDeadline(epoch, endBlock, head.Number)
-		if err != nil {
-			return "", err
-		}
-		return self.send(ctx, fmt.Sprintf("deposit:%d:%d:%s", epoch, noId, nonce), self.cfg.DepositKey, self.cfg.ContractAddress, self.coordinator.PackDeposit(n, alphaRao, nonce, deadline))
+		return self.sendPrepared(ctx, self.cfg.DepositKey, func(ctx context.Context, client *ethclient.Client) (string, common.Address, []byte, error) {
+			state, err := self.readDepositCustody(ctx, client, &epoch)
+			if err != nil {
+				return "", common.Address{}, nil, err
+			}
+			if err := state.validatePrincipal(self.cfg, alphaRao); err != nil {
+				if errors.Is(err, errStDepositAlreadyCredited) {
+					return "", common.Address{}, nil, nil
+				}
+				return "", common.Address{}, nil, err
+			}
+			if state.staged.Cmp(new(big.Int).Add(alphaRao, big.NewInt(stDepositReserveAllowanceRao))) < 0 {
+				return "", common.Address{}, nil, errors.New("st: deposit staging lacks principal plus exact reserve rounding allowance")
+			}
+			operation := fmt.Sprintf("deposit:%d:%d:%s", epoch, noId, state.nonce)
+			logicalKey, err := stTransactionLogicalKey(self.cfg, operation)
+			if err != nil {
+				return "", common.Address{}, nil, err
+			}
+			calldata := self.coordinator.PackDeposit(new(big.Int).SetUint64(noId), alphaRao, state.nonce, state.deadline)
+			err = stDepositRetainedCalldata(self.cfg, operation, self.cfg.ContractAddress, calldata, model.GetStTransactionIntent(ctx, logicalKey))
+			return operation, self.cfg.ContractAddress, calldata, err
+		})
 	}
 	calldata := self.st.PackDeposit(new(big.Int).SetUint64(noId), alphaRao)
 	return self.send(ctx, fmt.Sprintf("legacy:deposit:%d:%d:%s", epoch, noId, alphaRao), self.cfg.DepositKey, self.cfg.ContractAddress, calldata)
@@ -2511,7 +2549,7 @@ type StPayoutShare struct {
 // whose contributing verify client resolves (client_id -> ckey) to an active
 // head binding is dropped entirely, so a provider promoted to the head tier —
 // already paid natively by Yuma — never contributes to a pool payoutRoot
-// (never paid twice). Usage is per-network (transfer_escrow_sweep is not
+// (never paid twice). Legacy payout usage is aggregated per-network (it is not
 // client-attributed), so the network is the finest unit at which a promoted
 // provider can be removed; a promoted provider only ever earns a leaf when it
 // has verify confirmations, and those confirmations name the client_id, so the
@@ -3192,7 +3230,7 @@ func stComputeReleasePayout(
 	if prior := model.GetStPayoutArtifact(ctx, cfg.DeploymentKey(), epoch, cfg.NoId); prior != nil {
 		return prior.PayoutRoot, len(model.GetStPayoutLeaves(ctx, cfg.DeploymentKey(), epoch, cfg.NoId)), nil
 	}
-	usages, err := model.GetStEpochProviderUsage(ctx, startTime, endTime)
+	usages, err := model.GetStEpochProviderUsageAtEpoch(ctx, epoch, startTime, endTime)
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
@@ -3273,7 +3311,7 @@ func stComputeReleasePayout(
 
 // StComputeEpochPayout computes and stores the payout leaves for a closed
 // epoch (the StEpochClose step): map the epoch boundary blocks to a
-// wall-clock window, read usage (`transfer_escrow_sweep`) × reliability
+// wall-clock window, read payment-independent completed usage × reliability
 // (`verify_provider_stats`), join claim wallets, aggregate per coldkey,
 // allocate exactly 10,000 bps by largest remainder, and store the canonical leaf set. Returns the Merkle
 // root (zero when there are no leaves).
@@ -3318,7 +3356,10 @@ func StComputeEpochPayout(ctx context.Context, epoch uint64) (root [32]byte, lea
 		return stComputeReleasePayout(ctx, cfg, client, epoch, startTime, endTime, startBlock, closeBlock)
 	}
 
-	usages := model.GetStEpochNetworkUsage(ctx, startTime, endTime)
+	usages, err := model.GetStEpochNetworkUsage(ctx, startTime, endTime)
+	if err != nil {
+		return root, 0, err
+	}
 	reliabilities := model.GetStEpochClientReliability(ctx, startTime, endTime)
 	wallets := model.GetAllStWalletColdkeys(ctx)
 
@@ -3617,34 +3658,46 @@ func StDepositForEpoch(ctx context.Context, epoch uint64, overrideRao *big.Int) 
 	// STAGE: move alpha into this NO's unique coordinator-owned deposit
 	// position. Skip (partially) when an approved campaign preload or a prior
 	// stage whose reserve transition failed already covers the amount.
-	unaccounted, err := client.UnaccountedStakeRao(ctx)
-	if err != nil {
-		return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: err.Error(), Retry: true}, nil
-	}
-	pushAmount := new(big.Int).Sub(amount, unaccounted)
 	pushPublishId := model.AddStPublish(ctx, cfg.DeploymentKey(), epoch, model.StPublishKindDepositPush)
-	if pushAmount.Sign() <= 0 {
-		stResolvePublish(ctx, pushPublishId, &StPublishOutcome{
-			Status: model.StPublishStatusSkipped,
-			Reason: fmt.Sprintf("%s rao already staged on the isolated deposit hotkey", unaccounted),
-		})
-	} else {
-		txHash, err := client.DepositPush(ctx, epoch, pushAmount)
+	if core, ok := client.(*CoreStClient); ok && core.coordinator != nil {
+		txHash, err := core.stageDepositPrincipal(ctx, epoch, amount)
+		if errors.Is(err, errStDepositAlreadyCredited) {
+			outcome := &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: err.Error()}
+			stResolvePublish(ctx, pushPublishId, outcome)
+			return outcome, nil
+		}
 		if err != nil {
 			outcome := &StPublishOutcome{
 				Status: model.StPublishStatusFailed,
 				TxHash: txHash,
 				Reason: fmt.Sprintf("push transferStake: %s", err),
-				Retry:  true,
+				Retry:  !errors.Is(err, errStDepositBelowRuntimeMinimum),
 			}
 			stResolvePublish(ctx, pushPublishId, outcome)
-			glog.Errorf("[st]epoch %d deposit push failed: %s\n", epoch, err)
 			return outcome, nil
 		}
-		stResolvePublish(ctx, pushPublishId, &StPublishOutcome{
-			Status: model.StPublishStatusConfirmed,
-			TxHash: txHash,
-		})
+		status := model.StPublishStatusConfirmed
+		if txHash == "" {
+			status = model.StPublishStatusSkipped
+		}
+		stResolvePublish(ctx, pushPublishId, &StPublishOutcome{Status: status, TxHash: txHash})
+	} else {
+		unaccounted, err := client.UnaccountedStakeRao(ctx)
+		if err != nil {
+			return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: err.Error(), Retry: true}, nil
+		}
+		pushAmount := new(big.Int).Sub(amount, unaccounted)
+		if pushAmount.Sign() <= 0 {
+			stResolvePublish(ctx, pushPublishId, &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("%s rao already staged on the isolated deposit hotkey", unaccounted)})
+		} else {
+			txHash, err := client.DepositPush(ctx, epoch, pushAmount)
+			if err != nil {
+				outcome := &StPublishOutcome{Status: model.StPublishStatusFailed, TxHash: txHash, Reason: fmt.Sprintf("push transferStake: %s", err), Retry: true}
+				stResolvePublish(ctx, pushPublishId, outcome)
+				return outcome, nil
+			}
+			stResolvePublish(ctx, pushPublishId, &StPublishOutcome{Status: model.StPublishStatusConfirmed, TxHash: txHash})
+		}
 	}
 
 	// RESERVE: deposit() atomically moves and attributes the staged alpha.
