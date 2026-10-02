@@ -427,6 +427,23 @@ func IncrementIpRateLimit(
 	return IncrementRateLimitWindow(ctx, key, duration)
 }
 
+// create_time stores UTC without a zone. Keep the window boundary and retry
+// duration in that same clock, regardless of the PostgreSQL session timezone.
+const networkCreateIpRateLimitWindowSQL = `
+				SELECT
+					COUNT(*),
+					COALESCE(
+						CEIL(EXTRACT(EPOCH FROM (
+							MIN(create_time) + INTERVAL '1 seconds' * $2 - (now() AT TIME ZONE 'UTC')
+						)))::bigint,
+						0
+					)
+				FROM network_create_attempt
+				WHERE
+					client_address_hash = $1 AND
+					(now() AT TIME ZONE 'UTC') - INTERVAL '1 seconds' * $2 <= create_time
+			`
+
 // Atomically checks and records a seedphrase account creation. PostgreSQL owns
 // the rolling-window history; excluded callers return before opening it.
 func CheckNetworkCreateIpRateLimit(
@@ -445,20 +462,7 @@ func CheckNetworkCreateIpRateLimit(
 	Tx(ctx, func(tx PgTx) {
 		queryResult, err := tx.Query(
 			ctx,
-			`
-				SELECT
-					COUNT(*),
-					COALESCE(
-						CEIL(EXTRACT(EPOCH FROM (
-							MIN(create_time) + INTERVAL '1 seconds' * $2 - now()
-						)))::bigint,
-						0
-					)
-				FROM network_create_attempt
-				WHERE
-					client_address_hash = $1 AND
-					now() - INTERVAL '1 seconds' * $2 <= create_time
-			`,
+			networkCreateIpRateLimitWindowSQL,
 			client.clientIpHash[:],
 			int(window/time.Second),
 		)
