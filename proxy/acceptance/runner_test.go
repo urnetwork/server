@@ -616,7 +616,7 @@ func TestHTTPSRequestTraceIdentifiesResponseHeaderStall(t *testing.T) {
 
 // An error before GotConn must not be mislabeled as an established data-plane
 // tunnel; this is the adjacent failure class needed to interpret a timeout.
-func TestHTTPSRequestTraceIdentifiesTunnelConnectFailure(t *testing.T) {
+func TestHTTPSRequestTraceIdentifiesTCPConnectFailure(t *testing.T) {
 	started := time.Date(2026, time.August, 29, 4, 3, 0, 0, time.UTC)
 	requestTrace := &httpsRequestTrace{started: started, phase: "starting_request"}
 	clientTrace := requestTrace.clientTrace()
@@ -624,7 +624,7 @@ func TestHTTPSRequestTraceIdentifiesTunnelConnectFailure(t *testing.T) {
 	clientTrace.ConnectDone("tcp", "example.test:443", errors.New("dial failed"))
 
 	detail := requestTrace.wrap(errors.New("dial failed"), started.Add(time.Second)).Error()
-	if !strings.Contains(detail, "phase connecting_tunnel_failed") {
+	if !strings.Contains(detail, "phase connecting_tcp_failed") {
 		t.Errorf("trace detail %q does not identify the connect failure", detail)
 	}
 	if !strings.Contains(detail, "connection not_established") {

@@ -40,10 +40,9 @@ BEGIN
 END
 `
 
-// Only insertion/removal of an open contract or a change to its outcome can
-// change its reservation. Checkpoints and immutable usage writes are not new
-// reservation states. The escrow lookup uses the contract primary-key prefix.
-const NetEscrowContractsRevisionFunctionBodySql = `
+// Keep migration 747 byte-identical. The appended function replacement below
+// supplies the contract-key optimization boundary without rewriting history.
+const netEscrowContractsRevisionLegacyFunctionBodySql = `
 BEGIN
 	IF TG_OP = 'INSERT' THEN
 		PERFORM advance_net_escrow_revision(ARRAY(
@@ -72,6 +71,58 @@ BEGIN
 	END IF;
 	RETURN NULL;
 END
+`
+
+// Only insertion/removal of an open contract or a change to its outcome can
+// change its reservation. Checkpoints and immutable usage writes are not new
+// reservation states. Start with each changed contract, then constrain escrow
+// by its primary-key prefix. Keep settled/zero filters outside OFFSET 0 so
+// false-zero partial-index statistics cannot substitute a global unsettled scan.
+const NetEscrowContractsRevisionFunctionBodySql = `
+BEGIN
+	IF TG_OP = 'INSERT' THEN
+		PERFORM advance_net_escrow_revision(ARRAY(
+			SELECT escrow.balance_id FROM new_escrow_contracts AS contract
+			CROSS JOIN LATERAL (
+				SELECT balance_id, settled, balance_byte_count FROM transfer_escrow
+				WHERE contract_id = contract.contract_id OFFSET 0
+			) AS escrow
+			WHERE contract.outcome IS NULL AND NOT escrow.settled AND escrow.balance_byte_count <> 0
+		));
+	ELSIF TG_OP = 'DELETE' THEN
+		PERFORM advance_net_escrow_revision(ARRAY(
+			SELECT escrow.balance_id FROM old_escrow_contracts AS contract
+			CROSS JOIN LATERAL (
+				SELECT balance_id, settled, balance_byte_count FROM transfer_escrow
+				WHERE contract_id = contract.contract_id OFFSET 0
+			) AS escrow
+			WHERE contract.outcome IS NULL AND NOT escrow.settled AND escrow.balance_byte_count <> 0
+		));
+	ELSE
+		PERFORM advance_net_escrow_revision(ARRAY(
+			SELECT escrow.balance_id FROM (
+				SELECT COALESCE(old_contract.contract_id, new_contract.contract_id) AS contract_id
+				FROM old_escrow_contracts AS old_contract
+				FULL JOIN new_escrow_contracts AS new_contract USING (contract_id)
+				WHERE old_contract.contract_id IS NULL OR new_contract.contract_id IS NULL
+					OR (old_contract.outcome IS NULL) <> (new_contract.outcome IS NULL)
+			) AS changed
+			CROSS JOIN LATERAL (
+				SELECT balance_id, settled, balance_byte_count FROM transfer_escrow
+				WHERE contract_id = changed.contract_id OFFSET 0
+			) AS escrow
+			WHERE NOT escrow.settled AND escrow.balance_byte_count <> 0
+		));
+	END IF;
+	RETURN NULL;
+END
+`
+
+// Function replacement invalidates cached trigger plans without scanning or
+// rewriting billing history. Existing statement triggers and lock order remain.
+const netEscrowContractsRevisionPointLookupSql = `
+	CREATE OR REPLACE FUNCTION transfer_contract_escrow_revision()
+	RETURNS trigger LANGUAGE plpgsql AS $contract$` + NetEscrowContractsRevisionFunctionBodySql + `$contract$;
 `
 
 // A removed balance is a zero-reservation tombstone, even when old escrow rows
@@ -143,7 +194,7 @@ const netEscrowRevisionSchemaSql = `
 	CREATE TRIGGER transfer_escrow_revision_delete AFTER DELETE ON transfer_escrow
 	REFERENCING OLD TABLE AS old_escrow_rows FOR EACH STATEMENT EXECUTE FUNCTION transfer_escrow_revision();
 	CREATE FUNCTION transfer_contract_escrow_revision()
-	RETURNS trigger LANGUAGE plpgsql AS $contract$` + NetEscrowContractsRevisionFunctionBodySql + `$contract$;
+	RETURNS trigger LANGUAGE plpgsql AS $contract$` + netEscrowContractsRevisionLegacyFunctionBodySql + `$contract$;
 	CREATE TRIGGER transfer_contract_escrow_revision_insert AFTER INSERT ON transfer_contract
 	REFERENCING NEW TABLE AS new_escrow_contracts FOR EACH STATEMENT EXECUTE FUNCTION transfer_contract_escrow_revision();
 	CREATE TRIGGER transfer_contract_escrow_revision_update AFTER UPDATE ON transfer_contract
@@ -158,4 +209,16 @@ const netEscrowRevisionSchemaSql = `
 	REFERENCING OLD TABLE AS old_escrow_balances FOR EACH STATEMENT EXECUTE FUNCTION transfer_balance_escrow_revision();
 	CREATE TRIGGER transfer_balance_escrow_revision_update AFTER UPDATE ON transfer_balance
 	REFERENCING OLD TABLE AS old_escrow_balances NEW TABLE AS new_escrow_balances FOR EACH STATEMENT EXECUTE FUNCTION transfer_balance_escrow_revision();
+`
+
+// Lazily populated only from exact revision-fenced reservation snapshots.
+// Existing writers need no change: every revision advance invalidates an old
+// cached amount. Retained revision tombstones also fence balance-id reuse.
+// No history scan, backfill or populated index build is required.
+const netEscrowAdmissionSnapshotSchemaSql = `
+ CREATE TABLE transfer_balance_net_escrow_snapshot (
+     balance_id uuid PRIMARY KEY,
+     revision bigint NOT NULL CHECK (revision >= 0),
+     reserved_byte_count bigint NOT NULL CHECK (reserved_byte_count >= 0)
+ );
 `

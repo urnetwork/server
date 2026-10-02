@@ -152,25 +152,57 @@ func lockProberShardClientAdmissionInTx(ctx context.Context, tx server.PgTx, net
 }
 
 // A private probe account may fund only contracts in which it is an endpoint;
-// two different shard accounts never share a contract or payer. The existing
-// endpoint row locks below this check fence a concurrent drain before INSERT.
-func validateProberShardPayerInTx(ctx context.Context, tx server.PgTx, source, destination, payer server.Id) error {
-	rows, err := tx.Query(ctx, `SELECT network_id, state='active' AND clock_timestamp() AT TIME ZONE 'UTC'<deadline FROM prober_shard_run WHERE network_id=ANY($1)`, []server.Id{source, destination, payer})
+// two different shard accounts never share a contract or payer. Lock ownership
+// before grants or clients: drain locks the registry, clients, then its grant.
+// The shared registry fence prevents an admission waiting on a grant from
+// deadlocking with drain after it moves on to its endpoint lifecycle locks.
+func validateProberShardPayerInTx(ctx context.Context, tx server.PgTx, source, destination, payer server.Id) (*time.Time, error) {
+	rows, err := tx.Query(ctx, `SELECT network_id, state, deadline FROM prober_shard_run
+		WHERE network_id=ANY($1) ORDER BY network_id FOR SHARE`, []server.Id{source, destination, payer})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer rows.Close()
+	var admissionDeadline *time.Time
 	for rows.Next() {
 		var network server.Id
-		var live bool
-		if err := rows.Scan(&network, &live); err != nil {
-			return err
+		var state string
+		var deadline time.Time
+		if err := rows.Scan(&network, &state, &deadline); err != nil {
+			rows.Close()
+			return nil, err
 		}
-		if !live || payer != network || (source != network && destination != network) {
-			return errors.New("contract is outside its probe shard payer")
+		if state != "active" || payer != network || (source != network && destination != network) {
+			rows.Close()
+			return nil, errors.New("contract is outside its probe shard payer")
+		}
+		if admissionDeadline == nil || deadline.Before(*admissionDeadline) {
+			admissionDeadline = &deadline
 		}
 	}
-	return rows.Err()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	// A timestamp projected inside the locking SELECT can precede a row-lock
+	// wait. Read the database clock only after every selected lock is acquired.
+	return admissionDeadline, validateProberShardAdmissionDeadlineInTx(ctx, tx, admissionDeadline)
+}
+
+// Registry locks fence state changes, not the passage of time. Admission must
+// recheck after any grant/census/client wait and before its financial writes.
+func validateProberShardAdmissionDeadlineInTx(ctx context.Context, tx server.PgTx, deadline *time.Time) error {
+	if deadline == nil {
+		return nil
+	}
+	var live bool
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp() AT TIME ZONE 'UTC' < $1::timestamp`, *deadline).Scan(&live); err != nil {
+		return err
+	}
+	if !live {
+		return ErrProberShardRetired
+	}
+	return nil
 }
 
 // Caller owns the registry row FOR UPDATE. The existing sorted client locks

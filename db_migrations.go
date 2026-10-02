@@ -9445,4 +9445,9 @@ var migrations = []any{
 	newSqlMigration(subscriberQualityWriteGuardSchemaSql),
 	// Private probe passes own their disposable network and balance atomically.
 	newSqlMigration(proberShardSchemaSql),
+	// Keep reservation-revision work proportional to the changed contracts,
+	// even when the unsettled partial index has stale false-zero statistics.
+	newSqlMigration(netEscrowContractsRevisionPointLookupSql),
+	// Cache exact admission snapshots at the guarded durable revision.
+	newSqlMigration(netEscrowAdmissionSnapshotSchemaSql),
 }
