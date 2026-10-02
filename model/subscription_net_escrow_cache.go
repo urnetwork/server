@@ -75,16 +75,16 @@ func netEscrowAdmissionCacheArgs(pending map[server.Id]netEscrowSnapshot, balanc
 	return []any{balanceIds, revisions, amounts}
 }
 
-// Existing balance locks serialize admission. This cache removes historical
-// scans from that critical section after its first exact census. Old binaries
-// and other financial writers continue to advance the guarded revision, making
-// their unreflected changes misses. No Redis data authorizes credit here.
-func readLockedNetEscrowSnapshots(ctx context.Context, tx server.PgTx, balanceIds []server.Id) map[server.Id]netEscrowSnapshot {
+// The amount and matching durable revision come from one PostgreSQL snapshot.
+// Admission calls this after its balance locks; mirror readers need no financial
+// locks because their Redis publication retains the revision fence. Missing,
+// stale and deleted-balance entries stay absent for exact fallback.
+func readCachedNetEscrowSnapshots(ctx context.Context, query server.PgCanQuery, balanceIds []server.Id) map[server.Id]netEscrowSnapshot {
 	pending := map[server.Id]netEscrowSnapshot{}
 	if len(balanceIds) == 0 {
 		return pending
 	}
-	rows, err := tx.Query(ctx, netEscrowAdmissionCacheSQL, balanceIds)
+	rows, err := query.Query(ctx, netEscrowAdmissionCacheSQL, balanceIds)
 	server.WithPgResult(rows, err, func() {
 		for rows.Next() {
 			var id server.Id
@@ -100,12 +100,29 @@ func readLockedNetEscrowSnapshots(ctx context.Context, tx server.PgTx, balanceId
 			}
 		}
 	})
+	return pending
+}
+
+func missingNetEscrowSnapshots(pending map[server.Id]netEscrowSnapshot, balanceIds []server.Id) []server.Id {
 	missing := make([]server.Id, 0, len(balanceIds)-len(pending))
 	for _, id := range balanceIds {
 		if _, ok := pending[id]; !ok {
 			missing = append(missing, id)
 		}
 	}
+	return missing
+}
+
+// Existing balance locks serialize admission. This cache removes historical
+// scans from that critical section after its first exact census. Old binaries
+// and other financial writers continue to advance the guarded revision, making
+// their unreflected changes misses. No Redis data authorizes credit here.
+func readLockedNetEscrowSnapshots(ctx context.Context, tx server.PgTx, balanceIds []server.Id) map[server.Id]netEscrowSnapshot {
+	pending := readCachedNetEscrowSnapshots(ctx, tx, balanceIds)
+	if len(balanceIds) == 0 {
+		return pending
+	}
+	missing := missingNetEscrowSnapshots(pending, balanceIds)
 	if len(missing) > 0 {
 		exact := readNetEscrowSnapshots(ctx, tx, missing)
 		// Ordered cache writes follow the already ordered balance locks. Warming
