@@ -89,16 +89,31 @@ func TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks(t *testing.T) 
 
 	for _, boundary := range boundaries {
 		source := functionSource(boundary.filename, boundary.functionName)
+		lockCount := 1
+		if boundary.functionName == "createTransferEscrowInTx" {
+			// Zero-byte anchors and positive-byte reservations deliberately take
+			// the same endpoint locks on opposite sides of the financial wait.
+			// Prove both branches, including negative-input rejection, rather
+			// than mistaking their two call sites for two locks on one path.
+			if err := contractLifecycleEscrowBranchLockOrder(source); err != nil {
+				t.Errorf("%s: %v", boundary.functionName, err)
+			}
+			lockCount = 2
+		}
 		for markerName, marker := range map[string]string{
 			"lock":  boundary.lockMarker,
 			"write": boundary.writeMarker,
 			"clock": "clock_timestamp() AT TIME ZONE 'UTC'",
 		} {
-			if count := strings.Count(source, marker); count != 1 {
-				t.Errorf("%s: %s marker count = %d, want 1", boundary.functionName, markerName, count)
+			want := 1
+			if markerName == "lock" {
+				want = lockCount
+			}
+			if count := strings.Count(source, marker); count != want {
+				t.Errorf("%s: %s marker count = %d, want %d", boundary.functionName, markerName, count, want)
 			}
 		}
-		lockIndex := strings.Index(source, boundary.lockMarker)
+		lockIndex := strings.LastIndex(source, boundary.lockMarker)
 		writeIndex := strings.Index(source, boundary.writeMarker)
 		clockIndex := strings.Index(source, "clock_timestamp() AT TIME ZONE 'UTC'")
 		if lockIndex < 0 || writeIndex <= lockIndex || clockIndex <= writeIndex {
