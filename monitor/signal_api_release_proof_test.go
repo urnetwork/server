@@ -478,9 +478,13 @@ func (s *releaseBudgetSignal) Run(ctx context.Context, _ SignalSettings) (Alerts
 func TestAPIReleaseProofQueueBudgetIncludesAdmission(t *testing.T) {
 	for _, occupied := range []bool{false, true} {
 		t.Run(fmt.Sprint("occupied-", occupied), func(t *testing.T) {
-			slots := make(chan struct{}, 1)
+			slots := newRunSlotPool(1)
 			if occupied {
-				slots <- struct{}{}
+				release, err := slots.acquire(context.Background(), false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer release()
 			}
 			signal := &releaseBudgetSignal{budget: 10 * time.Millisecond}
 			_, err := runSignalInSlot(context.Background(), slots, signal, SignalSettings{})
@@ -493,7 +497,7 @@ func TestAPIReleaseProofQueueBudgetIncludesAdmission(t *testing.T) {
 				want = 0
 				size = 1
 			}
-			if signal.calls.Load() != want || len(slots) != size {
+			if signal.calls.Load() != want || slots.active != size {
 				t.Fatal("queue expiry started a child or released an unowned slot")
 			}
 		})
