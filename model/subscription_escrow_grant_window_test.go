@@ -26,7 +26,9 @@ type escrowGrantQueryTestTx struct {
 
 // Records only the grant query; no process-global database hooks are used.
 func (self *escrowGrantQueryTestTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	grant := strings.Contains(strings.Join(strings.Fields(sql), " "), " FROM transfer_balance ")
+	// Cache validation has a separate balance primary-key lookup; it neither
+	// discovers grants nor changes the candidate/locking row budget.
+	grant := sql != netEscrowAdmissionCacheSQL && strings.Contains(strings.Join(strings.Fields(sql), " "), " FROM transfer_balance ")
 	if grant {
 		self.grantQueries++
 		self.grantSql, self.grantArgs = sql, append([]any(nil), args...)

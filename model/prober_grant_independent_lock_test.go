@@ -114,7 +114,9 @@ type grantHintTestTx struct {
 }
 
 func (tx *grantHintTestTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
-	if query == netEscrowReservationPageSQL {
+	// Count authoritative snapshot attempts; a matching durable revision
+	// now avoids a historical census within an attempt.
+	if query == netEscrowAdmissionCacheSQL {
 		tx.reservationReads++
 		tx.reservationRows += len(args[0].([]server.Id))
 	}

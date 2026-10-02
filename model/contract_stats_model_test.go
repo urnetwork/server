@@ -21,8 +21,8 @@ import (
 // the redis keys reproducible.
 var testContractStatsBase = time.Date(2026, 3, 15, 12, 0, 0, 0, time.UTC)
 
-// One transfer_contract row with an exact create_time, so it lands in a named
-// hour bucket.
+// One contract lands in an exact hour bucket. A terminal stats fixture has
+// explicit zero delivered work: allocated capacity is not completed usage.
 func testContractStatsContract(
 	ctx context.Context,
 	createTime time.Time,
@@ -30,6 +30,15 @@ func testContractStatsContract(
 	outcome *string,
 ) server.Id {
 	contractId := server.NewId()
+	var closedAt *time.Time
+	var usage *contractUsageSnapshot
+	if outcome != nil {
+		closed := createTime.UTC()
+		closedAt = &closed
+		var err error
+		usage, err = newContractUsageSnapshot(0, nil)
+		server.Raise(err)
+	}
 	server.Db(ctx, func(conn server.PgConn) {
 		server.RaisePgResult(conn.Exec(
 			ctx,
@@ -43,9 +52,11 @@ func testContractStatsContract(
 				transfer_byte_count,
 				create_time,
 				dispute,
-				outcome
+				outcome,
+				close_time,
+				provider_usage
 			)
-			VALUES ($1, $2, $3, $4, $5, 1024, $6, $7, $8)
+			VALUES ($1, $2, $3, $4, $5, 1024, $6, $7, $8, $9, $10)
 			`,
 			contractId,
 			server.NewId(),
@@ -55,9 +66,48 @@ func testContractStatsContract(
 			createTime.UTC(),
 			dispute,
 			outcome,
+			closedAt,
+			usage,
 		))
 	})
 	return contractId
+}
+
+// Count-only setup must never manufacture credited work from its allocation,
+// and open/disputed rows must not acquire a terminal receipt merely by seeding.
+func TestContractStatsFixtureRetainsExplicitZeroSettlement(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		created := testContractStatsBase
+		for _, outcome := range []string{ContractOutcomeSettled, ContractOutcomeDisputeResolvedToSource, ContractOutcomeDisputeResolvedToDestination, "success"} {
+			id := testContractStatsContract(ctx, created, false, &outcome)
+			server.Db(ctx, func(conn server.PgConn) {
+				var closed time.Time
+				var raw []byte
+				var allocated int64
+				var open bool
+				server.Raise(conn.QueryRow(ctx, `SELECT close_time,provider_usage,transfer_byte_count,open
+					FROM transfer_contract WHERE contract_id=$1`, id).Scan(&closed, &raw, &allocated, &open))
+				snapshot, err := decodeContractUsageSnapshot(raw)
+				if err != nil || snapshot.ByteCount != 0 || len(snapshot.Providers) != 0 || !closed.Equal(created) || allocated != 1024 || open {
+					t.Fatalf("stats fixture invented or lost terminal usage for %s: snapshot=%+v closed=%s allocated=%d open=%t err=%v", outcome, snapshot, closed, allocated, open, err)
+				}
+			})
+		}
+		for _, disputed := range []bool{false, true} {
+			id := testContractStatsContract(ctx, created, disputed, nil)
+			server.Db(ctx, func(conn server.PgConn) {
+				var pending bool
+				server.Raise(conn.QueryRow(ctx, `SELECT outcome IS NULL AND close_time IS NULL AND provider_usage IS NULL
+					FROM transfer_contract WHERE contract_id=$1`, id).Scan(&pending))
+				if !pending {
+					t.Fatal("unsettled stats fixture acquired terminal custody", disputed)
+				}
+			})
+		}
+	})
 }
 
 // One extender party of a contract, stamped with the contract's own
