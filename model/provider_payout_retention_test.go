@@ -43,8 +43,9 @@ func TestProviderTransitionLegacyComponentsRetainOriginalAllocation(t *testing.T
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE account_payment SET canceled=true,cancel_time=now() WHERE payment_id=$1`, payment.PaymentId))
 		})
 		var priorPoints, priorWindows int
+		var priorPointValue int64
 		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM network_point),(SELECT COUNT(*) FROM subsidy_payment)`).Scan(&priorPoints, &priorWindows))
+			server.Raise(conn.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM account_point),(SELECT COUNT(*) FROM subsidy_payment),(SELECT COALESCE(SUM(point_value),0)::bigint FROM account_point)`).Scan(&priorPoints, &priorWindows, &priorPointValue))
 		})
 		for attempt := 0; attempt < 2; attempt++ {
 			plan, err := CreatePaymentPlan(ctx, config, false, 0)
@@ -68,8 +69,9 @@ func TestProviderTransitionLegacyComponentsRetainOriginalAllocation(t *testing.T
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var points, windows, owners int
-			server.Raise(conn.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM network_point),(SELECT COUNT(*) FROM subsidy_payment),(SELECT COUNT(*) FROM account_payment WHERE network_id=$1)`, f.network).Scan(&points, &windows, &owners))
-			if points != priorPoints || windows != priorWindows || owners != 1 {
+			var pointValue int64
+			server.Raise(conn.QueryRow(ctx, `SELECT (SELECT COUNT(*) FROM account_point),(SELECT COUNT(*) FROM subsidy_payment),(SELECT COUNT(*) FROM account_payment WHERE network_id=$1),(SELECT COALESCE(SUM(point_value),0)::bigint FROM account_point)`, f.network).Scan(&points, &windows, &owners, &pointValue))
+			if points != priorPoints || windows != priorWindows || owners != 1 || pointValue != priorPointValue {
 				t.Fatal("recovery repeated points/window/payment", points, windows, owners)
 			}
 		})

@@ -341,3 +341,36 @@ func TestProviderTransitionLateAcceptancePreservesNewAttemptAndFlagsConflict(t *
 		})
 	})
 }
+
+func TestProviderTransitionHeldPaymentPostSchedulesBoundedContinuation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		cutoff := time.Date(2020, 1, 7, 0, 0, 0, 0, time.UTC)
+		controllerPayoutSchedule(t, cutoff)
+		owner, payment := controllerPayoutFixture(t, cutoff.Add(-time.Microsecond), model.UsdToNanoCents(.005))
+		controllerRetainedComponents(t, owner, payment, payment.Payout, 0)
+		args := &AdvancePaymentArgs{PaymentId: payment.PaymentId}
+		result, err := AdvancePayment(args, owner)
+		if err == nil || result.Complete || result.Canceled {
+			t.Fatal("missing actual pending/held result", result, err)
+		}
+		before := server.NowUtc()
+		// The post consumer uses only the returned lifecycle flags. Its run-once
+		// admission owns one delayed continuation, even if invoked twice.
+		for i := 0; i < 2; i++ {
+			server.Tx(owner.Ctx, func(tx server.PgTx) {
+				if err := AdvancePaymentPost(args, result, owner, tx); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}
+		after := server.NowUtc()
+		server.Db(owner.Ctx, func(conn server.PgConn) {
+			var count int
+			var earliest, latest time.Time
+			server.Raise(conn.QueryRow(owner.Ctx, `SELECT COUNT(*),MIN(run_at),MAX(run_at) FROM pending_task WHERE args_json::jsonb->>'payment_id'=$1`, payment.PaymentId.String()).Scan(&count, &earliest, &latest))
+			if count != 1 || earliest.Before(before.Add(5*time.Minute)) || latest.After(after.Add(30*time.Minute)) {
+				t.Fatal("held result abandoned or busy-spun continuation", count, earliest, latest)
+			}
+		})
+	})
+}

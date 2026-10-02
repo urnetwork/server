@@ -537,9 +537,9 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 		connect.AssertEqual(t, removeResult.Success, true)
 
 		result, err := AdvancePayment(advanceArgs, destinationSession)
-		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, err, nil)
 		connect.AssertEqual(t, result.Complete, false)
-		connect.AssertEqual(t, result.Canceled, true)
+		connect.AssertEqual(t, result.Canceled, false)
 		connect.AssertEqual(t, len(sends), 0)
 
 		// the payment is held, not canceled, so it can pay out
