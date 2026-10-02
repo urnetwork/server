@@ -1747,7 +1747,7 @@ func CreateTransferEscrow(
 ) (transferEscrow *TransferEscrow, returnErr error) {
 	var posts []func() any
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	if err := transferEscrowTx(ctx, sourceNetworkId, contractTransferByteCount, func(tx server.PgTx) {
 		transferEscrow, posts, returnErr = createTransferEscrowInTx(
 			ctx,
 			tx,
@@ -1760,7 +1760,9 @@ func CreateTransferEscrow(
 			contractTransferByteCount,
 			nil,
 		)
-	}, server.TxReadCommitted)
+	}); err != nil {
+		return nil, err
+	}
 
 	if returnErr != nil {
 		return
@@ -1827,7 +1829,7 @@ func CreateCompanionTransferEscrow(
 ) (transferEscrow *TransferEscrow, returnErr error) {
 	var posts []func() any
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	if err := transferEscrowTx(ctx, destinationNetworkId, contractTransferByteCount, func(tx server.PgTx) {
 		// find the earliest open transfer contract in the opposite direction
 		// with null companion_contract_id
 		// there can be many companion contracts for an original contract
@@ -2011,7 +2013,9 @@ func CreateCompanionTransferEscrow(
 			contractTransferByteCount,
 			companionContractId,
 		)
-	}, server.TxReadCommitted)
+	}); err != nil {
+		return nil, err
+	}
 
 	if returnErr != nil {
 		return
