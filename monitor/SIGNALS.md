@@ -1628,6 +1628,22 @@ required settlement work; persistent misses can leave CPU high. Verify fresh
 per-process counter continuity and source coverage alongside independent CPU
 and successful traffic before claiming recovery.
 
+Settlement metadata also advances reservation revisions when it marks escrow
+rows settled. Its post must lock the contract's existing balances in sorted
+order before locking escrow rows and reading the current snapshot, including
+balances outside a partial payout map. Without that fence, concurrent
+admission can overtake the metadata read; guarded publication then correctly
+rejects the stale prediction, but the next reader repeats the exact census.
+An actual PostgreSQL interleave with 10,001 surviving reservations reproduced
+this cache invalidation without changing reserved credit. The balance fence
+preserved the current revision; independent-process admission and settlement
+controls also verified exact PostgreSQL/cache/Redis accounting. Missing cache
+rows, legacy mutations, rollback, replay and deleted balances retain their
+existing authority checks. Local controls establish this mechanism, not its
+production frequency or the identity of a sampled Main census caller. A
+revision miss is not proof of lost funds; repeated misses can explain work
+amplification even when every financial check remains correct.
+
 **2026-10-02 early-detection audit.** The CPU warning was already present:
 25% in two observations (§1.3c), and active/idle-transaction warnings existed
 in §1.3. Retained CPU observations include 80.85% at 10:29:23Z and 52.52% at
