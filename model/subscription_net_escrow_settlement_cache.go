@@ -1,0 +1,132 @@
+package model
+
+import (
+	"context"
+	"fmt"
+	"slices"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/urnetwork/server"
+)
+
+// Lock the existing contract/balance primary-key tuples before reading the
+// reservation snapshot. The offset boundary prevents a global partial-index
+// scan when historical statistics incorrectly estimate no unsettled rows.
+const settlementReservationRowsSQL = `
+ SELECT escrow.balance_id, escrow.balance_byte_count, escrow.settled
+ FROM unnest(ARRAY[$1::uuid]) AS requested(contract_id)
+ CROSS JOIN LATERAL (
+     SELECT balance_id, balance_byte_count, settled
+     FROM transfer_escrow
+     WHERE contract_id = requested.contract_id
+     ORDER BY balance_id
+     OFFSET 0 FOR UPDATE
+ ) AS escrow
+`
+
+var netEscrowSettlementSnapshots = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_net_escrow_settlement_snapshot_total",
+	Help: "Attempted settlement balance snapshots reused at a durable revision or reloaded from exact history; not committed settlements.",
+}, []string{"result"})
+
+func init() { prometheus.MustRegister(netEscrowSettlementSnapshots) }
+
+func lockSettlementReservations(ctx context.Context, tx server.PgTx, contractId server.Id, balanceIds []server.Id) map[server.Id]ByteCount {
+	allowed := make(map[server.Id]bool, len(balanceIds))
+	for _, id := range balanceIds {
+		allowed[id] = true
+	}
+	positive := map[server.Id]ByteCount{}
+	rows, err := tx.Query(ctx, settlementReservationRowsSQL, contractId)
+	server.WithPgResult(rows, err, func() {
+		for rows.Next() {
+			var id server.Id
+			var amount ByteCount
+			var settled bool
+			server.Raise(rows.Scan(&id, &amount, &settled))
+			if allowed[id] && !settled && amount > 0 {
+				positive[id] = amount
+			}
+		}
+	})
+	return positive
+}
+
+func settlementReservationIds(positive map[server.Id]ByteCount) []server.Id {
+	ids := make([]server.Id, 0, len(positive))
+	for id := range positive {
+		ids = append(ids, id)
+	}
+	slices.SortFunc(ids, server.Id.Cmp)
+	return ids
+}
+
+// This runs under the contract, balance and escrow row locks. A cold balance
+// needs one exact census; subsequent settlements preserve that snapshot. Count
+// these reads separately from admission and asynchronous mirror reads.
+func readSettlementNetEscrowSnapshots(ctx context.Context, tx server.PgTx, ids []server.Id) map[server.Id]netEscrowSnapshot {
+	pending := readCachedNetEscrowSnapshots(ctx, tx, ids)
+	missing := missingNetEscrowSnapshots(pending, ids)
+	if len(missing) > 0 {
+		for id, snapshot := range readNetEscrowSnapshots(ctx, tx, missing) {
+			pending[id] = snapshot
+		}
+	}
+	netEscrowSettlementSnapshots.WithLabelValues("reused").Add(float64(len(ids) - len(missing)))
+	netEscrowSettlementSnapshots.WithLabelValues("reloaded").Add(float64(len(missing)))
+	return pending
+}
+
+// The caller has made exactly one revision-advancing transition for each
+// locked positive row. Any intervening legacy mutation makes expected+1 stale,
+// so guarded publication skips it. No later durable revision is borrowed.
+func publishSettlementNetEscrowSnapshots(ctx context.Context, tx server.PgTx, pending map[server.Id]netEscrowSnapshot, positive map[server.Id]ByteCount, release bool) {
+	ids := []server.Id{}
+	for _, id := range settlementReservationIds(positive) {
+		snapshot, ok := pending[id]
+		if !ok {
+			continue
+		}
+		if release {
+			if snapshot.reserved < positive[id] {
+				server.Raise(fmt.Errorf("settlement reservation snapshot underflow"))
+			}
+			snapshot.reserved -= positive[id]
+		}
+		snapshot.revision++
+		pending[id] = snapshot
+		ids = append(ids, id)
+	}
+	if len(ids) > 0 {
+		server.RaisePgResult(tx.Exec(ctx, netEscrowPublishAdmissionCacheSQL, netEscrowAdmissionCacheArgs(pending, ids)...))
+	}
+}
+
+// Metadata is still a separate post. Read committed authority here, never a
+// prediction captured before the outcome commit: callbacks after rollback or
+// ambiguous commits must not reuse an abandoned transaction's revision.
+func settleEscrowMetadataInTx(ctx context.Context, tx server.PgTx, contractId server.Id, settleTime time.Time, sweepPayouts map[server.Id]sweepPayout) {
+	var terminal bool
+	rows, err := tx.Query(ctx, `SELECT outcome IS NOT NULL FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, contractId)
+	server.WithPgResult(rows, err, func() {
+		if rows.Next() {
+			server.Raise(rows.Scan(&terminal))
+		}
+	})
+	if !terminal {
+		return
+	}
+	ids := make([]server.Id, 0, len(sweepPayouts))
+	for id := range sweepPayouts {
+		ids = append(ids, id)
+	}
+	positive := lockSettlementReservations(ctx, tx, contractId, ids)
+	pending := readCachedNetEscrowSnapshots(ctx, tx, settlementReservationIds(positive))
+	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+		queueEscrowSettlementUpdates(batch, contractId, settleTime, sweepPayouts)
+	})
+	// A terminal contract contributes zero before and after metadata changes.
+	// Already-settled and zero rows cause no revision advance and need no write.
+	publishSettlementNetEscrowSnapshots(ctx, tx, pending, positive, false)
+}

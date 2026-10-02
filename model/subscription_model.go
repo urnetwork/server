@@ -3021,6 +3021,10 @@ func settleEscrowInTx(
 		return
 	}
 
+	// Keep each positive reservation's exact tuple stable through the outcome
+	// transition, including when a legacy writer does not take balance locks.
+	positiveReservations := lockSettlementReservations(ctx, tx, contractId, lockedBalanceIds)
+
 	// order balances by end date, ascending
 	// take from the earlier before the later
 	result, err = tx.Query(
@@ -3088,6 +3092,7 @@ func settleEscrowInTx(
 		sweepPayouts,
 	)
 
+	reservationSnapshots := readSettlementNetEscrowSnapshots(ctx, tx, settlementReservationIds(positiveReservations))
 	closed, returnErr = claimContractOutcomeInTx(ctx, tx, contractId, outcome)
 	if returnErr != nil || !closed {
 		return
@@ -3104,6 +3109,7 @@ func settleEscrowInTx(
 			`, balanceId, payout))
 		}
 	}
+	publishSettlementNetEscrowSnapshots(ctx, tx, reservationSnapshots, positiveReservations, true)
 	if 0 < clockTransferByteCount {
 		posts = append(posts, clockTransferPost(ctx, clockTransferByteCount))
 	}
@@ -3113,9 +3119,7 @@ func settleEscrowInTx(
 	if 0 < len(sweepPayouts) {
 		posts = append(posts, func() any {
 			server.Tx(ctx, func(tx server.PgTx) {
-				server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-					queueEscrowSettlementUpdates(batch, contractId, server.NowUtc(), sweepPayouts)
-				})
+				settleEscrowMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts)
 			}, server.TxReadCommitted)
 			return nil
 		})
