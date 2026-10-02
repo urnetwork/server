@@ -28,7 +28,12 @@ type privateLateContractFixture struct {
 
 func newPrivateLateContractFixture(t testing.TB, ctx context.Context) privateLateContractFixture {
 	t.Helper()
-	shard, err := model.BeginProberShard(ctx, model.ProberShardKey{TaskId: server.NewId(), Epoch: server.NewId(), ShardIndex: 0, ShardCount: 8}, 1024*1024*1024, time.Hour)
+	return newPrivateLateContractFixtureWithCredit(t, ctx, 1024*1024*1024)
+}
+
+func newPrivateLateContractFixtureWithCredit(t testing.TB, ctx context.Context, credit model.ByteCount) privateLateContractFixture {
+	t.Helper()
+	shard, err := model.BeginProberShard(ctx, model.ProberShardKey{TaskId: server.NewId(), Epoch: server.NewId(), ShardIndex: 0, ShardCount: 8}, credit, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,14 +143,32 @@ func privateLateAssertPool(t testing.TB) {
 // Cleanup must join through the same authenticated controller, write only the
 // requester's zero-use close, and leave provider accounting authoritative.
 func TestPrivateProviderLateCommittedContractClosesRequesterOnly(t *testing.T) {
+	privateProviderLateCommittedContractClosesRequesterOnly(t, 1024*1024*1024, false)
+}
+
+// The configured URL-probe grant also qualifies for indexed selected-first
+// allocation. Counter evidence prevents a large-credit fixture from silently
+// exercising the ordinary fallback tested above.
+func TestPrivateProviderLateCommittedSelectedGrantClosesRequesterOnly(t *testing.T) {
+	args := providerEgressProbeArgs(defaultProviderEgressProbeSettings("late-contract.example"), 0)
+	credit, err := providerUrlProbeShardCredit(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateProviderLateCommittedContractClosesRequesterOnly(t, credit, true)
+}
+
+func privateProviderLateCommittedContractClosesRequesterOnly(t *testing.T, credit model.ByteCount, selected bool) {
+	t.Helper()
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
-		fixture := newPrivateLateContractFixture(t, ctx)
+		fixture := newPrivateLateContractFixtureWithCredit(t, ctx, credit)
 		restore := privateLateOneConnection(t)
 		defer restore()
+		selectedBefore := urlFundingSelectedGrants(t)
 		ownerCtx, cancelOwner := context.WithCancel(ctx)
 		defer cancelOwner()
 		strategy := privateLateContractStrategy(ctx)
@@ -196,6 +219,13 @@ func TestPrivateProviderLateCommittedContractClosesRequesterOnly(t *testing.T) {
 			t.Fatal("create did not reach its committed barrier", reply.err)
 		case <-ctx.Done():
 			t.Fatal("create could not complete through one database connection")
+		}
+		selectedWant := float64(0)
+		if selected {
+			selectedWant = 1
+		}
+		if got := urlFundingSelectedGrants(t) - selectedBefore; got != selectedWant {
+			t.Fatalf("unexpected selected-first allocation count: got=%v want=%v", got, selectedWant)
 		}
 		contract, err := server.IdFromBytes(stored.ContractId)
 		if err != nil || stored.TransferByteCount <= 0 {
