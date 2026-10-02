@@ -11,7 +11,7 @@ ten-success census is not evidence of zero completion under this new target.
 Bucket admission, eight-hour success-ratio ranking, common eligibility gates,
 and independent same-URL TLS recovery are unchanged.
 
-Status: implementation and Main validation in progress, 2026-09-29. This
+Status: implementation and Main validation in progress, 2026-10-02. This
 document defines the quality-probe/indexing contract. The checkpoint below
 distinguishes deployed changes from remaining production acceptance; code or
 deployment completion alone does not establish the four-hour quota or CPU
@@ -174,7 +174,8 @@ Ten errors can complete collection while leaving the provider online-only;
 ten successes and ten errors in the eight-hour history give `r = 0.5`, so that
 provider also remains online-only until its history meets the success threshold.
 Ten measured runs are a collection target, not an additional quality/speed gate;
-for example, three successes and two errors already pass the URL ratio gate.
+for example, four successes and one error already pass the URL ratio gate.
+Three successes and two errors give `3/5` and fail the inclusive `4/5` gate.
 Probing pauses only when the rolling quota is met **and** all TLS exceptions
 have cleared; a quota-complete but quarantined provider still needs work.
 
@@ -4866,3 +4867,82 @@ that the active score export used 4/5 at their source times, while complete
 old-writer retirement remains unproved. A second bounded mounted-config
 attestation stopped at its first host with SSH exit 255 and produced no
 qualified host row; it neither proves nor disproves a mounted override.
+
+
+## 2026-10-02 settlement-cache deployment and unresolved acceptance
+
+Main server source `36f43eefefe1ef4153c526d3c3b656cceb19b368` includes the
+revision-checked reservation read-through and exact snapshot preservation
+through settlement and terminal metadata updates. Release suffix `4000` was
+selected for API, Taskworker and Connect. At 12:43 UTC, the source-qualified
+API pressure read found all 20 API processes current and ready. Eight
+Taskworkers were observed on `4000` at 12:47. Nineteen of 20 Connect slots had
+been witnessed on `4000` across different observations by 12:54; this is not a
+simultaneous fleet sample, and edge3/g3 still reported `3900` at 12:54. These
+observations do not establish predecessor retirement or every serving path.
+
+The 12:43 five-minute API pressure read reported 608,791 completed
+`/connect/control` requests, mean duration 0.927 seconds, cancellation share
+2.10%, 1,967 requests in flight, and mean PG acquisition time 5.6 microseconds.
+Across the 19 cells with comparable counter endpoints, reservation refreshes
+reported 594 snapshot reuses and 40 reloads; settlement reported 579 reuses and
+55 reloads. These count completed snapshot reads and attempted settlement
+balance operations, respectively, rather than committed financial operations,
+saved SQL calls, or per-query CPU. They establish that the guarded cache path
+was exercised in this interval. The earlier `3900` refresh read at 11:40 had
+zero reuses and 453 reloads in five minutes, with a different population and
+clock; that comparison does not isolate the new release's effect.
+
+Local financial validation covered settlement, rollback, replay, missing and
+already-settled rows, and a concurrent legacy writer. Author and independent
+34-root race runs passed in 135.810 and 125.225 seconds. In the bounded local
+20-close fixture with 10,001 surviving escrows and no intervening admission,
+the baseline performed 20 mirror censuses; the new warm snapshot performed
+zero main and zero mirror censuses, and a cold snapshot performed one main
+and zero mirror censuses. Revision mismatch, incomplete knowledge, and an
+unexpected mutation retain the exact census fallback. This fixture does not
+predict Main coverage when other transactions change the revision.
+
+Standing Main PG CPU at 12:45:20 was 52.754 cores out of 96 (54.95%). The
+separate 12:55 PG state sample reported 203 active sessions, 90 idle in a
+transaction, and 695 client sessions. These clocks are not a joined sample
+and do not identify which query consumes CPU. A fresh bounded catalog sample
+remains outstanding; an unrelated SSH transfer blocked its quiet precontact
+gate. The successful pre-cache 10:52 catalog sample identified the normalized
+1,023-row reservation-page census as the largest sampled active/no-wait
+family, but activity samples are not per-query CPU measurements.
+
+The scheduled URL coverage observations at 12:36:02 and 12:51:18 remained
+`owner_unavailable`. The former lacked qualifying owners for shards 0, 2 and
+6; the latter lacked owners for shards 0 and 2. They reported no qualified
+current numeric quota census. All eight current Taskworker versions alone do
+not establish active shard ownership, accepted measured-run throughput, or
+ten-run rolling coverage. The next scheduled observation at 13:06:30 produced a qualified coherent
+census: 113,561 eligible providers, zero quota-complete or secure-complete,
+98,115 due, 113,558 overdue, three warming, 15 uninitialized, and 786,714
+measured runs still needed. It reported 17 security-pending providers, one
+unknown recovery target, and an oldest due age of 192,746 seconds. A separate
+13:09:20 owner read found all eight expected Taskworker slots at capability 2
+and configured geometry eight, with exactly one fresh owner for each shard
+and heartbeat ages 15.87–65.25 seconds. This later evidence resolves ownership
+for that observation; it does not identify the cause of the earlier gaps or
+establish sustained throughput. The current-process hourly rate window remains
+incomplete. The fresh native bucket/ratio publication, durable shard-cleanup
+validation, and remaining scheduler and ARIN policy acceptance are still open.
+No quota, DB CPU, or end-user connection recovery is claimed by this checkpoint.
+
+Evidence: bounded runtime receipt
+`Connect-Taskworker-settlement-snapshot-runtime-1247-v1/run-20261002T124742Z`
+(SHA-256 `70891c754f99259d2d1cf0e95275c523e5421eca85373783bd5e1d0502ffa688`),
+API receipt `API-current-settlement-snapshot-pressure-https-1243-v2/run-20261002T124317Z`
+(SHA-256 `c5a0ea83b19f3e01696efee493be14b811c8a2b03d6992110f022176e73ee121`), and the retained scheduled URL alert scope
+(SHA-256 `1dc907abbe6df9456b000b52406ffc57e5065f0abad75b1fea108660ad9fd56a`).
+The source-local author financial receipt is
+`settlement-snapshot-preservation-20261002/author-review.json`
+(SHA-256 `a85c9eb856544b155f470c8736da3b34941181a348a959b5880a8bb28436595b`);
+the independent receipt is `independent-monitor-financial-review.json`
+(SHA-256 `d0081bd25d8f0a794ec8e41aded578d843c96c63e597f3d6aca47bc8891944c5`).
+
+The 13:09 owner receipt is `URL-owner-qualification-4000-1309-v3/run-20261002T130920Z`
+(SHA-256 prefix `1440ddf2`); it is an instantaneous metric observation, not a
+durable task-lease, cleanup, or accepted-history join.
