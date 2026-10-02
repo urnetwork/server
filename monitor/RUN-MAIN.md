@@ -950,6 +950,14 @@ that budget; require an immediate qualified coverage failure, never an invented
 completion. Startup priority must leave standing log ingestion running and
 delay ordinary active probes by at most the same finite owner. Recurring
 priority must include an ordinary-work fairness control.
+Gate the actual remote adapter against bounded local executable/connection,
+SQL authority/schema/PGSS, statement-timeout, capped-stderr/output and stalled
+child controls, with a complete12-frame healthy parser control. Psql phase
+markers are source comments only; verify the owning SQL workload is unchanged
+apart from those comments against the attested local PGSS fixture. Require a
+fixed phase/cause in failed immutable receipts without raw diagnostic text.
+Do not infer the cause of older coarse source-unavailable receipts from a
+later classifier result or promote queue fairness as proof that SQL now runs.
 PGSS1.10 lifetime counters remain interval-unqualified; query activity and
 execution wall time are not CPU shares. Preserve resource incidents while
 triaging absent, stale, partial, disabled or overdue query evidence.

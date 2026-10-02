@@ -3311,7 +3311,17 @@ catalog workload. The read-only primary session collects 12 activity snapshots
 separated by two seconds, clears the statistics snapshot before each read, and
 reads two bounded completed-statistic endpoints plus one final blocker census.
 There are no application-table scans, EXPLAIN ANALYZE, DDL, cancellations,
-financial changes or pool changes. Raw stderr and SQL text remain private.
+financial changes or pool changes. Raw stderr and SQL text never enter receipts
+or alerts. The remote adapter drains stderr concurrently, keeps only its first
+4KiB in memory and emits a fixed phase/cause plus a truncation flag. SQL source
+comments map psql's own failing statement line to identity, authority,
+history-start/end, activity, sample-wait or blockers without adding queries.
+Connection, executable/bootstrap, authority, PGSS-unavailable, schema/access,
+statement/lock timeout, output cap and owner deadline failures stay distinct.
+An absent or malformed envelope stays host-transport/projection unknown; it
+cannot become an attributed SQL failure. The finite envelope itself is capped
+at1KiB and validated for exact fields/enums before persistence. No raw exception
+or stderr fragment is retained, including unclassified failures.
 
 At startup, after the unchanged minimum cadence, the enabled recurring sampler
 owns the first finite turn before ordinary active probes begin. Standing log
@@ -3333,6 +3343,11 @@ more. On October 2, the local saturated scheduler control reproduced an
 invisible first cadence under the old two-observation visibility gate. The
 live first durable attempt at 16:34:22–16:34:27Z was source-unavailable; the
 earlier startup queue loss remains an inference, not a directly observed event.
+The next attempts at16:49:27–16:49:32Z and17:04:32–17:04:36Z also ended
+source-unavailable. Recurrence is observed, successful query coverage is not.
+Their coarse receipts cannot be retroactively assigned a transport or SQL
+cause. The phase projection repairs that evidence gap; a later complete
+receipt and representative source clocks are still required for recovery.
 
 A process-shared lock covers admission through terminal receipt writing.
 `pg-query-sample/continuous.json` is atomically written and fsynced, including
