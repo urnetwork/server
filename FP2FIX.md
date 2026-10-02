@@ -5470,3 +5470,63 @@ failed before authentication or any GET because its direct connection timed
 out. ARIN subscriber-policy activation, complete current-owner shadow coverage,
 accepted health-history retention, full tests, and sustained 100-percent
 eligible-provider quota coverage remain open.
+
+### 21:40 UTC settlement rollout and admission consistency requirement
+
+The cold settlement repair is committed and pushed as `075bd3b8`.
+Seventeen financial race roots passed author and independent runs; the
+independent current-source/published-SDK integration also passed. The repair
+removes cold balance-wide census work from the financial lock scope, retains
+warm revision-guarded deltas, and orders cold metadata before committed mirror
+rebuilding. It does not remove admission's own balance/revision contention.
+Independent financial gate:
+`be978fb1baccd9c13a8bd60d0ed33c14d3f82baf48325982e9d6e33182b06579`.
+
+Release `2026.10.2-settlement-lock-scope+1060864700` was built, pushed and
+verified for both Linux architectures for API, Connect and Taskworker. All
+three all-block deployment commands terminated successfully by 21:34:51 UTC.
+Fresh running-instance convergence and subsequent performance remain unproved.
+Deployment manifest:
+`91f89647be64a9daea13e1cc7a899f1f0ce29a49e6de56b136b327dd05f83eb1`.
+
+The qualified eight-Taskworker timing window at 20:40–20:45 UTC attributed
+95.80 percent (g1) and 96.41 percent (g2) of completed synchronous contract
+residence to the process-local payer gate. For DNS timeout waves, 60.10 and
+74.61 percent respectively carried an affirmative same-tunnel local-contract
+failure/pending witness with no provider write. These are not a cross-request
+SQL join, accepted quota counts, or measurements of the 4700 repair.
+Receipt:
+`b0594f05e59ba62021dabd942f2108e58db4adfc6a5e022e4d29510b1b35a77a`.
+
+Seven consecutive successful autonomous query samples establish recurring
+visibility; the eighth also completed at 21:30:15 UTC with persistent grant
+and settlement queues. The coherent 21:29:38 URL census reports 112,344
+eligible providers and 62 meeting quota; hourly process-counter coverage is
+incomplete. A retained 21:02:17 CPU sample measured 44.264 PostgreSQL cores
+out of 96 (46.11 percent over 5.02 seconds), before the repair deployment.
+This supersedes the previously retained 19:16 CPU observation, without
+attributing an improvement to a fix.
+
+The operator now explicitly requires contention-free contract creation for
+large numbers of clients on the same network and accepts approximate
+accounting at crash/reconciliation edges in exchange for eliminating admission
+contention. This supersedes absolute cache/admission consistency as a release
+criterion for the replacement admission design. The deterministic regression
+must use many distinct clients sharing a funded network across independent
+processes, demonstrate the current contention, and verify the repaired path
+without hiding serialization behind a local gate. Healthy concurrent
+reservation behavior, throughput, and the accepted failure/replay/reconciliation
+windows must be tested and documented. This replacement is not implemented or
+activated by the 4700 settlement repair.
+
+Current source has no distributed Redis admission mutex: September commit
+`35274673` made admission and settlement debit atomic using PostgreSQL locks
+and durable reservation reads. Redis currently mirrors committed state.
+The later local-controller path calls the same model and did not remove a
+mutex. Creator revision-trigger and snapshot writes also need attention in
+the replacement; removing only the local gate or balance lock is insufficient.
+
+ARIN full current-provider shadow coverage, hosted proxy local-controller
+integration, and dashboard corrections continue as separate work. New agent
+threads were rejected by the agent service's thread limit, so an existing
+Astra Max agent was reassigned exclusively to ARIN coverage in parallel.
