@@ -159,18 +159,17 @@ func lockProberShardClientAdmissionInTx(ctx context.Context, tx server.PgTx, net
 func validateProberShardPayerInTx(ctx context.Context, tx server.PgTx, source, destination, payer server.Id) (*time.Time, error) {
 	rows, err := tx.Query(ctx, `SELECT network_id, state, deadline FROM prober_shard_run
 		WHERE network_id=ANY($1) ORDER BY network_id FOR SHARE`, []server.Id{source, destination, payer})
-	if err != nil {
-		return nil, err
-	}
+	// Only policy refusals return normally. Database failures must unwind Tx;
+	// otherwise its void callback appears successful and a later COMMIT masks
+	// the original query/cancellation error with a closed-connection failure.
+	server.Raise(err)
+	defer rows.Close()
 	var admissionDeadline *time.Time
 	for rows.Next() {
 		var network server.Id
 		var state string
 		var deadline time.Time
-		if err := rows.Scan(&network, &state, &deadline); err != nil {
-			rows.Close()
-			return nil, err
-		}
+		server.Raise(rows.Scan(&network, &state, &deadline))
 		if state != "active" || payer != network || (source != network && destination != network) {
 			rows.Close()
 			return nil, errors.New("contract is outside its probe shard payer")
@@ -179,11 +178,8 @@ func validateProberShardPayerInTx(ctx context.Context, tx server.PgTx, source, d
 			admissionDeadline = &deadline
 		}
 	}
-	err = rows.Err()
 	rows.Close()
-	if err != nil {
-		return nil, err
-	}
+	server.Raise(rows.Err())
 	// A timestamp projected inside the locking SELECT can precede a row-lock
 	// wait. Read the database clock only after every selected lock is acquired.
 	return admissionDeadline, validateProberShardAdmissionDeadlineInTx(ctx, tx, admissionDeadline)
@@ -196,9 +192,7 @@ func validateProberShardAdmissionDeadlineInTx(ctx context.Context, tx server.PgT
 		return nil
 	}
 	var live bool
-	if err := tx.QueryRow(ctx, `SELECT clock_timestamp() AT TIME ZONE 'UTC' < $1::timestamp`, *deadline).Scan(&live); err != nil {
-		return err
-	}
+	server.Raise(tx.QueryRow(ctx, `SELECT clock_timestamp() AT TIME ZONE 'UTC' < $1::timestamp`, *deadline).Scan(&live))
 	if !live {
 		return ErrProberShardRetired
 	}
