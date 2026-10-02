@@ -5317,3 +5317,17 @@ A separate 18:07:24 state observation had 279 active sessions, 143 idle
 transactions and 711 clients. Both precede the monitoring handoff and neither
 attributes current load to a query or proves recovery. The first new scheduled
 query sampler remains pending.
+
+
+## 2026-10-02 18:30 UTC first classified recurring database failure
+
+The first autonomous query-sampler attempt from the promoted watcher ran at
+18:30:32.598286774–18:30:39.350513219 UTC. It failed at `history_start` with
+`statement_timeout`; its finite diagnostic was not truncated. This establishes
+that the initial query-history snapshot timed out, rather than identifying an
+SSH/bootstrap or missing-source failure. It does not identify the responsible
+application query, provide a valid historical share, or establish recovery.
+There are still zero successful recurring samples. The failed attempt retained
+its next eligible floor of 18:45:39.350513219 UTC; no manual retry was run.
+Astra is investigating the owning snapshot query and its dependencies. Receipt
+SHA-256: `da96a82accd316c8330ad0de8fd0a9136241f090417e60344827feedb2526881`.
