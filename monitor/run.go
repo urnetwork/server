@@ -222,7 +222,21 @@ func (self *Monitor) runLoopWithOptions(ctx context.Context, options RunLoopOpti
 	var handleLock sync.Mutex
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)
-	runSlots := make(chan struct{}, runLoopMaxConcurrentSignals)
+	runSlots := newRunSlotPool(runLoopMaxConcurrentSignals)
+	// All active signals wake at the same startup floor. The enabled recurring
+	// sampler gets the first finite turn so that this bulk wave cannot consume
+	// its entire queue-inclusive budget before it has ever observed a query.
+	// Standing log streams/drains remain independent. Ordinary probes start
+	// after this at-most40s turn; subsequent collisions use the fair slot queue.
+	var startupSampleDone chan struct{}
+	if self.settings.PGQuerySampleContinuous {
+		for _, signal := range signals {
+			if signal.ID() == "pg/query-sample" {
+				startupSampleDone = make(chan struct{})
+				break
+			}
+		}
+	}
 	alertGate := newCadenceAlertGate()
 	for _, registered := range tailers {
 		tailer := registered
@@ -238,6 +252,7 @@ func (self *Monitor) runLoopWithOptions(ctx context.Context, options RunLoopOpti
 		go func() {
 			defer wg.Done()
 			standingLogSignal := isStandingLogSignal(signal)
+			startupSample := startupSampleDone != nil && signal.ID() == "pg/query-sample"
 			initialDelay := options.MinimumProbeCadence
 			if standingLogSignal {
 				// Tailers begin just before these scheduler goroutines. Preserve
@@ -247,6 +262,13 @@ func (self *Monitor) runLoopWithOptions(ctx context.Context, options RunLoopOpti
 			}
 			if initialDelay > 0 && !waitRunLoopCadence(ctx, initialDelay, newTicker) {
 				return
+			}
+			if startupSampleDone != nil && !startupSample && !standingLogSignal {
+				select {
+				case <-startupSampleDone:
+				case <-ctx.Done():
+					return
+				}
 			}
 			for {
 				var alerts Alerts
@@ -258,6 +280,10 @@ func (self *Monitor) runLoopWithOptions(ctx context.Context, options RunLoopOpti
 					alerts, err = signal.Run(ctx, self.settings)
 				} else {
 					alerts, err = runSignalInSlot(ctx, runSlots, signal, self.settings)
+				}
+				if startupSample {
+					close(startupSampleDone)
+					startupSample = false
 				}
 				// A probe interrupted by monitor shutdown has not lost visibility;
 				// it was deliberately stopped. Do not turn that lifecycle event
@@ -306,20 +332,21 @@ func (self *Monitor) runLoopWithOptions(ctx context.Context, options RunLoopOpti
 // A bounded diagnostic's owner starts before the top-level queue. Its parent
 // deadline also reaches the shared host limiter and the transport. Cancellation
 // never releases a slot the caller did not acquire.
-func runSignalInSlot(ctx context.Context, slots chan struct{}, signal Signal, settings SignalSettings) (Alerts, error) {
+func runSignalInSlot(ctx context.Context, slots *runSlotPool, signal Signal, settings SignalSettings) (Alerts, error) {
+	priority := false
 	if bounded, ok := signal.(interface{ runBudget() time.Duration }); ok && bounded.runBudget() > 0 {
+		priority = true
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, bounded.runBudget())
 		defer cancel()
 	}
-	select {
-	case slots <- struct{}{}:
-		defer func() { <-slots }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	release, err := slots.acquire(ctx, priority)
+	if err != nil {
+		return nil, &runSlotAdmissionError{cause: err}
 	}
+	defer release()
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, &runSlotAdmissionError{cause: err}
 	}
 	return signal.Run(ctx, settings)
 }

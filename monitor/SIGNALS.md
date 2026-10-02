@@ -3297,6 +3297,27 @@ reads two bounded completed-statistic endpoints plus one final blocker census.
 There are no application-table scans, EXPLAIN ANALYZE, DDL, cancellations,
 financial changes or pool changes. Raw stderr and SQL text remain private.
 
+At startup, after the unchanged minimum cadence, the enabled recurring sampler
+owns the first finite turn before ordinary active probes begin. Standing log
+streams and drains continue independently. Later shared-slot collisions admit
+finite-budget observations ahead of queued ordinary work, with at most two
+priority grants before an ordinary waiter and FIFO within each class. Running
+work is never evicted and the shared four-signal/host-two-command caps remain.
+This bounds the startup delay by the sampler's 40-second owner and prevents a
+fleet of queued probes from repeatedly taking every newly released slot. Four
+already-running slow probes can still exhaust that budget: coverage is then
+unknown, with no early retry or extra slot.
+
+The first pre-slot deadline emits `pg-query-sample-unavailable` immediately
+(`Sustain=1`), identifying `shared-slot-admission` and
+`source_contact_attempted=false`. It preserves existing attempted/completed/
+next-eligible clocks without inventing a database attempt or receipt. A source
+or adapter failure has contact status unknown unless an owning receipt proves
+more. On October 2, the local saturated scheduler control reproduced an
+invisible first cadence under the old two-observation visibility gate. The
+live first durable attempt at 16:34:22–16:34:27Z was source-unavailable; the
+earlier startup queue loss remains an inference, not a directly observed event.
+
 A process-shared lock covers admission through terminal receipt writing.
 `pg-query-sample/continuous.json` is atomically written and fsynced, including
 its directories, before contact. It records mode, last attempted/terminal/
@@ -3342,7 +3363,7 @@ through PgBouncer.
   attribution. Retained positive findings still stand; missing work is unknown.
 - UNAVAILABLE: disabled/expired/spent configuration, cadence or source failure,
   deadline, stale/malformed/incomplete frames, or failed authority cannot
-  establish a fresh query sample. The ordinary visibility signal also retains
+  establish a fresh query sample. The first missing PG observation also retains
   a queue/host admission failure. This never clears `pg-cpu` or `pg-state`.
 
 Each SQL snapshot retains the union of 64 count-ranked and 64 age-ranked

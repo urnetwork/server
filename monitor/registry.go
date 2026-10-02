@@ -269,6 +269,9 @@ func (m *Monitor) Run(ctx context.Context) (Alerts, error) {
 }
 
 func visibilityAlert(settings SignalSettings, signal Signal, err error) Alert {
+	if signal.ID() == "pg/query-sample" {
+		return pgSampleFailureAlert(settings, signal, err)
+	}
 	var providerFailure interface{ monitorVisibilityClass() string }
 	if errors.As(err, &providerFailure) {
 		return providerFailureAlert(settings, signal, err, providerFailure.monitorVisibilityClass())

@@ -940,6 +940,16 @@ by an alert or ledger record; the sampler never overwrites or deletes receipt
 bodies. Global archival/retention needs an explicit policy. A source/queue
 failure consumes its admission reservation; no immediate manual retry or
 second watcher is allowed. Monitor tests are not a sampler runtime action.
+An unacquired shared slot has no database attempt to record; its first-cadence
+coverage alert must say so and preserve any older durable clocks. Test the real
+RunLoop with a startup bulk wave and a later saturated queue: the enabled
+sampler must complete its finite startup turn and receive a released recurring
+slot without exceeding global four or host two. Keep its 40-second budget
+inclusive of shared-slot/host admission. Existing active work can still exhaust
+that budget; require an immediate qualified coverage failure, never an invented
+completion. Startup priority must leave standing log ingestion running and
+delay ordinary active probes by at most the same finite owner. Recurring
+priority must include an ordinary-work fairness control.
 PGSS1.10 lifetime counters remain interval-unqualified; query activity and
 execution wall time are not CPU shares. Preserve resource incidents while
 triaging absent, stale, partial, disabled or overdue query evidence.
