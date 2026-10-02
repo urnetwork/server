@@ -10938,6 +10938,21 @@ The shard-zero owner alone periodically produces the global census:
   cycle rows remain in the eligible denominator, are explicitly uninitialized,
   and cannot receive an invented new four-hour grace interval.
 
+Private shard funding reserves at least ten times a conservative full-pass
+contract forecast: all selected turns plus concurrent headroom, the complete
+renewal ramp and current/ahead/prefetched slots in both directions, and every
+allowed tunnel generation. The forecast assumes no reclamation within the
+pass and uses standard-sized contracts, not URL body bytes. Each execution
+still owns one balance; another shard's allocation cannot supply its credit.
+Actual-PG controls require derived clients to retain their shard identity,
+origin/companion reservations to use that one grant with delayed reclamation,
+and cleanup to retain unresolved debt. False-positive qualifier: increased
+funding does not diagnose a live contract failure or prove quota recovery.
+False-negative qualifier: unexpected reservation growth can still reach normal
+credit checks; distinguish an observed insufficient balance from cancellation,
+missing origin, retired ownership or transport failure. Local setup failures
+remain unmeasured and cannot satisfy rolling coverage.
+
 Emit `url-probe-coverage-deficit` WARN for any eligible provider lacking secure
 completion. Escalate to PAGE when at least 10% of eligible providers are
 overdue, sustained for two cadences. Report quota and security deficits
