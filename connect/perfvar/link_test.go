@@ -251,6 +251,7 @@ type directionalLink struct {
 	afterReorderPairForTest      func()
 	afterPacketScheduledForTest  atomic.Pointer[linkScheduleTestHook]
 	forcedLossForTest            atomic.Pointer[linkLossTestHook]
+	packetTraceForTest           atomic.Pointer[linkPacketTraceHook]
 }
 
 // A nil callback removes the observer without racing the scheduler goroutine.
@@ -375,6 +376,7 @@ func (self *directionalLink) submitPacket(
 	self.stateLock.Lock()
 	if self.closed {
 		self.stateLock.Unlock()
+		self.tracePacketForTest("closed", 0, packetBytes, linkScheduleObservation{})
 		return 0, errLinkClosed
 	}
 	if self.activeSubmissionCount == 0 && self.queuedPacketCount == 0 {
@@ -399,6 +401,7 @@ func (self *directionalLink) submitPacket(
 	profile := self.profile
 	if profile.OuterMtu < packetByteCount {
 		self.stateLock.Unlock()
+		self.tracePacketForTest("mtu-drop", 0, packetBytes, linkScheduleObservation{})
 		self.invalidateFence(fenceEpoch)
 		if self.afterImmediateDropForTest != nil {
 			self.afterImmediateDropForTest()
@@ -422,6 +425,7 @@ func (self *directionalLink) submitPacket(
 	if profile.QueuePacketCount <= self.queuedPacketCount ||
 		profile.QueueByteCount < self.queuedByteCount+packetByteCount {
 		self.stateLock.Unlock()
+		self.tracePacketForTest("queue-drop", 0, packetBytes, linkScheduleObservation{})
 		self.invalidateFence(fenceEpoch)
 		if self.afterImmediateDropForTest != nil {
 			self.afterImmediateDropForTest()
@@ -480,6 +484,7 @@ func (self *directionalLink) submitPacket(
 		return packetByteCount, nil
 	default:
 		self.counters.queueDropPacketCount.Add(1)
+		self.tracePacketForTest("queue-drop", packet.sequence, packet.packetBytes, linkScheduleObservation{})
 		recordLinkDropPolicy(
 			profile.AllowQueueDrops,
 			&self.counters.allowedQueueDropPacketCount,
@@ -942,6 +947,7 @@ func (self *directionalLink) run(seed int64) {
 		}
 		switch packet.terminalDropCause {
 		case linkTerminalDropLoss:
+			self.tracePacketForTest("loss-drop", packet.sequence, packet.packetBytes, linkScheduleObservation{})
 			self.counters.lossDropPacketCount.Add(1)
 			recordLinkDropPolicy(
 				packet.terminalDropAllowed,
@@ -951,6 +957,7 @@ func (self *directionalLink) run(seed int64) {
 			finishWireTerminal(!packet.terminalDropAllowed)
 			return
 		case linkTerminalDropOutage:
+			self.tracePacketForTest("outage-drop", packet.sequence, packet.packetBytes, linkScheduleObservation{})
 			self.counters.outageDropPacketCount.Add(1)
 			recordLinkDropPolicy(
 				packet.terminalDropAllowed,
@@ -971,12 +978,15 @@ func (self *directionalLink) run(seed int64) {
 			deliver = self.deliver
 		}
 		if deliver != nil {
+			self.tracePacketForTest("delivery-offer", packet.sequence, packet.packetBytes, linkScheduleObservation{})
 			accepted = deliver(packet.packetBytes)
 		}
 		if accepted {
+			self.tracePacketForTest("delivered", packet.sequence, nil, linkScheduleObservation{})
 			self.counters.deliveredPacketCount.Add(1)
 			self.counters.deliveredByteCount.Add(uint64(len(packet.packetBytes)))
 		} else {
+			self.tracePacketForTest("receiver-drop", packet.sequence, nil, linkScheduleObservation{})
 			self.counters.receiverDropPacketCount.Add(1)
 		}
 		finishWireTerminal(!accepted)
@@ -1121,6 +1131,10 @@ func (self *directionalLink) run(seed int64) {
 				duplicateReleaseTime:   duplicateReleaseTime,
 			})
 		}
+		self.tracePacketForTest("scheduled", packet.sequence, packet.packetBytes, linkScheduleObservation{
+			scheduleTime: now, rateReadyTime: rateReady, releaseTime: releaseTime,
+			terminalDropCause: terminalDropCause,
+		})
 	}
 
 	for {
@@ -1154,11 +1168,13 @@ func (self *directionalLink) run(seed int64) {
 			for {
 				select {
 				case packet := <-self.ingress:
+					self.tracePacketForTest("canceled", packet.sequence, packet.packetBytes, linkScheduleObservation{})
 					self.counters.canceledDropPacketCount.Add(1)
 					self.releasePacketQueue(packet, true)
 				default:
 					for 0 < packets.Len() {
 						packet := heap.Pop(packets).(*linkPacket)
+						self.tracePacketForTest("canceled", packet.sequence, packet.packetBytes, linkScheduleObservation{})
 						self.counters.canceledDropPacketCount.Add(1)
 						self.counters.lastWireTerminalUnixNano.Store(time.Now().UnixNano())
 						self.releasePacketQueue(packet, true)
