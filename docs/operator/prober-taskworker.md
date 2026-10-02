@@ -80,6 +80,17 @@ history may be large. A bounded diagnostic can report per-balance unsettled
 escrow blockers, but absence of those blockers does not exclude unanchored
 zero-byte contracts or authorize removal of the shared identity.
 
+The ordinary balance retention task also preserves every legacy singleton
+grant for explicit retirement. Other expired grants are deleted only after a
+locked, fresh PostgreSQL check finds no unsettled escrow, including zero-byte
+and terminal-contract rows. It discovers the existing expiry range once and
+processes up to 256 explicit balance IDs per transaction. This uses the existing
+`transfer_balance_end_time`, balance primary key, and
+`transfer_escrow_unsettled_balance_contract` indexes; no migration is required.
+The streaming reader retains at most 256 IDs and holds a read snapshot for the
+pass; the maintenance pool must allow at least two concurrent connections for
+that reader and the short delete transactions.
+
 ## Network boundaries
 
 Direct control-plane calls to `api.bringyour.com` and

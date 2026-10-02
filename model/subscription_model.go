@@ -4895,36 +4895,7 @@ func AddFreeTransferBalanceToAllNetworks(
 func RemoveCompletedContracts(ctx context.Context, minTime time.Time) {
 	maxRowCount := 50000
 
-	var balanceIds []server.Id
-
-	server.MaintenanceTx(ctx, func(tx server.PgTx) {
-
-		// remove completed transfer balances
-		result, err := tx.Query(
-			ctx,
-			`
-			DELETE FROM transfer_balance
-			WHERE
-				end_time <= $1 AND NOT EXISTS (
-					SELECT 1 FROM prober_shard_run r
-					WHERE r.balance_id=transfer_balance.balance_id AND r.state<>'closed'
-				)
-			RETURNING balance_id
-			`,
-			minTime.UTC(),
-		)
-		balanceIds = []server.Id{}
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var balanceId server.Id
-				server.Raise(result.Scan(&balanceId))
-				balanceIds = append(balanceIds, balanceId)
-			}
-		})
-
-	}, server.TxReadCommitted)
-
-	refreshNetEscrow(ctx, balanceIds)
+	removeCompletedTransferBalanceBatches(ctx, minTime)
 
 	// The reaper is driven by the indexed reap_time column. reap_time is the
 	// instant a contract becomes due for hard deletion:
