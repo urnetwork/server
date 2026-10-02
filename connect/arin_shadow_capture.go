@@ -20,15 +20,17 @@ type arinShadowOwnerEntry struct {
 type arinShadowOwnerRegistry struct {
 	mu       sync.Mutex
 	entries  map[server.Id]*arinShadowOwnerEntry
+	handlers map[server.Id]int
 	capacity int
 	overflow int
 }
 
 type arinShadowOwnerLease struct {
-	registry *arinShadowOwnerRegistry
-	id       server.Id
-	entry    *arinShadowOwnerEntry
-	once     sync.Once
+	registry  *arinShadowOwnerRegistry
+	id        server.Id
+	entry     *arinShadowOwnerEntry
+	handlerId server.Id
+	once      sync.Once
 }
 
 // Counts are local-process metadata, not fleet or public-provider coverage.
@@ -40,13 +42,14 @@ type ArinShadowOwnerRegistryStats struct {
 var currentArinShadowOwners = newArinShadowOwnerRegistry(arinShadowOwnerCapacity)
 
 func newArinShadowOwnerRegistry(capacity int) *arinShadowOwnerRegistry {
-	return &arinShadowOwnerRegistry{entries: make(map[server.Id]*arinShadowOwnerEntry), capacity: capacity}
+	return &arinShadowOwnerRegistry{entries: make(map[server.Id]*arinShadowOwnerEntry), handlers: map[server.Id]int{}, capacity: capacity}
 }
 
 func (r *arinShadowOwnerRegistry) add(id server.Id, owner *ConnectionAnnounce) *arinShadowOwnerLease {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	lease := &arinShadowOwnerLease{registry: r, id: id}
+	lease := &arinShadowOwnerLease{registry: r, id: id, handlerId: owner.handlerId}
+	r.handlers[owner.handlerId]++
 	if entry := r.entries[id]; entry != nil {
 		// Even after one duplicate leaves, this generation remains ambiguous.
 		// This avoids assigning an existing durable identity to a replacement.
@@ -70,6 +73,10 @@ func (l *arinShadowOwnerLease) close() {
 		r := l.registry
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		r.handlers[l.handlerId]--
+		if r.handlers[l.handlerId] == 0 {
+			delete(r.handlers, l.handlerId)
+		}
 		if l.entry == nil {
 			r.overflow--
 			return

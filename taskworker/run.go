@@ -15,6 +15,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/task"
 )
@@ -164,6 +165,17 @@ func runWithDependenciesAndDrainLogger(
 		glog.Infof("[taskworker]not ready (%s)\n", err)
 		readyGauge.Set(0)
 	} else {
+		config, captureErr := server.LoadArinShadowRuntimeConfig()
+		if captureErr != nil {
+			return server.ErrArinShadowInput
+		}
+		capture, captureErr := server.StartArinShadowRuntime(runCtx, config, "native", func(lifetime context.Context) (server.ArinShadowRPCHandler, func(), error) {
+			return model.NewArinShadowNativeRPC(lifetime, config.Capacity)
+		})
+		if captureErr != nil {
+			return server.ErrArinShadowInput
+		}
+		defer capture.Close()
 		worker = startRuntime(runCtx, cancel, options)
 		readyGauge.Set(1)
 		// Failed readiness keeps /status visible without publishing a new

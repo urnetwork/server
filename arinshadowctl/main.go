@@ -139,7 +139,21 @@ func run(input io.Reader, output io.Writer, args []string) error {
 	return json.NewEncoder(output).Encode(report)
 }
 func main() {
-	if run(os.Stdin, os.Stdout, os.Args[1:]) != nil {
+	var err error
+	if len(os.Args) > 1 && os.Args[1] == "capture-assemble" {
+		err = runCaptureAssemble(os.Stdout, os.Args[2:])
+	} else if len(os.Args) > 1 && os.Args[1] == "capture-host-inventory" {
+		err = runCaptureHostInventory(os.Stdout, os.Args[2:])
+	} else if len(os.Args) > 1 && os.Args[1] == "capture-prepare" {
+		err = runCapturePrepare(os.Stdout, os.Args[2:])
+	} else if len(os.Args) > 1 && os.Args[1] == "capture-current" {
+		err = runCaptureCurrent(os.Stdout, os.Args[2:])
+	} else if len(os.Args) > 1 && os.Args[1] == "capture-bridge" {
+		err = runCaptureBridge(os.Stdin, os.Stdout, os.Args[2:])
+	} else {
+		err = run(os.Stdin, os.Stdout, os.Args[1:])
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "ARIN shadow input unavailable or inconsistent")
 		os.Exit(1)
 	}

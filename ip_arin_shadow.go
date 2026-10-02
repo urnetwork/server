@@ -45,20 +45,22 @@ func (f *ArinShadowActiveFacts) UnmarshalJSON(data []byte) error {
 type arinShadowFacts struct {
 	state                     string
 	risk, proxyRisk, verified bool
+	registration              ArinShadowRegistration
 }
 type arinShadowConnection struct {
 	actual            ArinShadowActiveFacts
 	active, candidate arinShadowFacts
 }
 type ArinShadowRecorder struct {
-	mu                sync.RWMutex
-	active, candidate *mmdb.Reader
-	connections       map[string]arinShadowConnection
-	start             time.Time
-	capacity          int
-	dropped, failed   int64
-	closed            bool
-	clock             func() time.Time
+	mu                        sync.RWMutex
+	active, candidate         *mmdb.Reader
+	activeHash, candidateHash string
+	connections               map[string]arinShadowConnection
+	start                     time.Time
+	capacity                  int
+	dropped, failed           int64
+	closed                    bool
+	clock                     func() time.Time
 }
 
 var arinShadowObserver atomic.Pointer[ArinShadowRecorder]
@@ -66,6 +68,17 @@ var arinShadowObserver atomic.Pointer[ArinShadowRecorder]
 // Both paths and hashes must come from independently attested immutable
 // resources. An enabled observer still cannot establish census completeness.
 func OpenArinShadowRecorder(activePath, activeHash, candidatePath, candidateHash string, start time.Time, capacity int) (*ArinShadowRecorder, error) {
+	return openArinShadowRecorder(activePath, activeHash, candidatePath, candidateHash, start, capacity, false)
+}
+
+// Capture resources must be independently pinned immutable files. Linux maps
+// the same open descriptor which was hashed, avoiding one whole-file Go-heap
+// copy per process. Mapping never changes the serving reader or resource.
+func OpenArinShadowCaptureRecorder(activePath, activeHash, candidatePath, candidateHash string, start time.Time, capacity int) (*ArinShadowRecorder, error) {
+	return openArinShadowRecorder(activePath, activeHash, candidatePath, candidateHash, start, capacity, true)
+}
+
+func openArinShadowRecorder(activePath, activeHash, candidatePath, candidateHash string, start time.Time, capacity int, mapped bool) (*ArinShadowRecorder, error) {
 	if start.IsZero() || capacity < 1 || capacity > 2000000 {
 		return nil, ErrArinShadowInput
 	}
@@ -82,6 +95,27 @@ func OpenArinShadowRecorder(activePath, activeHash, candidatePath, candidateHash
 		metadata, err := file.Stat()
 		if err != nil || !metadata.Mode().IsRegular() || metadata.Size() > 512<<20 {
 			return nil, ErrArinShadowInput
+		}
+		if mapped {
+			h := sha256.New()
+			n, err := io.Copy(h, io.LimitReader(file, (512<<20)+1))
+			if err != nil || n != metadata.Size() || !slices.Equal(h.Sum(nil), digest) {
+				return nil, ErrArinShadowInput
+			}
+			db, err := openMappedArinShadowFile(file)
+			after, statErr := file.Stat()
+			if err != nil {
+				return nil, ErrArinShadowInput
+			}
+			// This hash must name the exact artifact already fully verified
+			// by the offline build/readback gate. Repeating Verify traverses
+			// the whole database per Connect process and defeats a bounded
+			// capture; per-address decode failures remain explicit unknowns.
+			if statErr != nil || !os.SameFile(metadata, after) || metadata.Size() != after.Size() || !metadata.ModTime().Equal(after.ModTime()) || db.Metadata.DatabaseType != string(schemaTypeArinDb) || db.Metadata.BuildTime().Unix() <= 0 {
+				db.Close()
+				return nil, ErrArinShadowInput
+			}
+			return db, nil
 		}
 		data, err := io.ReadAll(io.LimitReader(file, (512<<20)+1))
 		if err != nil || len(data) > 512<<20 {
@@ -110,7 +144,7 @@ func OpenArinShadowRecorder(activePath, activeHash, candidatePath, candidateHash
 		active.Close()
 		return nil, err
 	}
-	return &ArinShadowRecorder{active: active, candidate: candidate, connections: map[string]arinShadowConnection{}, start: start, capacity: capacity, clock: NowUtc}, nil
+	return &ArinShadowRecorder{active: active, candidate: candidate, activeHash: activeHash, candidateHash: candidateHash, connections: map[string]arinShadowConnection{}, start: start, capacity: capacity, clock: NowUtc}, nil
 }
 
 // Installation is explicit and default-off. Call only after source/resource
@@ -144,12 +178,23 @@ func shadowFacts(db *mmdb.Reader, address netip.Addr) (arinShadowFacts, *ArinInf
 	}
 	facts := arinShadowFacts{state: state, risk: info.Risk, verified: info.ClassifierVersion == 1 && info.QualityPolicyVersion == 2 && state == "subscriber" && !info.NonQuality}
 	var extra struct {
-		Evidence []struct {
+		OrgHandle               string `maxminddb:"org_handle"`
+		NetHandle               string `maxminddb:"net_handle"`
+		ClassificationOrgHandle string `maxminddb:"classification_org_handle"`
+		ClassificationRule      string `maxminddb:"classification_rule"`
+		MultipleOwners          bool   `maxminddb:"multiple_registration_owners"`
+		Evidence                []struct {
 			Category string `maxminddb:"category"`
 		} `maxminddb:"network_risk_evidence"`
 	}
 	if err := db.Lookup(address).Decode(&extra); err != nil {
 		return arinShadowFacts{}, nil, ErrArinShadowInput
+	}
+	// Only a single public registration can be attributed without inventing
+	// an owner for a multi-owner record. The classification still retains all
+	// original multi-owner/ambiguity semantics; missing attribution is counted.
+	if !extra.MultipleOwners {
+		facts.registration = newArinShadowRegistration(extra.OrgHandle, extra.NetHandle, extra.ClassificationOrgHandle, extra.ClassificationRule)
 	}
 	for _, e := range extra.Evidence {
 		if slices.Contains([]string{"proxy", "residential_proxy", "virtual_isp", "vpn", "tor"}, e.Category) {

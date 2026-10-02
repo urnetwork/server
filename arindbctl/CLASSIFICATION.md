@@ -582,3 +582,12 @@ generation is not by itself proof of classifier correctness: the input hashes,
 reader validation, shadow review, and publication identity are separate release
 prerequisites. Legacy URL-policy history also remains audit-only during the
 independent eight-hour quality-evidence warmup.
+
+
+The full current-owner shadow transport and exact operator activation sequence
+are documented in [arinshadowctl/CAPTURE.md](../arinshadowctl/CAPTURE.md). The
+protected runtime adapter keeps candidate resources separate, inventories
+current and draining owners, and pins one start-current native generation
+through healthy publication rollover. Its local full-population controls do
+not establish Main subscriber coverage or authorize policy activation. Those
+remain mandatory before the final active-resource and policy cutover.

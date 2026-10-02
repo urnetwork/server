@@ -21,6 +21,7 @@ type ArinShadowScoreCapture struct {
 	capacity int
 	closed   bool
 	current  *ArinShadowScoreSnapshot
+	lease    *ArinShadowScoreLease
 }
 
 type arinShadowScoreEntry struct {
@@ -65,6 +66,13 @@ func (c *ArinShadowScoreCapture) Close() {
 	defer c.mu.Unlock()
 	c.closed = true
 	c.current = nil
+	if c.lease != nil {
+		if c.lease.timer != nil {
+			c.lease.timer.Stop()
+		}
+		c.lease.snapshot = nil
+		c.lease = nil
+	}
 }
 
 func beginArinShadowScoreCapture() *arinShadowScoreAttempt {

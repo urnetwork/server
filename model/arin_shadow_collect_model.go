@@ -20,6 +20,11 @@ func CollectArinShadowCurrentPublic(ctx context.Context, recorder *server.ArinSh
 	}
 	bounded, cancel := context.WithTimeout(ctx, server.ArinShadowCaptureMaxAge)
 	defer cancel()
+	lease, err := snapshot.AcquireCaptureLease(bounded)
+	if err != nil {
+		return server.ArinShadowCaptureReport{}, err
+	}
+	defer lease.Close()
 	var collector *server.ArinShadowCaptureCollector
 	var source server.ArinShadowCaptureCohort
 	var lastProvider server.Id
@@ -30,6 +35,9 @@ func CollectArinShadowCurrentPublic(ctx context.Context, recorder *server.ArinSh
 		collector, openErr = recorder.NewCurrentCaptureCollector(bounded, source, required)
 		return openErr
 	}, func(rows []ArinShadowPublicConnection) error {
+		if _, current := lease.current(bounded); !current {
+			return server.ErrArinShadowInput
+		}
 		page := server.ArinShadowCapturePage{GenerationSHA256: snapshot.generation, Sequence: sequence, Records: make([]server.ArinShadowCaptureRecord, len(rows))}
 		for i, row := range rows {
 			record := server.ArinShadowCaptureRecord{ConnectionId: row.ConnectionId, HandlerId: row.HandlerId}
@@ -49,11 +57,16 @@ func CollectArinShadowCurrentPublic(ctx context.Context, recorder *server.ArinSh
 	if collector == nil {
 		return server.ArinShadowCaptureReport{}, server.ErrArinShadowInput
 	}
-	complete := err == nil && cohort.Complete && bounded.Err() == nil && snapshot.Validate(bounded)
+	_, liveLease := lease.current(bounded)
+	latest, latestErr := GetClientScoreNativeCensus(bounded)
+	latestGeneration := arinShadowNativeGeneration(latest)
+	complete := err == nil && cohort.Complete && bounded.Err() == nil && liveLease && latestErr == nil && latestGeneration != ""
 	report, finishErr := collector.Finish(source, complete)
 	report.NativeSourceStartedAt = snapshot.sourceStartedAt
 	report.NativeSourceCompletedAt = snapshot.sourceCompletedAt
 	report.NativePublishedAt = snapshot.publishedAt
+	report.NativeGenerationAtEnd = latestGeneration
+	report.NativeGenerationChanged = latestGeneration != "" && latestGeneration != snapshot.generation
 	if err != nil || finishErr != nil || !complete {
 		return report, server.ErrArinShadowInput
 	}

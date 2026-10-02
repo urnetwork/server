@@ -113,6 +113,11 @@ func runWithDependencies(
 		statusHandler = connectRouter.Status
 		routes = append(routes, router.NewRoute("GET", "/", connectRouter.Connect))
 		server.Warmup(connectWarmupTargets()...)
+		capture, captureErr := startArinShadowCaptureRuntime(runCtx)
+		if captureErr != nil {
+			return server.ErrArinShadowInput
+		}
+		defer capture.Close()
 		// Only admitted candidates publish a process-identity metrics cohort.
 		startStatsPusher(runCtx)
 	}

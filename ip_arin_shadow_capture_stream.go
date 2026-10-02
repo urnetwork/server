@@ -22,22 +22,27 @@ type ArinShadowCaptureProvider struct {
 
 type ArinShadowCaptureReport struct {
 	ArinShadowReport
-	StartedAt                time.Time        `json:"capture_started_at"`
-	CapturedConnections      int64            `json:"captured_connections"`
-	DeclaredConnections      int64            `json:"declared_connections"`
-	Providers                int64            `json:"providers"`
-	EarliestLookupAt         time.Time        `json:"earliest_immutable_lookup_at"`
-	LatestLookupAt           time.Time        `json:"latest_immutable_lookup_at"`
-	EarliestDurableReadAt    time.Time        `json:"earliest_durable_read_at"`
-	LatestDurableReadAt      time.Time        `json:"latest_durable_read_at"`
-	Reasons                  map[string]int64 `json:"connection_reasons"`
-	NativeMembershipComplete bool             `json:"native_membership_complete"`
-	NativeMembershipUnknown  int64            `json:"native_membership_unknown_providers"`
-	CohortGenerationSHA256   string           `json:"cohort_generation_sha256,omitempty"`
-	CohortObservedAt         time.Time        `json:"cohort_observed_at,omitzero"`
-	NativeSourceStartedAt    time.Time        `json:"native_source_started_at,omitzero"`
-	NativeSourceCompletedAt  time.Time        `json:"native_source_completed_at,omitzero"`
-	NativePublishedAt        time.Time        `json:"native_published_at,omitzero"`
+	StartedAt                           time.Time                     `json:"capture_started_at"`
+	CapturedConnections                 int64                         `json:"captured_connections"`
+	DeclaredConnections                 int64                         `json:"declared_connections"`
+	Providers                           int64                         `json:"providers"`
+	EarliestLookupAt                    time.Time                     `json:"earliest_immutable_lookup_at"`
+	LatestLookupAt                      time.Time                     `json:"latest_immutable_lookup_at"`
+	EarliestDurableReadAt               time.Time                     `json:"earliest_durable_read_at"`
+	LatestDurableReadAt                 time.Time                     `json:"latest_durable_read_at"`
+	Reasons                             map[string]int64              `json:"connection_reasons"`
+	NativeMembershipComplete            bool                          `json:"native_membership_complete"`
+	NativeMembershipUnknown             int64                         `json:"native_membership_unknown_providers"`
+	CohortGenerationSHA256              string                        `json:"cohort_generation_sha256,omitempty"`
+	CohortObservedAt                    time.Time                     `json:"cohort_observed_at,omitzero"`
+	NativeSourceStartedAt               time.Time                     `json:"native_source_started_at,omitzero"`
+	NativeSourceCompletedAt             time.Time                     `json:"native_source_completed_at,omitzero"`
+	NativePublishedAt                   time.Time                     `json:"native_published_at,omitzero"`
+	NativeGenerationAtEnd               string                        `json:"native_generation_at_end,omitempty"`
+	NativeGenerationChanged             bool                          `json:"native_generation_changed"`
+	RegistrationCounts                  []ArinShadowRegistrationCount `json:"registration_connection_counts"`
+	RegistrationUnattributedConnections int64                         `json:"registration_unattributed_connections"`
+	RegistrationOverflowConnections     int64                         `json:"registration_overflow_connections"`
 }
 
 type arinShadowCaptureProviderState struct {
@@ -58,6 +63,7 @@ type ArinShadowCaptureStream struct {
 	lastProvider                Id
 	current                     *arinShadowCaptureProviderState
 	buckets                     map[string]*ArinShadowBucket
+	registrations               map[ArinShadowRegistration]*ArinShadowRegistrationCount
 	report                      ArinShadowCaptureReport
 	complete, finished, invalid bool
 }
@@ -73,7 +79,7 @@ func (r *ArinShadowRecorder) NewCurrentCaptureStream(ctx context.Context, requir
 		return nil, ErrArinShadowInput
 	}
 	now := r.clock()
-	s := &ArinShadowCaptureStream{recorder: r, ctx: ctx, started: now, buckets: make(map[string]*ArinShadowBucket, len(required)), complete: true}
+	s := &ArinShadowCaptureStream{recorder: r, ctx: ctx, started: now, buckets: make(map[string]*ArinShadowBucket, len(required)), registrations: make(map[ArinShadowRegistration]*ArinShadowRegistrationCount), complete: true}
 	s.report = ArinShadowCaptureReport{StartedAt: now, NativeMembershipComplete: true, Reasons: make(map[string]int64, len(arinShadowCaptureReasons)+1)}
 	for _, reason := range arinShadowCaptureReasons {
 		s.report.Reasons[reason] = 0
@@ -99,7 +105,7 @@ func (s *ArinShadowCaptureStream) BeginProvider(input ArinShadowCaptureProvider)
 	if !s.live() || s.current != nil || input.ClientId == (Id{}) || !s.lastProvider.Less(input.ClientId) ||
 		input.ExpectedConnections < 1 || int64(input.ExpectedConnections) > ArinShadowCapturePopulationLimit-s.report.DeclaredConnections ||
 		s.report.Providers >= ArinShadowCapturePopulationLimit || len(input.Buckets) == 0 || len(input.Buckets) > len(s.buckets) ||
-		input.ActiveQuality && !input.BaseQuality || input.ActiveSpeed && !input.BaseSpeed {
+		!input.MembershipUnavailable && (input.ActiveQuality && !input.BaseQuality || input.ActiveSpeed && !input.BaseSpeed) {
 		return s.reject()
 	}
 	seen := make(map[string]bool, len(input.Buckets))
@@ -185,6 +191,7 @@ func (s *ArinShadowCaptureStream) addConnection(row arinShadowCapturedConnection
 		return
 	}
 	f := row.facts
+	s.addRegistration(f)
 	p.verified = p.verified && f.verified
 	p.risk = p.risk || f.risk
 	p.proxy = p.proxy || f.proxyRisk
@@ -286,6 +293,7 @@ func (s *ArinShadowCaptureStream) Finish(sourceComplete bool, expectedProviders,
 	s.report.CensusComplete = live && s.current == nil && sourceComplete && expectedProviders >= 0 && expectedConnections >= 0 &&
 		expectedProviders == s.report.Providers && expectedConnections == s.report.DeclaredConnections
 	s.report.ObservationComplete = s.report.CensusComplete && s.complete && s.report.CapturedConnections == s.report.DeclaredConnections
+	s.finishRegistrations()
 	keys := make([]string, 0, len(s.buckets))
 	for key := range s.buckets {
 		keys = append(keys, key)

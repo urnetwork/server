@@ -1,3 +1,11 @@
+The protected full-current-owner capture is implemented and documented in
+[CAPTURE.md](CAPTURE.md), including temporary Vault configuration, host
+inventory, strict two-session transport, source/end-marker gates and final
+activation prerequisites. Its source is default-off; deployment and a complete
+Main shadow remain independent evidence requirements.
+
+The following describes the older local NDJSON dry-run interface only.
+
 This local dry run does not qualify Main coverage. It does not contact Main,
 activate a policy, or publish an MMDB. The runtime hook remains off unless a
 reviewed caller explicitly installs a recorder.
@@ -34,9 +42,9 @@ Use an external process deadline for stdin and source transport. The tool
 checks its 90-second cutover at input and finalization but cannot interrupt an
 arbitrary blocking `io.Reader`. It holds two immutable MMDB byte copies, each
 bounded at 512 MiB, plus bounded connection facts. Those file bounds do not
-establish an acceptable production memory or latency budget. The observer has
-no startup/config activation path, and its mutex/lookup cost still needs an
-explicit canary budget before installation on a serving process.
+establish an acceptable production memory or latency budget. This legacy NDJSON interface does not install a runtime observer. The separate
+protected capture adapter uses mapped resources and its measured lifecycle
+budget; see CAPTURE.md for its explicit startup authority and remaining Main gates.
 
 Actual rollout evidence still requires an independently attested policy-two
 MMDB, source-owned runtime capture, complete current live-provider census and
