@@ -360,12 +360,14 @@ func getActiveTransferBalanceRows(ctx context.Context, query server.PgCanQuery, 
 func applyActiveTransferEscrow(ctx context.Context, transferBalances []*TransferBalance) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		netEscrowCmds := map[server.Id]*redis.StringCmd{}
+		approxCmds := map[server.Id]*redis.StringCmd{}
 		// the net escrow keys use per-balance hash tags (different slots), so
 		// use a plain pipeline, which auto-routes per slot on cluster; a tx
 		// pipeline would be cross-slot
 		_, pipelineErr := r.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			for _, transferBalance := range transferBalances {
 				netEscrowCmds[transferBalance.BalanceId] = pipe.Get(ctx, netEscrowKey(transferBalance.BalanceId))
+				approxCmds[transferBalance.BalanceId] = pipe.Get(ctx, redisContractReservationKeys(transferBalance.BalanceId)[0])
 			}
 			return nil
 		})
@@ -382,6 +384,11 @@ func applyActiveTransferEscrow(ctx context.Context, transferBalances []*Transfer
 			}
 			netEscrowBalanceByteCount = max(int64(0), netEscrowBalanceByteCount)
 			transferBalance.BalanceByteCount = max(0, transferBalance.BalanceByteCount-ByteCount(netEscrowBalanceByteCount))
+			approx, err := approxCmds[transferBalance.BalanceId].Int64()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				server.Raise(err)
+			}
+			transferBalance.BalanceByteCount = max(0, transferBalance.BalanceByteCount-max(0, approx))
 		}
 	})
 }
@@ -402,6 +409,9 @@ func Testing_NetEscrowByteCount(ctx context.Context, balanceId server.Id) ByteCo
 	server.Redis(ctx, func(r server.RedisClient) {
 		if v, err := r.Get(ctx, netEscrowKey(balanceId)).Int64(); err == nil {
 			byteCount = ByteCount(v)
+		}
+		if v, err := r.Get(ctx, redisContractReservationKeys(balanceId)[0]).Int64(); err == nil {
+			byteCount += v
 		}
 	})
 	return byteCount
@@ -718,7 +728,7 @@ const netEscrowReservationPageSQL = `
             FROM transfer_escrow
             WHERE transfer_escrow.balance_id = requested_balance.balance_id AND
                 transfer_escrow.settled = false AND
-                transfer_escrow.balance_byte_count <> 0
+                transfer_escrow.balance_byte_count <> 0 AND NOT transfer_escrow.redis_reserved
             OFFSET 0
         ) AS selected_escrow
         INNER JOIN LATERAL (
@@ -1423,6 +1433,10 @@ func createTransferEscrowInTx(
 	contractTransferByteCount ByteCount,
 	companionContractId *server.Id,
 ) (transferEscrow *TransferEscrow, posts []func() any, returnErr error) {
+	if admission := redisAdmissionFromContext(ctx); admission != nil && contractTransferByteCount > 0 {
+		return createRedisTransferEscrowInTx(ctx, tx, admission, sourceNetworkId, sourceId,
+			destinationNetworkId, destinationId, payerNetworkId, contractTransferByteCount, companionContractId)
+	}
 	// *important note* this function is one of the hotspots in the system,
 	// since it is called before every transfer pair.
 	// a small regression here can cause a backlog in the overall throughput of the network.
@@ -1750,6 +1764,7 @@ func CreateTransferEscrow(
 	destinationId server.Id,
 	contractTransferByteCount ByteCount,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	ctx = withRedisContractAdmission(ctx)
 	var posts []func() any
 
 	if err := transferEscrowTx(ctx, sourceNetworkId, contractTransferByteCount, func(tx server.PgTx) {
@@ -1835,6 +1850,7 @@ func CreateCompanionTransferEscrow(
 	contractTransferByteCount ByteCount,
 	originContractTimeout time.Duration,
 ) (transferEscrow *TransferEscrow, returnErr error) {
+	ctx = withRedisContractAdmission(ctx)
 	var posts []func() any
 	payerNetworkId := destinationNetworkId
 	requestedBytes := contractTransferByteCount
@@ -3081,7 +3097,7 @@ func settleEscrowInTx(
 
 	// Keep each positive reservation's exact tuple stable through the outcome
 	// transition, including when a legacy writer does not take balance locks.
-	positiveReservations := lockSettlementReservations(ctx, tx, contractId, lockedBalanceIds)
+	positiveReservations, redisReservations := lockSettlementReservations(ctx, tx, contractId, lockedBalanceIds)
 
 	// order balances by end date, ascending
 	// take from the earlier before the later
@@ -3206,7 +3222,7 @@ func settleEscrowInTx(
 
 		mirrorBalanceIds := make([]server.Id, 0, len(sweepPayouts))
 		for balanceId, sweepPayout := range sweepPayouts {
-			if 0 < sweepPayout.escrowBalanceByteCount {
+			if 0 < sweepPayout.escrowBalanceByteCount && positiveReservations[balanceId] > 0 {
 				mirrorBalanceIds = append(mirrorBalanceIds, balanceId)
 			}
 		}
@@ -3232,6 +3248,22 @@ func settleEscrowInTx(
 		} else {
 			posts = append(posts, metadataPost)
 		}
+	}
+
+	if len(redisReservations) > 0 {
+		posts = append(posts, func() any {
+			// A retained callback from a rolled-back transaction cannot release
+			// a still-open contract. The committed check needs only its PK.
+			var terminal bool
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx,
+					`SELECT EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$1 AND outcome IS NOT NULL)`, contractId).Scan(&terminal))
+			})
+			if terminal {
+				releaseRedisContractReservations(ctx, contractId, redisReservations)
+			}
+			return nil
+		})
 	}
 
 	if 0 < len(accountPayouts) {

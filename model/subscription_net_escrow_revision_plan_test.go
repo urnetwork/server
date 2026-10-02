@@ -66,7 +66,7 @@ func TestNetEscrowRevisionTriggerUsesContractKeyAfterUpgrade(t *testing.T) {
 					server.ApplyDbMigrations(ctx)
 					var body string
 					server.Raise(conn.QueryRow(ctx, `SELECT prosrc FROM pg_proc WHERE oid='transfer_contract_escrow_revision()'::regprocedure`).Scan(&body))
-					if body != server.NetEscrowContractsRevisionFunctionBodySql {
+					if body != server.NetEscrowContractsRedisRevisionFunctionBodySql {
 						t.Fatal("appended migration did not install current function on existing session")
 					}
 				}

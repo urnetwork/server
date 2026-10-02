@@ -14,10 +14,10 @@ import (
 // reservation snapshot. The offset boundary prevents a global partial-index
 // scan when historical statistics incorrectly estimate no unsettled rows.
 const settlementReservationRowsSQL = `
- SELECT escrow.balance_id, escrow.balance_byte_count, escrow.settled
+ SELECT escrow.balance_id, escrow.balance_byte_count, escrow.settled, escrow.redis_reserved
  FROM unnest(ARRAY[$1::uuid]) AS requested(contract_id)
  CROSS JOIN LATERAL (
-     SELECT balance_id, balance_byte_count, settled
+     SELECT balance_id, balance_byte_count, settled, redis_reserved
      FROM transfer_escrow
      WHERE contract_id = requested.contract_id
      ORDER BY balance_id
@@ -32,25 +32,30 @@ var netEscrowSettlementSnapshots = prometheus.NewCounterVec(prometheus.CounterOp
 
 func init() { prometheus.MustRegister(netEscrowSettlementSnapshots) }
 
-func lockSettlementReservations(ctx context.Context, tx server.PgTx, contractId server.Id, balanceIds []server.Id) map[server.Id]ByteCount {
+func lockSettlementReservations(ctx context.Context, tx server.PgTx, contractId server.Id, balanceIds []server.Id) (map[server.Id]ByteCount, []server.Id) {
 	allowed := make(map[server.Id]bool, len(balanceIds))
 	for _, id := range balanceIds {
 		allowed[id] = true
 	}
 	positive := map[server.Id]ByteCount{}
+	var approximate []server.Id
 	rows, err := tx.Query(ctx, settlementReservationRowsSQL, contractId)
 	server.WithPgResult(rows, err, func() {
 		for rows.Next() {
 			var id server.Id
 			var amount ByteCount
-			var settled bool
-			server.Raise(rows.Scan(&id, &amount, &settled))
+			var settled, redisReserved bool
+			server.Raise(rows.Scan(&id, &amount, &settled, &redisReserved))
 			if allowed[id] && !settled && amount > 0 {
-				positive[id] = amount
+				if redisReserved {
+					approximate = append(approximate, id)
+				} else {
+					positive[id] = amount
+				}
 			}
 		}
 	})
-	return positive
+	return positive, approximate
 }
 
 func settlementReservationIds(positive map[server.Id]ByteCount) []server.Id {
@@ -107,7 +112,7 @@ const settlementMetadataBalanceLocksSQL = `
  SELECT selected_balance.balance_id
  FROM (
      SELECT balance_id FROM transfer_escrow
-     WHERE contract_id = $1
+     WHERE contract_id = $1 AND NOT redis_reserved
      ORDER BY balance_id OFFSET 0
  ) AS selected_escrow
  CROSS JOIN LATERAL (
@@ -146,7 +151,7 @@ func settleEscrowMetadataInTx(ctx context.Context, tx server.PgTx, contractId se
 	for id := range sweepPayouts {
 		ids = append(ids, id)
 	}
-	positive := lockSettlementReservations(ctx, tx, contractId, ids)
+	positive, _ := lockSettlementReservations(ctx, tx, contractId, ids)
 	pending := readCachedNetEscrowSnapshots(ctx, tx, settlementReservationIds(positive))
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		queueEscrowSettlementUpdates(batch, contractId, settleTime, sweepPayouts)

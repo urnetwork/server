@@ -76,7 +76,7 @@ func (q *payerAdmissionQueue) acquire(ctx context.Context, payer server.Id) (fun
 // Zero-byte anchors need no financial serialization. A positive companion that
 // is subsequently clamped to zero may harmlessly take a turn before that read.
 func transferEscrowTx(ctx context.Context, payer server.Id, requested ByteCount, callback func(server.PgTx)) error {
-	if requested > 0 {
+	if requested > 0 && redisAdmissionFromContext(ctx) == nil {
 		leaveGate := server.EnterContractCreationStage(ctx, server.ContractStagePayerGate)
 		release, err := transferEscrowAdmissionQueue.acquire(ctx, payer)
 		leaveGate()
