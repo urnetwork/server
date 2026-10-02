@@ -5241,7 +5241,46 @@ func removeContractBatches(ctx context.Context, sql string, minTime time.Time, m
 	}
 }
 
-// assignStragglerReapTimeBatches stamps reap_time = now() on closed contracts
+// reap_time is a timestamp without zone on the UTC storage clock. Preserve
+// the transaction-start clock while making its storage zone explicit.
+const assignStragglerReapTimeSQL = `
+WITH batch AS (
+	SELECT transfer_contract.contract_id
+	FROM transfer_contract
+	WHERE
+		transfer_contract.reap_time IS NULL AND
+		transfer_contract.close_time IS NOT NULL AND
+		transfer_contract.create_time < $1 AND
+		NOT EXISTS (
+			SELECT 1
+			FROM transfer_escrow_sweep
+			INNER JOIN account_payment ON
+				account_payment.payment_id = transfer_escrow_sweep.payment_id
+			WHERE
+				transfer_escrow_sweep.contract_id = transfer_contract.contract_id AND
+				(
+					account_payment.contract_retention_pending OR
+					(
+						NOT account_payment.completed AND
+						(
+							NOT account_payment.canceled OR
+							account_payment.circle_idempotency_key IS NOT NULL OR
+							account_payment.payment_record IS NOT NULL OR
+							account_payment.tx_hash IS NOT NULL
+						)
+					)
+				)
+		)
+	ORDER BY transfer_contract.create_time
+	LIMIT $2
+)
+UPDATE transfer_contract
+SET reap_time = now() AT TIME ZONE 'UTC'
+FROM batch
+WHERE transfer_contract.contract_id = batch.contract_id
+`
+
+// assignStragglerReapTimeBatches stamps the UTC transaction time on closed contracts
 // that were never reaped (reap_time IS NULL), are older than minCreateTime, and
 // are not held by an active/ambiguous payment. This is the straggler + sweep-less
 // cleanup: safely unplanned value otherwise lives forever. Bounded by the
@@ -5270,42 +5309,7 @@ func assignStragglerReapTimeBatches(ctx context.Context, minCreateTime time.Time
 			// stragglers first) rather than risking a seq scan.
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,
-				`
-				WITH batch AS (
-					SELECT transfer_contract.contract_id
-					FROM transfer_contract
-					WHERE
-						transfer_contract.reap_time IS NULL AND
-						transfer_contract.close_time IS NOT NULL AND
-						transfer_contract.create_time < $1 AND
-						NOT EXISTS (
-							SELECT 1
-							FROM transfer_escrow_sweep
-							INNER JOIN account_payment ON
-								account_payment.payment_id = transfer_escrow_sweep.payment_id
-							WHERE
-								transfer_escrow_sweep.contract_id = transfer_contract.contract_id AND
-								(
-									account_payment.contract_retention_pending OR
-									(
-										NOT account_payment.completed AND
-										(
-											NOT account_payment.canceled OR
-											account_payment.circle_idempotency_key IS NOT NULL OR
-											account_payment.payment_record IS NOT NULL OR
-											account_payment.tx_hash IS NOT NULL
-										)
-									)
-								)
-						)
-					ORDER BY transfer_contract.create_time
-					LIMIT $2
-				)
-				UPDATE transfer_contract
-				SET reap_time = now()
-				FROM batch
-				WHERE transfer_contract.contract_id = batch.contract_id
-				`,
+				assignStragglerReapTimeSQL,
 				minCreateTime.UTC(),
 				maxRowCount,
 			))
@@ -5983,7 +5987,7 @@ func BackfillCompletedContractReapTime(ctx context.Context, rowLimit int, progre
 	return
 }
 
-// BackfillStragglerContractReapTime seeds reap_time = now() on existing aged
+// BackfillStragglerContractReapTime seeds the UTC transaction time on existing aged
 // closed contracts (reap_time IS NULL, closed, older than
 // StragglerContractExpiration) so the indexed reaper can remove them. This is the
 // same work the reaper's assign pass performs each run; it exists as an explicit
