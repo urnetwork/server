@@ -20,14 +20,27 @@ provider binaries support it.
 
 ## Product contract
 
+The later subscriber-policy requirement, reviewed 2026-10-01 and reaffirmed
+2026-10-02, requires affirmative residential-subscriber or business-subscriber
+evidence for Quality. Unknown, ambiguous, hosted and proxy/virtual-ISP use cannot
+qualify. Verified ISP-branded proxy infrastructure also receives an independent
+risk exclusion; a legitimate access reseller or MVNO is not a proxy merely
+because it lacks last-mile ownership. These requirements supersede the legacy
+default-allow Quality behavior. Policy two remains a candidate until
+reviewed subscriber coverage, fresh provider shadow losses and operator supply
+criteria pass; no source edit or resource build establishes activation.
+
 The index, the probe due queue, and the monitor must use the **same base
 eligibility facts** for an active, connected, valid, publicly reachable provider.
 Bucket admission and probe scheduling then apply the rules below. A
 reliability failure or an ARINdb risk finding disqualifies a provider from all
 three public buckets and from URL probing. The ARINdb
 `non_quality` finding disqualifies it from **quality only**; it may still qualify
-for speed or online. Missing ARINdb coverage means *no exception*, not a risk
-or hosting finding. A corrupt or unavailable entire database is a publication
+for speed or online. Under the target subscriber policy, missing ARINdb coverage
+cannot qualify Quality; it does not manufacture a risk or hosting finding and
+does not by itself exclude Speed or Online. The deployed legacy policy's
+default-allow behavior remains a rollout fact, not the target contract.
+A corrupt or unavailable entire database is a publication
 error: retain the last verified database/index and alert, rather than silently
 reclassifying the fleet.
 
@@ -37,7 +50,7 @@ reclassifying the fleet.
 | No ARIN risk exception | Required | Required | Required |
 | No probe security exception | Required | Required | Required |
 | URL success ratio ≥ 0.8 | Required | Required | Not required |
-| No ARIN quality exception | Required | Not required | Not required |
+| Affirmative subscriber evidence and no ARIN quality exception | Required under policy two | Not required | Not required |
 
 This matrix is the bucket admission contract. Probe admission has a different
 purpose: every provider passing reliability and the ARIN **risk** gate is
@@ -286,8 +299,10 @@ process argument, image, config repo, test fixture, or build log. Do not
 confuse this with the GeoLite2 credential. Keep the historical updater as a
 compatibility wrapper only until callers move to `arindbctl`.
 
-The classifier should make the absence of an ARIN record default to quality,
-then emit explicit, auditable exceptions:
+The deployed legacy classifier treats the absence of an ARIN record as no
+exception. The subscriber-policy-two candidate instead represents absent or
+unreviewed use as unknown and excludes it from Quality without asserting risk
+or hosting. Preserve explicit, auditable reasons for both policies:
 
 - `risk`: the registration country's credible country set and GeoLite2's
   associated country disagree. Unknown/ambiguous countries are *unknown*, not
@@ -350,7 +365,13 @@ provider-shadow and lookup-epoch activation sequence. Official feed imports and
 third-party proxy evidence remain separate candidates until their scope,
 freshness, overlap and clean-access controls are reviewed. Never infer that a
 customer origin is CDN infrastructure just because a CDN fronts its hostname.
-Missing ARIN coverage remains no exception, not positive proof of access use.
+Missing ARIN coverage is not positive proof of access use. The candidate's
+affirmative catalog and additional evidence limits are documented in
+`arindbctl/CLASSIFICATION.md`; prefix/rule counts are not provider coverage.
+Use the separate default-off shadow reader for preactivation comparison.
+Never replace today's active MMDB merely to obtain a shadow: its risk and
+non-quality flags already affect serving independently of the policy-two
+request-guard switch.
 
 ## Probe URL configuration and execution
 

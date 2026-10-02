@@ -11388,6 +11388,28 @@ no arbitrary operator/provider labels in runtime metrics. Catalog prefix or
 address counts cannot substitute for eligible provider counts. Resource
 activation and epoch readback are specified in `arindbctl/CLASSIFICATION.md`.
 
+The subscriber-policy-two requirement is stricter: Quality needs reviewed
+residential/business subscriber evidence, and unknown or ambiguous use cannot
+borrow its way through a Quality request. Verified ISP-branded proxy egress
+has an independent risk veto; registry ISP status, ordinary leasing or an MVNO
+label does not establish that finding. The candidate remains inactive pending
+adequate affirmative supply and a fresh provider-level shadow with explicit
+operator acceptance criteria.
+
+The default-off shadow reducer has local causal controls for two misleading
+inputs: delayed receipt cannot rejuvenate an expired lookup, and an absent or
+mismatched current connection observation cannot become a confirmed Quality
+loss. Its observation must match the census's exact durable lookup epoch, time
+and flags. Known unknown-use records exclude Quality while remaining distinct
+from missing observations and from risk. Output separates confirmed removals
+from indeterminate comparisons and rejects missing boolean evidence and private
+bucket labels. Local controls and a complete sampled matrix do not establish
+fleet completeness, current subscriber coverage, acceptable lookup/memory cost
+or Main policy activation. Missing observation coverage can hide either losses
+or gains. Publishing candidate MMDB bytes is itself a serving change on current
+binaries, independently of the subscriber request-guard switch; keep shadow
+resources separate until every activation gate is reviewed.
+
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`
 
