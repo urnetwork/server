@@ -35,6 +35,13 @@ test_pipeline_status() {
     return "$test_status"
 }
 
+# Mandatory admission regression, even when a later package run is filtered.
+# Real PostgreSQL+Redis and independent processes must prove the same-network
+# shared-grant path does not regain financial row queues or a local payer gate.
+# No retries or skip-on-short mode: a missing fixture fails the release gate.
+WARP_TEST_ENV_FAIL_FAST=1 go test -p=1 -race -count=1 -timeout=5m ./model ./taskworker/work \
+    -run '^(TestRedisAdmission.*|TestContractCreationSameNetworkLargeNContentionFree|TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows)$' || exit $?
+
 # The proxy integration tests (./proxy) drive real-time wireguard/gvisor packet
 # paths and real outbound TLS. Like the connect packet-translation tests, the
 # race detector's scheduling overhead slows that real-time delivery enough to

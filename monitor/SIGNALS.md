@@ -1668,6 +1668,48 @@ describes the prior implementation. A missing old label is not zero cold work.
 Actual mirror reads remain `refresh_snapshot_total{result="reloaded"}`;
 neither family counts committed settlements or distinct SQL statements.
 
+The source-qualified 4700 Taskworker interval at 2026-10-02 21:40–21:45Z
+still attributed 97.02%/97.13% of completed exclusive contract-creation residence
+to the process-local payer gate in g1/g2 (mean returned calls 1.715/1.594s).
+The same nominal DNS window had affirmative same-tunnel local-contract-pending,
+no-provider-write evidence for 83.74%/75.52% of timeout waves. The producers are
+independent cohorts: do not turn these into a request-to-SQL, payer, provider,
+CPU or durable-receipt join. Cold-settlement deployment alone did not establish
+admission recovery.
+
+**Contention prevention and explicit approximation.** Migration 755 and the
+compatible reader release add a separately enabled Redis admission policy.
+Default-off traffic retains the existing legacy path. When enabled, marked
+escrow reservations use atomic same-slot Redis admission, without the local
+payer permit or common balance/revision/snapshot writes. Exact legacy censuses
+and their cache metrics cover unmarked rows; do not interpret them as the total
+new reservation balance. `urnetwork_redis_contract_reservation_total` counts
+finite `operation=reserve|release|restore`, `result=accepted|refused|error`
+operations, including retries, not financial commits. Missing mode/source
+coverage, command errors or absent counters remain unknown, not healthy.
+
+The owning release gate now holds each shared financial row while requests from
+another process must complete, separately holds the local payer permit, and
+runs 512 distinct clients in one funded network across two synchronized
+processes. The historical held-row control timed out all 64 requests for each
+balance/revision/snapshot barrier; the candidate completes them before releasing
+the blocker. Healthy varied/shared destinations and exact final reservation
+sums are required. The broad workload samples waits and latency; sampling alone
+cannot prove absence, so the held-row controls are mandatory. Keep this gate in
+`test.sh` for model/controller/admission and relevant SDK upgrades.
+
+The operator explicitly approved exchanging absolute admission consistency for
+no shared financial contention. Missing Redis state, expiry, stale credit reads
+and ambiguous commits have documented over-/under-admission windows; they are
+not automatic corruption findings under the new mode. Malformed Redis values
+and transport failures remain errors. Per-contract usage and settlement debit
+remain durable. See [the policy and recovery contract](../docs/operator/contract-admission.md)
+for the 24-hour reservation horizon, bounded expiry, targeted reconciliation,
+mixed-reader rollout and mandatory commands. Do not reintroduce exact shared-row
+serialization to remove an explicitly accepted approximate edge. Qualified
+successful Main traffic, continuing query observations and independent CPU
+remain required before closing the incident.
+
 **2026-10-02 early-detection audit.** The CPU warning was already present:
 25% in two observations (§1.3c), and active/idle-transaction warnings existed
 in §1.3. Retained CPU observations include 80.85% at 10:29:23Z and 52.52% at

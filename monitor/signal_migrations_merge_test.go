@@ -49,7 +49,7 @@ func TestMigrationsSignalMergedCatalogUsesExactColumns(t *testing.T) {
 			},
 			{
 				apply:    `CREATE OR REPLACE FUNCTION transfer_contract_escrow_revision() RETURNS trigger LANGUAGE plpgsql AS $body$` + server.NetEscrowContractsRevisionLegacyFunctionBodySql + `$body$`,
-				restore:  `CREATE OR REPLACE FUNCTION transfer_contract_escrow_revision() RETURNS trigger LANGUAGE plpgsql AS $body$` + server.NetEscrowContractsRevisionFunctionBodySql + `$body$`,
+				restore:  `CREATE OR REPLACE FUNCTION transfer_contract_escrow_revision() RETURNS trigger LANGUAGE plpgsql AS $body$` + server.NetEscrowContractsRedisRevisionFunctionBodySql + `$body$`,
 				artifact: "net escrow contract revision point lookup@v753",
 			},
 			{

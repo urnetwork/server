@@ -411,6 +411,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "private prober shard ownership and cleanup fences", requiredVersion: 752, rowColumn: 163},
 	{name: "net escrow contract revision point lookup", requiredVersion: 753, rowColumn: 164},
 	{name: "durable net escrow reservation snapshot", requiredVersion: 754, rowColumn: 165},
+	{name: "Redis contract admission compatibility and policy", requiredVersion: 755, rowColumn: 166},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -2153,7 +2154,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       `+subscriberQualityWriteGuardArtifactQuery+`,
 		       `+proberShardOwnershipArtifactQuery+`,
 		       `+netEscrowContractPointRevisionArtifactQuery+`,
-		       `+netEscrowSnapshotArtifactQuery+`
+		       `+netEscrowSnapshotArtifactQuery+`,
+		       `+redisAdmissionArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {
