@@ -2,6 +2,7 @@ package controller
 
 import (
 	// "context"
+	"errors"
 	"fmt"
 	// "time"
 	"sync"
@@ -205,16 +206,20 @@ func AuthPasswordSet(passwordSet model.AuthPasswordSetArgs, session *session.Cli
 			Error: passwordSetResult.Error,
 		}, nil
 	}
+	// The password is already changed. An account created with a wallet or
+	// SSO and given an email or phone sign-in later has no network_user
+	// recipient, which is not a failure of the reset.
 	userAuth, err := model.GetUserAuth(session.Ctx, passwordSetResult.NetworkId)
-	if err != nil {
+	if err != nil && !errors.Is(err, model.ErrMissingUserAuth) {
 		return nil, err
 	}
-	normalUserAuth, _ := model.NormalUserAuthV1(&userAuth)
-	awsMessageSender := GetAWSMessageSender()
-	awsMessageSender.SendAccountMessageTemplate(
-		*normalUserAuth,
-		&AuthPasswordSetTemplate{},
-	)
+	if normalUserAuth, _ := model.NormalUserAuthV1(&userAuth); normalUserAuth != nil {
+		awsMessageSender := GetAWSMessageSender()
+		awsMessageSender.SendAccountMessageTemplate(
+			*normalUserAuth,
+			&AuthPasswordSetTemplate{},
+		)
+	}
 
 	safePasswordSetResult := &AuthPasswordSetResult{}
 	return safePasswordSetResult, nil

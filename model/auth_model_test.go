@@ -980,6 +980,149 @@ func TestAuthVerifyCodeInvalidation(t *testing.T) {
 	})
 }
 
+// An email or phone sign-in added after the account was created lives only in
+// network_user_auth_password (network_user.user_auth keeps the original
+// identity). Logging in with it asks for verification, so a code must be
+// created for it and must verify it.
+func TestAuthVerifyAddedUserAuth(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "test", userId)
+
+		phone := "+1 609-737-0011"
+		password := "password123"
+		passwordSalt := createPasswordSalt()
+		passwordHash := computePasswordHashV1([]byte(password), passwordSalt)
+		err := addUserAuth(
+			&AddUserAuthArgs{
+				UserId:       userId,
+				UserAuth:     &phone,
+				PasswordHash: passwordHash,
+				PasswordSalt: passwordSalt,
+			},
+			ctx,
+		)
+		connect.AssertEqual(t, err, nil)
+		normalPhone, _ := NormalUserAuthV1(&phone)
+
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+
+		loginResult, err := AuthLoginWithPassword(
+			AuthLoginWithPasswordArgs{
+				UserAuth: phone,
+				Password: password,
+			},
+			clientSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, loginResult.Error, nil)
+		connect.AssertNotEqual(t, loginResult.VerificationRequired, nil)
+
+		createResult, err := AuthVerifyCreateCode(
+			AuthVerifyCreateCodeArgs{
+				UserAuth: loginResult.VerificationRequired.UserAuth,
+			},
+			clientSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, createResult.VerifyCode, nil)
+
+		verifyResult, err := AuthVerify(
+			AuthVerifyArgs{
+				UserAuth:   phone,
+				VerifyCode: *createResult.VerifyCode,
+			},
+			clientSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, verifyResult.Error, nil)
+		connect.AssertNotEqual(t, verifyResult.Network, nil)
+
+		byJwt, err := jwt.ParseByJwt(ctx, verifyResult.Network.ByJwt)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, byJwt.NetworkId, networkId)
+		connect.AssertEqual(t, byJwt.UserId, userId)
+
+		verified := false
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`SELECT verified FROM network_user_auth_password WHERE user_auth = $1`,
+				*normalPhone,
+			)
+			server.WithPgResult(result, err, func() {
+				connect.AssertEqual(t, result.Next(), true)
+				server.Raise(result.Scan(&verified))
+			})
+		})
+		connect.AssertEqual(t, verified, true)
+	})
+}
+
+// A password reset for an added email or phone sign-in creates a reset code
+// for the account that owns it.
+func TestPasswordResetAddedUserAuth(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "test", userId)
+
+		phone := "+1 609-737-0012"
+		passwordSalt := createPasswordSalt()
+		passwordHash := computePasswordHashV1([]byte("password123"), passwordSalt)
+		err := addUserAuth(
+			&AddUserAuthArgs{
+				UserId:       userId,
+				UserAuth:     &phone,
+				PasswordHash: passwordHash,
+				PasswordSalt: passwordSalt,
+				Verified:     true,
+			},
+			ctx,
+		)
+		connect.AssertEqual(t, err, nil)
+
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+
+		resetResult, err := AuthPasswordResetCreateCode(
+			AuthPasswordResetCreateCodeArgs{
+				UserAuth: phone,
+			},
+			clientSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, resetResult.ResetCode, nil)
+
+		newPassword := "password456"
+		setResult, err := AuthPasswordSet(
+			AuthPasswordSetArgs{
+				ResetCode: *resetResult.ResetCode,
+				Password:  newPassword,
+			},
+			clientSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, setResult.NetworkId, networkId)
+
+		loginResult, err := AuthLoginWithPassword(
+			AuthLoginWithPasswordArgs{
+				UserAuth: phone,
+				Password: newPassword,
+			},
+			clientSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, loginResult.Error, nil)
+		connect.AssertNotEqual(t, loginResult.Network, nil)
+		connect.AssertNotEqual(t, loginResult.Network.ByJwt, nil)
+	})
+}
+
 // countRows is a small helper for the reaper tests below.
 func countRows(ctx context.Context, query string, args ...any) int {
 	c := 0

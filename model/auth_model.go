@@ -963,18 +963,17 @@ func AuthVerify(
 			session.Ctx,
 			`
 				SELECT
-					network_user.user_id,
+					user_auth_verify.user_id,
 					user_auth_verify.user_auth_verify_id,
 					network.network_id,
 					network.network_name
-				FROM network_user
-				INNER JOIN user_auth_verify ON
-					user_auth_verify.user_id = network_user.user_id AND
+				FROM user_auth_verify
+				INNER JOIN network ON network.admin_user_id = user_auth_verify.user_id
+				WHERE
+					user_auth_verify.user_id = `+userIdByUserAuthSql("$3")+` AND
 					user_auth_verify.verify_code = $1 AND
-					used = false AND
+					user_auth_verify.used = false AND
 					now() - INTERVAL '1 seconds' * $2 <= user_auth_verify.verify_time
-				INNER JOIN network ON network.admin_user_id = network_user.user_id
-				WHERE user_auth = $3
 			`,
 			normalVerifyCode,
 			int(VerifyCodeTimeout/time.Second),
@@ -1049,6 +1048,23 @@ func AuthVerify(
 	return result, nil
 }
 
+// userIdByUserAuthSql is a scalar subquery for the user that signs in with an
+// email or phone. Email and phone sign-ins live in network_user_auth_password;
+// network_user.user_auth only holds the identity the account was created with,
+// so an email or phone added later with AddAuth is found only in the former.
+// The legacy column is kept as a fallback for accounts whose only identity is
+// that column. Looking only at network_user.user_auth meant an added sign-in
+// could log in with its password but never got a verification or reset code.
+func userIdByUserAuthSql(userAuthParam string) string {
+	return fmt.Sprintf(
+		`COALESCE(
+			(SELECT user_id FROM network_user_auth_password WHERE user_auth = %[1]s LIMIT 1),
+			(SELECT user_id FROM network_user WHERE user_auth = %[1]s LIMIT 1)
+		)`,
+		userAuthParam,
+	)
+}
+
 type AuthVerifyCreateCodeArgs struct {
 	UserAuth string `json:"user_auth"`
 	CodeType VerifyCodeType
@@ -1095,9 +1111,7 @@ func AuthVerifyCreateCode(
 		var userId *server.Id
 		result, err = tx.Query(
 			session.Ctx,
-			`
-				SELECT user_id FROM network_user WHERE user_auth = $1
-			`,
+			`SELECT `+userIdByUserAuthSql("$1"),
 			userAuth,
 		)
 		server.WithPgResult(result, err, func() {
@@ -1195,9 +1209,7 @@ func AuthPasswordResetCreateCode(
 		var userId *server.Id
 		result, err = tx.Query(
 			session.Ctx,
-			`
-				SELECT user_id FROM network_user WHERE user_auth = $1
-			`,
+			`SELECT `+userIdByUserAuthSql("$1"),
 			userAuth,
 		)
 		server.WithPgResult(result, err, func() {
