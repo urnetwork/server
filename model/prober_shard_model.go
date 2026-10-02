@@ -152,25 +152,57 @@ func lockProberShardClientAdmissionInTx(ctx context.Context, tx server.PgTx, net
 }
 
 // A private probe account may fund only contracts in which it is an endpoint;
-// two different shard accounts never share a contract or payer. The existing
-// endpoint row locks below this check fence a concurrent drain before INSERT.
-func validateProberShardPayerInTx(ctx context.Context, tx server.PgTx, source, destination, payer server.Id) error {
-	rows, err := tx.Query(ctx, `SELECT network_id, state='active' AND clock_timestamp() AT TIME ZONE 'UTC'<deadline FROM prober_shard_run WHERE network_id=ANY($1)`, []server.Id{source, destination, payer})
+// two different shard accounts never share a contract or payer. Lock ownership
+// before grants or clients: drain locks the registry, clients, then its grant.
+// The shared registry fence prevents an admission waiting on a grant from
+// deadlocking with drain after it moves on to its endpoint lifecycle locks.
+func validateProberShardPayerInTx(ctx context.Context, tx server.PgTx, source, destination, payer server.Id) (*time.Time, error) {
+	rows, err := tx.Query(ctx, `SELECT network_id, state, deadline FROM prober_shard_run
+		WHERE network_id=ANY($1) ORDER BY network_id FOR SHARE`, []server.Id{source, destination, payer})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer rows.Close()
+	var admissionDeadline *time.Time
 	for rows.Next() {
 		var network server.Id
-		var live bool
-		if err := rows.Scan(&network, &live); err != nil {
-			return err
+		var state string
+		var deadline time.Time
+		if err := rows.Scan(&network, &state, &deadline); err != nil {
+			rows.Close()
+			return nil, err
 		}
-		if !live || payer != network || (source != network && destination != network) {
-			return errors.New("contract is outside its probe shard payer")
+		if state != "active" || payer != network || (source != network && destination != network) {
+			rows.Close()
+			return nil, errors.New("contract is outside its probe shard payer")
+		}
+		if admissionDeadline == nil || deadline.Before(*admissionDeadline) {
+			admissionDeadline = &deadline
 		}
 	}
-	return rows.Err()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	// A timestamp projected inside the locking SELECT can precede a row-lock
+	// wait. Read the database clock only after every selected lock is acquired.
+	return admissionDeadline, validateProberShardAdmissionDeadlineInTx(ctx, tx, admissionDeadline)
+}
+
+// Registry locks fence state changes, not the passage of time. Admission must
+// recheck after any grant/census/client wait and before its financial writes.
+func validateProberShardAdmissionDeadlineInTx(ctx context.Context, tx server.PgTx, deadline *time.Time) error {
+	if deadline == nil {
+		return nil
+	}
+	var live bool
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp() AT TIME ZONE 'UTC' < $1::timestamp`, *deadline).Scan(&live); err != nil {
+		return err
+	}
+	if !live {
+		return ErrProberShardRetired
+	}
+	return nil
 }
 
 // Caller owns the registry row FOR UPDATE. The existing sorted client locks
@@ -224,6 +256,53 @@ func DrainProberShard(ctx context.Context, key ProberShardKey) error {
 	return err
 }
 
+// The full payer index was removed; the newer unresolved-payer partial index
+// excludes disputed contracts. A bare payer/outcome predicate can therefore
+// scan the global outcome index even for an empty private shard. Constrain both
+// leading keys of the retained (open,payer_network_id,transfer_byte_count) index.
+// Keep outcome outside OFFSET 0, so a false-zero global partial index cannot
+// replace these two payer ranges. Both generated-open values are necessary:
+// disputed unresolved and unanchored zero-byte contracts still block deletion.
+// Work is scoped to this short-lived payer's history, not the global live set.
+const proberShardPayerContractScopeSql = `
+	CROSS JOIN (VALUES (true), (false)) AS contract_state(open)
+	CROSS JOIN LATERAL (
+		SELECT contract_id, outcome
+		FROM transfer_contract
+		WHERE open=contract_state.open AND payer_network_id=payer_scope.network_id
+		OFFSET 0
+	) AS scoped_contract
+`
+
+const proberShardReportedContractsSql = `
+	SELECT scoped_contract.contract_id
+	FROM (
+		SELECT network_id FROM prober_shard_run
+		WHERE task_id=$1 AND epoch=$2 AND state='draining'
+	) AS payer_scope
+` + proberShardPayerContractScopeSql + `
+	CROSS JOIN LATERAL (
+		SELECT 1 FROM contract_close
+		WHERE contract_id=scoped_contract.contract_id AND party=$3 AND NOT checkpoint
+		LIMIT 1 OFFSET 0
+	) AS source_final
+	CROSS JOIN LATERAL (
+		SELECT 1 FROM contract_close
+		WHERE contract_id=scoped_contract.contract_id AND party=$4 AND NOT checkpoint
+		LIMIT 1 OFFSET 0
+	) AS destination_final
+	WHERE scoped_contract.outcome IS NULL
+	ORDER BY scoped_contract.contract_id LIMIT 32
+`
+
+const proberShardHasUnresolvedContractsSql = `
+	SELECT EXISTS (
+		SELECT 1 FROM (SELECT $1::uuid AS network_id) AS payer_scope
+` + proberShardPayerContractScopeSql + `
+		WHERE scoped_contract.outcome IS NULL
+	)
+`
+
 // Retry only contracts whose two actual final reports already authorize normal
 // settlement. This runs without an ownership/balance lock: settlement keeps its
 // existing contract-before-balance lock order. Missing/checkpoint reports and
@@ -231,13 +310,8 @@ func DrainProberShard(ctx context.Context, key ProberShardKey) error {
 func settleReportedProberShardContracts(ctx context.Context, key ProberShardKey) error {
 	var contracts []server.Id
 	server.Db(ctx, func(conn server.PgConn) {
-		rows, err := conn.Query(ctx, `SELECT c.contract_id
-			FROM prober_shard_run r
-			JOIN transfer_contract c ON c.payer_network_id=r.network_id AND c.outcome IS NULL
-			JOIN contract_close s ON s.contract_id=c.contract_id AND s.party=$3 AND NOT s.checkpoint
-			JOIN contract_close d ON d.contract_id=c.contract_id AND d.party=$4 AND NOT d.checkpoint
-			WHERE r.task_id=$1 AND r.epoch=$2 AND r.state='draining'
-			ORDER BY c.contract_id LIMIT 32`, key.TaskId, key.Epoch, ContractPartySource, ContractPartyDestination)
+		rows, err := conn.Query(ctx, proberShardReportedContractsSql,
+			key.TaskId, key.Epoch, ContractPartySource, ContractPartyDestination)
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				var id server.Id
@@ -309,8 +383,11 @@ func ReapProberShard(ctx context.Context, key ProberShardKey) (deleted bool, ret
 			var blocked bool
 			server.Raise(tx.QueryRow(ctx, `SELECT
 				EXISTS (SELECT 1 FROM transfer_escrow WHERE balance_id=$1 AND NOT settled) OR
-				EXISTS (SELECT 1 FROM transfer_contract WHERE payer_network_id=$2 AND outcome IS NULL) OR
 				EXISTS (SELECT 1 FROM transfer_balance WHERE network_id=$2 AND balance_id<>$1)`, owner.BalanceId, owner.NetworkId).Scan(&blocked))
+			if blocked {
+				return
+			}
+			server.Raise(tx.QueryRow(ctx, proberShardHasUnresolvedContractsSql, owner.NetworkId).Scan(&blocked))
 			if blocked {
 				return
 			}

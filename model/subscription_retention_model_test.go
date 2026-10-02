@@ -220,7 +220,8 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 		connect.AssertEqual(t, contractCount, 1)
 		connect.AssertNotEqual(t, escrowCount, 0)
 
-		// balances are removed once their end time passes retention
+		// Expiry does not discharge the live escrow. Keep its grant until real
+		// settlement finishes, even when the caller's retention cutoff advances.
 		countBalances := func() int {
 			c := 0
 			server.Db(ctx, func(conn server.PgConn) {
@@ -238,6 +239,11 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 			return c
 		}
 		connect.AssertNotEqual(t, countBalances(), 0)
+		RemoveCompletedContracts(ctx, server.NowUtc().Add(2*365*24*time.Hour))
+		connect.AssertNotEqual(t, countBalances(), 0)
+		for _, clientId := range []server.Id{sourceId, destinationId} {
+			server.Raise(CloseContract(ctx, liveEscrow.ContractId, clientId, 512, false))
+		}
 		RemoveCompletedContracts(ctx, server.NowUtc().Add(2*365*24*time.Hour))
 		connect.AssertEqual(t, countBalances(), 0)
 	})
