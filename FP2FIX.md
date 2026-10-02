@@ -5055,3 +5055,78 @@ UTC sweep review `2979c5181770f2ed594dfae7ab419184fb3e95c9c16b9c49e8d196eb1220ed
 failed sampler receipt `a293c8f053d436cbaa876df74ef4e8614ae260919b56cb839410a4dea8197b9a`.
 The fresh native-bucket/request-local acceptance, ARIN subscriber shadow,
 loaded Main query cause and complete four-hour coverage remain unresolved.
+
+
+## 2026-10-02 17:25 UTC lifecycle rollout and metadata contention checkpoint
+
+Release `2026.10.2-contract-lifecycle+1060864200` was built locally from clean
+`bf7d620517b082bfd6a485765ff929f5996a7f2c`, using Connect `6443417d70dc`.
+All three multiarchitecture registry graphs were verified against the actual
+local binaries, embedded revision, SDK module, and isolated version/help runs.
+API, Taskworker and Connect all-block deployment commands completed at
+17:03:53, 17:06:12 and 17:14:04 UTC respectively. Command success is selection
+progress, not proof of fleet convergence.
+
+A single source-qualified HTTPS metrics read at 17:24:17 UTC found 43 of 48
+expected fresh source/start witnesses: API 20/20, Taskworker 8/8 and Connect
+15/20. API readiness gauges were positive. Two Connect witnesses explicitly
+reported the older 4000 source; three were strict-null and require generation
+triage. A strict-null result can include incomplete predecessor coverage and
+is not proof that a new process is absent. These self-reported metrics do not
+prove executable/container identity, old-process retirement, DNAT, Connect
+QUIC readiness, Taskworker readiness, or improved accepted throughput. The
+Connect rollout boundary remains open.
+
+Independent actual-PG tests now also cover the configured large private shard
+grant: selected-first allocation is positively counted with one pool
+connection, late-result cleanup closes only the requester, and reservations
+remain until an independent provider close and normal financial settlement.
+The smaller ordinary-fallback control is retained. These are correctness
+controls, not measurements of Main incident frequency.
+
+A separate settlement-metadata race was reproduced deterministically. Metadata
+read a current reservation snapshot without locking the corresponding balance;
+concurrent admission then advanced the revision before metadata updated its
+settled flag. Guarded publication correctly rejected the stale prediction, but
+the next reader repeated the exact reservation census. The merged correction
+locks every existing balance for the terminal contract in sorted order before
+escrow/cache work, including balances outside a partial payout map. Custom and
+generic false-zero plan controls with 100,000 unrelated rows used three live
+escrow rows and three balance primary-key probes. Independent eight-root
+financial race tests passed, including interleave, partial-map, rollback,
+ambiguous commit, legacy, missing/zero and numeric-extreme controls.
+
+One loaded two-process comparison improved 64 admissions from 3 completing
+inside their five-second limits to all 64 completing in 1.296 seconds while
+another process settled contracts; candidate accounting remained exact.
+A later baseline also completed all 64 within the limit, so deadline failures
+are schedule/load dependent. Its overlap still performed 81 exact snapshot
+reloads with ten sampled concurrent censuses. The deterministic cache race,
+not a guaranteed timeout ratio, establishes the mechanism. This correction
+needs new API, Connect and Taskworker binaries; its Main performance benefit
+is not yet proven. No migration is required.
+
+The scheduled 17:21:18 UTC census has 113,314 eligible providers, 9,226
+quota-complete and 9,223 secure-complete (about 8.14 percent quota coverage),
+with 395,364 measured runs still needed. The earlier 17:06 census was
+9,111/114,885. Cohort changes and incomplete hourly ranges prevent a sustained
+rate or fixed-provider recovery claim. Standing PostgreSQL CPU at 17:07:17
+was 40.15 of 96 cores (41.82 percent); the separate 17:06:55 state sample had
+164 active sessions and 54 idle transactions. These do not identify query CPU.
+
+Four actual continuous query-sampler attempts have failed source-unavailable;
+the latest finished 17:19:41.625 UTC and reserved its next eligible time at
+17:34:41.625. There is still no successful recurring query sample. Fair bounded
+scheduling and finite source-phase diagnostics are implemented, with independent
+monitor gates in progress. A failing local test launcher was isolated to a
+pyenv shim under restricted PATH and repaired; it is not the cause of the
+unclassified production failures. The authoritative watcher and 15-minute
+floors remain intact. Native bucket acceptance, ARIN shadow activation, full
+Model partitions, loaded Main attribution and complete provider coverage remain
+outstanding.
+
+Evidence: all verified images `bbd65107dd75f94b7aa23cb36038d62e1f99166a73cc9c7f848e8d5f5ff9de9d`;
+all deployment terminals `886db690583fe09dd3f49b4ff2135c7c896c9548fe075fbf3669daa5e424cc1d`;
+fleet witness `d42b2be91f4ab510f7573ce11dcf519d715c27f28e41481c268502ba6a2a59a6`;
+selected-grant independent review `ea267bc6eb1256ab4312d445173178da5883adb0d2d8e73d2763d3ca41c62d59`;
+metadata-fence independent review `0ee9845667b087768e6a91757fb03602eae21473c5919f4ce1bc0f86648dd89e`.
