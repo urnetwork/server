@@ -9,16 +9,23 @@ import (
 
 // Observation is a fixed atomic increment; collection never blocks a probe.
 type providerEgressDnsMetrics struct {
-	observations     providertunnel.DnsObservations
-	desc             *prometheus.Desc
-	routeCountDesc   *prometheus.Desc
-	routeSecondsDesc *prometheus.Desc
+	observations                      providertunnel.DnsObservations
+	desc                              *prometheus.Desc
+	routeCountDesc                    *prometheus.Desc
+	routeSecondsDesc                  *prometheus.Desc
+	contractDesc, contractSecondsDesc *prometheus.Desc
 }
 
 // Every process exports all 45 fixed cells, including zeros, so an absent
 // metric on an older executable cannot masquerade as a healthy observation.
 func newProviderEgressDnsMetrics() *providerEgressDnsMetrics {
 	return &providerEgressDnsMetrics{
+		contractDesc: prometheus.NewDesc("urnetwork_egress_probe_dns_contract_waves_total",
+			"DNS wave outcomes joined to the exact tunnel's end-of-wave no-provider-write local contract witness; not_proved is unknown cause",
+			[]string{"result", "evidence"}, nil),
+		contractSecondsDesc: prometheus.NewDesc("urnetwork_egress_probe_dns_contract_wave_seconds_total",
+			"DNS wave wall residence by exact tunnel contract witness; not contract-acquisition duration",
+			[]string{"result", "evidence"}, nil),
 		routeCountDesc: prometheus.NewDesc("urnetwork_egress_probe_dns_route_waves_total",
 			"Completed DNS waves classified by endpoint route snapshots and source-owned admission time; snapshots are not complete route history",
 			[]string{"result", "route"}, nil),
@@ -42,10 +49,16 @@ func (self *providerEgressDnsMetrics) Describe(ch chan<- *prometheus.Desc) {
 	ch <- self.desc
 	ch <- self.routeCountDesc
 	ch <- self.routeSecondsDesc
+	ch <- self.contractDesc
+	ch <- self.contractSecondsDesc
 }
 
 // Reads a bounded snapshot without retaining any provider lifecycle owner.
 func (self *providerEgressDnsMetrics) Collect(ch chan<- prometheus.Metric) {
+	for _, value := range self.observations.ContractSnapshot() {
+		ch <- prometheus.MustNewConstMetric(self.contractDesc, prometheus.CounterValue, float64(value.Count), value.Result, value.Evidence)
+		ch <- prometheus.MustNewConstMetric(self.contractSecondsDesc, prometheus.CounterValue, value.WaveSeconds, value.Result, value.Evidence)
+	}
 	for _, value := range self.observations.RouteTimingSnapshot() {
 		ch <- prometheus.MustNewConstMetric(self.routeCountDesc, prometheus.CounterValue, float64(value.Count), value.Result, value.Route)
 		for phase, seconds := range map[string]float64{

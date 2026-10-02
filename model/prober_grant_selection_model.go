@@ -163,6 +163,7 @@ func loadTransferEscrowBalances(
 	ctx context.Context, tx server.PgTx, payerNetworkId, payerClientId server.Id,
 	now time.Time, requestedBytes ByteCount,
 ) []*escrowTransferBalance {
+	defer server.EnterContractCreationStage(ctx, server.ContractStageGrantSelection)()
 	if requestedBytes == 0 {
 		// An anchor consumes no credit. Preserve its earliest-expiry priority
 		// without queuing behind a financial allocation or scanning escrow

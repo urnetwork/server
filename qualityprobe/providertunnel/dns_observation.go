@@ -44,6 +44,7 @@ var dnsPathLabels = [...]string{"unknown", "active", "forming", "platform_unreac
 type DnsObservations struct {
 	counts      [len(dnsResultLabels)][len(dnsPathLabels)]atomic.Uint64
 	routeTiming [len(dnsResultLabels)][len(dnsRouteLabels)]dnsRouteTimingCell
+	contract    [len(dnsResultLabels)][len(dnsContractLabels)]dnsContractCell
 }
 
 // One fixed-cardinality row. Labels are defined here, never copied from an

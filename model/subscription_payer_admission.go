@@ -77,12 +77,15 @@ func (q *payerAdmissionQueue) acquire(ctx context.Context, payer server.Id) (fun
 // is subsequently clamped to zero may harmlessly take a turn before that read.
 func transferEscrowTx(ctx context.Context, payer server.Id, requested ByteCount, callback func(server.PgTx)) error {
 	if requested > 0 {
+		leaveGate := server.EnterContractCreationStage(ctx, server.ContractStagePayerGate)
 		release, err := transferEscrowAdmissionQueue.acquire(ctx, payer)
+		leaveGate()
 		if err != nil {
 			return err
 		}
 		defer release()
 	}
+	defer server.EnterContractCreationStage(ctx, server.ContractStageTransaction)()
 	server.Tx(ctx, callback, server.TxReadCommitted)
 	return nil
 }

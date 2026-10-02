@@ -458,6 +458,7 @@ func ConnectControlFrames(
 }
 
 func GetProvideModes(ctx context.Context, destinationId server.Id) map[model.ProvideMode]bool {
+	defer server.EnterContractCreationStage(ctx, server.ContractStageProvideModes)()
 
 	if destinationId == ControlId {
 		return map[model.ProvideMode]bool{
@@ -482,6 +483,7 @@ func GetProvideRelationship(ctx context.Context, sourceId server.Id, destination
 }
 
 func getProvideRelationshipDetails(ctx context.Context, sourceId server.Id, destinationId server.Id) model.ProvideRelationshipDetails {
+	defer server.EnterContractCreationStage(ctx, server.ContractStageRelationship)()
 	details := model.GetProvideRelationshipDetails(ctx, sourceId, destinationId)
 	if sourceId == ControlId {
 		details.Mode = model.ProvideModeNetwork
@@ -629,7 +631,20 @@ func CreateContract(
 	clientId server.Id,
 	createContract *protocol.CreateContract,
 	contractManagerSettings *connect.ContractManagerSettings,
-) ([]*protocol.Frame, error) {
+) (resultFrames []*protocol.Frame, resultErr error) {
+	httpIngress, _ := ctx.Value(controlHttpIngressKey{}).(bool)
+	ctx, timing := server.BeginContractCreationTiming(ctx, httpIngress)
+	timingResult := server.ContractCreationError
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			timing.Finish(server.ContractCreationPanic)
+			panic(recovered)
+		}
+		if resultErr != nil {
+			timingResult = server.ContractCreationError
+		}
+		timing.Finish(timingResult)
+	}()
 	// server.Logger().Printf("CONTROL CREATE CONTRACT (companion=%t)\n", createContract.Companion)
 
 	destinationId := server.RequireIdFromBytes(createContract.DestinationId)
@@ -675,6 +690,7 @@ func CreateContract(
 		if err != nil {
 			return nil, err
 		}
+		timingResult = server.ContractCreationRejected
 		return []*protocol.Frame{frame}, nil
 	}
 
@@ -712,6 +728,7 @@ func CreateContract(
 			if err != nil {
 				return nil, err
 			}
+			timingResult = server.ContractCreationRejected
 			return []*protocol.Frame{frame}, nil
 		}
 		if companion {
@@ -720,7 +737,9 @@ func CreateContract(
 		}
 	}
 
+	leaveSecret := server.EnterContractCreationStage(ctx, server.ContractStageProvideSecret)
 	provideSecretKey, err := model.GetProvideSecretKey(ctx, destinationId, provideMode)
+	leaveSecret()
 	if err != nil {
 		// A companion request in symmetric mode lands here: provideMode=Stream(4)
 		// has no secret key because the destination never provided Stream.
@@ -734,6 +753,7 @@ func CreateContract(
 			return nil, err
 		}
 		// self.client.Send(frame, connect.Id(self.clientId), nil)
+		timingResult = server.ContractCreationRejected
 		return []*protocol.Frame{frame}, nil
 	}
 
@@ -743,11 +763,13 @@ func CreateContract(
 	// key against the unauthenticated `/key/<client_id>` lookup to defeat a
 	// man-in-the-middle platform that swaps both cert and key in lockstep.
 	var metadata model.ClientContractMetadata
+	leaveMetadata := server.EnterContractCreationStage(ctx, server.ContractStageMetadata)
 	server.HandleError(func() {
 		// As before, optional metadata failure does not reject the contract.
 		// A public-key verification/fallback error preserves the valid cert.
 		metadata, _ = model.GetClientContractMetadata(ctx, destinationId)
 	})
+	leaveMetadata()
 	provideTlsCertificatePem := metadata.TLSCertificatePEM
 	clientKeySignedTlsCertificate := metadata.ClientKeySignedTLSCertificate
 	destinationClientPublicKey := metadata.PublicKey
@@ -793,9 +815,12 @@ func CreateContract(
 			return nil, err
 		}
 		// self.client.Send(frame, connect.Id(self.clientId), nil)
+		timingResult = server.ContractCreationRejected
 		return []*protocol.Frame{frame}, nil
 	}
 
+	leaveResponse := server.EnterContractCreationStage(ctx, server.ContractStageResponse)
+	defer leaveResponse()
 	storedContract := &protocol.StoredContract{
 		ContractId:                               contractId.Bytes(),
 		TransferByteCount:                        uint64(transferByteCount),
@@ -848,6 +873,7 @@ func CreateContract(
 	}
 	// self.client.Send(frame, connect.Id(self.clientId), nil)
 	// server.Logger().Printf("CONTROL CREATE CONTRACT SENT\n")
+	timingResult = server.ContractCreationReply
 	return []*protocol.Frame{frame}, nil
 }
 
@@ -976,6 +1002,7 @@ func newContract(
 		}
 		priority = model.TrustedPriority
 
+		defer server.EnterContractCreationStage(ctx, server.ContractStageStream)()
 		switch streamVersion {
 		case 0:
 			// force stream is not supported
@@ -1034,6 +1061,7 @@ func newContract(
 		// already exists.
 		originWatch := model.GetContractOriginNotifications(ctx).Watch(destinationId, sourceId)
 		defer originWatch.Close()
+		leaveOrigin := server.EnterContractCreationStage(ctx, server.ContractStageCompanionOrigin)
 		escrow, err := waitForCompanionOrigin(ctx, func() (*model.TransferEscrow, error) {
 			return model.CreateCompanionTransferEscrow(
 				ctx,
@@ -1045,6 +1073,7 @@ func newContract(
 				contractManagerSettings.OriginContractLinger,
 			)
 		}, originWatch.Update)
+		leaveOrigin()
 		if err != nil {
 			returnErr = err
 			return
@@ -1055,6 +1084,7 @@ func newContract(
 		contractTransferByteCount = escrow.TransferByteCount
 		priority = escrow.Priority
 
+		defer server.EnterContractCreationStage(ctx, server.ContractStageStream)()
 		switch streamVersion {
 		case 0:
 			// companion stream is not supported
@@ -1095,6 +1125,7 @@ func newContract(
 		contractId = escrow.ContractId
 		priority = escrow.Priority
 
+		defer server.EnterContractCreationStage(ctx, server.ContractStageStream)()
 		switch streamVersion {
 		case 0:
 			// force stream is not supported

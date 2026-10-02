@@ -14,7 +14,7 @@ func TestProviderEgressDnsMetricsHaveFixedCardinality(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	expected := map[string]int{"urnetwork_egress_probe_dns_waves_total": 45, "urnetwork_egress_probe_dns_route_waves_total": 35, "urnetwork_egress_probe_dns_route_seconds_total": 105}
+	expected := map[string]int{"urnetwork_egress_probe_dns_waves_total": 45, "urnetwork_egress_probe_dns_route_waves_total": 35, "urnetwork_egress_probe_dns_route_seconds_total": 105, "urnetwork_egress_probe_dns_contract_waves_total": 15, "urnetwork_egress_probe_dns_contract_wave_seconds_total": 15}
 	results := map[string]bool{"answer": true, "authoritative_empty": true, "timeout": true, "unanswered": true, "canceled": true}
 	paths := map[string]bool{"unknown": true, "active": true, "forming": true, "platform_unreachable": true, "provider_unresponsive": true, "rate_limited": true, "auth_failing": true, "lost": true, "closed": true}
 	routes := map[string]bool{"unknown": true, "stable_route": true, "current_route_admitted": true, "unready_endpoints": true, "changed_or_ambiguous": true, "lost": true, "closed": true}
@@ -45,6 +45,8 @@ func TestProviderEgressDnsMetricsHaveFixedCardinality(t *testing.T) {
 					allowed = routes[label.GetValue()]
 				case "phase":
 					allowed = phases[label.GetValue()]
+				case "evidence":
+					allowed = label.GetValue() == "unobserved" || label.GetValue() == "local_contract_no_provider_write" || label.GetValue() == "not_proved"
 				}
 				if !allowed {
 					t.Fatal("identity or unbounded label escaped diagnostic")
