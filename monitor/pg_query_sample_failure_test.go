@@ -20,6 +20,16 @@ func runPgSampleProgramFixture(t *testing.T, program, stub, input string) (strin
 	if err != nil {
 		t.Skip("python3 unavailable")
 	}
+	// LookPath may name a pyenv shell shim. Resolve the actual interpreter
+	// before restricting PATH to the fake psql directory; otherwise the test
+	// fails in the shim's env/bash bootstrap instead of our Python program.
+	resolveCtx, cancelResolve := context.WithTimeout(t.Context(), 5*time.Second)
+	resolved, resolveErr := exec.CommandContext(resolveCtx, python, "-c", "import sys;print(sys.executable)").Output()
+	cancelResolve()
+	if resolveErr != nil || !filepath.IsAbs(strings.TrimSpace(string(resolved))) {
+		t.Fatal("Python interpreter resolution failed")
+	}
+	python = strings.TrimSpace(string(resolved))
 	dir := t.TempDir()
 	if stub != "" {
 		if err := os.WriteFile(filepath.Join(dir, "psql"), []byte("#!"+python+"\nimport sys\n"+stub), 0700); err != nil {
