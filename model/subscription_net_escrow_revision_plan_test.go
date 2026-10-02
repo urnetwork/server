@@ -24,7 +24,9 @@ func TestNetEscrowRevisionTriggerUsesContractKeyAfterUpgrade(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 		defer cancel()
-		server.ApplyDbMigrationsUpTo(ctx, server.MigrationCount()-1)
+		// Schema 753 changed this trigger. Keep its historical baseline fixed
+		// when later, unrelated migrations are appended.
+		server.ApplyDbMigrationsUpTo(ctx, 752)
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		contractID, unrelatedBalanceID := server.NewId(), server.NewId()
 		server.Tx(ctx, func(tx server.PgTx) {
