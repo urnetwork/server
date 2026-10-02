@@ -30,19 +30,20 @@ const (
 )
 
 type monitorOptions struct {
-	once                  bool
-	listSignals           bool
-	mode                  string
-	format                string
-	output                string
-	keys                  stringFlags
-	includedSignals       stringFlags
-	excludedSignals       stringFlags
-	excludedHosts         stringFlags
-	excludedEdgeIPv6Hosts stringFlags
-	minimumProbeCadence   time.Duration
-	apiReleaseProofFile   string
-	pgQuerySampleUntil    string
+	once                    bool
+	listSignals             bool
+	mode                    string
+	format                  string
+	output                  string
+	keys                    stringFlags
+	includedSignals         stringFlags
+	excludedSignals         stringFlags
+	excludedHosts           stringFlags
+	excludedEdgeIPv6Hosts   stringFlags
+	minimumProbeCadence     time.Duration
+	apiReleaseProofFile     string
+	pgQuerySampleUntil      string
+	pgQuerySampleContinuous bool
 }
 
 // Exit only after the command-owned process lifecycle has returned.
@@ -105,7 +106,7 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 		return err
 	}
 
-	if !pgSampleUntil.IsZero() {
+	if opts.pgQuerySampleContinuous || !pgSampleUntil.IsZero() {
 		selected := false
 		for _, signal := range signals {
 			selected = selected || signal.Key() == "pg-query-sample"
@@ -130,6 +131,7 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 		}
 		settings.APIReleaseProof = releaseProof
 		settings.PGQuerySampleUntil = pgSampleUntil
+		settings.PGQuerySampleContinuous = opts.pgQuerySampleContinuous
 		return applyMonitorSettingsOptions(settings, opts)
 	}
 	settings, err := loadEffectiveSettings()
@@ -191,6 +193,7 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	flags.StringVar(&opts.mode, "mode", "", "SSH address mode: lan or overlay")
 	flags.StringVar(&opts.format, "format", alertFormatMarkdown, "alert output format: markdown or jsonl")
 	flags.StringVar(&opts.output, "output", "", "write one-shot alert output directly to this file")
+	flags.BoolVar(&opts.pgQuerySampleContinuous, "pg-query-sample-continuous", false, "continuously collect bounded PostgreSQL query/load samples at the 15m cadence floor")
 	flags.StringVar(&opts.pgQuerySampleUntil, "pg-query-sample-until", "", "UTC expiry for one optional bounded PostgreSQL query/load sample")
 	flags.StringVar(&opts.apiReleaseProofFile, "api-release-proof", "", "private local JSON expectation for the optional bounded API release proof")
 	flags.DurationVar(&opts.minimumProbeCadence, "min-probe-cadence", 0, "continuous active-probe cadence floor and first-run delay; standing logs are unchanged")
@@ -205,11 +208,14 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	if opts.minimumProbeCadence < 0 {
 		return monitorOptions{}, errors.New("monitor: -min-probe-cadence must not be negative")
 	}
-	if opts.pgQuerySampleUntil != "" && (opts.once || opts.minimumProbeCadence < 15*time.Minute) {
-		return monitorOptions{}, errors.New("monitor: -pg-query-sample-until requires continuous mode with at least15m cadence floor")
+	if opts.pgQuerySampleContinuous && opts.pgQuerySampleUntil != "" {
+		return monitorOptions{}, errors.New("monitor: continuous and expiring PG sample modes are mutually exclusive")
 	}
-	if opts.pgQuerySampleUntil != "" && opts.listSignals {
-		return monitorOptions{}, errors.New("monitor: -pg-query-sample-until cannot be used with -list-signals")
+	if (opts.pgQuerySampleContinuous || opts.pgQuerySampleUntil != "") && (opts.once || opts.minimumProbeCadence < 15*time.Minute) {
+		return monitorOptions{}, errors.New("monitor: PG query sampling requires continuous mode with at least 15m cadence floor")
+	}
+	if (opts.pgQuerySampleContinuous || opts.pgQuerySampleUntil != "") && opts.listSignals {
+		return monitorOptions{}, errors.New("monitor: PG query sampling cannot be used with -list-signals")
 	}
 	if opts.apiReleaseProofFile != "" && opts.listSignals {
 		return monitorOptions{}, errors.New("monitor: -api-release-proof cannot be used with -list-signals")

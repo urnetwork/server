@@ -411,9 +411,11 @@ type SignalSettings struct {
 	// APIReleaseProof is an explicit, finite local release expectation. Nil
 	// leaves the optional release diagnostic off without remote contact.
 	APIReleaseProof *APIReleaseProofSettings
-	// PGQuerySampleUntil arms one finite catalog sample, default off.
-	PGQuerySampleUntil time.Time
-	StateDir           string
+	// PGQuerySampleContinuous schedules bounded catalog samples indefinitely.
+	// PGQuerySampleUntil instead arms one expiring sample; modes are exclusive.
+	PGQuerySampleContinuous bool
+	PGQuerySampleUntil      time.Time
+	StateDir                string
 	// SettingsGenerationCheck is armed by LoadSignalSettings. Embedders that
 	// assemble SignalSettings directly may omit it; synthetic tests inject it
 	// without touching Config or Vault.
@@ -512,7 +514,10 @@ func (s SignalSettings) validate() error {
 	if !s.PGQuerySampleUntil.IsZero() && s.PGQuerySampleUntil.After(s.Now().Add(24*time.Hour)) {
 		return fmt.Errorf("monitor: bounded PG query sample expiry exceeds 24 hours")
 	}
-	if !s.PGQuerySampleUntil.IsZero() && s.StateDir == "" {
+	if s.PGQuerySampleContinuous && !s.PGQuerySampleUntil.IsZero() {
+		return fmt.Errorf("monitor: continuous and expiring PG sample modes are mutually exclusive")
+	}
+	if (s.PGQuerySampleContinuous || !s.PGQuerySampleUntil.IsZero()) && s.StateDir == "" {
 		return fmt.Errorf("monitor: bounded PG query sample requires a private state directory")
 	}
 	if s.APIReleaseProof != nil {
@@ -612,39 +617,40 @@ func newProbeEnv(settings SignalSettings) (*probeEnv, error) {
 
 func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 	cfg := &monitorConfig{
-		env:                    settings.Environment,
-		publicDomain:           settings.PublicDomain,
-		websiteDomain:          settings.WebsiteDomain,
-		managerHostname:        settings.ManagerHostname,
-		logServices:            append([]string(nil), settings.LogServices...),
-		logServiceBlocks:       cloneLogServiceBlocks(settings.LogServiceBlocks),
-		logServiceHosts:        cloneLogServiceBlocks(settings.LogServiceHosts),
-		proxyPathExpectedHosts: settings.ProxyPathExpectedHosts,
-		verificationEnabled:    settings.VerificationEnabled,
-		stConfigStatus:         settings.STConfigStatus.normalized(),
-		stDeploymentKey:        settings.STDeploymentKey,
-		sshUser:                settings.SSHUser,
-		sshDevUser:             settings.SSHDevUser,
-		sshKeyPaths:            append([]string(nil), settings.SSHKeyPaths...),
-		addressMode:            string(settings.AddressMode),
-		pgPort:                 settings.PostgreSQL.Port,
-		pgbouncerPort:          settings.PostgreSQL.PgBouncerPort,
-		pgUser:                 settings.PostgreSQL.User,
-		pgPassword:             settings.PostgreSQL.Password,
-		pgDb:                   settings.PostgreSQL.Database,
-		grafanaAdminPassword:   settings.Grafana.AdminPassword,
-		sourceIPv4URL:          settings.SourceAttribution.IPv4URL,
-		sourceIPv6URL:          settings.SourceAttribution.IPv6URL,
-		expectedSourceIPv4:     settings.SourceAttribution.ExpectedIPv4,
-		expectedSourceIPv6:     settings.SourceAttribution.ExpectedIPv6,
-		dnsAliases:             cloneDNSAliasSettings(settings.DNSAliases),
-		mimirPublishers:        cloneMimirPublisherSettings(settings.MimirPublishers),
-		apiReleaseProof:        cloneAPIReleaseProofSettings(settings.APIReleaseProof),
-		pgQuerySampleUntil:     settings.PGQuerySampleUntil,
-		publicUdp:              clonePublicUdpSettings(settings.PublicUdp),
-		stateDir:               settings.StateDir,
-		sshConnectTimeout:      settings.SSHConnectTimeout,
-		commandTimeout:         settings.CommandTimeout,
+		env:                     settings.Environment,
+		publicDomain:            settings.PublicDomain,
+		websiteDomain:           settings.WebsiteDomain,
+		managerHostname:         settings.ManagerHostname,
+		logServices:             append([]string(nil), settings.LogServices...),
+		logServiceBlocks:        cloneLogServiceBlocks(settings.LogServiceBlocks),
+		logServiceHosts:         cloneLogServiceBlocks(settings.LogServiceHosts),
+		proxyPathExpectedHosts:  settings.ProxyPathExpectedHosts,
+		verificationEnabled:     settings.VerificationEnabled,
+		stConfigStatus:          settings.STConfigStatus.normalized(),
+		stDeploymentKey:         settings.STDeploymentKey,
+		sshUser:                 settings.SSHUser,
+		sshDevUser:              settings.SSHDevUser,
+		sshKeyPaths:             append([]string(nil), settings.SSHKeyPaths...),
+		addressMode:             string(settings.AddressMode),
+		pgPort:                  settings.PostgreSQL.Port,
+		pgbouncerPort:           settings.PostgreSQL.PgBouncerPort,
+		pgUser:                  settings.PostgreSQL.User,
+		pgPassword:              settings.PostgreSQL.Password,
+		pgDb:                    settings.PostgreSQL.Database,
+		grafanaAdminPassword:    settings.Grafana.AdminPassword,
+		sourceIPv4URL:           settings.SourceAttribution.IPv4URL,
+		sourceIPv6URL:           settings.SourceAttribution.IPv6URL,
+		expectedSourceIPv4:      settings.SourceAttribution.ExpectedIPv4,
+		expectedSourceIPv6:      settings.SourceAttribution.ExpectedIPv6,
+		dnsAliases:              cloneDNSAliasSettings(settings.DNSAliases),
+		mimirPublishers:         cloneMimirPublisherSettings(settings.MimirPublishers),
+		apiReleaseProof:         cloneAPIReleaseProofSettings(settings.APIReleaseProof),
+		pgQuerySampleUntil:      settings.PGQuerySampleUntil,
+		pgQuerySampleContinuous: settings.PGQuerySampleContinuous,
+		publicUdp:               clonePublicUdpSettings(settings.PublicUdp),
+		stateDir:                settings.StateDir,
+		sshConnectTimeout:       settings.SSHConnectTimeout,
+		commandTimeout:          settings.CommandTimeout,
 	}
 	if settings.runtime != nil {
 		cfg.remoteCommands = settings.runtime.remoteCommands

@@ -909,6 +909,41 @@ operator work.
 Update the Go alert text and deterministic expectations in the same change when
 the catalog changes an automated diagnosis, action, or verification contract.
 
+## Continuous PostgreSQL query observation
+
+A resource alert requires fresh query context, not an expired diagnostic arm.
+The authoritative watcher should explicitly select `-pg-query-sample-continuous`
+with its existing private state root and `-min-probe-cadence 15m` or longer.
+Remove the mutually exclusive one-shot `-pg-query-sample-until` option only in
+the reviewed replacement command. `pg-query-sample` stays registered; retain
+all other signals, URL floors, exclusions, host concurrency and standing tails.
+A disabled/expired sample is coverage failure, not a healthy database.
+
+Before promotion, Sol independently verifies focused reducer/cadence/CLI
+controls and the full sequential monitor/package, race and vet gates below.
+Verify actual SQL classification and authority guards against the attested
+local fixture; never use Main to test a query. The recurring state must survive
+watcher replacement: precontact fsync, process lock, crash reservation, terminal
+15-minute floor, success/failure clocks and malformed-state rejection all need
+controls. Preserve the existing state directory and `pg-query-sample` files
+through the bounded singleton handoff; do not reset clocks to obtain a sample.
+Do not overlap old and new sampler ownership. Keep the alert ledger and standing
+log observation continuous using the existing promotion procedure.
+
+After activation, record exact binary/argv/PID and the first actual sampler
+terminal receipt; then require a second eligible attempt to prove recurring
+coverage. `continuous.json` records last attempted/completed/terminal clocks,
+next eligible clock and outcome. Due age comes from the current clock minus
+that next eligible clock. Inspect the immutable content-addressed receipt named by the cadence index
+and its explicit source clocks/caps. Preserve every original body referenced
+by an alert or ledger record; the sampler never overwrites or deletes receipt
+bodies. Global archival/retention needs an explicit policy. A source/queue
+failure consumes its admission reservation; no immediate manual retry or
+second watcher is allowed. Monitor tests are not a sampler runtime action.
+PGSS1.10 lifetime counters remain interval-unqualified; query activity and
+execution wall time are not CPU shares. Preserve resource incidents while
+triaging absent, stale, partial, disabled or overdue query evidence.
+
 ## Deterministic verification gates
 
 Every confirmed problem needs an Astra Max-authored synthetic regression. The

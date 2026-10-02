@@ -16,13 +16,13 @@ import (
 
 func pgSampleTestFrames(now time.Time) []map[string]any {
 	at := float64(now.Unix())
-	frames := []map[string]any{{"kind": "identity", "sample": 0, "at": at, "primary": true, "read_only": true, "database_ok": true}}
+	frames := []map[string]any{{"kind": "identity", "sample": 0, "at": at, "primary": true, "read_only": true, "database_ok": true, "track_activity_query_size": 1024, "pgss_version": "1.10"}}
 	history := func(i int, t float64, calls, ms float64) map[string]any {
 		return map[string]any{"kind": "history", "sample": i, "at": t, "reset": at - 1000, "total": 1, "rows": [][]any{{"714727414314", calls, ms, 100., "audit_daily_delete"}}}
 	}
 	frames = append(frames, history(0, at+.01, 10, 1000))
 	for i := 0; i < 12; i++ {
-		frames = append(frames, map[string]any{"kind": "activity", "sample": i, "at": at + .02 + float64(2*i), "total": 9, "groups": 2, "rows": [][]any{{"714727414314", "active", "Lock:transactionid", "loopback", "unset", "client backend", "audit_daily_delete", "current", 5, 200., 250., 2.}, {"none", "idle in transaction", "Client:ClientRead", "loopback", "other", "client backend", "other", "current", 4, 20., 25., 20.}}})
+		frames = append(frames, map[string]any{"kind": "activity", "sample": i, "at": at + .02 + float64(2*i), "total": 9, "groups": 2, "query_text_truncated": 0, "rows": [][]any{{"714727414314", "active", "Lock:transactionid", "loopback", "unset", "client backend", "audit_daily_delete", "current", 5, 200., 250., 2.}, {"none", "idle in transaction", "Client:ClientRead", "loopback", "other", "client backend", "other", "current", 4, 20., 25., 20.}}})
 	}
 	frames = append(frames, map[string]any{"kind": "blockers", "sample": 0, "at": at + 22.03, "total": 5, "rows": [][]any{{"5432167", "7865423", "714727414314", "9087614561", "audit_daily_delete", "commit", "active", "IO:WALSync", "loopback", "unset", 260., true, 1}}}, history(1, at+22.04, 14, 1200))
 	return frames
@@ -204,7 +204,7 @@ func TestPgQuerySampleInventoryChangeNoContact(t *testing.T) {
 }
 func TestPgQuerySampleSourceBounds(t *testing.T) {
 	sql := pgQuerySampleSQL("fixture")
-	if strings.Count(sql, "SELECT pg_sleep(2)") != 11 || strings.Count(sql, "'kind','activity'") != 12 || strings.Count(sql, "'kind','history'") != 2 || strings.Contains(sql, "SELECT query,") || !strings.Contains(sql, "LIMIT 128") || !strings.Contains(sql, "LIMIT 5000") {
+	if strings.Count(sql, "SELECT pg_sleep(2)") != 11 || strings.Count(sql, "'kind','activity'") != 12 || strings.Count(sql, "'kind','history'") != 2 || strings.Contains(sql, "SELECT query,") || !strings.Contains(sql, "load_rank<=64 OR age_rank<=64") || !strings.Contains(sql, "LIMIT 5000") {
 		t.Fatal("sampling query scope changed")
 	}
 	s := NewPgQuerySampleSignal()
