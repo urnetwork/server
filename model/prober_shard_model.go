@@ -224,6 +224,53 @@ func DrainProberShard(ctx context.Context, key ProberShardKey) error {
 	return err
 }
 
+// The full payer index was removed; the newer unresolved-payer partial index
+// excludes disputed contracts. A bare payer/outcome predicate can therefore
+// scan the global outcome index even for an empty private shard. Constrain both
+// leading keys of the retained (open,payer_network_id,transfer_byte_count) index.
+// Keep outcome outside OFFSET 0, so a false-zero global partial index cannot
+// replace these two payer ranges. Both generated-open values are necessary:
+// disputed unresolved and unanchored zero-byte contracts still block deletion.
+// Work is scoped to this short-lived payer's history, not the global live set.
+const proberShardPayerContractScopeSql = `
+	CROSS JOIN (VALUES (true), (false)) AS contract_state(open)
+	CROSS JOIN LATERAL (
+		SELECT contract_id, outcome
+		FROM transfer_contract
+		WHERE open=contract_state.open AND payer_network_id=payer_scope.network_id
+		OFFSET 0
+	) AS scoped_contract
+`
+
+const proberShardReportedContractsSql = `
+	SELECT scoped_contract.contract_id
+	FROM (
+		SELECT network_id FROM prober_shard_run
+		WHERE task_id=$1 AND epoch=$2 AND state='draining'
+	) AS payer_scope
+` + proberShardPayerContractScopeSql + `
+	CROSS JOIN LATERAL (
+		SELECT 1 FROM contract_close
+		WHERE contract_id=scoped_contract.contract_id AND party=$3 AND NOT checkpoint
+		LIMIT 1 OFFSET 0
+	) AS source_final
+	CROSS JOIN LATERAL (
+		SELECT 1 FROM contract_close
+		WHERE contract_id=scoped_contract.contract_id AND party=$4 AND NOT checkpoint
+		LIMIT 1 OFFSET 0
+	) AS destination_final
+	WHERE scoped_contract.outcome IS NULL
+	ORDER BY scoped_contract.contract_id LIMIT 32
+`
+
+const proberShardHasUnresolvedContractsSql = `
+	SELECT EXISTS (
+		SELECT 1 FROM (SELECT $1::uuid AS network_id) AS payer_scope
+` + proberShardPayerContractScopeSql + `
+		WHERE scoped_contract.outcome IS NULL
+	)
+`
+
 // Retry only contracts whose two actual final reports already authorize normal
 // settlement. This runs without an ownership/balance lock: settlement keeps its
 // existing contract-before-balance lock order. Missing/checkpoint reports and
@@ -231,13 +278,8 @@ func DrainProberShard(ctx context.Context, key ProberShardKey) error {
 func settleReportedProberShardContracts(ctx context.Context, key ProberShardKey) error {
 	var contracts []server.Id
 	server.Db(ctx, func(conn server.PgConn) {
-		rows, err := conn.Query(ctx, `SELECT c.contract_id
-			FROM prober_shard_run r
-			JOIN transfer_contract c ON c.payer_network_id=r.network_id AND c.outcome IS NULL
-			JOIN contract_close s ON s.contract_id=c.contract_id AND s.party=$3 AND NOT s.checkpoint
-			JOIN contract_close d ON d.contract_id=c.contract_id AND d.party=$4 AND NOT d.checkpoint
-			WHERE r.task_id=$1 AND r.epoch=$2 AND r.state='draining'
-			ORDER BY c.contract_id LIMIT 32`, key.TaskId, key.Epoch, ContractPartySource, ContractPartyDestination)
+		rows, err := conn.Query(ctx, proberShardReportedContractsSql,
+			key.TaskId, key.Epoch, ContractPartySource, ContractPartyDestination)
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				var id server.Id
@@ -309,8 +351,11 @@ func ReapProberShard(ctx context.Context, key ProberShardKey) (deleted bool, ret
 			var blocked bool
 			server.Raise(tx.QueryRow(ctx, `SELECT
 				EXISTS (SELECT 1 FROM transfer_escrow WHERE balance_id=$1 AND NOT settled) OR
-				EXISTS (SELECT 1 FROM transfer_contract WHERE payer_network_id=$2 AND outcome IS NULL) OR
 				EXISTS (SELECT 1 FROM transfer_balance WHERE network_id=$2 AND balance_id<>$1)`, owner.BalanceId, owner.NetworkId).Scan(&blocked))
+			if blocked {
+				return
+			}
+			server.Raise(tx.QueryRow(ctx, proberShardHasUnresolvedContractsSql, owner.NetworkId).Scan(&blocked))
 			if blocked {
 				return
 			}

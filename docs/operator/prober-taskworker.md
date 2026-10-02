@@ -58,9 +58,27 @@ An already-dispatched row exits before reading `provider_egress.yml` or creating
 any network client, and its post-step schedules no successor. Re-enabling and
 running `taskworker init-tasks` seeds a fresh canonical shard set.
 
-The prober identity is created and refreshed by the immediate recurring
-`ProberBootstrap` task. The operator ingest secret remains in
-`vault/<env>/provider_egress.yml`; it is never serialized into task arguments.
+Each shard execution owns its network, client, and grant. `ProberBootstrap`
+runs cleanup immediately at startup and every five minutes after a successful
+pass; it no longer replenishes the legacy shared identity. The operator ingest
+secret remains in `vault/<env>/provider_egress.yml`; it is never serialized into
+task arguments.
+
+Cleanup retains unresolved contracts, including disputed and zero-byte ones,
+and retries normal settlement only when both actual final reports exist. Its
+contract reads use both `open` values of the existing full
+`transfer_contract_open_payer_network_id_transfer_byte_count` index, followed
+by exact `contract_close` primary-key reads. Verify that full index is valid
+and ready before deploying this query change; no new migration is required.
+The unresolved-payer partial index excludes disputes and cannot prove that an
+account is safe to remove.
+
+These reads visit only the shard payer's history. Their work is proportional
+to that history, even though settlement returns at most 32 contracts per pass.
+Do not reuse them as a cheap negative check for the old shared account: its
+history may be large. A bounded diagnostic can report per-balance unsettled
+escrow blockers, but absence of those blockers does not exclude unanchored
+zero-byte contracts or authorize removal of the shared identity.
 
 ## Network boundaries
 
