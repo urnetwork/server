@@ -307,18 +307,26 @@ or hosting. Preserve explicit, auditable reasons for both policies:
 - `risk`: the registration country's credible country set and GeoLite2's
   associated country disagree. Unknown/ambiguous countries are *unknown*, not
   automatically risky; document multi-country organizations and overrides.
+  Under the later subscriber policy, reviewed proxy, ISP-branded virtual-ISP
+  proxy, VPN or Tor evidence also sets an independent network-use risk. A
+  matching country or subscriber allow cannot clear that risk. An ordinary
+  access reseller, MVNO or leased prefix does not acquire it from its label.
 - `non_quality`: verified cloud, CDN, hosting, data center, transit, VPN/proxy
   infrastructure, VPS, or other machine-hosted egress rather than individual
   subscriber or business end-user access. Verified cloud/CDN-operator ranges
   with ambiguous office-versus-hosted use are also excluded, as clarified by
   the user; a reviewed more-specific clean business/access exception may clear
-  them. This is quality-only, not a risk finding. Start with reviewed
+  them. A `non_quality` flag alone is Quality-only; the independently reviewed
+  network-use evidence above additionally excludes all public buckets. Under
+  policy two, unknown or conflicting subscriber use also fails Quality without
+  asserting that it is hosting or proxy infrastructure. Start with reviewed
   organization/prefix rules and test against measured providers; do not use a
   broad organization-name substring as an unreviewed mass exclusion.
 - An unclassified child inherits a known hosting parent's `non_quality`
   exception, as approved by the user. A reviewed clean consumer/business ISP
-  child or most-specific prefix override can clear it; publish the matching
-  rule, source, and ancestor provenance. An absent child classification must
+  child or most-specific prefix override can clear the Quality exclusion;
+  independent risk remains. Publish the matching rule, source, and ancestor
+  provenance. An absent child classification must
   not silently turn a known hosting allocation into a clean access ISP.
 
 ARIN bulk Whois is not authoritative ownership data for every RIR. Preserve
@@ -335,17 +343,21 @@ Use most-specific-prefix precedence and explicit override ordering, preserve
 the raw evidence/reason, version the classifier, and report counts and sample
 diffs before enabling new exclusions. Expand `server/ip.go`'s ARIN decoder
 without breaking the current `OrgCountryCodes` reader until migration is
-complete. The current ARINdb only carries organization country codes and
-`arinForeignScore` is a separate location score, not this new classifier.
+complete. The original pre-classifier ARINdb carried only organization country
+codes, and `arinForeignScore` was a separate location score. That describes the
+historical starting point, not a current artifact attestation.
 
 Existing connection rows do not retain the raw observed client IP, so a
 database-only backfill cannot safely reconstruct their classifications. The
-approved Connect deployment will cycle connections; each actual database
+original approved Connect rollout cycled connections; each actual database
 lookup records `arin_lookup_at` and `arin_database_build_epoch`, including a
 valid no-record result. An explicit IP override must not claim such a lookup.
 After rollout, measure aggregate current-public-connection coverage against
 the deployed ARIN database epoch and cutover time. Do not call the new risk
 rules effective merely because the database file or Connect image changed.
+For the still-unactivated subscriber-policy-two candidate, retain the active
+resource and use the separate observer first. The historical cycle recipe is
+not authorization to replace today's active MMDB for a shadow comparison.
 
 The 2026-09-28 exact-owner review found omitted Google Cloud customer
 `GOOGL-2`, Alibaba Cloud `AL-3` and IBM Cloud/SoftLayer `IBMC-24`/`SOFTL`
