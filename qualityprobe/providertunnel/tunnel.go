@@ -765,8 +765,8 @@ func httpClientOverDialerWithResolver(dial dialContextFunc, resolver *providerUr
 
 		handshakeCtx := ctx
 		handshakeTimeout := timeout
-		if scoped && (handshakeTimeout <= 0 || urlProbePhaseTimeout < handshakeTimeout) {
-			handshakeTimeout = urlProbePhaseTimeout
+		if scoped && (handshakeTimeout <= 0 || urlProbeTlsTimeout < handshakeTimeout) {
+			handshakeTimeout = urlProbeTlsTimeout
 		}
 		if 0 < handshakeTimeout {
 			var cancel context.CancelFunc
@@ -798,7 +798,7 @@ func httpClientOverDialerWithResolver(dial dialContextFunc, resolver *providerUr
 			return nil, &providerHttpStageError{stage: "tls", err: err}
 		}
 		if readConn != nil {
-			readConn.idleTimeout = urlProbePhaseTimeout
+			readConn.idleTimeout = urlProbeReadIdleTimeout
 		}
 		return tlsConn, nil
 	}

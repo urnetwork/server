@@ -378,6 +378,14 @@ from a single site's outage or a taskworker/control-plane failure. Track
 `provider_contacted`, attempt stage, URLs tried, error class, completion,
 accepted report, and index publication as separate counters.
 
+The URL-only phase profile is DNS **5 seconds**, TCP connect **3 seconds**,
+TLS handshake **3 seconds**, and read idle **5 seconds**. DNS retries share
+one resolution allowance; the TCP and TLS allowances start at their respective
+boundaries. Each successful read refreshes only the read-idle allowance. Every
+phase remains clipped by the original total attempt deadline, including the
+redirect chain. These limits do not turn local setup or contract failures into
+measured provider outcomes and do not change TLS authentication or quota credit.
+
 ### URL success and final-response performance
 
 A successful URL probe must retrieve actual destination content, not just an

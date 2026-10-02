@@ -7,13 +7,18 @@ import (
 	"time"
 )
 
-// URL probes cap DNS, TCP connect, TLS handshake and per-read idle time at
-// five seconds. The request's original total deadline remains the outer owner.
-const urlProbePhaseTimeout = 5 * time.Second
+// URL probes give DNS and read progress five seconds, and TCP connect and TLS
+// handshake three seconds each. The original total deadline remains the owner.
+const (
+	urlProbeDnsTimeout      = 5 * time.Second
+	urlProbeTcpTimeout      = 3 * time.Second
+	urlProbeTlsTimeout      = 3 * time.Second
+	urlProbeReadIdleTimeout = 5 * time.Second
+)
 
-func providerUrlPhaseContext(ctx context.Context) (context.Context, context.CancelFunc) {
+func providerUrlPhaseContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if _, scoped := ctx.Value(providerUrlProbeKey{}).(providerUrlProbeTarget); scoped {
-		return context.WithTimeout(ctx, urlProbePhaseTimeout)
+		return context.WithTimeout(ctx, timeout)
 	}
 	return ctx, func() {}
 }

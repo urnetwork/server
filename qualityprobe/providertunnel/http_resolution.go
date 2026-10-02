@@ -40,7 +40,7 @@ func (self *providerUrlResolver) dialContext(ctx context.Context, network, addre
 	observation.observe(connect.TunDialDnsStarted)
 	// One URL-only budget covers route waiting, all resolver waves and jitter.
 	// It must never become the target TCP/TLS/body deadline.
-	resolutionCtx, resolutionCancel := providerUrlPhaseContext(ctx)
+	resolutionCtx, resolutionCancel := providerUrlPhaseContext(ctx, urlProbeDnsTimeout)
 	defer resolutionCancel()
 	const attempts = 3
 	var addrs []netip.Addr
@@ -163,7 +163,7 @@ resolution:
 // Starts a fresh socket budget after DNS; it cannot extend a shorter caller
 // deadline or affect the successfully returned connection's lifetime.
 func (self *providerUrlResolver) dialResolved(ctx context.Context, network, address string, addrs []netip.Addr) (net.Conn, error) {
-	dialCtx, cancel := providerUrlPhaseContext(ctx)
+	dialCtx, cancel := providerUrlPhaseContext(ctx, urlProbeTcpTimeout)
 	defer cancel()
 	return self.dial(dialCtx, network, address, addrs)
 }
