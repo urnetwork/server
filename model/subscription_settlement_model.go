@@ -35,3 +35,24 @@ func queueEscrowSettlementUpdates(
 		WHERE escrow.contract_id = $1 AND escrow.balance_id = payout.balance_id
 	`, contractId, settleTime, balanceIds, payoutByteCounts)
 }
+
+// The payout row keeps its first insertion clock across metadata replay.
+const participantSweepInsertSQL = `
+									INSERT INTO transfer_escrow_sweep (
+										contract_id,
+										balance_id,
+										network_id,
+										payout_byte_count,
+										payout_net_revenue_nano_cents,
+										destination_id,
+										provider_payouts,
+										sweep_time
+									)
+									VALUES ($1, $2, $3, $4, $5, $6, $7, now() AT TIME ZONE 'UTC')
+									ON CONFLICT (contract_id, balance_id, network_id) DO UPDATE
+									SET
+										payout_byte_count = $4,
+										payout_net_revenue_nano_cents = $5,
+										destination_id = $6,
+										provider_payouts = $7
+								`

@@ -3130,24 +3130,7 @@ func settleEscrowInTx(
 					server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 						for key, payout := range participantSweepPayouts {
 							batch.Queue(
-								`
-									INSERT INTO transfer_escrow_sweep (
-										contract_id,
-										balance_id,
-										network_id,
-										payout_byte_count,
-										payout_net_revenue_nano_cents,
-										destination_id,
-										provider_payouts
-									)
-									VALUES ($1, $2, $3, $4, $5, $6, $7)
-									ON CONFLICT (contract_id, balance_id, network_id) DO UPDATE
-									SET
-										payout_byte_count = $4,
-										payout_net_revenue_nano_cents = $5,
-										destination_id = $6,
-										provider_payouts = $7
-								`,
+								participantSweepInsertSQL,
 								contractId,
 								key.balanceId,
 								key.networkId,
