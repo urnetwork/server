@@ -69,3 +69,33 @@ func TestTaskRetryDelayPreservesOrdinaryErrorPrecedence(t *testing.T) {
 		t.Fatal("old hint bypassed the current duration cap")
 	}
 }
+
+func TestTargetRetryCapKeepsOtherErrorsAndPrecedence(t *testing.T) {
+	oldBase, oldCap := RescheduleTimeout, RescheduleBackoffMaxTimeout
+	RescheduleTimeout, RescheduleBackoffMaxTimeout = 2*time.Second, time.Hour
+	t.Cleanup(func() { RescheduleTimeout, RescheduleBackoffMaxTimeout = oldBase, oldCap })
+	target := &errorRetryCappedTarget{maxDelay: 5 * time.Minute}
+	ordinary := errorRescheduleDelay(RescheduleTimeout, RescheduleBackoffMaxTimeout, 16, rescheduleBackoffMaxExponent, 0.5)
+	for _, err := range []error{errors.New("accounting rejection"), context.Canceled, context.DeadlineExceeded, errors.Join(errors.New("Timeout"), context.Canceled)} {
+		if delay, delta := taskTargetErrorRetryDelay(target, err, 16, 0.5); delay != 5*time.Minute || delta != 1 {
+			t.Fatalf("target cap lost its timeout/count policy: delay=%s count_delta=%d", delay, delta)
+		}
+		if delay, delta := taskTargetErrorRetryDelay(nil, err, 16, 0.5); delay != ordinary || delta != 1 {
+			t.Fatalf("target cap changed an unconfigured task: delay=%s count_delta=%d", delay, delta)
+		}
+	}
+	for _, err := range []error{ErrDrained, ErrTargetNotFound, errors.Join(ErrDrained, context.Canceled)} {
+		wantDelay, wantDelta := taskErrorRetryDelay(err, 16, 0.5)
+		if delay, delta := taskTargetErrorRetryDelay(target, err, 16, 0.5); delay != wantDelay || delta != wantDelta {
+			t.Fatal("target cap changed drain or version-skew precedence")
+		}
+	}
+	if delay, delta := taskTargetErrorRetryDelay(target, context.Canceled, 0, 0.5); delay != 3*time.Second || delta != 1 {
+		t.Fatal("target cap increased an initial short retry")
+	}
+	for _, invalid := range []time.Duration{0, time.Second, time.Hour + time.Second} {
+		if got := WithErrorRetryCap(target, invalid); got != target {
+			t.Fatalf("invalid cap %s changed the target", invalid)
+		}
+	}
+}

@@ -35,6 +35,32 @@ func validTaskRetryDelay(delay time.Duration) bool {
 	return 0 < RescheduleTimeout && RescheduleTimeout <= delay && delay <= RescheduleBackoffMaxTimeout
 }
 
+type errorRetryCappedTarget struct {
+	Target
+	maxDelay time.Duration
+}
+
+// WithErrorRetryCap opts one registered target into a maximum failure delay,
+// including max-time cancellation. The original failure, pending task, error
+// count, and absence of a success post are unchanged. This is target policy,
+// not an error hint: errors from other targets retain ordinary backoff.
+// Invalid caps preserve the target's existing policy.
+func WithErrorRetryCap(target Target, maxDelay time.Duration) Target {
+	if target == nil || !validTaskRetryDelay(maxDelay) {
+		return target
+	}
+	return &errorRetryCappedTarget{Target: target, maxDelay: maxDelay}
+}
+
+func taskTargetErrorRetryDelay(target Target, err error, errorCount int, randomUnit float64) (time.Duration, int) {
+	delay, delta := taskErrorRetryDelay(err, errorCount, randomUnit)
+	if capped, ok := target.(*errorRetryCappedTarget); ok && validTaskRetryDelay(capped.maxDelay) &&
+		!errors.Is(err, ErrDrained) && !errors.Is(err, ErrTargetNotFound) {
+		delay = min(delay, capped.maxDelay)
+	}
+	return delay, delta
+}
+
 // Drain/version-skew precedence and ordinary jitter are unchanged. Only a root
 // wrapper can supply a hint; cancellation remains ordinary backoff even inside it.
 func taskErrorRetryDelay(err error, errorCount int, randomUnit float64) (time.Duration, int) {

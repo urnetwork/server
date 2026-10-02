@@ -2318,9 +2318,10 @@ func (self *TaskWorker) EvalTasks(n int) (
 				// - target not found (deploy version skew): the count still
 				//   advances (visibility) but the exponent clamps low, so the
 				//   retry converges to ~16s instead of the backoff cap
-				// A fully classified target can explicitly retain its existing
-				// cadence while preserving this same failing task and count.
-				delay, errorCountDelta := taskErrorRetryDelay(
+				// A classified failure hint or registered target cap can retain
+				// its cadence while preserving this same failing task and count.
+				delay, errorCountDelta := taskTargetErrorRetryDelay(
+					self.targets[tasks[taskId].FunctionName],
 					err,
 					tasks[taskId].RescheduleErrorCount,
 					mathrand.Float64(),

@@ -312,10 +312,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveExpiredProviderEgressLocations,
 			work.RemoveExpiredProviderEgressLocationsPost,
 		),
-		task.NewTaskTargetWithPost(
+		task.WithErrorRetryCap(task.NewTaskTargetWithPost(
 			work.ProberBootstrap,
 			work.ProberBootstrapPost,
-		),
+		), work.ProberBootstrapTimeout),
 		task.NewTaskTargetWithPost(
 			work.RefreshGeolocationSourcePins,
 			work.RefreshGeolocationSourcePinsPost,
