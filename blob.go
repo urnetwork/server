@@ -36,6 +36,7 @@ import (
 	"github.com/minio/minio-go/v7/pkg/replication"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/durablevolume"
 	"github.com/urnetwork/glog"
 )
 
@@ -252,6 +253,8 @@ type BlobStoreConfig struct {
 	LocalPath string
 	// LocalMaxBytes bounds all objects under LocalPath.
 	LocalMaxBytes int64
+	// Explicit local service storage requires an independently pinned declaration.
+	DurableVolumes durablevolume.Reference
 }
 
 // defaultLocalBlobRoot is the local backend's root when unset: a `blob`
@@ -274,11 +277,8 @@ func LoadBlobStore() (store BlobStore, ok bool) {
 		return NewLocalBlobStore(defaultLocalBlobRoot(), DefaultBlobPrefix), true
 	}
 	if config.Local {
-		return NewLocalBlobStoreWithMaxBytes(
-			config.LocalPath,
-			config.Prefix,
-			config.LocalMaxBytes,
-		), true
+		store, err := NewDurableLocalBlobStore(context.Background(), config.LocalPath, config.Prefix, config.LocalMaxBytes, config.DurableVolumes)
+		return store, err == nil
 	}
 	minioStore, err := NewBlobStore(config)
 	if err != nil {
@@ -342,16 +342,22 @@ func LoadBlobStoreConfig() (config *BlobStoreConfig, present bool) {
 	if localMaxBytes <= 0 {
 		localMaxBytes = DefaultLocalBlobMaxBytes
 	}
+	var durable durablevolume.Reference
+	if declaration, ok := values["durable_volumes"].(map[string]any); ok {
+		durable.Path, _ = declaration["path"].(string)
+		durable.Sha256, _ = declaration["sha256"].(string)
+	}
 	return &BlobStoreConfig{
-		Authority:     authority,
-		AccessKey:     str("access_key"),
-		SecretKey:     str("secret_key"),
-		Bucket:        str("bucket"),
-		Tls:           tls,
-		Prefix:        prefix,
-		Local:         local,
-		LocalPath:     localPath,
-		LocalMaxBytes: localMaxBytes,
+		Authority:      authority,
+		AccessKey:      str("access_key"),
+		SecretKey:      str("secret_key"),
+		Bucket:         str("bucket"),
+		Tls:            tls,
+		Prefix:         prefix,
+		Local:          local,
+		LocalPath:      localPath,
+		LocalMaxBytes:  localMaxBytes,
+		DurableVolumes: durable,
 	}, true
 }
 
@@ -744,14 +750,24 @@ func NewLocalBlobStoreWithMaxBytes(root string, prefix string, maxBytes int64) B
 
 // localBlobStore is the local-filesystem implementation of BlobStore.
 type localBlobStore struct {
-	root     string
-	prefix   string
-	maxBytes int64
+	root                 string
+	prefix               string
+	maxBytes             int64
+	durableReference     *durablevolume.Reference
+	durableHostForTest   durablevolume.Host
+	syncDirectoryForTest func(*os.File) error
+	syncFileForTest      func(*os.File) error
+	// Captured only during construction; each operation must retain this exact
+	// physical root. Proven loss is sticky even after a pathname is restored.
+	durableRootInfo os.FileInfo
+	stateLock       sync.Mutex
+	durableFailure  error
 
 	reapMu                         sync.Mutex
 	rules                          []BlobLifecycleRule
 	reapOnce                       sync.Once
 	beforeCreateCommitForTest      func()
+	beforeReapCommitForTest        func(string)
 	afterListScanEntryForTest      func()
 	afterUsageScanEntryForTest     func(string)
 	beforeCapacityLockForTest      func()
@@ -808,6 +824,9 @@ func (self *localBlobStore) putFile(ctx context.Context, key string, localPath s
 // The caller owns the physical root lock through the complete copy and commit.
 // A finite batch supplies its accounted usage; ordinary writes scan afresh.
 func (self *localBlobStore) putFileAtCapacity(ctx context.Context, key, localPath string, srcInfo os.FileInfo, ifAbsent bool, owner *localBlobCapacityOwner, batchUsage *int64) (created bool, resultErr error) {
+	if owner.volume != nil {
+		return self.putDurableAtCapacity(ctx, key, localPath, srcInfo, ifAbsent, owner, batchUsage)
+	}
 	defer func() {
 		if resultErr != nil {
 			created = false
@@ -969,6 +988,9 @@ func (self *localBlobStore) usageBytesAtRoot(root string) (int64, error) {
 // A publication lease never retains its root while an explicitly canceled
 // census continues walking. The historical scan-only entry remains available.
 func (self *localBlobStore) usageBytesAtRootWithContext(ctx context.Context, root string) (int64, error) {
+	if self.durableReference != nil {
+		return self.durableUsage(ctx, root)
+	}
 	var total int64
 	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
@@ -997,6 +1019,9 @@ func (self *localBlobStore) usageBytesAtRootWithContext(ctx context.Context, roo
 }
 
 func (self *localBlobStore) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	if self.durableReference != nil {
+		return self.getDurable(ctx, key)
+	}
 	return os.Open(self.pathFor(key))
 }
 
@@ -1008,6 +1033,10 @@ func (self *localBlobStore) GetVersion(ctx context.Context, key string, versionI
 }
 
 func (self *localBlobStore) List(ctx context.Context, keyPrefix string) ([]BlobObject, error) {
+	if self.durableReference != nil {
+		objects, _, err := self.listDurable(ctx, keyPrefix, "", maximumLocalBlobListScanEntries, maximumLocalBlobListScanEntries)
+		return objects, err
+	}
 	objects := []BlobObject{}
 	if _, err := os.Stat(self.root); err != nil {
 		if os.IsNotExist(err) {
@@ -1053,6 +1082,9 @@ func (self *localBlobStore) listPage(ctx context.Context, keyPrefix string, star
 	}
 	if maximumScanEntries <= 0 {
 		return nil, false, errors.New("local blob list scan limit must be positive")
+	}
+	if self.durableReference != nil {
+		return self.listDurable(ctx, keyPrefix, startAfter, limit, maximumScanEntries)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
@@ -1163,7 +1195,14 @@ func (self *localBlobStore) SetLifecycle(ctx context.Context, rules []BlobLifecy
 	return nil
 }
 
-func (self *localBlobStore) CheckRetention(context.Context) error {
+func (self *localBlobStore) CheckRetention(ctx context.Context) error {
+	if self.durableReference != nil {
+		owner, err := self.openDurable(ctx, durablevolume.ReadOnly)
+		if err != nil {
+			return err
+		}
+		return owner.Close()
+	}
 	return nil
 }
 
@@ -1188,6 +1227,9 @@ func (self *localBlobStore) reapPass(ctx context.Context) (resultErr error) {
 	self.reapMu.Unlock()
 	if len(rules) == 0 {
 		return nil
+	}
+	if self.durableReference != nil {
+		return self.reapDurable(ctx, rules)
 	}
 	if _, err := os.Stat(self.root); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
