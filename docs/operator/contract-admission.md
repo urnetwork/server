@@ -59,6 +59,69 @@ before explicitly enabling that singleton. Each public creation reads the
 current switch; there is no process-local policy cache. Do not treat applying
 the migration or selecting image tags as activation or runtime convergence.
 
+The compatibility inventory includes every API process serving contract create,
+close or balance reads; every Connect process able to dispatch those operations;
+every Taskworker process (including its local probe controller, expired-contract
+closer, shard cleanup and reservation reconciliation); and manual/periodic
+`bringyourctl` or other programs linked to these model functions. External SDK
+clients do not read the reservation tables and need no update for this switch.
+Read-only database catalog monitoring does not participate in reservation
+accounting. Use the enabled deployment inventory, including draining replicas,
+rather than a fixed count of latest metric series.
+
+Before enabling, establish both the compatible current binary and retirement
+of each incompatible predecessor. A current process metric, selected image tag,
+successful deployment command, missing old metric, or elapsed nominal drain
+timeout establishes neither old-process exit nor completion of its background
+work. Use the owning host/worker process-generation and drain/exit evidence, or
+an explicit stop-and-join of the predecessor. Include in-flight requests,
+settlement posts, leased workers and suspended/restartable old jobs. Their next
+start must also select compatible code. Keep manual old maintenance commands
+disabled during and after activation. A null or unobserved slot leaves this
+prerequisite unresolved.
+
+Old settlers are incompatible with marked rows: their snapshot code treats the
+marked reservation as legacy even though migration 755 no longer advances its
+legacy revision. It can subtract an amount absent from a current legacy cache
+and fail with snapshot underflow; it also lacks the owned Redis-token release.
+Old cold-census/reconciliation readers can include marked rows in the legacy
+mirror, double-counting them alongside the approximate counter. Old creators
+can instead reuse a legacy-only cache without subtracting approximate debt.
+These are source-defined compatibility risks, not a claim that an old process
+has already performed one of them on Main. Accepted Redis crash/eviction edges
+do not make a mixed incompatible-binary rollout supported.
+
+After independently verifying migration 755's exact artifacts and the above
+process inventory, use the existing approved primary PostgreSQL transport with
+the reviewed `psql` program below. Its session must be bound to the expected
+inventory database; do not guess a port, create a new tunnel or put credentials
+in argv. It changes only the singleton, checks primary/database/migration and
+the expected old mode, and bounds statement/lock time. This SQL cannot prove
+application predecessor retirement. Preserve its terminal receipt; after a
+connection loss inspect the singleton once under a fresh observation admission
+instead of blindly repeating an ambiguous update.
+
+```sh
+# PG connection authority/credentials come from the already-reviewed transport.
+PGCONNECT_TIMEOUT=3 timeout --signal=TERM 15s \
+  psql -X --no-password --set=ON_ERROR_STOP=1 \
+  --set=expected_database="$ADMISSION_DATABASE" \
+  --set=expected_enabled=false --set=desired_enabled=true \
+  --file=docs/operator/contract-admission-mode.sql
+```
+
+Read back `SELECT enabled FROM redis_contract_admission_policy WHERE singleton`
+through that same authority and retain the UTC boundary. To stop new Redis
+admission, run the same program with `expected_enabled=true` and
+`desired_enabled=false`. Calls which already read `true` may still finish and
+write marked rows after the disabling transaction commits. Disabling preserves
+all counters, tokens and contracts; it neither refunds nor reconstructs them.
+Continue running compatible code and target reconciliation at known exceptions.
+Do not restore old binaries, clear Redis keys, drop the compatibility column or
+restore old trigger bodies. After the first marked contract, a binary/schema
+rollback needs a separately reviewed drain, reconciliation and data-conversion
+plan; neither a false switch nor waiting 24 hours proves it safe.
+
 The mandatory release gate is part of `test.sh`, before filtered or expensive
 package tests. It always runs the actual PostgreSQL/Redis held-row and held-payer
 permit regressions, mixed legacy/new settlement/replay/expiry controls, and a
