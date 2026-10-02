@@ -1644,6 +1644,30 @@ production frequency or the identity of a sampled Main census caller. A
 revision miss is not proof of lost funds; repeated misses can explain work
 amplification even when every financial check remains correct.
 
+Cold financial settlement has a separate lock-lifetime boundary. Its locked
+contract, escrow rows and authoritative close reports determine the debit;
+rebuilding an optional balance-wide reservation snapshot must follow the
+financial commit. A matching cache still receives the exact guarded delta.
+For a cold or stale cache, the metadata attempt and committed mirror now share
+one replayable post, in that order, so the metadata revision cannot immediately
+invalidate its own mirror's rebuild. Metadata failure is still reported and
+the mirror is attempted. The mirror conditionally warms the durable cache at
+its observed revision; a later legacy mutation or newer cache rejects stale
+publication. Lost posts leave admission's exact fallback intact.
+
+The owning PostgreSQL control with 10,001 surviving reservations previously
+observed a second connection time out on the balance lock at the cold census
+seam. The repaired settlement issues no census while owning those locks.
+Across twenty sequential closes, the warm control uses no census and the cold
+control uses one committed mirror census. This establishes the local mechanism,
+not the identity or prevalence of a Main census caller, nor lower Main CPU.
+Cold admission still needs an exact census; concurrent legacy invalidation can
+still require later rebuilds. Source-qualified readers must include settlement
+snapshot `result="deferred"` alongside `reused`; the older `reloaded` label
+describes the prior implementation. A missing old label is not zero cold work.
+Actual mirror reads remain `refresh_snapshot_total{result="reloaded"}`;
+neither family counts committed settlements or distinct SQL statements.
+
 **2026-10-02 early-detection audit.** The CPU warning was already present:
 25% in two observations (§1.3c), and active/idle-transaction warnings existed
 in §1.3. Retained CPU observations include 80.85% at 10:29:23Z and 52.52% at

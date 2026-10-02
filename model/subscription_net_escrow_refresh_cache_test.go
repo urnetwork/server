@@ -138,12 +138,11 @@ func TestNetEscrowRefreshCacheConcurrentMirrorCost(t *testing.T) {
 			wg.Wait()
 			reloads := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("reloaded")) - beforeReload
 			reused := testutil.ToFloat64(netEscrowRefreshSnapshots.WithLabelValues("reused")) - beforeReuse
-			wantReloads := float64(0)
-			if missing {
-				wantReloads = 20
-			}
-			if reloads != wantReloads || reused+reloads != 20 {
-				t.Fatalf("missing=%t completed reloads=%v reused=%v, want%v/%v", missing, reloads, reused, wantReloads, 20-wantReloads)
+			// Concurrent cold readers may all start before the first guarded
+			// warmup commits; later readers may reuse it. Both schedules retain
+			// exactly twenty complete reads, and a warm start requires no census.
+			if reused+reloads != 20 || (!missing && reloads != 0) || (missing && (reloads < 1 || reloads > 20)) {
+				t.Fatalf("missing=%t completed reloads=%v reused=%v", missing, reloads, reused)
 			}
 			if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 10002 {
 				t.Fatalf("concurrent delayed settlement mirrors published%d, want10002", got)
