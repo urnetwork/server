@@ -489,6 +489,19 @@ errors.
 
 ## Four-hour scheduler and database budget
 
+Each shard execution owns one distinct network, credential parent and balance.
+Fund that balance at **at least 10 times** the anticipated full-pass contract
+exposure without relying on unused credit being reclaimed during the pass.
+Budget the bounded 5,000 selected turns plus concurrent headroom, both origin
+and companion directions, every initial-to-standard renewal stage, current,
+announced-ahead and prefetched contracts, and every allowed tunnel generation.
+Use the standard contract ceiling for each budgeted slot, rather than only the
+URL body size; reject arithmetic overflow instead of clipping the allocation.
+Do not multiply an individual allocation by the number of unrelated shards,
+refill it from a shared account, or delete unsettled obligations during cleanup.
+This forecast is a funding margin, not proof that contract acquisition is
+healthy or permission to classify a local acquisition failure as provider loss.
+
 There is one URL-probe workflow, with no full/fast or independent blackhole
 probe classes. Count the *currently eligible* public providers after the shared
 reliability and ARIN risk gates; call this `N`. Each provider receives paced

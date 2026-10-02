@@ -99,9 +99,16 @@ func providerUrlProbeCreditMinimum(args *ProviderEgressProbeArgs) (model.ByteCou
 	return model.ByteCount(amount * int64(args.ShardCount)), nil
 }
 
-// One private allocation covers the full bounded pass's contract reservations,
-// including both directions, prefetch and tunnel recreation. It is not
-// multiplied by ShardCount and never replenished from the shared account.
+const providerUrlProbeFundingMultiplier = int64(10)
+
+// One private allocation funds at least ten times the full pass's anticipated
+// contract exposure, without assuming any reclamation before the pass ends.
+// Each direction reserves the whole initial-to-standard renewal ramp plus
+// current, announced-ahead and prefetched standard contracts. Charging every
+// slot at the standard ceiling is deliberately more conservative than the URL
+// body cap or the actual ramp. Include concurrent headroom and every possible
+// tunnel generation; no old generation's unused reservation is borrowed back.
+// This is not multiplied by ShardCount or replenished from the shared account.
 // Unexpected extra consumption fails normal available-credit admission rather
 // than silently creating another grant or borrowing another shard's credit.
 func providerUrlProbeShardCredit(args *ProviderEgressProbeArgs) (model.ByteCount, error) {
@@ -109,9 +116,20 @@ func providerUrlProbeShardCredit(args *ProviderEgressProbeArgs) (model.ByteCount
 		return 0, err
 	}
 	batch := providerUrlProbeBatch(args)
-	amount := int64(connect.DefaultContractManagerSettings().StandardContractTransferByteCount)
-	for _, factor := range []int64{int64(providerEgressFullSelectedLimit) + int64(batch.Concurrency), 6, int64(args.TunnelRecreateAttempts) + 1} {
-		if factor < 1 || amount > math.MaxInt64/factor {
+	contracts := connect.DefaultContractManagerSettings()
+	if int64(batch.Concurrency) > math.MaxInt64-int64(providerEgressFullSelectedLimit) ||
+		contracts.ContractTransferByteSeqScale > uint64(math.MaxInt64-3) {
+		return 0, fmt.Errorf("URL probe pass credit geometry overflows")
+	}
+	amount := int64(contracts.StandardContractTransferByteCount)
+	for _, factor := range []int64{
+		int64(providerEgressFullSelectedLimit) + int64(batch.Concurrency),
+		2, // origin and companion both charge the private payer
+		int64(contracts.ContractTransferByteSeqScale) + 3,
+		int64(args.TunnelRecreateAttempts) + 1,
+		providerUrlProbeFundingMultiplier,
+	} {
+		if amount < 1 || factor < 1 || amount > math.MaxInt64/factor {
 			return 0, fmt.Errorf("URL probe pass credit geometry overflows")
 		}
 		amount *= factor
