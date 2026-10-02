@@ -21,6 +21,7 @@ import (
 const pgQuerySampleBudget = 40 * time.Second
 const pgQuerySampleMaxBytes = 4 * 1024 * 1024
 const pgQuerySampleCount = 12
+const pgQuerySampleCadence = 15 * time.Minute
 
 func NewPgQuerySampleSignal() Signal {
 	return &signalAdapter{number: "2.1a", key: "pg-query-sample", name: "Bounded PostgreSQL query/load sample", probe: pgQuerySampleProbe{}}
@@ -32,7 +33,7 @@ type pgQuerySampleProbe struct {
 
 func (pgQuerySampleProbe) id() string               { return "pg/query-sample" }
 func (pgQuerySampleProbe) tier() string             { return tierWarn }
-func (pgQuerySampleProbe) cadence() time.Duration   { return 15 * time.Minute }
+func (pgQuerySampleProbe) cadence() time.Duration   { return pgQuerySampleCadence }
 func (pgQuerySampleProbe) runBudget() time.Duration { return pgQuerySampleBudget }
 
 // The input is SQL owned by this program, not caller text. Families are only
@@ -50,6 +51,16 @@ func pgSampleFamily(q string) string {
  WHEN ` + q + ` LIKE 'update transfer_escrow_sweep%temp_account_payment%' THEN 'payout_finalize'
  WHEN ` + q + ` LIKE 'insert into network_connection_reliability_score%' THEN 'reliability_insert'
  WHEN ` + q + ` LIKE '%client_reliability_running%' THEN 'reliability_running'
+ WHEN ` + q + ` LIKE 'select requested_balance.balance_id,%coalesce(revision.revision,%from unnest(%transfer_balance_net_escrow_revision%cross join lateral%sum(selected_escrow.balance_byte_count)%' THEN 'reservation_census_prefix'
+ WHEN ` + q + ` LIKE 'insert into transfer_balance_net_escrow_snapshot%' THEN 'reservation_snapshot_publish'
+ WHEN ` + q + ` LIKE '%snapshot.reserved_byte_count%balance.end_time%from unnest%transfer_balance_net_escrow_snapshot%' THEN 'reservation_snapshot_read'
+ WHEN ` + q + ` LIKE 'select balance_id, paid, balance_byte_count, start_time, end_time from transfer_balance%for update%' THEN 'grant_all_lock'
+ WHEN ` + q + ` LIKE '%from transfer_balance%for update skip locked%' THEN 'grant_skip_locked'
+ WHEN ` + q + ` LIKE '%from transfer_balance%balance_id = any%for update%' THEN 'grant_window_lock'
+ WHEN ` + q + ` LIKE '%from transfer_balance%inner join transfer_escrow%for update of transfer_balance%' THEN 'settlement_balance_lock'
+ WHEN ` + q + ` LIKE '%selected_escrow.balance_id%requested_contract%selected_balance%order by selected_balance.end_time%' THEN 'settlement_escrow_read'
+ WHEN ` + q + ` LIKE '%eligible_probe_companion_origins%' THEN 'companion_fallback'
+ WHEN ` + q + ` LIKE '%eligible_probe_origins%' THEN 'companion_origin'
  WHEN ` + q + ` LIKE '%pending_task%' THEN 'pending_task_access'
  WHEN ` + q + ` LIKE '%client_tls_certificate%' THEN 'tls_metadata_access'
  WHEN ` + q + ` LIKE '%st_client_key_head%' THEN 'signed_key_access'
@@ -61,7 +72,7 @@ func pgSampleFamily(q string) string {
 func pgSampleWait(alias string) string {
 	return `CASE
  WHEN ` + alias + `.wait_event IS NULL THEN 'none'
- WHEN ` + alias + `.wait_event IN ('WALWrite','WALInsert','WALSync','BufferMapping','DataFileRead','DataFileWrite','DataFileExtend','ClientRead','ClientWrite','transactionid','virtualxid','relation','MessageQueueReceive') THEN coalesce(` + alias + `.wait_event_type,'unknown')||':'||` + alias + `.wait_event
+ WHEN ` + alias + `.wait_event IN ('WALWrite','WALInsert','WALSync','BufferMapping','DataFileRead','DataFileWrite','DataFileExtend','ClientRead','ClientWrite','transactionid','tuple','virtualxid','relation','MessageQueueReceive') THEN coalesce(` + alias + `.wait_event_type,'unknown')||':'||` + alias + `.wait_event
  WHEN ` + alias + `.wait_event_type IN ('Activity','BufferPin','Client','Extension','IO','IPC','Lock','LWLock','Timeout') THEN ` + alias + `.wait_event_type||':other'
  ELSE 'other' END`
 }
@@ -90,9 +101,13 @@ func pgSampleActivitySQL(index int) string {
  coalesce(greatest(0,extract(epoch FROM max(clock_timestamp()-xact_start))),0)::float8 xact_age,
  coalesce(greatest(0,extract(epoch FROM max(clock_timestamp()-state_change))),0)::float8 state_age
  FROM a GROUP BY 1,2,3,4,5,6,7,8
- ), selected AS (SELECT * FROM grouped ORDER BY (state='active') DESC,n DESC,q,wait,owner,backend LIMIT 128)
+ ), ranked AS (
+ SELECT *,row_number() OVER (ORDER BY (state='active') DESC,n DESC,q,wait,owner,app,backend,family,db_scope) load_rank,
+ row_number() OVER (ORDER BY (state='active') DESC,query_age DESC,n DESC,q,wait,owner,app,backend,family,db_scope) age_rank FROM grouped
+ ), selected AS (SELECT * FROM ranked WHERE load_rank<=64 OR age_rank<=64 ORDER BY load_rank)
  SELECT json_build_object('kind','activity','sample',%d,'at',extract(epoch FROM clock_timestamp()),
  'total',(SELECT count(*) FROM a),'groups',(SELECT count(*) FROM grouped),
+ 'query_text_truncated',(SELECT count(*) FROM a WHERE octet_length(query)>=pg_size_bytes(current_setting('track_activity_query_size'))-1 OR length(query)>2048),
  'rows',coalesce((SELECT json_agg(json_build_array(q,state,wait,owner,app,backend,family,db_scope,n,query_age,xact_age,state_age)) FROM selected),'[]'::json));
  `, pgSampleState("a"), pgSampleWait("a"), pgSampleOwner("a"), pgSampleApp("a"), pgSampleBackend("a"), pgSampleFamily("normalized"), index)
 }
@@ -127,14 +142,17 @@ func pgSampleBlockersSQL() string {
 }
 func pgQuerySampleSQL(database string) string {
 	var b strings.Builder
-	b.WriteString("SELECT json_build_object('kind','identity','sample',0,'at',extract(epoch FROM clock_timestamp()),'primary',NOT pg_is_in_recovery(),'read_only',current_setting('transaction_read_only')='on','database_ok',current_database()=" + "'" + strings.ReplaceAll(database, "'", "''") + "');\n")
+	b.WriteString("SELECT json_build_object('kind','identity','sample',0,'at',extract(epoch FROM clock_timestamp()),'primary',NOT pg_is_in_recovery(),'read_only',current_setting('transaction_read_only')='on','track_activity_query_size',pg_size_bytes(current_setting('track_activity_query_size')),'pgss_version',(SELECT extversion FROM pg_extension WHERE extname='pg_stat_statements'),'database_ok',current_database()=" + "'" + strings.ReplaceAll(database, "'", "''") + "');\n")
+	b.WriteString("DO $guard$ BEGIN IF pg_is_in_recovery() OR current_setting('transaction_read_only') <> 'on' OR current_database() <> '" + strings.ReplaceAll(database, "'", "''") + "' THEN RAISE EXCEPTION 'sample authority mismatch'; END IF; END $guard$;\n")
 	b.WriteString(pgSampleHistorySQL(0))
 	for i := 0; i < pgQuerySampleCount; i++ {
 		if i > 0 {
 			b.WriteString("SELECT pg_sleep(2);\n")
 		}
+		b.WriteString("SELECT pg_stat_clear_snapshot();\n")
 		b.WriteString(pgSampleActivitySQL(i))
 	}
+	b.WriteString("SELECT pg_stat_clear_snapshot();\n")
 	b.WriteString(pgSampleBlockersSQL())
 	b.WriteString(pgSampleHistorySQL(1))
 	return b.String()
@@ -148,7 +166,7 @@ try:
  cfg=json.loads(sys.stdin.buffer.read(262145));assert set(cfg)=={'password','user','database','port','sql'}
  assert all(type(cfg[k]) is str for k in ('password','user','database','sql')) and type(cfg['port']) is int
  assert len(cfg['sql'])<200000 and 0<cfg['port']<65536
- env=dict(os.environ,PGPASSWORD=cfg['password'],PGCONNECT_TIMEOUT='3',PGOPTIONS='-c statement_timeout=3000 -c default_transaction_read_only=on -c idle_in_transaction_session_timeout=3000')
+ env=dict(os.environ,PGPASSWORD=cfg['password'],PGCONNECT_TIMEOUT='3',PGOPTIONS='-c statement_timeout=3000 -c lock_timeout=250 -c default_transaction_read_only=on -c idle_in_transaction_session_timeout=3000')
  deadline=time.monotonic()+32
  p=subprocess.Popen(['psql','-X','-q','-A','-t','-h','localhost','-p',str(cfg['port']),'-U',cfg['user'],'-d',cfg['database'],'-v','ON_ERROR_STOP=1','-f','-'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env=env)
  payload=memoryview(cfg['sql'].encode());output=bytearray();sel=selectors.DefaultSelector()
@@ -172,35 +190,41 @@ except BaseException:
 `
 
 type pgSampleWire struct {
-	Kind       string              `json:"kind"`
-	Sample     int                 `json:"sample"`
-	At         float64             `json:"at"`
-	Total      int                 `json:"total"`
-	Groups     int                 `json:"groups"`
-	Reset      *float64            `json:"reset"`
-	Primary    bool                `json:"primary"`
-	ReadOnly   bool                `json:"read_only"`
-	DatabaseOK bool                `json:"database_ok"`
-	Rows       [][]json.RawMessage `json:"rows"`
+	Kind               string              `json:"kind"`
+	Sample             int                 `json:"sample"`
+	At                 float64             `json:"at"`
+	Total              int                 `json:"total"`
+	Groups             int                 `json:"groups"`
+	Reset              *float64            `json:"reset"`
+	Primary            bool                `json:"primary"`
+	ReadOnly           bool                `json:"read_only"`
+	DatabaseOK         bool                `json:"database_ok"`
+	Rows               [][]json.RawMessage `json:"rows"`
+	TrackQuerySize     *int                `json:"track_activity_query_size"`
+	PGSSVersion        string              `json:"pgss_version"`
+	QueryTextTruncated *int                `json:"query_text_truncated"`
 }
 type pgSampleLoad struct {
-	Query           string   `json:"query_token"`
-	Family          string   `json:"family"`
-	State           string   `json:"state"`
-	Wait            string   `json:"wait"`
-	Owner           string   `json:"client_owner"`
-	Application     string   `json:"declared_application"`
-	Backend         string   `json:"backend"`
-	Scope           string   `json:"database_scope"`
-	BackendSamples  int      `json:"backend_samples"`
-	SeenSamples     int      `json:"seen_samples"`
-	Peak            int      `json:"peak_count"`
-	QueryAge        float64  `json:"max_query_age_s"`
-	TransactionAge  float64  `json:"max_transaction_age_s"`
-	StateAge        float64  `json:"max_state_age_s"`
-	CompletedCalls  *float64 `json:"completed_lifetime_calls,omitempty"`
-	CompletedMeanMS *float64 `json:"completed_lifetime_mean_ms,omitempty"`
-	CompletedMaxMS  *float64 `json:"completed_lifetime_max_ms,omitempty"`
+	Query                  string   `json:"query_token"`
+	Family                 string   `json:"family"`
+	State                  string   `json:"state"`
+	Wait                   string   `json:"wait"`
+	Owner                  string   `json:"client_owner"`
+	Application            string   `json:"declared_application"`
+	Backend                string   `json:"backend"`
+	Scope                  string   `json:"database_scope"`
+	BackendSamples         int      `json:"backend_samples"`
+	SeenSamples            int      `json:"seen_samples"`
+	Peak                   int      `json:"peak_count"`
+	PressureSamples        int      `json:"samples_with_at_least_five_backends"`
+	SlowSamples            int      `json:"samples_with_query_age_at_least_30s"`
+	MaintenanceSlowSamples int      `json:"samples_with_query_age_at_least_2h"`
+	QueryAge               float64  `json:"max_query_age_s"`
+	TransactionAge         float64  `json:"max_transaction_age_s"`
+	StateAge               float64  `json:"max_state_age_s"`
+	CompletedCalls         *float64 `json:"completed_lifetime_calls,omitempty"`
+	CompletedMeanMS        *float64 `json:"completed_lifetime_mean_ms,omitempty"`
+	CompletedMaxMS         *float64 `json:"completed_lifetime_max_ms,omitempty"`
 }
 type pgSampleCompleted struct {
 	Query  string  `json:"query_token"`
@@ -231,6 +255,9 @@ type pgQuerySampleReceipt struct {
 	Samples                   int                 `json:"samples"`
 	SampleClocks              []float64           `json:"sample_clocks"`
 	BackendTotals             []int               `json:"backend_totals"`
+	QueryTextTruncated        []int               `json:"query_text_truncated"`
+	TrackQuerySize            int                 `json:"track_activity_query_size"`
+	PGSSVersion               string              `json:"pgss_version"`
 	OmittedGroups             int                 `json:"omitted_group_samples"`
 	Load                      []pgSampleLoad      `json:"load"`
 	Completed                 []pgSampleCompleted `json:"completed_lifetime_end"`
@@ -255,8 +282,8 @@ var pgSampleAllowed = map[string][]string{
 	"app":     {"unset", "pg_dump", "pg_restore", "psql", "other"},
 	"scope":   {"current", "other"},
 	"backend": {"client backend", "parallel worker", "autovacuum worker", "autovacuum launcher", "checkpointer", "background writer", "walwriter", "walsender", "walreceiver", "logical replication worker", "logical replication launcher", "other"},
-	"family":  {"commit", "rollback", "begin", "reindex_concurrent", "vacuum", "audit_daily_delete", "audit_daily_sum", "legacy_payout_range", "payout_finalize", "reliability_insert", "reliability_running", "pending_task_access", "tls_metadata_access", "signed_key_access", "escrow_access", "contract_close_access", "transfer_contract_access", "other"},
-	"wait":    {"none", "LWLock:WALWrite", "LWLock:WALInsert", "IO:WALWrite", "IO:WALSync", "LWLock:WALSync", "LWLock:BufferMapping", "IO:DataFileRead", "IO:DataFileWrite", "IO:DataFileExtend", "Client:ClientRead", "Client:ClientWrite", "Lock:transactionid", "Lock:virtualxid", "Lock:relation", "IPC:MessageQueueReceive", "Activity:other", "BufferPin:other", "Client:other", "Extension:other", "IO:other", "IPC:other", "Lock:other", "LWLock:other", "Timeout:other", "other"},
+	"family":  {"reservation_census_prefix", "reservation_snapshot_publish", "reservation_snapshot_read", "grant_all_lock", "grant_skip_locked", "grant_window_lock", "settlement_balance_lock", "settlement_escrow_read", "companion_fallback", "companion_origin", "commit", "rollback", "begin", "reindex_concurrent", "vacuum", "audit_daily_delete", "audit_daily_sum", "legacy_payout_range", "payout_finalize", "reliability_insert", "reliability_running", "pending_task_access", "tls_metadata_access", "signed_key_access", "escrow_access", "contract_close_access", "transfer_contract_access", "other"},
+	"wait":    {"none", "LWLock:WALWrite", "LWLock:WALInsert", "IO:WALWrite", "IO:WALSync", "LWLock:WALSync", "LWLock:BufferMapping", "IO:DataFileRead", "IO:DataFileWrite", "IO:DataFileExtend", "Client:ClientRead", "Client:ClientWrite", "Lock:transactionid", "Lock:tuple", "Lock:virtualxid", "Lock:relation", "IPC:MessageQueueReceive", "Activity:other", "BufferPin:other", "Client:other", "Extension:other", "IO:other", "IPC:other", "Lock:other", "LWLock:other", "Timeout:other", "other"},
 }
 
 func pgSampleAllowedValue(field, value string) bool {
@@ -353,6 +380,10 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 		lastClock = w.At
 		switch w.Kind {
 		case "identity":
+			if w.TrackQuerySize == nil || *w.TrackQuerySize < 1024 || *w.TrackQuerySize > 1048576 || !regexp.MustCompile(`^[0-9]+(?:\.[0-9]+){1,2}$`).MatchString(w.PGSSVersion) {
+				return fail()
+			}
+			r.TrackQuerySize, r.PGSSVersion = *w.TrackQuerySize, w.PGSSVersion
 			if seenIdentity || !w.Primary || !w.ReadOnly || !w.DatabaseOK {
 				return fail()
 			}
@@ -394,6 +425,10 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 				histories[w.Sample][q] = history{a, b, c, family}
 			}
 		case "activity":
+			if w.QueryTextTruncated == nil || *w.QueryTextTruncated < 0 || *w.QueryTextTruncated > w.Total {
+				return fail()
+			}
+			r.QueryTextTruncated = append(r.QueryTextTruncated, *w.QueryTextTruncated)
 			if !seenHistory[0] || seenHistory[1] || w.Sample != r.Samples || w.Sample >= pgQuerySampleCount || len(w.Rows) > 128 || w.Groups < len(w.Rows) || w.Groups > w.Total {
 				return fail()
 			}
@@ -448,6 +483,15 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 					l = &pgSampleLoad{Query: token("q", parts[0]), State: parts[1], Wait: parts[2], Owner: parts[3], Application: parts[4], Backend: parts[5], Family: parts[6], Scope: parts[7]}
 					loads[key] = l
 					queryForLoad[key] = parts[0]
+				}
+				if nums[0] >= 5 {
+					l.PressureSamples++
+				}
+				if nums[1] >= 30 {
+					l.SlowSamples++
+				}
+				if nums[1] >= 7200 {
+					l.MaintenanceSlowSamples++
 				}
 				l.BackendSamples += int(nums[0])
 				l.SeenSamples++
@@ -537,7 +581,7 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 	})
 	if len(r.Load) > 80 {
 		r.LoadOutputTruncated = true
-		r.Load = r.Load[:80]
+		r.Load = pgSampleRetainLoad(r.Load)
 	}
 	for q, b := range histories[1] {
 		a, ok := histories[0][q]
@@ -558,7 +602,7 @@ func parsePgQuerySample(raw string, now time.Time) (pgQuerySampleReceipt, error)
 	}
 
 	r.Complete = true
-	r.Qualifiers = []string{"12 snapshots are backend-samples, not distinct statements, continuous waits or CPU attribution", "query/transaction/state ages are separate; wait residence unknown", "completed statistics are endpoint entry-lifetime gauges, not sample-window or per-owner runtimes; exclude canceled/incomplete and possibly utility statements; eviction/selective-reset continuity is unproved, so interval deltas are withheld", "history is current database only, capped to top5000 lifetime execution-time IDs at each endpoint; missing entries unknown", "active groups prioritized then capped128 per snapshot, output top80; blockers one final snapshot of oldest16 lock waiters, at most16 blockers each", "SQL family matching is descriptive source shape, not runtime executable or task ownership", "local/loopback client owner and declared application do not identify originating service through PgBouncer", "NULL query IDs share an unknown token; recognized families only partly distinguish those statements", "raw SQL, database/application values, client addresses, PIDs and query IDs are not retained"}
+	r.Qualifiers = []string{"12 snapshots are backend-samples, not distinct statements, continuous waits or CPU attribution", "query/transaction/state ages are separate; wait residence unknown", "completed statistics are endpoint entry-lifetime gauges, not sample-window or per-owner runtimes; exclude canceled/incomplete and possibly utility statements; eviction/selective-reset continuity is unproved, so interval deltas are withheld", "history is current database only, capped to top5000 lifetime execution-time IDs at each endpoint; missing entries unknown", "each snapshot retains the union of top64 active/count and top64 active/age groups; output retains40 count-ranked plus40 slow/age-ranked groups; blockers one final snapshot of oldest16 lock waiters, at most16 blockers each", "SQL family matching is descriptive source shape, not runtime executable or task ownership; reservation_census_prefix is a suspected source-shaped prefix, not full identity. SQL truncation counts include configured activity buffer and local2048-character cap", "local/loopback client owner and declared application do not identify originating service through PgBouncer", "NULL query IDs share an unknown token; recognized families only partly distinguish those statements", "raw SQL, database/application values, client addresses, PIDs and query IDs are not retained"}
 	return r, nil
 }
 
@@ -606,18 +650,24 @@ func pgSampleCreateAttempt(marker string, now time.Time, syncFile func(*os.File)
 
 func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	until := env.cfg.pgQuerySampleUntil
-	if until.IsZero() {
-		return nil, nil
+	recurring := env.cfg.pgQuerySampleContinuous
+	if until.IsZero() && !recurring {
+		return []finding{pgSampleUnavailable(env, "configured-disabled")}, nil
 	}
 	now := env.now().UTC()
-	if !now.Before(until) || until.Sub(now) > 24*time.Hour {
-		return nil, nil
+	if !recurring && (!now.Before(until) || until.Sub(now) > 24*time.Hour) {
+		return []finding{pgSampleUnavailable(env, "configured-sample-expired")}, nil
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithDeadline(ctx, until)
-	defer cancel()
+	if !recurring {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, until)
+		defer cancel()
+	}
+	ctx, cancelSample := context.WithTimeout(ctx, pgQuerySampleBudget)
+	defer cancelSample()
 	h := env.cfg.hostByRole("pg-primary")
 	if h == nil || h.disabled {
 		return nil, errors.New("monitor: bounded PG sample primary unavailable")
@@ -632,21 +682,42 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, errors.New("monitor: bounded PG sample state unavailable")
 	}
-	hash := sha256.Sum256([]byte(until.UTC().Format(time.RFC3339Nano)))
-	name := hex.EncodeToString(hash[:8])
-	marker := filepath.Join(dir, name+".attempt")
-	created, err := pgSampleCreateAttempt(marker, now, p.syncAttemptFile)
-	if err != nil {
-		return nil, errors.New("monitor: bounded PG sample durable marker unavailable")
+	identity := until.UTC().Format(time.RFC3339Nano)
+	if recurring {
+		lock, err := lockProviderState(ctx, env.cfg.stateDir, "pg-query-sample-cadence")
+		if err != nil {
+			return nil, errors.New("monitor: bounded PG sample cadence lock unavailable")
+		}
+		defer lock.Close()
+		admitted, err := pgSampleContinuousAdmission(dir, now, p.syncAttemptFile)
+		if err != nil {
+			return nil, errors.New("monitor: bounded PG sample cadence state unavailable")
+		}
+		if !admitted {
+			return []finding{pgSampleUnavailable(env, "cadence-not-due-no-new-observation")}, nil
+		}
+		identity = now.Format(time.RFC3339Nano)
 	}
-	if !created {
-		return nil, nil
+	hash := sha256.Sum256([]byte(identity))
+	name := hex.EncodeToString(hash[:8])
+	if !recurring {
+		marker := filepath.Join(dir, name+".attempt")
+		created, err := pgSampleCreateAttempt(marker, now, p.syncAttemptFile)
+		if err != nil {
+			return nil, errors.New("monitor: bounded PG sample durable marker unavailable")
+		}
+		if !created {
+			return []finding{pgSampleUnavailable(env, "one-shot-already-attempted")}, nil
+		}
 	}
 
 	r := pgQuerySampleReceipt{Schema: 1, RequestedAt: now, Reason: "source-unavailable"}
 	input, _ := json.Marshal(map[string]any{"password": env.cfg.pgPassword, "user": env.cfg.pgUser, "database": env.cfg.pgDb, "port": env.cfg.pgPort, "sql": pgQuerySampleSQL(env.cfg.pgDb)})
 	command := "[ \"$(hostname -s)\" = " + shellSingleQuote(h.name) + " ] || exit 74; exec timeout -k 2s 35s python3 -c " + shellSingleQuote(pgQuerySampleProgram)
 	out, readErr := env.runner.sshTimeout(ctx, h, command, string(input), pgQuerySampleBudget)
+	if errors.Is(readErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		r.Reason = "deadline"
+	}
 	if readErr == nil {
 		parsed, parseErr := parsePgQuerySample(out, now)
 		if parseErr == nil {
@@ -660,18 +731,22 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	if err != nil || len(raw) > 262144 {
 		return nil, errors.New("monitor: bounded PG sample receipt exceeds bound")
 	}
-	tmp, err := os.CreateTemp(dir, ".receipt-")
+	receiptSHA256, err := pgSampleStoreReceipt(dir, append(raw, '\n'))
 	if err != nil {
-		return nil, errors.New("monitor: bounded PG sample receipt unavailable")
+		return nil, errors.New("monitor: bounded PG sample immutable receipt unavailable")
 	}
-	defer os.Remove(tmp.Name())
-	_, werr := tmp.Write(append(raw, '\n'))
-	cerr := tmp.Close()
-	if werr != nil || cerr != nil || os.Rename(tmp.Name(), filepath.Join(dir, name+".json")) != nil {
-		return nil, errors.New("monitor: bounded PG sample receipt write failed")
+
+	if recurring {
+		if err := pgSampleContinuousFinish(dir, now, r.FinishedAt, r.Complete, r.Reason, receiptSHA256, p.syncAttemptFile); err != nil {
+			return nil, errors.New("monitor: bounded PG sample terminal state unavailable")
+		}
 	}
 	if r.Complete {
-		return nil, nil
+		findings := pgSampleFindings(r, pgTarget(env))
+		for i := range findings {
+			findings[i].evidence += " Immutable receipt_sha256=" + receiptSHA256
+		}
+		return findings, nil
 	}
-	return []finding{{probeId: "pg/query-sample", tier: tierWarn, class: "pg-query-sample-unavailable", target: pgTarget(env), sustain: 1, symptom: "Bounded PostgreSQL query/load sample is incomplete", observed: "reason=" + r.Reason, evidence: "Finite private receipt retained in pg-query-sample; no raw SQL or identities", mechanism: "Admission, source or projection was unavailable; the spent attempt is not retried.", baseline: "One complete read-only12-snapshot sample under the shared monitor host budget.", action: "Inspect private finite receipt before authorizing a successor; do not infer health or tune pools from missing evidence.", verify: "A separately authorized finite sample qualifies.", playbook: "SIGNALS.md §2.1a"}}, nil
+	return []finding{{probeId: "pg/query-sample", tier: tierWarn, class: "pg-query-sample-unavailable", target: pgTarget(env), sustain: 1, symptom: "Bounded PostgreSQL query/load sample is incomplete", observed: "reason=" + r.Reason, evidence: "Finite private immutable receipt_sha256=" + receiptSHA256 + "; no raw SQL or identities", mechanism: "Admission, source or projection was unavailable; the spent attempt is not retried.", baseline: "One complete read-only12-snapshot sample under the shared monitor host budget.", action: "Inspect the private finite receipt and sampler status; recurring mode waits for its next cadence, while one-shot mode needs a fresh explicit arm. Do not infer health or tune pools from missing evidence.", verify: "The next eligible finite sample qualifies under the same source and host limits.", playbook: "SIGNALS.md §2.1a"}}, nil
 }

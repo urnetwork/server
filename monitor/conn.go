@@ -185,15 +185,16 @@ type monitorConfig struct {
 
 	grafanaAdminPassword string
 
-	sourceIPv4URL      string
-	sourceIPv6URL      string
-	expectedSourceIPv4 string
-	expectedSourceIPv6 string
-	dnsAliases         DNSAliasSettings
-	mimirPublishers    MimirPublisherSettings
-	apiReleaseProof    *APIReleaseProofSettings
-	pgQuerySampleUntil time.Time
-	publicUdp          PublicUdpSettings
+	sourceIPv4URL           string
+	sourceIPv6URL           string
+	expectedSourceIPv4      string
+	expectedSourceIPv6      string
+	dnsAliases              DNSAliasSettings
+	mimirPublishers         MimirPublisherSettings
+	apiReleaseProof         *APIReleaseProofSettings
+	pgQuerySampleUntil      time.Time
+	pgQuerySampleContinuous bool
+	publicUdp               PublicUdpSettings
 
 	// state dir for baselines and other local persistence
 	stateDir string

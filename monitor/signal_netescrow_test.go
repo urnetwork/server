@@ -158,16 +158,10 @@ func TestNetEscrowSignalAttributesReservationPageAmplification(t *testing.T) {
 		"reservation_page_bounded_lateral_calls=0",
 		"reservation_page_unsettled_partial_calls=0",
 		"balance_page_lifetime_mean_ms=4.6",
-		"10,000-ID ANY predicate",
-		"parallel sequential scan",
-		"roughly one-billion-row transfer_escrow",
-		"not merely a missing INCLUDE payload",
-		"bounded-lateral reservation page",
-		"OFFSET 0 optimization boundary",
-		"transfer_escrow_unsettled_balance_contract migration",
-		"settled=false inside its OFFSET 0 optimization boundary",
-		"authoritative outcome IS NULL join",
-		"zero new legacy-ANY calls",
+		"statement_interval_qualified=false",
+		"endpoint entry-lifetime aggregates only",
+		"current bounded activity/source and non-executing plan discriminator",
+		"not proof that the same statement caused this task overrun",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("net-escrow page attribution missing %q:\n%s", detail, markdown)
@@ -194,11 +188,9 @@ func TestNetEscrowSignalDoesNotMisdiagnoseBoundedLateralAsLegacyPlan(t *testing.
 		"reservation_page_legacy_any_calls=0",
 		"reservation_page_bounded_lateral_calls=91",
 		"reservation_page_unsettled_partial_calls=0",
-		"bounded-lateral reservation page is present",
-		"whole-table ANY-plan regression is excluded",
-		"more than a billion escrow rows",
-		"transfer_escrow_unsettled_balance_contract partial covering index",
-		"settled=false is only a necessary prefilter",
+		"statement_interval_qualified=false",
+		"no adjacent-window rate or current executor/plan attribution",
+		"do not use lifetime counters to prescribe an already-deployed migration",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("bounded-lateral attribution missing %q:\n%s", detail, markdown)
@@ -229,10 +221,10 @@ func TestNetEscrowSignalRecognizesUnsettledPartialAccessPath(t *testing.T) {
 	markdown := requireAlertClass(t, alerts, "netescrow-reconcile-overrun").Markdown()
 	for _, detail := range []string{
 		"reservation_page_unsettled_partial_calls=91",
-		"unsettled partial covering access path is present",
-		"Historical settled escrow ranges and balance-byte heap fetches are excluded",
-		"Keep the partial covering index",
-		"EXPLAIN (ANALYZE, BUFFERS)",
+		"statement_interval_qualified=false",
+		"Preserve the partial covering index",
+		"authoritative outcome join",
+		"non-executing plan discriminator",
 	} {
 		if !strings.Contains(markdown, detail) {
 			t.Fatalf("unsettled-partial attribution missing %q:\n%s", detail, markdown)
@@ -243,7 +235,7 @@ func TestNetEscrowSignalRecognizesUnsettledPartialAccessPath(t *testing.T) {
 	}
 }
 
-func TestNetEscrowSignalAdjacentWindowRendersHumanReadableMarkdown(t *testing.T) {
+func TestNetEscrowSignalAdjacentCountersStayLifetimeOnly(t *testing.T) {
 	profiles := []Row{
 		{"10", "10000", "2000", "10", "100", "10", "10", "0", "0"},
 		{"12", "14000", "2000", "12", "120", "10", "12", "0", "0"},
@@ -269,41 +261,25 @@ func TestNetEscrowSignalAdjacentWindowRendersHumanReadableMarkdown(t *testing.T)
 		t.Fatal(err)
 	}
 	markdown := requireAlertClass(t, alerts, "netescrow-reconcile-overrun").Markdown()
-	if !strings.Contains(markdown, "reports the adjacent-sample mean") || strings.Contains(markdown, "a adjacent-sample") {
-		t.Fatalf("adjacent timing window is not human readable:\n%s", markdown)
+	if !strings.Contains(markdown, "statement_interval_qualified=false") || strings.Contains(markdown, "delta_mean_ms") || strings.Contains(markdown, "reports the adjacent-sample mean") {
+		t.Fatalf("unqualified counters became interval attribution:\n%s", markdown)
 	}
 }
 
-func TestNetEscrowStatementProfileUsesAdjacentCounterDelta(t *testing.T) {
+func TestNetEscrowStatementProfileWithholdsUnqualifiedDeltas(t *testing.T) {
 	probe := &netEscrowProbe{}
-	first := probe.observeStatementProfile(netEscrowStatementCounters{
-		reservationCalls:          100,
-		reservationTotalMs:        1000,
-		legacyReservationCalls:    100,
-		boundedReservationCalls:   0,
-		unsettledReservationCalls: 0,
-		balanceCalls:              200,
-		balanceTotalMs:            400,
-	})
-	if first.reservationDeltaCalls != 0 || first.legacyReservationDeltaCalls != 0 ||
-		first.boundedReservationDeltaCalls != 0 || first.unsettledReservationDeltaCalls != 0 ||
-		first.balanceDeltaCalls != 0 {
-		t.Fatalf("first profile fabricated a delta: %+v", first)
-	}
-	second := probe.observeStatementProfile(netEscrowStatementCounters{
-		reservationCalls:          104,
-		reservationTotalMs:        5000,
-		legacyReservationCalls:    100,
-		boundedReservationCalls:   4,
-		unsettledReservationCalls: 4,
-		balanceCalls:              220,
-		balanceTotalMs:            500,
-	})
-	if second.reservationDeltaCalls != 4 || second.reservationDeltaMeanMs != 1000 ||
-		second.legacyReservationDeltaCalls != 0 || second.boundedReservationDeltaCalls != 4 ||
-		second.unsettledReservationDeltaCalls != 4 ||
-		second.balanceDeltaCalls != 20 || second.balanceDeltaMeanMs != 5 {
-		t.Fatalf("adjacent profile delta = %+v", second)
+	// Rising, falling and unchanged aggregates are compatible with unseen
+	// entry resets/evictions or replacement. None proves an interval.
+	for _, current := range []netEscrowStatementCounters{
+		{reservationCalls: 100, reservationTotalMs: 1000, balanceCalls: 200, balanceTotalMs: 400},
+		{reservationCalls: 104, reservationTotalMs: 5000, balanceCalls: 220, balanceTotalMs: 500},
+		{reservationCalls: 1, reservationTotalMs: 2, balanceCalls: 2, balanceTotalMs: 2},
+		{reservationCalls: 1, reservationTotalMs: 2, balanceCalls: 2, balanceTotalMs: 2},
+	} {
+		profile := probe.observeStatementProfile(current)
+		if profile.intervalQualified || profile.netEscrowStatementCounters != current {
+			t.Fatal("unqualified PGSS lifetime became interval")
+		}
 	}
 }
 

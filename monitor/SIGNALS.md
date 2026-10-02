@@ -1628,6 +1628,37 @@ required settlement work; persistent misses can leave CPU high. Verify fresh
 per-process counter continuity and source coverage alongside independent CPU
 and successful traffic before claiming recovery.
 
+**2026-10-02 early-detection audit.** The CPU warning was already present:
+25% in two observations (§1.3c), and active/idle-transaction warnings existed
+in §1.3. Retained CPU observations include 80.85% at 10:29:23Z and 52.52% at
+13:30:42Z. These are dated evidence, not the first warning or a proven outage
+start. No current customer/request join establishes that chronology. The gap
+was missing continuous query context and incomplete automatic escalation from
+resource warnings, not a newly discovered CPU threshold. The live watcher
+still carried an expired `pg-query-sample-until=2026-10-01T19:30:00Z`; its old
+one-shot implementation silently returned after expiry. §2.1a now makes that
+coverage failure visible and supports explicit continuous scheduling.
+
+| Boundary missed or incompletely used | Evidence and action | Detector status and control |
+| --- | --- | --- |
+| Repeated short reservation work | At 10:52, 307 active/no-wait backend-samples, peak 51, max 10.31s matched a 1,023-byte source prefix. The older netescrow active-page detector required both trailing text beyond that buffer and age 120s. | §2.1a now detects repeated active groups without that age gate and labels suspected prefixes/text coverage. A brief burst, idle last statement, or healthy indexed bulk job is not proof of waste; unknown source remains unknown. |
+| Grant convoy and slow holder | At 14:10:08–36, grant tuple waits contributed 1132 backend-samples, peak 104; transaction-ID waits 119, peak 12. Final 102 waiters included a selected grant blocked by active/no-wait escrow-family work in a 19.87s transaction. The old output hid 220 groups. | §2.1a now preserves count and slow views and fixed tuple/transaction-ID waits. One blocker snapshot is not full depth, continuous wait residence, CPU share or payer identity. A separate bounded depth/owner read is still required for exact financial causality. |
+| Escrow scale despite an index | A 07:19 bounded read found one ordinary balance with at least 10,001 unsettled rows; a biased 64-row sample was all open. Source/plan showed indexed per-balance work, not constant work. | Existing escrow amplification/overrun signals are retained. Exact per-key cardinality and full custom/generic plan cost remain manual bounded discriminators; no broad production count or ANALYZE is authorized by this row. Legitimate backlog is a healthy counterexample to an automatic corruption claim. |
+| Revision churn defeats cache intent | Release 3900 completed refresh reads showed reused 0/reloaded 453 in one five-minute fleet window. Revision-changing settlement made the read-through miss. After 4000, 19 paired API cells showed refresh 594/40 and settlement 579/55 reuse/reload at 12:43. | Finite producer counters exist; an automatic source/process-qualified cache-miss escalation is still prospective. These are completed balance-source reads, not commits, distinct SQL calls, payer counts or CPU savings. Preserve cold/stale fallback, legacy writer, rollback and replay controls. |
+| Repeated payer/shared probe balance | The 10:15 bounded holder read observed ordinary 18 waiters/4 keys, singleton 96/2 keys, shard 20/7 keys, with depth truncation. | Existing convoy/fanout alerts do not prove owner→holder causality. Automatic distinct-key/owner attribution remains prospective; use exact bounded key equality, no identifiers in alerts, and a healthy independently funded payer control. Do not assume every grant waiter is a probe. |
+| Young idle transactions and root depth | Existing idle count thresholds can warn even when transaction ages are only seconds. Last statements and aggregate counts do not identify the active lock root. | Retain §1.3/§2.2; §2.1a supplies bounded state/wait/blocker context. Recursive root depth and service/payer attribution remain separate bounded observations. No automatic cancellation or weakened financial locks. |
+| Apparent current PGSS rates | Installed PGSS 1.10 lacked per-entry stats_since even on PG18. Rising family counters and a stable global reset did not prove entry continuity. | §2.1a and netescrow now withhold unqualified interval inference. Available extension versions/actual columns may be inspected separately; no automatic extension upgrade. A lifetime mean is historical context, not a current slow-call or CPU rate. |
+| Effective probe geometry and durable acceptance | Exact task arguments at 13:54 established 8×64=512 slots. Fixed 13:40–45 scheduler attempts 95.801/s, accepted 15.489/s; independently measured history had 4650 qualifying rows (15.5/s), versus about 78.86/s needed. g1 accepted roughly one in five minutes. | Existing URL coverage and scheduler metrics remain authoritative within their scopes. Matched finite per-block admission/acceptance escalation is prospective. The earlier ACK 30.69/s window was 13:37:20–13:42:20 and cannot be divided into the later scheduler cohort. Constructor/route admission is not provider contact; successful provider traffic and durable receipts are the healthy control. |
+
+The required escalation is operational and immediate: retain the CPU/state
+warning, inspect the continuous query receipt or explicit cannot-observe
+reason, then authorize only the smallest source/holder/plan discriminator for
+the missing fact. Do not wait for a 120-second task overrun, alert silence, or a
+new release to supply query attribution. Diagnostic transport holds and source
+caps must stay visible; a successful later sample does not retroactively fill
+a gap. These changes do not assert CPU recovery, provider quota completion,
+or a customer-specific explanation.
+
 The 2026-09-27 read-only grant/backup discriminator is manual evidence, not a
 new automated alert. The current grant shape returned about 225 rows/call at
 834 calls/s, with 7,547 shared-buffer hits/call and no shared reads. The balance
@@ -3243,49 +3274,111 @@ was observed completing normally after 420s. The active probe treats those
 statements as known bounded maintenance until the same two-hour limit, after
 which it warns; task canaries report the resulting maintenance error as well.
 
-### 2.1a Bounded query/load observation
+### 2.1a Continuous bounded query/load observation
 Probe: `pg-query-sample`
 
-An incomplete attempt emits `pg-query-sample-unavailable`; it never clears an
-existing database incident. Default off. An explicit
-`-pg-query-sample-until <RFC3339 UTC clock>` arms one
-attempt before that expiry (at most 24 hours ahead). Keep the authoritative
-watcher's 15-minute cadence floor: this probe uses the same RunLoop slots,
-shared host limiter and queue-inclusive 40-second context. Do not start a
-second watcher or bypass SSH admission to obtain this sample. Promote a tested
-monitor binary through the singleton handoff before enabling this option.
+Enable `-pg-query-sample-continuous` on the authoritative watcher, with
+`-min-probe-cadence 15m` or longer and its existing private state directory.
+This mode has no expiry and performs one bounded catalog observation per
+eligible cadence. The mutually exclusive `-pg-query-sample-until <RFC3339>`
+mode remains an explicitly armed one-shot diagnostic (expiry at most 24 hours
+ahead). Default disabled, expired, already-spent one-shot, and not-yet-due
+invocations emit `pg-query-sample-unavailable` with a finite reason; none
+claims a fresh healthy observation. Do not start a second watcher to sample.
+Promote the tested binary through the singleton handoff in RUN-MAIN.md.
 
-The direct-primary session is read-only, verifies the remote hostname,
-primary role, database and read-only setting, and collects 12 activity snapshots
-separated by two seconds. One SSH/psql process has a bounded stdin/output owner,
-three-second statement timeout, a 32-second remote owner and a 35-second outer
-kill bound. Catalog queries only: no application-table scan, EXPLAIN ANALYZE,
-DDL, query cancellation or pool change. An exclusive local attempt marker,
-fsynced with its directory before contact, prevents automatic retry after a source, admission or projection failure.
+The probe keeps the existing RunLoop slots and shared host limiter. Its
+queue-inclusive owner is 40 seconds, remote owner 32 seconds, outer kill bound
+35 seconds, statement timeout three seconds and lock timeout 250ms. It verifies
+the inventory hostname and primary/database/read-only authority before the
+catalog workload. The read-only primary session collects 12 activity snapshots
+separated by two seconds, clears the statistics snapshot before each read, and
+reads two bounded completed-statistic endpoints plus one final blocker census.
+There are no application-table scans, EXPLAIN ANALYZE, DDL, cancellations,
+financial changes or pool changes. Raw stderr and SQL text remain private.
 
-The private `pg-query-sample` receipt retains finite state/wait/backend groups,
-separate query/transaction/state ages, current-database completed-runtime
-counter endpoints and one final blocker snapshot. SQL text never leaves the
-server-side classification expression; raw query IDs/PIDs are converted to
-run-local ordinal tokens before persistence. Exact source families are aids
-for attribution, not artifact or task identity. Local/loopback backend clients
-and declared application labels cannot establish the originating API,
-Taskworker, Proxy or customer process through PgBouncer.
+A process-shared lock covers admission through terminal receipt writing.
+`pg-query-sample/continuous.json` is atomically written and fsynced, including
+its directories, before contact. It records mode, last attempted/terminal/
+completed clocks, next eligible clock and finite outcome. Before contact the
+reservation conservatively includes the full 40-second owner plus the
+15-minute floor; normal termination sets the floor from the actual terminal.
+A crash or transport failure cannot cause an early retry after watcher restart.
+Malformed/future state, durability failures and deadline exhaustion remain
+unavailable. Every finite receipt is retained as an immutable content-addressed
+`receipt-<sha256>.json` body, fsynced before publishing its mutable cadence/index
+pointer. Alert evidence names its hash. The sampler never deletes or overwrites
+these bodies; global archive/retention remains an explicit operator policy,
+not a silent ring overwrite. Each body caps 256KiB (about 25MiB/day at the
+15-minute floor). Silence is not a completion receipt. Compare current time
+to `next_eligible_at` for due age, and retain the last successful clock when
+later attempts fail. One-shot markers remain spent.
 
-False-positive qualifiers: repeated backend-samples are not distinct requests,
-continuous wait residence, or CPU time. A lock victim does not identify the
-initiating workload. Completed execution time includes waits, and a later
-quieter sample does not clear an earlier capacity rejection. Completed-runtime
-values describe endpoint entry lifetimes, not this sample window or a particular
-backend owner. Interval deltas are withheld: unchanged global reset and rising
-counters cannot prove continuity across eviction/recreation or selective reset.
-False-negative qualifiers: completed history excludes unfinished/canceled and
-some utility statements; only the 5,000 largest lifetime execution-time query
-IDs are retained at each endpoint. Each activity snapshot caps 128 groups and
-retains their denominator; the receipt ranks at most 80 groups and 30 final
-completed-entry lifetime totals. The blocker snapshot selects at most 16 oldest lock waiters and 16
-blockers per waiter. Truncated, absent, expired or failed observations remain
-incomplete evidence, never healthy database coverage.
+The private receipt retains all 12 source clocks and denominators, finite
+state/wait/backend/source-family groups, separate query/transaction/state
+ages, completed-entry lifetime endpoints and final blocker links. Query IDs
+and PIDs become run-local ordinal tokens before persistence. Families include
+reservation census prefixes, snapshot reads/publications, grant locks,
+settlement locks/reads, companion lookups, and generic fallback families.
+`reservation_census_prefix` means a suspected distinctive source-shaped prefix,
+not a complete SQL identity or a caller join. The measured query buffer size
+and query-text truncation counts accompany it. Local/loopback clients and
+application labels cannot resolve API, Taskworker, Proxy or payer ownership
+through PgBouncer.
+
+- `pg-query-repeated-work` WARN: a current-database active query group has at
+  least five concurrent backends in at least six of the 12 snapshots. This
+  investigation band captures short repeated work and grant convoys that never
+  cross a minutes-long query-age guard. It is calibrated to the retained
+  incident, not a capacity or financial limit.
+- `pg-query-slow` WARN: a current-database active group contains query age at
+  least 30 seconds in at least two snapshots. Reindex/vacuum uses two hours,
+  preserving the existing bounded-maintenance control. One old plus one young
+  snapshot, a one-snapshot burst, and an idle transaction's last statement do
+  not satisfy this boundary. Groups need not contain the same backend or
+  statement instance across snapshots.
+- `pg-query-sample-coverage` WARN: omitted activity groups, truncated final
+  load/history/blocker selection, or truncated query text prevent complete
+  attribution. Retained positive findings still stand; missing work is unknown.
+- UNAVAILABLE: disabled/expired/spent configuration, cadence or source failure,
+  deadline, stale/malformed/incomplete frames, or failed authority cannot
+  establish a fresh query sample. The ordinary visibility signal also retains
+  a queue/host admission failure. This never clears `pg-cpu` or `pg-state`.
+
+Each SQL snapshot retains the union of 64 count-ranked and 64 age-ranked
+active-first groups. Final output retains 40 count-ranked groups plus 40
+slow/age-ranked groups so a large lock queue cannot automatically hide its
+slow singleton holder. Caps and omitted counts remain explicit; more than
+64 slow source groups can still hide work. Completed history caps 5,000 query
+IDs per endpoint, ranked by lifetime execution time; output retains 30 totals.
+Blockers select the oldest 16 lock waiters and at most 16 blockers per waiter,
+in one final snapshot, not a recursive owner/payer census.
+
+FALSE-POSITIVE QUALIFIERS: useful bulk work or maintenance may explain a band.
+Backend-samples are neither distinct requests, continuous waits, CPU time nor
+per-query CPU shares. Execution wall time includes waits. Confirm successful
+comparable traffic and the exact current source/plan before changing behavior.
+FALSE-NEGATIVE QUALIFIERS: activity snapshots miss work between samples;
+completed history excludes unfinished/canceled and some utility statements;
+truncated text, NULL query IDs, output caps and source gaps can conceal a
+holder or merge identities. A later quieter partial sample is not recovery.
+PGSS interval deltas remain withheld: unchanged global reset and rising
+counters cannot prove entry continuity across eviction/recreation or selective
+reset. Installed extension version is recorded; PostgreSQL server version does
+not establish availability of per-entry lifetime fields. The `netescrow`
+statement-profile reducer likewise reports only endpoint lifetime aggregates,
+never an unqualified adjacent-window rate or current executor/plan conclusion.
+
+ACTION: after a resource warning, inspect this same watcher's recent complete
+receipt or its explicit coverage failure immediately. Join the bounded waiter
+chain to source and, only when necessary, a separately reviewed exact key/owner
+and non-executing plan discriminator. Preserve authoritative accounting,
+rollback/replay controls and the successful-work baseline. Do not cancel
+financial work, increase probe slots, or relax a provider acceptance threshold
+from sample counts. VERIFY: repeated fresh complete observations leave the
+investigation band under comparable successful traffic, while independent CPU,
+waits, capacity, financial correctness and provider coverage also recover.
+
 
 ### 2.2 Wait events on active queries
 Probe: `wait-events`

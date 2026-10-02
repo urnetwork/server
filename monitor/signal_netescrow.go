@@ -6,7 +6,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -37,20 +36,12 @@ type netEscrowStatementCounters struct {
 
 type netEscrowStatementProfile struct {
 	netEscrowStatementCounters
-	reservationDeltaCalls          int64
-	reservationDeltaMeanMs         float64
-	legacyReservationDeltaCalls    int64
-	boundedReservationDeltaCalls   int64
-	unsettledReservationDeltaCalls int64
-	balanceDeltaCalls              int64
-	balanceDeltaMeanMs             float64
+	// This projection has no per-entry stats_since/eviction identity. Family
+	// sums with rising counters cannot establish adjacent-window continuity.
+	intervalQualified bool
 }
 
-type netEscrowProbe struct {
-	profileMu          sync.Mutex
-	profileInitialized bool
-	lastProfile        netEscrowStatementCounters
-}
+type netEscrowProbe struct{}
 
 var netEscrowAggregateRe = regexp.MustCompile(
 	`(?i)\[sm\]reconcile net escrow: ([0-9]+) balances, ([0-9]+) networks drifted, over-reserved ([0-9]+(?:\.[0-9]+)?)([kmgt]?i?b), under-reserved ([0-9]+(?:\.[0-9]+)?)([kmgt]?i?b)`,
@@ -85,40 +76,7 @@ func netEscrowProfileInt64(row pgRow, column int) int64 {
 }
 
 func (self *netEscrowProbe) observeStatementProfile(current netEscrowStatementCounters) netEscrowStatementProfile {
-	self.profileMu.Lock()
-	defer self.profileMu.Unlock()
-
-	profile := netEscrowStatementProfile{netEscrowStatementCounters: current}
-	if self.profileInitialized &&
-		self.lastProfile.reservationCalls <= current.reservationCalls &&
-		self.lastProfile.reservationTotalMs <= current.reservationTotalMs {
-		profile.reservationDeltaCalls = current.reservationCalls - self.lastProfile.reservationCalls
-		if 0 < profile.reservationDeltaCalls {
-			profile.reservationDeltaMeanMs = (current.reservationTotalMs - self.lastProfile.reservationTotalMs) /
-				float64(profile.reservationDeltaCalls)
-		}
-	}
-	if self.profileInitialized &&
-		self.lastProfile.balanceCalls <= current.balanceCalls &&
-		self.lastProfile.balanceTotalMs <= current.balanceTotalMs {
-		profile.balanceDeltaCalls = current.balanceCalls - self.lastProfile.balanceCalls
-		if 0 < profile.balanceDeltaCalls {
-			profile.balanceDeltaMeanMs = (current.balanceTotalMs - self.lastProfile.balanceTotalMs) /
-				float64(profile.balanceDeltaCalls)
-		}
-	}
-	if self.profileInitialized && self.lastProfile.legacyReservationCalls <= current.legacyReservationCalls {
-		profile.legacyReservationDeltaCalls = current.legacyReservationCalls - self.lastProfile.legacyReservationCalls
-	}
-	if self.profileInitialized && self.lastProfile.boundedReservationCalls <= current.boundedReservationCalls {
-		profile.boundedReservationDeltaCalls = current.boundedReservationCalls - self.lastProfile.boundedReservationCalls
-	}
-	if self.profileInitialized && self.lastProfile.unsettledReservationCalls <= current.unsettledReservationCalls {
-		profile.unsettledReservationDeltaCalls = current.unsettledReservationCalls - self.lastProfile.unsettledReservationCalls
-	}
-	self.lastProfile = current
-	self.profileInitialized = true
-	return profile
+	return netEscrowStatementProfile{netEscrowStatementCounters: current, intervalQualified: false}
 }
 
 func (self *netEscrowProbe) statementProfile(ctx context.Context, env *probeEnv) (netEscrowStatementProfile, error) {
@@ -141,7 +99,8 @@ func (self *netEscrowProbe) statementProfile(ctx context.Context, env *probeEnv)
 			         AND query ILIKE '%ORDER BY balance_id%'
 			         AND query ILIKE '%LIMIT%' AS balance_page
 			FROM pg_stat_statements
-			WHERE query NOT ILIKE '%FROM pg_stat_statements%'
+			WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database())
+          AND query NOT ILIKE '%FROM pg_stat_statements%'
 			  AND query NOT ILIKE 'EXPLAIN%'
 		)
 		SELECT coalesce(sum(calls) FILTER (WHERE legacy_reservation_page OR bounded_reservation_page),0),
@@ -595,62 +554,13 @@ func (self *netEscrowProbe) check(ctx context.Context, env *probeEnv) ([]finding
 			balanceLifetimeMeanMs,
 			profile.balanceMaxMs,
 		)
-		reservationMeanMs := reservationLifetimeMeanMs
-		balanceMeanMs := balanceLifetimeMeanMs
-		profileWindow := "lifetime"
-		if 0 < profile.reservationDeltaCalls {
-			reservationMeanMs = profile.reservationDeltaMeanMs
-			profileWindow = "adjacent-sample"
-			observed += fmt.Sprintf(
-				" reservation_page_delta_calls=%d reservation_page_delta_mean_ms=%.1f",
-				profile.reservationDeltaCalls,
-				profile.reservationDeltaMeanMs,
-			)
+		observed += " statement_interval_qualified=false"
+		evidence += " Completed statement values are endpoint entry-lifetime aggregates only. Rising family counters do not prove continuity across query-entry eviction, recreation or selective reset; no adjacent-window rate or current executor/plan attribution is established."
+		if reservationLifetimeMeanMs >= 1000 && (balanceLifetimeMeanMs == 0 || 10*balanceLifetimeMeanMs < reservationLifetimeMeanMs) {
+			evidence += " The historical reservation-page mean is at least 1s and over 10 times the keyset mean (or the keyset denominator is absent). This is a candidate for a current bounded activity/source and non-executing plan discriminator, not proof that the same statement caused this task overrun."
+			action += " Preserve the partial covering index and authoritative outcome join where present. Resolve current source, cache state and bounded plan before changing page size or access path; do not use lifetime counters to prescribe an already-deployed migration."
 		}
-		if 0 < profile.balanceDeltaCalls {
-			balanceMeanMs = profile.balanceDeltaMeanMs
-			observed += fmt.Sprintf(
-				" balance_page_delta_calls=%d balance_page_delta_mean_ms=%.1f",
-				profile.balanceDeltaCalls,
-				profile.balanceDeltaMeanMs,
-			)
-		}
-		if 0 < profile.legacyReservationDeltaCalls {
-			observed += fmt.Sprintf(" reservation_page_legacy_any_delta_calls=%d", profile.legacyReservationDeltaCalls)
-		}
-		if 0 < profile.boundedReservationDeltaCalls {
-			observed += fmt.Sprintf(" reservation_page_bounded_lateral_delta_calls=%d", profile.boundedReservationDeltaCalls)
-		}
-		if 0 < profile.unsettledReservationDeltaCalls {
-			observed += fmt.Sprintf(" reservation_page_unsettled_partial_delta_calls=%d", profile.unsettledReservationDeltaCalls)
-		}
-		if 1000 <= reservationMeanMs && (balanceMeanMs == 0 || 10*balanceMeanMs < reservationMeanMs) {
-			evidence += " The statement comparison separates the reservation join from the cheap keyset scan; cumulative maxima retain tail risk, while adjacent-sample deltas describe only calls since the preceding monitor pass."
-			legacyShape := 0 < profile.legacyReservationDeltaCalls ||
-				(profile.reservationDeltaCalls == 0 && 0 < profile.legacyReservationCalls && profile.boundedReservationCalls == 0)
-			boundedShape := 0 < profile.boundedReservationDeltaCalls ||
-				(profile.reservationDeltaCalls == 0 && 0 < profile.boundedReservationCalls && profile.legacyReservationCalls == 0)
-			unsettledShape := 0 < profile.unsettledReservationDeltaCalls ||
-				(profile.reservationDeltaCalls == 0 && 0 < profile.unsettledReservationCalls && profile.legacyReservationCalls == 0)
-			switch {
-			case legacyShape:
-				mechanism = fmt.Sprintf("The page-local additive algorithm is present, but the deployed reservation statement still uses one 10,000-ID ANY predicate. A read-only production EXPLAIN at schema head 597 selected a parallel sequential scan of the roughly one-billion-row transfer_escrow table for every page instead of transfer_escrow_balance_contract; pg_stat_statements reports the %s mean of %.1fms/page versus %.1fms for the balance keyset. This repeated whole-history plan is the overrun, not the old absolute writer and not merely a missing INCLUDE payload.", profileWindow, reservationMeanMs, balanceMeanMs)
-				action = "Apply the online transfer_escrow_unsettled_balance_contract migration, then deploy the bounded-lateral reservation page with settled=false inside its OFFSET 0 optimization boundary while retaining the authoritative outcome IS NULL join. Keep page-local additive corrections and the task deadline; do not force a global planner setting or manually re-run reconciliation."
-				verify = "Post-deploy pg_stat_statements shows unsettled-partial bounded-lateral delta calls and zero new legacy-ANY calls; the reservation-page adjacent mean stays below 1s, scheduled runs finish below 120s, aggregate drift remains below 256GiB, and negative-counter emitters remain quiet for a full interval."
-			case unsettledShape:
-				mechanism = fmt.Sprintf("The unsettled partial covering access path is present, but pg_stat_statements still attributes the %s mean of %.1fms/page versus %.1fms for the balance keyset. Historical settled escrow ranges and balance-byte heap fetches are excluded; remaining cost is in the small unsettled range, contract outcome probes, index visibility, or unrelated storage contention.", profileWindow, reservationMeanMs, balanceMeanMs)
-				action = "Keep the partial covering index, settled=false prefilter, authoritative outcome IS NULL join, bounded-lateral boundary, and page-local additive corrections. Capture an isolated EXPLAIN (ANALYZE, BUFFERS) for one production-shaped page before changing page size or planner settings."
-				verify = "The unsettled-partial adjacent mean stays below 1s with bounded tail latency, scheduled runs finish below 120s, aggregate drift remains below 256GiB, and negative-counter emitters remain quiet for a full interval."
-			case boundedShape:
-				mechanism = fmt.Sprintf("The bounded-lateral reservation page is present, but pg_stat_statements still attributes the %s mean of %.1fms/page versus %.1fms for the balance keyset. The whole-table ANY-plan regression is excluded, but each balance range still traverses settled history and fetches balance_byte_count from the heap; production has more than a billion escrow rows while only a small fraction is unsettled.", profileWindow, reservationMeanMs, balanceMeanMs)
-				action = "Apply the online transfer_escrow_unsettled_balance_contract partial covering index, then deploy the matching settled=false prefilter inside the existing lateral boundary. Retain outcome IS NULL as the authoritative open-reservation predicate; settled=false is only a necessary prefilter and must not replace the outcome join."
-				verify = "pg_stat_statements shows new unsettled-partial delta calls, its adjacent mean stays below 1s, scheduled runs finish below 120s, aggregate drift remains below 256GiB, and negative-counter emitters remain quiet for a full interval."
-			default:
-				mechanism = fmt.Sprintf("The current page-local additive algorithm is present, and pg_stat_statements attributes its database cost to the open-reservation join: the %s mean is %.1fms/page versus %.1fms for the balance-id keyset page. Statement counters do not yet identify whether the latest run used legacy ANY, historical bounded-lateral, or unsettled-partial bounded-lateral access.", profileWindow, reservationMeanMs, balanceMeanMs)
-				action = "Keep the page-local additive semantics and task deadline. Wait for an adjacent statement sample that identifies legacy-ANY, historical bounded-lateral, or unsettled-partial calls before changing the access path; do not manually re-run reconciliation."
-				verify = "A fresh adjacent sample identifies the deployed reservation shape, then its mean stays below 1s and scheduled runs finish below 120s without large drift or negative-counter aftermath."
-			}
-		}
+
 	}
 
 	findings = append(findings, finding{
