@@ -59,11 +59,11 @@ func newPayoutTransitionCohort(t testing.TB, ctx context.Context) *payoutTransit
 func (self *payoutTransitionCohort) insert(t testing.TB, ctx context.Context, created time.Time, closed *time.Time, swept time.Time, bytes ByteCount, revenue NanoCents) server.Id {
 	t.Helper()
 	id := server.NewId()
-	outcome := "settled"
+	var outcome *string
 	var usage *contractUsageSnapshot
-	if closed == nil {
-		outcome = "open"
-	} else {
+	if closed != nil {
+		settled := "settled"
+		outcome = &settled
 		usage = &contractUsageSnapshot{Version: 1, ByteCount: bytes, Providers: []contractProviderUsage{{ClientId: self.client, NetworkId: self.network, ByteCount: bytes}}}
 	}
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -296,6 +296,13 @@ func TestProviderTransitionFreeAndPaidUsageHaveEqualSubnetWeight(t *testing.T) {
 		canceled := paid.insert(t, ctx, payoutTestCutoff.Add(-time.Hour), nil, closed.Add(time.Hour), 8192, 0)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET outcome='canceled',close_time=$2 WHERE contract_id=$1`, canceled, closed))
+		})
+		// An open contract has a NULL outcome, just like the production writer.
+		// The legal NULL -> canceled transition above must then be immutable.
+		server.Db(ctx, func(conn server.PgConn) {
+			if _, err := conn.Exec(ctx, `UPDATE transfer_contract SET close_time=$2 WHERE contract_id=$1`, canceled, closed.Add(time.Microsecond)); err == nil {
+				t.Fatal("terminal canceled attribution remained mutable")
+			}
 		})
 		rows, err := GetStEpochProviderUsageAtEpoch(ctx, 9, payoutTestCutoff.Add(-time.Hour), closed.Add(time.Hour))
 		if err != nil {
