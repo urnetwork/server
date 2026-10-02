@@ -4987,3 +4987,71 @@ durable task-lease, cleanup, or accepted-history join.
 The 13:06:30 scheduled census is in retained scoped record 475
 (SHA-256 `e781a2d0600959ebe09abf565fdb9caafaf21b9c8918bb6fa662a2efe62ae35f`);
 the earlier `1dc907ab` scope supports only the 12:36 and 12:51 observations.
+
+
+## 2026-10-02 contract lifecycle and probe release checkpoint
+
+The timeout and funding changes are committed on Main. Taskworker release
+`2026.10.2-probe-timeouts-headroom+1060864100` uses clean server source
+`e072f9e87ebb4a354208132c1f1c771a69b6442f`. Both Linux image binaries were
+verified against the local build and embedded VCS metadata. Both blocks were
+selected at 15:56 UTC; the 16:14:29 UTC process-metric witness qualified all
+eight enabled slots against the verified image configuration and source.
+These self-reported metrics do not prove predecessor retirement, readiness,
+or a funding or throughput improvement. The release implements DNS/read-idle
+5s, TCP/TLS 3s and tenfold conservative private-shard funding without assuming
+reclamation during a pass. Existing financial obligations remain protected.
+
+The coherent 16:35:33 UTC scheduled census had 115,061 eligible providers,
+2,449 quota-complete and 2,448 secure-complete, with 515,915 measured runs
+still needed. Cohort changes and incomplete hourly process/measurement ranges
+prevent attribution of that change to this release. This is about 2.13 percent
+quota coverage, far from the required ten accepted measured runs for every
+eligible provider in the rolling four hours. Local allocation failures cannot
+be counted as provider failures or quota credit.
+
+The private companion-chain correction passed independent actual-PG race
+tests for 15 Model and three Controller roots and is merged. It preserves an
+exact reverse anchor's private payer, re-resolves after releasing the first
+gate/transaction, and preserves ordinary destination-payer semantics. This
+repairs a supported encrypted-chain path; current default encryption is off,
+so it does not establish the cause of Main's cancellation deficit.
+
+Two distinct admitted-result cleanup races are reproduced and repaired in
+Connect source `6443417d70dc5825f442c18461a3ec874fed884e`, directly descended
+from the deployed `e1b5d77b5029` plus the known-result correction `a863a03b`.
+A locally committed result arriving after cancellation gets one finite, joined
+requester-only zero-use close through the original authority. A result whose
+callback is still running when the manager closes is now joined before OOB
+admission retires, and cannot refill a final-flushed queue. No provider close,
+unknown-result guess, creation replay or early reservation release is added.
+Independent SDK race/vet and six real-controller financial/lifecycle roots
+passed. The one-connection financial test used a 1-GiB private grant and thus
+exercised ordinary fallback; large-grant selected-first coverage is separate
+loaded-workload research. API, Connect and Taskworker deployment of this
+integration is still pending at this checkpoint.
+
+The UTC-only sweep insertion repair passed independent nine-root financial
+race tests, including the original denormalization failure and timezone/replay
+controls. Main already uses UTC; this repairs test/product correctness and is
+not attributed to the outage. Full Model partition closure remains outstanding.
+
+The continuous sampler is running in the single authoritative monitor, clean
+source `7a5f1ae8a87c809908728b28f8b98fd3bf221c92`, PID 4144942. The prior
+cgroup was retired before the transient unit was recreated with the same name,
+launcher, append paths and cadence; the handoff includes an explicit collection
+gap and possible canceled callbacks. Its first durable admitted attempt at
+16:34:22–16:34:27 UTC failed `source-unavailable` with zero snapshots; the next
+durable eligibility is 16:49:27.582939897 UTC. No successful recurring Main
+database sample is established. An offline regression proves that shared-slot
+expiry can precede sampler state admission and the generic sustain gate can
+hide the first failure; this is not yet proof of the initial runtime cause.
+Fair bounded admission and finite bootstrap diagnostics are being corrected.
+
+Evidence: Taskworker runtime receipt SHA-256 `1732b96ba280860ed5b24f834e6cf06529bf6b67806d3a1c6dcc319f68945c2e`;
+companion independent review `7167933b006ac7d5dcf87fbe9c72a53a27362e5ce7307e22bd5b73d4dec05704`;
+combined lifecycle review `77babeccb5aef8e751aa592917fd2d8a1b513ddf224ee8c0845c338341a58b21`;
+UTC sweep review `2979c5181770f2ed594dfae7ab419184fb3e95c9c16b9c49e8d196eb1220edc7`;
+failed sampler receipt `a293c8f053d436cbaa876df74ef4e8614ae260919b56cb839410a4dea8197b9a`.
+The fresh native-bucket/request-local acceptance, ARIN subscriber shadow,
+loaded Main query cause and complete four-hour coverage remain unresolved.
