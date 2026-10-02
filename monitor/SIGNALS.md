@@ -10903,6 +10903,20 @@ Capability1 is the superseded success-only quota contract and cannot prove this
 measured-run target. The old `successes_needed` label is retained as a deprecated
 alias equal to `runs_needed`; reject inconsistent aliases or mixed contracts.
 Heartbeat proves ownership, not completed probes.
+A URL-only transport uses separate DNS/TCP/TLS/read-idle limits of **5/3/3/5
+seconds**, each clipped by the original attempt owner. DNS retries share one
+resolution budget; socket and handshake budgets start after their preceding
+phase, and read progress refreshes only the idle budget. A phase timeout does
+not override setup, lost-path, contract-readiness or TLS evidence gates and
+does not itself prove an accepted measured result. Local controls use delayed
+resolution/socket boundaries and real authenticated TLS/HTTP exchanges to
+check the limits, cancellation, cumulative owner and non-URL isolation.
+False-positive qualifier: shorter local residence or increased attempts cannot
+prove rolling quota recovery or attribute Main throughput changes to this
+profile alone. False-negative qualifier: local transport controls do not model
+provider scheduling, Main contract availability or the live eligible population;
+retain the independently observed per-provider quota and ownership requirements.
+
 A completed URL pass must stop and join its heartbeat refresher, then publish
 zero for its shard if no other invocation in that process still owns it. A
 nonzero final timestamp left by a completed pass can remain fresh for the

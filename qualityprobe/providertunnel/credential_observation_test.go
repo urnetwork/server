@@ -67,7 +67,8 @@ func credentialObservationGenerator(t *testing.T, authority connect.NetworkClien
 	return &providerRegistrationGenerator{ApiMultiClientGenerator: generator, registration: &providerRegistrationState{}}, publicCalls
 }
 
-// The real single-URL flow performs three bounded DNS waves and no target dial.
+// A stalled first DNS wave consumes the URL's five-second resolution allowance;
+// the real single-URL flow must then classify local control without a target dial.
 func credentialObservationUrl(t *testing.T, state *providerRegistrationState) *egresshealth.Result {
 	t.Helper()
 	var result *egresshealth.Result
@@ -90,13 +91,14 @@ func credentialObservationUrl(t *testing.T, state *providerRegistrationState) *e
 		client := httpClientOverDialerWithResolver(nil, resolver, nil, []string{"sample.probe.example"}, time.Minute)
 		client.Transport.(*providerHttpTransport).registration = state
 		var err error
+		started := time.Now()
 		result, err = egresshealth.Check(t.Context(), client, egresshealth.Options{
 			UrlProbe: true, ColdStartTimeout: time.Minute, PerRequestTimeout: 15 * time.Second,
 			Rand:         rand.New(rand.NewSource(1)),
 			Destinations: []egresshealth.Destination{{Name: "synthetic", Class: egresshealth.ClassSite, Url: "https://sample.probe.example/page"}},
 		})
-		if err != nil || result == nil || queries != 3 || len(result.Checks) != 1 || result.Checks[0].Attempts != 1 {
-			t.Fatalf("single URL/private DNS contract changed: queries=%d err=%v", queries, err)
+		if err != nil || result == nil || queries != 1 || time.Since(started) != 5*time.Second || len(result.Checks) != 1 || result.Checks[0].Attempts != 1 {
+			t.Fatalf("single URL/private DNS contract changed: queries=%d elapsed=%s err=%v", queries, time.Since(started), err)
 		}
 	})
 	return result
