@@ -537,7 +537,7 @@ func TestAccountLimitRefusalIsHonestAboutItsScope(t *testing.T) {
 // CheckNetworkCreateRateLimit computes the hint in SQL, in the same statement
 // and against the same clock as the count:
 //
-//	COALESCE(CEIL(EXTRACT(EPOCH FROM (MIN(create_time) + INTERVAL '1 seconds' * $2 - now())))::bigint, 0)
+//	COALESCE(CEIL(EXTRACT(EPOCH FROM (MIN(create_time) + INTERVAL '1 seconds' * $2 - (now() AT TIME ZONE 'UTC'))))::bigint, 0)
 //
 // and the comment above it promises "the real remaining time on the window: the
 // oldest attempt still counted expires then, freeing exactly one slot." Nothing
