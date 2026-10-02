@@ -931,9 +931,9 @@ func TestLoadBlobStoreConfigBackendSelection(t *testing.T) {
 		t.Fatalf("local max bytes = %d, want %d", config.LocalMaxBytes, DefaultLocalBlobMaxBytes)
 	}
 	store, ok := LoadBlobStore()
-	if !ok || store.Authority() != "local:/tmp/sim-blob" {
+	if ok || store != nil {
 		cleanup()
-		t.Fatalf("LoadBlobStore local: ok=%t authority=%q", ok, store.Authority())
+		t.Fatalf("configured local store without a physical declaration was admitted: ok=%t", ok)
 	}
 	cleanup()
 
