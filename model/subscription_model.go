@@ -1410,7 +1410,7 @@ const contractExtenderInsertSql = `
 // reservations afterward in read committed, so a lock wait cannot authorize
 // already-reserved credit.
 // Zero-byte contracts read their earliest-grant anchor and priority without
-// taking financial locks; the client lifecycle fences still precede this read.
+// taking financial locks; their client lifecycle fences precede this read.
 func createTransferEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -1432,19 +1432,14 @@ func createTransferEscrowInTx(
 	if contractTransferByteCount < 0 {
 		return nil, nil, fmt.Errorf("negative contract transfer byte count")
 	}
-	if err := validateProberShardPayerInTx(ctx, tx, sourceNetworkId, destinationNetworkId, payerNetworkId); err != nil {
+	shardDeadline, err := validateProberShardPayerInTx(ctx, tx, sourceNetworkId, destinationNetworkId, payerNetworkId)
+	if err != nil {
 		return nil, nil, err
 	}
-	if err := lockActiveContractClientsInTx(
-		ctx,
-		tx,
-		sourceNetworkId,
-		sourceId,
-		destinationNetworkId,
-		destinationId,
-	); err != nil {
-		returnErr = err
-		return
+	if contractTransferByteCount == 0 {
+		if err := lockActiveContractClientsInTx(ctx, tx, sourceNetworkId, sourceId, destinationNetworkId, destinationId); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	contractId := server.NewId()
@@ -1466,6 +1461,21 @@ func createTransferEscrowInTx(
 		payerClientId = destinationId
 	}
 	orderedTransferBalances := loadTransferEscrowBalances(ctx, tx, payerNetworkId, payerClientId, now, contractTransferByteCount)
+	// Waiting for a payer's grant must not retain provider/client row locks
+	// and block unrelated connection refreshes or lifecycle changes. Revalidate
+	// both endpoints after the financial wait, retaining the locks through commit.
+	if 0 < contractTransferByteCount {
+		if err := lockActiveContractClientsInTx(ctx, tx, sourceNetworkId, sourceId, destinationNetworkId, destinationId); err != nil {
+			return nil, nil, err
+		}
+		// Client-lock waits can outlive a grant even though its row stayed
+		// locked and unchanged. Keep the final positive-byte eligibility check
+		// after that wait; zero anchors preserve their original snapshot order.
+		now = server.NowUtc()
+		orderedTransferBalances = slices.DeleteFunc(orderedTransferBalances, func(balance *escrow) bool {
+			return balance.startTime.After(now) || !now.Before(balance.endTime)
+		})
+	}
 
 	slices.SortFunc(orderedTransferBalances, func(a *escrow, b *escrow) int {
 		if a.endTime.Before(b.endTime) {
@@ -1538,6 +1548,9 @@ func createTransferEscrowInTx(
 		balanceIds = append(balanceIds, balanceId)
 	}
 	slices.SortFunc(balanceIds, func(a, b server.Id) int { return a.Cmp(b) })
+	if err := validateProberShardAdmissionDeadlineInTx(ctx, tx, shardDeadline); err != nil {
+		return nil, nil, err
+	}
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for _, balanceId := range balanceIds {
 			escrow := balanceEscrows[balanceId]
@@ -2186,7 +2199,7 @@ func createContractNoEscrowInTx(
 ) (contractId server.Id, returnErr error) {
 	// A shard-owned probe always pays from its private grant. Ordinary network
 	// and friends-and-family contracts keep their existing no-payer behavior.
-	if err := validateProberShardPayerInTx(ctx, tx, sourceNetworkId, destinationNetworkId, server.Id{}); err != nil {
+	if _, err := validateProberShardPayerInTx(ctx, tx, sourceNetworkId, destinationNetworkId, server.Id{}); err != nil {
 		return server.Id{}, err
 	}
 	if err := lockActiveContractClientsInTx(
