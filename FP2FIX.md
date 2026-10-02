@@ -4917,7 +4917,9 @@ The scheduled URL coverage observations at 12:36:02 and 12:51:18 remained
 6; the latter lacked owners for shards 0 and 2. They reported no qualified
 current numeric quota census. All eight current Taskworker versions alone do
 not establish active shard ownership, accepted measured-run throughput, or
-ten-run rolling coverage. The next scheduled observation at 13:06:30 produced a qualified coherent
+ten-run rolling coverage.
+
+The next scheduled observation at 13:06:30 produced a qualified coherent
 census: 113,561 eligible providers, zero quota-complete or secure-complete,
 98,115 due, 113,558 overdue, three warming, 15 uninitialized, and 786,714
 measured runs still needed. It reported 17 security-pending providers, one
@@ -4944,5 +4946,9 @@ the independent receipt is `independent-monitor-financial-review.json`
 (SHA-256 `d0081bd25d8f0a794ec8e41aded578d843c96c63e597f3d6aca47bc8891944c5`).
 
 The 13:09 owner receipt is `URL-owner-qualification-4000-1309-v3/run-20261002T130920Z`
-(SHA-256 prefix `1440ddf2`); it is an instantaneous metric observation, not a
+(SHA-256 `1440ddf2084ef1b147c1d98d95d2620ec383b2bbde02daf641bde0c743a6e3ad`);
+it is an instantaneous metric observation, not a
 durable task-lease, cleanup, or accepted-history join.
+The 13:06:30 scheduled census is in retained scoped record 475
+(SHA-256 `e781a2d0600959ebe09abf565fdb9caafaf21b9c8918bb6fa662a2efe62ae35f`);
+the earlier `1dc907ab` scope supports only the 12:36 and 12:51 observations.
