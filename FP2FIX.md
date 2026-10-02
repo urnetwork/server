@@ -5289,3 +5289,31 @@ independent posthandoff audit
 `3624856d5e17548aa24a58adc5ef7ec54e34821167217a41249c7d8759a837c5`;
 independent ARIN source review
 `5f561e5ee7273d7c4b6880cd3bd0eebf5b8ecd9c118ab8c3110638fd5c9c3c9b`.
+
+
+## 2026-10-02 18:27 UTC all-block source witness
+
+One bounded source-qualified HTTPS read at 18:27 UTC found all 48 enabled
+API, Connect and Taskworker slots with fresh source/start/config witnesses for
+`2026.10.2-metadata-balance-fence+1060864300`, source `3213739b`. API was
+20/20 with positive readiness gauges; Connect was 20/20 and Taskworker 8/8
+for release identity. This supersedes the earlier partial 4200 version witness.
+These self-reported instant metrics do not establish direct executable identity,
+predecessor retirement, DNAT, Connect QUIC readiness, Taskworker readiness,
+continuous health or accepted probe throughput. No additional rollout or restart
+was performed to obtain this read.
+
+The owning reader review caught null deployment floors in the actual reducer
+pins before contact. The correction binds all twelve parsed ISO floors and
+rejects loaded-pin/manifest disagreement before requesting Main; independent
+32-control verification passed. A local interpreter import failure also occurred
+before any contact. The actual read used the independently tested interpreter
+and made exactly one production request. Receipt SHA-256:
+`2859398f3caf23b350131b576d3b499d47f9027eacf1e556eb4c073e44f18d92`.
+
+The latest retained automatic PostgreSQL CPU sample, at 18:07:52 UTC, was
+50.318 of 96 logical cores (52.41 percent), over a 5.01-second interval.
+A separate 18:07:24 state observation had 279 active sessions, 143 idle
+transactions and 711 clients. Both precede the monitoring handoff and neither
+attributes current load to a query or proves recovery. The first new scheduled
+query sampler remains pending.
