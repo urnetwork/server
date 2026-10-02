@@ -182,6 +182,8 @@ type httpsRequestTrace struct {
 	certificate       string
 	gotConn           bool
 	reused            bool
+	// Zero means CONNECT is not in use; -1 means its response is still pending.
+	proxyConnectStatus int
 }
 
 type httpsRequestTraceContextKey struct{}
@@ -648,7 +650,7 @@ func (self *httpsRequestTrace) clientTrace() *httptrace.ClientTrace {
 		ConnectStart: func(_, address string) {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
-			self.phase = "connecting_tunnel"
+			self.phase = "connecting_tcp"
 			self.dialAddress = compactDiagnosticToken(address)
 		},
 		ConnectDone: func(_, address string, err error) {
@@ -656,9 +658,9 @@ func (self *httpsRequestTrace) clientTrace() *httptrace.ClientTrace {
 			defer self.stateLock.Unlock()
 			self.dialAddress = compactDiagnosticToken(address)
 			if err != nil {
-				self.phase = "connecting_tunnel_failed"
+				self.phase = "connecting_tcp_failed"
 			} else {
-				self.phase = "tunnel_connected"
+				self.phase = "tcp_connected"
 			}
 		},
 		TLSHandshakeStart: func() { setPhase("tls_handshake") },
@@ -709,6 +711,11 @@ func (self *httpsRequestTrace) wrap(err error, finished time.Time) error {
 		}
 	}
 	path := ""
+	if self.proxyConnectStatus < 0 {
+		path += "; proxy_connect_status pending"
+	} else if self.proxyConnectStatus > 0 {
+		path += fmt.Sprintf("; proxy_connect_status %d", self.proxyConnectStatus)
+	}
 	if self.dialAddress != "" {
 		path += "; dial " + self.dialAddress
 	}
@@ -1146,14 +1153,17 @@ func (a *apiClient) post(ctx context.Context, path string, body any, jwt string,
 	if jwt != "" {
 		request.Header.Set("Authorization", "Bearer "+jwt)
 	}
+	requestTrace := newAPIRequestTrace()
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), requestTrace.clientTrace()))
 	response, err := a.client.Do(request)
 	if err != nil {
-		return err
+		return requestTrace.failure(path, err, 0)
 	}
 	defer response.Body.Close()
+	requestTrace.responseReceived(response.StatusCode)
 	data, err := io.ReadAll(io.LimitReader(response.Body, maxAPIResponseBytes+1))
 	if err != nil {
-		return err
+		return requestTrace.failure(path, err, len(data))
 	}
 	if len(data) > maxAPIResponseBytes {
 		return fmt.Errorf("%s response exceeded %d bytes", path, maxAPIResponseBytes)
@@ -1185,7 +1195,7 @@ func (r *runner) productionProbes(config *proxyConfigResult) map[string]protocol
 				return errors.New("HTTP proxy URL is invalid")
 			}
 			proxyURL.User = url.UserPassword(config.AuthToken, "acceptance")
-			transport := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+			transport := newHTTPConnectTransport(proxyURL)
 			defer transport.CloseIdleConnections()
 			_, err = probeHTTPSCampaign(
 				ctx,
