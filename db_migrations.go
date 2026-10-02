@@ -9450,4 +9450,6 @@ var migrations = []any{
 	newSqlMigration(netEscrowContractsRevisionPointLookupSql),
 	// Cache exact admission snapshots at the guarded durable revision.
 	newSqlMigration(netEscrowAdmissionSnapshotSchemaSql),
+	// Reader compatibility only; approximate admission remains disabled.
+	newSqlMigration(redisContractAdmissionSchemaSql),
 }

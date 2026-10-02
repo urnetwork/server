@@ -58,7 +58,7 @@ var netEscrowContractPointRevisionArtifactQuery = `EXISTS (
 		AND actual.prokind='f' AND actual.provolatile='v' AND actual.proparallel='u'
 		AND NOT actual.prosecdef AND NOT actual.proleakproof AND NOT actual.proisstrict
 		AND actual.proconfig IS NULL
-		AND actual.prosrc='` + strings.ReplaceAll(server.NetEscrowContractsRevisionFunctionBodySql, "'", "''") + `'
+		AND actual.prosrc=CASE WHEN (SELECT coalesce(max(end_version_number),0) FROM migration_audit WHERE status='success')>=755 THEN '` + strings.ReplaceAll(server.NetEscrowContractsRedisRevisionFunctionBodySql, "'", "''") + `' ELSE '` + strings.ReplaceAll(server.NetEscrowContractsRevisionFunctionBodySql, "'", "''") + `' END
 )`
 
 const netEscrowSnapshotArtifactQuery = `(
@@ -78,4 +78,17 @@ const netEscrowSnapshotArtifactQuery = `(
 			AND pg_get_constraintdef(actual.oid)=expected.definition
 			AND (expected.kind='c' OR EXISTS (SELECT 1 FROM pg_index AS i
 				WHERE i.indexrelid=actual.conindid AND i.indisvalid AND i.indisready AND i.indisunique))))
+)`
+
+const redisAdmissionArtifactQuery = `(
+    EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public'
+        AND table_name='transfer_escrow' AND column_name='redis_reserved'
+        AND data_type='boolean' AND is_nullable='NO' AND column_default='false')
+    AND (SELECT count(*)=2 FROM information_schema.columns WHERE table_schema='public'
+        AND table_name='redis_contract_admission_policy' AND column_name IN ('singleton','enabled')
+        AND data_type='boolean' AND is_nullable='NO')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('public.redis_contract_admission_policy')
+        AND contype='p' AND convalidated AND pg_get_constraintdef(oid)='PRIMARY KEY (singleton)')
+    AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('public.redis_contract_admission_policy')
+        AND contype='c' AND convalidated AND pg_get_constraintdef(oid)='CHECK (singleton)')
 )`

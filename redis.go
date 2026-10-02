@@ -150,7 +150,7 @@ func (self *safeRedisClient) open() redis.UniversalClient {
 				// see https://redis.uptrace.dev/guide/go-redis-debugging.html#timeouts
 				// see https://uptrace.dev/blog/golang-context-timeout.html
 				ContextTimeoutEnabled: self.contextTimeoutEnabled,
-				// PING and single-key GET/EVAL use direct slot routing. Policy
+				// PING, GET and same-slot EVAL use direct slot routing. Policy
 				// discovery otherwise detaches COMMAND from the caller deadline.
 				DisableRoutingPolicies: self.contextTimeoutEnabled,
 				ReadTimeout:            readTimeout,
@@ -372,8 +372,9 @@ func RedisDoOnce(ctx context.Context, callback func(RedisClient)) {
 // reads and writes for both standalone and cluster clients. The callback must
 // pass the same ctx to every command. RedisReset and pool telemetry own this
 // pool just like the ordinary pools; no per-operation client is leaked.
-// This pool is restricted to PING and single-key GET/EVAL cleanup; it bypasses
+// This pool is restricted to PING, GET and same-slot EVAL operations; it bypasses
 // cluster command-policy discovery and must not route multi-shard operations.
+// EVAL callers must keep every declared key in one explicit Redis hash tag.
 func RedisWithDeadline(ctx context.Context, callback func(RedisClient) error) (returnErr error) {
 	if _, bounded := ctx.Deadline(); !bounded {
 		return fmt.Errorf("RedisWithDeadline requires an explicit deadline")

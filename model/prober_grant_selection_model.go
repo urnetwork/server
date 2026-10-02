@@ -144,9 +144,11 @@ func lockTransferEscrowBalanceRows(
 	// This statement must remain separate from the locking query: its snapshot
 	// must include reservations committed by the preceding balance-lock owner.
 	reserved := readLockedNetEscrowSnapshots(ctx, tx, lockedBalanceIds)
+	approxReserved := readRedisContractReservations(ctx, lockedBalanceIds)
 	for _, balance := range balances {
 		balance.reservation = reserved[balance.balanceId]
 		balance.balanceByteCount = max(0, balance.balanceByteCount-balance.reservation.reserved)
+		balance.balanceByteCount = max(0, balance.balanceByteCount-approxReserved[balance.balanceId])
 	}
 	if recheckExpiry {
 		now = server.NowUtc()

@@ -262,22 +262,33 @@ func refreshNetEscrow(ctx context.Context, balanceIds []server.Id) {
 // A quarantine commits its outcome before refreshing the affected balances.
 // Retrying this post cannot release another contract's reservation.
 func releaseNetEscrowForContract(ctx context.Context, contractId server.Id) {
-	balanceIds := []server.Id{}
+	var legacyIds, redisIds []server.Id
 	mirrorCtx, cancel := netEscrowMirrorCtx(ctx)
 	defer cancel()
 	server.Db(mirrorCtx, func(conn server.PgConn) {
-		result, err := conn.Query(mirrorCtx,
-			`SELECT balance_id FROM transfer_escrow WHERE contract_id = $1 AND balance_byte_count <> 0`, contractId)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var balanceId server.Id
-				server.Raise(result.Scan(&balanceId))
-				balanceIds = append(balanceIds, balanceId)
+		rows, err := conn.Query(mirrorCtx, `SELECT escrow.balance_id,escrow.redis_reserved,contract.outcome IS NOT NULL
+            FROM transfer_contract AS contract
+            CROSS JOIN LATERAL (SELECT balance_id,redis_reserved,balance_byte_count FROM transfer_escrow
+                WHERE contract_id=contract.contract_id OFFSET 0) AS escrow
+            WHERE contract.contract_id=$1 AND escrow.balance_byte_count<>0`, contractId)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				var id server.Id
+				var redisReserved, terminal bool
+				server.Raise(rows.Scan(&id, &redisReserved, &terminal))
+				if redisReserved {
+					if terminal {
+						redisIds = append(redisIds, id)
+					}
+				} else {
+					legacyIds = append(legacyIds, id)
+				}
 			}
 		})
 	})
-	if len(balanceIds) > 0 {
-		pending := readMirrorNetEscrowSnapshots(mirrorCtx, balanceIds)
-		reconcileNetEscrowBatch(mirrorCtx, pending, balanceIds, true)
+	releaseRedisContractReservations(mirrorCtx, contractId, redisIds)
+	if len(legacyIds) > 0 {
+		pending := readMirrorNetEscrowSnapshots(mirrorCtx, legacyIds)
+		reconcileNetEscrowBatch(mirrorCtx, pending, legacyIds, true)
 	}
 }

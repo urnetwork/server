@@ -21,8 +21,8 @@ var netEscrowRevisionArtifactQuery = `(
 		AND contype='c' AND convalidated AND pg_get_constraintdef(oid)='CHECK ((revision > 0))')
 	AND (SELECT count(*) = 5 FROM (VALUES
 		('advance_net_escrow_revision(uuid[])','void', '` + strings.ReplaceAll(server.NetEscrowAdvanceRevisionFunctionBodySql, "'", "''") + `'),
-		('transfer_escrow_revision()','trigger', '` + strings.ReplaceAll(server.NetEscrowRowsRevisionFunctionBodySql, "'", "''") + `'),
-		('transfer_contract_escrow_revision()','trigger', CASE WHEN
+		('transfer_escrow_revision()','trigger', CASE WHEN (SELECT coalesce(max(end_version_number),0) FROM migration_audit WHERE status='success') >= 755 THEN '` + strings.ReplaceAll(server.NetEscrowRowsRedisRevisionFunctionBodySql, "'", "''") + `' ELSE '` + strings.ReplaceAll(server.NetEscrowRowsRevisionFunctionBodySql, "'", "''") + `' END),
+		('transfer_contract_escrow_revision()','trigger', CASE WHEN (SELECT coalesce(max(end_version_number),0) FROM migration_audit WHERE status='success') >= 755 THEN '` + strings.ReplaceAll(server.NetEscrowContractsRedisRevisionFunctionBodySql, "'", "''") + `' WHEN
 			(SELECT coalesce(max(end_version_number),0) FROM migration_audit WHERE status='success') >= 753
 			THEN '` + strings.ReplaceAll(server.NetEscrowContractsRevisionFunctionBodySql, "'", "''") + `'
 			ELSE '` + strings.ReplaceAll(server.NetEscrowContractsRevisionLegacyFunctionBodySql, "'", "''") + `' END),
