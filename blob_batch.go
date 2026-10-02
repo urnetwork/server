@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/urnetwork/connect/durablevolume"
 )
 
 const MaximumLocalBlobBatchWrites = 16 * 1024
@@ -88,8 +90,18 @@ func BeginLocalBlobWriteBatch(ctx context.Context, stores []BlobStore, maximumWr
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if err := os.MkdirAll(store.root, 0o755); err != nil {
-			return nil, err
+		if store.durableReference == nil {
+			if err := os.MkdirAll(store.root, 0o755); err != nil {
+				return nil, err
+			}
+		} else {
+			owner, err := store.openDurable(ctx, durablevolume.ReadOnly)
+			if err != nil {
+				return nil, err
+			}
+			if err := owner.Close(); err != nil {
+				return nil, err
+			}
 		}
 		absolute, err := filepath.Abs(store.root)
 		if err != nil {
@@ -118,6 +130,9 @@ func BeginLocalBlobWriteBatch(ctx context.Context, stores []BlobStore, maximumWr
 			batch.roots = append(batch.roots, entry)
 		} else if !os.SameFile(info, entry.info) {
 			return nil, errors.New("local blob batch root changed during declaration")
+		}
+		if (store.durableReference == nil) != (entry.store.durableReference == nil) || store.durableReference != nil && *store.durableReference != *entry.store.durableReference {
+			return nil, errors.New("local blob batch mixes different physical storage declarations for one root")
 		}
 		byPath[root] = entry
 		batch.stores[store] = entry
