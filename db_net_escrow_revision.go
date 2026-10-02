@@ -42,7 +42,10 @@ END
 
 // Keep migration 747 byte-identical. The appended function replacement below
 // supplies the contract-key optimization boundary without rewriting history.
-const netEscrowContractsRevisionLegacyFunctionBodySql = `
+// NetEscrowContractsRevisionLegacyFunctionBodySql is the byte-exact body
+// published by migration 747. The monitor uses it until migration 753 replaces
+// the function; keeping both bodies prevents a current-source false drift.
+const NetEscrowContractsRevisionLegacyFunctionBodySql = `
 BEGIN
 	IF TG_OP = 'INSERT' THEN
 		PERFORM advance_net_escrow_revision(ARRAY(
@@ -194,7 +197,7 @@ const netEscrowRevisionSchemaSql = `
 	CREATE TRIGGER transfer_escrow_revision_delete AFTER DELETE ON transfer_escrow
 	REFERENCING OLD TABLE AS old_escrow_rows FOR EACH STATEMENT EXECUTE FUNCTION transfer_escrow_revision();
 	CREATE FUNCTION transfer_contract_escrow_revision()
-	RETURNS trigger LANGUAGE plpgsql AS $contract$` + netEscrowContractsRevisionLegacyFunctionBodySql + `$contract$;
+	RETURNS trigger LANGUAGE plpgsql AS $contract$` + NetEscrowContractsRevisionLegacyFunctionBodySql + `$contract$;
 	CREATE TRIGGER transfer_contract_escrow_revision_insert AFTER INSERT ON transfer_contract
 	REFERENCING NEW TABLE AS new_escrow_contracts FOR EACH STATEMENT EXECUTE FUNCTION transfer_contract_escrow_revision();
 	CREATE TRIGGER transfer_contract_escrow_revision_update AFTER UPDATE ON transfer_contract

@@ -32,6 +32,41 @@ func TestMigrationsSignalMergedCatalogUsesExactColumns(t *testing.T) {
 				restore:  `ALTER TABLE transfer_contract ENABLE TRIGGER transfer_contract_usage_guard`,
 				artifact: "transfer_contract immutable usage and terminal attribution guard@v745",
 			},
+			{
+				apply:    `DROP INDEX prober_shard_run_active_slot`,
+				restore:  `CREATE UNIQUE INDEX prober_shard_run_active_slot ON prober_shard_run(shard_index) WHERE state='active'`,
+				artifact: "private prober shard ownership and cleanup fences@v752",
+			},
+			{
+				apply:    `ALTER TABLE prober_shard_run DROP CONSTRAINT prober_shard_run_balance_id_key`,
+				restore:  `ALTER TABLE prober_shard_run ADD CONSTRAINT prober_shard_run_balance_id_key UNIQUE(balance_id)`,
+				artifact: "private prober shard ownership and cleanup fences@v752",
+			},
+			{
+				apply:    `ALTER TABLE prober_shard_run ALTER COLUMN retired_client_ids DROP DEFAULT`,
+				restore:  `ALTER TABLE prober_shard_run ALTER COLUMN retired_client_ids SET DEFAULT '{}'::uuid[]`,
+				artifact: "private prober shard ownership and cleanup fences@v752",
+			},
+			{
+				apply:    `CREATE OR REPLACE FUNCTION transfer_contract_escrow_revision() RETURNS trigger LANGUAGE plpgsql AS $body$` + server.NetEscrowContractsRevisionLegacyFunctionBodySql + `$body$`,
+				restore:  `CREATE OR REPLACE FUNCTION transfer_contract_escrow_revision() RETURNS trigger LANGUAGE plpgsql AS $body$` + server.NetEscrowContractsRevisionFunctionBodySql + `$body$`,
+				artifact: "net escrow contract revision point lookup@v753",
+			},
+			{
+				apply:    `ALTER FUNCTION transfer_contract_escrow_revision() SECURITY DEFINER`,
+				restore:  `ALTER FUNCTION transfer_contract_escrow_revision() SECURITY INVOKER`,
+				artifact: "net escrow contract revision point lookup@v753",
+			},
+			{
+				apply:    `ALTER TABLE transfer_balance_net_escrow_snapshot DROP CONSTRAINT transfer_balance_net_escrow_snapshot_reserved_byte_count_check`,
+				restore:  `ALTER TABLE transfer_balance_net_escrow_snapshot ADD CONSTRAINT transfer_balance_net_escrow_snapshot_reserved_byte_count_check CHECK(reserved_byte_count>=0)`,
+				artifact: "durable net escrow reservation snapshot@v754",
+			},
+			{
+				apply:    `ALTER TABLE transfer_balance_net_escrow_snapshot ALTER COLUMN revision SET DEFAULT 0`,
+				restore:  `ALTER TABLE transfer_balance_net_escrow_snapshot ALTER COLUMN revision DROP DEFAULT`,
+				artifact: "durable net escrow reservation snapshot@v754",
+			},
 		} {
 			server.Db(ctx, func(conn server.PgConn) {
 				server.RaisePgResult(conn.Exec(ctx, fault.apply))
