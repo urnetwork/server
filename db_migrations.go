@@ -9448,4 +9448,6 @@ var migrations = []any{
 	// Keep reservation-revision work proportional to the changed contracts,
 	// even when the unsettled partial index has stale false-zero statistics.
 	newSqlMigration(netEscrowContractsRevisionPointLookupSql),
+	// Cache exact admission snapshots at the guarded durable revision.
+	newSqlMigration(netEscrowAdmissionSnapshotSchemaSql),
 }
