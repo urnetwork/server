@@ -20,13 +20,30 @@ import (
 // their separate policies; delayed limiter admission rechecks the actual debt.
 type providerUsdcPaymentContextKey struct{}
 
+// This instance-owned observation seam orders a mutation after the actual
+// public read in regression tests. Production callers never populate it.
+type providerPaymentReadObserverKey struct{}
+
+type providerPaymentSubmission struct {
+	Basis   model.ProviderPaymentBasis
+	Amount  float64
+	Network string
+}
+
+type circleTransferArguments struct {
+	IdempotencyKey server.Id
+	Amount         float64
+	Destination    string
+	Network        string
+}
+
 // The limiter and the final earning check form one send boundary, also used
 // by deterministic tests that advance policy while admission is suspended.
-func circleTransferAfterAdmission(ctx context.Context, wait func(context.Context) error, send func(context.Context) (*CreateTransferTransactionResult, error)) (*CreateTransferTransactionResult, error) {
+func circleTransferAfterAdmission(ctx context.Context, args circleTransferArguments, wait func(context.Context) error, send func(context.Context) (*CreateTransferTransactionResult, error)) (*CreateTransferTransactionResult, error) {
 	if err := wait(ctx); err != nil {
 		return nil, err
 	}
-	if err := requireCircleProviderPayment(ctx); err != nil {
+	if err := requireCircleProviderTransfer(ctx, args); err != nil {
 		return nil, err
 	}
 	return send(ctx)
@@ -36,8 +53,27 @@ func requireCircleProviderPayment(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if paymentId, ok := ctx.Value(providerUsdcPaymentContextKey{}).(server.Id); ok {
-		return model.RequireProviderUsdcPayment(ctx, paymentId)
+	if value := ctx.Value(providerUsdcPaymentContextKey{}); value != nil {
+		submission, ok := value.(providerPaymentSubmission)
+		if !ok {
+			return model.ErrProviderPaymentBasisChanged
+		}
+		return model.RequireProviderPaymentBasis(ctx, &submission.Basis)
+	}
+	return nil
+}
+
+// Actual Core arguments, not merely a valid payment id, must match the
+// retained attempt. Customer/admin sends have no provider submission context.
+func requireCircleProviderTransfer(ctx context.Context, args circleTransferArguments) error {
+	if err := requireCircleProviderPayment(ctx); err != nil {
+		return err
+	}
+	if submission, ok := ctx.Value(providerUsdcPaymentContextKey{}).(providerPaymentSubmission); ok {
+		if submission.Basis.IdempotencyKey != args.IdempotencyKey || submission.Amount != args.Amount ||
+			submission.Basis.WalletAddress != args.Destination || submission.Network != args.Network {
+			return model.ErrProviderPaymentBasisChanged
+		}
 	}
 	return nil
 }
@@ -115,7 +151,8 @@ func (c *CoreCircleApiClient) CreateTransferTransaction(
 	destinationAddress string,
 	network string,
 ) (*CreateTransferTransactionResult, error) {
-	if err := requireCircleProviderPayment(ctx); err != nil {
+	args := circleTransferArguments{IdempotencyKey: idempotencyKey, Amount: amountInUsd, Destination: destinationAddress, Network: network}
+	if err := requireCircleProviderTransfer(ctx, args); err != nil {
 		return nil, err
 	}
 	hexEncodedEntitySecret := entitySecret()
@@ -136,7 +173,7 @@ func (c *CoreCircleApiClient) CreateTransferTransaction(
 	}
 
 	uri := "https://api.circle.com/v1/w3s/developer/transactions/transfer"
-	res, err := circleTransferAfterAdmission(ctx, waitForCircleTransferAdmission, func(ctx context.Context) (*CreateTransferTransactionResult, error) {
+	res, err := circleTransferAfterAdmission(ctx, args, waitForCircleTransferAdmission, func(ctx context.Context) (*CreateTransferTransactionResult, error) {
 		return server.HttpPostRequireStatusOk(
 			ctx,
 			uri,

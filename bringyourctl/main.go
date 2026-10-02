@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"os"
 	"strconv"
@@ -84,7 +85,7 @@ Usage:
     bringyourctl payout single --account_payment_id=<account_payment_id>
     bringyourctl payout pending
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
-    bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd>
+    bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd> --adjustment_id=<adjustment_id> --reason=<reason>
     bringyourctl payouts plan [--send] [--dry-run] [--max_duration=<max_duration>]
     bringyourctl payouts populate-tx-hashes
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
@@ -278,7 +279,7 @@ Options:
 		} else if plan, _ := opts.Bool("plan"); plan {
 			planPayouts(opts)
 		} else if applyBonus, _ := opts.Bool("apply-bonus"); applyBonus {
-			payoutPlanApplyBonus(opts)
+			server.Raise(payoutPlanApplyBonus(opts))
 		} else if ptxh, _ := opts.Bool("populate-tx-hashes"); ptxh {
 			populateTxHashes()
 		}
@@ -1476,27 +1477,41 @@ func payoutByPaymentId(opts docopt.Opts) {
 	fmt.Println("Complete Status: ", res.Complete)
 }
 
-func payoutPlanApplyBonus(opts docopt.Opts) {
+func payoutPlanApplyBonus(opts docopt.Opts) error {
 	ctx := context.Background()
 
 	planIdStr, err := opts.String("--plan_id")
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	amountUsd, err := opts.Float64("--amount_usd")
 	if err != nil {
-		panic(err)
+		return err
+	}
+	if math.IsNaN(amountUsd) || math.IsInf(amountUsd, 0) || amountUsd <= 0 || amountUsd >= float64(math.MaxInt64)/1e9 {
+		return errors.New("bonus amount must be positive and within NanoCents range")
 	}
 
 	amountNanoCents := model.UsdToNanoCents(amountUsd)
 
 	planId, err := server.ParseId(planIdStr)
 	if err != nil {
-		panic(err)
+		return err
 	}
-
-	model.PayoutPlanApplyBonus(ctx, planId, amountNanoCents)
+	operationText, err := opts.String("--adjustment_id")
+	if err != nil {
+		return err
+	}
+	operationId, err := server.ParseId(operationText)
+	if err != nil {
+		return err
+	}
+	reason, err := opts.String("--reason")
+	if err != nil {
+		return err
+	}
+	return model.PayoutPlanApplyBonus(ctx, planId, amountNanoCents, operationId, reason)
 }
 
 // paymentsReconcile runs one payment reconciliation pass (UPGRADE.md §8) by

@@ -81,10 +81,12 @@ type AccountPayment struct {
 	PayoutByteCount ByteCount  `json:"payout_byte_count"`
 	Payout          NanoCents  `json:"payout_nano_cents"`
 	// AccountPoints   NanoPoints `json:"account_points"`
-	SubsidyPayout      NanoCents `json:"subsidy_payout_nano_cents"`
-	ReliabilitySubsidy NanoCents `json:"reliability_subsidy_nano_cents"`
-	MinSweepTime       time.Time `json:"min_sweep_time"`
-	CreateTime         time.Time `json:"create_time"`
+	SubsidyPayout             NanoCents `json:"subsidy_payout_nano_cents"`
+	ReliabilitySubsidy        NanoCents `json:"reliability_subsidy_nano_cents"`
+	BonusPayout               NanoCents `json:"bonus_payout_nano_cents"`
+	AttributionReviewRequired bool      `json:"attribution_review_required"`
+	MinSweepTime              time.Time `json:"min_sweep_time"`
+	CreateTime                time.Time `json:"create_time"`
 
 	PaymentRecord  *string    `json:"payment_record"`
 	TokenType      *string    `json:"token_type"`
@@ -127,6 +129,8 @@ func dbGetPayment(ctx context.Context, conn server.PgConn, paymentId server.Id) 
                 account_payment.payout_nano_cents,
                 account_payment.subsidy_payout_nano_cents,
                 account_payment.reliability_subsidy_nano_cents,
+                account_payment.bonus_payout_nano_cents,
+                account_payment.attribution_review_required,
                 account_payment.min_sweep_time,
                 account_payment.create_time,
                 account_payment.payment_record,
@@ -175,6 +179,8 @@ func dbGetPayment(ctx context.Context, conn server.PgConn, paymentId server.Id) 
 				&payment.Payout,
 				&payment.SubsidyPayout,
 				&payment.ReliabilitySubsidy,
+				&payment.BonusPayout,
+				&payment.AttributionReviewRequired,
 				&payment.MinSweepTime,
 				&payment.CreateTime,
 				&payment.PaymentRecord,
@@ -835,34 +841,6 @@ func CancelPaymentAfterProcessorCancellation(
 	return
 }
 
-// used in bringyourctl to apply a bonus to a payment plan
-func PayoutPlanApplyBonus(
-	ctx context.Context,
-	paymentPlanId server.Id,
-	bonusNanoCents NanoCents,
-) (returnErr error) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-                UPDATE account_payment
-                SET
-                    payout_nano_cents = payout_nano_cents + $2
-                WHERE
-                    payment_plan_id = $1 AND
-                    NOT completed AND NOT canceled
-            `,
-			paymentPlanId,
-			bonusNanoCents,
-		))
-		if tag.RowsAffected() == 0 {
-			returnErr = fmt.Errorf("invalid payment plan")
-			return
-		}
-	})
-	return
-}
-
 // GetNetworkPayments normally hides canceled payments because their sweeps are
 // represented by a replacement payment. A canceled row that still carries a
 // retry/on-chain marker is not safely replaceable, however, and remains visible
@@ -884,6 +862,8 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
                 account_payment.payout_byte_count,
                 account_payment.payout_nano_cents,
                 account_payment.subsidy_payout_nano_cents,
+                account_payment.bonus_payout_nano_cents,
+                account_payment.attribution_review_required,
                 account_payment.min_sweep_time,
                 account_payment.create_time,
                 account_payment.payment_record,
@@ -928,6 +908,8 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 					&payment.PayoutByteCount,
 					&payment.Payout,
 					&payment.SubsidyPayout,
+					&payment.BonusPayout,
+					&payment.AttributionReviewRequired,
 					&payment.MinSweepTime,
 					&payment.CreateTime,
 					&payment.PaymentRecord,

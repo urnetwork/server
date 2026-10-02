@@ -172,12 +172,13 @@ func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 			return
 		}
 
+		planner.carryPaymentBonuses()
 		planner.withholdSmallPayments()
 		planner.setWallets()
 
 		totalPayout := NanoCents(0)
 		for _, payment := range planner.networkPayments {
-			totalPayout += payment.Payout
+			totalPayout += payment.Payout - payment.BonusPayout
 		}
 		if planner.subsidyPayment != nil && 0 < planner.subsidyPayment.SubsidyScale && 0 < totalPayout {
 			planner.applyPayoutPoints(
@@ -986,7 +987,7 @@ func (self *PaymentPlanner) finalizePayments() {
 				payment.NetworkId,
 				payment.WalletId,
 				payment.PayoutByteCount,
-				payment.Payout,
+				payment.Payout-payment.BonusPayout,
 				payment.SubsidyPayout,
 				payment.MinSweepTime,
 				payment.CreateTime,
@@ -994,6 +995,8 @@ func (self *PaymentPlanner) finalizePayments() {
 			)
 		}
 	})
+
+	self.assignPaymentBonuses()
 
 	server.RaisePgResult(self.tx.Exec(
 		self.ctx,
@@ -1106,7 +1109,7 @@ func (self *PaymentPlanner) applyPayoutPoints(
 
 		// scaledAccountPoints := NanoPoints(pointsScaleFactor * float64(accountNanoPoints))
 
-		scaledAccountPoints := PointsToNanoPoints(totalPoints * (float64(payment.Payout) / float64(totalPayout)))
+		scaledAccountPoints := PointsToNanoPoints(totalPoints * (float64(payment.Payout-payment.BonusPayout) / float64(totalPayout)))
 		glog.Infof("[plan]payout %s with %d nano points (%d nano cents)\n",
 			payment.NetworkId,
 			scaledAccountPoints,

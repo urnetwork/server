@@ -9450,4 +9450,6 @@ var migrations = []any{
 	newSqlMigration(netEscrowContractsRevisionPointLookupSql),
 	// Cache exact admission snapshots at the guarded durable revision.
 	newSqlMigration(netEscrowAdmissionSnapshotSchemaSql),
+	// Corrections retain their original earning window across safe re-planning.
+	newSqlMigration(providerPaymentBonusSchemaSql),
 }

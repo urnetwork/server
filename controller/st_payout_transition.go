@@ -44,7 +44,10 @@ func stPayoutAdmissionAt(ctx context.Context, cfg *StConfig, now time.Time) erro
 	if err != nil {
 		return err
 	}
-	return policy.MainnetAdmission(now, stPayoutIdentity(cfg))
+	if err := policy.MainnetAdmission(now, stPayoutIdentity(cfg)); err != nil {
+		return err
+	}
+	return server.RequireProviderPayoutSchema(ctx)
 }
 
 // Public, redacted local status. This is loaded configuration and identity
@@ -60,6 +63,8 @@ type ProviderPayoutTransitionStatus struct {
 	ReadinessReason                string                           `json:"readiness_reason"`
 	DeploymentVerified             bool                             `json:"deployment_verified"`
 	RetrospectiveClaimGuaranteed   bool                             `json:"retrospective_claim_guaranteed"`
+	PayoutSchemaReady              bool                             `json:"payout_schema_ready"`
+	PayoutSchemaReason             string                           `json:"payout_schema_reason"`
 }
 
 func GetProviderPayoutTransitionStatus(ctx context.Context) (*ProviderPayoutTransitionStatus, error) {
@@ -70,6 +75,11 @@ func GetProviderPayoutTransitionStatus(ctx context.Context) (*ProviderPayoutTran
 	now := server.NowUtc()
 	status := &ProviderPayoutTransitionStatus{ObservedAt: now, Schedule: policy, Phase: "legacy_unscheduled", LegacyPreCutoffPaymentsAllowed: true, SelectedProfile: os.Getenv("URNETWORK_ST_PROFILE")}
 	if policy != nil {
+		if err := server.RequireProviderPayoutSchema(ctx); err != nil {
+			status.PayoutSchemaReason = err.Error()
+		} else {
+			status.PayoutSchemaReady = true
+		}
 		status.Phase = "scheduled"
 		if !now.Before(policy.Cutoff) {
 			status.Phase = "sn_earning_legacy_settlement"

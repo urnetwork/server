@@ -36,7 +36,7 @@ func newPayoutTransitionCohort(t testing.TB, ctx context.Context) *payoutTransit
 	t.Cleanup(sourceSession.Cancel)
 	f.session = session.Testing_CreateClientSession(ctx, &jwt.ByJwt{NetworkId: f.network, ClientId: &f.client})
 	t.Cleanup(f.session.Cancel)
-	code, err := CreateBalanceCode(ctx, 1024*1024*1024, 365*24*time.Hour, UsdToNanoCents(100), "", "", "")
+	code, err := CreateBalanceCode(ctx, 1024*1024*1024, 365*24*time.Hour, UsdToNanoCents(100), "transition-"+server.NewId().String(), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,6 +290,13 @@ func TestProviderTransitionFreeAndPaidUsageHaveEqualSubnetWeight(t *testing.T) {
 		closed := payoutTestCutoff.Add(time.Microsecond)
 		free.insert(t, ctx, payoutTestCutoff.Add(-time.Hour), &closed, closed.Add(time.Hour), 1024, 0)
 		paid.insert(t, ctx, payoutTestCutoff.Add(-time.Hour), &closed, closed.Add(time.Hour), 1024, UsdToNanoCents(9))
+		// Real nonterminal and canceled snapshots cannot mint usage even if an
+		// escrow row exists. Both share the same actual model read below.
+		free.insert(t, ctx, payoutTestCutoff.Add(-time.Hour), nil, closed.Add(time.Hour), 4096, 0)
+		canceled := paid.insert(t, ctx, payoutTestCutoff.Add(-time.Hour), nil, closed.Add(time.Hour), 8192, 0)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET outcome='canceled',close_time=$2 WHERE contract_id=$1`, canceled, closed))
+		})
 		rows, err := GetStEpochProviderUsageAtEpoch(ctx, 9, payoutTestCutoff.Add(-time.Hour), closed.Add(time.Hour))
 		if err != nil {
 			t.Fatal(err)

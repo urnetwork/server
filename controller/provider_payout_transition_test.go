@@ -23,7 +23,7 @@ func controllerPayoutSchedule(t testing.TB, cutoff time.Time) {
 
 // An original, terminal contract and its exact escrow credit back the queued
 // payment. Processing time is intentionally unrelated to the earning time.
-func controllerPayoutFixture(t testing.TB, closed time.Time) (*session.ClientSession, *model.AccountPayment) {
+func controllerPayoutFixture(t testing.TB, closed time.Time, historicalGross ...model.NanoCents) (*session.ClientSession, *model.AccountPayment) {
 	t.Helper()
 	ctx := context.Background()
 	network, client, sourceNetwork, source := server.NewId(), server.NewId(), server.NewId(), server.NewId()
@@ -38,7 +38,7 @@ func controllerPayoutFixture(t testing.TB, closed time.Time) (*session.ClientSes
 	if err := model.SetPayoutWallet(ctx, network, *wallet); err != nil {
 		t.Fatal(err)
 	}
-	code, err := model.CreateBalanceCode(ctx, 1024*1024, 365*24*time.Hour, model.UsdToNanoCents(100), "", "", "")
+	code, err := model.CreateBalanceCode(ctx, 1024*1024, 365*24*time.Hour, model.UsdToNanoCents(100), "transition-"+server.NewId().String(), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,10 +48,14 @@ func controllerPayoutFixture(t testing.TB, closed time.Time) (*session.ClientSes
 		t.Fatal("missing fixture balance")
 	}
 	paymentId, contract := server.NewId(), server.NewId()
+	gross := model.UsdToNanoCents(10)
+	if len(historicalGross) == 1 {
+		gross = historicalGross[0]
+	}
 	usage := fmt.Sprintf(`{"version":1,"byte_count":100,"providers":[{"client_id":%q,"network_id":%q,"byte_count":100}]}`, client.String(), network.String())
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_payment(payment_id,payment_plan_id,network_id,wallet_id,payout_byte_count,payout_nano_cents,min_sweep_time)
-		VALUES($1,$2,$3,$4,100,$5,$6)`, paymentId, server.NewId(), network, *wallet, model.UsdToNanoCents(10), closed.Add(time.Hour)))
+		VALUES($1,$2,$3,$4,100,$5,$6)`, paymentId, server.NewId(), network, *wallet, gross, closed.Add(time.Hour)))
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,create_time,close_time,outcome,provider_usage,usage_origin_is_source)
 		VALUES($1,$2,$3,$4,$5,100,$6,$7,'settled',$8,true)`, contract, sourceNetwork, source, network, client, closed.Add(-time.Hour), closed, usage))
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_escrow_sweep(contract_id,balance_id,network_id,destination_id,payout_byte_count,payout_net_revenue_nano_cents,sweep_time,payment_id)
@@ -166,12 +170,18 @@ func TestProviderTransitionFinalCircleAdmissionAndCustomerIsolation(t *testing.T
 		owner, payment := controllerPayoutFixture(t, cutoff)
 		// Force the ordering at the actual shared final-send guard: original
 		// legacy eligibility, then a declaration loaded while admission waits.
-		ctx := context.WithValue(owner.Ctx, providerUsdcPaymentContextKey{}, payment.PaymentId)
+		wallet := model.GetAccountWallet(owner.Ctx, *payment.WalletId)
+		basis, err := model.ReserveProviderPaymentBasis(owner.Ctx, payment, wallet)
+		if err != nil {
+			t.Fatal(err)
+		}
+		args := circleTransferArguments{IdempotencyKey: basis.IdempotencyKey, Amount: 9.99, Destination: wallet.WalletAddress, Network: "MATIC"}
+		ctx := context.WithValue(owner.Ctx, providerUsdcPaymentContextKey{}, providerPaymentSubmission{Basis: *basis, Amount: args.Amount, Network: args.Network})
 		if err := requireCircleProviderPayment(ctx); err != nil {
 			t.Fatal(err)
 		}
 		sends := 0
-		_, err := circleTransferAfterAdmission(ctx, func(context.Context) error { controllerPayoutSchedule(t, cutoff); return nil }, func(context.Context) (*CreateTransferTransactionResult, error) {
+		_, err = circleTransferAfterAdmission(ctx, args, func(context.Context) error { controllerPayoutSchedule(t, cutoff); return nil }, func(context.Context) (*CreateTransferTransactionResult, error) {
 			sends++
 			return &CreateTransferTransactionResult{}, nil
 		})

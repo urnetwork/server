@@ -258,6 +258,9 @@ func AdvancePayment(
 			Canceled: true,
 		}, nil
 	}
+	if observer, ok := clientSession.Ctx.Value(providerPaymentReadObserverKey{}).(func(*model.AccountPayment)); ok {
+		observer(payment)
+	}
 
 	if payment.Completed || payment.Canceled {
 		return &AdvancePaymentResult{
@@ -398,6 +401,12 @@ func advancePayment(
 			return
 
 		case "COMPLETE":
+			if err := model.RequireProviderUsdcPayment(clientSession.Ctx, payment.PaymentId); err != nil {
+				// Existing processor success is not proof that a mutable historical
+				// gross amount was paid. Keep its actual token amount and receipt.
+				model.RetainProviderPaymentAttributionReview(clientSession.Ctx, payment.PaymentId)
+				auditAccountPayment(clientSession, payment.PaymentId, fmt.Errorf("processor result reconciled; gross earning attribution requires review: %w", err))
+			}
 
 			// mark the payment complete in our DB
 			if err := model.CompletePayment(
@@ -498,16 +507,16 @@ func advancePayment(
 		}
 		// creating it also pins the payment wallet (`UpdatePaymentWallet`),
 		// so a retried submit pays the same address the processor already saw
-		idempotencyKey, err := model.GetOrCreatePaymentIdempotencyKey(clientSession.Ctx, payment.PaymentId)
+		basis, err := model.ReserveProviderPaymentBasis(clientSession.Ctx, payment, accountWallet)
 		if err != nil {
-			returnErr = fmt.Errorf("[%s]Payment idempotency key error = %s", payment.PaymentId, err)
+			returnErr = fmt.Errorf("[%s]Payment idempotency key error = %w", payment.PaymentId, err)
 			return
 		}
 
 		// send the payment
 		transferResult, err := circleClient.CreateTransferTransaction(
-			context.WithValue(clientSession.Ctx, providerUsdcPaymentContextKey{}, payment.PaymentId),
-			idempotencyKey,
+			context.WithValue(clientSession.Ctx, providerUsdcPaymentContextKey{}, providerPaymentSubmission{Basis: *basis, Amount: payoutAmount, Network: formattedBlockchain}),
+			basis.IdempotencyKey,
 			payoutAmount,
 			accountWallet.WalletAddress,
 			formattedBlockchain,
