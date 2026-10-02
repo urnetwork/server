@@ -36,7 +36,24 @@ func queryProviderPayoutStats(
 	windowStart time.Time,
 	windowEnd time.Time,
 ) (map[server.Id]map[string]NanoCents, error) {
-	result, err := conn.Query(ctx, providerPayoutStatsSql, networkId, windowStart, windowEnd)
+	policy, err := server.LoadProviderPayoutTransition(ctx)
+	if err != nil {
+		return nil, err
+	}
+	query := providerPayoutStatsSql
+	args := []any{networkId, windowStart, windowEnd}
+	if policy != nil {
+		query = `WITH payout_sweeps AS MATERIALIZED (
+			SELECT s.* FROM transfer_escrow_sweep s JOIN transfer_contract c ON c.contract_id=s.contract_id
+			WHERE s.network_id=$1 AND $2 <= s.sweep_time AND s.sweep_time < $3 AND c.close_time < $4
+			AND c.outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
+		)` + contractProviderPayoutRowsSql + `
+		SELECT COALESCE(client_id,'00000000-0000-0000-0000-000000000000'::uuid),
+		to_char(sweep_time,'YYYY-MM-DD'),COALESCE(SUM(payout_nano_cents),0)::bigint,BOOL_AND(valid)
+		FROM provider_rows GROUP BY client_id,to_char(sweep_time,'YYYY-MM-DD')`
+		args = append(args, policy.Cutoff)
+	}
+	result, err := conn.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read provider payout attribution: %w", err)
 	}

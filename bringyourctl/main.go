@@ -36,6 +36,7 @@ func main() {
 	usage := `BringYour control.
 
 Usage:
+    bringyourctl sn-transition-status
     bringyourctl db version
     bringyourctl db migrate
     bringyourctl db vacuum [--exclude=<table>...]
@@ -149,7 +150,17 @@ Options:
 		panic(err)
 	}
 
-	if db, _ := opts.Bool("db"); db {
+	if transitionStatus, _ := opts.Bool("sn-transition-status"); transitionStatus {
+		status, err := controller.GetProviderPayoutTransitionStatus(context.Background())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(status); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	} else if db, _ := opts.Bool("db"); db {
 		if version, _ := opts.Bool("version"); version {
 			dbVersion(opts)
 		} else if migrate, _ := opts.Bool("migrate"); migrate {

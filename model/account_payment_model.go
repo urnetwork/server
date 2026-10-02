@@ -366,7 +366,10 @@ type PaymentPlan struct {
 	// - thresholds
 	// - missing wallets
 	// - or other rules
-	WithheldNetworkIds []server.Id
+	WithheldNetworkIds       []server.Id
+	QuarantinedSweepCount    int64
+	QuarantinedNanoCents     NanoCents
+	UnresolvedCensusComplete bool
 }
 
 type SubsidyPayment struct {
@@ -435,6 +438,14 @@ func PlanPaymentsWithMaxDurationLoop(
 	maxDuration time.Duration,
 	onSlice func(*PaymentPlan),
 ) ([]*PaymentPlan, error) {
+	transition, err := server.LoadProviderPayoutTransition(ctx)
+	if err != nil {
+		return nil, err
+	}
+	end := server.NowUtc()
+	if transition != nil {
+		end = server.MinTime(end, transition.Cutoff)
+	}
 	if maxDuration <= 0 {
 		plan, err := CreatePaymentPlan(ctx, EnvSubsidyConfig(), false, 0)
 		if err != nil {
@@ -476,7 +487,7 @@ func PlanPaymentsWithMaxDurationLoop(
 		lastFrontier = frontier
 
 		// the frontier reached now: the backlog is fully drained.
-		if !frontier.Before(server.NowUtc()) {
+		if !frontier.Before(end) {
 			break
 		}
 	}

@@ -28,6 +28,7 @@ type GetNetworkAccountPaymentsError struct {
 }
 
 type GetNetworkAccountPaymentsResult struct {
+	Asset           string                          `json:"asset"`
 	AccountPayments []*model.AccountPayment         `json:"account_payments,omitempty"`
 	Error           *GetNetworkAccountPaymentsError `json:"error,omitempty"`
 }
@@ -44,6 +45,7 @@ func GetNetworkAccountPayments(session *session.ClientSession) (*GetNetworkAccou
 	}
 
 	return &GetNetworkAccountPaymentsResult{
+		Asset:           "USDC",
 		AccountPayments: networkAccountPayments,
 	}, nil
 }
@@ -491,6 +493,9 @@ func advancePayment(
 		}
 
 		// the idempotency key is stable across retries of this payment.
+		if err := model.RequireProviderUsdcPayment(clientSession.Ctx, payment.PaymentId); err != nil {
+			return false, false, err
+		}
 		// creating it also pins the payment wallet (`UpdatePaymentWallet`),
 		// so a retried submit pays the same address the processor already saw
 		idempotencyKey, err := model.GetOrCreatePaymentIdempotencyKey(clientSession.Ctx, payment.PaymentId)
@@ -501,7 +506,7 @@ func advancePayment(
 
 		// send the payment
 		transferResult, err := circleClient.CreateTransferTransaction(
-			clientSession.Ctx,
+			context.WithValue(clientSession.Ctx, providerUsdcPaymentContextKey{}, payment.PaymentId),
 			idempotencyKey,
 			payoutAmount,
 			accountWallet.WalletAddress,
