@@ -366,3 +366,39 @@ func TestRedisAdmissionPartialEvictionCannotReleaseNeighbor(t *testing.T) {
 		}
 	})
 }
+
+func TestRedisAdmissionOlderRecoveryPreservesYoungerLease(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		balance, young, old := server.NewId(), server.NewId(), server.NewId()
+		amount, err := redisContractReservation(ctx, "reserve", balance, young, 1000, 23, redisContractReservationLease)
+		if err != nil || amount != 23 {
+			t.Fatal("young reservation failed", err)
+		}
+		amount, err = redisContractReservation(ctx, "restore", balance, old, 1000, 17, time.Hour)
+		if err != nil || amount != 17 {
+			t.Fatal("older recovery failed", err)
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			keys := redisContractReservationKeys(balance)
+			for _, key := range keys[:3] {
+				ttl, err := r.PTTL(ctx, key).Result()
+				if err != nil || ttl < 24*time.Hour {
+					t.Fatal("older recovery shortened a younger reservation's shared key lifetime", ttl, err)
+				}
+			}
+			youngUntil, err := r.ZScore(ctx, keys[2], young.String()).Result()
+			server.Raise(err)
+			oldUntil, err := r.ZScore(ctx, keys[2], old.String()).Result()
+			server.Raise(err)
+			if time.Duration(youngUntil-oldUntil)*time.Millisecond < 22*time.Hour {
+				t.Fatal("recovery extended the older token's own horizon")
+			}
+		})
+		if got := Testing_NetEscrowByteCount(ctx, balance); got != 40 {
+			t.Fatal("recovery changed combined reservation", got)
+		}
+	})
+}
