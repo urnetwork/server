@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/connect/durablevolume"
 )
 
 const localBlobCapacityLockName = ".capacity-owner.partial"
@@ -31,16 +33,20 @@ func (self *localBlobCapacityReader) Read(data []byte) (int, error) {
 	}
 	n, err := self.reader.Read(data)
 	if canceled := self.ctx.Err(); canceled != nil {
-		return n, canceled
+		// Do not let ReadFull or a decoder accept a canceled complete buffer.
+		return 0, errors.Join(err, canceled)
 	}
 	return n, err
 }
 
 // The physical root is fixed before locking so path aliases share one owner.
 type localBlobCapacityOwner struct {
-	root     string
-	rootInfo os.FileInfo
-	file     *os.File
+	root      string
+	rootInfo  os.FileInfo
+	file      *os.File
+	volume    *durablevolume.Owner
+	directory *os.File
+	failed    error
 }
 
 // Reserved temporary names and escaping paths cannot become uncharged objects.
@@ -94,6 +100,9 @@ func (self *localBlobStore) acquireCapacity(ctx context.Context, wait bool) (*lo
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if self.durableReference != nil {
+		return self.acquireDurableCapacity(ctx, wait)
 	}
 	if err := os.MkdirAll(self.root, 0o755); err != nil {
 		return nil, err
@@ -159,6 +168,9 @@ func (self *localBlobStore) acquireCapacity(ctx context.Context, wait bool) (*lo
 
 // Existing owner and root identities must survive a wait before mutation.
 func (self *localBlobCapacityOwner) check() error {
+	if self.volume != nil {
+		return self.checkDurable()
+	}
 	rootInfo, err := os.Stat(self.root)
 	if err != nil || !os.SameFile(rootInfo, self.rootInfo) {
 		return errors.Join(errors.New("local blob capacity root changed"), err)
@@ -181,7 +193,17 @@ func (self *localBlobCapacityOwner) Close() error {
 	}
 	file := self.file
 	self.file = nil
-	return errors.Join(localBlobCapacityUnlock(file), file.Close())
+	// Drop application ownership before releasing the external snapshot lease.
+	durableErr := errors.Join(localBlobCapacityUnlock(file), file.Close())
+	if self.directory != nil {
+		durableErr = errors.Join(durableErr, self.directory.Close())
+		self.directory = nil
+	}
+	if self.volume != nil {
+		durableErr = errors.Join(durableErr, self.volume.Close())
+		self.volume = nil
+	}
+	return durableErr
 }
 
 // Keep capacity arithmetic nonnegative and avoid addition overflow on refusal.
