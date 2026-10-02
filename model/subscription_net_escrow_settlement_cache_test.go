@@ -105,8 +105,11 @@ func TestNetEscrowSettlementCacheLegacyMutationInvalidatesPrediction(t *testing.
 			if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 7 {
 				t.Fatalf("%s mirror=%d want7", stage, got)
 			}
-			if got, n := lockedAdmissionCacheTestRead(ctx, f); got.reserved != 7 || n != 1 {
-				t.Fatalf("%s next admission cache amount=%d census=%d want7/1", stage, got.reserved, n)
+			// This legacy hook invalidates a previously warm settlement. Its
+			// independent metadata/mirror posts may leave either a current warmup
+			// or a revision miss; admission must be exact in both schedules.
+			if got, n := lockedAdmissionCacheTestRead(ctx, f); got.reserved != 7 || n > 1 {
+				t.Fatalf("%s next admission cache amount=%d census=%d want7/at-most1", stage, got.reserved, n)
 			}
 			server.RunPosts(ctx, posts...)
 			if got := settlementCacheSnapshot(ctx, []server.Id{f.balanceId})[f.balanceId].reserved; got != 7 {
@@ -332,13 +335,13 @@ func TestNetEscrowSettlementCacheTwentyCloseCost(t *testing.T) {
 			if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 10001 {
 				t.Fatalf("surviving mirrored reservation=%d want10001", got)
 			}
-			want := int64(0)
+			wantMirror := float64(0)
 			if cold {
-				want = 1
+				wantMirror = 1
 			}
 			t.Logf("cold_cache=%t closes20 no_overtaking_admission main_census_statements=%d mirror_census_statements=%v mirror_reused=%v elapsed=%s", cold, mainReads.Load(), reloaded, reused, elapsed)
-			if mainReads.Load() != want || reloaded != 0 || reused != 20 {
-				t.Errorf("cold=%t main_exact=%d mirror_exact=%v reused=%v want%d/0/20", cold, mainReads.Load(), reloaded, reused, want)
+			if mainReads.Load() != 0 || reloaded != wantMirror || reused != 20-wantMirror {
+				t.Errorf("cold=%t main_exact=%d mirror_exact=%v reused=%v want0/%v/%v", cold, mainReads.Load(), reloaded, reused, wantMirror, 20-wantMirror)
 			}
 		}
 	})

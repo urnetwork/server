@@ -3159,12 +3159,12 @@ func settleEscrowInTx(
 	// run all the posts in parallel in as small blocks as reasonable to minimize the work for serialization errors
 
 	if 0 < len(sweepPayouts) {
-		posts = append(posts, func() any {
+		metadataPost := func() any {
 			server.Tx(ctx, func(tx server.PgTx) {
 				settleEscrowMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts)
 			}, server.TxReadCommitted)
 			return nil
-		})
+		}
 
 		if 0 < len(participantSweepPayouts) {
 			posts = append(posts, func() any {
@@ -3195,10 +3195,26 @@ func settleEscrowInTx(
 			}
 		}
 		if len(mirrorBalanceIds) > 0 {
-			posts = append(posts, func() any {
+			mirrorPost := func() any {
 				refreshNetEscrow(ctx, mirrorBalanceIds)
 				return nil
-			})
+			}
+			if len(reservationSnapshots) < len(positiveReservations) {
+				// A cold mirror must follow this metadata attempt: otherwise it
+				// can warm the preceding revision after metadata already read a
+				// cache miss, only to be invalidated by its harmless settled flag.
+				// Keep both in one independently replayable post, with no channel
+				// dependency on another callback that could be lost. As with the
+				// separate posts, report metadata errors and still try the mirror.
+				posts = append(posts, func() any {
+					server.HandleError(func() { metadataPost() })
+					return mirrorPost()
+				})
+			} else {
+				posts = append(posts, metadataPost, mirrorPost)
+			}
+		} else {
+			posts = append(posts, metadataPost)
 		}
 	}
 

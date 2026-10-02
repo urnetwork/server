@@ -233,7 +233,9 @@ func readMirrorNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id) m
 		pending = readCachedNetEscrowSnapshots(ctx, conn, balanceIds)
 	})
 	missing := missingNetEscrowSnapshots(pending, balanceIds)
-	for balanceId, snapshot := range openEscrowReservedForBalances(ctx, missing) {
+	exact := openEscrowReservedForBalances(ctx, missing)
+	cacheCommittedNetEscrowSnapshots(ctx, exact)
+	for balanceId, snapshot := range exact {
 		pending[balanceId] = snapshot
 	}
 	netEscrowRefreshSnapshots.WithLabelValues("reused").Add(float64(len(balanceIds) - len(missing)))
