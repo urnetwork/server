@@ -210,3 +210,15 @@ const netEscrowRevisionSchemaSql = `
 	CREATE TRIGGER transfer_balance_escrow_revision_update AFTER UPDATE ON transfer_balance
 	REFERENCING OLD TABLE AS old_escrow_balances NEW TABLE AS new_escrow_balances FOR EACH STATEMENT EXECUTE FUNCTION transfer_balance_escrow_revision();
 `
+
+// Lazily populated only from exact revision-fenced reservation snapshots.
+// Existing writers need no change: every revision advance invalidates an old
+// cached amount. Retained revision tombstones also fence balance-id reuse.
+// No history scan, backfill or populated index build is required.
+const netEscrowAdmissionSnapshotSchemaSql = `
+ CREATE TABLE transfer_balance_net_escrow_snapshot (
+     balance_id uuid PRIMARY KEY,
+     revision bigint NOT NULL CHECK (revision >= 0),
+     reserved_byte_count bigint NOT NULL CHECK (reserved_byte_count >= 0)
+ );
+`
