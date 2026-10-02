@@ -5195,3 +5195,64 @@ all deployment terminals `886db690583fe09dd3f49b4ff2135c7c896c9548fe075fbf3669da
 fleet witness `d42b2be91f4ab510f7573ce11dcf519d715c27f28e41481c268502ba6a2a59a6`;
 selected-grant independent review `ea267bc6eb1256ab4312d445173178da5883adb0d2d8e73d2763d3ca41c62d59`;
 metadata-fence independent review `0ee9845667b087768e6a91757fb03602eae21473c5919f4ce1bc0f86648dd89e`.
+
+
+## 2026-10-02 18:17 UTC metadata release and monitoring handoff checkpoint
+
+API, Connect and Taskworker multiarchitecture images for
+`2026.10.2-metadata-balance-fence+1060864300` were built from source
+`3213739b6be57a71d502fb63cc97bf387a4851dd` with Connect SDK `6443417d70dc`.
+Registry graphs and embedded local binaries were verified. All-block deployment
+commands completed successfully at 17:51:13, 17:59:03 and 17:50:00 UTC,
+respectively. Actual 4300 runtime convergence remains unverified; the earlier
+43/48 witness applies only to 4200 and must not be reused as current proof.
+
+The final matched local two-process financial comparison completed all 64
+admissions and 64 settlements in both arms. Both preserved exact durable and
+cached accounting. The old implementation performed 81 exact reservation
+snapshot reloads with ten sampled concurrent censuses; the balance-lock
+correction performed zero. This establishes the local mechanism and preserves
+accounting, but does not establish Main CPU recovery or a guaranteed timeout
+improvement. Independent focused financial and integrated cross-patch race
+controls passed. The full Model suite remains incomplete: its owning partition
+has a static clock-order guard failure under investigation. Initial source
+triage found two mutually exclusive endpoint-lock branches where the older
+static guard expects one textual marker; no runtime monetary failure has been
+established by that failure.
+
+The actual scheduled 18:06:53 UTC census reports 112,542 eligible providers,
+5,529 quota-complete and 5,525 secure-complete, about 4.91 percent quota
+coverage. It reports 398,306 measured runs still needed. The preceding 17:51:41
+census was 7,994/112,629, about 7.10 percent. Cohort changes and incomplete
+hourly history prevent fixed-provider or sustained-rate attribution. This is
+not quota recovery and the 100-percent coverage requirement remains open.
+
+Seven recurring database query samples have failed, with no successful sample.
+The latest old-watcher attempt completed at 18:05:21.466533523 UTC and retained
+its next eligible floor of 18:20:21.466533523. The reviewed fair-admission and
+finite failure-phase monitoring correction was promoted through one same-unit
+restart. Old PID 4144942 retired; new PID 193014 started at 18:15:32 UTC and
+runs exact source `1ff1a4e2c520a5822c5c2b69d1d79bb11c610976`. Independent
+posthandoff audit confirmed unchanged unit/launcher, the 15-minute interval,
+all durable cadence clocks, and no duplicate watcher. The startup delay makes
+the earliest new active callback 18:30:32 UTC; this handoff has an observation
+gap and is not evidence of a successful query sample. Database load recovery
+and query attribution remain unverified.
+
+The nonactivating ARIN shadow correction passed independent focused race
+controls. It retains the owning lookup clock, matches current census facts,
+and classifies missing/stale observations as indeterminate rather than proven
+provider loss. A separately staged policy-two resource, verified subscriber
+coverage, bucket census, and activation evidence remain outstanding. No active
+catalog replacement or classification cutover is claimed.
+
+Evidence SHA-256: all 4300 deployment terminals
+`6042af765c80cc1ed2bfbf81e5bfaa02746fce5657ba05f4fa86239b24725d10`;
+matched local financial comparison
+`a877f338f954c8149f245bb98ef3e8c577200ee691be42134e8377cea8eb0023`;
+monitor promotion
+`3a43bed6e4c91889047971abb495da93687f41970f030f2592c51863d107d386`;
+independent posthandoff audit
+`3624856d5e17548aa24a58adc5ef7ec54e34821167217a41249c7d8759a837c5`;
+independent ARIN source review
+`5f561e5ee7273d7c4b6880cd3bd0eebf5b8ecd9c118ab8c3110638fd5c9c3c9b`.
