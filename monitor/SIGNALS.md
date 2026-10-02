@@ -1604,6 +1604,30 @@ boundary below, not conversion of SQL wall time into CPU.
 Implementation convention: SIGNALS.md §1.3c (`pg-cpu`) maps to
 `signal_pg_cpu.go`, `signal_pg_cpu_test.go`, and `NewPgCpuSignal` in `NewSignals`.
 
+The 2026-10-02 10:52:38–10:53:02Z bounded activity sample matched the
+1,023-byte normalized prefix of `netEscrowReservationPageSQL` across all 12
+snapshots: 307 active/no-wait backend-samples, peak 51, maximum query age
+10.31 seconds. This was the largest retained no-wait group, not its measured
+CPU share or proof of a specific caller. The activity group and final-output
+caps omitted groups. Installed `pg_stat_statements` 1.10 lacked the per-entry
+`stats_since` lifetime field despite PostgreSQL 18; unchanged global reset and
+deallocation counters did not qualify any completed interval deltas.
+
+Settlement, quarantine and retention mirrors now try the same committed
+revision-matched PostgreSQL snapshot used by admission before exact fallback.
+A delayed-settlement control with 10,001 surviving reservations blocked on
+escrow history despite a current cache before the change; the repaired mirror
+completed while that history table remained locked. Missing/stale snapshots,
+legacy mutations and deleted balances still require the exact census, and
+reconciliation itself remains exact. The two finite `result` values of
+`urnetwork_net_escrow_refresh_snapshot_total` count `reused`/`reloaded` balance
+snapshots after source reads, not distinct SQL calls, successful Redis writes,
+settlements, or committed admissions. They do not identify the production
+census caller. A current cache can remove repeat reads without reducing
+required settlement work; persistent misses can leave CPU high. Verify fresh
+per-process counter continuity and source coverage alongside independent CPU
+and successful traffic before claiming recovery.
+
 The 2026-09-27 read-only grant/backup discriminator is manual evidence, not a
 new automated alert. The current grant shape returned about 225 rows/call at
 834 calls/s, with 7,547 shared-buffer hits/call and no shared reads. The balance

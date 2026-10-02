@@ -26,8 +26,14 @@ var netEscrowCreationSnapshots = prometheus.NewCounterVec(prometheus.CounterOpts
 	Help: "Creation mirror balances published from a verified admission or durable cached snapshot, or reloaded from escrow history.",
 }, []string{"result"})
 
+var netEscrowRefreshSnapshots = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_net_escrow_refresh_snapshot_total",
+	Help: "Settlement, quarantine and retention mirror snapshots reused at a durable revision or reloaded from escrow history; not completed settlements.",
+}, []string{"result"})
+
 func init() {
 	prometheus.MustRegister(netEscrowCreationSnapshots)
+	prometheus.MustRegister(netEscrowRefreshSnapshots)
 }
 
 // The fence shares its balance's Redis slot and survives a zero reservation or
@@ -214,8 +220,27 @@ func publishCreatedNetEscrow(
 	netEscrowCreationSnapshots.WithLabelValues("reloaded").Add(float64(len(changed)))
 }
 
-// Other posts reload committed state instead of replaying their original delta.
-// The source revision fences publishers that overtake either read/write pair.
+// Other posts read committed state instead of replaying their original delta.
+// An overtaking admission may already have cached the current exact amount.
+// Keep exact fallback for legacy writes and invalidated or deleted balances;
+// the source revision fences publishers that overtake either read/write pair.
+func readMirrorNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id) map[server.Id]netEscrowSnapshot {
+	pending := map[server.Id]netEscrowSnapshot{}
+	if len(balanceIds) == 0 {
+		return pending
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		pending = readCachedNetEscrowSnapshots(ctx, conn, balanceIds)
+	})
+	missing := missingNetEscrowSnapshots(pending, balanceIds)
+	for balanceId, snapshot := range openEscrowReservedForBalances(ctx, missing) {
+		pending[balanceId] = snapshot
+	}
+	netEscrowRefreshSnapshots.WithLabelValues("reused").Add(float64(len(balanceIds) - len(missing)))
+	netEscrowRefreshSnapshots.WithLabelValues("reloaded").Add(float64(len(missing)))
+	return pending
+}
+
 func refreshNetEscrow(ctx context.Context, balanceIds []server.Id) {
 	if len(balanceIds) == 0 {
 		return
@@ -227,7 +252,7 @@ func refreshNetEscrow(ctx context.Context, balanceIds []server.Id) {
 	const batchSize = 10000
 	for start := 0; start < len(balanceIds); start += batchSize {
 		batch := balanceIds[start:min(start+batchSize, len(balanceIds))]
-		pending := openEscrowReservedForBalances(mirrorCtx, batch)
+		pending := readMirrorNetEscrowSnapshots(mirrorCtx, batch)
 		reconcileNetEscrowBatch(mirrorCtx, pending, batch, true)
 	}
 }
@@ -250,7 +275,7 @@ func releaseNetEscrowForContract(ctx context.Context, contractId server.Id) {
 		})
 	})
 	if len(balanceIds) > 0 {
-		pending := openEscrowReservedForBalances(mirrorCtx, balanceIds)
+		pending := readMirrorNetEscrowSnapshots(mirrorCtx, balanceIds)
 		reconcileNetEscrowBatch(mirrorCtx, pending, balanceIds, true)
 	}
 }
