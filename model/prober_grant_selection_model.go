@@ -26,6 +26,7 @@ type escrowTransferBalance struct {
 	balanceByteCount ByteCount
 	startTime        time.Time
 	endTime          time.Time
+	reservation      netEscrowSnapshot
 }
 
 var proberGrantSelectionResults = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -144,7 +145,8 @@ func lockTransferEscrowBalanceRows(
 	// must include reservations committed by the preceding balance-lock owner.
 	reserved := readNetEscrowSnapshots(ctx, tx, lockedBalanceIds)
 	for _, balance := range balances {
-		balance.balanceByteCount = max(0, balance.balanceByteCount-reserved[balance.balanceId].reserved)
+		balance.reservation = reserved[balance.balanceId]
+		balance.balanceByteCount = max(0, balance.balanceByteCount-balance.reservation.reserved)
 	}
 	if recheckExpiry {
 		now = server.NowUtc()
@@ -161,6 +163,23 @@ func loadTransferEscrowBalances(
 	ctx context.Context, tx server.PgTx, payerNetworkId, payerClientId server.Id,
 	now time.Time, requestedBytes ByteCount,
 ) []*escrowTransferBalance {
+	if requestedBytes == 0 {
+		// An anchor consumes no credit. Preserve its earliest-expiry priority
+		// without queuing behind a financial allocation or scanning escrow
+		// history for amounts that cannot affect this zero-byte reservation.
+		balances := []*escrowTransferBalance{}
+		rows, err := tx.Query(ctx, escrowTransferBalanceSql+`
+			ORDER BY end_time, start_time, balance_id LIMIT 1`, payerNetworkId, now)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				balance := &escrowTransferBalance{}
+				server.Raise(rows.Scan(&balance.balanceId, &balance.paid, &balance.balanceByteCount,
+					&balance.startTime, &balance.endTime))
+				balances = append(balances, balance)
+			}
+		})
+		return balances
+	}
 	if requestedBytes > 0 {
 		balances := []*escrowTransferBalance{}
 		internalProber := false

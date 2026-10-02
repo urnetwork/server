@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
 )
@@ -18,6 +19,15 @@ type netEscrowSnapshot struct {
 	revision int64
 	reserved ByteCount
 	endTime  *time.Time
+}
+
+var netEscrowCreationSnapshots = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_net_escrow_creation_snapshot_total",
+	Help: "Creation mirror balances published from a verified admission snapshot or reloaded from escrow history.",
+}, []string{"result"})
+
+func init() {
+	prometheus.MustRegister(netEscrowCreationSnapshots)
 }
 
 // The fence shares its balance's Redis slot and survives a zero reservation or
@@ -139,8 +149,58 @@ func reconcileNetEscrowBatch(
 	return
 }
 
-// Posts reload committed state instead of replaying their original delta. The
-// source revision fences another publisher that overtakes this read/write pair.
+// A creation already censused reservations before its two revision-advancing
+// inserts. Reuse that exact snapshot only while a single committed statement
+// confirms both the contract and the expected revisions. Contract existence is
+// essential: a rolled-back transaction's predicted revision can be reused by
+// another writer. Changed state falls back to the ordinary authoritative census.
+const netEscrowCreatedSnapshotSQL = `
+    SELECT requested_balance.balance_id, COALESCE(revision.revision, 0), balance.end_time,
+        EXISTS (SELECT 1 FROM transfer_contract WHERE contract_id = $2 AND outcome IS NULL)
+    FROM unnest($1::uuid[]) AS requested_balance(balance_id)
+    LEFT JOIN transfer_balance_net_escrow_revision AS revision USING (balance_id)
+    LEFT JOIN transfer_balance AS balance USING (balance_id)
+`
+
+func publishCreatedNetEscrow(
+	ctx context.Context, contractId server.Id,
+	expected map[server.Id]netEscrowSnapshot, balanceIds []server.Id,
+) {
+	mirrorCtx, cancel := netEscrowMirrorCtx(ctx)
+	defer cancel()
+	pending := map[server.Id]netEscrowSnapshot{}
+	server.Db(mirrorCtx, func(conn server.PgConn) {
+		rows, err := conn.Query(mirrorCtx, netEscrowCreatedSnapshotSQL, balanceIds, contractId)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				var balanceId server.Id
+				var revision int64
+				var endTime *time.Time
+				var created bool
+				server.Raise(rows.Scan(&balanceId, &revision, &endTime, &created))
+				if snapshot, ok := expected[balanceId]; ok && created && endTime != nil && snapshot.revision == revision {
+					snapshot.endTime = endTime
+					pending[balanceId] = snapshot
+				}
+			}
+		})
+	})
+	changed := make([]server.Id, 0, len(balanceIds)-len(pending))
+	for _, balanceId := range balanceIds {
+		if _, ok := pending[balanceId]; !ok {
+			changed = append(changed, balanceId)
+		}
+	}
+	for balanceId, snapshot := range openEscrowReservedForBalances(mirrorCtx, changed) {
+		pending[balanceId] = snapshot
+	}
+	reconcileNetEscrowBatch(mirrorCtx, pending, balanceIds, true)
+	netEscrowCreationSnapshots.WithLabelValues("reused").Add(float64(len(balanceIds) - len(changed)))
+	netEscrowCreationSnapshots.WithLabelValues("reloaded").Add(float64(len(changed)))
+}
+
+// Other posts reload committed state instead of replaying their original delta.
+// The source revision fences publishers that overtake either read/write pair.
 func refreshNetEscrow(ctx context.Context, balanceIds []server.Id) {
 	if len(balanceIds) == 0 {
 		return

@@ -36,6 +36,16 @@ func TestDynamicProberGrantBoundsRowsAndDiscoversReplenishment(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		clients := newEscrowSelectionTestClients(t, ctx)
+		// This test measures a first-candidate success. A random client whose
+		// hash starts at the preceding round's now-reserved grant legitimately
+		// needs an extra rejected attempt before discovering the new top-up.
+		originalClientId := clients.payerId
+		for clients.payerId.Hash()%proberGrantFirstCount != 0 {
+			clients.payerId = server.NewId()
+		}
+		if clients.payerId != originalClientId {
+			insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{clients.payerId: clients.payerNetworkId})
+		}
 		setDynamicProberIdentityForTest(t, ctx, clients)
 		now := server.NowUtc()
 		for index := range 80 {
