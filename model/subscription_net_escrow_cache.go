@@ -113,6 +113,28 @@ func missingNetEscrowSnapshots(pending map[server.Id]netEscrowSnapshot, balanceI
 	return missing
 }
 
+// Only snapshots freshly read from committed PostgreSQL state reach this
+// helper. The read-only census has already released its connection and holds
+// no financial row locks. A later writer may have advanced the revision: keep
+// the observed revision, and let guarded publication reject that stale amount.
+// Deleted balances remain absent. An older publication cannot replace a newer
+// cached revision, even if it waited for that cache row's transaction.
+func cacheCommittedNetEscrowSnapshots(ctx context.Context, pending map[server.Id]netEscrowSnapshot) {
+	ids := make([]server.Id, 0, len(pending))
+	for id, snapshot := range pending {
+		if snapshot.endTime != nil {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	slices.SortFunc(ids, server.Id.Cmp)
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, netEscrowPublishAdmissionCacheSQL, netEscrowAdmissionCacheArgs(pending, ids)...))
+	}, server.TxReadCommitted)
+}
+
 // Existing balance locks serialize admission. This cache removes historical
 // scans from that critical section after its first exact census. Old binaries
 // and other financial writers continue to advance the guarded revision, making

@@ -27,7 +27,7 @@ const settlementReservationRowsSQL = `
 
 var netEscrowSettlementSnapshots = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_net_escrow_settlement_snapshot_total",
-	Help: "Attempted settlement balance snapshots reused at a durable revision or reloaded from exact history; not committed settlements.",
+	Help: "Attempted settlement balance snapshots reused at a durable revision or deferred to committed mirror work; not committed settlements.",
 }, []string{"result"})
 
 func init() { prometheus.MustRegister(netEscrowSettlementSnapshots) }
@@ -62,19 +62,16 @@ func settlementReservationIds(positive map[server.Id]ByteCount) []server.Id {
 	return ids
 }
 
-// This runs under the contract, balance and escrow row locks. A cold balance
-// needs one exact census; subsequent settlements preserve that snapshot. Count
-// these reads separately from admission and asynchronous mirror reads.
+// The locked contract, exact escrow rows and close reports authorize settlement.
+// A matching optional cache can preserve its known reservation delta. A cold
+// cache must not make the payer's financial locks cover an unbounded history
+// scan; committed mirror work can rebuild it after those locks are released.
+// Admission still requires a current exact snapshot before reserving credit.
 func readSettlementNetEscrowSnapshots(ctx context.Context, tx server.PgTx, ids []server.Id) map[server.Id]netEscrowSnapshot {
 	pending := readCachedNetEscrowSnapshots(ctx, tx, ids)
 	missing := missingNetEscrowSnapshots(pending, ids)
-	if len(missing) > 0 {
-		for id, snapshot := range readNetEscrowSnapshots(ctx, tx, missing) {
-			pending[id] = snapshot
-		}
-	}
 	netEscrowSettlementSnapshots.WithLabelValues("reused").Add(float64(len(ids) - len(missing)))
-	netEscrowSettlementSnapshots.WithLabelValues("reloaded").Add(float64(len(missing)))
+	netEscrowSettlementSnapshots.WithLabelValues("deferred").Add(float64(len(missing)))
 	return pending
 }
 

@@ -1644,6 +1644,30 @@ production frequency or the identity of a sampled Main census caller. A
 revision miss is not proof of lost funds; repeated misses can explain work
 amplification even when every financial check remains correct.
 
+Cold financial settlement has a separate lock-lifetime boundary. Its locked
+contract, escrow rows and authoritative close reports determine the debit;
+rebuilding an optional balance-wide reservation snapshot must follow the
+financial commit. A matching cache still receives the exact guarded delta.
+For a cold or stale cache, the metadata attempt and committed mirror now share
+one replayable post, in that order, so the metadata revision cannot immediately
+invalidate its own mirror's rebuild. Metadata failure is still reported and
+the mirror is attempted. The mirror conditionally warms the durable cache at
+its observed revision; a later legacy mutation or newer cache rejects stale
+publication. Lost posts leave admission's exact fallback intact.
+
+The owning PostgreSQL control with 10,001 surviving reservations previously
+observed a second connection time out on the balance lock at the cold census
+seam. The repaired settlement issues no census while owning those locks.
+Across twenty sequential closes, the warm control uses no census and the cold
+control uses one committed mirror census. This establishes the local mechanism,
+not the identity or prevalence of a Main census caller, nor lower Main CPU.
+Cold admission still needs an exact census; concurrent legacy invalidation can
+still require later rebuilds. Source-qualified readers must include settlement
+snapshot `result="deferred"` alongside `reused`; the older `reloaded` label
+describes the prior implementation. A missing old label is not zero cold work.
+Actual mirror reads remain `refresh_snapshot_total{result="reloaded"}`;
+neither family counts committed settlements or distinct SQL statements.
+
 **2026-10-02 early-detection audit.** The CPU warning was already present:
 25% in two observations (§1.3c), and active/idle-transaction warnings existed
 in §1.3. Retained CPU observations include 80.85% at 10:29:23Z and 52.52% at
@@ -17866,6 +17890,30 @@ arguments or binary identity fail with a finite precontact reason. Actual child
 controls prove the guard runs before those imports, alongside the existing
 TLS, privacy and loaded-floor controls. This source guard does not authorize a
 contact or replace fresh watcher, inventory, window and singleton admission.
+
+Watcher-process verification has a separate unavailable state. At 19:26:50 UTC
+on October 2, the authorized same-unit replacement completed, but its final
+unprivileged `/proc/<pid>/exe` read raised `PermissionError`. The wrapper's
+nonzero exit did not mean the restart failed. A bounded read-only recovery
+confirmed the expected new executable, unchanged unit and cadence, and retired
+predecessor; no second restart was needed. This does not establish why the
+kernel denied that original read or that it remained denied afterward.
+
+The shared staged-reader helper `diagnostics/process_identity.py` binds the
+exact unit, PID, boot ID, process start ticks, executable digest and zero restart
+count. It checks unit and process generation before and after one fixed,
+noninteractive `sudo` hash of that exact proc executable, under a five-second
+local owner. The hash child has its own two-second supervisor; stdout/stderr
+are capped and raw errors are discarded. Privilege refusal, timeout, malformed
+output, changed generation or wrong digest remain finite verification failures.
+Never substitute an on-disk binary hash, select another PID, restart the unit,
+or add a watcher to make this audit pass. Healthy-but-unreadable is unknown;
+a correct digest alone can miss PID reuse or a replaced unit. Controls cover
+both, including an unchanged digest with changed process start ticks, a unit
+change during hashing, privilege refusal and real child timeout/output caps.
+This is a local admission helper, not a new remote signal or proof of query
+coverage. Apply it only to freshly reviewed reader successors; sealed historical
+readers and expired grants stay closed.
 
 Every completed observation atomically replaces the private mode-0600
 `<StateDir>/api-release-proof/latest.json` (directory mode 0700). The finite

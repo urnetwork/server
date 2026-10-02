@@ -5418,3 +5418,153 @@ sample had 78 edges for 16 selected waiters out of 228 reported lock waiters.
 PGSS 1.10 histories remain interval-unqualified; these findings do not quantify
 CPU share or prove exclusive root cause. Independent initial-triage SHA-256:
 `25e27a1b1d8162895d387218a37331aaab368cc8491ba130ba85dae29a931c63`.
+
+### 20:47 UTC deployment and recurring query-sample checkpoint
+
+The autonomous query sampler has now completed five twelve-snapshot Main
+runs, most recently at 20:43:35.148096191–20:44:00.220028633 UTC.
+Recurring visibility is established; database recovery is not. The latest
+sample retained grant-lock tuple waits peaking at 121, escrow waits at 55,
+and settlement balance-lock waits at 54. Selected reservation-census-prefix
+backends were active without waits. Load/completed output and blocker selection
+remain capped, and the samples do not identify payer, service, full statement,
+or CPU share. The latest receipt is
+`0484e84225465e28664c313c1ebab02b29771ddd93c901a39c92dbc065eb2053`.
+
+The coherent 20:44:03 UTC URL census reports 112,526 eligible providers,
+160 meeting the ten-run rolling quota (0.14219 percent), and 158 meeting the
+security gate. Hourly process-counter coverage is incomplete. This is not
+sustained quota recovery. The last numerical CPU sample is historical and
+must not be presented as current database CPU.
+
+Release `2026.10.2-contract-path-timing+1060864600`, source `ea2a7abd`,
+was built locally, pushed, and selected by successful all-block deployment
+commands for API, Connect and Taskworker. It includes the UTC reap correction,
+contract stage/outcome instrumentation, and DNS no-provider-write diagnostics.
+Instrumentation does not itself establish a performance improvement.
+The release preserves the intervening Main blob-store changes and published
+Connect SDK `e0d75562aa23`; focused financial, probe lifecycle and probe-package
+race gates passed against that exact source/dependency combination. Whole-model
+normal/race closure remains incomplete.
+
+A fresh read-only runtime witness at 20:47:08 UTC qualifies the source, start
+and image-config reports of all 20 API and all eight Taskworker instances,
+but only 14 of 20 Connect instances. Three Connect instances still report the
+previous 4300 build, and three lack a qualified current-process witness.
+API readiness gauges are positive; Connect and Taskworker readiness, direct
+container identity and predecessor retirement are not proved. The eight
+Taskworker references qualify the next fixed-window timing discriminator.
+Runtime receipt:
+`c26377569bd66138fd57048bc065f366bba47e01fe2486c2b5c5499d8cfa997e`.
+
+A two-connection local PostgreSQL control reproduces a cold settlement census
+holding the same balance row while another connection times out; the row
+becomes available after commit. This proves a possible lock amplification
+mechanism, not its Main caller or exclusive CPU attribution. The financial
+repair and full current/legacy census fingerprint discriminator remain in
+progress. No speculative query rewrite or removal of financial guards has
+been deployed.
+
+Current native bucket counts remain unknown: the bounded Redis census attempt
+failed before authentication or any GET because its direct connection timed
+out. ARIN subscriber-policy activation, complete current-owner shadow coverage,
+accepted health-history retention, full tests, and sustained 100-percent
+eligible-provider quota coverage remain open.
+
+### 21:40 UTC settlement rollout and admission consistency requirement
+
+The cold settlement repair is committed and pushed as `075bd3b8`.
+Seventeen financial race roots passed author and independent runs; the
+independent current-source/published-SDK integration also passed. The repair
+removes cold balance-wide census work from the financial lock scope, retains
+warm revision-guarded deltas, and orders cold metadata before committed mirror
+rebuilding. It does not remove admission's own balance/revision contention.
+Independent financial gate:
+`be978fb1baccd9c13a8bd60d0ed33c14d3f82baf48325982e9d6e33182b06579`.
+
+Release `2026.10.2-settlement-lock-scope+1060864700` was built, pushed and
+verified for both Linux architectures for API, Connect and Taskworker. All
+three all-block deployment commands terminated successfully by 21:34:51 UTC.
+Fresh running-instance convergence and subsequent performance remain unproved.
+Deployment manifest:
+`91f89647be64a9daea13e1cc7a899f1f0ce29a49e6de56b136b327dd05f83eb1`.
+
+The qualified eight-Taskworker timing window at 20:40–20:45 UTC attributed
+95.80 percent (g1) and 96.41 percent (g2) of completed synchronous contract
+residence to the process-local payer gate. For DNS timeout waves, 60.10 and
+74.61 percent respectively carried an affirmative same-tunnel local-contract
+failure/pending witness with no provider write. These are not a cross-request
+SQL join, accepted quota counts, or measurements of the 4700 repair.
+Receipt:
+`b0594f05e59ba62021dabd942f2108e58db4adfc6a5e022e4d29510b1b35a77a`.
+
+Seven consecutive successful autonomous query samples establish recurring
+visibility; the eighth also completed at 21:30:15 UTC with persistent grant
+and settlement queues. The coherent 21:29:38 URL census reports 112,344
+eligible providers and 62 meeting quota; hourly process-counter coverage is
+incomplete. A retained 21:02:17 CPU sample measured 44.264 PostgreSQL cores
+out of 96 (46.11 percent over 5.02 seconds), before the repair deployment.
+This supersedes the previously retained 19:16 CPU observation, without
+attributing an improvement to a fix.
+
+The operator now explicitly requires contention-free contract creation for
+large numbers of clients on the same network and accepts approximate
+accounting at crash/reconciliation edges in exchange for eliminating admission
+contention. This supersedes absolute cache/admission consistency as a release
+criterion for the replacement admission design. The deterministic regression
+must use many distinct clients sharing a funded network across independent
+processes, demonstrate the current contention, and verify the repaired path
+without hiding serialization behind a local gate. Healthy concurrent
+reservation behavior, throughput, and the accepted failure/replay/reconciliation
+windows must be tested and documented. This replacement is not implemented or
+activated by the 4700 settlement repair.
+
+Current source has no distributed Redis admission mutex: September commit
+`35274673` made admission and settlement debit atomic using PostgreSQL locks
+and durable reservation reads. Redis currently mirrors committed state.
+The later local-controller path calls the same model and did not remove a
+mutex. Creator revision-trigger and snapshot writes also need attention in
+the replacement; removing only the local gate or balance lock is insufficient.
+
+ARIN full current-provider shadow coverage, hosted proxy local-controller
+integration, and dashboard corrections continue as separate work. New agent
+threads were rejected by the agent service's thread limit, so an existing
+Astra Max agent was reassigned exclusively to ARIN coverage in parallel.
+
+### 22:07 UTC admission discriminator and ARIN completion priority
+
+The completed 4700 timing read covers all eight qualified Taskworker processes
+in the fixed 21:40–21:45 UTC window. Payer-gate waiting accounts for 97.02
+percent (g1) and 97.13 percent (g2) of completed synchronous contract residence;
+mean returned-call times are 1.715 and 1.594 seconds. For DNS timeout waves,
+83.74 and 75.52 percent respectively have the affirmative same-tunnel
+local-contract pending/failure witness with no provider write. This confirms
+that gate dominance persists after the settlement repair; it does not join
+individual requests to SQL waits or establish accepted quota recovery.
+Receipt: `80d72d36cb6e4b961ac35ab8c7ca7a8abdf3e8415bc100afdc68feda92219129`.
+
+The 21:50 UTC runtime read qualifies 44 of 48 source/start/image-config reports:
+20 API, eight Taskworker and 16 Connect. Four Connect reports remain unavailable,
+with no positively observed older build. These are runtime reports, not direct
+container identity, predecessor retirement, or customer recovery proof.
+Receipt: `ea71bdb55363ca5e184ae2773e1a6028016c91d32f4c4e2dcd495d66d2c6a18e`.
+
+The coherent 22:00:02 UTC URL census reports 112,355 eligible providers and 365
+meeting the rolling quota (0.3249 percent); hourly expected-process coverage
+remains incomplete. The 21:47:44 UTC resource sample measures 46.254 PostgreSQL
+cores out of 96 (48.18 percent over 5.02 seconds). The tenth complete autonomous
+query cadence ends at 22:01:06 UTC with persistent grant queues. These separate
+observation clocks do not establish an isolated deployment effect.
+
+The Redis admission candidate has passed local synchronized, two-process tests
+with 512 distinct clients sharing one network, including varied- and shared-
+destination controls. All creations succeeded with no sampled balance/cache/
+census lock waits; settlement, replay, crash, compatibility and release-gate
+checks remain open. The candidate is not yet deployed or activated.
+
+The operator explicitly requests completion of all ARINDB work through final
+merge and deployment. Current-owner capture core `6b478365` has 22 passing
+author race roots and is undergoing independent review. The protected fleet
+adapter, complete Main shadow, adequate verified subscriber coverage, resource
+cutover and policy deployment remain required. The policy remains inactive;
+local tests or an observer-only deployment cannot close that requirement.
