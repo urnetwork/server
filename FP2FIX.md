@@ -5394,3 +5394,27 @@ independent handoff audit
 `d42f73deb6aa7ee11309aa53de0b6251c3df5dd7838449342414b536db07100d`;
 UTC financial gates
 `bb8e2ce9c44ff0ab6d3e8cf35a9396e7e310574ca27ee343939df7b9a15247e0`.
+
+
+### 19:42 UTC first successful Main query sample
+
+The corrected autonomous sampler ran at 19:41:50.424922150–
+19:42:17.640870401 UTC and completed all twelve snapshots. Its next
+eligible floor is 19:57:17.640870401 UTC; a second eligible completion is
+still required to prove recurring coverage. No manual retry occurred.
+The retained receipt is
+`bdbed2288686529f798e1b7ffd3e4a0b3d5a55c7d019ece8be2299b3fc1c1336`.
+
+The grant-lock tuple-wait cohort totaled 1,423 backend-samples, with a peak
+of 127 and maximum query age of 72.94 seconds. Escrow-access tuple waits
+peaked at 47, and settlement balance-lock tuple waits at 44. Selected grant
+and settlement waiters shared one opaque active, non-waiting blocker classified
+as a reservation-census prefix. These are direct backend lock edges, without
+logical payer, private-probe, service or full-statement attribution.
+
+Load/completed output and blocker selection were capped; 217 group-samples
+were omitted, and activity query text was limited to 1,024 bytes. The blocker
+sample had 78 edges for 16 selected waiters out of 228 reported lock waiters.
+PGSS 1.10 histories remain interval-unqualified; these findings do not quantify
+CPU share or prove exclusive root cause. Independent initial-triage SHA-256:
+`25e27a1b1d8162895d387218a37331aaab368cc8491ba130ba85dae29a931c63`.
