@@ -142,52 +142,28 @@ func pgSampleBlockersSQL() string {
 }
 func pgQuerySampleSQL(database string) string {
 	var b strings.Builder
+	b.WriteString("-- monitor_query_sample_phase:identity\n")
 	b.WriteString("SELECT json_build_object('kind','identity','sample',0,'at',extract(epoch FROM clock_timestamp()),'primary',NOT pg_is_in_recovery(),'read_only',current_setting('transaction_read_only')='on','track_activity_query_size',pg_size_bytes(current_setting('track_activity_query_size')),'pgss_version',(SELECT extversion FROM pg_extension WHERE extname='pg_stat_statements'),'database_ok',current_database()=" + "'" + strings.ReplaceAll(database, "'", "''") + "');\n")
+	b.WriteString("-- monitor_query_sample_phase:authority\n")
 	b.WriteString("DO $guard$ BEGIN IF pg_is_in_recovery() OR current_setting('transaction_read_only') <> 'on' OR current_database() <> '" + strings.ReplaceAll(database, "'", "''") + "' THEN RAISE EXCEPTION 'sample authority mismatch'; END IF; END $guard$;\n")
+	b.WriteString("-- monitor_query_sample_phase:history_start\n")
 	b.WriteString(pgSampleHistorySQL(0))
 	for i := 0; i < pgQuerySampleCount; i++ {
 		if i > 0 {
+			b.WriteString("\n-- monitor_query_sample_phase:sample_wait\n")
 			b.WriteString("SELECT pg_sleep(2);\n")
 		}
+		b.WriteString("\n-- monitor_query_sample_phase:activity\n")
 		b.WriteString("SELECT pg_stat_clear_snapshot();\n")
 		b.WriteString(pgSampleActivitySQL(i))
 	}
+	b.WriteString("\n-- monitor_query_sample_phase:blockers\n")
 	b.WriteString("SELECT pg_stat_clear_snapshot();\n")
 	b.WriteString(pgSampleBlockersSQL())
+	b.WriteString("\n-- monitor_query_sample_phase:history_end\n")
 	b.WriteString(pgSampleHistorySQL(1))
 	return b.String()
 }
-
-// One bounded subprocess; stdin delivery shares the same absolute owner budget
-// as reads. Raw stderr is discarded; errors expose fixed categories only.
-const pgQuerySampleProgram = `import json,os,selectors,subprocess,sys,time
-p=None
-try:
- cfg=json.loads(sys.stdin.buffer.read(262145));assert set(cfg)=={'password','user','database','port','sql'}
- assert all(type(cfg[k]) is str for k in ('password','user','database','sql')) and type(cfg['port']) is int
- assert len(cfg['sql'])<200000 and 0<cfg['port']<65536
- env=dict(os.environ,PGPASSWORD=cfg['password'],PGCONNECT_TIMEOUT='3',PGOPTIONS='-c statement_timeout=3000 -c lock_timeout=250 -c default_transaction_read_only=on -c idle_in_transaction_session_timeout=3000')
- deadline=time.monotonic()+32
- p=subprocess.Popen(['psql','-X','-q','-A','-t','-h','localhost','-p',str(cfg['port']),'-U',cfg['user'],'-d',cfg['database'],'-v','ON_ERROR_STOP=1','-f','-'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env=env)
- payload=memoryview(cfg['sql'].encode());output=bytearray();sel=selectors.DefaultSelector()
- for f in (p.stdin,p.stdout):os.set_blocking(f.fileno(),False)
- sel.register(p.stdin,selectors.EVENT_WRITE);sel.register(p.stdout,selectors.EVENT_READ)
- while sel.get_map():
-  left=deadline-time.monotonic();assert left>0
-  for key,event in sel.select(min(left,0.2)):
-   if key.fileobj is p.stdin:
-    n=os.write(p.stdin.fileno(),payload[:65536]);payload=payload[n:]
-    if not payload:sel.unregister(p.stdin);p.stdin.close()
-   else:
-    chunk=os.read(p.stdout.fileno(),65536)
-    if not chunk:sel.unregister(p.stdout);p.stdout.close()
-    else:output.extend(chunk);assert len(output)<=4194304
- assert p.wait(timeout=max(.001,deadline-time.monotonic()))==0
- sys.stdout.buffer.write(output)
-except BaseException:
- if p is not None and p.poll() is None:p.kill();p.wait()
- sys.exit(76)
-`
 
 type pgSampleWire struct {
 	Kind               string              `json:"kind"`
@@ -247,32 +223,33 @@ type pgSampleBlocker struct {
 	Observed       bool    `json:"blocker_observed"`
 }
 type pgQuerySampleReceipt struct {
-	Schema                    int                 `json:"schema"`
-	RequestedAt               time.Time           `json:"requested_at"`
-	FinishedAt                time.Time           `json:"finished_at"`
-	Complete                  bool                `json:"complete"`
-	Reason                    string              `json:"reason,omitempty"`
-	Samples                   int                 `json:"samples"`
-	SampleClocks              []float64           `json:"sample_clocks"`
-	BackendTotals             []int               `json:"backend_totals"`
-	QueryTextTruncated        []int               `json:"query_text_truncated"`
-	TrackQuerySize            int                 `json:"track_activity_query_size"`
-	PGSSVersion               string              `json:"pgss_version"`
-	OmittedGroups             int                 `json:"omitted_group_samples"`
-	Load                      []pgSampleLoad      `json:"load"`
-	Completed                 []pgSampleCompleted `json:"completed_lifetime_end"`
-	HistoryDeltaQualified     bool                `json:"history_delta_qualified"`
-	HistoryRows               []int               `json:"history_rows"`
-	HistoryPaired             int                 `json:"history_paired_ids"`
-	HistoryUnpaired           int                 `json:"history_unpaired_ids"`
-	HistoryNonmonotonic       int                 `json:"history_nonmonotonic_ids"`
-	LoadOutputTruncated       bool                `json:"load_output_truncated"`
-	CompletedOutputTruncated  bool                `json:"completed_output_truncated"`
-	HistoryTruncated          bool                `json:"history_truncated"`
-	Blockers                  []pgSampleBlocker   `json:"blockers"`
-	LockWaiters               int                 `json:"lock_waiters"`
-	BlockerSelectionTruncated bool                `json:"blocker_selection_truncated"`
-	Qualifiers                []string            `json:"qualifiers"`
+	Schema                    int                    `json:"schema"`
+	RequestedAt               time.Time              `json:"requested_at"`
+	FinishedAt                time.Time              `json:"finished_at"`
+	Complete                  bool                   `json:"complete"`
+	Reason                    string                 `json:"reason,omitempty"`
+	SourceFailure             *pgSampleSourceFailure `json:"source_failure,omitempty"`
+	Samples                   int                    `json:"samples"`
+	SampleClocks              []float64              `json:"sample_clocks"`
+	BackendTotals             []int                  `json:"backend_totals"`
+	QueryTextTruncated        []int                  `json:"query_text_truncated"`
+	TrackQuerySize            int                    `json:"track_activity_query_size"`
+	PGSSVersion               string                 `json:"pgss_version"`
+	OmittedGroups             int                    `json:"omitted_group_samples"`
+	Load                      []pgSampleLoad         `json:"load"`
+	Completed                 []pgSampleCompleted    `json:"completed_lifetime_end"`
+	HistoryDeltaQualified     bool                   `json:"history_delta_qualified"`
+	HistoryRows               []int                  `json:"history_rows"`
+	HistoryPaired             int                    `json:"history_paired_ids"`
+	HistoryUnpaired           int                    `json:"history_unpaired_ids"`
+	HistoryNonmonotonic       int                    `json:"history_nonmonotonic_ids"`
+	LoadOutputTruncated       bool                   `json:"load_output_truncated"`
+	CompletedOutputTruncated  bool                   `json:"completed_output_truncated"`
+	HistoryTruncated          bool                   `json:"history_truncated"`
+	Blockers                  []pgSampleBlocker      `json:"blockers"`
+	LockWaiters               int                    `json:"lock_waiters"`
+	BlockerSelectionTruncated bool                   `json:"blocker_selection_truncated"`
+	Qualifiers                []string               `json:"qualifiers"`
 }
 
 var pgSampleID = regexp.MustCompile(`^(none|-?[0-9]{1,20})$`)
@@ -715,15 +692,21 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	input, _ := json.Marshal(map[string]any{"password": env.cfg.pgPassword, "user": env.cfg.pgUser, "database": env.cfg.pgDb, "port": env.cfg.pgPort, "sql": pgQuerySampleSQL(env.cfg.pgDb)})
 	command := "[ \"$(hostname -s)\" = " + shellSingleQuote(h.name) + " ] || exit 74; exec timeout -k 2s 35s python3 -c " + shellSingleQuote(pgQuerySampleProgram)
 	out, readErr := env.runner.sshTimeout(ctx, h, command, string(input), pgQuerySampleBudget)
+	if failure, valid := parsePgSampleSourceFailure(out); valid {
+		r.SourceFailure = failure
+	} else if readErr != nil {
+		r.SourceFailure = pgSampleTransportFailure(readErr)
+	}
 	if errors.Is(readErr, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		r.Reason = "deadline"
 	}
-	if readErr == nil {
+	if readErr == nil && r.SourceFailure == nil {
 		parsed, parseErr := parsePgQuerySample(out, now)
 		if parseErr == nil {
 			r = parsed
 		} else {
 			r.Reason = "projection-unavailable"
+			r.SourceFailure = &pgSampleSourceFailure{Phase: "projection", Cause: "invalid_response"}
 		}
 	}
 	r.FinishedAt = env.now().UTC()
@@ -748,5 +731,9 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		}
 		return findings, nil
 	}
-	return []finding{{probeId: "pg/query-sample", tier: tierWarn, class: "pg-query-sample-unavailable", target: pgTarget(env), sustain: 1, symptom: "Bounded PostgreSQL query/load sample is incomplete", observed: "reason=" + r.Reason, evidence: "Finite private immutable receipt_sha256=" + receiptSHA256 + "; no raw SQL or identities", mechanism: "Admission, source or projection was unavailable; the spent attempt is not retried.", baseline: "One complete read-only12-snapshot sample under the shared monitor host budget.", action: "Inspect the private finite receipt and sampler status; recurring mode waits for its next cadence, while one-shot mode needs a fresh explicit arm. Do not infer health or tune pools from missing evidence.", verify: "The next eligible finite sample qualifies under the same source and host limits.", playbook: "SIGNALS.md §2.1a"}}, nil
+	observed := "reason=" + r.Reason
+	if f := r.SourceFailure; f != nil {
+		observed += fmt.Sprintf(" phase=%s cause=%s stderr_truncated=%t", f.Phase, f.Cause, f.StderrTruncated)
+	}
+	return []finding{{probeId: "pg/query-sample", tier: tierWarn, class: "pg-query-sample-unavailable", target: pgTarget(env), sustain: 1, symptom: "Bounded PostgreSQL query/load sample is incomplete", observed: observed, evidence: "Finite private immutable receipt_sha256=" + receiptSHA256 + "; no raw SQL or identities", mechanism: "Admission, source or projection was unavailable; the spent attempt is not retried.", baseline: "One complete read-only12-snapshot sample under the shared monitor host budget.", action: "Inspect the private finite receipt and sampler status; recurring mode waits for its next cadence, while one-shot mode needs a fresh explicit arm. Do not infer health or tune pools from missing evidence.", verify: "The next eligible finite sample qualifies under the same source and host limits.", playbook: "SIGNALS.md §2.1a"}}, nil
 }

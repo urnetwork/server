@@ -246,10 +246,13 @@ func TestPgQuerySampleRemoteProgramStdinAndOutputCap(t *testing.T) {
 				if runErr != nil || string(out) != "finite-output\n" {
 					t.Fatal("actual program failed bounded stdin delivery")
 				}
-			} else if runErr == nil || len(out) != 0 {
-				t.Fatal("invalid child output accepted")
+			} else {
+				failure, valid := parsePgSampleSourceFailure(string(out))
+				if runErr == nil || !valid || failure == nil || (name == "output-cap" && failure.Cause != "output_cap") || (name == "stderr-private" && failure.Cause != "child_exit_unknown") {
+					t.Fatal("invalid child output lost its finite failure")
+				}
 			}
-			if strings.Contains(stderr.String(), "private-password") {
+			if strings.Contains(stderr.String()+string(out), "private-password") {
 				t.Fatal("child stderr escaped")
 			}
 		})
