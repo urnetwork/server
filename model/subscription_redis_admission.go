@@ -129,9 +129,11 @@ elseif ARGV[1]=='reserve' or ARGV[1]=='restore' then
   end
  end
 else return redis.error_reply('invalid reservation operation') end
-redis.call('SET',KEYS[1],total,'PX',lease+3600000)
-redis.call('PEXPIRE',KEYS[2],lease+3600000)
-redis.call('PEXPIRE',KEYS[3],lease+3600000)
+-- Recovery may restore an older token with only a short lease remaining.
+-- Never let that operation shorten the shared keys beneath younger tokens.
+redis.call('SET',KEYS[1],total,'PX',90000000)
+redis.call('PEXPIRE',KEYS[2],90000000)
+redis.call('PEXPIRE',KEYS[3],90000000)
 return amount
 `
 
