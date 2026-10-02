@@ -128,6 +128,16 @@ func BeginContractCreationTiming(ctx context.Context, httpIngress bool) (context
 	return beginContractCreationTiming(ctx, httpIngress, defaultContractCreationMetrics)
 }
 
+// Parallel post callbacks retain their caller's cancellation, deadlines and
+// other context values, but cannot enter the synchronous stage owner. Their
+// entire joined lifetime belongs to the caller's post_commit span.
+func WithoutContractCreationTiming(ctx context.Context) context.Context {
+	if owner, _ := ctx.Value(contractCreationTimingKey{}).(*ContractCreationTiming); owner == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, contractCreationTimingKey{}, (*ContractCreationTiming)(nil))
+}
+
 func beginContractCreationTiming(ctx context.Context, httpIngress bool, metrics *contractCreationMetrics) (context.Context, *ContractCreationTiming) {
 	owner := &ContractCreationTiming{metrics: metrics, ctx: ctx, last: metrics.now()}
 	if httpIngress {

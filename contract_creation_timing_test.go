@@ -114,6 +114,79 @@ func TestContractCreationTimingBoundedConcurrentCollection(t *testing.T) {
 	}
 }
 
+func TestContractCreationTimingJoinedPostsKeepExclusiveOwner(t *testing.T) {
+	type otherKey struct{}
+	parent, cancel := context.WithTimeout(context.WithValue(t.Context(), otherKey{}, "retained"), 5*time.Second)
+	defer cancel()
+	m := newContractCreationMetrics()
+	ctx, owner := beginContractCreationTiming(parent, false, m)
+	defer owner.Finish(ContractCreationError)
+	leavePosts := EnterContractCreationStage(ctx, ContractStagePostCommit)
+	postCtx := WithoutContractCreationTiming(ctx)
+	if postCtx.Value(otherKey{}) != "retained" || postCtx.Done() != ctx.Done() {
+		t.Fatal("post context lost values or cancellation")
+	}
+	gotDeadline, gotOK := postCtx.Deadline()
+	wantDeadline, wantOK := ctx.Deadline()
+	if gotDeadline != wantDeadline || gotOK != wantOK || WithoutContractCreationTiming(postCtx) != postCtx || WithoutContractCreationTiming(parent) != parent {
+		t.Fatal("post context changed deadline or unobserved context")
+	}
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	defer close(release)
+	exited := make(chan error, 2)
+	post := func(stage ContractCreationStage) PostFunction {
+		return func() any {
+			defer EnterContractCreationStage(postCtx, stage)()
+			entered <- struct{}{}
+			<-release
+			exited <- postCtx.Err()
+			return nil
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		RunPosts(ctx, post(ContractStageReservationSnapshot), post(ContractStageClientFence))
+		close(done)
+	}()
+	for range 2 {
+		select {
+		case <-entered:
+		case <-parent.Done():
+			t.Fatal("parallel posts did not start")
+		}
+	}
+	m.mu.Lock()
+	inflight := m.values.inflight
+	m.mu.Unlock()
+	var want [2][contractStageCount]int64
+	want[0][ContractStagePostCommit] = 1
+	if inflight != want {
+		t.Fatal("parallel child stage overwrote the joined post owner")
+	}
+	cancel()
+	select {
+	case <-done:
+		t.Fatal("canceled owner failed to join posts")
+	default:
+	}
+	// Release both callbacks without closing twice on the early-failure path.
+	for range 2 {
+		release <- struct{}{}
+	}
+	<-done
+	for range 2 {
+		if err := <-exited; err != context.Canceled {
+			t.Fatal("post did not retain owning cancellation")
+		}
+	}
+	leavePosts()
+	owner.Finish(ContractCreationReply)
+	if m.values.inflight != [2][contractStageCount]int64{} || m.values.counts[0][ContractCreationCanceled] != 1 || m.values.seconds[0][ContractStagePostCommit] <= 0 || m.values.seconds[0][ContractStageReservationSnapshot] != 0 || m.values.seconds[0][ContractStageClientFence] != 0 {
+		t.Fatal("parallel posts corrupted the exclusive completion partition")
+	}
+}
+
 func BenchmarkContractCreationTiming(b *testing.B) {
 	m := newContractCreationMetrics()
 	ctx := context.Background()

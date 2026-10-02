@@ -1631,8 +1631,11 @@ func createTransferEscrowInTx(
 		// The escrow insert and subsequent open-contract insert each advance
 		// this balance's revision once. Validate that exact committed state in
 		// the post before reusing the census already performed under its lock.
+		// RunPosts may run callbacks concurrently; only its synchronous caller
+		// owns the joined post_commit timing span.
+		postCtx := server.WithoutContractCreationTiming(ctx)
 		posts = append(posts, func() any {
-			publishCreatedNetEscrow(ctx, contractId, pending, balanceIds)
+			publishCreatedNetEscrow(postCtx, contractId, pending, balanceIds)
 			return nil
 		})
 	}
