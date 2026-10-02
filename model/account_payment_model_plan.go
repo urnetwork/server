@@ -24,8 +24,10 @@ import (
 // 3. (only if there is a subsidy) proportional points and referral shares (points only)
 
 type PaymentPlanner struct {
-	ctx           context.Context
-	subsidyConfig *SubsidyConfig
+	restoredLegacyPaymentCount   int
+	unresolvedLegacyPaymentCount int
+	ctx                          context.Context
+	subsidyConfig                *SubsidyConfig
 
 	// dryRun mirrors the plan's dry-run mode. It selects where the reliability
 	// recompute runs: in its own committed transaction for a real plan, or
@@ -160,6 +162,7 @@ func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 			networkPayments:        map[server.Id]*AccountPayment{},
 		}
 
+		planner.recoverLegacyComponents()
 		returnErr = planner.planPayments()
 		if returnErr != nil {
 			return
@@ -196,13 +199,16 @@ func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 		planner.finalizePayments()
 
 		paymentPlan = &PaymentPlan{
-			PaymentPlanId:            planner.paymentPlanId,
-			NetworkPayments:          planner.networkPayments,
-			SubsidyPayment:           planner.subsidyPayment,
-			WithheldNetworkIds:       planner.networkIdsToRemove,
-			QuarantinedSweepCount:    planner.quarantinedSweepCount,
-			QuarantinedNanoCents:     planner.quarantinedNanoCents,
-			UnresolvedCensusComplete: false,
+			PaymentPlanId:                planner.paymentPlanId,
+			NetworkPayments:              planner.networkPayments,
+			SubsidyPayment:               planner.subsidyPayment,
+			WithheldNetworkIds:           planner.networkIdsToRemove,
+			QuarantinedSweepCount:        planner.quarantinedSweepCount,
+			QuarantinedNanoCents:         planner.quarantinedNanoCents,
+			UnresolvedCensusComplete:     false,
+			RestoredLegacyPaymentCount:   planner.restoredLegacyPaymentCount,
+			UnresolvedLegacyPaymentCount: planner.unresolvedLegacyPaymentCount,
+			LegacyRecoveryScanLimit:      legacyPaymentRecoveryLimit,
 		}
 
 		// set the bonus weights for next payout
@@ -324,7 +330,7 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 		closeTimeArgs = append(closeTimeArgs, self.upperBound)
 	}
 	if self.transition != nil {
-		closeTimeBound += ` AND transfer_contract.outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')`
+		closeTimeBound += ` AND transfer_contract.outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination') AND NOT u.preserve_legacy_components`
 		// Retain ambiguous liabilities while unrelated exact obligations progress.
 		if self.inspectUnresolved {
 			server.Raise(self.tx.QueryRow(self.ctx, paymentTransitionUnresolvedSampleSql).Scan(&self.quarantinedSweepCount, &self.quarantinedNanoCents))
@@ -374,7 +380,8 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 				transfer_escrow_sweep.network_id,
 				transfer_escrow_sweep.payout_byte_count,
 				transfer_escrow_sweep.payout_net_revenue_nano_cents,
-				transfer_escrow_sweep.sweep_time
+				transfer_escrow_sweep.sweep_time,
+				false AS preserve_legacy_components
             FROM transfer_escrow_sweep
             WHERE transfer_escrow_sweep.payment_id IS NULL
 
@@ -386,7 +393,8 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 				s.network_id,
 				s.payout_byte_count,
 				s.payout_net_revenue_nano_cents,
-				s.sweep_time
+				s.sweep_time,
+				(ap.subsidy_payout_nano_cents>0 OR ap.reliability_subsidy_nano_cents>0) AS preserve_legacy_components
             FROM account_payment ap
             INNER JOIN transfer_escrow_sweep s ON
                 s.payment_id = ap.payment_id

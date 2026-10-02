@@ -186,5 +186,14 @@ func TestProviderTransitionHistoricalInflightExcessRemainsVisible(t *testing.T) 
 		if err != nil || !stored.AttributionReviewRequired || stored.Payout != model.UsdToNanoCents(11) || stored.TokenAmount == nil || *stored.TokenAmount != 9.99 || stored.PaymentReceipt == nil {
 			t.Fatalf("historical gross silently treated as processor-paid: %+v %v", stored, err)
 		}
+		server.Db(owner.Ctx, func(conn server.PgConn) {
+			var paid model.NanoCents
+			var cleanup bool
+			server.Raise(conn.QueryRow(owner.Ctx, `SELECT COALESCE((SELECT paid_net_revenue_nano_cents FROM account_balance WHERE network_id=$1),0),
+				(SELECT contract_retention_pending FROM account_payment WHERE payment_id=$2)`, payment.NetworkId, payment.PaymentId).Scan(&paid, &cleanup))
+			if paid != 0 || cleanup {
+				t.Fatal("unexplained gross was credited or original earning evidence queued for deletion", paid, cleanup)
+			}
+		})
 	})
 }

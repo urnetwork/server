@@ -88,14 +88,15 @@ type AccountPayment struct {
 	MinSweepTime              time.Time `json:"min_sweep_time"`
 	CreateTime                time.Time `json:"create_time"`
 
-	PaymentRecord  *string    `json:"payment_record"`
-	TokenType      *string    `json:"token_type"`
-	TokenAmount    *float64   `json:"token_amount"`
-	PaymentTime    *time.Time `json:"payment_time"`
-	PaymentReceipt *string    `json:"payment_receipt"`
-	WalletAddress  *string    `json:"wallet_address"`
-	Blockchain     *string    `json:"blockchain,omitempty"`
-	TxHash         *string    `json:"tx_hash,omitempty"`
+	PaymentRecord        *string    `json:"payment_record"`
+	CircleIdempotencyKey *server.Id `json:"-"`
+	TokenType            *string    `json:"token_type"`
+	TokenAmount          *float64   `json:"token_amount"`
+	PaymentTime          *time.Time `json:"payment_time"`
+	PaymentReceipt       *string    `json:"payment_receipt"`
+	WalletAddress        *string    `json:"wallet_address"`
+	Blockchain           *string    `json:"blockchain,omitempty"`
+	TxHash               *string    `json:"tx_hash,omitempty"`
 
 	Completed    bool       `json:"completed"`
 	CompleteTime *time.Time `json:"complete_time"`
@@ -117,7 +118,7 @@ func (self *EscrowId) Values() []any {
 	}
 }
 
-func dbGetPayment(ctx context.Context, conn server.PgConn, paymentId server.Id) (payment *AccountPayment, returnErr error) {
+func dbGetPayment(ctx context.Context, conn server.PgCanQuery, paymentId server.Id) (payment *AccountPayment, returnErr error) {
 	result, err := conn.Query(
 		ctx,
 		`
@@ -134,6 +135,7 @@ func dbGetPayment(ctx context.Context, conn server.PgConn, paymentId server.Id) 
                 account_payment.min_sweep_time,
                 account_payment.create_time,
                 account_payment.payment_record,
+                account_payment.circle_idempotency_key,
                 account_payment.token_type,
                 account_payment.token_amount,
                 account_payment.tx_hash,
@@ -184,6 +186,7 @@ func dbGetPayment(ctx context.Context, conn server.PgConn, paymentId server.Id) 
 				&payment.MinSweepTime,
 				&payment.CreateTime,
 				&payment.PaymentRecord,
+				&payment.CircleIdempotencyKey,
 				&payment.TokenType,
 				&payment.TokenAmount,
 				&payment.TxHash,
@@ -372,10 +375,13 @@ type PaymentPlan struct {
 	// - thresholds
 	// - missing wallets
 	// - or other rules
-	WithheldNetworkIds       []server.Id
-	QuarantinedSweepCount    int64
-	QuarantinedNanoCents     NanoCents
-	UnresolvedCensusComplete bool
+	WithheldNetworkIds           []server.Id
+	QuarantinedSweepCount        int64
+	QuarantinedNanoCents         NanoCents
+	UnresolvedCensusComplete     bool
+	RestoredLegacyPaymentCount   int
+	UnresolvedLegacyPaymentCount int
+	LegacyRecoveryScanLimit      int
 }
 
 type SubsidyPayment struct {
@@ -667,11 +673,16 @@ func CompletePayment(
 	paymentReceipt string,
 	txHash string,
 ) (returnErr error) {
-
 	server.Tx(ctx, func(tx server.PgTx) {
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
+		returnErr = completePaymentInTx(ctx, tx, paymentId, paymentReceipt, txHash)
+	})
+	return
+}
+
+func completePaymentInTx(ctx context.Context, tx server.PgTx, paymentId server.Id, paymentReceipt, txHash string) error {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
                 UPDATE account_payment
                 SET
                     payment_receipt = $2,
@@ -679,24 +690,23 @@ func CompletePayment(
                     complete_time = $3,
                     tx_hash = $4,
                     contract_retention_cursor = NULL,
-                    contract_retention_pending = true
+                    contract_retention_pending = NOT attribution_review_required
                 WHERE
                     payment_id = $1 AND
                     NOT completed AND NOT canceled
             `,
-			paymentId,
-			paymentReceipt,
-			server.NowUtc(),
-			txHash,
-		))
-		if tag.RowsAffected() != 1 {
-			returnErr = fmt.Errorf("Invalid payment.")
-			return
-		}
+		paymentId,
+		paymentReceipt,
+		server.NowUtc(),
+		txHash,
+	))
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("Invalid payment.")
+	}
 
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
                 INSERT INTO account_balance (
                 	network_id,
                 	paid_byte_count,
@@ -708,22 +718,21 @@ func CompletePayment(
                 	account_payment.payout_nano_cents AS paid_net_revenue_nano_cents
                 FROM account_payment
                 WHERE
-                    account_payment.payment_id = $1
+                    account_payment.payment_id = $1 AND NOT account_payment.attribution_review_required
 		        ON CONFLICT (network_id) DO UPDATE
                 SET
                     paid_byte_count = account_balance.paid_byte_count + EXCLUDED.paid_byte_count,
                     paid_net_revenue_nano_cents = account_balance.paid_net_revenue_nano_cents + EXCLUDED.paid_net_revenue_nano_cents
             `,
-			paymentId,
-		))
+		paymentId,
+	))
 
-		// Contract retention is deliberately not fanned out here. A payment can
-		// own hundreds of thousands of sweeps, and updating every contract in the
-		// same transaction made recording an already-sent payment vulnerable to a
-		// statement timeout. contract_retention_pending is a durable queue bit;
-		// RemoveCompletedContracts advances the cursor in bounded transactions.
-	})
-	return
+	// Contract retention is deliberately not fanned out here. A payment can
+	// own hundreds of thousands of sweeps, and updating every contract in the
+	// same transaction made recording an already-sent payment vulnerable to a
+	// statement timeout. contract_retention_pending is a durable queue bit;
+	// RemoveCompletedContracts advances the cursor in bounded transactions.
+	return nil
 }
 
 // A planned payment that has never entered the Circle retry state and remains
@@ -739,6 +748,8 @@ const HungPaymentExpiration = 30 * 24 * time.Hour
 // for legacy rows. Retry-state payments remain pending regardless of age.
 func CancelHungAccountPayments(ctx context.Context, maxTime time.Time) (canceledCount int64) {
 	minTime := maxTime.Add(-HungPaymentExpiration)
+	policy, err := server.LoadProviderPayoutTransition(ctx)
+	server.Raise(err)
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		result, err := tx.Query(
@@ -754,11 +765,13 @@ func CancelHungAccountPayments(ctx context.Context, maxTime time.Time) (canceled
 				circle_idempotency_key IS NULL AND
 				payment_record IS NULL AND
 				tx_hash IS NULL AND
+				(NOT $3 OR (subsidy_payout_nano_cents=0 AND reliability_subsidy_nano_cents=0)) AND
 				create_time < $1
 			RETURNING payment_id
 			`,
 			minTime,
 			server.NowUtc(),
+			policy != nil,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -776,6 +789,10 @@ func CancelHungAccountPayments(ctx context.Context, maxTime time.Time) (canceled
 // unsubmitted. Retry-state payments must be resolved from Circle's terminal
 // status instead; CancelPaymentAfterProcessorCancellation handles CANCELLED.
 func CancelPayment(ctx context.Context, paymentId server.Id) (returnErr error) {
+	policy, err := server.LoadProviderPayoutTransition(ctx)
+	if err != nil {
+		return err
+	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
@@ -789,13 +806,15 @@ func CancelPayment(ctx context.Context, paymentId server.Id) (returnErr error) {
                     NOT completed AND NOT canceled AND
                     circle_idempotency_key IS NULL AND
                     payment_record IS NULL AND
-                    tx_hash IS NULL
+                    tx_hash IS NULL AND
+                    (NOT $3 OR (subsidy_payout_nano_cents=0 AND reliability_subsidy_nano_cents=0))
             `,
 			paymentId,
 			server.NowUtc(),
+			policy != nil,
 		))
 		if tag.RowsAffected() != 1 {
-			returnErr = fmt.Errorf("Invalid payment.")
+			returnErr = fmt.Errorf("payment retains submission or legacy subsidy/reliability; obligation was not canceled")
 			return
 		}
 	})
@@ -814,6 +833,10 @@ func CancelPaymentAfterProcessorCancellation(
 	paymentId server.Id,
 	paymentReceipt string,
 ) (returnErr error) {
+	policy, err := server.LoadProviderPayoutTransition(ctx)
+	if err != nil {
+		return err
+	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
@@ -823,8 +846,8 @@ func CancelPaymentAfterProcessorCancellation(
                     payment_record = NULL,
                     circle_idempotency_key = NULL,
                     payment_receipt = $2,
-                    canceled = true,
-                    cancel_time = $3
+                    canceled = NOT ($4 AND (subsidy_payout_nano_cents>0 OR reliability_subsidy_nano_cents>0)),
+                    cancel_time = CASE WHEN $4 AND (subsidy_payout_nano_cents>0 OR reliability_subsidy_nano_cents>0) THEN cancel_time ELSE $3 END
                 WHERE
                     payment_id = $1 AND
                     NOT completed AND NOT canceled AND
@@ -833,6 +856,7 @@ func CancelPaymentAfterProcessorCancellation(
 			paymentId,
 			paymentReceipt,
 			server.NowUtc(),
+			policy != nil,
 		))
 		if tag.RowsAffected() != 1 {
 			returnErr = fmt.Errorf("Invalid payment.")
@@ -863,6 +887,7 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
                 account_payment.payout_nano_cents,
                 account_payment.subsidy_payout_nano_cents,
                 account_payment.bonus_payout_nano_cents,
+                account_payment.reliability_subsidy_nano_cents,
                 account_payment.attribution_review_required,
                 account_payment.min_sweep_time,
                 account_payment.create_time,
@@ -889,7 +914,10 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
                     NOT account_payment.canceled OR
                     account_payment.payment_record IS NOT NULL OR
                     account_payment.circle_idempotency_key IS NOT NULL OR
-                    account_payment.tx_hash IS NOT NULL
+                    account_payment.tx_hash IS NOT NULL OR
+                    account_payment.subsidy_payout_nano_cents > 0 OR
+                    account_payment.reliability_subsidy_nano_cents > 0 OR
+                    account_payment.attribution_review_required
                 )
         `,
 			session.ByJwt.NetworkId,
@@ -909,6 +937,7 @@ func GetNetworkPayments(session *session.ClientSession) ([]*AccountPayment, erro
 					&payment.Payout,
 					&payment.SubsidyPayout,
 					&payment.BonusPayout,
+					&payment.ReliabilitySubsidy,
 					&payment.AttributionReviewRequired,
 					&payment.MinSweepTime,
 					&payment.CreateTime,

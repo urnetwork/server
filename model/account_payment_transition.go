@@ -12,6 +12,7 @@ import (
 )
 
 var ErrProviderLegacyReliabilityWindow = errors.New("provider legacy reliability attribution unavailable for exact earning window; retained for retry")
+var ErrProviderUsdcAttributionUnresolved = errors.New("provider USDC payment has unresolved or post-cutoff earning attribution; retained without submission")
 
 // A confirmed processor transfer is reconciled even when a historical gross
 // correction is unexplained. Persist the exception without authorizing money.
@@ -55,15 +56,22 @@ func RequireProviderUsdcPayment(ctx context.Context, paymentId server.Id) error 
 // The same exact component census admits a send and records an explicitly
 // requested adjustment. A nil policy here still requires original provenance.
 func providerUsdcPaymentAttribution(ctx context.Context, query server.PgCanQuery, paymentId server.Id, policy *server.ProviderPayoutTransition) (latestClose, subsidyEnd *time.Time, returnErr error) {
+	return inspectProviderUsdcPaymentAttribution(ctx, query, paymentId, policy, false)
+}
+
+// Canceled recovery additionally requires the complete original sweep byte
+// census. Query failures never become evidence that the old debt is invalid.
+func inspectProviderUsdcPaymentAttribution(ctx context.Context, query server.PgCanQuery, paymentId server.Id, policy *server.ProviderPayoutTransition, allowCanceled bool) (latestClose, subsidyEnd *time.Time, returnErr error) {
 	var cutoff *time.Time
 	if policy != nil {
 		cutoff = &policy.Cutoff
 	}
 	var allowed bool
 	result, err := query.Query(ctx, `SELECT
-			NOT p.completed AND NOT p.canceled AND p.payout_nano_cents >= 0
+			NOT p.completed AND (NOT p.canceled OR $3) AND NOT p.attribution_review_required AND p.payout_nano_cents >= 0
 			AND p.subsidy_payout_nano_cents >= 0 AND p.reliability_subsidy_nano_cents >= 0
 			AND EXISTS (SELECT 1 FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id)
+			AND (NOT $3 OR p.payout_byte_count=(SELECT COALESCE(SUM(s.payout_byte_count),0) FROM transfer_escrow_sweep s WHERE s.payment_id=p.payment_id))
 			AND NOT EXISTS (SELECT 1 FROM transfer_escrow_sweep s
 				LEFT JOIN transfer_contract c ON c.contract_id=s.contract_id
 				WHERE s.payment_id=p.payment_id AND
@@ -81,7 +89,7 @@ func providerUsdcPaymentAttribution(ctx context.Context, query server.PgCanQuery
 				AND sp.start_time < sp.end_time AND ($2::timestamp IS NULL OR sp.end_time <= $2))),
 			(SELECT MAX(c.close_time) FROM transfer_escrow_sweep s JOIN transfer_contract c ON c.contract_id=s.contract_id WHERE s.payment_id=p.payment_id),
 			(SELECT MAX(sp.end_time) FROM subsidy_payment sp WHERE sp.payment_plan_id=p.payment_plan_id AND (p.subsidy_payout_nano_cents>0 OR p.reliability_subsidy_nano_cents>0))
-			FROM account_payment p WHERE p.payment_id=$1`, paymentId, cutoff)
+			FROM account_payment p WHERE p.payment_id=$1`, paymentId, cutoff, allowCanceled)
 	if err != nil {
 		return nil, nil, fmt.Errorf("provider USDC earning authority unavailable: %w", err)
 	}
@@ -93,7 +101,7 @@ func providerUsdcPaymentAttribution(ctx context.Context, query server.PgCanQuery
 		return nil, nil, fmt.Errorf("provider USDC earning authority unavailable: %w", err)
 	}
 	if !allowed || latestClose == nil {
-		return nil, nil, errors.New("provider USDC payment has unresolved or post-cutoff earning attribution; retained without submission")
+		return nil, nil, ErrProviderUsdcAttributionUnresolved
 	}
 	return latestClose, subsidyEnd, nil
 }
