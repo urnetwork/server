@@ -521,7 +521,20 @@ epoch. Unclassified and outdated connections must be understood before the
 canary is declared populated; two false exception bits alone never pass this
 check. Disconnects and stale handlers do not create artificial deficits.
 
-For a provider-level shadow before enabling new serving policy, use two
+The following two-release recipe documents the original 2026-09 classifier/URL
+cutover. **Do not reuse it as a nonactivating subscriber-policy-two shadow on
+the current fleet.** Current API/index code already consumes `arin_risk` and
+`arin_non_quality`; replacing the active MMDB can change exclusions even when
+the subscriber request-guard switch is absent. Policy-two shadow work must keep
+the active reader/resource unchanged and mount an independently attested
+candidate only for the separate default-off observer and aggregate reducer.
+See `arinshadowctl/README.md`. A missing, stale or differently versioned lookup
+is an unresolved comparison, not a known policy loss. Connection identities
+must join exact current census lookup times, epochs and flags; arrival time is
+not a fresh lookup. No actual Main candidate shadow or adequate subscriber
+supply has been established by the local tooling controls.
+
+For the historical provider-level shadow before enabling that policy, use two
 immutable config releases after the required tests and commits. Migrate first.
 Build stage A from the currently effective Main config, preserving
 `provider.yml`, `provider_egress_probe.yml`, and `egress-sites.yml` unchanged;
