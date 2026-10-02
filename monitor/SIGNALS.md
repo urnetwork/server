@@ -17768,6 +17768,28 @@ digest, the expected build-info version, and a start strictly after that
 block's selection floor. Controls retain current source/readiness counts
 without acquiring the targeted artifact's qualification.
 
+For separately staged runtime readers, bind the reducer's actually loaded
+expectation to the reviewed manifest before admission. On October 2, a proposed
+48-slot reader had twelve selection floors in its manifest but null floors in
+the separate canary object used by the reducer. File hashes alone did not prove
+those objects agreed. The owning staged reader now requires exact loaded-object
+equality and timezone-qualified string floors; matching null floors remain valid
+for source-only preparation and confer no release qualification. Controls cover
+the actual loaded object, manifest-only edits, null preparation and invalid
+numeric floors. The mismatched proposal stayed before contact.
+
+Bind the local invocation as well as the query source. A subsequent launch used
+a different default Python interpreter and failed importing YAML before reaching
+the reader. That was a local bootstrap failure, not a failed Main request.
+The staged Python successor verifies the exact tested interpreter path, resolved
+binary hash and original argument vector before importing its optional front
+dependencies. Its reviewed command is the pinned interpreter and script with
+no additional arguments; unexpected interpreter options, optimization mode,
+arguments or binary identity fail with a finite precontact reason. Actual child
+controls prove the guard runs before those imports, alongside the existing
+TLS, privacy and loaded-floor controls. This source guard does not authorize a
+contact or replace fresh watcher, inventory, window and singleton admission.
+
 Every completed observation atomically replaces the private mode-0600
 `<StateDir>/api-release-proof/latest.json` (directory mode 0700). The finite
 receipt contains evaluation/completion time, expectation hash, source
