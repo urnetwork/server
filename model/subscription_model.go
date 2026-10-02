@@ -1551,6 +1551,16 @@ func createTransferEscrowInTx(
 	if err := validateProberShardAdmissionDeadlineInTx(ctx, tx, shardDeadline); err != nil {
 		return nil, nil, err
 	}
+	pending := make(map[server.Id]netEscrowSnapshot, len(balanceIds))
+	if 0 < contractTransferByteCount {
+		for _, balanceId := range balanceIds {
+			escrow := balanceEscrows[balanceId]
+			snapshot := escrow.reservation
+			snapshot.revision += 2
+			snapshot.reserved += escrow.balanceByteCount
+			pending[balanceId] = snapshot
+		}
+	}
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for _, balanceId := range balanceIds {
 			escrow := balanceEscrows[balanceId]
@@ -1609,20 +1619,17 @@ func createTransferEscrowInTx(
 			ContractPartySource,
 			ContractPartyDestination,
 		)
+		if 0 < contractTransferByteCount {
+			// The same commit publishes only the exact expected revision. A
+			// legacy or concurrent writer leaves a miss rather than stale credit.
+			batch.Queue(netEscrowPublishAdmissionCacheSQL, netEscrowAdmissionCacheArgs(pending, balanceIds)...)
+		}
 	})
 
 	if 0 < contractTransferByteCount {
 		// The escrow insert and subsequent open-contract insert each advance
 		// this balance's revision once. Validate that exact committed state in
 		// the post before reusing the census already performed under its lock.
-		pending := make(map[server.Id]netEscrowSnapshot, len(balanceIds))
-		for _, balanceId := range balanceIds {
-			escrow := balanceEscrows[balanceId]
-			snapshot := escrow.reservation
-			snapshot.revision += 2
-			snapshot.reserved += escrow.balanceByteCount
-			pending[balanceId] = snapshot
-		}
 		posts = append(posts, func() any {
 			publishCreatedNetEscrow(ctx, contractId, pending, balanceIds)
 			return nil
