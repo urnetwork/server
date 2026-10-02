@@ -3421,6 +3421,20 @@ not establish availability of per-entry lifetime fields. The `netescrow`
 statement-profile reducer likewise reports only endpoint lifetime aggregates,
 never an unqualified adjacent-window rate or current executor/plan conclusion.
 
+The October 2 18:30:32–18:30:39Z attempt failed specifically at `history_start`
+with `statement_timeout`, before any activity snapshot. This identifies the
+sampler's history statement, not an application query or a CPU share. A local
+PG18/PGSS fixture with 2,639 current-database entries reproduced the three-second
+timeout twice: the planner expanded text normalization into the family CASE
+arms. Materializing the bounded normalized text once per source row completed
+those history controls in 1.35–1.42 seconds with identical aggregation and
+selection semantics. The owning SQL now retains that evaluation boundary.
+This local mechanism does not exclude Main PGSS contention or query-text I/O;
+a later complete scheduled receipt is still required. The 5,000-ID output cap
+does not bound the extension's initial scan or text retrieval. Keep the same
+three-second statement and 32-second remote budgets, and report another timeout
+as unavailable rather than retrying or treating partial history as empty.
+
 ACTION: after a resource warning, inspect this same watcher's recent complete
 receipt or its explicit coverage failure immediately. Join the bounded waiter
 chain to source and, only when necessary, a separately reviewed exact key/owner

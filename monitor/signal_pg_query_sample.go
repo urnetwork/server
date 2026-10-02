@@ -112,11 +112,17 @@ func pgSampleActivitySQL(index int) string {
  `, pgSampleState("a"), pgSampleWait("a"), pgSampleOwner("a"), pgSampleApp("a"), pgSampleBackend("a"), pgSampleFamily("normalized"), index)
 }
 func pgSampleHistorySQL(index int) string {
-	return fmt.Sprintf(`WITH history AS MATERIALIZED (
+	// Keep normalization behind a materialization boundary. Without it PostgreSQL
+	// inlines the expression into every family CASE arm, repeatedly normalizing
+	// the same bounded text before the history limit can apply.
+	return fmt.Sprintf(`WITH normalized_statements AS MATERIALIZED (
+ SELECT queryid,calls,total_exec_time,max_exec_time,
+ lower(btrim(regexp_replace(left(query,2048),'\s+',' ','g'))) normalized
+ FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database())
+ ), history AS MATERIALIZED (
  SELECT queryid::text q,sum(calls)::float8 calls,sum(total_exec_time)::float8 exec_ms,max(max_exec_time)::float8 max_ms,
  min(%s) family
- FROM (SELECT *,lower(btrim(regexp_replace(left(query,2048),'\s+',' ','g'))) normalized FROM pg_stat_statements
- WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database())) s
+ FROM normalized_statements
  GROUP BY queryid
  ), selected AS (SELECT * FROM history ORDER BY exec_ms DESC,q LIMIT 5000)
  SELECT json_build_object('kind','history','sample',%d,'at',extract(epoch FROM clock_timestamp()),
