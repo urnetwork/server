@@ -10967,6 +10967,28 @@ credit checks; distinguish an observed insufficient balance from cancellation,
 missing origin, retired ownership or transport failure. Local setup failures
 remain unmeasured and cannot satisfy rolling coverage.
 
+For an encrypted-control reply whose reverse origin is itself a companion,
+the private shard payer must remain the payer of that exact eligible anchor.
+The reply may inherit the source shard only when the stored payer and both
+stored endpoint networks match the requested reverse pair; ordinary accounts
+retain destination-payer semantics. The model releases its initial read-only
+transaction and payer turn before waiting for the inherited payer, then reads
+the origin again. Current shard state/deadline, active endpoint mappings and
+the ordinary credit checks still fence the final write. Only eligible anchors
+of that same private payer and pair can raise its reservation ramp; the
+earliest anchor and recent-close linger policy remain unchanged.
+Actual-PG controls cover origin replacement while queued, cancellation,
+retirement, foreign/cross-shard authority, zero-byte anchors, delayed reclaim,
+and the signed response from a currently valid derived credential. Custom and
+generic plans retain the open pair indexes and existing closed endpoint
+indexes; the latter still filter the other endpoint and linger window.
+False-positive qualifier: the pinned Connect default is `EncryptionModeOff`,
+so this supported encrypted-chain defect alone does not explain a current
+probe cancellation or establish that Main exercised the path. False-negative
+qualifier: a valid first origin/return pair does not prove the encrypted reply
+carrier succeeded; preserve the exact request branch and local acquisition
+error. Such a setup failure is unmeasured, not a negative provider outcome.
+
 Emit `url-probe-coverage-deficit` WARN for any eligible provider lacking secure
 completion. Escalate to PAGE when at least 10% of eligible providers are
 overdue, sustained for two cadences. Report quota and security deficits
