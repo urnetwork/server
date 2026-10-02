@@ -5026,10 +5026,17 @@ callback is still running when the manager closes is now joined before OOB
 admission retires, and cannot refill a final-flushed queue. No provider close,
 unknown-result guess, creation replay or early reservation release is added.
 Independent SDK race/vet and six real-controller financial/lifecycle roots
-passed. The one-connection financial test used a 1-GiB private grant and thus
-exercised ordinary fallback; large-grant selected-first coverage is separate
-loaded-workload research. API, Connect and Taskworker deployment of this
-integration is still pending at this checkpoint.
+passed. The initial one-connection financial test used a 1-GiB private grant
+and thus exercised ordinary fallback. The follow-up `eed038cd` uses the actual
+configured URL-probe grant and requires exactly one `selected_first` counter
+increment. The old SDK reproduced a committed allocation with no requester
+close; the combined correction passed both fallback and selected-first roots
+under the race detector, independently in 10.380 seconds. Both preserve the
+provider reservation until independent normal provider settlement. This adds
+selected-path correctness evidence, not a loaded-Main latency or frequency
+claim. API, Connect and Taskworker deployment of this integration was still
+pending at the original checkpoint above; subsequent rollout/runtime receipts
+must establish its serving state separately.
 
 The UTC-only sweep insertion repair passed independent nine-root financial
 race tests, including the original denormalization failure and timezone/replay
@@ -5055,3 +5062,61 @@ UTC sweep review `2979c5181770f2ed594dfae7ab419184fb3e95c9c16b9c49e8d196eb1220ed
 failed sampler receipt `a293c8f053d436cbaa876df74ef4e8614ae260919b56cb839410a4dea8197b9a`.
 The fresh native-bucket/request-local acceptance, ARIN subscriber shadow,
 loaded Main query cause and complete four-hour coverage remain unresolved.
+
+### 17:24 UTC evidence addendum
+
+The exact task read at 13:54 established eight URL shards with concurrency and
+limit 64: 512 configured slots, outer timeout 60s, maximum pass time 900s and
+idle delay 5s. All eight had one advisory owner and zero task errors in that
+snapshot. It does not prove continuous occupancy, timely due admission or a
+completed provider sweep. The older four-row/208-slot blackhole sizing example
+in the operator guide is now explicitly historical.
+
+The matched 13:40–13:45 window remains the durable acceptance baseline:
+4,650 qualifying policy-1 URL measurements, with 1,445 successes and 3,205
+failures, or 15.5 accepted measurements/s versus approximately 78.86/s needed
+for that eligible cohort. Scheduler counters in the same nominal window
+reported 95.801 attempts/s, 15.489 accepted/s and 80.312 local failures/s;
+they are not a row-for-row join. g1 had nearly zero scheduler acceptance.
+Its DNS cohort had 14,444 timeouts and zero answers, versus approximately
+1,823 g2 answers. The corresponding local create-contract handler counters
+showed g1 14,548 cancellations versus about two handler successes and mean
+4.94s residence. Constructor/route admission is not a usable contract, handler
+success is not a durable URL receipt, and unmeasured local failures remain
+excluded from the provider denominator. The earlier completed-stage window
+13:37:20–13:42:20 overlaps but cannot be divided into these later cohorts.
+
+A fresh bounded holder snapshot at 16:59:23 observed ordinary, legacy singleton
+and shard-registry grant waiters (35, 14 and 6 respectively). One retained
+active/no-wait reservation-census family had query age 6.675s and transaction
+age 23.604s. Selected holder depth and fanout were truncated; registry ownership
+is historical, and no output joined an owner cohort to that particular holder
+or to g1. These are positive contention witnesses, not per-query CPU shares
+or proof that every probe cancellation had that cause.
+
+The 17:24:17 release witness found API20/20 and Taskworker8/8 qualified against
+`2026.10.2-contract-lifecycle+1060864200`, source `bf7d6205`. Connect had15/20
+qualified, two fresh explicit4000 processes and three strict unknown slots.
+Only API readiness was observed. Completed tag-selection commands, self-reported
+metrics and stale/unjoined predecessor generations do not prove current DNAT,
+predecessor retirement or continuous serving health. That partial Connect
+boundary remains open.
+
+The recurring database sampler also failed at16:49:27–16:49:32 and
+17:04:32–17:04:36 with coarse `source-unavailable` receipts and no completed
+sample. Its cadence is observed; query coverage is not. The isolated scheduler
+and finite source-phase corrections are in independent verification and have
+not yet supplied a successful Main sample. The prior receipts cannot identify
+whether bootstrap, transport, authority or SQL failed. No CPU, useful throughput
+or complete rolling-quota recovery is claimed by these checkpoints.
+
+Evidence SHA-256: task geometry
+`ffad4f4acd7ef26486fb593074868026c8a56c557756602a84a903880b268236`;
+durable measured window
+`d367708d5b4d89e433392a9a4f89b38d3f94215fd23e68eb4ae1096435bf88fb`;
+fresh holder
+`64a41fe34f44f575bb117b4fb6c81c9f518b4f6836abeb8c3e224e46d58deaca`;
+4200 runtime
+`d42b2be91f4ab510f7573ce11dcf519d715c27f28e41481c268502ba6a2a59a6`;
+selected-grant independent financial control
+`ea267bc6eb1256ab4312d445173178da5883adb0d2d8e73d2763d3ca41c62d59`.

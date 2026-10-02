@@ -11,7 +11,35 @@ Errors use the task system's durable retry and capped exponential backoff. This
 means an offline edge or taskworker cannot own—and therefore cannot strand—a
 slice of providers.
 
-The settings live in `config/<env>/provider_egress_probe.yml`:
+The settings live in `config/<env>/provider_egress_probe.yml`. Treat actual
+deployed task arguments and process evidence as authoritative; a checked-in
+example or tag selection does not prove current worker capacity.
+
+The bounded Main task read at 2026-10-02 13:54 UTC found all eight canonical
+URL shards with limit/concurrency 64, outer probe timeout 60 seconds, maximum
+pass time 900 seconds, idle delay five seconds and result version 1. This is
+512 configured URL slots, not 512 continuously busy or successful probes. Each
+URL turn attempts one provider measurement. The target is ten accepted
+measured outcomes per eligible provider in the rolling four hours, including
+both measured successes and failures; local setup, control or contract failures
+are not provider failures or quota credit. The URL success threshold is
+inclusive `successes / measured outcomes >= 0.8`; three successes and two
+measured failures do not pass it.
+
+Taskworker release `2026.10.2-probe-timeouts-headroom+1060864100` implements
+DNS five seconds, TCP connect three seconds, TLS handshake three seconds and
+read-idle five seconds. The read-idle budget is not a total response-duration
+limit. The request and pass owners remain bounded, and normal TLS authentication
+is required. Each private shard's funding includes at least tenfold conservative
+anticipated usage without depending on reclamation during its pass. The local
+authenticated controller owns contract control; route admission and a ready
+constructor still do not prove provider contact or successful contract creation.
+The 16:14 UTC process witness qualified eight slots against that release's
+source/build/configuration; it did not establish readiness, predecessor
+retirement, useful throughput or rolling quota completion.
+
+The configuration and capacity calculation below are retained **historical
+2026-09-15 full/blackhole examples**, not the current Main URL geometry:
 
 ```yaml
 enabled: true
@@ -37,7 +65,8 @@ blackhole:
   probe_timeout_seconds: 15
 ```
 
-Main keeps four durable rows with a combined peak of 52 probe workers per row,
+That historical Main configuration kept four durable rows with a combined peak
+of 52 probe workers per row,
 or 208 slots without consuming more taskworker executor slots. A blackhole-only
 pass can use all 52. While both queues are due, the independent drain reserves
 the two full-probe workers and uses 50 blackhole workers per row: 200 blackhole
