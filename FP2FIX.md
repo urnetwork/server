@@ -502,6 +502,20 @@ refill it from a shared account, or delete unsettled obligations during cleanup.
 This forecast is a funding margin, not proof that contract acquisition is
 healthy or permission to classify a local acquisition failure as provider loss.
 
+The supported companion-on-companion encrypted reply also retains this private
+payer. A reverse companion anchor must prove the same private payer and both
+endpoint networks before its source-side reply can inherit that payer. Re-read
+the eligible anchor after changing the process-local payer turn; never hold
+the former turn or a database transaction while waiting for the new one.
+The normal active-owner/deadline, current-client and credit fences remain in
+force, and ordinary accounts keep destination-payer billing. The private ramp
+can use only eligible reservations of that payer and exact pair. Actual-PG
+controls reproduce the prior shard-payer rejection and check retirement,
+replacement, cancellation, cross-shard refusal, zero/linger accounting and
+the derived client's signed response. This is a supported-path correctness
+fix: pinned probe encryption defaults to Off, so it is not evidence for the
+current Main canceled-request cause or for live coverage recovery.
+
 There is one URL-probe workflow, with no full/fast or independent blackhole
 probe classes. Count the *currently eligible* public providers after the shared
 reliability and ARIN risk gates; call this `N`. Each provider receives paced

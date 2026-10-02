@@ -1828,8 +1828,14 @@ func CreateCompanionTransferEscrow(
 	originContractTimeout time.Duration,
 ) (transferEscrow *TransferEscrow, returnErr error) {
 	var posts []func() any
-
-	if err := transferEscrowTx(ctx, destinationNetworkId, contractTransferByteCount, func(tx server.PgTx) {
+	payerNetworkId := destinationNetworkId
+	requestedBytes := contractTransferByteCount
+	var inheritedPayer *server.Id
+	create := func(tx server.PgTx) {
+		// A transaction retry or payer handoff must re-read the current origin,
+		// without retaining a previous attempt's clamp, posts or outcome.
+		transferEscrow, posts, returnErr, inheritedPayer = nil, nil, nil, nil
+		contractTransferByteCount = requestedBytes
 		// find the earliest open transfer contract in the opposite direction
 		// with null companion_contract_id
 		// there can be many companion contracts for an original contract
@@ -1920,9 +1926,10 @@ func CreateCompanionTransferEscrow(
 			// deadlock that EncryptionModeRequired surfaces as a hard
 			// establishment failure (Opportunistic silently downgraded the
 			// peer's direction to plaintext instead, which is how it went
-			// unnoticed). The payer is unchanged: the companion's
-			// destination side pays, exactly as for a plain-origin
-			// companion. Plain origins stay preferred; the chain is bounded
+			// unnoticed). Ordinary destination-payer semantics stay unchanged.
+			// A private shard reply inherits only its exact reverse anchor's
+			// private payer; otherwise the shard fence still rejects it.
+			// Plain origins stay preferred; the chain is bounded
 			// in practice at depth two (a reply carrier answering a return
 			// direction).
 			result, err := tx.Query(
@@ -1934,21 +1941,35 @@ func CreateCompanionTransferEscrow(
                         THEN GREATEST(transfer_byte_count, (
                             SELECT max(transfer_byte_count)
                             FROM (
-                                SELECT transfer_byte_count FROM transfer_contract
+                                SELECT transfer_byte_count, payer_network_id,
+                                    source_network_id, destination_network_id
+                                FROM transfer_contract
                                 WHERE
                                     (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
                                     source_id = $1 AND destination_id = $2 AND
                                     companion_contract_id IS NOT NULL
                                 UNION ALL
-                                SELECT transfer_byte_count FROM transfer_contract
+                                SELECT transfer_byte_count, payer_network_id,
+                                    source_network_id, destination_network_id
+                                FROM transfer_contract
                                 WHERE open = false AND $3 <= close_time AND
                                     source_id = $1 AND destination_id = $2 AND
                                     companion_contract_id IS NOT NULL
+                                -- Filter private ownership outside the pair boundary;
+                                -- false-zero stats must not substitute a payer scan.
+                                OFFSET 0
                             ) AS eligible_probe_companion_origins
-                        )) END AS prober_reservation_byte_count
+                            WHERE ($4::uuid <> $5 OR (payer_network_id = $4 AND
+                                source_network_id = $6 AND destination_network_id = $5))
+                        )) END AS prober_reservation_byte_count,
+                        CASE WHEN payer_network_id = $5 AND source_network_id = $6
+                            AND destination_network_id = $5
+                            AND EXISTS (SELECT 1 FROM prober_shard_run WHERE network_id = $5)
+                        THEN $5::uuid END AS inherited_private_payer
                     FROM (
                         (
-                            SELECT contract_id, create_time, transfer_byte_count
+                            SELECT contract_id, create_time, transfer_byte_count,
+                                payer_network_id, source_network_id, destination_network_id
                             FROM transfer_contract
                             WHERE
 								-- Keep both generic open and outcome-null partial
@@ -1964,7 +1985,8 @@ func CreateCompanionTransferEscrow(
                         UNION ALL
 
                         (
-                            SELECT contract_id, create_time, transfer_byte_count
+                            SELECT contract_id, create_time, transfer_byte_count,
+                                payer_network_id, source_network_id, destination_network_id
                             FROM transfer_contract
                             WHERE
                                 open = false AND
@@ -1983,17 +2005,29 @@ func CreateCompanionTransferEscrow(
 				destinationId,
 				sourceId,
 				server.NowUtc().Add(-originContractTimeout),
+				payerNetworkId,
+				sourceNetworkId,
 				destinationNetworkId,
 			)
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
-					server.Raise(result.Scan(&companionContractId, &proberReservationByteCount))
+					server.Raise(result.Scan(&companionContractId, &proberReservationByteCount, &inheritedPayer))
 				}
 			})
 		}
 
 		if companionContractId == nil {
 			returnErr = ErrMissingCompanionOrigin
+			return
+		}
+
+		if inheritedPayer != nil && payerNetworkId != *inheritedPayer {
+			// End this read-only transaction before joining the true payer's
+			// process-local queue. Never wait for another gate with a connection.
+			return
+		}
+		if payerNetworkId != destinationNetworkId && inheritedPayer == nil {
+			returnErr = errors.New("probe companion origin payer changed")
 			return
 		}
 
@@ -2008,13 +2042,19 @@ func CreateCompanionTransferEscrow(
 			sourceId,
 			destinationNetworkId,
 			destinationId,
-			// destination is payer
-			destinationNetworkId,
+			payerNetworkId,
 			contractTransferByteCount,
 			companionContractId,
 		)
-	}); err != nil {
+	}
+	if err := transferEscrowTx(ctx, payerNetworkId, requestedBytes, create); err != nil {
 		return nil, err
+	}
+	if inheritedPayer != nil && payerNetworkId != *inheritedPayer {
+		payerNetworkId = *inheritedPayer
+		if err := transferEscrowTx(ctx, payerNetworkId, requestedBytes, create); err != nil {
+			return nil, err
+		}
 	}
 
 	if returnErr != nil {
@@ -2022,10 +2062,12 @@ func CreateCompanionTransferEscrow(
 	}
 	notifyCommittedContractOrigin(ctx, sourceId, destinationId)
 	server.RunPosts(ctx, posts...)
-	// a companion contract is the return path of an origin contract: the
-	// destination is the paying side — count its top-level identity in the
-	// block users stat
-	StampTopLevelClientContractTime(ctx, destinationId)
+	// Stamp the identity that actually funded this contract.
+	if inheritedPayer != nil && payerNetworkId == sourceNetworkId {
+		StampTopLevelClientContractTime(ctx, sourceId)
+	} else {
+		StampTopLevelClientContractTime(ctx, destinationId)
+	}
 	return
 }
 
