@@ -5563,8 +5563,13 @@ census lock waits; settlement, replay, crash, compatibility and release-gate
 checks remain open. The candidate is not yet deployed or activated.
 
 The operator explicitly requests completion of all ARINDB work through final
-merge and deployment. Current-owner capture core `6b478365` has 22 passing
-author race roots and is undergoing independent review. The protected fleet
+merge and deployment. Current-owner capture core `6b478365` is independently
+reviewed, merged and pushed on Main as `4af854be`. All 22 race roots pass
+against that exact Main source and published SDK. The full classifier/tooling
+race run also passes 43 tests, with two optional external-input audits skipped.
+Independent current-Main gate:
+`61e851a1813cff8e6fc7cdc4d8c03c82af2a0ebcb25cfd07cebacbb558ca3d6d`.
+The protected fleet
 adapter, complete Main shadow, adequate verified subscriber coverage, resource
 cutover and policy deployment remain required. The policy remains inactive;
 local tests or an observer-only deployment cannot close that requirement.
