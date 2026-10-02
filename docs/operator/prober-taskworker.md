@@ -64,6 +64,21 @@ pass; it no longer replenishes the legacy shared identity. The operator ingest
 secret remains in `vault/<env>/provider_egress.yml`; it is never serialized into
 task arguments.
 
+The production `ProberBootstrap` target caps failure backoff at five minutes,
+including its two-minute execution timeout. Failed attempts retain the same
+pending task, error text, and increasing error count; only a successful attempt
+runs the post-step that schedules its successor. Initial shorter retries,
+drain/version-skew behavior, and all other targets keep their existing policy.
+This cap requires only a taskworker binary update, with no schema change.
+
+That delay begins when the worker finalizes the failed attempt. A worker can
+still retain a completed Bootstrap's claim while another task in the same
+evaluation batch runs. Inspect the unique `pending_task.run_once_key` row for
+`["prober_bootstrap"]` to distinguish a future `run_at` after failure from a
+live claim awaiting batch finalization. One fleet-wide recurring task can leave
+Bootstrap metrics absent on the other workers. The retry cap does not release
+live claims or shorten the remaining tasks' execution budgets.
+
 Cleanup retains unresolved contracts, including disputed and zero-byte ones,
 and retries normal settlement only when both actual final reports exist. Its
 contract reads use both `open` values of the existing full
