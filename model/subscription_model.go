@@ -698,6 +698,11 @@ func ReconcileNetEscrowForNetwork(ctx context.Context, networkId server.Id, appl
 // partial-index prefilter only while the outcome join remains in this query.
 // Zero-byte anchors cannot affect SUM. Reject them inside the same boundary
 // before spending a contract lookup on every retained control connection.
+// Keep the contract lookup inside its own key boundary too. False-zero
+// outcome-index statistics can otherwise turn that join into repeated scans
+// of unrelated unresolved contracts while an admission holds its grant locks.
+// Apply outcome outside this boundary so it cannot replace the exact lookup
+// with a global partial-index scan; disputed unresolved contracts still count.
 const netEscrowReservationPageSQL = `
     SELECT requested_balance.balance_id,
         COALESCE(revision.revision, 0),
@@ -716,9 +721,11 @@ const netEscrowReservationPageSQL = `
                 transfer_escrow.balance_byte_count <> 0
             OFFSET 0
         ) AS selected_escrow
-        INNER JOIN transfer_contract ON
-            transfer_contract.contract_id = selected_escrow.contract_id
-        WHERE transfer_contract.outcome IS NULL
+        INNER JOIN LATERAL (
+            SELECT outcome FROM transfer_contract
+            WHERE contract_id = selected_escrow.contract_id
+            OFFSET 0
+        ) AS transfer_contract ON transfer_contract.outcome IS NULL
     ) AS reserved
 `
 
