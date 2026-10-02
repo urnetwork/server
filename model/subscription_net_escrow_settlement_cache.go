@@ -103,6 +103,23 @@ func publishSettlementNetEscrowSnapshots(ctx context.Context, tx server.PgTx, pe
 	}
 }
 
+// Visit every existing balance for this contract in settlement lock order.
+// Keep the contract range and individual balance probes scoped even when
+// historical statistics incorrectly estimate an empty escrow relation.
+const settlementMetadataBalanceLocksSQL = `
+ SELECT selected_balance.balance_id
+ FROM (
+     SELECT balance_id FROM transfer_escrow
+     WHERE contract_id = $1
+     ORDER BY balance_id OFFSET 0
+ ) AS selected_escrow
+ CROSS JOIN LATERAL (
+     SELECT balance_id FROM transfer_balance
+     WHERE balance_id = selected_escrow.balance_id
+     OFFSET 0 FOR UPDATE
+ ) AS selected_balance
+`
+
 // Metadata is still a separate post. Read committed authority here, never a
 // prediction captured before the outcome commit: callbacks after rollback or
 // ambiguous commits must not reuse an abandoned transaction's revision.
@@ -117,6 +134,17 @@ func settleEscrowMetadataInTx(ctx context.Context, tx server.PgTx, contractId se
 	if !terminal {
 		return
 	}
+	// Metadata advances the same revision as admission and financial settlement.
+	// Keep its read/update/publication inside their balance fence, or a harmless
+	// settled-flag update can invalidate current snapshots and force full history
+	// reloads under a busy payer. Match contract -> sorted balances -> escrow ->
+	// revision ordering, including balances outside a partial caller payout map.
+	// Complete this locking statement before the separate fresh snapshot read.
+	rows, err = tx.Query(ctx, settlementMetadataBalanceLocksSQL, contractId)
+	server.WithPgResult(rows, err, func() {
+		for rows.Next() {
+		}
+	})
 	ids := make([]server.Id, 0, len(sweepPayouts))
 	for id := range sweepPayouts {
 		ids = append(ids, id)

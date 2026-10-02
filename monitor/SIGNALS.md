@@ -1628,6 +1628,22 @@ required settlement work; persistent misses can leave CPU high. Verify fresh
 per-process counter continuity and source coverage alongside independent CPU
 and successful traffic before claiming recovery.
 
+Settlement metadata also advances reservation revisions when it marks escrow
+rows settled. Its post must lock the contract's existing balances in sorted
+order before locking escrow rows and reading the current snapshot, including
+balances outside a partial payout map. Without that fence, concurrent
+admission can overtake the metadata read; guarded publication then correctly
+rejects the stale prediction, but the next reader repeats the exact census.
+An actual PostgreSQL interleave with 10,001 surviving reservations reproduced
+this cache invalidation without changing reserved credit. The balance fence
+preserved the current revision; independent-process admission and settlement
+controls also verified exact PostgreSQL/cache/Redis accounting. Missing cache
+rows, legacy mutations, rollback, replay and deleted balances retain their
+existing authority checks. Local controls establish this mechanism, not its
+production frequency or the identity of a sampled Main census caller. A
+revision miss is not proof of lost funds; repeated misses can explain work
+amplification even when every financial check remains correct.
+
 The 2026-09-27 read-only grant/backup discriminator is manual evidence, not a
 new automated alert. The current grant shape returned about 225 rows/call at
 834 calls/s, with 7,547 shared-buffer hits/call and no shared reads. The balance
