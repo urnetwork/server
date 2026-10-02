@@ -509,6 +509,8 @@ type durableBlobReader struct {
 	relative, name string
 	anchor         unix.Stat_t
 	failed         error
+	// Instance-only ordering seam after real descriptor I/O; production nil.
+	afterReadForTest func(int, error)
 }
 
 func (self *localBlobStore) getDurable(ctx context.Context, key string) (_ io.ReadCloser, resultErr error) {
@@ -576,6 +578,9 @@ func (self *durableBlobReader) Read(raw []byte) (int, error) {
 		return 0, err
 	}
 	n, err := self.file.Read(raw[:min(len(raw), 64*1024)])
+	if self.afterReadForTest != nil {
+		self.afterReadForTest(n, err)
+	}
 	if checkErr := self.check(); checkErr != nil {
 		return n, errors.Join(err, checkErr)
 	}
