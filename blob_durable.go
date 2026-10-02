@@ -582,7 +582,9 @@ func (self *durableBlobReader) Read(raw []byte) (int, error) {
 		self.afterReadForTest(n, err)
 	}
 	if checkErr := self.check(); checkErr != nil {
-		return n, errors.Join(err, checkErr)
+		// Full-buffer consumers may discard an error alongside enough bytes.
+		// Withhold this read; the retained descriptor still advances normally.
+		return 0, errors.Join(err, checkErr)
 	}
 	return n, err
 }

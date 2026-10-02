@@ -33,7 +33,8 @@ func (self *localBlobCapacityReader) Read(data []byte) (int, error) {
 	}
 	n, err := self.reader.Read(data)
 	if canceled := self.ctx.Err(); canceled != nil {
-		return n, canceled
+		// Do not let ReadFull or a decoder accept a canceled complete buffer.
+		return 0, errors.Join(err, canceled)
 	}
 	return n, err
 }
