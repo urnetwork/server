@@ -17867,6 +17867,30 @@ controls prove the guard runs before those imports, alongside the existing
 TLS, privacy and loaded-floor controls. This source guard does not authorize a
 contact or replace fresh watcher, inventory, window and singleton admission.
 
+Watcher-process verification has a separate unavailable state. At 19:26:50 UTC
+on October 2, the authorized same-unit replacement completed, but its final
+unprivileged `/proc/<pid>/exe` read raised `PermissionError`. The wrapper's
+nonzero exit did not mean the restart failed. A bounded read-only recovery
+confirmed the expected new executable, unchanged unit and cadence, and retired
+predecessor; no second restart was needed. This does not establish why the
+kernel denied that original read or that it remained denied afterward.
+
+The shared staged-reader helper `diagnostics/process_identity.py` binds the
+exact unit, PID, boot ID, process start ticks, executable digest and zero restart
+count. It checks unit and process generation before and after one fixed,
+noninteractive `sudo` hash of that exact proc executable, under a five-second
+local owner. The hash child has its own two-second supervisor; stdout/stderr
+are capped and raw errors are discarded. Privilege refusal, timeout, malformed
+output, changed generation or wrong digest remain finite verification failures.
+Never substitute an on-disk binary hash, select another PID, restart the unit,
+or add a watcher to make this audit pass. Healthy-but-unreadable is unknown;
+a correct digest alone can miss PID reuse or a replaced unit. Controls cover
+both, including an unchanged digest with changed process start ticks, a unit
+change during hashing, privilege refusal and real child timeout/output caps.
+This is a local admission helper, not a new remote signal or proof of query
+coverage. Apply it only to freshly reviewed reader successors; sealed historical
+readers and expired grants stay closed.
+
 Every completed observation atomically replaces the private mode-0600
 `<StateDir>/api-release-proof/latest.json` (directory mode 0700). The finite
 receipt contains evaluation/completion time, expectation hash, source
