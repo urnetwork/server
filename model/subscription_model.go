@@ -696,6 +696,8 @@ func ReconcileNetEscrowForNetwork(ctx context.Context, networkId server.Id, appl
 // is intentionally not assumed: the best-effort settled post can be missed and
 // leave closed escrow rows unsettled. `settled = false` is therefore a safe
 // partial-index prefilter only while the outcome join remains in this query.
+// Zero-byte anchors cannot affect SUM. Reject them inside the same boundary
+// before spending a contract lookup on every retained control connection.
 const netEscrowReservationPageSQL = `
     SELECT requested_balance.balance_id,
         COALESCE(revision.revision, 0),
@@ -710,7 +712,8 @@ const netEscrowReservationPageSQL = `
             SELECT transfer_escrow.contract_id, transfer_escrow.balance_byte_count
             FROM transfer_escrow
             WHERE transfer_escrow.balance_id = requested_balance.balance_id AND
-                transfer_escrow.settled = false
+                transfer_escrow.settled = false AND
+                transfer_escrow.balance_byte_count <> 0
             OFFSET 0
         ) AS selected_escrow
         INNER JOIN transfer_contract ON
@@ -1396,9 +1399,11 @@ const contractExtenderInsertSql = `
 
 // Ordinary payers reserve from the earliest available grants. The persisted
 // internal prober first tries a bounded whole-request free grant. Both paths
-// hold balance locks through commit and read reservations afterward in read
-// committed, so a lock wait cannot authorize already-reserved credit.
-// Zero-byte contracts retain their existing earliest-grant anchor and priority.
+// hold balance locks through commit for positive-byte admission and read
+// reservations afterward in read committed, so a lock wait cannot authorize
+// already-reserved credit.
+// Zero-byte contracts read their earliest-grant anchor and priority without
+// taking financial locks; the client lifecycle fences still precede this read.
 func createTransferEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -1489,7 +1494,8 @@ func createTransferEscrowInTx(
 			paid:             transferBalance.paid,
 			balanceByteCount: escrowBalanceByteCount,
 			// carried to stamp the net escrow counter ttl in the redis post
-			endTime: transferBalance.endTime,
+			endTime:     transferBalance.endTime,
+			reservation: transferBalance.reservation,
 		}
 		netEscrowBalanceByteCount += escrowBalanceByteCount
 		if contractTransferByteCount <= netEscrowBalanceByteCount {
@@ -1586,8 +1592,19 @@ func createTransferEscrowInTx(
 	})
 
 	if 0 < contractTransferByteCount {
+		// The escrow insert and subsequent open-contract insert each advance
+		// this balance's revision once. Validate that exact committed state in
+		// the post before reusing the census already performed under its lock.
+		pending := make(map[server.Id]netEscrowSnapshot, len(balanceIds))
+		for _, balanceId := range balanceIds {
+			escrow := balanceEscrows[balanceId]
+			snapshot := escrow.reservation
+			snapshot.revision += 2
+			snapshot.reserved += escrow.balanceByteCount
+			pending[balanceId] = snapshot
+		}
 		posts = append(posts, func() any {
-			refreshNetEscrow(ctx, balanceIds)
+			publishCreatedNetEscrow(ctx, contractId, pending, balanceIds)
 			return nil
 		})
 	}

@@ -12,9 +12,9 @@ the eight hardening additions from 722–729 to 742–749 without changing their
 SQL identities. A database carrying the former branch catalog is refused at
 the conflicting index; migration history is never relabeled automatically.
 
-Every cache publisher now reads `(balance_id, revision, reserved_bytes)` in one
-PostgreSQL statement. Create, settlement, quarantine, retention and reconciliation
-all publish this absolute snapshot through the same Redis script. A delayed
+Every cache publisher obtains `(balance_id, revision, reserved_bytes)` from
+PostgreSQL. Create, settlement, quarantine, retention and reconciliation all
+publish this absolute snapshot through the same Redis script. A delayed
 create cannot double a repaired reservation; a delayed settlement cannot release
 a neighboring contract's reservation. A newer cached revision rejects an older
 page. Different authoritative amounts at the same revision are an integrity
@@ -52,7 +52,7 @@ write on the hot creation path. Revision tombstones have no automatic pruning;
 design a bounded export/retirement policy before deleting them. The migration
 guards ordinary deletion, revision rollback, and source-table truncation.
 
-Admission now locks eligible payer balances in ascending ID order and reads
+Positive-byte admission locks eligible payer balances in ascending ID order and reads
 durable open reservations in a separate statement after the lock completes.
 Both origin and companion creation use read-committed transactions. Reading
 reservations in the locking statement would retain its pre-wait snapshot and
@@ -66,8 +66,43 @@ then uses the payer client's hash in the original discovery order. A successful
 window retains its locks through commit. A rejected window rolls back its
 savepoint before the next window or complete fallback, so speculative locks
 cannot invert the next lock order. Ordinary payers and full fallback lock all
-eligible grants. The bounded discovery path adds a locked reread; it does not
+eligible grants for positive-byte requests. Zero-byte anchors read only the
+earliest-expiring eligible grant without balance locks or a reservation census.
+Their priority comes from that committed statement snapshot, including while
+another transaction changes a grant's expiry, paid status or existence. The
+endpoint lifecycle locks remain in place, so concurrent client deactivation
+still blocks admission and rejects it after committing. The bounded discovery
+path adds a locked reread; it does not
 establish production contention or capacity limits.
+
+Creation mirror posts reuse the exact admission census when one subsequent
+committed statement confirms the created contract is still open and each
+balance's revision equals its admission revision plus two: one advance for the
+escrow insertion and one for the open-contract insertion. The corresponding
+absolute amount is the admission reservation plus this contract's allocated
+bytes. This check adds no statement under the grant locks. Contract visibility
+guards a rolled-back transaction whose predicted numeric revision is later
+reused. A changed revision or missing/closed contract triggers the existing
+exact census for that balance; concurrent cancellation between the census and
+inserts is therefore also detected. The same Redis script still rejects older
+publication after this read. Other publishers retain their authoritative census.
+
+The reservation query excludes zero-byte anchors before joining contract
+outcomes. It retains disputed unresolved reservations, the unsettled prefilter,
+and the existing per-balance optimization boundary. In a disposable PostgreSQL
+18 fixture with 8,192 zero anchors, 64 positive open reservations and 64 closed
+unsettled rows, custom and generic plans reduced contract-join inputs from
+8,320 to 128 and returned the same 64 reserved bytes. Buffers were unchanged
+in that small hash-join fixture; this is not a forecast of Main CPU reduction.
+
+These reductions require no new migration or index. The existing reservation
+revision triggers and guards must pass their actual-definition monitor checks.
+Rolling deployment among the current fenced writers is compatible. Observe
+`urnetwork_net_escrow_creation_snapshot_total{result="reused"|"reloaded"}`,
+the changed census SQL fingerprint, grant lock queues, and latency/CPU under
+comparable traffic. Positive allocations still serialize on shared grants;
+benefit depends on zero-anchor volume and how often committed revisions remain
+unchanged until the post. This patch alone does not establish Main recovery.
 
 The successful terminal claimant debits consumed payer bytes in that same
 PostgreSQL transaction. A missing post can no longer release a reservation while

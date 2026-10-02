@@ -98,12 +98,13 @@ func TestCreateTransferEscrowReadsOnlyCurrentGrants(t *testing.T) {
 				server.Raise(err)
 			})
 			server.RunPosts(ctx, posts...)
-			wantQueries := 1
+			wantQueries, wantRows := 1, 1
 			if byteCount > 0 {
 				wantQueries = 2 // Identity-only discovery, then locked current grants.
+				wantRows = 2
 			}
-			if query.grantQueries != wantQueries || query.grantRows != 2 {
-				t.Errorf("bytes=%d grant queries=%d rows=%d, want %d queries and two current rows", byteCount, query.grantQueries, query.grantRows, wantQueries)
+			if query.grantQueries != wantQueries || query.grantRows != wantRows {
+				t.Errorf("bytes=%d grant queries=%d rows=%d, want %d queries and %d current rows", byteCount, query.grantQueries, query.grantRows, wantQueries, wantRows)
 			}
 			want := map[server.Id]ByteCount{firstId: 0}
 			wantPriority := Priority(PaidPriority)
@@ -168,7 +169,7 @@ func TestCreateTransferEscrowGrantWindowKeepsExactBoundaries(t *testing.T) {
 			escrow, _, err := createTransferEscrowInTx(ctx, query, clients.payerNetworkId, clients.payerId,
 				clients.providerNetworkId, clients.providerId, clients.payerNetworkId, 0, nil)
 			server.Raise(err)
-			if query.grantQueries != 1 || query.grantRows != 2 || len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != earliestId || escrow.Priority != PaidPriority {
+			if query.grantQueries != 1 || query.grantRows != 1 || len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != earliestId || escrow.Priority != PaidPriority {
 				t.Fatal("allocation changed the inclusive-start/exclusive-end boundary or earliest zero-byte anchor")
 			}
 
