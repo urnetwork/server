@@ -645,6 +645,25 @@ documented healthy resolution window. Do not persist sustain counters or
 introduce persistent ticket state as part of a watcher handoff without a
 separate design decision.
 
+Record an authorized replacement command's actual exit and boundary time
+durably before its postconditions are evaluated. Keep `replacement completed`
+separate from `process verification unavailable`: an unprivileged proc-exe
+permission failure after a successful unit restart is not authority to repeat
+that restart. Recover only the missing bounded read-only identity evidence,
+preserving the prior attempt, unit, launcher, cadence and predecessor-retirement
+facts. A recovery receipt supplements the original; it does not overwrite it.
+
+Fresh staged Python reader successors use the reviewed
+`monitor/diagnostics/process_identity.py` helper (or a byte-identical pinned
+copy), with exact unit/PID/boot/start-ticks/executable authority. Its only sudo
+operation is a fixed, noninteractive, timeout-supervised hash of that process's
+proc executable; it cannot restart or signal the watcher. Unknown authority
+stops before contact. Do not reopen historical readers just to replace their
+audit. Gate this helper with the actual tested interpreter:
+`/usr/bin/python3 -m unittest discover -s monitor/diagnostics -v`, then run the
+consumer's own admission/privacy/transport controls on its frozen successor.
+These local controls add no Main request or automatic activation.
+
 ## Alert validation loop
 
 Process each new alert identity and each material update in this order:
