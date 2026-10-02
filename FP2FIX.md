@@ -5331,3 +5331,66 @@ There are still zero successful recurring samples. The failed attempt retained
 its next eligible floor of 18:45:39.350513219 UTC; no manual retry was run.
 Astra is investigating the owning snapshot query and its dependencies. Receipt
 SHA-256: `da96a82accd316c8330ad0de8fd0a9136241f090417e60344827feedb2526881`.
+
+
+## 2026-10-02 19:30 UTC throughput and sampler checkpoint
+
+The automatic 19:22:11 UTC URL census had 113,823 eligible providers,
+1,649 quota-complete (1.45 percent), and 1,643 secure-complete. Its cohort
+changed and the hourly coverage remained incomplete; this is not a matched
+provider recovery comparison. The 19:16:04 UTC resource sample measured
+58.022 PostgreSQL cores out of 96 (60.44 percent), over 5.01 seconds.
+Neither result establishes query attribution or recovery.
+
+Three bounded current-worker metric reads used eight source/start-qualified
+Taskworker references for the deployed 4300 release and the same fixed
+18:55–19:00 UTC interval. Completed timed turns averaged 5.037 seconds;
+setup phases totaled about 69 milliseconds, while check-and-buffer averaged
+4.959 seconds. Acknowledged outcomes were approximately 24.56 per second;
+these counter increases are not durable per-provider quota proof. Local failures
+accounted for 73.95 percent of attempts. DNS timeout waves spent about 4.94
+seconds after route admission. Route admission establishes registered-channel
+selection, not contract availability, an actual provider write or provider fault.
+Data-only probes intentionally omit the initial ping/evaluation exchange.
+
+Qualified contract-frame counters averaged 1.903 seconds, with 34.41 percent
+canceled and 475 inflight. Successful PostgreSQL pool acquisition averaged
+110 microseconds; canceled acquisition duration and several sparse error,
+settlement and refresh families remain unknown. Admission cache reuse was
+99.95 percent; creation-cache reloads were zero in the qualified interval.
+These are separate cohorts, without a request/provider/SQL causal join.
+The next discriminator is contract phase timing and the first provider write.
+
+Sampler source `78a7e518` materializes normalized history text once before
+classification, preserving existing filters, aggregation, caps and timeouts.
+A controlled PostgreSQL fixture reproduced the old three-second timeout;
+the corrected full twelve-frame program completed. Independent full monitor
+normal, race and vet gates passed. One same-unit restart at 19:26:50 UTC
+replaced PID 193014 with PID 303929 and exact binary SHA-256
+`42f074e9c9051c1e4600eae2bea57dcdd21b6d8831ea26c48abadd74534884f1`.
+The restart succeeded, but its original verification script exited on a local
+/proc executable permission error. A subsequent privileged read-only check and
+independent audit verified the binary, retired old PID, unchanged unit/launcher
+and all retained cadence clocks. No second restart occurred. The startup floor
+makes the first new active callback no earlier than 19:41:50 UTC; successful
+Main query sampling and recurring coverage are still unproven.
+
+The UTC straggler-reap timestamp correction is committed on Main as
+`9a7abf78`; seven financial roots passed independent normal/race controls,
+including the previously failing backfill test and cross-zone retention checks.
+It is source-only, not a deployed fix or current Main outage attribution.
+The 328-root model normal partition completed with 325 passes, zero failures
+and three skips. Whole-model normal/race verification remains incomplete.
+Accepted health-history retention, current native bucket counts, complete ARIN
+shadow coverage and sustained 100-percent probe coverage remain open.
+
+Evidence SHA-256: fixed-window metric analysis
+`1ca9c6fb20cd2c5a5b86009356cc93efc06cc31e6282891931405267791730cc`;
+sampler full independent gates
+`10680dc2ca2ff099104c69c6fa8bdaa1f04a2b8cdc45538b596749d65da17493`;
+recovered promotion verification
+`4af2f4fc960b98c679bcddb0d822a9ec0d5a6fe62ec912d5c3fce89c6464e437`;
+independent handoff audit
+`d42f73deb6aa7ee11309aa53de0b6251c3df5dd7838449342414b536db07100d`;
+UTC financial gates
+`bb8e2ce9c44ff0ab6d3e8cf35a9396e7e310574ca27ee343939df7b9a15247e0`.
