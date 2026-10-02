@@ -5530,3 +5530,41 @@ ARIN full current-provider shadow coverage, hosted proxy local-controller
 integration, and dashboard corrections continue as separate work. New agent
 threads were rejected by the agent service's thread limit, so an existing
 Astra Max agent was reassigned exclusively to ARIN coverage in parallel.
+
+### 22:07 UTC admission discriminator and ARIN completion priority
+
+The completed 4700 timing read covers all eight qualified Taskworker processes
+in the fixed 21:40–21:45 UTC window. Payer-gate waiting accounts for 97.02
+percent (g1) and 97.13 percent (g2) of completed synchronous contract residence;
+mean returned-call times are 1.715 and 1.594 seconds. For DNS timeout waves,
+83.74 and 75.52 percent respectively have the affirmative same-tunnel
+local-contract pending/failure witness with no provider write. This confirms
+that gate dominance persists after the settlement repair; it does not join
+individual requests to SQL waits or establish accepted quota recovery.
+Receipt: `80d72d36cb6e4b961ac35ab8c7ca7a8abdf3e8415bc100afdc68feda92219129`.
+
+The 21:50 UTC runtime read qualifies 44 of 48 source/start/image-config reports:
+20 API, eight Taskworker and 16 Connect. Four Connect reports remain unavailable,
+with no positively observed older build. These are runtime reports, not direct
+container identity, predecessor retirement, or customer recovery proof.
+Receipt: `ea71bdb55363ca5e184ae2773e1a6028016c91d32f4c4e2dcd495d66d2c6a18e`.
+
+The coherent 22:00:02 UTC URL census reports 112,355 eligible providers and 365
+meeting the rolling quota (0.3249 percent); hourly expected-process coverage
+remains incomplete. The 21:47:44 UTC resource sample measures 46.254 PostgreSQL
+cores out of 96 (48.18 percent over 5.02 seconds). The tenth complete autonomous
+query cadence ends at 22:01:06 UTC with persistent grant queues. These separate
+observation clocks do not establish an isolated deployment effect.
+
+The Redis admission candidate has passed local synchronized, two-process tests
+with 512 distinct clients sharing one network, including varied- and shared-
+destination controls. All creations succeeded with no sampled balance/cache/
+census lock waits; settlement, replay, crash, compatibility and release-gate
+checks remain open. The candidate is not yet deployed or activated.
+
+The operator explicitly requests completion of all ARINDB work through final
+merge and deployment. Current-owner capture core `6b478365` has 22 passing
+author race roots and is undergoing independent review. The protected fleet
+adapter, complete Main shadow, adequate verified subscriber coverage, resource
+cutover and policy deployment remain required. The policy remains inactive;
+local tests or an observer-only deployment cannot close that requirement.
