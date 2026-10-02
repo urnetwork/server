@@ -1631,8 +1631,8 @@ func measureProductionStreamP2pTopology(
 			forcedRouteBarrier,
 		)
 	}
-	for _, client := range clients {
-		client.transport.Close()
+	if err := closeRouteClientTransportsAndWait(ctx, routeClientLifecycles(clients)); err != nil {
+		t.Fatalf("join platform transports before forced %d-hop P2P route: %v", hopCount, err)
 	}
 	if _, err := waitForRouteCountAfter(
 		ctx,

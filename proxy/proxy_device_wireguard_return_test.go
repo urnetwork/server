@@ -149,6 +149,7 @@ type wgReturnHarness struct {
 	wg        *wgproxy.WgProxy
 	clientTun *tuntest.ChannelTUN
 	bind      *wgReturnTrackingBind
+	provider  <-chan []byte
 	close     func()
 }
 
@@ -267,16 +268,17 @@ func newWgReturnHarness(t *testing.T) *wgReturnHarness {
 		})
 	}
 	t.Cleanup(closeHarness)
-	return &wgReturnHarness{ctx, peer, device, wg, clientTun, bind, closeHarness}
+	return &wgReturnHarness{ctx, peer, device, wg, clientTun, bind, provider, closeHarness}
 }
 
 // Count datagrams at the actual local Bind receive boundary, before decrypt or
 // stack injection. Fixed atomics retain neither payloads nor peer identities.
 type wgReturnTrackingBind struct {
 	conn.Bind
-	dataPackets   atomic.Uint64
-	largePackets  atomic.Uint64
-	receiveErrors atomic.Uint64
+	dataPackets    atomic.Uint64
+	payloadPackets atomic.Uint64
+	largePackets   atomic.Uint64
+	receiveErrors  atomic.Uint64
 }
 
 func (b *wgReturnTrackingBind) Open(ip4, ip6 string, port uint16) ([]conn.ReceiveFunc, uint16, error) {
@@ -290,6 +292,9 @@ func (b *wgReturnTrackingBind) Open(ip4, ip6 string, port uint16) ([]conn.Receiv
 			for index := range n {
 				if sizes[index] >= 4 && binary.LittleEndian.Uint32(packets[index][:4]) == uwgdevice.MessageTransportType {
 					b.dataPackets.Add(1)
+					if sizes[index] > uwgdevice.MessageKeepaliveSize {
+						b.payloadPackets.Add(1)
+					}
 					if sizes[index] > 200 {
 						b.largePackets.Add(1)
 					}

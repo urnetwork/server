@@ -93,6 +93,10 @@ func TestH1LoadedDownloadReplayMode(t *testing.T) {
 }
 
 func TestH1LoadedDownloadRun1Replay(t *testing.T) {
+	runH1LoadedDownloadRun1Replay(t, h1LoadedDownloadRun1Scenario)
+}
+
+func runH1LoadedDownloadRun1Replay(t *testing.T, scenarioForTest func(testing.TB) perfvarScenario) {
 	mode := os.Getenv("CONNECT_PERFVAR_H1_LOADED_DOWNLOAD_REPLAY")
 	if mode == "" {
 		t.Skip("explicit source-pinned H1 loaded download replay required")
@@ -111,7 +115,7 @@ func TestH1LoadedDownloadRun1Replay(t *testing.T) {
 		newPerfvarProgressTraceForTest != nil || newFullTunLatencyProbeObserverForTest != nil || newFullTunConstructionHooksForTest != nil {
 		t.Fatal("H1 loaded download replay requires V0, exact progress-trace mode, and unowned hooks")
 	}
-	scenario := h1LoadedDownloadRun1Scenario(t)
+	scenario := scenarioForTest(t)
 	var transportRecorder *h1LoadedTransportRecorder
 	if mode == "transport" {
 		transportRecorder = &h1LoadedTransportRecorder{}

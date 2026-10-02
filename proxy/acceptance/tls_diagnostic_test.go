@@ -163,3 +163,53 @@ func TestTLSVerificationDiagnosticRetainsAdjacentRejections(t *testing.T) {
 		t.Fatalf("non-verification error reported a certificate: %q", got)
 	}
 }
+
+// A fresh TLS connection can finish its handshake and accept our request,
+// then close before sending any HTTP headers. Preserve that EOF as a terminal
+// sustained failure even when another connection would receive a valid reply.
+func TestProbeHTTPSTLSCloseBeforeHeadersIsTerminalWithoutRetry(t *testing.T) {
+	certificate, root := diagnosticTLSCertificate(t, "EOF validation root")
+	var requests, dials atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if !request.Close || request.TLS == nil || !request.TLS.HandshakeComplete {
+			t.Error("probe changed its fresh-connection contract or did not complete TLS")
+		}
+		if requests.Add(1) == 2 {
+			connection, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("hijack completed TLS request: %v", err)
+				return
+			}
+			_ = connection.Close()
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{certificate}}
+	server.StartTLS()
+	defer server.Close()
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		dials.Add(1)
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	defer transport.CloseIdleConnections()
+	successes, err := probeHTTPSCampaign(
+		context.Background(), "WireGuard", server.URL, transport,
+		time.Second, 3*time.Second, time.Second,
+		func(context.Context, time.Duration) error { return nil }, nil, nil,
+	)
+	if successes != 1 || requests.Load() != 2 || dials.Load() != 2 {
+		t.Fatalf("successes=%d requests=%d dials=%d; want one readiness success and one terminal attempt", successes, requests.Load(), dials.Load())
+	}
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("close before headers did not retain EOF: %v", err)
+	}
+	for _, want := range []string{"sustained request 1/3 failed after 1 successful requests", "phase waiting_for_response_headers", "connection new"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("EOF lost %q: %v", want, err)
+		}
+	}
+}

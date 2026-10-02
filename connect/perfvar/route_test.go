@@ -254,10 +254,11 @@ type routeClient struct {
 	routeStateTrace *p2pRouteStateTrace
 }
 
-// One lifecycle bundle lets environment teardown join concrete clients while
-// pure tests hold exact transport and client completion barriers.
+// Forced-route transitions and teardown share concrete lifecycle operations;
+// pure tests can hold exact transport and client completion barriers.
 type routeClientLifecycle struct {
 	flush                 func()
+	closeTransport        func()
 	closeTransportAndWait func(context.Context) error
 	closeClientAndWait    func(context.Context) error
 }
@@ -270,6 +271,11 @@ func routeClientLifecycles(clients []*routeClient) []routeClientLifecycle {
 		client := client
 		lifecycles = append(lifecycles, routeClientLifecycle{
 			flush: client.client.Flush,
+			closeTransport: func() {
+				if client.transport != nil {
+					client.transport.Close()
+				}
+			},
 			closeTransportAndWait: func(ctx context.Context) error {
 				if client.transport == nil {
 					return nil
@@ -280,6 +286,27 @@ func routeClientLifecycles(clients []*routeClient) []routeClientLifecycle {
 		})
 	}
 	return lifecycles
+}
+
+// Forced P2P measurement closes every fallback before joining its owners.
+// One selector's withdrawal does not finish other selectors or carrier workers.
+func closeRouteClientTransportsAndWait(
+	ctx context.Context,
+	lifecycles []routeClientLifecycle,
+) error {
+	for _, lifecycle := range lifecycles {
+		lifecycle.closeTransport()
+	}
+	var closeErr error
+	for clientIndex, lifecycle := range lifecycles {
+		if err := lifecycle.closeTransportAndWait(ctx); err != nil {
+			closeErr = errors.Join(
+				closeErr,
+				fmt.Errorf("join route client %d platform transport: %w", clientIndex, err),
+			)
+		}
+	}
+	return closeErr
 }
 
 // Teardown flushes every source before stopping carriers, then joins each
@@ -1299,8 +1326,12 @@ func measureP2pRoute(
 	if forcedRouteBarrier.ActiveRouteCount != 2 {
 		t.Fatalf("forced P2P transition started from route state=%+v", forcedRouteBarrier)
 	}
-	source.transport.Close()
-	destination.transport.Close()
+	if err := closeRouteClientTransportsAndWait(
+		environment.ctx,
+		routeClientLifecycles([]*routeClient{source, destination}),
+	); err != nil {
+		t.Fatalf("join platform transports before forced P2P route: %v", err)
+	}
 	if _, err := waitForRouteCountAfter(
 		environment.ctx,
 		routeStateObserver,
