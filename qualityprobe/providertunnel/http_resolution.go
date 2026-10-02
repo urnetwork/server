@@ -15,12 +15,13 @@ import (
 // Each independent tunnel supplies its own cache and socket dialer. Probe
 // tunnels are IPv4-only; this does not change general Connect resolution.
 type providerUrlResolver struct {
-	waitRoute    func(context.Context) error
-	query        func(context.Context, string, string) ([]netip.Addr, bool)
-	dial         func(context.Context, string, string, []netip.Addr) (net.Conn, error)
-	observations *DnsObservations
-	pathState    func() dnsPathState
-	routeState   func() dnsRouteSnapshot
+	waitRoute           func(context.Context) error
+	query               func(context.Context, string, string) ([]netip.Addr, bool)
+	dial                func(context.Context, string, string, []netip.Addr) (net.Conn, error)
+	observations        *DnsObservations
+	pathState           func() dnsPathState
+	routeState          func() dnsRouteSnapshot
+	contractUnavailable func() bool
 }
 
 // Retries resolver failures before attempting a socket. All attempts share the
@@ -93,6 +94,16 @@ resolution:
 		if self.observations != nil {
 			waveEnd = time.Now()
 		}
+		// Snapshot before our own lookup cancellation can release a wait.
+		// This exact tunnel's monotonic write fence is owned by Connect;
+		// registration/admission and separate process counters cannot supply it.
+		contractEvidence := 0
+		if self.observations != nil && self.contractUnavailable != nil {
+			contractEvidence = 2
+			if self.contractUnavailable() {
+				contractEvidence = 1
+			}
+		}
 		stop()
 		cancel()
 		if self.observations != nil && self.routeState != nil {
@@ -125,6 +136,7 @@ resolution:
 			}
 			self.observations.record(result, path)
 			self.observations.recordRouteTiming(result, waveStart, waveEnd, before, after)
+			self.observations.recordContract(result, contractEvidence, waveEnd.Sub(waveStart))
 		}
 		if len(addrs) != 0 || authoritative {
 			break

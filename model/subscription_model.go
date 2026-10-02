@@ -1241,6 +1241,7 @@ func SetContractStream(
 	streamId server.Id,
 	intermediaryIds []server.Id,
 ) (returnErr error) {
+	defer server.EnterContractCreationStage(ctx, server.ContractStageStream)()
 	// Join callers do not carry the original path. Recover it from the Redis
 	// contract marking while it is present, both to populate a newly joined
 	// contract and to backfill streams created before participant persistence
@@ -1669,6 +1670,7 @@ func lockActiveContractClientsInTx(
 	destinationNetworkId server.Id,
 	destinationId server.Id,
 ) error {
+	defer server.EnterContractCreationStage(ctx, server.ContractStageClientFence)()
 	clientIds := []server.Id{sourceId}
 	if destinationId != sourceId {
 		clientIds = append(clientIds, destinationId)
@@ -1767,8 +1769,11 @@ func CreateTransferEscrow(
 	if returnErr != nil {
 		return
 	}
+	leavePosts := server.EnterContractCreationStage(ctx, server.ContractStagePostCommit)
 	notifyCommittedContractOrigin(ctx, sourceId, destinationId)
 	server.RunPosts(ctx, posts...)
+	leavePosts()
+	defer server.EnterContractCreationStage(ctx, server.ContractStageClientStamp)()
 	// the source is the paying side: count its top-level identity in the
 	// block users stat
 	StampTopLevelClientContractTime(ctx, sourceId)
@@ -2060,8 +2065,11 @@ func CreateCompanionTransferEscrow(
 	if returnErr != nil {
 		return
 	}
+	leavePosts := server.EnterContractCreationStage(ctx, server.ContractStagePostCommit)
 	notifyCommittedContractOrigin(ctx, sourceId, destinationId)
 	server.RunPosts(ctx, posts...)
+	leavePosts()
+	defer server.EnterContractCreationStage(ctx, server.ContractStageClientStamp)()
 	// Stamp the identity that actually funded this contract.
 	if inheritedPayer != nil && payerNetworkId == sourceNetworkId {
 		StampTopLevelClientContractTime(ctx, sourceId)
@@ -2217,6 +2225,7 @@ func CreateContractNoEscrowWithUsageOrigin(
 	contractTransferByteCount ByteCount,
 	usageOriginIsSource bool,
 ) (contractId server.Id, returnErr error) {
+	leaveTransaction := server.EnterContractCreationStage(ctx, server.ContractStageTransaction)
 	server.Tx(ctx, func(tx server.PgTx) {
 		contractId, returnErr = createContractNoEscrowInTx(
 			ctx,
@@ -2229,13 +2238,17 @@ func CreateContractNoEscrowWithUsageOrigin(
 			usageOriginIsSource,
 		)
 	})
+	leaveTransaction()
 	if returnErr != nil {
 		return
 	}
 	// network / friends-and-family egress has no payer but is still
 	// contract-creating usage: count the source's top-level identity in the
 	// block users stat
+	leavePosts := server.EnterContractCreationStage(ctx, server.ContractStagePostCommit)
 	notifyCommittedContractOrigin(ctx, sourceId, destinationId)
+	leavePosts()
+	defer server.EnterContractCreationStage(ctx, server.ContractStageClientStamp)()
 	StampTopLevelClientContractTime(ctx, sourceId)
 	return
 }

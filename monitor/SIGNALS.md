@@ -9055,6 +9055,33 @@ Deployment and fresh paired data are needed to discriminate setup from work
 with an admitted route; source tests do not establish Main's latency mechanism,
 provider blame, lower probe occupancy or recovered URL quota.
 
+URL probes deliberately use the data-only fixed-provider branch: processed
+registration emits `Added` without an inner `InEvaluation` ping. Therefore
+missing completed-setup evaluation timing is expected for these turns. It is
+not evidence of an omitted observer or a slow ping. Contract acquisition and
+the first provider write can still follow that registration/admission marker.
+
+`urnetwork_egress_probe_dns_contract_waves_total{result,evidence}` and matching
+`urnetwork_egress_probe_dns_contract_wave_seconds_total` export 15 fixed cells
+each, including zeros. Before cleanup cancels the lookup, each completed DNS
+wave reads its exact tunnel's existing SDK contract witness. Evidence is
+`local_contract_no_provider_write` only when a local acquisition remains
+pending or has failed and that tunnel has never attempted a provider write.
+`not_proved` is unknown cause, including earlier provider contact, a finished
+wait, or no current contract wait; it is not provider-fault evidence.
+`unobserved` means no witness was supplied. Seconds describe the DNS wave,
+not the duration of a contract wait. No witness affects the DNS result,
+retry, deadline, routing, or provider verdict.
+
+False-positive qualifier: even the affirmative witness identifies an unmet
+local dependency at the wave boundary, not its database/transport cause or
+the entire wave's continuous state. A cached answer needs no fresh write.
+False-negative qualifiers: a racing completion may remove a pending witness;
+any earlier attempted provider write conservatively invalidates the lifetime
+no-contact proof. Missing source capability or incomplete process windows stay
+unknown. The source controls retain healthy DNS, local wait, unavailable
+witness, parent cancellation, target-socket confinement and the same budgets.
+
 The 2026-09-29 00:37Z source-fresh eight-Taskworker control found about 5,774
 `active/answer` waves and 1,874 `active/timeout` waves over five minutes, plus
 413 `forming/timeout` and 952 `provider_unresponsive/timeout`, with no resets.
@@ -10802,6 +10829,42 @@ The opt-in API instrumentation adds only fixed cells:
   residence. Every child exists at zero on a capable executable. `internal`
   includes resident and other direct controller callers; it is not a provider
   identity. HTTP ingress is stamped by the server entry point.
+
+The shared controller also exports
+`urnetwork_contract_creation_completed_stage_seconds_total{ingress,stage}`,
+`urnetwork_contract_creation_stage_inflight{ingress,stage}`,
+`urnetwork_contract_creation_completed_total{ingress,outcome}`, and capability
+`urnetwork_contract_creation_stage_timing_enabled=1`. The 17 stage labels are
+`other`, `relationship`, `provide_modes`, `provide_secret`, `metadata`,
+`endpoint_lookup`, `companion_origin`, `payer_gate`, `transaction`,
+`shard_fence`, `grant_selection`, `reservation_snapshot`, `client_fence`,
+`post_commit`, `client_stamp`, `stream`, and `response`. Every fixed cell is
+exported at zero. An older executable's missing collector is unavailable,
+not zero work. HTTP ingress comes from the existing server context marker.
+
+One synchronous CreateContract owns the exclusive wall-time partition. Nested
+model stages replace, rather than add to, their parent stage. `transaction`
+includes connection acquisition, retries, SQL and commit remaining outside its
+named child stages; `grant_selection` includes discovery and grant-lock waits,
+excluding the nested reservation snapshot. `post_commit` includes notification
+and joined posts, whose parallel workers do not create extra stage owners.
+Current occupancy includes unfinished calls; completed seconds omit their
+unfinished residence. Completion outcomes are `contract_reply`,
+`protocol_reject`, `error`, `canceled`, or `panic`, with canceled context taking
+precedence. A generated signed reply does not prove delivery, provider contact,
+a unique reservation, or an accepted URL trial.
+
+The actual-PG control holds a balance row, observes its grant-selection waiter
+separately from a second payer-gate waiter, cancels the queued request, and
+checks the unchanged reservation. Healthy signed and insufficient-credit
+replies retain their ledger and wire behavior. False-positive qualifiers:
+legitimate serialization, caller cancellation and changed request mix may
+increase residence; neither a slow phase nor its name proves a particular
+query is responsible. False-negative qualifiers: completed means omit blocked
+tails, pre-controller credential checks are outside this owner, and sparse or
+stale samples cannot establish current recovery. Matching process/time with
+DNS counters still does not create a request-level causal join; use the exact
+wave's no-write witness for that narrower local-dependency boundary.
 
 Compare phase inflight/residence first, then the HTTP-ingress frame kinds and
 completion denominator. A canceled request may never pass authentication or

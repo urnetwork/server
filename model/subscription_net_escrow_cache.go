@@ -118,6 +118,7 @@ func missingNetEscrowSnapshots(pending map[server.Id]netEscrowSnapshot, balanceI
 // and other financial writers continue to advance the guarded revision, making
 // their unreflected changes misses. No Redis data authorizes credit here.
 func readLockedNetEscrowSnapshots(ctx context.Context, tx server.PgTx, balanceIds []server.Id) map[server.Id]netEscrowSnapshot {
+	defer server.EnterContractCreationStage(ctx, server.ContractStageReservationSnapshot)()
 	pending := readCachedNetEscrowSnapshots(ctx, tx, balanceIds)
 	if len(balanceIds) == 0 {
 		return pending

@@ -146,6 +146,7 @@ func FindActiveClientPairNetworks(
 	sourceId server.Id,
 	destinationId server.Id,
 ) (sourceNetworkId *server.Id, destinationNetworkId *server.Id) {
+	defer server.EnterContractCreationStage(ctx, server.ContractStageEndpointLookup)()
 	server.Db(ctx, func(conn server.PgConn) {
 		sourceNetworkId, destinationNetworkId = findActiveClientPairNetworks(ctx, conn, sourceId, destinationId)
 	})

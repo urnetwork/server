@@ -521,9 +521,10 @@ func (self *Tunnel) HttpClientForHosts(timeout time.Duration, extraHosts []strin
 		waitRoute: func(ctx context.Context) error {
 			return waitProviderRoute(ctx, self.lost, self.multiClient.Monitor())
 		},
-		query:        self.tun.DohCache().QueryResult,
-		dial:         self.tun.DialResolvedContext,
-		observations: self.dnsObservations,
+		query:               self.tun.DohCache().QueryResult,
+		dial:                self.tun.DialResolvedContext,
+		observations:        self.dnsObservations,
+		contractUnavailable: self.multiClient.ProviderContractAcquisitionUnavailable,
 		routeState: func() dnsRouteSnapshot {
 			window, providers := self.multiClient.Monitor().Events()
 			return dnsRouteFromMonitor(self.lost, window, providers)

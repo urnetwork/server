@@ -157,6 +157,7 @@ func lockProberShardClientAdmissionInTx(ctx context.Context, tx server.PgTx, net
 // The shared registry fence prevents an admission waiting on a grant from
 // deadlocking with drain after it moves on to its endpoint lifecycle locks.
 func validateProberShardPayerInTx(ctx context.Context, tx server.PgTx, source, destination, payer server.Id) (*time.Time, error) {
+	defer server.EnterContractCreationStage(ctx, server.ContractStageShardFence)()
 	rows, err := tx.Query(ctx, `SELECT network_id, state, deadline FROM prober_shard_run
 		WHERE network_id=ANY($1) ORDER BY network_id FOR SHARE`, []server.Id{source, destination, payer})
 	// Only policy refusals return normally. Database failures must unwind Tx;
