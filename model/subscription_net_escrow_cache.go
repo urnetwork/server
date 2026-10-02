@@ -30,7 +30,7 @@ const netEscrowAdmissionCacheSQL = `
  ) AS snapshot ON snapshot.revision = COALESCE(revision.revision, 0)
 `
 
-// Only an exact census or its known in-transaction creation delta reaches this
+// Only an exact census or its known in-transaction reservation delta reaches this
 // statement. A concurrent/legacy writer can invalidate the amount; never stamp
 // an older amount with its newer revision. Tombstones prevent revision ABA.
 const netEscrowPublishAdmissionCacheSQL = `
