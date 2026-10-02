@@ -5418,3 +5418,55 @@ sample had 78 edges for 16 selected waiters out of 228 reported lock waiters.
 PGSS 1.10 histories remain interval-unqualified; these findings do not quantify
 CPU share or prove exclusive root cause. Independent initial-triage SHA-256:
 `25e27a1b1d8162895d387218a37331aaab368cc8491ba130ba85dae29a931c63`.
+
+### 20:47 UTC deployment and recurring query-sample checkpoint
+
+The autonomous query sampler has now completed five twelve-snapshot Main
+runs, most recently at 20:43:35.148096191–20:44:00.220028633 UTC.
+Recurring visibility is established; database recovery is not. The latest
+sample retained grant-lock tuple waits peaking at 121, escrow waits at 55,
+and settlement balance-lock waits at 54. Selected reservation-census-prefix
+backends were active without waits. Load/completed output and blocker selection
+remain capped, and the samples do not identify payer, service, full statement,
+or CPU share. The latest receipt is
+`0484e84225465e28664c313c1ebab02b29771ddd93c901a39c92dbc065eb2053`.
+
+The coherent 20:44:03 UTC URL census reports 112,526 eligible providers,
+160 meeting the ten-run rolling quota (0.14219 percent), and 158 meeting the
+security gate. Hourly process-counter coverage is incomplete. This is not
+sustained quota recovery. The last numerical CPU sample is historical and
+must not be presented as current database CPU.
+
+Release `2026.10.2-contract-path-timing+1060864600`, source `ea2a7abd`,
+was built locally, pushed, and selected by successful all-block deployment
+commands for API, Connect and Taskworker. It includes the UTC reap correction,
+contract stage/outcome instrumentation, and DNS no-provider-write diagnostics.
+Instrumentation does not itself establish a performance improvement.
+The release preserves the intervening Main blob-store changes and published
+Connect SDK `e0d75562aa23`; focused financial, probe lifecycle and probe-package
+race gates passed against that exact source/dependency combination. Whole-model
+normal/race closure remains incomplete.
+
+A fresh read-only runtime witness at 20:47:08 UTC qualifies the source, start
+and image-config reports of all 20 API and all eight Taskworker instances,
+but only 14 of 20 Connect instances. Three Connect instances still report the
+previous 4300 build, and three lack a qualified current-process witness.
+API readiness gauges are positive; Connect and Taskworker readiness, direct
+container identity and predecessor retirement are not proved. The eight
+Taskworker references qualify the next fixed-window timing discriminator.
+Runtime receipt:
+`c26377569bd66138fd57048bc065f366bba47e01fe2486c2b5c5499d8cfa997e`.
+
+A two-connection local PostgreSQL control reproduces a cold settlement census
+holding the same balance row while another connection times out; the row
+becomes available after commit. This proves a possible lock amplification
+mechanism, not its Main caller or exclusive CPU attribution. The financial
+repair and full current/legacy census fingerprint discriminator remain in
+progress. No speculative query rewrite or removal of financial guards has
+been deployed.
+
+Current native bucket counts remain unknown: the bounded Redis census attempt
+failed before authentication or any GET because its direct connection timed
+out. ARIN subscriber-policy activation, complete current-owner shadow coverage,
+accepted health-history retention, full tests, and sustained 100-percent
+eligible-provider quota coverage remain open.
