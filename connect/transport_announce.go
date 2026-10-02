@@ -186,6 +186,7 @@ type ConnectionAnnounce struct {
 
 	stateLock           sync.Mutex
 	connectionId        *server.Id
+	shadowCaptureLease  *arinShadowOwnerLease
 	receiveMessageCount uint64
 	receiveByteCount    ByteCount
 	sendMessageCount    uint64
@@ -314,6 +315,7 @@ func NewConnectionAnnounceWithIpFamily(
 		if lifecycleDone != nil {
 			defer lifecycleDone()
 		}
+		defer announce.releaseArinShadowOwner()
 		server.HandleError(announce.run, cancel)
 	}()
 	return announce
@@ -691,6 +693,8 @@ func (self *ConnectionAnnounce) setConnectionId(connectionId server.Id) {
 	defer self.stateLock.Unlock()
 
 	self.connectionId = &connectionId
+	self.shadowCaptureLease.close()
+	self.shadowCaptureLease = currentArinShadowOwners.add(connectionId, self)
 }
 
 func (self *ConnectionAnnounce) ConnectionId() *server.Id {

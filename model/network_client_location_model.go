@@ -5326,6 +5326,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	countFilter := newProviderCountFilter(ctx, egressTestEnabled)
 	clientIdEgresses := map[server.Id]*clientScoreEgress{}
 	hardExcludedClientIds := map[server.Id]bool{}
+	shadowScoreCapture := beginArinShadowScoreCapture()
 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -5428,6 +5429,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			for result.Next() {
 				sourceRows++
 				lookbackClientScore, cityLocationId, regionLocationId, countryLocationId, reputationFailedNames, egress := loadClientScore(result)
+				if shadowScoreCapture != nil {
+					shadowScoreCapture.observe(lookbackClientScore, egress.publishedCountryCode, countFilter.egressFacts(lookbackClientScore.ClientId, egress.publishedCountryCode, egress.egressIndex, egress.egressQuality, egressSettings), egressTestEnabled)
+				}
 				if countFilter.hasHardEgressFailure(lookbackClientScore.ClientId) {
 					hardExcludedClientIds[lookbackClientScore.ClientId] = true
 					continue
@@ -5551,6 +5555,9 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			for result.Next() {
 				sourceRows++
 				lookbackClientScore, cityLocationGroupId, regionLocationGroupId, countryLocationGroupId, reputationFailedNames, egress := loadClientScore(result)
+				if shadowScoreCapture != nil {
+					shadowScoreCapture.observe(lookbackClientScore, egress.publishedCountryCode, countFilter.egressFacts(lookbackClientScore.ClientId, egress.publishedCountryCode, egress.egressIndex, egress.egressQuality, egressSettings), egressTestEnabled)
+				}
 				if countFilter.hasHardEgressFailure(lookbackClientScore.ClientId) {
 					hardExcludedClientIds[lookbackClientScore.ClientId] = true
 					continue
@@ -6026,6 +6033,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		if err := writeClientScoreNativeCensus(ctx, nativeCensus, ttl); err != nil {
 			return fmt.Errorf("publish native client score census: %w", err)
 		}
+		shadowScoreCapture.publish(nativeCensus, locationClientScores, locationGroupClientScores)
 		glog.Infof(
 			"[nclm]update %d client locations x %d location scores, %d location group scores\n",
 			len(clientLocationIds),
