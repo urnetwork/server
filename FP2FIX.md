@@ -6266,3 +6266,34 @@ Webpass leaves do not prove enough Main residential/business supply. Native
 reader configuration delivery, full ARIN shadow, quota coverage, contract
 backlog and memory ownership remain open under the active FP2FIX goal and the
 authoritative standing monitor.
+
+### 2026-10-03 21:28 UTC cohort-origin selection boundary
+
+The private-prober native PostgreSQL control `83a4bf25` passes under the race
+detector, including independent review. Normal private shard roots have no
+Public key, and derived children remain excluded even when given one. A second
+reliability refresh preserves an existing provider's first-cycle timestamp.
+An explicitly Public top-level private root can enter, so network ownership
+alone is not an exclusion. This control does not identify Main cohort members
+or establish the cause of the earlier warming increase.
+
+Root's bounded origin read completed at 21:28 UTC (`57088ccd`, privacy reduction
+`b3eb0a52`). Both 64-client Public-key ID heads were full, but all 128 selected
+rows were currently ineligible: 107 failed base admission and 21 failed normal
+reliability. All were top-level identities with no retained private-shard owner.
+The sample held 105 missing cycles, 23 existing deficient cycles and 80 accepted
+measurements. Fourteen older clients had first-cycle timestamps in the selected
+change window. None of these rows joined the current eligible warming
+population, so the read does not explain its increase or prove a reset. The
+next discriminator must select currently eligible providers with bounded raw
+candidate work; no fleet prevalence follows from either sample.
+
+Root published the thin close-report emitter `fd4388de` and Main Connect
+counterpart `b83e4fe9` as source. Neither is selected by the Server dependency or
+enabled at runtime. Hosted emission cannot deduplicate checkpoints from old
+ID-less provider clients. Root also merged and published the Connect ownership
+ledger source; its dependency selection and runtime enablement remain separate.
+ARIN renewal and full-capture sources are qualified against the new monitor764
+authority. No fresh operator generation, renewed Main capture lease, completed
+full Main shadow or sufficient verified subscriber supply is established here.
+Policy two remains inactive and the FP2FIX goal continues.

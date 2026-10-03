@@ -11485,6 +11485,17 @@ nor the cause of a whole-census change; removed keys and other IDs remain
 unsampled. In the qualified R59 source, normal reliability mode is statically
 true, so use its normal floors rather than infer a mode transition.
 
+The 2026-10-03 21:28 Root read demonstrated this selection limit: its two
+64-client Public-key heads contained 107 base-rejected and 21 reliability-rejected
+rows, with no currently eligible provider. There were 105 missing cycles and
+23 existing deficient cycles, but none joined the current eligible warming
+population. Fourteen older clients had first-cycle timestamps in the selected
+change window. This is evidence about those ineligible rows, not an explanation
+of the global warming increase. Receipt `57088ccd` and reviewed reduction
+`b3eb0a52` preserve the boundary. A follow-up must first qualify current
+connected/Public/top-level/reliability admission, keep raw candidate work
+bounded, and distinguish future-paced warming selection from a fleet census.
+
 The shard-zero owner alone periodically produces the global census:
 
 - `urnetwork_url_probe_fleet{state}` contains `eligible`, `due`, `overdue`,
