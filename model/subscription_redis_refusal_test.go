@@ -181,6 +181,9 @@ func TestRedisAdmissionExpiredPostReserveClockCompensates(t *testing.T) {
 				t.Fatal("expired shard produced an escrow", escrow)
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
+		if err := redisAdmissionFromContext(requestCtx).compensate(ctx); err != nil {
+			t.Fatal("expired request compensation failed after SQL joined", err)
+		}
 		if reads != 2 || !errors.Is(failure, ErrProberShardRetired) {
 			t.Fatal("post-reserve deadline boundary was not exercised", reads, failure)
 		}
@@ -213,6 +216,9 @@ func TestRedisAdmissionPrePublicationPanicCompensatesAndPropagates(t *testing.T)
 		})
 		if value != marker {
 			t.Fatal("compensation replaced the original panic", value)
+		}
+		if err := redisAdmissionFromContext(requestCtx).compensate(ctx); err != nil {
+			t.Fatal("panicked request compensation failed after SQL joined", err)
 		}
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 17 {
 			t.Fatal("pre-publication panic retained refused reservation", got)

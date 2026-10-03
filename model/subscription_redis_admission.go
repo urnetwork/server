@@ -2,12 +2,13 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
-	"errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
@@ -16,10 +17,13 @@ import (
 // This deliberately exchanges serializable reservation admission for bounded
 // Redis coordination. Durable contract usage/debits retain their existing
 // authority. Redis loss and a stale concurrent debit may over-admit; an
-// abandoned reservation may under-admit until its 24-hour lease expires.
+// old unmarked reservation may under-admit until its 24-hour lease expires.
+// New request markers support bounded SQL-fenced recovery before lease expiry.
 // Neither case puts creators behind a shared PostgreSQL financial row lock.
 const redisContractReservationLease = 24 * time.Hour
 const redisContractAdmissionTimeout = time.Second
+
+var errRedisReservationInsufficient = errors.New("Insufficient balance")
 
 var redisContractReservationResults = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_redis_contract_reservation_total",
@@ -29,7 +33,30 @@ var redisContractReservationResults = prometheus.NewCounterVec(prometheus.Counte
 func init() { prometheus.MustRegister(redisContractReservationResults) }
 
 type redisAdmissionContextKey struct{}
-type redisContractAdmission struct{ contractId server.Id }
+
+// The immutable request id follows transaction retries. State snapshots are
+// safe if an internal caller retries that same context concurrently. PG fences
+// publication, and cleanup runs after its own transaction owner has joined.
+type redisContractAdmission struct {
+	contractId          server.Id
+	stateLock           sync.Mutex
+	attemptedBalanceIds []server.Id
+	publicationStarted  bool
+}
+
+func (self *redisContractAdmission) noteBalance(balanceId server.Id) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if !slices.Contains(self.attemptedBalanceIds, balanceId) {
+		self.attemptedBalanceIds = append(self.attemptedBalanceIds, balanceId)
+	}
+}
+
+func (self *redisContractAdmission) notePublication() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.publicationStarted = true
+}
 
 func redisAdmissionFromContext(ctx context.Context) *redisContractAdmission {
 	admission, _ := ctx.Value(redisAdmissionContextKey{}).(*redisContractAdmission)
@@ -48,7 +75,7 @@ func withRedisContractAdmission(ctx context.Context) context.Context {
 
 func redisContractReservationKeys(balanceId server.Id) []string {
 	base := fmt.Sprintf("{escrow_%s}", balanceId)
-	return []string{base + "approx_reserved", base + "approx_contracts", base + "approx_expiry", netEscrowKey(balanceId)}
+	return []string{base + "approx_reserved", base + "approx_contracts", base + "approx_expiry", netEscrowKey(balanceId), base + "approx_recovery_v2"}
 }
 
 // All keys occupy one Redis cluster slot. Monetary arithmetic uses decimal
@@ -76,6 +103,10 @@ end
 local rawTotal=redis.call('GET',KEYS[1])
 local total=rawTotal or '0'
 local legacy=redis.call('GET',KEYS[4]) or '0'
+for _,entry in ipairs({{2,'hash'},{3,'zset'},{5,'zset'}}) do
+ local kind=redis.call('TYPE',KEYS[entry[1]]).ok
+ if kind~='none' and kind~=entry[2] then return redis.error_reply('invalid reservation key type') end
+end
 if not valid(total) or not valid(legacy) or not valid(ARGV[3]) or not valid(ARGV[4]) then
  return redis.error_reply('invalid reservation counter')
 end
@@ -84,7 +115,7 @@ if not lease or lease<1 or lease>86400000 then return redis.error_reply('invalid
 -- Partial key eviction starts a new approximate generation too. Old releases
 -- then find no token and cannot subtract a newly admitted neighbor's bytes.
 if not rawTotal or (total~='0' and (redis.call('EXISTS',KEYS[2])==0 or redis.call('EXISTS',KEYS[3])==0)) then
- redis.call('DEL',KEYS[2],KEYS[3]);total='0'
+ redis.call('DEL',KEYS[2],KEYS[3],KEYS[5]);total='0'
 end
 local now=redis.call('TIME'); local milliseconds=tonumber(now[1])*1000+math.floor(tonumber(now[2])/1000)
 local expired=redis.call('ZRANGEBYSCORE',KEYS[3],'-inf',milliseconds,'LIMIT',0,32)
@@ -94,17 +125,28 @@ for _,token in ipairs(expired) do
   if not valid(amount) then return redis.error_reply('invalid reservation token') end
   total=sub(total,amount); redis.call('HDEL',KEYS[2],token)
  end
- redis.call('ZREM',KEYS[3],token)
+ redis.call('ZREM',KEYS[3],token); redis.call('ZREM',KEYS[5],token)
 end
 local existing=redis.call('HGET',KEYS[2],ARGV[2])
 if existing and not valid(existing) then return redis.error_reply('invalid reservation token') end
 local amount='0'
-if ARGV[1]=='release' then
+if ARGV[1]=='release-owned' and existing and not redis.call('ZSCORE',KEYS[5],ARGV[2]) then
+ return redis.error_reply('missing owned reservation marker')
+end
+if (ARGV[1]=='release-owned' or ARGV[1]=='published') and existing and ARGV[4]~='0' and existing~=ARGV[4] then
+ return redis.error_reply('reservation recovery amount changed')
+end
+if ARGV[1]=='release' or ARGV[1]=='release-owned' then
  if existing then
+  if ARGV[1]=='release-owned' then amount=existing end
   total=sub(total,existing); redis.call('HDEL',KEYS[2],ARGV[2]); redis.call('ZREM',KEYS[3],ARGV[2])
  end
-elseif ARGV[1]=='reserve' or ARGV[1]=='restore' then
+ redis.call('ZREM',KEYS[5],ARGV[2])
+elseif ARGV[1]=='reserve' or ARGV[1]=='reserve-owned' or ARGV[1]=='restore' then
  if existing then
+  if ARGV[1]=='reserve-owned' and not redis.call('ZSCORE',KEYS[5],ARGV[2]) then
+   return redis.error_reply('missing owned reservation marker')
+  end
   if less(ARGV[4],existing) then return redis.error_reply('reservation retry changed amount') end
   amount=existing
  else
@@ -120,14 +162,19 @@ elseif ARGV[1]=='reserve' or ARGV[1]=='restore' then
    redis.call('INCRBY',KEYS[1],amount); total=redis.call('GET',KEYS[1])
    redis.call('HSET',KEYS[2],ARGV[2],amount)
    redis.call('ZADD',KEYS[3],milliseconds+lease,ARGV[2])
+   if ARGV[1]=='reserve-owned' then redis.call('ZADD',KEYS[5],milliseconds,ARGV[2]) end
   end
  end
+ if ARGV[1]=='restore' then redis.call('ZREM',KEYS[5],ARGV[2]) end
+elseif ARGV[1]=='published' then
+ redis.call('ZREM',KEYS[5],ARGV[2])
 else return redis.error_reply('invalid reservation operation') end
 -- Recovery may restore an older token with only a short lease remaining.
 -- Never let that operation shorten the shared keys beneath younger tokens.
 redis.call('SET',KEYS[1],total,'PX',90000000)
 redis.call('PEXPIRE',KEYS[2],90000000)
 redis.call('PEXPIRE',KEYS[3],90000000)
+redis.call('PEXPIRE',KEYS[5],90000000)
 return amount
 `
 
@@ -151,7 +198,7 @@ func redisContractReservation(ctx context.Context, operation string, balanceId, 
 	result := "accepted"
 	if err != nil {
 		result = "error"
-	} else if operation == "reserve" && amount == 0 {
+	} else if (operation == "reserve" || operation == "reserve-owned") && amount == 0 {
 		result = "refused"
 	}
 	redisContractReservationResults.WithLabelValues(operation, result).Inc()
@@ -168,6 +215,15 @@ func releaseRedisContractReservations(ctx context.Context, contractId server.Id,
 func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admission *redisContractAdmission,
 	sourceNetworkId, sourceId, destinationNetworkId, destinationId, payerNetworkId server.Id,
 	requested ByteCount, companionId *server.Id) (*TransferEscrow, []func() any, error) {
+	// The v2 marker is recoverable only while all writers of this exact request
+	// hold this transaction-scoped fence. No shared payer/balance lock is added.
+	server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, redisContractAdmissionLock(admission.contractId)))
+	var published bool
+	server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$1)`, admission.contractId).Scan(&published))
+	if published {
+		admission.notePublication()
+		return nil, nil, errors.New("Redis reservation request already has SQL custody; reconcile its original contract")
+	}
 	deadline, err := validateProberShardPayerInTx(ctx, tx, sourceNetworkId, destinationNetworkId, payerNetworkId)
 	if err != nil {
 		return nil, nil, err
@@ -184,33 +240,14 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 	})
 	leave()
 	selected := []*TransferEscrowBalance{}
-	attemptedBalanceIds := []server.Id{}
-	publicationStarted := false
-	defer func() {
-		if publicationStarted || len(attemptedBalanceIds) == 0 {
-			return
-		}
-		// No SQL publication has been attempted, including on a read panic or
-		// cancellation. Only this request's tokens can be compensated. A lost
-		// reserve acknowledgement is included; a failed cleanup retains its
-		// original lease. One detached budget bounds the entire cleanup.
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), redisContractAdmissionTimeout)
-		defer cancel()
-		for _, balanceId := range attemptedBalanceIds {
-			if cleanupCtx.Err() != nil {
-				break
-			}
-			_, _ = redisContractReservation(cleanupCtx, "release", balanceId, admission.contractId, 0, 0, redisContractReservationLease)
-		}
-	}()
 	remaining := requested
 	var priority Priority
 	for _, balance := range balances {
 		if balance.balanceByteCount <= 0 {
 			continue
 		}
-		attemptedBalanceIds = append(attemptedBalanceIds, balance.balanceId)
-		amount, err := redisContractReservation(ctx, "reserve", balance.balanceId, admission.contractId, balance.balanceByteCount, remaining, redisContractReservationLease)
+		admission.noteBalance(balance.balanceId)
+		amount, err := redisContractReservation(ctx, "reserve-owned", balance.balanceId, admission.contractId, balance.balanceByteCount, remaining, redisContractReservationLease)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -227,7 +264,7 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 		}
 	}
 	if remaining != 0 {
-		return nil, nil, fmt.Errorf("Insufficient balance (%d).", requested-remaining)
+		return nil, nil, fmt.Errorf("%w (%d).", errRedisReservationInsufficient, requested-remaining)
 	}
 	priority /= Priority(len(selected))
 	if err := lockActiveContractClientsInTx(ctx, tx, sourceNetworkId, sourceId, destinationNetworkId, destinationId); err != nil {
@@ -245,7 +282,7 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 	// From this point the transaction owner decides commit/rollback. A failed
 	// round trip is not proof of absence, so compensation must not release a
 	// possibly committed contract. Existing reconciliation/lease recovery owns it.
-	publicationStarted = true
+	admission.notePublication()
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for _, b := range selected {
 			batch.Queue(`INSERT INTO transfer_escrow(contract_id,balance_id,balance_byte_count,redis_reserved) VALUES($1,$2,$3,true)`, admission.contractId, b.BalanceId, b.BalanceByteCount)

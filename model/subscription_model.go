@@ -1764,7 +1764,9 @@ func CreateTransferEscrow(
 	destinationId server.Id,
 	contractTransferByteCount ByteCount,
 ) (transferEscrow *TransferEscrow, returnErr error) {
-	return createTransferEscrow(withRedisContractAdmission(ctx), sourceNetworkId, sourceId, destinationNetworkId, destinationId, contractTransferByteCount)
+	return runRedisContractAdmission(ctx, func(ctx context.Context) (*TransferEscrow, error) {
+		return createTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, contractTransferByteCount)
+	})
 }
 
 // Shared transaction owner; public entry points always supply Redis admission.
@@ -1862,7 +1864,9 @@ func CreateCompanionTransferEscrow(
 	contractTransferByteCount ByteCount,
 	originContractTimeout time.Duration,
 ) (transferEscrow *TransferEscrow, returnErr error) {
-	return createCompanionTransferEscrow(withRedisContractAdmission(ctx), sourceNetworkId, sourceId, destinationNetworkId, destinationId, contractTransferByteCount, originContractTimeout)
+	return runRedisContractAdmission(ctx, func(ctx context.Context) (*TransferEscrow, error) {
+		return createCompanionTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, contractTransferByteCount, originContractTimeout)
+	})
 }
 
 // Shared transaction owner; public entry points always supply Redis admission.
