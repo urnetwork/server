@@ -1440,6 +1440,17 @@ func createTransferEscrowInTx(
 	contractTransferByteCount ByteCount,
 	companionContractId *server.Id,
 ) (transferEscrow *TransferEscrow, posts []func() any, returnErr error) {
+	// an acceptance-test drain refuses like an empty balance, on both the Redis
+	// and the PostgreSQL admission path. The allowlist is checked in memory, so
+	// other payers add no query here.
+	if 0 < contractTransferByteCount {
+		if err := testBalanceDrainEscrowError(
+			testBalanceDrainActive(ctx, tx, payerNetworkId, server.NowUtc()),
+			contractTransferByteCount,
+		); err != nil {
+			return nil, nil, err
+		}
+	}
 	if admission := redisAdmissionFromContext(ctx); admission != nil && contractTransferByteCount > 0 {
 		return createRedisTransferEscrowInTx(ctx, tx, admission, sourceNetworkId, sourceId,
 			destinationNetworkId, destinationId, payerNetworkId, contractTransferByteCount, companionContractId)
@@ -1481,17 +1492,6 @@ func createTransferEscrowInTx(
 	payerClientId := sourceId
 	if sourceNetworkId != payerNetworkId {
 		payerClientId = destinationId
-	}
-	// an acceptance-test drain refuses like an empty balance. The allowlist is
-	// checked in memory, so other payers add no query here.
-	if 0 < contractTransferByteCount {
-		if err := testBalanceDrainEscrowError(
-			testBalanceDrainActive(ctx, tx, payerNetworkId, now),
-			contractTransferByteCount,
-		); err != nil {
-			returnErr = err
-			return
-		}
 	}
 	orderedTransferBalances := loadTransferEscrowBalances(ctx, tx, payerNetworkId, payerClientId, now, contractTransferByteCount)
 	// Waiting for a payer's grant must not retain provider/client row locks
