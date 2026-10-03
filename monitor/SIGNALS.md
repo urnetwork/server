@@ -18651,6 +18651,36 @@ cost can be multiplied into a complete heap estimate. The owning regression is
 `TestResidentRuntimeOwnershipChurnControl` in
 `connect/resident_runtime_ownership_diagnostic_test.go`.
 
+The private native discriminator in
+`diagnostics/connect_native_memory.py` retains every running Connect container
+generation on one inventory-owned host. It binds kernel RSS to a stable
+boot/PID/start-tick identity and the actual executable hash, Go source revision,
+and image configuration before and after collection. Missing slots, replaced
+processes, unknown images, and incomplete reads remain explicit; one host's
+census cannot establish fleet convergence or ownership of its memory.
+
+A distinct Linux time-namespace identifier alone does not prove different
+Prometheus process-start conversion. The bounded discriminator also reads the
+reader and target boottime offsets. Because `timens_offsets` describes
+`time_for_children`, both active/future namespace links must agree before those
+offsets can qualify the current processes. A cross-namespace join is qualified
+only when both boottime offsets are exactly zero and the namespace/offset proof
+survives the terminal identity check. Nonzero, missing, malformed, unbound, or
+changing offsets preserve an unknown metric join while retaining native RSS.
+An unchanged common active namespace already supplies the same clock view and
+does not require the extra offset read. These rules match the pinned Prometheus
+procfs conversion of boot time plus process-start ticks; they do not infer a
+Main offset from a local control.
+
+Join the fresh metric row only with unique host/block/start and matching
+source/image evidence, retaining current and draining generations. A digest
+of a container's short ID is a log-join hint, not an independently unique
+process identity. The owning Python controls cover healthy overlap, exact
+zero-offset conversion, refused or changing clock evidence, PID reuse,
+source mismatch, unavailable reads, and finite byte/time bounds. Collection
+still requires the separately admitted private inventory/hostname wrapper;
+this module installs no service endpoint or profiling producer.
+
 `connect-resident-cost-unobservable` WARNs immediately when the newest Connect
 population join is missing/stale, duplicated, invalid, or cannot select an
 unambiguous newest generation. It carries only fixed fleet counts. Duplicate
@@ -21189,6 +21219,21 @@ explicit full-media-read mode. Scrape time, integrity check time, and artifact
 file time therefore remain independent evidence. A check older than 48 hours
 is stale even if Fluent Bit keeps scraping the report and the structural
 artifact remains inside its five-day recovery-point objective.
+
+A private source-completion read must retain three separate times: the
+generation start, the successful producer completion, and completion of the
+diagnostic observation. A 2026-10-02 23:24Z observation retained a generation
+started on October 1 at 00:00:15Z whose producer succeeded at 19:28:43Z that
+day. Calling the observation recent cannot make that producer completion less
+than 24 hours old. Keep the five-day archive objective separate from any
+explicitly tighter migration prerequisite; qualify each against its owning
+timestamp. The private migration controls cover a fresh observation of an old
+producer, stale or future observations, missing producer evidence, and a
+claimed producer time incorrectly copied from the observation. A read-only
+catalog check can still run when a migration's producer-age gate fails, but
+apply must refuse before contact. Stable archive and sidecar metadata at the
+observation time remains weaker than current ciphertext, decryption, restore,
+or destination-copy verification.
 
 Planetoid also publishes physical allocation telemetry for the mounted archive
 volume. `urnetwork_backup_archive_storage_bytes{archive="pg|redis|code"}` is
