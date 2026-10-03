@@ -285,15 +285,45 @@ func Testing_SendAuthVerifyCode(userAuth string) {
 
 type AuthPasswordResetArgs struct {
 	UserAuth string `json:"user_auth"`
+	// return a rate-limit refusal or a send failure in the result `error`
+	// with a 200, instead of the HTTP 429 / 502 older clients expect
+	ResultErrors bool `json:"result_errors,omitempty"`
 }
 
 type AuthPasswordResetResult struct {
 	UserAuth string `json:"user_auth"`
+	// set when no reset code was sent
+	Error *AuthVerifySendError `json:"error,omitempty"`
 }
 
 func AuthPasswordReset(
 	reset AuthPasswordResetArgs,
 	session *session.ClientSession,
+) (*AuthPasswordResetResult, error) {
+	result, err := authPasswordReset(reset, session, model.AuthPasswordResetCreateCode, GetAWSMessageSender())
+	if err != nil {
+		return nil, err
+	}
+	if result.Error != nil && !reset.ResultErrors {
+		// older clients show any error status as a failed send
+		return nil, legacyAuthVerifySendError(result.Error)
+	}
+	return result, nil
+}
+
+const passwordResetSendFailedMessage = "The password reset code could not be sent. Please try again."
+
+type authPasswordResetCreateCodeFunction func(model.AuthPasswordResetCreateCodeArgs, *session.ClientSession) (*model.AuthPasswordResetCreateCodeResult, error)
+
+// Creates a password reset code and sends it. A rate-limit refusal and a send
+// failure come back in the result `Error` with the verify send codes, never
+// dropped: the caller must not tell the user a code was sent. Other errors are
+// returned as errors.
+func authPasswordReset(
+	reset AuthPasswordResetArgs,
+	session *session.ClientSession,
+	createCode authPasswordResetCreateCodeFunction,
+	messageSender MessageSender,
 ) (*AuthPasswordResetResult, error) {
 	userAuth, _ := model.NormalUserAuthV1(&reset.UserAuth)
 	if userAuth == nil {
@@ -303,22 +333,48 @@ func AuthPasswordReset(
 	resetCreateCode := model.AuthPasswordResetCreateCodeArgs{
 		UserAuth: *userAuth,
 	}
-	resetCreateCodeResult, err := model.AuthPasswordResetCreateCode(resetCreateCode, session)
+	resetCreateCodeResult, err := createCode(resetCreateCode, session)
 	if err != nil {
+		var rateLimit interface{ RetryAfterSeconds() int }
+		if errors.As(err, &rateLimit) {
+			return &AuthPasswordResetResult{
+				UserAuth: *userAuth,
+				Error: &AuthVerifySendError{
+					Code:              model.AuthVerifySendErrorCodeRateLimited,
+					Message:           strings.TrimPrefix(err.Error(), "429 "),
+					RetryAfterSeconds: rateLimit.RetryAfterSeconds(),
+				},
+			}, nil
+		}
 		return nil, err
-	}
-	if resetCreateCodeResult.ResetCode != nil {
-		awsMessageSender := GetAWSMessageSender()
-		awsMessageSender.SendAccountMessageTemplate(
-			*userAuth,
-			&AuthPasswordResetTemplate{
-				ResetCode: *resetCreateCodeResult.ResetCode,
-			},
-		)
 	}
 
 	result := &AuthPasswordResetResult{
 		UserAuth: *userAuth,
+	}
+	if resetCreateCodeResult.ResetCode == nil {
+		message := passwordResetSendFailedMessage
+		if resetCreateCodeResult.Error != nil {
+			message = resetCreateCodeResult.Error.Message
+		}
+		result.Error = &AuthVerifySendError{
+			Code:    model.AuthVerifySendErrorCodeSendFailed,
+			Message: message,
+		}
+		return result, nil
+	}
+	err = messageSender.SendAccountMessageTemplate(
+		*userAuth,
+		&AuthPasswordResetTemplate{
+			ResetCode: *resetCreateCodeResult.ResetCode,
+		},
+	)
+	if err != nil {
+		glog.Warningf("[auth]password reset code send failed: %s\n", err)
+		result.Error = &AuthVerifySendError{
+			Code:    model.AuthVerifySendErrorCodeSendFailed,
+			Message: passwordResetSendFailedMessage,
+		}
 	}
 	return result, nil
 }
