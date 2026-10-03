@@ -1898,6 +1898,8 @@ type HeliusWebhookResult struct {
 
 const solanaUsdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
+// the webhook credits payments to any of these; the first is the one quoted
+// to clients (SolanaPaymentIntentResult.Recipient)
 var solanaReceiverAddresses = []string{
 	"4Fj9RCwJqHLdLNK28DwWHunHqWapxKbbzeYZLmreSYCM", // coinbase account address
 	"74UNdYRpvakSABaYHSZMQNaXBVtA6eY9Nt8chcqocKe7", // deprecating this
@@ -2256,6 +2258,11 @@ type SolanaPaymentIntentResult struct {
 	RegularAmountUsd float64 `json:"regular_amount_usd,omitempty"`
 	OfferApplied     bool    `json:"offer_applied,omitempty"`
 	Currency         string  `json:"currency,omitempty"`
+	// where to pay: the merchant address (base58) and the SPL token mint (USDC).
+	// Clients build the payment url from these instead of hardcoding them, so a
+	// rotated receiving address reaches every client with the quote.
+	Recipient    string `json:"recipient,omitempty"`
+	SplTokenMint string `json:"spl_token_mint,omitempty"`
 }
 
 type SolanaPaymentIntentError struct {
@@ -2344,12 +2351,26 @@ func CreateSolanaPaymentIntent(
 
 	// Hand the quoted price back so the payment url the client builds and the intent the
 	// webhook checks against cannot disagree.
+	return solanaPaymentIntentQuote(priceUsd, regularUsd, tier.Tier.Name, intent.Plan, offerApplied), nil
+}
+
+// solanaPaymentIntentQuote is the successful intent result: the quoted price and
+// where to pay it, the same receiver and mint the webhook credits.
+func solanaPaymentIntentQuote(
+	priceUsd float64,
+	regularUsd float64,
+	tierName string,
+	plan string,
+	offerApplied bool,
+) *SolanaPaymentIntentResult {
 	return &SolanaPaymentIntentResult{
 		AmountUsd:        priceUsd,
-		Tier:             tier.Tier.Name,
-		Plan:             intent.Plan,
+		Tier:             tierName,
+		Plan:             plan,
 		RegularAmountUsd: regularUsd,
 		OfferApplied:     offerApplied,
 		Currency:         model.PriceTierCurrency,
-	}, nil
+		Recipient:        solanaReceiverAddresses[0],
+		SplTokenMint:     solanaUsdcMint,
+	}
 }
