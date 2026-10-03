@@ -53,21 +53,23 @@ func stPayoutAdmissionAt(ctx context.Context, cfg *StConfig, now time.Time) erro
 // Public, redacted local status. This is loaded configuration and identity
 // matching, never evidence that this binary/config is deployed or chain-ready.
 type ProviderPayoutTransitionStatus struct {
-	EarningBoundary                *server.ProviderEarningBoundary  `json:"earning_boundary,omitempty"`
-	EarningBoundaryReady           bool                             `json:"earning_boundary_ready"`
-	EarningBoundaryReason          string                           `json:"earning_boundary_reason"`
-	ObservedAt                     time.Time                        `json:"observed_at"`
-	Schedule                       *server.ProviderPayoutTransition `json:"schedule"`
-	Selected                       *server.ProviderPayoutMainnet    `json:"selected,omitempty"`
-	SelectedProfile                string                           `json:"selected_profile"`
-	Phase                          string                           `json:"phase"`
-	NewMainnetWritesAdmitted       bool                             `json:"new_mainnet_writes_admitted"`
-	LegacyPreCutoffPaymentsAllowed bool                             `json:"legacy_pre_cutoff_payments_allowed"`
-	ReadinessReason                string                           `json:"readiness_reason"`
-	DeploymentVerified             bool                             `json:"deployment_verified"`
-	RetrospectiveClaimGuaranteed   bool                             `json:"retrospective_claim_guaranteed"`
-	PayoutSchemaReady              bool                             `json:"payout_schema_ready"`
-	PayoutSchemaReason             string                           `json:"payout_schema_reason"`
+	EarningBoundary                      *server.ProviderEarningBoundary  `json:"earning_boundary,omitempty"`
+	EarningBoundaryReady                 bool                             `json:"earning_boundary_ready"`
+	EarningBoundaryReason                string                           `json:"earning_boundary_reason"`
+	ObservedAt                           time.Time                        `json:"observed_at"`
+	Schedule                             *server.ProviderPayoutTransition `json:"schedule"`
+	Selected                             *server.ProviderPayoutMainnet    `json:"selected,omitempty"`
+	SelectedProfile                      string                           `json:"selected_profile"`
+	Phase                                string                           `json:"phase"`
+	NewMainnetWritesAdmitted             bool                             `json:"new_mainnet_writes_admitted"`
+	LegacyPreCutoffPaymentsAllowed       bool                             `json:"legacy_pre_cutoff_payments_allowed"`
+	NewLegacySubmissionsAdmitted         bool                             `json:"new_legacy_submissions_admitted"`
+	ExistingAttemptReconciliationAllowed bool                             `json:"existing_attempt_reconciliation_allowed"`
+	ReadinessReason                      string                           `json:"readiness_reason"`
+	DeploymentVerified                   bool                             `json:"deployment_verified"`
+	RetrospectiveClaimGuaranteed         bool                             `json:"retrospective_claim_guaranteed"`
+	PayoutSchemaReady                    bool                             `json:"payout_schema_ready"`
+	PayoutSchemaReason                   string                           `json:"payout_schema_reason"`
 }
 
 func GetProviderPayoutTransitionStatus(ctx context.Context) (*ProviderPayoutTransitionStatus, error) {
@@ -76,7 +78,7 @@ func GetProviderPayoutTransitionStatus(ctx context.Context) (*ProviderPayoutTran
 		return nil, err
 	}
 	now := server.NowUtc()
-	status := &ProviderPayoutTransitionStatus{ObservedAt: now, Schedule: policy, Phase: "legacy_unscheduled", LegacyPreCutoffPaymentsAllowed: true, SelectedProfile: os.Getenv("URNETWORK_ST_PROFILE")}
+	status := &ProviderPayoutTransitionStatus{ObservedAt: now, Schedule: policy, Phase: "legacy_unscheduled", LegacyPreCutoffPaymentsAllowed: true, ExistingAttemptReconciliationAllowed: true, SelectedProfile: os.Getenv("URNETWORK_ST_PROFILE")}
 	if binding, err := server.RequireProviderPayoutBoundary(ctx, policy); err != nil {
 		status.EarningBoundaryReason = err.Error()
 		status.LegacyPreCutoffPaymentsAllowed = false
@@ -95,6 +97,9 @@ func GetProviderPayoutTransitionStatus(ctx context.Context) (*ProviderPayoutTran
 			status.Phase = "sn_earning_legacy_settlement"
 		}
 	}
+	// This reports schedule/schema admission, not processor or database uptime.
+	// Accepted attempts continue to use their original identity during a hold.
+	status.NewLegacySubmissionsAdmitted = status.EarningBoundaryReady && (policy == nil || status.PayoutSchemaReady)
 	cfg := stConfig()
 	if cfg != nil {
 		identity := stPayoutIdentity(cfg)

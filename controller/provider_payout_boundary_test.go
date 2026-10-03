@@ -74,6 +74,10 @@ func TestProviderBoundaryAcceptedAttemptReconcilesDuringDrift(t *testing.T) {
 		original := server.Config.RequireSimpleResource("sn.yml").Bytes()
 		owner, payment := controllerPayoutFixture(t, cutoff.Add(-time.Microsecond))
 		accepted, _ := controllerRetainAttempt(t, owner, payment, "synthetic-already-accepted")
+		before, err := GetProviderPayoutTransitionStatus(owner.Ctx)
+		if err != nil || before == nil || !before.NewLegacySubmissionsAdmitted || !before.ExistingAttemptReconciliationAllowed {
+			t.Fatal("prepared status did not distinguish sends and reconciliation", before, err)
+		}
 		changed := bytes.Replace(original, []byte(cutoff.Format(time.RFC3339)), []byte(cutoff.Add(-time.Hour).Format(time.RFC3339)), 1)
 		t.Cleanup(server.Config.PushSimpleResource("sn.yml", changed))
 		sends, reads := 0, 0
@@ -98,7 +102,7 @@ func TestProviderBoundaryAcceptedAttemptReconcilesDuringDrift(t *testing.T) {
 			t.Fatal("reconciliation lost original attempt or hid policy review", got, err)
 		}
 		status, err := GetProviderPayoutTransitionStatus(owner.Ctx)
-		if err != nil || status == nil || status.EarningBoundaryReady || status.EarningBoundaryReason == "" || status.LegacyPreCutoffPaymentsAllowed || status.NewMainnetWritesAdmitted || status.DeploymentVerified {
+		if err != nil || status == nil || status.EarningBoundaryReady || status.EarningBoundaryReason == "" || status.LegacyPreCutoffPaymentsAllowed || status.NewLegacySubmissionsAdmitted || !status.ExistingAttemptReconciliationAllowed || status.NewMainnetWritesAdmitted || status.DeploymentVerified {
 			t.Fatal("loaded status hid drift or claimed deployment", status, err)
 		}
 		if _, err := AdvancePayment(args, owner); err != nil || reads != 1 || sends != 0 {
