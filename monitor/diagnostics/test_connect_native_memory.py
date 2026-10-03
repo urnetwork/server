@@ -115,8 +115,20 @@ def collect(fixture):
     with mock.patch.object(n.os, 'geteuid', return_value=0), \
          mock.patch.object(n.os, 'uname', return_value=type('U', (), {'nodename': HOST})()), \
          mock.patch.object(n.os, 'readlink', return_value='time:[42]'), \
-         mock.patch.object(n.os, 'sysconf', return_value=100):
+         mock.patch.object(n.os, 'sysconf', return_value=100), \
+         mock.patch.object(n, 'host_memory', side_effect=lambda r, rows, qualified: host_fixture(qualified)):
         return n.collect(HOST, POLICY, fixture)
+
+
+def host_fixture(qualified=True):
+    fields={k:0 for k in n.HOST_MEM_FIELDS};fields.update(MemTotal=1024*1024,MemAvailable=512*1024)
+    return {'complete':qualified,'meminfo_complete':True,'process_aggregate_complete':qualified,
+            'connect_partition_qualified':qualified,'before':fields,'after':fields,
+            'mem_available_min_bytes':512*1024,'processes_listed':6,'processes_stable':6,
+            'processes_unavailable':0,'process_rss_lower_bound_bytes':16384,
+            'connect_init_rss_lower_bound_bytes':8192 if qualified else None,'other_process_rss_lower_bound_bytes':8192 if qualified else None,
+            'rss_shared_pages_may_be_counted_multiple_times':True,'rss_is_approximate':True,
+            'causes':[] if qualified else ['host-connect-partition-unbound'],'started_unix':1800000000.,'completed_unix':1800000001.}
 
 
 class NativeControls(unittest.TestCase):

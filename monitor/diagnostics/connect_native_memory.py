@@ -436,6 +436,142 @@ def stable_process(reader, row, token):
     return True
 
 
+HOST_MEM_FIELDS = ('MemTotal', 'MemFree', 'MemAvailable', 'Buffers', 'Cached',
+                   'SwapTotal', 'SwapFree', 'Shmem', 'Slab', 'SReclaimable',
+                   'SUnreclaim', 'KernelStack', 'PageTables')
+MAX_HOST_PROCESSES = 1024
+HOST_SECONDS = 5
+
+
+def host_meminfo(raw):
+    fields = {}
+    for line in raw.splitlines():
+        key, sep, value = line.partition(':')
+        if sep and key in HOST_MEM_FIELDS:
+            parts = value.split()
+            require(key not in fields and len(parts) == 2 and parts[1] == 'kB'
+                    and re.fullmatch(r'[0-9]{1,16}', parts[0])
+                    and int(parts[0]) <= 2**43, 'host-meminfo-schema')
+            fields[key] = int(parts[0]) * 1024
+    require(set(fields) == set(HOST_MEM_FIELDS) and fields['MemTotal'] > 0
+            and fields['MemFree'] <= fields['MemTotal']
+            and fields['MemAvailable'] <= fields['MemTotal']
+            and fields['SwapFree'] <= fields['SwapTotal'], 'host-meminfo-schema')
+    return fields
+
+
+def host_clock(reader, end):
+    reader.clock()
+    require(time.monotonic() < end, 'host-sample-time-bound')
+
+
+def host_process_ids(reader, end):
+    pids = set()
+    with os.scandir('/proc') as entries:
+        for count, entry in enumerate(entries):
+            host_clock(reader, end)
+            require(count < MAX_HOST_PROCESSES + 256, 'host-proc-list-bound')
+            if entry.name.isascii() and entry.name.isdecimal():
+                pid = int(entry.name)
+                require(0 < pid <= 4194304 and pid not in pids, 'host-proc-list-schema')
+                pids.add(pid)
+                require(len(pids) <= MAX_HOST_PROCESSES, 'host-proc-list-bound')
+    return pids
+
+
+def host_statm(raw, page_size):
+    fields = raw.split()
+    require(len(fields) == 7 and all(re.fullmatch(r'[0-9]{1,16}', x) for x in fields)
+            and int(fields[1]) <= int(fields[0])
+            and int(fields[1]) * page_size <= 2**53, 'host-statm-schema')
+    return int(fields[1]) * page_size
+
+
+def host_memory(reader, connect_rows, partition_qualified):
+    # RSS sums double-count shared pages, omit kernel/cache ownership, and are
+    # approximate procfs counters. MemAvailable is the headroom observation;
+    # neither subtraction from MemTotal nor an RSS sum is a capacity forecast.
+    end = min(reader.started + MAX_SECONDS, time.monotonic() + HOST_SECONDS)
+    out = {'complete': False, 'meminfo_complete': False,
+           'process_aggregate_complete': False,
+           'connect_partition_qualified': False,
+           'before': None, 'after': None, 'mem_available_min_bytes': None,
+           'processes_listed': 0, 'processes_stable': 0, 'processes_unavailable': 0,
+           'process_rss_lower_bound_bytes': 0,
+           'connect_init_rss_lower_bound_bytes': None,
+           'other_process_rss_lower_bound_bytes': None,
+           'rss_shared_pages_may_be_counted_multiple_times': True,
+           'rss_is_approximate': True, 'causes': [],
+           'started_unix': time.time(), 'completed_unix': None}
+    try:
+        host_clock(reader, end)
+        boot = reader.text('/proc/sys/kernel/random/boot_id', 128)
+        require(re.fullmatch(r'[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}\n?', boot),
+                'boot-identity-schema')
+        out['before'] = host_meminfo(reader.text('/proc/meminfo', 16384))
+        census_finished = False
+        connect_rss = 0
+        try:
+            page_size = os.sysconf('SC_PAGE_SIZE')
+            require(type(page_size) is int and page_size in (4096, 16384, 65536),
+                    'host-page-size-unsupported')
+            pids = host_process_ids(reader, end)
+            out['processes_listed'] = len(pids)
+            connect = {r['pid']: r['native']['start_ticks'] for r in connect_rows
+                       if r['identity_stable'] and r['native'] is not None}
+            require(len(connect) == len(connect_rows) or not partition_qualified,
+                    'host-connect-partition-unbound')
+            connect_rss = 0
+            for pid in sorted(pids):
+                host_clock(reader, end)
+                try:
+                    base = '/proc/' + str(pid)
+                    ticks = process_stat(reader.text(base + '/stat', 4096), pid)
+                    rss = host_statm(reader.text(base + '/statm', 256), page_size)
+                    require(process_stat(reader.text(base + '/stat', 4096), pid) == ticks,
+                            'process-start-changed')
+                    if pid in connect:
+                        require(ticks == connect[pid], 'host-connect-partition-unbound')
+                        connect_rss += rss
+                    out['process_rss_lower_bound_bytes'] += rss
+                    out['processes_stable'] += 1
+                except Exception as error:
+                    out['processes_unavailable'] += 1
+                    out['causes'].append(classify(error))
+                    if pid in connect:
+                        out['causes'].append('host-connect-partition-unbound')
+            terminal = host_process_ids(reader, end)
+            if pids != terminal:
+                out['causes'].append('host-process-set-changed')
+            if not set(connect) <= pids:
+                out['causes'].append('host-connect-partition-unbound')
+            census_finished = True
+        except Exception as error:
+            out['causes'].append(classify(error))
+        out['after'] = host_meminfo(reader.text('/proc/meminfo', 16384))
+        require(reader.text('/proc/sys/kernel/random/boot_id', 128) == boot,
+                'boot-identity-changed')
+        require(out['before']['MemTotal'] == out['after']['MemTotal'],
+                'host-memory-total-changed')
+        host_clock(reader, end)
+        out['meminfo_complete'] = True
+        out['mem_available_min_bytes'] = min(out['before']['MemAvailable'], out['after']['MemAvailable'])
+        partition = partition_qualified and 'host-connect-partition-unbound' not in out['causes'] and census_finished
+        out['connect_partition_qualified'] = partition
+        if partition:
+            out['connect_init_rss_lower_bound_bytes'] = connect_rss
+            out['other_process_rss_lower_bound_bytes'] = out['process_rss_lower_bound_bytes'] - connect_rss
+        out['process_aggregate_complete'] = not out['causes'] and partition
+        out['complete'] = out['meminfo_complete'] and out['process_aggregate_complete']
+    except Exception as error:
+        out['causes'].append(classify(error))
+    if not partition_qualified:
+        out['causes'].append('host-connect-partition-unbound')
+    out['causes'] = sorted(set(out['causes']))
+    out['completed_unix'] = time.time()
+    return out
+
+
 def collect(host, policy, reader=None):
     policy_checked(policy)
     require(host in HOSTS and os.geteuid() == 0 and
@@ -492,6 +628,8 @@ def collect(host, policy, reader=None):
         if not row['identity_stable']:
             row['source_qualified'] = False
             row['metric_start_join_qualified'] = False
+    result['host_memory'] = host_memory(reader, result['rows'], result['scope_stable'] and
+                                       all(r['identity_stable'] for r in result['rows']))
     result.update(completed_unix=time.time(), metadata_bytes=reader.metadata_bytes,
                   hash_bytes=reader.hash_bytes, elapsed_seconds=time.monotonic() - reader.started)
     require(len(json.dumps(result, allow_nan=False).encode()) <= 131072, 'result-output-bound')
