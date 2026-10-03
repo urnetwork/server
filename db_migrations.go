@@ -9458,4 +9458,22 @@ var migrations = []any{
 	newSqlMigration(providerPayoutBoundarySchemaSql),
 	// Independent settlement records keep shared grant writes out of contract closure.
 	newSqlMigration(transferDebitJournalSchemaSql),
+	// acceptance-test balance drains (model/test_balance_drain_model.go). Each
+	// row is the audit record of one drain; rows are never deleted. The partial
+	// index keeps the in-window lookup an index probe.
+	newSqlMigration(`
+        CREATE TABLE test_balance_drain (
+            drain_id uuid NOT NULL,
+            network_id uuid NOT NULL,
+            start_time timestamp NOT NULL,
+            end_time timestamp NOT NULL,
+            restore_time timestamp NULL,
+            drained_balance_byte_count bigint NOT NULL,
+
+            PRIMARY KEY (drain_id)
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX test_balance_drain_network_id_end_time ON test_balance_drain (network_id, end_time) WHERE restore_time IS NULL
+    `),
 }
