@@ -46,9 +46,7 @@ func TestContractCreationSameNetworkLargeNContentionFree(t *testing.T) {
 			model.Testing_CreateDevice(ctx, peerNetwork, server.NewId(), peers[i], "synthetic destination", "fixture")
 			model.SetProvide(ctx, peers[i], map[model.ProvideMode][]byte{model.ProvideModePublic: bytes.Repeat([]byte{29}, 32)})
 		}
-		server.Db(ctx, func(conn server.PgConn) {
-			server.RaisePgResult(conn.Exec(ctx, `UPDATE redis_contract_admission_policy SET enabled=true WHERE singleton`))
-		})
+		// Exercise production's unconditional default; no test-only mode switch.
 		pop := server.Config.PushSimpleResource("db.yml", []byte("min_connections: 0\nmax_connections: 16\n"))
 		server.PgReset()
 		defer func() { pop(); server.PgReset() }()

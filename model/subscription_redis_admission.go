@@ -40,15 +40,9 @@ func withRedisContractAdmission(ctx context.Context) context.Context {
 	if redisAdmissionFromContext(ctx) != nil {
 		return ctx
 	}
-	var enabled bool
-	server.Db(ctx, func(conn server.PgConn) {
-		server.Raise(conn.QueryRow(ctx, `SELECT enabled FROM redis_contract_admission_policy WHERE singleton`).Scan(&enabled))
-	})
-	if !enabled {
-		return ctx
-	}
 	// A database serialization retry keeps the same Redis request identity.
-	// No process-local financial permit participates in this mode.
+	// Admission is unconditional after the compatibility rollout. No shared
+	// policy read or process-local financial permit precedes this path.
 	return context.WithValue(ctx, redisAdmissionContextKey{}, &redisContractAdmission{contractId: server.NewId()})
 }
 

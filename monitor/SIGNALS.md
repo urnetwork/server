@@ -1678,15 +1678,27 @@ CPU or durable-receipt join. Cold-settlement deployment alone did not establish
 admission recovery.
 
 **Contention prevention and explicit approximation.** Migration 755 and the
-compatible reader release add a separately enabled Redis admission policy.
-Default-off traffic retains the existing legacy path. When enabled, marked
-escrow reservations use atomic same-slot Redis admission, without the local
+initial compatible reader release added a separately enabled Redis admission
+policy. Main's guarded switch became true at 2026-10-03 01:16:08Z after actual
+retirement observations on all four enabled financial hosts. This is activation
+evidence, not performance recovery. The follow-up bridge removes the policy
+query and always uses Redis admission; its deployment and later column-drop
+state must be identified separately from the earlier switch-reading release.
+Marked escrow reservations use atomic same-slot Redis admission, without the local
 payer permit or common balance/revision/snapshot writes. Exact legacy censuses
 and their cache metrics cover unmarked rows; do not interpret them as the total
 new reservation balance. `urnetwork_redis_contract_reservation_total` counts
 finite `operation=reserve|release|restore`, `result=accepted|refused|error`
-operations, including retries, not financial commits. Missing mode/source
+operations, including retries, not financial commits. Missing release/source
 coverage, command errors or absent counters remain unknown, not healthy.
+
+The bridge's owning controls hold the entire retired policy table while a
+contract must still complete, and create/settle origin and companion contracts
+after removing `enabled` in a disposable fixture. The prior reader blocks or
+fails with undefined-column respectively. These are local release regressions,
+not Main throughput measurements. Deploy every bridge reader and establish
+old-reader retirement before the separate column drop; a later false singleton
+value is not an off switch for an always-on binary.
 
 The owning release gate now holds each shared financial row while requests from
 another process must complete, separately holds the local payer permit, and

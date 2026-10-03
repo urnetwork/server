@@ -47,17 +47,24 @@ Accepted failure windows:
   one known contract with primary-key reads. Repair after an open/closed race can
   temporarily resurrect debt, but never extends its original 24-hour horizon.
   It is an explicit exception tool, not a history scan on the creation path.
-- Switching admission off does not make existing marked rows strict: compatible
-  legacy readers continue subtracting their Redis debt. Keep the upgraded
-  settlement and maintenance readers until all marked rows are drained. Rolling
-  back to an older binary after activation is unsupported.
+- Compatible legacy readers continue subtracting marked rows' Redis debt. Keep
+  upgraded settlement and maintenance readers until marked rows are drained.
+  This release has no admission-off mode; rolling back to an incompatible
+  binary after activation is unsupported.
 
-Migration 755 only installs compatibility and an `enabled=false` singleton in
-`redis_contract_admission_policy`. Apply the reviewed append-only migration,
-then deploy and qualify all API, Connect, Taskworker and maintenance readers
-before explicitly enabling that singleton. Each public creation reads the
-current switch; there is no process-local policy cache. Do not treat applying
-the migration or selecting image tags as activation or runtime convergence.
+Migration 755 installed compatibility and the initial `enabled=false` singleton.
+The initial rollout required upgrading and retiring every incompatible financial
+reader before explicitly enabling Redis admission. This bridge release follows
+that activation: contract creation now always uses Redis admission and never
+reads `redis_contract_admission_policy`. Changing its old `enabled` value no
+longer controls this release. The schema remains compatible with migration 755.
+
+Keep the initial switch true while any prior release still reads it. Deploy this
+bridge to every creator and companion creator, including API, Connect,
+Taskworker and actual maintenance jobs, and establish predecessor retirement.
+Only then apply the separate migration that drops the `enabled` column. Dropping
+it before an older reader retires would make that reader's contract creation
+fail. The table's singleton and all reservation/accounting columns remain.
 
 The compatibility inventory includes every API process serving contract create,
 close or balance reads; every Connect process able to dispatch those operations;
@@ -69,16 +76,14 @@ Read-only database catalog monitoring does not participate in reservation
 accounting. Use the enabled deployment inventory, including draining replicas,
 rather than a fixed count of latest metric series.
 
-Before enabling, establish both the compatible current binary and retirement
-of each incompatible predecessor. A current process metric, selected image tag,
-successful deployment command, missing old metric, or elapsed nominal drain
-timeout establishes neither old-process exit nor completion of its background
-work. Use the owning host/worker process-generation and drain/exit evidence, or
-an explicit stop-and-join of the predecessor. Include in-flight requests,
-settlement posts, leased workers and suspended/restartable old jobs. Their next
-start must also select compatible code. Keep manual old maintenance commands
-disabled during and after activation. A null or unobserved slot leaves this
-prerequisite unresolved.
+Before the initial enable, establish compatible current binaries and retirement
+of incompatible predecessors. Before dropping `enabled`, establish the same
+boundary for older binaries that still read the column. Current metrics,
+selected tags and a completed deployment command alone do not establish exit.
+Use actual host/container process and restart state, with compatible next-start
+selection and the actual known manual-job inventory. Edge5 is excluded under the
+operator's standing offline and stopped-worker instruction. A null observation
+remains unknown. Do not add a hypothetical future manual-resumption condition.
 
 Old settlers are incompatible with marked rows: their snapshot code treats the
 marked reservation as legacy even though migration 755 no longer advances its
@@ -91,36 +96,12 @@ These are source-defined compatibility risks, not a claim that an old process
 has already performed one of them on Main. Accepted Redis crash/eviction edges
 do not make a mixed incompatible-binary rollout supported.
 
-After independently verifying migration 755's exact artifacts and the above
-process inventory, use the existing approved primary PostgreSQL transport with
-the reviewed `psql` program below. Its session must be bound to the expected
-inventory database; do not guess a port, create a new tunnel or put credentials
-in argv. It changes only the singleton, checks primary/database/migration and
-the expected old mode, and bounds statement/lock time. This SQL cannot prove
-application predecessor retirement. Preserve its terminal receipt; after a
-connection loss inspect the singleton once under a fresh observation admission
-instead of blindly repeating an ambiguous update.
-
-```sh
-# PG connection authority/credentials come from the already-reviewed transport.
-PGCONNECT_TIMEOUT=3 timeout --signal=TERM 15s \
-  psql -X --no-password --set=ON_ERROR_STOP=1 \
-  --set=expected_database="$ADMISSION_DATABASE" \
-  --set=expected_enabled=false --set=desired_enabled=true \
-  --file=docs/operator/contract-admission-mode.sql
-```
-
-Read back `SELECT enabled FROM redis_contract_admission_policy WHERE singleton`
-through that same authority and retain the UTC boundary. To stop new Redis
-admission, run the same program with `expected_enabled=true` and
-`desired_enabled=false`. Calls which already read `true` may still finish and
-write marked rows after the disabling transaction commits. Disabling preserves
-all counters, tokens and contracts; it neither refunds nor reconstructs them.
-Continue running compatible code and target reconciliation at known exceptions.
-Do not restore old binaries, clear Redis keys, drop the compatibility column or
-restore old trigger bodies. After the first marked contract, a binary/schema
-rollback needs a separately reviewed drain, reconciliation and data-conversion
-plan; neither a false switch nor waiting 24 hours proves it safe.
+The former `contract-admission-mode.sql` operator program is removed from this
+release. It cannot stop new admission after the switch has been retired. Keep
+compatible settlement and maintenance readers: actual usage and debits stay
+durable, and existing marked reservations still need their owned releases.
+Rolling back to an incompatible binary, clearing Redis keys, or restoring old
+trigger bodies is unsupported. Use targeted reconciliation for known exceptions.
 
 The mandatory release gate is part of `test.sh`, before filtered or expensive
 package tests. It always runs the actual PostgreSQL/Redis held-row and held-payer

@@ -12,11 +12,6 @@ import (
 	"github.com/urnetwork/server"
 )
 
-func enableRedisAdmissionTest(ctx context.Context) {
-	server.Db(ctx, func(conn server.PgConn) {
-		server.RaisePgResult(conn.Exec(ctx, `UPDATE redis_contract_admission_policy SET enabled=true WHERE singleton`))
-	})
-}
 func createRedisAdmissionTest(ctx context.Context, f netEscrowOrderingTestFixture, amount ByteCount) *TransferEscrow {
 	escrow, err := CreateTransferEscrow(ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, amount)
 	server.Raise(err)
@@ -30,7 +25,6 @@ func TestRedisAdmissionMixedSettlementReplay(t *testing.T) {
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		legacy, posts := createNetEscrowOrderingTestContract(ctx, f, 100)
 		server.RunPosts(ctx, posts...)
-		enableRedisAdmissionTest(ctx)
 		first := createRedisAdmissionTest(ctx, f, 200)
 		_ = createRedisAdmissionTest(ctx, f, 300)
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 600 {
@@ -146,7 +140,6 @@ func TestRedisAdmissionRollbackExpiresWithoutDatabaseLocks(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
-		enableRedisAdmissionTest(ctx)
 		ctx = withRedisContractAdmission(ctx)
 		conn, err := server.AcquireMaintenanceDbConn(ctx)
 		if err != nil {
@@ -187,7 +180,6 @@ func TestRedisAdmissionDoesNotUseHeldProcessPayerPermit(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
-		enableRedisAdmissionTest(ctx)
 		release, err := transferEscrowAdmissionQueue.acquire(ctx, f.sourceNetworkId)
 		if err != nil {
 			t.Fatal(err)
@@ -205,7 +197,6 @@ func TestRedisAdmissionCompanionUsesSamePayerAndCredit(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
-		enableRedisAdmissionTest(ctx)
 		origin := createRedisAdmissionTest(ctx, f, 100)
 		companion, err := CreateCompanionTransferEscrow(ctx, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, f.sourceId, 100, time.Hour)
 		if err != nil || companion == nil || companion.CompanionContractId == nil || *companion.CompanionContractId != origin.ContractId {
@@ -227,7 +218,6 @@ func TestRedisAdmissionRecoveryAfterLossAndLateRelease(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
-		enableRedisAdmissionTest(ctx)
 		first := createRedisAdmissionTest(ctx, f, 17)
 		second := createRedisAdmissionTest(ctx, f, 23)
 		keys := redisContractReservationKeys(f.balanceId)
@@ -247,7 +237,7 @@ func TestRedisAdmissionRecoveryAfterLossAndLateRelease(t *testing.T) {
 		}
 	})
 }
-func TestRedisAdmissionModeDisabledRetainsExistingNewReservations(t *testing.T) {
+func TestRedisAdmissionLegacyPolicyValueDoesNotDisableCreation(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -260,18 +250,17 @@ func TestRedisAdmissionModeDisabledRetainsExistingNewReservations(t *testing.T) 
 		if enabled {
 			t.Fatal("migration unexpectedly enabled new admission")
 		}
-		enableRedisAdmissionTest(ctx)
 		_ = createRedisAdmissionTest(ctx, f, 900)
 		server.Db(ctx, func(conn server.PgConn) {
 			server.RaisePgResult(conn.Exec(ctx, `UPDATE redis_contract_admission_policy SET enabled=false WHERE singleton`))
 		})
 		if escrow, err := CreateTransferEscrow(ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 101); err == nil || escrow != nil {
-			t.Fatal("legacy compatibility ignored new reservations")
+			t.Fatal("unconditional admission ignored existing reservations")
 		}
-		legacy := createRedisAdmissionTest(ctx, f, 100)
-		server.RunPosts(ctx, settleNetEscrowOrderingTestContract(ctx, legacy.ContractId)...)
+		next := createRedisAdmissionTest(ctx, f, 100)
+		server.RunPosts(ctx, settleNetEscrowOrderingTestContract(ctx, next.ContractId)...)
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 900 {
-			t.Fatal("disabled reader lost approximate debt", got)
+			t.Fatal("legacy policy value changed approximate debt", got)
 		}
 	})
 }
@@ -310,7 +299,6 @@ func TestRedisAdmissionDurableUsageAndLostSettlementPost(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
-		enableRedisAdmissionTest(ctx)
 		escrow := createRedisAdmissionTest(ctx, f, 100)
 		var posts []func() any
 		server.Tx(ctx, func(tx server.PgTx) {

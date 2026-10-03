@@ -520,11 +520,14 @@ func TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows(t *testing.T) 
 			t.Fatal("healthy warm control failed")
 		}
 		server.Db(ctx, func(conn server.PgConn) {
-			var present bool
-			server.Raise(conn.QueryRow(ctx, `SELECT to_regclass('redis_contract_admission_policy') IS NOT NULL`).Scan(&present))
-			if present {
-				server.RaisePgResult(conn.Exec(ctx, `UPDATE redis_contract_admission_policy SET enabled=true WHERE singleton`))
-			}
+			// New default admission never creates legacy revision/cache rows.
+			// Seed those historical rows explicitly so every barrier holds a
+			// real shared row while the independent creator must still finish.
+			server.RaisePgResult(conn.Exec(ctx, `INSERT INTO transfer_balance_net_escrow_revision(balance_id,revision)
+                VALUES($1,1) ON CONFLICT(balance_id) DO NOTHING`, f.owner.BalanceId))
+			server.RaisePgResult(conn.Exec(ctx, `INSERT INTO transfer_balance_net_escrow_snapshot(balance_id,revision,reserved_byte_count)
+                SELECT balance_id,revision,0 FROM transfer_balance_net_escrow_revision WHERE balance_id=$1
+                ON CONFLICT(balance_id) DO NOTHING`, f.owner.BalanceId))
 			var foreignKeys int
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pg_constraint WHERE contype='f' AND conrelid='transfer_escrow'::regclass AND confrelid='transfer_balance'::regclass`).Scan(&foreignKeys))
 			t.Logf("actual escrow-to-balance foreign keys=%d", foreignKeys)
