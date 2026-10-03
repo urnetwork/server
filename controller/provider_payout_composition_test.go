@@ -98,6 +98,18 @@ func TestProviderCompositionCanceledReadRetainsAttemptAndCause(t *testing.T) {
 		if !errors.Is(err, context.Canceled) || result == nil || result.Complete || result.Canceled || result.Retryable || reads != 1 || sends != 0 {
 			t.Fatal("public controller hid cancellation or canceled the obligation", result, err, reads, sends)
 		}
+		server.Tx(retainedCtx, func(tx server.PgTx) {
+			if err := AdvancePaymentPost(&AdvancePaymentArgs{PaymentId: payment.PaymentId}, result, owner, tx); !errors.Is(err, context.Canceled) {
+				t.Fatal("canceled public continuation did not refuse scheduling", err)
+			}
+		})
+		var queued int
+		server.Db(retainedCtx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(retainedCtx, `SELECT COUNT(*) FROM pending_task WHERE args_json::jsonb->>'payment_id'=$1`, payment.PaymentId.String()).Scan(&queued))
+		})
+		if queued != 0 {
+			t.Fatal("canceled read created a new continuation", queued)
+		}
 		got, err := model.GetPayment(retainedCtx, payment.PaymentId)
 		if err != nil || got == nil || got.Completed || got.Canceled || got.PaymentRecord == nil || *got.PaymentRecord != *accepted.PaymentRecord || got.CircleIdempotencyKey == nil || *got.CircleIdempotencyKey != *accepted.CircleIdempotencyKey {
 			t.Fatal("canceled observation changed the retained payment", got, err)

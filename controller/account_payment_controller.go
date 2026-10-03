@@ -300,6 +300,9 @@ func AdvancePaymentPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	if err := clientSession.Ctx.Err(); err != nil {
+		return err
+	}
 	if !advancePaymentResult.Canceled && !advancePaymentResult.Complete {
 		// keep checking on the payment until it is completed or canceled
 		ScheduleAdvancePayment(advancePaymentArgs, clientSession, tx)
@@ -391,7 +394,7 @@ func advancePayment(
 		}
 		formattedBlockchain, err := formatBlockchain(accountWallet.Blockchain)
 		if err != nil {
-			returnErr = fmt.Errorf("[%s]Payment wallet error = %s", payment.PaymentId, err)
+			returnErr = fmt.Errorf("[%s]Payment wallet error: %w", payment.PaymentId, err)
 			return
 		}
 
@@ -443,7 +446,7 @@ func advancePayment(
 			glog.Info("[payout][%s]payout - fee is negative\n", payment.PaymentId)
 
 			if err := model.CancelPayment(clientSession.Ctx, payment.PaymentId); err != nil {
-				returnErr = fmt.Errorf("[%s]Payment cancellation error = %s", payment.PaymentId, err)
+				returnErr = fmt.Errorf("[%s]Payment cancellation error: %w", payment.PaymentId, err)
 				return
 			}
 			canceled = true
@@ -481,7 +484,7 @@ func advancePayment(
 				// pinned attempt. On the next retry UpdatePaymentWallet can select a
 				// corrected payout wallet. Ambiguous failures retain the key.
 				if resetErr := model.ResetProviderPaymentSubmission(clientSession.Ctx, basis, err.Error()); resetErr != nil {
-					returnErr = fmt.Errorf("[%s]Payment create transaction error = %s; invalid destination reset error = %s", payment.PaymentId, err, resetErr)
+					returnErr = fmt.Errorf("[%s]Payment create transaction error: %w; invalid destination reset error: %w", payment.PaymentId, err, resetErr)
 					return
 				}
 			}
@@ -499,7 +502,7 @@ func advancePayment(
 		if err != nil {
 			// the transfer was already submitted. Return an error so the task
 			// retries; the stable idempotency key makes the resubmit safe.
-			returnErr = fmt.Errorf("[%s]Payment record error = %s", payment.PaymentId, err)
+			returnErr = fmt.Errorf("[%s]Payment record error: %w", payment.PaymentId, err)
 			return
 		}
 	}
@@ -585,7 +588,7 @@ func ConvertFeeToUSDC(ctx context.Context, currencyTicker string, fee float64) (
 
 	rate, err := strconv.ParseFloat(rateStr, 64)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse rate: %v", err)
+		return 0, fmt.Errorf("failed to parse rate: %w", err)
 	}
 
 	feeUsdc := fee * rate
