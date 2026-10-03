@@ -1908,137 +1908,35 @@ func HeliusWebhook(
 	// the reason the transaction was skipped -- reported as the result message for a
 	// single-transaction delivery, so a caller (and the existing tests) can see WHY
 	skipMessage := ""
+	lookups := &solanaDbPaymentLookups{clientSession: clientSession}
 	for _, transaction := range transactions {
+		decision := solanaDecidePayment(transaction, lookups)
 
-		if transaction.Type != "TRANSFER" {
-			glog.Infof("HeliusWebhook: ignoring non-transfer transaction: %s of type %s", transaction.Signature, transaction.Type)
-			skipMessage = fmt.Sprintf("Ignoring non-transfer transaction of type %s", transaction.Type)
-			continue
-		}
-
-		if len(transaction.TokenTransfers) == 0 {
-			glog.Infof("HeliusWebhook: no token transfers found for transaction: %s", transaction.Signature)
-			skipMessage = "Ignoring transaction with no token transfers"
-			continue
-		}
-
-		// Take the largest USDC transfer to one of our receiving addresses, WHATEVER its
-		// size. It used to require `>= 40` here -- a hardcoded stand-in for the yearly
-		// price -- which meant a customer who chose the $5 monthly plan on the site had
-		// their payment ignored entirely as "no matching USDC payment". They paid and got
-		// nothing.
-		//
-		// The amount is checked below, against what they were actually QUOTED.
-		paymentReceived := false
-		var tokenAmountReceived float64
-
-		for _, tokenTransfer := range transaction.TokenTransfers {
-
-			if tokenTransfer.Mint == solanaUsdcMint &&
-				slices.Contains(solanaReceiverAddresses, tokenTransfer.ToUserAccount) &&
-				0 < tokenTransfer.TokenAmount {
-				paymentReceived = true
-				if tokenAmountReceived < tokenTransfer.TokenAmount {
-					tokenAmountReceived = tokenTransfer.TokenAmount
-				}
-			}
-
-		}
-
-		if !paymentReceived {
-			glog.Infof("HeliusWebhook: no USDC payment found for transaction: %s", transaction.Signature)
-			skipMessage = "Ignoring transaction with no matching USDC payment"
-			continue
-		}
-
-		// every string the reference could be found under: the account keys (a
-		// Solana Pay wallet attaches the reference as an account) and the memo
-		// texts (a payment sent by hand carries it as the transfer memo)
-		accounts := solanaReferenceCandidates(transaction)
-
-		paymentSearchResult, err := model.SearchPaymentIntents(accounts, clientSession)
-
-		if err != nil {
-			glog.Infof("HeliusWebhook: error searching payment intents: %v", err)
+		switch decision.action {
+		case solanaPaymentActionError:
 			if firstErr == nil {
-				firstErr = err
+				firstErr = decision.err
 			}
 			continue
-		}
-
-		// on-chain time, when the webhook carried one, for the unfulfilled record
-		var transactionTime *time.Time
-		if transaction.Timestamp != 0 {
-			t := time.Unix(transaction.Timestamp, 0).UTC()
-			transactionTime = &t
-		}
-
-		if paymentSearchResult == nil {
-			skipMessage = "No payment intent found for this network ID"
-
-			// a REDELIVERY of a payment that already consumed its intent finds no
-			// open intent either -- that one is credited and done, not unfulfilled
-			if model.IsSolanaPaymentCompleted(clientSession.Ctx, transaction.Signature) {
-				glog.Infof("HeliusWebhook: transaction %s already credited; ignoring redelivery", transaction.Signature)
-				continue
-			}
-
-			// Money arrived at our address and no open intent matched -- a payment
-			// after the intent was swept, or an unknown reference. Helius is still
-			// acked 200 (it never re-examines a delivered tx), so record it where an
-			// operator can see and repair it, with the account keys and memos the
-			// reference was searched among. A late payment whose intent has merely EXPIRED but not
-			// yet been swept never lands here: the search ignores expires_at on
-			// purpose, so it still resolves and is credited below -- late is not
-			// fraudulent.
-			glog.Errorf("HeliusWebhook: no payment intent found for transaction: %s; recording as unfulfilled\n", transaction.Signature)
-			if err := model.RecordUnfulfilledSolanaPayment(clientSession.Ctx, &model.UnfulfilledSolanaPayment{
-				TxSignature:         transaction.Signature,
-				Reason:              model.SolanaUnfulfilledReasonNoIntent,
-				TokenAmountUsd:      tokenAmountReceived,
-				ReferenceCandidates: accounts,
-				TransactionTime:     transactionTime,
-			}); err != nil {
-				glog.Errorf("HeliusWebhook: could not record unfulfilled payment %s: %v\n", transaction.Signature, err)
-			}
+		case solanaPaymentActionSkip:
+			skipMessage = decision.skipMessage
 			continue
-		}
-
-		// Verify the payment against what the customer was QUOTED. Underpaying must not
-		// buy a plan; overpaying is their choice and is honored.
-		//
-		// The tolerance absorbs float dust in the token amount (it arrives as a float64
-		// from the chain), not a real discount.
-		if solanaAmountTolerance < paymentSearchResult.ExpectedAmountUsd-tokenAmountReceived {
-			glog.Errorf(
-				"HeliusWebhook: underpaid %s: received %.2f USDC, quoted %.2f (reference %s)\n",
-				transaction.Signature,
-				tokenAmountReceived,
-				paymentSearchResult.ExpectedAmountUsd,
-				paymentSearchResult.PaymentReference,
-			)
-			// funds were kept and the intent stays open -- record the shortfall where
-			// an operator can see it, with the quote it was checked against
-			if err := model.RecordUnfulfilledSolanaPayment(clientSession.Ctx, &model.UnfulfilledSolanaPayment{
-				TxSignature:       transaction.Signature,
-				Reason:            model.SolanaUnfulfilledReasonUnderpaid,
-				TokenAmountUsd:    tokenAmountReceived,
-				ExpectedAmountUsd: &paymentSearchResult.ExpectedAmountUsd,
-				PaymentReference:  &paymentSearchResult.PaymentReference,
-				NetworkId:         paymentSearchResult.NetworkId,
-				TransactionTime:   transactionTime,
-			}); err != nil {
+		case solanaPaymentActionRecord:
+			// Money arrived at our address and bought nothing. Helius is still acked
+			// 200 (it never re-examines a delivered tx), so record it where an
+			// operator can see and repair it.
+			if err := model.RecordUnfulfilledSolanaPayment(clientSession.Ctx, decision.unfulfilled); err != nil {
 				glog.Errorf("HeliusWebhook: could not record unfulfilled payment %s: %v\n", transaction.Signature, err)
 			}
-			skipMessage = "Payment is less than the quoted price"
+			skipMessage = decision.skipMessage
 			continue
 		}
 
 		credited, insertErr := solanaCreditPaymentIntent(
 			clientSession,
-			paymentSearchResult,
+			decision.intent,
 			transaction.Signature,
-			tokenAmountReceived,
+			decision.tokenAmountUsd,
 		)
 
 		if insertErr != nil {
@@ -2057,7 +1955,7 @@ func HeliusWebhook(
 		}
 
 		// the regional price tier and the welcome offer on the credited row
-		solanaRecordOnboarding(clientSession, paymentSearchResult)
+		solanaRecordOnboarding(clientSession, decision.intent)
 
 		matched++
 	}
@@ -2079,6 +1977,203 @@ func HeliusWebhook(
 		return &HeliusWebhookResult{Message: "No matching payments"}, nil
 	}
 	return &HeliusWebhookResult{Message: fmt.Sprintf("Processed %d matching payments", matched)}, nil
+}
+
+// What the webhook does with one transaction (solanaDecidePayment).
+type solanaPaymentAction int
+
+const (
+	// nothing to credit or record; skipMessage says why
+	solanaPaymentActionSkip solanaPaymentAction = iota
+	// credit intent with tokenAmountUsd (the intent one-shot still guards it)
+	solanaPaymentActionCredit
+	// record unfulfilled for an operator; skipMessage says why
+	solanaPaymentActionRecord
+	// a lookup failed; err is returned after the batch so Helius redelivers
+	solanaPaymentActionError
+)
+
+type solanaPaymentDecision struct {
+	action         solanaPaymentAction
+	skipMessage    string
+	intent         *model.PaymentIntentSearchResult
+	tokenAmountUsd float64
+	unfulfilled    *model.UnfulfilledSolanaPayment
+	err            error
+}
+
+// The reads solanaDecidePayment makes. The webhook uses the db
+// (solanaDbPaymentLookups); tests use an in-memory fake, so the matching rules
+// are exercised without Postgres.
+type solanaPaymentLookups interface {
+	// the open intent whose reference is one of references, or nil
+	searchIntentsByReference(references []string) (*model.PaymentIntentSearchResult, error)
+	// whether this transaction signature already consumed an intent
+	isPaymentCompleted(signature string) bool
+}
+
+type solanaDbPaymentLookups struct {
+	clientSession *session.ClientSession
+}
+
+func (self *solanaDbPaymentLookups) searchIntentsByReference(references []string) (*model.PaymentIntentSearchResult, error) {
+	return model.SearchPaymentIntents(references, self.clientSession)
+}
+
+func (self *solanaDbPaymentLookups) isPaymentCompleted(signature string) bool {
+	return model.IsSolanaPaymentCompleted(self.clientSession.Ctx, signature)
+}
+
+// solanaDecidePayment decides what one Helius transaction buys, with no writes:
+// the webhook carries out the decision (credit through the intent one-shot, or
+// record for an operator). The rules, in order:
+//
+//   - only a TRANSFER with a USDC transfer to one of our receiving addresses is
+//     a payment; anything else is skipped
+//   - the reference is searched among the account keys and memo texts
+//     (solanaReferenceCandidates); an open intent found there is credited when
+//     the amount is not under its quote (underpaid is recorded)
+//   - no open intent: a redelivery of an already credited signature is
+//     skipped, anything else is recorded as no_intent
+func solanaDecidePayment(
+	transaction *SolanaTransaction,
+	lookups solanaPaymentLookups,
+) *solanaPaymentDecision {
+	if transaction.Type != "TRANSFER" {
+		glog.Infof("HeliusWebhook: ignoring non-transfer transaction: %s of type %s", transaction.Signature, transaction.Type)
+		return &solanaPaymentDecision{
+			action:      solanaPaymentActionSkip,
+			skipMessage: fmt.Sprintf("Ignoring non-transfer transaction of type %s", transaction.Type),
+		}
+	}
+
+	if len(transaction.TokenTransfers) == 0 {
+		glog.Infof("HeliusWebhook: no token transfers found for transaction: %s", transaction.Signature)
+		return &solanaPaymentDecision{
+			action:      solanaPaymentActionSkip,
+			skipMessage: "Ignoring transaction with no token transfers",
+		}
+	}
+
+	// Take the largest USDC transfer to one of our receiving addresses, WHATEVER its
+	// size. It used to require `>= 40` here -- a hardcoded stand-in for the yearly
+	// price -- which meant a customer who chose the $5 monthly plan on the site had
+	// their payment ignored entirely as "no matching USDC payment". They paid and got
+	// nothing.
+	//
+	// The amount is checked below, against what they were actually QUOTED.
+	paymentReceived := false
+	var tokenAmountReceived float64
+
+	for _, tokenTransfer := range transaction.TokenTransfers {
+
+		if tokenTransfer.Mint == solanaUsdcMint &&
+			slices.Contains(solanaReceiverAddresses, tokenTransfer.ToUserAccount) &&
+			0 < tokenTransfer.TokenAmount {
+			paymentReceived = true
+			if tokenAmountReceived < tokenTransfer.TokenAmount {
+				tokenAmountReceived = tokenTransfer.TokenAmount
+			}
+		}
+
+	}
+
+	if !paymentReceived {
+		glog.Infof("HeliusWebhook: no USDC payment found for transaction: %s", transaction.Signature)
+		return &solanaPaymentDecision{
+			action:      solanaPaymentActionSkip,
+			skipMessage: "Ignoring transaction with no matching USDC payment",
+		}
+	}
+
+	// every string the reference could be found under: the account keys (a
+	// Solana Pay wallet attaches the reference as an account) and the memo
+	// texts (a payment sent by hand carries it as the transfer memo)
+	accounts := solanaReferenceCandidates(transaction)
+
+	paymentSearchResult, err := lookups.searchIntentsByReference(accounts)
+
+	if err != nil {
+		glog.Infof("HeliusWebhook: error searching payment intents: %v", err)
+		return &solanaPaymentDecision{
+			action: solanaPaymentActionError,
+			err:    err,
+		}
+	}
+
+	// on-chain time, when the webhook carried one, for the unfulfilled record
+	var transactionTime *time.Time
+	if transaction.Timestamp != 0 {
+		t := time.Unix(transaction.Timestamp, 0).UTC()
+		transactionTime = &t
+	}
+
+	if paymentSearchResult == nil {
+		// a REDELIVERY of a payment that already consumed its intent finds no
+		// open intent either -- that one is credited and done, not unfulfilled
+		if lookups.isPaymentCompleted(transaction.Signature) {
+			glog.Infof("HeliusWebhook: transaction %s already credited; ignoring redelivery", transaction.Signature)
+			return &solanaPaymentDecision{
+				action:      solanaPaymentActionSkip,
+				skipMessage: "No payment intent found for this network ID",
+			}
+		}
+
+		// Money arrived at our address and no open intent matched -- a payment
+		// after the intent was swept, or an unknown reference. Record it with the
+		// account keys and memos the reference was searched among. A late payment
+		// whose intent has merely EXPIRED but not yet been swept never lands here:
+		// the search ignores expires_at on purpose, so it still resolves and is
+		// credited -- late is not fraudulent.
+		glog.Errorf("HeliusWebhook: no payment intent found for transaction: %s; recording as unfulfilled\n", transaction.Signature)
+		return &solanaPaymentDecision{
+			action:      solanaPaymentActionRecord,
+			skipMessage: "No payment intent found for this network ID",
+			unfulfilled: &model.UnfulfilledSolanaPayment{
+				TxSignature:         transaction.Signature,
+				Reason:              model.SolanaUnfulfilledReasonNoIntent,
+				TokenAmountUsd:      tokenAmountReceived,
+				ReferenceCandidates: accounts,
+				TransactionTime:     transactionTime,
+			},
+		}
+	}
+
+	// Verify the payment against what the customer was QUOTED. Underpaying must not
+	// buy a plan; overpaying is their choice and is honored.
+	//
+	// The tolerance absorbs float dust in the token amount (it arrives as a float64
+	// from the chain), not a real discount.
+	if solanaAmountTolerance < paymentSearchResult.ExpectedAmountUsd-tokenAmountReceived {
+		glog.Errorf(
+			"HeliusWebhook: underpaid %s: received %.2f USDC, quoted %.2f (reference %s)\n",
+			transaction.Signature,
+			tokenAmountReceived,
+			paymentSearchResult.ExpectedAmountUsd,
+			paymentSearchResult.PaymentReference,
+		)
+		// funds were kept and the intent stays open -- record the shortfall where
+		// an operator can see it, with the quote it was checked against
+		return &solanaPaymentDecision{
+			action:      solanaPaymentActionRecord,
+			skipMessage: "Payment is less than the quoted price",
+			unfulfilled: &model.UnfulfilledSolanaPayment{
+				TxSignature:       transaction.Signature,
+				Reason:            model.SolanaUnfulfilledReasonUnderpaid,
+				TokenAmountUsd:    tokenAmountReceived,
+				ExpectedAmountUsd: &paymentSearchResult.ExpectedAmountUsd,
+				PaymentReference:  &paymentSearchResult.PaymentReference,
+				NetworkId:         paymentSearchResult.NetworkId,
+				TransactionTime:   transactionTime,
+			},
+		}
+	}
+
+	return &solanaPaymentDecision{
+		action:         solanaPaymentActionCredit,
+		intent:         paymentSearchResult,
+		tokenAmountUsd: tokenAmountReceived,
+	}
 }
 
 // solanaCreditPaymentIntent consumes an open intent and grants the plan the
