@@ -6,7 +6,7 @@ classify named cloud/VPS/hosting owners as `non_quality`, not as geographic
 directory or proof that every address of a diversified corporation hosts VMs.
 The candidate must pass the shadow review below before activation.
 
-The complete new policy is staged only in
+The policy-two rule catalog is staged only in
 `config/main/arindb-quality-v2.candidate.yml`. Active `main/arindb.yml` and the
 all-release default refresh input are unchanged. Candidate builds and catalog
 tests must name the candidate path explicitly. No resource was published.
@@ -315,10 +315,38 @@ and [the operator's home internet offering](https://fiber.google.com/internet/).
 This explicit owner exception overrides a Google ancestor, but does not bypass
 the independent reliability, risk, TLS, or URL-success gates. Unknown
 organization children inherit a reviewed hosting organization ancestor.
-Do not generalize this to all network children: allocation precedence can
-select an independently registered network child whose organization has no
-`parentOrgHandle` link to the hosting owner. That boundary remains an explicit
-coverage-review item, not a correction implemented by the catalog additions.
+The 2026-09-28 catalog additions did not cover independently registered network
+children whose organization lacks `parentOrgHandle`. A separate 2026-10-03 UTC
+builder regression demonstrates that gap and implements the originally
+requested negative Quality fallback through `parentNetHandle`.
+
+The fallback uses the nearest reviewed network owner's organization evidence,
+and requires a fully containing authoritative ARIN allocation at every link.
+It preserves the direct owner and exact network handle, publishing the inherited
+rule, source, organization and `classification_network_handle`. Missing,
+noncontaining, external-RIR referral, registry and unknown links stop the
+search. A reviewed access ancestor stops an older hosting rule from being
+resurrected but does not approve an unreviewed child. Direct reviewed children,
+organization ancestry and most-specific prefix overrides keep precedence.
+Incomparable-owner conflicts remain explicit.
+
+This is the user's conservative Quality inheritance policy applied to ARIN's
+documented [network relationship](https://www.arin.net/reference/research/bulkwhois/),
+not a claim that the registry proves actual service use.
+[Reallocations and reassignments](https://www.arin.net/resources/registry/reassignments/)
+can represent independently operated downstream networks. Consequently this
+fallback never transfers country evidence, independent proxy risk or subscriber
+approval. Full MMDB tests cover those boundaries, including parent and child
+country differences, proxy evidence, clean overrides, referrals and reversed
+source order. The old near-name negative fixture is now truly unrelated: it
+has no network-parent link; separate tests cover unreviewed actual children.
+
+Every new record also retains `net_handle` independently of optional country
+evidence mode. Earlier policy-two resources could omit it, so their owner
+aggregates cannot claim exact current prefix coverage when that handle is
+empty. These changes do not replace the staged candidate or active database;
+resource rebuild, aggregate provider shadow and lookup-epoch cutover remain
+required.
 
 The initial rules omitted `AMAZO-4` (the earlier text misspelled it
 `AMAZON-4`) out of concern about blanket Amazon classification. The 2026-09-28

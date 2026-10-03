@@ -369,9 +369,15 @@ still permits one success out of one observation; the ten-measured-run/four-hour
 collection quota is not an additional admission gate. High native counts are
 not by themselves proof of a classifier error or sufficient evidence coverage.
 
-Complete non-ARIN/global-cloud prefix coverage and independently registered
-network-child inheritance remain explicit review gaps; an organization-parent
-inheritance test does not prove allocation-parent inheritance. See
+Complete non-ARIN/global-cloud prefix coverage remains an explicit review gap.
+The 2026-10-03 UTC builder control closes the separate independently registered
+network-child inheritance gap: a containing authoritative `parentNetHandle`
+chain can retain reviewed negative Quality evidence, with direct-child and
+most-specific-prefix precedence. Missing, referral or noncontaining links do
+not establish that authority; subscriber approval, country evidence and proxy
+risk are not inherited through this new path. Organization-parent tests alone
+did not prove this case. The builder correction and its additive provenance
+still require a rebuilt resource and current Main shadow before activation. See
 `arindbctl/CLASSIFICATION.md` for exact evidence, tests and the resource-build,
 provider-shadow and lookup-epoch activation sequence. Official feed imports and
 third-party proxy evidence remain separate candidates until their scope,

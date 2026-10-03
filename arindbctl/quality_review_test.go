@@ -76,7 +76,7 @@ func TestArinQualityCatalogAdditionKeepsRiskAndAccessOverrides(t *testing.T) {
 <net><handle>TEST-CLOUD-NET</handle><orgHandle>TEST-NEW-CLOUD</orgHandle><netBlocks><netBlock><type>DA</type><cidrLength>24</cidrLength><startAddress>192.0.2.0</startAddress><endAddress>192.0.2.255</endAddress></netBlock></netBlocks></net>
 <net><handle>TEST-UNKNOWN-NET</handle><parentNetHandle>TEST-CLOUD-NET</parentNetHandle><orgHandle>TEST-UNKNOWN-CHILD</orgHandle><netBlocks><netBlock><type>S</type><cidrLength>27</cidrLength><startAddress>192.0.2.32</startAddress><endAddress>192.0.2.63</endAddress></netBlock></netBlocks></net>
 <net><handle>TEST-ACCESS-NET</handle><parentNetHandle>TEST-CLOUD-NET</parentNetHandle><orgHandle>TEST-ACCESS-CHILD</orgHandle><netBlocks><netBlock><type>S</type><cidrLength>27</cidrLength><startAddress>192.0.2.64</startAddress><endAddress>192.0.2.95</endAddress></netBlock></netBlocks></net>
-<net><handle>TEST-NEAR-NET</handle><parentNetHandle>TEST-CLOUD-NET</parentNetHandle><orgHandle>TEST-NEAR-NAME</orgHandle><netBlocks><netBlock><type>S</type><cidrLength>27</cidrLength><startAddress>192.0.2.96</startAddress><endAddress>192.0.2.127</endAddress></netBlock></netBlocks></net>
+<net><handle>TEST-NEAR-NET</handle><orgHandle>TEST-NEAR-NAME</orgHandle><netBlocks><netBlock><type>S</type><cidrLength>27</cidrLength><startAddress>192.0.2.96</startAddress><endAddress>192.0.2.127</endAddress></netBlock></netBlocks></net>
 </bulkwhois>`))
 	geo := writeTestInput(t, filepath.Join(directory, "geolite2.mmdb"), testGeoDatabase(t))
 	const accessRules = `version: 1

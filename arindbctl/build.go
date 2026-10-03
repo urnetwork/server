@@ -309,12 +309,13 @@ func loadClassificationRules(path string) (classificationRules, error) {
 // The matched rule and organization remain auditable even when the direct
 // allocation owner inherits its classification from a reviewed parent.
 type arinClassification struct {
-	qualityState string
-	nonQuality   bool
-	reason       string
-	ruleName     string
-	source       string
-	orgHandle    string
+	qualityState  string
+	nonQuality    bool
+	reason        string
+	ruleName      string
+	source        string
+	orgHandle     string
+	networkHandle string
 }
 
 // Organizations arrive parent-first. A reviewed child and then a narrower
@@ -581,7 +582,19 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 	if err := rules.validateCountryEvidenceOwners(allocationGroups); err != nil {
 		return err
 	}
-	networkParents = nil
+	// Retain exact network ancestry for the Quality-only hosting fallback.
+	// Selection of the direct owner, countries and independent risk is unchanged.
+	networkAllocations := map[string][]arinAllocation{}
+	for _, parent := range networkParents {
+		if parent != "" {
+			networkAllocations[parent] = nil
+		}
+	}
+	for _, allocation := range allocations {
+		if _, isParent := networkAllocations[allocation.network]; isParent {
+			networkAllocations[allocation.network] = append(networkAllocations[allocation.network], allocation)
+		}
+	}
 	writer, err := mmdbwriter.New(mmdbwriter.Options{BuildEpoch: buildTime.Unix(), DatabaseType: "urnetwork arindb", IncludeReservedNetworks: true, RecordSize: 32, Description: map[string]string{"en": "ARIN registration and GeoLite2 classification exceptions"}})
 	if err != nil {
 		return err
@@ -616,6 +629,7 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 			countries         []string
 			registrationScope string
 			registeredCountry string
+			qualityParent     arinAllocationQualityParent
 		}
 		owners := make([]ownerEvidence, 0, len(group.owners))
 		for _, allocation := range group.owners {
@@ -648,6 +662,10 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 			}
 			slices.Reverse(owner.countries)
 			slices.Reverse(owner.ancestors)
+			owner.qualityParent, err = rules.allocationQualityParent(allocation, owner.ancestors, organizations, networkParents, networkAllocations)
+			if err != nil {
+				return err
+			}
 			owners = append(owners, owner)
 		}
 		firstOwner := owners[0]
@@ -709,13 +727,13 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 				}
 				riskEvidence := rules.networkRiskEvidence(riskAncestors, prefix.Addr())
 				risk := geographicRisk || len(riskEvidence) != 0
-				classification := rules.classify(firstOwner.ancestors, prefix.Addr())
+				classification := rules.classifyAllocation(firstOwner.ancestors, firstOwner.qualityParent, prefix.Addr())
 				commonClassification := true
 				qualityAmbiguous := classification.qualityState == "ambiguous"
 				ownerRecords := mmdbtype.Slice{}
 				sources := []string{}
 				for _, owner := range owners {
-					ownerClassification := rules.classify(owner.ancestors, prefix.Addr())
+					ownerClassification := rules.classifyAllocation(owner.ancestors, owner.qualityParent, prefix.Addr())
 					if ownerClassification != classification {
 						commonClassification = false
 					}
@@ -736,8 +754,9 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 							"registered_country": mmdbtype.String(owner.registeredCountry), "org_country_codes": ownerCountries,
 							"non_quality": mmdbtype.Bool(ownerClassification.nonQuality), "classification_rule": mmdbtype.String(ownerClassification.ruleName),
 							"classification_source": mmdbtype.String(ownerClassification.source), "reason": mmdbtype.String(ownerClassification.reason),
-							"classification_org_handle": mmdbtype.String(ownerClassification.orgHandle),
-							"quality_state":             mmdbtype.String(ownerClassification.qualityState),
+							"classification_org_handle":     mmdbtype.String(ownerClassification.orgHandle),
+							"classification_network_handle": mmdbtype.String(ownerClassification.networkHandle),
+							"quality_state":                 mmdbtype.String(ownerClassification.qualityState),
 						})
 					}
 				}
@@ -758,12 +777,13 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 				data := mmdbtype.Map{
 					"org_country_codes": countries, "risk": mmdbtype.Bool(risk),
 					"non_quality": mmdbtype.Bool(classification.nonQuality), "classifier_version": mmdbtype.Uint32(rules.Version),
-					"org_handle": mmdbtype.String(orgHandle), "registered_country": mmdbtype.String(registeredCountry),
+					"org_handle": mmdbtype.String(orgHandle), "net_handle": mmdbtype.String(netHandle), "registered_country": mmdbtype.String(registeredCountry),
 					"associated_country": mmdbtype.String(info.CountryCode), "registration_scope": mmdbtype.String(registrationScope),
 					"net_block_type": mmdbtype.String(blockType), "reason": mmdbtype.String(classification.reason),
 					"classification_rule": mmdbtype.String(classification.ruleName), "classification_source": mmdbtype.String(classification.source),
-					"classification_org_handle":    mmdbtype.String(classification.orgHandle),
-					"multiple_registration_owners": mmdbtype.Bool(len(owners) > 1), "country_ambiguous": mmdbtype.Bool(countryAmbiguous),
+					"classification_org_handle":     mmdbtype.String(classification.orgHandle),
+					"classification_network_handle": mmdbtype.String(classification.networkHandle),
+					"multiple_registration_owners":  mmdbtype.Bool(len(owners) > 1), "country_ambiguous": mmdbtype.Bool(countryAmbiguous),
 					"non_quality_ambiguous": mmdbtype.Bool(qualityAmbiguous),
 				}
 				if rules.QualityPolicyVersion == 2 {
@@ -780,7 +800,6 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 				countryEvidence.addRecordFields(data)
 				if countryEvidence.state != "" {
 					data["registration_mismatch"] = mmdbtype.Bool(registrationMismatch)
-					data["net_handle"] = mmdbtype.String(netHandle)
 					countryEvidencePartitions[countryEvidence.state]++
 				}
 				if len(ownerRecords) > 0 {

@@ -78,6 +78,13 @@ exclusion; legacy policy retains last-rule precedence for reproducible compariso
 Each rule must carry its evidence source and reason. The manifest binds the exact
 reviewed rule file; each record retains the direct owner plus the matched rule,
 evidence source, reason, and inherited classification owner when applicable.
+An independently registered network child can also retain negative Quality
+evidence through a containing authoritative ARIN `parentNetHandle` chain.
+Missing/referral/noncontaining links stop that fallback. Reviewed access stops
+the chain without approving its unreviewed child; country and independent
+network risk keep their original authority. Records always retain the direct
+`net_handle` and add `classification_network_handle` for this fallback. These
+additive fields require a new resource build and shadow review before cutover.
 
 ARIN bulk data is not authoritative for other RIRs' customer registrations.
 The builder retains `netBlock.type` and distinguishes direct ARIN records from
