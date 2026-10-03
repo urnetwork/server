@@ -430,6 +430,8 @@ func addContractPayoutTestClients(
 	})
 }
 
+// Provider credit and payer consumption publish together; the raw balance
+// catches up through the public debit worker, exactly once.
 func assertContractPayoutTestBalanceConsumed(
 	t testing.TB,
 	ctx context.Context,
@@ -439,34 +441,19 @@ func assertContractPayoutTestBalanceConsumed(
 ) {
 	t.Helper()
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT
-					transfer_balance.balance_byte_count,
-					transfer_escrow.payout_byte_count
-				FROM transfer_balance
-				INNER JOIN transfer_escrow ON
-					transfer_escrow.balance_id = transfer_balance.balance_id
-				WHERE
-					transfer_balance.balance_id = $1 AND
-					transfer_escrow.contract_id = $2
-			`,
-			balanceId,
-			contractId,
-		)
-		server.WithPgResult(result, err, func() {
-			if !result.Next() {
-				t.Fatal("missing settled escrow balance")
-			}
-			var remaining ByteCount
-			var consumed ByteCount
-			server.Raise(result.Scan(&remaining, &consumed))
-			if remaining != 0 || consumed != want {
-				t.Fatalf("settled balance remaining/consumed = %d/%d, want 0/%d", remaining, consumed, want)
-			}
-		})
+		var consumed, queued ByteCount
+		var settled, reserved, applied bool
+		err := conn.QueryRow(ctx, `SELECT escrow.payout_byte_count,escrow.settled,escrow.redis_reserved,
+			debit.debit_byte_count,debit.applied FROM transfer_escrow AS escrow
+			INNER JOIN transfer_debit_journal AS debit USING (contract_id,balance_id)
+			WHERE escrow.balance_id=$1 AND escrow.contract_id=$2`, balanceId, contractId).
+			Scan(&consumed, &settled, &reserved, &queued, &applied)
+		if err != nil || !settled || !reserved || applied || consumed != want || queued != want {
+			t.Fatalf("settled contract did not retain exact pending debit: payout=%d queued=%d settled=%t reserved=%t applied=%t err=%v",
+				consumed, queued, settled, reserved, applied, err)
+		}
 	})
+	assertPayoutDebitTestConsumedAndDrained(t, ctx, balanceId, want)
 }
 
 // This is the deterministic root-cause matrix for contract payouts. A contract

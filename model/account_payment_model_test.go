@@ -1257,10 +1257,12 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		}
 		connect.AssertEqual(t, GetActiveTransferBalanceByteCount(ctx, sourceNetworkId), ByteCount(0))
 		connect.AssertEqual(t, len(GetOpenContractIds(ctx, sourceId, destinationId)), 0)
+		// Settlement first retains consumption in the debit journal and Redis.
+		// This fixture has no task worker: drain through its public paged API
+		// before expecting the generated active flag or reservation to clear.
 		for _, balance := range remainingBalances {
-			connect.AssertEqual(t, Testing_NetEscrowByteCount(ctx, balance.BalanceId), ByteCount(0))
+			assertPayoutDebitTestConsumedAndDrained(t, ctx, balance.BalanceId, balance.StartBalanceByteCount)
 		}
-		// Successful settlement, not fixture arithmetic, exhausted the balance.
 
 		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
 		connect.AssertEqual(t, transferBalances, []*TransferBalance{})
