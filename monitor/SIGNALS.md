@@ -2106,6 +2106,33 @@ container-stream match does not independently attest a PID/image or attribute
 database CPU. Preserve the accounting rejection and progress as separate facts;
 do not fund, bypass, or quarantine from log counts alone.
 
+On 2026-10-03 a bounded Connect Loki read retained 64 matching records from
+four container streams on one host: all reached `txWithPool`'s commit-error
+raise through `ConnectNetworkClientWithIpFamily`, all reported a closed
+connection, and 53 also matched the statement-cache deallocation wrapper.
+This identifies a failed commit path, not its initiating query or a committed
+or rolled-back connection row. The capped slice is a lower bound; missing
+hosts, generations, SQLSTATEs and source identities remain unknown. The
+recurrence predates release 5500, so timing alone does not establish a rollout
+regression. Retain the generic aggregate and owner PAGEs without adding their
+overlapping counts or replaying an ambiguous commit.
+
+The owning client-admission control reproduced that exact wrapper by canceling
+the full Connect model call while its shard-registry read waited on a real row
+lock. Returning the read error normally made the void transaction callback
+appear successful and reach COMMIT. Query, decode and iteration failures now
+unwind that transaction with their original error; an intentional retired-shard
+refusal still returns normally. The same helper fences client creation and
+refresh. Real PostgreSQL controls cover cancellation, original SQLSTATE,
+rollback of earlier writes after decode failure, ordinary/live admission and
+draining/expired refusal. This establishes an error-masking defect, not that
+every production closed connection was caused by cancellation or shard-lock
+contention. Verify the emitting artifact and require ten fresh minutes below
+the unchanged panic threshold after convergence, while separately checking
+admission success and financial lock pressure. Missing tail coverage or a
+changed error owner is not recovery, and healthy local controls do not prove
+production availability.
+
 The 2026-09-23 Main Taskworker sample also exposed a versioned-root
 attribution false positive: `server/v2026.HandleError` was counted as the
 owner because wrapper recognition handled only `server.HandleError`. The
