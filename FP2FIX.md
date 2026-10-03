@@ -5885,3 +5885,38 @@ watcher is continuously active with its 15-minute cadence. Root appended
 ledger T0506 under its 505-record prior-tail guard; the resulting canonical
 tail is `fcd8c5a48ae24755a0be5de29bf8685075b04280f49fa2b6bcae3ad9f7666c7d`.
 FP2FIX is not complete and Main performance is not resolved.
+
+
+### 2026-10-03 05:12 UTC settlement test and migration compatibility boundary
+
+The author's actual public settlement contention control now has a red/green
+pair: 64 independent clients/contracts sharing a grant all timed out on the
+baseline while three shared financial rows were independently held; all 64
+completed on the candidate. The candidate package took 3.502 seconds including
+fixture setup. This is an author result on mutable source, not an independent
+release gate or a Main rollout. Partitioned asynchronous debit writeback,
+interrupted-post recovery, replay, fairness and shard cleanup remain under test.
+
+The standard migration sequence for proposed journal migration 758 also runs
+source migrations 756 and 757. Migration 756 changes account_payment and adds
+payment guards that may reject older unproven payout edits; migration 757 adds
+an immutable earning boundary. Their deployment compatibility and the current
+Connect08d module graph require explicit qualification; earlier Connect638
+financial gates do not establish it. No new migration has been applied here.
+
+The fresh 04:43 runtime witness qualified 39 of 68 slots, with no positively
+identified incompatible current process. Most failures collapse missing,
+stale, unjoined or ambiguous evidence into strict nulls; one Proxy process had
+qualified release identity but was not ready. All 20 Connect slots qualified,
+but no complete Taskworker reference set or predecessor-retirement proof was
+available. The reduced qualification count alone is not a downgrade diagnosis.
+Direct current and draining namespace inventory remains necessary.
+
+The 04:52:24 automatic census reported 109,606 of 111,471 eligible providers at
+quota (98.33 percent), still subject to historical measurement truth and hourly
+owner coverage limits. The 05:03:17 PostgreSQL CPU sample was 25.60 percent;
+preceding query samples still contain escrow and settlement tuple queues.
+Root appended T0507 under the 506-record guard, producing canonical tail
+`4463ed11146fd3a3226333515c0deb3f47132a69dc7e933eb891e84908b02c77`.
+The standing watcher and both independent fixture endpoints remain active;
+no restart, reset, classifier activation or completion is claimed.
