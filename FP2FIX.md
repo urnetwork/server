@@ -5920,3 +5920,58 @@ Root appended T0507 under the 506-record guard, producing canonical tail
 `4463ed11146fd3a3226333515c0deb3f47132a69dc7e933eb891e84908b02c77`.
 The standing watcher and both independent fixture endpoints remain active;
 no restart, reset, classifier activation or completion is claimed.
+
+
+### 2026-10-03 06:24 UTC asynchronous accounting migration and rollout
+
+The asynchronous accounting correction is committed as `c56f9557`, merged and
+pushed in Main `0015fbdc`. Current Redis-admitted settlement writes exact debt
+journal entries without updating or locking the shared transfer balance in the
+settlement transaction. Sixteen bounded background partitions apply the debit
+and release Redis debt after commit; pending debt fences grant and shard cleanup.
+Legacy unmarked contracts retain their compatibility path and remain a separate
+contention boundary.
+
+Independent focused race gates passed for all twelve asynchronous debit roots,
+three local-controller authority roots and five migration/monitor roots. They
+cover replay, rollback, interrupted Redis posting and acknowledgement, cleanup
+fencing, fairness and distinct-payer capacity. The author's public 512-client,
+two-process held-row settlement and sixteen-partition flush controls also passed.
+These focused results do not establish a complete current Model-suite pass.
+
+Main's native migration command completed once with exit zero at
+06:17:52 UTC, advancing schema 755 to 758 through canonical migrations 756,
+757 and 758. Read-only postflight verified exact migration identities, table,
+index and guard definitions, the enabled Redis admission policy, and an empty
+provider-payout boundary. The owned primary tunnel closed. The primary-local
+backup completion was within 24 hours; it does not attest ciphertext integrity,
+destination-copy completion, decryption or restore. The Main migration receipt
+is `/home/by/urnetwork/temp/main758-native-primary-20261003-root-activation-v1/run-20261003T061740.770997Z/receipt.json`,
+SHA-256 `29370a6f4f03bbf1a8a72eff66685811206955d310b77ec1a5f51cda1f4bd824`.
+
+Both architectures of API, Connect, Taskworker and Proxy were built, pushed and
+verified from c56 with published Connect `08d48400`, SDK `95ccd57d` and SCTP
+`6443417d`. All four all-block selection commands completed with exit zero for
+`2026.10.3-async-transfer-debit+1060875500`: Proxy at 06:18:31, Taskworker at
+06:20:21, API at 06:21:02 and Connect at 06:23:56 UTC. Selection success is not
+proof that all current and draining processes converged. Fresh 68-slot runtime
+identity and post-rollout accounting/probe performance observations remain due.
+
+The pre-rollout automatic 06:07:32 UTC query sample still showed settlement
+balance locks peaking at 66 sampled backends with a 21.643-second maximum query,
+and escrow access peaking at 56 with a 13.794-second maximum. Occurrences are
+not distinct clients or CPU attribution; observation coverage remains partial.
+The older authoritative watcher continues at the 15-minute cadence while its
+schema-758 successor is prepared for a controlled handoff.
+
+A real H1/exchange/full-resident churn control and signal guidance are committed
+as `f2420ef6`. All 24 residents released indexed sequences and transport routes
+after joined shutdown, including under race. The specific active control path
+retains at least 480 KiB of named channel slots per resident; this is a population
+cost lower bound, not a Main heap attribution or proof that no leak exists.
+Native PID/start/build/RSS and population attribution remains unfinished.
+
+ARIN policy two remains inactive. Exact 5500 namespace-admission successors
+have independent local gates; final Main resource custody, protected capture,
+full shadow comparison, rebuilt allocation classification and subscriber
+coverage still require production evidence. FP2FIX is not complete.
