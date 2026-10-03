@@ -10932,6 +10932,26 @@ unfinished residence. Completion outcomes are `contract_reply`,
 precedence. A generated signed reply does not prove delivery, provider contact,
 a unique reservation, or an accepted URL trial.
 
+`urnetwork_connect_contract_rejections_total{ingress,cause,companion}` closes
+the early-branch gap in the older contract-failure counter. Its 40 initialized
+cells use `internal|http`, requested companion `true|false`, and the fixed
+causes `inactive_destination`, `provide_mode_unavailable`,
+`provide_secret_unavailable`, `insufficient_balance`,
+`missing_companion_origin`, `client_not_found`, `source_inactive`, `canceled`,
+`deadline`, or `other`. Mode and secret rejections occur before grant
+allocation; a high protocol-reject total alone does not establish exhausted
+probe credit. Secret-unavailable identifies the owning branch, not a proven
+Redis, database or registration cause. No ID or raw error enters these labels.
+
+This counts generated rejection frames, including a frame whose owner became
+canceled before returning. Completion timing gives cancellation precedence,
+so the two families need not sum identically. Neither proves delivery or a
+provider verdict. Require exact current process/source continuity and a paired
+window; absent older collectors are unavailable rather than zero. Actual
+controller regressions distinguish missing mode, missing secret, missing
+companion origin, healthy signed allocation and insufficient credit while
+checking unchanged wire results and reservations.
+
 The actual-PG control holds a balance row, observes its grant-selection waiter
 separately from a second payer-gate waiter, cancels the queued request, and
 checks the unchanged reservation. Healthy signed and insufficient-credit

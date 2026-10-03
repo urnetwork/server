@@ -68,6 +68,20 @@ var contractFailureCounter = prometheus.NewCounterVec(
 	[]string{"cause", "companion"},
 )
 
+// Every generated protocol rejection, including branches before accounting.
+// Canceled owners may still return such a frame; this is not the completed
+// timing counter, a delivered response, or a measured provider outcome.
+var contractRejectionCauses = []string{
+	"inactive_destination", "provide_mode_unavailable", "provide_secret_unavailable",
+	"insufficient_balance", "missing_companion_origin", "client_not_found",
+	"source_inactive", "canceled", "deadline", "other",
+}
+
+var contractRejectionCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_connect_contract_rejections_total",
+	Help: "Generated create-contract protocol rejections by fixed branch/cause, ingress and requested companion mode; not delivery or provider outcomes.",
+}, []string{"ingress", "cause", "companion"})
+
 var missingOriginDetailsCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
@@ -104,10 +118,16 @@ func init() {
 	// API generation that predates the guard and cannot report it at all.
 	for _, companion := range []string{"false", "true"} {
 		contractFailureCounter.WithLabelValues("inactive_destination", companion)
+		for _, ingress := range []string{"internal", "http"} {
+			for _, cause := range contractRejectionCauses {
+				contractRejectionCounter.WithLabelValues(ingress, cause, companion)
+			}
+		}
 	}
 	prometheus.MustRegister(
 		transferByteCounter,
 		contractFailureCounter,
+		contractRejectionCounter,
 		missingOriginDetailsCounter,
 		inactiveDestinationDetailsCounter,
 		controlFrameFailureCounter,
@@ -190,6 +210,19 @@ func contractFailureClass(err error) string {
 		return "client_not_found"
 	default:
 		return "other"
+	}
+}
+
+func contractRejectionFailureClass(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline"
+	case errors.Is(err, model.ErrActiveClientNotFound):
+		return "source_inactive"
+	default:
+		return contractFailureClass(err)
 	}
 }
 
@@ -635,6 +668,7 @@ func CreateContract(
 	httpIngress, _ := ctx.Value(controlHttpIngressKey{}).(bool)
 	ctx, timing := server.BeginContractCreationTiming(ctx, httpIngress)
 	timingResult := server.ContractCreationError
+	rejectionCause := "other"
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			timing.Finish(server.ContractCreationPanic)
@@ -642,6 +676,16 @@ func CreateContract(
 		}
 		if resultErr != nil {
 			timingResult = server.ContractCreationError
+		}
+		if timingResult == server.ContractCreationRejected {
+			ingress, companion := "internal", "false"
+			if httpIngress {
+				ingress = "http"
+			}
+			if createContract.Companion {
+				companion = "true"
+			}
+			contractRejectionCounter.WithLabelValues(ingress, rejectionCause, companion).Inc()
 		}
 		timing.Finish(timingResult)
 	}()
@@ -675,6 +719,7 @@ func CreateContract(
 	// and make the reason explicit on the wire so the requesting multi-client
 	// retires this exact route instead of retrying it for the full timeout.
 	if !contractDestinationActive(relationshipDetails.DestinationLifecycle) {
+		rejectionCause = "inactive_destination"
 		resolution.path = contractResolutionRejected
 		recordContractFailureResolved(
 			clientId,
@@ -717,6 +762,7 @@ func CreateContract(
 		var allowed bool
 		provideMode, companion, allowed = resolveNonCompanionProvideMode(provideRelationship, provideModes)
 		if !allowed {
+			rejectionCause = "provide_mode_unavailable"
 			resolution.path = contractResolutionRejected
 			glog.V(2).Infof("[contract][reject]%s->%s no-permission (companion=%t relationship=%d)\n", clientId, destinationId, createContract.Companion, provideRelationship)
 			contractError := protocol.ContractError_NoPermission
@@ -741,6 +787,7 @@ func CreateContract(
 	provideSecretKey, err := model.GetProvideSecretKey(ctx, destinationId, provideMode)
 	leaveSecret()
 	if err != nil {
+		rejectionCause = "provide_secret_unavailable"
 		// A companion request in symmetric mode lands here: provideMode=Stream(4)
 		// has no secret key because the destination never provided Stream.
 		glog.V(2).Infof("[contract][reject]%s->%s no-secret-key (companion=%t provideMode=%d err=%v)\n", clientId, destinationId, createContract.Companion, provideMode, err)
@@ -798,6 +845,7 @@ func CreateContract(
 		// multi-client can replace the stale route. An inactive local source is
 		// NoPermission without condemning that route; legacy/account failures
 		// keep their previous InsufficientBalance result.
+		rejectionCause = contractRejectionFailureClass(err)
 		recordContractFailureResolved(
 			clientId,
 			destinationId,

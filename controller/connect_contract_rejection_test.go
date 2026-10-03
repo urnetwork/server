@@ -1,0 +1,173 @@
+package controller
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/connect/protocol"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
+)
+
+func TestContractRejectionCauseSchemaAndErrorClasses(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		want string
+	}{
+		{err: context.Canceled, want: "canceled"},
+		{err: context.DeadlineExceeded, want: "deadline"},
+		{err: model.ErrActiveClientNotFound, want: "source_inactive"},
+		{err: errors.New("private error text must not become a label"), want: "other"},
+	} {
+		if got := contractRejectionFailureClass(test.err); got != test.want {
+			t.Fatalf("fixed error class = %q, want %q", got, test.want)
+		}
+	}
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() != "urnetwork_connect_contract_rejections_total" {
+			continue
+		}
+		if len(family.Metric) != 40 {
+			t.Fatalf("rejection collector has %d cells, want 40 initialized cells", len(family.Metric))
+		}
+		for _, sample := range family.Metric {
+			if len(sample.Label) != 3 {
+				t.Fatal("rejection collector gained an unreviewed label")
+			}
+		}
+		return
+	}
+	t.Fatal("rejection collector is absent")
+}
+
+func rejectionCount(t testing.TB, ingress, cause, companion string) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() != "urnetwork_connect_contract_rejections_total" {
+			continue
+		}
+		for _, sample := range family.Metric {
+			labels := map[string]string{}
+			for _, label := range sample.Label {
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels["ingress"] == ingress && labels["cause"] == cause && labels["companion"] == companion {
+				return sample.GetCounter().GetValue()
+			}
+		}
+	}
+	// A baseline without this collector must execute the real controller
+	// branch before failing its expected increment below.
+	return 0
+}
+
+// These real controller paths all return a protocol error with nil Go error.
+// Neither missing mode nor missing key reaches financial allocation, so a
+// protocol-reject total cannot stand in for exhausted grant credit.
+func TestCreateContractRejectionCauseIncludesPreAllocationFailures(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		network, peerNetwork, source, destination := server.NewId(), server.NewId(), server.NewId(), server.NewId()
+		for _, n := range []server.Id{network, peerNetwork} {
+			model.Testing_CreateNetwork(ctx, n, "rejection-fixture-"+n.String(), server.NewId())
+		}
+		model.Testing_CreateDevice(ctx, network, server.NewId(), source, "source", "fixture")
+		model.Testing_CreateDevice(ctx, peerNetwork, server.NewId(), destination, "destination", "fixture")
+		server.Raise(model.AddBasicTransferBalance(ctx, network, 4*1024*1024, server.NowUtc(), server.NowUtc().Add(time.Hour)))
+		for _, test := range []struct {
+			cause     string
+			companion bool
+			modes     map[model.ProvideMode][]byte
+			wire      protocol.ContractError
+		}{
+			{cause: "provide_mode_unavailable", modes: map[model.ProvideMode][]byte{}, wire: protocol.ContractError_NoPermission},
+			{cause: "provide_secret_unavailable", companion: true, modes: map[model.ProvideMode][]byte{model.ProvideModePublic: bytes.Repeat([]byte{42}, 32)}, wire: protocol.ContractError_NoPermission},
+			{cause: "missing_companion_origin", companion: true, modes: map[model.ProvideMode][]byte{model.ProvideModeStream: bytes.Repeat([]byte{42}, 32)}, wire: protocol.ContractError_Reliability},
+		} {
+			model.SetProvide(ctx, destination, test.modes)
+			companion := "false"
+			if test.companion {
+				companion = "true"
+			}
+			before := rejectionCount(t, "internal", test.cause, companion)
+			frames, err := CreateContract(ctx, source, &protocol.CreateContract{DestinationId: destination.Bytes(), TransferByteCount: 1024 * 1024, Companion: test.companion}, connect.DefaultContractManagerSettings())
+			if err != nil || len(frames) != 1 {
+				t.Fatalf("%s changed transport outcome: %v", test.cause, err)
+			}
+			message, err := connect.FromFrame(frames[0])
+			returnConnectControlFrames(frames)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := message.(*protocol.CreateContractResult)
+			if result.Contract != nil || result.Error == nil || *result.Error != test.wire {
+				t.Fatalf("%s changed protocol refusal", test.cause)
+			}
+			if got := rejectionCount(t, "internal", test.cause, companion); got != before+1 {
+				t.Fatalf("%s did not count its actual rejection: %v -> %v", test.cause, before, got)
+			}
+			if model.GetOpenTransferByteCount(ctx, network) != 0 {
+				t.Fatal("pre-allocation refusal changed reservations")
+			}
+		}
+	})
+}
+
+// The completed disposition and narrower cause cells preserve an actual
+// healthy signed allocation and a separate insufficient-credit refusal.
+func TestCreateContractRejectionCausePreservesHealthyAccounting(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		network, peerNetwork, source, destination := server.NewId(), server.NewId(), server.NewId(), server.NewId()
+		for _, n := range []server.Id{network, peerNetwork} {
+			model.Testing_CreateNetwork(ctx, n, "rejection-accounting-"+n.String(), server.NewId())
+		}
+		model.Testing_CreateDevice(ctx, network, server.NewId(), source, "source", "fixture")
+		model.Testing_CreateDevice(ctx, peerNetwork, server.NewId(), destination, "destination", "fixture")
+		server.Raise(model.AddBasicTransferBalance(ctx, network, 2*1024*1024, server.NowUtc(), server.NowUtc().Add(time.Hour)))
+		model.SetProvide(ctx, destination, map[model.ProvideMode][]byte{model.ProvideModePublic: bytes.Repeat([]byte{42}, 32)})
+		httpCtx := context.WithValue(ctx, controlHttpIngressKey{}, true)
+		before := rejectionCount(t, "http", "insufficient_balance", "false")
+		for _, amount := range []int{1024 * 1024, 8 * 1024 * 1024} {
+			frames, err := CreateContract(httpCtx, source, &protocol.CreateContract{DestinationId: destination.Bytes(), TransferByteCount: uint64(amount)}, connect.DefaultContractManagerSettings())
+			if err != nil || len(frames) != 1 {
+				t.Fatal("actual contract request failed", err)
+			}
+			message, err := connect.FromFrame(frames[0])
+			returnConnectControlFrames(frames)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := message.(*protocol.CreateContractResult)
+			if amount == 1024*1024 {
+				if result.Contract == nil || result.Error != nil || rejectionCount(t, "http", "insufficient_balance", "false") != before {
+					t.Fatal("healthy reply became a rejection")
+				}
+			} else if result.Contract != nil || result.Error == nil || *result.Error != protocol.ContractError_InsufficientBalance || rejectionCount(t, "http", "insufficient_balance", "false") != before+1 {
+				t.Fatal("insufficient balance lost its distinct wire/cause outcome")
+			}
+		}
+		if model.GetOpenTransferByteCount(ctx, network) != 1024*1024 {
+			t.Fatal("observation changed reservation accounting")
+		}
+	})
+}
