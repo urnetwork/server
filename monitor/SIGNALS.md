@@ -1143,6 +1143,21 @@ WHERE function_name LIKE '%UpdateClient%'
   existing task ceiling so a hard worker loss cannot leave a server-side
   statement unbounded. This is a Taskworker software containment, not a
   replacement for index finalization or a reason to disturb current work.
+- GOTCHA — prove activity visibility before filtering nullable activity fields.
+  PostgreSQL can obscure another role's `state`, `backend_type`, `query_start`
+  and query text. A `WHERE state IN (...) AND backend_type IN (...)` filter
+  discards those rows before a later unknown-text counter can detect them.
+  Require `pg_read_all_stats` privileges usable by the current role, or
+  superuser status, before selecting an activity family. Missing authorization
+  is `cannot-observe`; do not grant permissions as part of a diagnostic.
+  The 2026-10-03 22:40 phase receipt `ef5e22db` returned no reliability-family
+  rows without this authorization proof. It cannot clear the preceding
+  111-minute family sample or establish CPU ownership. A corrected reader
+  rejects restricted-role NULL-obscured input before selection, including an
+  otherwise schema-valid zero result. Fully authorized empty results remain
+  limited to their instant and bounded backend head. Truncated SQL yields
+  candidate prefixes, not an exact statement identity; parallel rows are not
+  unique requests, and idle-in-transaction query age is not active runtime.
 
 ### 1.3 pg idle-in-transaction count — the redis-latency mirror
 Probe: `pg-state`
