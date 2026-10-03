@@ -5713,3 +5713,48 @@ adds only the separate policy-two resource. Four-host selected-resource join:
 This is file custody and mounted selection, not loaded-reader, full Main shadow,
 verified subscriber coverage or classifier activation. ARIN policy two remains
 inactive until those requirements are met.
+
+
+### 2026-10-03 03:12 UTC local admission and live rollout verification
+
+An actual local-route refusal regression reproduced a provider-contact
+classification defect: registration and durable contract creation succeeded,
+but the local route rejected the write; no control API or DNS endpoint was
+contacted, yet the URL result counted as a measured DNS failure. The candidate
+changes that result to an unmeasured local-transport-admission failure, while
+the healthy real provider DNS/TLS/accounting control still succeeds without
+API use. The paired race run passed in 14.196 seconds. Further owner and
+precedence controls, independent review and production rollout remain open.
+No ping or transfer acknowledgement was restored. Until this correction is
+verified in Main, collection throughput and rolling coverage are provenance
+of the deployed classification, not assured provider-contact measurements.
+
+The automatic 03:06:03 UTC census recorded 64,362 of 112,989 eligible providers
+at the rolling quota (56.96 percent), with 64,346 secure and quota-complete.
+The accounting defect above prevents using these numbers to close coverage.
+The latest PostgreSQL CPU sample is 28.97 percent. The recurring query sample
+ending 03:02:52 still has escrow and settlement tuple queues; maximum observed
+ages were 7.464 and 1.619 seconds respectively. Lower CPU does not establish
+that lock contention or Main performance is resolved.
+
+The fresh 68-slot runtime collection completed, but its strict reducer
+qualified 47 slots: all 20 API slots, all eight Taskworker slots and 19 Connect
+slots. One Connect slot has unavailable identity evidence. All 20 Proxy slots
+have fresh source, version, process start and ready state; their producer
+reports the OCI index digest while this reducer expects architecture-specific
+configuration digests. That mismatch requires a reviewed identity-semantics
+correction, not a claim that those Proxy processes are old or fully verified.
+Runtime receipt: `d311fe455bc8612a1f5cc0bd930e287064271e96dfca033ac44feb72e15f3d19`.
+
+Finite contract-rejection diagnostics are merged and pushed as `ce8e7aec`.
+Independent six-root controller race tests and vet passed; the fixed cause
+labels distinguish early mode/secret refusals from credit and lifecycle
+failures without changing protocol or accounting. These diagnostics are not
+yet deployed. The remaining 384-root Model race partition is running on a new
+independent local fixture; it has no terminal result yet.
+
+The policy-two capture Config image build exited zero at 03:06:13 UTC.
+Selection, credential installation, full Main shadow comparison, subscriber
+coverage validation and classifier activation remain incomplete. Policy two
+remains inactive. Monitor ledger T0504 was appended with its prior-tail guard;
+continuous URL and PostgreSQL monitoring retains the 15-minute cadence.
