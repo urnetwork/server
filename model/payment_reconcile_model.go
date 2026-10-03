@@ -55,6 +55,15 @@ const (
 	// stripeHandleInvoicePaid resolved the network by the LEGACY customer
 	// email fallback (S11) -- every use is surfaced until it can be retired
 	PaymentReconcileActionEmailFallback = "email_fallback"
+	// X402Purchase settled the payment (the money moved) and the grant failed
+	// (S9). Evidence is the settle transaction; details carry what was bought.
+	// The reconciler retries the idempotent grant until a resolving event
+	// (credited, already_credited or credit_unfulfillable) with the same
+	// evidence exists.
+	PaymentReconcileActionSettledNotGranted = "settled_not_granted"
+	// the reconciler found a settled_not_granted transaction already granted
+	// (an agent retry got there first): resolved without a new credit
+	PaymentReconcileActionAlreadyCredited = "already_credited"
 )
 
 // PaymentReconcileStoreAll is the store label for run-level rows (heartbeat).
@@ -171,6 +180,75 @@ func GetPaymentReconciliationEventsByAction(
 				event := &PaymentReconciliationEvent{
 					Store:  store,
 					Action: action,
+				}
+				var detailsJson *string
+				server.Raise(result.Scan(
+					&event.EventId,
+					&event.RunId,
+					&event.NetworkId,
+					&event.Evidence,
+					&detailsJson,
+					&event.EventTime,
+				))
+				if detailsJson != nil {
+					json.Unmarshal([]byte(*detailsJson), &event.Details)
+				}
+				events = append(events, event)
+			}
+		})
+	})
+	return events
+}
+
+// GetUnresolvedSettledNotGrantedEvents reads the store's settled_not_granted
+// events that no real (non-dry-run) credited, already_credited or
+// credit_unfulfillable event with the same evidence resolves yet, one per
+// evidence (its first record), oldest first, bounded by limit. Events without
+// evidence (no settle transaction to key a retry on) are left to the operator.
+func GetUnresolvedSettledNotGrantedEvents(
+	ctx context.Context,
+	store string,
+	limit int,
+) []*PaymentReconciliationEvent {
+	events := []*PaymentReconciliationEvent{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT event_id, run_id, network_id, evidence, details, event_time
+			FROM (
+				SELECT DISTINCT ON (e.evidence)
+					e.event_id, e.run_id, e.network_id, e.evidence, e.details, e.event_time
+				FROM payment_reconciliation_event e
+				WHERE e.store = $1
+				  AND e.action = $2
+				  AND e.evidence IS NOT NULL
+				  AND NOT e.dry_run
+				  AND NOT EXISTS (
+					SELECT 1
+					FROM payment_reconciliation_event r
+					WHERE r.store = e.store
+					  AND r.evidence = e.evidence
+					  AND r.action IN ($3, $4, $5)
+					  AND NOT r.dry_run
+				  )
+				ORDER BY e.evidence, e.event_time ASC, e.event_id ASC
+			) unresolved
+			ORDER BY event_time ASC, event_id ASC
+			LIMIT $6
+			`,
+			store,
+			PaymentReconcileActionSettledNotGranted,
+			PaymentReconcileActionCredited,
+			PaymentReconcileActionAlreadyCredited,
+			PaymentReconcileActionCreditUnfulfillable,
+			limit,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				event := &PaymentReconciliationEvent{
+					Store:  store,
+					Action: PaymentReconcileActionSettledNotGranted,
 				}
 				var detailsJson *string
 				server.Raise(result.Scan(
