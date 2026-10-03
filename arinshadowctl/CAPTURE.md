@@ -165,9 +165,17 @@ user-authorized explicit identity/host-key policy and exact enabled IPv4 host
 from the sealed plan. The pool permits at most **two simultaneous bridge
 processes total**, joins idle transports before replacement, and never retries
 a failed host. It caps total starts at512. All RPCs have a5-second cap,64KiB
-request/256KiB response caps and replay limits. Root must reserve the Main lane
-so no other diagnostic SSH, including archive transfer, overlaps those two sessions; existing watcher
-admission/fingerprint and four-fence requirements still apply.
+request/256KiB response caps and replay limits. Count **all** concurrent
+diagnostic sessions against the currently attested watcher policy; the bridge
+pool is not a separate allowance. For Main's approved global-four/per-host-two
+capture lane, an archive session and database tunnel occupy edge2's two slots,
+while at most two bridges use distinct enabled service hosts. The service
+matrix is edge0/edge1/edge3/edge4, with Connect beta/g1/g2/g3/g4 and Taskworker
+g1/g2 on each host. Edge2 is not a capture service host; edge5 stays excluded.
+Root must reserve the quiet lane and count any other watcher, transfer or
+diagnostic session before admission. Existing actual watcher fingerprints,
+inventory authority and four-fence requirements still apply. This accounting
+does not establish a direct Main PostgreSQL route or authorize a new contact.
 
 Run the coordinator under the reviewed Main database/Vault authority and the
 sealed not-before/not-after window:
@@ -222,11 +230,24 @@ prefix rule still needs affirmative residential/business subscriber evidence,
 proxy/virtual exclusion checks, rebuild/readback and another complete shadow.
 Attribution truncation never changes the provider/native denominators.
 
-Local capacity proof covers100001 real PG providers/105001 connections,
-20 real Unix endpoints behind8 real child multiplexers, strict2-session pool,
-150ms setup+20ms RPC+10ms PG-read injected delay, and healthy native rollover. Resource opening/inventory setup was outside that
-measured cohort interval. All end markers passed in66.160s under the race detector. This establishes a
-local budget control, not Main latency or fleet coverage. The operator reports
+The supported Main capacity control covers100001 real PG providers/105001
+connections,20 real Connect Unix endpoints behind4 real child multiplexers,
+and the selected native publisher, with a strict2-bridge pool. It injects150ms
+process setup,20ms RPC and10ms PG-read delay and exercises healthy native
+publication rollover. On frozen25897, all end markers passed in60.934s under
+the race detector, with90 starts and peak2 bridges. The exact owning test is
+`TestArinRemoteFullPopulationTwoHostPipesRolloverAndLatency`; its helper uses
+four hosts (the name's two refers to concurrent pipes). Resource opening and
+inventory of all8 Taskworkers occur before the separately measured cohort
+interval and remain subject to their own setup deadline.
+
+The earlier8-host author run completed in66.160s, but the independent8-host
+rerun took87.610s and **failed** its85-second headroom assertion. That result
+supersedes any general8-host capacity claim. The90-second cohort lease is
+unchanged. An expanded host/owner population needs another supported capacity
+gate; neither complete local rows nor the finite512-start cap proves adequate
+headroom. The current4-host result is a local control, not Main latency or
+fleet coverage. The operator reports
 setup and capture durations separately. Measured hashing/opening of two
 334,604,722-byte resources took1.609s and339,792 Go heap allocation bytes;
 setup is not allowed to consume the cohort's90-second lease. Mappings may
