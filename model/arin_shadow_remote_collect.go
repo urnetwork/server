@@ -78,14 +78,10 @@ func CollectArinShadowRemotePublic(ctx context.Context, recorder *server.ArinSha
 			client := fleet.Handlers[row.HandlerId]
 			groups[client] = append(groups[client], row.ConnectionId)
 		}
-		type job struct {
-			client *server.ArinShadowRPCClient
-			ids    []server.Id
-		}
-		jobs := []job{}
+		jobs := []arinShadowCaptureJob{}
 		for client, ids := range groups {
 			for start := 0; start < len(ids); start += server.ArinShadowCaptureBatchLimit {
-				jobs = append(jobs, job{client, ids[start:min(start+server.ArinShadowCaptureBatchLimit, len(ids))]})
+				jobs = append(jobs, arinShadowCaptureJob{client, ids[start:min(start+server.ArinShadowCaptureBatchLimit, len(ids))]})
 			}
 		}
 		if len(jobs) > 256 {
@@ -93,7 +89,7 @@ func CollectArinShadowRemotePublic(ctx context.Context, recorder *server.ArinSha
 		}
 		// Keep all batches for one host adjacent. The operator's two-slot
 		// SSH pool multiplexes its processes and evicts only idle transports.
-		slices.SortStableFunc(jobs, func(a, b job) int {
+		slices.SortStableFunc(jobs, func(a, b arinShadowCaptureJob) int {
 			if a.client == nil {
 				if b.client == nil {
 					return 0
@@ -106,33 +102,18 @@ func CollectArinShadowRemotePublic(ctx context.Context, recorder *server.ArinSha
 			return cmp.Compare(a.client.Identity().Host, b.client.Identity().Host)
 		})
 		batches := make([]server.ArinShadowCapturedBatch, len(jobs))
-		// Four finite, joined workers; a process-local client serializes its
-		// own requests without holding a database connection from its pool.
-		work := make(chan int)
-		var wg sync.WaitGroup
-		for range min(4, len(jobs)) {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				for i := range work {
-					job := jobs[i]
-					var err error
-					if job.client != nil {
-						batches[i], err = recorder.CallCapture(boundedLease, job.client, job.ids)
-					} else {
-						err = server.ErrArinShadowInput
-					}
-					if err != nil {
-						batches[i], _ = recorder.UnavailableCaptureBatch(job.ids)
-					}
-				}
-			}()
-		}
-		for i := range jobs {
-			work <- i
-		}
-		close(work)
-		wg.Wait()
+		runArinShadowCaptureJobs(jobs, func(i int) {
+			job := jobs[i]
+			var err error
+			if job.client != nil {
+				batches[i], err = recorder.CallCapture(boundedLease, job.client, job.ids)
+			} else {
+				err = server.ErrArinShadowInput
+			}
+			if err != nil {
+				batches[i], _ = recorder.UnavailableCaptureBatch(job.ids)
+			}
+		})
 		if boundedLease.Err() != nil {
 			return server.ErrArinShadowInput
 		}
@@ -201,4 +182,46 @@ func CollectArinShadowRemotePublic(ctx context.Context, recorder *server.ArinSha
 		return report, server.ErrArinShadowInput
 	}
 	return report, nil
+}
+
+type arinShadowCaptureJob struct {
+	client *server.ArinShadowRPCClient
+	ids    []server.Id
+}
+
+// A host's multiplexed transport serves one request at a time. Schedule one
+// worker per host, in pairs, rather than occupying all workers with requests
+// waiting behind the first host. This keeps both existing transport permits
+// usable without adding sessions, growing the prefetch or extending the lease.
+// The caller supplies jobs sorted by host and joins every pair before moving on.
+func runArinShadowCaptureJobs(jobs []arinShadowCaptureJob, call func(int)) {
+	type span struct{ start, end int }
+	groups := []span{}
+	host := func(job arinShadowCaptureJob) string {
+		if job.client == nil {
+			return ""
+		}
+		return job.client.Identity().Host
+	}
+	for i := 0; i < len(jobs); {
+		end := i + 1
+		for end < len(jobs) && host(jobs[end]) == host(jobs[i]) {
+			end++
+		}
+		groups = append(groups, span{i, end})
+		i = end
+	}
+	for next := 0; next < len(groups); next += 2 {
+		var wg sync.WaitGroup
+		for _, group := range groups[next:min(next+2, len(groups))] {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := group.start; i < group.end; i++ {
+					call(i)
+				}
+			}()
+		}
+		wg.Wait()
+	}
 }
