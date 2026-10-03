@@ -255,3 +255,106 @@ func TestSolanaMarkCompletedConcurrent(t *testing.T) {
 		connect.AssertEqual(t, wins, 1)
 	})
 }
+
+// solanaTestSuffixes returns a picker that proposes the suffixes in order,
+// repeating the last one.
+func solanaTestSuffixes(suffixMicros ...int64) func() int64 {
+	i := 0
+	return func() int64 {
+		suffixMicro := suffixMicros[min(i, len(suffixMicros)-1)]
+		i += 1
+		return suffixMicro
+	}
+}
+
+// TestSolanaUniqueAmountReservation pins that no two intents are quoted the
+// same amount while either could still be paid, so an amount identifies at
+// most one intent.
+func TestSolanaUniqueAmountReservation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkIdA := server.NewId()
+		networkIdB := server.NewId()
+		expiresAt := server.NowUtc().Add(time.Hour)
+
+		amountUsd, err := CreateSolanaPaymentIntentWithUniqueAmount(ctx, "unique-a", networkIdA, 40, SolanaPlanYearly, expiresAt, solanaTestSuffixes(7))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, amountUsd, 40.000007)
+		intent := GetSolanaPaymentIntent(ctx, "unique-a")
+		connect.AssertEqual(t, intent.ExpectedAmountUsd, 40.000007)
+
+		// the same suffix is taken: the next free one is used
+		amountUsd, err = CreateSolanaPaymentIntentWithUniqueAmount(ctx, "unique-b", networkIdB, 40, SolanaPlanYearly, expiresAt, solanaTestSuffixes(7, 7, 8))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, amountUsd, 40.000008)
+
+		// the same suffix on another price is another amount
+		amountUsd, err = CreateSolanaPaymentIntentWithUniqueAmount(ctx, "unique-c", networkIdB, 5, SolanaPlanMonthly, expiresAt, solanaTestSuffixes(7))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, amountUsd, 5.000007)
+
+		// no free suffix: the plain price, matchable by reference only
+		amountUsd, err = CreateSolanaPaymentIntentWithUniqueAmount(ctx, "unique-d", networkIdB, 40, SolanaPlanYearly, expiresAt, solanaTestSuffixes(7))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, amountUsd, float64(40))
+		intents, err := ListSolanaPaymentIntentsByAmountMicro(ctx, 40_000_000, server.NowUtc().Add(-SolanaUniqueAmountHold))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(intents), 0)
+
+		// a duplicate reference is refused and reserves nothing
+		_, err = CreateSolanaPaymentIntentWithUniqueAmount(ctx, "unique-a", networkIdB, 40, SolanaPlanYearly, expiresAt, solanaTestSuffixes(9))
+		connect.AssertNotEqual(t, err, nil)
+		amountUsd, err = CreateSolanaPaymentIntentWithUniqueAmount(ctx, "unique-e", networkIdB, 40, SolanaPlanYearly, expiresAt, solanaTestSuffixes(9))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, amountUsd, 40.000009)
+
+		intents, err = ListSolanaPaymentIntentsByAmountMicro(ctx, 40_000_007, server.NowUtc().Add(-SolanaUniqueAmountHold))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(intents), 1)
+		connect.AssertEqual(t, intents[0].PaymentReference, "unique-a")
+		connect.AssertEqual(t, intents[0].NetworkId, networkIdA)
+
+		// a consumed intent still holds its amount and is still listed: a second
+		// payment of it is ambiguous, not a credit for someone else
+		completed, err := MarkPaymentIntentCompleted("unique-a", "sig-unique-a", session.Testing_CreateClientSession(ctx, nil))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, completed, true)
+		amountUsd, err = CreateSolanaPaymentIntentWithUniqueAmount(ctx, "unique-f", networkIdB, 40, SolanaPlanYearly, expiresAt, solanaTestSuffixes(7, 10))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, amountUsd, 40.00001)
+		intents, err = ListSolanaPaymentIntentsByAmountMicro(ctx, 40_000_007, server.NowUtc().Add(-SolanaUniqueAmountHold))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(intents), 1)
+		connect.AssertNotEqual(t, intents[0].TxSignature, nil)
+	})
+}
+
+// TestSolanaUniqueAmountReusedOnlyAfterTheHold: an amount is quoted again only
+// once its previous intent expired more than SolanaUniqueAmountHold ago, and
+// the lookup for a payment then sees only the new intent.
+func TestSolanaUniqueAmountReusedOnlyAfterTheHold(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+
+		// expired just inside the hold: the amount is still held
+		_, err := CreateSolanaPaymentIntentWithUniqueAmount(ctx, "hold-a", server.NewId(), 5, SolanaPlanMonthly, now.Add(-SolanaUniqueAmountHold+time.Hour), solanaTestSuffixes(42))
+		connect.AssertEqual(t, err, nil)
+		// expired before the hold: the amount is free again
+		_, err = CreateSolanaPaymentIntentWithUniqueAmount(ctx, "hold-b", server.NewId(), 40, SolanaPlanYearly, now.Add(-SolanaUniqueAmountHold-time.Hour), solanaTestSuffixes(42))
+		connect.AssertEqual(t, err, nil)
+
+		amountUsd, err := CreateSolanaPaymentIntentWithUniqueAmount(ctx, "hold-c", server.NewId(), 5, SolanaPlanMonthly, now.Add(time.Hour), solanaTestSuffixes(42, 43))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, amountUsd, 5.000043)
+
+		amountUsd, err = CreateSolanaPaymentIntentWithUniqueAmount(ctx, "hold-d", server.NewId(), 40, SolanaPlanYearly, now.Add(time.Hour), solanaTestSuffixes(42))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, amountUsd, 40.000042)
+
+		intents, err := ListSolanaPaymentIntentsByAmountMicro(ctx, 40_000_042, now.Add(-SolanaUniqueAmountHold))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(intents), 1)
+		connect.AssertEqual(t, intents[0].PaymentReference, "hold-d")
+	})
+}
