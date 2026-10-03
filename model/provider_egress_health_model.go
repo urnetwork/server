@@ -344,7 +344,7 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 					latest_result_at = GREATEST(latest_result_at, $5),
 					next_attempt_at = CASE WHEN latest_result_at > $5 THEN next_attempt_at
 						WHEN recent.run_count >= $6 AND NOT (`+providerHasUrlSecurityExceptionSql("cycle.client_id")+`) THEN recent.oldest_run_at + ($7 * interval '1 second')
-						ELSE `+providerUrlProbePacedAttemptSql("cycle", "$5", "$3")+` END
+						ELSE `+providerUrlProbePacedAttemptSql("cycle", "$5", "$3", "recent.run_count < $6")+` END
 				FROM recent WHERE cycle.client_id = recent.client_id`,
 				health.ClientId, cycleStartedAt, health.OKCount, health.Total-health.OKCount,
 				health.MeasuredAt.UTC(), ProviderUrlProbeRunTarget, ProviderEgressProbeRefreshAge.Seconds(), health.Total))
