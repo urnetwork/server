@@ -4553,6 +4553,18 @@ contention boundary and its eventual settlement control.
 Probe: `legacy-settlements`
 Classes: `legacy-settlement-pending`, `legacy-settlement-worker-missing`.
 
+Checkpoint replay qualifier (2026-10-03): native `ControlSync` can deliver the
+same incremental checkpoint as a fresh operation after an application commit
+and lost transfer ACK. A real-controller/PostgreSQL control reproduces a final
+destination total above its issued grant while preserving final reports and
+correctly refusing insufficient escrow. Equal-sized independent checkpoints
+are healthy and must not be deduplicated by payload. Migration764 adds optional
+logical-report receipts under the existing contract owner; backend/schema must
+precede hosted SDK emission. ID-less old clients remain compatible and
+ambiguous. This mechanism is not attribution of any retained Main row; missing
+original funding, overreporting and historical deletion remain distinct facts.
+See [the staged repair and controls](../docs/operator/close-report-idempotency-20261003.md).
+
 Migration 763 gives legacy unmarked or mixed escrow contracts an independent
 per-contract settlement intent. Foreground acknowledgement leaves the outcome
 unset and the SQL reservation intact. Sixteen bounded recovery partitions take
@@ -11523,6 +11535,30 @@ or retention can invalidate that comparison. The existing synthetic
 `TestUrlProbeCoverageHighAggregateRateCannotHideStarvedProviders` preserves
 the coverage PAGE even when acknowledged throughput is high.
 
+A single coherent census also bounds pacing: at least
+`max(0, overdue - due)` overdue providers are currently outside the due set.
+The sets overlap, so this is a lower bound, not their exact intersection. Missing
+cycles are due by definition; this bound therefore refers to future
+`next_attempt_at` values. A high accepted measurement rate cannot clear this
+provider-level deficit or prove that replenishment occurs before older runs
+expire. A mature provider still below ten measurements after an accepted
+success uses the existing short retry pace to replenish its deficit. Warmup
+success pacing and quota-full oldest-run expiry remain separate. Accepted
+measured failures count toward the same quota; setup-only completions do not.
+
+Bounded diagnosis must name its indexed raw cohort before applying current
+eligibility or history projections. The admission head filters the stored
+`provider_egress_probe_cycle.eligible` hint; the census reconstructs current
+eligibility without that hint. Current reliability can recover while a false
+hint remains until its owning refresh. Conversely, an unfiltered oldest-cycle
+head can contain only inactive historical providers. Neither head alone
+quantifies all overdue providers, missing cycles, or future-paced work. A
+completed latest claim is evidence for that sampled claim, not proof that all
+workers are live or that every earlier attempt completed. DNS and route errors
+in accepted policy-one history already count toward quota. Preserve unknown
+setup causes, current network-condition mode, worker generation and the
+sampling bias; never infer these from a slot number or a coarse tunnel error.
+
 Missing desired geometry, source coverage, owner identity, coherent census or
 rate window emits `url-probe-coverage-unobservable` WARN, not a healthy zero
 or an inferred numerical throughput failure. An independently valid census
@@ -17284,6 +17320,7 @@ This is the version-to-artifact contract checked by the probe:
 | 749 | Persistent resumable registration binding with exact required columns and digest bounds/checks, immediate identity uniqueness, and only the network-deletion cascade |
 | 750 | Required false-default boolean `network_client_location.arin_quality_verified` |
 | 751 | Nullable no-default UUID subscriber write token plus the exact enabled, unconditional before-insert/update invalidation function and trigger |
+
 | 752 | Private prober shard ownership, unique active slot, and cleanup fences |
 | 753 | Exact net-escrow contract revision point lookup |
 | 754 | Durable per-balance net-escrow reservation snapshot |
@@ -18662,6 +18699,108 @@ transports and active traffic and is not a Main reproduction. Retain every
 runtime PAGE while finding those active owners. Current owning Connect source
 has no production pprof route, and SIGQUIT participates in service shutdown;
 do not invent a profile endpoint or use a shutdown signal as a profile read.
+
+A 2026-10-03 local control at Server `c56f9557` with published Connect
+`08d48400` extended that constructor control through actual H1 handlers,
+exchange TCP connections, full residents, and acknowledged control traffic in
+both directions. Three consecutive cohorts of eight residents each held one
+send sequence, one receive sequence, and one pacing service per resident.
+Each resident's three 4,096-slot channels retained 491,520 bytes (480 KiB) of
+named slot storage before channel headers, allocator overhead, exchange queues,
+payloads, maps, or stacks. The exported `Client.MemoryOwnerCensus()` measured
+these existing owners without a process-wide profile or a production producer.
+Every one of the 24 retired resident clients reached zero indexed/active
+send/receive sequences, pacing services, and named channel slots after joined
+shutdown, including under the race detector. Joining the exchange also left
+zero transport routes on every retained retired resident.
+
+This is a lower bound for a specific active control path, not a Main heap
+attribution or proof that a leak is absent. The local process also contains
+the synthetic remote clients and both ends of each exchange connection, so its
+heap and goroutine totals cannot be assigned to the resident side. Peer-list
+fan-out, forwarded data, P2P, lossy carriers, stalled dependencies, and aged
+draining generations were outside this control. Preserve the exact native
+PID/start/build/RSS join and measured transport/sequence population as the next
+production discriminator; neither the bare-client cost nor this larger active
+cost can be multiplied into a complete heap estimate. The owning regression is
+`TestResidentRuntimeOwnershipChurnControl` in
+`connect/resident_runtime_ownership_diagnostic_test.go`.
+
+The private native discriminator in
+`diagnostics/connect_native_memory.py` retains every running Connect container
+generation on one inventory-owned host. It binds kernel RSS to a stable
+boot/PID/start-tick identity and the actual executable hash, Go source revision,
+and image configuration before and after collection. Missing slots, replaced
+processes, unknown images, and incomplete reads remain explicit; one host's
+census cannot establish fleet convergence or ownership of its memory.
+
+A distinct Linux time-namespace identifier alone does not prove different
+Prometheus process-start conversion. The bounded discriminator also reads the
+reader and target boottime offsets. Because `timens_offsets` describes
+`time_for_children`, both active/future namespace links must agree before those
+offsets can qualify the current processes. A cross-namespace join is qualified
+only when both boottime offsets are exactly zero and the namespace/offset proof
+survives the terminal identity check. Nonzero, missing, malformed, unbound, or
+changing offsets preserve an unknown metric join while retaining native RSS.
+An unchanged common active namespace already supplies the same clock view and
+does not require the extra offset read. These rules match the pinned Prometheus
+procfs conversion of boot time plus process-start ticks; they do not infer a
+Main offset from a local control.
+
+Join the fresh metric row only with unique host/block/start and matching
+source/image evidence, retaining current and draining generations. A digest
+of a container's short ID is a log-join hint, not an independently unique
+process identity. The owning Python controls cover healthy overlap, exact
+zero-offset conversion, refused or changing clock evidence, PID reuse,
+source mismatch, unavailable reads, and finite byte/time bounds. Collection
+still requires the separately admitted private inventory/hostname wrapper;
+this module installs no service endpoint or profiling producer.
+
+The 2026-10-03 R57 follow-up joined all five current native Connect processes on
+each host to source `114b708c`. Edge4 g1 retained the same PID, start, executable
+and image while RSS grew from about 120,343 MiB at 15:57Z to 173,379 MiB at
+16:14Z and 191,858 MiB at 16:23Z. Its metric row was absent from the earlier
+bounded Mimir sample. Neither missing metrics nor a deployed current source
+turns that native growth into a healthy or retired process. The sample does
+not identify the allocation owner or prove that the same rate will continue.
+
+The native discriminator now reads a fixed `/proc/meminfo` field set before
+and after a bounded process census. It retains the smaller observed
+`MemAvailable` only when both frames and the boot identity qualify. The
+optional census reads at most 1,024 process identities and `statm` records
+within five seconds, inside the existing total time and byte limits. A PID
+cap, permission failure, reuse, or changing process set makes its aggregate
+incomplete. It must still attempt the final independent memory frame: the
+first edge4 census exceeded the PID cap, and discarding its final frame lost
+otherwise obtainable host evidence. Separate controls cover healthy and zero
+available memory, capped or failed census with valid paired frames, missing
+fields, malformed units, boot changes, PID reuse, and time exhaustion.
+
+Summed process RSS is approximate and can count shared pages more than once;
+it omits kernel and cache ownership. It cannot be subtracted from `MemTotal`
+to manufacture free capacity. The completed edge4 follow-up observed roughly
+489.75 GiB available out of 944.26 GiB, while its process aggregate remained
+capped. Paired headroom is an observation, not a growth forecast or a safe
+old/new rollout-overlap budget. Keep that qualification separate from the
+Connect process census's own completeness. The private activation also checks
+its exact time fence during local preflight: a nominal ten-minute window
+extended five seconds backwards exceeded the reader's ten-minute maximum and
+correctly refused before contact; disabled source manifests still need no
+activation fence.
+
+Use existing same-process pool, heap, stack, resident and worker counters
+before adding a live profile. `resident_clients` leaves the residents map
+before `CloseAndWait` completes, whereas callback, forward and idle-watch
+gauges decrement at actual worker exit. Their ratio can include constructing
+or retiring owners and alone cannot prove a leak. Message-pool retained bytes
+measure free buffers, outstanding measures buffer count, and allocation or
+unpooled-byte totals are cumulative. The one-argument 16 GiB pool resize in
+this source permits 48 GiB aggregate free retention across packet and large
+classes; that ceiling is neither measured retention nor a total process
+budget. Preserve all generations, exact metric scrape anchors, and a unique
+native host/block/start/source match; a missing hot process cannot borrow a
+healthy peer's counters. No full heap or goroutine traversal is made
+pause-bounded merely by limiting the returned bytes.
 
 `connect-resident-cost-unobservable` WARNs immediately when the newest Connect
 population join is missing/stale, duplicated, invalid, or cannot select an
@@ -21201,6 +21340,21 @@ explicit full-media-read mode. Scrape time, integrity check time, and artifact
 file time therefore remain independent evidence. A check older than 48 hours
 is stale even if Fluent Bit keeps scraping the report and the structural
 artifact remains inside its five-day recovery-point objective.
+
+A private source-completion read must retain three separate times: the
+generation start, the successful producer completion, and completion of the
+diagnostic observation. A 2026-10-02 23:24Z observation retained a generation
+started on October 1 at 00:00:15Z whose producer succeeded at 19:28:43Z that
+day. Calling the observation recent cannot make that producer completion less
+than 24 hours old. Keep the five-day archive objective separate from any
+explicitly tighter migration prerequisite; qualify each against its owning
+timestamp. The private migration controls cover a fresh observation of an old
+producer, stale or future observations, missing producer evidence, and a
+claimed producer time incorrectly copied from the observation. A read-only
+catalog check can still run when a migration's producer-age gate fails, but
+apply must refuse before contact. Stable archive and sidecar metadata at the
+observation time remains weaker than current ciphertext, decryption, restore,
+or destination-copy verification.
 
 Planetoid also publishes physical allocation telemetry for the mounted archive
 volume. `urnetwork_backup_archive_storage_bytes{archive="pg|redis|code"}` is
