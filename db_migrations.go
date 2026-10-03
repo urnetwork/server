@@ -9456,4 +9456,6 @@ var migrations = []any{
 	newSqlMigration(providerPaymentBonusSchemaSql),
 	// The earning asset boundary is prepared explicitly and cannot drift with a file edit.
 	newSqlMigration(providerPayoutBoundarySchemaSql),
+	// Caller operation IDs retain one exact customer transfer challenge request.
+	newSqlMigration(circleTransferRequestSchemaSql),
 }
