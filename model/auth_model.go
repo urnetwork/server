@@ -332,16 +332,108 @@ type HandleLoginParsedAuthJwtArgs struct {
 	UserAuthAttemptId UserAuthAttemptId
 }
 
+// parsedAuthJwtLoginStore is the account storage an SSO login reads and
+// writes. Replaceable by tests; production uses the database.
+type parsedAuthJwtLoginStore struct {
+	ssoAuthsByUserAuth func(ctx context.Context, userAuth string) ([]NetworkUserSsoAuth, error)
+	// the network_user_auth_password row for the user auth, if any
+	passwordAuthByUserAuth func(ctx context.Context, userAuth string) (userId *server.Id, verified bool, found bool)
+	// the network the user administers, if any
+	adminNetwork              func(ctx context.Context, userId server.Id) (networkId server.Id, networkName string, found bool)
+	addSsoAuth                func(args *AddSsoAuthArgs, ctx context.Context) error
+	setUserAuthAttemptSuccess func(ctx context.Context, userAuthAttemptId UserAuthAttemptId)
+	signByJwt                 func(ctx context.Context, networkId server.Id, userId server.Id, networkName string) string
+}
+
+var parsedAuthJwtLoginDb = parsedAuthJwtLoginStore{
+	ssoAuthsByUserAuth: getSsoAuthsByUserAuth,
+	passwordAuthByUserAuth: func(ctx context.Context, userAuth string) (userId *server.Id, verified bool, found bool) {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT
+						user_id,
+						verified
+					FROM network_user_auth_password
+					WHERE user_auth = $1
+				`,
+				userAuth,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(
+						&userId,
+						&verified,
+					))
+					found = true
+				}
+			})
+		})
+		return
+	},
+	adminNetwork: func(ctx context.Context, userId server.Id) (networkId server.Id, networkName string, found bool) {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT
+						network.network_id,
+						network.network_name
+					FROM network_user
+					INNER JOIN network ON network.admin_user_id = network_user.user_id
+					WHERE user_id = $1
+				`,
+				userId,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(
+						&networkId,
+						&networkName,
+					))
+					found = true
+				}
+			})
+		})
+		return
+	},
+	addSsoAuth: addSsoAuth,
+	setUserAuthAttemptSuccess: func(ctx context.Context, userAuthAttemptId UserAuthAttemptId) {
+		SetUserAuthAttemptSuccess(ctx, userAuthAttemptId, true)
+	},
+	signByJwt: func(ctx context.Context, networkId server.Id, userId server.Id, networkName string) string {
+		isGuestMode := false
+		isPro := IsProFresh(
+			ctx,
+			&networkId,
+		)
+		return jwt.NewByJwt(
+			networkId,
+			userId,
+			networkName,
+			isGuestMode,
+			isPro,
+		).Sign()
+	},
+}
+
 func handleLoginParsedAuthJwt(
 	args *HandleLoginParsedAuthJwtArgs,
 	ctx context.Context,
+) (*AuthLoginResult, error) {
+	return handleLoginParsedAuthJwtWithStore(args, ctx, &parsedAuthJwtLoginDb)
+}
+
+func handleLoginParsedAuthJwtWithStore(
+	args *HandleLoginParsedAuthJwtArgs,
+	ctx context.Context,
+	store *parsedAuthJwtLoginStore,
 ) (*AuthLoginResult, error) {
 
 	var authJwt = args.AuthJwt
 
 	var userId *server.Id
-	var networkId server.Id
-	var networkName string
 
 	ssoExists := false
 	userAuthExists := false
@@ -350,7 +442,7 @@ func handleLoginParsedAuthJwt(
 	/**
 	 * get sso auths
 	 */
-	ssoAuths, err := getSsoAuthsByUserAuth(ctx, authJwt.UserAuth)
+	ssoAuths, err := store.ssoAuthsByUserAuth(ctx, authJwt.UserAuth)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get SSO auths: %w", err)
 	}
@@ -362,37 +454,15 @@ func handleLoginParsedAuthJwt(
 	/**
 	 * check if userAuth exists with this email in network_user_auth_password
 	 */
-	server.Db(ctx, func(conn server.PgConn) {
-		// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
-		result, err := conn.Query(
-			ctx,
-			`
-					SELECT
-						user_id,
-						verified
-					FROM network_user_auth_password
-					WHERE user_auth = $1
-				`,
-			authJwt.UserAuth,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				var id *server.Id
-				verified := false
-				server.Raise(result.Scan(
-					&id,
-					&verified,
-				))
-				userAuthExists = true
-				userAuthEmailVerified = verified
+	if id, verified, found := store.passwordAuthByUserAuth(ctx, authJwt.UserAuth); found {
+		userAuthExists = true
+		userAuthEmailVerified = verified
 
-				if id != nil {
-					glog.Infof("setting user id inside of user auth as %s", id.String())
-					userId = id
-				}
-			}
-		})
-	})
+		if id != nil {
+			glog.Infof("setting user id inside of user auth as %s", id.String())
+			userId = id
+		}
+	}
 
 	if userId == nil {
 
@@ -402,33 +472,9 @@ func handleLoginParsedAuthJwt(
 		}, nil
 	}
 
-	server.Db(ctx, func(conn server.PgConn) {
-		// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT
-					network_user.user_id,
-					network.network_id,
-					network.network_name
-				FROM network_user
-				INNER JOIN network ON network.admin_user_id = network_user.user_id
-				WHERE user_id = $1
-			`,
-			userId,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(
-					&userId,
-					&networkId,
-					&networkName,
-				))
-			}
-		})
-	})
+	networkId, networkName, networkFound := store.adminNetwork(ctx, *userId)
 
-	if &networkId == nil || &networkName == nil {
+	if !networkFound {
 
 		/**
 		 * This scenario should not happen
@@ -471,7 +517,7 @@ func handleLoginParsedAuthJwt(
 		 * but user has a different SSO
 		 * add the new SSO auth
 		 */
-		addSsoAuth(
+		store.addSsoAuth(
 			&AddSsoAuthArgs{
 				ParsedAuthJwt: args.AuthJwt,
 				AuthJwt:       args.AuthJwtStr,
@@ -482,26 +528,12 @@ func handleLoginParsedAuthJwt(
 		)
 	}
 
-	SetUserAuthAttemptSuccess(ctx, args.UserAuthAttemptId, true)
-
-	isGuestMode := false
-
-	isPro := IsProFresh(
-		ctx,
-		&networkId,
-	)
+	store.setUserAuthAttemptSuccess(ctx, args.UserAuthAttemptId)
 
 	// successful login
-	byJwt := jwt.NewByJwt(
-		networkId,
-		*userId,
-		networkName,
-		isGuestMode,
-		isPro,
-	)
 	result := &AuthLoginResult{
 		Network: &AuthLoginResultNetwork{
-			ByJwt: byJwt.Sign(),
+			ByJwt: store.signByJwt(ctx, networkId, *userId, networkName),
 		},
 	}
 	return result, nil
