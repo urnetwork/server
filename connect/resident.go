@@ -1390,6 +1390,10 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 					}
 				}
 				err := sendBuffer.WriteMessages(conn, batch)
+				// WriteMessages releases pool ownership. Drop the writer's stale
+				// slice references too, so idle or smaller later batches cannot
+				// keep completed payload backing arrays reachable.
+				clear(batch)
 				batch = batch[:0]
 				if err != nil {
 					return false
@@ -2536,6 +2540,9 @@ func (self *ExchangeConnection) Run() {
 			}
 			self.notifySendDequeuedForTest()
 			err := self.sendBuffer.WriteMessages(self.conn, batch)
+			// A zero length preserves backing-array references. Release each
+			// completed payload before retaining the batch index for reuse.
+			clear(batch)
 			batch = batch[:0]
 			if err != nil {
 				return false
