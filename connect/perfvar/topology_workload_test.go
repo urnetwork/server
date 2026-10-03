@@ -335,7 +335,14 @@ func measureFullTunUDPDirection(
 	}
 	defer connection.Close()
 	var providerAddress net.Addr
+	var providerReturnOwner clientconnect.Id
 	if !upload {
+		registrationOwner, err := newFullTunUDPRegistrationOwner(connection.LocalAddr(), listener.LocalAddr())
+		if err != nil {
+			return workloadResult{}, fmt.Errorf("identify UDP registration flow: %w", err)
+		}
+		removeRegistrationOwner := path.providerClient.AddReceiveCallback(registrationOwner.observe)
+		defer removeRegistrationOwner()
 		if _, err := connection.Write([]byte{1}); err != nil {
 			return workloadResult{}, fmt.Errorf("open UDP provider NAT: %w", err)
 		}
@@ -361,11 +368,21 @@ func measureFullTunUDPDirection(
 		if err := path.waitForSetupBoundary(ctx); err != nil {
 			return workloadResult{}, fmt.Errorf("join UDP provider registration: %w", err)
 		}
+		providerReturnOwner, err = registrationOwner.wait(ctx)
+		if err != nil {
+			return workloadResult{}, fmt.Errorf("resolve UDP registration owner: %w", err)
+		}
+		removeRegistrationOwner()
 		carrierMeasurementStart, err := beginPerfvarCarrierMeasurement(path)
 		if err != nil {
 			return workloadResult{}, err
 		}
 		path.setCarrierMeasurementStart(carrierMeasurementStart)
+		if path.afterUdpRegistrationForTest != nil {
+			if err := path.afterUdpRegistrationForTest(ctx, connection); err != nil {
+				return workloadResult{}, fmt.Errorf("after UDP registration: %w", err)
+			}
+		}
 	}
 	packetInterval := time.Duration(float64(time.Second) * float64(payloadByteCount*8) / float64(offeredBitsPerSecond))
 	if packetInterval <= 0 {
@@ -477,12 +494,8 @@ func measureFullTunUDPDirection(
 			return workloadResult{}, fmt.Errorf("begin measured bridge flow window for %+v", bridgeFlowKey)
 		}
 	} else {
-		deviceClient := path.deviceClient.Load()
-		if deviceClient == nil || deviceClient.ClientId() == (clientconnect.Id{}) {
-			return workloadResult{}, fmt.Errorf("derive measured provider-return flow before the generated device client is ready")
-		}
 		providerReturnFlowKey, err = fullTunProviderReturnUdpFlowKey(
-			deviceClient.ClientId(),
+			providerReturnOwner,
 			listener.LocalAddr(),
 			connection.LocalAddr(),
 		)

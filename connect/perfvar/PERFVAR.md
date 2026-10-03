@@ -111,12 +111,19 @@ logical destination and every live endpoint `StreamId` alias on the platform
 writer. On a multihop endpoint, `P2pRouteState.PeerId` names the adjacent
 physical peer rather than the final application destination. The authenticated
 `StreamId` alias is what lets the final-destination writer select that endpoint
-route. The platform transport stays alive for control traffic, receive traffic,
+route. The platform transport stays alive for `ControlId` traffic, receive traffic,
 and unrelated destinations. Suppression remains fail-closed if the selected P2P
 route disconnects; only explicit test teardown restores platform payload
 routing. The measured writer therefore has exactly one endpoint P2P payload
-route, which may carry a stream across several physical hops, without destroying
-the control plane. This setup does not measure promotion itself.
+route, which may carry a stream across several physical hops. Peer-addressed
+SDP/ICE uses the suppressed peer writer too, so keeping `ControlId` reachable
+does not preserve peer renegotiation after the last P2P route is withdrawn.
+[The deterministic peer-signaling test](p2p_forced_signal_route_test.go)
+compares real encrypted Transfer delivery and acknowledgments with ordinary H1:
+forced signals and concurrent application traffic expire unwritten after P2P
+withdrawal, while ordinary H1 still delivers the signals. This proves the
+forced-harness recovery limitation, not the identity of the initial lost
+DATA/SACK in a failed SCTP transfer. This setup does not measure promotion itself.
 
 The P2P topology filter accepts `one-hop`, `three-hop`, `five-hop`, and
 `nine-hop`. Extended paths use one independently shaped Pion network per
@@ -737,14 +744,19 @@ CONNECT_PERFVAR_FEATURE=defer-timeout-resend|fast-path-size-aware
 Defaults are all four routes, `clean-lan`, `tcp`, both directions, `one-hop`, no
 extenders, default resources, no features, seed `20260810`, five fresh
 repetitions, and a 32 MiB payload subject to the profile-specific reductions
-described above. `CONNECT_PERFVAR_FEATURE` selects production settings that
-ship off by default and are under measurement (connect/FLIGHTGATEFIX.md §13.5
-and §13.6): `defer-timeout-resend` sets
+described above. `CONNECT_PERFVAR_FEATURE` explicitly selects production
+settings under measurement (connect/FLIGHTGATEFIX.md §13.5 and §13.6):
+`defer-timeout-resend` sets
 `SendBufferSettings.DeferTimeoutResendWhileCumulativeProgress` and
 `fast-path-size-aware` sets
 `P2pTransportSettings.FastPathSizeAwareAdmission` on both endpoint Clients. An
 empty selection leaves every existing scenario identity unchanged; a non-empty
 one is part of the identity and of the profile hash.
+Connect revisions `332c0e30` and `69a006b3` already default
+`DeferTimeoutResendWhileCumulativeProgress` to true. For a comparison against
+the 2026-10-02 runner, leave `CONNECT_PERFVAR_FEATURE` empty on both arms;
+explicitly selecting `defer-timeout-resend` creates a different scenario
+identity.
 Logical Transfer data lanes default to `0` (disabled). A nonzero selection is
 applied to both full-TUN endpoints but not to direct underlay calibration, and
 is recorded in the scenario identity. Use `1` to isolate the cost of sequence

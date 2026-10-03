@@ -223,3 +223,5 @@ replace github.com/urfoundation/sn => ../sn
 // Dependency replacements are not inherited from SN; share its corrected
 // native RPC transport and tracked upstream provenance in server binaries.
 replace github.com/centrifuge/go-substrate-rpc-client/v4 => ../sn/third_party/go-substrate-rpc-client
+
+replace gvisor.dev/gvisor => ../gvisor
