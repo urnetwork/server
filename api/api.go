@@ -191,6 +191,10 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),
 		router.NewRoute("POST", "/wallet/circle-transfer-out", handlers.WalletCircleTransferOut),
 		router.NewRoute("GET", "/subscription/balance", handlers.SubscriptionBalance),
+		// acceptance-test only: drains the caller's own balance; refused unless
+		// the caller's network is in the vault allowlist (acceptance-balance-drain.yml)
+		router.NewRoute("POST", "/test/balance-drain", handlers.TestBalanceDrain),
+		router.NewRoute("POST", "/test/balance-restore", handlers.TestBalanceRestore),
 		// onboarding program (mmm/onboarding/PLAN.md): the welcome offer, the
 		// closed client event schema, the campaign token endpoints and the
 		// inline Stripe payment sheet

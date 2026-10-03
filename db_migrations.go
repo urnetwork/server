@@ -9391,4 +9391,22 @@ var migrations = []any{
 			ON provider_egress_health_history(client_id, measured_at DESC)
 			WHERE url_probe AND url_probe_policy_version=1 AND total_count=1 AND (ok_count=0 OR ok_count=1)
 	`),
+	// acceptance-test balance drains (model/test_balance_drain_model.go). Each
+	// row is the audit record of one drain; rows are never deleted. The partial
+	// index keeps the in-window lookup an index probe.
+	newSqlMigration(`
+        CREATE TABLE test_balance_drain (
+            drain_id uuid NOT NULL,
+            network_id uuid NOT NULL,
+            start_time timestamp NOT NULL,
+            end_time timestamp NOT NULL,
+            restore_time timestamp NULL,
+            drained_balance_byte_count bigint NOT NULL,
+
+            PRIMARY KEY (drain_id)
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX test_balance_drain_network_id_end_time ON test_balance_drain (network_id, end_time) WHERE restore_time IS NULL
+    `),
 }

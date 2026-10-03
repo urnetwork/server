@@ -297,6 +297,13 @@ type TransferBalance struct {
 }
 
 func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*TransferBalance {
+	transferBalances := getActiveTransferBalancesWithoutDrain(ctx, networkId)
+	// an acceptance-test drain reads as zero available (see test_balance_drain_model.go)
+	applyTestBalanceDrain(transferBalances, IsTestBalanceDrainActive(ctx, networkId))
+	return transferBalances
+}
+
+func getActiveTransferBalancesWithoutDrain(ctx context.Context, networkId server.Id) []*TransferBalance {
 	var transferBalances []*TransferBalance
 	server.Db(ctx, func(conn server.PgConn) {
 		transferBalances = getActiveTransferBalanceRows(ctx, conn, networkId)
@@ -1641,6 +1648,17 @@ func createTransferEscrowInTx(
 	payerClientId := sourceId
 	if sourceNetworkId != payerNetworkId {
 		payerClientId = destinationId
+	}
+	// an acceptance-test drain refuses like an empty balance. The allowlist is
+	// checked in memory, so other payers add no query here.
+	if 0 < contractTransferByteCount {
+		if err := testBalanceDrainEscrowError(
+			testBalanceDrainActive(ctx, tx, payerNetworkId, now),
+			contractTransferByteCount,
+		); err != nil {
+			returnErr = err
+			return
+		}
 	}
 	orderedTransferBalances := loadTransferEscrowBalances(ctx, tx, payerNetworkId, payerClientId, now, contractTransferByteCount)
 
