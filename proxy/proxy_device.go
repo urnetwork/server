@@ -15,6 +15,7 @@ import (
 	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/localclient"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/proxy/flowtrace"
 )
@@ -693,7 +694,8 @@ type ProxyDevice struct {
 	instanceId        server.Id
 	proxyDeviceConfig *model.ProxyDeviceConfig
 
-	deviceLocal *sdk.DeviceLocal
+	deviceLocal  *sdk.DeviceLocal
+	localControl *localclient.Authority
 	// deviceState is the lifecycle/readiness surface used by selection and
 	// readiness. Production points it at deviceLocal; tests replace it with an
 	// exact transition source.
@@ -777,12 +779,28 @@ func NewProxyDevice(
 	}
 
 	cancelCtx, cancel := context.WithCancel(ctx)
+	signedByJwt := byJwt.Sign()
+	localControl, err := localclient.New(ctx, signedByJwt, networkSpace.GetApiUrl())
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	transferredControl := false
+	defer func() {
+		if !transferredControl {
+			localControl.Close()
+		}
+	}()
 
 	deviceLocalSettings := newProxyDeviceLocalSettings(ctx, proxyDeviceConfig, settings)
+	deviceLocalSettings.ClientCredentials = localControl
+	deviceLocalSettings.ClientControl = localControl
+	deviceLocalSettings.ProviderDiscovery = localControl
+	deviceLocalSettings.LocalApi = localControl
 	deviceLocal, err := sdk.NewPlatformDeviceLocal(
 		nil,
 		networkSpace,
-		byJwt.Sign(),
+		signedByJwt,
 		settings.ProxyDeviceDescription,
 		settings.ProxyDeviceSpec,
 		server.RequireVersion(),
@@ -861,6 +879,7 @@ func NewProxyDevice(
 		instanceId:        proxyDeviceConfig.InstanceId,
 		proxyDeviceConfig: proxyDeviceConfig,
 		deviceLocal:       deviceLocal,
+		localControl:      localControl,
 		deviceState:       deviceLocal,
 		tun:               tun,
 		settings:          settings,
@@ -878,6 +897,7 @@ func NewProxyDevice(
 
 	glog.Infof("[pd]using api=%s connect=%s\n", networkSpace.GetApiUrl(), networkSpace.GetPlatformUrl())
 
+	transferredControl = true
 	return proxyDevice, nil
 }
 
@@ -1506,6 +1526,9 @@ func (self *ProxyDevice) Close() error {
 			self.closeDeviceLocalForTest()
 		} else if self.deviceLocal != nil {
 			_ = self.deviceLocal.CloseAndWait(context.Background())
+		}
+		if self.localControl != nil {
+			self.localControl.Close()
 		}
 		if self.tun != nil {
 			self.closeErr = self.tun.Close()

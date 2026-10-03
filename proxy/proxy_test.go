@@ -87,6 +87,9 @@ const (
 // proxyTestOptions parameterizes setupProxyTestWithOptions. The defaults
 // reproduce the original setupProxyTest behavior.
 type proxyTestOptions struct {
+	// The hosted device alone uses this origin; the fixture provider retains
+	// its separately owned API. A rejecting server proves local control.
+	hostedApiUrl string
 	// initial transfer balance redeemed for the proxy device network
 	pdInitialBalance model.ByteCount
 	// initial transfer balance redeemed for the provider network
@@ -338,9 +341,13 @@ func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestH
 
 	// ---- the test network space pointing the SDK at the local servers --------
 	connectSettings := connect.DefaultConnectSettings()
+	hostedApiUrl := fmt.Sprintf("http://127.0.0.1:%d", testApiPort)
+	if opts.hostedApiUrl != "" {
+		hostedApiUrl = opts.hostedApiUrl
+	}
 	networkSpace := sdk.Testing_NewNetworkSpaceWithUrls(
 		ctx,
-		fmt.Sprintf("http://127.0.0.1:%d", testApiPort),
+		hostedApiUrl,
 		fmt.Sprintf("ws://127.0.0.1:%d", connectClientPort),
 		connectSettings,
 	)

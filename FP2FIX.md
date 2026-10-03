@@ -5656,3 +5656,60 @@ progress in isolated worktrees. An initial real hosted-device test delivered
 requests to its rejecting API origin. Quality-probe traffic tests, discovery
 and key-read coverage, negative controls, independent review, merge and rollout
 remain open. The hosted-proxy fix is not yet deployed.
+
+
+### 2026-10-03 02:52 UTC hosted local control and acceptance boundaries
+
+Hosted-proxy local control and API-free regression tests are merged and pushed
+as `9d7b930b`, with exact minimal published Connect `b8bd3c994855` and SDK
+`95ccd57da971` dependencies. The independent normal-module race gates passed:
+local authorization 12.146 seconds and real hosted proxy 25.422 seconds;
+focused vet passed. The real quality-probe DNS/TLS path passed its race run in
+5.805 seconds. Successful traffic, renewal, reconnect, durable payer settlement
+and derived-client retirement completed with zero requests to the rejecting
+control API. Actual missing-hook controls reached that API, establishing a
+non-vacuous regression boundary. Independent source/control receipt:
+`c068f583d34b46cb354e8d6b3e097fdfe5cbb2d5fcfa5c07fb893b23c1f48cb5`.
+
+Both architectures of API, Connect, Taskworker and Proxy images were built,
+pushed and verified from this Main commit as
+`2026.10.3-hosted-local-control+1060875200`. All block deployment commands exited
+zero: Proxy at 02:42:48 UTC, Taskworker at 02:44:38 UTC, API at 02:44:48 UTC and
+Connect at 02:48:48 UTC. Raw eight-image-configuration closure:
+`ebff1ac5d80e3691758b75013c7a9e05c738c6a42aa752a20a6e85bbee99e92b`.
+This is completed selection/rollout-command evidence, not proof of every live
+process or zero HTTP API requests in Main. The current four-service runtime
+scope includes the 48 financial service slots on four enabled edge hosts plus
+20 Proxy slots on Fireside and Crisp. Edge5 remains excluded. Fresh 68-slot
+source/image/process proof and predecessor retirement remain open. Migration
+755 is still the schema head; the enabled column has not been removed.
+The running native monitor's schema catalog also expects that column and must
+be promoted compatibly before its removal.
+
+The source-qualified historical 01:17–01:22 UTC scheduler sample reports
+110.158 accepted ProbeOne collection outcomes per second, 110.169 attempted
+turns per second and 0.01064 local-failure turns per second across all eight
+Taskworkers. These are collection outcomes, not verified unique durable quota
+or internal controller calls. Receipt:
+`326029f2a0161da315e14f5922049c4c86547048f3b47483327dd8e5b8eff075`.
+The 02:50:01 UTC automatic census reports 46,700 of 112,988 eligible providers
+meeting the configured rolling quota (41.33 percent); the separate hourly
+forecast is incomplete. Provider-contact classification is now under causal
+review because a writer attempt may be marked before successful local buffer
+admission. A faster or larger reported count cannot close acceptance if it
+includes unmeasured local failures. No classification fix is yet deployed.
+
+PostgreSQL CPU measured 38.35 percent at 02:47:01 UTC. The independent recurring
+query sample ending 02:47:23 UTC still contains settlement and escrow tuple
+queues with maximum observed ages about 16 seconds. These capped samples do
+not identify a payer, service or every root blocker; accounting and grant
+contention remain unresolved.
+
+All four enabled edge-host mounted-resource observations now match the
+recovered selected ARIN, GeoLite and places pair and preserved configuration.
+The baseline/candidate Config staging tree retains all 61 baseline files and
+adds only the separate policy-two resource. Four-host selected-resource join:
+`aaa9f3d38605d1eda16a48c9245259bf90e75f384f1aa432732a4bd45b7eba8c`.
+This is file custody and mounted selection, not loaded-reader, full Main shadow,
+verified subscriber coverage or classifier activation. ARIN policy two remains
+inactive until those requirements are met.
