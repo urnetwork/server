@@ -1511,11 +1511,12 @@ func paymentsReconcile(opts docopt.Opts) {
 		model.SubscriptionMarketApple,
 		model.SubscriptionMarketGoogle,
 		model.SubscriptionMarketSolana,
+		model.SubscriptionMarketX402,
 	}
 	stores := allStores
 	if store, _ := opts.String("--store"); store != "" {
 		if !slices.Contains(allStores, store) {
-			fmt.Printf("unknown store %q (expected stripe, apple, google, or solana)\n", store)
+			fmt.Printf("unknown store %q (expected stripe, apple, google, solana, or x402)\n", store)
 			os.Exit(1)
 		}
 		options.Stores = []string{store}

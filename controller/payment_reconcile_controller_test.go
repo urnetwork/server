@@ -33,15 +33,18 @@ func disableAllReconcileStores(t testing.TB) {
 	prevApple := appleReconcileHasCredentials
 	prevPlay := playReconcileHasCredentials
 	prevSolana := solanaReconcileHasCredentials
+	prevX402 := x402ReconcileHasCredentials
 	stripeReconcileHasCredentials = func() bool { return false }
 	appleReconcileHasCredentials = func() bool { return false }
 	playReconcileHasCredentials = func() bool { return false }
 	solanaReconcileHasCredentials = func() bool { return false }
+	x402ReconcileHasCredentials = func() bool { return false }
 	t.Cleanup(func() {
 		stripeReconcileHasCredentials = prevStripe
 		appleReconcileHasCredentials = prevApple
 		playReconcileHasCredentials = prevPlay
 		solanaReconcileHasCredentials = prevSolana
+		x402ReconcileHasCredentials = prevX402
 	})
 }
 
@@ -270,7 +273,7 @@ func TestPaymentReconcileMalformedCredentialResourcesSkipAllStores(t *testing.T)
 		result, err := RunPaymentReconciliation(reconcileTestSession(t, ctx))
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Errors, 0)
-		connect.AssertEqual(t, len(result.SkippedStores), 4)
+		connect.AssertEqual(t, len(result.SkippedStores), 5)
 		events := model.GetPaymentReconciliationEvents(ctx, result.RunId)
 		connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketStripe, model.PaymentReconcileActionSkippedStore), 1)
 		connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketApple, model.PaymentReconcileActionSkippedStore), 1)
@@ -592,7 +595,7 @@ func TestPaymentReconcileSkipsStoresWithoutCredentials(t *testing.T) {
 		connect.AssertEqual(t, result.Credited, 0)
 		connect.AssertEqual(t, result.Ended, 0)
 		connect.AssertEqual(t, result.Errors, 0)
-		connect.AssertEqual(t, len(result.SkippedStores), 4)
+		connect.AssertEqual(t, len(result.SkippedStores), 5)
 
 		events := model.GetPaymentReconciliationEvents(ctx, result.RunId)
 		for _, store := range []string{
@@ -600,6 +603,7 @@ func TestPaymentReconcileSkipsStoresWithoutCredentials(t *testing.T) {
 			model.SubscriptionMarketApple,
 			model.SubscriptionMarketGoogle,
 			model.SubscriptionMarketSolana,
+			model.SubscriptionMarketX402,
 		} {
 			connect.AssertEqual(t, countReconcileEvents(events, store, model.PaymentReconcileActionSkippedStore), 1)
 			// a skipped store never advances its watermark
@@ -2609,7 +2613,7 @@ func TestPaymentReconcileRunLockExcludesConcurrentRuns(t *testing.T) {
 		// lock released: the real run proceeds
 		result, err := RunPaymentReconciliation(reconcileTestSession(t, ctx))
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, len(result.SkippedStores), 4)
+		connect.AssertEqual(t, len(result.SkippedStores), 5)
 	})
 }
 
