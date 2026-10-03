@@ -51,7 +51,9 @@ func TestCreateContractTimingActualReplyAndRejection(t *testing.T) {
 		}
 		model.Testing_CreateDevice(ctx, network, server.NewId(), source, "timing-source", "fixture")
 		model.Testing_CreateDevice(ctx, peerNetwork, server.NewId(), destination, "timing-destination", "fixture")
-		server.Raise(model.AddBasicTransferBalance(ctx, network, 4*1024*1024, server.NowUtc(), server.NowUtc().Add(time.Hour)))
+		// The 512 KiB left after the 1 MiB contract is below the shrink-to-fit
+		// floor, so the larger request is still refused.
+		server.Raise(model.AddBasicTransferBalance(ctx, network, 1024*1024+512*1024, server.NowUtc(), server.NowUtc().Add(time.Hour)))
 		model.SetProvide(ctx, destination, map[model.ProvideMode][]byte{model.ProvideModePublic: bytes.Repeat([]byte{42}, 32)})
 		before := controllerContractTimingCount(t, "internal", "contract_reply")
 		request := &protocol.CreateContract{DestinationId: destination.Bytes(), TransferByteCount: 1024 * 1024}

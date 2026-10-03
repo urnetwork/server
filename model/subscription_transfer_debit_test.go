@@ -120,8 +120,11 @@ func (self *asyncDebitReleaseHook) ProcessPipelineHook(next redis.ProcessPipelin
 		matched := false
 		for _, command := range commands {
 			a := command.Args()
-			if command.Name() == "eval" && len(a) > 7 && a[3] == self.key && a[7] == "release" {
-				matched = true
+			if command.Name() == "eval" && len(a) > 3 {
+				keyCount, ok := a[2].(int)
+				if ok && keyCount > 0 && len(a) > 3+keyCount && a[3] == self.key && a[3+keyCount] == "release" {
+					matched = true
+				}
 			}
 		}
 		if matched && self.enabled.Load() {

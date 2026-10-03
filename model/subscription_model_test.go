@@ -2140,26 +2140,61 @@ func TestReconcileNetEscrowCorrectsDrift(t *testing.T) {
 		connect.AssertEqual(t, ByteCount(0), Testing_NetEscrowByteCount(ctx, balanceId))
 		connect.AssertEqual(t, initialBalance, GetActiveTransferBalanceByteCount(ctx, networkId))
 
-		// Even renewed cache drift cannot deny database-owned credit. The
-		// successful create post repairs the mirror to its real reservation.
+		// Public Redis admission does not invent authority to erase unexplained
+		// legacy debt. Explicit SQL reconciliation repairs that separate mirror.
 		server.Redis(ctx, func(r server.RedisClient) {
 			server.Raise(r.IncrBy(ctx, netEscrowKey(balanceId), int64(initialBalance)).Err())
 		})
 		connect.AssertEqual(t, ByteCount(0), GetActiveTransferBalanceByteCount(ctx, networkId))
-		_, _, err := CreateContract(ctx, networkId, clientId, networkIdB, clientIdB, ByteCount(1024*1024))
+		_, held, err := CreateContract(ctx, networkId, clientId, networkIdB, clientIdB, ByteCount(1024*1024))
+		if held != nil || !errors.Is(err, errRedisReservationInsufficient) {
+			t.Fatal("public admission erased unreviewed legacy debt", held, err)
+		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			value, err := r.Get(ctx, netEscrowKey(balanceId)).Int64()
+			server.Raise(err)
+			if value != initialBalance {
+				t.Fatal("refused public admission changed legacy debt", value)
+			}
+		})
+		drift, balanceCount := ReconcileNetEscrowForNetwork(ctx, networkId, true)
+		if drift != initialBalance || balanceCount != 1 {
+			t.Fatal("explicit reconciliation lost legacy drift", drift, balanceCount)
+		}
+		contractId, _, err := CreateContract(ctx, networkId, clientId, networkIdB, clientIdB, ByteCount(1024*1024))
 		connect.AssertEqual(t, nil, err)
 		connect.AssertEqual(t, ByteCount(1024*1024), Testing_NetEscrowByteCount(ctx, balanceId))
+		keys := redisContractReservationKeys(balanceId)
+		var originalExpiry float64
+		server.Redis(ctx, func(r server.RedisClient) {
+			amount, err := r.HGet(ctx, keys[1], contractId.String()).Int64()
+			server.Raise(err)
+			if amount != Mib {
+				t.Fatal("public admission did not preserve its exact request token", amount)
+			}
+			originalExpiry, err = r.ZScore(ctx, keys[2], contractId.String()).Result()
+			server.Raise(err)
+		})
 
 		// drift on top of a live reservation: reconcile removes only the drift and
 		// keeps the open contract's reservation (the targeted per-network form)
 		server.Redis(ctx, func(r server.RedisClient) {
 			r.IncrBy(ctx, netEscrowKey(balanceId), int64(5*1024*1024))
 		})
-		drift, balanceCount := ReconcileNetEscrowForNetwork(ctx, networkId, true)
+		drift, balanceCount = ReconcileNetEscrowForNetwork(ctx, networkId, true)
 		connect.AssertEqual(t, 1, balanceCount)
 		connect.AssertEqual(t, ByteCount(5*1024*1024), drift)
 		connect.AssertEqual(t, ByteCount(1024*1024), Testing_NetEscrowByteCount(ctx, balanceId))
 		connect.AssertEqual(t, initialBalance-ByteCount(1024*1024), GetActiveTransferBalanceByteCount(ctx, networkId))
+		server.Redis(ctx, func(r server.RedisClient) {
+			amount, err := r.HGet(ctx, keys[1], contractId.String()).Int64()
+			server.Raise(err)
+			expiry, err := r.ZScore(ctx, keys[2], contractId.String()).Result()
+			server.Raise(err)
+			if amount != Mib || expiry != originalExpiry {
+				t.Fatal("legacy reconciliation changed a public request's amount or lease", amount, expiry, originalExpiry)
+			}
+		})
 	})
 }
 
@@ -2314,6 +2349,23 @@ func TestNetEscrowKeyFormatAndTtl(t *testing.T) {
 		connect.AssertEqual(t, nil, err)
 		err = CloseContract(ctx, contractId, clientIdB, 0, false)
 		connect.AssertEqual(t, nil, err)
+		// A legacy close now queues durable work. The contract must retain
+		// its reservation until the actual bounded worker commits settlement;
+		// an acknowledged close alone cannot justify a final mirror check.
+		server.Db(ctx, func(conn server.PgConn) {
+			var pending, open, unsettled bool
+			server.Raise(conn.QueryRow(ctx, `
+				SELECT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1),
+				       (SELECT outcome IS NULL FROM transfer_contract WHERE contract_id=$1),
+				       EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1 AND NOT settled)
+			`, contractId).Scan(&pending, &open, &unsettled))
+			connect.AssertEqual(t, true, pending && open && unsettled)
+		})
+		flushed, err := FlushLegacySettlements(ctx, int(contractId[15])%LegacySettlementShardCount, nil, 1)
+		connect.AssertEqual(t, nil, err)
+		connect.AssertEqual(t, 1, flushed.Visited)
+		connect.AssertEqual(t, 1, flushed.Completed)
+		connect.AssertEqual(t, 0, flushed.Failed)
 		connect.AssertEqual(t, ByteCount(0), Testing_NetEscrowByteCount(ctx, balanceId))
 		connect.AssertEqual(t, initialBalanceA+initialBalanceB, GetActiveTransferBalanceByteCount(ctx, networkId))
 		server.Redis(ctx, func(r server.RedisClient) {
@@ -2344,7 +2396,8 @@ func TestNetEscrowKeyFormatAndTtl(t *testing.T) {
 // A durable balance may intentionally be valid for decades, but its Redis
 // reservation mirror must remain rolling state. Before the cap, every contract
 // on a 100-year balance issued EXPIREAT for 2126 and retained the key for the
-// balance's full lifetime.
+// balance's full lifetime. This root pins the legacy mirror; the separate
+// public request-lease root pins the unconditional Redis admission contract.
 func TestNetEscrowLongLivedBalanceTtlIsCapped(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -2375,14 +2428,7 @@ func TestNetEscrowLongLivedBalanceTtlIsCapped(t *testing.T) {
 		balances := GetActiveTransferBalances(ctx, sourceNetworkId)
 		connect.AssertEqual(t, len(balances), 1)
 
-		_, _, err = CreateContract(
-			ctx,
-			sourceNetworkId,
-			sourceClientId,
-			destinationNetworkId,
-			destinationClientId,
-			Mib,
-		)
+		_, err = createTransferEscrow(ctx, sourceNetworkId, sourceClientId, destinationNetworkId, destinationClientId, Mib)
 		connect.AssertEqual(t, err, nil)
 		server.Redis(ctx, func(r server.RedisClient) {
 			ttl := r.TTL(ctx, netEscrowKey(balances[0].BalanceId)).Val()
