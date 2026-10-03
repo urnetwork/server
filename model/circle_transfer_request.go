@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"runtime"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -40,6 +41,7 @@ type CircleTransferRequest struct {
 	ChallengeId     *string
 	ChallengeStatus string
 	SubmissionCount int64
+	ReviewRequired  bool
 }
 
 // USDC has six decimal places. Reject precision loss instead of rounding an
@@ -64,16 +66,31 @@ func circleTransferRequestBody(basis CircleTransferBasis, key, requestId server.
 		TokenId        string    `json:"tokenId"`
 		FeeLevel       string    `json:"feeLevel"`
 		RefId          string    `json:"refId"`
-	}{key, []string{amount}, basis.Destination, basis.WalletId, basis.TokenId, "LOW", requestId.String()})
+	}{IdempotencyKey: key, Amounts: []string{amount}, Destination: basis.Destination, WalletId: basis.WalletId, TokenId: basis.TokenId, FeeLevel: "LOW", RefId: requestId.String()})
 	return string(body), err
 }
 
-const circleTransferColumns = `network_id,user_id,request_id,idempotency_key,basis,request_body,challenge_id,challenge_status,submission_count`
+const circleTransferColumns = `network_id,user_id,request_id,idempotency_key,basis,request_body,challenge_id,challenge_status,submission_count,review_required`
+
+// Database outages preserve ordinary API errors without swallowing programming
+// panics or caller cancellation. The exact request remains retained on failure.
+func recoverCircleTransferStorage(ctx context.Context, returnErr *error) {
+	if value := recover(); value != nil {
+		if _, ok := value.(runtime.Error); ok {
+			panic(value)
+		}
+		if err, ok := value.(error); ok {
+			*returnErr = errors.Join(err, ctx.Err())
+			return
+		}
+		panic(value)
+	}
+}
 
 func scanCircleTransfer(row pgx.Row) (*CircleTransferRequest, error) {
 	value := &CircleTransferRequest{}
 	var basis string
-	if err := row.Scan(&value.NetworkId, &value.UserId, &value.RequestId, &value.IdempotencyKey, &basis, &value.Body, &value.ChallengeId, &value.ChallengeStatus, &value.SubmissionCount); err != nil {
+	if err := row.Scan(&value.NetworkId, &value.UserId, &value.RequestId, &value.IdempotencyKey, &basis, &value.Body, &value.ChallengeId, &value.ChallengeStatus, &value.SubmissionCount, &value.ReviewRequired); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(basis), &value.Basis); err != nil {
@@ -87,6 +104,7 @@ func scanCircleTransfer(row pgx.Row) (*CircleTransferRequest, error) {
 }
 
 func GetCircleTransferRequest(ctx context.Context, networkId, userId, requestId server.Id) (value *CircleTransferRequest, err error) {
+	defer recoverCircleTransferStorage(ctx, &err)
 	if err = ctx.Err(); err != nil {
 		return
 	}
@@ -102,11 +120,15 @@ func GetCircleTransferRequest(ctx context.Context, networkId, userId, requestId 
 // Request creation commits before external I/O. The first writer's key wins;
 // a concurrent identical request reuses it rather than replacing it.
 func RetainCircleTransferRequest(ctx context.Context, networkId, userId, requestId server.Id, basis CircleTransferBasis) (value *CircleTransferRequest, returnErr error) {
+	defer recoverCircleTransferStorage(ctx, &returnErr)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if networkId == (server.Id{}) || userId == (server.Id{}) || requestId == (server.Id{}) || basis.CircleUserId == (server.Id{}) || len(basis.WalletId) == 0 || len(basis.WalletId) > 256 || len(basis.TokenId) == 0 || len(basis.TokenId) > 256 || len(basis.Blockchain) == 0 || len(basis.Blockchain) > 64 || len(basis.Destination) == 0 || len(basis.Destination) > 256 {
 		return nil, ErrCircleTransferRequestChanged
+	}
+	if err := server.RequireCircleTransferSchema(ctx); err != nil {
+		return nil, err
 	}
 	key := server.RequireParseId(uuid.NewString())
 	body, err := circleTransferRequestBody(basis, key, requestId)
@@ -146,12 +168,20 @@ func lockCircleTransfer(ctx context.Context, tx server.PgTx, expected *CircleTra
 // A known challenge is always read rather than submitted again. Unknown
 // prior outcomes may recover only through Circle's same-key response contract.
 func BeginCircleTransferSubmission(ctx context.Context, expected *CircleTransferRequest) (value *CircleTransferRequest, returnErr error) {
+	defer recoverCircleTransferStorage(ctx, &returnErr)
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := server.RequireCircleTransferSchema(ctx); err != nil {
 		return nil, err
 	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		value, returnErr = lockCircleTransfer(ctx, tx, expected)
 		server.Raise(returnErr)
+		if value.ReviewRequired {
+			returnErr = ErrCircleTransferObservation
+			return
+		}
 		if value.ChallengeId != nil {
 			return
 		}
@@ -172,7 +202,11 @@ func circleTransferTerminal(status string) bool {
 // Only normalized public challenge evidence is stored; arbitrary response
 // bodies, bearer tokens and session encryption keys never enter this journal.
 func ObserveCircleTransfer(ctx context.Context, expected *CircleTransferRequest, challengeId, status, responseDigest string, httpStatus int) (value *CircleTransferRequest, returnErr error) {
+	defer recoverCircleTransferStorage(ctx, &returnErr)
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := server.RequireCircleTransferSchema(ctx); err != nil {
 		return nil, err
 	}
 	if len(challengeId) > 256 || len(responseDigest) != 64 {
@@ -190,11 +224,20 @@ func ObserveCircleTransfer(ctx context.Context, expected *CircleTransferRequest,
 	encoded, err := json.Marshal(struct {
 		ChallengeId, Status, ResponseSha256 string
 		HttpStatus                          int
-	}{challengeId, status, responseDigest, httpStatus})
+	}{ChallengeId: challengeId, Status: status, ResponseSha256: responseDigest, HttpStatus: httpStatus})
 	if err != nil {
 		return nil, err
 	}
-	digest := sha256.Sum256(encoded)
+	// Keep the first exact response witness for each semantic observation.
+	// Changing response timestamps must not consume custody capacity forever.
+	semantic, err := json.Marshal(struct {
+		ChallengeId, Status string
+		HttpStatus          int
+	}{ChallengeId: challengeId, Status: status, HttpStatus: httpStatus})
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(semantic)
 	server.Tx(ctx, func(tx server.PgTx) {
 		value, returnErr = lockCircleTransfer(ctx, tx, expected)
 		server.Raise(returnErr)
@@ -210,11 +253,13 @@ func ObserveCircleTransfer(ctx context.Context, expected *CircleTransferRequest,
 			return
 		}
 		if value.ChallengeId != nil && *value.ChallengeId != challengeId {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE circle_transfer_request SET review_required=true WHERE network_id=$1 AND user_id=$2 AND request_id=$3`, value.NetworkId, value.UserId, value.RequestId))
 			returnErr = ErrCircleTransferObservation
 			return
 		}
 		if circleTransferTerminal(value.ChallengeStatus) {
 			if circleTransferTerminal(status) && status != value.ChallengeStatus {
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE circle_transfer_request SET review_required=true WHERE network_id=$1 AND user_id=$2 AND request_id=$3`, value.NetworkId, value.UserId, value.RequestId))
 				returnErr = ErrCircleTransferObservation
 			}
 			return

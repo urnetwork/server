@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"io"
 	"math/big"
-	mathrand "math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -167,15 +166,19 @@ func WalletBalance(session *session.ClientSession) (*WalletBalanceResult, error)
 }
 
 type WalletCircleTransferOutArgs struct {
+	// Created once by the caller for a user intent and retained for every retry.
+	RequestId           *server.Id      `json:"request_id"`
 	ToAddress           string          `json:"to_address"`
 	AmountUsdcNanoCents model.NanoCents `json:"amount_usdc_nano_cents"`
 	Terms               bool            `json:"terms"`
 }
 
 type WalletCircleTransferOutResult struct {
-	UserToken   *CircleUserToken              `json:"user_token,omitempty"`
-	ChallengeId string                        `json:"challenge_id,omitempty"`
-	Error       *WalletCircleTransferOutError `json:"error,omitempty"`
+	RequestId       *server.Id                    `json:"request_id,omitempty"`
+	ChallengeStatus string                        `json:"challenge_status,omitempty"`
+	UserToken       *CircleUserToken              `json:"user_token,omitempty"`
+	ChallengeId     string                        `json:"challenge_id,omitempty"`
+	Error           *WalletCircleTransferOutError `json:"error,omitempty"`
 }
 
 type WalletCircleTransferOutError struct {
@@ -186,78 +189,14 @@ func WalletCircleTransferOut(
 	walletCircleTransferOut *WalletCircleTransferOutArgs,
 	session *session.ClientSession,
 ) (result *WalletCircleTransferOutResult, returnErr error) {
-	if !walletCircleTransferOut.Terms {
-		returnErr = fmt.Errorf("You must accept the terms of transfer.")
-		return
+	if session == nil || session.Ctx == nil {
+		return nil, fmt.Errorf("customer transfer requires a caller context")
 	}
-
-	walletInfo, err := findMostRecentCircleWallet(session)
-	if err != nil {
-		returnErr = err
-		return
+	client, _ := session.Ctx.Value(circleTransferClientKey{}).(*circleTransferClient)
+	if client == nil {
+		client = &circleTransferClient{}
 	}
-
-	if walletInfo == nil {
-		returnErr = fmt.Errorf("no wallet info found")
-		return
-	}
-
-	circleUserToken, err := createCircleUserToken(session)
-	if err != nil {
-		returnErr = err
-		return
-	}
-
-	// retry with timeout
-	for i := range 4 {
-		select {
-		case <-session.Ctx.Done():
-			returnErr = fmt.Errorf("Done.")
-			return
-		case <-time.After(500*time.Millisecond + time.Duration(mathrand.Int63n(int64(i+1)*int64(time.Second)))):
-		}
-
-		result, returnErr = server.HttpPostRequireStatusOk(
-			session.Ctx,
-			"https://api.circle.com/v1/w3s/user/transactions/transfer",
-			map[string]any{
-				"userId":             circleUserToken.circleUserId,
-				"destinationAddress": walletCircleTransferOut.ToAddress,
-				"amounts": []string{
-					fmt.Sprintf("%f", model.NanoCentsToUsd(walletCircleTransferOut.AmountUsdcNanoCents)),
-				},
-				"idempotencyKey": server.NewId(),
-				"tokenId":        walletInfo.TokenId,
-				"walletId":       walletInfo.WalletId,
-				"feeLevel":       "LOW",
-			},
-			func(header http.Header) {
-				header.Add("Accept", "application/json")
-				header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
-				header.Add("X-User-Token", circleUserToken.UserToken)
-			},
-			func(response *http.Response, responseBodyBytes []byte) (*WalletCircleTransferOutResult, error) {
-				challengeId, err := parseCircleChallengeId(responseBodyBytes)
-
-				if err == nil {
-					return &WalletCircleTransferOutResult{
-						UserToken:   circleUserToken,
-						ChallengeId: challengeId,
-					}, nil
-				} else {
-					return &WalletCircleTransferOutResult{
-						Error: &WalletCircleTransferOutError{
-							Message: "Bad challenge response.",
-						},
-					}, nil
-				}
-			},
-		)
-		if returnErr == nil {
-			return
-		}
-	}
-	return
+	return client.transfer(walletCircleTransferOut, session)
 }
 
 type GetPublicKeyResult struct {
