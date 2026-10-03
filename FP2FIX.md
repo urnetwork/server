@@ -6022,3 +6022,45 @@ expanded subscriber classification and Main shadow coverage remain unfinished.
 A capped Main log sample found 64 Taskworker ForceCloseOpenContractIds panics
 classified as insufficient escrow; generation, close outcome and unsampled
 generator failures remain unknown. FP2FIX is not complete.
+
+### 2026-10-03 08:14 UTC coverage, native reader and legacy contention
+
+The delayed 07:50 UTC runtime sample qualified 46/68 serving slots for release
+5600: API 20/20, Taskworker 8/8, Connect 10/20 and Proxy 8/20. Native edge0
+inspection separately verified five bf7 Connect processes and one older c56
+draining predecessor across five blocks. Those six processes used about 25.06
+GiB RSS, including 13.55 GiB for the predecessor. Different time namespaces
+prevent a qualified native-start/metrics join; neither this host nor self-reported
+metrics prove full-fleet predecessor retirement.
+
+The 07:42 URL census reported 112,020 eligible providers, 109,761 quota-complete
+and 109,743 security-clear complete: approximately 98% rolling ten-measured-run
+coverage, with 7,472 runs needed. Four shard-owner/hourly ranges were unobserved,
+so aggregate throughput remains unqualified. The 08:08 exact-release Taskworker
+metric read found eight source-qualified bucket publishers: per-process native
+Quality 28,370–28,399, Speed 29,943–29,974 and Online 111,999. These overlapping
+global buckets must not be summed across processes. Scrape freshness does not
+prove the isolated underlying database refresh succeeded recently.
+
+All twenty exact-release API effective native-reader flags were false. The
+disabled flag selects compatibility Redis union loading, rather than bounded
+native Redis pages; it does not mean discovery bypasses Redis altogether.
+Selected candidates still undergo database-backed hard exclusions. Native page
+publication and activation are being validated independently of ARIN policy two.
+
+The 07:42 PostgreSQL CPU sample was 26.161 cores of 96 logical CPUs, or 27.25%,
+above the monitor's 25% warning band. Financial contention persisted at the
+07:51 and 08:07 cadences, with final selected waiter counts 89 and 90. The
+07:57 bounded holder graph positively matched unmarked legacy settlement's
+shared transfer_balance lock and metadata's NOT redis_reserved branch. It
+selected four seeds from 89 candidates and does not attribute the entire graph
+or CPU to that path. A private deferred-legacy-settlement correction passed its
+first 64-client held-row control; durability, rollback, mixed-writer and larger
+controls remain. Its migration must follow canonical Main migrations 759–761,
+as 762, rather than collide with already-merged migrations.
+
+The protected ARIN fleet attempt reached Main but failed in host inventory,
+before retained native inventory or shadow output. Cleanup completed without
+unreleased hosts. Its exact transport/native-stage cause remains unproved;
+ARIN policy two remains inactive. Provider IPv6 findings are excluded from goal
+acceptance under the user's current rollout instruction. FP2FIX is not complete.
