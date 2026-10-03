@@ -1420,6 +1420,13 @@ func updateClientReliabilityRunningLookbackAtBoundsInTx(
 			newMax,
 		)
 	}
+	// Score publication revisits windows already committed by the checkpointed
+	// path. Their rows and pruning are complete: preserve the trusted marker
+	// instead of repeating empty aggregates, a full prune and token writes.
+	// Compute every mandatory/periodic repair above before taking this path.
+	if !recompute && prev.minBlockNumber == newMin && prev.maxBlockNumber == newMax {
+		return
+	}
 
 	if recompute {
 		degradedBlockNumbers := reliabilityDegradedBlocks(ctx, tx, newMin, newMax)
