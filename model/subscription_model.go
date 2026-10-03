@@ -2971,8 +2971,9 @@ func meanContractByteCount(first, second ByteCount) (ByteCount, error) {
 	return lower + (upper-lower)/2, nil
 }
 
-// Claims the outcome and debits consumed payer credit in one transaction.
-// Lock contract, balances (by id), then reservation revisions in that order.
+// Claims the outcome and records exact payer consumption. Current Redis
+// contracts append independent debit records; a bounded worker batches balance
+// writes. Legacy contracts retain their original atomic reservation authority.
 func settleEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -2982,14 +2983,23 @@ func settleEscrowInTx(
 	// CloseContract already owns this lock; direct and recovery settlement
 	// must acquire it before balance locks to keep the same lock order.
 	server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id = $1 FOR UPDATE`, contractId))
-	result, err := tx.Query(ctx, `
-		SELECT transfer_balance.balance_id
-		FROM transfer_balance
-		INNER JOIN transfer_escrow USING (balance_id)
-		WHERE transfer_escrow.contract_id = $1
-		ORDER BY transfer_balance.balance_id
-		FOR UPDATE OF transfer_balance
-	`, contractId)
+	// The immutable reservation mode is read under the owning contract lock.
+	// Current contracts must never queue behind another contract's grant debit.
+	var asyncDebit bool
+	server.Raise(tx.QueryRow(ctx, `SELECT COALESCE(bool_and(redis_reserved),false)
+        FROM transfer_escrow WHERE contract_id=$1`, contractId).Scan(&asyncDebit))
+	var result pgx.Rows
+	var err error
+	if asyncDebit {
+		result, err = tx.Query(ctx, `SELECT balance_id FROM transfer_escrow WHERE contract_id=$1 ORDER BY balance_id`, contractId)
+	} else {
+		result, err = tx.Query(ctx, `
+			SELECT transfer_balance.balance_id
+			FROM transfer_balance INNER JOIN transfer_escrow USING (balance_id)
+			WHERE transfer_escrow.contract_id=$1
+			ORDER BY transfer_balance.balance_id FOR UPDATE OF transfer_balance
+		`, contractId)
+	}
 	lockedBalanceIds := []server.Id{}
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
@@ -3196,16 +3206,20 @@ func settleEscrowInTx(
 	if returnErr != nil || !closed {
 		return
 	}
-	// A terminal outcome removes its reservation from the census immediately.
-	// Its consumed credit must disappear in this same commit, even if every
-	// asynchronous post is lost. Replay cannot debit after another claimant.
-	for _, balanceId := range lockedBalanceIds {
-		if payout := sweepPayouts[balanceId].payoutByteCount; payout > 0 {
-			server.RaisePgResult(tx.Exec(ctx, `
-				UPDATE transfer_balance
-				SET balance_byte_count = balance_byte_count - $2
-				WHERE balance_id = $1
-			`, balanceId, payout))
+	if asyncDebit {
+		// Journal insertion and outcome claim share a commit. No provider payout
+		// row is used as a proxy for payer consumption or as the replay fence.
+		for _, balanceId := range lockedBalanceIds {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_debit_journal
+                (contract_id,balance_id,debit_byte_count,shard) VALUES($1,$2,$3,$4)`,
+				contractId, balanceId, sweepPayouts[balanceId].payoutByteCount, transferDebitShard(balanceId)))
+		}
+	} else {
+		for _, balanceId := range lockedBalanceIds {
+			if payout := sweepPayouts[balanceId].payoutByteCount; payout > 0 {
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance
+                    SET balance_byte_count=balance_byte_count-$2 WHERE balance_id=$1`, balanceId, payout))
+			}
 		}
 	}
 	publishSettlementNetEscrowSnapshots(ctx, tx, reservationSnapshots, positiveReservations, true)
@@ -3277,16 +3291,9 @@ func settleEscrowInTx(
 
 	if len(redisReservations) > 0 {
 		posts = append(posts, func() any {
-			// A retained callback from a rolled-back transaction cannot release
-			// a still-open contract. The committed check needs only its PK.
-			var terminal bool
-			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx,
-					`SELECT EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$1 AND outcome IS NOT NULL)`, contractId).Scan(&terminal))
-			})
-			if terminal {
-				releaseRedisContractReservations(ctx, contractId, redisReservations)
-			}
+			// Read committed journal state, not captured transaction predictions.
+			// Lost posts leave the original reservation conservatively outstanding.
+			ReconcileRedisContractReservation(ctx, contractId)
 			return nil
 		})
 	}

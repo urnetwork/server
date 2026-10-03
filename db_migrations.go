@@ -9456,4 +9456,6 @@ var migrations = []any{
 	newSqlMigration(providerPaymentBonusSchemaSql),
 	// The earning asset boundary is prepared explicitly and cannot drift with a file edit.
 	newSqlMigration(providerPayoutBoundarySchemaSql),
+	// Independent settlement records keep shared grant writes out of contract closure.
+	newSqlMigration(transferDebitJournalSchemaSql),
 }

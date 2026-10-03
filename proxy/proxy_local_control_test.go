@@ -109,6 +109,11 @@ func TestProxyCriticalControlUsesLocalAuthorityWithoutHttp(t *testing.T) {
 		}
 		h.closeProvider(t)
 		settleAllEscrowedContracts(t, ctx, h.pdNetworkId)
+		for shard := range model.TransferDebitShardCount {
+			if _, err := model.FlushTransferDebits(ctx, shard, nil, 64); err != nil {
+				t.Fatal("asynchronous payer debit", err)
+			}
+		}
 		payout := settledPayoutSum(ctx, h.pdNetworkId)
 		if payout < 16*testMib || pgActiveBalanceSum(ctx, h.pdNetworkId) != opts.pdInitialBalance-payout {
 			t.Fatal("actual transferred usage did not reconcile against the hosted payer")

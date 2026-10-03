@@ -103,6 +103,14 @@ if ARGV[1]=='release' then
  if existing then
   total=sub(total,existing); redis.call('HDEL',KEYS[2],ARGV[2]); redis.call('ZREM',KEYS[3],ARGV[2])
  end
+elseif ARGV[1]=='settle' then
+ -- Never resurrect a token after the durable batch already released it.
+ -- A missing/expired Redis generation retains its documented approximation.
+ if existing then
+  if less(existing,ARGV[4]) then return redis.error_reply('settled consumption exceeds reservation') end
+  total=sub(total,sub(existing,ARGV[4])); amount=ARGV[4]
+  redis.call('HSET',KEYS[2],ARGV[2],amount)
+ end
 elseif ARGV[1]=='reserve' or ARGV[1]=='restore' then
  if existing then
   if less(ARGV[4],existing) then return redis.error_reply('reservation retry changed amount') end
@@ -247,11 +255,13 @@ func ReconcileRedisContractReservation(ctx context.Context, contractId server.Id
 		amount          ByteCount
 		terminal        bool
 		ageMilliseconds float64
+		pending         *ByteCount
 	}
 	var reservations []reservation
 	server.Db(ctx, func(conn server.PgConn) {
 		rows, err := conn.Query(ctx, `SELECT escrow.balance_id,escrow.balance_byte_count,contract.outcome IS NOT NULL,
-            GREATEST(0,EXTRACT(epoch FROM (clock_timestamp() AT TIME ZONE 'UTC'-contract.create_time))*1000)::double precision
+            GREATEST(0,EXTRACT(epoch FROM (clock_timestamp() AT TIME ZONE 'UTC'-contract.create_time))*1000)::double precision,
+            (SELECT debit_byte_count FROM transfer_debit_journal WHERE contract_id=contract.contract_id AND balance_id=escrow.balance_id AND NOT applied)
             FROM transfer_contract AS contract
             CROSS JOIN LATERAL (SELECT balance_id,balance_byte_count,redis_reserved FROM transfer_escrow
                 WHERE contract_id=contract.contract_id OFFSET 0) AS escrow
@@ -259,7 +269,7 @@ func ReconcileRedisContractReservation(ctx context.Context, contractId server.Id
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				var value reservation
-				server.Raise(rows.Scan(&value.id, &value.amount, &value.terminal, &value.ageMilliseconds))
+				server.Raise(rows.Scan(&value.id, &value.amount, &value.terminal, &value.ageMilliseconds, &value.pending))
 				reservations = append(reservations, value)
 			}
 		})
@@ -267,7 +277,14 @@ func ReconcileRedisContractReservation(ctx context.Context, contractId server.Id
 	for _, value := range reservations {
 		remaining := redisContractReservationLease - time.Duration(value.ageMilliseconds)*time.Millisecond
 		operation := "restore"
-		if value.terminal || remaining < time.Millisecond {
+		if value.terminal {
+			operation = "release"
+			if value.pending != nil {
+				operation = "settle"
+				value.amount = *value.pending
+			}
+			remaining = redisContractReservationLease
+		} else if remaining < time.Millisecond {
 			operation = "release"
 			remaining = redisContractReservationLease
 		}

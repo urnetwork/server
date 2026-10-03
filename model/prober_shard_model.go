@@ -378,6 +378,7 @@ func ReapProberShard(ctx context.Context, key ProberShardKey) (deleted bool, ret
 			var blocked bool
 			server.Raise(tx.QueryRow(ctx, `SELECT
 				EXISTS (SELECT 1 FROM transfer_escrow WHERE balance_id=$1 AND NOT settled) OR
+				EXISTS (SELECT 1 FROM transfer_debit_journal WHERE balance_id=$1) OR
 				EXISTS (SELECT 1 FROM transfer_balance WHERE network_id=$2 AND balance_id<>$1)`, owner.BalanceId, owner.NetworkId).Scan(&blocked))
 			if blocked {
 				return

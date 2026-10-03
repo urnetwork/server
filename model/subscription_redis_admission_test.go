@@ -316,11 +316,16 @@ func TestRedisAdmissionDurableUsageAndLostSettlementPost(t *testing.T) {
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$1`, f.balanceId).Scan(&credit))
 		})
-		if credit != 983 || Testing_NetEscrowByteCount(ctx, f.balanceId) != 100 {
-			t.Fatal("lost post did not preserve durable debit plus temporary admission debt")
+		if credit != 1000 || Testing_NetEscrowByteCount(ctx, f.balanceId) != 100 {
+			t.Fatal("lost post did not preserve deferred credit plus conservative admission debt")
 		}
 		ReconcileRedisContractReservation(ctx, escrow.ContractId)
 		server.RunPosts(ctx, posts...)
+		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 17 {
+			t.Fatal("pending consumed credit was released before writeback", got)
+		}
+		_, _, _, flushErr := flushTransferDebitBalance(ctx, f.balanceId)
+		server.Raise(flushErr)
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 0 {
 			t.Fatal("recovered closed contract retained debt", got)
 		}

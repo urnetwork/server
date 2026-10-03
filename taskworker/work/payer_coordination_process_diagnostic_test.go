@@ -291,6 +291,20 @@ func TestPrivateProviderLoadedPeerProcess(t *testing.T) {
 			close(release)
 			report = <-result
 			previous = report.Contracts
+		case "prepare_settle":
+			ready, release := make(chan struct{}), make(chan struct{})
+			result := make(chan privateLoadProcessReport, 1)
+			go func() { result <- privateLoadSettleWave(ctx, t, f, previous, ready, release) }()
+			<-ready
+			if err := encoder.Encode(privateLoadProcessReport{Ready: true}); err != nil {
+				t.Fatal(err)
+			}
+			var next string
+			if err := decoder.Decode(&next); err != nil || next != "go" {
+				t.Fatal("settlement barrier not released")
+			}
+			close(release)
+			report = <-result
 		case "create":
 			report = privateLoadCreateWave(ctx, t, f)
 			previous = report.Contracts

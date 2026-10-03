@@ -130,3 +130,64 @@ finite operation/result labels; it includes token replay and does not count
 committed contracts. Legacy cache counters cover legacy rows only. Missing or
 capped query families remain unknown, and faster local tests do not establish
 Main recovery or the FP2 coverage target.
+
+## Asynchronous settlement writeback (migration 758)
+
+Current Redis-reserved contracts commit their terminal outcome and exact payer
+consumption to `transfer_debit_journal` without locking/updating their shared
+grant, revision or reservation snapshot. A journal row belongs to one
+contract/balance and does not depend on provider payout eligibility. Unmarked
+legacy contracts keep the existing synchronous debit path.
+
+Redis keeps the consumed portion reserved until the journal worker commits a
+batch. The worker takes one grant with `FOR NO KEY UPDATE SKIP LOCKED`, applies
+at most 512 records in one debit, marks those records applied in the same
+transaction, and releases all PG locks before bounded Redis I/O. It deletes the
+applied records only after Redis acknowledges release. Lost callbacks, rollback,
+partial pipelines, lost acknowledgment and replay cannot erase or repeat the
+durable debit. Lost metadata callbacks are reconstructed from the journal.
+
+This exchanges immediate PG balance consistency for contention-free current
+settlement and eventual writeback. During a healthy delay, PG credit is high by
+pending consumption and Redis retains that consumption. Missing/expired Redis
+state or overlapping old settlement callbacks may temporarily under-reserve;
+there is no claim of absolute cross-store consistency. The durable journal
+remains the recovery source. Do not delete it, synthesize provider payout rows,
+or remove its balance-retention guard to make balances appear settled.
+
+Sixteen independent recurring tasks keep durable balance cursors. Each call
+visits at most 64 balances within 15s, with a 2s SQL/250ms lock bound per batch and
+1s Redis deadline. Full successful pages continue immediately; a busy or failed
+key advances the cursor on the regular 2s cadence. A failure returns its cursor
+before another slow key can consume the owner deadline. A permanently locked
+first grant cannot starve later grants. Sixteen scheduled partitions do not
+establish the number of actual executing workers. Use SIGNALS §2.5a to observe
+both pending and applied-but-unreleased age, missing schedules and actual
+source-qualified owner/completion evidence.
+
+Migrate the canonical 756/757/758 sequence before selecting this code. Deploy
+Taskworker recovery owners promptly with API/Connect/Proxy settlement writers.
+756/757 preserve upstream payout provenance and immutable earning authority;
+old manual bonus amount edits are intentionally refused by 756 and must use the
+current provenance-preserving operation. The journal is backward-compatible
+with old settlement replay (old outcomes have no journal); new pending debt
+prevents both new cleanup and old balance-delete paths from removing its grant.
+Retire old writers to close their early-Redis-release overlap. Never roll back
+by dropping the journal: drain it with a compatible worker first. Old legacy
+settlement still has shared-row contention and needs separate measured closure.
+
+`./test.sh` includes the mandatory real-PG/Redis contention gates. Focused gate:
+
+```sh
+go test -p=1 -race -count=1 -timeout=5m ./model ./taskworker/work \
+  -run '^(TestAsyncDebit.*|TestRedisSettlementCompletesWithSharedFinancialRowsHeld|TestContractSettlementSameNetworkLargeNContentionFree|TestTransferDebitTaskPartitionsAndBoundedContinuation)$'
+```
+
+The large settlement test uses 512 clients and two independent processes with a
+held shared grant and actual public/controller closes. Set
+`URNETWORK_CONTRACT_CONTENTION_CLIENTS=1024` (or an even 256–4096) for the standalone
+loaded run. Held-row completion and simultaneous process overlap prevent a
+hidden local serializer from turning a queue regression into a false pass.
+The old 35274673 ordering times out all 64 deterministic public held-row closes;
+the candidate completes them before the holder releases. Local results are not
+a Main capacity or CPU-share measurement.
