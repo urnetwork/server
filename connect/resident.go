@@ -1397,6 +1397,10 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				if h1RelayLineageTraceEnabled {
 					endH1RelayLineageBatch(trace, "exchange_client_write_end", err == nil)
 				}
+				// WriteMessages releases pool ownership. Drop the writer's stale
+				// slice references too, so idle or smaller later batches cannot
+				// keep completed payload backing arrays reachable.
+				clear(batch)
 				batch = batch[:0]
 				if err != nil {
 					return false
@@ -2564,6 +2568,9 @@ func (self *ExchangeConnection) Run() {
 			if h1RelayLineageTraceEnabled {
 				endH1RelayLineageBatch(trace, "exchange_socket_write_end", err == nil)
 			}
+			// A zero length preserves backing-array references. Release each
+			// completed payload before retaining the batch index for reuse.
+			clear(batch)
 			batch = batch[:0]
 			if err != nil {
 				return false
