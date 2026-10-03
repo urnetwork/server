@@ -1780,6 +1780,16 @@ not page or authorize cancellation. Verify buffer work and affected throughput
 after natural horizon release before claiming recovery. Do not cancel backups,
 run maintenance, alter grants, or widen financial admission from this evidence.
 
+The 2026-10-03 07:57 bounded financial-holder graph source-matched the selected
+legacy grant and `NOT redis_reserved` metadata paths; its terminal selected
+holder was active metadata work. Seed selection was truncated, so this is a
+selected chain, not attribution of all 89 candidate waiters or a service through
+PgBouncer. The earlier 07:32 empty graph was a valid short healthy observation,
+not sustained recovery. §2.5b records the per-contract intent repair and retains
+failed/pending financial work even when asynchronous acknowledgement lowers
+foreground waits. Keep CPU and the original queue observation open until exact
+runtime deployment and fresh complete observations establish improvement.
+
 ### 1.3d Empty transfer-escrow write amplification
 Probe: `escrow-amplification`
 
@@ -4493,6 +4503,7 @@ export from one correlated duration.
 
 ### 2.5a Asynchronous payer debit recovery
 Probe: `transfer-debits`
+Classes: `debit-writeback-lag`, `debit-worker-missing`.
 
 Migration 758 moves current Redis-marked contract consumption into a per-contract
 journal in the outcome transaction. Sixteen indexed partitions batch balance
@@ -4534,8 +4545,79 @@ leave conservative reservations. Journal applied bits prevent duplicate durable
 debit after Redis failure or lost acknowledgment. Redis loss/lease expiry and
 mixed old release callbacks can temporarily under-reserve; reconciliation and
 bounded journal drain restore the ledger without using provider payout eligibility
-as payer consumption. Legacy unmarked contracts retain their existing synchronous
-financial authority and remain an explicit separate contention boundary.
+as payer consumption. Legacy unmarked contracts retain their original synchronous financial authority
+until migration 763 and its worker are deployed; §2.5b owns that separate
+contention boundary and its eventual settlement control.
+
+### 2.5b Legacy settlement intent recovery
+Probe: `legacy-settlements`
+Classes: `legacy-settlement-pending`, `legacy-settlement-worker-missing`.
+
+Migration 763 gives legacy unmarked or mixed escrow contracts an independent
+per-contract settlement intent. Foreground acknowledgement leaves the outcome
+unset and the SQL reservation intact. Sixteen bounded recovery partitions take
+queue, contract and sorted grant ownership with `SKIP LOCKED`. One transaction
+commits payer debit, provider sweep/attribution, durable provider totals, escrow
+metadata, final outcome and intent deletion. Provider totals from this worker go
+to the existing `account_balance.provided_*` fields; the API already adds those
+to the Redis deltas from other writers. They are not incremented in Redis again.
+
+The outcome trigger refuses an old writer after an intent has been accepted;
+the worker deletes its locked intent inside the financial transaction before
+claiming the outcome. Rollback restores all state. An old writer that wins before
+enqueue remains valid. A rolling or rollback deployment must retain a worker
+that understands 763 until every intent drains. The intent's contract foreign
+key fences old retention statements atomically, including their dependent
+rows; current retention explicitly preserves the intent. Unsettled escrow still
+protects the grant from expiry and shard deletion.
+
+The probe uses 48 indexed oldest-row seeks: all 16 partitions and each finite
+state `none`, `accounting`, `operational`, including rows whose next attempt is
+in the future. Pending age warns at 60 seconds; any retained accounting or
+operational failure warns immediately. Any age at 300 seconds pages. These are
+initial design escalation bands, not measured Main capacity. Every partition
+must share a source clock within 30 seconds. Partial, duplicate, malformed or
+stale evidence is unknown. Before schema 763 the probe is inapplicable; a missing
+table after installation is a visibility error. A missing scheduled partition
+warns after two observations; a future task lease alone is not a live owner.
+
+An accounting rejection keeps its reservation and dispute, stores a finite
+failure code and waits 15 minutes before the next attempt; operational failures
+wait 30 seconds. Neither is a verified close. The original error remains logged,
+and this signal retains the unresolved financial state between retries. A page
+visits at most 64 items, advances past busy/failed keys, and persists its composite
+cursor. Immediate continuation requires successful progress; otherwise normal
+scheduling waits two seconds. The database loop has a 15-second context and
+individual worker statements use 2-second statement / 250ms lock timeouts.
+Already-started projection posts retain their existing separately bounded joins;
+this is not a 15-second end-to-end claim for a failed Redis dependency.
+
+Clock, legacy reservation mirror and stream cleanup remain post-commit
+projections: the clock uses its existing aggregate backfill with its documented
+ambiguity; the mirror is rebuilt from durable revisions; mixed Redis reservation
+leases and stream memberships retain their existing bounded expiry/reconciliation.
+No replay of a non-idempotent Redis increment is added. A quiet error log or low
+CPU does not establish complete recovery or current provider payout success.
+
+Source qualification on 2026-10-03: the 07:57 selected holder graph contained
+legacy grant-lock SQL (`asyncDebit=false`) and metadata SQL filtered by
+`NOT redis_reserved`, with a terminal active metadata holder. It sampled 89
+candidates but selected four seeds; that does not attribute every waiter to one
+chain, payer, service or deployed generation through PgBouncer. The 07:32 empty
+38ms graph is a healthy instantaneous control, not evidence the intermittent
+convoy ended. Ordinary later samples continued to report tuple waits.
+
+Local real-PG controls reproduce 64/64 legacy foreground timeouts with all shared
+financial rows held. The candidate acknowledges 512 legacy plus 64 current
+contracts on one payer under the same granted-lock barrier, then drains exact
+payer and provider amounts after release. Separate controls cover lost commit
+acknowledgement, rollback before commit, provider rows before any posts,
+old-writer ordering/refusal, competing workers, busy-cursor fairness,
+cancellation/conflicting intent, disputed accounting rejection, and old/current
+retention. These establish local causal and conservation properties; they do
+not claim Main throughput or arbitrary-N worker capacity. Require the exact
+migration catalog, task registration and service generation, followed by fresh
+complete backlog/holder observations before closing the production boundary.
 
 ### 2.6 Open-contract set size — the close-backlog canary
 Probe: `open-contracts`
