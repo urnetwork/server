@@ -61,6 +61,7 @@ func NewSignals() []Signal {
 		NewVacuumHealthSignal(),
 		NewTaskHealthSignal(),
 		NewTransferDebitsSignal(),
+		NewLegacySettlementsSignal(),
 		NewOpenContractsSignal(),
 		NewCloseDurationSignal(),
 		NewRebootCollisionSignal(),

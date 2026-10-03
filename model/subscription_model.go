@@ -2582,7 +2582,7 @@ func settleContract(ctx context.Context, contractId server.Id) (closed bool, ret
 				diff := sourceUsedTransferByteCount - destinationUsedTransferByteCount
 				if math.Abs(float64(diff)) <= AcceptableTransfersByteDifference {
 					// fmt.Printf("CLOSE CONTRACT SETTLE (%s) %s\n", clientId.String(), contractId.String())
-					posts, closed, returnErr = settleEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled)
+					posts, closed, returnErr = settleEscrowForegroundInTx(ctx, tx, contractId, ContractOutcomeSettled)
 				} else {
 					glog.Infof("[sub]contract[%s]diff %d (%d <> %d)\n", contractId.String(), diff, sourceUsedTransferByteCount, destinationUsedTransferByteCount)
 					// fmt.Printf("CLOSE CONTRACT DISPUTE (%s) %s\n", clientId.String(), contractId.String())
@@ -2612,7 +2612,7 @@ func SettleEscrow(ctx context.Context, contractId server.Id, outcome ContractOut
 	var posts []func() any
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		posts, _, returnErr = settleEscrowInTx(ctx, tx, contractId, outcome)
+		posts, _, returnErr = settleEscrowForegroundInTx(ctx, tx, contractId, outcome)
 	}, server.TxReadCommitted)
 
 	if returnErr != nil {
@@ -2971,23 +2971,36 @@ func meanContractByteCount(first, second ByteCount) (ByteCount, error) {
 	return lower + (upper-lower)/2, nil
 }
 
-// Claims the outcome and records exact payer consumption. Current Redis
-// contracts append independent debit records; a bounded worker batches balance
-// writes. Legacy contracts retain their original atomic reservation authority.
+// The exact legacy implementation remains the worker's financial authority.
+// Foreground calls select the durable deferred path below instead.
 func settleEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
 	contractId server.Id,
 	outcome ContractOutcome,
 ) (posts []func() any, closed bool, returnErr error) {
+	return settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, false, false)
+}
+
+func settleEscrowForegroundInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome) ([]func() any, bool, error) {
+	return settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, true, false)
+}
+
+// Current Redis contracts append independent consumption records. Legacy
+// callers queue an intent without releasing their reservation; the worker uses
+// the original atomic debit/outcome path and completes all financial writes before commit.
+func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial bool) (posts []func() any, closed bool, returnErr error) {
 	// CloseContract already owns this lock; direct and recovery settlement
 	// must acquire it before balance locks to keep the same lock order.
 	server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id = $1 FOR UPDATE`, contractId))
 	// The immutable reservation mode is read under the owning contract lock.
 	// Current contracts must never queue behind another contract's grant debit.
-	var asyncDebit bool
-	server.Raise(tx.QueryRow(ctx, `SELECT COALESCE(bool_and(redis_reserved),false)
-        FROM transfer_escrow WHERE contract_id=$1`, contractId).Scan(&asyncDebit))
+	var asyncDebit, hasEscrow bool
+	server.Raise(tx.QueryRow(ctx, `SELECT COALESCE(bool_and(redis_reserved),false),count(*)>0
+        FROM transfer_escrow WHERE contract_id=$1`, contractId).Scan(&asyncDebit, &hasEscrow))
+	if deferLegacy && hasEscrow && !asyncDebit {
+		return nil, false, queueLegacySettlementInTx(ctx, tx, contractId, outcome, false)
+	}
 	var result pgx.Rows
 	var err error
 	if asyncDebit {
@@ -3236,27 +3249,34 @@ func settleEscrowInTx(
 			}, server.TxReadCommitted)
 			return nil
 		}
+		if inlineFinancial {
+			// The legacy worker already owns the contract and every grant. Do
+			// this before releasing those locks so metadata never queues behind
+			// a different worker's next contract on the same payer.
+			settleEscrowMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts)
+			metadataPost = func() any { return nil }
+		}
 
 		if 0 < len(participantSweepPayouts) {
-			posts = append(posts, func() any {
-				server.Tx(ctx, func(tx server.PgTx) {
-					server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-						for key, payout := range participantSweepPayouts {
-							batch.Queue(
-								participantSweepInsertSQL,
-								contractId,
-								key.balanceId,
-								key.networkId,
-								payout.payoutByteCount,
-								payout.payout,
-								payout.destinationId,
-								payout.providerPayouts,
-							)
-						}
-					})
-				}, server.TxReadCommitted)
-				return nil
-			})
+			writePayouts := func(tx server.PgTx) {
+				server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+					for key, payout := range participantSweepPayouts {
+						batch.Queue(participantSweepInsertSQL, contractId, key.balanceId, key.networkId,
+							payout.payoutByteCount, payout.payout, payout.destinationId, payout.providerPayouts)
+					}
+				})
+			}
+			if inlineFinancial {
+				// No required payout may depend on a callback after the queue
+				// item's deletion. Its first insertion clock and attribution
+				// commit with the debit, outcome and escrow metadata.
+				writePayouts(tx)
+			} else {
+				posts = append(posts, func() any {
+					server.Tx(ctx, writePayouts, server.TxReadCommitted)
+					return nil
+				})
+			}
 		}
 
 		mirrorBalanceIds := make([]server.Id, 0, len(sweepPayouts))
@@ -3298,7 +3318,25 @@ func settleEscrowInTx(
 		})
 	}
 
-	if 0 < len(accountPayouts) {
+	if inlineFinancial && len(accountPayouts) > 0 {
+		// The API already adds durable provided totals to the Redis deltas.
+		// Record this worker's contribution only in PG: a crash or ambiguous
+		// Redis INCRBY reply must neither lose nor duplicate provider totals.
+		networkIds := make([]server.Id, 0, len(accountPayouts))
+		for networkId := range accountPayouts {
+			networkIds = append(networkIds, networkId)
+		}
+		slices.SortFunc(networkIds, server.Id.Cmp)
+		for _, networkId := range networkIds {
+			payout := accountPayouts[networkId]
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_balance
+                (network_id,provided_byte_count,provided_net_revenue_nano_cents) VALUES($1,$2,$3)
+                ON CONFLICT(network_id) DO UPDATE SET
+                provided_byte_count=account_balance.provided_byte_count+EXCLUDED.provided_byte_count,
+                provided_net_revenue_nano_cents=account_balance.provided_net_revenue_nano_cents+EXCLUDED.provided_net_revenue_nano_cents`,
+				networkId, payout.payoutByteCount, payout.payout))
+		}
+	} else if 0 < len(accountPayouts) {
 		posts = append(posts, func() any {
 			server.Redis(ctx, func(r server.RedisClient) {
 				// Participant networks occupy independent Redis hash slots. Keep
@@ -4003,6 +4041,21 @@ func ForceCloseOpenContractIds(
 		server.Tx(ctx, func(tx server.PgTx) {
 			posts = nil
 			resolved = false
+			// Keep the dispute and reservation intact while legacy work is
+			// queued. The worker clears it only in the debit/outcome transaction;
+			// an accounting rejection rolls that clear back with everything else.
+			var owned bool
+			rows, queryErr := tx.Query(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id=$1 AND dispute AND outcome IS NULL FOR UPDATE`, contractId)
+			server.WithPgResult(rows, queryErr, func() { owned = rows.Next() })
+			if !owned {
+				return
+			}
+			var legacy bool
+			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1 AND NOT redis_reserved)`, contractId).Scan(&legacy))
+			if legacy {
+				server.Raise(queueLegacySettlementInTx(ctx, tx, contractId, ContractOutcomeSettled, true))
+				return
+			}
 			changed := server.RaisePgResult(tx.Exec(
 				ctx,
 				`
@@ -4163,7 +4216,7 @@ func ForceCloseOpenContractIds(
 			var posts []func() any
 			var err error
 			server.Tx(ctx, func(tx server.PgTx) {
-				posts, _, err = settleEscrowInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
+				posts, _, err = settleEscrowForegroundInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
 			}, server.TxReadCommitted)
 			if err != nil {
 				return err
@@ -4194,15 +4247,18 @@ func ForceCloseOpenContractIds(
 		found := false
 		finalized := false
 		disputed := false
+		pending := false
 		readState := func() {
 			found = false
 			finalized = false
 			disputed = false
+			pending = false
 			server.Db(ctx, func(conn server.PgConn) {
 				result, err := conn.Query(
 					ctx,
 					`
-                        SELECT outcome IS NOT NULL, dispute
+                        SELECT outcome IS NOT NULL, dispute,
+                            EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)
                         FROM transfer_contract
                         WHERE contract_id = $1
                     `,
@@ -4211,12 +4267,15 @@ func ForceCloseOpenContractIds(
 				server.WithPgResult(result, err, func() {
 					if result.Next() {
 						found = true
-						server.Raise(result.Scan(&finalized, &disputed))
+						server.Raise(result.Scan(&finalized, &disputed, &pending))
 					}
 				})
 			})
 		}
 		readState()
+		if found && !finalized && pending {
+			return errLegacySettlementPending
+		}
 		if allowDisputeSettlement && found && !finalized && disputed {
 			// A successful close can create a dispute after both selection scans.
 			// Resolve once, then re-read; failed closes never enter this path.
@@ -4239,6 +4298,9 @@ func ForceCloseOpenContractIds(
 				})
 			}
 			readState()
+			if found && !finalized && pending {
+				return errLegacySettlementPending
+			}
 		}
 		if !found {
 			return fmt.Errorf("contract disappeared before force-close verification")
@@ -4287,6 +4349,11 @@ func ForceCloseOpenContractIds(
 					prepareErr := runForceClose(func() error {
 						var err error
 						server.Tx(ctx, func(tx server.PgTx) {
+							var pending bool
+							server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, openContract.contractId).Scan(&pending))
+							if pending {
+								return
+							}
 							fresh, err = prepareContractExpiryInTx(ctx, tx, openContract.contractId, minTime)
 							server.Raise(err)
 						}, server.TxReadCommitted)
@@ -4347,14 +4414,21 @@ func ForceCloseOpenContractIds(
 	wg.Wait()
 	close(workerErrors)
 
-	for _, closed := range attempted {
-		if closed {
+	for index, closed := range attempted {
+		if closed && !errors.Is(contractErrors[index], errLegacySettlementPending) {
 			closeCount++
 		}
 	}
 	accountingOnly := true
 	var verifiedCloseCount, accountingRejectionCount, quarantinedAccountingRejectionCount int64
 	for index, contractErr := range contractErrors {
+		if errors.Is(contractErr, errLegacySettlementPending) {
+			// A durable intent is acknowledged work, not a verified close or an
+			// accounting success. Its separate worker owns progress and errors.
+			accountingOnly = false
+			forceCloseContractCounter.WithLabelValues("deferred").Inc()
+			continue
+		}
 		if !contractCompleted[index] {
 			accountingOnly = false
 		} else if contractErr == nil {
@@ -5223,6 +5297,7 @@ func removeDueContractBatches(ctx context.Context, minTime time.Time, minStraggl
 					SELECT due.contract_id
 					FROM due
 					WHERE
+						EXISTS (SELECT 1 FROM legacy_settlement_intent WHERE contract_id=due.contract_id) OR
 						EXISTS (
 							SELECT 1
 							FROM transfer_escrow_sweep

@@ -73,6 +73,7 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleRemoveCompletedContracts(clientSession, tx)
 		work.ScheduleReconcileNetEscrow(clientSession, tx)
 		work.ScheduleFlushTransferDebits(clientSession, tx)
+		work.ScheduleFlushLegacySettlements(clientSession, tx)
 		work.ScheduleDbMaintenance(clientSession, tx, 0)
 		work.ScheduleWarmNetworkGetProviderLocations(clientSession, tx)
 		work.ScheduleRemoveExpiredAuthAttempts(clientSession, tx)
@@ -284,6 +285,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveCompletedContractsPost,
 		),
 		task.NewTaskTargetWithPost(work.FlushTransferDebits, work.FlushTransferDebitsPost),
+		task.NewTaskTargetWithPost(work.FlushLegacySettlements, work.FlushLegacySettlementsPost),
 		task.NewTaskTargetWithPost(
 			work.ReconcileNetEscrow,
 			work.ReconcileNetEscrowPost,
