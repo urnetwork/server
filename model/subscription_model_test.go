@@ -2280,7 +2280,8 @@ func TestNetEscrowKeyFormatAndTtl(t *testing.T) {
 		// escrow creation mirrors the reservation and stamps the
 		// end_time-based ttl
 		contractByteCount := ByteCount(1024 * 1024)
-		contractId, _, err := CreateContract(ctx, networkId, clientId, networkIdB, clientIdB, contractByteCount)
+		escrow, err := createTransferEscrow(ctx, networkId, clientId, networkIdB, clientIdB, contractByteCount)
+		contractId := escrow.ContractId
 		connect.AssertEqual(t, nil, err)
 		connect.AssertEqual(t, contractByteCount, Testing_NetEscrowByteCount(ctx, balanceId))
 		// the real read path (multi-balance pipeline) reflects the reservation

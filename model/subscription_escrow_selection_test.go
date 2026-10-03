@@ -4,10 +4,13 @@ package model
 
 import (
 	"context"
+	"errors"
 	"maps"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
 )
 
@@ -63,114 +66,146 @@ func (self escrowSelectionTestClients) reserve(ctx context.Context, balanceId se
 func TestCreateTransferEscrowReservedGrantsDoNotAffectPriorityOrMirrors(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		for _, test := range []struct {
-			name      string
-			paid      bool
-			companion bool
-		}{
-			{name: "paid origin", paid: true},
-			{name: "unpaid origin"},
-			{name: "paid companion", paid: true, companion: true},
-			{name: "unpaid companion", companion: true},
-		} {
-			clients := newEscrowSelectionTestClients(t, ctx)
-			if test.companion {
-				// Make the anchor before grants exist so it cannot touch the
-				// reservation mirrors whose exact deadlines this case checks.
-				if _, err := clients.create(ctx, 0, false); err != nil {
-					t.Fatal(err)
+		for _, legacy := range []bool{false, true} {
+			for _, test := range []struct {
+				name      string
+				paid      bool
+				companion bool
+			}{
+				{name: "paid origin", paid: true},
+				{name: "unpaid origin"},
+				{name: "paid companion", paid: true, companion: true},
+				{name: "unpaid companion", companion: true},
+			} {
+				clients := newEscrowSelectionTestClients(t, ctx)
+				if test.companion {
+					// Make the anchor before grants exist so it cannot touch the
+					// reservation mirrors whose exact deadlines this case checks.
+					if _, err := clients.create(ctx, 0, false); err != nil {
+						t.Fatal(err)
+					}
 				}
-			}
-			now := server.NowUtc()
-			expiration := now.Truncate(time.Second).Add(time.Hour)
-			balances := []*TransferBalance{}
-			reservedByteCounts := []ByteCount{2048, 3072, 1024, 0}
-			for index := range reservedByteCounts {
-				paid := test.paid
-				if index < 2 {
-					paid = !paid
+				now := server.NowUtc()
+				expiration := now.Truncate(time.Second).Add(time.Hour)
+				balances := []*TransferBalance{}
+				reservedByteCounts := []ByteCount{2048, 3072, 1024, 0}
+				for index := range reservedByteCounts {
+					paid := test.paid
+					if index < 2 {
+						paid = !paid
+					}
+					balance := &TransferBalance{
+						NetworkId: clients.payerNetworkId,
+						StartTime: now.Add(-time.Minute), EndTime: now.Add(time.Duration(index+1) * 24 * time.Hour),
+						StartBalanceByteCount: 2048, BalanceByteCount: 2048,
+					}
+					if paid {
+						balance.NetRevenue = 2048
+					}
+					AddTransferBalance(ctx, balance)
+					balances = append(balances, balance)
+					if 0 < reservedByteCounts[index] {
+						clients.reserve(ctx, balance.BalanceId, reservedByteCounts[index])
+						server.Redis(ctx, func(r server.RedisClient) {
+							key := netEscrowKey(balance.BalanceId)
+							server.Raise(r.Set(ctx, key, reservedByteCounts[index], 0).Err())
+							server.Raise(r.ExpireAt(ctx, key, expiration).Err())
+						})
+					}
 				}
-				balance := &TransferBalance{
-					NetworkId: clients.payerNetworkId,
-					StartTime: now.Add(-time.Minute), EndTime: now.Add(time.Duration(index+1) * 24 * time.Hour),
-					StartBalanceByteCount: 2048, BalanceByteCount: 2048,
+				var escrow *TransferEscrow
+				var err error
+				if legacy {
+					if test.companion {
+						escrow, err = createCompanionTransferEscrow(ctx, clients.providerNetworkId, clients.providerId, clients.payerNetworkId, clients.payerId, 1536, time.Hour)
+					} else {
+						escrow, err = createTransferEscrow(ctx, clients.payerNetworkId, clients.payerId, clients.providerNetworkId, clients.providerId, 1536)
+					}
+				} else {
+					escrow, err = clients.create(ctx, 1536, test.companion)
 				}
-				if paid {
-					balance.NetRevenue = 2048
+				if err != nil {
+					t.Fatalf("%s: %v", test.name, err)
 				}
-				AddTransferBalance(ctx, balance)
-				balances = append(balances, balance)
-				if 0 < reservedByteCounts[index] {
-					clients.reserve(ctx, balance.BalanceId, reservedByteCounts[index])
-					server.Redis(ctx, func(r server.RedisClient) {
-						key := netEscrowKey(balance.BalanceId)
-						server.Raise(r.Set(ctx, key, reservedByteCounts[index], 0).Err())
-						server.Raise(r.ExpireAt(ctx, key, expiration).Err())
-					})
+				wantPriority := Priority(UnpaidPriority)
+				if test.paid {
+					wantPriority = PaidPriority
 				}
-			}
-			escrow, err := clients.create(ctx, 1536, test.companion)
-			if err != nil {
-				t.Fatalf("%s: %v", test.name, err)
-			}
-			wantPriority := Priority(UnpaidPriority)
-			if test.paid {
-				wantPriority = PaidPriority
-			}
-			if escrow.Priority != wantPriority {
-				t.Errorf("%s: priority = %d, want %d", test.name, escrow.Priority, wantPriority)
-			}
-			wantBalanceIdByteCounts := map[server.Id]ByteCount{
-				balances[2].BalanceId: 1024, balances[3].BalanceId: 512,
-			}
-			gotBalanceIdByteCounts := map[server.Id]ByteCount{}
-			for _, balance := range escrow.Balances {
-				gotBalanceIdByteCounts[balance.BalanceId] = balance.BalanceByteCount
-			}
-			if !maps.Equal(gotBalanceIdByteCounts, wantBalanceIdByteCounts) {
-				t.Errorf("%s: returned allocation contains %d grants, want two correctly funded grants", test.name, len(escrow.Balances))
-			}
-			server.Db(ctx, func(conn server.PgConn) {
-				result, err := conn.Query(ctx, `
+				if escrow.Priority != wantPriority {
+					t.Errorf("%s: priority = %d, want %d", test.name, escrow.Priority, wantPriority)
+				}
+				wantBalanceIdByteCounts := map[server.Id]ByteCount{
+					balances[2].BalanceId: 1024, balances[3].BalanceId: 512,
+				}
+				gotBalanceIdByteCounts := map[server.Id]ByteCount{}
+				for _, balance := range escrow.Balances {
+					gotBalanceIdByteCounts[balance.BalanceId] = balance.BalanceByteCount
+				}
+				if !maps.Equal(gotBalanceIdByteCounts, wantBalanceIdByteCounts) {
+					t.Errorf("%s: returned allocation contains %d grants, want two correctly funded grants", test.name, len(escrow.Balances))
+				}
+				server.Db(ctx, func(conn server.PgConn) {
+					result, err := conn.Query(ctx, `
 					SELECT transfer_escrow.balance_id, transfer_escrow.balance_byte_count, transfer_contract.priority
 					FROM transfer_escrow INNER JOIN transfer_contract USING (contract_id)
 					WHERE contract_id = $1
 				`, escrow.ContractId)
-				gotBalanceIdByteCounts = map[server.Id]ByteCount{}
-				server.WithPgResult(result, err, func() {
-					for result.Next() {
-						var balanceId server.Id
-						var byteCount ByteCount
-						var priority Priority
-						server.Raise(result.Scan(&balanceId, &byteCount, &priority))
-						gotBalanceIdByteCounts[balanceId] = byteCount
-						if priority != wantPriority {
-							t.Errorf("%s: stored priority = %d, want %d", test.name, priority, wantPriority)
+					gotBalanceIdByteCounts = map[server.Id]ByteCount{}
+					server.WithPgResult(result, err, func() {
+						for result.Next() {
+							var balanceId server.Id
+							var byteCount ByteCount
+							var priority Priority
+							server.Raise(result.Scan(&balanceId, &byteCount, &priority))
+							gotBalanceIdByteCounts[balanceId] = byteCount
+							if priority != wantPriority {
+								t.Errorf("%s: stored priority = %d, want %d", test.name, priority, wantPriority)
+							}
 						}
-					}
+					})
 				})
-			})
-			if !maps.Equal(gotBalanceIdByteCounts, wantBalanceIdByteCounts) {
-				t.Errorf("%s: stored allocation contains %d grants, want two correctly funded grants", test.name, len(gotBalanceIdByteCounts))
-			}
-			server.Redis(ctx, func(r server.RedisClient) {
-				for index, balance := range balances {
-					key := netEscrowKey(balance.BalanceId)
-					got, err := r.Get(ctx, key).Int64()
-					server.Raise(err)
-					want := reservedByteCounts[index] + wantBalanceIdByteCounts[balance.BalanceId]
-					if got != want {
-						t.Errorf("%s: grant %d mirror = %d, want %d", test.name, index, got, want)
-					}
-					if index < 2 {
-						gotExpiration, err := r.ExpireTime(ctx, key).Result()
-						server.Raise(err)
-						if gotExpiration != time.Duration(expiration.Unix())*time.Second {
-							t.Errorf("%s: exhausted grant %d mirror deadline was rewritten", test.name, index)
+				if !maps.Equal(gotBalanceIdByteCounts, wantBalanceIdByteCounts) {
+					t.Errorf("%s: stored allocation contains %d grants, want two correctly funded grants", test.name, len(gotBalanceIdByteCounts))
+				}
+				var marked int
+				server.Db(ctx, func(conn server.PgConn) {
+					server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_escrow WHERE contract_id=$1 AND redis_reserved`, escrow.ContractId).Scan(&marked))
+				})
+				if (legacy && marked != 0) || (!legacy && marked != 2) {
+					t.Fatalf("mode marker legacy=%t rows=%d", legacy, marked)
+				}
+				if !legacy {
+					for _, balance := range balances {
+						want := reservedByteCounts[slices.Index(balances, balance)] + wantBalanceIdByteCounts[balance.BalanceId]
+						if got := Testing_NetEscrowByteCount(ctx, balance.BalanceId); got != want {
+							t.Fatalf("combined ledger=%d want%d", got, want)
 						}
 					}
 				}
-			})
+				server.Redis(ctx, func(r server.RedisClient) {
+					for index, balance := range balances {
+						key := netEscrowKey(balance.BalanceId)
+						got, err := r.Get(ctx, key).Int64()
+						want := reservedByteCounts[index]
+						if legacy {
+							want += wantBalanceIdByteCounts[balance.BalanceId]
+						}
+						if err != nil && !(errors.Is(err, redis.Nil) && want == 0) {
+							server.Raise(err)
+						}
+						if got != want {
+							t.Errorf("%s: grant %d mirror = %d, want %d", test.name, index, got, want)
+						}
+						if index < 2 {
+							gotExpiration, err := r.ExpireTime(ctx, key).Result()
+							server.Raise(err)
+							if gotExpiration != time.Duration(expiration.Unix())*time.Second {
+								t.Errorf("%s: exhausted grant %d mirror deadline was rewritten", test.name, index)
+							}
+						}
+					}
+				})
+			}
 		}
 	})
 }

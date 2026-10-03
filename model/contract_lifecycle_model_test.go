@@ -83,12 +83,18 @@ func TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks(t *testing.T) 
 	}{
 		{filename: "subscription_model.go", functionName: "createTransferEscrowInTx", lockMarker: "if err := lockActiveContractClientsInTx(", writeMarker: "INSERT INTO transfer_contract"},
 		{filename: "subscription_model.go", functionName: "createContractNoEscrowInTx", lockMarker: "if err := lockActiveContractClientsInTx(", writeMarker: "INSERT INTO transfer_contract"},
+		{filename: "subscription_redis_admission.go", functionName: "createRedisTransferEscrowInTx", lockMarker: "if err := lockActiveContractClientsInTx(", writeMarker: "INSERT INTO transfer_contract"},
 		{filename: "network_client_model.go", functionName: "deactivateNetworkClientsInTx", lockMarker: "/* network_client_deactivation_write_boundary */", writeMarker: "WITH lifecycle_clock AS MATERIALIZED"},
 		{filename: "network_client_model.go", functionName: "RemoveDisconnectedNetworkClients", lockMarker: "FOR UPDATE OF network_client", writeMarker: "WITH lifecycle_clock AS MATERIALIZED"},
 	}
 
 	for _, boundary := range boundaries {
 		source := functionSource(boundary.filename, boundary.functionName)
+		if boundary.functionName == "createRedisTransferEscrowInTx" {
+			if err := contractLifecycleRedisWriterOrder(source); err != nil {
+				t.Errorf("Redis writer: %v", err)
+			}
+		}
 		lockCount := 1
 		if boundary.functionName == "createTransferEscrowInTx" {
 			// Zero-byte anchors and positive-byte reservations deliberately take
@@ -149,8 +155,8 @@ func TestContractLifecycleWritesUsePrimaryDatabaseClockAfterLocks(t *testing.T) 
 			return true
 		})
 	}
-	if len(contractWriters) != 2 {
-		t.Fatalf("production transfer_contract INSERT writers = %d, want exactly 2 reviewed writers", len(contractWriters))
+	if len(contractWriters) != 3 {
+		t.Fatalf("production transfer_contract INSERT writers = %d, want exactly 3 reviewed writers", len(contractWriters))
 	}
 	for writerIndex, writer := range contractWriters {
 		if !strings.Contains(writer, "CLOCK_TIMESTAMP() AT TIME ZONE 'UTC'") {
