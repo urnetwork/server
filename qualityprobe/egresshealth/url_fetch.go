@@ -100,6 +100,8 @@ func fetchUrlProbe(ctx context.Context, client *http.Client, destination Destina
 					result.NotMeasured, result.FailureStage = true, "local_control_registration"
 				} else if unavailable, ok := client.Transport.(interface{ ProviderContractAcquisitionUnavailable() bool }); ok && unavailable.ProviderContractAcquisitionUnavailable() {
 					result.NotMeasured, result.FailureStage = true, "local_contract_acquisition"
+				} else if unavailable, ok := client.Transport.(interface{ ProviderLocalWriteUnavailable() bool }); ok && unavailable.ProviderLocalWriteUnavailable() {
+					result.NotMeasured, result.FailureStage = true, "local_transport_admission"
 				}
 			}
 			return result

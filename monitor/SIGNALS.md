@@ -10952,6 +10952,29 @@ controller regressions distinguish missing mode, missing secret, missing
 companion origin, healthy signed allocation and insufficient credit while
 checking unchanged wire results and reservations.
 
+A data-only URL probe also exposes an owner-local write-admission witness.
+`local_transport_admission` means a real writer is pending or refused its local
+route handoff and no application frame has ever been admitted by that tunnel.
+It is `NotMeasured`, excluded from measured total and durable URL quota. A
+successful contract-only head cannot clear that witness. Registration and
+contract allocation alone are insufficient: an actual controller/PG regression
+with a permanently rejecting platform listener previously produced `total=1`,
+`not_measured=0`, `dial_dns`; the corrected result is `total=0`,
+`not_measured=1`, `local_transport_admission`. The separate healthy control
+carries real DNS/TLS traffic, closes contracts and checks the payer debit.
+
+This is local admission, not physical delivery or a provider acknowledgment.
+The older contract-acquisition attempted-write fence remains unchanged.
+Successful application admission in any owner window conservatively disables
+absence evidence across replacement; false does not prove delivery. Scheduled
+URL turns own fresh tunnels, so no earlier request supplies their admission
+witness. Real response, established socket, TLS authentication or confinement
+evidence takes precedence over a contradictory local observer. Ordinary
+clients do not opt into the added write accounting. The finite failure-stage
+summary accepts this cause; older sources without it are unqualified for its
+absence. The local regression establishes a measurement defect, not its Main
+frequency or the causes of previously accepted outcomes.
+
 The actual-PG control holds a balance row, observes its grant-selection waiter
 separately from a second payer-gate waiter, cancels the queued request, and
 checks the unchanged reservation. Healthy signed and insufficient-credit
