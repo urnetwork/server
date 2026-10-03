@@ -989,6 +989,12 @@ func nextContract(
 	)
 }
 
+// The lifecycle lookup and origin escrow creation newContract performs.
+// Tests replace them to check, without a database, which byte count the
+// controller signs for a given escrow.
+var findActiveClientPairNetworks = model.FindActiveClientPairNetworks
+var createTransferEscrow = model.CreateTransferEscrow
+
 func newContract(
 	ctx context.Context,
 	sourceId server.Id,
@@ -1005,7 +1011,7 @@ func newContract(
 	// Recheck lifecycle at the write boundary. CreateContract's detailed lookup
 	// provides the fast rejection and diagnosis; this fresh active-only read closes
 	// the race where either endpoint is deactivated before the contract insert.
-	sourceNetworkIdPointer, destinationNetworkIdPointer := model.FindActiveClientPairNetworks(ctx, sourceId, destinationId)
+	sourceNetworkIdPointer, destinationNetworkIdPointer := findActiveClientPairNetworks(ctx, sourceId, destinationId)
 	if sourceNetworkIdPointer == nil {
 		// The local/source identity is no longer valid. This is not evidence
 		// against the selected destination, so do not wrap it as Reliability.
@@ -1158,7 +1164,7 @@ func newContract(
 			}
 		}
 	} else {
-		escrow, err := model.CreateTransferEscrow(
+		escrow, err := createTransferEscrow(
 			ctx,
 			sourceNetworkId,
 			sourceId,
@@ -1171,6 +1177,9 @@ func newContract(
 			return
 		}
 		contractId = escrow.ContractId
+		// The escrow shrinks to fit when the payer's balance is below the
+		// request. Sign only the capacity actually held in escrow.
+		contractTransferByteCount = escrow.TransferByteCount
 		priority = escrow.Priority
 
 		defer server.EnterContractCreationStage(ctx, server.ContractStageStream)()
