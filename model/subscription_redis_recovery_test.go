@@ -192,6 +192,12 @@ func TestRedisRecoveryLivePublicationAndLostCommitStayReserved(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
+		// Share the funded balance but not the deliberately held source row.
+		// The public peer's post-commit usage stamp must remain independent
+		// of the original writer's client lifecycle FOR SHARE fence.
+		peer := f
+		peer.sourceId = server.NewId()
+		insertContractLifecycleTestClients(t, ctx, map[server.Id]server.Id{peer.sourceId: peer.sourceNetworkId})
 		request := withRedisContractAdmission(ctx)
 		conn := acquireContractLifecycleTestConnection(t, ctx)
 		defer conn.Release()
@@ -202,7 +208,7 @@ func TestRedisRecoveryLivePublicationAndLostCommitStayReserved(t *testing.T) {
 		if err != nil || first == nil {
 			t.Fatal("held publication fixture failed", err)
 		}
-		_ = createRedisAdmissionTest(ctx, f, 29)
+		_ = createRedisAdmissionTest(ctx, peer, 29)
 		if got := Testing_NetEscrowByteCount(ctx, f.balanceId); got != 52 {
 			t.Fatal("concurrent recovery released an uncommitted writer", got)
 		}
