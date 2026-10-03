@@ -17028,6 +17028,19 @@ websocket connections and probes only.
 ### 8.9 Append-only migration coherence — a numeric head can hide skipped schema
 Probe: `migrations`
 
+Migration764 appends logical close-report receipts after the unchanged deployed
+1–763 prefix. The artifact contract checks the exact contract/party/report key,
+nonzero report IDs, nonnegative acknowledged bytes, finality and timestamp
+columns, and the enabled contract-delete cascade. It also rejects added global
+report uniqueness or shared balance foreign keys, which would change ownership.
+Native controls cover absence at763, the healthy764 schema, eleven changed or
+disabled constraints/guards, and restoration through the complete probe row.
+Missing future artifacts remain pending migration; failed or incomplete catalog
+reads remain unknown. A matching catalog proves schema only. Stable-ID emission
+still requires compatible backend generations, and ID-less clients retain their
+legacy replay limitation. Neither schema presence nor the local ACK-loss control
+attributes existing Main accounting failures to duplicate reports.
+
 Migration versions are a published production protocol. Once a migration has
 run anywhere, its slice position and version must never move: corrections and
 new work are appended after the published sequence. A successful numeric head

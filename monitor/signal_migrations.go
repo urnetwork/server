@@ -420,6 +420,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "Solana payment amount reservations", requiredVersion: 761, rowColumn: 172},
 	{name: "Circle customer transfer custody and append-only observations", requiredVersion: 762, rowColumn: 173},
 	{name: "legacy settlement intent and ownership guards", requiredVersion: 763, rowColumn: 174},
+	{name: "logical contract close report receipts", requiredVersion: 764, rowColumn: 175},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -2171,7 +2172,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       `+testBalanceDrainIndexArtifactQuery+`,
 		       `+solanaPaymentAmountArtifactQuery+`,
 		       `+circleTransferRequestArtifactQuery+`,
-		       `+legacySettlementIntentArtifactQuery+`
+		       `+legacySettlementIntentArtifactQuery+`,
+		       `+contractCloseReportArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {

@@ -9514,4 +9514,6 @@ var migrations = []any{
 	newSqlMigration(circleTransferRequestSchemaSql),
 	// Unmarked contracts retain reservations until one bounded worker settles them.
 	newSqlMigration(legacySettlementIntentSchemaSql),
+	// One durable receipt per logical close report, scoped to its contract.
+	newSqlMigration(contractCloseReportSchemaSql),
 }
