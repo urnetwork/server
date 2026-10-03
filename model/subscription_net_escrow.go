@@ -286,7 +286,9 @@ func releaseNetEscrowForContract(ctx context.Context, contractId server.Id) {
 			}
 		})
 	})
-	releaseRedisContractReservations(mirrorCtx, contractId, redisIds)
+	if len(redisIds) > 0 {
+		ReconcileRedisContractReservation(mirrorCtx, contractId)
+	}
 	if len(legacyIds) > 0 {
 		pending := readMirrorNetEscrowSnapshots(mirrorCtx, legacyIds)
 		reconcileNetEscrowBatch(mirrorCtx, pending, legacyIds, true)

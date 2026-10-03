@@ -23,6 +23,10 @@ func currentPayoutRedisSettlements(t testing.TB, ctx context.Context, legacy boo
 	})
 	var firstClose, lastClose time.Time
 	for _, f := range cohorts {
+		var creditBefore ByteCount
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$1`, f.balance).Scan(&creditBefore))
+		})
 		escrow, err := CreateTransferEscrow(ctx, f.sourceNetwork, f.source, f.network, f.client, 1024)
 		if err != nil || escrow == nil {
 			t.Fatal("current Redis escrow creation failed", err)
@@ -46,9 +50,19 @@ func currentPayoutRedisSettlements(t testing.TB, ctx context.Context, legacy boo
 		if err := SettleEscrow(ctx, escrow.ContractId, ContractOutcomeSettled); err != nil {
 			t.Fatal("settlement replay failed", err)
 		}
-		if reserved := Testing_NetEscrowByteCount(ctx, f.balance); reserved != 0 {
-			t.Fatal("completed reservation was not released", reserved)
+
+		credit, pending, applied := asyncDebitTestState(t, ctx, f.balance)
+		if credit != creditBefore || pending != 1 || applied != 0 || Testing_NetEscrowByteCount(ctx, f.balance) != 1024 {
+			t.Fatal("paid/free consumption lost its deferred debit")
 		}
+		if n, released, busy, err := flushTransferDebitBalance(ctx, f.balance); err != nil || busy || n != 1 || released != 1 {
+			t.Fatal("paid/free debit failed to drain", n, released, busy, err)
+		}
+		credit, pending, applied = asyncDebitTestState(t, ctx, f.balance)
+		if credit != creditBefore-1024 || pending+applied != 0 || Testing_NetEscrowByteCount(ctx, f.balance) != 0 {
+			t.Fatal("paid/free writeback changed payer consumption")
+		}
+
 		server.Db(ctx, func(conn server.PgConn) {
 			var closedAt time.Time
 			var outcome string

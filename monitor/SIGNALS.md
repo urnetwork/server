@@ -253,6 +253,7 @@ active missing capability and must not be read as green.
 | 22.8 | Coverage gap | `subnet-coverage` reports missing artifact, anchor, history, and audit replay |
 | 22.9 | Coverage gap | `subnet-coverage` reports missing process, resource, quota, funding, and adversarial readers |
 | 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
+| 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
 <!-- numbered-coverage-end -->
 
 Cadence mode starts each probe immediately, but admits at most four concurrent
@@ -4462,6 +4463,52 @@ cadence and ten-minute export bound, and directs remediation to the dedicated
 owner signals. Require consecutive exports to return toward baseline after
 those taskworker fixes; do not rewrite or disable a successful public-stats
 export from one correlated duration.
+
+### 2.5a Asynchronous payer debit recovery
+Probe: `transfer-debits`
+
+Migration 758 moves current Redis-marked contract consumption into a per-contract
+journal in the outcome transaction. Sixteen indexed partitions batch balance
+updates after settlement returns. The probe reads all 16 partitions with two
+oldest-row index seeks each and exact scheduled task keys. It returns no finding
+before 758; missing/malformed coverage afterward is unobservable, never zero debt.
+
+WARN oldest pending or committed-but-unreleased debt at 60s; PAGE at 300s.
+These are initial design escalation bands (four 15s worker budgets and five
+minutes), **not a measured Main service-level baseline**. Normal empty partitions
+and bursts below 60s are healthy. A missing scheduled partition warns after two
+observations so the completion/post transition is not mistaken for a stopped
+worker. Actual cadence can be lengthened by the monitor global minimum; preserve
+source clocks. Source/query failures retain visibility errors. No full journal
+COUNT or customer identifiers are collected.
+
+`urnetwork_transfer_debit_oldest_seconds{shard,state}` and its sample timestamp,
+`flush_active`, `complete_timestamp_seconds`, and finite `flush_total` outcomes
+supply per-process drill-down. State `pending` awaits PG debit; `redis_release`
+already committed and awaits Redis acknowledgment/deletion. Fresh task leases do
+not prove a live owner; sixteen keys do not imply sixteen executing workers.
+Compare source-qualified task processes, cursor progress, completed batches and
+both ages. Busy grants advance the cursor; they must not starve later keys.
+Never delete journal debt or force-release Redis to make these signals healthy.
+
+The Sep 27 commit 35274673 moved a previously separate post-transaction per-contract
+PG debit into `settleEscrowInTx` and added a shared grant lock. History supports
+that ordering regression; it does **not** establish an earlier aggregate Redis
+writeback worker. The current fix introduces explicit durable batched writeback.
+Real PG controls hold the shared balance/revision/snapshot while 64 public closes
+return; old code timed out 64/64, the candidate completed. Two independent local
+processes settled 512 contracts while their shared grant stayed locked. A separate
+512-payer/16-call control exercised drain capacity. These are local controls,
+not Main throughput or a claim that legacy unmarked settlement is contention-free.
+
+The accepted tradeoff is eventual PG credit plus approximate Redis admission:
+healthy reservations retain consumed bytes until the debit commits; lost callbacks
+leave conservative reservations. Journal applied bits prevent duplicate durable
+debit after Redis failure or lost acknowledgment. Redis loss/lease expiry and
+mixed old release callbacks can temporarily under-reserve; reconciliation and
+bounded journal drain restore the ledger without using provider payout eligibility
+as payer consumption. Legacy unmarked contracts retain their existing synchronous
+financial authority and remain an explicit separate contention boundary.
 
 ### 2.6 Open-contract set size — the close-backlog canary
 Probe: `open-contracts`

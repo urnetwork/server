@@ -22,6 +22,12 @@ func TestMigrationsSignalMergedCatalogUsesExactColumns(t *testing.T) {
 			}
 		}
 		for _, fault := range []struct{ apply, restore, artifact string }{
+			{apply: `ALTER TABLE account_payment DISABLE TRIGGER account_payment_submission_basis_guard`, restore: `ALTER TABLE account_payment ENABLE TRIGGER account_payment_submission_basis_guard`, artifact: "provider payment bonus provenance and submission guards@v756"},
+			{apply: `ALTER TABLE provider_payout_boundary DISABLE TRIGGER provider_payout_boundary_truncate_guard`, restore: `ALTER TABLE provider_payout_boundary ENABLE TRIGGER provider_payout_boundary_truncate_guard`, artifact: "provider earning boundary immutable guards@v757"},
+			{apply: `ALTER TABLE transfer_balance DISABLE TRIGGER transfer_balance_pending_debit_guard`, restore: `ALTER TABLE transfer_balance ENABLE TRIGGER transfer_balance_pending_debit_guard`, artifact: "asynchronous transfer debit journal and retention guard@v758"},
+			{apply: `DROP INDEX transfer_debit_journal_shard`, restore: `CREATE INDEX transfer_debit_journal_shard ON transfer_debit_journal(shard,balance_id,contract_id)`, artifact: "asynchronous transfer debit journal and retention guard@v758"},
+			{apply: `ALTER TABLE transfer_debit_journal ADD CONSTRAINT test_shared_fk FOREIGN KEY(balance_id) REFERENCES transfer_balance(balance_id)`, restore: `ALTER TABLE transfer_debit_journal DROP CONSTRAINT test_shared_fk`, artifact: "asynchronous transfer debit journal and retention guard@v758"},
+
 			{
 				apply:    `ALTER TABLE provider_egress_health ALTER COLUMN security_measured_at SET DEFAULT now()`,
 				restore:  `ALTER TABLE provider_egress_health ALTER COLUMN security_measured_at DROP DEFAULT`,

@@ -44,6 +44,7 @@ const completedTransferBalanceDeleteSql = `
 			SELECT 1 FROM transfer_escrow
 			WHERE balance_id=balance.balance_id AND NOT settled OFFSET 0
 		)
+		AND NOT EXISTS (SELECT 1 FROM transfer_debit_journal WHERE balance_id=balance.balance_id)
 	RETURNING balance.balance_id
 `
 

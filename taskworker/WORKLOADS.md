@@ -31,7 +31,7 @@ the original claim query and unknown-target retry behavior.
 | `StSyncChain`, `StEpochClose`, `StCommitRoot`, `StDeposit`, `StFinalizePoke` | Contract epoch/event mirror, payout root, operator commit/deposit and finalization. Every parent/child and post retry remains available. |
 | `SweepVerifyTrails`, `RollupVerifyProviderStats`, `RemoveOldVerifyProviderStats`, `RefreshVerifyProxyEgress` | Full `/verify` trail lifecycle, provider statistics, and proxy egress index refresh. |
 | `RollupSearchProviderStats`, `RemoveOldSearchProviderStats` | Provider search evidence and retention. |
-| `CloseExpiredContracts`, `SweepOrphanContractData`, `RemoveCompletedContracts`, `ReconcileNetEscrow` | Transfer finalization, contract retention, and escrow reconciliation. |
+| `CloseExpiredContracts`, `SweepOrphanContractData`, `RemoveCompletedContracts`, `ReconcileNetEscrow`, `FlushTransferDebits` | Transfer finalization, contract retention, and escrow reconciliation. |
 | `CloseExpiredNetworkClientHandlers`, `RemoveDisconnectedNetworkClients`, `SweepOrphanNetworkClientData`, `RemoveNetworkClientsTask` | Connection lifecycle and API-enqueued client removal. |
 | `BackfillInitialTransferBalance`, `RefreshFreeTransferBalances`, `RebuildPointsLeaderboard` | Transfer grants and accounting-derived provider/account state. |
 | `IndexSearchLocations`, `WarmNetworkGetProviderLocations`, `UpdateClientLocations`, `UpdateClientScores`, `RemoveExpiredProviderEgressLocations` | Local provider discovery, location/score indices and egress expiry. |
@@ -70,3 +70,5 @@ targets to ordinary production workers/cleanup. Neither startup nor claims
 delete their retained pending rows. The simulator must not use this profile for
 a campaign that intends to exercise retail payments or the external prober;
 those require their own explicit workload scope.
+
+`FlushTransferDebits` schedules 16 independent partition keys, each with a durable balance cursor. A call visits at most 64 balances and 512 journal rows per balance within 15 seconds (task owner: 30 seconds). Successful full pages continue immediately; caught-up, failed, or busy partitions return on the two-second cadence. Partition count does not establish actual running worker capacity.
