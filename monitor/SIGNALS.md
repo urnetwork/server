@@ -11440,6 +11440,30 @@ the zero before the series disappears. Continue to require a unique fresh owner
 and an independently coherent census; do not convert ambiguous ownership into
 a zero quota or carry forward a previous census as a current observation.
 
+`census_reason=owner_unavailable` is emitted after the owning Mimir fetch and
+parse succeed. SSH failures from other standing probes do not establish its
+cause. A bounded discriminator should retain explicit heartbeat zero, absent
+series, stale scrape, stale heartbeat, invalid geometry and ambiguous process
+selection as separate states. The 2026-10-03 19:54:56 historical evaluation
+observed two explicit shard-zero zeros and six absent shard-zero series; all
+eight Taskworker slots retained the expected source/start/geometry. At 20:24:59
+the same eight self-reported process hashes and start values remained, and
+edge0/g2 again owned shard zero, with exactly one owner for every shard. Its
+returned-ok pass counter increased from 16 to 19 while its error counter
+remained one. This supports a local task-owner return gap, not its duration or
+reason, continuous ownership, native process identity, or accepted throughput.
+The historical query is a new evaluation at the old time, not a retained copy
+of the original standing payload. A recently published census may survive a
+local owner's return; it cannot bypass current ownership qualification.
+
+The minimum durable cycle-start timestamp is computed over the currently
+eligible cohort. Cohort membership can change this minimum without resetting
+cycles; an unchanged minimum also cannot exclude changes to individual rows.
+Reliability refresh seeds absent cycles with `ON CONFLICT DO NOTHING` and
+preserves existing cycle clocks. Large changes in eligible, warming and quota
+counts require cohort/eligibility evidence before a reset, process replacement,
+or fixed-provider recovery claim.
+
 The shard-zero owner alone periodically produces the global census:
 
 - `urnetwork_url_probe_fleet{state}` contains `eligible`, `due`, `overdue`,

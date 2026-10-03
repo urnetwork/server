@@ -6219,3 +6219,50 @@ still explicit. Existing accounting reservations and insufficient-escrow
 rejections remain intact. The authoritative 15-minute watcher and the FP2FIX
 goal continue; memory ownership, quota coverage, native-reader delivery and ARIN
 full-fleet shadow/positive supply remain open. ARIN policy two stays inactive.
+
+### 2026-10-03 20:32 UTC checkpoint identity and owner-observation checkpoint
+
+Root merged and pushed the optional close-report identity backend to Main as
+`afca7d83`; monitor764 contract support followed in `d486bdc6`. Combined release
+source `107c79c7` includes the bounded expiry selector, mature URL pacing and
+backend764. All sixteen local Makefile binary builds completed successfully
+(receipt `a7d44032`), with no published OCI images or deployment. Registry
+publication remains held pending replacement-credential disposition. Migration764
+has not been applied and report-ID emission remains disabled. The streaming
+backup producer was started at 20:08 UTC after the qualified writer install;
+completion and a new pre-DDL backup have not yet been established. No migration
+or deployment is inferred from source merges, local binaries or backup start.
+
+The 19:54:56 standing URL census became unobservable with no qualified shard-zero
+owner. A bounded Root HTTPS read later distinguished two explicit shard-zero
+heartbeat zeros from six missing series in a new evaluation at that historical
+time. At 20:24:59 all eight shards again had exactly one owner. All eight
+self-reported process hashes and starts were unchanged between those frames;
+edge0/g2's shard-zero returned-ok passes advanced from 16 to 19 and its error
+count stayed one. This supports a local task-owner return gap, without proving
+duration, return reason, continuous ownership, native process identity or probe
+throughput. Separate SSH255 observations do not establish that gap's cause.
+Receipt `39d3d950` and privacy summary `a86d07b3` preserve those limits.
+
+The coherent 20:25 observation reported 69,249/85,087 quota-complete providers
+(81.39%), 12,588 warming and 204,073 seconds oldest due. The preceding coherent
+20:10 census had 84,323 eligible and 66,412 quota-complete (78.76%), after the
+19:39 population of 106,655 eligible. These are changing eligibility cohorts,
+not fixed-provider recovery or proof of a cycle reset. Neither the selector nor
+the mature pacing correction is deployed, so neither receives causal credit.
+The separate 20:20 database CPU observation was 49.47%; the 20:22 activity sample
+omitted 179 groups and truncated 129 query texts, so it cannot clear database
+contention or establish an owning query cause.
+
+R59 all-block selection is complete but full simultaneous native convergence,
+predecessor retirement and current resident memory ownership remain unresolved.
+Old accounting failures retain their reservations and insufficient-escrow
+rejections. Stable per-logical-close report-ID emission is follow-up source work
+and must wait for migration764 and backend-generation coverage before enabling.
+ARIN capture leases expired at 18:06:48; renewed files require ordinary service
+startup to create endpoints, and older live owners remain part of full-fleet
+coverage. Policy two stays inactive: the 493 offline verified Google Fiber and
+Webpass leaves do not prove enough Main residential/business supply. Native
+reader configuration delivery, full ARIN shadow, quota coverage, contract
+backlog and memory ownership remain open under the active FP2FIX goal and the
+authoritative standing monitor.
