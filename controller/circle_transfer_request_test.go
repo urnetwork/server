@@ -215,6 +215,7 @@ func TestCustomerChallengeCancellationAfterRealResponseRetainsOriginalRequest(t 
 			return customerTransferResponse(201, map[string]any{"data": map[string]any{"challengeId": f.challenge}}), nil
 		})
 		f.owner.Ctx, cancel = context.WithCancel(f.owner.Ctx)
+		defer cancel()
 		if _, err := WalletCircleTransferOut(f.args, f.owner); !errors.Is(err, context.Canceled) {
 			t.Fatal("canceled response was acknowledged without typed cause", err)
 		}
