@@ -1339,8 +1339,18 @@ func CloseContract(
 	usedTransferByteCount := model.ByteCount(closeContract.AckedByteCount)
 	checkpoint := closeContract.Checkpoint
 
-	err := model.CloseContract(ctx, contractId, clientId, usedTransferByteCount, checkpoint)
-	if err == nil {
+	applied := true
+	var err error
+	if len(closeContract.ReportId) == 0 {
+		err = model.CloseContract(ctx, contractId, clientId, usedTransferByteCount, checkpoint)
+	} else {
+		reportId, parseErr := server.IdFromBytes(closeContract.ReportId)
+		if parseErr != nil || reportId == (server.Id{}) {
+			return fmt.Errorf("invalid close report identity")
+		}
+		applied, err = model.CloseContractReport(ctx, contractId, clientId, usedTransferByteCount, checkpoint, reportId)
+	}
+	if err == nil && applied {
 		// the acked byte count is incremental per checkpoint, so this sums to
 		// the total transferred bytes (matching the contract_close accumulation)
 		transferByteCounter.Add(float64(usedTransferByteCount))

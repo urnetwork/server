@@ -2433,24 +2433,80 @@ func CloseContract(
 	clientId server.Id,
 	usedTransferByteCount ByteCount,
 	checkpoint bool,
-) (returnErr error) {
+) error {
+	_, err := closeContractReport(ctx, contractId, clientId, usedTransferByteCount, checkpoint, nil)
+	return err
+}
+
+// CloseContractReport acknowledges an exact logical report once. A retry may
+// resume settlement after the report commit without repeating its increment.
+// The caller must preserve reportId across transport retries; equal-sized
+// independent checkpoints have different identities.
+func CloseContractReport(
+	ctx context.Context,
+	contractId, clientId server.Id,
+	usedTransferByteCount ByteCount,
+	checkpoint bool,
+	reportId server.Id,
+) (bool, error) {
+	if reportId == (server.Id{}) {
+		return false, fmt.Errorf("invalid close report identity")
+	}
+	return closeContractReport(ctx, contractId, clientId, usedTransferByteCount, checkpoint, &reportId)
+}
+
+func closeContractReport(
+	ctx context.Context,
+	contractId, clientId server.Id,
+	usedTransferByteCount ByteCount,
+	checkpoint bool,
+	reportId *server.Id,
+) (applied bool, returnErr error) {
 	// settle := false
 	// dispute := false
 	if usedTransferByteCount < 0 {
-		return fmt.Errorf("Invalid used transfer byte count: %d", usedTransferByteCount)
+		return false, fmt.Errorf("Invalid used transfer byte count: %d", usedTransferByteCount)
 	}
 
+	terminalReplay := false
 	server.Tx(ctx, func(tx server.PgTx) {
-		found := false
-		var sourceId server.Id
-		var destinationId server.Id
-		var outcome *ContractOutcome
-		var dispute bool
-		var party ContractParty
+		applied, terminalReplay, returnErr = applyContractCloseReportInTx(ctx, tx, contractId, clientId, usedTransferByteCount, checkpoint, reportId)
+	}, server.TxReadCommitted)
 
-		result, err := tx.Query(
-			ctx,
-			`
+	if terminalReplay {
+		return
+	}
+	if returnErr != nil {
+		return
+	}
+
+	closed, err := settleContract(ctx, contractId)
+	if err != nil {
+		returnErr = err
+		return
+	}
+	if closed {
+		RemoveFromStream(ctx, contractId)
+	}
+	return
+}
+
+// Receipt publication and the existing close increment share this transaction.
+// Splitting the owner from settlement also permits exact crash/rollback controls.
+func applyContractCloseReportInTx(ctx context.Context, tx server.PgTx,
+	contractId, clientId server.Id, usedTransferByteCount ByteCount,
+	checkpoint bool, reportId *server.Id,
+) (applied, terminalReplay bool, returnErr error) {
+	found := false
+	var sourceId server.Id
+	var destinationId server.Id
+	var outcome *ContractOutcome
+	var dispute bool
+	var party ContractParty
+
+	result, err := tx.Query(
+		ctx,
+		`
                 SELECT
                     source_id,
                     destination_id,
@@ -2461,45 +2517,66 @@ func CloseContract(
                     contract_id = $1
                 FOR UPDATE
             `,
-			contractId,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				found = true
-				server.Raise(result.Scan(&sourceId, &destinationId, &outcome, &dispute))
-				if clientId == sourceId {
-					party = ContractPartySource
-				} else if clientId == destinationId {
-					party = ContractPartyDestination
-				}
+		contractId,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			found = true
+			server.Raise(result.Scan(&sourceId, &destinationId, &outcome, &dispute))
+			if clientId == sourceId {
+				party = ContractPartySource
+			} else if clientId == destinationId {
+				party = ContractPartyDestination
+			}
+		}
+	})
+
+	if !found {
+		returnErr = fmt.Errorf("Contract not found: %s", contractId.String())
+		return
+	}
+	if party == "" {
+		returnErr = fmt.Errorf("Client is not a party to the contract: %s %s %s->%s", contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
+		return
+	}
+	if reportId != nil {
+		var priorBytes ByteCount
+		var priorCheckpoint bool
+		foundReport := false
+		rows, err := tx.Query(ctx, `SELECT used_transfer_byte_count,checkpoint
+ FROM contract_close_report WHERE contract_id=$1 AND party=$2 AND report_id=$3`, contractId, party, *reportId)
+		server.WithPgResult(rows, err, func() {
+			if rows.Next() {
+				server.Raise(rows.Scan(&priorBytes, &priorCheckpoint))
+				foundReport = true
 			}
 		})
-
-		if !found {
-			returnErr = fmt.Errorf("Contract not found: %s", contractId.String())
-			return
-		}
-		if party == "" {
-			returnErr = fmt.Errorf("Client is not a party to the contract: %s %s %s->%s", contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
-			return
-		}
-		if outcome != nil {
-			if *outcome == ContractOutcomeSettled {
-				returnErr = fmt.Errorf("%w: %s %s %s->%s", errContractAlreadySettled, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
+		if foundReport {
+			if priorBytes != usedTransferByteCount || priorCheckpoint != checkpoint {
+				returnErr = fmt.Errorf("close report identity payload conflicts")
 			} else {
-				returnErr = fmt.Errorf("Contract already closed with outcome %s: %s %s %s->%s", *outcome, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
+				terminalReplay = outcome != nil || dispute
 			}
 			return
 		}
-		if dispute {
-			returnErr = fmt.Errorf("Contract in dispute: %s %s %s->%s", contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
-			return
+	}
+	if outcome != nil {
+		if *outcome == ContractOutcomeSettled {
+			returnErr = fmt.Errorf("%w: %s %s %s->%s", errContractAlreadySettled, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
+		} else {
+			returnErr = fmt.Errorf("Contract already closed with outcome %s: %s %s %s->%s", *outcome, contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
 		}
+		return
+	}
+	if dispute {
+		returnErr = fmt.Errorf("Contract in dispute: %s %s %s->%s", contractId.String(), clientId.String(), sourceId.String(), destinationId.String())
+		return
+	}
 
-		if checkpoint {
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`
+	if checkpoint {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
                     INSERT INTO contract_close (
                         contract_id,
                         party,
@@ -2515,16 +2592,17 @@ func CloseContract(
                     WHERE
                         contract_close.checkpoint = true
                 `,
-				contractId,
-				party,
-				usedTransferByteCount,
-				server.NowUtc(),
-			))
+			contractId,
+			party,
+			usedTransferByteCount,
+			server.NowUtc(),
+		))
+		applied = tag.RowsAffected() == 1
 
-		} else {
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`
+	} else {
+		tag := server.RaisePgResult(tx.Exec(
+			ctx,
+			`
                     INSERT INTO contract_close (
                         contract_id,
                         party,
@@ -2541,25 +2619,19 @@ func CloseContract(
                     WHERE
                         contract_close.checkpoint = true
                 `,
-				contractId,
-				party,
-				usedTransferByteCount,
-				server.NowUtc(),
-			))
-		}
-	}, server.TxReadCommitted)
-
-	if returnErr != nil {
-		return
+			contractId,
+			party,
+			usedTransferByteCount,
+			server.NowUtc(),
+		))
+		applied = tag.RowsAffected() == 1
 	}
-
-	closed, err := settleContract(ctx, contractId)
-	if err != nil {
-		returnErr = err
-		return
-	}
-	if closed {
-		RemoveFromStream(ctx, contractId)
+	if reportId != nil {
+		// The existing contract row lock serializes this receipt with its
+		// party increment. No shared payer/network row is acquired here.
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close_report
+ (contract_id,party,report_id,used_transfer_byte_count,checkpoint) VALUES($1,$2,$3,$4,$5)`,
+			contractId, party, *reportId, usedTransferByteCount, checkpoint))
 	}
 	return
 }

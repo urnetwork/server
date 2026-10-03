@@ -4553,6 +4553,18 @@ contention boundary and its eventual settlement control.
 Probe: `legacy-settlements`
 Classes: `legacy-settlement-pending`, `legacy-settlement-worker-missing`.
 
+Checkpoint replay qualifier (2026-10-03): native `ControlSync` can deliver the
+same incremental checkpoint as a fresh operation after an application commit
+and lost transfer ACK. A real-controller/PostgreSQL control reproduces a final
+destination total above its issued grant while preserving final reports and
+correctly refusing insufficient escrow. Equal-sized independent checkpoints
+are healthy and must not be deduplicated by payload. Migration764 adds optional
+logical-report receipts under the existing contract owner; backend/schema must
+precede hosted SDK emission. ID-less old clients remain compatible and
+ambiguous. This mechanism is not attribution of any retained Main row; missing
+original funding, overreporting and historical deletion remain distinct facts.
+See [the staged repair and controls](../docs/operator/close-report-idempotency-20261003.md).
+
 Migration 763 gives legacy unmarked or mixed escrow contracts an independent
 per-contract settlement intent. Foreground acknowledgement leaves the outcome
 unset and the SQL reservation intact. Sixteen bounded recovery partitions take
