@@ -107,3 +107,20 @@ func TestProPriceTiersParse(t *testing.T) {
 	connect.AssertEqual(t, 2, len(tiers[0].Countries))
 	connect.AssertEqual(t, "US", tiers[0].Countries[0])
 }
+
+// TestPriceTierForUniqueSolanaQuote: a Solana quote is the price plus a
+// sub-cent suffix (SolanaUniqueAmountMicro), and the credited intent's tier is
+// recovered from that quote. The largest suffix still resolves to the tier.
+func TestPriceTierForUniqueSolanaQuote(t *testing.T) {
+	c := testPriceTierConfig()
+	quote := func(priceUsd float64) float64 {
+		amountMicro, ok := SolanaUniqueAmountMicro(priceUsd, SolanaUniqueAmountMaxSuffixMicro)
+		connect.AssertEqual(t, ok, true)
+		return SolanaMicroToUsd(amountMicro)
+	}
+	connect.AssertEqual(t, "standard", c.PriceTierForPrice(PlanYearly, quote(40), 25))
+	connect.AssertEqual(t, "standard", c.PriceTierForPrice(PlanYearly, quote(30), 25))
+	connect.AssertEqual(t, "regional", c.PriceTierForPrice(PlanYearly, quote(4), 25))
+	connect.AssertEqual(t, "standard", c.PriceTierForPrice(PlanMonthly, quote(5), 25))
+	connect.AssertEqual(t, "regional", c.PriceTierForPrice(PlanMonthly, quote(0.5), 25))
+}

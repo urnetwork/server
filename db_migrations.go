@@ -9391,4 +9391,37 @@ var migrations = []any{
 			ON provider_egress_health_history(client_id, measured_at DESC)
 			WHERE url_probe AND url_probe_policy_version=1 AND total_count=1 AND (ok_count=0 OR ok_count=1)
 	`),
+
+	// Memo-less USDC payments on Solana. Each quote gets a unique amount (the
+	// price plus a sub-cent suffix of 1 to 9999 micro-USDC), so a transfer of
+	// exactly that amount identifies its intent without the reference.
+	//
+	// expected_amount_micro is the exact quote in micro-USDC; NULL for intents
+	// quoted without a suffix, which only ever match by reference.
+	//
+	// solana_payment_amount_reservation holds each amount for its intent until
+	// reserved_until (the intent's expiry plus a hold), so an amount is never
+	// quoted to a second buyer while a late payment of the first quote could
+	// still arrive -- swept intents are deleted, but their reservation stays.
+	//
+	// sender_account and match_note give support what it needs to credit a
+	// memo-less payment by hand when it could not be matched unambiguously.
+	newSqlMigration(`
+		ALTER TABLE solana_payment_intent
+			ADD COLUMN expected_amount_micro bigint NULL;
+
+		CREATE INDEX solana_payment_intent_expected_amount_micro
+			ON solana_payment_intent (expected_amount_micro, expires_at)
+			WHERE expected_amount_micro IS NOT NULL;
+
+		CREATE TABLE solana_payment_amount_reservation (
+			amount_micro bigint NOT NULL PRIMARY KEY,
+			payment_reference text NOT NULL,
+			reserved_until timestamp NOT NULL
+		);
+
+		ALTER TABLE solana_unfulfilled_payment
+			ADD COLUMN sender_account varchar(64) NULL,
+			ADD COLUMN match_note text NULL;
+	`),
 }

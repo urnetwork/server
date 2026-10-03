@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mathrand "math/rand/v2"
 	"net/http"
 	"net/url"
 	"slices"
@@ -2010,6 +2011,9 @@ type solanaPaymentLookups interface {
 	searchIntentsByReference(references []string) (*model.PaymentIntentSearchResult, error)
 	// whether this transaction signature already consumed an intent
 	isPaymentCompleted(signature string) bool
+	// every intent, open or consumed, quoted exactly amountMicro that expires
+	// after minExpiresAt (model.ListSolanaPaymentIntentsByAmountMicro)
+	intentsByAmountMicro(amountMicro int64, minExpiresAt time.Time) ([]*model.SolanaPaymentIntent, error)
 }
 
 type solanaDbPaymentLookups struct {
@@ -2024,6 +2028,10 @@ func (self *solanaDbPaymentLookups) isPaymentCompleted(signature string) bool {
 	return model.IsSolanaPaymentCompleted(self.clientSession.Ctx, signature)
 }
 
+func (self *solanaDbPaymentLookups) intentsByAmountMicro(amountMicro int64, minExpiresAt time.Time) ([]*model.SolanaPaymentIntent, error) {
+	return model.ListSolanaPaymentIntentsByAmountMicro(self.clientSession.Ctx, amountMicro, minExpiresAt)
+}
+
 // solanaDecidePayment decides what one Helius transaction buys, with no writes:
 // the webhook carries out the decision (credit through the intent one-shot, or
 // record for an operator). The rules, in order:
@@ -2034,7 +2042,9 @@ func (self *solanaDbPaymentLookups) isPaymentCompleted(signature string) bool {
 //     (solanaReferenceCandidates); an open intent found there is credited when
 //     the amount is not under its quote (underpaid is recorded)
 //   - no open intent: a redelivery of an already credited signature is
-//     skipped, anything else is recorded as no_intent
+//     skipped; otherwise the payment is matched by its exact unique amount
+//     (solanaDecideMemolessPayment) and credited only when unambiguous, else
+//     recorded as no_intent
 func solanaDecidePayment(
 	transaction *SolanaTransaction,
 	lookups solanaPaymentLookups,
@@ -2119,24 +2129,40 @@ func solanaDecidePayment(
 			}
 		}
 
-		// Money arrived at our address and no open intent matched -- a payment
-		// after the intent was swept, or an unknown reference. Record it with the
-		// account keys and memos the reference was searched among. A late payment
-		// whose intent has merely EXPIRED but not yet been swept never lands here:
-		// the search ignores expires_at on purpose, so it still resolves and is
-		// credited -- late is not fraudulent.
-		glog.Errorf("HeliusWebhook: no payment intent found for transaction: %s; recording as unfulfilled\n", transaction.Signature)
-		return &solanaPaymentDecision{
-			action:      solanaPaymentActionRecord,
-			skipMessage: "No payment intent found for this network ID",
-			unfulfilled: &model.UnfulfilledSolanaPayment{
-				TxSignature:         transaction.Signature,
-				Reason:              model.SolanaUnfulfilledReasonNoIntent,
-				TokenAmountUsd:      tokenAmountReceived,
-				ReferenceCandidates: accounts,
-				TransactionTime:     transactionTime,
-			},
+		// No open intent matched the reference -- a payment sent without it (a
+		// wallet that cannot add a memo), after the intent was swept, or with an
+		// unknown reference. A late payment whose intent has merely EXPIRED but
+		// not yet been swept never lands here: the search ignores expires_at on
+		// purpose, so it still resolves and is credited -- late is not
+		// fraudulent.
+		//
+		// Try the exact unique amount; what does not match unambiguously is
+		// recorded with the account keys and memos the reference was searched
+		// among, the sender, and why the amount did not match.
+		decision := solanaDecideMemolessPayment(transaction, lookups, &model.UnfulfilledSolanaPayment{
+			TxSignature:         transaction.Signature,
+			Reason:              model.SolanaUnfulfilledReasonNoIntent,
+			TokenAmountUsd:      tokenAmountReceived,
+			ReferenceCandidates: accounts,
+			TransactionTime:     transactionTime,
+		})
+		switch decision.action {
+		case solanaPaymentActionCredit:
+			glog.Infof(
+				"HeliusWebhook: transaction %s has no reference; matched intent %s (network %s) by its unique amount %.6f USDC\n",
+				transaction.Signature,
+				decision.intent.PaymentReference,
+				*decision.intent.NetworkId,
+				decision.tokenAmountUsd,
+			)
+		case solanaPaymentActionRecord:
+			glog.Errorf(
+				"HeliusWebhook: no payment intent found for transaction: %s; recording as unfulfilled (%s)\n",
+				transaction.Signature,
+				*decision.unfulfilled.MatchNote,
+			)
 		}
+		return decision
 	}
 
 	// Verify the payment against what the customer was QUOTED. Underpaying must not
@@ -2289,6 +2315,17 @@ func solanaCreditPaymentIntent(
  * We create a reference for each payment intent and map it to the network ID
  */
 
+// a plan intent is paid from a wallet the buyer is already in; the data pack
+// intents of the buy-data page last longer (payDataSolanaIntentDuration)
+const solanaPlanIntentDuration = 1 * time.Hour
+
+// solanaPickAmountSuffixMicro proposes a quote suffix in [1,
+// model.SolanaUniqueAmountMaxSuffixMicro]; the reservation decides whether it
+// is free.
+var solanaPickAmountSuffixMicro = func() int64 {
+	return 1 + mathrand.Int64N(model.SolanaUniqueAmountMaxSuffixMicro)
+}
+
 // solanaAmountTolerance absorbs float dust in the chain-reported token amount. It is not
 // a discount: anything more than a cent short of the quoted price is an underpayment.
 const solanaAmountTolerance = 0.01
@@ -2322,7 +2359,9 @@ type SolanaPaymentIntentArgs struct {
 }
 
 type SolanaPaymentIntentResult struct {
-	// the price the SERVER quoted -- the client must pay exactly this
+	// the amount the SERVER quoted -- the client must pay exactly this. It is the
+	// price plus a unique sub-cent suffix (up to 6 decimals), which identifies a
+	// payment sent without the reference; show and pay all its decimals
 	AmountUsd float64                   `json:"amount_usd,omitempty"`
 	Error     *SolanaPaymentIntentError `json:"error,omitempty"`
 	// the tier the quote came from and the plan's regular price (the offer's
@@ -2410,7 +2449,18 @@ func CreateSolanaPaymentIntent(
 	// The error used to be discarded here, so a duplicate or failed intent looked exactly
 	// like a successful one -- and the customer was sent off to pay against an intent
 	// that did not exist.
-	err := model.CreateSolanaPaymentIntent(intent.Reference, priceUsd, intent.Plan, clientSession)
+	//
+	// The quote is the price plus a reserved sub-cent suffix, so a payment sent
+	// without the reference is still identified by its exact amount.
+	amountUsd, err := model.CreateSolanaPaymentIntentWithUniqueAmount(
+		clientSession.Ctx,
+		intent.Reference,
+		clientSession.ByJwt.NetworkId,
+		priceUsd,
+		intent.Plan,
+		server.NowUtc().Add(solanaPlanIntentDuration),
+		solanaPickAmountSuffixMicro,
+	)
 	if err != nil {
 		glog.Errorf("[sub]could not create solana payment intent: %s\n", err)
 		return &SolanaPaymentIntentResult{
@@ -2418,10 +2468,10 @@ func CreateSolanaPaymentIntent(
 		}, nil
 	}
 
-	// Hand the quoted price back so the payment url the client builds and the intent the
+	// Hand the quoted amount back so the payment url the client builds and the intent the
 	// webhook checks against cannot disagree.
 	return &SolanaPaymentIntentResult{
-		AmountUsd:        priceUsd,
+		AmountUsd:        amountUsd,
 		Tier:             tier.Tier.Name,
 		Plan:             intent.Plan,
 		RegularAmountUsd: regularUsd,

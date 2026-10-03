@@ -25,7 +25,9 @@ import (
 // an account key of the transfer, or by hand from any wallet or exchange with the
 // reference as the transfer MEMO. The webhook matches both
 // (solanaReferenceCandidates), so there is no email, no hosted checkout and no
-// code: the data lands on the network.
+// code: the data lands on the network. A wallet that cannot add a memo still
+// works: the quoted amount is unique, and a transfer of exactly that amount
+// within the intent's window is matched by it (solana_memoless_match.go).
 //
 // POST /pay/data/solana-status is what the buy-data page polls while it waits.
 //
@@ -63,7 +65,8 @@ type PayDataSolanaIntentArgs struct {
 }
 
 type PayDataSolanaIntentResult struct {
-	// the exact USDC amount to send, quoted from pro.yml
+	// the exact USDC amount to send: the pro.yml price plus a unique sub-cent
+	// suffix (up to 6 decimals) that identifies a payment sent without the memo
 	AmountUsd float64 `json:"amount_usd,omitempty"`
 	Reference string  `json:"reference,omitempty"`
 	// what to put in the transfer memo when paying by hand: the reference
@@ -172,14 +175,17 @@ func PayDataSolanaIntent(
 		return payDataSolanaIntentError(fmt.Sprintf("No network named %s", networkName)), nil
 	}
 
+	// the quote carries a reserved sub-cent suffix, so a payment sent without
+	// the memo is still identified by its exact amount
 	expiresAt := server.NowUtc().Add(payDataSolanaIntentDuration)
-	err := model.CreateSolanaPaymentIntentForNetwork(
+	amountUsd, err := model.CreateSolanaPaymentIntentWithUniqueAmount(
 		clientSession.Ctx,
 		reference,
 		*networkId,
 		priceUsd,
 		itemId,
 		expiresAt,
+		solanaPickAmountSuffixMicro,
 	)
 	if err != nil {
 		// a duplicate reference or a failed insert must not send the buyer off to
@@ -189,12 +195,12 @@ func PayDataSolanaIntent(
 	}
 
 	glog.Infof(
-		"[paydata]solana intent %s: %s for network %s, %.2f USDC\n",
-		reference, itemId, *networkId, priceUsd,
+		"[paydata]solana intent %s: %s for network %s, %.6f USDC\n",
+		reference, itemId, *networkId, amountUsd,
 	)
 
 	return &PayDataSolanaIntentResult{
-		AmountUsd:   priceUsd,
+		AmountUsd:   amountUsd,
 		Reference:   reference,
 		Memo:        reference,
 		ExpiresAt:   &expiresAt,

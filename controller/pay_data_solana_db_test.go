@@ -87,6 +87,7 @@ func TestSolanaWebhookAppliesDataPackToNamedNetwork(t *testing.T) {
 		defer SetMessageSender(prevSender)
 
 		reference := "7Gk3sQx9pLmN2vB4cD6eF8hJ1kM5nP7rS9tU2wY4zA6B"
+		solanaTestAmountSuffixes(t, 202)
 		intentResult, err := PayDataSolanaIntent(&PayDataSolanaIntentArgs{
 			ItemId:      StripeItemData1Tib,
 			NetworkName: "BuyDataSolana",
@@ -96,7 +97,8 @@ func TestSolanaWebhookAppliesDataPackToNamedNetwork(t *testing.T) {
 		connect.AssertEqual(t, intentResult.Error, nil)
 		priceUsd, ok := dataPackPriceUsd(StripeItemData1Tib)
 		connect.AssertEqual(t, ok, true)
-		connect.AssertEqual(t, intentResult.AmountUsd, priceUsd)
+		// the price plus the reserved sub-cent suffix
+		connect.AssertEqual(t, intentResult.AmountUsd, model.SolanaMicroToUsd(model.SolanaUsdToMicro(priceUsd)+202))
 		connect.AssertEqual(t, intentResult.Memo, reference)
 		connect.AssertEqual(t, intentResult.NetworkName, "buydatasolana")
 		connect.AssertEqual(t, *intentResult.NetworkId, networkId)
@@ -116,7 +118,7 @@ func TestSolanaWebhookAppliesDataPackToNamedNetwork(t *testing.T) {
 		connect.AssertEqual(t, status.Status, PayDataSolanaStatusPending)
 		connect.AssertEqual(t, status.ItemId, StripeItemData1Tib)
 		connect.AssertEqual(t, status.NetworkName, "buydatasolana")
-		connect.AssertEqual(t, status.AmountUsd, priceUsd)
+		connect.AssertEqual(t, status.AmountUsd, intentResult.AmountUsd)
 
 		// underpaying buys nothing and keeps the intent open
 		result, err := HeliusWebhook(
