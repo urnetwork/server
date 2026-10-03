@@ -4,8 +4,6 @@ import (
 	// "time"
 	"fmt"
 
-	"github.com/urnetwork/glog"
-	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
@@ -186,32 +184,7 @@ func NetworkRemove(session *session.ClientSession) (*NetworkRemoveResult, error)
 	// local owner. Each confirmed cancellation closes only its own renewal, so
 	// partial progress is retryable and any remaining failure leaves the
 	// network and its authentication context intact.
-	if err := UnsubscribeStripe(session); err != nil {
-		glog.Errorf("Failed to unsubscribe Stripe: %v", err)
-		return &NetworkRemoveResult{
-			Error: &NetworkRemoveResultError{
-				Message: "Failed to unsubscribe Stripe",
-			},
-		}, nil
-	}
-
-	success, userAuths := model.RemoveNetwork(
-		session.Ctx,
-		session.ByJwt.NetworkId,
-		&session.ByJwt.UserId,
-	)
-
-	if success {
-		server.Tx(session.Ctx, func(tx server.PgTx) {
-			for userAuth, _ := range userAuths {
-				ScheduleRemoveProductUpdates(session, userAuth, tx)
-			}
-		})
-
-		return &NetworkRemoveResult{}, nil
-	}
-
-	return nil, fmt.Errorf("Could not remove network")
+	return networkRemoveWithSteps(session, &defaultNetworkRemoveSteps)
 }
 
 type GetNetworkReliabilityResult struct {
