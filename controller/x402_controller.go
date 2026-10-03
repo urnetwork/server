@@ -538,21 +538,8 @@ func X402Purchase(
 	}
 
 	// paid. grant it.
-	netRevenue := model.UsdToNanoCents(sku.PriceUsd)
-
-	if sku.Pro {
-		err = x402GrantProMonth(ctx, networkId, sku, netRevenue, settleResponse)
-	} else {
-		err = x402GrantData(ctx, networkId, sku, netRevenue, settleResponse)
-	}
-	if err != nil {
-		// The money moved but the grant did not. Loudly: this needs manual repair,
-		// and the transaction id is the thread to pull.
-		glog.Errorf(
-			"[x402]SETTLED BUT NOT GRANTED network=%s sku=%s tx=%s err=%s\n",
-			networkId, sku.SkuId, settleResponse.Transaction, err,
-		)
-		return nil, fmt.Errorf("x402 grant failed after settlement: %w", err)
+	if err := x402GrantSettled(ctx, networkId, sku, settleResponse); err != nil {
+		return nil, err
 	}
 
 	// Record the settled transfer in Stripe. The money is already on chain and
@@ -577,6 +564,97 @@ func X402Purchase(
 		Transaction: settleResponse.Transaction,
 		Network:     settleResponse.Network,
 	}, nil
+}
+
+// x402 grant seams, so the settle->grant failure path is testable without Postgres
+var (
+	x402GrantProMonthFunc = x402GrantProMonth
+	x402GrantDataFunc     = x402GrantData
+)
+
+// x402GrantSettled grants a settled purchase. The money has already moved, so a
+// grant failure is recorded durably as a settled_not_granted reconciliation event
+// keyed by the settle transaction; the payment reconciler retries the grant from
+// it (the grant is idempotent on that transaction), so repair no longer depends
+// on someone reading the logs.
+func x402GrantSettled(
+	ctx context.Context,
+	networkId server.Id,
+	sku *X402Sku,
+	settleResponse *X402SettleResponse,
+) error {
+	netRevenue := model.UsdToNanoCents(sku.PriceUsd)
+
+	var err error
+	if sku.Pro {
+		err = x402GrantProMonthFunc(ctx, networkId, sku, netRevenue, settleResponse)
+	} else {
+		err = x402GrantDataFunc(ctx, networkId, sku, netRevenue, settleResponse)
+	}
+	if err != nil {
+		glog.Errorf(
+			"[x402]SETTLED BUT NOT GRANTED network=%s sku=%s tx=%s err=%s\n",
+			networkId, sku.SkuId, settleResponse.Transaction, err,
+		)
+		recordErr := addPaymentReconciliationEvent(ctx, &model.PaymentReconciliationEvent{
+			// a fresh provenance id, like the other webhook-time events
+			RunId:     server.NewId(),
+			Store:     model.SubscriptionMarketX402,
+			NetworkId: &networkId,
+			Action:    model.PaymentReconcileActionSettledNotGranted,
+			Evidence:  settleResponse.Transaction,
+			Details:   x402SettledNotGrantedDetails(sku, settleResponse, err),
+		})
+		if recordErr != nil {
+			// the log line above is now the only record
+			glog.Errorf(
+				"[x402]SETTLED BUT NOT GRANTED tx=%s could not be recorded for the reconciler: %s\n",
+				settleResponse.Transaction, recordErr,
+			)
+		}
+		return fmt.Errorf("x402 grant failed after settlement: %w", err)
+	}
+	return nil
+}
+
+// x402SettledNotGrantedDetails is what the reconciler needs to retry the grant
+// exactly as bought: the price paid and the amount, not the current config.
+func x402SettledNotGrantedDetails(sku *X402Sku, settleResponse *X402SettleResponse, err error) map[string]any {
+	return map[string]any{
+		"sku_id":     sku.SkuId,
+		"pro":        sku.Pro,
+		"byte_count": int64(sku.ByteCount),
+		"price_usd":  sku.PriceUsd,
+		"network":    settleResponse.Network,
+		"error":      err.Error(),
+	}
+}
+
+// x402SkuFromSettledNotGrantedDetails reverses x402SettledNotGrantedDetails
+// (json numbers decode as float64).
+func x402SkuFromSettledNotGrantedDetails(details map[string]any) (*X402Sku, string, error) {
+	skuId, _ := details["sku_id"].(string)
+	pro, proOk := details["pro"].(bool)
+	byteCount, byteCountOk := details["byte_count"].(float64)
+	priceUsd, priceUsdOk := details["price_usd"].(float64)
+	network, _ := details["network"].(string)
+	if skuId == "" || !proOk || !byteCountOk || !priceUsdOk {
+		return nil, "", fmt.Errorf("settled_not_granted details are incomplete: %v", details)
+	}
+	return &X402Sku{
+		SkuId:     skuId,
+		PriceUsd:  priceUsd,
+		Pro:       pro,
+		ByteCount: model.ByteCount(byteCount),
+	}, network, nil
+}
+
+// x402TransactionGranted is x402AlreadyGrantedForTransaction in its own read.
+func x402TransactionGranted(ctx context.Context, networkId server.Id, transaction string) (granted bool) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		granted = x402AlreadyGrantedForTransaction(ctx, tx, networkId, transaction)
+	}, server.TxReadCommitted)
+	return
 }
 
 // x402PaymentNetwork reads the network out of the signed payment payload. Per the

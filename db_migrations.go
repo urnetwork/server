@@ -9458,4 +9458,55 @@ var migrations = []any{
 	newSqlMigration(providerPayoutBoundarySchemaSql),
 	// Independent settlement records keep shared grant writes out of contract closure.
 	newSqlMigration(transferDebitJournalSchemaSql),
+	// acceptance-test balance drains (model/test_balance_drain_model.go). Each
+	// row is the audit record of one drain; rows are never deleted. The partial
+	// index keeps the in-window lookup an index probe.
+	newSqlMigration(`
+        CREATE TABLE test_balance_drain (
+            drain_id uuid NOT NULL,
+            network_id uuid NOT NULL,
+            start_time timestamp NOT NULL,
+            end_time timestamp NOT NULL,
+            restore_time timestamp NULL,
+            drained_balance_byte_count bigint NOT NULL,
+
+            PRIMARY KEY (drain_id)
+        )
+    `),
+	newSqlMigration(`
+        CREATE INDEX test_balance_drain_network_id_end_time ON test_balance_drain (network_id, end_time) WHERE restore_time IS NULL
+    `),
+
+	// Memo-less USDC payments on Solana. Each quote gets a unique amount (the
+	// price plus a sub-cent suffix of 1 to 9999 micro-USDC), so a transfer of
+	// exactly that amount identifies its intent without the reference.
+	//
+	// expected_amount_micro is the exact quote in micro-USDC; NULL for intents
+	// quoted without a suffix, which only ever match by reference.
+	//
+	// solana_payment_amount_reservation holds each amount for its intent until
+	// reserved_until (the intent's expiry plus a hold), so an amount is never
+	// quoted to a second buyer while a late payment of the first quote could
+	// still arrive -- swept intents are deleted, but their reservation stays.
+	//
+	// sender_account and match_note give support what it needs to credit a
+	// memo-less payment by hand when it could not be matched unambiguously.
+	newSqlMigration(`
+		ALTER TABLE solana_payment_intent
+			ADD COLUMN expected_amount_micro bigint NULL;
+
+		CREATE INDEX solana_payment_intent_expected_amount_micro
+			ON solana_payment_intent (expected_amount_micro, expires_at)
+			WHERE expected_amount_micro IS NOT NULL;
+
+		CREATE TABLE solana_payment_amount_reservation (
+			amount_micro bigint NOT NULL PRIMARY KEY,
+			payment_reference text NOT NULL,
+			reserved_until timestamp NOT NULL
+		);
+
+		ALTER TABLE solana_unfulfilled_payment
+			ADD COLUMN sender_account varchar(64) NULL,
+			ADD COLUMN match_note text NULL;
+	`),
 }

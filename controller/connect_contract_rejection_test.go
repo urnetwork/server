@@ -143,7 +143,9 @@ func TestCreateContractRejectionCausePreservesHealthyAccounting(t *testing.T) {
 		}
 		model.Testing_CreateDevice(ctx, network, server.NewId(), source, "source", "fixture")
 		model.Testing_CreateDevice(ctx, peerNetwork, server.NewId(), destination, "destination", "fixture")
-		server.Raise(model.AddBasicTransferBalance(ctx, network, 2*1024*1024, server.NowUtc(), server.NowUtc().Add(time.Hour)))
+		// The 512 KiB left after the 1 MiB contract is below the shrink-to-fit
+		// floor, so the larger request is still refused.
+		server.Raise(model.AddBasicTransferBalance(ctx, network, 1024*1024+512*1024, server.NowUtc(), server.NowUtc().Add(time.Hour)))
 		model.SetProvide(ctx, destination, map[model.ProvideMode][]byte{model.ProvideModePublic: bytes.Repeat([]byte{42}, 32)})
 		httpCtx := context.WithValue(ctx, controlHttpIngressKey{}, true)
 		before := rejectionCount(t, "http", "insufficient_balance", "false")

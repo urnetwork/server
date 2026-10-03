@@ -2,9 +2,13 @@ package controller
 
 import (
 	// "context"
+	"errors"
 	"fmt"
+	"strings"
 	// "time"
 	"sync"
+
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -70,37 +74,108 @@ func AuthLoginWithPassword(
 	loginWithPassword model.AuthLoginWithPasswordArgs,
 	session *session.ClientSession,
 ) (*model.AuthLoginWithPasswordResult, error) {
-	result, err := model.AuthLoginWithPassword(loginWithPassword, session)
+	return authLoginWithPassword(loginWithPassword, session, model.AuthLoginWithPassword, authVerifySendResult)
+}
+
+type authLoginWithPasswordFunction func(model.AuthLoginWithPasswordArgs, *session.ClientSession) (*model.AuthLoginWithPasswordResult, error)
+
+type authVerifySendFunction func(AuthVerifySendArgs, *session.ClientSession) (*AuthVerifySendResult, error)
+
+// Logs in, and when the account still needs verification sends a code. Why a
+// code was not sent goes to `verification_required.send_error`; it used to be
+// dropped, so the apps said a code was sent when it was not.
+func authLoginWithPassword(
+	loginWithPassword model.AuthLoginWithPasswordArgs,
+	session *session.ClientSession,
+	login authLoginWithPasswordFunction,
+	verifySend authVerifySendFunction,
+) (*model.AuthLoginWithPasswordResult, error) {
+	result, err := login(loginWithPassword, session)
 	// if verification required, send it
 	if result != nil && result.VerificationRequired != nil {
-
-		useNumeric := false
-
-		if loginWithPassword.VerifyOtpNumeric {
-			useNumeric = true
-		}
-
-		verifySend := AuthVerifySendArgs{
-			UserAuth:   result.VerificationRequired.UserAuth,
-			UseNumeric: useNumeric,
-		}
-		AuthVerifySend(verifySend, session)
+		result.VerificationRequired.SendError = sendVerification(
+			result.VerificationRequired.UserAuth,
+			loginWithPassword.VerifyOtpNumeric,
+			session,
+			verifySend,
+		)
 	}
 	return result, err
+}
+
+// Sends a verification code after login or sign-up. Returns why no code was
+// sent, or nil when it was.
+func sendVerification(
+	userAuth string,
+	useNumeric bool,
+	session *session.ClientSession,
+	verifySend authVerifySendFunction,
+) *AuthVerifySendError {
+	result, err := verifySend(AuthVerifySendArgs{
+		UserAuth:   userAuth,
+		UseNumeric: useNumeric,
+	}, session)
+	if err != nil {
+		// no code was created, so none can have been sent
+		glog.Warningf("[auth]verification code not sent: %s\n", err)
+		return &AuthVerifySendError{
+			Code:    model.AuthVerifySendErrorCodeSendFailed,
+			Message: verifySendFailedMessage,
+		}
+	}
+	return result.Error
 }
 
 type AuthVerifySendArgs struct {
 	UserAuth   string `json:"user_auth"`
 	UseNumeric bool   `json:"use_numeric,omitempty"`
+	// return a rate-limit refusal or a send failure in the result `error`
+	// with a 200, instead of the HTTP 429 / 502 older clients expect
+	ResultErrors bool `json:"result_errors,omitempty"`
 }
+
+type AuthVerifySendError = model.AuthVerifySendError
 
 type AuthVerifySendResult struct {
 	UserAuth string `json:"user_auth"`
+	// set when no code was sent
+	Error *AuthVerifySendError `json:"error,omitempty"`
 }
+
+const verifySendFailedMessage = "The verification code could not be sent. Please try again."
 
 func AuthVerifySend(
 	verifySend AuthVerifySendArgs,
 	session *session.ClientSession,
+) (*AuthVerifySendResult, error) {
+	result, err := authVerifySendResult(verifySend, session)
+	if err != nil {
+		return nil, err
+	}
+	if result.Error != nil && !verifySend.ResultErrors {
+		// older clients show any error status as a failed send
+		return nil, legacyAuthVerifySendError(result.Error)
+	}
+	return result, nil
+}
+
+func authVerifySendResult(
+	verifySend AuthVerifySendArgs,
+	session *session.ClientSession,
+) (*AuthVerifySendResult, error) {
+	return authVerifySend(verifySend, session, model.AuthVerifyCreateCode, GetAWSMessageSender())
+}
+
+type authVerifyCreateCodeFunction func(model.AuthVerifyCreateCodeArgs, *session.ClientSession) (*model.AuthVerifyCreateCodeResult, error)
+
+// Creates a verification code and sends it. A rate-limit refusal and a send
+// failure come back in the result `Error`, never dropped: the caller must not
+// tell the user a code was sent. Other errors are returned as errors.
+func authVerifySend(
+	verifySend AuthVerifySendArgs,
+	session *session.ClientSession,
+	createCode authVerifyCreateCodeFunction,
+	messageSender MessageSender,
 ) (*AuthVerifySendResult, error) {
 	userAuth, _ := model.NormalUserAuthV1(&verifySend.UserAuth)
 	if userAuth == nil {
@@ -116,25 +191,82 @@ func AuthVerifySend(
 		UserAuth: *userAuth,
 		CodeType: verifyCodeType,
 	}
-	verifyCreateCodeResult, err := model.AuthVerifyCreateCode(verifyCreateCode, session)
+	verifyCreateCodeResult, err := createCode(verifyCreateCode, session)
 	if err != nil {
+		var rateLimit interface{ RetryAfterSeconds() int }
+		if errors.As(err, &rateLimit) {
+			return &AuthVerifySendResult{
+				UserAuth: *userAuth,
+				Error: &AuthVerifySendError{
+					Code:              model.AuthVerifySendErrorCodeRateLimited,
+					Message:           strings.TrimPrefix(err.Error(), "429 "),
+					RetryAfterSeconds: rateLimit.RetryAfterSeconds(),
+				},
+			}, nil
+		}
 		return nil, err
-	}
-
-	if verifyCreateCodeResult.VerifyCode != nil {
-		awsMessageSender := GetAWSMessageSender()
-		awsMessageSender.SendAccountMessageTemplate(
-			*userAuth,
-			&AuthVerifyTemplate{
-				VerifyCode: *verifyCreateCodeResult.VerifyCode,
-			},
-		)
 	}
 
 	result := &AuthVerifySendResult{
 		UserAuth: *userAuth,
 	}
+	if verifyCreateCodeResult.VerifyCode == nil {
+		message := verifySendFailedMessage
+		if verifyCreateCodeResult.Error != nil {
+			message = verifyCreateCodeResult.Error.Message
+		}
+		result.Error = &AuthVerifySendError{
+			Code:    model.AuthVerifySendErrorCodeSendFailed,
+			Message: message,
+		}
+		return result, nil
+	}
+	err = messageSender.SendAccountMessageTemplate(
+		*userAuth,
+		&AuthVerifyTemplate{
+			VerifyCode: *verifyCreateCodeResult.VerifyCode,
+		},
+	)
+	if err != nil {
+		glog.Warningf("[auth]verification code send failed: %s\n", err)
+		result.Error = &AuthVerifySendError{
+			Code:    model.AuthVerifySendErrorCodeSendFailed,
+			Message: verifySendFailedMessage,
+		}
+	}
 	return result, nil
+}
+
+// The error status /auth/verify-send answered before `result_errors`: 429 with
+// a Retry-After for a rate limit (unchanged), and 502 for a failed send, which
+// older clients show as a failed send instead of a 200 that claimed one.
+func legacyAuthVerifySendError(sendError *AuthVerifySendError) error {
+	switch sendError.Code {
+	case model.AuthVerifySendErrorCodeRateLimited:
+		return &verifySendStatusError{
+			message:           fmt.Sprintf("429 %s", sendError.Message),
+			retryAfterSeconds: sendError.RetryAfterSeconds,
+		}
+	default:
+		return &verifySendStatusError{
+			message: fmt.Sprintf("502 %s", sendError.Message),
+		}
+	}
+}
+
+// An error status the router maps from the "<status> " prefix, with the
+// Retry-After hint it reads through `RetryAfterSeconds`.
+type verifySendStatusError struct {
+	message           string
+	retryAfterSeconds int
+}
+
+func (self *verifySendStatusError) Error() string {
+	return self.message
+}
+
+func (self *verifySendStatusError) RetryAfterSeconds() int {
+	return self.retryAfterSeconds
 }
 
 func Testing_SendAuthVerifyCode(userAuth string) {
@@ -153,15 +285,45 @@ func Testing_SendAuthVerifyCode(userAuth string) {
 
 type AuthPasswordResetArgs struct {
 	UserAuth string `json:"user_auth"`
+	// return a rate-limit refusal or a send failure in the result `error`
+	// with a 200, instead of the HTTP 429 / 502 older clients expect
+	ResultErrors bool `json:"result_errors,omitempty"`
 }
 
 type AuthPasswordResetResult struct {
 	UserAuth string `json:"user_auth"`
+	// set when no reset code was sent
+	Error *AuthVerifySendError `json:"error,omitempty"`
 }
 
 func AuthPasswordReset(
 	reset AuthPasswordResetArgs,
 	session *session.ClientSession,
+) (*AuthPasswordResetResult, error) {
+	result, err := authPasswordReset(reset, session, model.AuthPasswordResetCreateCode, GetAWSMessageSender())
+	if err != nil {
+		return nil, err
+	}
+	if result.Error != nil && !reset.ResultErrors {
+		// older clients show any error status as a failed send
+		return nil, legacyAuthVerifySendError(result.Error)
+	}
+	return result, nil
+}
+
+const passwordResetSendFailedMessage = "The password reset code could not be sent. Please try again."
+
+type authPasswordResetCreateCodeFunction func(model.AuthPasswordResetCreateCodeArgs, *session.ClientSession) (*model.AuthPasswordResetCreateCodeResult, error)
+
+// Creates a password reset code and sends it. A rate-limit refusal and a send
+// failure come back in the result `Error` with the verify send codes, never
+// dropped: the caller must not tell the user a code was sent. Other errors are
+// returned as errors.
+func authPasswordReset(
+	reset AuthPasswordResetArgs,
+	session *session.ClientSession,
+	createCode authPasswordResetCreateCodeFunction,
+	messageSender MessageSender,
 ) (*AuthPasswordResetResult, error) {
 	userAuth, _ := model.NormalUserAuthV1(&reset.UserAuth)
 	if userAuth == nil {
@@ -171,22 +333,48 @@ func AuthPasswordReset(
 	resetCreateCode := model.AuthPasswordResetCreateCodeArgs{
 		UserAuth: *userAuth,
 	}
-	resetCreateCodeResult, err := model.AuthPasswordResetCreateCode(resetCreateCode, session)
+	resetCreateCodeResult, err := createCode(resetCreateCode, session)
 	if err != nil {
+		var rateLimit interface{ RetryAfterSeconds() int }
+		if errors.As(err, &rateLimit) {
+			return &AuthPasswordResetResult{
+				UserAuth: *userAuth,
+				Error: &AuthVerifySendError{
+					Code:              model.AuthVerifySendErrorCodeRateLimited,
+					Message:           strings.TrimPrefix(err.Error(), "429 "),
+					RetryAfterSeconds: rateLimit.RetryAfterSeconds(),
+				},
+			}, nil
+		}
 		return nil, err
-	}
-	if resetCreateCodeResult.ResetCode != nil {
-		awsMessageSender := GetAWSMessageSender()
-		awsMessageSender.SendAccountMessageTemplate(
-			*userAuth,
-			&AuthPasswordResetTemplate{
-				ResetCode: *resetCreateCodeResult.ResetCode,
-			},
-		)
 	}
 
 	result := &AuthPasswordResetResult{
 		UserAuth: *userAuth,
+	}
+	if resetCreateCodeResult.ResetCode == nil {
+		message := passwordResetSendFailedMessage
+		if resetCreateCodeResult.Error != nil {
+			message = resetCreateCodeResult.Error.Message
+		}
+		result.Error = &AuthVerifySendError{
+			Code:    model.AuthVerifySendErrorCodeSendFailed,
+			Message: message,
+		}
+		return result, nil
+	}
+	err = messageSender.SendAccountMessageTemplate(
+		*userAuth,
+		&AuthPasswordResetTemplate{
+			ResetCode: *resetCreateCodeResult.ResetCode,
+		},
+	)
+	if err != nil {
+		glog.Warningf("[auth]password reset code send failed: %s\n", err)
+		result.Error = &AuthVerifySendError{
+			Code:    model.AuthVerifySendErrorCodeSendFailed,
+			Message: passwordResetSendFailedMessage,
+		}
 	}
 	return result, nil
 }
@@ -205,16 +393,20 @@ func AuthPasswordSet(passwordSet model.AuthPasswordSetArgs, session *session.Cli
 			Error: passwordSetResult.Error,
 		}, nil
 	}
+	// The password is already changed. An account created with a wallet or
+	// SSO and given an email or phone sign-in later has no network_user
+	// recipient, which is not a failure of the reset.
 	userAuth, err := model.GetUserAuth(session.Ctx, passwordSetResult.NetworkId)
-	if err != nil {
+	if err != nil && !errors.Is(err, model.ErrMissingUserAuth) {
 		return nil, err
 	}
-	normalUserAuth, _ := model.NormalUserAuthV1(&userAuth)
-	awsMessageSender := GetAWSMessageSender()
-	awsMessageSender.SendAccountMessageTemplate(
-		*normalUserAuth,
-		&AuthPasswordSetTemplate{},
-	)
+	if normalUserAuth, _ := model.NormalUserAuthV1(&userAuth); normalUserAuth != nil {
+		awsMessageSender := GetAWSMessageSender()
+		awsMessageSender.SendAccountMessageTemplate(
+			*normalUserAuth,
+			&AuthPasswordSetTemplate{},
+		)
+	}
 
 	safePasswordSetResult := &AuthPasswordSetResult{}
 	return safePasswordSetResult, nil

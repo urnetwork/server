@@ -1876,14 +1876,16 @@ func StripeCreateCheckoutSession(
 			},
 		}
 		// Stamp the network onto the SUBSCRIPTION itself, not just the session.
-		// stripeHandleInvoicePaid resolves the network in this order:
+		// stripeResolveInvoiceCredit resolves the network in this order:
 		//   1. subscription metadata network_id  <- this
-		//   2. the Stripe customer's email -> FindNetworkIdByEmail
-		//   3. the checkout session's client_reference_id
-		// Without (1) a customer who pays with a different email than their account
-		// falls through to (2), which can resolve to the WRONG network or none at all.
-		// Renewal invoices also carry the subscription but no checkout session, so (3)
-		// is not a reliable long-term anchor either.
+		//   2. the checkout session's client_reference_id
+		//   3. the Stripe customer's email -> FindNetworkIdByEmail (legacy, last
+		//      resort; every credit through it is recorded as an email_fallback
+		//      event, S11)
+		// Renewal invoices carry the subscription but no checkout session, so (2) is
+		// not a reliable long-term anchor. Without (1) such a renewal falls through
+		// to (3), which can resolve to the WRONG network when the customer pays with
+		// a different email than their account, or to none at all.
 		params.SubscriptionData = &stripe.CheckoutSessionSubscriptionDataParams{
 			Metadata: map[string]string{
 				"network_id": networkId.String(),

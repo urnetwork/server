@@ -299,6 +299,13 @@ type TransferBalance struct {
 }
 
 func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*TransferBalance {
+	transferBalances := getActiveTransferBalancesWithoutDrain(ctx, networkId)
+	// an acceptance-test drain reads as zero available (see test_balance_drain_model.go)
+	applyTestBalanceDrain(transferBalances, IsTestBalanceDrainActive(ctx, networkId))
+	return transferBalances
+}
+
+func getActiveTransferBalancesWithoutDrain(ctx context.Context, networkId server.Id) []*TransferBalance {
 	var transferBalances []*TransferBalance
 	server.Db(ctx, func(conn server.PgConn) {
 		transferBalances = getActiveTransferBalanceRows(ctx, conn, networkId)
@@ -1415,6 +1422,37 @@ const contractExtenderInsertSql = `
 		transfer_contract.contract_id = $1
 `
 
+// MinShrinkContractTransferByteCount is the floor for shrink-to-fit escrow.
+// When the payer's available balance is below the requested contract size but
+// at least min(requested, MinShrinkContractTransferByteCount), the contract is
+// granted for the available balance instead of failing with "Insufficient
+// balance". Clients size their send capacity from the signed
+// `StoredContract.TransferByteCount`, so a smaller grant is transparent to them.
+// The floor matches the client's initial contract size, so a granted contract
+// always fits at least one message.
+const MinShrinkContractTransferByteCount = Mib
+
+// grantTransferEscrowByteCount decides the contract size granted for a request
+// of `requestedByteCount` when `availableByteCount` can be escrowed for it.
+// A request the balance covers is granted as is. Otherwise the contract
+// shrinks to fit the available balance, provided that is at least
+// min(requested, MinShrinkContractTransferByteCount); below the floor the
+// request is refused (`ok` false). The grant never exceeds the available
+// balance, and a zero-byte request is always granted as zero bytes.
+func grantTransferEscrowByteCount(
+	requestedByteCount ByteCount,
+	availableByteCount ByteCount,
+) (grantedByteCount ByteCount, ok bool) {
+	if requestedByteCount <= availableByteCount {
+		return requestedByteCount, true
+	}
+	if availableByteCount < min(requestedByteCount, MinShrinkContractTransferByteCount) {
+		return 0, false
+	}
+	// shrink to fit
+	return availableByteCount, true
+}
+
 // Ordinary payers reserve from the earliest available grants. The persisted
 // internal prober first tries a bounded whole-request free grant. Both paths
 // hold balance locks through commit for positive-byte admission and read
@@ -1422,6 +1460,10 @@ const contractExtenderInsertSql = `
 // already-reserved credit.
 // Zero-byte contracts read their earliest-grant anchor and priority without
 // taking financial locks; their client lifecycle fences precede this read.
+// A positive request larger than the available balance is granted for the
+// available balance when it is at least the shrink floor (see
+// grantTransferEscrowByteCount); the returned escrow's TransferByteCount is the
+// granted size on both the Redis and the PostgreSQL admission path.
 func createTransferEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -1433,6 +1475,17 @@ func createTransferEscrowInTx(
 	contractTransferByteCount ByteCount,
 	companionContractId *server.Id,
 ) (transferEscrow *TransferEscrow, posts []func() any, returnErr error) {
+	// an acceptance-test drain refuses like an empty balance, on both the Redis
+	// and the PostgreSQL admission path. The allowlist is checked in memory, so
+	// other payers add no query here.
+	if 0 < contractTransferByteCount {
+		if err := testBalanceDrainEscrowError(
+			testBalanceDrainActive(ctx, tx, payerNetworkId, server.NowUtc()),
+			contractTransferByteCount,
+		); err != nil {
+			return nil, nil, err
+		}
+	}
 	if admission := redisAdmissionFromContext(ctx); admission != nil && contractTransferByteCount > 0 {
 		return createRedisTransferEscrowInTx(ctx, tx, admission, sourceNetworkId, sourceId,
 			destinationNetworkId, destinationId, payerNetworkId, contractTransferByteCount, companionContractId)
@@ -1464,7 +1517,7 @@ func createTransferEscrowInTx(
 	now := server.NowUtc()
 
 	// add up the balance_byte_count until >= contractTransferByteCount
-	// if not enough, error
+	// if not enough, shrink to fit or error (see grantTransferEscrowByteCount)
 	balanceEscrows := map[server.Id]*escrow{}
 
 	// attempt to split up across remaining transfer balances
@@ -1536,10 +1589,16 @@ func createTransferEscrowInTx(
 		}
 	}
 
-	if netEscrowBalanceByteCount < contractTransferByteCount {
+	// The loop drew every available byte when the balances fall short, so a
+	// shrunk grant equals the escrow rows' sum.
+	grantedTransferByteCount, ok := grantTransferEscrowByteCount(contractTransferByteCount, netEscrowBalanceByteCount)
+	if !ok {
 		returnErr = fmt.Errorf("Insufficient balance (%d).", netEscrowBalanceByteCount)
 		return
 	}
+	// the contract row, escrow rows, mirror and returned escrow all carry the
+	// granted size, which may be smaller than the request (shrink to fit)
+	contractTransferByteCount = grantedTransferByteCount
 
 	// the priority is blended between 0 and 100 depending on escrows
 	var priority Priority
