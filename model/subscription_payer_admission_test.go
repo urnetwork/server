@@ -23,7 +23,7 @@ func payerQueueCreate(ctx context.Context, f netEscrowOrderingTestFixture, bytes
 			}
 		}
 	}()
-	return CreateTransferEscrow(ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, bytes)
+	return createTransferEscrow(ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, bytes)
 }
 
 func payerQueueReferences(q *payerAdmissionQueue, payer server.Id) int {
@@ -159,7 +159,7 @@ func TestPayerAdmissionQueueCompanionUsesDestinationPayer(t *testing.T) {
 		done := make(chan error, 2)
 		go func() { _, err := payerQueueCreate(ctx, f, 1); done <- err }()
 		go func() {
-			_, err := CreateCompanionTransferEscrow(ctx, f.destinationNetworkId, f.destinationId,
+			_, err := createCompanionTransferEscrow(ctx, f.destinationNetworkId, f.destinationId,
 				f.sourceNetworkId, f.sourceId, 1, time.Minute)
 			done <- err
 		}()
