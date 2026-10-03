@@ -136,19 +136,20 @@ func lockProberShardClientAdmissionInTx(ctx context.Context, tx server.PgTx, net
 	var state string
 	var live bool
 	rows, err := tx.Query(ctx, `SELECT state, clock_timestamp() AT TIME ZONE 'UTC' < deadline FROM prober_shard_run WHERE network_id=$1 FOR SHARE`, networkId)
-	if err != nil {
-		return err
-	}
+	// Only the retired-shard policy refusal returns normally. Operational
+	// failures must unwind the enclosing void Tx callback: otherwise it reaches
+	// COMMIT after a failed admission read and can mask cancellation with a
+	// statement-cache/closed-connection error, or commit earlier caller writes.
+	server.Raise(err)
 	defer rows.Close()
 	if rows.Next() {
-		if err = rows.Scan(&state, &live); err != nil {
-			return err
-		}
+		server.Raise(rows.Scan(&state, &live))
 		if state != "active" || !live {
 			return ErrProberShardRetired
 		}
 	}
-	return rows.Err()
+	server.Raise(rows.Err())
+	return nil
 }
 
 // A private probe account may fund only contracts in which it is an endpoint;
