@@ -525,8 +525,8 @@ github.com/urnetwork/connect v0.0.0-20261003032127-638e55103517 h1:mzDhtYuYM9V67
 github.com/urnetwork/connect v0.0.0-20261003032127-638e55103517/go.mod h1:A88Ceqd8zbfpUB4+1pTsT1G3kiS9kgB22ZuljBZVw4k=
 github.com/urnetwork/connect v0.0.0-20261003033456-08d4840087a7 h1:ca0zHpum3+/Du+plyv9KJt16TAZ/tUDKBi8MRrwS1CI=
 github.com/urnetwork/connect v0.0.0-20261003033456-08d4840087a7/go.mod h1:A88Ceqd8zbfpUB4+1pTsT1G3kiS9kgB22ZuljBZVw4k=
-github.com/urnetwork/connect v0.0.0-20261003212241-15d6c8b9cbee h1:z+rsjtNOFGWBTZa7dg0vfiLeHmkY+uopAYW6xLOiCzI=
-github.com/urnetwork/connect v0.0.0-20261003212241-15d6c8b9cbee/go.mod h1:A88Ceqd8zbfpUB4+1pTsT1G3kiS9kgB22ZuljBZVw4k=
+github.com/urnetwork/connect v0.0.0-20261003225416-f29b679b7a88 h1:NjmzYCohiLOKYwvrOzgJJFCaEsRghhSYuL7Ve+QALrA=
+github.com/urnetwork/connect v0.0.0-20261003225416-f29b679b7a88/go.mod h1:A88Ceqd8zbfpUB4+1pTsT1G3kiS9kgB22ZuljBZVw4k=
 github.com/urnetwork/connect/sctp v0.0.0-20261001021459-e1b5d77b5029 h1:GfovpOIWKd6TjkYsWLkMNE/zKEoGNC/5NfrPRCI+50A=
 github.com/urnetwork/connect/sctp v0.0.0-20261001021459-e1b5d77b5029/go.mod h1:7KFmTwLcoYgJs/Z+99nJvsWL0qDpuyloSI0RbAqlrz0=
 github.com/urnetwork/connect/sctp v0.0.0-20261002163341-6443417d70dc h1:w8WyMTyOkCNb/qEZtgZDr6m0zf3eM8kjh08DweW4/i8=
