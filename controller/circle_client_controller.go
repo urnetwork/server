@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -101,7 +102,21 @@ type CircleApi interface {
 	) (*GetTransactionResult, error)
 }
 
-type CoreCircleApiClient struct{}
+type CoreCircleApiClient struct {
+	readSettings PaymentReadSettings
+	readHooks    paymentReadHooks
+	readToken    func() string
+}
+
+// The returned client's read policy is immutable and safe for concurrent GETs.
+// Each operation owns its own timer/transport; POST methods are unchanged.
+func NewCoreCircleApiClient(settings PaymentReadSettings) (*CoreCircleApiClient, error) {
+	settings, err := settings.normalized()
+	if err != nil {
+		return nil, err
+	}
+	return &CoreCircleApiClient{readSettings: settings}, nil
+}
 
 var circleClientInstance CircleApi = &CoreCircleApiClient{}
 
@@ -303,14 +318,26 @@ type GetTransactionResult struct {
 	ResponseBodyBytes []byte
 }
 
-func (c *CoreCircleApiClient) GetTransaction(ctx context.Context, id string) (*GetTransactionResult, error) {
-
-	uri := fmt.Sprintf("https://api.circle.com/v1/w3s/transactions/%s", id)
-
-	circleApiToken := circleConfig()["api_token"]
-
-	return server.HttpGetRequireStatusOk(
+func (self *CoreCircleApiClient) GetTransaction(ctx context.Context, id string) (*GetTransactionResult, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("transaction GET requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if id == "" || len(id) > 256 {
+		return nil, fmt.Errorf("invalid transaction observation id")
+	}
+	uri := fmt.Sprintf("https://api.circle.com/v1/w3s/transactions/%s", url.PathEscape(id))
+	token := self.readToken
+	if token == nil {
+		token = func() string { return fmt.Sprint(circleConfig()["api_token"]) }
+	}
+	circleApiToken := token()
+	return paymentHttpGet(
 		ctx,
+		self.readSettings,
+		self.readHooks,
 		uri,
 		func(header http.Header) {
 			header.Add("Accept", "application/json")
@@ -322,6 +349,9 @@ func (c *CoreCircleApiClient) GetTransaction(ctx context.Context, id string) (*G
 			err := json.Unmarshal(responseBodyBytes, result)
 			if err != nil {
 				return nil, err
+			}
+			if result.Data.Transaction.Id != id {
+				return nil, fmt.Errorf("transaction observation identity mismatch")
 			}
 
 			return &GetTransactionResult{
