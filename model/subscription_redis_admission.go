@@ -184,12 +184,32 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 	})
 	leave()
 	selected := []*TransferEscrowBalance{}
+	attemptedBalanceIds := []server.Id{}
+	publicationStarted := false
+	defer func() {
+		if publicationStarted || len(attemptedBalanceIds) == 0 {
+			return
+		}
+		// No SQL publication has been attempted, including on a read panic or
+		// cancellation. Only this request's tokens can be compensated. A lost
+		// reserve acknowledgement is included; a failed cleanup retains its
+		// original lease. One detached budget bounds the entire cleanup.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), redisContractAdmissionTimeout)
+		defer cancel()
+		for _, balanceId := range attemptedBalanceIds {
+			if cleanupCtx.Err() != nil {
+				break
+			}
+			_, _ = redisContractReservation(cleanupCtx, "release", balanceId, admission.contractId, 0, 0, redisContractReservationLease)
+		}
+	}()
 	remaining := requested
 	var priority Priority
 	for _, balance := range balances {
 		if balance.balanceByteCount <= 0 {
 			continue
 		}
+		attemptedBalanceIds = append(attemptedBalanceIds, balance.balanceId)
 		amount, err := redisContractReservation(ctx, "reserve", balance.balanceId, admission.contractId, balance.balanceByteCount, remaining, redisContractReservationLease)
 		if err != nil {
 			return nil, nil, err
@@ -207,11 +227,6 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 		}
 	}
 	if remaining != 0 {
-		// This is a known pre-write refusal, unlike an ambiguous commit. Release
-		// only this request's tokens; a failed compensation expires on its lease.
-		for _, b := range selected {
-			_, _ = redisContractReservation(ctx, "release", b.BalanceId, admission.contractId, 0, 0, redisContractReservationLease)
-		}
 		return nil, nil, fmt.Errorf("Insufficient balance (%d).", requested-remaining)
 	}
 	priority /= Priority(len(selected))
@@ -221,9 +236,16 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 	if err := validateProberShardAdmissionDeadlineInTx(ctx, tx, deadline); err != nil {
 		return nil, nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	// Per-contract rows only. The compatibility triggers omit marked rows from
 	// legacy revision maintenance, and no shared snapshot is read or published.
 	slices.SortFunc(selected, func(a, b *TransferEscrowBalance) int { return a.BalanceId.Cmp(b.BalanceId) })
+	// From this point the transaction owner decides commit/rollback. A failed
+	// round trip is not proof of absence, so compensation must not release a
+	// possibly committed contract. Existing reconciliation/lease recovery owns it.
+	publicationStarted = true
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for _, b := range selected {
 			batch.Queue(`INSERT INTO transfer_escrow(contract_id,balance_id,balance_byte_count,redis_reserved) VALUES($1,$2,$3,true)`, admission.contractId, b.BalanceId, b.BalanceByteCount)
