@@ -18516,6 +18516,32 @@ runtime PAGE while finding those active owners. Current owning Connect source
 has no production pprof route, and SIGQUIT participates in service shutdown;
 do not invent a profile endpoint or use a shutdown signal as a profile read.
 
+A 2026-10-03 local control at Server `c56f9557` with published Connect
+`08d48400` extended that constructor control through actual H1 handlers,
+exchange TCP connections, full residents, and acknowledged control traffic in
+both directions. Three consecutive cohorts of eight residents each held one
+send sequence, one receive sequence, and one pacing service per resident.
+Each resident's three 4,096-slot channels retained 491,520 bytes (480 KiB) of
+named slot storage before channel headers, allocator overhead, exchange queues,
+payloads, maps, or stacks. The exported `Client.MemoryOwnerCensus()` measured
+these existing owners without a process-wide profile or a production producer.
+Every one of the 24 retired resident clients reached zero indexed/active
+send/receive sequences, pacing services, and named channel slots after joined
+shutdown, including under the race detector. Joining the exchange also left
+zero transport routes on every retained retired resident.
+
+This is a lower bound for a specific active control path, not a Main heap
+attribution or proof that a leak is absent. The local process also contains
+the synthetic remote clients and both ends of each exchange connection, so its
+heap and goroutine totals cannot be assigned to the resident side. Peer-list
+fan-out, forwarded data, P2P, lossy carriers, stalled dependencies, and aged
+draining generations were outside this control. Preserve the exact native
+PID/start/build/RSS join and measured transport/sequence population as the next
+production discriminator; neither the bare-client cost nor this larger active
+cost can be multiplied into a complete heap estimate. The owning regression is
+`TestResidentRuntimeOwnershipChurnControl` in
+`connect/resident_runtime_ownership_diagnostic_test.go`.
+
 `connect-resident-cost-unobservable` WARNs immediately when the newest Connect
 population join is missing/stale, duplicated, invalid, or cannot select an
 unambiguous newest generation. It carries only fixed fleet counts. Duplicate
