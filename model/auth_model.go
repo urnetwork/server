@@ -868,6 +868,9 @@ type AuthLoginWithPasswordResult struct {
 
 type AuthLoginWithPasswordResultVerification struct {
 	UserAuth string `json:"user_auth"`
+	// set when no code was sent for this verification (rate limited or the
+	// send failed). Clients that predate the field ignore it.
+	SendError *AuthVerifySendError `json:"send_error,omitempty"`
 }
 
 type AuthLoginWithPasswordResultNetwork struct {
