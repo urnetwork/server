@@ -22,14 +22,15 @@ func main() {
 	usage := `BringYour connect server.
 
 Usage:
-  connect [--port=<port>]
+  connect [--port=<port>] [--memory-owner-ledger]
   connect -h | --help
   connect --version
 
 Options:
   -h --help     Show this screen.
   --version     Show version.
-  -p --port=<port>  Listen port [default: 80].`
+  -p --port=<port>  Listen port [default: 80].
+  --memory-owner-ledger  Enable fixed resident transfer-owner metrics.`
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
 	if err != nil {
@@ -39,9 +40,13 @@ Options:
 	if err != nil {
 		panic(err)
 	}
+	memoryOwnerLedger, err := opts.Bool("--memory-owner-ledger")
+	if err != nil {
+		panic(err)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
-	if err := connectserver.Run(ctx, connectserver.RunOptions{Port: port}); err != nil {
+	if err := connectserver.Run(ctx, connectserver.RunOptions{Port: port, MemoryOwnerLedger: memoryOwnerLedger}); err != nil {
 		panic(err)
 	}
 }

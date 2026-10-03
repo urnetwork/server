@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	connectcore "github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 
@@ -22,6 +23,8 @@ type RunOptions struct {
 	Port                 int
 	TLSDefaultHostName   string
 	DirectH3LoopbackMode bool
+	// Startup-only, opt-in accounting for resident SDK transfer owners.
+	MemoryOwnerLedger bool
 }
 
 func connectWarmupTargets() []server.WarmupTarget {
@@ -48,6 +51,9 @@ func (self RunOptions) Validate() error {
 
 func exchangeSettingsForRun(options RunOptions) *ExchangeSettings {
 	settings := DefaultExchangeSettings()
+	if options.MemoryOwnerLedger {
+		settings.MemoryOwnerLedger = &connectcore.TransferMemoryOwnerLedger{}
+	}
 	settings.ConnectHandlerSettings.TransportTlsSettings.DefaultHostName = options.TLSDefaultHostName
 	if options.DirectH3LoopbackMode {
 		// Production ingress supplies Proxy Protocol on every new UDP flow. The
@@ -104,7 +110,13 @@ func runWithDependencies(
 	if err := readiness(runCtx); err != nil {
 		glog.Infof("[connect]not ready (%s)\n", err)
 	} else {
-		exchange = NewExchangeFromEnv(runCtx, exchangeSettingsForRun(options))
+		settings := exchangeSettingsForRun(options)
+		unregisterOwnerMetrics, err := registerTransferMemoryOwnerMetrics(prometheus.DefaultRegisterer, settings.MemoryOwnerLedger)
+		if err != nil {
+			return fmt.Errorf("register Connect transfer owner metrics: %w", err)
+		}
+		defer unregisterOwnerMetrics()
+		exchange = NewExchangeFromEnv(runCtx, settings)
 		defer exchange.Close()
 		connectRouter, err := newConnectRouterFromExchange(runCtx, cancel, exchange)
 		if err != nil {
