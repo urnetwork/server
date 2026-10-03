@@ -6333,3 +6333,60 @@ ARIN-only restart is claimed. Policy two remains inactive until full Main
 capture closure, provider losses and sufficient verified residential/business
 supply are established. The 493 offline verified leaves are not provider supply.
 Registry publication still awaits credential disposition. FP2FIX remains active.
+
+
+### 2026-10-03 23:19 UTC coverage, query provenance and rollout checkpoint
+
+The coherent 23:03:55 URL census reported 49,521/72,810 quota complete (68.01%),
+23,310 overdue and 38,977 runs needed. At 23:19:07 it reported 47,000/70,858
+(66.33%), 23,879 overdue, 10,873 due, zero warming, two uninitialized and
+45,291 runs needed. Eligibility changed between observations; neither equal
+nor similar population counts prove a fixed-provider comparison. The sharp
+warming/eligibility transition and continued rolling-quota deterioration remain
+unexplained. The prepared one-minute pacing for mature deficient providers and
+bounded close selector are not deployed and receive no causal credit.
+
+The fixed 23:00–23:05 accepted-measurement window (`23c2f520`) contained 15,443
+runs: 11,777 success, 3,666 failure and 15,315 providers, or 51.4767/s. The
+22:20–22:25 window had 18,157 runs (60.5233/s). These are durable measurement-time
+history windows, not arrivals, exact live process generations or fixed-cohort
+recovery. Global throughput does not establish adequate distribution across
+providers or enough capacity for arrivals and existing deficits.
+
+A stable five-second native observation at 22:55:59 (`1377c638`) measured
+PostgreSQL at 44.0615 of 96 effective cores (45.8973%); the earlier 22:13 point
+was 52.99%. Neither point attributes CPU to a query or proves sustained recovery.
+The retained 23:04 activity receipt (`5c5ddfa9`) identifies the long ClientWrite
+candidate as an active local backend declaring `pg_dump`, with about 2,198
+seconds statement age and 10,593 seconds transaction age. A backup table COPY
+can match the `contract_close_access` substring family. The separate backup
+start supports that candidate but supplies no socket/backend join, so this is
+not proved contract-close worker ownership or a cancellation basis. Other
+reservation-I/O and close-family samples remain separate. The diagnostic source
+now preserves finite application/locality/backend fields; the running watcher
+has not been promoted by this source change.
+
+The authorized 22:50 bounded activity read found no current long reliability
+family; it does not determine how the historical 111-minute statement ended.
+The fixed 22:32–22:51 terminal-log read (`7edcfe23`) returned no matching records.
+Successful-return logs require verbosity one, capture completeness is unproved,
+and function return precedes durable task finalization. Completion, retry,
+timeout and the relation to the cohort transition remain unresolved.
+
+Connect source `59864c2b` and its thin release counterpart remove the unused
+production compatibility ACK queue and worker while preserving direct ACK
+ownership, bounded legacy compatibility and teardown. Local allocation controls
+show no compatibility-channel storage for constructor-owned sequences; this is
+source-only evidence and gives no production heap-recovery credit. Existing
+source-qualified selector, pacing, backend764, emitter and memory ownership
+work remains pending image publication/deployment. Registry publication still
+awaits replacement-credential disposition. Report-ID emission requires native
+schema764 and all backend-generation coverage; ID-less peers remain ambiguous.
+
+The source backup was still active and generation-bound at 23:14; completion,
+restore and destination custody are unproved, so migration764 remains unapplied.
+ARIN leases remain expired and startup endpoints need the next ordinary rollout;
+no forced ARIN-only restart, full Main shadow or sufficient positive subscriber
+supply has been established. Policy two stays inactive. The 493 offline verified
+leaves are not Main provider supply. FP2FIX, current resident memory ownership,
+financial backlog recovery and the authoritative standing monitor remain active.
