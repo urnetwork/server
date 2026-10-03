@@ -66,7 +66,8 @@ func (self *ssoLoginFakeStore) store() *parsedAuthJwtLoginStore {
 		},
 		addSsoAuth: func(args *AddSsoAuthArgs, ctx context.Context) error {
 			self.addedSso = append(self.addedSso, *args)
-			userAuth := args.ParsedAuthJwt.UserAuth
+			// stored normalized, as addSsoAuthInTx does
+			userAuth, _ := NormalUserAuth(args.ParsedAuthJwt.UserAuth)
 			userId := args.UserId
 			self.ssoAuths = append(self.ssoAuths, NetworkUserSsoAuth{
 				UserId:   &userId,
@@ -233,6 +234,82 @@ func TestSsoLoginLegacyFallbackIsAppleOnly(t *testing.T) {
 	)
 	if err != nil || result == nil || result.Network != nil {
 		t.Fatalf("google login result=%+v err=%v, want no login to the apple account", result, err)
+	}
+	if len(fake.signed) != 0 || len(fake.addedSso) != 0 {
+		t.Fatalf("signed %v and added sso %v", fake.signed, fake.addedSso)
+	}
+}
+
+// Sign-in rows are stored under the normalized user auth (trimmed,
+// lowercase). A provider token whose email differs from the stored one only in
+// case or surrounding spaces logs in to the stored account. Before the fix the
+// sso and password lookups used the raw token email, missed the stored rows,
+// and sent the user to network creation, which then failed with a conflict.
+func TestSsoLoginTokenEmailIsNormalizedBeforeLookup(t *testing.T) {
+	type ssoLoginNormalizeCase struct {
+		authType AuthType
+		// the stored row is an sso row of this type, or a password row if empty
+		storedSsoType SsoAuthType
+	}
+	cases := []ssoLoginNormalizeCase{
+		{authType: AuthTypeGoogle, storedSsoType: SsoAuthTypeGoogle},
+		{authType: AuthTypeApple, storedSsoType: SsoAuthTypeApple},
+		{authType: AuthTypeGoogle, storedSsoType: SsoAuthTypeApple},
+		{authType: AuthTypeGoogle, storedSsoType: ""},
+		{authType: AuthTypeApple, storedSsoType: ""},
+	}
+	storedUserAuth := "mixed.case@example.invalid"
+	tokenUserAuth := "  Mixed.Case@Example.INVALID "
+	for _, c := range cases {
+		fake := newSsoLoginFakeStore()
+		userId := server.NewId()
+		if c.storedSsoType == "" {
+			fake.passwordAuths[storedUserAuth] = userId
+		} else {
+			fake.ssoAuths = append(fake.ssoAuths, NetworkUserSsoAuth{
+				UserId:   &userId,
+				AuthType: c.storedSsoType,
+				UserAuth: &storedUserAuth,
+			})
+		}
+		networkId := fake.addNetwork(userId, "stored")
+
+		result, err := handleLoginParsedAuthJwtWithStore(
+			ssoLoginTestArgs(c.authType, tokenUserAuth),
+			context.Background(),
+			fake.store(),
+		)
+		if err != nil || result == nil || result.Network == nil {
+			t.Fatalf("%s token, stored %q row: result=%+v err=%v, want the stored account's network", c.authType, c.storedSsoType, result, err)
+		}
+		want := fmt.Sprintf("network=%s user=%s name=stored", networkId, userId)
+		if result.Network.ByJwt != want {
+			t.Fatalf("%s token, stored %q row: signed %q, want %q", c.authType, c.storedSsoType, result.Network.ByJwt, want)
+		}
+	}
+}
+
+// An unparseable token email normalizes to empty and must not look up rows
+// stored under an empty user auth.
+func TestSsoLoginUnparseableTokenEmailMatchesNoRow(t *testing.T) {
+	fake := newSsoLoginFakeStore()
+	userId := server.NewId()
+	emptyUserAuth := ""
+	fake.ssoAuths = append(fake.ssoAuths, NetworkUserSsoAuth{
+		UserId:   &userId,
+		AuthType: SsoAuthTypeGoogle,
+		UserAuth: &emptyUserAuth,
+	})
+	fake.passwordAuths[emptyUserAuth] = userId
+	fake.addNetwork(userId, "empty")
+
+	result, err := handleLoginParsedAuthJwtWithStore(
+		ssoLoginTestArgs(AuthTypeGoogle, "not an email"),
+		context.Background(),
+		fake.store(),
+	)
+	if err != nil || result == nil || result.Network != nil {
+		t.Fatalf("result=%+v err=%v, want no login", result, err)
 	}
 	if len(fake.signed) != 0 || len(fake.addedSso) != 0 {
 		t.Fatalf("signed %v and added sso %v", fake.signed, fake.addedSso)
