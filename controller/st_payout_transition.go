@@ -40,7 +40,7 @@ func stPayoutAdmissionAt(ctx context.Context, cfg *StConfig, now time.Time) erro
 	if !cfg.Enabled || cfg.Netuid != 25 {
 		return fmt.Errorf("sn: mainnet payout is disabled or has wrong subnet")
 	}
-	policy, err := server.LoadProviderPayoutTransition(ctx)
+	policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
 		return err
 	}
@@ -53,6 +53,9 @@ func stPayoutAdmissionAt(ctx context.Context, cfg *StConfig, now time.Time) erro
 // Public, redacted local status. This is loaded configuration and identity
 // matching, never evidence that this binary/config is deployed or chain-ready.
 type ProviderPayoutTransitionStatus struct {
+	EarningBoundary                *server.ProviderEarningBoundary  `json:"earning_boundary,omitempty"`
+	EarningBoundaryReady           bool                             `json:"earning_boundary_ready"`
+	EarningBoundaryReason          string                           `json:"earning_boundary_reason"`
 	ObservedAt                     time.Time                        `json:"observed_at"`
 	Schedule                       *server.ProviderPayoutTransition `json:"schedule"`
 	Selected                       *server.ProviderPayoutMainnet    `json:"selected,omitempty"`
@@ -74,6 +77,13 @@ func GetProviderPayoutTransitionStatus(ctx context.Context) (*ProviderPayoutTran
 	}
 	now := server.NowUtc()
 	status := &ProviderPayoutTransitionStatus{ObservedAt: now, Schedule: policy, Phase: "legacy_unscheduled", LegacyPreCutoffPaymentsAllowed: true, SelectedProfile: os.Getenv("URNETWORK_ST_PROFILE")}
+	if binding, err := server.RequireProviderPayoutBoundary(ctx, policy); err != nil {
+		status.EarningBoundaryReason = err.Error()
+		status.LegacyPreCutoffPaymentsAllowed = false
+	} else {
+		status.EarningBoundary = binding
+		status.EarningBoundaryReady = policy == nil || binding != nil
+	}
 	if policy != nil {
 		if err := server.RequireProviderPayoutSchema(ctx); err != nil {
 			status.PayoutSchemaReason = err.Error()

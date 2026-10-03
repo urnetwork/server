@@ -19,7 +19,7 @@ func PayoutPlanApplyBonus(ctx context.Context, paymentPlanId server.Id, bonusNan
 	if bonusNanoCents <= 0 || operationId == (server.Id{}) || strings.TrimSpace(reason) == "" || len(reason) > 1024 {
 		return errors.New("bonus requires a positive amount, operation id and bounded reason")
 	}
-	policy, err := server.LoadProviderPayoutTransition(ctx)
+	policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
 		return err
 	}

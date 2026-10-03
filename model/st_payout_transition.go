@@ -12,7 +12,7 @@ import (
 // event authority. Retain the epoch for repair instead of attributing a bucket
 // spanning the earning boundary to both assets or silently losing its exposure.
 func GetStEpochPayoutReliability(ctx context.Context, start, end time.Time, clientIds []server.Id) ([]*StClientReliability, error) {
-	policy, err := server.LoadProviderPayoutTransition(ctx)
+	policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
 		return nil, err
 	}

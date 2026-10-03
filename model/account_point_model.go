@@ -533,7 +533,7 @@ func calculateReliabilityPayoutInTx(
 
 	// get reliability scores
 	reliabilityScores := GetAllMultipliedNetworkReliabilityScoresInTx(tx, ctx)
-	transition, err := server.LoadProviderPayoutTransition(ctx)
+	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	server.Raise(err)
 	if transition != nil {
 		// A no-coverage recompute deliberately retains cached scores. They are

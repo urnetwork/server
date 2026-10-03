@@ -20,6 +20,13 @@ func usePayoutTransition(t testing.TB) {
 	t.Helper()
 	data := fmt.Sprintf("schema: urnetwork-provider-payout-transition-v1\ncutoff_utc: %q\nattribution: settled_contract_close_time\nlegacy_usdc: finish_pre_cutoff_obligations\nmainnet:\n  profile: mainnet\n  chain_id: 964\n  genesis_hash: %q\n  netuid: 25\n  activation: blocked\n", payoutTestCutoff.Format(time.RFC3339), "0x"+strings.Repeat("11", 32))
 	t.Cleanup(server.Config.PushSimpleResource("sn.yml", []byte(data)))
+	policyForPreparation, preparationErr := server.LoadProviderPayoutTransition(context.Background())
+	if preparationErr != nil {
+		t.Fatal(preparationErr)
+	}
+	if _, err := server.PrepareProviderPayoutBoundary(context.Background(), policyForPreparation.ConfigSha256); err != nil {
+		t.Fatal(err)
+	}
 }
 
 type payoutTransitionCohort struct {

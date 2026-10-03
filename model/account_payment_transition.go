@@ -39,7 +39,7 @@ const paymentTransitionUnresolvedSampleSql = `
 // Ambiguous payments remain pending, with their processor idempotency key
 // intact. Existing PaymentRecord reconciliation does not call this admission.
 func RequireProviderUsdcPayment(ctx context.Context, paymentId server.Id) error {
-	policy, err := server.LoadProviderPayoutTransition(ctx)
+	policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil || policy == nil {
 		return err
 	}

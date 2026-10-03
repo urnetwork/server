@@ -94,7 +94,9 @@ func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun bool, maxDuration time.Duration, refreshReliabilityInputs bool) (paymentPlan *PaymentPlan, returnErr error) {
 	defer func() {
 		if value := recover(); value != nil {
-			if err, ok := value.(error); ok && errors.Is(err, ErrProviderLegacyReliabilityWindow) {
+			if err, ok := value.(error); ok && (errors.Is(err, ErrProviderLegacyReliabilityWindow) ||
+				errors.Is(err, server.ErrProviderEarningBoundaryUnavailable) || errors.Is(err, server.ErrProviderEarningBoundaryMismatch) ||
+				errors.Is(err, server.ErrProviderEarningBoundaryUnprepared) || errors.Is(err, server.ErrProviderEarningBoundarySchema)) {
 				paymentPlan = nil
 				returnErr = err
 				return
@@ -102,7 +104,7 @@ func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 			panic(value)
 		}
 	}()
-	transition, err := server.LoadProviderPayoutTransition(ctx)
+	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
 		return nil, err
 	}

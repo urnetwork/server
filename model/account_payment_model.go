@@ -450,7 +450,7 @@ func PlanPaymentsWithMaxDurationLoop(
 	maxDuration time.Duration,
 	onSlice func(*PaymentPlan),
 ) ([]*PaymentPlan, error) {
-	transition, err := server.LoadProviderPayoutTransition(ctx)
+	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -748,7 +748,7 @@ const HungPaymentExpiration = 30 * 24 * time.Hour
 // for legacy rows. Retry-state payments remain pending regardless of age.
 func CancelHungAccountPayments(ctx context.Context, maxTime time.Time) (canceledCount int64) {
 	minTime := maxTime.Add(-HungPaymentExpiration)
-	policy, err := server.LoadProviderPayoutTransition(ctx)
+	policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	server.Raise(err)
 
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -789,7 +789,7 @@ func CancelHungAccountPayments(ctx context.Context, maxTime time.Time) (canceled
 // unsubmitted. Retry-state payments must be resolved from Circle's terminal
 // status instead; CancelPaymentAfterProcessorCancellation handles CANCELLED.
 func CancelPayment(ctx context.Context, paymentId server.Id) (returnErr error) {
-	policy, err := server.LoadProviderPayoutTransition(ctx)
+	policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
 		return err
 	}
@@ -833,7 +833,7 @@ func CancelPaymentAfterProcessorCancellation(
 	paymentId server.Id,
 	paymentReceipt string,
 ) (returnErr error) {
-	policy, err := server.LoadProviderPayoutTransition(ctx)
+	policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
 		return err
 	}

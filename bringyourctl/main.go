@@ -39,7 +39,7 @@ func main() {
 Usage:
     bringyourctl sn-transition-status
     bringyourctl db version
-    bringyourctl db migrate
+    bringyourctl db migrate [--sn-schedule-sha256=<sha256>]
     bringyourctl db vacuum [--exclude=<table>...]
     bringyourctl db maintenance (all|<epoch>) [--reindex] [--cleanup] [--analyze]
     bringyourctl db audit [--fix [--force-drop-indexes]]
@@ -124,6 +124,7 @@ Usage:
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>]
 
 Options:
+    --sn-schedule-sha256=<sha256>  Prepare the immutable earning boundary from this exact reviewed sn.yml after migrations.
     -h --help     Show this screen.
     --version     Show version.
     -r --realm=<realm>  Search realm.
@@ -404,6 +405,7 @@ func dbMigrate(opts docopt.Opts) {
 	fmt.Printf("Applying DB migrations ...\n")
 	server.DbMigrationVerbose = true
 	server.ApplyDbMigrations(context.Background())
+	server.Raise(preparePayoutBoundaryAfterMigrate(context.Background(), opts))
 }
 
 // dbScrubClientAddresses re-runs the 20260807 raw-client-address scrub

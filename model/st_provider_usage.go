@@ -62,7 +62,7 @@ func getStEpochProviderUsage(ctx context.Context, epoch uint64, startTime time.T
 	if !startTime.Before(endTime) {
 		return nil, fmt.Errorf("invalid subnet usage window")
 	}
-	transition, err := server.LoadProviderPayoutTransition(ctx)
+	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -180,7 +180,7 @@ func ApplyProviderPaymentOutcome(ctx context.Context, expected *AccountPayment, 
 		return false, false, ErrProviderPaymentAttemptChanged
 	}
 	status = strings.ToUpper(status)
-	policy, policyErr := server.LoadProviderPayoutTransition(ctx)
+	policy, policyErr := server.LoadProviderPayoutEarningPolicy(ctx)
 	// A missing policy observation cannot authorize releasing an allocated
 	// component. Completion/reconciliation still retains the original attempt.
 	retainComponents := policy != nil || policyErr != nil

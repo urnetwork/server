@@ -218,8 +218,10 @@ type AdvancePaymentArgs struct {
 }
 
 type AdvancePaymentResult struct {
-	Complete bool `json:"complete"`
-	Canceled bool `json:"canceled"`
+	Complete   bool   `json:"complete"`
+	Canceled   bool   `json:"canceled"`
+	Retryable  bool   `json:"retryable,omitempty"`
+	HeldReason string `json:"held_reason,omitempty"`
 }
 
 func ScheduleAdvancePayment(
@@ -227,7 +229,7 @@ func ScheduleAdvancePayment(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) {
-	// randomly schedule between now and 5 minutes from now
+	// Randomly schedule between 5 and 30 minutes from now.
 	minDelay := 5 * time.Minute
 	delay := 25 * time.Minute
 	// this avoid circle and coinbase rate limiting
@@ -281,6 +283,11 @@ func AdvancePayment(
 	}
 
 	complete, canceled, err := advancePayment(payment, clientSession)
+	if server.ProviderEarningBoundaryRetryable(clientSession.Ctx, err) {
+		// The post consumer schedules one bounded RunOnce continuation. This is
+		// an unavailable observation, never completion/cancellation or new money.
+		return &AdvancePaymentResult{Retryable: true, HeldReason: err.Error()}, nil
+	}
 	return &AdvancePaymentResult{
 		Complete: complete,
 		Canceled: canceled,
@@ -423,7 +430,7 @@ func advancePayment(
 
 		// ensure paymout amount is greater than minimum payout threshold
 		if model.UsdToNanoCents(payoutAmount) <= 0 {
-			policy, err := server.LoadProviderPayoutTransition(clientSession.Ctx)
+			policy, err := server.LoadProviderPayoutEarningPolicy(clientSession.Ctx)
 			if err != nil {
 				return false, false, err
 			}
@@ -478,7 +485,7 @@ func advancePayment(
 					return
 				}
 			}
-			returnErr = fmt.Errorf("[%s]Payment create transaction error = %s", payment.PaymentId, err)
+			returnErr = fmt.Errorf("[%s]Payment create transaction error = %w", payment.PaymentId, err)
 			return
 		}
 

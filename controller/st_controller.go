@@ -3247,7 +3247,7 @@ func stComputeReleasePayout(
 	if err := stPayoutAdmission(ctx, cfg); err != nil {
 		return [32]byte{}, 0, err
 	}
-	transition, err := server.LoadProviderPayoutTransition(ctx)
+	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
 		return [32]byte{}, 0, err
 	}

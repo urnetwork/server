@@ -30,6 +30,13 @@ func TestProviderTransitionPayoutRetryAndStartupPreservePending(t *testing.T) {
 		}
 		releaseInvalid()
 		t.Cleanup(server.Config.PushSimpleResource("sn.yml", []byte(policy)))
+		policyForPreparation, preparationErr := server.LoadProviderPayoutTransition(ctx)
+		if preparationErr != nil {
+			t.Fatal(preparationErr)
+		}
+		if _, err := server.PrepareProviderPayoutBoundary(ctx, policyForPreparation.ConfigSha256); err != nil {
+			t.Fatal(err)
+		}
 		// This deliberately unbound prior payment cannot be newly sent, but
 		// the task pipeline must keep it for attribution/reconciliation.
 		paymentId := server.NewId()

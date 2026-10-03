@@ -9452,4 +9452,6 @@ var migrations = []any{
 	newSqlMigration(netEscrowAdmissionSnapshotSchemaSql),
 	// Corrections retain their original earning window across safe re-planning.
 	newSqlMigration(providerPaymentBonusSchemaSql),
+	// The earning asset boundary is prepared explicitly and cannot drift with a file edit.
+	newSqlMigration(providerPayoutBoundarySchemaSql),
 }
