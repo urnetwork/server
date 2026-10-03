@@ -651,6 +651,44 @@ type PlaySubscription struct {
 	SubscribeWithGoogleInfo    *PlaySubscribeWithGoogleInfo    `json:"subscribeWithGoogleInfo,omitempty"`
 }
 
+// playAcknowledgeSubscription acknowledges the purchase with Google, unless
+// Play already reports it acknowledged. Every renewal RTDN is for an
+// acknowledged purchase; acknowledging it again would make each renewal depend
+// on Play accepting a repeat, and a non-200 there would fail every redelivery
+// while the renewal is never credited inline.
+func playAcknowledgeSubscription(
+	ctx context.Context,
+	rtdnMessage *PlayRtdnMessage,
+	sub *PlaySubscription,
+) error {
+	if sub.AcknowledgementState == "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED" {
+		return nil
+	}
+	url := fmt.Sprintf(
+		"%s/androidpublisher/v3/applications/%s/purchases/subscriptions/%s/tokens/%s:acknowledge",
+		playPublisherApiBaseUrl,
+		rtdnMessage.PackageName,
+		rtdnMessage.SubscriptionNotification.SubscriptionId,
+		rtdnMessage.SubscriptionNotification.PurchaseToken,
+	)
+	_, err := server.HttpPostRawRequireStatusOk(
+		ctx,
+		url,
+		[]byte{},
+		func(header http.Header) {
+			playAuthHeaderFunc(ctx, header)
+		},
+	)
+	if err != nil {
+		glog.Errorf(
+			"[sub]play acknowledge failed for token %s: %s\n",
+			rtdnMessage.SubscriptionNotification.PurchaseToken, err,
+		)
+		return fmt.Errorf("could not acknowledge play purchase: %w", err)
+	}
+	return nil
+}
+
 func (self *PlaySubscription) ParseStartTime() (time.Time, error) {
 	return time.Parse(time.RFC3339, self.StartTime)
 }
@@ -929,27 +967,8 @@ func PlayWebhook(
 				// acknowledged is auto-refunded after 3 days while any granted
 				// balance would stand. A failure here is a non-2xx so Pub/Sub
 				// redelivers and the acknowledge is attempted again.
-				url := fmt.Sprintf(
-					"%s/androidpublisher/v3/applications/%s/purchases/subscriptions/%s/tokens/%s:acknowledge",
-					playPublisherApiBaseUrl,
-					rtdnMessage.PackageName,
-					rtdnMessage.SubscriptionNotification.SubscriptionId,
-					rtdnMessage.SubscriptionNotification.PurchaseToken,
-				)
-				_, err := server.HttpPostRawRequireStatusOk(
-					clientSession.Ctx,
-					url,
-					[]byte{},
-					func(header http.Header) {
-						playAuthHeaderFunc(clientSession.Ctx, header)
-					},
-				)
-				if err != nil {
-					glog.Errorf(
-						"[sub]play acknowledge failed for token %s: %s\n",
-						rtdnMessage.SubscriptionNotification.PurchaseToken, err,
-					)
-					return nil, fmt.Errorf("could not acknowledge play purchase: %w", err)
+				if err := playAcknowledgeSubscription(clientSession.Ctx, rtdnMessage, sub); err != nil {
+					return nil, err
 				}
 
 				// fire this immediately since we pull current plan from subscription_renewal table.
