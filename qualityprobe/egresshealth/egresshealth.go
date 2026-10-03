@@ -1174,6 +1174,9 @@ func fetchWithExitPolicy(ctx context.Context, client *http.Client, d Destination
 			} else if unavailable, ok := client.Transport.(interface{ ProviderContractAcquisitionUnavailable() bool }); ok && unavailable.ProviderContractAcquisitionUnavailable() {
 				r.NotMeasured = true
 				r.FailureStage = "local_contract_acquisition"
+			} else if unavailable, ok := client.Transport.(interface{ ProviderLocalWriteUnavailable() bool }); ok && unavailable.ProviderLocalWriteUnavailable() {
+				r.NotMeasured = true
+				r.FailureStage = "local_transport_admission"
 			}
 		}
 		return r
@@ -1442,7 +1445,7 @@ func (self *Result) FailureStageSummary() string {
 }
 
 func failureStageSummary(checks []CheckResult) string {
-	order := []string{"dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "local_control_registration", "local_contract_acquisition", "run_ended", "unknown"}
+	order := []string{"dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "local_control_registration", "local_contract_acquisition", "local_transport_admission", "run_ended", "unknown"}
 	counts := map[string]int{}
 	for _, check := range checks {
 		if check.Ok {
@@ -1450,7 +1453,7 @@ func failureStageSummary(checks []CheckResult) string {
 		}
 		stage := check.FailureStage
 		switch stage {
-		case "dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "local_control_registration", "local_contract_acquisition", "run_ended":
+		case "dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "local_control_registration", "local_contract_acquisition", "local_transport_admission", "run_ended":
 		default:
 			stage = "unknown"
 		}

@@ -533,6 +533,7 @@ func (self *Tunnel) HttpClientForHosts(timeout time.Duration, extraHosts []strin
 	client := httpClientOverDialerWithResolver(self.tun.DialContext, resolver, self.pins, extraHosts, timeout)
 	client.Transport.(*providerHttpTransport).registration = self.registration
 	client.Transport.(*providerHttpTransport).contractAcquisition = self.multiClient
+	client.Transport.(*providerHttpTransport).localWrite = self.multiClient
 	client.Transport.(*providerHttpTransport).redirectPins = self.redirectPins
 	return client
 }

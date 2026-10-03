@@ -15,6 +15,7 @@ type providerHttpTransport struct {
 	*http.Transport
 	registration        *providerRegistrationState
 	contractAcquisition interface{ ProviderContractAcquisitionUnavailable() bool }
+	localWrite          interface{ ProviderLocalWriteUnavailable() bool }
 	// Verification-only pins for redirect targets. They grant no dial authority.
 	redirectPins map[string][]string
 }
@@ -30,6 +31,12 @@ func (self *providerHttpTransport) ProviderMeasurementUnavailable() bool {
 // dial error with its own timeout. Successful registration alone is insufficient.
 func (self *providerHttpTransport) ProviderContractAcquisitionUnavailable() bool {
 	return self != nil && self.contractAcquisition != nil && self.contractAcquisition.ProviderContractAcquisitionUnavailable()
+}
+
+// Refused/pending local queue admission is not a provider result. A false
+// value still cannot prove physical delivery; real response/TLS evidence wins.
+func (self *providerHttpTransport) ProviderLocalWriteUnavailable() bool {
+	return self != nil && self.localWrite != nil && self.localWrite.ProviderLocalWriteUnavailable()
 }
 
 type providerHttpRequestKey struct{}
