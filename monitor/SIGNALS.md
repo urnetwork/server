@@ -4611,6 +4611,22 @@ leases and stream memberships retain their existing bounded expiry/reconciliatio
 No replay of a non-idempotent Redis increment is added. A quiet error log or low
 CPU does not establish complete recovery or current provider payout success.
 
+A normalized `panic` log class is not proof of an uncaught worker failure.
+`server.HandleError` recovers a raised error, emits `Unexpected error` unless it
+is an explicit Done, and calls the error handler. In the qualified R59
+`flushLegacySettlement` path, that handler returns the error to the batch loop;
+the loop increments `Failed` and records accounting/operational retry state.
+An `insufficient_escrow` record therefore preserves an unresolved financial
+rejection, not a verified close, process crash or successful retry. The native
+`TestLegacySettlementDisputeRejectionStaysReservedAndDeferred` control covers
+the retained reservation, failed result and deferred next attempt. Require a
+finite owning cause and a separate exit/native-generation witness before
+claiming worker death; unknown causes and other panic owners remain unresolved.
+Do not suppress the financial failure or its durable age signal. Service-wide
+log buckets can overlap owner buckets, and incomplete Loki tails cannot prove
+absence. A DNS egress-health sample and a window-stall count do not by themselves
+establish the cause of a settlement error or each other's cause.
+
 Source qualification on 2026-10-03: the 07:57 selected holder graph contained
 legacy grant-lock SQL (`asyncDebit=false`) and metadata SQL filtered by
 `NOT redis_reserved`, with a terminal active metadata holder. It sampled 89
@@ -11495,6 +11511,22 @@ of the global warming increase. Receipt `57088ccd` and reviewed reduction
 `b3eb0a52` preserve the boundary. A follow-up must first qualify current
 connected/Public/top-level/reliability admission, keep raw candidate work
 bounded, and distinguish future-paced warming selection from a fleet census.
+
+The 21:54 follow-up selected at most 1,024 indexed future true-hint cycles,
+128 recent-cycle candidates and 64 revalidated current eligible providers.
+All stages hit their caps. All 64 returned rows were deficient warming,
+top-level clients with no retained private-shard owner; 63 had both stored
+client and first-cycle creation within 19:30–20:15, and one had both afterward.
+Five first-cycle delays were under five minutes and 59 were five minutes to
+four hours. The sample held 401 accepted measurements and needed 239 more.
+These sampled records are new client rows, not old client rows with only a
+new cycle timestamp. Receipt `cfaaa72b` and reviewed reduction `528fa0d3`
+do not establish fleet prevalence, historical eligibility or why those client
+identities were created. Missing retained private ownership is not historical
+non-ownership proof. Follow the authenticated top-level create/re-auth/replace
+path before attributing this sample to private probers, resets or a scheduler
+regression; preserve the bounded future-queue selection and independent native
+runtime/creation provenance requirements.
 
 The shard-zero owner alone periodically produces the global census:
 

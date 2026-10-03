@@ -6297,3 +6297,39 @@ ARIN renewal and full-capture sources are qualified against the new monitor764
 authority. No fresh operator generation, renewed Main capture lease, completed
 full Main shadow or sufficient verified subscriber supply is established here.
 Policy two remains inactive and the FP2FIX goal continues.
+
+### 2026-10-03 21:54 UTC eligible warming and settlement error boundaries
+
+Root's follow-up Main read (`cfaaa72b`, reviewed reduction `528fa0d3`) reached
+64 currently eligible deficient warming providers after capped 1,024-cycle,
+128-recent-candidate and 64-eligible stages. All were top-level clients without
+a retained private-shard owner. Sixty-three had both stored client and
+first-cycle creation during 19:30–20:15, and one had both afterward. Five cycle
+delays were under five minutes and 59 were five minutes to four hours. The
+sample contained 401 accepted measurements and a 239-run deficit. This moves
+the sampled mechanism toward client creation and identity replacement, not an
+old client row with only a reset cycle. It does not establish fleet prevalence,
+historical eligibility or the cause of the global warming increase.
+
+The separate coherent 21:47:54 standing census reported 73,246/85,922 quota
+complete (85.25%), 12,110 warming, 588 overdue, 90 due and 45,389 runs needed.
+These remain changing-cohort observations; selector/pacing/backend764 successor
+images are not deployed and receive no causal credit. The 21:47 database
+activity sample omitted 332 groups and truncated 246 query texts, so it gives
+no holder or CPU clearance.
+
+The 21:40 Taskworker normalized panic sample names `flushLegacySettlement`.
+Its qualified source catches raised transaction errors with `HandleError` and
+returns the error for durable failed/retry accounting. This is not evidence of
+an uncaught worker death; financial refusals and retained intent ages remain
+failures. A fresh fixed-window owning-cause reader is prepared separately, with
+no native generation join or completeness claim for dropped Loki records.
+Unclassified DNS health and window-stall observations remain separate.
+
+ARIN renewal and full-capture sources are independently qualified against the
+current monitor764 authority. Root-local native baseline operator preparation
+is ready for the next ordinary all-block rollout; no new lease or forced
+ARIN-only restart is claimed. Policy two remains inactive until full Main
+capture closure, provider losses and sufficient verified residential/business
+supply are established. The 493 offline verified leaves are not provider supply.
+Registry publication still awaits credential disposition. FP2FIX remains active.
