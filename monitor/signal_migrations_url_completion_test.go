@@ -156,7 +156,7 @@ func TestMigrationUrlCompletionCatalogGuardsOnMigratedDatabase(t *testing.T) {
 				{name: "changed function settings", version: 732, sql: `ALTER FUNCTION provider_url_probe_ready_invalidate() SET search_path=public`},
 			}
 			for _, index := range syntheticMigrationPartialIndexContracts() {
-				if index.version >= 733 {
+				if 733 <= index.version && index.version <= 739 {
 					faults = append(faults, struct {
 						name, sql string
 						version   int

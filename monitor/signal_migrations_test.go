@@ -1135,6 +1135,8 @@ func syntheticMigrationPartialIndexContracts() []syntheticMigrationPartialIndexC
 		{version: 737, table: "provider_egress_probe_cycle", name: "provider_probe_cycle_completed_expiry", keys: "completed_next_expiry_at, client_id", predicate: "(completed_next_expiry_at IS NOT NULL)"},
 		{version: 738, table: "provider_egress_probe_cycle", name: "provider_probe_cycle_slot_completed_expiry", keys: "slot_id, completed_next_expiry_at, client_id", predicate: "(completed_next_expiry_at IS NOT NULL)"},
 		{version: 739, table: "transfer_balance", name: "transfer_balance_active_network_end_start_id", keys: "network_id, end_time, start_time, balance_id", predicate: "active"},
+		{version: 760, table: "test_balance_drain", name: "test_balance_drain_network_id_end_time", keys: "network_id, end_time", predicate: "(restore_time IS NULL)"},
+		{version: 761, table: "solana_payment_intent", name: "solana_payment_intent_expected_amount_micro", keys: "expected_amount_micro, expires_at", predicate: "(expected_amount_micro IS NOT NULL)"},
 	}
 }
 

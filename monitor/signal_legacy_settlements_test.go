@@ -65,7 +65,7 @@ func TestLegacySettlementsAuthorityAndRetainedFailure(t *testing.T) {
 	if _, err = NewLegacySettlementsSignal().Run(context.Background(), syntheticSettings(source)); err == nil {
 		t.Fatal("installed missing schema became healthy")
 	}
-	head = "761"
+	head = "762"
 	if alerts, err = NewLegacySettlementsSignal().Run(context.Background(), syntheticSettings(source)); err != nil || len(alerts) != 0 {
 		t.Fatal("pre-migration healthy control failed", alerts, err)
 	}

@@ -26,13 +26,22 @@ func financialIndexArtifact(table, name, columns string) string {
  AND i.indexrelid=to_regclass('public.` + name + `') AND i.indisvalid AND i.indisready
  AND pg_get_indexdef(i.indexrelid)='CREATE INDEX ` + name + ` ON public.` + table + ` USING btree (` + columns + `)')`
 }
-func financialGuardArtifact(table, trigger, function, body string, mask int) string {
+func financialGuardArtifact(table, trigger, function, body string, mask int, updateColumns ...string) string {
+	attributes := "t.tgattr=''::int2vector"
+	if len(updateColumns) != 0 {
+		columns := make([]string, len(updateColumns))
+		for i, column := range updateColumns {
+			columns[i] = "'" + strings.ReplaceAll(column, "'", "''") + "'"
+		}
+		attributes = `ARRAY(SELECT a.attname::text FROM pg_attribute a
+ WHERE a.attrelid=t.tgrelid AND a.attnum=ANY(t.tgattr) ORDER BY a.attname)=ARRAY[` + strings.Join(columns, ",") + `]::text[]`
+	}
 	return fmt.Sprintf(`EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
  WHERE t.tgrelid=to_regclass('public.%s') AND t.tgname='%s' AND t.tgfoid=to_regprocedure('public.%s()')
- AND NOT t.tgisinternal AND t.tgenabled IN ('O','A') AND t.tgtype=%d AND t.tgqual IS NULL AND t.tgnargs=0 AND t.tgattr=''::int2vector
+ AND NOT t.tgisinternal AND t.tgenabled IN ('O','A') AND t.tgtype=%d AND t.tgqual IS NULL AND t.tgnargs=0 AND %s
  AND p.prorettype='trigger'::regtype AND p.pronargs=0 AND p.prolang=(SELECT oid FROM pg_language WHERE lanname='plpgsql')
  AND p.prokind='f' AND p.provolatile='v' AND p.proparallel='u' AND NOT p.prosecdef AND NOT p.proleakproof AND NOT p.proisstrict
- AND p.proconfig IS NULL AND p.prosrc='%s')`, table, trigger, function, mask, strings.ReplaceAll(body, "'", "''"))
+ AND p.proconfig IS NULL AND p.prosrc='%s')`, table, trigger, function, mask, attributes, strings.ReplaceAll(body, "'", "''"))
 }
 
 var providerPaymentBonusArtifactQuery = func() string {
