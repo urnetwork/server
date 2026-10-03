@@ -5975,3 +5975,41 @@ ARIN policy two remains inactive. Exact 5500 namespace-admission successors
 have independent local gates; final Main resource custody, protected capture,
 full shadow comparison, rebuilt allocation classification and subscriber
 coverage still require production evidence. FP2FIX is not complete.
+
+### 2026-10-03 07:43 UTC admission unwind and all-block selection
+
+The admission-error fix `bf7cadcd` is merged into Main and pushed through
+`7d93570f`, preserving concurrent Main changes. A real PostgreSQL regression
+control reproduced cancellation during the shard-admission query being treated
+as a policy refusal, followed by a misleading commit-on-closed-connection panic.
+Operational query, scan and iteration errors now unwind the transaction; retired
+shard policy refusals retain their ordinary return behavior. Independent focused
+tests passed. Main's initiating cancellation and exact failing process generation
+are not yet proved; the patch does not blindly replay ambiguous commits.
+
+API, Connect, Taskworker and Proxy were built and verified for both architectures
+from `bf7cadcd`, retaining the published libraries and deployed c56 accounting
+implementation. All four all-block selection commands completed with exit zero
+for `2026.10.3-client-admission-unwind+1060875600`: Proxy at 07:38:12,
+Taskworker at 07:40:00, API at 07:40:07 and Connect at 07:42:28 UTC. This release
+requires no migration beyond Main's schema 758. Its raw OCI configuration closure
+has SHA-256 `6b52d5cc3c726bca959c7eb7751ada0ed85fa916a876deb17ba5a06e8c64fac8`.
+Selection-command success does not prove current and draining process convergence
+or an improved probe rate; fresh runtime and post-rollout measurements remain due.
+
+The schema-758 monitor successor replaced the older watcher at 06:34 UTC without
+overlapping watcher parents. The handoff had a brief collection gap and reset
+sustain windows; it was not gap-free. The successor continues the 15-minute probe
+cadence. Its 07:20 database sample had truncated coverage. A separate read-only
+07:32 financial-holder snapshot found no candidate waiters during 38 milliseconds,
+which is an instantaneous quiet control, not proof that earlier lock queues cleared.
+Local 64-client controls reproduce contention in the legacy unmarked settlement
+path while the marked/current control passes. The legacy correction remains open.
+
+Private baseline ARIN capture configurations are installed on edge0, edge1,
+edge3 and edge4, without a separate service restart or classifier activation.
+The rebuilt parent-allocation candidate passed full native decoder readback;
+expanded subscriber classification and Main shadow coverage remain unfinished.
+A capped Main log sample found 64 Taskworker ForceCloseOpenContractIds panics
+classified as insufficient escrow; generation, close outcome and unsampled
+generator failures remain unknown. FP2FIX is not complete.
