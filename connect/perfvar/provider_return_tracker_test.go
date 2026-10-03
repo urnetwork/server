@@ -78,13 +78,16 @@ type providerReturnFlowWindow struct {
 	flowKey clientconnect.RemoteUserNatProviderReturnFlowKey
 }
 
-// One immutable boundary retains exactly the tokens contributing to its
-// packet and byte target.
+// One boundary retains the counts and membership from a validated owner
+// response. Retained entries keep their existing atomic terminal state.
 type providerReturnFlowBoundary struct {
 	window          providerReturnFlowWindow
 	entries         []*providerReturnSendEntry
 	packetCount     int64
 	packetByteCount clientconnect.ByteCount
+	// Set only after flowBoundary receives a valid owner response. Exact
+	// success remains the separate returned bool; zero counts may be real.
+	snapshotPresent bool
 }
 
 // An all-item source boundary joins return sends before their first SendPack.
@@ -493,13 +496,15 @@ func (self *providerReturnSendTracker) beginFlowWindow(
 }
 
 // Boundary waits for exact matching-flow packet and byte totals, then seals
-// the window against late overshoot.
+// the window against late overshoot. Failure retains the last valid prefix
+// for diagnostics without changing the exact-success gate.
 func (self *providerReturnSendTracker) flowBoundary(
 	ctx context.Context,
 	window providerReturnFlowWindow,
 	expectedPacketCount int64,
 	expectedPacketByteCount clientconnect.ByteCount,
 ) (providerReturnFlowBoundary, bool) {
+	var lastValid providerReturnFlowBoundary
 	for {
 		response, ok := self.request(ctx, &providerReturnRequest{
 			kind:                    providerReturnRequestBoundary,
@@ -508,16 +513,18 @@ func (self *providerReturnSendTracker) flowBoundary(
 			expectedPacketByteCount: expectedPacketByteCount,
 		})
 		if !ok {
-			return providerReturnFlowBoundary{}, false
+			return lastValid, false
 		}
+		lastValid = response.boundary
+		lastValid.snapshotPresent = true
 		if response.exact {
-			return response.boundary, true
+			return lastValid, true
 		}
 		select {
 		case <-ctx.Done():
-			return providerReturnFlowBoundary{}, false
+			return lastValid, false
 		case <-self.ctx.Done():
-			return providerReturnFlowBoundary{}, false
+			return lastValid, false
 		case <-self.progress:
 		}
 	}

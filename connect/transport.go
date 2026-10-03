@@ -377,6 +377,20 @@ func writeConnectH1UserReadyBatch(
 	default:
 	}
 
+	if h1RelayLineageTraceEnabled {
+		var spans [connectH1WriteBatchMaxMessageCount]h1RelayLineageSpan
+		for index, message := range messageStorage[:messageCount] {
+			if len(message) > 16 {
+				spans[index] = beginH1RelayLineage("edge_h1_write_begin", server.Id{}, server.Id{}, message, len(receive), cap(receive))
+			}
+		}
+		defer func() {
+			for _, span := range spans[:messageCount] {
+				span.end("edge_h1_write_end", err == nil, len(receive), cap(receive))
+			}
+		}()
+	}
+
 	if err = writer.SetWriteDeadline(time.Now().Add(writeTimeout)); err != nil {
 		return open, err
 	}
@@ -1478,6 +1492,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		)
 		var workers connectHandlerWorkers
 		defer finishH1ConnectHandlerWorkers(&workers, func() {
+			if h1RelayLineageTraceEnabled {
+				beginH1RelayLineage("edge_h1_close", clientId, connectionId, nil, 0, 0)
+			}
 			handleCancel()
 			residentTransport.Close()
 			ws.Close()
@@ -1497,7 +1514,14 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			for {
 
 				messageType, message, err := readConnectH1PooledWithDeadline(ws, self.settings.ReadTimeout, int64(self.settings.FramerSettings.MaxMessageLen+4))
+				var trace h1RelayLineageSpan
+				if h1RelayLineageTraceEnabled {
+					trace = beginH1RelayLineage("edge_h1_read", clientId, connectionId, message, len(residentTransport.send), cap(residentTransport.send))
+				}
 				if err != nil {
+					if h1RelayLineageTraceEnabled {
+						trace.end("edge_h1_read_error", false, 0, 0)
+					}
 					// glog.Errorf("[t]read err = %s\n", err)
 					if connectionId := announce.ConnectionId(); connectionId != nil {
 						model.ClientError(handleCtx, *networkId, clientId, *connectionId, "read", err)
@@ -1553,6 +1577,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						message,
 						connect.CarrierReliabilityReliable,
 					)
+					if h1RelayLineageTraceEnabled {
+						trace.end("edge_h1_admit", sendResult == pooledMessageSendDelivered, len(residentTransport.send), cap(residentTransport.send))
+					}
 					if sendResult == pooledMessageSendDone {
 						return
 					}

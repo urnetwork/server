@@ -100,6 +100,7 @@ func providerReturnAdmissionSnapshot(tracker *sendPackLifecycleTracker) provider
 type providerReturnAdmissionReceipt struct {
 	Version               int                                   `json:"receipt_version"`
 	BoundaryCaptured      bool                                  `json:"boundary_captured"`
+	PrefixSnapshotPresent bool                                  `json:"prefix_snapshot_present"`
 	PrefixPointSample     bool                                  `json:"return_prefix_point_sample"`
 	ContextStatus         string                                `json:"context_status"`
 	TargetPackets         int64                                 `json:"target_packets"`
@@ -129,12 +130,12 @@ func (e *providerReturnSourceFailureError) Error() string { return e.text }
 func (e *providerReturnSourceFailureError) Unwrap() error { return e.cause }
 
 // Called only at the existing failed measured UDP provider-return boundary.
-// Exact return counts and the separate Pack prefix are never token-correlated.
+// Validated return counts and the separate Pack prefix are never token-correlated.
 // The existing schema14 failure_reason string carries the receipt, not a new
 // record or schema field. No callback, successful run, or admission is changed.
 func (path *fullTunPath) providerReturnSourceFailure(ctx context.Context, boundary providerReturnFlowBoundary,
 	boundaryOK bool, targetPackets int64, targetBytes clientconnect.ByteCount, failedBefore int64) error {
-	receipt := providerReturnAdmissionReceipt{Version: 1, BoundaryCaptured: boundaryOK, PrefixPointSample: true, TargetPackets: targetPackets, TargetBytes: targetBytes, GlobalFailuresBefore: failedBefore, PackPrefix: providerReturnAdmissionSnapshot(path.providerPackSends)}
+	receipt := providerReturnAdmissionReceipt{Version: 1, BoundaryCaptured: boundaryOK, PrefixSnapshotPresent: boundaryOK || boundary.snapshotPresent, PrefixPointSample: true, TargetPackets: targetPackets, TargetBytes: targetBytes, GlobalFailuresBefore: failedBefore, PackPrefix: providerReturnAdmissionSnapshot(path.providerPackSends)}
 	cause := ctx.Err()
 	switch cause {
 	case nil:
@@ -146,7 +147,7 @@ func (path *fullTunPath) providerReturnSourceFailure(ctx context.Context, bounda
 	default:
 		receipt.ContextStatus = "other"
 	}
-	if boundaryOK {
+	if receipt.PrefixSnapshotPresent {
 		receipt.PrefixPackets, receipt.PrefixBytes = boundary.packetCount, boundary.packetByteCount
 		receipt.PrefixEntries = len(boundary.entries)
 		for _, entry := range boundary.entries {
@@ -281,7 +282,7 @@ func TestProviderReturnAdmissionReceiptExactPrefixAndErrorPreserved(t *testing.T
 	path := &fullTunPath{providerReturns: returns}
 	err := path.providerReturnSourceFailure(ctx, boundary, true, 6, 384, 0)
 	receipt := providerReturnReceiptForTest(t, err)
-	if !receipt.BoundaryCaptured || !receipt.PrefixPointSample || receipt.PrefixEntries != 3 || receipt.PrefixPendingEntries != 1 || receipt.PrefixRejectedPackets != 2 || receipt.PrefixPackets != 6 || receipt.PrefixBytes != 384 {
+	if !receipt.BoundaryCaptured || !receipt.PrefixSnapshotPresent || !receipt.PrefixPointSample || receipt.PrefixEntries != 3 || receipt.PrefixPendingEntries != 1 || receipt.PrefixRejectedPackets != 2 || receipt.PrefixPackets != 6 || receipt.PrefixBytes != 384 {
 		t.Fatalf("wrong exact prefix: %+v", receipt)
 	}
 	if receipt.PackPrefix.Present || receipt.PackPrefix.Samples != nil {
