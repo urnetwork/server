@@ -9509,6 +9509,9 @@ var migrations = []any{
 			ADD COLUMN sender_account varchar(64) NULL,
 			ADD COLUMN match_note text NULL;
 	`),
-	// Legacy final reports retain reservation authority while settlement is queued.
+	// Caller operation IDs retain one exact customer transfer challenge request.
+	// Append after the complete published asynchronous-debit/Solana prefix.
+	newSqlMigration(circleTransferRequestSchemaSql),
+	// Unmarked contracts retain reservations until one bounded worker settles them.
 	newSqlMigration(legacySettlementIntentSchemaSql),
 }

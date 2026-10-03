@@ -17281,10 +17281,11 @@ This is the version-to-artifact contract checked by the probe:
 | 759 | Persistent acceptance-test drain audit with exact columns and immediate primary key |
 | 760 | Valid/ready drain lookup on `(network_id, end_time)` restricted to `restore_time IS NULL` |
 | 761 | Nullable no-default Solana expected amount and exact partial lookup, persistent amount reservations with immediate primary key, and nullable support fields with a 64-character sender bound |
-| 762 | Persistent legacy settlement intent with exact defaults/checks, partition/due indexes, enabled exact outcome-update guard, and immediate contract retention foreign key with all four operative guards; no shared-balance foreign key |
+| 762 | Canonical Circle customer-transfer request identity, bounded payloads, monotonic custody and append-only retained observations |
+| 763 | Persistent legacy settlement intent with exact defaults/checks, partition/due indexes, enabled exact outcome-update guard, and immediate contract retention foreign key with all four operative guards; no shared-balance foreign key |
 
 The 2026-10-03 full local watcher gate found missing detector contracts for
-759–762. This was a monitor catalog omission, not evidence of absent Main
+759–763. This was a monitor catalog omission, not evidence of absent Main
 schema. The corrected catalog visits each published prefix with the actual
 query; absent future functions/tables are pending rollout. Fault controls
 change nullability, defaults, keys, partial predicates, sender length, queue

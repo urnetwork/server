@@ -20,7 +20,7 @@ func legacyRows(now time.Time) []pgRow {
 func TestLegacySettlementsAuthorityAndRetainedFailure(t *testing.T) {
 	now := syntheticSettings(nil).Now()
 	rows := legacyRows(now)
-	head, present := "762", "t"
+	head, present := "763", "t"
 	source := &syntheticSource{postgresFn: func(q string) ([]Row, error) {
 		if strings.Contains(q, "max(end_version_number)") {
 			return []Row{{head, present}}, nil
@@ -65,7 +65,7 @@ func TestLegacySettlementsAuthorityAndRetainedFailure(t *testing.T) {
 	if _, err = NewLegacySettlementsSignal().Run(context.Background(), syntheticSettings(source)); err == nil {
 		t.Fatal("installed missing schema became healthy")
 	}
-	head = "761"
+	head = "762"
 	if alerts, err = NewLegacySettlementsSignal().Run(context.Background(), syntheticSettings(source)); err != nil || len(alerts) != 0 {
 		t.Fatal("pre-migration healthy control failed", alerts, err)
 	}

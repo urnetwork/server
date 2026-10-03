@@ -1,4 +1,4 @@
-// Published 759–762 artifacts are inspected through catalogs only. Missing
+// Published 759–763 artifacts are inspected through catalogs only. Missing
 // future tables/functions remain pending migrations, not query errors.
 package monitor
 
@@ -20,7 +20,7 @@ var solanaPaymentAmountArtifactQuery = `(` +
  AND column_name='sender_account' AND character_maximum_length=64))`
 
 // Pin the exact published body, including the narrow NULL-to-terminal event.
-// The native prefix/fault fixture detects any divergence from migration 762.
+// The native prefix/fault fixture detects any divergence from migration 763.
 const legacySettlementOutcomeGuardBody = `
  BEGIN
   IF OLD.outcome IS NULL AND NEW.outcome IS NOT NULL AND

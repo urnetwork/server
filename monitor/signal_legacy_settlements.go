@@ -95,7 +95,7 @@ func (p legacySettlementProbe) check(ctx context.Context, env *probeEnv) ([]find
 	if err != nil || head < 0 || rows[0].str(1) != "t" && rows[0].str(1) != "f" {
 		return nil, fmt.Errorf("legacy settlement schema observation is invalid")
 	}
-	if head < 762 {
+	if head < 763 {
 		return nil, nil
 	}
 	if rows[0].str(1) != "t" {
@@ -128,7 +128,7 @@ func (p legacySettlementProbe) check(ctx context.Context, env *probeEnv) ([]find
 		}
 		findings = append(findings, finding{probeId: p.id(), tier: tierWarn, class: "legacy-settlement-worker-missing", target: pgTarget(env), frame: fmt.Sprintf("partition-%d", o.shard), healthy: o.scheduled, sustain: 2,
 			symptom: "A legacy settlement partition has no scheduled recovery task.", observed: fmt.Sprintf("partition=%d scheduled=%t", o.shard, o.scheduled), baseline: "16 independent keys; two observations allow a short completion/post transition.",
-			mechanism: "An old worker cannot finalize an accepted intent. Removing the new worker before draining intents leaves durable work reserved.", action: "Restore the owning scheduler and a worker that implements migration 762. Keep that worker through rollback until all pending intents drain.", verify: "Every partition key recurs and actual worker completions advance.", playbook: "SIGNALS.md §2.5b"})
+			mechanism: "An old worker cannot finalize an accepted intent. Removing the new worker before draining intents leaves durable work reserved.", action: "Restore the owning scheduler and a worker that implements migration 763. Keep that worker through rollback until all pending intents drain.", verify: "Every partition key recurs and actual worker completions advance.", playbook: "SIGNALS.md §2.5b"})
 	}
 	return findings, nil
 }

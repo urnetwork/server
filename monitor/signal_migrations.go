@@ -418,7 +418,8 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "acceptance-test balance drain audit", requiredVersion: 759, rowColumn: 170},
 	{name: "active acceptance-test balance drain lookup", requiredVersion: 760, rowColumn: 171},
 	{name: "Solana payment amount reservations", requiredVersion: 761, rowColumn: 172},
-	{name: "legacy settlement intent and ownership guards", requiredVersion: 762, rowColumn: 173},
+	{name: "Circle customer transfer custody and append-only observations", requiredVersion: 762, rowColumn: 173},
+	{name: "legacy settlement intent and ownership guards", requiredVersion: 763, rowColumn: 174},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -2169,6 +2170,7 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       `+testBalanceDrainArtifactQuery+`,
 		       `+testBalanceDrainIndexArtifactQuery+`,
 		       `+solanaPaymentAmountArtifactQuery+`,
+		       `+circleTransferRequestArtifactQuery+`,
 		       `+legacySettlementIntentArtifactQuery+`
 		FROM version;
 	`)
