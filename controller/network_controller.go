@@ -74,11 +74,13 @@ func NetworkCreate(
 
 	// if verification required, send it
 	if result.VerificationRequired != nil {
-		verifySend := AuthVerifySendArgs{
-			UserAuth:   result.VerificationRequired.UserAuth,
-			UseNumeric: verifyUseNumeric,
-		}
-		AuthVerifySend(verifySend, session)
+		// why no code was sent goes back to the client; it used to be dropped
+		result.VerificationRequired.SendError = sendVerification(
+			result.VerificationRequired.UserAuth,
+			verifyUseNumeric,
+			session,
+			authVerifySendResult,
+		)
 	} else {
 
 		if result.UserAuth != nil && !result.SuppressAccountMessages {
