@@ -25,8 +25,8 @@ The audit covered 46 tracked items: S1–S11, A1–A7, N1–N7, W1–W6, D1–D8
 
 | Status | Count | Items |
 |---|---|---|
-| Fixed `[x]` | 23 | S1 S2 S4 S5 S6 S7 S8 S10 · A3 A5 A7 · N3 N4 · W2 W4 W6 · D3 D5 D6 D7 · §4.2 §4.4 §4.5 |
-| Partially fixed `[ ]` | 20 | S3 S9 S11 · A1 A2 A4 · N1 N2 N5 N7 · W1 W3 W5 · D1 D2 D4 D8 · §4.1 §4.3 §4.7 |
+| Fixed `[x]` | 26 | S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 · A3 A5 A7 · N3 N4 · W2 W4 W6 · D3 D5 D6 D7 · §4.2 §4.3 §4.4 §4.5 |
+| Partially fixed `[ ]` | 17 | S11 · A1 A2 A4 · N1 N2 N5 N7 · W1 W3 W5 · D1 D2 D4 D8 · §4.1 §4.7 |
 | Open `[ ]` | 2 | N6 · §4.6 |
 | Accepted `[-]` | 1 | A6 |
 
@@ -40,11 +40,12 @@ The audit covered 46 tracked items: S1–S11, A1–A7, N1–N7, W1–W6, D1–D8
   `connect.WithHttpRedirectsDisabled` and `connect.HttpRequestExhaustedError`
   exist only under `connect/ssoenv/connect/`. The SDK payment tests could
   not be run for this audit.
-- New, open only because the fix is on an unmerged branch: **S12**
-  (Play subscription keeps billing a deleted account, fix on server
-  `fix/play-cancel-on-delete`) and **S13** (memo-less USDC payment is never
-  matched, fix on server `fix/usdc-memoless-match` plus mmm
-  `fix/usdc-memoless-match`). See §2.
+- New: **S12** (Play subscription keeps billing a deleted account) and
+  **S13** (memo-less USDC payment is never matched). Both fixes are merged
+  to server main; see §2.
+- Merged to server main 2026-10-03: the fix branches for S3, S5 (repeat
+  acknowledge), S9, S11 (comment), S12, S13 and §4.3 (server half; the sdk
+  half is on sdk main `bd173d29`). The table above counts them.
 
 ---
 
@@ -136,13 +137,12 @@ Underpayment (`:1522-1533`) likewise keeps funds and acks 200.
       tx is recognized and not recorded; late payments whose intent expired but
       is not yet swept still credit (`TestSolanaWebhookLatePaymentStillCredits`,
       `TestSolanaWebhookRecordsUnmatchedAndUnderpaid`).
-- [ ] Partial (2026-10-03, main 94329db1): the unmatched path
-      (`subscription_controller.go:1985-2006`) and the underpaid path
-      (`:2012-2034`) are in place. But if writing the
-      `RecordUnfulfilledSolanaPayment` row itself fails, it is only logged
-      (`~:2004`, `~:2032`) and Helius still gets a 200, so the payment leaves
-      no record anywhere. Fix: add that error to `firstErr` so the batch
-      returns non-2xx and Helius retries.
+- [x] Fixed 2026-10-03 (`fix/upgrade-s3` `082a1333`, merged in `9615cbd1`):
+      a failed `RecordUnfulfilledSolanaPayment` write now joins the batch's
+      `firstErr`, so the delivery is answered non-2xx and Helius redelivers
+      it (the insert is ON CONFLICT DO NOTHING). Since the S13 merge the write
+      is in `HeliusWebhook`'s record case, for both the no-intent and the
+      underpaid path. `TestSolanaWebhookUnfulfilledRecordFailureFailsTheBatch`.
 
 ### S4 — Concurrent-delivery double credits (Solana, balance codes, Play) — MEDIUM
 All three are read-check-then-insert with no lock:
@@ -186,10 +186,13 @@ out).
       hermetic seams): credit+acknowledge+redelivery-idempotence, sku-missing
       -> non-2xx, acknowledge-failure -> non-2xx then recovery.
       Re-checked 2026-10-03: `subscription_controller.go:927-973`, tests
-      `play_webhook_test.go:162/227/267`, commit `3e98ccbb`. Needs a sandbox
-      check: `:acknowledge` is POSTed on every non-cancelled RTDN, renewals
-      included. If Play answers non-200 for an already-acknowledged purchase,
-      every renewal would loop on retries (the tests use a fake API).
+      `play_webhook_test.go:162/227/267`, commit `3e98ccbb`.
+- [x] Fixed 2026-10-03 (`fix/upgrade-s5` `d542237b`, merged in `81fdcd7f`):
+      the acknowledge is skipped when Play already reports the subscription
+      `ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED`, so renewals no longer depend on
+      Play accepting a repeat acknowledge. A first purchase is still
+      acknowledged and a failed acknowledge still fails the delivery.
+      `TestPlayAcknowledgeSkipsAlreadyAcknowledgedPurchase`.
 
 ### S6 — SDK `UpgradeGuest` / `UpgradeGuestExisting` → 404 — MEDIUM
 `sdk/api.go:1747` posts `/auth/upgrade-guest`, `:1793`
@@ -315,14 +318,14 @@ repair — an agent retry re-charges.
       `TestX402GrantProMonthRollingWindow`,
       `TestX402GrantIdempotentOnSettleTransaction`,
       `TestX402SecondPurchaseInOneCalendarMonthExtends`.
-- [ ] Partial (2026-10-03): settle-then-grant failure is still only a log line,
-      `SETTLED BUT NOT GRANTED` (`controller/x402_controller.go:551-555`).
-      Nothing records it durably and the reconciler has no x402 leg, so repair
-      is manual and depends on someone reading the logs. Fix: write a
-      `payment_reconciliation_event` (or an unfulfilled row keyed by the
-      settle transaction) at that point. Optionally retry the grant from the
-      reconciler by settle tx id; it is already idempotent
-      (`x402AlreadyGrantedForTransaction`, `:766`).
+- [x] Fixed 2026-10-03 (`fix/upgrade-s9` `1f035242`, merged in `c4a65512`):
+      a grant failure after settlement writes a `settled_not_granted`
+      `payment_reconciliation_event` keyed by the settle transaction. The
+      hourly reconciler has an x402 leg that retries the grant (idempotent on
+      the settle transaction) and resolves the event; `bringyourctl payments
+      reconcile --store=x402`. `TestX402SettledButNotGrantedIsRecordedAndReconciled`,
+      `TestX402ReconcileResolvesWithoutDoubleGrant`. The event query has not
+      been run against Postgres.
 
 ### S10 — Stripe checkout session: per-session key, quantity ignored — LOW (latent)
 `stripeHandleCheckoutSessionCompleted` loops line items
@@ -368,8 +371,8 @@ different account credits that account. Acknowledged in a comment
         over a full billing cycle, or a Stripe listing of subscriptions
         without `network_id` metadata (repair those with metadata, then
         delete the fallback).
-      - The comment at `:1880-1882` still lists the old order (email second)
-        and should be corrected.
+      - The comment that listed the old order (email second) is corrected
+        (`fix/upgrade-s11` `ef72f6be`, merged in `9ed88be1`).
 
 ### S12 — Play subscription keeps billing a deleted account — MEDIUM (new 2026-10-03)
 `NetworkRemove` (`controller/network_controller.go:176-214`) cancels only
@@ -377,8 +380,8 @@ Stripe (`UnsubscribeStripe`, `:189`) before `model.RemoveNetwork` (`:198`). An
 active Google Play subscription keeps charging after the account is deleted,
 and nothing on the server can credit it any more.
 
-- [ ] Open (fix on branch `fix/play-cancel-on-delete`, server `1a67d9d3`): cancels
-      Play via `subscriptionsv2.cancel` (`DEVELOPER_REQUESTED_STOP_PAYMENTS`)
+- [x] Fixed 2026-10-03 (`fix/play-cancel-on-delete` `1a67d9d3`, merged in
+      `5a76b6c7`): cancels Play via `subscriptionsv2.cancel` (`DEVELOPER_REQUESTED_STOP_PAYMENTS`)
       and blocks deletion if lookup/cancel fails. It also refuses deletion
       while the App Store reports an auto-renewing subscription, which the
       server cannot cancel. That Apple-side refusal is a product/UX decision.
@@ -388,12 +391,12 @@ and nothing on the server can credit it any more.
 A USDC transfer without the reference/memo reaches S3's `no_intent` record
 (`subscription_controller.go:1985-2006`) and can only be credited by hand.
 
-- [ ] Open (fix on branch `fix/usdc-memoless-match`, server `1ad2fc26`+`b841c08f`;
-      mmm `38e8f8a61`): every quote reserves a unique sub-cent amount suffix
+- [x] Fixed 2026-10-03 (server `fix/usdc-memoless-match` `1ad2fc26`+`b841c08f`,
+      merged in `76ed6bbb`; mmm `38e8f8a61`): every quote reserves a unique sub-cent amount suffix
       (new `solana_payment_amount_reservation` table), and an unambiguous
       exact-amount match credits.
       - **Release order:** the mmm branch must ship with or before the
-        server branch. Main's `UsdcPayPanel.jsx:57` rounds the quote to
+        server change. It was not on mmm main when the server branch merged. Main's `UsdcPayPanel.jsx:57` rounds the quote to
         cents, so buyers who copy it would underpay.
       - Needs a live check of wallet USDC rounding.
 
@@ -822,7 +825,12 @@ Each of these is implemented ≥3 times today, with drift:
    `data_1tib|data_10tib`, Stripe payment-link URLs, Solana merchant +
    USDC mint, displayed-price fallbacks — scattered across ~12 files in
    5 repos.
-   - [ ] Partial (2026-10-03). `payment_catalog.go` has the plan/item ids
+   - [x] Fixed 2026-10-03: the intent result returns `recipient` and
+         `spl_token_mint` (server `fix/upgrade-4-3` `23bc3004`, merged in
+         `be8d2ce2`), and the SDK decodes them (sdk `bd173d29`). The
+         `StripeItem*` constants were already in the cgo headers. No app
+         builds the payment url from them yet.
+   - Before the fix (2026-10-03). `payment_catalog.go` has the plan/item ids
          (`:30,42-47`), ui modes, store classification (`:75-109`). Prices
          come from the server (`StripePrices`, `onboarding_api.go:379-397`).
          No app uses Stripe payment links any more. Missing: the Solana
@@ -922,14 +930,15 @@ Each of these is implemented ≥3 times today, with drift:
 
 Status 2026-10-03:
 - [x] Step 1: S1–S5 and the S7 Coinbase guard are done (server `3e98ccbb`).
-      Residual edges S3/S9 are noted in §2.
+      The residual S3/S9 edges are fixed too (2026-10-03, §2).
 - [ ] Step 2, partial: the SDK controller is done; no client is ported (§4.1).
       A2/N2/D1 timeouts are fixed per-app, not structurally.
 - [ ] Step 3, partial: verify endpoints, SDK and both reorders are done. Open:
       apple restore doesn't report finished entitlements (A1), and android
       never re-reports legacy acknowledged tokens (N1). A3 restore is done.
 - [ ] Step 4, partial: SDK catalog, envelope, `CheckBalanceCode` and
-      `RedirectOnCompletion` are done (Solana merchant/mint missing, §4.3).
+      `RedirectOnCompletion` are done (the Solana merchant/mint is on the
+      intent result since 2026-10-03, §4.3).
       No client has adopted them. S6 is resolved by deprecation. The A4/D8
       legacy-guest UI needs a product decision.
 - [ ] Step 5, partial: W1 (core), W2, W4, A5 and N5 (core) are done. Open: D2/N7/W5
