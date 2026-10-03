@@ -208,7 +208,7 @@ func TestDynamicProberRejectedCandidateStillUsesCreditReleasedBeforeFallback(t *
 				fallback = true
 				// Release the prior reservation through real zero-use settlement
 				// after the locked attempt. Full fallback must re-read funding.
-				settleNetEscrowOrderingTestContract(ctx, prior.ContractId)
+				server.RunPosts(ctx, settleNetEscrowOrderingTestContract(ctx, prior.ContractId)...)
 			}
 			escrow, err := independentGrantTestCreate(ctx, controlled, clients)
 			if err != nil || escrow == nil || len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != grant.BalanceId {

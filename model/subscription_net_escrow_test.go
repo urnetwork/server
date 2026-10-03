@@ -270,7 +270,7 @@ func TestNetEscrowReconcileRepairsExpiredBalanceWithOpenEscrow(t *testing.T) {
 		)
 		connect.AssertEqual(t, err, nil)
 
-		transferEscrow, err := CreateTransferEscrow(
+		transferEscrow, err := createTransferEscrow(
 			ctx,
 			sourceNetworkId,
 			sourceClientId,

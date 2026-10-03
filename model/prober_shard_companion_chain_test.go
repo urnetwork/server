@@ -212,7 +212,7 @@ func TestProberShardCompanionPayerHandoffRechecksOriginAndCancellation(t *testin
 		ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 		defer cancel()
 		for _, change := range []string{"cancel", "deadline", "anchor-payer", "anchor-delete", "plain-origin", "retire", "valid"} {
-			f := newShardCompanionChainFixture(t, ctx, 1024)
+			f := newLegacyShardCompanionChainFixture(t, ctx, 1024)
 			release, err := transferEscrowAdmissionQueue.acquire(ctx, f.owner.NetworkId)
 			server.Raise(err)
 			defer release()
@@ -229,7 +229,9 @@ func TestProberShardCompanionPayerHandoffRechecksOriginAndCancellation(t *testin
 			done := make(chan outcome, 1)
 			go func() {
 				value := outcome{}
-				panicErr := server.HandleError(func() { value.escrow, value.err = f.reply(waitCtx, 4096) })
+				panicErr := server.HandleError(func() {
+					value.escrow, value.err = createCompanionTransferEscrow(waitCtx, f.owner.NetworkId, f.owner.ClientId, f.peer.providerNetworkId, f.peer.providerId, 4096, time.Hour)
+				})
 				if panicErr != nil {
 					value.err = fmt.Errorf("reply panic: %v", panicErr)
 				}

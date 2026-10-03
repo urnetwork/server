@@ -1764,7 +1764,19 @@ func CreateTransferEscrow(
 	destinationId server.Id,
 	contractTransferByteCount ByteCount,
 ) (transferEscrow *TransferEscrow, returnErr error) {
-	ctx = withRedisContractAdmission(ctx)
+	return createTransferEscrow(withRedisContractAdmission(ctx), sourceNetworkId, sourceId, destinationNetworkId, destinationId, contractTransferByteCount)
+}
+
+// Shared transaction owner; public entry points always supply Redis admission.
+// Raw contexts retain the legacy ledger path for compatibility and recovery controls.
+func createTransferEscrow(
+	ctx context.Context,
+	sourceNetworkId server.Id,
+	sourceId server.Id,
+	destinationNetworkId server.Id,
+	destinationId server.Id,
+	contractTransferByteCount ByteCount,
+) (transferEscrow *TransferEscrow, returnErr error) {
 	var posts []func() any
 
 	if err := transferEscrowTx(ctx, sourceNetworkId, contractTransferByteCount, func(tx server.PgTx) {
@@ -1850,7 +1862,20 @@ func CreateCompanionTransferEscrow(
 	contractTransferByteCount ByteCount,
 	originContractTimeout time.Duration,
 ) (transferEscrow *TransferEscrow, returnErr error) {
-	ctx = withRedisContractAdmission(ctx)
+	return createCompanionTransferEscrow(withRedisContractAdmission(ctx), sourceNetworkId, sourceId, destinationNetworkId, destinationId, contractTransferByteCount, originContractTimeout)
+}
+
+// Shared transaction owner; public entry points always supply Redis admission.
+// Raw contexts retain the legacy ledger path for compatibility and recovery controls.
+func createCompanionTransferEscrow(
+	ctx context.Context,
+	sourceNetworkId server.Id,
+	sourceId server.Id,
+	destinationNetworkId server.Id,
+	destinationId server.Id,
+	contractTransferByteCount ByteCount,
+	originContractTimeout time.Duration,
+) (transferEscrow *TransferEscrow, returnErr error) {
 	var posts []func() any
 	payerNetworkId := destinationNetworkId
 	requestedBytes := contractTransferByteCount
