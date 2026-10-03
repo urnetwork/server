@@ -533,6 +533,21 @@ func calculateReliabilityPayoutInTx(
 
 	// get reliability scores
 	reliabilityScores := GetAllMultipliedNetworkReliabilityScoresInTx(tx, ctx)
+	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
+	server.Raise(err)
+	if transition != nil {
+		// A no-coverage recompute deliberately retains cached scores. They are
+		// not evidence for this payment's window, especially after the cutoff.
+		minBlock := reliabilityBlockNumber(subsidyStartTime)
+		maxBlock := reliabilityBlockNumber(subsidyEndTime) + 1
+		shift := reliabilityRollupBlockShift(ctx, tx, maxBlock)
+		var mismatch bool
+		server.Raise(tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM network_connection_reliability_score
+			WHERE min_block_number<>$1 OR max_block_number<>$2)`, minBlock-shift, maxBlock-shift).Scan(&mismatch))
+		if mismatch {
+			panic(ErrProviderLegacyReliabilityWindow)
+		}
+	}
 
 	reliabilityPointsPerPayout := PointsToNanoPoints(float64(EnvSubsidyConfig().ReliabilityPointsPerPayout) * subsidyScale)
 
@@ -548,6 +563,9 @@ func calculateReliabilityPayoutInTx(
 	}
 
 	reliabilitySubsidyPerPayout := UsdToNanoCents(float64(EnvSubsidyConfig().ReliabilitySubsidyPerPayoutUsd))
+	if transition != nil {
+		reliabilitySubsidyPerPayout = NanoCents(float64(reliabilitySubsidyPerPayout) * subsidyScale)
+	}
 
 	for networkId, score := range reliabilityScores {
 

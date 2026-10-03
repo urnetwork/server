@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/urnetwork/server"
@@ -14,7 +16,19 @@ type CoinbaseClient interface {
 	FetchExchangeRates(ctx context.Context, currencyTicker string) (*CoinbaseExchangeRatesResults, error)
 }
 
-type CoreCoinbaseClient struct{}
+type CoreCoinbaseClient struct {
+	readSettings PaymentReadSettings
+	readHooks    paymentReadHooks
+	readHost     func() string
+}
+
+func NewCoreCoinbaseClient(settings PaymentReadSettings) (*CoreCoinbaseClient, error) {
+	settings, err := settings.normalized()
+	if err != nil {
+		return nil, err
+	}
+	return &CoreCoinbaseClient{readSettings: settings}, nil
+}
 
 var coinbaseClientInstance CoinbaseClient = &CoreCoinbaseClient{}
 
@@ -40,15 +54,30 @@ type CoinbaseResponse[T any] struct {
 	Data T `json:"data"`
 }
 
-func (c *CoreCoinbaseClient) FetchExchangeRates(
+func (self *CoreCoinbaseClient) FetchExchangeRates(
 	ctx context.Context,
 	currencyTicker string,
 ) (*CoinbaseExchangeRatesResults, error) {
-	path := fmt.Sprintf("/v2/exchange-rates?currency=%s", currencyTicker)
-	uri := fmt.Sprintf("https://%s%s", coinbaseApiHost(), path)
+	if ctx == nil {
+		return nil, fmt.Errorf("exchange-rate GET requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if currencyTicker == "" || len(currencyTicker) > 32 {
+		return nil, fmt.Errorf("invalid exchange-rate currency")
+	}
+	path := fmt.Sprintf("/v2/exchange-rates?currency=%s", url.QueryEscape(currencyTicker))
+	host := self.readHost
+	if host == nil {
+		host = coinbaseApiHost
+	}
+	uri := fmt.Sprintf("https://%s%s", host(), path)
 
-	exchangeRatesResult, err := server.HttpGetRequireStatusOk(
+	exchangeRatesResult, err := paymentHttpGet(
 		ctx,
+		self.readSettings,
+		self.readHooks,
 		uri,
 		func(header http.Header) {
 			header.Add("Accept", "application/json")
@@ -59,6 +88,9 @@ func (c *CoreCoinbaseClient) FetchExchangeRates(
 			err := json.Unmarshal(responseBodyBytes, result)
 			if err != nil {
 				return nil, err
+			}
+			if !strings.EqualFold(result.Data.Currency, currencyTicker) {
+				return nil, fmt.Errorf("exchange-rate observation currency mismatch")
 			}
 
 			return &result.Data, nil

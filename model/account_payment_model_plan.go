@@ -24,8 +24,10 @@ import (
 // 3. (only if there is a subsidy) proportional points and referral shares (points only)
 
 type PaymentPlanner struct {
-	ctx           context.Context
-	subsidyConfig *SubsidyConfig
+	restoredLegacyPaymentCount   int
+	unresolvedLegacyPaymentCount int
+	ctx                          context.Context
+	subsidyConfig                *SubsidyConfig
 
 	// dryRun mirrors the plan's dry-run mode. It selects where the reliability
 	// recompute runs: in its own committed transaction for a real plan, or
@@ -38,8 +40,12 @@ type PaymentPlanner struct {
 	maxDuration time.Duration
 	// computed sweep-time upper bound for a bounded plan. `bounded` is only set
 	// when maxDuration > 0 and there is at least one unpaid sweep to anchor on.
-	bounded    bool
-	upperBound time.Time
+	bounded               bool
+	upperBound            time.Time
+	transition            *server.ProviderPayoutTransition
+	quarantinedSweepCount int64
+	quarantinedNanoCents  NanoCents
+	inspectUnresolved     bool
 
 	// all the planning is done inside a transaction
 	tx server.PgTx
@@ -86,6 +92,22 @@ func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 // on the first slice and passes false afterward instead of repeating the same
 // heavy refresh on every slice.
 func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun bool, maxDuration time.Duration, refreshReliabilityInputs bool) (paymentPlan *PaymentPlan, returnErr error) {
+	defer func() {
+		if value := recover(); value != nil {
+			if err, ok := value.(error); ok && (errors.Is(err, ErrProviderLegacyReliabilityWindow) ||
+				errors.Is(err, server.ErrProviderEarningBoundaryUnavailable) || errors.Is(err, server.ErrProviderEarningBoundaryMismatch) ||
+				errors.Is(err, server.ErrProviderEarningBoundaryUnprepared) || errors.Is(err, server.ErrProviderEarningBoundarySchema)) {
+				paymentPlan = nil
+				returnErr = err
+				return
+			}
+			panic(value)
+		}
+	}()
+	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if dryRun {
 		// recover the rollback sentinel so a dry run returns the computed plan
 		// normally. Any other panic (e.g. a real db error) still propagates.
@@ -102,6 +124,9 @@ func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 		// write, so it is skipped for a dry run; a dry run then previews using
 		// the reliability values from the last refresh.
 		now := server.NowUtc()
+		if transition != nil {
+			now = server.MinTime(now, transition.Cutoff)
+		}
 		UpdateClientLocationReliabilities(ctx, now.Add(-30*24*time.Hour), now)
 	}
 
@@ -130,6 +155,8 @@ func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 			subsidyConfig:          subsidyConfig,
 			dryRun:                 dryRun,
 			maxDuration:            maxDuration,
+			transition:             transition,
+			inspectUnresolved:      refreshReliabilityInputs,
 			tx:                     tx,
 			paymentPlanId:          server.NewId(),
 			networkReferrals:       networkReferrals,
@@ -137,6 +164,7 @@ func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 			networkPayments:        map[server.Id]*AccountPayment{},
 		}
 
+		planner.recoverLegacyComponents()
 		returnErr = planner.planPayments()
 		if returnErr != nil {
 			return
@@ -149,12 +177,13 @@ func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 			return
 		}
 
+		planner.carryPaymentBonuses()
 		planner.withholdSmallPayments()
 		planner.setWallets()
 
 		totalPayout := NanoCents(0)
 		for _, payment := range planner.networkPayments {
-			totalPayout += payment.Payout
+			totalPayout += payment.Payout - payment.BonusPayout
 		}
 		if planner.subsidyPayment != nil && 0 < planner.subsidyPayment.SubsidyScale && 0 < totalPayout {
 			planner.applyPayoutPoints(
@@ -172,10 +201,16 @@ func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 		planner.finalizePayments()
 
 		paymentPlan = &PaymentPlan{
-			PaymentPlanId:      planner.paymentPlanId,
-			NetworkPayments:    planner.networkPayments,
-			SubsidyPayment:     planner.subsidyPayment,
-			WithheldNetworkIds: planner.networkIdsToRemove,
+			PaymentPlanId:                planner.paymentPlanId,
+			NetworkPayments:              planner.networkPayments,
+			SubsidyPayment:               planner.subsidyPayment,
+			WithheldNetworkIds:           planner.networkIdsToRemove,
+			QuarantinedSweepCount:        planner.quarantinedSweepCount,
+			QuarantinedNanoCents:         planner.quarantinedNanoCents,
+			UnresolvedCensusComplete:     false,
+			RestoredLegacyPaymentCount:   planner.restoredLegacyPaymentCount,
+			UnresolvedLegacyPaymentCount: planner.unresolvedLegacyPaymentCount,
+			LegacyRecoveryScanLimit:      legacyPaymentRecoveryLimit,
 		}
 
 		// set the bonus weights for next payout
@@ -230,6 +265,12 @@ func configurePaymentPlanTransaction(ctx context.Context, tx paymentPlanTransact
 // When maxDuration is 0, or no subsidy epoch exists yet to anchor on, the plan
 // is left unbounded.
 func (self *PaymentPlanner) computePlanUpperBound() {
+	// Bound every planner, including an unbounded first plan and dry-run.
+	// Sweep/submit dates cannot change a completed contract's earning asset.
+	if self.transition != nil {
+		self.bounded = true
+		self.upperBound = self.transition.Cutoff
+	}
 	if self.maxDuration <= 0 {
 		return
 	}
@@ -254,6 +295,9 @@ func (self *PaymentPlanner) computePlanUpperBound() {
 
 	self.bounded = true
 	self.upperBound = server.MinTime(server.NowUtc(), lastSubsidyEnd.Add(self.maxDuration))
+	if self.transition != nil {
+		self.upperBound = server.MinTime(self.upperBound, self.transition.Cutoff)
+	}
 	glog.Infof(
 		"[plan]bounded to close_time < %s (last subsidy end %s + %s)\n",
 		self.upperBound.Format(time.RFC3339),
@@ -286,6 +330,13 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
             transfer_contract.contract_id = u.contract_id`
 		closeTimeBound = "WHERE transfer_contract.close_time < $1"
 		closeTimeArgs = append(closeTimeArgs, self.upperBound)
+	}
+	if self.transition != nil {
+		closeTimeBound += ` AND transfer_contract.outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination') AND NOT u.preserve_legacy_components`
+		// Retain ambiguous liabilities while unrelated exact obligations progress.
+		if self.inspectUnresolved {
+			server.Raise(self.tx.QueryRow(self.ctx, paymentTransitionUnresolvedSampleSql).Scan(&self.quarantinedSweepCount, &self.quarantinedNanoCents))
+		}
 	}
 
 	// The set of sweeps that need (re)payment is the union of two disjoint,
@@ -331,7 +382,8 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 				transfer_escrow_sweep.network_id,
 				transfer_escrow_sweep.payout_byte_count,
 				transfer_escrow_sweep.payout_net_revenue_nano_cents,
-				transfer_escrow_sweep.sweep_time
+				transfer_escrow_sweep.sweep_time,
+				false AS preserve_legacy_components
             FROM transfer_escrow_sweep
             WHERE transfer_escrow_sweep.payment_id IS NULL
 
@@ -343,7 +395,8 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 				s.network_id,
 				s.payout_byte_count,
 				s.payout_net_revenue_nano_cents,
-				s.sweep_time
+				s.sweep_time,
+				(ap.subsidy_payout_nano_cents>0 OR ap.reliability_subsidy_nano_cents>0) AS preserve_legacy_components
             FROM account_payment ap
             INNER JOIN transfer_escrow_sweep s ON
                 s.payment_id = ap.payment_id
@@ -598,6 +651,10 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	}
 	subsidyStartTime := *subsidyStartTimePtr
 	subsidyEndTime := *subsidyEndTimePtr
+	finalLegacyTail := self.transition != nil && !server.NowUtc().Before(self.transition.Cutoff)
+	if self.transition != nil {
+		subsidyEndTime = server.MinTime(subsidyEndTime, self.transition.Cutoff)
+	}
 
 	if !subsidyStartTime.Before(subsidyEndTime) {
 		// empty time range
@@ -605,7 +662,7 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		return
 	}
 
-	if subsidyEndTime.Sub(subsidyStartTime) < self.subsidyConfig.MinDurationPerPayout() {
+	if subsidyEndTime.Sub(subsidyStartTime) < self.subsidyConfig.MinDurationPerPayout() && !finalLegacyTail {
 		// does not meet minimum time range
 		glog.Infof("[plan]subsidy short\n")
 		return
@@ -653,7 +710,7 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 		return
 	}
 
-	if subsidyEndTime.Sub(subsidyStartTime) < self.subsidyConfig.MinDurationPerPayout() {
+	if subsidyEndTime.Sub(subsidyStartTime) < self.subsidyConfig.MinDurationPerPayout() && !finalLegacyTail {
 		// does not meet minimum time range
 		glog.Infof("[plan]subsidy adjusted short\n")
 		return
@@ -666,10 +723,10 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	)
 	// the fraction of a `days` for this subsidy payout
 	// restrict the time range to a single subsidy epoch
-	subsidyScale := min(
-		float64(subsidyEndTime.Sub(subsidyStartTime)/time.Minute)/float64(self.subsidyConfig.Duration()/time.Minute),
-		1.0,
-	)
+	subsidyScale := min(float64(subsidyEndTime.Sub(subsidyStartTime)/time.Minute)/float64(self.subsidyConfig.Duration()/time.Minute), 1.0)
+	if self.transition != nil {
+		subsidyScale = min(float64(subsidyEndTime.Sub(subsidyStartTime))/float64(self.subsidyConfig.Duration()), 1.0)
+	}
 	subsidyNetPayoutUsd := subsidyScale * subsidyPayoutUsd
 	glog.Infof("[plan]payout $%.2f\n", subsidyNetPayoutUsd)
 
@@ -738,11 +795,15 @@ func (self *PaymentPlanner) planSubsidyPayments() (returnErr error) {
 	// a real plan recomputes reliability scores in its own committed tx (see
 	// calculateReliabilityPayoutInTx); a dry run keeps it inside this tx so it
 	// rolls back with the rest of the plan.
+	reliabilityEnd := subsidyEndTime
+	if self.transition != nil && !reliabilityEnd.Before(self.transition.Cutoff) {
+		reliabilityEnd = self.transition.Cutoff.Add(-time.Nanosecond)
+	}
 	networkReliabilitySubsidies := calculateReliabilityPayoutInTx(
 		self.ctx,
 		self.tx,
 		subsidyStartTime,
-		subsidyEndTime,
+		reliabilityEnd,
 		subsidyScale,
 		!self.dryRun,
 	)
@@ -825,7 +886,8 @@ func (self *PaymentPlanner) withholdSmallPayments() {
 	payoutExpirationTime := server.NowUtc().Add(-self.subsidyConfig.WalletPayoutTimeout())
 	for networkId, payment := range self.networkPayments {
 		// cannot remove payments that have `MinSweepTime <= payoutExpirationTime`
-		if payment.Payout < UsdToNanoCents(self.subsidyConfig.MinWalletPayoutUsd) && payoutExpirationTime.Before(payment.MinSweepTime) {
+		finalLegacy := self.transition != nil && !server.NowUtc().Before(self.transition.Cutoff)
+		if !finalLegacy && payment.Payout < UsdToNanoCents(self.subsidyConfig.MinWalletPayoutUsd) && payoutExpirationTime.Before(payment.MinSweepTime) {
 			self.networkIdsToRemove = append(self.networkIdsToRemove, networkId)
 		}
 		// else this payment will be included in the plan
@@ -935,7 +997,7 @@ func (self *PaymentPlanner) finalizePayments() {
 				payment.NetworkId,
 				payment.WalletId,
 				payment.PayoutByteCount,
-				payment.Payout,
+				payment.Payout-payment.BonusPayout,
 				payment.SubsidyPayout,
 				payment.MinSweepTime,
 				payment.CreateTime,
@@ -943,6 +1005,8 @@ func (self *PaymentPlanner) finalizePayments() {
 			)
 		}
 	})
+
+	self.assignPaymentBonuses()
 
 	server.RaisePgResult(self.tx.Exec(
 		self.ctx,
@@ -1055,7 +1119,7 @@ func (self *PaymentPlanner) applyPayoutPoints(
 
 		// scaledAccountPoints := NanoPoints(pointsScaleFactor * float64(accountNanoPoints))
 
-		scaledAccountPoints := PointsToNanoPoints(totalPoints * (float64(payment.Payout) / float64(totalPayout)))
+		scaledAccountPoints := PointsToNanoPoints(totalPoints * (float64(payment.Payout-payment.BonusPayout) / float64(totalPayout)))
 		glog.Infof("[plan]payout %s with %d nano points (%d nano cents)\n",
 			payment.NetworkId,
 			scaledAccountPoints,
