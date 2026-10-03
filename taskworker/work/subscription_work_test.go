@@ -4,10 +4,44 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
+
+// A successful page with no verified closes can still advance past a retained
+// legacy head. Its cursor must survive the ordinary task post and JSON store.
+func TestCloseExpiredContractsPostPersistsBoundedContinuation(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+		defer clientSession.Cancel()
+		stamp := server.NowUtc().Truncate(time.Microsecond)
+		cursor := &model.ContractExpiryCursor{ScanBefore: stamp, Open: &model.ContractExpiryPosition{CreateTime: stamp.Add(-time.Hour), ContractId: server.NewId()}, DisputeDone: true}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.Raise(CloseExpiredContractsPost(&CloseExpiredContractsArgs{BlockSize: 1, BlockIndex: 0}, &CloseExpiredContractsResult{Full: true, Cursor: cursor}, clientSession, tx))
+		})
+		var raw string
+		var runAt time.Time
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT args_json,run_at FROM pending_task WHERE function_name=$1`, "github.com/urnetwork/server/taskworker/work.CloseExpiredContracts").Scan(&raw, &runAt))
+		})
+		var args CloseExpiredContractsArgs
+		if err := json.Unmarshal([]byte(raw), &args); err != nil {
+			t.Fatal(err)
+		}
+		if args.Cursor == nil || args.Cursor.Open == nil || args.Cursor.Open.ContractId != cursor.Open.ContractId || !args.Cursor.Open.CreateTime.Equal(cursor.Open.CreateTime) || !args.Cursor.ScanBefore.Equal(stamp) || !args.Cursor.DisputeDone {
+			t.Fatal("scheduled task lost bounded continuation")
+		}
+		if runAt.After(stamp.Add(10 * time.Second)) {
+			t.Fatal("owned-head page was parked at idle cadence")
+		}
+	})
+}
 
 func TestCloseExpiredContractsSchedulingConvergesToOneDatabaseScan(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {

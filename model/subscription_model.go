@@ -3713,19 +3713,21 @@ func GetOpenContractIdsForSourceOrDestination(
 }
 
 func ForceCloseAllOpenContractIds(ctx context.Context, minTime time.Time) error {
+	var cursor *ContractExpiryCursor
 	for {
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("Done.")
 		default:
 		}
-		c, err := ForceCloseOpenContractIds(ctx, minTime, 1000, 1, 0, 0)
+		_, next, err := ForceCloseOpenContractIdsPage(ctx, minTime, 1000, 1, 0, 0, cursor)
 		if err != nil {
 			return err
 		}
-		if c == 0 {
+		if next == nil {
 			return nil
 		}
+		cursor = next
 	}
 }
 
@@ -3764,82 +3766,45 @@ func recordForceCloseContract(resolution string, tag string) {
 // - single close
 // - one or more checkpoints
 // - dispute (settled with both sides accepted)
-func ForceCloseOpenContractIds(
-	ctx context.Context,
-	minTime time.Time,
-	maxCount int,
-	parallel int,
-	blockSize int,
-	blockIndex int,
-) (
-	closeCount int64,
-	err error,
-) {
+// ContractExpiryPosition is an ordered continuation through a bounded raw
+// selection page, including contracts already owned by legacy settlement.
+type ContractExpiryPosition struct {
+	CreateTime time.Time `json:"create_time"`
+	ContractId server.Id `json:"contract_id"`
+}
+
+type ContractExpiryCursor struct {
+	ScanBefore  time.Time               `json:"scan_before"`
+	Open        *ContractExpiryPosition `json:"open,omitempty"`
+	Dispute     *ContractExpiryPosition `json:"dispute,omitempty"`
+	OpenDone    bool                    `json:"open_done,omitempty"`
+	DisputeDone bool                    `json:"dispute_done,omitempty"`
+}
+
+// Single-page compatibility boundary. Scheduled expiry persists the returned
+// cursor from ForceCloseOpenContractIdsPage instead of restarting at the head.
+func ForceCloseOpenContractIds(ctx context.Context, minTime time.Time, maxCount, parallel, blockSize, blockIndex int) (int64, error) {
+	count, _, err := ForceCloseOpenContractIdsPage(ctx, minTime, maxCount, parallel, blockSize, blockIndex, nil)
+	return count, err
+}
+
+func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCount, parallel, blockSize, blockIndex int,
+	after *ContractExpiryCursor,
+) (closeCount int64, next *ContractExpiryCursor, err error) {
 	if parallel <= 0 {
-		return 0, fmt.Errorf("force close parallelism must be positive: %d", parallel)
+		return 0, nil, fmt.Errorf("force close parallelism must be positive: %d", parallel)
 	}
 
-	/*
-		// force close contracts where there is nothing to do
-		server.Tx(ctx, func(tx server.PgTx) {
-			tag := server.RaisePgResult(tx.Exec(
-				ctx,
-				`
-				UPDATE transfer_contract
-				SET
-			        outcome = $5,
-			        close_time = $6
-				FROM (
-					SELECT
-			            t.contract_id
-
-			        FROM (
-			            SELECT
-			                transfer_contract.contract_id,
-			                transfer_contract.source_id,
-			                transfer_contract.destination_id
-
-			            FROM transfer_contract
-
-			            WHERE
-			                transfer_contract.open AND
-			                transfer_contract.create_time <= $3
-
-			            LIMIT $4
-
-			        ) t
-
-			        LEFT JOIN contract_close source_contract_close ON
-			            source_contract_close.contract_id = t.contract_id AND
-			            source_contract_close.party = $1
-
-			        LEFT JOIN contract_close destination_contract_close ON
-			            destination_contract_close.contract_id = t.contract_id AND
-			            destination_contract_close.party = $2
-
-			        WHERE
-			        	destination_contract_close.contract_id IS NOT NULL AND
-			        	source_contract_close.contract_id IS NOT NULL
-			    ) t
-
-			    WHERE
-			        transfer_contract.contract_id = t.contract_id
-
-				`,
-				ContractPartySource,
-				ContractPartyDestination,
-				minTime.UTC(),
-				maxCount,
-				ContractOutcomeSettled,
-				server.NowUtc(),
-			))
-
-			if c := tag.RowsAffected(); 0 < c {
-				glog.Infof("[sm]force closed %d malformed contracts\n", c)
-				closeCount += c
-			}
-		})
-	*/
+	if maxCount <= 0 {
+		return 0, nil, fmt.Errorf("force close page size must be positive: %d", maxCount)
+	}
+	next = &ContractExpiryCursor{}
+	if after != nil {
+		*next = *after
+	}
+	if next.ScanBefore.IsZero() {
+		next.ScanBefore = server.NowUtc()
+	}
 
 	type OpenContract = contractExpiryState
 
@@ -3861,124 +3826,101 @@ func ForceCloseOpenContractIds(
 		openContracts = append(openContracts, openContract)
 	}
 
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-                SELECT
-                    t.contract_id,
-                    t.source_id,
-                    t.destination_id,
-                    t.dispute,
-
-                    source_contract_close.close_time AS source_close_time,
-                    source_contract_close.used_transfer_byte_count AS source_used_transfer_byte_count,
-                    source_contract_close.checkpoint AS source_checkpoint,
-
-                    destination_contract_close.close_time AS destination_close_time,
-                    destination_contract_close.used_transfer_byte_count AS destination_used_transfer_byte_count,
-                    destination_contract_close.checkpoint AS destination_checkpoint
-
-                FROM (
-                    SELECT
-                        transfer_contract.contract_id,
-                        transfer_contract.source_id,
-                        transfer_contract.destination_id,
-                        transfer_contract.dispute
-
+	// LIMIT bounds raw candidates before pending-intent and quiet-period
+	// checks. The cursor advances through skipped rows too; a retained old
+	// financial cohort cannot occupy every future selection. The existing
+	// row-level proof and intent race guard still own every mutation.
+	rawOpen, rawDisputed := 0, 0
+	if !next.OpenDone {
+		position := ContractExpiryPosition{}
+		if next.Open != nil {
+			position = *next.Open
+		}
+		seen := 0
+		server.Db(ctx, func(conn server.PgConn) {
+			rows, queryErr := conn.Query(ctx, `
+                WITH bounded AS MATERIALIZED (
+                    SELECT contract_id,source_id,destination_id,dispute,create_time,usage_unverified
                     FROM transfer_contract
-
-                    WHERE
-                        transfer_contract.open AND
-                        (transfer_contract.usage_unverified OR (
-                            transfer_contract.create_time <= $3 AND
-                            NOT EXISTS (SELECT 1 FROM contract_close recent_close
-                                WHERE recent_close.contract_id=transfer_contract.contract_id AND recent_close.close_time > $3)
-                        ))
-
-                    ORDER BY transfer_contract.create_time
-
-                    LIMIT $4
-                ) t
-
-                LEFT JOIN contract_close source_contract_close ON
-                    source_contract_close.contract_id = t.contract_id AND
-                    source_contract_close.party = $1
-
-                LEFT JOIN contract_close destination_contract_close ON
-                    destination_contract_close.contract_id = t.contract_id AND
-                    destination_contract_close.party = $2
-
-            `,
-			ContractPartySource,
-			ContractPartyDestination,
-			minTime.UTC(),
-			maxCount,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				openContract := &OpenContract{}
-
-				server.Raise(result.Scan(
-					&openContract.contractId,
-					&openContract.sourceId,
-					&openContract.destinationId,
-					&openContract.dispute,
-					&openContract.sourceCloseTime,
-					&openContract.sourceUsedTransferByteCount,
-					&openContract.sourceCheckpoint,
-					&openContract.destinationCloseTime,
-					&openContract.destinationUsedTransferByteCount,
-					&openContract.destinationCheckpoint,
-				))
-
-				appendBlockOpenContract(openContract)
-			}
-		})
-	})
-
-	openContractCount := len(openContracts)
-
-	// settle expired disputes
-	// a disputed contract is not `open` (`open` is generated as
-	// `dispute = false AND outcome IS NULL`), so scan for disputes separately
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-                SELECT
-                    contract_id,
-                    source_id,
-                    destination_id
-                FROM transfer_contract
-                WHERE
-                    dispute AND
-                    outcome IS NULL AND
-                    (usage_unverified OR (
-                        create_time <= $1 AND
-                        NOT EXISTS (SELECT 1 FROM contract_close recent_close
-                            WHERE recent_close.contract_id=transfer_contract.contract_id AND recent_close.close_time > $1)
-                    ))
-                ORDER BY create_time
-                LIMIT $2
-            `,
-			minTime.UTC(),
-			maxCount,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				openContract := &OpenContract{
-					dispute: true,
+                    WHERE open AND (create_time,contract_id)>($5,$6) AND create_time <= $7
+                    ORDER BY create_time,contract_id LIMIT $4
+                )
+                SELECT t.contract_id,t.source_id,t.destination_id,t.dispute,
+                    source_contract_close.close_time,source_contract_close.used_transfer_byte_count,source_contract_close.checkpoint,
+                    destination_contract_close.close_time,destination_contract_close.used_transfer_byte_count,destination_contract_close.checkpoint,
+                    t.create_time,
+                    NOT COALESCE((SELECT true FROM legacy_settlement_intent pending WHERE pending.contract_id=t.contract_id),false)
+                    AND (t.usage_unverified OR (t.create_time <= $3
+                        AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $3)))
+                FROM bounded t
+                LEFT JOIN contract_close source_contract_close ON source_contract_close.contract_id=t.contract_id AND source_contract_close.party=$1
+                LEFT JOIN contract_close destination_contract_close ON destination_contract_close.contract_id=t.contract_id AND destination_contract_close.party=$2
+                ORDER BY t.create_time,t.contract_id
+			`, ContractPartySource, ContractPartyDestination, minTime.UTC(), maxCount, position.CreateTime, position.ContractId, next.ScanBefore)
+			server.WithPgResult(rows, queryErr, func() {
+				for rows.Next() {
+					c := &OpenContract{}
+					var created time.Time
+					var eligible bool
+					server.Raise(rows.Scan(&c.contractId, &c.sourceId, &c.destinationId, &c.dispute,
+						&c.sourceCloseTime, &c.sourceUsedTransferByteCount, &c.sourceCheckpoint,
+						&c.destinationCloseTime, &c.destinationUsedTransferByteCount, &c.destinationCheckpoint, &created, &eligible))
+					seen++
+					next.Open = &ContractExpiryPosition{CreateTime: created, ContractId: c.contractId}
+					if eligible {
+						appendBlockOpenContract(c)
+					}
 				}
-				server.Raise(result.Scan(
-					&openContract.contractId,
-					&openContract.sourceId,
-					&openContract.destinationId,
-				))
-				appendBlockOpenContract(openContract)
-			}
+			})
 		})
-	})
+		rawOpen = seen
+		if seen < maxCount {
+			next.OpenDone = true
+		}
+	}
+	openContractCount := len(openContracts)
+	if !next.DisputeDone {
+		position := ContractExpiryPosition{}
+		if next.Dispute != nil {
+			position = *next.Dispute
+		}
+		seen := 0
+		server.Db(ctx, func(conn server.PgConn) {
+			rows, queryErr := conn.Query(ctx, `
+                WITH bounded AS MATERIALIZED (
+                    SELECT contract_id,source_id,destination_id,create_time,usage_unverified
+                    FROM transfer_contract
+                    WHERE dispute AND outcome IS NULL AND (create_time,contract_id)>($3,$4) AND create_time <= $5
+                    ORDER BY create_time,contract_id LIMIT $2
+                )
+                SELECT t.contract_id,t.source_id,t.destination_id,t.create_time,
+                    NOT COALESCE((SELECT true FROM legacy_settlement_intent pending WHERE pending.contract_id=t.contract_id),false)
+                    AND (t.usage_unverified OR (t.create_time <= $1
+                        AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $1)))
+                FROM bounded t ORDER BY t.create_time,t.contract_id
+			`, minTime.UTC(), maxCount, position.CreateTime, position.ContractId, next.ScanBefore)
+			server.WithPgResult(rows, queryErr, func() {
+				for rows.Next() {
+					c := &OpenContract{dispute: true}
+					var created time.Time
+					var eligible bool
+					server.Raise(rows.Scan(&c.contractId, &c.sourceId, &c.destinationId, &created, &eligible))
+					seen++
+					next.Dispute = &ContractExpiryPosition{CreateTime: created, ContractId: c.contractId}
+					if eligible {
+						appendBlockOpenContract(c)
+					}
+				}
+			})
+		})
+		rawDisputed = seen
+		if seen < maxCount {
+			next.DisputeDone = true
+		}
+	}
+	if next.OpenDone && next.DisputeDone {
+		next = nil
+	}
 
 	glog.Infof("[sm]found %d contracts to close (%d disputes)\n", len(openContracts), len(openContracts)-openContractCount)
 
@@ -4461,6 +4403,8 @@ func ForceCloseOpenContractIds(
 			quarantinedAccountingRejectionCount: quarantinedAccountingRejectionCount,
 		}
 	}
+	glog.Infof("[close-expired]page returned success=%t raw_open=%d raw_disputed=%d selected=%d terminal_verified=%d unresolved_accounting=%d quarantined_accounting=%d has_more=%t\n",
+		err == nil, rawOpen, rawDisputed, len(openContracts), verifiedCloseCount, accountingRejectionCount, quarantinedAccountingRejectionCount, next != nil)
 
 	return
 }
