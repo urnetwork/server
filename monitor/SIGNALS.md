@@ -18779,6 +18779,9 @@ These phases do not classify every goroutine or resident retirement stage.
 One fixed-size atomic ledger snapshot supplies each collection. Overlapping
 lifecycle updates, invalid conservation, or values outside exact float64 integer
 range publish only finite validity state, with ownership values omitted.
+The closing writer count is read before the closing revision; reversing those
+loads can hide a writer that finishes between them. Deterministic interleavings
+cover both writer completion and admission inside that final observation pair.
 Require fresh `enabled=1` and `sample_complete=1`, exactly one active state,
 the same collection/start/source, and unique fixed label cells before using
 any counts or bytes. Never fill an unavailable sample with older values. These
@@ -18789,16 +18792,28 @@ storage. They exclude queued payload backing, channel headers, allocator spans,
 maps, routes, pacing, callbacks, and externally retained roots after the join.
 They are not retained heap or an additive RSS attribution. Pool outstanding
 counts are taken-minus-returned accounting, not a live-buffer byte census.
-The initial release integration uses the published ledger-only Connect commit
-`15d6c8b9cbeed0110f07575a66693a8c9ff37c6e` with R61's schema763 and SDK95;
+The corrected release integration uses the published ledger-only Connect commit
+`d788cb4a8dfa99eaf545a576daa2a40625a79fcd` with R61's schema763 and SDK95;
 it does not enable close-report ID emission or require migration764. Local
 controls cover real resident construction/held-ACK teardown, fixed metric cells,
 overlap and invalid-state refusal, default-off settings, and scope ownership.
+
+Constructor-owned SendSequence ACKs are already coalesced directly into their
+published ACK window. The corrected SDK no longer allocates a compatibility ACK
+channel or starts its unused queue worker for those owners. Explicitly
+constructed legacy channels retain their bounded handoff, worker, cancellation,
+and joined teardown. Real data queues, protocol feedback, and accounting are
+unchanged. At the hosted 4,096-slot setting, the native control found 425,984
+unused channel-element bytes per sequence. A fixed 32-construction local
+benchmark fell from 488,116 to 46,799 allocated bytes per operation (43 to 38
+allocations). These are source and local allocation facts, not a measured Main
+RSS reduction. Require fresh executable identity and ownership evidence before
+attributing any production heap or goroutine change to this repair.
 Until an enabled current executable is observed, these local controls establish
 instrumentation behavior rather than the cause of Main retained heap.
 
 The separate canonical Main integration preserves its newer Connect graph at
-`b04d5b3e7821d8d16ca3da723aa31461efb94c79`, SDK9ae, and the existing explicit
+`59864c2b5b2af1d5555784065a12b8e7c3e03efa`, SDK9ae, and the existing explicit
 gVisor fork replacement. That Connect graph also includes close-report ID
 emission. Its deployment remains conditional on schema764 and compatible
 backend/fallback generation retirement; it is not interchangeable with the
