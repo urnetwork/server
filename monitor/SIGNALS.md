@@ -11464,6 +11464,27 @@ preserves existing cycle clocks. Large changes in eligible, warming and quota
 counts require cohort/eligibility evidence before a reset, process replacement,
 or fixed-provider recovery claim.
 
+Normal private shard creation does not grant its root a Public provide key.
+Hosted tunnel authentication requires derived children to retain that root as
+`source_client_id`; both public URL eligibility and cycle seeding require null
+source lineage. The native R59 control gives the private root and child healthy
+connected IPv4 location evidence, even gives the child a Public key, and still
+excludes both from the cohort. Repeating the rollup preserves the existing
+public provider's cycle start. The negative boundary is explicit: a top-level
+private root deliberately granted Public mode can enter. Private network
+ownership alone is not an eligibility exclusion. Check actual provide mode and
+lineage before attributing a warming increase to disposable probe clients.
+
+A bounded Public-key ID sample can compare stored client creation time with
+first-cycle time and retained private-shard ownership. Time-ordered IDs select
+the sample; they do not replace the stored creation timestamp. An older client
+with a later first cycle can be newly eligible without an identity or cycle
+reset. Current eligibility and a retained ownership row do not reconstruct
+historical eligibility. Two capped ID heads establish neither fleet prevalence
+nor the cause of a whole-census change; removed keys and other IDs remain
+unsampled. In the qualified R59 source, normal reliability mode is statically
+true, so use its normal floors rather than infer a mode transition.
+
 The shard-zero owner alone periodically produces the global census:
 
 - `urnetwork_url_probe_fleet{state}` contains `eligible`, `due`, `overdue`,
