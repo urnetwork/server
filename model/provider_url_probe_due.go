@@ -43,7 +43,7 @@ func providerUrlProbeShardSql(clientExpression, shardCountExpression string) str
 
 // Stable per-provider jitter spreads recurring work without retaining a timer
 // or tunnel. Quota-full scheduling is separately tied to the oldest counted run.
-func providerUrlProbePacedAttemptSql(cycleAlias, measuredAtParam, acceptedSuccessesParam string) string {
+func providerUrlProbePacedAttemptSql(cycleAlias, measuredAtParam, acceptedSuccessesParam string, measuredDeficit ...string) string {
 	rules := GetProviderEgressRules()
 	defaults := DefaultProviderEgressRules()
 	successSeconds, failureSeconds := rules.UrlSuccessIntervalSeconds, rules.UrlFailureIntervalSeconds
@@ -53,10 +53,20 @@ func providerUrlProbePacedAttemptSql(cycleAlias, measuredAtParam, acceptedSucces
 	if failureSeconds == 0 {
 		failureSeconds = defaults.UrlFailureIntervalSeconds
 	}
-	return fmt.Sprintf(`%[2]s::timestamp + ((CASE WHEN %[3]s > 0 THEN %[4]d ELSE %[5]d END)
+	// A mature rolling deficit needs replenishment even when its latest
+	// measurement succeeded. Waiting the warmup success interval can lose
+	// additional retained measurements before that provider becomes due again.
+	// Only the accepted-history writer supplies this measured deficit; setup
+	// completion keeps its existing independent pacing contract.
+	recovery := "false"
+	if len(measuredDeficit) != 0 {
+		recovery = fmt.Sprintf("(%s) AND %s.cycle_started_at <= %s::timestamp - interval '%d seconds'",
+			measuredDeficit[0], cycleAlias, measuredAtParam, int(ProviderEgressProbeRefreshAge/time.Second))
+	}
+	return fmt.Sprintf(`%[2]s::timestamp + ((CASE WHEN %[3]s > 0 AND NOT (%[6]s) THEN %[4]d ELSE %[5]d END)
 		* (0.9 + (((hashtext(%[1]s.client_id::text) %% 2001) + 2001) %% 2001)::double precision / 10000)
 		* interval '1 second')`, cycleAlias, measuredAtParam, acceptedSuccessesParam,
-		successSeconds, failureSeconds)
+		successSeconds, failureSeconds, recovery)
 }
 
 // This success-only projection remains diagnostic. It cannot satisfy the

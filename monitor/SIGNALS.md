@@ -11523,6 +11523,30 @@ or retention can invalidate that comparison. The existing synthetic
 `TestUrlProbeCoverageHighAggregateRateCannotHideStarvedProviders` preserves
 the coverage PAGE even when acknowledged throughput is high.
 
+A single coherent census also bounds pacing: at least
+`max(0, overdue - due)` overdue providers are currently outside the due set.
+The sets overlap, so this is a lower bound, not their exact intersection. Missing
+cycles are due by definition; this bound therefore refers to future
+`next_attempt_at` values. A high accepted measurement rate cannot clear this
+provider-level deficit or prove that replenishment occurs before older runs
+expire. A mature provider still below ten measurements after an accepted
+success uses the existing short retry pace to replenish its deficit. Warmup
+success pacing and quota-full oldest-run expiry remain separate. Accepted
+measured failures count toward the same quota; setup-only completions do not.
+
+Bounded diagnosis must name its indexed raw cohort before applying current
+eligibility or history projections. The admission head filters the stored
+`provider_egress_probe_cycle.eligible` hint; the census reconstructs current
+eligibility without that hint. Current reliability can recover while a false
+hint remains until its owning refresh. Conversely, an unfiltered oldest-cycle
+head can contain only inactive historical providers. Neither head alone
+quantifies all overdue providers, missing cycles, or future-paced work. A
+completed latest claim is evidence for that sampled claim, not proof that all
+workers are live or that every earlier attempt completed. DNS and route errors
+in accepted policy-one history already count toward quota. Preserve unknown
+setup causes, current network-condition mode, worker generation and the
+sampling bias; never infer these from a slot number or a coarse tunnel error.
+
 Missing desired geometry, source coverage, owner identity, coherent census or
 rate window emits `url-probe-coverage-unobservable` WARN, not a healthy zero
 or an inferred numerical throughput failure. An independently valid census
