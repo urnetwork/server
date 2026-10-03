@@ -65,6 +65,9 @@ func pgHistorySQLNormalizationAndBounds(t testing.TB, conn server.PgConn) {
 		{"INSERT INTO transfer_balance_net_escrow_snapshot VALUES ($1)", "reservation_snapshot_publish"},
 		{"SELECT requested_balance.balance_id, COALESCE(revision.revision,0) FROM unnest($1) requested_balance LEFT JOIN transfer_balance_net_escrow_revision revision ON true CROSS JOIN LATERAL (SELECT SUM(selected_escrow.balance_byte_count)) selected", "reservation_census_prefix"},
 		{"SELECT * FROM transfer_escrow WHERE contract_id=$1", "escrow_access"},
+		// A healthy backup COPY shares the table family with application work.
+		// The application declaration is separate evidence, not a query owner.
+		{"COPY public.contract_close (contract_id) TO stdout", "contract_close_access"},
 		{"SELECT 1 /* private-history-query-sentinel */", "other"},
 		{strings.Repeat("x", 2048) + " transfer_escrow", "other"},
 	}

@@ -3537,6 +3537,23 @@ IDs per endpoint, ranked by lifetime execution time; output retains 30 totals.
 Blockers select the oldest 16 lock waiters and at most 16 blockers per waiter,
 in one final snapshot, not a recursive owner/payer census.
 
+GOTCHA — a table family does not identify its caller. The October 3 23:04
+private receipt `5c5ddfa9` retained an active local client backend declaring
+`pg_dump` in `contract_close_access`: nine no-wait, two `Client:ClientWrite`
+and one BufferMapping observations, each peak one. Its maximum statement age
+was about 2,198 seconds while its transaction was about 10,593 seconds old.
+A healthy backup COPY can match that table family; one long snapshot transaction
+can contain successive table-copy statements. ClientWrite is waiting to send
+server output, not proof of a contract-close worker, tuple lock or client death.
+The backup producer's separately observed 20:08 start supports that candidate,
+but these projections contain no socket/backend-to-process join. Do not claim
+exact producer ownership or cancellation authority. The alert now carries its
+selected group's finite state, backend, client locality and application class,
+preserving the same warning and sampling limits. Application names are declared,
+not native identity; `other`/`unset` and truncated text remain unattributed.
+Private query tokens are receipt-local ordinals, not reusable fingerprints or
+recoverable SQL. Other reservation-I/O and close-family groups remain separate.
+
 FALSE-POSITIVE QUALIFIERS: useful bulk work or maintenance may explain a band.
 Backend-samples are neither distinct requests, continuous waits, CPU time nor
 per-query CPU shares. Execution wall time includes waits. Confirm successful

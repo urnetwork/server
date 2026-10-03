@@ -118,6 +118,65 @@ func TestPgQuerySampleRepeatedSlowAndHealthyControls(t *testing.T) {
 	}
 }
 
+func TestPgQuerySampleDeclaredOwnerSurvivesAlertReduction(t *testing.T) {
+	for _, test := range []struct {
+		name, owner, app, backend string
+		truncated, partial        bool
+	}{
+		{"healthy_bulk_copy", "local", "pg_dump", "client backend", false, false},
+		{"application_owner_unknown", "loopback", "unset", "client backend", false, false},
+		{"unrecognized_declaration_and_truncated", "remote", "other", "parallel worker", true, false},
+		{"incomplete_backup_observation", "local", "pg_dump", "client backend", false, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Now().UTC().Truncate(time.Second)
+			frames := pgSampleTestFrames(now)
+			for i := 2; i < 14; i++ {
+				frames[i]["total"], frames[i]["groups"] = 1, 1
+				frames[i]["rows"] = [][]any{{"714727414314", "active", "Client:ClientWrite", test.owner, test.app, test.backend, "contract_close_access", "current", 1, 2200., 10600., 2200.}}
+				if test.truncated {
+					frames[i]["query_text_truncated"] = 1
+				}
+			}
+			if test.partial {
+				frames = frames[:len(frames)-1]
+			}
+			r, err := parsePgQuerySample(pgSampleTestEncode(t, frames), now)
+			if test.partial {
+				if err == nil || r.Complete {
+					t.Fatal("partial backup source became qualified")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			slow, coverage := false, false
+			for _, f := range pgSampleFindings(r, "synthetic-db") {
+				coverage = coverage || f.class == "pg-query-sample-coverage"
+				if f.class != "pg-query-slow" {
+					continue
+				}
+				slow = true
+				for _, field := range []string{"state=\"active\"", "backend=\"" + test.backend + "\"", "client_owner=" + test.owner, "declared_application=" + test.app, "max_query_s=2200.000", "max_xact_s=10600.000"} {
+					if !strings.Contains(f.observed, field) {
+						t.Fatal("alert lost selected-group provenance or separate ages")
+					}
+				}
+				if f.tier != tierWarn || !strings.Contains(f.context, "not a native process identity") || !strings.Contains(f.context, "not proof of a contract-close worker") {
+					t.Fatal("backup declaration suppressed symptom or acquired unproved ownership")
+				}
+				if strings.Contains(f.observed, "714727414314") {
+					t.Fatal("private query identifier escaped alert")
+				}
+			}
+			if !slow || coverage != test.truncated {
+				t.Fatal("backup/unknown label cleared slow work or lost partial coverage")
+			}
+		})
+	}
+}
+
 func TestPgQuerySampleCoverageNeverBecomesZeroWork(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	frames := pgSampleTestFrames(now)
