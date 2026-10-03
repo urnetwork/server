@@ -7,13 +7,77 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
+
+// Only provider payout supplies this identity. Customer/admin transfers keep
+// their separate policies; delayed limiter admission rechecks the actual debt.
+type providerUsdcPaymentContextKey struct{}
+
+// This instance-owned observation seam orders a mutation after the actual
+// public read in regression tests. Production callers never populate it.
+type providerPaymentReadObserverKey struct{}
+
+type providerPaymentSubmission struct {
+	Basis   model.ProviderPaymentBasis
+	Amount  float64
+	Network string
+}
+
+type circleTransferArguments struct {
+	IdempotencyKey server.Id
+	Amount         float64
+	Destination    string
+	Network        string
+}
+
+// The limiter and the final earning check form one send boundary, also used
+// by deterministic tests that advance policy while admission is suspended.
+func circleTransferAfterAdmission(ctx context.Context, args circleTransferArguments, wait func(context.Context) error, send func(context.Context) (*CreateTransferTransactionResult, error)) (*CreateTransferTransactionResult, error) {
+	if err := wait(ctx); err != nil {
+		return nil, err
+	}
+	if err := requireCircleProviderTransfer(ctx, args); err != nil {
+		return nil, err
+	}
+	return send(ctx)
+}
+
+func requireCircleProviderPayment(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if value := ctx.Value(providerUsdcPaymentContextKey{}); value != nil {
+		submission, ok := value.(providerPaymentSubmission)
+		if !ok {
+			return model.ErrProviderPaymentBasisChanged
+		}
+		return model.RequireProviderPaymentBasis(ctx, &submission.Basis)
+	}
+	return nil
+}
+
+// Actual Core arguments, not merely a valid payment id, must match the
+// retained attempt. Customer/admin sends have no provider submission context.
+func requireCircleProviderTransfer(ctx context.Context, args circleTransferArguments) error {
+	if err := requireCircleProviderPayment(ctx); err != nil {
+		return err
+	}
+	if submission, ok := ctx.Value(providerUsdcPaymentContextKey{}).(providerPaymentSubmission); ok {
+		if submission.Basis.IdempotencyKey != args.IdempotencyKey || submission.Amount != args.Amount ||
+			submission.Basis.WalletAddress != args.Destination || submission.Network != args.Network {
+			return model.ErrProviderPaymentBasisChanged
+		}
+	}
+	return nil
+}
 
 type CircleApi interface {
 	EstimateTransferFee(
@@ -38,7 +102,21 @@ type CircleApi interface {
 	) (*GetTransactionResult, error)
 }
 
-type CoreCircleApiClient struct{}
+type CoreCircleApiClient struct {
+	readSettings PaymentReadSettings
+	readHooks    paymentReadHooks
+	readToken    func() string
+}
+
+// The returned client's read policy is immutable and safe for concurrent GETs.
+// Each operation owns its own timer/transport; POST methods are unchanged.
+func NewCoreCircleApiClient(settings PaymentReadSettings) (*CoreCircleApiClient, error) {
+	settings, err := settings.normalized()
+	if err != nil {
+		return nil, err
+	}
+	return &CoreCircleApiClient{readSettings: settings}, nil
+}
 
 var circleClientInstance CircleApi = &CoreCircleApiClient{}
 
@@ -88,7 +166,10 @@ func (c *CoreCircleApiClient) CreateTransferTransaction(
 	destinationAddress string,
 	network string,
 ) (*CreateTransferTransactionResult, error) {
-
+	args := circleTransferArguments{IdempotencyKey: idempotencyKey, Amount: amountInUsd, Destination: destinationAddress, Network: network}
+	if err := requireCircleProviderTransfer(ctx, args); err != nil {
+		return nil, err
+	}
 	hexEncodedEntitySecret := entitySecret()
 
 	adminWalletId, err := getWalletIdByNetwork(network)
@@ -107,39 +188,37 @@ func (c *CoreCircleApiClient) CreateTransferTransaction(
 	}
 
 	uri := "https://api.circle.com/v1/w3s/developer/transactions/transfer"
-	if err := waitForCircleTransferAdmission(ctx); err != nil {
-		return nil, err
-	}
+	res, err := circleTransferAfterAdmission(ctx, args, waitForCircleTransferAdmission, func(ctx context.Context) (*CreateTransferTransactionResult, error) {
+		return server.HttpPostRequireStatusOk(
+			ctx,
+			uri,
+			map[string]any{
+				"idempotencyKey":         idempotencyKey,
+				"amounts":                []string{fmt.Sprintf("%f", amountInUsd)},
+				"destinationAddress":     destinationAddress,
+				"entitySecretCiphertext": cipher,
+				"tokenAddress":           usdcNetworkAddress,
+				"walletId":               adminWalletId,
+				"blockchain":             network,
+				"feeLevel":               "MEDIUM",
+			},
+			func(header http.Header) {
+				header.Add("Accept", "application/json")
+				header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
+			},
+			func(response *http.Response, responseBodyBytes []byte) (*CreateTransferTransactionResult, error) {
+				result := &CircleResponse[CreateTransferTransactionResult]{}
 
-	res, err := server.HttpPostRequireStatusOk(
-		ctx,
-		uri,
-		map[string]any{
-			"idempotencyKey":         idempotencyKey,
-			"amounts":                []string{fmt.Sprintf("%f", amountInUsd)},
-			"destinationAddress":     destinationAddress,
-			"entitySecretCiphertext": cipher,
-			"tokenAddress":           usdcNetworkAddress,
-			"walletId":               adminWalletId,
-			"blockchain":             network,
-			"feeLevel":               "MEDIUM",
-		},
-		func(header http.Header) {
-			header.Add("Accept", "application/json")
-			header.Add("Authorization", fmt.Sprintf("Bearer %s", circleConfig()["api_token"]))
-		},
-		func(response *http.Response, responseBodyBytes []byte) (*CreateTransferTransactionResult, error) {
-			result := &CircleResponse[CreateTransferTransactionResult]{}
+				err := json.Unmarshal(responseBodyBytes, result)
 
-			err := json.Unmarshal(responseBodyBytes, result)
+				if err != nil {
+					return nil, err
+				}
 
-			if err != nil {
-				return nil, err
-			}
-
-			return &result.Data, nil
-		},
-	)
+				return &result.Data, nil
+			},
+		)
+	})
 
 	if err != nil {
 		glog.Infof("[circlec]error sending payment: %s", err)
@@ -239,14 +318,26 @@ type GetTransactionResult struct {
 	ResponseBodyBytes []byte
 }
 
-func (c *CoreCircleApiClient) GetTransaction(ctx context.Context, id string) (*GetTransactionResult, error) {
-
-	uri := fmt.Sprintf("https://api.circle.com/v1/w3s/transactions/%s", id)
-
-	circleApiToken := circleConfig()["api_token"]
-
-	return server.HttpGetRequireStatusOk(
+func (self *CoreCircleApiClient) GetTransaction(ctx context.Context, id string) (*GetTransactionResult, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("transaction GET requires a context")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if id == "" || len(id) > 256 {
+		return nil, fmt.Errorf("invalid transaction observation id")
+	}
+	uri := fmt.Sprintf("https://api.circle.com/v1/w3s/transactions/%s", url.PathEscape(id))
+	token := self.readToken
+	if token == nil {
+		token = func() string { return fmt.Sprint(circleConfig()["api_token"]) }
+	}
+	circleApiToken := token()
+	return paymentHttpGet(
 		ctx,
+		self.readSettings,
+		self.readHooks,
 		uri,
 		func(header http.Header) {
 			header.Add("Accept", "application/json")
@@ -258,6 +349,9 @@ func (c *CoreCircleApiClient) GetTransaction(ctx context.Context, id string) (*G
 			err := json.Unmarshal(responseBodyBytes, result)
 			if err != nil {
 				return nil, err
+			}
+			if result.Data.Transaction.Id != id {
+				return nil, fmt.Errorf("transaction observation identity mismatch")
 			}
 
 			return &GetTransactionResult{

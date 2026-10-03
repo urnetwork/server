@@ -146,6 +146,7 @@ type StConfig struct {
 	GenesisHash            [32]byte
 	DeploymentId           string
 	PolicyHash             [32]byte
+	LaunchReadinessSha256  string
 	ContractAddress        common.Address
 	SettlementVault        common.Address
 	ReserveSink            common.Address
@@ -225,6 +226,7 @@ type stVaultFile struct {
 	GenesisHash            string                         `yaml:"genesis_hash"`
 	DeploymentId           string                         `yaml:"deployment_id"`
 	PolicyHash             string                         `yaml:"policy_hash"`
+	LaunchReadinessSha256  string                         `yaml:"launch_readiness_sha256"`
 	ContractAddress        string                         `yaml:"coordinator_address"`
 	LegacyContractAddress  string                         `yaml:"contract_address"`
 	SettlementVault        string                         `yaml:"settlement_vault_address"`
@@ -405,6 +407,9 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 		DepositTiers:          append([]StDepositTier(nil), s.DepositTiers...),
 		DepositZeroRateAction: s.DepositZeroRateAction,
 		ReliabilityAMin:       s.ReliabilityAMin, BlockSeconds: s.BlockSeconds, DeployBlock: s.DeployBlock}
+	if profile == "mainnet" {
+		cfg.LaunchReadinessSha256 = file.LaunchReadinessSha256
+	}
 	if cfg.ReliabilityAMin <= 0 {
 		cfg.ReliabilityAMin = stDefaultReliabilityAMin
 	}
@@ -1047,6 +1052,9 @@ func (self *CoreStClient) buildTransactionAttempt(
 			Data: append([]byte(nil), calldata...),
 		})
 	}
+	if err := stPayoutAdmission(ctx, self.cfg); err != nil {
+		return nil, err
+	}
 	signed, err := types.SignTx(unsigned, types.LatestSignerForChainID(chainId), key)
 	if err != nil {
 		return nil, fmt.Errorf("st: sign transaction: %w", err)
@@ -1517,6 +1525,9 @@ func (self *CoreStClient) sendPrepared(ctx context.Context, key *ecdsa.PrivateKe
 
 	from := crypto.PubkeyToAddress(key.PublicKey)
 	if err := self.reconcileAccountIntents(ctx, client, key, from); err != nil {
+		return "", err
+	}
+	if err := stPayoutAdmission(ctx, self.cfg); err != nil {
 		return "", err
 	}
 	operation, to, calldata, err := prepare(ctx, client)
@@ -3090,6 +3101,9 @@ func StCloseOperatorEpoch(ctx context.Context, epoch uint64) (*StPublishOutcome,
 	if err != nil {
 		return nil, err
 	}
+	if err := stPayoutAdmission(ctx, cfg); err != nil {
+		return nil, err
+	}
 	pool, err := client.PoolState(ctx, epoch, cfg.NoId)
 	if err != nil {
 		return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: err.Error(), Retry: true}, nil
@@ -3230,7 +3244,18 @@ func stComputeReleasePayout(
 	if prior := model.GetStPayoutArtifact(ctx, cfg.DeploymentKey(), epoch, cfg.NoId); prior != nil {
 		return prior.PayoutRoot, len(model.GetStPayoutLeaves(ctx, cfg.DeploymentKey(), epoch, cfg.NoId)), nil
 	}
-	usages, err := model.GetStEpochProviderUsageAtEpoch(ctx, epoch, startTime, endTime)
+	if err := stPayoutAdmission(ctx, cfg); err != nil {
+		return [32]byte{}, 0, err
+	}
+	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
+	usageStart, usageEnd := transition.SnWindow(startTime, endTime)
+	if !usageStart.Before(usageEnd) {
+		return [32]byte{}, 0, fmt.Errorf("sn: epoch has no post-cutoff earning window")
+	}
+	usages, err := model.GetStEpochProviderUsageAtEpoch(ctx, epoch, usageStart, usageEnd)
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
@@ -3252,7 +3277,14 @@ func stComputeReleasePayout(
 	if authority == nil || authority.Epoch != epoch || authority.PolicyHash != cfg.PolicyHash || authority.Start.Block != startBlock || authority.End.Block != closeBlock || !authority.StartTime.Equal(startTime) || !authority.EndTime.Equal(endTime) {
 		return [32]byte{}, 0, errors.New("st: payout policy or window differs from authenticated epoch authority")
 	}
-	reliabilityRows := model.GetStEpochClientReliability(ctx, startTime, endTime)
+	usageClientIds := make([]server.Id, len(usages))
+	for index, usage := range usages {
+		usageClientIds[index] = usage.ClientId
+	}
+	reliabilityRows, err := model.GetStEpochPayoutReliability(ctx, usageStart, usageEnd, usageClientIds)
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
 	wallets := model.GetStProviderWalletsAt(ctx, endTime)
 	networkForClient := map[[16]byte]server.Id{}
 	clientIds := make([][16]byte, len(usages))
@@ -3270,11 +3302,16 @@ func stComputeReleasePayout(
 	}
 	// The attested user count is the stats feed's per-block `users` figure
 	// over this epoch's window; with the usage bytes it sizes the next deposit.
-	epochUsers := model.CountTopLevelClientsWithContractInEpoch(ctx, startTime, endTime)
+	epochUsers := model.CountTopLevelClientsWithContractInEpoch(ctx, usageStart, usageEnd)
 	if epochUsers < 0 {
 		return [32]byte{}, 0, fmt.Errorf("epoch %d user count is negative", epoch)
 	}
 	operatorSnapshot := map[string]any{"no_id": cfg.NoId, "epoch": epoch, "policy_hash": fmt.Sprintf("0x%x", authority.PolicyHash)}
+	if transition != nil {
+		operatorSnapshot["earning_policy_sha256"] = transition.ConfigSha256
+		operatorSnapshot["earning_start_utc"] = usageStart.UTC().Format(time.RFC3339Nano)
+		operatorSnapshot["earning_end_utc"] = usageEnd.UTC().Format(time.RFC3339Nano)
+	}
 	fleetSnapshot := make([]map[string]any, 0, len(providers))
 	for _, p := range providers {
 		fleetSnapshot = append(fleetSnapshot, map[string]any{"client_id": fmt.Sprintf("%x", p.ClientID), "head": p.HeadExcluded, "generation": p.BindingGeneration})
@@ -3327,6 +3364,9 @@ func stComputeReleasePayout(
 func StComputeEpochPayout(ctx context.Context, epoch uint64) (root [32]byte, leafCount int, returnErr error) {
 	cfg, client, err := stRequire()
 	if err != nil {
+		return root, 0, err
+	}
+	if err := stPayoutAdmission(ctx, cfg); err != nil {
 		return root, 0, err
 	}
 	// A fully published release artifact is immutable and proves that all
@@ -3440,6 +3480,9 @@ func stResolvePublish(ctx context.Context, publishId server.Id, outcome *StPubli
 func StCommitEpochRoot(ctx context.Context, epoch uint64) (*StPublishOutcome, error) {
 	cfg, client, err := stRequire()
 	if err != nil {
+		return nil, err
+	}
+	if err := stPayoutAdmission(ctx, cfg); err != nil {
 		return nil, err
 	}
 
@@ -3573,6 +3616,9 @@ func StCommitEpochRoot(ctx context.Context, epoch uint64) (*StPublishOutcome, er
 func StDepositForEpoch(ctx context.Context, epoch uint64, overrideRao *big.Int) (*StPublishOutcome, error) {
 	cfg, client, err := stRequire()
 	if err != nil {
+		return nil, err
+	}
+	if err := stPayoutAdmission(ctx, cfg); err != nil {
 		return nil, err
 	}
 
@@ -3746,6 +3792,9 @@ func StFinalizeEpochPoke(ctx context.Context, epoch uint64) (*StPublishOutcome, 
 	if err != nil {
 		return nil, err
 	}
+	if err := stPayoutAdmission(ctx, cfg); err != nil {
+		return nil, err
+	}
 
 	// idempotency: already finalized (by anyone — the call is permissionless)
 	pool, err := client.PoolState(ctx, epoch, cfg.NoId)
@@ -3872,7 +3921,7 @@ func StSyncChainState(ctx context.Context) (*StEpochState, error) {
 		return nil, err
 	}
 
-	if state.Epoch < state.PendingEpoch {
+	if state.Epoch < state.PendingEpoch && stPayoutAdmission(ctx, cfg) == nil {
 		// permissionless poke; the contract measures pool emission at each
 		// roll, so keeping the roll current keeps the D-4 measurement tight
 		if txHash, err := client.RollEpochs(ctx); err != nil {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"os"
 	"strconv"
@@ -36,8 +37,9 @@ func main() {
 	usage := `BringYour control.
 
 Usage:
+    bringyourctl sn-transition-status
     bringyourctl db version
-    bringyourctl db migrate
+    bringyourctl db migrate [--sn-schedule-sha256=<sha256>]
     bringyourctl db vacuum [--exclude=<table>...]
     bringyourctl db maintenance (all|<epoch>) [--reindex] [--cleanup] [--analyze]
     bringyourctl db audit [--fix [--force-drop-indexes]]
@@ -83,7 +85,7 @@ Usage:
     bringyourctl payout single --account_payment_id=<account_payment_id>
     bringyourctl payout pending
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
-    bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd>
+    bringyourctl payouts apply-bonus --plan_id=<plan_id> --amount_usd=<amount_usd> --adjustment_id=<adjustment_id> --reason=<reason>
     bringyourctl payouts plan [--send] [--dry-run] [--max_duration=<max_duration>]
     bringyourctl payouts populate-tx-hashes
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
@@ -122,6 +124,7 @@ Usage:
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>]
 
 Options:
+    --sn-schedule-sha256=<sha256>  Prepare the immutable earning boundary from this exact reviewed sn.yml after migrations.
     -h --help     Show this screen.
     --version     Show version.
     -r --realm=<realm>  Search realm.
@@ -149,7 +152,17 @@ Options:
 		panic(err)
 	}
 
-	if db, _ := opts.Bool("db"); db {
+	if transitionStatus, _ := opts.Bool("sn-transition-status"); transitionStatus {
+		status, err := controller.GetProviderPayoutTransitionStatus(context.Background())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(status); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	} else if db, _ := opts.Bool("db"); db {
 		if version, _ := opts.Bool("version"); version {
 			dbVersion(opts)
 		} else if migrate, _ := opts.Bool("migrate"); migrate {
@@ -267,7 +280,7 @@ Options:
 		} else if plan, _ := opts.Bool("plan"); plan {
 			planPayouts(opts)
 		} else if applyBonus, _ := opts.Bool("apply-bonus"); applyBonus {
-			payoutPlanApplyBonus(opts)
+			server.Raise(payoutPlanApplyBonus(opts))
 		} else if ptxh, _ := opts.Bool("populate-tx-hashes"); ptxh {
 			populateTxHashes()
 		}
@@ -392,6 +405,7 @@ func dbMigrate(opts docopt.Opts) {
 	fmt.Printf("Applying DB migrations ...\n")
 	server.DbMigrationVerbose = true
 	server.ApplyDbMigrations(context.Background())
+	server.Raise(preparePayoutBoundaryAfterMigrate(context.Background(), opts))
 }
 
 // dbScrubClientAddresses re-runs the 20260807 raw-client-address scrub
@@ -1465,27 +1479,41 @@ func payoutByPaymentId(opts docopt.Opts) {
 	fmt.Println("Complete Status: ", res.Complete)
 }
 
-func payoutPlanApplyBonus(opts docopt.Opts) {
+func payoutPlanApplyBonus(opts docopt.Opts) error {
 	ctx := context.Background()
 
 	planIdStr, err := opts.String("--plan_id")
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	amountUsd, err := opts.Float64("--amount_usd")
 	if err != nil {
-		panic(err)
+		return err
+	}
+	if math.IsNaN(amountUsd) || math.IsInf(amountUsd, 0) || amountUsd <= 0 || amountUsd >= float64(math.MaxInt64)/1e9 {
+		return errors.New("bonus amount must be positive and within NanoCents range")
 	}
 
 	amountNanoCents := model.UsdToNanoCents(amountUsd)
 
 	planId, err := server.ParseId(planIdStr)
 	if err != nil {
-		panic(err)
+		return err
 	}
-
-	model.PayoutPlanApplyBonus(ctx, planId, amountNanoCents)
+	operationText, err := opts.String("--adjustment_id")
+	if err != nil {
+		return err
+	}
+	operationId, err := server.ParseId(operationText)
+	if err != nil {
+		return err
+	}
+	reason, err := opts.String("--reason")
+	if err != nil {
+		return err
+	}
+	return model.PayoutPlanApplyBonus(ctx, planId, amountNanoCents, operationId, reason)
 }
 
 // paymentsReconcile runs one payment reconciliation pass (UPGRADE.md §8) by

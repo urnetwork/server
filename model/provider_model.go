@@ -79,6 +79,9 @@ type ProviderStats struct {
 	UptimeLast24h          float64           `json:"uptime_last_24h"`
 	TransferDataLast24h    float64           `json:"transfer_data_last_24h"`
 	PayoutLast24h          float64           `json:"payout_last_24h"`
+	PayoutAsset            string            `json:"payout_asset"`
+	PayoutBasis            string            `json:"payout_basis"`
+	SnPayoutIncluded       bool              `json:"sn_payout_included"`
 	SearchInterestLast24h  int               `json:"search_interest_last_24h"`
 	ContractsLast24h       int               `json:"contracts_last_24h"`
 	ClientsLast24h         int               `json:"clients_last_24h"`
@@ -247,6 +250,8 @@ func statsProviders(
 				UptimeLast24h:          uptimeHours(ivals, windowStart, now),
 				TransferDataLast24h:    bytesToGib(transferBytes[clientId]),
 				PayoutLast24h:          NanoCentsToUsd(payoutNanoCents[clientId]),
+				PayoutAsset:            "USDC",
+				PayoutBasis:            "legacy_escrow_credit_by_sweep_time_not_transfer_confirmation",
 				SearchInterestLast24h:  searchInterest[clientId],
 				ContractsLast24h:       contracts[clientId],
 				ClientsLast24h:         clients[clientId],

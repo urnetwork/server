@@ -3,12 +3,11 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
 	"strings"
-
-	// "errors"
 
 	// "sync"
 	"time"
@@ -28,6 +27,7 @@ type GetNetworkAccountPaymentsError struct {
 }
 
 type GetNetworkAccountPaymentsResult struct {
+	Asset           string                          `json:"asset"`
 	AccountPayments []*model.AccountPayment         `json:"account_payments,omitempty"`
 	Error           *GetNetworkAccountPaymentsError `json:"error,omitempty"`
 }
@@ -44,6 +44,7 @@ func GetNetworkAccountPayments(session *session.ClientSession) (*GetNetworkAccou
 	}
 
 	return &GetNetworkAccountPaymentsResult{
+		Asset:           "USDC",
 		AccountPayments: networkAccountPayments,
 	}, nil
 }
@@ -217,8 +218,10 @@ type AdvancePaymentArgs struct {
 }
 
 type AdvancePaymentResult struct {
-	Complete bool `json:"complete"`
-	Canceled bool `json:"canceled"`
+	Complete   bool   `json:"complete"`
+	Canceled   bool   `json:"canceled"`
+	Retryable  bool   `json:"retryable,omitempty"`
+	HeldReason string `json:"held_reason,omitempty"`
 }
 
 func ScheduleAdvancePayment(
@@ -226,7 +229,7 @@ func ScheduleAdvancePayment(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) {
-	// randomly schedule between now and 5 minutes from now
+	// Randomly schedule between 5 and 30 minutes from now.
 	minDelay := 5 * time.Minute
 	delay := 25 * time.Minute
 	// this avoid circle and coinbase rate limiting
@@ -249,12 +252,18 @@ func AdvancePayment(
 ) (*AdvancePaymentResult, error) {
 	model.UpdatePaymentWallet(clientSession.Ctx, advancePaymentArgs.PaymentId)
 	payment, err := model.GetPayment(clientSession.Ctx, advancePaymentArgs.PaymentId)
-	if payment == nil || err != nil {
+	if err != nil {
+		return &AdvancePaymentResult{}, err
+	}
+	if payment == nil {
 		// payment doesn't exist
 		return &AdvancePaymentResult{
 			Complete: false,
 			Canceled: true,
 		}, nil
+	}
+	if observer, ok := clientSession.Ctx.Value(providerPaymentReadObserverKey{}).(func(*model.AccountPayment)); ok {
+		observer(payment)
 	}
 
 	if payment.Completed || payment.Canceled {
@@ -264,16 +273,21 @@ func AdvancePayment(
 		}, nil
 	}
 
-	if payment.WalletId == nil {
+	if payment.WalletId == nil && payment.PaymentRecord == nil {
 		// cannot advance until the wallet is set
 		// the payment will get picked up in the next dangling payment sweep. No need to keep trying until then.
 		return &AdvancePaymentResult{
 			Complete: false,
-			Canceled: true,
-		}, nil
+			Canceled: false,
+		}, fmt.Errorf("payment retained pending a payout wallet")
 	}
 
 	complete, canceled, err := advancePayment(payment, clientSession)
+	if server.ProviderEarningBoundaryRetryable(clientSession.Ctx, err) {
+		// The post consumer schedules one bounded RunOnce continuation. This is
+		// an unavailable observation, never completion/cancellation or new money.
+		return &AdvancePaymentResult{Retryable: true, HeldReason: err.Error()}, nil
+	}
 	return &AdvancePaymentResult{
 		Complete: complete,
 		Canceled: canceled,
@@ -286,6 +300,9 @@ func AdvancePaymentPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
+	if err := clientSession.Ctx.Err(); err != nil {
+		return err
+	}
 	if !advancePaymentResult.Canceled && !advancePaymentResult.Complete {
 		// keep checking on the payment until it is completed or canceled
 		ScheduleAdvancePayment(advancePaymentArgs, clientSession, tx)
@@ -321,13 +338,16 @@ func advancePayment(
 		// get the status of the transaction
 		txResult, err := circleClient.GetTransaction(clientSession.Ctx, *payment.PaymentRecord)
 		if err != nil {
-			returnErr = fmt.Errorf("[%s]Payment transaction error = %s", payment.PaymentId, err)
+			returnErr = fmt.Errorf("[%s]Payment transaction error: %w", payment.PaymentId, err)
 			return
 		}
 
 		tx = &txResult.Transaction
 		txResponseBodyBytes = txResult.ResponseBodyBytes
 		status = tx.State
+		if tx.Id != "" && tx.Id != *payment.PaymentRecord {
+			return false, false, fmt.Errorf("processor returned a different transaction; original attempt retained")
+		}
 
 		// Check the Circle status of the payment. Every non-terminal state stays
 		// in retry; age is not a cancellation condition.
@@ -337,81 +357,18 @@ func advancePayment(
 			return
 
 		case "SENT", "STUCK", "CONFIRMED":
-			// Circle has assigned a chain transaction hash by SENT. Persist it
-			// before terminal completion so a long-running retry remains
-			// externally reconcilable and visible to the account holder.
-			if tx.TxHash != "" {
-				if err := model.UpdatePaymentProgress(
-					clientSession.Ctx,
-					payment.PaymentId,
-					string(txResponseBodyBytes),
-					tx.TxHash,
-				); err != nil {
-					returnErr = fmt.Errorf("[%s]Payment progress error = %s", payment.PaymentId, err)
-				}
-			}
-			return
+			return model.ApplyProviderPaymentOutcome(clientSession.Ctx, payment, status, string(txResponseBodyBytes), tx.TxHash, false)
 
 		case "DENIED", "FAILED":
-			returnErr = fmt.Errorf("[%s]error = %s", payment.PaymentId, status)
-			// remove the payment record so it can be recreated
-			if err := model.RemovePaymentRecord(
-				clientSession.Ctx,
-				payment.PaymentId,
-			); err != nil {
-				returnErr = fmt.Errorf("[%s]error = %s; payment reset error = %s", payment.PaymentId, status, err)
-			}
-			return
+			complete, canceled, err = model.ApplyProviderPaymentOutcome(clientSession.Ctx, payment, status, string(txResponseBodyBytes), tx.TxHash, false)
+			return complete, canceled, errors.Join(fmt.Errorf("[%s]processor status = %s; obligation retained for retry", payment.PaymentId, status), err)
 
 		case "CANCELLED":
-			// A chain hash and CANCELLED are contradictory. Preserve both pieces
-			// of evidence and keep reconciling; releasing the sweeps here could
-			// pay an already-broadcast transaction twice.
-			if tx.TxHash != "" || payment.TxHash != nil {
-				txHash := tx.TxHash
-				if txHash == "" {
-					txHash = *payment.TxHash
-				}
-				if err := model.UpdatePaymentProgress(
-					clientSession.Ctx,
-					payment.PaymentId,
-					string(txResponseBodyBytes),
-					txHash,
-				); err != nil {
-					returnErr = fmt.Errorf("[%s]Payment progress error = %s", payment.PaymentId, err)
-					return
-				}
-				returnErr = fmt.Errorf("[%s]Circle returned CANCELLED for a payment with transaction hash %s", payment.PaymentId, txHash)
-				return
-			}
-			if err := model.CancelPaymentAfterProcessorCancellation(
-				clientSession.Ctx,
-				payment.PaymentId,
-				string(txResponseBodyBytes),
-			); err != nil {
-				returnErr = fmt.Errorf("[%s]Payment cancellation error = %s", payment.PaymentId, err)
-				return
-			}
-			canceled = true
-			return
+			return model.ApplyProviderPaymentOutcome(clientSession.Ctx, payment, status, string(txResponseBodyBytes), tx.TxHash, false)
 
 		case "COMPLETE":
-
-			// mark the payment complete in our DB
-			if err := model.CompletePayment(
-				clientSession.Ctx,
-				payment.PaymentId,
-				string(txResponseBodyBytes),
-				tx.TxHash,
-			); err != nil {
-				returnErr = fmt.Errorf("[%s]Payment completion error = %s", payment.PaymentId, err)
-				return
-			}
-			complete = true
-			// no per-payment email: earnings are reported once per finalized
-			// epoch by the epoch earnings email (controller/epoch_earnings_email.go)
-
-			return
+			review := model.RequireProviderUsdcPayment(clientSession.Ctx, payment.PaymentId) != nil
+			return model.ApplyProviderPaymentOutcome(clientSession.Ctx, payment, status, string(txResponseBodyBytes), tx.TxHash, review)
 
 		default:
 			returnErr = fmt.Errorf(
@@ -433,12 +390,11 @@ func advancePayment(
 		// sets a valid payout wallet. The pending payment sweep will retry it.
 		if accountWallet == nil || !accountWallet.Active || accountWallet.NetworkId != payment.NetworkId {
 			glog.Warningf("[%s]payment wallet %s is not a valid payout wallet for network %s. Holding payment.\n", payment.PaymentId, *payment.WalletId, payment.NetworkId)
-			canceled = true
-			return
+			return false, false, fmt.Errorf("payment retained pending a valid payout wallet")
 		}
 		formattedBlockchain, err := formatBlockchain(accountWallet.Blockchain)
 		if err != nil {
-			returnErr = fmt.Errorf("[%s]Payment wallet error = %s", payment.PaymentId, err)
+			returnErr = fmt.Errorf("[%s]Payment wallet error: %w", payment.PaymentId, err)
 			return
 		}
 
@@ -477,13 +433,20 @@ func advancePayment(
 
 		// ensure paymout amount is greater than minimum payout threshold
 		if model.UsdToNanoCents(payoutAmount) <= 0 {
+			policy, err := server.LoadProviderPayoutEarningPolicy(clientSession.Ctx)
+			if err != nil {
+				return false, false, err
+			}
+			if policy != nil {
+				return false, false, fmt.Errorf("legacy payment retained: amount does not cover the transfer fee")
+			}
 			// cancel this payment, and let the next plan pick up the contracts
 			// in a new (larger) payment. Otherwise, we will likely keep failing due
 			// to the payment not being large enough to cover the transfer fee.
 			glog.Info("[payout][%s]payout - fee is negative\n", payment.PaymentId)
 
 			if err := model.CancelPayment(clientSession.Ctx, payment.PaymentId); err != nil {
-				returnErr = fmt.Errorf("[%s]Payment cancellation error = %s", payment.PaymentId, err)
+				returnErr = fmt.Errorf("[%s]Payment cancellation error: %w", payment.PaymentId, err)
 				return
 			}
 			canceled = true
@@ -491,18 +454,24 @@ func advancePayment(
 		}
 
 		// the idempotency key is stable across retries of this payment.
+		if err := model.RequireProviderUsdcPayment(clientSession.Ctx, payment.PaymentId); err != nil {
+			return false, false, err
+		}
 		// creating it also pins the payment wallet (`UpdatePaymentWallet`),
 		// so a retried submit pays the same address the processor already saw
-		idempotencyKey, err := model.GetOrCreatePaymentIdempotencyKey(clientSession.Ctx, payment.PaymentId)
+		basis, err := model.ReserveProviderPaymentBasis(clientSession.Ctx, payment, accountWallet)
 		if err != nil {
-			returnErr = fmt.Errorf("[%s]Payment idempotency key error = %s", payment.PaymentId, err)
+			returnErr = fmt.Errorf("[%s]Payment idempotency key error = %w", payment.PaymentId, err)
 			return
+		}
+		if err := model.RetainProviderPaymentRequest(clientSession.Ctx, basis, payoutAmount, formattedBlockchain); err != nil {
+			return false, false, err
 		}
 
 		// send the payment
 		transferResult, err := circleClient.CreateTransferTransaction(
-			clientSession.Ctx,
-			idempotencyKey,
+			context.WithValue(clientSession.Ctx, providerUsdcPaymentContextKey{}, providerPaymentSubmission{Basis: *basis, Amount: payoutAmount, Network: formattedBlockchain}),
+			basis.IdempotencyKey,
 			payoutAmount,
 			accountWallet.WalletAddress,
 			formattedBlockchain,
@@ -514,27 +483,26 @@ func advancePayment(
 				// this is the one submit error for which it is safe to release the
 				// pinned attempt. On the next retry UpdatePaymentWallet can select a
 				// corrected payout wallet. Ambiguous failures retain the key.
-				if resetErr := model.RemovePaymentRecord(clientSession.Ctx, payment.PaymentId); resetErr != nil {
-					returnErr = fmt.Errorf("[%s]Payment create transaction error = %s; invalid destination reset error = %s", payment.PaymentId, err, resetErr)
+				if resetErr := model.ResetProviderPaymentSubmission(clientSession.Ctx, basis, err.Error()); resetErr != nil {
+					returnErr = fmt.Errorf("[%s]Payment create transaction error: %w; invalid destination reset error: %w", payment.PaymentId, err, resetErr)
 					return
 				}
 			}
-			returnErr = fmt.Errorf("[%s]Payment create transaction error = %s", payment.PaymentId, err)
+			returnErr = fmt.Errorf("[%s]Payment create transaction error = %w", payment.PaymentId, err)
 			return
 		}
 
 		// set the payment record
-		err = model.SetPaymentRecord(
+		err = model.SetProviderPaymentRecord(
 			clientSession.Ctx,
-			payment.PaymentId,
-			"USDC", // For token type
+			basis,
 			payoutAmount,
 			transferResult.Id,
 		)
 		if err != nil {
 			// the transfer was already submitted. Return an error so the task
 			// retries; the stable idempotency key makes the resubmit safe.
-			returnErr = fmt.Errorf("[%s]Payment record error = %s", payment.PaymentId, err)
+			returnErr = fmt.Errorf("[%s]Payment record error: %w", payment.PaymentId, err)
 			return
 		}
 	}
@@ -620,7 +588,7 @@ func ConvertFeeToUSDC(ctx context.Context, currencyTicker string, fee float64) (
 
 	rate, err := strconv.ParseFloat(rateStr, 64)
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse rate: %v", err)
+		return 0, fmt.Errorf("failed to parse rate: %w", err)
 	}
 
 	feeUsdc := fee * rate
