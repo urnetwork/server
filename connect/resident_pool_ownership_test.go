@@ -101,6 +101,8 @@ func newResidentCallbackLifecycleFixture(
 		transports: map[*clientTransport]bool{},
 		forwards:   map[server.Id]*ResidentForward{},
 	}
+	resident.controlLimiter = newLimiter(residentCtx, 0)
+	resident.residentController = newResidentController(residentCtx, resident.clientId, nil, settings)
 	resident.startClientCallbackWorkers()
 	return resident
 }
@@ -719,9 +721,9 @@ func TestResidentForwardIngressWorkerRegistrationIsJoinedByClose(t *testing.T) {
 	}
 }
 
-// A callback admitted before cancellation can win its queue send after the
-// worker observed cancellation and drained. The final joined drain reclaims
-// both forward and analogous control owners without closing producer channels.
+// A callback admitted before cancellation can finish its queue send afterward.
+// Control joins that producer before applying the accepted tail; forward
+// teardown returns the late owner without closing either producer channel.
 func TestResidentCloseAndWaitDrainsLateCallbackOwners(t *testing.T) {
 	testCtx, testCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer testCancel()
@@ -755,10 +757,10 @@ func TestResidentCloseAndWaitDrainsLateCallbackOwners(t *testing.T) {
 	}()
 	select {
 	case <-workersJoined:
-	case <-testCtx.Done():
 		resident.controlIngressAdmission.done()
 		resident.forwardIngressAdmission.done()
-		t.Fatalf("resident callback workers did not stop: %v", testCtx.Err())
+		t.Fatal("control worker joined before its admitted producer")
+	default:
 	}
 
 	controlBytes := clientconnect.MessagePoolGet(17)
