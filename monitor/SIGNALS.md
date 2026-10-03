@@ -18542,6 +18542,36 @@ cost can be multiplied into a complete heap estimate. The owning regression is
 `TestResidentRuntimeOwnershipChurnControl` in
 `connect/resident_runtime_ownership_diagnostic_test.go`.
 
+The private native discriminator in
+`diagnostics/connect_native_memory.py` retains every running Connect container
+generation on one inventory-owned host. It binds kernel RSS to a stable
+boot/PID/start-tick identity and the actual executable hash, Go source revision,
+and image configuration before and after collection. Missing slots, replaced
+processes, unknown images, and incomplete reads remain explicit; one host's
+census cannot establish fleet convergence or ownership of its memory.
+
+A distinct Linux time-namespace identifier alone does not prove different
+Prometheus process-start conversion. The bounded discriminator also reads the
+reader and target boottime offsets. Because `timens_offsets` describes
+`time_for_children`, both active/future namespace links must agree before those
+offsets can qualify the current processes. A cross-namespace join is qualified
+only when both boottime offsets are exactly zero and the namespace/offset proof
+survives the terminal identity check. Nonzero, missing, malformed, unbound, or
+changing offsets preserve an unknown metric join while retaining native RSS.
+An unchanged common active namespace already supplies the same clock view and
+does not require the extra offset read. These rules match the pinned Prometheus
+procfs conversion of boot time plus process-start ticks; they do not infer a
+Main offset from a local control.
+
+Join the fresh metric row only with unique host/block/start and matching
+source/image evidence, retaining current and draining generations. A digest
+of a container's short ID is a log-join hint, not an independently unique
+process identity. The owning Python controls cover healthy overlap, exact
+zero-offset conversion, refused or changing clock evidence, PID reuse,
+source mismatch, unavailable reads, and finite byte/time bounds. Collection
+still requires the separately admitted private inventory/hostname wrapper;
+this module installs no service endpoint or profiling producer.
+
 `connect-resident-cost-unobservable` WARNs immediately when the newest Connect
 population join is missing/stale, duplicated, invalid, or cannot select an
 unambiguous newest generation. It carries only fixed fleet counts. Duplicate
