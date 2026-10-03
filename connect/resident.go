@@ -387,6 +387,9 @@ type ExchangeSettings struct {
 	ConnectHandlerSettings
 
 	ExchangeBufferSize int
+	// Optional fixed ledger shared by resident SDK clients. Captured once by
+	// the Exchange; nil leaves SDK lifecycle accounting disabled.
+	MemoryOwnerLedger *connect.TransferMemoryOwnerLedger
 
 	// `send` queue depth of a `ResidentForward` to a peer resident. Kept
 	// separate from `ExchangeBufferSize` so production can hold a deep queue
@@ -651,7 +654,8 @@ type Exchange struct {
 	hostToServicePorts map[int]int
 	routes             map[string]string
 
-	settings *ExchangeSettings
+	settings          *ExchangeSettings
+	memoryOwnerLedger *connect.TransferMemoryOwnerLedger
 	// Optional already-bound sockets keyed by service port. Tests use these to
 	// eliminate release-to-rebind races and cross-process SO_REUSEPORT
 	// interference. The Exchange owns and closes every supplied listener.
@@ -768,6 +772,7 @@ func newExchange(
 		hostToServicePorts:   hostToServicePorts,
 		routes:               routes,
 		settings:             settings,
+		memoryOwnerLedger:    settings.MemoryOwnerLedger,
 		servicePortListeners: servicePortListeners,
 		residents:            map[server.Id]*Resident{},
 		residentChanges:      map[server.Id]chan struct{}{},
@@ -3515,7 +3520,7 @@ func NewResident(
 
 	// use a tag with the client so that the logging does not show up as the control id
 	clientTag := fmt.Sprintf("c(%s)", clientId.String())
-	clientSettings := connect.DefaultClientSettingsWithBufferSize(exchange.settings.ExchangeBufferSize)
+	clientSettings := exchange.residentClientSettings()
 	client := connect.NewClientWithTag(cancelCtx, connect.ControlId, clientTag, connect.NewNoContractClientOob(), clientSettings)
 
 	// no contract is required between the platform and client

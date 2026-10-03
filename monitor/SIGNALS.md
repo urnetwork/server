@@ -18578,6 +18578,44 @@ and Markdown detail.
 
 Probe: `service-load`
 
+An optional Connect startup flag, `--memory-owner-ledger`, publishes a fixed
+resident SDK transfer-owner scope through the existing authenticated,
+process-stamped metrics pusher. It defaults off and adds no listener, timer,
+heap profile, forced collection, or per-packet hook. A run captures one ledger
+before creating residents. A nil ledger registers no collector; absence must
+remain disabled/unknown, never a zero-owner census.
+
+The `urnetwork_connect_transfer_owner_` metric families are `enabled`,
+`sample_complete`, `sample_state`, `workers`, `known_channel_slot_bytes`,
+`known_sequence_struct_bytes`, `admitted_total`, and `finished_total`. A complete
+collection has exactly 27 fixed series. Kind labels are `send`, `receive`, and
+`forward`; worker and channel storage phase labels are disjoint `running` and
+`cleanup`. Running means the SDK sequence's Run has not returned, even if its
+context is canceled. Cleanup begins after Run returns and remains counted
+through the outer buffer-owned join, including owners removed from lookup maps.
+These phases do not classify every goroutine or resident retirement stage.
+
+One fixed-size atomic ledger snapshot supplies each collection. Overlapping
+lifecycle updates, invalid conservation, or values outside exact float64 integer
+range publish only finite validity state, with ownership values omitted.
+Require fresh `enabled=1` and `sample_complete=1`, exactly one active state,
+the same collection/start/source, and unique fixed label cells before using
+any counts or bytes. Never fill an unavailable sample with older values. These
+metrics are diagnostic only and do not clear the independent runtime PAGE.
+
+Known bytes cover registered sequence structs and actual channel element
+storage. They exclude queued payload backing, channel headers, allocator spans,
+maps, routes, pacing, callbacks, and externally retained roots after the join.
+They are not retained heap or an additive RSS attribution. Pool outstanding
+counts are taken-minus-returned accounting, not a live-buffer byte census.
+The initial release integration uses the published ledger-only Connect commit
+`15d6c8b9cbeed0110f07575a66693a8c9ff37c6e` with R61's schema763 and SDK95;
+it does not enable close-report ID emission or require migration764. Local
+controls cover real resident construction/held-ACK teardown, fixed metric cells,
+overlap and invalid-state refusal, default-off settings, and scope ownership.
+Until an enabled current executable is observed, these local controls establish
+instrumentation behavior rather than the cause of Main retained heap.
+
 Join fresh `process_resident_memory_bytes`, `go_memstats_heap_alloc_bytes`,
 `go_memstats_heap_objects`, `go_goroutines`, and
 `process_start_time_seconds` with five-minute rates for

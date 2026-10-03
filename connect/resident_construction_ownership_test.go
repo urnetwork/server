@@ -98,6 +98,8 @@ func TestResidentConstructionAbortJoinsHeldAck(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	exchange := newResidentConstructionExchange(ctx)
+	var ownerLedger clientconnect.TransferMemoryOwnerLedger
+	exchange.memoryOwnerLedger = &ownerLedger
 	want := errors.New("synthetic profile failure with retained ACK")
 	prepared := make(chan *Resident, 1)
 	failNow := make(chan struct{})
@@ -160,6 +162,10 @@ func TestResidentConstructionAbortJoinsHeldAck(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("synthetic constructor client did not write")
 	}
+	activeOwners := ownerLedger.Snapshot()
+	if !activeOwners.Complete || activeOwners.Send.Workers < 1 || activeOwners.Send.KnownChannelSlotBytes == 0 {
+		t.Fatalf("real resident constructor did not wire its SDK transfer ledger: %+v", activeOwners)
+	}
 	failOnce.Do(func() { close(failNow) })
 	select {
 	case <-joinEntered:
@@ -195,6 +201,10 @@ func TestResidentConstructionAbortJoinsHeldAck(t *testing.T) {
 	}
 	if resident.residentController.ctx.Err() != context.Canceled {
 		t.Fatal("joined construction left its controller alive")
+	}
+	joinedOwners := ownerLedger.Snapshot()
+	if !joinedOwners.Complete || joinedOwners.Send.Workers != 0 || joinedOwners.Send.KnownChannelSlotBytes != 0 || joinedOwners.Send.AdmittedTotal != joinedOwners.Send.FinishedTotal {
+		t.Fatalf("joined constructor retained a registered transfer owner: %+v", joinedOwners)
 	}
 }
 
