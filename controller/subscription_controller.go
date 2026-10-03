@@ -160,6 +160,15 @@ type SubscriptionBalanceResult struct {
 	ActiveTransferBalances    []*model.TransferBalance `json:"active_transfer_balances,omitempty"`
 	PendingPayoutUsdNanoCents model.NanoCents          `json:"pending_payout_usd_nano_cents"`
 	UpdateTime                time.Time                `json:"update_time"`
+	/**
+	 * Guest - the network has no login method (no password/phone, SSO, wallet
+	 * or seedphrase sign-in): a legacy guest network. Read from the live auth
+	 * tables on every call, so it is right after a token refresh (which signs
+	 * every jwt without the guest_mode claim) and turns false the moment a
+	 * login method is added with AddAuth. A client must not sell a plan to a
+	 * guest network, because nothing can sign back in to it.
+	 */
+	Guest bool `json:"guest"`
 
 	// ----- the onboarding plan fields (onboarding_controller.go DecoratePlan) -----
 	// PriceTier is the caller's regional price tier (display estimate unless the
@@ -240,7 +249,20 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 		ActiveTransferBalances:    transferBalances,
 		PendingPayoutUsdNanoCents: pendingPayout,
 		UpdateTime:                server.NowUtc(),
+		Guest:                     isGuestNetwork(session, model.HasAnyAuthMethod),
 	}, nil
+}
+
+// isGuestNetwork reports whether the session's network has no login method.
+// It deliberately ignores the jwt's GuestMode claim: RefreshToken signs every
+// jwt with GuestMode=false, so a refreshed legacy guest no longer carries it,
+// and a guest that just added a login method still carries it until the next
+// refresh.
+func isGuestNetwork(
+	session *session.ClientSession,
+	hasAnyAuthMethod func(ctx context.Context, userId server.Id) bool,
+) bool {
+	return !hasAnyAuthMethod(session.Ctx, session.ByJwt.UserId)
 }
 
 type CoinbaseWebhookArgs struct {
