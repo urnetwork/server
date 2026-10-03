@@ -5618,3 +5618,41 @@ and uses Redis admission unconditionally. Deploy the schema-755-compatible
 unconditional code to all readers before dropping the enabled column in a
 later migration; existing flag-reading binaries must not encounter the
 removed column.
+
+
+### 2026-10-03 02:01 UTC Redis admission and unconditional rollout
+
+The four enabled hosts were directly checked before activation: all 48 active
+API, Connect and Taskworker slots used compatible images; no incompatible live
+or restartable financial predecessor was found. Independent four-host closure:
+`639f2935e108aca638870bf6eacf7fa6bd4b441320dec962c9c6d36ca9753688`.
+Redis admission was enabled by a guarded primary transaction at 01:16:08 UTC;
+the fresh read verified schema 755, one policy row and enabled true. Activation
+receipt: `e0eec26d4043ab24d799fb711cf62cf812f8c7aed1a73e128d2914cd1f5b9764`.
+
+The unconditional admission bridge `75b40973` is merged and pushed. Focused
+accounting, lifecycle and synchronized contention checks passed independently.
+Both image architectures were verified, and all API, Connect and Taskworker
+block deployment commands exited zero for
+`2026.10.3-redis-always-on+1060875100`: Taskworker at 01:52:44 UTC, API at
+01:52:50 UTC and Connect at 01:56:06 UTC. Fresh direct process proof and
+retirement of every older flag-reading binary remain required before the
+separate enabled-column removal migration. Schema head remains 755.
+
+The fixed 01:17–01:22 UTC eight-Taskworker timing sample reports internal
+controller returns averaging 20.68 milliseconds, with no measured payer-gate
+or reservation-snapshot residence. This is internal control timing, not an
+accepted URL-probe completion rate. Protocol rejections and five-second DNS
+timeouts remain. Qualified rolling-quota coverage rose from 2,400 of 111,397
+providers at 01:18:27 UTC to 10,291 of 111,400 at 01:48:51 UTC (9.24 percent).
+The separate hourly forecast is still incomplete. PostgreSQL measured 31.47
+percent CPU at 01:46:31 UTC; query sampling still found tuple-wait queues.
+These observations have separate clocks and do not isolate a deployment effect
+or close the 100-percent quota-coverage goal.
+
+Hosted-proxy local controller wiring and API-request regression tests are in
+progress in isolated worktrees. An initial real hosted-device test delivered
+16 MiB with renewal, reconnect and payer reconciliation while making zero
+requests to its rejecting API origin. Quality-probe traffic tests, discovery
+and key-read coverage, negative controls, independent review, merge and rollout
+remain open. The hosted-proxy fix is not yet deployed.
