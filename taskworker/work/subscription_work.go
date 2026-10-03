@@ -47,15 +47,21 @@ func closeExpiredContractsRetryDelay(verifiedCloseCount int64, randomUnit float6
 }
 
 type CloseExpiredContractsArgs struct {
-	BlockSize  int `json:"block_size"`
-	BlockIndex int `json:"block_index"`
+	BlockSize  int                         `json:"block_size"`
+	BlockIndex int                         `json:"block_index"`
+	Cursor     *model.ContractExpiryCursor `json:"cursor,omitempty"`
 }
 
 type CloseExpiredContractsResult struct {
-	Full bool `json:"full"`
+	Full   bool                        `json:"full"`
+	Cursor *model.ContractExpiryCursor `json:"cursor,omitempty"`
 }
 
 func ScheduleCloseExpiredContracts(clientSession *session.ClientSession, tx server.PgTx, blockIndex int, delay bool) {
+	scheduleCloseExpiredContractsPage(clientSession, tx, blockIndex, delay, nil)
+}
+
+func scheduleCloseExpiredContractsPage(clientSession *session.ClientSession, tx server.PgTx, blockIndex int, delay bool, cursor *model.ContractExpiryCursor) {
 	// runAt := func() time.Time {
 	// 	now := server.NowUtc()
 	// 	year, month, day := now.Date()
@@ -78,6 +84,7 @@ func ScheduleCloseExpiredContracts(clientSession *session.ClientSession, tx serv
 		&CloseExpiredContractsArgs{
 			BlockSize:  blockSize,
 			BlockIndex: blockIndex,
+			Cursor:     cursor,
 		},
 		clientSession,
 		// legacy key
@@ -94,18 +101,22 @@ func CloseExpiredContracts(
 ) (*CloseExpiredContractsResult, error) {
 	if closeExpiredContracts.BlockSize == DefaultCloseExpiredContractsBlockSize {
 		minTime := server.NowUtc().Add(-5 * time.Minute)
-		c, err := model.ForceCloseOpenContractIds(
+		c, next, err := model.ForceCloseOpenContractIdsPage(
 			clientSession.Ctx,
 			minTime,
 			closeExpiredContractsMaxCount,
 			closeExpiredContractsParallel,
 			closeExpiredContracts.BlockSize,
 			closeExpiredContracts.BlockIndex,
+			closeExpiredContracts.Cursor,
 		)
 		// The model alone can attest that every selected row completed and
 		// every failure is a verified still-reserved dispute or completed
 		// no-payout quarantine. Never infer authority from a mixed error join.
-		full := closeExpiredContractsFull(c)
+		// Scanning past an owned or recently active head is page progress,
+		// not a verified close. Continue the bounded pass without parking it
+		// at the idle cadence; completion resets to the oldest head next pass.
+		full := closeExpiredContractsFull(c) || next != nil
 		if accounting, ok := err.(*model.ForceCloseAccountingError); ok && clientSession.Ctx.Err() == nil &&
 			0 <= accounting.VerifiedCloseCount() && 0 <= accounting.AccountingRejectionCount() &&
 			0 <= accounting.QuarantinedAccountingRejectionCount() && accounting.QuarantinedAccountingRejectionCount() <= accounting.VerifiedCloseCount() &&
@@ -118,7 +129,8 @@ func CloseExpiredContracts(
 				accounting.VerifiedCloseCount(), accounting.AccountingRejectionCount(), accounting.QuarantinedAccountingRejectionCount(), delay.Milliseconds())
 		}
 		return &CloseExpiredContractsResult{
-			Full: full,
+			Full:   full,
+			Cursor: next,
 		}, err
 	}
 	// else ignore lingering tasks with older block size
@@ -131,7 +143,7 @@ func CloseExpiredContractsPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleCloseExpiredContracts(clientSession, tx, closeExpiredContracts.BlockIndex, !closeExpiredContractsResult.Full)
+	scheduleCloseExpiredContractsPage(clientSession, tx, closeExpiredContracts.BlockIndex, !closeExpiredContractsResult.Full, closeExpiredContractsResult.Cursor)
 	return nil
 }
 
