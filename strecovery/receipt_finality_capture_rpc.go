@@ -151,13 +151,39 @@ func captureBlockCertificate(raw json.RawMessage, hash string) (string, string, 
 // selected successors must later match the signed ancestry from the checkpoint.
 func (self *finalityCapture) blockHash(ctx context.Context, number uint64) (string, error) {
 	var hash string
-	if err := self.rpc.read(ctx, "chain_getBlockHash", []any{number}, &hash); err != nil {
+	validate := func(raw json.RawMessage) error {
+		if err := json.Unmarshal(raw, &hash); err != nil {
+			return err
+		}
+		if !canonicalHex(hash, 32) {
+			return errors.New("native capture returned a malformed block hash")
+		}
+		return nil
+	}
+	raw, err := self.call(ctx, "chain_getBlockHash", []any{number}, validate)
+	if err != nil {
 		return "", err
 	}
-	if !canonicalHex(hash, 32) {
-		return "", errors.New("native capture block hash is unavailable or malformed")
+	if err := validate(raw); err != nil {
+		return "", self.invalid(err)
 	}
 	return hash, nil
+}
+
+// Complete native results are checked before a failed read tail can trigger
+// retry. Null remains unavailable. The receipt adapter keeps its old path.
+func (self *finalityCapture) call(ctx context.Context, method string, params []any, validate func(json.RawMessage) error) (json.RawMessage, error) {
+	if self.nativeExecution {
+		previous := self.rpc.validateResult
+		self.rpc.validateResult = func(raw json.RawMessage) error {
+			if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+				return nil
+			}
+			return self.invalid(validate(raw))
+		}
+		defer func() { self.rpc.validateResult = previous }()
+	}
+	return self.rpc.call(ctx, method, params)
 }
 
 // Only hash-addressed complete headers are reusable. Every reuse is rehashed;
@@ -172,18 +198,24 @@ func (self *finalityCapture) header(ctx context.Context, hash string) (string, *
 	if found {
 		budget := &nativeFinalityBudget{remaining: MaximumReceiptFinalityBytes}
 		header, err := budget.header(scale)
-		if err != nil || header.identity.Hash != hash {
-			return "", nil, errors.New("retained native capture header differs from its hash")
+		if err != nil {
+			return "", nil, self.invalid(err)
+		}
+		if header.identity.Hash != hash {
+			return "", nil, self.invalid(errors.New("retained native capture header differs from its hash"))
 		}
 		return scale, header, nil
 	}
-	raw, err := self.rpc.call(ctx, "chain_getHeader", []any{hash})
+	raw, err := self.call(ctx, "chain_getHeader", []any{hash}, func(raw json.RawMessage) error {
+		_, _, err := captureHeaderScale(raw, hash)
+		return err
+	})
 	if err != nil {
 		return "", nil, err
 	}
 	scale, header, err := captureHeaderScale(raw, hash)
 	if err != nil {
-		return "", nil, err
+		return "", nil, self.invalid(err)
 	}
 	if err := self.save(ctx, name, scale); err != nil {
 		return "", nil, err
@@ -193,23 +225,48 @@ func (self *finalityCapture) header(ctx context.Context, hash string) (string, *
 
 // Retain exact certificate bytes before cryptographic replay so a rejected
 // response remains available. Reuse never bypasses the verifier or hash checks.
-func (self *finalityCapture) certificate(ctx context.Context, hash, expectedHeader string) (string, error) {
+func (self *finalityCapture) certificate(ctx context.Context, hash, expectedHeader string, verify func(string) error) (string, error) {
 	name := "certificate-" + hash[2:] + ".json"
 	var certificate string
 	found, err := self.load(ctx, name, 8*1024*1024+32, &certificate)
-	if err != nil || found {
-		return certificate, err
+	if err != nil {
+		return "", err
 	}
-	raw, err := self.rpc.call(ctx, "chain_getBlock", []any{hash})
+	if found {
+		if verify != nil && certificate != "" {
+			if err := verify(certificate); err != nil {
+				return "", self.invalid(err)
+			}
+		}
+		return certificate, nil
+	}
+	validate := func(raw json.RawMessage) error {
+		scale, certificate, err := captureBlockCertificate(raw, hash)
+		if err != nil {
+			return err
+		}
+		if scale != expectedHeader {
+			return errors.New("native capture block and retained complete header differ")
+		}
+		if verify != nil && certificate != "" {
+			if err := verify(certificate); err != nil {
+				// Retain the original well-formed but rejected certificate as
+				// evidence. Its publication never grants finality or a cursor.
+				return errors.Join(err, self.save(ctx, name, certificate))
+			}
+		}
+		return nil
+	}
+	raw, err := self.call(ctx, "chain_getBlock", []any{hash}, validate)
 	if err != nil {
 		return "", err
 	}
 	scale, certificate, err := captureBlockCertificate(raw, hash)
 	if err != nil {
-		return "", err
+		return "", self.invalid(err)
 	}
 	if scale != expectedHeader {
-		return "", errors.New("native capture block and retained complete header differ")
+		return "", self.invalid(errors.New("native capture block and retained complete header differ"))
 	}
 	if certificate != "" {
 		if err := self.save(ctx, name, certificate); err != nil {

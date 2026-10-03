@@ -13,8 +13,6 @@ import (
 	"net/http"
 	"net/url"
 	"time"
-
-	"github.com/urfoundation/sn/protocol"
 )
 
 const maximumCollectionReplyBytes = 16 * 1024 * 1024
@@ -27,16 +25,20 @@ var errReceiptCollectorRedirect = errors.New("receipt collector refuses redirect
 // read profile and durable request/response hooks; the old collector has none.
 // The private wait port allows deterministic retry cancellation in tests.
 type receiptCollectorRpc struct {
-	url         string
-	client      *http.Client
-	wait        func(context.Context, time.Duration) error
-	requests    int
-	remaining   int
-	retryWindow time.Duration
-	finality    bool
-	storage     bool
-	beforeRead  func(context.Context, int, []byte) error
-	afterRead   func(context.Context, int, int) error
+	url              string
+	client           *http.Client
+	wait             func(context.Context, time.Duration) error
+	requests         int
+	remaining        int
+	retryWindow      time.Duration
+	finality         bool
+	requiredFinality bool
+	nativeExecution  bool
+	storage          bool
+	nativeProof      bool
+	beforeRead       func(context.Context, int, []byte) error
+	afterRead        func(context.Context, int, int) error
+	validateResult   func(json.RawMessage) error
 }
 
 // Credentials and redirect/proxy routes cannot silently change the explicit
@@ -72,7 +74,13 @@ func newReceiptCollectorRpc(endpoint string) *receiptCollectorRpc {
 // Result decoding may use a projection, but duplicate/case-folded keys are
 // rejected over the entire reply, including fields absent from that projection.
 func (self *receiptCollectorRpc) call(ctx context.Context, method string, params []any) (json.RawMessage, error) {
-	if self.storage {
+	if self.nativeProof {
+		switch method {
+		case "state_getReadProof", "state_getChildReadProof":
+		default:
+			return nil, errors.New("method is outside the native execution proof read profile")
+		}
+	} else if self.storage {
 		switch method {
 		case "chain_getBlockHash", "state_getStorage", "state_getReadProof":
 		default:
@@ -97,7 +105,11 @@ func (self *receiptCollectorRpc) call(ctx context.Context, method string, params
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if self.requests >= maximumCollectionRequests || self.remaining <= 0 {
+		maximumRequests, maximumReply := maximumCollectionRequests, maximumCollectionReplyBytes
+		if self.nativeProof {
+			maximumRequests, maximumReply = 2*MaximumNativeExecutionStorageNodes, MaximumNativeExecutionProofReplyBytes
+		}
+		if self.requests >= maximumRequests || self.remaining <= 0 {
 			return nil, errors.New("receipt collection exhausted its shared request/response budget")
 		}
 		self.requests++
@@ -122,64 +134,96 @@ func (self *receiptCollectorRpc) call(ctx context.Context, method string, params
 		}
 		request.Header.Set("Content-Type", "application/json")
 		response, requestErr := self.client.Do(request)
-		retry := false
 		var raw []byte
-		if requestErr != nil {
-			if response != nil && response.Body != nil {
-				response.Body.Close()
-			}
-			if errors.Is(requestErr, errReceiptCollectorRedirect) {
-				return nil, errReceiptCollectorRedirect
-			}
-			retry = true
-		} else {
-			limit := min(self.remaining, maximumCollectionReplyBytes)
-			raw, err = io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
-			closeErr := response.Body.Close()
-			self.remaining -= len(raw)
-			if len(raw) > limit {
-				return nil, errors.New("receipt collection response exceeds its byte budget")
-			}
-			if err != nil || closeErr != nil {
-				retry = true
-			} else if response.StatusCode != http.StatusOK {
-				retry = response.StatusCode == 408 || response.StatusCode == 429 || response.StatusCode == 502 || response.StatusCode == 503 || response.StatusCode == 504
-				if !retry {
-					return nil, fmt.Errorf("receipt collection %s refused HTTP status %d", method, response.StatusCode)
+		var readErr, closeErr error
+		status := 0
+		if response != nil {
+			status = response.StatusCode
+			if response.Body != nil {
+				limit := min(self.remaining, maximumReply)
+				raw, readErr = io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
+				closeErr = response.Body.Close()
+				self.remaining -= len(raw)
+				if len(raw) > limit {
+					readErr = errors.Join(readErr, errReceiptCollectorReplyBound)
 				}
+			} else if requestErr == nil {
+				readErr = errors.New("receipt collection response body is absent")
+			}
+		} else if requestErr == nil {
+			requestErr = errors.New("receipt collection response is absent")
+		}
+		var journalErr error
+		if self.afterRead != nil {
+			journalErr = self.afterRead(ctx, id, len(raw))
+		}
+		observationErr := errors.Join(requestErr, readErr, closeErr)
+		readCauses := errors.Join(observationErr, journalErr)
+		// Complete returned bytes are evidence even if their terminal read or
+		// close also failed. A wrong identity/ambiguous frame must dominate a
+		// transient tail; incomplete bytes alone cannot establish a conflict.
+		var reply receiptCollectorReply
+		complete := json.Valid(raw)
+		if complete {
+			if err := decodeReceiptCollectorReply(raw, id, &reply); err != nil {
+				if self.nativeProof {
+					err = errors.Join(ErrNativeExecutionProofConflict, err)
+				} else if self.nativeExecution {
+					err = nativeFinalityVerificationError(err)
+				}
+				return nil, errors.Join(err, readCauses)
 			}
 		}
-		if self.afterRead != nil {
-			if err := self.afterRead(ctx, id, len(raw)); err != nil {
-				return nil, err
+		if complete && len(reply.Error) != 0 {
+			return nil, errors.Join(fmt.Errorf("receipt collection %s returned an RPC error; required read capability is unavailable", method), readCauses)
+		}
+		if complete && self.validateResult != nil {
+			if err := self.validateResult(reply.Result); err != nil {
+				return nil, errors.Join(err, readCauses)
 			}
+		}
+		if journalErr != nil {
+			// A failed debit publication forbids another read, but cannot erase
+			// a complete contradiction that was already returned above.
+			return nil, readCauses
+		}
+		if status != 0 && status != http.StatusOK && !receiptCollectorStatusRetry(status) {
+			return nil, errors.Join(fmt.Errorf("receipt collection %s refused HTTP status %d", method, status), observationErr)
+		}
+		if observationErr != nil && !receiptCollectorRetryable(observationErr) {
+			return nil, observationErr
 		}
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, errors.Join(err, observationErr)
 		}
-		if retry {
+		if observationErr != nil || status != http.StatusOK {
+			if err := self.wait(ctx, time.Second); err != nil {
+				return nil, errors.Join(err, observationErr)
+			}
+			continue
+		}
+		if !complete {
+			if self.nativeProof || self.nativeExecution {
+				// An incomplete transport frame establishes no decoded evidence.
+				// Keep its charged bytes and original deadline while retrying.
+				if err := self.wait(ctx, time.Second); err != nil {
+					return nil, errors.Join(io.ErrUnexpectedEOF, err)
+				}
+				continue
+			}
+			return nil, errors.New("receipt collection reply is ambiguous or malformed")
+		}
+		if len(reply.Error) != 0 {
+			return nil, fmt.Errorf("receipt collection %s returned an RPC error; required read capability is unavailable", method)
+		}
+		// The native producer requires an actual header/block/hash. Explicit null
+		// is unavailable, not contradictory evidence; old receipt profiles retain
+		// their existing nullable read semantics.
+		if self.requiredFinality && bytes.Equal(bytes.TrimSpace(reply.Result), []byte("null")) {
 			if err := self.wait(ctx, time.Second); err != nil {
 				return nil, err
 			}
 			continue
-		}
-		if err := protocol.ValidateUniqueJsonKeys(raw); err != nil {
-			return nil, errors.New("receipt collection reply is ambiguous or malformed")
-		}
-		var reply struct {
-			Version string          `json:"jsonrpc"`
-			Id      *int            `json:"id"`
-			Result  json.RawMessage `json:"result"`
-			Error   json.RawMessage `json:"error"`
-		}
-		if err := json.Unmarshal(raw, &reply); err != nil || reply.Version != "2.0" || reply.Id == nil || *reply.Id != id ||
-			(len(reply.Result) == 0) == (len(reply.Error) == 0) {
-			return nil, errors.New("receipt collection reply identity or result/error envelope differs")
-		}
-		if len(reply.Error) != 0 {
-			// Capability and semantic errors never become null receipts and do
-			// not retry. In particular unsupported raw reads cannot downgrade.
-			return nil, fmt.Errorf("receipt collection %s returned an RPC error; required read capability is unavailable", method)
 		}
 		return reply.Result, nil
 	}
@@ -192,7 +236,13 @@ func (self *receiptCollectorRpc) read(ctx context.Context, method string, params
 	if err != nil {
 		return err
 	}
-	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, result) != nil {
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return fmt.Errorf("receipt collection %s result is unavailable or malformed", method)
+	}
+	if err := json.Unmarshal(raw, result); err != nil {
+		if self.nativeExecution {
+			return nativeFinalityVerificationError(err)
+		}
 		return fmt.Errorf("receipt collection %s result is unavailable or malformed", method)
 	}
 	return nil

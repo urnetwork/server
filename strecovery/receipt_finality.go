@@ -6,7 +6,6 @@ package strecovery
 import (
 	"context"
 	"errors"
-	"fmt"
 	"slices"
 )
 
@@ -155,8 +154,15 @@ func LoadReceiptFinalityProof(ctx context.Context, reference FileReference) (*Re
 // verifier checks internal consistency; independently establishing that state
 // (including absence of other pending signals) remains an explicit requirement.
 func (self *NativeFinalityCheckpoint) validate(archive *Archive, budget *nativeFinalityBudget) (*nativeFinalityHeader, error) {
+	if archive == nil {
+		return nil, errors.New("native finality archive is absent")
+	}
+	return self.validateGenesis(archive.Selection.Genesis, budget)
+}
+
+func (self *NativeFinalityCheckpoint) validateGenesis(genesis string, budget *nativeFinalityBudget) (*nativeFinalityHeader, error) {
 	if self == nil || self.Schema != NativeFinalityCheckpointSchema || self.CodecProfile != NativeFinalityCodecProfile ||
-		self.Genesis != archive.Selection.Genesis || !canonicalHex(self.Genesis, 32) || self.LiveState != "live" {
+		self.Genesis != genesis || !canonicalHex(self.Genesis, 32) || self.LiveState != "live" {
 		return nil, errors.New("native finality checkpoint schema, genesis, codec or live state differs")
 	}
 	if _, _, err := grandpaAuthorityWeights(self.Authorities); err != nil {
@@ -209,85 +215,16 @@ func VerifyReceiptFinality(ctx context.Context, archive *Archive, collection *Re
 	if err != nil {
 		return nil, err
 	}
-	budget := &nativeFinalityBudget{remaining: MaximumReceiptFinalityBytes}
-	anchor, err := checkpoint.validate(archive, budget)
-	if err != nil {
-		return nil, err
-	}
 	if proof == nil || (proof.Schema != ReceiptFinalityProofSchema && proof.Schema != ReceiptFinalityDescendantProofSchema) || proof.CheckpointHash != checkpoint.Hash() || proof.CollectionHash != collection.ContentHash || len(proof.Segments) == 0 || len(proof.Segments) > maximumGrandpaCertificates {
 		return nil, errors.New("native finality proof context or certificate count differs")
 	}
-	boundary := collection.Observations.NativeFinalized
-	if boundary.Number <= anchor.identity.Number || boundary.Number-anchor.identity.Number >= maximumNativeFinalityHeaders {
-		return nil, errors.New("native finality selected boundary is outside the rolling checkpoint interval")
+	window, err := verifyNativeFinalityWindow(ctx, archive.Selection.Genesis, checkpoint, collection.Observations.NativeFinalized, proof.Segments, proof.Schema == ReceiptFinalityDescendantProofSchema)
+	if err != nil {
+		return nil, err
 	}
-	cursor := anchor
-	var boundaryHeader *nativeFinalityHeader
-	setId, authorities, pending := checkpoint.SetId, checkpoint.Authorities, checkpoint.PendingChange
-	certificates := make([]GrandpaCertificateResult, 0, len(proof.Segments))
-	transitions := 0
-	for index, segment := range proof.Segments {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if len(segment.Headers) == 0 || len(segment.Headers) > maximumNativeFinalityHeaders-budget.headers {
-			return nil, errors.New("native finality segment header count differs")
-		}
-		for _, encoded := range segment.Headers {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			header, err := budget.header(encoded)
-			if err != nil {
-				return nil, err
-			}
-			if header.identity.Number != cursor.identity.Number+1 || header.parent != cursor.identity.Hash ||
-				header.identity.Number-anchor.identity.Number >= maximumNativeFinalityHeaders ||
-				proof.Schema == ReceiptFinalityProofSchema && header.identity.Number > boundary.Number {
-				return nil, errors.New("native finality header ancestry is disconnected or outside the collection boundary")
-			}
-			if header.identity.Number == boundary.Number {
-				if header.identity != boundary {
-					return nil, errors.New("native finality certified ancestry differs from the exact collection boundary")
-				}
-				boundaryHeader = header
-			}
-			if pending != nil && header.identity.Number > pending.EnactmentNumber {
-				return nil, errors.New("native finality segment skips the outgoing authority enactment certificate")
-			}
-			change, err := header.scheduledChange()
-			if err != nil {
-				return nil, err
-			}
-			if change != nil {
-				if pending != nil {
-					return nil, errors.New("native finality scheduled authority changes overlap")
-				}
-				pending = change
-			}
-			cursor = header
-		}
-		justification, err := budget.justification(segment.JustificationScale)
-		if err != nil {
-			return nil, err
-		}
-		certificate, err := verifyGrandpaCertificate(ctx, justification, cursor, setId, authorities, pending)
-		if err != nil {
-			return nil, fmt.Errorf("native finality segment %d: %w", index, err)
-		}
-		certificates = append(certificates, certificate)
-		if pending != nil && cursor.identity.Number == pending.EnactmentNumber {
-			if setId == ^uint64(0) {
-				return nil, errors.New("native finality authority set ID overflows")
-			}
-			setId++
-			authorities, pending = pending.Authorities, nil
-			transitions++
-		}
-	}
-	if boundaryHeader == nil || proof.Schema == ReceiptFinalityProofSchema && cursor.identity != boundary {
-		return nil, errors.New("native finality certificate chain does not cover the exact collection boundary")
-	}
+	anchor, boundaryHeader, cursor := window.anchor, window.boundary, window.tip
+	setId, authorities, pending := window.setId, window.authorities, window.pending
+	certificates, transitions := window.certificates, window.transitions
 	evmHash, variant, err := boundaryHeader.frontierHash()
 	if err != nil {
 		return nil, err
