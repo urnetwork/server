@@ -1805,6 +1805,28 @@ failed/pending financial work even when asynchronous acknowledgement lowers
 foreground waits. Keep CPU and the original queue observation open until exact
 runtime deployment and fresh complete observations establish improvement.
 
+The 2026-10-03 unchanged-checkpoint control found redundant maintenance in
+`UpdateClientReliabilityScoresCheckpointed`: after committing a running window,
+score publication revisited the same bounds and issued three running-table
+statements (four statement-trigger events) plus a token rewrite. A 100,000-row
+local control now performs none
+of those writes for a trusted unchanged checkpoint. Classification/observation
+versions, token presence, database guards, backward movement and required
+periodic repair are evaluated before skipping. Advancing windows and repair
+continue to run; interrupted checkpoint resume and rolling equivalence controls
+retain their existing results.
+
+Equal clocks do not prove unchanged input. The rolling algorithm relies on
+finalized drained blocks; an out-of-band late commit inside a trusted window
+was already outside its empty entering/leaving ranges. A baseline/fixed parity
+control preserves that boundary, and invalidating the observation generation
+repairs the newly committed invalid observation even at unchanged bounds.
+The shortcut is not a late-data detector or a change to block finality. Local
+statement counts/timing do not attribute Main's historical long query or prove
+CPU/coverage recovery. The 23:38 current-status read (`05159bed`) found a scheduled
+no-error task and all four checkpoints ending 23:07, but no historical backend,
+score-publication or durable task-finalization join. Preserve those limits.
+
 ### 1.3d Empty transfer-escrow write amplification
 Probe: `escrow-amplification`
 
