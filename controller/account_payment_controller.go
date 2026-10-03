@@ -335,7 +335,7 @@ func advancePayment(
 		// get the status of the transaction
 		txResult, err := circleClient.GetTransaction(clientSession.Ctx, *payment.PaymentRecord)
 		if err != nil {
-			returnErr = fmt.Errorf("[%s]Payment transaction error = %s", payment.PaymentId, err)
+			returnErr = fmt.Errorf("[%s]Payment transaction error: %w", payment.PaymentId, err)
 			return
 		}
 
