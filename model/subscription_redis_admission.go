@@ -191,38 +191,18 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 		}
 	})
 	leave()
-	selected := []*TransferEscrowBalance{}
-	remaining := requested
-	var priority Priority
-	for _, balance := range balances {
-		if balance.balanceByteCount <= 0 {
-			continue
-		}
-		amount, err := redisContractReservation(ctx, "reserve", balance.balanceId, admission.contractId, balance.balanceByteCount, remaining, redisContractReservationLease)
-		if err != nil {
-			return nil, nil, err
-		}
-		if amount == 0 {
-			continue
-		}
-		selected = append(selected, &TransferEscrowBalance{BalanceId: balance.balanceId, BalanceByteCount: amount})
-		if balance.paid {
-			priority += PaidPriority
-		}
-		remaining -= amount
-		if remaining == 0 {
-			break
-		}
+	selected, granted, priority, err := reserveRedisTransferEscrowBalances(balances, requested,
+		func(balance *escrowTransferBalance, remaining ByteCount) (ByteCount, error) {
+			return redisContractReservation(ctx, "reserve", balance.balanceId, admission.contractId, balance.balanceByteCount, remaining, redisContractReservationLease)
+		},
+		func(balanceId server.Id) {
+			// A failed compensation expires on its lease.
+			_, _ = redisContractReservation(ctx, "release", balanceId, admission.contractId, 0, 0, redisContractReservationLease)
+		},
+	)
+	if err != nil {
+		return nil, nil, err
 	}
-	if remaining != 0 {
-		// This is a known pre-write refusal, unlike an ambiguous commit. Release
-		// only this request's tokens; a failed compensation expires on its lease.
-		for _, b := range selected {
-			_, _ = redisContractReservation(ctx, "release", b.BalanceId, admission.contractId, 0, 0, redisContractReservationLease)
-		}
-		return nil, nil, fmt.Errorf("Insufficient balance (%d).", requested-remaining)
-	}
-	priority /= Priority(len(selected))
 	if err := lockActiveContractClientsInTx(ctx, tx, sourceNetworkId, sourceId, destinationNetworkId, destinationId); err != nil {
 		return nil, nil, err
 	}
@@ -238,10 +218,63 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 		}
 		batch.Queue(`INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,companion_contract_id,payer_network_id,usage_origin_is_source,create_time,priority)
             VALUES($1,$2,$3,$4,$5,$6,$7,$8,($7::uuid IS NULL),clock_timestamp() AT TIME ZONE 'UTC',$9)`,
-			admission.contractId, sourceNetworkId, sourceId, destinationNetworkId, destinationId, requested, companionId, payerNetworkId, priority)
+			admission.contractId, sourceNetworkId, sourceId, destinationNetworkId, destinationId, granted, companionId, payerNetworkId, priority)
 		batch.Queue(contractExtenderInsertSql, admission.contractId, sourceId, destinationId, ContractPartySource, ContractPartyDestination)
 	})
-	return &TransferEscrow{ContractId: admission.contractId, CompanionContractId: companionId, TransferByteCount: requested, Priority: priority, Balances: selected}, nil, nil
+	return &TransferEscrow{ContractId: admission.contractId, CompanionContractId: companionId, TransferByteCount: granted, Priority: priority, Balances: selected}, nil, nil
+}
+
+// reserveRedisTransferEscrowBalances reserves up to `requested` bytes from
+// `balances` in order, through `reserve`, which atomically reserves at most
+// `remaining` bytes of one balance's unreserved credit and returns the amount
+// reserved (the Redis reservation script clamps to what concurrent contracts
+// left available, so two creators never reserve the same bytes).
+//
+// The granted contract size is the reserved total when it covers the request,
+// or shrinks to fit the reserved total when that is at least the shrink floor
+// (see grantTransferEscrowByteCount). Below the floor every reservation this
+// request made is released through `release` and the request is refused with
+// "Insufficient balance". The selected escrow balances sum to the granted size.
+func reserveRedisTransferEscrowBalances(
+	balances []*escrowTransferBalance,
+	requested ByteCount,
+	reserve func(balance *escrowTransferBalance, remaining ByteCount) (ByteCount, error),
+	release func(balanceId server.Id),
+) (selected []*TransferEscrowBalance, granted ByteCount, priority Priority, err error) {
+	selected = []*TransferEscrowBalance{}
+	remaining := requested
+	for _, balance := range balances {
+		if balance.balanceByteCount <= 0 {
+			continue
+		}
+		amount, err := reserve(balance, remaining)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		if amount == 0 {
+			continue
+		}
+		selected = append(selected, &TransferEscrowBalance{BalanceId: balance.balanceId, BalanceByteCount: amount})
+		if balance.paid {
+			priority += PaidPriority
+		}
+		remaining -= amount
+		if remaining == 0 {
+			break
+		}
+	}
+	reserved := requested - remaining
+	granted, ok := grantTransferEscrowByteCount(requested, reserved)
+	if !ok {
+		// This is a known pre-write refusal, unlike an ambiguous commit. Release
+		// only this request's tokens.
+		for _, b := range selected {
+			release(b.BalanceId)
+		}
+		return nil, 0, 0, fmt.Errorf("Insufficient balance (%d).", reserved)
+	}
+	priority /= Priority(len(selected))
+	return selected, granted, priority, nil
 }
 
 // ReconcileRedisContractReservation repairs one known contract, without shared
