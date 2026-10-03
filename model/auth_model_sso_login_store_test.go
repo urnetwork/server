@@ -15,6 +15,8 @@ type ssoLoginFakeStore struct {
 	passwordAuths map[string]server.Id
 	networks      map[server.Id]string
 	networkIds    map[server.Id]server.Id
+	// network_user rows: user_auth -> rows
+	legacyUsers map[string][]legacyNetworkUser
 
 	addedSso []AddSsoAuthArgs
 	signed   []string
@@ -26,6 +28,7 @@ func newSsoLoginFakeStore() *ssoLoginFakeStore {
 		passwordAuths: map[string]server.Id{},
 		networks:      map[server.Id]string{},
 		networkIds:    map[server.Id]server.Id{},
+		legacyUsers:   map[string][]legacyNetworkUser{},
 	}
 }
 
@@ -53,6 +56,9 @@ func (self *ssoLoginFakeStore) store() *parsedAuthJwtLoginStore {
 				return nil, false, false
 			}
 			return &userId, true, true
+		},
+		legacyUsersByUserAuth: func(ctx context.Context, normalUserAuth string) ([]legacyNetworkUser, error) {
+			return self.legacyUsers[normalUserAuth], nil
 		},
 		adminNetwork: func(ctx context.Context, userId server.Id) (server.Id, string, bool) {
 			networkName, ok := self.networks[userId]
@@ -142,5 +148,93 @@ func TestSsoLoginWithNetworkSignsThatNetwork(t *testing.T) {
 	}
 	if fake.success != 1 || len(fake.addedSso) != 0 {
 		t.Fatalf("successes=%d added sso=%v, want 1 success and no new sso row", fake.success, fake.addedSso)
+	}
+}
+
+func (self *ssoLoginFakeStore) addLegacyUser(userAuth string, authType AuthType) server.Id {
+	userId := server.NewId()
+	self.legacyUsers[userAuth] = append(self.legacyUsers[userAuth], legacyNetworkUser{
+		UserId:   userId,
+		AuthType: string(authType),
+	})
+	return userId
+}
+
+// An account created with Apple sign-in whose network_user_auth_sso row was
+// never migrated logs in with Apple. Before the fix the login found no sso or
+// password row and sent the user to network creation, which then failed
+// because network_user already held the email (inbox 501).
+func TestSsoLoginAppleLegacyUnmigratedLogsInAndBackfillsOnce(t *testing.T) {
+	fake := newSsoLoginFakeStore()
+	userAuth := "legacy@example.invalid"
+	userId := fake.addLegacyUser(userAuth, AuthTypeApple)
+	networkId := fake.addNetwork(userId, "legacy")
+	want := fmt.Sprintf("network=%s user=%s name=legacy", networkId, userId)
+
+	for i := 0; i < 2; i += 1 {
+		result, err := handleLoginParsedAuthJwtWithStore(
+			// the token email may differ in case from the stored, normalized one
+			ssoLoginTestArgs(AuthTypeApple, " Legacy@Example.invalid"),
+			context.Background(),
+			fake.store(),
+		)
+		if err != nil || result == nil || result.Network == nil {
+			t.Fatalf("login %d: result=%+v err=%v, want the legacy account's network", i, result, err)
+		}
+		if result.Network.ByJwt != want {
+			t.Fatalf("login %d: signed %q, want %q", i, result.Network.ByJwt, want)
+		}
+	}
+	if len(fake.addedSso) != 1 {
+		t.Fatalf("sso rows added %d times, want one backfill", len(fake.addedSso))
+	}
+	backfill := fake.addedSso[0]
+	if backfill.UserId != userId || backfill.AuthJwtType != SsoAuthTypeApple {
+		t.Fatalf("backfill = %+v, want an apple row for user %s", backfill, userId)
+	}
+}
+
+// The fallback never logs in to an account that was not created with Apple
+// sign-in, even when the verified email matches.
+func TestSsoLoginAppleLegacyFallbackNeedsAppleAccount(t *testing.T) {
+	for _, authType := range []AuthType{AuthTypeGoogle, AuthType(UserAuthTypeEmail), AuthType("password"), AuthType("guest")} {
+		t.Run(string(authType), func(t *testing.T) {
+			fake := newSsoLoginFakeStore()
+			userAuth := "other@example.invalid"
+			userId := fake.addLegacyUser(userAuth, authType)
+			fake.addNetwork(userId, "other")
+
+			result, err := handleLoginParsedAuthJwtWithStore(
+				ssoLoginTestArgs(AuthTypeApple, userAuth),
+				context.Background(),
+				fake.store(),
+			)
+			if err != nil || result == nil || result.Network != nil || result.UserName == nil {
+				t.Fatalf("result=%+v err=%v, want the new-network route", result, err)
+			}
+			if len(fake.signed) != 0 || len(fake.addedSso) != 0 {
+				t.Fatalf("signed %v and added sso %v for a %s account", fake.signed, fake.addedSso, authType)
+			}
+		})
+	}
+}
+
+// Only an Apple sign-in uses the fallback.
+func TestSsoLoginLegacyFallbackIsAppleOnly(t *testing.T) {
+	fake := newSsoLoginFakeStore()
+	userAuth := "apple@example.invalid"
+	userId := fake.addLegacyUser(userAuth, AuthTypeApple)
+	fake.addNetwork(userId, "apple")
+
+	result, err := handleLoginParsedAuthJwtWithStore(
+		ssoLoginTestArgs(AuthTypeGoogle, userAuth),
+		context.Background(),
+		fake.store(),
+	)
+	if err != nil || result == nil || result.Network != nil {
+		t.Fatalf("google login result=%+v err=%v, want no login to the apple account", result, err)
+	}
+	if len(fake.signed) != 0 || len(fake.addedSso) != 0 {
+		t.Fatalf("signed %v and added sso %v", fake.signed, fake.addedSso)
 	}
 }

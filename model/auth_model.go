@@ -338,6 +338,9 @@ type parsedAuthJwtLoginStore struct {
 	ssoAuthsByUserAuth func(ctx context.Context, userAuth string) ([]NetworkUserSsoAuth, error)
 	// the network_user_auth_password row for the user auth, if any
 	passwordAuthByUserAuth func(ctx context.Context, userAuth string) (userId *server.Id, verified bool, found bool)
+	// the legacy network_user rows (user id and auth type) whose user_auth is
+	// the normalized user auth
+	legacyUsersByUserAuth func(ctx context.Context, normalUserAuth string) ([]legacyNetworkUser, error)
 	// the network the user administers, if any
 	adminNetwork              func(ctx context.Context, userId server.Id) (networkId server.Id, networkName string, found bool)
 	addSsoAuth                func(args *AddSsoAuthArgs, ctx context.Context) error
@@ -371,6 +374,33 @@ var parsedAuthJwtLoginDb = parsedAuthJwtLoginStore{
 			})
 		})
 		return
+	},
+	legacyUsersByUserAuth: func(ctx context.Context, normalUserAuth string) ([]legacyNetworkUser, error) {
+		legacyUsers := []legacyNetworkUser{}
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT
+						user_id,
+						auth_type
+					FROM network_user
+					WHERE user_auth = $1
+				`,
+				normalUserAuth,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var legacyUser legacyNetworkUser
+					server.Raise(result.Scan(
+						&legacyUser.UserId,
+						&legacyUser.AuthType,
+					))
+					legacyUsers = append(legacyUsers, legacyUser)
+				}
+			})
+		})
+		return legacyUsers, nil
 	},
 	adminNetwork: func(ctx context.Context, userId server.Id) (networkId server.Id, networkName string, found bool) {
 		server.Db(ctx, func(conn server.PgConn) {
@@ -418,6 +448,45 @@ var parsedAuthJwtLoginDb = parsedAuthJwtLoginStore{
 	},
 }
 
+// legacyNetworkUser is the sign-in identity kept on the network_user row
+// itself, from before sign-ins moved to the network_user_auth_* tables.
+type legacyNetworkUser struct {
+	UserId   server.Id
+	AuthType string
+}
+
+// legacyAppleSsoUserId finds an account created with Apple sign-in whose
+// Apple sign-in row was never migrated to network_user_auth_sso (the
+// migration skips stored tokens it cannot parse). It matches exactly as the
+// legacy login did: the normalized verified token email equals
+// network_user.user_auth AND the account's auth type is apple. An account
+// created with a password or another provider never matches on the email
+// alone.
+func legacyAppleSsoUserId(
+	ctx context.Context,
+	authJwt AuthJwt,
+	store *parsedAuthJwtLoginStore,
+) (*server.Id, error) {
+	if authJwt.AuthType != AuthTypeApple {
+		return nil, nil
+	}
+	normalUserAuth, _ := NormalUserAuth(authJwt.UserAuth)
+	if normalUserAuth == "" {
+		return nil, nil
+	}
+	legacyUsers, err := store.legacyUsersByUserAuth(ctx, normalUserAuth)
+	if err != nil {
+		return nil, err
+	}
+	for _, legacyUser := range legacyUsers {
+		if AuthType(legacyUser.AuthType) == AuthTypeApple {
+			userId := legacyUser.UserId
+			return &userId, nil
+		}
+	}
+	return nil, nil
+}
+
 func handleLoginParsedAuthJwt(
 	args *HandleLoginParsedAuthJwtArgs,
 	ctx context.Context,
@@ -438,6 +507,7 @@ func handleLoginParsedAuthJwtWithStore(
 	ssoExists := false
 	userAuthExists := false
 	userAuthEmailVerified := false
+	legacySsoExists := false
 
 	/**
 	 * get sso auths
@@ -465,6 +535,21 @@ func handleLoginParsedAuthJwtWithStore(
 	}
 
 	if userId == nil {
+		/**
+		 * no sso or password row: an Apple account whose sign-in row was
+		 * never migrated still logs in, and its sso row is backfilled below
+		 */
+		legacyUserId, err := legacyAppleSsoUserId(ctx, authJwt, store)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get legacy SSO user: %w", err)
+		}
+		if legacyUserId != nil {
+			legacySsoExists = true
+			userId = legacyUserId
+		}
+	}
+
+	if userId == nil {
 
 		// new user - direct to create network
 		return &AuthLoginResult{
@@ -487,7 +572,7 @@ func handleLoginParsedAuthJwtWithStore(
 		// todo - mark userauth as verified
 	}
 
-	if !ssoExists && !userAuthExists {
+	if !ssoExists && !userAuthExists && !legacySsoExists {
 
 		/**
 		 * this generally would only happen for guest users
@@ -516,6 +601,7 @@ func handleLoginParsedAuthJwtWithStore(
 		 * User is logging in with an SSO that does not exist
 		 * but user has a different SSO
 		 * add the new SSO auth
+		 * (for a legacy Apple account this backfills its sso row)
 		 */
 		store.addSsoAuth(
 			&AddSsoAuthArgs{
