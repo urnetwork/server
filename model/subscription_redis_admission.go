@@ -30,7 +30,20 @@ var redisContractReservationResults = prometheus.NewCounterVec(prometheus.Counte
 	Help: "Redis reservation operations by finite outcome; includes token replays and is not committed contract throughput.",
 }, []string{"operation", "result"})
 
-func init() { prometheus.MustRegister(redisContractReservationResults) }
+var redisGrantSelectionLimitsMetric = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "urnetwork_redis_contract_selection_limit",
+	Help: "Declared per-request grant selection limit; immutable process config, not remaining financial balance.",
+}, []string{"resource"})
+
+var redisGrantSelectionFraction = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	Name:    "urnetwork_redis_contract_selection_fraction",
+	Help:    "Fraction of the request-owned grant selection capacity consumed, including held requests.",
+	Buckets: []float64{0.1, 0.25, 0.5, 0.75, 0.8, 0.9, 1},
+}, []string{"resource"})
+
+func init() {
+	prometheus.MustRegister(redisContractReservationResults, redisGrantSelectionLimitsMetric, redisGrantSelectionFraction)
+}
 
 type redisAdmissionContextKey struct{}
 
@@ -41,13 +54,21 @@ type redisContractAdmission struct {
 	contractId          server.Id
 	stateLock           sync.Mutex
 	attemptedBalanceIds []server.Id
+	attemptedBalanceKVs map[server.Id]bool
 	publicationStarted  bool
 }
 
 func (self *redisContractAdmission) noteBalance(balanceId server.Id) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	if !slices.Contains(self.attemptedBalanceIds, balanceId) {
+	if self.attemptedBalanceKVs == nil {
+		self.attemptedBalanceKVs = make(map[server.Id]bool, len(self.attemptedBalanceIds))
+		for _, id := range self.attemptedBalanceIds {
+			self.attemptedBalanceKVs[id] = true
+		}
+	}
+	if !self.attemptedBalanceKVs[balanceId] {
+		self.attemptedBalanceKVs[balanceId] = true
 		self.attemptedBalanceIds = append(self.attemptedBalanceIds, balanceId)
 	}
 }
@@ -142,9 +163,9 @@ if ARGV[1]=='release' or ARGV[1]=='release-owned' then
   total=sub(total,existing); redis.call('HDEL',KEYS[2],ARGV[2]); redis.call('ZREM',KEYS[3],ARGV[2])
  end
  redis.call('ZREM',KEYS[5],ARGV[2])
-elseif ARGV[1]=='reserve' or ARGV[1]=='reserve-owned' or ARGV[1]=='restore' then
+elseif ARGV[1]=='reserve' or ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned-full' or ARGV[1]=='restore' then
  if existing then
-  if ARGV[1]=='reserve-owned' and not redis.call('ZSCORE',KEYS[5],ARGV[2]) then
+  if (ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned-full') and not redis.call('ZSCORE',KEYS[5],ARGV[2]) then
    return redis.error_reply('missing owned reservation marker')
   end
   if less(ARGV[4],existing) then return redis.error_reply('reservation retry changed amount') end
@@ -155,6 +176,7 @@ elseif ARGV[1]=='reserve' or ARGV[1]=='reserve-owned' or ARGV[1]=='restore' then
   amount=ARGV[4]; if less(available,amount) then
    if ARGV[1]=='restore' then return redis.error_reply('reservation recovery overflow') end
    amount=available
+   if ARGV[1]=='reserve-owned-full' then amount='0' end
   end
   if amount~='0' then
    -- The total remains <= the supplied signed-int64 credit, so INCRBY is exact.
@@ -162,7 +184,7 @@ elseif ARGV[1]=='reserve' or ARGV[1]=='reserve-owned' or ARGV[1]=='restore' then
    redis.call('INCRBY',KEYS[1],amount); total=redis.call('GET',KEYS[1])
    redis.call('HSET',KEYS[2],ARGV[2],amount)
    redis.call('ZADD',KEYS[3],milliseconds+lease,ARGV[2])
-   if ARGV[1]=='reserve-owned' then redis.call('ZADD',KEYS[5],milliseconds,ARGV[2]) end
+   if ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned-full' then redis.call('ZADD',KEYS[5],milliseconds,ARGV[2]) end
   end
  end
  if ARGV[1]=='restore' then redis.call('ZREM',KEYS[5],ARGV[2]) end
@@ -198,7 +220,7 @@ func redisContractReservation(ctx context.Context, operation string, balanceId, 
 	result := "accepted"
 	if err != nil {
 		result = "error"
-	} else if (operation == "reserve" || operation == "reserve-owned") && amount == 0 {
+	} else if (operation == "reserve" || operation == "reserve-owned" || operation == "reserve-owned-full") && amount == 0 {
 		result = "refused"
 	}
 	redisContractReservationResults.WithLabelValues(operation, result).Inc()
@@ -228,45 +250,16 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 	if err != nil {
 		return nil, nil, err
 	}
-	var balances []*escrowTransferBalance
 	leave := server.EnterContractCreationStage(ctx, server.ContractStageGrantSelection)
-	rows, err := tx.Query(ctx, escrowTransferBalanceSql+` ORDER BY end_time,start_time,balance_id`, payerNetworkId, server.NowUtc())
-	server.WithPgResult(rows, err, func() {
-		for rows.Next() {
-			b := &escrowTransferBalance{}
-			server.Raise(rows.Scan(&b.balanceId, &b.paid, &b.balanceByteCount, &b.startTime, &b.endTime))
-			balances = append(balances, b)
-		}
-	})
+	payerClientId := sourceId
+	if sourceNetworkId != payerNetworkId {
+		payerClientId = destinationId
+	}
+	selected, priority, err := selectRedisTransferBalances(ctx, tx, admission, payerNetworkId, payerClientId, requested)
 	leave()
-	selected := []*TransferEscrowBalance{}
-	remaining := requested
-	var priority Priority
-	for _, balance := range balances {
-		if balance.balanceByteCount <= 0 {
-			continue
-		}
-		admission.noteBalance(balance.balanceId)
-		amount, err := redisContractReservation(ctx, "reserve-owned", balance.balanceId, admission.contractId, balance.balanceByteCount, remaining, redisContractReservationLease)
-		if err != nil {
-			return nil, nil, err
-		}
-		if amount == 0 {
-			continue
-		}
-		selected = append(selected, &TransferEscrowBalance{BalanceId: balance.balanceId, BalanceByteCount: amount})
-		if balance.paid {
-			priority += PaidPriority
-		}
-		remaining -= amount
-		if remaining == 0 {
-			break
-		}
+	if err != nil {
+		return nil, nil, err
 	}
-	if remaining != 0 {
-		return nil, nil, fmt.Errorf("%w (%d).", errRedisReservationInsufficient, requested-remaining)
-	}
-	priority /= Priority(len(selected))
 	if err := lockActiveContractClientsInTx(ctx, tx, sourceNetworkId, sourceId, destinationNetworkId, destinationId); err != nil {
 		return nil, nil, err
 	}
@@ -274,6 +267,13 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 		return nil, nil, err
 	}
 	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	selectedIds := make([]server.Id, 0, len(selected))
+	for _, balance := range selected {
+		selectedIds = append(selectedIds, balance.BalanceId)
+	}
+	if err := redisGrantSelectedCurrent(ctx, tx, selectedIds); err != nil {
 		return nil, nil, err
 	}
 	// Per-contract rows only. The compatibility triggers omit marked rows from

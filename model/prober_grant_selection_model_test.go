@@ -165,72 +165,82 @@ func TestDynamicProberGrantReservedWindowsAndExactFallback(t *testing.T) {
 // A matching identity is not a spending exemption. All funding predicates,
 // current durable bytes, and committed reservations remain authoritative.
 func TestDynamicProberGrantEligibilityAndReservationSemantics(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		for _, name := range []string{"wrong identity", "missing identity", "wrong payer", "inactive", "expired", "future", "paid", "pro", "negative revenue", "subsidized", "small original", "reserved", "over-reserved", "partial", "negative reservation", "exact spendable", "missing reservation"} {
-			clients := newEscrowSelectionTestClients(t, ctx)
-			setDynamicProberIdentityForTest(t, ctx, clients)
-			now := server.NowUtc()
-			old := addDynamicProberGrantForTest(ctx, clients.payerNetworkId, now.Add(-2*time.Hour), now.Add(time.Hour), 4096)
-			candidate := addDynamicProberGrantForTest(ctx, clients.payerNetworkId, now.Add(-time.Hour), now.Add(2*time.Hour), 4096)
-			server.Tx(ctx, func(tx server.PgTx) {
-				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET start_balance_byte_count=4096 WHERE balance_id=$1`, old.BalanceId))
-				switch name {
-				case "wrong identity":
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE prober_identity SET network_id=$1 WHERE singleton`, server.NewId()))
-				case "missing identity":
-					server.RaisePgResult(tx.Exec(ctx, `DELETE FROM prober_identity WHERE singleton`))
-				case "wrong payer":
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET network_id=$2 WHERE balance_id=$1`, candidate.BalanceId, server.NewId()))
-				case "inactive":
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=0 WHERE balance_id=$1`, candidate.BalanceId))
-				case "expired":
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET end_time=$2 WHERE balance_id=$1`, candidate.BalanceId, now.Add(-time.Second)))
-				case "future":
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET start_time=$2 WHERE balance_id=$1`, candidate.BalanceId, now.Add(time.Hour)))
-				case "paid":
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET net_revenue_nano_cents=1 WHERE balance_id=$1`, candidate.BalanceId))
-				case "pro":
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET pro=true WHERE balance_id=$1`, candidate.BalanceId))
-				case "negative revenue":
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET net_revenue_nano_cents=-1 WHERE balance_id=$1`, candidate.BalanceId))
-				case "subsidized":
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET subsidy_net_revenue_nano_cents=1 WHERE balance_id=$1`, candidate.BalanceId))
-				case "small original":
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET start_balance_byte_count=4096 WHERE balance_id=$1`, candidate.BalanceId))
-				}
-			})
-			reserved := ByteCount(0)
-			switch name {
-			case "reserved":
-				reserved = 4096
-			case "over-reserved":
-				reserved = 8192
-			case "partial":
-				reserved = 3584
-			case "negative reservation":
-				reserved = -1024
-			case "exact spendable":
-				reserved = 3072
-			}
-			if reserved != 0 {
-				if reserved > 0 {
-					clients.reserve(ctx, candidate.BalanceId, reserved)
-				}
-				server.Redis(ctx, func(r server.RedisClient) {
-					server.Raise(r.Set(ctx, netEscrowKey(candidate.BalanceId), reserved, time.Hour).Err())
+		for _, legacy := range []bool{false, true} {
+			for _, name := range []string{"wrong identity", "missing identity", "wrong payer", "inactive", "expired", "future", "paid", "pro", "negative revenue", "subsidized", "small original", "reserved", "over-reserved", "partial", "negative reservation", "exact spendable", "missing reservation"} {
+				clients := newEscrowSelectionTestClients(t, ctx)
+				setDynamicProberIdentityForTest(t, ctx, clients)
+				now := server.NowUtc()
+				old := addDynamicProberGrantForTest(ctx, clients.payerNetworkId, now.Add(-2*time.Hour), now.Add(time.Hour), 4096)
+				candidate := addDynamicProberGrantForTest(ctx, clients.payerNetworkId, now.Add(-time.Hour), now.Add(2*time.Hour), 4096)
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET start_balance_byte_count=4096 WHERE balance_id=$1`, old.BalanceId))
+					switch name {
+					case "wrong identity":
+						server.RaisePgResult(tx.Exec(ctx, `UPDATE prober_identity SET network_id=$1 WHERE singleton`, server.NewId()))
+					case "missing identity":
+						server.RaisePgResult(tx.Exec(ctx, `DELETE FROM prober_identity WHERE singleton`))
+					case "wrong payer":
+						server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET network_id=$2 WHERE balance_id=$1`, candidate.BalanceId, server.NewId()))
+					case "inactive":
+						server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=0 WHERE balance_id=$1`, candidate.BalanceId))
+					case "expired":
+						server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET end_time=$2 WHERE balance_id=$1`, candidate.BalanceId, now.Add(-time.Second)))
+					case "future":
+						server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET start_time=$2 WHERE balance_id=$1`, candidate.BalanceId, now.Add(time.Hour)))
+					case "paid":
+						server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET net_revenue_nano_cents=1 WHERE balance_id=$1`, candidate.BalanceId))
+					case "pro":
+						server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET pro=true WHERE balance_id=$1`, candidate.BalanceId))
+					case "negative revenue":
+						server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET net_revenue_nano_cents=-1 WHERE balance_id=$1`, candidate.BalanceId))
+					case "subsidized":
+						server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET subsidy_net_revenue_nano_cents=1 WHERE balance_id=$1`, candidate.BalanceId))
+					case "small original":
+						server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET start_balance_byte_count=4096 WHERE balance_id=$1`, candidate.BalanceId))
+					}
 				})
-			}
-			escrow, err := clients.create(ctx, 1024, false)
-			if err != nil {
-				t.Fatalf("%s: allocation failed", name)
-			}
-			wanted := old.BalanceId
-			if name == "negative reservation" || name == "exact spendable" || name == "missing reservation" {
-				wanted = candidate.BalanceId
-			}
-			if len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != wanted || escrow.Balances[0].BalanceByteCount != 1024 || escrow.Priority != UnpaidPriority {
-				t.Fatalf("%s: changed eligibility, exact allocation, or priority", name)
+				reserved := ByteCount(0)
+				switch name {
+				case "reserved":
+					reserved = 4096
+				case "over-reserved":
+					reserved = 8192
+				case "partial":
+					reserved = 3584
+				case "negative reservation":
+					reserved = -1024
+				case "exact spendable":
+					reserved = 3072
+				}
+				if reserved != 0 {
+					if reserved > 0 {
+						clients.reserve(ctx, candidate.BalanceId, reserved)
+					}
+					server.Redis(ctx, func(r server.RedisClient) {
+						server.Raise(r.Set(ctx, netEscrowKey(candidate.BalanceId), reserved, time.Hour).Err())
+					})
+				}
+				var escrow *TransferEscrow
+				var err error
+				if legacy {
+					escrow, err = createTransferEscrow(ctx, clients.payerNetworkId, clients.payerId, clients.providerNetworkId, clients.providerId, 1024)
+				} else {
+					escrow, err = clients.create(ctx, 1024, false)
+				}
+				if err != nil || escrow == nil {
+					t.Fatalf("legacy=%t %s: allocation failed: %v", legacy, name, err)
+				}
+				wanted := old.BalanceId
+				if legacy && name == "negative reservation" || name == "exact spendable" || name == "missing reservation" {
+					wanted = candidate.BalanceId
+				}
+				if len(escrow.Balances) != 1 || escrow.Balances[0].BalanceId != wanted || escrow.Balances[0].BalanceByteCount != 1024 || escrow.Priority != UnpaidPriority {
+					t.Fatalf("legacy=%t %s: changed eligibility, exact allocation, or priority: %+v", legacy, name, escrow)
+				}
 			}
 		}
 	})
