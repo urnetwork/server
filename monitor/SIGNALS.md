@@ -17320,7 +17320,6 @@ This is the version-to-artifact contract checked by the probe:
 | 749 | Persistent resumable registration binding with exact required columns and digest bounds/checks, immediate identity uniqueness, and only the network-deletion cascade |
 | 750 | Required false-default boolean `network_client_location.arin_quality_verified` |
 | 751 | Nullable no-default UUID subscriber write token plus the exact enabled, unconditional before-insert/update invalidation function and trigger |
-
 | 752 | Private prober shard ownership, unique active slot, and cleanup fences |
 | 753 | Exact net-escrow contract revision point lookup |
 | 754 | Durable per-balance net-escrow reservation snapshot |
@@ -17333,6 +17332,7 @@ This is the version-to-artifact contract checked by the probe:
 | 761 | Nullable no-default Solana expected amount and exact partial lookup, persistent amount reservations with immediate primary key, and nullable support fields with a 64-character sender bound |
 | 762 | Canonical Circle customer-transfer request identity, bounded payloads, monotonic custody and append-only retained observations |
 | 763 | Persistent legacy settlement intent with exact defaults/checks, partition/due indexes, enabled exact outcome-update guard, and immediate contract retention foreign key with all four operative guards; no shared-balance foreign key |
+| 764 | Per-contract and party logical close-report receipts with exact payload columns, nonzero identity and byte checks, enabled contract-delete cascade, and no shared-balance or global-report ownership |
 
 The 2026-10-03 full local watcher gate found missing detector contracts for
 759–763. This was a monitor catalog omission, not evidence of absent Main
