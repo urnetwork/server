@@ -18681,6 +18681,52 @@ source mismatch, unavailable reads, and finite byte/time bounds. Collection
 still requires the separately admitted private inventory/hostname wrapper;
 this module installs no service endpoint or profiling producer.
 
+The 2026-10-03 R57 follow-up joined all five current native Connect processes on
+each host to source `114b708c`. Edge4 g1 retained the same PID, start, executable
+and image while RSS grew from about 120,343 MiB at 15:57Z to 173,379 MiB at
+16:14Z and 191,858 MiB at 16:23Z. Its metric row was absent from the earlier
+bounded Mimir sample. Neither missing metrics nor a deployed current source
+turns that native growth into a healthy or retired process. The sample does
+not identify the allocation owner or prove that the same rate will continue.
+
+The native discriminator now reads a fixed `/proc/meminfo` field set before
+and after a bounded process census. It retains the smaller observed
+`MemAvailable` only when both frames and the boot identity qualify. The
+optional census reads at most 1,024 process identities and `statm` records
+within five seconds, inside the existing total time and byte limits. A PID
+cap, permission failure, reuse, or changing process set makes its aggregate
+incomplete. It must still attempt the final independent memory frame: the
+first edge4 census exceeded the PID cap, and discarding its final frame lost
+otherwise obtainable host evidence. Separate controls cover healthy and zero
+available memory, capped or failed census with valid paired frames, missing
+fields, malformed units, boot changes, PID reuse, and time exhaustion.
+
+Summed process RSS is approximate and can count shared pages more than once;
+it omits kernel and cache ownership. It cannot be subtracted from `MemTotal`
+to manufacture free capacity. The completed edge4 follow-up observed roughly
+489.75 GiB available out of 944.26 GiB, while its process aggregate remained
+capped. Paired headroom is an observation, not a growth forecast or a safe
+old/new rollout-overlap budget. Keep that qualification separate from the
+Connect process census's own completeness. The private activation also checks
+its exact time fence during local preflight: a nominal ten-minute window
+extended five seconds backwards exceeded the reader's ten-minute maximum and
+correctly refused before contact; disabled source manifests still need no
+activation fence.
+
+Use existing same-process pool, heap, stack, resident and worker counters
+before adding a live profile. `resident_clients` leaves the residents map
+before `CloseAndWait` completes, whereas callback, forward and idle-watch
+gauges decrement at actual worker exit. Their ratio can include constructing
+or retiring owners and alone cannot prove a leak. Message-pool retained bytes
+measure free buffers, outstanding measures buffer count, and allocation or
+unpooled-byte totals are cumulative. The one-argument 16 GiB pool resize in
+this source permits 48 GiB aggregate free retention across packet and large
+classes; that ceiling is neither measured retention nor a total process
+budget. Preserve all generations, exact metric scrape anchors, and a unique
+native host/block/start/source match; a missing hot process cannot borrow a
+healthy peer's counters. No full heap or goroutine traversal is made
+pause-bounded merely by limiting the returned bytes.
+
 `connect-resident-cost-unobservable` WARNs immediately when the newest Connect
 population join is missing/stale, duplicated, invalid, or cannot select an
 unambiguous newest generation. It carries only fixed fleet counts. Duplicate
