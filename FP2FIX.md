@@ -5758,3 +5758,56 @@ Selection, credential installation, full Main shadow comparison, subscriber
 coverage validation and classifier activation remain incomplete. Policy two
 remains inactive. Monitor ledger T0504 was appended with its prior-tail guard;
 continuous URL and PostgreSQL monitoring retains the 15-minute cadence.
+
+
+### 2026-10-03 03:54 UTC measurement correction and remaining contention work
+
+The local-write classification fix is merged and pushed as `49450197`, using
+published Connect `638e55103517`. Independent normal-module verification
+passed the actual rejected-route and healthy traffic/accounting roots under
+race (52.604 seconds), full egress-health race (8.850 seconds), focused vet,
+and the 28 Connect producer/recovery roots. Review:
+`c48c64b7ac999673f784d414d75845a4b2fc73b1e389d69fb71d15774b4b0478`.
+The rejected local writer created its real contract but reached neither API
+nor DNS, returned an unmeasured result and made zero health publications.
+The healthy provider control still completed authenticated DNS/TLS and payer
+accounting. Contract-attempt semantics and the removed ACK remain unchanged.
+
+API, Connect, Taskworker and Proxy version
+`2026.10.3-local-write-admission+1060875400` completed both-architecture builds
+and artifact verification. All-block deployment commands are running; source
+convergence and retirement are not yet proven. Do not treat existing four-hour
+quota or eight-hour ratio history as validated by this rollout. Establish the
+last incompatible probe-writer retirement time, validate fresh outcomes after
+that boundary, and preserve security evidence while older history ages out.
+The automatic 03:36:26 census reported 97,604 of 114,521 eligible providers at
+quota (85.23 percent), but remains subject to that classification qualifier.
+
+The query sample ending 03:33:45 still contains escrow and settlement tuple
+queues, with observed maxima about 14.9 and 11.7 seconds. Retained one-hop
+financial blocker edges primarily lead to other waiting transactions and do
+not identify terminal holders. A bounded chain reader has passed a real
+three-transaction PostgreSQL control and awaits independent gate and actual
+Main use. The settlement balance-lock query did not reproduce a bad plan in
+an actual 1.35-million-row local control: generic/custom plans used primary-key
+nested loops and about nine buffers. No query rewrite is justified by that
+planning hypothesis alone. Exact holder SQL, lock lifetime and source caller
+mapping remain open, together with deterministic hot-area contention tests.
+
+The remaining 384-root Model race partition is terminal with eight failures.
+Seven financial/clock failures need current Redis-path accounting, TTL,
+reconciliation, cancellation and ordering controls while retaining meaningful
+legacy coverage. The eighth is the full-population ARIN transport deadline.
+They remain failures until repaired and verified; no full Model closure is
+claimed. Astra owns both repair tracks.
+
+The Config Makefile mode-preservation correction is independently verified and
+pushed in Warp `9a75631`. Rebuilt capture version
+`2026.10.3-arin-capture+1060875301` preserves all 61 baseline files and modes,
+adds only the two candidate resource files, and passed both-architecture image
+custody and offline CLI verification. The original unselected 5300 build is
+retained as failed mode-custody evidence. Version 5301 remains unselected;
+full Main shadow, protected credential installation, subscriber coverage,
+catalog expansion and policy-two activation are still open. A candidate local
+four-host capture also failed the unchanged 90-second bound, so capacity must
+be fixed rather than extending its lease or claiming completion.
