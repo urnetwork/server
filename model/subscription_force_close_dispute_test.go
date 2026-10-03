@@ -21,6 +21,7 @@ const forceCloseDisputeInitialBalance = ByteCount(4 * 1024 * 1024 * 1024)
 type forceCloseDisputeFixture struct {
 	contractId           server.Id
 	balanceId            server.Id
+	payerNetworkId       server.Id
 	providerNetworkId    server.Id
 	cutoff               time.Time
 	sourceByteCount      ByteCount
@@ -46,6 +47,10 @@ type forceCloseDisputeState struct {
 	requestTokenByteCount   ByteCount
 	redisReserved           bool
 	providerPayoutByteCount ByteCount
+	pendingDebitByteCount   ByteCount
+	pendingDebits           int
+	appliedDebits           int
+	availableByteCount      ByteCount
 	streamFound             bool
 }
 
@@ -119,6 +124,7 @@ func newForceCloseDisputeFixtureWithAdmission(t testing.TB, ctx context.Context,
 	return &forceCloseDisputeFixture{
 		contractId:           contractId,
 		balanceId:            balances[0].BalanceId,
+		payerNetworkId:       payerNetworkId,
 		providerNetworkId:    providerNetworkId,
 		cutoff:               createTime.Add(time.Hour),
 		sourceByteCount:      sourceByteCount,
@@ -156,6 +162,10 @@ func (self *forceCloseDisputeFixture) state(t testing.TB, ctx context.Context) f
 				t.Fatal("synthetic contract has multiple funding rows")
 			}
 		})
+		server.Raise(conn.QueryRow(ctx, `SELECT count(*) FILTER (WHERE NOT applied),
+			count(*) FILTER (WHERE applied),COALESCE(sum(debit_byte_count) FILTER (WHERE NOT applied),0)
+			FROM transfer_debit_journal WHERE balance_id=$1 AND contract_id=$2`, self.balanceId, self.contractId).
+			Scan(&state.pendingDebits, &state.appliedDebits, &state.pendingDebitByteCount))
 	})
 	server.Redis(ctx, func(r server.RedisClient) {
 		value, err := r.Get(ctx, netEscrowKey(self.balanceId)).Int64()
@@ -182,6 +192,7 @@ func (self *forceCloseDisputeFixture) state(t testing.TB, ctx context.Context) f
 		}
 	})
 	_, _, state.streamFound = GetStream(ctx, self.contractId)
+	state.availableByteCount = GetActiveTransferBalanceByteCount(ctx, self.payerNetworkId)
 	return state
 }
 
@@ -239,9 +250,11 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 				!state.escrowSettled || state.sourceCheckpoint || state.destinationCheckpoint ||
 				state.sourceByteCount != fixture.sourceByteCount || state.destinationByteCount != fixture.destinationByteCount ||
 				state.escrowPayoutByteCount != mean || state.providerPayoutByteCount != mean ||
-				state.payerBalanceByteCount != forceCloseDisputeInitialBalance-mean || state.netEscrowByteCount != 0 ||
-				state.requestTokenByteCount != 0 || state.redisEscrowByteCount != 0 {
-				t.Errorf("%s: first sweep did not settle and release exactly once", caseNames[index])
+				state.payerBalanceByteCount != forceCloseDisputeInitialBalance || state.netEscrowByteCount != mean ||
+				state.requestTokenByteCount != mean || state.redisEscrowByteCount != mean || state.legacyEscrowByteCount != 0 ||
+				state.pendingDebits != 1 || state.appliedDebits != 0 || state.pendingDebitByteCount != mean ||
+				state.availableByteCount != forceCloseDisputeInitialBalance-mean {
+				t.Errorf("%s: first sweep did not settle and journal exact consumption: %+v", caseNames[index], state)
 			}
 		}
 		closeCount, err = ForceCloseOpenContractIds(ctx, fixtures[0].cutoff, 10, 1, 0, 0)
@@ -251,6 +264,27 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 		for index, fixture := range fixtures {
 			if state := fixture.state(t, ctx); state != firstStates[index] {
 				t.Errorf("%s: repeat sweep changed terminal or accounting state", caseNames[index])
+			}
+		}
+		for index, fixture := range fixtures {
+			mean := (fixture.sourceByteCount + fixture.destinationByteCount) / 2
+			assertPayoutDebitTestConsumptionAndDrain(t, ctx, fixture.balanceId, forceCloseDisputeInitialBalance, mean)
+			want := firstStates[index]
+			want.payerBalanceByteCount -= mean
+			want.netEscrowByteCount, want.requestTokenByteCount, want.redisEscrowByteCount = 0, 0, 0
+			want.pendingDebits, want.pendingDebitByteCount = 0, 0
+			if state := fixture.state(t, ctx); state != want {
+				t.Fatalf("%s: public debit changed one-sweep terminal or provider state: got=%+v want=%+v", caseNames[index], state, want)
+			}
+			firstStates[index] = want
+		}
+		closeCount, err = ForceCloseOpenContractIds(ctx, fixtures[0].cutoff, 10, 1, 0, 0)
+		if err != nil || closeCount != 0 {
+			t.Fatal("drained checkpoint outcomes reentered the sweep", closeCount, err)
+		}
+		for index, fixture := range fixtures {
+			if state := fixture.state(t, ctx); state != firstStates[index] {
+				t.Fatalf("%s: sweep after debit changed exact consumption: %+v", caseNames[index], state)
 			}
 		}
 	})
@@ -294,10 +328,20 @@ func TestForceCloseHealthyFinalizationSkipsDisputeSettlement(t *testing.T) {
 		for _, fixture := range fixtures {
 			state := fixture.state(t, ctx)
 			if state.outcome != ContractOutcomeSettled || state.dispute || state.open || state.streamFound ||
-				!state.escrowSettled || state.escrowPayoutByteCount != 1024 || state.netEscrowByteCount != 0 ||
-				state.providerPayoutByteCount != 1024 || state.payerBalanceByteCount != forceCloseDisputeInitialBalance-1024 ||
-				state.requestTokenByteCount != 0 || state.redisEscrowByteCount != 0 {
-				t.Error("healthy finalization changed settlement accounting")
+				!state.escrowSettled || state.escrowPayoutByteCount != 1024 || state.netEscrowByteCount != 1024 ||
+				state.providerPayoutByteCount != 1024 || state.payerBalanceByteCount != forceCloseDisputeInitialBalance ||
+				state.requestTokenByteCount != 1024 || state.redisEscrowByteCount != 1024 || state.legacyEscrowByteCount != 0 ||
+				state.pendingDebits != 1 || state.appliedDebits != 0 || state.pendingDebitByteCount != 1024 ||
+				state.availableByteCount != forceCloseDisputeInitialBalance-1024 {
+				t.Fatalf("healthy finalization changed one-sweep settlement accounting: %+v", state)
+			}
+			assertPayoutDebitTestConsumptionAndDrain(t, ctx, fixture.balanceId, forceCloseDisputeInitialBalance, 1024)
+			want := state
+			want.payerBalanceByteCount -= 1024
+			want.netEscrowByteCount, want.requestTokenByteCount, want.redisEscrowByteCount = 0, 0, 0
+			want.pendingDebits, want.pendingDebitByteCount = 0, 0
+			if after := fixture.state(t, ctx); after != want {
+				t.Fatalf("healthy debit changed terminal or provider state: got=%+v want=%+v", after, want)
 			}
 		}
 	})
@@ -338,7 +382,9 @@ func TestForceCloseDisputeSettlementFailureRollsBack(t *testing.T) {
 				if state.outcome != "" || !state.dispute || state.open || state.escrowSettled ||
 					state.escrowPayoutByteCount != 0 || state.providerPayoutByteCount != 0 ||
 					state.payerBalanceByteCount != forceCloseDisputeInitialBalance || state.netEscrowByteCount != escrow ||
-					state.requestTokenByteCount != escrow || state.legacyEscrowByteCount != 0 {
+					state.requestTokenByteCount != escrow || state.legacyEscrowByteCount != 0 ||
+					state.pendingDebits != 0 || state.appliedDebits != 0 || state.pendingDebitByteCount != 0 ||
+					state.availableByteCount != forceCloseDisputeInitialBalance-escrow {
 					t.Errorf("case %d: failed dispute settlement changed terminal or accounting state: %+v", index, state)
 				}
 				if pass == 0 {

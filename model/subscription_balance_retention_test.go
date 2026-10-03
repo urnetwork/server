@@ -36,8 +36,8 @@ func TestCompletedTransferBalanceRetentionPreservesDebtAndLegacy(t *testing.T) {
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET dispute=true WHERE contract_id=$1`, escrow.ContractId))
 				}
 				if state == "terminal_unsettled" {
-					// The debit and terminal receipt committed, but its async escrow
-					// post is missing. Retention must preserve this repair obligation.
+					// Durable consumption and its terminal receipt committed, but
+					// the metadata post is missing. Retain this repair obligation.
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET settled=false WHERE contract_id=$1`, escrow.ContractId))
 				}
 			})
@@ -66,21 +66,38 @@ func TestCompletedTransferBalanceRetentionPreservesDebtAndLegacy(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET end_time=now()-interval '8 days' WHERE balance_id=ANY($1)`, all))
 		})
+		preserved := map[server.Id]payoutDebitTestState{}
+		for _, balanceId := range retained {
+			preserved[balanceId] = readPayoutDebitTestState(t, ctx, balanceId)
+		}
 		removeCompletedTransferBalanceBatches(ctx, server.NowUtc().Add(-7*24*time.Hour))
-		server.Db(ctx, func(conn server.PgConn) {
-			var kept int
-			var gone, receipt, unanchoredKept, tombstone bool
-			server.Raise(conn.QueryRow(ctx, `SELECT
+		check := func(wantGone bool) {
+			server.Db(ctx, func(conn server.PgConn) {
+				var kept int
+				var gone, receipt, unanchoredKept, tombstone bool
+				server.Raise(conn.QueryRow(ctx, `SELECT
 				(SELECT count(*) FROM transfer_balance WHERE balance_id=ANY($1)),
 				NOT EXISTS(SELECT 1 FROM transfer_balance WHERE balance_id=$2),
 				EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$3 AND outcome='settled' AND provider_usage IS NOT NULL),
 				EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$4 AND outcome IS NULL),
 				EXISTS(SELECT 1 FROM transfer_balance_net_escrow_revision WHERE balance_id=$2 AND revision>0)`,
-				retained, finished.balanceId, escrow.ContractId, unanchored.ContractId).Scan(&kept, &gone, &receipt, &unanchoredKept, &tombstone))
-			if kept != len(retained) || !gone || !receipt || !unanchoredKept || !tombstone {
-				t.Fatalf("retention lost debt/receipt or failed safe cleanup: kept=%d gone=%t receipt=%t zero=%t tombstone=%t", kept, gone, receipt, unanchoredKept, tombstone)
+					retained, finished.balanceId, escrow.ContractId, unanchored.ContractId).Scan(&kept, &gone, &receipt, &unanchoredKept, &tombstone))
+				if kept != len(retained) || gone != wantGone || !receipt || !unanchoredKept || tombstone != wantGone {
+					t.Fatalf("retention lost debt/receipt or failed safe cleanup: kept=%d gone=%t receipt=%t zero=%t tombstone=%t", kept, gone, receipt, unanchoredKept, tombstone)
+				}
+			})
+		}
+		// A terminal contract still owes its unapplied debit. The first expiry
+		// pass must keep its original balance and must not create a tombstone.
+		check(false)
+		assertPayoutDebitTestConsumptionAndDrain(t, ctx, finished.balanceId, 1000, 300)
+		for balanceId, before := range preserved {
+			if after := readPayoutDebitTestState(t, ctx, balanceId); after != before {
+				t.Fatalf("targeted public debit changed unrelated retained obligation %s: before=%+v after=%+v", balanceId, before, after)
 			}
-		})
+		}
+		removeCompletedTransferBalanceBatches(ctx, server.NowUtc().Add(-7*24*time.Hour))
+		check(true)
 	})
 }
 

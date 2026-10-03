@@ -107,6 +107,26 @@ func TestPublicRedisLongLivedGrantRetainsOriginalRequestLease(t *testing.T) {
 		posts := settleNetEscrowOrderingTestContract(ctx, escrow.ContractId)
 		server.RunPosts(ctx, posts...)
 		server.RunPosts(ctx, posts...)
+		ReconcileRedisContractReservation(ctx, escrow.ContractId)
+		// Even zero consumption retains its journal/token until the debit
+		// worker acknowledges cleanup. Settlement must not extend its lease.
+		server.Redis(ctx, func(r server.RedisClient) {
+			amount, err := r.HGet(ctx, keys[1], escrow.ContractId.String()).Int64()
+			server.Raise(err)
+			expiry, err := r.ZScore(ctx, keys[2], escrow.ContractId.String()).Result()
+			server.Raise(err)
+			if amount != 0 || expiry != originalExpiry {
+				t.Fatal("pending zero debit lost its original token or lease", amount, expiry, originalExpiry)
+			}
+		})
+		assertPayoutDebitTestConsumptionAndDrain(t, ctx, f.balanceId, 1000, 0)
+		replay, err := FlushTransferDebits(ctx, transferDebitShard(f.balanceId), nil, 1)
+		if err != nil || replay != (TransferDebitFlushResult{}) {
+			t.Fatal("empty public zero-debit replay repeated work", replay, err)
+		}
+		// A post delayed until after writeback cannot restore the old token.
+		server.RunPosts(ctx, posts...)
+		ReconcileRedisContractReservation(ctx, escrow.ContractId)
 		server.Redis(ctx, func(r server.RedisClient) {
 			value, err := r.Get(ctx, keys[0]).Int64()
 			server.Raise(err)

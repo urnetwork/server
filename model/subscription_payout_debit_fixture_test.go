@@ -19,6 +19,7 @@ type payoutDebitTestState struct {
 	initial, credit, pendingBytes, settled ByteCount
 	legacy, reserved                       ByteCount
 	pending, applied, escrows, invalid     int
+	inWindow                               bool
 }
 
 // Only an acknowledged missing key represents zero. Malformed replies,
@@ -27,8 +28,9 @@ func readPayoutDebitTestState(t testing.TB, ctx context.Context, balanceId serve
 	t.Helper()
 	var state payoutDebitTestState
 	server.Db(ctx, func(conn server.PgConn) {
-		server.Raise(conn.QueryRow(ctx, `SELECT network_id,start_balance_byte_count,balance_byte_count
-			FROM transfer_balance WHERE balance_id=$1`, balanceId).Scan(&state.networkId, &state.initial, &state.credit))
+		server.Raise(conn.QueryRow(ctx, `SELECT network_id,start_balance_byte_count,balance_byte_count,
+			start_time <= clock_timestamp() AT TIME ZONE 'UTC' AND clock_timestamp() AT TIME ZONE 'UTC' < end_time
+			FROM transfer_balance WHERE balance_id=$1`, balanceId).Scan(&state.networkId, &state.initial, &state.credit, &state.inWindow))
 		server.Raise(conn.QueryRow(ctx, `SELECT count(*) FILTER (WHERE NOT applied),
 			COALESCE(sum(debit_byte_count) FILTER (WHERE NOT applied),0),count(*) FILTER (WHERE applied)
 			FROM transfer_debit_journal WHERE balance_id=$1`, balanceId).Scan(&state.pending, &state.pendingBytes, &state.applied))
@@ -42,7 +44,7 @@ func readPayoutDebitTestState(t testing.TB, ctx context.Context, balanceId serve
 		for _, counter := range []struct {
 			key   string
 			value *ByteCount
-		}{{netEscrowKey(balanceId), &state.legacy}, {redisContractReservationKeys(balanceId)[0], &state.reserved}} {
+		}{{key: netEscrowKey(balanceId), value: &state.legacy}, {key: redisContractReservationKeys(balanceId)[0], value: &state.reserved}} {
 			value, err := client.Get(bounded, counter.key).Int64()
 			if errors.Is(err, redis.Nil) {
 				value = 0
@@ -89,29 +91,55 @@ func readPayoutDebitTestSweeps(t testing.TB, ctx context.Context, balanceId serv
 	return sweeps
 }
 
-// These fixtures own a fully consumed grant and no background drainer. Prove
-// its exact queued liability, run finite public pages, then replay an empty
-// page. The original provider shares and account credits remain identical.
+// Fully consumed grants use the same conservation check as a partial final
+// settlement. Neither fixture has an implicit background debit worker.
 func assertPayoutDebitTestConsumedAndDrained(t testing.TB, ctx context.Context, balanceId server.Id, want ByteCount) {
 	t.Helper()
+	assertPayoutDebitTestConsumptionAndDrain(t, ctx, balanceId, want, want)
+}
+
+// Require every settled escrow to match one pending journal entry while its
+// consumed bytes remain reserved; a partial grant keeps its exact remainder.
+func assertPayoutDebitTestConsumptionAndDrain(t testing.TB, ctx context.Context, balanceId server.Id, initial, consumed ByteCount) {
+	t.Helper()
 	before := readPayoutDebitTestState(t, ctx, balanceId)
-	if before.initial != want || before.credit != want || before.pendingBytes != want || before.settled != want ||
+	if consumed < 0 || consumed > initial || before.initial != initial || before.credit != initial || before.pendingBytes != consumed || before.settled != consumed ||
 		before.pending <= 0 || before.pending != before.escrows || before.applied != 0 || before.invalid != 0 ||
-		before.legacy != 0 || before.reserved != want {
-		t.Fatalf("settled grant did not retain exact asynchronous consumption: state=%+v want=%d", before, want)
+		before.legacy != 0 || before.reserved != consumed {
+		t.Fatalf("settled grant did not retain exact asynchronous consumption: state=%+v initial=%d consumed=%d", before, initial, consumed)
 	}
-	if available := GetActiveTransferBalanceByteCount(ctx, before.networkId); available != 0 {
-		t.Fatalf("pending consumed credit became spendable: %d", available)
+	drainPayoutDebitTestPending(t, ctx, balanceId, before)
+}
+
+// Check public available credit before writeback, including durable journals
+// whose paid contract metadata has already expired. A one-balance public page
+// selects the exact grant using its preceding UUID; unrelated pending grants
+// remain untouched. Replaying the empty exact worker cannot debit twice.
+func drainPayoutDebitTestPending(t testing.TB, ctx context.Context, balanceId server.Id, before payoutDebitTestState) {
+	t.Helper()
+	if before.pending <= 0 || before.applied != 0 || before.pendingBytes < 0 || before.pendingBytes > before.credit ||
+		before.legacy != 0 || before.reserved != before.pendingBytes {
+		t.Fatalf("pending debit fixture lacks exact retained consumption: %+v", before)
+	}
+	wantAvailable := ByteCount(0)
+	if before.inWindow {
+		wantAvailable = before.credit - before.pendingBytes
+	}
+	if available := GetActiveTransferBalanceByteCount(ctx, before.networkId); available != wantAvailable {
+		t.Fatalf("pending consumed credit became spendable: got=%d want=%d", available, wantAvailable)
 	}
 	shard := transferDebitShard(balanceId)
-	server.Db(ctx, func(conn server.PgConn) {
-		var peers int
-		server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_debit_journal
-			WHERE shard=$1 AND balance_id<>$2`, shard, balanceId).Scan(&peers))
-		if peers != 0 {
-			t.Fatalf("payout fixture unexpectedly shares its debit shard with %d unrelated rows", peers)
+	previous := balanceId
+	for index := len(previous) - 1; ; index-- {
+		if index < 0 {
+			t.Fatal("synthetic balance has no preceding UUID")
 		}
-	})
+		if previous[index] != 0 {
+			previous[index]--
+			break
+		}
+		previous[index] = 255
+	}
 	sweeps := readPayoutDebitTestSweeps(t, ctx, balanceId)
 	accounts := map[server.Id]contractPayoutTestAmount{
 		before.networkId: contractPayoutTestAccountAmount(t, ctx, before.networkId),
@@ -122,29 +150,30 @@ func assertPayoutDebitTestConsumedAndDrained(t testing.TB, ctx context.Context, 
 	state := before
 	pageLimit := (before.pending + transferDebitBatchSize - 1) / transferDebitBatchSize
 	for page := 0; page < pageLimit; page++ {
-		result, err := FlushTransferDebits(ctx, shard, nil, 64)
-		if err != nil || result.Failed != 0 || result.Busy != 0 || result.LastBalanceId != nil {
-			t.Fatalf("public debit page failed to reach the fixture shard end: %+v %v", result, err)
+		result, err := FlushTransferDebits(ctx, shard, &previous, 1)
+		if err != nil || result.Failed != 0 || result.Busy != 0 || result.Balances != 1 || !result.More ||
+			result.LastBalanceId == nil || *result.LastBalanceId != balanceId {
+			t.Fatalf("public debit page did not retain the exact bounded grant cursor: %+v %v", result, err)
 		}
 		next := readPayoutDebitTestState(t, ctx, balanceId)
 		removed := state.pending - next.pending
-		consumed := state.pendingBytes - next.pendingBytes
+		debit := state.pendingBytes - next.pendingBytes
 		if removed <= 0 || removed > transferDebitBatchSize || result.Applied != removed || result.Released != removed ||
-			next.applied != 0 || next.credit != state.credit-consumed || next.reserved != state.reserved-consumed ||
-			next.legacy != 0 || next.settled != want || next.invalid != 0 || (next.pending > 0 && !result.More) {
+			next.applied != 0 || next.credit != state.credit-debit || next.reserved != state.reserved-debit ||
+			next.legacy != 0 || next.settled != before.settled || next.invalid != before.invalid || next.escrows != before.escrows {
 			t.Fatalf("public debit page did not conserve exact consumption: before=%+v after=%+v result=%+v", state, next, result)
 		}
-		if available := GetActiveTransferBalanceByteCount(ctx, before.networkId); available != 0 {
-			t.Fatalf("public debit page made consumed credit spendable: %d", available)
+		if available := GetActiveTransferBalanceByteCount(ctx, before.networkId); available != wantAvailable {
+			t.Fatalf("public debit page changed available credit: got=%d want=%d", available, wantAvailable)
 		}
 		state = next
 	}
-	if state.credit != 0 || state.pending != 0 || state.applied != 0 || state.pendingBytes != 0 || state.reserved != 0 {
+	if state.credit != before.credit-before.pendingBytes || state.pending != 0 || state.applied != 0 || state.pendingBytes != 0 || state.reserved != 0 {
 		t.Fatalf("public debit pages left consumed credit or liability: %+v", state)
 	}
-	replay, err := FlushTransferDebits(ctx, shard, nil, 64)
-	if err != nil || replay != (TransferDebitFlushResult{}) {
-		t.Fatalf("empty public debit replay changed the journal: %+v %v", replay, err)
+	applied, released, busy, err := flushTransferDebitBalance(ctx, balanceId)
+	if err != nil || applied != 0 || released != 0 || busy {
+		t.Fatalf("empty exact debit replay changed the journal: applied=%d released=%d busy=%t err=%v", applied, released, busy, err)
 	}
 	if after := readPayoutDebitTestState(t, ctx, balanceId); after != state {
 		t.Fatalf("debit replay changed settled credit: before=%+v after=%+v", state, after)
