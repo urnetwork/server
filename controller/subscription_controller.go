@@ -1905,6 +1905,14 @@ var solanaReceiverAddresses = []string{
 	"74UNdYRpvakSABaYHSZMQNaXBVtA6eY9Nt8chcqocKe7", // deprecating this
 }
 
+// db lookups and writes HeliusWebhook makes, as seams so a test can drive a batch
+// (including a failed write) without Postgres
+var (
+	heliusSearchPaymentIntents           = model.SearchPaymentIntents
+	heliusIsSolanaPaymentCompleted       = model.IsSolanaPaymentCompleted
+	heliusRecordUnfulfilledSolanaPayment = model.RecordUnfulfilledSolanaPayment
+)
+
 func HeliusWebhook(
 	transactions []*SolanaTransaction,
 	clientSession *session.ClientSession,
@@ -1977,7 +1985,7 @@ func HeliusWebhook(
 		// texts (a payment sent by hand carries it as the transfer memo)
 		accounts := solanaReferenceCandidates(transaction)
 
-		paymentSearchResult, err := model.SearchPaymentIntents(accounts, clientSession)
+		paymentSearchResult, err := heliusSearchPaymentIntents(accounts, clientSession)
 
 		if err != nil {
 			glog.Infof("HeliusWebhook: error searching payment intents: %v", err)
@@ -1999,28 +2007,33 @@ func HeliusWebhook(
 
 			// a REDELIVERY of a payment that already consumed its intent finds no
 			// open intent either -- that one is credited and done, not unfulfilled
-			if model.IsSolanaPaymentCompleted(clientSession.Ctx, transaction.Signature) {
+			if heliusIsSolanaPaymentCompleted(clientSession.Ctx, transaction.Signature) {
 				glog.Infof("HeliusWebhook: transaction %s already credited; ignoring redelivery", transaction.Signature)
 				continue
 			}
 
 			// Money arrived at our address and no open intent matched -- a payment
 			// after the intent was swept, or an unknown reference. Helius is still
-			// acked 200 (it never re-examines a delivered tx), so record it where an
-			// operator can see and repair it, with the account keys and memos the
+			// acked 200 (it never re-examines a delivered tx) once it is recorded where
+			// an operator can see and repair it, with the account keys and memos the
 			// reference was searched among. A late payment whose intent has merely EXPIRED but not
 			// yet been swept never lands here: the search ignores expires_at on
 			// purpose, so it still resolves and is credited below -- late is not
 			// fraudulent.
 			glog.Errorf("HeliusWebhook: no payment intent found for transaction: %s; recording as unfulfilled\n", transaction.Signature)
-			if err := model.RecordUnfulfilledSolanaPayment(clientSession.Ctx, &model.UnfulfilledSolanaPayment{
+			if err := heliusRecordUnfulfilledSolanaPayment(clientSession.Ctx, &model.UnfulfilledSolanaPayment{
 				TxSignature:         transaction.Signature,
 				Reason:              model.SolanaUnfulfilledReasonNoIntent,
 				TokenAmountUsd:      tokenAmountReceived,
 				ReferenceCandidates: accounts,
 				TransactionTime:     transactionTime,
 			}); err != nil {
+				// the row is the only trace of this payment, so a failed write fails
+				// the batch and Helius redelivers (the insert is ON CONFLICT DO NOTHING)
 				glog.Errorf("HeliusWebhook: could not record unfulfilled payment %s: %v\n", transaction.Signature, err)
+				if firstErr == nil {
+					firstErr = err
+				}
 			}
 			continue
 		}
@@ -2040,7 +2053,7 @@ func HeliusWebhook(
 			)
 			// funds were kept and the intent stays open -- record the shortfall where
 			// an operator can see it, with the quote it was checked against
-			if err := model.RecordUnfulfilledSolanaPayment(clientSession.Ctx, &model.UnfulfilledSolanaPayment{
+			if err := heliusRecordUnfulfilledSolanaPayment(clientSession.Ctx, &model.UnfulfilledSolanaPayment{
 				TxSignature:       transaction.Signature,
 				Reason:            model.SolanaUnfulfilledReasonUnderpaid,
 				TokenAmountUsd:    tokenAmountReceived,
@@ -2049,7 +2062,12 @@ func HeliusWebhook(
 				NetworkId:         paymentSearchResult.NetworkId,
 				TransactionTime:   transactionTime,
 			}); err != nil {
+				// the row is the only trace of this payment, so a failed write fails
+				// the batch and Helius redelivers (the insert is ON CONFLICT DO NOTHING)
 				glog.Errorf("HeliusWebhook: could not record unfulfilled payment %s: %v\n", transaction.Signature, err)
+				if firstErr == nil {
+					firstErr = err
+				}
 			}
 			skipMessage = "Payment is less than the quoted price"
 			continue
