@@ -5943,8 +5943,12 @@ Main's native migration command completed once with exit zero at
 06:17:52 UTC, advancing schema 755 to 758 through canonical migrations 756,
 757 and 758. Read-only postflight verified exact migration identities, table,
 index and guard definitions, the enabled Redis admission policy, and an empty
-provider-payout boundary. The owned primary tunnel closed. The primary-local
-backup completion was within 24 hours; it does not attest ciphertext integrity,
+provider-payout boundary. The owned primary tunnel closed. The earlier claim
+that the primary-local backup completed within 24 hours was incorrect: it
+confused metadata observation time with producer completion. The retained dump
+generation began on October 1 at 00:00:15 UTC; its producer completed at
+19:28:43 UTC that day. The October 2 23:24:08 metadata observation refreshed
+neither time. Stable local metadata does not attest ciphertext integrity,
 destination-copy completion, decryption or restore. The Main migration receipt
 is `/home/by/urnetwork/temp/main758-native-primary-20261003-root-activation-v1/run-20261003T061740.770997Z/receipt.json`,
 SHA-256 `29370a6f4f03bbf1a8a72eff66685811206955d310b77ec1a5f51cda1f4bd824`.
@@ -6064,3 +6068,46 @@ before retained native inventory or shadow output. Cleanup completed without
 unreleased hosts. Its exact transport/native-stage cause remains unproved;
 ARIN policy two remains inactive. Provider IPv6 findings are excluded from goal
 acceptance under the user's current rollout instruction. FP2FIX is not complete.
+
+
+### 2026-10-03 15:10 UTC canonical migration and backup evidence correction
+
+Release source `114b708c` preserves Main's exact published prefix through Circle
+migration 762 and appends legacy settlement intents at 763. Root's native
+migration command completed once with exit zero, advancing Main from 758 to
+763. Read-only preflight and postflight verified the primary, all migration
+identities, exact table/index/function/trigger guards, preserved 756–758
+artifacts, enabled Redis admission policy and empty new tables. The owned
+primary tunnel closed. Native lock timeout remained three seconds, statement
+timeout remained zero and the CLI retained its 60-second outer bound. Receipt:
+`/home/by/urnetwork/temp/main763-native-primary-20261003-root-1506-48h-v2/run-20261003T150747.226470Z/receipt.json`,
+SHA-256 `1549df300b712819766055423cd52938f4eba1867fc1471a745850c3fe6c10bb`.
+
+The 24-hour producer-age prerequisite was an agent-created migration wrapper
+policy, not a user or `monitor/RUN-MAIN.md` requirement. Root explicitly accepted
+a separate, reviewed limit of 48 hours since producer completion solely for
+exact additive canonical migrations 759–763; the strict predecessor was
+preserved. The October 3 14:32:32 metadata observation still found the successful
+October 1 producer: approximately 43 hours since completion but approximately
+63 hours since dump-generation start when migration ran. This is not a 48-hour
+recovery-point or data-loss bound. No current ciphertext rehash, decrypt,
+restore or destination-copy proof was obtained. Native metadata receipt
+SHA-256: `f7c44dd03933efc60e36906453d3e17982fbce3077cde63716b5bc540e2f9911`.
+
+Root scheduled a new backup start after migration because a running `pg_dump`
+retains shared table locks that can block migration 761's table changes. The
+bounded start action then refused during its free-space preflight:
+`start_command_issued=false`, `production_mutation=false`. No backup started
+and no retry occurred. Its proposed free-space floor was twice the retained
+599,562,125,770-byte ciphertext plus 1 GiB, allowing the existing writer's
+compressed plaintext and ciphertext staging to coexist. The receipt establishes
+only that available space was below 1,200,197,993,364 bytes; it does not retain
+actual available bytes or prove the next dump's size. A bounded filesystem,
+staging-file and retained-generation metadata read remains due before an owning
+capacity correction. Refusal receipt SHA-256:
+`a3781be79d606eae14c06ce0588cb550be938de4edb7c21a64d21ba69c764187`.
+
+R57 API, Connect, Taskworker and Proxy all-block selection was in progress at
+this checkpoint. Schema success and local controls do not prove fleet
+convergence, legacy-worker progress, drained settlement debt or restored service
+health. The 15-minute monitor remains authoritative; FP2FIX is not complete.
