@@ -959,6 +959,13 @@ func AuthVerify(
 	var networkName string
 
 	server.Db(session.Ctx, func(conn server.PgConn) {
+		authUserId := findUserIdByUserAuth(
+			&pgUserAuthUserIdLookup{ctx: session.Ctx, conn: conn},
+			*userAuth,
+		)
+		if authUserId == nil {
+			return
+		}
 		result, err := conn.Query(
 			session.Ctx,
 			`
@@ -970,14 +977,14 @@ func AuthVerify(
 				FROM user_auth_verify
 				INNER JOIN network ON network.admin_user_id = user_auth_verify.user_id
 				WHERE
-					user_auth_verify.user_id = `+userIdByUserAuthSql("$3")+` AND
+					user_auth_verify.user_id = $3 AND
 					user_auth_verify.verify_code = $1 AND
 					user_auth_verify.used = false AND
 					now() - INTERVAL '1 seconds' * $2 <= user_auth_verify.verify_time
 			`,
 			normalVerifyCode,
 			int(VerifyCodeTimeout/time.Second),
-			userAuth,
+			*authUserId,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -1048,20 +1055,55 @@ func AuthVerify(
 	return result, nil
 }
 
-// userIdByUserAuthSql is a scalar subquery for the user that signs in with an
-// email or phone. Email and phone sign-ins live in network_user_auth_password;
-// network_user.user_auth only holds the identity the account was created with,
-// so an email or phone added later with AddAuth is found only in the former.
-// The legacy column is kept as a fallback for accounts whose only identity is
-// that column. Looking only at network_user.user_auth meant an added sign-in
-// could log in with its password but never got a verification or reset code.
-func userIdByUserAuthSql(userAuthParam string) string {
-	return fmt.Sprintf(
-		`COALESCE(
-			(SELECT user_id FROM network_user_auth_password WHERE user_auth = %[1]s LIMIT 1),
-			(SELECT user_id FROM network_user WHERE user_auth = %[1]s LIMIT 1)
-		)`,
-		userAuthParam,
+// userAuthUserIdLookup reads the two places an email or phone sign-in can
+// name its user.
+type userAuthUserIdLookup interface {
+	// passwordAuthUserId reads network_user_auth_password, where every email
+	// and phone sign-in lives, including ones added later with AddAuth.
+	passwordAuthUserId(userAuth string) *server.Id
+	// legacyUserAuthUserId reads network_user.user_auth, which only holds the
+	// identity the account was created with.
+	legacyUserAuthUserId(userAuth string) *server.Id
+}
+
+// findUserIdByUserAuth resolves the user that signs in with an email or phone
+// for verification and reset codes. The sign-in table is authoritative; the
+// legacy column is a fallback for accounts whose only identity is that column.
+// Looking only at network_user.user_auth meant an added sign-in could log in
+// with its password but never got a verification or reset code.
+func findUserIdByUserAuth(lookup userAuthUserIdLookup, userAuth string) *server.Id {
+	if userId := lookup.passwordAuthUserId(userAuth); userId != nil {
+		return userId
+	}
+	return lookup.legacyUserAuthUserId(userAuth)
+}
+
+type pgUserAuthUserIdLookup struct {
+	ctx  context.Context
+	conn server.PgCanQuery
+}
+
+func (self *pgUserAuthUserIdLookup) queryUserId(sql string, userAuth string) (userId *server.Id) {
+	result, err := self.conn.Query(self.ctx, sql, userAuth)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&userId))
+		}
+	})
+	return
+}
+
+func (self *pgUserAuthUserIdLookup) passwordAuthUserId(userAuth string) *server.Id {
+	return self.queryUserId(
+		`SELECT user_id FROM network_user_auth_password WHERE user_auth = $1 LIMIT 1`,
+		userAuth,
+	)
+}
+
+func (self *pgUserAuthUserIdLookup) legacyUserAuthUserId(userAuth string) *server.Id {
+	return self.queryUserId(
+		`SELECT user_id FROM network_user WHERE user_auth = $1 LIMIT 1`,
+		userAuth,
 	)
 }
 
@@ -1105,20 +1147,10 @@ func AuthVerifyCreateCode(
 	var verifyCode string
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-		var result server.PgResult
-		var err error
-
-		var userId *server.Id
-		result, err = tx.Query(
-			session.Ctx,
-			`SELECT `+userIdByUserAuthSql("$1"),
-			userAuth,
+		userId := findUserIdByUserAuth(
+			&pgUserAuthUserIdLookup{ctx: session.Ctx, conn: tx},
+			*userAuth,
 		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&userId))
-			}
-		})
 
 		if userId == nil {
 			return
@@ -1203,20 +1235,10 @@ func AuthPasswordResetCreateCode(
 	var resetCode string
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-		var result server.PgResult
-		var err error
-
-		var userId *server.Id
-		result, err = tx.Query(
-			session.Ctx,
-			`SELECT `+userIdByUserAuthSql("$1"),
-			userAuth,
+		userId := findUserIdByUserAuth(
+			&pgUserAuthUserIdLookup{ctx: session.Ctx, conn: tx},
+			*userAuth,
 		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&userId))
-			}
-		})
 
 		if userId == nil {
 			return
