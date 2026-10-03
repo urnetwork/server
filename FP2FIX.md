@@ -5573,3 +5573,42 @@ The protected fleet
 adapter, complete Main shadow, adequate verified subscriber coverage, resource
 cutover and policy deployment remain required. The policy remains inactive;
 local tests or an observer-only deployment cannot close that requirement.
+
+
+### 2026-10-03 00:45 UTC schema 755 and service rollout
+
+Migration 755 is applied to Main. The native CLI exited successfully; the
+post-migration read verified successful schema head 755, all expected
+compatibility artifacts, and exactly one admission-policy row with enabled
+false. The controlled attempt completed at 00:38:21 UTC in 14.146 seconds,
+using a 30-second native lock allowance and no statement timeout. The earlier
+three-second lock failure remains recorded; its unmatched start was qualified
+against a fresh read of head 754 and absent 755 objects before this attempt.
+Migration receipt:
+`7d097704ae23238ba2b0f658feb1b234766464e31dcb45eaad9ac8aa4c6f60e0`.
+Independent post-migration closure:
+`5a201ee3fad6a5bea036b7c29827dbf93b1f653b9096cf8a80e4313bb50e3b2e`.
+
+All API, Connect and Taskworker block deployment commands completed with exit
+zero for `2026.10.2-arin-final+1060864900`, compiled from `25897f4c`.
+Taskworker completed at 00:40:01 UTC, API at 00:41:08 UTC, and Connect at
+00:45:08 UTC. Both architecture manifests and image configurations were
+verified before selection. This is completed deployment-command and selected
+version evidence; direct process identity and incompatible predecessor
+retirement are still being collected. Redis admission remains disabled until
+that compatibility boundary is established. Edge5 remains excluded under the
+operator's explicit offline guarantee.
+
+The protected ARIN capture adapter is merged and pushed. Its independent
+four-host, twenty-Connect-process transport test completed in 60.062 seconds
+within the unchanged 90-second cohort lease. The separate eight-host
+headroom failure is retained and does not qualify a larger topology.
+Actual Main shadow coverage, affirmative subscriber catalog adequacy, and
+classifier activation remain open. Default-off capture deployment does not
+activate the new classifier or demonstrate Quality/Speed provider coverage.
+
+The operator requests a follow-up that removes the admission-policy SELECT
+and uses Redis admission unconditionally. Deploy the schema-755-compatible
+unconditional code to all readers before dropping the enabled column in a
+later migration; existing flag-reading binaries must not encounter the
+removed column.
