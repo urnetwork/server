@@ -525,6 +525,10 @@ github.com/urnetwork/connect v0.0.0-20261003032127-638e55103517 h1:mzDhtYuYM9V67
 github.com/urnetwork/connect v0.0.0-20261003032127-638e55103517/go.mod h1:A88Ceqd8zbfpUB4+1pTsT1G3kiS9kgB22ZuljBZVw4k=
 github.com/urnetwork/connect v0.0.0-20261003033456-08d4840087a7 h1:ca0zHpum3+/Du+plyv9KJt16TAZ/tUDKBi8MRrwS1CI=
 github.com/urnetwork/connect v0.0.0-20261003033456-08d4840087a7/go.mod h1:A88Ceqd8zbfpUB4+1pTsT1G3kiS9kgB22ZuljBZVw4k=
+github.com/urnetwork/connect v0.0.0-20261003042459-a53ed36a6e5d h1:NlxDU751IaXuCNLjEHS5nvZgrydm4iIw6rBLnGy5e0I=
+github.com/urnetwork/connect v0.0.0-20261003042459-a53ed36a6e5d/go.mod h1:A88Ceqd8zbfpUB4+1pTsT1G3kiS9kgB22ZuljBZVw4k=
+github.com/urnetwork/connect v0.0.0-20261003082047-631bcb282d39 h1:WvYmlCnwCRMXf91KeZPfbQy4kxMDN1pV964tdSlF1iE=
+github.com/urnetwork/connect v0.0.0-20261003082047-631bcb282d39/go.mod h1:4fQ88a6LeWCbTb/1XCLy5oca56yANXCz+CU5JYeyT5Y=
 github.com/urnetwork/connect/sctp v0.0.0-20261001021459-e1b5d77b5029 h1:GfovpOIWKd6TjkYsWLkMNE/zKEoGNC/5NfrPRCI+50A=
 github.com/urnetwork/connect/sctp v0.0.0-20261001021459-e1b5d77b5029/go.mod h1:7KFmTwLcoYgJs/Z+99nJvsWL0qDpuyloSI0RbAqlrz0=
 github.com/urnetwork/connect/sctp v0.0.0-20261002163341-6443417d70dc h1:w8WyMTyOkCNb/qEZtgZDr6m0zf3eM8kjh08DweW4/i8=
@@ -533,6 +537,8 @@ github.com/urnetwork/sdk v0.0.0-20261001021058-5d37be3876e5 h1:PYuzGCWhMRuCnZS9q
 github.com/urnetwork/sdk v0.0.0-20261001021058-5d37be3876e5/go.mod h1:IuPYnLZ5j1SP+gm3O4a4SxbOT4U/CPKEqONI1iLO5yk=
 github.com/urnetwork/sdk v0.0.0-20261003021240-95ccd57da971 h1:ukQnbTHew94T4caqOBso3/V4gv8jyTRHbmnxKKuBxQE=
 github.com/urnetwork/sdk v0.0.0-20261003021240-95ccd57da971/go.mod h1:IuPYnLZ5j1SP+gm3O4a4SxbOT4U/CPKEqONI1iLO5yk=
+github.com/urnetwork/sdk v0.0.0-20261003032453-9ae95704a230 h1:73/fQJqKcJZE5YQddv7MDVsn2Mghqsc8vGGOxFFO1HI=
+github.com/urnetwork/sdk v0.0.0-20261003032453-9ae95704a230/go.mod h1:IuPYnLZ5j1SP+gm3O4a4SxbOT4U/CPKEqONI1iLO5yk=
 github.com/vedhavyas/go-subkey/v2 v2.0.0 h1:LemDIsrVtRSOkp0FA8HxP6ynfKjeOj3BY2U9UNfeDMA=
 github.com/vedhavyas/go-subkey/v2 v2.0.0/go.mod h1:95aZ+XDCWAUUynjlmi7BtPExjXgXxByE0WfBwbmIRH4=
 github.com/wlynxg/anet v0.0.5 h1:J3VJGi1gvo0JwZ/P1/Yc/8p63SoW98B5dHkYDmpgvvU=
@@ -735,7 +741,3 @@ lukechampine.com/blake3 v1.4.1 h1:I3Smz7gso8w4/TunLKec6K2fn+kyKtDxr/xcQEN84Wg=
 lukechampine.com/blake3 v1.4.1/go.mod h1:QFosUxmjB8mnrWFSNwKmvxHpfY72bmD2tQ0kBMM3kwo=
 src.agwa.name/tlshacks v0.0.4 h1:zIxyKo4duQB9N61l6N1tbwgTmnUCcbtUtdk4ZnIJicM=
 src.agwa.name/tlshacks v0.0.4/go.mod h1:DjmhEIN3A1AG5jx6tKMv9oOHULPGf6CSQC2PQuTC/U0=
-github.com/urnetwork/connect v0.0.0-20261003042459-a53ed36a6e5d h1:NlxDU751IaXuCNLjEHS5nvZgrydm4iIw6rBLnGy5e0I=
-github.com/urnetwork/connect v0.0.0-20261003042459-a53ed36a6e5d/go.mod h1:A88Ceqd8zbfpUB4+1pTsT1G3kiS9kgB22ZuljBZVw4k=
-github.com/urnetwork/sdk v0.0.0-20261003032453-9ae95704a230 h1:73/fQJqKcJZE5YQddv7MDVsn2Mghqsc8vGGOxFFO1HI=
-github.com/urnetwork/sdk v0.0.0-20261003032453-9ae95704a230/go.mod h1:IuPYnLZ5j1SP+gm3O4a4SxbOT4U/CPKEqONI1iLO5yk=
