@@ -41,6 +41,10 @@ type forceCloseDisputeState struct {
 	sourceCheckpoint        bool
 	destinationCheckpoint   bool
 	netEscrowByteCount      ByteCount
+	legacyEscrowByteCount   ByteCount
+	redisEscrowByteCount    ByteCount
+	requestTokenByteCount   ByteCount
+	redisReserved           bool
 	providerPayoutByteCount ByteCount
 	streamFound             bool
 }
@@ -55,6 +59,21 @@ func newForceCloseDisputeFixture(
 	destinationByteCount ByteCount,
 	escrowByteCount ByteCount,
 ) *forceCloseDisputeFixture {
+	return newForceCloseDisputeFixtureWithAdmission(t, ctx, sourceCheckpoint, destinationCheckpoint,
+		sourceByteCount, destinationByteCount, escrowByteCount, false)
+}
+
+// Explicit legacy construction keeps SQL batching/mirror controls distinct
+// from the unconditional Redis admission exercised by the public fixture.
+func newLegacyForceCloseDisputeFixture(t testing.TB, ctx context.Context, sourceCheckpoint, destinationCheckpoint bool,
+	sourceByteCount, destinationByteCount, escrowByteCount ByteCount) *forceCloseDisputeFixture {
+	return newForceCloseDisputeFixtureWithAdmission(t, ctx, sourceCheckpoint, destinationCheckpoint,
+		sourceByteCount, destinationByteCount, escrowByteCount, true)
+}
+
+// Both modes use the actual transaction owners, close reports and expiry sweep.
+func newForceCloseDisputeFixtureWithAdmission(t testing.TB, ctx context.Context, sourceCheckpoint, destinationCheckpoint bool,
+	sourceByteCount, destinationByteCount, escrowByteCount ByteCount, legacy bool) *forceCloseDisputeFixture {
 	t.Helper()
 	payerNetworkId := server.NewId()
 	providerNetworkId := server.NewId()
@@ -70,9 +89,20 @@ func newForceCloseDisputeFixture(
 		server.NowUtc(), server.NowUtc().Add(24*time.Hour))
 	balances := GetActiveTransferBalances(ctx, payerNetworkId)
 	connect.AssertEqual(t, 1, len(balances))
-	contractId, _, err := CreateContract(ctx, payerNetworkId, sourceId,
-		providerNetworkId, destinationId, escrowByteCount)
-	connect.AssertEqual(t, nil, err)
+	var contractId server.Id
+	if legacy {
+		escrow, err := createTransferEscrow(ctx, payerNetworkId, sourceId, providerNetworkId, destinationId, escrowByteCount)
+		if err != nil || escrow == nil {
+			t.Fatal("legacy dispute fixture could not reserve", err)
+		}
+		contractId = escrow.ContractId
+	} else {
+		var err error
+		contractId, _, err = CreateContract(ctx, payerNetworkId, sourceId, providerNetworkId, destinationId, escrowByteCount)
+		if err != nil {
+			t.Fatal("public dispute fixture could not reserve", err)
+		}
+	}
 	AddToStream(ctx, contractId, sourceId, destinationId, nil)
 	connect.AssertEqual(t, nil, CloseContract(ctx, contractId, sourceId, sourceByteCount, sourceCheckpoint))
 	connect.AssertEqual(t, nil, CloseContract(ctx, contractId, destinationId, destinationByteCount, destinationCheckpoint))
@@ -106,7 +136,7 @@ func (self *forceCloseDisputeFixture) state(t testing.TB, ctx context.Context) f
                    coalesce(c.close_time::text,''), e.settled,
                    coalesce(e.payout_byte_count,0), b.balance_byte_count,
                    s.used_transfer_byte_count, d.used_transfer_byte_count,
-                   s.checkpoint, d.checkpoint
+                   s.checkpoint, d.checkpoint, e.redis_reserved
             FROM transfer_contract c
             JOIN transfer_escrow e ON e.contract_id=c.contract_id
             JOIN transfer_balance b ON b.balance_id=e.balance_id
@@ -121,7 +151,7 @@ func (self *forceCloseDisputeFixture) state(t testing.TB, ctx context.Context) f
 			server.Raise(rows.Scan(&state.outcome, &state.dispute, &state.open,
 				&state.closeTime, &state.escrowSettled, &state.escrowPayoutByteCount,
 				&state.payerBalanceByteCount, &state.sourceByteCount, &state.destinationByteCount,
-				&state.sourceCheckpoint, &state.destinationCheckpoint))
+				&state.sourceCheckpoint, &state.destinationCheckpoint, &state.redisReserved))
 			if rows.Next() {
 				t.Fatal("synthetic contract has multiple funding rows")
 			}
@@ -131,8 +161,20 @@ func (self *forceCloseDisputeFixture) state(t testing.TB, ctx context.Context) f
 		value, err := r.Get(ctx, netEscrowKey(self.balanceId)).Int64()
 		if err != server.RedisNil {
 			server.Raise(err)
-			state.netEscrowByteCount = ByteCount(value)
+			state.legacyEscrowByteCount = ByteCount(value)
 		}
+		keys := redisContractReservationKeys(self.balanceId)
+		value, err = r.Get(ctx, keys[0]).Int64()
+		if err != server.RedisNil {
+			server.Raise(err)
+			state.redisEscrowByteCount = ByteCount(value)
+		}
+		value, err = r.HGet(ctx, keys[1], self.contractId.String()).Int64()
+		if err != server.RedisNil {
+			server.Raise(err)
+			state.requestTokenByteCount = ByteCount(value)
+		}
+		state.netEscrowByteCount = state.legacyEscrowByteCount + state.redisEscrowByteCount
 		value, err = r.Get(ctx, accountBalanceNetPayoutByteCountKey(self.providerNetworkId)).Int64()
 		if err != server.RedisNil {
 			server.Raise(err)
@@ -197,7 +239,8 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 				!state.escrowSettled || state.sourceCheckpoint || state.destinationCheckpoint ||
 				state.sourceByteCount != fixture.sourceByteCount || state.destinationByteCount != fixture.destinationByteCount ||
 				state.escrowPayoutByteCount != mean || state.providerPayoutByteCount != mean ||
-				state.payerBalanceByteCount != forceCloseDisputeInitialBalance-mean || state.netEscrowByteCount != 0 {
+				state.payerBalanceByteCount != forceCloseDisputeInitialBalance-mean || state.netEscrowByteCount != 0 ||
+				state.requestTokenByteCount != 0 || state.redisEscrowByteCount != 0 {
 				t.Errorf("%s: first sweep did not settle and release exactly once", caseNames[index])
 			}
 		}
@@ -252,7 +295,8 @@ func TestForceCloseHealthyFinalizationSkipsDisputeSettlement(t *testing.T) {
 			state := fixture.state(t, ctx)
 			if state.outcome != ContractOutcomeSettled || state.dispute || state.open || state.streamFound ||
 				!state.escrowSettled || state.escrowPayoutByteCount != 1024 || state.netEscrowByteCount != 0 ||
-				state.providerPayoutByteCount != 1024 || state.payerBalanceByteCount != forceCloseDisputeInitialBalance-1024 {
+				state.providerPayoutByteCount != 1024 || state.payerBalanceByteCount != forceCloseDisputeInitialBalance-1024 ||
+				state.requestTokenByteCount != 0 || state.redisEscrowByteCount != 0 {
 				t.Error("healthy finalization changed settlement accounting")
 			}
 		}
@@ -262,8 +306,10 @@ func TestForceCloseHealthyFinalizationSkipsDisputeSettlement(t *testing.T) {
 // A failed dispute settlement must retain its reservation, including when this
 // sweep created the dispute. Non-disputed malformed quarantine is a separate policy.
 func TestForceCloseDisputeSettlementFailureRollsBack(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
 		const escrow = ByteCount(32 * 1024 * 1024)
 		fixtures := []*forceCloseDisputeFixture{
 			newForceCloseDisputeFixture(t, ctx, true, false, 0, 4*escrow, escrow),
@@ -271,6 +317,13 @@ func TestForceCloseDisputeSettlementFailureRollsBack(t *testing.T) {
 		}
 		connect.AssertEqual(t, false, fixtures[0].state(t, ctx).dispute)
 		connect.AssertEqual(t, true, fixtures[1].state(t, ctx).dispute)
+		for _, fixture := range fixtures {
+			state := fixture.state(t, ctx)
+			if !state.redisReserved || state.legacyEscrowByteCount != 0 || state.redisEscrowByteCount != escrow ||
+				state.requestTokenByteCount != escrow || state.netEscrowByteCount != escrow {
+				t.Fatalf("public dispute reservation was not observed before settlement: %+v", state)
+			}
+		}
 		firstStates := make([]forceCloseDisputeState, len(fixtures))
 		for pass := 0; pass < 2; pass++ {
 			closeCount, err := ForceCloseOpenContractIds(ctx, fixtures[0].cutoff, 10, 1, 0, 0)
@@ -284,8 +337,9 @@ func TestForceCloseDisputeSettlementFailureRollsBack(t *testing.T) {
 				state := fixture.state(t, ctx)
 				if state.outcome != "" || !state.dispute || state.open || state.escrowSettled ||
 					state.escrowPayoutByteCount != 0 || state.providerPayoutByteCount != 0 ||
-					state.payerBalanceByteCount != forceCloseDisputeInitialBalance || state.netEscrowByteCount != escrow {
-					t.Errorf("case %d: failed dispute settlement changed terminal or accounting state", index)
+					state.payerBalanceByteCount != forceCloseDisputeInitialBalance || state.netEscrowByteCount != escrow ||
+					state.requestTokenByteCount != escrow || state.legacyEscrowByteCount != 0 {
+					t.Errorf("case %d: failed dispute settlement changed terminal or accounting state: %+v", index, state)
 				}
 				if pass == 0 {
 					firstStates[index] = state

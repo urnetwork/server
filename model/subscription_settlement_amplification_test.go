@@ -64,7 +64,7 @@ func TestEscrowSettlementLegacyRowsPreserveAccounting(t *testing.T) {
 		ctx := context.Background()
 		start := server.NowUtc()
 		const used = ByteCount(128)
-		fixture := newForceCloseDisputeFixture(t, ctx, true, true, used, used, 1024)
+		fixture := newLegacyForceCloseDisputeFixture(t, ctx, true, true, used, used, 1024)
 		zeroBalanceIds := addLegacyEmptySettlementEscrows(t, ctx, fixture, 45)
 		var sourceNetworkId, sourceId, destinationNetworkId, destinationId server.Id
 		server.Db(ctx, func(conn server.PgConn) {
@@ -79,10 +79,11 @@ func TestEscrowSettlementLegacyRowsPreserveAccounting(t *testing.T) {
 		})
 		// A second live contract shares the funded balance. Its reservation and
 		// escrow marker must survive the first contract's set-based update.
-		siblingId, _, err := CreateContract(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024)
-		if err != nil {
+		sibling, err := createTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024)
+		if err != nil || sibling == nil {
 			t.Fatal(err)
 		}
+		siblingId := sibling.ContractId
 		server.Redis(ctx, func(r server.RedisClient) {
 			server.Raise(r.Set(ctx, netEscrowKey(zeroBalanceIds[0]), 512, 0).Err())
 		})
@@ -160,7 +161,7 @@ func TestEscrowSettlementZeroUseOmitsEmptyPosts(t *testing.T) {
 			{grant: 0, posts: 1},
 			{grant: 1024, posts: 2},
 		} {
-			fixture := newForceCloseDisputeFixture(t, ctx, true, true, 0, 0, test.grant)
+			fixture := newLegacyForceCloseDisputeFixture(t, ctx, true, true, 0, 0, test.grant)
 			addLegacyEmptySettlementEscrows(t, ctx, fixture, 45)
 			var beforeMirror string
 			var beforeMirrorErr error
@@ -204,7 +205,7 @@ func TestEscrowSettlementLegacyRejectionKeepsReservation(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		const grant = ByteCount(32 * 1024 * 1024)
-		fixture := newForceCloseDisputeFixture(t, ctx, false, false, 0, 4*grant, grant)
+		fixture := newLegacyForceCloseDisputeFixture(t, ctx, false, false, 0, 4*grant, grant)
 		before := fixture.state(t, ctx)
 		addLegacyEmptySettlementEscrows(t, ctx, fixture, 45)
 		selected, err := ForceCloseOpenContractIds(ctx, fixture.cutoff, 10, 1, 1, 0)
@@ -242,7 +243,7 @@ func TestEscrowSettlementLegacyRejectionKeepsReservation(t *testing.T) {
 func TestEscrowSettlementZeroQuarantinePreservesUnrelatedMirror(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		fixture := newForceCloseDisputeFixture(t, ctx, true, true, 0, 0, 0)
+		fixture := newLegacyForceCloseDisputeFixture(t, ctx, true, true, 0, 0, 0)
 		zeroBalanceIds := addLegacyEmptySettlementEscrows(t, ctx, fixture, 45)
 		server.Redis(ctx, func(r server.RedisClient) {
 			server.Raise(r.Set(ctx, netEscrowKey(zeroBalanceIds[0]), 512, 0).Err())
