@@ -25433,6 +25433,41 @@ gate, and over-target tracked use without production identities.
 
 ---
 
+### 14.7e Hosted source and quality-probe local control
+
+Hosted Proxy source devices use a private local authority for credential
+mint/retirement, contract control, provider discovery, token refresh, balance,
+location and public-key/history reads. The authority verifies the existing
+JWT signature, API audience, current credential state and durable parent/child
+scope before calling the same model/controller operations. A local refusal
+must never retry through HTTP. Ordinary application SDK sessions and
+standalone probes retain their HTTP defaults. The local hosted API explicitly
+refuses provider mode; it cannot leave a second providing client's HTTP
+control or key factory outside that authority.
+
+This is a release regression boundary, not a new production alert:
+`proxy/TestProxyCriticalControlUsesLocalAuthorityWithoutHttp` drives a real
+hosted device through renewal and reconnect, then joins its control owners
+and reconciles settled payer usage with a rejecting API request trap.
+`proxy/TestProxyLocalHooksHaveIndependentHttpRedControls` removes credentials,
+control and non-fixed discovery separately; each removal must expose the
+HTTP dependency. A fixed provider does not exercise discovery.
+`qualityprobe/providertunnel/TestProviderTunnelActualLocalAuthorityWithoutApi`
+uses a real provider, separate DNS/TLS payload origins, counted local
+mint/control/retirement operations and durable usage. Its API trap remains
+zero after owner joins; missing-boundary controls must fail with positive API
+attempts. Keep these tests in the Server release gates when changing Proxy,
+probe construction, SDK forwarding or Connect generator control.
+
+Production controller timing can show internal work and cancellation, but
+cannot by itself prove absence of HTTP fallback or join a call to a provider,
+SQL wait or completed quality receipt. Verify the deployed Server/SDK/Connect
+source pins and current processes before comparing those metrics. Successful
+local control does not establish usable provider DNS/TLS/URL traffic, and a
+local contract failure remains unmeasured provider health.
+
+---
+
 ## 15. E2E encryption (post-quantum) signals — E2EPQ1
 
 Context: clients can enable per-peer post-quantum e2e sessions (the "Post
