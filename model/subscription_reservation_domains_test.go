@@ -117,16 +117,63 @@ func TestPublicRedisLongLivedGrantRetainsOriginalRequestLease(t *testing.T) {
 				t.Fatal("reconciliation changed the original request's lease", expiry, originalExpiry)
 			}
 		})
-		posts := settleNetEscrowOrderingTestContract(ctx, escrow.ContractId)
+		neighbor := createRedisAdmissionTest(ctx, f, 29)
+		var neighborExpiry float64
+		server.Redis(ctx, func(r server.RedisClient) {
+			var err error
+			neighborExpiry, err = r.ZScore(ctx, keys[2], neighbor.ContractId.String()).Result()
+			server.Raise(err)
+		})
+		// A terminal outcome queues its debit. Its exact token and original
+		// expiry remain owned until the durable worker commits and releases it.
+		posts := asyncDebitTestSettle(ctx, escrow.ContractId, 11)
 		server.RunPosts(ctx, posts...)
 		server.RunPosts(ctx, posts...)
+		credit, pending, applied := asyncDebitTestState(t, ctx, f.balanceId)
+		if credit != 1000 || pending != 1 || applied != 0 {
+			t.Fatal("outcome did not retain the pending durable debit", credit, pending, applied)
+		}
 		server.Redis(ctx, func(r server.RedisClient) {
 			value, err := r.Get(ctx, keys[0]).Int64()
 			server.Raise(err)
-			if value != 0 || !errors.Is(r.HGet(ctx, keys[1], escrow.ContractId.String()).Err(), server.RedisNil) ||
-				!errors.Is(r.ZScore(ctx, keys[2], escrow.ContractId.String()).Err(), server.RedisNil) {
-				t.Fatal("terminal public settlement did not release the exact request once", value)
+			amount, err := r.HGet(ctx, keys[1], escrow.ContractId.String()).Int64()
+			server.Raise(err)
+			expiry, err := r.ZScore(ctx, keys[2], escrow.ContractId.String()).Result()
+			server.Raise(err)
+			if value != 40 || amount != 11 || expiry != originalExpiry {
+				t.Fatal("pending debit lost its consumption token or original lease", value, amount, expiry == originalExpiry)
 			}
 		})
+		n, released, busy, err := flushTransferDebitBalance(ctx, f.balanceId)
+		if err != nil || n != 1 || released != 1 || busy {
+			t.Fatal("durable worker did not apply and release the exact debit", n, released, busy, err)
+		}
+		checkReleased := func() {
+			credit, pending, applied := asyncDebitTestState(t, ctx, f.balanceId)
+			if credit != 989 || pending+applied != 0 {
+				t.Fatal("worker release changed durable accounting", credit, pending, applied)
+			}
+			server.Redis(ctx, func(r server.RedisClient) {
+				value, err := r.Get(ctx, keys[0]).Int64()
+				server.Raise(err)
+				amount, err := r.HGet(ctx, keys[1], neighbor.ContractId.String()).Int64()
+				server.Raise(err)
+				expiry, err := r.ZScore(ctx, keys[2], neighbor.ContractId.String()).Result()
+				server.Raise(err)
+				if value != 29 || amount != 29 || expiry != neighborExpiry ||
+					!errors.Is(r.HGet(ctx, keys[1], escrow.ContractId.String()).Err(), server.RedisNil) ||
+					!errors.Is(r.ZScore(ctx, keys[2], escrow.ContractId.String()).Err(), server.RedisNil) {
+					t.Fatal("worker did not release exactly its request while retaining its neighbor", value, amount, expiry == neighborExpiry)
+				}
+			})
+		}
+		checkReleased()
+		server.RunPosts(ctx, posts...)
+		ReconcileRedisContractReservation(ctx, escrow.ContractId)
+		n, released, busy, err = flushTransferDebitBalance(ctx, f.balanceId)
+		if err != nil || n != 0 || released != 0 || busy {
+			t.Fatal("replayed worker or callbacks repeated the debit or release", n, released, busy, err)
+		}
+		checkReleased()
 	})
 }
