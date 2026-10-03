@@ -3703,25 +3703,44 @@ func (self *Resident) startClientCallbackWorkers() {
 
 func (self *Resident) runClientControlIngress() {
 	defer returnReadyResidentControlIngress(self.controlIngress)
+	handle := func(frames []*protocol.Frame) {
+		defer returnResidentControlFrames(frames)
+		self.controlLimiter.delay()
+		if err := self.residentController.HandleControlFrames(frames); err != nil {
+			if glog.V(1) {
+				glog.Infof("[rr]control error = %s\n", err)
+			}
+		}
+	}
+	drainAccepted := func() {
+		// The receive callback returns after enqueue and the transfer layer
+		// can then ACK. Transport cancellation cannot discard that promise.
+		// Fence and join producers before consuming the finite accepted tail;
+		// CloseAndWait keeps the detached controller alive until this joins.
+		self.controlIngressAdmission.close()
+		self.controlIngressAdmission.wait()
+		for {
+			select {
+			case frames := <-self.controlIngress:
+				handle(frames)
+			default:
+				return
+			}
+		}
+	}
 	for {
 		select {
 		case <-self.ctx.Done():
+			drainAccepted()
 			return
 		default:
 		}
 		select {
 		case <-self.ctx.Done():
+			drainAccepted()
 			return
 		case frames := <-self.controlIngress:
-			func() {
-				defer returnResidentControlFrames(frames)
-				self.controlLimiter.delay()
-				if err := self.residentController.HandleControlFrames(frames); err != nil {
-					if glog.V(1) {
-						glog.Infof("[rr]control error = %s\n", err)
-					}
-				}
-			}()
+			handle(frames)
 		}
 	}
 }
