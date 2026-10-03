@@ -223,6 +223,11 @@ func TestProviderTunnelActualLocalAuthorityWithoutApi(t *testing.T) {
 			if err := model.ForceCloseAllOpenContractIds(ctx, server.NowUtc().Add(time.Second)); err != nil {
 				tb.Fatal("settlement", err)
 			}
+			for shard := range model.TransferDebitShardCount {
+				if _, err := model.FlushTransferDebits(ctx, shard, nil, 64); err != nil {
+					tb.Fatal("asynchronous payer debit", err)
+				}
+			}
 			server.Db(ctx, func(conn server.PgConn) {
 				server.Raise(conn.QueryRow(ctx, `SELECT COALESCE(SUM(te.payout_byte_count) FILTER (WHERE te.settled),0), count(*) FILTER (WHERE NOT te.settled) FROM transfer_escrow te JOIN transfer_contract tc ON tc.contract_id=te.contract_id WHERE tc.payer_network_id=$1`, sourceNetworkId).Scan(&payout, &unsettled))
 				server.Raise(conn.QueryRow(ctx, `SELECT COALESCE(SUM(balance_byte_count),0) FROM transfer_balance WHERE network_id=$1 AND active=true AND start_time<=$2 AND $2<end_time`, sourceNetworkId, server.NowUtc()).Scan(&balance))

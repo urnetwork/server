@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,6 +35,10 @@ type playWebhookTestEnv struct {
 	statusFailures map[string]int
 	// when true, the acknowledge endpoint answers 500
 	failAcknowledge bool
+	// when true, acknowledging a purchase the subscription already reports as
+	// ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED answers 400 (the unverified Play
+	// behavior a renewal RTDN would hit, UPGRADE.md S5)
+	rejectReacknowledge bool
 
 	testServer *httptest.Server
 }
@@ -71,6 +76,13 @@ func newPlayWebhookTestEnv(t testing.TB, skus map[string]*Sku) *playWebhookTestE
 			if env.failAcknowledge {
 				http.Error(w, "backend error", http.StatusInternalServerError)
 				return
+			}
+			if env.rejectReacknowledge {
+				token, _ := strings.CutSuffix(r.PathValue("tokenAndAction"), ":acknowledge")
+				if sub, ok := env.subscriptions[token]; ok && sub.AcknowledgementState == "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED" {
+					http.Error(w, "purchase already acknowledged", http.StatusBadRequest)
+					return
+				}
 			}
 			counter, ok := env.acknowledged[r.PathValue("tokenAndAction")]
 			if !ok {
@@ -312,4 +324,55 @@ func TestPlayWebhookAcknowledgeFailureIsNon2xx(t *testing.T) {
 		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 1)
 		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
 	})
+}
+
+// S5 guard: Play renewals arrive as RTDNs for a purchase that is already
+// acknowledged. Acknowledging it again must not be attempted, or a non-200 from
+// Play for the repeat would fail every delivery of every renewal, and Pub/Sub
+// would redeliver it without end while the renewal is never credited inline.
+// No db: the acknowledge step runs against the fake Android Publisher API.
+func TestPlayAcknowledgeSkipsAlreadyAcknowledgedPurchase(t *testing.T) {
+	env := newPlayWebhookTestEnv(t, map[string]*Sku{})
+	env.rejectReacknowledge = true
+	ctx := context.Background()
+
+	rtdnMessage := func(purchaseToken string) *PlayRtdnMessage {
+		return &PlayRtdnMessage{
+			Version:     "1.0",
+			PackageName: env.packageName,
+			SubscriptionNotification: &PlaySubscriptionNotification{
+				Version: "1.0",
+				// SUBSCRIPTION_RENEWED
+				NotificationType: 2,
+				PurchaseToken:    purchaseToken,
+				SubscriptionId:   "supporter_monthly",
+			},
+		}
+	}
+	networkId := server.NewId()
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+
+	// a renewal: Play reports the purchase as acknowledged
+	renewedToken := "play-token-renewed-1"
+	renewed := playTestSubscription(networkId, "supporter_monthly", now.Add(-30*24*time.Hour), now.Add(30*24*time.Hour))
+	renewed.AcknowledgementState = "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED"
+	env.subscriptions[renewedToken] = renewed
+
+	for delivery := 1; delivery <= 3; delivery += 1 {
+		if err := playAcknowledgeSubscription(ctx, rtdnMessage(renewedToken), renewed); err != nil {
+			t.Fatalf("renewal delivery %d of an already-acknowledged purchase failed: %s; every redelivery fails the same way", delivery, err)
+		}
+	}
+	connect.AssertEqual(t, env.acknowledgeCount(renewedToken), int64(0))
+
+	// a first purchase is still acknowledged, and a failed acknowledge still fails
+	purchasedToken := "play-token-purchased-1"
+	purchased := playTestSubscription(networkId, "supporter_monthly", now, now.Add(30*24*time.Hour))
+	env.subscriptions[purchasedToken] = purchased
+
+	env.failAcknowledge = true
+	connect.AssertNotEqual(t, playAcknowledgeSubscription(ctx, rtdnMessage(purchasedToken), purchased), nil)
+	env.failAcknowledge = false
+	connect.AssertEqual(t, playAcknowledgeSubscription(ctx, rtdnMessage(purchasedToken), purchased), nil)
+	connect.AssertEqual(t, env.acknowledgeCount(purchasedToken), int64(1))
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -211,6 +212,11 @@ type UnfulfilledSolanaPayment struct {
 	ReferenceCandidates []string
 	// the on-chain timestamp, when the webhook carried one
 	TransactionTime *time.Time
+	// the wallet that sent the payment, when it was a single transfer
+	SenderAccount *string
+	// why a payment without a reference was not matched by its amount, with
+	// the candidate intents, for support to credit by hand
+	MatchNote *string
 }
 
 // RecordUnfulfilledSolanaPayment writes the row. Idempotent on the tx signature
@@ -236,8 +242,9 @@ func RecordUnfulfilledSolanaPayment(
 			`
 			INSERT INTO solana_unfulfilled_payment
 			(tx_signature, reason, token_amount_usd, expected_amount_usd,
-			 payment_reference, network_id, reference_candidates, transaction_time)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			 payment_reference, network_id, reference_candidates, transaction_time,
+			 sender_account, match_note)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT DO NOTHING
 			`,
 			payment.TxSignature,
@@ -248,6 +255,8 @@ func RecordUnfulfilledSolanaPayment(
 			payment.NetworkId,
 			referenceCandidates,
 			payment.TransactionTime,
+			payment.SenderAccount,
+			payment.MatchNote,
 		)
 	})
 
@@ -388,7 +397,7 @@ func GetUnfulfilledSolanaPayment(
 			ctx,
 			`
 			SELECT reason, token_amount_usd, expected_amount_usd,
-			       payment_reference, network_id
+			       payment_reference, network_id, sender_account, match_note
 			FROM solana_unfulfilled_payment
 			WHERE tx_signature = $1
 			`,
@@ -405,6 +414,8 @@ func GetUnfulfilledSolanaPayment(
 					&payment.ExpectedAmountUsd,
 					&payment.PaymentReference,
 					&payment.NetworkId,
+					&payment.SenderAccount,
+					&payment.MatchNote,
 				))
 			} else {
 				returnErr = errors.New("Unfulfilled payment not found.")
@@ -535,6 +546,208 @@ func GetSolanaPaymentIntent(
 				if subscriptionPlan != nil {
 					intent.SubscriptionPlan = *subscriptionPlan
 				}
+			}
+		})
+	})
+	return
+}
+
+// Unique quote amounts for memo-less payments.
+//
+// A buyer whose wallet cannot add a memo sends the quoted amount with no
+// reference. To identify the intent from the amount alone, every new quote is
+// the price plus a sub-cent suffix of 1 to SolanaUniqueAmountMaxSuffixMicro
+// micro-USDC (USDC has 6 decimals), and that exact amount is reserved for the
+// intent in solana_payment_amount_reservation until the intent's expiry plus
+// SolanaUniqueAmountHold. No two intents hold the same amount at once, and an
+// amount is not quoted again until a late payment of the previous quote is
+// implausible. When no suffix is free the quote is the plain price and the
+// intent matches by reference only, as before.
+const (
+	SolanaUsdcMicroPerUsd = 1_000_000
+	// the suffix stays under a cent
+	SolanaUniqueAmountMaxSuffixMicro = 9_999
+	// how long an amount stays reserved after its intent expires
+	SolanaUniqueAmountHold = 30 * 24 * time.Hour
+	// random suffixes tried before quoting the plain price
+	solanaUniqueAmountAttempts = 32
+)
+
+// SolanaUsdToMicro is the exact micro-USDC of a usd amount. Rounded, so float
+// dust in a quote or a chain-reported token amount never shifts it.
+func SolanaUsdToMicro(amountUsd float64) int64 {
+	return int64(math.Round(amountUsd * SolanaUsdcMicroPerUsd))
+}
+
+// SolanaMicroToUsd is the usd amount of exact micro-USDC.
+func SolanaMicroToUsd(amountMicro int64) float64 {
+	return float64(amountMicro) / SolanaUsdcMicroPerUsd
+}
+
+// SolanaUniqueAmountMicro is the quote for a price with a suffix. ok = false
+// for a suffix out of range or a non-positive price.
+func SolanaUniqueAmountMicro(priceUsd float64, suffixMicro int64) (amountMicro int64, ok bool) {
+	if priceUsd <= 0 || suffixMicro < 1 || SolanaUniqueAmountMaxSuffixMicro < suffixMicro {
+		return 0, false
+	}
+	return SolanaUsdToMicro(priceUsd) + suffixMicro, true
+}
+
+// CreateSolanaPaymentIntentWithUniqueAmount records a quote of priceUsd plus a
+// reserved suffix and returns the amount the buyer must send. pickSuffixMicro
+// returns a candidate suffix in [1, SolanaUniqueAmountMaxSuffixMicro]; it is
+// injected so tests are deterministic.
+//
+// The intent row is inserted first, so a duplicate reference reserves nothing.
+// A reservation is taken only when the amount is free or its previous hold has
+// lapsed (ON CONFLICT ... WHERE reserved_until < now): the primary key on the
+// amount makes concurrent quotes of the same amount exclusive. With no free
+// suffix after solanaUniqueAmountAttempts tries the intent keeps the plain
+// price and no expected_amount_micro, so it can only match by reference.
+//
+// created_at is set here from the same clock as expires_at: the memo-less
+// match compares the on-chain time against both.
+func CreateSolanaPaymentIntentWithUniqueAmount(
+	ctx context.Context,
+	reference string,
+	networkId server.Id,
+	priceUsd float64,
+	subscriptionPlan string,
+	expiresAt time.Time,
+	pickSuffixMicro func() int64,
+) (amountUsd float64, err error) {
+	now := server.NowUtc()
+	server.Tx(ctx, func(tx server.PgTx) {
+		amountUsd = 0
+		err = nil
+		tag, execErr := tx.Exec(
+			ctx,
+			`
+				INSERT INTO solana_payment_intent
+				(payment_reference, network_id, created_at, expires_at, expected_amount_usd, subscription_plan)
+				VALUES ($1, $2, $3, $4, $5, $6)
+				ON CONFLICT DO NOTHING
+			`,
+			reference,
+			networkId,
+			now,
+			expiresAt,
+			priceUsd,
+			subscriptionPlan,
+		)
+		if execErr != nil {
+			err = execErr
+			return
+		}
+		if tag.RowsAffected() == 0 {
+			err = errors.New("payment_reference already exists")
+			return
+		}
+		amountUsd = priceUsd
+
+		for range solanaUniqueAmountAttempts {
+			amountMicro, ok := SolanaUniqueAmountMicro(priceUsd, pickSuffixMicro())
+			if !ok {
+				continue
+			}
+			tag, execErr := tx.Exec(
+				ctx,
+				`
+					INSERT INTO solana_payment_amount_reservation
+					(amount_micro, payment_reference, reserved_until)
+					VALUES ($1, $2, $3)
+					ON CONFLICT (amount_micro) DO UPDATE
+					SET payment_reference = EXCLUDED.payment_reference,
+						reserved_until = EXCLUDED.reserved_until
+					WHERE solana_payment_amount_reservation.reserved_until < $4
+				`,
+				amountMicro,
+				reference,
+				expiresAt.Add(SolanaUniqueAmountHold),
+				now,
+			)
+			if execErr != nil {
+				err = execErr
+				return
+			}
+			if tag.RowsAffected() == 0 {
+				// held by another quote
+				continue
+			}
+			_, execErr = tx.Exec(
+				ctx,
+				`
+					UPDATE solana_payment_intent
+					SET expected_amount_usd = $2,
+						expected_amount_micro = $3
+					WHERE payment_reference = $1
+				`,
+				reference,
+				SolanaMicroToUsd(amountMicro),
+				amountMicro,
+			)
+			if execErr != nil {
+				err = execErr
+				return
+			}
+			amountUsd = SolanaMicroToUsd(amountMicro)
+			return
+		}
+	})
+	if err != nil {
+		return 0, err
+	}
+	return amountUsd, nil
+}
+
+// ListSolanaPaymentIntentsByAmountMicro returns every intent, open or consumed,
+// quoted exactly amountMicro that expires after minExpiresAt. The memo-less
+// match passes the payment time less SolanaUniqueAmountHold, so the result
+// holds every intent the amount could belong to; more than one is ambiguous
+// and is not credited.
+func ListSolanaPaymentIntentsByAmountMicro(
+	ctx context.Context,
+	amountMicro int64,
+	minExpiresAt time.Time,
+) (intents []*SolanaPaymentIntent, returnErr error) {
+	intents = []*SolanaPaymentIntent{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				payment_reference,
+				network_id,
+				expected_amount_usd,
+				subscription_plan,
+				created_at,
+				expires_at,
+				tx_signature
+			FROM solana_payment_intent
+			WHERE expected_amount_micro = $1
+			  AND $2 < expires_at
+			LIMIT 8
+			`,
+			amountMicro,
+			minExpiresAt,
+		)
+		if err != nil {
+			returnErr = err
+			return
+		}
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				intent := &SolanaPaymentIntent{}
+				server.Raise(result.Scan(
+					&intent.PaymentReference,
+					&intent.NetworkId,
+					&intent.ExpectedAmountUsd,
+					&intent.SubscriptionPlan,
+					&intent.CreatedAt,
+					&intent.ExpiresAt,
+					&intent.TxSignature,
+				))
+				intents = append(intents, intent)
 			}
 		})
 	})

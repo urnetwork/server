@@ -157,6 +157,12 @@ func solanaReconcileCredentialsPresent() bool {
 
 var solanaReconcileHasCredentials = solanaReconcileCredentialsPresent
 
+// The x402 leg reads only our own settled_not_granted events and retries the
+// grant locally; it needs no store credentials, so it always runs.
+var x402ReconcileHasCredentials = func() bool {
+	return true
+}
+
 // ----- apple App Store Server API client -----
 
 // The only genuinely new credential reconciliation needs: App Store Server
@@ -378,8 +384,8 @@ type PaymentReconcileRunOptions struct {
 	// the real repair would carry, tagged dry_run.
 	DryRun bool
 	// Stores limits the pass to the named stores
-	// (model.SubscriptionMarketStripe | Apple | Google | Solana); empty runs
-	// all four. Filtered-out stores are untouched entirely: no events, no
+	// (model.SubscriptionMarketStripe | Apple | Google | Solana | X402); empty
+	// runs all of them. Filtered-out stores are untouched entirely: no events, no
 	// watermark.
 	Stores []string
 }
@@ -764,6 +770,7 @@ func runPaymentReconciliation(
 		{model.SubscriptionMarketApple, appleReconcileHasCredentials, reconcileApple},
 		{model.SubscriptionMarketGoogle, playReconcileHasCredentials, reconcilePlay},
 		{model.SubscriptionMarketSolana, solanaReconcileHasCredentials, reconcileSolana},
+		{model.SubscriptionMarketX402, x402ReconcileHasCredentials, reconcileX402},
 	}
 	if 0 < len(options.Stores) {
 		selected := map[string]bool{}
@@ -1753,4 +1760,91 @@ func solanaStatusConfirmsPayment(statusErr any, confirmationStatus *string) bool
 		return false
 	}
 	return *confirmationStatus == "confirmed" || *confirmationStatus == "finalized"
+}
+
+// ----- x402 -----
+//
+// decision table (our settled_not_granted events -> action):
+//
+//	unresolved, settle tx already granted       -> already_credited (resolves)
+//	unresolved, not granted                     -> grant (idempotent on the settle tx) -> credited
+//	unresolved, network deleted                 -> credit_unfulfillable (resolves)
+//	unresolved, grant fails otherwise           -> error (retried next run)
+//
+// There is no store to pull from: the facilitator already settled, so the
+// truth is our own record of the settle transaction (S9).
+
+var (
+	x402ListUnresolvedSettledNotGranted = func(ctx context.Context, limit int) []*model.PaymentReconciliationEvent {
+		return model.GetUnresolvedSettledNotGrantedEvents(ctx, model.SubscriptionMarketX402, limit)
+	}
+	x402ReconcileTransactionGranted = x402TransactionGranted
+)
+
+func reconcileX402(run *paymentReconcileRun, since time.Time) (bool, error) {
+	store := model.SubscriptionMarketX402
+	ctx := run.clientSession.Ctx
+
+	events := x402ListUnresolvedSettledNotGranted(ctx, paymentReconcileRenewalLimit)
+	for _, event := range events {
+		if !run.spend(store) {
+			return false, nil
+		}
+		run.examine(store)
+
+		transaction := event.Evidence
+		if event.NetworkId == nil {
+			run.recordCreditUnfulfillable(store, transaction, "destination_unresolved")
+			continue
+		}
+		networkId := *event.NetworkId
+
+		sku, network, err := x402SkuFromSettledNotGrantedDetails(event.Details)
+		if err != nil {
+			run.record(store, model.PaymentReconcileActionError, &networkId, transaction, map[string]any{
+				"error": err.Error(),
+				"leg":   "credit",
+			})
+			continue
+		}
+		details := map[string]any{
+			"sku_id":  sku.SkuId,
+			"network": network,
+			"leg":     "credit",
+		}
+
+		if x402ReconcileTransactionGranted(ctx, networkId, transaction) {
+			run.record(store, model.PaymentReconcileActionAlreadyCredited, &networkId, transaction, details)
+			continue
+		}
+		if run.dryRun {
+			run.record(store, model.PaymentReconcileActionWouldCredit, &networkId, transaction, details)
+			continue
+		}
+
+		err = func() error {
+			settleResponse := &X402SettleResponse{
+				Success:     true,
+				Transaction: transaction,
+				Network:     network,
+			}
+			netRevenue := model.UsdToNanoCents(sku.PriceUsd)
+			if sku.Pro {
+				return x402GrantProMonthFunc(ctx, networkId, sku, netRevenue, settleResponse)
+			}
+			return x402GrantDataFunc(ctx, networkId, sku, netRevenue, settleResponse)
+		}()
+		switch {
+		case errors.Is(err, model.ErrPaymentNetworkNotFound):
+			run.recordCreditUnfulfillable(store, transaction, "destination_deleted")
+		case err != nil:
+			run.record(store, model.PaymentReconcileActionError, &networkId, transaction, map[string]any{
+				"error": err.Error(),
+				"leg":   "credit",
+			})
+		default:
+			run.record(store, model.PaymentReconcileActionCredited, &networkId, transaction, details)
+		}
+	}
+	return true, nil
 }

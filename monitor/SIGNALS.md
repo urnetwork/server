@@ -253,6 +253,7 @@ active missing capability and must not be read as green.
 | 22.8 | Coverage gap | `subnet-coverage` reports missing artifact, anchor, history, and audit replay |
 | 22.9 | Coverage gap | `subnet-coverage` reports missing process, resource, quota, funding, and adversarial readers |
 | 22.10 | Coverage gap | `subnet-coverage` preserves the acceptance and recovery requirements for every missing family |
+| 14.7e | Runbook | `control-route-pressure`, `proxy-runtime`, `provenance`; actual local-authority/no-HTTP tests are release controls, not a production fallback detector |
 <!-- numbered-coverage-end -->
 
 Cadence mode starts each probe immediately, but admits at most four concurrent
@@ -2104,6 +2105,33 @@ visibility gaps prevent a unique-contract count or negative inference. A
 container-stream match does not independently attest a PID/image or attribute
 database CPU. Preserve the accounting rejection and progress as separate facts;
 do not fund, bypass, or quarantine from log counts alone.
+
+On 2026-10-03 a bounded Connect Loki read retained 64 matching records from
+four container streams on one host: all reached `txWithPool`'s commit-error
+raise through `ConnectNetworkClientWithIpFamily`, all reported a closed
+connection, and 53 also matched the statement-cache deallocation wrapper.
+This identifies a failed commit path, not its initiating query or a committed
+or rolled-back connection row. The capped slice is a lower bound; missing
+hosts, generations, SQLSTATEs and source identities remain unknown. The
+recurrence predates release 5500, so timing alone does not establish a rollout
+regression. Retain the generic aggregate and owner PAGEs without adding their
+overlapping counts or replaying an ambiguous commit.
+
+The owning client-admission control reproduced that exact wrapper by canceling
+the full Connect model call while its shard-registry read waited on a real row
+lock. Returning the read error normally made the void transaction callback
+appear successful and reach COMMIT. Query, decode and iteration failures now
+unwind that transaction with their original error; an intentional retired-shard
+refusal still returns normally. The same helper fences client creation and
+refresh. Real PostgreSQL controls cover cancellation, original SQLSTATE,
+rollback of earlier writes after decode failure, ordinary/live admission and
+draining/expired refusal. This establishes an error-masking defect, not that
+every production closed connection was caused by cancellation or shard-lock
+contention. Verify the emitting artifact and require ten fresh minutes below
+the unchanged panic threshold after convergence, while separately checking
+admission success and financial lock pressure. Missing tail coverage or a
+changed error owner is not recovery, and healthy local controls do not prove
+production availability.
 
 The 2026-09-23 Main Taskworker sample also exposed a versioned-root
 attribution false positive: `server/v2026.HandleError` was counted as the
@@ -4462,6 +4490,52 @@ cadence and ten-minute export bound, and directs remediation to the dedicated
 owner signals. Require consecutive exports to return toward baseline after
 those taskworker fixes; do not rewrite or disable a successful public-stats
 export from one correlated duration.
+
+### 2.5a Asynchronous payer debit recovery
+Probe: `transfer-debits`
+
+Migration 758 moves current Redis-marked contract consumption into a per-contract
+journal in the outcome transaction. Sixteen indexed partitions batch balance
+updates after settlement returns. The probe reads all 16 partitions with two
+oldest-row index seeks each and exact scheduled task keys. It returns no finding
+before 758; missing/malformed coverage afterward is unobservable, never zero debt.
+
+WARN oldest pending or committed-but-unreleased debt at 60s; PAGE at 300s.
+These are initial design escalation bands (four 15s worker budgets and five
+minutes), **not a measured Main service-level baseline**. Normal empty partitions
+and bursts below 60s are healthy. A missing scheduled partition warns after two
+observations so the completion/post transition is not mistaken for a stopped
+worker. Actual cadence can be lengthened by the monitor global minimum; preserve
+source clocks. Source/query failures retain visibility errors. No full journal
+COUNT or customer identifiers are collected.
+
+`urnetwork_transfer_debit_oldest_seconds{shard,state}` and its sample timestamp,
+`flush_active`, `complete_timestamp_seconds`, and finite `flush_total` outcomes
+supply per-process drill-down. State `pending` awaits PG debit; `redis_release`
+already committed and awaits Redis acknowledgment/deletion. Fresh task leases do
+not prove a live owner; sixteen keys do not imply sixteen executing workers.
+Compare source-qualified task processes, cursor progress, completed batches and
+both ages. Busy grants advance the cursor; they must not starve later keys.
+Never delete journal debt or force-release Redis to make these signals healthy.
+
+The Sep 27 commit 35274673 moved a previously separate post-transaction per-contract
+PG debit into `settleEscrowInTx` and added a shared grant lock. History supports
+that ordering regression; it does **not** establish an earlier aggregate Redis
+writeback worker. The current fix introduces explicit durable batched writeback.
+Real PG controls hold the shared balance/revision/snapshot while 64 public closes
+return; old code timed out 64/64, the candidate completed. Two independent local
+processes settled 512 contracts while their shared grant stayed locked. A separate
+512-payer/16-call control exercised drain capacity. These are local controls,
+not Main throughput or a claim that legacy unmarked settlement is contention-free.
+
+The accepted tradeoff is eventual PG credit plus approximate Redis admission:
+healthy reservations retain consumed bytes until the debit commits; lost callbacks
+leave conservative reservations. Journal applied bits prevent duplicate durable
+debit after Redis failure or lost acknowledgment. Redis loss/lease expiry and
+mixed old release callbacks can temporarily under-reserve; reconciliation and
+bounded journal drain restore the ledger without using provider payout eligibility
+as payer consumption. Legacy unmarked contracts retain their existing synchronous
+financial authority and remain an explicit separate contention boundary.
 
 ### 2.6 Open-contract set size — the close-backlog canary
 Probe: `open-contracts`
@@ -18468,6 +18542,32 @@ transports and active traffic and is not a Main reproduction. Retain every
 runtime PAGE while finding those active owners. Current owning Connect source
 has no production pprof route, and SIGQUIT participates in service shutdown;
 do not invent a profile endpoint or use a shutdown signal as a profile read.
+
+A 2026-10-03 local control at Server `c56f9557` with published Connect
+`08d48400` extended that constructor control through actual H1 handlers,
+exchange TCP connections, full residents, and acknowledged control traffic in
+both directions. Three consecutive cohorts of eight residents each held one
+send sequence, one receive sequence, and one pacing service per resident.
+Each resident's three 4,096-slot channels retained 491,520 bytes (480 KiB) of
+named slot storage before channel headers, allocator overhead, exchange queues,
+payloads, maps, or stacks. The exported `Client.MemoryOwnerCensus()` measured
+these existing owners without a process-wide profile or a production producer.
+Every one of the 24 retired resident clients reached zero indexed/active
+send/receive sequences, pacing services, and named channel slots after joined
+shutdown, including under the race detector. Joining the exchange also left
+zero transport routes on every retained retired resident.
+
+This is a lower bound for a specific active control path, not a Main heap
+attribution or proof that a leak is absent. The local process also contains
+the synthetic remote clients and both ends of each exchange connection, so its
+heap and goroutine totals cannot be assigned to the resident side. Peer-list
+fan-out, forwarded data, P2P, lossy carriers, stalled dependencies, and aged
+draining generations were outside this control. Preserve the exact native
+PID/start/build/RSS join and measured transport/sequence population as the next
+production discriminator; neither the bare-client cost nor this larger active
+cost can be multiplied into a complete heap estimate. The owning regression is
+`TestResidentRuntimeOwnershipChurnControl` in
+`connect/resident_runtime_ownership_diagnostic_test.go`.
 
 `connect-resident-cost-unobservable` WARNs immediately when the newest Connect
 population join is missing/stale, duplicated, invalid, or cannot select an

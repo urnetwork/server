@@ -70,6 +70,7 @@ func (self *ackReplayRecorder) dump(t testing.TB, role string) {
 			"sequence": progressTraceIdentity(event.SequenceId), "message": progressTraceIdentity(event.MessageId),
 			"number": event.SequenceNumber, "wire_hash": fmt.Sprintf("%016x", event.WireHash),
 			"bytes": event.ByteCount, "transport": event.TransportType, "no_ack": event.NoAck,
+			"queue_length": event.QueueLength, "queue_capacity": event.QueueCapacity,
 			"selective": event.Selective, "success": event.Success, "error_kind": event.ErrorKind, "outcome": event.Outcome,
 		})
 		t.Logf("[ack-lineage] %s", row)

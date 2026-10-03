@@ -577,10 +577,12 @@ func addSsoAuthInTx(
 	/**
 	 * Check user auth isn't already associated with a different user
 	 */
+	// rows are stored under the normalized user auth, so the conflict check
+	// must use it too
 	err := validateUserAuthAvailability(
 		ctx,
 		tx,
-		parsedAuthJwt.UserAuth,
+		normalJwtUserAuth,
 		args.UserId,
 	)
 	if err != nil {

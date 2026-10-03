@@ -287,6 +287,11 @@ func selectRedisTransferBalances(ctx context.Context, tx server.PgTx, admission 
 			if held != nil {
 				return nil, 0, fmt.Errorf("Redis grant funding incomplete because a counter remains unknown: %w", held)
 			}
+			// Only a complete bounded census can authorize shrink-to-fit. A
+			// capacity refusal or unknown counter is not proof of less funding.
+			if _, ok := grantTransferEscrowByteCount(requested, requested-remaining); ok && len(selected) != 0 {
+				return selected, priority / Priority(len(selected)), nil
+			}
 			return nil, 0, fmt.Errorf("%w (%d).", errRedisReservationInsufficient, requested-remaining)
 		}
 	}

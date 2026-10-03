@@ -1389,7 +1389,14 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 						break gather
 					}
 				}
+				var trace []h1RelayLineageSpan
+				if h1RelayLineageTraceEnabled {
+					trace = beginH1RelayLineageBatch("exchange_client_write_begin", header.ClientId, header.ResidentId, batch)
+				}
 				err := sendBuffer.WriteMessages(conn, batch)
+				if h1RelayLineageTraceEnabled {
+					endH1RelayLineageBatch(trace, "exchange_client_write_end", err == nil)
+				}
 				batch = batch[:0]
 				if err != nil {
 					return false
@@ -1458,6 +1465,10 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				}
 
 				messageByteCount := len(message)
+				var trace h1RelayLineageSpan
+				if h1RelayLineageTraceEnabled {
+					trace = beginH1RelayLineage("exchange_transport_read", header.ClientId, header.ResidentId, message, len(receive), cap(receive))
+				}
 				sendResult := sendPooledReceive(
 					handleCtx.Done(),
 					nil,
@@ -1465,6 +1476,9 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 					message,
 					connect.CarrierReliabilityReliable,
 				)
+				if h1RelayLineageTraceEnabled {
+					trace.end("exchange_transport_admit", sendResult == pooledMessageSendDelivered, len(receive), cap(receive))
+				}
 				switch sendResult {
 				case pooledMessageSendDelivered:
 					resident.UpdateActivity()
@@ -1555,6 +1569,10 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 				}
 
 				messageByteCount := len(message)
+				var trace h1RelayLineageSpan
+				if h1RelayLineageTraceEnabled {
+					trace = beginH1RelayLineage("exchange_forward_read", header.ClientId, header.ResidentId, message, len(forward), cap(forward))
+				}
 				sendResult := sendPooledReceive(
 					handleCtx.Done(),
 					nil,
@@ -1562,6 +1580,9 @@ func (self *Exchange) handleExchangeConnection(conn net.Conn) {
 					message,
 					connect.CarrierReliabilityReliable,
 				)
+				if h1RelayLineageTraceEnabled {
+					trace.end("exchange_forward_admit", sendResult == pooledMessageSendDelivered, len(forward), cap(forward))
+				}
 				switch sendResult {
 				case pooledMessageSendDelivered:
 					resident.UpdateActivity()
@@ -2535,7 +2556,14 @@ func (self *ExchangeConnection) Run() {
 				}
 			}
 			self.notifySendDequeuedForTest()
+			var trace []h1RelayLineageSpan
+			if h1RelayLineageTraceEnabled {
+				trace = beginH1RelayLineageBatch("exchange_socket_write_begin", self.header.ClientId, self.header.ResidentId, batch)
+			}
 			err := self.sendBuffer.WriteMessages(self.conn, batch)
+			if h1RelayLineageTraceEnabled {
+				endH1RelayLineageBatch(trace, "exchange_socket_write_end", err == nil)
+			}
 			batch = batch[:0]
 			if err != nil {
 				return false
@@ -2988,12 +3016,19 @@ func (self *ResidentTransport) Run() {
 							self.cancel()
 							return
 						}
+						var trace h1RelayLineageSpan
+						if h1RelayLineageTraceEnabled {
+							trace = beginH1RelayLineage("resident_transport_dequeue", self.clientId, self.instanceId, message, len(self.send), cap(self.send))
+						}
 						sendResult := connection.sendMessage(
 							handleCtx.Done(),
 							message,
 							writeTimer,
 							self.exchange.settings.WriteTimeout,
 						)
+						if h1RelayLineageTraceEnabled {
+							trace.end("resident_transport_socket_admit", sendResult == pooledMessageSendDelivered, len(connection.send), cap(connection.send))
+						}
 						if !pooledMessageSendKeepsGeneration(sendResult) {
 							return
 						}
@@ -3764,6 +3799,9 @@ func (self *Resident) runClientForwardIngress(queue <-chan residentForwardIngres
 		case <-self.ctx.Done():
 			return
 		case message := <-queue:
+			if h1RelayLineageTraceEnabled {
+				beginH1RelayLineage("resident_forward_dequeue", self.clientId, server.Id(message.path.DestinationId), message.transferFrameBytes, len(queue), cap(queue))
+			}
 			self.processClientForward(message.path, message.transferFrameBytes)
 		}
 	}
@@ -4028,6 +4066,9 @@ func (self *Resident) clientForward() {
 func (self *Resident) handleClientForward(path connect.TransferPath, transferFrameBytes []byte) {
 	sourceId := server.Id(path.SourceId)
 	destinationId := server.Id(path.DestinationId)
+	if h1RelayLineageTraceEnabled {
+		beginH1RelayLineage("resident_forward_callback", self.clientId, destinationId, transferFrameBytes, 0, 0)
+	}
 
 	self.UpdateActivity()
 
@@ -4088,6 +4129,10 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 	sourceId := server.Id(path.SourceId)
 	destinationId := server.Id(path.DestinationId)
 	messageOwned := true
+	if h1RelayLineageTraceEnabled {
+		trace := beginH1RelayLineage("resident_forward_begin", self.clientId, destinationId, transferFrameBytes, 0, 0)
+		defer func() { trace.end("resident_forward_end", !messageOwned, 0, 0) }()
+	}
 	defer func() {
 		if messageOwned {
 			connect.MessagePoolReturn(transferFrameBytes)

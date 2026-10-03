@@ -412,6 +412,9 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "net escrow contract revision point lookup", requiredVersion: 753, rowColumn: 164},
 	{name: "durable net escrow reservation snapshot", requiredVersion: 754, rowColumn: 165},
 	{name: "Redis contract admission compatibility and policy", requiredVersion: 755, rowColumn: 166},
+	{name: "provider payment bonus provenance and submission guards", requiredVersion: 756, rowColumn: 167},
+	{name: "provider earning boundary immutable guards", requiredVersion: 757, rowColumn: 168},
+	{name: "asynchronous transfer debit journal and retention guard", requiredVersion: 758, rowColumn: 169},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -2155,7 +2158,10 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       `+proberShardOwnershipArtifactQuery+`,
 		       `+netEscrowContractPointRevisionArtifactQuery+`,
 		       `+netEscrowSnapshotArtifactQuery+`,
-		       `+redisAdmissionArtifactQuery+`
+		       `+redisAdmissionArtifactQuery+`,
+		       `+providerPaymentBonusArtifactQuery+`,
+		       `+providerPayoutBoundaryArtifactQuery+`,
+		       `+transferDebitArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {

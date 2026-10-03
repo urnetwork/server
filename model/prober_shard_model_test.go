@@ -263,6 +263,12 @@ func TestProberShardOpenDebtBlocksDeleteUntilRealSettlement(t *testing.T) {
 		if err = CloseContract(ctx, escrow.ContractId, p.providerId, 1024, false); err != nil {
 			t.Fatal(err)
 		}
+		if deleted, err := ReapProberShard(ctx, owner.Key); err != nil || deleted {
+			t.Fatal("pending durable debit did not fence shard deletion", err)
+		}
+		if _, released, _, err := flushTransferDebitBalance(ctx, owner.BalanceId); err != nil || released != 1 {
+			t.Fatal("private debit did not drain", released, err)
+		}
 		var before ByteCount
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$1`, owner.BalanceId).Scan(&before))
@@ -434,8 +440,14 @@ func TestProberShardRetriesOnlyTwoRealFinalReports(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET checkpoint=false WHERE contract_id=$1 AND party=$2`, escrow.ContractId, ContractPartyDestination))
 		})
+		if deleted, err := ReapProberShard(ctx, owner.Key); err != nil || deleted {
+			t.Fatal("two final reports lost their pending writeback", err)
+		}
+		if _, released, _, err := flushTransferDebitBalance(ctx, owner.BalanceId); err != nil || released != 1 {
+			t.Fatal("recovered settlement debit did not drain", released, err)
+		}
 		if deleted, err := ReapProberShard(ctx, owner.Key); err != nil || !deleted {
-			t.Fatal("two final reports were not retried and hard-deleted", err)
+			t.Fatal("flushed final reports were not hard-deleted", err)
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var retained bool

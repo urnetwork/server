@@ -332,27 +332,199 @@ type HandleLoginParsedAuthJwtArgs struct {
 	UserAuthAttemptId UserAuthAttemptId
 }
 
+// parsedAuthJwtLoginStore is the account storage an SSO login reads and
+// writes. Replaceable by tests; production uses the database.
+type parsedAuthJwtLoginStore struct {
+	ssoAuthsByUserAuth func(ctx context.Context, userAuth string) ([]NetworkUserSsoAuth, error)
+	// the network_user_auth_password row for the user auth, if any
+	passwordAuthByUserAuth func(ctx context.Context, userAuth string) (userId *server.Id, verified bool, found bool)
+	// the legacy network_user rows (user id and auth type) whose user_auth is
+	// the normalized user auth
+	legacyUsersByUserAuth func(ctx context.Context, normalUserAuth string) ([]legacyNetworkUser, error)
+	// the network the user administers, if any
+	adminNetwork              func(ctx context.Context, userId server.Id) (networkId server.Id, networkName string, found bool)
+	addSsoAuth                func(args *AddSsoAuthArgs, ctx context.Context) error
+	setUserAuthAttemptSuccess func(ctx context.Context, userAuthAttemptId UserAuthAttemptId)
+	signByJwt                 func(ctx context.Context, networkId server.Id, userId server.Id, networkName string) string
+}
+
+var parsedAuthJwtLoginDb = parsedAuthJwtLoginStore{
+	ssoAuthsByUserAuth: getSsoAuthsByUserAuth,
+	passwordAuthByUserAuth: func(ctx context.Context, userAuth string) (userId *server.Id, verified bool, found bool) {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT
+						user_id,
+						verified
+					FROM network_user_auth_password
+					WHERE user_auth = $1
+				`,
+				userAuth,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(
+						&userId,
+						&verified,
+					))
+					found = true
+				}
+			})
+		})
+		return
+	},
+	legacyUsersByUserAuth: func(ctx context.Context, normalUserAuth string) ([]legacyNetworkUser, error) {
+		legacyUsers := []legacyNetworkUser{}
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT
+						user_id,
+						auth_type
+					FROM network_user
+					WHERE user_auth = $1
+				`,
+				normalUserAuth,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var legacyUser legacyNetworkUser
+					server.Raise(result.Scan(
+						&legacyUser.UserId,
+						&legacyUser.AuthType,
+					))
+					legacyUsers = append(legacyUsers, legacyUser)
+				}
+			})
+		})
+		return legacyUsers, nil
+	},
+	adminNetwork: func(ctx context.Context, userId server.Id) (networkId server.Id, networkName string, found bool) {
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+					SELECT
+						network.network_id,
+						network.network_name
+					FROM network_user
+					INNER JOIN network ON network.admin_user_id = network_user.user_id
+					WHERE user_id = $1
+				`,
+				userId,
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(
+						&networkId,
+						&networkName,
+					))
+					found = true
+				}
+			})
+		})
+		return
+	},
+	addSsoAuth: addSsoAuth,
+	setUserAuthAttemptSuccess: func(ctx context.Context, userAuthAttemptId UserAuthAttemptId) {
+		SetUserAuthAttemptSuccess(ctx, userAuthAttemptId, true)
+	},
+	signByJwt: func(ctx context.Context, networkId server.Id, userId server.Id, networkName string) string {
+		isGuestMode := false
+		isPro := IsProFresh(
+			ctx,
+			&networkId,
+		)
+		return jwt.NewByJwt(
+			networkId,
+			userId,
+			networkName,
+			isGuestMode,
+			isPro,
+		).Sign()
+	},
+}
+
+// legacyNetworkUser is the sign-in identity kept on the network_user row
+// itself, from before sign-ins moved to the network_user_auth_* tables.
+type legacyNetworkUser struct {
+	UserId   server.Id
+	AuthType string
+}
+
+// legacyAppleSsoUserId finds an account created with Apple sign-in whose
+// Apple sign-in row was never migrated to network_user_auth_sso (the
+// migration skips stored tokens it cannot parse). It matches exactly as the
+// legacy login did: the normalized verified token email equals
+// network_user.user_auth AND the account's auth type is apple. An account
+// created with a password or another provider never matches on the email
+// alone.
+func legacyAppleSsoUserId(
+	ctx context.Context,
+	authJwt AuthJwt,
+	store *parsedAuthJwtLoginStore,
+) (*server.Id, error) {
+	if authJwt.AuthType != AuthTypeApple {
+		return nil, nil
+	}
+	normalUserAuth, _ := NormalUserAuth(authJwt.UserAuth)
+	if normalUserAuth == "" {
+		return nil, nil
+	}
+	legacyUsers, err := store.legacyUsersByUserAuth(ctx, normalUserAuth)
+	if err != nil {
+		return nil, err
+	}
+	for _, legacyUser := range legacyUsers {
+		if AuthType(legacyUser.AuthType) == AuthTypeApple {
+			userId := legacyUser.UserId
+			return &userId, nil
+		}
+	}
+	return nil, nil
+}
+
 func handleLoginParsedAuthJwt(
 	args *HandleLoginParsedAuthJwtArgs,
 	ctx context.Context,
+) (*AuthLoginResult, error) {
+	return handleLoginParsedAuthJwtWithStore(args, ctx, &parsedAuthJwtLoginDb)
+}
+
+func handleLoginParsedAuthJwtWithStore(
+	args *HandleLoginParsedAuthJwtArgs,
+	ctx context.Context,
+	store *parsedAuthJwtLoginStore,
 ) (*AuthLoginResult, error) {
 
 	var authJwt = args.AuthJwt
 
 	var userId *server.Id
-	var networkId server.Id
-	var networkName string
 
 	ssoExists := false
 	userAuthExists := false
 	userAuthEmailVerified := false
+	legacySsoExists := false
+
+	// sign-in rows are stored under the normalized user auth (trimmed,
+	// lowercase), while the provider's token email may differ in case or spacing.
+	// An email that does not normalize matches no row; never look up the empty
+	// user auth.
+	normalUserAuth, _ := NormalUserAuth(authJwt.UserAuth)
 
 	/**
 	 * get sso auths
 	 */
-	ssoAuths, err := getSsoAuthsByUserAuth(ctx, authJwt.UserAuth)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get SSO auths: %w", err)
+	var ssoAuths []NetworkUserSsoAuth
+	if normalUserAuth != "" {
+		var err error
+		ssoAuths, err = store.ssoAuthsByUserAuth(ctx, normalUserAuth)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get SSO auths: %w", err)
+		}
 	}
 	if len(ssoAuths) > 0 {
 		ssoExists = true
@@ -362,37 +534,32 @@ func handleLoginParsedAuthJwt(
 	/**
 	 * check if userAuth exists with this email in network_user_auth_password
 	 */
-	server.Db(ctx, func(conn server.PgConn) {
-		// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
-		result, err := conn.Query(
-			ctx,
-			`
-					SELECT
-						user_id,
-						verified
-					FROM network_user_auth_password
-					WHERE user_auth = $1
-				`,
-			authJwt.UserAuth,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				var id *server.Id
-				verified := false
-				server.Raise(result.Scan(
-					&id,
-					&verified,
-				))
-				userAuthExists = true
-				userAuthEmailVerified = verified
+	if normalUserAuth != "" {
+		if id, verified, found := store.passwordAuthByUserAuth(ctx, normalUserAuth); found {
+			userAuthExists = true
+			userAuthEmailVerified = verified
 
-				if id != nil {
-					glog.Infof("setting user id inside of user auth as %s", id.String())
-					userId = id
-				}
+			if id != nil {
+				glog.Infof("setting user id inside of user auth as %s", id.String())
+				userId = id
 			}
-		})
-	})
+		}
+	}
+
+	if userId == nil {
+		/**
+		 * no sso or password row: an Apple account whose sign-in row was
+		 * never migrated still logs in, and its sso row is backfilled below
+		 */
+		legacyUserId, err := legacyAppleSsoUserId(ctx, authJwt, store)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get legacy SSO user: %w", err)
+		}
+		if legacyUserId != nil {
+			legacySsoExists = true
+			userId = legacyUserId
+		}
+	}
 
 	if userId == nil {
 
@@ -402,33 +569,9 @@ func handleLoginParsedAuthJwt(
 		}, nil
 	}
 
-	server.Db(ctx, func(conn server.PgConn) {
-		// server.Logger().Printf("Matching user auth %s\n", authJwt.UserAuth)
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT
-					network_user.user_id,
-					network.network_id,
-					network.network_name
-				FROM network_user
-				INNER JOIN network ON network.admin_user_id = network_user.user_id
-				WHERE user_id = $1
-			`,
-			userId,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(
-					&userId,
-					&networkId,
-					&networkName,
-				))
-			}
-		})
-	})
+	networkId, networkName, networkFound := store.adminNetwork(ctx, *userId)
 
-	if &networkId == nil || &networkName == nil {
+	if !networkFound {
 
 		/**
 		 * This scenario should not happen
@@ -441,7 +584,7 @@ func handleLoginParsedAuthJwt(
 		// todo - mark userauth as verified
 	}
 
-	if !ssoExists && !userAuthExists {
+	if !ssoExists && !userAuthExists && !legacySsoExists {
 
 		/**
 		 * this generally would only happen for guest users
@@ -470,8 +613,9 @@ func handleLoginParsedAuthJwt(
 		 * User is logging in with an SSO that does not exist
 		 * but user has a different SSO
 		 * add the new SSO auth
+		 * (for a legacy Apple account this backfills its sso row)
 		 */
-		addSsoAuth(
+		store.addSsoAuth(
 			&AddSsoAuthArgs{
 				ParsedAuthJwt: args.AuthJwt,
 				AuthJwt:       args.AuthJwtStr,
@@ -482,26 +626,12 @@ func handleLoginParsedAuthJwt(
 		)
 	}
 
-	SetUserAuthAttemptSuccess(ctx, args.UserAuthAttemptId, true)
-
-	isGuestMode := false
-
-	isPro := IsProFresh(
-		ctx,
-		&networkId,
-	)
+	store.setUserAuthAttemptSuccess(ctx, args.UserAuthAttemptId)
 
 	// successful login
-	byJwt := jwt.NewByJwt(
-		networkId,
-		*userId,
-		networkName,
-		isGuestMode,
-		isPro,
-	)
 	result := &AuthLoginResult{
 		Network: &AuthLoginResultNetwork{
-			ByJwt: byJwt.Sign(),
+			ByJwt: store.signByJwt(ctx, networkId, *userId, networkName),
 		},
 	}
 	return result, nil
@@ -738,6 +868,9 @@ type AuthLoginWithPasswordResult struct {
 
 type AuthLoginWithPasswordResultVerification struct {
 	UserAuth string `json:"user_auth"`
+	// set when no code was sent for this verification (rate limited or the
+	// send failed). Clients that predate the field ignore it.
+	SendError *AuthVerifySendError `json:"send_error,omitempty"`
 }
 
 type AuthLoginWithPasswordResultNetwork struct {
@@ -959,26 +1092,32 @@ func AuthVerify(
 	var networkName string
 
 	server.Db(session.Ctx, func(conn server.PgConn) {
+		authUserId := findUserIdByUserAuth(
+			&pgUserAuthUserIdLookup{ctx: session.Ctx, conn: conn},
+			*userAuth,
+		)
+		if authUserId == nil {
+			return
+		}
 		result, err := conn.Query(
 			session.Ctx,
 			`
 				SELECT
-					network_user.user_id,
+					user_auth_verify.user_id,
 					user_auth_verify.user_auth_verify_id,
 					network.network_id,
 					network.network_name
-				FROM network_user
-				INNER JOIN user_auth_verify ON
-					user_auth_verify.user_id = network_user.user_id AND
+				FROM user_auth_verify
+				INNER JOIN network ON network.admin_user_id = user_auth_verify.user_id
+				WHERE
+					user_auth_verify.user_id = $3 AND
 					user_auth_verify.verify_code = $1 AND
-					used = false AND
+					user_auth_verify.used = false AND
 					now() - INTERVAL '1 seconds' * $2 <= user_auth_verify.verify_time
-				INNER JOIN network ON network.admin_user_id = network_user.user_id
-				WHERE user_auth = $3
 			`,
 			normalVerifyCode,
 			int(VerifyCodeTimeout/time.Second),
-			userAuth,
+			*authUserId,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -1049,6 +1188,58 @@ func AuthVerify(
 	return result, nil
 }
 
+// userAuthUserIdLookup reads the two places an email or phone sign-in can
+// name its user.
+type userAuthUserIdLookup interface {
+	// passwordAuthUserId reads network_user_auth_password, where every email
+	// and phone sign-in lives, including ones added later with AddAuth.
+	passwordAuthUserId(userAuth string) *server.Id
+	// legacyUserAuthUserId reads network_user.user_auth, which only holds the
+	// identity the account was created with.
+	legacyUserAuthUserId(userAuth string) *server.Id
+}
+
+// findUserIdByUserAuth resolves the user that signs in with an email or phone
+// for verification and reset codes. The sign-in table is authoritative; the
+// legacy column is a fallback for accounts whose only identity is that column.
+// Looking only at network_user.user_auth meant an added sign-in could log in
+// with its password but never got a verification or reset code.
+func findUserIdByUserAuth(lookup userAuthUserIdLookup, userAuth string) *server.Id {
+	if userId := lookup.passwordAuthUserId(userAuth); userId != nil {
+		return userId
+	}
+	return lookup.legacyUserAuthUserId(userAuth)
+}
+
+type pgUserAuthUserIdLookup struct {
+	ctx  context.Context
+	conn server.PgCanQuery
+}
+
+func (self *pgUserAuthUserIdLookup) queryUserId(sql string, userAuth string) (userId *server.Id) {
+	result, err := self.conn.Query(self.ctx, sql, userAuth)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&userId))
+		}
+	})
+	return
+}
+
+func (self *pgUserAuthUserIdLookup) passwordAuthUserId(userAuth string) *server.Id {
+	return self.queryUserId(
+		`SELECT user_id FROM network_user_auth_password WHERE user_auth = $1 LIMIT 1`,
+		userAuth,
+	)
+}
+
+func (self *pgUserAuthUserIdLookup) legacyUserAuthUserId(userAuth string) *server.Id {
+	return self.queryUserId(
+		`SELECT user_id FROM network_user WHERE user_auth = $1 LIMIT 1`,
+		userAuth,
+	)
+}
+
 type AuthVerifyCreateCodeArgs struct {
 	UserAuth string `json:"user_auth"`
 	CodeType VerifyCodeType
@@ -1089,22 +1280,10 @@ func AuthVerifyCreateCode(
 	var verifyCode string
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-		var result server.PgResult
-		var err error
-
-		var userId *server.Id
-		result, err = tx.Query(
-			session.Ctx,
-			`
-				SELECT user_id FROM network_user WHERE user_auth = $1
-			`,
-			userAuth,
+		userId := findUserIdByUserAuth(
+			&pgUserAuthUserIdLookup{ctx: session.Ctx, conn: tx},
+			*userAuth,
 		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&userId))
-			}
-		})
 
 		if userId == nil {
 			return
@@ -1189,22 +1368,10 @@ func AuthPasswordResetCreateCode(
 	var resetCode string
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-		var result server.PgResult
-		var err error
-
-		var userId *server.Id
-		result, err = tx.Query(
-			session.Ctx,
-			`
-				SELECT user_id FROM network_user WHERE user_auth = $1
-			`,
-			userAuth,
+		userId := findUserIdByUserAuth(
+			&pgUserAuthUserIdLookup{ctx: session.Ctx, conn: tx},
+			*userAuth,
 		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&userId))
-			}
-		})
 
 		if userId == nil {
 			return

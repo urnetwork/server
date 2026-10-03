@@ -149,11 +149,9 @@ type perfvarConfig struct {
 	LogicalDataLaneCount int
 }
 
-// Opt-in production settings under measurement. Each ships off by default
-// (connect/FLIGHTGATEFIX.md §13.5 and §13.6) and needs its own A/B before a
-// default can flip.
-// A setting under measurement may ship off (measure it on) or on (measure it
-// off), so each has both polarities.
+// Explicit production-setting overrides under measurement. Defaults may
+// differ across Connect revisions, so each setting has both polarities and
+// an explicit override is part of the scenario identity.
 const (
 	perfvarFeatureDeferTimeoutResend   = "defer-timeout-resend"
 	perfvarFeatureNoDeferTimeoutResend = "no-defer-timeout-resend"

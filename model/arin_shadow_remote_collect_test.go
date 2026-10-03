@@ -280,8 +280,19 @@ func arinRemoteFullPopulation(t *testing.T, hosts int) {
 		}
 		hostSockets[identity.Host][identity.ProcessNonce] = nativeSocket
 		var pool *server.ArinShadowRPCPipePool
+		var nativeNanos, captureNanos, factNanos, nativeCalls, captureCalls atomic.Int64
 		wrap := func(identity server.ArinShadowRPCIdentity, transport server.ArinShadowRPCRoundTrip) server.ArinShadowRPCRoundTrip {
 			return func(ctx context.Context, request []byte) ([]byte, error) {
+				started := time.Now()
+				defer func() {
+					if identity.Role == "native" {
+						nativeNanos.Add(int64(time.Since(started)))
+						nativeCalls.Add(1)
+					} else {
+						captureNanos.Add(int64(time.Since(started)))
+						captureCalls.Add(1)
+					}
+				}()
 				if remote {
 					select {
 					case <-time.After(20 * time.Millisecond):
@@ -326,7 +337,10 @@ func arinRemoteFullPopulation(t *testing.T, hosts int) {
 					}
 					factCalls.Add(1)
 					keys.Add(int64(len(ids)))
-					return ReadArinShadowCaptureFacts(ctx, ids)
+					started := time.Now()
+					rows, err := ReadArinShadowCaptureFacts(ctx, ids)
+					factNanos.Add(int64(time.Since(started)))
+					return rows, err
 				})
 			})
 			if err != nil {
@@ -404,6 +418,7 @@ func arinRemoteFullPopulation(t *testing.T, hosts int) {
 		}
 		report, err := CollectArinShadowRemotePublic(ctx, recorder, fleet, []string{"all", "zz"})
 		elapsed := time.Since(started)
+		t.Logf("stage_sums_native=%s/calls%d capture=%s/calls%d PGfacts=%s/calls%d (concurrent sums, not exclusive residence)", time.Duration(nativeNanos.Load()), nativeCalls.Load(), time.Duration(captureNanos.Load()), captureCalls.Load(), time.Duration(factNanos.Load()), factCalls.Load())
 		close(memoryStop)
 		<-memoryDone
 		<-rolloverDone

@@ -299,6 +299,13 @@ type TransferBalance struct {
 }
 
 func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*TransferBalance {
+	transferBalances := getActiveTransferBalancesWithoutDrain(ctx, networkId)
+	// an acceptance-test drain reads as zero available (see test_balance_drain_model.go)
+	applyTestBalanceDrain(transferBalances, IsTestBalanceDrainActive(ctx, networkId))
+	return transferBalances
+}
+
+func getActiveTransferBalancesWithoutDrain(ctx context.Context, networkId server.Id) []*TransferBalance {
 	var transferBalances []*TransferBalance
 	server.Db(ctx, func(conn server.PgConn) {
 		transferBalances = getActiveTransferBalanceRows(ctx, conn, networkId)
@@ -1415,6 +1422,37 @@ const contractExtenderInsertSql = `
 		transfer_contract.contract_id = $1
 `
 
+// MinShrinkContractTransferByteCount is the floor for shrink-to-fit escrow.
+// When the payer's available balance is below the requested contract size but
+// at least min(requested, MinShrinkContractTransferByteCount), the contract is
+// granted for the available balance instead of failing with "Insufficient
+// balance". Clients size their send capacity from the signed
+// `StoredContract.TransferByteCount`, so a smaller grant is transparent to them.
+// The floor matches the client's initial contract size, so a granted contract
+// always fits at least one message.
+const MinShrinkContractTransferByteCount = Mib
+
+// grantTransferEscrowByteCount decides the contract size granted for a request
+// of `requestedByteCount` when `availableByteCount` can be escrowed for it.
+// A request the balance covers is granted as is. Otherwise the contract
+// shrinks to fit the available balance, provided that is at least
+// min(requested, MinShrinkContractTransferByteCount); below the floor the
+// request is refused (`ok` false). The grant never exceeds the available
+// balance, and a zero-byte request is always granted as zero bytes.
+func grantTransferEscrowByteCount(
+	requestedByteCount ByteCount,
+	availableByteCount ByteCount,
+) (grantedByteCount ByteCount, ok bool) {
+	if requestedByteCount <= availableByteCount {
+		return requestedByteCount, true
+	}
+	if availableByteCount < min(requestedByteCount, MinShrinkContractTransferByteCount) {
+		return 0, false
+	}
+	// shrink to fit
+	return availableByteCount, true
+}
+
 // Ordinary payers reserve from the earliest available grants. The persisted
 // internal prober first tries a bounded whole-request free grant. Both paths
 // hold balance locks through commit for positive-byte admission and read
@@ -1422,6 +1460,10 @@ const contractExtenderInsertSql = `
 // already-reserved credit.
 // Zero-byte contracts read their earliest-grant anchor and priority without
 // taking financial locks; their client lifecycle fences precede this read.
+// A positive request larger than the available balance is granted for the
+// available balance when it is at least the shrink floor (see
+// grantTransferEscrowByteCount); the returned escrow's TransferByteCount is the
+// granted size on both the Redis and the PostgreSQL admission path.
 func createTransferEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -1433,6 +1475,17 @@ func createTransferEscrowInTx(
 	contractTransferByteCount ByteCount,
 	companionContractId *server.Id,
 ) (transferEscrow *TransferEscrow, posts []func() any, returnErr error) {
+	// an acceptance-test drain refuses like an empty balance, on both the Redis
+	// and the PostgreSQL admission path. The allowlist is checked in memory, so
+	// other payers add no query here.
+	if 0 < contractTransferByteCount {
+		if err := testBalanceDrainEscrowError(
+			testBalanceDrainActive(ctx, tx, payerNetworkId, server.NowUtc()),
+			contractTransferByteCount,
+		); err != nil {
+			return nil, nil, err
+		}
+	}
 	if admission := redisAdmissionFromContext(ctx); admission != nil && contractTransferByteCount > 0 {
 		return createRedisTransferEscrowInTx(ctx, tx, admission, sourceNetworkId, sourceId,
 			destinationNetworkId, destinationId, payerNetworkId, contractTransferByteCount, companionContractId)
@@ -1464,7 +1517,7 @@ func createTransferEscrowInTx(
 	now := server.NowUtc()
 
 	// add up the balance_byte_count until >= contractTransferByteCount
-	// if not enough, error
+	// if not enough, shrink to fit or error (see grantTransferEscrowByteCount)
 	balanceEscrows := map[server.Id]*escrow{}
 
 	// attempt to split up across remaining transfer balances
@@ -1536,10 +1589,16 @@ func createTransferEscrowInTx(
 		}
 	}
 
-	if netEscrowBalanceByteCount < contractTransferByteCount {
+	// The loop drew every available byte when the balances fall short, so a
+	// shrunk grant equals the escrow rows' sum.
+	grantedTransferByteCount, ok := grantTransferEscrowByteCount(contractTransferByteCount, netEscrowBalanceByteCount)
+	if !ok {
 		returnErr = fmt.Errorf("Insufficient balance (%d).", netEscrowBalanceByteCount)
 		return
 	}
+	// the contract row, escrow rows, mirror and returned escrow all carry the
+	// granted size, which may be smaller than the request (shrink to fit)
+	contractTransferByteCount = grantedTransferByteCount
 
 	// the priority is blended between 0 and 100 depending on escrows
 	var priority Priority
@@ -2975,8 +3034,9 @@ func meanContractByteCount(first, second ByteCount) (ByteCount, error) {
 	return lower + (upper-lower)/2, nil
 }
 
-// Claims the outcome and debits consumed payer credit in one transaction.
-// Lock contract, balances (by id), then reservation revisions in that order.
+// Claims the outcome and records exact payer consumption. Current Redis
+// contracts append independent debit records; a bounded worker batches balance
+// writes. Legacy contracts retain their original atomic reservation authority.
 func settleEscrowInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -2986,14 +3046,23 @@ func settleEscrowInTx(
 	// CloseContract already owns this lock; direct and recovery settlement
 	// must acquire it before balance locks to keep the same lock order.
 	server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id = $1 FOR UPDATE`, contractId))
-	result, err := tx.Query(ctx, `
-		SELECT transfer_balance.balance_id
-		FROM transfer_balance
-		INNER JOIN transfer_escrow USING (balance_id)
-		WHERE transfer_escrow.contract_id = $1
-		ORDER BY transfer_balance.balance_id
-		FOR UPDATE OF transfer_balance
-	`, contractId)
+	// The immutable reservation mode is read under the owning contract lock.
+	// Current contracts must never queue behind another contract's grant debit.
+	var asyncDebit bool
+	server.Raise(tx.QueryRow(ctx, `SELECT COALESCE(bool_and(redis_reserved),false)
+        FROM transfer_escrow WHERE contract_id=$1`, contractId).Scan(&asyncDebit))
+	var result pgx.Rows
+	var err error
+	if asyncDebit {
+		result, err = tx.Query(ctx, `SELECT balance_id FROM transfer_escrow WHERE contract_id=$1 ORDER BY balance_id`, contractId)
+	} else {
+		result, err = tx.Query(ctx, `
+			SELECT transfer_balance.balance_id
+			FROM transfer_balance INNER JOIN transfer_escrow USING (balance_id)
+			WHERE transfer_escrow.contract_id=$1
+			ORDER BY transfer_balance.balance_id FOR UPDATE OF transfer_balance
+		`, contractId)
+	}
 	lockedBalanceIds := []server.Id{}
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
@@ -3200,16 +3269,20 @@ func settleEscrowInTx(
 	if returnErr != nil || !closed {
 		return
 	}
-	// A terminal outcome removes its reservation from the census immediately.
-	// Its consumed credit must disappear in this same commit, even if every
-	// asynchronous post is lost. Replay cannot debit after another claimant.
-	for _, balanceId := range lockedBalanceIds {
-		if payout := sweepPayouts[balanceId].payoutByteCount; payout > 0 {
-			server.RaisePgResult(tx.Exec(ctx, `
-				UPDATE transfer_balance
-				SET balance_byte_count = balance_byte_count - $2
-				WHERE balance_id = $1
-			`, balanceId, payout))
+	if asyncDebit {
+		// Journal insertion and outcome claim share a commit. No provider payout
+		// row is used as a proxy for payer consumption or as the replay fence.
+		for _, balanceId := range lockedBalanceIds {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_debit_journal
+                (contract_id,balance_id,debit_byte_count,shard) VALUES($1,$2,$3,$4)`,
+				contractId, balanceId, sweepPayouts[balanceId].payoutByteCount, transferDebitShard(balanceId)))
+		}
+	} else {
+		for _, balanceId := range lockedBalanceIds {
+			if payout := sweepPayouts[balanceId].payoutByteCount; payout > 0 {
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance
+                    SET balance_byte_count=balance_byte_count-$2 WHERE balance_id=$1`, balanceId, payout))
+			}
 		}
 	}
 	publishSettlementNetEscrowSnapshots(ctx, tx, reservationSnapshots, positiveReservations, true)
@@ -3281,16 +3354,9 @@ func settleEscrowInTx(
 
 	if len(redisReservations) > 0 {
 		posts = append(posts, func() any {
-			// A retained callback from a rolled-back transaction cannot release
-			// a still-open contract. The committed check needs only its PK.
-			var terminal bool
-			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx,
-					`SELECT EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$1 AND outcome IS NOT NULL)`, contractId).Scan(&terminal))
-			})
-			if terminal {
-				releaseRedisContractReservations(ctx, contractId, redisReservations)
-			}
+			// Read committed journal state, not captured transaction predictions.
+			// Lost posts leave the original reservation conservatively outstanding.
+			ReconcileRedisContractReservation(ctx, contractId)
 			return nil
 		})
 	}

@@ -188,8 +188,12 @@ type fullTunPath struct {
 	afterUdpTerminalMarkerForTest       func(context.Context, bool, int) error
 	beforeUdpTerminalReceiptForTest     func(context.Context, bool)
 	afterUdpTerminalReceiptForTest      func(bool)
+	afterUdpRegistrationForTest         func(context.Context, net.Conn) error
 	beforeWarmedTcpAckForTest           func(context.Context, bool) error
 	beforeWarmedTcpMeasuredForTest      func(bool)
+	downloadCompletionPhaseForTest      func(fullTunDownloadCompletionEvent)
+	beforeDownloadCompletionForTest     func(context.Context) error
+	beforeDownloadCompletionReadForTest func(context.Context) error
 	readinessProbePayloadForTest        []byte
 	beforeReadinessClientWriteForTest   func()
 	readinessClientConnectionForTest    func(net.Conn)
@@ -3430,8 +3434,8 @@ func fullTunClientSettingsWithFeatures(
 	}
 	for _, feature := range features {
 		// The harness builds against several Connect revisions in one
-		// campaign, and a setting that ships off by default exists only from
-		// the commit that introduced it. Set it by name, and fail the run
+		// campaign, and a setting may exist only from the commit that
+		// introduced it. Set it by name, and fail the run
 		// loudly when an arm cannot honor a requested feature rather than
 		// silently measuring the default.
 		var target any
@@ -7170,8 +7174,16 @@ func measureFullTunDownloadWithWarmupAndStartHook(
 				}
 				remaining -= int64(len(chunk))
 			}
+			if path.beforeDownloadCompletionReadForTest != nil {
+				if err := path.beforeDownloadCompletionReadForTest(ctx); err != nil {
+					return err
+				}
+			}
 			ack := make([]byte, 1)
-			_, readErr := io.ReadFull(connection, ack)
+			readCount, readErr := io.ReadFull(connection, ack)
+			path.observeDownloadCompletionForTest(fullTunDownloadCompletionEvent{
+				Phase: "server-read", Count: int64(readCount), Value: ack[0], Err: readErr,
+			})
 			return readErr
 		},
 		path.workloadFlowServerSettingsForTest,
@@ -7289,8 +7301,26 @@ func measureFullTunDownloadWithWarmupAndStartHook(
 	if readByteCount != byteCount || !bytes.Equal(actualHash.Sum(nil), expectedHash.Sum(nil)) {
 		return workloadResult{}, fmt.Errorf("full-TUN download content mismatch bytes=%d", readByteCount)
 	}
-	if err := writeFullTunAll(connection, []byte{1}); err != nil {
-		return workloadResult{}, err
+	if path.downloadCompletionPhaseForTest != nil {
+		path.observeDownloadCompletionForTest(fullTunDownloadCompletionEvent{
+			Phase: "body-verified", Count: readByteCount, Hash: fmt.Sprintf("%x", actualHash.Sum(nil)),
+		})
+	}
+	if path.beforeDownloadCompletionForTest != nil {
+		if err := path.beforeDownloadCompletionForTest(ctx); err != nil {
+			return workloadResult{}, err
+		}
+	}
+	completionWriteErr := writeFullTunAll(connection, []byte{1})
+	completionWriteCount := int64(-1)
+	if completionWriteErr == nil {
+		completionWriteCount = 1
+	}
+	path.observeDownloadCompletionForTest(fullTunDownloadCompletionEvent{
+		Phase: "client-write", Count: completionWriteCount, Value: 1, Err: completionWriteErr,
+	})
+	if completionWriteErr != nil {
+		return workloadResult{}, completionWriteErr
 	}
 	if err := flowServer.Wait(); err != nil {
 		return workloadResult{}, contextBoundWorkloadError(ctx, err)

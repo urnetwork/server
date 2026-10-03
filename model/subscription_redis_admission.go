@@ -163,6 +163,14 @@ if ARGV[1]=='release' or ARGV[1]=='release-owned' then
   total=sub(total,existing); redis.call('HDEL',KEYS[2],ARGV[2]); redis.call('ZREM',KEYS[3],ARGV[2])
  end
  redis.call('ZREM',KEYS[5],ARGV[2])
+elseif ARGV[1]=='settle' then
+ -- Never resurrect a token after the durable batch already released it.
+ -- A missing/expired Redis generation retains its documented approximation.
+ if existing then
+  if less(existing,ARGV[4]) then return redis.error_reply('settled consumption exceeds reservation') end
+  total=sub(total,sub(existing,ARGV[4])); amount=ARGV[4]
+  redis.call('HSET',KEYS[2],ARGV[2],amount)
+ end
 elseif ARGV[1]=='reserve' or ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned-full' or ARGV[1]=='restore' then
  if existing then
   if (ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned-full') and not redis.call('ZSCORE',KEYS[5],ARGV[2]) then
@@ -270,8 +278,16 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 		return nil, nil, err
 	}
 	selectedIds := make([]server.Id, 0, len(selected))
+	var granted ByteCount
 	for _, balance := range selected {
+		if balance.BalanceByteCount <= 0 || balance.BalanceByteCount > requested-granted {
+			return nil, nil, errors.New("selected Redis reservation exceeds requested authority")
+		}
+		granted += balance.BalanceByteCount
 		selectedIds = append(selectedIds, balance.BalanceId)
+	}
+	if amount, ok := grantTransferEscrowByteCount(requested, granted); !ok || amount != granted {
+		return nil, nil, errors.New("selected Redis reservation does not cover the shrink floor")
 	}
 	if err := redisGrantSelectedCurrent(ctx, tx, selectedIds); err != nil {
 		return nil, nil, err
@@ -289,10 +305,63 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 		}
 		batch.Queue(`INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,companion_contract_id,payer_network_id,usage_origin_is_source,create_time,priority)
             VALUES($1,$2,$3,$4,$5,$6,$7,$8,($7::uuid IS NULL),clock_timestamp() AT TIME ZONE 'UTC',$9)`,
-			admission.contractId, sourceNetworkId, sourceId, destinationNetworkId, destinationId, requested, companionId, payerNetworkId, priority)
+			admission.contractId, sourceNetworkId, sourceId, destinationNetworkId, destinationId, granted, companionId, payerNetworkId, priority)
 		batch.Queue(contractExtenderInsertSql, admission.contractId, sourceId, destinationId, ContractPartySource, ContractPartyDestination)
 	})
-	return &TransferEscrow{ContractId: admission.contractId, CompanionContractId: companionId, TransferByteCount: requested, Priority: priority, Balances: selected}, nil, nil
+	return &TransferEscrow{ContractId: admission.contractId, CompanionContractId: companionId, TransferByteCount: granted, Priority: priority, Balances: selected}, nil, nil
+}
+
+// reserveRedisTransferEscrowBalances reserves up to `requested` bytes from
+// `balances` in order, through `reserve`, which atomically reserves at most
+// `remaining` bytes of one balance's unreserved credit and returns the amount
+// reserved (the Redis reservation script clamps to what concurrent contracts
+// left available, so two creators never reserve the same bytes).
+//
+// The granted contract size is the reserved total when it covers the request,
+// or shrinks to fit the reserved total when that is at least the shrink floor
+// (see grantTransferEscrowByteCount). Below the floor every reservation this
+// request made is released through `release` and the request is refused with
+// "Insufficient balance". The selected escrow balances sum to the granted size.
+func reserveRedisTransferEscrowBalances(
+	balances []*escrowTransferBalance,
+	requested ByteCount,
+	reserve func(balance *escrowTransferBalance, remaining ByteCount) (ByteCount, error),
+	release func(balanceId server.Id),
+) (selected []*TransferEscrowBalance, granted ByteCount, priority Priority, err error) {
+	selected = []*TransferEscrowBalance{}
+	remaining := requested
+	for _, balance := range balances {
+		if balance.balanceByteCount <= 0 {
+			continue
+		}
+		amount, err := reserve(balance, remaining)
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		if amount == 0 {
+			continue
+		}
+		selected = append(selected, &TransferEscrowBalance{BalanceId: balance.balanceId, BalanceByteCount: amount})
+		if balance.paid {
+			priority += PaidPriority
+		}
+		remaining -= amount
+		if remaining == 0 {
+			break
+		}
+	}
+	reserved := requested - remaining
+	granted, ok := grantTransferEscrowByteCount(requested, reserved)
+	if !ok {
+		// This is a known pre-write refusal, unlike an ambiguous commit. Release
+		// only this request's tokens.
+		for _, b := range selected {
+			release(b.BalanceId)
+		}
+		return nil, 0, 0, fmt.Errorf("Insufficient balance (%d).", reserved)
+	}
+	priority /= Priority(len(selected))
+	return selected, granted, priority, nil
 }
 
 // ReconcileRedisContractReservation repairs one known contract, without shared
@@ -306,11 +375,13 @@ func ReconcileRedisContractReservation(ctx context.Context, contractId server.Id
 		amount          ByteCount
 		terminal        bool
 		ageMilliseconds float64
+		pending         *ByteCount
 	}
 	var reservations []reservation
 	server.Db(ctx, func(conn server.PgConn) {
 		rows, err := conn.Query(ctx, `SELECT escrow.balance_id,escrow.balance_byte_count,contract.outcome IS NOT NULL,
-            GREATEST(0,EXTRACT(epoch FROM (clock_timestamp() AT TIME ZONE 'UTC'-contract.create_time))*1000)::double precision
+            GREATEST(0,EXTRACT(epoch FROM (clock_timestamp() AT TIME ZONE 'UTC'-contract.create_time))*1000)::double precision,
+            (SELECT debit_byte_count FROM transfer_debit_journal WHERE contract_id=contract.contract_id AND balance_id=escrow.balance_id AND NOT applied)
             FROM transfer_contract AS contract
             CROSS JOIN LATERAL (SELECT balance_id,balance_byte_count,redis_reserved FROM transfer_escrow
                 WHERE contract_id=contract.contract_id OFFSET 0) AS escrow
@@ -318,7 +389,7 @@ func ReconcileRedisContractReservation(ctx context.Context, contractId server.Id
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				var value reservation
-				server.Raise(rows.Scan(&value.id, &value.amount, &value.terminal, &value.ageMilliseconds))
+				server.Raise(rows.Scan(&value.id, &value.amount, &value.terminal, &value.ageMilliseconds, &value.pending))
 				reservations = append(reservations, value)
 			}
 		})
@@ -326,7 +397,14 @@ func ReconcileRedisContractReservation(ctx context.Context, contractId server.Id
 	for _, value := range reservations {
 		remaining := redisContractReservationLease - time.Duration(value.ageMilliseconds)*time.Millisecond
 		operation := "restore"
-		if value.terminal || remaining < time.Millisecond {
+		if value.terminal {
+			operation = "release"
+			if value.pending != nil {
+				operation = "settle"
+				value.amount = *value.pending
+			}
+			remaining = redisContractReservationLease
+		} else if remaining < time.Millisecond {
 			operation = "release"
 			remaining = redisContractReservationLease
 		}

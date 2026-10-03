@@ -5811,3 +5811,256 @@ full Main shadow, protected credential installation, subscriber coverage,
 catalog expansion and policy-two activation are still open. A candidate local
 four-host capture also failed the unchanged 90-second bound, so capacity must
 be fixed rather than extending its lease or claiming completion.
+
+
+### 2026-10-03 04:42 UTC async settlement regression and qualified rollout
+
+API, Connect, Taskworker and Proxy version
+`2026.10.3-local-write-admission+1060875400` completed all four all-block
+selection commands with exit zero. The fresh runtime collection qualified
+64 of 68 enabled slots: 20 API, eight Taskworker, 19 Connect and 17 Proxy.
+One Connect slot positively still reported the preceding 5200 release; three
+Proxy slots had unavailable identity evidence. Command success does not prove
+all predecessor retirement or all-slot runtime convergence. Edge5 remains
+operator-offline and excluded; IPv6 provider availability remains outside the
+current acceptance target.
+
+The automatic census at 04:22:01 reported 111,270 of 113,902 eligible providers
+at quota (97.69 percent). Historical local-writer refusals previously counted
+as measured provider failures, so this remains a reported counter rather than
+validated coverage. Establish the last incompatible probe-writer retirement,
+verify new measured outcomes, and let incompatible four-hour quota/eight-hour
+ratio history age out. Hourly owner coverage was incomplete for shards two,
+four and six. Do not infer complete rate or corrected measurement truth.
+
+The complete recurring query sample ending 04:35:25 still reported 88 lock
+waiters. Escrow tuple waits reached 28.157 seconds with peak occupancy 60;
+settlement balance tuple waits reached 2.378 seconds with peak occupancy 48.
+The latest sampled PostgreSQL CPU was 41.40 percent of 96 CPUs. Query-family
+occupancy is not CPU attribution and the capped blocker output does not prove
+all terminal holders. The earlier independently qualified chain read traced
+four oldest selected seeds to an idle transaction whose last statement was
+`contractParticipantsWithUsageOriginInTx`; that statement is not itself the
+lock-acquiring statement and does not uniquely identify the caller.
+
+History verifies a settlement regression in
+`352746737bb1deb28198f4162985b434ebc98461`: payer balance debits moved from a
+separate post-commit transaction into `settleEscrowInTx`, together with shared
+balance row locks held through the settlement transaction. An older aggregate
+Redis-to-database flush has not been established by the inspected history.
+Redis admission alone does not remove these settlement writes. Astra is
+implementing asynchronous writeback with deterministic current-public-path
+held-row and concurrent-settlement controls, plus interrupted-post, replay,
+reconciliation and shard-cleanup coverage. The proposed journal migration must
+follow already present migrations 756 and 757. No async correction or new
+migration is deployed yet; legacy compatibility contention remains explicit.
+
+The seven financial/clock Model failures have independent focused race,
+mandatory same-network large-N and vet evidence and are merged in `87e7e8a6`.
+The ARIN transport failure has a host-pair scheduler correction merged as
+`0a2fc4e`; independent full-population capture completed in 39.225 seconds
+normally and 73.715 seconds under race, within the unchanged 90-second lease.
+Neither focused repair establishes a current complete Model-suite pass.
+Concurrent Main payout changes and source migrations 756/757 were preserved
+in pushed Main `c5b02bbb`; those changes are not attested as deployed or migrated
+by this checkpoint. Current 5400 services use source `49450197`.
+
+Verified candidate-only Config version
+`2026.10.3-arin-capture+1060875301` completed all-block selection at
+04:38:25 UTC with exit zero. Its 63 files preserve all 61 baseline file bytes
+and modes and add only two separately located candidate resource files.
+Current and draining service namespaces still need actual candidate-resource
+verification before protected capture credentials are installed. Policy two
+remains inactive. The protected installer and transport scheduler have local
+independent gates, but the gateway coordinator, full Main shadow comparison,
+verified native subscriber coverage, catalog expansion and rebuilt allocation
+classification remain unfinished.
+
+Fresh Connect resource alerts still report very high memory/goroutine burdens,
+including approximately 98.24 GB RSS and 703,507 goroutines in one observed
+instance. The resource alert does not identify the allocation callsite or the
+running build, so no leak mechanism or retirement is claimed. Safe private
+profiling instrumentation and root-cause repair remain open. The authoritative
+watcher is continuously active with its 15-minute cadence. Root appended
+ledger T0506 under its 505-record prior-tail guard; the resulting canonical
+tail is `fcd8c5a48ae24755a0be5de29bf8685075b04280f49fa2b6bcae3ad9f7666c7d`.
+FP2FIX is not complete and Main performance is not resolved.
+
+
+### 2026-10-03 05:12 UTC settlement test and migration compatibility boundary
+
+The author's actual public settlement contention control now has a red/green
+pair: 64 independent clients/contracts sharing a grant all timed out on the
+baseline while three shared financial rows were independently held; all 64
+completed on the candidate. The candidate package took 3.502 seconds including
+fixture setup. This is an author result on mutable source, not an independent
+release gate or a Main rollout. Partitioned asynchronous debit writeback,
+interrupted-post recovery, replay, fairness and shard cleanup remain under test.
+
+The standard migration sequence for proposed journal migration 758 also runs
+source migrations 756 and 757. Migration 756 changes account_payment and adds
+payment guards that may reject older unproven payout edits; migration 757 adds
+an immutable earning boundary. Their deployment compatibility and the current
+Connect08d module graph require explicit qualification; earlier Connect638
+financial gates do not establish it. No new migration has been applied here.
+
+The fresh 04:43 runtime witness qualified 39 of 68 slots, with no positively
+identified incompatible current process. Most failures collapse missing,
+stale, unjoined or ambiguous evidence into strict nulls; one Proxy process had
+qualified release identity but was not ready. All 20 Connect slots qualified,
+but no complete Taskworker reference set or predecessor-retirement proof was
+available. The reduced qualification count alone is not a downgrade diagnosis.
+Direct current and draining namespace inventory remains necessary.
+
+The 04:52:24 automatic census reported 109,606 of 111,471 eligible providers at
+quota (98.33 percent), still subject to historical measurement truth and hourly
+owner coverage limits. The 05:03:17 PostgreSQL CPU sample was 25.60 percent;
+preceding query samples still contain escrow and settlement tuple queues.
+Root appended T0507 under the 506-record guard, producing canonical tail
+`4463ed11146fd3a3226333515c0deb3f47132a69dc7e933eb891e84908b02c77`.
+The standing watcher and both independent fixture endpoints remain active;
+no restart, reset, classifier activation or completion is claimed.
+
+
+### 2026-10-03 06:24 UTC asynchronous accounting migration and rollout
+
+The asynchronous accounting correction is committed as `c56f9557`, merged and
+pushed in Main `0015fbdc`. Current Redis-admitted settlement writes exact debt
+journal entries without updating or locking the shared transfer balance in the
+settlement transaction. Sixteen bounded background partitions apply the debit
+and release Redis debt after commit; pending debt fences grant and shard cleanup.
+Legacy unmarked contracts retain their compatibility path and remain a separate
+contention boundary.
+
+Independent focused race gates passed for all twelve asynchronous debit roots,
+three local-controller authority roots and five migration/monitor roots. They
+cover replay, rollback, interrupted Redis posting and acknowledgement, cleanup
+fencing, fairness and distinct-payer capacity. The author's public 512-client,
+two-process held-row settlement and sixteen-partition flush controls also passed.
+These focused results do not establish a complete current Model-suite pass.
+
+Main's native migration command completed once with exit zero at
+06:17:52 UTC, advancing schema 755 to 758 through canonical migrations 756,
+757 and 758. Read-only postflight verified exact migration identities, table,
+index and guard definitions, the enabled Redis admission policy, and an empty
+provider-payout boundary. The owned primary tunnel closed. The primary-local
+backup completion was within 24 hours; it does not attest ciphertext integrity,
+destination-copy completion, decryption or restore. The Main migration receipt
+is `/home/by/urnetwork/temp/main758-native-primary-20261003-root-activation-v1/run-20261003T061740.770997Z/receipt.json`,
+SHA-256 `29370a6f4f03bbf1a8a72eff66685811206955d310b77ec1a5f51cda1f4bd824`.
+
+Both architectures of API, Connect, Taskworker and Proxy were built, pushed and
+verified from c56 with published Connect `08d48400`, SDK `95ccd57d` and SCTP
+`6443417d`. All four all-block selection commands completed with exit zero for
+`2026.10.3-async-transfer-debit+1060875500`: Proxy at 06:18:31, Taskworker at
+06:20:21, API at 06:21:02 and Connect at 06:23:56 UTC. Selection success is not
+proof that all current and draining processes converged. Fresh 68-slot runtime
+identity and post-rollout accounting/probe performance observations remain due.
+
+The pre-rollout automatic 06:07:32 UTC query sample still showed settlement
+balance locks peaking at 66 sampled backends with a 21.643-second maximum query,
+and escrow access peaking at 56 with a 13.794-second maximum. Occurrences are
+not distinct clients or CPU attribution; observation coverage remains partial.
+The older authoritative watcher continues at the 15-minute cadence while its
+schema-758 successor is prepared for a controlled handoff.
+
+A real H1/exchange/full-resident churn control and signal guidance are committed
+as `f2420ef6`. All 24 residents released indexed sequences and transport routes
+after joined shutdown, including under race. The specific active control path
+retains at least 480 KiB of named channel slots per resident; this is a population
+cost lower bound, not a Main heap attribution or proof that no leak exists.
+Native PID/start/build/RSS and population attribution remains unfinished.
+
+ARIN policy two remains inactive. Exact 5500 namespace-admission successors
+have independent local gates; final Main resource custody, protected capture,
+full shadow comparison, rebuilt allocation classification and subscriber
+coverage still require production evidence. FP2FIX is not complete.
+
+### 2026-10-03 07:43 UTC admission unwind and all-block selection
+
+The admission-error fix `bf7cadcd` is merged into Main and pushed through
+`7d93570f`, preserving concurrent Main changes. A real PostgreSQL regression
+control reproduced cancellation during the shard-admission query being treated
+as a policy refusal, followed by a misleading commit-on-closed-connection panic.
+Operational query, scan and iteration errors now unwind the transaction; retired
+shard policy refusals retain their ordinary return behavior. Independent focused
+tests passed. Main's initiating cancellation and exact failing process generation
+are not yet proved; the patch does not blindly replay ambiguous commits.
+
+API, Connect, Taskworker and Proxy were built and verified for both architectures
+from `bf7cadcd`, retaining the published libraries and deployed c56 accounting
+implementation. All four all-block selection commands completed with exit zero
+for `2026.10.3-client-admission-unwind+1060875600`: Proxy at 07:38:12,
+Taskworker at 07:40:00, API at 07:40:07 and Connect at 07:42:28 UTC. This release
+requires no migration beyond Main's schema 758. Its raw OCI configuration closure
+has SHA-256 `6b52d5cc3c726bca959c7eb7751ada0ed85fa916a876deb17ba5a06e8c64fac8`.
+Selection-command success does not prove current and draining process convergence
+or an improved probe rate; fresh runtime and post-rollout measurements remain due.
+
+The independent 07:44 UTC HTTPS runtime sample qualified 22 of 68 expected
+current slots: API 10/20, Connect 6/20, Taskworker 4/8 and Proxy 2/20. Twenty
+witnesses matched architecture configuration digests and two matched the verified
+release index. Old, missing or ambiguous witnesses remain unqualified. These are
+self-reported source/image/start metrics, not native executable proof or evidence
+that predecessor processes retired. Fleet convergence is incomplete in this
+sample. Receipt SHA-256:
+`c65e2ebfe2dfc3e1fe3ba14f14fac34e7b74eb7297772e79789ba2e16bc9146b`.
+
+The schema-758 monitor successor replaced the older watcher at 06:34 UTC without
+overlapping watcher parents. The handoff had a brief collection gap and reset
+sustain windows; it was not gap-free. The successor continues the 15-minute probe
+cadence. Its 07:20 database sample had truncated coverage. A separate read-only
+07:32 financial-holder snapshot found no candidate waiters during 38 milliseconds,
+which is an instantaneous quiet control, not proof that earlier lock queues cleared.
+Local 64-client controls reproduce contention in the legacy unmarked settlement
+path while the marked/current control passes. The legacy correction remains open.
+
+Private baseline ARIN capture configurations are installed on edge0, edge1,
+edge3 and edge4, without a separate service restart or classifier activation.
+The rebuilt parent-allocation candidate passed full native decoder readback;
+expanded subscriber classification and Main shadow coverage remain unfinished.
+A capped Main log sample found 64 Taskworker ForceCloseOpenContractIds panics
+classified as insufficient escrow; generation, close outcome and unsampled
+generator failures remain unknown. FP2FIX is not complete.
+
+### 2026-10-03 08:14 UTC coverage, native reader and legacy contention
+
+The delayed 07:50 UTC runtime sample qualified 46/68 serving slots for release
+5600: API 20/20, Taskworker 8/8, Connect 10/20 and Proxy 8/20. Native edge0
+inspection separately verified five bf7 Connect processes and one older c56
+draining predecessor across five blocks. Those six processes used about 25.06
+GiB RSS, including 13.55 GiB for the predecessor. Different time namespaces
+prevent a qualified native-start/metrics join; neither this host nor self-reported
+metrics prove full-fleet predecessor retirement.
+
+The 07:42 URL census reported 112,020 eligible providers, 109,761 quota-complete
+and 109,743 security-clear complete: approximately 98% rolling ten-measured-run
+coverage, with 7,472 runs needed. Four shard-owner/hourly ranges were unobserved,
+so aggregate throughput remains unqualified. The 08:08 exact-release Taskworker
+metric read found eight source-qualified bucket publishers: per-process native
+Quality 28,370–28,399, Speed 29,943–29,974 and Online 111,999. These overlapping
+global buckets must not be summed across processes. Scrape freshness does not
+prove the isolated underlying database refresh succeeded recently.
+
+All twenty exact-release API effective native-reader flags were false. The
+disabled flag selects compatibility Redis union loading, rather than bounded
+native Redis pages; it does not mean discovery bypasses Redis altogether.
+Selected candidates still undergo database-backed hard exclusions. Native page
+publication and activation are being validated independently of ARIN policy two.
+
+The 07:42 PostgreSQL CPU sample was 26.161 cores of 96 logical CPUs, or 27.25%,
+above the monitor's 25% warning band. Financial contention persisted at the
+07:51 and 08:07 cadences, with final selected waiter counts 89 and 90. The
+07:57 bounded holder graph positively matched unmarked legacy settlement's
+shared transfer_balance lock and metadata's NOT redis_reserved branch. It
+selected four seeds from 89 candidates and does not attribute the entire graph
+or CPU to that path. A private deferred-legacy-settlement correction passed its
+first 64-client held-row control; durability, rollback, mixed-writer and larger
+controls remain. Its migration must follow canonical Main migrations 759–761,
+as 762, rather than collide with already-merged migrations.
+
+The protected ARIN fleet attempt reached Main but failed in host inventory,
+before retained native inventory or shadow output. Cleanup completed without
+unreleased hosts. Its exact transport/native-stage cause remains unproved;
+ARIN policy two remains inactive. Provider IPv6 findings are excluded from goal
+acceptance under the user's current rollout instruction. FP2FIX is not complete.

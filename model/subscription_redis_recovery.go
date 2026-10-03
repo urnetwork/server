@@ -25,6 +25,7 @@ const redisReservationCleanupBudget = 300 * time.Second
 var errRedisReservationCleanupPending = errors.New("Redis reservation compensation remains pending in retained v2 markers")
 var errRedisReservationRecoveryIdentity = errors.New("Redis reservation marker or SQL custody does not match")
 var errRedisReservationRequestActive = errors.New("Redis reservation request still owns its SQL publication fence")
+var errRedisReservationDebitPending = errors.New("Redis reservation retains unapplied asynchronous consumption")
 
 func redisContractAdmissionLock(contractId server.Id) string {
 	return "redis-contract-v2/" + contractId.String()
@@ -91,15 +92,26 @@ func recoverRedisReservationInTx(ctx context.Context, tx server.PgTx, balanceId 
 	if !locked {
 		return false, errRedisReservationRequestActive
 	}
-	var contract, escrow, matching, terminal bool
+	var contract, escrow, matching, terminal, debitPending bool
 	server.Raise(tx.QueryRow(ctx, `SELECT
 		EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$1),
 		EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1),
 		EXISTS(SELECT 1 FROM transfer_contract c JOIN transfer_escrow e USING(contract_id)
 			JOIN transfer_balance b USING(balance_id) WHERE c.contract_id=$1 AND e.balance_id=$2
-			AND e.redis_reserved AND e.balance_byte_count=$3 AND c.payer_network_id=b.network_id),
-		EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$1 AND outcome IS NOT NULL)`,
-		candidate.contractId, balanceId, candidate.amount).Scan(&contract, &escrow, &matching, &terminal))
+			AND e.redis_reserved AND c.payer_network_id=b.network_id
+			AND (e.balance_byte_count=$3 OR (c.outcome IS NOT NULL AND EXISTS(
+				SELECT 1 FROM transfer_debit_journal j WHERE j.contract_id=$1 AND j.balance_id=$2
+				AND j.applied AND j.debit_byte_count=$3 AND j.debit_byte_count<=e.balance_byte_count)))),
+		EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$1 AND outcome IS NOT NULL),
+		EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1 AND balance_id=$2 AND NOT applied)`,
+		candidate.contractId, balanceId, candidate.amount).Scan(&contract, &escrow, &matching, &terminal, &debitPending))
+	if debitPending {
+		// The same SQL snapshot must cover outcome and consumption. Terminal
+		// history may be reaped while its durable debit still awaits writeback.
+		// Keep both original and already-settled tokens; the bounded debit owner
+		// releases them after commit. Other recovery candidates can advance.
+		return false, errRedisReservationDebitPending
+	}
 	operation := "release-owned"
 	if contract || escrow {
 		if !contract || !matching {
