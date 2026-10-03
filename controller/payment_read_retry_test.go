@@ -191,7 +191,7 @@ func TestPaymentReadCirclePermanentResponsesDoNotRetry(t *testing.T) {
 		{status: http.StatusUnauthorized, payload: "authentication refused"},
 		{status: http.StatusForbidden, payload: "authorization refused"},
 		{status: http.StatusNotFound, payload: "unknown transaction"},
-		{status: http.StatusInternalServerError, payload: "unclassified server failure"},
+		{status: http.StatusNotImplemented, payload: "unsupported operation"},
 		{status: http.StatusOK, payload: "{malformed"},
 		{status: http.StatusOK, payload: paymentReadTestPayload("different-transaction")},
 	}

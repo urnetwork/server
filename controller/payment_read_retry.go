@@ -12,6 +12,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,8 +23,8 @@ import (
 const DefaultPaymentReadBudget = 300 * time.Second
 const maximumPaymentReadBytes = 1024 * 1024
 
-// Budget belongs to one complete GET, while AttemptTimeout bounds one wire
-// attempt. A caller's earlier cancellation/deadline always takes precedence.
+// Budget belongs to one logical read (including its pages/related balances),
+// while AttemptTimeout bounds one wire attempt. A caller's earlier deadline wins.
 type PaymentReadSettings struct {
 	Budget         time.Duration
 	AttemptTimeout time.Duration
@@ -59,39 +61,65 @@ type paymentReadCloseError struct{ cause error }
 func (self *paymentReadCloseError) Error() string { return self.cause.Error() }
 func (self *paymentReadCloseError) Unwrap() error { return self.cause }
 
-type paymentReadStatusError struct{ cause *server.HttpStatusError }
+type paymentReadStatusError struct {
+	cause      *server.HttpStatusError
+	retryAfter string
+}
 
 func (self *paymentReadStatusError) Error() string { return self.cause.Error() }
 func (self *paymentReadStatusError) Unwrap() error { return self.cause }
 
-func paymentHttpGet[R any](ctx context.Context, settings PaymentReadSettings, hooks paymentReadHooks, uri string, headers server.HeaderCallback, decode server.ResponseCallback[R]) (R, error) {
-	var empty R
+type paymentReadScopeKey struct{}
+
+// A logical list/pages/balances operation owns one deadline and one transport.
+// Child GETs borrow this immutable scope; none can restart the budget.
+type paymentReadScope struct {
+	deadline time.Time
+	settings PaymentReadSettings
+	hooks    paymentReadHooks
+}
+
+// Authenticated observations never forward user/API credentials via redirects.
+// The fixed endpoint or admitted pagination Link must return the response itself.
+func paymentReadHttpClient() *http.Client {
+	client := server.DefaultHttpClient()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return client
+}
+
+func beginPaymentReads(ctx context.Context, settings PaymentReadSettings, hooks paymentReadHooks) (context.Context, context.CancelFunc, error) {
 	if ctx == nil {
-		return empty, fmt.Errorf("payment GET requires a context")
+		return nil, nil, fmt.Errorf("payment GET requires a context")
 	}
 	if err := ctx.Err(); err != nil {
-		return empty, err
+		return nil, nil, err
+	}
+	if scope, ok := ctx.Value(paymentReadScopeKey{}).(*paymentReadScope); ok {
+		if !scope.hooks.now().Before(scope.deadline) {
+			return nil, nil, context.DeadlineExceeded
+		}
+		return ctx, func() {}, nil
 	}
 	settings, err := settings.normalized()
 	if err != nil {
-		return empty, err
+		return nil, nil, err
+	}
+	ownerBudget := settings.Budget
+	if deadline, ok := ctx.Deadline(); ok {
+		ownerBudget = min(ownerBudget, time.Until(deadline))
 	}
 	ctx, cancel := context.WithTimeout(ctx, settings.Budget)
-	defer cancel()
-	now := hooks.now
-	if now == nil {
-		now = time.Now
+	if hooks.now == nil {
+		hooks.now = time.Now
 	}
-	deadline := now().Add(settings.Budget)
-	do := hooks.do
-	if do == nil {
-		client := server.DefaultHttpClient()
-		defer client.CloseIdleConnections()
-		do = client.Do
+	closeIdle := func() {}
+	if hooks.do == nil {
+		client := paymentReadHttpClient()
+		closeIdle = client.CloseIdleConnections
+		hooks.do = client.Do
 	}
-	wait := hooks.wait
-	if wait == nil {
-		wait = func(ctx context.Context, delay time.Duration) error {
+	if hooks.wait == nil {
+		hooks.wait = func(ctx context.Context, delay time.Duration) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -100,6 +128,19 @@ func paymentHttpGet[R any](ctx context.Context, settings PaymentReadSettings, ho
 			}
 		}
 	}
+	scope := &paymentReadScope{deadline: hooks.now().Add(ownerBudget), settings: settings, hooks: hooks}
+	return context.WithValue(ctx, paymentReadScopeKey{}, scope), func() { cancel(); closeIdle() }, nil
+}
+
+func paymentHttpGet[R any](ctx context.Context, settings PaymentReadSettings, hooks paymentReadHooks, uri string, headers server.HeaderCallback, decode server.ResponseCallback[R]) (R, error) {
+	var empty R
+	ctx, cancel, err := beginPaymentReads(ctx, settings, hooks)
+	if err != nil {
+		return empty, err
+	}
+	defer cancel()
+	scope := ctx.Value(paymentReadScopeKey{}).(*paymentReadScope)
+	now, deadline := scope.hooks.now, scope.deadline
 	var lastErr error
 	for {
 		if err := ctx.Err(); err != nil {
@@ -109,8 +150,8 @@ func paymentHttpGet[R any](ctx context.Context, settings PaymentReadSettings, ho
 		if remaining <= 0 {
 			return empty, errors.Join(lastErr, context.DeadlineExceeded)
 		}
-		attemptCtx, attemptCancel := context.WithTimeout(ctx, min(settings.AttemptTimeout, remaining))
-		value, err := paymentHttpGetAttempt(attemptCtx, do, uri, headers, decode)
+		attemptCtx, attemptCancel := context.WithTimeout(ctx, min(scope.settings.AttemptTimeout, remaining))
+		value, err := paymentHttpGetAttempt(attemptCtx, scope.hooks.do, uri, headers, decode)
 		attemptCancel()
 		if ownerErr := ctx.Err(); ownerErr != nil {
 			return empty, errors.Join(err, ownerErr)
@@ -126,14 +167,46 @@ func paymentHttpGet[R any](ctx context.Context, settings PaymentReadSettings, ho
 			return empty, err
 		}
 		delay := time.Second + time.Duration(rand.Int64N(int64(time.Second)))
+		delay = max(delay, paymentReadRetryAfter(err, now(), deadline.Sub(now())))
 		delay = min(delay, deadline.Sub(now()))
 		if delay <= 0 {
 			return empty, errors.Join(lastErr, context.DeadlineExceeded)
 		}
-		if err := wait(ctx, delay); err != nil {
+		if err := scope.hooks.wait(ctx, delay); err != nil {
 			return empty, errors.Join(lastErr, err)
 		}
 	}
+}
+
+// Retry-After cannot extend the owner deadline or overflow a duration. Invalid
+// headers retain the normal short pause, and past dates never spin immediately.
+func paymentReadRetryAfter(err error, now time.Time, remaining time.Duration) time.Duration {
+	var status *paymentReadStatusError
+	if !errors.As(err, &status) {
+		return 0
+	}
+	value := strings.TrimSpace(status.retryAfter)
+	if value == "" || len(value) > 128 {
+		return 0
+	}
+	digits := true
+	for _, ch := range value {
+		if ch < '0' || ch > '9' {
+			digits = false
+			break
+		}
+	}
+	if digits {
+		seconds, err := strconv.ParseUint(value, 10, 64)
+		if err != nil || seconds > uint64(max(remaining, 0)/time.Second) {
+			return max(remaining, 0)
+		}
+		return min(time.Duration(seconds)*time.Second, max(remaining, 0))
+	}
+	if after, err := http.ParseTime(value); err == nil {
+		return min(max(after.Sub(now), 0), max(remaining, 0))
+	}
+	return 0
 }
 
 // Every body is bounded and closed before a retry; cancellation refuses even a
@@ -171,7 +244,7 @@ func paymentHttpGetAttempt[R any](ctx context.Context, do func(*http.Request) (*
 	if len(body) > maximumPaymentReadBytes {
 		resultErr = fmt.Errorf("payment GET response exceeds %d bytes", maximumPaymentReadBytes)
 	} else if response.StatusCode != http.StatusOK {
-		resultErr = &paymentReadStatusError{cause: &server.HttpStatusError{StatusCode: response.StatusCode, Status: response.Status, ResponseBody: string(body)}}
+		resultErr = &paymentReadStatusError{cause: &server.HttpStatusError{StatusCode: response.StatusCode, Status: response.Status, ResponseBody: string(body)}, retryAfter: response.Header.Get("Retry-After")}
 	} else if readErr == nil && ctx.Err() == nil {
 		result, resultErr = decode(response, body)
 	}
@@ -196,7 +269,7 @@ func retryablePaymentReadError(err error, transport bool) bool {
 		return false
 	case *paymentReadStatusError:
 		switch value.cause.StatusCode {
-		case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 			return true
 		}
 		return false
