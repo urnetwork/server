@@ -227,7 +227,7 @@ func ScheduleAdvancePayment(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) {
-	// randomly schedule between now and 5 minutes from now
+	// Randomly schedule between 5 and 30 minutes from now.
 	minDelay := 5 * time.Minute
 	delay := 25 * time.Minute
 	// this avoid circle and coinbase rate limiting
