@@ -5997,6 +5997,15 @@ has SHA-256 `6b52d5cc3c726bca959c7eb7751ada0ed85fa916a876deb17ba5a06e8c64fac8`.
 Selection-command success does not prove current and draining process convergence
 or an improved probe rate; fresh runtime and post-rollout measurements remain due.
 
+The independent 07:44 UTC HTTPS runtime sample qualified 22 of 68 expected
+current slots: API 10/20, Connect 6/20, Taskworker 4/8 and Proxy 2/20. Twenty
+witnesses matched architecture configuration digests and two matched the verified
+release index. Old, missing or ambiguous witnesses remain unqualified. These are
+self-reported source/image/start metrics, not native executable proof or evidence
+that predecessor processes retired. Fleet convergence is incomplete in this
+sample. Receipt SHA-256:
+`c65e2ebfe2dfc3e1fe3ba14f14fac34e7b74eb7297772e79789ba2e16bc9146b`.
+
 The schema-758 monitor successor replaced the older watcher at 06:34 UTC without
 overlapping watcher parents. The handoff had a brief collection gap and reset
 sustain windows; it was not gap-free. The successor continues the 15-minute probe
