@@ -18717,6 +18717,16 @@ and Markdown detail.
 
 Probe: `service-load`
 
+The bounded native host-memory reader retains paired `MemAvailable` independently
+of its optional process census. Enumeration stops at the existing 1,024-PID or
+1,280-entry bounds. `process_list_refusal` records which bound fired, whether it
+was the initial or terminal listing, and finite observed lower bounds. It does
+not complete the census or raise either limit. `processes_listed=0` after a
+refusal means the initial list did not finish, not that the host has no processes.
+Older receipts carrying only `host-proc-list-bound` cannot distinguish the two
+cutoffs retrospectively. Time or permission failures leave those counts unknown;
+RSS ownership totals remain partial even when paired memory headroom is valid.
+
 An optional Connect startup flag, `--memory-owner-ledger`, publishes a fixed
 resident SDK transfer-owner scope through the existing authenticated,
 process-stamped metrics pusher. It defaults off and adds no listener, timer,

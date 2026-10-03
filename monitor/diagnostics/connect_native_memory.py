@@ -35,6 +35,14 @@ class Unavailable(Exception):
     pass
 
 
+class HostProcessListBound(Unavailable):
+    """Finite lower bounds from the entry already consumed at a list cutoff."""
+    def __init__(self, limit, entries_observed, numeric_pids_seen):
+        super().__init__('host-proc-list-bound')
+        self.facts = {'limit': limit, 'entries_observed': entries_observed,
+                      'numeric_pids_seen': numeric_pids_seen}
+
+
 def require(condition, code):
     if not condition:
         raise Unavailable(code)
@@ -470,12 +478,14 @@ def host_process_ids(reader, end):
     with os.scandir('/proc') as entries:
         for count, entry in enumerate(entries):
             host_clock(reader, end)
-            require(count < MAX_HOST_PROCESSES + 256, 'host-proc-list-bound')
+            if count >= MAX_HOST_PROCESSES + 256:
+                raise HostProcessListBound('entries', count + 1, len(pids))
             if entry.name.isascii() and entry.name.isdecimal():
                 pid = int(entry.name)
                 require(0 < pid <= 4194304 and pid not in pids, 'host-proc-list-schema')
                 pids.add(pid)
-                require(len(pids) <= MAX_HOST_PROCESSES, 'host-proc-list-bound')
+                if len(pids) > MAX_HOST_PROCESSES:
+                    raise HostProcessListBound('numeric_pids', count + 1, len(pids))
     return pids
 
 
@@ -497,6 +507,10 @@ def host_memory(reader, connect_rows, partition_qualified):
            'connect_partition_qualified': False,
            'before': None, 'after': None, 'mem_available_min_bytes': None,
            'processes_listed': 0, 'processes_stable': 0, 'processes_unavailable': 0,
+           # None means no qualified list-bound detail, not an empty host.
+           # Counts in a refusal are lower bounds; processes_listed counts
+           # only a completed initial enumeration.
+           'process_list_refusal': None,
            'process_rss_lower_bound_bytes': 0,
            'connect_init_rss_lower_bound_bytes': None,
            'other_process_rss_lower_bound_bytes': None,
@@ -511,6 +525,7 @@ def host_memory(reader, connect_rows, partition_qualified):
         out['before'] = host_meminfo(reader.text('/proc/meminfo', 16384))
         census_finished = False
         connect_rss = 0
+        listing_phase = 'initial'
         try:
             page_size = os.sysconf('SC_PAGE_SIZE')
             require(type(page_size) is int and page_size in (4096, 16384, 65536),
@@ -540,6 +555,7 @@ def host_memory(reader, connect_rows, partition_qualified):
                     out['causes'].append(classify(error))
                     if pid in connect:
                         out['causes'].append('host-connect-partition-unbound')
+            listing_phase = 'terminal'
             terminal = host_process_ids(reader, end)
             if pids != terminal:
                 out['causes'].append('host-process-set-changed')
@@ -548,6 +564,8 @@ def host_memory(reader, connect_rows, partition_qualified):
             census_finished = True
         except Exception as error:
             out['causes'].append(classify(error))
+            if isinstance(error, HostProcessListBound):
+                out['process_list_refusal'] = {'phase': listing_phase, **error.facts}
         out['after'] = host_meminfo(reader.text('/proc/meminfo', 16384))
         require(reader.text('/proc/sys/kernel/random/boot_id', 128) == boot,
                 'boot-identity-changed')

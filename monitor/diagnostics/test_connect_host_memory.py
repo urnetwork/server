@@ -107,6 +107,44 @@ class HostControls(unittest.TestCase):
         with mock.patch.object(n.os,'scandir',return_value=manager),self.assertRaises(n.Unavailable):
             n.host_process_ids(n.Reader(),time.monotonic()+5)
 
+    def test_listing_bound_distinguishes_pid_and_entry_cutoffs_without_extra_read(self):
+        for kind, names, expected_entries, expected_pids in (
+            ('numeric_pids', (str(i+1) for i in range(2000)), 1025, 1025),
+            ('entries', ('non-pid' for _ in range(2000)), 1281, 0),
+        ):
+            seen = []
+            def entries():
+                for name in names:
+                    seen.append(1)
+                    yield type('Entry', (), {'name': name})()
+            manager = mock.MagicMock()
+            manager.__enter__.return_value = entries()
+            with mock.patch.object(n.os, 'scandir', return_value=manager), self.assertRaises(n.HostProcessListBound) as caught:
+                n.host_process_ids(n.Reader(), time.monotonic()+5)
+            self.assertEqual(len(seen), expected_entries)
+            self.assertEqual(caught.exception.facts, {'limit': kind, 'entries_observed': expected_entries,
+                                                       'numeric_pids_seen': expected_pids})
+            self.assertEqual(n.classify(caught.exception), 'host-proc-list-bound')
+
+    def test_refusal_phase_keeps_paired_meminfo_and_incomplete_census(self):
+        refusal = n.HostProcessListBound('numeric_pids', 1100, 1025)
+        for phase, steps, listed in (('initial', [refusal], 0), ('terminal', [{10,20}, refusal], 2)):
+            h = sample(lists=steps)
+            self.assertTrue(h['meminfo_complete'])
+            self.assertEqual(h['mem_available_min_bytes'], 350*1024)
+            self.assertFalse(h['process_aggregate_complete'])
+            self.assertIsNone(h['other_process_rss_lower_bound_bytes'])
+            self.assertEqual(h['processes_listed'], listed)
+            self.assertEqual(h['process_list_refusal'], {'phase': phase, 'limit': 'numeric_pids',
+                                                         'entries_observed': 1100, 'numeric_pids_seen': 1025})
+
+    def test_time_or_permission_failure_does_not_invent_census_size(self):
+        for error in (PermissionError('private'), n.Unavailable('host-sample-time-bound')):
+            h = sample(lists=[error])
+            self.assertTrue(h['meminfo_complete'])
+            self.assertIsNone(h['process_list_refusal'])
+            self.assertFalse(h['process_aggregate_complete'])
+
     def test_capped_or_failed_census_keeps_independent_paired_meminfo(self):
         for error in (n.Unavailable('host-proc-list-bound'), PermissionError('private detail')):
             with mock.patch.object(n,'host_process_ids',side_effect=error), \
