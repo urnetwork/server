@@ -21111,6 +21111,21 @@ file time therefore remain independent evidence. A check older than 48 hours
 is stale even if Fluent Bit keeps scraping the report and the structural
 artifact remains inside its five-day recovery-point objective.
 
+A private source-completion read must retain three separate times: the
+generation start, the successful producer completion, and completion of the
+diagnostic observation. A 2026-10-02 23:24Z observation retained a generation
+started on October 1 at 00:00:15Z whose producer succeeded at 19:28:43Z that
+day. Calling the observation recent cannot make that producer completion less
+than 24 hours old. Keep the five-day archive objective separate from any
+explicitly tighter migration prerequisite; qualify each against its owning
+timestamp. The private migration controls cover a fresh observation of an old
+producer, stale or future observations, missing producer evidence, and a
+claimed producer time incorrectly copied from the observation. A read-only
+catalog check can still run when a migration's producer-age gate fails, but
+apply must refuse before contact. Stable archive and sidecar metadata at the
+observation time remains weaker than current ciphertext, decryption, restore,
+or destination-copy verification.
+
 Planetoid also publishes physical allocation telemetry for the mounted archive
 volume. `urnetwork_backup_archive_storage_bytes{archive="pg|redis|code"}` is
 the total used by each class, with hard-linked retention copies for all three
