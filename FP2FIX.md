@@ -6111,3 +6111,59 @@ R57 API, Connect, Taskworker and Proxy all-block selection was in progress at
 this checkpoint. Schema success and local controls do not prove fleet
 convergence, legacy-worker progress, drained settlement debt or restored service
 health. The 15-minute monitor remains authoritative; FP2FIX is not complete.
+
+
+### 2026-10-03 18:02 UTC exchange retention and close-backlog correction
+
+Root built and verified all four R58 service images for both architectures and
+completed all-block API, Connect, Taskworker and Proxy selection with exit zero.
+The exact source is `a58dd054` on R57's `114b708c`, retaining schema 763 and the
+qualified Connect/SDK dependencies. This release clears completed exchange
+batch backing references. Its local native writer control reproduces retention
+and collection; it does not attribute the large Main heap to that defect.
+Current Main financial admission/recovery changes are not implicitly part of
+R58. The corrected source/build/image/start reader qualified 57 of 68 slots:
+API 20, Taskworker 8, Connect 13 and Proxy 16. Four Connect slots still reported
+R57, and three Connect plus four Proxy slots were ambiguous. This is
+self-reported release evidence, not direct executable proof or predecessor
+retirement. The first read used the deployment tag in place of the build
+version; the corrected reader binds the exact build-plan version and keeps
+true revision, image and version mismatches unqualified.
+
+The 17:18 bounded primary snapshot found all 16 legacy partitions at their
+65-row pending and due sentinels, at least 1,040 each. Accounting-failure counts
+were exact at 159; operational failures were zero. The oldest 65 open contracts
+were all owned by legacy intents. This establishes head ownership for that
+sample, not the entire 25,000-row selector or the disputed population. The
+fixed 17:16–17:20 worker log read selected 45 owning `flushLegacySettlement`
+errors, all `insufficient_escrow`, below its 64-record cap. These logs do not join
+every accounting row or prove exact native process generation. Reservations
+and accounting rejections remain intact; an accounting invariant discriminator
+is still required.
+
+Two local controls reproduced additional correctness defects: the closer can
+reselect an intent-owned head without reaching later eligible contracts, and
+resident teardown can discard a queued control after the sender receives a
+successful native transfer ACK. The ACK fix `c371033c` drains accepted controls
+after fencing and joining their producers; seven focused race controls pass.
+Root merged it to Main as `393c76bf`; it is not in R58. R59 source `610a5c75`
+combines that fix with financial candidate `8d983696`. All four image builds,
+both-architecture verification and all-block deployment commands completed
+with exit zero; the last was Connect at 17:52:29 UTC. Runtime convergence and
+backlog improvement remain unproven. A focused financial test initially
+expected synchronous debit behavior; its correction is being checked separately
+without changing the published R59 bytes.
+
+Bounded closer continuation `8f92f41e` now has passing focused model and
+scheduler race controls, including tied timestamps and a fixed pass boundary.
+Each independent open/disputed scan limits raw candidates to 25,000, advances
+past existing intents and persists its cursor in the ordinary task. Local
+32,768-intent head controls use indexed pages. The existing 92 workers, row
+proofs and financial rejections remain unchanged. Root merged the selector
+as `2cee420c`; the thin R60 source `54f09828` is prepared on R59 and remains
+unpublished at this checkpoint.
+
+The 15-minute monitor and the FP2FIX goal remain active. High contract backlog,
+accounting failures, large resident heaps, native-reader config delivery and
+ARIN full-fleet shadow/coverage remain unresolved. ARIN policy two stays inactive;
+the offline expanded artifact does not establish sufficient Main provider supply.
