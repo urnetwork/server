@@ -8,6 +8,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -31,6 +32,71 @@ const (
 	openContractOutcomeNullIndex     = "transfer_contract_outcome_null"
 )
 
+// Resolve the real query owner only through the public wrapper's returned
+// call. A dead helper or an unused callback cannot satisfy the SQL guard.
+func openContractCompanionQueryOwner(file *ast.File) (*ast.FuncDecl, error) {
+	functions := map[string]*ast.FuncDecl{}
+	for _, declaration := range file.Decls {
+		if function, ok := declaration.(*ast.FuncDecl); ok && function.Recv == nil {
+			functions[function.Name.Name] = function
+		}
+	}
+	ident := func(expression ast.Expr, name string) bool {
+		value, ok := expression.(*ast.Ident)
+		return ok && value.Name == name
+	}
+	returnedCall := func(body *ast.BlockStmt) *ast.CallExpr {
+		if body == nil || len(body.List) != 1 {
+			return nil
+		}
+		statement, ok := body.List[0].(*ast.ReturnStmt)
+		if !ok || len(statement.Results) != 1 {
+			return nil
+		}
+		call, _ := statement.Results[0].(*ast.CallExpr)
+		return call
+	}
+	wrapper := functions["CreateCompanionTransferEscrow"]
+	owner := functions["createCompanionTransferEscrow"]
+	if wrapper == nil || owner == nil || owner.Body == nil {
+		return nil, fmt.Errorf("missing public companion wrapper or actual query owner")
+	}
+	call := returnedCall(wrapper.Body)
+	if call == nil {
+		return nil, fmt.Errorf("public companion wrapper does not return its query owner")
+	}
+	direct := true
+	if ident(call.Fun, "runRedisContractAdmission") {
+		direct = false
+		if len(call.Args) != 2 || !ident(call.Args[0], "ctx") {
+			return nil, fmt.Errorf("companion recovery owner lost caller context")
+		}
+		callback, ok := call.Args[1].(*ast.FuncLit)
+		if !ok || callback.Type.Params == nil || len(callback.Type.Params.List) != 1 || len(callback.Type.Params.List[0].Names) != 1 || callback.Type.Params.List[0].Names[0].Name != "ctx" {
+			return nil, fmt.Errorf("companion recovery callback lost its owned context")
+		}
+		call = returnedCall(callback.Body)
+	}
+	arguments := []string{"ctx", "sourceNetworkId", "sourceId", "destinationNetworkId", "destinationId", "contractTransferByteCount", "originContractTimeout"}
+	if call == nil || !ident(call.Fun, owner.Name.Name) || len(call.Args) != len(arguments) {
+		return nil, fmt.Errorf("public companion wrapper is disconnected from the guarded query owner")
+	}
+	for index, name := range arguments {
+		expression := call.Args[index]
+		if index == 0 && direct {
+			admission, ok := expression.(*ast.CallExpr)
+			if !ok || !ident(admission.Fun, "withRedisContractAdmission") || len(admission.Args) != 1 {
+				return nil, fmt.Errorf("direct companion query lost admission context")
+			}
+			expression = admission.Args[0]
+		}
+		if !ident(expression, name) {
+			return nil, fmt.Errorf("companion query argument %s changed at public wrapper", name)
+		}
+	}
+	return owner, nil
+}
+
 // Binds the planner regression below to the actual runtime statements. The
 // database fixture proves why the generated open column is unsafe for these
 // pair/payer lookups; this source-level guard prevents a later cleanup from
@@ -41,9 +107,50 @@ func TestOpenContractRuntimeQueriesUseStructuralPredicate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	owner, err := openContractCompanionQueryOwner(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// These are the two executed tx.Query literals, not independent fixture
+	// strings or unreachable declarations. Each has both discovery predicates.
+	queries := map[string]bool{"AS earliest_origin": false, "AS earliest_companion_origin": false}
+	ast.Inspect(owner.Body, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok || len(call.Args) < 2 {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || selector.Sel.Name != "Query" {
+			return true
+		}
+		receiver, ok := selector.X.(*ast.Ident)
+		literal, literalOk := call.Args[1].(*ast.BasicLit)
+		if !ok || receiver.Name != "tx" || !literalOk || literal.Kind != token.STRING {
+			return true
+		}
+		sql, err := strconv.Unquote(literal.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for marker := range queries {
+			if strings.Contains(sql, marker) {
+				queries[marker] = true
+				normalized := strings.ToLower(strings.Join(strings.Fields(sql), " "))
+				if strings.Count(normalized, "case when outcome is null then dispute = false else false end") < 2 {
+					t.Errorf("actual companion query %s lost its two structural CASE predicates", marker)
+				}
+			}
+		}
+		return true
+	})
+	for marker, found := range queries {
+		if !found {
+			t.Errorf("actual companion tx.Query %s not found", marker)
+		}
+	}
 
 	minimumPredicates := map[string]int{
-		"CreateCompanionTransferEscrow":                     2,
+		"createCompanionTransferEscrow":                     2,
 		"GetOpenTransferEscrowsOrderedByPriorityCreateTime": 1,
 		"GetOpenContractIds":                                1,
 		"GetOpenContractIdsForSourceOrDestination":          1,
