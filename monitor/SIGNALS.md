@@ -17271,6 +17271,30 @@ This is the version-to-artifact contract checked by the probe:
 | 749 | Persistent resumable registration binding with exact required columns and digest bounds/checks, immediate identity uniqueness, and only the network-deletion cascade |
 | 750 | Required false-default boolean `network_client_location.arin_quality_verified` |
 | 751 | Nullable no-default UUID subscriber write token plus the exact enabled, unconditional before-insert/update invalidation function and trigger |
+| 752 | Private prober shard ownership, unique active slot, and cleanup fences |
+| 753 | Exact net-escrow contract revision point lookup |
+| 754 | Durable per-balance net-escrow reservation snapshot |
+| 755 | Redis contract admission compatibility and policy |
+| 756 | Provider payment bonus provenance and submission guards |
+| 757 | Provider earning boundary immutable guards |
+| 758 | Independent transfer debit journal, bounded indexes, and pending-debt retention guard |
+| 759 | Persistent acceptance-test drain audit with exact columns and immediate primary key |
+| 760 | Valid/ready drain lookup on `(network_id, end_time)` restricted to `restore_time IS NULL` |
+| 761 | Nullable no-default Solana expected amount and exact partial lookup, persistent amount reservations with immediate primary key, and nullable support fields with a 64-character sender bound |
+| 762 | Persistent legacy settlement intent with exact defaults/checks, partition/due indexes, enabled exact outcome-update guard, and immediate contract retention foreign key with all four operative guards; no shared-balance foreign key |
+
+The 2026-10-03 full local watcher gate found missing detector contracts for
+759–762. This was a monitor catalog omission, not evidence of absent Main
+schema. The corrected catalog visits each published prefix with the actual
+query; absent future functions/tables are pending rollout. Fault controls
+change nullability, defaults, keys, partial predicates, sender length, queue
+index, guard body/events, and foreign-key enforcement, then restore the exact
+schema and require recovery. A disabled internal foreign-key trigger cannot
+count as retention protection merely because its validated constraint remains.
+Catalog coherence does not establish worker deployment, settlement progress,
+admission-policy state, payment enrollment, or rollout convergence. Retain
+§2.5b's backlog and worker observations and the independent production gates;
+unavailable or failed catalog reads remain unknown, never healthy.
 
 The 2026-10-01 local monitor gate found missing artifact contracts for versions
 749–751 and three migration-query helpers incorrectly named as independent

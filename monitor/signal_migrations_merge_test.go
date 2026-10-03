@@ -27,6 +27,23 @@ func TestMigrationsSignalMergedCatalogUsesExactColumns(t *testing.T) {
 			{apply: `ALTER TABLE transfer_balance DISABLE TRIGGER transfer_balance_pending_debit_guard`, restore: `ALTER TABLE transfer_balance ENABLE TRIGGER transfer_balance_pending_debit_guard`, artifact: "asynchronous transfer debit journal and retention guard@v758"},
 			{apply: `DROP INDEX transfer_debit_journal_shard`, restore: `CREATE INDEX transfer_debit_journal_shard ON transfer_debit_journal(shard,balance_id,contract_id)`, artifact: "asynchronous transfer debit journal and retention guard@v758"},
 			{apply: `ALTER TABLE transfer_debit_journal ADD CONSTRAINT test_shared_fk FOREIGN KEY(balance_id) REFERENCES transfer_balance(balance_id)`, restore: `ALTER TABLE transfer_debit_journal DROP CONSTRAINT test_shared_fk`, artifact: "asynchronous transfer debit journal and retention guard@v758"},
+			{apply: `ALTER TABLE test_balance_drain ALTER COLUMN drained_balance_byte_count DROP NOT NULL`, restore: `ALTER TABLE test_balance_drain ALTER COLUMN drained_balance_byte_count SET NOT NULL`, artifact: "acceptance-test balance drain audit@v759"},
+			{apply: `ALTER TABLE test_balance_drain DROP CONSTRAINT test_balance_drain_pkey`, restore: `ALTER TABLE test_balance_drain ADD PRIMARY KEY(drain_id)`, artifact: "acceptance-test balance drain audit@v759"},
+			{apply: `DROP INDEX test_balance_drain_network_id_end_time; CREATE INDEX test_balance_drain_network_id_end_time ON test_balance_drain(network_id,end_time) WHERE restore_time IS NOT NULL`, restore: `DROP INDEX test_balance_drain_network_id_end_time; CREATE INDEX test_balance_drain_network_id_end_time ON test_balance_drain(network_id,end_time) WHERE restore_time IS NULL`, artifact: "active acceptance-test balance drain lookup@v760"},
+			{apply: `ALTER TABLE solana_payment_intent ALTER COLUMN expected_amount_micro SET DEFAULT 0`, restore: `ALTER TABLE solana_payment_intent ALTER COLUMN expected_amount_micro DROP DEFAULT`, artifact: "Solana payment amount reservations@v761"},
+			{apply: `ALTER TABLE solana_unfulfilled_payment ALTER COLUMN sender_account TYPE varchar(65)`, restore: `ALTER TABLE solana_unfulfilled_payment ALTER COLUMN sender_account TYPE varchar(64)`, artifact: "Solana payment amount reservations@v761"},
+			{apply: `ALTER TABLE solana_payment_amount_reservation DROP CONSTRAINT solana_payment_amount_reservation_pkey`, restore: `ALTER TABLE solana_payment_amount_reservation ADD PRIMARY KEY(amount_micro)`, artifact: "Solana payment amount reservations@v761"},
+			{apply: `DROP INDEX solana_payment_intent_expected_amount_micro`, restore: `CREATE INDEX solana_payment_intent_expected_amount_micro ON solana_payment_intent(expected_amount_micro,expires_at) WHERE expected_amount_micro IS NOT NULL`, artifact: "Solana payment amount reservations@v761"},
+			{apply: `ALTER TABLE legacy_settlement_intent ALTER COLUMN failure_code SET DEFAULT 'accounting'`, restore: `ALTER TABLE legacy_settlement_intent ALTER COLUMN failure_code SET DEFAULT 'none'`, artifact: "legacy settlement intent and ownership guards@v762"},
+			{apply: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_check`, restore: `ALTER TABLE legacy_settlement_intent ADD CHECK(shard=get_byte(uuid_send(contract_id),15)%16)`, artifact: "legacy settlement intent and ownership guards@v762"},
+			{apply: `DROP INDEX legacy_settlement_intent_due`, restore: `CREATE INDEX legacy_settlement_intent_due ON legacy_settlement_intent(shard,next_attempt_time,contract_id)`, artifact: "legacy settlement intent and ownership guards@v762"},
+			{apply: `ALTER TABLE transfer_contract DISABLE TRIGGER transfer_contract_legacy_settlement_owner`, restore: `ALTER TABLE transfer_contract ENABLE TRIGGER transfer_contract_legacy_settlement_owner`, artifact: "legacy settlement intent and ownership guards@v762"},
+			{apply: `DROP TRIGGER transfer_contract_legacy_settlement_owner ON transfer_contract; CREATE TRIGGER transfer_contract_legacy_settlement_owner BEFORE UPDATE OF outcome,dispute ON transfer_contract FOR EACH ROW EXECUTE FUNCTION guard_legacy_settlement_intent_outcome()`, restore: `DROP TRIGGER transfer_contract_legacy_settlement_owner ON transfer_contract; CREATE TRIGGER transfer_contract_legacy_settlement_owner BEFORE UPDATE OF outcome ON transfer_contract FOR EACH ROW EXECUTE FUNCTION guard_legacy_settlement_intent_outcome()`, artifact: "legacy settlement intent and ownership guards@v762"},
+			{apply: `CREATE OR REPLACE FUNCTION guard_legacy_settlement_intent_outcome() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$`, restore: `CREATE OR REPLACE FUNCTION guard_legacy_settlement_intent_outcome() RETURNS trigger LANGUAGE plpgsql AS $body$` + legacySettlementOutcomeGuardBody + `$body$`, artifact: "legacy settlement intent and ownership guards@v762"},
+			{apply: `ALTER TABLE legacy_settlement_intent DISABLE TRIGGER ALL`, restore: `ALTER TABLE legacy_settlement_intent ENABLE TRIGGER ALL`, artifact: "legacy settlement intent and ownership guards@v762"},
+			{apply: legacySettlementRetentionTriggerDDL("DISABLE"), restore: legacySettlementRetentionTriggerDDL("ENABLE"), artifact: "legacy settlement intent and ownership guards@v762"},
+			{apply: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_contract_id_fkey; ALTER TABLE legacy_settlement_intent ADD FOREIGN KEY(contract_id) REFERENCES transfer_contract(contract_id) ON DELETE CASCADE`, restore: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_contract_id_fkey; ALTER TABLE legacy_settlement_intent ADD FOREIGN KEY(contract_id) REFERENCES transfer_contract(contract_id)`, artifact: "legacy settlement intent and ownership guards@v762"},
+			{apply: `ALTER TABLE legacy_settlement_intent ADD COLUMN test_shared_balance_id uuid REFERENCES transfer_balance(balance_id)`, restore: `ALTER TABLE legacy_settlement_intent DROP COLUMN test_shared_balance_id`, artifact: "legacy settlement intent and ownership guards@v762"},
 
 			{
 				apply:    `ALTER TABLE provider_egress_health ALTER COLUMN security_measured_at SET DEFAULT now()`,
@@ -89,4 +106,14 @@ func TestMigrationsSignalMergedCatalogUsesExactColumns(t *testing.T) {
 			}
 		}
 	})
+}
+
+// Exercise the parent DELETE guard independently of the child FK checks.
+func legacySettlementRetentionTriggerDDL(mode string) string {
+	return `DO $body$ DECLARE guard name; BEGIN
+ SELECT t.tgname INTO STRICT guard FROM pg_trigger t JOIN pg_constraint k ON k.oid=t.tgconstraint
+ WHERE k.conrelid='legacy_settlement_intent'::regclass AND k.contype='f'
+ AND t.tgrelid='transfer_contract'::regclass AND t.tgtype=9;
+ EXECUTE format('ALTER TABLE transfer_contract ` + mode + ` TRIGGER %I',guard);
+ END $body$`
 }
