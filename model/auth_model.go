@@ -509,12 +509,22 @@ func handleLoginParsedAuthJwtWithStore(
 	userAuthEmailVerified := false
 	legacySsoExists := false
 
+	// sign-in rows are stored under the normalized user auth (trimmed,
+	// lowercase), while the provider's token email may differ in case or spacing.
+	// An email that does not normalize matches no row; never look up the empty
+	// user auth.
+	normalUserAuth, _ := NormalUserAuth(authJwt.UserAuth)
+
 	/**
 	 * get sso auths
 	 */
-	ssoAuths, err := store.ssoAuthsByUserAuth(ctx, authJwt.UserAuth)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get SSO auths: %w", err)
+	var ssoAuths []NetworkUserSsoAuth
+	if normalUserAuth != "" {
+		var err error
+		ssoAuths, err = store.ssoAuthsByUserAuth(ctx, normalUserAuth)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get SSO auths: %w", err)
+		}
 	}
 	if len(ssoAuths) > 0 {
 		ssoExists = true
@@ -524,13 +534,15 @@ func handleLoginParsedAuthJwtWithStore(
 	/**
 	 * check if userAuth exists with this email in network_user_auth_password
 	 */
-	if id, verified, found := store.passwordAuthByUserAuth(ctx, authJwt.UserAuth); found {
-		userAuthExists = true
-		userAuthEmailVerified = verified
+	if normalUserAuth != "" {
+		if id, verified, found := store.passwordAuthByUserAuth(ctx, normalUserAuth); found {
+			userAuthExists = true
+			userAuthEmailVerified = verified
 
-		if id != nil {
-			glog.Infof("setting user id inside of user auth as %s", id.String())
-			userId = id
+			if id != nil {
+				glog.Infof("setting user id inside of user auth as %s", id.String())
+				userId = id
+			}
 		}
 	}
 
