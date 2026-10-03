@@ -4546,14 +4546,14 @@ debit after Redis failure or lost acknowledgment. Redis loss/lease expiry and
 mixed old release callbacks can temporarily under-reserve; reconciliation and
 bounded journal drain restore the ledger without using provider payout eligibility
 as payer consumption. Legacy unmarked contracts retain their original synchronous financial authority
-until migration 762 and its worker are deployed; §2.5b owns that separate
+until migration 763 and its worker are deployed; §2.5b owns that separate
 contention boundary and its eventual settlement control.
 
 ### 2.5b Legacy settlement intent recovery
 Probe: `legacy-settlements`
 Classes: `legacy-settlement-pending`, `legacy-settlement-worker-missing`.
 
-Migration 762 gives legacy unmarked or mixed escrow contracts an independent
+Migration 763 gives legacy unmarked or mixed escrow contracts an independent
 per-contract settlement intent. Foreground acknowledgement leaves the outcome
 unset and the SQL reservation intact. Sixteen bounded recovery partitions take
 queue, contract and sorted grant ownership with `SKIP LOCKED`. One transaction
@@ -4566,7 +4566,7 @@ The outcome trigger refuses an old writer after an intent has been accepted;
 the worker deletes its locked intent inside the financial transaction before
 claiming the outcome. Rollback restores all state. An old writer that wins before
 enqueue remains valid. A rolling or rollback deployment must retain a worker
-that understands 762 until every intent drains. The intent's contract foreign
+that understands 763 until every intent drains. The intent's contract foreign
 key fences old retention statements atomically, including their dependent
 rows; current retention explicitly preserves the intent. Unsettled escrow still
 protects the grant from expiry and shard deletion.
@@ -4577,7 +4577,7 @@ in the future. Pending age warns at 60 seconds; any retained accounting or
 operational failure warns immediately. Any age at 300 seconds pages. These are
 initial design escalation bands, not measured Main capacity. Every partition
 must share a source clock within 30 seconds. Partial, duplicate, malformed or
-stale evidence is unknown. Before schema 762 the probe is inapplicable; a missing
+stale evidence is unknown. Before schema 763 the probe is inapplicable; a missing
 table after installation is a visibility error. A missing scheduled partition
 warns after two observations; a future task lease alone is not a live owner.
 

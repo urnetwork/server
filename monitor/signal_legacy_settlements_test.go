@@ -20,7 +20,7 @@ func legacyRows(now time.Time) []pgRow {
 func TestLegacySettlementsAuthorityAndRetainedFailure(t *testing.T) {
 	now := syntheticSettings(nil).Now()
 	rows := legacyRows(now)
-	head, present := "762", "t"
+	head, present := "763", "t"
 	source := &syntheticSource{postgresFn: func(q string) ([]Row, error) {
 		if strings.Contains(q, "max(end_version_number)") {
 			return []Row{{head, present}}, nil
