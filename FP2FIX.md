@@ -6167,3 +6167,55 @@ The 15-minute monitor and the FP2FIX goal remain active. High contract backlog,
 accounting failures, large resident heaps, native-reader config delivery and
 ARIN full-fleet shadow/coverage remain unresolved. ARIN policy two stays inactive;
 the offline expanded artifact does not establish sufficient Main provider supply.
+
+
+### 2026-10-03 19:14 UTC rolling coverage and deployment checkpoint
+
+Root merged mature URL recovery pacing `675fa67b` to Main as `243e7439`, then
+pulled and pushed successfully. The native regression reproduced a mature
+provider still below ten accepted measurements being deferred another
+20m26.52s after a successful measurement. Seven focused race roots pass with
+the correction: this case uses the existing one-minute retry pace, while
+warmup, measured failure, quota-full expiry, security and replay controls retain
+their contracts. No dependencies or migrations changed. R61 source `675fa67b`
+combines this correction with the bounded expiry selector already prepared in
+R60. Registry publication remains held pending replacement-credential disposition;
+local Makefile binaries do not establish published images or deployed fixes.
+Neither selector nor pacing is deployed at this checkpoint.
+
+R59's four all-block deployment commands completed, but the 18:04 source-bound
+runtime read qualified only 54 of 68 slots: API20, Taskworker8, Connect11 and
+Proxy15. Sequential native Connect observations later proved current executable
+identities on sampled owners while also finding older/current overlap on hot
+hosts. They do not prove simultaneous fleet convergence, drain phase or retired
+predecessors. Large RSS in directly verified current R59 processes remains an
+open ownership problem; the exchange-tail and accepted-control fixes cannot be
+claimed to explain or resolve the whole retained heap.
+
+The fixed 18:30–18:35 UTC selected-policy history window contained 23,682 unique
+accepted measured runs (16,587 success, 7,095 failure; 22,848 providers), or
+78.94/s. This is measurement-time history, not arrival rate or fixed-provider
+recovery. The coherent 18:54 census had 92,253/107,139 quota-complete providers
+(86.11%). At 19:09:21 it reported 96,316/107,142 (89.90%), 10,847 overdue,
+4,203 due and 16,598 runs needed, with 142,355.3 seconds oldest due. Observation
+age was 55.04 seconds and sample age 14.30 seconds. The improvement preceded
+R61 deployment and receives no causal credit; provider-cohort turnover remains
+unmeasured. At least 6,644 overdue providers were outside the due set in that
+single later snapshot, a lower bound on future-paced work.
+
+The 18:49 oldest-eligible-hint head contained 128 mature deficient providers,
+all currently eligible under both reliability modes and all latest claims
+completed without recorded setup failure. Their 1,119 retained measurements
+included 332 accepted failures and left a 161-run deficit. This bounded head
+cannot explain all overdue providers. The next oldest-all-cycle head consisted
+entirely of inactive historical cycles, so it did not establish live false
+hints. A native control independently reproduces restored reliability remaining
+unscheduled until its hint refresh; Main prevalence is still unknown.
+
+Native ACK-loss replay and additive checkpoint accounting are now reproducible
+locally. An idempotent checkpoint repair and proposed migration764 remain under
+qualification, with backup/schema prerequisites and mixed-client compatibility
+still explicit. Existing accounting reservations and insufficient-escrow
+rejections remain intact. The authoritative 15-minute watcher and the FP2FIX
+goal continue; memory ownership, quota coverage, native-reader delivery and ARIN
+full-fleet shadow/positive supply remain open. ARIN policy two stays inactive.
