@@ -18183,6 +18183,20 @@ only after Warp pulls and inspects the exact image it passes to `docker run`.
 Both halves are required, and the reported digest must independently match the
 running container and the executable extracted from that digest.
 
+The installed Go toolchain observed on 2026-10-04 recognized a repository's
+`.git` directory but ignored the `.git` file used by a linked worktree. A native
+control built the same committed program with the ordinary `go build -trimpath`:
+the repository build contained the exact revision and `modified=false`, while
+the linked-worktree build omitted all VCS fields. Explicit `-buildvcs=true`
+also omitted them in that worktree; the deliberate `-buildvcs=false` control
+omitted them in the repository. A genuine isolated clone can restore this
+toolchain's native metadata without changing source or inventing labels.
+This is a proved local artifact boundary, not a universal Go/worktree rule.
+Missing VCS fields suppress `urnetwork_source_info` in `StartStatsPusher` even
+when other metrics are present. Keep provenance and the source-qualified
+ownership projection in §8.15 unknown until exact current witnesses exist;
+external image/source closure alone does not synthesize the missing series.
+
 Warpctl version-sampling counts are HTTP responses, not unique processes or
 containers. Its twenty requests per logical block can produce forty samples
 for a two-block service on eight actual host/block slots. Derive the desired
