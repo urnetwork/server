@@ -1,0 +1,17 @@
+{
+  "branch": "origin/app-sumo-webhook",
+  "disposition": "original unfinished source preserved as non-built historical patch; ancestry merged",
+  "head": "e20968b0a2463074796099f51a84be3eca09868a",
+  "original_file_sha256": {
+    "api/handlers/subscription_handlers.go": "e0f685f2c91ecc143b759a617c32ab3ad3ab845c53af039ed7b647eb059acfbe",
+    "api/main.go": "b2694bc308691c757976ff833d990de8d2a247d54a891ac608ab901d8e2b29aa",
+    "controller/subscription_controller.go": "1e2f12dfd1b798be3c543cd6bb0ceb381057fb21ea07385e734dda871f76db96",
+    "db_migrations.go": "c38e6d9071b2fa4d4dc8714d8c0e8163ff5c1a2d70bbfa72276113872da46b20",
+    "model/account_redemption_code_model.go": "cdbec35810787300f4299a5f2866974bd185139423bfb823bc3fd567ea4e679b",
+    "model/account_redemption_code_model_test.go": "7830eb210e48469fb7cfd2809f26bdb4522109f397172941532337732a5b0b7c"
+  },
+  "original_patch_sha256": "1f03edbd1b4ab05de3df9836e24404997fa12ce727e497f8decdfcab436bb595",
+  "reason": "Prototype exposes unauthenticated redemption-code creation; VerifyAppSumoBody explicitly leaves authentication TODO. No live route is enabled.",
+  "runtime_activation": false,
+  "source_retrieval": "git show e20968b0a2463074796099f51a84be3eca09868a:<path>"
+}
