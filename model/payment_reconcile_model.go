@@ -39,8 +39,9 @@ const (
 
 // Webhook-written operator events (UPGRADE.md §2 S7/S11) that join the
 // reconciler's audit stream. Their run_id is a fresh provenance id, not a
-// reconcile run: the store's REAL-TIME refund/revocation handlers and the
-// stripe email fallback write these as they happen.
+// reconcile run: the store's REAL-TIME refund/revocation handlers write these
+// as they happen. (The stripe invoice.paid webhook also writes
+// credit_unfulfillable, above, for a paid invoice that names no network.)
 const (
 	// a store refund clawed back (or tried to claw back) what it granted
 	PaymentReconcileActionRefunded = "refunded"
@@ -52,9 +53,6 @@ const (
 	// a refund/dispute whose charge could not be mapped to anything we
 	// granted: recorded for the operator instead of guessing what to claw
 	PaymentReconcileActionRefundUnmatched = "refund_unmatched"
-	// stripeHandleInvoicePaid resolved the network by the LEGACY customer
-	// email fallback (S11) -- every use is surfaced until it can be retired
-	PaymentReconcileActionEmailFallback = "email_fallback"
 	// X402Purchase settled the payment (the money moved) and the grant failed
 	// (S9). Evidence is the settle transaction; details carry what was bought.
 	// The reconciler retries the idempotent grant until a resolving event
@@ -144,60 +142,41 @@ func AddPaymentReconciliationEventInTx(
 	return
 }
 
-// GetPaymentReconciliationEventsByAction reads one store's audit rows for one
-// action since a time, oldest first, bounded by limit and excluding dry runs.
-// This is how the stripe reconciler leg and the CLI summary surface
-// webhook-written events (email_fallback) since the last watermark.
-func GetPaymentReconciliationEventsByAction(
+// AddPaymentReconciliationEventOnce appends the event unless a non-dry-run row
+// with the same store, action and evidence already exists. added is false when
+// one does. Webhook redeliveries use this so one store object is one support
+// row; two concurrent first deliveries can still both append, which is
+// harmless (readers count distinct evidence).
+func AddPaymentReconciliationEventOnce(
 	ctx context.Context,
-	store string,
-	action string,
-	since time.Time,
-	limit int,
-) []*PaymentReconciliationEvent {
-	events := []*PaymentReconciliationEvent{}
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
+	event *PaymentReconciliationEvent,
+) (added bool, err error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		result, queryErr := tx.Query(
 			ctx,
 			`
-			SELECT event_id, run_id, network_id,
-			       COALESCE(evidence, ''), details, event_time
-			FROM payment_reconciliation_event
+			SELECT 1 FROM payment_reconciliation_event
 			WHERE store = $1
 			  AND action = $2
-			  AND event_time >= $3
+			  AND evidence = $3
 			  AND NOT dry_run
-			ORDER BY event_time ASC, event_id ASC
-			LIMIT $4
+			LIMIT 1
 			`,
-			store,
-			action,
-			since,
-			limit,
+			event.Store,
+			event.Action,
+			event.Evidence,
 		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				event := &PaymentReconciliationEvent{
-					Store:  store,
-					Action: action,
-				}
-				var detailsJson *string
-				server.Raise(result.Scan(
-					&event.EventId,
-					&event.RunId,
-					&event.NetworkId,
-					&event.Evidence,
-					&detailsJson,
-					&event.EventTime,
-				))
-				if detailsJson != nil {
-					json.Unmarshal([]byte(*detailsJson), &event.Details)
-				}
-				events = append(events, event)
-			}
+		exists := false
+		server.WithPgResult(result, queryErr, func() {
+			exists = result.Next()
 		})
+		if exists {
+			return
+		}
+		err = AddPaymentReconciliationEventInTx(tx, ctx, event)
+		added = err == nil
 	})
-	return events
+	return
 }
 
 // GetUnresolvedSettledNotGrantedEvents reads the store's settled_not_granted

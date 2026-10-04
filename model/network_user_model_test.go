@@ -200,54 +200,6 @@ func TestAddUserAuthWallet(t *testing.T) {
 	})
 }
 
-func TestFindNetworkIdByEmail(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-
-		networkId := server.NewId()
-		userId := server.NewId()
-		networkName := "abcdef"
-
-		userAuth := Testing_CreateNetwork(ctx, networkId, networkName, userId)
-
-		retrievedNetworkId, err := FindNetworkIdByEmail(ctx, userAuth)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, *retrievedNetworkId, networkId)
-
-		/**
-		 * Test SSO
-		 */
-		email := "hello@ur.io"
-		networkId = server.NewId()
-		userId = server.NewId()
-		parsedAuthJwt := AuthJwt{
-			AuthType: SsoAuthTypeGoogle,
-			UserAuth: email,
-			UserName: "",
-		}
-
-		Testing_CreateNetworkSso(
-			networkId,
-			userId,
-			parsedAuthJwt,
-			ctx,
-		)
-
-		retrievedNetworkId, err = FindNetworkIdByEmail(ctx, email)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, *retrievedNetworkId, networkId)
-
-		/**
-		 * Test not found
-		 */
-
-		retrievedNetworkId, err = FindNetworkIdByEmail(ctx, "unknown@email.com")
-		assert.Equal(t, err, nil)
-		assert.Equal(t, retrievedNetworkId, nil)
-
-	})
-}
-
 func TestFindNetworkIdByWalletAddress(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

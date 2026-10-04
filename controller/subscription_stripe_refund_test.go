@@ -1,12 +1,13 @@
 package controller
 
 // Hermetic tests for the real-time Stripe refund/dispute clawback and the
-// S11 email-fallback audit (UPGRADE.md §2 S7/S11): a fake Stripe API behind
+// S11 legacy-invoice handling (UPGRADE.md §2 S7/S11): a fake Stripe API behind
 // the same stripeApiBaseUrl seam the S5-pattern tests use.
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -453,21 +454,22 @@ func TestStripeWebhookUnknownEventTypeStill200(t *testing.T) {
 	})
 }
 
-// TestStripeEmailFallbackWritesAuditEventOnce pins the S11 keep-plus-audit
-// decision: when invoice.paid resolves its network by the LEGACY customer
-// email fallback, the credit lands AND an email_fallback operator event is
-// recorded -- once, even across a Stripe redelivery of the same invoice.
-func TestStripeEmailFallbackWritesAuditEventOnce(t *testing.T) {
+// TestStripeLegacyInvoiceEmailMatchIsNotCredited pins the S11 removal: a
+// legacy invoice.paid (no subscription network_id metadata, no checkout
+// client_reference_id) whose Stripe customer email matches an account is NOT
+// credited to that account. The webhook answers 2xx and records it once as a
+// credit_unfulfillable event for support, also across a redelivery.
+func TestStripeLegacyInvoiceEmailMatchIsNotCredited(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		env := newStripeRefundTestEnv(t)
 
 		networkId := server.NewId()
 		userId := server.NewId()
-		userAuth := model.Testing_CreateNetwork(ctx, networkId, "emailfallback", userId)
+		userAuth := model.Testing_CreateNetwork(ctx, networkId, "legacyemailmatch", userId)
 
-		invoiceId := "in_email_fallback_1"
-		subscriptionId := "sub_email_fallback_1"
+		invoiceId := "in_legacy_email_match_1"
+		subscriptionId := "sub_legacy_email_match_1"
 		periodStart := server.NowUtc().Add(-time.Hour)
 		periodEnd := server.NowUtc().Add(30 * 24 * time.Hour)
 		// a legacy subscription: NO network_id metadata, NO checkout session --
@@ -493,63 +495,28 @@ func TestStripeEmailFallbackWritesAuditEventOnce(t *testing.T) {
 			},
 		}
 
-		invoice := &StripeEventInvoiceObject{Id: invoiceId, Total: 500}
-		result, err := stripeHandleInvoicePaid(invoice, reconcileTestSession(t, ctx))
-		connect.AssertEqual(t, err, nil)
-		connect.AssertNotEqual(t, result, nil)
+		invoice := &StripeEventInvoiceObject{Id: invoiceId, Total: 500, Currency: "usd"}
+		for delivery := 0; delivery < 2; delivery++ {
+			// the reconciler-facing handler reports the destination as unresolved
+			_, err := stripeHandleInvoicePaid(invoice, reconcileTestSession(t, ctx))
+			connect.AssertEqual(t, errors.Is(err, errStripeInvoiceDestinationUnresolved), true)
 
-		// the credit landed on the email-matched network, and the fallback use
-		// is an operator-visible audit row
-		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
+			// the webhook acknowledges it and records it for support
+			var unresolved *stripeInvoiceDestinationUnresolvedError
+			connect.AssertEqual(t, errors.As(err, &unresolved), true)
+			result, err := stripeAcknowledgeUnresolvedInvoice(ctx, invoice, unresolved)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertNotEqual(t, result, nil)
+		}
+
+		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), false)
+		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 0)
+		_, credited := model.GetStripeInvoiceNetworkId(ctx, invoiceId)
+		connect.AssertEqual(t, credited, false)
 		connect.AssertEqual(
 			t,
-			countPaymentReconciliationEventRows(t, ctx, model.SubscriptionMarketStripe, model.PaymentReconcileActionEmailFallback, invoiceId),
+			countPaymentReconciliationEventRows(t, ctx, model.SubscriptionMarketStripe, model.PaymentReconcileActionCreditUnfulfillable, invoiceId),
 			1,
 		)
-
-		// a redelivery re-resolves the email but the stripe_invoice ledger
-		// absorbs the credit -- the fallback count must not inflate
-		result, err = stripeHandleInvoicePaid(invoice, reconcileTestSession(t, ctx))
-		connect.AssertEqual(t, err, nil)
-		connect.AssertNotEqual(t, result, nil)
-		connect.AssertEqual(
-			t,
-			countPaymentReconciliationEventRows(t, ctx, model.SubscriptionMarketStripe, model.PaymentReconcileActionEmailFallback, invoiceId),
-			1,
-		)
-	})
-}
-
-// TestPaymentReconcileStripeSurfacesEmailFallback pins the reporting leg: the
-// stripe reconciler counts email_fallback events since the last watermark
-// into its store result (and the heartbeat), and hands the rows to the run
-// result for the `bringyourctl payments reconcile` summary to print.
-func TestPaymentReconcileStripeSurfacesEmailFallback(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
-		disableAllReconcileStores(t)
-		newStripeReconcileTestEnv(t) // empty listings; re-enables stripe only
-
-		networkId := server.NewId()
-		invoiceId := "in_email_fallback_reconcile_1"
-		connect.AssertEqual(t, model.AddPaymentReconciliationEvent(ctx, &model.PaymentReconciliationEvent{
-			RunId:     server.NewId(),
-			Store:     model.SubscriptionMarketStripe,
-			NetworkId: &networkId,
-			Action:    model.PaymentReconcileActionEmailFallback,
-			Evidence:  invoiceId,
-			Details:   map[string]any{"resolution": "customer_email"},
-		}), nil)
-
-		result, err := RunPaymentReconciliationWithOptions(
-			reconcileTestSession(t, ctx),
-			&PaymentReconcileRunOptions{Stores: []string{model.SubscriptionMarketStripe}},
-		)
-		connect.AssertEqual(t, err, nil)
-
-		connect.AssertEqual(t, result.StoreResults[model.SubscriptionMarketStripe].EmailFallbacks, 1)
-		connect.AssertEqual(t, len(result.EmailFallbackEvents), 1)
-		connect.AssertEqual(t, result.EmailFallbackEvents[0].Evidence, invoiceId)
-		connect.AssertEqual(t, result.EmailFallbackEvents[0].Action, model.PaymentReconcileActionEmailFallback)
 	})
 }
