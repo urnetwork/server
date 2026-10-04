@@ -1,5 +1,140 @@
 # Reviewed ARIN classification and cutover
 
+## 2026-10-04 classifier review, research and discriminator additions
+
+This section records the deep review of [ARINDB.md](ARINDB.md) and the
+classifiers, the research into additional evidence, and the builder changes
+that followed. It supersedes the "Deferred" status of the origin-ASN and RPKI
+rows in the signal matrix below; the other rows keep their status.
+
+### Review findings
+
+| Finding | Consequence | Disposition |
+| --- | --- | --- |
+| The origin stage discarded the RIS peer count, so a prefix/origin pair seen by one of 453 peers carried the same weight as a globally visible aggregate. Single-peer pairs include `3.0.0.0/8` from an unrelated origin, `198.18.0.0/15` benchmarking space and leaked ISP aggregates. | A leak, hijack or local-only announcement by a reviewed ISP ASN could manufacture an inference. | Fixed: visibility floor with aggregate inheritance. |
+| No origin authorization check existed. | An unauthorized origin, including a leased or hijacked block announced from a reviewed access ASN, inferred clean. | Fixed: RPKI withholding. |
+| Catalog `countries` were review context only. On a 127-ASN eyeball sample, routes geolocated outside the operator's country were almost entirely on-net CDN caches, leased blocks and anycast, and two deliberately misidentified entries geolocated 100% outside their stated country. | The cheapest available discriminator was unused, and a misidentified identity was invisible until shadowed. | Fixed: reviewed-country withholding and the catalog audit. |
+| Proxy, VPN and Tor evidence existed only at organization and ASN scope, so an exit inside a reviewed access network inherited the inference. The official Tor export names 1,398 exit addresses. | Known contrary use at exact addresses was approved. | Fixed: address-level risk lists. |
+| Records outside ARIN space carried no `associated_country`, so neither geography nor the country discriminator could apply there. | The global stage was blind to geography. | Fixed where an inference is made: the country policy records the observed country at withheld cells; GeoLite is now an augmentation input. |
+| The catalog had 4,786 operators but no tooling to measure a catalog against observed routing before a 500 MB build. | Identity errors surfaced only in full readbacks. | Fixed: `audit-subscriber-catalog`. |
+| Registration-country geographic risk applies only to ARIN direct registrations. Measured against the NRO delegated file, the delegated country disagrees with GeoLite for 6.4% of ARIN, 6.4% of RIPE, 6.1% of AFRINIC, 1.5% of APNIC and 0.7% of LACNIC assigned IPv4 space. | Risk semantics differ by registry: the same cross-border registration is risky in ARIN space and clean elsewhere. | Not changed: applying it globally would exclude several percent of non-ARIN supply from every bucket, which is a policy decision, not a classifier correction. The measurement and the delegated-file format are recorded for that decision. |
+| Visibility and validity inheritance initially compared ASN sets, so sibling ASNs of one operator (an Orange ES aggregate with Jazztel more-specifics) looked like different identities. | 7,164 of 7,165 Jazztel routes were withheld. | Fixed: inheritance also recognizes identical reviewed-operator sets; the catalog must list sibling ASNs under one operator ID. |
+
+The registration stage, allocation scopes, country evidence and runtime decoder
+were reviewed without a correctness finding. The augmentation loop's iteration
+errors surface through `Decode`, so no unchecked iteration remains.
+
+### Research summary
+
+Sources were fetched and their formats verified on 2026-10-04. Adopted now, as
+pinned reviewed snapshots:
+
+- RIS peer counts, already in the pinned dumps (`<origin> <prefix> <seen by #rispeers>`).
+- RPKI payloads: `https://rpki.cloudflare.com/rpki.json` and
+  `https://console.rpki-client.org/vrps.json` (integer or `AS`-prefixed ASNs,
+  AS0 payloads present), routinator CSV, and the publisher-hashed RIPE NCC daily
+  archive `https://ftp.ripe.net/rpki/<ta>.tal/YYYY/MM/DD/roas.csv.xz`.
+- Tor: `https://check.torproject.org/exit-addresses` (TorDNSEL `ExitAddress`
+  lines, the measured egress) and the bulk list; CollecTor archives are CC0.
+- Operator-published egress geofeeds: Apple iCloud Private Relay
+  `https://mask-api.icloud.com/egress-ip-ranges.csv` (about 285,000 rows) and
+  Cloudflare WARP `https://api.cloudflare.com/local-ip-ranges.csv`, both RFC 8805
+  CSV, usable as `vpn` lists after review.
+
+Assessed and deferred, with the reason:
+
+- Cloud prefix publications (AWS `ip-ranges.json`, Google `cloud.json`, Azure
+  service tags, Oracle, DigitalOcean/Linode/Vultr geofeeds, Cloudflare and
+  Fastly edge lists) are authoritative hosting evidence but only change a
+  Quality outcome where a cloud prefix is originated by a reviewed subscriber
+  ASN; unknown space is already excluded. Worth ingesting as `hosting` prefix
+  evidence once the catalog's positive coverage makes that overlap measurable.
+- Spamhaus DROP/ASN-DROP (free, credit required) is a small high-precision
+  negative list; add when a `hosting`/`proxy` address-list category policy is
+  reviewed for it.
+- APNIC Labs per-ASN user estimates (`https://stats.labs.apnic.net/cgi-bin/aspop?cc=XX&ff=2`,
+  attribution required), bgp.tools `asns.csv` class and `dsl`/`mobile`/`vpn`/`vpsh`
+  tags, PeeringDB `info_types` (operational use only, no bulk redistribution),
+  Stanford ASdb (bulk download now login-gated; per-ASN API open), Cloudflare
+  Radar top ASes, and Steam per-country network rankings are discovery inputs
+  for the review queue. APNIC counts spuriously credit VPN egress ASNs and are
+  weak in RU, BR, JP, PL, KR and CN; none of them is reviewed subscriber proof.
+- CAIDA AS classification is retired with download access removed. Rapid7 and
+  OpenINTEL reverse-DNS datasets are access-gated; reverse-DNS naming
+  heuristics would require our own PTR resolution and misclassify static
+  business subscribers.
+- Regulator joins beyond Brazil: LACNIC RDAP registrant handles are national
+  legal identifiers (CNPJ confirmed for BR; NIT/RFC/CUIT/RUT to verify), which
+  can bridge Colombia's Postdata `ID_EMPRESA` and similar files; JPNIC publishes
+  an ASN list; FCC BDC, CRTC, Ofcom, ARCEP, BNetzA, AGCOM, CNMC, CRT and TRAI
+  publications carry no ASN and need name bridges.
+- MaxMind Enterprise/Anonymous IP/Residential Proxy, IPinfo and ipapi remain
+  licensed inputs with the handling described in the matrix below.
+
+### Measurements
+
+All figures are from the 2026-10-04 10:03 UTC RIS IPv4 dump, the deployed
+GeoLite2 release and today's Cloudflare RPKI export.
+
+| Measurement | Value |
+| --- | --- |
+| Prefix/origin pairs; seen by one peer; by two | 1,270,431; 68,342; 28,329 |
+| Address space in standalone routes under 10 peers, with no covering route | 0.65% |
+| Address space in routes under 10 peers whose covering route has a different origin set | 0.34% |
+| Routes under 10 peers that inherit an identically originated visible aggregate | 82,426 |
+| Routes RPKI-invalid; of which inside a valid identically originated aggregate | 42,355; 24,200 |
+| Sample of 127 eyeball ASNs: routed IPv4 outside the stated country, excluding the two misidentified entries | under 1% each; Orange FR 3.2% (overseas departments), Sky GB 9.3% (Ireland) |
+| Misidentified sample entries flagged by the audit | 2 of 2 |
+
+The two misidentified entries were AS36874 and AS37282, stated as NG and KE and
+routed 100% in ZA and 89% in NG. The sample catalog is a measurement fixture,
+not a reviewed catalog.
+
+### Builder changes
+
+`augment-subscribers` now reads peer counts, resolves visibility and RPKI
+validity with aggregate and sibling-ASN inheritance, withholds the positive
+inference below `minimum_origin_peers` (default 10) or for an invalid origin,
+withholds it at GeoLite cells outside the identified operators' reviewed
+countries under `origin_country_policy` with `--geolite2`, and applies
+`address_risk_sources` at exact addresses with independent risk. Withheld
+decisions preserve the base state and record the identity, peers, validity and
+reason. The manifest binds every new input and counts withheld partitions by
+reason, RPKI validity and applied address entries. `audit-subscriber-catalog`
+produces the per-operator consistency report and per-country review queue. The
+record schema remains `classifier_version: 1`, `quality_policy_version: 2`;
+the runtime decoder ignores the additive fields and needs no change. Existing
+catalogs build unchanged except for the default visibility floor, which the
+manifest records.
+
+The follow-up the same day made the catalog revision mechanical.
+`refresh-subscriber-evidence` pins all five public snapshots, and the two
+opt-in relay geofeeds, into a validated catalog in 16 seconds. The audit
+gained NRO registry-holder sibling detection and nested-route merge
+candidates: on the measurement fixture it surfaced 55 unreviewed Comcast
+regional ASNs under one ARIN holder, Airtel's four unlisted APNIC siblings,
+and 55 merge candidates led by Charter (AS22394 under AS6167, 3,818 routes),
+AT&T (AS20057 under AS7018), KT/LG (AS3786 under AS4766) and the Orange
+ES/Jazztel nesting (325 routes, 311 below the floor, no shared holder because
+they are distinct RIPE holders). These are catalog suggestions; the build
+reads neither registry data nor merge candidates.
+
+Package, race and vet checks pass. The real-data audit over today's table ran
+in 20 seconds for 129 operators. A full augmentation of a local policy-two base
+built from the 2026-02-18 ARIN snapshot (6,843,456 base leaves) with the
+129-operator measurement fixture, today's RIS, Cloudflare RPKI and Tor exit
+snapshots and the reviewed-country policy completed in 178 seconds at about
+5.4 GB resident: 7,269,483 emitted partitions, 3,867,522 inferred, 2,317
+withheld for visibility, 60 for an invalid origin, 4,216 cells withheld outside
+reviewed countries, and 1,398 Tor exit addresses excluded with risk. Spot
+readback confirmed a Tor exit excluded at its /32 with the adjacent address
+unchanged, a Cox /24 geolocated in GB and an Akamai on-net block inside Telkom
+Indonesia withheld with their identity recorded, the single-peer `3.0.0.0/8`
+announcement never inferred, and ordinary Comcast and Free addresses inferred
+with their peer counts and validity. This is a local builder qualification with
+a measurement fixture; no production catalog, resource or Main selection was
+changed.
+
 ## 2026-10-04 subscriber coverage correction
 
 The Root-owned Main receipts supersede the historical inactive-candidate
@@ -272,8 +407,8 @@ business connection, MVNO or hosting ASN is a proxy.
 | --- | --- | --- | --- |
 | Direct delegated organization | ARIN bulk Whois and RDAP provide the allocation/reassignment hierarchy; [ARIN's guide](https://www.arin.net/resources/registry/reassignments/) explains direct allocation versus reallocation/reassignment. | A registry relationship is administrative. Smaller delegations may not be reported; residential records have special reporting rules. A child can change use independently of its parent. | **Implemented:** direct-owner precedence, no inherited subscriber allow for unreviewed children, and conflict exclusion. Positive service evidence still requires review. Foreign-RIR/customer ingestion is deferred; ARIN referrals never manufacture that authority. |
 | Reassignment and leased address space | The same registry hierarchy, corroborated by the lessor's own exact-handle instructions, is available now. IPXO explicitly names `IL-845` as its reallocation destination. | Leasing can serve legitimate access, business networks, hosting or proxies. The lessor does not establish every lessee's use. Unreported subleases can remain invisible. | **Implemented:** the IPXO identity is Quality-only excluded pending specific reviewed access. **Not implemented:** treating every lessor or its ASN as hard risk. IPXO evidence does not meet the proxy-risk criterion by itself. |
-| Origin ASN | A current routing collector establishes observed origin; [GeoLite ASN](https://dev.maxmind.com/geoip/docs/databases/asn/) supplies downloadable IP-to-AS-number/name data. These have different authority and freshness. | A single ASN can carry consumer access, business access, leased blocks and proxies. The registered organization, origin operator and endpoint user can differ. | **Deferred:** snapshot an origin input with time and hash, then use changes or conflicts to queue review. Neither ASN branding nor routing through an access ISP can allow Quality or clear risk. A global ASN deny needs exact independent use evidence. |
-| RPKI/ROA | [ARIN RPKI](https://www.arin.net/resources/manage/rpki/) supports cryptographic prefix-origin authorization; a validated, time-bound VRP snapshot is deployable. | Route authorization proves neither subscriber use nor the absence of proxies. Invalid/unknown validation can also be an operational routing issue, not anonymizer evidence. | **Deferred:** corroboration and change detection only. No proxy risk or subscriber allow from RPKI state alone; no validator/feed is added here. |
+| Origin ASN | A current routing collector establishes observed origin; [GeoLite ASN](https://dev.maxmind.com/geoip/docs/databases/asn/) supplies downloadable IP-to-AS-number/name data. These have different authority and freshness. | A single ASN can carry consumer access, business access, leased blocks and proxies. The registered organization, origin operator and endpoint user can differ. | **Implemented** by `augment-subscribers` with pinned RIS snapshots, reviewed operator identities, a peer-visibility floor and reviewed-country withholding (2026-10-04). Neither ASN branding nor routing through an access ISP can allow Quality or clear risk. |
+| RPKI/ROA | [ARIN RPKI](https://www.arin.net/resources/manage/rpki/) supports cryptographic prefix-origin authorization; a validated, time-bound VRP snapshot is deployable. | Route authorization proves neither subscriber use nor the absence of proxies. Invalid/unknown validation can also be an operational routing issue, not anonymizer evidence. | **Implemented** as a withholding discriminator over pinned rpki-client/routinator exports (2026-10-04). No proxy risk or subscriber allow follows from RPKI state; an invalid more-specific under the same operator's valid aggregate is not withheld. |
 | Operator prefix publications | [AWS publishes JSON](https://docs.aws.amazon.com/vpc/latest/userguide/aws-ip-ranges.html); [Google distinguishes cloud customer ranges from broader Google service ranges](https://docs.cloud.google.com/vpc/docs/configure-private-google-access#ip-addr-defaults). Public TLS downloads are available. | AWS documents incomplete service coverage and missing BYOIP ranges. A broad corporate/service list is not equivalent to hosted customer egress, and cloud is not automatically proxy risk. | **Deferred ingestion; reviewed prefix rules already supported.** Prefer service-scoped cloud customer prefixes as Quality exclusions. Add input hashes, publication times, refresh/expiry, overlap checks and release diffs before automating; never infer clean access from absence. |
 | Commercial user type | [GeoIP Enterprise](https://dev.maxmind.com/geoip/docs/databases/enterprise/) provides `user_type`, including `business`, `residential`, `hosting`, `consumer_privacy_network` and other classes. | A vendor's user label is not a guarantee of individual endpoint use. Residential and business access can also carry proxy traffic; omitted/unknown classes are ambiguous. GeoLite City does not supply this field. | **Recommended deferred licensed input** for broader affirmative coverage. Ingest exact prefix labels with database generation/hash and freshness limits; shadow false inclusions against direct-owner/use evidence and current proxy data before treating reviewed residential/business labels as supporting subscriber evidence. Never let a positive type override independent risk. |
 | Commercial connection type | [GeoIP Connection Type](https://dev.maxmind.com/geoip/docs/databases/connection-type/) supplies `Cable/DSL`, `Cellular`, `Corporate` and `Satellite`; Enterprise also includes connection type. | Transport/access category does not establish that a particular endpoint is a residential or business subscriber, or exclude a proxy on the same access network. `Corporate` is not an automatic business-subscriber allow. | **Recommended deferred licensed corroboration.** Require licensed snapshots, freshness and missing-value handling; combine with reviewed user type/ownership and anonymizer evidence. Do not infer these fields from GeoLite location data, reverse DNS or ISP branding. |

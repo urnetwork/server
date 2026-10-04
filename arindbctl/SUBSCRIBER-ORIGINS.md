@@ -18,8 +18,13 @@ The output preserves registration facts and adds auditable origin evidence.
 arindbctl augment-subscribers \
   --source /path/to/unaugmented-registration/arin.mmdb \
   --rules /path/to/reviewed-operators/catalog.yml \
+  --geolite2 /path/to/GeoLite2-City.mmdb \
   --output /path/to/new-subscriber-resource
 ```
+
+`--geolite2` is required when, and only when, the catalog declares
+`origin_country_policy`. Use the GeoLite release the registration base was
+built with.
 
 The source must be a complete policy-two database without prior origin
 augmentation. Always rebuild from that registration base when refreshing an
@@ -37,6 +42,8 @@ example operator below are illustrative and must never be deployed.
 ```yaml
 version: 1
 policy: identified-subscriber-default
+minimum_origin_peers: 10
+origin_country_policy: withhold-outside-reviewed-countries
 origin_sources:
   - id: ris-ipv4-20261004
     url: https://www.ris.ripe.net/dumps/riswhoisdump.IPv4.gz
@@ -44,6 +51,32 @@ origin_sources:
     sha256: REPLACE_WITH_EXACT_64_CHARACTER_SHA256
     observed_at: 2026-10-04T02:03:14Z
     expires_at: 2026-10-06T02:03:14Z
+rpki_sources:
+  - id: rpki-client-20261004
+    url: https://rpki.cloudflare.com/rpki.json
+    file: sources/rpki.json.gz
+    sha256: REPLACE_WITH_EXACT_64_CHARACTER_SHA256
+    observed_at: 2026-10-04T15:31:47Z
+    expires_at: 2026-10-06T15:31:47Z
+    format: rpki-client-json
+registry_sources:
+  - id: nro-delegated-stats-20261004
+    url: https://ftp.ripe.net/pub/stats/ripencc/nro-stats/latest/nro-delegated-stats
+    file: sources/nro-delegated-stats.gz
+    sha256: REPLACE_WITH_EXACT_64_CHARACTER_SHA256
+    observed_at: 2026-10-04T16:00:00Z
+    expires_at: 2026-10-06T16:00:00Z
+    format: nro-delegated-stats
+address_risk_sources:
+  - id: tor-exit-addresses-20261004
+    url: https://check.torproject.org/exit-addresses
+    file: sources/exit-addresses
+    sha256: REPLACE_WITH_EXACT_64_CHARACTER_SHA256
+    observed_at: 2026-10-04T15:00:00Z
+    expires_at: 2026-10-06T15:00:00Z
+    format: tor-exit-addresses
+    category: tor
+    reason: measured Tor exit egress addresses from the official TorDNSEL export
 operators:
   - id: stable-reviewed-operator-id
     name: Reviewed Subscriber Operator
@@ -52,6 +85,45 @@ operators:
     source: https://operator.example/subscriber-service https://registry.example/asn-identity
     countries: [US]
 ```
+
+`minimum_origin_peers` is the number of RIS peers a subscriber-only route must
+be seen by before it is inferred; it defaults to 10 and must be at least 1.
+`origin_country_policy` is optional; its only value withholds an inference
+where the associated GeoLite country is outside every identified operator's
+`countries`. `rpki_sources` accept `rpki-client-json` (rpki-client and
+Cloudflare `rpki.json`, integer or `AS`-prefixed ASNs) and `routinator-csv`
+(routinator `csv`/`csvext` and the RIPE NCC daily archive, matched by the
+`ASN`, `IP Prefix` and `Max Length` header names). `address_risk_sources`
+accept `tor-exit-addresses` (TorDNSEL `ExitAddress` lines),
+`rfc8805-geofeed` (first CSV column) and `address-list` (one address or prefix
+per line), each with one reviewed category among `tor`, `proxy`, `vpn` and
+`virtual_isp` and a reason. `registry_sources` accept the NRO extended
+delegated statistics (`nro-delegated-stats`); only the audit reads them. Every
+snapshot may be gzip-compressed; the pinned file is hashed as stored, and its
+freshness window is at most 48 hours. List every sibling ASN of one operator
+under the same operator ID; the audit's merge candidates show where that was
+missed.
+
+## Refreshing evidence
+
+```sh
+arindbctl refresh-subscriber-evidence \
+  --rules /path/to/previous/catalog.yml \
+  --output /path/to/new-catalog-directory
+```
+
+The refresh downloads the RIS IPv4 and IPv6 dumps, the Cloudflare rpki-client
+export, the Tor exit-address export and the NRO delegated statistics over
+HTTPS without following redirects, bounds each body, validates it with the
+same reader the build uses, stores the JSON and statistics gzipped under
+`sources/`, and writes `catalog.yml` with the previous catalog's operators,
+visibility floor and country policy and the freshly pinned stanzas. RIS
+observation times are the dumps' own generation headers; the others are the
+fetch time. Without `--rules` it writes an `evidence.yml` fragment instead.
+`--relay-geofeeds` additionally pins the Apple Private Relay and Cloudflare
+egress geofeeds as `vpn` lists; include them only after reviewing that
+category. The written file is reloaded and rehashed before publication, and
+the manifest records every snapshot hash and the fetch time.
 
 Each operator needs a unique stable ID, reviewed name, distinct public ASNs,
 nonempty evidence source, known country codes, and one of `subscriber`,
@@ -101,6 +173,14 @@ for an identified ISP. Native IPv6 outside those aliases remains supported.
 | Subscriber identity plus an unidentified competing origin | Ambiguous |
 | Any explicit hosting, transit, proxy or other negative use | Excluded |
 | Missing child/service-purpose detail inside identified ISP | Subscriber, inferred |
+| Subscriber identity seen by fewer peers than the floor, without an identically originated visible aggregate | Unknown, withheld `insufficient-origin-visibility` |
+| Subscriber identity whose origin is RPKI-invalid, without a valid identically originated aggregate | Unknown, withheld `rpki-invalid-origin` |
+| Inferred subscriber whose GeoLite country is outside the operators' reviewed countries | Unknown at that cell, withheld `outside-reviewed-countries` |
+| Exact address on a reviewed Tor, proxy, VPN or virtual-ISP list | Excluded with independent network risk |
+
+A withheld decision records the identity for review and never changes the base
+state, so a reviewed direct registration approval survives it. Vetoes are
+never withheld. Each withheld reason is counted in the manifest.
 
 An existing registration exclusion or actual conflict is preserved. A known
 negative origin can veto an existing reviewed subscriber approval. Proxy,
@@ -109,13 +189,43 @@ hosting/transit evidence alone does not invent geographic or security risk.
 No inferred approval clears any existing geographic or network risk.
 
 Known origin decisions add `origin_use_state`, `origin_asns`,
-`origin_operator_ids` and `origin_evidence_source`. New positive inferences add
+`origin_operator_ids`, `origin_evidence_source`, `origin_peers` and, with RPKI
+payloads, `origin_rpki_validity`; withheld decisions add
+`origin_withheld_reason`. Address-level findings add
+`address_risk_source_ids`. New positive inferences add
 `subscriber_evidence_kind: isp_inferred` and the classification rule
 `identified-subscriber-isp-default`. Direct allocation approvals retain their
 existing evidence. Runtime policy version two remains compatible: `subscriber`
 means the subscriber condition passed under the selected policy, including
 the explicit inference. It is not proof that an individual device is free of
 undetected proxy use; the independent risk and provider-health gates still apply.
+
+## Catalog audit
+
+```sh
+arindbctl audit-subscriber-catalog \
+  --rules /path/to/reviewed-operators/catalog.yml \
+  --geolite2 /path/to/GeoLite2-City.mmdb \
+  --output /path/to/catalog-audit
+```
+
+The audit reads the same pinned catalog, routes, payloads and geography as a
+build and writes `catalog-audit.json` with a manifest binding every input. For
+each operator it reports observed routes, routed IPv4 addresses and IPv6 /48
+networks, the IPv4 share per associated country, the share outside the
+operator's reviewed countries, routes below the visibility floor, RPKI-invalid
+routes, routes shared with other reviewed operators, and ASNs that originate
+nothing. An operator whose routed space is at least half outside its reviewed
+countries is flagged `identity-review-suggested`; on the 2026-10-04 sample this
+flagged exactly the two deliberately misidentified entries. With a registry
+source it adds each operator's registry holder ids, sibling ASNs that are
+unreviewed or listed under another operator, and `operator_merge_candidates`:
+pairs sharing a holder, and pairs where one operator's routes are
+more-specifics under the other's aggregates, with how many of those sit below
+the visibility floor. The report also lists, per associated country, the
+thirty unreviewed origin ASNs with the most routed IPv4 space. That queue is prioritization by address weight, which
+over-represents hosting and transit; it is not a subscriber ranking and never
+an approval.
 
 ## Country and state/province research coverage
 
@@ -141,8 +251,11 @@ classification path.
 The focused controls cover missing child purpose, unknown origins, a narrower
 unidentified origin, mixed-origin ambiguity, explicit hosting/transit/proxy
 vetoes, same-ASN contrary use, retained geographic/network risk, global IPv4/IPv6
-coverage, immutable base metadata, source corruption, freshness and stale
-augmentation rejection. Independent full package, race and vet checks qualify
+coverage, immutable base metadata, source corruption, freshness, stale
+augmentation rejection, visibility and validity withholding with aggregate and
+sibling-ASN inheritance, reviewed-country withholding at GeoLite cell
+boundaries, exact-address risk in every list format, both RPKI formats
+including AS0 payloads, and the audit's flags and review queue. Independent full package, race and vet checks qualify
 the implementation separately from each real catalog and full resource build.
 
 Before selecting a new resource, compare the complete candidate to the pinned
