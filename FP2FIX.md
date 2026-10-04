@@ -6767,3 +6767,35 @@ read and native admission bounds while privately joining selected long/blocker
 query IDs to bounded statement text. Truncated prefixes, absent statements and
 multiple variants remain unknown. No rejected reliability performance variant
 has been promoted, and provider coverage and slow-query ownership remain open.
+
+### 2026-10-04 15:38 UTC picker latency and native queue ownership
+
+The operator clarified that the blank picker waits too long for its API
+response. Initial GET and searched POST latency must therefore be measured
+separately from successful empty results. The legacy Quality-named location
+filter includes public online fallback; native Quality zero alone does not
+prove that this picker returned no locations. No subscriber, security, health,
+timeout or fallback predicate changes accompany the fixed phase observations.
+
+The adjacent typed-search metadata loader discarded failed pipeline commands.
+It now shares the existing candidate/filter read-error helper, including an
+earlier missing key masking a later failure and the expanded-parent pass.
+Genuine missing metadata retains the existing partial-result behavior. This
+error correction is independent of the unproved latency cause.
+
+The qualified native PgBouncer snapshot at 15:15 observed 26,502 queued clients
+across 32 instances, with no idle server connections. Three instances had zero
+active server connections and one login in progress. This is current queue
+pressure, without a request or backend-login cause join. A bounded successor
+classifies only recent current-process log tails and compares declared backend
+endpoint equality. It cannot replace source-qualified API route and pool
+observations. The native five-second PostgreSQL CPU observation at 15:38 was
+56.076 cores on 96 logical CPUs; that one interval is not sustained recovery.
+
+The picker phase change measures exclusive model residence and inflight calls
+while preserving the existing query, cache and policy behavior. Root continues
+the qualified deployment/measurement loop for dispatch-clock, profile client
+lifetime and the retention worker lane. Worker cleanup success is observed;
+API cleanup removal still requires its own release proof. Current quota
+coverage, successful provider traffic, picker latency and sustained database
+recovery remain open.

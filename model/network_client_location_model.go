@@ -4367,8 +4367,11 @@ func loadClientLocations(
 				v := pipe.Get(ctx, clientLocationKey(locationId))
 				clientLocationCmds[locationId] = v
 			}
-			// note ignore the error for GET since it will include missing key
-			pipe.Exec(ctx)
+			// Missing metadata is legitimate. A failed GET must not turn typed
+			// search into a successful partial or empty result.
+			if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
+				return err
+			}
 
 			for locationId, clientLocationCmd := range clientLocationCmds {
 				clientLocationBytes, _ := clientLocationCmd.Bytes()
@@ -4546,9 +4549,13 @@ func FindProviderLocations(
 ) (result *FindLocationsResult, returnErr error) {
 	surface := "search"
 	defer func() { providerPickerMetrics.observe(surface, result, returnErr) }()
+	observation := &providerPickerObservation{metrics: providerPickerMetrics, surface: surface}
+	defer observation.finish()
 	query := strings.TrimSpace(findLocations.Query)
 	if clientId, err := server.ParseId(query); err == nil {
 		surface = "direct"
+		observation.surface = surface
+		observation.enter("format_result")
 		device := &LocationDeviceResult{
 			ClientId:   clientId,
 			DeviceName: fmt.Sprintf("%s", clientId),
@@ -4565,6 +4572,7 @@ func FindProviderLocations(
 		}, nil
 	} else {
 		// note group search is no longer supported
+		observation.enter("caller_location")
 
 		rankMode := RankModeQuality
 		if findLocations.RankMode != "" {
@@ -4587,6 +4595,7 @@ func FindProviderLocations(
 		var matchDistances map[server.Id]int
 		var clientLocations map[server.Id]*ClientLocation
 		if query == "" {
+			observation.enter("initial_cache")
 			initialClientLocations, err := loadInitialClientLocations(session.Ctx)
 			if err != nil {
 				return nil, err
@@ -4600,6 +4609,7 @@ func FindProviderLocations(
 				clientLocations[clientLocation.LocationId] = clientLocation
 			}
 		} else {
+			observation.enter("search_index")
 			maxSearchDistance := 2
 			locationSearchResults := locationSearch().AroundIds(
 				session.Ctx,
@@ -4613,6 +4623,7 @@ func FindProviderLocations(
 				locationIds[locationId] = true
 			}
 			var err error
+			observation.enter("location_cache")
 			clientLocations, err = loadClientLocations(session.Ctx, locationIds)
 			if err != nil {
 				return nil, err
@@ -4629,6 +4640,7 @@ func FindProviderLocations(
 		}
 
 		// An absent entry excludes the location, so read errors must propagate.
+		observation.enter("filters")
 		locationStables, err := loadLocationStables(
 			session.Ctx,
 			slices.Collect(maps.Keys(clientLocations)),
@@ -4643,6 +4655,7 @@ func FindProviderLocations(
 		if locationStables == nil {
 			locationStables = map[server.Id]bool{}
 		}
+		observation.enter("format_result")
 
 		locationResults := []*LocationResult{}
 
@@ -4688,6 +4701,9 @@ func GetProviderLocations(
 	session *session.ClientSession,
 ) (result *FindLocationsResult, returnErr error) {
 	defer func() { providerPickerMetrics.observe("initial", result, returnErr) }()
+	observation := &providerPickerObservation{metrics: providerPickerMetrics, surface: "initial"}
+	defer observation.finish()
+	observation.enter("caller_location")
 	rankMode := RankModeQuality
 
 	// the caller ip is used to match against provider excluded lists
@@ -4705,6 +4721,7 @@ func GetProviderLocations(
 		glog.V(2).Infof("[GetProviderLocations] could not parse client ip: %s\n", err)
 	}
 
+	observation.enter("initial_cache")
 	initialClientLocations, err := loadInitialClientLocations(session.Ctx)
 	if err != nil {
 		return nil, err
@@ -4719,6 +4736,7 @@ func GetProviderLocations(
 	}
 
 	// An unavailable filter cannot be reported as an empty successful picker.
+	observation.enter("filters")
 	locationStables, err := loadLocationStables(
 		session.Ctx,
 		locationIds,
@@ -4733,6 +4751,7 @@ func GetProviderLocations(
 	if locationStables == nil {
 		locationStables = map[server.Id]bool{}
 	}
+	observation.enter("format_result")
 
 	locationResults := []*LocationResult{}
 	locationGroupResults := []*LocationGroupResult{}

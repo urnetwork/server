@@ -6316,12 +6316,46 @@ Read counts and outcome counts therefore must not be added or treated as the
 same-attempt denominator. Decode/WRONGTYPE, caller cancellation and client
 lifecycle errors do not by themselves prove a Redis service outage.
 
+Picker latency is a distinct boundary from empty results. The owning model
+also exposes `urnetwork_provider_picker_phase_seconds` (sum/count) and
+`urnetwork_provider_picker_phase_inflight`, with fixed `initial`, `search`,
+`direct` surfaces and `caller_location`, `initial_cache`, `search_index`,
+`location_cache`, `filters`, `format_result` phases. All children start at zero.
+Each request occupies one phase at a time; the final observation runs on
+success, error, cancellation and panic. Redis phases include the wrapper PING,
+connection acquisition, command/pipeline wait and decoding. Caller location
+includes the process-local country lookup; typed search has a separate local
+index phase. These are caller residence times, not Redis or PostgreSQL CPU.
+An inflight phase can locate a currently blocked call before it completes;
+completed sum/count alone cannot describe calls still blocked. Join the exact
+process/source and scrape clock before comparing intervals. A request's model
+outcome and its HTTP delivery are still different observations.
+
+Deterministic controls hold sixteen actual initial-picker filter pipelines at
+an explicit test-only barrier, then either release valid results or cancel the
+callers. They require the filter inflight gauge to hold all sixteen calls,
+the initial-cache gauge to be zero and every final gauge to unwind. Fake-clock
+controls verify exclusive durations and idempotent panic cleanup. This proves
+the diagnostic ownership and preserves error/missing-key semantics; it does
+not establish the cause or severity of a Main picker delay. Missing phase
+families from an older producer remain unknown. The existing route duration,
+inflight and timestamped maximum can provide latency evidence independently.
+
 The source-correctness boundary is fail-closed: a failed initial read must not
 become an empty successful GET; failed filters must not silently remove every
 location from GET or POST results. A genuine initial-cache miss returns an
 empty structure (including blank POST), not a nil dereference. No cache is
 cleared, no providers are invented, and score/health/country exclusion rules
 are unchanged.
+
+Typed-search location metadata and its expanded parent metadata now use the
+same command-by-command read-error boundary. Previously those two pipelines
+discarded both `Exec` and command errors, allowing a failed metadata read to
+return a successful partial or empty search. A missing key remains ordinary
+absence; WRONGTYPE, failed transport and cancellation remain errors. The
+owning search outcome records failure, while the existing `initial`/`filters`
+read counters keep their original narrower meaning. This adjacent correction
+does not explain a slow response without phase or transport evidence.
 
 One fixed query observes only configured permitted API host/block placements.
 It carries process instance and start value, raw source timestamps at now and
