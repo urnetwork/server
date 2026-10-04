@@ -21,6 +21,9 @@ type stProviderWorkAuthority struct {
 	Raw         []byte
 	Authority   payoutartifact.WholeWorkAuthority
 	Expectation payoutartifact.WholeWorkExpectation
+	// Only the checked operator/epoch identity is needed before payout signing.
+	// It binds signed source lookup without deriving a deployment from a hash.
+	Artifact *payoutartifact.Artifact
 }
 
 // Absence remains optional unknown. Returned authority must match the actual
@@ -57,7 +60,8 @@ func stLoadProviderWorkAuthority(ctx context.Context, cfg *StConfig, epoch *StPa
 	if authority.Domain != domain || authority.Start != start || authority.End != end || authority.RequestPublicKey != approver {
 		return nil, model.ErrProviderWorkConflict
 	}
-	return &stProviderWorkAuthority{Raw: raw, Authority: authority, Expectation: expected}, nil
+	artifact := &payoutartifact.Artifact{DeploymentID: cfg.DeploymentId, ChainID: cfg.ChainId, GenesisHash: common.Hash(cfg.GenesisHash).Hex(), Netuid: uint16(cfg.Netuid), Coordinator: cfg.ContractAddress, SettlementVault: cfg.SettlementVault, Epoch: epoch.Epoch, NoID: cfg.NoId, PolicyHash: common.Hash(epoch.PolicyHash).Hex(), Start: start, End: end, Signer: crypto.PubkeyToAddress(cfg.ArtifactKey.PublicKey)}
+	return &stProviderWorkAuthority{Raw: raw, Authority: authority, Expectation: expected, Artifact: artifact}, nil
 }
 
 // Add explicit zero rows only from an independently signed prospective roster.
