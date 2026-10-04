@@ -186,8 +186,8 @@ func TestStContractUsageExpirySerializesRealReports(t *testing.T) {
 }
 
 // A recent authenticated report withdraws an old creation-time candidate.
-// Filtering before LIMIT also prevents that active contract from hiding the
-// next genuinely idle contract in every task iteration.
+// Bounded raw pages advance through that active contract so the next genuinely
+// idle contract is reachable without repeating the same first page.
 func TestStContractUsageExpiryQuietPeriodAndScanAdmission(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
@@ -218,15 +218,26 @@ func TestStContractUsageExpiryQuietPeriodAndScanAdmission(t *testing.T) {
 				t.Fatalf("fresh report ignored after candidate selection: %+v, %v", state, err)
 			}
 		})
-		count, err := ForceCloseOpenContractIds(ctx, cutoff, 1, 1, 0, 0)
-		if err != nil || count != 1 {
-			t.Fatalf("active candidate starved idle contract: %d, %v", count, err)
+		count, cursor, err := ForceCloseOpenContractIdsPage(ctx, cutoff, 1, 1, 0, 0, nil)
+		if err != nil || count != 0 || cursor == nil || cursor.Open == nil || cursor.Open.ContractId != ids[0] {
+			t.Fatalf("recent report page did not preserve its continuation: count=%d, cursor=%+v, err=%v", count, cursor, err)
 		}
 		if _, closed := GetContractClose(ctx, ids[0]); closed {
 			t.Fatal("recent report contract was retired")
 		}
+		if _, closed := GetContractClose(ctx, ids[1]); closed {
+			t.Fatal("one raw page exceeded its candidate bound")
+		}
+		scanBefore := cursor.ScanBefore
+		count, cursor, err = ForceCloseOpenContractIdsPage(ctx, cutoff, 1, 1, 0, 0, cursor)
+		if err != nil || count != 1 || cursor == nil || cursor.Open == nil || cursor.Open.ContractId != ids[1] || !cursor.ScanBefore.Equal(scanBefore) {
+			t.Fatalf("active candidate starved next idle page: count=%d, cursor=%+v, err=%v", count, cursor, err)
+		}
 		if _, closed := GetContractClose(ctx, ids[1]); !closed {
 			t.Fatal("idle contract did not retire")
+		}
+		if count, next, err := ForceCloseOpenContractIdsPage(ctx, cutoff, 1, 1, 0, 0, cursor); err != nil || count != 0 || next != nil {
+			t.Fatalf("completed raw scan did not terminate: count=%d, next=%+v, err=%v", count, next, err)
 		}
 		// The exact cutoff is inclusive, and both recent-report directions
 		// use the same bound independently of the original creation time.
