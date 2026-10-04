@@ -149,7 +149,7 @@ func TestRaiseHttpErrorTaggedJoinedFailureThroughActualWrapper(t *testing.T) {
 	WrapNoAuth(func(clientSession *session.ClientSession) (string, error) {
 		defer clientSession.Cancel()
 		return "", fmt.Errorf("408 Upload canceled: %w", errors.Join(errors.New("native close failure"), context.Canceled))
-	}, response, request, func(string) bool { formatted = true; return true })
+	}, response, request, func(*session.ClientSession, string) bool { formatted = true; return true })
 	if response.Code != http.StatusRequestTimeout || formatted || response.Body.String() != "Upload canceled: native close failure\ncontext canceled\n" {
 		t.Fatalf("actual wrapper lost joined status: code=%d formatted=%t body=%q", response.Code, formatted, response.Body.String())
 	}

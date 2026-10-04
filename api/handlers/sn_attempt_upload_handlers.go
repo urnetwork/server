@@ -163,7 +163,7 @@ func serveSnAttemptUpload(w http.ResponseWriter, r *http.Request, loadStore func
 			return "", fmt.Errorf("408 Upload canceled: %w", err)
 		}
 		return contentHash, nil
-	}, w, r, func(contentHash string) bool {
+	}, w, r, func(_ *session.ClientSession, contentHash string) bool {
 		w.Header().Set("ETag", `"`+contentHash+`"`)
 		w.Header().Set("Content-Length", "0")
 		w.WriteHeader(http.StatusNoContent)
