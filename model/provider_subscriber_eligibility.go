@@ -5,8 +5,30 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/server"
 )
+
+var subscriberEligibilityEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_subscriber_eligibility_events_total",
+	Help: "Subscriber eligibility cache candidate events and SQL batch attempts; positive eligibility and successful requests are not cached or counted here.",
+}, []string{"event"})
+
+var subscriberEligibilityEventCounters = map[string]prometheus.Counter{}
+
+func init() {
+	for _, event := range []string{"negative_hit", "negative_miss", "coalesced_wait", "capacity_bypass", "fresh_reread", "sql_batch"} {
+		subscriberEligibilityEventCounters[event] = subscriberEligibilityEvents.WithLabelValues(event)
+	}
+	prometheus.MustRegister(subscriberEligibilityEvents)
+	providerSubscriberNegativeCache.observe = observeSubscriberEligibilityEvent
+}
+
+func observeSubscriberEligibilityEvent(event string, count int) {
+	if counter := subscriberEligibilityEventCounters[event]; counter != nil && count > 0 {
+		counter.Add(float64(count))
+	}
+}
 
 // Subscriber eligibility applies to the original Quality request, including
 // named providers, force_minimum, Speed borrowing and Online fallback. The
@@ -43,6 +65,7 @@ func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mo
 		server.Db(ctx, func(conn server.PgConn) {
 			for start := 0; start < len(pending); start += chunkSize {
 				chunk := pending[start:min(start+chunkSize, len(pending))]
+				observeSubscriberEligibilityEvent("sql_batch", 1)
 				rows, err := conn.Query(ctx, providerSubscriberExclusionsSql, chunk, server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout))
 				if err != nil {
 					readErr = err

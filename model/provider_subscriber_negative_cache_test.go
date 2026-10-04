@@ -2,7 +2,9 @@ package model
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -175,6 +177,8 @@ func TestSubscriberNegativeCacheResetDiscardsFactsAndOldFlights(t *testing.T) {
 func TestSubscriberNegativeCacheCapacityAndCanceledCaller(t *testing.T) {
 	_, now := subscriberCacheTestClock()
 	c := newSubscriberNegativeCache(2, now)
+	events := map[string]int{}
+	c.observe = func(event string, count int) { events[event] += count }
 	ids := []server.Id{{1}, {2}, {3}}
 	read := func(_ context.Context, requested []server.Id) (map[server.Id]bool, error) {
 		if len(c.flights) > 2 {
@@ -187,7 +191,7 @@ func TestSubscriberNegativeCacheCapacityAndCanceledCaller(t *testing.T) {
 		return negative, nil
 	}
 	got, err := c.lookup(t.Context(), ids, read)
-	if err != nil || len(got) != 3 || len(c.negative) != 2 || len(c.expiry) != 2 {
+	if err != nil || len(got) != 3 || len(c.negative) != 2 || len(c.expiry) != 2 || events["capacity_bypass"] != 1 || events["negative_miss"] != 3 {
 		t.Fatal("capacity limited the result instead of only cache memory", err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -201,16 +205,95 @@ func TestSubscriberNegativeCachePanicReleasesFlight(t *testing.T) {
 	_, now := subscriberCacheTestClock()
 	c := newSubscriberNegativeCache(8, now)
 	id := server.Id{1}
-	func() {
+	started, release, entered := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	c.observe = func(event string, _ int) {
+		if event == "coalesced_wait" {
+			close(entered)
+		}
+	}
+	panicked := make(chan bool, 1)
+	go func() {
 		defer func() {
-			if recover() == nil {
-				t.Fatal("read panic was swallowed")
-			}
+			panicked <- recover() != nil
 		}()
-		_, _ = c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id) (map[server.Id]bool, error) { panic("synthetic") })
+		_, _ = c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id) (map[server.Id]bool, error) {
+			close(started)
+			<-release
+			panic("synthetic acquisition failure")
+		})
 	}()
+	<-started
+	follower := make(chan error, 1)
+	go func() {
+		_, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id) (map[server.Id]bool, error) {
+			return nil, errors.New("unexpected follower read")
+		})
+		follower <- err
+	}()
+	<-entered
+	close(release)
+	if !<-panicked {
+		t.Fatal("read panic was swallowed")
+	}
+	select {
+	case err := <-follower:
+		if !errors.Is(err, errSubscriberReadIncomplete) {
+			t.Fatal("panic did not fail the waiting reader", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("panic left a waiting reader blocked")
+	}
 	if len(c.flights) != 0 || len(c.negative) != 0 {
 		t.Fatal("panic left a live flight or negative fact")
+	}
+}
+
+func TestSubscriberNegativeCacheCanceledOwnerReleasesFlight(t *testing.T) {
+	_, now := subscriberCacheTestClock()
+	c := newSubscriberNegativeCache(8, now)
+	id := server.Id{1}
+	started, entered := make(chan struct{}), make(chan struct{})
+	c.observe = func(event string, _ int) {
+		if event == "coalesced_wait" {
+			close(entered)
+		}
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	owner, follower := make(chan error, 1), make(chan error, 1)
+	go func() {
+		_, err := c.lookup(ctx, []server.Id{id}, func(ctx context.Context, _ []server.Id) (map[server.Id]bool, error) {
+			close(started)
+			<-ctx.Done()
+			return map[server.Id]bool{id: true}, ctx.Err()
+		})
+		owner <- err
+	}()
+	<-started
+	go func() {
+		_, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id) (map[server.Id]bool, error) {
+			return nil, errors.New("unexpected follower read")
+		})
+		follower <- err
+	}()
+	<-entered
+	cancel()
+	for _, done := range []chan error{owner, follower} {
+		select {
+		case err := <-done:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatal("canceled read did not release its waiter", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("cancellation left a waiting reader blocked")
+		}
+	}
+	if len(c.flights) != 0 || len(c.negative) != 0 {
+		t.Fatal("canceled partial result entered the cache")
+	}
+	got, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id) (map[server.Id]bool, error) { return nil, nil })
+	if err != nil || got[id] {
+		t.Fatal("canceled owner poisoned a subsequent eligible read", err)
 	}
 }
 
@@ -285,4 +368,116 @@ func BenchmarkSubscriberNegativeCacheWarm256(b *testing.B) {
 		b.Fatal("warm negatives reached the reader")
 	}
 	b.ReportMetric(float64(calls.Load()-1)/float64(b.N), "reads/op")
+}
+
+func subscriberCachePopulationId(n int) server.Id {
+	var id server.Id
+	binary.LittleEndian.PutUint64(id[:8], uint64(n+1))
+	return id
+}
+
+func TestSubscriberNegativeCacheRandomOverlapEvictionAndExpiry(t *testing.T) {
+	clock, now := subscriberCacheTestClock()
+	c := newSubscriberNegativeCache(4096, now)
+	events := map[string]int{}
+	c.observe = func(event string, count int) { events[event] += count }
+	rng := rand.New(rand.NewSource(1))
+	reads, readCandidates, requestedCandidates := 0, 0, 0
+	read := func(_ context.Context, ids []server.Id) (map[server.Id]bool, error) {
+		reads++
+		readCandidates += len(ids)
+		negative := make(map[server.Id]bool)
+		for _, id := range ids {
+			// Some candidates remain eligible; they must always be read again.
+			if binary.LittleEndian.Uint64(id[:8])%1000 != 0 {
+				negative[id] = true
+			}
+		}
+		return negative, nil
+	}
+	for batch := range 512 {
+		if batch%128 == 0 {
+			clock.Add(time.Second.Nanoseconds())
+		}
+		ids := make([]server.Id, 256)
+		unique := map[server.Id]bool{}
+		for i := range ids {
+			population := 85000
+			if i%2 == 0 {
+				population = 1024 // An overlapping hot subset plus broad cold work.
+			}
+			ids[i] = subscriberCachePopulationId(rng.Intn(population))
+			unique[ids[i]] = true
+		}
+		requestedCandidates += len(unique)
+		got, err := c.lookup(t.Context(), ids, read)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for id := range unique {
+			if got[id] != (binary.LittleEndian.Uint64(id[:8])%1000 != 0) {
+				t.Fatal("random overlap changed eligibility")
+			}
+		}
+		if len(c.negative) > c.capacity || len(c.expiry) != len(c.negative) || len(c.flights) != 0 {
+			t.Fatal("cold population exceeded cache bounds or retained a flight")
+		}
+	}
+	if events["negative_hit"] == 0 || events["negative_miss"] == 0 ||
+		events["negative_hit"]+events["negative_miss"] != requestedCandidates ||
+		events["negative_miss"] != readCandidates || readCandidates >= requestedCandidates {
+		t.Fatal("random overlap counters do not describe candidate reads")
+	}
+	// A cold member in each request still causes a SQL batch: candidate hits
+	// cannot be presented as the same reduction in completed SQL calls.
+	if reads != 512 {
+		t.Fatal("synthetic cold work unexpectedly avoided a reader batch", reads)
+	}
+	t.Logf("requests=%d requested_candidates=%d read_candidates=%d hits=%d capacity=%d", reads, requestedCandidates, readCandidates, events["negative_hit"], c.capacity)
+}
+
+func BenchmarkSubscriberNegativeCacheRandomPopulation256(b *testing.B) {
+	for _, hotHalf := range []bool{false, true} {
+		name := "uniform_85000"
+		if hotHalf {
+			name = "half_hot_1024"
+		}
+		b.Run(name, func(b *testing.B) {
+			clock, now := subscriberCacheTestClock()
+			c := newSubscriberNegativeCache(subscriberNegativeCapacity, now)
+			rng := rand.New(rand.NewSource(2))
+			reads, candidates := 0, 0
+			read := func(_ context.Context, ids []server.Id) (map[server.Id]bool, error) {
+				reads++
+				candidates += len(ids)
+				negative := make(map[server.Id]bool, len(ids))
+				for _, id := range ids {
+					negative[id] = true
+				}
+				return negative, nil
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for batch := 0; batch < b.N; batch++ {
+				// Thirty batches per process per second approximates a distributed
+				// several-hundred-batch fleet. This is a workload control, not a
+				// claim about Main's candidate distribution or wall-clock load.
+				clock.Add((time.Second / 30).Nanoseconds())
+				ids := make([]server.Id, 256)
+				for i := range ids {
+					population := 85000
+					if hotHalf && i%2 == 0 {
+						population = 1024
+					}
+					ids[i] = subscriberCachePopulationId(rng.Intn(population))
+				}
+				if _, err := c.lookup(b.Context(), ids, read); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.StopTimer()
+			b.ReportMetric(float64(reads)/float64(b.N), "reads/op")
+			b.ReportMetric(float64(candidates)/float64(b.N), "candidates/op")
+		})
+	}
 }
