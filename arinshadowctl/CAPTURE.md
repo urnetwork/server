@@ -230,6 +230,32 @@ prefix rule still needs affirmative residential/business subscriber evidence,
 proxy/virtual exclusion checks, rebuild/readback and another complete shadow.
 Attribution truncation never changes the provider/native denominators.
 
+`origin_connection_counts` complements registration attribution with the
+candidate record's public origin ASN set and its reviewed `use_state`. It retains
+unknown origin identities across RIR regions. Each qualified connection belongs
+to at most one set; a multiple-origin route is not attributed to an arbitrary
+single operator. Counters show the final subscriber/excluded/unknown/ambiguous
+classification and independent risk alongside that routing identity.
+Sets have at most eight strictly increasing, distinct ASNs. Missing, malformed
+or larger sets increment `origin_unattributed_connections`; the aggregate keeps
+at most 4,096 distinct sets and counts additional connections separately in
+`origin_overflow_connections`. Existing sets still accumulate exact counts after
+that bound. The sorted output is the retained groups ordered by observed
+connections, not proof of a complete global top-ASN list when overflow exists.
+All source, provider, native-membership and eligibility denominators remain
+unchanged. Old resources or owner binaries may lack this optional attribution.
+Use the current coordinator with owners exposing the added reply field; an old
+strict coordinator rejects new owner replies.
+
+Join unknown ASN sets to the pinned catalog and official RIR/operator sources
+to prioritize missing identity and subscriber-service reviews. Preserve mixed
+origins and contrary-use evidence during that research. Record verified regional
+service footprints and ranking evidence separately; connection counts do not
+prove market share, customer location or subscriber use. Then rebuild from the
+unaugmented base and compare a fresh complete provider capture. The origin
+snapshot manifest provides provenance for unknown routing identities; this
+aggregate adds neither implicit subscriber approvals nor network-risk flags.
+
 The supported Main capacity control covers100001 real PG providers/105001
 connections,20 real Connect Unix endpoints behind4 real child multiplexers,
 and the selected native publisher, with a strict2-bridge pool. It injects150ms

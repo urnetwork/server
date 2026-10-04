@@ -73,6 +73,7 @@ func TestArinRegistrationActualDecoderPreservesClassificationAndAmbiguity(t *tes
 func TestArinCaptureMaximumRegistrationWireFits(t *testing.T) {
 	now := time.Now().UTC()
 	row := arinShadowCaptureWireRow{ConnectionId: NewId(), ClientId: NewId(), HandlerId: NewId(), ActualAt: now, ObservedAt: now, CapturedAt: now, State: "ambiguous", Reason: "qualified", Registration: newArinShadowRegistration(strings.Repeat("A", 64), strings.Repeat("N", 64), strings.Repeat("C", 64), strings.Repeat("R", 64))}
+	row.Origin = newArinShadowOrigin([]uint32{4294967288, 4294967289, 4294967290, 4294967291, 4294967292, 4294967293, 4294967294, 4294967295}, "subscriber")
 	reply := arinShadowCaptureRPCReply{Rows: make([]arinShadowCaptureWireRow, ArinShadowCaptureBatchLimit)}
 	for i := range reply.Rows {
 		reply.Rows[i] = row

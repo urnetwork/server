@@ -231,7 +231,10 @@ func subscriberOriginDecision(route subscriberOriginRoute, byASN map[uint32][]su
 		state = "ambiguous"
 	}
 	if state == "unknown" {
-		return mmdbtype.Map{"state": mmdbtype.String(state)}
+		// Routing identity remains useful when network use is unreviewed. A
+		// later current-owner capture can prioritize these public ASNs without
+		// exporting a provider address or treating routing as subscriber proof.
+		return mmdbtype.Map{"state": mmdbtype.String(state), "asns": asns}
 	}
 	slices.Sort(ids)
 	slices.Sort(sources)
@@ -258,14 +261,20 @@ func augmentSubscriberRecord(base, origin mmdbtype.Map) (mmdbtype.Map, error) {
 	if !ok || !hasNonQuality || !hasRisk || !slices.Contains([]mmdbtype.String{"subscriber", "unknown", "excluded", "ambiguous"}, state) || bool(nonQuality) != (state != "subscriber") {
 		return nil, errors.New("subscriber augmentation found inconsistent base evidence")
 	}
-	if origin == nil || origin["state"] == mmdbtype.String("unknown") {
+	if origin == nil {
 		return base, nil
 	}
 	data := make(mmdbtype.Map, len(base)+5)
 	for key, value := range base {
 		data[key] = value
 	}
-	data["origin_use_state"], data["origin_asns"], data["origin_operator_ids"], data["origin_evidence_source"] = origin["state"], origin["asns"], origin["operators"], origin["source"]
+	data["origin_use_state"], data["origin_asns"] = origin["state"], origin["asns"]
+	if origin["state"] == mmdbtype.String("unknown") {
+		// Preserve independent direct subscriber approval and every existing
+		// exclusion/risk discriminator. Unknown origin use is provenance only.
+		return data, nil
+	}
+	data["origin_operator_ids"], data["origin_evidence_source"] = origin["operators"], origin["source"]
 	if risks, ok := origin["risk_evidence"].(mmdbtype.Slice); ok && len(risks) != 0 {
 		old, _ := data["network_risk_evidence"].(mmdbtype.Slice)
 		data["network_risk_evidence"] = append(slices.Clone(old), risks...)

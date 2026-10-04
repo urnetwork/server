@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -85,6 +86,28 @@ func TestSubscriberOriginCleanDefaultKeepsEveryAdditionalDiscriminator(t *testin
 	byASN[64500] = append(byASN[64500], subscriberOperator{Id: "same-asn-hosting", Usage: "hosting", Source: "https://evidence.example/mixed-use"})
 	if subscriberOriginDecision(subscriberOriginRoute{asns: []uint32{64500}}, byASN)["state"] != mmdbtype.String("excluded") {
 		t.Fatal("identified ISP waived a same-ASN use discriminator")
+	}
+}
+
+func TestSubscriberUnknownOriginsKeepResearchIdentityWithoutChangingUse(t *testing.T) {
+	decision := subscriberOriginDecision(subscriberOriginRoute{asns: []uint32{12345, 12346}}, nil)
+	for _, state := range []string{"subscriber", "excluded", "unknown", "ambiguous"} {
+		for _, risk := range []bool{false, true} {
+			base := subscriberFixtureRecord(state, risk)
+			base["classification_rule"] = mmdbtype.String("original-reviewed-rule")
+			got, err := augmentSubscriberRecord(base, decision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got["origin_use_state"] != mmdbtype.String("unknown") || !reflect.DeepEqual(got["origin_asns"], mmdbtype.Slice{mmdbtype.Uint32(12345), mmdbtype.Uint32(12346)}) {
+				t.Fatal("unreviewed global routing identity was discarded")
+			}
+			delete(got, "origin_use_state")
+			delete(got, "origin_asns")
+			if !reflect.DeepEqual(base, got) {
+				t.Fatal("unreviewed origins changed independent use, risk or registration evidence")
+			}
+		}
 	}
 }
 
@@ -210,11 +233,17 @@ operators:
 		if record["quality_state"] != mmdbtype.String(state) || record["risk"] != mmdbtype.Bool(risk) || record["org_handle"] != mmdbtype.String("TEST-UNREVIEWED-CHILD") {
 			t.Fatalf("offset=%d lost subscriber/veto/registration facts: %+v", n, record)
 		}
+		if 64 <= n && n < 128 && (record["origin_use_state"] != mmdbtype.String("unknown") || !reflect.DeepEqual(record["origin_asns"], mmdbtype.Slice{mmdbtype.Uint32(64501)})) {
+			t.Fatalf("offset=%d lost the narrower unreviewed origin's research identity", n)
+		}
 	}
 	for _, tc := range []struct{ address, state string }{{"198.51.100.1", "unknown"}, {"2001:db8::1", "subscriber"}, {"2001:db9::1", "unknown"}} {
 		var record mmdbtype.Map
 		if err := db.Lookup(netip.MustParseAddr(tc.address)).Decode(&record); err != nil || record["quality_state"] != mmdbtype.String(tc.state) {
 			t.Fatalf("global coverage mismatch at %s: %+v %v", tc.address, record, err)
+		}
+		if tc.state == "unknown" && (record["origin_asns"] != nil || record["origin_use_state"] != nil) {
+			t.Fatal("unrouted space inherited a routing identity")
 		}
 	}
 	if err := os.WriteFile(routePath, append(routes, 1), 0600); err != nil {

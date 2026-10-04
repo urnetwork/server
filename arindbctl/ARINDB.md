@@ -212,11 +212,18 @@ schema and research contract.
 Each build produces `arin.mmdb` and `manifest.json`. The MMDB contains direct
 registration identity and scope, countries, classification state, matching rule
 and source, reason, ambiguity/owner evidence, and independent risk evidence.
-Known origin decisions add `origin_use_state`, `origin_asns`,
-`origin_operator_ids`, and `origin_evidence_source`. New inferred approvals also
+Observed origins add `origin_use_state` and `origin_asns`, including unidentified
+origins whose use remains unknown. Known origin decisions additionally add
+`origin_operator_ids` and `origin_evidence_source`. New inferred approvals also
 carry `subscriber_evidence_kind: isp_inferred` and
 `classification_rule: identified-subscriber-isp-default`; direct approvals keep
 their existing classification provenance.
+
+Unknown origin attribution does not change the base classification, even where
+independent direct approval establishes subscriber use. It makes the observed
+network available to the bounded current-owner research aggregate described in
+[CAPTURE.md](../arinshadowctl/CAPTURE.md). The pinned RIS snapshots and build
+manifest supply its routing provenance; an ASN alone supplies no use approval.
 
 The registration manifest binds the builder version, XML, GeoLite database,
 rules, optional evidence files, output hash, build time, and classification and

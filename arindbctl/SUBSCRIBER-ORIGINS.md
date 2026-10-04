@@ -108,8 +108,12 @@ virtual-ISP, VPN and Tor origin evidence also adds independent network risk;
 hosting/transit evidence alone does not invent geographic or security risk.
 No inferred approval clears any existing geographic or network risk.
 
-Known origin decisions add `origin_use_state`, `origin_asns`,
-`origin_operator_ids` and `origin_evidence_source`. New positive inferences add
+Observed origins add `origin_use_state` and `origin_asns`. This includes unknown
+origins, so a current-owner capture can identify the public routing networks
+whose operator/use evidence needs review without exporting provider addresses.
+Unknown origin metadata never changes a direct approval, exclusion, conflict or
+risk finding. Known decisions also add `origin_operator_ids` and
+`origin_evidence_source`. New positive inferences add
 `subscriber_evidence_kind: isp_inferred` and the classification rule
 `identified-subscriber-isp-default`. Direct allocation approvals retain their
 existing evidence. Runtime policy version two remains compatible: `subscriber`

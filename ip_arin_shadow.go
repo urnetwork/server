@@ -46,6 +46,7 @@ type arinShadowFacts struct {
 	state                     string
 	risk, proxyRisk, verified bool
 	registration              ArinShadowRegistration
+	origin                    ArinShadowOrigin
 }
 type arinShadowConnection struct {
 	actual            ArinShadowActiveFacts
@@ -178,11 +179,13 @@ func shadowFacts(db *mmdb.Reader, address netip.Addr) (arinShadowFacts, *ArinInf
 	}
 	facts := arinShadowFacts{state: state, risk: info.Risk, verified: info.ClassifierVersion == 1 && info.QualityPolicyVersion == 2 && state == "subscriber" && !info.NonQuality}
 	var extra struct {
-		OrgHandle               string `maxminddb:"org_handle"`
-		NetHandle               string `maxminddb:"net_handle"`
-		ClassificationOrgHandle string `maxminddb:"classification_org_handle"`
-		ClassificationRule      string `maxminddb:"classification_rule"`
-		MultipleOwners          bool   `maxminddb:"multiple_registration_owners"`
+		OrgHandle               string   `maxminddb:"org_handle"`
+		NetHandle               string   `maxminddb:"net_handle"`
+		ClassificationOrgHandle string   `maxminddb:"classification_org_handle"`
+		ClassificationRule      string   `maxminddb:"classification_rule"`
+		MultipleOwners          bool     `maxminddb:"multiple_registration_owners"`
+		OriginASNs              []uint32 `maxminddb:"origin_asns"`
+		OriginUseState          string   `maxminddb:"origin_use_state"`
 		Evidence                []struct {
 			Category string `maxminddb:"category"`
 		} `maxminddb:"network_risk_evidence"`
@@ -196,6 +199,7 @@ func shadowFacts(db *mmdb.Reader, address netip.Addr) (arinShadowFacts, *ArinInf
 	if !extra.MultipleOwners {
 		facts.registration = newArinShadowRegistration(extra.OrgHandle, extra.NetHandle, extra.ClassificationOrgHandle, extra.ClassificationRule)
 	}
+	facts.origin = newArinShadowOrigin(extra.OriginASNs, extra.OriginUseState)
 	for _, e := range extra.Evidence {
 		if slices.Contains([]string{"proxy", "residential_proxy", "virtual_isp", "vpn", "tor"}, e.Category) {
 			facts.proxyRisk = true
