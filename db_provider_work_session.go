@@ -89,6 +89,24 @@ BEGIN
  RETURN NEW;
 END;
 $session_mutation$;
+CREATE FUNCTION provider_work_session_statement_fence() RETURNS trigger LANGUAGE plpgsql AS $statement_fence$
+BEGIN
+ IF current_setting('urnetwork.provider_work_cooperating',true)='1' THEN
+  PERFORM pg_advisory_xact_lock_shared(-776::bigint);
+ ELSE
+  IF EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND granted
+   AND classid=4294967295::oid AND objid=4294966520::oid AND objsubid=1 AND mode='ShareLock')
+   AND NOT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND granted
+    AND classid=4294967295::oid AND objid=4294966520::oid AND objsubid=1 AND mode='ExclusiveLock') THEN
+   RAISE EXCEPTION 'provider work mutation lacks ordered endpoint fences' USING ERRCODE='40001';
+  END IF;
+  PERFORM pg_advisory_xact_lock(-776::bigint);
+ END IF;
+ RETURN NULL;
+END;
+$statement_fence$;
+CREATE TRIGGER provider_work_session_statement_fence BEFORE INSERT OR UPDATE OR DELETE ON network_client_connection
+ FOR EACH STATEMENT EXECUTE FUNCTION provider_work_session_statement_fence();
 CREATE TRIGGER provider_work_session_mutation AFTER INSERT OR UPDATE OR DELETE ON network_client_connection
  FOR EACH ROW EXECUTE FUNCTION provider_work_session_mutation();
 CREATE FUNCTION provider_work_session_head_guard() RETURNS trigger LANGUAGE plpgsql AS $head_guard$

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/server"
 )
@@ -21,6 +22,12 @@ func providerWorkOptionalInTx(ctx context.Context, tx server.PgTx, fn func(serve
 	if providerWorkSessionSourceFromContext(ctx) == nil {
 		return false
 	}
+	return providerWorkOptionalSchemaInTx(ctx, tx, fn)
+}
+
+// Fences also apply to unsigned current callers. Before the optional migration
+// exists, a savepoint preserves their original operation and compatibility.
+func providerWorkOptionalSchemaInTx(ctx context.Context, tx server.PgTx, fn func(server.PgTx) error) bool {
 	optional, err := tx.Begin(ctx)
 	if err != nil {
 		return false
@@ -28,6 +35,10 @@ func providerWorkOptionalInTx(ctx context.Context, tx server.PgTx, fn func(serve
 	if err = fn(optional); err != nil {
 		server.Raise(optional.Rollback(ctx))
 		server.Raise(ctx.Err())
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "40001" {
+			server.Raise(err)
+		}
 		return false
 	}
 	server.Raise(optional.Commit(ctx))
@@ -38,11 +49,49 @@ func providerWorkOptionalInTx(ctx context.Context, tx server.PgTx, fn func(serve
 // may collide. Both request directions and connection owners use this function.
 func providerWorkLockEndpointsInTx(ctx context.Context, tx server.PgTx, clientIds ...server.Id) {
 	providerWorkOptionalInTx(ctx, tx, func(optional server.PgTx) error {
-		_, err := optional.Exec(ctx, `SELECT pg_advisory_xact_lock(776,lock_key) FROM
-   (SELECT DISTINCT ('x'||substr(md5(client_id::text),1,8))::bit(32)::int AS lock_key
-    FROM unnest($1::uuid[]) AS client_id ORDER BY lock_key) AS locks`, clientIds)
+		if _, err := optional.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`); err != nil {
+			return err
+		}
+		return providerWorkLockEndpointRowsInTx(ctx, optional, clientIds)
+	})
+}
+
+// Current writers share the compatibility bridge and prelock every endpoint.
+// Unmarked rolling writers take it exclusively before any connection row lock.
+func providerWorkLockSessionMutationInTx(ctx context.Context, tx server.PgTx, clientIds ...server.Id) bool {
+	if len(clientIds) == 0 {
+		return false
+	}
+	return providerWorkOptionalSchemaInTx(ctx, tx, func(optional server.PgTx) error {
+		if _, err := optional.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`); err != nil {
+			return err
+		}
+		if err := providerWorkLockEndpointRowsInTx(ctx, optional, clientIds); err != nil {
+			return err
+		}
+		_, err := optional.Exec(ctx, `SELECT set_config('urnetwork.provider_work_cooperating','1',true)`)
 		return err
 	})
+}
+
+// A head updated after a repeatable-read snapshot must retry the transaction;
+// otherwise an advisory wait alone could certify a stale connected set.
+func providerWorkLockEndpointRowsInTx(ctx context.Context, tx server.PgTx, clientIds []server.Id) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(776,lock_key) FROM
+   (SELECT DISTINCT ('x'||substr(md5(client_id::text),1,8))::bit(32)::int AS lock_key
+    FROM unnest($1::uuid[]) AS client_id ORDER BY lock_key) AS locks`, clientIds)
+	if err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `SELECT client_id FROM provider_work_session_head WHERE client_id=ANY($1) ORDER BY client_id FOR UPDATE`, clientIds)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+	}
+	err = rows.Err()
+	rows.Close()
+	return err
 }
 
 // A failed optional lock acquisition cannot later become a complete receipt.
@@ -283,7 +332,8 @@ func providerWorkRetainReservationInTx(ctx context.Context, tx server.PgTx, cont
 		var sourceId, sourceNetworkId, destinationId, destinationNetworkId server.Id
 		var at time.Time
 		var capacity int64
-		if err := optional.QueryRow(ctx, `SELECT source_id,source_network_id,destination_id,destination_network_id,create_time,transfer_byte_count FROM transfer_contract WHERE contract_id=$1`, contractId).Scan(&sourceId, &sourceNetworkId, &destinationId, &destinationNetworkId, &at, &capacity); err != nil {
+		var originIsSource *bool
+		if err := optional.QueryRow(ctx, `SELECT source_id,source_network_id,destination_id,destination_network_id,create_time,transfer_byte_count,usage_origin_is_source FROM transfer_contract WHERE contract_id=$1`, contractId).Scan(&sourceId, &sourceNetworkId, &destinationId, &destinationNetworkId, &at, &capacity, &originIsSource); err != nil {
 			return err
 		}
 		if capacity < 0 {
@@ -301,6 +351,12 @@ func providerWorkRetainReservationInTx(ctx context.Context, tx server.PgTx, cont
 			return err
 		}
 		body := protocol.ProviderWorkReservation{ContractId: contractId.String(), SourceId: sourceId.String(), SourceNetworkId: sourceNetworkId.String(), DestinationId: destinationId.String(), DestinationNetworkId: destinationNetworkId.String(), CreatedAtUnixMicro: at.UnixMicro(), Capacity: uint64(capacity), SourceHead: sourceHead, DestinationHead: destinationHead, Complete: sourceComplete && destinationComplete}
+		body.UsageOriginIsSource = originIsSource
+		requestHash, _ := ctx.Value(providerWorkRequestFrameContextKey{}).([32]byte)
+		if requestHash != ([32]byte{}) {
+			body.RequestFrameHash = &requestHash
+		}
+		body.Complete = body.Complete && body.UsageOriginIsSource != nil && body.RequestFrameHash != nil
 		_, raw, hash, err := providerWorkSessionSourceFromContext(ctx).sign(ctx, protocol.ProviderWorkReceipt{Reservation: &body}, body.CreatedAtUnixMicro)
 		if err != nil {
 			return err

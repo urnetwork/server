@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/connect"
 	coreprotocol "github.com/urnetwork/connect/protocol"
@@ -64,11 +65,34 @@ func newProviderWorkSessionFixture(t testing.TB) *providerWorkSessionFixture {
 
 func (self *providerWorkSessionFixture) contract(t testing.TB) server.Id {
 	t.Helper()
-	id, err := CreateContractNoEscrow(self.ctx, self.sourceNetworkId, self.sourceId, self.destinationNetworkId, self.destinationId, 121)
+	id, err := CreateContractNoEscrow(self.requestContext(t, nil), self.sourceNetworkId, self.sourceId, self.destinationNetworkId, self.destinationId, 121)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return id
+}
+
+// This models the exact ingress capability; producer unit fixtures do not
+// substitute a newly minted hash after SQL admission has already happened.
+func (self *providerWorkSessionFixture) requestContext(t testing.TB, intermediaryIds []server.Id) context.Context {
+	t.Helper()
+	request := &coreprotocol.CreateContract{DestinationId: self.destinationId.Bytes(), TransferByteCount: 121}
+	for _, id := range intermediaryIds {
+		request.IntermediaryIds = append(request.IntermediaryIds, id.Bytes())
+	}
+	if len(intermediaryIds) > 0 {
+		version := uint32(1)
+		request.StreamVersion = &version
+	}
+	frame, err := connect.ToFrame(request, connect.DefaultProtocolVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := proto.Marshal(frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return WithProviderWorkRequestFrameHash(self.ctx, sha256.Sum256(raw))
 }
 
 func (self *providerWorkSessionFixture) close(t testing.TB, id server.Id) {
@@ -284,7 +308,6 @@ func TestProviderWorkSessionActualStreamBirthAndInheritedCohort(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		f := newProviderWorkSessionFixture(t)
-		origin := f.contract(t)
 		frame, err := connect.ToFrame(&coreprotocol.CreateContract{DestinationId: f.destinationId.Bytes(), TransferByteCount: 121, IntermediaryIds: [][]byte{f.intermediaryId.Bytes()}}, connect.DefaultProtocolVersion)
 		if err != nil {
 			t.Fatal(err)
@@ -294,6 +317,10 @@ func TestProviderWorkSessionActualStreamBirthAndInheritedCohort(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctx := WithProviderWorkRequestFrameHash(f.ctx, sha256.Sum256(requestFrame))
+		origin, err := CreateContractNoEscrow(ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121)
+		if err != nil {
+			t.Fatal(err)
+		}
 		streamId := AddToStream(ctx, origin, f.sourceId, f.destinationId, []server.Id{f.intermediaryId})
 		if err := SetContractStream(ctx, origin, streamId, []server.Id{f.intermediaryId}); err != nil {
 			t.Fatal(err)
@@ -345,7 +372,7 @@ func TestProviderWorkSessionPaidAndFreeAdmissionsKeepEqualOriginalWork(t *testin
 		var posts []func() any
 		server.Tx(f.ctx, func(tx server.PgTx) {
 			var err error
-			escrow, posts, err = createTransferEscrowInTx(f.ctx, tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 121, nil)
+			escrow, posts, err = createTransferEscrowInTx(f.requestContext(t, nil), tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 121, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -383,7 +410,7 @@ func TestProviderWorkSessionRedisAdmissionRetainsOriginalFence(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		f := newProviderWorkSessionFixture(t)
 		addContractPayoutTestBalance(f.ctx, f.sourceNetworkId, 1000)
-		escrow, err := CreateTransferEscrow(f.ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121)
+		escrow, err := CreateTransferEscrow(f.requestContext(t, nil), f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -484,7 +511,7 @@ func TestProviderWorkSessionReservationRollsBackWithItsContract(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer tx.Rollback(context.WithoutCancel(f.ctx))
-			id, err = createContractNoEscrowInTx(f.ctx, tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121, true)
+			id, err = createContractNoEscrowInTx(f.requestContext(t, nil), tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -500,4 +527,218 @@ func TestProviderWorkSessionReservationRollsBackWithItsContract(t *testing.T) {
 			t.Fatal("rolled-back reservation leaked an original", len(originals), err)
 		}
 	})
+}
+
+func TestProviderWorkSessionRepeatableReadCannotCertifyAnOldAdmissionHead(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		f := newProviderWorkSessionFixture(t)
+		testExtenderCacheExtender(f.ctx, "snapshot-admission.example", true, testExtenderCacheAddress("192.0.2.81", true))
+		Testing_RefreshExtenderAddressCache()
+		server.Tx(f.ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(f.ctx, `UPDATE network_client SET auth_time=$2 WHERE client_id=$1`, f.sourceId, server.NowUtc()))
+		})
+		var observedErr error
+		server.Db(f.ctx, func(conn server.PgConn) {
+			tx, err := conn.BeginTx(f.ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(context.WithoutCancel(f.ctx))
+			var originalSequence uint64
+			server.Raise(tx.QueryRow(f.ctx, `SELECT sequence FROM provider_work_session_head WHERE client_id=$1`, f.sourceId).Scan(&originalSequence))
+			if originalSequence != 2 {
+				t.Fatal("fixture did not establish the prior snapshot")
+			}
+			// The actual admission commits after this transaction's snapshot.
+			// Its fresh auth_time makes the throttled directory update a no-op.
+			if _, _, _, _, err := ConnectNetworkClientWithIpFamily(f.ctx, f.sourceId, "192.0.2.81:15001", f.handlerId, 4); err != nil {
+				t.Fatal(err)
+			}
+			server.HandleError(func() {
+				_, err := createContractNoEscrowInTx(f.requestContext(t, nil), tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121, true)
+				observedErr = err
+			}, func(err error) { observedErr = err })
+		})
+		var pgErr *pgconn.PgError
+		if !errors.As(observedErr, &pgErr) || pgErr.Code != "40001" {
+			t.Fatal("old repeatable-read snapshot certified a stale original endpoint set", observedErr)
+		}
+		id := f.contract(t)
+		r := providerWorkFixtureReservation(t, providerWorkFixtureReceipts(t, f.ctx, id), id)
+		if r.Reservation.Complete || r.Reservation.SourceHead.Sequence != 3 {
+			t.Fatal("public admission omitted the newly committed extender", r.Reservation)
+		}
+	})
+}
+
+func TestProviderWorkSessionLegacyWriterWaitsBeforeTakingConnectionRow(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		f := newProviderWorkSessionFixture(t)
+		ctx, cancel := context.WithTimeout(f.ctx, 2*time.Minute)
+		defer cancel()
+		legacyCtx, cancelLegacy := context.WithCancel(ctx)
+		defer cancelLegacy()
+		ready := make(chan int, 1)
+		done := make(chan error, 1)
+		joined := make(chan struct{})
+		started := false
+		defer func() {
+			cancelLegacy()
+			if !started {
+				return
+			}
+			select {
+			case <-joined:
+			case <-time.After(30 * time.Second):
+				t.Error("legacy writer did not join canceled cleanup")
+			}
+		}()
+		server.Db(ctx, func(conn server.PgConn) {
+			tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(context.WithoutCancel(ctx))
+			if !providerWorkLockSessionMutationInTx(ctx, tx, f.sourceId) {
+				t.Fatal("new admission owner did not acquire its ordered fences")
+			}
+			var ownerPid int
+			server.Raise(tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&ownerPid))
+			started = true
+			go func() {
+				defer close(joined)
+				var resultErr error
+				server.HandleError(func() {
+					server.Db(legacyCtx, func(other server.PgConn) {
+						legacy, err := other.BeginTx(legacyCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+						server.Raise(err)
+						defer legacy.Rollback(context.WithoutCancel(legacyCtx))
+						var pid int
+						server.Raise(legacy.QueryRow(legacyCtx, `SELECT pg_backend_pid()`).Scan(&pid))
+						ready <- pid
+						_, resultErr = legacy.Exec(legacyCtx, `UPDATE network_client_connection SET connected=false,disconnect_time=$2 WHERE connection_id=$1`, f.sourceConnectionId, server.NowUtc())
+						if resultErr == nil {
+							resultErr = legacy.Commit(legacyCtx)
+						}
+					})
+				}, func(err error) { resultErr = err })
+				done <- resultErr
+			}()
+			var legacyPid int
+			select {
+			case legacyPid = <-ready:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			for {
+				select {
+				case err := <-done:
+					t.Fatal("legacy writer crossed the original reservation fence", err)
+				default:
+				}
+				var blocked, bridge bool
+				server.Raise(tx.QueryRow(ctx, `SELECT $2=ANY(pg_blocking_pids($1)),EXISTS(
+				 SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND NOT granted
+				 AND classid=4294967295::oid AND objid=4294966520::oid AND objsubid=1)`, legacyPid, ownerPid).Scan(&blocked, &bridge))
+				if blocked {
+					if !bridge {
+						t.Fatal("legacy writer took the row before waiting for the endpoint; lock order inverted")
+					}
+					break
+				}
+				if err := ctx.Err(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client_connection SET connected=false,disconnect_time=$2 WHERE connection_id=$1`, f.sourceConnectionId, server.NowUtc()))
+			providerWorkRetainSessionEventsInTx(ctx, tx, f.sourceId)
+			server.Raise(tx.Commit(ctx))
+		})
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal("legacy traffic failed after the original owner committed", err)
+			}
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		}
+		id := f.contract(t)
+		if !providerWorkFixtureReservation(t, providerWorkFixtureReceipts(t, f.ctx, id), id).Reservation.Complete {
+			t.Fatal("ordered legacy no-op lost the original retirement")
+		}
+	})
+}
+
+func TestProviderWorkSessionStreamDirectoryRaceLeavesAttributionUnknown(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		f := newProviderWorkSessionFixture(t)
+		ctx := f.requestContext(t, []server.Id{f.intermediaryId})
+		id, err := CreateContractNoEscrow(ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121)
+		if err != nil {
+			t.Fatal(err)
+		}
+		streamId := AddToStream(ctx, id, f.sourceId, f.destinationId, []server.Id{f.intermediaryId})
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET network_id=$2 WHERE client_id=$1`, f.intermediaryId, server.NewId()))
+		})
+		if err := SetContractStream(ctx, id, streamId, []server.Id{f.intermediaryId}); err != nil {
+			t.Fatal("optional provenance blocked ordinary stream traffic", err)
+		}
+		f.close(t, id)
+		for _, r := range providerWorkFixtureReceipts(t, ctx, id) {
+			if r.Outcome != nil {
+				t.Fatal("raced directory was signed as the original stream owner")
+			}
+		}
+	})
+}
+
+func TestProviderWorkSessionMissingOriginalRequestCannotMintOutcome(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		f := newProviderWorkSessionFixture(t)
+		id, err := CreateContractNoEscrow(f.ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.close(t, id)
+		receipts := providerWorkFixtureReceipts(t, f.ctx, id)
+		if providerWorkFixtureReservation(t, receipts, id).Reservation.Complete {
+			t.Fatal("absent original request became a complete source admission")
+		}
+		for _, r := range receipts {
+			if r.Outcome != nil {
+				t.Fatal("missing original request borrowed live settlement authority")
+			}
+		}
+	})
+}
+
+func TestProviderWorkSessionOptionalStreamAcquireFailureKeepsTrafficOwner(t *testing.T) {
+	key := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{123}, ed25519.SeedSize))
+	authority := protocol.ProviderWorkSourceAuthority{DomainHash: [32]byte{124}, SourceId: server.NewId().String(), Generation: server.NewId().String(), PublicKey: [32]byte(key.Public().(ed25519.PublicKey)), FromUnixMicro: 1, ThroughUnixMicro: 1000, MaxEndpointEvents: 16, MaxCohortMembers: 4, DirectoryPublicKeys: [][32]byte{}}
+	source, err := NewProviderWorkSessionSource(authority, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithProviderWorkRequestFrameHash(WithProviderWorkSessionSource(t.Context(), source), [32]byte{125})
+	called := false
+	cohort := providerWorkPrepareStreamWithDb(ctx, server.NewId(), server.NewId(), server.NewId(), []server.Id{server.NewId()}, func(context.Context, func(server.PgConn)) {
+		called = true
+		panic(errors.New("synthetic pool acquisition failed before callback"))
+	})
+	if !called || cohort != nil {
+		t.Fatal("optional database acquisition escaped or minted a cohort")
+	}
+	authority.MaxCohortMembers = 0
+	if _, err := NewProviderWorkSessionSource(authority, key); err != nil {
+		t.Fatal("independently approved direct-only source was refused", err)
+	}
 }
