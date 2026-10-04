@@ -43,8 +43,8 @@ const MaxJsonRequestBytes int64 = 16 * 1024 * 1024
 
 type ImplFunction[R any] func(*session.ClientSession) (R, error)
 type ImplWithInputFunction[T any, R any] func(T, *session.ClientSession) (R, error)
-type BodyFormatFunction func(*http.Request) (io.Reader, error)
-type FormatFunction[R any] func(result R) (complete bool)
+type BodyFormatFunction func(*session.ClientSession, *http.Request) (io.Reader, error)
+type FormatFunction[R any] func(*session.ClientSession, R) (complete bool)
 
 // writeJsonResponse marshals result as JSON and writes it. This is the default
 // response path; calling it directly avoids building a closure per response
@@ -67,7 +67,7 @@ func writeJsonResponse[R any](w http.ResponseWriter, result R) {
 // JsonFormatter returns a FormatFunction that writes result as JSON. The default
 // path uses writeJsonResponse directly; this remains for explicit formatter lists.
 func JsonFormatter[R any](w http.ResponseWriter) FormatFunction[R] {
-	return func(result R) bool {
+	return func(_ *session.ClientSession, result R) bool {
 		writeJsonResponse(w, result)
 		return true
 	}
@@ -100,7 +100,7 @@ func wrap[R any](
 	}
 
 	for _, formatter := range formatters {
-		if complete := formatter(result); complete {
+		if complete := formatter(session, result); complete {
 			return
 		}
 	}
@@ -220,7 +220,7 @@ func wrapWithInput[T any, R any](
 		req.Body = http.MaxBytesReader(w, req.Body, MaxJsonRequestBytes)
 	}
 
-	body, err := bodyFormatter(req)
+	body, err := bodyFormatter(session, req)
 	if err != nil {
 		var maxBytesError *http.MaxBytesError
 		if errors.As(err, &maxBytesError) {
@@ -289,7 +289,7 @@ func wrapWithInput[T any, R any](
 
 	advanceControlHttpPhase(req, controlHttpResponse)
 	for _, formatter := range formatters {
-		if complete := formatter(result); complete {
+		if complete := formatter(session, result); complete {
 			return
 		}
 	}
@@ -464,6 +464,6 @@ func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 	return
 }
 
-func RequestBodyFormatter(req *http.Request) (io.Reader, error) {
+func RequestBodyFormatter(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
 	return req.Body, nil
 }

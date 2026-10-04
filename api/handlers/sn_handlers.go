@@ -202,6 +202,10 @@ func SnEvidence(w http.ResponseWriter, r *http.Request) {
 		}
 		published, err := publishSnEvidence(r.Context(), body)
 		if err != nil {
+			if server.IsBlobCapacityError(err) {
+				http.Error(w, "Evidence storage capacity exhausted; check bucket quota and disk headroom.", http.StatusInsufficientStorage)
+				return
+			}
 			http.Error(w, "Evidence rejected.", http.StatusBadRequest)
 			return
 		}
@@ -225,14 +229,18 @@ func SnEvidence(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Evidence not found.", http.StatusNotFound)
 		return
 	}
-	defer reader.Close()
-	b, err := readSnEvidenceBytes(reader, maximumSnEvidenceBytes)
-	if err != nil {
+	operation := &snEvidenceReadOperation{writer: w}
+	defer operation.close()
+	b, envelope, readErr := readSnEvidenceEnvelopeWithAdmission(r.Context(), reader, operation.admit)
+	if readErr != nil {
+		if errors.Is(readErr, errSnEvidencePlanReadBusy) {
+			http.Error(w, "Large evidence read busy.", http.StatusTooManyRequests)
+			return
+		}
 		http.Error(w, "Evidence read failed.", http.StatusBadGateway)
 		return
 	}
-	var envelope startifact.EvidenceEnvelope
-	if err := json.Unmarshal(b, &envelope); err != nil || startifact.VerifyEvidence(&envelope) != nil || !strings.EqualFold(envelope.ContentHash, hash) {
+	if !strings.EqualFold(envelope.ContentHash, hash) {
 		http.Error(w, "Evidence integrity failure.", http.StatusBadGateway)
 		return
 	}
@@ -311,16 +319,19 @@ func SnEvidenceHistory(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Evidence history object not found.", http.StatusNotFound)
 			return
 		}
-		b, readErr := readSnEvidenceBytes(reader, maximumSnEvidenceBytes)
-		closeErr := reader.Close()
-		if readErr != nil || closeErr != nil {
+		operation := &snEvidenceReadOperation{writer: w}
+		defer operation.close()
+		b, envelope, readErr := readSnEvidenceEnvelopeWithAdmission(r.Context(), reader, operation.admit)
+		if readErr != nil {
+			if errors.Is(readErr, errSnEvidencePlanReadBusy) {
+				http.Error(w, "Large evidence history read busy.", http.StatusTooManyRequests)
+				return
+			}
 			http.Error(w, "Evidence history object unavailable.", http.StatusBadGateway)
 			return
 		}
-		var envelope startifact.EvidenceEnvelope
 		expectedContentHash := "sha256:" + strings.TrimSuffix(filepath.Base(historyKey), ".json")
-		if json.Unmarshal(b, &envelope) != nil || startifact.VerifyEvidence(&envelope) != nil ||
-			envelope.DeploymentID != deployment || envelope.Netuid != uint16(netuidValue) || envelope.Kind != kind ||
+		if envelope.DeploymentID != deployment || envelope.Netuid != uint16(netuidValue) || envelope.Kind != kind ||
 			envelope.ContentHash != expectedContentHash || !evidenceHistoryRunMatches(envelope.RunID, runID) {
 			http.Error(w, "Evidence history object failed integrity.", http.StatusBadGateway)
 			return

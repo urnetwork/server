@@ -29,7 +29,7 @@ func DeviceShareCodeQR(w http.ResponseWriter, r *http.Request) {
 		impl,
 		w,
 		r,
-		func(result *model.DeviceShareCodeQRResult) bool {
+		func(_ *session.ClientSession, result *model.DeviceShareCodeQRResult) bool {
 			w.Header().Set("Content-Type", "image/png")
 			w.Write(result.PngBytes)
 			return true
@@ -62,7 +62,7 @@ func DeviceAdoptCodeQR(w http.ResponseWriter, r *http.Request) {
 		impl,
 		w,
 		r,
-		func(result *model.DeviceAdoptCodeQRResult) bool {
+		func(_ *session.ClientSession, result *model.DeviceAdoptCodeQRResult) bool {
 			w.Header().Set("Content-Type", "image/png")
 			w.Write(result.PngBytes)
 			return true
