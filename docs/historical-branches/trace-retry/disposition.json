@@ -1,0 +1,15 @@
+{
+  "branch": "origin/trace-retry",
+  "disposition": "exact original unique patches preserved outside build; ancestry merged",
+  "head": "f0369cbe6a7d3cb596371e9ccc695b31b5dcd5de",
+  "patches": [
+    {
+      "commit": "f0369cbe6a7d3cb596371e9ccc695b31b5dcd5de",
+      "path": "f0369cbe6a7d3cb596371e9ccc695b31b5dcd5de.patch",
+      "sha256": "3a05c8aa3d2329c0ba493d43a26532d4951f7d60bb5c48724dabfde89be54041"
+    }
+  ],
+  "reason": "Generic handler panic retry is not coupled to current side-effect idempotency or cancellation; replaying arbitrary handlers would bypass current owning transaction retry boundaries.",
+  "runtime_activation": false,
+  "source_retrieval": "git show f0369cbe6a7d3cb596371e9ccc695b31b5dcd5de:<path>"
+}

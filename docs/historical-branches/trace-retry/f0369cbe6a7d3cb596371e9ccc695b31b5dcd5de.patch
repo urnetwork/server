@@ -1,0 +1,143 @@
+commit f0369cbe6a7d3cb596371e9ccc695b31b5dcd5de
+Author:     Brien Colwell <xcolwell@gmail.com>
+AuthorDate: Sun Feb 1 02:24:42 2026 -0600
+Commit:     Brien Colwell <xcolwell@gmail.com>
+CommitDate: Sun Feb 1 02:24:42 2026 -0600
+
+    trace: add retry
+
+diff --git a/router/handler_utils.go b/router/handler_utils.go
+index c198e046..de97e853 100644
+--- a/router/handler_utils.go
++++ b/router/handler_utils.go
+@@ -12,6 +12,7 @@ import (
+ 	"runtime"
+ 	"strconv"
+ 	"strings"
++	"time"
+ 
+ 	"github.com/urnetwork/glog"
+ 
+@@ -27,6 +28,12 @@ type ImplWithInputFunction[T any, R any] func(T, *session.ClientSession) (R, err
+ type BodyFormatFunction func(*http.Request) (io.Reader, error)
+ type FormatFunction[R any] func(result R) (complete bool)
+ 
++var DefaultRetryOptions = server.RetryOptions{
++	Count:    0,
++	MinDelay: 100 * time.Millisecond,
++	MaxDelay: 2 * time.Second,
++}
++
+ func JsonFormatter[R any](w http.ResponseWriter) FormatFunction[R] {
+ 	formatter := func(result R) bool {
+ 		responseJson, err := json.Marshal(result)
+@@ -61,7 +68,9 @@ func wrap[R any](
+ 	// }
+ 
+ 	// server.Logger().Printf("Handling %s\n", impl)
+-	result, err := impl(session)
++	result, err := server.HandleError2WithRetry(func() (R, error) {
++		return impl(session)
++	}, DefaultRetryOptions)
+ 	if err != nil {
+ 		if !RaiseHttpError(err, w) {
+ 			glog.Infof("[h]impl error: %s\n", err)
+@@ -233,7 +242,9 @@ func wrapWithInput[T any, R any](
+ 	}
+ 
+ 	// server.Logger().Printf("Handling %s\n", impl)
+-	result, err := impl(input, session)
++	result, err := server.HandleError2WithRetry(func() (R, error) {
++		return impl(input, session)
++	}, DefaultRetryOptions)
+ 	if err != nil {
+ 		custom := map[string]any{
+ 			"headers": req.Header,
+diff --git a/trace.go b/trace.go
+index 2320657a..a94bc0b4 100644
+--- a/trace.go
++++ b/trace.go
+@@ -13,7 +13,7 @@ import (
+ 	"runtime/debug"
+ 	"strings"
+ 	// "reflect"
+-	// mathrand "math/rand"
++	mathrand "math/rand"
+ 
+ 	"github.com/urnetwork/glog"
+ )
+@@ -41,8 +41,18 @@ func IsDoneError(r any) bool {
+ 	}
+ }
+ 
++type RetryOptions struct {
++	Count    int
++	MinDelay time.Duration
++	MaxDelay time.Duration
++}
++
+ // this is meant to handle unexpected errors and do some cleanup
+ func HandleError(do func(), handlers ...any) (r any) {
++	return HandleErrorWithRetry(do, RetryOptions{}, handlers...)
++}
++
++func HandleErrorWithRetry(do func(), retryOptions RetryOptions, handlers ...any) (r any) {
+ 	defer func() {
+ 		if r = recover(); r != nil {
+ 			if IsDoneError(r) {
+@@ -64,14 +74,38 @@ func HandleError(do func(), handlers ...any) (r any) {
+ 			}
+ 		}
+ 	}()
++	for range retryOptions.Count {
++		success := false
++		func() {
++			defer func() {
++				if r = recover(); r != nil {
++					randomDelay := retryOptions.MinDelay + time.Duration(mathrand.Int63n(int64(retryOptions.MaxDelay)))
++					if 0 < randomDelay {
++						select {
++						case <-time.After(randomDelay):
++						}
++					}
++				}
++			}()
++			do()
++			success = true
++		}()
++		if success {
++			return
++		}
++	}
+ 	do()
+ 	return
+ }
+ 
+ func HandleError1[R any](do func() R, handlers ...any) (result R) {
++	return HandleError1WithRetry(do, RetryOptions{}, handlers...)
++}
++
++func HandleError1WithRetry[R any](do func() R, retryOptions RetryOptions, handlers ...any) (result R) {
+ 	HandleError(func() {
+ 		result = do()
+-	}, func(err error) {
++	}, retryOptions, func(err error) {
+ 		for _, handler := range handlers {
+ 			switch v := handler.(type) {
+ 			case func() R:
+@@ -85,9 +119,13 @@ func HandleError1[R any](do func() R, handlers ...any) (result R) {
+ }
+ 
+ func HandleError2[R1 any, R2 any](do func() (R1, R2), handlers ...any) (result1 R1, result2 R2) {
+-	HandleError(func() {
++	return HandleError2WithRetry(do, RetryOptions{}, handlers...)
++}
++
++func HandleError2WithRetry[R1 any, R2 any](do func() (R1, R2), retryOptions RetryOptions, handlers ...any) (result1 R1, result2 R2) {
++	HandleErrorWithRetry(func() {
+ 		result1, result2 = do()
+-	}, func(err error) {
++	}, retryOptions, func(err error) {
+ 		for _, handler := range handlers {
+ 			switch v := handler.(type) {
+ 			case func() (R1, R2):
