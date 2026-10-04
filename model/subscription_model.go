@@ -1179,6 +1179,13 @@ func isForceCloseQuarantinedAccountingRejection(closeErr error, quarantineClaime
 		isOnlyContractError(closeErr, errContractInsufficientEscrow)
 }
 
+// A fresh intent read delegates this row only after every preceding phase
+// succeeded. Finding the pending sentinel in a joined error cannot erase an
+// operational failure or authorize an accounting-only page checkpoint.
+func isForceCloseDeferredSettlement(closeErr error, quarantineErr error, cleanupErr error) bool {
+	return closeErr == nil && quarantineErr == nil && cleanupErr == errLegacySettlementPending
+}
+
 // Only the exact guard permits one post-failure read. Missing, changed, or
 // unavailable state preserves ordinary failure; cancellation invalidates even
 // a positive verifier result. No financial operation is retried here.
@@ -4407,6 +4414,8 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 	attempted := make([]bool, len(openContracts))
 	contractErrors := make([]error, len(openContracts))
 	contractCompleted := make([]bool, len(openContracts))
+	eligibilitySkipped := make([]bool, len(openContracts))
+	deferredSettlements := make([]bool, len(openContracts))
 	accountingRejections := make([]bool, len(openContracts))
 	quarantinedAccountingRejections := make([]bool, len(openContracts))
 	workerErrors := make(chan error, parallel)
@@ -4446,8 +4455,10 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 						continue
 					}
 					if fresh == nil && prepareErr == nil {
-						// A real report arrived after the scan. Preserve its stream
-						// and let the next quiet-period candidate own retirement.
+						// A fresh report or pending intent withdrew this candidate.
+						// Its eligibility check completed without a financial close;
+						// the proper owner or a later quiet pass retains retirement.
+						eligibilitySkipped[j] = true
 						continue
 					}
 					attempted[j] = true
@@ -4478,6 +4489,7 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 					)
 					accountingRejections[j] = isForceCloseAccountingRejection(closeErr, quarantineErr, cleanupErr)
 					quarantinedAccountingRejections[j] = isForceCloseQuarantinedAccountingRejection(closeErr, quarantineClaimed, quarantineErr, cleanupErr)
+					deferredSettlements[j] = isForceCloseDeferredSettlement(closeErr, quarantineErr, cleanupErr)
 					contractCompleted[j] = true
 				}
 			})
@@ -4496,17 +4508,21 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 	close(workerErrors)
 
 	for index, closed := range attempted {
-		if closed && !errors.Is(contractErrors[index], errLegacySettlementPending) {
+		if closed && !deferredSettlements[index] {
 			closeCount++
 		}
 	}
 	accountingOnly := true
 	var verifiedCloseCount, accountingRejectionCount, quarantinedAccountingRejectionCount int64
 	for index, contractErr := range contractErrors {
-		if errors.Is(contractErr, errLegacySettlementPending) {
+		if eligibilitySkipped[index] {
+			// A current eligibility rejection is a completed scan visit, not
+			// a close or a reason to discard other rows' classified errors.
+			continue
+		}
+		if deferredSettlements[index] {
 			// A durable intent is acknowledged work, not a verified close or an
 			// accounting success. Its separate worker owns progress and errors.
-			accountingOnly = false
 			forceCloseContractCounter.WithLabelValues("deferred").Inc()
 			continue
 		}
