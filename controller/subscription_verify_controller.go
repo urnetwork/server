@@ -109,6 +109,11 @@ type VerifyPlayPurchaseArgs struct {
 //
 //	token unknown / malformed (400, 404, 410)                    -> invalid
 //	linked account (obfuscated/external id) != session network   -> wrong_network
+//	no account identifiers                                       -> the unlinked
+//	                                                                binding rules
+//	                                                                (credited /
+//	                                                                already_credited
+//	                                                                / invalid)
 //	SUBSCRIPTION_STATE_PENDING / PAUSED / ON_HOLD / GRACE        -> pending (retry)
 //	SUBSCRIPTION_STATE_ACTIVE, credit landed                     -> credited
 //	SUBSCRIPTION_STATE_ACTIVE, balance already overlaps expiry   -> already_credited
@@ -210,6 +215,15 @@ func VerifyPlayPurchase(
 		if !found {
 			return NewVerifyStorePurchaseInvalid(), nil
 		}
+	}
+
+	if linkedNetworkId == nil {
+		// no account identifiers: bought outside the app's billing flow (a
+		// Play Store promo code redemption). Credited only through the
+		// binding to the welcome offer this server issued to the session
+		// network (play_purchase_binding_controller.go) -- never to whichever
+		// session reports it first.
+		return verifyPlayUnlinkedPurchase(clientSession, packageName, purchaseToken, sub)
 	}
 
 	// the credit path: re-fetches the subscription, takes the purchase-token

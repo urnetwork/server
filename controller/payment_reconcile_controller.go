@@ -1448,6 +1448,18 @@ func reconcilePlay(run *paymentReconcileRun, since time.Time) (bool, error) {
 		}
 
 		if sub.SubscriptionState == "SUBSCRIPTION_STATE_ACTIVE" {
+			if playUnlinkedBoundElsewhere(run.clientSession, sub, renewal) {
+				// a purchase without an account link is bound to a different
+				// network than this renewal row: never credit the row's network
+				run.record(
+					store,
+					model.PaymentReconcileActionError,
+					&renewal.NetworkId,
+					purchaseToken,
+					map[string]any{"error": "purchase is bound to another network", "leg": "validate"},
+				)
+				continue
+			}
 			repairMatches, matchErr := playRenewalMatchesSubscription(
 				run.clientSession,
 				renewal,
@@ -1533,6 +1545,23 @@ func reconcilePlay(run *paymentReconcileRun, since time.Time) (bool, error) {
 	return true, nil
 }
 
+// playUnlinkedBoundElsewhere: the purchase carries no account identifiers
+// and its binding names a network other than the renewal row's. A purchase
+// that was never bound keeps the row's network (rows credited before the
+// binding existed).
+func playUnlinkedBoundElsewhere(
+	clientSession *session.ClientSession,
+	subscription *PlaySubscription,
+	renewal *model.ReconcileSubscriptionRenewal,
+) bool {
+	linkedNetworkId, validLink := playLinkedNetworkId(clientSession, subscription)
+	if !validLink || linkedNetworkId != nil {
+		return false
+	}
+	networkId, bound := playPurchaseBindingLookupFunc(clientSession.Ctx, renewal.PurchaseToken, subscription.LinkedPurchaseToken, false)
+	return bound && networkId != renewal.NetworkId
+}
+
 func playRenewalMatchesSubscription(
 	clientSession *session.ClientSession,
 	renewal *model.ReconcileSubscriptionRenewal,
@@ -1550,7 +1579,9 @@ func playRenewalMatchesSubscription(
 	if !ok || !sku.Supporter {
 		return false, nil
 	}
-	linkedNetworkId, validLink := playLinkedNetworkId(clientSession, subscription)
+	// the account link, or for a purchase without one the binding the verify
+	// endpoint made (read-only: a reconcile pass never writes a binding)
+	linkedNetworkId, validLink := playResolveNetworkId(clientSession, subscription, renewal.PurchaseToken, false)
 	if !validLink || linkedNetworkId == nil {
 		return false, nil
 	}

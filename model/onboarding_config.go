@@ -147,6 +147,14 @@ type OnboardingOfferConfig struct {
 	StripeCouponId string `yaml:"stripe_coupon_id"`
 	// Play offer tag on the discounted first cycle of the yearly base plan
 	PlayOfferTag string `yaml:"play_offer_tag"`
+	// PlayPromotionCode is a Play Console custom (vanity) promotion code that
+	// stands for the welcome offer. A purchase redeemed with it reports the
+	// code in lineItems[].signupPromotion.vanityCode.promotionCode and carries
+	// no obfuscated account id; it can be bound to a network that was issued
+	// the offer (controller/play_purchase_binding_controller.go). Empty = no
+	// code is recognized (one-time codes never are: subscriptionsv2 reports
+	// them without an identifier).
+	PlayPromotionCode string `yaml:"play_promotion_code"`
 	// config resource path of an App Store Connect one-time offer code batch csv
 	// (`code,expires` rows); loaded into the network_onboarding_apple_offer_code
 	// pool. Empty = no batch.
