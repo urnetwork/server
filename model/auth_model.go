@@ -1074,6 +1074,11 @@ type AuthVerifyArgs struct {
 type AuthVerifyResult struct {
 	Network *AuthVerifyResultNetwork `json:"network,omitempty"`
 	Error   *AuthVerifyResultError   `json:"error,omitempty"`
+	// NewAccount is set when this verification completed the sign-up of an
+	// account created with an email or phone, as opposed to verifying a
+	// sign-in added later to an existing account. Only a new account gets the
+	// welcome email and onboarding enrollment. Never sent to the client.
+	NewAccount bool `json:"-"`
 }
 
 type AuthVerifyResultNetwork struct {
@@ -1161,7 +1166,14 @@ func AuthVerify(
 	}
 
 	// verified
+	newAccount := false
 	server.Tx(session.Ctx, func(tx server.PgTx) {
+		// classify before marking this sign-in verified
+		newAccount = isNewAccountVerification(
+			&pgAuthVerifyAccountLookup{ctx: session.Ctx, conn: tx},
+			userId,
+		)
+
 		server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
@@ -1204,8 +1216,78 @@ func AuthVerify(
 		Network: &AuthVerifyResultNetwork{
 			ByJwt: byJwt.Sign(),
 		},
+		NewAccount: newAccount,
 	}
 	return result, nil
+}
+
+// authVerifyAccountLookup reads what decides whether a verification completes
+// a new account's sign-up.
+type authVerifyAccountLookup interface {
+	// createAuthType is network_user.auth_type, the sign-in the account was
+	// created with ("password" for an email or phone sign-up).
+	createAuthType(userId server.Id) AuthType
+	// hasVerifiedPasswordAuth reports whether any email or phone sign-in of
+	// the user is already verified.
+	hasVerifiedPasswordAuth(userId server.Id) bool
+}
+
+// isNewAccountVerification reports whether a verification, read before it
+// marks its sign-in verified, is the one that completes an email or phone
+// sign-up. That is the case only for an account created with an email or
+// phone that has no verified email or phone sign-in yet. A network created
+// with Apple, Google, a wallet, a seed phrase or as a guest that later adds an
+// email or phone is an existing account, as is an account verifying a second
+// email or phone, or re-verifying one.
+func isNewAccountVerification(lookup authVerifyAccountLookup, userId server.Id) bool {
+	if lookup.createAuthType(userId) != AuthTypePassword {
+		return false
+	}
+	return !lookup.hasVerifiedPasswordAuth(userId)
+}
+
+type pgAuthVerifyAccountLookup struct {
+	ctx  context.Context
+	conn server.PgCanQuery
+}
+
+func (self *pgAuthVerifyAccountLookup) createAuthType(userId server.Id) (authType AuthType) {
+	// the row lock serializes concurrent verifications of one account, so at
+	// most one of them sees the account as new
+	result, err := self.conn.Query(
+		self.ctx,
+		`SELECT auth_type FROM network_user WHERE user_id = $1 FOR UPDATE`,
+		userId,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			var value *string
+			server.Raise(result.Scan(&value))
+			if value != nil {
+				authType = *value
+			}
+		}
+	})
+	return
+}
+
+func (self *pgAuthVerifyAccountLookup) hasVerifiedPasswordAuth(userId server.Id) (verified bool) {
+	result, err := self.conn.Query(
+		self.ctx,
+		`
+			SELECT EXISTS (
+				SELECT 1 FROM network_user_auth_password
+				WHERE user_id = $1 AND verified = true
+			)
+		`,
+		userId,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&verified))
+		}
+	})
+	return
 }
 
 // userAuthUserIdLookup reads the two places an email or phone sign-in can

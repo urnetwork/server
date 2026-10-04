@@ -417,32 +417,82 @@ func AuthVerify(
 	session *session.ClientSession,
 ) (*model.AuthVerifyResult, error) {
 	result, err := model.AuthVerify(verify, session)
-	if err == nil && result.Network != nil {
-		byJwt := enrollAuthVerifyOnboardingPostPrimary(result, verify.UserAuth, session)
+	if err == nil {
+		completeAuthVerify(result, verify.UserAuth, session, defaultAuthVerifyEffects())
+	}
+	return result, err
+}
 
-		awsMessageSender := GetAWSMessageSender()
-		awsMessageSender.SendAccountMessageTemplate(
-			verify.UserAuth,
-			&NetworkWelcomeTemplate{},
-		)
+// authVerifyEffects are the side effects of a successful verification.
+type authVerifyEffects struct {
+	// enrollOnboarding enrolls the verified network and returns its parsed jwt
+	enrollOnboarding func(*model.AuthVerifyResult, string, *session.ClientSession) *jwt.ByJwt
+	parseByJwt       func(*session.ClientSession, string) *jwt.ByJwt
+	sendWelcome      func(userAuth string)
+	// syncProductUpdates runs with the verified network's jwt
+	syncProductUpdates func(*session.ClientSession)
+}
 
-		if byJwt != nil {
+func defaultAuthVerifyEffects() authVerifyEffects {
+	return authVerifyEffects{
+		enrollOnboarding: enrollAuthVerifyOnboardingPostPrimary,
+		parseByJwt: func(clientSession *session.ClientSession, signedByJwt string) *jwt.ByJwt {
+			byJwt, err := jwt.ParseByJwt(clientSession.Ctx, signedByJwt)
+			if err != nil {
+				return nil
+			}
+			return byJwt
+		},
+		sendWelcome: func(userAuth string) {
+			awsMessageSender := GetAWSMessageSender()
+			awsMessageSender.SendAccountMessageTemplate(
+				userAuth,
+				&NetworkWelcomeTemplate{},
+			)
+		},
+		syncProductUpdates: func(verifiedSession *session.ClientSession) {
 			// the preference the sign-up form asked for was persisted by
 			// NetworkCreate; completing verification syncs it, it never
 			// overrides an opt-out with a default
 			productUpdates := true
-			if preferences := model.AccountPreferencesGet(session.WithByJwt(byJwt)); preferences != nil {
+			if preferences := model.AccountPreferencesGet(verifiedSession); preferences != nil {
 				productUpdates = preferences.ProductUpdates
 			}
 			AccountPreferencesSet(
 				&model.AccountPreferencesSetArgs{
 					ProductUpdates: productUpdates,
 				},
-				session.WithByJwt(byJwt),
+				verifiedSession,
 			)
-		}
+		},
 	}
-	return result, err
+}
+
+// completeAuthVerify runs after the verification is committed. The welcome
+// email and the onboarding campaign are for a new account only: verifying an
+// email or phone added later to an existing account (one created with Apple,
+// Google, a wallet, or another email or phone) is not a sign-up. Every
+// verification syncs the network's existing product-updates preference, which
+// never overrides an opt-out.
+func completeAuthVerify(
+	result *model.AuthVerifyResult,
+	userAuth string,
+	clientSession *session.ClientSession,
+	effects authVerifyEffects,
+) {
+	if result == nil || result.Network == nil {
+		return
+	}
+	var byJwt *jwt.ByJwt
+	if result.NewAccount {
+		byJwt = effects.enrollOnboarding(result, userAuth, clientSession)
+		effects.sendWelcome(userAuth)
+	} else {
+		byJwt = effects.parseByJwt(clientSession, result.Network.ByJwt)
+	}
+	if byJwt != nil {
+		effects.syncProductUpdates(clientSession.WithByJwt(byJwt))
+	}
 }
 
 func enrollAuthVerifyOnboardingPostPrimary(
