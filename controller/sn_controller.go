@@ -23,6 +23,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 
 	"github.com/urfoundation/sn/merkle"
+	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/ss58"
 
 	"github.com/urnetwork/glog"
@@ -54,7 +55,9 @@ type SnSetWalletError struct {
 }
 
 type SnSetWalletResult struct {
-	Error *SnSetWalletError `json:"error,omitempty"`
+	Error             *SnSetWalletError `json:"error,omitempty"`
+	MappingHash       string            `json:"mapping_hash,omitempty"`
+	MappingGeneration uint64            `json:"mapping_generation,omitempty"`
 }
 
 // SnSetWallet sets the caller network's subnet claim wallet — the ss58
@@ -66,6 +69,12 @@ func SnSetWallet(
 	setWallet *SnSetWalletArgs,
 	clientSession *session.ClientSession,
 ) (*SnSetWalletResult, error) {
+	if setWallet == nil {
+		return nil, protocol.ErrWalletMappingIntegrity
+	}
+	if strings.HasPrefix(setWallet.Message, protocol.WalletMappingConsentPrefix) {
+		return snAcceptWalletMapping(setWallet, clientSession)
+	}
 	fail := func(message string) (*SnSetWalletResult, error) {
 		return &SnSetWalletResult{Error: &SnSetWalletError{Message: message}}, nil
 	}
