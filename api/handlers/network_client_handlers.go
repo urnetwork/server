@@ -6,6 +6,7 @@ import (
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/session"
 )
 
 // AuthNetworkClient provisions a client, and is where an agent meets the plan's
@@ -28,7 +29,7 @@ func AuthNetworkClient(w http.ResponseWriter, r *http.Request) {
 		controller.AuthNetworkClient,
 		w,
 		r,
-		func(result *model.AuthNetworkClientResult) bool {
+		func(_ *session.ClientSession, result *model.AuthNetworkClientResult) bool {
 			return controller.WriteX402UpgradeRequired(w, result)
 		},
 	)

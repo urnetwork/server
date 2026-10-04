@@ -226,7 +226,7 @@ type StripeLineItemProduct struct {
 	UnitAmount int    `json:"unit_amount"`
 }
 
-func VerifyStripeBody(req *http.Request) (io.Reader, error) {
+func VerifyStripeBody(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
 	bodyBytes, err := io.ReadAll(req.Body)
 	if err != nil {
 		return nil, err
