@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"errors"
 	"path"
 	"strings"
 	"sync"
