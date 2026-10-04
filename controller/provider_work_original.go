@@ -25,6 +25,7 @@ type ProviderWorkPolicy struct {
 	RequestPublicKey    string `yaml:"request_public_key"`
 	AuthoritySigner     string `yaml:"authority_signer,omitempty"`
 	ClientKeyRootSigner string `yaml:"client_key_root_signer,omitempty"`
+	AttributionSigner   string `yaml:"attribution_signer,omitempty"`
 }
 
 // Require exact lower-case fixed-size identities, accepting an explicit 0x
@@ -101,6 +102,15 @@ func LoadProviderWorkAuthorityPolicy() (domain, approver [32]byte, expected payo
 	expected.ClientKeyRootSigner = common.HexToAddress(policy.ClientKeyRootSigner)
 	if expected.AuthoritySigner == (common.Address{}) || expected.ClientKeyRootSigner == (common.Address{}) {
 		return domain, approver, expected, errors.New("provider work independent root authority is zero")
+	}
+	if policy.AttributionSigner != "" {
+		if !common.IsHexAddress(policy.AttributionSigner) {
+			return domain, approver, expected, errors.New("provider work attribution authority is invalid")
+		}
+		expected.AttributionSigner = common.HexToAddress(policy.AttributionSigner)
+		if expected.AttributionSigner == (common.Address{}) || expected.AttributionSigner != expected.AuthoritySigner {
+			return domain, approver, expected, errors.New("provider work attribution purpose requires the independent roster authority")
+		}
 	}
 	return domain, approver, expected, nil
 }

@@ -82,6 +82,9 @@ func stPrepareApprovedWholeWorkInventory(ctx context.Context, approved *stProvid
 		}
 		result.Owners = append(result.Owners, payoutartifact.WholeWorkOwnerCuts{StartRequest: startPair.Request, Start: startPair.Cut, EndRequest: endPair.Request, End: endPair.Cut})
 	}
+	if err := attachProviderWorkOriginals(ctx, authority, expected, result); err != nil {
+		return nil, expected, err
+	}
 	encoded, err := json.Marshal(result)
 	if err != nil {
 		return nil, expected, err
@@ -91,7 +94,7 @@ func stPrepareApprovedWholeWorkInventory(ctx context.Context, approved *stProvid
 	if err != nil {
 		return nil, expected, err
 	}
-	expected, err = providerWorkPriorExpectation(ctx, authority, expected)
+	expected, err = providerWorkPriorExpectation(ctx, authority, expected, owned)
 	if err != nil {
 		return nil, expected, err
 	}
@@ -104,7 +107,11 @@ func stRetainWholeWorkWindow(ctx context.Context, artifact *payoutartifact.Artif
 	if artifact == nil || artifact.ClosedWork == nil || artifact.ClosedWork.WholeInventory == nil {
 		return nil
 	}
-	if _, err := payoutartifact.VerifyWholeWorkInventory(ctx, artifact, expected); err != nil {
+	verified, err := payoutartifact.VerifyWholeWorkInventory(ctx, artifact, expected)
+	if err != nil {
+		return err
+	}
+	if err := requireProviderWorkPublication(ctx, artifact.ClosedWork.WholeInventory, expected, verified); err != nil {
 		return err
 	}
 	raw, err := json.Marshal(artifact.ClosedWork.WholeInventory)
@@ -157,11 +164,15 @@ func ProviderWorkWindow(ctx context.Context, domainHash [32]byte, epoch uint64, 
 		return nil, err
 	}
 	expected.AuthorityHash = "sha256:" + hex.EncodeToString(digest[:])
-	expected, err = providerWorkPriorExpectation(ctx, authority, expected)
+	expected, err = providerWorkPriorExpectation(ctx, authority, expected, inventory)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := payoutartifact.VerifyWholeWorkInventoryWithWitness(ctx, artifact, inventory, expected); err != nil {
+	verified, err := payoutartifact.VerifyWholeWorkInventoryWithWitness(ctx, artifact, inventory, expected)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireProviderWorkPublication(ctx, inventory, expected, verified); err != nil {
 		return nil, err
 	}
 	return raw, nil
