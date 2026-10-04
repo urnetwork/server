@@ -6873,6 +6873,11 @@ subscriber SQL for candidates considered only as Speed or Online.
 Fresh explicit risk observed by that same SQL remains a common exclusion; it
 cannot be converted to a lower-tier answer or stored as a Quality-only cached
 refusal. Repeated and concurrent warm-cache controls cover this distinction.
+If the later Quality read discovers risk for an already chosen Speed or named
+provider, it revokes that earlier selection before computing remaining quota.
+The same-target lower tiers refill the vacancy; answered and backfill counters
+count the surviving selections only. The overlap control covers both cache
+readers, named/discovery overlap, and native/borrowed/Online ordering.
 
 The actual initial/search geographic picker already uses a public
 native-or-Online count under its legacy Quality-named key. Neither native

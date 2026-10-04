@@ -6539,6 +6539,8 @@ func FindProviders2(
 		qualityExcludedClientIds := map[server.Id]bool{}
 		exclusionReadClientIds := map[server.Id]bool{}
 		qualityReadClientIds := map[server.Id]bool{}
+		var nativeClientScores map[server.Id]*ClientScore
+		var clientIds, borrowedClientIds []server.Id
 		// Common refusals apply to every bucket. Subscriber refusals apply only
 		// to native Quality, including Quality borrowed by a Speed request.
 		readExclusions := func(scores map[server.Id]*ClientScore, mode RankMode, native bool, namedClientIds []server.Id) error {
@@ -6586,6 +6588,20 @@ func FindProviders2(
 					qualityReadClientIds[clientId] = true
 				}
 			}
+			// A later bucket can expose common risk for an earlier selection.
+			// Revoke it before quota/refill counts or final answers use it.
+			rejectedSelection := func(clientId server.Id) bool {
+				if !hardExcludedClientIds[clientId] {
+					return false
+				}
+				delete(clientScores, clientId)
+				delete(nativeClientScores, clientId)
+				return true
+			}
+			clientIds = slices.DeleteFunc(clientIds, rejectedSelection)
+			borrowedClientIds = slices.DeleteFunc(borrowedClientIds, rejectedSelection)
+			providers = slices.DeleteFunc(providers, func(provider *FindProvidersProvider) bool { return hardExcludedClientIds[provider.ClientId] })
+			observation.explicitReturned = len(providers) - len(clientIds) - len(borrowedClientIds)
 			return nil
 		}
 		if err := readExclusions(clientScores, rankMode, true, specClientIds); err != nil {
@@ -6862,7 +6878,7 @@ func FindProviders2(
 
 		// Native membership comes only from the shared gate decision. The
 		// performance tier orders members within this bucket.
-		nativeClientScores := clientScores
+		nativeClientScores = clientScores
 		if !findProviders2.ForceMinimum {
 			nativeClientScores = map[server.Id]*ClientScore{}
 			for clientId, clientScore := range clientScores {
@@ -6871,7 +6887,7 @@ func FindProviders2(
 				}
 			}
 		}
-		clientIds := selectProviders(nativeClientScores, rankMode, count)
+		clientIds = selectProviders(nativeClientScores, rankMode, count)
 
 		observation.enter("directory")
 		directory := locationDirectory()
@@ -6887,9 +6903,7 @@ func FindProviders2(
 		// Fill the requested bucket, then the other native bucket, then the
 		// online union. Every borrowed page passes the same request filters;
 		// tier offsets preserve its lower client-visible priority.
-		chosenClientIds := slices.Clone(clientIds)
 		if otherRankMode, ok := backfillRankMode(rankMode); ok && !findProviders2.ForceMinimum {
-			borrowedClientIds := []server.Id{}
 			remainingCount := func() int {
 				return count - len(clientIds) - len(borrowedClientIds)
 			}
@@ -7016,10 +7030,10 @@ func FindProviders2(
 					}
 				}
 			}
-			chosenClientIds = append(chosenClientIds, borrowedClientIds...)
 			findProviders2BackfillProviders.WithLabelValues(rankMode).Observe(float64(len(borrowedClientIds)))
 			findProviders2AnsweredProviders.WithLabelValues(rankMode).Add(float64(len(clientIds) + len(borrowedClientIds)))
 		}
+		chosenClientIds := append(slices.Clone(clientIds), borrowedClientIds...)
 		observation.discoveryReturned = len(chosenClientIds)
 
 		// export one anonymized stats sample tracing this call's pool and

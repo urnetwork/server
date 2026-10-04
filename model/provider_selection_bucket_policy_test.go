@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 )
@@ -210,6 +214,79 @@ func TestFindProviders2FallbackKeepsObservedRiskOutOfEveryTier(t *testing.T) {
 		}
 		if combined != nil {
 			t.Fatal(combined)
+		}
+	})
+}
+
+// A later Quality read can reject a provider already selected as Speed or by
+// name. Remove that earlier selection before filling the remaining quota.
+func TestFindProviders2FallbackRevokesEarlierSelectedRisk(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		nativeTestEnableReader(t)
+		ctx := t.Context()
+		location := server.NewId()
+		speed := nativeTestScore(RankModeSpeed, ipFamilyFacetV4Only)
+		risky := nativeTestScore(RankModeSpeed, ipFamilyFacetV4Only)
+		risky.PassesMinimums[RankModeQuality] = true
+		qualityA := nativeTestScore(RankModeQuality, ipFamilyFacetV4Only)
+		qualityB := nativeTestScore(RankModeQuality, ipFamilyFacetV4Only)
+		online := onlineBackfillScore(true, 1)
+		scores := map[ipFamilyFacet][]*ClientScore{ipFamilyFacetV4Only: {speed, risky, qualityA, qualityB, online}}
+		for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
+			nativeTestPublishLocation(t, location, mode, scores)
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client_location SET arin_risk=true WHERE connection_id=$1`, risky.ClientId))
+		})
+		common, err := getProviderHardExclusions(ctx, []server.Id{risky.ClientId})
+		if err != nil || common[risky.ClientId] {
+			t.Fatal("fixture must discover risk in the later Quality read")
+		}
+		observed := func() (uint64, float64, float64) {
+			metric := &dto.Metric{}
+			if err := findProviders2BackfillProviders.WithLabelValues(RankModeSpeed).(prometheus.Metric).Write(metric); err != nil {
+				t.Fatal(err)
+			}
+			answered := testutil.ToFloat64(findProviders2AnsweredProviders.WithLabelValues(RankModeSpeed))
+			return metric.GetHistogram().GetSampleCount(), metric.GetHistogram().GetSampleSum(), answered
+		}
+		for _, nativeReader := range []bool{false, true} {
+			func() {
+				pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(fmt.Sprintf("subscriber_quality_policy_version: 2\negress_index:\n  native_reader_enabled: %t\n", nativeReader)))
+				defer pop()
+				requestEgressIndexSettingsSnapshot.Store(nil)
+				defer requestEgressIndexSettingsSnapshot.Store(nil)
+				for _, named := range []bool{false, true} {
+					specs := []*ProviderSpec{{LocationId: &location}}
+					if named {
+						specs = append(specs, &ProviderSpec{ClientId: &risky.ClientId})
+					}
+					clientSession := testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "late-risk-fallback-test", false, false))
+					answers, borrowed, answered := observed()
+					result, err := FindProviders2(&FindProviders2Args{Specs: specs, RankMode: RankModeSpeed, Count: 4, ForceCount: true}, clientSession)
+					if err != nil || result == nil || len(result.Providers) != 4 {
+						t.Fatalf("reader=%t named=%t: late risk removal did not refill available supply", nativeReader, named)
+					}
+					assertEgressTestNoRepeats(t, result.Providers)
+					assertEgressTestTiersKeepOrder(t, result.Providers)
+					for index, provider := range result.Providers {
+						wantTier := egressTestBackfillOffset()
+						valid := provider.ClientId == qualityA.ClientId || provider.ClientId == qualityB.ClientId
+						if index == 0 {
+							wantTier, valid = 0, provider.ClientId == speed.ClientId
+						} else if index == 3 {
+							wantTier, valid = 2*egressTestBackfillOffset(), provider.ClientId == online.ClientId
+						}
+						if !valid || provider.Tier != wantTier {
+							t.Fatalf("reader=%t named=%t: later risk survived an earlier selection or changed fallback order", nativeReader, named)
+						}
+					}
+					nextAnswers, nextBorrowed, nextAnswered := observed()
+					if nextAnswers-answers != 1 || nextBorrowed-borrowed != 3 || nextAnswered-answered != 4 {
+						t.Fatal("late risk removal left rejected providers in selection metrics")
+					}
+				}
+			}()
 		}
 	})
 }

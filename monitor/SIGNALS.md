@@ -6493,6 +6493,10 @@ The same bounded live query returns explicit risk separately: an observed risk
 joins the request's common exclusions even if the published snapshot is older.
 It is not stored as a Quality-only cached refusal; waiting callers read fresh
 so a cache hit cannot discard the risk reason. No additional query is added.
+If that later read rejects an already selected Speed or named provider, remove
+it before remaining-quota and refill decisions; final answer/backfill counts
+must exclude the revoked selection. The overlap control verifies refill and
+tier order for both readers rather than accepting a short post-filter answer.
 
 The geographic picker still reads the public native-or-Online count. Its
 Quality-named key does not mean native Quality only, and this selection fix
