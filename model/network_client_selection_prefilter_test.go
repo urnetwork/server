@@ -73,6 +73,12 @@ func TestFindProviders2PrefilterBoundsSubscriberReadsUnderContention(t *testing.
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_client_location WHERE connection_id=$1`, unknown.ClientId))
 			})
+			if source != "primary" {
+				// Subscriber evidence is required by native Quality only. The
+				// same unknown provider remains eligible as Speed or Online.
+				allowed[unknown.ClientId] = true
+				args.Count, args.ForceCount = len(allowed), true
+			}
 			providerSubscriberNegativeCache = newSubscriberNegativeCache(subscriberNegativeCapacity, time.Now)
 			var candidateReads atomic.Int64
 			providerSubscriberNegativeCache.observe = func(event string, count int) {
@@ -132,8 +138,12 @@ func TestFindProviders2PrefilterBoundsSubscriberReadsUnderContention(t *testing.
 			})
 			batches := testutil.ToFloat64(subscriberEligibilityEventCounters["sql_batch"]) - beforeBatches
 			t.Logf("prefilter_contention source=%s concurrent_requests=%d pg_slots=1 cached_refusals=%d sql_batches=%g subscriber_candidate_reads=%d elapsed_ms=%.3f", source, requests, rejected, batches, candidateReads.Load(), float64(time.Since(started))/float64(time.Millisecond))
-			if batches != requests || candidateReads.Load() > requests*21 {
-				t.Fatalf("%s request-only refusals consumed subscriber SQL: batches=%g candidates=%d; want %d batches and at most %d candidates", source, batches, candidateReads.Load(), requests, requests*21)
+			wantBatches, maxCandidateReads := float64(0), int64(0)
+			if source == "primary" {
+				wantBatches, maxCandidateReads = requests, requests*21
+			}
+			if batches != wantBatches || candidateReads.Load() > maxCandidateReads {
+				t.Fatalf("%s request-only refusals consumed subscriber SQL: batches=%g candidates=%d; want %g batches and at most %d candidates", source, batches, candidateReads.Load(), wantBatches, maxCandidateReads)
 			}
 		}
 	})

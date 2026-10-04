@@ -30,18 +30,40 @@ func observeSubscriberEligibilityEvent(event string, count int) {
 	}
 }
 
-// Subscriber eligibility applies to the original Quality request, including
-// named providers, force_minimum, Speed borrowing and Online fallback. The
-// common cached hard-exclusion set deliberately has no Quality-only members.
+// Named providers and force_minimum keep the requested bucket's policy.
+// Discovery evaluates subscriber evidence for native Quality membership;
+// Speed and Online borrowing use the independent common exclusions.
 func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mode RankMode) (map[server.Id]bool, error) {
 	excluded, err := getProviderHardExclusions(ctx, clientIds)
 	if err != nil || mode != RankModeQuality || len(clientIds) == 0 {
 		return excluded, err
 	}
+	pending := make([]server.Id, 0, len(clientIds))
+	for _, id := range clientIds {
+		if !excluded[id] {
+			pending = append(pending, id)
+		}
+	}
+	negative, risky, err := getProviderSubscriberExclusions(ctx, pending)
+	if err != nil {
+		return nil, err
+	}
+	for id := range negative {
+		excluded[id] = true
+	}
+	for id := range risky {
+		excluded[id] = true
+	}
+	return excluded, nil
+}
+
+// Separate Quality membership from explicit live risk. A risk observed by this
+// guard remains a common refusal even while the published snapshot is older.
+func getProviderSubscriberExclusions(ctx context.Context, clientIds []server.Id) (map[server.Id]bool, map[server.Id]bool, error) {
 	enabled, err := subscriberQualityPolicyEnabled()
 	if err != nil || !enabled {
 		providerSubscriberNegativeCache.reset()
-		return excluded, err
+		return nil, nil, err
 	}
 	// Positive decisions always read current connection facts on the primary.
 	// A one-second negative-only cache coalesces repeated rejections; its age
@@ -52,14 +74,15 @@ func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mo
 	pending := make([]server.Id, 0, len(clientIds))
 	seen := make(map[server.Id]bool, len(clientIds))
 	for _, id := range clientIds {
-		if !excluded[id] && !seen[id] {
+		if !seen[id] {
 			seen[id] = true
 			pending = append(pending, id)
 		}
 	}
 	if len(pending) == 0 {
-		return excluded, nil
+		return nil, nil, nil
 	}
+	risky := make(map[server.Id]bool)
 	negative, readErr := providerSubscriberNegativeCache.lookup(ctx, pending, func(ctx context.Context, pending []server.Id, markObserved func()) (map[server.Id]bool, error) {
 		negative := make(map[server.Id]bool)
 		var readErr error
@@ -77,12 +100,20 @@ func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mo
 				}
 				for rows.Next() {
 					var id server.Id
-					if err := rows.Scan(&id); err != nil {
+					var risk bool
+					if err := rows.Scan(&id, &risk); err != nil {
 						rows.Close()
 						readErr = err
 						return
 					}
-					negative[id] = true
+					if risk {
+						risky[id] = true
+						// The cache stores Quality-only refusals, not common risk.
+						// Omitting this id makes concurrent followers read fresh;
+						// it cannot lose the reason on a later cached downgrade.
+					} else {
+						negative[id] = true
+					}
 				}
 				readErr = rows.Err()
 				rows.Close()
@@ -94,12 +125,9 @@ func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mo
 		return negative, readErr
 	})
 	if readErr != nil {
-		return nil, readErr
+		return nil, nil, readErr
 	}
-	for id := range negative {
-		excluded[id] = true
-	}
-	return excluded, nil
+	return negative, risky, nil
 }
 
 // Aggregate the candidate batch together so the live-handler relation is joined
@@ -117,7 +145,7 @@ const providerSubscriberExclusionsSql = `
 		JOIN network_client_handler AS handler ON handler.handler_id = connections.handler_id
 			AND handler.heartbeat_time >= $2
 	)
-	SELECT candidates.client_id
+	SELECT candidates.client_id, bool_or(COALESCE(location.arin_risk, false)) AS arin_risk
 	FROM candidates
 	LEFT JOIN live ON live.client_id = candidates.client_id
 	LEFT JOIN network_client_location AS location ON location.connection_id = live.connection_id

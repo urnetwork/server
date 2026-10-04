@@ -150,6 +150,11 @@ and risk rules to explicit-client and
 
 Quality requests take native quality first, then native speed, then online.
 Speed requests take native speed first, then native quality, then online.
+Subscriber evidence applies to native Quality membership, including Quality
+borrowed by a Speed request. A Quality request cannot carry that Quality-only
+refusal into its lower Speed or Online tiers. Those borrowed rows keep their
+own bucket's common security gates and lower client-visible priority. Explicit
+provider IDs and force_minimum retain the explicitly requested Quality policy.
 Read enough pages to fill the requested native limit after request filters,
 or establish actual exhaustion of that native source, before borrowing from
 the next bucket. Online rows cannot count toward a native quota. An initial
@@ -6853,3 +6858,34 @@ final accounting with no remaining reservation. The independent receipt is
 throughput improvement or backlog recovery is established by these local gates.
 The separate ordinary-close mixed accounting/deferred-page classification
 remains under investigation.
+
+### 2026-10-04 uniform provider fallback source correction
+
+The deployed API source `4ee64ef3`, current Main and the next `65f0232b` API
+candidate all retained an original-request subscriber guard across Speed and
+Online borrowing. Existing tests even required a Quality response to stay empty
+when the same target had a full eligible Speed cohort. This conflicts with the
+bucket matrix and uniform fallback contract above. The correction separates
+common exclusions from native Quality membership and preserves lower-tier
+fallback without claiming it as Quality supply. It also revalidates Quality
+borrowed by Speed, retains strict explicit/forced Quality checks, and avoids
+subscriber SQL for candidates considered only as Speed or Online.
+Fresh explicit risk observed by that same SQL remains a common exclusion; it
+cannot be converted to a lower-tier answer or stored as a Quality-only cached
+refusal. Repeated and concurrent warm-cache controls cover this distinction.
+If the later Quality read discovers risk for an already chosen Speed or named
+provider, it revokes that earlier selection before computing remaining quota.
+The same-target lower tiers refill the vacancy; answered and backfill counters
+count the surviving selections only. The overlap control covers both cache
+readers, named/discovery overlap, and native/borrowed/Online ordering.
+
+The actual initial/search geographic picker already uses a public
+native-or-Online count under its legacy Quality-named key. Neither native
+Quality zero nor the completed FP2 country zero cohorts prove that this listing
+returned empty or explain its latency. Root's retained 18:50 observations of
+high completed Quality zero fractions are a separate selection symptom; this
+source mechanism is not an exact attribution of those requests. Provider IPv6
+empty cohorts are outside this investigation as requested. The frozen next API
+candidate remains untouched; integration and deployment follow independent
+baseline, focused and race gates. Main selection, picker latency, durable URL
+quota, and sustained database recovery remain open.
