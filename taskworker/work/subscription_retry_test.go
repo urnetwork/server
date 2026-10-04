@@ -58,6 +58,10 @@ func newCloseRetryFixture(t testing.TB, ctx context.Context) closeRetryFixture {
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$3 WHERE contract_id IN ($1,$2)`,
 			originId, companionId, time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)))
+		// Both creation and authenticated reports must predate the quiet
+		// cutoff; fresh reports deliberately withdraw an expiry candidate.
+		server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET close_time=$2 WHERE contract_id=$1`,
+			companionId, time.Date(2020, time.January, 1, 0, 1, 0, 0, time.UTC)))
 	})
 	return closeRetryFixture{originId: originId, companionId: companionId, balanceId: balances[0].BalanceId, grant: grant}
 }
@@ -127,6 +131,10 @@ func testCloseExpiredAccountingRejectionKeepsTaskAndIdleCadence(t *testing.T, qu
 				model.CloseContract(ctx, fixture.originId, destinationId, 2*fixture.grant, true) != nil {
 				t.Fatal("synthetic over-grant checkpoint pair failed")
 			}
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE contract_close SET close_time=$2 WHERE contract_id=$1`,
+					fixture.originId, time.Date(2020, time.January, 1, 0, 1, 0, 0, time.UTC)))
+			})
 		}
 		clientSession := session.Testing_CreateClientSession(ctx, nil)
 		defer clientSession.Cancel()

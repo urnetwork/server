@@ -1,6 +1,7 @@
 package work
 
 import (
+	"context"
 	"fmt"
 	"math"
 	mathrand "math/rand"
@@ -116,31 +117,40 @@ func CloseExpiredContracts(
 			closeExpiredContracts.BlockIndex,
 			closeExpiredContracts.Cursor,
 		)
-		// The model alone can attest that every selected row completed and
-		// every failure is a verified still-reserved dispute or completed
-		// no-payout quarantine. Never infer authority from a mixed error join.
-		// Scanning past an owned or recently active head is page progress,
-		// not a verified close. Continue the bounded pass without parking it
-		// at the idle cadence; completion resets to the oldest head next pass.
-		full := closeExpiredContractsFull(c) || next != nil
-		if accounting, ok := err.(*model.ForceCloseAccountingError); ok && clientSession.Ctx.Err() == nil &&
-			0 <= accounting.VerifiedCloseCount() && 0 <= accounting.AccountingRejectionCount() &&
-			0 <= accounting.QuarantinedAccountingRejectionCount() && accounting.QuarantinedAccountingRejectionCount() <= accounting.VerifiedCloseCount() &&
-			0 < accounting.AccountingRejectionCount()+accounting.QuarantinedAccountingRejectionCount() &&
-			accounting.VerifiedCloseCount()+accounting.AccountingRejectionCount() == c {
-			full = closeExpiredContractsFull(accounting.VerifiedCloseCount())
-			delay := closeExpiredContractsRetryDelay(accounting.VerifiedCloseCount(), mathrand.Float64())
-			err = task.WithRetryDelay(err, delay)
-			glog.Infof("[close-expired]completed batch terminal_verified=%d unresolved_accounting=%d quarantined_accounting=%d retry_delay_ms=%d\n",
-				accounting.VerifiedCloseCount(), accounting.AccountingRejectionCount(), accounting.QuarantinedAccountingRejectionCount(), delay.Milliseconds())
-		}
-		return &CloseExpiredContractsResult{
-			Full:   full,
-			Cursor: next,
-		}, err
+		return closeExpiredContractsPageResult(clientSession.Ctx, closeExpiredContracts, c, next, err)
 	}
 	// else ignore lingering tasks with older block size
 	return &CloseExpiredContractsResult{}, nil
+}
+
+// Only a completed, fully classified accounting-error page may checkpoint its
+// raw scan position. End of pass resets the cursor so protected rows return on
+// the next pass; ambiguous/operational failures keep the original task args.
+func closeExpiredContractsPageResult(ctx context.Context, args *CloseExpiredContractsArgs, c int64, next *model.ContractExpiryCursor, err error) (*CloseExpiredContractsResult, error) {
+	// The model alone can attest that every selected row completed and
+	// every failure is a verified still-reserved dispute or completed
+	// no-payout quarantine. Never infer authority from a mixed error join.
+	// Scanning past an owned or recently active head is page progress,
+	// not a verified close. Continue the bounded pass without parking it
+	// at the idle cadence; completion resets to the oldest head next pass.
+	full := closeExpiredContractsFull(c) || next != nil
+	if accounting, ok := err.(*model.ForceCloseAccountingError); ok && ctx.Err() == nil &&
+		0 <= accounting.VerifiedCloseCount() && 0 <= accounting.AccountingRejectionCount() &&
+		0 <= accounting.QuarantinedAccountingRejectionCount() && accounting.QuarantinedAccountingRejectionCount() <= accounting.VerifiedCloseCount() &&
+		0 < accounting.AccountingRejectionCount()+accounting.QuarantinedAccountingRejectionCount() &&
+		accounting.VerifiedCloseCount()+accounting.AccountingRejectionCount() == c {
+		full = closeExpiredContractsFull(accounting.VerifiedCloseCount())
+		delay := closeExpiredContractsRetryDelay(accounting.VerifiedCloseCount(), mathrand.Float64())
+		err = task.WithRetryDelayAndArgs(err, delay, &CloseExpiredContractsArgs{
+			BlockSize: args.BlockSize, BlockIndex: args.BlockIndex, Cursor: next,
+		})
+		glog.Infof("[close-expired]completed batch terminal_verified=%d unresolved_accounting=%d quarantined_accounting=%d retry_delay_ms=%d\n",
+			accounting.VerifiedCloseCount(), accounting.AccountingRejectionCount(), accounting.QuarantinedAccountingRejectionCount(), delay.Milliseconds())
+	}
+	return &CloseExpiredContractsResult{
+		Full:   full,
+		Cursor: next,
+	}, err
 }
 
 func CloseExpiredContractsPost(

@@ -3,6 +3,7 @@ package task
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -10,8 +11,9 @@ import (
 // The target owns the complete failure it wraps; a nested hint inside a joined
 // error cannot shorten another failure's backoff.
 type retryDelayError struct {
-	cause error
-	delay time.Duration
+	cause         error
+	delay         time.Duration
+	retryArgsJson *string
 }
 
 // Preserve the original durable error text.
@@ -28,6 +30,52 @@ func WithRetryDelay(err error, delay time.Duration) error {
 		return err
 	}
 	return &retryDelayError{cause: err, delay: delay}
+}
+
+// WithRetryDelayAndArgs checkpoints only target-attested completed work on a
+// failing task. It snapshots a small object of next arguments; error text,
+// error count, task identity and retry delay remain owned by the normal retry.
+// Mixed failures, canceled work and invalid arguments retain the original args.
+func WithRetryDelayAndArgs(err error, delay time.Duration, args any) error {
+	hinted := WithRetryDelay(err, delay)
+	hint, ok := hinted.(*retryDelayError)
+	if !ok || !taskRetryCheckpointAllowed(hint) {
+		return hinted
+	}
+	data, marshalErr := json.Marshal(args)
+	if marshalErr != nil || len(data) == 0 || 4*1024 < len(data) || data[0] != '{' {
+		return hinted
+	}
+	argsJson := string(data)
+	return &retryDelayError{cause: hint.cause, delay: hint.delay, retryArgsJson: &argsJson}
+}
+
+// A root hint owns its complete failure; joins/wrappers never grant checkpoint
+// authority to another error. Cancellation and ownership loss remain retriable.
+func taskRetryCheckpointAllowed(hint *retryDelayError) bool {
+	if _, joined := hint.cause.(interface{ Unwrap() []error }); joined {
+		return false
+	}
+	return validTaskRetryDelay(hint.delay) &&
+		!errors.Is(hint, context.Canceled) && !errors.Is(hint, context.DeadlineExceeded) &&
+		!errors.Is(hint, ErrDrained) && !errors.Is(hint, ErrTargetNotFound)
+}
+
+// Reads an immutable checkpoint only from the exact completed target failure.
+func taskRetryArgsJson(err error) *string {
+	if hint, ok := err.(*retryDelayError); ok && taskRetryCheckpointAllowed(hint) {
+		return hint.retryArgsJson
+	}
+	return nil
+}
+
+// Cancellation after a target built its hint withdraws only the checkpoint;
+// the owning error and existing retry policy remain unchanged.
+func withoutTaskRetryArgs(err error) error {
+	if hint, ok := err.(*retryDelayError); ok && hint.retryArgsJson != nil {
+		return &retryDelayError{cause: hint.cause, delay: hint.delay}
+	}
+	return err
 }
 
 // Revalidate at use time so changed task settings cannot make a hint unbounded.

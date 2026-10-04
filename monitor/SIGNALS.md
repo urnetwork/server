@@ -600,6 +600,19 @@ FROM failures GROUP BY task;
   the guard. Only the target's positive typed batch proof can request this
   cadence; diagnostic error text alone cannot authorize it.
 
+  Completed accounting-error pages also checkpoint their bounded raw-scan
+  cursor in the same pending-task update as the retained error, increasing
+  count and existing retry delay. Previously the target returned a continuation
+  but the failed-task path discarded it, repeatedly selecting the protected
+  head. The same exact typed, fully completed batch proof owns this checkpoint;
+  mixed, canceled, timed-out or incomplete work retains its prior arguments.
+  No success post or financial operation runs during retry finalization.
+  End of pass resets the cursor, so unresolved reserved disputes return on the
+  next pass. Local real-model/scheduler controls require two rejected pages to
+  advance, preserve accounting state and task identity, then revisit the head.
+  This proves the cursor mechanism, not a live backlog reduction: require
+  fresh cursor movement and shrinking eligible-age buckets before recovery.
+
   Retry/progress authority: max_errors is a cumulative stored retry count,
   not a failed-contract count or a matched-window execution rate.
   outcome=failed is intentional when the target retains any unresolved
