@@ -70,6 +70,7 @@ func (self *providerWorkWindowFixture) retainAuthority(t testing.TB) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
+	self.authority = authority
 	raw, err := authority.Bytes(t.Context())
 	if err != nil {
 		t.Fatal(err)

@@ -13,9 +13,7 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urfoundation/sn/payoutartifact"
-	"github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/startifact"
@@ -24,35 +22,32 @@ import (
 // The caller supplies the already retained same-SQL window and independently
 // read epoch boundaries. Every expected owner comes solely from the root roster.
 func stPrepareWholeWorkInventory(ctx context.Context, cfg *StConfig, epoch *StPayoutEpochAuthority, window *payoutartifact.ClosedWorkWindow) (*payoutartifact.WholeWorkInventory, payoutartifact.WholeWorkExpectation, error) {
-	domainHash, approver, expected, err := LoadProviderWorkAuthorityPolicy()
-	if errors.Is(err, server.ErrResourceNotFound) {
-		return nil, expected, nil
-	}
+	approved, err := stLoadProviderWorkAuthority(ctx, cfg, epoch)
 	if err != nil {
-		return nil, expected, err
+		return nil, payoutartifact.WholeWorkExpectation{}, err
 	}
-	if cfg == nil || epoch == nil || cfg.Netuid == 0 || cfg.Netuid > 65535 || cfg.ArtifactKey == nil {
-		return nil, expected, model.ErrProviderWorkInvalid
+	return stPrepareApprovedWholeWorkInventory(ctx, approved, epoch, window)
+}
+
+// The production caller already used this exact authority for all provider
+// input queries. The same retained bytes then own the signed inventory join.
+func stPrepareApprovedWholeWorkInventory(ctx context.Context, approved *stProviderWorkAuthority, epoch *StPayoutEpochAuthority, window *payoutartifact.ClosedWorkWindow) (*payoutartifact.WholeWorkInventory, payoutartifact.WholeWorkExpectation, error) {
+	if approved == nil {
+		return nil, payoutartifact.WholeWorkExpectation{}, nil
 	}
-	domain := protocol.ClientKeyHistoryDomain{ChainID: cfg.ChainId, GenesisHash: cfg.GenesisHash, Netuid: uint16(cfg.Netuid), Coordinator: cfg.ContractAddress, SettlementVault: cfg.SettlementVault, DeploymentIDHash: sha256.Sum256([]byte(cfg.DeploymentId)), PolicyHash: epoch.PolicyHash, NoID: cfg.NoId}
-	actual, err := domain.Digest()
-	if err != nil || actual != domainHash || expected.AuthoritySigner == crypto.PubkeyToAddress(cfg.ArtifactKey.PublicKey) {
-		return nil, expected, errors.Join(model.ErrProviderWorkConflict, err)
+	raw, authority, expected := approved.Raw, approved.Authority, approved.Expectation
+	domainHash, err := authority.Domain.Digest()
+	if err != nil || epoch == nil {
+		return nil, expected, errors.Join(model.ErrProviderWorkInvalid, err)
 	}
-	raw, authority, err := model.GetProviderWorkAuthority(ctx, domainHash, epoch.Epoch, expected.AuthoritySigner)
-	if errors.Is(err, model.ErrProviderWorkMissing) {
-		return nil, expected, nil
-	}
-	if err != nil {
-		return nil, expected, err
-	}
+	approver := authority.RequestPublicKey
 	start := payoutartifact.Boundary{Number: epoch.Start.Block, Hash: common.Hash(epoch.Start.Hash).Hex()}
 	end := payoutartifact.Boundary{Number: epoch.End.Block, Hash: common.Hash(epoch.End.Hash).Hex()}
-	if authority.Domain != domain || authority.Start != start || authority.End != end || authority.RequestPublicKey != approver {
+	if authority.Epoch != epoch.Epoch || authority.Start != start || authority.End != end {
 		return nil, expected, model.ErrProviderWorkConflict
 	}
 	// Historical absence cannot become an invented empty window or timestamp.
-	if window == nil || len(epoch.StartHeader) == 0 || len(epoch.EndHeader) == 0 {
+	if authority.ExpectedProviders == nil || window == nil || len(epoch.StartHeader) == 0 || len(epoch.EndHeader) == 0 {
 		return nil, expected, nil
 	}
 	if authority.ClockProfile != epoch.ClockProfile {
@@ -93,7 +88,14 @@ func stPrepareWholeWorkInventory(ctx context.Context, cfg *StConfig, epoch *StPa
 	}
 	owned, err := payoutartifact.DecodeWholeWorkInventory(ctx, encoded)
 	expected.AuthorityHash = fmt.Sprintf("sha256:%x", sha256.Sum256(raw))
-	return owned, expected, err
+	if err != nil {
+		return nil, expected, err
+	}
+	expected, err = providerWorkPriorExpectation(ctx, authority, expected)
+	if err != nil {
+		return nil, expected, err
+	}
+	return owned, expected, nil
 }
 
 // Publication first verifies the final signed artifact and retains the exact
@@ -155,6 +157,10 @@ func ProviderWorkWindow(ctx context.Context, domainHash [32]byte, epoch uint64, 
 		return nil, err
 	}
 	expected.AuthorityHash = "sha256:" + hex.EncodeToString(digest[:])
+	expected, err = providerWorkPriorExpectation(ctx, authority, expected)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := payoutartifact.VerifyWholeWorkInventoryWithWitness(ctx, artifact, inventory, expected); err != nil {
 		return nil, err
 	}

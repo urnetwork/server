@@ -294,11 +294,11 @@ func providerWorkHttpError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, model.ErrProviderWorkInvalid):
 		status = http.StatusBadRequest
-	case errors.Is(err, model.ErrProviderWorkConflict):
+	case errors.Is(err, model.ErrProviderWorkConflict), errors.Is(err, payoutartifact.ErrClosedWorkIntegrity):
 		status = http.StatusConflict
-	case errors.Is(err, model.ErrProviderWorkMissing):
+	case errors.Is(err, model.ErrProviderWorkMissing), errors.Is(err, payoutartifact.ErrClosedWorkUnavailable):
 		status = http.StatusNotFound
-	case errors.Is(err, model.ErrProviderWorkCapacity):
+	case errors.Is(err, model.ErrProviderWorkCapacity), errors.Is(err, payoutartifact.ErrClosedWorkCapacity):
 		status = http.StatusTooManyRequests
 	}
 	http.Error(w, "Provider work operation unavailable or refused.", status)
