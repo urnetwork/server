@@ -5,6 +5,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -17,6 +18,8 @@ import (
 
 const transferDebitBatchSize = 512
 const TransferDebitShardCount = 16
+
+var errTransferDebitPageDeadline = errors.New("transfer debit page deadline")
 
 func transferDebitShard(balanceId server.Id) int { return int(balanceId[15]) % TransferDebitShardCount }
 
@@ -55,6 +58,13 @@ type transferDebit struct {
 	applied    bool
 }
 
+// Operations belong to one bounded traversal. The public worker supplies the
+// real indexed lookup and durable financial owner; no shared mutable hooks exist.
+type transferDebitPageOperations struct {
+	nextBalance  func(context.Context, int, *server.Id) *server.Id
+	flushBalance func(context.Context, server.Id) (int, int, bool, error)
+}
+
 // Advance by balance key rather than repeatedly retrying one busy oldest grant.
 // Each next-key lookup is one index seek, each grant has one finite journal page.
 // The task persists LastBalanceId; reaching the end restarts on the next cadence.
@@ -70,7 +80,7 @@ func FlushTransferDebits(ctx context.Context, shard int, after *server.Id, maxBa
 			transferDebitCompleteTime.WithLabelValues(label).SetToCurrentTime()
 		}
 	}()
-	bounded, cancel := context.WithTimeout(ctx, 15*time.Second)
+	bounded, cancel := context.WithTimeoutCause(ctx, 15*time.Second, errTransferDebitPageDeadline)
 	defer cancel()
 	server.HandleError(func() {
 		server.Db(bounded, func(conn server.PgConn) {
@@ -84,29 +94,52 @@ func FlushTransferDebits(ctx context.Context, shard int, after *server.Id, maxBa
 			}
 			transferDebitSampleTime.WithLabelValues(label).SetToCurrentTime()
 		})
+		var err error
+		result, err = flushTransferDebitPage(ctx, bounded, shard, after, maxBalances, transferDebitPageOperations{
+			nextBalance: nextTransferDebitBalance, flushBalance: flushTransferDebitBalance,
+		})
+		server.Raise(err)
+	}, func(err error) { returnErr = err })
+	if returnErr != nil {
+		transferDebitResults.WithLabelValues("error").Inc()
+	}
+	return
+}
+
+// This indexed read has its own checkout; the previous balance's financial
+// commit and Redis release have finished before the next key is requested.
+func nextTransferDebitBalance(ctx context.Context, shard int, after *server.Id) (next *server.Id) {
+	server.Db(ctx, func(conn server.PgConn) {
+		query := `SELECT balance_id FROM transfer_debit_journal WHERE shard=$1 ORDER BY balance_id LIMIT 1`
+		args := []any{shard}
+		if after != nil {
+			query = `SELECT balance_id FROM transfer_debit_journal WHERE shard=$1 AND balance_id>$2 ORDER BY balance_id LIMIT 1`
+			args = append(args, *after)
+		}
+		rows, err := conn.Query(ctx, query, args...)
+		server.WithPgResult(rows, err, func() {
+			if rows.Next() {
+				var id server.Id
+				server.Raise(rows.Scan(&id))
+				next = &id
+			}
+		})
+	})
+	return
+}
+
+// Persist only visited balance keys. Per-balance failures retain their existing
+// fair-cursor policy; the durable journal remains the accounting replay fence.
+func flushTransferDebitPage(ctx, bounded context.Context, shard int, after *server.Id, maxBalances int,
+	operations transferDebitPageOperations) (result TransferDebitFlushResult, returnErr error) {
+	server.HandleError(func() {
 		for range maxBalances {
-			var next *server.Id
-			server.Db(bounded, func(conn server.PgConn) {
-				query := `SELECT balance_id FROM transfer_debit_journal WHERE shard=$1 ORDER BY balance_id LIMIT 1`
-				args := []any{shard}
-				if after != nil {
-					query = `SELECT balance_id FROM transfer_debit_journal WHERE shard=$1 AND balance_id>$2 ORDER BY balance_id LIMIT 1`
-					args = append(args, *after)
-				}
-				rows, err := conn.Query(bounded, query, args...)
-				server.WithPgResult(rows, err, func() {
-					if rows.Next() {
-						var id server.Id
-						server.Raise(rows.Scan(&id))
-						next = &id
-					}
-				})
-			})
+			next := operations.nextBalance(bounded, shard, after)
 			if next == nil {
 				result.LastBalanceId = nil
 				return
 			}
-			applied, released, busy, err := flushTransferDebitBalance(bounded, *next)
+			applied, released, busy, err := operations.flushBalance(bounded, *next)
 			if err != nil {
 				result.Failed++
 				transferDebitResults.WithLabelValues("error").Inc()
@@ -133,9 +166,6 @@ func FlushTransferDebits(ctx context.Context, shard int, after *server.Id, maxBa
 		}
 		result.More = true
 	}, func(err error) { returnErr = err })
-	if returnErr != nil {
-		transferDebitResults.WithLabelValues("error").Inc()
-	}
 	return
 }
 

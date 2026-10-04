@@ -47,7 +47,7 @@ func TestTransferDebitTaskPartitionsAndBoundedContinuation(t *testing.T) {
 			released, failed int
 			immediate        bool
 		}{
-			{"progress", true, 512, 0, true}, {"busy", true, 0, 0, false}, {"partial_failure", true, 512, 1, false}, {"caught_up", false, 3, 0, false},
+			{"progress", true, 512, 0, true}, {"page_deadline_progress", true, 1, 0, true}, {"busy", true, 0, 0, false}, {"partial_failure", true, 512, 1, false}, {"caught_up", false, 3, 0, false},
 		} {
 			cursor := server.NewId()
 			before := server.NowUtc()
