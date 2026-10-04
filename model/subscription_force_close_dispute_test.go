@@ -185,10 +185,13 @@ func (self *forceCloseDisputeFixture) state(t testing.TB, ctx context.Context) f
 	return state
 }
 
-// Both orientations and both-checkpoint pairs must converge in one bounded sweep.
-// Equal totals are healthy controls; reversed unequal totals pin average settlement.
+// Both orientations and both-checkpoint pairs finalize in one bounded sweep.
+// Redis-backed debt remains reserved until its durable debit worker commits;
+// repeats before and after that boundary must not duplicate accounting.
 func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		orientations := []struct {
 			name                  string
@@ -230,8 +233,47 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 			t.Error("first sweep returned an error for valid checkpoint totals")
 		}
 		connect.AssertEqual(t, int64(len(fixtures)), closeCount)
+		pendingStates := make([]forceCloseDisputeState, 0, len(fixtures))
+		for index, fixture := range fixtures {
+			state := fixture.state(t, ctx)
+			pendingStates = append(pendingStates, state)
+			mean := (fixture.sourceByteCount + fixture.destinationByteCount) / 2
+			if state.outcome != ContractOutcomeSettled || state.dispute || state.open || state.streamFound ||
+				!state.escrowSettled || !state.redisReserved || state.sourceCheckpoint || state.destinationCheckpoint ||
+				state.sourceByteCount != fixture.sourceByteCount || state.destinationByteCount != fixture.destinationByteCount ||
+				state.escrowPayoutByteCount != mean || state.providerPayoutByteCount != mean ||
+				state.payerBalanceByteCount != forceCloseDisputeInitialBalance || state.legacyEscrowByteCount != 0 ||
+				state.netEscrowByteCount != mean || state.requestTokenByteCount != mean || state.redisEscrowByteCount != mean {
+				t.Errorf("%s: first sweep did not finalize with conserved pending debt", caseNames[index])
+			}
+			var pending, applied int
+			var pendingByteCount ByteCount
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FILTER (WHERE NOT applied),
+                    count(*) FILTER (WHERE applied), COALESCE(sum(debit_byte_count) FILTER (WHERE NOT applied),0)
+                    FROM transfer_debit_journal WHERE contract_id=$1 AND balance_id=$2`,
+					fixture.contractId, fixture.balanceId).Scan(&pending, &applied, &pendingByteCount))
+			})
+			if pending != 1 || applied != 0 || pendingByteCount != mean {
+				t.Errorf("%s: first sweep did not retain exactly one unapplied debit", caseNames[index])
+			}
+		}
+		closeCount, err = ForceCloseOpenContractIds(ctx, fixtures[0].cutoff, 10, 1, 0, 0)
+		if err != nil || closeCount != 0 {
+			t.Error("repeat sweep performed work while finalized debits awaited their worker")
+		}
+		for index, fixture := range fixtures {
+			if state := fixture.state(t, ctx); state != pendingStates[index] {
+				t.Errorf("%s: repeat sweep changed finalized state or released pending debt", caseNames[index])
+			}
+		}
+
 		firstStates := make([]forceCloseDisputeState, 0, len(fixtures))
 		for index, fixture := range fixtures {
+			applied, released, busy, flushErr := flushTransferDebitBalance(ctx, fixture.balanceId)
+			if flushErr != nil || applied != 1 || released != 1 || busy {
+				t.Errorf("%s: owning debit worker did not apply and release exactly once", caseNames[index])
+			}
 			state := fixture.state(t, ctx)
 			firstStates = append(firstStates, state)
 			mean := (fixture.sourceByteCount + fixture.destinationByteCount) / 2
@@ -241,7 +283,7 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 				state.escrowPayoutByteCount != mean || state.providerPayoutByteCount != mean ||
 				state.payerBalanceByteCount != forceCloseDisputeInitialBalance-mean || state.netEscrowByteCount != 0 ||
 				state.requestTokenByteCount != 0 || state.redisEscrowByteCount != 0 {
-				t.Errorf("%s: first sweep did not settle and release exactly once", caseNames[index])
+				t.Errorf("%s: debit completion did not preserve exact settlement accounting", caseNames[index])
 			}
 		}
 		closeCount, err = ForceCloseOpenContractIds(ctx, fixtures[0].cutoff, 10, 1, 0, 0)
@@ -249,8 +291,12 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 			t.Error("second sweep performed work after the required one-pass convergence")
 		}
 		for index, fixture := range fixtures {
+			applied, released, busy, flushErr := flushTransferDebitBalance(ctx, fixture.balanceId)
+			if flushErr != nil || applied != 0 || released != 0 || busy {
+				t.Errorf("%s: repeated debit worker performed accounting work", caseNames[index])
+			}
 			if state := fixture.state(t, ctx); state != firstStates[index] {
-				t.Errorf("%s: repeat sweep changed terminal or accounting state", caseNames[index])
+				t.Errorf("%s: repeat sweep or debit worker changed terminal or accounting state", caseNames[index])
 			}
 		}
 	})
