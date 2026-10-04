@@ -61,6 +61,10 @@ func TestProviderWorkOpenObservationActualOwnerRetainsFirstBoundary(t *testing.T
 		if err != nil || original.Open.ReservationHash != hash || original.Open.BoundaryUnixMicro != boundary.UnixMicro() || original.Open.ObservedAtUnixMicro < boundary.UnixMicro() {
 			t.Fatal("observation lost its exact reservation or independently observed clock", original.Open, err)
 		}
+		retried, err := RetainProviderWorkOpenObservations(f.ctx, []server.Id{id}, 51, 501, blockHash, boundary)
+		if err != nil || len(retried) != 1 || !bytes.Equal(retried[0], originals[0]) {
+			t.Fatal("retry of a delivered or lost first reply minted a newer open tuple", err)
+		}
 		server.Db(f.ctx, func(conn server.PgConn) {
 			var unresolved bool
 			server.Raise(conn.QueryRow(f.ctx, `SELECT outcome IS NULL FROM transfer_contract WHERE contract_id=$1`, id).Scan(&unresolved))
@@ -171,7 +175,8 @@ func TestProviderWorkOpenObservationUnavailableAuthorityAndFutureBoundaryStayUnk
 	})
 }
 
-func TestProviderWorkOpenObservationWaitsForActualTerminalOwner(t *testing.T) {
+func exerciseProviderWorkOpenFence(t *testing.T, cancelWait bool) {
+	t.Helper()
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -180,6 +185,8 @@ func TestProviderWorkOpenObservationWaitsForActualTerminalOwner(t *testing.T) {
 		boundary := providerWorkOpenTestBoundary(t, f, id)
 		ctx, cancel := context.WithTimeout(f.ctx, 2*time.Minute)
 		defer cancel()
+		observerCtx, cancelObserver := context.WithCancel(ctx)
+		defer cancelObserver()
 		type result struct {
 			originals [][]byte
 			err       error
@@ -188,6 +195,7 @@ func TestProviderWorkOpenObservationWaitsForActualTerminalOwner(t *testing.T) {
 		joined := make(chan struct{})
 		started := false
 		defer func() {
+			cancelObserver()
 			cancel()
 			if started {
 				select {
@@ -224,7 +232,7 @@ func TestProviderWorkOpenObservationWaitsForActualTerminalOwner(t *testing.T) {
 			started = true
 			go func() {
 				defer close(joined)
-				originals, err := RetainProviderWorkOpenObservations(ctx, []server.Id{id}, 59, 509, [32]byte{139}, boundary)
+				originals, err := RetainProviderWorkOpenObservations(observerCtx, []server.Id{id}, 59, 509, [32]byte{139}, boundary)
 				done <- result{originals: originals, err: err}
 			}()
 			for {
@@ -244,12 +252,41 @@ func TestProviderWorkOpenObservationWaitsForActualTerminalOwner(t *testing.T) {
 				case <-time.After(time.Millisecond):
 				}
 			}
+			if cancelWait {
+				cancelObserver()
+				select {
+				case value := <-done:
+					if !errors.Is(value.err, context.Canceled) || len(value.originals) != 0 {
+						t.Fatal("canceled fenced observer retained a partial write", len(value.originals), value.err)
+					}
+				case <-ctx.Done():
+					t.Fatal("canceled observer did not release its bounded owner", ctx.Err())
+				}
+				var count int
+				server.Raise(tx.QueryRow(ctx, `SELECT count(*) FROM provider_work_open_original WHERE contract_id=$1`, id).Scan(&count))
+				if count != 0 {
+					t.Fatal("canceled original acquisition leaked a retained tuple", count)
+				}
+				server.Raise(tx.Rollback(ctx))
+				return
+			}
 			claimed, err := claimContractOutcomeInTx(ctx, tx, id, ContractOutcomeSettled)
 			if err != nil || !claimed {
 				t.Fatal("actual terminal owner did not claim its outcome", claimed, err)
 			}
 			server.Raise(tx.Commit(ctx))
 		})
+		if cancelWait {
+			first, err := RetainProviderWorkOpenObservations(f.ctx, []server.Id{id}, 59, 509, [32]byte{139}, boundary)
+			if err != nil || len(first) != 1 {
+				t.Fatal("healthy retry did not acquire the still-open original", len(first), err)
+			}
+			replayed, err := RetainProviderWorkOpenObservations(f.ctx, []server.Id{id}, 59, 509, [32]byte{139}, boundary)
+			if err != nil || len(replayed) != 1 || !bytes.Equal(first[0], replayed[0]) {
+				t.Fatal("exact retry did not reconcile the first retained tuple", err)
+			}
+			return
+		}
 		select {
 		case value := <-done:
 			if value.err != nil || len(value.originals) != 0 {
@@ -259,6 +296,38 @@ func TestProviderWorkOpenObservationWaitsForActualTerminalOwner(t *testing.T) {
 			t.Fatal(ctx.Err())
 		}
 	})
+}
+
+func TestProviderWorkOpenObservationWaitsForActualTerminalOwner(t *testing.T) {
+	exerciseProviderWorkOpenFence(t, false)
+}
+
+func TestProviderWorkOpenObservationCanceledWaitReconcilesExactRetry(t *testing.T) {
+	exerciseProviderWorkOpenFence(t, true)
+}
+
+func TestProviderWorkOpenObservationDeadlinePreservesApprovedBudgetAndParent(t *testing.T) {
+	parent := WithProviderWorkSessionSource(context.Background(), nil)
+	before := time.Now()
+	ctx, cancel := providerWorkOpenContext(parent)
+	defer cancel()
+	after := time.Now()
+	deadline, ok := ctx.Deadline()
+	if !ok || deadline.Before(before.Add(300*time.Second)) || deadline.After(after.Add(300*time.Second)) {
+		t.Fatal("open observation shortened the approved expected-read owner", deadline)
+	}
+	parentDeadline := before.Add(60 * time.Second)
+	shortParent, shortCancel := context.WithDeadline(parent, parentDeadline)
+	defer shortCancel()
+	short, stop := providerWorkOpenContext(shortParent)
+	defer stop()
+	if deadline, ok := short.Deadline(); !ok || !deadline.Equal(parentDeadline) {
+		t.Fatal("open observation extended its caller deadline", deadline)
+	}
+	shortCancel()
+	if !errors.Is(short.Err(), context.Canceled) {
+		t.Fatal("open observation escaped caller cancellation", short.Err())
+	}
 }
 
 // This instance substitutes only the database clock result; all contract locks,
