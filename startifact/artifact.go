@@ -28,11 +28,15 @@ type Artifact = payoutartifact.Artifact
 type BuildInput = payoutartifact.BuildInput
 
 var Build = payoutartifact.Build
+var BuildWithContext = payoutartifact.BuildWithContext
 var Sign = payoutartifact.Sign
 var Verify = payoutartifact.Verify
+var VerifyWithContext = payoutartifact.VerifyWithContext
 var VerifyClosedWork = payoutartifact.VerifyClosedWork
 var Bytes = payoutartifact.Bytes
+var BytesWithContext = payoutartifact.BytesWithContext
 var Decode = payoutartifact.Decode
+var DecodeWithContext = payoutartifact.DecodeWithContext
 
 const maximumArtifactBytes = 32 * 1024 * 1024
 
@@ -47,7 +51,7 @@ func Publish(ctx context.Context, store server.BlobStore, a *Artifact) (*Publish
 	if store == nil {
 		return nil, errors.New("server/blob store is unavailable")
 	}
-	b, err := Bytes(a)
+	b, err := BytesWithContext(ctx, a)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +93,7 @@ func Read(ctx context.Context, store server.BlobStore, contentHash string) (*Art
 	if len(value) > maximumArtifactBytes {
 		return nil, nil, errors.New("payout artifact exceeds 32 MiB")
 	}
-	artifact, err := Decode(value)
+	artifact, err := DecodeWithContext(ctx, value)
 	if err != nil {
 		return nil, nil, err
 	}

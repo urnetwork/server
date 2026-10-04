@@ -3325,7 +3325,7 @@ func stComputeReleasePayout(
 		closedWork.Start = startifact.Boundary{Number: startBlock, Hash: common.Hash(authority.Start.Hash).Hex()}
 		closedWork.End = startifact.Boundary{Number: closeBlock, Hash: common.Hash(authority.End.Hash).Hex()}
 	}
-	artifact, err := startifact.Build(startifact.BuildInput{
+	artifact, err := startifact.BuildWithContext(ctx, startifact.BuildInput{
 		ClosedWork:   closedWork,
 		DeploymentID: cfg.DeploymentId, GenesisHash: fmt.Sprintf("0x%x", cfg.GenesisHash), PolicyHash: fmt.Sprintf("0x%x", authority.PolicyHash),
 		ChainID: cfg.ChainId, Netuid: uint16(cfg.Netuid), Coordinator: cfg.ContractAddress,
