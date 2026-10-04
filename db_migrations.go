@@ -9553,4 +9553,5 @@ var migrations = []any{
 	newSqlMigration(contractCloseOriginalSchemaSql),
 	newSqlMigration(contractCloseInventorySchemaSql),
 	newSqlMigration(verifyOriginalSchemaSql),
+	newSqlMigration(providerWorkOriginalSchemaSql),
 }
