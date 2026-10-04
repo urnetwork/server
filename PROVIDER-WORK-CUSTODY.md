@@ -69,3 +69,33 @@ original body close. Unavailable I/O returns 503, capacity returns 429, unknown
 originals return 404, and actual immutable-byte contradictions return 409. The SDK
 retains its original outbox across transient errors; the Server never requests a
 fresh SDK signature to recover an uncertain receipt.
+# SDK startup enrollment
+
+The SDK sends its exact canonical `OriginalWorkOwnerEnrollment` to public
+`POST /provider-work/v1/owners` before polling capture requests. The 4 KiB signed
+statement binds domain, client, SDK generation and public key. Its receipt is
+`OriginalWorkOwnerReceipt`, containing the SHA-256 hash of those exact bytes.
+
+First admission requires the existing authenticated client and its current,
+independently signed client-key registration under `client_key_root_signer` in
+`provider_work.yml`. A missing registration returns 503 so normal asynchronous
+key registration can finish. A foreign key or contradictory registration is
+refused. No private key is accepted by this route. There is a lifetime allowance
+of 1,024 retained SDK generations per client across domains; a new policy,
+request, signature or process does not renew it. Exact retained retries remain
+valid after key rotation or client cleanup, with identical receipts. The
+registration bytes used for first admission are retained alongside the SDK
+statement. Migration 774 makes those rows append-only, including TRUNCATE.
+
+`GET /provider-work/v1/owners?domain=<lowerhex32>&client=<lowerhex16>&key=<lowerhex32>`
+returns `urnetwork-sdk-whole-work-owner-index-v1` with `owners`, an array of
+original signed statement bytes. The index is bounded by the lifetime allowance
+and is never truncated. Adding `generation=<lowerhex16>` selects one exact raw
+statement, or 404 when missing. All selectors must occur exactly once, with no
+other query parameters. The shared four-operation route owner and 300-second
+operation deadline apply; uploads retain the native 60-second read deadline.
+
+This index proves possession and retained admission for each listed tuple. It
+does not identify a current generation or assert a complete SDK population. The
+independent request approver and signed whole-work authority must explicitly
+choose each original tuple. Missing historical enrollment remains unknown.

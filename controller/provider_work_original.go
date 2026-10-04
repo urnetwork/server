@@ -58,6 +58,27 @@ func LoadProviderWorkPolicy() (domain, approver [32]byte, resultErr error) {
 	return domain, approver, err
 }
 
+// First SDK-generation admission checks existing signed client-key history.
+// The registration signer is a separate fixed input, never the enrollment key.
+func LoadProviderWorkOwnerPolicy() (domain [32]byte, rootSigner common.Address, resultErr error) {
+	policy, err := loadProviderWorkPolicyFile()
+	if err != nil {
+		return domain, rootSigner, err
+	}
+	domain, err = providerWorkPolicyHash(policy.DomainHash)
+	if err != nil {
+		return domain, rootSigner, err
+	}
+	if !common.IsHexAddress(policy.ClientKeyRootSigner) {
+		return domain, rootSigner, errors.New("provider work client-key authority is absent")
+	}
+	rootSigner = common.HexToAddress(policy.ClientKeyRootSigner)
+	if rootSigner == (common.Address{}) {
+		return domain, rootSigner, errors.New("provider work client-key authority is zero")
+	}
+	return domain, rootSigner, nil
+}
+
 // Root roster and key-registration authorities are explicit independent inputs;
 // neither is inferred from SQL, the body signer or an ordinary artifact signer.
 func LoadProviderWorkAuthorityPolicy() (domain, approver [32]byte, expected payoutartifact.WholeWorkExpectation, resultErr error) {

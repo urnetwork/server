@@ -57,7 +57,7 @@ func newProviderWorkWindowFixture(t testing.TB) *providerWorkWindowFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.authority = payoutartifact.WholeWorkAuthority{Domain: base.domain, Epoch: f.epoch.Epoch, Start: payoutartifact.Boundary{Number: 20, Hash: startHeader.Hash().Hex()}, End: payoutartifact.Boundary{Number: 30, Hash: endHeader.Hash().Hex()}, RequestPublicKey: [32]byte(f.approver.Public().(ed25519.PublicKey)), Owners: []payoutartifact.WholeWorkOwner{}, PriorContracts: []payoutartifact.WholeWorkPriorContract{}}
+	f.authority = payoutartifact.WholeWorkAuthority{Domain: base.domain, Epoch: f.epoch.Epoch, Start: payoutartifact.Boundary{Number: 20, Hash: startHeader.Hash().Hex()}, End: payoutartifact.Boundary{Number: 30, Hash: endHeader.Hash().Hex()}, RequestPublicKey: [32]byte(f.approver.Public().(ed25519.PublicKey)), Owners: []payoutartifact.WholeWorkOwner{}, PriorContracts: []payoutartifact.WholeWorkPriorContract{}, ExpectedProviders: []payoutartifact.WholeWorkExpectedProvider{}}
 	f.window = &payoutartifact.ClosedWorkWindow{Schema: payoutartifact.ClosedWorkWindowSchema, Start: startTime.Format(time.RFC3339Nano), End: endTime.Format(time.RFC3339Nano), Records: []payoutartifact.ClosedWorkWindowRecord{}}
 	t.Cleanup(server.Vault.PushSimpleResource("provider_work.yml", []byte(fmt.Sprintf("schema: %s\ndomain_hash: %x\nrequest_public_key: %x\nauthority_signer: %s\nclient_key_root_signer: %s\n", ProviderWorkPolicySchema, f.domain, f.authority.RequestPublicKey, crypto.PubkeyToAddress(cfg.RootKey.PublicKey).Hex(), crypto.PubkeyToAddress(cfg.RootKey.PublicKey).Hex()))))
 	return f
