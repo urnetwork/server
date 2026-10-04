@@ -107,13 +107,40 @@ func TestPublicRedisLongLivedGrantRetainsOriginalRequestLease(t *testing.T) {
 		posts := settleNetEscrowOrderingTestContract(ctx, escrow.ContractId)
 		server.RunPosts(ctx, posts...)
 		server.RunPosts(ctx, posts...)
+		ReconcileRedisContractReservation(ctx, escrow.ContractId)
+		// Even zero consumption retains its journal/token until the debit
+		// worker acknowledges cleanup. Settlement must not extend its lease.
 		server.Redis(ctx, func(r server.RedisClient) {
-			value, err := r.Get(ctx, keys[0]).Int64()
+			amount, err := r.HGet(ctx, keys[1], escrow.ContractId.String()).Int64()
 			server.Raise(err)
-			if value != 0 || !errors.Is(r.HGet(ctx, keys[1], escrow.ContractId.String()).Err(), server.RedisNil) ||
-				!errors.Is(r.ZScore(ctx, keys[2], escrow.ContractId.String()).Err(), server.RedisNil) {
-				t.Fatal("terminal public settlement did not release the exact request once", value)
+			expiry, err := r.ZScore(ctx, keys[2], escrow.ContractId.String()).Result()
+			server.Raise(err)
+			if amount != 0 || expiry != originalExpiry {
+				t.Fatal("pending zero debit lost its original token or lease", amount, expiry, originalExpiry)
 			}
 		})
+		assertPayoutDebitTestConsumptionAndDrain(t, ctx, f.balanceId, 1000, 0)
+		checkReleased := func() {
+			server.Redis(ctx, func(r server.RedisClient) {
+				value, err := r.Get(ctx, keys[0]).Int64()
+				server.Raise(err)
+				if value != 0 || !errors.Is(r.HGet(ctx, keys[1], escrow.ContractId.String()).Err(), server.RedisNil) ||
+					!errors.Is(r.ZScore(ctx, keys[2], escrow.ContractId.String()).Err(), server.RedisNil) {
+					t.Fatal("acknowledged zero debit did not release the exact original request", value)
+				}
+			})
+		}
+		// Observe the actual acknowledgment before a later reconciliation can
+		// repair a missing release and hide a worker regression.
+		checkReleased()
+		replay, err := FlushTransferDebits(ctx, transferDebitShard(f.balanceId), nil, 1)
+		if err != nil || replay != (TransferDebitFlushResult{}) {
+			t.Fatal("empty public zero-debit replay repeated work", replay, err)
+		}
+		checkReleased()
+		// A post delayed until after writeback cannot restore the old token.
+		server.RunPosts(ctx, posts...)
+		ReconcileRedisContractReservation(ctx, escrow.ContractId)
+		checkReleased()
 	})
 }

@@ -92,9 +92,20 @@ func contractLifecycleEscrowBranchLockOrder(source string) error {
 				}
 				anchor = conditional
 			case comparison(conditional.Cond, token.LSS, true):
-				// Later positive-byte branches publish accounting metadata;
-				// the first one must be the checked lifecycle lock boundary.
-				if positive == nil {
+				// The early test-balance drain refusal also tests positive
+				// bytes. Identify the actual lock-bearing branch, then retain
+				// the argument, propagation, coverage and ordering checks below.
+				hasLock := false
+				ast.Inspect(conditional.Body, func(node ast.Node) bool {
+					if call, ok := node.(*ast.CallExpr); ok && ident(call.Fun, "lockActiveContractClientsInTx") {
+						hasLock = true
+					}
+					return true
+				})
+				if hasLock {
+					if positive != nil {
+						return fmt.Errorf("duplicate positive endpoint-lock branch")
+					}
 					positive = conditional
 				}
 			}
@@ -192,7 +203,7 @@ func TestContractLifecycleEscrowBranchClockGuardRejectsMissingOrLateLocks(t *tes
 		"zero lock missing":                  strings.Replace(source, lock, "omittedEndpointLock(", 1),
 		"positive lock missing":              source[:lastLock] + strings.Replace(source[lastLock:], lock, "omittedEndpointLock(", 1),
 		"zero coverage hole":                 strings.Replace(source, "if contractTransferByteCount == 0 {", "if contractTransferByteCount == 1 {", 1),
-		"positive coverage hole":             strings.Replace(source, "if 0 < contractTransferByteCount {", "if 1 < contractTransferByteCount {", 1),
+		"positive coverage hole":             source[:positiveStart] + strings.Replace(source[positiveStart:positiveEnd], "if 0 < contractTransferByteCount {", "if 1 < contractTransferByteCount {", 1) + source[positiveEnd:],
 		"negative rejection missing":         strings.Replace(source, "if contractTransferByteCount < 0 {", "if contractTransferByteCount < -1 {", 1),
 		"lock error ignored":                 strings.Replace(source, "return nil, nil, err", "return nil, nil, nil", -1),
 		"different endpoint locked":          strings.Replace(source, "lockActiveContractClientsInTx(ctx, tx, sourceNetworkId, sourceId, destinationNetworkId, destinationId)", "lockActiveContractClientsInTx(ctx, tx, sourceNetworkId, sourceId, sourceNetworkId, sourceId)", 1),

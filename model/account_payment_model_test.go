@@ -1069,8 +1069,8 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		_, err = CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, netTransferByteCount)
 		connect.AssertNotEqual(t, err, nil)
 
-		CloseContract(ctx, transferEscrow.ContractId, sourceId, 0, false)
-		CloseContract(ctx, transferEscrow.ContractId, destinationId, 0, false)
+		connect.AssertEqual(t, CloseContract(ctx, transferEscrow.ContractId, sourceId, 0, false), nil)
+		connect.AssertEqual(t, CloseContract(ctx, transferEscrow.ContractId, destinationId, 0, false), nil)
 
 		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
 		netBalanceByteCount = ByteCount(0)
@@ -1088,8 +1088,8 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		})
 
 		usedTransferByteCount := ByteCount(1024)
-		CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
-		CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
+		connect.AssertEqual(t, CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false), nil)
+		connect.AssertEqual(t, CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false), nil)
 		paidByteCount := usedTransferByteCount
 		paid := UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 
@@ -1216,30 +1216,53 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, paidByteCount)
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, paid)
 
-		// repeat escrow until it fails due to no balance
+		// The public allocator can shrink its final grant. Consumption and
+		// expected subsidy follow the returned signed capacity, never the larger
+		// request; reporting that request would fail settlement and retain escrow.
 		contractCount := 0
+		shrunkContracts := 0
 		usedTransferByteCount = ByteCount(1024 * 1024 * 1024)
-		for {
+		remainingBalances := GetActiveTransferBalances(ctx, sourceNetworkId)
+		for paidByteCount < netTransferByteCount {
 			transferEscrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, usedTransferByteCount)
 			if err != nil && 1024 < usedTransferByteCount {
-				usedTransferByteCount = usedTransferByteCount / 1024
+				usedTransferByteCount /= 1024
 				glog.Infof("Step down contract size to %d bytes.\n", usedTransferByteCount)
 				continue
 			}
-			if netTransferByteCount <= paidByteCount {
-				connect.AssertNotEqual(t, err, nil)
-				break
-			} else {
-				connect.AssertEqual(t, err, nil)
+			if err != nil || transferEscrow == nil {
+				t.Fatalf("remaining subsidy consumption was not admitted: escrow=%v err=%v", transferEscrow, err)
 			}
-
-			CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
-			CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
-			paidByteCount += usedTransferByteCount
-			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
-			contractCount += 1
+			granted := transferEscrow.TransferByteCount
+			if granted <= 0 || granted > usedTransferByteCount || granted > netTransferByteCount-paidByteCount {
+				t.Fatalf("grant does not fit remaining consumption: granted=%d requested=%d remaining=%d", granted, usedTransferByteCount, netTransferByteCount-paidByteCount)
+			}
+			if granted < usedTransferByteCount {
+				shrunkContracts++
+			}
+			if err := CloseContract(ctx, transferEscrow.ContractId, sourceId, granted, false); err != nil {
+				t.Fatalf("payer close of actual grant failed: %v", err)
+			}
+			if err := CloseContract(ctx, transferEscrow.ContractId, destinationId, granted, false); err != nil {
+				t.Fatalf("provider settlement of actual grant failed: %v", err)
+			}
+			paidByteCount += granted
+			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(granted) / float64(netTransferByteCount))
+			contractCount++
 		}
-		// at this point the balance should be fully used up
+		connect.AssertEqual(t, paidByteCount, netTransferByteCount)
+		connect.AssertEqual(t, shrunkContracts, 1)
+		if escrow, err := CreateTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, 1024); err == nil || escrow != nil {
+			t.Fatalf("exhausted actual balance admitted another contract: escrow=%v err=%v", escrow, err)
+		}
+		connect.AssertEqual(t, GetActiveTransferBalanceByteCount(ctx, sourceNetworkId), ByteCount(0))
+		connect.AssertEqual(t, len(GetOpenContractIds(ctx, sourceId, destinationId)), 0)
+		// Settlement first retains consumption in the debit journal and Redis.
+		// This fixture has no task worker: drain through its public paged API
+		// before expecting the generated active flag or reservation to clear.
+		for _, balance := range remainingBalances {
+			assertPayoutDebitTestConsumedAndDrained(t, ctx, balance.BalanceId, balance.StartBalanceByteCount)
+		}
 
 		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
 		connect.AssertEqual(t, transferBalances, []*TransferBalance{})
