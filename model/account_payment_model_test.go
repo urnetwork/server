@@ -1233,14 +1233,60 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 				connect.AssertEqual(t, err, nil)
 			}
 
-			CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
-			CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
-			paidByteCount += usedTransferByteCount
-			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+			// The final contract may shrink to the remaining balance. Consume
+			// the grant advertised to clients, so this drain neither overreports
+			// usage nor counts a rejected close as paid work.
+			grantedByteCount := transferEscrow.TransferByteCount
+			connect.AssertEqual(t, 0 < grantedByteCount && grantedByteCount <= usedTransferByteCount, true)
+			connect.AssertEqual(t, CloseContract(ctx, transferEscrow.ContractId, sourceId, grantedByteCount, false), nil)
+			connect.AssertEqual(t, CloseContract(ctx, transferEscrow.ContractId, destinationId, grantedByteCount, false), nil)
+			paidByteCount += grantedByteCount
+			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(grantedByteCount) / float64(netTransferByteCount))
 			contractCount += 1
 		}
-		// at this point the balance should be fully used up
-
+		// Closed Redis contracts reserve their consumed credit until the
+		// owning debit worker writes the journal back. Prove that pending
+		// debt accounts for all raw credit before expecting active=false,
+		// which is generated from the persisted balance, not usable credit.
+		connect.AssertEqual(t, paidByteCount, netTransferByteCount)
+		connect.AssertEqual(t, len(GetOpenContractIds(ctx, sourceId, destinationId)), 0)
+		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
+		connect.AssertEqual(t, len(transferBalances), 1)
+		for _, balance := range transferBalances {
+			connect.AssertEqual(t, balance.BalanceByteCount, ByteCount(0))
+			var rawCredit, pendingDebit ByteCount
+			var journalRows, appliedRows int
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT balance_byte_count,
+					(SELECT COALESCE(SUM(debit_byte_count),0)::bigint FROM transfer_debit_journal WHERE balance_id=$1 AND NOT applied),
+					(SELECT COUNT(*) FROM transfer_debit_journal WHERE balance_id=$1),
+					(SELECT COUNT(*) FROM transfer_debit_journal WHERE balance_id=$1 AND applied)
+					FROM transfer_balance WHERE balance_id=$1 AND network_id=$2`,
+					balance.BalanceId, sourceNetworkId).Scan(&rawCredit, &pendingDebit, &journalRows, &appliedRows))
+			})
+			connect.AssertEqual(t, rawCredit, pendingDebit)
+			connect.AssertEqual(t, rawCredit > 0 && journalRows > 0, true)
+			connect.AssertEqual(t, appliedRows, 0)
+			remaining := journalRows
+			for batch := 0; batch < (journalRows+transferDebitBatchSize-1)/transferDebitBatchSize; batch++ {
+				applied, released, busy, flushErr := flushTransferDebitBalance(ctx, balance.BalanceId)
+				connect.AssertEqual(t, flushErr, nil)
+				connect.AssertEqual(t, busy, false)
+				connect.AssertEqual(t, applied, min(remaining, transferDebitBatchSize))
+				connect.AssertEqual(t, released, applied)
+				remaining -= applied
+			}
+			connect.AssertEqual(t, remaining, 0)
+			applied, released, busy, flushErr := flushTransferDebitBalance(ctx, balance.BalanceId)
+			connect.AssertEqual(t, flushErr, nil)
+			connect.AssertEqual(t, busy, false)
+			connect.AssertEqual(t, applied, 0)
+			connect.AssertEqual(t, released, 0)
+			credit, pending, retainedApplied := asyncDebitTestState(t, ctx, balance.BalanceId)
+			connect.AssertEqual(t, credit, ByteCount(0))
+			connect.AssertEqual(t, pending, 0)
+			connect.AssertEqual(t, retainedApplied, 0)
+		}
 		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
 		connect.AssertEqual(t, transferBalances, []*TransferBalance{})
 

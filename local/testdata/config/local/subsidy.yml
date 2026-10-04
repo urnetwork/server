@@ -1,0 +1,20 @@
+# Synthetic local accounting fixture. These are test inputs, not Main policy.
+# Keep nonzero subsidy, points and wallet thresholds so the existing payout
+# tests exercise accrual, referral weighting and withholding. Ledger-only
+# tests explicitly select their own zero-subsidy copy.
+days: 30
+min_days_fraction: 0.0
+usd_per_active_user: 0.1
+subscription_net_revenue_fraction: 0.2
+min_payout_usd: 500
+active_user_byte_count_threshold: 1b
+min_wallet_payout_usd: 0.20
+wallet_payout_timeout: 1440h
+referral_parent_payout_fraction: 0.25
+referral_child_payout_fraction: 0.25
+account_points_per_payout: 1000000
+reliability_points_per_payout: 250000
+reliability_subsidy_per_payout_usd: 250
+country_reliability_weight_target: 30
+max_country_reliability_multiplier: 8
+seeker_holder_multiplier: 2.0
