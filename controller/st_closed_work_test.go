@@ -1,23 +1,26 @@
-// Actual payout issuance retains same-statement original rows in its signed
-// published artifact. This fixture's wallet/binding rows are not a new claim
-// that those eligibility inputs have independent measurement provenance.
+//go:build linux || darwin || freebsd
+
+// Actual SDK custody, original consent and independently approved work reach
+// publication before exact SQL bytes and immutable retries are inspected.
 package controller
 
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/hex"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urfoundation/sn/payoutartifact"
+	"github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/startifact"
 )
 
-// Epoch policy comes from the real pinned RPC owner. This explicit fixture
-// supplies only an inactive fleet census, not artifact or usage verdicts.
+// No fresh reader is available on the retry. A retained payout must return
+// before either the chain or current wallet/configuration is consulted.
 type stClosedWorkClient struct {
 	StClient
 	bindingCalls int
@@ -32,83 +35,72 @@ func (self *stClosedWorkClient) BindingsAt(ctx context.Context, clients [][16]by
 	return result, ctx.Err()
 }
 
-// Read original jsonb back, rather than predicting PostgreSQL's presentation.
+// Read the actual settled row's jsonb rather than predicting PostgreSQL's
+// presentation. The common driver has already verified whole-work publication;
+// this continuation additionally checks every original wallet and exact retry.
 func TestStClosedWorkPublishedArtifactKeepsExactOriginalRowsAndRetry(t *testing.T) {
-	env := server.DefaultTestEnv()
-	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) {
-		ctx := t.Context()
-		fixture, credential, cfg, restart := newStPayoutPolicyFixture(t, 1)
-		fixture.configure(275, "")
-		client := &stClosedWorkClient{StClient: restart()}
-		id := server.NewId()
-		provider := *credential.ClientId
-		closed := stPayoutPolicyTime(225)
-		snapshot := map[string]any{"version": 1, "byte_count": 121, "providers": []map[string]any{{"client_id": provider, "network_id": credential.NetworkId, "byte_count": 121}}}
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract(contract_id,source_id,source_network_id,destination_id,destination_network_id,transfer_byte_count,outcome,close_time,provider_usage,usage_origin_is_source)
-				VALUES($1,$2,$3,$4,$5,121,'settled',$6,$7,true)`, id, server.NewId(), server.NewId(), provider, credential.NetworkId, closed, snapshot))
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO verify_provider_stats(period_start,period_end,client_id,assignments,confirmations) VALUES($1,$2,$3,10,10)`, stPayoutPolicyTime(200), stPayoutPolicyTime(250), provider))
-			coldkey := [32]byte{9}
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO st_provider_wallet_history(client_id,network_id,coldkey_ss58,coldkey_pubkey,set_time) VALUES($1,$2,$3,$4,$5)`, provider, credential.NetworkId, "synthetic-closed-work-wallet", coldkey[:], stPayoutPolicyTime(200)))
-		})
-		root, leaves, err := stComputeReleasePayout(ctx, cfg, client, 1, stPayoutPolicyTime(200), stPayoutPolicyTime(250), 200, 250, nil)
-		if err != nil || root == ([32]byte{}) || leaves != 1 || client.bindingCalls != 1 {
-			t.Fatal("actual payout issuance did not reach original component publication", root, leaves, err)
+	providerWorkActualSdkStreamPublication(t, false, func(t testing.TB, ctx context.Context, f *providerWorkWindowFixture, artifact *payoutartifact.Artifact) {
+		if artifact == nil || artifact.ClosedWork == nil || artifact.ClosedWork.WholeInventory == nil || len(artifact.ClosedWork.Records) != 1 {
+			t.Fatal("actual SDK publication omitted its original complete census")
 		}
-		record := model.GetStPayoutArtifact(ctx, cfg.DeploymentKey(), 1, cfg.NoId)
+		var original []byte
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT provider_usage FROM transfer_contract WHERE contract_id=$1`, server.Id(artifact.ClosedWork.Records[0].ContractId)).Scan(&original))
+		})
+		if !bytes.Equal(original, artifact.ClosedWork.Records[0].Original) || artifact.ClosedWork.WindowStart != f.epoch.StartTime.UTC().Format(time.RFC3339Nano) || artifact.ClosedWork.WindowEnd != f.epoch.EndTime.UTC().Format(time.RFC3339Nano) || artifact.ClosedWork.Start != artifact.Start || artifact.ClosedWork.End != artifact.End || artifact.ClosedWork.PolicyHash != artifact.PolicyHash {
+			t.Fatal("issuance reconstructed database bytes or guessed epoch/policy")
+		}
+		approved, err := stLoadProviderWorkAuthority(ctx, f.cfg, f.epoch)
+		if err != nil || approved == nil {
+			t.Fatal("published original authority is unavailable", err)
+		}
+		component, err := payoutartifact.VerifyWholeWorkInventory(ctx, artifact, approved.Expectation)
+		if err != nil || component == nil || !component.Complete || !component.AttributionComplete || component.Reports == nil || component.Reports.ClosedWork.Contracts != 1 || component.Reports.ClosedWork.Providers != 3 || component.Reports.ClosedWork.UsageBytes != 121 {
+			t.Fatal("independent reconstruction rejected actual published source", component, err)
+		}
+		if len(artifact.Providers) != len(f.authority.ExpectedProviders) {
+			t.Fatal("publication changed the independently approved provider universe")
+		}
+		for index, member := range f.authority.ExpectedProviders {
+			head, err := hex.DecodeString(member.WalletHeadHash)
+			if err != nil || len(head) != 32 {
+				t.Fatal("published provider has no independently approved wallet head", err)
+			}
+			originals, err := model.ReadWalletMappingHistory(ctx, f.authority.Domain, server.Id(member.ClientId), member.WalletGeneration, [32]byte(head))
+			if err != nil {
+				t.Fatal(err)
+			}
+			mapping, err := protocol.VerifyWalletMappingHistory(ctx, originals, protocol.WalletMappingHistoryExpectation{Domain: f.authority.Domain, ClientId: member.ClientId, HeadHash: [32]byte(head), Generation: member.WalletGeneration, Epoch: f.epoch.Epoch})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := protocol.VerifyProspectiveWalletMapping(ctx, mapping, crypto.PubkeyToAddress(f.cfg.RootKey.PublicKey), f.epoch.Start.Block, f.epoch.StartTime.Unix()); err != nil {
+				t.Fatal(err)
+			}
+			provider := artifact.Providers[index]
+			if provider.ClientID != member.ClientId || provider.NetworkID != member.NetworkId || mapping.Statement.NetworkId != member.NetworkId || provider.Coldkey != mapping.Statement.Coldkey {
+				t.Fatal("signed payout changed an original epoch wallet", index, provider)
+			}
+		}
+		record := model.GetStPayoutArtifact(ctx, f.cfg.DeploymentKey(), f.epoch.Epoch, f.cfg.NoId)
 		store, ok := server.LoadBlobStore()
 		if record == nil || !ok {
 			t.Fatal("original artifact publication is absent")
 		}
-		artifact, raw, err := startifact.Read(ctx, store, record.ContentHash)
-		if err != nil || artifact.ClosedWork == nil || artifact.ClosedWork.Count != 1 || artifact.ClosedWork.Records[0].ContractId != [16]byte(id) {
-			t.Fatal("published payout lost original complete work census", err)
+		_, raw, err := startifact.Read(ctx, store, record.ContentHash)
+		if err != nil {
+			t.Fatal(err)
 		}
-		var original []byte
-		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT provider_usage FROM transfer_contract WHERE contract_id=$1`, id).Scan(&original))
-		})
-		if !bytes.Equal(original, artifact.ClosedWork.Records[0].Original) || artifact.ClosedWork.WindowStart != stPayoutPolicyTime(200).UTC().Format(time.RFC3339Nano) || artifact.ClosedWork.Start != artifact.Start || artifact.ClosedWork.PolicyHash != artifact.PolicyHash {
-			t.Fatal("issuance reconstructed database bytes or guessed epoch/policy")
-		}
-		component, err := payoutartifact.VerifyClosedWork(ctx, artifact)
-		if err != nil || component.Contracts != 1 || component.Providers != 1 || component.UsageBytes != 121 {
-			t.Fatal("independent reconstruction rejected actual published source", component, err)
-		}
-		fixture.configure(275, "missing-history")
-		if _, _, err := stComputeReleasePayout(ctx, cfg, client, 1, time.Time{}, time.Time{}, 0, 0, nil); err != nil || client.bindingCalls != 1 {
-			t.Fatal("immutable retry asked for newer source authority", err)
+		retryCfg := *f.cfg
+		retryCfg.RootKey, retryCfg.ArtifactKey = nil, nil
+		client := &stClosedWorkClient{}
+		root, leaves, err := stComputeReleasePayout(ctx, &retryCfg, client, f.epoch.Epoch, time.Time{}, time.Time{}, 0, 0, nil)
+		if err != nil || root != artifact.PayoutRoot || leaves != len(artifact.Leaves) || client.bindingCalls != 0 {
+			t.Fatal("immutable retry asked for newer source authority", root, leaves, err)
 		}
 		_, again, err := startifact.Read(ctx, store, record.ContentHash)
 		if err != nil || !bytes.Equal(raw, again) {
 			t.Fatal("restart changed exact signed original census", err)
-		}
-	})
-}
-
-// Existing signed artifacts are consumed without a backfill or re-signature.
-func TestStClosedWorkLegacyPublishedArtifactRemainsExactOnRetry(t *testing.T) {
-	env := server.DefaultTestEnv()
-	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) {
-		fixture, _, cfg, restart := newStPayoutPolicyFixture(t, 1)
-		original, record := stRetainPolicyPayout(t, cfg)
-		fixture.configure(275, "missing-history")
-		if _, _, err := stComputeReleasePayout(t.Context(), cfg, restart(), 0, time.Time{}, time.Time{}, 0, 0, nil); err != nil {
-			t.Fatal("legacy original retry demanded component backfill", err)
-		}
-		store, ok := server.LoadBlobStore()
-		if !ok {
-			t.Fatal("original store is absent")
-		}
-		artifact, again, err := startifact.Read(t.Context(), store, record.ContentHash)
-		if err != nil || artifact.ClosedWork != nil || !bytes.Equal(original, again) {
-			t.Fatal("legacy published bytes changed on rolling retry", err)
-		}
-		var wire map[string]json.RawMessage
-		if err := json.Unmarshal(again, &wire); err != nil || wire["original_closed_work"] != nil {
-			t.Fatal("legacy original acquired a serialized evidence claim", err)
 		}
 	})
 }
