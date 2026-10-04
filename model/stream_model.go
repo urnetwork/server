@@ -253,6 +253,9 @@ func AddToStream(
 ) (
 	streamId server.Id,
 ) {
+	ctx = providerWorkSessionContext(ctx)
+	originalCohort := providerWorkPrepareStream(ctx, contractId, sourceId, destinationId, intermediaryIds)
+	var originalBirthTime time.Time
 	ttl := 8 * time.Hour
 	ttlSeconds := int64(ttl / time.Second)
 	streamKey := newStreamKey(sourceId, destinationId, intermediaryIds)
@@ -303,6 +306,9 @@ func AddToStream(
 		streamId = server.Id([]byte(values[0].(string)))
 		initialSize := values[1].(int64)
 		changed := 0 < values[2].(int64)
+		if changed && initialSize == 0 {
+			originalBirthTime = server.NowUtc()
+		}
 
 		if changed {
 			pipe := r.TxPipeline()
@@ -347,6 +353,9 @@ func AddToStream(
 			}
 		}
 	})
+	if !originalBirthTime.IsZero() {
+		providerWorkRetainStreamBirth(ctx, streamId, originalCohort, originalBirthTime)
+	}
 	return
 }
 

@@ -2484,6 +2484,7 @@ func ConnectNetworkClientWithIpFamily(
 	err error,
 ) {
 	clientIp, clientPort, err = server.SplitClientAddress(clientAddress)
+	ctx = providerWorkSessionContext(ctx)
 	if err != nil {
 		return
 	}
@@ -2527,6 +2528,8 @@ func ConnectNetworkClientWithIpFamily(
 			}
 		}
 		connectionId = server.NewId()
+		providerWorkLockEndpointsInTx(ctx, tx, clientId)
+		providerWorkSessionGenesisInTx(ctx, tx, clientId)
 
 		host, _ := server.Host()
 		service, _ := server.Service()
@@ -2566,6 +2569,7 @@ func ConnectNetworkClientWithIpFamily(
 			ipFamilyIntent,
 			extenderId,
 		))
+		providerWorkRetainSessionEventsInTx(ctx, tx, clientId)
 
 		// refresh auth_time as a durable last-seen marker. connection rows are
 		// retained only briefly by `RemoveDisconnectedNetworkClients`, so the
@@ -2624,9 +2628,17 @@ func ConnectNetworkClientWithIpFamily(
 }
 
 func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error {
+	ctx = providerWorkSessionContext(ctx)
 	var disconnectErr error
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		var originalClientId *server.Id
+		providerWorkOptionalInTx(ctx, tx, func(optional server.PgTx) error {
+			return optional.QueryRow(ctx, `SELECT client_id FROM network_client_connection WHERE connection_id=$1`, connectionId).Scan(&originalClientId)
+		})
+		if originalClientId != nil {
+			providerWorkLockEndpointsInTx(ctx, tx, *originalClientId)
+		}
 		disconnectTime := server.NowUtc()
 		tag, err := tx.Exec(
 			ctx,
@@ -2645,6 +2657,9 @@ func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error 
 		if tag.RowsAffected() != 1 {
 			disconnectErr = errors.New("Connection does not exist.")
 			return
+		}
+		if originalClientId != nil {
+			providerWorkRetainSessionEventsInTx(ctx, tx, *originalClientId)
 		}
 	})
 
@@ -3736,6 +3751,7 @@ func HeartbeatNetworkClientHandler(ctx context.Context, handlerId server.Id) (re
 }
 
 func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
+	ctx = providerWorkSessionContext(ctx)
 	disconnectTime := server.NowUtc()
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(
@@ -3747,6 +3763,28 @@ func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
 			`,
 			minTime.UTC(),
 		))
+		var originalClientIds []server.Id
+		providerWorkOptionalInTx(ctx, tx, func(optional server.PgTx) error {
+			rows, err := optional.Query(ctx, `SELECT DISTINCT client_id FROM network_client_connection c
+			 WHERE c.connected AND NOT EXISTS(SELECT 1 FROM network_client_handler h WHERE h.handler_id=c.handler_id)
+			 ORDER BY client_id LIMIT 4097`)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var clientId server.Id
+				if err := rows.Scan(&clientId); err != nil {
+					return err
+				}
+				originalClientIds = append(originalClientIds, clientId)
+			}
+			return rows.Err()
+		})
+		if len(originalClientIds) > 4096 {
+			originalClientIds = nil
+		}
+		providerWorkLockEndpointsInTx(ctx, tx, originalClientIds...)
 
 		// A handler row and its connections deliberately have no foreign key:
 		// handlers are ephemeral, while connection history is retained. That
@@ -3773,6 +3811,7 @@ func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
 			`,
 			disconnectTime,
 		))
+		providerWorkRetainSessionEventsInTx(ctx, tx, originalClientIds...)
 	})
 }
 
