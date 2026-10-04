@@ -9516,4 +9516,19 @@ var migrations = []any{
 	newSqlMigration(legacySettlementIntentSchemaSql),
 	// One durable receipt per logical close report, scoped to its contract.
 	newSqlMigration(contractCloseReportSchemaSql),
+	// App Store offer-code bindings (model/apple_offer_code_binding_model.go):
+	// an offer-code redemption carries no appAccountToken, so the verify
+	// endpoint binds its subscription to the network that was issued the
+	// welcome offer code, once. Renewals resolve through the same row.
+	newSqlMigration(`
+		CREATE TABLE apple_offer_code_binding (
+			original_transaction_id varchar(128) NOT NULL,
+			network_id uuid NOT NULL,
+			transaction_id varchar(128) NOT NULL,
+			offer_identifier varchar(128) NOT NULL,
+			bound_at timestamp NOT NULL,
+
+			PRIMARY KEY (original_transaction_id)
+		)
+	`),
 }

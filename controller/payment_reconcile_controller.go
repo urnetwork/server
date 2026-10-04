@@ -1235,7 +1235,8 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 				)
 				continue
 			}
-			transaction, err := validateAppleTransaction(
+			transaction, err := validateAppleTransactionBound(
+				ctx,
 				AppleNotificationDecodedPayload{
 					SignedDate:      run.now.UnixMilli(),
 					TransactionInfo: claims,
@@ -1340,7 +1341,7 @@ func appleReconcileCreditTransaction(
 		SignedDate:      server.NowUtc().UnixMilli(),
 		TransactionInfo: transactionClaims,
 	}
-	transaction, err := validateAppleTransaction(notification, allowedProductIds, true)
+	transaction, err := validateAppleTransactionBound(ctx, notification, allowedProductIds, true)
 	if err != nil {
 		return false, server.Id{}, err
 	}
