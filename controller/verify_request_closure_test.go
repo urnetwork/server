@@ -3,6 +3,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"errors"
 	"testing"
@@ -14,6 +15,18 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
+
+// A canceled original owner keeps both its standard cancellation and actual
+// cause without acquiring SQL state or manufacturing a signature contradiction.
+func TestVerifyRequestClosureCanceledOwnerPreservesCause(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cause := errors.New("synthetic request closure owner stopped")
+	cancel(cause)
+	_, err := CloseVerifyOriginalRequest(&protocol.ProviderAttemptRequestClosure{}, testVerifySession(ctx, "192.0.2.11"))
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, cause) || errors.Is(err, protocol.ErrProviderAttemptsIntegrity) {
+		t.Fatal("request closure lost actual owner cancellation", err)
+	}
+}
 
 // The deployment is independently configured before either request is signed.
 func verifyClosureControllerConfig(t testing.TB) {

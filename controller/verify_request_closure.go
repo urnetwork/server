@@ -3,6 +3,7 @@
 package controller
 
 import (
+	"context"
 	"crypto/ed25519"
 	"errors"
 
@@ -28,18 +29,19 @@ func CloseVerifyOriginalRequest(args *protocol.ProviderAttemptRequestClosure, cl
 		return nil, errors.New("400 missing verification closure owner")
 	}
 	ctx := clientSession.Ctx
+	ownerCause := func(err error) error { return errors.Join(err, ctx.Err(), context.Cause(ctx)) }
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, ownerCause(err)
 	}
 	scope, err := verifyRequestClosureScope()
 	if err != nil {
 		return nil, err
 	}
 	if err := protocol.VerifyProviderAttemptRequestClosure(ctx, *args, scope); err != nil {
-		if ctx.Err() != nil {
-			return nil, err
+		if !errors.Is(err, protocol.ErrProviderAttemptsIntegrity) {
+			return nil, ownerCause(err)
 		}
-		return nil, errors.Join(errors.New("400 invalid verification closure"), err)
+		return nil, ownerCause(errors.Join(errors.New("400 invalid verification closure"), err))
 	}
 	vpk, err := protocol.VerifyProviderAttemptRequestWire(args.Message, args.RequestSignature)
 	if err != nil {
@@ -70,5 +72,5 @@ func CloseVerifyOriginalRequest(args *protocol.ProviderAttemptRequestClosure, cl
 			verifyDecodeOriginal(result.Original)
 		}
 	}, func(cause error) { err = cause })
-	return result, err
+	return result, ownerCause(err)
 }
