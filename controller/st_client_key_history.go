@@ -39,6 +39,10 @@ type stClientKeyAuthorityOwner struct {
 	store        server.BlobStore
 }
 
+// This is a scoped request/domain disagreement, never a caller-selected domain
+// to be signed by a different operator or a reason to alter other key owners.
+var ErrStClientKeyDomain = errors.New("client-key enrollment domain differs from the actual operator owner")
+
 // Ordinary key registration never falls back to a legacy unsigned write when
 // a configured release operator lacks its real signer, RPC owner or evidence.
 func newStClientKeyAuthorityOwner() (*stClientKeyAuthorityOwner, error) {
@@ -126,16 +130,33 @@ func (self *stClientKeyAuthorityOwner) readBoundary(ctx context.Context, request
 // Public publication failure does not discard the committed signed generation;
 // the exact same bytes are retried by this API and by observation capture.
 func StRegisterClientKey(ctx context.Context, clientID server.Id, publicKey []byte) error {
+	return StRegisterClientKeyForDomain(ctx, clientID, publicKey, nil)
+}
+
+// The optional digest is supplied by the actual provider launch domain and is
+// compared against this operation's owned configuration before RPC or mutation.
+// Empty legacy messages retain the existing operator-selected namespace.
+func StRegisterClientKeyForDomain(ctx context.Context, clientID server.Id, publicKey, domainHash []byte) error {
 	if ctx == nil || clientID == (server.Id{}) || len(publicKey) != 0 && len(publicKey) != 32 {
 		return errors.New("client-key registration context, identity or key length is invalid")
+	}
+	if len(domainHash) != 0 && len(domainHash) != 32 {
+		return ErrStClientKeyDomain
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	publicKey = bytes.Clone(publicKey)
+	domainHash = bytes.Clone(domainHash)
 	owner, err := newStClientKeyAuthorityOwner()
 	if err != nil {
 		return err
+	}
+	if len(domainHash) != 0 {
+		actual, err := owner.domain.Digest()
+		if err != nil || !bytes.Equal(domainHash, actual[:]) {
+			return errors.Join(ErrStClientKeyDomain, err)
+		}
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 	defer cancel()

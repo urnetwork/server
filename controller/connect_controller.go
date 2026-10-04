@@ -1258,8 +1258,14 @@ func SetClientKey(
 	if len(clientKey.PublicKey) != 0 && len(clientKey.PublicKey) != ed25519.PublicKeySize {
 		return fmt.Errorf("Invalid client public key length: %d (expected %d)", len(clientKey.PublicKey), ed25519.PublicKeySize)
 	}
+	if len(clientKey.HistoryDomainHash) != 0 && len(clientKey.HistoryDomainHash) != 32 {
+		return ErrStClientKeyDomain
+	}
 	if StEnabled() {
-		return StRegisterClientKey(ctx, clientId, clientKey.PublicKey)
+		return StRegisterClientKeyForDomain(ctx, clientId, clientKey.PublicKey, clientKey.HistoryDomainHash)
+	}
+	if len(clientKey.HistoryDomainHash) != 0 {
+		return ErrStClientKeyDomain
 	}
 	model.SetClientPublicKey(ctx, clientId, clientKey.PublicKey)
 	return nil
