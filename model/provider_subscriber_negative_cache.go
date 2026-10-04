@@ -88,7 +88,7 @@ func (c *subscriberNegativeCache) reset() {
 	c.flights = make(map[server.Id]*subscriberNegativeFlight)
 }
 
-// remember runs with mu held. observed is taken before connection acquisition,
+// remember runs with mu held. observed is taken before the first fact query,
 // not after query completion; a slow query cannot extend the one-second bound.
 func (c *subscriberNegativeCache) remember(ids []server.Id, negative map[server.Id]bool, observed time.Time, epoch uint64) {
 	expires := observed.Add(subscriberNegativeTTL)
@@ -116,7 +116,10 @@ func (c *subscriberNegativeCache) remember(ids []server.Id, negative map[server.
 	}
 }
 
-type subscriberNegativeReader func(context.Context, []server.Id) (map[server.Id]bool, error)
+// The reader owns markObserved synchronously and calls it before dispatching
+// its first fact query. Until then the conservative read-entry clock applies.
+// Later chunks cannot renew the age of facts read by an earlier chunk.
+type subscriberNegativeReader func(context.Context, []server.Id, func()) (map[server.Id]bool, error)
 
 func (c *subscriberNegativeCache) lookup(ctx context.Context, ids []server.Id, read subscriberNegativeReader) (map[server.Id]bool, error) {
 	if err := ctx.Err(); err != nil {
@@ -184,9 +187,16 @@ func (c *subscriberNegativeCache) lookup(ctx context.Context, ids []server.Id, r
 	c.record("negative_miss", len(load)+len(waiting))
 	c.record("coalesced_wait", len(waiting))
 	c.record("capacity_bypass", bypasses)
-	if len(load) > 0 {
+	readFacts := func(ids []server.Id) (map[server.Id]bool, time.Time, error) {
 		observed := c.now()
-		negative, err := read(ctx, load)
+		var firstDispatch sync.Once
+		negative, err := read(ctx, ids, func() {
+			firstDispatch.Do(func() { observed = c.now() })
+		})
+		return negative, observed, err
+	}
+	if len(load) > 0 {
+		negative, observed, err := readFacts(load)
 		finish(negative, observed, err)
 		completed = true
 		if err != nil {
@@ -222,8 +232,7 @@ func (c *subscriberNegativeCache) lookup(ctx context.Context, ids []server.Id, r
 	}
 	if len(fresh) > 0 {
 		c.record("fresh_reread", len(fresh))
-		observed := c.now()
-		negative, err := read(ctx, fresh)
+		negative, observed, err := readFacts(fresh)
 		if err != nil {
 			return nil, err
 		}
