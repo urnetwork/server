@@ -69,7 +69,7 @@ func TestRemoveWalletConcurrentSinglePoolConnection(t *testing.T) {
 					owner := session.NewLocalClientSession(bounded, "192.0.2.1:443", &jwt.ByJwt{NetworkId: f.networkId})
 					defer owner.Cancel()
 					var out outcome
-					out.err = server.HandleError(func() { out.result = RemoveWallet(f.walletId, owner) })
+					server.HandleError(func() { out.result = RemoveWallet(f.walletId, owner) }, func(err error) { out.err = err })
 					finished <- out
 				}()
 			}
@@ -116,7 +116,8 @@ func TestRemoveWalletCommitFailurePreservesSelection(t *testing.T) {
 		})
 		owner := session.NewLocalClientSession(ctx, "192.0.2.1:443", &jwt.ByJwt{NetworkId: networkId})
 		defer owner.Cancel()
-		err := server.HandleError(func() { RemoveWallet(walletId, owner) })
+		var err error
+		server.HandleError(func() { RemoveWallet(walletId, owner) }, func(cause error) { err = cause })
 		var pgErr *pgconn.PgError
 		if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
 			t.Fatalf("owning commit failure was not exercised: %v", err)
