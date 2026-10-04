@@ -372,7 +372,7 @@ func evaluateUrlProbeCoverage(processes []*urlProbeCoverageProcess, expected map
 	}
 	if len(gaps) > 0 {
 		sort.Strings(gaps)
-		findings = append(findings, urlProbeCoverageUnknown(strings.Join(gaps, " ")+" "+census.projection()))
+		findings = append(findings, urlProbeCoverageUnknown(strings.Join(gaps, " ")+" "+observed))
 	}
 	return findings
 }
