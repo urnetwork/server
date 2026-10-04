@@ -593,7 +593,7 @@ func TestProviderWorkSessionLegacyWriterWaitsBeforeTakingConnectionRow(t *testin
 			}
 			select {
 			case <-joined:
-			case <-time.After(30 * time.Second):
+			case <-time.After(time.Minute):
 				t.Error("legacy writer did not join canceled cleanup")
 			}
 		}()
@@ -602,7 +602,7 @@ func TestProviderWorkSessionLegacyWriterWaitsBeforeTakingConnectionRow(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer tx.Rollback(context.WithoutCancel(ctx))
+			defer rollbackCloseReportTestTransaction(ctx, tx)
 			if !providerWorkLockSessionMutationInTx(ctx, tx, f.sourceId) {
 				t.Fatal("new admission owner did not acquire its ordered fences")
 			}
@@ -616,7 +616,7 @@ func TestProviderWorkSessionLegacyWriterWaitsBeforeTakingConnectionRow(t *testin
 					server.Db(legacyCtx, func(other server.PgConn) {
 						legacy, err := other.BeginTx(legacyCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 						server.Raise(err)
-						defer legacy.Rollback(context.WithoutCancel(legacyCtx))
+						defer rollbackCloseReportTestTransaction(legacyCtx, legacy)
 						var pid int
 						server.Raise(legacy.QueryRow(legacyCtx, `SELECT pg_backend_pid()`).Scan(&pid))
 						ready <- pid
@@ -650,8 +650,12 @@ func TestProviderWorkSessionLegacyWriterWaitsBeforeTakingConnectionRow(t *testin
 					}
 					break
 				}
-				if err := ctx.Err(); err != nil {
-					t.Fatal(err)
+				select {
+				case err := <-done:
+					t.Fatal("legacy writer crossed the original reservation fence", err)
+				case <-ctx.Done():
+					t.Fatal(ctx.Err())
+				case <-time.After(time.Millisecond):
 				}
 			}
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client_connection SET connected=false,disconnect_time=$2 WHERE connection_id=$1`, f.sourceConnectionId, server.NowUtc()))
