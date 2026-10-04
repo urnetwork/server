@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"strings"
 
@@ -358,6 +359,9 @@ func readProviderWorkPriorOriginal(ctx context.Context, domain protocol.ClientKe
 	}
 	artifact, raw, err := startifact.Read(ctx, store, record.ContentHash)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return result, errors.Join(payoutartifact.ErrClosedWorkUnavailable, err)
+		}
 		return result, err
 	}
 	if artifact.Epoch != epoch || artifact.NoID != domain.NoID || artifact.PayoutRoot != record.PayoutRoot {

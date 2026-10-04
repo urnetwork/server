@@ -352,16 +352,20 @@ func TestProviderWorkInheritedStreamReopensRetiredCreationThroughPublicConsumer(
 	})
 }
 
-// Removing the published prior membership defeats both the source-signed
-// lookup and any proposed list; it never permits a partial current artifact.
+// Losing the exact published prior bytes defeats the retained locator and
+// source-signed lookup; it never permits a partial current artifact.
 func TestProviderWorkInheritedStreamMissingPriorCannotPublish(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		f := newProviderWorkInheritedFixture(t)
-		server.Tx(f.ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(f.ctx, `DELETE FROM st_payout_artifact WHERE deployment_key=$1 AND epoch=$2 AND no_id=$3`, f.f.cfg.DeploymentKey(), int64(f.prior.Epoch), int64(f.f.cfg.NoId)))
-		})
+		config, ok := server.LoadBlobStoreConfig()
+		if !ok || !config.Local {
+			t.Fatal("fixture does not own a local immutable artifact")
+		}
+		if err := os.Remove(filepath.Join(config.LocalPath, f.prior.ContentKey)); err != nil {
+			t.Fatal(err)
+		}
 		client := &providerWorkRosterClient{StClient: newStubStClient(&StEpochState{})}
 		if _, _, err := stComputeReleasePayout(f.ctx, f.f.cfg, client, f.f.epoch.Epoch, f.f.epoch.StartTime, f.f.epoch.EndTime, f.f.epoch.Start.Block, f.f.epoch.End.Block, f.f.epoch); !errors.Is(err, payoutartifact.ErrClosedWorkUnavailable) {
 			t.Fatal("missing published creation did not retain unknown work", err)
