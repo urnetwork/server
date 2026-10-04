@@ -61,6 +61,13 @@ type subscriberNegativeCache struct {
 	epoch    uint64
 	capacity int
 	now      func() time.Time
+	observe  func(string, int)
+}
+
+func (c *subscriberNegativeCache) record(event string, count int) {
+	if c.observe != nil && count > 0 {
+		c.observe(event, count)
+	}
 }
 
 func newSubscriberNegativeCache(capacity int, now func() time.Time) *subscriberNegativeCache {
@@ -120,6 +127,7 @@ func (c *subscriberNegativeCache) lookup(ctx context.Context, ids []server.Id, r
 	waiting := make(map[server.Id]*subscriberNegativeFlight)
 	load := make([]server.Id, 0, len(ids))
 	seen := make(map[server.Id]bool, len(ids))
+	hits, bypasses := 0, 0
 	c.mu.Lock()
 	epoch, now := c.epoch, c.now()
 	for _, id := range ids {
@@ -130,6 +138,7 @@ func (c *subscriberNegativeCache) lookup(ctx context.Context, ids []server.Id, r
 		if e := c.negative[id]; e != nil {
 			if now.Before(e.expires) {
 				result[id] = true
+				hits++
 				continue
 			}
 			heap.Remove(&c.expiry, e.index)
@@ -143,6 +152,8 @@ func (c *subscriberNegativeCache) lookup(ctx context.Context, ids []server.Id, r
 		if len(c.flights) < c.capacity {
 			f := &subscriberNegativeFlight{done: make(chan struct{})}
 			c.flights[id], owned[id] = f, f
+		} else {
+			bypasses++
 		}
 	}
 	c.mu.Unlock()
@@ -169,6 +180,10 @@ func (c *subscriberNegativeCache) lookup(ctx context.Context, ids []server.Id, r
 			finish(nil, time.Time{}, errSubscriberReadIncomplete)
 		}
 	}()
+	c.record("negative_hit", hits)
+	c.record("negative_miss", len(load)+len(waiting))
+	c.record("coalesced_wait", len(waiting))
+	c.record("capacity_bypass", bypasses)
 	if len(load) > 0 {
 		observed := c.now()
 		negative, err := read(ctx, load)
@@ -206,6 +221,7 @@ func (c *subscriberNegativeCache) lookup(ctx context.Context, ids []server.Id, r
 		}
 	}
 	if len(fresh) > 0 {
+		c.record("fresh_reread", len(fresh))
 		observed := c.now()
 		negative, err := read(ctx, fresh)
 		if err != nil {
