@@ -171,7 +171,7 @@ func TestStClosedWorkCensusCarriesOriginalSignaturesAcrossRetention(t *testing.T
 			t.Fatal("actual signed closes did not produce original usage census", usages, census, err)
 		}
 		var reports payoutartifact.ClosedWorkReports
-		if err := json.Unmarshal(census.Records[0].OriginalReports, &reports); err != nil || reports.Schema != payoutartifact.ClosedWorkReportsSchema || reports.Count != 2 || len(reports.Reports) != 2 {
+		if err := json.Unmarshal(census.Records[0].OriginalReports, &reports); err != nil || reports.Schema != payoutartifact.ClosedWorkInventoryReportsSchema || reports.Window == nil || reports.Count != 2 || len(reports.Reports) != 2 {
 			t.Fatal("same statement omitted original close reports", reports, err)
 		}
 		for _, original := range originals {
@@ -219,8 +219,12 @@ func TestStClosedWorkOriginalReportCapacityOmitsWholeProof(t *testing.T) {
 			}
 		}
 		usages, census, err := GetStEpochProviderUsageCensus(f.ctx, 17, start, start.Add(time.Hour))
-		if err != nil || census == nil || len(census.Records) != 1 || len(census.Records[0].OriginalReports) != 0 || len(usages) != 1 || usages[0].PayoutByteCount != 121 {
+		if err != nil || census == nil || len(census.Records) != 1 || len(usages) != 1 || usages[0].PayoutByteCount != 121 {
 			t.Fatal("overflow published an original prefix or erased ordinary work", usages, census, err)
+		}
+		var retained payoutartifact.ClosedWorkReports
+		if err := json.Unmarshal(census.Records[0].OriginalReports, &retained); err != nil || retained.Count != 0 || len(retained.Reports) != 0 || retained.Window == nil {
+			t.Fatal("overflow fabricated a report prefix or dropped independent window evidence", retained, err)
 		}
 	})
 }

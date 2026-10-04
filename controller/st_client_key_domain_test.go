@@ -102,7 +102,7 @@ func TestProviderDomainActualEnrollmentRotationAndClosedWork(t *testing.T) {
 		// test. The provider's normal native publisher uses the same wire message.
 		settings.ClientKeyRegistrationRequired = true
 		clientCtx, cancelClient := context.WithCancel(owner)
-		client := connect.NewClient(clientCtx, connect.Id(*credential.ClientId), control, settings)
+		client := connect.NewClient(clientCtx, connect.Id(*credential.ClientId), control, &settings)
 		defer func() {
 			cancelClient()
 			join, cancel := context.WithTimeout(context.Background(), 5*time.Second)

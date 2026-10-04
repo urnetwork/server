@@ -425,6 +425,7 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "Google Play purchase-token bindings", requiredVersion: 766, rowColumn: 177},
 	{name: "original contract close evidence custody", requiredVersion: 767, rowColumn: 178},
 	{name: "original client close signature companions", requiredVersion: 768, rowColumn: 179},
+	{name: "original client report inventory", requiredVersion: 769, rowColumn: 180},
 }
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
@@ -2181,7 +2182,8 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       `+appleOfferCodeBindingArtifactQuery+`,
 		       `+playPurchaseBindingArtifactQuery+`,
 		       `+contractCloseEvidenceArtifactQuery+`,
-		       `+contractCloseOriginalArtifactQuery+`
+		       `+contractCloseOriginalArtifactQuery+`,
+		       `+contractCloseInventoryArtifactQuery+`
 		FROM version;
 	`)
 	if err != nil {

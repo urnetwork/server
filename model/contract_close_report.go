@@ -16,13 +16,14 @@ import (
 // The stable identity is scoped to the authenticated client, never supplied party text.
 // Unacked bytes are retained exactly but do not contribute to completed-work credit.
 type ContractCloseReport struct {
-	ReportId         server.Id
-	ContractId       server.Id
-	ClientId         server.Id
-	AckedByteCount   ByteCount
-	UnackedByteCount uint64
-	Checkpoint       bool
-	OriginalReport   []byte
+	ReportId          server.Id
+	ContractId        server.Id
+	ClientId          server.Id
+	AckedByteCount    ByteCount
+	UnackedByteCount  uint64
+	Checkpoint        bool
+	OriginalReport    []byte
+	OriginalInventory []byte
 }
 
 // These typed refusals distinguish identity reuse from a missing or closed original.
@@ -42,6 +43,10 @@ func CloseContractWithReport(ctx context.Context, report ContractCloseReport) (a
 	}
 	if report.ReportId == (server.Id{}) || report.ContractId == (server.Id{}) || report.ClientId == (server.Id{}) || report.AckedByteCount < 0 {
 		return false, ErrContractCloseReportInvalid
+	}
+	report.OriginalInventory = bytes.Clone(report.OriginalInventory)
+	if len(report.OriginalInventory) == 0 {
+		report.OriginalInventory = nil
 	}
 	report.OriginalReport = bytes.Clone(report.OriginalReport)
 	if len(report.OriginalReport) == 0 {
@@ -99,9 +104,9 @@ func matchContractCloseReportInTx(ctx context.Context, tx server.PgTx, report Co
 	var acked ByteCount
 	var unacked string
 	var checkpoint bool
-	var original []byte
-	err := tx.QueryRow(ctx, `SELECT contract_id,acked_byte_count,unacked_byte_count::text,checkpoint,original_report
-  FROM contract_close_report_evidence WHERE client_id=$1 AND report_id=$2`, report.ClientId, report.ReportId).Scan(&contractId, &acked, &unacked, &checkpoint, &original)
+	var original, inventory []byte
+	err := tx.QueryRow(ctx, `SELECT contract_id,acked_byte_count,unacked_byte_count::text,checkpoint,original_report,original_inventory
+  FROM contract_close_report_evidence WHERE client_id=$1 AND report_id=$2`, report.ClientId, report.ReportId).Scan(&contractId, &acked, &unacked, &checkpoint, &original, &inventory)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -112,6 +117,9 @@ func matchContractCloseReportInTx(ctx context.Context, tx server.PgTx, report Co
 	// Older intermediaries may omit evidence; their exact retry cannot erase it.
 	// A previously unsigned admission cannot be backfilled as an original signature.
 	if len(report.OriginalReport) > 0 && !bytes.Equal(report.OriginalReport, original) {
+		return true, ErrContractCloseReportConflict
+	}
+	if len(report.OriginalInventory) > 0 && !bytes.Equal(report.OriginalInventory, inventory) {
 		return true, ErrContractCloseReportConflict
 	}
 	return true, nil
@@ -184,9 +192,9 @@ func closeContractReportInTx(ctx context.Context, tx server.PgTx, report Contrac
 	// commit an increment before discovering that its report key already exists.
 	acceptedAt := server.NowUtc()
 	tag := server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close_report_evidence
-	  (client_id,report_id,contract_id,party,acked_byte_count,unacked_byte_count,checkpoint,accepted_at,original_report,original_key_registration,original_key_issue)
-	  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(client_id,report_id) DO NOTHING`,
-		report.ClientId, report.ReportId, report.ContractId, party, report.AckedByteCount, strconv.FormatUint(report.UnackedByteCount, 10), report.Checkpoint, acceptedAt, report.OriginalReport, registration, keyIssue))
+	  (client_id,report_id,contract_id,party,acked_byte_count,unacked_byte_count,checkpoint,accepted_at,original_report,original_key_registration,original_key_issue,original_inventory)
+	  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(client_id,report_id) DO NOTHING`,
+		report.ClientId, report.ReportId, report.ContractId, party, report.AckedByteCount, strconv.FormatUint(report.UnackedByteCount, 10), report.Checkpoint, acceptedAt, report.OriginalReport, registration, keyIssue, report.OriginalInventory))
 	if tag.RowsAffected() == 0 {
 		found, err := matchContractCloseReportInTx(ctx, tx, report)
 		if !found && err == nil {

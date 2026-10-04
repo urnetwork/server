@@ -9551,4 +9551,5 @@ var migrations = []any{
 	// Existing v764 receipts keep their schema, custody and rolling-writer role.
 	newSqlMigration(contractCloseReportEvidenceSchemaSql),
 	newSqlMigration(contractCloseOriginalSchemaSql),
+	newSqlMigration(contractCloseInventorySchemaSql),
 }

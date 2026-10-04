@@ -29,6 +29,7 @@ func TestMigrationsOriginalCloseEvidenceCatalog(t *testing.T) {
 		check(true, false)
 		server.ApplyDbMigrationsUpTo(ctx, 768)
 		check(true, true)
+		server.ApplyDbMigrationsUpTo(ctx, 769)
 		for _, fault := range []struct {
 			apply, restore, artifact string
 			evidence                 bool

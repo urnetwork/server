@@ -27,6 +27,9 @@ var errOriginalCloseKeyCapacity = errors.New("original close key history exceeds
 // remain unsigned, while a present malformed envelope is a scoped refusal.
 func validateContractCloseOriginal(report ContractCloseReport) (*coreprotocol.OriginalCloseReport, error) {
 	if len(report.OriginalReport) == 0 {
+		if len(report.OriginalInventory) != 0 {
+			return nil, ErrContractCloseOriginalIntegrity
+		}
 		return nil, nil
 	}
 	original, err := coreprotocol.DecodeOriginalCloseReport(report.OriginalReport)
@@ -36,6 +39,12 @@ func validateContractCloseOriginal(report ContractCloseReport) (*coreprotocol.Or
 	outer := &coreprotocol.CloseContract{ContractId: report.ContractId.Bytes(), ReportId: report.ReportId.Bytes(), AckedByteCount: uint64(report.AckedByteCount), UnackedByteCount: report.UnackedByteCount, Checkpoint: report.Checkpoint}
 	if !original.Matches([16]byte(report.ClientId), outer) {
 		return nil, ErrContractCloseOriginalIntegrity
+	}
+	if len(report.OriginalInventory) != 0 {
+		inventory, err := coreprotocol.DecodeOriginalCloseInventory(report.OriginalInventory)
+		if err != nil || !inventory.Matches(original) {
+			return nil, errors.Join(ErrContractCloseOriginalIntegrity, err)
+		}
 	}
 	return &original, nil
 }
