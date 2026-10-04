@@ -450,6 +450,13 @@ func verifySeedWithAdmission(
 		return nil, fmt.Errorf("400 invalid seed signature")
 	}
 
+	// An authenticated identical request keeps its first original response even
+	// after key rotation or directory cleanup. No new assignment is sampled.
+	if original := model.GetVerifyOriginalRequest(ctx, model.VerifyOriginalRequest{Scope: verifyCurrentOriginalScope(), ClientId: verify.ClientId, Message: seedMessage, Signature: verify.SeedSig}); original != nil {
+		body := verifyDecodeOriginal(original)
+		return verifyDecodeCachedResponse(body.ResponseJson)
+	}
+
 	// §4.1 step 1: resolve source ip → seed hop (§8.1); unresolved → poison
 	var seedClientId *server.Id
 	if sourceIpOk {
@@ -617,6 +624,13 @@ func verifySeedWithAdmission(
 		model.SnapshotVerifyProviderNetwork(ctx, trail.Hops[0])
 		model.SnapshotVerifyProviderNetwork(ctx, trail.Pending)
 		original := verifyRetainOriginal(ctx, 0, trail, seedMessage, verify.SeedSig, responseJson)
+		retained := verifyDecodeOriginal(original)
+		if retained.Trail.TrailId != trail.TrailId {
+			// A simultaneous writer won the durable request identity. Its first
+			// original response wins; do not regress a later Redis projection.
+			model.DecrVerifyActiveTrails(ctx, verify.Vpk)
+			return verifyDecodeCachedResponse(retained.ResponseJson)
+		}
 		model.PublishVerifyOriginal(ctx, original, settings)
 	} else {
 		model.CreateVerifyTrail(ctx, trail, responseJson, settings)
