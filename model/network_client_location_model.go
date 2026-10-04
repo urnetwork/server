@@ -4367,8 +4367,11 @@ func loadClientLocations(
 				v := pipe.Get(ctx, clientLocationKey(locationId))
 				clientLocationCmds[locationId] = v
 			}
-			// note ignore the error for GET since it will include missing key
-			pipe.Exec(ctx)
+			// Missing metadata is legitimate. A failed GET must not turn typed
+			// search into a successful partial or empty result.
+			if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
+				return err
+			}
 
 			for locationId, clientLocationCmd := range clientLocationCmds {
 				clientLocationBytes, _ := clientLocationCmd.Bytes()
@@ -4546,9 +4549,13 @@ func FindProviderLocations(
 ) (result *FindLocationsResult, returnErr error) {
 	surface := "search"
 	defer func() { providerPickerMetrics.observe(surface, result, returnErr) }()
+	observation := &providerPickerObservation{metrics: providerPickerMetrics, surface: surface}
+	defer observation.finish()
 	query := strings.TrimSpace(findLocations.Query)
 	if clientId, err := server.ParseId(query); err == nil {
 		surface = "direct"
+		observation.surface = surface
+		observation.enter("format_result")
 		device := &LocationDeviceResult{
 			ClientId:   clientId,
 			DeviceName: fmt.Sprintf("%s", clientId),
@@ -4565,6 +4572,7 @@ func FindProviderLocations(
 		}, nil
 	} else {
 		// note group search is no longer supported
+		observation.enter("caller_location")
 
 		rankMode := RankModeQuality
 		if findLocations.RankMode != "" {
@@ -4587,6 +4595,7 @@ func FindProviderLocations(
 		var matchDistances map[server.Id]int
 		var clientLocations map[server.Id]*ClientLocation
 		if query == "" {
+			observation.enter("initial_cache")
 			initialClientLocations, err := loadInitialClientLocations(session.Ctx)
 			if err != nil {
 				return nil, err
@@ -4600,6 +4609,7 @@ func FindProviderLocations(
 				clientLocations[clientLocation.LocationId] = clientLocation
 			}
 		} else {
+			observation.enter("search_index")
 			maxSearchDistance := 2
 			locationSearchResults := locationSearch().AroundIds(
 				session.Ctx,
@@ -4613,6 +4623,7 @@ func FindProviderLocations(
 				locationIds[locationId] = true
 			}
 			var err error
+			observation.enter("location_cache")
 			clientLocations, err = loadClientLocations(session.Ctx, locationIds)
 			if err != nil {
 				return nil, err
@@ -4629,6 +4640,7 @@ func FindProviderLocations(
 		}
 
 		// An absent entry excludes the location, so read errors must propagate.
+		observation.enter("filters")
 		locationStables, err := loadLocationStables(
 			session.Ctx,
 			slices.Collect(maps.Keys(clientLocations)),
@@ -4643,6 +4655,7 @@ func FindProviderLocations(
 		if locationStables == nil {
 			locationStables = map[server.Id]bool{}
 		}
+		observation.enter("format_result")
 
 		locationResults := []*LocationResult{}
 
@@ -4688,6 +4701,9 @@ func GetProviderLocations(
 	session *session.ClientSession,
 ) (result *FindLocationsResult, returnErr error) {
 	defer func() { providerPickerMetrics.observe("initial", result, returnErr) }()
+	observation := &providerPickerObservation{metrics: providerPickerMetrics, surface: "initial"}
+	defer observation.finish()
+	observation.enter("caller_location")
 	rankMode := RankModeQuality
 
 	// the caller ip is used to match against provider excluded lists
@@ -4705,6 +4721,7 @@ func GetProviderLocations(
 		glog.V(2).Infof("[GetProviderLocations] could not parse client ip: %s\n", err)
 	}
 
+	observation.enter("initial_cache")
 	initialClientLocations, err := loadInitialClientLocations(session.Ctx)
 	if err != nil {
 		return nil, err
@@ -4719,6 +4736,7 @@ func GetProviderLocations(
 	}
 
 	// An unavailable filter cannot be reported as an empty successful picker.
+	observation.enter("filters")
 	locationStables, err := loadLocationStables(
 		session.Ctx,
 		locationIds,
@@ -4733,6 +4751,7 @@ func GetProviderLocations(
 	if locationStables == nil {
 		locationStables = map[server.Id]bool{}
 	}
+	observation.enter("format_result")
 
 	locationResults := []*LocationResult{}
 	locationGroupResults := []*LocationGroupResult{}
@@ -6505,10 +6524,19 @@ func FindProviders2(
 		// cached pool already leaves out what its last export saw excluded,
 		// but that export can be an hour old, a verdict issued since must hold
 		// now, and force_minimum reads the same pool with no minimums at all.
-		candidateClientIds := slices.Clone(specClientIds)
-		for clientId := range clientScores {
-			candidateClientIds = append(candidateClientIds, clientId)
+		// Request-only refusals cannot appear in the answer and need no fresh
+		// security or subscriber read. Preserve the same predicates below.
+		var callerNetworkId server.Id
+		if session.ByJwt != nil {
+			callerNetworkId = session.ByJwt.NetworkId
 		}
+		requestFilter := clientScoreRequestFilter{
+			callerNetworkId:   callerNetworkId,
+			facets:            facets,
+			excludedClientIds: excludeFinalDestinations(),
+		}
+		candidateClientIds := slices.Clone(specClientIds)
+		candidateClientIds = append(candidateClientIds, requestFilter.unchecked(clientScores, nil)...)
 		observation.enter("hard_exclusions")
 		hardExcludedClientIds, err := getProviderRequestExclusions(session.Ctx, candidateClientIds, rankMode)
 		if err != nil {
@@ -6538,10 +6566,6 @@ func FindProviders2(
 		//
 		// A session with no jwt yields the zero network id, which matches no
 		// provider -- fail closed rather than leak.
-		var callerNetworkId server.Id
-		if session.ByJwt != nil {
-			callerNetworkId = session.ByJwt.NetworkId
-		}
 
 		// Applies the request's eligibility to one mode's loaded pool, then the
 		// request's weights in that mode. It runs on the requested mode's pool
@@ -6570,32 +6594,9 @@ func FindProviders2(
 				delete(clientScores, provider.ClientId)
 			}
 			observation.dropped[0] += before - len(clientScores)
-			before = len(clientScores)
-			for clientId, clientScore := range clientScores {
-				if clientScore.NetworkOnly && clientScore.NetworkId != callerNetworkId {
-					delete(clientScores, clientId)
-				}
-			}
-			observation.dropped[1] += before - len(clientScores)
-			before = len(clientScores)
-
 			// a cache written without facets fell back to its un-faceted
 			// buckets, whose scores carry no proven family and read as v4-only
-			for clientId, clientScore := range clientScores {
-				if !slices.Contains(facets, clientScore.ipFamilyFacet()) {
-					delete(clientScores, clientId)
-				}
-			}
-			observation.dropped[2] += before - len(clientScores)
-			before = len(clientScores)
-
-			for clientId, sources := range excludeFinalDestinations() {
-				if _, ok := clientScores[clientId]; ok {
-					observation.explicitSources |= sources
-				}
-				delete(clientScores, clientId)
-			}
-			observation.dropped[3] += before - len(clientScores)
+			requestFilter.apply(clientScores, observation)
 			observation.eligible += len(clientScores)
 			if findProviders2.ForceMinimum {
 				for _, clientScore := range clientScores {
@@ -6671,12 +6672,7 @@ func FindProviders2(
 				readFailed := err != nil
 				unknown = unknown || cursor.sourceIncomplete || 0 < cursor.missingPages
 				observation.loaded += len(extraScores)
-				unreadClientIds := []server.Id{}
-				for clientId := range extraScores {
-					if !exclusionReadClientIds[clientId] {
-						unreadClientIds = append(unreadClientIds, clientId)
-					}
-				}
+				unreadClientIds := requestFilter.unchecked(extraScores, exclusionReadClientIds)
 				observation.enter("hard_exclusions")
 				extraHardExclusions, err := getProviderRequestExclusions(session.Ctx, unreadClientIds, rankMode)
 				if err != nil {
@@ -6880,12 +6876,7 @@ func FindProviders2(
 				}
 				observation.loaded += len(otherClientScores)
 				// the exclusions of the providers this call has not read yet
-				unreadClientIds := []server.Id{}
-				for clientId := range otherClientScores {
-					if !exclusionReadClientIds[clientId] {
-						unreadClientIds = append(unreadClientIds, clientId)
-					}
-				}
+				unreadClientIds := requestFilter.unchecked(otherClientScores, exclusionReadClientIds)
 				observation.enter("hard_exclusions")
 				otherHardExcludedClientIds, err := getProviderRequestExclusions(session.Ctx, unreadClientIds, rankMode)
 				if err != nil {
@@ -6961,12 +6952,7 @@ func FindProviders2(
 								pool = map[server.Id]*ClientScore{}
 							}
 							observation.loaded += len(pool)
-							unreadClientIds := []server.Id{}
-							for clientId := range pool {
-								if !exclusionReadClientIds[clientId] {
-									unreadClientIds = append(unreadClientIds, clientId)
-								}
-							}
+							unreadClientIds := requestFilter.unchecked(pool, exclusionReadClientIds)
 							observation.enter("hard_exclusions")
 							extraHardExclusions, err := getProviderRequestExclusions(session.Ctx, unreadClientIds, rankMode)
 							if err != nil {

@@ -12,6 +12,7 @@ import (
 const LegacySettlementShardCount = 16
 
 var errLegacySettlementPending = errors.New("legacy settlement is durably pending")
+var errLegacySettlementPageBudget = errors.New("legacy settlement page budget elapsed")
 
 type LegacySettlementCursor struct {
 	NextAttemptTime time.Time `json:"next_attempt_time"`
@@ -142,12 +143,23 @@ func flushLegacySettlement(ctx context.Context, contractId server.Id) (completed
 // per-row volatile clock would scan future rows even with LIMIT 1. Failed accounting
 // remains visible and reserved; it is not quarantined or retried in a hot loop.
 // Each next task owns a fresh bounded page and persists this composite cursor.
+// Exhausting this page's own budget after progress yields its completed prefix;
+// it must not turn durable per-contract progress into a task-wide error backoff.
 func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlementCursor, limit int) (result LegacySettlementFlushResult, returnErr error) {
 	if shard < 0 || shard >= LegacySettlementShardCount || limit < 1 || limit > 64 {
 		return result, fmt.Errorf("invalid legacy settlement limit")
 	}
-	bounded, cancel := context.WithTimeout(ctx, 15*time.Second)
+	bounded, cancel := context.WithTimeoutCause(ctx, 15*time.Second, errLegacySettlementPageBudget)
 	defer cancel()
+	contextDone := func(err error) bool {
+		// The database owner deliberately replaces interrupted connection
+		// failures with this exact sentinel after joining its cleanup.
+		return bounded.Err() != nil && (err == server.DbContextDoneError || errors.Is(err, bounded.Err()))
+	}
+	pageBudgetExceeded := func(err error) bool {
+		return ctx.Err() == nil && context.Cause(bounded) == errLegacySettlementPageBudget &&
+			contextDone(err)
+	}
 	server.HandleError(func() {
 		for range limit {
 			var next *LegacySettlementCursor
@@ -176,6 +188,12 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 				return
 			}
 			completed, busy, err := flushLegacySettlement(bounded, next.ContractId)
+			if contextDone(err) {
+				// The current transaction may have rolled back or its commit
+				// acknowledgement may be unknown. Retain the previous cursor;
+				// replay still takes the existing intent/outcome ownership guard.
+				server.Raise(err)
+			}
 			result.Visited++
 			if completed && err == nil {
 				result.Completed++
@@ -183,8 +201,6 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 			if busy {
 				result.BusyOrGone++
 			}
-			result.Cursor = next
-			after = next
 			if err != nil {
 				result.Failed++
 				code, delay := "operational", 30*time.Second
@@ -196,10 +212,21 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
                       failure_code=$2,next_attempt_time=clock_timestamp() AT TIME ZONE 'UTC'+$3::interval
                       WHERE contract_id=$1`, next.ContractId, code, delay.String()))
 				}, server.TxReadCommitted, server.OptNoRetry())
+				result.Cursor = next
 				return
 			}
+			result.Cursor = next
+			after = next
 		}
 		result.More = true
-	}, func(err error) { returnErr = err })
+	}, func(err error) {
+		// A failed retry-state write is not a completed visit. Keep that
+		// failure visible even if it coincides with the page budget.
+		if result.Failed == 0 && result.Visited > 0 && pageBudgetExceeded(err) {
+			result.More = true
+			return
+		}
+		returnErr = err
+	})
 	return
 }

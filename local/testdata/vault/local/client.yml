@@ -1,0 +1,2 @@
+# Public local test value; never use for a deployed environment.
+client_ip_hash_pepper: synthetic-subscriber-eligibility-local-control-only
