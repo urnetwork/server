@@ -106,6 +106,24 @@ func publicOriginASN(asn uint32) bool {
 	return asn != 0 && asn != 23456 && asn != 65535 && asn != 4294967295 && !(64512 <= asn && asn <= 65534) && !(4200000000 <= asn && asn <= 4294967294)
 }
 
+// Keep routing observations outside the IPv4 subtree and its MMDB aliases.
+// These are address-encoding aliases, not independent native IPv6 networks.
+func subscriberOriginAliasesIPv4(prefix netip.Prefix) bool {
+	if prefix.Addr().Is4() {
+		return false
+	}
+	root := netip.MustParsePrefix("::/96")
+	if prefix.Overlaps(root) {
+		return true
+	}
+	for _, alias := range []netip.Prefix{netip.MustParsePrefix("::ffff:0:0/96"), netip.MustParsePrefix("2001::/32"), netip.MustParsePrefix("2002::/16")} {
+		if prefix.Bits() >= alias.Bits() && alias.Contains(prefix.Addr()) {
+			return true
+		}
+	}
+	return false
+}
+
 // All routes participate, including unidentified more-specific origins. Dropping
 // unknown routes would let a broader identified ISP swallow another operator.
 // Multiple-origin records are merged independent of file/line order.
@@ -163,9 +181,10 @@ func readSubscriberOrigins(ctx context.Context, reader io.Reader, at time.Time, 
 		}
 		rows++
 		// A default route does not identify the entire Internet. RIS may also
-		// observe IPv4-mapped IPv6 announcements; MMDB aliases those addresses
-		// to IPv4, so they must not override the native IPv4 origin evidence.
-		if prefix.Bits() == 0 || prefix.Addr().Is4In6() {
+		// observe IPv4-mapped/compatible, Teredo or 6to4 announcements; MMDB
+		// aliases those addresses to IPv4, so they must not override native
+		// IPv4 evidence or fail insertion into the complete origin tree.
+		if prefix.Bits() == 0 || subscriberOriginAliasesIPv4(prefix) {
 			continue
 		}
 		slices.Sort(route.asns)

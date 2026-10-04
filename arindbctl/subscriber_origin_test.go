@@ -116,6 +116,25 @@ func TestSubscriberOriginSnapshotRejectsMalformedStaleAndPartialEvidence(t *test
 	}
 }
 
+func TestSubscriberOriginIgnoresEveryMMDBIPv4Alias(t *testing.T) {
+	at := time.Date(2026, 10, 4, 6, 0, 0, 0, time.UTC)
+	for _, prefix := range []string{"::/80", "::192.0.2.0/120", "::ffff:192.0.2.0/120", "2001::/32", "2001:0:c000::/48", "2002::/16", "2002:c000:200::/48"} {
+		if !subscriberOriginAliasesIPv4(netip.MustParsePrefix(prefix)) {
+			t.Fatal("IPv4 alias observation was not excluded")
+		}
+		routes := map[netip.Prefix]subscriberOriginRoute{}
+		data := subscriberFixtureGzip(t, at, "64500 192.0.2.0/24 1\n64503 "+prefix+" 1\n")
+		if rows, err := readSubscriberOrigins(t.Context(), bytes.NewReader(data), at, routes); err != nil || rows != 2 || len(routes) != 1 {
+			t.Fatal("IPv4 alias observation contaminated native origin data")
+		}
+	}
+	for _, prefix := range []string{"192.0.2.0/24", "2000::/3", "2001:db8::/32", "2001:100::/32", "2003::/16"} {
+		if subscriberOriginAliasesIPv4(netip.MustParsePrefix(prefix)) {
+			t.Fatal("native origin network was treated as an IPv4 alias")
+		}
+	}
+}
+
 func TestSubscriberOriginBuildGlobalPrefixesAndPreservesBaseCoverage(t *testing.T) {
 	dir := t.TempDir()
 	at := time.Date(2026, 10, 4, 6, 0, 0, 0, time.UTC)
