@@ -47,7 +47,9 @@ func shadowFixture(t *testing.T, risk bool) (*ArinShadowRecorder, ArinShadowActi
 		t.Fatal(err)
 	}
 	t.Cleanup(r.Close)
-	return r, ArinShadowActiveFacts{Epoch: r.active.Metadata.BuildTime().Unix(), At: time.Now().UTC(), Risk: risk, Verified: !risk}
+	// Match the recorder clock's microsecond resolution so a fixture cannot
+	// appear to come from the future within the same clock tick.
+	return r, ArinShadowActiveFacts{Epoch: r.active.Metadata.BuildTime().Unix(), At: NowUtc(), Risk: risk, Verified: !risk}
 }
 func TestArinShadowRiskStaysIndependentAndOutputPrivate(t *testing.T) {
 	r, facts := shadowFixture(t, true)
