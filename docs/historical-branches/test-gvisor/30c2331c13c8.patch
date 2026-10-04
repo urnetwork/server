@@ -1,0 +1,28 @@
+commit 30c2331c13c8b9475a0b135477a28e0c34fc1a71
+Author:     Dragan Milic <dragan@netice9.com>
+AuthorDate: Thu Oct 10 22:41:49 2024 +0200
+Commit:     Dragan Milic <dragan@netice9.com>
+CommitDate: Tue Nov 5 23:07:12 2024 +0100
+
+    memlimit 32 mbit
+
+diff --git a/.github/workflows/measure-troughput.yml b/.github/workflows/measure-troughput.yml
+index 4cab5dab..d8660e1f 100644
+--- a/.github/workflows/measure-troughput.yml
++++ b/.github/workflows/measure-troughput.yml
+@@ -63,6 +63,7 @@ jobs:
+       - name: Measure Troughput - single client
+         working-directory: ./bringyour/measure-throughput
+         env:
++          GOMEMLIMIT: "32MiB"
+           REPORT_FILE: report-single.md
+         run: |
+           go mod tidy && go run .
+@@ -70,6 +71,7 @@ jobs:
+       - name: Measure Troughput - multi client
+         working-directory: ./bringyour/measure-throughput
+         env:
++          GOMEMLIMIT: "32MiB"
+           USE_MULTICLIENT: "true"
+           REPORT_FILE: report-multi.md
+         run: |

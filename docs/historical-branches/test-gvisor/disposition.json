@@ -1,0 +1,13 @@
+{
+  "branch": "origin/test-gvisor",
+  "head": "30c2331c13c8b9475a0b135477a28e0c34fc1a71",
+  "disposition": "historical exact source retained outside runtime/workflow build",
+  "reason": "Historical CI experiment pins gvisor-test with32MiB harness limits and removed nested modules. It does not supply or qualify the current explicit gVisor fork.",
+  "runtime_activated": false,
+  "original_patch_sha256": {
+    "6672d950762e.patch": "bc1d7a4028fe5b0f8d1894ea56b8afff9b7525073dd3c056649b4881711489b3",
+    "30c2331c13c8.patch": "09045307cbb3a3e42a0b84837acb7dd02cad6b4754a9b3b37cf2d90b04b035a5"
+  },
+  "retrieve_original": "git show 30c2331c13c8b9475a0b135477a28e0c34fc1a71",
+  "privacy_scan": "No private-key/PAT/cloud-key/credential-URL patterns. Only previously committed source; no private runtime artifacts copied."
+}
