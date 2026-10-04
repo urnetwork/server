@@ -1252,6 +1252,7 @@ type ContractParticipant struct {
 // records the stream's intermediary contract participants. Participants are
 // keyed by stream id rather than contract id so companion contracts, which do
 // not repeat the intermediary list, settle against the same participant set.
+// The first network snapshot survives retries and later membership changes.
 func SetContractStream(
 	ctx context.Context,
 	contractId server.Id,
@@ -1342,8 +1343,7 @@ func SetContractStream(
 							network_id
 						)
 						VALUES ($1, $2, $3)
-						ON CONFLICT (stream_id, client_id) DO UPDATE
-						SET network_id = EXCLUDED.network_id
+						ON CONFLICT (stream_id, client_id) DO NOTHING
 					`,
 					streamId,
 					clientId,
@@ -2896,8 +2896,24 @@ func contractParticipantsWithUsageOriginInTx(
 	}
 
 	participantsByClientId := map[server.Id]ContractParticipant{}
-	if egress.ClientId != originId {
-		participantsByClientId[egress.ClientId] = egress
+	// A client appearing in several roles is one provider only when its
+	// retained network agrees. Source order cannot choose its payout owner.
+	addParticipant := func(participant ContractParticipant) error {
+		if participant.ClientId == originId {
+			return nil
+		}
+		if prior, exists := participantsByClientId[participant.ClientId]; exists {
+			if prior.NetworkId != participant.NetworkId {
+				return fmt.Errorf("contract provider %s has conflicting retained networks: %s", participant.ClientId, contractId)
+			}
+			return nil
+		}
+		participantsByClientId[participant.ClientId] = participant
+		return nil
+	}
+	if err := addParticipant(egress); err != nil {
+		returnErr = err
+		return
 	}
 	if streamId != nil {
 		result, err = tx.Query(
@@ -2917,11 +2933,15 @@ func contractParticipantsWithUsageOriginInTx(
 			for result.Next() {
 				var participant ContractParticipant
 				server.Raise(result.Scan(&participant.ClientId, &participant.NetworkId))
-				if _, exists := participantsByClientId[participant.ClientId]; participant.ClientId != originId && !exists {
-					participantsByClientId[participant.ClientId] = participant
+				if err := addParticipant(participant); err != nil {
+					returnErr = err
+					return
 				}
 			}
 		})
+		if returnErr != nil {
+			return
+		}
 	}
 
 	// The extender parties of the contract are hops like any other
@@ -2944,11 +2964,15 @@ func contractParticipantsWithUsageOriginInTx(
 		for result.Next() {
 			var participant ContractParticipant
 			server.Raise(result.Scan(&participant.ClientId, &participant.NetworkId))
-			if _, exists := participantsByClientId[participant.ClientId]; participant.ClientId != originId && !exists {
-				participantsByClientId[participant.ClientId] = participant
+			if err := addParticipant(participant); err != nil {
+				returnErr = err
+				return
 			}
 		}
 	})
+	if returnErr != nil {
+		return
+	}
 
 	for _, participant := range participantsByClientId {
 		participants = append(participants, participant)
