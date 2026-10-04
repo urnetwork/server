@@ -3502,6 +3502,37 @@ Their coarse receipts cannot be retroactively assigned a transport or SQL
 cause. The phase projection repairs that evidence gap; a later complete
 receipt and representative source clocks are still required for recovery.
 
+The October 4 local preflight projection distinguishes
+`phase=settings-generation cause=stale` (the complete effective settings no
+longer match the loaded generation) from `cause=unobservable` (the comparison
+failed). Both state `source_contact_attempted=false`: this check occurs before
+cadence admission, SSH, or receipt creation. Missing or disabled primary
+inventory, local cancellation, and durable-state/admission failures also have
+finite local reasons. Their alert retains any valid prior attempted/completed/
+next-eligible clocks; it does not advance them or fabricate a new receipt.
+Generation and inventory rejection leave cadence untouched. A later durable
+admission failure can leave a conservative spent reservation; preserve its
+existing floor even though host contact did not occur.
+Private settings values, loader errors, paths, and secret-derived fingerprints
+are never included. An untyped legacy error or a later receipt-writing failure
+keeps contact status unknown rather than guessing from error text.
+
+At the retained October 4 observations, the independent settings signal was
+stale at 07:56:41Z, while the sampler was unavailable at 07:52:26Z and still
+retained its 06:07:24Z completion and 06:22:24Z eligibility clock. This proves a
+loaded/current settings mismatch at the settings observation. The old generic
+sampler alerts cannot prove the exact failing branch of each historical turn.
+Absent receipts alone do not prove an SSH or PostgreSQL failure, database
+pressure, or a missed scheduler wakeup. Repair an unobservable settings loader,
+or promote a tested watcher with current complete settings through RUN-MAIN.md;
+preserve the generation guard, existing cadence files and all standing tails.
+Do not reset the floor or add an immediate retry. A fresh process or silence
+does not resolve the incident: require a current-generation proof, a later due
+complete immutable receipt, and a second eligible completion for recurrence.
+Synthetic controls cover changed and unreadable settings, error-over-current
+precedence, no source contact or cadence mutation, private error redaction,
+current-generation completion, and the unchanged no-early-retry boundary.
+
 A process-shared lock covers admission through terminal receipt writing.
 `pg-query-sample/continuous.json` is atomically written and fsynced, including
 its directories, before contact. It records mode, last attempted/terminal/
