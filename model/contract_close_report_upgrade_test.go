@@ -146,7 +146,7 @@ func exerciseCloseReportRollingWriters(t testing.TB, oldFirst bool) {
 	server.Db(ctx, func(conn server.PgConn) {
 		tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 		server.Raise(err)
-		defer tx.Rollback(context.WithoutCancel(ctx))
+		defer rollbackCloseReportTestTransaction(ctx, tx)
 		var ownerPid int
 		server.Raise(tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&ownerPid))
 		if applied, err := apply(tx, oldFirst); !applied || err != nil {
@@ -159,7 +159,7 @@ func exerciseCloseReportRollingWriters(t testing.TB, oldFirst bool) {
 				server.Db(ctx, func(other server.PgConn) {
 					otherTx, err := other.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 					server.Raise(err)
-					defer otherTx.Rollback(context.WithoutCancel(ctx))
+					defer rollbackCloseReportTestTransaction(ctx, otherTx)
 					var pid int
 					server.Raise(otherTx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid))
 					ready <- pid

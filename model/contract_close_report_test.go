@@ -146,8 +146,10 @@ func waitCloseReportDatabaseConflict(t testing.TB, ctx context.Context, tx serve
 		if blocked {
 			return
 		}
-		if err := ctx.Err(); err != nil {
-			t.Fatal("report contender did not reach the retained database lock", err)
+		select {
+		case <-ctx.Done():
+			t.Fatal("report contender did not reach the retained database lock", ctx.Err())
+		case <-time.After(time.Millisecond):
 		}
 	}
 }
@@ -172,24 +174,38 @@ func exerciseCloseReportConcurrent(t testing.TB, changedContract, cancelContende
 	finished := make(chan result, 1)
 	contenderCtx, cancelWaiting := context.WithCancel(ctx)
 	defer cancelWaiting()
+	joined := make(chan struct{})
+	started := false
+	defer func() {
+		cancelWaiting()
+		if started {
+			select {
+			case <-joined:
+			case <-time.After(time.Minute):
+				t.Error("close-report contender did not join canceled cleanup")
+			}
+		}
+	}()
 	var canceledResult *result
 	server.Db(ctx, func(conn server.PgConn) {
 		tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 		server.Raise(err)
-		defer tx.Rollback(context.WithoutCancel(ctx))
+		defer rollbackCloseReportTestTransaction(ctx, tx)
 		var ownerPid int
 		server.Raise(tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&ownerPid))
 		applied, err := closeContractReportInTx(ctx, tx, first)
 		if err != nil || !applied {
 			t.Fatal("first original did not enter its owning transaction", applied, err)
 		}
+		started = true
 		go func() {
+			defer close(joined)
 			var observed result
 			server.HandleError(func() {
 				server.Db(contenderCtx, func(other server.PgConn) {
 					otherTx, err := other.BeginTx(contenderCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 					server.Raise(err)
-					defer otherTx.Rollback(context.WithoutCancel(ctx))
+					defer rollbackCloseReportTestTransaction(ctx, otherTx)
 					var pid int
 					server.Raise(otherTx.QueryRow(contenderCtx, `SELECT pg_backend_pid()`).Scan(&pid))
 					ready <- pid
