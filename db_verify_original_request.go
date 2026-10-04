@@ -29,7 +29,7 @@ CREATE TABLE verify_original_request_lookup (
 CREATE INDEX verify_original_request_lookup_identity ON verify_original_request_lookup
  (client_id,sha256(request_message),sha256(request_signature));
 INSERT INTO verify_original_request_lookup
- SELECT trail_id,previous_depth,((convert_from(original_body,'UTF8')::jsonb)->'trail'->>'client_id')::uuid,
+ SELECT trail_id,previous_depth,((convert_from(original_body,'UTF8')::jsonb)->'trail'->>'ClientId')::uuid,
  COALESCE((convert_from(original_body,'UTF8')::jsonb)->'scope','null'::jsonb),
  decode((convert_from(original_body,'UTF8')::jsonb)->>'request_message','base64'),
  decode((convert_from(original_body,'UTF8')::jsonb)->>'request_signature','base64')
@@ -39,7 +39,7 @@ DECLARE body jsonb;
 BEGIN
  body := convert_from(NEW.original_body,'UTF8')::jsonb;
  INSERT INTO verify_original_request_lookup VALUES
- (NEW.trail_id,NEW.previous_depth,(body->'trail'->>'client_id')::uuid,
+ (NEW.trail_id,NEW.previous_depth,(body->'trail'->>'ClientId')::uuid,
  COALESCE(body->'scope','null'::jsonb),decode(body->>'request_message','base64'),decode(body->>'request_signature','base64'));
  RETURN NEW;
 END
