@@ -25,6 +25,17 @@ and memory maps it; it checks schema metadata and treats lookup errors as
 unknown. It does not repeat the expensive full-database `Verify` per process.
 Immutable, read-only mounted files are required for the mapping's lifetime.
 
+Each mapped active/candidate file has a finite 1 GiB limit, checked before
+hashing and enforced again on the hash stream. The global origin attribution
+build of 2026-10-04 measured 559,752,379 bytes (533.82 MiB), up 10.73% from the
+505,506,195-byte v7 artifact. This measured whole-file growth required a
+separate mapped-capture budget; it does not narrow the worldwide subscriber
+research scope. The legacy observer still limits each heap-copied file to
+512 MiB. Both immutable mappings together may occupy up to their complete
+file sizes in resident pages, so the larger limit alone is not a host-memory
+qualification. Qualify the exact whole artifacts' hash/open time, heap and
+RSS before use; retain the source, transport, cohort and lifecycle limits.
+
 A release config staging tree therefore adds only:
 
 ```
