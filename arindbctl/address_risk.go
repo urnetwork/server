@@ -85,6 +85,14 @@ func readAddressRiskList(ctx context.Context, format string, raw io.Reader) ([]n
 			}
 			prefix = netip.PrefixFrom(address, address.BitLen())
 		}
+		// Operator geofeeds describe whole published ranges and can list
+		// non-global space; skip it there. Address lists stay strict.
+		if format == "rfc8805-geofeed" && nonGlobalPrefix(prefix.Masked()) {
+			continue
+		}
+		if format == "rfc8805-geofeed" {
+			prefix = prefix.Masked()
+		}
 		if prefix != prefix.Masked() || prefix.Bits() == 0 || prefix.Addr().Is4In6() || prefix.Addr().IsUnspecified() || subscriberOriginAliasesIPv4(prefix) {
 			return nil, errors.New("address risk list entry is not a canonical native network")
 		}

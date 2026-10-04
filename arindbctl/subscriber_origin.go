@@ -36,17 +36,19 @@ const originCountryPolicyWithhold = "withhold-outside-reviewed-countries"
 // Use evidence and routing authority are separate. RIS establishes the observed
 // origin; a reviewed catalog establishes that origin's subscriber or other use.
 type subscriberOriginCatalog struct {
-	Version             int                     `yaml:"version"`
-	Policy              string                  `yaml:"policy"`
-	MinimumOriginPeers  *uint32                 `yaml:"minimum_origin_peers"`
-	OriginCountryPolicy string                  `yaml:"origin_country_policy"`
-	OriginSources       []countryEvidenceSource `yaml:"origin_sources"`
-	AddressRiskSources  []addressRiskSource     `yaml:"address_risk_sources"`
-	RpkiSources         []rpkiSource            `yaml:"rpki_sources"`
-	RegistrySources     []registrySource        `yaml:"registry_sources"`
-	Operators           []subscriberOperator    `yaml:"operators"`
-	byASN               map[uint32][]subscriberOperator
-	byId                map[string]subscriberOperator
+	Version              int                     `yaml:"version"`
+	Policy               string                  `yaml:"policy"`
+	MinimumOriginPeers   *uint32                 `yaml:"minimum_origin_peers"`
+	OriginCountryPolicy  string                  `yaml:"origin_country_policy"`
+	OriginSources        []countryEvidenceSource `yaml:"origin_sources"`
+	AddressRiskSources   []addressRiskSource     `yaml:"address_risk_sources"`
+	RpkiSources          []rpkiSource            `yaml:"rpki_sources"`
+	RegistrySources      []registrySource        `yaml:"registry_sources"`
+	LabelSources         []labelSource           `yaml:"label_sources"`
+	HostingPrefixSources []hostingPrefixSource   `yaml:"hosting_prefix_sources"`
+	Operators            []subscriberOperator    `yaml:"operators"`
+	byASN                map[uint32][]subscriberOperator
+	byId                 map[string]subscriberOperator
 }
 
 type subscriberOperator struct {
@@ -193,6 +195,22 @@ func loadSubscriberOriginCatalog(path string) (subscriberOriginCatalog, error) {
 		}
 		if source.Format != registryFormatNroDelegatedStats {
 			return catalog, errors.New("registry source requires the nro-delegated-stats format")
+		}
+	}
+	for _, source := range catalog.LabelSources {
+		if err := validateSubscriberEvidenceSource(source.countryEvidenceSource, seen); err != nil {
+			return catalog, err
+		}
+		if !validLabelSource(source) {
+			return catalog, errors.New("label source requires a supported format, and a simple tag exactly for bgp-tools-tag-csv")
+		}
+	}
+	for _, source := range catalog.HostingPrefixSources {
+		if err := validateSubscriberEvidenceSource(source.countryEvidenceSource, seen); err != nil {
+			return catalog, err
+		}
+		if !validHostingPrefixSource(source) {
+			return catalog, errors.New("hosting prefix source requires a supported format, a reason, and services exactly for the AWS and Azure formats")
 		}
 	}
 	seen = map[string]bool{}
@@ -472,6 +490,9 @@ func augmentSubscriberRecord(base, origin mmdbtype.Map) (mmdbtype.Map, error) {
 	if _, augmented := base["address_risk_source_ids"]; augmented {
 		return nil, errors.New("subscriber augmentation requires an unaugmented registration base, not prior address-level risk")
 	}
+	if _, augmented := base["hosting_prefix_source_ids"]; augmented {
+		return nil, errors.New("subscriber augmentation requires an unaugmented registration base, not prior hosting prefixes")
+	}
 	if base["classifier_version"] != mmdbtype.Uint32(1) || base["quality_policy_version"] != mmdbtype.Uint32(2) {
 		return nil, errors.New("subscriber augmentation requires a policy-two base database")
 	}
@@ -573,6 +594,12 @@ func (self subscriberOriginCatalog) evidenceSources() classificationRules {
 	for _, source := range self.RegistrySources {
 		sources = append(sources, source.countryEvidenceSource)
 	}
+	for _, source := range self.LabelSources {
+		sources = append(sources, source.countryEvidenceSource)
+	}
+	for _, source := range self.HostingPrefixSources {
+		sources = append(sources, source.countryEvidenceSource)
+	}
 	return classificationRules{CountrySources: sources}
 }
 
@@ -593,6 +620,12 @@ func (self subscriberOriginCatalog) hashEvidenceSources(ctx context.Context, cat
 	}
 	for _, source := range self.RegistrySources {
 		named["registry/"+source.Id] = hashes["country_evidence/"+source.Id]
+	}
+	for _, source := range self.LabelSources {
+		named["label/"+source.Id] = hashes["country_evidence/"+source.Id]
+	}
+	for _, source := range self.HostingPrefixSources {
+		named["hosting_prefix/"+source.Id] = hashes["country_evidence/"+source.Id]
 	}
 	return named, nil
 }
@@ -754,6 +787,11 @@ func augmentSubscriberDatabase(ctx context.Context, basePath, catalogPath, geoli
 	if baseLeaves == 0 {
 		return errors.New("subscriber base database is empty")
 	}
+	// Prefix-scope hosting first, then exact-address risk on top of it.
+	hostingEntries, hostingSkipped, err := applyHostingPrefixSources(ctx, writer, catalog, catalogPath)
+	if err != nil {
+		return err
+	}
 	addressRiskEntries, err := applyAddressRiskSources(ctx, writer, catalog, catalogPath)
 	if err != nil {
 		return err
@@ -802,6 +840,11 @@ func augmentSubscriberDatabase(ctx context.Context, basePath, catalogPath, geoli
 	if len(catalog.AddressRiskSources) != 0 {
 		manifest["address_risk_sources"] = catalog.AddressRiskSources
 		manifest["address_risk_entries"] = addressRiskEntries
+	}
+	if len(catalog.HostingPrefixSources) != 0 {
+		manifest["hosting_prefix_sources"] = catalog.HostingPrefixSources
+		manifest["hosting_prefix_entries"] = hostingEntries
+		manifest["hosting_prefix_skipped_non_global"] = hostingSkipped
 	}
 	if len(catalog.RpkiSources) != 0 {
 		manifest["rpki_sources"] = catalog.RpkiSources

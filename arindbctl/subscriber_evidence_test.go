@@ -51,7 +51,7 @@ func TestSubscriberEvidenceRefreshPinsValidatedSnapshotsIntoACatalog(t *testing.
 	client := &http.Client{Transport: transport}
 	out := filepath.Join(dir, "refreshed")
 	if err := publishDirectory(out, func(stage string) error {
-		return refreshSubscriberEvidence(t.Context(), existing, true, stage, client, at)
+		return refreshSubscriberEvidence(t.Context(), existing, true, false, false, stage, client, at)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,9 @@ func TestSubscriberEvidenceRefreshPinsValidatedSnapshotsIntoACatalog(t *testing.
 	}
 	// Without operators the output is a fragment, and the relay feeds are opt-in.
 	fragment := filepath.Join(dir, "fragment")
-	if err := publishDirectory(fragment, func(stage string) error { return refreshSubscriberEvidence(t.Context(), "", false, stage, client, at) }); err != nil {
+	if err := publishDirectory(fragment, func(stage string) error {
+		return refreshSubscriberEvidence(t.Context(), "", false, false, false, stage, client, at)
+	}); err != nil {
 		t.Fatal(err)
 	}
 	content, err := os.ReadFile(filepath.Join(fragment, "evidence.yml"))
@@ -123,7 +125,9 @@ func TestSubscriberEvidenceRefreshRejectsRedirectsAndInvalidSnapshots(t *testing
 			mutate(bodies)
 			client := &http.Client{Transport: &evidenceRoundTripper{bodies: bodies}}
 			out := filepath.Join(t.TempDir(), "refreshed")
-			if err := publishDirectory(out, func(stage string) error { return refreshSubscriberEvidence(t.Context(), "", false, stage, client, at) }); err == nil {
+			if err := publishDirectory(out, func(stage string) error {
+				return refreshSubscriberEvidence(t.Context(), "", false, false, false, stage, client, at)
+			}); err == nil {
 				t.Fatal("invalid evidence was pinned")
 			}
 			if _, err := os.Lstat(out); err == nil {
@@ -214,5 +218,172 @@ func TestSubscriberCatalogAuditSuggestsSiblingMerges(t *testing.T) {
 	p := writeTestInput(t, filepath.Join(t.TempDir(), "catalog.yml"), []byte(strings.Replace(fixture.catalogText, "format: nro-delegated-stats", "format: delegated-extended", 1)))
 	if _, err := loadSubscriberOriginCatalog(p); err == nil {
 		t.Fatal("unsupported registry format accepted")
+	}
+}
+
+func TestLabelSourcesParseEachPublishedFormat(t *testing.T) {
+	labels := &asnLabels{names: map[uint32]string{}, class: map[uint32]string{}, tags: map[uint32][]string{}, users: map[uint32]uint64{}, usersByCountry: map[uint32]map[string]uint64{}, hasTags: map[string]bool{}}
+	if err := readBgpToolsAsns(t.Context(), strings.NewReader("asn,name,class,cc\nAS64500,Synthetic ISP,Eyeball,IN\nAS64503,\"Synthetic, Hosting\",Content,GB\n"), labels); err != nil {
+		t.Fatal(err)
+	}
+	if err := readBgpToolsTag(t.Context(), strings.NewReader("AS64503,Synthetic Hosting\nAS64500,Synthetic ISP\n"), "vpsh", labels); err != nil {
+		t.Fatal(err)
+	}
+	if err := readBgpToolsTag(t.Context(), strings.NewReader(""), "satnet", labels); err != nil {
+		t.Fatal("an empty tag list was rejected")
+	}
+	aspop := "\"#Report of estimated users per AS - Date: 01/10/2026, Window: 60 days\"\n#Rank,AS,\"AS Name\",CC,\"Users (est.)\",\"% of Country\",\"% of Internet\",\"Samples\"\n1,\"AS64500\",\"SYNTHETIC - Synthetic ISP\",\"IN\",250000,1.00,0.01,9000\n2,\"AS64500\",\"SYNTHETIC - Synthetic ISP\",\"NP\",5000,1.00,0.01,90\n3,\"AS64502\",\"PROXY\",\"US\",80000,0.1,0.001,50\n"
+	if err := readApnicAspop(t.Context(), strings.NewReader(aspop), labels); err != nil {
+		t.Fatal(err)
+	}
+	if labels.class[64503] != "Content" || labels.names[64503] != "Synthetic, Hosting" || fmt.Sprint(labels.tags[64500]) != "[vpsh]" || labels.users[64500] != 255000 || labels.usersByCountry[64500]["np"] != 5000 || !labels.hasTags["satnet"] || !labels.hasClass || !labels.hasUsers {
+		t.Fatalf("labels: %+v", labels)
+	}
+	for format, bad := range map[string]string{
+		labelFormatBgpToolsAsns: "asn,name\nAS1,x\n",
+		labelFormatBgpToolsTag:  "ASx,name\n",
+		labelFormatApnicAspop:   "1,\"AS1\",\"x\",\"USA\",10\n",
+	} {
+		fresh := &asnLabels{names: map[uint32]string{}, class: map[uint32]string{}, tags: map[uint32][]string{}, users: map[uint32]uint64{}, usersByCountry: map[uint32]map[string]uint64{}, hasTags: map[string]bool{}}
+		var err error
+		switch format {
+		case labelFormatBgpToolsAsns:
+			err = readBgpToolsAsns(t.Context(), strings.NewReader(bad), fresh)
+		case labelFormatBgpToolsTag:
+			err = readBgpToolsTag(t.Context(), strings.NewReader(bad), "vpn", fresh)
+		default:
+			err = readApnicAspop(t.Context(), strings.NewReader(bad), fresh)
+		}
+		if err == nil {
+			t.Fatalf("malformed %s accepted", format)
+		}
+	}
+	for _, source := range []labelSource{{Format: labelFormatBgpToolsTag}, {Format: labelFormatBgpToolsTag, Tag: "a,b"}, {Format: labelFormatBgpToolsAsns, Tag: "dsl"}, {Format: "peeringdb"}} {
+		if validLabelSource(source) {
+			t.Fatalf("invalid label source accepted: %+v", source)
+		}
+	}
+}
+
+// Verdicts are judged against the reviewed use, and APNIC users never
+// contradict an anonymizer because APNIC credits VPN egress with users.
+func TestIndependentLabelVerdictsFollowReviewedUse(t *testing.T) {
+	labels := &asnLabels{
+		names: map[uint32]string{}, hasClass: true, hasUsers: true, hasTags: map[string]bool{"vpsh": true, "dsl": true, "vpn": true},
+		class:          map[uint32]string{64500: "Eyeball", 64503: "Content", 64504: "Carrier"},
+		tags:           map[uint32][]string{64501: {"vpsh"}, 64502: {"vpn"}, 64505: {"dsl"}},
+		users:          map[uint32]uint64{64500: 50000, 64502: 90000, 64503: 20, 64505: 999},
+		usersByCountry: map[uint32]map[string]uint64{64500: {"in": 50000}},
+	}
+	for _, tc := range []struct {
+		usage, verdict string
+		asns           []uint32
+	}{
+		{"subscriber", "agrees", []uint32{64500}},
+		{"subscriber", "mixed", []uint32{64500, 64501}},
+		{"subscriber", "disagrees", []uint32{64503}},
+		{"subscriber", "unlabeled", []uint32{64504}},
+		{"subscriber", "agrees", []uint32{64505}},
+		{"hosting", "agrees", []uint32{64503}},
+		{"hosting", "disagrees", []uint32{64500}},
+		{"vpn", "agrees", []uint32{64502}},
+		{"proxy", "unlabeled", []uint32{64504}},
+	} {
+		got := labels.operatorLabels(subscriberOperator{Id: "x", Usage: tc.usage, ASNs: tc.asns})
+		if got.Verdict != tc.verdict {
+			t.Fatalf("%s %v: verdict=%s %+v", tc.usage, tc.asns, got.Verdict, got)
+		}
+	}
+	if got := labels.operatorLabels(subscriberOperator{Usage: "subscriber", ASNs: []uint32{64500}}); got.Users != 50000 || got.UsersByCountry["in"] != 50000 || fmt.Sprint(got.Agreeing) != "[apnic-users class-eyeball]" {
+		t.Fatalf("labels lost detail: %+v", got)
+	}
+}
+
+// The audit reports per-operator verdicts and queues unreviewed ASNs that
+// independent sources call eyeball, ranked by users, flagging contrary tags.
+func TestSubscriberCatalogAuditReportsIndependentLabels(t *testing.T) {
+	asns := []byte("asn,name,class,cc\nAS64500,Synthetic ISP,Eyeball,IN\nAS64503,Synthetic Hosting,Content,GB\nAS64510,Unreviewed ISP,Eyeball,US\nAS64511,Unreviewed Mixed ISP,Eyeball,US\nAS64512,Unreviewed Host,Content,US\n")
+	vpsh := []byte("AS64511,Unreviewed Mixed ISP\nAS64512,Unreviewed Host\n")
+	aspop := []byte("#Rank,AS,\"AS Name\",CC,\"Users (est.)\"\n1,\"AS64510\",\"UNREVIEWED\",\"US\",90000\n2,\"AS64511\",\"MIXED\",\"US\",120000\n3,\"AS64512\",\"HOST\",\"US\",80000\n4,\"AS64500\",\"ISP\",\"IN\",500000\n5,\"AS64513\",\"TINY\",\"US\",10\n")
+	source := func(id, file, format, tag string) string {
+		extra := ""
+		if tag != "" {
+			extra = "\n    tag: " + tag
+		}
+		key := strings.ToUpper(strings.ReplaceAll(file, ".", "_"))
+		return "  - id: " + id + "\n    url: https://labels.example/" + file + "\n    file: " + file + "\n    sha256: SHA256_" + key + "\n    observed_at: OBSERVED\n    expires_at: EXPIRES\n    format: " + format + extra + "\n"
+	}
+	catalog := subscriberFixtureCatalogHeader + "label_sources:\n" + source("asns", "asns.csv", labelFormatBgpToolsAsns, "") + source("vpsh", "vpsh.csv", labelFormatBgpToolsTag, "vpsh") + source("aspop", "aspop.csv", labelFormatApnicAspop, "") + subscriberFixtureOperators
+	fixture := newSubscriberBuildFixture(t, "64500 192.0.2.0/24 40\n64510 198.51.100.0/24 40\n", map[string][]byte{"asns.csv": asns, "vpsh.csv": vpsh, "aspop.csv": aspop}, catalog)
+	out := filepath.Join(fixture.dir, "audit")
+	if err := publishDirectory(out, func(stage string) error {
+		return auditSubscriberCatalog(t.Context(), fixture.catalog, fixture.geo, stage, fixture.at)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(out, "catalog-audit.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report struct {
+		Operators []subscriberCatalogAuditOperator  `json:"operators"`
+		Verdicts  map[string]int                    `json:"independent_label_verdicts"`
+		Queue     map[string][]labelReviewCandidate `json:"unreviewed_eyeball_queue_by_country"`
+	}
+	if err := json.Unmarshal(content, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Verdicts["subscriber/agrees"] != 1 || report.Verdicts["hosting/agrees"] != 1 || report.Verdicts["virtual_isp/unlabeled"] != 1 || report.Verdicts["transit/unlabeled"] != 1 {
+		t.Fatalf("verdicts: %v", report.Verdicts)
+	}
+	for _, operator := range report.Operators {
+		if operator.Id == "access" && (operator.Independent == nil || operator.Independent.Users != 500000 || operator.Independent.Verdict != "agrees") {
+			t.Fatalf("access labels: %+v", operator.Independent)
+		}
+	}
+	queue := report.Queue["us"]
+	if len(queue) != 2 || queue[0].ASN != 64511 || !queue[0].Contrary || queue[0].Routed || queue[1].ASN != 64510 || queue[1].Contrary || !queue[1].Routed || queue[1].Name != "Unreviewed ISP" || len(report.Queue["in"]) != 0 {
+		t.Fatalf("eyeball queue: %+v", report.Queue)
+	}
+	p := writeTestInput(t, filepath.Join(t.TempDir(), "catalog.yml"), []byte(strings.Replace(fixture.catalogText, "    tag: vpsh\n", "", 1)))
+	if _, err := loadSubscriberOriginCatalog(p); err == nil {
+		t.Fatal("tag list without its tag accepted")
+	}
+}
+
+func TestSubscriberEvidenceRefreshPinsLabelSourcesOnRequest(t *testing.T) {
+	at := time.Date(2026, 10, 4, 16, 0, 0, 0, time.UTC)
+	bodies := evidenceFixtureBodies(t, at)
+	bodies[subscriberEvidenceBgpToolsAsns] = []byte("asn,name,class,cc\nAS64500,Synthetic ISP,Eyeball,IN\n")
+	for _, tag := range subscriberEvidenceLabelTags {
+		bodies[fmt.Sprintf(subscriberEvidenceBgpToolsTag, tag)] = []byte("AS64500,Synthetic ISP\n")
+	}
+	bodies[subscriberEvidenceApnicAspop] = []byte("#Rank,AS,\"AS Name\",CC,\"Users (est.)\"\n1,\"AS64500\",\"ISP\",\"IN\",500000\n")
+	transport := &evidenceRoundTripper{bodies: bodies}
+	out := filepath.Join(t.TempDir(), "refreshed")
+	if err := publishDirectory(out, func(stage string) error {
+		return refreshSubscriberEvidence(t.Context(), "", false, true, false, stage, &http.Client{Transport: transport}, at)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(out, "evidence.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"label_sources:", "format: bgp-tools-asns-csv", "tag: vpsh", "format: apnic-aspop-csv", "sources/bgp-tools-tag-dsl.csv.gz"} {
+		if !strings.Contains(string(content), want) {
+			t.Fatalf("evidence fragment lacks %q: %s", want, content)
+		}
+	}
+	for _, request := range transport.requests {
+		if strings.Contains(request, "bgp.tools") && !strings.HasPrefix(request, "https://bgp.tools/") {
+			t.Fatalf("unexpected label request %s", request)
+		}
+	}
+	delete(bodies, subscriberEvidenceApnicAspop)
+	if err := publishDirectory(filepath.Join(t.TempDir(), "partial"), func(stage string) error {
+		return refreshSubscriberEvidence(t.Context(), "", false, true, false, stage, &http.Client{Transport: transport}, at)
+	}); err == nil {
+		t.Fatal("a missing label source was pinned")
 	}
 }

@@ -62,6 +62,8 @@ resolution and runtime decoding belong to [env.go](../env.go) and
 | RPKI payload snapshots | Validated ROA payloads from an rpki-client/Cloudflare JSON export or a routinator/RIPE NCC CSV export. They corroborate origin authorization; they never establish use or risk. |
 | Address-level risk lists | Reviewed one-category snapshots: the official Tor exit-address export, RFC 8805 geofeeds published by relay/VPN operators, or plain address lists. Each applies only to the exact addresses it names. |
 | NRO delegated statistics | Per-registry resource-holder ids for every ASN. The audit uses them to find sibling ASNs of a reviewed operator; the build never reads them. |
+| Operator-published cloud prefixes | AWS EC2 `ip-ranges.json`, Google Cloud `cloud.json`, the AzureCloud service tag, Oracle `public_ip_ranges.json`, and the DigitalOcean, Linode and Vultr geofeeds. Prefix-scope hosting evidence that excludes Quality without network risk. |
+| Independent ASN labels | bgp.tools ASN classes and tag lists and APNIC Labs per-ASN user estimates. Audit-only validation of catalog entries and an eyeball review queue; never subscriber evidence. |
 
 Acquisition reads credentials from protected files. ARIN credentials contain
 `api_key`; MaxMind credentials contain `account_id`, `license_key`, and
@@ -201,6 +203,7 @@ alias behavior; native IPv6 remains supported.
 | Subscriber-only route seen by fewer RIS peers than `minimum_origin_peers` | Withheld: identity recorded, base state preserved |
 | Subscriber-only route whose origin is RPKI-invalid | Withheld: identity recorded, base state preserved |
 | Inferred approval whose GeoLite country is outside every identified operator's reviewed countries | Withheld at that geography's boundary, under `origin_country_policy` |
+| Prefix in an operator-published cloud list | Excluded at that prefix; a direct reviewed subscriber approval there becomes ambiguous |
 | Address named by a reviewed Tor, proxy, VPN or virtual-ISP list | Excluded at that exact address and independent network risk added |
 
 Missing child-registration or service-purpose detail alone does not veto an
@@ -244,6 +247,19 @@ space; the withheld cells are dominated by on-net CDN caches, leased blocks and
 anycast announced from an access ASN, and an operator whose space is mostly
 outside its reviewed countries is a misidentified catalog entry.
 
+Operator-published cloud prefixes are applied after the origin stage. Unknown
+records and inferred approvals inside them become excluded with
+`hosting_prefix_source_ids`; a direct reviewed subscriber approval meets
+contrary published use and becomes ambiguous; exclusions, ambiguity and risk
+are preserved; no network risk is added. This matters where a cloud prefix is
+originated by an access network: on 2026-10-04, 52 AWS EC2 Wavelength
+prefixes were originated by Verizon Wireless AS6167 and an Oracle block by Cox
+AS22773, so identity alone would have approved rented compute. AWS and Azure
+publications mix tenant compute with provider services, so their sources must
+select services explicitly (`EC2`, `AzureCloud`). Published lists contain
+non-global space (Vultr's feed lists 6to4 and Teredo), which is skipped and
+counted rather than failing the source.
+
 Address-level findings are applied last, on top of whatever record covers the
 address. They add independent network risk with the list's reviewed category,
 exclude subscriber use at that address, and leave the surrounding prefix
@@ -285,7 +301,9 @@ allocation counts. The augmentation manifest binds the exact base MMDB, catalog,
 origin, RPKI and address-risk snapshots and their generations, the GeoLite
 database when the country policy is active, the effective visibility floor,
 output hash, and augmentation counts including withheld partitions by reason,
-RPKI route validity and applied address entries.
+RPKI route validity, applied hosting prefixes with skipped non-global entries,
+and applied address entries. `quality_state_partitions` counts the origin
+stage before the hosting and address overlays, which are counted separately.
 Retain both manifests and source receipts to preserve the full chain. The
 builder rehashes inputs before publishing and verifies the written database.
 
@@ -310,7 +328,7 @@ select a Config release.
 | `build --source … --geolite2 … --rules … --output …` | Registration MMDB and manifest, using local inputs |
 | `augment-subscribers --source … --rules … [--geolite2 …] --output …` | Globally augmented MMDB and manifest, using a registration MMDB, operator catalog and pinned evidence; `--geolite2` is required by, and only by, the reviewed-country policy |
 | `audit-subscriber-catalog --rules … --geolite2 … --output …` | `catalog-audit.json` and manifest: per-operator routed geography against reviewed countries, unobserved ASNs, registry siblings, operator merge candidates, withheld routes, and a per-country queue of unreviewed origins |
-| `refresh-subscriber-evidence [--rules existing-catalog.yml] [--relay-geofeeds] --output …` | Pinned, validated and hashed RIS, RPKI, Tor and NRO snapshots under `sources/`, plus a complete `catalog.yml` carrying the existing operators and policy, or an `evidence.yml` fragment without `--rules` |
+| `refresh-subscriber-evidence [--rules existing-catalog.yml] [--hosting-prefixes] [--label-sources] [--relay-geofeeds] --output …` | Pinned, validated and hashed RIS, RPKI, Tor and NRO snapshots under `sources/`, optionally the seven cloud prefix lists, the bgp.tools and APNIC label sources and the relay geofeeds, plus a complete `catalog.yml` carrying the existing operators and policy, or an `evidence.yml` fragment without `--rules` |
 | `refresh --geoip-config … --credentials … --rules … --output …` | One atomic bundle containing refreshed `mmdb/` and registration `arindb/` |
 
 `refresh` does **not** invoke `augment-subscribers`. A release that needs global
@@ -356,7 +374,17 @@ listed under another operator, and merge candidates: operator pairs sharing a
 holder, and pairs where one originates more-specifics inside the other's
 aggregates. The latter is how one operator's sibling ASNs look when cataloged
 separately, and until they are merged those more-specifics stand on their own
-visibility and validity. On the 2026-10-04 sample this surfaced Comcast's 55
+visibility and validity. With label sources it adds, per operator, the
+bgp.tools classes and tags and APNIC users of its ASNs and a verdict against
+the reviewed use (agrees, disagrees, mixed, unlabeled), and a per-country
+`unreviewed_eyeball_queue_by_country`: unreviewed ASNs that bgp.tools calls
+eyeball, ranked by APNIC users, with contrary tags flagged rather than
+filtered. On the 2026-10-04 sample 106 of 127 subscriber operators agreed,
+20 were mixed (incumbents bgp.tools also tags as VPS or CDN hosts, which is
+genuine mixed use inside one ASN and the reason prefix-scope hosting evidence
+matters), and the queue led with TIM and Claro in Brazil, Charter AS11426 in
+the US and Airtel in Nigeria, where the address-weighted queue led with AWS.
+On the same sample the registry source surfaced Comcast's 55
 regional ASNs, Airtel's four unlisted siblings, and the Orange ES/Jazztel
 nesting with 311 of 325 nested routes below the visibility floor. Address
 weights are not subscribers, and a queued ASN or suggested merge is a research
@@ -378,9 +406,10 @@ that day; the details and verdicts are in
 | Tor Project `exit-addresses` and bulk exit list; CollecTor archives (CC0) | Address-level `tor` findings at measured egress addresses. |
 | Apple iCloud Private Relay and Cloudflare egress geofeeds (RFC 8805) | Operator-published relay egress, opt-in `vpn` lists; Mullvad and NordVPN publish relay JSON that could join them after review. |
 | NRO extended delegated statistics; RIR whois dumps; CAIDA AS2Org (attribution) | Registry holder grouping for sibling ASNs and the delegated country used in the global geographic-risk measurement. |
-| Cloud prefix publications: AWS, Google Cloud, Azure service tags, Oracle, DigitalOcean/Linode/Vultr geofeeds, Cloudflare and Fastly edge lists | Authoritative hosting evidence, deferred: unknown space is already excluded, so they only change an outcome where a cloud prefix is originated by a reviewed subscriber ASN. |
+| Cloud prefix publications: AWS EC2, Google Cloud, AzureCloud, Oracle, DigitalOcean/Linode/Vultr geofeeds | Adopted as `hosting_prefix_sources` after measurement showed cloud compute originated by access networks (AWS Wavelength under Verizon Wireless). Cloudflare and Fastly edge lists are CDN, not tenant compute, and are not used. |
 | Spamhaus DROP and ASN-DROP (credit required) | Small high-precision negative list, deferred pending a reviewed category policy. |
-| APNIC Labs per-ASN user estimates, bgp.tools class and tags, PeeringDB `info_types`, Stanford ASdb, Cloudflare Radar, Steam per-country rankings | Discovery for the review queue only. APNIC credits VPN egress ASNs with users; PeeringDB data may not be redistributed in bulk; ASdb bulk download is login-gated. |
+| APNIC Labs per-ASN user estimates; bgp.tools class and tags | Adopted as audit-only `label_sources` for validation and the eyeball queue. APNIC credits VPN egress ASNs with users, so users never contradict an anonymizer entry. |
+| PeeringDB `info_types`, Stanford ASdb, Cloudflare Radar, Steam per-country rankings | Discovery only. PeeringDB data may not be redistributed in bulk; ASdb bulk download is login-gated; Radar needs a token; Steam lists names without ASNs. |
 | Regulator and NIR publications: NIC.br ASN/CNPJ (done for Brazil), LACNIC RDAP registrant legal ids, JPNIC ASN list, Colombia Postdata, CNMC, AGCOM, MIC, ACCC, TRAI, FCC BDC | Subscriber counts and footprints; only NIC.br carries ASNs, LACNIC registrant handles can bridge by legal id, the rest need name bridges. |
 | MaxMind Enterprise, Anonymous IP and Residential Proxy; IPinfo; ipapi | Licensed address-level user-type and proxy sightings, deferred; the signal matrix in CLASSIFICATION.md records their handling. |
 | CAIDA AS classification; Rapid7 and OpenINTEL reverse DNS; Spamhaus PBL bulk | Unavailable: retired, access-gated, or DNS-query only. |

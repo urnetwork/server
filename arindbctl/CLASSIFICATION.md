@@ -119,6 +119,21 @@ ES/Jazztel nesting (325 routes, 311 below the floor, no shared holder because
 they are distinct RIPE holders). These are catalog suggestions; the build
 reads neither registry data nor merge candidates.
 
+A third pass validated the data with independent methods. Cross-checking
+bgp.tools against APNIC showed why neither is evidence alone: APNIC credits
+users to 807 of 2,256 VPS-host ASNs and 306 of 770 VPN ASNs. As audit-only
+label sources they gave the 127-operator sample 106 agreeing and 20 mixed
+subscriber verdicts and one unlabeled (Jazztel, whose users APNIC attributes
+to the Orange ES aggregate), and an eyeball queue ranked by users instead of
+address weight. Measuring the deferred cloud publications against routing
+overturned their deferral: 52 AWS EC2 Wavelength prefixes are originated by
+Verizon Wireless AS6167 and an Oracle block by Cox AS22773, so they are now
+prefix-scope hosting evidence. The same data showed Vultr's geofeed listing
+6to4, Teredo and documentation space, so geofeed readers skip non-global
+entries. A full augmentation with every evidence family applied 16,265 cloud
+prefixes and 436,929 address entries in 188 seconds, and readback showed both
+Verizon Wavelength blocks excluded with their origin identity retained.
+
 Package, race and vet checks pass. The real-data audit over today's table ran
 in 20 seconds for 129 operators. A full augmentation of a local policy-two base
 built from the 2026-02-18 ARIN snapshot (6,843,456 base leaves) with the

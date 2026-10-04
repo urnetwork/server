@@ -20,14 +20,16 @@ var Version = "development"
 
 // Paths are explicit so a release uses its selected source and secret files.
 type commandOptions struct {
-	geoipConfig string
-	credentials string
-	rules       string
-	geolite2    string
-	source      string
-	output      string
-	timeout     time.Duration
-	relayFeeds  bool
+	geoipConfig  string
+	credentials  string
+	rules        string
+	geolite2     string
+	source       string
+	output       string
+	timeout      time.Duration
+	relayFeeds   bool
+	labelFeeds   bool
+	hostingFeeds bool
 }
 
 func main() {
@@ -76,6 +78,8 @@ func runCommandWithDependencies(ctx context.Context, args []string, output io.Wr
 	flags.StringVar(&options.output, "output", "", "new output directory; existing directories are never replaced")
 	flags.DurationVar(&options.timeout, "timeout", time.Hour, "total command deadline")
 	flags.BoolVar(&options.relayFeeds, "relay-geofeeds", false, "also pin Apple Private Relay and Cloudflare egress geofeeds as reviewed VPN address lists")
+	flags.BoolVar(&options.hostingFeeds, "hosting-prefixes", false, "also pin AWS EC2, Google Cloud, AzureCloud, Oracle, DigitalOcean, Linode and Vultr published prefixes as hosting evidence")
+	flags.BoolVar(&options.labelFeeds, "label-sources", false, "also pin bgp.tools ASN classes and tags and APNIC Labs user estimates for the audit's independent validation")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -97,7 +101,7 @@ func runCommandWithDependencies(ctx context.Context, args []string, output io.Wr
 		case "audit-subscriber-catalog":
 			return auditSubscriberCatalog(ctx, options.rules, options.geolite2, stage, time.Now().UTC())
 		case "refresh-subscriber-evidence":
-			return refreshSubscriberEvidence(ctx, options.rules, options.relayFeeds, stage, dependencies.evidenceClient, time.Now().UTC())
+			return refreshSubscriberEvidence(ctx, options.rules, options.relayFeeds, options.labelFeeds, options.hostingFeeds, stage, dependencies.evidenceClient, time.Now().UTC())
 		case "refresh":
 			// Neither database becomes visible until both were built and verified.
 			geoDir := filepath.Join(stage, "mmdb")
