@@ -29,8 +29,13 @@ func feeContextTestHeader(number uint32, parent string, root byte, digests ...[]
 // Native heights start at 700 while EVM receipts are in block 90.
 func feeContextTestFixture(t testing.TB, winner int, mappings []int) *receiptFinalityFixture {
 	t.Helper()
+	return feeContextTestFixtureOnChain(t, winner, mappings, 31337)
+}
+
+func feeContextTestFixtureOnChain(t testing.TB, winner int, mappings []int, chainId uint64) *receiptFinalityFixture {
+	t.Helper()
 	keys, authorities := finalityTestAuthorities(31)
-	fixture := &receiptFinalityFixture{receipts: receiptCommitmentTestFixture(t, winner), keys: keys}
+	fixture := &receiptFinalityFixture{receipts: receiptCommitmentTestFixtureOnChain(t, winner, chainId), keys: keys}
 	parent := "0x" + strings.Repeat("9", 64)
 	for index, mapping := range mappings {
 		var digests [][]byte

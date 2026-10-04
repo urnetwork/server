@@ -71,17 +71,22 @@ func censusTestKey(t testing.TB, scalar byte) *ecdsa.PrivateKey {
 // Both supported fee formats and cancellation envelopes are really signed.
 func censusTestTransaction(t testing.TB, key *ecdsa.PrivateKey, nonce uint64, kind string, dynamic bool, price int64) (*types.Transaction, []byte) {
 	t.Helper()
+	return censusTestTransactionOnChain(t, key, nonce, kind, dynamic, price, 31337)
+}
+
+func censusTestTransactionOnChain(t testing.TB, key *ecdsa.PrivateKey, nonce uint64, kind string, dynamic bool, price int64, chainId uint64) (*types.Transaction, []byte) {
+	t.Helper()
 	to, gas, data := common.HexToAddress("0x"+strings.Repeat("c", 40)), uint64(30000), []byte{1, 2, 3}
 	if kind == "cancellation" {
 		to, gas, data = crypto.PubkeyToAddress(key.PublicKey), 21000, nil
 	}
 	var tx *types.Transaction
 	if dynamic {
-		tx = types.NewTx(&types.DynamicFeeTx{ChainID: big.NewInt(31337), Nonce: nonce, To: &to, Gas: gas, GasTipCap: big.NewInt(10), GasFeeCap: big.NewInt(price), Value: new(big.Int), Data: data})
+		tx = types.NewTx(&types.DynamicFeeTx{ChainID: new(big.Int).SetUint64(chainId), Nonce: nonce, To: &to, Gas: gas, GasTipCap: big.NewInt(10), GasFeeCap: big.NewInt(price), Value: new(big.Int), Data: data})
 	} else {
 		tx = types.NewTx(&types.LegacyTx{Nonce: nonce, To: &to, Gas: gas, GasPrice: big.NewInt(price), Value: new(big.Int), Data: data})
 	}
-	signed, err := types.SignTx(tx, types.LatestSignerForChainID(big.NewInt(31337)), key)
+	signed, err := types.SignTx(tx, types.LatestSignerForChainID(new(big.Int).SetUint64(chainId)), key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,9 +99,13 @@ func censusTestTransaction(t testing.TB, key *ecdsa.PrivateKey, nonce uint64, ki
 
 // Every retained column is synthetic, including UUID-shaped intent identities.
 func censusTestIntent(key *ecdsa.PrivateKey, number int, nonce int64, status string) Intent {
+	return censusTestIntentOnChain(key, number, nonce, status, 31337)
+}
+
+func censusTestIntentOnChain(key *ecdsa.PrivateKey, number int, nonce int64, status string, chainId uint64) Intent {
 	data := []byte{1, 2, 3}
 	return Intent{Id: fmt.Sprintf("00000000-0000-0000-0000-%012d", number), IntentKey: fmt.Sprintf("synthetic-%d:0", number), LogicalKey: fmt.Sprintf("synthetic-%d", number),
-		Profile: "synthetic", DeploymentId: "synthetic-deployment", DeploymentKey: "31337:0x" + strings.Repeat("c", 40), ChainId: 31337, Genesis: "0x" + strings.Repeat("a", 64),
+		Profile: "synthetic", DeploymentId: "synthetic-deployment", DeploymentKey: fmt.Sprint(chainId) + ":0x" + strings.Repeat("c", 40), ChainId: int64(chainId), Genesis: "0x" + strings.Repeat("a", 64),
 		From: strings.ToLower(crypto.PubkeyToAddress(key.PublicKey).Hex()), To: "0x" + strings.Repeat("c", 40), CalldataHash: crypto.Keccak256Hash(data).Hex(), Calldata: data,
 		Nonce: nonce, Status: status, CreateTime: time.Unix(1700000000, 0).UTC(), UpdateTime: time.Unix(1700000001, 0).UTC()}
 }
@@ -105,7 +114,7 @@ func censusTestIntent(key *ecdsa.PrivateKey, number int, nonce int64, status str
 func censusTestAddAttempt(t testing.TB, image *DatabaseSnapshot, intentIndex int, key *ecdsa.PrivateKey, kind string, dynamic bool, price int64) {
 	t.Helper()
 	intent := &image.Intents[intentIndex]
-	tx, raw := censusTestTransaction(t, key, uint64(intent.Nonce), kind, dynamic, price)
+	tx, raw := censusTestTransactionOnChain(t, key, uint64(intent.Nonce), kind, dynamic, price, uint64(intent.ChainId))
 	intent.AttemptCount++
 	hash := tx.Hash().Hex()
 	intent.CurrentHash = &hash
@@ -124,14 +133,19 @@ func censusTestAddAttempt(t testing.TB, image *DatabaseSnapshot, intentIndex int
 // and four signatures are deliberately missing from that original store.
 func censusTestFixture(t testing.TB) (Config, *censusFixtureReader) {
 	t.Helper()
+	return censusTestFixtureOnChain(t, 31337)
+}
+
+func censusTestFixtureOnChain(t testing.TB, chainId uint64) (Config, *censusFixtureReader) {
+	t.Helper()
 	keyA, keyB := censusTestKey(t, 1), censusTestKey(t, 2)
-	imageA := &DatabaseSnapshot{Intents: []Intent{censusTestIntent(keyA, 1, 7, "reverted"), censusTestIntent(keyA, 2, 8, "finalized")}, Attempts: []Attempt{}}
+	imageA := &DatabaseSnapshot{Intents: []Intent{censusTestIntentOnChain(keyA, 1, 7, "reverted", chainId), censusTestIntentOnChain(keyA, 2, 8, "finalized", chainId)}, Attempts: []Attempt{}}
 	imageA.Intents[1].Generation, imageA.Intents[1].LogicalKey, imageA.Intents[1].IntentKey = 1, imageA.Intents[0].LogicalKey, imageA.Intents[0].LogicalKey+":1"
 	censusTestAddAttempt(t, imageA, 0, keyA, "execution", false, 100)
 	censusTestAddAttempt(t, imageA, 0, keyA, "execution", true, 200)
 	censusTestAddAttempt(t, imageA, 0, keyA, "cancellation", false, 150)
 	censusTestAddAttempt(t, imageA, 1, keyA, "execution", false, 110)
-	imageB := &DatabaseSnapshot{Intents: []Intent{censusTestIntent(keyB, 3, 11, "superseded"), censusTestIntent(keyB, 4, 13, "prepared")}, Attempts: []Attempt{}}
+	imageB := &DatabaseSnapshot{Intents: []Intent{censusTestIntentOnChain(keyB, 3, 11, "superseded", chainId), censusTestIntentOnChain(keyB, 4, 13, "prepared", chainId)}, Attempts: []Attempt{}}
 	censusTestAddAttempt(t, imageB, 0, keyB, "execution", false, 100)
 	root := censusTestDir(t)
 	store := filepath.Join(root, "store")
@@ -139,14 +153,14 @@ func censusTestFixture(t testing.TB) (Config, *censusFixtureReader) {
 		t.Fatal(err)
 	}
 	files := []StoreFile{{Name: strings.TrimPrefix(imageA.Attempts[0].Hash, "0x") + ".rlp", Raw: imageA.Attempts[0].Raw}, {Name: strings.Repeat("b", 64) + ".scale", Raw: []byte("synthetic opaque native bytes")}}
-	storeTx, storeRaw := censusTestTransaction(t, keyB, 12, "execution", false, 100)
+	storeTx, storeRaw := censusTestTransactionOnChain(t, keyB, 12, "execution", false, 100, chainId)
 	files = append(files, StoreFile{Name: strings.TrimPrefix(storeTx.Hash().Hex(), "0x") + ".rlp", Raw: storeRaw})
 	for _, file := range files {
 		if err := os.WriteFile(filepath.Join(store, file.Name), file.Raw, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	config := Config{Schema: ConfigSchema, ChainId: 31337, Genesis: "0x" + strings.Repeat("a", 64),
+	config := Config{Schema: ConfigSchema, ChainId: chainId, Genesis: "0x" + strings.Repeat("a", 64),
 		Roles: []Role{{Id: "operator-a", Address: imageA.Intents[0].From, FirstNonce: 7, NextNonce: 9}, {Id: "operator-b", Address: imageB.Intents[0].From, FirstNonce: 11, NextNonce: 13}},
 		Databases: []DatabaseSource{{Id: "database-a", Connection: FileReference{Path: filepath.Join(root, "database-a.url"), Sha256: digest([]byte("synthetic-a"))}, Roles: []string{"operator-a"}},
 			{Id: "database-b", Connection: FileReference{Path: filepath.Join(root, "database-b.url"), Sha256: digest([]byte("synthetic-b"))}, Roles: []string{"operator-b"}}},

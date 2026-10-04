@@ -20,7 +20,12 @@ import (
 // database generations, duplicate store custody and one store-only signature.
 func receiptTestFixture(t testing.TB, winner int) (*Archive, *ReceiptObservations) {
 	t.Helper()
-	config, reader := censusTestFixture(t)
+	return receiptTestFixtureOnChain(t, winner, 31337)
+}
+
+func receiptTestFixtureOnChain(t testing.TB, winner int, chainId uint64) (*Archive, *ReceiptObservations) {
+	t.Helper()
+	config, reader := censusTestFixtureOnChain(t, chainId)
 	archive, err := Collect(context.Background(), config, reader)
 	if err != nil {
 		t.Fatal(err)
@@ -54,7 +59,7 @@ func receiptTestObservations(t testing.TB, archive *Archive, winner int) *Receip
 		}
 		observation := ReceiptObservation{Hash: tx.Hash, Outcome: "not-found"}
 		if selected {
-			observation.Outcome, observation.Receipt = "found", receiptTestFound(t, tx, uint64(index))
+			observation.Outcome, observation.Receipt = "found", receiptTestFoundOnChain(t, tx, uint64(index), archive.Selection.ChainId)
 		}
 		observations.Receipts = append(observations.Receipts, observation)
 	}
@@ -65,7 +70,12 @@ func receiptTestObservations(t testing.TB, archive *Archive, winner int) *Receip
 // substitute for gas used. Index-derived cumulative gas avoids shared slots.
 func receiptTestFound(t testing.TB, transaction Transaction, index uint64) *ObservedReceipt {
 	t.Helper()
-	tx, _, err := decodeTransaction(transaction.Raw, 31337)
+	return receiptTestFoundOnChain(t, transaction, index, 31337)
+}
+
+func receiptTestFoundOnChain(t testing.TB, transaction Transaction, index, chainId uint64) *ObservedReceipt {
+	t.Helper()
+	tx, _, err := decodeTransaction(transaction.Raw, chainId)
 	if err != nil {
 		t.Fatal(err)
 	}
