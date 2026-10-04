@@ -69,6 +69,26 @@ func loadProviderWorkSessionSource() (*ProviderWorkSessionSource, error) {
 	if err != nil {
 		return nil, err
 	}
+	return providerWorkSessionSourceFromBytes(raw)
+}
+
+// Return only public source identity after the same finite parsing and signer
+// checks as the live loader. No environment, filesystem, cache, or signing
+// operation is used. The caller still owns independent roster approval and
+// resource custody; missing bytes are an error, never complete source coverage.
+func InspectProviderWorkSessionSourceBytes(raw []byte) (protocol.ProviderWorkSourceAuthority, error) {
+	source, err := providerWorkSessionSourceFromBytes(raw)
+	if err != nil {
+		return protocol.ProviderWorkSourceAuthority{}, err
+	}
+	clear(source.key)
+	return source.authority, nil
+}
+
+// Share the exact live decoder and constructor. Static failures cannot echo
+// secret JSON values or unknown field names; decoded temporary key bytes are
+// cleared after the constructor takes its independent copy for a live owner.
+func providerWorkSessionSourceFromBytes(raw []byte) (*ProviderWorkSessionSource, error) {
 	if len(raw) == 0 || len(raw) > 64*1024 {
 		return nil, errors.New("provider work source configuration exceeds capacity")
 	}
@@ -77,15 +97,20 @@ func loadProviderWorkSessionSource() (*ProviderWorkSessionSource, error) {
 		Authority  protocol.ProviderWorkSourceAuthority `json:"authority"`
 		PrivateKey []byte                               `json:"private_key"`
 	}
+	defer func() { clear(policy.PrivateKey) }()
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&policy); err != nil {
-		return nil, err
+		return nil, errors.New("provider work source configuration cannot be decoded")
 	}
 	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) || policy.Schema != ProviderWorkSessionSourceSchema {
 		return nil, errors.New("provider work source configuration is not canonical")
 	}
-	return NewProviderWorkSessionSource(policy.Authority, ed25519.PrivateKey(policy.PrivateKey))
+	source, err := NewProviderWorkSessionSource(policy.Authority, ed25519.PrivateKey(policy.PrivateKey))
+	if err != nil {
+		return nil, errors.New("provider work source configuration authority or key is invalid")
+	}
+	return source, nil
 }
 
 // Check the local event time as well as the independently verified consumer
