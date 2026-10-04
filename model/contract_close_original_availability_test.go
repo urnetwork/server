@@ -172,27 +172,62 @@ func TestContractCloseOriginalCanceledHistoryReadRollsBackThenRecovers(t *testin
 			err     error
 		}
 		finished := make(chan result, 1)
+		joined := make(chan struct{})
+		started := false
+		defer func() {
+			cancelReport()
+			if started {
+				select {
+				case <-joined:
+				case <-time.After(time.Minute):
+					t.Error("canceled optional reader did not join cleanup")
+				}
+			}
+		}()
 		server.Db(ctx, func(conn server.PgConn) {
 			tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 			server.Raise(err)
-			defer tx.Rollback(context.WithoutCancel(ctx))
+			defer rollbackCloseReportTestTransaction(ctx, tx)
 			var holderPid int
 			server.Raise(tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&holderPid))
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(73472601)`))
+			// Force the failed ordering: PostgreSQL caches this activity snapshot
+			// before the worker starts, even in a read-committed transaction.
+			const activitySql = `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%FROM st_client_key_history%')`
+			var cachedBlocked bool
+			server.Raise(tx.QueryRow(ctx, activitySql, holderPid).Scan(&cachedBlocked))
+			if cachedBlocked {
+				t.Fatal("optional reader existed before its owner started")
+			}
+			started = true
 			go func() {
+				defer close(joined)
 				var observed result
 				server.HandleError(func() { observed.applied, observed.err = CloseContractWithReport(reportCtx, report) }, func(err error) { observed.err = err })
 				finished <- observed
 			}()
 			for {
 				var blocked bool
-				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%FROM st_client_key_history%')`, holderPid).Scan(&blocked))
+				// Lock-manager state is live and identifies the optional reader's
+				// exact one-bigint advisory lock without cached query text.
+				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_locks
+				 WHERE locktype='advisory' AND NOT granted AND classid=0::oid
+				 AND objid=73472601::oid AND objsubid=1
+				 AND $1::int=ANY(pg_blocking_pids(pid)))`, holderPid).Scan(&blocked))
 				if blocked {
 					break
 				}
-				if err := ctx.Err(); err != nil {
-					t.Fatal("original optional reader did not reach actual database barrier", err)
+				select {
+				case value := <-finished:
+					t.Fatal("optional reader escaped the actual database barrier", value.applied, value.err)
+				case <-ctx.Done():
+					t.Fatal("original optional reader did not reach actual database barrier", ctx.Err())
+				case <-time.After(time.Millisecond):
 				}
+			}
+			server.Raise(tx.QueryRow(ctx, activitySql, holderPid).Scan(&cachedBlocked))
+			if cachedBlocked {
+				t.Fatal("activity snapshot did not preserve the forced pre-worker ordering")
 			}
 			cancelReport()
 			select {
