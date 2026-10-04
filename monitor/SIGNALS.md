@@ -11394,6 +11394,22 @@ unbounded queueing or alternate longer configurations. Existing persisted
 expiry deadlines are refreshed when touched, so deployment is not instant
 full-cohort repair. A modeled latency-gap repair is not Main coverage proof;
 missing/stale census and historical hourly gaps remain separate unknowns.
+
+An empty ordinary admission can inspect at most 128 indexed future deadlines
+inside the six-minute horizon. The compatibility repair advances only an exact
+old four-hour measurement-expiry deadline whose latest issued claim has a
+retained completed receipt, after the full configured success/failure interval
+including jitter and the live-claim reservation have elapsed since all retained
+activity. Missing/uncompleted/recent ownership, a different deadline, and longer
+custom policies stay unchanged. The ordinary due predicate is not widened, and
+the normal authoritative eligibility and single-claim checks still run after
+repair. Populated 100,000-row and concurrent owned-shard controls distinguish
+bounded future-index seeks from a broad scan or shortened lease. Ambiguous rows
+can occupy the capped head; a busy ordinary queue skips repair. These limits
+mean neither immediate full-cohort backfill nor sustained Main coverage follows
+from the local repair. Inspect accepted history, stored deadline and current
+ownership together before attributing an unreplaced measurement to scheduler
+failure; a future timestamp alone does not distinguish quota expiry from retry.
 Probe: `url-probe-coverage`
 
 This is the URL-only `FP2FIX.md` contract, not a renamed legacy cheap/full

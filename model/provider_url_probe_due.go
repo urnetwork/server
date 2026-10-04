@@ -161,28 +161,35 @@ func claimProviderUrlProbeDue(ctx context.Context, now time.Time, limit, shardIn
 				// A serialization/deadlock retry must discard the rolled-back result.
 				result.Providers = []ProviderUrlProbeDue{}
 				result.PriorityMaintenancePending = false
-				maintained := maintainProviderUrlProbeCompletedPriority(ctx, tx, now, shardIndex, shardCount, result.CompletedRunPriorityReady, observation)
-				if result.CompletedRunPriorityReady && !maintained {
-					result.PriorityMaintenancePending = true
-					return
-				}
-				observation.measure(ProviderUrlProbeDueClaimQueryRows, func() {
-					rows, err := tx.Query(ctx, providerUrlProbeDueSql(shardIndex, shardCount, result.CompletedRunPriorityReady),
-						now.UTC(), ProvideModePublic, limit, shardCount, shardIndex,
-						ProviderUrlProbeRunTarget, now.Add(ProviderEgressProbeAttemptBackoff).UTC())
-					server.WithPgResult(rows, err, func() {
-						for rows.Next() {
-							var provider ProviderUrlProbeDue
-							var securityDestinations []byte
-							server.Raise(rows.Scan(&provider.ClientId, &provider.CycleStartedAt, &provider.RunsNeeded, &provider.OutcomeCount,
-								&provider.CountryCode, &provider.Region, &securityDestinations,
-								&provider.ClaimOrdinal, &provider.ClaimedAt, &provider.CompletedRunCount))
-							server.Raise(json.Unmarshal(securityDestinations, &provider.SecurityDestinations))
-							provider.SuccessesNeeded = provider.RunsNeeded
-							result.Providers = append(result.Providers, provider)
-						}
+				// Retry admission once after a bounded repair of an old, idle,
+				// completed quota deadline. Never widen the ordinary due cutoff.
+				for pass := 0; pass < 2; pass++ {
+					maintained := maintainProviderUrlProbeCompletedPriority(ctx, tx, now, shardIndex, shardCount, result.CompletedRunPriorityReady, observation)
+					if result.CompletedRunPriorityReady && !maintained {
+						result.PriorityMaintenancePending = true
+						return
+					}
+					observation.measure(ProviderUrlProbeDueClaimQueryRows, func() {
+						rows, err := tx.Query(ctx, providerUrlProbeDueSql(shardIndex, shardCount, result.CompletedRunPriorityReady),
+							now.UTC(), ProvideModePublic, limit, shardCount, shardIndex,
+							ProviderUrlProbeRunTarget, now.Add(ProviderEgressProbeAttemptBackoff).UTC())
+						server.WithPgResult(rows, err, func() {
+							for rows.Next() {
+								var provider ProviderUrlProbeDue
+								var securityDestinations []byte
+								server.Raise(rows.Scan(&provider.ClientId, &provider.CycleStartedAt, &provider.RunsNeeded, &provider.OutcomeCount,
+									&provider.CountryCode, &provider.Region, &securityDestinations,
+									&provider.ClaimOrdinal, &provider.ClaimedAt, &provider.CompletedRunCount))
+								server.Raise(json.Unmarshal(securityDestinations, &provider.SecurityDestinations))
+								provider.SuccessesNeeded = provider.RunsNeeded
+								result.Providers = append(result.Providers, provider)
+							}
+						})
 					})
-				})
+					if pass != 0 || len(result.Providers) != 0 || repairProviderUrlProbeLegacyDeadlines(ctx, tx, now, limit, shardIndex, shardCount) == 0 {
+						return
+					}
+				}
 			})
 		}, observation.database(false))
 	})
