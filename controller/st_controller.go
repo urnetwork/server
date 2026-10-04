@@ -140,6 +140,7 @@ type StConfig struct {
 	Enabled                bool
 	AttemptUploadBudget    model.StAttemptUploadBudget
 	ReservedAttemptUpload  *StReservedAttemptUploadConfig
+	OperatorGasPolicy      *server.StOperatorGasPolicy
 	WalletAllowUnsigned    bool
 	PublicRpcUrl           string
 	RpcUrls                []string
@@ -222,6 +223,7 @@ type stVaultFile struct {
 	Enabled                bool                           `yaml:"enabled"`
 	AttemptUploadBudget    model.StAttemptUploadBudget    `yaml:"attempt_upload"`
 	ReservedAttemptUpload  *StReservedAttemptUploadConfig `yaml:"reserved_attempt_upload"`
+	OperatorGasPolicy      *server.StOperatorGasPolicy    `yaml:"operator_gas_policy"`
 	RpcUrls                []string                       `yaml:"rpc_urls"`
 	ChainId                uint64                         `yaml:"chain_id"`
 	GenesisHash            string                         `yaml:"genesis_hash"`
@@ -253,6 +255,7 @@ type stVaultFile struct {
 	TestnetEnabled                bool                           `yaml:"testnet-enabled"`
 	TestnetAttemptUploadBudget    model.StAttemptUploadBudget    `yaml:"testnet-attempt-upload"`
 	TestnetReservedAttemptUpload  *StReservedAttemptUploadConfig `yaml:"testnet-reserved-attempt-upload"`
+	TestnetOperatorGasPolicy      *server.StOperatorGasPolicy    `yaml:"testnet-operator-gas-policy"`
 	TestnetWalletAllowUnsigned    bool                           `yaml:"testnet-wallet-allow-unsigned"`
 	TestnetPublicRpcUrl           string                         `yaml:"testnet-public-rpc-url"`
 	TestnetRpcUrls                []string                       `yaml:"testnet-rpc-urls"`
@@ -339,6 +342,7 @@ var stConfigFromVault = sync.OnceValue(func() (cfg *StConfig) {
 type stSelectedConfig struct {
 	AttemptUploadBudget                                                                                            model.StAttemptUploadBudget
 	ReservedAttemptUpload                                                                                          *StReservedAttemptUploadConfig
+	OperatorGasPolicy                                                                                              *server.StOperatorGasPolicy
 	WalletAllowUnsigned                                                                                            bool
 	Enabled                                                                                                        bool
 	ChainId, Netuid, NoId, DepositAlphaRaoPerGib, DepositRateNumerator, DepositRateDenominator, DepositEpochCapRao uint64
@@ -359,6 +363,7 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			Enabled: f.TestnetEnabled, WalletAllowUnsigned: f.TestnetWalletAllowUnsigned,
 			AttemptUploadBudget:   f.TestnetAttemptUploadBudget,
 			ReservedAttemptUpload: f.TestnetReservedAttemptUpload.clone(),
+			OperatorGasPolicy:     f.TestnetOperatorGasPolicy.Clone(),
 			PublicRpcUrl:          f.TestnetPublicRpcUrl, ChainId: f.TestnetChainId, GenesisHash: f.TestnetGenesisHash,
 			DeploymentId: f.TestnetDeploymentId, PolicyHash: f.TestnetPolicyHash,
 			ContractAddress: f.TestnetContractAddress, SettlementVault: f.TestnetSettlementVault,
@@ -378,6 +383,7 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			Enabled: f.Enabled, WalletAllowUnsigned: f.WalletAllowUnsigned,
 			AttemptUploadBudget:   f.AttemptUploadBudget,
 			ReservedAttemptUpload: f.ReservedAttemptUpload.clone(),
+			OperatorGasPolicy:     f.OperatorGasPolicy.Clone(),
 			PublicRpcUrl:          f.PublicRpcUrl, ChainId: f.ChainId, GenesisHash: f.GenesisHash,
 			DeploymentId: f.DeploymentId, PolicyHash: f.PolicyHash,
 			ContractAddress: f.ContractAddress, SettlementVault: f.SettlementVault, ReserveSink: f.ReserveSink,
@@ -403,6 +409,7 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 	cfg := &StConfig{Profile: profile, Enabled: s.Enabled, WalletAllowUnsigned: s.WalletAllowUnsigned, PublicRpcUrl: s.PublicRpcUrl, RpcUrls: append([]string(nil), rpcUrls...), ChainId: s.ChainId,
 		DeploymentId: s.DeploymentId, Netuid: s.Netuid, NoId: s.NoId, AttemptUploadBudget: s.AttemptUploadBudget,
 		ReservedAttemptUpload: s.ReservedAttemptUpload.clone(),
+		OperatorGasPolicy:     s.OperatorGasPolicy.Clone(),
 		DepositAlphaRaoPerGib: s.DepositAlphaRaoPerGib, DepositRateNumerator: s.DepositRateNumerator,
 		DepositRateDenominator: s.DepositRateDenominator, DepositEpochCapRao: s.DepositEpochCapRao,
 		DepositTiers:          append([]StDepositTier(nil), s.DepositTiers...),
@@ -744,6 +751,11 @@ type CoreStClient struct {
 	// clients caches one dialed (chain-id-verified) client per rpc url
 	clients   map[string]*ethclient.Client
 	readHooks stRpcReadHooks
+	// Tests inject only the independent public authority bytes and the actual
+	// signer boundary; neither hook skips policy or durable reservation checks.
+	gasAuthority      func(context.Context) ([]byte, error)
+	gasNow            func() time.Time
+	transactionSigner func(context.Context, *types.Transaction, types.Signer, *ecdsa.PrivateKey) (*types.Transaction, error)
 	// One bounded registration owner is reused by every authenticated dispatch.
 	clientKeyRegistrations *stClientKeyRegistrationCohorts
 }
@@ -1003,6 +1015,19 @@ func (self *CoreStClient) buildTransactionAttempt(
 	if !strings.EqualFold(from.Hex(), intent.FromAddress) {
 		return nil, fmt.Errorf("st: signing key address %s does not own intent account %s", from.Hex(), intent.FromAddress)
 	}
+	gasPolicy, gasAuthority, err := self.operatorGasAdmission(ctx, from)
+	if err != nil {
+		return nil, err
+	}
+	if gasPolicy != nil {
+		pending, err := model.GetPendingStTransactionGasReservation(ctx, intent.IntentId)
+		if err != nil {
+			return nil, err
+		}
+		if pending != nil {
+			return self.signReservedStTransaction(ctx, client, key, intent, kind, pending, gasPolicy, gasAuthority)
+		}
+	}
 	if err := self.validateDepositAttempt(ctx, client, intent, kind); err != nil {
 		return nil, err
 	}
@@ -1072,6 +1097,13 @@ func (self *CoreStClient) buildTransactionAttempt(
 	if err := stPayoutAdmission(ctx, self.cfg); err != nil {
 		return nil, err
 	}
+	if gasPolicy != nil {
+		reservation, err := model.ReserveStTransactionGasAttempt(ctx, gasPolicy, gasAuthority, intent.IntentId, attempt.Attempt, kind, unsigned)
+		if err != nil {
+			return nil, err
+		}
+		return self.signReservedStTransaction(ctx, client, key, intent, kind, reservation, gasPolicy, gasAuthority)
+	}
 	signed, err := types.SignTx(unsigned, types.LatestSignerForChainID(chainId), key)
 	if err != nil {
 		return nil, fmt.Errorf("st: sign transaction: %w", err)
@@ -1115,6 +1147,13 @@ func (self *CoreStClient) broadcastStoredAttempt(
 	intent *model.StTransactionIntent,
 	attempt *model.StTransactionAttempt,
 ) error {
+	if policy, authority, err := self.operatorGasAdmission(ctx, common.HexToAddress(intent.FromAddress)); err != nil {
+		return err
+	} else if policy != nil {
+		if err := model.ValidateStTransactionGasBroadcast(ctx, policy, authority, intent.IntentId, attempt); err != nil {
+			return fmt.Errorf("%w: %w", model.ErrStOperatorGasAllowance, err)
+		}
+	}
 	tx, err := stDecodeStoredTransaction(attempt)
 	if err != nil {
 		// Invalid local bytes have not consumed the account nonce. Keep the
@@ -1297,7 +1336,9 @@ func (self *CoreStClient) runTransactionIntent(
 		if current.Status == model.StTxSigned || current.Status == model.StTxBroadcast || current.Status == model.StTxUncertain {
 			// Re-broadcasting identical signed bytes is safe and repairs a node or
 			// process restart that forgot its mempool while preserving the nonce.
-			_ = self.broadcastStoredAttempt(waitCtx, client, intent, current)
+			if err := self.broadcastStoredAttempt(waitCtx, client, intent, current); errors.Is(err, model.ErrStOperatorGasAllowance) {
+				return current.TxHash, err
+			}
 		}
 		txHash, waitErr := self.waitFinalizedAttempt(waitCtx, client, intent, attempts)
 		if !errors.Is(waitErr, errStReplaceTransaction) {
@@ -1527,6 +1568,11 @@ func (self *CoreStClient) sendPrepared(ctx context.Context, key *ecdsa.PrivateKe
 		return "", err
 	}
 	if err := stPayoutAdmission(ctx, self.cfg); err != nil {
+		return "", err
+	}
+	// Adopt the independently approved original history before reserving a
+	// fresh nonce. Reconciliation above remains possible without new authority.
+	if _, _, err := self.operatorGasAdmission(ctx, from); err != nil {
 		return "", err
 	}
 	operation, to, calldata, err := prepare(ctx, client)

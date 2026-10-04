@@ -1129,6 +1129,11 @@ func AddStTransactionAttempt(ctx context.Context, candidate *StTransactionAttemp
 	}
 	var stored *StTransactionAttempt
 	server.Tx(ctx, func(tx server.PgTx) {
+		// Initial gas-history adoption and legacy writers share this account
+		// lock. A signature cannot appear after the approved census is read.
+		intent := scanStTransactionIntent(tx.QueryRow(ctx, `SELECT `+stTransactionIntentColumns+` FROM st_transaction_intent WHERE intent_id=$1`, candidate.IntentId))
+		var ignored any
+		server.Raise(tx.QueryRow(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, stTransactionAdvisoryLockKey(intent.ChainId, intent.GenesisHash, intent.FromAddress)).Scan(&ignored))
 		var intentStatus string
 		var attemptCount int
 		server.Raise(tx.QueryRow(ctx, `
@@ -1154,6 +1159,7 @@ func AddStTransactionAttempt(ctx context.Context, candidate *StTransactionAttemp
 		if intentStatus != StTxPrepared && intentStatus != StTxSigned && intentStatus != StTxBroadcast && intentStatus != StTxUncertain {
 			panic(fmt.Errorf("st transaction intent has invalid signing state %q", intentStatus))
 		}
+		checkStTransactionGasAttempt(ctx, tx, intent, candidate)
 		now := server.NowUtc()
 		if attemptCount > 0 {
 			server.RaisePgResult(tx.Exec(ctx, `
@@ -1408,6 +1414,13 @@ func MarkStTransactionSuperseded(ctx context.Context, intentId server.Id, err er
 			SELECT status, attempt_count FROM st_transaction_intent WHERE intent_id=$1 FOR UPDATE
 		`, intentId).Scan(&intentStatus, &attemptCount))
 		if stTransactionIntentTerminal(intentStatus) || attemptCount != 0 {
+			return
+		}
+		// A signer may have produced the pre-reserved exact bytes before its
+		// result was lost. Zero persisted signatures no longer proves unsigned.
+		var gasReserved bool
+		server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM st_operator_gas_reservation WHERE intent_id=$1)`, intentId).Scan(&gasReserved))
+		if gasReserved {
 			return
 		}
 		now := server.NowUtc()

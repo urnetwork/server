@@ -278,7 +278,7 @@ func (self *stDepositCustodyRpc) SendRawTransaction(_ context.Context, raw hexut
 	} else if *tx.To() == self.cfg.ContractAddress && len(tx.Data()) == 132 {
 		amount := new(big.Int).SetBytes(tx.Data()[36:68])
 		deadline := new(big.Int).SetBytes(tx.Data()[100:132])
-		if !deadline.IsUint64() || deadline.Uint64() < self.boundary.Block+1 {
+		if self.fault == "deposit_revert" || !deadline.IsUint64() || deadline.Uint64() < self.boundary.Block+1 {
 			status = types.ReceiptStatusFailed
 		} else if new(big.Int).SetBytes(tx.Data()[68:100]).Cmp(self.depositNonce) != 0 {
 			return common.Hash{}, errors.New("wrong fixture deposit nonce")
