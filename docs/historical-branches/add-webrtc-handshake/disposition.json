@@ -1,0 +1,20 @@
+{
+  "branch": "origin/add-webrtc-handshake",
+  "disposition": "exact original unique patches preserved outside build; ancestry merged",
+  "head": "7b9fb115ef39172016938db0e4298f5585b31c4d",
+  "patches": [
+    {
+      "commit": "002618eb785dc9636d102ffad8dce54a1fa15dc8",
+      "path": "002618eb785dc9636d102ffad8dce54a1fa15dc8.patch",
+      "sha256": "3ab1d5ce6bda651eb8aaf6e32b6d0d98d5534fb4b3d0c4bd97b2d105421e6dac"
+    },
+    {
+      "commit": "7b9fb115ef39172016938db0e4298f5585b31c4d",
+      "path": "7b9fb115ef39172016938db0e4298f5585b31c4d.patch",
+      "sha256": "798ff4cd7466963ea913ab602a0151abcc4a3f9f061195183db8993bc311bd5e"
+    }
+  ],
+  "reason": "Historical BringYour-module signaling routes lack peer/session ownership binding and print SDP/candidate data; the removed API layout cannot be revived as current authenticated signaling.",
+  "runtime_activation": false,
+  "source_retrieval": "git show 7b9fb115ef39172016938db0e4298f5585b31c4d:<path>"
+}
