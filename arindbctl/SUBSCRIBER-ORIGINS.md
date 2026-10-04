@@ -86,6 +86,13 @@ The longest observed origin prefix is evaluated, and equal-prefix origins are
 merged independent of input order. Unknown origin routes are retained so a
 narrower unrelated network does not inherit a larger ISP's identity. Default
 routes never identify the entire address space.
+IPv4-compatible/mapped, Teredo and 6to4 announcements are also ineligible for
+origin inference: MMDB aliases those addresses to IPv4, and those observations
+must not replace the separate native IPv4 table. The manifest distinguishes
+observed rows from usable unique origin prefixes. The pinned 2026-10-04 IPv6
+source includes 28 mapped announcements as well as other alias ranges; ignoring
+them is explicit input normalization, not a missing service-purpose discriminator
+for an identified ISP. Native IPv6 outside those aliases remains supported.
 
 | Origin/use evidence | Result for an otherwise unknown base record |
 | --- | --- |

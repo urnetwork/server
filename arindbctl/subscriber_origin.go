@@ -106,6 +106,24 @@ func publicOriginASN(asn uint32) bool {
 	return asn != 0 && asn != 23456 && asn != 65535 && asn != 4294967295 && !(64512 <= asn && asn <= 65534) && !(4200000000 <= asn && asn <= 4294967294)
 }
 
+// Keep routing observations outside the IPv4 subtree and its MMDB aliases.
+// These are address-encoding aliases, not independent native IPv6 networks.
+func subscriberOriginAliasesIPv4(prefix netip.Prefix) bool {
+	if prefix.Addr().Is4() {
+		return false
+	}
+	root := netip.MustParsePrefix("::/96")
+	if prefix.Overlaps(root) {
+		return true
+	}
+	for _, alias := range []netip.Prefix{netip.MustParsePrefix("::ffff:0:0/96"), netip.MustParsePrefix("2001::/32"), netip.MustParsePrefix("2002::/16")} {
+		if prefix.Bits() >= alias.Bits() && alias.Contains(prefix.Addr()) {
+			return true
+		}
+	}
+	return false
+}
+
 // All routes participate, including unidentified more-specific origins. Dropping
 // unknown routes would let a broader identified ISP swallow another operator.
 // Multiple-origin records are merged independent of file/line order.
@@ -144,7 +162,7 @@ func readSubscriberOrigins(ctx context.Context, reader io.Reader, at time.Time, 
 		}
 		prefix, err := netip.ParsePrefix(fields[1])
 		peers, peerErr := strconv.ParseUint(fields[2], 10, 32)
-		if err != nil || prefix != prefix.Masked() || prefix.Addr().Is4In6() || peerErr != nil || peers == 0 {
+		if err != nil || prefix != prefix.Masked() || peerErr != nil || peers == 0 {
 			return 0, errors.New("origin snapshot has invalid prefix or peer count")
 		}
 		origins := fields[0]
@@ -162,8 +180,11 @@ func readSubscriberOrigins(ctx context.Context, reader io.Reader, at time.Time, 
 			}
 		}
 		rows++
-		// A default route is not an identification of the entire Internet.
-		if prefix.Bits() == 0 {
+		// A default route does not identify the entire Internet. RIS may also
+		// observe IPv4-mapped/compatible, Teredo or 6to4 announcements; MMDB
+		// aliases those addresses to IPv4, so they must not override native
+		// IPv4 evidence or fail insertion into the complete origin tree.
+		if prefix.Bits() == 0 || subscriberOriginAliasesIPv4(prefix) {
 			continue
 		}
 		slices.Sort(route.asns)
@@ -317,6 +338,7 @@ func augmentSubscriberDatabase(ctx context.Context, basePath, catalogPath, outpu
 	if len(routes) == 0 {
 		return errors.New("origin snapshots contain no usable routes")
 	}
+	usableRoutePrefixes := len(routes)
 	byASN := map[uint32][]subscriberOperator{}
 	for _, operator := range catalog.Operators {
 		for _, asn := range operator.ASNs {
@@ -442,5 +464,5 @@ func augmentSubscriberDatabase(ctx context.Context, basePath, catalogPath, outpu
 	if _, err := sources.hashCountryEvidenceSources(ctx, catalogPath, at); err != nil {
 		return err
 	}
-	return writeManifest(output, map[string]any{"source": "reviewed subscriber operators and RIPE RIS origins", "built_at": at, "classifier_version": 1, "quality_policy_version": 2, "subscriber_origin_policy": "identified-subscriber-default", "inputs_sha256": hashes, "origin_sources": catalog.OriginSources, "origin_rows": rows, "reviewed_operators": len(catalog.Operators), "base_leaves": baseLeaves, "emitted_partitions": emitted, "quality_state_partitions": states, "isp_inferred_partitions": inferred}, "arin.mmdb")
+	return writeManifest(output, map[string]any{"source": "reviewed subscriber operators and RIPE RIS origins", "built_at": at, "classifier_version": 1, "quality_policy_version": 2, "subscriber_origin_policy": "identified-subscriber-default", "inputs_sha256": hashes, "origin_sources": catalog.OriginSources, "origin_rows": rows, "usable_origin_prefixes": usableRoutePrefixes, "reviewed_operators": len(catalog.Operators), "base_leaves": baseLeaves, "emitted_partitions": emitted, "quality_state_partitions": states, "isp_inferred_partitions": inferred}, "arin.mmdb")
 }

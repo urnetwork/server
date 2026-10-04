@@ -77,6 +77,114 @@ field, including risk, stayed equal. The resource SHA-256 is
 This is an offline evidence check, not a provider count or a Main activation
 receipt. Global inference and catalog coverage are separate successor work.
 
+## 2026-10-04 07:08 UTC global candidate readback
+
+The first reviewed global seed contains 44 subscriber operators, 48 subscriber
+ASNs and 22 countries, plus four explicit hosting-origin operators. Every
+emitted identity joins current official RIR ASN evidence to an official service
+source; three pending seed identities are not emitted. This is an initial
+catalog, not completion of the country/state/province top-30 research. Its
+frozen catalog SHA-256 is
+`46cee901d365d5a50c99cec0831c27268b6f4d121ba9b6b109de1d568c592a07`.
+The APNIC estimated-user ASN queue remains research prioritization, not reviewed
+subscriber identity or regional market rank. All regional rankings remain
+unverified in this first frozen catalog.
+
+The complete global augmentation finished at 06:54 UTC in 485.7 seconds. The
+serialized candidate has 7,027,342 leaves: 2,920,041 subscriber, 3,894,465 unknown,
+211,987 excluded and 849 ambiguous. Of these, 2,917,920 are new identified-ISP
+inferences and 124,610 are new origin-use vetoes. The resource SHA-256 is
+`c27a3e4904e00d8dd747f8c872126ece2a99b31c784b83c908ebdc1de04f6a49`,
+with build epoch `1791096376`. The builder's manifest counts emitted partitions
+before adjacent equal records are compressed, so those counts are larger than
+the serialized leaf counts.
+
+A complete two-direction output comparison passed in 264.6 seconds. Every new
+approval had exactly the reviewed origin ASN/operator set and matching frozen
+evidence source; existing registration metadata and independent risk values
+remained equal. Only the candidate-to-base pass counts the actual candidate
+state/address population: the reverse pass samples candidate state at each
+base leaf's first address and checks preservation. Neither prefix counts nor
+address-space weights measure live provider coverage.
+
+The independent native decoder control on the qualified 6800 production source
+passed 119 public registry/RIS samples, with 44 verified and 75 excluded outcomes
+matching the candidate's epoch, state and risk. This was a narrow diagnostic
+control using production files: the unrelated root-package generator preflight
+prevented a full root suite. Focused/full/race builder suites and vet passed
+separately. No Main contact or resource activation occurred in these checks.
+Fresh actual-provider overlap, loaded-resource proof, rollup and native-index
+Quality recovery remain Root-owned acceptance work.
+
+## 2026-10-04 07:55 UTC expanded global candidate
+
+The second frozen catalog contains 78 subscriber operators, 85 subscriber ASNs
+and 45 countries, with the same four hosting-origin vetoes. Four unresolved
+identity/service joins remain pending and are not emitted. Frontier AS5650 is
+deduplicated into the stable Verizon identity using the current ARIN record and
+Verizon's dated acquisition filing. Registry legacy names have explicit source
+bridges; the LG Powercomm/LG Uplus continuity inference records that a separate
+legal merger instrument was not captured. The catalog SHA-256 is
+`9751341eb8c4eb8ac2a47451c6a45a9f37d0d33de382cb4455973cddb8f0e8f7`.
+Independent review verified source hashes, joins, pending exclusions and entity
+deduplication; this is not an independent semantic review of every identity.
+
+The new full build completed at 07:47 UTC in 483.2 seconds. Resource SHA-256
+`d8f26b416aa5bb72d7845850ad1e09c9cefa615d7d33a5fcd4bbc6b4f7191584`,
+epoch `1791099583`, contains 7,054,846 serialized leaves: 2,939,274 subscriber,
+3,902,447 unknown, 212,004 excluded and 1,121 ambiguous. The complete
+bidirectional comparison passed in 276.2 seconds, including exact ASN/operator
+attribution and preserved registration and risk values. New inferred approvals
+number 2,937,153; origin-use vetoes number 124,610. Independent native decoding
+on the qualified 6800 graph passed 187 public samples: 78 verified and 109
+excluded. These are resource and compatibility checks, not provider counts.
+
+Regional evidence now records 77 reviewed advertised-service operator/region
+pairs in 46 US states, with all ranks unverified. The global administrative
+inventory has 3,865 regions; no state/province top-30 research is complete.
+The September 28 TRAI release adds dated Indian national broadband rankings
+and observations for 22 telecom service areas. Cross-state service areas are
+kept distinct from administrative regions. The handoff receipt under
+`temp/arin-subscriber-coverage-20261004/global-candidate-handoff-v4.json`
+binds the catalog, build, complete readback and native decoder evidence.
+Current-provider shadow, publication, loaded-resource proof and native Quality
+recovery remain Root-owned work. No Main contact occurred in this candidate
+build or its controls; the earlier candidate remains frozen separately.
+
+## 2026-10-04 09:40 UTC India expansion and complete v5 readback
+
+Catalog v3 adds twelve reviewed Indian access operators and fifteen ASNs. Its
+total is 90 subscriber operators, 100 subscriber ASNs and 45 countries, with
+the four hosting-origin vetoes retained. The catalog SHA-256 is
+`4894e396b142804cffa61c1090748d6e85b0d909e91a87bd037ca6f05da53b4e`.
+Official TRAI August 2026 subscriber tables now join the reviewed operator
+identities for metric-specific national top-five rankings. They do not establish
+state/province ranks. Three additional advertised service footprints in India
+bring reviewed presence to 80 operator/region pairs in 49 of 3,865 regions;
+every regional rank remains unverified. Four seed identities remain pending
+in this frozen catalog. Later research is a separate catalog revision.
+
+The unchanged gated builder completed v5 in 463.7 seconds. Resource SHA-256
+`0abe2281bf2f257a06735d6875e7e073c1422187637060fe54a615a8ba110be0`,
+epoch `1791105668`, contains 7,058,446 serialized leaves: 2,941,220 subscriber,
+3,903,856 unknown, 212,004 excluded and 1,366 ambiguous. The complete
+bidirectional comparison passed in 280.0 seconds. All 2,939,099 new inferences
+carry the exact reviewed ASN/operator/source attribution; 124,610 origin-use
+vetoes remain, and registration metadata and independent risk match at every
+compared address. Only candidate-to-base counts describe the serialized
+candidate population; neither directional prefix count measures live providers.
+
+The independent qualified-6800 native decoder diagnostic passed 206 public
+origin samples, with 90 verified and 116 excluded outcomes. It compiled all
+70 production files with the exact external test; an unrelated root-package
+fixture preflight prevented using that package's TestMain. The handoff
+`temp/arin-subscriber-coverage-20261004/global-candidate-handoff-v5.json`,
+SHA-256 `13cb54ecee2d902b100b017e169053f373e6c219a9e141db16b6a91d5faffe53`,
+binds the catalog, sources, output, complete readback and decoder control.
+This is local resource qualification. Current-provider overlap, publication,
+loaded-resource proof, rollup and native Quality recovery remain distinct
+Root-owned acceptance work. No Main contact occurred in these checks.
+
 ## Original policy-two review history
 
 The following records the original stricter review and rollout. The current
