@@ -14371,6 +14371,28 @@ redis-cli -p <port> SLOWLOG GET 8       # the key names attribute it
   unit is safe. The race-enabled rolling-equivalence, durable-checkpoint, and
   cadence tests cover the source behavior; production verification still
   requires a rolled cycle and a quiet four-hour anchor boundary after rollout.
+- 2026-10-04 fully expired running-window work bound: the task runs thirty
+  minutes after completion, while the shortest client window contains six
+  closed one-minute blocks. If the previous maximum is no later than the new
+  minimum, no previous contribution remains. The old incremental path still
+  scanned the entering and leaving ranges, adding and subtracting the entire
+  intervening gap. It could produce the correct final providers while reading
+  roughly sixty blocks for a six-block result on an ordinary cycle.
+  The owning decision now uses the existing authoritative aggregate over only
+  the new window in this case. This bounded rebuild is useful during
+  maintenance pressure too; overlapping windows retain incremental updates,
+  the four-hour optional cadence and its maintenance deferral. Shared-address
+  weighting, observed zero, degraded-block classification, guarded checkpoint
+  tokens, transaction rollback and the two-hour statement ceiling retain
+  their existing contracts.
+  Require a loaded baseline counterexample and current-window work bound,
+  including invalid observations and shared addresses, before release. A
+  passing local control does not identify a truncated Main statement or repair
+  a missing/non-covering index. Bind the actual query, current index shape and
+  committed window markers before attributing a production stall; after
+  rollout verify that expired windows advance without the gap scans while
+  overlapping windows still roll normally. Provider coverage and fleet CPU
+  remain separate acceptance boundaries.
 
 ---
 

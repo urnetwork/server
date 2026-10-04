@@ -6799,3 +6799,33 @@ lifetime and the retention worker lane. Worker cleanup success is observed;
 API cleanup removal still requires its own release proof. Current quota
 coverage, successful provider traffic, picker latency and sustained database
 recovery remain open.
+
+### 2026-10-04 17:00 UTC expired reliability windows and queue recovery
+
+The 16:38 native PgBouncer observation qualified all 32 instances against the
+same native process and configuration generations as 15:15. The sequential
+snapshot found 14 queued clients, 399 active and 197 idle servers; its maximum
+queue age was 2.505 milliseconds. The earlier three stalled instances each had
+idle servers and no queued clients. This is observed recovery from the earlier
+26,502-client queue, without attribution to one rollout or proof of sustained
+recovery. Four bounded current-process log tails hit their caps and contained
+only the finite `other` class, so the older login cause remains unknown.
+
+The reliability source has a separate reproducible work-bound defect: when
+the complete previous window has expired, rolling add/subtract scans the gap
+between windows twice. The normal thirty-minute task cadence exposes this in
+the six-block client window. The correction uses the existing current-window
+aggregate for disjoint windows; it does not change arithmetic, quality policy,
+retained history, timeouts, task cadence or accounting. An 85,000-provider
+managed control checks actual checkpoint ranges, shared-address weights,
+observed zero, degraded blocks and cancellation rollback before qualification.
+Overlapping windows keep the established rolling and maintenance-deferral
+behavior. The separate numeric-division fast-path experiment was held because
+its unique-address gains came with shared-address regressions.
+
+Recurring `reliability_running` prefixes do not yet prove which checkpoint
+or physical index owns the Main stall. Exact bounded statement and catalog
+observations remain required. Picker phase deployment, current durable URL
+quota coverage, successful provider traffic and sustained database recovery
+remain open; neither local parity nor lower point-in-time queue counts closes
+those requirements.
