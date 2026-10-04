@@ -127,7 +127,8 @@ func runWithDependencies(
 		server.Warmup(connectWarmupTargets()...)
 		capture, captureErr := startArinShadowCaptureRuntime(runCtx)
 		if captureErr != nil {
-			return server.ErrArinShadowInput
+			// Optional diagnostic authority must not gate primary serving.
+			glog.Errorf("[arin-shadow]optional capture unavailable; continuing primary service startup\n")
 		}
 		defer capture.Close()
 		// Only admitted candidates publish a process-identity metrics cohort.
