@@ -1403,6 +1403,18 @@ backend belongs to PgBouncer until a privileged socket census or `SHOW POOLS`
 proves the owner. This probe exports only aggregate loopback counts and ages;
 the exact loopback address/CIDR predicate never appears in logs or alerts.
 
+The application pool has a separate ownership failure: `GetNetworkUser` used
+to retain its profile-read client while four authentication helpers opened
+independent transactions from the same pool. At saturation, each outer reader
+can hold the slot needed by its nested reader. The profile query now releases
+its connection before the unchanged authentication reads. The regression uses
+eight real model calls, all four auth families, and one disposable pool slot;
+canceled and missing-user controls check cleanup and result semantics. This
+mechanism does not identify the current Main retaining route. Pair finite pgx
+acquire/cancel/connection counters with native PgBouncer pool and query-owner
+evidence before attributing observed provider starvation to this profile path.
+Do not raise either pool ceiling to hide an extra checkout.
+
 ```sql
 SELECT count(*) FILTER (WHERE client_addr <<= inet '127.0.0.0/8'
                          AND state = 'idle') AS loopback_idle,

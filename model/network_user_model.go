@@ -94,57 +94,60 @@ func GetNetworkUser(
 			}
 		})
 
-		if networkUser == nil {
-			glog.Infof("No network user found for user ID: %s", userId)
-			// No user found with this ID
-			return
-		}
-
-		/**
-		 * Get SSO auths for the user
-		 */
-		ssoAuths, err := getSsoAuths(ctx, userId)
-		server.Raise(err)
-		networkUser.SsoAuths = ssoAuths
-
-		/**
-		 * Get email/phone + password auths for the user
-		 */
-		userAuths, err := getUserAuths(userId, ctx)
-		server.Raise(err)
-		networkUser.UserAuths = userAuths
-
-		/**
-		 * Get wallet auths for the user
-		 */
-		walletAuths, err := getWalletAuths(ctx, userId)
-		server.Raise(err)
-		networkUser.WalletAuths = walletAuths
-
-		/**
-		 * Get seedphrase auths for the user
-		 */
-		seedphraseAuths, err := getSeedphraseAuths(ctx, userId)
-		server.Raise(err)
-		networkUser.SeedphraseAuths = seedphraseAuths
-
-		/**
-		 * Build composite auth_types list
-		 */
-		for _, a := range userAuths {
-			networkUser.AuthTypes = append(networkUser.AuthTypes, string(a.AuthType))
-		}
-		for _, a := range ssoAuths {
-			networkUser.AuthTypes = append(networkUser.AuthTypes, string(a.AuthType))
-		}
-		if len(walletAuths) > 0 {
-			networkUser.AuthTypes = append(networkUser.AuthTypes, walletAuthType(walletAuths[0].Blockchain))
-		}
-		if len(seedphraseAuths) > 0 {
-			networkUser.AuthTypes = append(networkUser.AuthTypes, "seedphrase")
-		}
-
 	})
+
+	// Authentication readers own separate transactions. Release the profile
+	// connection before they acquire another slot from the same pool.
+
+	if networkUser == nil {
+		glog.Infof("No network user found for user ID: %s", userId)
+		// No user found with this ID
+		return nil
+	}
+
+	/**
+	 * Get SSO auths for the user
+	 */
+	ssoAuths, err := getSsoAuths(ctx, userId)
+	server.Raise(err)
+	networkUser.SsoAuths = ssoAuths
+
+	/**
+	 * Get email/phone + password auths for the user
+	 */
+	userAuths, err := getUserAuths(userId, ctx)
+	server.Raise(err)
+	networkUser.UserAuths = userAuths
+
+	/**
+	 * Get wallet auths for the user
+	 */
+	walletAuths, err := getWalletAuths(ctx, userId)
+	server.Raise(err)
+	networkUser.WalletAuths = walletAuths
+
+	/**
+	 * Get seedphrase auths for the user
+	 */
+	seedphraseAuths, err := getSeedphraseAuths(ctx, userId)
+	server.Raise(err)
+	networkUser.SeedphraseAuths = seedphraseAuths
+
+	/**
+	 * Build composite auth_types list
+	 */
+	for _, a := range userAuths {
+		networkUser.AuthTypes = append(networkUser.AuthTypes, string(a.AuthType))
+	}
+	for _, a := range ssoAuths {
+		networkUser.AuthTypes = append(networkUser.AuthTypes, string(a.AuthType))
+	}
+	if len(walletAuths) > 0 {
+		networkUser.AuthTypes = append(networkUser.AuthTypes, walletAuthType(walletAuths[0].Blockchain))
+	}
+	if len(seedphraseAuths) > 0 {
+		networkUser.AuthTypes = append(networkUser.AuthTypes, "seedphrase")
+	}
 
 	return networkUser
 }

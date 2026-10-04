@@ -6742,3 +6742,28 @@ likewise have no general loaded-control win. These experiments do not justify
 an unconditional query replacement. Root's fresh backlog, exact pool/backend
 owners, sustained accepted-run coverage, global subscriber overlap and Main
 performance remain open; no full-coverage or CPU-recovery claim is made.
+
+### 2026-10-04 14:34 UTC shared-pool ownership and merged source
+
+Root merged the completed retention, subscriber dispatch-clock, local fixture,
+test-boundary and monitor visibility work into Main `f888f495`. Worker-lane
+deployment and runtime observation remain distinct from deploying the API Due
+cleanup removal. The existing dispatch worktree was advanced to that Main
+baseline for the next profile connection-lifetime correction.
+
+`GetNetworkUser` held the profile-read client across four independent
+authentication transactions. The owning fix releases that client before those
+unchanged readers; the local control runs eight real profiles with one pool
+slot and populated password, SSO, wallet and seedphrase result families. It
+also checks cancellation followed by an independent read and a missing user.
+These controls isolate a possible starvation mechanism; they do not establish
+the rate of this endpoint or its contribution to Main's observed pool pressure.
+
+Published reliability maintenance permits a two-hour checkpoint statement.
+The client checkpoints publish before the separate seven-day network window,
+but an individual anchor can retain its earlier DELETE locks and MVCC horizon
+until commit. The new disabled witness preserves the existing three-second
+read and native admission bounds while privately joining selected long/blocker
+query IDs to bounded statement text. Truncated prefixes, absent statements and
+multiple variants remain unknown. No rejected reliability performance variant
+has been promoted, and provider coverage and slow-query ownership remain open.
