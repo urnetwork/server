@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/urfoundation/sn/payoutartifact"
@@ -32,6 +33,7 @@ type providerWorkPriorOwner struct {
 	domain   protocol.ClientKeyHistoryDomain
 	expected payoutartifact.WholeWorkExpectation
 	read     func(context.Context, uint64) (providerWorkPriorOriginal, error)
+	locate   func(context.Context, uint64, []server.Id) ([]uint64, error)
 	bytes    int
 	windows  int
 	verified map[uint64]*providerWorkPriorVerified
@@ -45,15 +47,35 @@ type providerWorkPriorVerified struct {
 
 // SQL identifies exact published artifacts; the verifier still proves all
 // signed bytes, original identities and predecessor dependencies independently.
-func providerWorkPriorExpectation(ctx context.Context, authority payoutartifact.WholeWorkAuthority, expected payoutartifact.WholeWorkExpectation) (payoutartifact.WholeWorkExpectation, error) {
-	return providerWorkPriorExpectationWithReader(ctx, authority, expected, func(ctx context.Context, epoch uint64) (providerWorkPriorOriginal, error) {
+func providerWorkPriorExpectation(ctx context.Context, authority payoutartifact.WholeWorkAuthority, expected payoutartifact.WholeWorkExpectation, inventories ...*payoutartifact.WholeWorkInventory) (payoutartifact.WholeWorkExpectation, error) {
+	var inventory *payoutartifact.WholeWorkInventory
+	if len(inventories) > 1 {
+		return expected, model.ErrProviderWorkInvalid
+	}
+	if len(inventories) == 1 {
+		inventory = inventories[0]
+	}
+	return providerWorkPriorExpectationWithInputs(ctx, authority, expected, inventory, func(ctx context.Context, epoch uint64) (providerWorkPriorOriginal, error) {
 		return readProviderWorkPriorOriginal(ctx, authority.Domain, epoch, expected)
+	}, func(ctx context.Context, before uint64, candidates []server.Id) ([]uint64, error) {
+		domain, err := authority.Domain.Digest()
+		if err != nil {
+			return nil, err
+		}
+		deployment := model.StDeploymentKey(fmt.Sprintf("%d:%s", authority.Domain.ChainID, strings.ToLower(authority.Domain.Coordinator.Hex())))
+		return model.ListProviderWorkPriorEpochs(ctx, domain, deployment, authority.Domain.NoID, before, candidates, maximumProviderWorkPriorWindows)
 	})
 }
 
 // Reader substitution permits deterministic source-I/O boundaries in tests;
 // the actual cryptographic verifier and finite graph owner are never replaced.
-func providerWorkPriorExpectationWithReader(ctx context.Context, authority payoutartifact.WholeWorkAuthority, expected payoutartifact.WholeWorkExpectation, read func(context.Context, uint64) (providerWorkPriorOriginal, error)) (result payoutartifact.WholeWorkExpectation, resultErr error) {
+func providerWorkPriorExpectationWithReader(ctx context.Context, authority payoutartifact.WholeWorkAuthority, expected payoutartifact.WholeWorkExpectation, read func(context.Context, uint64) (providerWorkPriorOriginal, error)) (payoutartifact.WholeWorkExpectation, error) {
+	return providerWorkPriorExpectationWithInputs(ctx, authority, expected, nil, read, nil)
+}
+
+// The index locates earlier original bytes for every candidate. It never
+// supplies a checkpoint or asserts that missing historical custody is complete.
+func providerWorkPriorExpectationWithInputs(ctx context.Context, authority payoutartifact.WholeWorkAuthority, expected payoutartifact.WholeWorkExpectation, inventory *payoutartifact.WholeWorkInventory, read func(context.Context, uint64) (providerWorkPriorOriginal, error), locate func(context.Context, uint64, []server.Id) ([]uint64, error)) (result payoutartifact.WholeWorkExpectation, resultErr error) {
 	result = expected
 	result.PriorContracts = nil
 	if ctx == nil || read == nil {
@@ -75,18 +97,18 @@ func providerWorkPriorExpectationWithReader(ctx context.Context, authority payou
 	if _, err := payoutartifact.DecodeWholeWorkAuthority(ctx, raw, expected.AuthoritySigner); err != nil {
 		return result, err
 	}
-	owner := &providerWorkPriorOwner{domain: authority.Domain, expected: expected, read: read, verified: make(map[uint64]*providerWorkPriorVerified)}
-	result.PriorContracts, resultErr = owner.claims(ctx, authority, 0)
+	owner := &providerWorkPriorOwner{domain: authority.Domain, expected: expected, read: read, locate: locate, verified: make(map[uint64]*providerWorkPriorVerified)}
+	result.PriorContracts, resultErr = owner.claims(ctx, authority, inventory, 0)
 	return
 }
 
 // Strictly decreasing signed epochs prohibit cycles. A lookup hint must match
 // every field of an actual reconstructed checkpoint, including its inventory.
-func (self *providerWorkPriorOwner) claims(ctx context.Context, authority payoutartifact.WholeWorkAuthority, depth int) ([]payoutartifact.WholeWorkPriorContract, error) {
+func (self *providerWorkPriorOwner) claims(ctx context.Context, authority payoutartifact.WholeWorkAuthority, inventory *payoutartifact.WholeWorkInventory, depth int) ([]payoutartifact.WholeWorkPriorContract, error) {
 	if authority.Domain != self.domain || len(authority.PriorContracts) > payoutartifact.MaxClosedWorkRecords {
 		return nil, payoutartifact.ErrClosedWorkIntegrity
 	}
-	result := make([]payoutartifact.WholeWorkPriorContract, 0, len(authority.PriorContracts))
+	contractKVs := make(map[[16]byte]payoutartifact.WholeWorkPriorContract)
 	for _, proposed := range authority.PriorContracts {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -102,8 +124,50 @@ func (self *providerWorkPriorOwner) claims(ctx context.Context, authority payout
 		if !present || prior.inventoryHash != proposed.InventoryHash || actual != proposed {
 			return nil, payoutartifact.ErrClosedWorkIntegrity
 		}
-		result = append(result, actual)
+		contractKVs[actual.ContractId] = actual
 	}
+	if inventory != nil && self.locate != nil {
+		ids, err := providerWorkCandidateIds(ctx, inventory)
+		if err != nil {
+			return nil, err
+		}
+		epochs, err := self.locate(ctx, authority.Epoch, ids)
+		if err != nil {
+			return nil, err
+		}
+		if len(epochs) > maximumProviderWorkPriorWindows {
+			return nil, payoutartifact.ErrClosedWorkCapacity
+		}
+		for _, epoch := range epochs {
+			if epoch >= authority.Epoch {
+				return nil, payoutartifact.ErrClosedWorkIntegrity
+			}
+			prior, err := self.window(ctx, epoch, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			for _, id := range ids {
+				actual, exists := prior.contracts[[16]byte(id)]
+				if !exists {
+					continue
+				}
+				if retained, exists := contractKVs[actual.ContractId]; exists && retained != actual {
+					return nil, payoutartifact.ErrClosedWorkIntegrity
+				}
+				contractKVs[actual.ContractId] = actual
+			}
+		}
+	}
+	if len(contractKVs) > payoutartifact.MaxClosedWorkRecords {
+		return nil, payoutartifact.ErrClosedWorkCapacity
+	}
+	result := make([]payoutartifact.WholeWorkPriorContract, 0, len(contractKVs))
+	for _, contract := range contractKVs {
+		result = append(result, contract)
+	}
+	slices.SortFunc(result, func(a, b payoutartifact.WholeWorkPriorContract) int {
+		return server.Id(a.ContractId).Cmp(server.Id(b.ContractId))
+	})
 	return result, nil
 }
 
@@ -157,7 +221,7 @@ func (self *providerWorkPriorOwner) window(ctx context.Context, epoch uint64, de
 	}
 	expected := self.expected
 	expected.AuthorityHash = fmt.Sprintf("sha256:%x", sha256.Sum256(inventory.Authority))
-	expected.PriorContracts, err = self.claims(ctx, authority, depth)
+	expected.PriorContracts, err = self.claims(ctx, authority, inventory, depth)
 	if err != nil {
 		return nil, err
 	}
@@ -167,6 +231,9 @@ func (self *providerWorkPriorOwner) window(ctx context.Context, epoch uint64, de
 	}
 	if !verified.Complete || verified.Domain != self.domain || verified.Epoch != epoch {
 		return nil, payoutartifact.ErrClosedWorkUnavailable
+	}
+	if err := requireProviderWorkPublication(ctx, inventory, expected, verified); err != nil {
+		return nil, err
 	}
 	result := &providerWorkPriorVerified{inventoryHash: verified.InventoryHash, contracts: make(map[[16]byte]payoutartifact.WholeWorkPriorContract, len(verified.ReconciledContracts))}
 	for _, contract := range verified.ReconciledContracts {

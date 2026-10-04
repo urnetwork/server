@@ -89,9 +89,9 @@ type StWallet struct {
 	SetTime       time.Time
 }
 
-// StProviderWallet is the epoch-snapshotted payout coldkey for one logical
-// provider client. Wallet changes are prospective: settlement selects the
-// newest row whose SetTime is not after the epoch boundary.
+// A provider association read from account history or verified original
+// consent. SetTime orders account projections only; payout selection requires
+// the independently approved consent chain and its effective earning epoch.
 type StProviderWallet struct {
 	ClientId          server.Id
 	NetworkId         server.Id

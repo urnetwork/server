@@ -1259,6 +1259,7 @@ func SetContractStream(
 	streamId server.Id,
 	intermediaryIds []server.Id,
 ) (returnErr error) {
+	ctx = providerWorkSessionContext(ctx)
 	defer server.EnterContractCreationStage(ctx, server.ContractStageStream)()
 	// Join callers do not carry the original path. Recover it from the Redis
 	// contract marking while it is present, both to populate a newly joined
@@ -1361,6 +1362,7 @@ func SetContractStream(
 				)
 			}
 		})
+		providerWorkAttachStreamInTx(ctx, tx, contractId, streamId)
 	})
 
 	return
@@ -1485,6 +1487,7 @@ func createTransferEscrowInTx(
 	contractTransferByteCount ByteCount,
 	companionContractId *server.Id,
 ) (transferEscrow *TransferEscrow, posts []func() any, returnErr error) {
+	ctx = providerWorkSessionContext(ctx)
 	// an acceptance-test drain refuses like an empty balance, on both the Redis
 	// and the PostgreSQL admission path. The allowlist is checked in memory, so
 	// other payers add no query here.
@@ -1709,6 +1712,7 @@ func createTransferEscrowInTx(
 			batch.Queue(netEscrowPublishAdmissionCacheSQL, netEscrowAdmissionCacheArgs(pending, balanceIds)...)
 		}
 	})
+	providerWorkRetainReservationInTx(ctx, tx, contractId)
 
 	if 0 < contractTransferByteCount {
 		// The escrow insert and subsequent open-contract insert each advance
@@ -1757,6 +1761,7 @@ func lockActiveContractClientsInTx(
 	destinationId server.Id,
 ) error {
 	defer server.EnterContractCreationStage(ctx, server.ContractStageClientFence)()
+	providerWorkLockEndpointsInTx(ctx, tx, sourceId, destinationId)
 	clientIds := []server.Id{sourceId}
 	if destinationId != sourceId {
 		clientIds = append(clientIds, destinationId)
@@ -2354,7 +2359,7 @@ func CreateContractNoEscrowWithUsageOrigin(
 			contractTransferByteCount,
 			usageOriginIsSource,
 		)
-	})
+	}, server.TxReadCommitted)
 	leaveTransaction()
 	if returnErr != nil {
 		return
@@ -2380,6 +2385,7 @@ func createContractNoEscrowInTx(
 	contractTransferByteCount ByteCount,
 	usageOriginIsSource bool,
 ) (contractId server.Id, returnErr error) {
+	ctx = providerWorkSessionContext(ctx)
 	// A shard-owned probe always pays from its private grant. Ordinary network
 	// and friends-and-family contracts keep their existing no-payer behavior.
 	if _, err := validateProberShardPayerInTx(ctx, tx, sourceNetworkId, destinationNetworkId, server.Id{}); err != nil {
@@ -2432,6 +2438,7 @@ func createContractNoEscrowInTx(
 		ContractPartySource,
 		ContractPartyDestination,
 	))
+	providerWorkRetainReservationInTx(ctx, tx, contractId)
 	return
 }
 
@@ -2773,10 +2780,12 @@ func claimContractOutcomeInTx(
 	contractId server.Id,
 	outcome ContractOutcome,
 ) (bool, error) {
+	ctx = providerWorkSessionContext(ctx)
 	usage, err := contractUsageSnapshotInTx(ctx, tx, contractId, outcome)
 	if err != nil {
 		return false, err
 	}
+	closedAt := server.NowUtc().Truncate(time.Microsecond)
 	tag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -2791,9 +2800,12 @@ func claimContractOutcomeInTx(
         `,
 		contractId,
 		outcome,
-		server.NowUtc(),
+		closedAt,
 		usage,
 	))
+	if tag.RowsAffected() == 1 {
+		providerWorkRetainOutcomeInTx(ctx, tx, contractId, outcome, closedAt)
+	}
 	return tag.RowsAffected() == 1, nil
 }
 

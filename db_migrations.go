@@ -9558,4 +9558,5 @@ var migrations = []any{
 	newSqlMigration(verifyOriginalRequestSchemaSql),
 	newSqlMigration(providerWorkOwnerSchemaSql),
 	newSqlMigration(verifyRequestClosureSchemaSql),
+	newSqlMigration(providerWorkSessionSchemaSql),
 }

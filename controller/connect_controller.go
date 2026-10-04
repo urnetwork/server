@@ -452,7 +452,8 @@ func ConnectControlFrames(
 		err = observeControlFrame(ctx, message, defaultControlFrameMetrics, func() error {
 			switch v := message.(type) {
 			case *protocol.CreateContract:
-				outFrames, err = CreateContract(ctx, clientId, v, contractManagerSettings)
+				originalCtx := model.WithProviderWorkRequestFrameHash(ctx, providerWorkOriginalRequestFrameHash(frame))
+				outFrames, err = CreateContract(originalCtx, clientId, v, contractManagerSettings)
 			case *protocol.CloseContract:
 				err = CloseContract(ctx, clientId, v)
 			case *protocol.Provide:

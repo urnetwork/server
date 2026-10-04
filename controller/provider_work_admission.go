@@ -33,6 +33,10 @@ func stLoadProviderWorkAuthority(ctx context.Context, cfg *StConfig, epoch *StPa
 	if err != nil {
 		return nil, err
 	}
+	expected.EarningSelection, err = model.GetProviderPayoutEarningSelection(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if cfg == nil || epoch == nil || cfg.Netuid == 0 || cfg.Netuid > 65535 || cfg.ArtifactKey == nil {
 		return nil, model.ErrProviderWorkInvalid
 	}
