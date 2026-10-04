@@ -401,18 +401,19 @@ func augmentSubscriberDatabase(ctx context.Context, basePath, catalogPath, outpu
 	}
 	states := map[string]int{}
 	baseLeaves, emitted, inferred := 0, 0, 0
+	baseRecords, originRecords := subscriberRecordCache{}, subscriberRecordCache{}
 	for original := range base.Networks(mmdb.IncludeNetworksWithoutData()) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		var record mmdbtype.Map
-		if err := original.Decode(&record); err != nil {
+		record, err := baseRecords.decode(original)
+		if err != nil {
 			return err
 		}
 		baseLeaves++
 		for origin := range origins.NetworksWithin(original.Prefix(), mmdb.IncludeNetworksWithoutData()) {
-			var evidence mmdbtype.Map
-			if err := origin.Decode(&evidence); err != nil {
+			evidence, err := originRecords.decode(origin)
+			if err != nil {
 				return err
 			}
 			data, err := augmentSubscriberRecord(record, evidence)
@@ -473,5 +474,6 @@ func augmentSubscriberDatabase(ctx context.Context, basePath, catalogPath, outpu
 	if _, err := sources.hashCountryEvidenceSources(ctx, catalogPath, at); err != nil {
 		return err
 	}
-	return writeManifest(output, map[string]any{"source": "reviewed subscriber operators and RIPE RIS origins", "built_at": at, "classifier_version": 1, "quality_policy_version": 2, "subscriber_origin_policy": "identified-subscriber-default", "inputs_sha256": hashes, "origin_sources": catalog.OriginSources, "origin_rows": rows, "usable_origin_prefixes": usableRoutePrefixes, "reviewed_operators": len(catalog.Operators), "base_leaves": baseLeaves, "emitted_partitions": emitted, "quality_state_partitions": states, "isp_inferred_partitions": inferred}, "arin.mmdb")
+	return writeManifest(output, map[string]any{"source": "reviewed subscriber operators and RIPE RIS origins", "built_at": at, "classifier_version": 1, "quality_policy_version": 2, "subscriber_origin_policy": "identified-subscriber-default", "inputs_sha256": hashes, "origin_sources": catalog.OriginSources, "origin_rows": rows, "usable_origin_prefixes": usableRoutePrefixes, "reviewed_operators": len(catalog.Operators), "base_leaves": baseLeaves, "emitted_partitions": emitted, "quality_state_partitions": states, "isp_inferred_partitions": inferred,
+		"decoded_record_cache": map[string]any{"limit_per_reader": subscriberRecordCacheLimit, "base_hits": baseRecords.hits, "base_misses": baseRecords.misses, "origin_hits": originRecords.hits, "origin_misses": originRecords.misses}}, "arin.mmdb")
 }

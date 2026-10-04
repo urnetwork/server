@@ -225,6 +225,12 @@ network available to the bounded current-owner research aggregate described in
 [CAPTURE.md](../arinshadowctl/CAPTURE.md). The pinned RIS snapshots and build
 manifest supply its routing provenance; an ASN alone supplies no use approval.
 
+The augmentation walk reuses immutable decoded records by their MMDB offset,
+with separate caches of at most 65,536 entries per input reader. Eviction causes
+another decode when needed; it never drops routes, partitions or evidence. The
+manifest records cache hits and misses so full-artifact build cost can be
+measured alongside output size and complete classification readback.
+
 The registration manifest binds the builder version, XML, GeoLite database,
 rules, optional evidence files, output hash, build time, and classification and
 allocation counts. The augmentation manifest binds the exact base MMDB, catalog,
