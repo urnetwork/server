@@ -98,9 +98,12 @@ func RetainProviderWorkOpenObservations(ctx context.Context, contractIds []serve
 // ReadCommitted plus the exact settlement row lock makes the post-lock clock
 // authoritative. The immutable terminal guard forbids reopening a closed row.
 func retainProviderWorkOpenBatchInTx(ctx context.Context, tx server.PgTx, source *ProviderWorkSessionSource, ids []server.Id, epoch, block uint64, epochText, blockText string, blockHash [32]byte, boundary time.Time) error {
+	// Keep the outcome check opaque to legacy false-zero global partial
+	// indexes; this owner is bounded by the requested primary-key cohort.
 	rows, err := tx.Query(ctx, `/* provider-work-open-owner */ SELECT c.contract_id,r.receipt_hash,r.original
  FROM transfer_contract c JOIN provider_work_reservation_original r USING(contract_id)
- WHERE c.contract_id=ANY($1) AND c.outcome IS NULL ORDER BY c.contract_id FOR UPDATE OF c`, ids)
+ WHERE c.contract_id=ANY($1) AND (CASE WHEN c.outcome IS NULL THEN true ELSE false END)
+ ORDER BY c.contract_id FOR UPDATE OF c`, ids)
 	if err != nil {
 		return err
 	}
