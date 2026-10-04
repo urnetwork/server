@@ -3287,7 +3287,7 @@ func stComputeReleasePayout(
 	if !usageStart.Before(usageEnd) {
 		return [32]byte{}, 0, fmt.Errorf("sn: epoch has no post-cutoff earning window")
 	}
-	usages, closedWork, wholeWindow, err := model.GetStEpochProviderUsageWholeCensus(ctx, epoch, usageStart, usageEnd)
+	usages, closedWork, wholeWindow, err := model.GetStEpochProviderUsageWholeCensus(ctx, epoch, startTime, endTime)
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
@@ -3394,7 +3394,11 @@ func stComputeReleasePayout(
 		return [32]byte{}, 0, err
 	}
 	if artifact.ClosedWork != nil && artifact.ClosedWork.WholeInventory == nil {
-		if _, err := startifact.VerifyClosedWorkReports(ctx, artifact, common.Address{}); err != nil {
+		selection, err := model.GetProviderPayoutEarningSelection(ctx)
+		if err != nil {
+			return [32]byte{}, 0, err
+		}
+		if _, err := payoutartifact.VerifyClosedWorkReportsWithEarningSelection(ctx, artifact, common.Address{}, selection); err != nil {
 			return [32]byte{}, 0, err
 		}
 	}

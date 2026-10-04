@@ -132,6 +132,13 @@ func (self *ProviderPayoutTransition) SnWindow(start, end time.Time) (time.Time,
 	return start, end
 }
 
+// The immutable earning identity survives readiness changes. Callers admit the
+// policy against its prepared database boundary before using this selection.
+func (self *ProviderPayoutTransition) EarningIdentitySha256() (string, error) {
+	_, digest, err := providerPayoutEarningIdentity(self)
+	return digest, err
+}
+
 // The wall clock gates new mainnet actions independently of historical epoch
 // clocks. It never changes which asset a retained obligation is owed.
 func (self *ProviderPayoutTransition) MainnetAdmission(now time.Time, identity ProviderPayoutMainnet) error {
