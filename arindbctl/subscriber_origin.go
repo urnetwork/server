@@ -33,20 +33,27 @@ const defaultMinimumOriginPeers uint32 = 10
 
 const originCountryPolicyWithhold = "withhold-outside-reviewed-countries"
 
+// Pinned subscriber evidence includes compressed registry dumps (the RIPE
+// inetnum split file is about 213 MB); the bound applies to the stored file.
+const maxSubscriberEvidenceSourceBytes int64 = 1 << 30
+
 // Use evidence and routing authority are separate. RIS establishes the observed
 // origin; a reviewed catalog establishes that origin's subscriber or other use.
 type subscriberOriginCatalog struct {
-	Version             int                     `yaml:"version"`
-	Policy              string                  `yaml:"policy"`
-	MinimumOriginPeers  *uint32                 `yaml:"minimum_origin_peers"`
-	OriginCountryPolicy string                  `yaml:"origin_country_policy"`
-	OriginSources       []countryEvidenceSource `yaml:"origin_sources"`
-	AddressRiskSources  []addressRiskSource     `yaml:"address_risk_sources"`
-	RpkiSources         []rpkiSource            `yaml:"rpki_sources"`
-	RegistrySources     []registrySource        `yaml:"registry_sources"`
-	Operators           []subscriberOperator    `yaml:"operators"`
-	byASN               map[uint32][]subscriberOperator
-	byId                map[string]subscriberOperator
+	Version                   int                        `yaml:"version"`
+	Policy                    string                     `yaml:"policy"`
+	MinimumOriginPeers        *uint32                    `yaml:"minimum_origin_peers"`
+	OriginCountryPolicy       string                     `yaml:"origin_country_policy"`
+	OriginSources             []countryEvidenceSource    `yaml:"origin_sources"`
+	AddressRiskSources        []addressRiskSource        `yaml:"address_risk_sources"`
+	RpkiSources               []rpkiSource               `yaml:"rpki_sources"`
+	RegistrySources           []registrySource           `yaml:"registry_sources"`
+	LabelSources              []labelSource              `yaml:"label_sources"`
+	HostingPrefixSources      []hostingPrefixSource      `yaml:"hosting_prefix_sources"`
+	RegistryAssignmentSources []registryAssignmentSource `yaml:"registry_assignment_sources"`
+	Operators                 []subscriberOperator       `yaml:"operators"`
+	byASN                     map[uint32][]subscriberOperator
+	byId                      map[string]subscriberOperator
 }
 
 type subscriberOperator struct {
@@ -191,8 +198,32 @@ func loadSubscriberOriginCatalog(path string) (subscriberOriginCatalog, error) {
 		if err := validateSubscriberEvidenceSource(source.countryEvidenceSource, seen); err != nil {
 			return catalog, err
 		}
-		if source.Format != registryFormatNroDelegatedStats {
-			return catalog, errors.New("registry source requires the nro-delegated-stats format")
+		if source.Format != registryFormatNroDelegatedStats && source.Format != registryFormatCaidaAs2org {
+			return catalog, errors.New("registry source requires the nro-delegated-stats or caida-as2org-jsonl format")
+		}
+	}
+	for _, source := range catalog.LabelSources {
+		if err := validateSubscriberEvidenceSource(source.countryEvidenceSource, seen); err != nil {
+			return catalog, err
+		}
+		if !validLabelSource(source) {
+			return catalog, errors.New("label source requires a supported format, and a simple tag exactly for bgp-tools-tag-csv")
+		}
+	}
+	for _, source := range catalog.HostingPrefixSources {
+		if err := validateSubscriberEvidenceSource(source.countryEvidenceSource, seen); err != nil {
+			return catalog, err
+		}
+		if !validHostingPrefixSource(source) {
+			return catalog, errors.New("hosting prefix source requires a supported format, a reason, and services exactly for the AWS and Azure formats")
+		}
+	}
+	for _, source := range catalog.RegistryAssignmentSources {
+		if err := validateSubscriberEvidenceSource(source.countryEvidenceSource, seen); err != nil {
+			return catalog, err
+		}
+		if source.Format != registryAssignmentFormatRpsl {
+			return catalog, errors.New("registry assignment source requires the rpsl format")
 		}
 	}
 	seen = map[string]bool{}
@@ -472,6 +503,9 @@ func augmentSubscriberRecord(base, origin mmdbtype.Map) (mmdbtype.Map, error) {
 	if _, augmented := base["address_risk_source_ids"]; augmented {
 		return nil, errors.New("subscriber augmentation requires an unaugmented registration base, not prior address-level risk")
 	}
+	if _, augmented := base["hosting_prefix_source_ids"]; augmented {
+		return nil, errors.New("subscriber augmentation requires an unaugmented registration base, not prior hosting prefixes")
+	}
 	if base["classifier_version"] != mmdbtype.Uint32(1) || base["quality_policy_version"] != mmdbtype.Uint32(2) {
 		return nil, errors.New("subscriber augmentation requires a policy-two base database")
 	}
@@ -573,11 +607,20 @@ func (self subscriberOriginCatalog) evidenceSources() classificationRules {
 	for _, source := range self.RegistrySources {
 		sources = append(sources, source.countryEvidenceSource)
 	}
+	for _, source := range self.LabelSources {
+		sources = append(sources, source.countryEvidenceSource)
+	}
+	for _, source := range self.HostingPrefixSources {
+		sources = append(sources, source.countryEvidenceSource)
+	}
+	for _, source := range self.RegistryAssignmentSources {
+		sources = append(sources, source.countryEvidenceSource)
+	}
 	return classificationRules{CountrySources: sources}
 }
 
 func (self subscriberOriginCatalog) hashEvidenceSources(ctx context.Context, catalogPath string, at time.Time) (map[string]string, error) {
-	hashes, err := self.evidenceSources().hashCountryEvidenceSources(ctx, catalogPath, at)
+	hashes, err := self.evidenceSources().hashEvidenceSourcesWithin(ctx, catalogPath, at, maxSubscriberEvidenceSourceBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -593,6 +636,15 @@ func (self subscriberOriginCatalog) hashEvidenceSources(ctx context.Context, cat
 	}
 	for _, source := range self.RegistrySources {
 		named["registry/"+source.Id] = hashes["country_evidence/"+source.Id]
+	}
+	for _, source := range self.LabelSources {
+		named["label/"+source.Id] = hashes["country_evidence/"+source.Id]
+	}
+	for _, source := range self.HostingPrefixSources {
+		named["hosting_prefix/"+source.Id] = hashes["country_evidence/"+source.Id]
+	}
+	for _, source := range self.RegistryAssignmentSources {
+		named["registry_assignment/"+source.Id] = hashes["country_evidence/"+source.Id]
 	}
 	return named, nil
 }
@@ -659,6 +711,11 @@ func augmentSubscriberDatabase(ctx context.Context, basePath, catalogPath, geoli
 	}
 	defer origins.Close()
 	routes, prefixes, originWriter = nil, nil, nil
+	assignments, err := loadRegistryAssignments(ctx, catalogPath, catalog.RegistryAssignmentSources)
+	if err != nil {
+		return err
+	}
+	defer assignments.close()
 	var geo *server.IpInfoDatabase
 	if geolite2Path != "" {
 		geo, err = server.OpenIpInfoDatabase(geolite2Path)
@@ -722,7 +779,22 @@ func augmentSubscriberDatabase(ctx context.Context, basePath, catalogPath, geoli
 			if err := insert(prefix, data); err != nil {
 				return err
 			}
-			if geo == nil || data["subscriber_evidence_kind"] != mmdbtype.String("isp_inferred") {
+			if data["subscriber_evidence_kind"] != mmdbtype.String("isp_inferred") {
+				continue
+			}
+			// A hosting-named most-specific registration object inside the
+			// inferred prefix withholds the inference at the object's boundary.
+			if err := assignments.hostingCells(prefix, func(cell netip.Prefix, netname, source string) error {
+				withheld, err := augmentSubscriberRecord(record, withholdSubscriberOrigin(evidence, "registry-hosting-assignment"))
+				if err != nil {
+					return err
+				}
+				withheld["registry_assignment_netname"], withheld["registry_assignment_source"] = mmdbtype.String(netname), mmdbtype.String(source)
+				return insert(cell, withheld)
+			}); err != nil {
+				return err
+			}
+			if geo == nil {
 				continue
 			}
 			// An inferred approval outside every reviewed operator country is
@@ -753,6 +825,11 @@ func augmentSubscriberDatabase(ctx context.Context, basePath, catalogPath, geoli
 	}
 	if baseLeaves == 0 {
 		return errors.New("subscriber base database is empty")
+	}
+	// Prefix-scope hosting first, then exact-address risk on top of it.
+	hostingEntries, hostingSkipped, err := applyHostingPrefixSources(ctx, writer, catalog, catalogPath)
+	if err != nil {
+		return err
 	}
 	addressRiskEntries, err := applyAddressRiskSources(ctx, writer, catalog, catalogPath)
 	if err != nil {
@@ -802,6 +879,17 @@ func augmentSubscriberDatabase(ctx context.Context, basePath, catalogPath, geoli
 	if len(catalog.AddressRiskSources) != 0 {
 		manifest["address_risk_sources"] = catalog.AddressRiskSources
 		manifest["address_risk_entries"] = addressRiskEntries
+	}
+	if assignments != nil {
+		manifest["registry_assignment_sources"] = catalog.RegistryAssignmentSources
+		manifest["registry_assignment_objects"] = assignments.objects
+		manifest["registry_hosting_assignment_objects"] = assignments.hostingObjects
+		manifest["registry_nested_override_objects"] = assignments.nestedObjects
+	}
+	if len(catalog.HostingPrefixSources) != 0 {
+		manifest["hosting_prefix_sources"] = catalog.HostingPrefixSources
+		manifest["hosting_prefix_entries"] = hostingEntries
+		manifest["hosting_prefix_skipped_non_global"] = hostingSkipped
 	}
 	if len(catalog.RpkiSources) != 0 {
 		manifest["rpki_sources"] = catalog.RpkiSources

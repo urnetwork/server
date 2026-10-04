@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"net/netip"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -24,27 +25,30 @@ import (
 const reviewQueueDepth = 30
 
 type subscriberCatalogAuditOperator struct {
-	Id                   string             `json:"id"`
-	Name                 string             `json:"name"`
-	Usage                string             `json:"usage"`
-	Countries            []string           `json:"countries"`
-	ASNs                 []uint32           `json:"asns"`
-	UnobservedASNs       []uint32           `json:"unobserved_asns"`
-	Routes               int                `json:"routes"`
-	Ipv4Addresses        uint64             `json:"ipv4_addresses"`
-	Ipv6Networks48       float64            `json:"ipv6_48_networks"`
-	CountryShares        map[string]float64 `json:"ipv4_country_shares"`
-	OutsideReviewedShare float64            `json:"ipv4_outside_reviewed_share"`
-	LowVisibilityRoutes  int                `json:"low_visibility_routes"`
-	RpkiInvalidRoutes    int                `json:"rpki_invalid_routes"`
-	SharedOriginRoutes   int                `json:"shared_origin_routes"`
-	RegistryHolders      []string           `json:"registry_holders,omitempty"`
-	UnreviewedSiblings   []uint32           `json:"registry_sibling_asns_unreviewed,omitempty"`
-	OtherOperatorSibling map[uint32]string  `json:"registry_sibling_asns_other_operators,omitempty"`
-	Flags                []string           `json:"flags"`
+	Id                   string                     `json:"id"`
+	Name                 string                     `json:"name"`
+	Usage                string                     `json:"usage"`
+	Countries            []string                   `json:"countries"`
+	ASNs                 []uint32                   `json:"asns"`
+	UnobservedASNs       []uint32                   `json:"unobserved_asns"`
+	Routes               int                        `json:"routes"`
+	Ipv4Addresses        uint64                     `json:"ipv4_addresses"`
+	Ipv6Networks48       float64                    `json:"ipv6_48_networks"`
+	CountryShares        map[string]float64         `json:"ipv4_country_shares"`
+	OutsideReviewedShare float64                    `json:"ipv4_outside_reviewed_share"`
+	LowVisibilityRoutes  int                        `json:"low_visibility_routes"`
+	RpkiInvalidRoutes    int                        `json:"rpki_invalid_routes"`
+	SharedOriginRoutes   int                        `json:"shared_origin_routes"`
+	RegistryHostingShare float64                    `json:"registry_hosting_ipv4_share"`
+	RegistryHolders      []string                   `json:"registry_holders,omitempty"`
+	UnreviewedSiblings   []uint32                   `json:"registry_sibling_asns_unreviewed,omitempty"`
+	OtherOperatorSibling map[uint32]string          `json:"registry_sibling_asns_other_operators,omitempty"`
+	Independent          *operatorIndependentLabels `json:"independent_labels,omitempty"`
+	Flags                []string                   `json:"flags"`
 	ipv4Weight           float64
 	outsideWeight        float64
 	countryWeight        map[string]float64
+	registryHosting      float64
 	observed             map[uint32]bool
 }
 
@@ -97,12 +101,23 @@ func auditSubscriberCatalog(ctx context.Context, catalogPath, geolite2Path, outp
 	if err != nil {
 		return err
 	}
+	labels, err := loadAsnLabels(ctx, catalogPath, catalog.LabelSources)
+	if err != nil {
+		return err
+	}
+	assignments, err := loadRegistryAssignments(ctx, catalogPath, catalog.RegistryAssignmentSources)
+	if err != nil {
+		return err
+	}
+	defer assignments.close()
+	routedASNs := map[uint32]bool{}
 	geo, err := server.OpenIpInfoDatabase(geolite2Path)
 	if err != nil {
 		return err
 	}
 	defer geo.Close()
 	minimumPeers := catalog.minimumOriginPeers()
+	verdicts := map[string]int{}
 	reviewedIdentities := func(route subscriberOriginRoute) ([]string, bool) {
 		ids := []string{}
 		for _, origin := range route.origins {
@@ -182,8 +197,18 @@ func auditSubscriberCatalog(ctx context.Context, catalogPath, geolite2Path, outp
 				}
 			}
 		}
+		var hostingWeight float64
+		if ipv4 && assignments != nil {
+			if err := assignments.hostingCells(prefix, func(cell netip.Prefix, _, _ string) error {
+				hostingWeight += math.Exp2(float64(32 - cell.Bits()))
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
 		ids := map[string]bool{}
 		for _, origin := range route.origins {
+			routedASNs[origin.asn] = true
 			for _, operator := range catalog.byASN[origin.asn] {
 				ids[operator.Id] = true
 				operators[operator.Id].observed[origin.asn] = true
@@ -206,6 +231,7 @@ func auditSubscriberCatalog(ctx context.Context, catalogPath, geolite2Path, outp
 			stats.Routes++
 			if ipv4 {
 				stats.ipv4Weight += total
+				stats.registryHosting += hostingWeight
 				reviewed := map[string]bool{}
 				for _, country := range catalog.byId[id].Countries {
 					reviewed[strings.ToLower(country)] = true
@@ -244,6 +270,7 @@ func auditSubscriberCatalog(ctx context.Context, catalogPath, geolite2Path, outp
 		}
 		if stats.ipv4Weight > 0 {
 			stats.OutsideReviewedShare = math.Round(10000*stats.outsideWeight/stats.ipv4Weight) / 10000
+			stats.RegistryHostingShare = math.Round(10000*stats.registryHosting/stats.ipv4Weight) / 10000
 		}
 		for _, asn := range operator.ASNs {
 			if !stats.observed[asn] {
@@ -285,7 +312,63 @@ func auditSubscriberCatalog(ctx context.Context, catalogPath, geolite2Path, outp
 				stats.Flags = append(stats.Flags, "registry-siblings-under-other-operators")
 			}
 		}
+		if labels != nil {
+			independent := labels.operatorLabels(operator)
+			stats.Independent = &independent
+			verdicts[operator.Usage+"/"+independent.Verdict]++
+			if independent.Verdict == "disagrees" || independent.Verdict == "mixed" {
+				stats.Flags = append(stats.Flags, "independent-labels-"+independent.Verdict)
+			}
+			if operator.Usage == "subscriber" && independent.GroundTruth == "hosting" || operator.Usage != "subscriber" && independent.GroundTruth == "eyeball" {
+				stats.Flags = append(stats.Flags, "ground-truth-contradicts")
+			}
+		}
 		report = append(report, *stats)
+	}
+	labelQueue := map[string][]labelReviewCandidate{}
+	if labels != nil && labels.hasUsers {
+		for asn, byCountry := range labels.usersByCountry {
+			if len(catalog.byASN[asn]) != 0 {
+				continue
+			}
+			eyeballSources, hostingSources := labels.consensus(asn)
+			// APNIC users alone are not an eyeball identity: they credit
+			// hosting and VPN egress too, so another source must agree.
+			apnicOnly := labels.signals["apnic"][asn].eyeball && eyeballSources == 1
+			if eyeballSources == 0 || apnicOnly {
+				continue
+			}
+			for country, users := range byCountry {
+				if users < labelMinimumUsers {
+					continue
+				}
+				labelQueue[country] = append(labelQueue[country], labelReviewCandidate{ASN: asn, Name: labels.names[asn], Users: users,
+					CountryShare: math.Round(10000*float64(users)/float64(labels.users[asn])) / 10000, Class: labels.class[asn], Tags: labels.tags[asn],
+					EyeballSources: eyeballSources, HostingSources: hostingSources, Corroborated: eyeballSources >= 2 && hostingSources == 0,
+					Routed: routedASNs[asn], Contrary: hostingSources != 0})
+			}
+		}
+		for country, candidates := range labelQueue {
+			sort.Slice(candidates, func(i, j int) bool {
+				if candidates[i].Users != candidates[j].Users {
+					return candidates[i].Users > candidates[j].Users
+				}
+				return candidates[i].ASN < candidates[j].ASN
+			})
+			if len(candidates) > reviewQueueDepth {
+				candidates = candidates[:reviewQueueDepth]
+			}
+			labelQueue[country] = candidates
+		}
+	}
+	// The catalog itself scored against the hand labels: a subscriber
+	// operator whose ASNs are labelled pure hosting is a likely error, and the
+	// reverse for operators reviewed as hosting, transit or an anonymizer.
+	groundTruth := map[string]int{}
+	for _, operator := range report {
+		if operator.Independent != nil && operator.Independent.GroundTruth != "" {
+			groundTruth[operator.Usage+"/"+operator.Independent.GroundTruth]++
+		}
 	}
 	merges := []subscriberCatalogMergeCandidate{}
 	for _, candidate := range nesting {
@@ -358,12 +441,16 @@ func auditSubscriberCatalog(ctx context.Context, catalogPath, geolite2Path, outp
 		"minimum_origin_peers": minimumPeers, "origin_rows": rows, "usable_origin_prefixes": len(routes),
 		"route_decisions": decisions, "withheld_routes": withheld, "rpki_route_validity": rpkiStates,
 		"operators": report, "operator_merge_candidates": merges, "unreviewed_review_queue_by_country": queue,
+		"independent_label_verdicts": verdicts, "unreviewed_eyeball_queue_by_country": labelQueue,
+		"label_source_quality": labels.quality(), "catalog_ground_truth": groundTruth,
 		"summary": map[string]any{"operators": len(catalog.Operators), "identity_review_suggested": flagged, "operators_without_routes": withoutRoutes, "unreviewed_origin_asns": len(unreviewed), "operator_merge_candidates": len(merges)},
 		"caveats": []string{
 			"Address weights are routed IPv4 address counts, not subscribers, users or providers.",
 			"GeoLite2 associated country is correlation evidence, not customer location.",
 			"The review queue is a discovery input; a listed ASN is not a reviewed subscriber identity.",
 			"Registry siblings and nested routes suggest one operator; merging entries or adding ASNs remains a reviewed catalog decision.",
+			"Independent labels (bgp.tools, APNIC Labs, ASdb, ipverse, Linnaeus) validate entries by different methods; they are never subscriber evidence, and APNIC credits hosting, VPN and relay egress with users.",
+			"Registry hosting share is the routed IPv4 space under hosting-named most-specific registry objects; the build withholds inferred approvals there.",
 		},
 	}, "", "  ")
 	if err != nil {

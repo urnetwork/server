@@ -13,14 +13,21 @@ without global visibility or origin authorization and for geography outside an
 operator's reviewed countries, reviewed address-level Tor/VPN/proxy lists apply
 at exact addresses, `refresh-subscriber-evidence` pins the public snapshots
 into a new catalog, and `audit-subscriber-catalog` checks that catalog,
-including sibling-ASN merge candidates, before it is built.
+including sibling-ASN merge candidates, before it is built. The release now
+runs `arindbctl update`, which refreshes GeoLite2, ARIN and every subscriber
+evidence source best effort, augments with the reviewed catalog, and validates
+the result against RIPE Atlas; see [ARINDB.md](ARINDB.md).
 
 The release runner builds and runs this tool natively on macOS or Linux.
 Windows is currently unsupported by its Server dependency: the process log
 scrubber uses Unix file descriptors and descriptor duplication.
 
-`arindbctl refresh` downloads GeoLite2-City first, then ARIN organization and
-network records, and builds one new bundle containing `mmdb/` and `arindb/`.
+`arindbctl update` is the release command: it downloads GeoLite2-City, then ARIN
+organization and network records, builds the registration database and, with
+`--subscriber-catalog`, pins fresh subscriber evidence, augments, audits and
+validates, publishing one bundle whose `mmdb/` and `arindb/` become the config
+resources. `arindbctl refresh` is the registration-only form: it builds one
+new bundle containing `mmdb/` and a registration `arindb/`.
 The bundle is published only after both databases validate. Existing output
 directories are never replaced; failed work leaves the previous versions intact.
 
@@ -33,11 +40,13 @@ for any previously exposed key; this tool does not rotate credentials.
 
 ```sh
 go build -o /tmp/arindbctl ./arindbctl
-/tmp/arindbctl refresh \
+/tmp/arindbctl update \
   --geoip-config "$WARP_HOME/vault/mm-geoip.yml" \
   --credentials "$WARP_HOME/vault/arin.yml" \
   --rules "$WARP_HOME/config/main/arindb.yml" \
-  --output /path/to/new-ip-database-bundle
+  --subscriber-catalog "$WARP_HOME/config/main/arindb-subscribers/catalog.yml" \
+  --output /path/to/new-ip-database-bundle \
+  --timeout 2h
 ```
 
 `geoipupdate` must be installed. The protected `vault/mm-geoip.yml` document
@@ -122,9 +131,12 @@ AFRINIC-wide customer classification needs authoritative additional inputs;
 registry membership or continent alone is not a negative classification.
 
 The all-release runner builds this command from its selected versioned Server
-checkout and refreshes before constructing the config-updater image. Its input
-overrides are `GEOIP_CONF_FILE`, `ARIN_CREDENTIALS_FILE`, and `ARIN_RULES_FILE`,
-with the defaults shown above (`main` is the release's `BUILD_ENV`). Both
+checkout and runs `update` before constructing the config-updater image. Its
+input overrides are `GEOIP_CONF_FILE`, `ARIN_CREDENTIALS_FILE`,
+`ARIN_RULES_FILE` and `ARIN_SUBSCRIBER_CATALOG_FILE`, with the defaults shown
+above (`main` is the release's `BUILD_ENV`); a missing default catalog yields a
+registration-only resource, while an explicitly configured but unreadable one
+stops the release. `ARIN_RELAY_GEOFEEDS=1` adds the relay geofeeds. Both
 resources are installed under the same `WARP_VERSION`, then committed and
 pushed together as scoped config changes. Missing inputs stop that release
 refresh. Ordinary local service builds can still use their existing caches.

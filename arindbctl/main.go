@@ -20,14 +20,16 @@ var Version = "development"
 
 // Paths are explicit so a release uses its selected source and secret files.
 type commandOptions struct {
-	geoipConfig string
-	credentials string
-	rules       string
-	geolite2    string
-	source      string
-	output      string
-	timeout     time.Duration
-	relayFeeds  bool
+	geoipConfig       string
+	credentials       string
+	rules             string
+	geolite2          string
+	source            string
+	output            string
+	timeout           time.Duration
+	evidence          subscriberEvidenceOptions
+	subscriberCatalog string
+	atlasProbes       string
 }
 
 func main() {
@@ -50,12 +52,21 @@ type commandDependencies struct {
 	geoipUpdate    geoipUpdater
 	arinClient     *http.Client
 	evidenceClient *http.Client
+	// The evidence, augmentation and validation clock; nil means time.Now.
+	now func() time.Time
+}
+
+func (self commandDependencies) clock() time.Time {
+	if self.now != nil {
+		return self.now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 // Exercises the complete publication path with explicit command-owned I/O.
 func runCommandWithDependencies(ctx context.Context, args []string, output io.Writer, dependencies commandDependencies) error {
 	if len(args) == 0 {
-		return errors.New("usage: arindbctl {geolite2 refresh|arin refresh|build|augment-subscribers|audit-subscriber-catalog|refresh-subscriber-evidence|refresh} [flags]")
+		return errors.New("usage: arindbctl {update|refresh|geolite2 refresh|arin refresh|build|augment-subscribers|audit-subscriber-catalog|refresh-subscriber-evidence|validate-database} [flags]")
 	}
 	command := args[0]
 	args = args[1:]
@@ -75,7 +86,13 @@ func runCommandWithDependencies(ctx context.Context, args []string, output io.Wr
 	flags.StringVar(&options.source, "source", "", "ARIN bulk XML input for an offline build")
 	flags.StringVar(&options.output, "output", "", "new output directory; existing directories are never replaced")
 	flags.DurationVar(&options.timeout, "timeout", time.Hour, "total command deadline")
-	flags.BoolVar(&options.relayFeeds, "relay-geofeeds", false, "also pin Apple Private Relay and Cloudflare egress geofeeds as reviewed VPN address lists")
+	flags.StringVar(&options.atlasProbes, "atlas-probes", "", "RIPE Atlas probe archive (bzip2, gzip or JSON) for validate-database")
+	flags.StringVar(&options.subscriberCatalog, "subscriber-catalog", "", "reviewed subscriber operator catalog for update; without it update publishes registration evidence only")
+	flags.BoolVar(&options.evidence.RelayGeofeeds, "relay-geofeeds", false, "also pin Apple Private Relay and Cloudflare egress geofeeds as reviewed VPN address lists")
+	flags.BoolVar(&options.evidence.VpnServers, "vpn-servers", false, "also pin Mullvad, NordVPN, PIA and Windscribe published server lists as exact VPN addresses")
+	flags.BoolVar(&options.evidence.HostingPrefixes, "hosting-prefixes", false, "also pin AWS EC2, Google Cloud, AzureCloud, Oracle, DigitalOcean, Linode and Vultr published prefixes as hosting evidence")
+	flags.BoolVar(&options.evidence.RegistryAssignments, "registry-assignments", false, "also pin the RIPE, APNIC and AFRINIC whois assignment dumps for hosting-named object withholding")
+	flags.BoolVar(&options.evidence.LabelSources, "label-sources", false, "also pin bgp.tools, APNIC Labs, ASdb, ipverse and Linnaeus labels for the audit's independent validation")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -97,7 +114,14 @@ func runCommandWithDependencies(ctx context.Context, args []string, output io.Wr
 		case "audit-subscriber-catalog":
 			return auditSubscriberCatalog(ctx, options.rules, options.geolite2, stage, time.Now().UTC())
 		case "refresh-subscriber-evidence":
-			return refreshSubscriberEvidence(ctx, options.rules, options.relayFeeds, stage, dependencies.evidenceClient, time.Now().UTC())
+			return refreshSubscriberEvidence(ctx, options.rules, options.evidence, stage, dependencies.evidenceClient, time.Now().UTC())
+		case "update":
+			return runUpdate(ctx, options, dependencies, stage)
+		case "validate-database":
+			if options.source == "" || options.atlasProbes == "" {
+				return errors.New("validate-database requires source and atlas-probes")
+			}
+			return validateArinDatabase(ctx, options.source, options.atlasProbes, stage, dependencies.clock())
 		case "refresh":
 			// Neither database becomes visible until both were built and verified.
 			geoDir := filepath.Join(stage, "mmdb")

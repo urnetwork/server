@@ -143,6 +143,12 @@ func (self *classificationRules) validateCountryEvidence() error {
 // Rooted file access rejects symlink escapes as well as lexical parent paths.
 // Recheck these hashes after generation; a stale/changed source stops publication.
 func (self classificationRules) hashCountryEvidenceSources(ctx context.Context, rulesPath string, buildTime time.Time) (map[string]string, error) {
+	return self.hashEvidenceSourcesWithin(ctx, rulesPath, buildTime, maxCountryEvidenceSourceBytes)
+}
+
+// Subscriber evidence includes registry dumps of hundreds of megabytes, so its
+// bound is a parameter; every other check is shared with country evidence.
+func (self classificationRules) hashEvidenceSourcesWithin(ctx context.Context, rulesPath string, buildTime time.Time, maxBytes int64) (map[string]string, error) {
 	hashes := map[string]string{}
 	if len(self.CountrySources) == 0 {
 		return hashes, nil
@@ -163,11 +169,11 @@ func (self classificationRules) hashCountryEvidenceSources(ctx context.Context, 
 			}
 			defer file.Close()
 			info, err := file.Stat()
-			if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxCountryEvidenceSourceBytes {
+			if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxBytes {
 				return "", errors.New("country source snapshot must be a nonempty bounded regular file")
 			}
 			hash := sha256.New()
-			reader := io.LimitReader(file, maxCountryEvidenceSourceBytes+1)
+			reader := io.LimitReader(file, maxBytes+1)
 			buffer := make([]byte, 64*1024)
 			var total int64
 			for {
@@ -177,7 +183,7 @@ func (self classificationRules) hashCountryEvidenceSources(ctx context.Context, 
 				n, err := reader.Read(buffer)
 				total += int64(n)
 				_, _ = hash.Write(buffer[:n])
-				if total > maxCountryEvidenceSourceBytes {
+				if total > maxBytes {
 					return "", errors.New("country source snapshot exceeds its size bound")
 				}
 				if err == io.EOF {
