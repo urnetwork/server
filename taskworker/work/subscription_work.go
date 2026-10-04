@@ -95,12 +95,18 @@ func scheduleCloseExpiredContractsPage(clientSession *session.ClientSession, tx 
 	)
 }
 
+// Allow two default receive-owner lifetimes before synthesizing an absent report.
+// The bounded cursor and accounting/intent gates remain authoritative.
+func closeExpiredContractsCutoff(now time.Time) time.Time {
+	return now.Add(-12 * time.Minute)
+}
+
 func CloseExpiredContracts(
 	closeExpiredContracts *CloseExpiredContractsArgs,
 	clientSession *session.ClientSession,
 ) (*CloseExpiredContractsResult, error) {
 	if closeExpiredContracts.BlockSize == DefaultCloseExpiredContractsBlockSize {
-		minTime := server.NowUtc().Add(-5 * time.Minute)
+		minTime := closeExpiredContractsCutoff(server.NowUtc())
 		c, next, err := model.ForceCloseOpenContractIdsPage(
 			clientSession.Ctx,
 			minTime,

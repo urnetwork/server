@@ -754,16 +754,14 @@ func verifyExtend(
 	// §4.4: the pending hop must confirm within StepTimeout
 	deadlineMs := trail.Pending.AssignedMs + uint64(settings.StepTimeout.Milliseconds())
 	if deadlineMs < nowMs {
-		verifyFailTrail(ctx, trail)
-		return nil, fmt.Errorf("400 trail failed")
+		return nil, rejectVerifyExtend(ctx, trail, "step-expired")
 	}
 
 	// §4.2 step 3: the submitted trail must equal the confirmed hops plus
 	// the single pending hop — history cannot be rewritten
 	expectedTrail := append(slices.Clone(confirmedIds), trail.Pending.ClientId)
 	if !slices.Equal(verify.Trail, expectedTrail) {
-		verifyFailTrail(ctx, trail)
-		return nil, fmt.Errorf("400 trail failed")
+		return nil, rejectVerifyExtend(ctx, trail, "path-mismatch")
 	}
 
 	// §4.2 step 4: verify extend_sig under the trail's vpk over the
@@ -776,19 +774,19 @@ func verifyExtend(
 		verifyConnectIds(verify.Trail),
 	)
 	if err != nil {
-		verifyFailTrail(ctx, trail)
-		return nil, fmt.Errorf("400 trail failed")
+		return nil, rejectVerifyExtend(ctx, trail, "invalid-signature-message")
 	}
 	if !connect.VerifyVerifyMessageSignature(trail.Vpk, extendMessage, verify.ExtendSig) {
-		verifyFailTrail(ctx, trail)
-		return nil, fmt.Errorf("400 trail failed")
+		return nil, rejectVerifyExtend(ctx, trail, "signature-mismatch")
 	}
 
 	// §4.2 step 5: the request truly egressed from the assigned provider. This
 	// check applies identically to normal and poison shadow routes.
-	if sourceClientId == nil || *sourceClientId != trail.Pending.ClientId {
-		verifyFailTrail(ctx, trail)
-		return nil, fmt.Errorf("400 trail failed")
+	if sourceClientId == nil {
+		return nil, rejectVerifyExtend(ctx, trail, "source-egress-unresolved")
+	}
+	if *sourceClientId != trail.Pending.ClientId {
+		return nil, rejectVerifyExtend(ctx, trail, "source-egress-mismatch")
 	}
 
 	// §4.2 step 6: confirm the hop, stamp server time (§3.4), record
@@ -937,8 +935,7 @@ func verifyExtend(
 			// a real trail with no assignable provider cannot continue and
 			// cannot be completed honestly: fail it without blame (there is
 			// no unreached assigned hop)
-			verifyFailTrail(ctx, trail)
-			return nil, fmt.Errorf("400 trail failed")
+			return nil, rejectVerifyExtend(ctx, trail, "next-hop-unavailable")
 		}
 		assignN = model.PadVerifySample(ctx, settings)
 		nextHopClientId = server.NewId()
@@ -1000,6 +997,25 @@ func verifyFailTrail(ctx context.Context, trail *model.VerifyTrail) {
 	if glog.V(2) {
 		glog.Infof("[verify]failed trail %s depth %d (poison=%t)\n", trail.TrailId, len(trail.Hops), trail.Poison)
 	}
+}
+
+// Internal diagnosis cannot reveal which failure branch a remote caller hit.
+// Error retains the protocol's identical HTTP status and response text.
+type verifyExtendFailure struct{ reason string }
+
+// The private reason never becomes an HTTP oracle for source eligibility.
+func (self *verifyExtendFailure) Error() string { return "400 trail failed" }
+
+// Records only bounded branch labels and existing public trail/provider ids.
+// No signatures, keys, request bodies, or source addresses enter the log.
+func rejectVerifyExtend(ctx context.Context, trail *model.VerifyTrail, reason string) error {
+	verifyFailTrail(ctx, trail)
+	pending := server.Id{}
+	if trail.Pending != nil {
+		pending = trail.Pending.ClientId
+	}
+	glog.Infof("[verify]EXTEND rejected trail=%s depth=%d pending=%s reason=%s\n", trail.TrailId, len(trail.Hops)+1, pending, reason)
+	return &verifyExtendFailure{reason: reason}
 }
 
 // VerifyKey is one published server verification key (§3.5).

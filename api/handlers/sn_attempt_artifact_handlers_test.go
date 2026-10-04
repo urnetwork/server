@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/urfoundation/sn/validator"
 	"github.com/urnetwork/server"
@@ -302,8 +303,98 @@ func TestSnAttemptArtifactCancellationJoinsReader(t *testing.T) {
 	}
 	cancel()
 	<-done
-	if closes.Load() != 1 || len(slots) != 0 || response.Code != http.StatusBadGateway {
+	if closes.Load() != 1 || len(slots) != 0 || response.Code != http.StatusRequestTimeout {
 		t.Fatalf("canceled reader leaked ownership: closes%d slots%d status%d", closes.Load(), len(slots), response.Code)
+	}
+}
+
+// The response owns only its injected write boundary; no global logger changes.
+type snAttemptCancellationTestWriter struct {
+	*httptest.ResponseRecorder
+	write func([]byte) (int, error)
+}
+
+// Drive cancellation at the actual handler write, after or before accepted bytes.
+func (self *snAttemptCancellationTestWriter) Write(value []byte) (int, error) {
+	return self.write(value)
+}
+
+// Force every ordering at owned read/close/write boundaries. Pure client
+// cancellation is silent, while adjacent independent failures still warn.
+func TestSnAttemptArtifactCancellationKeepsHardFailuresVisible(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		failure  string
+		warnings int
+		abort    bool
+		status   int
+	}{
+		{failure: "cancel-read", status: http.StatusRequestTimeout},
+		{failure: "cancel-written", abort: true, status: http.StatusOK},
+		{failure: "cancel-close-error", warnings: 1, status: http.StatusBadGateway},
+		{failure: "deadline", warnings: 1, status: http.StatusBadGateway},
+		{failure: "integrity", warnings: 1, abort: true, status: http.StatusOK},
+		{failure: "write", warnings: 1, status: http.StatusBadGateway},
+	} {
+		ctx, cancel := context.WithCancel(t.Context())
+		data := []byte("complete synthetic artifact")
+		closes, warnings := 0, 0
+		reader := &snAttemptTestReadCloser{Reader: bytes.NewReader(data), close: func() error { closes++; return nil }}
+		response := &snAttemptCancellationTestWriter{ResponseRecorder: httptest.NewRecorder()}
+		response.write = response.ResponseRecorder.Write
+		switch test.failure {
+		case "cancel-close-error":
+			reader.close = func() error { closes++; return errors.New("synthetic storage close failure") }
+		case "deadline":
+			reader.Reader = snAttemptTestReadFunc(func([]byte) (int, error) { return 0, context.DeadlineExceeded })
+		case "integrity":
+			reader.Reader = bytes.NewReader([]byte("substituted artifact"))
+		case "write":
+			response.write = func([]byte) (int, error) { return 0, errors.New("synthetic destination write failure") }
+		case "cancel-written":
+			response.write = func(value []byte) (int, error) {
+				count, err := response.ResponseRecorder.Write(value)
+				cancel()
+				return count, err
+			}
+		}
+		store := &snAttemptTestStore{BlobStore: server.NewLocalBlobStore(t.TempDir(), "attempt-api"), get: func(context.Context, string) (io.ReadCloser, error) {
+			if test.failure == "cancel-read" || test.failure == "cancel-close-error" {
+				cancel()
+			}
+			return reader, nil
+		}}
+		slots := make(chan struct{}, 1)
+		request := httptest.NewRequest(http.MethodGet, "/sn/attempt-artifact?kind=records&hash="+snAttemptTestHash(data), nil).WithContext(ctx)
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			serveSnAttemptArtifactWithReporter(response, request, func() (server.BlobStore, bool) { return store, true }, snAttemptTestBounds(), slots, func(context.Context, string, string, uint64, time.Duration, error) { warnings++ })
+		}()
+		cancel()
+		if warnings != test.warnings || (recovered == http.ErrAbortHandler) != test.abort || recovered != nil && recovered != http.ErrAbortHandler || closes != 1 || len(slots) != 0 || response.Code != test.status {
+			t.Fatalf("%s: warnings=%d abort=%v closes=%d slots=%d status=%d", test.failure, warnings, recovered, closes, len(slots), response.Code)
+		}
+	}
+}
+
+// A cancellation leaf cannot pardon an unrelated timeout, disk or write cause.
+func TestSnAttemptArtifactCancellationRequiresEveryCause(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	for _, cause := range []error{context.Canceled, fmt.Errorf("reader stopped: %w", context.Canceled), errors.Join(context.Canceled, io.EOF, context.Canceled)} {
+		if !snAttemptArtifactClientCanceled(ctx, cause) {
+			t.Errorf("owned cancellation reported as failure: %v", cause)
+		}
+	}
+	for _, cause := range []error{nil, context.DeadlineExceeded, io.ErrShortWrite, errors.Join(context.Canceled, context.DeadlineExceeded), errors.Join(context.Canceled, errors.New("storage integrity failed")), errors.New("context canceled")} {
+		if snAttemptArtifactClientCanceled(ctx, cause) {
+			t.Errorf("hard cause hidden by cancellation: %v", cause)
+		}
+	}
+	if snAttemptArtifactClientCanceled(t.Context(), context.Canceled) || snAttemptArtifactClientCanceled(nil, context.Canceled) {
+		t.Fatal("unowned cancellation was waived")
 	}
 }
 
