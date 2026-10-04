@@ -8,6 +8,12 @@ Identified subscriber ISPs now default clean in the absence of additional
 discrimination; explicit negative use and independent risk remain exclusions.
 The global [subscriber-origin command and catalog](SUBSCRIBER-ORIGINS.md)
 implement that policy without treating country rankings as an eligibility list.
+Since the 2026-10-04 classifier review the inference is withheld for routes
+without global visibility or origin authorization and for geography outside an
+operator's reviewed countries, reviewed address-level Tor/VPN/proxy lists apply
+at exact addresses, `refresh-subscriber-evidence` pins the public snapshots
+into a new catalog, and `audit-subscriber-catalog` checks that catalog,
+including sibling-ASN merge candidates, before it is built.
 
 The release runner builds and runs this tool natively on macOS or Linux.
 Windows is currently unsupported by its Server dependency: the process log
@@ -130,6 +136,8 @@ go test ./arindbctl
 go test -race ./arindbctl
 ```
 
-The independent `geolite2 refresh`, `arin refresh`, and `build` subcommands
-support operator-managed source acquisition and offline builds. They require
+The independent `geolite2 refresh`, `arin refresh`, `build`,
+`augment-subscribers`, `audit-subscriber-catalog` and
+`refresh-subscriber-evidence` subcommands support
+operator-managed source acquisition, offline builds and catalog review. They require
 explicit paths and never silently fall back to older or unverified inputs.

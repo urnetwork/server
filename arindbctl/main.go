@@ -27,6 +27,7 @@ type commandOptions struct {
 	source      string
 	output      string
 	timeout     time.Duration
+	relayFeeds  bool
 }
 
 func main() {
@@ -46,14 +47,15 @@ func runCommand(ctx context.Context, args []string, output io.Writer) error {
 // Dependencies belong to one command; synthetic tests never replace a global
 // HTTP transport or updater used by another invocation.
 type commandDependencies struct {
-	geoipUpdate geoipUpdater
-	arinClient  *http.Client
+	geoipUpdate    geoipUpdater
+	arinClient     *http.Client
+	evidenceClient *http.Client
 }
 
 // Exercises the complete publication path with explicit command-owned I/O.
 func runCommandWithDependencies(ctx context.Context, args []string, output io.Writer, dependencies commandDependencies) error {
 	if len(args) == 0 {
-		return errors.New("usage: arindbctl {geolite2 refresh|arin refresh|build|augment-subscribers|refresh} [flags]")
+		return errors.New("usage: arindbctl {geolite2 refresh|arin refresh|build|augment-subscribers|audit-subscriber-catalog|refresh-subscriber-evidence|refresh} [flags]")
 	}
 	command := args[0]
 	args = args[1:]
@@ -69,10 +71,11 @@ func runCommandWithDependencies(ctx context.Context, args []string, output io.Wr
 	flags.StringVar(&options.geoipConfig, "geoip-config", "", "protected MaxMind Vault YAML path (vault/mm-geoip.yml)")
 	flags.StringVar(&options.credentials, "credentials", "", "protected ARIN YAML credential path")
 	flags.StringVar(&options.rules, "rules", "", "reviewed ARIN classification rule YAML path")
-	flags.StringVar(&options.geolite2, "geolite2", "", "GeoLite2-City source for ARIN country correlation")
+	flags.StringVar(&options.geolite2, "geolite2", "", "GeoLite2-City source for country correlation and reviewed-country discrimination")
 	flags.StringVar(&options.source, "source", "", "ARIN bulk XML input for an offline build")
 	flags.StringVar(&options.output, "output", "", "new output directory; existing directories are never replaced")
 	flags.DurationVar(&options.timeout, "timeout", time.Hour, "total command deadline")
+	flags.BoolVar(&options.relayFeeds, "relay-geofeeds", false, "also pin Apple Private Relay and Cloudflare egress geofeeds as reviewed VPN address lists")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -90,7 +93,11 @@ func runCommandWithDependencies(ctx context.Context, args []string, output io.Wr
 		case "build":
 			return buildArinDatabase(ctx, options.source, options.geolite2, options.rules, stage)
 		case "augment-subscribers":
-			return augmentSubscriberDatabase(ctx, options.source, options.rules, stage, time.Now().UTC())
+			return augmentSubscriberDatabase(ctx, options.source, options.rules, options.geolite2, stage, time.Now().UTC())
+		case "audit-subscriber-catalog":
+			return auditSubscriberCatalog(ctx, options.rules, options.geolite2, stage, time.Now().UTC())
+		case "refresh-subscriber-evidence":
+			return refreshSubscriberEvidence(ctx, options.rules, options.relayFeeds, stage, dependencies.evidenceClient, time.Now().UTC())
 		case "refresh":
 			// Neither database becomes visible until both were built and verified.
 			geoDir := filepath.Join(stage, "mmdb")

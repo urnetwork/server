@@ -1,11 +1,15 @@
 # ARIN database design
 
-This document describes the implementation as of 2026-10-04. `arindbctl` builds
-an immutable IPv4/IPv6 MaxMind database that combines registration facts,
-reviewed network-use evidence, and geographic risk. A separate augmentation
-step joins reviewed subscriber-ISP identities to observed routing origins across
-RIR regions. Runtime lookups use the resulting local file; they do not query a
-registry, consult BGP, or perform operator research.
+This document describes the implementation as of 2026-10-04, including the
+discriminators added by the same-day classifier review recorded in
+[CLASSIFICATION.md](CLASSIFICATION.md). `arindbctl` builds an immutable
+IPv4/IPv6 MaxMind database that combines registration facts, reviewed
+network-use evidence, and geographic risk. A separate augmentation step joins
+reviewed subscriber-ISP identities to observed routing origins across RIR
+regions, withholds that inference where routing visibility, origin
+authorization or associated geography contradicts it, and applies reviewed
+address-level findings. Runtime lookups use the resulting local file; they do
+not query a registry, consult BGP, or perform operator research.
 
 The selected policy permits an **identified residential or business subscriber
 ISP to default clean when no additional discriminator is available**. Explicit
@@ -39,8 +43,11 @@ flowchart TD
 The command dispatcher and local publication boundary are in [main.go](main.go).
 Acquisition is in [refresh.go](refresh.go); registration classification is in
 [build.go](build.go); global augmentation is in
-[subscriber_origin.go](subscriber_origin.go). Resource resolution and runtime
-decoding belong to [env.go](../env.go) and [ip.go](../ip.go).
+[subscriber_origin.go](subscriber_origin.go), with origin validation in
+[rpki.go](rpki.go), address-level findings in [address_risk.go](address_risk.go)
+and the catalog audit in [subscriber_audit.go](subscriber_audit.go). Resource
+resolution and runtime decoding belong to [env.go](../env.go) and
+[ip.go](../ip.go).
 
 ## Inputs and evidence contracts
 
@@ -50,8 +57,11 @@ decoding belong to [env.go](../env.go) and [ip.go](../ip.go).
 | GeoLite2-City MMDB | Associated geographic country used for country correlation. It does not identify subscriber service. |
 | Registration rule YAML | Explicit reviewed use decisions. Requires `version: 1`, nonempty rules, unique names, `reason`, `source`, selectors, and an explicitly supplied `non_quality` boolean. Unknown YAML fields and extra documents are rejected. |
 | Optional country-evidence snapshots | Exact owner/allocation-bound country sets or explicit uncertainty, with HTTPS provenance, local snapshot SHA-256, and observation/expiry dates. |
-| Subscriber operator catalog | `version: 1`, `policy: identified-subscriber-default`, reviewed operator identities, public ASNs, use, sources, country context, and pinned origin sources. |
-| RIS origin snapshots | Observed prefix-to-origin mappings. These establish routing evidence, not subscriber use, customer location, or market rank. |
+| Subscriber operator catalog | `version: 1`, `policy: identified-subscriber-default`, reviewed operator identities, public ASNs, use, sources, country context, pinned origin sources, and the optional visibility floor, country policy, RPKI and address-risk sources. |
+| RIS origin snapshots | Observed prefix-to-origin mappings with the number of RIS peers that see each pair. These establish routing evidence and its visibility, not subscriber use, customer location, or market rank. |
+| RPKI payload snapshots | Validated ROA payloads from an rpki-client/Cloudflare JSON export or a routinator/RIPE NCC CSV export. They corroborate origin authorization; they never establish use or risk. |
+| Address-level risk lists | Reviewed one-category snapshots: the official Tor exit-address export, RFC 8805 geofeeds published by relay/VPN operators, or plain address lists. Each applies only to the exact addresses it names. |
+| NRO delegated statistics | Per-registry resource-holder ids for every ASN. The audit uses them to find sibling ASNs of a reviewed operator; the build never reads them. |
 
 Acquisition reads credentials from protected files. ARIN credentials contain
 `api_key`; MaxMind credentials contain `account_id`, `license_key`, and
@@ -158,7 +168,9 @@ prefix rules; there is no risk-clearing rule. See
 ## Global subscriber-origin augmentation
 
 The operator catalog reviews the connection between an actual subscriber
-service, its legal/operator identity, and each listed ASN. A diversified parent
+service, its legal/operator identity, and each listed ASN. Sibling ASNs of one
+operator belong under one operator ID so that their aggregates and
+more-specifics are evaluated as one identity. A diversified parent
 company is not evidence for every affiliate or ASN. Country codes in the catalog
 describe review context; they do not relocate routes or waive geographic risk.
 The accepted uses are `subscriber`, `hosting`, `transit`, `virtual_isp`, `proxy`,
@@ -171,10 +183,10 @@ HTTPS provenance and exact hashes. Their observation/expiry interval is at
 most 48 hours, and their generation header must also be no more than 48 hours
 old at build time. Parsing bounds compressed input, decompressed bytes, and
 line length; malformed, truncated, future, stale, or changing input fails.
-Equal-prefix origins are merged independent of file order. Longest-prefix
-lookup includes unidentified origins, so a narrower unrelated network cannot
-inherit a broader ISP's inferred approval. Default routes do not identify the
-entire Internet. IPv4 alias ranges in IPv6, including mapped/compatible, Teredo,
+Equal-prefix origins are merged independent of file order, keeping each
+origin's best peer count. Longest-prefix lookup includes unidentified origins,
+so a narrower unrelated network cannot inherit a broader ISP's inferred
+approval. Default routes do not identify the entire Internet. IPv4 alias ranges in IPv6, including mapped/compatible, Teredo,
 and 6to4 ranges, are excluded from origin inference to preserve the MMDB's IPv4
 alias behavior; native IPv6 remains supported.
 
@@ -186,11 +198,56 @@ alias behavior; native IPv6 remains supported.
 | Any reviewed negative use | Excluded; veto an otherwise positive/unknown base |
 | Existing base exclusion or ambiguity | Preserve it; an inferred subscriber cannot clear it |
 | Proxy, virtual-ISP, VPN, or Tor origin evidence | Also add independent network risk |
+| Subscriber-only route seen by fewer RIS peers than `minimum_origin_peers` | Withheld: identity recorded, base state preserved |
+| Subscriber-only route whose origin is RPKI-invalid | Withheld: identity recorded, base state preserved |
+| Inferred approval whose GeoLite country is outside every identified operator's reviewed countries | Withheld at that geography's boundary, under `origin_country_policy` |
+| Address named by a reviewed Tor, proxy, VPN or virtual-ISP list | Excluded at that exact address and independent network risk added |
 
 Missing child-registration or service-purpose detail alone does not veto an
 identified subscriber ISP. A narrower unknown origin blocks broader *inference*,
 but does not erase an independent direct registration approval. Existing
 geographic and network risk always survives augmentation.
+
+### Withheld inference
+
+A withheld decision is a third outcome between inference and veto. The route's
+identity, ASNs, peer count, validity and source are recorded with
+`origin_use_state: withheld` and `origin_withheld_reason`, but the base
+`quality_state` is unchanged: unknown stays unknown for review, and a direct
+registration approval survives. Negative and conflicting evidence is never
+withheld; it applies at any visibility or validity.
+
+Visibility is the number of RIS peers that see a prefix/origin pair. The
+2026-10-04 IPv4 table has 453 peers at most; 68,342 of 1,270,431 pairs are seen
+by exactly one peer, and those include leaked aggregates and benchmarking
+space. The floor defaults to 10 peers and the manifest records the effective
+value. An operator's own more-specific inherits the visibility of its
+identically originated aggregate, or of an aggregate originated by sibling ASNs
+of the same reviewed operator, because the aggregate establishes the identity
+and carries the Internet's traffic. A different origin set inherits nothing.
+
+RPKI validity follows RFC 6811 over the pinned payloads, including AS0
+payloads, and is evaluated per origin: any invalid origin makes the route
+invalid. An invalid more-specific under a valid identically originated
+aggregate is recorded as `valid-aggregate`: the same operator exceeded its own
+maximum length, which is not an identity problem. Not-found and valid routes
+are unchanged. RPKI never creates risk or an approval.
+
+The reviewed-country discriminator requires `--geolite2` and
+`origin_country_policy: withhold-outside-reviewed-countries` together. It
+compares the GeoLite country of each cell inside a newly inferred prefix with
+the union of the identified operators' reviewed countries, withholds the
+inference for outside cells, and records the observed `associated_country`
+there. Unknown GeoLite countries never withhold. On a sample of 127 correctly
+identified eyeball ASNs this withholds under one percent of their routed IPv4
+space; the withheld cells are dominated by on-net CDN caches, leased blocks and
+anycast announced from an access ASN, and an operator whose space is mostly
+outside its reviewed countries is a misidentified catalog entry.
+
+Address-level findings are applied last, on top of whatever record covers the
+address. They add independent network risk with the list's reviewed category,
+exclude subscriber use at that address, and leave the surrounding prefix
+unchanged. Lists never expand to a prefix, operator or ASN.
 
 The input must be a complete, unaugmented policy-two database. Previously
 augmented records are rejected: refreshing from yesterday's inferred result
@@ -213,15 +270,22 @@ Each build produces `arin.mmdb` and `manifest.json`. The MMDB contains direct
 registration identity and scope, countries, classification state, matching rule
 and source, reason, ambiguity/owner evidence, and independent risk evidence.
 Known origin decisions add `origin_use_state`, `origin_asns`,
-`origin_operator_ids`, and `origin_evidence_source`. New inferred approvals also
-carry `subscriber_evidence_kind: isp_inferred` and
+`origin_operator_ids`, `origin_evidence_source`, `origin_peers` and, when RPKI
+payloads were supplied, `origin_rpki_validity`. Withheld decisions add
+`origin_withheld_reason`. New inferred approvals also carry
+`subscriber_evidence_kind: isp_inferred` and
 `classification_rule: identified-subscriber-isp-default`; direct approvals keep
-their existing classification provenance.
+their existing classification provenance. Address-level findings add
+`address_risk_source_ids` and their `network_risk_evidence` entries. A record
+carrying any origin or address-level field is rejected as augmentation input.
 
 The registration manifest binds the builder version, XML, GeoLite database,
 rules, optional evidence files, output hash, build time, and classification and
 allocation counts. The augmentation manifest binds the exact base MMDB, catalog,
-origin snapshots and their generations, output hash, and augmentation counts.
+origin, RPKI and address-risk snapshots and their generations, the GeoLite
+database when the country policy is active, the effective visibility floor,
+output hash, and augmentation counts including withheld partitions by reason,
+RPKI route validity and applied address entries.
 Retain both manifests and source receipts to preserve the full chain. The
 builder rehashes inputs before publishing and verifies the written database.
 
@@ -244,7 +308,9 @@ select a Config release.
 | `geolite2 refresh --geoip-config … --output …` | Validated GeoLite resources and manifest |
 | `arin refresh --credentials … --output …` | Acquired and validated ARIN XML |
 | `build --source … --geolite2 … --rules … --output …` | Registration MMDB and manifest, using local inputs |
-| `augment-subscribers --source … --rules … --output …` | Globally augmented MMDB and manifest, using a registration MMDB and operator catalog |
+| `augment-subscribers --source … --rules … [--geolite2 …] --output …` | Globally augmented MMDB and manifest, using a registration MMDB, operator catalog and pinned evidence; `--geolite2` is required by, and only by, the reviewed-country policy |
+| `audit-subscriber-catalog --rules … --geolite2 … --output …` | `catalog-audit.json` and manifest: per-operator routed geography against reviewed countries, unobserved ASNs, registry siblings, operator merge candidates, withheld routes, and a per-country queue of unreviewed origins |
+| `refresh-subscriber-evidence [--rules existing-catalog.yml] [--relay-geofeeds] --output …` | Pinned, validated and hashed RIS, RPKI, Tor and NRO snapshots under `sources/`, plus a complete `catalog.yml` carrying the existing operators and policy, or an `evidence.yml` fragment without `--rules` |
 | `refresh --geoip-config … --credentials … --rules … --output …` | One atomic bundle containing refreshed `mmdb/` and registration `arindb/` |
 
 `refresh` does **not** invoke `augment-subscribers`. A release that needs global
@@ -261,11 +327,75 @@ go build -o /tmp/arindbctl ./arindbctl
   --geolite2 /path/to/GeoLite2-City.mmdb \
   --rules /path/to/reviewed-registration.yml \
   --output /path/to/new-registration
+/tmp/arindbctl audit-subscriber-catalog \
+  --rules /path/to/reviewed-operators/catalog.yml \
+  --geolite2 /path/to/GeoLite2-City.mmdb \
+  --output /path/to/catalog-audit
 /tmp/arindbctl augment-subscribers \
   --source /path/to/new-registration/arin.mmdb \
   --rules /path/to/reviewed-operators/catalog.yml \
+  --geolite2 /path/to/GeoLite2-City.mmdb \
   --output /path/to/new-final-arindb
 ```
+
+A catalog revision is therefore three commands: refresh the evidence from the
+previous catalog, audit the result, and augment. The refresh downloads over
+HTTPS without following redirects, bounds every body, parses each snapshot
+with the reader the build uses, stores large JSON and text snapshots gzipped,
+and refuses to publish if the written catalog does not validate and hash. It
+pins evidence; it does not review operators, and the relay geofeeds it can
+pin are opt-in because their `vpn` category is a reviewer decision.
+
+Run the audit before every catalog revision. It measures the catalog against
+the same pinned routing, validity and geography the build uses and flags
+identities whose routed space lies mostly outside their reviewed countries,
+ASNs that originate nothing, and the unreviewed origins carrying the most
+address space per associated country. With a registry source it also lists
+each operator's registry holder ids, sibling ASNs that are unreviewed or
+listed under another operator, and merge candidates: operator pairs sharing a
+holder, and pairs where one originates more-specifics inside the other's
+aggregates. The latter is how one operator's sibling ASNs look when cataloged
+separately, and until they are merged those more-specifics stand on their own
+visibility and validity. On the 2026-10-04 sample this surfaced Comcast's 55
+regional ASNs, Airtel's four unlisted siblings, and the Orange ES/Jazztel
+nesting with 311 of 325 nested routes below the visibility floor. Address
+weights are not subscribers, and a queued ASN or suggested merge is a research
+input, never reviewed evidence. Use the same GeoLite release for the
+registration build and the augmentation so cell boundaries agree.
+
+## Research and evidence sources
+
+The 2026-10-04 review surveyed public data for distinguishing subscriber
+access from hosting, transit, proxy, VPN and Tor use, and for finding
+subscriber operators worldwide. Formats and URLs were fetched and verified
+that day; the details and verdicts are in
+[CLASSIFICATION.md](CLASSIFICATION.md).
+
+| Source | Role in this design |
+| --- | --- |
+| RIPE RIS `riswhoisdump` IPv4/IPv6, with `<seen by #rispeers>` | Routing origin and visibility. Pinned by the refresh; the visibility floor and aggregate inheritance come from its peer counts. Attribution to RIPE NCC. |
+| RPKI payloads from rpki-client/Cloudflare JSON, routinator CSV, or the RIPE NCC daily archive with publisher hashes | Origin authorization, withholding only. The archive is preferred for reproducibility; the Cloudflare export is what the refresh pins today. |
+| Tor Project `exit-addresses` and bulk exit list; CollecTor archives (CC0) | Address-level `tor` findings at measured egress addresses. |
+| Apple iCloud Private Relay and Cloudflare egress geofeeds (RFC 8805) | Operator-published relay egress, opt-in `vpn` lists; Mullvad and NordVPN publish relay JSON that could join them after review. |
+| NRO extended delegated statistics; RIR whois dumps; CAIDA AS2Org (attribution) | Registry holder grouping for sibling ASNs and the delegated country used in the global geographic-risk measurement. |
+| Cloud prefix publications: AWS, Google Cloud, Azure service tags, Oracle, DigitalOcean/Linode/Vultr geofeeds, Cloudflare and Fastly edge lists | Authoritative hosting evidence, deferred: unknown space is already excluded, so they only change an outcome where a cloud prefix is originated by a reviewed subscriber ASN. |
+| Spamhaus DROP and ASN-DROP (credit required) | Small high-precision negative list, deferred pending a reviewed category policy. |
+| APNIC Labs per-ASN user estimates, bgp.tools class and tags, PeeringDB `info_types`, Stanford ASdb, Cloudflare Radar, Steam per-country rankings | Discovery for the review queue only. APNIC credits VPN egress ASNs with users; PeeringDB data may not be redistributed in bulk; ASdb bulk download is login-gated. |
+| Regulator and NIR publications: NIC.br ASN/CNPJ (done for Brazil), LACNIC RDAP registrant legal ids, JPNIC ASN list, Colombia Postdata, CNMC, AGCOM, MIC, ACCC, TRAI, FCC BDC | Subscriber counts and footprints; only NIC.br carries ASNs, LACNIC registrant handles can bridge by legal id, the rest need name bridges. |
+| MaxMind Enterprise, Anonymous IP and Residential Proxy; IPinfo; ipapi | Licensed address-level user-type and proxy sightings, deferred; the signal matrix in CLASSIFICATION.md records their handling. |
+| CAIDA AS classification; Rapid7 and OpenINTEL reverse DNS; Spamhaus PBL bulk | Unavailable: retired, access-gated, or DNS-query only. |
+
+Techniques evaluated and adopted: visibility weighting of origins, aggregate
+and sibling inheritance, RFC 6811 origin validation as a withholding
+discriminator, reviewed-country withholding at GeoLite cell boundaries,
+exact-address negative evidence, and registry-holder sibling detection.
+Evaluated and not adopted: reverse-DNS naming heuristics (static business
+subscribers and CGNAT make them unreliable without our own measurement),
+prefix-length heuristics (no authoritative dataset), and extending
+registration-country geographic risk worldwide from the delegated files
+(the delegated country disagrees with GeoLite for roughly six percent of
+ARIN, RIPE and AFRINIC assigned IPv4 space, so that is a supply policy
+decision rather than a classifier correction).
 
 Release builds should stamp the reviewed builder version rather than leaving
 the default `development`. Preserve immutable inputs for reproduction; build
@@ -369,7 +499,10 @@ next identity or discriminator review.
 Builder controls cover ancestry, allocation authority and precedence, exact
 scopes, narrow boundaries, conflicting owners, unknown evidence, country
 uncertainty, independent risk, multi-origin conflicts, IPv4 aliases, immutable
-base preservation, malformed/stale inputs, and rejection of repeated augmentation.
+base preservation, malformed/stale inputs, rejection of repeated augmentation,
+visibility and validity withholding with aggregate inheritance, reviewed-country
+withholding at cell boundaries, exact-address risk lists in every supported
+format, both RPKI export formats, and the audit's flags and queue.
 Run package tests, race tests, and vet for builder changes. Release-catalog
 tests take explicit reviewed inputs, including `ARIN_REVIEWED_RULES_PATH`;
 synthetic test success is not review of a production catalog. Qualify each
@@ -377,7 +510,10 @@ large artifact with full readback and the intended runtime decoder as well.
 
 Coverage remains bounded by reviewed identities and routing visibility. An
 identified ISP inference cannot detect every leased subnet, proxy, hosting use,
-or subsequent reassignment. Narrow contrary evidence must be added when found.
+or subsequent reassignment; the visibility, validity, geography and
+address-level discriminators narrow that gap without closing it. Address lists
+expire with their snapshots and Tor exits churn within hours, so a pinned list
+is evidence about the build interval, not the present. Narrow contrary evidence must be added when found.
 Country/admin1 research and ranks may be incomplete even when an operator is
 already eligible. Snapshot expiry is enforced during building, not as a runtime
 per-record expiry; keeping a selected resource fresh requires an update process.
