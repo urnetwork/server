@@ -21,7 +21,25 @@ type pgSamplePreflightError struct {
 	err    error
 }
 
-func (*pgSamplePreflightError) Error() string {
+func (e *pgSamplePreflightError) Error() string {
+	if e != nil {
+		switch e.reason {
+		case pgSamplePreflightPrimaryMissing, pgSamplePreflightPrimaryDisabled:
+			return "monitor: bounded PG sample primary unavailable"
+		case pgSamplePreflightGenerationStale:
+			return "monitor: bounded PG sample settings generation stale"
+		case pgSamplePreflightGenerationUnobservable:
+			return "monitor: bounded PG sample settings generation unobservable"
+		case pgSamplePreflightDirectory:
+			return "monitor: bounded PG sample state unavailable"
+		case pgSamplePreflightCadenceLock:
+			return "monitor: bounded PG sample cadence lock unavailable"
+		case pgSamplePreflightCadenceState:
+			return "monitor: bounded PG sample cadence state unavailable"
+		case pgSamplePreflightMarker:
+			return "monitor: bounded PG sample durable marker unavailable"
+		}
+	}
 	return "monitor: bounded PG sample local prerequisite unavailable"
 }
 
