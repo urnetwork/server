@@ -305,13 +305,14 @@ func TestNativeExecutionFinalityCancellationTraversalIsBoundedAndExact(t *testin
 	cycle := &nativeFinalityTestCauses{}
 	cycle.causes = []error{cycle}
 	cases := []struct {
-		err  error
-		pure bool
+		err      error
+		pure     bool
+		conflict bool
 	}{
 		{err: context.Canceled, pure: true},
 		{err: fmt.Errorf("owner: %w", context.DeadlineExceeded), pure: true},
 		{err: errors.Join(context.Canceled, context.DeadlineExceeded), pure: true},
-		{err: errors.Join(context.Canceled, errors.New("invalid signature"))},
+		{err: errors.Join(context.Canceled, errors.New("invalid signature")), conflict: true},
 		{err: &nativeFinalityTestCauses{causes: []error{nil, nil}}},
 		{err: &nativeFinalityTestCauses{causes: make([]error, 129)}},
 		{err: deep},
@@ -326,8 +327,10 @@ func TestNativeExecutionFinalityCancellationTraversalIsBoundedAndExact(t *testin
 			if actual != test.err {
 				t.Fatalf("case %d changed original cancellation", index)
 			}
-		} else if !errors.Is(actual, ErrNativeFinalityConflict) {
+		} else if test.conflict && !errors.Is(actual, ErrNativeFinalityConflict) {
 			t.Fatalf("case %d lost a pure verifier conflict", index)
+		} else if !test.conflict && actual != test.err {
+			t.Fatalf("case %d invented a conflict from an unobserved cause graph", index)
 		}
 	}
 }

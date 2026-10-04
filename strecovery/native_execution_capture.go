@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 const NativeExecutionCaptureSchema = "urnetwork-native-execution-capture-v1"
@@ -22,6 +24,25 @@ type nativeFinalityUnavailableError struct{ reason string }
 
 func (self *nativeFinalityUnavailableError) Error() string { return self.reason }
 func (self *nativeFinalityUnavailableError) Unwrap() error { return ErrNativeFinalityUnavailable }
+
+// Missing certificate coverage may retry only after a complete, nonempty
+// observation of that exact cause. Joined conflicts and absent receivers hold.
+func nativeFinalityUnavailableOnly(err error) bool {
+	inspection := server.InspectErrorCauses(err)
+	if !inspection.Complete {
+		return false
+	}
+	seen := false
+	for _, node := range inspection.Nodes {
+		if node.Leaf {
+			seen = true
+			if node.Err != ErrNativeFinalityUnavailable {
+				return false
+			}
+		}
+	}
+	return seen
+}
 
 // The route is an explicit observation source, not finality authority. Zero
 // retry budget retains the established 300-second default; accepted overrides
@@ -130,7 +151,7 @@ func captureNativeExecutionFinality(ctx context.Context, checkpoint *NativeFinal
 				proof = NativeExecutionFinalityProof{Schema: NativeExecutionFinalitySchema, CheckpointHash: checkpoint.Hash(), Parent: config.Parent, Child: config.Child, Segments: segments}
 				break
 			}
-			if !errors.Is(err, ErrNativeFinalityUnavailable) {
+			if !nativeFinalityUnavailableOnly(err) {
 				return nil, err
 			}
 			if err := capture.rpc.wait(ctx, time.Second); err != nil {

@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+
+	"github.com/urnetwork/server"
 )
 
 const NativeExecutionFinalitySchema = "urnetwork-native-execution-finality-v1"
@@ -20,43 +22,34 @@ var ErrNativeFinalityConflict = errors.New("native finality evidence conflicts")
 // Verification is pure except for cancellation. Walk every cause so a joined
 // contradiction cannot disappear merely because cancellation is also present.
 func nativeFinalityVerificationError(err error) error {
-	if err == nil || nativeFinalityCancellationOnly(err) {
+	if err == nil {
 		return err
 	}
-	return errors.Join(ErrNativeFinalityConflict, err)
+	// An incomplete cause graph cannot invent a contradiction. A concrete
+	// verifier refusal already observed beside it still retains precedence.
+	for _, node := range server.InspectErrorCauses(err).Nodes {
+		if node.Leaf && node.Err != context.Canceled && node.Err != context.DeadlineExceeded {
+			return errors.Join(ErrNativeFinalityConflict, err)
+		}
+	}
+	return err
 }
 
 func nativeFinalityCancellationOnly(err error) bool {
-	remaining := 128
-	var visit func(error, int) bool
-	visit = func(cause error, depth int) bool {
-		if cause == nil || depth > 32 || remaining == 0 {
-			return false
-		}
-		remaining--
-		if many, ok := cause.(interface{ Unwrap() []error }); ok {
-			causes := many.Unwrap()
-			if len(causes) == 0 || len(causes) > remaining {
+	inspection := server.InspectErrorCauses(err)
+	if !inspection.Complete {
+		return false
+	}
+	seen := false
+	for _, node := range inspection.Nodes {
+		if node.Leaf {
+			seen = true
+			if node.Err != context.Canceled && node.Err != context.DeadlineExceeded {
 				return false
 			}
-			seen := false
-			for _, next := range causes {
-				if next == nil {
-					continue
-				}
-				seen = true
-				if !visit(next, depth+1) {
-					return false
-				}
-			}
-			return seen
 		}
-		if one, ok := cause.(interface{ Unwrap() error }); ok {
-			return visit(one.Unwrap(), depth+1)
-		}
-		return cause == context.Canceled || cause == context.DeadlineExceeded
 	}
-	return visit(err, 0)
+	return seen
 }
 
 // Decode the bounded independently approved anchor without granting it trust.

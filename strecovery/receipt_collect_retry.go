@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/urfoundation/sn/protocol"
+	"github.com/urnetwork/server"
 )
 
 var errReceiptCollectorReplyBound = errors.New("receipt collection response exceeds its byte budget")
@@ -38,44 +39,32 @@ func receiptCollectorStatusRetry(status int) bool {
 }
 
 func receiptCollectorRetryable(err error) bool {
-	remaining := 128
-	var visit func(error, int) bool
-	visit = func(cause error, depth int) bool {
-		if cause == nil || depth > 32 || remaining == 0 {
-			return false
+	inspection := server.InspectErrorCauses(err)
+	if !inspection.Complete {
+		return false
+	}
+	seen := false
+	for _, node := range inspection.Nodes {
+		if !node.Leaf {
+			continue
 		}
-		remaining--
-		if many, ok := cause.(interface{ Unwrap() []error }); ok {
-			causes := many.Unwrap()
-			if len(causes) == 0 || len(causes) > remaining {
-				return false
-			}
-			seen := false
-			for _, next := range causes {
-				if next == nil {
-					continue
-				}
-				seen = true
-				if !visit(next, depth+1) {
-					return false
-				}
-			}
-			return seen
-		}
-		if one, ok := cause.(interface{ Unwrap() error }); ok {
-			return visit(one.Unwrap(), depth+1)
-		}
+		cause := node.Err
+		seen = true
 		// Calling errors.Is here would allow a custom Is method to walk a
-		// second unbounded cause tree. Only the observed leaf grants retry.
+		// second unbounded cause tree. Missing receivers never reach a leaf.
+		retry := false
 		for _, transient := range []error{context.DeadlineExceeded, io.EOF, io.ErrUnexpectedEOF, syscall.ECONNRESET, syscall.ECONNABORTED, syscall.ECONNREFUSED, syscall.ETIMEDOUT, syscall.EHOSTUNREACH, syscall.ENETUNREACH, syscall.EPIPE, syscall.EAGAIN, syscall.EINTR, syscall.EMFILE, syscall.ENFILE, syscall.ENOMEM, syscall.EIO} {
 			if cause == transient {
-				return true
+				retry = true
+				break
 			}
 		}
 		if network, ok := cause.(net.Error); ok {
-			return network.Timeout() || network.Temporary()
+			retry = network.Timeout() || network.Temporary()
 		}
-		return false
+		if !retry {
+			return false
+		}
 	}
-	return visit(err, 0)
+	return seen
 }
