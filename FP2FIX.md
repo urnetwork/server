@@ -6948,3 +6948,63 @@ verification. Index repair remains held during acute outage recovery. Current
 FP2 quota coverage cannot be inferred from historical pre-outage worker samples.
 
 Root ledger T580 retains the immutable native recovery and verification receipts.
+
+### 2026-10-04 22:37 UTC successful provider responses after pool recovery
+
+Two fresh, same-process HTTP observations qualified all 16 API blocks on the
+selected `2026.10.4-api-bucket-fallback-v2+1063426840` build with readiness true.
+The latest matched interval observed 578 provider-selection requests and 578
+HTTP-200 responses, with no cancellations or panic outcomes; mean handler time
+was 24.6 ms. Initial picker requests were 30/30 HTTP-200 at 15.0 ms mean. Location
+search was 2/2 HTTP-200 across 14 observed slots; two slots had no qualified lazy
+search counters. Successful HTTP responses do not by themselves prove populated
+results or delivery to an individual user's app.
+
+A fresh probe in Connect edge1/g1's mounted configuration, network namespace,
+and UID authenticated and completed its PostgreSQL ping in 2.25 ms. This proves
+the current database path, not the application's cached pool or an end-to-end
+provider session. Authenticated Connect traffic and semantic contract-creation
+outcomes remain acceptance checks.
+
+The native 22:35 sample identified PgBouncer 1.26.0 with libevent 2.1.12-stable.
+All 32 shards had established backends and no pending backend login; PostgreSQL
+had no heavyweight Lock wait and one lightweight-lock wait. One long active
+statement was matched by its exact composed SQL hash to the seven-day network
+reliability full recompute, rather than the held covering-index repair. Its
+trigger and execution plan remain under investigation.
+
+Root ledger T581 retains the API paired counters, Connect path control, native
+version/owner census, and generated-cache reclamation evidence. The HTTP-200
+pair is retained separately for the next acceptance ledger record. Overall
+FP2 coverage and full Main recovery remain open until their own current evidence
+passes.
+
+### 2026-10-04 23:27 UTC transport recovered; financial admission remains open
+
+The matched 22:50–22:52 interval qualified all 16 Connect processes on the
+intended build with fresh authenticated carrier progress: 15,406 successful
+HTTP upgrades and more than 1.26 million completed HTTP carrier writes.
+These counters prove transport progress, not individual provider delivery.
+
+Current API contract outcomes remain unacceptable. The 23:09–23:13 pair
+observed 8,470 replies against 147,551 protocol rejections. Separate cause
+counters attribute 73.4% of rejections to insufficient balance and 18.9% to
+missing companion origins. Payer attribution and balance-release custody
+are not yet established; these counters alone do not prove a customer-wide
+allowance failure. Financial admission is the priority recovery lane.
+
+All eight Taskworkers are ready on the deployed close-progress build.
+Current quota-complete coverage remains only 0.56%, despite a large decrease
+in aggregate remaining checks between successive censuses. Historical
+pre-outage coverage must not be substituted for current coverage.
+
+Fresh representative plans for the long seven-day network reliability
+recompute use old noncovering scans across all eight recent partitions.
+Root resumed the serial concurrent covering-index repair in a durable user
+unit at 23:25 UTC. The valid detached child was attached, and the first
+missing child rebuild started. This is operation progress, not a completed
+catalog audit. The previously failed V3/V4 attempts made no Main contact.
+
+The independently tested cooperative close-page budget is ready for an
+urgent compatible Taskworker release. Main recovery and FP2 completion
+remain open until financial and provider outcomes are verified.
