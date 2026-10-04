@@ -236,8 +236,8 @@ func (self *providerEgressProbePass) completeUnstartedUrlClaims(ctx context.Cont
 		go func() {
 			var err error
 			defer func() {
-				// The country-label lookup can raise a datastore error. This
-				// owned cleanup still owes the scheduler a terminal result.
+				// A reporter can raise a datastore error. This owned cleanup
+				// still owes the scheduler a terminal result.
 				if recovered := recover(); recovered != nil {
 					if cause, ok := recovered.(error); ok {
 						err = fmt.Errorf("URL claim completion failed: %w", cause)
@@ -253,7 +253,8 @@ func (self *providerEgressProbePass) completeUnstartedUrlClaims(ctx context.Cont
 			if self.fullSink == nil || provider.ClaimOrdinal <= 0 {
 				err = qualityprobe.ErrUrlProbeCompletionUnsupported
 			} else {
-				err = self.fullSink.ReportUrlProbeCompletion(releaseCtx, qualityprobe.UrlProbeCompletion{
+				completionCtx := withProviderEgressClaimCountry(releaseCtx, provider.ClientId, provider.CountryCode)
+				err = self.fullSink.ReportUrlProbeCompletion(completionCtx, qualityprobe.UrlProbeCompletion{
 					ClientId: provider.ClientId, ClaimOrdinal: provider.ClaimOrdinal,
 					CompletedAt: time.Now().UTC(), ProbeFailure: prober.FailureHealthNotRun, AllowPacing: false,
 				})

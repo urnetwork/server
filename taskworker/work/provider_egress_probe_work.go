@@ -1242,6 +1242,9 @@ func (self *providerEgressProbePass) runFullBatchObserved(
 	due []ingest.DueProvider,
 	timing *providerUrlProbeStageOwner,
 ) providerEgressFullOutcome {
+	if self.urlProbes && len(due) == 1 {
+		ctx = withProviderEgressClaimCountry(ctx, due[0].ClientId, due[0].CountryCode)
+	}
 	progress := egressProbeFullProgress.begin(len(due))
 	defer progress.close()
 	readinessStarted := timing.now()
