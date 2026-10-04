@@ -419,54 +419,61 @@ func setCurrentProviderSummaries(stats *Stats, byCountry []ProviderCountryCount)
 // so a device that connects and disconnects within one day still counts that
 // day even though its end-of-day state is removed. Carry-in rows (the
 // pre-window state synthesized onto startDay) establish state only — they are
-// not same-day connection evidence, which is why event_time is fetched and
-// compared against the window start.
+// not same-day connection evidence. A single cutoff determines both SQL
+// buckets and the carry_in flag; carry-in is replayed before that day's events.
+// Already-removed carry-in devices have no effect and need not be returned.
+// The event ID, rather than event_time, orders revisions within a bucket.
+// Keep its event type in the same MAX value so both columns come from one
+// event without joining every winning ID back to the retained history. The
+// first array element is globally unique under audit_device_event's schema.
+const computeStatsDeviceSql = `
+	SELECT
+		t.day,
+		t.device_id,
+		t.last_event[2] AS event_type,
+		t.carry_in
+	FROM (
+		SELECT
+			to_char(event_time, 'YYYY-MM-DD') AS day,
+			device_id,
+			MAX(ARRAY[event_id::varchar, event_type]) AS last_event,
+			false AS carry_in
+		FROM audit_device_event
+		WHERE
+			@windowStart <= event_time AND
+			event_type IN (@eventTypeDeviceAdded, @eventTypeDeviceRemoved)
+		GROUP BY day, device_id
+
+		UNION ALL
+
+		SELECT
+			@startDay AS day,
+			device_id,
+			MAX(ARRAY[event_id::varchar, event_type]) AS last_event,
+			true AS carry_in
+		FROM audit_device_event
+		WHERE
+			event_time < @windowStart AND
+			event_type IN (@eventTypeDeviceAdded, @eventTypeDeviceRemoved)
+		GROUP BY device_id
+	) t
+	WHERE NOT t.carry_in OR t.last_event[2] = @eventTypeDeviceAdded
+	ORDER BY day ASC, carry_in DESC
+`
+
 func computeStatsDevice(ctx context.Context, stats *Stats, conn server.PgConn) {
 	startDay, endDay := dayRange(stats.Lookback)
 	windowStart := server.NowUtc().Add(-24 * time.Hour * time.Duration(stats.Lookback))
+	computeStatsDeviceWindow(ctx, stats, conn, startDay, endDay, windowStart)
+}
+
+func computeStatsDeviceWindow(ctx context.Context, stats *Stats, conn server.PgCanQuery, startDay string, endDay string, windowStart time.Time) {
 	result, err := conn.Query(
 		ctx,
-		`
-			SELECT
-				t.day,
-				t.device_id,
-				audit_device_event.event_type,
-				audit_device_event.event_time
-			FROM (
-				SELECT
-					to_char(event_time, 'YYYY-MM-DD') AS day,
-					device_id,
-					MAX(event_id::varchar) AS max_event_id
-				FROM audit_device_event
-				WHERE
-					now() - interval '1 days' * @lookback <= event_time AND
-					event_type IN (
-						@eventTypeDeviceAdded,
-						@eventTypeDeviceRemoved
-					)
-				GROUP BY day, device_id
-
-				UNION ALL
-
-				SELECT
-					@startDay AS day,
-					device_id,
-					MAX(event_id::varchar) AS max_event_id
-				FROM audit_device_event
-				WHERE
-					event_time < now() - interval '1 days' * @lookback AND
-					event_type IN (
-						@eventTypeDeviceAdded,
-						@eventTypeDeviceRemoved
-					)
-				GROUP BY device_id
-			) t
-			INNER JOIN audit_device_event ON t.max_event_id::uuid = audit_device_event.event_id
-			ORDER BY day ASC
-		`,
+		computeStatsDeviceSql,
 		server.PgNamedArgs{
 			"startDay":               startDay,
-			"lookback":               stats.Lookback,
+			"windowStart":            windowStart,
 			"eventTypeDeviceAdded":   AuditEventTypeDeviceAdded,
 			"eventTypeDeviceRemoved": AuditEventTypeDeviceRemoved,
 		},
@@ -493,9 +500,9 @@ func computeStatsDevice(ctx context.Context, stats *Stats, conn server.PgConn) {
 		var day string
 		var deviceId server.Id
 		var eventType string
-		var eventTime time.Time
+		var carryIn bool
 		for result.Next() {
-			result.Scan(&day, &deviceId, &eventType, &eventTime)
+			server.Raise(result.Scan(&day, &deviceId, &eventType, &carryIn))
 
 			if day != activeDay {
 				exportActive()
@@ -508,7 +515,7 @@ func computeStatsDevice(ctx context.Context, stats *Stats, conn server.PgConn) {
 				activeDay = day
 			}
 
-			if !eventTime.Before(windowStart) {
+			if !carryIn {
 				touchedDevices[deviceId] = true
 			}
 
