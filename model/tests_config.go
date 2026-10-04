@@ -68,6 +68,35 @@ func loadTestsVaultConfig() (*testsVaultConfig, error) {
 	return config, nil
 }
 
+// testEmailBypassDomains returns the exact configured email bypass domains.
+// Any malformed entry rejects the whole list (valid is false), so a typo can
+// never widen a bypass. The caller checks the config version.
+func testEmailBypassDomains(config *testsVaultConfig) (normalDomains map[string]bool, valid bool) {
+	normalDomains = map[string]bool{}
+	for _, configuredDomain := range config.EmailVerification.BypassDomains {
+		domain, valid := normalizeTestEmailDomain(configuredDomain)
+		if !valid {
+			return map[string]bool{}, false
+		}
+		normalDomains[domain] = true
+	}
+	return normalDomains, true
+}
+
+// testEmailOnBypassDomain matches a normalized email address against the exact
+// bypass domains. There is no suffix or wildcard matching.
+func testEmailOnBypassDomain(normalEmail string, normalDomains map[string]bool) bool {
+	at := strings.LastIndexByte(normalEmail, '@')
+	if at <= 0 || at == len(normalEmail)-1 {
+		return false
+	}
+	emailDomain, valid := normalizeTestEmailDomain(normalEmail[at+1:])
+	if !valid {
+		return false
+	}
+	return normalDomains[emailDomain]
+}
+
 // testSeedphraseRateLimitBypassForAddr is the narrowly scoped escape hatch
 // used by destructive acceptance campaigns. A seedphrase signup has no email,
 // phone, wallet, or SSO identity with which to identify the configured test
@@ -133,14 +162,10 @@ func testAuthPolicyForUserAuth(userAuth *string) testAuthPolicy {
 		return testAuthPolicy{}
 	}
 
-	normalDomains := map[string]bool{}
-	for _, configuredDomain := range config.EmailVerification.BypassDomains {
-		domain, valid := normalizeTestEmailDomain(configuredDomain)
-		if !valid {
-			glog.Errorf("[auth] refusing tests.yml auth policy with invalid bypass domain")
-			return testAuthPolicy{}
-		}
-		normalDomains[domain] = true
+	normalDomains, valid := testEmailBypassDomains(config)
+	if !valid {
+		glog.Errorf("[auth] refusing tests.yml auth policy with invalid bypass domain")
+		return testAuthPolicy{}
 	}
 
 	var normalConfiguredPhone *string
@@ -155,15 +180,7 @@ func testAuthPolicyForUserAuth(userAuth *string) testAuthPolicy {
 
 	matched := false
 	if authType == UserAuthTypeEmail {
-		at := strings.LastIndexByte(*normalUserAuth, '@')
-		if at <= 0 || at == len(*normalUserAuth)-1 {
-			return testAuthPolicy{}
-		}
-		emailDomain, valid := normalizeTestEmailDomain((*normalUserAuth)[at+1:])
-		if !valid {
-			return testAuthPolicy{}
-		}
-		matched = normalDomains[emailDomain]
+		matched = testEmailOnBypassDomain(*normalUserAuth, normalDomains)
 	} else if normalConfiguredPhone != nil {
 		matched = *normalConfiguredPhone == *normalUserAuth
 	}
