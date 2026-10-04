@@ -223,7 +223,7 @@ func TestProviderWorkActualPublisherWaitsForMissingLiveSessionOriginal(t *testin
 
 // Both paths use the same genuine SDK and database producers. The sole fault
 // removes the optional signer from live connection admission, before exposure.
-func providerWorkActualSdkStreamPublication(t *testing.T, missingSessionOriginal bool) {
+func providerWorkActualSdkStreamPublication(t *testing.T, missingSessionOriginal bool, continuations ...func(testing.TB, context.Context, *providerWorkWindowFixture, *payoutartifact.Artifact)) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -283,7 +283,8 @@ func providerWorkActualSdkStreamPublication(t *testing.T, missingSessionOriginal
 				t.Fatal(err)
 			}
 			f.authority.Owners = append(f.authority.Owners, payoutartifact.WholeWorkOwner{ClientId: identity.ClientId, NetworkId: [16]byte(networkId), Generation: identity.Generation, PublicKey: identity.PublicKey})
-			f.authority.ExpectedProviders = append(f.authority.ExpectedProviders, payoutartifact.WholeWorkExpectedProvider{ClientId: identity.ClientId, NetworkId: [16]byte(networkId)})
+			provider := providerWorkRetainFixtureWallet(t, f.cfg, f.authority.Domain, f.epoch.Epoch, f.epoch.Start.Block, f.epoch.StartTime, identity.ClientId, [16]byte(networkId))
+			f.authority.ExpectedProviders = append(f.authority.ExpectedProviders, provider)
 			cut := providerWorkRetainActualCut(t, f, client.ContractManager(), "start")
 			if !cut.Complete || len(cut.Contracts) != 0 {
 				t.Fatal("actual start cut is not empty")
@@ -445,6 +446,9 @@ func providerWorkActualSdkStreamPublication(t *testing.T, missingSessionOriginal
 		_, after, err := startifact.Read(ctx, store, record.ContentHash)
 		if err != nil || !bytes.Equal(raw, after) {
 			t.Fatal("restart changed original signed artifact", err)
+		}
+		for _, continuation := range continuations {
+			continuation(t, ctx, f, artifact)
 		}
 		witness.AttributionOriginals = nil
 		missing, err := payoutartifact.VerifyWholeWorkInventoryWithWitness(ctx, artifact, witness, expected)
