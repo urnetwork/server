@@ -100,11 +100,23 @@ func (self *CoreStClient) depositDomain() (protocol.ClientKeyHistoryDomain, erro
 // graph, policy and current operator proof, then reads every economic field at
 // that same canonical hash. Another endpoint must restart this entire read.
 func (self *CoreStClient) readDepositCustody(ctx context.Context, client *ethclient.Client, epoch *uint64) (*stDepositCustody, error) {
+	var result *stDepositCustody
+	err := self.readTransactionRpc(ctx, client, func(ctx context.Context) error {
+		var err error
+		result, err = self.readDepositCustodyOnce(ctx, client, epoch)
+		return err
+	})
+	return result, err
+}
+
+// One attempt owns the complete authority and economic snapshot. No partial
+// result survives a failed read into the next bounded attempt.
+func (self *CoreStClient) readDepositCustodyOnce(ctx context.Context, client *ethclient.Client, epoch *uint64) (*stDepositCustody, error) {
 	domain, err := self.depositDomain()
 	if err != nil {
 		return nil, err
 	}
-	callCtx, cancel := context.WithTimeout(ctx, stSendTimeout)
+	callCtx, cancel := context.WithTimeout(ctx, stReadAttemptBudget)
 	defer cancel()
 	boundary, operator, err := readStClientKeyAuthorityAt(callCtx, client, domain, nil)
 	if err != nil {
