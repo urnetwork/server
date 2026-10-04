@@ -188,6 +188,13 @@ type resolverHomeObservation struct {
 }
 
 func resolveMultiHomeObserved(root string) []resolverHomeObservation {
+	env, _ := Env()
+	return resolveMultiHomeObservedForEnv(root, env)
+}
+
+// Observe literal, selected environment, and shared homes without consulting
+// the process environment. An empty environment omits only its selected home.
+func resolveMultiHomeObservedForEnv(root string, env string) []resolverHomeObservation {
 	// always search the literal dir first
 	observations := []resolverHomeObservation{{path: root}}
 	if info, err := os.Stat(root); err == nil {
@@ -221,7 +228,7 @@ func resolveMultiHomeObserved(root string) []resolverHomeObservation {
 		}
 	}
 
-	if env, err := Env(); err == nil {
+	if env != "" {
 		appendDirectory(filepath.Join(root, env))
 	}
 
@@ -537,6 +544,24 @@ func (self *Resolver) ResourcePaths(relPath string) ([]string, error) {
 		panic(fmt.Sprintf("Unknown mount type %s", self.mountType))
 	}
 
+	return resolveResourcePaths(homes, relPath, self.mountType)
+}
+
+// Resolve a resource beneath an explicit mount root and environment, using the
+// same literal/environment/all and descending version precedence as Resolver.
+// No process environment, resolver overrides, or cached state is consulted.
+// Like Resolver.ResourcePaths, an absolute resource path panics and duplicate
+// candidates are retained. The caller selects its vault/config/site root.
+func ResolveResourcePaths(root string, env string, relPath string) ([]string, error) {
+	if filepath.IsAbs(relPath) {
+		panic("Resource path must be relative.")
+	}
+	return resolveResourcePaths(resolveMultiHomeObservedForEnv(root, env), relPath, root)
+}
+
+// Share candidate ordering and error classification across explicit and
+// process-configured resolution, including higher-priority lookup failures.
+func resolveResourcePaths(homes []resolverHomeObservation, relPath string, resourceScope string) ([]string, error) {
 	paths := []string{}
 	lookupErrs := []error{}
 	recordError := func(err error) {
@@ -576,7 +601,7 @@ func (self *Resolver) ResourcePaths(relPath string) ([]string, error) {
 		return nil, errors.Join(lookupErrs...)
 	}
 	if len(paths) == 0 {
-		return nil, fmt.Errorf("%w in %s (%s)", ErrResourceNotFound, self.mountType, relPath)
+		return nil, fmt.Errorf("%w in %s (%s)", ErrResourceNotFound, resourceScope, relPath)
 	}
 
 	return paths, nil
