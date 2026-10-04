@@ -6585,3 +6585,38 @@ top-30 ranking is complete. TRAI's dated national metric rankings remain
 separate. Fresh current-provider overlap, loaded epoch, rollup and a complete
 native Quality generation are still required to establish recovery. See
 `arindbctl/CLASSIFICATION.md` for the evidence and the directional count limits.
+
+### 2026-10-04 10:47 UTC global v7 subscriber release checkpoint
+
+The immutable v7 candidate expands the reviewed global catalog to 4,786
+subscriber operators, 4,966 positive ASNs and 46 countries. Brazil's bulk
+primary-source rule joins regulator-reported fixed Internet subscribers by
+exact legal CNPJ root to NIC.br ASN identity and Brazilian delegation. Sol
+independently reprocessed every regulator row, state ranking and identity join;
+this is a reviewed bulk rule, not thousands of individually reviewed websites.
+All 27 Brazilian states now have August 2026 fixed-Internet metric top-30
+rankings, while worldwide and combined-service rankings remain incomplete.
+Legitimate MVNO/reseller status and mixed products alone are not proxy evidence;
+explicit proxy/hosting/transit/conflicting-origin and independent risk vetoes
+remain effective.
+
+Complete bidirectional readback passed 262.97s and counted 7,075,149 serialized
+candidate leaves, including 2,957,726 subscriber leaves. Independent native
+decoding passed 5,023 public samples (4,696 positive, 327 excluded). These are
+offline artifact controls, not Main provider supply. Resource SHA-256 is
+`2bca7f6f76bd0a099cfa8704c326efea4d3dfb9cd734a0350f10ff2a842fb150`,
+epoch `1791109251`; catalog SHA-256 is
+`02e7ccf38fc57626f429918b8b58a375df468cdc05e4a7f55dd761cbdfa361a4`.
+The exact independent gates under
+`temp/arin-subscriber-coverage-20261004/` are `sol-brazil-v5-gate.json`
+(`7ab1e15f9c8c45fd61d5a456d313421c4b1926b58c8f643fd643553cbe0f3464`)
+and `sol-global-v7-native-gate.json`
+(`ce48eea69afbbb9bec9e02607ebad125f1b49de66c1e0e7be2f13b824db05964`).
+The full readback summary hash is
+`a480a1e155d472d7ccce3fa2e3fba53c99f8832dbed80d10f8caa163121baac3`.
+
+No Main publication, selection or recovered Quality supply is claimed here.
+Root owns Config identity and publication, current-provider shadow, cached
+reader rollover and fresh lookup/rollup/native-index proof. The previously
+observed policy-two activation and sparse-catalog Quality gap remain the
+production facts until Root's new receipts establish the changed boundary.

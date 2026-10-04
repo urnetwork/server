@@ -809,3 +809,70 @@ current and draining owners, and pins one start-current native generation
 through healthy publication rollover. Its local full-population controls do
 not establish Main subscriber coverage or authorize policy activation. Those
 remain mandatory before the final active-resource and policy cutover.
+
+## 2026-10-04 10:47 UTC global v7 qualification checkpoint
+
+This checkpoint supersedes the earlier offline v4/v5 coverage counts, without
+changing the historical Main observations above. The frozen v7 resource is
+`temp/arin-subscriber-coverage-20261004/global-candidate-v7/arin.mmdb`, SHA-256
+`2bca7f6f76bd0a099cfa8704c326efea4d3dfb9cd734a0350f10ff2a842fb150`,
+505,506,195 bytes, build epoch `1791109251`. Its manifest hash is
+`6b3518a452c1fed8a43b6262f1b9645904ff40191c0fa46e9370e3b46dd9be49`.
+It uses the independently checked global catalog v5, SHA-256
+`02e7ccf38fc57626f429918b8b58a375df468cdc05e4a7f55dd761cbdfa361a4`:
+4,786 positive operators, 4,966 positive ASNs and 46 countries, with four
+unchanged explicit hosting operators. Identified subscriber use remains an
+inference; explicit contrary use, conflicting origins and independent risk
+retain their vetoes. Legitimate access resellers/MVNOs and a diversified product
+menu do not by themselves identify ISP-branded proxy egress.
+
+Brazil supplies a scalable primary-source identity join: positive Anatel
+fixed `INTERNET` subscriptions for a legal entity, exact CNPJ legal-root join
+to NIC.br's ASN/OrgID publication, and current Brazilian ASN delegation.
+This reviewed rule application qualifies 4,694 operators and 4,865 ASNs;
+it is not a claim that every operator website was individually reviewed.
+Eight foreign/global ASN associations await separate identity/scope bridges,
+and 5,061 reported operators remain unmatched. Names, ranks and market size
+are not identity join keys or admission cutoffs.
+
+Independent Sol review streamed all 5,631,845 regulator rows, matched all eight
+monthly totals, independently rebuilt the national and all 27 state top-30
+arrays, and rechecked the legal-root/NIR/delegation join. The August 2026
+ranking metric is 56,986,853 fixed `INTERNET` subscriptions, including both
+natural and legal persons; dedicated lines, M2M and other product categories
+are separate. These are metric-specific rankings, not combined fixed/mobile
+market rankings. The gate is `sol-brazil-v5-gate.json`, SHA-256
+`7ab1e15f9c8c45fd61d5a456d313421c4b1926b58c8f643fd643553cbe0f3464`,
+in the same research directory. There are 7,299 reviewed operator/region
+footprints across 78 of 3,865 indexed regions. Worldwide country/state/province
+top-30 coverage remains incomplete.
+
+Complete bidirectional v7 readback passed in 262.97 seconds. The authoritative
+candidate-to-base pass counted 7,075,149 serialized leaves, 2,957,726 subscriber
+leaves, 2,955,605 new inferred subscriber leaves and 124,610 explicit origin
+negative veto leaves. Every compared address retained independent risk and
+approval attribution. Prefix leaves and IPv4 address weights are not Main
+provider counts; the opposite pass's first-address weights are not exact
+candidate population counts. Summary SHA-256 is
+`a480a1e155d472d7ccce3fa2e3fba53c99f8832dbed80d10f8caa163121baac3`;
+full readback log SHA-256 is
+`31ef1ae52c08c919f6cabc67b085cacbca2a85dd0aa057ce1979d67b6c1af9ce`.
+
+The independent qualified-6800 native decoder control used all 70 production
+Go files plus the exact external test, and passed 5,023 public origin samples:
+4,696 positive and 327 excluded. It is a decoder compatibility control, not a
+full root-package suite or a provider sample. Its gate
+`sol-global-v7-native-gate.json` has SHA-256
+`ce48eea69afbbb9bec9e02607ebad125f1b49de66c1e0e7be2f13b824db05964`;
+its log hash is
+`750d3827b0f719eb82aeba631322856a320a1851ff6c3e7374f6108ca9b1c87d`.
+The actual catalog package control also passed (`global-catalog-full-v5.log`,
+SHA-256 `2d02c2ee3404ad033dd26e39b77c9dc3f02fa0ea9fcc7cf4a95cf791def30c23`).
+The pinned routing evidence expires no earlier than 2026-10-06 02:03:14 UTC.
+
+This checkpoint records no Main contact, resource publication or activation.
+Root owns the current Config identity check, separate shadow resource staging,
+authenticated provider comparison, active resource selection and cached reader
+rollover. Fresh lookup epoch/flags, rollup and a complete native Quality
+generation remain necessary to establish actual recovery. Subsequent country
+research remains separate from this immutable v7 release candidate.
