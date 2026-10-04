@@ -255,6 +255,7 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/verify/keys", handlers.GetVerifyKeys),
 		router.NewRoute("GET", "/verify/stats", handlers.GetVerifyStats),
 		router.NewRoute("GET", "/verify/proofs", handlers.GetVerifyProofs),
+		router.NewRoute("POST", "/verify/original", handlers.GetVerifyOriginalRequest),
 		// subnet control plane (sn/PLAN.md §5, D-13)
 		router.NewRoute("POST", "/sn/wallet", handlers.SnSetWallet),
 		router.NewRoute("GET", "/sn/wallet", handlers.SnGetWallet),

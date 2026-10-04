@@ -23,9 +23,7 @@ func verifyRetainOriginal(ctx context.Context, previousDepth int, trail *model.V
 		settings := verifySettings()
 		body.RecoveryMs = trail.Pending.AssignedMs + uint64((settings.StepTimeout + settings.StepTimeoutGrace).Milliseconds())
 	}
-	if cfg := stConfig(); cfg != nil && cfg.DeploymentKey() != "" {
-		body.Scope = &model.VerifyOriginalScope{Profile: cfg.Profile, GenesisHash: cfg.GenesisHash, DeploymentId: cfg.DeploymentId, DeploymentKey: cfg.DeploymentKey(), PolicyHash: cfg.PolicyHash, Netuid: cfg.Netuid, NoId: cfg.NoId}
-	}
+	body.Scope = verifyCurrentOriginalScope()
 	if previousDepth > 0 {
 		if prior := model.GetLatestVerifyOriginal(ctx, trail.TrailId); prior != nil {
 			previous := verifyDecodeOriginal(prior)
