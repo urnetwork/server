@@ -3591,6 +3591,30 @@ not establish availability of per-entry lifetime fields. The `netescrow`
 statement-profile reducer likewise reports only endpoint lifetime aggregates,
 never an unqualified adjacent-window rate or current executor/plan conclusion.
 
+Bounded native CPU attribution is a separate Root-owned diagnostic. It retains
+the five-second PostgreSQL unit CPU result, then attempts two read-only local
+Unix activity snapshots (500ms statement and 100ms lock limits) and at most
+1,024 direct-unit process reads per endpoint. Query attribution requires stable
+PID/start, backend start, active query ID/start and, for a parallel worker, a
+stable native leader with the same query ID. Sixteen CPU-ranked query groups
+retain omitted CPU/counts; changed, missing, zero-ID and short-lived queries
+remain unknown. Process windows differ slightly from the unit window; the
+reported core equivalents are not an exact partition of total unit CPU.
+
+A completed aggregate CPU read never makes missing query attribution healthy.
+The October 4 03:17 receipt `bfe0388e` measured 60.9045 cores out of 96 while
+query attribution was unavailable as `sql_unavailable`; no query family
+was established. Its original projection omitted the executor failure detail.
+The successor retains availability for each SQL/process endpoint and, on a
+psql failure, only exit status, phase, SQLSTATE when present, stderr byte count
+and a fixed authentication/privilege/socket/statement/error category. Raw SQL,
+errors, credentials and PIDs are not exported. A failed local Unix invocation
+must be distinguished from the qualified PgBouncer reader; a healthy isolated
+SQL control does not establish Main socket, role or database availability.
+An optional cap or failure preserves aggregate CPU while withholding query
+ownership. Neither that aggregate nor an incomplete query join clears `pg-cpu`
+or proves recovery; application names remain declarations, not native owners.
+
 The October 2 18:30:32–18:30:39Z attempt failed specifically at `history_start`
 with `statement_timeout`, before any activity snapshot. This identifies the
 sampler's history statement, not an application query or a CPU share. A local
