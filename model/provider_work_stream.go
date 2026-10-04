@@ -22,6 +22,12 @@ func WithProviderWorkRequestFrameHash(ctx context.Context, hash [32]byte) contex
 // Prepare original directory identities at live creation, before any Redis
 // mutation. The signed cohort is retained only if this call actually births it.
 func providerWorkPrepareStream(ctx context.Context, contractId, sourceId, destinationId server.Id, intermediaryIds []server.Id) *protocol.ProviderWorkStreamCohort {
+	return providerWorkPrepareStreamWithDb(ctx, contractId, sourceId, destinationId, intermediaryIds, func(ctx context.Context, read func(server.PgConn)) { server.Db(ctx, read) })
+}
+
+// The owned database acquisition boundary is explicit so pool failures remain
+// optional evidence loss, including failures raised before the read callback.
+func providerWorkPrepareStreamWithDb(ctx context.Context, contractId, sourceId, destinationId server.Id, intermediaryIds []server.Id, db func(context.Context, func(server.PgConn))) *protocol.ProviderWorkStreamCohort {
 	source := providerWorkSessionSourceFromContext(ctx)
 	hash, _ := ctx.Value(providerWorkRequestFrameContextKey{}).([32]byte)
 	if source == nil || hash == ([32]byte{}) || len(intermediaryIds) > int(source.authority.MaxCohortMembers) {
@@ -33,23 +39,25 @@ func providerWorkPrepareStream(ctx context.Context, contractId, sourceId, destin
 	}
 	identities := map[server.Id]server.Id{}
 	var resultErr error
-	server.Db(ctx, func(conn server.PgConn) {
-		rows, err := conn.Query(ctx, `SELECT client_id,network_id FROM network_client WHERE client_id=ANY($1)`, intermediaryIds)
-		if err != nil {
-			resultErr = err
-			return
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var clientId, networkId server.Id
-			if err := rows.Scan(&clientId, &networkId); err != nil {
+	server.HandleError(func() {
+		db(ctx, func(conn server.PgConn) {
+			rows, err := conn.Query(ctx, `SELECT client_id,network_id FROM network_client WHERE client_id=ANY($1)`, intermediaryIds)
+			if err != nil {
 				resultErr = err
 				return
 			}
-			identities[clientId] = networkId
-		}
-		resultErr = rows.Err()
-	})
+			defer rows.Close()
+			for rows.Next() {
+				var clientId, networkId server.Id
+				if err := rows.Scan(&clientId, &networkId); err != nil {
+					resultErr = err
+					return
+				}
+				identities[clientId] = networkId
+			}
+			resultErr = rows.Err()
+		})
+	}, func(err error) { resultErr = err })
 	if resultErr != nil {
 		return nil
 	}
@@ -95,7 +103,43 @@ func providerWorkRetainStreamBirth(ctx context.Context, streamId server.Id, body
 // companion cohorts. The original birth must already exist; absence is unknown.
 func providerWorkAttachStreamInTx(ctx context.Context, tx server.PgTx, contractId, streamId server.Id) {
 	providerWorkOptionalInTx(ctx, tx, func(optional server.PgTx) error {
-		_, err := optional.Exec(ctx, `INSERT INTO provider_work_stream_contract(contract_id,stream_id)
+		var raw []byte
+		if err := optional.QueryRow(ctx, `SELECT original FROM provider_work_stream_original WHERE stream_id=$1`, streamId).Scan(&raw); err != nil {
+			return err
+		}
+		original, err := protocol.DecodeProviderWorkReceipt(ctx, raw)
+		if err != nil || original.Stream == nil {
+			return errors.Join(errors.New("provider work original cohort is invalid"), err)
+		}
+		members := map[string]string{}
+		for _, member := range original.Stream.Intermediaries {
+			members[member.ClientId] = member.NetworkId
+		}
+		rows, err := optional.Query(ctx, `SELECT client_id,network_id FROM contract_participant WHERE stream_id=$1 ORDER BY client_id`, streamId)
+		if err != nil {
+			return err
+		}
+		matches := true
+		for rows.Next() {
+			var clientId, networkId server.Id
+			if err := rows.Scan(&clientId, &networkId); err != nil {
+				rows.Close()
+				return err
+			}
+			if members[clientId.String()] != networkId.String() {
+				matches = false
+			}
+			delete(members, clientId.String())
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		if !matches || len(members) != 0 {
+			return errors.New("provider work current stream parties differ from the original cohort")
+		}
+		_, err = optional.Exec(ctx, `INSERT INTO provider_work_stream_contract(contract_id,stream_id)
    SELECT $1,stream_id FROM provider_work_stream_original WHERE stream_id=$2
    ON CONFLICT(contract_id) DO NOTHING`, contractId, streamId)
 		return err
@@ -107,15 +151,19 @@ func providerWorkAttachStreamInTx(ctx context.Context, tx server.PgTx, contractI
 func providerWorkRetainOutcomeInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, closedAt time.Time) {
 	providerWorkOptionalInTx(ctx, tx, func(optional server.PgTx) error {
 		body := protocol.ProviderWorkOutcome{ContractId: contractId.String(), Outcome: outcome, ClosedAtUnixMicro: closedAt.UnixMicro()}
-		var reservationHash, streamHash []byte
+		var reservationHash, reservationRaw, streamHash []byte
 		var streamId *server.Id
 		var capacity int64
-		if err := optional.QueryRow(ctx, `SELECT r.receipt_hash,c.stream_id,s.receipt_hash,c.transfer_byte_count
+		if err := optional.QueryRow(ctx, `SELECT r.receipt_hash,r.original,c.stream_id,s.receipt_hash,c.transfer_byte_count
    FROM transfer_contract c JOIN provider_work_reservation_original r USING(contract_id)
    LEFT JOIN provider_work_stream_contract a USING(contract_id)
    LEFT JOIN provider_work_stream_original s ON s.stream_id=a.stream_id
-   WHERE c.contract_id=$1`, contractId).Scan(&reservationHash, &streamId, &streamHash, &capacity); err != nil {
+   WHERE c.contract_id=$1`, contractId).Scan(&reservationHash, &reservationRaw, &streamId, &streamHash, &capacity); err != nil {
 			return err
+		}
+		reservation, err := protocol.DecodeProviderWorkReceipt(ctx, reservationRaw)
+		if err != nil || reservation.Reservation == nil || reservation.Reservation.RequestFrameHash == nil || reservation.Reservation.UsageOriginIsSource == nil {
+			return errors.Join(errors.New("provider work original request or direction is absent"), err)
 		}
 		if len(reservationHash) != 32 || capacity < 0 || streamId != nil && len(streamHash) != 32 {
 			return errors.New("provider work original reservation or stream is absent")

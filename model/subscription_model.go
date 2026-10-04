@@ -2359,7 +2359,7 @@ func CreateContractNoEscrowWithUsageOrigin(
 			contractTransferByteCount,
 			usageOriginIsSource,
 		)
-	})
+	}, server.TxReadCommitted)
 	leaveTransaction()
 	if returnErr != nil {
 		return

@@ -2528,7 +2528,7 @@ func ConnectNetworkClientWithIpFamily(
 			}
 		}
 		connectionId = server.NewId()
-		providerWorkLockEndpointsInTx(ctx, tx, clientId)
+		providerWorkLockSessionMutationInTx(ctx, tx, clientId)
 		providerWorkSessionGenesisInTx(ctx, tx, clientId)
 
 		host, _ := server.Host()
@@ -2633,11 +2633,11 @@ func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error 
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		var originalClientId *server.Id
-		providerWorkOptionalInTx(ctx, tx, func(optional server.PgTx) error {
+		providerWorkOptionalSchemaInTx(ctx, tx, func(optional server.PgTx) error {
 			return optional.QueryRow(ctx, `SELECT client_id FROM network_client_connection WHERE connection_id=$1`, connectionId).Scan(&originalClientId)
 		})
 		if originalClientId != nil {
-			providerWorkLockEndpointsInTx(ctx, tx, *originalClientId)
+			providerWorkLockSessionMutationInTx(ctx, tx, *originalClientId)
 		}
 		disconnectTime := server.NowUtc()
 		tag, err := tx.Exec(
@@ -3764,10 +3764,10 @@ func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
 			minTime.UTC(),
 		))
 		var originalClientIds []server.Id
-		providerWorkOptionalInTx(ctx, tx, func(optional server.PgTx) error {
+		boundedRetirement := providerWorkOptionalSchemaInTx(ctx, tx, func(optional server.PgTx) error {
 			rows, err := optional.Query(ctx, `SELECT DISTINCT client_id FROM network_client_connection c
 			 WHERE c.connected AND NOT EXISTS(SELECT 1 FROM network_client_handler h WHERE h.handler_id=c.handler_id)
-			 ORDER BY client_id LIMIT 4097`)
+			 ORDER BY client_id LIMIT 4096`)
 			if err != nil {
 				return err
 			}
@@ -3781,10 +3781,10 @@ func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
 			}
 			return rows.Err()
 		})
-		if len(originalClientIds) > 4096 {
-			originalClientIds = nil
+		if boundedRetirement && len(originalClientIds) == 0 {
+			return
 		}
-		providerWorkLockEndpointsInTx(ctx, tx, originalClientIds...)
+		boundedRetirement = boundedRetirement && providerWorkLockSessionMutationInTx(ctx, tx, originalClientIds...)
 
 		// A handler row and its connections deliberately have no foreign key:
 		// handlers are ephemeral, while connection history is retained. That
@@ -3802,6 +3802,7 @@ func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
 					disconnect_time = $1
 				WHERE
 					network_client_connection.connected = true AND
+					(NOT $2::boolean OR network_client_connection.client_id=ANY($3::uuid[])) AND
 					NOT EXISTS (
 						SELECT 1
 						FROM network_client_handler
@@ -3810,6 +3811,8 @@ func CloseExpiredNetworkClientHandlers(ctx context.Context, minTime time.Time) {
 					)
 			`,
 			disconnectTime,
+			boundedRetirement,
+			originalClientIds,
 		))
 		providerWorkRetainSessionEventsInTx(ctx, tx, originalClientIds...)
 	})

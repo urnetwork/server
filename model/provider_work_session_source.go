@@ -30,7 +30,7 @@ func NewProviderWorkSessionSource(authority protocol.ProviderWorkSourceAuthority
 	if err := authority.Validate(); err != nil {
 		return nil, err
 	}
-	if len(key) != ed25519.PrivateKeySize || !bytes.Equal(ed25519.NewKeyFromSeed(key[:ed25519.SeedSize]), key) || authority.PublicKey != [32]byte(key.Public().(ed25519.PublicKey)) || authority.DomainHash == ([32]byte{}) || authority.SourceId == "" || authority.Generation == "" || authority.FromUnixMicro <= 0 || authority.ThroughUnixMicro <= authority.FromUnixMicro || authority.MaxEndpointEvents == 0 || authority.MaxCohortMembers == 0 {
+	if len(key) != ed25519.PrivateKeySize || !bytes.Equal(ed25519.NewKeyFromSeed(key[:ed25519.SeedSize]), key) || authority.PublicKey != [32]byte(key.Public().(ed25519.PublicKey)) || authority.DomainHash == ([32]byte{}) || authority.SourceId == "" || authority.Generation == "" || authority.FromUnixMicro <= 0 || authority.ThroughUnixMicro <= authority.FromUnixMicro || authority.MaxEndpointEvents == 0 {
 		return nil, errors.New("provider work session source authority or key is invalid")
 	}
 	authority.DirectoryPublicKeys = append([][32]byte(nil), authority.DirectoryPublicKeys...)
