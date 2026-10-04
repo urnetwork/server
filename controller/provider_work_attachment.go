@@ -91,7 +91,21 @@ func attachProviderWorkOriginals(ctx context.Context, authority payoutartifact.W
 	if err != nil {
 		return err
 	}
+	// Observation may sign only after the separately approved boundary and
+	// its exact original header clock are authenticated. The live model owns
+	// the signer and settlement row fence; this publisher supplies no key.
+	if err := payoutartifact.VerifyWholeWorkWindowClock(ctx, authority, inventory.Clock); err != nil {
+		return err
+	}
+	openOriginals, err := model.RetainProviderWorkOpenObservations(ctx, ids, authority.Epoch, authority.End.Number, [32]byte(common.HexToHash(authority.End.Hash)), inventory.Clock.EndTime)
+	if err != nil {
+		return providerWorkOriginalFailure(err)
+	}
 	originals, err := model.ListProviderWorkOriginals(ctx, ids)
+	if err != nil {
+		return err
+	}
+	originals, err = mergeProviderWorkOriginalPools(ctx, originals, openOriginals)
 	if err != nil {
 		return err
 	}

@@ -224,6 +224,12 @@ func TestProviderWorkActualPublisherWaitsForMissingLiveSessionOriginal(t *testin
 // Both paths use the same genuine SDK and database producers. The sole fault
 // removes the optional signer from live connection admission, before exposure.
 func providerWorkActualSdkStreamPublication(t *testing.T, missingSessionOriginal bool, continuations ...func(testing.TB, context.Context, *providerWorkWindowFixture, *payoutartifact.Artifact)) {
+	providerWorkActualSdkPublication(t, missingSessionOriginal, false, false, continuations...)
+}
+
+// Open publication uses the same real admission and signed SDK capture owners;
+// only the deliberate absence of terminal delivery distinguishes that workload.
+func providerWorkActualSdkPublication(t *testing.T, missingSessionOriginal, keepOpen, missingOpenOriginal bool, continuations ...func(testing.TB, context.Context, *providerWorkWindowFixture, *payoutartifact.Artifact)) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -332,9 +338,11 @@ func providerWorkActualSdkStreamPublication(t *testing.T, missingSessionOriginal
 		contractId := connect.RequireIdFromBytes(stored.ContractId)
 		// Close the manager's admission before exercising its supported cleanup
 		// delivery. Both exact SDK-generated reports reach actual Server ingress.
-		for _, client := range clients[:2] {
-			client.ContractManager().Close()
-			client.ContractManager().CloseContract(contractId, 121, 0)
+		if !keepOpen {
+			for _, client := range clients[:2] {
+				client.ContractManager().Close()
+				client.ContractManager().CloseContract(contractId, 121, 0)
+			}
 		}
 		for _, transport := range transports {
 			transport.stateLock.Lock()
@@ -360,7 +368,11 @@ func providerWorkActualSdkStreamPublication(t *testing.T, missingSessionOriginal
 			if !cut.Complete {
 				t.Fatal("actual end cut incomplete")
 			}
-			if index < 2 && len(cut.Contracts) != 1 || index == 2 && len(cut.Contracts) != 0 {
+			wantContracts := 0
+			if index < 2 {
+				wantContracts = 1
+			}
+			if len(cut.Contracts) != wantContracts {
 				t.Fatal("actual SDK inventory differs from ingress", index, len(cut.Contracts))
 			}
 			if index == 0 {
@@ -378,12 +390,20 @@ func providerWorkActualSdkStreamPublication(t *testing.T, missingSessionOriginal
 		}
 		f.retainAuthority(t)
 		originals, err := model.ListProviderWorkOriginals(ctx, []server.Id{server.Id(contractId)})
-		if err != nil || !missingSessionOriginal && len(originals) < 6 {
+		minimumOriginals := 6
+		if keepOpen {
+			minimumOriginals--
+		}
+		if err != nil || !missingSessionOriginal && len(originals) < minimumOriginals {
 			t.Fatal("live producer originals incomplete", len(originals), err)
 		}
 		client := &providerWorkRosterClient{StClient: newStubStClient(&StEpochState{})}
-		if missingSessionOriginal {
-			if _, _, err := stComputeReleasePayout(ctx, f.cfg, client, f.epoch.Epoch, start, end, f.epoch.Start.Block, f.epoch.End.Block, f.epoch); !errors.Is(err, payoutartifact.ErrClosedWorkUnavailable) {
+		publicationCtx := ctx
+		if missingOpenOriginal {
+			publicationCtx = model.WithProviderWorkSessionSource(ctx, nil)
+		}
+		if missingSessionOriginal || missingOpenOriginal {
+			if _, _, err := stComputeReleasePayout(publicationCtx, f.cfg, client, f.epoch.Epoch, start, end, f.epoch.Start.Block, f.epoch.End.Block, f.epoch); !errors.Is(err, payoutartifact.ErrClosedWorkUnavailable) {
 				t.Fatal("actual publisher did not retain missing live originals as pending", err)
 			}
 			if record := model.GetStPayoutArtifact(ctx, f.cfg.DeploymentKey(), f.epoch.Epoch, f.cfg.NoId); record != nil {
@@ -406,10 +426,18 @@ func providerWorkActualSdkStreamPublication(t *testing.T, missingSessionOriginal
 		if err != nil {
 			t.Fatal(err)
 		}
-		if artifact.ClosedWork == nil || artifact.ClosedWork.WholeInventory == nil || len(artifact.ClosedWork.Records) != 1 {
+		wantCredited := 1
+		if keepOpen {
+			wantCredited = 0
+		}
+		if artifact.ClosedWork == nil || artifact.ClosedWork.WholeInventory == nil || len(artifact.ClosedWork.Records) != wantCredited {
 			t.Fatal("actual publication lost nonempty work")
 		}
-		if len(artifact.ClosedWork.WholeInventory.AttributionOriginals) != len(originals) {
+		wantOriginals := len(originals)
+		if keepOpen {
+			wantOriginals++
+		}
+		if len(artifact.ClosedWork.WholeInventory.AttributionOriginals) != wantOriginals {
 			t.Fatal("actual publication omitted retained participant originals")
 		}
 		approved, err := stLoadProviderWorkAuthority(ctx, f.cfg, f.epoch)
@@ -418,10 +446,14 @@ func providerWorkActualSdkStreamPublication(t *testing.T, missingSessionOriginal
 		}
 		expected := approved.Expectation
 		verified, err := payoutartifact.VerifyWholeWorkInventory(ctx, artifact, expected)
-		if err != nil || verified == nil || !verified.Complete || !verified.AttributionComplete || verified.Credited != 1 {
+		if err != nil || verified == nil || !verified.Complete || !verified.AttributionComplete || verified.Credited != uint64(wantCredited) || keepOpen && verified.Open != 1 {
 			t.Fatal("actual public payout did not prove complete nonempty attribution", verified, err)
 		}
-		if len(verified.ExpectedProviders) != 3 || verified.ExpectedProviders[0].UsageBytes != 0 || verified.ExpectedProviders[1].UsageBytes != 61 || verified.ExpectedProviders[2].UsageBytes != 60 {
+		wantDestination, wantIntermediary := uint64(61), uint64(60)
+		if keepOpen {
+			wantDestination, wantIntermediary = 0, 0
+		}
+		if len(verified.ExpectedProviders) != 3 || verified.ExpectedProviders[0].UsageBytes != 0 || verified.ExpectedProviders[1].UsageBytes != wantDestination || verified.ExpectedProviders[2].UsageBytes != wantIntermediary {
 			t.Fatal("original source/destination/stream earning parties differ", verified.ExpectedProviders)
 		}
 		digest, err := providerWorkPolicyHash(strings.TrimPrefix(record.ContentHash, "sha256:"))
