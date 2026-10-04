@@ -69,11 +69,12 @@ func (self *providerEgressProbePass) runUrlProbes(ctx context.Context, args *Pro
 func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *ProviderEgressProbeArgs, pins map[string][]string, pool *egresshealth.Pool, observation *providerUrlProbeSchedulerOwner) (*ProviderEgressProbeResult, error) {
 	result := &ProviderEgressProbeResult{}
 	type completedTurn struct {
-		clientId string
-		outcome  providerEgressFullOutcome
+		clientId     string
+		claimOrdinal int64
+		outcome      providerEgressFullOutcome
 	}
 	completed := make(chan completedTurn, args.Full.Concurrency)
-	active := map[string]bool{}
+	active := map[string]int64{}
 	var runErr error
 	admit := true
 	stopAdmission := func(reason int) {
@@ -81,7 +82,9 @@ func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *P
 		observation.stopAdmission(reason)
 	}
 	collect := func(turn completedTurn) {
-		delete(active, turn.clientId)
+		if active[turn.clientId] == turn.claimOrdinal {
+			delete(active, turn.clientId)
+		}
 		result.Attempted += turn.outcome.summary.Attempted
 		result.Submitted += turn.outcome.summary.Submitted
 		result.Failed += turn.outcome.summary.Failed
@@ -144,19 +147,21 @@ func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *P
 				observation.due(urlDueError, claimElapsed)
 				runErr = errors.Join(runErr, fmt.Errorf("URL probe due claim: %w", err))
 				stopAdmission(urlSchedulerDueError)
-			} else if len(due) > limit {
-				observation.due(urlDueInvalid, claimElapsed)
-				runErr = errors.Join(runErr, fmt.Errorf("URL probe due response exceeds requested limit"))
-				stopAdmission(urlSchedulerInvalidDue)
 			} else {
-				dueResult := urlDuePartial
-				if len(due) == 0 {
-					dueResult = urlDueEmpty
-				} else if len(due) == limit {
-					dueResult = urlDueFull
+				if len(due) > limit {
+					observation.due(urlDueInvalid, claimElapsed)
+					runErr = errors.Join(runErr, fmt.Errorf("URL probe due response exceeds requested limit"))
+					stopAdmission(urlSchedulerInvalidDue)
+				} else {
+					dueResult := urlDuePartial
+					if len(due) == 0 {
+						dueResult = urlDueEmpty
+					} else if len(due) == limit {
+						dueResult = urlDueFull
+					}
+					observation.due(dueResult, claimElapsed)
+					result.Backlog = false
 				}
-				observation.due(dueResult, claimElapsed)
-				result.Backlog = false
 				// The request can span the admission cutoff, and cancellation can
 				// race a successful response. Preserve every valid claim identity
 				// without opening a fresh tunnel on an exhausted owner.
@@ -168,18 +173,34 @@ func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *P
 					stopAdmission(urlSchedulerReserve)
 				}
 				var unstarted []ingest.DueProvider
+				type claimIdentity struct {
+					clientId string
+					ordinal  int64
+				}
+				seen := map[claimIdentity]bool{}
 				for _, provider := range due {
-					if provider.ClientId == "" || active[provider.ClientId] {
-						runErr = errors.Join(runErr, fmt.Errorf("URL probe due response contains an empty or in-flight provider"))
+					identity := claimIdentity{provider.ClientId, provider.ClaimOrdinal}
+					if provider.ClientId == "" || seen[identity] {
+						runErr = errors.Join(runErr, fmt.Errorf("URL probe due response contains an empty or repeated claim"))
 						stopAdmission(urlSchedulerInvalidDue)
 						continue
 					}
-					active[provider.ClientId] = true
+					seen[identity] = true
+					if ordinal, exists := active[provider.ClientId]; exists {
+						runErr = errors.Join(runErr, fmt.Errorf("URL probe due response contains an in-flight provider"))
+						stopAdmission(urlSchedulerInvalidDue)
+						// An exact replay is already owned by the running turn. A
+						// distinct issued ordinal still needs its own completion.
+						if ordinal == provider.ClaimOrdinal {
+							continue
+						}
+					}
 					result.UrlDue++
 					if !admit {
 						unstarted = append(unstarted, provider)
 						continue
 					}
+					active[provider.ClientId] = provider.ClaimOrdinal
 					observation.claim(urlClaimAdmitted, 1)
 					go func() {
 						startedAt := time.Now()
@@ -188,15 +209,12 @@ func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *P
 						outcome := self.runFullBatch(ctx, &turnArgs, func() map[string][]string { return pins },
 							func() *egresshealth.Pool { return pool }, []ingest.DueProvider{provider})
 						urlProbeTurnSeconds.Observe(time.Since(startedAt).Seconds())
-						completed <- completedTurn{clientId: provider.ClientId, outcome: outcome}
+						completed <- completedTurn{clientId: provider.ClientId, claimOrdinal: provider.ClaimOrdinal, outcome: outcome}
 					}()
 				}
 				if len(unstarted) > 0 {
 					observation.enter(urlSchedulerUnstarted)
-					runErr = errors.Join(runErr, self.completeUnstartedUrlClaims(ctx, unstarted, observation))
-					for _, provider := range unstarted {
-						delete(active, provider.ClientId)
-					}
+					runErr = errors.Join(runErr, self.completeUnstartedUrlClaims(ctx, unstarted, args.Full.Concurrency-len(active), observation))
 					result.Backlog = true
 				}
 			}
@@ -222,7 +240,7 @@ func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *P
 // verdict. The original task deadline still bounds this joined publication.
 // A failed acknowledgment is explicit; the existing durable claim expiry is
 // the recovery authority, never an invented successful completion.
-func (self *providerEgressProbePass) completeUnstartedUrlClaims(ctx context.Context, due []ingest.DueProvider, observation *providerUrlProbeSchedulerOwner) error {
+func (self *providerEgressProbePass) completeUnstartedUrlClaims(ctx context.Context, due []ingest.DueProvider, concurrency int, observation *providerUrlProbeSchedulerOwner) error {
 	observation.claim(urlClaimUnstarted, len(due))
 	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), providerEgressControlPlaneTimeout)
 	defer cancel()
@@ -231,33 +249,39 @@ func (self *providerEgressProbePass) completeUnstartedUrlClaims(ctx context.Cont
 		releaseCtx, cancelDeadline = context.WithDeadline(releaseCtx, deadline)
 		defer cancelDeadline()
 	}
-	completed := make(chan error, len(due))
-	for _, provider := range due {
-		go func() {
-			var err error
-			defer func() {
-				// A reporter can raise a datastore error. This owned cleanup
-				// still owes the scheduler a terminal result.
-				if recovered := recover(); recovered != nil {
-					if cause, ok := recovered.(error); ok {
-						err = fmt.Errorf("URL claim completion failed: %w", cause)
-					} else {
-						err = fmt.Errorf("URL claim completion failed with a non-error panic")
-					}
+	complete := func(provider ingest.DueProvider) (err error) {
+		defer func() {
+			// A reporter can raise a datastore error. This owned cleanup
+			// still owes the scheduler a terminal result for every sibling.
+			if recovered := recover(); recovered != nil {
+				if cause, ok := recovered.(error); ok {
+					err = fmt.Errorf("URL claim completion failed: %w", cause)
+				} else {
+					err = fmt.Errorf("URL claim completion failed with a non-error panic")
 				}
-				completed <- err
-			}()
-			if err = releaseCtx.Err(); err != nil {
-				return
 			}
-			if self.fullSink == nil || provider.ClaimOrdinal <= 0 {
-				err = qualityprobe.ErrUrlProbeCompletionUnsupported
-			} else {
-				completionCtx := withProviderEgressClaimCountry(releaseCtx, provider.ClientId, provider.CountryCode)
-				err = self.fullSink.ReportUrlProbeCompletion(completionCtx, qualityprobe.UrlProbeCompletion{
-					ClientId: provider.ClientId, ClaimOrdinal: provider.ClaimOrdinal,
-					CompletedAt: time.Now().UTC(), ProbeFailure: prober.FailureHealthNotRun, AllowPacing: false,
-				})
+		}()
+		if err = releaseCtx.Err(); err != nil {
+			return err
+		}
+		if self.fullSink == nil || provider.ClaimOrdinal <= 0 {
+			return qualityprobe.ErrUrlProbeCompletionUnsupported
+		}
+		completionCtx := withProviderEgressClaimCountry(releaseCtx, provider.ClientId, provider.CountryCode)
+		return self.fullSink.ReportUrlProbeCompletion(completionCtx, qualityprobe.UrlProbeCompletion{
+			ClientId: provider.ClientId, ClaimOrdinal: provider.ClaimOrdinal,
+			CompletedAt: time.Now().UTC(), ProbeFailure: prober.FailureHealthNotRun, AllowPacing: false,
+		})
+	}
+	// A malformed response can exceed the free slots. Reuse a bounded number
+	// of cleanup owners under one shared deadline instead of one goroutine per
+	// returned identity; active measured turns retain their existing slots.
+	workers := min(len(due), max(1, concurrency))
+	completed := make(chan error, workers)
+	for worker := range workers {
+		go func() {
+			for i := worker; i < len(due); i += workers {
+				completed <- complete(due[i])
 			}
 		}()
 	}
