@@ -6699,3 +6699,46 @@ claim of Main recovery. The separate retention candidate removes the extra
 per-Due storage-cleanup checkout only after its bounded global worker lane is
 deployed and observed. Neither change raises pool limits or weakens quota,
 measurement, security, proxy/hosting or financial authority.
+
+### 2026-10-04 13:14 UTC measured throughput and Due pool boundary
+
+Root deployed the qualified keyed close-selector carrier `b7fb7f56`, Taskworker
+version `2026.10.4-close-page-keyed+1060890600`, and the later runtime/metrics receipts
+qualified all eight Taskworkers. The financial admission, asynchronous debit,
+legacy settlement and close retry models remain the preceding release's bytes.
+The 12:48–12:49 census reported 86,045 eligible providers, zero quota-complete
+providers and 257,813 measured runs needed; all eight Quality buckets were zero.
+The same-process 90–106-second throughput windows had zero measured successes,
+717 measured errors and 1,080 local failures. Those counts describe distinct
+process intervals, not one synchronized fleet rate. Root's delta is
+`temp/pg-contention-20261004/root-tw-url-throughput-90600-delta-1248-1249.json`,
+SHA-256 `4cbafd00c849dec7024cadd39deb710860359baf727787c177ffc17fc8e302c8`.
+
+The later 13:04–13:07 pair observed 57 measured successes, 3,240 measured errors
+and 512 `run_not_measured` attempts across eight stable processes. Health and
+attempt submissions were acknowledged, but those counters are not exact
+request joins or distinct durable quota history. Setup failures still earn no
+quota; removing the initial provider probe does not remove actual application
+writer evidence or permit an extra ping. The finite paired reduction is
+`temp/pg-contention-20261004/sol-tw-url-failures-paired-finite-1304-1307.json`,
+SHA-256 `f63b70ce6d5b3117dda9c36d22260ccfb2e0a7fc1627460007dd78bd51e8f54b`.
+
+Four fixed API processes subsequently returned 56 Due calls with 3.175-second
+mean model time. The old second storage-retention transaction consumed
+1.345 seconds on average, mostly acquiring a connection and starting the
+transaction; its SQL averaged 0.007 seconds. These are nested completed-call
+wall times, not CPU or backend-owner proof. The finite reduction is
+`temp/pg-contention-20261004/sol-api-url-due-paired-finite-1312-1314.json`,
+SHA-256 `1585fb4ae16cf4ab105dff7d2dc3592e458c70ece0c9ccb32b4cf2f6a8bd417f`.
+The owning candidate moves seven-day storage cleanup to one bounded durable
+Taskworker lane before removing its second checkout from API Due. Quota,
+security, current completion expiry and claim issuance remain synchronous.
+Deployment must verify the lane first, then measure API and fleet behavior.
+
+Reliability-fill alternatives remain held: the client-first query's sparse
+speedup regressed a cohort with unrelated missing clients from about 137 to
+680 milliseconds and increased dense buffer work. Census aggregate variants
+likewise have no general loaded-control win. These experiments do not justify
+an unconditional query replacement. Root's fresh backlog, exact pool/backend
+owners, sustained accepted-run coverage, global subscriber overlap and Main
+performance remain open; no full-coverage or CPU-recovery claim is made.

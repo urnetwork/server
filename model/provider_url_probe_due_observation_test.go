@@ -60,7 +60,7 @@ func TestUrlDueObservationInvalidArgumentsHaveNoDatabasePhases(t *testing.T) {
 }
 
 // Restore the identical durable fixture before each path. The result and both
-// tables must match, including old-receipt cleanup and the new claim identity.
+// tables must match, including retained old receipts and the new claim identity.
 func TestUrlDueObservationPreservesDatabaseResults(t *testing.T) {
 	for _, priority := range []bool{false, true} {
 		name := "legacy_order"
@@ -122,6 +122,9 @@ func TestUrlDueObservationPreservesDatabaseResults(t *testing.T) {
 				}
 				for phase, sample := range observation.Phases {
 					want := uint64(1)
+					if phase == int(ProviderUrlProbeDueRetentionTransaction) || phase == int(ProviderUrlProbeDueRetentionQuery) {
+						want = 0
+					}
 					if !priority && (phase == int(ProviderUrlProbeDuePromote) || phase == int(ProviderUrlProbeDuePromotePending)) {
 						want = 0
 					}
@@ -129,7 +132,10 @@ func TestUrlDueObservationPreservesDatabaseResults(t *testing.T) {
 						t.Fatalf("phase%d=%+v want count%d", phase, sample, want)
 					}
 				}
-				for _, database := range []server.DbTiming{observation.ClaimDatabase, observation.RetentionDatabase} {
+				if observation.RetentionDatabase != (server.DbTiming{}) {
+					t.Fatal("admission acquired a retention transaction")
+				}
+				for _, database := range []server.DbTiming{observation.ClaimDatabase} {
 					for phase, sample := range database.Phases {
 						want := uint64(1)
 						if phase == int(server.DbTimingRollback) || phase == int(server.DbTimingRetryWait) {
@@ -148,7 +154,7 @@ func TestUrlDueObservationPreservesDatabaseResults(t *testing.T) {
 	}
 }
 
-func TestUrlDueObservationPendingMaintenanceSkipsClaimAndRetainsCleanup(t *testing.T) {
+func TestUrlDueObservationPendingMaintenanceSkipsClaimAndStorageCleanup(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		now := server.NowUtc().Truncate(time.Microsecond)
@@ -165,12 +171,12 @@ func TestUrlDueObservationPendingMaintenanceSkipsClaimAndRetainsCleanup(t *testi
 				t.Fatal("locked maintenance no longer prevents admission")
 			}
 		})
-		for _, phase := range []ProviderUrlProbeDuePhase{ProviderUrlProbeDueExpiry, ProviderUrlProbeDueExpiryPending, ProviderUrlProbeDueRetentionQuery} {
+		for _, phase := range []ProviderUrlProbeDuePhase{ProviderUrlProbeDueExpiry, ProviderUrlProbeDueExpiryPending} {
 			if observation.Phases[phase].Count != 1 {
 				t.Fatalf("pending path lost phase%d", phase)
 			}
 		}
-		for _, phase := range []ProviderUrlProbeDuePhase{ProviderUrlProbeDuePromote, ProviderUrlProbeDuePromotePending, ProviderUrlProbeDueClaimQueryRows} {
+		for _, phase := range []ProviderUrlProbeDuePhase{ProviderUrlProbeDuePromote, ProviderUrlProbeDuePromotePending, ProviderUrlProbeDueClaimQueryRows, ProviderUrlProbeDueRetentionTransaction, ProviderUrlProbeDueRetentionQuery} {
 			if observation.Phases[phase].Count != 0 {
 				t.Fatalf("pending path fabricated phase%d", phase)
 			}
