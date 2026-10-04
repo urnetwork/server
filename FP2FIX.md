@@ -6859,6 +6859,42 @@ throughput improvement or backlog recovery is established by these local gates.
 The separate ordinary-close mixed accounting/deferred-page classification
 remains under investigation.
 
+### 2026-10-04 19:55 UTC integration and live acceptance boundaries
+
+Canonical Main `1d834ace` combines the latest origin ARIN evidence rules with
+the qualified origin-attribution capture work and uniform provider fallback.
+The complete ARIN package passed 78 focused controls; three opt-in offline
+controls remain explicitly skipped. The new provenance artifact has passed
+independent whole-artifact readback, but its Main resource activation and
+current-provider coverage are not yet proved. Its classification fields are
+unchanged from the active v7 artifact; new subscriber catalog approvals require
+a separate artifact build and validation.
+
+The serial concurrent reliability covering-index repair is running. At
+19:53 UTC the CLI had attached 18 of 34 partitions; final native catalog
+validation and the subsequent performance observation are still required.
+The API `65f0232b` and Taskworker `db96d42c` all-block rollout commands completed
+successfully. API fallback carrier `c3bcac1e` passed focused, race, vet and
+both-platform immutable image verification, and its all-block rollout is
+running. Rollout completion alone does not prove current process convergence.
+
+The last qualified quota census remains 18:54:35 UTC: 89,041 of 89,759 providers
+completed ten accepted measured runs, with 718 incomplete and 4,298 runs needed.
+Fresh post-Taskworker-rollout readers completed their HTTP transport, but none
+of eight slots passed the expected runtime identity join. Their empty metric
+maps are unknown, not zero counts or proof that coverage regressed. Preserve
+the failed identity predicates before another measurement. The bounded durable
+quota diagnostic reached its ten-second context deadline; collect a native
+EXPLAIN without ANALYZE before retrying or changing its query budget.
+
+The matched 19:44–19:49 API window qualified eleven unchanged processes.
+Provider selection recorded 29,850 handlers, zero completed, 22,812 canceled
+and 7,038 panic outcomes. Initial picker and search handlers completed quickly.
+The five remaining processes are unknown, and the counters do not identify
+the panic cause. Treat provider selection as an outage boundary until current
+deployed-source measurements and actual successful selection establish recovery;
+lower database or Redis utilization cannot substitute for that proof.
+
 ### 2026-10-04 uniform provider fallback source correction
 
 The deployed API source `4ee64ef3`, current Main and the next `65f0232b` API
