@@ -35,6 +35,13 @@ type validatedAppleTransaction struct {
 	offerType         int64
 	offerIdentifier   string
 	offerDiscountType string
+	// originalTransactionId names the subscription across renewals; an
+	// offer-code binding (apple_offer_code_binding) is keyed on it
+	originalTransactionId string
+	// unboundAccountToken is set when the claims carry no appAccountToken at
+	// all (an offer-code redemption through the App Store redeem sheet or
+	// link). networkId is then zero until the binding resolves it.
+	unboundAccountToken bool
 }
 
 // Returns true only when this call committed a new entitlement. Valid retries
@@ -59,7 +66,7 @@ func ProcessAppleNotification(
 	revocation := notification.NotificationType == "REFUND" || notification.NotificationType == "REVOKE"
 	var transaction *validatedAppleTransaction
 	if notification.TransactionInfo != nil {
-		transaction, err = validateAppleTransaction(notification, allowedProductIds, actionable)
+		transaction, err = validateAppleTransactionBound(ctx, notification, allowedProductIds, actionable)
 		if err != nil {
 			return false, err
 		}
@@ -264,6 +271,23 @@ func validateAppleTransaction(
 	allowedProductIds []string,
 	requireEntitlementFields bool,
 ) (*validatedAppleTransaction, error) {
+	return validateAppleTransactionAccount(notification, allowedProductIds, requireEntitlementFields, false)
+}
+
+// validateAppleTransactionAccount is validateAppleTransaction that, with
+// allowUnboundAccountToken, accepts claims carrying no appAccountToken at all
+// (an offer-code redemption) as long as they name an originalTransactionId.
+// The result is then marked unboundAccountToken with a zero networkId; the
+// caller must resolve the network through the offer-code binding
+// (resolveAppleTransactionNetwork) or the binding rules
+// (appleBindOfferCodeTransaction) before crediting anything. A token that is
+// present but malformed is still invalid.
+func validateAppleTransactionAccount(
+	notification AppleNotificationDecodedPayload,
+	allowedProductIds []string,
+	requireEntitlementFields bool,
+	allowUnboundAccountToken bool,
+) (*validatedAppleTransaction, error) {
 	transactionClaims := notification.TransactionInfo
 	renewalClaims := notification.RenewalInfo
 
@@ -271,9 +295,24 @@ func validateAppleTransaction(
 	if accountToken == "" {
 		accountToken, _ = appleControllerStringClaim(renewalClaims, "appAccountToken")
 	}
-	networkId, err := server.ParseId(accountToken)
-	if err != nil || networkId == (server.Id{}) {
-		return nil, errors.New("invalid App Store account token")
+	originalTransactionId, _ := appleControllerStringClaim(transactionClaims, "originalTransactionId")
+	if originalTransactionId == "" {
+		originalTransactionId, _ = appleControllerStringClaim(renewalClaims, "originalTransactionId")
+	}
+	if len(originalTransactionId) > 128 {
+		return nil, errors.New("invalid App Store original transaction ID")
+	}
+	var networkId server.Id
+	unboundAccountToken := false
+	if accountToken == "" && allowUnboundAccountToken && originalTransactionId != "" {
+		// no token at all: only a binding can name the network
+		unboundAccountToken = true
+	} else {
+		var err error
+		networkId, err = server.ParseId(accountToken)
+		if err != nil || networkId == (server.Id{}) {
+			return nil, errors.New("invalid App Store account token")
+		}
 	}
 	if renewalAccountToken, exists := appleControllerStringClaim(renewalClaims, "appAccountToken"); exists && renewalAccountToken != accountToken {
 		return nil, errors.New("transaction and renewal account tokens do not match")
@@ -296,9 +335,11 @@ func validateAppleTransaction(
 	}
 
 	validated := &validatedAppleTransaction{
-		networkId:     networkId,
-		transactionId: transactionId,
-		productId:     productId,
+		networkId:             networkId,
+		transactionId:         transactionId,
+		productId:             productId,
+		originalTransactionId: originalTransactionId,
+		unboundAccountToken:   unboundAccountToken,
 	}
 	validated.storefront, _ = appleControllerStringClaim(transactionClaims, "storefront")
 	validated.offerType, _ = appleControllerInt64Claim(transactionClaims, "offerType")

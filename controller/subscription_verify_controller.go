@@ -271,6 +271,9 @@ func playLinkedNetworkId(
 
 // ----- apple -----
 
+// appleVerifyNowFunc is the verify endpoint's clock. Tests fix it.
+var appleVerifyNowFunc = server.NowUtc
+
 type VerifyAppleTransactionArgs struct {
 	// SignedTransaction is the StoreKit transaction JWS
 	// (Transaction.jwsRepresentation), verified in api/handlers with the full
@@ -291,6 +294,11 @@ type VerifyAppleTransactionArgs struct {
 // decision table (claims -> status):
 //
 //	validation fails (account token, product, dates, price) -> invalid
+//	no appAccountToken                                      -> the offer-code
+//	                                                           binding rules
+//	                                                           (credited /
+//	                                                           already_credited
+//	                                                           / invalid)
 //	appAccountToken != session network                      -> wrong_network
 //	ledger insert landed                                    -> credited
 //	transaction already in the ledger                       -> already_credited
@@ -306,13 +314,19 @@ func VerifyAppleTransactionClaims(
 	// purchase-date plausibility window; the JWS's own signedDate was already
 	// used by the handler for certificate-chain validity
 	notification := AppleNotificationDecodedPayload{
-		SignedDate:      server.NowUtc().UnixMilli(),
+		SignedDate:      appleVerifyNowFunc().UnixMilli(),
 		TransactionInfo: transactionClaims,
 	}
-	transaction, err := validateAppleTransaction(notification, allowedProductIds, true)
+	transaction, err := validateAppleTransactionAccount(notification, allowedProductIds, true, true)
 	if err != nil {
 		glog.Infof("[sub]verify apple transaction: %s\n", err)
 		return NewVerifyStorePurchaseInvalid(), nil
+	}
+	if transaction.unboundAccountToken {
+		// no appAccountToken: an offer-code redemption, bound only through
+		// the welcome offer this server issued to the session network
+		// (apple_offer_code_binding_controller.go)
+		return verifyAppleOfferCodeTransaction(clientSession.Ctx, transaction, clientSession.ByJwt.NetworkId)
 	}
 
 	if transaction.networkId != clientSession.ByJwt.NetworkId {
