@@ -106,6 +106,13 @@ operators:
 
 `minimum_origin_peers` is the number of RIS peers a subscriber-only route must
 be seen by before it is inferred; it defaults to 10 and must be at least 1.
+For equal-prefix sibling ASNs with exactly the same reviewed subscriber
+identities, visibility uses their highest peer count, without adding counts
+from potentially overlapping peers. Every distinct reviewed identity must
+meet the floor. An unknown or negative-use origin preserves the raw minimum
+and its existing ambiguity or veto. Raw per-ASN observations stay unchanged;
+the audit's `low_visibility_routes` counts use effective identity visibility.
+RPKI still checks every observed ASN independently.
 `origin_country_policy` is optional; its only value withholds an inference
 where the associated GeoLite country is outside every identified operator's
 `countries`. `rpki_sources` accept `rpki-client-json` (rpki-client and
