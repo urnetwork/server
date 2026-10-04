@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -18,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	schnorrkel "github.com/ChainSafe/go-schnorrkel"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -138,6 +141,44 @@ func providerWorkInheritedClose(t testing.TB, source, destination *providerWorkI
 	}
 }
 
+// A closed epoch needs its original prospective consent, including the root
+// attestation and coldkey signature made before that epoch. Only those immutable
+// historical bytes are seeded; the actual payout selector verifies them later.
+func providerWorkInheritedWallet(t testing.TB, ctx context.Context, f *providerWorkWindowFixture, owner payoutartifact.WholeWorkOwner, userId server.Id, index int) payoutartifact.WholeWorkExpectedProvider {
+	t.Helper()
+	key, err := schnorrkel.NewMiniSecretKeyFromRaw([32]byte{byte(190 + index)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement := snprotocol.WalletMappingStatement{Domain: f.authority.Domain, UserId: [16]byte(userId), ClientId: owner.ClientId, NetworkId: owner.NetworkId, Coldkey: key.Public().Encode(), Generation: 1, Nonce: [32]byte{byte(194 + index)}, IssuedAt: f.epoch.StartTime.Add(-10 * time.Minute).Unix(), ExpiresAt: f.epoch.StartTime.Add(-5 * time.Minute).Unix(), FromEpoch: f.epoch.Epoch, ThroughEpoch: f.epoch.Epoch + 1}
+	boundary := snprotocol.ClientKeyEffectiveBoundary{Epoch: f.epoch.Epoch - 1, Block: f.epoch.Start.Block - 1, Hash: [32]byte{189}}
+	if err := snprotocol.SignProspectiveWalletMapping(&statement, boundary, f.cfg.RootKey); err != nil {
+		t.Fatal(err)
+	}
+	message, err := statement.Message()
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature, err := key.ExpandEd25519().Sign(schnorrkel.NewSigningContext([]byte("substrate"), []byte(message)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := snprotocol.WalletMappingConsent{Message: message, Signature: signature.Encode()}
+	_, head, err := snprotocol.VerifyWalletMappingConsent(ctx, original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO wallet_mapping_challenge(nonce,domain_hash,client_id,generation,expires_at,message) VALUES($1,$2,$3,$4,$5,$6)`, statement.Nonce[:], f.domain[:], server.Id(owner.ClientId), statement.Generation, statement.ExpiresAt, message))
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO wallet_mapping_consent(domain_hash,client_id,generation,original_hash,nonce,original,accepted_at) VALUES($1,$2,$3,$4,$5,$6,$7)`, f.domain[:], server.Id(owner.ClientId), statement.Generation, head[:], statement.Nonce[:], raw, time.Unix(statement.IssuedAt+1, 0).UTC()))
+	})
+	return payoutartifact.WholeWorkExpectedProvider{ClientId: owner.ClientId, NetworkId: owner.NetworkId, WalletHeadHash: hex.EncodeToString(head[:]), WalletGeneration: statement.Generation}
+}
+
 // Both generations coexist in the first independently signed roster. The new
 // one holds an actual open contract when the old stream origin is reconciled.
 func newProviderWorkInheritedFixture(t testing.TB) *providerWorkInheritedFixture {
@@ -158,8 +199,8 @@ func newProviderWorkInheritedFixture(t testing.TB) *providerWorkInheritedFixture
 	f.authority.WorkSources = []snprotocol.ProviderWorkSourceAuthority{authority}
 	root := crypto.PubkeyToAddress(f.cfg.RootKey.PublicKey)
 	t.Cleanup(server.Vault.PushSimpleResource("provider_work.yml", []byte(fmt.Sprintf("schema: %s\ndomain_hash: %x\nrequest_public_key: %x\nauthority_signer: %s\nclient_key_root_signer: %s\nattribution_signer: %s\n", ProviderWorkPolicySchema, f.domain, f.authority.RequestPublicKey, root.Hex(), root.Hex(), root.Hex()))))
-	network := server.Id{11}
-	model.Testing_CreateNetwork(ctx, network, "inherited-publisher.example", server.NewId())
+	network, userId := server.Id{11}, server.NewId()
+	model.Testing_CreateNetwork(ctx, network, "inherited-publisher.example", userId)
 	old := make([]*providerWorkInheritedSdk, 3)
 	for index := range old {
 		id := server.Id{byte(index + 1)}
@@ -169,7 +210,7 @@ func newProviderWorkInheritedFixture(t testing.TB) *providerWorkInheritedFixture
 			t.Fatal(err)
 		}
 		old[index] = providerWorkInheritedNewSdk(t, ctx, f, index, 0)
-		f.authority.ExpectedProviders = append(f.authority.ExpectedProviders, payoutartifact.WholeWorkExpectedProvider{ClientId: old[index].owner.ClientId, NetworkId: old[index].owner.NetworkId})
+		f.authority.ExpectedProviders = append(f.authority.ExpectedProviders, providerWorkInheritedWallet(t, ctx, f, old[index].owner, userId, index))
 		providerWorkRetainActualCut(t, f, old[index].client.ContractManager(), "start")
 	}
 	secret := bytes.Repeat([]byte{167}, 32)
