@@ -1,5 +1,14 @@
 # IP database release refresh
 
+Current status (2026-10-04): policy two is selected on Main; earlier inactive
+candidate statements in this document describe the original rollout sequence.
+The active positive catalog is incomplete. See the dated coverage correction
+in [CLASSIFICATION.md](CLASSIFICATION.md) before preparing a successor resource.
+Identified subscriber ISPs now default clean in the absence of additional
+discrimination; explicit negative use and independent risk remain exclusions.
+The global [subscriber-origin command and catalog](SUBSCRIBER-ORIGINS.md)
+implement that policy without treating country rankings as an eligibility list.
+
 The release runner builds and runs this tool natively on macOS or Linux.
 Windows is currently unsupported by its Server dependency: the process log
 scrubber uses Unix file descriptors and descriptor duplication.
@@ -51,19 +60,27 @@ Do not substitute a blanket organization-name heuristic for evidence-backed
 hosting classifications. No production classifier or credentials are bundled
 with the tool.
 
-The complete subscriber/risk proposal is staged in
-`config/main/arindb-quality-v2.candidate.yml`. Active `main/arindb.yml` is
-unchanged and remains the all-release default. Candidate builds must supply the
-candidate path explicitly. Runtime enforcement additionally requires
-`subscriber_quality_policy_version: 2` in `provider.yml`; it defaults off and
-must remain off until coordinated promotion passes the coverage and performance
-review described below.
+Reviewed policy-two subscriber pools can instead use `allocation_scopes` with
+exact `net_handle`, `org_handle` and full source-allocation `prefix` tuples.
+These positive rules cannot contain unscoped selectors. They fail the build
+when their exact authoritative registration changes and do not approve child
+delegations or the owner's unrelated allocations. Use this form when service
+evidence covers only part of a mixed-use operator's holdings.
 
-`quality_policy_version: 2` requires affirmative reviewed subscriber access.
-Unreviewed, uncovered, conflicting, hosting and ambiguous leased use are excluded
-from Quality, with distinct `quality_state` metadata. An allow is not inherited
-by an unreviewed child. Rules must explicitly supply `non_quality`; omission is
-an error. The optional `risk_category` (`virtual_isp`, `proxy`, `vpn`, `tor`)
+The selected `main/arindb.yml` is the all-release default. Successor builds must
+supply their reviewed candidate paths explicitly; they do not change that
+selection. Runtime enforcement also requires
+`subscriber_quality_policy_version: 2` in `provider.yml`, selected on Main at
+the dated checkpoint above. New resources still require the coverage and
+performance review described below.
+
+The registration builder requires affirmative reviewed subscriber access and
+does not inherit an allow to an unreviewed child. The subsequent global origin
+augmentation accepts identified subscriber-ISP inference under the latest user
+policy. Missing child use alone is not an exclusion; unidentified, conflicting,
+hosting and explicit other-use evidence remains excluded with distinct
+`quality_state` metadata. Registration rules must explicitly supply `non_quality`;
+omission is an error. The optional `risk_category` (`virtual_isp`, `proxy`, `vpn`, `tor`)
 adds an independent hard exclusion whose positive evidence cannot be cleared by
 an access or country override. See [the research and rollout requirements](CLASSIFICATION.md).
 

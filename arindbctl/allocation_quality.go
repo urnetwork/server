@@ -82,8 +82,9 @@ func (rules classificationRules) allocationQualityParent(allocation arinAllocati
 	return arinAllocationQualityParent{}, nil
 }
 
-func (rules classificationRules) classifyAllocation(direct []arinOrganization, parent arinAllocationQualityParent, address netip.Addr) arinClassification {
+func (rules classificationRules) classifyAllocation(allocation arinAllocation, direct []arinOrganization, parent arinAllocationQualityParent, address netip.Addr) arinClassification {
 	classification := rules.classify(direct, address)
+	classification = rules.classifyAllocationScope(allocation, classification)
 	if classification.ruleName != "" || parent.network == "" {
 		return classification
 	}

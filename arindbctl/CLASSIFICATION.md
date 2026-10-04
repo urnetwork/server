@@ -1,5 +1,87 @@
 # Reviewed ARIN classification and cutover
 
+## 2026-10-04 subscriber coverage correction
+
+The Root-owned Main receipts supersede the historical inactive-candidate
+statements below: policy two was selected at 03:57 UTC, and the 04:28 UTC native
+readback found zero Quality supply on all eight Taskworkers. The selected
+catalog's affirmative scope was only Google Fiber and Webpass. Successful
+policy enforcement does not establish adequate subscriber coverage.
+
+The later 2026-10-04 user policy supersedes the original direct-allocation-only
+requirement: an **identified subscriber ISP defaults clean when there is no
+additional discriminator**. Missing child-registration or service-purpose detail
+alone does not exclude an identified ISP. Explicit hosting, transit, proxy,
+virtual-ISP, conflicting-use and independent risk findings remain effective.
+An unidentified origin is a review backlog, not an identified subscriber ISP.
+
+Quality must support subscriber access globally, including the long tail of
+operators. Research up to 30 actual subscriber operators per state/province
+within every country. Deduplicate entities and record actual service footprints,
+ranking dates, metrics, ties and incomplete coverage; a national ranking does
+not establish a regional rank or footprint. Country/provider coverage and
+official operator rankings prioritize research; neither is an eligibility
+cutoff. Record fewer than 30 where fewer operators are evidenced, and mark
+unverified ranks and footprints explicitly.
+
+The `augment-subscribers` command joins reviewed operator identity/use evidence
+to a fresh RIPE RIS origin-prefix snapshot across all RIRs. RIS establishes
+observed routing origin, not subscriber use or market rank. The resulting
+approvals carry `subscriber_evidence_kind: isp_inferred`, preserve registration
+metadata and cannot clear existing exclusions, conflicts or independent risk.
+All origin routes participate: a narrower unidentified origin blocks a broader
+ISP inference; mixed known/unknown origins are ambiguous; an explicit negative
+origin wins. See [the catalog contract](SUBSCRIBER-ORIGINS.md) for reproducible
+inputs, audit fields, the clean-default distinction and remaining limits. ARIN
+referrals still cannot manufacture foreign customer registration authority;
+global inference uses the separate reviewed identity and routing evidence.
+
+Policy-two rules may now use `allocation_scopes`, each containing an exact
+`net_handle`, `org_handle` and canonical full allocation `prefix`. Such a rule
+must explicitly approve subscriber access and cannot also contain unscoped
+organization, name or prefix selectors. The builder requires every tuple in
+the authoritative input and rejects missing, transferred, resized or referral
+records. The scope applies only to that allocation: separately registered
+children, even children with the same organization, need their own review for
+this exact-allocation approval. The separate identified-ISP inference can
+qualify an unreviewed child under the later user policy above.
+Incomparable-owner disagreement and direct-use contradictions remain excluded;
+geographic and proxy/virtual-ISP risk remain independent vetoes. Exact-key
+indexes avoid multiplying bulk classification work by catalog length.
+
+The first candidate using this mechanism intersects Comcast's official
+[dynamic-range publication](https://spa.xfinity.com/md/faqs/en/postmaster/comcast-dynamic-ip-ranges.md)
+and [residential-use statement](https://spa.xfinity.com/md/faqs/en/postmaster/comcast-mail-errors.md)
+with current Comcast registration blocks. It omits explicit VoIP registrations.
+It does not approve the whole Comcast organization or apply a global prefix
+override to unrelated reassignments. Source snapshots, retrieval clocks and
+hashes must accompany the review. Rebuild against the complete pinned registry,
+compare every changed output leaf and retained exclusion, then measure fresh
+actual-provider overlap before Root publishes an increment. Registry address
+weights and operator market shares are not provider supply. This increment
+does not establish worldwide coverage or resolve Quality zero by itself.
+
+The synthetic allocation-scope controls cover all addresses across a subscriber
+pool, unrelated corporate use, unknown and same-owner children, inherited proxy
+risk, geographic mismatch and incomparable registrations. Changed owner,
+network, block size or registry authority invalidates build approval. Candidate
+activation still requires the source-bound resource, fresh loaded-epoch
+lookups, current-provider shadow, rollup and a complete native-index generation.
+
+The complete pinned-source candidate finished at 06:02 UTC. Its full MMDB
+readback compared both directions across 6,948,793 leaves: exactly 1,628 leaves
+changed from unknown to subscriber, all under the reviewed Comcast allocation
+rule. Total subscriber leaves increased from 493 to 2,121; every other record
+field, including risk, stayed equal. The resource SHA-256 is
+`8426869bd98e06711858bc6dd0eba3685e04eea032bcadbdcb56f471c057a2a0`.
+This is an offline evidence check, not a provider count or a Main activation
+receipt. Global inference and catalog coverage are separate successor work.
+
+## Original policy-two review history
+
+The following records the original stricter review and rollout. The current
+policy and Main selection status are the dated correction above.
+
 The initial `config/main/arindb.yml` rules were reviewed on 2026-09-27. They
 classify named cloud/VPS/hosting owners as `non_quality`, not as geographic
 `risk`. These rules are a reviewed initial scope, not a comprehensive provider

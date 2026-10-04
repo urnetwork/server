@@ -1,5 +1,36 @@
 # FindProviders2 supply and quality-probe repair plan
 
+Current ARIN status, 2026-10-04: Root's Main receipts record policy two selected
+at 03:57 UTC and zero native Quality supply across eight Taskworkers at 04:28
+UTC. Earlier inactive-candidate statements below are historical. The subscriber
+contract remains in force; expanding identified global subscriber coverage is
+required to repair this supply loss. A source patch or catalog prefix count is
+not evidence that actual provider supply has recovered.
+
+Latest subscriber policy, 2026-10-04: an identified residential or business
+subscriber ISP defaults clean when no additional discriminator is available.
+Missing customer-registration or service-purpose information alone is not a
+negative. Explicit hosting, transit, proxy, virtual-ISP and conflicting-use
+evidence still excludes Quality; independent risk still excludes all public
+buckets. Unidentified networks remain a review backlog. Research up to 30 real
+subscriber operators per state/province in every country, with source-backed
+service footprints and ranking provenance; unknown ranks or fewer evidenced
+operators must remain explicit. This supersedes the earlier direct-positive-only
+requirement, not the health, risk or provider freshness gates.
+
+The isolated `augment-subscribers` builder implements this policy by joining
+reviewed operator identities with fresh global RIPE RIS origin-prefix evidence.
+Its new approvals are explicitly tagged `isp_inferred`; existing exclusion and
+risk discriminators survive. A missing child use alone no longer rejects an
+identified ISP. Focused and full builder tests, race tests, vet and an independent
+qualified-6800 gate passed. The complete preceding Comcast allocation candidate
+also built and passed full two-direction MMDB comparison: 1,628 additional
+subscriber leaves with all other fields unchanged. Neither result establishes
+Main provider overlap, adequate worldwide coverage or recovered native Quality.
+Source and catalog details are in
+[the classification correction](arindbctl/CLASSIFICATION.md) and
+[the origin catalog contract](arindbctl/SUBSCRIBER-ORIGINS.md).
+
 Latest user override, 2026-09-29: each eligible provider needs **ten total
 accepted measured URL runs (success plus failure) in the rolling four hours**.
 A completed turn with no accepted measured URL result does **not** count.
@@ -20,15 +51,15 @@ provider binaries support it.
 
 ## Product contract
 
-The later subscriber-policy requirement, reviewed 2026-10-01 and reaffirmed
-2026-10-02, requires affirmative residential-subscriber or business-subscriber
-evidence for Quality. Unknown, ambiguous, hosted and proxy/virtual-ISP use cannot
-qualify. Verified ISP-branded proxy infrastructure also receives an independent
+The subscriber-policy requirement, updated 2026-10-04, accepts reviewed direct
+subscriber evidence or identified subscriber-ISP inference with no additional
+negative discriminator. Unidentified, conflicting, hosted and proxy/virtual-ISP
+use cannot qualify. Verified ISP-branded proxy infrastructure also receives an independent
 risk exclusion; a legitimate access reseller or MVNO is not a proxy merely
 because it lacks last-mile ownership. These requirements supersede the legacy
-default-allow Quality behavior. Policy two remains a candidate until
-reviewed subscriber coverage, fresh provider shadow losses and operator supply
-criteria pass; no source edit or resource build establishes activation.
+default-allow Quality behavior. Policy two is selected on Main; its expanded
+catalogs require reviewed subscriber coverage, fresh provider shadow losses and
+operator supply checks. No source edit or resource build establishes activation.
 
 The index, the probe due queue, and the monitor must use the **same base
 eligibility facts** for an active, connected, valid, publicly reachable provider.
@@ -50,7 +81,7 @@ reclassifying the fleet.
 | No ARIN risk exception | Required | Required | Required |
 | No probe security exception | Required | Required | Required |
 | URL success ratio ≥ 0.8 | Required | Required | Not required |
-| Affirmative subscriber evidence and no ARIN quality exception | Required under policy two | Not required | Not required |
+| Direct or identified-ISP subscriber evidence and no quality exception | Required under policy two | Not required | Not required |
 
 This matrix is the bucket admission contract. Probe admission has a different
 purpose: every provider passing reliability and the ARIN **risk** gate is
