@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -35,8 +36,17 @@ const (
 // address-list: one address or prefix per line. tor-exit-addresses: the
 // TorDNSEL export, whose ExitAddress lines are measured egress addresses.
 // rfc8805-geofeed: operator self-published CSV whose first column is a prefix,
-// as used by relay/VPN egress publications.
-var addressRiskFormats = []string{"address-list", "tor-exit-addresses", "rfc8805-geofeed"}
+// as used by relay/VPN egress publications. The JSON formats are VPN
+// operators' own public server lists; on 2026-10-04 they named 10,861 server
+// addresses, 26 of which sat inside identified access ISPs (NordVPN in
+// Versatel and BT, Windscribe in LG U+ and SK Broadband).
+var addressRiskFormats = []string{"address-list", "tor-exit-addresses", "rfc8805-geofeed", "mullvad-relays-json", "nordvpn-servers-json", "pia-servers-json", "windscribe-serverlist-json"}
+
+// Formats describing operator-published ranges or third-party APIs skip
+// non-global entries instead of failing the publication.
+func addressRiskFormatSkipsNonGlobal(format string) bool {
+	return format != "address-list" && format != "tor-exit-addresses"
+}
 
 func addressRiskEntryText(format string, line string) (string, bool) {
 	switch format {
@@ -54,6 +64,91 @@ func addressRiskEntryText(format string, line string) (string, bool) {
 	}
 }
 
+// Server addresses from one VPN operator's JSON server list.
+func readVpnServerAddresses(format string, reader io.Reader) ([]string, error) {
+	addresses := []string{}
+	switch format {
+	case "mullvad-relays-json":
+		var relays []struct {
+			Ipv4 string `json:"ipv4_addr_in"`
+			Ipv6 string `json:"ipv6_addr_in"`
+		}
+		if err := json.NewDecoder(reader).Decode(&relays); err != nil {
+			return nil, errors.New("Mullvad relay list is malformed")
+		}
+		for _, relay := range relays {
+			addresses = append(addresses, relay.Ipv4, relay.Ipv6)
+		}
+	case "nordvpn-servers-json":
+		var servers []struct {
+			Station     string `json:"station"`
+			Ipv6Station string `json:"ipv6_station"`
+			Ips         []struct {
+				Ip struct {
+					Ip string `json:"ip"`
+				} `json:"ip"`
+			} `json:"ips"`
+		}
+		if err := json.NewDecoder(reader).Decode(&servers); err != nil {
+			return nil, errors.New("NordVPN server list is malformed")
+		}
+		for _, server := range servers {
+			addresses = append(addresses, server.Station, server.Ipv6Station)
+			for _, ip := range server.Ips {
+				addresses = append(addresses, ip.Ip.Ip)
+			}
+		}
+	case "pia-servers-json":
+		// The list is one JSON line followed by its signature.
+		line, err := bufio.NewReaderSize(reader, 64*1024).ReadString('\n')
+		if err != nil && err != io.EOF {
+			return nil, errors.New("PIA server list is unreadable")
+		}
+		var document struct {
+			Regions []struct {
+				Servers map[string][]struct {
+					Ip string `json:"ip"`
+				} `json:"servers"`
+			} `json:"regions"`
+		}
+		if err := json.Unmarshal([]byte(line), &document); err != nil || len(document.Regions) == 0 {
+			return nil, errors.New("PIA server list is malformed")
+		}
+		for _, region := range document.Regions {
+			for _, servers := range region.Servers {
+				for _, server := range servers {
+					addresses = append(addresses, server.Ip)
+				}
+			}
+		}
+	case "windscribe-serverlist-json":
+		var document struct {
+			Data []struct {
+				Groups []struct {
+					Nodes []struct {
+						Ip  string `json:"ip"`
+						Ip2 string `json:"ip2"`
+						Ip3 string `json:"ip3"`
+					} `json:"nodes"`
+				} `json:"groups"`
+			} `json:"data"`
+		}
+		if err := json.NewDecoder(reader).Decode(&document); err != nil || len(document.Data) == 0 {
+			return nil, errors.New("Windscribe server list is malformed")
+		}
+		for _, location := range document.Data {
+			for _, group := range location.Groups {
+				for _, node := range group.Nodes {
+					addresses = append(addresses, node.Ip, node.Ip2, node.Ip3)
+				}
+			}
+		}
+	default:
+		return nil, errors.New("unsupported VPN server list format")
+	}
+	return addresses, nil
+}
+
 // Comments and blank lines are skipped; IPv4 aliases inside IPv6 are rejected
 // rather than silently remapped. Gzip input is accepted and bounded.
 func readAddressRiskList(ctx context.Context, format string, raw io.Reader) ([]netip.Prefix, error) {
@@ -61,44 +156,72 @@ func readAddressRiskList(ctx context.Context, format string, raw io.Reader) ([]n
 	if err != nil {
 		return nil, err
 	}
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 4096), 4096)
 	entries := []netip.Prefix{}
 	seen := map[netip.Prefix]bool{}
-	for scanner.Scan() {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	add := func(text string) error {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return nil
 		}
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line, ok := addressRiskEntryText(format, line)
-		if !ok {
-			continue
-		}
-		prefix, err := netip.ParsePrefix(line)
+		prefix, err := netip.ParsePrefix(text)
 		if err != nil {
-			address, addressErr := netip.ParseAddr(line)
+			address, addressErr := netip.ParseAddr(text)
 			if addressErr != nil {
-				return nil, errors.New("address risk list has a malformed entry")
+				return errors.New("address risk list has a malformed entry")
 			}
 			prefix = netip.PrefixFrom(address, address.BitLen())
 		}
+		if addressRiskFormatSkipsNonGlobal(format) {
+			if nonGlobalPrefix(prefix.Masked()) {
+				return nil
+			}
+			prefix = prefix.Masked()
+		}
 		if prefix != prefix.Masked() || prefix.Bits() == 0 || prefix.Addr().Is4In6() || prefix.Addr().IsUnspecified() || subscriberOriginAliasesIPv4(prefix) {
-			return nil, errors.New("address risk list entry is not a canonical native network")
+			return errors.New("address risk list entry is not a canonical native network")
 		}
 		if seen[prefix] {
-			continue
+			return nil
 		}
 		seen[prefix] = true
 		entries = append(entries, prefix)
 		if len(entries) > maxAddressRiskEntries {
-			return nil, errors.New("address risk list exceeds its entry bound")
+			return errors.New("address risk list exceeds its entry bound")
 		}
+		return nil
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, errors.New("address risk list is truncated or unreadable")
+	if strings.HasSuffix(format, "-json") {
+		addresses, err := readVpnServerAddresses(format, reader)
+		if err != nil {
+			return nil, err
+		}
+		for _, address := range addresses {
+			if err := add(address); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 4096), 4096)
+		for scanner.Scan() {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			line, ok := addressRiskEntryText(format, line)
+			if !ok {
+				continue
+			}
+			if err := add(line); err != nil {
+				return nil, err
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			return nil, errors.New("address risk list is truncated or unreadable")
+		}
 	}
 	if len(entries) == 0 {
 		return nil, errors.New("address risk list has no entries")

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -24,6 +26,7 @@ type registrySource struct {
 
 const (
 	registryFormatNroDelegatedStats = "nro-delegated-stats"
+	registryFormatCaidaAs2org       = "caida-as2org-jsonl"
 	maxRegistryDecompressedBytes    = 256 << 20
 	maxRegistryAsnRecords           = 1 << 20
 )
@@ -31,6 +34,8 @@ const (
 type registryHolders struct {
 	holderByASN  map[uint32]string
 	asnsByHolder map[string][]uint32
+	caidaByASN   map[uint32]string
+	asnsByCaida  map[string][]uint32
 	records      int
 }
 
@@ -110,6 +115,76 @@ func readNroDelegatedStats(ctx context.Context, raw io.Reader, into *registryHol
 	return nil
 }
 
+// CAIDA's AS2Org groups ASNs by WHOIS organization across all five RIRs; its
+// organization ids are globally unique, unlike delegated-statistics holders.
+// https://publicdata.caida.org/datasets/as-organizations/README.txt
+func readCaidaAs2org(ctx context.Context, raw io.Reader, into *registryHolders) error {
+	reader, err := openBoundedEvidenceReader(raw, maxRegistryDecompressedBytes)
+	if err != nil {
+		return err
+	}
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64*1024), 1<<20)
+	rows := 0
+	for scanner.Scan() {
+		if rows%4096 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var entry struct {
+			Type           string `json:"type"`
+			ASN            string `json:"asn"`
+			OrganizationId string `json:"organizationId"`
+		}
+		if err := json.Unmarshal(line, &entry); err != nil {
+			return errors.New("CAIDA AS2Org line is malformed")
+		}
+		if entry.Type != "ASN" {
+			continue
+		}
+		asn, err := strconv.ParseUint(entry.ASN, 10, 32)
+		if err != nil || asn == 0 || strings.TrimSpace(entry.OrganizationId) == "" {
+			return errors.New("CAIDA AS2Org ASN line lacks its ASN or organization")
+		}
+		if err := into.addCaida("caida/"+entry.OrganizationId, uint32(asn)); err != nil {
+			return err
+		}
+		rows++
+	}
+	if err := scanner.Err(); err != nil {
+		return errors.New("CAIDA AS2Org is truncated or unreadable")
+	}
+	if rows == 0 {
+		return errors.New("CAIDA AS2Org contains no ASN lines")
+	}
+	return nil
+}
+
+// A second grouping beside the registry holder; an ASN may carry both.
+func (self *registryHolders) addCaida(holder string, asn uint32) error {
+	if self.caidaByASN == nil {
+		self.caidaByASN, self.asnsByCaida = map[uint32]string{}, map[string][]uint32{}
+	}
+	if existing, ok := self.caidaByASN[asn]; ok {
+		if existing != holder {
+			return errors.New("CAIDA AS2Org assigns one ASN to two organizations")
+		}
+		return nil
+	}
+	self.caidaByASN[asn] = holder
+	self.asnsByCaida[holder] = append(self.asnsByCaida[holder], asn)
+	self.records++
+	if self.records > 2*maxRegistryAsnRecords {
+		return errors.New("registry groupings exceed their ASN record bound")
+	}
+	return nil
+}
+
 func loadRegistryHolders(ctx context.Context, catalogPath string, sources []registrySource) (*registryHolders, error) {
 	if len(sources) == 0 {
 		return nil, nil
@@ -126,10 +201,14 @@ func loadRegistryHolders(ctx context.Context, catalogPath string, sources []regi
 			return nil, err
 		}
 		parseErr := func() error {
-			if source.Format != registryFormatNroDelegatedStats {
+			switch source.Format {
+			case registryFormatNroDelegatedStats:
+				return readNroDelegatedStats(ctx, f, holders)
+			case registryFormatCaidaAs2org:
+				return readCaidaAs2org(ctx, f, holders)
+			default:
 				return errors.New("unsupported registry statistics format")
 			}
-			return readNroDelegatedStats(ctx, f, holders)
 		}()
 		closeErr := f.Close()
 		if parseErr != nil {
@@ -149,13 +228,18 @@ func (self *registryHolders) siblings(asns []uint32) []uint32 {
 	}
 	siblings := []uint32{}
 	for _, asn := range asns {
-		holder, ok := self.holderByASN[asn]
-		if !ok {
-			continue
+		groups := [][]uint32{}
+		if holder, ok := self.holderByASN[asn]; ok {
+			groups = append(groups, self.asnsByHolder[holder])
 		}
-		for _, sibling := range self.asnsByHolder[holder] {
-			if !slices.Contains(asns, sibling) && !slices.Contains(siblings, sibling) {
-				siblings = append(siblings, sibling)
+		if organization, ok := self.caidaByASN[asn]; ok {
+			groups = append(groups, self.asnsByCaida[organization])
+		}
+		for _, group := range groups {
+			for _, sibling := range group {
+				if !slices.Contains(asns, sibling) && !slices.Contains(siblings, sibling) {
+					siblings = append(siblings, sibling)
+				}
 			}
 		}
 	}
@@ -171,6 +255,9 @@ func (self *registryHolders) holdersOf(asns []uint32) []string {
 	for _, asn := range asns {
 		if holder, ok := self.holderByASN[asn]; ok && !slices.Contains(holders, holder) {
 			holders = append(holders, holder)
+		}
+		if organization, ok := self.caidaByASN[asn]; ok && !slices.Contains(holders, organization) {
+			holders = append(holders, organization)
 		}
 	}
 	slices.Sort(holders)

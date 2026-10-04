@@ -67,6 +67,24 @@ registry_sources:
     observed_at: 2026-10-04T16:00:00Z
     expires_at: 2026-10-06T16:00:00Z
     format: nro-delegated-stats
+hosting_prefix_sources:
+  - id: aws-ec2-20261004
+    url: https://ip-ranges.amazonaws.com/ip-ranges.json
+    file: sources/aws-ip-ranges.json.gz
+    sha256: REPLACE_WITH_EXACT_64_CHARACTER_SHA256
+    observed_at: 2026-10-04T16:00:00Z
+    expires_at: 2026-10-06T16:00:00Z
+    format: aws-ip-ranges-json
+    services: [EC2]
+    reason: AWS-published EC2 ranges, including Wavelength zones inside carrier networks
+label_sources:
+  - id: bgp-tools-asns-20261004
+    url: https://bgp.tools/asns.csv
+    file: sources/bgp-tools-asns.csv.gz
+    sha256: REPLACE_WITH_EXACT_64_CHARACTER_SHA256
+    observed_at: 2026-10-04T16:00:00Z
+    expires_at: 2026-10-06T16:00:00Z
+    format: bgp-tools-asns-csv
 address_risk_sources:
   - id: tor-exit-addresses-20261004
     url: https://check.torproject.org/exit-addresses
@@ -98,13 +116,34 @@ accept `tor-exit-addresses` (TorDNSEL `ExitAddress` lines),
 `rfc8805-geofeed` (first CSV column) and `address-list` (one address or prefix
 per line), each with one reviewed category among `tor`, `proxy`, `vpn` and
 `virtual_isp` and a reason. `registry_sources` accept the NRO extended
-delegated statistics (`nro-delegated-stats`); only the audit reads them. Every
+delegated statistics (`nro-delegated-stats`); only the audit reads them.
+`hosting_prefix_sources` accept `aws-ip-ranges-json` and
+`azure-service-tags-json`, each with a required `services` selection,
+`gcp-cloud-json`, `oracle-public-ip-ranges-json` and `rfc8805-geofeed`, each
+with a reason; non-global entries are skipped and counted.
+`registry_assignment_sources` accept `rpsl` dumps (RIPE split files, APNIC
+split files, the AFRINIC database), gzip or plain, bounded to 16 GiB
+decompressed. `registry_sources` also accept CAIDA's `caida-as2org-jsonl`.
+`address_risk_sources` also accept the VPN operators' own lists:
+`mullvad-relays-json`, `nordvpn-servers-json`, `pia-servers-json` and
+`windscribe-serverlist-json`. `label_sources` accept `bgp-tools-asns-csv`,
+`bgp-tools-tag-csv` with its `tag`, `apnic-aspop-csv`,
+`asdb-categorized-csv`, `ipverse-as-json`, `linnaeus-predictions-csv`,
+`linnaeus-labels-csv` (ground truth) and `linnaeus-splits-csv`; only the audit
+reads them. Pinned subscriber evidence may be up to 1 GiB per stored file. Every
 snapshot may be gzip-compressed; the pinned file is hashed as stored, and its
 freshness window is at most 48 hours. List every sibling ASN of one operator
 under the same operator ID; the audit's merge candidates show where that was
 missed.
 
-## Refreshing evidence
+## Updating and refreshing evidence
+
+The release runs `arindbctl update --subscriber-catalog catalog.yml`, which
+pins every evidence family below best effort, audits, augments and validates
+in one bundle; see [ARINDB.md](ARINDB.md). Keep the reviewed catalog at
+`config/<env>/arindb-subscribers/catalog.yml` so the runner finds it. The
+strict command below pins evidence for a manual revision and fails on any
+source.
 
 ```sh
 arindbctl refresh-subscriber-evidence \
@@ -120,9 +159,20 @@ same reader the build uses, stores the JSON and statistics gzipped under
 visibility floor and country policy and the freshly pinned stanzas. RIS
 observation times are the dumps' own generation headers; the others are the
 fetch time. Without `--rules` it writes an `evidence.yml` fragment instead.
-`--relay-geofeeds` additionally pins the Apple Private Relay and Cloudflare
-egress geofeeds as `vpn` lists; include them only after reviewing that
-category. The written file is reloaded and rehashed before publication, and
+`--registry-assignments` pins the RIPE inetnum and inet6num split files, the
+APNIC inetnum and inet6num files and the AFRINIC database, stored as
+published. `--vpn-servers` pins the Mullvad, NordVPN, PIA and Windscribe
+server lists. CAIDA AS2Org is always pinned beside the NRO statistics.
+`--hosting-prefixes` pins the AWS EC2, Google Cloud, AzureCloud, Oracle,
+DigitalOcean, Linode and Vultr publications; the Azure file is found through
+its stable download page, and only a `download.microsoft.com` link is
+accepted. `--label-sources` pins the bgp.tools ASN list and seven tag lists
+(with a descriptive User-Agent, as bgp.tools requires), the worldwide APNIC
+user estimates, the current ASdb release, ipverse's metadata, and Linnaeus's
+predictions, hand labels and splits from the commit that published release
+202506. `--relay-geofeeds` additionally pins the Apple Private Relay and
+Cloudflare egress geofeeds as `vpn` lists; include them only after reviewing
+that category. The written file is reloaded and rehashed before publication, and
 the manifest records every snapshot hash and the fetch time.
 
 Each operator needs a unique stable ID, reviewed name, distinct public ASNs,
@@ -176,6 +226,8 @@ for an identified ISP. Native IPv6 outside those aliases remains supported.
 | Subscriber identity seen by fewer peers than the floor, without an identically originated visible aggregate | Unknown, withheld `insufficient-origin-visibility` |
 | Subscriber identity whose origin is RPKI-invalid, without a valid identically originated aggregate | Unknown, withheld `rpki-invalid-origin` |
 | Inferred subscriber whose GeoLite country is outside the operators' reviewed countries | Unknown at that cell, withheld `outside-reviewed-countries` |
+| Inferred approval inside a most-specific RIR assignment named for hosting | Unknown at that assignment, withheld `registry-hosting-assignment` |
+| Prefix in an operator-published cloud list | Excluded, or ambiguous over a direct reviewed approval; no risk |
 | Exact address on a reviewed Tor, proxy, VPN or virtual-ISP list | Excluded with independent network risk |
 
 A withheld decision records the identity for review and never changes the base
@@ -225,7 +277,13 @@ source it adds each operator's registry holder ids, sibling ASNs that are
 unreviewed or listed under another operator, and `operator_merge_candidates`:
 pairs sharing a holder, and pairs where one operator's routes are
 more-specifics under the other's aggregates, with how many of those sit below
-the visibility floor. The report also lists, per associated country, the
+the visibility floor, and each operator's share of routed IPv4 space under
+hosting-named registry assignments. With label sources it adds each operator's
+independent sources, verdict and `corroborated` flag, a verdict tally by use,
+`label_source_quality` and `catalog_ground_truth` when the Linnaeus hand labels
+are present, and `unreviewed_eyeball_queue_by_country`, which ranks unreviewed
+ASNs with an independent eyeball signal by APNIC users and flags contrary
+signals. The report also lists, per associated country, the
 thirty unreviewed origin ASNs with the most routed IPv4 space. That queue is prioritization by address weight, which
 over-represents hosting and transit; it is not a subscriber ranking and never
 an approval.
