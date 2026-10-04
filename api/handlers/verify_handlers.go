@@ -67,6 +67,12 @@ func verifyEvidenceArgs(r *http.Request) (*controller.GetVerifyEvidenceArgs, err
 			return nil, err
 		}
 	}
+	if raw := r.URL.Query().Get("originals"); raw != "" {
+		args.IncludeOriginals, err = strconv.ParseBool(raw)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return args, nil
 }
 

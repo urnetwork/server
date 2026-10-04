@@ -1038,9 +1038,10 @@ type GetVerifyKeysResult struct {
 }
 
 type GetVerifyEvidenceArgs struct {
-	From  time.Time
-	To    time.Time
-	Limit int
+	From             time.Time
+	To               time.Time
+	Limit            int
+	IncludeOriginals bool
 }
 
 type PublicVerifyStatsRow struct {
@@ -1084,7 +1085,8 @@ type GetVerifyProofsResult struct {
 	PolicyHash          string                            `json:"policy_hash"`
 	Rows                []*PublicVerifyProofRow           `json:"rows"`
 	OriginalTransitions []*model.VerifyOriginalTransition `json:"original_transitions,omitempty"`
-	OriginalCoverage    string                            `json:"original_coverage"`
+	OriginalCoverage    string                            `json:"original_coverage,omitempty"`
+	OriginalTruncated   bool                              `json:"original_truncated,omitempty"`
 }
 
 func verifyEvidenceRange(args *GetVerifyEvidenceArgs, defaultLimit, maxLimit int) (time.Time, time.Time, int, error) {
@@ -1150,8 +1152,17 @@ func GetVerifyProofs(args *GetVerifyEvidenceArgs, clientSession *session.ClientS
 	if err != nil {
 		return nil, err
 	}
-	result := &GetVerifyProofsResult{Schema: "urnetwork-verify-proof-index-v1", OriginalCoverage: "operator_index_only"}
-	result.OriginalTransitions = model.ListVerifyOriginals(clientSession.Ctx, from, to, limit)
+	result := &GetVerifyProofsResult{Schema: "urnetwork-verify-proof-index-v1"}
+	includeOriginals := args != nil && args.IncludeOriginals
+	if includeOriginals {
+		limit = min(limit, 256)
+		result.OriginalCoverage = "operator_index_only"
+		result.OriginalTransitions = model.ListVerifyOriginals(clientSession.Ctx, from, to, limit+1)
+		if len(result.OriginalTransitions) > limit {
+			result.OriginalTruncated = true
+			result.OriginalTransitions = result.OriginalTransitions[:limit]
+		}
+	}
 	if cfg := stConfig(); cfg != nil {
 		result.Profile = cfg.Profile
 		result.PolicyHash = fmt.Sprintf("0x%x", cfg.PolicyHash)
@@ -1161,12 +1172,16 @@ func GetVerifyProofs(args *GetVerifyEvidenceArgs, clientSession *session.ClientS
 		if !json.Valid(hops) {
 			return nil, fmt.Errorf("stored verify proof %s has invalid hops JSON", row.TrailId)
 		}
+		var originalState []byte
+		if includeOriginals {
+			originalState = row.OriginalState
+		}
 		result.Rows = append(result.Rows, &PublicVerifyProofRow{
 			TrailId: row.TrailId, Vpk: row.Vpk, ServerKeyId: row.ServerKeyId,
 			ServerNonce: row.ServerNonce, Depth: row.Depth, Status: row.Status, Hops: hops,
 			FinalSig: row.FinalSig, VerifierSig: row.VerifierSig,
 			CreateTime: row.CreateTime.UTC(), CompleteTime: row.CompleteTime,
-			OriginalState: row.OriginalState,
+			OriginalState: originalState,
 		})
 	}
 	return result, nil

@@ -210,3 +210,30 @@ func TestVerifyOriginalOutboxRecoversUnpublishedSeed(t *testing.T) {
 		}
 	})
 }
+
+// Replaying a publication after a lost response cannot increment exposure twice.
+func TestVerifyOriginalPublicationIsIdempotent(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		original, _ := testVerifySignedOriginal(t)
+		body, err := DecodeVerifyOriginal(original)
+		if err != nil {
+			t.Fatal(err)
+		}
+		RetainVerifyOriginal(ctx, original)
+		settings := DefaultVerifySettings()
+		PublishVerifyOriginal(ctx, original, settings)
+		PublishVerifyOriginal(ctx, original, settings)
+		RollupVerifyProviderStats(ctx, server.NowUtc(), settings)
+		var assignments int64
+		for _, row := range GetVerifyProviderStats(ctx, body.Trail.Pending.ClientId) {
+			assignments += row.Assignments
+		}
+		if assignments != 1 {
+			t.Fatalf("replayed exposure=%d, want1", assignments)
+		}
+		if hot := GetVerifyTrail(ctx, body.Trail.TrailId); len(hot.Hops) != 1 || hot.Pending.ClientId != body.Trail.Pending.ClientId {
+			t.Fatal("publication changed route")
+		}
+	})
+}
