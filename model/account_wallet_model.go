@@ -396,6 +396,7 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 	}
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
+		result.Success = false
 		tag := server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
@@ -412,12 +413,8 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 		))
 
 		if tag.RowsAffected() == 1 {
-			result = &RemoveWalletResult{
-				Success: true,
-			}
-
-			deletePayoutWallet(id, session)
-
+			deletePayoutWalletInTx(session.Ctx, tx, id, session.ByJwt.NetworkId)
+			result.Success = true
 		}
 
 	})

@@ -107,19 +107,23 @@ func GetPayoutWalletId(ctx context.Context, networkId server.Id) *server.Id {
 }
 
 func deletePayoutWallet(walletId server.Id, session *session.ClientSession) {
-
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			session.Ctx,
-			`
+		deletePayoutWalletInTx(session.Ctx, tx, walletId, session.ByJwt.NetworkId)
+	})
+}
+
+// Wallet deactivation owns the same transaction as its payout selection. An
+// independent checkout can exhaust the pool and commit only half the removal.
+func deletePayoutWalletInTx(ctx context.Context, tx server.PgTx, walletId, networkId server.Id) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
             DELETE FROM payout_wallet
             WHERE 
                 wallet_id = $1 AND 
                 network_id = $2
             `,
-			walletId,
-			session.ByJwt.NetworkId,
-		))
-	})
-
+		walletId,
+		networkId,
+	))
 }
