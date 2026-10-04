@@ -6535,18 +6535,67 @@ func FindProviders2(
 			facets:            facets,
 			excludedClientIds: excludeFinalDestinations(),
 		}
-		candidateClientIds := slices.Clone(specClientIds)
-		candidateClientIds = append(candidateClientIds, requestFilter.unchecked(clientScores, nil)...)
-		observation.enter("hard_exclusions")
-		hardExcludedClientIds, err := getProviderRequestExclusions(session.Ctx, candidateClientIds, rankMode)
-		if err != nil {
+		hardExcludedClientIds := map[server.Id]bool{}
+		qualityExcludedClientIds := map[server.Id]bool{}
+		exclusionReadClientIds := map[server.Id]bool{}
+		qualityReadClientIds := map[server.Id]bool{}
+		// Common refusals apply to every bucket. Subscriber refusals apply only
+		// to native Quality, including Quality borrowed by a Speed request.
+		readExclusions := func(scores map[server.Id]*ClientScore, mode RankMode, native bool, namedClientIds []server.Id) error {
+			observation.enter("hard_exclusions")
+			candidateClientIds := requestFilter.unchecked(scores, exclusionReadClientIds)
+			for _, clientId := range namedClientIds {
+				if !exclusionReadClientIds[clientId] {
+					candidateClientIds = append(candidateClientIds, clientId)
+				}
+			}
+			excluded, err := getProviderHardExclusions(session.Ctx, candidateClientIds)
+			if err != nil {
+				return err
+			}
+			maps.Copy(hardExcludedClientIds, excluded)
+			for _, clientId := range candidateClientIds {
+				exclusionReadClientIds[clientId] = true
+			}
+			qualityClientIds := []server.Id{}
+			if mode == RankModeQuality && (native || findProviders2.ForceMinimum) {
+				now := server.NowUtc()
+				for _, clientId := range requestFilter.unchecked(scores, qualityReadClientIds) {
+					score := scores[clientId]
+					if !hardExcludedClientIds[clientId] && (findProviders2.ForceMinimum ||
+						(score.PassesMinimums[RankModeQuality] && score.EgressValidUntil != nil && now.Before(*score.EgressValidUntil))) {
+						qualityClientIds = append(qualityClientIds, clientId)
+					}
+				}
+			}
+			if rankMode == RankModeQuality {
+				for _, clientId := range namedClientIds {
+					if !hardExcludedClientIds[clientId] && !qualityReadClientIds[clientId] {
+						qualityClientIds = append(qualityClientIds, clientId)
+					}
+				}
+			}
+			if len(qualityClientIds) != 0 {
+				qualityExcluded, risky, err := getProviderSubscriberExclusions(session.Ctx, qualityClientIds)
+				if err != nil {
+					return err
+				}
+				maps.Copy(qualityExcludedClientIds, qualityExcluded)
+				maps.Copy(hardExcludedClientIds, risky)
+				for _, clientId := range qualityClientIds {
+					qualityReadClientIds[clientId] = true
+				}
+			}
+			return nil
+		}
+		if err := readExclusions(clientScores, rankMode, true, specClientIds); err != nil {
 			return nil, err
 		}
-		appendSpecProviders(hardExcludedClientIds)
-		exclusionReadClientIds := map[server.Id]bool{}
-		for _, clientId := range candidateClientIds {
-			exclusionReadClientIds[clientId] = true
+		namedExcludedClientIds := maps.Clone(hardExcludedClientIds)
+		if rankMode == RankModeQuality {
+			maps.Copy(namedExcludedClientIds, qualityExcludedClientIds)
 		}
+		appendSpecProviders(namedExcludedClientIds)
 
 		// drop providers this caller cannot contract with.
 		//
@@ -6589,6 +6638,19 @@ func FindProviders2(
 			before := len(clientScores)
 			for clientId := range hardExcludedClientIds {
 				delete(clientScores, clientId)
+			}
+			for clientId := range qualityExcludedClientIds {
+				if clientScore := clientScores[clientId]; clientScore != nil {
+					if findProviders2.ForceMinimum && rankMode == RankModeQuality {
+						delete(clientScores, clientId)
+					} else if clientScore.PassesMinimums[RankModeQuality] {
+						// A stale Quality label cannot survive live revalidation.
+						// Its prior admission still supplies common-gated Online.
+						clientScore.Online = true
+						clientScore.PassesMinimums = maps.Clone(clientScore.PassesMinimums)
+						delete(clientScore.PassesMinimums, RankModeQuality)
+					}
+				}
 			}
 			for _, provider := range providers {
 				delete(clientScores, provider.ClientId)
@@ -6672,17 +6734,8 @@ func FindProviders2(
 				readFailed := err != nil
 				unknown = unknown || cursor.sourceIncomplete || 0 < cursor.missingPages
 				observation.loaded += len(extraScores)
-				unreadClientIds := requestFilter.unchecked(extraScores, exclusionReadClientIds)
-				observation.enter("hard_exclusions")
-				extraHardExclusions, err := getProviderRequestExclusions(session.Ctx, unreadClientIds, rankMode)
-				if err != nil {
+				if err := readExclusions(extraScores, mode, native, nil); err != nil {
 					return err
-				}
-				for _, clientId := range unreadClientIds {
-					exclusionReadClientIds[clientId] = true
-				}
-				for clientId := range extraHardExclusions {
-					knownHardExclusions[clientId] = true
 				}
 				filterPool(extraScores, mode, knownHardExclusions)
 				if native && cursor.nativeOnly {
@@ -6875,24 +6928,14 @@ func FindProviders2(
 					otherClientScores = map[server.Id]*ClientScore{}
 				}
 				observation.loaded += len(otherClientScores)
-				// the exclusions of the providers this call has not read yet
-				unreadClientIds := requestFilter.unchecked(otherClientScores, exclusionReadClientIds)
-				observation.enter("hard_exclusions")
-				otherHardExcludedClientIds, err := getProviderRequestExclusions(session.Ctx, unreadClientIds, rankMode)
-				if err != nil {
+				if err := readExclusions(otherClientScores, otherRankMode, true, nil); err != nil {
 					return nil, err
 				}
-				for _, clientId := range unreadClientIds {
-					exclusionReadClientIds[clientId] = true
-				}
-				for clientId := range hardExcludedClientIds {
-					otherHardExcludedClientIds[clientId] = true
-				}
-				filterPool(otherClientScores, otherRankMode, otherHardExcludedClientIds)
+				filterPool(otherClientScores, otherRankMode, hardExcludedClientIds)
 				if otherCursor != nil && otherCursor.nativeOnly {
 					retainNativeClientScores(otherClientScores, otherRankMode)
 				}
-				if err := refillPool(otherClientScores, nativeClientScores, otherRankMode, otherCursor, otherHardExcludedClientIds, true, true); err != nil {
+				if err := refillPool(otherClientScores, nativeClientScores, otherRankMode, otherCursor, hardExcludedClientIds, true, true); err != nil {
 					return nil, err
 				}
 				observation.backfillClientScores = otherClientScores
@@ -6952,23 +6995,14 @@ func FindProviders2(
 								pool = map[server.Id]*ClientScore{}
 							}
 							observation.loaded += len(pool)
-							unreadClientIds := requestFilter.unchecked(pool, exclusionReadClientIds)
-							observation.enter("hard_exclusions")
-							extraHardExclusions, err := getProviderRequestExclusions(session.Ctx, unreadClientIds, rankMode)
-							if err != nil {
+							if err := readExclusions(pool, source.mode, false, nil); err != nil {
 								return nil, err
 							}
-							for _, clientId := range unreadClientIds {
-								exclusionReadClientIds[clientId] = true
-							}
-							for clientId := range extraHardExclusions {
-								otherHardExcludedClientIds[clientId] = true
-							}
-							filterPool(pool, source.mode, otherHardExcludedClientIds)
+							filterPool(pool, source.mode, hardExcludedClientIds)
 						}
 						priorScores := maps.Clone(answeredClientScores)
 						maps.Copy(priorScores, onlineClientScores)
-						if err := refillPool(pool, priorScores, source.mode, cursor, otherHardExcludedClientIds, true, false); err != nil {
+						if err := refillPool(pool, priorScores, source.mode, cursor, hardExcludedClientIds, true, false); err != nil {
 							return nil, err
 						}
 						for clientId, clientScore := range pool {

@@ -6479,6 +6479,30 @@ does not establish supply for the selected target. The roughly four-percent
 location zero tail observed during the 2026-09-27 incident remains unattributed
 until matching current-generation request-local evidence is available.
 
+Bucket-scoped subscriber correction (2026-10-04): the earlier API applied the
+original Quality request's live subscriber refusal to every borrowed Speed and
+Online row. A full same-target Speed pool could therefore produce a completed
+Quality zero, despite the documented fallback order. Discovery now keeps common
+exclusions separate from Quality membership. A revoked or missing subscriber
+fact removes native Quality admission; it does not remove otherwise eligible
+Speed or Online fallback. Quality borrowed by a Speed request also requires the
+current subscriber check. Native quota/exhaustion, target and request filters,
+risk, reliability, TLS quarantine and lower fallback tiers remain in force.
+Explicit-ID and force_minimum Quality requests keep their strict policy.
+The same bounded live query returns explicit risk separately: an observed risk
+joins the request's common exclusions even if the published snapshot is older.
+It is not stored as a Quality-only cached refusal; waiting callers read fresh
+so a cache hit cannot discard the risk reason. No additional query is added.
+
+The geographic picker still reads the public native-or-Online count. Its
+Quality-named key does not mean native Quality only, and this selection fix
+does not diagnose a slow GET or searched POST. Controls cover actual publication
+and both legacy/native readers, empty Quality with Speed/Online supply, exact
+4/5 versus 2/3 health, stale borrowed Quality, common/request exclusions and
+strict explicit/forced requests. Subscriber SQL is used for possible Quality
+members rather than every lower-tier candidate. Main zero-cohort and latency
+recovery still require source-qualified paired observations after API rollout.
+
 The API exports `urnetwork_findproviders2_selection_schema_version=2` even
 without traffic, plus `urnetwork_findproviders2_selection_outcomes_total` once
 per model invocation, including errors/cancellation. The old

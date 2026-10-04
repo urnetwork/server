@@ -30,7 +30,7 @@ func enableSubscriberQualityPolicy(t testing.TB) {
 	t.Cleanup(server.Config.PushSimpleResource(providerConfigResourceName, encoded))
 }
 
-func TestQualityRequiresSubscriberAcrossNativeFallbackForceAndNamed(t *testing.T) {
+func TestQualityRequiresSubscriberAcrossNativeForceAndNamed(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		enableSubscriberQualityPolicy(t)
 		cacheClock, cacheNow := subscriberCacheTestClock()
@@ -56,12 +56,21 @@ func TestQualityRequiresSubscriberAcrossNativeFallbackForceAndNamed(t *testing.T
 			}
 		})
 		for _, force := range []bool{false, true} {
-			for _, specs := range [][]*ProviderSpec{
+			for index, specs := range [][]*ProviderSpec{
 				egressTestLocationSpec(city),
 				{{ClientId: &verified.clientId}, {ClientId: &unknown.clientId}, {ClientId: &excluded.clientId}},
 			} {
 				providers := egressTestFind(ctx, t, specs, RankModeQuality, 10, force, server.NewId())
-				if ids := egressTestIds(providers); !slices.Equal(ids, []server.Id{verified.clientId}) {
+				if !force && index == 0 {
+					if len(providers) != 3 || providers[0].ClientId != verified.clientId || providers[0].Tier != 0 {
+						t.Fatal("Quality discovery lost native priority or lower Speed fallback")
+					}
+					for _, provider := range providers[1:] {
+						if provider.Tier < egressTestBackfillOffset() {
+							t.Fatal("unverified access entered the native Quality tier")
+						}
+					}
+				} else if ids := egressTestIds(providers); !slices.Equal(ids, []server.Id{verified.clientId}) {
 					t.Fatalf("force=%t: Quality returned unverified or excluded access", force)
 				}
 			}
@@ -87,13 +96,13 @@ func TestQualityRequiresSubscriberAcrossNativeFallbackForceAndNamed(t *testing.T
 		// A prior refusal may remain for at most one second from its read start.
 		// Advance the cache clock; no real sleep or positive-cache bypass.
 		cacheClock.Add(subscriberNegativeTTL.Nanoseconds())
-		if providers := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeQuality, 10, false, server.NewId()); len(providers) != 1 {
+		if providers := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeQuality, 10, true, server.NewId()); len(providers) != 1 {
 			t.Fatal("expired unknown handler blocked a current subscriber connection")
 		}
 		if err := HeartbeatNetworkClientHandler(ctx, handler); err != nil {
 			t.Fatal(err)
 		}
-		if providers := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeQuality, 10, false, server.NewId()); len(providers) != 0 {
+		if providers := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeQuality, 10, true, server.NewId()); len(providers) != 0 {
 			t.Fatal("fresh unknown handler reused an old subscriber decision")
 		}
 		if err := DisconnectNetworkClient(ctx, connection); err != nil {
@@ -102,7 +111,7 @@ func TestQualityRequiresSubscriberAcrossNativeFallbackForceAndNamed(t *testing.T
 		// A prior refusal may remain for at most one second from its read start.
 		// Advance the cache clock; no real sleep or positive-cache bypass.
 		cacheClock.Add(subscriberNegativeTTL.Nanoseconds())
-		if providers := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeQuality, 10, false, server.NewId()); len(providers) != 1 {
+		if providers := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeQuality, 10, true, server.NewId()); len(providers) != 1 {
 			t.Fatal("disconnected unknown history blocked current subscriber access")
 		}
 		if err := DisconnectNetworkClient(ctx, verified.connectionId); err != nil {

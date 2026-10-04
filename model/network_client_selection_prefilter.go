@@ -10,7 +10,7 @@ import (
 // predicates when choosing candidates to validate and when filtering the pool,
 // so rejected retry history or another network's private providers cannot
 // consume subscriber/security query capacity. Every remaining candidate still
-// passes the common hard gates and the original request's subscriber policy.
+// passes the common hard gates and the selected bucket's subscriber policy.
 type clientScoreRequestFilter struct {
 	callerNetworkId   server.Id
 	facets            []ipFamilyFacet
