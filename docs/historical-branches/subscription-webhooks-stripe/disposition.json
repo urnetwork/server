@@ -1,0 +1,15 @@
+{
+  "branch": "origin/subscription-webhooks-stripe",
+  "disposition": "exact original unique patches preserved outside build; ancestry merged",
+  "head": "cb189bdc04936c28049f46cb4922a87f0f7b6949",
+  "patches": [
+    {
+      "commit": "cb189bdc04936c28049f46cb4922a87f0f7b6949",
+      "path": "cb189bdc04936c28049f46cb4922a87f0f7b6949.patch",
+      "sha256": "579e4dacc0c97a730268b641b4bf9fc9a021f126ef744a5e2cc1e0b3a1c11583"
+    }
+  ],
+  "reason": "Historical raw-body persistence precedes signature verification and inserts a migration in the published prefix. Current Stripe controller/schema and authenticated processing remain authoritative; a safe retention feature needs separate current design.",
+  "runtime_activation": false,
+  "source_retrieval": "git show cb189bdc04936c28049f46cb4922a87f0f7b6949:<path>"
+}
