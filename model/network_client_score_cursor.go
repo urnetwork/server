@@ -97,17 +97,26 @@ func (self *clientScoreCursor) readWithClient(ctx context.Context, r server.Redi
 		}
 		commands = append(commands, read)
 	}
+	var sourceErr error
 	if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
 		clientScoreReadMetrics.samples.Inc()
-		return nil, fmt.Errorf("read client score samples: %w", err)
+		sourceErr = fmt.Errorf("read client score samples: %w", err)
+		if !self.nativeOnly || ctx.Err() != nil {
+			return nil, sourceErr
+		}
+		// Native pages carry their own generation, checksum and count proof.
+		// A failed sibling command cannot invalidate a successfully returned
+		// page's proof, but the overall source remains explicitly unavailable.
 	}
 	scores := map[server.Id]*ClientScore{}
-	var sourceErr error
 	for _, command := range commands {
 		var data []byte
 		if command.native == nil {
 			data, _ = command.legacy.Bytes()
 		} else {
+			if command.native.Err() != nil {
+				continue
+			}
 			values, _ := command.native.Result()
 			if len(values) != 2 {
 				sourceErr = errors.Join(sourceErr, fmt.Errorf("%w: incomplete page response", errClientScoreNativeUnavailable))

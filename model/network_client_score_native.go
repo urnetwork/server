@@ -342,13 +342,22 @@ func loadNativeClientScoresWithCursor(ctx context.Context, mode RankMode, locati
 		if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
 			clientScoreReadMetrics.counts.Inc()
 			returnErr = err
-			return
+			// Failed metadata is an unavailable native source, not evidence of
+			// a legacy-only writer. Independently successful targets can still
+			// prove their own manifests and pages. Cancellation remains fatal.
+			available = true
+			if ctx.Err() != nil {
+				return
+			}
 		}
 		pagesByFacet := make([]map[string]clientScorePage, len(facets))
 		for i := range pagesByFacet {
 			pagesByFacet[i] = map[string]clientScorePage{}
 		}
 		for _, target := range targets {
+			if err := target.callerRead.Err(); err != nil && !errors.Is(err, redis.Nil) {
+				continue
+			}
 			key, rawPointer := target.callerKey, string(clientScoreCommandBytes(target.callerRead))
 			if rawPointer != "" {
 				available = true
@@ -356,6 +365,9 @@ func loadNativeClientScoresWithCursor(ctx context.Context, mode RankMode, locati
 			if rawPointer == clientScoreNativeBaseline {
 				if target.baseRead == nil {
 					returnErr = errors.Join(returnErr, fmt.Errorf("%w: baseline cannot alias itself", errClientScoreNativeUnavailable))
+					continue
+				}
+				if err := target.baseRead.Err(); err != nil && !errors.Is(err, redis.Nil) {
 					continue
 				}
 				key, rawPointer = target.baselineKey, string(clientScoreCommandBytes(target.baseRead))
