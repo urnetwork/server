@@ -66,16 +66,33 @@ func registryNameTokens(text string) []string {
 
 // hosting, access or other, from the object's netname and descr lines.
 func registryAssignmentKind(netname string, descr []string) string {
-	tokens := registryNameTokens(netname + " " + strings.Join(descr, " "))
-	hosting, access := false, false
-	for _, token := range tokens {
-		hosting = hosting || slices.Contains(registryHostingTokens, token)
-		access = access || slices.Contains(registryAccessTokens, token)
+	evidence := registryAssignmentNameEvidence{}
+	evidence.add(netname)
+	for _, value := range descr {
+		evidence.add(value)
 	}
+	return evidence.kind()
+}
+
+// Only the two token findings need to survive each line. This lets a bounded
+// scanner inspect every description without retaining an unbounded object or
+// silently dropping evidence after an arbitrary number of attributes.
+type registryAssignmentNameEvidence struct {
+	hosting, access bool
+}
+
+func (self *registryAssignmentNameEvidence) add(value string) {
+	for _, token := range registryNameTokens(value) {
+		self.hosting = self.hosting || slices.Contains(registryHostingTokens, token)
+		self.access = self.access || slices.Contains(registryAccessTokens, token)
+	}
+}
+
+func (self registryAssignmentNameEvidence) kind() string {
 	switch {
-	case hosting && !access:
+	case self.hosting && !self.access:
 		return "hosting"
-	case access && !hosting:
+	case self.access && !self.hosting:
 		return "access"
 	default:
 		return "other"
@@ -144,9 +161,12 @@ func rangePrefixes(first, last netip.Addr) []netip.Prefix {
 }
 
 // Streams RPSL objects; each inetnum or inet6num object yields one callback.
-// Continuation lines and other object classes are skipped. A malformed range
-// skips that object, because registries carry historic oddities, but a source
-// without any parsable object fails.
+// RPSL continuations belong to the preceding attribute and comments end at
+// each physical newline. Tokenizing each continued value separately is
+// equivalent to RPSL's joining space, without retaining the complete value.
+// Other object classes are skipped. A malformed range skips that object,
+// because registries carry historic oddities, but a source without any
+// parsable object fails.
 func scanRpslAssignments(ctx context.Context, raw io.Reader, source string, visit func(registryAssignment) error) (int, error) {
 	reader, err := openBoundedEvidenceReader(raw, maxRegistryAssignmentDecompressedBytes)
 	if err != nil {
@@ -155,19 +175,20 @@ func scanRpslAssignments(ctx context.Context, raw io.Reader, source string, visi
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 1<<20)
 	var current *registryAssignment
-	var descr []string
+	var evidence registryAssignmentNameEvidence
+	var attribute string
 	objects := 0
 	flush := func() error {
 		if current == nil {
 			return nil
 		}
-		current.kind = registryAssignmentKind(current.netname, descr)
+		current.kind = evidence.kind()
 		objects++
 		if objects > maxRegistryAssignmentObjects {
 			return errors.New("registry assignment source exceeds its object bound")
 		}
 		err := visit(*current)
-		current, descr = nil, nil
+		current, evidence, attribute = nil, registryAssignmentNameEvidence{}, ""
 		return err
 	}
 	lines := 0
@@ -185,11 +206,21 @@ func scanRpslAssignments(ctx context.Context, raw io.Reader, source string, visi
 			}
 			continue
 		}
-		if line[0] == ' ' || line[0] == '\t' || line[0] == '+' || line[0] == '#' || line[0] == '%' {
+		if line[0] == '#' || line[0] == '%' {
+			continue
+		}
+		if comment := bytes.IndexByte(line, '#'); comment >= 0 {
+			line = line[:comment]
+		}
+		if line[0] == ' ' || line[0] == '\t' || line[0] == '+' {
+			if current != nil && (attribute == "netname" || attribute == "descr") {
+				evidence.add(string(line[1:]))
+			}
 			continue
 		}
 		colon := bytes.IndexByte(line, ':')
 		if colon <= 0 {
+			attribute = ""
 			continue
 		}
 		key := strings.ToLower(string(bytes.TrimSpace(line[:colon])))
@@ -206,12 +237,14 @@ func scanRpslAssignments(ctx context.Context, raw io.Reader, source string, visi
 		case "netname":
 			if current != nil {
 				current.netname = value
+				evidence.add(value)
 			}
 		case "descr":
-			if current != nil && len(descr) < 8 {
-				descr = append(descr, value)
+			if current != nil {
+				evidence.add(value)
 			}
 		}
+		attribute = key
 	}
 	if err := scanner.Err(); err != nil {
 		return 0, errors.New("registry assignment source is truncated or unreadable")

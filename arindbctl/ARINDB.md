@@ -278,6 +278,10 @@ matter most for incumbents that sell both access and hosting under one ASN.
 An object is hosting-named when its netname or descr carries DATACENTER,
 DEDICATED, DEDI, VPS, HOSTING or CLOUD (also with trailing digits, as in VPS2)
 and no access-technology token such as ADSL, FTTH, DOCSIS, PPPOE, BNG or CGNAT.
+The parser inspects every description, includes space/tab/plus continuation
+lines of these attributes, and strips end-of-line comments according to the
+[RPSL attribute-value syntax](https://docs.db.ripe.net/RIPE-Database-Structure/Attribute-Values/).
+Comments and other attributes do not supply network-use tokens.
 Those six tokens were chosen by measurement: across the 2026-10-04 RIPE, APNIC
 and AFRINIC dumps (6.7 million objects), objects naming them sat under
 hosting-labelled origins 86 to 96 percent of the time, while every
