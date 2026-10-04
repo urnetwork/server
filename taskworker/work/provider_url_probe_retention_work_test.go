@@ -19,11 +19,27 @@ func TestUrlReceiptRetentionTaskCoalescesAndBoundsContinuation(t *testing.T) {
 		ctx := t.Context()
 		owner := session.NewLocalClientSession(ctx, "192.0.2.1:0", nil)
 		defer owner.Cancel()
-		server.Tx(ctx, func(tx server.PgTx) {
-			for range 8 {
-				ScheduleRemoveExpiredProviderUrlProbeRuns(owner, tx)
+		ready, start, finished := make(chan struct{}, 8), make(chan struct{}), make(chan any, 8)
+		for range 8 {
+			go func() {
+				ready <- struct{}{}
+				<-start
+				finished <- server.HandleError(func() {
+					server.Tx(ctx, func(tx server.PgTx) {
+						ScheduleRemoveExpiredProviderUrlProbeRuns(owner, tx)
+					})
+				})
+			}()
+		}
+		for range 8 {
+			<-ready
+		}
+		close(start)
+		for range 8 {
+			if failure := <-finished; failure != nil {
+				t.Fatal("concurrent startup schedule failed", failure)
 			}
-		})
+		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var count int
 			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM pending_task WHERE run_once_key='["remove_expired_provider_url_probe_runs"]'`).Scan(&count))
