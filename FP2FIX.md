@@ -6556,3 +6556,32 @@ cadence. Backup completion, migration764/Report-ID emission, ARIN baseline/final
 Main shadow and verified subscriber supply remain open; policy two and the
 prepared Redis native-reader flag remain inactive. FP2FIX continues through
 source merge, all-block deployment and fresh measurements.
+
+### 2026-10-04 09:40 UTC subscriber coverage qualification checkpoint
+
+The earlier inactive-policy statements above are historical: Root's Main
+receipts selected policy two at 03:57 UTC, and the 04:28 native readback found
+zero Quality supply on all eight Taskworkers. The selected positive catalog
+then covered only Google Fiber and Webpass. Enforcement alone did not prove
+adequate subscriber coverage. The later user policy defaults an identified
+subscriber ISP clean when no additional contrary discriminator exists;
+explicit hosting, proxy, virtual-ISP, transit, owner/origin conflicts and
+independent risk keep their vetoes. Missing identity remains review work.
+
+The independently checked global v5 candidate now joins 90 reviewed subscriber
+operators and 100 ASNs across 45 countries to pinned RIPE RIS origins. Complete
+bidirectional output validation passed across 7,058,446 serialized leaves,
+including exact approval attribution and preserved risk. Independent native
+decoding on the qualified 6800 source passed 206 public origin samples. Resource
+SHA-256 is `0abe2281bf2f257a06735d6875e7e073c1422187637060fe54a615a8ba110be0`,
+epoch `1791105668`; the frozen handoff is
+`temp/arin-subscriber-coverage-20261004/global-candidate-handoff-v5.json`,
+SHA-256 `13cb54ecee2d902b100b017e169053f373e6c219a9e141db16b6a91d5faffe53`.
+These are local resource checks, not Main provider counts or activation proof.
+
+Country/state/province research remains incomplete: 80 reviewed advertised
+operator/region footprints cover 49 of 3,865 indexed regions, and no regional
+top-30 ranking is complete. TRAI's dated national metric rankings remain
+separate. Fresh current-provider overlap, loaded epoch, rollup and a complete
+native Quality generation are still required to establish recovery. See
+`arindbctl/CLASSIFICATION.md` for the evidence and the directional count limits.

@@ -151,6 +151,40 @@ Current-provider shadow, publication, loaded-resource proof and native Quality
 recovery remain Root-owned work. No Main contact occurred in this candidate
 build or its controls; the earlier candidate remains frozen separately.
 
+## 2026-10-04 09:40 UTC India expansion and complete v5 readback
+
+Catalog v3 adds twelve reviewed Indian access operators and fifteen ASNs. Its
+total is 90 subscriber operators, 100 subscriber ASNs and 45 countries, with
+the four hosting-origin vetoes retained. The catalog SHA-256 is
+`4894e396b142804cffa61c1090748d6e85b0d909e91a87bd037ca6f05da53b4e`.
+Official TRAI August 2026 subscriber tables now join the reviewed operator
+identities for metric-specific national top-five rankings. They do not establish
+state/province ranks. Three additional advertised service footprints in India
+bring reviewed presence to 80 operator/region pairs in 49 of 3,865 regions;
+every regional rank remains unverified. Four seed identities remain pending
+in this frozen catalog. Later research is a separate catalog revision.
+
+The unchanged gated builder completed v5 in 463.7 seconds. Resource SHA-256
+`0abe2281bf2f257a06735d6875e7e073c1422187637060fe54a615a8ba110be0`,
+epoch `1791105668`, contains 7,058,446 serialized leaves: 2,941,220 subscriber,
+3,903,856 unknown, 212,004 excluded and 1,366 ambiguous. The complete
+bidirectional comparison passed in 280.0 seconds. All 2,939,099 new inferences
+carry the exact reviewed ASN/operator/source attribution; 124,610 origin-use
+vetoes remain, and registration metadata and independent risk match at every
+compared address. Only candidate-to-base counts describe the serialized
+candidate population; neither directional prefix count measures live providers.
+
+The independent qualified-6800 native decoder diagnostic passed 206 public
+origin samples, with 90 verified and 116 excluded outcomes. It compiled all
+70 production files with the exact external test; an unrelated root-package
+fixture preflight prevented using that package's TestMain. The handoff
+`temp/arin-subscriber-coverage-20261004/global-candidate-handoff-v5.json`,
+SHA-256 `13cb54ecee2d902b100b017e169053f373e6c219a9e141db16b6a91d5faffe53`,
+binds the catalog, sources, output, complete readback and decoder control.
+This is local resource qualification. Current-provider overlap, publication,
+loaded-resource proof, rollup and native Quality recovery remain distinct
+Root-owned acceptance work. No Main contact occurred in these checks.
+
 ## Original policy-two review history
 
 The following records the original stricter review and rollout. The current
