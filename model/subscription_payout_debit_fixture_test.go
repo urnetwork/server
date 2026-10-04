@@ -19,6 +19,8 @@ type payoutDebitTestState struct {
 	initial, credit, pendingBytes, settled ByteCount
 	legacy, reserved                       ByteCount
 	pending, applied, escrows, invalid     int
+	settledEscrows, anchors                int
+	anchorRows                             string
 	inWindow                               bool
 }
 
@@ -27,6 +29,7 @@ type payoutDebitTestState struct {
 func readPayoutDebitTestState(t testing.TB, ctx context.Context, balanceId server.Id) payoutDebitTestState {
 	t.Helper()
 	var state payoutDebitTestState
+	var anchorIds []server.Id
 	server.Db(ctx, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(ctx, `SELECT network_id,start_balance_byte_count,balance_byte_count,
 			start_time <= clock_timestamp() AT TIME ZONE 'UTC' AND clock_timestamp() AT TIME ZONE 'UTC' < end_time
@@ -34,13 +37,48 @@ func readPayoutDebitTestState(t testing.TB, ctx context.Context, balanceId serve
 		server.Raise(conn.QueryRow(ctx, `SELECT count(*) FILTER (WHERE NOT applied),
 			COALESCE(sum(debit_byte_count) FILTER (WHERE NOT applied),0),count(*) FILTER (WHERE applied)
 			FROM transfer_debit_journal WHERE balance_id=$1`, balanceId).Scan(&state.pending, &state.pendingBytes, &state.applied))
-		server.Raise(conn.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE NOT settled OR NOT redis_reserved),
-			COALESCE(sum(payout_byte_count),0) FROM transfer_escrow WHERE balance_id=$1`, balanceId).
-			Scan(&state.escrows, &state.invalid, &state.settled))
+		// A live zero-byte forward anchor is not a settled Redis reservation.
+		// Every other row must retain the complete settled consumption shape.
+		rows, err := conn.Query(ctx, `SELECT escrow.contract_id,
+			COALESCE(escrow.settled AND escrow.redis_reserved AND escrow.settle_time IS NOT NULL
+				AND escrow.payout_byte_count IS NOT NULL AND escrow.payout_byte_count >= 0
+				AND escrow.payout_byte_count <= escrow.balance_byte_count, false),
+			COALESCE(NOT escrow.settled AND NOT escrow.redis_reserved AND escrow.balance_byte_count=0
+				AND escrow.payout_byte_count IS NULL AND escrow.settle_time IS NULL
+				AND contract.contract_id IS NOT NULL AND contract.transfer_byte_count=0
+				AND contract.companion_contract_id IS NULL AND contract.outcome IS NULL AND NOT contract.dispute
+				AND NOT EXISTS (SELECT 1 FROM transfer_debit_journal AS debit
+					WHERE debit.contract_id=escrow.contract_id AND debit.balance_id=escrow.balance_id), false),
+			COALESCE(escrow.payout_byte_count,0),
+			jsonb_build_object('escrow',to_jsonb(escrow),'contract',to_jsonb(contract))::text
+			FROM transfer_escrow AS escrow LEFT JOIN transfer_contract AS contract USING (contract_id)
+			WHERE escrow.balance_id=$1 ORDER BY escrow.contract_id`, balanceId)
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				var contractId server.Id
+				var settled, anchor bool
+				var payout ByteCount
+				var originalRows string
+				server.Raise(rows.Scan(&contractId, &settled, &anchor, &payout, &originalRows))
+				state.escrows++
+				state.settled += payout
+				switch {
+				case settled:
+					state.settledEscrows++
+				case anchor:
+					state.anchors++
+					state.anchorRows += originalRows + "\n"
+					anchorIds = append(anchorIds, contractId)
+				default:
+					state.invalid++
+				}
+			}
+		})
 	})
 	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	err := server.RedisWithDeadline(bounded, func(client server.RedisClient) error {
+		keys := redisContractReservationKeys(balanceId)
 		for _, counter := range []struct {
 			key   string
 			value *ByteCount
@@ -55,6 +93,22 @@ func readPayoutDebitTestState(t testing.TB, ctx context.Context, balanceId serve
 				return fmt.Errorf("negative payout reservation %s: %d", counter.key, value)
 			}
 			*counter.value = ByteCount(value)
+		}
+		for _, contractId := range anchorIds {
+			if err := client.HGet(bounded, keys[1], contractId.String()).Err(); err != redis.Nil {
+				if err != nil {
+					return fmt.Errorf("observe live zero anchor reservation token %s: %w", contractId, err)
+				}
+				return fmt.Errorf("live zero anchor unexpectedly has a reservation token: %s", contractId)
+			}
+			for _, key := range []string{keys[2], keys[4]} {
+				if err := client.ZScore(bounded, key, contractId.String()).Err(); err != redis.Nil {
+					if err != nil {
+						return fmt.Errorf("observe live zero anchor lease/recovery marker %s: %w", contractId, err)
+					}
+					return fmt.Errorf("live zero anchor unexpectedly has a reservation lease/recovery marker: %s", contractId)
+				}
+			}
 		}
 		return nil
 	})
@@ -104,7 +158,7 @@ func assertPayoutDebitTestConsumptionAndDrain(t testing.TB, ctx context.Context,
 	t.Helper()
 	before := readPayoutDebitTestState(t, ctx, balanceId)
 	if consumed < 0 || consumed > initial || before.initial != initial || before.credit != initial || before.pendingBytes != consumed || before.settled != consumed ||
-		before.pending <= 0 || before.pending != before.escrows || before.applied != 0 || before.invalid != 0 ||
+		before.pending <= 0 || before.pending != before.settledEscrows || before.escrows != before.settledEscrows+before.anchors || before.applied != 0 || before.invalid != 0 ||
 		before.legacy != 0 || before.reserved != consumed {
 		t.Fatalf("settled grant did not retain exact asynchronous consumption: state=%+v initial=%d consumed=%d", before, initial, consumed)
 	}
@@ -160,7 +214,8 @@ func drainPayoutDebitTestPending(t testing.TB, ctx context.Context, balanceId se
 		debit := state.pendingBytes - next.pendingBytes
 		if removed <= 0 || removed > transferDebitBatchSize || result.Applied != removed || result.Released != removed ||
 			next.applied != 0 || next.credit != state.credit-debit || next.reserved != state.reserved-debit ||
-			next.legacy != 0 || next.settled != before.settled || next.invalid != before.invalid || next.escrows != before.escrows {
+			next.legacy != 0 || next.settled != before.settled || next.invalid != before.invalid || next.escrows != before.escrows ||
+			next.settledEscrows != before.settledEscrows || next.anchors != before.anchors || next.anchorRows != before.anchorRows {
 			t.Fatalf("public debit page did not conserve exact consumption: before=%+v after=%+v result=%+v", state, next, result)
 		}
 		if available := GetActiveTransferBalanceByteCount(ctx, before.networkId); available != wantAvailable {
