@@ -5,6 +5,7 @@ package model
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/jackc/pgx/v5"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/server"
@@ -20,10 +22,18 @@ import (
 // The controller supplies the authenticated caller and independently selected
 // deployment. Public payload fields cannot change this ownership tuple.
 type WalletMappingOwner struct {
-	Domain    protocol.ClientKeyHistoryDomain
-	UserId    server.Id
-	ClientId  server.Id
-	NetworkId server.Id
+	Domain      protocol.ClientKeyHistoryDomain
+	UserId      server.Id
+	ClientId    server.Id
+	NetworkId   server.Id
+	Prospective *WalletMappingProspectiveOwner
+}
+
+// Only the concrete controller constructs this original read/signing owner.
+// It is never decoded from a request or persisted as a private signing key.
+type WalletMappingProspectiveOwner struct {
+	Boundary protocol.ClientKeyEffectiveBoundary
+	RootKey  *ecdsa.PrivateKey
 }
 
 // Only this private refusal unwinds an uncommitted semantic transaction.
@@ -106,6 +116,11 @@ func CreateWalletMappingChallenge(ctx context.Context, owner WalletMappingOwner,
 		} else if !errors.Is(err, pgx.ErrNoRows) {
 			server.Raise(err)
 		}
+		if owner.Prospective != nil {
+			if err := protocol.SignProspectiveWalletMapping(&statement, owner.Prospective.Boundary, owner.Prospective.RootKey); err != nil {
+				panic(walletMappingAbort{cause: err})
+			}
+		}
 		var pending int
 		server.Raise(tx.QueryRow(ctx, `SELECT count(*) FROM wallet_mapping_challenge c WHERE domain_hash=$1 AND client_id=$2 AND expires_at>=$3 AND NOT EXISTS (SELECT 1 FROM wallet_mapping_consent s WHERE s.nonce=c.nonce)`, domain[:], owner.ClientId, now).Scan(&pending))
 		if pending >= 16 {
@@ -179,6 +194,14 @@ func AcceptWalletMappingConsent(ctx context.Context, owner WalletMappingOwner, o
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
 			server.Raise(err)
+		}
+		if owner.Prospective != nil {
+			scope := owner.Prospective
+			if statement.Schema != protocol.WalletMappingProspectiveSchema || scope.RootKey == nil || statement.Prospective.Signer != crypto.PubkeyToAddress(scope.RootKey.PublicKey) || scope.Boundary.Validate() != nil || scope.Boundary.Epoch >= statement.FromEpoch || scope.Boundary.Epoch < statement.Prospective.Boundary.Epoch || scope.Boundary.Block < statement.Prospective.Boundary.Block || scope.Boundary.Block == statement.Prospective.Boundary.Block && scope.Boundary != statement.Prospective.Boundary {
+				panic(walletMappingAbort{cause: protocol.ErrWalletMappingIntegrity})
+			}
+		} else if statement.Schema == protocol.WalletMappingProspectiveSchema {
+			panic(walletMappingAbort{cause: protocol.ErrWalletMappingUnavailable})
 		}
 		now := server.NowUtc()
 		if now.Unix() < statement.IssuedAt || now.Unix() > statement.ExpiresAt {

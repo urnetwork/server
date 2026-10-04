@@ -82,7 +82,7 @@ func TestWalletMappingPublicAuthenticatedConsentAndIndependentHistory(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
-		args := &SnWalletMappingChallengeArgs{ClientId: credential.ClientId, ColdkeySs58: address, FromEpoch: 0, ThroughEpoch: 100}
+		args := &SnWalletMappingChallengeArgs{ClientId: credential.ClientId, ColdkeySs58: address, FromEpoch: 1, ThroughEpoch: 100}
 		if status, _ := walletMappingControllerPost(t, endpoint.URL, "/sn/wallet/consent", "", args); status == http.StatusOK {
 			t.Fatal("unauthenticated caller issued a provider mapping")
 		}
@@ -112,7 +112,7 @@ func TestWalletMappingPublicAuthenticatedConsentAndIndependentHistory(t *testing
 		if err != nil {
 			t.Fatal(err)
 		}
-		originals, value, err := reader.Read(t.Context(), protocol.WalletMappingHistoryExpectation{Domain: fixture.domain, ClientId: [16]byte(*credential.ClientId), HeadHash: head, Generation: 1, Epoch: 0})
+		originals, value, err := reader.Read(t.Context(), protocol.WalletMappingHistoryExpectation{Domain: fixture.domain, ClientId: [16]byte(*credential.ClientId), HeadHash: head, Generation: 1, Epoch: 1})
 		if err != nil || value == nil || len(originals) != 1 || originals[0] != original || value.Statement.Coldkey != key.Public().Encode() {
 			t.Fatal("actual independent reader lost accepted signed mapping", value, err)
 		}
