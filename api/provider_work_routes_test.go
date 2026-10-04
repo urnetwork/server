@@ -8,7 +8,7 @@ import (
 
 // Enumerate the exact production route table rather than an alternate test mux.
 func TestProviderWorkProductionRoutesAreReachable(t *testing.T) {
-	want := map[string]bool{"GET ^/provider-work/v1/requests$": false, "POST ^/provider-work/v1/requests$": false, "GET ^/provider-work/v1/requests/([^/]+)$": false, "POST ^/provider-work/v1/cuts$": false, "GET ^/provider-work/v1/cuts/([^/]+)$": false, "POST ^/provider-work/v1/authorities$": false, "GET ^/provider-work/v1/windows$": false}
+	want := map[string]bool{"GET ^/provider-work/v1/owners$": false, "POST ^/provider-work/v1/owners$": false, "GET ^/provider-work/v1/requests$": false, "POST ^/provider-work/v1/requests$": false, "GET ^/provider-work/v1/requests/([^/]+)$": false, "POST ^/provider-work/v1/cuts$": false, "GET ^/provider-work/v1/cuts/([^/]+)$": false, "POST ^/provider-work/v1/authorities$": false, "GET ^/provider-work/v1/windows$": false}
 	for _, route := range Routes() {
 		if _, ok := want[route.String()]; ok {
 			if want[route.String()] {

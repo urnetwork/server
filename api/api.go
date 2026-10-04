@@ -33,6 +33,8 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		connectControl = handlers.ConnectControlWithOriginNotifications(notifications[0])
 	}
 	routes := []*router.Route{
+		router.NewStreamingRoute("POST", "/provider-work/v1/owners", providerWork.ServeHTTP, providerWorkBody),
+		router.NewRoute("GET", "/provider-work/v1/owners", providerWork.ServeHTTP),
 		router.NewRoute("GET", "/provider-work/v1/requests", providerWork.ServeHTTP),
 		router.NewStreamingRoute("POST", "/provider-work/v1/requests", providerWork.ServeHTTP, providerWorkBody),
 		router.NewRoute("GET", "/provider-work/v1/requests/([^/]+)", providerWork.ServeHTTP),

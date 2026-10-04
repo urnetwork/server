@@ -67,6 +67,10 @@ func (self *ProviderWorkHandlers) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		providerWorkHttpError(w, model.ErrProviderWorkInvalid)
 		return
 	}
+	if r.URL.Path == "/provider-work/v1/owners" {
+		self.serveOwner(ctx, w, r, domain)
+		return
+	}
 	if r.Method == http.MethodGet && r.URL.Path == "/provider-work/v1/windows" {
 		names := []string{"domain", "epoch", "artifact"}
 		if _, exists := r.URL.Query()["authority"]; exists {
