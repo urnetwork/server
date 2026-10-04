@@ -137,6 +137,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.RemoveExpiredWalletAuthChallenges), schedule: work.ScheduleRemoveExpiredWalletAuthChallenges},
 		{target: task.NewTaskTarget(work.RemoveExpiredWalletNonces), schedule: work.ScheduleRemoveExpiredWalletNonces},
 		{target: task.NewTaskTarget(work.RemoveExpiredProviderEgressLocations), schedule: work.ScheduleRemoveExpiredProviderEgressLocations},
+		{target: task.NewTaskTarget(work.RemoveExpiredProviderUrlProbeRuns), schedule: work.ScheduleRemoveExpiredProviderUrlProbeRuns},
 		{target: task.NewTaskTarget(work.RemoveExpiredBulkClientRemovalQuota), schedule: work.ScheduleRemoveExpiredBulkClientRemovalQuota},
 		{target: task.NewTaskTarget(work.RemoveOldAuditNetworkEvents), schedule: work.ScheduleRemoveOldAuditNetworkEvents},
 		{target: task.NewTaskTarget(work.RemoveOldAuditEvents), schedule: work.ScheduleRemoveOldAuditEvents},

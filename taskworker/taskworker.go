@@ -80,6 +80,7 @@ func InitTasks(ctx context.Context) {
 		work.ScheduleRemoveExpiredWalletAuthChallenges(clientSession, tx)
 		work.ScheduleRemoveExpiredWalletNonces(clientSession, tx)
 		work.ScheduleRemoveExpiredProviderEgressLocations(clientSession, tx)
+		work.ScheduleRemoveExpiredProviderUrlProbeRuns(clientSession, tx)
 		work.ScheduleProberBootstrap(clientSession, tx)
 		// no geolocation-source pin refresh: its sources are gone
 		// (connect/GEOMAP.md D24), and a pending row drains through the
@@ -315,6 +316,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RemoveExpiredProviderEgressLocations,
 			work.RemoveExpiredProviderEgressLocationsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveExpiredProviderUrlProbeRuns,
+			work.RemoveExpiredProviderUrlProbeRunsPost,
 		),
 		task.WithErrorRetryCap(task.NewTaskTargetWithPost(
 			work.ProberBootstrap,
