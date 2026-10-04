@@ -11582,6 +11582,21 @@ path before attributing this sample to private probers, resets or a scheduler
 regression; preserve the bounded future-queue selection and independent native
 runtime/creation provenance requirements.
 
+The reliability gate is also a cohort-membership boundary at score publication.
+Missing history is neutral, but an observed client's independent numerator is
+divided by the whole covered lookback, not by that client's observed minutes or
+age. A native healthy control with one valid minute and no invalid observations
+passes before publication, then has weights 1/61 and 1/721 in the one-hour and
+twelve-hour windows and fails the current SQL/Go gates and URL claim. A full
+721-minute healthy control and a missing-history control remain admitted. Thus
+an eligible-count drop can occur without a newly invalid observation or a lost
+connection. This control characterizes the current policy; it does not establish
+Main cohort overlap or authorize lower reliability floors. Attribute an actual
+change only with bounded provider-level before/after score and eligibility
+facts, source authority and cycle identity. Preserve observed-bad history and
+missing-history controls when changing this boundary; a low full-window weight
+alone does not distinguish bad observations from short healthy history.
+
 The shard-zero owner alone periodically produces the global census:
 
 - `urnetwork_url_probe_fleet{state}` contains `eligible`, `due`, `overdue`,
