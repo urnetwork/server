@@ -6434,8 +6434,10 @@ isolation. Selection success does not prove every running generation changed.
 
 The bounded 01:07 HTTPS read (`5d2d`) qualified fresh source/start witnesses for
 46/68 slots: API 20/20, Taskworker 8/8, Connect 10/20 and Proxy 8/20. Connect had
-six old-5900 and four nonunique slot observations; Proxy had seven old-6200 and
-five nonunique observations. These are self-reported metric witnesses, not
+six old-5900 and four slots without a unique current selection; Proxy had seven
+old-6200 and five slots without a unique current selection. Missing/stale start
+evidence and tied newest processes share that unknown result. These are
+self-reported metric witnesses, not
 native executable, routing, drain-phase or predecessor-retirement proof. The
 CLI's 21/100 response tally is also not an owner count, and its normal timeout
 return does not establish convergence. Current host proof remains separate.
