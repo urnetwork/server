@@ -4,6 +4,7 @@ package model
 
 import (
 	"testing"
+	"time"
 
 	"github.com/urnetwork/server"
 )
@@ -29,6 +30,10 @@ const subscriberLegacyLocationUpsertSql = `
 func TestSubscriberQualityMixedWritersInvalidateWarmRequestAndRollup(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		enableSubscriberQualityPolicy(t)
+		cacheClock, cacheNow := subscriberCacheTestClock()
+		previousCache := providerSubscriberNegativeCache
+		providerSubscriberNegativeCache = newSubscriberNegativeCache(subscriberNegativeCapacity, cacheNow)
+		t.Cleanup(func() { providerSubscriberNegativeCache = previousCache })
 		ctx := t.Context()
 		firstCity := egressTestCity(ctx, "First Synthetic City", "Synthetic Region", "Synthetic Country", "zz")
 		secondCity := egressTestCity(ctx, "Second Synthetic City", "Synthetic Region", "Synthetic Country", "zz")
@@ -36,6 +41,7 @@ func TestSubscriberQualityMixedWritersInvalidateWarmRequestAndRollup(t *testing.
 		egressTestHealth(ctx, provider.clientId, server.NowUtc(), 5, 0)
 		egressTestPasses(ctx, t)
 		var lastToken server.Id
+		lastWanted := true
 		assertFact := func(want bool, fresh bool) {
 			server.Db(ctx, func(conn server.PgConn) {
 				var verified bool
@@ -47,6 +53,12 @@ func TestSubscriberQualityMixedWritersInvalidateWarmRequestAndRollup(t *testing.
 				}
 				lastToken = token
 			}, server.OptReadOnly(), server.OptNoRetry())
+			if want && !lastWanted {
+				// New evidence may remain negatively cached for at most one
+				// second. Revocation in the opposite direction stays immediate.
+				cacheClock.Add(time.Second.Nanoseconds())
+			}
+			lastWanted = want
 			excluded, err := getProviderRequestExclusions(ctx, []server.Id{provider.clientId}, RankModeQuality)
 			if err != nil || excluded[provider.clientId] == want {
 				t.Fatalf("live Quality guard excluded=%t want=%t error=%v", excluded[provider.clientId], !want, err)
@@ -102,6 +114,10 @@ func TestSubscriberQualityMixedWritersInvalidateWarmRequestAndRollup(t *testing.
 func TestSubscriberQualityOldTransactionAfterNewAttestation(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		enableSubscriberQualityPolicy(t)
+		cacheClock, cacheNow := subscriberCacheTestClock()
+		previousCache := providerSubscriberNegativeCache
+		providerSubscriberNegativeCache = newSubscriberNegativeCache(subscriberNegativeCapacity, cacheNow)
+		t.Cleanup(func() { providerSubscriberNegativeCache = previousCache })
 		ctx := t.Context()
 		city := egressTestCity(ctx, "Transaction City", "Synthetic Region", "Synthetic Country", "zz")
 		provider := egressTestConnect(ctx, t, city, egressTestFast, nil, &ConnectionLocationScores{})
@@ -131,6 +147,11 @@ func TestSubscriberQualityOldTransactionAfterNewAttestation(t *testing.T) {
 		if err := SetConnectionLocation(ctx, provider.connectionId, city.LocationId, &ConnectionLocationScores{ArinQualityVerified: true}); err != nil {
 			t.Fatal(err)
 		}
+		excluded, err = getProviderRequestExclusions(ctx, []server.Id{provider.clientId}, RankModeQuality)
+		if err != nil || !excluded[provider.clientId] {
+			t.Fatalf("bounded negative changed before its expiry: excluded=%t error=%v", excluded[provider.clientId], err)
+		}
+		cacheClock.Add(time.Second.Nanoseconds())
 		excluded, err = getProviderRequestExclusions(ctx, []server.Id{provider.clientId}, RankModeQuality)
 		if err != nil || excluded[provider.clientId] {
 			t.Fatalf("fresh attestation after old commit was not accepted: excluded=%t error=%v", excluded[provider.clientId], err)
