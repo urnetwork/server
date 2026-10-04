@@ -50,7 +50,8 @@ func providerWorkRosterFixture(t testing.TB, f *providerWorkWindowFixture) []ed2
 	for index, key := range keys {
 		owner := payoutartifact.WholeWorkOwner{ClientId: [16]byte{byte(index + 1)}, NetworkId: [16]byte{byte(index + 11)}, Generation: [16]byte{byte(index + 21)}, PublicKey: [32]byte(key.Public().(ed25519.PublicKey))}
 		f.authority.Owners = append(f.authority.Owners, owner)
-		f.authority.ExpectedProviders = append(f.authority.ExpectedProviders, payoutartifact.WholeWorkExpectedProvider{ClientId: owner.ClientId, NetworkId: owner.NetworkId})
+		provider := providerWorkRetainFixtureWallet(t, f.cfg, f.authority.Domain, f.epoch.Epoch, f.epoch.Start.Block, f.epoch.StartTime, owner.ClientId, owner.NetworkId)
+		f.authority.ExpectedProviders = append(f.authority.ExpectedProviders, provider)
 	}
 	return keys
 }
