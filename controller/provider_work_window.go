@@ -94,7 +94,7 @@ func stPrepareApprovedWholeWorkInventory(ctx context.Context, approved *stProvid
 	if err != nil {
 		return nil, expected, err
 	}
-	expected, err = providerWorkPriorExpectation(ctx, authority, expected, owned)
+	expected, err = providerWorkPriorExpectation(ctx, authority, expected, providerWorkPriorCurrent{artifact: approved.Artifact, inventory: owned})
 	if err != nil {
 		return nil, expected, err
 	}
@@ -168,7 +168,7 @@ func ProviderWorkWindow(ctx context.Context, domainHash [32]byte, epoch uint64, 
 		return nil, err
 	}
 	expected.AuthorityHash = "sha256:" + hex.EncodeToString(digest[:])
-	expected, err = providerWorkPriorExpectation(ctx, authority, expected, inventory)
+	expected, err = providerWorkPriorExpectation(ctx, authority, expected, providerWorkPriorCurrent{artifact: artifact, inventory: inventory})
 	if err != nil {
 		return nil, err
 	}
