@@ -166,6 +166,15 @@ func flushTransferDebitPage(ctx, bounded context.Context, shard int, after *serv
 		}
 		result.More = true
 	}, func(err error) { returnErr = err })
+	// A next-key checkout/read can exhaust the page after earlier balances
+	// committed. Return that prefix for the task post instead of replaying its
+	// old cursor through task failure backoff. No unvisited key is acknowledged.
+	if returnErr != nil && result.Balances > 0 && result.LastBalanceId != nil &&
+		ctx.Err() == nil && bounded.Err() != nil && context.Cause(bounded) == errTransferDebitPageDeadline &&
+		(isOnlyContractError(returnErr, context.DeadlineExceeded) || isOnlyContractError(returnErr, server.DbContextDoneError)) {
+		result.More = true
+		returnErr = nil
+	}
 	return
 }
 
