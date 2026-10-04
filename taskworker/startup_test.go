@@ -118,7 +118,7 @@ func TestTaskworkerStartupKeepsMixedContradictionHard(t *testing.T) {
 			starts++
 			return nil, nil
 		},
-		func(context.Context, time.Duration) error { waits++; return nil },
+		func(context.Context, time.Duration) error { waits++; return errors.New("synthetic unexpected retry") },
 	)
 	if !errors.Is(result.err, hard) || !errors.Is(result.err, context.DeadlineExceeded) || result.worker != nil || reads != 1 || starts != 0 || waits != 0 {
 		t.Fatal("mixed startup contradiction acquired retry or runtime authority", result.err, reads, starts, waits)
@@ -249,6 +249,12 @@ func TestTaskworkerRunServesStatusDuringCancelableStartup(t *testing.T) {
 	case err := <-done:
 		t.Fatal("startup owner returned before exposing its closed status", err)
 	case <-time.After(10 * time.Second):
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("unavailable startup status also failed to join after cancellation")
+		}
 		t.Fatal("status was unavailable while the dependency read was in flight")
 	}
 	cancel()
