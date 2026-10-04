@@ -624,6 +624,10 @@ func stripeHandleInvoicePaidWithOnboarding(
 	}
 	result, err := stripeHandleInvoicePaid(invoice, clientSession)
 	if err != nil {
+		var unresolved *stripeInvoiceDestinationUnresolvedError
+		if errors.As(err, &unresolved) {
+			return stripeAcknowledgeUnresolvedInvoice(clientSession.Ctx, invoice, unresolved)
+		}
 		return result, err
 	}
 	if sub != nil {

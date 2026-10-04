@@ -70,9 +70,11 @@ Run against a test-mode api server with the stripe CLI:
   `refund.created` → ONE clawback for the pair; dispute → `disputed` event.
 - `/checkout/success` page: pay with a pre-existing balance → confirmation
   only on Pro flip or balance INCREASE (the W1 fix).
-- Email-fallback: a legacy-shaped invoice.paid (no metadata) →
-  `email_fallback` audit event + `bringyourctl payments reconcile` summary
-  line.
+- Legacy invoice (S11): a legacy-shaped invoice.paid (no subscription
+  metadata, no checkout client_reference_id) whose customer email matches an
+  account → 200, NOT credited, one `credit_unfulfillable` event (stripe,
+  evidence = invoice id) with subscription, customer, email, amount and
+  period; a redelivery adds no second event.
 
 ## Solana (devnet/mainnet dry)
 

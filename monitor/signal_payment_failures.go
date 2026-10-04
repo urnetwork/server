@@ -60,11 +60,12 @@ WITH active_supporter AS (
 ), payment_audit AS (
     SELECT store AS target,
            action AS kind,
-           count(*)::bigint AS issue_count,
+           count(DISTINCT evidence)::bigint AS issue_count,
            extract(epoch FROM now() - min(event_time))::bigint AS oldest_age,
            extract(epoch FROM now() - max(event_time))::bigint AS newest_age
     FROM payment_reconciliation_event
-    WHERE action IN ('refund_unmatched', 'email_fallback')
+    WHERE (action = 'refund_unmatched'
+           OR (action = 'credit_unfulfillable' AND store = 'stripe'))
       AND NOT dry_run
       AND event_time >= now() - interval '24 hours'
     GROUP BY store, action
@@ -141,7 +142,7 @@ func (paymentFailuresProbe) check(ctx context.Context, env *probeEnv) ([]finding
 func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int64) (finding, error) {
 	common := finding{
 		probeId: "pg/payment-failures", tier: tierPage, target: target, frame: "kind=" + kind, sustain: 1,
-		baseline: "No durable paid-but-unfulfilled payment, paying-account entitlement mismatch, orphaned active renewal, unmatched refund, or legacy identity fallback remains unresolved.",
+		baseline: "No durable paid-but-unfulfilled payment, paying-account entitlement mismatch, orphaned active renewal, unmatched refund, or paid Stripe invoice that names no account remains unresolved.",
 		observed: fmt.Sprintf("kind=%s target=%s count=%d oldest_age_seconds=%d newest_age_seconds=%d", kind, target, count, oldestAge, newestAge),
 		evidence: "Only aggregate kind/target counts and ages are selected. Network IDs, user identity, payment references, transaction signatures, provider evidence, stored details, and credentials never leave PostgreSQL.",
 		playbook: "SIGNALS.md §2.22",
@@ -185,17 +186,17 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 		common.mechanism = "The processor withdrew or disputed funds, but the webhook could not find the idempotency ledger or purchase record that names what entitlement/data should be clawed back. Guessing would affect the wrong account."
 		common.action = "Correlate the processor object with the immutable Stripe invoice/data-pack ledger using privileged tooling, repair the missing identity link, and apply the normal idempotent clawback. Do not guess from email or manually edit balances."
 		common.verify = "Each unmatched event has an authorized resolution, future refunds resolve through immutable IDs, and the 24-hour aggregate returns to zero without duplicate clawback."
-	case "email_fallback":
+	case "credit_unfulfillable":
 		if target != "stripe" {
-			return finding{}, fmt.Errorf("payment failures returned an unknown email-fallback store")
+			return finding{}, fmt.Errorf("payment failures returned an unknown unfulfillable-credit store")
 		}
 		common.tier = tierWarn
-		common.class = "payment-identity-fallback"
-		common.symptom = fmt.Sprintf("%d Stripe credit(s) used the legacy customer-email identity fallback in 24 hours", count)
-		common.mechanism = "The payment was credited, but immutable network metadata was absent and the handler fell back to customer email. Email is mutable and non-unique across account lifecycle, so continued use is a correctness risk. This aggregate alone cannot distinguish a pre-metadata legacy subscription from a current checkout regression."
-		common.context = "A current invoice does not date the subscription that produced it. Server commit bb4d0676 began stamping network_id on new Stripe subscriptions; only the provider object's creation time plus its subscription metadata and checkout-session reference can place this fallback before or after that rollout."
-		common.action = "Using authorized read-only provider tooling, compare the subscription and checkout-session creation time and metadata with Server commit bb4d0676's deployed boundary. For a legacy object with both immutable fields absent, verify the account mapping from authoritative payment/support evidence before backfilling subscription metadata; email alone is not safe write authority. For a post-boundary object, fix the checkout producer. Preserve the credited idempotency ledger; do not replay the invoice, do not infer a current deployment need from this aggregate, and do not log the customer email."
-		common.verify = "New checkout objects carry immutable network metadata and invoice credits use it; every legacy object has a verified metadata repair or documented provider/support disposition; and no email_fallback event appears for two full reconciliation windows."
+		common.class = "payment-credit-unfulfillable"
+		common.symptom = fmt.Sprintf("%d paid Stripe invoice(s) were not credited because they name no live account, in 24 hours", count)
+		common.mechanism = "invoice.paid resolves the account only from the subscription's network_id metadata or the checkout session's client_reference_id. The customer-email fallback is removed (UPGRADE.md S11), so a legacy subscription without either, or one whose named account was deleted, is acknowledged to Stripe and recorded as a credit_unfulfillable event instead of being credited to whichever account shares the email."
+		common.context = "The durable event (payment_reconciliation_event, store=stripe, action=credit_unfulfillable, evidence=invoice id) carries the subscription, customer, customer email, amount and paid period in its details. The count is distinct invoices; the webhook and the reconciler may both record one."
+		common.action = "Using authorized read-only provider tooling and payment/support evidence, establish which account paid. For a verified mapping, set network_id metadata on the Stripe subscription, then resend the invoice.paid event from the Stripe dashboard so the ordinary ledger-gated credit runs; future renewals then resolve by metadata. Otherwise record an authorized refund or support disposition. Email alone is not safe write authority; never edit balances by hand."
+		common.verify = "Each invoice is either credited once through the stripe_invoice ledger after its metadata repair or has a documented refund/support disposition, and the aggregate returns to zero without a duplicate credit."
 	default:
 		return finding{}, fmt.Errorf("payment failures returned an unknown kind")
 	}

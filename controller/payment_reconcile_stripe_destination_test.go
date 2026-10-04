@@ -198,8 +198,10 @@ func TestPaymentReconcileStripeIncompleteDestinationEvidencePinsWatermark(t *tes
 	})
 }
 
-// Resolving a live legacy destination still preserves checkout precedence,
-// fallback auditing, dry-run no-write behavior, and exactly one real credit.
+// Resolving a live legacy destination by checkout reference preserves dry-run
+// no-write behavior and exactly one real credit. A customer email that matches
+// an account is not a destination (S11): it is credit_unfulfillable, with the
+// identities support needs, and nothing is credited.
 func TestPaymentReconcileStripeLegacyDestinationResolutionMatchesDryRun(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -227,13 +229,32 @@ func TestPaymentReconcileStripeLegacyDestinationResolutionMatchesDryRun(t *testi
 				)
 				connect.AssertEqual(t, err, nil)
 				connect.AssertEqual(t, result.Errors, 0)
-				connect.AssertEqual(t, result.Credited, 1)
 				events := model.GetPaymentReconciliationEvents(ctx, result.RunId)
-				connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketStripe, model.PaymentReconcileActionCreditUnfulfillable), 0)
 				_, credited := model.GetStripeInvoiceNetworkId(ctx, invoiceId)
-				connect.AssertEqual(t, credited, !dryRun)
+				if resolution == "checkout" {
+					connect.AssertEqual(t, result.Credited, 1)
+					connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketStripe, model.PaymentReconcileActionCreditUnfulfillable), 0)
+					connect.AssertEqual(t, credited, !dryRun)
+				} else {
+					connect.AssertEqual(t, result.Credited, 0)
+					connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketStripe, model.PaymentReconcileActionCreditUnfulfillable), 1)
+					for _, event := range events {
+						if event.Action == model.PaymentReconcileActionCreditUnfulfillable {
+							connect.AssertEqual(t, event.NetworkId, nil)
+							connect.AssertEqual(t, event.Details["reason"], "destination_unresolved")
+							connect.AssertEqual(t, event.Details["customer_email"], userAuth)
+							connect.AssertEqual(t, event.Details["subscription"], "sub_synthetic_unresolved")
+							connect.AssertEqual(t, event.Details["customer"], "cus_synthetic_unresolved")
+						}
+					}
+					connect.AssertEqual(t, credited, false)
+				}
 			}
-			connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 1)
+			if resolution == "checkout" {
+				connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 1)
+			} else {
+				connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 0)
+			}
 		}
 	})
 }
