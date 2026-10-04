@@ -166,14 +166,15 @@ func runWithDependenciesAndDrainLogger(
 		readyGauge.Set(0)
 	} else {
 		config, captureErr := server.LoadArinShadowRuntimeConfig()
-		if captureErr != nil {
-			return server.ErrArinShadowInput
+		var capture *server.ArinShadowRuntime
+		if captureErr == nil {
+			capture, captureErr = server.StartArinShadowRuntime(runCtx, config, "native", func(lifetime context.Context) (server.ArinShadowRPCHandler, func(), error) {
+				return model.NewArinShadowNativeRPC(lifetime, config.Capacity)
+			})
 		}
-		capture, captureErr := server.StartArinShadowRuntime(runCtx, config, "native", func(lifetime context.Context) (server.ArinShadowRPCHandler, func(), error) {
-			return model.NewArinShadowNativeRPC(lifetime, config.Capacity)
-		})
 		if captureErr != nil {
-			return server.ErrArinShadowInput
+			// Keep strict capture refusal separate from primary worker readiness.
+			glog.Errorf("[arin-shadow]optional capture unavailable; continuing primary service startup\n")
 		}
 		defer capture.Close()
 		worker = startRuntime(runCtx, cancel, options)
