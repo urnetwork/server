@@ -16,7 +16,7 @@ import (
 
 	// "github.com/urnetwork/glog"
 
-	"github.com/ethereum/go-ethereum/common"
+	"encoding/hex"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
@@ -806,10 +806,12 @@ func VerifyEthereumSignature(publicKey string, message string, signature string)
 	msg := []byte(prefix + message)
 	msgHash := crypto.Keccak256Hash(msg)
 
-	// Decode signature
-	sig := common.FromHex(signature)
+	// Decode signature – accept hex (with or without 0x) and base64/base64url
+	// (some mobile clients such as DGEN1 encode the signature with
+	// base64.RawURLEncoding rather than hex)
+	sig := decodeSignatureBytes(signature)
 	if len(sig) != 65 {
-		return false, fmt.Errorf("signature must be 65 bytes")
+		return false, fmt.Errorf("signature must decode to 65 bytes")
 	}
 	// Ethereum uses v = 27 or 28, Go expects 0 or 1
 	if sig[64] >= 27 {
@@ -821,7 +823,25 @@ func VerifyEthereumSignature(publicKey string, message string, signature string)
 		return false, err
 	}
 	recoveredAddr := crypto.PubkeyToAddress(*pubKey)
-	return recoveredAddr.Hex() == publicKey, nil
+	// Use case-insensitive comparison: crypto.PubkeyToAddress returns an EIP-55
+	// checksummed (mixed-case) address, but some clients send all-lowercase.
+	return strings.EqualFold(recoveredAddr.Hex(), publicKey), nil
+}
+
+// decodeSignatureBytes accepts a complete 65-byte hex, standard-base64 or
+// raw-base64url encoding. Partial hex prefixes must not hide a valid base64
+// signature, and malformed trailing input must never be silently discarded.
+func decodeSignatureBytes(s string) []byte {
+	hexValue := strings.TrimPrefix(strings.TrimPrefix(s, "0x"), "0X")
+	if b, err := hex.DecodeString(hexValue); err == nil && len(b) == 65 {
+		return b
+	}
+	for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawURLEncoding} {
+		if b, err := encoding.DecodeString(s); err == nil && len(b) == 65 {
+			return b
+		}
+	}
+	return nil
 }
 
 /**
