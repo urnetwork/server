@@ -1233,10 +1233,15 @@ func TestPaymentPlanSubsidy(t *testing.T) {
 				connect.AssertEqual(t, err, nil)
 			}
 
-			CloseContract(ctx, transferEscrow.ContractId, sourceId, usedTransferByteCount, false)
-			CloseContract(ctx, transferEscrow.ContractId, destinationId, usedTransferByteCount, false)
-			paidByteCount += usedTransferByteCount
-			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
+			// The final contract may shrink to the remaining balance. Consume
+			// the grant advertised to clients, so this drain neither overreports
+			// usage nor counts a rejected close as paid work.
+			grantedByteCount := transferEscrow.TransferByteCount
+			connect.AssertEqual(t, 0 < grantedByteCount && grantedByteCount <= usedTransferByteCount, true)
+			connect.AssertEqual(t, CloseContract(ctx, transferEscrow.ContractId, sourceId, grantedByteCount, false), nil)
+			connect.AssertEqual(t, CloseContract(ctx, transferEscrow.ContractId, destinationId, grantedByteCount, false), nil)
+			paidByteCount += grantedByteCount
+			paid += UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(grantedByteCount) / float64(netTransferByteCount))
 			contractCount += 1
 		}
 		// at this point the balance should be fully used up
