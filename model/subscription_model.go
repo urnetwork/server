@@ -2785,7 +2785,12 @@ func claimContractOutcomeInTx(
 	if err != nil {
 		return false, err
 	}
-	closedAt := server.NowUtc().Truncate(time.Microsecond)
+	// Open observations and terminal originals share the database clock after
+	// this same row fence; a handler clock skew cannot reverse their order.
+	var closedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp() AT TIME ZONE 'UTC'`).Scan(&closedAt); err != nil {
+		return false, err
+	}
 	tag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
