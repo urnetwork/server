@@ -204,6 +204,8 @@ require (
 	src.agwa.name/tlshacks v0.0.4 // indirect
 )
 
+// Keep the ACK ownership repair and the preparation-cohort API required by SN
+// in one composed revision; the imported SN module's replace is not inherited.
 replace github.com/urnetwork/connect => github.com/urnetwork/connect v0.0.0-20261004062731-aab49d971580
 
 replace github.com/pion/sctp => github.com/urnetwork/connect/sctp v0.0.0-20261002163341-6443417d70dc
