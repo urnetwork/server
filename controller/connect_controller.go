@@ -1338,6 +1338,9 @@ func CloseContract(
 	}
 	usedTransferByteCount := model.ByteCount(closeContract.AckedByteCount)
 	checkpoint := closeContract.Checkpoint
+	if len(closeContract.OriginalReport) != 0 && len(closeContract.ReportId) == 0 {
+		return model.ErrContractCloseOriginalIntegrity
+	}
 
 	if len(closeContract.ReportId) != 0 {
 		reportId, err := server.IdFromBytes(closeContract.ReportId)
@@ -1347,7 +1350,7 @@ func CloseContract(
 		applied, err := model.CloseContractWithReport(ctx, model.ContractCloseReport{
 			ReportId: reportId, ContractId: contractId, ClientId: clientId,
 			AckedByteCount: usedTransferByteCount, UnackedByteCount: closeContract.UnackedByteCount,
-			Checkpoint: checkpoint,
+			Checkpoint: checkpoint, OriginalReport: closeContract.OriginalReport,
 		})
 		if applied {
 			// Count the committed original once, even if later settlement needs retry.

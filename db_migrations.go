@@ -9514,4 +9514,6 @@ var migrations = []any{
 	newSqlMigration(circleTransferRequestSchemaSql),
 	// Stable control retries retain one original request and one byte increment.
 	newSqlMigration(contractCloseReportSchemaSql),
+	// Preserve optional original client signatures with their accepted increments.
+	newSqlMigration(contractCloseOriginalSchemaSql),
 }

@@ -105,7 +105,11 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 	usagesByClientId := map[server.Id]*StProviderUsage{}
 	var returnErr error
 	server.Db(ctx, func(conn server.PgConn) {
-		rows, err := conn.Query(ctx, stEpochProviderUsageSql, startTime, endTime)
+		query := stEpochProviderUsageSql
+		if census != nil {
+			query = stEpochProviderOriginalUsageSql
+		}
+		rows, err := conn.Query(ctx, query, startTime, endTime)
 		if err != nil {
 			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
 			return
@@ -116,7 +120,12 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 			var data []byte
 			var closedAt *time.Time
 			var duplicate bool
-			if err := rows.Scan(&contractId, &data, &closedAt, &duplicate); err != nil {
+			var originalReports []byte
+			columns := []any{&contractId, &data, &closedAt, &duplicate}
+			if census != nil {
+				columns = append(columns, &originalReports)
+			}
+			if err := rows.Scan(columns...); err != nil {
 				returnErr = err
 				return
 			}
@@ -140,11 +149,14 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 			if census != nil {
 				census.Count++
 				if census.Records != nil {
-					if len(census.Records) == payoutartifact.MaxClosedWorkRecords || len(data) > payoutartifact.MaxClosedWorkRecordBytes || len(data) > payoutartifact.MaxClosedWorkOriginalBytes-originalBytes {
+					if len(originalReports) > payoutartifact.MaxClosedWorkRecordBytes {
+						originalReports = nil // Preserve original usage, never a truncated proof.
+					}
+					if len(census.Records) == payoutartifact.MaxClosedWorkRecords || len(data) > payoutartifact.MaxClosedWorkRecordBytes || len(data)+len(originalReports) > payoutartifact.MaxClosedWorkOriginalBytes-originalBytes {
 						census.Records = nil // No prefix may claim the complete query.
 					} else {
-						originalBytes += len(data)
-						census.Records = append(census.Records, payoutartifact.ClosedWorkRecord{ContractId: [16]byte(contractId), ClosedAt: closedAt.UTC().Format(time.RFC3339Nano), Original: bytes.Clone(data)})
+						originalBytes += len(data) + len(originalReports)
+						census.Records = append(census.Records, payoutartifact.ClosedWorkRecord{ContractId: [16]byte(contractId), ClosedAt: closedAt.UTC().Format(time.RFC3339Nano), Original: bytes.Clone(data), OriginalReports: bytes.Clone(originalReports)})
 					}
 				}
 			}

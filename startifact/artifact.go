@@ -33,6 +33,7 @@ var Sign = payoutartifact.Sign
 var Verify = payoutartifact.Verify
 var VerifyWithContext = payoutartifact.VerifyWithContext
 var VerifyClosedWork = payoutartifact.VerifyClosedWork
+var VerifyClosedWorkReports = payoutartifact.VerifyClosedWorkReports
 var Bytes = payoutartifact.Bytes
 var BytesWithContext = payoutartifact.BytesWithContext
 var Decode = payoutartifact.Decode

@@ -3344,7 +3344,7 @@ func stComputeReleasePayout(
 		return [32]byte{}, 0, err
 	}
 	if artifact.ClosedWork != nil {
-		if _, err := startifact.VerifyClosedWork(ctx, artifact); err != nil {
+		if _, err := startifact.VerifyClosedWorkReports(ctx, artifact, common.Address{}); err != nil {
 			return [32]byte{}, 0, err
 		}
 	}

@@ -3,6 +3,7 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -21,6 +22,7 @@ type ContractCloseReport struct {
 	AckedByteCount   ByteCount
 	UnackedByteCount uint64
 	Checkpoint       bool
+	OriginalReport   []byte
 }
 
 // These typed refusals distinguish identity reuse from a missing or closed original.
@@ -40,6 +42,13 @@ func CloseContractWithReport(ctx context.Context, report ContractCloseReport) (a
 	}
 	if report.ReportId == (server.Id{}) || report.ContractId == (server.Id{}) || report.ClientId == (server.Id{}) || report.AckedByteCount < 0 {
 		return false, ErrContractCloseReportInvalid
+	}
+	report.OriginalReport = bytes.Clone(report.OriginalReport)
+	if len(report.OriginalReport) == 0 {
+		report.OriginalReport = nil
+	}
+	if _, err := validateContractCloseOriginal(report); err != nil {
+		return false, err
 	}
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -78,13 +87,19 @@ func matchContractCloseReportInTx(ctx context.Context, tx server.PgTx, report Co
 	var acked ByteCount
 	var unacked string
 	var checkpoint bool
-	err := tx.QueryRow(ctx, `SELECT contract_id,acked_byte_count,unacked_byte_count::text,checkpoint
-  FROM contract_close_report WHERE client_id=$1 AND report_id=$2`, report.ClientId, report.ReportId).Scan(&contractId, &acked, &unacked, &checkpoint)
+	var original []byte
+	err := tx.QueryRow(ctx, `SELECT contract_id,acked_byte_count,unacked_byte_count::text,checkpoint,original_report
+  FROM contract_close_report WHERE client_id=$1 AND report_id=$2`, report.ClientId, report.ReportId).Scan(&contractId, &acked, &unacked, &checkpoint, &original)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	server.Raise(err)
 	if contractId != report.ContractId || acked != report.AckedByteCount || unacked != strconv.FormatUint(report.UnackedByteCount, 10) || checkpoint != report.Checkpoint {
+		return true, ErrContractCloseReportConflict
+	}
+	// Older intermediaries may omit evidence; their exact retry cannot erase it.
+	// A previously unsigned admission cannot be backfilled as an original signature.
+	if len(report.OriginalReport) > 0 && !bytes.Equal(report.OriginalReport, original) {
 		return true, ErrContractCloseReportConflict
 	}
 	return true, nil
@@ -96,13 +111,17 @@ func closeContractReportInTx(ctx context.Context, tx server.PgTx, report Contrac
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
+	original, err := validateContractCloseOriginal(report)
+	if err != nil {
+		return false, err
+	}
 	if found, err := matchContractCloseReportInTx(ctx, tx, report); found || err != nil {
 		return false, err
 	}
 	var sourceId, destinationId server.Id
 	var outcome *ContractOutcome
 	var dispute bool
-	err := tx.QueryRow(ctx, `SELECT source_id,destination_id,outcome,dispute FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, report.ContractId).Scan(&sourceId, &destinationId, &outcome, &dispute)
+	err = tx.QueryRow(ctx, `SELECT source_id,destination_id,outcome,dispute FROM transfer_contract WHERE contract_id=$1 FOR UPDATE`, report.ContractId).Scan(&sourceId, &destinationId, &outcome, &dispute)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, fmt.Errorf("Contract not found: %s", report.ContractId)
 	}
@@ -129,13 +148,17 @@ func closeContractReportInTx(ctx context.Context, tx server.PgTx, report Contrac
 	if dispute {
 		return false, fmt.Errorf("Contract in dispute: %s", report.ContractId)
 	}
+	registration, keyIssue, err := originalCloseKeyRegistrationInTx(ctx, tx, original)
+	if err != nil {
+		return false, err
+	}
 	// Reserve before accumulating. A different-contract collision must never
 	// commit an increment before discovering that its report key already exists.
 	acceptedAt := server.NowUtc()
 	tag := server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close_report
-  (client_id,report_id,contract_id,party,acked_byte_count,unacked_byte_count,checkpoint,accepted_at)
-  VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(client_id,report_id) DO NOTHING`,
-		report.ClientId, report.ReportId, report.ContractId, party, report.AckedByteCount, strconv.FormatUint(report.UnackedByteCount, 10), report.Checkpoint, acceptedAt))
+	  (client_id,report_id,contract_id,party,acked_byte_count,unacked_byte_count,checkpoint,accepted_at,original_report,original_key_registration,original_key_issue)
+	  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(client_id,report_id) DO NOTHING`,
+		report.ClientId, report.ReportId, report.ContractId, party, report.AckedByteCount, strconv.FormatUint(report.UnackedByteCount, 10), report.Checkpoint, acceptedAt, report.OriginalReport, registration, keyIssue))
 	if tag.RowsAffected() == 0 {
 		found, err := matchContractCloseReportInTx(ctx, tx, report)
 		if !found && err == nil {
