@@ -3325,7 +3325,10 @@ func stComputeReleasePayout(
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
-	wallets := model.GetStProviderWalletsAt(ctx, endTime)
+	wallets, err := stProviderWalletsForEpoch(ctx, cfg, workAuthority, authority)
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
 	networkForClient := map[[16]byte]server.Id{}
 	clientIds := make([][16]byte, len(usages))
 	for index, usage := range usages {
