@@ -16,7 +16,13 @@ import (
 )
 
 const providerWorkOpenBatchSize = 64
-const providerWorkOpenTimeout = 30 * time.Second
+const providerWorkOpenTimeout = 300 * time.Second
+
+// The finite observation owner preserves any earlier caller deadline. Its
+// expected database reads use the same approved 300-second recovery budget.
+func providerWorkOpenContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(providerWorkSessionContext(ctx), providerWorkOpenTimeout)
+}
 
 // Capture only actual unresolved rows after their original reservation. The
 // dedicated configured source owns signing; the artifact publisher supplies no
@@ -40,7 +46,7 @@ func RetainProviderWorkOpenObservations(ctx context.Context, contractIds []serve
 	if ids[0] == (server.Id{}) {
 		return nil, protocol.ErrProviderWorkIntegrity
 	}
-	ctx, cancel := context.WithTimeout(providerWorkSessionContext(ctx), providerWorkOpenTimeout)
+	ctx, cancel := providerWorkOpenContext(ctx)
 	defer cancel()
 	epochText := strconv.FormatUint(epoch, 10)
 	blockText := strconv.FormatUint(block, 10)
