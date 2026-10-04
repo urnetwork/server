@@ -11642,6 +11642,20 @@ The shard-zero owner alone periodically produces the global census:
   cycle rows remain in the eligible denominator, are explicitly uninitialized,
   and cannot receive an invented new four-hour grace interval.
 
+`oldest_due_seconds` has a narrower meaning than "oldest overdue provider".
+`GetProviderUrlProbeFleet` (`model/provider_url_probe_fleet.go:33–59`) computes
+its maximum only inside the current authoritative eligibility cohort, but the
+age filter requires only `next_attempt_at <= now`. It does not require a quota
+deficit, mature cycle age, unresolved security state or a true stored eligibility
+hint. A quota-complete provider with an old scheduling timestamp can therefore
+set the maximum without being overdue. Missing cycles contribute to due and
+uninitialized counts but have no timestamp for this maximum. Neither a large
+age nor zero age proves oldest deficient-provider liveness. Preserve the true
+overdue/deficit counts; a precise tail read must revalidate current admission,
+rolling accepted measurements and security state within its bounded selection.
+A raw cycle-index head containing only ineligible rows cannot disprove this
+eligible-cohort aggregate or establish fleet-wide hint failure.
+
 Private shard funding reserves at least ten times a conservative full-pass
 contract forecast: all selected turns plus concurrent headroom, the complete
 renewal ramp and current/ahead/prefetched slots in both directions, and every
@@ -18175,6 +18189,39 @@ and resident worker; software present on disk is not proof of active behavior.
 Pair these controls with the readiness-gated metrics publication in §11.20.
 These source corrections were not deployed during the observations above;
 verify each running artifact before attributing current behavior to the fix.
+
+The 2026-10-04 6300 rollout adds a concrete observation boundary. The inspected
+workstation Warp source `9a756319` still has a void `pollStatusUntil`
+(`warpctl/docker.go:540`), whose exhausted timeout returns normally at line 607;
+the deploy caller continues to `announceDeployEnded` (`warpctl/main.go:772`).
+The earlier intended timeout correction is not evidence that this exact CLI or
+any resident worker contains it. A zero deployment exit and all block-selection
+markers establish successful selection work, not completed runtime convergence.
+
+`sampleStatusVersions` (`warpctl/docker.go:690`) increments one count per HTTP
+response; `pollLbBlockStatusUntil` requests twenty responses per block (line 860).
+Five blocks therefore produce a hundred samples even when the service has a
+different number of owners. A 21/100 target-version tally is not 21 current and
+79 old processes. Repeated responses can reach the same owner; missing owners,
+traffic weighting and a draining predecessor are not resolved by the tally.
+Even a clean 100% target response sample does not prove every owner changed or
+every predecessor exited. Keep partial transport observations explicit, as in
+`TestOnlyOlderRetriesTransientTransportSampleUntilClean`; use the independent
+source/start/freshness join in §8.12 and native artifact/lifecycle evidence for
+those separate questions. No monitoring reducer may convert response counts
+into a container census or use a normal poll return as a retirement signal.
+
+The inspected worker's `deploy` (`warpctl/run.go:1323`) holds the per-host,
+per-service overlap lease through candidate startup, readiness, redirect and
+old-container drain, then a five-second settle. `NewDrainWorker` (line 3655)
+allows the existing sixty-minute drain, so other blocks can legitimately wait
+before starting a replacement. `TestHostDrainLockCoversReplacementOverlap` and
+`TestHostDrainLockTimeoutRefusesReplacement` cover that source contract. A mixed
+generation observation does not distinguish this wait from failed readiness,
+stale metrics, unavailable observation or a stalled worker. Bind the actual
+resident worker, lock ownership, candidate readiness, front route and current
+container state before choosing a cause. This qualifier changes no deployment
+semantics and authorizes no forced restart or retirement.
 
 ### 8.12 Fleet service artifact provenance
 Probe: `provenance`
