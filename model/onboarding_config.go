@@ -65,12 +65,31 @@ type OnboardingAppleOfferCodesConfig struct {
 	// of the onboarding25 offer code. Empty = the top-up task is inert and the
 	// custom code stays the only App Store path.
 	OfferCodeId string `yaml:"offer_code_id"`
+	// OfferReferenceName is the offer code's reference name in App Store
+	// Connect. A redemption's transaction carries no appAccountToken; its
+	// offerIdentifier claim names the offer code (offerType 3), and only a
+	// redemption of this offer can be bound to a network that was issued a
+	// code. Empty = OnboardingAppleOfferReferenceNameDefault.
+	OfferReferenceName string `yaml:"offer_reference_name"`
 	// BatchSize per top-up (Apple's minimum is 500)
 	BatchSize int `yaml:"batch_size"`
 	// MinAvailable: a top-up runs when fewer unexpired, unassigned codes remain
 	MinAvailable int `yaml:"min_available"`
 	// ExpiryDays of a batch (the offer's validity, 5)
 	ExpiryDays int `yaml:"expiry_days"`
+}
+
+// OnboardingAppleOfferReferenceNameDefault is the reference name of the
+// welcome offer code in App Store Connect (the yearly subscription's Offer
+// Codes -> onboarding25).
+const OnboardingAppleOfferReferenceNameDefault = "onboarding25"
+
+// ReferenceName is the configured offer code reference name, or the default.
+func (c OnboardingAppleOfferCodesConfig) ReferenceName() string {
+	if name := strings.TrimSpace(c.OfferReferenceName); name != "" {
+		return name
+	}
+	return OnboardingAppleOfferReferenceNameDefault
 }
 
 // Template variant and locale fallbacks.

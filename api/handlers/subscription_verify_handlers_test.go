@@ -104,3 +104,34 @@ func TestAppleVerifierVerifyTransactionAcceptsOldSignedDate(t *testing.T) {
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, claims["transactionId"], "client-reported-transaction-old")
 }
+
+// TestAppleVerifierVerifyTransactionWithoutAccountToken: an offer-code
+// redemption (redeem sheet / redeem link) is signed without an
+// appAccountToken. The verifier must still accept it and surface the claims
+// the offer-code binding needs (offerType, offerIdentifier,
+// originalTransactionId); the binding itself is decided in the controller.
+func TestAppleVerifierVerifyTransactionWithoutAccountToken(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	chain := newAppleTestCertificateChain(t, now, now.Add(24*time.Hour))
+	verifier := appleTestVerifier(chain, now)
+	signed := chain.sign(t, gojwt.MapClaims{
+		"signedDate":            now.UnixMilli(),
+		"bundleId":              "network.ur",
+		"environment":           "Production",
+		"transactionId":         "offer-code-transaction-1",
+		"originalTransactionId": "offer-code-original-1",
+		"productId":             "supporter_yearly_26",
+		"purchaseDate":          now.Add(-time.Hour).UnixMilli(),
+		"expiresDate":           now.Add(365 * 24 * time.Hour).UnixMilli(),
+		"price":                 int64(29990),
+		"offerType":             int64(3),
+		"offerIdentifier":       "onboarding25",
+	})
+	claims, err := verifier.verifyTransaction(signed)
+	connect.AssertEqual(t, err, nil)
+	_, hasAccountToken := claims["appAccountToken"]
+	connect.AssertEqual(t, hasAccountToken, false)
+	connect.AssertEqual(t, claims["originalTransactionId"], "offer-code-original-1")
+	connect.AssertEqual(t, claims["offerIdentifier"], "onboarding25")
+	connect.AssertEqual(t, claims["offerType"], float64(3))
+}
