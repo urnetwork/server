@@ -94,6 +94,7 @@ func TestStOperatorGasDistinctConcurrentNoncesShareLifetimeCeiling(t *testing.T)
 		if intents[0].Nonce == intents[1].Nonce {
 			tb.Fatal("fixture failed to reserve distinct same-account nonces")
 		}
+		workerCtx, cancelWorkers := context.WithTimeout(tb.Context(), 30*time.Second)
 		start := make(chan struct{})
 		results := make(chan error, 2)
 		var workers sync.WaitGroup
@@ -101,13 +102,37 @@ func TestStOperatorGasDistinctConcurrentNoncesShareLifetimeCeiling(t *testing.T)
 			workers.Add(1)
 			go func(intent *StTransactionIntent) {
 				defer workers.Done()
-				<-start
-				_, err := ReserveStTransactionGasAttempt(context.Background(), p, a, intent.IntentId, 1, StTxAttemptExecution, stGasModelTransaction(intent, 60_000, 10))
+				select {
+				case <-start:
+				case <-workerCtx.Done():
+					results <- workerCtx.Err()
+					return
+				}
+				_, err := ReserveStTransactionGasAttempt(workerCtx, p, a, intent.IntentId, 1, StTxAttemptExecution, stGasModelTransaction(intent, 60_000, 10))
 				results <- err
 			}(intent)
 		}
+		joined := make(chan struct{})
+		go func() {
+			workers.Wait()
+			close(joined)
+		}()
+		defer func() {
+			cancelWorkers()
+			select {
+			case <-joined:
+			case <-time.After(10 * time.Second):
+				tb.Error("operator gas reservation workers did not join after cancellation")
+			}
+		}()
 		close(start)
-		workers.Wait()
+		// The launch channel establishes the competing requests. These
+		// deadlines only bound a broken database lock/cancellation path.
+		select {
+		case <-joined:
+		case <-workerCtx.Done():
+			tb.Fatal("operator gas reservation workers exceeded their parent deadline", workerCtx.Err())
+		}
 		close(results)
 		success, refused := 0, 0
 		for err := range results {
@@ -119,7 +144,7 @@ func TestStOperatorGasDistinctConcurrentNoncesShareLifetimeCeiling(t *testing.T)
 				tb.Fatal(err)
 			}
 		}
-		snapshot, err := GetStOperatorGasBudgetSnapshot(context.Background(), p.Scope())
+		snapshot, err := GetStOperatorGasBudgetSnapshot(workerCtx, p.Scope())
 		if err != nil || success != 1 || refused != 1 || snapshot == nil || snapshot.MaximumLiabilityWei != "600000" || snapshot.Attempts != 1 {
 			tb.Fatalf("same-account concurrent writers exceeded lifetime: success=%d refused=%d snapshot=%+v error=%v", success, refused, snapshot, err)
 		}
