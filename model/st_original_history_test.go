@@ -33,8 +33,10 @@ func TestStEventOriginalRejectsContradictoryReplay(t *testing.T) {
 		UpsertStEvents(ctx, testStDeploymentKey, []*StChainEvent{event})
 		changed := *event
 		changed.DataJson = `{"synthetic":false}`
-		if err := server.HandleError(func() { UpsertStEvents(ctx, testStDeploymentKey, []*StChainEvent{&changed}) }); !errors.Is(err, ErrStEventOriginalIntegrity) {
-			t.Fatalf("contradictory event: %v", err)
+		recovered := server.HandleError(func() { UpsertStEvents(ctx, testStDeploymentKey, []*StChainEvent{&changed}) })
+		cause, ok := recovered.(error)
+		if !ok || !errors.Is(cause, ErrStEventOriginalIntegrity) {
+			t.Fatalf("contradictory event: %v", recovered)
 		}
 		rows := GetStEvents(ctx, testStDeploymentKey, 41, 41)
 		if len(rows) != 1 || !bytes.Equal(rows[0].OriginalLog, event.OriginalLog) || rows[0].DataJson != event.DataJson {

@@ -175,8 +175,10 @@ func TestVerifyOriginalCanceledReadPreservesCause(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if err := server.HandleError(func() { GetLatestVerifyOriginal(ctx, server.NewId()) }); err == nil || (!errors.Is(err, context.Canceled) && !errors.Is(err, server.DbContextDoneError)) {
-			t.Fatalf("canceled original read: %v", err)
+		recovered := server.HandleError(func() { GetLatestVerifyOriginal(ctx, server.NewId()) })
+		cause, ok := recovered.(error)
+		if !ok || (!errors.Is(cause, context.Canceled) && !errors.Is(cause, server.DbContextDoneError)) {
+			t.Fatalf("canceled original read: %v", recovered)
 		}
 	})
 }

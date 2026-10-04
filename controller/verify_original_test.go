@@ -53,8 +53,10 @@ func TestVerifyOriginalCommitRecoversAssignment(t *testing.T) {
 		crash := errors.New("synthetic failure after original commit")
 		verifyOriginalAfterCommit = func() { panic(crash) }
 		defer func() { verifyOriginalAfterCommit = nil }()
-		if err := server.HandleError(func() { _, err := Verify(request, session); server.Raise(err) }); !errors.Is(err, crash) {
-			t.Fatalf("crash boundary: %v", err)
+		recovered := server.HandleError(func() { _, err := Verify(request, session); server.Raise(err) })
+		cause, ok := recovered.(error)
+		if !ok || !errors.Is(cause, crash) {
+			t.Fatalf("crash boundary: %v", recovered)
 		}
 		verifyOriginalAfterCommit = nil
 		trailId := server.Id(assign.TrailId)
@@ -116,8 +118,10 @@ func TestVerifyOriginalCommitRecoversFinal(t *testing.T) {
 		crash := errors.New("synthetic final publication failure")
 		verifyOriginalAfterCommit = func() { panic(crash) }
 		defer func() { verifyOriginalAfterCommit = nil }()
-		if err := server.HandleError(func() { _, err := Verify(request, session); server.Raise(err) }); !errors.Is(err, crash) {
-			t.Fatalf("crash boundary: %v", err)
+		recovered := server.HandleError(func() { _, err := Verify(request, session); server.Raise(err) })
+		cause, ok := recovered.(error)
+		if !ok || !errors.Is(cause, crash) {
+			t.Fatalf("crash boundary: %v", recovered)
 		}
 		verifyOriginalAfterCommit = nil
 		trailId := server.Id(assign.TrailId)
