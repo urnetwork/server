@@ -269,7 +269,8 @@ schema and research contract.
 Each build produces `arin.mmdb` and `manifest.json`. The MMDB contains direct
 registration identity and scope, countries, classification state, matching rule
 and source, reason, ambiguity/owner evidence, and independent risk evidence.
-Known origin decisions add `origin_use_state`, `origin_asns`,
+Observed origins add `origin_use_state` and `origin_asns`, including unidentified
+origins whose use remains unknown. Known origin decisions additionally add
 `origin_operator_ids`, `origin_evidence_source`, `origin_peers` and, when RPKI
 payloads were supplied, `origin_rpki_validity`. Withheld decisions add
 `origin_withheld_reason`. New inferred approvals also carry
@@ -278,6 +279,18 @@ payloads were supplied, `origin_rpki_validity`. Withheld decisions add
 their existing classification provenance. Address-level findings add
 `address_risk_source_ids` and their `network_risk_evidence` entries. A record
 carrying any origin or address-level field is rejected as augmentation input.
+
+Unknown origin attribution preserves the base classification, including direct
+subscriber approval and all independent risk evidence. It supplies the bounded
+current-owner research aggregate in [CAPTURE.md](../arinshadowctl/CAPTURE.md)
+without exporting provider addresses. Withheld origin identities remain distinct
+from unknown origins in that aggregate; neither adds an approval.
+
+The full augmentation walk reuses successful immutable decoded records by
+reader-local MMDB offset. Each reader has a 65,536-record FIFO cache; evicted
+records are decoded again. This bounds the optimization without dropping
+routes, base partitions, classification fields or evidence. The manifest records
+hits and misses for both base and origin readers.
 
 The registration manifest binds the builder version, XML, GeoLite database,
 rules, optional evidence files, output hash, build time, and classification and

@@ -25,6 +25,17 @@ and memory maps it; it checks schema metadata and treats lookup errors as
 unknown. It does not repeat the expensive full-database `Verify` per process.
 Immutable, read-only mounted files are required for the mapping's lifetime.
 
+Each mapped active/candidate file has a finite 1 GiB limit, checked before
+hashing and enforced again on the hash stream. The global origin attribution
+build of 2026-10-04 measured 559,752,379 bytes (533.82 MiB), up 10.73% from the
+505,506,195-byte v7 artifact. This measured whole-file growth required a
+separate mapped-capture budget; it does not narrow the worldwide subscriber
+research scope. The legacy observer still limits each heap-copied file to
+512 MiB. Both immutable mappings together may occupy up to their complete
+file sizes in resident pages, so the larger limit alone is not a host-memory
+qualification. Qualify the exact whole artifacts' hash/open time, heap and
+RSS before use; retain the source, transport, cohort and lifecycle limits.
+
 A release config staging tree therefore adds only:
 
 ```
@@ -229,6 +240,34 @@ use from an ASN, brand, parent organization or traffic volume. Any proposed
 prefix rule still needs affirmative residential/business subscriber evidence,
 proxy/virtual exclusion checks, rebuild/readback and another complete shadow.
 Attribution truncation never changes the provider/native denominators.
+
+`origin_connection_counts` complements registration attribution with the
+candidate record's public origin ASN set and its reviewed `use_state`. It retains
+unknown origin identities across RIR regions and distinguishes the classifier's
+`withheld` inference from unreviewed use without changing the base decision.
+Each qualified connection belongs
+to at most one set; a multiple-origin route is not attributed to an arbitrary
+single operator. Counters show the final subscriber/excluded/unknown/ambiguous
+classification and independent risk alongside that routing identity.
+Sets have at most eight strictly increasing, distinct ASNs. Missing, malformed
+or larger sets increment `origin_unattributed_connections`; the aggregate keeps
+at most 4,096 distinct sets and counts additional connections separately in
+`origin_overflow_connections`. Existing sets still accumulate exact counts after
+that bound. The sorted output is the retained groups ordered by observed
+connections, not proof of a complete global top-ASN list when overflow exists.
+All source, provider, native-membership and eligibility denominators remain
+unchanged. Old resources or owner binaries may lack this optional attribution.
+Use the current coordinator with owners exposing the added reply field; an old
+strict coordinator rejects new owner replies.
+
+Join unknown ASN sets to the pinned catalog and official RIR/operator sources
+to prioritize missing identity and subscriber-service reviews. Preserve mixed
+origins and contrary-use evidence during that research. Record verified regional
+service footprints and ranking evidence separately; connection counts do not
+prove market share, customer location or subscriber use. Then rebuild from the
+unaugmented base and compare a fresh complete provider capture. The origin
+snapshot manifest provides provenance for unknown routing identities; this
+aggregate adds neither implicit subscriber approvals nor network-risk flags.
 
 The supported Main capacity control covers100001 real PG providers/105001
 connections,20 real Connect Unix endpoints behind4 real child multiplexers,

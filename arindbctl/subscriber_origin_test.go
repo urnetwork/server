@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -166,6 +167,28 @@ func TestSubscriberOriginVisibilityInheritsOnlyIdenticalAggregates(t *testing.T)
 	// Merged equal-prefix origins keep each origin's own best peer count.
 	if route := routes[netip.MustParsePrefix("203.0.113.0/24")]; len(route.origins) != 2 || route.origins[0].peers != 7 || route.origins[1].peers != 7 {
 		t.Fatalf("merged origins lost peer counts: %+v", route)
+	}
+}
+
+func TestSubscriberUnknownOriginsKeepResearchIdentityWithoutChangingUse(t *testing.T) {
+	decision := subscriberOriginDecision(subscriberFixtureRoute(1, 12345, 12346), nil, defaultMinimumOriginPeers)
+	for _, state := range []string{"subscriber", "excluded", "unknown", "ambiguous"} {
+		for _, risk := range []bool{false, true} {
+			base := subscriberFixtureRecord(state, risk)
+			base["classification_rule"] = mmdbtype.String("original-reviewed-rule")
+			got, err := augmentSubscriberRecord(base, decision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got["origin_use_state"] != mmdbtype.String("unknown") || !reflect.DeepEqual(got["origin_asns"], mmdbtype.Slice{mmdbtype.Uint32(12345), mmdbtype.Uint32(12346)}) {
+				t.Fatal("unreviewed global routing identity was discarded")
+			}
+			delete(got, "origin_use_state")
+			delete(got, "origin_asns")
+			if !reflect.DeepEqual(base, got) {
+				t.Fatal("unreviewed origins changed independent use, risk or registration evidence")
+			}
+		}
 	}
 }
 
@@ -346,12 +369,18 @@ func TestSubscriberOriginBuildGlobalPrefixesAndPreservesBaseCoverage(t *testing.
 		if 208 <= n && n < 224 && record["origin_peers"] != mmdbtype.Uint32(4) {
 			t.Fatalf("offset=%d own more-specific lost aggregate visibility: %+v", n, record)
 		}
+		if 64 <= n && n < 128 && (record["origin_use_state"] != mmdbtype.String("unknown") || !reflect.DeepEqual(record["origin_asns"], mmdbtype.Slice{mmdbtype.Uint32(64501)})) {
+			t.Fatalf("offset=%d lost the narrower unreviewed origin's research identity", n)
+		}
 	}
 	for _, tc := range []struct{ address, state, withheld string }{{"198.51.100.1", "unknown", "insufficient-origin-visibility"}, {"203.0.113.1", "unknown", ""}, {"2001:db8::1", "subscriber", ""}, {"2001:db9::1", "unknown", ""}} {
 		record := lookupSubscriberRecord(t, db, tc.address)
 		withheld, _ := record["origin_withheld_reason"].(mmdbtype.String)
 		if record["quality_state"] != mmdbtype.String(tc.state) || string(withheld) != tc.withheld {
 			t.Fatalf("global coverage mismatch at %s: %+v", tc.address, record)
+		}
+		if tc.state == "unknown" && tc.withheld == "" && (record["origin_asns"] != nil || record["origin_use_state"] != nil) {
+			t.Fatal("unrouted space inherited a routing identity")
 		}
 	}
 	manifest, err := os.ReadFile(filepath.Join(out, "manifest.json"))

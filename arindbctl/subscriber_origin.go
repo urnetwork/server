@@ -426,7 +426,9 @@ func subscriberOriginDecision(route subscriberOriginRoute, byASN map[uint32][]su
 		state = "ambiguous"
 	}
 	if state == "unknown" {
-		return mmdbtype.Map{"state": mmdbtype.String(state)}
+		// Retain routing identity for current-owner research without turning
+		// an unreviewed origin into subscriber or risk evidence.
+		return mmdbtype.Map{"state": mmdbtype.String(state), "asns": asns}
 	}
 	slices.Sort(ids)
 	slices.Sort(sources)
@@ -481,14 +483,19 @@ func augmentSubscriberRecord(base, origin mmdbtype.Map) (mmdbtype.Map, error) {
 	if !ok || !hasNonQuality || !hasRisk || !slices.Contains([]mmdbtype.String{"subscriber", "unknown", "excluded", "ambiguous"}, state) || bool(nonQuality) != (state != "subscriber") {
 		return nil, errors.New("subscriber augmentation found inconsistent base evidence")
 	}
-	if origin == nil || origin["state"] == mmdbtype.String("unknown") {
+	if origin == nil {
 		return base, nil
 	}
 	data := make(mmdbtype.Map, len(base)+7)
 	for key, value := range base {
 		data[key] = value
 	}
-	data["origin_use_state"], data["origin_asns"], data["origin_operator_ids"], data["origin_evidence_source"] = origin["state"], origin["asns"], origin["operators"], origin["source"]
+	data["origin_use_state"], data["origin_asns"] = origin["state"], origin["asns"]
+	if origin["state"] == mmdbtype.String("unknown") {
+		// Preserve every independent direct approval, exclusion and risk.
+		return data, nil
+	}
+	data["origin_operator_ids"], data["origin_evidence_source"] = origin["operators"], origin["source"]
 	if peers, ok := origin["peers"].(mmdbtype.Uint32); ok {
 		data["origin_peers"] = peers
 	}
@@ -682,6 +689,7 @@ func augmentSubscriberDatabase(ctx context.Context, basePath, catalogPath, geoli
 	states := map[string]int{}
 	withheld := map[string]int{}
 	baseLeaves, emitted, inferred := 0, 0, 0
+	baseRecords, originRecords := subscriberRecordCache{}, subscriberRecordCache{}
 	insert := func(prefix netip.Prefix, data mmdbtype.Map) error {
 		_, network, _ := net.ParseCIDR(prefix.String())
 		if err := writer.Insert(network, data); err != nil {
@@ -701,14 +709,14 @@ func augmentSubscriberDatabase(ctx context.Context, basePath, catalogPath, geoli
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		var record mmdbtype.Map
-		if err := original.Decode(&record); err != nil {
+		record, err := baseRecords.decode(original)
+		if err != nil {
 			return err
 		}
 		baseLeaves++
 		for origin := range origins.NetworksWithin(original.Prefix(), mmdb.IncludeNetworksWithoutData()) {
-			var evidence mmdbtype.Map
-			if err := origin.Decode(&evidence); err != nil {
+			evidence, err := originRecords.decode(origin)
+			if err != nil {
 				return err
 			}
 			data, err := augmentSubscriberRecord(record, evidence)
@@ -795,6 +803,7 @@ func augmentSubscriberDatabase(ctx context.Context, basePath, catalogPath, geoli
 		return err
 	}
 	manifest := map[string]any{"source": "reviewed subscriber operators and RIPE RIS origins", "built_at": at, "classifier_version": 1, "quality_policy_version": 2, "subscriber_origin_policy": "identified-subscriber-default", "minimum_origin_peers": minimumPeers, "inputs_sha256": hashes, "origin_sources": catalog.OriginSources, "origin_rows": rows, "usable_origin_prefixes": usableRoutePrefixes, "reviewed_operators": len(catalog.Operators), "base_leaves": baseLeaves, "emitted_partitions": emitted, "quality_state_partitions": states, "isp_inferred_partitions": inferred, "withheld_partitions": withheld}
+	manifest["decoded_record_cache"] = map[string]any{"limit_per_reader": subscriberRecordCacheLimit, "base_hits": baseRecords.hits, "base_misses": baseRecords.misses, "origin_hits": originRecords.hits, "origin_misses": originRecords.misses}
 	if catalog.OriginCountryPolicy != "" {
 		manifest["origin_country_policy"] = catalog.OriginCountryPolicy
 		manifest["geolite2_build_time"] = geo.BuildTime().UTC()

@@ -43,6 +43,9 @@ type ArinShadowCaptureReport struct {
 	RegistrationCounts                  []ArinShadowRegistrationCount `json:"registration_connection_counts"`
 	RegistrationUnattributedConnections int64                         `json:"registration_unattributed_connections"`
 	RegistrationOverflowConnections     int64                         `json:"registration_overflow_connections"`
+	OriginCounts                        []ArinShadowOriginCount       `json:"origin_connection_counts"`
+	OriginUnattributedConnections       int64                         `json:"origin_unattributed_connections"`
+	OriginOverflowConnections           int64                         `json:"origin_overflow_connections"`
 }
 
 type arinShadowCaptureProviderState struct {
@@ -64,6 +67,7 @@ type ArinShadowCaptureStream struct {
 	current                     *arinShadowCaptureProviderState
 	buckets                     map[string]*ArinShadowBucket
 	registrations               map[ArinShadowRegistration]*ArinShadowRegistrationCount
+	origins                     map[string]*ArinShadowOriginCount
 	report                      ArinShadowCaptureReport
 	complete, finished, invalid bool
 }
@@ -79,7 +83,7 @@ func (r *ArinShadowRecorder) NewCurrentCaptureStream(ctx context.Context, requir
 		return nil, ErrArinShadowInput
 	}
 	now := r.clock()
-	s := &ArinShadowCaptureStream{recorder: r, ctx: ctx, started: now, buckets: make(map[string]*ArinShadowBucket, len(required)), registrations: make(map[ArinShadowRegistration]*ArinShadowRegistrationCount), complete: true}
+	s := &ArinShadowCaptureStream{recorder: r, ctx: ctx, started: now, buckets: make(map[string]*ArinShadowBucket, len(required)), registrations: make(map[ArinShadowRegistration]*ArinShadowRegistrationCount), origins: make(map[string]*ArinShadowOriginCount), complete: true}
 	s.report = ArinShadowCaptureReport{StartedAt: now, NativeMembershipComplete: true, Reasons: make(map[string]int64, len(arinShadowCaptureReasons)+1)}
 	for _, reason := range arinShadowCaptureReasons {
 		s.report.Reasons[reason] = 0
@@ -192,6 +196,7 @@ func (s *ArinShadowCaptureStream) addConnection(row arinShadowCapturedConnection
 	}
 	f := row.facts
 	s.addRegistration(f)
+	s.addOrigin(f)
 	p.verified = p.verified && f.verified
 	p.risk = p.risk || f.risk
 	p.proxy = p.proxy || f.proxyRisk
@@ -294,6 +299,7 @@ func (s *ArinShadowCaptureStream) Finish(sourceComplete bool, expectedProviders,
 		expectedProviders == s.report.Providers && expectedConnections == s.report.DeclaredConnections
 	s.report.ObservationComplete = s.report.CensusComplete && s.complete && s.report.CapturedConnections == s.report.DeclaredConnections
 	s.finishRegistrations()
+	s.finishOrigins()
 	keys := make([]string, 0, len(s.buckets))
 	for key := range s.buckets {
 		keys = append(keys, key)

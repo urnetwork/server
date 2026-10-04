@@ -188,7 +188,10 @@ virtual-ISP, VPN and Tor origin evidence also adds independent network risk;
 hosting/transit evidence alone does not invent geographic or security risk.
 No inferred approval clears any existing geographic or network risk.
 
-Known origin decisions add `origin_use_state`, `origin_asns`,
+Observed origins add `origin_use_state` and `origin_asns`, including unknown
+origins whose public routing identity can guide research without exporting
+provider addresses. Unknown origin metadata changes no direct approval,
+exclusion, conflict or risk finding. Known decisions additionally add
 `origin_operator_ids`, `origin_evidence_source`, `origin_peers` and, with RPKI
 payloads, `origin_rpki_validity`; withheld decisions add
 `origin_withheld_reason`. Address-level findings add

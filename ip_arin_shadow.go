@@ -20,6 +20,15 @@ import (
 
 var ErrArinShadowInput = errors.New("ARIN shadow input is unavailable or inconsistent")
 
+const (
+	// The legacy observer copies each complete resource into the Go heap.
+	arinShadowSnapshotFileLimit int64 = 512 << 20
+	// Global origin provenance increased the fully built artifact to
+	// 559,752,379 bytes. Capture hashes bounded streams and maps the exact
+	// immutable descriptors, so it has a separate finite file budget.
+	arinShadowCaptureFileLimit int64 = 1 << 30
+)
+
 type ArinShadowActiveFacts struct {
 	Epoch                      int64
 	At                         time.Time
@@ -46,6 +55,7 @@ type arinShadowFacts struct {
 	state                     string
 	risk, proxyRisk, verified bool
 	registration              ArinShadowRegistration
+	origin                    ArinShadowOrigin
 }
 type arinShadowConnection struct {
 	actual            ArinShadowActiveFacts
@@ -82,6 +92,10 @@ func openArinShadowRecorder(activePath, activeHash, candidatePath, candidateHash
 	if start.IsZero() || capacity < 1 || capacity > 2000000 {
 		return nil, ErrArinShadowInput
 	}
+	fileLimit := arinShadowSnapshotFileLimit
+	if mapped {
+		fileLimit = arinShadowCaptureFileLimit
+	}
 	open := func(path, pin string) (*mmdb.Reader, error) {
 		digest, err := hex.DecodeString(pin)
 		if err != nil || len(digest) != sha256.Size {
@@ -93,12 +107,12 @@ func openArinShadowRecorder(activePath, activeHash, candidatePath, candidateHash
 		}
 		defer file.Close()
 		metadata, err := file.Stat()
-		if err != nil || !metadata.Mode().IsRegular() || metadata.Size() > 512<<20 {
+		if err != nil || !metadata.Mode().IsRegular() || metadata.Size() > fileLimit {
 			return nil, ErrArinShadowInput
 		}
 		if mapped {
 			h := sha256.New()
-			n, err := io.Copy(h, io.LimitReader(file, (512<<20)+1))
+			n, err := io.Copy(h, io.LimitReader(file, fileLimit+1))
 			if err != nil || n != metadata.Size() || !slices.Equal(h.Sum(nil), digest) {
 				return nil, ErrArinShadowInput
 			}
@@ -117,8 +131,8 @@ func openArinShadowRecorder(activePath, activeHash, candidatePath, candidateHash
 			}
 			return db, nil
 		}
-		data, err := io.ReadAll(io.LimitReader(file, (512<<20)+1))
-		if err != nil || len(data) > 512<<20 {
+		data, err := io.ReadAll(io.LimitReader(file, arinShadowSnapshotFileLimit+1))
+		if err != nil || int64(len(data)) > arinShadowSnapshotFileLimit {
 			return nil, ErrArinShadowInput
 		}
 		actual := sha256.Sum256(data)
@@ -178,11 +192,13 @@ func shadowFacts(db *mmdb.Reader, address netip.Addr) (arinShadowFacts, *ArinInf
 	}
 	facts := arinShadowFacts{state: state, risk: info.Risk, verified: info.ClassifierVersion == 1 && info.QualityPolicyVersion == 2 && state == "subscriber" && !info.NonQuality}
 	var extra struct {
-		OrgHandle               string `maxminddb:"org_handle"`
-		NetHandle               string `maxminddb:"net_handle"`
-		ClassificationOrgHandle string `maxminddb:"classification_org_handle"`
-		ClassificationRule      string `maxminddb:"classification_rule"`
-		MultipleOwners          bool   `maxminddb:"multiple_registration_owners"`
+		OrgHandle               string   `maxminddb:"org_handle"`
+		NetHandle               string   `maxminddb:"net_handle"`
+		ClassificationOrgHandle string   `maxminddb:"classification_org_handle"`
+		ClassificationRule      string   `maxminddb:"classification_rule"`
+		MultipleOwners          bool     `maxminddb:"multiple_registration_owners"`
+		OriginASNs              []uint32 `maxminddb:"origin_asns"`
+		OriginUseState          string   `maxminddb:"origin_use_state"`
 		Evidence                []struct {
 			Category string `maxminddb:"category"`
 		} `maxminddb:"network_risk_evidence"`
@@ -196,6 +212,7 @@ func shadowFacts(db *mmdb.Reader, address netip.Addr) (arinShadowFacts, *ArinInf
 	if !extra.MultipleOwners {
 		facts.registration = newArinShadowRegistration(extra.OrgHandle, extra.NetHandle, extra.ClassificationOrgHandle, extra.ClassificationRule)
 	}
+	facts.origin = newArinShadowOrigin(extra.OriginASNs, extra.OriginUseState)
 	for _, e := range extra.Evidence {
 		if slices.Contains([]string{"proxy", "residential_proxy", "virtual_isp", "vpn", "tor"}, e.Category) {
 			facts.proxyRisk = true

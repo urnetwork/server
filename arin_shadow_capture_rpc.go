@@ -39,6 +39,7 @@ type arinShadowCaptureWireRow struct {
 	Verified     bool                   `json:"verified"`
 	Reason       string                 `json:"reason"`
 	Registration ArinShadowRegistration `json:"registration"`
+	Origin       ArinShadowOrigin       `json:"origin"`
 }
 
 type arinShadowCaptureRPCRequest struct {
@@ -73,7 +74,7 @@ func (r *ArinShadowRecorder) CaptureRPC(ctx context.Context, input json.RawMessa
 	}
 	reply := arinShadowCaptureRPCReply{Pins: pins, Rows: make([]arinShadowCaptureWireRow, len(rows))}
 	for i, row := range rows {
-		reply.Rows[i] = arinShadowCaptureWireRow{row.connectionId, row.clientId, row.handlerId, row.actualAt, row.observedAt, row.capturedAt, row.facts.state, row.facts.risk, row.facts.proxyRisk, row.facts.verified, row.reason, row.facts.registration}
+		reply.Rows[i] = arinShadowCaptureWireRow{row.connectionId, row.clientId, row.handlerId, row.actualAt, row.observedAt, row.capturedAt, row.facts.state, row.facts.risk, row.facts.proxyRisk, row.facts.verified, row.reason, row.facts.registration, row.facts.origin}
 	}
 	return reply, nil
 }
@@ -116,14 +117,14 @@ func (r *ArinShadowRecorder) CallCapture(ctx context.Context, client *ArinShadow
 	rows := make([]arinShadowCapturedConnection, len(ids))
 	seen := map[Id]bool{}
 	for i, row := range reply.Rows {
-		if ids[i] == (Id{}) || seen[ids[i]] || row.ConnectionId != ids[i] || !validArinShadowRegistration(row.Registration) || !slices.Contains(arinShadowCaptureReasons[:], row.Reason) || row.CapturedAt.Before(started.Add(-arinShadowCaptureClockSkew)) || row.CapturedAt.After(r.clock().Add(arinShadowCaptureClockSkew)) {
+		if ids[i] == (Id{}) || seen[ids[i]] || row.ConnectionId != ids[i] || !validArinShadowRegistration(row.Registration) || !validArinShadowOrigin(row.Origin) || !slices.Contains(arinShadowCaptureReasons[:], row.Reason) || row.CapturedAt.Before(started.Add(-arinShadowCaptureClockSkew)) || row.CapturedAt.After(r.clock().Add(arinShadowCaptureClockSkew)) {
 			return ArinShadowCapturedBatch{}, ErrArinShadowInput
 		}
 		seen[ids[i]] = true
 		if row.Reason == "qualified" && (row.ClientId == (Id{}) || row.HandlerId == (Id{}) || row.ActualAt.IsZero() || row.ObservedAt.Before(started.Add(-arinShadowCaptureClockSkew)) || row.ActualAt.After(row.ObservedAt.Add(arinShadowCaptureClockSkew)) || !slices.Contains([]string{"subscriber", "excluded", "unknown", "ambiguous"}, row.State) || row.ProxyRisk && !row.Risk || row.Verified && row.State != "subscriber") {
 			return ArinShadowCapturedBatch{}, ErrArinShadowInput
 		}
-		rows[i] = arinShadowCapturedConnection{recorder: r, connectionId: row.ConnectionId, clientId: row.ClientId, handlerId: row.HandlerId, actualAt: row.ActualAt, observedAt: row.ObservedAt, capturedAt: row.CapturedAt, facts: arinShadowFacts{state: row.State, risk: row.Risk, proxyRisk: row.ProxyRisk, verified: row.Verified, registration: row.Registration}, reason: row.Reason}
+		rows[i] = arinShadowCapturedConnection{recorder: r, connectionId: row.ConnectionId, clientId: row.ClientId, handlerId: row.HandlerId, actualAt: row.ActualAt, observedAt: row.ObservedAt, capturedAt: row.CapturedAt, facts: arinShadowFacts{state: row.State, risk: row.Risk, proxyRisk: row.ProxyRisk, verified: row.Verified, registration: row.Registration, origin: newArinShadowOrigin(row.Origin.ASNs, row.Origin.UseState)}, reason: row.Reason}
 	}
 	return ArinShadowCapturedBatch{rows}, nil
 }
