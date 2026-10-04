@@ -2,6 +2,8 @@
 // transport or integrity reads remain unknown even beside an orphaned receipt.
 package controller
 
+import "github.com/urnetwork/server"
+
 // Only the reconciler creates this diagnostic after a successful Rpc read.
 // Its text is never used to classify untrusted endpoint failures as absence.
 type stOrphanedTransactionReceiptError struct {
@@ -19,24 +21,16 @@ func stTransactionReceiptCensusComplete(err error) bool {
 	if err == nil {
 		return true
 	}
-	if _, orphan := err.(*stOrphanedTransactionReceiptError); orphan {
-		return true
+	causes := server.InspectErrorCauses(err)
+	if !causes.Complete {
+		return false
 	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		causes := joined.Unwrap()
-		if len(causes) == 0 {
-			return false
-		}
-		for _, cause := range causes {
-			if !stTransactionReceiptCensusComplete(cause) {
+	for _, node := range causes.Nodes {
+		if node.Leaf {
+			if value, orphan := node.Err.(*stOrphanedTransactionReceiptError); !orphan || value == nil {
 				return false
 			}
 		}
-		return true
 	}
-	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		cause := wrapped.Unwrap()
-		return cause != nil && stTransactionReceiptCensusComplete(cause)
-	}
-	return false
+	return true
 }

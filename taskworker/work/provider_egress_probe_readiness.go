@@ -103,25 +103,16 @@ func (self *providerEgressProbeReadiness) err() error {
 // idle cadence. Joined transport, unknown-readiness and cancellation failures
 // retain task backoff rather than borrowing the funding retry hint.
 func providerEgressProbeUnfundedOnly(err error) bool {
-	if err == errProviderEgressProbeUnfunded {
-		return true
+	causes := server.InspectErrorCauses(err)
+	if !causes.Complete || causes.NilBranches != 0 {
+		return false
 	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		causes := joined.Unwrap()
-		if len(causes) == 0 {
+	for _, node := range causes.Nodes {
+		if node.Leaf && node.Err != errProviderEgressProbeUnfunded {
 			return false
 		}
-		for _, cause := range causes {
-			if !providerEgressProbeUnfundedOnly(cause) {
-				return false
-			}
-		}
-		return true
 	}
-	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		return providerEgressProbeUnfundedOnly(wrapped.Unwrap())
-	}
-	return false
+	return true
 }
 
 // Successful observations remain valid evidence. Failed attempts and degraded

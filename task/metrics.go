@@ -2,7 +2,6 @@ package task
 
 import (
 	"context"
-	"errors"
 	"path"
 	"strings"
 	"sync"
@@ -281,10 +280,11 @@ func taskMetricOutcome(err error) string {
 	if err == nil {
 		return "succeeded"
 	}
-	if errors.Is(err, ErrDrained) {
+	causes := inspectTaskRetryCauses(err)
+	if causes.complete && causes.drained {
 		return "drained"
 	}
-	if errors.Is(err, ErrTargetNotFound) {
+	if causes.complete && causes.targetMissing {
 		return "target_not_found"
 	}
 	return "failed"
