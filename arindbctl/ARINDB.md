@@ -276,13 +276,19 @@ outside its reviewed countries is a misidentified catalog entry.
 RIR assignment objects are the only free evidence below the ASN, and they
 matter most for incumbents that sell both access and hosting under one ASN.
 An object is hosting-named when its netname or descr carries DATACENTER,
-DEDICATED, DEDI, VPS, HOSTING or CLOUD (also with trailing digits, as in VPS2)
+VPS, HOSTING or CLOUD, or DEDICATED/DEDI together with SERVER/SERVERS
+(also with trailing digits, as in VPS2)
 and no access-technology token such as ADSL, FTTH, DOCSIS, PPPOE, BNG or CGNAT.
+DEDICATED or DEDI alone is neutral: official assignments also use those words
+for dedicated Internet access, leased lines, Wi-Fi, VSAT and customer IPs.
+Missing server evidence does not establish access; the subscriber inference
+still requires the reviewed ISP identity and preserves every other veto.
 The parser inspects every description, includes space/tab/plus continuation
 lines of these attributes, and strips end-of-line comments according to the
 [RPSL attribute-value syntax](https://docs.db.ripe.net/RIPE-Database-Structure/Attribute-Values/).
 Comments and other attributes do not supply network-use tokens.
-Those six tokens were chosen by measurement: across the 2026-10-04 RIPE, APNIC
+The initial six-token screen included standalone DEDICATED and DEDI. Across
+the 2026-10-04 RIPE, APNIC
 and AFRINIC dumps (6.7 million objects), objects naming them sat under
 hosting-labelled origins 86 to 96 percent of the time, while every
 access-technology token sat under hosting origins at most 6 percent of the
