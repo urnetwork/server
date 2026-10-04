@@ -40,7 +40,21 @@ func evidenceFixtureBodies(t *testing.T, at time.Time) map[string][]byte {
 		subscriberEvidenceRegistryUrl:   []byte("2|nro|20261004|3|19821213|20261004|+0000\nnro|*|asn|*|2|summary\napnic|IN|asn|64500|2|20100101|assigned|A91964B3|e-stats\nripencc|ES|asn|64510|1|20100101|assigned|7836cb32|e-stats\n"),
 		subscriberEvidenceAppleRelayUrl: []byte("192.0.2.64/27,US,US-CA,Los Angeles,\n"),
 		subscriberEvidenceWarpUrl:       []byte("198.51.100.0/24,GB,GB-ENG,London,\n"),
+		subscriberEvidenceCaidaAs2org:   gzipFixture(t, `{"organizationId":"LVLT-ARIN","name":"Level 3","type":"Organization"}`+"\n"+`{"asn":"64500","organizationId":"LVLT-ARIN","type":"ASN"}`+"\n"),
 	}
+}
+
+func gzipFixture(t *testing.T, body string) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	zip := gzip.NewWriter(&buffer)
+	if _, err := zip.Write([]byte(body)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zip.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
 }
 
 func TestSubscriberEvidenceRefreshPinsValidatedSnapshotsIntoACatalog(t *testing.T) {
@@ -51,19 +65,19 @@ func TestSubscriberEvidenceRefreshPinsValidatedSnapshotsIntoACatalog(t *testing.
 	client := &http.Client{Transport: transport}
 	out := filepath.Join(dir, "refreshed")
 	if err := publishDirectory(out, func(stage string) error {
-		return refreshSubscriberEvidence(t.Context(), existing, true, false, false, stage, client, at)
+		return refreshSubscriberEvidence(t.Context(), existing, subscriberEvidenceOptions{RelayGeofeeds: true}, stage, client, at)
 	}); err != nil {
 		t.Fatal(err)
 	}
 	catalog := mustLoadCatalog(t, filepath.Join(out, "catalog.yml"))
-	if len(catalog.OriginSources) != 2 || len(catalog.RpkiSources) != 1 || len(catalog.AddressRiskSources) != 3 || len(catalog.RegistrySources) != 1 || len(catalog.Operators) != 4 || catalog.OriginCountryPolicy != originCountryPolicyWithhold || catalog.minimumOriginPeers() != 3 {
+	if len(catalog.OriginSources) != 2 || len(catalog.RpkiSources) != 1 || len(catalog.AddressRiskSources) != 3 || len(catalog.RegistrySources) != 2 || len(catalog.Operators) != 4 || catalog.OriginCountryPolicy != originCountryPolicyWithhold || catalog.minimumOriginPeers() != 3 {
 		t.Fatalf("refreshed catalog lost stanzas or policy: %+v", catalog)
 	}
 	if catalog.OriginSources[0].ObservedAt != at.Add(-2*time.Hour) || catalog.OriginSources[0].ExpiresAt != at.Add(46*time.Hour) || catalog.RpkiSources[0].ObservedAt != at {
 		t.Fatalf("observation times do not follow the snapshot generation: %+v", catalog.OriginSources)
 	}
 	hashes, err := catalog.hashEvidenceSources(t.Context(), filepath.Join(out, "catalog.yml"), at)
-	if err != nil || len(hashes) != 7 {
+	if err != nil || len(hashes) != 8 {
 		t.Fatalf("pinned snapshots do not hash as written: %v %v", err, hashes)
 	}
 	compressed, err := os.ReadFile(filepath.Join(out, "sources", "rpki.json.gz"))
@@ -83,7 +97,7 @@ func TestSubscriberEvidenceRefreshPinsValidatedSnapshotsIntoACatalog(t *testing.
 		Snapshots map[string]struct{ Sha256 string } `json:"snapshots"`
 		Hashes    map[string]string                  `json:"sha256"`
 	}
-	if err := json.Unmarshal(manifest, &parsed); err != nil || len(parsed.Snapshots) != 7 || parsed.Snapshots["tor-exit-addresses"].Sha256 != catalog.AddressRiskSources[0].Sha256 || parsed.Hashes["catalog.yml"] == "" {
+	if err := json.Unmarshal(manifest, &parsed); err != nil || len(parsed.Snapshots) != 8 || parsed.Snapshots["tor-exit-addresses"].Sha256 != catalog.AddressRiskSources[0].Sha256 || parsed.Hashes["catalog.yml"] == "" {
 		t.Fatalf("manifest lacks snapshot binding: %s", manifest)
 	}
 	for _, request := range transport.requests {
@@ -94,7 +108,7 @@ func TestSubscriberEvidenceRefreshPinsValidatedSnapshotsIntoACatalog(t *testing.
 	// Without operators the output is a fragment, and the relay feeds are opt-in.
 	fragment := filepath.Join(dir, "fragment")
 	if err := publishDirectory(fragment, func(stage string) error {
-		return refreshSubscriberEvidence(t.Context(), "", false, false, false, stage, client, at)
+		return refreshSubscriberEvidence(t.Context(), "", subscriberEvidenceOptions{}, stage, client, at)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +140,7 @@ func TestSubscriberEvidenceRefreshRejectsRedirectsAndInvalidSnapshots(t *testing
 			client := &http.Client{Transport: &evidenceRoundTripper{bodies: bodies}}
 			out := filepath.Join(t.TempDir(), "refreshed")
 			if err := publishDirectory(out, func(stage string) error {
-				return refreshSubscriberEvidence(t.Context(), "", false, false, false, stage, client, at)
+				return refreshSubscriberEvidence(t.Context(), "", subscriberEvidenceOptions{}, stage, client, at)
 			}); err == nil {
 				t.Fatal("invalid evidence was pinned")
 			}
@@ -268,34 +282,112 @@ func TestLabelSourcesParseEachPublishedFormat(t *testing.T) {
 // Verdicts are judged against the reviewed use, and APNIC users never
 // contradict an anonymizer because APNIC credits VPN egress with users.
 func TestIndependentLabelVerdictsFollowReviewedUse(t *testing.T) {
-	labels := &asnLabels{
-		names: map[uint32]string{}, hasClass: true, hasUsers: true, hasTags: map[string]bool{"vpsh": true, "dsl": true, "vpn": true},
-		class:          map[uint32]string{64500: "Eyeball", 64503: "Content", 64504: "Carrier"},
-		tags:           map[uint32][]string{64501: {"vpsh"}, 64502: {"vpn"}, 64505: {"dsl"}},
-		users:          map[uint32]uint64{64500: 50000, 64502: 90000, 64503: 20, 64505: 999},
-		usersByCountry: map[uint32]map[string]uint64{64500: {"in": 50000}},
-	}
+	labels := newAsnLabels()
+	labels.hasClass, labels.hasUsers = true, true
+	labels.class = map[uint32]string{64500: "Eyeball", 64503: "Content", 64504: "Carrier"}
+	labels.tags = map[uint32][]string{64501: {"vpsh"}, 64502: {"vpn"}, 64505: {"dsl"}, 64506: {"anycast"}, 64507: {"biznet"}}
+	labels.users = map[uint32]uint64{64500: 50000, 64502: 90000, 64503: 20000, 64505: 999}
+	labels.usersByCountry = map[uint32]map[string]uint64{64500: {"in": 50000}}
+	labels.signal("asdb", 64500, true, false)
+	labels.signal("ipverse", 64503, false, true)
+	labels.deriveSignals()
 	for _, tc := range []struct {
 		usage, verdict string
+		corroborated   bool
 		asns           []uint32
 	}{
-		{"subscriber", "agrees", []uint32{64500}},
-		{"subscriber", "mixed", []uint32{64500, 64501}},
-		{"subscriber", "disagrees", []uint32{64503}},
-		{"subscriber", "unlabeled", []uint32{64504}},
-		{"subscriber", "agrees", []uint32{64505}},
-		{"hosting", "agrees", []uint32{64503}},
-		{"hosting", "disagrees", []uint32{64500}},
-		{"vpn", "agrees", []uint32{64502}},
-		{"proxy", "unlabeled", []uint32{64504}},
+		{"subscriber", "agrees", true, []uint32{64500}},
+		{"subscriber", "mixed", false, []uint32{64500, 64501}},
+		{"subscriber", "mixed", false, []uint32{64503}},
+		{"subscriber", "unlabeled", false, []uint32{64504}},
+		{"subscriber", "agrees", false, []uint32{64505}},
+		{"subscriber", "unlabeled", false, []uint32{64506}},
+		{"subscriber", "agrees", false, []uint32{64507}},
+		{"hosting", "agrees", true, []uint32{64503}},
+		{"hosting", "disagrees", false, []uint32{64500}},
+		{"vpn", "agrees", false, []uint32{64502}},
+		{"proxy", "unlabeled", false, []uint32{64504}},
 	} {
 		got := labels.operatorLabels(subscriberOperator{Id: "x", Usage: tc.usage, ASNs: tc.asns})
-		if got.Verdict != tc.verdict {
-			t.Fatalf("%s %v: verdict=%s %+v", tc.usage, tc.asns, got.Verdict, got)
+		if got.Verdict != tc.verdict || got.Corroborated != tc.corroborated {
+			t.Fatalf("%s %v: verdict=%s corroborated=%t %+v", tc.usage, tc.asns, got.Verdict, got.Corroborated, got)
 		}
 	}
-	if got := labels.operatorLabels(subscriberOperator{Usage: "subscriber", ASNs: []uint32{64500}}); got.Users != 50000 || got.UsersByCountry["in"] != 50000 || fmt.Sprint(got.Agreeing) != "[apnic-users class-eyeball]" {
+	if got := labels.operatorLabels(subscriberOperator{Usage: "subscriber", ASNs: []uint32{64500}}); got.Users != 50000 || got.UsersByCountry["in"] != 50000 || fmt.Sprint(got.Agreeing) != "[apnic asdb bgp.tools]" {
 		t.Fatalf("labels lost detail: %+v", got)
+	}
+}
+
+// Every source and the consensus rules are scored against hand labels, with
+// Linnaeus restricted to its validation split because it trained on them.
+func TestLabelSourceQualityAgainstGroundTruth(t *testing.T) {
+	header := "asn,Access_LargeISP,Access_SmallISP,Mobile,Satellite,ContentProvider_Cloud,ContentProvider_Hosting,ContentProvider_CDN,VPNs,Transit_Global\n"
+	truth := header + "1,1,0,0,0,0,0,0,0,0\n2,0,1,0,0,0,0,0,0,0\n3,0,0,0,0,0,1,0,0,0\n4,0,0,0,0,1,0,0,0,0\n5,1,0,0,0,1,0,0,0,0\n6,0,0,0,0,0,0,0,0,1\n"
+	predictions := header + "1,1,0,0,0,0,0,0,0,0\n2,0,0,0,0,0,1,0,0,0\n3,0,0,0,0,0,1,0,0,0\n4,1,0,0,0,0,0,0,0,0\n"
+	labels := newAsnLabels()
+	for format, content := range map[string]string{labelFormatLinnaeusLabels: truth, labelFormatLinnaeusPred: predictions, labelFormatLinnaeusSplits: "asn,split\n1,val\n2,test\n3,train\n4,train\n"} {
+		if err := readLabelSource(t.Context(), labelSource{Format: format}, strings.NewReader(content), labels); err != nil {
+			t.Fatal(err)
+		}
+	}
+	labels.signal("asdb", 1, true, false)
+	labels.signal("asdb", 2, true, false)
+	labels.signal("asdb", 3, true, false)
+	labels.signal("ipverse", 1, true, false)
+	labels.signal("ipverse", 3, false, true)
+	labels.signal("ipverse", 4, false, true)
+	labels.class = map[uint32]string{1: "Eyeball", 2: "Eyeball", 4: "Content"}
+	labels.deriveSignals()
+	quality := map[string]labelSourceQuality{}
+	for _, q := range labels.quality() {
+		quality[q.Source] = q
+	}
+	if q := quality["asdb"]; q.PureEyeball != 2 || q.PureHosting != 2 || q.EyeballTP != 2 || q.EyeballFP != 1 || q.EyeballPrecision != 0.667 || q.EyeballRecall != 1 {
+		t.Fatalf("asdb quality: %+v", q)
+	}
+	if q := quality["ipverse"]; q.EyeballTP != 1 || q.HostingTP != 2 || q.HostingPrecision != 1 || q.HostingRecall != 1 {
+		t.Fatalf("ipverse quality: %+v", q)
+	}
+	if q := quality["linnaeus"]; q.Scope != "held-out-split" || q.PureEyeball != 2 || q.PureHosting != 0 || q.EyeballTP != 1 || q.EyeballRecall != 0.5 {
+		t.Fatalf("linnaeus quality: %+v", q)
+	}
+	if q := quality["consensus-2"]; q.EyeballTP != 2 || q.EyeballFP != 0 || q.HostingTP != 1 {
+		t.Fatalf("consensus quality: %+v", q)
+	}
+	if q := quality["consensus-3"]; q.EyeballTP != 1 || q.EyeballFP != 0 {
+		t.Fatalf("three-source consensus: %+v", q)
+	}
+	if got := labels.operatorLabels(subscriberOperator{Usage: "subscriber", ASNs: []uint32{3}}); got.GroundTruth != "hosting" {
+		t.Fatalf("ground truth not attached: %+v", got)
+	}
+	for format, bad := range map[string]string{
+		labelFormatLinnaeusLabels: "asn,Access_LargeISP\n1,1\n",
+		labelFormatLinnaeusSplits: "asn,split\n1,holdout\n",
+		labelFormatAsdb:           "ASN,x\nAS1,y\n",
+		labelFormatIpverse:        `[{"asn":1,"metadata":{"category":"isp"}}`,
+	} {
+		if err := readLabelSource(t.Context(), labelSource{Format: format}, strings.NewReader(bad), newAsnLabels()); err == nil {
+			t.Fatalf("malformed %s accepted", format)
+		}
+	}
+}
+
+// ASdb layer-2 categories and ipverse categories map onto the two signals.
+func TestAsdbAndIpverseSignals(t *testing.T) {
+	labels := newAsnLabels()
+	asdb := "ASN,Category 1 - Layer 1,Category 1 - Layer 2,Category 2 - Layer 1,Category 2 - Layer 2\nAS0,\"Reserved\",\"Reserved\"\nAS1,\"Computer and Information Technology\",\"Internet Service Provider (ISP)\"\nAS2,\"Computer and Information Technology\",\"Hosting and Cloud Provider\",\"Computer and Information Technology\",\"Phone Provider\"\nAS3,\"Finance\",\"Banking\"\n"
+	ipverse := `[{"asn":1,"metadata":{"category":"isp","description":"One"}},{"asn":4,"metadata":{"category":"hosting"}},{"asn":5,"metadata":{"category":null}},{"asn":6,"metadata":null}]`
+	if err := readLabelSource(t.Context(), labelSource{Format: labelFormatAsdb}, strings.NewReader(asdb), labels); err != nil {
+		t.Fatal(err)
+	}
+	if err := readLabelSource(t.Context(), labelSource{Format: labelFormatIpverse}, strings.NewReader(ipverse), labels); err != nil {
+		t.Fatal(err)
+	}
+	if labels.signals["asdb"][1] != (labelSignal{eyeball: true}) || labels.signals["asdb"][2] != (labelSignal{true, true}) || len(labels.signals["asdb"]) != 2 {
+		t.Fatalf("asdb signals: %+v", labels.signals["asdb"])
+	}
+	if labels.signals["ipverse"][1] != (labelSignal{eyeball: true}) || labels.signals["ipverse"][4] != (labelSignal{hosting: true}) || len(labels.signals["ipverse"]) != 2 || labels.names[1] != "One" {
+		t.Fatalf("ipverse signals: %+v", labels.signals["ipverse"])
 	}
 }
 
@@ -359,10 +451,16 @@ func TestSubscriberEvidenceRefreshPinsLabelSourcesOnRequest(t *testing.T) {
 		bodies[fmt.Sprintf(subscriberEvidenceBgpToolsTag, tag)] = []byte("AS64500,Synthetic ISP\n")
 	}
 	bodies[subscriberEvidenceApnicAspop] = []byte("#Rank,AS,\"AS Name\",CC,\"Users (est.)\"\n1,\"AS64500\",\"ISP\",\"IN\",500000\n")
+	bodies[subscriberEvidenceAsdb] = []byte("ASN,Category 1 - Layer 1,Category 1 - Layer 2\nAS64500,\"Computer and Information Technology\",\"Internet Service Provider (ISP)\"\n")
+	bodies[subscriberEvidenceIpverse] = []byte(`[{"asn":64500,"metadata":{"category":"isp"}}]`)
+	linnaeus := "asn,Access_LargeISP,Access_SmallISP,Mobile,Satellite,ContentProvider_Cloud,ContentProvider_Hosting,ContentProvider_CDN,VPNs\n64500,1,0,0,0,0,0,0,0\n"
+	bodies[subscriberEvidenceLinnaeus+"predictions/sublevel/complete.csv"] = []byte(linnaeus)
+	bodies[subscriberEvidenceLinnaeus+"labels/sublevel.csv"] = []byte(linnaeus)
+	bodies[subscriberEvidenceLinnaeus+"splits/assignments.csv"] = []byte("asn,split\n64500,val\n")
 	transport := &evidenceRoundTripper{bodies: bodies}
 	out := filepath.Join(t.TempDir(), "refreshed")
 	if err := publishDirectory(out, func(stage string) error {
-		return refreshSubscriberEvidence(t.Context(), "", false, true, false, stage, &http.Client{Transport: transport}, at)
+		return refreshSubscriberEvidence(t.Context(), "", subscriberEvidenceOptions{LabelSources: true}, stage, &http.Client{Transport: transport}, at)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +468,7 @@ func TestSubscriberEvidenceRefreshPinsLabelSourcesOnRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"label_sources:", "format: bgp-tools-asns-csv", "tag: vpsh", "format: apnic-aspop-csv", "sources/bgp-tools-tag-dsl.csv.gz"} {
+	for _, want := range []string{"label_sources:", "format: bgp-tools-asns-csv", "tag: vpsh", "tag: biznet", "format: apnic-aspop-csv", "sources/bgp-tools-tag-dsl.csv.gz", "format: asdb-categorized-csv", "format: ipverse-as-json", "format: linnaeus-predictions-csv", "format: linnaeus-labels-csv", "format: linnaeus-splits-csv", "format: caida-as2org-jsonl"} {
 		if !strings.Contains(string(content), want) {
 			t.Fatalf("evidence fragment lacks %q: %s", want, content)
 		}
@@ -382,7 +480,7 @@ func TestSubscriberEvidenceRefreshPinsLabelSourcesOnRequest(t *testing.T) {
 	}
 	delete(bodies, subscriberEvidenceApnicAspop)
 	if err := publishDirectory(filepath.Join(t.TempDir(), "partial"), func(stage string) error {
-		return refreshSubscriberEvidence(t.Context(), "", false, true, false, stage, &http.Client{Transport: transport}, at)
+		return refreshSubscriberEvidence(t.Context(), "", subscriberEvidenceOptions{LabelSources: true}, stage, &http.Client{Transport: transport}, at)
 	}); err == nil {
 		t.Fatal("a missing label source was pinned")
 	}

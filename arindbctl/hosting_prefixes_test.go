@@ -161,7 +161,7 @@ func TestSubscriberEvidenceRefreshPinsHostingPrefixesAndResolvesAzure(t *testing
 	transport := &evidenceRoundTripper{bodies: bodies}
 	out := filepath.Join(t.TempDir(), "refreshed")
 	if err := publishDirectory(out, func(stage string) error {
-		return refreshSubscriberEvidence(t.Context(), "", false, false, true, stage, &http.Client{Transport: transport}, at)
+		return refreshSubscriberEvidence(t.Context(), "", subscriberEvidenceOptions{HostingPrefixes: true}, stage, &http.Client{Transport: transport}, at)
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestSubscriberEvidenceRefreshPinsHostingPrefixesAndResolvesAzure(t *testing
 	}
 	bodies[subscriberEvidenceAzurePage] = []byte(`<html><a href="https://evil.example/download/ServiceTags_Public_20260928.json">x</a></html>`)
 	if err := publishDirectory(filepath.Join(t.TempDir(), "bad"), func(stage string) error {
-		return refreshSubscriberEvidence(t.Context(), "", false, false, true, stage, &http.Client{Transport: transport}, at)
+		return refreshSubscriberEvidence(t.Context(), "", subscriberEvidenceOptions{HostingPrefixes: true}, stage, &http.Client{Transport: transport}, at)
 	}); err == nil {
 		t.Fatal("an Azure link outside download.microsoft.com was followed")
 	}

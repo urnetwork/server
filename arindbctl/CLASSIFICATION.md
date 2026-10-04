@@ -134,12 +134,54 @@ entries. A full augmentation with every evidence family applied 16,265 cloud
 prefixes and 436,929 address entries in 188 seconds, and readback showed both
 Verizon Wavelength blocks excluded with their origin identity retained.
 
+### Evidence expansion, ground-truth validation and the update command
+
+A third pass, the same day, measured every candidate source against real data
+before adopting it, added a prefix-level discriminator, validated the finished
+database against a held-out reference, and made the whole refresh one release
+command.
+
+| Measurement (2026-10-04) | Result |
+| --- | --- |
+| Label sources against 1,978 Linnaeus hand labels (300 pure eyeball, 160 pure hosting): eyeball precision and recall | bgp.tools 0.961 / 0.49; ipverse 0.942 / 0.70; Linnaeus held out 0.927 / 0.41; ASdb 0.823 / 0.85; APNIC 0.802 / 0.76 |
+| Two agreeing sources with none contrary; three | 0.969 / 0.73; 0.988 / 0.56 |
+| RIR assignment objects scanned (RIPE, APNIC, AFRINIC) | 6,739,442 |
+| Share under hosting origins: DATACENTER, DEDICATED, VPS, HOSTING, CLOUD | 0.955, 0.929, 0.907, 0.876, 0.861 |
+| Share under hosting origins: ADSL, PPPOE, GPON, DOCSIS, RESIDENTIAL, BNG | at most 0.003 |
+| Hosting-named objects inside eyeball origins judged hosting on review | 42 of 45 |
+| Hosting-named objects kept, and nested non-hosting objects overriding them | 109,833; 32,778 |
+| VPN operator server addresses (Mullvad, NordVPN, PIA, Windscribe); inside inferred subscriber space | 10,861; 26 |
+| Consolidated operator geofeeds in identified space; decisions they would change | 117,903; 54 |
+| Atlas validation of the 129-operator fixture build: clean precision | 99.05% (98.61-99.35) of 2,734 networks |
+| Datacentre clean rate; residential recall | 0.85% of 3,045; 39.5% of 6,865 |
+| Residential Atlas networks lost to registry withholding; to visibility; to country; to hosting prefixes | 0; 9; 25; 5 |
+
+The 26 datacentre false approvals are mostly RIPE Atlas anchors that access
+ISPs host inside their own networks, which identity inference cannot see. The
+residential recall reflects the fixture's 129 operators: 4,116 of the missing
+networks have no identified operator at all. An independent research pass
+found that RIPE registry keywords agree with Atlas tags at Cohen's kappa 0.90
+where decisive, a PTR lexicon reaches 95-99% residential precision at a third
+of the recall, and leased space, about 6% of routed IPv4 prefixes, is the main
+remaining path for hosting inside eyeball-registered blocks; lease inference is
+the next deferred technique.
+
+Two real-data defects surfaced only against live sources: ASdb lists a reserved
+AS0 row, and the Linnaeus splits file has a third split named "test". Both made
+strict pinning fail until fixed, which is why `arindbctl update` pins
+everything except GeoLite2, ARIN and the RIS routing snapshots best effort and
+names what it left out. Update now runs from `build/all/run.sh`; without a
+reviewed catalog at `config/<env>/arindb-subscribers/catalog.yml` it publishes
+the registration database alone, as `refresh` did.
+
 Package, race and vet checks pass. The real-data audit over today's table ran
 in 20 seconds for 129 operators. A full augmentation of a local policy-two base
 built from the 2026-02-18 ARIN snapshot (6,843,456 base leaves) with the
 129-operator measurement fixture, today's RIS, Cloudflare RPKI and Tor exit
-snapshots and the reviewed-country policy completed in 178 seconds at about
-5.4 GB resident: 7,269,483 emitted partitions, 3,867,522 inferred, 2,317
+snapshots and the reviewed-country policy completed in 178 seconds (a later
+measurement put the augmentation's peak resident set near 20 GB, of which a
+routing-only run already uses 19.5 GB; an earlier 5.4 GB figure was a mid-run
+sample): 7,269,483 emitted partitions, 3,867,522 inferred, 2,317
 withheld for visibility, 60 for an invalid origin, 4,216 cells withheld outside
 reviewed countries, and 1,398 Tor exit addresses excluded with risk. Spot
 readback confirmed a Tor exit excluded at its /32 with the adjacent address
