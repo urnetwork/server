@@ -389,8 +389,8 @@ func TestVerifyEthereumSignature(t *testing.T) {
 		// often send all-lowercase. The old code used == which would fail here.
 		lowercaseAddr := strings.ToLower(address.String())
 		isValid, err = VerifyEthereumSignature(lowercaseAddr, messageStr, sigHex)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, isValid, true)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, isValid, true)
 
 		// --- base64url (no padding) encoded signature, checksummed address ---
 		// Catches: mobile clients (e.g. DGEN1) that encode the signature with
@@ -398,14 +398,14 @@ func TestVerifyEthereumSignature(t *testing.T) {
 		// which silently returns ~0 bytes for base64url input.
 		sigBase64url := base64.RawURLEncoding.EncodeToString(signature)
 		isValid, err = VerifyEthereumSignature(address.String(), messageStr, sigBase64url)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, isValid, true)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, isValid, true)
 
 		// --- standard base64 (with padding) encoded signature ---
 		sigBase64 := base64.StdEncoding.EncodeToString(signature)
 		isValid, err = VerifyEthereumSignature(address.String(), messageStr, sigBase64)
-		assert.Equal(t, err, nil)
-		assert.Equal(t, isValid, true)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, isValid, true)
 
 		// --- invalid signature (modified bits) ---
 		invalidSigBytes, _ := hex.DecodeString(sigHex)
