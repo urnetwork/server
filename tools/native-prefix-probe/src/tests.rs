@@ -617,7 +617,7 @@ fn child_iterator_misses<L: TrieConfiguration<Hash = Blake2Hasher>>() {
         let expected: Vec<_> = child
             .entries
             .keys()
-            .filter(|key| key.as_slice() >= &[0x10, 0xac])
+            .filter(|key| key.as_slice() >= &[0x10, 0xac][..])
             .cloned()
             .collect();
         assert_eq!(actual, expected);
