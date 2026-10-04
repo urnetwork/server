@@ -921,6 +921,7 @@ func (self *CoreStClient) finalizedBlock(ctx context.Context) (*stBlockIdentity,
 }
 
 var errStReplaceTransaction = errors.New("st: replace transaction")
+var errStTransactionAttemptLimit = errors.New("st: durable transaction attempt allowance exhausted; original attempts retained")
 
 func stBigIntString(v *big.Int) *string {
 	if v == nil {
@@ -984,6 +985,20 @@ func (self *CoreStClient) buildTransactionAttempt(
 	previous *model.StTransactionAttempt,
 	kind string,
 ) (*model.StTransactionAttempt, error) {
+	if intent == nil || intent.AttemptCount < 0 {
+		return nil, errors.New("st: transaction intent is absent or invalid")
+	}
+	// Recheck at the construction boundary: another worker can consume the
+	// last attempt after the wait loop admitted a replacement. Cancellation
+	// shares this original allowance and never authorizes a fourth signature.
+	if intent.AttemptCount >= stTxMaxAttempts || previous != nil && previous.Attempt >= stTxMaxAttempts {
+		return nil, errStTransactionAttemptLimit
+	}
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
 	from := crypto.PubkeyToAddress(key.PublicKey)
 	if !strings.EqualFold(from.Hex(), intent.FromAddress) {
 		return nil, fmt.Errorf("st: signing key address %s does not own intent account %s", from.Hex(), intent.FromAddress)
@@ -1003,7 +1018,12 @@ func (self *CoreStClient) buildTransactionAttempt(
 		gasLimit = previous.GasLimit
 	}
 	estimate := gasLimit == 0 && previous == nil
-	prepared, err := readStTransactionFeePreparation(ctx, client, from, to, calldata, estimate, previous != nil && previous.GasPrice != nil)
+	var prepared *stTransactionFeePreparation
+	err = self.readTransactionRpc(ctx, client, func(ctx context.Context) error {
+		var err error
+		prepared, err = readStTransactionFeePreparation(ctx, client, from, to, calldata, estimate, previous != nil && previous.GasPrice != nil)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1121,13 +1141,33 @@ func (self *CoreStClient) observeTransactionAttempts(
 	intent *model.StTransactionIntent,
 	attempts []*model.StTransactionAttempt,
 ) (terminal bool, receiptPending bool, txHash string, observationErr error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return false, false, "", err
+	}
+	defer stopRead()
 	var lastErr error
 	for _, attempt := range attempts {
 		hash := common.HexToHash(attempt.TxHash)
-		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
-		receipt, err := client.TransactionReceipt(callCtx, hash)
-		cancel()
-		if errors.Is(err, ethereum.NotFound) {
+		observation, err := self.readTransactionReceipt(ctx, client, hash)
+		if observation != nil && observation.receipt != nil && ctx.Err() == nil {
+			// A valid inclusion remains useful even when finality is unknown.
+			// This provisional fact never grants a replacement or new nonce.
+			receipt := observation.receipt
+			inclusionBlock := receipt.BlockNumber.Uint64()
+			inclusionHash := strings.ToLower(receipt.BlockHash.Hex())
+			model.MarkStTransactionMined(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash, inclusionBlock, inclusionHash)
+			attempt.Status, attempt.InclusionBlock, attempt.InclusionHash = model.StTxMined, &inclusionBlock, &inclusionHash
+		}
+		if err != nil {
+			if observation != nil && observation.receipt != nil {
+				receiptPending = true
+			}
+			lastErr = errors.Join(lastErr, err)
+			continue
+		}
+		receipt := observation.receipt
+		if receipt == nil {
 			if attempt.InclusionBlock != nil && attempt.InclusionHash != nil {
 				orphanErr := &stOrphanedTransactionReceiptError{message: fmt.Sprintf("st: receipt %s disappeared before finality", attempt.TxHash)}
 				model.MarkStTransactionOrphaned(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
@@ -1138,52 +1178,18 @@ func (self *CoreStClient) observeTransactionAttempts(
 			}
 			continue
 		}
-		if err != nil {
-			lastErr = errors.Join(lastErr, err)
-			continue
-		}
-		// An RPC receipt lookup does not authenticate the returned transaction
-		// hash. Refuse malformed/transplanted observations before durable writes.
-		if receipt == nil || receipt.TxHash != hash || receipt.BlockHash == (common.Hash{}) || receipt.BlockNumber == nil || !receipt.BlockNumber.IsInt64() || receipt.BlockNumber.Sign() <= 0 {
-			lastErr = errors.Join(lastErr, fmt.Errorf("st: receipt response differs from requested transaction %s or has an invalid inclusion block", attempt.TxHash))
-			continue
-		}
-		model.MarkStTransactionMined(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
-			receipt.BlockNumber.Uint64(), strings.ToLower(receipt.BlockHash.Hex()))
-		inclusionBlock := receipt.BlockNumber.Uint64()
-		inclusionHash := strings.ToLower(receipt.BlockHash.Hex())
-		attempt.Status, attempt.InclusionBlock, attempt.InclusionHash = model.StTxMined, &inclusionBlock, &inclusionHash
-		finalized, err := self.finalizedBlock(ctx)
-		if err != nil {
-			receiptPending = true
-			lastErr = errors.Join(lastErr, err)
-			continue
-		}
-		if finalized.Number > math.MaxInt64 {
-			receiptPending = true
-			lastErr = errors.Join(lastErr, errors.New("st: finalized transaction boundary exceeds postgres bigint"))
-			continue
-		}
-		if finalized.Number < receipt.BlockNumber.Uint64() {
-			receiptPending = true
-			continue
-		}
-		canonicalNumber := receipt.BlockNumber.Uint64()
-		callCtx, cancel = context.WithTimeout(ctx, stCallTimeout)
-		canonical, err := readStRPCBlockIdentity(callCtx, client, hexutil.EncodeUint64(canonicalNumber), &canonicalNumber)
-		cancel()
-		if err != nil {
-			receiptPending = true
-			lastErr = errors.Join(lastErr, err)
-			continue
-		}
-		if canonical.Hash != [32]byte(receipt.BlockHash) {
+		if observation.orphaned {
 			err = &stOrphanedTransactionReceiptError{message: fmt.Sprintf("st: receipt %s was orphaned before finality", attempt.TxHash)}
 			model.MarkStTransactionOrphaned(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
 				receipt.BlockNumber.Uint64(), strings.ToLower(receipt.BlockHash.Hex()), err)
 			attempt.Status = model.StTxUncertain
 			attempt.InclusionBlock, attempt.InclusionHash = nil, nil
 			lastErr = errors.Join(lastErr, err)
+			continue
+		}
+		finalized := observation.finalized
+		if finalized == nil {
+			receiptPending = true
 			continue
 		}
 		finalizedHash := strings.ToLower(common.BytesToHash(finalized.Hash[:]).Hex())
@@ -1280,10 +1286,11 @@ func (self *CoreStClient) runTransactionIntent(
 			}
 			attempts = model.GetStTransactionAttempts(ctx, intent.IntentId)
 		} else if replaceImmediately && current.Kind != model.StTxAttemptCancellation && current.Status != model.StTxMined {
+			originalHash := current.TxHash
 			var err error
 			current, err = self.buildTransactionAttempt(waitCtx, client, key, intent, current, model.StTxAttemptCancellation)
 			if err != nil {
-				return "", err
+				return originalHash, err
 			}
 			attempts = model.GetStTransactionAttempts(ctx, intent.IntentId)
 		}
@@ -1351,12 +1358,12 @@ func (self *CoreStClient) expiredCloseIntent(ctx context.Context, intent *model.
 	return true, nil
 }
 
-// An unsigned deposit whose encoded deadline has finalized cannot execute in a
+// A deposit whose encoded deadline has finalized cannot execute in a
 // later epoch. Keep its immutable intent and consume its EVM nonce through the
-// existing real cancellation path; the coordinator deposit nonce is untouched.
-func (self *CoreStClient) expiredUnsignedDepositIntent(intent *model.StTransactionIntent, attempts []*model.StTransactionAttempt, from common.Address, finalized uint64) (bool, error) {
+// existing real cancellation path; every original signed attempt is retained
+// and reconciled first, and the coordinator deposit nonce is untouched.
+func (self *CoreStClient) expiredDepositIntent(intent *model.StTransactionIntent, from common.Address, finalized uint64) (bool, error) {
 	if self.cfg == nil || self.coordinator == nil || self.cfg.DepositKey == nil || intent == nil ||
-		intent.Status != model.StTxPrepared || intent.AttemptCount != 0 || intent.CurrentTxHash != nil || len(attempts) != 0 ||
 		intent.Profile != self.cfg.Profile || intent.DeploymentId != self.cfg.DeploymentId || intent.DeploymentKey != self.cfg.DeploymentKey() || intent.ChainId != self.cfg.ChainId ||
 		!strings.EqualFold(intent.GenesisHash, "0x"+hex.EncodeToString(self.cfg.GenesisHash[:])) ||
 		from != crypto.PubkeyToAddress(self.cfg.DepositKey.PublicKey) || !strings.EqualFold(intent.FromAddress, from.Hex()) ||
@@ -1375,18 +1382,18 @@ func (self *CoreStClient) expiredUnsignedDepositIntent(intent *model.StTransacti
 		return false, nil
 	}
 	if !strings.EqualFold(intent.CalldataHash, crypto.Keccak256Hash(intent.Calldata).Hex()) {
-		return false, errors.New("st: unsigned deposit intent has inconsistent immutable calldata hash")
+		return false, errors.New("st: deposit intent has inconsistent immutable calldata hash")
 	}
 	if finalized <= deadline.Uint64() {
 		return false, nil
 	}
-	glog.Infof("[st]cancel expired unsigned deposit intent %s nonce %d operator %d amount %s deposit_nonce %s finalized_block %d deposit_deadline %d", intent.IntentKey, intent.Nonce, noID.Uint64(), amount, nonce, finalized, deadline.Uint64())
+	glog.Infof("[st]cancel expired deposit intent %s nonce %d operator %d amount %s deposit_nonce %s finalized_block %d deposit_deadline %d", intent.IntentKey, intent.Nonce, noID.Uint64(), amount, nonce, finalized, deadline.Uint64())
 	return true, nil
 }
 
 // Drains every lower account nonce before a new operation can reserve one. An
 // active-deployment intent resumes its exact stored business transaction;
-// expired closes, unsigned deposits and stale coordinators use a same-nonce
+// expired closes, deposits and stale coordinators use a same-nonce
 // self-transaction.
 func (self *CoreStClient) reconcileAccountIntents(
 	ctx context.Context,
@@ -1434,20 +1441,15 @@ func (self *CoreStClient) reconcileAccountIntents(
 			}
 		}
 
-		finalized, err := self.finalizedBlock(ctx)
-		if err != nil {
-			return fmt.Errorf("st: finalized head while reconciling nonce %d: %w", intent.Nonce, err)
-		}
-		nonceCtx, cancelNonce := context.WithTimeout(ctx, stCallTimeout)
-		finalizedNonce, err := client.NonceAt(nonceCtx, from, new(big.Int).SetUint64(finalized.Number))
-		cancelNonce()
+		finalized, finalizedNonce, err := self.readFinalizedTransactionNonce(ctx, client, from)
 		if err != nil {
 			return fmt.Errorf("st: finalized account nonce while reconciling %d: %w", intent.Nonce, err)
 		}
 		if finalizedNonce > intent.Nonce {
 			err := fmt.Errorf("st: account nonce %d was consumed without a known canonical attempt", intent.Nonce)
-			model.MarkStTransactionSuperseded(ctx, intent.IntentId, err)
-			if intent.DeploymentKey == self.cfg.DeploymentKey() {
+			// Receipt indexing can lag finality, or our own signature may land
+			// between the census and nonce read. Signed liability remains live.
+			if !model.MarkStTransactionSuperseded(ctx, intent.IntentId, err) || intent.DeploymentKey == self.cfg.DeploymentKey() {
 				return err
 			}
 			continue
@@ -1458,7 +1460,7 @@ func (self *CoreStClient) reconcileAccountIntents(
 		if err != nil {
 			return err
 		}
-		expiredDeposit, err := self.expiredUnsignedDepositIntent(intent, attempts, from, finalized.Number)
+		expiredDeposit, err := self.expiredDepositIntent(intent, from, finalized.Number)
 		if err != nil {
 			return err
 		}
@@ -1535,9 +1537,12 @@ func (self *CoreStClient) sendPrepared(ctx context.Context, key *ecdsa.PrivateKe
 	if err != nil {
 		return "", err
 	}
-	nonceCtx, cancelNonce := context.WithTimeout(ctx, stCallTimeout)
-	pendingNonce, err := client.PendingNonceAt(nonceCtx, from)
-	cancelNonce()
+	var pendingNonce uint64
+	err = self.readTransactionRpc(ctx, client, func(ctx context.Context) error {
+		var err error
+		pendingNonce, err = client.PendingNonceAt(ctx, from)
+		return err
+	})
 	if err != nil {
 		return "", fmt.Errorf("st: pending nonce for %s: %w", from, err)
 	}

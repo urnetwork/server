@@ -231,7 +231,7 @@ func (self *stDepositCustodyRpc) Call(ctx context.Context, call map[string]hexut
 }
 
 // Account nonce is independent of the coordinator deposit nonce.
-func (self *stDepositCustodyRpc) GetTransactionCount(context.Context, common.Address, string) (hexutil.Uint64, error) {
+func (self *stDepositCustodyRpc) GetTransactionCount(context.Context, common.Address, rpc.BlockNumberOrHash) (hexutil.Uint64, error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return hexutil.Uint64(self.accountNonce), nil
@@ -270,25 +270,32 @@ func (self *stDepositCustodyRpc) SendRawTransaction(_ context.Context, raw hexut
 	if err != nil || from != crypto.PubkeyToAddress(self.cfg.DepositKey.PublicKey) || tx.To() == nil || tx.Nonce() != self.accountNonce || tx.Value().Sign() != 0 {
 		return common.Hash{}, errors.New("wrong fixture signing origin or account nonce")
 	}
+	status := uint64(types.ReceiptStatusSuccessful)
 	if *tx.To() == stStakingPrecompileAddress && len(tx.Data()) == 164 {
 		amount := new(big.Int).SetBytes(tx.Data()[132:164])
 		self.source.Sub(self.source, amount)
 		self.staged.Add(self.staged, new(big.Int).Sub(amount, big.NewInt(self.loss)))
 	} else if *tx.To() == self.cfg.ContractAddress && len(tx.Data()) == 132 {
 		amount := new(big.Int).SetBytes(tx.Data()[36:68])
-		if new(big.Int).SetBytes(tx.Data()[68:100]).Cmp(self.depositNonce) != 0 {
+		deadline := new(big.Int).SetBytes(tx.Data()[100:132])
+		if !deadline.IsUint64() || deadline.Uint64() < self.boundary.Block+1 {
+			status = types.ReceiptStatusFailed
+		} else if new(big.Int).SetBytes(tx.Data()[68:100]).Cmp(self.depositNonce) != 0 {
 			return common.Hash{}, errors.New("wrong fixture deposit nonce")
+		} else {
+			self.staged.Sub(self.staged, new(big.Int).Add(amount, big.NewInt(2)))
+			self.deposited.Add(self.deposited, amount)
+			self.depositNonce.Add(self.depositNonce, big.NewInt(1))
 		}
-		self.staged.Sub(self.staged, new(big.Int).Add(amount, big.NewInt(2)))
-		self.deposited.Add(self.deposited, amount)
-		self.depositNonce.Add(self.depositNonce, big.NewInt(1))
+	} else if *tx.To() == from && len(tx.Data()) == 0 && tx.Gas() == 21_000 {
+		// A real same-nonce cancellation consumes gas/account nonce only.
 	} else {
 		return common.Hash{}, errors.New("unexpected deposit execution")
 	}
 	self.accountNonce++
 	self.boundary.Block++
 	self.boundary.Hash = [32]byte(stTransactionReconcileBlockHash(self.boundary.Block))
-	self.receiptKVs[tx.Hash()] = &types.Receipt{Type: tx.Type(), TxHash: tx.Hash(), BlockHash: common.Hash(self.boundary.Hash), BlockNumber: new(big.Int).SetUint64(self.boundary.Block), Status: types.ReceiptStatusSuccessful, GasUsed: tx.Gas(), CumulativeGasUsed: tx.Gas(), EffectiveGasPrice: tx.GasPrice(), Logs: []*types.Log{}}
+	self.receiptKVs[tx.Hash()] = &types.Receipt{Type: tx.Type(), TxHash: tx.Hash(), BlockHash: common.Hash(self.boundary.Hash), BlockNumber: new(big.Int).SetUint64(self.boundary.Block), Status: status, GasUsed: tx.Gas(), CumulativeGasUsed: tx.Gas(), EffectiveGasPrice: tx.GasPrice(), Logs: []*types.Log{}}
 	if self.lostReply {
 		self.lostReply = false
 		return common.Hash{}, errors.New("deterministic lost reply after inclusion")

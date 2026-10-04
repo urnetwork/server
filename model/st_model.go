@@ -1392,31 +1392,32 @@ func MarkStTransactionCanceled(ctx context.Context, intentId server.Id, attempt 
 	})
 }
 
-// Records finalized account-nonce consumption for which none of the durable
-// attempt hashes is canonical. The unknown transaction cannot be overwritten.
-func MarkStTransactionSuperseded(ctx context.Context, intentId server.Id, err error) {
+// Retires only an unsigned reservation after canonical nonce consumption. A
+// missing receipt cannot disprove a retained signature; the row lock also
+// excludes a first signature elected after the caller's earlier census.
+func MarkStTransactionSuperseded(ctx context.Context, intentId server.Id, err error) bool {
 	message := "account nonce was consumed by an unknown transaction"
 	if err != nil {
 		message = err.Error()
 	}
+	superseded := false
 	server.Tx(ctx, func(tx server.PgTx) {
 		var intentStatus string
+		var attemptCount int
 		server.Raise(tx.QueryRow(ctx, `
-			SELECT status FROM st_transaction_intent WHERE intent_id=$1 FOR UPDATE
-		`, intentId).Scan(&intentStatus))
-		if stTransactionIntentTerminal(intentStatus) {
+			SELECT status, attempt_count FROM st_transaction_intent WHERE intent_id=$1 FOR UPDATE
+		`, intentId).Scan(&intentStatus, &attemptCount))
+		if stTransactionIntentTerminal(intentStatus) || attemptCount != 0 {
 			return
 		}
 		now := server.NowUtc()
 		server.RaisePgResult(tx.Exec(ctx, `
-			UPDATE st_transaction_attempt SET status=$2, error=$3, update_time=$4
-			WHERE intent_id=$1 AND status NOT IN ($5,$6)
-		`, intentId, StTxSuperseded, message, now, StTxFinalized, StTxReverted))
-		server.RaisePgResult(tx.Exec(ctx, `
 			UPDATE st_transaction_intent SET status=$2, error=$3, update_time=$4
 			WHERE intent_id=$1
 		`, intentId, StTxSuperseded, message, now))
+		superseded = true
 	})
+	return superseded
 }
 
 // StChainEvent is one mirrored contract log, unique on
