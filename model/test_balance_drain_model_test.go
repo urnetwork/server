@@ -45,8 +45,8 @@ func TestTestBalanceDrainAllowlistGate(t *testing.T) {
 	Testing_SetTestBalanceDrainAllowlist([]server.Id{allowed})
 	defer Testing_SetTestBalanceDrainAllowlist(nil)
 
-	connect.AssertEqual(t, TestBalanceDrainAllowed(allowed), true)
-	connect.AssertEqual(t, TestBalanceDrainAllowed(other), false)
+	connect.AssertEqual(t, TestBalanceDrainAllowed(context.Background(), allowed), true)
+	connect.AssertEqual(t, TestBalanceDrainAllowed(context.Background(), other), false)
 
 	// refused before any database access
 	drain, err := DrainTestBalance(context.Background(), other, time.Minute)
@@ -54,7 +54,7 @@ func TestTestBalanceDrainAllowlistGate(t *testing.T) {
 	connect.AssertEqual(t, err, ErrTestBalanceDrainNotAllowed)
 
 	Testing_SetTestBalanceDrainAllowlist([]server.Id{})
-	connect.AssertEqual(t, TestBalanceDrainAllowed(allowed), false)
+	connect.AssertEqual(t, TestBalanceDrainAllowed(context.Background(), allowed), false)
 }
 
 type failingQuery struct {
@@ -182,21 +182,21 @@ func TestTestBalanceDrainRoundTrip(t *testing.T) {
 
 func TestTestBalanceDrainVaultAllowlistDefaultsClosed(t *testing.T) {
 	Testing_SetTestBalanceDrainAllowlist(nil)
-	testBalanceDrainAllowlist.snapshot.Store(nil)
-	defer testBalanceDrainAllowlist.snapshot.Store(nil)
+	testBalanceDrainGates.snapshot.Store(nil)
+	defer testBalanceDrainGates.snapshot.Store(nil)
 
 	networkId := server.NewId()
-	connect.AssertEqual(t, TestBalanceDrainAllowed(networkId), false)
+	connect.AssertEqual(t, TestBalanceDrainAllowed(context.Background(), networkId), false)
 
 	pop := server.Vault.PushSimpleResource(testBalanceDrainVaultResource, []byte("network_ids:\n  - "+networkId.String()+"\n"))
-	testBalanceDrainAllowlist.snapshot.Store(nil)
-	connect.AssertEqual(t, TestBalanceDrainAllowed(networkId), true)
-	connect.AssertEqual(t, TestBalanceDrainAllowed(server.NewId()), false)
+	testBalanceDrainGates.snapshot.Store(nil)
+	connect.AssertEqual(t, TestBalanceDrainAllowed(context.Background(), networkId), true)
+	connect.AssertEqual(t, TestBalanceDrainAllowed(context.Background(), server.NewId()), false)
 	pop()
 
 	// a malformed vault file disables the gate
 	pop = server.Vault.PushSimpleResource(testBalanceDrainVaultResource, []byte("network_ids:\n  - "+networkId.String()+"\n  - nope\n"))
-	testBalanceDrainAllowlist.snapshot.Store(nil)
-	connect.AssertEqual(t, TestBalanceDrainAllowed(networkId), false)
+	testBalanceDrainGates.snapshot.Store(nil)
+	connect.AssertEqual(t, TestBalanceDrainAllowed(context.Background(), networkId), false)
 	pop()
 }
