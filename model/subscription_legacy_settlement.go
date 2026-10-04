@@ -138,7 +138,8 @@ func flushLegacySettlement(ctx context.Context, contractId server.Id) (completed
 	return
 }
 
-// The due-time index makes each next item one bounded seek. Failed accounting
+// Each statement takes a fresh cutoff that bounds the due-time index. A
+// per-row volatile clock would scan future rows even with LIMIT 1. Failed accounting
 // remains visible and reserved; it is not quarantined or retried in a hot loop.
 // Each next task owns a fresh bounded page and persists this composite cursor.
 func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlementCursor, limit int) (result LegacySettlementFlushResult, returnErr error) {
@@ -152,12 +153,12 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 			var next *LegacySettlementCursor
 			server.Db(bounded, func(conn server.PgConn) {
 				query := `SELECT next_attempt_time,contract_id FROM legacy_settlement_intent
-                  WHERE shard=$1 AND next_attempt_time<=clock_timestamp() AT TIME ZONE 'UTC'
+                  WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
                   ORDER BY next_attempt_time,contract_id LIMIT 1`
 				args := []any{shard}
 				if after != nil {
 					query = `SELECT next_attempt_time,contract_id FROM legacy_settlement_intent
-                      WHERE shard=$1 AND next_attempt_time<=clock_timestamp() AT TIME ZONE 'UTC'
+                      WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
                       AND (next_attempt_time,contract_id)>($2,$3) ORDER BY next_attempt_time,contract_id LIMIT 1`
 					args = append(args, after.NextAttemptTime, after.ContractId)
 				}

@@ -4619,6 +4619,20 @@ not claim Main throughput or arbitrary-N worker capacity. Require the exact
 migration catalog, task registration and service generation, followed by fresh
 complete backlog/holder observations before closing the production boundary.
 
+Due selection plan qualifier (2026-10-04): a row-volatile `clock_timestamp()`
+cutoff can remain a Filter after the shard index condition. `LIMIT 1` then
+still examines an all-future shard. Native controls with 400,000 future rows
+reproduced that scan in both initial and cursor selections. A fresh
+`statement_timestamp() AT TIME ZONE 'UTC'` cutoff makes the due-time upper
+bound an Index Cond; the control visits no future rows and a later statement
+still sees newly due work inside an existing transaction. Cursor, SKIP LOCKED,
+accounting refusal, reservation and retry policy are unchanged. This is a
+local plan mechanism, not attribution of Main CPU or a timed-out diagnostic.
+A separately materialized observation clock can already be indexable; inspect
+its actual plan before equating it with the worker expression. A statement
+timeout with no projection leaves backlog unknown, not empty. Main recovery
+still requires current source and fresh bounded progress evidence.
+
 ### 2.6 Open-contract set size — the close-backlog canary
 Probe: `open-contracts`
 
