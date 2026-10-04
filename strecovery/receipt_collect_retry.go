@@ -38,33 +38,44 @@ func receiptCollectorStatusRetry(status int) bool {
 }
 
 func receiptCollectorRetryable(err error) bool {
-	if err == nil {
-		return false
-	}
-	if many, ok := err.(interface{ Unwrap() []error }); ok {
-		causes := many.Unwrap()
-		if len(causes) == 0 {
+	remaining := 128
+	var visit func(error, int) bool
+	visit = func(cause error, depth int) bool {
+		if cause == nil || depth > 32 || remaining == 0 {
 			return false
 		}
-		for _, cause := range causes {
-			if cause != nil && !receiptCollectorRetryable(cause) {
+		remaining--
+		if many, ok := cause.(interface{ Unwrap() []error }); ok {
+			causes := many.Unwrap()
+			if len(causes) == 0 || len(causes) > remaining {
 				return false
 			}
+			seen := false
+			for _, next := range causes {
+				if next == nil {
+					continue
+				}
+				seen = true
+				if !visit(next, depth+1) {
+					return false
+				}
+			}
+			return seen
 		}
-		return true
-	}
-	if one, ok := err.(interface{ Unwrap() error }); ok {
-		if cause := one.Unwrap(); cause != nil {
-			return receiptCollectorRetryable(cause)
+		if one, ok := cause.(interface{ Unwrap() error }); ok {
+			return visit(one.Unwrap(), depth+1)
 		}
-	}
-	for _, transient := range []error{context.DeadlineExceeded, io.EOF, io.ErrUnexpectedEOF, syscall.ECONNRESET, syscall.ECONNABORTED, syscall.ECONNREFUSED, syscall.ETIMEDOUT, syscall.EHOSTUNREACH, syscall.ENETUNREACH, syscall.EPIPE, syscall.EAGAIN, syscall.EINTR, syscall.EMFILE, syscall.ENFILE, syscall.ENOMEM, syscall.EIO} {
-		if errors.Is(err, transient) {
-			return true
+		// Calling errors.Is here would allow a custom Is method to walk a
+		// second unbounded cause tree. Only the observed leaf grants retry.
+		for _, transient := range []error{context.DeadlineExceeded, io.EOF, io.ErrUnexpectedEOF, syscall.ECONNRESET, syscall.ECONNABORTED, syscall.ECONNREFUSED, syscall.ETIMEDOUT, syscall.EHOSTUNREACH, syscall.ENETUNREACH, syscall.EPIPE, syscall.EAGAIN, syscall.EINTR, syscall.EMFILE, syscall.ENFILE, syscall.ENOMEM, syscall.EIO} {
+			if cause == transient {
+				return true
+			}
 		}
+		if network, ok := cause.(net.Error); ok {
+			return network.Timeout() || network.Temporary()
+		}
+		return false
 	}
-	if network, ok := err.(net.Error); ok {
-		return network.Timeout() || network.Temporary()
-	}
-	return false
+	return visit(err, 0)
 }
