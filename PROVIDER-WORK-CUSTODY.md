@@ -71,6 +71,27 @@ retains its original outbox across transient errors; the Server never requests a
 fresh SDK signature to recover an uncertain receipt.
 # SDK startup enrollment
 
+Prospective payout production loads the independently signed whole-work
+authority once, before querying provider reliability, wallets or fleet bindings.
+Its explicit `expected_providers` roster adds zero-usage rows for idle providers;
+observed usage outside that roster or under a different network is refused.
+Zero rows do not create exposure, eligibility, a wallet or a payout leaf.
+
+When that prospective authority is present, missing original cuts, window clock
+or predecessor evidence leaves payout production pending before publication.
+The later delivery of the same originals can finish the same payout. An already
+published historical artifact still uses its original immutable retry path.
+
+Prior-contract exclusions require original predecessor artifacts from the same
+domain and their exact whole-work witnesses. Every dependency is independently
+verified again under the configured root authorities. The new authority's prior
+entries are lookup hints and must match the resulting original checkpoints in
+every field. The operation traverses at most 64 distinct prior windows and
+64 MiB of original artifact/witness bytes; exceeding either bound returns a
+capacity refusal, without accepting a partial predecessor graph. Missing
+predecessors remain unknown. This acquisition runs for both payout publication
+and public companion retrieval; no current SQL row supplies a verified verdict.
+
 The SDK sends its exact canonical `OriginalWorkOwnerEnrollment` to public
 `POST /provider-work/v1/owners` before polling capture requests. The 4 KiB signed
 statement binds domain, client, SDK generation and public key. Its receipt is

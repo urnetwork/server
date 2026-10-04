@@ -55,6 +55,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urfoundation/sn/merkle"
+	"github.com/urfoundation/sn/payoutartifact"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/ss58"
 	"github.com/urfoundation/sn/stabi"
@@ -3303,6 +3304,14 @@ func stComputeReleasePayout(
 	if authority == nil || authority.Epoch != epoch || authority.PolicyHash != cfg.PolicyHash || authority.Start.Block != startBlock || authority.End.Block != closeBlock || !authority.StartTime.Equal(startTime) || !authority.EndTime.Equal(endTime) {
 		return [32]byte{}, 0, errors.New("st: payout policy or window differs from authenticated epoch authority")
 	}
+	workAuthority, err := stLoadProviderWorkAuthority(ctx, cfg, authority)
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
+	usages, err = stProviderWorkUsages(ctx, workAuthority, usages)
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
 	usageClientIds := make([]server.Id, len(usages))
 	for index, usage := range usages {
 		usageClientIds[index] = usage.ClientId
@@ -3351,9 +3360,12 @@ func stComputeReleasePayout(
 		closedWork.Start = startifact.Boundary{Number: startBlock, Hash: common.Hash(authority.Start.Hash).Hex()}
 		closedWork.End = startifact.Boundary{Number: closeBlock, Hash: common.Hash(authority.End.Hash).Hex()}
 	}
-	wholeInventory, wholeExpectation, err := stPrepareWholeWorkInventory(ctx, cfg, authority, wholeWindow)
+	wholeInventory, wholeExpectation, err := stPrepareApprovedWholeWorkInventory(ctx, workAuthority, authority, wholeWindow)
 	if err != nil {
 		return [32]byte{}, 0, err
+	}
+	if workAuthority != nil && workAuthority.Authority.ExpectedProviders != nil && wholeInventory == nil {
+		return [32]byte{}, 0, payoutartifact.ErrClosedWorkUnavailable
 	}
 	if closedWork != nil {
 		closedWork.WholeInventory = wholeInventory
@@ -3376,7 +3388,7 @@ func stComputeReleasePayout(
 	if err := startifact.Sign(artifact, cfg.ArtifactKey); err != nil {
 		return [32]byte{}, 0, err
 	}
-	if artifact.ClosedWork != nil {
+	if artifact.ClosedWork != nil && artifact.ClosedWork.WholeInventory == nil {
 		if _, err := startifact.VerifyClosedWorkReports(ctx, artifact, common.Address{}); err != nil {
 			return [32]byte{}, 0, err
 		}
