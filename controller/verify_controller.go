@@ -558,8 +558,6 @@ func verifySeedWithAdmission(
 		if poison {
 			model.PadVerifySample(ctx, settings)
 			model.IncrVerifyPoisonCounter(ctx, "assign")
-		} else {
-			model.RecordVerifyAssignment(ctx, nextHopClientId, now, settings)
 		}
 	}
 
@@ -614,12 +612,15 @@ func verifySeedWithAdmission(
 	}
 
 	// §4.1 step 7: persist trail + cached response (§4.3)
-	model.CreateVerifyTrail(
-		ctx,
-		trail,
-		verifyEncodeCachedResponse(&verifyCachedResponse{Assign: result}),
-		settings,
-	)
+	responseJson := verifyEncodeCachedResponse(&verifyCachedResponse{Assign: result})
+	if !trail.Poison {
+		model.SnapshotVerifyProviderNetwork(ctx, trail.Hops[0])
+		model.SnapshotVerifyProviderNetwork(ctx, trail.Pending)
+		original := verifyRetainOriginal(ctx, 0, trail, seedMessage, verify.SeedSig, responseJson)
+		model.PublishVerifyOriginal(ctx, original, settings)
+	} else {
+		model.CreateVerifyTrail(ctx, trail, responseJson, settings)
+	}
 
 	if glog.V(2) {
 		glog.Infof("[verify]seed trail %s depth 1/%d (poison=%t)\n", trailId, m, poison)
@@ -672,7 +673,11 @@ func verifyExtend(
 	// §4.2 step 2: load the trail
 	trail := model.GetVerifyTrail(ctx, trailId)
 	if trail == nil {
-		return nil, fmt.Errorf("400 trail not found")
+		if original := model.GetLatestVerifyOriginal(ctx, trailId); original != nil {
+			trail = verifyDecodeOriginal(original).Trail
+		} else {
+			return nil, fmt.Errorf("400 trail not found")
+		}
 	}
 
 	var confirmedIds []server.Id
@@ -692,6 +697,9 @@ func verifyExtend(
 		}
 		if !connect.VerifyVerifyMessageSignature(trail.Vpk, replayMessage, verify.ExtendSig) {
 			return nil, true, fmt.Errorf("400 invalid extend signature")
+		}
+		if trail.Status == model.VerifyTrailStatusExpired {
+			return nil, true, &verifyExtendFailure{reason: "retained-expiry"}
 		}
 		responseJson, ok := model.GetVerifyTrailResponse(ctx, trailId)
 		if !ok {
@@ -723,7 +731,7 @@ func verifyExtend(
 	// The lock protects this snapshot through the matching write below. A
 	// request that became a replay while waiting returns the newly cached
 	// response without mutating state or accounting twice.
-	trail = model.GetVerifyTrail(ctx, trailId)
+	trail = verifyRecoverOriginal(ctx, trailId, model.GetVerifyTrail(ctx, trailId), settings)
 	if trail == nil {
 		return nil, fmt.Errorf("400 trail not found")
 	}
@@ -792,10 +800,12 @@ func verifyExtend(
 	// §4.2 step 6: confirm the hop, stamp server time (§3.4), record
 	// per-step latency at the instant of confirmation (§7.5)
 	confirmedHop := &model.VerifyTrailHop{
-		ClientId:    trail.Pending.ClientId,
-		AssignedMs:  trail.Pending.AssignedMs,
-		ConfirmedMs: nowMs,
-		AssignN:     trail.Pending.AssignN,
+		ClientId:     trail.Pending.ClientId,
+		NetworkId:    trail.Pending.NetworkId,
+		NetworkIssue: trail.Pending.NetworkIssue,
+		AssignedMs:   trail.Pending.AssignedMs,
+		ConfirmedMs:  nowMs,
+		AssignN:      trail.Pending.AssignN,
 		// §4.2 step 5 passed, so the confirming request's source ip is this
 		// provider's egress ip — record its egress-IP-hash at the configured
 		// granularity (§8.1, §3.3, D27). Computed unconditionally: a poison
@@ -803,10 +813,7 @@ func verifyExtend(
 		// observable branch on poison.
 		EgressIpHash: model.VerifyEgressIpHashWithSettings(sourceIp, settings),
 	}
-	if !trail.Poison {
-		latencyMs := int64(confirmedHop.ConfirmedMs - confirmedHop.AssignedMs)
-		model.RecordVerifyConfirmation(ctx, confirmedHop.ClientId, latencyMs, now, settings)
-	} else {
+	if trail.Poison {
 		model.IncrVerifyPoisonCounter(ctx, "confirm")
 	}
 
@@ -874,35 +881,21 @@ func verifyExtend(
 			Proof:  proof,
 		}
 
-		model.CompleteVerifyTrail(
-			ctx,
-			trail,
-			confirmedHop,
-			verifyEncodeCachedResponse(&verifyCachedResponse{Final: result}),
-			settings,
-		)
-		model.DecrVerifyActiveTrails(ctx, trail.Vpk)
-
 		if !trail.Poison {
-			// §3.3/§6.2: publish the proof durably; a poison trail is
-			// silently never published (§9)
-			hopsJson, err := json.Marshal(proofHops)
+			nextTrail := *trail
+			nextTrail.Hops = confirmedHops
+			nextTrail.Pending = nil
+			nextTrail.Status = model.VerifyTrailStatusComplete
+			nextTrail.ActivityMs = nowMs
+			original := verifyRetainOriginal(ctx, len(trail.Hops), &nextTrail, extendMessage, verify.ExtendSig, verifyEncodeCachedResponse(&verifyCachedResponse{Final: result}))
+			retained := model.PublishVerifyOriginal(ctx, original, settings)
+			decoded, err := verifyDecodeCachedResponse(retained.ResponseJson)
 			server.Raise(err)
-			completeTime := now.UTC()
-			model.InsertVerifyTrail(ctx, &model.VerifyTrailRow{
-				TrailId:      trailId,
-				Vpk:          trail.Vpk,
-				ServerKeyId:  serverKey.ServerKeyId,
-				ServerNonce:  trail.ServerNonce,
-				Depth:        trail.M,
-				Status:       model.VerifyTrailRowStatusComplete,
-				HopsJson:     string(hopsJson),
-				FinalSig:     finalSig,
-				VerifierSig:  verify.ExtendSig,
-				CreateTime:   time.UnixMilli(int64(trail.CreateMs)).UTC(),
-				CompleteTime: &completeTime,
-			})
+			result = decoded.(*connect.VerifyFinalResult)
+		} else {
+			model.CompleteVerifyTrail(ctx, trail, confirmedHop, verifyEncodeCachedResponse(&verifyCachedResponse{Final: result}), settings)
 		}
+		model.DecrVerifyActiveTrails(ctx, trail.Vpk)
 
 		if glog.V(2) {
 			glog.Infof("[verify]complete trail %s depth %d (poison=%t)\n", trailId, depth, trail.Poison)
@@ -926,8 +919,6 @@ func verifyExtend(
 		if trail.Poison {
 			model.PadVerifySample(ctx, settings)
 			model.IncrVerifyPoisonCounter(ctx, "assign")
-		} else {
-			model.RecordVerifyAssignment(ctx, nextHopClientId, now, settings)
 		}
 	}
 	if !sampled {
@@ -935,7 +926,15 @@ func verifyExtend(
 			// a real trail with no assignable provider cannot continue and
 			// cannot be completed honestly: fail it without blame (there is
 			// no unreached assigned hop)
-			return nil, rejectVerifyExtend(ctx, trail, "next-hop-unavailable")
+			nextTrail := *trail
+			nextTrail.Hops = confirmedHops
+			nextTrail.Pending = nil
+			nextTrail.Status = model.VerifyTrailStatusExpired
+			nextTrail.ActivityMs = nowMs
+			original := verifyRetainOriginal(ctx, len(trail.Hops), &nextTrail, extendMessage, verify.ExtendSig, "")
+			model.PublishVerifyOriginal(ctx, original, settings)
+			model.DecrVerifyActiveTrails(ctx, trail.Vpk)
+			return nil, &verifyExtendFailure{reason: "next-hop-unavailable"}
 		}
 		assignN = model.PadVerifySample(ctx, settings)
 		nextHopClientId = server.NewId()
@@ -969,14 +968,21 @@ func verifyExtend(
 		AssignSig:   assignSig,
 	}
 
-	model.ConfirmVerifyHopAndAssign(
-		ctx,
-		trail,
-		confirmedHop,
-		newPending,
-		verifyEncodeCachedResponse(&verifyCachedResponse{Assign: result}),
-		settings,
-	)
+	responseJson := verifyEncodeCachedResponse(&verifyCachedResponse{Assign: result})
+	if !trail.Poison {
+		model.SnapshotVerifyProviderNetwork(ctx, newPending)
+		nextTrail := *trail
+		nextTrail.Hops = confirmedHops
+		nextTrail.Pending = newPending
+		nextTrail.ActivityMs = nowMs
+		original := verifyRetainOriginal(ctx, len(trail.Hops), &nextTrail, extendMessage, verify.ExtendSig, responseJson)
+		retained := model.PublishVerifyOriginal(ctx, original, settings)
+		decoded, err := verifyDecodeCachedResponse(retained.ResponseJson)
+		server.Raise(err)
+		result = decoded.(*connect.VerifyAssignResult)
+	} else {
+		model.ConfirmVerifyHopAndAssign(ctx, trail, confirmedHop, newPending, responseJson, settings)
+	}
 
 	if glog.V(2) {
 		glog.Infof("[verify]extend trail %s depth %d/%d (poison=%t)\n", trailId, depth, trail.M, trail.Poison)
@@ -989,11 +995,11 @@ func verifyExtend(
 // failure is attributed to the pending hop by construction (its assignment
 // was counted at ASSIGN time and no confirmation ever will be, §7.2).
 func verifyFailTrail(ctx context.Context, trail *model.VerifyTrail) {
-	model.ExpireVerifyTrail(ctx, trail.TrailId)
-	model.DecrVerifyActiveTrails(ctx, trail.Vpk)
 	if !trail.Poison {
 		model.InsertVerifyTrail(ctx, model.NewExpiredVerifyTrailRow(trail))
 	}
+	model.ExpireVerifyTrail(ctx, trail.TrailId)
+	model.DecrVerifyActiveTrails(ctx, trail.Vpk)
 	if glog.V(2) {
 		glog.Infof("[verify]failed trail %s depth %d (poison=%t)\n", trail.TrailId, len(trail.Hops), trail.Poison)
 	}
@@ -1058,24 +1064,27 @@ type GetVerifyStatsResult struct {
 }
 
 type PublicVerifyProofRow struct {
-	TrailId      server.Id       `json:"trail_id"`
-	Vpk          []byte          `json:"vpk"`
-	ServerKeyId  byte            `json:"server_key_id"`
-	ServerNonce  []byte          `json:"server_nonce"`
-	Depth        int             `json:"depth"`
-	Status       int             `json:"status"`
-	Hops         json.RawMessage `json:"hops"`
-	FinalSig     []byte          `json:"final_sig,omitempty"`
-	VerifierSig  []byte          `json:"verifier_sig,omitempty"`
-	CreateTime   time.Time       `json:"create_time"`
-	CompleteTime *time.Time      `json:"complete_time,omitempty"`
+	TrailId       server.Id       `json:"trail_id"`
+	Vpk           []byte          `json:"vpk"`
+	ServerKeyId   byte            `json:"server_key_id"`
+	ServerNonce   []byte          `json:"server_nonce"`
+	Depth         int             `json:"depth"`
+	Status        int             `json:"status"`
+	Hops          json.RawMessage `json:"hops"`
+	FinalSig      []byte          `json:"final_sig,omitempty"`
+	VerifierSig   []byte          `json:"verifier_sig,omitempty"`
+	CreateTime    time.Time       `json:"create_time"`
+	CompleteTime  *time.Time      `json:"complete_time,omitempty"`
+	OriginalState []byte          `json:"original_state,omitempty"`
 }
 
 type GetVerifyProofsResult struct {
-	Schema     string                  `json:"schema"`
-	Profile    string                  `json:"profile"`
-	PolicyHash string                  `json:"policy_hash"`
-	Rows       []*PublicVerifyProofRow `json:"rows"`
+	Schema              string                            `json:"schema"`
+	Profile             string                            `json:"profile"`
+	PolicyHash          string                            `json:"policy_hash"`
+	Rows                []*PublicVerifyProofRow           `json:"rows"`
+	OriginalTransitions []*model.VerifyOriginalTransition `json:"original_transitions,omitempty"`
+	OriginalCoverage    string                            `json:"original_coverage"`
 }
 
 func verifyEvidenceRange(args *GetVerifyEvidenceArgs, defaultLimit, maxLimit int) (time.Time, time.Time, int, error) {
@@ -1141,7 +1150,8 @@ func GetVerifyProofs(args *GetVerifyEvidenceArgs, clientSession *session.ClientS
 	if err != nil {
 		return nil, err
 	}
-	result := &GetVerifyProofsResult{Schema: "urnetwork-verify-proof-index-v1"}
+	result := &GetVerifyProofsResult{Schema: "urnetwork-verify-proof-index-v1", OriginalCoverage: "operator_index_only"}
+	result.OriginalTransitions = model.ListVerifyOriginals(clientSession.Ctx, from, to, limit)
 	if cfg := stConfig(); cfg != nil {
 		result.Profile = cfg.Profile
 		result.PolicyHash = fmt.Sprintf("0x%x", cfg.PolicyHash)
@@ -1156,6 +1166,7 @@ func GetVerifyProofs(args *GetVerifyEvidenceArgs, clientSession *session.ClientS
 			ServerNonce: row.ServerNonce, Depth: row.Depth, Status: row.Status, Hops: hops,
 			FinalSig: row.FinalSig, VerifierSig: row.VerifierSig,
 			CreateTime: row.CreateTime.UTC(), CompleteTime: row.CompleteTime,
+			OriginalState: row.OriginalState,
 		})
 	}
 	return result, nil

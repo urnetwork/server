@@ -93,21 +93,38 @@ type StWallet struct {
 // provider client. Wallet changes are prospective: settlement selects the
 // newest row whose SetTime is not after the epoch boundary.
 type StProviderWallet struct {
-	ClientId      server.Id
-	NetworkId     server.Id
-	ColdkeySs58   string
-	ColdkeyPubkey [32]byte
-	SetTime       time.Time
+	ClientId          server.Id
+	NetworkId         server.Id
+	ColdkeySs58       string
+	ColdkeyPubkey     [32]byte
+	SetTime           time.Time
+	OriginalMessage   *string
+	OriginalSignature *string
 }
 
+// Legacy writers retain a missing original instead of inventing wallet consent.
 func SetStProviderWallet(ctx context.Context, clientId server.Id, networkId server.Id, coldkeySs58 string, coldkeyPubkey [32]byte) {
+	SetStProviderWalletOriginal(ctx, clientId, networkId, coldkeySs58, coldkeyPubkey, nil, nil)
+}
+
+// Retain the exact validated coldkey challenge beside the prospective owner.
+// This proves key possession; the challenge does not sign the client mapping.
+func SetStProviderWalletOriginal(ctx context.Context, clientId server.Id, networkId server.Id, coldkeySs58 string, coldkeyPubkey [32]byte, originalMessage, originalSignature *string) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(ctx, `
-            INSERT INTO st_provider_wallet_history (
-                client_id, network_id, coldkey_ss58, coldkey_pubkey, set_time
-            ) VALUES ($1, $2, $3, $4, $5)
-        `, clientId, networkId, coldkeySs58, coldkeyPubkey[:], server.NowUtc()))
+		setStProviderWalletOriginalInTx(ctx, tx, clientId, networkId, coldkeySs58, coldkeyPubkey, originalMessage, originalSignature)
 	})
+}
+
+// The wallet and its retained proof share the caller's ownership transaction.
+func setStProviderWalletOriginalInTx(ctx context.Context, tx server.PgTx, clientId server.Id, networkId server.Id, coldkeySs58 string, coldkeyPubkey [32]byte, originalMessage, originalSignature *string) {
+	if (originalMessage == nil) != (originalSignature == nil) || (originalMessage != nil && (len(*originalMessage) == 0 || len(*originalMessage) > 8192 || len(*originalSignature) == 0 || len(*originalSignature) > 512)) {
+		panic(fmt.Errorf("wallet original requires bounded message and signature"))
+	}
+	server.RaisePgResult(tx.Exec(ctx, `
+            INSERT INTO st_provider_wallet_history (
+                client_id, network_id, coldkey_ss58, coldkey_pubkey, set_time, original_message, original_signature
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, clientId, networkId, coldkeySs58, coldkeyPubkey[:], server.NowUtc(), originalMessage, originalSignature))
 }
 
 // GetStProviderWalletsAt returns the most recent wallet for every provider as
@@ -119,7 +136,7 @@ func GetStProviderWalletsAt(ctx context.Context, boundaryTime time.Time) map[ser
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(ctx, `
             SELECT DISTINCT ON (client_id)
-                client_id, network_id, coldkey_ss58, coldkey_pubkey, set_time
+                client_id, network_id, coldkey_ss58, coldkey_pubkey, set_time, original_message, original_signature
             FROM st_provider_wallet_history
             WHERE set_time <= $1
             ORDER BY client_id, set_time DESC, wallet_version DESC
@@ -128,7 +145,7 @@ func GetStProviderWalletsAt(ctx context.Context, boundaryTime time.Time) map[ser
 			for result.Next() {
 				wallet := &StProviderWallet{}
 				var coldkey []byte
-				server.Raise(result.Scan(&wallet.ClientId, &wallet.NetworkId, &wallet.ColdkeySs58, &coldkey, &wallet.SetTime))
+				server.Raise(result.Scan(&wallet.ClientId, &wallet.NetworkId, &wallet.ColdkeySs58, &coldkey, &wallet.SetTime, &wallet.OriginalMessage, &wallet.OriginalSignature))
 				copy(wallet.ColdkeyPubkey[:], coldkey)
 				wallets[wallet.ClientId] = wallet
 			}
@@ -140,9 +157,25 @@ func GetStProviderWalletsAt(ctx context.Context, boundaryTime time.Time) map[ser
 // SetStWallet upserts the claim wallet for a network.
 func SetStWallet(ctx context.Context, networkId server.Id, coldkeySs58 string, coldkeyPubkey [32]byte) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
+		setStWalletInTx(ctx, tx, networkId, coldkeySs58, coldkeyPubkey)
+	})
+}
+
+// Publish both wallet projections only after the provider original is retained.
+func SetStWalletOriginal(ctx context.Context, networkId server.Id, clientId *server.Id, coldkeySs58 string, coldkeyPubkey [32]byte, originalMessage, originalSignature *string) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		if clientId != nil {
+			setStProviderWalletOriginalInTx(ctx, tx, *clientId, networkId, coldkeySs58, coldkeyPubkey, originalMessage, originalSignature)
+		}
+		setStWalletInTx(ctx, tx, networkId, coldkeySs58, coldkeyPubkey)
+	})
+}
+
+// Legacy network wallet projection is committed by its caller's transaction.
+func setStWalletInTx(ctx context.Context, tx server.PgTx, networkId server.Id, coldkeySs58 string, coldkeyPubkey [32]byte) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
                 INSERT INTO st_wallet (
                     network_id,
                     coldkey_ss58,
@@ -156,12 +189,11 @@ func SetStWallet(ctx context.Context, networkId server.Id, coldkeySs58 string, c
                     coldkey_pubkey = $3,
                     set_time = $4
             `,
-			networkId,
-			coldkeySs58,
-			coldkeyPubkey[:],
-			server.NowUtc(),
-		))
-	})
+		networkId,
+		coldkeySs58,
+		coldkeyPubkey[:],
+		server.NowUtc(),
+	))
 }
 
 // GetStWallet returns the claim wallet for a network, or nil if unset.
@@ -1396,6 +1428,7 @@ type StChainEvent struct {
 	TxHash      string
 	Kind        string
 	DataJson    string
+	OriginalLog []byte
 }
 
 // UpsertStEvents inserts events, ignoring rows already mirrored (log ranges
@@ -1417,9 +1450,10 @@ func UpsertStEvents(ctx context.Context, deploymentKey StDeploymentKey, events [
                             log_index,
                             tx_hash,
                             kind,
-                            data_json
+                            data_json,
+							original_log
                         )
-						VALUES ($1, $2, $3, $4, $5, $6, $7)
+						VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 						ON CONFLICT (deployment_key, block_number, log_index) DO NOTHING
                     `,
 					key,
@@ -1429,9 +1463,13 @@ func UpsertStEvents(ctx context.Context, deploymentKey StDeploymentKey, events [
 					event.TxHash,
 					event.Kind,
 					event.DataJson,
+					event.OriginalLog,
 				)
 			}
 		})
+		for _, event := range events {
+			verifyStEventOriginalInTx(ctx, tx, key, event)
+		}
 	})
 }
 
@@ -1449,7 +1487,8 @@ func GetStEvents(ctx context.Context, deploymentKey StDeploymentKey, minBlock ui
                     log_index,
                     tx_hash,
                     kind,
-                    data_json
+                    data_json,
+					original_log
                 FROM st_event
 				WHERE deployment_key = $1 AND $2 <= block_number AND block_number <= $3
                 ORDER BY block_number ASC, log_index ASC
@@ -1469,6 +1508,7 @@ func GetStEvents(ctx context.Context, deploymentKey StDeploymentKey, minBlock ui
 					&event.TxHash,
 					&event.Kind,
 					&event.DataJson,
+					&event.OriginalLog,
 				))
 				event.BlockNumber = uint64(blockNumber)
 				events = append(events, event)

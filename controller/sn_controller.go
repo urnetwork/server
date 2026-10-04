@@ -115,10 +115,11 @@ func SnSetWallet(
 			return &SnSetWalletResult{Error: &SnSetWalletError{Message: "Client does not belong to this network."}}, nil
 		}
 	}
-	model.SetStWallet(clientSession.Ctx, clientSession.ByJwt.NetworkId, setWallet.ColdkeySs58, coldkeyPubkey)
-	if clientId != nil {
-		model.SetStProviderWallet(clientSession.Ctx, *clientId, clientSession.ByJwt.NetworkId, setWallet.ColdkeySs58, coldkeyPubkey)
+	var originalMessage, originalSignature *string
+	if setWallet.Message != "" && strings.TrimSpace(setWallet.Signature) != "" {
+		originalMessage, originalSignature = &setWallet.Message, &setWallet.Signature
 	}
+	model.SetStWalletOriginal(clientSession.Ctx, clientSession.ByJwt.NetworkId, clientId, setWallet.ColdkeySs58, coldkeyPubkey, originalMessage, originalSignature)
 
 	return &SnSetWalletResult{}, nil
 }

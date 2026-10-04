@@ -821,10 +821,8 @@ func SnHeadBinding(
 		return fail("A client session can only bind its own client id.")
 	}
 	// the binding's client key must be the key this client actually holds
-	if ckeys := model.GetStContributingClientCkeys(ctx, []server.Id{clientId}); len(ckeys) == 1 {
-		if ckey, ok := ckeys[clientId]; ok && ckey != binding.ClientKey {
-			return fail("client_key does not match this client's key.")
-		}
+	if ckeys := model.GetStContributingClientCkeys(ctx, []server.Id{clientId}); !snBindingClientKeyMatches(ckeys, clientId, binding.ClientKey) {
+		return fail("client_key does not match this client's registered key.")
 	}
 	clientSignature, err := snParseHexBytes(args.ClientSignature)
 	if err != nil {

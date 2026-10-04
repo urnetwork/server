@@ -2538,6 +2538,10 @@ func (self *CoreStClient) SyncEvents(ctx context.Context, fromBlock uint64, toBl
 		if err != nil {
 			return nil, fromBlock, err
 		}
+		originalLog, err := json.Marshal(log)
+		if err != nil {
+			return nil, fromBlock, err
+		}
 		events = append(events, &model.StChainEvent{
 			BlockNumber: log.BlockNumber,
 			BlockHash:   log.BlockHash.Hex(),
@@ -2545,6 +2549,7 @@ func (self *CoreStClient) SyncEvents(ctx context.Context, fromBlock uint64, toBl
 			TxHash:      log.TxHash.Hex(),
 			Kind:        kind,
 			DataJson:    string(argsJson),
+			OriginalLog: originalLog,
 		})
 	}
 	return events, toBlock + 1, nil
