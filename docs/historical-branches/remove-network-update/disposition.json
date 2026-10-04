@@ -1,0 +1,12 @@
+{
+  "branch": "origin/remove-network-update",
+  "head": "635d7889747a3f412317f9d6166b68c40cf68167",
+  "disposition": "historical exact source retained outside runtime/workflow build",
+  "reason": "Historical network_user.network_id backfill at old schema position and unfenced deletion conflict with current canonical765, admin authorization, payment row-lock and active Stripe renewal refusal. Current deletion already clears all child auth methods.",
+  "runtime_activated": false,
+  "original_patch_sha256": {
+    "7f6cd0a4c6f5.patch": "c100dfaece66ac72d3c94a338e91a165329fcda3b33110bddb9ad3852251259b"
+  },
+  "retrieve_original": "git show 635d7889747a3f412317f9d6166b68c40cf68167",
+  "privacy_scan": "No private-key/PAT/cloud-key/credential-URL patterns. Only previously committed source; no private runtime artifacts copied."
+}

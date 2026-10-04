@@ -1,0 +1,415 @@
+commit 7f6cd0a4c6f5a8d15de4dd950d45ac60e10a36bd
+Author:     Stuart Kuentzel <s.w.kuentzel@gmail.com>
+AuthorDate: Tue Aug 12 14:26:00 2025 +0900
+Commit:     Stuart Kuentzel <s.w.kuentzel@gmail.com>
+CommitDate: Tue Aug 12 14:26:00 2025 +0900
+
+    adds network_id to network_user; cleanup remove network
+
+diff --git a/bringyourctl/main.go b/bringyourctl/main.go
+index cbc19944..c9ddb969 100644
+--- a/bringyourctl/main.go
++++ b/bringyourctl/main.go
+@@ -40,7 +40,7 @@ Usage:
+     bringyourctl stats add
+     bringyourctl locations add-default [-a]
+     bringyourctl network find [--user_auth=<user_auth>] [--network_name=<network_name>]
+-    bringyourctl network remove --network_id=<network_id> --user_id=<user_id>
++    bringyourctl network remove --network_id=<network_id>
+     bringyourctl balance-code create
+     bringyourctl balance-code check --secret=<secret>
+     bringyourctl send network-welcome --user_auth=<user_auth>
+@@ -333,17 +333,13 @@ func networkRemove(opts docopt.Opts) {
+ 	ctx := context.Background()
+ 
+ 	networkIdStr, _ := opts.String("--network_id")
+-	userIdStr, _ := opts.String("--user_id")
+ 
+ 	networkId, err := server.ParseId(networkIdStr)
+ 	if err != nil {
+ 		panic(err)
+ 	}
+-	userId, err := server.ParseId(userIdStr)
+-	if err != nil {
+-		panic(err)
+-	}
+-	model.RemoveNetwork(ctx, networkId, userId)
++
++	model.RemoveNetwork(ctx, networkId)
+ }
+ 
+ func balanceCodeCreate(opts docopt.Opts) {
+diff --git a/controller/network_controller.go b/controller/network_controller.go
+index bffb2fb4..90900954 100644
+--- a/controller/network_controller.go
++++ b/controller/network_controller.go
+@@ -181,7 +181,6 @@ func NetworkRemove(session *session.ClientSession) (*NetworkRemoveResult, error)
+ 	model.RemoveNetwork(
+ 		session.Ctx,
+ 		session.ByJwt.NetworkId,
+-		session.ByJwt.UserId,
+ 	)
+ 
+ 	return &NetworkRemoveResult{}, nil
+diff --git a/db_migrations.go b/db_migrations.go
+index b0e7ade4..5fdcbc56 100644
+--- a/db_migrations.go
++++ b/db_migrations.go
+@@ -2047,4 +2047,27 @@ var migrations = []any{
+ 			UNIQUE (wallet_address, blockchain)
+ 		)
+ 	`),
++
++	// allow NULL until populated
++	newSqlMigration(`
++        ALTER TABLE network_user
++        ADD COLUMN network_id uuid NULL
++    `),
++
++	// populate network_id in auth tables
++	newSqlMigration(`
++	    UPDATE network_user
++	    SET network_id = (SELECT network_id FROM network WHERE network_user.user_id = network.admin_user_id);
++	`),
++
++	// after populating network_id, add NOT NULL constraints
++	newSqlMigration(`
++	    ALTER TABLE network_user
++	    ALTER COLUMN network_id SET NOT NULL;
++	`),
++
++	// index network_id on network_user
++	newSqlMigration(`
++	    CREATE INDEX idx_network_user_network_id ON network_user (network_id);
++	`),
+ }
+diff --git a/go.mod b/go.mod
+index c6235615..03ea1cf3 100644
+--- a/go.mod
++++ b/go.mod
+@@ -21,6 +21,7 @@ require (
+ 	github.com/mozillazg/go-unidecode v0.2.0
+ 	github.com/nyaruka/phonenumbers v1.6.0
+ 	github.com/oklog/ulid/v2 v2.1.1
++	github.com/oschwald/maxminddb-golang/v2 v2.0.0-beta.8
+ 	github.com/pquerna/cachecontrol v0.2.0
+ 	github.com/prometheus/client_golang v1.22.0
+ 	github.com/quic-go/quic-go v0.53.0
+@@ -28,7 +29,6 @@ require (
+ 	github.com/samber/lo v1.49.1
+ 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
+ 	github.com/stripe/stripe-go/v76 v76.25.0
+-	github.com/twmb/murmur3 v1.1.8
+ 	github.com/tyler-smith/go-bip39 v1.1.0
+ 	github.com/urnetwork/connect v0.0.0
+ 	golang.org/x/crypto v0.40.0
+@@ -55,7 +55,6 @@ require (
+ 	github.com/modern-go/reflect2 v1.0.2 // indirect
+ 	github.com/mostynb/zstdpool-freelist v0.0.0-20201229113212-927304c0c3b1 // indirect
+ 	github.com/mr-tron/base58 v1.2.0 // indirect
+-	github.com/oschwald/maxminddb-golang/v2 v2.0.0-beta.8 // indirect
+ 	github.com/pkg/errors v0.9.1 // indirect
+ 	github.com/streamingfast/logging v0.0.0-20230608130331-f22c91403091 // indirect
+ 	go.mongodb.org/mongo-driver v1.12.2 // indirect
+diff --git a/go.sum b/go.sum
+index 8b372112..a2033674 100644
+--- a/go.sum
++++ b/go.sum
+@@ -172,8 +172,6 @@ github.com/stripe/stripe-go/v76 v76.25.0/go.mod h1:rw1MxjlAKKcZ+3FOXgTHgwiOa2ya6
+ github.com/test-go/testify v1.1.4 h1:Tf9lntrKUMHiXQ07qBScBTSA0dhYQlu83hswqelv1iE=
+ github.com/test-go/testify v1.1.4/go.mod h1:rH7cfJo/47vWGdi4GPj16x3/t1xGOj2YxzmNQzk2ghU=
+ github.com/thrawn01/args v0.3.0/go.mod h1:TnRiOFjyh7Wa6oC8ACFPc7KIvbzCiluphA3mJUiPIEo=
+-github.com/twmb/murmur3 v1.1.8 h1:8Yt9taO/WN3l08xErzjeschgZU2QSrwm1kclYq+0aRg=
+-github.com/twmb/murmur3 v1.1.8/go.mod h1:Qq/R7NUyOfr65zD+6Q5IHKsJLwP7exErjN6lyyq3OSQ=
+ github.com/tyler-smith/go-bip39 v1.1.0 h1:5eUemwrMargf3BSLRRCalXT93Ns6pQJIjYQN2nyfOP8=
+ github.com/tyler-smith/go-bip39 v1.1.0/go.mod h1:gUYDtqQw1JS3ZJ8UWVcGTGqqr6YIN3CWg+kkNaLt55U=
+ github.com/xdg-go/pbkdf2 v1.0.0/go.mod h1:jrpuAogTd400dnrH08LKmI/xc1MbPOebTwRqcT5RDeI=
+@@ -206,8 +204,6 @@ golang.org/x/crypto v0.0.0-20220622213112-05595931fe9d/go.mod h1:IxCIyHEi3zRg3s0
+ golang.org/x/crypto v0.19.0/go.mod h1:Iy9bg/ha4yyC70EfRS8jz+B6ybOBKMaSxLj6P6oBDfU=
+ golang.org/x/crypto v0.40.0 h1:r4x+VvoG5Fm+eJcxMaY8CQM7Lb0l1lsmjGBQ6s8BfKM=
+ golang.org/x/crypto v0.40.0/go.mod h1:Qr1vMER5WyS2dfPHAlsOj01wgLbsyWtFn/aY+5+ZdxY=
+-golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b h1:M2rDM6z3Fhozi9O7NWsxAkg/yqS/lQJ6PmkyIV3YP+o=
+-golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b/go.mod h1:3//PLf8L/X+8b4vuAfHzxeRUl04Adcb341+IGKfnqS8=
+ golang.org/x/exp v0.0.0-20250711185948-6ae5c78190dc h1:TS73t7x3KarrNd5qAipmspBDS1rkMcgVG/fS1aRb4Rc=
+ golang.org/x/exp v0.0.0-20250711185948-6ae5c78190dc/go.mod h1:A+z0yzpGtvnG90cToK5n2tu8UJVP2XUATh+r+sfOOOc=
+ golang.org/x/lint v0.0.0-20190930215403-16217165b5de/go.mod h1:6SW0HCj/g11FgYtHlgUYUwCkIfeOF89ocIRzGO/8vkc=
+@@ -230,8 +226,6 @@ golang.org/x/net v0.0.0-20211112202133-69e39bad7dc2/go.mod h1:9nx3DQGgdP8bBQD5qx
+ golang.org/x/net v0.0.0-20220722155237-a158d28d115b/go.mod h1:XRhObCWvk6IyKnWLug+ECip1KBveYUHfp+8e9klMJ9c=
+ golang.org/x/net v0.6.0/go.mod h1:2Tu9+aMcznHK/AK1HMvgo6xiTLG5rD5rZLDS+rp2Bjs=
+ golang.org/x/net v0.10.0/go.mod h1:0qNGK6F8kojg2nk9dLZ2mShWaEBan6FAoqfSigmmuDg=
+-golang.org/x/net v0.41.0 h1:vBTly1HeNPEn3wtREYfy4GZ/NECgw2Cnl+nK6Nz3uvw=
+-golang.org/x/net v0.41.0/go.mod h1:B/K4NNqkfmg07DQYrbwvSluqCJOOXwUjeb/5lOisjbA=
+ golang.org/x/net v0.42.0 h1:jzkYrhi3YQWD6MLBJcsklgQsoAcw89EcZbJw8Z614hs=
+ golang.org/x/net v0.42.0/go.mod h1:FF1RA5d3u7nAYA4z2TkclSCKh68eSXtiFwcWQpPXdt8=
+ golang.org/x/sync v0.0.0-20180314180146-1d60e4601c6f/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+@@ -286,8 +280,6 @@ golang.org/x/tools v0.0.0-20200130002326-2f3ba24bd6e7/go.mod h1:TB2adYChydJhpapK
+ golang.org/x/tools v0.1.5/go.mod h1:o0xws9oXOQQZyjljx8fwUC0k7L1pTE6eaCbjGeHmOkk=
+ golang.org/x/tools v0.1.12/go.mod h1:hNGJHUnrk76NpqgfD5Aqm5Crs+Hm0VOH/i9J2+nxYbc=
+ golang.org/x/tools v0.6.0/go.mod h1:Xwgl3UAJ/d3gWutnCtw505GrjyAbvKui8lOU390QaIU=
+-golang.org/x/tools v0.34.0 h1:qIpSLOxeCYGg9TrcJokLBG4KFA6d795g0xkBkiESGlo=
+-golang.org/x/tools v0.34.0/go.mod h1:pAP9OwEaY1CAW3HOmg3hLZC5Z0CCmzjAF2UQMSqNARg=
+ golang.org/x/tools v0.35.0 h1:mBffYraMEf7aa0sB+NuKnuCy8qI/9Bughn8dC2Gu5r0=
+ golang.org/x/tools v0.35.0/go.mod h1:NKdj5HkL/73byiZSJjqJgKn3ep7KjFkBOkR/Hps3VPw=
+ golang.org/x/xerrors v0.0.0-20190717185122-a985d3407aa7/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+diff --git a/model/account_model.go b/model/account_model.go
+index 9da39fe9..f961c62c 100644
+--- a/model/account_model.go
++++ b/model/account_model.go
+@@ -195,61 +195,62 @@ func FindNetworksByUserAuth(ctx context.Context, userAuth string) ([]*FindNetwor
+ 	return findNetworkResults, nil
+ }
+ 
++/**
++ * We remove the rows from `network`, `network_user`, and the auth tables.
++ *
++ * Note - we are not removing the associated wallets or payments for now,
++ * they can be deleted in a separate task later.
++ */
+ func RemoveNetwork(
+ 	ctx context.Context,
+ 	networkId server.Id,
+-	userId server.Id,
+ ) {
+ 	server.Tx(ctx, func(tx server.PgTx) {
+ 
+-		// TODO: Remove network user wallets
+-
+ 		// FIXME do we need to check that the user is the admin?
+ 		// FIXME normally we would enforce the access control by passing in a clientSession
+ 
++		// (cascade) delete network_user_auth_wallet
+ 		server.RaisePgResult(tx.Exec(
+ 			ctx,
+ 			`
+-				DELETE FROM network_user
+-				USING network
+-				WHERE network.network_id = $1 AND network_user.user_id = network.admin_user_id
++				DELETE FROM network_user_auth_wallet
++					USING network_user
++				WHERE network_user_auth_wallet.user_id = network_user.user_id AND network_user.network_id = $1
+ 			`,
+ 			networkId,
+ 		))
+ 
+-		// FIXME add network_id to:
+-		// - network_user_auth_wallet
+-		// - network_user_auth_password
+-		// - network_user_auth_sso
+-
+-		// (cascade) delete network_user_auth_wallet
++		// (cascade) delete network_user_auth_password
+ 		server.RaisePgResult(tx.Exec(
+ 			ctx,
+ 			`
+-				DELETE FROM network_user_auth_wallet
+-				WHERE user_id = $1
++				DELETE FROM network_user_auth_password
++					USING network_user
++				WHERE network_user_auth_password.user_id = network_user.user_id AND network_user.network_id = $1
+ 			`,
+-			userId,
++			networkId,
+ 		))
+ 
+-		// (cascade) delete network_user_auth_password
++		// (cascade) delete network_user_auth_sso
+ 		server.RaisePgResult(tx.Exec(
+ 			ctx,
+ 			`
+-				DELETE FROM network_user_auth_password
+-				WHERE user_id = $1
++				DELETE FROM network_user_auth_sso
++					USING network_user
++				WHERE network_user_auth_sso.user_id = network_user.user_id AND network_user.network_id = $1
+ 			`,
+-			userId,
++			networkId,
+ 		))
+ 
+-		// (cascade) delete network_user_auth_sso
+ 		server.RaisePgResult(tx.Exec(
+ 			ctx,
+ 			`
+-				DELETE FROM network_user_auth_sso
+-				WHERE user_id = $1
++				DELETE FROM network_user
++				USING network
++				WHERE network.network_id = $1 AND network_user.user_id = network.admin_user_id
+ 			`,
+-			userId,
++			networkId,
+ 		))
+ 
+ 		server.RaisePgResult(tx.Exec(
+@@ -261,6 +262,10 @@ func RemoveNetwork(
+ 			networkId,
+ 		))
+ 
+-		networkNameSearch.RemoveInTx(ctx, networkId, tx)
++		networkNameSearch.RemoveInTx(
++			ctx,
++			networkId,
++			tx,
++		)
+ 	})
+ }
+diff --git a/model/account_model_test.go b/model/account_model_test.go
+index ff0d3fed..d841940b 100644
+--- a/model/account_model_test.go
++++ b/model/account_model_test.go
+@@ -66,7 +66,7 @@ func TestRemoveNetwork(t *testing.T) {
+ 		assert.Equal(t, len(networkUser.SsoAuths), 1)
+ 		assert.Equal(t, len(networkUser.WalletAuths), 1)
+ 
+-		RemoveNetwork(ctx, networkId, userId)
++		RemoveNetwork(ctx, networkId)
+ 
+ 		networkUser = GetNetworkUser(ctx, userId)
+ 		assert.Equal(t, networkUser, nil)
+diff --git a/model/network_model.go b/model/network_model.go
+index 6d58192d..e73fcd25 100644
+--- a/model/network_model.go
++++ b/model/network_model.go
+@@ -135,12 +135,13 @@ func NetworkCreate(
+ 				session.Ctx,
+ 				`
+ 					INSERT INTO network_user
+-					(user_id, user_name, auth_type)
+-					VALUES ($1, $2, $3)
++					(user_id, user_name, auth_type, network_id)
++					VALUES ($1, $2, $3, $4)
+ 				`,
+ 				createdUserId,
+ 				"guest",
+ 				AuthTypeGuest,
++				createdNetworkId,
+ 			)
+ 			server.Raise(err)
+ 
+@@ -274,8 +275,8 @@ func NetworkCreate(
+ 				session.Ctx,
+ 				`
+ 					INSERT INTO network_user
+-					(user_id, user_name, auth_type, user_auth, password_hash, password_salt)
+-					VALUES ($1, $2, $3, $4, $5, $6)
++					(user_id, user_name, auth_type, user_auth, password_hash, password_salt, network_id)
++					VALUES ($1, $2, $3, $4, $5, $6, $7)
+ 				`,
+ 				createdUserId,
+ 				networkCreate.UserName,
+@@ -283,6 +284,7 @@ func NetworkCreate(
+ 				userAuth,
+ 				passwordHash,
+ 				passwordSalt,
++				createdNetworkId,
+ 			)
+ 			server.Raise(err)
+ 
+@@ -382,14 +384,15 @@ func NetworkCreate(
+ 					session.Ctx,
+ 					`
+ 						INSERT INTO network_user
+-						(user_id, user_name, auth_type, user_auth, auth_jwt)
+-						VALUES ($1, $2, $3, $4, $5)
++						(user_id, user_name, auth_type, user_auth, auth_jwt, network_id)
++						VALUES ($1, $2, $3, $4, $5, $6)
+ 					`,
+ 					createdUserId,
+ 					networkCreate.UserName,
+ 					authJwt.AuthType,
+ 					normalJwtUserAuth,
+ 					networkCreate.AuthJwt,
++					createdNetworkId,
+ 				)
+ 				if err != nil {
+ 					panic(err)
+@@ -513,14 +516,15 @@ func NetworkCreate(
+ 				session.Ctx,
+ 				`
+ 					INSERT INTO network_user
+-					(user_id, auth_type, wallet_address, wallet_blockchain, user_name)
+-					VALUES ($1, $2, $3, $4, $5)
++					(user_id, auth_type, wallet_address, wallet_blockchain, user_name, network_id)
++					VALUES ($1, $2, $3, $4, $5, $6)
+ 				`,
+ 				createdUserId,
+ 				AuthTypeSolana,
+ 				networkCreate.WalletAuth.PublicKey,
+ 				networkCreate.WalletAuth.Blockchain,
+ 				networkCreate.UserName,
++				createdNetworkId,
+ 			)
+ 			if err != nil {
+ 				panic(err)
+@@ -1343,8 +1347,8 @@ func Testing_CreateNetwork(
+ 		server.RaisePgResult(tx.Exec(
+ 			ctx,
+ 			`
+-				INSERT INTO network_user (user_id, user_name, auth_type, user_auth, verified, password_hash, password_salt)
+-				VALUES ($1, $2, $3, $4, $5, $6, $7)
++				INSERT INTO network_user (user_id, user_name, auth_type, user_auth, verified, password_hash, password_salt, network_id)
++				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ 			`,
+ 			adminUserId,
+ 			"test",
+@@ -1353,6 +1357,7 @@ func Testing_CreateNetwork(
+ 			true,
+ 			passwordHash,
+ 			passwordSalt,
++			networkId,
+ 		))
+ 
+ 		addUserAuth(
+@@ -1393,8 +1398,8 @@ func Testing_CreateNetworkByWallet(
+ 		server.RaisePgResult(tx.Exec(
+ 			ctx,
+ 			`
+-				INSERT INTO network_user (user_id, user_name, auth_type, verified, wallet_address, wallet_blockchain)
+-				VALUES ($1, $2, $3, $4, $5, $6)
++				INSERT INTO network_user (user_id, user_name, auth_type, verified, wallet_address, wallet_blockchain, network_id)
++				VALUES ($1, $2, $3, $4, $5, $6, $7)
+ 			`,
+ 			adminUserId,
+ 			"test",
+@@ -1402,6 +1407,7 @@ func Testing_CreateNetworkByWallet(
+ 			true,
+ 			publicKey,
+ 			AuthTypeSolana,
++			networkId,
+ 		))
+ 
+ 		addWalletAuth(
+@@ -1442,13 +1448,14 @@ func Testing_CreateGuestNetwork(
+ 		server.RaisePgResult(tx.Exec(
+ 			ctx,
+ 			`
+-				INSERT INTO network_user (user_id, user_name, auth_type, verified)
+-				VALUES ($1, $2, $3, $4)
++				INSERT INTO network_user (user_id, user_name, auth_type, verified, network_id)
++				VALUES ($1, $2, $3, $4, $5)
+ 			`,
+ 			adminUserId,
+ 			"test",
+ 			AuthTypeGuest,
+ 			false,
++			networkId,
+ 		))
+ 
+ 	})
+@@ -1477,13 +1484,14 @@ func Testing_CreateNetworkSso(
+ 		server.RaisePgResult(tx.Exec(
+ 			ctx,
+ 			`
+-				INSERT INTO network_user (user_id, user_name, auth_type, verified)
+-				VALUES ($1, $2, $3, $4)
++				INSERT INTO network_user (user_id, user_name, auth_type, verified, network_id)
++				VALUES ($1, $2, $3, $4, $5)
+ 			`,
+ 			userId,
+ 			"user_name",
+ 			AuthTypeGoogle,
+ 			true,
++			networkId,
+ 		))
+ 
+ 		addSsoAuth(
