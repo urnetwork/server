@@ -53,7 +53,7 @@ type commandDependencies struct {
 // Exercises the complete publication path with explicit command-owned I/O.
 func runCommandWithDependencies(ctx context.Context, args []string, output io.Writer, dependencies commandDependencies) error {
 	if len(args) == 0 {
-		return errors.New("usage: arindbctl {geolite2 refresh|arin refresh|build|refresh} [flags]")
+		return errors.New("usage: arindbctl {geolite2 refresh|arin refresh|build|augment-subscribers|refresh} [flags]")
 	}
 	command := args[0]
 	args = args[1:]
@@ -89,6 +89,8 @@ func runCommandWithDependencies(ctx context.Context, args []string, output io.Wr
 			return refreshArin(ctx, options.credentials, filepath.Join(stage, "arin_db.xml"), dependencies.arinClient)
 		case "build":
 			return buildArinDatabase(ctx, options.source, options.geolite2, options.rules, stage)
+		case "augment-subscribers":
+			return augmentSubscriberDatabase(ctx, options.source, options.rules, stage, time.Now().UTC())
 		case "refresh":
 			// Neither database becomes visible until both were built and verified.
 			geoDir := filepath.Join(stage, "mmdb")
