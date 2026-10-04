@@ -99,15 +99,25 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 	if err != nil {
 		return nil, err
 	}
-	startTime, endTime = transition.SnWindow(startTime, endTime)
-	if !startTime.Before(endTime) {
+	earningStart, earningEnd := transition.SnWindow(startTime, endTime)
+	if !earningStart.Before(earningEnd) {
 		return []*StProviderUsage{}, nil
 	}
+	// Whole-work evidence retains the original epoch interval, including every
+	// pre-cutoff original. Only the earning aggregate uses the asset boundary.
+	queryStart, queryEnd := earningStart, earningEnd
 	originalBytes := 0
 	if census != nil {
+		queryStart, queryEnd = startTime, endTime
 		census.WindowStart, census.WindowEnd = startTime.UTC().Format(time.RFC3339Nano), endTime.UTC().Format(time.RFC3339Nano)
 		if transition != nil {
 			census.EarningPolicyHash = "sha256:" + transition.ConfigSha256
+			selection, err := providerPayoutEarningSelection(transition)
+			if err != nil {
+				return nil, err
+			}
+			census.EarningStart = selection.StartTime.UTC().Format(time.RFC3339Nano)
+			census.EarningSelectionHash = selection.PolicyHash
 		}
 		census.Records = []payoutartifact.ClosedWorkRecord{}
 	}
@@ -118,7 +128,7 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 		if census != nil {
 			query = stEpochProviderOriginalUsageSql
 		}
-		rows, err := conn.Query(ctx, query, startTime, endTime)
+		rows, err := conn.Query(ctx, query, queryStart, queryEnd)
 		if err != nil {
 			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
 			return
@@ -178,6 +188,9 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 						census.Records = append(census.Records, payoutartifact.ClosedWorkRecord{ContractId: [16]byte(contractId), ClosedAt: closedAt.UTC().Format(time.RFC3339Nano), Original: bytes.Clone(data), OriginalReports: bytes.Clone(originalReports)})
 					}
 				}
+			}
+			if closedAt.Before(earningStart) || !closedAt.Before(earningEnd) {
+				continue
 			}
 			for _, provider := range snapshot.Providers {
 				usage := usagesByClientId[provider.ClientId]

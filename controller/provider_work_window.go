@@ -133,6 +133,10 @@ func ProviderWorkWindow(ctx context.Context, domainHash [32]byte, epoch uint64, 
 	if err != nil {
 		return nil, err
 	}
+	expected.EarningSelection, err = model.GetProviderPayoutEarningSelection(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if domain != domainHash {
 		return nil, model.ErrProviderWorkInvalid
 	}
