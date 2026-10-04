@@ -1,0 +1,119 @@
+// Mapping consent is issued for the authenticated provider and deployment.
+// Login challenges remain supported but never enter this signed mapping history.
+package controller
+
+import (
+	"encoding/hex"
+	"errors"
+	"strings"
+
+	"github.com/urfoundation/sn/protocol"
+	"github.com/urfoundation/sn/ss58"
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
+)
+
+// Epochs are an explicit wallet-approved earning interval, independent of the
+// five-minute acceptance expiry; the consumer still needs an approved head.
+type SnWalletMappingChallengeArgs struct {
+	ClientId     *server.Id `json:"client_id,omitempty"`
+	ColdkeySs58  string     `json:"coldkey_ss58"`
+	FromEpoch    uint64     `json:"from_epoch"`
+	ThroughEpoch uint64     `json:"through_epoch"`
+}
+
+// The exact displayed bytes must be passed unchanged to the coldkey signer.
+type SnWalletMappingChallengeResult struct {
+	Message string `json:"message"`
+}
+
+// The authenticated session selects user/network; an optional client must
+// belong to that network at both issuance and acceptance in the actual database.
+func snWalletMappingOwner(clientId *server.Id, clientSession *session.ClientSession) (model.WalletMappingOwner, error) {
+	if clientSession == nil || clientSession.Ctx == nil || clientSession.ByJwt == nil {
+		return model.WalletMappingOwner{}, protocol.ErrWalletMappingUnavailable
+	}
+	if clientId == nil {
+		clientId = clientSession.ByJwt.ClientId
+	}
+	if clientId == nil || *clientId == (server.Id{}) || clientSession.ByJwt.UserId == (server.Id{}) || clientSession.ByJwt.NetworkId == (server.Id{}) {
+		return model.WalletMappingOwner{}, protocol.ErrWalletMappingIntegrity
+	}
+	domain, ok := stClientKeyHistoryDomain()
+	if !ok {
+		return model.WalletMappingOwner{}, protocol.ErrWalletMappingUnavailable
+	}
+	return model.WalletMappingOwner{Domain: domain, UserId: clientSession.ByJwt.UserId, ClientId: *clientId, NetworkId: clientSession.ByJwt.NetworkId}, nil
+}
+
+// This public authenticated request cannot override the configured deployment,
+// JWT identities, original predecessor or bounded challenge expiry.
+func SnWalletMappingChallenge(args *SnWalletMappingChallengeArgs, clientSession *session.ClientSession) (*SnWalletMappingChallengeResult, error) {
+	if args == nil {
+		return nil, protocol.ErrWalletMappingIntegrity
+	}
+	owner, err := snWalletMappingOwner(args.ClientId, clientSession)
+	if err != nil {
+		return nil, err
+	}
+	coldkey, err := ss58.DecodeWithPrefix(strings.TrimSpace(args.ColdkeySs58), ss58.BittensorPrefix)
+	if err != nil || SnWalletBanned(coldkey) {
+		return nil, errors.Join(protocol.ErrWalletMappingIntegrity, err)
+	}
+	message, err := model.CreateWalletMappingChallenge(clientSession.Ctx, owner, coldkey, args.FromEpoch, args.ThroughEpoch)
+	if err != nil {
+		return nil, err
+	}
+	return &SnWalletMappingChallengeResult{Message: message}, nil
+}
+
+// A domain-specific mapping cannot fall back to generic wallet login or the
+// unsigned compatibility gate when its identity, nonce or signature is wrong.
+func snAcceptWalletMapping(args *SnSetWalletArgs, clientSession *session.ClientSession) (*SnSetWalletResult, error) {
+	owner, err := snWalletMappingOwner(args.ClientId, clientSession)
+	if err != nil {
+		return nil, err
+	}
+	coldkey, err := ss58.DecodeWithPrefix(strings.TrimSpace(args.ColdkeySs58), ss58.BittensorPrefix)
+	if err != nil || SnWalletBanned(coldkey) {
+		return nil, errors.Join(protocol.ErrWalletMappingIntegrity, err)
+	}
+	signature, err := hex.DecodeString(strings.TrimPrefix(args.Signature, "0x"))
+	if err != nil || len(signature) != 64 {
+		return nil, errors.Join(protocol.ErrWalletMappingIntegrity, err)
+	}
+	original := protocol.WalletMappingConsent{Message: args.Message, Signature: [64]byte(signature)}
+	accepted, err := model.AcceptWalletMappingConsent(clientSession.Ctx, owner, original, strings.TrimSpace(args.ColdkeySs58))
+	if err != nil {
+		return nil, err
+	}
+	return &SnSetWalletResult{MappingHash: hex.EncodeToString(accepted.OriginalHash[:]), MappingGeneration: accepted.Generation}, nil
+}
+
+// Readers must supply their independent head; the API never selects latest as
+// authority. The original domain is a namespace filter, not an approval grant.
+type SnWalletMappingHistoryArgs struct {
+	Domain     protocol.ClientKeyHistoryDomain `json:"domain"`
+	ClientId   server.Id                       `json:"client_id"`
+	HeadHash   [32]byte                        `json:"head_hash"`
+	Generation uint64                          `json:"generation"`
+}
+
+// The complete retained original chain is independently verified downstream.
+type SnWalletMappingHistoryResult struct {
+	Originals []protocol.WalletMappingConsent `json:"originals"`
+}
+
+// Signature-bearing originals are public evidence, with bounded database and
+// response work. Missing history stays unavailable rather than known-empty.
+func SnWalletMappingHistory(args *SnWalletMappingHistoryArgs, clientSession *session.ClientSession) (*SnWalletMappingHistoryResult, error) {
+	if args == nil || clientSession == nil || clientSession.Ctx == nil {
+		return nil, protocol.ErrWalletMappingUnavailable
+	}
+	originals, err := model.ReadWalletMappingHistory(clientSession.Ctx, args.Domain, args.ClientId, args.Generation, args.HeadHash)
+	if err != nil {
+		return nil, err
+	}
+	return &SnWalletMappingHistoryResult{Originals: originals}, nil
+}
