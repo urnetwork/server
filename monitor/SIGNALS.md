@@ -6988,6 +6988,23 @@ establishes a real pooler startup/progress failure and a successful recovery
 control; it does not identify the triggering code defect. The earlier claim
 that every queue timeout meant busy established servers was false.
 
+The post-recovery native version check bound all 32 shards to PgBouncer 1.26.0,
+libevent 2.1.12-stable and c-ares 1.18.1. The effective backend was the literal
+IPv4 loopback address with TLS disabled, `server_connect_timeout=300` and
+`server_login_retry=15`. The matching upstream 1.26.0 source permits only one
+pending server startup per pool in
+[`launch_new_connection`](https://github.com/pgbouncer/pgbouncer/blob/pgbouncer_1_26_0/src/objects.c),
+while
+[`pool_server_maint`](https://github.com/pgbouncer/pgbouncer/blob/pgbouncer_1_26_0/src/janitor.c)
+closes every login-state server older than the configured startup timeout.
+That check has no exception for the server's `ready` flag. The missing
+pre-restart server identities and ages prevent a conclusion that one startup
+exceeded 300 seconds: repeated failed attempts can produce the same aggregate
+login-only state. Recovered-server ages cannot fill that evidence gap. Record
+the pending server identity and age before recovery, and do not describe a
+lower timeout, pool-size increase, library upgrade or process restart as a
+durable fix without identifying the failed progress path.
+
 False-negative qualifier: the application's five-second initial Ping can
 time out before the pooler's longer queue deadline. An absent queue-timeout
 line, lower database/Redis load, or a successful listener-only probe does not
