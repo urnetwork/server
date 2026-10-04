@@ -3281,7 +3281,7 @@ func stComputeReleasePayout(
 	if !usageStart.Before(usageEnd) {
 		return [32]byte{}, 0, fmt.Errorf("sn: epoch has no post-cutoff earning window")
 	}
-	usages, closedWork, err := model.GetStEpochProviderUsageCensus(ctx, epoch, usageStart, usageEnd)
+	usages, closedWork, wholeWindow, err := model.GetStEpochProviderUsageWholeCensus(ctx, epoch, usageStart, usageEnd)
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
@@ -3351,6 +3351,13 @@ func stComputeReleasePayout(
 		closedWork.Start = startifact.Boundary{Number: startBlock, Hash: common.Hash(authority.Start.Hash).Hex()}
 		closedWork.End = startifact.Boundary{Number: closeBlock, Hash: common.Hash(authority.End.Hash).Hex()}
 	}
+	wholeInventory, wholeExpectation, err := stPrepareWholeWorkInventory(ctx, cfg, authority, wholeWindow)
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
+	if closedWork != nil {
+		closedWork.WholeInventory = wholeInventory
+	}
 	artifact, err := startifact.BuildWithContext(ctx, startifact.BuildInput{
 		ClosedWork:   closedWork,
 		DeploymentID: cfg.DeploymentId, GenesisHash: fmt.Sprintf("0x%x", cfg.GenesisHash), PolicyHash: fmt.Sprintf("0x%x", authority.PolicyHash),
@@ -3373,6 +3380,9 @@ func stComputeReleasePayout(
 		if _, err := startifact.VerifyClosedWorkReports(ctx, artifact, common.Address{}); err != nil {
 			return [32]byte{}, 0, err
 		}
+	}
+	if err := stRetainWholeWorkWindow(ctx, artifact, wholeExpectation); err != nil {
+		return [32]byte{}, 0, err
 	}
 	store, ok := server.LoadBlobStore()
 	if !ok {

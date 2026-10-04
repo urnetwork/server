@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/urfoundation/sn/payoutartifact"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/stabi"
 )
@@ -25,12 +26,15 @@ import (
 // Policy and the half-open epoch window come from one complete,
 // canonical deployment read. Local epoch mirrors cannot supply this authority.
 type StPayoutEpochAuthority struct {
-	Epoch      uint64
-	PolicyHash [32]byte
-	Start      protocol.ClientKeyEffectiveBoundary
-	End        protocol.ClientKeyEffectiveBoundary
-	StartTime  time.Time
-	EndTime    time.Time
+	Epoch        uint64
+	PolicyHash   [32]byte
+	Start        protocol.ClientKeyEffectiveBoundary
+	End          protocol.ClientKeyEffectiveBoundary
+	StartTime    time.Time
+	EndTime      time.Time
+	StartHeader  []byte
+	EndHeader    []byte
+	ClockProfile string
 }
 
 // PayoutEpochAuthority restarts the entire read on failover. It authenticates
@@ -151,6 +155,23 @@ func (self *CoreStClient) PayoutEpochAuthority(ctx context.Context, epoch uint64
 			return err
 		}
 		result = &StPayoutEpochAuthority{Epoch: epoch, PolicyHash: policy.PolicyHash, Start: boundaries[1], End: boundaries[2], StartTime: times[0], EndTime: times[1]}
+		// Preserve only recovered exact committed Frontier RLP15. Missing old
+		// projections remain unknown; a returned contradiction is never a clock.
+		clockHeaders := make([][]byte, 2)
+		for index, boundary := range boundaries[1:] {
+			clockHeaders[index], err = payoutartifact.RecoverFrontierWindowHeader(callCtx, headers[index], payoutartifact.Boundary{Number: boundary.Block, Hash: common.Hash(boundary.Hash).Hex()})
+			if err != nil {
+				if errors.Is(err, payoutartifact.ErrClosedWorkUnavailable) {
+					clockHeaders = nil
+					break
+				}
+				return err
+			}
+		}
+		if len(clockHeaders) == 2 {
+			result.StartHeader, result.EndHeader = clockHeaders[0], clockHeaders[1]
+			result.ClockProfile = payoutartifact.FrontierWindowClockProfile
+		}
 		return nil
 	})
 	if err != nil {

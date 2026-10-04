@@ -27,7 +27,7 @@ const stEpochProviderOriginalUsageSql = `
        'original_snapshot',CASE WHEN provider_usage IS NULL THEN NULL ELSE encode(convert_to(provider_usage::text,'UTF8'),'base64') END)
       ORDER BY contract_id),'[]'::jsonb)) ELSE NULL END AS body FROM window_rows
  )
- SELECT usage.*, CASE WHEN octet_length(combined.body)<=1048576 THEN combined.body ELSE originals.body END
+ SELECT usage.*, CASE WHEN octet_length(combined.body)<=1048576 THEN combined.body ELSE originals.body END, false AS window_only
  FROM usage_rows AS usage CROSS JOIN window_body
  LEFT JOIN LATERAL (
   WITH selected AS MATERIALIZED (
@@ -51,6 +51,9 @@ const stEpochProviderOriginalUsageSql = `
       || jsonb_build_object('schema','urnetwork-original-close-report-census-v2','window',window_body.body))::text,'UTF8')
    ELSE originals.body END AS body
  ) AS combined ON true
+ UNION ALL
+ SELECT '00000000-0000-0000-0000-000000000000'::uuid,NULL::jsonb,NULL::timestamp,false,
+   convert_to(window_body.body::text,'UTF8'),true FROM window_body
 `
 
 // Keep the source's finite prefix contract aligned with the public decoder.

@@ -5,6 +5,7 @@ package model
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"slices"
@@ -64,25 +65,33 @@ const stEpochProviderUsageSql = `
 // Existing payout processing can retain unknown evidence when the optional
 // original-row component exceeds capacity; it never publishes a partial census.
 func GetStEpochProviderUsageCensus(ctx context.Context, epoch uint64, startTime, endTime time.Time) ([]*StProviderUsage, *payoutartifact.ClosedWorkCensus, error) {
+	usages, census, _, err := GetStEpochProviderUsageWholeCensus(ctx, epoch, startTime, endTime)
+	return usages, census, err
+}
+
+// A separate sentinel retains the complete same-statement window even when no
+// credited row exists. No invented earning row carries known-empty evidence.
+func GetStEpochProviderUsageWholeCensus(ctx context.Context, epoch uint64, startTime, endTime time.Time) ([]*StProviderUsage, *payoutartifact.ClosedWorkCensus, *payoutartifact.ClosedWorkWindow, error) {
 	census := &payoutartifact.ClosedWorkCensus{Schema: payoutartifact.ClosedWorkSchema}
-	usages, err := getStEpochProviderUsageWithCensus(ctx, epoch, startTime, endTime, census)
+	var window *payoutartifact.ClosedWorkWindow
+	usages, err := getStEpochProviderUsageWithCensus(ctx, epoch, startTime, endTime, census, &window)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if census.Records == nil {
-		return usages, nil, nil
+		return usages, nil, nil, nil
 	}
 	census.Sort()
-	return usages, census, nil
+	return usages, census, window, nil
 }
 
 func getStEpochProviderUsage(ctx context.Context, epoch uint64, startTime time.Time, endTime time.Time) ([]*StProviderUsage, error) {
-	return getStEpochProviderUsageWithCensus(ctx, epoch, startTime, endTime, nil)
+	return getStEpochProviderUsageWithCensus(ctx, epoch, startTime, endTime, nil, nil)
 }
 
 // The optional recorder borrows each validated row only until it clones the
 // original jsonb bytes. No second query can race retention or terminal writers.
-func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startTime time.Time, endTime time.Time, census *payoutartifact.ClosedWorkCensus) ([]*StProviderUsage, error) {
+func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startTime time.Time, endTime time.Time, census *payoutartifact.ClosedWorkCensus, window **payoutartifact.ClosedWorkWindow) ([]*StProviderUsage, error) {
 	if !startTime.Before(endTime) {
 		return nil, fmt.Errorf("invalid subnet usage window")
 	}
@@ -121,13 +130,23 @@ func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startT
 			var closedAt *time.Time
 			var duplicate bool
 			var originalReports []byte
+			var windowOnly bool
 			columns := []any{&contractId, &data, &closedAt, &duplicate}
 			if census != nil {
-				columns = append(columns, &originalReports)
+				columns = append(columns, &originalReports, &windowOnly)
 			}
 			if err := rows.Scan(columns...); err != nil {
 				returnErr = err
 				return
+			}
+			if windowOnly {
+				if window != nil && len(originalReports) != 0 {
+					if err := json.Unmarshal(originalReports, window); err != nil {
+						returnErr = err
+						return
+					}
+				}
+				continue
 			}
 			if closedAt == nil {
 				returnErr = fmt.Errorf("subnet contract %s has terminal usage without a close time; epoch completeness is unknown", contractId)
