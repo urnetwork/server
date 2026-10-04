@@ -154,6 +154,10 @@ func TestProviderDomainActualEnrollmentRotationAndClosedWork(t *testing.T) {
 		if err != nil || original.DomainHash != wantDomain || original.PublicKey != history[1].Registration.PublicKey || original.ClientId != [16]byte(*credential.ClientId) {
 			t.Fatal("provider close departed from the actually enrolled domain/key", err)
 		}
+		inventory, err := protocol.DecodeOriginalCloseInventory(report.OriginalInventory)
+		if err != nil || !inventory.Matches(original) || inventory.Sequence != 1 || inventory.CumulativeAckedBytes != 121 || !inventory.Terminal {
+			t.Fatal("actual provider Http close lost its original inventory companion", err)
+		}
 		if err := CloseContract(owner, payer, &protocol.CloseContract{ContractId: contractId.Bytes(), ReportId: server.NewId().Bytes(), AckedByteCount: 121}); err != nil {
 			t.Fatal(err)
 		}
@@ -168,6 +172,9 @@ func TestProviderDomainActualEnrollmentRotationAndClosedWork(t *testing.T) {
 		found := false
 		for _, retained := range originals.Reports {
 			if bytes.Equal(retained.Original, report.OriginalReport) {
+				if !bytes.Equal(retained.Inventory, report.OriginalInventory) {
+					t.Fatal("actual Http accounting did not retain the signed original inventory")
+				}
 				registration, err := snprotocol.DecodeClientKeyRegistration(retained.KeyRegistration)
 				if err != nil || registration.Domain != fixture.domain || registration.ClientID != [16]byte(*credential.ClientId) || registration.PublicKey != original.PublicKey || !bytes.Equal(retained.KeyRegistration, history[1].RegistrationBytes) {
 					t.Fatal("closed work substituted current or foreign enrolled identity", err)
