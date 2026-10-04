@@ -400,10 +400,6 @@ type PaymentReconcileStoreResult struct {
 	Errors               int  `json:"errors"`
 	Skipped              bool `json:"skipped,omitempty"`
 	BudgetExhausted      bool `json:"budget_exhausted,omitempty"`
-	// stripe only: how many invoice.paid credits since the last watermark
-	// resolved their network by the LEGACY customer-email fallback (S11) --
-	// surfaced, never repaired, until the fallback can be retired
-	EmailFallbacks int `json:"email_fallbacks,omitempty"`
 }
 
 type PaymentReconcileRunResult struct {
@@ -416,9 +412,6 @@ type PaymentReconcileRunResult struct {
 	Errors               int                                     `json:"errors"`
 	SkippedStores        []string                                `json:"skipped_stores,omitempty"`
 	StoreResults         map[string]*PaymentReconcileStoreResult `json:"store_results,omitempty"`
-	// the S11 email_fallback audit rows behind StoreResults' EmailFallbacks
-	// counts, so the CLI can print each one as a line
-	EmailFallbackEvents []*model.PaymentReconciliationEvent `json:"email_fallback_events,omitempty"`
 }
 
 type paymentReconcileRun struct {
@@ -439,8 +432,6 @@ type paymentReconcileRun struct {
 	storeDetails map[string]map[string]any
 	// per-store tallies for the run result (the CLI summary)
 	storeResults map[string]*PaymentReconcileStoreResult
-	// the S11 email_fallback rows surfaced this run (see reconcileStripe leg 0)
-	emailFallbackEvents []*model.PaymentReconciliationEvent
 }
 
 func paymentReconcileStoreCanAdvanceWatermark(complete bool, dryRun bool, errorsBefore int, errorsAfter int) bool {
@@ -497,12 +488,20 @@ func (self *paymentReconcileRun) record(
 // audit behavior: their durable business writes must not be re-executed merely
 // because the secondary audit insert failed.
 func (self *paymentReconcileRun) recordCreditUnfulfillable(store string, evidence string, reason string) {
+	self.recordCreditUnfulfillableDetails(store, evidence, map[string]any{"reason": reason})
+}
+
+// recordCreditUnfulfillableDetails is recordCreditUnfulfillable with the
+// store identities support needs to place the payment (details must carry
+// "reason").
+func (self *paymentReconcileRun) recordCreditUnfulfillableDetails(store string, evidence string, details map[string]any) {
+	details["leg"] = "credit"
 	if !self.record(
 		store,
 		model.PaymentReconcileActionCreditUnfulfillable,
 		nil,
 		evidence,
-		map[string]any{"reason": reason, "leg": "credit"},
+		details,
 	) {
 		self.errors += 1
 		self.storeResult(store).Errors += 1
@@ -511,10 +510,18 @@ func (self *paymentReconcileRun) recordCreditUnfulfillable(store string, evidenc
 
 // Terminal destination exceptions retain durable disposition evidence. All
 // provider, schema, and local persistence failures continue to block progress.
-func (self *paymentReconcileRun) recordStripeCreditError(evidence string, err error) {
+func (self *paymentReconcileRun) recordStripeCreditError(invoice *StripeEventInvoiceObject, err error) {
+	evidence := invoice.Id
+	var unresolved *stripeInvoiceDestinationUnresolvedError
 	switch {
 	case errors.Is(err, model.ErrPaymentNetworkNotFound):
 		self.recordCreditUnfulfillable(model.SubscriptionMarketStripe, evidence, "destination_deleted")
+	case errors.As(err, &unresolved):
+		// a paid invoice that names no network (S11: no customer-email guess)
+		details := unresolved.details()
+		details["amount_total"] = invoice.Total
+		details["currency"] = invoice.Currency
+		self.recordCreditUnfulfillableDetails(model.SubscriptionMarketStripe, evidence, details)
 	case errors.Is(err, errStripeInvoiceDestinationUnresolved):
 		self.recordCreditUnfulfillable(model.SubscriptionMarketStripe, evidence, "destination_unresolved")
 	default:
@@ -874,7 +881,6 @@ func runPaymentReconciliation(
 		Errors:               run.errors,
 		SkippedStores:        run.skipped,
 		StoreResults:         run.storeResults,
-		EmailFallbackEvents:  run.emailFallbackEvents,
 	}
 }
 
@@ -890,25 +896,6 @@ func runPaymentReconciliation(
 func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 	ctx := run.clientSession.Ctx
 	store := model.SubscriptionMarketStripe
-
-	// leg 0: surface, never repair -- every invoice.paid credit since the last
-	// watermark that resolved its network by the LEGACY customer-email
-	// fallback (S11). The webhook already credited (that is the point of the
-	// fallback); counting it here in the heartbeat, the run result, and the
-	// CLI summary is what keeps every use visible until the fallback can be
-	// retired. A DB read: costs no store API budget, safe in a dry run.
-	emailFallbackEvents := model.GetPaymentReconciliationEventsByAction(
-		ctx,
-		store,
-		model.PaymentReconcileActionEmailFallback,
-		since,
-		paymentReconcileRenewalLimit,
-	)
-	if 0 < len(emailFallbackEvents) {
-		run.storeResult(store).EmailFallbacks = len(emailFallbackEvents)
-		run.storeDetail(store)["email_fallbacks"] = len(emailFallbackEvents)
-		run.emailFallbackEvents = append(run.emailFallbackEvents, emailFallbackEvents...)
-	}
 
 	// leg 1: store-side listing -- paid invoices created since the watermark
 	// whose credit never landed (the lost invoice.paid repair)
@@ -957,7 +944,7 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 			if run.dryRun {
 				credit, err := stripeResolveInvoiceCredit(invoice.Id, run.clientSession)
 				if err != nil {
-					run.recordStripeCreditError(invoice.Id, err)
+					run.recordStripeCreditError(invoice, err)
 					continue
 				}
 				if credit == nil {
@@ -987,7 +974,7 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 			// stripe_invoice ledger gate, so a racing late webhook delivery for
 			// the same invoice credits exactly once between the two of them
 			if _, err := stripeHandleInvoicePaid(invoice, run.clientSession); err != nil {
-				run.recordStripeCreditError(invoice.Id, err)
+				run.recordStripeCreditError(invoice, err)
 				continue
 			}
 			if networkId, credited := model.GetStripeInvoiceNetworkId(ctx, invoice.Id); credited {

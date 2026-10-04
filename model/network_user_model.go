@@ -1124,41 +1124,6 @@ func filterWalletAuthsByBlockchain(
 	return matched
 }
 
-func FindNetworkIdByEmail(ctx context.Context, email string) (networkId *server.Id, err error) {
-
-	server.Tx(ctx, func(tx server.PgTx) {
-
-		result, execErr := tx.Query(
-			ctx,
-			`
-			-- drive from the indexed user_auth side; an OR of correlated EXISTS
-			-- cannot become semi-joins and seq-scans network (see index audit)
-			SELECT network.network_id
-			FROM network
-			WHERE network.admin_user_id IN (
-			  SELECT user_id FROM network_user_auth_password WHERE user_auth = $1
-			  UNION
-			  SELECT user_id FROM network_user_auth_sso WHERE user_auth = $1
-			)
-			`,
-			email,
-		)
-		if execErr != nil {
-			err = execErr
-		}
-
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				server.Raise(result.Scan(
-					&networkId,
-				))
-			}
-		})
-	})
-
-	return
-}
-
 func FindNetworkIdByWalletAddress(ctx context.Context, walletAddress string) (networkId *server.Id, err error) {
 
 	server.Tx(ctx, func(tx server.PgTx) {

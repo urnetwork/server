@@ -12554,14 +12554,18 @@ establish:
 - `payment-refund-unmatched` (PAGE): Stripe withdrew/disputed funds but the
   event could not be mapped to the immutable purchase ledger. Do not guess by
   email or manually edit a balance.
-- `payment-identity-fallback` (WARN): a Stripe credit used the legacy customer
-  email fallback because immutable network metadata was missing. The credit is
-  retained. The database aggregate cannot tell whether the subscription
-  predates metadata stamping or a current checkout omitted it; compare the
-  provider object's creation time, subscription metadata, and checkout-session
-  reference with the deployed boundary for Server commit `bb4d0676`. A legacy
-  object may be backfilled only after authoritative payment/support evidence
-  verifies its account mapping. Email alone is not safe write authority.
+- `payment-credit-unfulfillable` (WARN): a paid Stripe invoice was not
+  credited because neither its subscription's `network_id` metadata nor its
+  checkout session's `client_reference_id` names a live account. The
+  customer-email fallback is removed (UPGRADE.md S11), so such an invoice is
+  acknowledged to Stripe and recorded as a `credit_unfulfillable`
+  `payment_reconciliation_event` (evidence = invoice id; details carry the
+  subscription, customer, customer email, amount and paid period). The count
+  is distinct invoices. Establish the paying account from authoritative
+  payment/support evidence, set `network_id` metadata on the Stripe
+  subscription, then resend the `invoice.paid` event from the Stripe dashboard
+  so the ledger-gated credit runs; otherwise record an authorized refund or
+  support disposition. Email alone is not safe write authority.
 - `payment-balance-code-undelivered` (PAGE, from the §1.5 log tail): a paid
   fulfillment durably created a balance code, automatic redemption failed,
   and no email recovery channel exists. Preserve the code and provider ledger;

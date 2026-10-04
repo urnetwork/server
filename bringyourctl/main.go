@@ -1587,9 +1587,6 @@ func paymentsReconcile(opts docopt.Opts) {
 		if summary.BudgetExhausted {
 			notes = append(notes, "api budget exhausted (next run continues)")
 		}
-		if 0 < summary.EmailFallbacks {
-			notes = append(notes, fmt.Sprintf("email fallbacks: %d", summary.EmailFallbacks))
-		}
 		fmt.Printf(
 			"%-8s %9d %13d %10d %14d %7d  %s\n",
 			store, summary.Examined, summary.Credited, summary.Ended, summary.EntitlementsRepaired, summary.Errors,
@@ -1622,33 +1619,6 @@ func paymentsReconcile(opts docopt.Opts) {
 			"  [%s] %-12s network=%s evidence=%s %s\n",
 			event.Store, event.Action, networkStr, event.Evidence, detailsStr,
 		)
-	}
-
-	// S11: every invoice.paid credit since the last watermark that resolved
-	// its network by the LEGACY customer-email fallback -- surfaced so any use
-	// is explicit, until the fallback can be retired
-	if 0 < len(result.EmailFallbackEvents) {
-		fmt.Println()
-		fmt.Printf(
-			"stripe email-fallback credits since the last watermark (%d) -- legacy invoices resolved by customer email (UPGRADE.md S11):\n",
-			len(result.EmailFallbackEvents),
-		)
-		for _, event := range result.EmailFallbackEvents {
-			networkStr := "-"
-			if event.NetworkId != nil {
-				networkStr = event.NetworkId.String()
-			}
-			detailsStr := ""
-			if 0 < len(event.Details) {
-				if detailsJson, err := json.Marshal(event.Details); err == nil {
-					detailsStr = string(detailsJson)
-				}
-			}
-			fmt.Printf(
-				"  [%s] invoice=%s network=%s %s\n",
-				event.EventTime.UTC().Format(time.RFC3339), event.Evidence, networkStr, detailsStr,
-			)
-		}
 	}
 
 	fmt.Println()

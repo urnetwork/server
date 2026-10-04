@@ -26,7 +26,7 @@ func TestPaymentFailuresHealthy(t *testing.T) {
 func TestPaymentFailuresClassifiesEveryDurableProblemWithoutIdentifiers(t *testing.T) {
 	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
 		return []Row{
-			{"email_fallback", "stripe", "2", "900", "300"},
+			{"credit_unfulfillable", "stripe", "2", "900", "300"},
 			{"entitlement_missing", "apple", "1", "7200", "7200"},
 			{"orphan_renewal", "google", "2", "5400", "1200"},
 			{"refund_unmatched", "stripe", "3", "3600", "60"},
@@ -43,7 +43,7 @@ func TestPaymentFailuresClassifiesEveryDurableProblemWithoutIdentifiers(t *testi
 		"payment-renewal-orphan",
 		"payment-refund-unmatched",
 		"payment-solana-unfulfilled",
-		"payment-identity-fallback",
+		"payment-credit-unfulfillable",
 	} {
 		alert := requireAlertClass(t, alerts, class)
 		for _, forbidden := range []string{
@@ -52,8 +52,8 @@ func TestPaymentFailuresClassifiesEveryDurableProblemWithoutIdentifiers(t *testi
 			requireAlertOmits(t, alert, forbidden)
 		}
 	}
-	if fallback := requireAlertClass(t, alerts, "payment-identity-fallback"); fallback.Severity != SeverityWarn {
-		t.Fatalf("email fallback severity = %s, want warn", fallback.Severity)
+	if unfulfillable := requireAlertClass(t, alerts, "payment-credit-unfulfillable"); unfulfillable.Severity != SeverityWarn {
+		t.Fatalf("unfulfillable credit severity = %s, want warn", unfulfillable.Severity)
 	}
 	if entitlement := requireAlertClass(t, alerts, "payment-entitlement-missing"); entitlement.Severity != SeverityPage {
 		t.Fatalf("entitlement severity = %s, want page", entitlement.Severity)
@@ -116,8 +116,8 @@ func TestPaymentFailuresSeparatesExistingAndDeletedNetworks(t *testing.T) {
 	}
 }
 
-func TestPaymentIdentityFallbackDoesNotBlameCurrentCheckoutWithoutProviderAge(t *testing.T) {
-	fallback, err := paymentFailureFinding("email_fallback", "stripe", 1, 1800, 1800)
+func TestPaymentCreditUnfulfillableNeverSuggestsEmailAuthority(t *testing.T) {
+	unfulfillable, err := paymentFailureFinding("credit_unfulfillable", "stripe", 1, 1800, 1800)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,30 +126,23 @@ func TestPaymentIdentityFallbackDoesNotBlameCurrentCheckoutWithoutProviderAge(t 
 		"2.22",
 		"payment-failures",
 		"Durable payment and entitlement failures",
-		fallback,
+		unfulfillable,
 	).Markdown()
 	for _, want := range []string{
-		"cannot distinguish a pre-metadata legacy subscription from a current checkout regression",
-		"A current invoice does not date the subscription",
-		"Server commit bb4d0676",
-		"provider object's creation time",
-		"verify the account mapping",
-		"email alone is not safe write authority",
-		"do not replay the invoice",
-		"do not infer a current deployment need",
+		"customer-email fallback is removed",
+		"set network_id metadata on the Stripe subscription",
+		"resend the invoice.paid event",
+		"Email alone is not safe write authority",
 	} {
 		if !strings.Contains(markdown, want) {
-			t.Fatalf("fallback alert missing %q:\n%s", want, markdown)
+			t.Fatalf("unfulfillable credit alert missing %q:\n%s", want, markdown)
 		}
 	}
-	for _, forbidden := range []string{
-		"deploy the API",
-		"the checkout producer omitted",
-		"automatically backfill",
-	} {
-		if strings.Contains(markdown, forbidden) {
-			t.Fatalf("fallback alert made unsupported attribution %q:\n%s", forbidden, markdown)
-		}
+	if _, err := paymentFailureFinding("credit_unfulfillable", "apple", 1, 1800, 1800); err == nil {
+		t.Fatal("unfulfillable credit accepted a non-stripe store")
+	}
+	if _, err := paymentFailureFinding("email_fallback", "stripe", 1, 1800, 1800); err == nil {
+		t.Fatal("the retired email_fallback kind is still accepted")
 	}
 }
 
@@ -164,8 +157,8 @@ func TestPaymentFailuresRejectsUnknownOrMalformedAggregate(t *testing.T) {
 		{name: "prepaid market is not recurring orphan", row: Row{"orphan_renewal", "solana", "1", "10", "5"}},
 		{name: "unknown Solana reason", row: Row{"solana_unfulfilled", "synthetic_reason", "1", "10", "5"}},
 		{name: "nonpositive count", row: Row{"refund_unmatched", "stripe", "0", "10", "5"}},
-		{name: "inverted age", row: Row{"email_fallback", "stripe", "1", "5", "10"}},
-		{name: "wrong columns", row: Row{"email_fallback", "stripe"}},
+		{name: "inverted age", row: Row{"credit_unfulfillable", "stripe", "1", "5", "10"}},
+		{name: "wrong columns", row: Row{"credit_unfulfillable", "stripe"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

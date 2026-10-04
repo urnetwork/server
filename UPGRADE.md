@@ -25,8 +25,8 @@ The audit covered 46 tracked items: S1–S11, A1–A7, N1–N7, W1–W6, D1–D8
 
 | Status | Count | Items |
 |---|---|---|
-| Fixed `[x]` | 26 | S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 · A3 A5 A7 · N3 N4 · W2 W4 W6 · D3 D5 D6 D7 · §4.2 §4.3 §4.4 §4.5 |
-| Partially fixed `[ ]` | 17 | S11 · A1 A2 A4 · N1 N2 N5 N7 · W1 W3 W5 · D1 D2 D4 D8 · §4.1 §4.7 |
+| Fixed `[x]` | 27 | S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 · A3 A5 A7 · N3 N4 · W2 W4 W6 · D3 D5 D6 D7 · §4.2 §4.3 §4.4 §4.5 |
+| Partially fixed `[ ]` | 16 | A1 A2 A4 · N1 N2 N5 N7 · W1 W3 W5 · D1 D2 D4 D8 · §4.1 §4.7 |
 | Open `[ ]` | 2 | N6 · §4.6 |
 | Accepted `[-]` | 1 | A6 |
 
@@ -46,6 +46,7 @@ The audit covered 46 tracked items: S1–S11, A1–A7, N1–N7, W1–W6, D1–D8
 - Merged to server main 2026-10-03: the fix branches for S3, S5 (repeat
   acknowledge), S9, S11 (comment), S12, S13 and §4.3 (server half; the sdk
   half is on sdk main `bd173d29`). The table above counts them.
+- 2026-10-04: S11 fixed by removing the email fallback (`5f9f5975`).
 
 ---
 
@@ -344,7 +345,7 @@ crediting even when `redeemNetworkId` is known (`:299`) — after Stripe's
       Re-checked 2026-10-03: `subscription_stripe_controller.go:435,467-471,526,538`;
       `subscription_stripe_checkout_test.go:293`.
 
-### S11 — Wrong-network credit via legacy email fallback — LOW
+### S11 — Wrong-network credit via legacy email fallback — LOW — FIXED (removed 2026-10-04)
 `stripeHandleInvoicePaid:484-499` falls back to `FindNetworkIdByEmail` for
 renewals without subscription metadata; a Stripe customer email matching a
 different account credits that account. Acknowledged in a comment
@@ -354,7 +355,7 @@ different account credits that account. Acknowledged in a comment
       checkout-session client_reference_id, then email) and warns loudly when
       used. Full retirement still needs live verification that every legacy
       subscription carries metadata.
-- [x] Kept + audited (user decision 2026-08-07): every invoice.paid credit
+- [x] Kept + audited (user decision 2026-08-07, superseded 2026-10-04): every invoice.paid credit
       that resolves its network by the email fallback ALSO writes a
       `payment_reconciliation_event` (store=stripe, action=`email_fallback`,
       evidence=invoice id, details incl. subscription id + the matched email)
@@ -363,16 +364,34 @@ different account credits that account. Acknowledged in a comment
       last watermark into its store result + heartbeat, and `bringyourctl
       payments reconcile` prints the count and a line per event, so any use
       is explicitly surfaced until the fallback can be retired.
-- [ ] Partial (2026-10-03): mitigated, not retired.
-      - In code: lookup order is metadata, then `client_reference_id`, then
-        email (`subscription_stripe_controller.go:690-765`). The audit event
-        is written at `:816-836`. Tests: `subscription_stripe_refund_test.go:460/527`.
-      - Retiring it needs live data, not code: zero `email_fallback` events
-        over a full billing cycle, or a Stripe listing of subscriptions
-        without `network_id` metadata (repair those with metadata, then
-        delete the fallback).
-      - The comment that listed the old order (email second) is corrected
+- [x] Superseded (2026-10-04): mitigated, then retired below.
+      - The comment that listed the old order (email second) was corrected
         (`fix/upgrade-s11` `ef72f6be`, merged in `9ed88be1`).
+- [x] Fixed (removed, user decision 2026-10-04): the email fallback is
+      deleted (`fix/stripe-remove-email-fallback` `5f9f5975`). An invoice
+      resolves its network only from subscription metadata `network_id`, then
+      the checkout session's `client_reference_id`. `FindNetworkIdByEmail`,
+      the `email_fallback` action and its reconciler/CLI summary are gone.
+      - An invoice that names no network is never credited. The invoice.paid
+        webhook records it once as a stripe `credit_unfulfillable`
+        `payment_reconciliation_event` (evidence = invoice id; details:
+        subscription, customer, customer email, amount, currency, paid
+        period, `leg=webhook`) and answers 2xx, so Stripe does not retry it
+        for 72h or disable the endpoint. It answered 500 before. A failed
+        record write still answers non-2xx so Stripe redelivers. The hourly
+        reconciler writes the same details with `leg=credit`.
+      - Monitor §2.22 `payment-credit-unfulfillable` (WARN) counts distinct
+        such invoices in 24h; it replaces `payment-identity-fallback`.
+      - Support repair: verify the paying account from payment evidence (not
+        the email alone), set `network_id` metadata on the Stripe
+        subscription, then resend the invoice.paid event from the Stripe
+        dashboard; the stripe_invoice ledger keeps the credit single.
+      - Tests: hermetic `controller/subscription_stripe_destination_test.go`
+        (metadata and checkout paths unchanged; email never used; webhook
+        2xx + one record; record failure is non-2xx). DB-backed
+        `TestStripeLegacyInvoiceEmailMatchIsNotCredited` and the updated
+        `TestPaymentReconcileStripeLegacyDestinationResolutionMatchesDryRun`
+        need Postgres and were not run here.
 
 ### S12 — Play subscription keeps billing a deleted account — MEDIUM (new 2026-10-03)
 `NetworkRemove` (`controller/network_controller.go:176-214`) cancels only
