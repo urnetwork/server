@@ -1,0 +1,1093 @@
+commit 49ce235e8629659508d6a6c0dde9ef2957b69fe1
+Author:     Dragan Milic <dragan@netice9.com>
+AuthorDate: Tue Nov 5 10:38:00 2024 +0100
+Commit:     Dragan Milic <dragan@netice9.com>
+CommitDate: Tue Nov 5 10:38:00 2024 +0100
+
+    added docker-compose
+
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+new file mode 100644
+index 00000000..0e4baa7f
+--- /dev/null
++++ b/.github/workflows/build.yml
+@@ -0,0 +1,56 @@
++name: Build All Services
++permissions:
++  contents: read
++
++on:
++  push:
++    branches:
++      - main
++  pull_request:
++    branches:
++      - main
++
++jobs:
++  checkout_repos:
++    runs-on: ubuntu-latest
++
++    steps:
++      # Step 1: Check out the current repository in the 'current-repo' subdirectory
++      - name: Checkout Current Repo
++        uses: actions/checkout@v3
++        with:
++          path: bringyour
++
++      # Step 2: Check out another repository in the 'another-repo' subdirectory using GITHUB_TOKEN
++      - name: Checkout Another Repo
++        uses: actions/checkout@v3
++        with:
++          repository: bringyour/connect
++          path: connect
++          token: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: Set up Docker
++        run: |
++          docker --version
++          echo "Docker is ready to use."
++      - uses: KengoTODA/actions-setup-docker-compose@v1
++        with:
++          version: "2.27.0"
++      - name: Build API image
++        run: |
++          docker build . -f bringyour/api/Dockerfile.compose
++
++      - name: Build Connect image
++        run: |
++          docker build . -f bringyour/connect/Dockerfile.compose
++
++      - name: Build Bringyourctl image
++        run: |
++          docker build . -f bringyour/bringyourctl/Dockerfile.compose
++
++      - name: Build Taskworker image
++        run: |
++          docker build . -f bringyour/taskworker/Dockerfile.compose
++      - name: Build docker-compose containers
++        run: |
++          cd bringyour && docker-compose build
+diff --git a/.gitignore b/.gitignore
+index 36cb9a71..ff12ecd8 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -9,7 +9,7 @@ bringyourctl/bringyourctl
+ api/api
+ taskworker/taskworker
+ gpt/gpt
+-connect/connect
++# connect/connect
+ connect/connect.test
+ connect/profile/memory
+ connect/profile/cpu
+diff --git a/api/Dockerfile.compose b/api/Dockerfile.compose
+new file mode 100644
+index 00000000..fd10e797
+--- /dev/null
++++ b/api/Dockerfile.compose
+@@ -0,0 +1,17 @@
++# syntax=docker/dockerfile:1
++FROM golang:1.23 AS builder
++RUN apt update && apt install -y protobuf-compiler
++RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
++ADD . /build/
++WORKDIR /build/connect/protocol
++RUN make
++RUN mkdir /out
++WORKDIR /build/bringyour/api
++RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/go/pkg/mod/ CGO_ENABLED=0 go build -o /out/service .
++
++FROM alpine
++RUN apk add --no-cache
++WORKDIR /app
++COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
++COPY --from=builder /out/service /app
++ENTRYPOINT ["/app/service"]
+diff --git a/api/Dockerfile.compose.dockerignore b/api/Dockerfile.compose.dockerignore
+new file mode 100644
+index 00000000..d18e5943
+--- /dev/null
++++ b/api/Dockerfile.compose.dockerignore
+@@ -0,0 +1,25 @@
++.git
++**/bin
++**/build
++**/.DS_Store
++**/test.out
++
++# binaries
++client/build
++bringyourctl/bringyourctl
++api/api
++taskworker/taskworker
++gpt/gpt
++connect/connect.test
++connect/profile/memory
++connect/profile/cpu
++
++temp/*
++
++build/androi
++
++.vscode/*
++.direnv
++android
++ICS/
++connect/explore
+\ No newline at end of file
+diff --git a/api/go.mod b/api/go.mod
+index a0921253..b8844bab 100644
+--- a/api/go.mod
++++ b/api/go.mod
+@@ -41,11 +41,12 @@ require (
+ 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
+ 	golang.org/x/mod v0.17.0 // indirect
+ 	golang.org/x/net v0.25.0 // indirect
+-	golang.org/x/sync v0.7.0 // indirect
++	golang.org/x/sync v0.8.0 // indirect
+ 	golang.org/x/sys v0.22.0 // indirect
+ 	golang.org/x/text v0.16.0 // indirect
+ 	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
+ 	google.golang.org/protobuf v1.33.0 // indirect
++	gopkg.in/yaml.v2 v2.4.0 // indirect
+ 	gopkg.in/yaml.v3 v3.0.1 // indirect
+ 	src.agwa.name/tlshacks v0.0.0-20231008131857-90d701ba3225 // indirect
+ )
+diff --git a/api/go.sum b/api/go.sum
+index 91536b00..fe9d3f27 100644
+--- a/api/go.sum
++++ b/api/go.sum
+@@ -123,8 +123,8 @@ golang.org/x/net v0.25.0 h1:d/OCCoBEUq33pjydKrGQhw7IlUPI2Oylr+8qLx49kac=
+ golang.org/x/net v0.25.0/go.mod h1:JkAGAh7GEvH74S6FOH42FLoXpXbE/aqXSrIQjXgsiwM=
+ golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+-golang.org/x/sync v0.7.0 h1:YsImfSBoP9QPYL0xyKJPq0gcaJdG3rInoqxTWbfQu9M=
+-golang.org/x/sync v0.7.0/go.mod h1:Czt+wKu1gCyEFDUtn0jG5QVvpJ6rzVqr5aXyt9drQfk=
++golang.org/x/sync v0.8.0 h1:3NFvSEYkUoMifnESzZl15y791HH1qU2xm6eCJU5ZPXQ=
++golang.org/x/sync v0.8.0/go.mod h1:Czt+wKu1gCyEFDUtn0jG5QVvpJ6rzVqr5aXyt9drQfk=
+ golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20190412213103-97732733099d/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+ golang.org/x/sys v0.0.0-20191204072324-ce4227a45e2e/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+@@ -164,8 +164,9 @@ google.golang.org/protobuf v1.33.0/go.mod h1:c6P6GXX6sHbq/GpV6MGZEdwhWPcYBgnhAHh
+ gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+ gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c h1:Hei/4ADfdWqJk1ZMxUNpqntNwaWcugrBjAiHlqqRiVk=
+ gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c/go.mod h1:JHkPIbrfpd72SG/EVd6muEfDQjcINNoR0C8j2r3qZ4Q=
+-gopkg.in/yaml.v2 v2.2.8 h1:obN1ZagJSUGI0Ek/LBmuj4SNLPfIny3KsKFopxRdj10=
+ gopkg.in/yaml.v2 v2.2.8/go.mod h1:hI93XBmqTisBFMUTm0b8Fm+jr3Dg1NNxqwp+5A1VGuI=
++gopkg.in/yaml.v2 v2.4.0 h1:D8xgwECY7CYvx+Y2n4sBz93Jn9JRvxdiyyo8CTfuKaY=
++gopkg.in/yaml.v2 v2.4.0/go.mod h1:RDklbk79AGWmwhnvt/jBztapEOGDOx6ZbXqjP6csGnQ=
+ gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+ gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+ gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+diff --git a/bringyourctl/Dockerfile.compose b/bringyourctl/Dockerfile.compose
+new file mode 100644
+index 00000000..bc60b6ff
+--- /dev/null
++++ b/bringyourctl/Dockerfile.compose
+@@ -0,0 +1,17 @@
++# syntax=docker/dockerfile:1
++FROM golang:1.23 AS builder
++RUN apt update && apt install -y protobuf-compiler
++RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
++ADD . /build/
++WORKDIR /build/connect/protocol
++RUN make
++RUN mkdir /out
++WORKDIR /build/bringyour/bringyourctl
++RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/go/pkg/mod/ CGO_ENABLED=0 go build -o /out/service .
++
++FROM alpine
++RUN apk add --no-cache
++WORKDIR /app
++COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
++COPY --from=builder /out/service /app
++ENTRYPOINT ["/app/service","db","migrate"]
+diff --git a/bringyourctl/Dockerfile.compose.dockerignore b/bringyourctl/Dockerfile.compose.dockerignore
+new file mode 100644
+index 00000000..01298d1c
+--- /dev/null
++++ b/bringyourctl/Dockerfile.compose.dockerignore
+@@ -0,0 +1,25 @@
++.git
++**/bin
++**/build
++**/.DS_Store
++**/test.out
++
++# binaries
++client/build
++# bringyourctl/bringyourctl
++api/api
++taskworker/taskworker
++gpt/gpt
++connect/connect.test
++connect/profile/memory
++connect/profile/cpu
++
++temp/*
++
++build/androi
++
++.vscode/*
++.direnv
++android
++ICS/
++connect/explore
+\ No newline at end of file
+diff --git a/bringyourctl/go.mod b/bringyourctl/go.mod
+index b0807058..631b0cc6 100644
+--- a/bringyourctl/go.mod
++++ b/bringyourctl/go.mod
+@@ -41,11 +41,12 @@ require (
+ 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
+ 	golang.org/x/mod v0.17.0 // indirect
+ 	golang.org/x/net v0.25.0 // indirect
+-	golang.org/x/sync v0.7.0 // indirect
++	golang.org/x/sync v0.8.0 // indirect
+ 	golang.org/x/sys v0.22.0 // indirect
+ 	golang.org/x/text v0.16.0 // indirect
+ 	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
+ 	google.golang.org/protobuf v1.33.0 // indirect
++	gopkg.in/yaml.v2 v2.4.0 // indirect
+ 	gopkg.in/yaml.v3 v3.0.1 // indirect
+ 	src.agwa.name/tlshacks v0.0.0-20231008131857-90d701ba3225 // indirect
+ )
+diff --git a/bringyourctl/go.sum b/bringyourctl/go.sum
+index 842262e6..fe9d3f27 100644
+--- a/bringyourctl/go.sum
++++ b/bringyourctl/go.sum
+@@ -20,6 +20,8 @@ github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815 h1:bWDMxwH3px2JBh
+ github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815/go.mod h1:WwZ+bS3ebgob9U8Nd0kOddGdZWjyMGR8Wziv+TBNwSE=
+ github.com/go-jose/go-jose/v3 v3.0.0 h1:s6rrhirfEP/CGIoc6p+PZAeogN2SxKav6Wp7+dyMWVo=
+ github.com/go-jose/go-jose/v3 v3.0.0/go.mod h1:RNkWWRld676jZEYoV3+XK8L2ZnNSvIsxFMht0mSX+u8=
++github.com/go-logr/logr v1.2.4 h1:g01GSCwiDw2xSZfjJ2/T9M+S6pFdcNtFYsp+Y43HYDQ=
++github.com/go-logr/logr v1.2.4/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=
+ github.com/go-playground/assert/v2 v2.2.0 h1:JvknZsQTYeFEAhQwI4qEt9cyV5ONwRHC+lYKSsYSR8s=
+ github.com/go-playground/assert/v2 v2.2.0/go.mod h1:VDjEfimB/XKnb+ZQfWdccd7VUvScMdVu0Titje2rxJ4=
+ github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 h1:tfuBGBXKqDEevZMzYi5KSi8KkcZtzBcTgAUUtapy0OI=
+@@ -68,6 +70,8 @@ github.com/oklog/ulid/v2 v2.1.0 h1:+9lhoxAP56we25tyYETBBY1YLA2SaoLvUFgrP2miPJU=
+ github.com/oklog/ulid/v2 v2.1.0/go.mod h1:rcEKHmBBKfef9DhnvX7y1HZBYxjXb0cP5ExxNsTT1QQ=
+ github.com/onsi/ginkgo/v2 v2.9.5 h1:+6Hr4uxzP4XIUyAkg61dWBw8lb/gc4/X5luuxN/EC+Q=
+ github.com/onsi/ginkgo/v2 v2.9.5/go.mod h1:tvAoo1QUJwNEU2ITftXTpR7R1RbCzoZUOs3RonqW57k=
++github.com/onsi/gomega v1.27.6 h1:ENqfyGeS5AX/rlXDd/ETokDz93u0YufY1Pgxuy/PvWE=
++github.com/onsi/gomega v1.27.6/go.mod h1:PIQNjfQwkP3aQAH7lf7j87O/5FiNr+ZR8+ipb+qQlhg=
+ github.com/pborman/getopt v0.0.0-20170112200414-7148bc3a4c30/go.mod h1:85jBQOZwpVEaDAr341tbn15RS4fCAsIst0qp7i8ex1o=
+ github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
+ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+@@ -119,8 +123,8 @@ golang.org/x/net v0.25.0 h1:d/OCCoBEUq33pjydKrGQhw7IlUPI2Oylr+8qLx49kac=
+ golang.org/x/net v0.25.0/go.mod h1:JkAGAh7GEvH74S6FOH42FLoXpXbE/aqXSrIQjXgsiwM=
+ golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+-golang.org/x/sync v0.7.0 h1:YsImfSBoP9QPYL0xyKJPq0gcaJdG3rInoqxTWbfQu9M=
+-golang.org/x/sync v0.7.0/go.mod h1:Czt+wKu1gCyEFDUtn0jG5QVvpJ6rzVqr5aXyt9drQfk=
++golang.org/x/sync v0.8.0 h1:3NFvSEYkUoMifnESzZl15y791HH1qU2xm6eCJU5ZPXQ=
++golang.org/x/sync v0.8.0/go.mod h1:Czt+wKu1gCyEFDUtn0jG5QVvpJ6rzVqr5aXyt9drQfk=
+ golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20190412213103-97732733099d/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+ golang.org/x/sys v0.0.0-20191204072324-ce4227a45e2e/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+@@ -142,6 +146,8 @@ golang.org/x/text v0.3.7/go.mod h1:u+2+/6zg+i71rQMx5EYifcz6MCKuco9NR6JIITiCfzQ=
+ golang.org/x/text v0.4.0/go.mod h1:mrYo+phRRbMaCq/xk9113O4dZlRixOauAjOtrjsXDZ8=
+ golang.org/x/text v0.16.0 h1:a94ExnEXNtEwYLGJSIUxnWoxoRz/ZcCsV63ROupILh4=
+ golang.org/x/text v0.16.0/go.mod h1:GhwF1Be+LQoKShO3cGOHzqOgRrGaYc9AvblQOmPVHnI=
++golang.org/x/time v0.5.0 h1:o7cqy6amK/52YcAKIPlM3a+Fpj35zvRj2TP+e1xFSfk=
++golang.org/x/time v0.5.0/go.mod h1:3BpzKBy/shNhVucY/MWOyx10tF3SFh9QdLuxbVysPQM=
+ golang.org/x/tools v0.0.0-20180917221912-90fa682c2a6e/go.mod h1:n7NCudcB/nEzxVGmLbDWY5pfWTLqBcC2KZ6jyYvM4mQ=
+ golang.org/x/tools v0.0.0-20191119224855-298f0cb1881e/go.mod h1:b+2E5dAYhXwXZwtnZ6UAqBI28+e2cm9otk0dWdXHAEo=
+ golang.org/x/tools v0.0.0-20200130002326-2f3ba24bd6e7/go.mod h1:TB2adYChydJhpapKDTa4BR/hXlZSLoq2Wpct/0txZ28=
+@@ -158,8 +164,9 @@ google.golang.org/protobuf v1.33.0/go.mod h1:c6P6GXX6sHbq/GpV6MGZEdwhWPcYBgnhAHh
+ gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+ gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c h1:Hei/4ADfdWqJk1ZMxUNpqntNwaWcugrBjAiHlqqRiVk=
+ gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c/go.mod h1:JHkPIbrfpd72SG/EVd6muEfDQjcINNoR0C8j2r3qZ4Q=
+-gopkg.in/yaml.v2 v2.2.8 h1:obN1ZagJSUGI0Ek/LBmuj4SNLPfIny3KsKFopxRdj10=
+ gopkg.in/yaml.v2 v2.2.8/go.mod h1:hI93XBmqTisBFMUTm0b8Fm+jr3Dg1NNxqwp+5A1VGuI=
++gopkg.in/yaml.v2 v2.4.0 h1:D8xgwECY7CYvx+Y2n4sBz93Jn9JRvxdiyyo8CTfuKaY=
++gopkg.in/yaml.v2 v2.4.0/go.mod h1:RDklbk79AGWmwhnvt/jBztapEOGDOx6ZbXqjP6csGnQ=
+ gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+ gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+ gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+diff --git a/connect/Dockerfile.compose b/connect/Dockerfile.compose
+new file mode 100644
+index 00000000..485c7b9c
+--- /dev/null
++++ b/connect/Dockerfile.compose
+@@ -0,0 +1,17 @@
++# syntax=docker/dockerfile:1
++FROM golang:1.23 AS builder
++RUN apt update && apt install -y protobuf-compiler
++RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
++ADD . /build/
++WORKDIR /build/connect/protocol
++RUN make
++RUN mkdir /out
++WORKDIR /build/bringyour/connect
++RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/go/pkg/mod/ CGO_ENABLED=0 go build -o /out/service .
++
++FROM alpine
++RUN apk add --no-cache
++WORKDIR /app
++COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
++COPY --from=builder /out/service /app
++ENTRYPOINT ["/app/service","-p","80"]
+diff --git a/connect/Dockerfile.compose.dockerignore b/connect/Dockerfile.compose.dockerignore
+new file mode 100644
+index 00000000..d18e5943
+--- /dev/null
++++ b/connect/Dockerfile.compose.dockerignore
+@@ -0,0 +1,25 @@
++.git
++**/bin
++**/build
++**/.DS_Store
++**/test.out
++
++# binaries
++client/build
++bringyourctl/bringyourctl
++api/api
++taskworker/taskworker
++gpt/gpt
++connect/connect.test
++connect/profile/memory
++connect/profile/cpu
++
++temp/*
++
++build/androi
++
++.vscode/*
++.direnv
++android
++ICS/
++connect/explore
+\ No newline at end of file
+diff --git a/docker-compose.yml b/docker-compose.yml
+new file mode 100644
+index 00000000..26a5048b
+--- /dev/null
++++ b/docker-compose.yml
+@@ -0,0 +1,119 @@
++services:
++  api:
++    environment:
++      - WARP_VERSION=0.0.0
++      - WARP_ENV=local
++      - WARP_VAULT_HOME=/vault
++      - BRINGYOUR_POSTGRES_HOSTNAME=postgres
++    build:
++      context: ../
++      dockerfile: bringyour/api/Dockerfile.compose
++    develop:
++      watch:
++        - path: api
++          action: rebuild
++    ports:
++      - "8080:80"
++    volumes:
++      - ../vault:/vault
++    depends_on:
++      db-migrate:
++        condition: service_completed_successfully
++      redis:
++        condition: service_started
++
++  connect:
++    environment:
++      - WARP_VERSION=0.0.0
++      - WARP_ENV=local
++      - WARP_SERVICE=local
++      - WARP_BLOCK=local
++      - WARP_VAULT_HOME=/vault
++      - BRINGYOUR_POSTGRES_HOSTNAME=postgres
++      - WARP_PORTS=5080:5080,5081:5081
++    build:
++      context: ../
++      dockerfile: bringyour/connect/Dockerfile.compose
++    develop:
++      watch:
++        - path: .
++          action: rebuild
++    ports:
++      - "7070:80"
++    volumes:
++      - ../vault:/vault
++    depends_on:
++      db-migrate:
++        condition: service_completed_successfully
++  taskworker:
++    environment:
++      - WARP_VERSION=0.0.0
++      - WARP_ENV=local
++      - WARP_VAULT_HOME=/vault
++      - BRINGYOUR_POSTGRES_HOSTNAME=postgres
++    build:
++      context: ../
++      dockerfile: bringyour/taskworker/Dockerfile.compose
++    develop:
++      watch:
++        - path: .
++          action: rebuild
++    volumes:
++      - ../vault:/vault
++    restart: on-failure
++    depends_on:
++      db-migrate:
++        condition: service_completed_successfully
++      redis:
++        condition: service_started
++
++  db-migrate:
++    environment:
++      - WARP_VERSION=0.0.0
++      - WARP_ENV=local
++      - WARP_VAULT_HOME=/vault
++      - BRINGYOUR_POSTGRES_HOSTNAME=postgres
++    build:
++      context: ../
++      dockerfile: bringyour/bringyourctl/Dockerfile.compose
++    volumes:
++      - ../vault:/vault
++    restart: on-failure:5
++    depends_on:
++      postgres:
++        condition: service_healthy
++  postgres:
++    image: docker.io/postgres:16-alpine
++    healthcheck:
++      test: ["CMD-SHELL", "pg_isready -U bringyour"]
++      interval: 10s
++      timeout: 5s
++      retries: 5
++    environment:
++      - POSTGRES_DB=bringyour
++      - POSTGRES_USER=bringyour
++      - POSTGRES_PASSWORD=pigsty-vesicle-trombone-vigour
++      - BRINGYOUR_POSTGRES_HOSTNAME=postgres
++
++  setup-local-user:
++    build:
++      context: ../
++      dockerfile: bringyour/local/setup-local-user/Dockerfile
++    restart: on-failure
++    environment:
++      - WARP_VERSION=0.0.0
++      - WARP_ENV=local
++      - WARP_VAULT_HOME=/vault
++      - BRINGYOUR_POSTGRES_HOSTNAME=postgres
++    depends_on:
++      api:
++        condition: service_started
++    volumes:
++      - ../vault:/vault
++    develop:
++      watch:
++        - path: local/setup-local-user
++          action: rebuild
++
++  redis:
++    image: redis:7.4.0
+diff --git a/local/README.md b/local/README.md
+new file mode 100644
+index 00000000..fe88d4a3
+--- /dev/null
++++ b/local/README.md
+@@ -0,0 +1,4 @@
++# Files needed for running local version of the server
++
++This directory contains all the configs needed to run local version of the server.
++Please do not use these configs (especially the private keys) for any other purpose!
+diff --git a/local/setup-local-user/Dockerfile b/local/setup-local-user/Dockerfile
+new file mode 100644
+index 00000000..71ba905c
+--- /dev/null
++++ b/local/setup-local-user/Dockerfile
+@@ -0,0 +1,18 @@
++# syntax=docker/dockerfile:1
++FROM golang:1.23 AS builder
++RUN apt update && apt install -y protobuf-compiler
++RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
++ADD . /build/
++WORKDIR /build/connect/protocol
++RUN make
++RUN mkdir /out
++WORKDIR /build/bringyour/local/setup-local-user
++# RUN ls -la ../../../connect && exit 1
++RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/go/pkg/mod/ CGO_ENABLED=0 go build -o /out/service .
++
++FROM alpine
++RUN apk add --no-cache
++WORKDIR /app
++COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
++COPY --from=builder /out/service /app
++ENTRYPOINT ["/app/service"]
+\ No newline at end of file
+diff --git a/local/setup-local-user/Dockerfile.dockerignore b/local/setup-local-user/Dockerfile.dockerignore
+new file mode 100644
+index 00000000..01298d1c
+--- /dev/null
++++ b/local/setup-local-user/Dockerfile.dockerignore
+@@ -0,0 +1,25 @@
++.git
++**/bin
++**/build
++**/.DS_Store
++**/test.out
++
++# binaries
++client/build
++# bringyourctl/bringyourctl
++api/api
++taskworker/taskworker
++gpt/gpt
++connect/connect.test
++connect/profile/memory
++connect/profile/cpu
++
++temp/*
++
++build/androi
++
++.vscode/*
++.direnv
++android
++ICS/
++connect/explore
+\ No newline at end of file
+diff --git a/local/setup-local-user/go.mod b/local/setup-local-user/go.mod
+new file mode 100644
+index 00000000..0bbe66c0
+--- /dev/null
++++ b/local/setup-local-user/go.mod
+@@ -0,0 +1,59 @@
++module bringyour.com/setup-local-user
++
++go 1.22.5
++
++replace bringyour.com/bringyour v0.0.0 => ../../bringyour
++
++replace bringyour.com/connect v0.0.0 => ../../../connect/connect
++
++replace bringyour.com/protocol v0.0.0 => ../../../connect/protocol/build/bringyour.com/protocol
++
++require (
++	bringyour.com/bringyour v0.0.0
++	bringyour.com/connect v0.0.0
++)
++
++require (
++	bringyour.com/protocol v0.0.0 // indirect
++	github.com/cespare/xxhash/v2 v2.2.0 // indirect
++	github.com/coreos/go-semver v0.3.1 // indirect
++	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
++	github.com/go-jose/go-jose/v3 v3.0.0 // indirect
++	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
++	github.com/golang-jwt/jwt/v5 v5.2.0 // indirect
++	github.com/golang/glog v1.2.1 // indirect
++	github.com/golang/protobuf v1.5.3 // indirect
++	github.com/google/btree v1.1.2 // indirect
++	github.com/google/gopacket v1.1.19 // indirect
++	github.com/google/pprof v0.0.0-20210407192527-94a9f03dee38 // indirect
++	github.com/gorilla/websocket v1.5.0 // indirect
++	github.com/jackc/pgerrcode v0.0.0-20220416144525-469b46aa5efa // indirect
++	github.com/jackc/pgpassfile v1.0.0 // indirect
++	github.com/jackc/pgservicefile v0.0.0-20221227161230-091c0ba34f0a // indirect
++	github.com/jackc/pgx/v5 v5.3.1 // indirect
++	github.com/jackc/puddle/v2 v2.2.0 // indirect
++	github.com/jellydator/ttlcache/v3 v3.3.0 // indirect
++	github.com/mozillazg/go-unidecode v0.2.0 // indirect
++	github.com/nyaruka/phonenumbers v1.1.6 // indirect
++	github.com/oklog/ulid/v2 v2.1.0 // indirect
++	github.com/onsi/ginkgo/v2 v2.9.5 // indirect
++	github.com/pquerna/cachecontrol v0.2.0 // indirect
++	github.com/quic-go/quic-go v0.46.0 // indirect
++	github.com/redis/go-redis/v9 v9.0.3 // indirect
++	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e // indirect
++	github.com/tyler-smith/go-bip39 v1.1.0 // indirect
++	go.uber.org/mock v0.4.0 // indirect
++	golang.org/x/crypto v0.25.0 // indirect
++	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
++	golang.org/x/mod v0.17.0 // indirect
++	golang.org/x/net v0.25.0 // indirect
++	golang.org/x/sync v0.8.0 // indirect
++	golang.org/x/sys v0.22.0 // indirect
++	golang.org/x/text v0.16.0 // indirect
++	golang.org/x/time v0.5.0 // indirect
++	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
++	google.golang.org/protobuf v1.33.0 // indirect
++	gopkg.in/yaml.v3 v3.0.1 // indirect
++	gvisor.dev/gvisor v0.0.0-20240912184249-d4480ca03532 // indirect
++	src.agwa.name/tlshacks v0.0.0-20231008131857-90d701ba3225 // indirect
++)
+diff --git a/local/setup-local-user/go.sum b/local/setup-local-user/go.sum
+new file mode 100644
+index 00000000..6ce259d2
+--- /dev/null
++++ b/local/setup-local-user/go.sum
+@@ -0,0 +1,143 @@
++github.com/bsm/ginkgo/v2 v2.7.0 h1:ItPMPH90RbmZJt5GtkcNvIRuGEdwlBItdNVoyzaNQao=
++github.com/bsm/ginkgo/v2 v2.7.0/go.mod h1:AiKlXPm7ItEHNc/2+OkrNG4E0ITzojb9/xWzvQ9XZ9w=
++github.com/bsm/gomega v1.26.0 h1:LhQm+AFcgV2M0WyKroMASzAzCAJVpAxQXv4SaI9a69Y=
++github.com/bsm/gomega v1.26.0/go.mod h1:JyEr/xRbxbtgWNi8tIEVPUYZ5Dzef52k01W3YH0H+O0=
++github.com/cespare/xxhash/v2 v2.2.0 h1:DC2CZ1Ep5Y4k3ZQ899DldepgrayRUGE6BBZ/cd9Cj44=
++github.com/cespare/xxhash/v2 v2.2.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
++github.com/chzyer/logex v1.1.10/go.mod h1:+Ywpsq7O8HXn0nuIou7OrIPyXbp3wmkHB+jjWRnGsAI=
++github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e/go.mod h1:nSuG5e5PlCu98SY8svDHJxuZscDgtXS6KTTbou5AhLI=
++github.com/chzyer/test v0.0.0-20180213035817-a1ea475d72b1/go.mod h1:Q3SI9o4m/ZMnBNeIyt5eFwwo7qiLfzFZmjNmxjkiQlU=
++github.com/coreos/go-semver v0.3.1 h1:yi21YpKnrx1gt5R+la8n5WgS0kCrsPp33dmEyHReZr4=
++github.com/coreos/go-semver v0.3.1/go.mod h1:irMmmIw/7yzSRPWryHsK7EYSg09caPQL03VsM8rvUec=
++github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
++github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
++github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
++github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f h1:lO4WD4F/rVNCu3HqELle0jiPLLBs70cWOduZpkS1E78=
++github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f/go.mod h1:cuUVRXasLTGF7a8hSLbxyZXjz+1KgoB3wDUb6vlszIc=
++github.com/go-jose/go-jose/v3 v3.0.0 h1:s6rrhirfEP/CGIoc6p+PZAeogN2SxKav6Wp7+dyMWVo=
++github.com/go-jose/go-jose/v3 v3.0.0/go.mod h1:RNkWWRld676jZEYoV3+XK8L2ZnNSvIsxFMht0mSX+u8=
++github.com/go-logr/logr v1.2.4 h1:g01GSCwiDw2xSZfjJ2/T9M+S6pFdcNtFYsp+Y43HYDQ=
++github.com/go-logr/logr v1.2.4/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=
++github.com/go-playground/assert/v2 v2.2.0 h1:JvknZsQTYeFEAhQwI4qEt9cyV5ONwRHC+lYKSsYSR8s=
++github.com/go-playground/assert/v2 v2.2.0/go.mod h1:VDjEfimB/XKnb+ZQfWdccd7VUvScMdVu0Titje2rxJ4=
++github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 h1:tfuBGBXKqDEevZMzYi5KSi8KkcZtzBcTgAUUtapy0OI=
++github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572/go.mod h1:9Pwr4B2jHnOSGXyyzV8ROjYa2ojvAY6HCGYYfMoC3Ls=
++github.com/golang-jwt/jwt/v5 v5.2.0 h1:d/ix8ftRUorsN+5eMIlF4T6J8CAt9rch3My2winC1Jw=
++github.com/golang-jwt/jwt/v5 v5.2.0/go.mod h1:pqrtFR0X4osieyHYxtmOUWsAWrfe1Q5UVIyoH402zdk=
++github.com/golang/glog v1.2.1 h1:OptwRhECazUx5ix5TTWC3EZhsZEHWcYWY4FQHTIubm4=
++github.com/golang/glog v1.2.1/go.mod h1:6AhwSGph0fcJtXVM/PEHPqZlFeoLxhs7/t5UDAwmO+w=
++github.com/golang/protobuf v1.5.0/go.mod h1:FsONVRAS9T7sI+LIUmWTfcYkHO4aIWwzhcaSAoJOfIk=
++github.com/golang/protobuf v1.5.3 h1:KhyjKVUg7Usr/dYsdSqoFveMYd5ko72D+zANwlG1mmg=
++github.com/golang/protobuf v1.5.3/go.mod h1:XVQd3VNwM+JqD3oG2Ue2ip4fOMUkwXdXDdiuN0vRsmY=
++github.com/google/btree v1.1.2 h1:xf4v41cLI2Z6FxbKm+8Bu+m8ifhj15JuZ9sa0jZCMUU=
++github.com/google/btree v1.1.2/go.mod h1:qOPhT0dTNdNzV6Z/lhRX0YXUafgPLFUh+gZMl761Gm4=
++github.com/google/go-cmp v0.5.0/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
++github.com/google/go-cmp v0.5.5/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
++github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
++github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
++github.com/google/gopacket v1.1.19 h1:ves8RnFZPGiFnTS0uPQStjwru6uO6h+nlr9j6fL7kF8=
++github.com/google/gopacket v1.1.19/go.mod h1:iJ8V8n6KS+z2U1A8pUwu8bW5SyEMkXJB8Yo/Vo+TKTo=
++github.com/google/pprof v0.0.0-20210407192527-94a9f03dee38 h1:yAJXTCF9TqKcTiHJAE8dj7HMvPfh66eeA2JYW7eFpSE=
++github.com/google/pprof v0.0.0-20210407192527-94a9f03dee38/go.mod h1:kpwsk12EmLew5upagYY7GY0pfYCcupk39gWOCRROcvE=
++github.com/gorilla/websocket v1.5.0 h1:PPwGk2jz7EePpoHN/+ClbZu8SPxiqlu12wZP/3sWmnc=
++github.com/gorilla/websocket v1.5.0/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
++github.com/ianlancetaylor/demangle v0.0.0-20200824232613-28f6c0f3b639/go.mod h1:aSSvb/t6k1mPoxDqO4vJh6VOCGPwU4O0C2/Eqndh1Sc=
++github.com/jackc/pgerrcode v0.0.0-20220416144525-469b46aa5efa h1:s+4MhCQ6YrzisK6hFJUX53drDT4UsSW3DEhKn0ifuHw=
++github.com/jackc/pgerrcode v0.0.0-20220416144525-469b46aa5efa/go.mod h1:a/s9Lp5W7n/DD0VrVoyJ00FbP2ytTPDVOivvn2bMlds=
++github.com/jackc/pgpassfile v1.0.0 h1:/6Hmqy13Ss2zCq62VdNG8tM1wchn8zjSGOBJ6icpsIM=
++github.com/jackc/pgpassfile v1.0.0/go.mod h1:CEx0iS5ambNFdcRtxPj5JhEz+xB6uRky5eyVu/W2HEg=
++github.com/jackc/pgservicefile v0.0.0-20221227161230-091c0ba34f0a h1:bbPeKD0xmW/Y25WS6cokEszi5g+S0QxI/d45PkRi7Nk=
++github.com/jackc/pgservicefile v0.0.0-20221227161230-091c0ba34f0a/go.mod h1:5TJZWKEWniPve33vlWYSoGYefn3gLQRzjfDlhSJ9ZKM=
++github.com/jackc/pgx/v5 v5.3.1 h1:Fcr8QJ1ZeLi5zsPZqQeUZhNhxfkkKBOgJuYkJHoBOtU=
++github.com/jackc/pgx/v5 v5.3.1/go.mod h1:t3JDKnCBlYIc0ewLF0Q7B8MXmoIaBOZj/ic7iHozM/8=
++github.com/jackc/puddle/v2 v2.2.0 h1:RdcDk92EJBuBS55nQMMYFXTxwstHug4jkhT5pq8VxPk=
++github.com/jackc/puddle/v2 v2.2.0/go.mod h1:vriiEXHvEE654aYKXXjOvZM39qJ0q+azkZFrfEOc3H4=
++github.com/jellydator/ttlcache/v3 v3.3.0 h1:BdoC9cE81qXfrxeb9eoJi9dWrdhSuwXMAnHTbnBm4Wc=
++github.com/jellydator/ttlcache/v3 v3.3.0/go.mod h1:bj2/e0l4jRnQdrnSTaGTsh4GSXvMjQcy41i7th0GVGw=
++github.com/kr/pretty v0.3.0 h1:WgNl7dwNpEZ6jJ9k1snq4pZsg7DOEN8hP9Xw0Tsjwk0=
++github.com/kr/pretty v0.3.0/go.mod h1:640gp4NfQd8pI5XOwp5fnNeVWj67G7CFk/SaSQn7NBk=
++github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
++github.com/kr/text v0.2.0/go.mod h1:eLer722TekiGuMkidMxC/pM04lWEeraHUUmBw8l2grE=
++github.com/mozillazg/go-unidecode v0.2.0 h1:vFGEzAH9KSwyWmXCOblazEWDh7fOkpmy/Z4ArmamSUc=
++github.com/mozillazg/go-unidecode v0.2.0/go.mod h1:zB48+/Z5toiRolOZy9ksLryJ976VIwmDmpQ2quyt1aA=
++github.com/nyaruka/phonenumbers v1.1.6 h1:DcueYq7QrOArAprAYNoQfDgp0KetO4LqtnBtQC6Wyes=
++github.com/nyaruka/phonenumbers v1.1.6/go.mod h1:yShPJHDSH3aTKzCbXyVxNpbl2kA+F+Ne5Pun/MvFRos=
++github.com/oklog/ulid/v2 v2.1.0 h1:+9lhoxAP56we25tyYETBBY1YLA2SaoLvUFgrP2miPJU=
++github.com/oklog/ulid/v2 v2.1.0/go.mod h1:rcEKHmBBKfef9DhnvX7y1HZBYxjXb0cP5ExxNsTT1QQ=
++github.com/onsi/ginkgo/v2 v2.9.5 h1:+6Hr4uxzP4XIUyAkg61dWBw8lb/gc4/X5luuxN/EC+Q=
++github.com/onsi/ginkgo/v2 v2.9.5/go.mod h1:tvAoo1QUJwNEU2ITftXTpR7R1RbCzoZUOs3RonqW57k=
++github.com/onsi/gomega v1.27.6 h1:ENqfyGeS5AX/rlXDd/ETokDz93u0YufY1Pgxuy/PvWE=
++github.com/onsi/gomega v1.27.6/go.mod h1:PIQNjfQwkP3aQAH7lf7j87O/5FiNr+ZR8+ipb+qQlhg=
++github.com/pborman/getopt v0.0.0-20170112200414-7148bc3a4c30/go.mod h1:85jBQOZwpVEaDAr341tbn15RS4fCAsIst0qp7i8ex1o=
++github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
++github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
++github.com/pquerna/cachecontrol v0.2.0 h1:vBXSNuE5MYP9IJ5kjsdo8uq+w41jSPgvba2DEnkRx9k=
++github.com/pquerna/cachecontrol v0.2.0/go.mod h1:NrUG3Z7Rdu85UNR3vm7SOsl1nFIeSiQnrHV5K9mBcUI=
++github.com/quic-go/quic-go v0.46.0 h1:uuwLClEEyk1DNvchH8uCByQVjo3yKL9opKulExNDs7Y=
++github.com/quic-go/quic-go v0.46.0/go.mod h1:1dLehS7TIR64+vxGR70GDcatWTOtMX2PUtnKsjbTurI=
++github.com/redis/go-redis/v9 v9.0.3 h1:+7mmR26M0IvyLxGZUHxu4GiBkJkVDid0Un+j4ScYu4k=
++github.com/redis/go-redis/v9 v9.0.3/go.mod h1:WqMKv5vnQbRuZstUwxQI195wHy+t4PuXDOjzMvcuQHk=
++github.com/rogpeppe/go-internal v1.10.0 h1:TMyTOH3F/DB16zRVcYyreMH6GnZZrwQVAoYjRBZyWFQ=
++github.com/rogpeppe/go-internal v1.10.0/go.mod h1:UQnix2H7Ngw/k4C5ijL5+65zddjncjaFoBhdsK/akog=
++github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e h1:MRM5ITcdelLK2j1vwZ3Je0FKVCfqOLp5zO6trqMLYs0=
++github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e/go.mod h1:XV66xRDqSt+GTGFMVlhk3ULuV0y9ZmzeVGR4mloJI3M=
++github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
++github.com/stretchr/testify v1.3.0/go.mod h1:M5WIy9Dh21IEIfnGCwXGc5bZfKNJtfHm1UVUgZn+9EI=
++github.com/stretchr/testify v1.6.1/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
++github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
++github.com/stretchr/testify v1.9.0 h1:HtqpIVDClZ4nwg75+f6Lvsy/wHu+3BoSGCbBAcpTsTg=
++github.com/stretchr/testify v1.9.0/go.mod h1:r2ic/lqez/lEtzL7wO/rwa5dbSLXVDPFyf8C91i36aY=
++github.com/tyler-smith/go-bip39 v1.1.0 h1:5eUemwrMargf3BSLRRCalXT93Ns6pQJIjYQN2nyfOP8=
++github.com/tyler-smith/go-bip39 v1.1.0/go.mod h1:gUYDtqQw1JS3ZJ8UWVcGTGqqr6YIN3CWg+kkNaLt55U=
++go.uber.org/goleak v1.3.0 h1:2K3zAYmnTNqV73imy9J1T3WC+gmCePx2hEGkimedGto=
++go.uber.org/goleak v1.3.0/go.mod h1:CoHD4mav9JJNrW/WLlf7HGZPjdw8EucARQHekz1X6bE=
++go.uber.org/mock v0.4.0 h1:VcM4ZOtdbR4f6VXfiOpwpVJDL6lCReaZ6mw31wqh7KU=
++go.uber.org/mock v0.4.0/go.mod h1:a6FSlNadKUHUa9IP5Vyt1zh4fC7uAwxMutEAscFbkZc=
++golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
++golang.org/x/crypto v0.0.0-20190911031432-227b76d455e7/go.mod h1:yigFU9vqHzYiE8UmvKecakEJjdnWj3jj499lnFckfCI=
++golang.org/x/crypto v0.0.0-20191011191535-87dc89f01550/go.mod h1:yigFU9vqHzYiE8UmvKecakEJjdnWj3jj499lnFckfCI=
++golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9/go.mod h1:LzIPMQfyMNhhGPhUkYOs5KpL4U8rLKemX1yGLhDgUto=
++golang.org/x/crypto v0.25.0 h1:ypSNr+bnYL2YhwoMt2zPxHFmbAN1KZs/njMG3hxUp30=
++golang.org/x/crypto v0.25.0/go.mod h1:T+wALwcMOSE0kXgUAnPAHqTLW+XHgcELELW8VaDgm/M=
++golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 h1:vr/HnozRka3pE4EsMEg1lgkXJkTFJCVUX+S/ZT6wYzM=
++golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842/go.mod h1:XtvwrStGgqGPLc4cjQfWqZHG1YFdYs6swckp8vpsjnc=
++golang.org/x/lint v0.0.0-20200302205851-738671d3881b/go.mod h1:3xt1FjdF8hUf6vQPIChWIBhFzV8gjjsPE/fR3IyQdNY=
++golang.org/x/mod v0.1.1-0.20191105210325-c90efee705ee/go.mod h1:QqPTAvyqsEbceGzBzNggFXnrqF1CaUcvgkdR5Ot7KZg=
++golang.org/x/mod v0.17.0 h1:zY54UmvipHiNd+pm+m0x9KhZ9hl1/7QNMyxXbc6ICqA=
++golang.org/x/mod v0.17.0/go.mod h1:hTbmBsO62+eylJbnUtE2MGJUyE7QWk4xUqPFrRgJ+7c=
++golang.org/x/net v0.0.0-20190404232315-eb5bcb51f2a3/go.mod h1:t9HGtf8HONx5eT2rtn7q6eTqICYqUVnKs3thJo3Qplg=
++golang.org/x/net v0.0.0-20190620200207-3b0461eec859/go.mod h1:z5CRVTTTmAJ677TzLLGU+0bjPO0LkuOLi4/5GtJWs/s=
++golang.org/x/net v0.25.0 h1:d/OCCoBEUq33pjydKrGQhw7IlUPI2Oylr+8qLx49kac=
++golang.org/x/net v0.25.0/go.mod h1:JkAGAh7GEvH74S6FOH42FLoXpXbE/aqXSrIQjXgsiwM=
++golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
++golang.org/x/sync v0.8.0 h1:3NFvSEYkUoMifnESzZl15y791HH1qU2xm6eCJU5ZPXQ=
++golang.org/x/sync v0.8.0/go.mod h1:Czt+wKu1gCyEFDUtn0jG5QVvpJ6rzVqr5aXyt9drQfk=
++golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
++golang.org/x/sys v0.0.0-20190412213103-97732733099d/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
++golang.org/x/sys v0.0.0-20191204072324-ce4227a45e2e/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
++golang.org/x/sys v0.22.0 h1:RI27ohtqKCnwULzJLqkv897zojh5/DwS/ENaMzUOaWI=
++golang.org/x/sys v0.22.0/go.mod h1:/VUhepiaJMQUp4+oa/7Zr1D23ma6VTLIYjOOTFZPUcA=
++golang.org/x/text v0.3.0/go.mod h1:NqM8EUOU14njkJ3fqMW+pc6Ldnwhi/IjpwHt7yyuwOQ=
++golang.org/x/text v0.16.0 h1:a94ExnEXNtEwYLGJSIUxnWoxoRz/ZcCsV63ROupILh4=
++golang.org/x/text v0.16.0/go.mod h1:GhwF1Be+LQoKShO3cGOHzqOgRrGaYc9AvblQOmPVHnI=
++golang.org/x/time v0.5.0 h1:o7cqy6amK/52YcAKIPlM3a+Fpj35zvRj2TP+e1xFSfk=
++golang.org/x/time v0.5.0/go.mod h1:3BpzKBy/shNhVucY/MWOyx10tF3SFh9QdLuxbVysPQM=
++golang.org/x/tools v0.0.0-20200130002326-2f3ba24bd6e7/go.mod h1:TB2adYChydJhpapKDTa4BR/hXlZSLoq2Wpct/0txZ28=
++golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d h1:vU5i/LfpvrRCpgM/VPfJLg5KjxD3E+hfT1SH+d9zLwg=
++golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d/go.mod h1:aiJjzUbINMkxbQROHiO6hDPo2LHcIPhhQsa9DLh0yGk=
++golang.org/x/xerrors v0.0.0-20191011141410-1b5146add898/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
++golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
++google.golang.org/protobuf v1.26.0-rc.1/go.mod h1:jlhhOSvTdKEhbULTjvd4ARK9grFBp09yW+WbY/TyQbw=
++google.golang.org/protobuf v1.26.0/go.mod h1:9q0QmTI4eRPtz6boOQmLYwt+qCgq0jsYwAQnmE0givc=
++google.golang.org/protobuf v1.33.0 h1:uNO2rsAINq/JlFpSdYEKIZ0uKD/R9cpdv0T+yoGwGmI=
++google.golang.org/protobuf v1.33.0/go.mod h1:c6P6GXX6sHbq/GpV6MGZEdwhWPcYBgnhAHhKbcUYpos=
++gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
++gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c h1:Hei/4ADfdWqJk1ZMxUNpqntNwaWcugrBjAiHlqqRiVk=
++gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c/go.mod h1:JHkPIbrfpd72SG/EVd6muEfDQjcINNoR0C8j2r3qZ4Q=
++gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
++gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
++gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
++gvisor.dev/gvisor v0.0.0-20240912184249-d4480ca03532 h1:H3jhWs/ve7367o3o8GPd7szmSYphWCy34ncgm+D48wc=
++gvisor.dev/gvisor v0.0.0-20240912184249-d4480ca03532/go.mod h1:sxc3Uvk/vHcd3tj7/DHVBoR5wvWT/MmRq2pj7HRJnwU=
++src.agwa.name/tlshacks v0.0.0-20231008131857-90d701ba3225 h1:KvJgNzDBgG6IawXLCenHhjvU7RXQ5UD1a18Nm2ZMyGg=
++src.agwa.name/tlshacks v0.0.0-20231008131857-90d701ba3225/go.mod h1:NT4HI59yJusF5Il4/DlC8F5+mfylE4CbRVwdoEi6MF8=
+diff --git a/local/setup-local-user/main.go b/local/setup-local-user/main.go
+new file mode 100644
+index 00000000..b3756241
+--- /dev/null
++++ b/local/setup-local-user/main.go
+@@ -0,0 +1,143 @@
++package main
++
++import (
++	"context"
++	"fmt"
++
++	"bringyour.com/bringyour/jwt"
++	"bringyour.com/bringyour/model"
++	"bringyour.com/bringyour/session"
++	"bringyour.com/connect"
++)
++
++func main() {
++
++	err := setupLocalUser()
++	if err != nil {
++		panic(err)
++	}
++}
++
++func setupLocalUser() error {
++
++	ctx := context.Background()
++
++	userName := "test"
++	userAuth := "test@bringyour.com"
++	userPassword := "aaksdfkasd634"
++	networkName := "thisisatest"
++
++	client := connect.NewBringYourApi(
++		ctx,
++		connect.NewClientStrategyWithDefaults(ctx),
++		"http://api:80",
++	)
++
++	var err error
++
++	done := make(chan struct{})
++
++	client.AuthLoginWithPassword(
++		&connect.AuthLoginWithPasswordArgs{
++			UserAuth: userAuth,
++			Password: userPassword,
++		},
++
++		connect.NewApiCallback(func(result *connect.AuthLoginWithPasswordResult, e error) {
++			defer close(done)
++			if e != nil {
++				err = fmt.Errorf("could not login: %w", e)
++				return
++			}
++
++			if result.Error != nil {
++				err = fmt.Errorf("could not login: %s", result.Error)
++				return
++			}
++
++			fmt.Println("jwt: ", result.Network.ByJwt)
++		}),
++	)
++
++	<-done
++
++	if err == nil {
++		fmt.Println("User logged in successfully")
++		return nil
++	}
++
++	notJWTSession := session.NewLocalClientSession(ctx, "api:80", nil)
++
++	result, err := model.NetworkCreate(model.NetworkCreateArgs{
++		UserName:    userName,
++		Password:    &userPassword,
++		UserAuth:    &userAuth,
++		NetworkName: networkName,
++		Terms:       true,
++	}, notJWTSession)
++
++	if err != nil {
++		return fmt.Errorf("could not create network: %w", err)
++	}
++
++	if result.Error != nil {
++		return fmt.Errorf("could not create network: %s", result.Error)
++	}
++
++	createCodeResult, err := model.AuthVerifyCreateCode(
++		model.AuthVerifyCreateCodeArgs{
++			UserAuth: result.VerificationRequired.UserAuth,
++		},
++		notJWTSession,
++	)
++
++	if err != nil {
++		return fmt.Errorf("could not create code: %w", err)
++	}
++
++	av, err := model.AuthVerify(
++		model.AuthVerifyArgs{
++			UserAuth:   result.VerificationRequired.UserAuth,
++			VerifyCode: *createCodeResult.VerifyCode,
++		},
++		notJWTSession,
++	)
++
++	if err != nil {
++		return fmt.Errorf("could not verify code: %w", err)
++	}
++
++	initialTransferBalance := model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024) * model.ByteCount(1024)
++
++	balanceCodeA, err := model.CreateBalanceCode(
++		ctx,
++		initialTransferBalance,
++		0,
++		"test-1",
++		"",
++		"",
++	)
++	if err != nil {
++		return fmt.Errorf("could not create balance code: %w", err)
++	}
++
++	byJwt, err := jwt.ParseByJwt(av.Network.ByJwt)
++	if err != nil {
++		return fmt.Errorf("could not parse jwt: %w", err)
++	}
++
++	_, err = model.RedeemBalanceCode(
++		&model.RedeemBalanceCodeArgs{
++			Secret: balanceCodeA.Secret,
++		},
++		session.NewLocalClientSession(ctx, "0.0.0.0", byJwt),
++	)
++	if err != nil {
++		return fmt.Errorf("could not redeem balance code: %w", err)
++	}
++
++	fmt.Println("Network created successfully")
++	fmt.Println("jwt: ", av.Network.ByJwt)
++
++	return nil
++}
+diff --git a/taskworker/Dockerfile.compose b/taskworker/Dockerfile.compose
+new file mode 100644
+index 00000000..bd7b56ed
+--- /dev/null
++++ b/taskworker/Dockerfile.compose
+@@ -0,0 +1,17 @@
++# syntax=docker/dockerfile:1
++FROM golang:1.23 AS builder
++RUN apt update && apt install -y protobuf-compiler
++RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
++ADD . /build/
++WORKDIR /build/connect/protocol
++RUN make
++RUN mkdir /out
++WORKDIR /build/bringyour/taskworker
++RUN --mount=type=cache,target=/root/.cache/go-build --mount=type=cache,target=/go/pkg/mod/ CGO_ENABLED=0 go build -o /out/service .
++
++FROM alpine
++RUN apk add --no-cache
++WORKDIR /app
++COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
++COPY --from=builder /out/service /app
++ENTRYPOINT ["/app/service"]
+diff --git a/taskworker/Dockerfile.compose.dockerignore b/taskworker/Dockerfile.compose.dockerignore
+new file mode 100644
+index 00000000..d18e5943
+--- /dev/null
++++ b/taskworker/Dockerfile.compose.dockerignore
+@@ -0,0 +1,25 @@
++.git
++**/bin
++**/build
++**/.DS_Store
++**/test.out
++
++# binaries
++client/build
++bringyourctl/bringyourctl
++api/api
++taskworker/taskworker
++gpt/gpt
++connect/connect.test
++connect/profile/memory
++connect/profile/cpu
++
++temp/*
++
++build/androi
++
++.vscode/*
++.direnv
++android
++ICS/
++connect/explore
+\ No newline at end of file
+diff --git a/taskworker/go.mod b/taskworker/go.mod
+index 3566ec99..ef4dba6a 100644
+--- a/taskworker/go.mod
++++ b/taskworker/go.mod
+@@ -21,6 +21,7 @@ require (
+ 	github.com/golang-jwt/jwt/v5 v5.2.0 // indirect
+ 	github.com/golang/glog v1.2.1 // indirect
+ 	github.com/golang/protobuf v1.5.3 // indirect
++	github.com/google/btree v1.1.2 // indirect
+ 	github.com/google/gopacket v1.1.19 // indirect
+ 	github.com/google/pprof v0.0.0-20210407192527-94a9f03dee38 // indirect
+ 	github.com/gorilla/websocket v1.5.0 // indirect
+@@ -29,6 +30,7 @@ require (
+ 	github.com/jackc/pgservicefile v0.0.0-20221227161230-091c0ba34f0a // indirect
+ 	github.com/jackc/pgx/v5 v5.3.1 // indirect
+ 	github.com/jackc/puddle/v2 v2.2.0 // indirect
++	github.com/jellydator/ttlcache/v3 v3.3.0 // indirect
+ 	github.com/jmespath/go-jmespath v0.4.0 // indirect
+ 	github.com/mozillazg/go-unidecode v0.2.0 // indirect
+ 	github.com/nyaruka/phonenumbers v1.1.6 // indirect
+@@ -45,12 +47,14 @@ require (
+ 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
+ 	golang.org/x/mod v0.17.0 // indirect
+ 	golang.org/x/net v0.25.0 // indirect
+-	golang.org/x/sync v0.7.0 // indirect
++	golang.org/x/sync v0.8.0 // indirect
+ 	golang.org/x/sys v0.22.0 // indirect
+ 	golang.org/x/text v0.16.0 // indirect
++	golang.org/x/time v0.5.0 // indirect
+ 	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
+ 	google.golang.org/protobuf v1.33.0 // indirect
+ 	gopkg.in/yaml.v3 v3.0.1 // indirect
++	gvisor.dev/gvisor v0.0.0-20240912184249-d4480ca03532 // indirect
+ 	src.agwa.name/tlshacks v0.0.0-20231008131857-90d701ba3225 // indirect
+ )
+ 
+diff --git a/taskworker/go.sum b/taskworker/go.sum
+index 842262e6..bc29df5c 100644
+--- a/taskworker/go.sum
++++ b/taskworker/go.sum
+@@ -20,6 +20,8 @@ github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815 h1:bWDMxwH3px2JBh
+ github.com/docopt/docopt-go v0.0.0-20180111231733-ee0de3bc6815/go.mod h1:WwZ+bS3ebgob9U8Nd0kOddGdZWjyMGR8Wziv+TBNwSE=
+ github.com/go-jose/go-jose/v3 v3.0.0 h1:s6rrhirfEP/CGIoc6p+PZAeogN2SxKav6Wp7+dyMWVo=
+ github.com/go-jose/go-jose/v3 v3.0.0/go.mod h1:RNkWWRld676jZEYoV3+XK8L2ZnNSvIsxFMht0mSX+u8=
++github.com/go-logr/logr v1.2.4 h1:g01GSCwiDw2xSZfjJ2/T9M+S6pFdcNtFYsp+Y43HYDQ=
++github.com/go-logr/logr v1.2.4/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=
+ github.com/go-playground/assert/v2 v2.2.0 h1:JvknZsQTYeFEAhQwI4qEt9cyV5ONwRHC+lYKSsYSR8s=
+ github.com/go-playground/assert/v2 v2.2.0/go.mod h1:VDjEfimB/XKnb+ZQfWdccd7VUvScMdVu0Titje2rxJ4=
+ github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 h1:tfuBGBXKqDEevZMzYi5KSi8KkcZtzBcTgAUUtapy0OI=
+@@ -31,6 +33,8 @@ github.com/golang/glog v1.2.1/go.mod h1:6AhwSGph0fcJtXVM/PEHPqZlFeoLxhs7/t5UDAwm
+ github.com/golang/protobuf v1.5.0/go.mod h1:FsONVRAS9T7sI+LIUmWTfcYkHO4aIWwzhcaSAoJOfIk=
+ github.com/golang/protobuf v1.5.3 h1:KhyjKVUg7Usr/dYsdSqoFveMYd5ko72D+zANwlG1mmg=
+ github.com/golang/protobuf v1.5.3/go.mod h1:XVQd3VNwM+JqD3oG2Ue2ip4fOMUkwXdXDdiuN0vRsmY=
++github.com/google/btree v1.1.2 h1:xf4v41cLI2Z6FxbKm+8Bu+m8ifhj15JuZ9sa0jZCMUU=
++github.com/google/btree v1.1.2/go.mod h1:qOPhT0dTNdNzV6Z/lhRX0YXUafgPLFUh+gZMl761Gm4=
+ github.com/google/go-cmp v0.5.0/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
+ github.com/google/go-cmp v0.5.5/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
+ github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
+@@ -52,6 +56,8 @@ github.com/jackc/pgx/v5 v5.3.1 h1:Fcr8QJ1ZeLi5zsPZqQeUZhNhxfkkKBOgJuYkJHoBOtU=
+ github.com/jackc/pgx/v5 v5.3.1/go.mod h1:t3JDKnCBlYIc0ewLF0Q7B8MXmoIaBOZj/ic7iHozM/8=
+ github.com/jackc/puddle/v2 v2.2.0 h1:RdcDk92EJBuBS55nQMMYFXTxwstHug4jkhT5pq8VxPk=
+ github.com/jackc/puddle/v2 v2.2.0/go.mod h1:vriiEXHvEE654aYKXXjOvZM39qJ0q+azkZFrfEOc3H4=
++github.com/jellydator/ttlcache/v3 v3.3.0 h1:BdoC9cE81qXfrxeb9eoJi9dWrdhSuwXMAnHTbnBm4Wc=
++github.com/jellydator/ttlcache/v3 v3.3.0/go.mod h1:bj2/e0l4jRnQdrnSTaGTsh4GSXvMjQcy41i7th0GVGw=
+ github.com/jmespath/go-jmespath v0.4.0 h1:BEgLn5cpjn8UN1mAw4NjwDrS35OdebyEtFe+9YPoQUg=
+ github.com/jmespath/go-jmespath v0.4.0/go.mod h1:T8mJZnbsbmF+m6zOOFylbeCJqk5+pHWvzYPziyZiYoo=
+ github.com/jmespath/go-jmespath/internal/testify v1.5.1 h1:shLQSRRSCCPj3f2gpwzGwWFoC7ycTf1rcQZHOlsJ6N8=
+@@ -68,6 +74,8 @@ github.com/oklog/ulid/v2 v2.1.0 h1:+9lhoxAP56we25tyYETBBY1YLA2SaoLvUFgrP2miPJU=
+ github.com/oklog/ulid/v2 v2.1.0/go.mod h1:rcEKHmBBKfef9DhnvX7y1HZBYxjXb0cP5ExxNsTT1QQ=
+ github.com/onsi/ginkgo/v2 v2.9.5 h1:+6Hr4uxzP4XIUyAkg61dWBw8lb/gc4/X5luuxN/EC+Q=
+ github.com/onsi/ginkgo/v2 v2.9.5/go.mod h1:tvAoo1QUJwNEU2ITftXTpR7R1RbCzoZUOs3RonqW57k=
++github.com/onsi/gomega v1.27.6 h1:ENqfyGeS5AX/rlXDd/ETokDz93u0YufY1Pgxuy/PvWE=
++github.com/onsi/gomega v1.27.6/go.mod h1:PIQNjfQwkP3aQAH7lf7j87O/5FiNr+ZR8+ipb+qQlhg=
+ github.com/pborman/getopt v0.0.0-20170112200414-7148bc3a4c30/go.mod h1:85jBQOZwpVEaDAr341tbn15RS4fCAsIst0qp7i8ex1o=
+ github.com/pkg/errors v0.9.1/go.mod h1:bwawxfHBFNV+L2hUp1rHADufV3IMtnDRdf1r5NINEl0=
+ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
+@@ -93,6 +101,8 @@ github.com/stripe/stripe-go/v76 v76.16.0/go.mod h1:rw1MxjlAKKcZ+3FOXgTHgwiOa2ya6
+ github.com/tyler-smith/go-bip39 v1.1.0 h1:5eUemwrMargf3BSLRRCalXT93Ns6pQJIjYQN2nyfOP8=
+ github.com/tyler-smith/go-bip39 v1.1.0/go.mod h1:gUYDtqQw1JS3ZJ8UWVcGTGqqr6YIN3CWg+kkNaLt55U=
+ github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=
++go.uber.org/goleak v1.3.0 h1:2K3zAYmnTNqV73imy9J1T3WC+gmCePx2hEGkimedGto=
++go.uber.org/goleak v1.3.0/go.mod h1:CoHD4mav9JJNrW/WLlf7HGZPjdw8EucARQHekz1X6bE=
+ go.uber.org/mock v0.4.0 h1:VcM4ZOtdbR4f6VXfiOpwpVJDL6lCReaZ6mw31wqh7KU=
+ go.uber.org/mock v0.4.0/go.mod h1:a6FSlNadKUHUa9IP5Vyt1zh4fC7uAwxMutEAscFbkZc=
+ golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
+@@ -119,8 +129,8 @@ golang.org/x/net v0.25.0 h1:d/OCCoBEUq33pjydKrGQhw7IlUPI2Oylr+8qLx49kac=
+ golang.org/x/net v0.25.0/go.mod h1:JkAGAh7GEvH74S6FOH42FLoXpXbE/aqXSrIQjXgsiwM=
+ golang.org/x/sync v0.0.0-20190423024810-112230192c58/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+ golang.org/x/sync v0.0.0-20220722155255-886fb9371eb4/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
+-golang.org/x/sync v0.7.0 h1:YsImfSBoP9QPYL0xyKJPq0gcaJdG3rInoqxTWbfQu9M=
+-golang.org/x/sync v0.7.0/go.mod h1:Czt+wKu1gCyEFDUtn0jG5QVvpJ6rzVqr5aXyt9drQfk=
++golang.org/x/sync v0.8.0 h1:3NFvSEYkUoMifnESzZl15y791HH1qU2xm6eCJU5ZPXQ=
++golang.org/x/sync v0.8.0/go.mod h1:Czt+wKu1gCyEFDUtn0jG5QVvpJ6rzVqr5aXyt9drQfk=
+ golang.org/x/sys v0.0.0-20190215142949-d0b11bdaac8a/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
+ golang.org/x/sys v0.0.0-20190412213103-97732733099d/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+ golang.org/x/sys v0.0.0-20191204072324-ce4227a45e2e/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+@@ -142,6 +152,8 @@ golang.org/x/text v0.3.7/go.mod h1:u+2+/6zg+i71rQMx5EYifcz6MCKuco9NR6JIITiCfzQ=
+ golang.org/x/text v0.4.0/go.mod h1:mrYo+phRRbMaCq/xk9113O4dZlRixOauAjOtrjsXDZ8=
+ golang.org/x/text v0.16.0 h1:a94ExnEXNtEwYLGJSIUxnWoxoRz/ZcCsV63ROupILh4=
+ golang.org/x/text v0.16.0/go.mod h1:GhwF1Be+LQoKShO3cGOHzqOgRrGaYc9AvblQOmPVHnI=
++golang.org/x/time v0.5.0 h1:o7cqy6amK/52YcAKIPlM3a+Fpj35zvRj2TP+e1xFSfk=
++golang.org/x/time v0.5.0/go.mod h1:3BpzKBy/shNhVucY/MWOyx10tF3SFh9QdLuxbVysPQM=
+ golang.org/x/tools v0.0.0-20180917221912-90fa682c2a6e/go.mod h1:n7NCudcB/nEzxVGmLbDWY5pfWTLqBcC2KZ6jyYvM4mQ=
+ golang.org/x/tools v0.0.0-20191119224855-298f0cb1881e/go.mod h1:b+2E5dAYhXwXZwtnZ6UAqBI28+e2cm9otk0dWdXHAEo=
+ golang.org/x/tools v0.0.0-20200130002326-2f3ba24bd6e7/go.mod h1:TB2adYChydJhpapKDTa4BR/hXlZSLoq2Wpct/0txZ28=
+@@ -158,10 +170,13 @@ google.golang.org/protobuf v1.33.0/go.mod h1:c6P6GXX6sHbq/GpV6MGZEdwhWPcYBgnhAHh
+ gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+ gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c h1:Hei/4ADfdWqJk1ZMxUNpqntNwaWcugrBjAiHlqqRiVk=
+ gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c/go.mod h1:JHkPIbrfpd72SG/EVd6muEfDQjcINNoR0C8j2r3qZ4Q=
+-gopkg.in/yaml.v2 v2.2.8 h1:obN1ZagJSUGI0Ek/LBmuj4SNLPfIny3KsKFopxRdj10=
+ gopkg.in/yaml.v2 v2.2.8/go.mod h1:hI93XBmqTisBFMUTm0b8Fm+jr3Dg1NNxqwp+5A1VGuI=
++gopkg.in/yaml.v2 v2.4.0 h1:D8xgwECY7CYvx+Y2n4sBz93Jn9JRvxdiyyo8CTfuKaY=
++gopkg.in/yaml.v2 v2.4.0/go.mod h1:RDklbk79AGWmwhnvt/jBztapEOGDOx6ZbXqjP6csGnQ=
+ gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+ gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+ gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
++gvisor.dev/gvisor v0.0.0-20240912184249-d4480ca03532 h1:H3jhWs/ve7367o3o8GPd7szmSYphWCy34ncgm+D48wc=
++gvisor.dev/gvisor v0.0.0-20240912184249-d4480ca03532/go.mod h1:sxc3Uvk/vHcd3tj7/DHVBoR5wvWT/MmRq2pj7HRJnwU=
+ src.agwa.name/tlshacks v0.0.0-20231008131857-90d701ba3225 h1:KvJgNzDBgG6IawXLCenHhjvU7RXQ5UD1a18Nm2ZMyGg=
+ src.agwa.name/tlshacks v0.0.0-20231008131857-90d701ba3225/go.mod h1:NT4HI59yJusF5Il4/DlC8F5+mfylE4CbRVwdoEi6MF8=

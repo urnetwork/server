@@ -1,0 +1,12 @@
+{
+  "branch": "origin/docker-compose",
+  "head": "49ce235e8629659508d6a6c0dde9ef2957b69fe1",
+  "disposition": "historical exact source retained outside runtime/workflow build",
+  "reason": "Old local-compose experiment targets removed nested module locations and a historical schema/bootstrap; retain current top-level CLI, qualified release builders and explicit test fixture owners.",
+  "runtime_activated": false,
+  "original_patch_sha256": {
+    "49ce235e8629.patch": "097ed397c5c035da8a6ea6112160ad652145dc1e1c674f090587e478b3876024"
+  },
+  "retrieve_original": "git show 49ce235e8629659508d6a6c0dde9ef2957b69fe1",
+  "privacy_scan": "No private-key/PAT/cloud-key/credential-URL patterns. Only previously committed source; no private runtime artifacts copied. The local compose historical fixture password is a committed development constant, not loaded runtime authority."
+}
