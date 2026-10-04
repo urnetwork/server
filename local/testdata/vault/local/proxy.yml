@@ -1,0 +1,16 @@
+# Public throwaway configuration for portable local tests only.
+# No listener is started and no Main host or production credential is used.
+# Both WireGuard key values are deliberately public test material.
+secrets:
+  - urnetwork-public-portable-proxy-signing-key-for-tests-only
+hosts:
+  proxy.local.test:
+    test:
+      socks: 11080
+      http: 18080
+      https: 18443
+      api: 18444
+      wg: 51820
+wg:
+  public_key: "dAoT3CvaBQSpvIbe4Ss0kb17u5//6oX24YuV1N7JnDg="
+  private_key: "qEQA6O1+Fn3SCq6iBORWk53693r63optOgyDp1+OPUg="
