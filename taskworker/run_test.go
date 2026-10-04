@@ -39,10 +39,12 @@ func TestRunRejectedTaskworkerPreservesStatusWithoutPublishingMetrics(t *testing
 	t.Cleanup(router.SetWarpStatusReady)
 	readinessErr := errors.New("database migration head 627 is below binary-required head 630")
 	checks, starts, flushes, serves := 0, 0, 0, 0
+	checked := make(chan struct{})
 	err := runWithDependencies(context.Background(), RunOptions{Port: 8080, Count: 1, BatchSize: 1},
 		func(context.Context) error {
 			checks++
 			router.SetWarpStatusNotReady(readinessErr)
+			close(checked)
 			return readinessErr
 		},
 		func(context.Context) func() {
@@ -50,6 +52,7 @@ func TestRunRejectedTaskworkerPreservesStatusWithoutPublishingMetrics(t *testing
 			return func() { flushes++ }
 		},
 		func(_ context.Context, _ string, handler http.Handler, _ bool, _ server.HttpServerOptions) error {
+			<-checked
 			serves++
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/status", nil))
@@ -62,9 +65,9 @@ func TestRunRejectedTaskworkerPreservesStatusWithoutPublishingMetrics(t *testing
 			}
 			return nil
 		},
-		func(context.Context, context.CancelFunc, RunOptions) taskworkerRuntime {
+		func(context.Context, context.Context, context.CancelFunc, RunOptions) (taskworkerRuntime, error) {
 			t.Fatal("runtime started before readiness")
-			return nil
+			return nil, nil
 		},
 	)
 	if err != nil {
@@ -116,6 +119,7 @@ func TestRunFlushesMetricsAfterFinalTaskHandback(t *testing.T) {
 		handbackDone: make(chan struct{}),
 	}
 	flushDone := make(chan struct{})
+	started := make(chan struct{})
 	err := runWithDependencies(
 		ctx,
 		RunOptions{Port: 8080, Count: 1, BatchSize: 1},
@@ -129,13 +133,15 @@ func TestRunFlushesMetricsAfterFinalTaskHandback(t *testing.T) {
 			}
 		},
 		func(_ context.Context, _ string, _ http.Handler, _ bool, _ server.HttpServerOptions) error {
+			<-started
 			cancel()
 			<-runtime.drainStarted
 			<-runtime.handbackDone
 			return nil
 		},
-		func(context.Context, context.CancelFunc, RunOptions) taskworkerRuntime {
-			return runtime
+		func(context.Context, context.Context, context.CancelFunc, RunOptions) (taskworkerRuntime, error) {
+			close(started)
+			return runtime, nil
 		},
 	)
 	if err != nil {
