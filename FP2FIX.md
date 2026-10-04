@@ -6663,3 +6663,39 @@ backlog, all-provider accepted-run throughput, full subscriber coverage, actual
 prober funding/admission, and sustained performance recovery remain open. Keep
 accepted measured outcomes separate from setup failures, and measure the
 configured concurrency before considering a capacity change.
+
+### 2026-10-04 13:43 UTC published close-page fix and pool pressure
+
+The keyed close-page selector is deployed on all eight Taskworkers through the
+qualified carrier `b7fb7f56`, version
+`2026.10.4-close-page-keyed+1060890600`. Its financial and retry paths preserve
+the prior carrier. The 12:48–12:49 same-process measurements reported 86,045
+eligible providers, zero complete quotas, 257,813 runs needed and zero Quality
+buckets. That earlier interval had zero measured successes. A later 13:04–13:07
+eight-worker pair did observe 57 measured successes and 3,240 measured errors,
+plus 512 `run_not_measured` producer events. These distinct counters and windows
+are not an exact join or proof of durable quota acceptance. Full coverage remains
+open. The dense/sparse reliability alternatives remain held because local wins
+regressed other loaded cohorts.
+
+The four-API 13:41–13:43 pool pair qualified the same processes but unequal
+135–150s intervals. Two sampled pools stayed at 512 total/no idle at both ends,
+with every successful acquire counted as empty-pool work. Their mean successful
+acquisition was about 1.11s; the other two were about 6ms. The finite reduction
+is `temp/pg-contention-20261004/sol-api-url-pool-paired-finite-1341-1343.json`,
+SHA-256 `f5c76997700c6f38b8e3f58b9a55954ba86f280a1584d58e706129fbc9536740`.
+These metrics cover every API database call and do not identify the retaining
+route, native PostgreSQL backend, CPU owner or PgBouncer shard.
+
+The negative subscriber cache previously consumed its one-second age while
+waiting for a connection, before any fact was read. The dispatch-clock repair
+starts that same bounded age immediately before the first fact query; later
+chunks cannot refresh it. It preserves positive fresh reads, all-live
+connection checks, bounded capacity, cancellation/panic cleanup, and the policy
+epoch/new-flight deletion guard. Its deterministic queued-read control requires
+one SQL-reader call for an owner and 63 already-coalesced followers after a
+two-second acquisition wait. This is a local amplification mechanism, not a
+claim of Main recovery. The separate retention candidate removes the extra
+per-Due storage-cleanup checkout only after its bounded global worker lane is
+deployed and observed. Neither change raises pool limits or weakens quota,
+measurement, security, proxy/hosting or financial authority.

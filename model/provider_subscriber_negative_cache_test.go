@@ -24,7 +24,7 @@ func TestSubscriberNegativeCacheExpiryStartsBeforeRead(t *testing.T) {
 	c := newSubscriberNegativeCache(8, now)
 	id := server.Id{1}
 	calls := 0
-	read := func(context.Context, []server.Id) (map[server.Id]bool, error) {
+	read := func(context.Context, []server.Id, func()) (map[server.Id]bool, error) {
 		calls++
 		if calls == 1 {
 			clock.Add((900 * time.Millisecond).Nanoseconds())
@@ -46,7 +46,7 @@ func TestSubscriberNegativeCacheExpiryStartsBeforeRead(t *testing.T) {
 	if err != nil || got[id] || calls != 2 {
 		t.Fatal("negative outlived one second from read start", err)
 	}
-	got, err = c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id) (map[server.Id]bool, error) {
+	got, err = c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id, func()) (map[server.Id]bool, error) {
 		return map[server.Id]bool{id: true}, nil // A new unknown/risky live connection.
 	})
 	if err != nil || !got[id] {
@@ -59,12 +59,12 @@ func TestSubscriberNegativeCacheSlowReadAndErrorsNeverPoison(t *testing.T) {
 	c := newSubscriberNegativeCache(8, now)
 	id := server.Id{1}
 	want := errors.New("synthetic read failure")
-	if _, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id) (map[server.Id]bool, error) {
+	if _, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id, func()) (map[server.Id]bool, error) {
 		return map[server.Id]bool{id: true}, want
 	}); !errors.Is(err, want) || len(c.negative) != 0 || len(c.flights) != 0 {
 		t.Fatal("partial failure became a cached fact")
 	}
-	_, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id) (map[server.Id]bool, error) {
+	_, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id, func()) (map[server.Id]bool, error) {
 		clock.Add((2 * time.Second).Nanoseconds())
 		return map[server.Id]bool{id: true}, nil
 	})
@@ -84,7 +84,7 @@ func TestSubscriberNegativeCacheConcurrentNegativeBatchCoalesces(t *testing.T) {
 	}
 	var calls atomic.Int64
 	started, release := make(chan struct{}), make(chan struct{})
-	read := func(context.Context, []server.Id) (map[server.Id]bool, error) {
+	read := func(context.Context, []server.Id, func()) (map[server.Id]bool, error) {
 		if calls.Add(1) == 1 {
 			close(started)
 		}
@@ -131,7 +131,7 @@ func TestSubscriberNegativeCachePositiveFlightFollowersReadFresh(t *testing.T) {
 	id := server.Id{1}
 	started, release := make(chan struct{}), make(chan struct{})
 	var calls atomic.Int64
-	read := func(context.Context, []server.Id) (map[server.Id]bool, error) {
+	read := func(context.Context, []server.Id, func()) (map[server.Id]bool, error) {
 		if calls.Add(1) == 1 {
 			close(started)
 			<-release
@@ -157,7 +157,7 @@ func TestSubscriberNegativeCacheResetDiscardsFactsAndOldFlights(t *testing.T) {
 	_, now := subscriberCacheTestClock()
 	c := newSubscriberNegativeCache(8, now)
 	id := server.Id{1}
-	read := func(context.Context, []server.Id) (map[server.Id]bool, error) {
+	read := func(context.Context, []server.Id, func()) (map[server.Id]bool, error) {
 		return map[server.Id]bool{id: true}, nil
 	}
 	_, _ = c.lookup(t.Context(), []server.Id{id}, read)
@@ -165,7 +165,7 @@ func TestSubscriberNegativeCacheResetDiscardsFactsAndOldFlights(t *testing.T) {
 	if len(c.negative) != 0 || len(c.expiry) != 0 {
 		t.Fatal("policy transition retained a negative fact")
 	}
-	_, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id) (map[server.Id]bool, error) {
+	_, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id, func()) (map[server.Id]bool, error) {
 		c.reset()
 		return map[server.Id]bool{id: true}, nil
 	})
@@ -180,7 +180,7 @@ func TestSubscriberNegativeCacheCapacityAndCanceledCaller(t *testing.T) {
 	events := map[string]int{}
 	c.observe = func(event string, count int) { events[event] += count }
 	ids := []server.Id{{1}, {2}, {3}}
-	read := func(_ context.Context, requested []server.Id) (map[server.Id]bool, error) {
+	read := func(_ context.Context, requested []server.Id, _ func()) (map[server.Id]bool, error) {
 		if len(c.flights) > 2 {
 			t.Fatal("in-flight cache allocation exceeded its bound")
 		}
@@ -216,7 +216,7 @@ func TestSubscriberNegativeCachePanicReleasesFlight(t *testing.T) {
 		defer func() {
 			panicked <- recover() != nil
 		}()
-		_, _ = c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id) (map[server.Id]bool, error) {
+		_, _ = c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id, func()) (map[server.Id]bool, error) {
 			close(started)
 			<-release
 			panic("synthetic acquisition failure")
@@ -225,7 +225,7 @@ func TestSubscriberNegativeCachePanicReleasesFlight(t *testing.T) {
 	<-started
 	follower := make(chan error, 1)
 	go func() {
-		_, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id) (map[server.Id]bool, error) {
+		_, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id, func()) (map[server.Id]bool, error) {
 			return nil, errors.New("unexpected follower read")
 		})
 		follower <- err
@@ -262,7 +262,7 @@ func TestSubscriberNegativeCacheCanceledOwnerReleasesFlight(t *testing.T) {
 	defer cancel()
 	owner, follower := make(chan error, 1), make(chan error, 1)
 	go func() {
-		_, err := c.lookup(ctx, []server.Id{id}, func(ctx context.Context, _ []server.Id) (map[server.Id]bool, error) {
+		_, err := c.lookup(ctx, []server.Id{id}, func(ctx context.Context, _ []server.Id, _ func()) (map[server.Id]bool, error) {
 			close(started)
 			<-ctx.Done()
 			return map[server.Id]bool{id: true}, ctx.Err()
@@ -271,7 +271,7 @@ func TestSubscriberNegativeCacheCanceledOwnerReleasesFlight(t *testing.T) {
 	}()
 	<-started
 	go func() {
-		_, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id) (map[server.Id]bool, error) {
+		_, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id, func()) (map[server.Id]bool, error) {
 			return nil, errors.New("unexpected follower read")
 		})
 		follower <- err
@@ -291,7 +291,7 @@ func TestSubscriberNegativeCacheCanceledOwnerReleasesFlight(t *testing.T) {
 	if len(c.flights) != 0 || len(c.negative) != 0 {
 		t.Fatal("canceled partial result entered the cache")
 	}
-	got, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id) (map[server.Id]bool, error) { return nil, nil })
+	got, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id, func()) (map[server.Id]bool, error) { return nil, nil })
 	if err != nil || got[id] {
 		t.Fatal("canceled owner poisoned a subsequent eligible read", err)
 	}
@@ -309,7 +309,7 @@ func TestSubscriberNegativeCacheCanceledFollowerDoesNotCancelOwner(t *testing.T)
 	})
 	id := server.Id{1}
 	started, release, ownerDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	read := func(context.Context, []server.Id) (map[server.Id]bool, error) {
+	read := func(context.Context, []server.Id, func()) (map[server.Id]bool, error) {
 		close(started)
 		<-release
 		return map[server.Id]bool{id: true}, nil
@@ -328,7 +328,7 @@ func TestSubscriberNegativeCacheCanceledFollowerDoesNotCancelOwner(t *testing.T)
 	}
 	close(release)
 	<-ownerDone
-	got, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id) (map[server.Id]bool, error) {
+	got, err := c.lookup(t.Context(), []server.Id{id}, func(context.Context, []server.Id, func()) (map[server.Id]bool, error) {
 		t.Fatal("canceled follower discarded owner's completed refusal")
 		return nil, nil
 	})
@@ -345,7 +345,7 @@ func BenchmarkSubscriberNegativeCacheWarm256(b *testing.B) {
 		ids[i] = server.Id{byte(i), 1}
 	}
 	var calls atomic.Int64
-	read := func(_ context.Context, requested []server.Id) (map[server.Id]bool, error) {
+	read := func(_ context.Context, requested []server.Id, _ func()) (map[server.Id]bool, error) {
 		calls.Add(1)
 		negative := make(map[server.Id]bool)
 		for _, id := range requested {
@@ -383,7 +383,7 @@ func TestSubscriberNegativeCacheRandomOverlapEvictionAndExpiry(t *testing.T) {
 	c.observe = func(event string, count int) { events[event] += count }
 	rng := rand.New(rand.NewSource(1))
 	reads, readCandidates, requestedCandidates := 0, 0, 0
-	read := func(_ context.Context, ids []server.Id) (map[server.Id]bool, error) {
+	read := func(_ context.Context, ids []server.Id, _ func()) (map[server.Id]bool, error) {
 		reads++
 		readCandidates += len(ids)
 		negative := make(map[server.Id]bool)
@@ -447,7 +447,7 @@ func BenchmarkSubscriberNegativeCacheRandomPopulation256(b *testing.B) {
 			c := newSubscriberNegativeCache(subscriberNegativeCapacity, now)
 			rng := rand.New(rand.NewSource(2))
 			reads, candidates := 0, 0
-			read := func(_ context.Context, ids []server.Id) (map[server.Id]bool, error) {
+			read := func(_ context.Context, ids []server.Id, _ func()) (map[server.Id]bool, error) {
 				reads++
 				candidates += len(ids)
 				negative := make(map[server.Id]bool, len(ids))

@@ -45,7 +45,8 @@ func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mo
 	}
 	// Positive decisions always read current connection facts on the primary.
 	// A one-second negative-only cache coalesces repeated rejections; its age
-	// starts before the read. It cannot admit a new unknown or risky connection.
+	// starts before the first fact query. It cannot admit a new unknown or risky
+	// connection.
 	// Candidate chunks bound both the query and result size.
 	const chunkSize = 256
 	pending := make([]server.Id, 0, len(clientIds))
@@ -59,13 +60,16 @@ func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mo
 	if len(pending) == 0 {
 		return excluded, nil
 	}
-	negative, readErr := providerSubscriberNegativeCache.lookup(ctx, pending, func(ctx context.Context, pending []server.Id) (map[server.Id]bool, error) {
+	negative, readErr := providerSubscriberNegativeCache.lookup(ctx, pending, func(ctx context.Context, pending []server.Id, markObserved func()) (map[server.Id]bool, error) {
 		negative := make(map[server.Id]bool)
 		var readErr error
 		server.Db(ctx, func(conn server.PgConn) {
 			for start := 0; start < len(pending); start += chunkSize {
 				chunk := pending[start:min(start+chunkSize, len(pending))]
 				observeSubscriberEligibilityEvent("sql_batch", 1)
+				// Connection queueing has read no facts. Start the bounded age
+				// immediately before the first query; later chunks cannot renew it.
+				markObserved()
 				rows, err := conn.Query(ctx, providerSubscriberExclusionsSql, chunk, server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout))
 				if err != nil {
 					readErr = err

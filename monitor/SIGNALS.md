@@ -5562,6 +5562,28 @@ explicitly activated, Quality also verifies current connection eligibility
 against the primary even with a complete exclusion snapshot; see
 `arindbctl/CLASSIFICATION.md` for its separate rollout gate.
 
+The one-second subscriber cache stores negative decisions only. Its age starts
+immediately before the first fact-query dispatch, after connection acquisition;
+later query chunks cannot renew an earlier fact. Starting that clock before a
+long pool wait discarded still-fresh negatives and made already-coalesced
+followers repeat the read. The deterministic control holds acquisition for two
+seconds before a ten-millisecond fact read, with 63 followers already waiting.
+All must reuse that one negative read; a later chunk, a query lasting one second,
+errors, cancellation, panic or a policy reset must not extend its authority.
+Positive results always require current connection facts. The SQL, one-second
+lifetime, capacity and all-live connection/security predicates are unchanged.
+
+The 2026-10-04 13:41–13:43 process-qualified four-API pool pair found two slots
+at 512 total connections with no idle connections at both endpoints. Every
+successful acquisition in those two intervals was recorded as empty-pool work;
+their means were about 1.11s and their canceled-acquisition counters rose sharply.
+The other two sampled slots had lower occupancy and roughly 6ms mean pool
+acquisition. These are all-API pgx metrics over unequal intervals, not URL-only
+rates or PgBouncer/backend ownership. The negative clock repair removes a proven
+queue amplification mechanism; recovery still requires same-process cache and
+pool deltas, completed SQL work, and fresh route progress after deployment.
+Pool size, TTL and eligibility policy must not be relaxed to hide the pressure.
+
 Optional capture startup qualifier: a fresh protected operator lease is not an
 endpoint or source-identity proof. Connect and Taskworker must continue primary
 serving/work after a rejected optional capture configuration or unavailable
