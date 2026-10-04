@@ -86,18 +86,20 @@ type classificationRules struct {
 	CountryPolicyVersion uint32                  `yaml:"country_policy_version"`
 	CountrySources       []countryEvidenceSource `yaml:"country_sources"`
 	CountryRules         []countryEvidenceRule   `yaml:"country_rules"`
+	allocationRules      map[arinAllocationScopeKey][]int
 }
 type classificationRule struct {
-	Name           string   `yaml:"name"`
-	OrgHandles     []string `yaml:"org_handles"`
-	OrgNamePattern string   `yaml:"org_name_pattern"`
-	Prefixes       []string `yaml:"prefixes"`
-	NonQuality     *bool    `yaml:"non_quality"`
-	RiskCategory   string   `yaml:"risk_category"`
-	Reason         string   `yaml:"reason"`
-	Source         string   `yaml:"source"`
-	pattern        *regexp.Regexp
-	prefixes       []netip.Prefix
+	Name             string                          `yaml:"name"`
+	OrgHandles       []string                        `yaml:"org_handles"`
+	OrgNamePattern   string                          `yaml:"org_name_pattern"`
+	Prefixes         []string                        `yaml:"prefixes"`
+	AllocationScopes []classificationAllocationScope `yaml:"allocation_scopes"`
+	NonQuality       *bool                           `yaml:"non_quality"`
+	RiskCategory     string                          `yaml:"risk_category"`
+	Reason           string                          `yaml:"reason"`
+	Source           string                          `yaml:"source"`
+	pattern          *regexp.Regexp
+	prefixes         []netip.Prefix
 }
 
 // Truncation, malformed records, and empty responses fail the complete source.
@@ -280,7 +282,7 @@ func loadClassificationRules(path string) (classificationRules, error) {
 			}
 		}
 		names[rule.Name] = true
-		if len(rule.Prefixes) == 0 && len(rule.OrgHandles) == 0 && rule.OrgNamePattern == "" {
+		if len(rule.Prefixes) == 0 && len(rule.OrgHandles) == 0 && rule.OrgNamePattern == "" && len(rule.AllocationScopes) == 0 {
 			return rules, errors.New("ARIN rule has no match criteria")
 		}
 		if len(rule.Prefixes) > 0 && (len(rule.OrgHandles) > 0 || rule.OrgNamePattern != "") {
@@ -299,6 +301,9 @@ func loadClassificationRules(path string) (classificationRules, error) {
 			}
 			rule.prefixes = append(rule.prefixes, prefix)
 		}
+	}
+	if err := rules.prepareAllocationScopes(); err != nil {
+		return rules, err
 	}
 	if err := rules.validateCountryEvidence(); err != nil {
 		return rules, err
@@ -575,6 +580,9 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 		return err
 	}
 	sourceAllocationCount := len(allocations)
+	if err := rules.validateAllocationScopes(allocations); err != nil {
+		return err
+	}
 	allocationGroups, err := selectArinAllocations(ctx, allocations, networkParents)
 	if err != nil {
 		return err
@@ -727,13 +735,13 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 				}
 				riskEvidence := rules.networkRiskEvidence(riskAncestors, prefix.Addr())
 				risk := geographicRisk || len(riskEvidence) != 0
-				classification := rules.classifyAllocation(firstOwner.ancestors, firstOwner.qualityParent, prefix.Addr())
+				classification := rules.classifyAllocation(firstOwner.allocation, firstOwner.ancestors, firstOwner.qualityParent, prefix.Addr())
 				commonClassification := true
 				qualityAmbiguous := classification.qualityState == "ambiguous"
 				ownerRecords := mmdbtype.Slice{}
 				sources := []string{}
 				for _, owner := range owners {
-					ownerClassification := rules.classifyAllocation(owner.ancestors, owner.qualityParent, prefix.Addr())
+					ownerClassification := rules.classifyAllocation(owner.allocation, owner.ancestors, owner.qualityParent, prefix.Addr())
 					if ownerClassification != classification {
 						commonClassification = false
 					}
@@ -867,6 +875,9 @@ func buildArinDatabaseAt(ctx context.Context, source string, geolite2 string, ru
 		manifest["quality_state_partitions"] = qualityStates
 	}
 	manifest["network_risk_partitions"] = networkRiskCount
+	if len(rules.allocationRules) != 0 {
+		manifest["reviewed_subscriber_allocations"] = len(rules.allocationRules)
+	}
 	if len(rules.CountryRules) > 0 {
 		manifest["country_policy_version"] = rules.CountryPolicyVersion
 		manifest["country_evidence_sources"] = rules.CountrySources

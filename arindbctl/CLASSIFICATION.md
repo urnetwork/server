@@ -1,5 +1,52 @@
 # Reviewed ARIN classification and cutover
 
+## 2026-10-04 subscriber coverage correction
+
+The Root-owned Main receipts supersede the historical inactive-candidate
+statements below: policy two was selected at 03:57 UTC, and the 04:28 UTC native
+readback found zero Quality supply on all eight Taskworkers. The selected
+catalog's affirmative scope was only Google Fiber and Webpass. Successful
+policy enforcement does not establish adequate subscriber coverage.
+
+Quality must support verified subscriber access globally, including the long
+tail of operators. Country/provider coverage and official country operator
+rankings prioritize evidence collection; neither is an eligibility cutoff.
+Missing catalog evidence is a review backlog, distinct from affirmative
+hosting/proxy evidence and from conflicting or mixed-use evidence. It remains
+excluded until reviewed rather than silently borrowing Quality eligibility.
+ARIN referrals alone cannot authorize foreign subscriber allocations; each
+foreign scope needs its owning RIR's current direct registration authority.
+
+Policy-two rules may now use `allocation_scopes`, each containing an exact
+`net_handle`, `org_handle` and canonical full allocation `prefix`. Such a rule
+must explicitly approve subscriber access and cannot also contain unscoped
+organization, name or prefix selectors. The builder requires every tuple in
+the authoritative input and rejects missing, transferred, resized or referral
+records. The scope applies only to that allocation: separately registered
+children, even children with the same organization, need their own review.
+Incomparable-owner disagreement and direct-use contradictions remain excluded;
+geographic and proxy/virtual-ISP risk remain independent vetoes. Exact-key
+indexes avoid multiplying bulk classification work by catalog length.
+
+The first candidate using this mechanism intersects Comcast's official
+[dynamic-range publication](https://spa.xfinity.com/md/faqs/en/postmaster/comcast-dynamic-ip-ranges.md)
+and [residential-use statement](https://spa.xfinity.com/md/faqs/en/postmaster/comcast-mail-errors.md)
+with current Comcast registration blocks. It omits explicit VoIP registrations.
+It does not approve the whole Comcast organization or apply a global prefix
+override to unrelated reassignments. Source snapshots, retrieval clocks and
+hashes must accompany the review. Rebuild against the complete pinned registry,
+compare every changed output leaf and retained exclusion, then measure fresh
+actual-provider overlap before Root publishes an increment. Registry address
+weights and operator market shares are not provider supply. This increment
+does not establish worldwide coverage or resolve Quality zero by itself.
+
+The synthetic allocation-scope controls cover all addresses across a subscriber
+pool, unrelated corporate use, unknown and same-owner children, inherited proxy
+risk, geographic mismatch and incomparable registrations. Changed owner,
+network, block size or registry authority invalidates build approval. Candidate
+activation still requires the source-bound resource, fresh loaded-epoch
+lookups, current-provider shadow, rollup and a complete native-index generation.
+
 The initial `config/main/arindb.yml` rules were reviewed on 2026-09-27. They
 classify named cloud/VPS/hosting owners as `non_quality`, not as geographic
 `risk`. These rules are a reviewed initial scope, not a comprehensive provider

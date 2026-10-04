@@ -1,5 +1,10 @@
 # IP database release refresh
 
+Current status (2026-10-04): policy two is selected on Main; earlier inactive
+candidate statements in this document describe the original rollout sequence.
+The active positive catalog is incomplete. See the dated coverage correction
+in [CLASSIFICATION.md](CLASSIFICATION.md) before preparing a successor resource.
+
 The release runner builds and runs this tool natively on macOS or Linux.
 Windows is currently unsupported by its Server dependency: the process log
 scrubber uses Unix file descriptors and descriptor duplication.
@@ -50,6 +55,13 @@ organization rules, including narrowly verified access-network exceptions.
 Do not substitute a blanket organization-name heuristic for evidence-backed
 hosting classifications. No production classifier or credentials are bundled
 with the tool.
+
+Reviewed policy-two subscriber pools can instead use `allocation_scopes` with
+exact `net_handle`, `org_handle` and full source-allocation `prefix` tuples.
+These positive rules cannot contain unscoped selectors. They fail the build
+when their exact authoritative registration changes and do not approve child
+delegations or the owner's unrelated allocations. Use this form when service
+evidence covers only part of a mixed-use operator's holdings.
 
 The complete subscriber/risk proposal is staged in
 `config/main/arindb-quality-v2.candidate.yml`. Active `main/arindb.yml` is

@@ -1,5 +1,12 @@
 # FindProviders2 supply and quality-probe repair plan
 
+Current ARIN status, 2026-10-04: Root's Main receipts record policy two selected
+at 03:57 UTC and zero native Quality supply across eight Taskworkers at 04:28
+UTC. Earlier inactive-candidate statements below are historical. The subscriber
+contract remains in force; expanding verified global subscriber coverage is
+required to repair this supply loss. A source patch or catalog prefix count is
+not evidence that actual provider supply has recovered.
+
 Latest user override, 2026-09-29: each eligible provider needs **ten total
 accepted measured URL runs (success plus failure) in the rolling four hours**.
 A completed turn with no accepted measured URL result does **not** count.
