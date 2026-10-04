@@ -1287,13 +1287,23 @@ func SetContractStream(
 	server.Tx(ctx, func(tx server.PgTx) {
 		participantNetworks := map[server.Id]server.Id{}
 		if 0 < len(intermediaryIds) {
+			// Retries own the retained identity even after directory removal.
+			// Only a first-seen participant needs a current directory entry.
 			result, err := tx.Query(
 				ctx,
 				`
 					SELECT client_id, network_id
+					FROM contract_participant
+					WHERE stream_id = $1 AND client_id = ANY($2)
+					UNION ALL
+					SELECT client_id, network_id
 					FROM network_client
-					WHERE client_id = ANY($1)
+					WHERE client_id = ANY($2) AND NOT EXISTS (
+						SELECT 1 FROM contract_participant
+						WHERE stream_id = $1 AND client_id = network_client.client_id
+					)
 				`,
+				streamId,
 				intermediaryIds,
 			)
 			server.WithPgResult(result, err, func() {

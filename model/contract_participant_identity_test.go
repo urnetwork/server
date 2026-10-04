@@ -15,7 +15,7 @@ import (
 
 // The membership change precedes a real retry and both terminal reports.
 // It changes no completed snapshot, verdict or expected settlement amount.
-func exerciseContractParticipantIdentityRetry(t testing.TB, paid, companion bool) {
+func exerciseContractParticipantIdentityRetry(t testing.TB, paid, companion, removed bool) {
 	t.Helper()
 	ctx := context.Background()
 	start := server.NowUtc()
@@ -45,7 +45,11 @@ func exerciseContractParticipantIdentityRetry(t testing.TB, paid, companion bool
 		t.Fatal(err)
 	}
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET network_id=$2 WHERE client_id=$1`, first, replacementNetwork))
+		if removed {
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM network_client WHERE client_id=$1`, first))
+		} else {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET network_id=$2 WHERE client_id=$1`, first, replacementNetwork))
+		}
 	})
 	contracts := []server.Id{contractId}
 	if companion {
@@ -58,11 +62,11 @@ func exerciseContractParticipantIdentityRetry(t testing.TB, paid, companion bool
 			t.Fatal("original companion stream was not retained")
 		}
 		if err := SetContractStream(ctx, reply.ContractId, joined, nil); err != nil {
-			t.Fatal(err)
+			t.Fatalf("retained stream attachment failed: %v", err)
 		}
 		contracts = append(contracts, reply.ContractId)
 	} else if err := SetContractStream(ctx, contractId, streamId, []server.Id{first, first}); err != nil {
-		t.Fatal(err)
+		t.Fatalf("retained stream attachment failed: %v", err)
 	}
 	var retained server.Id
 	server.Db(ctx, func(conn server.PgConn) {
@@ -113,6 +117,12 @@ func exerciseContractParticipantIdentityRetry(t testing.TB, paid, companion bool
 		t.Fatal(err)
 	}
 	freshStream := server.NewId()
+	if removed {
+		if err := SetContractStream(ctx, fresh, freshStream, []server.Id{first}); err == nil || !strings.Contains(err.Error(), "intermediary clients do not exist") {
+			t.Fatalf("new stream borrowed a removed participant from old history: %v", err)
+		}
+		addContractPayoutTestClients(ctx, map[server.Id]server.Id{first: replacementNetwork})
+	}
 	if err := SetContractStream(ctx, fresh, freshStream, []server.Id{first}); err != nil {
 		t.Fatal(err)
 	}
@@ -128,21 +138,21 @@ func exerciseContractParticipantIdentityRetry(t testing.TB, paid, companion bool
 func TestStContractUsagePaidStreamRetryKeepsOriginalIdentity(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) { exerciseContractParticipantIdentityRetry(t, true, false) })
+	env.Run(t, func(t testing.TB) { exerciseContractParticipantIdentityRetry(t, true, false, false) })
 }
 
 // Same-network free work keeps its original identity and earns no cash sweep.
 func TestStContractUsageFreeStreamRetryKeepsOriginalIdentity(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) { exerciseContractParticipantIdentityRetry(t, false, false) })
+	env.Run(t, func(t testing.TB) { exerciseContractParticipantIdentityRetry(t, false, false, false) })
 }
 
 // A companion inherits the original stream snapshot before either close.
 func TestStContractUsageCompanionJoinKeepsOriginalIdentity(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
-	env.Run(t, func(t testing.TB) { exerciseContractParticipantIdentityRetry(t, true, true) })
+	env.Run(t, func(t testing.TB) { exerciseContractParticipantIdentityRetry(t, true, true, false) })
 }
 
 // Conflicting retained roles cannot be resolved by whichever SQL row the
@@ -343,4 +353,18 @@ func TestStContractUsageCanceledFirstParticipantRecovers(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) { exerciseContractParticipantFirstAdmissionFailure(t, "canceled") })
+}
+
+// A retained original path survives removal from the mutable directory.
+func TestStContractUsageRemovedParticipantRetryKeepsOriginalIdentity(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) { exerciseContractParticipantIdentityRetry(t, true, false, true) })
+}
+
+// A companion can inherit the same retained path without re-admitting members.
+func TestStContractUsageRemovedParticipantCompanionKeepsOriginalIdentity(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) { exerciseContractParticipantIdentityRetry(t, true, true, true) })
 }
