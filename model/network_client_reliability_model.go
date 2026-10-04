@@ -1172,6 +1172,15 @@ func reliabilityRunningNeedsRecompute(
 		newMin < prev.minBlockNumber {
 		return true, false
 	}
+	// Once the previous window has fully expired, no running contribution can
+	// survive. Rebuild only the current window instead of adding the entire
+	// gap and subtracting it again. In particular, the five-minute client
+	// window otherwise scans two thirty-minute ranges on the normal task
+	// cadence. This bounded rebuild also applies during maintenance pressure;
+	// optional re-anchors of overlapping windows retain their deferral below.
+	if prev.maxBlockNumber <= newMin {
+		return true, false
+	}
 	if ReliabilityRunningRecomputeBlocks <= newMax-prev.lastRecomputeBlock {
 		if periodicReanchorAllowed {
 			return true, false
