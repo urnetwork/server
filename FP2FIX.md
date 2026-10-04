@@ -6422,3 +6422,43 @@ cadence. The source backup remains active; completion, restore and destination
 custody are unproved, and migration764 remains unapplied. Retained legacy intent
 refusals, resident memory, URL coverage and ARIN shadow work remain open. FP2FIX
 continues through source merge, ordinary all-block rollout and fresh measurement.
+
+### 2026-10-04 01:14 UTC selection and runtime observation checkpoint
+
+All four 6300 service deployment commands completed with exit zero; Connect
+finished at 01:01:30 after all five block selections. The release uses genuine
+source `7cd8c437`, schema763 and the qualified dependency graph, including the
+bounded closer, one-minute mature-deficit pacing, ACK allocation correction,
+ownership ledger, guarded reliability no-op and optional-capture startup
+isolation. Selection success does not prove every running generation changed.
+
+The bounded 01:07 HTTPS read (`5d2d`) qualified fresh source/start witnesses for
+46/68 slots: API 20/20, Taskworker 8/8, Connect 10/20 and Proxy 8/20. Connect had
+six old-5900 and four nonunique slot observations; Proxy had seven old-6200 and
+five nonunique observations. These are self-reported metric witnesses, not
+native executable, routing, drain-phase or predecessor-retirement proof. The
+CLI's 21/100 response tally is also not an owner count, and its normal timeout
+return does not establish convergence. Current host proof remains separate.
+
+The coherent 01:07:38 URL census reported 66,589/68,687 quota complete (96.95%),
+2,119 overdue, 1,223 due, 4,545 runs needed, two warming and two uninitialized.
+The eligible denominator is 3,933 smaller than at 00:52; this is not a fixed-ID
+recovery comparison or attribution of the change to 6300. The 136,881.7-second
+oldest-due value covers due timestamps of eligible cycles, including quota-full
+providers; it does not by itself locate the oldest deficient overdue provider.
+A bounded eligible tail and its measured history are still needed for the
+remaining coverage gap. Setup-only completions do not satisfy the ten-run goal.
+
+The fixed 00:31–00:34 log read (`b4a1c1ee`) selected 26 caught legacy settlement
+errors, all finite `insufficient_escrow`, below its 64-record cap. It does not
+classify the whole durable backlog or prove worker death, a current native
+generation or the cause of DNS/window-stall observations. Accounting ownership
+and refused debt remain preserved; no clamp, replay or deletion is authorized.
+
+The authoritative c39 watcher continues at the ordinary fifteen-minute cadence.
+ARIN lease publication is file-only and cannot revive a listener absent at
+startup; full baseline/final Main shadow and verified subscriber supply remain
+open. Policy two and the separately prepared Redis native-reader flag remain
+inactive. Backup completion is unproved and migration764/Report-ID emission
+remain pending. FP2FIX remains active through complete generation qualification,
+fresh measurement and repair of the remaining coverage and financial boundaries.
