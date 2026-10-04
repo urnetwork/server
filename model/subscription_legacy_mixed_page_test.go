@@ -64,8 +64,25 @@ func TestForceCloseDeferredLegacySiblingKeepsAccountingRetryAuthority(t *testing
 		}
 		for _, fixture := range deferred {
 			state := fixture.state(t, ctx)
-			if state.outcome != ContractOutcomeSettled || !state.escrowSettled || state.streamFound || state.providerPayoutByteCount != 1024 || state.payerBalanceByteCount != forceCloseDisputeInitialBalance-1024 || state.netEscrowByteCount != 0 {
-				t.Fatal("deferred worker failed exact final conservation")
+			var swept, provided ByteCount
+			var pending bool
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT
+                COALESCE((SELECT sum(payout_byte_count) FROM transfer_escrow_sweep WHERE contract_id=$1 AND network_id=$2),0),
+                COALESCE((SELECT provided_byte_count FROM account_balance WHERE network_id=$2),0),
+                EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`,
+					fixture.contractId, fixture.providerNetworkId).Scan(&swept, &provided, &pending))
+			})
+			// Legacy workers commit provider totals in PostgreSQL. The shared
+			// fixture exposes only the Redis delta, which must remain zero to
+			// avoid counting the same contribution twice in the account API.
+			if state.outcome != ContractOutcomeSettled || !state.escrowSettled || state.escrowPayoutByteCount != 1024 ||
+				state.streamFound || state.providerPayoutByteCount != 0 || swept != 1024 || provided != 1024 || pending ||
+				state.payerBalanceByteCount != forceCloseDisputeInitialBalance-1024 || state.netEscrowByteCount != 0 {
+				t.Fatalf("deferred worker final conservation: terminal=%t metadata=%t escrow_payout=%t stream_removed=%t redis_delta_zero=%t durable_sweep=%t durable_provider=%t intent_removed=%t payer_debit=%t reservation_released=%t",
+					state.outcome == ContractOutcomeSettled, state.escrowSettled, state.escrowPayoutByteCount == 1024,
+					!state.streamFound, state.providerPayoutByteCount == 0, swept == 1024, provided == 1024, !pending,
+					state.payerBalanceByteCount == forceCloseDisputeInitialBalance-1024, state.netEscrowByteCount == 0)
 			}
 		}
 	})
