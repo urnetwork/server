@@ -106,7 +106,7 @@ func TestRemoveWalletCommitFailurePreservesSelection(t *testing.T) {
 				RETURNS trigger LANGUAGE plpgsql AS $function$
 				BEGIN
 					IF OLD.active AND NOT NEW.active THEN
-						RAISE EXCEPTION 'synthetic wallet removal commit failure' USING ERRCODE='23514';
+						RAISE EXCEPTION 'synthetic wallet removal commit failure' USING ERRCODE='P0001';
 					END IF;
 					RETURN NEW;
 				END $function$;
@@ -118,7 +118,7 @@ func TestRemoveWalletCommitFailurePreservesSelection(t *testing.T) {
 		defer owner.Cancel()
 		err := server.HandleError(func() { RemoveWallet(walletId, owner) })
 		var pgErr *pgconn.PgError
-		if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
+		if !errors.As(err, &pgErr) || pgErr.Code != "P0001" {
 			t.Fatalf("owning commit failure was not exercised: %v", err)
 		}
 		if active, selected := walletRemovalPoolState(ctx, networkId, walletId); !active || !selected {
