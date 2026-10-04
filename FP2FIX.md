@@ -7008,3 +7008,27 @@ catalog audit. The previously failed V3/V4 attempts made no Main contact.
 The independently tested cooperative close-page budget is ready for an
 urgent compatible Taskworker release. Main recovery and FP2 completion
 remain open until financial and provider outcomes are verified.
+
+### 2026-10-04 23:49 UTC populated picker and near-complete recovered quota
+
+The public provider-locations endpoint returned a qualified HTTPS200 response
+with66 country candidates in293ms at23:39:48. The SDK candidate set is nonempty.
+This verifies the initial picker response, not a particular user's contract.
+
+The newest pre-rollout census clock was23:36:21:17,321 of17,345 eligible providers
+were quota-complete (99.8616%);24 were deficient with197 measured checks remaining.
+Sparse Due responses and the low recent accepted rate are consistent with this
+near-complete quota, rather than stalled URL scheduler owners.100% remains open.
+
+Fresh paired debit clocks advanced for all16 logical shards.32 committed batches
+and32 released batches progressed; every latest pending and release oldest-age
+sample was zero. No aged asynchronous-debit backlog was observed. Financial
+correctness still requires independent reservation and token custody evidence.
+The API insufficient-balance label is substring-based and may include a joined
+compensation failure; it does not classify payer ownership or prove spending.
+
+The cooperative ordinary-close budget image was rebuilt from a source-identical
+standalone clone after Go omitted revision metadata for a worktree. Both published
+architectures now attest clean6e748b3, and the100% Taskworker rollout completed at
+23:44:12. Actual all-eight process convergence remains a separate acceptance.
+Root ledgerT583 retains these observations and the image/deployment receipts.
