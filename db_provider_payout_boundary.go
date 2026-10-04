@@ -5,6 +5,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -43,10 +44,33 @@ var ErrProviderEarningBoundarySchema = errors.New("provider earning boundary mig
 // authority is also a hard refusal. Neither is turned into retry by a joined
 // timeout. Only an unavailable observation with no such cause permits retry.
 func ProviderEarningBoundaryRetryable(ctx context.Context, err error) bool {
-	return ctx != nil && ctx.Err() == nil && err != nil && errors.Is(err, ErrProviderEarningBoundaryUnavailable) &&
-		!errors.Is(err, context.Canceled) &&
-		!errors.Is(err, ErrProviderEarningBoundaryMismatch) && !errors.Is(err, ErrProviderEarningBoundaryUnprepared) &&
-		!errors.Is(err, ErrProviderEarningBoundarySchema)
+	if ctx == nil || ctx.Err() != nil {
+		return false
+	}
+	causes := InspectErrorCauses(err)
+	if !causes.Complete {
+		return false
+	}
+	unavailable := false
+	for _, node := range causes.Nodes {
+		if node.Err == context.Canceled || providerBoundaryHardCause(node.Err) != nil {
+			return false
+		}
+		unavailable = unavailable || node.Err == ErrProviderEarningBoundaryUnavailable
+	}
+	return unavailable
+}
+
+// These are positive, typed observations. Truncation or unknown causes must
+// never be converted to a schema/authority mismatch.
+func providerBoundaryHardCause(err error) error {
+	if err == ErrProviderEarningBoundarySchema || err == ErrProviderEarningBoundaryMismatch || err == ErrProviderEarningBoundaryUnprepared {
+		return err
+	}
+	if value, ok := err.(*pgconn.PgError); ok && value != nil && strings.HasPrefix(value.Code, "42") {
+		return ErrProviderEarningBoundarySchema
+	}
+	return nil
 }
 
 // Missing/incompatible SQL objects are observed deployment damage. Walk joined
@@ -55,25 +79,16 @@ func providerBoundaryObservationError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, ErrProviderEarningBoundarySchema) || errors.Is(err, ErrProviderEarningBoundaryMismatch) || errors.Is(err, ErrProviderEarningBoundaryUnprepared) {
-		return err
-	}
-	pending := []error{err}
-	for len(pending) > 0 {
-		current := pending[len(pending)-1]
-		pending = pending[:len(pending)-1]
-		if pgError, ok := current.(*pgconn.PgError); ok && strings.HasPrefix(pgError.Code, "42") {
-			return errors.Join(ErrProviderEarningBoundarySchema, err)
-		}
-		switch wrapped := current.(type) {
-		case interface{ Unwrap() []error }:
-			pending = append(pending, wrapped.Unwrap()...)
-		case interface{ Unwrap() error }:
-			if cause := wrapped.Unwrap(); cause != nil {
-				pending = append(pending, cause)
-			}
+	causes := InspectErrorCauses(err)
+	for _, node := range causes.Nodes {
+		if hard := providerBoundaryHardCause(node.Err); hard != nil {
+			// Retain the original error and expose the observed hard sentinel
+			// before its possibly incomplete tree. No custom Is method is run.
+			return errors.Join(hard, err)
 		}
 	}
+	// An incomplete cause census is an unavailable observation. The retry
+	// admission above withholds a new attempt until its complete cause is known.
 	return errors.Join(ErrProviderEarningBoundaryUnavailable, err)
 }
 
@@ -161,10 +176,24 @@ func readProviderPayoutBoundary(ctx context.Context, query providerBoundaryQuery
 	binding := &ProviderEarningBoundary{}
 	err := query.QueryRow(ctx, `SELECT earning_identity, identity_sha256, initial_config_sha256, prepared_at FROM provider_payout_boundary WHERE singleton`).Scan(
 		&binding.earningIdentity, &binding.IdentitySha256, &binding.InitialConfigSha256, &binding.PreparedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
 	if err != nil {
+		causes := InspectErrorCauses(err)
+		absent := causes.Complete
+		noRowsOrigins := make([]bool, len(causes.Nodes))
+		for index, node := range causes.Nodes {
+			noRowsOrigins[index] = node.Err == pgx.ErrNoRows
+			if node.Parent >= 0 {
+				noRowsOrigins[index] = noRowsOrigins[index] || noRowsOrigins[node.Parent]
+			}
+			// Pgx's exact sentinel unwraps to sql.ErrNoRows. A bare SQL
+			// sentinel or another failed sibling is not this driver's absence.
+			if node.Leaf && (!noRowsOrigins[index] || node.Err != pgx.ErrNoRows && node.Err != sql.ErrNoRows) {
+				absent = false
+			}
+		}
+		if absent {
+			return nil, nil
+		}
 		return nil, providerBoundaryObservationError(err)
 	}
 	digest := sha256.Sum256([]byte(binding.earningIdentity))

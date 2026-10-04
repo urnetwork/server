@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"syscall"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 type grafanaHTTPClient interface {
@@ -163,26 +165,48 @@ func replayGrafanaRequest(request *http.Request, ctx context.Context) (*http.Req
 
 func classifyGrafanaTransportError(ctx context.Context, err error) (string, bool) {
 	if ctx.Err() != nil {
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if ctx.Err() == context.DeadlineExceeded {
 			return "timeout", false
 		}
 		return "context-canceled", false
 	}
+	causes := server.InspectErrorCauses(err)
+	class, retryable := "transport-error", causes.Complete
+	timedOut, unreachable, reset := false, false, false
+	for _, node := range causes.Nodes {
+		if node.Err == context.Canceled {
+			return "context-canceled", false
+		}
+		if !node.Leaf {
+			continue
+		}
+		switch node.Err {
+		case context.DeadlineExceeded:
+			timedOut = true
+		case syscall.ENETUNREACH, syscall.EHOSTUNREACH:
+			unreachable = true
+		case syscall.ECONNRESET:
+			reset = true
+		default:
+			if network, ok := node.Err.(net.Error); ok && network.Timeout() {
+				timedOut = true
+			} else {
+				retryable = false
+			}
+		}
+	}
+	if !retryable {
+		return class, false
+	}
 	switch {
-	case errors.Is(err, context.Canceled):
-		return "context-canceled", false
-	case errors.Is(err, context.DeadlineExceeded):
-		return "timeout", true
-	case errors.Is(err, syscall.ENETUNREACH), errors.Is(err, syscall.EHOSTUNREACH):
-		return "network-unreachable", true
-	case errors.Is(err, syscall.ECONNRESET):
-		return "connection-reset", true
+	case timedOut:
+		class = "timeout"
+	case unreachable:
+		class = "network-unreachable"
+	case reset:
+		class = "connection-reset"
 	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return "timeout", true
-	}
-	return "transport-error", false
+	return class, true
 }
 
 type grafanaObservationTransportError struct {
