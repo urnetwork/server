@@ -11343,6 +11343,38 @@ summary accepts this cause; older sources without it are unqualified for its
 absence. The local regression establishes a measurement defect, not its Main
 frequency or the causes of previously accepted outcomes.
 
+URL Due admission has a separate storage-maintenance boundary. The 2026-10-04
+13:12–13:14 paired four-API sample observed 56 returned calls with 3.175 seconds
+mean model time. Claim acquisition/begin averaged 0.931/0.542 seconds, while
+the separate retention acquisition/begin averaged 0.808/0.528 seconds; retention
+SQL averaged 0.007 seconds. These are inclusive client wall times, not CPU or
+proof of a PgBouncer or PostgreSQL lock owner. The pgx pool's successful acquire
+duration excludes its subsequent idle-connection Ping; compare default-pool
+empty/canceled acquisitions, occupancy and connection churn with Due phases.
+An instantaneous idle-in-transaction `BEGIN` cohort alone cannot identify the
+application callback or a pooler owner.
+
+`work.RemoveExpiredProviderUrlProbeRuns` owns seven-day receipt storage cleanup
+through one global durable run-once task. Each turn deletes at most 5,000 old,
+uncounted rows through the existing retention index and statement-local tuple
+set, with a 30-second task budget. A full page continues after one second; a
+partial or locked page retries after one minute. Task errors retain the normal
+durable retry path. The existing task execution/duration/finalization metrics
+and persisted result's removed count expose work; a missing series is unknown.
+
+Deploy and verify that Taskworker lane before selecting an API that removes
+per-Due storage cleanup. Due still commits the server-issued claim and performs
+bounded completed-window expiry and priority maintenance before selection.
+Measured history still requires its exact policy/shape and four-hour clock;
+first completion reports older than 24 hours remain rejected. Delayed storage
+cleanup may retain old idempotent receipts but cannot manufacture current
+quota, clear TLS evidence or reset claim ordinals. It must not be replaced by
+unowned request goroutines or by folding storage deletion into the claim's row
+locks. Verify same-process Due retention phases stop advancing only on the new
+API, while the maintenance task completes bounded pages and its backlog drains.
+API latency, publication throughput and full provider coverage remain separate
+Main measurements; source tests are not evidence of recovered performance.
+
 The actual-PG control holds a balance row, observes its grant-selection waiter
 separately from a second payer-gate waiter, cancels the queued request, and
 checks the unchanged reservation. Healthy signed and insufficient-credit

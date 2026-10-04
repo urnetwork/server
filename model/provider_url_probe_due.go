@@ -193,9 +193,9 @@ func claimProviderUrlProbeDue(ctx context.Context, now time.Time, limit, shardIn
 			})
 		}, observation.database(false))
 	})
-	// Retire at least as many old receipt slots as this admission can issue.
-	// Cleanup remains bounded even when a mostly empty shard is polled.
-	removeExpiredProviderUrlProbeRuns(ctx, now, limit, observation)
+	// Seven-day receipt storage cleanup has a durable Taskworker owner. Current
+	// completion expiry above and measured-history clock predicates retain all
+	// admission authority even when that independent cleanup is delayed.
 	return result
 }
 
