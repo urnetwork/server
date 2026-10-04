@@ -16,6 +16,7 @@ require (
 	github.com/go-jose/go-jose/v3 v3.0.5
 	github.com/go-playground/assert/v2 v2.2.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.10.0
@@ -93,7 +94,6 @@ require (
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/gtank/merlin v0.1.1 // indirect
 	github.com/gtank/ristretto255 v0.1.2 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
@@ -204,7 +204,7 @@ require (
 	src.agwa.name/tlshacks v0.0.4 // indirect
 )
 
-replace github.com/urnetwork/connect => github.com/urnetwork/connect v0.0.0-20261003230910-59864c2b5b2a
+replace github.com/urnetwork/connect => github.com/urnetwork/connect v0.0.0-20261004062731-aab49d971580
 
 replace github.com/pion/sctp => github.com/urnetwork/connect/sctp v0.0.0-20261002163341-6443417d70dc
 
@@ -224,6 +224,6 @@ replace github.com/urfoundation/sn => ../sn
 // native RPC transport and tracked upstream provenance in server binaries.
 replace github.com/centrifuge/go-substrate-rpc-client/v4 => ../sn/third_party/go-substrate-rpc-client
 
-// Keep the shared local fork explicit in this main-module context as well.
+// Pin the published shared fork in this main-module context as well.
 // Replacements in the imported SN module are not inherited by Go.
-replace gvisor.dev/gvisor => ../gvisor
+replace gvisor.dev/gvisor => github.com/urnetwork/gvisor v0.0.0-20261004152605-c0783dba2eef

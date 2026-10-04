@@ -533,10 +533,14 @@ github.com/urnetwork/connect v0.0.0-20261003191512-8ec41070e250 h1:cTU4hoi1ZEDoU
 github.com/urnetwork/connect v0.0.0-20261003191512-8ec41070e250/go.mod h1:4fQ88a6LeWCbTb/1XCLy5oca56yANXCz+CU5JYeyT5Y=
 github.com/urnetwork/connect v0.0.0-20261003230910-59864c2b5b2a h1:sNr2SPcReIqOrPTxWhCQNEcsLX+FSp3AkwFn1Ex0Wb0=
 github.com/urnetwork/connect v0.0.0-20261003230910-59864c2b5b2a/go.mod h1:4fQ88a6LeWCbTb/1XCLy5oca56yANXCz+CU5JYeyT5Y=
+github.com/urnetwork/connect v0.0.0-20261004062731-aab49d971580 h1:bl+H14zcdS5LR3mf+rWt1WZJ+szd7M9sCNWkcT8Z3qM=
+github.com/urnetwork/connect v0.0.0-20261004062731-aab49d971580/go.mod h1:4fQ88a6LeWCbTb/1XCLy5oca56yANXCz+CU5JYeyT5Y=
 github.com/urnetwork/connect/sctp v0.0.0-20261001021459-e1b5d77b5029 h1:GfovpOIWKd6TjkYsWLkMNE/zKEoGNC/5NfrPRCI+50A=
 github.com/urnetwork/connect/sctp v0.0.0-20261001021459-e1b5d77b5029/go.mod h1:7KFmTwLcoYgJs/Z+99nJvsWL0qDpuyloSI0RbAqlrz0=
 github.com/urnetwork/connect/sctp v0.0.0-20261002163341-6443417d70dc h1:w8WyMTyOkCNb/qEZtgZDr6m0zf3eM8kjh08DweW4/i8=
 github.com/urnetwork/connect/sctp v0.0.0-20261002163341-6443417d70dc/go.mod h1:7KFmTwLcoYgJs/Z+99nJvsWL0qDpuyloSI0RbAqlrz0=
+github.com/urnetwork/gvisor v0.0.0-20261004152605-c0783dba2eef h1:5o+/eARHbukXt1AkZW8MqCJ/o8hfuhYOllPaZv1Zdts=
+github.com/urnetwork/gvisor v0.0.0-20261004152605-c0783dba2eef/go.mod h1:We1Jh3kDvpcx13qPcI0LTjx3U6pHpis/KFoU/UtJTkM=
 github.com/urnetwork/sdk v0.0.0-20261001021058-5d37be3876e5 h1:PYuzGCWhMRuCnZS9qoSeMvwSZk9NQzX861Ir5xFFpHA=
 github.com/urnetwork/sdk v0.0.0-20261001021058-5d37be3876e5/go.mod h1:IuPYnLZ5j1SP+gm3O4a4SxbOT4U/CPKEqONI1iLO5yk=
 github.com/urnetwork/sdk v0.0.0-20261003021240-95ccd57da971 h1:ukQnbTHew94T4caqOBso3/V4gv8jyTRHbmnxKKuBxQE=
