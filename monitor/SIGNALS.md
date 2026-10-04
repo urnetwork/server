@@ -11481,6 +11481,17 @@ Deleting a grant while escrows or settlement remain open is not cleanup.
 
 ### 2.19f Rolling URL-probe coverage and measured-run capacity
 
+A fresh coherent global census remains independently reportable when the hourly
+accepted-run ranges or another shard's visibility are incomplete. Preserve its
+eligible, quota/secure-complete, overdue, warming, uninitialized and runs-needed
+projection on that visibility alert; a missing deficit alert alone is never
+proof of full coverage. The healthy control is a ten-run-complete census with
+incomplete hourly history: keep the numeric census and the rate-visibility
+warning together. Stale, missing, incoherent or ambiguous census owners still
+return without numeric coverage. This renderer correction does not establish
+historical counts absent from a retained qualified observation, change severity,
+or prove native process continuity, sustained coverage or sufficient capacity.
+
 Starting a replacement only at the oldest counted measurement's four-hour
 expiry creates a real deficit for the accepted-completion latency. Native
 controls with ten measurements spaced 20/24 minutes and a 25-second completion

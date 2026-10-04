@@ -399,3 +399,39 @@ func TestUrlProbeCoverageCancellationAndDisabledConfigAvoidContact(t *testing.T)
 		t.Fatalf("cancellation was lost: %v", err)
 	}
 }
+
+// A rate-history gap does not invalidate the separate, coherent global census.
+// Invalid or ambiguous censuses still return before any numeric projection.
+func TestUrlProbeCoverageHourlyGapRetainsQualifiedCensus(t *testing.T) {
+	now := time.Date(2026, 10, 4, 2, 23, 0, 0, time.UTC)
+	first := urlProbeCoverageFixture(now, "worker-a.example", 0)
+	second := urlProbeCoverageFixture(now, "worker-b.example", 1)
+	delete(second.values, "success_early")
+	alerts := runUrlProbeCoverageFixture(t, now, urlProbeCoverageFixtureJson(t, now, first, second))
+	alert := requireAlertClass(t, alerts, "url-probe-coverage-unobservable")
+	if len(alerts) != 1 {
+		t.Fatal("hourly gap invented a quota deficit")
+	}
+	for _, field := range []string{"hourly_measured_run_ranges_or_expected_process_coverage_incomplete", "eligible=10000", "quota_complete=10000", "secure_complete=10000", "runs_needed=0", "overdue=0", "census_reason=ok"} {
+		if !strings.Contains(alert.Observed, field) {
+			t.Fatalf("qualified census field missing: %s", field)
+		}
+	}
+	for _, invalid := range []string{"stale", "ambiguous"} {
+		t.Run(invalid, func(t *testing.T) {
+			a := urlProbeCoverageFixture(now, "worker-a.example", 0)
+			b := urlProbeCoverageFixture(now, "worker-b.example", 1)
+			if invalid == "stale" {
+				a.values["observed"] = float64(now.Add(-181 * time.Second).Unix())
+			} else {
+				b = urlProbeCoverageFixture(now, "worker-b.example", 0)
+			}
+			alert := requireAlertClass(t, runUrlProbeCoverageFixture(t, now, urlProbeCoverageFixtureJson(t, now, a, b)), "url-probe-coverage-unobservable")
+			for _, field := range []string{"eligible=", "quota_complete=", "runs_needed=", "overdue="} {
+				if strings.Contains(alert.Observed, field) {
+					t.Fatalf("invalid census exposed numeric field: %s", field)
+				}
+			}
+		})
+	}
+}

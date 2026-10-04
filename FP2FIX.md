@@ -6464,3 +6464,39 @@ open. Policy two and the separately prepared Redis native-reader flag remain
 inactive. Backup completion is unproved and migration764/Report-ID emission
 remain pending. FP2FIX remains active through complete generation qualification,
 fresh measurement and repair of the remaining coverage and financial boundaries.
+
+
+### 2026-10-04 02:34 UTC due-index rollout and renewal checkpoint
+
+All four 6400 deployment commands completed. The fresh source/start metric
+reference qualified 56/68 slots at source `2cae806b`: API 20/20, Taskworker 8/8,
+Connect 14/20 and Proxy 14/20. The other six Connect and six Proxy slots uniquely
+reported the preceding 6300 source. These are metric witnesses, not native
+executable or predecessor-retirement proof. The deployed due-index correction
+removed 400,000 filtered future rows in each local owning-query control,
+reducing 5,354 buffers to three; its effect on Main CPU/backlog remains unproved.
+
+Current numeric quota coverage is unknown in this checkpoint. The last cited
+coherent counts were historical 95.10% at 01:38; the 01:53 and 02:08 observations
+were stale. The 02:23 visibility alert reports a coherent census but omitted its
+counts when only hourly history was incomplete. The source correction preserves
+qualified census counts on that warning while keeping stale/ambiguous census
+values unreported. Absence of a deficit alert is not full-coverage proof.
+
+The six-minute renewal source admits replacement before one of the latest ten
+accepted measurements expires. Native controls with 25-second completion show
+expiry-only admission's 25-second gap and its repair; eleven/twelve current rows,
+clustered expiries, concurrent claims, setup/replay and policy/security controls
+preserve bounded work and actual measurement credit. This source is prepared for
+the next ordinary release and has not been deployed. Existing persisted deadlines
+refresh when touched; neither the controls nor a future deployment imply instant
+100% coverage. The separate payload-instrumentation source is not in that release.
+
+The attempted bounded ready-tail read stopped at its plan guard without provider
+results; no tail prevalence or cause follows. A plan-only discriminator is being
+qualified rather than widening its limits. The c39 monitor remains authoritative
+until separately qualified promotion, preserving the ordinary fifteen-minute
+cadence. Backup completion, migration764/Report-ID emission, ARIN baseline/final
+Main shadow and verified subscriber supply remain open; policy two and the
+prepared Redis native-reader flag remain inactive. FP2FIX continues through
+source merge, all-block deployment and fresh measurements.
