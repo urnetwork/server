@@ -9512,4 +9512,6 @@ var migrations = []any{
 	// Caller operation IDs retain one exact customer transfer challenge request.
 	// Append after the complete published asynchronous-debit/Solana prefix.
 	newSqlMigration(circleTransferRequestSchemaSql),
+	// Stable control retries retain one original request and one byte increment.
+	newSqlMigration(contractCloseReportSchemaSql),
 }

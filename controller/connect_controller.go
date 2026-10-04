@@ -1339,6 +1339,23 @@ func CloseContract(
 	usedTransferByteCount := model.ByteCount(closeContract.AckedByteCount)
 	checkpoint := closeContract.Checkpoint
 
+	if len(closeContract.ReportId) != 0 {
+		reportId, err := server.IdFromBytes(closeContract.ReportId)
+		if err != nil || reportId == (server.Id{}) {
+			return model.ErrContractCloseReportInvalid
+		}
+		applied, err := model.CloseContractWithReport(ctx, model.ContractCloseReport{
+			ReportId: reportId, ContractId: contractId, ClientId: clientId,
+			AckedByteCount: usedTransferByteCount, UnackedByteCount: closeContract.UnackedByteCount,
+			Checkpoint: checkpoint,
+		})
+		if applied {
+			// Count the committed original once, even if later settlement needs retry.
+			transferByteCounter.Add(float64(usedTransferByteCount))
+		}
+		return err
+	}
+	// Empty-id peers retain the original cumulative checkpoint contract.
 	err := model.CloseContract(ctx, contractId, clientId, usedTransferByteCount, checkpoint)
 	if err == nil {
 		// the acked byte count is incremental per checkpoint, so this sums to
