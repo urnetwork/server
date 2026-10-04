@@ -84,31 +84,42 @@ func VerifyOriginalSignature(original *VerifyOriginalTransition, publicKey ed255
 
 // Commit once per previous depth; an uncertain commit returns the exact first
 // receipt for the same authenticated request instead of signing another choice.
-func RetainVerifyOriginal(ctx context.Context, original *VerifyOriginalTransition) *VerifyOriginalTransition {
+func RetainVerifyOriginal(ctx context.Context, original *VerifyOriginalTransition) (retained *VerifyOriginalTransition) {
+	server.Tx(ctx, func(tx server.PgTx) { retained = retainVerifyOriginalInTx(ctx, tx, original) }, server.TxReadCommitted)
+	return
+}
+
+// The original request lock, first receipt and pending projection commit as
+// one transaction. Caller owns the transaction and never retries a partial send.
+func retainVerifyOriginalInTx(ctx context.Context, tx server.PgTx, original *VerifyOriginalTransition) *VerifyOriginalTransition {
 	body, err := DecodeVerifyOriginal(original)
 	server.Raise(err)
 	retained := &VerifyOriginalTransition{}
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO verify_original_transition
+
+	if prior := retainVerifyOriginalRequestInTx(ctx, tx, body); prior != nil {
+		retained = prior
+		return retained
+	}
+	server.RaisePgResult(tx.Exec(ctx, `INSERT INTO verify_original_transition
    (trail_id,previous_depth,observed_time,original_body,original_signature) VALUES ($1,$2,$3,$4,$5)
    ON CONFLICT (trail_id,previous_depth) DO NOTHING`, body.Trail.TrailId, body.PreviousDepth,
-			time.UnixMilli(int64(body.Trail.ActivityMs)).UTC(), original.Body, original.Signature))
-		rows, err := tx.Query(ctx, `SELECT original_body,original_signature FROM verify_original_transition WHERE trail_id=$1 AND previous_depth=$2`, body.Trail.TrailId, body.PreviousDepth)
-		server.WithPgResult(rows, err, func() {
-			if !rows.Next() {
-				panic(errors.New("verification original disappeared"))
-			}
-			server.Raise(rows.Scan(&retained.Body, &retained.Signature))
-		})
-		prior, err := DecodeVerifyOriginal(retained)
-		server.Raise(err)
-		if prior.Trail.TrailId != body.Trail.TrailId || prior.PreviousDepth != body.PreviousDepth || !bytes.Equal(prior.RequestMessage, body.RequestMessage) || !bytes.Equal(prior.RequestSignature, body.RequestSignature) {
-			panic(errors.New("verification original request conflict"))
+		time.UnixMilli(int64(body.Trail.ActivityMs)).UTC(), original.Body, original.Signature))
+	rows, err := tx.Query(ctx, `SELECT original_body,original_signature FROM verify_original_transition WHERE trail_id=$1 AND previous_depth=$2`, body.Trail.TrailId, body.PreviousDepth)
+	server.WithPgResult(rows, err, func() {
+		if !rows.Next() {
+			panic(errors.New("verification original disappeared"))
 		}
-		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO verify_original_pending (trail_id,previous_depth,recovery_time) VALUES ($1,$2,$3)
+		server.Raise(rows.Scan(&retained.Body, &retained.Signature))
+	})
+	prior, err := DecodeVerifyOriginal(retained)
+	server.Raise(err)
+	if prior.Trail.TrailId != body.Trail.TrailId || prior.PreviousDepth != body.PreviousDepth || !bytes.Equal(prior.RequestMessage, body.RequestMessage) || !bytes.Equal(prior.RequestSignature, body.RequestSignature) {
+		panic(errors.New("verification original request conflict"))
+	}
+	indexVerifyOriginalRequestInTx(ctx, tx, prior)
+	server.RaisePgResult(tx.Exec(ctx, `INSERT INTO verify_original_pending (trail_id,previous_depth,recovery_time) VALUES ($1,$2,$3)
  ON CONFLICT (trail_id) DO UPDATE SET previous_depth=EXCLUDED.previous_depth,recovery_time=EXCLUDED.recovery_time
  WHERE verify_original_pending.previous_depth <= EXCLUDED.previous_depth`, prior.Trail.TrailId, prior.PreviousDepth, time.UnixMilli(int64(prior.RecoveryMs)).UTC()))
-	})
 	return retained
 }
 
