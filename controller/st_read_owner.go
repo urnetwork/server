@@ -123,7 +123,13 @@ func (self *CoreStClient) eachRpcUrls(ctx context.Context, urls []string, op fun
 			if err == nil {
 				err = op(attempt, client)
 			}
+			if err == nil {
+				err = attempt.Err()
+			}
 			stop()
+			if !scope.hooks.now().Before(scope.deadline) {
+				return errors.Join(err, context.DeadlineExceeded)
+			}
 			if ownerErr := ctx.Err(); ownerErr != nil {
 				return errors.Join(err, ownerErr)
 			}
