@@ -212,6 +212,18 @@ func providerWorkPrepareCreationStore(t testing.TB, directory string, scope conn
 // This single root follows nonempty original work through SDK custody, actual
 // stream creation and closes, production payout signing and public verification.
 func TestProviderWorkActualSdkStreamPublishesCompleteNonemptyAttribution(t *testing.T) {
+	providerWorkActualSdkStreamPublication(t, false)
+}
+
+// Ordinary traffic still completes when the optional signer was unavailable at
+// live admission. Later signer recovery cannot invent that original history.
+func TestProviderWorkActualPublisherWaitsForMissingLiveSessionOriginal(t *testing.T) {
+	providerWorkActualSdkStreamPublication(t, true)
+}
+
+// Both paths use the same genuine SDK and database producers. The sole fault
+// removes the optional signer from live connection admission, before exposure.
+func providerWorkActualSdkStreamPublication(t *testing.T, missingSessionOriginal bool) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -290,8 +302,12 @@ func TestProviderWorkActualSdkStreamPublishesCompleteNonemptyAttribution(t *test
 			t.Fatal(ctx.Err())
 		}
 		handlerId := model.CreateNetworkClientHandler(ctx)
+		connectionCtx := ctx
+		if missingSessionOriginal {
+			connectionCtx = model.WithProviderWorkSessionSource(ctx, nil)
+		}
 		for index, id := range []server.Id{{1}, {2}} {
-			if _, _, _, _, err := model.ConnectNetworkClientWithIpFamily(ctx, id, fmt.Sprintf("192.0.2.%d:12001", 20+index), handlerId, 4); err != nil {
+			if _, _, _, _, err := model.ConnectNetworkClientWithIpFamily(connectionCtx, id, fmt.Sprintf("192.0.2.%d:12001", 20+index), handlerId, 4); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -361,10 +377,19 @@ func TestProviderWorkActualSdkStreamPublishesCompleteNonemptyAttribution(t *test
 		}
 		f.retainAuthority(t)
 		originals, err := model.ListProviderWorkOriginals(ctx, []server.Id{server.Id(contractId)})
-		if err != nil || len(originals) < 6 {
+		if err != nil || !missingSessionOriginal && len(originals) < 6 {
 			t.Fatal("live producer originals incomplete", len(originals), err)
 		}
 		client := &providerWorkRosterClient{StClient: newStubStClient(&StEpochState{})}
+		if missingSessionOriginal {
+			if _, _, err := stComputeReleasePayout(ctx, f.cfg, client, f.epoch.Epoch, start, end, f.epoch.Start.Block, f.epoch.End.Block, f.epoch); !errors.Is(err, payoutartifact.ErrClosedWorkUnavailable) {
+				t.Fatal("actual publisher did not retain missing live originals as pending", err)
+			}
+			if record := model.GetStPayoutArtifact(ctx, f.cfg.DeploymentKey(), f.epoch.Epoch, f.cfg.NoId); record != nil {
+				t.Fatal("missing live original published an immutable artifact")
+			}
+			return
+		}
 		if _, _, err := stComputeReleasePayout(ctx, f.cfg, client, f.epoch.Epoch, start, end, f.epoch.Start.Block, f.epoch.End.Block, f.epoch); err != nil {
 			t.Fatal("actual nonempty original payout did not publish", err)
 		}
