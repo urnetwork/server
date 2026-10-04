@@ -1,0 +1,12 @@
+{
+  "branch": "origin/google-sub-fix",
+  "head": "48631ea7c4f4cc63fa3a5bbcd8f8a71c6defaaa4",
+  "disposition": "historical exact source retained outside runtime/workflow build",
+  "reason": "Historical debug logging emits purchase tokens/webhook bodies. Current subscriptions-v2 reconciliation and playAcknowledgeSubscription already preserve acknowledgement failures with retry semantics; preserve current implementation and do not add new raw-payload diagnostics.",
+  "runtime_activated": false,
+  "original_patch_sha256": {
+    "48631ea7c4f4.patch": "485e8956adb90b50fdac6b2b33ee19c26b5d6a0a70215bdc9a811dcca7d5f493"
+  },
+  "retrieve_original": "git show 48631ea7c4f4cc63fa3a5bbcd8f8a71c6defaaa4",
+  "privacy_scan": "No private-key/PAT/cloud-key/credential-URL patterns. Only previously committed source; no private runtime artifacts copied."
+}
