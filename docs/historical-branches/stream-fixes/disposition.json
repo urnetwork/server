@@ -1,0 +1,12 @@
+{
+  "branch": "origin/stream-fixes",
+  "head": "5c6f295927ad5a348d1225cca5fea0c03ea5f5ac",
+  "disposition": "historical exact source retained outside runtime/workflow build",
+  "reason": "LiveView is entirely commented incomplete prototype. Old Resident.IsDone removal conflicts with current joined close/control ACK and client lifetime ownership; current streams live in extracted SDK.",
+  "runtime_activated": false,
+  "original_patch_sha256": {
+    "5c6f295927ad.patch": "8a7bb643789b2ccee5a9d73ba7e88452418d16675ec521320c1ee0fe0c8e0822"
+  },
+  "retrieve_original": "git show 5c6f295927ad5a348d1225cca5fea0c03ea5f5ac",
+  "privacy_scan": "No private-key/PAT/cloud-key/credential-URL patterns. Only previously committed source; no private runtime artifacts copied."
+}
