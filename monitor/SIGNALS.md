@@ -4958,12 +4958,20 @@ transfer_contract autovacuum phase. Apply the bounded retention correction only
 if that attribution is confirmed; the historical episodes below are not proof
 of the current running path.
 
-Current source has two independent scans, each limited to 25,000: aged open
-contracts and aged disputed/nonfinal contracts. Their deduplicated union can
-therefore contain up to 50,000 candidates. A merged selection above 25,000 does
-not prove a legacy deployment; establish the exact executor source and per-scan
-cap/count authority before prescribing a cap correction. Do not raise either
-scan to 50,000. Candidate count is not terminal-verified sibling progress.
+The scheduled closer retains two independent per-task totals of at most 25,000:
+aged open contracts and aged disputed/nonfinal contracts. It now visits raw
+subpages of at most 256 per scan and checks a 15-second elapsed budget between
+completed subpages. A subpage finishes its existing financial and cleanup
+phases before yielding; this is a cooperative budget, not a new cancellation
+deadline. Parent cancellation and operational failures remain errors. Only a
+complete, classified prefix can supply the next task's cursor; accounting
+rejections retain their typed failure and verified sibling counts. A skipped or
+durably delegated raw prefix can advance without claiming any financial close.
+The whole task's deduplicated union can still reach 50,000 candidates. A merged
+selection above 25,000 does not prove a legacy deployment; establish the exact
+executor source and per-scan cap/count authority before prescribing a cap
+correction. Candidate count is not terminal-verified sibling progress, and a
+short successful task alone does not prove that the aged backlog is draining.
 
 Also compare the complete stored failure and next due time with the attempt's
 duration. A verified underfunded dispute can leave unrelated per-contract
