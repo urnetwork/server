@@ -29,12 +29,12 @@ func payloadEventually(t testing.TB, check func() bool) {
 func TestResidentPayloadSnapshotAndMetricAuthority(t *testing.T) {
 	var ledger residentPayloadLedger
 	charge := residentPayloadCharge{3, 17, 256}
-	ledger.update(residentPayloadControl, charge, true)
+	ledger.update(residentPayloadControl, 0, charge, true)
 	s := ledger.snapshot()
 	if !s.Enabled || !s.Complete || s.Groups[0] != (residentPayloadGroup{3, 17, 256, 3, 0}) {
 		t.Fatal("coherent ownership lost")
 	}
-	if ledger.snapshotAt(func() { ledger.update(residentPayloadControl, charge, false) }).Complete {
+	if ledger.snapshotAt(func(shard int) { ledger.update(residentPayloadControl, 0, charge, false) }).Complete {
 		t.Fatal("overlap declared coherent")
 	}
 	registry := prometheus.NewPedanticRegistry()
@@ -316,10 +316,99 @@ func BenchmarkResidentPayloadAccounting(b *testing.B) {
 			charge := residentPayloadCharge{1, 1200, 2048}
 			for b.Loop() {
 				if ledger != nil {
-					ledger.update(residentPayloadForwardIngress, charge, true)
-					ledger.update(residentPayloadForwardIngress, charge, false)
+					ledger.update(residentPayloadForwardIngress, 0, charge, true)
+					ledger.update(residentPayloadForwardIngress, 0, charge, false)
 				}
 			}
 		})
+	}
+}
+
+func TestResidentPayloadShardConservationAndRefusal(t *testing.T) {
+	for _, mode := range []string{"shared", "collision", "spread"} {
+		t.Run(mode, func(t *testing.T) {
+			var ledger residentPayloadLedger
+			const workers, perWorker = 96, 257
+			var done sync.WaitGroup
+			done.Add(workers)
+			for worker := range workers {
+				go func() {
+					defer done.Done()
+					owner := byte(0)
+					if mode == "spread" {
+						owner = byte(worker)
+					}
+					if mode == "collision" {
+						owner = byte(worker%2) * residentPayloadShardCount
+					}
+					stage := residentPayloadStage(worker % 3)
+					charge := residentPayloadCharge{1, 17, 256}
+					for range perWorker {
+						ledger.update(stage, owner, charge, true)
+						ledger.update(stage, owner, charge, false)
+					}
+				}()
+			}
+			done.Wait()
+			s := ledger.snapshot()
+			if !s.Enabled || !s.Complete {
+				t.Fatal("joined shards unavailable")
+			}
+			for _, g := range s.Groups {
+				if g.Messages != 0 || g.LogicalBytes != 0 || g.BackingCharge != 0 || g.Admitted != workers/3*perWorker || g.Released != g.Admitted {
+					t.Fatalf("shard conservation=%+v", g)
+				}
+			}
+		})
+	}
+	for owner := range residentPayloadShardCount {
+		var ledger residentPayloadLedger
+		charge := residentPayloadCharge{1, 17, 256}
+		ledger.update(residentPayloadControl, byte(owner), charge, true)
+		if ledger.snapshotAt(func(shard int) {
+			if shard == owner {
+				ledger.update(residentPayloadControl, byte(owner), charge, false)
+			}
+		}).Complete {
+			t.Fatalf("overlap hidden in shard%d", owner)
+		}
+		ledger.shards[owner].writers.Add(1)
+		if ledger.snapshot().Complete {
+			t.Fatalf("live writer hidden in shard%d", owner)
+		}
+		ledger.shards[owner].writers.Add(-1)
+		if !ledger.snapshot().Complete {
+			t.Fatalf("joined writer unavailable in shard%d", owner)
+		}
+	}
+	var invalid residentPayloadLedger
+	invalid.shards[0].groups[0].messages.Store(-1)
+	invalid.shards[1].groups[0].messages.Store(1)
+	if invalid.snapshot().Complete {
+		t.Fatal("opposite invalid shards hid corruption")
+	}
+}
+
+func TestResidentPayloadAliasesRemainSeparateCharges(t *testing.T) {
+	var ledger residentPayloadLedger
+	message := clientconnect.MessagePoolGet(1200)
+	shared := clientconnect.MessagePoolShareReadOnly(message)
+	ledger.update(residentPayloadControl, 0, payloadCharge(message), true)
+	ledger.update(residentPayloadForwardIngress, 1, payloadCharge(shared), true)
+	s := ledger.snapshot()
+	if !s.Complete || s.Groups[0].LogicalBytes != 1200 || s.Groups[1].LogicalBytes != 1200 || s.Groups[0].BackingCharge != 2048 || s.Groups[1].BackingCharge != 2048 {
+		t.Fatal("two owner references collapsed into a physical-heap claim")
+	}
+	ledger.update(residentPayloadControl, 0, payloadCharge(message), false)
+	if clientconnect.MessagePoolReturn(message) {
+		t.Fatal("shared owner prematurely returned")
+	}
+	ledger.update(residentPayloadForwardIngress, 1, payloadCharge(shared), false)
+	if !clientconnect.MessagePoolReturn(shared) {
+		t.Fatal("last shared owner leaked")
+	}
+	s = ledger.snapshot()
+	if !s.Complete || s.Groups[0].Messages != 0 || s.Groups[1].Messages != 0 {
+		t.Fatal("alias charges did not conserve")
 	}
 }

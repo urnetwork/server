@@ -3274,12 +3274,18 @@ func (self *ResidentForward) runWithResidentLookup(
 					message = next
 				}
 			}
+			// Capture the scalar charge while this stage still owns the frame.
 			// sendMessage consumes this exact owner on every outcome.
+			ledger := self.exchange.residentPayloadLedger()
+			var charge residentPayloadCharge
+			if ledger != nil {
+				charge = payloadCharge(message)
+			}
 			sendResult := connection.sendMessage(
 				handleCtx.Done(), message, writeTimer, self.exchange.settings.WriteTimeout,
 			)
-			if ledger := self.exchange.residentPayloadLedger(); ledger != nil {
-				ledger.update(residentPayloadForwardOutput, payloadCharge(message), false)
+			if ledger != nil {
+				ledger.update(residentPayloadForwardOutput, self.clientId[15], charge, false)
 			}
 			if !pooledMessageSendKeepsGeneration(sendResult) {
 				if sendResult == pooledMessageSendDropped && glog.V(1) {
@@ -4097,7 +4103,7 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 	}
 	shared := connect.MessagePoolShareReadOnly(transferFrameBytes)
 	if ledger := self.exchange.residentPayloadLedger(); ledger != nil {
-		ledger.update(residentPayloadForwardIngress, payloadCharge(shared), true)
+		ledger.update(residentPayloadForwardIngress, self.clientId[15], payloadCharge(shared), true)
 	}
 	message := residentForwardIngress{
 		path:               path,
@@ -4130,7 +4136,7 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 	messageOwned := true
 	defer func() {
 		if ledger := self.exchange.residentPayloadLedger(); ledger != nil {
-			ledger.update(residentPayloadForwardIngress, payloadCharge(transferFrameBytes), false)
+			ledger.update(residentPayloadForwardIngress, self.clientId[15], payloadCharge(transferFrameBytes), false)
 		}
 		if messageOwned {
 			connect.MessagePoolReturn(transferFrameBytes)
@@ -4248,10 +4254,10 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 		defer forward.sendAdmission.done()
 		outputAccepted := false
 		if ledger := self.exchange.residentPayloadLedger(); ledger != nil {
-			ledger.update(residentPayloadForwardOutput, payloadCharge(transferFrameBytes), true)
+			ledger.update(residentPayloadForwardOutput, forward.clientId[15], payloadCharge(transferFrameBytes), true)
 			defer func() {
 				if !outputAccepted {
-					ledger.update(residentPayloadForwardOutput, payloadCharge(transferFrameBytes), false)
+					ledger.update(residentPayloadForwardOutput, forward.clientId[15], payloadCharge(transferFrameBytes), false)
 				}
 			}()
 		}
@@ -4322,7 +4328,7 @@ func (self *Resident) handleClientReceive(source connect.TransferPath, frames []
 	byteCount := residentControlFrameByteCount(frames)
 	shared := shareResidentControlFrames(frames)
 	if ledger := self.exchange.residentPayloadLedger(); ledger != nil {
-		ledger.update(residentPayloadControl, controlPayloadCharge(shared), true)
+		ledger.update(residentPayloadControl, self.clientId[15], controlPayloadCharge(shared), true)
 	}
 	select {
 	case <-self.ctx.Done():
