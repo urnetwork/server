@@ -9547,4 +9547,8 @@ var migrations = []any{
 			PRIMARY KEY (purchase_token)
 		)
 	`),
+	// Optional original evidence is appended after the complete published prefix.
+	// Existing v764 receipts keep their schema, custody and rolling-writer role.
+	newSqlMigration(contractCloseReportEvidenceSchemaSql),
+	newSqlMigration(contractCloseOriginalSchemaSql),
 }

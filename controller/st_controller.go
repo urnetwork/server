@@ -3255,7 +3255,7 @@ func stComputeReleasePayout(
 	if !usageStart.Before(usageEnd) {
 		return [32]byte{}, 0, fmt.Errorf("sn: epoch has no post-cutoff earning window")
 	}
-	usages, err := model.GetStEpochProviderUsageAtEpoch(ctx, epoch, usageStart, usageEnd)
+	usages, closedWork, err := model.GetStEpochProviderUsageCensus(ctx, epoch, usageStart, usageEnd)
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
@@ -3316,7 +3316,17 @@ func stComputeReleasePayout(
 	for _, p := range providers {
 		fleetSnapshot = append(fleetSnapshot, map[string]any{"client_id": fmt.Sprintf("%x", p.ClientID), "head": p.HeadExcluded, "generation": p.BindingGeneration})
 	}
-	artifact, err := startifact.Build(startifact.BuildInput{
+	if closedWork != nil {
+		closedWork.DeploymentId, closedWork.ChainId = cfg.DeploymentId, cfg.ChainId
+		closedWork.GenesisHash, closedWork.Netuid = fmt.Sprintf("0x%x", cfg.GenesisHash), uint16(cfg.Netuid)
+		closedWork.Coordinator, closedWork.SettlementVault = cfg.ContractAddress, cfg.SettlementVault
+		closedWork.Epoch, closedWork.NoId = epoch, cfg.NoId
+		closedWork.PolicyHash = fmt.Sprintf("0x%x", authority.PolicyHash)
+		closedWork.Start = startifact.Boundary{Number: startBlock, Hash: common.Hash(authority.Start.Hash).Hex()}
+		closedWork.End = startifact.Boundary{Number: closeBlock, Hash: common.Hash(authority.End.Hash).Hex()}
+	}
+	artifact, err := startifact.BuildWithContext(ctx, startifact.BuildInput{
+		ClosedWork:   closedWork,
 		DeploymentID: cfg.DeploymentId, GenesisHash: fmt.Sprintf("0x%x", cfg.GenesisHash), PolicyHash: fmt.Sprintf("0x%x", authority.PolicyHash),
 		ChainID: cfg.ChainId, Netuid: uint16(cfg.Netuid), Coordinator: cfg.ContractAddress,
 		SettlementVault: cfg.SettlementVault, Epoch: epoch, NoID: cfg.NoId,
@@ -3332,6 +3342,11 @@ func stComputeReleasePayout(
 	}
 	if err := startifact.Sign(artifact, cfg.ArtifactKey); err != nil {
 		return [32]byte{}, 0, err
+	}
+	if artifact.ClosedWork != nil {
+		if _, err := startifact.VerifyClosedWorkReports(ctx, artifact, common.Address{}); err != nil {
+			return [32]byte{}, 0, err
+		}
 	}
 	store, ok := server.LoadBlobStore()
 	if !ok {

@@ -3,12 +3,14 @@
 package model
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
 	"slices"
 	"time"
 
+	"github.com/urfoundation/sn/payoutartifact"
 	"github.com/urnetwork/server"
 )
 
@@ -58,7 +60,29 @@ const stEpochProviderUsageSql = `
 		AND outcome IN ('settled','dispute_resolved_to_source','dispute_resolved_to_destination')
 `
 
+// A component census comes from the exact same statement snapshot as usage.
+// Existing payout processing can retain unknown evidence when the optional
+// original-row component exceeds capacity; it never publishes a partial census.
+func GetStEpochProviderUsageCensus(ctx context.Context, epoch uint64, startTime, endTime time.Time) ([]*StProviderUsage, *payoutartifact.ClosedWorkCensus, error) {
+	census := &payoutartifact.ClosedWorkCensus{Schema: payoutartifact.ClosedWorkSchema}
+	usages, err := getStEpochProviderUsageWithCensus(ctx, epoch, startTime, endTime, census)
+	if err != nil {
+		return nil, nil, err
+	}
+	if census.Records == nil {
+		return usages, nil, nil
+	}
+	census.Sort()
+	return usages, census, nil
+}
+
 func getStEpochProviderUsage(ctx context.Context, epoch uint64, startTime time.Time, endTime time.Time) ([]*StProviderUsage, error) {
+	return getStEpochProviderUsageWithCensus(ctx, epoch, startTime, endTime, nil)
+}
+
+// The optional recorder borrows each validated row only until it clones the
+// original jsonb bytes. No second query can race retention or terminal writers.
+func getStEpochProviderUsageWithCensus(ctx context.Context, epoch uint64, startTime time.Time, endTime time.Time, census *payoutartifact.ClosedWorkCensus) ([]*StProviderUsage, error) {
 	if !startTime.Before(endTime) {
 		return nil, fmt.Errorf("invalid subnet usage window")
 	}
@@ -70,10 +94,22 @@ func getStEpochProviderUsage(ctx context.Context, epoch uint64, startTime time.T
 	if !startTime.Before(endTime) {
 		return []*StProviderUsage{}, nil
 	}
+	originalBytes := 0
+	if census != nil {
+		census.WindowStart, census.WindowEnd = startTime.UTC().Format(time.RFC3339Nano), endTime.UTC().Format(time.RFC3339Nano)
+		if transition != nil {
+			census.EarningPolicyHash = "sha256:" + transition.ConfigSha256
+		}
+		census.Records = []payoutartifact.ClosedWorkRecord{}
+	}
 	usagesByClientId := map[server.Id]*StProviderUsage{}
 	var returnErr error
 	server.Db(ctx, func(conn server.PgConn) {
-		rows, err := conn.Query(ctx, stEpochProviderUsageSql, startTime, endTime)
+		query := stEpochProviderUsageSql
+		if census != nil {
+			query = stEpochProviderOriginalUsageSql
+		}
+		rows, err := conn.Query(ctx, query, startTime, endTime)
 		if err != nil {
 			returnErr = fmt.Errorf("read epoch provider usage: %w", err)
 			return
@@ -84,7 +120,12 @@ func getStEpochProviderUsage(ctx context.Context, epoch uint64, startTime time.T
 			var data []byte
 			var closedAt *time.Time
 			var duplicate bool
-			if err := rows.Scan(&contractId, &data, &closedAt, &duplicate); err != nil {
+			var originalReports []byte
+			columns := []any{&contractId, &data, &closedAt, &duplicate}
+			if census != nil {
+				columns = append(columns, &originalReports)
+			}
+			if err := rows.Scan(columns...); err != nil {
 				returnErr = err
 				return
 			}
@@ -104,6 +145,20 @@ func getStEpochProviderUsage(ctx context.Context, epoch uint64, startTime time.T
 			if legacy := snapshot.LegacyExclusion; legacy != nil && (legacy.ContractId != contractId || !legacy.ClosedAt.Equal(*closedAt) || legacy.Epoch != epoch) {
 				returnErr = fmt.Errorf("subnet contract %s: legacy usage exclusion differs from its terminal owner", contractId)
 				return
+			}
+			if census != nil {
+				census.Count++
+				if census.Records != nil {
+					if len(originalReports) > payoutartifact.MaxClosedWorkRecordBytes {
+						originalReports = nil // Preserve original usage, never a truncated proof.
+					}
+					if len(census.Records) == payoutartifact.MaxClosedWorkRecords || len(data) > payoutartifact.MaxClosedWorkRecordBytes || len(data)+len(originalReports) > payoutartifact.MaxClosedWorkOriginalBytes-originalBytes {
+						census.Records = nil // No prefix may claim the complete query.
+					} else {
+						originalBytes += len(data) + len(originalReports)
+						census.Records = append(census.Records, payoutartifact.ClosedWorkRecord{ContractId: [16]byte(contractId), ClosedAt: closedAt.UTC().Format(time.RFC3339Nano), Original: bytes.Clone(data), OriginalReports: bytes.Clone(originalReports)})
+					}
+				}
 			}
 			for _, provider := range snapshot.Providers {
 				usage := usagesByClientId[provider.ClientId]
