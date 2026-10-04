@@ -18569,6 +18569,29 @@ This is a local admission helper, not a new remote signal or proof of query
 coverage. Apply it only to freshly reviewed reader successors; sealed historical
 readers and expired grants stay closed.
 
+The staged promotion entry point `diagnostics/promote_monitor.py` applies the
+same verifier before replacement and to the new unit-owned generation after
+one same-unit restart. Its companion `promotion_identity.py` captures the new
+PID/start ticks/boot only from that fixed unit and verifies the expected proc
+executable; an absent predecessor is checked independently. It never replaces
+that proof with the installed file, a default PID, or a fresh restart. A durable
+exclusive attempt marker precedes binary replacement and prevents reentry.
+Every spent attempt keeps a terminal receipt, including restart return status
+and the verification phase. A successful restart followed by denied/failed
+verification remains an incomplete observation; inspect the existing process
+read-only and preserve the marker. Do not rerun the promotion to repair it.
+
+Local controls cover a successful replacement, privilege refusal, PID/boot/unit
+changes, an unreadable predecessor, and an actual promotion orchestration whose
+restart succeeds before verification fails. That failure retains restart exit
+zero and a second invocation issues no restart. Current-process verification
+is also exercised read-only against the old unit. The source does not authorize
+promotion: freeze candidate/source/unit/launcher/state and a fresh bounded
+window, preserve durable cadence and one watcher, and independently review the
+exact staged invocation under `RUN-MAIN.md` before Root dispatch. A verified
+replacement still does not prove its first sample succeeded or that the handoff
+was observation-gap free.
+
 Every completed observation atomically replaces the private mode-0600
 `<StateDir>/api-release-proof/latest.json` (directory mode 0700). The finite
 receipt contains evaluation/completion time, expectation hash, source
