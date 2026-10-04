@@ -204,7 +204,7 @@ require (
 	src.agwa.name/tlshacks v0.0.4 // indirect
 )
 
-replace github.com/urnetwork/connect => github.com/urnetwork/connect v0.0.0-20261003195725-2ea8d82ea5cb
+replace github.com/urnetwork/connect => github.com/urnetwork/connect v0.0.0-20261004025941-ad6fc3a191a3
 
 replace github.com/pion/sctp => github.com/urnetwork/connect/sctp v0.0.0-20261002163341-6443417d70dc
 
