@@ -389,7 +389,8 @@ type ExchangeSettings struct {
 	ExchangeBufferSize int
 	// Optional fixed ledger shared by resident SDK clients. Captured once by
 	// the Exchange; nil leaves SDK lifecycle accounting disabled.
-	MemoryOwnerLedger *connect.TransferMemoryOwnerLedger
+	MemoryOwnerLedger  *connect.TransferMemoryOwnerLedger
+	payloadOwnerLedger *residentPayloadLedger
 
 	// `send` queue depth of a `ResidentForward` to a peer resident. Kept
 	// separate from `ExchangeBufferSize` so production can hold a deep queue
@@ -654,8 +655,9 @@ type Exchange struct {
 	hostToServicePorts map[int]int
 	routes             map[string]string
 
-	settings          *ExchangeSettings
-	memoryOwnerLedger *connect.TransferMemoryOwnerLedger
+	settings           *ExchangeSettings
+	memoryOwnerLedger  *connect.TransferMemoryOwnerLedger
+	payloadOwnerLedger *residentPayloadLedger
 	// Optional already-bound sockets keyed by service port. Tests use these to
 	// eliminate release-to-rebind races and cross-process SO_REUSEPORT
 	// interference. The Exchange owns and closes every supplied listener.
@@ -773,6 +775,7 @@ func newExchange(
 		routes:               routes,
 		settings:             settings,
 		memoryOwnerLedger:    settings.MemoryOwnerLedger,
+		payloadOwnerLedger:   settings.payloadOwnerLedger,
 		servicePortListeners: servicePortListeners,
 		residents:            map[server.Id]*Resident{},
 		residentChanges:      map[server.Id]chan struct{}{},
@@ -3262,12 +3265,12 @@ func (self *ResidentForward) runWithResidentLookup(
 	var hasPending bool
 	defer func() {
 		if hasPending {
-			connect.MessagePoolReturn(pending)
+			self.releasePayload(pending)
 		}
 		self.sendAdmission.close()
 		self.cancel()
 		self.sendAdmission.wait()
-		returnReadyPooledMessages(self.send)
+		self.drainPayloads()
 	}()
 
 	handle := func(connection *ExchangeConnection) {
@@ -3310,6 +3313,9 @@ func (self *ResidentForward) runWithResidentLookup(
 			sendResult := connection.sendMessage(
 				handleCtx.Done(), message, writeTimer, self.exchange.settings.WriteTimeout,
 			)
+			if ledger := self.exchange.residentPayloadLedger(); ledger != nil {
+				ledger.update(residentPayloadForwardOutput, payloadCharge(message), false)
+			}
 			if !pooledMessageSendKeepsGeneration(sendResult) {
 				if sendResult == pooledMessageSendDropped && glog.V(1) {
 					glog.Infof("[rf]retire saturated exchange %s->\n", self.clientId)
@@ -3449,7 +3455,7 @@ func (self *ResidentForward) Close() {
 	self.sendAdmission.close()
 	self.cancel()
 	self.sendAdmission.wait()
-	returnReadyPooledMessages(self.send)
+	self.drainPayloads()
 }
 
 func (self *ResidentForward) Cancel() {
@@ -3742,9 +3748,9 @@ func (self *Resident) startClientCallbackWorkers() {
 }
 
 func (self *Resident) runClientControlIngress() {
-	defer returnReadyResidentControlIngress(self.controlIngress)
+	defer self.drainControlPayloads()
 	handle := func(frames []*protocol.Frame) {
-		defer returnResidentControlFrames(frames)
+		defer self.releaseControlPayload(frames)
 		self.controlLimiter.delay()
 		if err := self.residentController.HandleControlFrames(frames); err != nil {
 			if glog.V(1) {
@@ -3819,7 +3825,7 @@ func (self *Resident) startClientForwardIngress(shardIndex int) chan residentFor
 }
 
 func (self *Resident) runClientForwardIngress(queue <-chan residentForwardIngress) {
-	defer returnReadyResidentForwardIngress(queue)
+	defer self.drainForwardIngress(queue)
 	for {
 		select {
 		case <-self.ctx.Done():
@@ -4131,17 +4137,20 @@ func (self *Resident) handleClientForward(path connect.TransferPath, transferFra
 		return
 	}
 	shared := connect.MessagePoolShareReadOnly(transferFrameBytes)
+	if ledger := self.exchange.residentPayloadLedger(); ledger != nil {
+		ledger.update(residentPayloadForwardIngress, payloadCharge(shared), true)
+	}
 	message := residentForwardIngress{
 		path:               path,
 		transferFrameBytes: shared,
 	}
 	select {
 	case <-self.ctx.Done():
-		connect.MessagePoolReturn(shared)
+		self.releaseForwardIngress(shared)
 	case queue <- message:
 		return
 	default:
-		connect.MessagePoolReturn(shared)
+		self.releaseForwardIngress(shared)
 		recordReceiveQueueDrop(receiveQueueBoundaryResidentClientForward, len(transferFrameBytes))
 		// This callback carries reliable Transfer frames. It cannot block the
 		// shared client receive loop, so retire this generation on saturation;
@@ -4165,6 +4174,9 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 		defer func() { trace.end("resident_forward_end", !messageOwned, 0, 0) }()
 	}
 	defer func() {
+		if ledger := self.exchange.residentPayloadLedger(); ledger != nil {
+			ledger.update(residentPayloadForwardIngress, payloadCharge(transferFrameBytes), false)
+		}
 		if messageOwned {
 			connect.MessagePoolReturn(transferFrameBytes)
 		}
@@ -4279,6 +4291,15 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 			return false
 		}
 		defer forward.sendAdmission.done()
+		outputAccepted := false
+		if ledger := self.exchange.residentPayloadLedger(); ledger != nil {
+			ledger.update(residentPayloadForwardOutput, payloadCharge(transferFrameBytes), true)
+			defer func() {
+				if !outputAccepted {
+					ledger.update(residentPayloadForwardOutput, payloadCharge(transferFrameBytes), false)
+				}
+			}()
+		}
 
 		// fast path: enqueue without blocking
 		select {
@@ -4286,6 +4307,7 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 			return false
 		case forward.send <- transferFrameBytes:
 			messageOwned = false
+			outputAccepted = true
 			return true
 		default:
 		}
@@ -4299,6 +4321,7 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 				return false
 			case forward.send <- transferFrameBytes:
 				messageOwned = false
+				outputAccepted = true
 				return true
 			case <-time.After(self.exchange.settings.ForwardTimeout):
 			}
@@ -4343,13 +4366,16 @@ func (self *Resident) handleClientReceive(source connect.TransferPath, frames []
 	defer self.controlIngressAdmission.done()
 	byteCount := residentControlFrameByteCount(frames)
 	shared := shareResidentControlFrames(frames)
+	if ledger := self.exchange.residentPayloadLedger(); ledger != nil {
+		ledger.update(residentPayloadControl, controlPayloadCharge(shared), true)
+	}
 	select {
 	case <-self.ctx.Done():
-		returnResidentControlFrames(shared)
+		self.releaseControlPayload(shared)
 	case self.controlIngress <- shared:
 		return
 	default:
-		returnResidentControlFrames(shared)
+		self.releaseControlPayload(shared)
 		recordReceiveQueueDrop(receiveQueueBoundaryResidentClientControl, byteCount)
 		// Control Transfer delivery has already reached its final application
 		// callback, so silently skipping a frame can acknowledge durable state
@@ -4619,10 +4645,10 @@ func (self *Resident) CloseAndWait(ctx context.Context) error {
 		// A callback admitted before Close can win its ready queue send after a
 		// canceled worker's deferred drain. Producer and worker joins make this
 		// final drain race-free without closing callback-facing channels.
-		returnReadyResidentControlIngress(self.controlIngress)
+		self.drainControlPayloads()
 		for shardIndex := range self.forwardIngress {
 			if queue := self.forwardIngress[shardIndex].queue; queue != nil {
-				returnReadyResidentForwardIngress(queue)
+				self.drainForwardIngress(queue)
 			}
 		}
 	}

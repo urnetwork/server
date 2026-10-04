@@ -18899,7 +18899,7 @@ RSS ownership totals remain partial even when paired memory headroom is valid.
 An optional Connect startup flag, `--memory-owner-ledger`, publishes a fixed
 resident SDK transfer-owner scope through the existing authenticated,
 process-stamped metrics pusher. It defaults off and adds no listener, timer,
-heap profile, forced collection, or per-packet hook. A run captures one ledger
+heap profile or forced collection. A run captures one ledger
 before creating residents. A nil ledger registers no collector; absence must
 remain disabled/unknown, never a zero-owner census.
 
@@ -18934,6 +18934,37 @@ The corrected release integration uses the published ledger-only Connect commit
 it does not enable close-report ID emission or require migration764. Local
 controls cover real resident construction/held-ACK teardown, fixed metric cells,
 overlap and invalid-state refusal, default-off settings, and scope ownership.
+
+The same opt-in flag also publishes resident payload ownership for three finite
+stages through `urnetwork_connect_resident_payload_`: `control_ingress` includes
+admission offers, queued frames, and the active controller call;
+`forward_ingress` includes the callback's shared frame through forward lookup
+and output admission; `forward_output` includes the admitted queue, pending
+resident lookup, and socket-queue offer until the exchange connection consumes
+that reference. Cancellation does not erase accepted control work: its charge
+remains until the controller returns or the joined teardown returns the frame.
+Refused offers release their charge immediately. A nil ledger keeps the original
+ownership/return path and publishes no collector.
+
+These payload families are `enabled`, `sample_complete`, `messages`,
+`logical_bytes`, `backing_charge_bytes`, `admitted_total`, and `released_total`.
+There are exactly 17 fixed series in a coherent collection; an overlapping or
+invalid snapshot emits only the two validity gauges. No queue, resident map,
+global heap, or goroutine profile is traversed. Enabled accounting adds constant
+atomic updates at ownership transitions, with no queue cap, timer, retry,
+protocol, financial, or lifecycle change. Require exact same-process provenance,
+freshness, complete state, unique cells, and admitted-minus-released conservation.
+
+`logical_bytes` sums visible message lengths. `backing_charge_bytes` charges
+complete pooled slices at the SDK pool class and other slices at visible length;
+it excludes frame envelopes and cannot recover an arbitrary subslice's complete
+allocation. The same backing may be shared with another stage or SDK owner, so
+these charges must not be added to other ownership metrics as physical heap.
+SDK queues, transport channels after handoff, caller-held buffers, allocator
+spans, and stacks remain outside this three-stage measurement. Local controls
+cover healthy socket delivery, pending lookup, saturation refusal, accepted
+control tail completion, cancellation, final pool returns, and disabled or
+incoherent collection. They qualify this diagnostic seam, not a Main leak cause.
 
 Constructor-owned SendSequence ACKs are already coalesced directly into their
 published ACK window. The corrected SDK no longer allocates a compatibility ACK

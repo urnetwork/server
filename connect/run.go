@@ -53,6 +53,7 @@ func exchangeSettingsForRun(options RunOptions) *ExchangeSettings {
 	settings := DefaultExchangeSettings()
 	if options.MemoryOwnerLedger {
 		settings.MemoryOwnerLedger = &connectcore.TransferMemoryOwnerLedger{}
+		settings.payloadOwnerLedger = &residentPayloadLedger{}
 	}
 	settings.ConnectHandlerSettings.TransportTlsSettings.DefaultHostName = options.TLSDefaultHostName
 	if options.DirectH3LoopbackMode {
@@ -116,6 +117,11 @@ func runWithDependencies(
 			return fmt.Errorf("register Connect transfer owner metrics: %w", err)
 		}
 		defer unregisterOwnerMetrics()
+		unregisterPayloadMetrics, err := registerResidentPayloadMetrics(prometheus.DefaultRegisterer, settings.payloadOwnerLedger)
+		if err != nil {
+			return fmt.Errorf("register Connect resident payload metrics: %w", err)
+		}
+		defer unregisterPayloadMetrics()
 		exchange = NewExchangeFromEnv(runCtx, settings)
 		defer exchange.Close()
 		connectRouter, err := newConnectRouterFromExchange(runCtx, cancel, exchange)
