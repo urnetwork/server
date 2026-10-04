@@ -77,8 +77,18 @@ func LoadReceiptFinalityCaptureConfig(ctx context.Context, reference FileReferen
 // A capture owns the directory lock and client for its entire invocation.
 // The private test seam supplies deterministic transport failures, never a signer.
 type finalityCapture struct {
-	directory *os.File
-	rpc       *receiptCollectorRpc
+	directory       *os.File
+	rpc             *receiptCollectorRpc
+	nativeExecution bool
+}
+
+// The receipt adapter retains its historical error contract. The native role
+// separately distinguishes complete contradictory evidence from unread data.
+func (self *finalityCapture) invalid(err error) error {
+	if self.nativeExecution {
+		return nativeFinalityVerificationError(err)
+	}
+	return err
 }
 
 // Journal publications use the existing owner-private create-only fsync path.
@@ -105,7 +115,7 @@ func (self *finalityCapture) load(ctx context.Context, name string, maximum int,
 	if err := errors.Join(readErr, file.Close()); err != nil {
 		return false, err
 	}
-	return true, decodeJson(raw, value)
+	return true, self.invalid(decodeJson(raw, value))
 }
 
 // A reservation is synced before transport. Missing completion after a crash
@@ -138,13 +148,19 @@ func (self *finalityCapture) resumeBudget(ctx context.Context) error {
 			break
 		}
 		var attempt finalityCaptureAttempt
-		if _, err := self.load(ctx, name, 1024, &attempt); err != nil || !canonicalDigest(attempt.RequestHash) {
-			return errors.New("native capture retained request reservation is invalid")
+		if _, err := self.load(ctx, name, 1024, &attempt); err != nil {
+			return fmt.Errorf("native capture reading original request reservation: %w", err)
+		}
+		if !canonicalDigest(attempt.RequestHash) {
+			return self.invalid(errors.New("native capture retained request reservation is invalid"))
 		}
 		var completion finalityCaptureRead
 		found, err := self.load(ctx, fmt.Sprintf("read-%05d.json", index), 1024, &completion)
-		if err != nil || found && (completion.ReplyBytes == nil || *completion.ReplyBytes < 0 || *completion.ReplyBytes > maximumCollectionReplyBytes+1) {
-			return errors.New("native capture retained response debit is invalid")
+		if err != nil {
+			return fmt.Errorf("native capture reading original response debit: %w", err)
+		}
+		if found && (completion.ReplyBytes == nil || *completion.ReplyBytes < 0 || *completion.ReplyBytes > maximumCollectionReplyBytes+1) {
+			return self.invalid(errors.New("native capture retained response debit is invalid"))
 		}
 		debit := maximumCollectionReplyBytes + 1
 		if found {
@@ -157,7 +173,7 @@ func (self *finalityCapture) resumeBudget(ctx context.Context) error {
 	}
 	for name := range nameKVs {
 		if strings.HasPrefix(name, "request-") || strings.HasPrefix(name, "read-") {
-			return errors.New("native capture request journal has a gap or orphan completion")
+			return self.invalid(errors.New("native capture request journal has a gap or orphan completion"))
 		}
 	}
 	self.rpc.requests, self.rpc.remaining = requests, remaining
@@ -276,7 +292,16 @@ func captureReceiptFinality(ctx context.Context, archive *Archive, collection *R
 // authority signal before choosing certificates. A later certificate may cover
 // an ordinary boundary, but cannot skip an outgoing-set enactment certificate.
 func (self *finalityCapture) collect(ctx context.Context, collection *ReceiptCollection, checkpoint *NativeFinalityCheckpoint, anchor *nativeFinalityHeader, maximumDescendants uint64) (*ReceiptFinalityProof, error) {
-	boundary := collection.Observations.NativeFinalized
+	segments, err := self.collectWindow(ctx, collection.Observations.NativeFinalized, checkpoint, anchor, maximumDescendants)
+	if err != nil {
+		return nil, err
+	}
+	return &ReceiptFinalityProof{Schema: ReceiptFinalityDescendantProofSchema, CollectionHash: collection.ContentHash, CheckpointHash: checkpoint.Hash(), Segments: segments}, nil
+}
+
+// Native execution and receipt recovery share exact ancestry discovery and
+// outgoing-set certificates. Only their independently bound contexts differ.
+func (self *finalityCapture) collectWindow(ctx context.Context, boundary ObservedBlockIdentity, checkpoint *NativeFinalityCheckpoint, anchor *nativeFinalityHeader, maximumDescendants uint64) ([]GrandpaFinalitySegment, error) {
 	var scales []string
 	selected := boundary
 	encodedBytes := len(checkpoint.HeaderScale)
@@ -286,23 +311,23 @@ func (self *finalityCapture) collect(ctx context.Context, collection *ReceiptCol
 			return nil, err
 		}
 		if header.identity != selected {
-			return nil, errors.New("native capture selected header number differs")
+			return nil, self.invalid(errors.New("native capture selected header number differs"))
 		}
 		encodedBytes += len(scale)
 		if encodedBytes > MaximumReceiptFinalityBytes {
-			return nil, errors.New("native capture header path exceeds the proof byte bound")
+			return nil, self.invalid(errors.New("native capture header path exceeds the proof byte bound"))
 		}
 		scales = append(scales, scale)
 		selected = ObservedBlockIdentity{Number: selected.Number - 1, Hash: header.parent}
 	}
 	if selected != anchor.identity {
-		return nil, errors.New("native capture ancestry does not reach the pinned checkpoint")
+		return nil, self.invalid(errors.New("native capture ancestry does not reach the pinned checkpoint"))
 	}
 	slices.Reverse(scales)
-	proof := &ReceiptFinalityProof{Schema: ReceiptFinalityDescendantProofSchema, CollectionHash: collection.ContentHash, CheckpointHash: checkpoint.Hash()}
+	segments := []GrandpaFinalitySegment{}
 	budget := &nativeFinalityBudget{remaining: MaximumReceiptFinalityBytes}
 	if _, err := budget.header(checkpoint.HeaderScale); err != nil {
-		return nil, err
+		return nil, self.invalid(err)
 	}
 	setId, authorities, pending := checkpoint.SetId, checkpoint.Authorities, checkpoint.PendingChange
 	var segment []string
@@ -327,18 +352,18 @@ func (self *finalityCapture) collect(ctx context.Context, collection *ReceiptCol
 		}
 		header, err := budget.header(scale)
 		if err != nil {
-			return nil, err
+			return nil, self.invalid(err)
 		}
 		if header.parent != cursor.identity.Hash || header.identity.Number != cursor.identity.Number+1 {
-			return nil, errors.New("native capture descendant is disconnected from the selected collection")
+			return nil, self.invalid(errors.New("native capture descendant is disconnected from the selected collection"))
 		}
 		change, err := header.scheduledChange()
 		if err != nil {
-			return nil, err
+			return nil, self.invalid(err)
 		}
 		if change != nil {
 			if pending != nil {
-				return nil, errors.New("native capture authority schedules overlap")
+				return nil, self.invalid(errors.New("native capture authority schedules overlap"))
 			}
 			pending = change
 		}
@@ -348,38 +373,52 @@ func (self *finalityCapture) collect(ctx context.Context, collection *ReceiptCol
 		if !enactment && header.identity.Number < boundary.Number {
 			continue
 		}
-		certificate, err := self.certificate(ctx, header.identity.Hash, scale)
+		var verifyCertificate func(string) error
+		if self.nativeExecution {
+			verifyCertificate = func(encoded string) error {
+				validationBudget := &nativeFinalityBudget{remaining: MaximumReceiptFinalityBytes}
+				justification, err := validationBudget.justification(encoded)
+				if err != nil {
+					return err
+				}
+				_, err = verifyGrandpaCertificate(ctx, justification, header, setId, authorities, pending)
+				return err
+			}
+		}
+		certificate, err := self.certificate(ctx, header.identity.Hash, scale, verifyCertificate)
 		if err != nil {
 			return nil, err
 		}
 		if certificate == "" {
 			if enactment {
-				return nil, errors.New("native capture requires the archive's exact outgoing GRANDPA enactment justification; checkpoint authority remains unknown")
+				return nil, &nativeFinalityUnavailableError{reason: "native capture requires the archive's exact outgoing GRANDPA enactment justification; checkpoint authority remains unknown"}
 			}
 			continue
 		}
 		justification, err := budget.justification(certificate)
 		if err != nil {
-			return nil, err
+			return nil, self.invalid(err)
 		}
-		if _, err := verifyGrandpaCertificate(ctx, justification, header, setId, authorities, pending); err != nil {
-			return nil, err
+		if !self.nativeExecution {
+			if _, err := verifyGrandpaCertificate(ctx, justification, header, setId, authorities, pending); err != nil {
+				return nil, err
+			}
 		}
-		proof.Segments = append(proof.Segments, GrandpaFinalitySegment{Headers: segment, JustificationScale: certificate})
-		if len(proof.Segments) > maximumGrandpaCertificates {
-			return nil, errors.New("native capture certificate count exceeds the proof bound")
+		segments = append(segments, GrandpaFinalitySegment{Headers: segment, JustificationScale: certificate})
+		if len(segments) > maximumGrandpaCertificates {
+			return nil, self.invalid(errors.New("native capture certificate count exceeds the proof bound"))
 		}
 		segment = nil
 		if header.identity.Number >= boundary.Number {
-			return proof, nil
+			return segments, nil
 		}
 		if enactment {
 			if setId == ^uint64(0) {
-				return nil, errors.New("native capture authority set ID overflows")
+				return nil, self.invalid(errors.New("native capture authority set ID overflows"))
 			}
 			setId++
 			authorities, pending = pending.Authorities, nil
 		}
 	}
-	return nil, errors.New("native capture found no stored GRANDPA justification within the pinned descendant window; retain partial evidence and obtain archive capability or a separately pinned wider capture")
+	return nil, &nativeFinalityUnavailableError{reason: "native capture found no stored GRANDPA justification within the pinned descendant window; retain partial evidence and obtain archive capability or a separately pinned wider capture"}
 }
