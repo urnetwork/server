@@ -5290,6 +5290,32 @@ drain the inherited debt, and require consecutive aged-bucket decline. Roll
 the cap only where a live selection log still exceeds 25,000; do not prescribe
 redeploying code that the executing version and journal already prove present.
 
+The 2026-10-04 loaded selector control found a separate work-bound defect
+inside the already capped page: ordinary source/destination report joins could
+scan retained global `contract_close` history. With 600,000 synthetic contracts,
+1.2 million reports and the live 25,000-row cap, the old open-page query examined
+about 2.45 million report rows; keyed lateral lookups examined about 97,000 and
+returned the same first and continued pages. Local time fell from about 641ms
+to 339–374ms, while buffer accesses increased. These local measurements prove
+the downstream scan mechanism, not Main CPU attribution or elapsed-time gain.
+The owning selector now uses one `(contract_id, party)` lookup per nullable
+report. The unique report key makes `LIMIT 1` equivalent; the raw page/cursor,
+quiet-period, pending-intent and financial mutation rules remain unchanged.
+The disputed selector showed no gain and retains its existing query.
+
+A truncated native query prefix matching this selector is a source-review lead,
+not full-statement or Taskworker ownership proof. Recovery still requires
+source-qualified task/cursor progress, completed pages and falling aged debt;
+neither a cursor patch nor a faster local read establishes that recovery. The
+loaded regression also covers missing source/destination reports, retained
+intents, recent reports, both initial/continued cursors and exact result parity.
+For the separate bounded backlog diagnostic, a `pending_task` bitmap plan may
+be one exact unique-key lookup: qualify its single bitmap-index child and
+matching recheck equality, not merely the node name. Missing/OR/range keys,
+multiple children, other indexes or unbounded estimates remain refused.
+`migration_audit` is outside that reader's guarded hot-relation list; its small
+metadata scan alone does not explain an indexed-plan refusal.
+
 The adjacent 03:27Z sample confirmed recovery direction without declaring the
 backlog cleared. Open contracts fell to 1,021,961, including 982,373 older than
 five minutes and 791,335 older than 30 minutes. `transfer_contract` dead tuples

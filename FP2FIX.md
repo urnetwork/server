@@ -6620,3 +6620,46 @@ Root owns Config identity and publication, current-provider shadow, cached
 reader rollover and fresh lookup/rollup/native-index proof. The previously
 observed policy-two activation and sparse-catalog Quality gap remain the
 production facts until Root's new receipts establish the changed boundary.
+
+### 2026-10-04 11:48 UTC close-cursor rollout and remaining work
+
+Root deployed the completed-accounting-error cursor correction from Main
+`2d96d996` through the qualified Taskworker carrier `25988a51`, version
+`2026.10.4-close-retry+1060890500`. All eight deployment commands completed by
+11:40:43 UTC. The correctly activated eight-Taskworker metrics receipts at
+11:45 and 11:48 independently qualified that release and compared the same
+process generations. The earlier runtime receipt's inconsistent disabled flag
+remains an evidence caveat; the later metrics manifest authorized its contact.
+The carrier preserves the preceding Redis admission and asynchronous settlement
+models; this rollout is not a financial-path revert.
+
+The fresh accepted URL census reported 85,283 eligible providers and zero quota
+or secure completions, with 349,724 measured runs still needed. During the
+135–151s same-process interval, the shard-zero owner completed one refresh in
+9.04s and one deadline at 10.00s. The census age was 148.593s at the second read.
+All eight native Quality buckets were zero; Speed ranged 2,359–2,382 and Online
+85,259–85,260. Missing close-task counters remain unknown. These measurements
+restore a current denominator; they do not establish full coverage or backlog
+recovery. Root's paired reduction is
+`temp/pg-contention-20261004/root-tw-census-delta-1145-1148.json`, SHA-256
+`9f696c11268cc9b7f6f4a00bdcecf1190e86f5ca18ac56c52d391d52035b9bab`.
+
+The subsequent local close-selector control exposed report-table work beyond
+the existing raw-page cap: 1.2 million synthetic report rows caused about 2.45
+million row examinations for one 25,000-contract page. Keyed report joins
+returned the same first and continued pages while examining about 97,000 rows.
+Local elapsed time improved, but buffer accesses increased; Main performance
+and its actual execution plan remain unproved. The independent experiment is
+`temp/pg-contention-20261004/close-query-loaded-v2/sol-independent-result.json`,
+SHA-256 `143e0be6a7af5e5cc762c0c74dc1a3bab793213e2d065407ad431f624ef6e1ea`.
+The owning patch bounds those two nullable report lookups and retains the
+existing quiet-period, intent, accounting, cursor and retry rules. Its source
+qualification and deployment are separate from the already deployed cursor fix.
+
+Native truncated prefixes also point to the close selector and disconnected
+client reliability fill; they do not prove full statement identity, runtime
+caller, cancellation failure or CPU ownership. Current close/legacy settlement
+backlog, all-provider accepted-run throughput, full subscriber coverage, actual
+prober funding/admission, and sustained performance recovery remain open. Keep
+accepted measured outcomes separate from setup failures, and measure the
+configured concurrency before considering a capacity change.

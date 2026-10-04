@@ -3973,25 +3973,7 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 		}
 		seen := 0
 		server.Db(ctx, func(conn server.PgConn) {
-			rows, queryErr := conn.Query(ctx, `
-                WITH bounded AS MATERIALIZED (
-                    SELECT contract_id,source_id,destination_id,dispute,create_time,usage_unverified
-                    FROM transfer_contract
-                    WHERE open AND (create_time,contract_id)>($5,$6) AND create_time <= $7
-                    ORDER BY create_time,contract_id LIMIT $4
-                )
-                SELECT t.contract_id,t.source_id,t.destination_id,t.dispute,
-                    source_contract_close.close_time,source_contract_close.used_transfer_byte_count,source_contract_close.checkpoint,
-                    destination_contract_close.close_time,destination_contract_close.used_transfer_byte_count,destination_contract_close.checkpoint,
-                    t.create_time,
-                    NOT COALESCE((SELECT true FROM legacy_settlement_intent pending WHERE pending.contract_id=t.contract_id),false)
-                    AND (t.usage_unverified OR (t.create_time <= $3
-                        AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $3)))
-                FROM bounded t
-                LEFT JOIN contract_close source_contract_close ON source_contract_close.contract_id=t.contract_id AND source_contract_close.party=$1
-                LEFT JOIN contract_close destination_contract_close ON destination_contract_close.contract_id=t.contract_id AND destination_contract_close.party=$2
-                ORDER BY t.create_time,t.contract_id
-			`, ContractPartySource, ContractPartyDestination, minTime.UTC(), maxCount, position.CreateTime, position.ContractId, next.ScanBefore)
+			rows, queryErr := conn.Query(ctx, forceCloseOpenContractPageSql, ContractPartySource, ContractPartyDestination, minTime.UTC(), maxCount, position.CreateTime, position.ContractId, next.ScanBefore)
 			server.WithPgResult(rows, queryErr, func() {
 				for rows.Next() {
 					c := &OpenContract{}
@@ -4021,19 +4003,7 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 		}
 		seen := 0
 		server.Db(ctx, func(conn server.PgConn) {
-			rows, queryErr := conn.Query(ctx, `
-                WITH bounded AS MATERIALIZED (
-                    SELECT contract_id,source_id,destination_id,create_time,usage_unverified
-                    FROM transfer_contract
-                    WHERE dispute AND outcome IS NULL AND (create_time,contract_id)>($3,$4) AND create_time <= $5
-                    ORDER BY create_time,contract_id LIMIT $2
-                )
-                SELECT t.contract_id,t.source_id,t.destination_id,t.create_time,
-                    NOT COALESCE((SELECT true FROM legacy_settlement_intent pending WHERE pending.contract_id=t.contract_id),false)
-                    AND (t.usage_unverified OR (t.create_time <= $1
-                        AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $1)))
-                FROM bounded t ORDER BY t.create_time,t.contract_id
-			`, minTime.UTC(), maxCount, position.CreateTime, position.ContractId, next.ScanBefore)
+			rows, queryErr := conn.Query(ctx, forceCloseDisputedContractPageSql, minTime.UTC(), maxCount, position.CreateTime, position.ContractId, next.ScanBefore)
 			server.WithPgResult(rows, queryErr, func() {
 				for rows.Next() {
 					c := &OpenContract{dispute: true}

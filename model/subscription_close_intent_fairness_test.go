@@ -3,10 +3,6 @@ package model
 import (
 	"context"
 	"encoding/json"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -134,34 +130,7 @@ func TestForceCloseCursorTiesAndFixedPassBoundary(t *testing.T) {
 // past a 32k intent-owned head each. The input remains a bounded test fixture;
 // this checks local planner cost and index use, not production scan duration.
 func TestForceCloseIntentLookupsRemainIndexed(t *testing.T) {
-	file, err := parser.ParseFile(token.NewFileSet(), "subscription_model.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var queries []string
-	for _, declaration := range file.Decls {
-		fn, ok := declaration.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "ForceCloseOpenContractIdsPage" {
-			continue
-		}
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			lit, ok := n.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				return true
-			}
-			query, err := strconv.Unquote(lit.Value)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if strings.Contains(query, "legacy_settlement_intent pending") {
-				queries = append(queries, query)
-			}
-			return true
-		})
-	}
-	if len(queries) != 2 {
-		t.Fatalf("runtime close selectors=%d want=2", len(queries))
-	}
+	queries := []string{forceCloseOpenContractPageSql, forceCloseDisputedContractPageSql}
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
