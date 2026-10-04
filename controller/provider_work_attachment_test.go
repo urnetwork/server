@@ -49,8 +49,6 @@ type providerWorkPublisherOob struct {
 // Only client key registration uses the separately installed original model
 // history below. Creation, provide registration and close use actual ingress.
 func (self *providerWorkPublisherOob) SendControl(frames []*protocol.Frame, callback connect.OobResultFunction) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
 	defer func() {
 		for _, frame := range frames {
 			connect.MessagePoolReturn(frame.MessageBytes)
@@ -62,21 +60,30 @@ func (self *providerWorkPublisherOob) SendControl(frames []*protocol.Frame, call
 	}
 	if len(frames) == 1 && frames[0].MessageType == protocol.MessageType_TransferCreateContract {
 		frameRaw, err := proto.Marshal(frames[0])
+		var request []byte
 		if err == nil {
-			self.request, err = providerWorkReadPresend(self.ctx, self.directory, frameRaw)
+			request, err = providerWorkReadPresend(self.ctx, self.directory, frameRaw)
 		}
+		self.stateLock.Lock()
+		self.request, self.err = request, errors.Join(self.err, err)
+		self.stateLock.Unlock()
 		if err != nil {
-			self.err = err
 			callback(nil, err)
 			return
 		}
 	}
 	replies, err := ConnectControlFrames(self.ctx, self.clientId, frames, self.settings)
 	defer returnConnectControlFrames(replies)
+	var reply []byte
 	if err == nil && len(replies) == 1 && replies[0].MessageType == protocol.MessageType_TransferCreateContractResult {
-		self.reply, err = proto.Marshal(replies[0])
+		reply, err = proto.Marshal(replies[0])
+	}
+	self.stateLock.Lock()
+	if reply != nil {
+		self.reply = reply
 	}
 	self.err = errors.Join(self.err, err)
+	self.stateLock.Unlock()
 	callback(replies, err)
 }
 
