@@ -1,0 +1,3 @@
+# Public, throwaway signing material for the portable local test database.
+tls_key_paths:
+  - jwt-local-evaluator.pem

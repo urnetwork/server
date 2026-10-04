@@ -226,7 +226,8 @@ from zsh; do not source `run-local-state.sh` directly into stock zsh.
   sibling vault checkout also exists. Set it consistently for both the launcher
   and the test shell; forcing it only for tests selects a different password
   from a stack initialized with `vault/local/pg.yml`.
-- The portable fixture also provides a public test password pepper and a
+- The portable fixture also provides a public test password pepper, a
+  throwaway P-256 JWT signing key (`jwt-local-evaluator.pem`), and a
   synthetic subsidy configuration for model tests. The subsidy keeps nonzero
   accrual, points, referral and wallet thresholds; tests that exercise only
   ledger settlement select an explicit zero-subsidy copy. These files stay
