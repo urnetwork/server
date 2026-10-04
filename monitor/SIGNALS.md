@@ -5454,6 +5454,28 @@ explicitly activated, Quality also verifies current connection eligibility
 against the primary even with a complete exclusion snapshot; see
 `arindbctl/CLASSIFICATION.md` for its separate rollout gate.
 
+Optional capture startup qualifier: a fresh protected operator lease is not an
+endpoint or source-identity proof. Connect and Taskworker must continue primary
+serving/work after a rejected optional capture configuration or unavailable
+native Go VCS metadata. The diagnostic emits a finite startup error and remains
+unavailable; it must not invent a revision, weaken RPC identity checks or turn
+missing capture into a successful shadow. Actual Run-path controls cover both
+fresh enabled/no-VCS and unsafe private configuration, while strict capture
+refusal and existing readiness/drain controls remain enforced. An expired lease
+already disables capture without error. File publication alone cannot revive a
+listener that was absent at startup, so lease actions belong with the next
+ordinary rollout and require endpoint inventory afterward.
+
+A native build control found this Go toolchain emits VCS settings from a genuine
+Git directory but omits them from a linked-worktree Git file, including with
+`-buildvcs=true`. Use the actual immutable image/binary build information as the
+discriminator: source checkout identity alone cannot prove runtime source-info
+metrics or capture identity. A genuine clone restores native metadata without
+injected labels. Conversely, missing diagnostic identity alone is not proof of
+primary service failure; qualify primary readiness separately. Static verified
+address leaves, successful lease files and service startup still do not establish
+complete Main shadow coverage or sufficient verified subscriber provider supply.
+
 Use §2.9c's `load_primary`, `load_backfill` and `hard_exclusions` stage
 residence/inflight metrics to separate score reads from safety checks. The
 last stage includes both the Redis exclusion read and any primary fallback;

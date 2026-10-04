@@ -6390,3 +6390,35 @@ no forced ARIN-only restart, full Main shadow or sufficient positive subscriber
 supply has been established. Policy two stays inactive. The 493 offline verified
 leaves are not Main provider supply. FP2FIX, current resident memory ownership,
 financial backlog recovery and the authoritative standing monitor remain active.
+
+
+### 2026-10-04 00:37 UTC optional capture and ordinary rollout checkpoint
+
+The last cited coherent URL census is historical: 79.15% quota complete at
+23:34. It is not current coverage or a fixed-provider recovery claim. A fresh
+fixed-window accepted-measurement read is separate; neither source changes nor
+global throughput prove provider distribution, financial recovery or CPU cause.
+
+API and Proxy 6200 deployment commands completed successfully. Their current
+native runtime convergence remains unproved here. Connect and Taskworker 6200
+selection is held while the successor restores genuine native Go VCS metadata
+and isolates optional capture failure from primary startup. The release keeps
+schema763, the qualified dependency graph, the bounded closer, mature-deficient
+one-minute pacing, ownership ledger and guarded reliability no-op. It does not
+emit Report IDs or claim migration764. Focused actual Run controls reproduce the
+fresh enabled/no-VCS and unsafe-config startup failure, then pass with strict
+capture refusal preserved. No Main improvement is attributed to those controls.
+
+The user has lifted the registry credential prerequisite; this is authorization
+to continue normal publication, not a claim of credential replacement. The next
+four-service release builds from a genuine Git clone. No forced ARIN-only restart
+is planned. A fresh three-hour baseline operator was prepared, but expired unused
+publication activations establish no Main lease or endpoint change. Policy two
+remains inactive pending full Main baseline/final capture and sufficient verified
+residential/business provider supply; 493 offline address leaves are not supply.
+
+The c39 provenance monitor is authoritative on its ordinary fifteen-minute
+cadence. The source backup remains active; completion, restore and destination
+custody are unproved, and migration764 remains unapplied. Retained legacy intent
+refusals, resident memory, URL coverage and ARIN shadow work remain open. FP2FIX
+continues through source merge, ordinary all-block rollout and fresh measurement.
