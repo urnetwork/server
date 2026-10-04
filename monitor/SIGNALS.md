@@ -1345,9 +1345,12 @@ socket census rather than disclosing its address in monitor output.
   recovery record, and goroutine-shaped JSON. Class `pg-client-capacity` takes
   precedence over generic `panic`; raw line volume is diagnostic amplification,
   not a count of unique rejected PostgreSQL sessions.
-- This is distinct from `query_wait_timeout`, where a PgBouncer shard already
-  owns all of its server connections and kills a queued client, and from a
-  client write timeout on port 6432, where the request may not reach the pool.
+- This is distinct from `query_wait_timeout`, where a queued client did not
+  receive a server connection before its deadline. That can mean established
+  servers are busy or backend connection/startup is not progressing; the error
+  alone does not distinguish them. Use the native shard discriminator in §2.11.
+  A client write timeout on port 6432 is another boundary, where the request
+  may not reach the pool.
 - ROOT-CAUSE ORDER: first split active, young idle-in-transaction, idle, and
   starting owners. Correlate active and young transaction cohorts with direct
   wait events and completed statement or `COMMIT` latency in PostgreSQL logs.
@@ -6888,7 +6891,7 @@ million, but that cleanup result does not make the 2.17M-row payment
 transaction bounded. Require the query id and deadline-error cohort to
 disappear after the queued cursor path is deployed.
 
-### 2.11 PgBouncer client-write stall — pool path vs postgres load
+### 2.11 PgBouncer pool-path stalls — startup progress vs busy servers
 Probe: `pgbouncer-stalls`
 
 The application-side error
@@ -6921,7 +6924,10 @@ focused detector tests do not prove Main recovery.
 
 Diagnosis order:
 1. Sample `pg_stat_activity` through direct 5432. Low active count/no blockers
-   rules out a postgres CPU or lock wall but does NOT clear the pool path.
+   does not establish a PostgreSQL CPU or lock wall and does NOT clear the
+   pool path. Require one bounded authenticated direct probe matching the
+   pooler's effective backend endpoint, role, database and TLS mode. An open
+   TCP listener or privileged Unix-socket query does not exercise that path.
 2. On the db host, remember 6432 is nginx in front of the 32 PgBouncer shards
    (6433-6464). Check `ss` listen/accept queues, nginx errors, every shard unit,
    and `SHOW POOLS`/`SHOW STATS` on the shards rather than the intentionally
@@ -6931,10 +6937,63 @@ Diagnosis order:
    lightly active. The provider route compounds the pool pressure with query
    ids `8120731601370473026` (hundreds of thousands of provider ids returned
    per call) and `6264993620546911677` (~3.3s lifetime mean aggregate).
-4. A route-specific cluster means bound/cache/page that route's database work;
-   a fleet-wide cluster with full shard queues means pool-path saturation.
-   Raising the socket timeout only hides either failure and retains scarce
-   connections longer.
+4. A route-specific cluster warrants attribution of that route's database
+   work. A fleet-wide cluster with waiting clients warrants native shard
+   evidence before choosing between busy established servers and backend
+   startup blockage. Raising the socket timeout hides either failure and
+   retains scarce connections longer.
+
+`FATAL: query_wait_timeout` means that a query did not receive a server before
+its queue deadline. Class `pgbouncer-query-wait` warns at one line/minute and
+pages at five, preserving the generic panic page threshold when the same
+error appears inside a recovery record. It takes precedence over generic
+`panic`, uses a fixed sample, and reports diagnostic lines rather than unique
+requests. The error does not prove that the pool owns its configured maximum
+of established servers.
+
+The bounded startup discriminator is a diagnosis under this signal, not a
+new automatic administrative probe:
+
+- Bind `SHOW POOLS`, `SHOW SERVERS` and effective `SHOW CONFIG` to each native
+  shard process and the same observation interval. Count active, idle, used,
+  tested, login, active-cancellation and being-canceled servers separately.
+  Keep client cancellation queues distinct from server ownership. Record
+  connection/request ages, effective `server_connect_timeout`, login retry,
+  and paused/disabled state without exporting endpoint or account values.
+- Waiting clients plus busy established servers require PostgreSQL wait and
+  owner attribution. Waiting clients with zero established normal and
+  cancellation servers but positive `sv_login` establish backend startup as
+  the blocked phase. They do not distinguish repeated failed attempts from
+  one overdue startup; successive server identities/ages and finite errors
+  are needed. Compare these with the matched authenticated direct control.
+- Missing shards, changed generations, capped rows, unparsed ages or failed
+  observations leave the affected causal fields unknown. A fresh startup can
+  be transient; one frame alone does not prove an overdue timer or a library
+  defect. A healthy direct control narrows the failure to the pooler path but
+  does not demonstrate application recovery.
+- Preserve bounded evidence before any explicitly authorized recovery.
+  Verify established-server progress on every shard, the matched direct
+  control, and affected API/Connect requests. Then require ten minutes of
+  complete fresh log windows and §1.3a headroom through the triggering work.
+  A restart that restores progress is recovery evidence; the durable fix
+  still requires the installed version and the responsible startup failure.
+
+The 2026-10-04 native control observed all 32 shards with 301,567 waiting
+clients, zero active/idle/used/tested or cancellation servers, and exactly one
+login per shard. Direct loopback TCP admission and authenticated SELECT 1 with
+the actual backend role and TLS disabled succeeded. One authorized shard
+restart restored 20 active servers and reduced that shard's waiting clients
+from 25,858 to 42 while the other 31 unit generations stayed unchanged. This
+establishes a real pooler startup/progress failure and a successful recovery
+control; it does not identify the triggering code defect. The earlier claim
+that every queue timeout meant busy established servers was false.
+
+False-negative qualifier: the application's five-second initial Ping can
+time out before the pooler's longer queue deadline. An absent queue-timeout
+line, lower database/Redis load, or a successful listener-only probe does not
+clear API/Connect failure. Bare `pgconn.errTimeout` and `Done` records retain
+their existing classification until exact deployed call-path evidence
+identifies the phase; they are not assigned to PgBouncer from wording alone.
 
 The 2026-09-08 CPU-wall investigation added a general route-cache containment
 boundary. A cold cached route now acquires a Redis `SETNX` fill lease with a
@@ -14502,7 +14561,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `snapd.apparmor.service` failed with parser errors under `snap.lxd.*` while `snapd.service` is active | Installed LXD snap profiles are incompatible with the host AppArmor parser. This is independent of Docker/Warp unless the host intentionally runs production workloads in LXD. | LXD is deliberately absent from main edges; `run-edges.sh` purges it while preserving Snapd and Canonical Livepatch. Confirm `snap list lxd` is absent and both `snapd.service` and `snapd.apparmor.service` are active. A reinstalled LXD snap is configuration drift. |
 | `invalid alert rule: interval (<duration>) should be non-zero and divided exactly by scheduler interval: 10` | A file-provisioned Grafana alert group uses an evaluation interval outside Grafana 13's 10-second scheduler grid. Grafana provisioning fails, the child exits and restarts, `/status` never becomes ready, and Warp keeps the old generation serving. | Fix the rule interval to a positive multiple of 10 seconds and run `go test ./grafana` in Warp; `TestProvisionedAlertIntervalsMatchGrafanaScheduler` validates every embedded alert file. Do not restart Warp or remove the old healthy container—the same invalid image will continue failing. See §11.16. |
 | `redis: connection pool timeout` | Local pool exhausted for PoolTimeout — backpressure, not the root. Deliberately NOT retried in-client (retry amplifies to livelock). | Find what is slow/stuck consuming the pool (usually a wedged node); check pool_timeouts metric per service. |
-| `FATAL: query_wait_timeout` (pgbouncer) | pgbouncer server pool saturated — every server conn busy on slow queries; queued clients are killed at the timeout. A pg-side stall symptom, never a pgbouncer config problem. | Diagnose on direct 5432 (it still connects); check 1.3 active count + db host load → 5.8. |
+| `FATAL: query_wait_timeout` (`pgbouncer-query-wait`) | A queued query did not receive a server connection before its deadline. Busy established servers and backend-startup blockage can both cause this; the line alone leaves the cause unknown. WARN at one diagnostic line/minute, PAGE at five; fixed sample and precedence over generic panic. | Run §2.11: bind native states/ages/config across all active shards and require a bounded authenticated direct control matching backend endpoint, role, database and TLS mode. Split established-server waits from login-only nonprogress; low direct-PG load or an open listener does not clear the pool path. |
 | `server login has been failing, cached error: sorry, too many clients already (server_login_retry)` (`pg-client-capacity`) | PostgreSQL refused a PgBouncer server login at its connection ceiling and PgBouncer cached the result. A timed-out transaction can leave its old backend unwinding while PgBouncer opens a replacement. A single failed request can also be rendered as `Unexpected error`, route recovery, and goroutine-shaped JSON, so the class takes precedence over generic panic and raw log volume is not unique-failure count. The 2026-09-01 control tied the burst to legacy reindex WAL/storage stalls and 60–66-second `COMMIT`s, not idle retention. | Run direct §1.3a immediately; split active, young idle-in-transaction, idle, and starting owners and correlate PostgreSQL waits/commit latency with PgBouncer connection logs or `SHOW POOLS` where permitted. For the matching legacy-reindex chain, wait for index progress to empty and deploy current-main Taskworker fixes `908a8b2c` and `d8392c83`. Do not first tune pools, raise `max_connections`, restart the database/pools, or mass-terminate sessions; preserve the deployed `work_mem` memory-risk context. |
 | `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
 | `[db]maintenance reindex[<i>/<n>] <excluded-table>` (`db-maintenance-legacy-reindex`) | A Taskworker selected a large or high-churn table that current policy excludes and entered the legacy full-table concurrent-reindex path. Because old code logs before acquiring its maintenance connection, the line proves selection/attempt, not that PostgreSQL began or completed the statement. Interruption plus lease recovery can strand `_ccnew`/`_ccold` artifacts and repeat the rebuild before old end-of-rotation cleanup. | Inspect `pg_stat_progress_create_index`, `reindex-debris`, and the exact DbMaintenance owner before changing Taskworker. Do not let a rollout implicitly cancel active work. After progress is empty, satisfy §8.13 and deploy a clean Taskworker containing current-main commits `908a8b2c` plus `d8392c83`; clean debris separately with explicit maintenance authorization and the supported cleanup-only command. Never wildcard-drop artifacts. See §2.2a. |

@@ -605,7 +605,7 @@ esac
 			observed:  "listener_tcp=closed connect_deadline_s=3",
 			evidence:  "Validated probe tools and the owned start/outcome contract distinguish connect refusal or timeout from command execution failure; no socket tuple is retained.",
 			context:   "An open tcp listener is not proof of working authentication, PgBouncer shard queues, nginx forwarding, or direct 5432. Service write-timeout observations are separate inputs.",
-			action:    "Split the configured nginx/PgBouncer frontend, every PgBouncer shard listener and queue, and direct 5432; correlate PostgreSQL activity and affected application routes before selecting a repair. Do not restart or raise timeouts solely on this tcp observation.",
+			action:    "Split the configured nginx/PgBouncer frontend, every PgBouncer shard listener and queue, and direct 5432. Use native SHOW POOLS/SERVERS to distinguish busy established servers from backend-startup nonprogress; require a bounded authenticated direct control matching the effective backend endpoint, role, database and TLS mode. Correlate affected application routes before selecting a repair. Do not restart or raise timeouts solely on this tcp observation.",
 			verify:    "The same local frontend accepts the next two bounded tcp observations and complete service log windows show no recurring client-write timeout while the affected routes are exercised; verify authentication and backend queues independently.",
 			playbook:  "SIGNALS.md §2.11",
 		})
@@ -659,7 +659,7 @@ esac
 				baseline:  fmt.Sprintf("Zero pgproto3 write i/o timeouts to the configured frontend :%d in a complete two-minute service log window.", port),
 				observed:  fmt.Sprintf("service=%s count_2m=%d", service, count),
 				evidence:  "A successful, below-limit log pull matched pgproto3.writeError plus a write-tcp destination at the configured frontend port and i/o timeout; raw lines and socket tuples are not retained.",
-				action:    "Split the configured nginx frontend, all PgBouncer shard queues/listeners, and direct 5432; group timeouts by application route.",
+				action:    "Split the configured nginx frontend, all PgBouncer shard queues/listeners, and direct 5432; group timeouts by application route. Native SHOW POOLS/SERVERS must distinguish busy established servers from backend-startup nonprogress. Require a bounded authenticated direct control matching the effective backend endpoint, role, database and TLS mode; a healthy listener or low PostgreSQL load does not clear the pool path.",
 				verify:    "The next two complete two-minute service log windows contain no configured-frontend client-write timeout while the affected route is exercised; a failed or truncated window is not recovery.",
 				playbook:  "SIGNALS.md §2.11",
 			})
