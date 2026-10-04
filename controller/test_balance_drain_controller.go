@@ -13,7 +13,8 @@ import (
 )
 
 // Acceptance-test balance drain. See model/test_balance_drain_model.go for the
-// gate (vault allowlist) and mechanism. The args deliberately carry no network
+// gate (vault allowlist, or a sign-in email on a tests.yml bypass domain) and
+// mechanism. The args deliberately carry no network
 // id: the drained network is always the caller's own `session.ByJwt.NetworkId`.
 
 type TestBalanceDrainArgs struct {
@@ -63,7 +64,7 @@ func TestBalanceRestore(args *TestBalanceRestoreArgs, clientSession *session.Cli
 
 func testBalanceDrain(
 	store testBalanceDrainStore,
-	allowed func(server.Id) bool,
+	allowed func(context.Context, server.Id) bool,
 	args *TestBalanceDrainArgs,
 	clientSession *session.ClientSession,
 ) (*TestBalanceDrainResult, error) {
@@ -72,7 +73,7 @@ func testBalanceDrain(
 	}
 	networkId := clientSession.ByJwt.NetworkId
 	// refuse before touching the store; the model checks again
-	if !allowed(networkId) {
+	if !allowed(clientSession.Ctx, networkId) {
 		return nil, fmt.Errorf("%d %s", http.StatusForbidden, model.ErrTestBalanceDrainNotAllowed.Error())
 	}
 	duration := time.Duration(0)
