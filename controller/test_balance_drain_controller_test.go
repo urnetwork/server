@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -78,7 +79,7 @@ func TestTestBalanceDrainArgsCannotNameANetwork(t *testing.T) {
 func TestTestBalanceDrainUsesOnlyTheCallerNetwork(t *testing.T) {
 	caller := server.NewId()
 	store := newFakeTestBalanceDrainStore()
-	allowed := func(networkId server.Id) bool { return networkId == caller }
+	allowed := func(ctx context.Context, networkId server.Id) bool { return networkId == caller }
 
 	result, err := testBalanceDrain(store, allowed, &TestBalanceDrainArgs{DurationSeconds: 300}, testBalanceDrainSession(caller))
 	connect.AssertEqual(t, err, nil)
@@ -95,7 +96,7 @@ func TestTestBalanceDrainUsesOnlyTheCallerNetwork(t *testing.T) {
 func TestTestBalanceDrainRefusesNetworksOutsideTheAllowlist(t *testing.T) {
 	store := newFakeTestBalanceDrainStore()
 	allowedNetwork := server.NewId()
-	allowed := func(networkId server.Id) bool { return networkId == allowedNetwork }
+	allowed := func(ctx context.Context, networkId server.Id) bool { return networkId == allowedNetwork }
 
 	for _, s := range []*session.ClientSession{testBalanceDrainSession(server.NewId()), nil, {Ctx: context.Background()}} {
 		result, err := testBalanceDrain(store, allowed, &TestBalanceDrainArgs{}, s)
@@ -110,7 +111,7 @@ func TestTestBalanceDrainRefusesNetworksOutsideTheAllowlist(t *testing.T) {
 	connect.AssertEqual(t, len(store.drainCalls), 0)
 
 	// empty allowlist: disabled for everyone
-	_, err = testBalanceDrain(store, func(server.Id) bool { return false }, nil, testBalanceDrainSession(allowedNetwork))
+	_, err = testBalanceDrain(store, func(context.Context, server.Id) bool { return false }, nil, testBalanceDrainSession(allowedNetwork))
 	connect.AssertEqual(t, err != nil, true)
 	connect.AssertEqual(t, len(store.drainCalls), 0)
 }
@@ -121,7 +122,7 @@ func TestTestBalanceDrainRestoreRoundTrip(t *testing.T) {
 	store := newFakeTestBalanceDrainStore()
 	store.available[caller] = 5 * 1024 * 1024
 	store.available[other] = 7 * 1024 * 1024
-	allowed := func(networkId server.Id) bool { return networkId == caller }
+	allowed := func(ctx context.Context, networkId server.Id) bool { return networkId == caller }
 
 	result, err := testBalanceDrain(store, allowed, nil, testBalanceDrainSession(caller))
 	connect.AssertEqual(t, err, nil)
@@ -144,4 +145,113 @@ func TestTestBalanceDrainRestoreRoundTrip(t *testing.T) {
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, restored.RestoredCount, int64(1))
 	connect.AssertEqual(t, store.balance(caller), model.ByteCount(5*1024*1024))
+}
+
+// The bypass-domain gate through the real model gate, with a fake sign-in
+// email lookup and a fake store.
+func TestTestBalanceDrainBypassDomainGate(t *testing.T) {
+	testCaller := server.NewId()
+	realCaller := server.NewId()
+	listedCaller := server.NewId()
+	networkIdEmails := map[server.Id][]string{
+		testCaller:   {"acceptance-ib-20261003t120000z-1a2b@acceptance.invalid"},
+		realCaller:   {"someone@gmail.com"},
+		listedCaller: {"listed@gmail.com"},
+	}
+	lookups := []server.Id{}
+	defer model.Testing_SetTestBalanceDrainSignInEmails(func(networkId server.Id) []string {
+		lookups = append(lookups, networkId)
+		return networkIdEmails[networkId]
+	})()
+	defer model.Testing_SetTestBalanceDrainAllowlist(nil)
+
+	drain := func(clientSession *session.ClientSession) (*fakeTestBalanceDrainStore, error) {
+		store := newFakeTestBalanceDrainStore()
+		_, err := testBalanceDrain(store, model.TestBalanceDrainAllowed, &TestBalanceDrainArgs{DurationSeconds: 300}, clientSession)
+		return store, err
+	}
+	refused := func(name string, clientSession *session.ClientSession) {
+		t.Helper()
+		store, err := drain(clientSession)
+		if err == nil || !strings.HasPrefix(err.Error(), "403 ") {
+			t.Fatalf("%s: want a 403 refusal, got %v", name, err)
+		}
+		connect.AssertEqual(t, len(store.drainCalls), 0)
+	}
+
+	model.Testing_SetTestBalanceDrainGate(nil, []string{"acceptance.invalid"})
+
+	// a caller whose live sign-in email is on the test domain is allowed
+	store, err := drain(testBalanceDrainSession(testCaller))
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, store.drainCalls, []server.Id{testCaller})
+
+	// a real-domain caller is refused
+	refused("real domain", testBalanceDrainSession(realCaller))
+
+	// JWT claims are not sign-in records: a test-domain principal or network
+	// name on a real-domain network is still refused
+	forged := testBalanceDrainSession(realCaller)
+	forged.ByJwt.Principal = "ib@acceptance.invalid"
+	forged.ByJwt.NetworkName = "ib@acceptance.invalid"
+	refused("test-domain JWT claims", forged)
+
+	// the lookup only ever asked about the JWT's own network
+	for _, networkId := range lookups {
+		if networkId != testCaller && networkId != realCaller {
+			t.Fatalf("sign-in lookup for a network other than the caller's: %s", networkId)
+		}
+	}
+
+	// a malformed bypass list refuses everyone, including test-domain callers
+	model.Testing_SetTestBalanceDrainGate(nil, []string{"acceptance.invalid", "*.invalid"})
+	refused("malformed list, test domain", testBalanceDrainSession(testCaller))
+	refused("malformed list, real domain", testBalanceDrainSession(realCaller))
+
+	// the explicit allowlist still works, beside or without the domain gate
+	model.Testing_SetTestBalanceDrainGate([]server.Id{listedCaller}, []string{"acceptance.invalid"})
+	store, err = drain(testBalanceDrainSession(listedCaller))
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, store.drainCalls, []server.Id{listedCaller})
+	model.Testing_SetTestBalanceDrainAllowlist([]server.Id{listedCaller})
+	store, err = drain(testBalanceDrainSession(listedCaller))
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, store.drainCalls, []server.Id{listedCaller})
+	refused("allowlist only, test domain", testBalanceDrainSession(testCaller))
+
+	// neither configured: off
+	model.Testing_SetTestBalanceDrainGate(nil, nil)
+	refused("off, test domain", testBalanceDrainSession(testCaller))
+	refused("off, listed", testBalanceDrainSession(listedCaller))
+}
+
+// A request body that names another network is ignored: the drain is always
+// the caller's own network, and the gate is evaluated for the caller.
+func TestTestBalanceDrainBodyCannotNameAnotherNetwork(t *testing.T) {
+	testCaller := server.NewId()
+	otherTestNetwork := server.NewId()
+	defer model.Testing_SetTestBalanceDrainSignInEmails(func(networkId server.Id) []string {
+		if networkId == testCaller || networkId == otherTestNetwork {
+			return []string{"ib@acceptance.invalid"}
+		}
+		return nil
+	})()
+	model.Testing_SetTestBalanceDrainGate(nil, []string{"acceptance.invalid"})
+	defer model.Testing_SetTestBalanceDrainAllowlist(nil)
+
+	var args TestBalanceDrainArgs
+	body := `{"duration_seconds": 120, "network_id": "` + otherTestNetwork.String() + `", "client_id": "` + otherTestNetwork.String() + `"}`
+	connect.AssertEqual(t, json.Unmarshal([]byte(body), &args), nil)
+	store := newFakeTestBalanceDrainStore()
+	_, err := testBalanceDrain(store, model.TestBalanceDrainAllowed, &args, testBalanceDrainSession(testCaller))
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, store.drainCalls, []server.Id{testCaller})
+
+	// a real-domain caller cannot borrow a test network's eligibility
+	realCaller := server.NewId()
+	_, err = testBalanceDrain(store, model.TestBalanceDrainAllowed, &args, testBalanceDrainSession(realCaller))
+	if err == nil || !strings.HasPrefix(err.Error(), "403 ") {
+		t.Fatalf("want a 403 refusal, got %v", err)
+	}
+	connect.AssertEqual(t, store.drainCalls, []server.Id{testCaller})
 }
