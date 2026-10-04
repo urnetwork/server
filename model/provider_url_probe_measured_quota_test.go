@@ -42,7 +42,7 @@ func TestUrlProbeMeasuredFailuresCompleteQuotaAndExpire(t *testing.T) {
 		}
 		cycle := testingReadUrlCompletionCycle(t, ctx, clientId)
 		if cycle.history != 10 || cycle.successes != 0 || cycle.errors != 10 || cycle.count != 10 ||
-			!cycle.next.Equal(firstAt.Add(ProviderEgressProbeRefreshAge)) {
+			!cycle.next.Equal(firstAt.Add(ProviderEgressProbeRefreshAge-ProviderUrlProbeRenewalHeadroom)) {
 			t.Fatalf("receipt dedup, diagnostics or failure completion pacing drifted: %+v", cycle)
 		}
 		SetProviderEgressProbeAttempt(ctx, &ProviderEgressProbeAttempt{ClientId: clientId, AttemptAt: now, ProbeFailure: "setup_failed"})
@@ -50,11 +50,11 @@ func TestUrlProbeMeasuredFailuresCompleteQuotaAndExpire(t *testing.T) {
 			t.Fatalf("attempt-only writer reopened full measured quota: %+v", after)
 		}
 		if early := ClaimProviderUrlProbeDue(ctx, cycle.next.Add(-time.Microsecond), 1, 0, 1); len(early) != 0 {
-			t.Fatalf("quota-full failure was retried before expiry: %+v", early)
+			t.Fatalf("quota-full failure was retried before its replacement deadline: %+v", early)
 		}
 		due := ClaimProviderUrlProbeDue(ctx, cycle.next, 1, 0, 1)
-		if len(due) != 1 || due[0].RunsNeeded != 1 || due[0].OutcomeCount != 10 {
-			t.Fatalf("exact four-hour failure expiry did not reopen one run: %+v", due)
+		if len(due) != 1 || due[0].RunsNeeded != 0 || due[0].OutcomeCount != 10 {
+			t.Fatalf("replacement horizon did not issue one turn while coverage remained full: %+v", due)
 		}
 	})
 }

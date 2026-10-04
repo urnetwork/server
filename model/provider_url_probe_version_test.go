@@ -99,8 +99,8 @@ func TestFp2UrlPolicySelectorValidation(t *testing.T) {
 }
 
 // Security can recover independently of a measured quality outcome. A clean
-// security-only receipt must release the claim reservation at the real quota
-// expiry, without inventing another successful or failed URL outcome. The
+// security-only receipt must release the claim reservation at the quota
+// replacement deadline, without inventing another successful or failed URL outcome. The
 // preceding measured TLS failure counts toward the ten-run quota, so expiry
 // of the earliest success alone does not reopen it.
 func TestFp2UrlSecurityOnlyRecoveryRecomputesQuotaDeadline(t *testing.T) {
@@ -112,6 +112,7 @@ func TestFp2UrlSecurityOnlyRecoveryRecomputesQuotaDeadline(t *testing.T) {
 		oldestSuccessAt := now.Add(-4*time.Hour + 2*time.Minute)
 		oldestQuotaRunAt := now.Add(-3*time.Hour + time.Minute)
 		quotaExpiresAt := oldestQuotaRunAt.Add(ProviderEgressProbeRefreshAge)
+		renewalAt := quotaExpiresAt.Add(-ProviderUrlProbeRenewalHeadroom)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_probe_cycle(client_id,cycle_started_at,next_attempt_at) VALUES($1,$2,$2)`, clientId, cycleStartedAt))
 		})
@@ -149,8 +150,8 @@ func TestFp2UrlSecurityOnlyRecoveryRecomputesQuotaDeadline(t *testing.T) {
 				var successes, failures, outcomes int
 				var next time.Time
 				server.Raise(rows.Scan(&successes, &failures, &outcomes, &next))
-				if successes != 10 || failures != 1 || outcomes != 11 || !next.Equal(quotaExpiresAt) {
-					t.Fatalf("security-only receipt changed outcomes or measured quota deadline: successes=%d failures=%d outcomes=%d next=%s want=%s", successes, failures, outcomes, next, quotaExpiresAt)
+				if successes != 10 || failures != 1 || outcomes != 11 || !next.Equal(renewalAt) {
+					t.Fatalf("security-only receipt changed outcomes or measured quota deadline: successes=%d failures=%d outcomes=%d next=%s want=%s", successes, failures, outcomes, next, renewalAt)
 				}
 			})
 			for _, boundary := range []struct {

@@ -11480,6 +11480,24 @@ admission/join transfers/settle accounting before expiring or removing funding.
 Deleting a grant while escrows or settlement remain open is not cleanup.
 
 ### 2.19f Rolling URL-probe coverage and measured-run capacity
+
+Starting a replacement only at the oldest counted measurement's four-hour
+expiry creates a real deficit for the accepted-completion latency. Native
+controls with ten measurements spaced 20/24 minutes and a 25-second completion
+show that gap even with available workers. Admit the replacement six minutes
+before the earliest of the latest ten accepted measurements expires, then
+recompute from accepted history after each result. Eleven/twelve current rows
+must not trigger a replacement while ten survive that horizon; clustered
+expiries allow only the number of replacements needed, with one live claim per
+provider. Coverage still uses actual policy-valid measurements in `(now-4h,
+now]`; setup completions, replay, other providers and future measurements add
+no credit. Success and measured failure count equally, and TLS rechecks remain
+independent. The six-minute headroom covers the default 220-second turn plus
+90-second control/publication reserve and 50-second scheduling margin, not
+unbounded queueing or alternate longer configurations. Existing persisted
+expiry deadlines are refreshed when touched, so deployment is not instant
+full-cohort repair. A modeled latency-gap repair is not Main coverage proof;
+missing/stale census and historical hourly gaps remain separate unknowns.
 Probe: `url-probe-coverage`
 
 This is the URL-only `FP2FIX.md` contract, not a renamed legacy cheap/full

@@ -89,8 +89,8 @@ func TestUrlProbeDurablePacingAndQuota(t *testing.T) {
 				t.Fatalf("turn %d replay changed progress: successes=%d errors=%d", turn, successes, errors)
 			}
 			if turn+1 == ProviderUrlProbeRunTarget {
-				if !now.Before(firstSuccessAt.Add(ProviderEgressProbeRefreshAge)) || !next.Equal(firstSuccessAt.Add(ProviderEgressProbeRefreshAge)) {
-					t.Fatalf("rolling quota missed its oldest-success expiry: completion=%s next=%s first=%s", now, next, firstSuccessAt)
+				if !now.Before(firstSuccessAt.Add(ProviderEgressProbeRefreshAge)) || !next.Equal(firstSuccessAt.Add(ProviderEgressProbeRefreshAge-ProviderUrlProbeRenewalHeadroom)) {
+					t.Fatalf("rolling quota missed its replacement deadline: completion=%s next=%s first=%s", now, next, firstSuccessAt)
 				}
 			} else {
 				interval := 20 * time.Minute
@@ -107,8 +107,8 @@ func TestUrlProbeDurablePacingAndQuota(t *testing.T) {
 			now = next
 		}
 		replacement := ClaimProviderUrlProbeDue(ctx, now, 1, 0, 1)
-		if len(replacement) != 1 || replacement[0].RunsNeeded != 1 || replacement[0].OutcomeCount != 10 || !replacement[0].CycleStartedAt.Equal(cycleStartedAt) {
-			t.Fatalf("oldest-success expiry reset the rolling quota or receipt identity: %+v", replacement)
+		if len(replacement) != 1 || replacement[0].RunsNeeded != 0 || replacement[0].OutcomeCount != 10 || !replacement[0].CycleStartedAt.Equal(cycleStartedAt) {
+			t.Fatalf("early replacement changed measured quota or receipt identity: %+v", replacement)
 		}
 	})
 }

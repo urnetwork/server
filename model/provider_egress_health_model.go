@@ -347,7 +347,7 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 						ELSE `+providerUrlProbePacedAttemptSql("cycle", "$5", "$3", "recent.run_count < $6")+` END
 				FROM recent WHERE cycle.client_id = recent.client_id`,
 				health.ClientId, cycleStartedAt, health.OKCount, health.Total-health.OKCount,
-				health.MeasuredAt.UTC(), ProviderUrlProbeRunTarget, ProviderEgressProbeRefreshAge.Seconds(), health.Total))
+				health.MeasuredAt.UTC(), ProviderUrlProbeRunTarget, (ProviderEgressProbeRefreshAge - ProviderUrlProbeRenewalHeadroom).Seconds(), health.Total))
 		}
 	})
 }

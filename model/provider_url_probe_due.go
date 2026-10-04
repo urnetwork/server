@@ -34,6 +34,20 @@ type ProviderUrlProbeDue struct {
 // taskworker host. Power-of-two geometries preserve the old hash mapping.
 const ProviderUrlProbeSlotCount = 1024
 
+// Replace measurements before they leave the four-hour window. This covers
+// the default 220-second URL turn plus 90 seconds for control/publication and
+// 50 seconds of scheduling margin. It is not extra quota credit or a promise
+// that a stalled worker finishes. Admission still owns one 15-minute claim.
+const ProviderUrlProbeRenewalHeadroom = 6 * time.Minute
+
+// The latest ten accepted measurements suffice to decide whether at least ten
+// will remain at the replacement horizon; any older measurements expire first.
+// Full cohorts outside that horizon do not receive another measured turn.
+func providerUrlProbeMeasuredWorkDueSql(recentAlias, nowExpression, targetExpression string) string {
+	return fmt.Sprintf("(%s.run_count < %s OR %s.oldest_run_at <= %s::timestamp - interval '%d seconds')",
+		recentAlias, targetExpression, recentAlias, nowExpression, int((ProviderEgressProbeRefreshAge-ProviderUrlProbeRenewalHeadroom)/time.Second))
+}
+
 // Compatibility readers share the exact slot-to-shard mapping with indexed
 // admission. hashtext is signed, so normalize the stable slot before modulo.
 func providerUrlProbeShardSql(clientExpression, shardCountExpression string) string {
@@ -256,6 +270,7 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 				RETURNING cycle.client_id
 			), measured AS MATERIALIZED (
 				SELECT candidates.*, recent.run_count, recent.oldest_run_at, successes.success_count,
+					`+providerUrlProbeMeasuredWorkDueSql("recent", "$1", "$6")+` AS measured_work_due,
 					security.security_exception
 				FROM candidates CROSS JOIN LATERAL (%s) AS recent
 				CROSS JOIN LATERAL (%s) AS successes
@@ -264,17 +279,17 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 				UPDATE provider_egress_probe_cycle AS cycle SET
 					success_count = measured.success_count,
 					completed_priority_ready = false,
-					claim_ordinal = cycle.claim_ordinal + CASE WHEN measured.run_count < $6 OR measured.security_exception THEN 1 ELSE 0 END,
-					next_attempt_at = CASE WHEN measured.run_count >= $6 AND NOT measured.security_exception
+					claim_ordinal = cycle.claim_ordinal + CASE WHEN measured.measured_work_due OR measured.security_exception THEN 1 ELSE 0 END,
+					next_attempt_at = CASE WHEN NOT measured.measured_work_due AND NOT measured.security_exception
 						THEN measured.oldest_run_at + interval '%d seconds' ELSE $7 END
 				FROM measured WHERE cycle.client_id=measured.client_id
 				AND cycle.client_id=ANY(ARRAY(SELECT client_id FROM measured))
 				RETURNING cycle.client_id, cycle.cycle_started_at, cycle.success_count, cycle.outcome_count, cycle.claim_ordinal,
-					measured.security_exception, measured.run_count
+					measured.security_exception, measured.run_count, measured.measured_work_due
 			), issued AS (
 				INSERT INTO provider_url_probe_run(client_id,claim_ordinal,claimed_at)
 				SELECT client_id,claim_ordinal,$1 FROM claimed
-				WHERE claimed.run_count<$6 OR claimed.security_exception
+				WHERE claimed.measured_work_due OR claimed.security_exception
 				RETURNING client_id,claim_ordinal,claimed_at
 			)
 			SELECT claimed.client_id, claimed.cycle_started_at, GREATEST(0, $6-claimed.run_count),
@@ -290,9 +305,9 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 				WHERE location_id=candidates.country_location_id OFFSET 0) AS country ON true
 			LEFT JOIN LATERAL (SELECT location_name FROM location
 				WHERE location_id=candidates.region_location_id OFFSET 0) AS region ON true
-			WHERE claimed.run_count < $6 OR claimed.security_exception
+			WHERE claimed.measured_work_due OR claimed.security_exception
 			ORDER BY %s
 		`, providerProbeEligibilitySql("provider"), providerUrlProbeRunWindowSql("candidates.client_id", "$1"),
 		providerUrlProbeSuccessWindowSql("candidates.client_id", "$1"),
-		providerHasUrlSecurityExceptionSql("candidates.client_id"), int(ProviderEgressProbeRefreshAge/time.Second), countProjection, resultOrder)
+		providerHasUrlSecurityExceptionSql("candidates.client_id"), int((ProviderEgressProbeRefreshAge-ProviderUrlProbeRenewalHeadroom)/time.Second), countProjection, resultOrder)
 }
