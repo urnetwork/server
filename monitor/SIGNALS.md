@@ -11675,6 +11675,19 @@ Deleting a grant while escrows or settlement remain open is not cleanup.
 
 ### 2.19f Rolling URL-probe coverage and measured-run capacity
 
+URL-turn health and completion counters take their country label from that
+turn's immutable Due place, the same country used to choose its URL catalog.
+Missing or invalid country is `unknown`; it does not trigger an optional
+egress-location query before publication. A later claim can have a different
+place, and a concurrent or unrelated provider cannot borrow the first claim's
+label. Legacy/manual probes retain their submitted/durable egress attribution.
+This removes one label-only query for each provider first seen in a pass and
+allows unstarted-claim completion while that optional read is unavailable.
+It does not change a result, accepted-history identity, measured quota,
+eligibility, funding check, or worker limit. Country metrics correlate to the
+claim's catalog place, not a new observed public-IP location. A synthetic
+loaded-publication control is not proof of Main throughput improvement.
+
 A fresh coherent global census remains independently reportable when the hourly
 accepted-run ranges or another shard's visibility are incomplete. Preserve its
 eligible, quota/secure-complete, overdue, warming, uninitialized and runs-needed

@@ -467,10 +467,10 @@ type egressProbeIngest interface {
 // never changes the outcome of a submission: a metrics error cannot exist, and
 // the inner error is returned as is.
 //
-// The country of a provider is learned from its own submitted location during
-// the pass (the freshest value), and otherwise from the durable table through
-// lookupCountry, so failures of providers that were located on an earlier pass
-// still land under their country.
+// URL turns use the current due claim's country snapshot, matching the place
+// that selected their URL catalog. Their publication never reads a database
+// solely to label a metric. Other callers learn a country from a submitted
+// location or the durable optional egress table through lookupCountry.
 type egressProbeMetricsReporter struct {
 	inner egressProbeIngest
 	// lookupCountry returns the last recorded egress country code of a provider
@@ -502,10 +502,33 @@ func resolveProviderEgressExitLabel(exitIp string) (*controller.ProviderEgressEx
 	return controller.ResolveProviderEgressExit(exitIp, model.GetProviderEgressRules().CityConfidentRadiusKm)
 }
 
-// country resolves the label for a provider: the country it submitted during
-// this pass, else the durable one, else unknown. The durable lookup result is
-// cached so a provider is looked up at most once per pass.
+type providerEgressClaimCountryKey struct{}
+
+type providerEgressClaimCountry struct {
+	clientId string
+	country  string
+}
+
+// Keep the label on this claim's context, not a pass-wide provider cache: a
+// later claim may select a changed place while an earlier turn is publishing.
+// The snapshot contains only the due country, never an address or a metric
+// label from arbitrary input. An absent/invalid country remains unknown and
+// does not require an optional location query before durable publication.
+func withProviderEgressClaimCountry(ctx context.Context, clientId, country string) context.Context {
+	country = egressProbeCountryLabel(country)
+	if len(country) != 2 || country[0] < 'a' || country[0] > 'z' || country[1] < 'a' || country[1] > 'z' {
+		country = egressProbeUnknownCountry
+	}
+	return context.WithValue(ctx, providerEgressClaimCountryKey{}, providerEgressClaimCountry{clientId: clientId, country: country})
+}
+
+// The exact URL claim's place owns its label, including unknown. Legacy and
+// manual callers retain submitted/durable egress attribution, cached once per
+// provider per pass. A claim snapshot never labels an unrelated provider.
 func (self *egressProbeMetricsReporter) country(ctx context.Context, providerClientId string) string {
+	if claim, ok := ctx.Value(providerEgressClaimCountryKey{}).(providerEgressClaimCountry); ok && claim.clientId == providerClientId {
+		return claim.country
+	}
 	self.stateLock.Lock()
 	country, ok := self.countries[providerClientId]
 	self.stateLock.Unlock()
