@@ -83,6 +83,13 @@ func CheckVerifyPurchaseRateLimit(clientSession *session.ClientSession) error {
 
 const maxPlayPurchaseTokenLength = 4 * 1024
 
+// The Play verify endpoint's db-backed steps. Replaceable only by the tests
+// that drive VerifyPlayPurchase without a database; production never mutates
+// these.
+var playVerifyRateLimitFunc = CheckVerifyPurchaseRateLimit
+var playVerifyRenewalFunc = PlaySubscriptionRenewal
+var playPaymentIdNetworkIdFunc = model.SubscriptionGetNetworkIdForPaymentId
+
 type VerifyPlayPurchaseArgs struct {
 	// PackageName defaults to (and must match) this app's package.
 	PackageName string `json:"package_name,omitempty"`
@@ -102,6 +109,11 @@ type VerifyPlayPurchaseArgs struct {
 //
 //	token unknown / malformed (400, 404, 410)                    -> invalid
 //	linked account (obfuscated/external id) != session network   -> wrong_network
+//	no account identifiers                                       -> the unlinked
+//	                                                                binding rules
+//	                                                                (credited /
+//	                                                                already_credited
+//	                                                                / invalid)
 //	SUBSCRIPTION_STATE_PENDING / PAUSED / ON_HOLD / GRACE        -> pending (retry)
 //	SUBSCRIPTION_STATE_ACTIVE, credit landed                     -> credited
 //	SUBSCRIPTION_STATE_ACTIVE, balance already overlaps expiry   -> already_credited
@@ -122,7 +134,7 @@ func VerifyPlayPurchase(
 		return NewVerifyStorePurchaseInvalid(), nil
 	}
 
-	if err := CheckVerifyPurchaseRateLimit(clientSession); err != nil {
+	if err := playVerifyRateLimitFunc(clientSession); err != nil {
 		return nil, err
 	}
 
@@ -205,10 +217,19 @@ func VerifyPlayPurchase(
 		}
 	}
 
+	if linkedNetworkId == nil {
+		// no account identifiers: bought outside the app's billing flow (a
+		// Play Store promo code redemption). Credited only through the
+		// binding to the welcome offer this server issued to the session
+		// network (play_purchase_binding_controller.go) -- never to whichever
+		// session reports it first.
+		return verifyPlayUnlinkedPurchase(clientSession, packageName, purchaseToken, sub)
+	}
+
 	// the credit path: re-fetches the subscription, takes the purchase-token
 	// advisory lock, and re-checks the overlap inside the credit tx -- the
 	// same gate the RTDN webhook and the reconciler go through
-	renewalResult, err := PlaySubscriptionRenewal(
+	renewalResult, err := playVerifyRenewalFunc(
 		&PlaySubscriptionRenewalArgs{
 			NetworkId:      clientSession.ByJwt.NetworkId,
 			PackageName:    packageName,
@@ -259,7 +280,7 @@ func playLinkedNetworkId(
 		if err != nil {
 			return nil, false
 		}
-		networkId, err := model.SubscriptionGetNetworkIdForPaymentId(clientSession.Ctx, networkIdOrSubscriptionPaymentId)
+		networkId, err := playPaymentIdNetworkIdFunc(clientSession.Ctx, networkIdOrSubscriptionPaymentId)
 		if err != nil {
 			// the obfuscated account id is just a plain network id
 			networkId = networkIdOrSubscriptionPaymentId

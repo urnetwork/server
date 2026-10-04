@@ -449,6 +449,49 @@ A USDC transfer without the reference/memo reaches S3's `no_intent` record
           is finished silently. If confirmed, a product/security decision is
           needed on how to bind it.
         - There are no unit tests for `PurchaseReporter` or the monitor.
+        - 2026-10-04: offer-code redemptions without an `appAccountToken`
+          are bound to the network that was issued the welcome offer code
+          (server `d1885478`, `apple_offer_code_binding_controller.go`;
+          apple `958a025f`).
+        - 2026-10-04, Play parity (`play_purchase_binding_controller.go`).
+          A purchase token with no `externalAccountIdentifiers` (a Play
+          Store promo code redemption, a purchase outside the app's billing
+          flow) used to be credited by `VerifyPlayPurchase` to whichever
+          session reported it first. It is now credited only when:
+          - the token (or its `linkedPurchaseToken`) is already bound to the
+            session network: a renewal, credited or already_credited; or
+          - it is unbound, the session network holds an unredeemed welcome
+            offer issued with a Play offer tag, a line item's
+            `offerDetails.offerTags` carries `play_offer_tag` (or the issued
+            tag) or its `signupPromotion.vanityCode.promotionCode` is
+            `onboarding.offer.play_promotion_code` (new, default empty = off),
+            and Google's `startTime` is in `[issued_at - 5 min, expires_at)`.
+            The binding (`play_purchase_binding`, keyed by token with the
+            chain root), the offer redemption (store `play`) and the credit
+            through the purchase-token gate (`playCreditSubscriptionInTx`)
+            commit in one ReadCommitted tx.
+          Everything else is `invalid` and persists nothing. Tokens with an
+          obfuscated account id are unchanged. The RTDN webhook resolves
+          unlinked tokens through the binding (inheriting it along
+          `linkedPurchaseToken`); never-bound stays unresolved (200 with a
+          message, no credit). The reconciler uses the binding for the repair
+          match and skips a renewal row whose unlinked token is bound to
+          another network. Rows of never-bound unlinked tokens credited
+          before this change keep their network.
+        - No Play code pool: onboarding issues no Play codes (the welcome
+          offer is bought in-app with its offer token, which sets the
+          obfuscated id), and subscriptionsv2 reports a one-time promo code
+          as an empty `oneTimeCode` with no identifier, so an issued code
+          could not be matched to its redemption.
+        - Sandbox check (license tester): redeem a Play promo code from the
+          Play Store with the app closed and read the token's
+          subscriptionsv2. Confirm `externalAccountIdentifiers` is absent,
+          which of `offerDetails.offerId`/`offerTags` and
+          `signupPromotion` are set, and that a promo code (a 3-90 day free
+          trial on the backwards-compatible base plan, per the Play Console
+          docs) never carries the `onboarding25` tag. If the welcome offer
+          should be reachable by promo code, configure a custom code as
+          `play_promotion_code`.
 - **A2 — Optimistic "You're premium"**: `purchaseSuccess` set at finish time
   (`:144-145`); the 120 s poll's `purchaseConfirmationTimedOut`
   (`SubscriptionBalanceViewModel.swift:304-310`) has **zero consumers** —

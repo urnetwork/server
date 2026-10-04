@@ -672,6 +672,10 @@ type PlaySubscription struct {
 	AcknowledgementState       string                          `json:"acknowledgementState"`
 	ExternalAccountIdentifiers *PlayExternalAccountIdentifiers `json:"externalAccountIdentifiers"`
 	SubscribeWithGoogleInfo    *PlaySubscribeWithGoogleInfo    `json:"subscribeWithGoogleInfo,omitempty"`
+	// LinkedPurchaseToken is the token of the subscription this purchase
+	// continues (re-signup, upgrade/downgrade, plan conversion); an unlinked
+	// token resolves through its binding (play_purchase_binding)
+	LinkedPurchaseToken string `json:"linkedPurchaseToken,omitempty"`
 }
 
 // playAcknowledgeSubscription acknowledges the purchase with Google, unless
@@ -743,6 +747,19 @@ type PlaySubscriptionPurchaseLineItem struct {
 	// OfferDetails names the base plan and offer the purchase was made under;
 	// the welcome offer is recognized by its offer tag
 	OfferDetails *PlayOfferDetails `json:"offerDetails,omitempty"`
+	// SignupPromotion is set when a Play promotion code was applied at signup
+	SignupPromotion *PlaySignupPromotion `json:"signupPromotion,omitempty"`
+}
+
+// PlaySignupPromotion is exactly one of oneTimeCode (a single-use code; the
+// API reports no identifier for it) or vanityCode (a custom code, named).
+type PlaySignupPromotion struct {
+	OneTimeCode *struct{}       `json:"oneTimeCode,omitempty"`
+	VanityCode  *PlayVanityCode `json:"vanityCode,omitempty"`
+}
+
+type PlayVanityCode struct {
+	PromotionCode string `json:"promotionCode,omitempty"`
 }
 
 type PlayOfferDetails struct {
@@ -930,35 +947,44 @@ func PlayWebhook(
 			}
 
 			var networkId server.Id
-			if sub.ExternalAccountIdentifiers != nil {
-				if sub.ExternalAccountIdentifiers.ExternalAccountId != "" {
-					networkId, err = server.ParseId(sub.ExternalAccountIdentifiers.ExternalAccountId)
-					if err != nil {
-						return nil, fmt.Errorf("Google Play subscription malformed external account id: \"%s\" = %s", sub.ExternalAccountIdentifiers.ExternalAccountId, err)
-					}
-				} else if sub.ExternalAccountIdentifiers.ObfuscatedExternalAccountId != "" {
-					networkIdOrSubscriptionPaymentId, err := server.ParseId(sub.ExternalAccountIdentifiers.ObfuscatedExternalAccountId)
-					if err != nil {
-						return nil, fmt.Errorf("Google Play subscription malformed obfuscated external account id: \"%s\" = %s", sub.ExternalAccountIdentifiers.ObfuscatedExternalAccountId, err)
-					}
-					networkId, err = model.SubscriptionGetNetworkIdForPaymentId(clientSession.Ctx, networkIdOrSubscriptionPaymentId)
-					if err != nil {
-						// the obfuscated account id is just a plain network id
-						networkId = networkIdOrSubscriptionPaymentId
-					}
-				} else {
-					return nil, fmt.Errorf("Google Play subscription missing external account id and obfuscated external account id")
+			identifiers := sub.ExternalAccountIdentifiers
+			if identifiers != nil && identifiers.ExternalAccountId != "" {
+				networkId, err = server.ParseId(identifiers.ExternalAccountId)
+				if err != nil {
+					return nil, fmt.Errorf("Google Play subscription malformed external account id: \"%s\" = %s", identifiers.ExternalAccountId, err)
+				}
+			} else if identifiers != nil && identifiers.ObfuscatedExternalAccountId != "" {
+				networkIdOrSubscriptionPaymentId, err := server.ParseId(identifiers.ObfuscatedExternalAccountId)
+				if err != nil {
+					return nil, fmt.Errorf("Google Play subscription malformed obfuscated external account id: \"%s\" = %s", identifiers.ObfuscatedExternalAccountId, err)
+				}
+				networkId, err = model.SubscriptionGetNetworkIdForPaymentId(clientSession.Ctx, networkIdOrSubscriptionPaymentId)
+				if err != nil {
+					// the obfuscated account id is just a plain network id
+					networkId = networkIdOrSubscriptionPaymentId
 				}
 			} else {
-				return &PlayWebhookResult{
-					Message: &PlayWebhookResultMessage{
-						Message: fmt.Sprintf(
-							"Google Play subscription no external account information: sub state: (%s), sub aknowledgement: (%s)",
-							sub.SubscriptionState,
-							sub.AcknowledgementState,
-						),
-					},
-				}, nil
+				// no account identifiers (a purchase outside the app's billing
+				// flow): only a binding made by the verify endpoint names the
+				// network (play_purchase_binding_controller.go)
+				boundNetworkId, bound := playPurchaseBindingLookupFunc(
+					clientSession.Ctx,
+					rtdnMessage.SubscriptionNotification.PurchaseToken,
+					sub.LinkedPurchaseToken,
+					true,
+				)
+				if !bound {
+					return &PlayWebhookResult{
+						Message: &PlayWebhookResultMessage{
+							Message: fmt.Sprintf(
+								"Google Play subscription no external account information and no binding: sub state: (%s), sub aknowledgement: (%s)",
+								sub.SubscriptionState,
+								sub.AcknowledgementState,
+							),
+						},
+					}, nil
+				}
+				networkId = boundNetworkId
 			}
 
 			minExpiryTime := sub.LineItems[0].RequireExpiryTime()
@@ -1242,90 +1268,15 @@ func PlaySubscriptionRenewal(
 			// Per-statement snapshots make the post-lock re-check see the
 			// winner's commit, which is the entire point of the re-check.
 			server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-				renewed = false
-				creditErr = nil
-				if err := model.LockPlaySubscriptionPurchaseInTx(
+				renewed, creditErr = playCreditSubscriptionInTx(
 					tx,
-					clientSession.Ctx,
-					playSubscriptionRenewal.NetworkId,
-					playSubscriptionRenewal.PurchaseToken,
-				); err != nil {
-					creditErr = err
-					return
-				}
-				// A provider response can cross a terminal poll while waiting
-				// for this lock. Never let a stale ACTIVE response whose paid
-				// window has now ended recreate the entitlement the terminal
-				// owner just closed. A real renewal has a future max expiry and
-				// still proceeds.
-				if !server.NowUtc().Before(maxExpiryTime) {
-					return
-				}
-
-				if _, err := model.GetOverlappingTransferBalanceInTx(tx, clientSession.Ctx, playSubscriptionRenewal.PurchaseToken, maxExpiryTime); err == nil {
-					// a concurrent credit for this expiry already landed
-					return
-				}
-
-				if sku.Supporter {
-
-					endTime := maxExpiryTime.Add(SubscriptionGracePeriod)
-					netRevenue := model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd)
-
-					renewal := &model.SubscriptionRenewal{
-						NetworkId:          playSubscriptionRenewal.NetworkId,
-						StartTime:          startTime,
-						EndTime:            endTime,
-						NetRevenue:         netRevenue,
-						PurchaseToken:      playSubscriptionRenewal.PurchaseToken,
-						SubscriptionType:   model.SubscriptionTypeSupporter,
-						SubscriptionMarket: model.SubscriptionMarketGoogle,
-					}
-					if err := model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, renewal); err != nil {
-						creditErr = err
-						return
-					}
-					// the regional price tier and the welcome offer, from the
-					// store's region code and offer tag
-					playRecordOnboardingInTx(tx, clientSession, sub, renewal)
-
-					// a supporter subscription -> carries the Pro entitlement
-					transferBalance := &model.TransferBalance{
-						NetworkId:             playSubscriptionRenewal.NetworkId,
-						StartTime:             startTime,
-						EndTime:               endTime,
-						StartBalanceByteCount: RefreshSupporterTransferBalance,
-						SubsidyNetRevenue:     netRevenue,
-						BalanceByteCount:      RefreshSupporterTransferBalance,
-						PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
-						Pro:                   true,
-					}
-					model.AddTransferBalanceInTx(
-						clientSession.Ctx,
-						tx,
-						transferBalance,
-					)
-
-				} else {
-					// a data pack, NOT a subscription -> data only, never Pro
-					transferBalance := &model.TransferBalance{
-						NetworkId:             playSubscriptionRenewal.NetworkId,
-						StartTime:             startTime,
-						EndTime:               maxExpiryTime.Add(SubscriptionGracePeriod),
-						StartBalanceByteCount: sku.BalanceByteCount(),
-						SubsidyNetRevenue:     model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd),
-						BalanceByteCount:      sku.BalanceByteCount(),
-						PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
-						Pro:                   false,
-					}
-					model.AddTransferBalanceInTx(
-						clientSession.Ctx,
-						tx,
-						transferBalance,
-					)
-				}
-
-				renewed = true
+					clientSession,
+					playSubscriptionRenewal,
+					sub,
+					sku,
+					startTime,
+					maxExpiryTime,
+				)
 			}, server.TxReadCommitted)
 			if creditErr != nil {
 				return nil, creditErr
@@ -1353,6 +1304,104 @@ func PlaySubscriptionRenewal(
 		ExpiryTime: minExpiryTime,
 		Renewed:    false,
 	}, nil
+}
+
+// playCreditSubscriptionInTx is the Play credit gate: it serializes on the
+// purchase token (advisory xact lock, released at commit/rollback), re-checks
+// the overlap inside the tx and only then adds the renewal and the balance.
+// renewed is false when a credit for this expiry already landed (or the paid
+// window has ended). The tx must be ReadCommitted (see PlaySubscriptionRenewal).
+// Shared by PlaySubscriptionRenewal and the unlinked-purchase binding
+// (play_purchase_binding_controller.go), which credits inside its own tx.
+func playCreditSubscriptionInTx(
+	tx server.PgTx,
+	clientSession *session.ClientSession,
+	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
+	sub *PlaySubscription,
+	sku *Sku,
+	startTime time.Time,
+	maxExpiryTime time.Time,
+) (bool, error) {
+	if err := model.LockPlaySubscriptionPurchaseInTx(
+		tx,
+		clientSession.Ctx,
+		playSubscriptionRenewal.NetworkId,
+		playSubscriptionRenewal.PurchaseToken,
+	); err != nil {
+		return false, err
+	}
+	// A provider response can cross a terminal poll while waiting
+	// for this lock. Never let a stale ACTIVE response whose paid
+	// window has now ended recreate the entitlement the terminal
+	// owner just closed. A real renewal has a future max expiry and
+	// still proceeds.
+	if !server.NowUtc().Before(maxExpiryTime) {
+		return false, nil
+	}
+
+	if _, err := model.GetOverlappingTransferBalanceInTx(tx, clientSession.Ctx, playSubscriptionRenewal.PurchaseToken, maxExpiryTime); err == nil {
+		// a concurrent credit for this expiry already landed
+		return false, nil
+	}
+
+	if sku.Supporter {
+
+		endTime := maxExpiryTime.Add(SubscriptionGracePeriod)
+		netRevenue := model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd)
+
+		renewal := &model.SubscriptionRenewal{
+			NetworkId:          playSubscriptionRenewal.NetworkId,
+			StartTime:          startTime,
+			EndTime:            endTime,
+			NetRevenue:         netRevenue,
+			PurchaseToken:      playSubscriptionRenewal.PurchaseToken,
+			SubscriptionType:   model.SubscriptionTypeSupporter,
+			SubscriptionMarket: model.SubscriptionMarketGoogle,
+		}
+		if err := model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, renewal); err != nil {
+			return false, err
+		}
+		// the regional price tier and the welcome offer, from the
+		// store's region code and offer tag
+		playRecordOnboardingInTx(tx, clientSession, sub, renewal)
+
+		// a supporter subscription -> carries the Pro entitlement
+		transferBalance := &model.TransferBalance{
+			NetworkId:             playSubscriptionRenewal.NetworkId,
+			StartTime:             startTime,
+			EndTime:               endTime,
+			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			SubsidyNetRevenue:     netRevenue,
+			BalanceByteCount:      RefreshSupporterTransferBalance,
+			PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
+			Pro:                   true,
+		}
+		model.AddTransferBalanceInTx(
+			clientSession.Ctx,
+			tx,
+			transferBalance,
+		)
+
+	} else {
+		// a data pack, NOT a subscription -> data only, never Pro
+		transferBalance := &model.TransferBalance{
+			NetworkId:             playSubscriptionRenewal.NetworkId,
+			StartTime:             startTime,
+			EndTime:               maxExpiryTime.Add(SubscriptionGracePeriod),
+			StartBalanceByteCount: sku.BalanceByteCount(),
+			SubsidyNetRevenue:     model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd),
+			BalanceByteCount:      sku.BalanceByteCount(),
+			PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
+			Pro:                   false,
+		}
+		model.AddTransferBalanceInTx(
+			clientSession.Ctx,
+			tx,
+			transferBalance,
+		)
+	}
+
+	return true, nil
 }
 
 // endTerminalPlaySubscriptionRenewal applies the same terminal-state contract

@@ -9531,4 +9531,20 @@ var migrations = []any{
 			PRIMARY KEY (original_transaction_id)
 		)
 	`),
+	// Google Play purchase bindings (model/play_purchase_binding_model.go): a
+	// purchase made outside the app's billing flow (a Play Store promo code
+	// redemption) carries no obfuscated account id, so the verify endpoint
+	// binds its token to the network that was issued the welcome offer, once.
+	// Linked tokens of the same subscription resolve through the same root.
+	newSqlMigration(`
+		CREATE TABLE play_purchase_binding (
+			purchase_token text NOT NULL,
+			root_purchase_token text NOT NULL,
+			network_id uuid NOT NULL,
+			offer varchar(256) NOT NULL,
+			bound_at timestamp NOT NULL,
+
+			PRIMARY KEY (purchase_token)
+		)
+	`),
 }
