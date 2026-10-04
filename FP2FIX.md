@@ -6925,3 +6925,26 @@ empty cohorts are outside this investigation as requested. The frozen next API
 candidate remains untouched; integration and deployment follow independent
 baseline, focused and race gates. Main selection, picker latency, durable URL
 quota, and sustained database recovery remain open.
+
+### 2026-10-04 22:26 UTC Main database-path recovery
+
+Main's outage included a failed backend-startup path across all 32 PgBouncer
+shards: the qualified 21:43 UTC native snapshot had no established backend
+connections, one pending login per shard, and 301,567 waiting clients.
+PostgreSQL itself answered an authenticated same-role IPv4 loopback `SELECT 1`
+with the pooler's configured TLS-disabled transport in approximately 53 ms.
+
+Controlled restarts of the failed pooler generations restored backend connections
+on every shard by 22:23 UTC. Pool configuration and PostgreSQL were unchanged.
+The 22:24 UTC native verification qualified all 32 shards with 565 active and
+47 idle backends, 4,808 waiting clients, and 4,940 active clients. This verifies
+restoration of the database connection path, not complete product recovery.
+
+The 22:26 UTC PostgreSQL activity census covered 600 rows and observed no
+heavyweight Lock waits; it retained 43 lightweight-lock waits and 121 sessions
+idle in transaction. Actual successful provider-selection responses, Connect
+recovery, deployed generations, and the initial stalled-login cause still need
+verification. Index repair remains held during acute outage recovery. Current
+FP2 quota coverage cannot be inferred from historical pre-outage worker samples.
+
+Root ledger T580 retains the immutable native recovery and verification receipts.
