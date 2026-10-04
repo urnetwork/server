@@ -4,11 +4,9 @@
 package controller
 
 import (
-	"bytes"
-	"crypto/ed25519"
 	"errors"
 
-	"github.com/urnetwork/connect"
+	"github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
@@ -35,13 +33,8 @@ func GetVerifyOriginalRequest(args *model.VerifyOriginalRequest, clientSession *
 	if _, err := args.Hash(); err != nil {
 		return nil, err
 	}
-	prefix := append([]byte(connect.VerifyCtx), connect.VerifyMsgTypeSeed)
-	if len(args.Message) != len(prefix)+ed25519.PublicKeySize+connect.VerifyNonceSize+1 || !bytes.HasPrefix(args.Message, prefix) {
-		return nil, errors.New("400 exact original seed request required")
-	}
-	vpk := ed25519.PublicKey(args.Message[len(prefix) : len(prefix)+ed25519.PublicKeySize])
-	if !ed25519.Verify(vpk, args.Message, args.Signature) {
-		return nil, errors.New("400 original seed signature differs")
+	if _, err := protocol.VerifyProviderAttemptRequestWire(args.Message, args.Signature); err != nil {
+		return nil, errors.Join(errors.New("400 original request signature differs"), err)
 	}
 	original := model.GetVerifyOriginalRequest(clientSession.Ctx, *args)
 	if original != nil {

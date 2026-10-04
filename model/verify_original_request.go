@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 
@@ -86,10 +85,12 @@ func readVerifyOriginalRequest(ctx context.Context, conn server.PgCanQuery, requ
 // server processes. Hash collisions merely serialize; full bytes still decide.
 func retainVerifyOriginalRequestInTx(ctx context.Context, tx server.PgTx, body *VerifyOriginalBody) *VerifyOriginalTransition {
 	request := VerifyOriginalRequest{Scope: body.Scope, ClientId: body.Trail.ClientId, Message: body.RequestMessage, Signature: body.RequestSignature}
-	hash, err := request.Hash()
-	server.Raise(err)
-	server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(binary.BigEndian.Uint64(hash[:8]))))
-	return readVerifyOriginalRequest(ctx, tx, request)
+	lockVerifyOriginalRequest(ctx, tx, request)
+	original := readVerifyOriginalRequest(ctx, tx, request)
+	if original == nil {
+		refuseClosedVerifyRequest(ctx, tx, request)
+	}
+	return original
 }
 
 // Called only after the matching original tuple exists in this same transaction.
@@ -109,6 +110,11 @@ func indexVerifyOriginalRequestInTx(ctx context.Context, tx server.PgTx, body *V
 // A missing request remains unavailable. This API does not turn absence from
 // an operator index into a signed zero-exposure or complete-window assertion.
 func GetVerifyOriginalRequest(ctx context.Context, request VerifyOriginalRequest) (retained *VerifyOriginalTransition) {
-	server.Db(ctx, func(conn server.PgConn) { retained = readVerifyOriginalRequest(ctx, conn, request) })
+	server.Db(ctx, func(conn server.PgConn) {
+		retained = readVerifyOriginalRequest(ctx, conn, request)
+		if retained == nil {
+			refuseClosedVerifyRequest(ctx, conn, request)
+		}
+	})
 	return
 }

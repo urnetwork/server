@@ -27,6 +27,7 @@ func Routes() []*router.Route {
 // starts a background owner or dials a provider on an upload request.
 func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUpload, notifications ...*model.ContractOriginNotifications) []*router.Route {
 	providerWork := handlers.NewProviderWorkHandlers()
+	verifyRequestClosure := handlers.NewVerifyRequestClosureHandlers()
 	providerWorkBody := router.StreamingBody{IdleTimeout: 60 * time.Second, TransferTimeout: 60 * time.Second, ResponseTimeout: 300 * time.Second, DrainTimeout: 5 * time.Second}
 	connectControl := handlers.ConnectControl
 	if len(notifications) > 0 {
@@ -268,6 +269,7 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/verify/stats", handlers.GetVerifyStats),
 		router.NewRoute("GET", "/verify/proofs", handlers.GetVerifyProofs),
 		router.NewRoute("POST", "/verify/original", handlers.GetVerifyOriginalRequest),
+		router.NewStreamingRoute("POST", "/verify/original/close", verifyRequestClosure.ServeHTTP, providerWorkBody),
 		// subnet control plane (sn/PLAN.md §5, D-13)
 		router.NewRoute("POST", "/sn/wallet", handlers.SnSetWallet),
 		router.NewRoute("POST", "/sn/wallet/consent", handlers.SnWalletMappingChallenge),

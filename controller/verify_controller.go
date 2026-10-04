@@ -801,6 +801,12 @@ func verifyExtend(
 	if !connect.VerifyVerifyMessageSignature(trail.Vpk, extendMessage, verify.ExtendSig) {
 		return nil, rejectVerifyExtend(ctx, trail, "signature-mismatch")
 	}
+	// A drained owner can permanently close this exact extension. The durable
+	// retention fence checks again before any confirmation is published.
+	if original := model.GetVerifyOriginalRequest(ctx, model.VerifyOriginalRequest{Scope: verifyCurrentOriginalScope(), ClientId: trail.ClientId, Message: extendMessage, Signature: verify.ExtendSig}); original != nil {
+		body := verifyDecodeOriginal(original)
+		return verifyDecodeCachedResponse(body.ResponseJson)
+	}
 
 	// §4.2 step 5: the request truly egressed from the assigned provider. This
 	// check applies identically to normal and poison shadow routes.
