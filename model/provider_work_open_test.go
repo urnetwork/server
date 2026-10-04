@@ -210,6 +210,17 @@ func TestProviderWorkOpenObservationWaitsForActualTerminalOwner(t *testing.T) {
 			}
 			var ownerPid int
 			server.Raise(tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&ownerPid))
+			// These live lock views do not cache pg_stat_activity's earlier
+			// transaction snapshot. Only this test's public observer is started.
+			const waitingSql = `SELECT EXISTS(SELECT 1 FROM pg_locks waiter JOIN pg_locks owner
+ ON owner.locktype=waiter.locktype AND owner.transactionid=waiter.transactionid
+ WHERE owner.pid=$1 AND owner.locktype='transactionid' AND owner.granted
+ AND NOT waiter.granted AND waiter.pid<>owner.pid AND $1=ANY(pg_blocking_pids(waiter.pid)))`
+			var beforeWorker bool
+			server.Raise(tx.QueryRow(ctx, waitingSql, ownerPid).Scan(&beforeWorker))
+			if beforeWorker {
+				t.Fatal("fixture already had an unrelated waiter on the terminal owner")
+			}
 			started = true
 			go func() {
 				defer close(joined)
@@ -223,9 +234,7 @@ func TestProviderWorkOpenObservationWaitsForActualTerminalOwner(t *testing.T) {
 				default:
 				}
 				var blocked bool
-				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity a
- WHERE a.datname=current_database() AND a.pid<>pg_backend_pid()
- AND a.query LIKE '/* provider-work-open-owner */%' AND $1=ANY(pg_blocking_pids(a.pid)))`, ownerPid).Scan(&blocked))
+				server.Raise(tx.QueryRow(ctx, waitingSql, ownerPid).Scan(&blocked))
 				if blocked {
 					break
 				}
