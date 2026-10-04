@@ -233,6 +233,34 @@ func TestStOperatorGasSignedEncodingBoundPrecedesReservation(t *testing.T) {
 		if err != nil || snapshot.Attempts != 0 || snapshot.MaximumLiabilityWei != "0" {
 			tb.Fatal("oversized envelope consumed an un-signable reservation", snapshot, err)
 		}
+		var widest [65]byte
+		for index := 0; index < 64; index++ {
+			widest[index] = 255
+		}
+		widest[64] = 1
+		projected, err := unsigned.WithSignature(types.LatestSignerForChainID(big.NewInt(945)), widest[:])
+		if err != nil {
+			tb.Fatal(err)
+		}
+		projectedRaw, _ := projected.MarshalBinary()
+		allowedSize := len(oversized.Calldata) - (len(projectedRaw) - stGasMaximumTransactionBytes)
+		exact := stGasModelIntent(p, "synthetic-gas-signature-exact-bound", bytes.Repeat([]byte{1}, allowedSize))
+		exactUnsigned := stGasModelTransaction(exact, 3_000_000, 10)
+		projected, err = exactUnsigned.WithSignature(types.LatestSignerForChainID(big.NewInt(945)), widest[:])
+		if err != nil {
+			tb.Fatal(err)
+		}
+		projectedRaw, _ = projected.MarshalBinary()
+		if len(projectedRaw) != stGasMaximumTransactionBytes {
+			tb.Fatal("fixture did not reach exact retained signature byte boundary")
+		}
+		if _, err := ReserveStTransactionGasAttempt(context.Background(), p, a, exact.IntentId, 1, StTxAttemptExecution, exactUnsigned); err != nil {
+			tb.Fatal("exact supported signed-byte boundary was refused", err)
+		}
+		snapshot, err = GetStOperatorGasBudgetSnapshot(context.Background(), p.Scope())
+		if err != nil || snapshot.Attempts != 1 || snapshot.MaximumLiabilityWei != "30000000" {
+			tb.Fatal("exact supported byte boundary did not reserve its full liability", snapshot, err)
+		}
 	})
 }
 
