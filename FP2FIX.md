@@ -6799,3 +6799,27 @@ lifetime and the retention worker lane. Worker cleanup success is observed;
 API cleanup removal still requires its own release proof. Current quota
 coverage, successful provider traffic, picker latency and sustained database
 recovery remain open.
+
+### 2026-10-04 17:12 UTC legacy settlement page-budget qualification
+
+The local legacy-settlement worker control reproduced a separate retry stall:
+with 64 intents and bounded 350ms per-contract residence, its fifteen-second
+page budget expired after 41 committed contracts and 23 retained intents. The
+old path attempted retry metadata under the canceled context and returned a
+task error, losing normal cursor continuation despite those durable commits.
+Candidate `ec83da08` yields only a completed prefix on its own page deadline;
+the continuation cursor remains before the interrupted intent. Parent
+cancellation, unrelated SQL errors and failed retry-state writes remain errors.
+No debit, payout, reservation, outcome, accounting cooldown, statement timeout
+or concurrency policy changed.
+
+Independent Sol controls reproduced the baseline failure, passed six focused
+model cases and the loaded/cancellation race controls, and passed vet. The
+existing task continuation test passed after using the release's frozen SN
+dependency instead of the advancing canonical checkout. The normal candidate
+committed 41 before yielding, the race candidate 40; both resumed to exact
+final accounting with no remaining reservation. The independent receipt is
+`temp/close-backlog-deadline-20261004/sol-close-go.json`. No Main deployment,
+throughput improvement or backlog recovery is established by these local gates.
+The separate ordinary-close mixed accounting/deferred-page classification
+remains under investigation.

@@ -4738,6 +4738,28 @@ individual worker statements use 2-second statement / 250ms lock timeouts.
 Already-started projection posts retain their existing separately bounded joins;
 this is not a 15-second end-to-end claim for a failed Redis dependency.
 
+Page-budget qualification (2026-10-04): the page's own fifteen-second deadline
+can expire after earlier per-contract transactions committed. Previously, the
+worker then attempted its failure-state write using the canceled context and
+returned an error; the task skipped its continuation post and could enter
+exponential backoff despite durable prefix progress. The worker now yields the
+last fully visited cursor only when its own page deadline expired, at least one
+item was visited, and no retry-state write failed. An interrupted item does not
+advance that cursor. Parent cancellation, an unrelated database failure, and a
+failed accounting/operational cooldown write remain errors. Deferred accounting
+rejections still retain their reservation and fifteen-minute cooldown.
+
+The loaded real-PG control uses 64 intents with 350ms residence per settlement,
+below the two-second statement limit. The baseline committed 41 and retained
+23, then returned a deadline error; the candidate checkpointed the same prefix
+and resumed to exact final payer debit, provider payout and zero remaining
+reservation. The race control committed 40 and retained 24 before the same safe
+continuation. A separate granted-lock barrier proves that parent cancellation
+after a committed prefix remains an error. Focused, race, vet and the existing
+task continuation gate passed. These are local controls, not Main throughput
+or attribution of its current backlog; require current qualified task outcomes,
+queue ages and progress before claiming production recovery.
+
 Clock, legacy reservation mirror and stream cleanup remain post-commit
 projections: the clock uses its existing aggregate backfill with its documented
 ambiguity; the mirror is rebuilt from durable revisions; mixed Redis reservation
