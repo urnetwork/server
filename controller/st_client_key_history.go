@@ -104,26 +104,17 @@ func (self *stClientKeyAuthorityOwner) readBoundary(ctx context.Context, request
 	if self == nil || self.client == nil || ctx == nil {
 		return protocol.ClientKeyEffectiveBoundary{}, stabi.STCoordinatorOperatorVersion{}, errors.New("client-key chain owner is absent")
 	}
-	var failures []error
-	for _, endpoint := range self.rpcURLs {
-		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
-		client, err := self.client.client(callCtx, endpoint)
-		if err != nil {
-			cancel()
-			failures = append(failures, err)
-			continue
-		}
-		boundary, operator, err := readStClientKeyAuthorityAt(callCtx, client, self.domain, requested)
-		cancel()
-		if err == nil {
-			return boundary, operator, ctx.Err()
-		}
-		failures = append(failures, err)
-		if ctx.Err() != nil {
-			break
-		}
+	var boundary protocol.ClientKeyEffectiveBoundary
+	var operator stabi.STCoordinatorOperatorVersion
+	err := self.client.eachRpcUrls(ctx, self.rpcURLs, func(ctx context.Context, client *ethclient.Client) error {
+		var err error
+		boundary, operator, err = readStClientKeyAuthorityAt(ctx, client, self.domain, requested)
+		return err
+	})
+	if err != nil {
+		return protocol.ClientKeyEffectiveBoundary{}, stabi.STCoordinatorOperatorVersion{}, err
 	}
-	return protocol.ClientKeyEffectiveBoundary{}, stabi.STCoordinatorOperatorVersion{}, errors.Join(errors.New("client-key boundary has no complete authenticated RPC observation"), errors.Join(failures...), ctx.Err())
+	return boundary, operator, ctx.Err()
 }
 
 // Called directly by the existing authenticated ClientKey control dispatch.

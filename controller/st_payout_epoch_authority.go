@@ -46,7 +46,7 @@ func (self *CoreStClient) PayoutEpochAuthority(ctx context.Context, epoch uint64
 		return nil, err
 	}
 	var result *StPayoutEpochAuthority
-	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
 		boundary, operator, err := readStClientKeyAuthorityAt(callCtx, client, domain, nil)

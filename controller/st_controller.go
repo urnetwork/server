@@ -67,9 +67,9 @@ import (
 
 const (
 	// stDialTimeout bounds each per-endpoint dial + chain id probe.
-	stDialTimeout = 15 * time.Second
+	stDialTimeout = 60 * time.Second
 	// stCallTimeout bounds each view call.
-	stCallTimeout = 30 * time.Second
+	stCallTimeout = 300 * time.Second
 	// stSendTimeout bounds building + broadcasting one transaction.
 	stSendTimeout = 60 * time.Second
 	// stWaitFinalizedTimeout bounds one synchronous transaction lifecycle.
@@ -741,7 +741,8 @@ type CoreStClient struct {
 
 	stateLock sync.Mutex
 	// clients caches one dialed (chain-id-verified) client per rpc url
-	clients map[string]*ethclient.Client
+	clients   map[string]*ethclient.Client
+	readHooks stRpcReadHooks
 	// One bounded registration owner is reused by every authenticated dispatch.
 	clientKeyRegistrations *stClientKeyRegistrationCohorts
 }
@@ -797,29 +798,18 @@ func (self *CoreStClient) dropClient(url string, client *ethclient.Client) {
 // eachRpc runs op against each rpc url in order until one succeeds. Safe
 // for reads and idempotent probes; sends acquire a single endpoint instead
 // (see send) so a transaction is never broadcast twice.
-func (self *CoreStClient) eachRpc(ctx context.Context, op func(client *ethclient.Client) error) error {
-	var errs []error
-	for _, url := range self.cfg.RpcUrls {
-		client, err := self.client(ctx, url)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", url, err))
-			continue
-		}
-		if err := op(client); err != nil {
-			self.dropClient(url, client)
-			errs = append(errs, fmt.Errorf("%s: %w", url, err))
-			continue
-		}
-		return nil
+func (self *CoreStClient) eachRpc(ctx context.Context, op func(context.Context, *ethclient.Client) error) error {
+	if self == nil || self.cfg == nil {
+		return errors.New("st: RPC read owner is absent")
 	}
-	return fmt.Errorf("st: no rpc endpoint answered: %w", errors.Join(errs...))
+	return self.eachRpcUrls(ctx, self.cfg.RpcUrls, op)
 }
 
 // Performs one contract read at a caller-selected canonical block with RPC
 // failover. Callers assembling a snapshot reuse one block across every field.
 func stViewAtBlock[T any](self *CoreStClient, ctx context.Context, address common.Address, block uint64, calldata []byte, unpack func([]byte) (T, error)) (T, error) {
 	var out T
-	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
 		bound := bind.NewBoundContract(address, abi.ABI{}, client, client, client)
@@ -910,7 +900,7 @@ func readStRPCBlockIdentity(ctx context.Context, client *ethclient.Client, selec
 // Reads the latest finalized block identity with RPC failover.
 func (self *CoreStClient) finalizedBlock(ctx context.Context) (*stBlockIdentity, error) {
 	var block *stBlockIdentity
-	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
 		value, err := readStRPCBlockIdentity(callCtx, client, rpc.FinalizedBlockNumber.String(), nil)
@@ -1627,7 +1617,7 @@ func (self *CoreStClient) Epoch(ctx context.Context) (*StEpochState, error) {
 		return nil, fmt.Errorf("finalizeOffsetBlocks(): %w", err)
 	}
 
-	err = self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err = self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
 		header, err := client.HeaderByNumber(callCtx, nil)
@@ -1672,7 +1662,7 @@ func (self *CoreStClient) EpochCloseBlock(ctx context.Context, epoch uint64) (ui
 
 func (self *CoreStClient) BlockTime(ctx context.Context, block uint64) (time.Time, error) {
 	var blockTime time.Time
-	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
 		identity, err := readStRPCBlockIdentity(callCtx, client, hexutil.EncodeUint64(block), &block)
@@ -1755,7 +1745,7 @@ func (self *CoreStClient) BlockHashes(ctx context.Context, blocks []uint64) ([][
 		return nil, errors.New("EVM RPC block batch is empty")
 	}
 	var identities []*stBlockIdentity
-	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		values, err := readStRPCBlockIdentities(ctx, client, blocks)
 		if err != nil {
 			return err
@@ -1956,7 +1946,7 @@ func (self *CoreStClient) UnaccountedStakeRao(ctx context.Context) (*big.Int, er
 		return nil, err
 	}
 	var stake *big.Int
-	err = self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err = self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
 		out, err := client.CallContract(callCtx, ethereum.CallMsg{
@@ -1992,7 +1982,7 @@ func (self *CoreStClient) stakeAt(ctx context.Context, hotkey [32]byte, coldkey 
 		return nil, err
 	}
 	var stake *big.Int
-	err = self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err = self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
 		out, callErr := client.CallContract(callCtx, ethereum.CallMsg{To: &stStakingPrecompileAddress, Data: calldata}, new(big.Int).SetUint64(header.Number))
@@ -2098,7 +2088,7 @@ func (self *CoreStClient) BindingAt(ctx context.Context, clientId [16]byte, epoc
 		return nil, fmt.Errorf("finalized binding head: %w", err)
 	}
 	var binding *StFleetBindingState
-	err = self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err = self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		bindings, err := stReadBindingsAt(ctx, client, self.coordinator, self.cfg.ContractAddress, finalized.Number, [][16]byte{clientId}, epoch)
 		if err != nil {
 			return err
@@ -2249,7 +2239,7 @@ func (self *CoreStClient) BindingsAt(ctx context.Context, clientIds [][16]byte, 
 		return bindings, nil
 	}
 	var bindings []*StFleetBindingState
-	err = self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err = self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		startBindings, err := stReadBindingsAt(ctx, client, self.coordinator, self.cfg.ContractAddress, startBlock, clientIds, epoch)
 		if err != nil {
 			return err
@@ -2470,7 +2460,7 @@ func (self *CoreStClient) SyncEvents(ctx context.Context, fromBlock uint64, toBl
 		return nil, fromBlock, nil
 	}
 	var logs []types.Log
-	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
 		addresses := []common.Address{self.cfg.ContractAddress}
