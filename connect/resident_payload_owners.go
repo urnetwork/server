@@ -12,10 +12,19 @@ import (
 // References may share a backing allocation with another stage or SDK owner;
 // backing charges are not additive physical heap bytes. No owners are retained
 // by this ledger, and collection never traverses a queue, resident, or heap.
+const residentPayloadShardCount = 64
+
 type residentPayloadLedger struct {
+	shards [residentPayloadShardCount]residentPayloadShard
+}
+
+// A shard occupies whole cache lines. Owners select a fixed shard from their
+// existing ID; that key never becomes a metric label or a retained reference.
+type residentPayloadShard struct {
 	writers  atomic.Int64
 	revision atomic.Uint64
 	groups   [3]residentPayloadCounters
+	_        [120]byte
 }
 
 type residentPayloadStage uint8
@@ -64,12 +73,13 @@ func controlPayloadCharge(frames []*protocol.Frame) residentPayloadCharge {
 	return total
 }
 
-func (l *residentPayloadLedger) update(stage residentPayloadStage, charge residentPayloadCharge, acquire bool) {
+func (l *residentPayloadLedger) update(stage residentPayloadStage, owner byte, charge residentPayloadCharge, acquire bool) {
 	if l == nil {
 		return
 	}
-	l.writers.Add(1)
-	g := &l.groups[stage]
+	shard := &l.shards[int(owner)%residentPayloadShardCount]
+	shard.writers.Add(1)
+	g := &shard.groups[stage]
 	direction := int64(-1)
 	if acquire {
 		direction = 1
@@ -80,36 +90,63 @@ func (l *residentPayloadLedger) update(stage residentPayloadStage, charge reside
 	g.messages.Add(direction * charge.messages)
 	g.logical.Add(direction * charge.logical)
 	g.backing.Add(direction * charge.backing)
-	l.revision.Add(1)
-	l.writers.Add(-1)
+	shard.revision.Add(1)
+	shard.writers.Add(-1)
 }
 
 func (l *residentPayloadLedger) snapshot() residentPayloadSnapshot {
 	return l.snapshotAt(nil)
 }
 
-// The barrier is a local test seam; collection passes nil and never retries.
-func (l *residentPayloadLedger) snapshotAt(boundary func()) residentPayloadSnapshot {
+// Collection visits each fixed shard once without retrying. Every shard must
+// be coherent at its own observation interval; the sum is not one global
+// atomic instant. The boundary is a deterministic local test seam only.
+func (l *residentPayloadLedger) snapshotAt(boundary func(int)) residentPayloadSnapshot {
 	if l == nil {
 		return residentPayloadSnapshot{}
 	}
-	beforeWriters, beforeRevision := l.writers.Load(), l.revision.Load()
-	out := residentPayloadSnapshot{Enabled: true}
-	for i := range out.Groups {
-		g := &l.groups[i]
-		out.Groups[i] = residentPayloadGroup{g.messages.Load(), g.logical.Load(), g.backing.Load(), g.admitted.Load(), g.released.Load()}
+	out := residentPayloadSnapshot{Enabled: true, Complete: true}
+	for i := range l.shards {
+		shard := &l.shards[i]
+		beforeWriters, beforeRevision := shard.writers.Load(), shard.revision.Load()
+		var groups [3]residentPayloadGroup
+		for j := range groups {
+			g := &shard.groups[j]
+			groups[j] = residentPayloadGroup{g.messages.Load(), g.logical.Load(), g.backing.Load(), g.admitted.Load(), g.released.Load()}
+		}
+		if boundary != nil {
+			boundary(i)
+		}
+		afterWriters, afterRevision := shard.writers.Load(), shard.revision.Load()
+		if beforeWriters != 0 || afterWriters != 0 || beforeRevision != afterRevision {
+			out.Complete = false
+			return out
+		}
+		for j, g := range groups {
+			if !validResidentPayloadGroup(g) {
+				out.Complete = false
+				return out
+			}
+			total := &out.Groups[j]
+			total.Messages += g.Messages
+			total.LogicalBytes += g.LogicalBytes
+			total.BackingCharge += g.BackingCharge
+			total.Admitted += g.Admitted
+			total.Released += g.Released
+		}
 	}
-	if boundary != nil {
-		boundary()
+	for _, g := range out.Groups {
+		if !validResidentPayloadGroup(g) {
+			out.Complete = false
+			break
+		}
 	}
-	afterWriters, afterRevision := l.writers.Load(), l.revision.Load()
-	out.Complete = beforeWriters == 0 && afterWriters == 0 && beforeRevision == afterRevision
 	return out
 }
 
 func (r *Resident) releaseControlPayload(frames []*protocol.Frame) {
 	if l := r.exchange.residentPayloadLedger(); l != nil {
-		l.update(residentPayloadControl, controlPayloadCharge(frames), false)
+		l.update(residentPayloadControl, r.clientId[15], controlPayloadCharge(frames), false)
 	}
 	returnResidentControlFrames(frames)
 }
@@ -127,7 +164,7 @@ func (r *Resident) drainControlPayloads() {
 
 func (r *Resident) releaseForwardIngress(message []byte) {
 	if ledger := r.exchange.residentPayloadLedger(); ledger != nil {
-		ledger.update(residentPayloadForwardIngress, payloadCharge(message), false)
+		ledger.update(residentPayloadForwardIngress, r.clientId[15], payloadCharge(message), false)
 	}
 	clientconnect.MessagePoolReturn(message)
 }
@@ -145,7 +182,7 @@ func (r *Resident) drainForwardIngress(queue <-chan residentForwardIngress) {
 
 func (f *ResidentForward) releasePayload(message []byte) {
 	if ledger := f.exchange.residentPayloadLedger(); ledger != nil {
-		ledger.update(residentPayloadForwardOutput, payloadCharge(message), false)
+		ledger.update(residentPayloadForwardOutput, f.clientId[15], payloadCharge(message), false)
 	}
 	clientconnect.MessagePoolReturn(message)
 }
@@ -172,7 +209,7 @@ func newResidentPayloadCollector(snapshot func() residentPayloadSnapshot) *resid
 	}
 	return &residentPayloadCollector{snapshot: snapshot,
 		enabled:  desc("enabled", "Whether fixed resident payload ownership accounting is enabled."),
-		complete: desc("sample_complete", "Whether this fixed snapshot is coherent; false omits owner values, not zero owners."),
+		complete: desc("sample_complete", "Whether every fixed shard observation is coherent; their sum is not a global atomic instant. False omits ownership values."),
 		messages: desc("messages", "Current message references held by this stage, including an active consumer or admission offer.", "stage"),
 		logical:  desc("logical_bytes", "Visible payload lengths held by this stage; excludes owner envelopes and other stages.", "stage"),
 		backing:  desc("backing_charge_bytes", "Complete pooled slices charged at their class, other slices at visible length; aliases may overlap and this is not physical heap size.", "stage"),

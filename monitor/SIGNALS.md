@@ -18977,10 +18977,13 @@ ownership/return path and publishes no collector.
 
 These payload families are `enabled`, `sample_complete`, `messages`,
 `logical_bytes`, `backing_charge_bytes`, `admitted_total`, and `released_total`.
-There are exactly 17 fixed series in a coherent collection; an overlapping or
-invalid snapshot emits only the two validity gauges. No queue, resident map,
+There are exactly 17 fixed series when all 64 fixed owner-selected shards are
+coherent at their own observation intervals. This bounded sum is not one global
+atomic instant. A single overlapping or invalid shard suppresses all ownership
+values and emits only the two validity gauges. Updates touch one shard and no
+global writer/revision counter; owner keys never become labels. No queue, resident map,
 global heap, or goroutine profile is traversed. Enabled accounting adds constant
-atomic updates at ownership transitions, with no queue cap, timer, retry,
+shard-local atomic updates at ownership transitions, with no queue cap, timer, retry,
 protocol, financial, or lifecycle change. Require exact same-process provenance,
 freshness, complete state, unique cells, and admitted-minus-released conservation.
 
