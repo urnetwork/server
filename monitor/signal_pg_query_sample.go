@@ -642,7 +642,7 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		return []finding{pgSampleUnavailable(env, "configured-sample-expired")}, nil
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, &pgSamplePreflightError{reason: pgSamplePreflightContext, err: err}
 	}
 	if !recurring {
 		var cancel context.CancelFunc
@@ -652,29 +652,35 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 	ctx, cancelSample := context.WithTimeout(ctx, pgQuerySampleBudget)
 	defer cancelSample()
 	h := env.cfg.hostByRole("pg-primary")
-	if h == nil || h.disabled {
-		return nil, errors.New("monitor: bounded PG sample primary unavailable")
+	if h == nil {
+		return nil, &pgSamplePreflightError{reason: pgSamplePreflightPrimaryMissing}
+	}
+	if h.disabled {
+		return nil, &pgSamplePreflightError{reason: pgSamplePreflightPrimaryDisabled}
 	}
 	if env.cfg.routerGenerationCheck != nil {
 		ok, err := env.cfg.routerGenerationCheck(ctx)
-		if err != nil || !ok {
-			return nil, errors.New("monitor: bounded PG sample inventory changed")
+		if err != nil {
+			return nil, &pgSamplePreflightError{reason: pgSamplePreflightGenerationUnobservable, err: err}
+		}
+		if !ok {
+			return nil, &pgSamplePreflightError{reason: pgSamplePreflightGenerationStale}
 		}
 	}
 	dir := filepath.Join(env.cfg.stateDir, "pg-query-sample")
 	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, errors.New("monitor: bounded PG sample state unavailable")
+		return nil, &pgSamplePreflightError{reason: pgSamplePreflightDirectory, err: err}
 	}
 	identity := until.UTC().Format(time.RFC3339Nano)
 	if recurring {
 		lock, err := lockProviderState(ctx, env.cfg.stateDir, "pg-query-sample-cadence")
 		if err != nil {
-			return nil, errors.New("monitor: bounded PG sample cadence lock unavailable")
+			return nil, &pgSamplePreflightError{reason: pgSamplePreflightCadenceLock, err: err}
 		}
 		defer lock.Close()
 		admitted, err := pgSampleContinuousAdmission(dir, now, p.syncAttemptFile)
 		if err != nil {
-			return nil, errors.New("monitor: bounded PG sample cadence state unavailable")
+			return nil, &pgSamplePreflightError{reason: pgSamplePreflightCadenceState, err: err}
 		}
 		if !admitted {
 			return []finding{pgSampleUnavailable(env, "cadence-not-due-no-new-observation")}, nil
@@ -687,7 +693,7 @@ func (p pgQuerySampleProbe) check(ctx context.Context, env *probeEnv) ([]finding
 		marker := filepath.Join(dir, name+".attempt")
 		created, err := pgSampleCreateAttempt(marker, now, p.syncAttemptFile)
 		if err != nil {
-			return nil, errors.New("monitor: bounded PG sample durable marker unavailable")
+			return nil, &pgSamplePreflightError{reason: pgSamplePreflightMarker, err: err}
 		}
 		if !created {
 			return []finding{pgSampleUnavailable(env, "one-shot-already-attempted")}, nil
