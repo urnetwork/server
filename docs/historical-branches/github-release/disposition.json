@@ -1,0 +1,12 @@
+{
+  "branch": "origin/github-release",
+  "head": "efb51678dddab2b2d0d258b1a53a0fc823b8ef08",
+  "disposition": "historical exact source retained outside runtime/workflow build",
+  "reason": "WIP2024 pull-request release workflow targets removed api/connect/taskworker modules, floating protocol generator and obsolete Go/build graph. Preserve current reviewed release architecture.",
+  "runtime_activated": false,
+  "original_patch_sha256": {
+    "efb51678ddda.patch": "2f17e859841a96967bb7ec0855583854835e606728ef4721fa9557356fc9f32c"
+  },
+  "retrieve_original": "git show efb51678dddab2b2d0d258b1a53a0fc823b8ef08",
+  "privacy_scan": "No private-key/PAT/cloud-key/credential-URL patterns. Only previously committed source; no private runtime artifacts copied."
+}
