@@ -3,10 +3,13 @@
 package controller
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"strings"
+	"time"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/ss58"
 	"github.com/urnetwork/server"
@@ -47,6 +50,27 @@ func snWalletMappingOwner(clientId *server.Id, clientSession *session.ClientSess
 	return model.WalletMappingOwner{Domain: domain, UserId: clientSession.ByJwt.UserId, ClientId: *clientId, NetworkId: clientSession.ByJwt.NetworkId}, nil
 }
 
+// Resolve one actual finalized coordinator boundary under the original
+// deployment owner. Public epoch fields cannot select a historical read.
+func snWalletMappingProspectiveOwner(ctx context.Context, caller model.WalletMappingOwner) (model.WalletMappingOwner, error) {
+	owner, err := newStClientKeyAuthorityOwner()
+	if err != nil {
+		return model.WalletMappingOwner{}, err
+	}
+	if owner.domain != caller.Domain {
+		return model.WalletMappingOwner{}, protocol.ErrWalletMappingIntegrity
+	}
+	boundary, operator, err := owner.readBoundary(ctx, nil)
+	if err != nil {
+		return model.WalletMappingOwner{}, err
+	}
+	if !operator.Active || operator.RootSigner != crypto.PubkeyToAddress(owner.rootKey.PublicKey) {
+		return model.WalletMappingOwner{}, protocol.ErrWalletMappingIntegrity
+	}
+	caller.Prospective = &model.WalletMappingProspectiveOwner{Boundary: boundary, RootKey: owner.rootKey}
+	return caller, ctx.Err()
+}
+
 // This public authenticated request cannot override the configured deployment,
 // JWT identities, original predecessor or bounded challenge expiry.
 func SnWalletMappingChallenge(args *SnWalletMappingChallengeArgs, clientSession *session.ClientSession) (*SnWalletMappingChallengeResult, error) {
@@ -61,7 +85,13 @@ func SnWalletMappingChallenge(args *SnWalletMappingChallengeArgs, clientSession 
 	if err != nil || SnWalletBanned(coldkey) {
 		return nil, errors.Join(protocol.ErrWalletMappingIntegrity, err)
 	}
-	message, err := model.CreateWalletMappingChallenge(clientSession.Ctx, owner, coldkey, args.FromEpoch, args.ThroughEpoch)
+	ctx, cancel := context.WithTimeout(clientSession.Ctx, 300*time.Second)
+	defer cancel()
+	owner, err = snWalletMappingProspectiveOwner(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	message, err := model.CreateWalletMappingChallenge(ctx, owner, coldkey, args.FromEpoch, args.ThroughEpoch)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +114,13 @@ func snAcceptWalletMapping(args *SnSetWalletArgs, clientSession *session.ClientS
 		return nil, errors.Join(protocol.ErrWalletMappingIntegrity, err)
 	}
 	original := protocol.WalletMappingConsent{Message: args.Message, Signature: [64]byte(signature)}
-	accepted, err := model.AcceptWalletMappingConsent(clientSession.Ctx, owner, original, strings.TrimSpace(args.ColdkeySs58))
+	ctx, cancel := context.WithTimeout(clientSession.Ctx, 300*time.Second)
+	defer cancel()
+	owner, err = snWalletMappingProspectiveOwner(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	accepted, err := model.AcceptWalletMappingConsent(ctx, owner, original, strings.TrimSpace(args.ColdkeySs58))
 	if err != nil {
 		return nil, err
 	}
