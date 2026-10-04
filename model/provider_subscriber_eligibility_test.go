@@ -33,6 +33,10 @@ func enableSubscriberQualityPolicy(t testing.TB) {
 func TestQualityRequiresSubscriberAcrossNativeFallbackForceAndNamed(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		enableSubscriberQualityPolicy(t)
+		cacheClock, cacheNow := subscriberCacheTestClock()
+		previousCache := providerSubscriberNegativeCache
+		providerSubscriberNegativeCache = newSubscriberNegativeCache(subscriberNegativeCapacity, cacheNow)
+		t.Cleanup(func() { providerSubscriberNegativeCache = previousCache })
 		ctx := t.Context()
 		city := egressTestCity(ctx, "Example City", "Example Region", "United States", "us")
 		verified := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
@@ -80,6 +84,9 @@ func TestQualityRequiresSubscriberAcrossNativeFallbackForceAndNamed(t *testing.T
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client_handler SET heartbeat_time=$2 WHERE handler_id=$1`, handler, server.NowUtc().Add(-3*NetworkClientHandlerHeartbeatTimeout)))
 		})
+		// A prior refusal may remain for at most one second from its read start.
+		// Advance the cache clock; no real sleep or positive-cache bypass.
+		cacheClock.Add(subscriberNegativeTTL.Nanoseconds())
 		if providers := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeQuality, 10, false, server.NewId()); len(providers) != 1 {
 			t.Fatal("expired unknown handler blocked a current subscriber connection")
 		}
@@ -92,6 +99,9 @@ func TestQualityRequiresSubscriberAcrossNativeFallbackForceAndNamed(t *testing.T
 		if err := DisconnectNetworkClient(ctx, connection); err != nil {
 			t.Fatal(err)
 		}
+		// A prior refusal may remain for at most one second from its read start.
+		// Advance the cache clock; no real sleep or positive-cache bypass.
+		cacheClock.Add(subscriberNegativeTTL.Nanoseconds())
 		if providers := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeQuality, 10, false, server.NewId()); len(providers) != 1 {
 			t.Fatal("disconnected unknown history blocked current subscriber access")
 		}

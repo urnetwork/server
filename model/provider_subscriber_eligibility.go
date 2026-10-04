@@ -18,10 +18,12 @@ func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mo
 	}
 	enabled, err := subscriberQualityPolicyEnabled()
 	if err != nil || !enabled {
+		providerSubscriberNegativeCache.reset()
 		return excluded, err
 	}
-	// Read current connection facts on the primary. Cached flags and a previous
-	// rollup must not turn a new, unknown address into verified subscriber access.
+	// Positive decisions always read current connection facts on the primary.
+	// A one-second negative-only cache coalesces repeated rejections; its age
+	// starts before the read. It cannot admit a new unknown or risky connection.
 	// Candidate chunks bound both the query and result size.
 	const chunkSize = 256
 	pending := make([]server.Id, 0, len(clientIds))
@@ -35,33 +37,40 @@ func getProviderRequestExclusions(ctx context.Context, clientIds []server.Id, mo
 	if len(pending) == 0 {
 		return excluded, nil
 	}
-	var readErr error
-	server.Db(ctx, func(conn server.PgConn) {
-		for start := 0; start < len(pending); start += chunkSize {
-			chunk := pending[start:min(start+chunkSize, len(pending))]
-			rows, err := conn.Query(ctx, providerSubscriberExclusionsSql, chunk, server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout))
-			if err != nil {
-				readErr = err
-				return
-			}
-			for rows.Next() {
-				var id server.Id
-				if err := rows.Scan(&id); err != nil {
-					rows.Close()
+	negative, readErr := providerSubscriberNegativeCache.lookup(ctx, pending, func(ctx context.Context, pending []server.Id) (map[server.Id]bool, error) {
+		negative := make(map[server.Id]bool)
+		var readErr error
+		server.Db(ctx, func(conn server.PgConn) {
+			for start := 0; start < len(pending); start += chunkSize {
+				chunk := pending[start:min(start+chunkSize, len(pending))]
+				rows, err := conn.Query(ctx, providerSubscriberExclusionsSql, chunk, server.NowUtc().Add(-2*NetworkClientHandlerHeartbeatTimeout))
+				if err != nil {
 					readErr = err
 					return
 				}
-				excluded[id] = true
+				for rows.Next() {
+					var id server.Id
+					if err := rows.Scan(&id); err != nil {
+						rows.Close()
+						readErr = err
+						return
+					}
+					negative[id] = true
+				}
+				readErr = rows.Err()
+				rows.Close()
+				if readErr != nil {
+					return
+				}
 			}
-			readErr = rows.Err()
-			rows.Close()
-			if readErr != nil {
-				return
-			}
-		}
-	}, server.OptReadOnly(), server.OptNoRetry())
+		}, server.OptReadOnly(), server.OptNoRetry())
+		return negative, readErr
+	})
 	if readErr != nil {
 		return nil, readErr
+	}
+	for id := range negative {
+		excluded[id] = true
 	}
 	return excluded, nil
 }
