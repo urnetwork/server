@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/qualityprobe"
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 	"github.com/urnetwork/server/qualityprobe/fleetprobe"
@@ -237,6 +238,10 @@ func TestUrlProbeAdmissionKeepsRequestAndReservePolicy(t *testing.T) {
 	_, args, _ := urlAdmissionPass()
 	if budget := providerUrlProbeRunBudget(args); budget != 220*time.Second || budget+3*providerEgressControlPlaneTimeout != 310*time.Second {
 		t.Fatalf("reserve policy changed: %s", budget)
+	}
+	reserve := providerUrlProbeRunBudget(args) + 3*providerEgressControlPlaneTimeout
+	if model.ProviderUrlProbeRenewalHeadroom-reserve != 50*time.Second {
+		t.Fatal("default turn and publication no longer fit the renewal scheduling margin")
 	}
 	opts := fleetprobe.EgressHealthOptions(time.Duration(args.UrlProbe.ProbeTimeoutSeconds)*time.Second, false)
 	if opts.ColdStartTimeout != 60*time.Second || opts.PerRequestTimeout != egresshealth.DefaultPerRequestTimeout {
