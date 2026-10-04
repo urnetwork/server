@@ -72,8 +72,9 @@ type subscriberOrigin struct {
 }
 
 // visibility is the effective peer count used for inference: the least visible
-// origin of this route, or an identical-origin covering route's visibility
-// when that aggregate is better seen (an operator's own more-specific).
+// reviewed identity on this route, or a covering route's visibility when its
+// origin ASNs or reviewed identities are identical and better seen. Raw peer
+// counts remain attached to each observed ASN.
 type subscriberOriginRoute struct {
 	origins    []subscriberOrigin
 	visibility uint32
@@ -94,6 +95,50 @@ func (self subscriberOriginRoute) ownVisibility() uint32 {
 		if i == 0 || origin.peers < least {
 			least = origin.peers
 		}
+	}
+	return least
+}
+
+// Sibling ASNs with exactly the same reviewed subscriber identities are one
+// visibility observation. Use their best count, never a sum of potentially
+// overlapping peers, then require every distinct identity to meet the floor.
+// Unknown or negative use keeps the raw per-ASN minimum; it cannot establish a
+// subscriber identity. RPKI still validates every ASN independently.
+func (self subscriberOriginRoute) reviewedVisibility(byASN map[uint32][]subscriberOperator) uint32 {
+	if len(self.origins) < 2 {
+		return self.ownVisibility()
+	}
+	type identityObservation struct {
+		ids   []string
+		peers uint32
+	}
+	observations := []identityObservation{}
+	for _, origin := range self.origins {
+		operators := byASN[origin.asn]
+		if len(operators) == 0 {
+			return self.ownVisibility()
+		}
+		ids := make([]string, 0, len(operators))
+		for _, operator := range operators {
+			if operator.Usage != "subscriber" {
+				return self.ownVisibility()
+			}
+			ids = append(ids, operator.Id)
+		}
+		slices.Sort(ids)
+		ids = slices.Compact(ids)
+		index := slices.IndexFunc(observations, func(observation identityObservation) bool {
+			return slices.Equal(observation.ids, ids)
+		})
+		if index < 0 {
+			observations = append(observations, identityObservation{ids: ids, peers: origin.peers})
+		} else {
+			observations[index].peers = max(observations[index].peers, origin.peers)
+		}
+	}
+	least := observations[0].peers
+	for _, observation := range observations[1:] {
+		least = min(least, observation.peers)
 	}
 	return least
 }
@@ -386,7 +431,7 @@ func resolveSubscriberOriginEvidence(ctx context.Context, routes map[netip.Prefi
 			return nil, err
 		}
 		route := routes[prefix]
-		route.visibility = route.ownVisibility()
+		route.visibility = route.reviewedVisibility(byASN)
 		route.rpki = authorizations.routeValidity(prefix, route)
 		if covering, ok := coveringSubscriberOrigin(routes, prefix); ok {
 			parent := routes[covering]

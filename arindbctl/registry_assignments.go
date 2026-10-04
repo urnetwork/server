@@ -24,7 +24,8 @@ import (
 // RIPE, APNIC and AFRINIC dumps, objects naming DATACENTER, DEDICATED, VPS,
 // HOSTING or CLOUD sat under hosting-labelled origins 86-96% of the time, and
 // a reviewed sample of such objects inside eyeball origins was hosting in 42
-// of 45 cases. A keyword is not proof of use, so a hosting-named most-specific
+// of 45 cases. DEDICATED and DEDI also describe subscriber Internet access and
+// need server evidence in the same object. A hosting-named most-specific
 // object withholds the identified-ISP inference rather than excluding it.
 type registryAssignmentSource struct {
 	countryEvidenceSource `yaml:",inline" json:",inline"`
@@ -40,7 +41,7 @@ const (
 
 // Measured hosting tokens: share of matching objects under hosting origins at
 // least 0.85 with at least 1,000 objects under labelled origins.
-var registryHostingTokens = []string{"DATACENTER", "DEDICATED", "DEDI", "VPS", "HOSTING", "CLOUD"}
+var registryHostingTokens = []string{"DATACENTER", "VPS", "HOSTING", "CLOUD"}
 
 // Access-technology tokens, each under hosting origins at most 6% of the time.
 // One in the same object cancels a hosting token ("DSL and hosting"). Generic
@@ -74,25 +75,31 @@ func registryAssignmentKind(netname string, descr []string) string {
 	return evidence.kind()
 }
 
-// Only the two token findings need to survive each line. This lets a bounded
+// Only the token findings need to survive each line. This lets a bounded
 // scanner inspect every description without retaining an unbounded object or
 // silently dropping evidence after an arbitrary number of attributes.
 type registryAssignmentNameEvidence struct {
-	hosting, access bool
+	hosting, access   bool
+	dedicated, server bool
 }
 
 func (self *registryAssignmentNameEvidence) add(value string) {
 	for _, token := range registryNameTokens(value) {
 		self.hosting = self.hosting || slices.Contains(registryHostingTokens, token)
 		self.access = self.access || slices.Contains(registryAccessTokens, token)
+		// The adjective alone also names dedicated Internet access, leased
+		// lines and customer addresses. SERVER(S) supplies the missing use.
+		self.dedicated = self.dedicated || token == "DEDICATED" || token == "DEDI"
+		self.server = self.server || token == "SERVER" || token == "SERVERS"
 	}
 }
 
 func (self registryAssignmentNameEvidence) kind() string {
+	hosting := self.hosting || self.dedicated && self.server
 	switch {
-	case self.hosting && !self.access:
+	case hosting && !self.access:
 		return "hosting"
-	case self.access && !self.hosting:
+	case self.access && !hosting:
 		return "access"
 	default:
 		return "other"
