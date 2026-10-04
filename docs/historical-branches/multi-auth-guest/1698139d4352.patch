@@ -1,0 +1,21 @@
+commit 1698139d43527840956dc4586669c04164ab56e5
+Author:     Stuart Kuentzel <s.w.kuentzel@gmail.com>
+AuthorDate: Fri Aug 22 13:27:17 2025 +0900
+Commit:     Stuart Kuentzel <s.w.kuentzel@gmail.com>
+CommitDate: Fri Aug 22 13:27:17 2025 +0900
+
+    drops network_user.wallet_blockchain
+
+diff --git a/db_migrations.go b/db_migrations.go
+index fd1ccebf..059e1f69 100644
+--- a/db_migrations.go
++++ b/db_migrations.go
+@@ -2141,6 +2141,7 @@ var migrations = []any{
+ 	newSqlMigration(`
+         ALTER TABLE network_user
+         DROP COLUMN auth_type,
+-        DROP COLUMN wallet_address
++        DROP COLUMN wallet_address,
++        DROP COLUMN wallet_blockchain
+     `),
+ }

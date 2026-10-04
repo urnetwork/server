@@ -1,0 +1,13 @@
+{
+  "branch": "origin/multi-auth-guest",
+  "head": "1698139d43527840956dc4586669c04164ab56e5",
+  "disposition": "historical exact source retained outside runtime/workflow build",
+  "reason": "Obsolete destructive auth-column migration conflicts with current mixed-version/adoption/migration readers and canonical schema765. Current HasAnyAuthMethod queries credential child tables and current authenticated account operations retain compatibility fields.",
+  "runtime_activated": false,
+  "original_patch_sha256": {
+    "01df1ca20e97.patch": "18309d2f4368b08c2e605e2051e4ccd5210379670a00c382f65d79ff061f9254",
+    "1698139d4352.patch": "209134d2cefba0286bf6724c44a674b46f5192fdb1cd6cdaa0db56751700f059"
+  },
+  "retrieve_original": "git show 1698139d43527840956dc4586669c04164ab56e5",
+  "privacy_scan": "No private-key/PAT/cloud-key/credential-URL patterns. Only previously committed source; no private runtime artifacts copied."
+}

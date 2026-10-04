@@ -1,0 +1,1286 @@
+commit 01df1ca20e972c2385265cb4f90166cb164f21da
+Author:     Stuart Kuentzel <s.w.kuentzel@gmail.com>
+AuthorDate: Fri Aug 22 13:19:04 2025 +0900
+Commit:     Stuart Kuentzel <s.w.kuentzel@gmail.com>
+CommitDate: Fri Aug 22 13:19:04 2025 +0900
+
+    removes network_user.user_auth and network_user.wallet_address
+
+diff --git a/controller/network_user_controller_test.go b/controller/network_user_controller_test.go
+index e4cfd326..a49ed9ac 100644
+--- a/controller/network_user_controller_test.go
++++ b/controller/network_user_controller_test.go
+@@ -44,6 +44,6 @@ func TestGetNetworkUser(t *testing.T) {
+ 		assert.Equal(t, networkUser.UserId, userId)
+ 		assert.Equal(t, networkUser.UserAuth, fmt.Sprintf("%s@bringyour.com", networkId))
+ 		assert.Equal(t, networkUser.Verified, true)
+-		assert.Equal(t, networkUser.AuthType, model.AuthTypePassword)
++
+ 	})
+ }
+diff --git a/db_migrations.go b/db_migrations.go
+index 59cf7264..fd1ccebf 100644
+--- a/db_migrations.go
++++ b/db_migrations.go
+@@ -2137,4 +2137,10 @@ var migrations = []any{
+         ALTER TABLE account_payment
+         ADD COLUMN reliability_subsidy_nano_cents bigint NOT NULL DEFAULT 0
+     `),
++
++	newSqlMigration(`
++        ALTER TABLE network_user
++        DROP COLUMN auth_type,
++        DROP COLUMN wallet_address
++    `),
+ }
+diff --git a/model/device_association_model.go b/model/device_association_model.go
+index d94fe3a2..ca69c6d9 100644
+--- a/model/device_association_model.go
++++ b/model/device_association_model.go
+@@ -792,13 +792,10 @@ func DeviceConfirmAdopt(
+                     device_adopt.device_spec,
+                     network.network_id,
+                     network.network_name,
+-										network_user.auth_type as admin_auth_type,
+                     device_adopt.owner_user_id
+                 FROM device_adopt
+                 INNER JOIN network ON
+                     network.network_id = device_adopt.owner_network_id
+-								LEFT JOIN network_user ON
+-                    network_user.user_id = network.admin_user_id
+                 WHERE
+                     device_adopt.device_association_id = $1
+             `,
+@@ -810,7 +807,6 @@ func DeviceConfirmAdopt(
+ 		var networkId server.Id
+ 		var networkName string
+ 		var userId server.Id
+-		var authType AuthType
+ 
+ 		server.WithPgResult(result, err, func() {
+ 			result.Next()
+@@ -819,7 +815,6 @@ func DeviceConfirmAdopt(
+ 				&deviceSpec,
+ 				&networkId,
+ 				&networkName,
+-				&authType,
+ 				&userId,
+ 			))
+ 		})
+@@ -904,7 +899,7 @@ func DeviceConfirmAdopt(
+ 			adoptTime,
+ 		))
+ 
+-		isGuestMode := (authType == AuthTypeGuest)
++		isGuestMode := isGuestMode(clientSession.Ctx, &userId)
+ 
+ 		byJwtWithClientId := jwt.NewByJwt(
+ 			networkId,
+diff --git a/model/network_model.go b/model/network_model.go
+index 6d58192d..f4ed833f 100644
+--- a/model/network_model.go
++++ b/model/network_model.go
+@@ -135,12 +135,11 @@ func NetworkCreate(
+ 				session.Ctx,
+ 				`
+ 					INSERT INTO network_user
+-					(user_id, user_name, auth_type)
+-					VALUES ($1, $2, $3)
++					(user_id, user_name)
++					VALUES ($1, $2)
+ 				`,
+ 				createdUserId,
+ 				"guest",
+-				AuthTypeGuest,
+ 			)
+ 			server.Raise(err)
+ 
+@@ -224,22 +223,11 @@ func NetworkCreate(
+ 			var result server.PgResult
+ 			var err error
+ 
+-			var userId *server.Id
+-
+-			result, err = tx.Query(
+-				session.Ctx,
+-				`
+-					SELECT user_id FROM network_user WHERE user_auth = $1
+-				`,
+-				userAuth,
+-			)
+-			server.WithPgResult(result, err, func() {
+-				if result.Next() {
+-					server.Raise(result.Scan(&userId))
+-				}
+-			})
+-
+-			if userId != nil {
++			/**
++			 * make sure user auth is not already in use
++			 */
++			exists := userAuthExistsInTx(session.Ctx, tx, *networkCreate.UserAuth)
++			if exists {
+ 				return
+ 			}
+ 
+@@ -269,20 +257,18 @@ func NetworkCreate(
+ 			passwordSalt := createPasswordSalt()
+ 			passwordHash := computePasswordHashV1([]byte(*networkCreate.Password), passwordSalt)
+ 
+-			// todo - cleanup network_user once UIs are updated
++			// todo: remove user_auth once UIs are updated to use user_auths
++			// specifically profile -> reset password uses network_user.user_auth
+ 			_, err = tx.Exec(
+ 				session.Ctx,
+ 				`
+ 					INSERT INTO network_user
+-					(user_id, user_name, auth_type, user_auth, password_hash, password_salt)
+-					VALUES ($1, $2, $3, $4, $5, $6)
++					(user_id, user_name, user_auth)
++					VALUES ($1, $2, $3)
+ 				`,
+ 				createdUserId,
+ 				networkCreate.UserName,
+-				AuthTypePassword,
+ 				userAuth,
+-				passwordHash,
+-				passwordSalt,
+ 			)
+ 			server.Raise(err)
+ 
+@@ -337,59 +323,41 @@ func NetworkCreate(
+ 	} else if networkCreate.AuthJwt != nil && networkCreate.AuthJwtType != nil {
+ 		// user is creating a network via social login
+ 
+-		// server.Logger().Printf("Parsing JWT\n")
+ 		authJwt, _ := ParseAuthJwt(*networkCreate.AuthJwt, AuthType(*networkCreate.AuthJwtType))
+ 		// server.Logger().Printf("Parse JWT result: %s, %s\n", authJwt, err)
+ 		if authJwt != nil {
+-			// validate the user does not exist
+ 
+ 			normalJwtUserAuth, _ := NormalUserAuth(authJwt.UserAuth)
+ 
+-			// server.Logger().Printf("Parsed JWT as %s\n", authJwt.AuthType)
+-
+ 			created := false
+ 			var createdNetworkId server.Id
+ 			var createdUserId server.Id
+ 
+ 			server.Tx(session.Ctx, func(tx server.PgTx) {
+-				var userId *server.Id
+ 
+-				result, err := tx.Query(
+-					session.Ctx,
+-					`
+-						SELECT user_id FROM network_user WHERE user_auth = $1
+-					`,
+-					normalJwtUserAuth,
+-				)
+-				server.WithPgResult(result, err, func() {
+-					if result.Next() {
+-						server.Raise(result.Scan(&userId))
+-					}
+-				})
+-
+-				if userId != nil {
+-					// server.Logger().Printf("User already exists\n")
++				/**
++				 * make sure user auth is not already in use
++				 */
++				exists := userAuthExistsInTx(session.Ctx, tx, normalJwtUserAuth)
++				if exists {
+ 					return
+ 				}
+ 
+-				// server.Logger().Printf("JWT Creating a new network\n")
+-
+ 				created = true
+ 				createdUserId = server.NewId()
+ 				createdNetworkId = server.NewId()
+ 
++				// todo: remove user_auth once UIs are updated to use user_auths
++				// specifically profile -> reset password uses network_user.user_auth
+ 				_, err = tx.Exec(
+ 					session.Ctx,
+ 					`
+ 						INSERT INTO network_user
+-						(user_id, user_name, auth_type, user_auth, auth_jwt)
+-						VALUES ($1, $2, $3, $4, $5)
++						(user_id, user_name, user_auth)
++						VALUES ($1, $2, $3)
+ 					`,
+ 					createdUserId,
+ 					networkCreate.UserName,
+-					authJwt.AuthType,
+-					normalJwtUserAuth,
+-					networkCreate.AuthJwt,
+ 				)
+ 				if err != nil {
+ 					panic(err)
+@@ -480,22 +448,14 @@ func NetworkCreate(
+ 		var createdUserId server.Id
+ 
+ 		server.Tx(session.Ctx, func(tx server.PgTx) {
+-			var userId *server.Id
+ 
+-			result, err := tx.Query(
+-				session.Ctx,
+-				`
+-					SELECT user_id FROM network_user WHERE wallet_address = $1
+-				`,
+-				networkCreate.WalletAuth.PublicKey,
+-			)
+-			server.WithPgResult(result, err, func() {
+-				if result.Next() {
+-					server.Raise(result.Scan(&userId))
+-				}
+-			})
++			walletAuths, err := getWalletAuthsByAddressInTx(session.Ctx, tx, networkCreate.WalletAuth.PublicKey)
++			if err != nil {
++				glog.Errorf("Error getting wallet auths by address: %v", err)
++				return
++			}
+ 
+-			if userId != nil {
++			if len(walletAuths) > 0 {
+ 				glog.Infof("Network user already exists with this wallet address")
+ 				return
+ 			}
+@@ -513,13 +473,10 @@ func NetworkCreate(
+ 				session.Ctx,
+ 				`
+ 					INSERT INTO network_user
+-					(user_id, auth_type, wallet_address, wallet_blockchain, user_name)
+-					VALUES ($1, $2, $3, $4, $5)
++					(user_id, user_name)
++					VALUES ($1, $2)
+ 				`,
+ 				createdUserId,
+-				AuthTypeSolana,
+-				networkCreate.WalletAuth.PublicKey,
+-				networkCreate.WalletAuth.Blockchain,
+ 				networkCreate.UserName,
+ 			)
+ 			if err != nil {
+@@ -804,22 +761,9 @@ func UpgradeGuest(
+ 			 * Validate the user does not exist
+ 			 */
+ 
+-			var userId *server.Id
+-
+-			userCheck, err := tx.Query(
+-				session.Ctx,
+-				`
+-					 SELECT user_id FROM network_user WHERE user_auth = $1
+-				 `,
+-				userAuth,
+-			)
+-			server.WithPgResult(userCheck, err, func() {
+-				if userCheck.Next() {
+-					server.Raise(userCheck.Scan(&userId))
+-				}
+-			})
++			exists := userAuthExistsInTx(session.Ctx, tx, *userAuth)
+ 
+-			if userId != nil {
++			if exists {
+ 				result = &UpgradeGuestResult{
+ 					Error: &UpgradeGuestError{
+ 						Message: "User already exists",
+@@ -839,25 +783,16 @@ func UpgradeGuest(
+ 			 * Update network user from guest
+ 			 */
+ 
+-			server.RaisePgResult(tx.Exec(
++			addUserAuth(
++				&AddUserAuthArgs{
++					UserId:       session.ByJwt.UserId,
++					UserAuth:     userAuth,
++					PasswordHash: passwordHash,
++					PasswordSalt: passwordSalt,
++					Verified:     false,
++				},
+ 				session.Ctx,
+-				`
+-								UPDATE network_user
+-								SET
+-										auth_type = $2,
+-										user_auth = $3,
+-										password_hash = $4,
+-										password_salt = $5
+-
+-								WHERE
+-										user_id = $1
+-						`,
+-				session.ByJwt.UserId,
+-				AuthTypePassword,
+-				userAuth,
+-				passwordHash,
+-				passwordSalt,
+-			))
++			)
+ 
+ 			// do we need to run auditNetworkCreate on the upgrade from guest -> normal account?
+ 
+@@ -883,22 +818,10 @@ func UpgradeGuest(
+ 				 * Validate the user does not exist
+ 				 */
+ 				normalJwtUserAuth, _ := NormalUserAuth(authJwt.UserAuth)
+-				var userId *server.Id
+ 
+-				userCheck, err := tx.Query(
+-					session.Ctx,
+-					`
+-					SELECT user_id FROM network_user WHERE user_auth = $1
+-				`,
+-					normalJwtUserAuth,
+-				)
+-				server.WithPgResult(userCheck, err, func() {
+-					if userCheck.Next() {
+-						server.Raise(userCheck.Scan(&userId))
+-					}
+-				})
++				exists := userAuthExistsInTx(session.Ctx, tx, *userAuth)
+ 
+-				if userId != nil {
++				if exists {
+ 					result = &UpgradeGuestResult{
+ 						Error: &UpgradeGuestError{
+ 							Message: "User already exists",
+@@ -910,23 +833,16 @@ func UpgradeGuest(
+ 				/**
+ 				 * Update network user from guest
+ 				 */
+-				server.RaisePgResult(tx.Exec(
++
++				addSsoAuth(
++					&AddSsoAuthArgs{
++						UserId:        session.ByJwt.UserId,
++						AuthJwt:       *upgradeGuest.AuthJwt,
++						ParsedAuthJwt: *authJwt,
++						AuthJwtType:   SsoAuthType(*upgradeGuest.AuthJwtType),
++					},
+ 					session.Ctx,
+-					`
+-								UPDATE network_user
+-								SET
+-										auth_type = $2,
+-										user_auth = $3,
+-										auth_jwt = $4
+-
+-								WHERE
+-										user_id = $1
+-						`,
+-					session.ByJwt.UserId,
+-					upgradeGuest.AuthJwtType,
+-					normalJwtUserAuth,
+-					upgradeGuest.AuthJwt,
+-				))
++				)
+ 
+ 				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+ 
+@@ -951,22 +867,19 @@ func UpgradeGuest(
+ 			/**
+ 			 * Upgrade from guest from wallet
+ 			 */
+-			var userId *server.Id
+-
+-			userCheck, err := tx.Query(
++			walletAuths, err := getWalletAuthsByAddressInTx(
+ 				session.Ctx,
+-				`
+-					SELECT user_id FROM network_user WHERE wallet_address = $1
+-				`,
++				tx,
+ 				upgradeGuest.WalletAuth.PublicKey,
+ 			)
+-			server.WithPgResult(userCheck, err, func() {
+-				if userCheck.Next() {
+-					server.Raise(userCheck.Scan(&userId))
+-				}
+-			})
++			if err != nil {
++				glog.Errorf("Error getting wallet auths by address: %v", err)
++				return
++			}
++
++			if len(walletAuths) > 0 {
++				glog.Infof("Network user already exists with this wallet address")
+ 
+-			if userId != nil {
+ 				result = &UpgradeGuestResult{
+ 					Error: &UpgradeGuestError{
+ 						Message: "User already exists",
+@@ -978,23 +891,19 @@ func UpgradeGuest(
+ 			/**
+ 			 * Update network user from guest
+ 			 */
+-			server.RaisePgResult(tx.Exec(
++
++			addWalletAuth(
++				&AddWalletAuthArgs{
++					WalletAuth: &WalletAuthArgs{
++						PublicKey:  upgradeGuest.WalletAuth.PublicKey,
++						Blockchain: upgradeGuest.WalletAuth.Blockchain,
++						Message:    upgradeGuest.WalletAuth.Message,
++						Signature:  upgradeGuest.WalletAuth.Signature,
++					},
++					UserId: session.ByJwt.UserId,
++				},
+ 				session.Ctx,
+-				`
+-								UPDATE network_user
+-								SET
+-										wallet_address = $2,
+-										wallet_blockchain = $3,
+-										auth_type = $4
+-
+-								WHERE
+-										user_id = $1
+-						`,
+-				session.ByJwt.UserId,
+-				upgradeGuest.WalletAuth.PublicKey,
+-				AuthTypeSolana,
+-				AuthTypeSolana,
+-			))
++			)
+ 
+ 			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
+ 
+@@ -1021,13 +930,13 @@ func UpgradeGuest(
+ 		server.RaisePgResult(tx.Exec(
+ 			session.Ctx,
+ 			`
+-							UPDATE network
+-							SET
+-								network_name = $2
++				UPDATE network
++				SET
++					network_name = $2
+ 
+-							WHERE
+-									network_id = $1
+-					`,
++				WHERE
++					network_id = $1
++			`,
+ 			session.ByJwt.NetworkId,
+ 			networkName,
+ 		))
+@@ -1343,12 +1252,11 @@ func Testing_CreateNetwork(
+ 		server.RaisePgResult(tx.Exec(
+ 			ctx,
+ 			`
+-				INSERT INTO network_user (user_id, user_name, auth_type, user_auth, verified, password_hash, password_salt)
+-				VALUES ($1, $2, $3, $4, $5, $6, $7)
++				INSERT INTO network_user (user_id, user_name, user_auth, verified, password_hash, password_salt)
++				VALUES ($1, $2, $3, $4, $5, $6)
+ 			`,
+ 			adminUserId,
+ 			"test",
+-			AuthTypePassword,
+ 			userAuth,
+ 			true,
+ 			passwordHash,
+@@ -1393,15 +1301,12 @@ func Testing_CreateNetworkByWallet(
+ 		server.RaisePgResult(tx.Exec(
+ 			ctx,
+ 			`
+-				INSERT INTO network_user (user_id, user_name, auth_type, verified, wallet_address, wallet_blockchain)
+-				VALUES ($1, $2, $3, $4, $5, $6)
++				INSERT INTO network_user (user_id, user_name, verified)
++				VALUES ($1, $2, $3)
+ 			`,
+ 			adminUserId,
+ 			"test",
+-			AuthTypeSolana,
+ 			true,
+-			publicKey,
+-			AuthTypeSolana,
+ 		))
+ 
+ 		addWalletAuth(
+@@ -1442,12 +1347,11 @@ func Testing_CreateGuestNetwork(
+ 		server.RaisePgResult(tx.Exec(
+ 			ctx,
+ 			`
+-				INSERT INTO network_user (user_id, user_name, auth_type, verified)
+-				VALUES ($1, $2, $3, $4)
++				INSERT INTO network_user (user_id, user_name, verified)
++				VALUES ($1, $2, $3)
+ 			`,
+ 			adminUserId,
+ 			"test",
+-			AuthTypeGuest,
+ 			false,
+ 		))
+ 
+@@ -1477,12 +1381,11 @@ func Testing_CreateNetworkSso(
+ 		server.RaisePgResult(tx.Exec(
+ 			ctx,
+ 			`
+-				INSERT INTO network_user (user_id, user_name, auth_type, verified)
+-				VALUES ($1, $2, $3, $4)
++				INSERT INTO network_user (user_id, user_name, verified)
++				VALUES ($1, $2, $3)
+ 			`,
+ 			userId,
+ 			"user_name",
+-			AuthTypeGoogle,
+ 			true,
+ 		))
+ 
+diff --git a/model/network_model_test.go b/model/network_model_test.go
+index 989f5eba..38d21d0c 100644
+--- a/model/network_model_test.go
++++ b/model/network_model_test.go
+@@ -51,8 +51,6 @@ func TestNetworkUpgradeGuestMode(t *testing.T) {
+ 			UserId:    userId,
+ 		}
+ 
+-		clientSession := session.Testing_CreateClientSession(ctx, &byJwt)
+-
+ 		Testing_CreateGuestNetwork(
+ 			ctx,
+ 			networkId,
+@@ -60,14 +58,16 @@ func TestNetworkUpgradeGuestMode(t *testing.T) {
+ 			userId,
+ 		)
+ 
++		clientSession := session.Testing_CreateClientSession(ctx, &byJwt)
++
+ 		// fetch the network user and make sure it's a guest
+ 
+ 		network := GetNetwork(clientSession)
+ 		assert.NotEqual(t, network, nil)
+ 
+-		networkUser := GetNetworkUser(ctx, *network.AdminUserId)
++		isGuest := isGuestMode(ctx, &userId)
+ 
+-		assert.Equal(t, networkUser.AuthType, AuthTypeGuest)
++		assert.Equal(t, isGuest, true)
+ 
+ 		// upgrade to non-guest
+ 
+@@ -89,9 +89,15 @@ func TestNetworkUpgradeGuestMode(t *testing.T) {
+ 		assert.Equal(t, upgradeGuestResult.Error, nil)
+ 		assert.Equal(t, upgradeGuestResult.VerificationRequired.UserAuth, userAuth)
+ 
+-		// fetch the network user and make sure it's no longer a guest
+-		networkUser = GetNetworkUser(ctx, userId)
+-		assert.Equal(t, networkUser.AuthType, AuthTypePassword)
++		// check if is guest
++		isGuest = isGuestMode(ctx, &userId)
++		assert.Equal(t, isGuest, false)
++
++		// should have created a user auth
++		userAuths, err := getUserAuths(userId, ctx)
++		assert.Equal(t, err, nil)
++		assert.Equal(t, len(userAuths), 1)
++		assert.Equal(t, userAuths[0].UserAuth, userAuth)
+ 
+ 		// ensure network name has been updated
+ 		network = GetNetwork(clientSession)
+@@ -192,6 +198,9 @@ func TestUpgradeGuestExistingWalletUser(t *testing.T) {
+ 			guestUserId,
+ 		)
+ 
++		isGuest := isGuestMode(ctx, &guestUserId)
++		assert.Equal(t, isGuest, true)
++
+ 		// fetch the network
+ 		// it should have no guest upgrade network id
+ 		network := GetNetwork(clientSession)
+@@ -216,7 +225,6 @@ func TestUpgradeGuestExistingWalletUser(t *testing.T) {
+ 		// it should have the guest upgrade network id
+ 		network = GetNetwork(clientSession)
+ 		assert.NotEqual(t, network, nil)
+-
+ 		assert.Equal(t, network.GuestUpgradeNetworkId, networkId)
+ 
+ 	})
+@@ -226,13 +234,6 @@ func TestUpgradeGuestByWallet(t *testing.T) {
+ 	server.DefaultTestEnv().Run(func() {
+ 
+ 		ctx := context.Background()
+-		// networkId := server.NewId()
+-		// userId := server.NewId()
+-		// clientId := server.NewId()
+-		// networkName := "abcdef"
+-
+-		// model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
+-
+ 		networkId := server.NewId()
+ 		userId := server.NewId()
+ 
+@@ -263,9 +264,11 @@ func TestUpgradeGuestByWallet(t *testing.T) {
+ 			},
+ 		}
+ 
+-		networkUser := GetNetworkUser(ctx, userId)
+-		assert.Equal(t, networkUser.AuthType, AuthTypeGuest)
+-		assert.Equal(t, networkUser.WalletAddress, nil)
++		isGuest := isGuestMode(ctx, &userId)
++		assert.Equal(t, isGuest, true)
++		walletAuths, err := getWalletAuths(ctx, userId)
++		assert.Equal(t, err, nil)
++		assert.Equal(t, len(walletAuths), 0)
+ 
+ 		result, err := UpgradeGuest(args, clientSession)
+ 		assert.Equal(t, err, nil)
+@@ -275,9 +278,13 @@ func TestUpgradeGuestByWallet(t *testing.T) {
+ 		assert.NotEqual(t, network, nil)
+ 		assert.Equal(t, network.NetworkName, networkName)
+ 
+-		user := GetNetworkUser(ctx, *network.AdminUserId)
+-		assert.Equal(t, user.AuthType, "solana")
+-		assert.Equal(t, user.WalletAddress, pk)
++		isGuest = isGuestMode(ctx, &userId)
++		assert.Equal(t, isGuest, false)
++
++		walletAuths, err = getWalletAuths(ctx, userId)
++		assert.Equal(t, err, nil)
++		assert.Equal(t, len(walletAuths), 1)
++		assert.Equal(t, walletAuths[0].WalletAddress, pk)
+ 
+ 	})
+ }
+diff --git a/model/network_user_model.go b/model/network_user_model.go
+index d8334d97..30c08cb9 100644
+--- a/model/network_user_model.go
++++ b/model/network_user_model.go
+@@ -11,15 +11,13 @@ import (
+ )
+ 
+ type NetworkUser struct {
+-	UserId        server.Id               `json:"user_id"`
+-	UserAuth      *string                 `json:"user_auth,omitempty"`
+-	Verified      bool                    `json:"verified"`
+-	AuthType      string                  `json:"auth_type"`
+-	NetworkName   string                  `json:"network_name"`
+-	WalletAddress *string                 `json:"wallet_address,omitempty"`
+-	UserAuths     []NetworkUserUserAuth   `json:"user_auths,omitempty"`
+-	SsoAuths      []NetworkUserSsoAuth    `json:"sso_auths,omitempty"`
+-	WalletAuths   []NetworkUserWalletAuth `json:"wallet_auths,omitempty"`
++	UserId      server.Id               `json:"user_id"`
++	UserAuth    *string                 `json:"user_auth,omitempty"`
++	Verified    bool                    `json:"verified"`
++	NetworkName string                  `json:"network_name"`
++	UserAuths   []NetworkUserUserAuth   `json:"user_auths,omitempty"`
++	SsoAuths    []NetworkUserSsoAuth    `json:"sso_auths,omitempty"`
++	WalletAuths []NetworkUserWalletAuth `json:"wallet_auths,omitempty"`
+ }
+ 
+ type NetworkUserUserAuth struct {
+@@ -56,10 +54,8 @@ func GetNetworkUser(
+ 			`
+ 			SELECT
+ 				network_user.user_id,
+-				network_user.auth_type,
+ 				network_user.user_auth,
+ 				network_user.verified,
+-				network_user.wallet_address,
+ 				network.network_name
+ 			FROM network_user
+ 			LEFT JOIN network ON
+@@ -75,10 +71,8 @@ func GetNetworkUser(
+ 
+ 				server.Raise(result.Scan(
+ 					&networkUser.UserId,
+-					&networkUser.AuthType,
+ 					&networkUser.UserAuth,
+ 					&networkUser.Verified,
+-					&networkUser.WalletAddress,
+ 					&networkUser.NetworkName,
+ 				))
+ 			}
+@@ -245,7 +239,7 @@ func addUserAuth(
+ 		/**
+ 		 * Check if this user_auth is already associated with a different user
+ 		 */
+-		err := validateUserAuthAvailability(
++		err := validateUserAuthAvailabilityInTx(
+ 			ctx,
+ 			tx,
+ 			*userAuth,
+@@ -369,7 +363,10 @@ type AddSsoAuthArgs struct {
+ 	UserId        server.Id   `json:"user_id"`
+ }
+ 
+-func validateUserAuthAvailability(
++/**
++ * Checking if the user auth is already associated with a different user id
++ */
++func validateUserAuthAvailabilityInTx(
+ 	ctx context.Context,
+ 	tx server.PgTx,
+ 	userAuth string,
+@@ -466,7 +463,7 @@ func addSsoAuth(
+ 		/**
+ 		 * Check user auth isn't already associated with a different user
+ 		 */
+-		err := validateUserAuthAvailability(
++		err := validateUserAuthAvailabilityInTx(
+ 			ctx,
+ 			tx,
+ 			parsedAuthJwt.UserAuth,
+@@ -690,18 +687,17 @@ func getWalletAuths(
+ 	return walletAuths, nil
+ }
+ 
+-func getWalletAuthsByAddress(
++func getWalletAuthsByAddressInTx(
+ 	ctx context.Context,
++	tx server.PgTx,
+ 	walletAddress string,
+ ) ([]NetworkUserWalletAuth, error) {
+ 
+ 	var walletAuths []NetworkUserWalletAuth
+ 
+-	server.Tx(ctx, func(tx server.PgTx) {
+-
+-		result, err := tx.Query(
+-			ctx,
+-			`
++	result, err := tx.Query(
++		ctx,
++		`
+ 				SELECT
+ 					user_id,
+ 					wallet_address,
+@@ -709,349 +705,151 @@ func getWalletAuthsByAddress(
+ 				FROM network_user_auth_wallet
+ 				WHERE wallet_address = $1
+ 			`,
+-			walletAddress,
+-		)
+-		if err != nil {
+-			server.Raise(err)
+-		}
+-
+-		server.WithPgResult(result, err, func() {
+-			for result.Next() {
+-				walletAuth := NetworkUserWalletAuth{}
+-				server.Raise(result.Scan(
+-					&walletAuth.UserId,
+-					&walletAuth.WalletAddress,
+-					&walletAuth.Blockchain,
+-				))
+-				walletAuths = append(walletAuths, walletAuth)
+-			}
+-		})
++		walletAddress,
++	)
++	if err != nil {
++		server.Raise(err)
++	}
+ 
++	server.WithPgResult(result, err, func() {
++		for result.Next() {
++			walletAuth := NetworkUserWalletAuth{}
++			server.Raise(result.Scan(
++				&walletAuth.UserId,
++				&walletAuth.WalletAddress,
++				&walletAuth.Blockchain,
++			))
++			walletAuths = append(walletAuths, walletAuth)
++		}
+ 	})
+ 
+ 	return walletAuths, nil
+ }
+ 
+-/**
+- * Migrating network_user to the new model
+- * This is a temporary structure to hold the data
+- */
+-type NetworkUserToMigrate struct {
+-	UserId        server.Id `json:"user_id"`
+-	UserAuth      *string   `json:"user_auth,omitempty"`
+-	Verified      bool      `json:"verified"`
+-	AuthType      *string   `json:"auth_type"`
+-	PasswordHash  *[]byte   `json:"-"`
+-	PasswordSalt  *[]byte   `json:"-"`
+-	AuthJwt       *string   `json:"auth_jwt"`
+-	WalletAddress *string   `json:"wallet_address,omitempty"`
+-	Blockchain    *string   `json:"wallet_blockchain"`
+-}
+-
+-/**
+- * Remove this once migration is complete
+- */
+-
+-func MigrateNetworkUserChildAuthsOriginal(
++func getWalletAuthsByAddress(
+ 	ctx context.Context,
+-) {
+-
+-	server.Db(ctx, func(conn server.PgConn) {
++	walletAddress string,
++) (walletAuths []NetworkUserWalletAuth, err error) {
+ 
+-		server.Tx(ctx, func(tx server.PgTx) {
+-			result, err := conn.Query(
+-				ctx,
+-				`
+-				SELECT
+-					user_id,
+-					user_auth,
+-					verified,
+-					auth_type,
+-					password_hash,
+-					password_salt,
+-					auth_jwt,
+-					wallet_address,
+-					blockchain
+-				FROM network_user
+-				`,
+-			)
+-			if err != nil {
+-				glog.Infof("Error querying network_user: %v", err)
+-				return
+-			}
++	server.Tx(ctx, func(tx server.PgTx) {
+ 
+-			var networkUsers []NetworkUserToMigrate
++		result, resultErr := getWalletAuthsByAddressInTx(
++			ctx,
++			tx,
++			walletAddress,
++		)
++		if resultErr != nil {
++			err = resultErr
++		}
+ 
+-			server.WithPgResult(result, err, func() {
+-				for result.Next() {
++		walletAuths = result
+ 
+-					networkUser := NetworkUserToMigrate{}
++	})
+ 
+-					result.Scan(
+-						&networkUser.UserId,
+-						&networkUser.UserAuth,
+-						&networkUser.Verified,
+-						&networkUser.AuthType,
+-						&networkUser.PasswordHash,
+-						&networkUser.PasswordSalt,
+-						&networkUser.AuthJwt,
+-						&networkUser.WalletAddress,
+-						&networkUser.Blockchain,
+-					)
++	return
++}
+ 
+-					networkUsers = append(networkUsers, networkUser)
+-				}
+-			})
+-
+-			for _, networkUser := range networkUsers {
+-
+-				if networkUser.UserAuth != nil && networkUser.PasswordHash != nil && networkUser.PasswordSalt != nil {
+-
+-					/**
+-					 * Email or phone + password auth
+-					 */
+-
+-					err := addUserAuth(
+-						&AddUserAuthArgs{
+-							UserId:       networkUser.UserId,
+-							UserAuth:     networkUser.UserAuth,
+-							PasswordHash: *networkUser.PasswordHash,
+-							PasswordSalt: *networkUser.PasswordSalt,
+-							Verified:     networkUser.Verified,
+-						},
+-						ctx,
+-					)
+-
+-					if err != nil {
+-						glog.Errorf("Error adding user auth for user %s: %v", networkUser.UserId, err)
+-					} else {
+-						glog.Infof("Added user auth for user %s: %s", networkUser.UserId, *networkUser.UserAuth)
+-					}
+-				}
++func isGuestMode(
++	ctx context.Context,
++	userId *server.Id,
++) bool {
+ 
+-				if networkUser.AuthJwt != nil && networkUser.AuthType != nil {
+-
+-					/**
+-					 * Google or Apple SSO auth
+-					 */
+-					authJwt, err := ParseAuthJwtUnverified(*networkUser.AuthJwt, AuthType(*networkUser.AuthType))
+-					if err != nil {
+-						glog.Errorf("Error parsing auth jwt for user %s: %v", networkUser.UserId, err)
+-						continue
+-					}
+-
+-					err = addSsoAuth(
+-						&AddSsoAuthArgs{
+-							ParsedAuthJwt: *authJwt,
+-							AuthJwt:       *networkUser.AuthJwt,
+-							AuthJwtType:   SsoAuthType(*networkUser.AuthType),
+-							UserId:        networkUser.UserId,
+-						},
+-						ctx,
+-					)
+-
+-					if err != nil {
+-						glog.Errorf("Error adding SSO auth for user %s: %v", networkUser.UserId, err)
+-					} else {
+-						glog.Infof("Added SSO auth for user %s: %s", networkUser.UserId, *networkUser.AuthJwt)
+-					}
++	isGuestMode := true
+ 
+-				}
++	server.Db(ctx, func(conn server.PgConn) {
++		result, err := conn.Query(
++			ctx,
++			`
++			SELECT
++			(
++				SELECT COUNT(*) FROM network_user_auth_password WHERE user_id = $1
++			) +
++			(
++				SELECT COUNT(*) FROM network_user_auth_sso WHERE user_id = $1
++			) +
++			(
++				SELECT COUNT(*) FROM network_user_auth_wallet WHERE user_id = $1
++			) AS child_auth_count
++			`,
++			userId,
++		)
++		server.WithPgResult(result, err, func() {
++			if result.Next() {
+ 
+-				if networkUser.WalletAddress != nil {
+-
+-					/**
+-					 * Wallet auth
+-					 */
+-
+-					_, err := tx.Exec(
+-						ctx,
+-						`
+-							INSERT INTO network_user_auth_wallet
+-							(user_id, wallet_address, blockchain)
+-							VALUES ($1, $2, $3)
+-						`,
+-						networkUser.UserId,
+-						networkUser.WalletAddress,
+-						AuthTypeSolana,
+-					)
+-
+-					if err != nil {
+-						glog.Errorf("Error adding wallet auth for user %s: %v", networkUser.UserId, err)
+-					} else {
+-						glog.Infof("Added wallet auth for user %s: %s", networkUser.UserId, *networkUser.WalletAddress)
+-					}
++				var childAuthCount int
++				server.Raise(result.Scan(&childAuthCount))
+ 
++				if childAuthCount > 0 {
++					isGuestMode = false
++				} else {
++					isGuestMode = true
+ 				}
+-
++			} else {
++				glog.Infof("No network user found for user ID: %s", userId)
+ 			}
+-
+ 		})
+-
+ 	})
+-}
+ 
+-/**
+- * Remove this once migration is complete
+- */
+-
+-func MigrateNetworkUserChildAuths(
+-	ctx context.Context,
+-) {
++	return isGuestMode
+ 
+-	server.Db(ctx, func(conn server.PgConn) {
+-
+-		server.Tx(ctx, func(tx server.PgTx) {
+-			result, err := conn.Query(
+-				ctx,
+-				`
+-				SELECT
+-				    nu.user_id,
+-				    nu.user_auth,
+-				    nu.verified,
+-				    nu.auth_type,
+-				    nu.password_hash,
+-				    nu.password_salt,
+-				    nu.auth_jwt,
+-				    nu.wallet_address,
+-				    nu.wallet_blockchain
+-				FROM
+-				    network_user nu
+-				LEFT JOIN
+-				    network_user_auth_sso sso ON nu.user_id = sso.user_id
+-				LEFT JOIN
+-				    network_user_auth_password pass ON nu.user_id = pass.user_id
+-				LEFT JOIN
+-				    network_user_auth_wallet wallet ON nu.user_id = wallet.user_id
+-				WHERE
+-				    sso.user_id IS NULL
+-				    AND pass.user_id IS NULL
+-				    AND wallet.user_id IS NULL
+-					AND nu.auth_type != 'guest';
+-				`,
+-			)
+-			if err != nil {
+-				glog.Infof("Error querying network_user: %v", err)
+-				return
+-			}
+-
+-			var networkUsers []NetworkUserToMigrate
+-			userCount := 0
+-
+-			server.WithPgResult(result, err, func() {
+-				for result.Next() {
+-
+-					networkUser := NetworkUserToMigrate{}
+-
+-					result.Scan(
+-						&networkUser.UserId,
+-						&networkUser.UserAuth,
+-						&networkUser.Verified,
+-						&networkUser.AuthType,
+-						&networkUser.PasswordHash,
+-						&networkUser.PasswordSalt,
+-						&networkUser.AuthJwt,
+-						&networkUser.WalletAddress,
+-						&networkUser.Blockchain,
+-					)
+-
+-					networkUsers = append(networkUsers, networkUser)
+-					userCount += 1
+-				}
+-			})
+-
+-			glog.Infof("Migrating %d network users", userCount)
+-
+-			i := 0
+-
+-			for _, networkUser := range networkUsers {
+-
+-				glog.Infof("Migrating user %d/%d: %s", i+1, userCount, networkUser.UserId)
++}
+ 
+-				i += 1
++func userAuthExists(
++	ctx context.Context,
++	userAuth string,
++) bool {
+ 
+-				if networkUser.UserAuth != nil && networkUser.PasswordHash != nil && networkUser.PasswordSalt != nil {
++	userAuthExists := false
+ 
+-					/**
+-					 * Email or phone + password auth
+-					 */
++	server.Tx(ctx, func(tx server.PgTx) {
++		userAuthExists = userAuthExistsInTx(
++			ctx,
++			tx,
++			userAuth,
++		)
++	})
+ 
+-					err := addUserAuth(
+-						&AddUserAuthArgs{
+-							UserId:       networkUser.UserId,
+-							UserAuth:     networkUser.UserAuth,
+-							PasswordHash: *networkUser.PasswordHash,
+-							PasswordSalt: *networkUser.PasswordSalt,
+-							Verified:     networkUser.Verified,
+-						},
+-						ctx,
+-					)
++	return userAuthExists
+ 
+-					if err != nil {
+-						glog.Errorf("Error adding user auth for user %s: %v", networkUser.UserId, err)
+-					} else {
+-						glog.Infof("Added user auth for user %s: %s", networkUser.UserId, *networkUser.UserAuth)
+-					}
+-				}
++}
+ 
+-				if networkUser.AuthJwt != nil && networkUser.AuthType != nil {
+-
+-					/**
+-					 * Google or Apple SSO auth
+-					 */
+-					authJwt, err := ParseAuthJwtUnverified(*networkUser.AuthJwt, AuthType(*networkUser.AuthType))
+-					if err != nil {
+-						glog.Errorf("Error parsing auth jwt for user %s: %v", networkUser.UserId, err)
+-						continue
+-					}
+-
+-					err = addSsoAuth(
+-						&AddSsoAuthArgs{
+-							ParsedAuthJwt: *authJwt,
+-							AuthJwt:       *networkUser.AuthJwt,
+-							AuthJwtType:   SsoAuthType(*networkUser.AuthType),
+-							UserId:        networkUser.UserId,
+-						},
+-						ctx,
+-					)
+-
+-					if err != nil {
+-						glog.Errorf("Error adding SSO auth for user %s: %v", networkUser.UserId, err)
+-					} else {
+-						glog.Infof("Added SSO auth for user %s: %s", networkUser.UserId, *networkUser.AuthJwt)
+-					}
++func userAuthExistsInTx(
++	ctx context.Context,
++	tx server.PgTx,
++	userAuth string,
++) bool {
+ 
+-				}
++	userAuthExists := false
+ 
+-				if networkUser.WalletAddress != nil {
+-
+-					/**
+-					 * Wallet auth
+-					 */
+-
+-					_, err := tx.Exec(
+-						ctx,
+-						`
+-							INSERT INTO network_user_auth_wallet
+-							(user_id, wallet_address, blockchain)
+-							VALUES ($1, $2, $3)
+-						`,
+-						networkUser.UserId,
+-						networkUser.WalletAddress,
+-						AuthTypeSolana,
+-					)
+-
+-					if err != nil {
+-						glog.Errorf("Error adding wallet auth for user %s: %v", networkUser.UserId, err)
+-					} else {
+-						glog.Infof("Added wallet auth for user %s: %s", networkUser.UserId, *networkUser.WalletAddress)
+-					}
++	// server.Db(ctx, func(conn server.PgConn) {
++	result, err := tx.Query(
++		ctx,
++		`
++			SELECT
++			(
++				SELECT COUNT(*) FROM network_user_auth_password WHERE user_auth = $1
++			) +
++			(
++				SELECT COUNT(*) FROM network_user_auth_sso WHERE user_auth = $1
++			) AS child_auth_count
++			`,
++		userAuth,
++	)
++	server.WithPgResult(result, err, func() {
++		if result.Next() {
+ 
+-				}
++			var childAuthCount int
++			server.Raise(result.Scan(&childAuthCount))
+ 
++			if childAuthCount > 0 {
++				userAuthExists = true
+ 			}
++		} else {
++			glog.Infof("No network user found for user ID: %s", userAuth)
++		}
++	})
++	// })
+ 
+-		})
++	return userAuthExists
+ 
+-	})
+ }
+diff --git a/model/network_user_model_test.go b/model/network_user_model_test.go
+index 262eecbb..864c65d1 100644
+--- a/model/network_user_model_test.go
++++ b/model/network_user_model_test.go
+@@ -30,7 +30,6 @@ func TestNetworkUser(t *testing.T) {
+ 		assert.Equal(t, networkUser.UserId, userId)
+ 		assert.Equal(t, networkUser.UserAuth, fmt.Sprintf("%s@bringyour.com", networkId))
+ 		assert.Equal(t, networkUser.Verified, true)
+-		assert.Equal(t, networkUser.AuthType, AuthTypePassword)
+ 		assert.Equal(t, networkUser.NetworkName, networkName)
+ 
+ 		// test for invalid user id
+@@ -46,12 +45,13 @@ func TestNetworkUser(t *testing.T) {
+ 		Testing_CreateGuestNetwork(ctx, guestNetworkId, guestNetworkName, guestUserId)
+ 
+ 		networkUser = GetNetworkUser(ctx, guestUserId)
++		isGuest := isGuestMode(ctx, &guestUserId)
+ 
+ 		assert.NotEqual(t, networkUser, nil)
+ 		assert.Equal(t, networkUser.UserId, guestUserId)
+ 		assert.Equal(t, networkUser.UserAuth, nil)
+ 		assert.Equal(t, networkUser.Verified, false)
+-		assert.Equal(t, networkUser.AuthType, AuthTypeGuest)
++		assert.Equal(t, isGuest, true)
+ 		assert.Equal(t, networkUser.NetworkName, guestNetworkName)
+ 
+ 	})
+@@ -192,3 +192,46 @@ func TestAddUserAuthWallet(t *testing.T) {
+ 
+ 	})
+ }
++
++func TestUserAuthExists(t *testing.T) {
++	server.DefaultTestEnv().Run(func() {
++		ctx := context.Background()
++
++		/**
++		 * Test standard user auth
++		 */
++		networkId := server.NewId()
++		userId := server.NewId()
++		email := fmt.Sprintf("%s@bringyour.com", networkId)
++
++		exists := userAuthExists(ctx, email)
++		assert.Equal(t, exists, false)
++
++		Testing_CreateNetwork(ctx, networkId, "", userId)
++
++		exists = userAuthExists(ctx, email)
++		assert.Equal(t, exists, true)
++
++		/**
++		 * Test SSO user auth
++		 */
++		networkId = server.NewId()
++		userId = server.NewId()
++		email = fmt.Sprintf("%s@bringyour.com", networkId)
++
++		exists = userAuthExists(ctx, email)
++		assert.Equal(t, exists, false)
++
++		jwt := AuthJwt{
++			AuthType: AuthTypeGoogle,
++			UserAuth: email,
++			UserName: "",
++		}
++
++		Testing_CreateNetworkSso(networkId, userId, jwt, ctx)
++
++		exists = userAuthExists(ctx, email)
++		assert.Equal(t, exists, true)
++
++	})
++}
