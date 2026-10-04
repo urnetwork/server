@@ -144,7 +144,7 @@ func readSubscriberOrigins(ctx context.Context, reader io.Reader, at time.Time, 
 		}
 		prefix, err := netip.ParsePrefix(fields[1])
 		peers, peerErr := strconv.ParseUint(fields[2], 10, 32)
-		if err != nil || prefix != prefix.Masked() || prefix.Addr().Is4In6() || peerErr != nil || peers == 0 {
+		if err != nil || prefix != prefix.Masked() || peerErr != nil || peers == 0 {
 			return 0, errors.New("origin snapshot has invalid prefix or peer count")
 		}
 		origins := fields[0]
@@ -162,8 +162,10 @@ func readSubscriberOrigins(ctx context.Context, reader io.Reader, at time.Time, 
 			}
 		}
 		rows++
-		// A default route is not an identification of the entire Internet.
-		if prefix.Bits() == 0 {
+		// A default route does not identify the entire Internet. RIS may also
+		// observe IPv4-mapped IPv6 announcements; MMDB aliases those addresses
+		// to IPv4, so they must not override the native IPv4 origin evidence.
+		if prefix.Bits() == 0 || prefix.Addr().Is4In6() {
 			continue
 		}
 		slices.Sort(route.asns)
@@ -317,6 +319,7 @@ func augmentSubscriberDatabase(ctx context.Context, basePath, catalogPath, outpu
 	if len(routes) == 0 {
 		return errors.New("origin snapshots contain no usable routes")
 	}
+	usableRoutePrefixes := len(routes)
 	byASN := map[uint32][]subscriberOperator{}
 	for _, operator := range catalog.Operators {
 		for _, asn := range operator.ASNs {
@@ -442,5 +445,5 @@ func augmentSubscriberDatabase(ctx context.Context, basePath, catalogPath, outpu
 	if _, err := sources.hashCountryEvidenceSources(ctx, catalogPath, at); err != nil {
 		return err
 	}
-	return writeManifest(output, map[string]any{"source": "reviewed subscriber operators and RIPE RIS origins", "built_at": at, "classifier_version": 1, "quality_policy_version": 2, "subscriber_origin_policy": "identified-subscriber-default", "inputs_sha256": hashes, "origin_sources": catalog.OriginSources, "origin_rows": rows, "reviewed_operators": len(catalog.Operators), "base_leaves": baseLeaves, "emitted_partitions": emitted, "quality_state_partitions": states, "isp_inferred_partitions": inferred}, "arin.mmdb")
+	return writeManifest(output, map[string]any{"source": "reviewed subscriber operators and RIPE RIS origins", "built_at": at, "classifier_version": 1, "quality_policy_version": 2, "subscriber_origin_policy": "identified-subscriber-default", "inputs_sha256": hashes, "origin_sources": catalog.OriginSources, "origin_rows": rows, "usable_origin_prefixes": usableRoutePrefixes, "reviewed_operators": len(catalog.Operators), "base_leaves": baseLeaves, "emitted_partitions": emitted, "quality_state_partitions": states, "isp_inferred_partitions": inferred}, "arin.mmdb")
 }

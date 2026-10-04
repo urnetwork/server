@@ -90,9 +90,9 @@ func TestSubscriberOriginCleanDefaultKeepsEveryAdditionalDiscriminator(t *testin
 
 func TestSubscriberOriginSnapshotRejectsMalformedStaleAndPartialEvidence(t *testing.T) {
 	at := time.Date(2026, 10, 4, 6, 0, 0, 0, time.UTC)
-	valid := subscriberFixtureGzip(t, at.Add(-time.Hour), "64500 192.0.2.0/24 4\n64501 192.0.2.0/24 3\n{64500,64501} 192.0.2.128/25 2\n64500 0.0.0.0/0 1\n")
+	valid := subscriberFixtureGzip(t, at.Add(-time.Hour), "64500 192.0.2.0/24 4\n64501 192.0.2.0/24 3\n{64500,64501} 192.0.2.128/25 2\n64500 0.0.0.0/0 1\n64502 ::ffff:192.0.2.0/120 1\n")
 	routes := map[netip.Prefix]subscriberOriginRoute{}
-	if rows, err := readSubscriberOrigins(t.Context(), bytes.NewReader(valid), at, routes); err != nil || rows != 4 || len(routes) != 2 || len(routes[netip.MustParsePrefix("192.0.2.0/24")].asns) != 2 {
+	if rows, err := readSubscriberOrigins(t.Context(), bytes.NewReader(valid), at, routes); err != nil || rows != 5 || len(routes) != 2 || len(routes[netip.MustParsePrefix("192.0.2.0/24")].asns) != 2 {
 		t.Fatalf("complete snapshot failed: rows=%d err=%v", rows, err)
 	}
 	for _, data := range [][]byte{
@@ -140,7 +140,7 @@ func TestSubscriberOriginBuildGlobalPrefixesAndPreservesBaseCoverage(t *testing.
 		t.Fatal(err)
 	}
 	base := writeTestInput(t, filepath.Join(dir, "base.mmdb"), baseBytes.Bytes())
-	routes := subscriberFixtureGzip(t, at.Add(-time.Hour), "64500 192.0.2.0/24 4\n64501 192.0.2.64/26 3\n64502 192.0.2.128/27 4\n64503 192.0.2.160/28 4\n64504 192.0.2.176/28 4\n64500 192.0.2.192/28 4\n64501 192.0.2.192/28 4\n64500 2001:db8::/32 4\n64500 0.0.0.0/0 1\n")
+	routes := subscriberFixtureGzip(t, at.Add(-time.Hour), "64500 192.0.2.0/24 4\n64501 192.0.2.64/26 3\n64502 192.0.2.128/27 4\n64503 192.0.2.160/28 4\n64504 192.0.2.176/28 4\n64500 192.0.2.192/28 4\n64501 192.0.2.192/28 4\n64500 2001:db8::/32 4\n64500 0.0.0.0/0 1\n64500 ::ffff:192.0.2.64/122 1\n64503 ::ffff:192.0.2.0/123 1\n")
 	routePath := writeTestInput(t, filepath.Join(dir, "origins.gz"), routes)
 	hash := sha256.Sum256(routes)
 	catalog := fmt.Sprintf(`version: 1
