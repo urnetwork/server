@@ -30,6 +30,7 @@ type BuildInput = payoutartifact.BuildInput
 var Build = payoutartifact.Build
 var Sign = payoutartifact.Sign
 var Verify = payoutartifact.Verify
+var VerifyClosedWork = payoutartifact.VerifyClosedWork
 var Bytes = payoutartifact.Bytes
 var Decode = payoutartifact.Decode
 
