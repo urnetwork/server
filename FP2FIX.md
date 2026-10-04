@@ -1,5 +1,18 @@
 # FindProviders2 supply and quality-probe repair plan
 
+Expanded offline subscriber candidate, 2026-10-04 07:55 UTC: the second reviewed
+catalog covers 78 subscriber operators, 85 ASNs and 45 countries, preserving
+the same four hosting vetoes and excluding four pending identities. Full build
+and complete bidirectional attribution/risk readback passed; the independent
+qualified-6800 native decoder passed 187 public samples (78 verified, 109
+excluded). Candidate resource `d8f26b416aa5bb72d7845850ad1e09c9cefa615d7d33a5fcd4bbc6b4f7191584`
+has epoch `1791099583` and 2,939,274 subscriber leaves, including 2,937,153 new
+inferences. These are database populations, not live provider supply. The
+frozen handoff is `temp/arin-subscriber-coverage-20261004/global-candidate-handoff-v4.json`.
+Regional research records 77 service-presence pairs across 46 states; no
+state/province top-30 ranking is complete. No Main activation or provider
+overlap is claimed by these offline controls. Prior checkpoints remain below.
+
 Current ARIN status, 2026-10-04: Root's Main receipts record policy two selected
 at 03:57 UTC and zero native Quality supply across eight Taskworkers at 04:28
 UTC. Earlier inactive-candidate statements below are historical. The subscriber

@@ -116,6 +116,41 @@ separately. No Main contact or resource activation occurred in these checks.
 Fresh actual-provider overlap, loaded-resource proof, rollup and native-index
 Quality recovery remain Root-owned acceptance work.
 
+## 2026-10-04 07:55 UTC expanded global candidate
+
+The second frozen catalog contains 78 subscriber operators, 85 subscriber ASNs
+and 45 countries, with the same four hosting-origin vetoes. Four unresolved
+identity/service joins remain pending and are not emitted. Frontier AS5650 is
+deduplicated into the stable Verizon identity using the current ARIN record and
+Verizon's dated acquisition filing. Registry legacy names have explicit source
+bridges; the LG Powercomm/LG Uplus continuity inference records that a separate
+legal merger instrument was not captured. The catalog SHA-256 is
+`9751341eb8c4eb8ac2a47451c6a45a9f37d0d33de382cb4455973cddb8f0e8f7`.
+Independent review verified source hashes, joins, pending exclusions and entity
+deduplication; this is not an independent semantic review of every identity.
+
+The new full build completed at 07:47 UTC in 483.2 seconds. Resource SHA-256
+`d8f26b416aa5bb72d7845850ad1e09c9cefa615d7d33a5fcd4bbc6b4f7191584`,
+epoch `1791099583`, contains 7,054,846 serialized leaves: 2,939,274 subscriber,
+3,902,447 unknown, 212,004 excluded and 1,121 ambiguous. The complete
+bidirectional comparison passed in 276.2 seconds, including exact ASN/operator
+attribution and preserved registration and risk values. New inferred approvals
+number 2,937,153; origin-use vetoes number 124,610. Independent native decoding
+on the qualified 6800 graph passed 187 public samples: 78 verified and 109
+excluded. These are resource and compatibility checks, not provider counts.
+
+Regional evidence now records 77 reviewed advertised-service operator/region
+pairs in 46 US states, with all ranks unverified. The global administrative
+inventory has 3,865 regions; no state/province top-30 research is complete.
+The September 28 TRAI release adds dated Indian national broadband rankings
+and observations for 22 telecom service areas. Cross-state service areas are
+kept distinct from administrative regions. The handoff receipt under
+`temp/arin-subscriber-coverage-20261004/global-candidate-handoff-v4.json`
+binds the catalog, build, complete readback and native decoder evidence.
+Current-provider shadow, publication, loaded-resource proof and native Quality
+recovery remain Root-owned work. No Main contact occurred in this candidate
+build or its controls; the earlier candidate remains frozen separately.
+
 ## Original policy-two review history
 
 The following records the original stricter review and rollout. The current
