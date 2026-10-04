@@ -25,4 +25,4 @@ COPY build/$TARGETPLATFORM/connect /usr/local/sbin/bringyour-connect
 RUN ln -s /srv/warp/vault/.aws /root/.aws
 
 STOPSIGNAL SIGTERM
-CMD ["/usr/local/sbin/bringyour-connect", "-p", "80"]
+CMD ["/usr/local/sbin/bringyour-connect", "-p", "80", "--memory-owner-ledger"]
