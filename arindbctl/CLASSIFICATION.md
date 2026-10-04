@@ -77,6 +77,45 @@ field, including risk, stayed equal. The resource SHA-256 is
 This is an offline evidence check, not a provider count or a Main activation
 receipt. Global inference and catalog coverage are separate successor work.
 
+## 2026-10-04 07:08 UTC global candidate readback
+
+The first reviewed global seed contains 44 subscriber operators, 48 subscriber
+ASNs and 22 countries, plus four explicit hosting-origin operators. Every
+emitted identity joins current official RIR ASN evidence to an official service
+source; three pending seed identities are not emitted. This is an initial
+catalog, not completion of the country/state/province top-30 research. Its
+frozen catalog SHA-256 is
+`46cee901d365d5a50c99cec0831c27268b6f4d121ba9b6b109de1d568c592a07`.
+The APNIC estimated-user ASN queue remains research prioritization, not reviewed
+subscriber identity or regional market rank. All regional rankings remain
+unverified in this first frozen catalog.
+
+The complete global augmentation finished at 06:54 UTC in 485.7 seconds. The
+serialized candidate has 7,027,342 leaves: 2,920,041 subscriber, 3,894,465 unknown,
+211,987 excluded and 849 ambiguous. Of these, 2,917,920 are new identified-ISP
+inferences and 124,610 are new origin-use vetoes. The resource SHA-256 is
+`c27a3e4904e00d8dd747f8c872126ece2a99b31c784b83c908ebdc1de04f6a49`,
+with build epoch `1791096376`. The builder's manifest counts emitted partitions
+before adjacent equal records are compressed, so those counts are larger than
+the serialized leaf counts.
+
+A complete two-direction output comparison passed in 264.6 seconds. Every new
+approval had exactly the reviewed origin ASN/operator set and matching frozen
+evidence source; existing registration metadata and independent risk values
+remained equal. Only the candidate-to-base pass counts the actual candidate
+state/address population: the reverse pass samples candidate state at each
+base leaf's first address and checks preservation. Neither prefix counts nor
+address-space weights measure live provider coverage.
+
+The independent native decoder control on the qualified 6800 production source
+passed 119 public registry/RIS samples, with 44 verified and 75 excluded outcomes
+matching the candidate's epoch, state and risk. This was a narrow diagnostic
+control using production files: the unrelated root-package generator preflight
+prevented a full root suite. Focused/full/race builder suites and vet passed
+separately. No Main contact or resource activation occurred in these checks.
+Fresh actual-provider overlap, loaded-resource proof, rollup and native-index
+Quality recovery remain Root-owned acceptance work.
+
 ## Original policy-two review history
 
 The following records the original stricter review and rollout. The current

@@ -31,6 +31,18 @@ Source and catalog details are in
 [the classification correction](arindbctl/CLASSIFICATION.md) and
 [the origin catalog contract](arindbctl/SUBSCRIBER-ORIGINS.md).
 
+Offline global candidate checkpoint, 2026-10-04 07:08 UTC: the full reviewed
+44-operator/48-ASN/22-country seed built successfully. Complete bidirectional
+readback checked 7,027,342 serialized candidate leaves, including 2,917,920 new
+identified-ISP subscriber inferences and 124,610 new explicit origin-use vetoes;
+all prior registration metadata and independent risk values were retained.
+An independent native decoder control matched epoch, state, risk and verified
+status for 119 public registry/RIS samples. It is a narrow production-decoder
+control, not a full root suite or a live-provider observation. The candidate
+SHA-256 is `c27a3e4904e00d8dd747f8c872126ece2a99b31c784b83c908ebdc1de04f6a49`.
+Main activation, provider overlap and native Quality recovery are unproved;
+worldwide state/province operator research and regional ranks remain incomplete.
+
 Latest user override, 2026-09-29: each eligible provider needs **ten total
 accepted measured URL runs (success plus failure) in the rolling four hours**.
 A completed turn with no accepted measured URL result does **not** count.
