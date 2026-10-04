@@ -275,10 +275,11 @@ func TestNativeFindProvidersDegradedFallbackKeepsFiltersAndErrors(t *testing.T) 
 		clientSession = testingCreateProviderSearchSession(ctx, jwt.NewByJwt(server.NewId(), server.NewId(), "native-canceled-test", false, false))
 		var canceledResult *FindProviders2Result
 		var canceledErr error
-		// Redis's pre-canceled PING raises this exact sentinel. The HTTP
-		// router and HandleError own it; do not bless an arbitrary panic.
+		// Redis's pre-canceled PING retains the done sentinel and context
+		// cause. The router and HandleError still own the original panic.
 		raised := server.HandleError(func() { canceledResult, canceledErr = FindProviders2(args, clientSession) })
-		if raised != server.DbContextDoneError || canceledResult != nil || canceledErr != nil {
+		raisedErr, _ := raised.(error)
+		if !errors.Is(raisedErr, server.DbContextDoneError) || !errors.Is(raisedErr, context.Canceled) || canceledResult != nil || canceledErr != nil {
 			t.Fatalf("pre-canceled request changed the owning Redis cancellation contract: raised=%v error=%v", raised, canceledErr)
 		}
 
