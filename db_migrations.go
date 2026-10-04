@@ -9559,4 +9559,5 @@ var migrations = []any{
 	newSqlMigration(providerWorkOwnerSchemaSql),
 	newSqlMigration(verifyRequestClosureSchemaSql),
 	newSqlMigration(providerWorkSessionSchemaSql),
+	newSqlMigration(stOperatorGasSchemaSql),
 }
