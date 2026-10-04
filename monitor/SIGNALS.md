@@ -18210,6 +18210,9 @@ every predecessor exited. Keep partial transport observations explicit, as in
 source/start/freshness join in §8.12 and native artifact/lifecycle evidence for
 those separate questions. No monitoring reducer may convert response counts
 into a container census or use a normal poll return as a retirement signal.
+The bounded runtime reader's `current_unique_process=false` also means that one
+fresh newest process could not be selected: a missing/stale start witness and
+a tied newest value can both cause it. It is not a native overlap count.
 
 The inspected worker's `deploy` (`warpctl/run.go:1323`) holds the per-host,
 per-service overlap lease through candidate startup, readiness, redirect and
