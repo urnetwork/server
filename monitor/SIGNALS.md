@@ -17388,6 +17388,19 @@ still requires compatible backend generations, and ID-less clients retain their
 legacy replay limitation. Neither schema presence nor the local ACK-loss control
 attributes existing Main accounting failures to duplicate reports.
 
+2026-10-04 catalog correction: migrations765 and766 also require the exact
+Apple offer-code and Google Play purchase-binding tables, key identities,
+column types and lengths, nullability, and absent defaults. Their checks occupy
+the next two artifact columns after764. Future absence remains a pending
+migration; changed published shapes are drift. Native prefix and fault controls
+cover both schemas. The same review reproduced four preexisting package
+failures on the unchanged source: two missing765/766 catalog registrations and
+two fixture tests attempting superuser-only FK-trigger changes. The latter now
+retain real schema/deferrability faults and separately project each native
+FK trigger's disabled, replica-only, or always-enabled state into the complete
+catalog query. These projections test the existing production predicates without
+granting fixture privileges or claiming a physical trigger was disabled.
+
 Migration versions are a published production protocol. Once a migration has
 run anywhere, its slice position and version must never move: corrections and
 new work are appended after the published sequence. A successful numeric head

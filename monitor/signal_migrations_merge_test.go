@@ -28,7 +28,7 @@ func TestMigrationsSignalMergedCatalogUsesExactColumns(t *testing.T) {
 			{apply: `ALTER TABLE circle_transfer_request DISABLE TRIGGER circle_transfer_request_guard`, restore: `ALTER TABLE circle_transfer_request ENABLE TRIGGER circle_transfer_request_guard`, artifact: "Circle customer transfer custody and append-only observations@v762"},
 			{apply: `ALTER TABLE circle_transfer_observation DISABLE TRIGGER circle_transfer_observation_truncate_guard`, restore: `ALTER TABLE circle_transfer_observation ENABLE TRIGGER circle_transfer_observation_truncate_guard`, artifact: "Circle customer transfer custody and append-only observations@v762"},
 			{apply: `CREATE OR REPLACE FUNCTION circle_transfer_request_guard() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$`, restore: `CREATE OR REPLACE FUNCTION circle_transfer_request_guard() RETURNS trigger LANGUAGE plpgsql AS $guard$` + circleTransferRequestGuardBody + `$guard$`, artifact: "Circle customer transfer custody and append-only observations@v762"},
-			{apply: `ALTER TABLE circle_transfer_observation DISABLE TRIGGER ALL`, restore: `ALTER TABLE circle_transfer_observation ENABLE TRIGGER ALL`, artifact: "Circle customer transfer custody and append-only observations@v762"},
+			{apply: `ALTER TABLE circle_transfer_observation ALTER CONSTRAINT circle_transfer_observation_network_id_user_id_request_id_fkey DEFERRABLE`, restore: `ALTER TABLE circle_transfer_observation ALTER CONSTRAINT circle_transfer_observation_network_id_user_id_request_id_fkey NOT DEFERRABLE`, artifact: "Circle customer transfer custody and append-only observations@v762"},
 			{apply: `ALTER TABLE account_payment DISABLE TRIGGER account_payment_submission_basis_guard`, restore: `ALTER TABLE account_payment ENABLE TRIGGER account_payment_submission_basis_guard`, artifact: "provider payment bonus provenance and submission guards@v756"},
 			{apply: `ALTER TABLE provider_payout_boundary DISABLE TRIGGER provider_payout_boundary_truncate_guard`, restore: `ALTER TABLE provider_payout_boundary ENABLE TRIGGER provider_payout_boundary_truncate_guard`, artifact: "provider earning boundary immutable guards@v757"},
 			{apply: `ALTER TABLE transfer_balance DISABLE TRIGGER transfer_balance_pending_debit_guard`, restore: `ALTER TABLE transfer_balance ENABLE TRIGGER transfer_balance_pending_debit_guard`, artifact: "asynchronous transfer debit journal and retention guard@v758"},
@@ -47,8 +47,7 @@ func TestMigrationsSignalMergedCatalogUsesExactColumns(t *testing.T) {
 			{apply: `ALTER TABLE transfer_contract DISABLE TRIGGER transfer_contract_legacy_settlement_owner`, restore: `ALTER TABLE transfer_contract ENABLE TRIGGER transfer_contract_legacy_settlement_owner`, artifact: "legacy settlement intent and ownership guards@v763"},
 			{apply: `DROP TRIGGER transfer_contract_legacy_settlement_owner ON transfer_contract; CREATE TRIGGER transfer_contract_legacy_settlement_owner BEFORE UPDATE OF outcome,dispute ON transfer_contract FOR EACH ROW EXECUTE FUNCTION guard_legacy_settlement_intent_outcome()`, restore: `DROP TRIGGER transfer_contract_legacy_settlement_owner ON transfer_contract; CREATE TRIGGER transfer_contract_legacy_settlement_owner BEFORE UPDATE OF outcome ON transfer_contract FOR EACH ROW EXECUTE FUNCTION guard_legacy_settlement_intent_outcome()`, artifact: "legacy settlement intent and ownership guards@v763"},
 			{apply: `CREATE OR REPLACE FUNCTION guard_legacy_settlement_intent_outcome() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RETURN NEW; END$$`, restore: `CREATE OR REPLACE FUNCTION guard_legacy_settlement_intent_outcome() RETURNS trigger LANGUAGE plpgsql AS $body$` + legacySettlementOutcomeGuardBody + `$body$`, artifact: "legacy settlement intent and ownership guards@v763"},
-			{apply: `ALTER TABLE legacy_settlement_intent DISABLE TRIGGER ALL`, restore: `ALTER TABLE legacy_settlement_intent ENABLE TRIGGER ALL`, artifact: "legacy settlement intent and ownership guards@v763"},
-			{apply: legacySettlementRetentionTriggerDDL("DISABLE"), restore: legacySettlementRetentionTriggerDDL("ENABLE"), artifact: "legacy settlement intent and ownership guards@v763"},
+			{apply: `ALTER TABLE legacy_settlement_intent ALTER CONSTRAINT legacy_settlement_intent_contract_id_fkey DEFERRABLE`, restore: `ALTER TABLE legacy_settlement_intent ALTER CONSTRAINT legacy_settlement_intent_contract_id_fkey NOT DEFERRABLE`, artifact: "legacy settlement intent and ownership guards@v763"},
 			{apply: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_contract_id_fkey; ALTER TABLE legacy_settlement_intent ADD FOREIGN KEY(contract_id) REFERENCES transfer_contract(contract_id) ON DELETE CASCADE`, restore: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_contract_id_fkey; ALTER TABLE legacy_settlement_intent ADD FOREIGN KEY(contract_id) REFERENCES transfer_contract(contract_id)`, artifact: "legacy settlement intent and ownership guards@v763"},
 			{apply: `ALTER TABLE legacy_settlement_intent ADD COLUMN test_shared_balance_id uuid REFERENCES transfer_balance(balance_id)`, restore: `ALTER TABLE legacy_settlement_intent DROP COLUMN test_shared_balance_id`, artifact: "legacy settlement intent and ownership guards@v763"},
 
@@ -112,15 +111,7 @@ func TestMigrationsSignalMergedCatalogUsesExactColumns(t *testing.T) {
 				t.Fatalf("restored merged schema reported drift: %s", drift)
 			}
 		}
+		checkMigrationForeignKeyEnabledCatalog(t, ctx, "circle_transfer_observation", "circle_transfer_request", "Circle customer transfer custody and append-only observations@v762")
+		checkMigrationForeignKeyEnabledCatalog(t, ctx, "legacy_settlement_intent", "transfer_contract", "legacy settlement intent and ownership guards@v763")
 	})
-}
-
-// Exercise the parent DELETE guard independently of the child FK checks.
-func legacySettlementRetentionTriggerDDL(mode string) string {
-	return `DO $body$ DECLARE guard name; BEGIN
- SELECT t.tgname INTO STRICT guard FROM pg_trigger t JOIN pg_constraint k ON k.oid=t.tgconstraint
- WHERE k.conrelid='legacy_settlement_intent'::regclass AND k.contype='f'
- AND t.tgrelid='transfer_contract'::regclass AND t.tgtype=9;
- EXECUTE format('ALTER TABLE transfer_contract ` + mode + ` TRIGGER %I',guard);
- END $body$`
 }
