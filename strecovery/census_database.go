@@ -14,19 +14,28 @@ import (
 
 // Each call owns and joins one connection selected by a private pinned URL.
 // No production vault, process-global database pool or fallback is selected.
-type PostgresReader struct{}
+type PostgresReader struct {
+	ReadTimeout time.Duration
+	// A private deterministic barrier may refuse, never manufacture a connection.
+	beforeConnect func(context.Context, *pgx.ConnConfig) error
+}
 
 // Credentials stay in the connection file and are never returned in errors.
 func (self PostgresReader) Snapshot(ctx context.Context, source DatabaseSource, limits Limits) (result *DatabaseSnapshot, resultErr error) {
-	if ctx == nil {
-		return nil, errors.New("database snapshot context is absent")
-	}
-	if err := errors.Join(ctx.Err(), limits.validate()); err != nil {
+	if err := limits.validate(); err != nil {
 		return nil, err
 	}
+	ctx, cancel, err := censusReadOwner(ctx, self.ReadTimeout)
+	if err != nil {
+		return nil, err
+	}
+	defer cancel()
 	raw, err := readPrivateFile(ctx, source.Connection.Path, 16*1024)
-	if err != nil || digest(raw) != source.Connection.Sha256 {
-		return nil, &Refusal{Source: source.Id, Cause: "connection file is unavailable or differs from its exact pin"}
+	if err != nil {
+		return nil, &CensusReadError{Source: source.Id, Stage: "connection input", Cause: errors.Join(err, ctx.Err())}
+	}
+	if digest(raw) != source.Connection.Sha256 {
+		return nil, &Refusal{Source: source.Id, Cause: "connection file differs from its exact pin"}
 	}
 	connectionUrl, err := url.Parse(strings.TrimSpace(string(raw)))
 	if err != nil || connectionUrl.Scheme != "postgres" && connectionUrl.Scheme != "postgresql" || connectionUrl.Hostname() == "" ||
@@ -38,21 +47,32 @@ func (self PostgresReader) Snapshot(ctx context.Context, source DatabaseSource, 
 		return nil, &Refusal{Source: source.Id, Cause: "connection configuration changes its explicit database identity"}
 	}
 	config.Password, _ = connectionUrl.User.Password()
-	config.Fallbacks, config.ConnectTimeout = nil, 30*time.Second
+	deadline, _ := ctx.Deadline()
+	config.Fallbacks, config.ConnectTimeout = nil, time.Until(deadline)
+	config.RuntimeParams = map[string]string{"application_name": "urnetwork-operator-census", "timezone": "UTC"}
+	if self.beforeConnect != nil {
+		if err := self.beforeConnect(ctx, config); err != nil {
+			return nil, &CensusReadError{Source: source.Id, Stage: "connection admission", Cause: errors.Join(err, ctx.Err())}
+		}
+	}
 	connection, err := pgx.ConnectConfig(ctx, config)
 	if err != nil {
-		return nil, errors.Join(&Refusal{Source: source.Id, Cause: "database connection unavailable"}, ctx.Err())
+		return nil, &CensusReadError{Source: source.Id, Stage: "connection", Cause: errors.Join(err, ctx.Err())}
 	}
 	defer func() {
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		if err := connection.Close(closeCtx); err != nil {
-			result, resultErr = nil, errors.Join(resultErr, &Refusal{Source: source.Id, Cause: "database connection close failed"})
+			result, resultErr = nil, errors.Join(resultErr, &CensusReadError{Source: source.Id, Stage: "connection close", Cause: err})
+		}
+		<-connection.PgConn().CleanupDone()
+		if err := ctx.Err(); err != nil {
+			result, resultErr = nil, errors.Join(resultErr, err)
 		}
 	}()
 	result, err = readDatabaseSnapshot(ctx, connection, limits, nil)
 	if err != nil {
-		return nil, errors.Join(&Refusal{Source: source.Id, Cause: "complete read-only database snapshot unavailable"}, ctx.Err())
+		return nil, &CensusReadError{Source: source.Id, Stage: "complete read-only snapshot", Cause: errors.Join(err, ctx.Err())}
 	}
 	return result, nil
 }
@@ -78,11 +98,11 @@ func readDatabaseSnapshot(ctx context.Context, connection *pgx.Conn, limits Limi
 		}
 	}()
 	var intentCount, attemptCount, totalBytes, maximumBytes int64
-	if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(sum(octet_length(calldata)),0), COALESCE(max(octet_length(calldata)),0) FROM st_transaction_intent`).Scan(&intentCount, &totalBytes, &maximumBytes); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(sum(octet_length(calldata)),0), COALESCE(max(octet_length(calldata)),0) FROM public.st_transaction_intent`).Scan(&intentCount, &totalBytes, &maximumBytes); err != nil {
 		return nil, err
 	}
 	var attemptBytes, maximumAttemptBytes int64
-	if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(sum(octet_length(raw_transaction)),0), COALESCE(max(octet_length(raw_transaction)),0) FROM st_transaction_attempt`).Scan(&attemptCount, &attemptBytes, &maximumAttemptBytes); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*), COALESCE(sum(octet_length(raw_transaction)),0), COALESCE(max(octet_length(raw_transaction)),0) FROM public.st_transaction_attempt`).Scan(&attemptCount, &attemptBytes, &maximumAttemptBytes); err != nil {
 		return nil, err
 	}
 	if intentCount > int64(limits.MaximumIntents) || attemptCount > int64(limits.MaximumAttempts) || maximumBytes > int64(limits.MaximumTransactionBytes) ||
@@ -97,7 +117,7 @@ func readDatabaseSnapshot(ctx context.Context, connection *pgx.Conn, limits Limi
 	result = &DatabaseSnapshot{Intents: []Intent{}, Attempts: []Attempt{}}
 	rows, err := tx.Query(ctx, `SELECT intent_id::text, intent_key, logical_key, generation, profile, deployment_id, deployment_key,
 		chain_id, genesis_hash, from_address, to_address, calldata_hash, calldata, nonce, status, current_tx_hash, attempt_count, error, create_time, update_time
-		FROM st_transaction_intent ORDER BY intent_id`)
+		FROM public.st_transaction_intent ORDER BY intent_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +137,7 @@ func readDatabaseSnapshot(ctx context.Context, connection *pgx.Conn, limits Limi
 	}
 	rows, err = tx.Query(ctx, `SELECT intent_id::text, attempt, kind, tx_hash, raw_transaction, gas_limit, gas_price, gas_tip_cap, gas_fee_cap, status,
 		inclusion_block, inclusion_hash, finalized_block, finalized_hash, error, create_time, update_time
-		FROM st_transaction_attempt ORDER BY intent_id, attempt`)
+		FROM public.st_transaction_attempt ORDER BY intent_id, attempt`)
 	if err != nil {
 		return nil, err
 	}
