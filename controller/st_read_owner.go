@@ -48,12 +48,10 @@ func beginStRpcRead(ctx context.Context, hooks stRpcReadHooks) (context.Context,
 	}
 	if hooks.wait == nil {
 		hooks.wait = func(ctx context.Context, delay time.Duration) error {
-			timer := time.NewTimer(delay)
-			defer timer.Stop()
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-timer.C:
+			case <-time.After(delay):
 				return nil
 			}
 		}

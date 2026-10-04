@@ -830,6 +830,12 @@ func stView[T any](self *CoreStClient, ctx context.Context, calldata []byte, unp
 
 // Selects one finalized block before delegating the actual contract read.
 func stViewAt[T any](self *CoreStClient, ctx context.Context, address common.Address, calldata []byte, unpack func([]byte) (T, error)) (T, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		var out T
+		return out, err
+	}
+	defer stopRead()
 	finalized, err := self.finalizedBlock(ctx)
 	if err != nil {
 		var out T
@@ -1565,12 +1571,17 @@ func stTransactionLogicalKey(cfg *StConfig, operation string) (string, error) {
 }
 
 func (self *CoreStClient) Epoch(ctx context.Context) (*StEpochState, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
+	head, err := self.finalizedBlock(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("finalized head: %w", err)
+	}
+	block := head.Number
 	if self.coordinator != nil {
-		head, err := self.finalizedBlock(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("finalized head: %w", err)
-		}
-		block := head.Number
 		epoch, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.coordinator.PackCurrentEpoch(), self.coordinator.UnpackCurrentEpoch)
 		if err != nil {
 			return nil, fmt.Errorf("currentEpoch(): %w", err)
@@ -1591,46 +1602,33 @@ func (self *CoreStClient) Epoch(ctx context.Context) (*StEpochState, error) {
 	}
 	state := &StEpochState{}
 
-	epoch, err := stView(self, ctx, self.st.PackEpoch(), self.st.UnpackEpoch)
+	epoch, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.st.PackEpoch(), self.st.UnpackEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("epoch(): %w", err)
 	}
 	state.Epoch = epoch.Uint64()
-	pending, err := stView(self, ctx, self.st.PackPendingEpoch(), self.st.UnpackPendingEpoch)
+	pending, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.st.PackPendingEpoch(), self.st.UnpackPendingEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("pendingEpoch(): %w", err)
 	}
 	state.PendingEpoch = pending.Uint64()
-	if state.EpochStartBlock, err = stView(self, ctx, self.st.PackEpochStartBlock(), self.st.UnpackEpochStartBlock); err != nil {
+	if state.EpochStartBlock, err = stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.st.PackEpochStartBlock(), self.st.UnpackEpochStartBlock); err != nil {
 		return nil, fmt.Errorf("epochStartBlock(): %w", err)
 	}
-	if state.TEpochBlocks, err = stView(self, ctx, self.st.PackTEpoch(), self.st.UnpackTEpoch); err != nil {
+	if state.TEpochBlocks, err = stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.st.PackTEpoch(), self.st.UnpackTEpoch); err != nil {
 		return nil, fmt.Errorf("tEpoch(): %w", err)
 	}
-	if state.CommitWindowBlocks, err = stView(self, ctx, self.st.PackCommitWindowBlocks(), self.st.UnpackCommitWindowBlocks); err != nil {
+	if state.CommitWindowBlocks, err = stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.st.PackCommitWindowBlocks(), self.st.UnpackCommitWindowBlocks); err != nil {
 		return nil, fmt.Errorf("commitWindowBlocks(): %w", err)
 	}
-	if state.TrailsWindowBlocks, err = stView(self, ctx, self.st.PackTrailsWindowBlocks(), self.st.UnpackTrailsWindowBlocks); err != nil {
+	if state.TrailsWindowBlocks, err = stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.st.PackTrailsWindowBlocks(), self.st.UnpackTrailsWindowBlocks); err != nil {
 		return nil, fmt.Errorf("trailsWindowBlocks(): %w", err)
 	}
-	if state.FinalizeOffsetBlocks, err = stView(self, ctx, self.st.PackFinalizeOffsetBlocks(), self.st.UnpackFinalizeOffsetBlocks); err != nil {
+	if state.FinalizeOffsetBlocks, err = stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.st.PackFinalizeOffsetBlocks(), self.st.UnpackFinalizeOffsetBlocks); err != nil {
 		return nil, fmt.Errorf("finalizeOffsetBlocks(): %w", err)
 	}
 
-	err = self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
-		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
-		defer cancel()
-		header, err := client.HeaderByNumber(callCtx, nil)
-		if err != nil {
-			return err
-		}
-		state.HeadBlock = header.Number.Uint64()
-		state.HeadBlockTime = time.Unix(int64(header.Time), 0).UTC()
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
+	state.HeadBlock, state.HeadBlockTime = head.Number, head.Time
 	return state, nil
 }
 
@@ -1924,20 +1922,29 @@ func (self *CoreStClient) BuybackTotal(ctx context.Context) (*big.Int, error) {
 }
 
 func (self *CoreStClient) UnaccountedStakeRao(ctx context.Context) (*big.Int, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
+	head, err := self.finalizedBlock(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if self.coordinator != nil {
-		selfColdkey, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackSelfColdkey(), self.coordinator.UnpackSelfColdkey)
+		selfColdkey, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.coordinator.PackSelfColdkey(), self.coordinator.UnpackSelfColdkey)
 		if err != nil {
 			return nil, fmt.Errorf("selfColdkey(): %w", err)
 		}
-		return self.stakeAt(ctx, self.cfg.DepositHotkey, selfColdkey)
+		return self.stakeAtBlock(ctx, head.Number, self.cfg.DepositHotkey, selfColdkey)
 	}
 	// selfColdkey is read from the contract (authoritative — the
 	// setSelfColdkey SP-1 escape hatch may have overridden the mirror)
-	selfColdkey, err := stView(self, ctx, self.st.PackSelfColdkey(), self.st.UnpackSelfColdkey)
+	selfColdkey, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.st.PackSelfColdkey(), self.st.UnpackSelfColdkey)
 	if err != nil {
 		return nil, fmt.Errorf("selfColdkey(): %w", err)
 	}
-	accounted, err := stView(self, ctx, self.st.PackAccountedStake(), self.st.UnpackAccountedStake)
+	accounted, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.st.PackAccountedStake(), self.st.UnpackAccountedStake)
 	if err != nil {
 		return nil, fmt.Errorf("accountedStake(): %w", err)
 	}
@@ -1952,7 +1959,7 @@ func (self *CoreStClient) UnaccountedStakeRao(ctx context.Context) (*big.Int, er
 		out, err := client.CallContract(callCtx, ethereum.CallMsg{
 			To:   &stStakingPrecompileAddress,
 			Data: calldata,
-		}, nil)
+		}, new(big.Int).SetUint64(head.Number))
 		if err != nil {
 			return err
 		}
@@ -1972,12 +1979,8 @@ func (self *CoreStClient) UnaccountedStakeRao(ctx context.Context) (*big.Int, er
 	return unaccounted, nil
 }
 
-func (self *CoreStClient) stakeAt(ctx context.Context, hotkey [32]byte, coldkey [32]byte) (*big.Int, error) {
+func (self *CoreStClient) stakeAtBlock(ctx context.Context, block uint64, hotkey [32]byte, coldkey [32]byte) (*big.Int, error) {
 	calldata, err := stPackGetStake(hotkey, coldkey, self.cfg.Netuid)
-	if err != nil {
-		return nil, err
-	}
-	header, err := self.finalizedBlock(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -1985,7 +1988,7 @@ func (self *CoreStClient) stakeAt(ctx context.Context, hotkey [32]byte, coldkey 
 	err = self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
-		out, callErr := client.CallContract(callCtx, ethereum.CallMsg{To: &stStakingPrecompileAddress, Data: calldata}, new(big.Int).SetUint64(header.Number))
+		out, callErr := client.CallContract(callCtx, ethereum.CallMsg{To: &stStakingPrecompileAddress, Data: calldata}, new(big.Int).SetUint64(block))
 		if callErr != nil {
 			return callErr
 		}
@@ -2035,14 +2038,23 @@ func (self *CoreStClient) NextFinalizeEpoch(ctx context.Context) (uint64, error)
 }
 
 func (self *CoreStClient) PoolState(ctx context.Context, epoch uint64, noId uint64) (*StPoolState, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
+	head, err := self.finalizedBlock(ctx)
+	if err != nil {
+		return nil, err
+	}
 	e := new(big.Int).SetUint64(epoch)
 	n := new(big.Int).SetUint64(noId)
 	if self.coordinator != nil {
-		commit, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackRootCommitments(e, n), self.coordinator.UnpackRootCommitments)
+		commit, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.coordinator.PackRootCommitments(e, n), self.coordinator.UnpackRootCommitments)
 		if err != nil {
 			return nil, fmt.Errorf("rootCommitments(): %w", err)
 		}
-		entitlement, err := stViewAt(self, ctx, self.cfg.SettlementVault, self.vault.PackEntitlement(e, n), self.vault.UnpackEntitlement)
+		entitlement, err := stViewAtBlock(self, ctx, self.cfg.SettlementVault, head.Number, self.vault.PackEntitlement(e, n), self.vault.UnpackEntitlement)
 		if err != nil {
 			return nil, fmt.Errorf("entitlement(): %w", err)
 		}
@@ -2051,19 +2063,19 @@ func (self *CoreStClient) PoolState(ctx context.Context, epoch uint64, noId uint
 			PoolTotalRao: new(big.Int).Set(entitlement.Total), ClaimedRao: new(big.Int).Set(entitlement.Claimed), Status: entitlement.Status}, nil
 	}
 
-	commit, err := stView(self, ctx, self.st.PackNoCommit(e, n), self.st.UnpackNoCommit)
+	commit, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.st.PackNoCommit(e, n), self.st.UnpackNoCommit)
 	if err != nil {
 		return nil, fmt.Errorf("noCommit(): %w", err)
 	}
-	finalized, err := stView(self, ctx, self.st.PackFinalized(e), self.st.UnpackFinalized)
+	finalized, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.st.PackFinalized(e), self.st.UnpackFinalized)
 	if err != nil {
 		return nil, fmt.Errorf("finalized(): %w", err)
 	}
-	poolTotal, err := stView(self, ctx, self.st.PackPoolTotal(e, n), self.st.UnpackPoolTotal)
+	poolTotal, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.st.PackPoolTotal(e, n), self.st.UnpackPoolTotal)
 	if err != nil {
 		return nil, fmt.Errorf("poolTotal(): %w", err)
 	}
-	claimed, err := stView(self, ctx, self.st.PackClaimedMiner(e, n), self.st.UnpackClaimedMiner)
+	claimed, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.st.PackClaimedMiner(e, n), self.st.UnpackClaimedMiner)
 	if err != nil {
 		return nil, fmt.Errorf("claimedMiner(): %w", err)
 	}
@@ -2080,6 +2092,11 @@ func (self *CoreStClient) PoolState(ctx context.Context, epoch uint64, noId uint
 // Reads one binding at the latest finalized head. Release settlement uses the
 // explicit two-boundary batch surface below instead of this convenience path.
 func (self *CoreStClient) BindingAt(ctx context.Context, clientId [16]byte, epoch uint64) (*StFleetBindingState, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
 	if self.coordinator == nil {
 		return &StFleetBindingState{}, nil
 	}
@@ -2218,6 +2235,11 @@ func stMergeBindingBoundaries(startBindings []*StFleetBindingState, closeBinding
 // then reads every requested binding at both boundary blocks. An empty input
 // still performs the finality proof before returning zero rows.
 func (self *CoreStClient) BindingsAt(ctx context.Context, clientIds [][16]byte, epoch uint64, startBlock uint64, closeBlock uint64) ([]*StFleetBindingState, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
 	if closeBlock < startBlock {
 		return nil, fmt.Errorf("binding block window [%d,%d] is invalid", startBlock, closeBlock)
 	}
@@ -2271,20 +2293,29 @@ func (self *CoreStClient) EpochDeposit(ctx context.Context, epoch uint64, noId u
 }
 
 func (self *CoreStClient) ConvictionBeforeEpoch(ctx context.Context, epoch uint64, noId uint64) (*big.Int, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
 	if self.coordinator == nil {
 		return nil, fmt.Errorf("conviction snapshots require the release coordinator")
 	}
+	head, err := self.finalizedBlock(ctx)
+	if err != nil {
+		return nil, err
+	}
 	e := new(big.Int).SetUint64(epoch)
 	n := new(big.Int).SetUint64(noId)
-	cumulative, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackCumulativeConviction(n), self.coordinator.UnpackCumulativeConviction)
+	cumulative, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.coordinator.PackCumulativeConviction(n), self.coordinator.UnpackCumulativeConviction)
 	if err != nil {
 		return nil, err
 	}
-	deposit, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackEpochDeposits(e, n), self.coordinator.UnpackEpochDeposits)
+	deposit, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.coordinator.PackEpochDeposits(e, n), self.coordinator.UnpackEpochDeposits)
 	if err != nil {
 		return nil, err
 	}
-	added, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackEpochConvictionAdded(e, n), self.coordinator.UnpackEpochConvictionAdded)
+	added, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.coordinator.PackEpochConvictionAdded(e, n), self.coordinator.UnpackEpochConvictionAdded)
 	if err != nil {
 		return nil, err
 	}
