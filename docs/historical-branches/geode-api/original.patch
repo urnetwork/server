@@ -1,0 +1,120 @@
+commit fee01a7aa24079fab7226493cfd5a58d1bc8cb48
+Author:     Brien Colwell <xcolwell@gmail.com>
+AuthorDate: Thu Jun 12 17:22:36 2025 -0700
+Commit:     Brien Colwell <xcolwell@gmail.com>
+CommitDate: Thu Jun 12 17:22:36 2025 -0700
+
+    api: start geode api
+
+diff --git a/api/handlers/earn_handlers.go b/api/handlers/earn_handlers.go
+new file mode 100644
+index 00000000..92c2a11e
+--- /dev/null
++++ b/api/handlers/earn_handlers.go
+@@ -0,0 +1,31 @@
++package handlers
++
++import (
++	"net/http"
++
++	"github.com/urnetwork/server/controller"
++	"github.com/urnetwork/server/router"
++)
++
++func GetEarnDatetime(w http.ResponseWriter, r *http.Request) {
++	pathValues := router.GetPathValues(r)
++
++	// regex
++	re := RequireCompile("[0-9]{4,4}-[0-9]{2,2}-[0-9]{2,2}")
++	if !re.MatchString(pathValues[0]) {
++		writeError(fmt.Sprintf("Bad datetime: %s. Expect yyyy-mm-dd.", pathValues[0]))
++	}
++
++	shareCodeQR := &model.DeviceShareCodeQRArgs{
++		ShareCode: pathValues[0],
++	}
++	impl := func(clientSession *session.ClientSession) (*model.DeviceShareCodeQRResult, error) {
++		return model.DeviceShareCodeQR(shareCodeQR, clientSession)
++	}
++
++	router.WrapWithInputNoAuth(controller.GetEarnDatetime, w, r)
++}
++
++func GetEarnDatetimePayout(w http.ResponseWriter, r *http.Request) {
++	router.WrapWithInputNoAuth(controller.GetEarnDatetimePayout, w, r)
++}
+diff --git a/api/main.go b/api/main.go
+index a4aae2be..e3d4d3c3 100644
+--- a/api/main.go
++++ b/api/main.go
+@@ -129,6 +129,8 @@ Options:
+ 		router.NewRoute("POST", "/connect", handlers.AuthConnect),
+ 		router.NewRoute("POST", "/apple/notification", handlers.AppleNotification),
+ 		router.NewRoute("GET", "/my-ip-info", handlers.MyIPInfo),
++		router.NewRoute("GET", "/earn/([^/]+)", handlers.GetEarnDatetime),
++		router.NewRoute("GET", "/earn/([^/]+)/payout", handlers.GetEarnDatetimePayout),
+ 	}
+ 
+ 	// server.().Printf("%s\n", opts)
+diff --git a/controller/earn_controller.go b/controller/earn_controller.go
+new file mode 100644
+index 00000000..71ff8174
+--- /dev/null
++++ b/controller/earn_controller.go
+@@ -0,0 +1,56 @@
++package controller
++
++import (
++	"github.com/urnetwork/server/model"
++	"github.com/urnetwork/server/session"
++)
++
++type DateKey = int
++
++func DatetimeStringToDateKey(datetime string) (DateKey, error) {
++	t, err := time.Parse("yyyy-mm-dd", datetime)
++	if err != nil {
++		return 0, err
++	}
++
++	// days since the epoch
++	return (t.UnixMilli() * time.Millisecond) / (24 * time.Hour)
++}
++
++func DateKeyToDatetimeString(dateKey DateKey) string {
++	// FIXME
++}
++
++type GetEarnDatetimeArgs struct {
++	DateKey DateKey
++}
++
++type GetEarnDatetimeResult struct {
++	Earnings map[string]float64 `json:"earnings"`
++}
++
++func GetEarnDatetime(
++	args *GetEarnDatetime,
++	session *session.ClientSession,
++) (*GetEarnDatetimeResult, error) {
++
++	// FIXME return random values
++
++}
++
++type GetEarnDatetimePayoutArgs struct {
++	DateKey DateKey
++}
++
++type GetEarnDatetimePayoutResult struct {
++	TotalPayment float64 `json:"total_payment"`
++}
++
++func GetEarnDatetimePayment(
++	args *GetEarnDatetimePayment,
++	session *session.ClientSession,
++) (*GetEarnDatetimePaymentResult, error) {
++
++	// FIXME return random values
++
++}

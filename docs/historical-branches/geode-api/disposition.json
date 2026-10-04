@@ -1,0 +1,14 @@
+{
+  "branch": "origin/geode-api",
+  "disposition": "original unfinished source preserved as non-built historical patch; ancestry merged",
+  "head": "fee01a7aa24079fab7226493cfd5a58d1bc8cb48",
+  "original_file_sha256": {
+    "api/handlers/earn_handlers.go": "3e40a1c095c37bd13eec73798a02226ceaff22c55ff62dd9139fdde4ba6c96ec",
+    "api/main.go": "7f9187d835c146c4c536174b547092222b5d5701dce0a1ad0bf05f28efc6f423",
+    "controller/earn_controller.go": "e043f0a83a42879d461a8c5813bb2b4f4fc2c0cc69213edf3d2962a47a93e970"
+  },
+  "original_patch_sha256": "47bd6d6efc58f85dc674bfc01c96e125356e80d87f2bfca71bcbe223f96b1aac",
+  "reason": "Prototype earnings handlers have undefined argument types, missing imports/returns, and TODO random-value placeholders. No executable earnings behavior is supplied.",
+  "runtime_activation": false,
+  "source_retrieval": "git show fee01a7aa24079fab7226493cfd5a58d1bc8cb48:<path>"
+}
