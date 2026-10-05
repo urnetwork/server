@@ -30,7 +30,6 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
-	"github.com/urnetwork/server/startifact"
 )
 
 type SnSetWalletArgs struct {
@@ -78,6 +77,10 @@ func SnSetWallet(
 	fail := func(message string) (*SnSetWalletResult, error) {
 		return &SnSetWalletResult{Error: &SnSetWalletError{Message: message}}, nil
 	}
+	clientId, ownerErr := snWalletClientOwner(setWallet.ClientId, clientSession)
+	if ownerErr != nil {
+		return fail("Client does not match the authenticated provider.")
+	}
 	coldkeySs58 := strings.TrimSpace(setWallet.ColdkeySs58)
 	coldkeyPubkey, err := ss58.DecodeWithPrefix(coldkeySs58, ss58.BittensorPrefix)
 	if err != nil {
@@ -114,10 +117,6 @@ func SnSetWallet(
 	}
 	setWallet.ColdkeySs58 = coldkeySs58
 
-	clientId := setWallet.ClientId
-	if clientId == nil {
-		clientId = clientSession.ByJwt.ClientId
-	}
 	if clientId != nil {
 		networkId, findErr := model.FindClientNetwork(clientSession.Ctx, *clientId)
 		if findErr != nil || networkId != clientSession.ByJwt.NetworkId {
@@ -138,6 +137,8 @@ func SnSetWallet(
 // (Epoch 0 is a real contract epoch, so absence is a nil, not a zero.)
 type SnPoolClaimArgs struct {
 	Epoch *uint64
+	// Explicit original coldkey for legacy proof reads; never provider ownership.
+	LegacyColdkey string
 }
 
 type SnPoolClaimError struct {
@@ -168,7 +169,7 @@ type SnPoolClaimResult struct {
 	Error                  *SnPoolClaimError `json:"error,omitempty"`
 }
 
-// SnPoolClaim rebuilds the caller network's merkle pool claim for an epoch:
+// SnPoolClaim rebuilds the authenticated provider's merkle pool claim for an epoch:
 // wallet coldkey -> payout leaf -> proof against the committed payout root.
 // The tree is rebuilt from the stored leaves in leaf_index order — the
 // exact input order the committed root was built from — and the proof is
@@ -211,45 +212,13 @@ func SnPoolClaim(
 		}, nil
 	}
 
-	var leaf *model.StPayoutLeaf
-	var artifactRecord *model.StPayoutArtifact
-	artifactRecord = model.GetStPayoutArtifact(ctx, deploymentKey, stEpoch.Epoch, cfg.NoId)
-	// Provider identity, payout ownership, and head exclusion are all frozen in
-	// the immutable epoch artifact. Never apply the caller's current wallet to
-	// an old epoch after a rotation.
-	if clientSession.ByJwt.ClientId != nil && artifactRecord != nil {
-		store, available := server.LoadBlobStore()
-		if !available {
-			return nil, fmt.Errorf("payout artifact store unavailable")
-		}
-		artifact, _, readErr := startifact.Read(ctx, store, artifactRecord.ContentHash)
-		if readErr != nil {
-			return nil, fmt.Errorf("payout artifact integrity failure: %w", readErr)
-		}
-		clientId := stId16(*clientSession.ByJwt.ClientId)
-		for _, provider := range artifact.Providers {
-			if provider.ClientID != clientId {
-				continue
-			}
-			for _, candidate := range model.GetStPayoutLeaves(ctx, deploymentKey, stEpoch.Epoch, artifact.NoID) {
-				if candidate.Coldkey == provider.Coldkey {
-					leaf = candidate
-					break
-				}
-			}
-			break
-		}
-	}
-	// Backward-compatible lookup for a network-scoped JWT/legacy epoch.
-	if leaf == nil {
-		if wallet := model.GetStWallet(ctx, clientSession.ByJwt.NetworkId); wallet != nil {
-			if noId, ok := getStPayoutNoIdForColdkey(ctx, deploymentKey, stEpoch.Epoch, wallet.ColdkeyPubkey); ok {
-				leaf = model.GetStPayoutLeafForColdkey(ctx, deploymentKey, stEpoch.Epoch, noId, wallet.ColdkeyPubkey)
-			}
-		}
+	artifactRecord := model.GetStPayoutArtifact(ctx, deploymentKey, stEpoch.Epoch, cfg.NoId)
+	leaf, err := snPoolClaimOwnedLeaf(poolClaim, clientSession, cfg, stEpoch, artifactRecord)
+	if err != nil {
+		return nil, err
 	}
 	if leaf == nil {
-		result := &SnPoolClaimResult{Epoch: stEpoch.Epoch}
+		result := &SnPoolClaimResult{Epoch: stEpoch.Epoch, Error: &SnPoolClaimError{Message: "Provider claim is not ready: no owned payout leaf; legacy reads require an explicit original coldkey and retained network-only evidence."}}
 		if artifactRecord != nil {
 			result.ArtifactHash = artifactRecord.ContentHash
 			result.ArtifactUri = "/sn/artifact?hash=" + artifactRecord.ContentHash
@@ -263,6 +232,10 @@ func SnPoolClaim(
 	if err != nil {
 		// a proof that does not self-verify is a server bug; never hand it out
 		return nil, err
+	}
+
+	if artifactRecord != nil && root != artifactRecord.PayoutRoot {
+		return nil, fmt.Errorf("payout leaf set differs from its retained artifact root")
 	}
 
 	result := &SnPoolClaimResult{

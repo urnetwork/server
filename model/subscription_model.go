@@ -296,6 +296,12 @@ type TransferBalance struct {
 	// Pro means the balance carries the Pro entitlement. A network is Pro iff it
 	// has an in-window balance with this set -- see pro_model.go.
 	Pro bool `json:"pro,omitempty"`
+	// GrantKind is the recurring grant that wrote the balance, GrantKindNone for
+	// any other balance. Read by the balance summary (see SupersededGrants).
+	GrantKind GrantKind `json:"-"`
+	// what open contracts reserve from the balance, already subtracted from
+	// BalanceByteCount (see applyActiveTransferEscrow)
+	reservedByteCount ByteCount
 }
 
 func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*TransferBalance {
@@ -323,7 +329,8 @@ const activeTransferBalanceSql = `
                     net_revenue_nano_cents,
                     balance_byte_count,
                     paid,
-                    pro
+                    pro,
+                    COALESCE(grant_kind, '')
                 FROM transfer_balance
                 WHERE
                     network_id = $1 AND
@@ -355,6 +362,7 @@ func getActiveTransferBalanceRows(ctx context.Context, query server.PgCanQuery, 
 				&transferBalance.BalanceByteCount,
 				&transferBalance.Paid,
 				&transferBalance.Pro,
+				&transferBalance.GrantKind,
 			))
 			transferBalances = append(transferBalances, transferBalance)
 		}
@@ -396,6 +404,7 @@ func applyActiveTransferEscrow(ctx context.Context, transferBalances []*Transfer
 				server.Raise(err)
 			}
 			transferBalance.BalanceByteCount = max(0, transferBalance.BalanceByteCount-max(0, approx))
+			transferBalance.reservedByteCount = ByteCount(netEscrowBalanceByteCount) + ByteCount(max(0, approx))
 		}
 	})
 }
@@ -933,9 +942,10 @@ func AddBasicTransferBalanceInTx(
 ) (returnErr error) {
 	balanceId := server.NewId()
 
-	// pro = false: this is the unpaid, data-only grant path (the daily free-tier
-	// grant and referral bonuses). It must never confer Pro -- see pro_model.go.
-	// For a Pro grant use AddProTransferBalanceInTx.
+	// pro = false: an unpaid, data-only balance. It must never confer Pro -- see
+	// pro_model.go. It records no grant kind, so it is for balances that are not a
+	// recurring grant (prober credit, fixtures); the daily free grant and referral
+	// bonuses use AddGrantTransferBalanceInTx.
 	_, err := tx.Exec(
 		ctx,
 		`
@@ -970,6 +980,10 @@ func AddBasicTransferBalanceInTx(
 // balance carries pro = true, which is what confers the Pro entitlement -- see
 // pro_model.go. The caller must refresh the Pro cache (UpdateProNetwork) once the
 // tx commits, so the upgrade is visible immediately.
+//
+// It records no grant kind: it is for a Pro balance bought for its own window
+// (x402), which the next monthly grant must not supersede in the summary. The
+// monthly Pro grant uses AddGrantTransferBalanceInTx.
 func AddProTransferBalanceInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -3181,7 +3195,7 @@ func settleEscrowForegroundInTx(ctx context.Context, tx server.PgTx, contractId 
 
 // Current Redis contracts append independent consumption records. Legacy
 // callers queue an intent without releasing their reservation; the worker uses
-// the original atomic debit/outcome path and completes all financial writes before commit.
+// the original atomic debit/outcome path and commits exact earnings plus durable total-projection ownership.
 func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial bool) (posts []func() any, closed bool, returnErr error) {
 	// CloseContract already owns this lock; direct and recovery settlement
 	// must acquire it before balance locks to keep the same lock order.
@@ -3443,10 +3457,12 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 			return nil
 		}
 		if inlineFinancial {
-			// The legacy worker already owns the contract and every grant. Do
-			// this before releasing those locks so metadata never queues behind
-			// a different worker's next contract on the same payer.
-			settleEscrowMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts)
+			// Only the synchronous branch actually owns the grant rows. Reuse
+			// its exact reservation locks and already-advanced snapshots when
+			// they cover every metadata target; unusual sets retain fresh locks.
+			if asyncDebit || !settleEscrowOwnedMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts, positiveReservations, reservationSnapshots) {
+				settleEscrowMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts)
+			}
 			metadataPost = func() any { return nil }
 		}
 
@@ -3512,23 +3528,11 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	}
 
 	if inlineFinancial && len(accountPayouts) > 0 {
-		// The API already adds durable provided totals to the Redis deltas.
-		// Record this worker's contribution only in PG: a crash or ambiguous
-		// Redis INCRBY reply must neither lose nor duplicate provider totals.
-		networkIds := make([]server.Id, 0, len(accountPayouts))
-		for networkId := range accountPayouts {
-			networkIds = append(networkIds, networkId)
-		}
-		slices.SortFunc(networkIds, server.Id.Cmp)
-		for _, networkId := range networkIds {
-			payout := accountPayouts[networkId]
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_balance
-                (network_id,provided_byte_count,provided_net_revenue_nano_cents) VALUES($1,$2,$3)
-                ON CONFLICT(network_id) DO UPDATE SET
-                provided_byte_count=account_balance.provided_byte_count+EXCLUDED.provided_byte_count,
-                provided_net_revenue_nano_cents=account_balance.provided_net_revenue_nano_cents+EXCLUDED.provided_net_revenue_nano_cents`,
-				networkId, payout.payoutByteCount, payout.payout))
-		}
+		// Exact earnings remain in the sweep ledger. Their lifetime display
+		// totals have an independent durable owner, so a held provider row
+		// cannot retain this transaction's payer grants. No Redis increment is
+		// added; account totals and their task's replay marker commit together.
+		queueLegacyProviderTotalsInTx(ctx, tx, contractId, accountPayouts)
 	} else if 0 < len(accountPayouts) {
 		posts = append(posts, func() any {
 			server.Redis(ctx, func(r server.RedisClient) {
@@ -5130,9 +5134,10 @@ func AddProTransferBalanceToAllNetworks(
 		                    net_revenue_nano_cents,
 		                    subsidy_net_revenue_nano_cents,
 		                    balance_byte_count,
-		                    pro
+		                    pro,
+		                    grant_kind
 		                )
-		                VALUES ($1, $2, $3, $4, $5, $6, $7, $5, true)
+		                VALUES ($1, $2, $3, $4, $5, $6, $7, $5, true, $8)
 		            `,
 					server.NewId(),
 					networkId,
@@ -5141,6 +5146,7 @@ func AddProTransferBalanceToAllNetworks(
 					balanceByteCount,
 					NanoCents(0),
 					subsidyNetRevenue,
+					GrantKindPro,
 				)
 				addedTransferBalances[networkId] = balanceByteCount
 			}
@@ -5218,9 +5224,10 @@ func AddFreeTransferBalanceToAllNetworks(
 		                    net_revenue_nano_cents,
 		                    subsidy_net_revenue_nano_cents,
 		                    balance_byte_count,
-		                    pro
+		                    pro,
+		                    grant_kind
 		                )
-		                VALUES ($1, $2, $3, $4, $5, $6, $7, $5, false)
+		                VALUES ($1, $2, $3, $4, $5, $6, $7, $5, false, $8)
 		            `,
 					server.NewId(),
 					networkId,
@@ -5229,6 +5236,7 @@ func AddFreeTransferBalanceToAllNetworks(
 					byteCount,
 					NanoCents(0),
 					NanoCents(0),
+					GrantKindFree,
 				)
 				addedTransferBalances[networkId] = byteCount
 			}

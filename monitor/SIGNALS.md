@@ -3508,6 +3508,24 @@ cannot become an attributed SQL failure. The finite envelope itself is capped
 at1KiB and validated for exact fields/enums before persistence. No raw exception
 or stderr fragment is retained, including unclassified failures.
 
+Qualify changes to the activity SQL with the exact candidate-generated query
+and a selected nonempty active statement under a size-qualified
+`track_activity_query_size` setting, such as `16kB`. Use
+`pg_size_bytes(current_setting('track_activity_query_size'))` before byte-length
+comparisons. A successful empty metadata frame exercises only the empty path;
+row-dependent expressions may not run. Source-string checks and synthetic
+reducer controls are useful regression guards, but do not replace a populated
+PostgreSQL control and a truncation-boundary control. A validated empty runtime
+frame remains an empty endpoint observation, not proof that populated
+predicates work or that process CPU is zero.
+
+For companion native CPU diagnostics, `source_complete` qualifies the guarded
+core collection; optional query and financial-stage metadata have separate
+availability. SQL failure or absent metadata leaves query attribution unknown.
+Populated metadata still requires the process/query generation and time-window
+guards before CPU attribution, and does not prove a native caller or ownership
+of a particular grant row.
+
 At startup, after the unchanged minimum cadence, the enabled recurring sampler
 owns the first finite turn before ordinary active probes begin. Standing log
 streams and drains continue independently. Later shared-slot collisions admit
@@ -4180,18 +4198,42 @@ same-window sequence proves both the database-capacity mechanism and the
 five-minute lease-retry mechanism without inferring either from a later idle
 snapshot.
 
-Standing class `db-maintenance-legacy-reindex` matches only the old-format
-start line for an exact table or daily reliability partition excluded by
-current policy, groups it by table, and pages on the first occurrence. It
-deliberately excludes the later `reindex took` completion line, ordinary
-old-format tables, and the fixed
-`maintenance table[...] <step> <table>` state-machine format. Old code writes
-the start line before it opens the maintenance connection, so this proves
-legacy selection and call-path entry but not that PostgreSQL began the
-statement. The page gives that legacy attempt an immediate operational gate
-while `pg_stat_progress_create_index` and `reindex-debris` remain the sources
-of truth for an active backend and for confirmed inactive/active-table
-candidate artifacts.
+Standing class `db-maintenance-legacy-reindex` matches an exact table or daily
+reliability partition excluded by current scheduled policy in either the old
+`maintenance reindex[i/n] <table>` or current
+`maintenance table[i/n] reindex <table>` start format. It groups by table and
+pages on the first occurrence. Cleanup-before/after, ordinary tables,
+incomplete lines, and `took` completion messages are excluded. Both formats
+log before opening the maintenance connection: the start proves selection and
+call-path entry, not that PostgreSQL began or finished the statement, current
+CPU consumption, or the exact worker revision. Direct progress/catalog
+observations qualify the active relation and phase; native process CPU needs
+its own bounded interval measurement. Missing or failed observation remains
+unknown.
+
+On 2026-10-05 at 04:26:37Z, a direct native capture identified a concurrent
+whole-table rebuild of `network_client`, with
+`network_client_device_id_ccnew` in index validation at 6,492,493 of 8,844,599
+blocks after about 4,660.7 seconds. No blockers were observed in that bounded
+capture. The phase proves an active rebuild; neither its age nor a WAL wait in
+another snapshot proves that it is CPU-heavy. Scheduled maintenance selected
+this table by its hash epoch with `Reindex=true`, without a measured-bloat or
+invalid-index trigger. `network_client` was missing from the large/high-churn
+skip policy despite its tuned autovacuum settings. It now skips scheduled
+whole-table reindexing while retaining cleanup, analysis, ordinary-table
+rotation, and the existing targeted priority-index maintenance. Explicit
+repairs remain separate operational actions; no new automatic repair trigger
+or bloat threshold is introduced.
+
+False-positive qualifier: a completion line, cleanup step, ordinary table, or
+old/current log format alone is not a new excluded-table rebuild or proof of
+runtime source identity. False-negative qualifier: an old-format-only matcher
+misses a real current-format selection such as `network_client`; direct native
+progress/catalog evidence can still identify that operation. The synthetic
+control accepts both exact start formats and rejects those misleading or
+incomplete lines. This source policy change does not cancel the active rebuild
+or prove that the new policy has been deployed. Runtime identity and a later
+maintenance epoch must establish adoption before closure.
 
 The pool timeout was consequently a downstream queue symptom. The daily
 maintenance scheduler had two independent defects: `transfer_escrow` was not
@@ -4710,10 +4752,12 @@ Migration 763 gives legacy unmarked or mixed escrow contracts an independent
 per-contract settlement intent. Foreground acknowledgement leaves the outcome
 unset and the SQL reservation intact. Sixteen bounded recovery partitions take
 queue, contract and sorted grant ownership with `SKIP LOCKED`. One transaction
-commits payer debit, provider sweep/attribution, durable provider totals, escrow
-metadata, final outcome and intent deletion. Provider totals from this worker go
-to the existing `account_balance.provided_*` fields; the API already adds those
-to the Redis deltas from other writers. They are not incremented in Redis again.
+commits payer debit, provider sweep/attribution, escrow metadata, final outcome,
+intent deletion and exact durable ownership of the provider-total projection.
+The projection writes the existing `account_balance.provided_*` fields; the API
+already adds those to Redis deltas from other writers. They are not incremented
+in Redis again. Payment selection still uses the committed sweep ledger, while
+the lifetime totals returned by `GetAccountBalance` can catch up afterward.
 
 The outcome trigger refuses an old writer after an intent has been accepted;
 the worker deletes its locked intent inside the financial transaction before
@@ -4767,12 +4811,217 @@ task continuation gate passed. These are local controls, not Main throughput
 or attribution of its current backlog; require current qualified task outcomes,
 queue ages and progress before claiming production recovery.
 
+Growing-tail qualifier (2026-10-05): busy owners retain their original due key.
+An advancing cursor that wraps only after exhausting all later due work can
+skip an available old owner indefinitely while new tail rows keep arriving.
+The cursor now persists the first selection's database-clock `pass_end_time`;
+continued selections retain that indexed upper bound until the pass wraps.
+Older persisted cursors establish the bound on their first continuation.
+New arrivals and deferred accounting retries beyond the cutoff wait for a later
+pass. This bounds the cohort, not its size or elapsed duration: a large existing
+backlog can still delay revisits. Native locked-owner/release controls with new
+arrivals before every page reproduce the old starvation, then verify revisits,
+exact payer/provider accounting and empty replay with either cursor format.
+Require fresh source-qualified age reduction before claiming Main recovery.
+
+Head-revisit qualifier (2026-10-05): a large fixed cohort can still postpone a
+released old owner for many pages. Continued pages allocate up to one quarter
+of their configured limit to distinct due keys at or before the incoming cursor:
+one forward visit precedes the first head, then three forward visits separate
+later heads. A 64-visit page can visit 16 heads and 48 forward keys. Limits two
+and three retain one head slot; single-item pages retain ordinary traversal.
+The page-local head cursor advances past a busy head without rewinding the
+persisted forward cursor or cutoff. All visits share the existing 64-item limit
+and page budget. Missing heads consume no visits and return unused slots to
+forward traversal. A head accounting/operational failure keeps its
+15-minute/30-second delay and the already completed forward prefix.
+Task-result `head_visited`, `head_completed`, `head_busy_or_gone`, and `head_failed`
+are subsets of the corresponding total counts. `head_busy_or_gone` still includes
+missing owners and incomplete grant locks; it is not an exclusive contention
+count. No attempted head is counted complete before the existing financial
+ownership transaction succeeds. Cancellation preserves the prior forward cursor.
+The first forward visit must finish before a head slot; a short deadline can
+truncate either share. There is no fixed elapsed-time or whole-oldest-prefix
+recovery guarantee. Sixteen continuously busy oldest heads can still fill the
+head allocation; fixed-cohort forward traversal remains the fairness backstop.
+Readers must bind the producer artifact: earlier one-head results use the same
+four fields, absent fields are unknown, and JSON shape alone cannot establish
+the allocation policy. For this source each head count is at most 16 per page;
+completed plus the larger of busy/failed cannot exceed visited. Busy and failed
+can overlap when a transaction's acknowledgement fails.
+
+The 09:06:22 finite Main sample from the earlier one-head artifact had 158 known
+pages, 120 head completions and 38 head busy-or-gone outcomes, with head
+completions in every shard. Heads were 2.13% of visits; selected task history was
+not full fleet coverage. Together with due, failure-free sampled oldest open
+keys before their shard cursors, this supports revising the head allocation. It
+does not establish every row's lock availability, arrival rate, remaining
+cohort size or whole-queue recovery. Native controls hold the old prefix, then
+release all or all but its first owner, verifying 16 distinct head visits and
+48 forward visits with exact debit/payout conservation and cancellation replay.
+
+Interpret oldest-edge stalls separately from progress elsewhere: capped due
+sentinels are lower bounds, selected oldest open/disputed heads are different
+cohorts, and stored failure classes are historical state. A cursor hash can
+change solely because a missing pass cutoff was initialized. Compare actual
+cursor positions and cutoffs, bounded remaining-pass seeks, head outcomes and
+fresh ages; neither hash movement nor delayed table counters proves recovery.
+The 06:40 finite task sample's 94-second oldest finish age was its observation
+span; maximum selected page runtime was 15.261 seconds. Page execution, task
+finalization and scheduling delay remain separate throughput terms.
+
+Busy-gate qualifier (2026-10-05): the allocation-qualified 09:48:17 finite
+sample recorded 1,886 head visits, 415 completions and 1,471 busy-or-gone outcomes
+across 144 selected pages. Every shard completed heads, while the selected oldest
+open edge barely advanced. This does not identify the busy gate or a current
+lock owner. The worker now records `busy_intent_unavailable`,
+`busy_contract_unavailable`, and `busy_grant_set_mismatch`, plus corresponding
+`head_busy_...` counters, directly at the existing refusal branches. These add
+no queries, locks, retry mutations or concurrency. Each three-counter sum equals
+its recorded busy-or-gone total; each head reason is a subset of its total reason.
+Readers require all six source-qualified fields. Missing fields remain unknown,
+partial or contradictory fields are invalid, and sums include only gate-valid
+pages. Busy and failed may still overlap after a commit acknowledgement error.
+
+Intent/contract unavailability means the existing `SKIP LOCKED` query returned
+no owner; it does not distinguish disappearance from a skipped lock. A joined
+grant-set mismatch likewise does not prove a held lock: its count and ownership
+statements take separate ReadCommitted snapshots. Native controls force each
+gate with granted locks, then prove exact recovery; another commits a previously
+missing joined balance between the statements and reproduces the mismatch
+without an externally held grant lock. Both queries use the same inner join and
+neither filters expiry. Static missing unused grants and expired funded grants
+settle normally; missing required funding produces the accounting hold rather
+than a busy gate. These controls refute that static false-busy mechanism, without
+attributing Main rows or authorizing a reservation release. Shared grants can
+span the sixteen contract-id shards; per-shard task ownership does not serialize
+their financial transactions. Observe gate outcomes before changing allocation
+or claiming that improved API connection pressure resolved settlement contention.
+
+Shared-grant owner qualifier (2026-10-05): the 10:25:39 source-qualified finite
+sample attributed 1,022 of 1,024 head busy outcomes to grant-set mismatch; these
+are busy outcomes, not all visits or a proved census of lock owners. Zero
+endpoint waiters do not clear this cause: `SKIP LOCKED` refuses ownership without
+joining a wait queue. A native 512-contract, sixteen-shard control holds one real
+legacy financial owner and produces 480 grant skips from its fifteen siblings,
+then verifies exact debit, metadata, monetary provider payouts and finite drain.
+Its client-observed grant completion duration excludes acquisition and the
+synthetic barrier but includes the commit acknowledgement; it is neither exact
+server lock residence nor Main latency. Busy attempts still acquire their
+per-contract owners and commit without economic DML; this inherited work and
+downstream provider-total contention require separate measurements.
+
+Bounded grant-queue opportunity (2026-10-05): the first selected old-head visit
+in a continued page issues the sorted grant preflight without `SKIP LOCKED`,
+under one 250ms statement budget. Intent and contract ownership still skip;
+forward visits and later heads retain the existing nonwaiting grant query.
+The query mode is chosen before acquiring any grant, avoiding an out-of-order
+retry of a partially acquired set. A successful preflight restores the normal
+two-second statement budget before the unchanged financial transaction.
+Recognized timeout from that exact query unwinds through full transaction
+rollback before becoming grant-busy; it neither changes the intent's due key
+nor logs an expected error, defers it as operational, or runs posts. Parent or
+operator cancellation, deadlock, later financial failure and ambiguous commit
+remain separate errors. Rollback/disposal and posts have their existing bounds;
+250ms describes the acquisition statement, not total request wall time.
+
+Source-qualified task results add `head_grant_wait_attempted`,
+`head_grant_wait_completed` and `head_grant_wait_timed_out`. Attempted means the
+blocking-mode query was issued, not that PostgreSQL actually waited. Completed
+means that visit returned financial success, not just grant acquisition. Each
+page has at most one attempted query; completed plus timed-out cannot exceed
+attempted, completed is a head-completed subset, and timed-out is a
+head-grant-busy subset. The existing grant-set counter now includes this scoped
+timeout as well as incomplete or changing joined membership. Missing fields
+from older producers remain unknown, not zero. Qualify the source separately
+from JSON shape and retain selected finished-task-head coverage limits.
+
+A native baseline skips the retained owner and returns before its subsequent
+release; the candidate is observed waiting on that owner and then commits exact
+debit, sweep, metadata and durable provider-total ownership after release.
+Held-budget, partial-grant, cancellation and later-failure controls preserve
+rollback and replay fences. This offers bounded acquisition opportunity, not a
+proof of Main's lock owner or guaranteed cohort drain: long owners, queue depth,
+membership changes and pages that never reach their head slot remain possible.
+Due-key order also differs from oldest-open creation order; an old open head
+before the persisted cursor need not occupy the first selected retry slot.
+
+The inline legacy metadata path now reuses its actual grant and escrow ownership
+only when every payout target exactly matches the captured positive unmarked
+reservation key and amount. It removes four redundant reads/locks, keeps
+metadata in the financial commit, and advances the same
+snapshot prediction a second time without subtracting the reservation again.
+Cold snapshots stay absent; an intervening revision invalidates both predictions.
+Mixed, zero, settled and incomplete target sets retain the full locking path.
+Native controls cover these fallbacks, multiple grants, revision invalidation,
+rollback and lost-reply replay, with explicit Redis error checks. This reduces
+known local ownership work; fresh owner outcomes and age reduction are still
+required to establish Main recovery or identify a dominant downstream owner.
+
 Clock, legacy reservation mirror and stream cleanup remain post-commit
 projections: the clock uses its existing aggregate backfill with its documented
 ambiguity; the mirror is rebuilt from durable revisions; mixed Redis reservation
 leases and stream memberships retain their existing bounded expiry/reconciliation.
 No replay of a non-idempotent Redis increment is added. A quiet error log or low
 CPU does not establish complete recovery or current provider payout success.
+
+Provider-total projection reader prerequisite (2026-10-05): the existing task
+queue can durably carry an exact provider-total allocation independently of the
+grant owner. `ApplyLegacyProviderTotals` reads and locks its own pending task,
+updates sorted account totals and an `applied` marker in one transaction, and has
+no task post. An invocation's captured arguments are not replay authority. The
+payload retains exact allocations after contract/sweep retention; ordinary
+finished-task cleanup cannot remove a pending allocation. A missing owner or
+invalid payload remains an error, and this target must not be retired or its
+pending rows canceled before every allocation is applied. The reader commit
+alone leaves the inline producer unchanged.
+
+Deploy private-task argument logging and the registered reader to every
+Taskworker before enabling the separate producer change. Old workers retain an
+unknown target through their existing short version-skew retry, but binaries
+without private-argument logging can print its recovery payload. The new marker
+redacts arguments even for an unknown target, malformed data and operator task
+listing; lifecycle/error envelopes remain visible. Producer activation requires
+complete running-generation evidence, not a successful build or partial fleet.
+Native controls cover enqueue/application rollback, stale duplicate invocations,
+lost replies, partial multi-provider failure, finalization rollback, unknown-target
+retry and finished cleanup. These establish local accounting and compatibility;
+they do not identify Main's current provider-row owner, queue capacity or drain
+rate. A healthy total projection does not clear a retained legacy accounting hold.
+
+Provider-total writer boundary: only the already-claimed terminal-outcome branch
+queues the self-contained allocation, in the same transaction as debit and sweep
+insertion. A duplicate queue key is an error that rolls back that whole financial
+prefix; it cannot merge or replace an earlier allocation. The terminal outcome
+remains the lifetime enqueue fence after normal task finalization releases the
+queue key. No provider-total row is acquired while this transaction owns grants.
+For a contract with N eligible provider networks this replaces N inline total
+upserts with one independent task insertion. Application still needs N upserts,
+one owning-row read and one marker write, plus ordinary scheduler claim and
+finalization work. It adds one task per legacy settlement; it does not establish
+task capacity, reduce the total write count or add a shared-provider queue key.
+
+The baseline native control fails at a held provider row. With the writer, an
+exact `pg_blocking_pids` projection-to-provider edge remains present before and
+after a same-grant sibling commits, and the holder transaction survives a full
+512-contract financial drain. Each contract retains one exact unapplied task;
+real payment selection still reads all committed sweeps. After release, actual
+task execution and finalization consume those exact owners without duplication.
+The synthetic owner timeout and forced task due times are diagnostic controls,
+not production latency or retry-cadence measurements. This establishes a local
+causal mechanism, not Main's current blocker or its frequency.
+
+False-positive qualifier: a pending projection whose marker is already applied
+can await ordinary task finalization with correct totals, and a short unapplied
+lag does not mean a provider earning is missing from the sweep ledger.
+False-negative qualifier: drained legacy intents and closed contracts no longer
+certify that lifetime totals have caught up; generic task errors/durations must
+be considered with exact source-qualified projection ownership and freshness.
+There is no dedicated projection-age probe in this change. Missing task evidence
+or a quiet log is not proof of complete projection, and failed or unsupported
+owners must retain their recovery payloads until applied. Explicit task deletion
+or retiring the target before that point is unsafe. Existing insufficient-escrow,
+dispute, reservation and payout-attribution holds remain unchanged.
 
 A normalized `panic` log class is not proof of an uncaught worker failure.
 `server.HandleError` recovers a raised error, emits `Unexpected error` unless it
@@ -11598,6 +11847,38 @@ unfinished residence. Completion outcomes are `contract_reply`,
 precedence. A generated signed reply does not prove delivery, provider contact,
 a unique reservation, or an accepted URL trial.
 
+The companion phase also owns synchronous model unwind after its nested
+transaction finishes. In particular, `runRedisContractAdmission` joins reserved
+token compensation before returning. Its detached owner has one shared
+300-second budget, one-second PG attempts, and at most one second between
+retry passes. Canceled callers can therefore remain in `companion_origin`
+while this required cleanup continues. A large companion population with a
+smaller `transaction` population does not by itself identify origin-query
+waiters or occupied PG connections. The 2026-10-05 08:47:42Z exact-02d four-g1
+point receipt (`1fc3b9294f70d0a13f5ea8f1865ac4ca48dc590a3fd01d42dbb77fad1e72120a`)
+showed edge3/edge4 companion populations 14,864/14,601 and nested transaction
+populations 179/169. This is point occupancy, not an interval rate or proof of
+the branch responsible for every call.
+
+Reservation attempts register cleanup ownership before Redis EVAL. A nil-error
+zero reply establishes no positive reservation for that attempt and can remove
+only its own compensation obligation. Keep the balance in retained-marker
+discovery so an entirely full grant can recover an older abandoned token.
+Positive, malformed, canceled, timed-out, and lost-reply outcomes remain owned;
+a concurrent or later zero must not erase an earlier uncertain attempt. A zero
+reply can still expire old tokens or refresh TTLs, so it does not prove that
+Redis performed no writes. SQL request fences and the sticky publication
+boundary continue to protect committed custody.
+
+Pool canceled-acquisition counters count failed acquisition attempts, not PG
+CancelRequest messages, logical requests, or borrowed connections. Do not infer
+constructor/cleanup populations by subtracting independently sampled gauges.
+The stage owner is finished by an idempotent controller defer; error,
+cancellation, and panic controls verify that it decrements its current gauge.
+A live cleanup tail remains counted until that defer executes. Use same-source,
+same-process paired counters to measure change, and treat completed-stage
+seconds/count as lifetime means unless a qualified pair supplies the interval.
+
 `urnetwork_connect_contract_rejections_total{ingress,cause,companion}` closes
 the early-branch gap in the older contract-failure counter. Its 40 initialized
 cells use `internal|http`, requested companion `true|false`, and the fixed
@@ -12064,6 +12345,28 @@ prove rolling quota recovery or attribute Main throughput changes to this
 profile alone. False-negative qualifier: local transport controls do not model
 provider scheduling, Main contract availability or the live eligible population;
 retain the independently observed per-provider quota and ownership requirements.
+
+URL content matcher v2 records changed HTML semantics separately from the
+unchanged result-policy version. It ignores controls in inert, hidden and example
+subtrees, parses script/form marker URLs, and requires a document title or H1
+human prompt plus live challenge structure. A custom-title browser gate can use
+its JavaScript-and-cookies instruction plus a non-passive platform script.
+Ordinary article content defeats generic widget heuristics; corroborated
+platform scripts and explicit response decisions remain authoritative. Auxiliary
+widgets do not establish a document gate. The detector does not
+render overlays or interpret inline script bootstraps, and a partial content
+prefix still does not certify a requested article. The deterministic
+`qualityprobe/egresshealth/TestUrlProbeHumanGate*` controls cover the repaired
+misses, inactive markers, passive scripts, articles and mixed matcher receipts.
+
+Deploy v1/v2-compatible API evidence readers before enabling v2 producers in
+Taskworker or standalone probes. The shared validator is also used by
+API ingress, model storage and probe publication; old v1-only readers reject v2.
+Historical v1 evidence retains its recorded provenance during a mixed rollout.
+This detector change does not alter phase limits, body sampling, the ten accepted
+measured outcomes per four hours, the inclusive 0.8 quality ratio, or the local
+setup versus measured-provider boundary. Local fixtures establish matcher
+behavior, not deployed Main recovery or rendered access to a live publisher.
 
 A completed URL pass must stop and join its heartbeat refresher, then publish
 zero for its shard if no other invocation in that process still owns it. A
@@ -30970,3 +31273,41 @@ A positive XL server-write witness is device RPC activity, not downstream
 customer data-plane success. Some early admission/capacity rejections occur
 before these counters. Keep client selection/fallback evidence separate and
 do not weaken authentication or TLS to make compatibility appear healthy.
+
+## Shared provider-egress dashboard refresh
+
+Every Taskworker process starts its own stats collector. The provider-egress
+dashboard aggregate now shares one completed, policy-keyed Redis snapshot for
+300 seconds after the original source completion. Its elected refresher still
+runs the full `CountProviderEgress` path: historical ARIN exclusions, reliability
+gates, all bucket/index labels and exclusion reasons retain their existing
+meaning. Location/score refresh tasks, provider selection and admission do not
+use this dashboard cache. This removes duplicate stats work; it does not prove
+which caller produced a sampled query or what fraction of Main CPU it used.
+
+The winner has a 120-second source deadline and a 180-second token lease. Redis
+operations use the non-retrying deadline pool with a two-second operation
+budget. Publication atomically checks the lease token, installs the complete
+aggregate and releases that token. A failed source leaves the lease as a retry
+fence; it cannot publish partial counts. Losing collectors keep their prior
+gauges and retry the cache on later minute ticks, without moving other DB stats
+off their five-tick cadence. These intervals are nominal: earlier synchronous
+collector work can delay them. A successful fresh snapshot suppresses new fills
+for 300 seconds; failed fills can retry after the 180-second fence expires.
+
+`urnetwork_stats_provider_egress_refresh_available` is one only when the last
+attempt obtained a complete fresh snapshot. Missing Redis, a cold owner still
+working, malformed data or a failed source yields zero, not healthy zero
+providers. The count gauges and their last source times remain unchanged on
+failure. Legitimate complete all-zero counts remain valid. Compare
+`urnetwork_stats_provider_egress_source_started_seconds` and
+`urnetwork_stats_provider_egress_source_completed_seconds` with scrape time;
+cache hits never advance these times or renew the cache TTL. An old exported
+gauge or a missing availability series is not a current population proof.
+
+The cache key separates resolved count policy, including accepted probe-policy
+version and the conservative configuration-error selection. It is not a data
+generation marker: provider and evidence changes can appear on the next source
+refresh. Different worker policies can each refresh their own key during a
+mixed rollout. Verify actual worker adoption and later source completions before
+claiming runtime scan reduction; a deployment result alone is insufficient.

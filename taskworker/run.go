@@ -16,7 +16,6 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/router"
-	"github.com/urnetwork/server/stats"
 	"github.com/urnetwork/server/task"
 )
 
@@ -129,7 +128,7 @@ func startTaskworkerRuntime(admission context.Context, ctx context.Context, canc
 	runtime = worker
 	// Retention is a best-effort lifetime observer. Its local reaper must not
 	// inherit the finite scheduling attempt, and storage I/O cannot gate work.
-	go server.HandleError(func() { stats.ApplyStreamRetention(ctx) })
+	go server.HandleError(func() { controller.ApplyBlobRetention(ctx) })
 	controller.StartStatsCollector(ctx)
 	task.StartQueueMetrics(ctx)
 	for range options.Count {

@@ -11,7 +11,6 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/onboarding"
 	"github.com/urnetwork/server/session"
-	"github.com/urnetwork/server/stats"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
 )
@@ -32,7 +31,7 @@ var removedTaskTargets = []string{
 // taskworkercli command (and by the `init-tasks` subcommand).
 func InitTasks(ctx context.Context) {
 	initTaskSchedule(ctx)
-	stats.ApplyStreamRetention(ctx)
+	controller.ApplyBlobRetention(ctx)
 }
 
 // Scheduling is bounded startup work. Long-lived retention observers are
@@ -238,6 +237,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.SweepOrphanNetworkClientData,
 			work.SweepOrphanNetworkClientDataPost,
 		),
+		task.NewTaskTarget(model.ApplyLegacyProviderTotals),
 		task.NewTaskTargetWithPost(
 			model.RemoveNetworkClientsTask,
 			model.RemoveNetworkClientsTaskPost,

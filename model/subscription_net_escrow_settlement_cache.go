@@ -122,6 +122,27 @@ const settlementMetadataBalanceLocksSQL = `
  ) AS selected_balance
 `
 
+// Reuse authority only inside the transaction that locked every grant and
+// exact escrow tuple, then claimed the outcome. Every metadata target must
+// match a positive unmarked reservation captured under those locks. The same
+// snapshot map has already advanced for the outcome; advance it once more
+// without releasing the reservation twice or borrowing a later revision.
+func settleEscrowOwnedMetadataInTx(ctx context.Context, tx server.PgTx, contractId server.Id, settleTime time.Time, sweepPayouts map[server.Id]sweepPayout, positive map[server.Id]ByteCount, pending map[server.Id]netEscrowSnapshot) bool {
+	if len(sweepPayouts) != len(positive) {
+		return false
+	}
+	for id, payout := range sweepPayouts {
+		if amount, ok := positive[id]; !ok || amount <= 0 || amount != payout.escrowBalanceByteCount {
+			return false
+		}
+	}
+	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+		queueEscrowSettlementUpdates(batch, contractId, settleTime, sweepPayouts)
+	})
+	publishSettlementNetEscrowSnapshots(ctx, tx, pending, positive, false)
+	return true
+}
+
 // Metadata is still a separate post. Read committed authority here, never a
 // prediction captured before the outcome commit: callbacks after rollback or
 // ambiguous commits must not reuse an abandoned transaction's revision.

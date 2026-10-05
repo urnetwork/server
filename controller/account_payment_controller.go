@@ -380,100 +380,101 @@ func advancePayment(
 		}
 
 	} else {
-		// no transaction or error
-		// create and send a new payment via Circle
-
-		// get the user wallet to send the payment to
-		accountWallet := model.GetAccountWallet(clientSession.Ctx, *payment.WalletId)
-		// never send funds to a missing, deactivated, or foreign wallet.
-		// like the missing wallet case, hold the payment until the network
-		// sets a valid payout wallet. The pending payment sweep will retry it.
-		if accountWallet == nil || !accountWallet.Active || accountWallet.NetworkId != payment.NetworkId {
-			glog.Warningf("[%s]payment wallet %s is not a valid payout wallet for network %s. Holding payment.\n", payment.PaymentId, *payment.WalletId, payment.NetworkId)
-			return false, false, fmt.Errorf("payment retained pending a valid payout wallet")
-		}
-		formattedBlockchain, err := formatBlockchain(accountWallet.Blockchain)
-		if err != nil {
-			returnErr = fmt.Errorf("[%s]Payment wallet error: %w", payment.PaymentId, err)
-			return
-		}
-
-		payoutAmount := model.NanoCentsToUsd(payment.Payout)
-
-		// feeInUSDC, err := func() (float64, error) {
-		// 	estimatedFees, err := circleClient.EstimateTransferFee(
-		// 		clientSession.Ctx,
-		// 		payoutAmount,
-		// 		accountWallet.WalletAddress,
-		// 		formattedBlockchain,
-		// 	)
-		// 	if err != nil {
-		// 		return 0, fmt.Errorf("[%s]Payment fee estimate error = %s", payment.PaymentId, err)
-		// 	}
-
-		// 	fee, err := CalculateFee(*estimatedFees.Medium, formattedBlockchain)
-		// 	if err != nil {
-		// 		return 0, err
-		// 	}
-
-		// 	feeInUSDC, err := ConvertFeeToUSDC(clientSession.Ctx, formattedBlockchain, *fee)
-		// 	if err != nil {
-		// 		return 0, fmt.Errorf("[%s]Payment fee conversion error = %s", payment.PaymentId, err)
-		// 	}
-
-		// 	return feeInUSDC, nil
-		// }()
-		// if err != nil {
-		// just choose a reasonable value
-		// glog.Infof("[payout][%s]fee estimate failed. Using default fee. err = %s\n", payment.PaymentId, err)
-		feeInUSDC := 0.01
-		// }
-
-		payoutAmount = payoutAmount - feeInUSDC
-
-		// ensure paymout amount is greater than minimum payout threshold
-		if model.UsdToNanoCents(payoutAmount) <= 0 {
-			policy, err := server.LoadProviderPayoutEarningPolicy(clientSession.Ctx)
+		var request *model.ProviderPaymentRequest
+		if payment.CircleIdempotencyKey != nil {
+			var err error
+			request, err = model.GetRetainedProviderPaymentRequest(clientSession.Ctx, payment)
 			if err != nil {
 				return false, false, err
 			}
-			if policy != nil {
-				return false, false, fmt.Errorf("legacy payment retained: amount does not cover the transfer fee")
-			}
-			// cancel this payment, and let the next plan pick up the contracts
-			// in a new (larger) payment. Otherwise, we will likely keep failing due
-			// to the payment not being large enough to cover the transfer fee.
-			glog.Info("[payout][%s]payout - fee is negative\n", payment.PaymentId)
+		} else {
+			// Only a fresh attempt consults current wallet selection and fees.
 
-			if err := model.CancelPayment(clientSession.Ctx, payment.PaymentId); err != nil {
-				returnErr = fmt.Errorf("[%s]Payment cancellation error: %w", payment.PaymentId, err)
+			// get the user wallet to send the payment to
+			accountWallet := model.GetAccountWallet(clientSession.Ctx, *payment.WalletId)
+			// never send funds to a missing, deactivated, or foreign wallet.
+			// like the missing wallet case, hold the payment until the network
+			// sets a valid payout wallet. The pending payment sweep will retry it.
+			if accountWallet == nil || !accountWallet.Active || accountWallet.NetworkId != payment.NetworkId {
+				glog.Warningf("[%s]payment wallet %s is not a valid payout wallet for network %s. Holding payment.\n", payment.PaymentId, *payment.WalletId, payment.NetworkId)
+				return false, false, fmt.Errorf("payment retained pending a valid payout wallet")
+			}
+			formattedBlockchain, err := formatBlockchain(accountWallet.Blockchain)
+			if err != nil {
+				returnErr = fmt.Errorf("[%s]Payment wallet error: %w", payment.PaymentId, err)
 				return
 			}
-			canceled = true
-			return
-		}
 
-		// the idempotency key is stable across retries of this payment.
-		if err := model.RequireProviderUsdcPayment(clientSession.Ctx, payment.PaymentId); err != nil {
-			return false, false, err
+			payoutAmount := model.NanoCentsToUsd(payment.Payout)
+
+			// feeInUSDC, err := func() (float64, error) {
+			// 	estimatedFees, err := circleClient.EstimateTransferFee(
+			// 		clientSession.Ctx,
+			// 		payoutAmount,
+			// 		accountWallet.WalletAddress,
+			// 		formattedBlockchain,
+			// 	)
+			// 	if err != nil {
+			// 		return 0, fmt.Errorf("[%s]Payment fee estimate error = %s", payment.PaymentId, err)
+			// 	}
+
+			// 	fee, err := CalculateFee(*estimatedFees.Medium, formattedBlockchain)
+			// 	if err != nil {
+			// 		return 0, err
+			// 	}
+
+			// 	feeInUSDC, err := ConvertFeeToUSDC(clientSession.Ctx, formattedBlockchain, *fee)
+			// 	if err != nil {
+			// 		return 0, fmt.Errorf("[%s]Payment fee conversion error = %s", payment.PaymentId, err)
+			// 	}
+
+			// 	return feeInUSDC, nil
+			// }()
+			// if err != nil {
+			// just choose a reasonable value
+			// glog.Infof("[payout][%s]fee estimate failed. Using default fee. err = %s\n", payment.PaymentId, err)
+			feeInUSDC := 0.01
+			// }
+
+			payoutAmount = payoutAmount - feeInUSDC
+
+			// ensure paymout amount is greater than minimum payout threshold
+			if model.UsdToNanoCents(payoutAmount) <= 0 {
+				policy, err := server.LoadProviderPayoutEarningPolicy(clientSession.Ctx)
+				if err != nil {
+					return false, false, err
+				}
+				if policy != nil {
+					return false, false, fmt.Errorf("legacy payment retained: amount does not cover the transfer fee")
+				}
+				// cancel this payment, and let the next plan pick up the contracts
+				// in a new (larger) payment. Otherwise, we will likely keep failing due
+				// to the payment not being large enough to cover the transfer fee.
+				glog.Info("[payout][%s]payout - fee is negative\n", payment.PaymentId)
+
+				if err := model.CancelPayment(clientSession.Ctx, payment.PaymentId); err != nil {
+					returnErr = fmt.Errorf("[%s]Payment cancellation error: %w", payment.PaymentId, err)
+					return
+				}
+				canceled = true
+				return
+			}
+
+			// The key and exact request become durable together before sending.
+			request, err = model.ReserveProviderPaymentRequest(clientSession.Ctx, payment, accountWallet, payoutAmount, formattedBlockchain)
+			if err != nil {
+				returnErr = fmt.Errorf("[%s]Payment idempotency key error = %w", payment.PaymentId, err)
+				return
+			}
 		}
-		// creating it also pins the payment wallet (`UpdatePaymentWallet`),
-		// so a retried submit pays the same address the processor already saw
-		basis, err := model.ReserveProviderPaymentBasis(clientSession.Ctx, payment, accountWallet)
-		if err != nil {
-			returnErr = fmt.Errorf("[%s]Payment idempotency key error = %w", payment.PaymentId, err)
-			return
-		}
-		if err := model.RetainProviderPaymentRequest(clientSession.Ctx, basis, payoutAmount, formattedBlockchain); err != nil {
-			return false, false, err
-		}
+		basis, payoutAmount, formattedBlockchain := &request.Basis, request.Amount, request.Network
 
 		// send the payment
 		transferResult, err := circleClient.CreateTransferTransaction(
 			context.WithValue(clientSession.Ctx, providerUsdcPaymentContextKey{}, providerPaymentSubmission{Basis: *basis, Amount: payoutAmount, Network: formattedBlockchain}),
 			basis.IdempotencyKey,
 			payoutAmount,
-			accountWallet.WalletAddress,
+			basis.WalletAddress,
 			formattedBlockchain,
 		)
 		if err != nil {

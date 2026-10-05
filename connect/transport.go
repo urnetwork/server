@@ -1501,6 +1501,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			clientId,
 			clientAddress,
 			ipFamilyIntent,
+			auth.AppVersion,
 			self.handlerId,
 			announceTimeout,
 			testConfig,
@@ -2166,6 +2167,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	var instanceId server.Id
 	var connectionId server.Id
 	ipFamilyIntent := 0
+	appVersion := ""
 	useH3Datagrams := false
 	connectionRegistered := false
 	defer func() {
@@ -2207,6 +2209,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			}
 
 			_, ipFamilyIntent = connectionIpFamily(clientId, clientAddress, auth)
+			appVersion = auth.AppVersion
 
 			if authCtx.Err() != nil {
 				return authCtx.Err()
@@ -2262,6 +2265,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			clientId,
 			clientAddress,
 			ipFamilyIntent,
+			appVersion,
 			self.handlerId,
 			announceTimeout,
 			V0TestConfig(),

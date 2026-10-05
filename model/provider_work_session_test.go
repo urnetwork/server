@@ -363,94 +363,155 @@ func TestProviderWorkSessionActualStreamBirthAndInheritedCohort(t *testing.T) {
 }
 
 func TestProviderWorkSessionPaidAndFreeAdmissionsKeepEqualOriginalWork(t *testing.T) {
+	providerWorkSessionFundingOriginals(t, false)
+}
+
+func TestProviderWorkSessionRedisPaidAndFreeAdmissionsKeepEqualOriginalWork(t *testing.T) {
+	providerWorkSessionFundingOriginals(t, true)
+}
+
+// The legacy admission owner acknowledges a durable intent before its worker
+// settles. Redis admission settles on the close path. Both must retain the same
+// original completed work for paid credit, a free grant and no-escrow traffic.
+func providerWorkSessionFundingOriginals(t *testing.T, redis bool) {
+	t.Helper()
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
-		f := newProviderWorkSessionFixture(t)
-		balance := addContractPayoutTestBalance(f.ctx, f.sourceNetworkId, 1000)
-		var escrow *TransferEscrow
-		var posts []func() any
-		server.Tx(f.ctx, func(tx server.PgTx) {
-			var err error
-			escrow, posts, err = createTransferEscrowInTx(f.requestContext(t, nil), tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 121, nil)
+		for _, paid := range []bool{true, false} {
+			f := newProviderWorkSessionFixture(t)
+			if paid {
+				addContractPayoutTestBalance(f.ctx, f.sourceNetworkId, 1000)
+			} else {
+				start, end := FreeGrantWindow(server.NowUtc())
+				server.Tx(f.ctx, func(tx server.PgTx) {
+					if err := AddGrantTransferBalanceInTx(tx, f.ctx, f.sourceNetworkId, GrantKindFree, 1000, start, end); err != nil {
+						t.Fatal(err)
+					}
+				})
+			}
+			balances := GetActiveTransferBalances(f.ctx, f.sourceNetworkId)
+			if len(balances) != 1 || balances[0].Paid != paid || paid && balances[0].GrantKind != GrantKindNone || !paid && balances[0].GrantKind != GrantKindFree {
+				t.Fatal("fixture did not create the original paid or free grant", paid, balances)
+			}
+			balance := balances[0]
+			var escrow *TransferEscrow
+			if redis {
+				var err error
+				escrow, err = CreateTransferEscrow(f.requestContext(t, nil), f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 121)
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				var posts []func() any
+				server.Tx(f.ctx, func(tx server.PgTx) {
+					var err error
+					escrow, posts, err = createTransferEscrowInTx(f.requestContext(t, nil), tx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, f.sourceNetworkId, 121, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+				})
+				server.RunPosts(f.ctx, posts...)
+			}
+			free := f.contract(t)
+			contractIds := []server.Id{escrow.ContractId, free}
+			before := providerWorkFixtureReceipts(t, f.ctx, contractIds...)
+			reservationHashes := map[string][32]byte{}
+			for _, id := range contractIds {
+				r := providerWorkFixtureReservation(t, before, id)
+				if !r.Reservation.Complete || r.Reservation.Capacity != 121 {
+					t.Fatal("funding changed original admission facts", r.Reservation)
+				}
+				hash, err := r.ContentHash(f.ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				reservationHashes[id.String()] = hash
+				f.close(t, id)
+			}
+			if reservationHashes[escrow.ContractId.String()] == reservationHashes[free.String()] {
+				t.Fatal("distinct admissions shared an original reservation")
+			}
+			server.Db(f.ctx, func(conn server.PgConn) {
+				var redisReserved, pending, terminal, original, freeTerminal, freeOriginal bool
+				server.Raise(conn.QueryRow(f.ctx, `SELECT
+ (SELECT bool_and(redis_reserved) FROM transfer_escrow WHERE contract_id=$1),
+ EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1),
+ (SELECT outcome IS NOT NULL FROM transfer_contract WHERE contract_id=$1),
+ EXISTS(SELECT 1 FROM provider_work_outcome_original WHERE contract_id=$1),
+ (SELECT outcome='settled' FROM transfer_contract WHERE contract_id=$2),
+ EXISTS(SELECT 1 FROM provider_work_outcome_original WHERE contract_id=$2)`,
+					escrow.ContractId, free).Scan(&redisReserved, &pending, &terminal, &original, &freeTerminal, &freeOriginal))
+				if redisReserved != redis || pending == redis || terminal != redis || original != redis {
+					t.Fatal("funded close did not retain its actual settlement owner", redis, paid, redisReserved, pending, terminal, original)
+				}
+				if !freeTerminal || !freeOriginal {
+					t.Fatal("no-escrow close did not retain its immediate original", redis, paid, freeTerminal, freeOriginal)
+				}
+			})
+			// Drive the public worker under the same independently approved
+			// source authority. No sleep or synthesized outcome can settle it.
+			if !redis {
+				if reserved := Testing_NetEscrowByteCount(f.ctx, balance.BalanceId); reserved != 121 {
+					t.Fatal("pending settlement released its reservation", paid, reserved)
+				}
+				result, err := FlushLegacySettlements(f.ctx, int(escrow.ContractId[15])%LegacySettlementShardCount, nil, 64)
+				if err != nil || result.Visited != 1 || result.Completed != 1 || result.BusyOrGone != 0 || result.Failed != 0 || result.More {
+					t.Fatal("actual legacy worker did not settle the funded original", paid, result, err)
+				}
+			}
+			receipts := providerWorkFixtureReceipts(t, f.ctx, contractIds...)
+			outcomeIds := map[string]bool{}
+			for _, r := range receipts {
+				if err := protocol.VerifyProviderWorkReceiptAuthority(f.ctx, r, f.source.authority); err != nil {
+					t.Fatal("settlement lost the independently signed original", err)
+				}
+				if r.Reservation != nil {
+					hash, err := r.ContentHash(f.ctx)
+					if err != nil || reservationHashes[r.Reservation.ContractId] != hash {
+						t.Fatal("settlement rewrote the original reservation", err)
+					}
+				}
+				if r.Outcome != nil {
+					outcome := r.Outcome
+					if outcomeIds[outcome.ContractId] || outcome.ReservationHash != reservationHashes[outcome.ContractId] || outcome.Capacity != 121 || outcome.SourceBytes != 121 || outcome.DestinationBytes != 121 || !outcome.SourceComplete || !outcome.DestinationComplete || outcome.Outcome != ContractOutcomeSettled {
+						t.Fatal("funding changed equal completed original work", paid, outcome)
+					}
+					outcomeIds[outcome.ContractId] = true
+				}
+			}
+			if len(outcomeIds) != 2 || !outcomeIds[escrow.ContractId.String()] || !outcomeIds[free.String()] {
+				t.Fatal("paid/free original outcomes missing", len(outcomeIds))
+			}
+			originals, err := ListProviderWorkOriginals(f.ctx, contractIds)
 			if err != nil {
 				t.Fatal(err)
 			}
-		})
-		server.RunPosts(f.ctx, posts...)
-		free := f.contract(t)
-		for _, id := range []server.Id{escrow.ContractId, free} {
-			f.close(t, id)
-		}
-		// Legacy admission acknowledges a durable settlement intent. It must
-		// retain its reservation without inventing a terminal original before
-		// the worker owns the financial transition; the free close is immediate.
-		server.Db(f.ctx, func(conn server.PgConn) {
-			var pending, paidTerminal, paidOriginal, freeTerminal, freeOriginal bool
-			server.Raise(conn.QueryRow(f.ctx, `SELECT
-                EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1),
-                (SELECT outcome IS NOT NULL FROM transfer_contract WHERE contract_id=$1),
-                EXISTS(SELECT 1 FROM provider_work_outcome_original WHERE contract_id=$1),
-                (SELECT outcome='settled' FROM transfer_contract WHERE contract_id=$2),
-                EXISTS(SELECT 1 FROM provider_work_outcome_original WHERE contract_id=$2)`,
-				escrow.ContractId, free).Scan(&pending, &paidTerminal, &paidOriginal, &freeTerminal, &freeOriginal))
-			if !pending || paidTerminal || paidOriginal || !freeTerminal || !freeOriginal {
-				t.Fatalf("close acknowledgement lost its durable boundary: pending=%t paid_terminal=%t paid_original=%t free_terminal=%t free_original=%t", pending, paidTerminal, paidOriginal, freeTerminal, freeOriginal)
+			result, err := FlushLegacySettlements(f.ctx, int(escrow.ContractId[15])%LegacySettlementShardCount, nil, 64)
+			if err != nil || result.Visited != 0 || result.Completed != 0 || result.BusyOrGone != 0 || result.Failed != 0 || result.More {
+				t.Fatal("completed work was admitted to a second settlement", result, err)
 			}
-		})
-		if reserved := Testing_NetEscrowByteCount(f.ctx, balance.BalanceId); reserved != 121 {
-			t.Fatal("pending settlement released its reservation", reserved)
-		}
-		shard := int(escrow.ContractId[15]) % LegacySettlementShardCount
-		result, err := FlushLegacySettlements(f.ctx, shard, nil, 2)
-		if err != nil || result.Visited != 1 || result.Completed != 1 || result.BusyOrGone != 0 || result.Failed != 0 || result.More {
-			t.Fatal("actual settlement worker did not retain the paid original", result, err)
-		}
-		receipts := providerWorkFixtureReceipts(t, f.ctx, escrow.ContractId, free)
-		for _, id := range []server.Id{escrow.ContractId, free} {
-			r := providerWorkFixtureReservation(t, receipts, id)
-			if !r.Reservation.Complete || r.Reservation.Capacity != 121 {
-				t.Fatal("funding changed original admission facts", r.Reservation)
+			after, err := ListProviderWorkOriginals(f.ctx, contractIds)
+			if err != nil || !slices.EqualFunc(originals, after, bytes.Equal) {
+				t.Fatal("idle worker changed retained original outcomes", err)
 			}
-		}
-		count := 0
-		for _, r := range receipts {
-			if r.Outcome != nil {
-				count++
-				if r.Outcome.SourceBytes != 121 || r.Outcome.DestinationBytes != 121 {
-					t.Fatal("funding changed equal completed bytes")
-				}
-			}
-		}
-		if count != 2 {
-			t.Fatal("paid/free original outcomes missing", count)
-		}
-		originals, err := ListProviderWorkOriginals(f.ctx, []server.Id{escrow.ContractId, free})
-		if err != nil {
-			t.Fatal(err)
-		}
-		result, err = FlushLegacySettlements(f.ctx, shard, nil, 2)
-		if err != nil || result.Visited != 0 || result.Completed != 0 || result.Failed != 0 || result.More {
-			t.Fatal("settlement replay repeated terminal work", result, err)
-		}
-		replayed, err := ListProviderWorkOriginals(f.ctx, []server.Id{escrow.ContractId, free})
-		if err != nil || !slices.EqualFunc(originals, replayed, bytes.Equal) {
-			t.Fatal("settlement replay changed retained originals", err)
-		}
-		server.Db(f.ctx, func(conn server.PgConn) {
-			var pending, settled bool
-			var remaining, consumed ByteCount
-			server.Raise(conn.QueryRow(f.ctx, `SELECT
+			if !redis {
+				server.Db(f.ctx, func(conn server.PgConn) {
+					var pending, settled bool
+					var remaining, consumed ByteCount
+					server.Raise(conn.QueryRow(f.ctx, `SELECT
                 EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1),
                 e.settled,b.balance_byte_count,e.payout_byte_count
                 FROM transfer_escrow e JOIN transfer_balance b USING(balance_id)
                 WHERE e.contract_id=$1 AND b.balance_id=$2`, escrow.ContractId, balance.BalanceId).Scan(&pending, &settled, &remaining, &consumed))
-			if pending || !settled || remaining != 879 || consumed != 121 {
-				t.Fatalf("settlement replay changed finances: pending=%t settled=%t remaining=%d consumed=%d", pending, settled, remaining, consumed)
+					if pending || !settled || remaining != 879 || consumed != 121 {
+						t.Fatalf("settlement replay changed finances: paid=%t pending=%t settled=%t remaining=%d consumed=%d", paid, pending, settled, remaining, consumed)
+					}
+				})
+				if reserved := Testing_NetEscrowByteCount(f.ctx, balance.BalanceId); reserved != 0 {
+					t.Fatal("completed settlement kept its reservation", paid, reserved)
+				}
 			}
-		})
-		if reserved := Testing_NetEscrowByteCount(f.ctx, balance.BalanceId); reserved != 0 {
-			t.Fatal("completed settlement kept its reservation", reserved)
 		}
 	})
 }

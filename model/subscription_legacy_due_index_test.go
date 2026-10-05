@@ -21,9 +21,9 @@ func TestLegacySettlementDueSelectionBoundsFutureShard(t *testing.T) {
 		ctx := t.Context()
 		source, readErr := os.ReadFile("subscription_legacy_settlement.go")
 		server.Raise(readErr)
-		statements := regexp.MustCompile("(?s)`(SELECT next_attempt_time,contract_id FROM legacy_settlement_intent.*?)`").FindAllSubmatch(source, -1)
-		if len(statements) != 2 {
-			t.Fatal("expected two owning selection statements")
+		statements := regexp.MustCompile("(?s)`(SELECT next_attempt_time,contract_id,.*? FROM legacy_settlement_intent.*?)`").FindAllSubmatch(source, -1)
+		if len(statements) != 4 {
+			t.Fatal("expected initial, continued, head and continued-head selection statements")
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			server.RaisePgResult(conn.Exec(ctx, `CREATE TEMP TABLE legacy_settlement_intent (
@@ -38,8 +38,11 @@ func TestLegacySettlementDueSelectionBoundsFutureShard(t *testing.T) {
 			for index, statement := range statements {
 				query := string(statement[1])
 				args := []any{0}
-				if index == 1 {
-					args = append(args, server.NowUtc().Add(-time.Second), server.Id{})
+				if index > 0 {
+					args = append(args, server.NowUtc().Add(-time.Second), server.Id{}, server.NowUtc())
+				}
+				if index == 3 {
+					args = append(args, server.NowUtc().Add(-2*time.Second), server.Id{})
 				}
 				var raw []byte
 				server.Raise(conn.QueryRow(ctx, "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) "+query, args...).Scan(&raw))
@@ -62,7 +65,7 @@ func TestLegacySettlementDueSelectionBoundsFutureShard(t *testing.T) {
 				}
 				n := plan[0].Plan.Plans[0]
 				bounded := strings.Contains(n.Cond, "next_attempt_time <=") && !strings.Contains(n.Filter, "next_attempt_time") && n.Removed == 0 && n.Hit+n.Read < 32
-				t.Logf("cursor=%t bounded_index_cutoff=%t future_rows_removed=%d local_buffers=%d execution_ms=%.3f", index == 1, bounded, n.Removed, n.Hit+n.Read, plan[0].MS)
+				t.Logf("selection=%d bounded_index_cutoff=%t future_rows_removed=%d local_buffers=%d execution_ms=%.3f", index, bounded, n.Removed, n.Hit+n.Read, plan[0].MS)
 				if !bounded {
 					failures++
 				}

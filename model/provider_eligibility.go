@@ -61,6 +61,43 @@ func providerProbeEligibilitySql(rollupAlias string) string {
 	return fmt.Sprintf(`NOT %s.arin_risk AND %s`, rollupAlias, providerReliabilityEligibilitySql(rollupAlias+".client_id"))
 }
 
+// Public-mode changes already own a client transaction. Read only that client's
+// admission inputs; missing location still waits for the ordinary rollup.
+func providerUrlProbeClientEligibilitySql() string {
+	return `SELECT EXISTS (
+		SELECT 1 FROM network_client_location_reliability AS provider_location
+		JOIN network_client AS provider USING (client_id)
+		WHERE provider_location.client_id = $1
+		AND provider_location.connected AND provider_location.valid
+		AND (provider_location.ipv4_proven OR NOT provider_location.ipv6_proven)
+		AND provider.active AND provider.source_client_id IS NULL
+		AND EXISTS (SELECT 1 FROM provide_key WHERE provide_key.client_id = $1 AND provide_mode = $2)
+		AND ` + providerProbeEligibilitySql("provider_location") + `)`
+}
+
+// Repair the changed identity before publishing its provide keys. Preserve all
+// measurement, claim and pacing state; fleet reconciliation remains the backstop
+// for admission inputs changed by other owners.
+func updateProviderUrlProbeEligibilityForClient(ctx context.Context, tx server.PgTx, clientId server.Id) {
+	var eligible bool
+	server.Raise(tx.QueryRow(ctx, providerUrlProbeClientEligibilitySql(), clientId, ProvideModePublic).Scan(&eligible))
+	if eligible {
+		server.RaisePgResult(tx.Exec(ctx, `
+			WITH reactivated AS (
+				UPDATE provider_egress_probe_cycle SET eligible = true
+				WHERE client_id = $1 AND NOT eligible
+			)
+			INSERT INTO provider_egress_probe_cycle (client_id, cycle_started_at, next_attempt_at, eligible)
+			SELECT $1, $2, $2, true
+			WHERE NOT EXISTS (SELECT 1 FROM provider_egress_probe_cycle WHERE client_id = $1)
+			ON CONFLICT (client_id) DO NOTHING`, clientId, server.NowUtc()))
+	} else {
+		server.RaisePgResult(tx.Exec(ctx, `
+			UPDATE provider_egress_probe_cycle SET eligible = false
+			WHERE client_id = $1 AND eligible`, clientId))
+	}
+}
+
 // Synchronize indexed scheduling with location and score publication. A score
 // recovery can admit a provider that had no cycle at the preceding location
 // pass, or reactivate a false hint. Keep this maintenance outside claim calls;

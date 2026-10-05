@@ -374,6 +374,15 @@ follow from the existence of those 27 tables. Colombia, Chile and other
 regional reporting queues retain their source, metric, period and unresolved
 identity joins without being promoted to complete operator coverage.
 
+A separately retained draft adds 12 sibling ASNs to five already reviewed
+subscriber operators. It adds no operator groups, country contexts or regional
+service-presence pairs, and has not passed a new full-artifact/native gate.
+Those draft identities are not part of the selected v13 counts above. Broader
+expansion must continue exact ASN-to-subscriber-service review alongside the
+missing regional ranking work; neither a sibling relationship nor a top-30
+position substitutes for that review. Keep smaller reviewed access providers
+eligible under the same clean-default rule and preserve explicit contrary use.
+
 ## Output and provenance
 
 Each build produces `arin.mmdb` and `manifest.json`. The MMDB contains direct
@@ -781,7 +790,7 @@ before or after activation, actual resource and process observations establish
 which classifier was used. Operational receipts retain those release-specific
 claims. Main execution follows [RUN-MAIN.md](../monitor/RUN-MAIN.md).
 
-### Qualified v13 artifact and publication (2026-10-05)
+### Qualified v13 artifact and Config selection (2026-10-05)
 
 The full normal update completed with every requested evidence source
 available. Its final artifact is:
@@ -805,14 +814,18 @@ inside identified subscriber-carrier networks. Those samples qualify the
 specified controls; they do not claim every published prefix or live provider
 was measured.
 
-The 592 MB file exceeds the legacy 512 MiB capture limit. The qualified c343
+The 592 MB file exceeds the legacy 512 MiB shadow snapshot limit. The qualified c343
 consumer graph keeps the legacy snapshot refusal and uses a bounded 1 GiB
 mapped capture reader. Its focused tests also qualify typed Origin replies and
 maximum wire size. Select the compatible standalone coordinator before using
 new Connect capture replies: the new decoder accepts omitted legacy Origin
 fields, while the old strict decoder refuses the new field. The host bridge
 forwards bounded opaque replies; the typed interpretation belongs to the
-coordinator.
+coordinator. These file limits belong to shadow instrumentation. The active
+serving reader is byte-identical in the preceding 536c and qualified c343
+graphs: it opens the selected MMDB directly without that 512 MiB limit. The
+capture cap therefore does not impose a full-fleet consumer upgrade before
+the new resource can load; actual loaded-resource identity still needs proof.
 
 Physical staging preserved the complete selected active-v7 Config baseline,
 including policy two and the native reader setting, and added exactly seven
@@ -822,13 +835,20 @@ comparison. The actual c343 native resolver selected all three new resource
 paths, and its serving ARIN reader loaded epoch `1791162091`. Both published
 image architectures were extracted and checked against that tree.
 
-**This checkpoint proves the artifact, local staging and registry publication;
-Main Config activation and loaded-consumer convergence remain unverified.**
-The release manifest records `selection_executed: false` and
-`runtime_identity_proven: false`; later selector and process receipts must be
-recorded separately. The qualified c343 runtime graph uses schema 763; a newer
-canonical source revision or migration inventory is not evidence that a
-running process uses that graph.
+**Root's Main Config deployment completed successfully at
+`2026-10-05T06:07:50.840855Z`, selecting the version and OCI index above.
+Fleet-wide loaded-consumer convergence and recovered provider supply remain
+unverified.**
+The separate deployment receipt has exit status zero and SHA-256
+`ccea1d2e8235eda5ef47209a70a5708c59329a1abb6d488915c968a8ff286551`;
+it retains `runtime_resource_identity_proven: false` and
+`provider_supply_proven: false`. The immutable publication manifest's
+`selection_executed: false` describes its earlier publication checkpoint,
+not this later selection. The typed coordinator was selected locally before
+the Connect rollout, but neither that selection nor the service deployment
+receipts establish fleet-wide adoption. The qualified c343 runtime graph uses
+schema 763; a newer canonical source revision or migration inventory is not
+evidence that a running process uses that graph.
 
 Freshness is also bounded. The pinned RIS IPv4 snapshot was observed at
 `2026-10-04T18:03:14Z` and expires at `2026-10-06T18:03:14Z`; IPv6 was observed
@@ -837,6 +857,24 @@ recorded evidence expiries in this bundle. Recheck freshness before selecting
 or reproducing it, and refresh through the normal update path as evidence ages.
 The process-local reader does not automatically unload or reclassify records
 when an evidence timestamp expires.
+
+### One mapped-process observation (2026-10-05)
+
+At `13:54:46.879280Z`–`13:54:47.100884Z`, one selected Main Connect process
+(amd64, source `1a46ab5f`) had a stable read-only file mapping whose ARIN
+metadata reported build epoch `1791162091`. Native container, PID, process
+start, executable and mapped device/inode identity stayed unchanged through
+the read. The file length was 592,226,645 bytes; its final 131,072 bytes and
+decoded metadata matched the qualified v13 fingerprints. The native read took
+0.221604 seconds under an eight-second deadline. The retained Main receipt has
+SHA-256 `d14c692da126d5fb7ff6c0183a28ed7e703c010079def63528f946c9f077ad33`.
+
+This is evidence for one process mapping and a bounded fingerprint. It does
+not hash the complete file or prove which application reader used it, request
+routing, fleet convergence, refreshed connection classifications, or recovered
+Quality supply. Those remain separate measurements. The deployed Connect and
+Taskworker ARIN source comparison preserves the same classification rules;
+this observation does not expand the catalog or change health/security gates.
 
 ### Measurements to complete after selection
 
@@ -849,6 +887,192 @@ epoch and lookup cutoff. It does not independently establish Quality eligibility
 Measure coverage additions and explicit exclusions as well as actual FP2
 results. Keep incomplete observations explicit and use them to prioritize the
 next identity or discriminator review.
+
+The first post-selection Main coverage attempt hit its three-second statement
+deadline (`SQLSTATE 57014`); no classification counts were returned. A separate
+one-key native census attempt reached its connection timeout before issuing
+any Redis GET. Those failed reads provided no counts. The unchanged coverage
+query passed a local PostgreSQL fixture with 75,000 live connections under the
+same statement deadline, but that fixture cannot establish Main's plan, data
+layout or current load. Do not infer a production cause or relax the deadline
+from that local result. Durable current, outdated and missing classification
+coverage remains **unknown**.
+
+A second current-cohort Main read at `2026-10-05T15:42:30.468457Z` also
+ended with `SQLSTATE 57014`. This version capped enumeration at 200,000
+connected rows and grouped each provider once; it retained the three-second
+statement deadline. Its 75,000-live-row local fixture completed the query in
+1.221 seconds, but Main returned neither counts nor a surviving plan. The
+retained receipt is
+`0efc3e3dc82b3456468ef2a765f913c96715e487a91d006ff5be3dba1081d57f`.
+Neither timeout confirms stale stored facts or justifies a classification
+write. Any smaller diagnostic must identify its subset explicitly; it cannot
+stand in for complete fleet coverage.
+
+A smaller Main read succeeded at `2026-10-05T16:26:47.184608Z`, with the
+query taking 0.031563 seconds. It enumerated the first 257 connected rows in
+client order and withheld the entire final provider at the boundary (one row).
+The remaining 256 rows yielded 119 live eligible connections across 118
+providers after the active/public/handler filters. Of those connections, 116
+had epoch `1791162091` and lookup times within the selected cutover and
+observation bounds; three had missing or mismatched location ownership. No
+older epoch, newer epoch, pre-cutover or future lookup was observed.
+
+Within that subset, 115 providers were current on all included live
+connections, and 20 had verified nonrisk subscriber classifications on all of
+them (21 connections). Live location flags marked 95 providers non-Quality and
+six risky; those counts can overlap. A non-Quality flag does not distinguish
+excluded, unknown and ambiguous states and is not a proxy count. Receipt
+`0eb8161c707094575a03a16689a5ba6bf96460d4cfdf3d672c7eeca614ab2557`
+contains aggregate counts only. This sorted prefix is not representative of
+the fleet and does not establish native Quality supply, source-process
+ownership or the persistence/cause of the three missing or mismatched rows.
+It supplies no evidence for refreshing an older epoch in those observed rows;
+the classification-only CAS cannot insert or repair their location identity.
+
+A later bounded native-host census read succeeded at
+`2026-10-05T08:51:36.381701Z`. It returned one complete cached publication from
+source evaluation `08:40:09.693091Z`–`08:40:57.573495Z`, published at
+`08:44:05.457343Z` on the same date. The source was 638.808 seconds old when
+read, and its whole evaluation occurred after the Config selection cutoff.
+
+| Native bucket | Deduplicated public providers |
+| --- | ---: |
+| Quality | 4 |
+| Speed | 82 |
+| Online | 80,593 |
+
+These counts overlap across buckets. Under selected URL-probe evidence policy
+1, the Online cohort contained 82 URL-ratio passes, 80,243 failures and 268 providers
+with no accepted evidence. The ratio uses the inclusive 4/5 threshold over
+`(2026-10-05T00:40:13.425409Z, 2026-10-05T08:40:13.425409Z]`; it is separate
+from native bucket admission. All four Quality providers had at least ten
+accepted outcomes; Speed had 62 with at least ten and 20 with one. These are
+outcome counts, not success counts or four-hour quota completion.
+
+The retained Main receipt has SHA-256
+`e1e8062bb589d58013d1d0c20f80108540d96e8e5b5a4520ff94c8edc46cb373`.
+It contains no risk-exclusion counts, ARIN lookup epochs, loaded file identity
+or provider-level joins. Thus the native supply is measured for that source
+publication, while fleet-wide v13 adoption, classification coverage and its
+causal effect on the Quality count remain unverified. A new publication after
+selection does not establish that its stored classification inputs came from
+the new resource.
+
+The later read at `2026-10-05T15:11:40.231020Z` reached Redis and decoded a
+present publication, but refused it because its source was 1,213.599842 seconds
+old against a 900-second limit. Source evaluation completed at
+`14:51:26.631178Z`; publication followed at `15:01:04.938704Z`. The
+578.307526 seconds between those events and the further 635.292316 seconds
+until observation are distinct delays, with no established cause or producing
+process identity. Receipt
+`f8e539aae1c51787fe1bf6f93d2db86cf5263aaf577b676e77c44f846f12fbd3`
+therefore supplies no qualified newer bucket counts. The historical 4/82/80,593
+counts above are not a current result, and a later publication timestamp does
+not renew its source evaluation.
+
+A subsequent read at `2026-10-05T17:44:57.444113Z` reached the same key, but
+failed publication validation during decoding. Its native child exited zero
+and completed the bounded read in 25.482 milliseconds. Receipt
+`8b9c64ef61b46efca14becc12d33e63c98b39bd5c7b820aa8746dce41cd8330c`
+retains no qualified source clocks or bucket counts. This is a different
+failure from the earlier stale-source refusal: neither current freshness nor
+a publisher stall is established. The invalid value was not retained; a
+bounded diagnostic of the failed validation location is needed before changing
+reader or producer behavior. A fresh URL-quota census cannot substitute for
+this independent native publication.
+
+In the reviewed `9577fddd` producer, source evaluation completes before target
+export; the native census is written only after the export and readiness
+markers succeed. Failed exports preserve the prior key and its clocks. The
+key's 300-minute TTL and the task's 120-minute execution limit do not promise
+fresh data. The successful task schedules its next run after 30 seconds. Task
+ownership separately uses a direct PostgreSQL advisory-lock session and a
+five-minute timestamp lease for crash recovery. These source limits identify
+possible diagnostic boundaries, not the actual owner or cause of this refusal.
+
+Connection facts advance only after a successful actual ARIN lookup during a
+connection location write. The c343 connection path retries a failed initial
+lookup; selecting Config does not stamp existing facts with the new epoch.
+Its active ARIN reader is process-local and opens once, so resolver selection
+and loaded process identity must be measured separately. The native census,
+when available, describes a completed cached score publication: retain its
+source start, completion and publication timestamps, and distinguish its
+bucket membership from durable current-generation classification coverage.
+
+The observed Taskworker source `74810db4` preserves that loader and
+connection-fact contract. Twenty-five reviewed ARIN loader, classifier, capture
+and native-score files match the selected Connect `1a46ab5f` source exactly.
+The eight-slot observation at `2026-10-05T12:10Z` established ready workers on
+that revision, not their loaded ARIN epoch. Taskworker startup does not eagerly
+warm the IP database; its score publisher consumes stored connection facts.
+The legacy missing-connection location task is a no-op. Restarting the
+publisher therefore does not reclassify the fleet.
+
+Keep these separate measurements and gates when interpreting recovery:
+
+| Boundary | What it establishes |
+| --- | --- |
+| Four-hour URL quota | Ten accepted measured successes or failures; not ten successes or a passing health ratio. |
+| Eight-hour URL health | A nonzero selected-policy denominator and success ratio at least 4/5 for native Quality and Speed. |
+| Probe security | Persistent security failures exclude serving buckets until the required authenticated recovery; quota progress alone does not clear them. |
+| Subscriber identity | Verified policy-two subscriber evidence is additionally required for native Quality; eligible Speed/Online fallback retains its own rules. |
+| Risk and reliability | Common serving exclusions remain, while an operator-side probe setup failure without a provider measurement supplies no negative provider verdict. |
+| Resource adoption | Actual loaded generation and subsequent connection lookups; Config selection, worker readiness and score-publication clocks cannot substitute. |
+
+The earlier `11:23:51Z` quota source reported zero completion among 79,664
+eligible providers. The later `2026-10-05T12:14:55.902994Z` source reported
+79,775 of 80,053 quota-complete (99.652730%), 79,751 security-complete, and
+524 remaining measured runs across 278 deficient providers. The cohort changed,
+so this is not a fixed-provider comparison. These figures are not a newer
+Quality/Speed census, a passing URL ratio, or proof of ARIN classification.
+The 24-provider security gap cannot be cleared merely by filling quota.
+Six native local controls on exact `5f613cbe` verified the ten-total-outcome
+boundary, including accepted failures and progression through eight, nine and
+ten runs; they do not establish Main's outcome distribution or probe delivery.
+
+Existing `urnetwork_stats_provider_excluded{reason}` and
+`urnetwork_stats_provider_egress_index{bucket,index}` gauges provide
+replica-backed rule diagnostics. Exclusion reasons report the first failing
+rule, so an early reliability, risk or TLS failure can hide later failures.
+The earlier graph had no producer observation timestamp for these gauges.
+Taskworker source `47952095` adds
+`urnetwork_stats_provider_egress_refresh_available` and the
+`urnetwork_stats_provider_egress_source_started_seconds` and
+`urnetwork_stats_provider_egress_source_completed_seconds` clocks. A failed
+refresh leaves availability zero; successful cache hits preserve the original
+source clocks. Retained counts and a recent scrape alone still cannot establish
+a fresh exclusion census. These are `CountProviderEgress` dashboard snapshots,
+separate from both the native score-target census key and URL quota publication.
+No qualified current read of these timestamped gauges is retained here.
+The individual count vectors and clocks are updated sequentially; availability
+one and a shared scrape timestamp do not by themselves prove an atomic
+counts-and-clock snapshot if collection overlaps a refresh.
+
+The native publication has source clocks but lacks ARIN epochs and exclusion
+reasons. These reviewed sources export no loaded-ARIN epoch gauge. The bounded
+process observation above supplies a mapped epoch for one process; its
+partial-file fingerprint does not establish a whole-file hash, application-reader
+use, fleet convergence or provider-level effect.
+
+An isolated classification-only refresh prototype passed nine local controls,
+including concurrent single-winner and mixed-writer checks. It compares the
+exact previous ARIN fields and write token before replacing six classification
+fields after an actual lookup; it does not rewrite location, URL/TLS evidence
+or reliability. It remains inactive: Main stale facts are unconfirmed, and
+bounded live-owner integration is unfinished. Owner changes during a write
+and uncertain commit outcomes require explicit handling; the local tests do
+not establish production activation or recovered Quality supply.
+
+The retained Connect `12c5c0ac` and API `a357c978` source trees each preserve
+25 reviewed ARIN loader, owner-capture, classification and native-score files
+from the earlier `1a46ab5f` graph byte for byte. This source comparison is not a
+live-owner join or proof of loaded resources in those newer processes. The
+aggregate database read retains no provider identifiers or addresses. Any
+future owner-side correction must first join a current live owner and address,
+its actual lookup generation, and the exact durable row/token; the earlier
+one-process mapping and a cached score-publication clock cannot supply that
+join.
 
 For this release, retain the following evidence as rollout proceeds:
 

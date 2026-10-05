@@ -34,8 +34,8 @@ const InitialTransferBalance = 32 * model.Gib
 const InitialTransferBalanceDuration = 30 * 24 * time.Hour
 
 // The recurring per-tier data grants come from pro.yml (model.Pro().DataAmount),
-// on three separate schedules -- see FreeGrantWindow / ProGrantWindow /
-// ReferralGrantWindow and the three Refresh*TransferBalances tasks below.
+// on three separate schedules -- see model.FreeGrantWindow / model.ProGrantWindow /
+// model.ReferralGrantWindow and the three Refresh*TransferBalances tasks below.
 //
 // RefreshSupporterTransferBalance is the legacy amount still used at subscription
 // ACTIVATION, where the balance spans the whole subscription period alongside the
@@ -187,26 +187,14 @@ type Subscription struct {
 }
 
 func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceResult, error) {
-	transferBalances := model.GetActiveTransferBalances(session.Ctx, session.ByJwt.NetworkId)
-
-	netBalanceByteCount := model.ByteCount(0)
-	startBalanceByteCount := model.ByteCount(0)
+	// at a grant boundary the old grant is still active through its grace; the
+	// summary counts only the new one (see model.SummarizeTransferBalances)
+	transferBalanceSummary := model.GetTransferBalanceSummary(session.Ctx, session.ByJwt.NetworkId)
 
 	// Pro comes from pro_model, the single place it is tracked. It is NOT "has a
 	// paid balance": a data code is paid but data-only, so that test would report
 	// a data-code buyer as Pro.
 	isPro := model.IsProNetwork(session.Ctx, session.ByJwt.NetworkId)
-
-	for _, transferBalance := range transferBalances {
-
-		if transferBalance.EndTime.After(server.NowUtc()) {
-			netBalanceByteCount += transferBalance.BalanceByteCount
-			startBalanceByteCount += transferBalance.StartBalanceByteCount
-		}
-
-	}
-
-	openTransferByteCount := model.GetOpenTransferByteCount(session.Ctx, session.ByJwt.NetworkId)
 
 	var currentSubscription *Subscription
 
@@ -241,12 +229,12 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 	pendingPayout := model.ByteCount(0)
 
 	return &SubscriptionBalanceResult{
-		BalanceByteCount:          netBalanceByteCount,
-		StartBalanceByteCount:     startBalanceByteCount,
-		OpenTransferByteCount:     openTransferByteCount,
+		BalanceByteCount:          transferBalanceSummary.BalanceByteCount,
+		StartBalanceByteCount:     transferBalanceSummary.StartBalanceByteCount,
+		OpenTransferByteCount:     transferBalanceSummary.OpenTransferByteCount,
 		CurrentSubscription:       currentSubscription,
 		Subscriptions:             subscriptions,
-		ActiveTransferBalances:    transferBalances,
+		ActiveTransferBalances:    transferBalanceSummary.ActiveTransferBalances,
 		PendingPayoutUsdNanoCents: pendingPayout,
 		UpdateTime:                server.NowUtc(),
 		Guest:                     isGuestNetwork(session, model.HasAnyAuthMethod),
@@ -263,6 +251,36 @@ func isGuestNetwork(
 	hasAnyAuthMethod func(ctx context.Context, userId server.Id) bool,
 ) bool {
 	return !hasAnyAuthMethod(session.Ctx, session.ByJwt.UserId)
+}
+
+// Stable machine codes for a refused checkout or payment intent. Clients pick
+// a localized message (or flow) from the code and fall back to `Message`.
+const (
+	// the network has no login method; add one (AddAuth) before buying
+	PurchaseErrorCodeGuestSignInRequired = "guest_sign_in_required"
+)
+
+const purchaseGuestSignInRequiredMessage = "Add a sign-in to your account before buying a plan."
+
+// purchaseHasAnyAuthMethod is model.HasAnyAuthMethod. Replaceable only by
+// hermetic tests, which answer the lookup without a database. Production never
+// mutates it.
+var purchaseHasAnyAuthMethod = model.HasAnyAuthMethod
+
+// refuseGuestPurchase reports whether the session's network must not start a
+// checkout or a payment intent: a legacy guest network has no login method, so
+// nothing could sign back in to the plan it bought. Current apps convert a
+// guest in place before checkout; this covers the builds from before that.
+//
+// Only the server-created checkouts and intents call this. A store-verified
+// purchase (verify-play-purchase, verify-apple-transaction) and every webhook
+// still credit a guest network: the store has already taken the money.
+func refuseGuestPurchase(session *session.ClientSession) bool {
+	if !isGuestNetwork(session, purchaseHasAnyAuthMethod) {
+		return false
+	}
+	glog.V(1).Infof("[sub]refused a purchase for guest network %s\n", session.ByJwt.NetworkId)
+	return true
 }
 
 type CoinbaseWebhookArgs struct {
@@ -1576,58 +1594,37 @@ func verifyPlayAuth(ctx context.Context, auth string) error {
 	return errors.New("Missing authorization.")
 }
 
-// ----- grant windows -----
-//
-// The three grants run on three different schedules, and each balance's window
-// extends a little past the end of its period so consecutive grants overlap and a
-// client never sees a gap at the boundary.
-
-// FreeGrantGrace is how long past the end of the day a daily free balance stays
-// valid.
-const FreeGrantGrace = 1 * time.Hour
-
-// ProGrantGrace is how long past the end of the month a monthly Pro balance stays
-// valid. It is also the window in which a lapsed subscriber is still Pro, because
-// the Pro entitlement is exactly "has an in-window pro balance" (see pro_model.go).
-const ProGrantGrace = 24 * time.Hour
-
-// FreeGrantWindow is the window for the daily free grant covering `now`:
-// [start of day, start of next day + 1 hour).
-func FreeGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
-	year, month, day := now.UTC().Date()
-	startTime = time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
-	endTime = startTime.AddDate(0, 0, 1).Add(FreeGrantGrace)
-	return
-}
-
-// ProGrantWindow is the window for the monthly Pro grant covering `now`:
-// [start of month, start of next month + 1 day).
-func ProGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
-	year, month, _ := now.UTC().Date()
-	startTime = time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
-	endTime = startTime.AddDate(0, 1, 0).Add(ProGrantGrace)
-	return
-}
-
-// ReferralGrantWindow is the window for one referral grant period, from `now`.
-func ReferralGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
-	startTime = now.UTC()
-	endTime = startTime.Add(model.Pro().ReferralGrantPeriod()).Add(FreeGrantGrace)
-	return
-}
+// The grant windows (model.FreeGrantWindow, model.ProGrantWindow,
+// model.ReferralGrantWindow) live in the model, next to the balance summary that
+// tells a grant in its grace from the next grant of its kind.
 
 // AddRefreshTransferBalance grants one network the data allowance for its CURRENT
 // tier and period: a Pro network gets the monthly Pro amount, everyone else gets the
 // daily free amount. Used when a network is created and when a subscription changes,
 // so the network does not have to wait for the next scheduled grant.
 func AddRefreshTransferBalance(ctx context.Context, networkId server.Id) (returnErr error) {
+	proGranted := false
 	server.Tx(ctx, func(tx server.PgTx) {
-		returnErr = AddRefreshTransferBalanceInTx(tx, ctx, networkId)
+		proGranted, returnErr = AddRefreshTransferBalanceInTx(tx, ctx, networkId)
 	})
+	if returnErr != nil {
+		return
+	}
+
+	if proGranted {
+		// the Pro grant is committed -- refresh the entitlement so the upgrade is
+		// visible immediately rather than after ProCacheTtl
+		model.UpdateProNetwork(ctx, networkId)
+	}
 	return
 }
 
-func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkId server.Id) error {
+// AddRefreshTransferBalanceInTx writes the refresh grant in the caller's tx and
+// returns true when it is the Pro grant. The caller must then refresh the Pro cache
+// (model.UpdateProNetwork) after the tx commits. A refresh inside the tx reads on its
+// own connection, so it would cache the entitlement from before the grant for up to
+// ProCacheTtl, and a tx that rolled back would still have written the cache.
+func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkId server.Id) (proGranted bool, returnErr error) {
 	pro, _ := model.HasSubscriptionRenewal(ctx, networkId, model.SubscriptionTypeSupporter)
 
 	// Nothing to grant -> grant nothing. With no pro.yml the amount is ZERO, and granting
@@ -1636,32 +1633,33 @@ func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkI
 	// present but says `data: 0` is handled the same way.
 	if model.Pro().DataAmount(pro) <= 0 {
 		glog.Errorf("[sub]no data amount configured for pro = %t; skipping the grant\n", pro)
-		return nil
+		return false, nil
 	}
 
 	if pro {
 		// the Pro grant carries pro = true, which is what confers the entitlement
-		startTime, endTime := ProGrantWindow(server.NowUtc())
-		err := model.AddProTransferBalanceInTx(
+		startTime, endTime := model.ProGrantWindow(server.NowUtc())
+		err := model.AddGrantTransferBalanceInTx(
 			tx,
 			ctx,
 			networkId,
+			model.GrantKindPro,
 			model.Pro().DataAmount(true),
 			startTime,
 			endTime,
 		)
 		if err != nil {
-			return err
+			return false, err
 		}
-		model.UpdateProNetwork(ctx, networkId)
-		return nil
+		return true, nil
 	}
 
-	startTime, endTime := FreeGrantWindow(server.NowUtc())
-	return model.AddBasicTransferBalanceInTx(
+	startTime, endTime := model.FreeGrantWindow(server.NowUtc())
+	return false, model.AddGrantTransferBalanceInTx(
 		tx,
 		ctx,
 		networkId,
+		model.GrantKindFree,
 		model.Pro().DataAmount(false),
 		startTime,
 		endTime,
@@ -1705,7 +1703,7 @@ func RefreshFreeTransferBalances(
 		return &RefreshFreeTransferBalancesResult{}, nil
 	}
 
-	startTime, endTime := FreeGrantWindow(server.NowUtc())
+	startTime, endTime := model.FreeGrantWindow(server.NowUtc())
 	model.AddFreeTransferBalanceToAllNetworks(
 		clientSession.Ctx,
 		startTime,
@@ -1764,7 +1762,7 @@ func RefreshProTransferBalances(
 		return &RefreshProTransferBalancesResult{}, nil
 	}
 
-	startTime, endTime := ProGrantWindow(server.NowUtc())
+	startTime, endTime := model.ProGrantWindow(server.NowUtc())
 	model.AddProTransferBalanceToAllNetworks(
 		clientSession.Ctx,
 		startTime,
@@ -1824,7 +1822,7 @@ func RefreshReferralTransferBalances(
 		return &RefreshReferralTransferBalancesResult{}, nil
 	}
 
-	startTime, endTime := ReferralGrantWindow(server.NowUtc())
+	startTime, endTime := model.ReferralGrantWindow(server.NowUtc())
 	model.AddReferralBonusesToAllNetworks(
 		clientSession.Ctx,
 		startTime,
@@ -2485,6 +2483,9 @@ type SolanaPaymentIntentResult struct {
 }
 
 type SolanaPaymentIntentError struct {
+	// one of the `PurchaseErrorCode*` values, when the refusal has one. Added
+	// after `Message`; older clients ignore it.
+	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 }
 
@@ -2533,6 +2534,14 @@ func CreateSolanaPaymentIntent(
 	intent *SolanaPaymentIntentArgs,
 	clientSession *session.ClientSession,
 ) (*SolanaPaymentIntentResult, error) {
+	if refuseGuestPurchase(clientSession) {
+		return &SolanaPaymentIntentResult{
+			Error: &SolanaPaymentIntentError{
+				Code:    PurchaseErrorCodeGuestSignInRequired,
+				Message: purchaseGuestSignInRequiredMessage,
+			},
+		}, nil
+	}
 
 	// The price comes from pro.yml, keyed by the plan and the caller's regional
 	// price tier. It is NEVER taken from the client.

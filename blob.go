@@ -255,6 +255,10 @@ type BlobStoreConfig struct {
 	LocalMaxBytes int64
 	// Explicit local service storage requires an independently pinned declaration.
 	DurableVolumes durablevolume.Reference
+	// FeedbackLogBucket is the MinIO bucket that keeps feedback log uploads
+	// (`feedback_log_bucket`). Empty means log uploads are not stored (see
+	// controller.LoadFeedbackLogStore).
+	FeedbackLogBucket string
 }
 
 // defaultLocalBlobRoot is the local backend's root when unset: a `blob`
@@ -348,16 +352,17 @@ func LoadBlobStoreConfig() (config *BlobStoreConfig, present bool) {
 		durable.Sha256, _ = declaration["sha256"].(string)
 	}
 	return &BlobStoreConfig{
-		Authority:      authority,
-		AccessKey:      str("access_key"),
-		SecretKey:      str("secret_key"),
-		Bucket:         str("bucket"),
-		Tls:            tls,
-		Prefix:         prefix,
-		Local:          local,
-		LocalPath:      localPath,
-		LocalMaxBytes:  localMaxBytes,
-		DurableVolumes: durable,
+		Authority:         authority,
+		AccessKey:         str("access_key"),
+		SecretKey:         str("secret_key"),
+		Bucket:            str("bucket"),
+		Tls:               tls,
+		Prefix:            prefix,
+		Local:             local,
+		LocalPath:         localPath,
+		LocalMaxBytes:     localMaxBytes,
+		DurableVolumes:    durable,
+		FeedbackLogBucket: strings.TrimSpace(str("feedback_log_bucket")),
 	}, true
 }
 
@@ -725,6 +730,17 @@ func mergeOwnedLifecycleRules(existing *lifecycle.Configuration, owned []lifecyc
 func (self *minioBlobStore) Bucket() string    { return self.bucket }
 func (self *minioBlobStore) Prefix() string    { return self.prefix }
 func (self *minioBlobStore) Authority() string { return self.authority }
+
+// BlobStoresShareLifecycle identifies one remote bucket-wide configuration.
+// Prefixes and client instances do not separate MinIO lifecycle ownership;
+// schemes do. Local stores retain independent in-process reaper state.
+func BlobStoresShareLifecycle(first, second BlobStore) bool {
+	left, leftOk := first.(*minioBlobStore)
+	right, rightOk := second.(*minioBlobStore)
+	return leftOk && rightOk && left != nil && right != nil &&
+		left.client != nil && right.client != nil && left.bucket == right.bucket &&
+		left.client.EndpointURL().String() == right.client.EndpointURL().String()
+}
 
 // NewLocalBlobStore builds a filesystem-backed store rooted at root with the
 // default aggregate byte cap.

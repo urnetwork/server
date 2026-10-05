@@ -330,6 +330,14 @@ func StripePaymentSheet(
 	args *StripePaymentSheetArgs,
 	clientSession *session.ClientSession,
 ) (*StripePaymentSheetResult, error) {
+	if refuseGuestPurchase(clientSession) {
+		return &StripePaymentSheetResult{
+			Error: &OnboardingError{
+				Code:    PurchaseErrorCodeGuestSignInRequired,
+				Message: purchaseGuestSignInRequiredMessage,
+			},
+		}, nil
+	}
 	plan := strings.ToLower(strings.TrimSpace(args.Plan))
 	if plan != model.PlanYearly && plan != model.PlanMonthly {
 		return stripePaymentSheetError("Unknown plan."), nil

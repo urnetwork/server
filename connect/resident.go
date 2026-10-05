@@ -1046,23 +1046,7 @@ func (self *Exchange) NominateLocalResidentWithContext(
 			glog.Infof("[r]close %s\n", clientId)
 		}
 	})
-	go server.HandleError(func() {
-		defer resident.Cancel()
-		for {
-			if resident.CancelIfIdle() {
-				if glog.V(1) {
-					glog.Infof("[r]idle %s\n", clientId)
-				}
-				return
-			}
-
-			select {
-			case <-resident.Done():
-				return
-			case <-time.After(self.settings.ExchangeResidentTtl):
-			}
-		}
-	})
+	go server.HandleError(resident.runIdleWatcher)
 	// poll the resident the same as exchange connections
 	go server.HandleError(func() {
 		defer resident.Cancel()
@@ -1130,22 +1114,26 @@ func (self *Exchange) refreshResidentRegistration(resident *Resident) bool {
 	// expires after `ExchangeResidentTtl` and other residents prune
 	// it to a disconnect marker, bounding disconnect detection.
 	if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && 0 < resident.TransportCount() {
+		// Give optional peer metadata one poll interval of caller time.
+		// Keep this context separate from resident and control lifetimes.
+		peerCtx, peerCancel := context.WithTimeout(resident.ctx, self.settings.ExchangeResidentTtl/4)
+		defer peerCancel()
 		server.HandleError(func() {
 			if resident.peerCategory == model.NetworkPeerCategoryProxy {
 				// AddNetworkProxyPeer doubles as the heartbeat, and is
 				// also the initial proxy registration (proxy clients
 				// do not pass through ConnectionAnnounce)
-				model.AddNetworkProxyPeer(resident.ctx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
+				model.AddNetworkProxyPeer(peerCtx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
 				return
 			}
-			if !model.RefreshNetworkPeer(resident.ctx, *resident.peerNetworkId, clientId, residentId, self.settings.ExchangeResidentTtl) {
+			if !model.RefreshNetworkPeer(peerCtx, *resident.peerNetworkId, clientId, residentId, self.settings.ExchangeResidentTtl) {
 				// the registration was lost (e.g. expired while the
 				// client was disconnected, or pruned at an expiry
 				// race); re-add with a fresh profile
 				// peersEnabled is not re-checked: peerNetworkId set means
 				// the network was enabled when the resident was created
-				if _, topLevel, _, peerProfile, _ := model.GetNetworkPeerProfile(resident.ctx, clientId); topLevel && peerProfile != nil {
-					model.AddNetworkPeer(resident.ctx, *resident.peerNetworkId, peerProfile, residentId, self.settings.ExchangeResidentTtl)
+				if _, topLevel, _, peerProfile, _ := model.GetNetworkPeerProfile(peerCtx, clientId); topLevel && peerProfile != nil {
+					model.AddNetworkPeer(peerCtx, *resident.peerNetworkId, peerProfile, residentId, self.settings.ExchangeResidentTtl)
 				}
 			}
 		})
@@ -3154,7 +3142,9 @@ func (self *ResidentTransport) Run() {
 	skippedReconnectWait := false
 	for {
 		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
-		resident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, self.exchange.settings.ExchangeResidentTtl)
+		// Routing does not own the registration heartbeat. Failed dialing must
+		// not keep a departed resident's registration alive.
+		resident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, 0)
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			headerCopy := self.header
@@ -3415,7 +3405,8 @@ func (self *ResidentForward) runWithResidentLookup(
 		}
 		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
 		resident := defaultResidentForwardLookupMetrics.observe(initialLookup, hasPending || len(self.send) > 0, func() *model.NetworkClientResident {
-			return lookup(self.ctx, self.clientId, self.exchange.settings.ExchangeResidentTtl)
+			// Pending traffic must not prolong a departed registration.
+			return lookup(self.ctx, self.clientId, 0)
 		})
 		initialLookup = false
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
@@ -4281,7 +4272,7 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 		if existing := func() *ResidentForward {
 			self.stateLock.RLock()
 			defer self.stateLock.RUnlock()
-			if f := self.forwards[destinationId]; f != nil && f.UpdateActivity() {
+			if f := self.forwards[destinationId]; f != nil && !f.IsDone() {
 				return f
 			}
 			return nil
@@ -4351,7 +4342,7 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 		func() {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
-			if existing := self.forwards[destinationId]; existing != nil && existing.UpdateActivity() {
+			if existing := self.forwards[destinationId]; existing != nil && !existing.IsDone() {
 				raceWinner = existing
 				return
 			}
@@ -4399,6 +4390,9 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 		case forward.send <- transferFrameBytes:
 			messageOwned = false
 			outputAccepted = true
+			// Refused offers must not renew a full destination queue's idle
+			// allowance. Only an accepted payload is forward activity.
+			forward.UpdateActivity()
 			return true
 		default:
 		}
@@ -4413,6 +4407,7 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 			case forward.send <- transferFrameBytes:
 				messageOwned = false
 				outputAccepted = true
+				forward.UpdateActivity()
 				return true
 			case <-time.After(self.exchange.settings.ForwardTimeout):
 			}
@@ -4647,6 +4642,31 @@ func (self *Resident) CancelIfIdle() bool {
 		return true
 	}
 	return false
+}
+
+// Retire after the existing idle allowance. A late constructor or activity
+// between timer wakes must not round that deadline up by another whole TTL.
+// Activity can move the deadline after arming; rechecking on wake preserves
+// that activity's full allowance without changing accepted control teardown.
+func (self *Resident) runIdleWatcher() {
+	defer self.Cancel()
+	timer := time.NewTimer(self.exchange.settings.ExchangeResidentTtl)
+	defer timer.Stop()
+	for {
+		if self.CancelIfIdle() {
+			if glog.V(1) {
+				glog.Infof("[r]idle %s\n", self.clientId)
+			}
+			return
+		}
+		remaining := self.exchange.settings.ExchangeResidentTtl - time.Since(time.Unix(0, self.lastActivityNanos.Load()))
+		timer.Reset(max(0, remaining))
+		select {
+		case <-self.Done():
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 func (self *Resident) IsDone() bool {

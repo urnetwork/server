@@ -159,6 +159,7 @@ func selectRedisTransferBalances(ctx context.Context, tx server.PgTx, admission 
 			return false, err
 		}
 		if amount == 0 {
+			admission.noteZeroReservation(balance.balanceId)
 			return false, nil
 		}
 		if whole && amount != remaining {

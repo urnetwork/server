@@ -7234,3 +7234,471 @@ Fresh paired reduction SHA256
 431197ab324c25b2c1755d49581f35c3fbd562b51b709a9db71123bfd63213d2;
 finite ancient-deadline reduction SHA256
 899a3177c02f7a52832c7b5ac433c58b0256d2dcaa95a22a8076536bab766bcb.
+
+### 2026-10-05 06:18 UTC renewed backlog after the quiet interval
+
+The native primary read confirms that 05:35–05:40 contained 33 unique accepted
+policy-1 measured runs across 17 providers: 13 successes and 20 failures, or
+0.11/s. This uses the same durable-history definition as the Oct 3 comparison,
+but observes measurement timestamps rather than arrival times or fixed provider
+membership. It confirms low production during the earlier near-full snapshot;
+it does not measure capacity under load or describe the later c343 processes.
+
+Fresh c343 runtime receipts now qualify all eight ready Taskworkers on identical
+processes across native intervals of 361.196–361.885 seconds. Their measured ACK
+counters increased by 68 successes and 6,591 failures, totaling 18.4174/s. The
+fresh global census at 06:16:49.755 reports 50,990 of 75,231 eligible providers
+quota-complete (67.7779%), 31,932 measured runs needed and 28,832 due providers.
+Over six minutes, quota completion fell by 6,646 and missing runs increased by
+12,977. Current demand is substantial; the earlier quiet-period interpretation
+must not be carried into this interval. These ACKs have not yet been joined to a
+matching durable-history window, and net population change does not prove a
+fixed cohort. Completed-stage and indexed measurement-expiry evidence are needed
+to separate execution limits, renewal timing and membership changes.
+
+Five existing local PostgreSQL renewal tests pass with relevant source bytes
+identical to c343: the six-minute headroom preserves coverage in the tested
+spacing/latency cases, clustered expiries require bounded replacement work,
+setup failures earn no credit, and acknowledged replays do not advance pacing.
+They establish the mechanism, not Main's expiry distribution. No fairness or
+headroom change follows from the rate comparison. The current oldest due age is
+938.75 seconds; the prior October 4 derived deadline is no longer current.
+
+The 24 outstanding security cases remain separate from measured quota. They may
+be correctly quarantined providers; completion requires accurate same-URL
+revalidation and exclusion, not forcing genuine failures to pass. FP2FIX remains
+open. Root alone owns any further observation and rollout.
+
+Finite history comparison SHA256
+7c9b951cdae1b9ecc2d93814c397c478e1b4e9fe221c7d43df63adf2509723fd;
+current c343 paired reduction SHA256
+58532d3cb6da7290d6fa91621e3caf9e0c37d684748b5458c0fd173da84cda75.
+
+### 2026-10-05 06:58 UTC current Taskworker adoption and continuing deficit
+
+The fresh paired receipts qualify all eight ready Taskworkers on source
+`7cae4081c99219e1c58d576177ad6c21e594589b`, with the same process identity
+and start time in both observations. Over native scrape intervals of
+120.566–135.993 seconds, their counters increased by 362 measured successes
+and 3,493 measured failures, or 30.97135 acknowledged outcomes per second.
+These are current process acknowledgments; a matching unique-history rate and
+saturated capacity have not been established.
+
+The same global publisher advanced its census by 120 seconds. At 06:57:15Z,
+15,967 of 77,550 eligible providers met measured quota (20.58930%), compared
+with 16,169 in the earlier census. Required measurements increased from
+145,833 to 151,325, and 60,295 providers were due. The unchanged denominator
+does not prove unchanged membership. This is an active backlog; the earlier
+near-full quiet interval cannot explain the current shortfall. The arithmetic
+steady requirement for this denominator is 53.85417 unique measurements per
+second, before catch-up work. Stage timing and bounded renewal/history readers
+are independently gated for Root-only observation; their results are still
+needed to distinguish execution delay, scheduler delay, expiry and credit.
+
+Secure coverage is separate: 15,945 providers met it, with 22 security-pending
+cases. Accurate same-URL quarantine, revalidation and exclusion remain required;
+persistent genuine TLS failures must not be forced to pass. The single global
+census is not summed across processes, and seven absent local census snapshots
+do not imply seven failed owners. The earlier old deadline has advanced and
+must not be retained as a current stuck-tail claim. FP2 completion remains open.
+
+Evidence: paired reduction
+`astra-7cae4-v1-v2-coverage-rate-reduction.json` SHA256
+`d111fbceb75195585c5c950e0ac7058de0887ce8f646c5b2f9081e0c4a60dabe`,
+binding actual receipts `ccc723b2…89320` and `22965b2f…560f2`.
+
+### 2026-10-05 08:23 UTC current adoption and financial checkpoint
+
+The 07:52:21 finite census qualified all eight ready Taskworkers on source
+`f24c159789758928af1569f2ba9eb3c870e46439`. A separate 07:52:29 finite
+runtime read qualified all sixteen APIs ready on source
+`02d9f529808b5d1d8022f3a14104f8a330c9a1cc`. These are adoption and
+readiness observations, not proof that rolling quota, picker delivery or
+financial backlog has recovered. The source-qualified 08:11–08:14 phase pair
+below now measures current throughput and delay; a newer quota census remains
+separate. The 06:57 `7cae4081` deficit above is historical.
+
+The 08:10 finite contract-close snapshot counted 1,818 newly created and 403
+terminal-closed visible rows in its selected ten-second timestamp window. These
+are exact below-cap timestamp counts, not commit acknowledgments or a continuous
+settlement rate. The oldest open and disputed head timestamps did not advance
+in the paired close observations; the open population remains capped at a
+10,001-row lower bound, and disputed retained accounting failures remain
+separate. An earlier legacy-page sample selected work over 94 seconds; that was
+the selected finish age, not one page's runtime. Its maximum observed page
+runtime was 15.261217 seconds. Neither sample proves backlog drain.
+
+The separate 06:36–08:11 financial-counter pair advanced intent inserts by
+59,058 and deletes by 260,753 over 5,694.885 seconds. Counter movement is not
+an exact outstanding-intent delta or custody reconciliation, and the oldest
+legacy heads remained unchanged in the retained comparison. The tally repair
+is merged and pushed in canonical source `dc3891782`, while the next Taskworker
+image was still being built or verified at this checkpoint; no deployment or
+runtime effect is claimed. FP2FIX remains open pending current rolling quota,
+quality, speed, security and financial acceptance.
+
+Evidence: `root-tw-census-f24c1-known-runtime-v1/run-20261005T075221Z`,
+`root-api16-known-runtime-02d-v1/run-20261005T075229Z`,
+`close-progress-actual-v4.json`, and `backlog-v2-v3-paired-actual.json` in the
+retained `/home/by/urnetwork/temp` evidence tree.
+
+
+### 2026-10-05 08:14 UTC current connection acquisition and publication delay
+
+The 08:11:47–08:14:04 API pair qualifies the same four ready `02d9f529`
+processes on enabled hosts 0, 1, 3 and 4, block g1, over native intervals of
+135.401–135.624 seconds. On E3g1, 15 returned Due calls averaged 1.772 seconds:
+1.468 acquiring a database connection, 0.182 beginning the transaction and
+0.122 in its body. On E4g1, 57 returned calls averaged 2.308 seconds: 1.717
+acquiring, 0.455 beginning and 0.135 in the body. Connection acquisition is
+74–83% of these measured handler times; query-row phases average 49–52 ms.
+These inclusive phases are wall time, not CPU, and exclude unfinished calls.
+
+Both affected processes had total/max connections 512/512 and zero idle at
+each snapshot. Their canceled-acquire counters increased by 831,985 and
+1,170,472; successful acquires averaged 1.489 and 1.560 seconds. E0g1 and E1g1
+had spare connections and no returned Due calls in this interval. This proves
+process-level pool pressure and skew, but does not identify the occupying
+handler, repeated-cancellation owner or routing cause. Canceled attempts are
+not distinct requests; constructing connections were not separately observed.
+The four-process reader does not establish all-sixteen API behavior.
+
+The matching Taskworker stage pair qualifies the same eight `f24c1597`
+source/build/image/start identities across 135.652–136.133-second native
+intervals. ACK counters increased by 181 measured successes and 3,147 failures,
+totaling 24.4989/s. Across 3,666 completed timed turns, mean total wall time was
+15.778 seconds: publication 7.927 (50.242%), check and buffer 5.252, close and
+join 1.707, and initial readiness observation 0.866. The synchronous schedulers
+spent 96.862% of their measured slot time in Due. This stage reader does not
+collect Taskworker readiness; the separate 07:52 census supplies historical
+ready evidence. ACKs are not unique durable-history credit, and these phase
+receipts do not establish current rolling quota or maximum capacity.
+
+Publication includes synchronous Taskworker tally work as well as API calls.
+Separate deterministic local PostgreSQL controls prove repeatable-read retry
+amplification on shared country/day/region tally rows; the narrow read-committed
+candidate preserves exact counters and transactional rollback in those tests.
+Its faster local completion also increases pool waiting in one loaded control,
+so neither Main publication improvement nor lower pool pressure follows from
+that local result. The 08:14 pair precedes the tally rollout. API pool ownership
+and the deployed tally effect require separate evidence. No fairness, six-minute
+renewal headroom, funding, measurement-credit or security rule changes follow
+from these observations. FP2 completion remains open.
+
+Evidence: `astra-api02d-f24c-current-phase-pair-20261005T081404Z.json` SHA256
+`3c6d5a28e21ea8bdc035f5f18065ec6039f78c5f65382dc326dce859dcfbbe3f`,
+binding all four actual receipts and both qualified deltas; local tally evidence
+SHA256 `47a688edca496beefb8e94fd4de19a6044a3abdd69653eff8fda3d7d5f840c0d`.
+
+### 2026-10-05 09:05 UTC current Taskworker renewal and failure attribution
+
+Root's fresh census receipts qualify all eight Taskworkers as ready on
+`7cc33c58303d6eadfac95ad78b31de4294c45146`, with the same processes across the
+pair. The current single global publisher observed 81,034 eligible providers
+at 09:03:53 UTC: 546 met measured quota (0.673791%), 526 were secure-complete,
+and 512,381 measured runs remained. There were 78,778 due providers and 24
+security-pending cases. This is the current dynamic cohort; earlier near-full
+coverage is historical and does not establish current completion.
+
+The separate 09:02–09:05 phase pair spans native intervals of 165.727–166.396
+seconds. It records 330 acknowledged measured successes and 3,449 failures,
+or 22.7682 ACK/s. Across 4,301 completed timed turns, publication averaged
+7.797 seconds (50.247% of total completed wall time), readiness 1.041 seconds,
+and checking/buffering 5.186 seconds. Scheduler Due residence was 92.921%.
+These are acknowledged outcomes and completed phase observations, not unique
+history credit, worker utilization or a controlled estimate of either recent
+repair. Census and stage baseline scrapes differ; readiness was observed at
+the separate census clocks. The frozen reduction is
+`temp/pg-contention-20261004/astra-7cc33-v1-v2-current-coverage-stage-reduction.json`
+(SHA-256 `5580f95a1d87da64faadfe93c69d1891b9b0ba2f73b3a90991d099c259a0c38e`).
+
+A local audit on unchanged 7cc production source establishes an additional
+failure-attribution mechanism. With real authority/controller/model calls,
+Exchange, provider NAT and the URL checker, holding only a successful provider
+return-companion reply produced a measured `dial_dns` negative at 5.0008
+seconds. All three caller-local unavailable witnesses were false. Releasing
+only that callback restored DNS and authenticated HTTPS payload through the
+same provider. The recovery request used a loopback fixture's ordinary HTTPS
+path; it is not a claimed URL-policy pass or quota receipt. A separate real
+paired-client control also verified forward receipt/ACK before the held return
+grant. The evidence is
+`temp/fp2-failure-validity-audit-20261005/failure-validity-evidence.json`
+(SHA-256 `f92ddd5f38954bcd179545ebd6999981344090fea8d10d94fe896db416088358`),
+with its separately pinned scope addendum.
+
+This callback-delay counterfactual does not reproduce the Redis zero-refusal
+cleanup branch or determine the production share of affected DNS failures.
+Correct the proven control-plane delay owner and measure fresh outcomes;
+historical negatives cannot be safely relabeled from aggregate counters.
+Genuine provider silence and TLS failures must remain failures, with unchanged
+same-URL quarantine/revalidation, ratio threshold and probe deadlines. No
+scoring-policy change follows from this audit. Full sustained coverage and
+accurate production failure attribution remain open.
+
+### 2026-10-05 09:55 UTC post-rollout throughput and remaining coverage
+
+Root's 09:45:44 and 09:55:35 census receipts qualify the same eight ready
+Taskworkers on `d3f4f5729c4cf9e007043bf32dfd05a0f34c19b0`, with no known-old
+or unknown slots. These are fresh paired runtime self-reports, not native
+executable ownership or proof that all predecessor processes have retired.
+
+The separate 09:53:23–09:55:35 phase pair spans native intervals of
+120.806–137.953 seconds. It records 4,858 acknowledged measured successes and
+6,655 failures: **85.7552 ACK/s**. Across 11,512 completed timed turns,
+publication averaged 0.502834 seconds (8.949% of total completed wall time),
+readiness 0.044886 seconds, checking/buffering 4.774119 seconds, and closing
+0.295468 seconds; total mean was 5.618898 seconds. Scheduler Due residence
+was 95.800%, which is neither CPU utilization nor proof of a blocked Due
+handler. Checking/buffering includes several network and local stages; its
+84.965% share does not identify external DNS as the cause. Stage observations
+contain no readiness metric; the matching processes were separately ready at
+the census clocks. Earlier 7cc timing is an uncontrolled prior window, since
+API Redis compensation and Taskworker head allocation changed together.
+
+The single global publisher observed 81,036 eligible providers at
+09:54:46.566 UTC: **4 met measured quota (0.004936%)**, none were
+secure-complete, and **449,919 measured runs remained**. Security-pending was
+24. From the preceding 09:43:54.286 census, missing runs fell by 53,094 while
+quota-complete providers fell from 147 to 4 and the denominator rose by one.
+These state changes can move in opposite directions at the ten-run threshold;
+net denominator stability does not prove fixed provider IDs or attribute the
+change to expiry. The census source clocks advanced 652.280 seconds. Census
+native scrape intervals reached 604.494 seconds, so no all-eight census ACK
+rate qualifies under the 600-second limit; the reported rate uses only the
+valid stage pair.
+
+The current arithmetic requirement is 56.275 unique measured credits/s for a
+stable 81,036-provider cohort. Acknowledgments are not unique durable history
+credits, and this short interval does not establish sustained headroom or
+completion. The next bounded history discriminator uses the same selected
+policy, admitted measured-run definition and five-minute window semantics as
+the earlier history measurements. Historical negatives remain unchanged;
+genuine provider silence and TLS failures retain their existing treatment.
+Full sustained measured coverage and accurate production failure attribution
+remain open.
+
+Finite evidence:
+`temp/pg-contention-20261004/astra-d3f4f-v1-v2-current-stage-reduction.json`
+(SHA-256 `9eb481c31a1d2d54a60e249a94865286db6fd6c4ab8a9f07c1d9d9141c6f3e01`)
+and
+`temp/pg-contention-20261004/astra-d3f4f-current-coverage-stage-comparison.json`
+(SHA-256 `1b694dc27f059fe7d4b4979dbc0638466ef1ca8fb66cc25ab4bb90da0c288098`).
+
+### 2026-10-05 10:33 UTC durable history and later d8 coverage
+
+Root's primary read at 10:33:38 UTC found **25,294 unique accepted measured
+runs** in the fixed measurement-time window `(09:50, 09:55]` UTC: 10,296
+successes and 14,998 failures, or **84.3133 unique credits/s**. The selected
+policy-1 count definition matches the earlier October 3 windows of 88.7733/s
+and 78.94/s. All 25,294 runs belong to distinct providers, so each observed
+provider has exactly one qualifying run in this five-minute window. Current
+eligible membership and four-hour per-provider history were not joined.
+
+The rate is 49.824% above the nearby 09:54 census's static-cohort arithmetic
+requirement of 56.275/s. This establishes durable credit for that measurement
+window; it does not establish sustained maintenance, fixed-cohort coverage or
+arrival-time throughput. The 85.7552 ACK/s stage observation has different
+boundaries, so no ACK duplication, loss or conversion fraction follows.
+Historical negatives have not been reclassified.
+
+Separately, Root's 10:24:23 census qualified all eight ready Taskworkers on
+`d8f364edc4f0b15ba549f1fb9655107967fbad5d`, with no known-old or unknown
+slots. The single global publisher's 10:23:24.368 snapshot has **79,348
+eligible providers, zero quota-complete and zero secure-complete providers,
+and 339,939 runs needed**. Security-pending is 25. This changed denominator
+is not a fixed-cohort comparison with the earlier 81,036 providers. Runtime
+qualification remains a fresh self-report, not native executable ownership;
+one d8 frame provides no new d8 throughput rate. Full sustained coverage
+remains open.
+
+Finite reductions:
+`temp/pg-contention-20261004/astra-accepted-window-0950-0955-vs-oct3-reduction.json`
+(SHA-256 `4d0a732c1488781db53968604711d56e5c5c5198645e4c022ec749627078fc87`)
+and
+`temp/pg-contention-20261004/astra-d8f36-v1-current-adoption-census-reduction.json`
+(SHA-256 `d429fcfabd4af37df9446d6563ca0f13bfff60b9bfbc83a588a417f1f094b5d1`).
+
+### 2026-10-05 11:40 UTC current throughput and quota boundary audit
+
+Root's 11:24:37 receipt qualified all eight ready Taskworkers on
+`5f613cbe09f538b612c1272201e80ca0dbe9cda5`, with no known-old or unknown
+slots. The global census was observed at 11:23:51.475 UTC: **79,664 eligible
+providers, zero quota-complete and zero secure-complete, and 141,919 runs
+needed**. Security-pending was 26. These observations remain runtime
+self-reports, with one separately qualified global census publisher.
+
+The coherent census implies 654,721 capped measured credits, averaging
+8.21853 per provider. With no provider at ten, at least 17,409 were exactly
+at nine and at least 48,537 were at eight or nine. The exact distribution
+and provider membership overlap with older cohorts were not observed.
+Zero completed quota therefore does not mean zero measured credit.
+Warming counts recent cycle starts rather than newly returning members.
+Eligibility publication preserves existing cycle progress and deadlines, so
+a returning provider with an old cycle can be mature immediately. A low
+warming count and similar population size do not exclude membership turnover.
+
+The separate 11:37:23–11:40:56 stage pair qualified the same eight processes
+across native intervals of 211.410–212.134 seconds. It recorded 10,177
+acknowledged measured successes and 6,800 failures: **80.2397 ACK/s**.
+Across 16,956 timed completed turns, publication averaged 0.818653 seconds
+(14.974% of total completed wall time), checking/buffering 4.399399 seconds,
+readiness 0.031111 seconds and closing 0.216415 seconds; total mean was
+5.467027 seconds. Due phase residence was 87.959%, which is not CPU or
+worker utilization. This pair contains no new quota snapshot or unique
+history count, and completed timing excludes unfinished turns. Readiness
+was observed at the earlier census clocks, not by the stage query.
+
+Six author and independent native controls on unchanged 5f production
+owners found no count or stop-at-nine defect. A fixed local fixture with
+79,664 providers, 654,721 measured history rows and 796,640 completed turns
+started at the same aggregate quota/deficit. Real claims and 256 accepted
+publications advanced 197 providers from eight to nine and 59 from nine to
+ten; missing runs fell by 256. Ten prior finished turns did not prevent
+another claim. A separate control followed actual deadlines without
+forcing them: mature deficits used the default 54–66-second recovery pace,
+full quota parked until oldest measurement plus 3h54m, and an accepted
+failure renewed coverage before expiry. Failed measurements count toward
+ten; setup-only completions and replays do not. The 4/5 serving-quality
+threshold and TLS exclusions remain separate.
+
+The local fixture does not reproduce Main workload, locks, configured
+pacing, provider turnover, expiry distribution or publication arrival
+delay. Its eight/nine distribution is one construction matching the
+aggregate, not a measured Main distribution. No policy or production
+change follows from this audit. Full sustained coverage remains open.
+
+Finite evidence: `temp/pg-contention-20261004/astra-5f613-v1-current-adoption-census-reduction.json`
+(SHA-256 `9065f467a0a0790d04fbc13d178482f0958da4f5d8bb982f2f41779502f1b03f`),
+`temp/pg-contention-20261004/astra-5f613-v1-v2-current-stage-reduction.json`
+(SHA-256 `ecb8b28dbfc5891a9075b5bb2b3e6d57031b8deab240fe80eae2791e6f8df247`),
+and `temp/sol-quota-boundary-5f613-review-20261005/sol-independent-quota-boundary-GO.json`
+(SHA-256 `c67d4d3b801f907a5c175ecf397b07986c87ded39c2be8b6d20146cd24231a69`).
+
+### 2026-10-05 14:29 UTC current coverage and public admission boundary
+
+The retained 13:48:05 reader qualified all eight selected 74810 workers.
+Its one fresh global snapshot, observed at 13:47:19.894 UTC, had **80,271
+eligible providers and 80,251 at the ten-measurement quota (99.975084%)**:
+20 were short by a total of 173 runs; 17 had no cycle row. The overlap
+between these groups was not observed. Earlier bounded deadline sampling
+found 128 quota-complete providers; that cycle-only head could not include
+missing cycle rows or false scheduling hints.
+
+Root's 14:29:37 writer receipt qualifies all eight selected workers on
+`5de9e8cb25e51962364e0f819edca2bc8d07bd8e`. Two fresh coherent global
+snapshots are retained without summing them. The latest unique source clock,
+14:28:37.872 UTC, reports **80,023 eligible, 79,539 quota-complete
+(99.395174%), 484 deficient, 1,035 runs needed and 27 missing cycles**.
+Secure-complete is 79,514, with 25 security exceptions. This changed dynamic
+cohort and process generation do not establish fixed-membership expiry,
+writer causality or throughput; one frame supplies no rate.
+
+An exact-748 native regression reproduced an admission gap: the real
+`SetProvide` public-mode transaction made a valid connected identity
+census-eligible, but left it without a cycle, so the real claim owner
+returned no work. Ordinary cycle reconciliation runs with location/score
+publication; the enclosing reliability task is scheduled 30 minutes after
+its previous completion. A separate control proves that a missing cycle
+can retain all ten accepted measurements, so missing-cycle counts cannot
+be converted directly into missing runs.
+
+Isolated candidate `9ab6ea54b5cfa961c448f2e8691a9ea5954defe3` adds
+pointwise reconciliation inside the existing provide-key transaction.
+Eight author and independent native controls pass, including atomic
+rollback, preserved leases/deadlines, unchanged eligibility and security
+gates, and a 100,000-provider point-plan control. Independent review also
+reproduced the baseline failure and passed two focused race controls.
+Existing orphan rows without a new provide publication, absent location
+and concurrent changes by other eligibility owners retain the ordinary
+reconciliation backstop. API and Connect both own this control path;
+a Taskworker-only rollout would not activate the change.
+
+The target remains ten accepted measured successes or failures per four
+hours, distinct from the 4/5 quality gate and TLS quarantine. Setup-only
+completions remain uncredited. Full sustained coverage is not established.
+
+Finite evidence: `temp/pg-contention-20261004/astra-74810-v3-current-coverage-stock-interpretation.json`
+(SHA-256 `c1a61273aaab0974ac33b7d346a6dd2a2796609c94856b0daf0dfc8aebbaad6c`),
+`temp/pg-contention-20261004/astra-5de9e-v1-current-global-census-snapshots.json`
+(SHA-256 `f831c27ad23a49fceca96466225400cb4acb3fc963ff61453bd93086470c1ebd`),
+and `temp/fp2-public-admission-cycle-74810-20261005/source-manifest.json`
+(SHA-256 `a2c0e804363688067adca5c7c419cbd4f8c4cad993ea664ea865c9f46f80c324`).
+
+Independent candidate gate: `temp/fp2-public-admission-cycle-74810-20261005/sol-independent-source-GO.json`
+(SHA-256 `284666bb501a2243dca3ad168637ee7abb735f68f1c731454c7de23ebc6e6b8b`).
+
+### 2026-10-05 17:28 UTC rolling quota and the maturation deadline boundary
+
+Root's 17:28:03 census receipt again qualifies all eight selected
+`9577fdddc26cdbc9616a507788b28363f0c880d7` workers as ready. The latest
+coherent global source snapshot is 17:26:39.687 UTC: **79,463 eligible,
+79,200 quota-complete (99.669028%), 263 deficient and 1,569 runs needed**.
+No eligible provider lacks a cycle row. Secure-complete is 79,172, with
+28 security exceptions; those exceptions do not remove accepted failed
+measurements from the ten-result quota. Two fresh snapshots are retained
+separately. The earlier 16:42:30 snapshot had 79,173 eligible, 79,157 at
+quota and 76 missing runs. Changed membership and separate clocks prevent
+a fixed-provider expiry or rollout-effect conclusion from these stocks.
+
+The current snapshot has eight due hints, 277 overdue and 14 warming
+providers. Due uses the deadline hint; overdue uses an old enough cycle
+with missing measurements or a security exception. These sets differ:
+at least 255 of the 263 deficient providers therefore have future
+deadlines, but no identity intersection or deadline distribution was
+retained. Current claims can legitimately reserve fifteen minutes;
+completed claims can retain that deadline under readiness, identity or
+latest-result guards. Their persisted rows do not record `AllowPacing`.
+
+A native regression on the actual API writer base
+`a357c978d4646cfe84b3451d37e1688445b39072` reproduced a distinct defect.
+Eight earlier credits plus an accepted success at cycle age 3h59m left
+nine credits, yet the warm success pace postponed the next attempt by
+20m26.52s. Successful completion preserved it. At cycle age 4h00m30s,
+an earlier credit had expired: two runs were missing and the provider was
+overdue, but it was not due. No maturation event revisits that deadline.
+The API's claim, health, completion and census owners are byte-identical
+to the retained 9577 worker source; mounted production pacing rules and
+the number of affected Main providers remain unobserved.
+
+Isolated candidate `5f321ce75634a0c47751c866e95617afcdc32cd0` caps only a
+new accepted warm-success deficit's next deadline at cycle maturation.
+The same native case becomes due at that boundary. Seven focused native
+controls and their race runs pass independently; review also reproduces
+the exact baseline failure. Controls preserve live fifteen-minute claims,
+old-token/replay guards, local completions without quota credit, mature
+recovery pacing, and full-quota renewal six minutes before oldest-credit
+expiry. Existing parked rows are not swept or rewritten; they retain
+their current deadline unless another legitimate publication changes it.
+This is a tested candidate, not proof of deployment or Main prevalence.
+
+The separately timed 17:11–17:12 worker phase pair qualifies the same eight
+processes over native intervals of 105.698–121.076 seconds. It measures
+23.8312 acknowledged results/s, with checking/buffering 97.763% of
+completed timed-turn wall time and publication 1.063%. Scheduler waiting
+occupies 64.102% of its measured phase residence. These are finite process
+counters, not unique durable quota credits, capacity or a rate joined to
+the later census. Full sustained coverage remains open; accepted successes
+and failures still count equally toward ten per four hours, while the
+4/5 quality gate, TLS exclusions and probe deadlines remain unchanged.
+
+Finite evidence: `temp/pg-contention-20261004/astra-9577f-v2-current-adoption-census-reduction.json`
+(SHA-256 `28fa1117933a8a9a5cfb14bb5b344a1f8a1c184050d8eb9932e59e3b8756e9f0`),
+`temp/pg-contention-20261004/sol-9577f-typed-v1-v2-stage-corroboration.json`
+(SHA-256 `175b5e3579bab2454159917af0f9f89ff75f03626fa9fbb0b0daa6afe82e6fd2`),
+and `temp/url-maturity-cap-20261005/sol-independent-source-gate.json`
+(SHA-256 `cbb84a8fbb3f1b3c389f8f8726c53d5064faec8d0bf31019030087234083899f`).
+
+### 2026-10-05 18:25 UTC maturation fix rollout
+
+The isolated API maturation fix `5f321ce75634a0c47751c866e95617afcdc32cd0`
+was built and verified, then deployed successfully at 18:13:46 UTC. The
+18:25:46 runtime read found all sixteen g1–g4 API slots on that build with
+readiness equal to one; no previous or unknown build was observed in those
+slots. This supersedes the deployment status in the earlier checkpoint,
+without establishing an effect on quota coverage or rewriting existing
+parked deadlines. Beta adoption was outside the runtime read's scope.
+
+The finite runtime receipt is
+`temp/pg-contention-20261004/root-api16-known-runtime-5f321-v1/run-20261005T182546Z/receipt.json`
+(SHA-256 `b41821d1c245beac467ca38296e790e2f6cfcc0fadc2e631c88b97c319f5b626`).
+A new coherent quota measurement and sustained coverage remain required.

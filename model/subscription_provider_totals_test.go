@@ -1,0 +1,263 @@
+package model
+
+import (
+	"context"
+	"encoding/json"
+	"math"
+	"slices"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
+)
+
+func providerTotalsTestEnv(t *testing.T, run func(testing.TB, context.Context)) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		run(t, ctx)
+	})
+}
+
+func providerTotalsTestTask(ctx context.Context, contractId, networkId server.Id) (id server.Id) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		id = queueLegacyProviderTotalsInTx(ctx, tx, contractId, map[server.Id]*contractPayout{
+			networkId: {payoutByteCount: 17, payout: 29},
+		})
+	})
+	return
+}
+
+func requireProviderTotalsTestState(t testing.TB, ctx context.Context, id, networkId server.Id, wantApplied bool, wantBytes, wantRevenue int64) {
+	t.Helper()
+	server.Db(ctx, func(conn server.PgConn) {
+		var applied bool
+		var provided, revenue int64
+		server.Raise(conn.QueryRow(ctx, `SELECT (SELECT (args_json::jsonb->>'applied')::boolean FROM pending_task WHERE task_id=$1),
+            COALESCE((SELECT provided_byte_count FROM account_balance WHERE network_id=$2),0),
+            COALESCE((SELECT provided_net_revenue_nano_cents FROM account_balance WHERE network_id=$2),0)`, id, networkId).Scan(&applied, &provided, &revenue))
+		if applied != wantApplied || provided != wantBytes || revenue != wantRevenue {
+			t.Fatal("provider projection marker or exact accounting differs")
+		}
+	})
+}
+
+// Each rollback and missing-reply boundary uses the actual PostgreSQL owner.
+func TestLegacyProviderTotalsAtomicEnqueueApplyAndReplay(t *testing.T) {
+	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
+		networkId, contractId := server.NewId(), server.NewId()
+		conn := acquireContractLifecycleTestConnection(t, ctx)
+		defer conn.Release()
+		tx, err := conn.Begin(ctx)
+		server.Raise(err)
+		abortedId := queueLegacyProviderTotalsInTx(ctx, tx, contractId, map[server.Id]*contractPayout{networkId: {payoutByteCount: 17, payout: 29}})
+		server.Raise(tx.Rollback(ctx))
+		if len(task.GetTasks(ctx, abortedId)) != 0 {
+			t.Fatal("rolled-back projection became visible")
+		}
+		id := providerTotalsTestTask(ctx, contractId, networkId)
+		stale := task.GetTasks(ctx, id)[id]
+		tx, err = conn.Begin(ctx)
+		server.Raise(err)
+		server.Raise(applyLegacyProviderTotalsInTx(ctx, tx, id))
+		server.Raise(tx.Rollback(ctx))
+		requireProviderTotalsTestState(t, ctx, id, networkId, false, 0, 0)
+		tx, err = conn.Begin(ctx)
+		server.Raise(err)
+		server.Raise(applyLegacyProviderTotalsInTx(ctx, tx, id))
+		server.Raise(tx.Commit(ctx))
+		// The invocation object predates the application commit. A missing reply
+		// must not let these stale arguments replace the durable applied marker.
+		target := task.NewTaskTarget(ApplyLegacyProviderTotals)
+		_, _, err = target.RunSpecific(ctx, stale)
+		server.Raise(err)
+		requireProviderTotalsTestState(t, ctx, id, networkId, true, 17, 29)
+		server.Tx(ctx, func(tx server.PgTx) {
+			if err := applyLegacyProviderTotalsInTx(ctx, tx, server.NewId()); err == nil {
+				t.Fatal("missing owner was accepted")
+			}
+		})
+		requireProviderTotalsTestState(t, ctx, id, networkId, true, 17, 29)
+	})
+}
+
+func TestLegacyProviderTotalsConcurrentStaleInvocations(t *testing.T) {
+	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
+		networkId := server.NewId()
+		id := providerTotalsTestTask(ctx, server.NewId(), networkId)
+		stale := task.GetTasks(ctx, id)[id]
+		target := task.NewTaskTarget(ApplyLegacyProviderTotals)
+		start := make(chan struct{})
+		errors := make(chan error, 8)
+		var workers sync.WaitGroup
+		for range 8 {
+			workers.Add(1)
+			go func() { defer workers.Done(); <-start; _, _, err := target.RunSpecific(ctx, stale); errors <- err }()
+		}
+		close(start)
+		workers.Wait()
+		for range 8 {
+			if err := <-errors; err != nil {
+				t.Fatal("concurrent projection failed", err)
+			}
+		}
+		requireProviderTotalsTestState(t, ctx, id, networkId, true, 17, 29)
+	})
+}
+
+// Unsupported readers must retain the exact payload. A new reader then runs
+// the same task through real claim, execution and finalization, without a post.
+func TestLegacyProviderTotalsUnknownReaderCleanupAndFinalization(t *testing.T) {
+	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
+		networkId := server.NewId()
+		id := providerTotalsTestTask(ctx, server.NewId(), networkId)
+		before := task.GetTasks(ctx, id)[id].ArgsJson
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$2,release_time=$2 WHERE task_id=$1`, id, time.Time{}))
+		})
+		old := task.NewTaskWorkerWithDefaults(ctx)
+		defer old.Close()
+		old.EvalTasks(1)
+		after := task.GetTasks(ctx, id)[id]
+		if after == nil || after.ArgsJson != before || after.RescheduleErrorCount != 1 {
+			t.Fatal("unsupported reader lost or mutated projection")
+		}
+		task.RemoveFinishedTasks(ctx, server.NowUtc().Add(time.Hour), server.NowUtc().Add(time.Hour))
+		requireProviderTotalsTestState(t, ctx, id, networkId, false, 0, 0)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$2,release_time=$2 WHERE task_id=$1`, id, time.Time{}))
+		})
+		current := task.NewTaskWorkerWithDefaults(ctx)
+		defer current.Close()
+		current.AddTargets(task.NewTaskTarget(ApplyLegacyProviderTotals))
+		current.EvalTasks(1)
+		if len(task.GetTasks(ctx, id)) != 0 {
+			t.Fatal("applied task did not finalize")
+		}
+		finished := task.GetFinishedTasks(ctx, id)[id]
+		if finished == nil {
+			t.Fatal("projection finalization lost its completion record")
+		}
+		var payload legacyProviderTotalsPayload
+		server.Raise(json.Unmarshal([]byte(finished.ArgsJson), &payload))
+		if !payload.Applied {
+			t.Fatal("finalization copied stale unapplied arguments")
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var provided, revenue int64
+			var postCount int
+			server.Raise(conn.QueryRow(ctx, `SELECT provided_byte_count,provided_net_revenue_nano_cents,
+                (SELECT count(*) FROM pending_task) FROM account_balance WHERE network_id=$1`, networkId).Scan(&provided, &revenue, &postCount))
+			if provided != 17 || revenue != 29 || postCount != 0 {
+				t.Fatal("finalization added a post or changed accounting")
+			}
+		})
+	})
+}
+
+func TestLegacyProviderTotalsSecondNetworkFailureRollsBackFirst(t *testing.T) {
+	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
+		networks := []server.Id{server.NewId(), server.NewId()}
+		slices.SortFunc(networks, server.Id.Cmp)
+		var id server.Id
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_balance(network_id,provided_byte_count) VALUES($1,$2)`, networks[1], int64(math.MaxInt64)))
+			id = queueLegacyProviderTotalsInTx(ctx, tx, server.NewId(), map[server.Id]*contractPayout{
+				networks[0]: {payoutByteCount: 17, payout: 29}, networks[1]: {payoutByteCount: 17, payout: 29},
+			})
+		})
+		queued := task.GetTasks(ctx, id)[id]
+		target := task.NewTaskTarget(ApplyLegacyProviderTotals)
+		if _, _, err := target.RunSpecific(ctx, queued); err == nil {
+			t.Fatal("second-network overflow was accepted")
+		}
+		requireProviderTotalsTestState(t, ctx, id, networks[0], false, 0, 0)
+		requireProviderTotalsTestState(t, ctx, id, networks[1], false, math.MaxInt64, 0)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE account_balance SET provided_byte_count=0 WHERE network_id=$1`, networks[1]))
+		})
+		_, _, err := target.RunSpecific(ctx, queued)
+		server.Raise(err)
+		for _, networkId := range networks {
+			requireProviderTotalsTestState(t, ctx, id, networkId, true, 17, 29)
+		}
+	})
+}
+
+func TestLegacyProviderTotalsFinalizationRollbackKeepsAppliedOwner(t *testing.T) {
+	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
+		networkId := server.NewId()
+		id := providerTotalsTestTask(ctx, server.NewId(), networkId)
+		forceDue := func() {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET run_at=$2,release_time=$2 WHERE task_id=$1`, id, time.Time{}))
+			})
+		}
+		forceDue()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `CREATE FUNCTION test_provider_totals_finalize_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic projection finalization failure' USING ERRCODE='P0001'; END $$;
+                CREATE TRIGGER test_provider_totals_finalize_failure BEFORE INSERT ON finished_task FOR EACH ROW EXECUTE FUNCTION test_provider_totals_finalize_failure()`))
+		})
+		current := task.NewTaskWorkerWithDefaults(ctx)
+		defer current.Close()
+		current.AddTargets(task.NewTaskTarget(ApplyLegacyProviderTotals))
+		failure := server.HandleError(func() { _, _, _, err := current.EvalTasks(1); server.Raise(err) })
+		if failure == nil {
+			t.Fatal("native finalization failure did not run")
+		}
+		requireProviderTotalsTestState(t, ctx, id, networkId, true, 17, 29)
+		if len(task.GetFinishedTasks(ctx, id)) != 0 {
+			t.Fatal("rolled-back finalize published a finished row")
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DROP TRIGGER test_provider_totals_finalize_failure ON finished_task; DROP FUNCTION test_provider_totals_finalize_failure()`))
+		})
+		forceDue()
+		old := task.NewTaskWorkerWithDefaults(ctx)
+		defer old.Close()
+		_, retried, _, err := old.EvalTasks(1)
+		server.Raise(err)
+		if len(retried) != 1 {
+			t.Fatal("unsupported reader did not retry applied owner")
+		}
+		requireProviderTotalsTestState(t, ctx, id, networkId, true, 17, 29)
+		forceDue()
+		finished, _, _, err := current.EvalTasks(1)
+		server.Raise(err)
+		if len(finished) != 1 || len(task.GetTasks(ctx, id)) != 0 {
+			t.Fatal("applied replay did not finalize")
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var exact bool
+			server.Raise(conn.QueryRow(ctx, `SELECT provided_byte_count=17 AND provided_net_revenue_nano_cents=29 FROM account_balance WHERE network_id=$1`, networkId).Scan(&exact))
+			if !exact {
+				t.Fatal("finalize rollback or unsupported-reader retry repeated totals")
+			}
+		})
+	})
+}
+
+func TestLegacyProviderTotalsRejectsMissingIdentityAndInvalidPayload(t *testing.T) {
+	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
+		owner := session.NewLocalClientSession(ctx, "", nil)
+		defer owner.Cancel()
+		if _, err := ApplyLegacyProviderTotals(nil, owner); err == nil {
+			t.Fatal("projection accepted missing task execution")
+		}
+		networkId := server.NewId()
+		id := providerTotalsTestTask(ctx, server.NewId(), networkId)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET args_json=jsonb_set(args_json::jsonb,'{version}','2'::jsonb)::text WHERE task_id=$1`, id))
+		})
+		_, _, err := task.NewTaskTarget(ApplyLegacyProviderTotals).RunSpecific(ctx, task.GetTasks(ctx, id)[id])
+		if err == nil {
+			t.Fatal("unknown payload version was applied")
+		}
+		requireProviderTotalsTestState(t, ctx, id, networkId, false, 0, 0)
+	})
+}

@@ -20,25 +20,43 @@ func TestSubscriberGuardQueryPlan(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		enableSubscriberQualityPolicy(t)
 		ctx := t.Context()
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client_handler (handler_id,heartbeat_time)
+		server.Db(ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(ctx, `INSERT INTO network_client_handler (handler_id,heartbeat_time)
 				SELECT md5('subscriber-benchmark-handler-'||n)::uuid, $1::timestamp FROM generate_series(0,127) AS n`, server.NowUtc()))
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client_connection
+			// Preserve one fixture timestamp. Each batch commits before the next,
+			// releasing the real session trigger's endpoint fences.
+			connectionTime := server.NowUtc()
+			arinRemoteInsertPopulation(t, ctx, conn, 240000, `INSERT INTO network_client_connection
 				(client_id,connection_id,connected,connect_time,disconnect_time,connection_host,connection_service,connection_block,handler_id)
 				SELECT md5('subscriber-benchmark-client-'||n)::uuid, md5('subscriber-benchmark-connection-'||n||':'||generation)::uuid,
-					generation<=2, now(), CASE WHEN generation>2 THEN now() END, 'synthetic','synthetic','synthetic',
+					generation<=2, $1::timestamp, CASE WHEN generation>2 THEN $1::timestamp END, 'synthetic','synthetic','synthetic',
 					md5('subscriber-benchmark-handler-'||(n%128))::uuid
-				FROM generate_series(1,20000) AS n CROSS JOIN generate_series(1,12) AS generation`))
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client_location
+				FROM (SELECT (ordinal-1)/12+1 AS n,(ordinal-1)%12+1 AS generation
+				 FROM generate_series($2::integer,$3::integer) AS ordinal) AS population`, connectionTime)
+			server.RaisePgResult(conn.Exec(ctx, `INSERT INTO network_client_location
 				(client_id,connection_id,city_location_id,region_location_id,country_location_id,arin_quality_verified,arin_quality_write_token)
 				SELECT md5('subscriber-benchmark-client-'||n)::uuid, md5('subscriber-benchmark-connection-'||n||':'||generation)::uuid,
 					$1::uuid,$1::uuid,$1::uuid, NOT (generation=2 AND n%10=0),
 					md5('subscriber-benchmark-write-'||n||':'||generation)::uuid
 				FROM generate_series(1,20000) AS n CROSS JOIN generate_series(1,12) AS generation
 				WHERE NOT (generation=2 AND n%20=0)`, server.NewId()))
-			server.RaisePgResult(tx.Exec(ctx, `ANALYZE network_client_connection`))
-			server.RaisePgResult(tx.Exec(ctx, `ANALYZE network_client_location`))
-			server.RaisePgResult(tx.Exec(ctx, `ANALYZE network_client_handler`))
+			server.RaisePgResult(conn.Exec(ctx, `ANALYZE network_client_connection`))
+			server.RaisePgResult(conn.Exec(ctx, `ANALYZE network_client_location`))
+			server.RaisePgResult(conn.Exec(ctx, `ANALYZE network_client_handler`))
+			var providers, connections, connected, locations, heads, admitted, transactions, maximumClients, maximumAdmits int64
+			server.Raise(conn.QueryRow(ctx, `WITH admission_batches AS (
+ SELECT e.transaction_id,count(*) AS admits,count(DISTINCT e.client_id) AS clients
+ FROM provider_work_session_event e JOIN network_client_connection c USING(client_id,connection_id)
+ WHERE c.connected AND e.kind='admit' GROUP BY e.transaction_id
+)
+SELECT count(DISTINCT client_id),count(*),count(*) FILTER(WHERE connected),
+ (SELECT count(*) FROM network_client_location),(SELECT count(*) FROM provider_work_session_head),
+ (SELECT COALESCE(sum(admits),0)::bigint FROM admission_batches),(SELECT count(*) FROM admission_batches),
+ (SELECT COALESCE(max(clients),0) FROM admission_batches),(SELECT COALESCE(max(admits),0) FROM admission_batches)
+FROM network_client_connection`).Scan(&providers, &connections, &connected, &locations, &heads, &admitted, &transactions, &maximumClients, &maximumAdmits))
+			if providers != 20000 || connections != 240000 || connected != 40000 || locations != 239000 || heads != 20000 || admitted != 40000 || transactions != 469 || maximumClients > 512 || maximumAdmits > 512 {
+				t.Fatalf("subscriber guard fixture lost complete bounded session population: providers=%d connections=%d connected=%d locations=%d heads=%d admitted=%d transactions=%d maximum_clients=%d maximum_admits=%d", providers, connections, connected, locations, heads, admitted, transactions, maximumClients, maximumAdmits)
+			}
 		})
 		server.Redis(ctx, func(r server.RedisClient) {
 			server.Raise(r.SAdd(ctx, providerHardExclusionsKey, providerHardExclusionsReadyMember).Err())

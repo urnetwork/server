@@ -136,6 +136,7 @@ func legacySettlementHeldRowsControl(t *testing.T, count, markedCount int) {
 		if completed != count || terminal != count || pending != 0 || credit != 1000000-11*int64(count+markedCount) || Testing_NetEscrowByteCount(ctx, f.balanceId) != 0 {
 			t.Fatalf("worker accounting mismatch: completed=%d terminal=%d pending=%d credit=%d", completed, terminal, pending, credit)
 		}
+		projectLegacyProviderTotalsForTest(t, ctx)
 		server.Db(ctx, func(conn server.PgConn) {
 			var swept, provided int64
 			server.Raise(conn.QueryRow(ctx, `SELECT (SELECT sum(payout_byte_count) FROM transfer_escrow_sweep WHERE network_id=$1),

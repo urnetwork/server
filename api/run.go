@@ -184,7 +184,7 @@ func runWithDependencies(
 			return err
 		}
 	} else {
-		apiRouter = router.NewRouter(processCtx, routesWithReservedAttemptUpload(nil))
+		apiRouter = router.NewRouter(processCtx, routesWithReservedAttemptUpload(nil, routeOwners{}))
 	}
 	defer closeApiRouter()
 	apiRouter.SetStreamingBody(apiStreamingBody)
@@ -228,7 +228,10 @@ func NewRouter(routeCtx context.Context, uploadCtx context.Context) (*router.Rou
 		return nil, nil, fmt.Errorf("reserved validator staging startup: %w", err)
 	}
 	notifications := model.NewContractOriginNotifications(routeCtx, model.DefaultContractOriginNotificationSettings())
-	return router.NewRouter(routeCtx, routesWithReservedAttemptUpload(reservedUpload, notifications)),
-		func() { notifications.Close(); reservedUpload.Close() },
+	// FindProviders2 answers served here count toward each provider's
+	// appearance histogram; the close writes what the drain left
+	appearances := model.NewProviderAppearances(routeCtx, model.DefaultProviderAppearanceSettings())
+	return router.NewRouter(routeCtx, routesWithReservedAttemptUpload(reservedUpload, routeOwners{notifications: notifications, appearances: appearances})),
+		func() { notifications.Close(); appearances.Close(); reservedUpload.Close() },
 		nil
 }

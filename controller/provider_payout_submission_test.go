@@ -119,6 +119,9 @@ func TestProviderTransitionFinalCircleBindsActualArguments(t *testing.T) {
 			t.Fatal(err)
 		}
 		original := circleTransferArguments{IdempotencyKey: basis.IdempotencyKey, Amount: 9.99, Destination: wallet.WalletAddress, Network: "MATIC"}
+		if err := model.RetainProviderPaymentRequest(owner.Ctx, basis, original.Amount, original.Network); err != nil {
+			t.Fatal(err)
+		}
 		ctx := context.WithValue(owner.Ctx, providerUsdcPaymentContextKey{}, providerPaymentSubmission{Basis: *basis, Amount: original.Amount, Network: original.Network})
 		for _, field := range []string{"key", "amount", "destination", "network"} {
 			args := original

@@ -32,3 +32,9 @@ func GetNetworkReliability(w http.ResponseWriter, r *http.Request) {
 		r,
 	)
 }
+
+// The caller network's admission and ranking is cached per network inside the
+// controller; the appearance histograms are read fresh on every call.
+func GetProviderStatus(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.GetProviderStatus, w, r)
+}

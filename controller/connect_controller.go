@@ -226,13 +226,27 @@ func contractRejectionFailureClass(err error) string {
 	}
 }
 
-// contractResultError preserves wire meaning while isolating the one failure
-// class a multi-client can act on safely. A missing companion origin or an
+// contractResultError preserves wire meaning while isolating the failure
+// classes a client can act on safely. A missing companion origin or an
 // inactive destination means the selected route itself is stale, so a current
 // client must retire that exact window entry. A missing or inactive source is
 // the local caller's authorization failure, not evidence against the selected
 // destination, so it receives NoPermission without poisoning provider
-// selection. Account and legacy failures retain their prior wire result.
+// selection.
+//
+// Only a refusal that found the payer's balance short is InsufficientBalance:
+// the sdk raises its insufficient balance status for it and the apps tell the
+// user they are out of data. Every other failure is Setup, because none of
+// them shows that the payer lacks balance: a Redis error or timeout during
+// admission, a grant census that reached its bound or met an unknown counter,
+// a grant that changed under the request. Clients retry Setup exactly like
+// InsufficientBalance. The send sequence's contract wait never reads the code
+// and asks again on its own backoff, the multi-client retires a route only for
+// Reliability, and the sdk ignores Setup. Setup has been in the protocol since
+// 2023, so every client version knows it. Database failures do not normally
+// reach here: the model raises them as panics, which fail the whole control
+// request, and a failed control request is what trips the client's
+// backend-degraded backoff.
 func contractResultError(err error) protocol.ContractError {
 	if errors.Is(err, model.ErrMissingCompanionOrigin) ||
 		errors.Is(err, errContractDestinationInactive) {
@@ -241,7 +255,10 @@ func contractResultError(err error) protocol.ContractError {
 	if errors.Is(err, model.ErrActiveClientNotFound) {
 		return protocol.ContractError_NoPermission
 	}
-	return protocol.ContractError_InsufficientBalance
+	if contractFailureClass(err) == "insufficient_balance" {
+		return protocol.ContractError_InsufficientBalance
+	}
+	return protocol.ContractError_Setup
 }
 
 func recordContractFailure(
@@ -844,8 +861,8 @@ func CreateContract(
 		// Preserve the cause as a bounded metric. Destination lifecycle and
 		// missing-origin failures are explicit Reliability results so a current
 		// multi-client can replace the stale route. An inactive local source is
-		// NoPermission without condemning that route; legacy/account failures
-		// keep their previous InsufficientBalance result.
+		// NoPermission without condemning that route. A balance refusal is
+		// InsufficientBalance and any other failure is Setup.
 		rejectionCause = contractRejectionFailureClass(err)
 		recordContractFailureResolved(
 			clientId,
@@ -990,11 +1007,55 @@ func nextContract(
 	)
 }
 
-// The lifecycle lookup and origin escrow creation newContract performs.
-// Tests replace them to check, without a database, which byte count the
-// controller signs for a given escrow.
+// The lifecycle lookup, origin escrow creation and payer plan lookup
+// newContract performs. Tests replace them to check, without a database, which
+// byte count the controller requests and signs for a given escrow.
 var findActiveClientPairNetworks = model.FindActiveClientPairNetworks
 var createTransferEscrow = model.CreateTransferEscrow
+var isProNetwork = model.IsProNetwork
+
+// contractPayerNetworkId returns the network whose balance escrows a contract,
+// following the order in which newContract chooses the funding path. Network
+// and friends-and-family contracts escrow nothing, so they have no payer. A
+// companion contract is paid by its destination, the source of its origin.
+func contractPayerNetworkId(
+	provideMode model.ProvideMode,
+	companionContract bool,
+	sourceNetworkId server.Id,
+	destinationNetworkId server.Id,
+) (payerNetworkId server.Id, escrowed bool) {
+	switch {
+	case provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily:
+		return server.Id{}, false
+	case companionContract:
+		return destinationNetworkId, true
+	default:
+		return sourceNetworkId, true
+	}
+}
+
+// payerMaxContractTransferByteCount is the largest contract, per hop, granted
+// against the payer's balance. pro.yml may cap the contracts of a tier
+// (<tier>.max_contract_transfer_byte_count, e.g. free) so that a contract
+// abandoned by its client holds less of the payer's balance until it is
+// force-closed. The grant is signed into the contract and clients size from it,
+// so a smaller grant is transparent to them. While no tier sets a cap, the
+// payer's plan is not looked up at all. A cap never goes below
+// MinContractTransferByteCount, so a granted contract still fits a message.
+func payerMaxContractTransferByteCount(ctx context.Context, payerNetworkId server.Id) model.ByteCount {
+	c := model.Pro()
+	if c.MaxContractTransferByteCount(false) == 0 && c.MaxContractTransferByteCount(true) == 0 {
+		return MaxContractTransferByteCount
+	}
+	tierMaxContractTransferByteCount := c.MaxContractTransferByteCount(isProNetwork(ctx, payerNetworkId))
+	if tierMaxContractTransferByteCount == 0 {
+		return MaxContractTransferByteCount
+	}
+	return min(
+		max(MinContractTransferByteCount, tierMaxContractTransferByteCount),
+		MaxContractTransferByteCount,
+	)
+}
 
 func newContract(
 	ctx context.Context,
@@ -1036,9 +1097,13 @@ func newContract(
 		}
 	}
 
+	maxContractTransferByteCount := MaxContractTransferByteCount
+	if payerNetworkId, escrowed := contractPayerNetworkId(provideMode, companionContract, sourceNetworkId, destinationNetworkId); escrowed {
+		maxContractTransferByteCount = payerMaxContractTransferByteCount(ctx, payerNetworkId)
+	}
 	contractTransferByteCount = min(
 		max(MinContractTransferByteCount, transferByteCount),
-		MaxContractTransferByteCount,
+		maxContractTransferByteCount,
 	) * model.ByteCount(len(intermediaryIds)+1)
 
 	if provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily {

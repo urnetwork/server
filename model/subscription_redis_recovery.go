@@ -333,7 +333,11 @@ func (self *redisContractAdmission) compensationIds() []server.Id {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		if !self.publicationStarted {
-			ids = append(ids, self.attemptedBalanceIds...)
+			for _, id := range self.attemptedBalanceIds {
+				if self.compensationAttempts == nil || self.compensationAttempts[id] > 0 {
+					ids = append(ids, id)
+				}
+			}
 		}
 	}()
 	return ids

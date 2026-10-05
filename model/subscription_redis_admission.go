@@ -51,16 +51,27 @@ type redisAdmissionContextKey struct{}
 // safe if an internal caller retries that same context concurrently. PG fences
 // publication, and cleanup runs after its own transaction owner has joined.
 type redisContractAdmission struct {
-	contractId          server.Id
-	stateLock           sync.Mutex
-	attemptedBalanceIds []server.Id
-	attemptedBalanceKVs map[server.Id]bool
-	publicationStarted  bool
+	contractId           server.Id
+	stateLock            sync.Mutex
+	attemptedBalanceIds  []server.Id
+	attemptedBalanceKVs  map[server.Id]bool
+	compensationAttempts map[server.Id]uint64
+	publicationStarted   bool
 }
 
 func (self *redisContractAdmission) noteBalance(balanceId server.Id) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	if self.compensationAttempts == nil {
+		self.compensationAttempts = make(map[server.Id]uint64, len(self.attemptedBalanceIds))
+		// Preexisting discovery state has unknown reservation ownership.
+		for _, id := range self.attemptedBalanceIds {
+			self.compensationAttempts[id] = 1
+		}
+	}
+	// Register before Redis: a panic, timeout, or lost reply may have allocated
+	// a token. Only this attempt's conclusive zero reply can discharge it.
+	self.compensationAttempts[balanceId]++
 	if self.attemptedBalanceKVs == nil {
 		self.attemptedBalanceKVs = make(map[server.Id]bool, len(self.attemptedBalanceIds))
 		for _, id := range self.attemptedBalanceIds {
@@ -71,6 +82,16 @@ func (self *redisContractAdmission) noteBalance(balanceId server.Id) {
 		self.attemptedBalanceKVs[balanceId] = true
 		self.attemptedBalanceIds = append(self.attemptedBalanceIds, balanceId)
 	}
+}
+
+func (self *redisContractAdmission) noteZeroReservation(balanceId server.Id) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.compensationAttempts[balanceId] > 0 {
+		self.compensationAttempts[balanceId]--
+	}
+	// Keep discovery state: a full grant can contain another abandoned token
+	// that retained recovery must discover before retrying insufficient credit.
 }
 
 func (self *redisContractAdmission) notePublication() {

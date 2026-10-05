@@ -171,7 +171,7 @@ func flushTransferDebitPage(ctx, bounded context.Context, shard int, after *serv
 	// old cursor through task failure backoff. No unvisited key is acknowledged.
 	if returnErr != nil && result.Balances > 0 && result.LastBalanceId != nil &&
 		ctx.Err() == nil && bounded.Err() != nil && context.Cause(bounded) == errTransferDebitPageDeadline &&
-		(isOnlyContractError(returnErr, context.DeadlineExceeded) || isOnlyContractError(returnErr, server.DbContextDoneError)) {
+		isSettlementPageCancellation(returnErr) {
 		result.More = true
 		returnErr = nil
 	}

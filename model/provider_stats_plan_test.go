@@ -67,7 +67,7 @@ func TestStatsQueryPlans(t *testing.T) {
 		five := all[:5]
 
 		server.Db(ctx, func(conn server.PgConn) {
-			statsPlanSeed(ctx, conn, networkId, sourceNetworkId, all)
+			statsPlanSeed(t, ctx, conn, networkId, sourceNetworkId, all)
 
 			assertStatsIndexPlan(t, ctx, conn, "01_enumerate_providers", `
 				SELECT network_client.client_id
@@ -160,7 +160,10 @@ func assertStatsIndexPlan(t testing.TB, ctx context.Context, conn server.PgConn,
 	t.Logf("[plan ok] %s", name)
 }
 
-func statsPlanSeed(ctx context.Context, conn server.PgConn, networkId, sourceNetworkId server.Id, providers []string) {
+// Preserve the full query-plan population while releasing each connection
+// batch's original session fences before admitting the next batch.
+func statsPlanSeed(t testing.TB, ctx context.Context, conn server.PgConn, networkId, sourceNetworkId server.Id, providers []string) {
+	t.Helper()
 	exec := func(sql string, args ...any) {
 		server.RaisePgResult(conn.Exec(ctx, sql, args...))
 	}
@@ -208,14 +211,30 @@ func statsPlanSeed(ctx context.Context, conn server.PgConn, networkId, sourceNet
 		FROM generate_series(1, $1) g ON CONFLICT DO NOTHING`, statsPlanBackground)
 
 	// network_client_connection: provider connections + background
-	exec(`
+	providerConnectionTime := server.NowUtc()
+	arinRemoteInsertPopulation(t, ctx, conn, statsPlanProviderN, `
 		INSERT INTO network_client_connection (client_id, connection_id, connected, connect_time, disconnect_time, connection_host, connection_service, connection_block)
-		SELECT ($1::uuid[])[1 + (g % array_length($1::uuid[],1))], gen_random_uuid(), true, now() - ((g % 240) || ' hours')::interval, NULL, 'h','s','b'
-		FROM generate_series(1, $2) g`, providers, statsPlanProviderN)
-	exec(`
+		SELECT ($1::uuid[])[1 + (g % array_length($1::uuid[],1))], gen_random_uuid(), true, $2::timestamp - ((g % 240) || ' hours')::interval, NULL, 'h','s','b'
+		FROM generate_series($3::integer, $4::integer) g`, providers, providerConnectionTime)
+	backgroundConnectionTime := server.NowUtc()
+	arinRemoteInsertPopulation(t, ctx, conn, statsPlanBackground, `
 		INSERT INTO network_client_connection (client_id, connection_id, connected, connect_time, disconnect_time, connection_host, connection_service, connection_block)
-		SELECT gen_random_uuid(), gen_random_uuid(), true, now() - ((g % 500) || ' hours')::interval, NULL, 'h','s','b'
-		FROM generate_series(1, $1) g`, statsPlanBackground)
+		SELECT gen_random_uuid(), gen_random_uuid(), true, $1::timestamp - ((g % 500) || ' hours')::interval, NULL, 'h','s','b'
+		FROM generate_series($2::integer, $3::integer) g`, backgroundConnectionTime)
+	var connections, providerConnections, heads, admitted, transactions, maximumClients, maximumAdmits int64
+	server.Raise(conn.QueryRow(ctx, `WITH admission_batches AS (
+ SELECT e.transaction_id,count(*) AS admits,count(DISTINCT e.client_id) AS clients
+ FROM provider_work_session_event e JOIN network_client_connection c USING(client_id,connection_id)
+ WHERE c.connected AND e.kind='admit' GROUP BY e.transaction_id
+)
+SELECT count(*),count(*) FILTER(WHERE client_id=ANY($1::uuid[])),
+ (SELECT count(*) FROM provider_work_session_head),
+ (SELECT COALESCE(sum(admits),0)::bigint FROM admission_batches),(SELECT count(*) FROM admission_batches),
+ (SELECT COALESCE(max(clients),0) FROM admission_batches),(SELECT COALESCE(max(admits),0) FROM admission_batches)
+FROM network_client_connection`, providers).Scan(&connections, &providerConnections, &heads, &admitted, &transactions, &maximumClients, &maximumAdmits))
+	if connections != statsPlanProviderN+statsPlanBackground || providerConnections != statsPlanProviderN || heads != int64(len(providers)+statsPlanBackground) || admitted != connections || transactions != 313 || maximumClients > 512 || maximumAdmits > 512 {
+		t.Fatalf("stats plan fixture lost complete bounded session population: connections=%d provider_connections=%d heads=%d admitted=%d transactions=%d maximum_clients=%d maximum_admits=%d", connections, providerConnections, heads, admitted, transactions, maximumClients, maximumAdmits)
+	}
 
 	// search_provider_stats: provider rows (200 x 48h) + background
 	exec(`

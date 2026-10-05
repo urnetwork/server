@@ -12,7 +12,6 @@ import (
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
-	"github.com/urnetwork/server/stats"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
 )
@@ -43,7 +42,7 @@ func InitTasksForProfile(ctx context.Context, profile WorkloadProfile) error {
 	if err := initTaskScheduleForProfile(ctx, profile); err != nil {
 		return err
 	}
-	stats.ApplyStreamRetention(ctx)
+	controller.ApplyBlobRetention(ctx)
 	return nil
 }
 
@@ -128,6 +127,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.RemoveDisconnectedNetworkClients), schedule: work.ScheduleRemoveDisconnectedNetworkClients},
 		{target: task.NewTaskTarget(work.SweepOrphanNetworkClientData), schedule: work.ScheduleSweepOrphanNetworkClientData},
 		{target: task.NewTaskTarget(model.RemoveNetworkClientsTask)},
+		{target: task.NewTaskTarget(model.ApplyLegacyProviderTotals)},
 		{target: task.NewTaskTarget(work.SweepOrphanContractData), schedule: work.ScheduleSweepOrphanContractData},
 		{target: task.NewTaskTarget(task.TaskCleanup), schedule: task.ScheduleTaskCleanup},
 		{target: task.NewTaskTarget(work.BackfillInitialTransferBalance), schedule: work.ScheduleBackfillInitialTransferBalance},
