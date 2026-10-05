@@ -52,14 +52,30 @@ usage() { sed -n '2,/^$/p' "$0" | sed 's/^#\{0,1\} \{0,1\}//'; }
 
 FRESH=0
 KEEP_UP=0
+RUN_OWNER_NONCE=""
 for arg in "$@"; do
   case "$arg" in
     --fresh)    FRESH=1 ;;
     --keep-up)  KEEP_UP=1 ;;
     -h|--help)  usage; exit 0 ;;
+    --urnetwork-local-owner-nonce=*)
+      [[ -z "$RUN_OWNER_NONCE" ]] || die "duplicate internal owner nonce"
+      RUN_OWNER_NONCE="${arg#--urnetwork-local-owner-nonce=}"
+      [[ "$RUN_OWNER_NONCE" =~ ^[0-9a-f]{32}$ ]] || die "invalid internal owner nonce" ;;
     *)          die "unknown argument: $arg (see --help)" ;;
   esac
 done
+
+# Re-exec before acquiring any resources so ps can verify a generation-specific
+# challenge on the owning process. exec retains the PID and all caller flags;
+# cleanup traps and ownership resources are installed only in the final shell.
+if [[ -z "$RUN_OWNER_NONCE" ]]; then
+  RUN_OWNER_NONCE="$(od -An -N16 -tx1 /dev/urandom | tr -d '[:space:]')" ||
+    die "could not generate launcher owner nonce"
+  [[ "$RUN_OWNER_NONCE" =~ ^[0-9a-f]{32}$ ]] || die "invalid generated owner nonce"
+  exec "$BASH" "${BASH_SOURCE[0]}" "--urnetwork-local-owner-nonce=$RUN_OWNER_NONCE" "$@"
+  die "could not re-exec with a live owner challenge"
+fi
 
 # --- resolve paths -----------------------------------------------------------
 
@@ -468,7 +484,7 @@ ALIAS_ADDED=0
 STACK_OWNED=0
 CLEANED=0
 RUN_LOCK_HELD=0
-RUN_LOCK_OWNER="v1:${MAIN_PID}:${RANDOM}:${RANDOM}"
+RUN_LOCK_OWNER="v2:${MAIN_PID}:${RUN_OWNER_NONCE}"
 RUN_LOCK_DEFERRED_SIGNAL_STATUS=0
 
 defer_lock_signal() {

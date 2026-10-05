@@ -32,17 +32,19 @@ func startLocalMetadataOwner(t *testing.T) (string, string, *os.Process, func() 
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, "bash", "-c", `set -euo pipefail
 source "$1"
-local_run_lock_acquire "$2" test-live-owner
-local_run_attestation_publish "$2" test-live-owner "$3" "$4" 5432 "$5" 6379
+owner_token="v2:$$:${6#--urnetwork-local-owner-nonce=}"
+local_run_lock_acquire "$2" "$owner_token"
+local_run_attestation_publish "$2" "$owner_token" "$3" "$4" 5432 "$5" 6379
 printf 'ready\n'
 IFS= read -r release || true
 remove_status=0
-local_run_attestation_remove "$2" test-live-owner || remove_status=$?
+local_run_attestation_remove "$2" "$owner_token" || remove_status=$?
 release_status=0
-local_run_lock_release "$2" test-live-owner || release_status=$?
+local_run_lock_release "$2" "$owner_token" || release_status=$?
 printf 'cleanup remove=%s release=%s\n' "$remove_status" "$release_status"
 `, "local-metadata-owner", filepath.Join("local", "run-local-state.sh"),
-		lockDir, localDedicatedAddress, localPostgresHost, localRedisHost)
+		lockDir, localDedicatedAddress, localPostgresHost, localRedisHost,
+		"--urnetwork-local-owner-nonce=0123456789abcdef0123456789abcdef")
 	cmd.Env = testCommandEnvironment(map[string]string{"TMPDIR": stateDir}, "BASH_ENV", "ENV")
 	input, err := cmd.StdinPipe()
 	if err != nil {
@@ -225,8 +227,10 @@ func TestRunLocalStateMetadataLossDuringValidation(t *testing.T) {
 source "$1"
 race_lock="$2"
 race_mutation="$3"
+race_hosts="$4"
 awk() {
   command awk "$@" || return $?
+  [[ "${!#}" == "$race_hosts" ]] || return 0
   unset -f awk
   case "$race_mutation" in
     owner) rm "$race_lock/owner" ;;

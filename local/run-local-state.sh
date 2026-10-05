@@ -360,6 +360,46 @@ local_run_lock_require_owner() {
   fi
 }
 
+# Readiness requires a live process carrying this generation's random challenge.
+# The PID alone can be reused, including within ps lstart's one-second precision.
+# Keep this separate from token-checked cleanup: failed liveness is never
+# authority to adopt or delete another launcher's residual state.
+local_run_owner_process_matches() {
+  local owner_token="$1"
+  local owner_pid
+  local owner_nonce
+  local process_snapshot
+
+  if [[ ! "$owner_token" =~ ^v2:([1-9][0-9]{0,9}):([0-9a-f]{32})$ ]]; then
+    local_state_error "local launcher owner process identity is missing or unsupported; restart run-local.sh after inspecting its ownership"
+    return 1
+  fi
+  owner_pid="${BASH_REMATCH[1]}"
+  owner_nonce="${BASH_REMATCH[2]}"
+  process_snapshot="$(LC_ALL=C ps -ww -o stat= -o command= -p "$owner_pid" 2>/dev/null)" || {
+    local_state_error "local launcher owner process is not live: $owner_pid"
+    return 1
+  }
+  # command can contain newlines (for example bash -c); only the first row has
+  # ps's status column. Zombies retain a PID but cannot supervise the fixture.
+  # ps renders argv as text: require the nonce as a complete whitespace field.
+  # This detects accidental PID reuse within the existing same-user metadata
+  # trust boundary; it does not authenticate records forged by that same user.
+  if ! printf '%s\n' "$process_snapshot" | LC_ALL=C awk \
+      -v expected_argument="--urnetwork-local-owner-nonce=$owner_nonce" '
+    NR == 1 { live = NF >= 2 && $1 !~ /^[ZX]/ }
+    {
+      for (i = NR == 1 ? 2 : 1; i <= NF; i++) {
+        if ($i == expected_argument) found = 1
+      }
+    }
+    END { exit live && found ? 0 : 1 }
+  '; then
+    local_state_error "local launcher owner process does not match its readiness token: $owner_pid"
+    return 1
+  fi
+}
+
 # Parses the fixed, non-executable readiness record into LOCAL_RUN_READY_*.
 # Exact line count and field names make partial writes and format drift fail
 # closed.
@@ -501,8 +541,8 @@ local_run_attestation_remove() {
   local_run_attestation_remove_pending "$lock_dir" "$owner_token" || return $?
 }
 
-# Validates a stable owner/attestation snapshot and the two unique aliases that
-# the launcher owns before an integration harness is allowed to probe services.
+# Validates a stable owner/attestation snapshot, its live process challenge,
+# and the two unique aliases before an integration harness may probe services.
 local_run_attestation_validate() {
   local lock_dir="$1"
   local hosts_file="$2"
@@ -530,6 +570,7 @@ local_run_attestation_validate() {
     local_state_error "local launcher readiness endpoints do not match the selected test resources"
     return 1
   fi
+  local_run_owner_process_matches "$owner_token" || return $?
   if ! local_hosts_validate_applied \
       "$hosts_file" "$hosts_ip" "$postgres_host" "$redis_host" "$marker_begin" "$marker_end"; then
     local_state_error "local service aliases are not unique launcher-managed mappings to $hosts_ip"
@@ -550,6 +591,7 @@ local_run_attestation_validate() {
     return 1
   fi
   local_run_lock_require_owner "$lock_dir" "$owner_token" || return $?
+  local_run_owner_process_matches "$owner_token" || return $?
 }
 
 # Removes only a lock whose opaque ownership token still matches this process.
