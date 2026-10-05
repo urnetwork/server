@@ -519,8 +519,9 @@ func TestEgressIndexTierFormulas(t *testing.T) {
 	})
 }
 
-// More than one in ten failed loads is out of quality and in speed: a quality
-// request excludes it, including fallback, while speed holds it natively.
+// ARIN non-quality excludes native and explicitly requested Quality. Eligible
+// native Speed still supplies lower-priority Quality discovery fallback, while
+// the common risk gate excludes a provider from every selection path.
 func TestFindProviders2ArinNonQualityIsSpeedOnly(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		enableSubscriberQualityPolicy(t)
@@ -529,32 +530,63 @@ func TestFindProviders2ArinNonQualityIsSpeedOnly(t *testing.T) {
 
 		healthy := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestProbed(ctx, healthy, city, 0, "us")
-		overLine := egressTestConnect(ctx, t, city, egressTestFast, nil, &ConnectionLocationScores{ArinNonQuality: true})
-		// seven of sixty: 530 < 540
-		egressTestProbed(ctx, overLine, city, 7, "us")
+		nonQuality := egressTestConnect(ctx, t, city, egressTestFast, nil, &ConnectionLocationScores{ArinQualityVerified: true, ArinNonQuality: true})
+		// 53/60 exceeds the inclusive 0.8 URL-success threshold. The ARIN
+		// exception, not URL health, excludes this provider from native Quality.
+		egressTestProbed(ctx, nonQuality, city, 7, "us")
+		risky := egressTestConnect(ctx, t, city, egressTestFast, nil, &ConnectionLocationScores{ArinQualityVerified: true, ArinNonQuality: true, ArinRisk: true})
+		egressTestProbed(ctx, risky, city, 0, "us")
 		egressTestPasses(ctx, t)
 
 		qualityClientScores := egressTestCachedScores(ctx, t, city, RankModeQuality, false)
 		connect.AssertEqual(t, qualityClientScores[healthy.clientId].PassesMinimums[RankModeQuality], true)
-		if score := qualityClientScores[overLine.clientId]; score == nil || !score.Online || score.PassesMinimums[RankModeQuality] {
-			t.Fatal("ARIN non-quality did not preserve online-only membership in the quality sample")
+		if score := qualityClientScores[nonQuality.clientId]; score == nil || !score.Online || score.PassesMinimums[RankModeQuality] {
+			t.Fatal("ARIN non-quality must remain Online without native Quality membership")
 		}
 		speedClientScores := egressTestCachedScores(ctx, t, city, RankModeSpeed, false)
-		connect.AssertEqual(t, speedClientScores[overLine.clientId].PassesMinimums[RankModeSpeed], true)
-		connect.AssertEqual(t, speedClientScores[overLine.clientId].PassesMinimums[RankModeQuality], false)
+		connect.AssertEqual(t, speedClientScores[nonQuality.clientId].PassesMinimums[RankModeSpeed], true)
+		connect.AssertEqual(t, speedClientScores[nonQuality.clientId].PassesMinimums[RankModeQuality], false)
 
-		// speed: both native
+		// Speed keeps both eligible providers native, with no risky answer.
 		clientIdSpeedTiers := map[server.Id]int{}
-		for _, provider := range egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeSpeed, 10, false, server.NewId()) {
+		speedProviders := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeSpeed, 10, false, server.NewId())
+		if len(speedProviders) != 2 {
+			t.Fatal("Speed must return exactly the two risk-free native providers")
+		}
+		for _, provider := range speedProviders {
 			clientIdSpeedTiers[provider.ClientId] = provider.Tier
 		}
-		connect.AssertEqual(t, clientIdSpeedTiers[healthy.clientId], 0)
-		connect.AssertEqual(t, clientIdSpeedTiers[overLine.clientId], 0)
+		for _, clientId := range []server.Id{healthy.clientId, nonQuality.clientId} {
+			if tier, ok := clientIdSpeedTiers[clientId]; !ok || tier != 0 {
+				t.Fatal("Speed lost an eligible native provider or changed its tier")
+			}
+		}
 
-		// quality: only the verified subscriber, without non-quality backfill
+		// Quality discovery exhausts native Quality before borrowing Speed;
+		// the common risk exclusion survives that lower-tier selection.
 		providers := egressTestFind(ctx, t, egressTestLocationSpec(city), RankModeQuality, 10, false, server.NewId())
-		connect.AssertEqual(t, egressTestIds(providers), []server.Id{healthy.clientId})
+		if !slices.Equal(egressTestIds(providers), []server.Id{healthy.clientId, nonQuality.clientId}) {
+			t.Fatal("Quality discovery must return native Quality before eligible Speed fallback")
+		}
 		connect.AssertEqual(t, providers[0].Tier, 0)
+		connect.AssertEqual(t, providers[1].Tier, egressTestBackfillOffset())
+
+		// Forced minimum and named providers retain the requested Quality
+		// policy; neither can use the lower bucket to bypass it or common risk.
+		named := []*ProviderSpec{{ClientId: &healthy.clientId}, {ClientId: &nonQuality.clientId}, {ClientId: &risky.clientId}}
+		for _, request := range []struct {
+			specs        []*ProviderSpec
+			forceMinimum bool
+		}{
+			{egressTestLocationSpec(city), true},
+			{named, false},
+			{named, true},
+		} {
+			providers := egressTestFind(ctx, t, request.specs, RankModeQuality, 10, request.forceMinimum, server.NewId())
+			if !slices.Equal(egressTestIds(providers), []server.Id{healthy.clientId}) || providers[0].Tier != 0 {
+				t.Fatal("explicit Quality admitted non-quality or risky access")
+			}
+		}
 	})
 }
 
