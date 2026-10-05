@@ -12,9 +12,12 @@ func NetworkBlockLocation(
 	locationId server.Id,
 ) {
 
+	// a failed statement raises, which ends the transaction at once. Its error
+	// used to be dropped, and the transaction went on to a commit that
+	// server.Tx retried for a minute.
 	server.Tx(ctx, func(tx server.PgTx) {
 
-		tx.Exec(
+		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				INSERT INTO exclude_network_client_location (
@@ -26,7 +29,7 @@ func NetworkBlockLocation(
 			`,
 			networkId,
 			locationId,
-		)
+		))
 
 	})
 
@@ -38,9 +41,10 @@ func NetworkUnblockLocation(
 	locationId server.Id,
 ) {
 
+	// a failed statement raises, which ends the transaction at once
 	server.Tx(ctx, func(tx server.PgTx) {
 
-		tx.Exec(
+		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				DELETE FROM exclude_network_client_location
@@ -48,7 +52,7 @@ func NetworkUnblockLocation(
 			`,
 			networkId,
 			locationId,
-		)
+		))
 
 	})
 
