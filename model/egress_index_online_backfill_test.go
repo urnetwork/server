@@ -39,20 +39,28 @@ func writeSubscriberFactsForScores(ctx context.Context, scores []*ClientScore) {
 		ids = append(ids, score.ClientId)
 	}
 	handler := CreateNetworkClientHandler(ctx)
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(ctx, `
+	location := server.NewId()
+	connectionTime := server.NowUtc()
+	// Each batch retains atomic connection/location facts while releasing the
+	// real session trigger's endpoint fences before the next batch. Callers
+	// publish their cache only after the complete original population exists.
+	for first := 0; first < len(ids); first += arinRemotePopulationBatchSize {
+		batchIds := ids[first:min(first+arinRemotePopulationBatchSize, len(ids))]
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `
 			INSERT INTO network_client_connection
 				(client_id, connection_id, connect_time, connection_host, connection_service, connection_block, handler_id)
-			SELECT DISTINCT id, id, now(), 'synthetic', 'synthetic', 'synthetic', $2::uuid
+			SELECT DISTINCT id, id, $3::timestamp, 'synthetic', 'synthetic', 'synthetic', $2::uuid
 			FROM unnest($1::uuid[]) AS id ON CONFLICT (connection_id) DO NOTHING
-		`, ids, handler))
-		server.RaisePgResult(tx.Exec(ctx, `
+		`, batchIds, handler, connectionTime))
+			server.RaisePgResult(tx.Exec(ctx, `
 			INSERT INTO network_client_location
 				(client_id, connection_id, city_location_id, region_location_id, country_location_id, arin_quality_verified, arin_quality_write_token)
 			SELECT DISTINCT id, id, $2::uuid, $2::uuid, $2::uuid, true, id
 			FROM unnest($1::uuid[]) AS id ON CONFLICT (connection_id) DO NOTHING
-		`, ids, server.NewId()))
-	})
+		`, batchIds, location))
+		})
+	}
 }
 
 // Each mode deliberately has one different page. No random page draw or
