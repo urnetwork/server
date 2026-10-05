@@ -76,7 +76,7 @@ func solanaTestKey(phrase string) solana.PublicKey {
 	return solana.PublicKeyFromBytes(sum[:])
 }
 
-// solanaDecodedTransfer is a built transaction read back from its wire bytes.
+// A built transaction read back from its wire bytes.
 type solanaDecodedTransfer struct {
 	transaction *solana.Transaction
 	keys        []string
@@ -86,6 +86,8 @@ type solanaDecodedTransfer struct {
 	data     [][]byte
 }
 
+// Reads a built transaction back: its keys and, per instruction, the program,
+// the accounts and the data.
 func solanaDecodeTransfer(t testing.TB, transactionBytes []byte) *solanaDecodedTransfer {
 	t.Helper()
 	transaction, err := solana.TransactionFromBytes(transactionBytes)
@@ -106,16 +108,19 @@ func solanaDecodeTransfer(t testing.TB, transactionBytes []byte) *solanaDecodedT
 	return decoded
 }
 
+// Whether the transaction lets key be written.
 func (self *solanaDecodedTransfer) writable(t *testing.T, key string) bool {
 	writable, err := self.transaction.Message.IsWritable(solana.MustPublicKeyFromBase58(key))
 	connect.AssertEqual(t, err, nil)
 	return writable
 }
 
+// Whether key signs the transaction.
 func (self *solanaDecodedTransfer) signer(key string) bool {
 	return self.transaction.Message.IsSigner(solana.MustPublicKeyFromBase58(key))
 }
 
+// The spl-token TransferChecked data for amountMicro at USDC's 6 decimals.
 func solanaTransferCheckedData(amountMicro uint64) []byte {
 	data := []byte{12, 0, 0, 0, 0, 0, 0, 0, 0, 6}
 	binary.LittleEndian.PutUint64(data[1:9], amountMicro)
@@ -225,34 +230,44 @@ func TestSolanaPaymentTransactionPaysOnlyTheMerchantTheQuotedUsdc(t *testing.T) 
 	connect.AssertEqual(t, keys, expectedKeys)
 }
 
-// solanaFakePaymentTransactionDeps replaces the intent lookup and the rpc.
+// Replaces the intent lookup and the rpc.
 type solanaFakePaymentTransactionDeps struct {
-	intents       map[string]*model.SolanaPaymentIntent
-	lookups       int
-	blockhashErr  error
-	blockhashGets int
+	referenceIntents  map[string]*model.SolanaPaymentIntent
+	lookupCount       int
+	blockhashErr      error
+	blockhashGetCount int
 }
 
-func (self *solanaFakePaymentTransactionDeps) install(t *testing.T) {
-	intent := solanaPaymentTransactionIntent
-	latestBlockhash := solanaLatestBlockhash
+// Fakes that answer intent for its reference (no intent when nil), installed
+// as the intent lookup and the rpc until the test ends.
+func installSolanaFakePaymentTransactionDeps(t *testing.T, intent *model.SolanaPaymentIntent) *solanaFakePaymentTransactionDeps {
+	deps := &solanaFakePaymentTransactionDeps{
+		referenceIntents: map[string]*model.SolanaPaymentIntent{},
+	}
+	if intent != nil {
+		deps.referenceIntents[intent.PaymentReference] = intent
+	}
+	previousIntent := solanaPaymentTransactionIntent
+	previousLatestBlockhash := solanaLatestBlockhash
 	t.Cleanup(func() {
-		solanaPaymentTransactionIntent = intent
-		solanaLatestBlockhash = latestBlockhash
+		solanaPaymentTransactionIntent = previousIntent
+		solanaLatestBlockhash = previousLatestBlockhash
 	})
 	solanaPaymentTransactionIntent = func(_ context.Context, reference string) *model.SolanaPaymentIntent {
-		self.lookups += 1
-		return self.intents[reference]
+		deps.lookupCount += 1
+		return deps.referenceIntents[reference]
 	}
 	solanaLatestBlockhash = func(_ context.Context) (solana.Hash, error) {
-		self.blockhashGets += 1
-		if self.blockhashErr != nil {
-			return solana.Hash{}, self.blockhashErr
+		deps.blockhashGetCount += 1
+		if deps.blockhashErr != nil {
+			return solana.Hash{}, deps.blockhashErr
 		}
 		return solana.MustHashFromBase58(solanaTestBlockhash), nil
 	}
+	return deps
 }
 
+// An authenticated session of networkId, without a database.
 func solanaTestPaymentSession(networkId server.Id) *session.ClientSession {
 	return &session.ClientSession{
 		Ctx:   context.Background(),
@@ -260,151 +275,152 @@ func solanaTestPaymentSession(networkId server.Id) *session.ClientSession {
 	}
 }
 
-// Only an open intent of the caller's own network is built, for its quote; a
-// refused request never reaches the rpc.
+// An open intent of networkId for the fixture reference: the yearly plan at
+// its quote, the price plus its unique sub-cent suffix.
+func solanaTestOpenIntent(networkId server.Id) *model.SolanaPaymentIntent {
+	expiresAt := server.NowUtc().Add(time.Hour)
+	return &model.SolanaPaymentIntent{
+		PaymentReference:  solanaTestReference,
+		NetworkId:         networkId,
+		ExpectedAmountUsd: 40.004317,
+		SubscriptionPlan:  model.SolanaPlanYearly,
+		ExpiresAt:         &expiresAt,
+	}
+}
+
+// An open intent of the caller's own network is built for its quote, a plan
+// or a data pack alike, to the configured receiver, after one blockhash from
+// the rpc.
 func TestSolanaPaymentTransactionUsesTheCallersOpenIntent(t *testing.T) {
 	solanaTestReceivers(t, solanaTestMerchant, solanaTestRetiredReceiver)
 	networkId := server.NewId()
-	otherNetworkId := server.NewId()
-	future := server.NowUtc().Add(time.Hour)
-	past := server.NowUtc().Add(-time.Minute)
-	signature := "5yZ7RHQD8xhCF6pPyP2CP3xS5Ld9rU4mSGBYqXdyPr6m"
-
-	newDeps := func(intent *model.SolanaPaymentIntent) *solanaFakePaymentTransactionDeps {
-		deps := &solanaFakePaymentTransactionDeps{intents: map[string]*model.SolanaPaymentIntent{}}
-		if intent != nil {
-			deps.intents[intent.PaymentReference] = intent
-		}
-		return deps
-	}
-	openIntent := func() *model.SolanaPaymentIntent {
-		return &model.SolanaPaymentIntent{
-			PaymentReference: solanaTestReference,
-			NetworkId:        networkId,
-			// the price plus its unique sub-cent suffix
-			ExpectedAmountUsd: 40.004317,
-			SubscriptionPlan:  model.SolanaPlanYearly,
-			ExpiresAt:         &future,
-		}
-	}
-	openIntentWith := func(change func(intent *model.SolanaPaymentIntent)) *model.SolanaPaymentIntent {
-		intent := openIntent()
-		change(intent)
-		return intent
-	}
-
-	t.Run("an open intent of the caller's network is built for its quote", func(t *testing.T) {
-		deps := newDeps(openIntent())
-		deps.install(t)
+	for _, c := range []struct {
+		name              string
+		subscriptionPlan  string
+		expectedAmountUsd float64
+		amountMicro       uint64
+	}{
+		{name: "a plan", subscriptionPlan: model.SolanaPlanYearly, expectedAmountUsd: 40.004317, amountMicro: 40_004_317},
+		{name: "a data pack", subscriptionPlan: "data_1tib", expectedAmountUsd: 3.000042, amountMicro: 3_000_042},
+	} {
+		intent := solanaTestOpenIntent(networkId)
+		intent.SubscriptionPlan = c.subscriptionPlan
+		intent.ExpectedAmountUsd = c.expectedAmountUsd
+		deps := installSolanaFakePaymentTransactionDeps(t, intent)
 		result, err := CreateSolanaPaymentTransaction(&SolanaPaymentTransactionArgs{
 			Reference: solanaTestReference,
 			Payer:     solanaTestPayer,
 		}, solanaTestPaymentSession(networkId))
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, result.Error, (*SolanaPaymentTransactionError)(nil))
-		connect.AssertEqual(t, deps.blockhashGets, 1)
+		if err != nil || result.Error != nil {
+			t.Fatalf("%s: err = %v, result error = %+v", c.name, err, result.Error)
+		}
+		if deps.blockhashGetCount != 1 {
+			t.Errorf("%s: %d blockhash requests, want 1", c.name, deps.blockhashGetCount)
+		}
 
 		transactionBytes, err := base64.StdEncoding.DecodeString(result.Transaction)
-		connect.AssertEqual(t, err, nil)
+		if err != nil {
+			t.Fatalf("%s: %s", c.name, err)
+		}
 		decoded := solanaDecodeTransfer(t, transactionBytes)
 		connect.AssertEqual(t, decoded.keys[0], solanaTestPayer)
 		connect.AssertEqual(t, string(decoded.data[0]), solanaTestReference)
-		connect.AssertEqual(t, decoded.data[1], solanaTransferCheckedData(40_004_317))
+		connect.AssertEqual(t, decoded.data[1], solanaTransferCheckedData(c.amountMicro))
 		connect.AssertEqual(t, decoded.accounts[1][2], solanaTestMerchantUsdcAccount)
-	})
+	}
+}
 
-	t.Run("a data pack intent of the caller's network is built too", func(t *testing.T) {
-		deps := newDeps(openIntentWith(func(intent *model.SolanaPaymentIntent) {
-			intent.SubscriptionPlan = "data_1tib"
-			intent.ExpectedAmountUsd = 3.000042
-		}))
-		deps.install(t)
-		result, err := CreateSolanaPaymentTransaction(&SolanaPaymentTransactionArgs{
-			Reference: solanaTestReference,
-			Payer:     solanaTestPayer,
-		}, solanaTestPaymentSession(networkId))
-		connect.AssertEqual(t, err, nil)
-		transactionBytes, err := base64.StdEncoding.DecodeString(result.Transaction)
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, solanaDecodeTransfer(t, transactionBytes).data[1], solanaTransferCheckedData(3_000_042))
-	})
-
-	refused := []struct {
-		name    string
-		intent  *model.SolanaPaymentIntent
-		args    *SolanaPaymentTransactionArgs
-		message string
-		lookups int
+// Another network's intent, no intent, a paid or expired intent and a request
+// that names no Solana key are refused with a plain message, and a refused
+// request never reaches the rpc.
+func TestSolanaPaymentTransactionRefusesWithoutTheRpc(t *testing.T) {
+	networkId := server.NewId()
+	signature := "5yZ7RHQD8xhCF6pPyP2CP3xS5Ld9rU4mSGBYqXdyPr6m"
+	openIntentWith := func(change func(intent *model.SolanaPaymentIntent)) *model.SolanaPaymentIntent {
+		intent := solanaTestOpenIntent(networkId)
+		change(intent)
+		return intent
+	}
+	for _, c := range []struct {
+		name        string
+		intent      *model.SolanaPaymentIntent
+		args        *SolanaPaymentTransactionArgs
+		message     string
+		lookupCount int
 	}{
 		{
-			name:    "another network's intent",
-			intent:  openIntentWith(func(intent *model.SolanaPaymentIntent) { intent.NetworkId = otherNetworkId }),
-			message: "This payment was not found. Start again.",
-			lookups: 1,
+			name:        "another network's intent",
+			intent:      openIntentWith(func(intent *model.SolanaPaymentIntent) { intent.NetworkId = server.NewId() }),
+			message:     "This payment was not found. Start again.",
+			lookupCount: 1,
 		},
 		{
-			name:    "no intent",
-			message: "This payment was not found. Start again.",
-			lookups: 1,
+			name:        "no intent",
+			message:     "This payment was not found. Start again.",
+			lookupCount: 1,
 		},
 		{
-			name:    "a paid intent",
-			intent:  openIntentWith(func(intent *model.SolanaPaymentIntent) { intent.TxSignature = &signature }),
-			message: "This payment was already received.",
-			lookups: 1,
+			name:        "a paid intent",
+			intent:      openIntentWith(func(intent *model.SolanaPaymentIntent) { intent.TxSignature = &signature }),
+			message:     "This payment was already received.",
+			lookupCount: 1,
 		},
 		{
-			name:    "an expired intent",
-			intent:  openIntentWith(func(intent *model.SolanaPaymentIntent) { intent.ExpiresAt = &past }),
-			message: "This payment request expired. Start again.",
-			lookups: 1,
+			name: "an expired intent",
+			intent: openIntentWith(func(intent *model.SolanaPaymentIntent) {
+				expiresAt := server.NowUtc().Add(-time.Minute)
+				intent.ExpiresAt = &expiresAt
+			}),
+			message:     "This payment request expired. Start again.",
+			lookupCount: 1,
 		},
 		{
 			name:    "a payer that is not a Solana address",
-			intent:  openIntent(),
-			args:    &SolanaPaymentTransactionArgs{Reference: solanaTestReference, Payer: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"},
+			intent:  solanaTestOpenIntent(networkId),
+			args:    &SolanaPaymentTransactionArgs{Reference: solanaTestReference, Payer: "0x0000000000000000000000000000000000000001"},
 			message: "The wallet did not give a Solana address.",
 		},
 		{
 			name:    "a reference that is not a public key",
-			intent:  openIntent(),
+			intent:  solanaTestOpenIntent(networkId),
 			args:    &SolanaPaymentTransactionArgs{Reference: "not-a-reference", Payer: solanaTestPayer},
 			message: "This payment cannot be sent from a browser wallet. Scan the QR code or send it by hand.",
 		},
-	}
-	for _, c := range refused {
-		t.Run(c.name, func(t *testing.T) {
-			deps := newDeps(c.intent)
-			deps.install(t)
-			args := c.args
-			if args == nil {
-				args = &SolanaPaymentTransactionArgs{Reference: solanaTestReference, Payer: solanaTestPayer}
-			}
-			result, err := CreateSolanaPaymentTransaction(args, solanaTestPaymentSession(networkId))
-			connect.AssertEqual(t, err, nil)
-			connect.AssertEqual(t, result.Transaction, "")
-			connect.AssertEqual(t, result.Error.Message, c.message)
-			connect.AssertEqual(t, deps.lookups, c.lookups)
-			connect.AssertEqual(t, deps.blockhashGets, 0)
-		})
-	}
-
-	t.Run("an rpc failure is a plain message", func(t *testing.T) {
-		deps := newDeps(openIntent())
-		deps.blockhashErr = &url.Error{
-			Op:  "Post",
-			URL: "https://mainnet.helius-rpc.com/?api-key=00000000-test-key",
-			Err: errors.New("dial tcp: i/o timeout"),
+	} {
+		deps := installSolanaFakePaymentTransactionDeps(t, c.intent)
+		args := c.args
+		if args == nil {
+			args = &SolanaPaymentTransactionArgs{Reference: solanaTestReference, Payer: solanaTestPayer}
 		}
-		deps.install(t)
-		result, err := CreateSolanaPaymentTransaction(&SolanaPaymentTransactionArgs{
-			Reference: solanaTestReference,
-			Payer:     solanaTestPayer,
-		}, solanaTestPaymentSession(networkId))
-		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, result.Transaction, "")
-		connect.AssertEqual(t, result.Error.Message, "Could not reach the Solana network. Try again, or scan the QR code.")
-	})
+		result, err := CreateSolanaPaymentTransaction(args, solanaTestPaymentSession(networkId))
+		if err != nil || result.Error == nil {
+			t.Fatalf("%s: err = %v, result error = %+v", c.name, err, result.Error)
+		}
+		if result.Transaction != "" || result.Error.Message != c.message {
+			t.Errorf("%s: transaction %q, message %q, want no transaction and %q", c.name, result.Transaction, result.Error.Message, c.message)
+		}
+		if deps.lookupCount != c.lookupCount || deps.blockhashGetCount != 0 {
+			t.Errorf("%s: %d lookups and %d blockhash requests, want %d and 0", c.name, deps.lookupCount, deps.blockhashGetCount, c.lookupCount)
+		}
+	}
+}
+
+// An rpc failure is answered with a plain message, never the rpc's error.
+func TestSolanaPaymentTransactionRpcFailureIsPlainMessage(t *testing.T) {
+	networkId := server.NewId()
+	deps := installSolanaFakePaymentTransactionDeps(t, solanaTestOpenIntent(networkId))
+	deps.blockhashErr = &url.Error{
+		Op:  "Post",
+		URL: "https://solana-rpc.example/?api-key=00000000-test-key",
+		Err: errors.New("dial tcp: i/o timeout"),
+	}
+	result, err := CreateSolanaPaymentTransaction(&SolanaPaymentTransactionArgs{
+		Reference: solanaTestReference,
+		Payer:     solanaTestPayer,
+	}, solanaTestPaymentSession(networkId))
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, result.Transaction, "")
+	connect.AssertEqual(t, result.Error.Message, "Could not reach the Solana network. Try again, or scan the QR code.")
 }
 
 // The blockhash request to the rpc names no account: nothing about the payer
@@ -486,8 +502,8 @@ func TestSolanaRpcLatestBlockhashRefusesAnErrorAnswer(t *testing.T) {
 func TestSolanaRpcErrorTextHidesTheApiKey(t *testing.T) {
 	key := "00000000-test-key"
 	for _, err := range []error{
-		&url.Error{Op: "Post", URL: "https://mainnet.helius-rpc.com/?api-key=" + key, Err: errors.New("dial tcp: i/o timeout")},
-		errors.New(`Post "https://mainnet.helius-rpc.com/?api-key=` + key + `": EOF`),
+		&url.Error{Op: "Post", URL: "https://solana-rpc.example/?api-key=" + key, Err: errors.New("dial tcp: i/o timeout")},
+		errors.New(`Post "https://solana-rpc.example/?api-key=` + key + `": EOF`),
 		&server.HttpStatusError{StatusCode: 401, Status: "401 Unauthorized", ResponseBody: "invalid api-key=" + key},
 	} {
 		text := solanaRpcErrorText(err)
@@ -495,7 +511,7 @@ func TestSolanaRpcErrorTextHidesTheApiKey(t *testing.T) {
 	}
 	connect.AssertEqual(
 		t,
-		solanaRpcErrorText(&url.Error{Op: "Post", URL: "https://mainnet.helius-rpc.com/?api-key=" + key, Err: errors.New("dial tcp: i/o timeout")}),
+		solanaRpcErrorText(&url.Error{Op: "Post", URL: "https://solana-rpc.example/?api-key=" + key, Err: errors.New("dial tcp: i/o timeout")}),
 		"Post: dial tcp: i/o timeout",
 	)
 }

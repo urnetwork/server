@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"slices"
 	"testing"
-	"time"
 
 	"github.com/gagliardetto/solana-go"
 
@@ -57,7 +56,7 @@ func TestSolanaPaymentIntentQuoteNamesWhereToPay(t *testing.T) {
 // A rotated receiver (a new address first, the old one after it) is what the
 // plan intent quotes and what the browser-wallet transfer for an intent pays.
 // Pure: the intent lookup and the rpc are seams.
-func TestSolanaPaymentPathsFollowARotatedReceiver(t *testing.T) {
+func TestSolanaPaymentPathsFollowRotatedReceiver(t *testing.T) {
 	rotatedReceiver := solanaTestKey(solanaTestRotatedReceiverPhrase)
 	connect.AssertEqual(t, rotatedReceiver.String(), solanaTestRotatedReceiver)
 	solanaTestReceivers(t, rotatedReceiver.String(), solanaTestMerchant)
@@ -70,19 +69,7 @@ func TestSolanaPaymentPathsFollowARotatedReceiver(t *testing.T) {
 	connect.AssertEqual(t, quote["spl_token_mint"], solanaUsdcMint)
 
 	networkId := server.NewId()
-	future := server.NowUtc().Add(time.Hour)
-	deps := &solanaFakePaymentTransactionDeps{
-		intents: map[string]*model.SolanaPaymentIntent{
-			solanaTestReference: {
-				PaymentReference:  solanaTestReference,
-				NetworkId:         networkId,
-				ExpectedAmountUsd: 40.004317,
-				SubscriptionPlan:  model.SolanaPlanYearly,
-				ExpiresAt:         &future,
-			},
-		},
-	}
-	deps.install(t)
+	installSolanaFakePaymentTransactionDeps(t, solanaTestOpenIntent(networkId))
 	result, err := CreateSolanaPaymentTransaction(&SolanaPaymentTransactionArgs{
 		Reference: solanaTestReference,
 		Payer:     solanaTestPayer,
