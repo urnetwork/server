@@ -91,6 +91,9 @@ Usage:
     bringyourctl wallet estimate-fee --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
     bringyourctl wallet transfer --amount_usd=<amount_usd> --destination_address=<destination_address> --blockchain=<blockchain>
 		bringyourctl wallets sync-circle
+    bringyourctl contracts repair-expiry-route-check
+    bringyourctl contracts repair-expiry --private-stdin [--apply]
+    bringyourctl contracts drain-legacy --private-stdin [--apply]
     bringyourctl contracts close-expired [-c <count>]
     bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
     bringyourctl contracts reconcile-net-escrow [--network_id=<network_id>] [--dry-run]
@@ -137,6 +140,8 @@ Options:
     --user_id=<user_id>
     --secret=<secret>
 
+    --private-stdin  Read the bounded private expiry request from stdin.
+    --apply          Apply the scoped expiry request; omission is a read-only preview.
     --contract_id=<contract_id> The contract to close
     --target_id=<target_id>     The contract_close.party (either "destination" or "source")
     --used_transfer_byte_count=<used_transfer_byte_count>   Bytes used
@@ -292,6 +297,17 @@ Options:
 			adminWalletEstimateFee(opts)
 		}
 	} else if contracts, _ := opts.Bool("contracts"); contracts {
+		if drainLegacy, _ := opts.Bool("drain-legacy"); drainLegacy {
+			apply, _ := opts.Bool("--apply")
+			os.Exit(runPrivateLegacySettlementDrain(context.Background(), os.Stdin, os.Stdout, apply, invokeLegacySettlementDrain))
+		}
+		if routeCheck, _ := opts.Bool("repair-expiry-route-check"); routeCheck {
+			os.Exit(runContractExpiryRouteCheck(context.Background(), os.Stdout, inspectContractExpiryRoute))
+		}
+		if repairExpiry, _ := opts.Bool("repair-expiry"); repairExpiry {
+			apply, _ := opts.Bool("--apply")
+			os.Exit(runPrivateContractExpiryRepair(context.Background(), os.Stdin, os.Stdout, apply, invokeContractExpiryRepair))
+		}
 		if closeExpired, _ := opts.Bool("close-expired"); closeExpired {
 			closeExpiredContracts(opts)
 		}
