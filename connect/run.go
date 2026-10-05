@@ -101,7 +101,7 @@ func runWithDependencies(
 	if err := validateRunListenIPv4(options, listenIPv4); err != nil {
 		return err
 	}
-	connectcore.ResizeMessagePools(connectcore.Gib(16))
+	ConfigureMessagePools()
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
