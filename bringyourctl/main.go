@@ -1890,13 +1890,13 @@ func taskLs(opts docopt.Opts) {
 	fmt.Printf("%d pending tasks:\n", len(tasks))
 	now := server.NowUtc()
 	for _, taskId := range orderedTaskIds {
-		task := tasks[taskId]
-		remaining := (task.RunAt.Sub(now) / time.Second) * time.Second
+		pending := tasks[taskId]
+		remaining := (pending.RunAt.Sub(now) / time.Second) * time.Second
 		runAtStr := fmt.Sprintf("%s", remaining)
-		if task.RescheduleError != "" {
-			fmt.Printf("[%8s]  %s %s: rescheduled err = %s (%s)\n", runAtStr, taskId, task.FunctionName, task.RescheduleError, task.ArgsJson)
+		if pending.RescheduleError != "" {
+			fmt.Printf("[%8s]  %s %s: rescheduled err = %s (%s)\n", runAtStr, taskId, pending.FunctionName, pending.RescheduleError, task.ArgumentsForLog(pending.ArgsJson))
 		} else {
-			fmt.Printf("[%8s]  %s %s\n", runAtStr, taskId, task.FunctionName)
+			fmt.Printf("[%8s]  %s %s\n", runAtStr, taskId, pending.FunctionName)
 		}
 	}
 

@@ -4910,6 +4910,30 @@ leases and stream memberships retain their existing bounded expiry/reconciliatio
 No replay of a non-idempotent Redis increment is added. A quiet error log or low
 CPU does not establish complete recovery or current provider payout success.
 
+Provider-total projection reader prerequisite (2026-10-05): the existing task
+queue can durably carry an exact provider-total allocation independently of the
+grant owner. `ApplyLegacyProviderTotals` reads and locks its own pending task,
+updates sorted account totals and an `applied` marker in one transaction, and has
+no task post. An invocation's captured arguments are not replay authority. The
+payload retains exact allocations after contract/sweep retention; ordinary
+finished-task cleanup cannot remove a pending allocation. A missing owner or
+invalid payload remains an error, and this target must not be retired or its
+pending rows canceled before every allocation is applied. The reader commit
+alone leaves the inline producer unchanged.
+
+Deploy private-task argument logging and the registered reader to every
+Taskworker before enabling the separate producer change. Old workers retain an
+unknown target through their existing short version-skew retry, but binaries
+without private-argument logging can print its recovery payload. The new marker
+redacts arguments even for an unknown target, malformed data and operator task
+listing; lifecycle/error envelopes remain visible. Producer activation requires
+complete running-generation evidence, not a successful build or partial fleet.
+Native controls cover enqueue/application rollback, stale duplicate invocations,
+lost replies, partial multi-provider failure, finalization rollback, unknown-target
+retry and finished cleanup. These establish local accounting and compatibility;
+they do not identify Main's current provider-row owner, queue capacity or drain
+rate. A healthy total projection does not clear a retained legacy accounting hold.
+
 A normalized `panic` log class is not proof of an uncaught worker failure.
 `server.HandleError` recovers a raised error, emits `Unexpected error` unless it
 is an explicit Done, and calls the error handler. In the qualified R59
