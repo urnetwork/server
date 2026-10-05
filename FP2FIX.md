@@ -7078,3 +7078,38 @@ run-20261005T005634.926225Z/receipt.json; SHA256
 f2446b4aeff3cc9aac5c37e3e7a3a1d8abd43ad5232abf6a07b1183fbb95ccc1.
 Independent closure gate SHA256
 047c82226b78a249bf81650ae54daf082a64c001b4ed06512fff35762b66170d.
+
+### 2026-10-05 02:10 UTC pooler outage recovery and current probe status
+
+The blank picker and connection outage coincided with all 32 native PgBouncer
+shards having zero established backends, one pending login each, and roughly
+300,000 waiting clients. Direct PostgreSQL authentication still succeeded.
+API phase evidence located the queue in authentication; sampled picker failures
+expired during pool acquisition before subscriber SQL executed. Low PostgreSQL
+load therefore did not establish application health.
+
+Bounded recovery replaced 31 failed pooler generations; the remaining shard was
+already healthy and was skipped. At 02:00 all 32 had established backends, 463
+total, with no waiting clients. The same generations remained established in the
+02:10 snapshot: 635 backends, 412 waiting clients, and a maximum wait of 57 ms.
+These snapshots establish recovery of backend capacity, not continuous health or
+resolution of the recurring login failure's root cause.
+
+The bounded Quality-validation API fix is merged into main and its deployment
+completed at 02:03. A public provider-location request returned 78 country
+entries in 0.29 seconds at 02:09. Running-version verification and actual provider
+connection progress remain separate acceptance gates. The Connect inclusive
+authentication-deadline fix passed independent normal and race controls; its
+verified image rollout is in progress.
+
+All eight current Taskworkers are ready. The shard-zero census owner has ten
+successful refreshes averaging 3.02 seconds, with no recorded cancellations.
+Census publication is owned by shard zero; absence on other workers is not a
+failure by itself. Fresh rolling quota coverage and accepted-probe throughput
+remain unmeasured after recovery. FP2FIX is not complete.
+
+Pooler baseline finite evidence SHA256
+8709207fda27b0ef9dec124d6efd79506807cf237644918b76c524001e0b73be;
+ten-minute comparison SHA256
+59b08d41426f7bc9c3d4d5ac9fb715bd7b07fa8056c02ad75f6357fe3f8bff96.
+Root ledger T588 retains the initial recovery and API deployment boundary.
