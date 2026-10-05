@@ -863,12 +863,40 @@ next identity or discriminator review.
 The first post-selection Main coverage attempt hit its three-second statement
 deadline (`SQLSTATE 57014`); no classification counts were returned. A separate
 one-key native census attempt reached its connection timeout before issuing
-any Redis GET. As of `2026-10-05T07:19:03Z`, both measurements therefore remain
-**unknown**, not zero or evidence of recovered supply. The unchanged coverage
+any Redis GET. Those failed reads provided no counts. The unchanged coverage
 query passed a local PostgreSQL fixture with 75,000 live connections under the
 same statement deadline, but that fixture cannot establish Main's plan, data
 layout or current load. Do not infer a production cause or relax the deadline
-from that local result.
+from that local result. Durable current, outdated and missing classification
+coverage remains **unknown**.
+
+A later bounded native-host census read succeeded at
+`2026-10-05T08:51:36.381701Z`. It returned one complete cached publication from
+source evaluation `08:40:09.693091Z`–`08:40:57.573495Z`, published at
+`08:44:05.457343Z` on the same date. The source was 638.808 seconds old when
+read, and its whole evaluation occurred after the Config selection cutoff.
+
+| Native bucket | Deduplicated public providers |
+| --- | ---: |
+| Quality | 4 |
+| Speed | 82 |
+| Online | 80,593 |
+
+These counts overlap across buckets. Under selected evidence policy 1, the
+Online cohort contained 82 URL-ratio passes, 80,243 failures and 268 providers
+with no accepted evidence. The ratio uses the inclusive 4/5 threshold over
+`(2026-10-05T00:40:13.425409Z, 2026-10-05T08:40:13.425409Z]`; it is separate
+from native bucket admission. All four Quality providers had at least ten
+accepted outcomes; Speed had 62 with at least ten and 20 with one. These are
+outcome counts, not success counts or four-hour quota completion.
+
+The retained Main receipt has SHA-256
+`e1e8062bb589d58013d1d0c20f80108540d96e8e5b5a4520ff94c8edc46cb373`.
+It contains no risk-exclusion counts, ARIN lookup epochs, loaded file identity
+or provider-level joins. Thus the native supply is measured for that source
+publication, while v13 adoption, classification coverage and its causal effect
+on the Quality count remain unverified. A new publication after selection does
+not establish that its stored classification inputs came from the new resource.
 
 Connection facts advance only after a successful actual ARIN lookup during a
 connection location write. The c343 connection path retries a failed initial
