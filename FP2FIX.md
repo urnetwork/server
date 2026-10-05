@@ -7702,3 +7702,57 @@ The finite runtime receipt is
 `temp/pg-contention-20261004/root-api16-known-runtime-5f321-v1/run-20261005T182546Z/receipt.json`
 (SHA-256 `b41821d1c245beac467ca38296e790e2f6cfcc0fadc2e631c88b97c319f5b626`).
 A new coherent quota measurement and sustained coverage remain required.
+
+### 2026-10-05 first-admission coverage denominator
+
+The coverage goal gives a newly admitted provider four hours to collect its
+first ten accepted measurements. It does not grant an older provider another
+four-hour grace period after a brief withdrawal or re-entry. The existing
+`provider_egress_probe_cycle.cycle_started_at` is preserved across those
+transitions, so the new metric uses that first durable probe-admission time
+without a schema migration or a change to admission, scheduling or history.
+The timestamp records cycle insertion, including delayed initialization or
+bootstrap; it is not a historical physical-join timestamp.
+
+The same coherent fleet aggregate now separates currently eligible providers
+into mature (first admission at least four hours ago), warming (known younger
+admission) and age unknown (missing cycle or future timestamp). Each partition
+retains eligible count, quota-complete count and runs needed. Their sums equal
+the unchanged all-current totals. The headline mature coverage is the fraction
+of known mature providers with ten accepted measured successes or failures in
+the rolling four-hour window. A zero mature denominator is unavailable;
+age-unknown providers remain a separate warning, including when the known
+mature cohort is at 100%. The all-current quota, secure coverage and warming
+counts remain visible. Neither a measured failure nor a security exception is
+silently removed from quota accounting.
+
+The new contract and cohort cells are emitted from the same atomic census
+snapshot. An older producer without those cells still supplies its existing
+all-current census, but cannot supply mature coverage. Monitor and dashboard
+queries retain the source-clock qualification and do not infer an age from an
+old aggregate. Five native model controls pass: first admission and the exact
+four-hour boundary, mixed accepted successes/failures with separate TLS state,
+withdrawal and re-entry without a renewed exemption, missing/future ages, and
+unchanged current admission gates. Deployment and a new mature-cohort census
+remain required before reporting this metric for Main.
+
+The retained 18:54:54 UTC all-current snapshot on 95639 has 78,409 eligible,
+78,068 quota-complete, 341 deficient and 369 runs needed. Only two providers
+are in the old warming-deficit counter and none lacks a cycle, so at least
+339 of those deficits have already reached first-admission age four hours.
+The new denominator does not erase that remaining work. A later qualified
+19:38–19:40 worker pair measures 74.3056 acknowledged measurements per second;
+one acknowledged measured result represents at most one durable quota credit.
+Root's separate indexed history read at 19:52:38 UTC finds 22,763 unique
+admitted policy-1 runs measured in (19:35, 19:40], or 75.8767 credits/s:
+12,518 successes and 10,245 measured failures across 22,746 providers. That
+five-minute measurement-time window partially overlaps the shorter worker
+counter intervals; it does not measure arrival time, duplicate ACK volume or
+renewal of a fixed current provider cohort. Aggregate durable headroom is
+present in that window; sustained full mature coverage remains open.
+
+The finite history reduction is
+`temp/pg-contention-20261004/astra-url-accepted-window-1935-current-durable-reduction.json`
+(SHA-256 `0d2f485f36422161b0da9b65c497b379a652d9adf4122ae23d12c1f6ac6140db`),
+independently corroborated by `sol-url-accepted-window-1935-actual-GO.json`
+(SHA-256 `a0441b3a49c6e19a70400e0c4be2a1534bbc1da568463d90a15a5170ff6fc2de`).

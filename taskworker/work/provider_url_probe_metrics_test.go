@@ -17,7 +17,10 @@ func TestUrlProbeFleetScrapeUsesOneAtomicGeneration(t *testing.T) {
 	collector.snapshot.Store(&providerUrlProbeFleetSnapshot{
 		fleet: model.ProviderUrlProbeFleet{Eligible: 1, Due: 1, Complete: 1, QuotaComplete: 1,
 			Overdue: 1, RunsNeeded: 1, SecurityExceptions: 1, SecurityUnknownTargets: 1, OldestDueSeconds: 1,
-			Warming: 1, MissingCycles: 1, CohortStartedAtSeconds: 1},
+			Warming: 1, MissingCycles: 1, CohortStartedAtSeconds: 1,
+			MatureEligible: 1, MatureQuotaComplete: 1, MatureRunsNeeded: 1,
+			WarmingEligible: 1, WarmingQuotaComplete: 1, WarmingRunsNeeded: 1,
+			EligibilityAgeUnknown: 1, AgeUnknownQuotaComplete: 1, AgeUnknownRunsNeeded: 1},
 		observedAt: time.Unix(1, 0),
 	})
 	go func() {
@@ -42,8 +45,8 @@ func TestUrlProbeFleetScrapeUsesOneAtomicGeneration(t *testing.T) {
 		assertOld(metric)
 		count++
 	}
-	if count != 15 {
-		t.Fatalf("incomplete fleet scrape: got %d series, want15", count)
+	if count != 25 {
+		t.Fatalf("incomplete fleet scrape: got %d series, want 25", count)
 	}
 }
 
@@ -74,6 +77,55 @@ func TestUrlProbeFleetRefreshHasDeadlineAndRetainsFailedSnapshot(t *testing.T) {
 	}
 	if collector.snapshot.Load() != previous {
 		t.Fatal("failed census advanced evidence freshness")
+	}
+}
+
+func TestUrlProbeAdmissionCohortMetricsPreserveOldContractAndUnknownAge(t *testing.T) {
+	collector := newProviderUrlProbeFleetCollector()
+	collector.snapshot.Store(&providerUrlProbeFleetSnapshot{
+		observedAt: time.Unix(100, 0),
+		fleet: model.ProviderUrlProbeFleet{
+			Eligible: 15, QuotaComplete: 9, RunsNeeded: 32,
+			MatureEligible: 10, MatureQuotaComplete: 8, MatureRunsNeeded: 12,
+			WarmingEligible: 2, WarmingQuotaComplete: 1, WarmingRunsNeeded: 3,
+			EligibilityAgeUnknown: 3, AgeUnknownQuotaComplete: 0, AgeUnknownRunsNeeded: 17,
+		},
+	})
+	registry := prometheus.NewPedanticRegistry()
+	registry.MustRegister(collector)
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]float64{
+		"mature:eligible": 10, "mature:quota_complete": 8, "mature:runs_needed": 12,
+		"warming:eligible": 2, "warming:quota_complete": 1, "warming:runs_needed": 3,
+		"age_unknown:eligible": 3, "age_unknown:quota_complete": 0, "age_unknown:runs_needed": 17,
+	}
+	oldStates, contract := 0, false
+	for _, family := range families {
+		switch family.GetName() {
+		case "urnetwork_url_probe_fleet":
+			oldStates = len(family.Metric)
+		case "urnetwork_url_probe_admission_cohort_contract":
+			contract = len(family.Metric) == 1 && family.Metric[0].GetGauge().GetValue() == 1
+		case "urnetwork_url_probe_admission_cohort":
+			for _, metric := range family.Metric {
+				labels := map[string]string{}
+				for _, label := range metric.Label {
+					labels[label.GetName()] = label.GetValue()
+				}
+				key := labels["cohort"] + ":" + labels["state"]
+				value, present := want[key]
+				if !present || len(labels) != 2 || metric.GetGauge().GetValue() != value {
+					t.Fatalf("incorrect cohort projection: %s", metric.String())
+				}
+				delete(want, key)
+			}
+		}
+	}
+	if oldStates != 12 || !contract || len(want) != 0 {
+		t.Fatalf("incomplete or incompatible contracts: old states=%d contract=%t missing=%v", oldStates, contract, want)
 	}
 }
 

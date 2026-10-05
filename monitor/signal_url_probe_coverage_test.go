@@ -91,6 +91,17 @@ func urlProbeCoverageFixture(now time.Time, host string, shard int) *urlProbeCov
 		values["oldest_time"] = scrape
 		values["cohort_started"] = float64(now.Add(-8 * time.Hour).Unix())
 		values["cohort_started_time"] = scrape
+		values["cohort_contract"] = 1
+		values["cohort_contract_time"] = scrape
+		for _, cohort := range urlProbeAdmissionCohorts {
+			for _, state := range urlProbeAdmissionCohortStates {
+				key := cohort + ":" + state
+				values["cohort:"+key] = 0
+				values["cohort_time:"+key] = scrape
+			}
+		}
+		values["cohort:mature:eligible"] = 10000
+		values["cohort:mature:quota_complete"] = 10000
 	}
 	return &urlProbeCoverageProcess{host: host, block: "worker-group", instance: host + "-private-process", values: values}
 }
@@ -107,7 +118,10 @@ func urlProbeCoverageFixtureJson(t *testing.T, now time.Time, processes ...*urlP
 			parts := strings.SplitN(name, ":", 2)
 			labels["monitor_metric"] = parts[0]
 			if len(parts) == 2 {
-				if strings.HasPrefix(parts[0], "fleet") {
+				if parts[0] == "cohort" || parts[0] == "cohort_time" {
+					cohortState := strings.SplitN(parts[1], ":", 2)
+					labels["cohort"], labels["state"] = cohortState[0], cohortState[1]
+				} else if strings.HasPrefix(parts[0], "fleet") {
 					labels["state"] = parts[1]
 				} else {
 					labels["shard"] = parts[1]
@@ -172,6 +186,11 @@ func TestUrlProbeCoverageHighAggregateRateCannotHideStarvedProviders(t *testing.
 	first.values["fleet:overdue"] = 1000
 	first.values["fleet:warming"] = 1000
 	first.values["fleet:due"] = 2000
+	first.values["cohort:mature:eligible"] = 9000
+	first.values["cohort:mature:quota_complete"] = 8000
+	first.values["cohort:mature:runs_needed"] = 10000
+	first.values["cohort:warming:eligible"] = 1000
+	first.values["cohort:warming:runs_needed"] = 10000
 	first.values["success"] = 100000
 	alerts := runUrlProbeCoverageFixture(t, now, urlProbeCoverageFixtureJson(t, now, first, second))
 	alert := requireAlertClass(t, alerts, "url-probe-coverage-deficit")
@@ -196,7 +215,7 @@ func TestUrlProbeCoverageQuotaDoesNotClearTlsAndUnknownTargets(t *testing.T) {
 	first.values["fleet:security_unknown_targets"] = 1
 	first.values["fleet:warming"] = 1
 	alerts := runUrlProbeCoverageFixture(t, now, urlProbeCoverageFixtureJson(t, now, first, second))
-	alert := requireAlertClass(t, alerts, "url-probe-coverage-deficit")
+	alert := requireAlertClass(t, alerts, "url-probe-security-pending")
 	requireAlertClass(t, alerts, "url-probe-security-recovery-unknown")
 	if len(alerts) != 2 || alert.Severity != Severity(tierWarn) || !strings.Contains(alert.Observed, "runs_needed=0") {
 		t.Fatalf("quota-full security recovery disappeared: %+v", alerts)
@@ -233,6 +252,8 @@ func TestUrlProbeCoverageMissingWorkerCannotBecomeLowThroughput(t *testing.T) {
 	first.values["fleet:complete"], first.values["fleet:secure_complete"], first.values["fleet:quota_complete"] = 0, 0, 0
 	first.values["fleet:runs_needed"] = 100000
 	first.values["fleet:overdue"] = 10000
+	first.values["cohort:mature:quota_complete"] = 0
+	first.values["cohort:mature:runs_needed"] = 100000
 	alerts := runUrlProbeCoverageFixture(t, now, urlProbeCoverageFixtureJson(t, now, first))
 	requireAlertClass(t, alerts, "url-probe-coverage-deficit")
 	requireAlertClass(t, alerts, "url-probe-coverage-unobservable")
@@ -339,6 +360,7 @@ func TestUrlProbeCoverageZeroEligibleIsNotAnOutage(t *testing.T) {
 	for _, state := range urlProbeFleetStates {
 		first.values["fleet:"+state] = 0
 	}
+	first.values["cohort:mature:eligible"], first.values["cohort:mature:quota_complete"] = 0, 0
 	first.values["success"], second.values["success"] = 0, 0
 	if alerts := runUrlProbeCoverageFixture(t, now, urlProbeCoverageFixtureJson(t, now, first, second)); len(alerts) != 0 {
 		t.Fatalf("zero eligible population manufactured a deficit: %+v", alerts)

@@ -54,6 +54,8 @@ type providerUrlProbeFleetCollector struct {
 	oldest         *prometheus.Desc
 	observed       *prometheus.Desc
 	started        *prometheus.Desc
+	cohort         *prometheus.Desc
+	cohortContract *prometheus.Desc
 	refreshMetrics *providerUrlProbeFleetRefreshCollectors
 }
 
@@ -68,6 +70,10 @@ func newProviderUrlProbeFleetCollector() *providerUrlProbeFleetCollector {
 			"UTC comparison timestamp of the last complete successful eligible-fleet database snapshot", nil, nil),
 		started: prometheus.NewDesc("urnetwork_url_probe_cohort_started_timestamp_seconds",
 			"Oldest durable first-eligibility timestamp in the current cohort; zero means no initialized admission", nil, nil),
+		cohort: prometheus.NewDesc("urnetwork_url_probe_admission_cohort",
+			"Current URL quota by immutable first-admission age: mature at four hours, known warming, or unknown age", []string{"cohort", "state"}, nil),
+		cohortContract: prometheus.NewDesc("urnetwork_url_probe_admission_cohort_contract",
+			"Atomic census extension version: 1 partitions current eligibility into mature, warming, and unknown age", nil, nil),
 	}
 }
 
@@ -76,6 +82,8 @@ func (self *providerUrlProbeFleetCollector) Describe(metrics chan<- *prometheus.
 	metrics <- self.oldest
 	metrics <- self.observed
 	metrics <- self.started
+	metrics <- self.cohort
+	metrics <- self.cohortContract
 }
 
 func (self *providerUrlProbeFleetCollector) Collect(metrics chan<- prometheus.Metric) {
@@ -99,6 +107,23 @@ func (self *providerUrlProbeFleetCollector) Collect(metrics chan<- prometheus.Me
 	metrics <- prometheus.MustNewConstMetric(self.oldest, prometheus.GaugeValue, fleet.OldestDueSeconds)
 	metrics <- prometheus.MustNewConstMetric(self.observed, prometheus.GaugeValue, float64(snapshot.observedAt.UnixNano())/float64(time.Second))
 	metrics <- prometheus.MustNewConstMetric(self.started, prometheus.GaugeValue, fleet.CohortStartedAtSeconds)
+	// Keep the existing closed state vocabulary and capability 2 unchanged so
+	// older observers can continue to read the all-current quota census.
+	for _, cohort := range []struct {
+		name                           string
+		eligible, complete, runsNeeded int
+	}{
+		{"mature", fleet.MatureEligible, fleet.MatureQuotaComplete, fleet.MatureRunsNeeded},
+		{"warming", fleet.WarmingEligible, fleet.WarmingQuotaComplete, fleet.WarmingRunsNeeded},
+		{"age_unknown", fleet.EligibilityAgeUnknown, fleet.AgeUnknownQuotaComplete, fleet.AgeUnknownRunsNeeded},
+	} {
+		for state, value := range map[string]int{
+			"eligible": cohort.eligible, "quota_complete": cohort.complete, "runs_needed": cohort.runsNeeded,
+		} {
+			metrics <- prometheus.MustNewConstMetric(self.cohort, prometheus.GaugeValue, float64(value), cohort.name, state)
+		}
+	}
+	metrics <- prometheus.MustNewConstMetric(self.cohortContract, prometheus.GaugeValue, 1)
 }
 
 var urlProbeFleetMetrics = newProviderUrlProbeFleetCollector()
@@ -110,7 +135,7 @@ func (self *providerUrlProbeFleetCollector) refresh(ctx context.Context, observe
 	defer cancel()
 	started := time.Now()
 	// Observe before the deferred cleanup cancellation; retained generations
-	// keep their original comparison clock and fifteen-series atomic shape.
+	// keep their original comparison clock and complete atomic shape.
 	defer func() { self.refreshMetrics.observe(snapshotCtx, refreshErr, time.Since(started)) }()
 	var fleet model.ProviderUrlProbeFleet
 	if failure := server.HandleError(func() { fleet = read(snapshotCtx, observedAt) }); failure != nil {

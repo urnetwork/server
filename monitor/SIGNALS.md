@@ -12253,6 +12253,55 @@ Deleting a grant while escrows or settlement remain open is not cleanup.
 
 ### 2.19f Rolling URL-probe coverage and measured-run capacity
 
+The quota objective applies **four hours after first admission**: every mature
+provider should have ten unique accepted measured outcomes, success plus
+failure, in `(now-4h, now]`. The immutable `cycle_started_at` establishes
+first-admission age, not uninterrupted historical eligibility. Known newcomers
+under four hours form a separate warming cohort, including providers already
+at quota. A brief withdrawal and re-entry preserves that original timestamp;
+an aged deficit cannot escape into a new warming interval. Missing or future
+first-admission timestamps remain `age_unknown`. There is no timestamp
+backfill or schema migration. The unchanged all-current quota stock includes
+all three cohorts and retains every missing measurement.
+
+The additive census family
+`urnetwork_url_probe_admission_cohort{cohort,state}` exposes `mature`,
+`warming`, and `age_unknown`, each with `eligible`, `quota_complete`, and
+`runs_needed`. Their sums must exactly equal the corresponding all-current
+fleet counts; each cohort also requires `quota_complete <= eligible` and
+`eligible-quota_complete <= runs_needed <= 10*(eligible-quota_complete)`.
+`urnetwork_url_probe_admission_cohort_contract=1` is part of the same immutable
+snapshot and uses its original observation clock. All ten extension cells must
+share the old census's underlying scrape timestamp. Missing, malformed, mixed
+or unsupported extension data is unobservable; it does not invalidate an
+independently coherent all-current census or invent an empty mature population.
+This extension reads existing first-admission timestamps without changing
+admission policy, pacing, or accepted-history rules. During mixed deployment,
+an old producer cannot establish mature coverage.
+
+The `url-probe-coverage-deficit` alert now applies to known mature quota
+deficits: WARN for any, PAGE for at least 10% of the mature denominator,
+sustained twice. Known warming deficits remain visible without counting as
+mature failures. Any unknown age also produces an observation warning.
+The known mature ratio may be 100% while unknown age is nonzero, but that is
+only the known subset and cannot establish a whole-fleet maturity verdict.
+A zero mature denominator is N/A, never 100%. Unresolved TLS state has the
+separate `url-probe-security-pending` finding at every eligibility age; the
+unknown-target recovery warning remains. The inclusive 4/5 success quality
+ratio, security exceptions, and ten-measured-outcome quota are distinct rules.
+Hourly acknowledgement capacity still uses all-current demand and cannot prove
+unique accepted credits, per-provider fairness, or sustained completion.
+
+The provider quality probes dashboard has a dedicated URL quota row with the
+known mature ratio, known warming count, unknown age count, all-current quota,
+all nine cohort counts, and separate TLS exceptions. It selects one current,
+unambiguous shard-zero publisher and checks source/scrape clocks and atomic
+cohort partitions. It never sums publisher replicas or substitutes zero for
+absent data. The standing monitor additionally binds desired inventory and
+all configured shard owners. First-admission age does not prove continuous
+eligibility, and two aggregate percentage snapshots alone do not establish
+sustained four-hour coverage of a fixed provider cohort.
+
 URL-turn health and completion counters take their country label from that
 turn's immutable Due place, the same country used to choose its URL catalog.
 Missing or invalid country is `unknown`; it does not trigger an optional
@@ -12504,9 +12553,12 @@ The shard-zero owner alone periodically produces the global census:
   all census cells, independently check the durable observation clock, and
   validate count relationships. Failed/canceled/over-deadline refresh retains
   the old timestamp. Never sum these global gauges across processes.
-- Warmup follows durable first eligibility, not a process restart. Missing
-  cycle rows remain in the eligible denominator, are explicitly uninitialized,
-  and cannot receive an invented new four-hour grace interval.
+- The compatibility `warming` state above remains the incomplete population
+  within four hours of its durable first-cycle timestamp; it is not the new
+  full warming cohort. Missing cycle rows remain in the eligible denominator,
+  are explicitly uninitialized, and cannot receive an invented new four-hour
+  grace interval. Use the additive eligibility-age partition for the mature
+  objective, rather than relabeling this historical state.
 
 `oldest_due_seconds` has a narrower meaning than "oldest overdue provider".
 `GetProviderUrlProbeFleet` (`model/provider_url_probe_fleet.go:33–59`) computes
@@ -12559,10 +12611,11 @@ qualifier: a valid first origin/return pair does not prove the encrypted reply
 carrier succeeded; preserve the exact request branch and local acquisition
 error. Such a setup failure is unmeasured, not a negative provider outcome.
 
-Emit `url-probe-coverage-deficit` WARN for any eligible provider lacking secure
-completion. Escalate to PAGE when at least 10% of eligible providers are
-overdue, sustained for two cadences. Report quota and security deficits
-separately. Emit `url-probe-security-recovery-unknown` WARN when legacy TLS
+Emit `url-probe-coverage-deficit` WARN for any known mature provider lacking
+measured-run quota. Escalate to PAGE when at least 10% of known mature providers
+are quota-deficient, sustained for two cadences. Keep all-current quota counts
+and warming deficits visible. Emit `url-probe-security-pending` WARN for any
+unresolved TLS exception, separately from maturity and quota. Emit `url-probe-security-recovery-unknown` WARN when legacy TLS
 quarantine has no trustworthy destination for same-URL recovery. A different
 URL's success, expired history, or a new policy version does not clear TLS.
 

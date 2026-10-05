@@ -23,6 +23,17 @@ type ProviderUrlProbeFleet struct {
 	MissingCycles          int
 	CohortStartedAtSeconds float64
 	OldestDueSeconds       float64
+	// First admission age never resets on re-entry. These partitions retain
+	// every current provider without granting older providers another grace period.
+	MatureEligible          int
+	MatureQuotaComplete     int
+	MatureRunsNeeded        int
+	WarmingEligible         int
+	WarmingQuotaComplete    int
+	WarmingRunsNeeded       int
+	EligibilityAgeUnknown   int
+	AgeUnknownQuotaComplete int
+	AgeUnknownRunsNeeded    int
 }
 
 // This aggregate belongs on the periodic metrics path, not on every claim.
@@ -56,14 +67,26 @@ func GetProviderUrlProbeFleet(ctx context.Context, now time.Time) ProviderUrlPro
 				COUNT(*) FILTER (WHERE run_count >= $3),
 				COUNT(*) FILTER (WHERE (run_count < $3 OR security_exception) AND cycle_started_at > $4),
 				COUNT(*) FILTER (WHERE client_id IS NULL),
-				COALESCE(MIN(EXTRACT(EPOCH FROM cycle_started_at)),0)
+				COALESCE(MIN(EXTRACT(EPOCH FROM cycle_started_at)),0),
+				COUNT(*) FILTER (WHERE cycle_started_at <= $4),
+				COUNT(*) FILTER (WHERE cycle_started_at <= $4 AND run_count >= $3),
+				COALESCE(SUM(GREATEST(0,$3-run_count)) FILTER (WHERE cycle_started_at <= $4),0),
+				COUNT(*) FILTER (WHERE cycle_started_at > $4 AND cycle_started_at <= $1),
+				COUNT(*) FILTER (WHERE cycle_started_at > $4 AND cycle_started_at <= $1 AND run_count >= $3),
+				COALESCE(SUM(GREATEST(0,$3-run_count)) FILTER (WHERE cycle_started_at > $4 AND cycle_started_at <= $1),0),
+				COUNT(*) FILTER (WHERE cycle_started_at IS NULL OR cycle_started_at > $1),
+				COUNT(*) FILTER (WHERE (cycle_started_at IS NULL OR cycle_started_at > $1) AND run_count >= $3),
+				COALESCE(SUM(GREATEST(0,$3-run_count)) FILTER (WHERE cycle_started_at IS NULL OR cycle_started_at > $1),0)
 			FROM cohort`, now.UTC(), ProvideModePublic, ProviderUrlProbeRunTarget,
 			now.Add(-ProviderEgressProbeRefreshAge).UTC())
 		server.WithPgResult(rows, err, func() {
 			if rows.Next() {
 				server.Raise(rows.Scan(&fleet.Eligible, &fleet.Due, &fleet.Complete, &fleet.Overdue, &fleet.RunsNeeded, &fleet.OldestDueSeconds,
 					&fleet.SecurityExceptions, &fleet.SecurityUnknownTargets, &fleet.QuotaComplete,
-					&fleet.Warming, &fleet.MissingCycles, &fleet.CohortStartedAtSeconds))
+					&fleet.Warming, &fleet.MissingCycles, &fleet.CohortStartedAtSeconds,
+					&fleet.MatureEligible, &fleet.MatureQuotaComplete, &fleet.MatureRunsNeeded,
+					&fleet.WarmingEligible, &fleet.WarmingQuotaComplete, &fleet.WarmingRunsNeeded,
+					&fleet.EligibilityAgeUnknown, &fleet.AgeUnknownQuotaComplete, &fleet.AgeUnknownRunsNeeded))
 			}
 		})
 	})
