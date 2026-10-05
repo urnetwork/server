@@ -98,6 +98,7 @@ func registry() []specEndpoint {
 		{"POST", "/network/unblock-location", rt(controller.NetworkUnblockLocationArgs{}), rt(controller.NetworkUnblockLocationResult{})},
 		{"GET", "/network/blocked-locations", nil, rt(controller.GetNetworkBlockedLocationsResult{})},
 		{"GET", "/network/reliability", nil, rt(controller.GetNetworkReliabilityResult{})},
+		{"GET", "/network/provider-status", nil, rt(controller.GetProviderStatusResult{})},
 		{"GET", "/network/user", nil, rt(controller.GetNetworkUserResult{})},
 		{"POST", "/network/user/update", rt(controller.UpdateNetworkNameArgs{}), rt(controller.UpdateNetworkNameResult{})},
 		{method: "POST", path: "/network/extender-activate", argType: rt(controller.ExtenderActivateArgs{}), resultType: rt(controller.ExtenderActivateResult{})},
