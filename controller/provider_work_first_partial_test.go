@@ -260,7 +260,7 @@ func TestProviderWorkFirstPartialSdkEpochPublishesOnlyNewEarnings(t *testing.T) 
 			t.Fatal("publication borrowed or changed the independent earning boundary")
 		}
 		verified, err := payoutartifact.VerifyWholeWorkInventory(ctx, artifact, expected)
-		if err != nil || verified == nil || !verified.Complete || !verified.AttributionComplete || verified.Contracts != 2 || verified.Credited != 2 || len(verified.ReconciledContracts) != 2 || verified.Reports == nil || verified.Reports.UsageBytes != 121 {
+		if err != nil || verified == nil || !verified.Complete || !verified.AttributionComplete || verified.Contracts != 2 || verified.Credited != 2 || len(verified.ReconciledContracts) != 2 || verified.Reports == nil || verified.Reports.ClosedWork.UsageBytes != 121 {
 			t.Fatal("first-partial public verifier lost full originals or exact new earnings", verified, err)
 		}
 		if len(artifact.Providers) != 3 || artifact.Providers[0].UsageBytes != 0 || artifact.Providers[1].UsageBytes != 61 || artifact.Providers[2].UsageBytes != 60 || artifact.TotalUsageBytes != 121 || artifact.EligibleUsageBytes != 121 || len(artifact.Leaves) != 2 || artifact.Leaves[0].ClientID != ([16]byte{2}) || artifact.Leaves[1].ClientID != ([16]byte{3}) || artifact.Leaves[0].ShareBPS != 5041 || artifact.Leaves[1].ShareBPS != 4959 {
@@ -282,7 +282,7 @@ func TestProviderWorkFirstPartialSdkEpochPublishesOnlyNewEarnings(t *testing.T) 
 			t.Fatal(err)
 		}
 		public, err := payoutartifact.VerifyWholeWorkInventoryWithWitness(ctx, artifact, witness, expected)
-		if err != nil || public == nil || !public.Complete || !public.AttributionComplete || public.Reports == nil || public.Reports.UsageBytes != 121 {
+		if err != nil || public == nil || !public.Complete || !public.AttributionComplete || public.Reports == nil || public.Reports.ClosedWork.UsageBytes != 121 {
 			t.Fatal("public companion reinterpreted original first-partial earnings", err)
 		}
 		changedExpected := expected
