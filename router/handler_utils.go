@@ -476,6 +476,23 @@ func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 		}
 	}
 
+	// A refusal that carries its result (network create's coded refusal for a
+	// client that asked for `result_errors`) keeps its 4xx status, so route
+	// metrics still count it as refused, and answers with the result as its
+	// JSON body, where that client reads the code. Read through a one-method
+	// interface like the retry hint above; a body without a 4xx status adds
+	// nothing.
+	var resultBody interface{ HttpErrorResultBody() any }
+	if statusError && statusCode/100 == 4 && errors.As(err, &resultBody) {
+		if body, marshalErr := json.Marshal(resultBody.HttpErrorResultBody()); marshalErr == nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.WriteHeader(statusCode)
+			_, _ = w.Write(append(body, '\n'))
+			return
+		}
+	}
+
 	http.Error(w, message, statusCode)
 	return
 }

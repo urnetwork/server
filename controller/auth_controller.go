@@ -66,7 +66,24 @@ func AuthLogin(
 	   }
 	*/
 
-	result, err := model.AuthLogin(login, session)
+	return authLogin(login, session, model.AuthLogin)
+}
+
+// The model's login, injected so the result handling runs without a database.
+type authLoginFunction func(model.AuthLoginArgs, *session.ClientSession) (*model.AuthLoginResult, error)
+
+// Logs in. A coded refusal (a wallet signature that does not verify for its
+// address) reaches a client that asked for `result_errors` in the result
+// `error`; an older client gets it as the HTTP 401 it had before the code.
+func authLogin(
+	login model.AuthLoginArgs,
+	session *session.ClientSession,
+	modelLogin authLoginFunction,
+) (*model.AuthLoginResult, error) {
+	result, err := modelLogin(login, session)
+	if err == nil && result != nil && result.Error != nil && result.Error.Code != "" && !login.ResultErrors {
+		return nil, fmt.Errorf("401 %s", result.Error.Message)
+	}
 	return result, err
 }
 
