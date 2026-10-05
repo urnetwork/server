@@ -7273,3 +7273,36 @@ Finite history comparison SHA256
 7c9b951cdae1b9ecc2d93814c397c478e1b4e9fe221c7d43df63adf2509723fd;
 current c343 paired reduction SHA256
 58532d3cb6da7290d6fa91621e3caf9e0c37d684748b5458c0fd173da84cda75.
+
+### 2026-10-05 06:58 UTC current Taskworker adoption and continuing deficit
+
+The fresh paired receipts qualify all eight ready Taskworkers on source
+`7cae4081c99219e1c58d576177ad6c21e594589b`, with the same process identity
+and start time in both observations. Over native scrape intervals of
+120.566–135.993 seconds, their counters increased by 362 measured successes
+and 3,493 measured failures, or 30.97135 acknowledged outcomes per second.
+These are current process acknowledgments; a matching unique-history rate and
+saturated capacity have not been established.
+
+The same global publisher advanced its census by 120 seconds. At 06:57:15Z,
+15,967 of 77,550 eligible providers met measured quota (20.58930%), compared
+with 16,169 in the earlier census. Required measurements increased from
+145,833 to 151,325, and 60,295 providers were due. The unchanged denominator
+does not prove unchanged membership. This is an active backlog; the earlier
+near-full quiet interval cannot explain the current shortfall. The arithmetic
+steady requirement for this denominator is 53.85417 unique measurements per
+second, before catch-up work. Stage timing and bounded renewal/history readers
+are independently gated for Root-only observation; their results are still
+needed to distinguish execution delay, scheduler delay, expiry and credit.
+
+Secure coverage is separate: 15,945 providers met it, with 22 security-pending
+cases. Accurate same-URL quarantine, revalidation and exclusion remain required;
+persistent genuine TLS failures must not be forced to pass. The single global
+census is not summed across processes, and seven absent local census snapshots
+do not imply seven failed owners. The earlier old deadline has advanced and
+must not be retained as a current stuck-tail claim. FP2 completion remains open.
+
+Evidence: paired reduction
+`astra-7cae4-v1-v2-coverage-rate-reduction.json` SHA256
+`d111fbceb75195585c5c950e0ac7058de0887ce8f646c5b2f9081e0c4a60dabe`,
+binding actual receipts `ccc723b2…89320` and `22965b2f…560f2`.
