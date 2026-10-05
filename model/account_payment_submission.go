@@ -33,23 +33,31 @@ func ReserveProviderPaymentBasis(ctx context.Context, payment *AccountPayment, w
 		return nil, err
 	}
 	server.Tx(ctx, func(tx server.PgTx) {
-		result, err := tx.Query(ctx, `UPDATE account_payment p SET circle_idempotency_key=COALESCE(circle_idempotency_key,$2)
-			WHERE p.payment_id=$1 AND p.network_id=$3 AND p.wallet_id=$4 AND p.payout_nano_cents=$5
-			AND NOT p.completed AND NOT p.canceled AND p.payment_record IS NULL AND p.tx_hash IS NULL
-			AND EXISTS (SELECT 1 FROM account_wallet w WHERE w.wallet_id=p.wallet_id AND w.network_id=p.network_id
-			AND w.wallet_address=$6 AND w.blockchain=$7 AND w.active)
-			RETURNING circle_idempotency_key`, payment.PaymentId, server.NewId(), payment.NetworkId, wallet.WalletId, payment.Payout, wallet.WalletAddress, wallet.Blockchain)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				var key server.Id
-				server.Raise(result.Scan(&key))
-				basis = &ProviderPaymentBasis{PaymentId: payment.PaymentId, IdempotencyKey: key, NetworkId: payment.NetworkId, WalletId: wallet.WalletId, Payout: payment.Payout, WalletAddress: wallet.WalletAddress, Blockchain: wallet.Blockchain}
-			}
-		})
+		basis = reserveProviderPaymentBasisInTx(ctx, tx, payment, wallet, true)
 		if basis == nil {
 			returnErr = ErrProviderPaymentBasisChanged
 		}
 	}, server.TxReadCommitted)
+	return
+}
+
+// The fresh writer and the compatibility reservation share the same exact
+// payment compare. Only the fresh writer requires an unreserved row.
+func reserveProviderPaymentBasisInTx(ctx context.Context, tx server.PgTx, payment *AccountPayment, wallet *AccountWallet, allowReserved bool) (basis *ProviderPaymentBasis) {
+	result, err := tx.Query(ctx, `UPDATE account_payment p SET circle_idempotency_key=COALESCE(circle_idempotency_key,$2)
+			WHERE p.payment_id=$1 AND p.network_id=$3 AND p.wallet_id=$4 AND p.payout_nano_cents=$5
+			AND NOT p.completed AND NOT p.canceled AND p.payment_record IS NULL AND p.tx_hash IS NULL
+			AND ($8 OR p.circle_idempotency_key IS NULL)
+			AND EXISTS (SELECT 1 FROM account_wallet w WHERE w.wallet_id=p.wallet_id AND w.network_id=p.network_id
+			AND w.wallet_address=$6 AND w.blockchain=$7 AND w.active)
+			RETURNING circle_idempotency_key`, payment.PaymentId, server.NewId(), payment.NetworkId, wallet.WalletId, payment.Payout, wallet.WalletAddress, wallet.Blockchain, allowReserved)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			var key server.Id
+			server.Raise(result.Scan(&key))
+			basis = &ProviderPaymentBasis{PaymentId: payment.PaymentId, IdempotencyKey: key, NetworkId: payment.NetworkId, WalletId: wallet.WalletId, Payout: payment.Payout, WalletAddress: wallet.WalletAddress, Blockchain: wallet.Blockchain}
+		}
+	})
 	return
 }
 
