@@ -18,6 +18,13 @@ type snMainnetMigrationTxSource struct {
 	tx server.PgTx
 }
 
+// Actual transactional observations cross the joined fixture boundary as data.
+// The shared *testing.T assertion runs only on the original test goroutine.
+type snMainnetMigrationAlertObservation struct {
+	alerts []Alert
+	want   string
+}
+
 // A schema qualification retains its first failure without a development rerun.
 func snMainnetMigrationTestEnv() *server.TestEnv {
 	environment := server.DefaultTestEnv()
@@ -163,7 +170,7 @@ func TestMigrationsMainnetOriginalCatalogAcrossPublishedPrefixes(t *testing.T) {
 // Column width, a missing bound, an unreviewed default, a disabled foreign key
 // or a dropped read index must survive through to the actual versioned page.
 func TestMigrationsMainnetOriginalSchemaFaultsReachSignal(t *testing.T) {
-	alertTest := t
+	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
 		for _, fault := range []struct {
 			version int
@@ -198,12 +205,18 @@ func TestMigrationsMainnetOriginalSchemaFaultsReachSignal(t *testing.T) {
 					t.Fatal(err)
 				}
 				want := fmt.Sprintf("%s@v%d", contract.artifact.name, fault.version)
-				if alert := requireAlertClass(alertTest, alerts, "migration-schema-drift"); !strings.Contains(alert.Markdown(), want) {
-					t.Fatalf("actual changed schema omitted %q: %s", want, alert.Markdown())
-				}
+				observed = append(observed, snMainnetMigrationAlertObservation{alerts: alerts, want: want})
 			})
 		}
 	})
+	if len(observed) != 16 {
+		t.Fatalf("mainnet schema fault fixture returned %d alert observations, want 16", len(observed))
+	}
+	for _, observation := range observed {
+		if alert := requireAlertClass(t, observation.alerts, "migration-schema-drift"); !strings.Contains(alert.Markdown(), observation.want) {
+			t.Fatalf("actual changed schema omitted %q: %s", observation.want, alert.Markdown())
+		}
+	}
 }
 
 // A valid FK declaration cannot conceal disabled internal enforcement, and
@@ -270,7 +283,7 @@ func TestMigrationsMainnetOriginalFunctionAndTriggerCustody(t *testing.T) {
 // The approved historical functions remain interpretable as their old
 // contracts, but head779 must identify either unupgraded consumer as drift.
 func TestMigrationsMainnetOriginalJsonUpgradeRejectsLegacyConsumers(t *testing.T) {
-	alertTest := t
+	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
 		for _, legacy := range []struct {
 			version int
@@ -292,12 +305,18 @@ func TestMigrationsMainnetOriginalJsonUpgradeRejectsLegacyConsumers(t *testing.T
 				if err != nil {
 					t.Fatal(err)
 				}
-				if alert := requireAlertClass(alertTest, alerts, "migration-schema-drift"); !strings.Contains(alert.Markdown(), upgrade.artifact.name+"@v779") {
-					t.Fatal("legacy request consumer hid the required v779 repair", alert.Markdown())
-				}
+				observed = append(observed, snMainnetMigrationAlertObservation{alerts: alerts, want: upgrade.artifact.name + "@v779"})
 			})
 		}
 	})
+	if len(observed) != 2 {
+		t.Fatalf("mainnet legacy consumer fixture returned %d alert observations, want 2", len(observed))
+	}
+	for _, observation := range observed {
+		if alert := requireAlertClass(t, observation.alerts, "migration-schema-drift"); !strings.Contains(alert.Markdown(), observation.want) {
+			t.Fatal("legacy request consumer hid the required v779 repair", alert.Markdown())
+		}
+	}
 }
 
 // Removing only the tested guard predicate admits the real weakened schema;
