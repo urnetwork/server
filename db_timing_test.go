@@ -121,7 +121,8 @@ func TestDbTimingCanceledRetryWaitRetainsRollback(t *testing.T) {
 			panic(&pgconn.PgError{Code: "40001", Message: "synthetic serialization failure"})
 		}, &observation)
 	})
-	if recovered != DbContextDoneError || observation.Phases[DbTimingRollback].Count != 1 || observation.Phases[DbTimingRetryWait].Count != 1 || observation.Phases[DbTimingCommit].Count != 0 {
+	recoveredErr, _ := recovered.(error)
+	if !errors.Is(recoveredErr, DbContextDoneError) || !errors.Is(recoveredErr, context.Canceled) || observation.Phases[DbTimingRollback].Count != 1 || observation.Phases[DbTimingRetryWait].Count != 1 || observation.Phases[DbTimingCommit].Count != 0 {
 		t.Fatalf("cancellation changed panic cleanup: %v %+v", recovered, observation)
 	}
 }

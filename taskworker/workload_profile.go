@@ -40,11 +40,21 @@ func (self WorkloadProfile) Validate() error {
 // retained retail, external probing, and removed-target rows untouched; its
 // claim filter also covers jobs independently enqueued by API/controller calls.
 func InitTasksForProfile(ctx context.Context, profile WorkloadProfile) error {
+	if err := initTaskScheduleForProfile(ctx, profile); err != nil {
+		return err
+	}
+	stats.ApplyStreamRetention(ctx)
+	return nil
+}
+
+// The retry owner may recheck these original RunOnce rows without creating a
+// metrics collector, retention reaper or execution loop on a failed attempt.
+func initTaskScheduleForProfile(ctx context.Context, profile WorkloadProfile) error {
 	if err := profile.Validate(); err != nil {
 		return err
 	}
 	if profile == WorkloadProfileProduction {
-		InitTasks(ctx)
+		initTaskSchedule(ctx)
 		return nil
 	}
 	// Match production's per-statement conflict handling for live queue rows;
@@ -58,7 +68,6 @@ func InitTasksForProfile(ctx context.Context, profile WorkloadProfile) error {
 			}
 		}
 	}, server.TxReadCommitted)
-	stats.ApplyStreamRetention(ctx)
 	return nil
 }
 

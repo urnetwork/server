@@ -6,6 +6,7 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
+	"time"
 )
 
 // Routes returns the full set of api routes.
@@ -25,11 +26,23 @@ func Routes() []*router.Route {
 // Only the API lifecycle supplies this authenticated cache; the route never
 // starts a background owner or dials a provider on an upload request.
 func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUpload, notifications ...*model.ContractOriginNotifications) []*router.Route {
+	providerWork := handlers.NewProviderWorkHandlers()
+	verifyRequestClosure := handlers.NewVerifyRequestClosureHandlers()
+	providerWorkBody := router.StreamingBody{IdleTimeout: 60 * time.Second, TransferTimeout: 60 * time.Second, ResponseTimeout: 300 * time.Second, DrainTimeout: 5 * time.Second}
 	connectControl := handlers.ConnectControl
 	if len(notifications) > 0 {
 		connectControl = handlers.ConnectControlWithOriginNotifications(notifications[0])
 	}
 	routes := []*router.Route{
+		router.NewStreamingRoute("POST", "/provider-work/v1/owners", providerWork.ServeHTTP, providerWorkBody),
+		router.NewRoute("GET", "/provider-work/v1/owners", providerWork.ServeHTTP),
+		router.NewRoute("GET", "/provider-work/v1/requests", providerWork.ServeHTTP),
+		router.NewStreamingRoute("POST", "/provider-work/v1/requests", providerWork.ServeHTTP, providerWorkBody),
+		router.NewRoute("GET", "/provider-work/v1/requests/([^/]+)", providerWork.ServeHTTP),
+		router.NewStreamingRoute("POST", "/provider-work/v1/cuts", providerWork.ServeHTTP, providerWorkBody),
+		router.NewRoute("GET", "/provider-work/v1/cuts/([^/]+)", providerWork.ServeHTTP),
+		router.NewStreamingRoute("POST", "/provider-work/v1/authorities", providerWork.ServeHTTP, providerWorkBody),
+		router.NewRoute("GET", "/provider-work/v1/windows", providerWork.ServeHTTP),
 		router.NewRoute("GET", "/privacy.txt", router.Txt),
 		router.NewRoute("GET", "/terms.txt", router.Txt),
 		router.NewRoute("GET", "/vdp.txt", router.Txt),
@@ -255,8 +268,12 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/verify/keys", handlers.GetVerifyKeys),
 		router.NewRoute("GET", "/verify/stats", handlers.GetVerifyStats),
 		router.NewRoute("GET", "/verify/proofs", handlers.GetVerifyProofs),
+		router.NewRoute("POST", "/verify/original", handlers.GetVerifyOriginalRequest),
+		router.NewStreamingRoute("POST", "/verify/original/close", verifyRequestClosure.ServeHTTP, providerWorkBody),
 		// subnet control plane (sn/PLAN.md §5, D-13)
 		router.NewRoute("POST", "/sn/wallet", handlers.SnSetWallet),
+		router.NewRoute("POST", "/sn/wallet/consent", handlers.SnWalletMappingChallenge),
+		router.NewRoute("POST", "/sn/wallet/consent/history", handlers.SnWalletMappingHistory),
 		router.NewRoute("GET", "/sn/wallet", handlers.SnGetWallet),
 		router.NewRoute("POST", "/sn/wallet/validate", handlers.SnValidateWallet),
 		router.NewRoute("GET", "/sn/head", handlers.SnHead),

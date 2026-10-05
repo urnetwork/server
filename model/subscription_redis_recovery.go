@@ -414,38 +414,36 @@ func (self redisReservationCleanup) runOwned(owner context.Context, end time.Tim
 // All joined leaf causes must be transient. A schema, ownership, corrupt-token
 // or authentication refusal cannot be hidden behind a timeout sibling.
 func redisReservationRecoveryRetryable(err error) bool {
-	if err == nil {
+	causes := server.InspectErrorCauses(err)
+	if !causes.Complete {
 		return false
 	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		for _, cause := range joined.Unwrap() {
-			if cause != nil && !redisReservationRecoveryRetryable(cause) {
-				return false
+	for _, node := range causes.Nodes {
+		if !node.Leaf {
+			continue
+		}
+		cause := node.Err
+		if cause == errRedisReservationRequestActive || cause == context.DeadlineExceeded || cause == context.Canceled || cause == io.EOF || cause == net.ErrClosed || cause == redis.ErrClosed || cause == syscall.ECONNRESET || cause == syscall.ECONNREFUSED || cause == syscall.ETIMEDOUT || cause == syscall.EADDRNOTAVAIL {
+			continue
+		}
+		if database, ok := cause.(*pgconn.PgError); ok && database != nil {
+			if strings.HasPrefix(database.Code, "08") || strings.HasPrefix(database.Code, "53") || database.Code == "40001" || database.Code == "40P01" || database.Code == "55P03" || database.Code == "57014" {
+				continue
 			}
+			return false
 		}
-		return true
-	}
-	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		if cause := wrapped.Unwrap(); cause != nil {
-			return redisReservationRecoveryRetryable(cause)
+		if reply, ok := cause.(redis.Error); ok {
+			kind, _, _ := strings.Cut(reply.Error(), " ")
+			switch kind {
+			case "LOADING", "TRYAGAIN", "CLUSTERDOWN", "READONLY", "MASTERDOWN":
+				continue
+			}
+			return false
 		}
-	}
-	if err == errRedisReservationRequestActive || err == context.DeadlineExceeded || err == context.Canceled || err == io.EOF || err == net.ErrClosed || err == redis.ErrClosed || err == syscall.ECONNRESET || err == syscall.ECONNREFUSED || err == syscall.ETIMEDOUT || err == syscall.EADDRNOTAVAIL {
-		return true
-	}
-	if database, ok := err.(*pgconn.PgError); ok {
-		return strings.HasPrefix(database.Code, "08") || strings.HasPrefix(database.Code, "53") || database.Code == "40001" || database.Code == "40P01" || database.Code == "55P03" || database.Code == "57014"
-	}
-	if reply, ok := err.(redis.Error); ok {
-		kind, _, _ := strings.Cut(reply.Error(), " ")
-		switch kind {
-		case "LOADING", "TRYAGAIN", "CLUSTERDOWN", "READONLY", "MASTERDOWN":
-			return true
+		if timeout, ok := cause.(net.Error); ok && timeout.Timeout() {
+			continue
 		}
 		return false
 	}
-	if timeout, ok := err.(net.Error); ok {
-		return timeout.Timeout()
-	}
-	return false
+	return true
 }

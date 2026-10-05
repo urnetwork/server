@@ -426,7 +426,7 @@ func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(R
 			if retryOptions.rerunOnConnectionError {
 				select {
 				case <-ctx.Done():
-					panic(DbContextDoneError)
+					panic(dbContextDoneCause(ctx, connErr))
 				case <-time.After(backoff.NextRetryTimeout()):
 					if retryEndTime.Before(NowUtc()) {
 						panic(connErr)
@@ -459,7 +459,7 @@ func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(R
 			if retryOptions.rerunOnConnectionError {
 				select {
 				case <-ctx.Done():
-					panic(DbContextDoneError)
+					panic(dbContextDoneCause(ctx, connErr))
 				case <-time.After(backoff.NextRetryTimeout()):
 					if retryEndTime.Before(NowUtc()) {
 						panic(connErr)

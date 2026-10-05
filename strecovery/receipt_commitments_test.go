@@ -35,7 +35,12 @@ type receiptCommitmentFixture struct {
 // All three historical attempt kinds use the same independently signed census.
 func receiptCommitmentTestFixture(t testing.TB, winner int) *receiptCommitmentFixture {
 	t.Helper()
-	archive, observations := receiptTestFixture(t, winner)
+	return receiptCommitmentTestFixtureOnChain(t, winner, 31337)
+}
+
+func receiptCommitmentTestFixtureOnChain(t testing.TB, winner int, chainId uint64) *receiptCommitmentFixture {
+	t.Helper()
+	archive, observations := receiptTestFixtureOnChain(t, winner, chainId)
 	fixture := &receiptCommitmentFixture{archive: archive, observations: observations, hashIndexes: map[string]uint64{},
 		commitments: &ReceiptCommitments{Schema: ReceiptCommitmentsSchema, CensusHash: archive.CensusHash}}
 	var cumulative uint64
@@ -45,7 +50,7 @@ func receiptCommitmentTestFixture(t testing.TB, winner int) *receiptCommitmentFi
 			continue
 		}
 		if len(fixture.transactions) == 1 {
-			foreign, _ := censusTestTransaction(t, censusTestKey(t, 3), 1, "execution", false, 100)
+			foreign, _ := censusTestTransactionOnChain(t, censusTestKey(t, 3), 1, "execution", false, 100, chainId)
 			cumulative += 23000
 			fixture.transactions = append(fixture.transactions, foreign)
 			fixture.receipts = append(fixture.receipts, &types.Receipt{Type: foreign.Type(), Status: types.ReceiptStatusSuccessful, CumulativeGasUsed: cumulative, Logs: []*types.Log{}})

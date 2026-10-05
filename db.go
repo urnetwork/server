@@ -622,7 +622,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				select {
 				case <-ctx.Done():
 					timing.finish(DbTimingRetryWait, waitStarted)
-					panic(DbContextDoneError)
+					panic(dbContextDoneCause(ctx, connErr))
 				case <-time.After(backoff.NextRetryTimeout()):
 					timing.finish(DbTimingRetryWait, waitStarted)
 					if retryEndTime.Before(NowUtc()) {
@@ -681,7 +681,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				select {
 				case <-ctx.Done():
 					timing.finish(DbTimingRetryWait, waitStarted)
-					panic(DbContextDoneError)
+					panic(dbContextDoneCause(ctx, pgErr))
 				case <-time.After(backoff.NextRetryTimeout()):
 					timing.finish(DbTimingRetryWait, waitStarted)
 					if retryEndTime.Before(NowUtc()) {
@@ -699,14 +699,14 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 		}
 		if connErr != nil {
 			if connectionContextDone {
-				panic(DbContextDoneError)
+				panic(dbContextDoneCause(ctx, connErr))
 			}
 			if retryOptions.rerunOnConnectionError && connectionRetrySafe && canRetryConnectionError(connErr) {
 				waitStarted := timing.start()
 				select {
 				case <-ctx.Done():
 					timing.finish(DbTimingRetryWait, waitStarted)
-					panic(DbContextDoneError)
+					panic(dbContextDoneCause(ctx, connErr))
 				case <-time.After(backoff.NextRetryTimeout()):
 					timing.finish(DbTimingRetryWait, waitStarted)
 					if retryEndTime.Before(NowUtc()) {
@@ -875,7 +875,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				select {
 				case <-ctx.Done():
 					timing.finish(DbTimingRetryWait, waitStarted)
-					panic(DbContextDoneError)
+					panic(dbContextDoneCause(ctx, pgErr))
 				case <-time.After(backoff.NextRetryTimeout()):
 					timing.finish(DbTimingRetryWait, waitStarted)
 				}
@@ -897,7 +897,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				select {
 				case <-ctx.Done():
 					timing.finish(DbTimingRetryWait, waitStarted)
-					panic(DbContextDoneError)
+					panic(dbContextDoneCause(ctx, commitErr))
 				case <-time.After(backoff.NextRetryTimeout()):
 					timing.finish(DbTimingRetryWait, waitStarted)
 				}

@@ -9547,4 +9547,20 @@ var migrations = []any{
 			PRIMARY KEY (purchase_token)
 		)
 	`),
+	// Optional original evidence is appended after the complete published prefix.
+	// Existing v764 receipts keep their schema, custody and rolling-writer role.
+	newSqlMigration(contractCloseReportEvidenceSchemaSql),
+	newSqlMigration(contractCloseOriginalSchemaSql),
+	newSqlMigration(contractCloseInventorySchemaSql),
+	newSqlMigration(verifyOriginalSchemaSql),
+	newSqlMigration(providerWorkOriginalSchemaSql),
+	newSqlMigration(walletMappingConsentSchemaSql),
+	newSqlMigration(verifyOriginalRequestSchemaSql),
+	newSqlMigration(providerWorkOwnerSchemaSql),
+	newSqlMigration(verifyRequestClosureSchemaSql),
+	newSqlMigration(providerWorkSessionSchemaSql),
+	newSqlMigration(stOperatorGasSchemaSql),
+	newSqlMigration(providerWorkOpenSchemaSql),
+	newSqlMigration(verifyOriginalRequestJsonRepairSql),
+	newSqlMigration(stNativeFeeSettlementSchemaSql),
 }

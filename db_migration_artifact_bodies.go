@@ -13,3 +13,8 @@ func ProviderPayoutBoundaryGuardBodySql() string {
 func TransferDebitGuardBodySql() string {
 	return strings.Split(transferDebitJournalSchemaSql, "$guard$")[1]
 }
+
+// The monitor compares exact immutable evidence custody without rewriting it.
+func ContractCloseEvidenceGuardBodySql() string {
+	return strings.Split(contractCloseReportEvidenceSchemaSql, "$close_report_guard$")[1]
+}

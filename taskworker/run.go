@@ -15,8 +15,8 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
-	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/stats"
 	"github.com/urnetwork/server/task"
 )
 
@@ -79,7 +79,7 @@ func Run(ctx context.Context, options RunOptions) error {
 	return runWithDependencies(
 		ctx,
 		options,
-		router.StartupReadiness,
+		router.CheckStartupReadiness,
 		server.StartStatsPusher,
 		server.HttpListenAndServeWithReusePort,
 		startTaskworkerRuntime,
@@ -97,13 +97,40 @@ type taskworkerRuntime interface {
 
 // startTaskworkerRuntime initializes the registered tasks, queue collector,
 // and execution loops after readiness has admitted this process.
-func startTaskworkerRuntime(ctx context.Context, cancel context.CancelFunc, options RunOptions) taskworkerRuntime {
-	controller.StartStatsCollector(ctx)
-	server.Raise(InitTasksForProfile(ctx, options.WorkloadProfile))
+func startTaskworkerRuntime(admission context.Context, ctx context.Context, cancel context.CancelFunc, options RunOptions) (runtime taskworkerRuntime, returnErr error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if err, ok := recovered.(error); ok {
+				returnErr = fmt.Errorf("taskworker initialization: %w", err)
+			} else {
+				returnErr = fmt.Errorf("taskworker initialization: %v", recovered)
+			}
+		}
+	}()
+	if err := admission.Err(); err != nil {
+		return nil, err
+	}
+	// Initialization only rearms the existing idempotent RunOnce identities.
+	// Keep its reads/transactions cancelable before starting lifetime workers.
+	if err := initTaskScheduleForProfile(admission, options.WorkloadProfile); err != nil {
+		return nil, err
+	}
+	if err := admission.Err(); err != nil {
+		return nil, err
+	}
 	settings := task.DefaultTaskWorkerSettings()
 	settings.BatchSize = options.BatchSize
 	worker, err := InitTaskWorkerForProfile(ctx, settings, options.WorkloadProfile)
-	server.Raise(err)
+	if err != nil {
+		return nil, err
+	}
+	// Once constructed, the original worker belongs to the drain owner even
+	// if later observer startup fails. It must never become another attempt.
+	runtime = worker
+	// Retention is a best-effort lifetime observer. Its local reaper must not
+	// inherit the finite scheduling attempt, and storage I/O cannot gate work.
+	go server.HandleError(func() { stats.ApplyStreamRetention(ctx) })
+	controller.StartStatsCollector(ctx)
 	task.StartQueueMetrics(ctx)
 	for range options.Count {
 		go server.HandleError(func() {
@@ -118,7 +145,7 @@ func startTaskworkerRuntime(ctx context.Context, cancel context.CancelFunc, opti
 			}
 		})
 	}
-	return worker
+	return worker, nil
 }
 
 func runWithDependencies(
@@ -127,7 +154,7 @@ func runWithDependencies(
 	readiness func(context.Context) error,
 	startStatsPusher func(context.Context) func(),
 	listenAndServe func(context.Context, string, http.Handler, bool, server.HttpServerOptions) error,
-	startRuntime func(context.Context, context.CancelFunc, RunOptions) taskworkerRuntime,
+	startRuntime func(context.Context, context.Context, context.CancelFunc, RunOptions) (taskworkerRuntime, error),
 ) error {
 	return runWithDependenciesAndDrainLogger(ctx, options, readiness, startStatsPusher, listenAndServe, startRuntime, glog.Infof)
 }
@@ -138,8 +165,23 @@ func runWithDependenciesAndDrainLogger(
 	readiness func(context.Context) error,
 	startStatsPusher func(context.Context) func(),
 	listenAndServe func(context.Context, string, http.Handler, bool, server.HttpServerOptions) error,
-	startRuntime func(context.Context, context.CancelFunc, RunOptions) taskworkerRuntime,
+	startRuntime func(context.Context, context.Context, context.CancelFunc, RunOptions) (taskworkerRuntime, error),
 	drainLogf func(string, ...any),
+) error {
+	return runWithStartupWait(ctx, options, readiness, startStatsPusher, listenAndServe, startRuntime, drainLogf, waitTaskworkerStartup)
+}
+
+// Startup owns bounded dependency reads while the closed status remains
+// available. The same drain path joins startup before using its runtime.
+func runWithStartupWait(
+	ctx context.Context,
+	options RunOptions,
+	readiness func(context.Context) error,
+	startStatsPusher func(context.Context) func(),
+	listenAndServe func(context.Context, string, http.Handler, bool, server.HttpServerOptions) error,
+	startRuntime func(context.Context, context.Context, context.CancelFunc, RunOptions) (taskworkerRuntime, error),
+	drainLogf func(string, ...any),
+	startupWait func(context.Context, time.Duration) error,
 ) error {
 	if ctx == nil {
 		return errors.New("taskworker run context is nil")
@@ -159,54 +201,42 @@ func runWithDependenciesAndDrainLogger(
 
 	glog.Infof("[taskworker]starting %s %s %d task workers with batch size %d\n", server.RequireEnv(), server.RequireVersion(), options.Count, options.BatchSize)
 
-	var worker taskworkerRuntime
-	flushStats := func() {}
-	if err := readiness(runCtx); err != nil {
-		glog.Infof("[taskworker]not ready (%s)\n", err)
-		readyGauge.Set(0)
-	} else {
-		config, captureErr := server.LoadArinShadowRuntimeConfig()
-		var capture *server.ArinShadowRuntime
-		if captureErr == nil {
-			capture, captureErr = server.StartArinShadowRuntime(runCtx, config, "native", func(lifetime context.Context) (server.ArinShadowRPCHandler, func(), error) {
-				return model.NewArinShadowNativeRPC(lifetime, config.Capacity)
-			})
-		}
-		if captureErr != nil {
-			// Keep strict capture refusal separate from primary worker readiness.
-			glog.Errorf("[arin-shadow]optional capture unavailable; continuing primary service startup\n")
-		}
-		defer capture.Close()
-		worker = startRuntime(runCtx, cancel, options)
-		readyGauge.Set(1)
-		// Failed readiness keeps /status visible without publishing a new
-		// process cohort or starting the DB/chain stats collector.
-		flushStats = startStatsPusher(runCtx)
-	}
-
-	draining := make(chan struct{})
+	admission, cancelAdmission := context.WithCancel(ctx)
+	defer cancelAdmission()
+	readyGauge.Set(0)
+	router.SetWarpStatusNotReady(errors.New("startup dependency checks pending"))
+	var startup taskworkerStartupResult
+	startupDone := make(chan struct{})
 	go func() {
+		defer close(startupDone)
+		startup = startTaskworkerAfterReadiness(admission, runCtx, cancel, options, readiness, startStatsPusher, startRuntime, startupWait)
+	}()
+	shutdown := make(chan struct{})
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
 		select {
 		case <-ctx.Done():
-			router.SetWarpStatusDrainingIfReady()
-			readyGauge.Set(0)
-			if worker != nil {
-				drainStart := time.Now()
-				inflight := worker.InflightCount()
-				drainInflightGauge.Set(float64(inflight))
-				logDrainAsync("[taskworker]drain start with %d in flight\n", inflight)
-				worker.Drain()
-				if !worker.WaitFinalHandback() {
-					logDrainAsync("[taskworker]final handback grace ended with %d tasks still running; claims remain leased\n", worker.InflightCount())
-				}
-				drainSecondsGauge.Set(time.Since(drainStart).Seconds())
-				drainCanceledGauge.Set(float64(worker.DrainCanceledCount()))
-			}
-			cancel()
-		case <-draining:
+		case <-shutdown:
 		}
+		cancelAdmission()
+		<-startupDone
+		router.SetWarpStatusDrainingIfReady()
+		readyGauge.Set(0)
+		if worker := startup.worker; worker != nil {
+			drainStart := time.Now()
+			inflight := worker.InflightCount()
+			drainInflightGauge.Set(float64(inflight))
+			logDrainAsync("[taskworker]drain start with %d in flight\n", inflight)
+			worker.Drain()
+			if !worker.WaitFinalHandback() {
+				logDrainAsync("[taskworker]final handback grace ended with %d tasks still running; claims remain leased\n", worker.InflightCount())
+			}
+			drainSecondsGauge.Set(time.Since(drainStart).Seconds())
+			drainCanceledGauge.Set(float64(worker.DrainCanceledCount()))
+		}
+		cancel()
 	}()
-	defer close(draining)
 
 	glog.Infof("[taskworker]serving %s %s on *:%d\n", server.RequireEnv(), server.RequireVersion(), options.Port)
 	listenIPv4, _, listenPort := server.RequireListenIpPort(options.Port)
@@ -222,16 +252,27 @@ func runWithDependenciesAndDrainLogger(
 			ShutdownTimeout: 30 * time.Second,
 		},
 	)
-	if err != nil && runCtx.Err() == nil {
-		return err
-	}
+	unavailable := err != nil && runCtx.Err() == nil && ctx.Err() == nil
+	close(shutdown)
+	<-drained
 	if err != nil {
 		logDrainAsync("[taskworker]status server shutdown error (%s)\n", err)
 	}
 	// Drain and final claim handback have completed before runCtx is canceled.
 	// Push once more so those terminal execution, queue, and drain samples are
 	// not lost with the process.
-	flushStats()
+	if startup.flushStats != nil {
+		startup.flushStats()
+	}
+	if startup.closeCapture != nil {
+		startup.closeCapture()
+	}
 	logDrainAsync("[taskworker]close\n")
+	if unavailable {
+		return err
+	}
+	if startup.worker != nil && startup.err != nil {
+		return startup.err
+	}
 	return nil
 }

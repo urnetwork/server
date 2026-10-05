@@ -1,10 +1,10 @@
 package model
 
 // verify_model.go — state model for the `/verify` routing-verification
-// protocol (sn/VALIDATOR.md §§5-8). Redis holds all hot per-trail and
-// per-provider state so the trail path puts no pressure on Postgres; Postgres
-// gets only completed/expired proofs (`verify_trail`, VALIDATOR.md §6.2) and
-// periodic per-provider stat rollups (`verify_provider_stats`).
+// protocol (sn/VALIDATOR.md §§5-8). Redis holds hot per-trail/provider state.
+// PostgreSQL retains each signed transition before publication, terminal proofs
+// and the derived provider-stat projection. Missing historical originals remain
+// unknown rather than being reconstructed from that mutable projection.
 //
 // Redis key map (cluster rule: keys touched in one pipeline share a `{...}`
 // hash tag):
@@ -190,12 +190,14 @@ func (self *VerifySettings) TrailTtl(m int) time.Duration {
 // confirmation from the confirming request's source ip (zero while pending)
 // and carried verbatim into the published FINAL proof.
 type VerifyTrailHop struct {
-	ClientId     server.Id `json:"client_id"`
-	AssignedMs   uint64    `json:"assigned_ms"`
-	ConfirmedMs  uint64    `json:"confirmed_ms"`
-	AssignN      int       `json:"assign_n"`
-	Seed         bool      `json:"seed,omitempty"`
-	EgressIpHash [32]byte  `json:"egress_ip_hash"`
+	ClientId     server.Id  `json:"client_id"`
+	NetworkId    *server.Id `json:"network_id,omitempty"`
+	NetworkIssue string     `json:"network_issue,omitempty"`
+	AssignedMs   uint64     `json:"assigned_ms"`
+	ConfirmedMs  uint64     `json:"confirmed_ms"`
+	AssignN      int        `json:"assign_n"`
+	Seed         bool       `json:"seed,omitempty"`
+	EgressIpHash [32]byte   `json:"egress_ip_hash"`
 }
 
 // VerifyTrail is the full redis state of one trail (§6.1). `Hops` are the
@@ -1182,7 +1184,7 @@ func ExpireVerifyTrail(
 	trailId server.Id,
 ) {
 	server.Redis(ctx, func(r server.RedisClient) {
-		r.HSet(ctx, verifyTrailHeaderKey(trailId), "status", VerifyTrailStatusExpired)
+		server.Raise(r.HSet(ctx, verifyTrailHeaderKey(trailId), "status", VerifyTrailStatusExpired).Err())
 		err := r.ZRem(ctx, verifyReapKey, trailId.String()).Err()
 		server.Raise(err)
 	})
@@ -1305,17 +1307,18 @@ func VerifyLatencyPercentiles(bucketCounts map[int]int64) (p50 *int, p90 *int, p
 
 // VerifyTrailRow is one durable `verify_trail` record (VALIDATOR.md §6.2).
 type VerifyTrailRow struct {
-	TrailId      server.Id
-	Vpk          []byte
-	ServerKeyId  byte
-	ServerNonce  []byte
-	Depth        int
-	Status       int
-	HopsJson     string
-	FinalSig     []byte
-	VerifierSig  []byte
-	CreateTime   time.Time
-	CompleteTime *time.Time
+	TrailId       server.Id
+	Vpk           []byte
+	ServerKeyId   byte
+	ServerNonce   []byte
+	Depth         int
+	Status        int
+	HopsJson      string
+	FinalSig      []byte
+	VerifierSig   []byte
+	CreateTime    time.Time
+	CompleteTime  *time.Time
+	OriginalState []byte
 }
 
 // InsertVerifyTrail durably persists a completed or expired trail (never a
@@ -1340,9 +1343,10 @@ func InsertVerifyTrail(
 				final_sig,
 				verifier_sig,
 				create_time,
-				complete_time
+				complete_time,
+				original_state
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 			ON CONFLICT (trail_id) DO NOTHING
 			`,
 			row.TrailId,
@@ -1356,7 +1360,9 @@ func InsertVerifyTrail(
 			row.VerifierSig,
 			row.CreateTime.UTC(),
 			row.CompleteTime,
+			row.OriginalState,
 		))
+		server.RaisePgResult(tx.Exec(ctx, `DELETE FROM verify_original_pending WHERE trail_id=$1`, row.TrailId))
 	})
 }
 
@@ -1379,7 +1385,8 @@ func GetVerifyTrailRow(
 				final_sig,
 				verifier_sig,
 				create_time,
-				complete_time
+				complete_time,
+				original_state
 			FROM verify_trail
 			WHERE trail_id = $1
 			`,
@@ -1402,6 +1409,7 @@ func GetVerifyTrailRow(
 					&r.VerifierSig,
 					&r.CreateTime,
 					&r.CompleteTime,
+					&r.OriginalState,
 				))
 				r.ServerKeyId = byte(serverKeyId)
 				row = r
@@ -1421,7 +1429,7 @@ func ListVerifyTrailRows(ctx context.Context, minTime, maxTime time.Time, limit 
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(ctx, `
 			SELECT trail_id, vpk, server_key_id, server_nonce, depth, status,
-				hops_json, final_sig, verifier_sig, create_time, complete_time
+				hops_json, final_sig, verifier_sig, create_time, complete_time, original_state
 			FROM verify_trail
 			WHERE create_time >= $1 AND create_time < $2
 			ORDER BY create_time, trail_id
@@ -1433,7 +1441,7 @@ func ListVerifyTrailRows(ctx context.Context, minTime, maxTime time.Time, limit 
 				var serverKeyId int16
 				server.Raise(result.Scan(&row.TrailId, &row.Vpk, &serverKeyId,
 					&row.ServerNonce, &row.Depth, &row.Status, &row.HopsJson,
-					&row.FinalSig, &row.VerifierSig, &row.CreateTime, &row.CompleteTime))
+					&row.FinalSig, &row.VerifierSig, &row.CreateTime, &row.CompleteTime, &row.OriginalState))
 				row.ServerKeyId = byte(serverKeyId)
 				rows = append(rows, row)
 			}
@@ -1469,6 +1477,16 @@ func SweepExpiredVerifyTrails(
 		}
 	})
 
+	seenTrailIds := map[string]bool{}
+	for _, trailId := range trailIdStrs {
+		seenTrailIds[trailId] = true
+	}
+	for _, trailId := range dueVerifyOriginalTrails(ctx, now, settings.SweepLimit) {
+		if !seenTrailIds[trailId] {
+			trailIdStrs = append(trailIdStrs, trailId)
+			seenTrailIds[trailId] = true
+		}
+	}
 	for _, trailIdStr := range trailIdStrs {
 		trailId, err := server.ParseId(trailIdStr)
 		if err != nil {
@@ -1479,7 +1497,16 @@ func SweepExpiredVerifyTrails(
 		}
 
 		trail := GetVerifyTrail(ctx, trailId)
-		if trail == nil || trail.Status != VerifyTrailStatusActive {
+		originalRecovery := false
+		if trail == nil {
+			if original := GetLatestVerifyOriginal(ctx, trailId); original != nil {
+				body, err := DecodeVerifyOriginal(original)
+				server.Raise(err)
+				trail = body.Trail
+				originalRecovery = true
+			}
+		}
+		if trail == nil || (trail.Status != VerifyTrailStatusActive && !originalRecovery) {
 			// ttl-expired or already terminal: drop the registry entry
 			server.Redis(ctx, func(r server.RedisClient) {
 				r.ZRem(ctx, verifyReapKey, trailIdStr)
@@ -1501,6 +1528,20 @@ func SweepExpiredVerifyTrails(
 			// The pre-lock snapshot may have changed while waiting. All expiry
 			// decisions and durable evidence below use the fenced reload.
 			trail = GetVerifyTrail(ctx, trailId)
+			var originalDeadlineMs uint64
+			if original := GetLatestVerifyOriginal(ctx, trailId); original != nil {
+				body, err := DecodeVerifyOriginal(original)
+				server.Raise(err)
+				if trail != nil {
+					server.Raise(VerifyOriginalMatchesTrail(body, trail))
+				}
+				if trail == nil || len(trail.Hops) < len(body.Trail.Hops) {
+					trail = PublishVerifyOriginal(ctx, original, settings).Trail
+				}
+				if trail.Pending != nil && body.Trail.Pending != nil && trail.Pending.ClientId == body.Trail.Pending.ClientId && len(trail.Hops) == len(body.Trail.Hops) {
+					originalDeadlineMs = body.RecoveryMs
+				}
+			}
 			if trail == nil || trail.Status != VerifyTrailStatusActive {
 				server.Redis(ctx, func(r server.RedisClient) {
 					r.ZRem(ctx, verifyReapKey, trailIdStr)
@@ -1510,6 +1551,9 @@ func SweepExpiredVerifyTrails(
 
 			if trail.Pending != nil {
 				deadlineMs := trail.Pending.AssignedMs + uint64((settings.StepTimeout+settings.StepTimeoutGrace)/time.Millisecond)
+				if originalDeadlineMs != 0 {
+					deadlineMs = originalDeadlineMs
+				}
 				if nowMs < deadlineMs {
 					// activity since the registry score was written: re-score
 					server.Redis(ctx, func(r server.RedisClient) {
@@ -1522,11 +1566,11 @@ func SweepExpiredVerifyTrails(
 				}
 			}
 
-			ExpireVerifyTrail(ctx, trailId)
-			DecrVerifyActiveTrails(ctx, trail.Vpk)
 			if !trail.Poison {
 				InsertVerifyTrail(ctx, NewExpiredVerifyTrailRow(trail))
 			}
+			ExpireVerifyTrail(ctx, trailId)
+			DecrVerifyActiveTrails(ctx, trail.Vpk)
 			sweptCount += 1
 			if glog.V(1) {
 				glog.Infof("[verify]reaped expired trail %s (depth %d, poison=%t)\n", trailId, len(trail.Hops), trail.Poison)
@@ -1552,15 +1596,18 @@ func NewExpiredVerifyTrailRow(trail *VerifyTrail) *VerifyTrailRow {
 	}
 	hopsJsonBytes, err := json.Marshal(hops)
 	server.Raise(err)
+	originalState, err := json.Marshal(trail)
+	server.Raise(err)
 	return &VerifyTrailRow{
-		TrailId:     trail.TrailId,
-		Vpk:         trail.Vpk,
-		ServerKeyId: trail.ServerKeyId,
-		ServerNonce: trail.ServerNonce,
-		Depth:       len(trail.Hops),
-		Status:      VerifyTrailRowStatusExpired,
-		HopsJson:    string(hopsJsonBytes),
-		CreateTime:  time.UnixMilli(int64(trail.CreateMs)).UTC(),
+		TrailId:       trail.TrailId,
+		Vpk:           trail.Vpk,
+		ServerKeyId:   trail.ServerKeyId,
+		ServerNonce:   trail.ServerNonce,
+		Depth:         len(trail.Hops),
+		Status:        VerifyTrailRowStatusExpired,
+		HopsJson:      string(hopsJsonBytes),
+		CreateTime:    time.UnixMilli(int64(trail.CreateMs)).UTC(),
+		OriginalState: originalState,
 	}
 }
 

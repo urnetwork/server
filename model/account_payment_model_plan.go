@@ -56,7 +56,8 @@ type PaymentPlanner struct {
 	seekerHolderNetworkIds map[server.Id]bool
 
 	// networkId -> AccountPayment
-	networkPayments map[server.Id]*AccountPayment
+	networkPayments    map[server.Id]*AccountPayment
+	networkSweepCounts map[server.Id]int64
 
 	// networkId -> parent referralNetworkId
 	referralNetworks map[server.Id]server.Id
@@ -78,6 +79,13 @@ type PaymentPlanner struct {
 // ever accidentally persist a payment, mark a sweep paid, or apply points.
 var errPaymentPlanDryRun = errors.New("payment plan dry run")
 
+// Every planner shares the database's unpaid sweeps and subsidy frontier,
+// including dry runs and callers in other processes. The transaction owns the
+// lock, so cancellation, rollback and connection loss release it automatically.
+const paymentPlanLockKey = "provider-payment-plan/v1"
+
+var errPaymentPlanSelectionChanged = errors.New("payment plan sweep ownership changed; allocation rolled back for retry")
+
 func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun bool, maxDuration time.Duration) (paymentPlan *PaymentPlan, returnErr error) {
 	return createPaymentPlan(ctx, subsidyConfig, dryRun, maxDuration, true)
 }
@@ -94,7 +102,7 @@ func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun bool, maxDuration time.Duration, refreshReliabilityInputs bool) (paymentPlan *PaymentPlan, returnErr error) {
 	defer func() {
 		if value := recover(); value != nil {
-			if err, ok := value.(error); ok && (errors.Is(err, ErrProviderLegacyReliabilityWindow) ||
+			if err, ok := value.(error); ok && (errors.Is(err, ErrProviderLegacyReliabilityWindow) || errors.Is(err, errPaymentPlanSelectionChanged) ||
 				errors.Is(err, server.ErrProviderEarningBoundaryUnavailable) || errors.Is(err, server.ErrProviderEarningBoundaryMismatch) ||
 				errors.Is(err, server.ErrProviderEarningBoundaryUnprepared) || errors.Is(err, server.ErrProviderEarningBoundarySchema)) {
 				paymentPlan = nil
@@ -136,6 +144,9 @@ func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 
 	server.Tx(ctx, func(tx server.PgTx) {
 		configurePaymentPlanTransaction(ctx, tx)
+		// ReadCommitted takes the sweep/frontier snapshot only after the prior
+		// planner commits. A process-local lock cannot serialize CLI and workers.
+		server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, paymentPlanLockKey))
 		if dryRun {
 			// force this transaction to roll back however the callback exits, so
 			// the dry run persists nothing. `paymentPlan` is populated before
@@ -309,6 +320,7 @@ func (self *PaymentPlanner) computePlanUpperBound() {
 func (self *PaymentPlanner) planPayments() (returnErr error) {
 	// networkId -> parent referralNetworkId
 	self.referralNetworks = map[server.Id]server.Id{}
+	self.networkSweepCounts = map[server.Id]int64{}
 
 	// when maxDuration is set, restrict the swept set to a bounded close-time
 	// window so this plan stays small. sets self.bounded / self.upperBound.
@@ -373,7 +385,8 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 			u.network_id,
 			u.payout_byte_count,
 			u.payout_net_revenue_nano_cents,
-			u.sweep_time
+			u.sweep_time,
+			u.payment_id AS previous_payment_id
 
         FROM (
             SELECT
@@ -383,6 +396,7 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 				transfer_escrow_sweep.payout_byte_count,
 				transfer_escrow_sweep.payout_net_revenue_nano_cents,
 				transfer_escrow_sweep.sweep_time,
+				transfer_escrow_sweep.payment_id,
 				false AS preserve_legacy_components
             FROM transfer_escrow_sweep
             WHERE transfer_escrow_sweep.payment_id IS NULL
@@ -396,6 +410,7 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 				s.payout_byte_count,
 				s.payout_net_revenue_nano_cents,
 				s.sweep_time,
+				s.payment_id,
 				(ap.subsidy_payout_nano_cents>0 OR ap.reliability_subsidy_nano_cents>0) AS preserve_legacy_components
             FROM account_payment ap
             INNER JOIN transfer_escrow_sweep s ON
@@ -428,7 +443,8 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 				network_referral.referral_network_id,
 				SUM(temp_account_payment.payout_byte_count)::bigint,
 				SUM(temp_account_payment.payout_net_revenue_nano_cents)::bigint,
-				MIN(temp_account_payment.sweep_time)
+				MIN(temp_account_payment.sweep_time),
+				COUNT(*)
 
 			FROM temp_account_payment
 
@@ -447,6 +463,7 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 			var payoutByteCount ByteCount
 			var payoutNetRevenue NanoCents
 			var minSweepTime time.Time
+			var sweepCount int64
 			// var walletId *server.Id
 			server.Raise(result.Scan(
 				&networkId,
@@ -454,6 +471,7 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 				&payoutByteCount,
 				&payoutNetRevenue,
 				&minSweepTime,
+				&sweepCount,
 				// &walletId,
 			))
 
@@ -480,6 +498,7 @@ func (self *PaymentPlanner) planPayments() (returnErr error) {
 			payment.Payout += payoutNetRevenue
 
 			payment.MinSweepTime = minSweepTime
+			self.networkSweepCounts[networkId] = sweepCount
 		}
 	})
 
@@ -1008,7 +1027,13 @@ func (self *PaymentPlanner) finalizePayments() {
 
 	self.assignPaymentBonuses()
 
-	server.RaisePgResult(self.tx.Exec(
+	// A nonparticipating writer cannot replace the selected original owner and
+	// leave this plan's amounts/points committed against somebody else's sweeps.
+	var expectedSweepCount int64
+	for networkId := range self.networkPayments {
+		expectedSweepCount += self.networkSweepCounts[networkId]
+	}
+	tag := server.RaisePgResult(self.tx.Exec(
 		self.ctx,
 		`
 			UPDATE transfer_escrow_sweep AS sweep
@@ -1021,9 +1046,13 @@ func (self *PaymentPlanner) finalizePayments() {
 				sweep.contract_id = selected_escrow.contract_id AND
 				sweep.balance_id = selected_escrow.balance_id AND
 				sweep.network_id = selected_escrow.network_id AND
-				sweep.network_id = payment_network_ids.network_id
+				sweep.network_id = payment_network_ids.network_id AND
+				sweep.payment_id IS NOT DISTINCT FROM selected_escrow.previous_payment_id
 		`,
 	))
+	if tag.RowsAffected() != expectedSweepCount {
+		panic(errPaymentPlanSelectionChanged)
+	}
 
 	// The leaderboard's per-week paid-traffic attribution is processed by a
 	// separate bounded task after this payout transaction commits. A full plan

@@ -515,9 +515,9 @@ func TestStEventsDedupOrderAndHighWater(t *testing.T) {
 			{BlockNumber: 5, LogIndex: 0, TxHash: "0x1", Kind: "HeadUnbound", DataJson: `{}`},
 			{BlockNumber: 3, LogIndex: 7, TxHash: "0x0", Kind: "OperatorCommitted", DataJson: `{}`},
 		})
-		// conservative re-scan: the duplicate (5, 2) must be ignored, first write wins
+		// An exact replay is idempotent; changed evidence is tested separately.
 		UpsertStEvents(ctx, testStDeploymentKey, []*StChainEvent{
-			{BlockNumber: 5, LogIndex: 2, TxHash: "0x1", Kind: "HeadBound", DataJson: `{"a":2}`},
+			{BlockNumber: 5, LogIndex: 2, TxHash: "0x1", Kind: "HeadBound", DataJson: `{"a":1}`},
 		})
 
 		events := GetStEvents(ctx, testStDeploymentKey, 0, 10)

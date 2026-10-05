@@ -4,8 +4,9 @@ package task
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 // The target owns the complete failure it wraps; a nested hint inside a joined
@@ -53,12 +54,15 @@ func WithRetryDelayAndArgs(err error, delay time.Duration, args any) error {
 // A root hint owns its complete failure; joins/wrappers never grant checkpoint
 // authority to another error. Cancellation and ownership loss remain retriable.
 func taskRetryCheckpointAllowed(hint *retryDelayError) bool {
+	if hint == nil {
+		return false
+	}
 	if _, joined := hint.cause.(interface{ Unwrap() []error }); joined {
 		return false
 	}
-	return validTaskRetryDelay(hint.delay) &&
-		!errors.Is(hint, context.Canceled) && !errors.Is(hint, context.DeadlineExceeded) &&
-		!errors.Is(hint, ErrDrained) && !errors.Is(hint, ErrTargetNotFound)
+	causes := inspectTaskRetryCauses(hint)
+	return validTaskRetryDelay(hint.delay) && causes.complete &&
+		!causes.canceled && !causes.drained && !causes.targetMissing
 }
 
 // Reads an immutable checkpoint only from the exact completed target failure.
@@ -101,9 +105,10 @@ func WithErrorRetryCap(target Target, maxDelay time.Duration) Target {
 }
 
 func taskTargetErrorRetryDelay(target Target, err error, errorCount int, randomUnit float64) (time.Duration, int) {
-	delay, delta := taskErrorRetryDelay(err, errorCount, randomUnit)
+	causes := inspectTaskRetryCauses(err)
+	delay, delta := taskErrorRetryDelayWithCauses(err, errorCount, randomUnit, causes)
 	if capped, ok := target.(*errorRetryCappedTarget); ok && validTaskRetryDelay(capped.maxDelay) &&
-		!errors.Is(err, ErrDrained) && !errors.Is(err, ErrTargetNotFound) {
+		causes.complete && !causes.drained && !causes.targetMissing {
 		delay = min(delay, capped.maxDelay)
 	}
 	return delay, delta
@@ -112,15 +117,19 @@ func taskTargetErrorRetryDelay(target Target, err error, errorCount int, randomU
 // Drain/version-skew precedence and ordinary jitter are unchanged. Only a root
 // wrapper can supply a hint; cancellation remains ordinary backoff even inside it.
 func taskErrorRetryDelay(err error, errorCount int, randomUnit float64) (time.Duration, int) {
+	return taskErrorRetryDelayWithCauses(err, errorCount, randomUnit, inspectTaskRetryCauses(err))
+}
+
+// Observe once before both generic backoff and an optional target-owned cap.
+func taskErrorRetryDelayWithCauses(err error, errorCount int, randomUnit float64, causes taskRetryCauses) (time.Duration, int) {
 	errorCountDelta := 1
 	backoffMaxExponent := rescheduleBackoffMaxExponent
-	if errors.Is(err, ErrDrained) {
+	if causes.complete && causes.drained {
 		errorCountDelta = 0
 		backoffMaxExponent = 0
-	} else if errors.Is(err, ErrTargetNotFound) {
+	} else if causes.complete && causes.targetMissing {
 		backoffMaxExponent = targetNotFoundBackoffMaxExponent
-	} else if hint, ok := err.(*retryDelayError); ok && validTaskRetryDelay(hint.delay) &&
-		!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+	} else if hint, ok := err.(*retryDelayError); ok && causes.complete && validTaskRetryDelay(hint.delay) && !causes.canceled {
 		return hint.delay, errorCountDelta
 	}
 	return errorRescheduleDelay(
@@ -130,4 +139,25 @@ func taskErrorRetryDelay(err error, errorCount int, randomUnit float64) (time.Du
 		backoffMaxExponent,
 		randomUnit,
 	), errorCountDelta
+}
+
+// Incomplete causes retain ordinary failure/count/backoff rather than a shorter
+// hint, a drain claim, or target-cap permission. No custom matching is invoked.
+type taskRetryCauses struct {
+	complete      bool
+	drained       bool
+	targetMissing bool
+	canceled      bool
+}
+
+// Shared with the metric path so it cannot re-enter an unbounded error graph.
+func inspectTaskRetryCauses(err error) taskRetryCauses {
+	inspection := server.InspectErrorCauses(err)
+	result := taskRetryCauses{complete: err == nil || inspection.Complete}
+	for _, node := range inspection.Nodes {
+		result.drained = result.drained || node.Err == ErrDrained
+		result.targetMissing = result.targetMissing || node.Err == ErrTargetNotFound
+		result.canceled = result.canceled || node.Err == context.Canceled || node.Err == context.DeadlineExceeded
+	}
+	return result
 }

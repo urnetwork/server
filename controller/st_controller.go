@@ -55,6 +55,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urfoundation/sn/merkle"
+	"github.com/urfoundation/sn/payoutartifact"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/ss58"
 	"github.com/urfoundation/sn/stabi"
@@ -67,9 +68,9 @@ import (
 
 const (
 	// stDialTimeout bounds each per-endpoint dial + chain id probe.
-	stDialTimeout = 15 * time.Second
+	stDialTimeout = 60 * time.Second
 	// stCallTimeout bounds each view call.
-	stCallTimeout = 30 * time.Second
+	stCallTimeout = 300 * time.Second
 	// stSendTimeout bounds building + broadcasting one transaction.
 	stSendTimeout = 60 * time.Second
 	// stWaitFinalizedTimeout bounds one synchronous transaction lifecycle.
@@ -139,6 +140,7 @@ type StConfig struct {
 	Enabled                bool
 	AttemptUploadBudget    model.StAttemptUploadBudget
 	ReservedAttemptUpload  *StReservedAttemptUploadConfig
+	OperatorGasPolicy      *server.StOperatorGasPolicy
 	WalletAllowUnsigned    bool
 	PublicRpcUrl           string
 	RpcUrls                []string
@@ -221,6 +223,7 @@ type stVaultFile struct {
 	Enabled                bool                           `yaml:"enabled"`
 	AttemptUploadBudget    model.StAttemptUploadBudget    `yaml:"attempt_upload"`
 	ReservedAttemptUpload  *StReservedAttemptUploadConfig `yaml:"reserved_attempt_upload"`
+	OperatorGasPolicy      *server.StOperatorGasPolicy    `yaml:"operator_gas_policy"`
 	RpcUrls                []string                       `yaml:"rpc_urls"`
 	ChainId                uint64                         `yaml:"chain_id"`
 	GenesisHash            string                         `yaml:"genesis_hash"`
@@ -252,6 +255,7 @@ type stVaultFile struct {
 	TestnetEnabled                bool                           `yaml:"testnet-enabled"`
 	TestnetAttemptUploadBudget    model.StAttemptUploadBudget    `yaml:"testnet-attempt-upload"`
 	TestnetReservedAttemptUpload  *StReservedAttemptUploadConfig `yaml:"testnet-reserved-attempt-upload"`
+	TestnetOperatorGasPolicy      *server.StOperatorGasPolicy    `yaml:"testnet-operator-gas-policy"`
 	TestnetWalletAllowUnsigned    bool                           `yaml:"testnet-wallet-allow-unsigned"`
 	TestnetPublicRpcUrl           string                         `yaml:"testnet-public-rpc-url"`
 	TestnetRpcUrls                []string                       `yaml:"testnet-rpc-urls"`
@@ -338,6 +342,7 @@ var stConfigFromVault = sync.OnceValue(func() (cfg *StConfig) {
 type stSelectedConfig struct {
 	AttemptUploadBudget                                                                                            model.StAttemptUploadBudget
 	ReservedAttemptUpload                                                                                          *StReservedAttemptUploadConfig
+	OperatorGasPolicy                                                                                              *server.StOperatorGasPolicy
 	WalletAllowUnsigned                                                                                            bool
 	Enabled                                                                                                        bool
 	ChainId, Netuid, NoId, DepositAlphaRaoPerGib, DepositRateNumerator, DepositRateDenominator, DepositEpochCapRao uint64
@@ -358,6 +363,7 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			Enabled: f.TestnetEnabled, WalletAllowUnsigned: f.TestnetWalletAllowUnsigned,
 			AttemptUploadBudget:   f.TestnetAttemptUploadBudget,
 			ReservedAttemptUpload: f.TestnetReservedAttemptUpload.clone(),
+			OperatorGasPolicy:     f.TestnetOperatorGasPolicy.Clone(),
 			PublicRpcUrl:          f.TestnetPublicRpcUrl, ChainId: f.TestnetChainId, GenesisHash: f.TestnetGenesisHash,
 			DeploymentId: f.TestnetDeploymentId, PolicyHash: f.TestnetPolicyHash,
 			ContractAddress: f.TestnetContractAddress, SettlementVault: f.TestnetSettlementVault,
@@ -377,6 +383,7 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			Enabled: f.Enabled, WalletAllowUnsigned: f.WalletAllowUnsigned,
 			AttemptUploadBudget:   f.AttemptUploadBudget,
 			ReservedAttemptUpload: f.ReservedAttemptUpload.clone(),
+			OperatorGasPolicy:     f.OperatorGasPolicy.Clone(),
 			PublicRpcUrl:          f.PublicRpcUrl, ChainId: f.ChainId, GenesisHash: f.GenesisHash,
 			DeploymentId: f.DeploymentId, PolicyHash: f.PolicyHash,
 			ContractAddress: f.ContractAddress, SettlementVault: f.SettlementVault, ReserveSink: f.ReserveSink,
@@ -402,6 +409,7 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 	cfg := &StConfig{Profile: profile, Enabled: s.Enabled, WalletAllowUnsigned: s.WalletAllowUnsigned, PublicRpcUrl: s.PublicRpcUrl, RpcUrls: append([]string(nil), rpcUrls...), ChainId: s.ChainId,
 		DeploymentId: s.DeploymentId, Netuid: s.Netuid, NoId: s.NoId, AttemptUploadBudget: s.AttemptUploadBudget,
 		ReservedAttemptUpload: s.ReservedAttemptUpload.clone(),
+		OperatorGasPolicy:     s.OperatorGasPolicy.Clone(),
 		DepositAlphaRaoPerGib: s.DepositAlphaRaoPerGib, DepositRateNumerator: s.DepositRateNumerator,
 		DepositRateDenominator: s.DepositRateDenominator, DepositEpochCapRao: s.DepositEpochCapRao,
 		DepositTiers:          append([]StDepositTier(nil), s.DepositTiers...),
@@ -741,7 +749,13 @@ type CoreStClient struct {
 
 	stateLock sync.Mutex
 	// clients caches one dialed (chain-id-verified) client per rpc url
-	clients map[string]*ethclient.Client
+	clients   map[string]*ethclient.Client
+	readHooks stRpcReadHooks
+	// Tests inject only the independent public authority bytes and the actual
+	// signer boundary; neither hook skips policy or durable reservation checks.
+	gasAuthority      func(context.Context) ([]byte, error)
+	gasNow            func() time.Time
+	transactionSigner func(context.Context, *types.Transaction, types.Signer, *ecdsa.PrivateKey) (*types.Transaction, error)
 	// One bounded registration owner is reused by every authenticated dispatch.
 	clientKeyRegistrations *stClientKeyRegistrationCohorts
 }
@@ -797,29 +811,18 @@ func (self *CoreStClient) dropClient(url string, client *ethclient.Client) {
 // eachRpc runs op against each rpc url in order until one succeeds. Safe
 // for reads and idempotent probes; sends acquire a single endpoint instead
 // (see send) so a transaction is never broadcast twice.
-func (self *CoreStClient) eachRpc(ctx context.Context, op func(client *ethclient.Client) error) error {
-	var errs []error
-	for _, url := range self.cfg.RpcUrls {
-		client, err := self.client(ctx, url)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", url, err))
-			continue
-		}
-		if err := op(client); err != nil {
-			self.dropClient(url, client)
-			errs = append(errs, fmt.Errorf("%s: %w", url, err))
-			continue
-		}
-		return nil
+func (self *CoreStClient) eachRpc(ctx context.Context, op func(context.Context, *ethclient.Client) error) error {
+	if self == nil || self.cfg == nil {
+		return errors.New("st: RPC read owner is absent")
 	}
-	return fmt.Errorf("st: no rpc endpoint answered: %w", errors.Join(errs...))
+	return self.eachRpcUrls(ctx, self.cfg.RpcUrls, op)
 }
 
 // Performs one contract read at a caller-selected canonical block with RPC
 // failover. Callers assembling a snapshot reuse one block across every field.
 func stViewAtBlock[T any](self *CoreStClient, ctx context.Context, address common.Address, block uint64, calldata []byte, unpack func([]byte) (T, error)) (T, error) {
 	var out T
-	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
 		bound := bind.NewBoundContract(address, abi.ABI{}, client, client, client)
@@ -840,6 +843,12 @@ func stView[T any](self *CoreStClient, ctx context.Context, calldata []byte, unp
 
 // Selects one finalized block before delegating the actual contract read.
 func stViewAt[T any](self *CoreStClient, ctx context.Context, address common.Address, calldata []byte, unpack func([]byte) (T, error)) (T, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		var out T
+		return out, err
+	}
+	defer stopRead()
 	finalized, err := self.finalizedBlock(ctx)
 	if err != nil {
 		var out T
@@ -910,7 +919,7 @@ func readStRPCBlockIdentity(ctx context.Context, client *ethclient.Client, selec
 // Reads the latest finalized block identity with RPC failover.
 func (self *CoreStClient) finalizedBlock(ctx context.Context) (*stBlockIdentity, error) {
 	var block *stBlockIdentity
-	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
 		value, err := readStRPCBlockIdentity(callCtx, client, rpc.FinalizedBlockNumber.String(), nil)
@@ -924,6 +933,7 @@ func (self *CoreStClient) finalizedBlock(ctx context.Context) (*stBlockIdentity,
 }
 
 var errStReplaceTransaction = errors.New("st: replace transaction")
+var errStTransactionAttemptLimit = errors.New("st: durable transaction attempt allowance exhausted; original attempts retained")
 
 func stBigIntString(v *big.Int) *string {
 	if v == nil {
@@ -987,9 +997,36 @@ func (self *CoreStClient) buildTransactionAttempt(
 	previous *model.StTransactionAttempt,
 	kind string,
 ) (*model.StTransactionAttempt, error) {
+	if intent == nil || intent.AttemptCount < 0 {
+		return nil, errors.New("st: transaction intent is absent or invalid")
+	}
+	// Recheck at the construction boundary: another worker can consume the
+	// last attempt after the wait loop admitted a replacement. Cancellation
+	// shares this original allowance and never authorizes a fourth signature.
+	if intent.AttemptCount >= stTxMaxAttempts || previous != nil && previous.Attempt >= stTxMaxAttempts {
+		return nil, errStTransactionAttemptLimit
+	}
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
 	from := crypto.PubkeyToAddress(key.PublicKey)
 	if !strings.EqualFold(from.Hex(), intent.FromAddress) {
 		return nil, fmt.Errorf("st: signing key address %s does not own intent account %s", from.Hex(), intent.FromAddress)
+	}
+	gasPolicy, gasAuthority, err := self.operatorGasAdmission(ctx, from)
+	if err != nil {
+		return nil, err
+	}
+	if gasPolicy != nil {
+		pending, err := model.GetPendingStTransactionGasReservation(ctx, intent.IntentId)
+		if err != nil {
+			return nil, err
+		}
+		if pending != nil {
+			return self.signReservedStTransaction(ctx, client, key, intent, kind, pending, gasPolicy, gasAuthority)
+		}
 	}
 	if err := self.validateDepositAttempt(ctx, client, intent, kind); err != nil {
 		return nil, err
@@ -1006,7 +1043,12 @@ func (self *CoreStClient) buildTransactionAttempt(
 		gasLimit = previous.GasLimit
 	}
 	estimate := gasLimit == 0 && previous == nil
-	prepared, err := readStTransactionFeePreparation(ctx, client, from, to, calldata, estimate, previous != nil && previous.GasPrice != nil)
+	var prepared *stTransactionFeePreparation
+	err = self.readTransactionRpc(ctx, client, func(ctx context.Context) error {
+		var err error
+		prepared, err = readStTransactionFeePreparation(ctx, client, from, to, calldata, estimate, previous != nil && previous.GasPrice != nil)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1055,6 +1097,13 @@ func (self *CoreStClient) buildTransactionAttempt(
 	if err := stPayoutAdmission(ctx, self.cfg); err != nil {
 		return nil, err
 	}
+	if gasPolicy != nil {
+		reservation, err := model.ReserveStTransactionGasAttempt(ctx, gasPolicy, gasAuthority, intent.IntentId, attempt.Attempt, kind, unsigned)
+		if err != nil {
+			return nil, err
+		}
+		return self.signReservedStTransaction(ctx, client, key, intent, kind, reservation, gasPolicy, gasAuthority)
+	}
 	signed, err := types.SignTx(unsigned, types.LatestSignerForChainID(chainId), key)
 	if err != nil {
 		return nil, fmt.Errorf("st: sign transaction: %w", err)
@@ -1098,6 +1147,13 @@ func (self *CoreStClient) broadcastStoredAttempt(
 	intent *model.StTransactionIntent,
 	attempt *model.StTransactionAttempt,
 ) error {
+	if policy, authority, err := self.operatorGasAdmission(ctx, common.HexToAddress(intent.FromAddress)); err != nil {
+		return err
+	} else if policy != nil {
+		if err := model.ValidateStTransactionGasBroadcast(ctx, policy, authority, intent.IntentId, attempt); err != nil {
+			return fmt.Errorf("%w: %w", model.ErrStOperatorGasAllowance, err)
+		}
+	}
 	tx, err := stDecodeStoredTransaction(attempt)
 	if err != nil {
 		// Invalid local bytes have not consumed the account nonce. Keep the
@@ -1124,13 +1180,33 @@ func (self *CoreStClient) observeTransactionAttempts(
 	intent *model.StTransactionIntent,
 	attempts []*model.StTransactionAttempt,
 ) (terminal bool, receiptPending bool, txHash string, observationErr error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return false, false, "", err
+	}
+	defer stopRead()
 	var lastErr error
 	for _, attempt := range attempts {
 		hash := common.HexToHash(attempt.TxHash)
-		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
-		receipt, err := client.TransactionReceipt(callCtx, hash)
-		cancel()
-		if errors.Is(err, ethereum.NotFound) {
+		observation, err := self.readTransactionReceipt(ctx, client, hash)
+		if observation != nil && observation.receipt != nil && ctx.Err() == nil {
+			// A valid inclusion remains useful even when finality is unknown.
+			// This provisional fact never grants a replacement or new nonce.
+			receipt := observation.receipt
+			inclusionBlock := receipt.BlockNumber.Uint64()
+			inclusionHash := strings.ToLower(receipt.BlockHash.Hex())
+			model.MarkStTransactionMined(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash, inclusionBlock, inclusionHash)
+			attempt.Status, attempt.InclusionBlock, attempt.InclusionHash = model.StTxMined, &inclusionBlock, &inclusionHash
+		}
+		if err != nil {
+			if observation != nil && observation.receipt != nil {
+				receiptPending = true
+			}
+			lastErr = errors.Join(lastErr, err)
+			continue
+		}
+		receipt := observation.receipt
+		if receipt == nil {
 			if attempt.InclusionBlock != nil && attempt.InclusionHash != nil {
 				orphanErr := &stOrphanedTransactionReceiptError{message: fmt.Sprintf("st: receipt %s disappeared before finality", attempt.TxHash)}
 				model.MarkStTransactionOrphaned(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
@@ -1141,52 +1217,18 @@ func (self *CoreStClient) observeTransactionAttempts(
 			}
 			continue
 		}
-		if err != nil {
-			lastErr = errors.Join(lastErr, err)
-			continue
-		}
-		// An RPC receipt lookup does not authenticate the returned transaction
-		// hash. Refuse malformed/transplanted observations before durable writes.
-		if receipt == nil || receipt.TxHash != hash || receipt.BlockHash == (common.Hash{}) || receipt.BlockNumber == nil || !receipt.BlockNumber.IsInt64() || receipt.BlockNumber.Sign() <= 0 {
-			lastErr = errors.Join(lastErr, fmt.Errorf("st: receipt response differs from requested transaction %s or has an invalid inclusion block", attempt.TxHash))
-			continue
-		}
-		model.MarkStTransactionMined(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
-			receipt.BlockNumber.Uint64(), strings.ToLower(receipt.BlockHash.Hex()))
-		inclusionBlock := receipt.BlockNumber.Uint64()
-		inclusionHash := strings.ToLower(receipt.BlockHash.Hex())
-		attempt.Status, attempt.InclusionBlock, attempt.InclusionHash = model.StTxMined, &inclusionBlock, &inclusionHash
-		finalized, err := self.finalizedBlock(ctx)
-		if err != nil {
-			receiptPending = true
-			lastErr = errors.Join(lastErr, err)
-			continue
-		}
-		if finalized.Number > math.MaxInt64 {
-			receiptPending = true
-			lastErr = errors.Join(lastErr, errors.New("st: finalized transaction boundary exceeds postgres bigint"))
-			continue
-		}
-		if finalized.Number < receipt.BlockNumber.Uint64() {
-			receiptPending = true
-			continue
-		}
-		canonicalNumber := receipt.BlockNumber.Uint64()
-		callCtx, cancel = context.WithTimeout(ctx, stCallTimeout)
-		canonical, err := readStRPCBlockIdentity(callCtx, client, hexutil.EncodeUint64(canonicalNumber), &canonicalNumber)
-		cancel()
-		if err != nil {
-			receiptPending = true
-			lastErr = errors.Join(lastErr, err)
-			continue
-		}
-		if canonical.Hash != [32]byte(receipt.BlockHash) {
+		if observation.orphaned {
 			err = &stOrphanedTransactionReceiptError{message: fmt.Sprintf("st: receipt %s was orphaned before finality", attempt.TxHash)}
 			model.MarkStTransactionOrphaned(ctx, intent.IntentId, attempt.Attempt, attempt.TxHash,
 				receipt.BlockNumber.Uint64(), strings.ToLower(receipt.BlockHash.Hex()), err)
 			attempt.Status = model.StTxUncertain
 			attempt.InclusionBlock, attempt.InclusionHash = nil, nil
 			lastErr = errors.Join(lastErr, err)
+			continue
+		}
+		finalized := observation.finalized
+		if finalized == nil {
+			receiptPending = true
 			continue
 		}
 		finalizedHash := strings.ToLower(common.BytesToHash(finalized.Hash[:]).Hex())
@@ -1283,17 +1325,20 @@ func (self *CoreStClient) runTransactionIntent(
 			}
 			attempts = model.GetStTransactionAttempts(ctx, intent.IntentId)
 		} else if replaceImmediately && current.Kind != model.StTxAttemptCancellation && current.Status != model.StTxMined {
+			originalHash := current.TxHash
 			var err error
 			current, err = self.buildTransactionAttempt(waitCtx, client, key, intent, current, model.StTxAttemptCancellation)
 			if err != nil {
-				return "", err
+				return originalHash, err
 			}
 			attempts = model.GetStTransactionAttempts(ctx, intent.IntentId)
 		}
 		if current.Status == model.StTxSigned || current.Status == model.StTxBroadcast || current.Status == model.StTxUncertain {
 			// Re-broadcasting identical signed bytes is safe and repairs a node or
 			// process restart that forgot its mempool while preserving the nonce.
-			_ = self.broadcastStoredAttempt(waitCtx, client, intent, current)
+			if err := self.broadcastStoredAttempt(waitCtx, client, intent, current); errors.Is(err, model.ErrStOperatorGasAllowance) {
+				return current.TxHash, err
+			}
 		}
 		txHash, waitErr := self.waitFinalizedAttempt(waitCtx, client, intent, attempts)
 		if !errors.Is(waitErr, errStReplaceTransaction) {
@@ -1318,7 +1363,7 @@ func (self *CoreStClient) runTransactionIntent(
 // A close that expired at a finalized block cannot become valid again. Retire
 // its nonce through the ordinary cancellation transaction so a later defer can
 // proceed without discarding the original intent or any signed attempt.
-func (self *CoreStClient) expiredCloseIntent(ctx context.Context, intent *model.StTransactionIntent, finalized uint64) (bool, error) {
+func (self *CoreStClient) expiredCloseIntent(ctx context.Context, client *ethclient.Client, intent *model.StTransactionIntent, finalized *stBlockIdentity) (bool, error) {
 	if self.coordinator == nil || intent.DeploymentKey != self.cfg.DeploymentKey() ||
 		!strings.EqualFold(intent.ToAddress, self.cfg.ContractAddress.Hex()) || len(intent.Calldata) != 68 {
 		return false, nil
@@ -1335,31 +1380,60 @@ func (self *CoreStClient) expiredCloseIntent(ctx context.Context, intent *model.
 	if err != nil || intent.LogicalKey != logicalKey || !strings.EqualFold(intent.CalldataHash, crypto.Keccak256Hash(intent.Calldata).Hex()) {
 		return false, errors.New("st: close intent has inconsistent immutable operation identity")
 	}
-	policy, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, finalized, self.coordinator.PackPolicyAt(epoch), self.coordinator.UnpackPolicyAt)
+	if client == nil || finalized == nil || finalized.Hash == ([32]byte{}) {
+		return false, errors.New("st: close intent finalized nonce boundary is absent")
+	}
+	// Expiry is a signing decision. Its complete policy/end read belongs to
+	// the same endpoint and original canonical hash that proved this nonce.
+	// A transient retry cannot replace that boundary or borrow another route.
+	boundary := *finalized
+	var deadline uint64
+	err = self.readTransactionRpc(ctx, client, func(ctx context.Context) error {
+		selector := rpc.BlockNumberOrHashWithHash(common.Hash(boundary.Hash), true)
+		var policyRaw, endRaw hexutil.Bytes
+		if err := client.Client().CallContext(ctx, &policyRaw, "eth_call", map[string]any{"to": self.cfg.ContractAddress, "data": hexutil.Bytes(self.coordinator.PackPolicyAt(epoch))}, selector); err != nil {
+			return fmt.Errorf("st: close intent epoch policy: %w", err)
+		}
+		policy, err := self.coordinator.UnpackPolicyAt(policyRaw)
+		if err != nil {
+			return fmt.Errorf("st: close intent epoch policy: %w", err)
+		}
+		if err := client.Client().CallContext(ctx, &endRaw, "eth_call", map[string]any{"to": self.cfg.ContractAddress, "data": hexutil.Bytes(self.coordinator.PackEpochEndBlock(epoch))}, selector); err != nil {
+			return fmt.Errorf("st: close intent epoch end: %w", err)
+		}
+		end, err := self.coordinator.UnpackEpochEndBlock(endRaw)
+		if err != nil {
+			return fmt.Errorf("st: close intent epoch end: %w", err)
+		}
+		if end == nil || !end.IsUint64() || end.Uint64() > math.MaxUint64-policy.CloseGraceBlocks {
+			return errors.New("st: close intent deadline exceeds supported range")
+		}
+		closing, err := readStRPCBlockIdentity(ctx, client, hexutil.EncodeUint64(boundary.Number), &boundary.Number)
+		if err != nil {
+			return err
+		}
+		if closing.Hash != boundary.Hash {
+			return errors.New("st: finalized transaction boundary changed during close expiry observation")
+		}
+		deadline = end.Uint64() + policy.CloseGraceBlocks
+		return nil
+	})
 	if err != nil {
-		return false, fmt.Errorf("st: close intent epoch policy: %w", err)
+		return false, err
 	}
-	end, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, finalized, self.coordinator.PackEpochEndBlock(epoch), self.coordinator.UnpackEpochEndBlock)
-	if err != nil {
-		return false, fmt.Errorf("st: close intent epoch end: %w", err)
-	}
-	if end == nil || !end.IsUint64() || end.Uint64() > math.MaxUint64-policy.CloseGraceBlocks {
-		return false, errors.New("st: close intent deadline exceeds supported range")
-	}
-	deadline := end.Uint64() + policy.CloseGraceBlocks
-	if finalized <= deadline {
+	if boundary.Number <= deadline {
 		return false, nil
 	}
-	glog.Infof("[st]cancel expired close intent %s nonce %d epoch %d operator %d finalized_block %d close_deadline %d", intent.IntentKey, intent.Nonce, epoch.Uint64(), noID.Uint64(), finalized, deadline)
+	glog.Infof("[st]cancel expired close intent %s nonce %d epoch %d operator %d finalized_block %d close_deadline %d", intent.IntentKey, intent.Nonce, epoch.Uint64(), noID.Uint64(), boundary.Number, deadline)
 	return true, nil
 }
 
-// An unsigned deposit whose encoded deadline has finalized cannot execute in a
+// A deposit whose encoded deadline has finalized cannot execute in a
 // later epoch. Keep its immutable intent and consume its EVM nonce through the
-// existing real cancellation path; the coordinator deposit nonce is untouched.
-func (self *CoreStClient) expiredUnsignedDepositIntent(intent *model.StTransactionIntent, attempts []*model.StTransactionAttempt, from common.Address, finalized uint64) (bool, error) {
+// existing real cancellation path; every original signed attempt is retained
+// and reconciled first, and the coordinator deposit nonce is untouched.
+func (self *CoreStClient) expiredDepositIntent(intent *model.StTransactionIntent, from common.Address, finalized uint64) (bool, error) {
 	if self.cfg == nil || self.coordinator == nil || self.cfg.DepositKey == nil || intent == nil ||
-		intent.Status != model.StTxPrepared || intent.AttemptCount != 0 || intent.CurrentTxHash != nil || len(attempts) != 0 ||
 		intent.Profile != self.cfg.Profile || intent.DeploymentId != self.cfg.DeploymentId || intent.DeploymentKey != self.cfg.DeploymentKey() || intent.ChainId != self.cfg.ChainId ||
 		!strings.EqualFold(intent.GenesisHash, "0x"+hex.EncodeToString(self.cfg.GenesisHash[:])) ||
 		from != crypto.PubkeyToAddress(self.cfg.DepositKey.PublicKey) || !strings.EqualFold(intent.FromAddress, from.Hex()) ||
@@ -1378,18 +1452,18 @@ func (self *CoreStClient) expiredUnsignedDepositIntent(intent *model.StTransacti
 		return false, nil
 	}
 	if !strings.EqualFold(intent.CalldataHash, crypto.Keccak256Hash(intent.Calldata).Hex()) {
-		return false, errors.New("st: unsigned deposit intent has inconsistent immutable calldata hash")
+		return false, errors.New("st: deposit intent has inconsistent immutable calldata hash")
 	}
 	if finalized <= deadline.Uint64() {
 		return false, nil
 	}
-	glog.Infof("[st]cancel expired unsigned deposit intent %s nonce %d operator %d amount %s deposit_nonce %s finalized_block %d deposit_deadline %d", intent.IntentKey, intent.Nonce, noID.Uint64(), amount, nonce, finalized, deadline.Uint64())
+	glog.Infof("[st]cancel expired deposit intent %s nonce %d operator %d amount %s deposit_nonce %s finalized_block %d deposit_deadline %d", intent.IntentKey, intent.Nonce, noID.Uint64(), amount, nonce, finalized, deadline.Uint64())
 	return true, nil
 }
 
 // Drains every lower account nonce before a new operation can reserve one. An
 // active-deployment intent resumes its exact stored business transaction;
-// expired closes, unsigned deposits and stale coordinators use a same-nonce
+// expired closes, deposits and stale coordinators use a same-nonce
 // self-transaction.
 func (self *CoreStClient) reconcileAccountIntents(
 	ctx context.Context,
@@ -1437,31 +1511,26 @@ func (self *CoreStClient) reconcileAccountIntents(
 			}
 		}
 
-		finalized, err := self.finalizedBlock(ctx)
-		if err != nil {
-			return fmt.Errorf("st: finalized head while reconciling nonce %d: %w", intent.Nonce, err)
-		}
-		nonceCtx, cancelNonce := context.WithTimeout(ctx, stCallTimeout)
-		finalizedNonce, err := client.NonceAt(nonceCtx, from, new(big.Int).SetUint64(finalized.Number))
-		cancelNonce()
+		finalized, finalizedNonce, err := self.readFinalizedTransactionNonce(ctx, client, from)
 		if err != nil {
 			return fmt.Errorf("st: finalized account nonce while reconciling %d: %w", intent.Nonce, err)
 		}
 		if finalizedNonce > intent.Nonce {
 			err := fmt.Errorf("st: account nonce %d was consumed without a known canonical attempt", intent.Nonce)
-			model.MarkStTransactionSuperseded(ctx, intent.IntentId, err)
-			if intent.DeploymentKey == self.cfg.DeploymentKey() {
+			// Receipt indexing can lag finality, or our own signature may land
+			// between the census and nonce read. Signed liability remains live.
+			if !model.MarkStTransactionSuperseded(ctx, intent.IntentId, err) || intent.DeploymentKey == self.cfg.DeploymentKey() {
 				return err
 			}
 			continue
 		}
 
 		stale := intent.DeploymentKey != self.cfg.DeploymentKey()
-		expiredClose, err := self.expiredCloseIntent(ctx, intent, finalized.Number)
+		expiredClose, err := self.expiredCloseIntent(ctx, client, intent, finalized)
 		if err != nil {
 			return err
 		}
-		expiredDeposit, err := self.expiredUnsignedDepositIntent(intent, attempts, from, finalized.Number)
+		expiredDeposit, err := self.expiredDepositIntent(intent, from, finalized.Number)
 		if err != nil {
 			return err
 		}
@@ -1509,18 +1578,14 @@ func (self *CoreStClient) sendPrepared(ctx context.Context, key *ecdsa.PrivateKe
 	}
 
 	var client *ethclient.Client
-	var errs []error
-	for _, url := range self.cfg.RpcUrls {
-		dialed, err := self.client(ctx, url)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", url, err))
-			continue
-		}
-		client = dialed
-		break
-	}
-	if client == nil {
-		return "", fmt.Errorf("st: no rpc endpoint answered: %w", errors.Join(errs...))
+	// The chain identity handshake is a read and shares the bounded transient
+	// retry policy. Select one verified endpoint before any durable transaction
+	// work; retries here never enclose preparation, signing or broadcast.
+	if err := self.eachRpc(ctx, func(_ context.Context, candidate *ethclient.Client) error {
+		client = candidate
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("st: no rpc endpoint answered: %w", err)
 	}
 
 	from := crypto.PubkeyToAddress(key.PublicKey)
@@ -1528,6 +1593,11 @@ func (self *CoreStClient) sendPrepared(ctx context.Context, key *ecdsa.PrivateKe
 		return "", err
 	}
 	if err := stPayoutAdmission(ctx, self.cfg); err != nil {
+		return "", err
+	}
+	// Adopt the independently approved original history before reserving a
+	// fresh nonce. Reconciliation above remains possible without new authority.
+	if _, _, err := self.operatorGasAdmission(ctx, from); err != nil {
 		return "", err
 	}
 	operation, to, calldata, err := prepare(ctx, client)
@@ -1538,9 +1608,12 @@ func (self *CoreStClient) sendPrepared(ctx context.Context, key *ecdsa.PrivateKe
 	if err != nil {
 		return "", err
 	}
-	nonceCtx, cancelNonce := context.WithTimeout(ctx, stCallTimeout)
-	pendingNonce, err := client.PendingNonceAt(nonceCtx, from)
-	cancelNonce()
+	var pendingNonce uint64
+	err = self.readTransactionRpc(ctx, client, func(ctx context.Context) error {
+		var err error
+		pendingNonce, err = client.PendingNonceAt(ctx, from)
+		return err
+	})
 	if err != nil {
 		return "", fmt.Errorf("st: pending nonce for %s: %w", from, err)
 	}
@@ -1575,12 +1648,17 @@ func stTransactionLogicalKey(cfg *StConfig, operation string) (string, error) {
 }
 
 func (self *CoreStClient) Epoch(ctx context.Context) (*StEpochState, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
+	head, err := self.finalizedBlock(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("finalized head: %w", err)
+	}
+	block := head.Number
 	if self.coordinator != nil {
-		head, err := self.finalizedBlock(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("finalized head: %w", err)
-		}
-		block := head.Number
 		epoch, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.coordinator.PackCurrentEpoch(), self.coordinator.UnpackCurrentEpoch)
 		if err != nil {
 			return nil, fmt.Errorf("currentEpoch(): %w", err)
@@ -1601,46 +1679,33 @@ func (self *CoreStClient) Epoch(ctx context.Context) (*StEpochState, error) {
 	}
 	state := &StEpochState{}
 
-	epoch, err := stView(self, ctx, self.st.PackEpoch(), self.st.UnpackEpoch)
+	epoch, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.st.PackEpoch(), self.st.UnpackEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("epoch(): %w", err)
 	}
 	state.Epoch = epoch.Uint64()
-	pending, err := stView(self, ctx, self.st.PackPendingEpoch(), self.st.UnpackPendingEpoch)
+	pending, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.st.PackPendingEpoch(), self.st.UnpackPendingEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("pendingEpoch(): %w", err)
 	}
 	state.PendingEpoch = pending.Uint64()
-	if state.EpochStartBlock, err = stView(self, ctx, self.st.PackEpochStartBlock(), self.st.UnpackEpochStartBlock); err != nil {
+	if state.EpochStartBlock, err = stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.st.PackEpochStartBlock(), self.st.UnpackEpochStartBlock); err != nil {
 		return nil, fmt.Errorf("epochStartBlock(): %w", err)
 	}
-	if state.TEpochBlocks, err = stView(self, ctx, self.st.PackTEpoch(), self.st.UnpackTEpoch); err != nil {
+	if state.TEpochBlocks, err = stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.st.PackTEpoch(), self.st.UnpackTEpoch); err != nil {
 		return nil, fmt.Errorf("tEpoch(): %w", err)
 	}
-	if state.CommitWindowBlocks, err = stView(self, ctx, self.st.PackCommitWindowBlocks(), self.st.UnpackCommitWindowBlocks); err != nil {
+	if state.CommitWindowBlocks, err = stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.st.PackCommitWindowBlocks(), self.st.UnpackCommitWindowBlocks); err != nil {
 		return nil, fmt.Errorf("commitWindowBlocks(): %w", err)
 	}
-	if state.TrailsWindowBlocks, err = stView(self, ctx, self.st.PackTrailsWindowBlocks(), self.st.UnpackTrailsWindowBlocks); err != nil {
+	if state.TrailsWindowBlocks, err = stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.st.PackTrailsWindowBlocks(), self.st.UnpackTrailsWindowBlocks); err != nil {
 		return nil, fmt.Errorf("trailsWindowBlocks(): %w", err)
 	}
-	if state.FinalizeOffsetBlocks, err = stView(self, ctx, self.st.PackFinalizeOffsetBlocks(), self.st.UnpackFinalizeOffsetBlocks); err != nil {
+	if state.FinalizeOffsetBlocks, err = stViewAtBlock(self, ctx, self.cfg.ContractAddress, block, self.st.PackFinalizeOffsetBlocks(), self.st.UnpackFinalizeOffsetBlocks); err != nil {
 		return nil, fmt.Errorf("finalizeOffsetBlocks(): %w", err)
 	}
 
-	err = self.eachRpc(ctx, func(client *ethclient.Client) error {
-		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
-		defer cancel()
-		header, err := client.HeaderByNumber(callCtx, nil)
-		if err != nil {
-			return err
-		}
-		state.HeadBlock = header.Number.Uint64()
-		state.HeadBlockTime = time.Unix(int64(header.Time), 0).UTC()
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
+	state.HeadBlock, state.HeadBlockTime = head.Number, head.Time
 	return state, nil
 }
 
@@ -1672,7 +1737,7 @@ func (self *CoreStClient) EpochCloseBlock(ctx context.Context, epoch uint64) (ui
 
 func (self *CoreStClient) BlockTime(ctx context.Context, block uint64) (time.Time, error) {
 	var blockTime time.Time
-	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
 		identity, err := readStRPCBlockIdentity(callCtx, client, hexutil.EncodeUint64(block), &block)
@@ -1755,7 +1820,7 @@ func (self *CoreStClient) BlockHashes(ctx context.Context, blocks []uint64) ([][
 		return nil, errors.New("EVM RPC block batch is empty")
 	}
 	var identities []*stBlockIdentity
-	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		values, err := readStRPCBlockIdentities(ctx, client, blocks)
 		if err != nil {
 			return err
@@ -1934,20 +1999,29 @@ func (self *CoreStClient) BuybackTotal(ctx context.Context) (*big.Int, error) {
 }
 
 func (self *CoreStClient) UnaccountedStakeRao(ctx context.Context) (*big.Int, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
+	head, err := self.finalizedBlock(ctx)
+	if err != nil {
+		return nil, err
+	}
 	if self.coordinator != nil {
-		selfColdkey, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackSelfColdkey(), self.coordinator.UnpackSelfColdkey)
+		selfColdkey, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.coordinator.PackSelfColdkey(), self.coordinator.UnpackSelfColdkey)
 		if err != nil {
 			return nil, fmt.Errorf("selfColdkey(): %w", err)
 		}
-		return self.stakeAt(ctx, self.cfg.DepositHotkey, selfColdkey)
+		return self.stakeAtBlock(ctx, head.Number, self.cfg.DepositHotkey, selfColdkey)
 	}
 	// selfColdkey is read from the contract (authoritative — the
 	// setSelfColdkey SP-1 escape hatch may have overridden the mirror)
-	selfColdkey, err := stView(self, ctx, self.st.PackSelfColdkey(), self.st.UnpackSelfColdkey)
+	selfColdkey, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.st.PackSelfColdkey(), self.st.UnpackSelfColdkey)
 	if err != nil {
 		return nil, fmt.Errorf("selfColdkey(): %w", err)
 	}
-	accounted, err := stView(self, ctx, self.st.PackAccountedStake(), self.st.UnpackAccountedStake)
+	accounted, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.st.PackAccountedStake(), self.st.UnpackAccountedStake)
 	if err != nil {
 		return nil, fmt.Errorf("accountedStake(): %w", err)
 	}
@@ -1956,13 +2030,13 @@ func (self *CoreStClient) UnaccountedStakeRao(ctx context.Context) (*big.Int, er
 		return nil, err
 	}
 	var stake *big.Int
-	err = self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err = self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
 		out, err := client.CallContract(callCtx, ethereum.CallMsg{
 			To:   &stStakingPrecompileAddress,
 			Data: calldata,
-		}, nil)
+		}, new(big.Int).SetUint64(head.Number))
 		if err != nil {
 			return err
 		}
@@ -1982,20 +2056,16 @@ func (self *CoreStClient) UnaccountedStakeRao(ctx context.Context) (*big.Int, er
 	return unaccounted, nil
 }
 
-func (self *CoreStClient) stakeAt(ctx context.Context, hotkey [32]byte, coldkey [32]byte) (*big.Int, error) {
+func (self *CoreStClient) stakeAtBlock(ctx context.Context, block uint64, hotkey [32]byte, coldkey [32]byte) (*big.Int, error) {
 	calldata, err := stPackGetStake(hotkey, coldkey, self.cfg.Netuid)
 	if err != nil {
 		return nil, err
 	}
-	header, err := self.finalizedBlock(ctx)
-	if err != nil {
-		return nil, err
-	}
 	var stake *big.Int
-	err = self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err = self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
-		out, callErr := client.CallContract(callCtx, ethereum.CallMsg{To: &stStakingPrecompileAddress, Data: calldata}, new(big.Int).SetUint64(header.Number))
+		out, callErr := client.CallContract(callCtx, ethereum.CallMsg{To: &stStakingPrecompileAddress, Data: calldata}, new(big.Int).SetUint64(block))
 		if callErr != nil {
 			return callErr
 		}
@@ -2045,14 +2115,23 @@ func (self *CoreStClient) NextFinalizeEpoch(ctx context.Context) (uint64, error)
 }
 
 func (self *CoreStClient) PoolState(ctx context.Context, epoch uint64, noId uint64) (*StPoolState, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
+	head, err := self.finalizedBlock(ctx)
+	if err != nil {
+		return nil, err
+	}
 	e := new(big.Int).SetUint64(epoch)
 	n := new(big.Int).SetUint64(noId)
 	if self.coordinator != nil {
-		commit, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackRootCommitments(e, n), self.coordinator.UnpackRootCommitments)
+		commit, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.coordinator.PackRootCommitments(e, n), self.coordinator.UnpackRootCommitments)
 		if err != nil {
 			return nil, fmt.Errorf("rootCommitments(): %w", err)
 		}
-		entitlement, err := stViewAt(self, ctx, self.cfg.SettlementVault, self.vault.PackEntitlement(e, n), self.vault.UnpackEntitlement)
+		entitlement, err := stViewAtBlock(self, ctx, self.cfg.SettlementVault, head.Number, self.vault.PackEntitlement(e, n), self.vault.UnpackEntitlement)
 		if err != nil {
 			return nil, fmt.Errorf("entitlement(): %w", err)
 		}
@@ -2061,19 +2140,19 @@ func (self *CoreStClient) PoolState(ctx context.Context, epoch uint64, noId uint
 			PoolTotalRao: new(big.Int).Set(entitlement.Total), ClaimedRao: new(big.Int).Set(entitlement.Claimed), Status: entitlement.Status}, nil
 	}
 
-	commit, err := stView(self, ctx, self.st.PackNoCommit(e, n), self.st.UnpackNoCommit)
+	commit, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.st.PackNoCommit(e, n), self.st.UnpackNoCommit)
 	if err != nil {
 		return nil, fmt.Errorf("noCommit(): %w", err)
 	}
-	finalized, err := stView(self, ctx, self.st.PackFinalized(e), self.st.UnpackFinalized)
+	finalized, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.st.PackFinalized(e), self.st.UnpackFinalized)
 	if err != nil {
 		return nil, fmt.Errorf("finalized(): %w", err)
 	}
-	poolTotal, err := stView(self, ctx, self.st.PackPoolTotal(e, n), self.st.UnpackPoolTotal)
+	poolTotal, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.st.PackPoolTotal(e, n), self.st.UnpackPoolTotal)
 	if err != nil {
 		return nil, fmt.Errorf("poolTotal(): %w", err)
 	}
-	claimed, err := stView(self, ctx, self.st.PackClaimedMiner(e, n), self.st.UnpackClaimedMiner)
+	claimed, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.st.PackClaimedMiner(e, n), self.st.UnpackClaimedMiner)
 	if err != nil {
 		return nil, fmt.Errorf("claimedMiner(): %w", err)
 	}
@@ -2090,6 +2169,11 @@ func (self *CoreStClient) PoolState(ctx context.Context, epoch uint64, noId uint
 // Reads one binding at the latest finalized head. Release settlement uses the
 // explicit two-boundary batch surface below instead of this convenience path.
 func (self *CoreStClient) BindingAt(ctx context.Context, clientId [16]byte, epoch uint64) (*StFleetBindingState, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
 	if self.coordinator == nil {
 		return &StFleetBindingState{}, nil
 	}
@@ -2098,7 +2182,7 @@ func (self *CoreStClient) BindingAt(ctx context.Context, clientId [16]byte, epoc
 		return nil, fmt.Errorf("finalized binding head: %w", err)
 	}
 	var binding *StFleetBindingState
-	err = self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err = self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		bindings, err := stReadBindingsAt(ctx, client, self.coordinator, self.cfg.ContractAddress, finalized.Number, [][16]byte{clientId}, epoch)
 		if err != nil {
 			return err
@@ -2228,6 +2312,11 @@ func stMergeBindingBoundaries(startBindings []*StFleetBindingState, closeBinding
 // then reads every requested binding at both boundary blocks. An empty input
 // still performs the finality proof before returning zero rows.
 func (self *CoreStClient) BindingsAt(ctx context.Context, clientIds [][16]byte, epoch uint64, startBlock uint64, closeBlock uint64) ([]*StFleetBindingState, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
 	if closeBlock < startBlock {
 		return nil, fmt.Errorf("binding block window [%d,%d] is invalid", startBlock, closeBlock)
 	}
@@ -2249,7 +2338,7 @@ func (self *CoreStClient) BindingsAt(ctx context.Context, clientIds [][16]byte, 
 		return bindings, nil
 	}
 	var bindings []*StFleetBindingState
-	err = self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err = self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		startBindings, err := stReadBindingsAt(ctx, client, self.coordinator, self.cfg.ContractAddress, startBlock, clientIds, epoch)
 		if err != nil {
 			return err
@@ -2281,20 +2370,29 @@ func (self *CoreStClient) EpochDeposit(ctx context.Context, epoch uint64, noId u
 }
 
 func (self *CoreStClient) ConvictionBeforeEpoch(ctx context.Context, epoch uint64, noId uint64) (*big.Int, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
 	if self.coordinator == nil {
 		return nil, fmt.Errorf("conviction snapshots require the release coordinator")
 	}
+	head, err := self.finalizedBlock(ctx)
+	if err != nil {
+		return nil, err
+	}
 	e := new(big.Int).SetUint64(epoch)
 	n := new(big.Int).SetUint64(noId)
-	cumulative, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackCumulativeConviction(n), self.coordinator.UnpackCumulativeConviction)
+	cumulative, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.coordinator.PackCumulativeConviction(n), self.coordinator.UnpackCumulativeConviction)
 	if err != nil {
 		return nil, err
 	}
-	deposit, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackEpochDeposits(e, n), self.coordinator.UnpackEpochDeposits)
+	deposit, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.coordinator.PackEpochDeposits(e, n), self.coordinator.UnpackEpochDeposits)
 	if err != nil {
 		return nil, err
 	}
-	added, err := stViewAt(self, ctx, self.cfg.ContractAddress, self.coordinator.PackEpochConvictionAdded(e, n), self.coordinator.UnpackEpochConvictionAdded)
+	added, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, head.Number, self.coordinator.PackEpochConvictionAdded(e, n), self.coordinator.UnpackEpochConvictionAdded)
 	if err != nil {
 		return nil, err
 	}
@@ -2470,7 +2568,7 @@ func (self *CoreStClient) SyncEvents(ctx context.Context, fromBlock uint64, toBl
 		return nil, fromBlock, nil
 	}
 	var logs []types.Log
-	err := self.eachRpc(ctx, func(client *ethclient.Client) error {
+	err := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
 		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 		defer cancel()
 		addresses := []common.Address{self.cfg.ContractAddress}
@@ -2517,6 +2615,10 @@ func (self *CoreStClient) SyncEvents(ctx context.Context, fromBlock uint64, toBl
 		if err != nil {
 			return nil, fromBlock, err
 		}
+		originalLog, err := json.Marshal(log)
+		if err != nil {
+			return nil, fromBlock, err
+		}
 		events = append(events, &model.StChainEvent{
 			BlockNumber: log.BlockNumber,
 			BlockHash:   log.BlockHash.Hex(),
@@ -2524,6 +2626,7 @@ func (self *CoreStClient) SyncEvents(ctx context.Context, fromBlock uint64, toBl
 			TxHash:      log.TxHash.Hex(),
 			Kind:        kind,
 			DataJson:    string(argsJson),
+			OriginalLog: originalLog,
 		})
 	}
 	return events, toBlock + 1, nil
@@ -3255,7 +3358,7 @@ func stComputeReleasePayout(
 	if !usageStart.Before(usageEnd) {
 		return [32]byte{}, 0, fmt.Errorf("sn: epoch has no post-cutoff earning window")
 	}
-	usages, err := model.GetStEpochProviderUsageAtEpoch(ctx, epoch, usageStart, usageEnd)
+	usages, closedWork, wholeWindow, err := model.GetStEpochProviderUsageWholeCensus(ctx, epoch, startTime, endTime)
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
@@ -3277,6 +3380,14 @@ func stComputeReleasePayout(
 	if authority == nil || authority.Epoch != epoch || authority.PolicyHash != cfg.PolicyHash || authority.Start.Block != startBlock || authority.End.Block != closeBlock || !authority.StartTime.Equal(startTime) || !authority.EndTime.Equal(endTime) {
 		return [32]byte{}, 0, errors.New("st: payout policy or window differs from authenticated epoch authority")
 	}
+	workAuthority, err := stLoadProviderWorkAuthority(ctx, cfg, authority)
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
+	usages, err = stProviderWorkUsages(ctx, workAuthority, usages)
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
 	usageClientIds := make([]server.Id, len(usages))
 	for index, usage := range usages {
 		usageClientIds[index] = usage.ClientId
@@ -3285,7 +3396,10 @@ func stComputeReleasePayout(
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
-	wallets := model.GetStProviderWalletsAt(ctx, endTime)
+	wallets, err := stProviderWalletsForEpoch(ctx, cfg, workAuthority, authority)
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
 	networkForClient := map[[16]byte]server.Id{}
 	clientIds := make([][16]byte, len(usages))
 	for index, usage := range usages {
@@ -3316,7 +3430,27 @@ func stComputeReleasePayout(
 	for _, p := range providers {
 		fleetSnapshot = append(fleetSnapshot, map[string]any{"client_id": fmt.Sprintf("%x", p.ClientID), "head": p.HeadExcluded, "generation": p.BindingGeneration})
 	}
-	artifact, err := startifact.Build(startifact.BuildInput{
+	if closedWork != nil {
+		closedWork.DeploymentId, closedWork.ChainId = cfg.DeploymentId, cfg.ChainId
+		closedWork.GenesisHash, closedWork.Netuid = fmt.Sprintf("0x%x", cfg.GenesisHash), uint16(cfg.Netuid)
+		closedWork.Coordinator, closedWork.SettlementVault = cfg.ContractAddress, cfg.SettlementVault
+		closedWork.Epoch, closedWork.NoId = epoch, cfg.NoId
+		closedWork.PolicyHash = fmt.Sprintf("0x%x", authority.PolicyHash)
+		closedWork.Start = startifact.Boundary{Number: startBlock, Hash: common.Hash(authority.Start.Hash).Hex()}
+		closedWork.End = startifact.Boundary{Number: closeBlock, Hash: common.Hash(authority.End.Hash).Hex()}
+	}
+	wholeInventory, wholeExpectation, err := stPrepareApprovedWholeWorkInventory(ctx, workAuthority, authority, wholeWindow)
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
+	if workAuthority != nil && workAuthority.Authority.ExpectedProviders != nil && wholeInventory == nil {
+		return [32]byte{}, 0, payoutartifact.ErrClosedWorkUnavailable
+	}
+	if closedWork != nil {
+		closedWork.WholeInventory = wholeInventory
+	}
+	artifact, err := startifact.BuildWithContext(ctx, startifact.BuildInput{
+		ClosedWork:   closedWork,
 		DeploymentID: cfg.DeploymentId, GenesisHash: fmt.Sprintf("0x%x", cfg.GenesisHash), PolicyHash: fmt.Sprintf("0x%x", authority.PolicyHash),
 		ChainID: cfg.ChainId, Netuid: uint16(cfg.Netuid), Coordinator: cfg.ContractAddress,
 		SettlementVault: cfg.SettlementVault, Epoch: epoch, NoID: cfg.NoId,
@@ -3331,6 +3465,18 @@ func stComputeReleasePayout(
 		return [32]byte{}, 0, err
 	}
 	if err := startifact.Sign(artifact, cfg.ArtifactKey); err != nil {
+		return [32]byte{}, 0, err
+	}
+	if artifact.ClosedWork != nil && artifact.ClosedWork.WholeInventory == nil {
+		selection, err := model.GetProviderPayoutEarningSelection(ctx)
+		if err != nil {
+			return [32]byte{}, 0, err
+		}
+		if _, err := payoutartifact.VerifyClosedWorkReportsWithEarningSelection(ctx, artifact, common.Address{}, selection); err != nil {
+			return [32]byte{}, 0, err
+		}
+	}
+	if err := stRetainWholeWorkWindow(ctx, artifact, wholeExpectation); err != nil {
 		return [32]byte{}, 0, err
 	}
 	store, ok := server.LoadBlobStore()
