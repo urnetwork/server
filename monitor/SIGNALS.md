@@ -11661,6 +11661,38 @@ unfinished residence. Completion outcomes are `contract_reply`,
 precedence. A generated signed reply does not prove delivery, provider contact,
 a unique reservation, or an accepted URL trial.
 
+The companion phase also owns synchronous model unwind after its nested
+transaction finishes. In particular, `runRedisContractAdmission` joins reserved
+token compensation before returning. Its detached owner has one shared
+300-second budget, one-second PG attempts, and at most one second between
+retry passes. Canceled callers can therefore remain in `companion_origin`
+while this required cleanup continues. A large companion population with a
+smaller `transaction` population does not by itself identify origin-query
+waiters or occupied PG connections. The 2026-10-05 08:47:42Z exact-02d four-g1
+point receipt (`1fc3b9294f70d0a13f5ea8f1865ac4ca48dc590a3fd01d42dbb77fad1e72120a`)
+showed edge3/edge4 companion populations 14,864/14,601 and nested transaction
+populations 179/169. This is point occupancy, not an interval rate or proof of
+the branch responsible for every call.
+
+Reservation attempts register cleanup ownership before Redis EVAL. A nil-error
+zero reply establishes no positive reservation for that attempt and can remove
+only its own compensation obligation. Keep the balance in retained-marker
+discovery so an entirely full grant can recover an older abandoned token.
+Positive, malformed, canceled, timed-out, and lost-reply outcomes remain owned;
+a concurrent or later zero must not erase an earlier uncertain attempt. A zero
+reply can still expire old tokens or refresh TTLs, so it does not prove that
+Redis performed no writes. SQL request fences and the sticky publication
+boundary continue to protect committed custody.
+
+Pool canceled-acquisition counters count failed acquisition attempts, not PG
+CancelRequest messages, logical requests, or borrowed connections. Do not infer
+constructor/cleanup populations by subtracting independently sampled gauges.
+The stage owner is finished by an idempotent controller defer; error,
+cancellation, and panic controls verify that it decrements its current gauge.
+A live cleanup tail remains counted until that defer executes. Use same-source,
+same-process paired counters to measure change, and treat completed-stage
+seconds/count as lifetime means unless a qualified pair supplies the interval.
+
 `urnetwork_connect_contract_rejections_total{ingress,cause,companion}` closes
 the early-branch gap in the older contract-failure counter. Its 40 initialized
 cells use `internal|http`, requested companion `true|false`, and the fixed
