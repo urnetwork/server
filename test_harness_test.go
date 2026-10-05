@@ -254,11 +254,12 @@ func writeTestEnvironmentLauncherState(
 	if err := os.Mkdir(lockDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(lockDir, "owner"), []byte("test-owner\n"), 0o600); err != nil {
+	ownerToken, _ := startLocalAttestationOwnerProcess(t)
+	if err := os.WriteFile(filepath.Join(lockDir, "owner"), []byte(ownerToken+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	attestation := "format=urnetwork-server-run-local-ready-v1\n" +
-		"owner_token=test-owner\n" +
+		"owner_token=" + ownerToken + "\n" +
 		"host_ip=" + localDedicatedAddress + "\n" +
 		"postgres_host=" + postgresHost + "\n" +
 		"postgres_port=" + postgresPort + "\n" +
@@ -2001,7 +2002,7 @@ func TestRunLocalReportsMissingTcpProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	binDir := t.TempDir()
-	for _, commandName := range []string{"dirname", "head", "sed", "uname"} {
+	for _, commandName := range []string{"dirname", "head", "od", "sed", "tr", "uname"} {
 		commandPath, err := exec.LookPath(commandName)
 		if err != nil {
 			t.Fatal(err)

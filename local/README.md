@@ -39,9 +39,14 @@ Press `Ctrl-C` in the `run-local.sh` terminal to stop the containers, restore
   ```
 - After both containers are healthy and both published ports are reachable from
   the host, atomically publishes `/tmp/urnetwork-server-run-local.lock/ready`.
-  That attestation binds the lock's opaque owner token to the selected IP,
-  hostnames, and ports. `test-env.sh` requires the complete record and the two
-  unique launcher-managed mappings before it probes either service.
+  That attestation binds the lock's owner token to the selected IP, hostnames,
+  and ports. The launcher re-execs before acquiring resources, preserving its
+  PID and flags while adding a random 128-bit nonce to its arguments. Its `v2`
+  owner token binds that nonce to the PID. `test-env.sh` requires a live,
+  non-zombie process with that exact nonce field in `ps`'s rendered command,
+  the complete record, and the two unique launcher-managed mappings before it
+  probes either service. Matching files or a reused PID alone cannot establish
+  readiness.
 
 ## Why not 127.0.0.1
 
@@ -91,6 +96,10 @@ further signals once cleanup starts, so an ordinary interruption cannot strand
 the lock between directory creation and owner publication, or between owner
 removal and directory removal. `SIGKILL`, host failure, and filesystem errors
 can still leave incomplete state.
+
+Readiness validation rejects an absent owner or an old `v1` token even when
+the containers are healthy. This rejection does not authorize stale-lock
+reclamation: retain the residual state and follow the ownership checks below.
 
 An empty `/tmp/urnetwork-server-run-local.lock` is not proof that the services
 are unowned. For recovery, first prevent concurrent launcher starts and test
@@ -249,10 +258,17 @@ from zsh; do not source `run-local-state.sh` directly into stock zsh.
   `local-redis.bringyour.com` aliases, flush the resolver cache, and remove a
   stale lock only after that ownership check. Preserve unrelated aliases on a
   shared hosts line.
-- A launcher started from an older checkout has no readiness attestation. Stop
-  it normally and restart the current `run-local.sh`; do not synthesize `ready`
-  by hand.
+- A launcher started from an older checkout can lack readiness or use an old
+  owner token without a live process challenge. Stop it normally and restart
+  the current `run-local.sh`; do not synthesize `ready` by hand.
 - The postgres data volume (`pgdata`) persists across runs; the init script only
   runs on a fresh volume.
 - The postgres image must be the glibc (debian) build, not alpine: the test
   harness creates databases `WITH ... LOCALE='en_US.UTF-8'`, which alpine lacks.
+
+The local readiness regressions are Go tests (`local_run_local_*_test.go` and
+the launcher cases in `test_harness_test.go`). They use temporary metadata and
+Go-managed child processes. Bash remains necessary at the integration boundary
+because the existing platform launcher owns shell traps, sudo, host mappings,
+and Compose; these tests invoke its real helpers without provisioning services.
+This is the existing-platform exception to the runner's Go automation rule.

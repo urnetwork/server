@@ -7198,3 +7198,39 @@ remain separate acceptance steps. Do not delay that rollout for an old-generatio
 rate pair. Root ledger T592 retains the recovery report and rollout boundary.
 FP2FIX remains open until current eligible providers satisfy the rolling quota
 and the independent quality, security and operational requirements.
+
+### 2026-10-05 05:40 UTC rolling quota recovery and rate interpretation
+
+The fresh 05:39:54.603 UTC global census reports 75,057 of 75,082 eligible
+providers quota-complete (99.9667%), with 126 measured runs still needed,
+22 warming providers and two uninitialized cycles. Four rows are due, and the
+oldest due age is 7.36 seconds. Secure completion is 75,033: all 24 outstanding
+security cases already have ten measured runs and remain a separate condition.
+This is a current aggregate snapshot, not proof of sustained 100% coverage.
+The earlier 04:49 census of 7,882/74,755 (10.54%) is historical; similar net
+population counts do not establish fixed-provider membership or the cause of
+recovery.
+
+All eight Taskworkers qualify on source `536c2f3d` and retain the same process
+identities as the earlier samples. Between the fresh 05:38 and 05:40 receipts,
+acknowledged measured outcomes increased by seven successes and seven failures
+across native intervals of 90.502–105.750 seconds, totaling 0.149797/s. With the
+cohort almost full and few due rows, this short rate does not measure maximum
+capacity. It is not directly comparable to the Oct 3 18:30–18:35 durable-history
+window's 78.94 unique measured runs/s; ACK counters can include acknowledged
+replays, and the history window counts immutable selected-policy run rows by
+measurement time. A matching current five-minute history read is being prepared.
+
+The deployed source parks a quota-full provider until the oldest of its latest
+ten measurements reaches age 3h54m, preserving six minutes for replacement.
+Clustered catch-up measurements can therefore produce quiet periods followed by
+renewal waves, but Main's per-provider expiry distribution has not yet proved
+that cause. No fairness, pacing, headroom or funding change follows from the
+0.15/s observation. The bounded 05:27 native read found no rows in the prior
+October 1 deadline's microsecond precision interval; it does not establish a
+current ancient tail or rule out stale hints elsewhere. FP2FIX remains open.
+
+Fresh paired reduction SHA256
+431197ab324c25b2c1755d49581f35c3fbd562b51b709a9db71123bfd63213d2;
+finite ancient-deadline reduction SHA256
+899a3177c02f7a52832c7b5ac433c58b0256d2dcaa95a22a8076536bab766bcb.

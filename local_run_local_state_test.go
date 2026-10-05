@@ -592,6 +592,7 @@ func TestRunLocalLifecycleFinishesOwnershipTransitionsOnSignal(t *testing.T) {
 				script := `set -euo pipefail
 source "$1"
 RUN_LOCK_DIR="$2/run-local.lock"
+RUN_OWNER_NONCE=0123456789abcdef0123456789abcdef
 phase="$3"
 signal="$4"
 KEEP_UP=0
