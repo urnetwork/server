@@ -107,6 +107,11 @@ func TestProAbsent(t *testing.T) {
 	//    fire, schedule for now, fire again, forever. A missing config file must not spin
 	//    the task worker.
 	connect.AssertEqual(t, true, 0 < c.ReferralGrantPeriod())
+
+	// 7. no contract cap on either tier. A zero cap, if it were applied, would grant
+	//    contracts that carry nothing.
+	connect.AssertEqual(t, ByteCount(0), c.MaxContractTransferByteCount(false))
+	connect.AssertEqual(t, ByteCount(0), c.MaxContractTransferByteCount(true))
 }
 
 // skipWithoutProYml skips a test that asserts the CONFIGURED product spec (caps,

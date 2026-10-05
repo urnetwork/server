@@ -989,11 +989,55 @@ func nextContract(
 	)
 }
 
-// The lifecycle lookup and origin escrow creation newContract performs.
-// Tests replace them to check, without a database, which byte count the
-// controller signs for a given escrow.
+// The lifecycle lookup, origin escrow creation and payer plan lookup
+// newContract performs. Tests replace them to check, without a database, which
+// byte count the controller requests and signs for a given escrow.
 var findActiveClientPairNetworks = model.FindActiveClientPairNetworks
 var createTransferEscrow = model.CreateTransferEscrow
+var isProNetwork = model.IsProNetwork
+
+// contractPayerNetworkId returns the network whose balance escrows a contract,
+// following the order in which newContract chooses the funding path. Network
+// and friends-and-family contracts escrow nothing, so they have no payer. A
+// companion contract is paid by its destination, the source of its origin.
+func contractPayerNetworkId(
+	provideMode model.ProvideMode,
+	companionContract bool,
+	sourceNetworkId server.Id,
+	destinationNetworkId server.Id,
+) (payerNetworkId server.Id, escrowed bool) {
+	switch {
+	case provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily:
+		return server.Id{}, false
+	case companionContract:
+		return destinationNetworkId, true
+	default:
+		return sourceNetworkId, true
+	}
+}
+
+// payerMaxContractTransferByteCount is the largest contract, per hop, granted
+// against the payer's balance. pro.yml may cap the contracts of a tier
+// (<tier>.max_contract_transfer_byte_count, e.g. free) so that a contract
+// abandoned by its client holds less of the payer's balance until it is
+// force-closed. The grant is signed into the contract and clients size from it,
+// so a smaller grant is transparent to them. While no tier sets a cap, the
+// payer's plan is not looked up at all. A cap never goes below
+// MinContractTransferByteCount, so a granted contract still fits a message.
+func payerMaxContractTransferByteCount(ctx context.Context, payerNetworkId server.Id) model.ByteCount {
+	c := model.Pro()
+	if c.MaxContractTransferByteCount(false) == 0 && c.MaxContractTransferByteCount(true) == 0 {
+		return MaxContractTransferByteCount
+	}
+	tierMaxContractTransferByteCount := c.MaxContractTransferByteCount(isProNetwork(ctx, payerNetworkId))
+	if tierMaxContractTransferByteCount == 0 {
+		return MaxContractTransferByteCount
+	}
+	return min(
+		max(MinContractTransferByteCount, tierMaxContractTransferByteCount),
+		MaxContractTransferByteCount,
+	)
+}
 
 func newContract(
 	ctx context.Context,
@@ -1035,9 +1079,13 @@ func newContract(
 		}
 	}
 
+	maxContractTransferByteCount := MaxContractTransferByteCount
+	if payerNetworkId, escrowed := contractPayerNetworkId(provideMode, companionContract, sourceNetworkId, destinationNetworkId); escrowed {
+		maxContractTransferByteCount = payerMaxContractTransferByteCount(ctx, payerNetworkId)
+	}
 	contractTransferByteCount = min(
 		max(MinContractTransferByteCount, transferByteCount),
-		MaxContractTransferByteCount,
+		maxContractTransferByteCount,
 	) * model.ByteCount(len(intermediaryIds)+1)
 
 	if provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily {
