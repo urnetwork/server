@@ -22,33 +22,42 @@ import (
 const networkRemoveStripeFailedMessage = "Failed to unsubscribe Stripe"
 const networkRemovePlayFailedMessage = "Could not cancel your Google Play subscription. Please try again."
 const networkRemoveAppleRenewingMessage = "Your subscription is billed through the App Store and cannot be cancelled by URnetwork. Cancel it in your App Store subscriptions (Settings > your name > Subscriptions), then delete your account."
+const networkRemoveStoreRenewalChangedMessage = "Your subscription changed while your account was being deleted. Please try again."
 
 // networkRemoveSteps are the store and storage steps of an account deletion.
-// NetworkRemove runs them in this order: the App Store check, Stripe
-// cancellation, Google Play cancellation, then the network removal.
+// NetworkRemove runs them in this order: the store snapshot, the App Store
+// check, Stripe cancellation, Google Play cancellation, then the network
+// removal.
 type networkRemoveSteps struct {
-	// reports whether an App Store subscription may still renew; an error
-	// counts as renewing
-	appleRenewing func(clientSession *session.ClientSession) (bool, error)
+	// reads the App Store and Google Play renewals once, for every step below
+	storeSnapshot func(clientSession *session.ClientSession) *model.RemoveNetworkStoreSnapshot
+	// reports whether any of the App Store subscriptions may still renew; an
+	// error counts as renewing
+	appleRenewing func(clientSession *session.ClientSession, originalTransactionIds []string) (bool, error)
 	// cancels and closes the network's Stripe subscriptions
 	unsubscribeStripe func(clientSession *session.ClientSession) error
-	// cancels the renewal of the network's Google Play subscriptions
-	cancelPlay func(clientSession *session.ClientSession) error
-	// removes the network; returns the removed user auths
-	removeNetwork func(clientSession *session.ClientSession) (bool, map[string]bool)
+	// cancels the renewal of the Google Play subscriptions
+	cancelPlay func(clientSession *session.ClientSession, purchaseTokens []string) error
+	// removes the network unless an App Store or Google Play renewal outside
+	// the snapshot is active; returns the removed user auths
+	removeNetwork func(clientSession *session.ClientSession, storeSnapshot *model.RemoveNetworkStoreSnapshot) (model.RemoveNetworkOutcome, map[string]bool)
 	// schedules the product-update removals for the removed user auths
 	scheduleRemoveProductUpdates func(clientSession *session.ClientSession, userAuths map[string]bool)
 }
 
 var defaultNetworkRemoveSteps = networkRemoveSteps{
+	storeSnapshot: func(clientSession *session.ClientSession) *model.RemoveNetworkStoreSnapshot {
+		return model.GetRemoveNetworkStoreSnapshot(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+	},
 	appleRenewing:     networkRemoveAppleRenewing,
 	unsubscribeStripe: UnsubscribeStripe,
 	cancelPlay:        networkRemoveCancelPlay,
-	removeNetwork: func(clientSession *session.ClientSession) (bool, map[string]bool) {
-		return model.RemoveNetwork(
+	removeNetwork: func(clientSession *session.ClientSession, storeSnapshot *model.RemoveNetworkStoreSnapshot) (model.RemoveNetworkOutcome, map[string]bool) {
+		return model.RemoveNetworkWithStoreSnapshot(
 			clientSession.Ctx,
 			clientSession.ByJwt.NetworkId,
 			&clientSession.ByJwt.UserId,
+			storeSnapshot,
 		)
 	},
 	scheduleRemoveProductUpdates: func(clientSession *session.ClientSession, userAuths map[string]bool) {
@@ -76,9 +85,15 @@ func networkRemoveWithSteps(
 	clientSession *session.ClientSession,
 	steps *networkRemoveSteps,
 ) (*NetworkRemoveResult, error) {
+	// One read of the App Store and Google Play renewals feeds the store steps
+	// and the removal. A renewal credited after this read reaches neither
+	// store step, so the removal refuses it under its lock and the customer
+	// retries.
+	storeSnapshot := steps.storeSnapshot(clientSession)
+
 	// checked first: it changes nothing, so a refusal leaves every store
 	// subscription as it was
-	appleRenewing, err := steps.appleRenewing(clientSession)
+	appleRenewing, err := steps.appleRenewing(clientSession, storeSnapshot.AppleTransactionIds)
 	if err != nil {
 		glog.Errorf("[network]remove could not check the App Store subscription: %v\n", err)
 		appleRenewing = true
@@ -92,42 +107,27 @@ func networkRemoveWithSteps(
 		return networkRemoveError(networkRemoveStripeFailedMessage), nil
 	}
 
-	if err := steps.cancelPlay(clientSession); err != nil {
+	if err := steps.cancelPlay(clientSession, storeSnapshot.PlayPurchaseTokens); err != nil {
 		glog.Errorf("[network]remove failed to cancel Google Play: %v\n", err)
 		return networkRemoveError(networkRemovePlayFailedMessage), nil
 	}
 
-	success, userAuths := steps.removeNetwork(clientSession)
-	if success {
+	outcome, userAuths := steps.removeNetwork(clientSession, storeSnapshot)
+	switch outcome {
+	case model.RemoveNetworkRemoved:
 		steps.scheduleRemoveProductUpdates(clientSession, userAuths)
 		return &NetworkRemoveResult{}, nil
+	case model.RemoveNetworkStoreRenewalUnchecked:
+		// a retry runs the App Store check and the Play cancellation on the
+		// new renewal
+		glog.Infof("[network]remove %s refused: a store renewal was credited during the deletion\n", clientSession.ByJwt.NetworkId)
+		return networkRemoveError(networkRemoveStoreRenewalChangedMessage), nil
 	}
 
 	return nil, fmt.Errorf("Could not remove network")
 }
 
-func networkRemoveActiveRenewals(
-	clientSession *session.ClientSession,
-	market model.SubscriptionMarket,
-) []*model.ActiveSubscriptionRenewal {
-	renewals := []*model.ActiveSubscriptionRenewal{}
-	for _, renewal := range model.GetActiveSubscriptionRenewals(
-		clientSession.Ctx,
-		clientSession.ByJwt.NetworkId,
-		model.SubscriptionTypeSupporter,
-	) {
-		if renewal.Market == market {
-			renewals = append(renewals, renewal)
-		}
-	}
-	return renewals
-}
-
-func networkRemoveAppleRenewing(clientSession *session.ClientSession) (bool, error) {
-	originalTransactionIds := []string{}
-	for _, renewal := range networkRemoveActiveRenewals(clientSession, model.SubscriptionMarketApple) {
-		originalTransactionIds = append(originalTransactionIds, renewal.TransactionId)
-	}
+func networkRemoveAppleRenewing(clientSession *session.ClientSession, originalTransactionIds []string) (bool, error) {
 	return appleSubscriptionsRenewing(
 		clientSession.Ctx,
 		originalTransactionIds,
@@ -169,11 +169,7 @@ func appleSubscriptionsRenewing(
 	return false, nil
 }
 
-func networkRemoveCancelPlay(clientSession *session.ClientSession) error {
-	purchaseTokens := []string{}
-	for _, renewal := range networkRemoveActiveRenewals(clientSession, model.SubscriptionMarketGoogle) {
-		purchaseTokens = append(purchaseTokens, renewal.PurchaseToken)
-	}
+func networkRemoveCancelPlay(clientSession *session.ClientSession, purchaseTokens []string) error {
 	return playCancelDeletionSubscriptions(clientSession.Ctx, purchaseTokens)
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -289,6 +290,236 @@ func TestRemoveNetworkRechecksStripeAfterWaitingForCredit(t *testing.T) {
 			t.Fatalf("credit-first state = network %v renewal %v, want both true", networkExists, renewalExists)
 		}
 	})
+}
+
+// removeNetworkTestStoreRenewal is an active App Store or Google Play renewal
+// whose store id is identity. Distinct end times keep renewals of one market
+// from colliding on the renewal key.
+func removeNetworkTestStoreRenewal(
+	networkId server.Id,
+	market SubscriptionMarket,
+	identity string,
+	startTime time.Time,
+	endTime time.Time,
+) *SubscriptionRenewal {
+	renewal := &SubscriptionRenewal{
+		NetworkId:          networkId,
+		SubscriptionType:   SubscriptionTypeSupporter,
+		StartTime:          startTime,
+		EndTime:            endTime,
+		SubscriptionMarket: market,
+	}
+	switch market {
+	case SubscriptionMarketApple:
+		renewal.TransactionId = identity
+	case SubscriptionMarketGoogle:
+		renewal.PurchaseToken = identity
+	}
+	return renewal
+}
+
+func removeNetworkTestNetworkExists(ctx context.Context, networkId server.Id) bool {
+	networkExists := false
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(
+			ctx,
+			`SELECT EXISTS (SELECT 1 FROM network WHERE network_id = $1)`,
+			networkId,
+		).Scan(&networkExists))
+	})
+	return networkExists
+}
+
+// The deletion refuses a store renewal its snapshot does not name. A nil
+// snapshot (no store steps ran) names none, and a renewal without a store id
+// is never named, even when the snapshot holds an empty id.
+func TestRemoveNetworkStoreSnapshotCovers(t *testing.T) {
+	storeSnapshot := &RemoveNetworkStoreSnapshot{
+		AppleTransactionIds: []string{"synthetic-apple-checked", ""},
+		PlayPurchaseTokens:  []string{"synthetic-play-checked", ""},
+	}
+	var noSnapshot *RemoveNetworkStoreSnapshot
+	apple := func(transactionId string) *ActiveSubscriptionRenewal {
+		return &ActiveSubscriptionRenewal{Market: SubscriptionMarketApple, TransactionId: transactionId}
+	}
+	play := func(purchaseToken string) *ActiveSubscriptionRenewal {
+		return &ActiveSubscriptionRenewal{Market: SubscriptionMarketGoogle, PurchaseToken: purchaseToken}
+	}
+	for _, c := range []struct {
+		name     string
+		snapshot *RemoveNetworkStoreSnapshot
+		renewal  *ActiveSubscriptionRenewal
+		covered  bool
+	}{
+		{"checked apple", storeSnapshot, apple("synthetic-apple-checked"), true},
+		{"apple credited later", storeSnapshot, apple("synthetic-apple-new"), false},
+		{"checked play", storeSnapshot, play("synthetic-play-checked"), true},
+		{"play credited later", storeSnapshot, play("synthetic-play-new"), false},
+		{"apple with a play id", storeSnapshot, apple("synthetic-play-checked"), false},
+		{"play with an apple id", storeSnapshot, play("synthetic-apple-checked"), false},
+		{"apple without an id", storeSnapshot, apple(""), false},
+		{"play without an id", storeSnapshot, play(""), false},
+		{"apple without store steps", noSnapshot, apple("synthetic-apple-checked"), false},
+		{"play without store steps", noSnapshot, play("synthetic-play-checked"), false},
+		{"other market", storeSnapshot, &ActiveSubscriptionRenewal{Market: SubscriptionMarketStripe, TransactionId: "synthetic-apple-checked"}, false},
+	} {
+		if covered := c.snapshot.Covers(c.renewal); covered != c.covered {
+			t.Errorf("%s: covered = %v, want %v", c.name, covered, c.covered)
+		}
+	}
+}
+
+// TestRemoveNetworkRechecksStoreRenewalsAfterWaitingForCredit is the App
+// Store and Google Play form of the Stripe test above. The deletion's store
+// steps ran against a snapshot; a credit holding the shared row lock then
+// commits a renewal the snapshot does not name; the deletion that waited on
+// the lock refuses instead of leaving that renewal billing a deleted account.
+func TestRemoveNetworkRechecksStoreRenewalsAfterWaitingForCredit(t *testing.T) {
+	for _, market := range []SubscriptionMarket{SubscriptionMarketApple, SubscriptionMarketGoogle} {
+		t.Run(market, func(t *testing.T) {
+			server.DefaultTestEnv().Run(t, func(t testing.TB) {
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+				networkId := server.NewId()
+				userId := server.NewId()
+				Testing_CreateNetwork(ctx, networkId, "synthetic-store-credit-first", userId)
+
+				// the store steps ran before the credit, with nothing to check
+				storeSnapshot := GetRemoveNetworkStoreSnapshot(ctx, networkId)
+				now := server.NowUtc()
+				renewal := removeNetworkTestStoreRenewal(
+					networkId,
+					market,
+					"synthetic-store-credit-first",
+					now.Add(-time.Minute),
+					now.Add(time.Hour),
+				)
+
+				creditLocked := make(chan struct{})
+				releaseCredit := make(chan struct{})
+				creditDone := runPaymentModelTest(func() error {
+					var returnErr error
+					server.Tx(ctx, func(tx server.PgTx) {
+						returnErr = LockPaymentNetworkInTx(tx, ctx, networkId)
+						if returnErr != nil {
+							return
+						}
+						close(creditLocked)
+						select {
+						case <-releaseCredit:
+						case <-ctx.Done():
+							returnErr = ctx.Err()
+							return
+						}
+						returnErr = AddSubscriptionRenewalInTx(tx, ctx, renewal)
+					}, server.TxReadCommitted, server.OptNoRetry())
+					return returnErr
+				})
+				select {
+				case <-creditLocked:
+				case <-ctx.Done():
+					if err := awaitPaymentModelTest(creditDone); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+						t.Errorf("credit setup cleanup: %v", err)
+					}
+					t.Fatal("credit transaction did not acquire its row lock")
+				}
+
+				var outcome RemoveNetworkOutcome
+				removeDone := runPaymentModelTest(func() error {
+					outcome, _ = RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, storeSnapshot)
+					return nil
+				})
+
+				waitErr := waitForPaymentLockWaiter(ctx, "payment-network-delete-lock")
+				if waitErr == nil {
+					close(releaseCredit)
+				} else {
+					cancel()
+				}
+				creditErr := awaitPaymentModelTest(creditDone)
+				removeErr := awaitPaymentModelTest(removeDone)
+				if waitErr != nil {
+					t.Fatal(waitErr)
+				}
+				if creditErr != nil {
+					t.Fatalf("credit transaction: %v", creditErr)
+				}
+				if removeErr != nil {
+					t.Fatalf("remove transaction: %v", removeErr)
+				}
+				if outcome != RemoveNetworkStoreRenewalUnchecked {
+					t.Fatalf("delete outcome = %q, want %q for the renewal committed by the lock winner", outcome, RemoveNetworkStoreRenewalUnchecked)
+				}
+				if !removeNetworkTestNetworkExists(ctx, networkId) {
+					t.Fatal("delete removed the network while the new store renewal bills it")
+				}
+			})
+		})
+	}
+}
+
+// The removal goes ahead for store renewals the snapshot names and refuses
+// others: one credited after the snapshot, or any at all when no store steps
+// ran (bringyourctl and other direct callers). The retry's fresh snapshot
+// names the new renewal, including a queued one that has not started yet.
+func TestRemoveNetworkStoreSnapshotGatesRemoval(t *testing.T) {
+	for _, market := range []SubscriptionMarket{SubscriptionMarketApple, SubscriptionMarketGoogle} {
+		t.Run(market, func(t *testing.T) {
+			server.DefaultTestEnv().Run(t, func(t testing.TB) {
+				ctx := context.Background()
+				networkId := server.NewId()
+				userId := server.NewId()
+				Testing_CreateNetwork(ctx, networkId, "synthetic-store-snapshot", userId)
+				now := server.NowUtc()
+				addRenewal := func(identity string, startTime time.Time, endTime time.Time) {
+					if err := AddSubscriptionRenewal(ctx, removeNetworkTestStoreRenewal(networkId, market, identity, startTime, endTime)); err != nil {
+						t.Fatalf("add %s renewal %s: %v", market, identity, err)
+					}
+				}
+
+				addRenewal("synthetic-store-checked", now.Add(-time.Minute), now.Add(time.Hour))
+
+				// no store steps ran: any active store renewal refuses
+				if outcome, _ := RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, nil); outcome != RemoveNetworkStoreRenewalUnchecked {
+					t.Fatalf("removal without a snapshot: outcome %q, want %q", outcome, RemoveNetworkStoreRenewalUnchecked)
+				}
+				if success, _ := RemoveNetwork(ctx, networkId, &userId); success {
+					t.Fatal("direct removal bypassed an active store renewal")
+				}
+
+				storeSnapshot := GetRemoveNetworkStoreSnapshot(ctx, networkId)
+
+				// credited after the store steps
+				addRenewal("synthetic-store-credited-later", now.Add(-time.Minute), now.Add(2*time.Hour))
+				if outcome, _ := RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, storeSnapshot); outcome != RemoveNetworkStoreRenewalUnchecked {
+					t.Fatalf("removal after a later credit: outcome %q, want %q", outcome, RemoveNetworkStoreRenewalUnchecked)
+				}
+				if !removeNetworkTestNetworkExists(ctx, networkId) {
+					t.Fatal("refused removal deleted the network")
+				}
+
+				// queued to start later; still part of what the store steps check
+				addRenewal("synthetic-store-queued", now.Add(time.Hour), now.Add(3*time.Hour))
+				storeSnapshot = GetRemoveNetworkStoreSnapshot(ctx, networkId)
+				identities := storeSnapshot.AppleTransactionIds
+				if market == SubscriptionMarketGoogle {
+					identities = storeSnapshot.PlayPurchaseTokens
+				}
+				for _, identity := range []string{"synthetic-store-checked", "synthetic-store-credited-later", "synthetic-store-queued"} {
+					if !slices.Contains(identities, identity) {
+						t.Fatalf("retry snapshot %+v is missing %s", storeSnapshot, identity)
+					}
+				}
+
+				if outcome, _ := RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, storeSnapshot); outcome != RemoveNetworkRemoved {
+					t.Fatalf("removal with a current snapshot: outcome %q, want %q", outcome, RemoveNetworkRemoved)
+				}
+				if removeNetworkTestNetworkExists(ctx, networkId) {
+					t.Fatal("removed network still exists")
+				}
+			})
+		})
+	}
 }
 
 // TestPaymentCreditWaitsForDeleteAndObservesAbsence proves the delete-first
