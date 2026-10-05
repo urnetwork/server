@@ -431,10 +431,13 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 
 /**
  * If the wallet holds a Seeker NFT, we increase points earned
+ *
+ * A failed write raises, as every model write does, so the transaction rolls
+ * back with its cause; the error result is always nil.
  */
-func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession) (err error) {
+func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession) error {
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-		tag, err := tx.Exec(
+		tag := server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				UPDATE account_wallet
@@ -445,11 +448,7 @@ func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession
 			`,
 			walletAddress,
 			session.ByJwt.NetworkId,
-		)
-		if err != nil {
-			glog.Errorf("Error marking wallet as seeker holder: %v", err)
-			return
-		}
+		))
 
 		if tag.RowsAffected() == 0 {
 			/**
@@ -459,7 +458,7 @@ func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession
 			active := true
 			createTime := server.NowUtc()
 
-			_, err = tx.Exec(
+			server.RaisePgResult(tx.Exec(
 				session.Ctx,
 				`
 					 INSERT INTO account_wallet (
@@ -484,12 +483,12 @@ func MarkWalletSeekerHolder(walletAddress string, session *session.ClientSession
 				"USDC",
 				createTime,
 				true,
-			)
+			))
 
 		}
 	})
 
-	return err
+	return nil
 }
 
 func GetAllSeekerHolders(ctx context.Context) map[server.Id]bool {
