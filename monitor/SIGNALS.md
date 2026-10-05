@@ -12311,6 +12311,28 @@ profile alone. False-negative qualifier: local transport controls do not model
 provider scheduling, Main contract availability or the live eligible population;
 retain the independently observed per-provider quota and ownership requirements.
 
+URL content matcher v2 records changed HTML semantics separately from the
+unchanged result-policy version. It ignores controls in inert, hidden and example
+subtrees, parses script/form marker URLs, and requires a document title or H1
+human prompt plus live challenge structure. A custom-title browser gate can use
+its JavaScript-and-cookies instruction plus a non-passive platform script.
+Ordinary article content defeats generic widget heuristics; corroborated
+platform scripts and explicit response decisions remain authoritative. Auxiliary
+widgets do not establish a document gate. The detector does not
+render overlays or interpret inline script bootstraps, and a partial content
+prefix still does not certify a requested article. The deterministic
+`qualityprobe/egresshealth/TestUrlProbeHumanGate*` controls cover the repaired
+misses, inactive markers, passive scripts, articles and mixed matcher receipts.
+
+Deploy v1/v2-compatible API evidence readers before enabling v2 producers in
+Taskworker or standalone probes. The shared validator is also used by
+API ingress, model storage and probe publication; old v1-only readers reject v2.
+Historical v1 evidence retains its recorded provenance during a mixed rollout.
+This detector change does not alter phase limits, body sampling, the ten accepted
+measured outcomes per four hours, the inclusive 0.8 quality ratio, or the local
+setup versus measured-provider boundary. Local fixtures establish matcher
+behavior, not deployed Main recovery or rendered access to a live publisher.
+
 A completed URL pass must stop and join its heartbeat refresher, then publish
 zero for its shard if no other invocation in that process still owns it. A
 nonzero final timestamp left by a completed pass can remain fresh for the
