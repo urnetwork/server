@@ -534,8 +534,20 @@ type connectCountry struct {
 	CountryCode string
 }
 
+// The countries are read once per process. A test env starts each test on a
+// new database, so the read is reset with the env, as the other location
+// caches are.
+func init() {
+	server.OnReset(func() {
+		countryCodeConnectCountries = sync.OnceValue(loadCountryCodeConnectCountries)
+	})
+}
+
 // county code is lower
-var countryCodeConnectCountries = sync.OnceValue(func() map[string]*connectCountry {
+var countryCodeConnectCountries = sync.OnceValue(loadCountryCodeConnectCountries)
+
+// Reads every country location, keyed by its lowercase country code.
+func loadCountryCodeConnectCountries() map[string]*connectCountry {
 	ctx := context.Background()
 
 	m := map[string]*connectCountry{}
@@ -567,7 +579,7 @@ var countryCodeConnectCountries = sync.OnceValue(func() map[string]*connectCount
 	})
 
 	return m
-})
+}
 
 func GetConnectLocationForCountryCode(ctx context.Context, countryCode string) *sdk.ConnectLocation {
 	normalCountryCode := strings.ToLower(countryCode)
