@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sdk"
@@ -394,6 +395,137 @@ func TestAuthNetworkClientCreatesAncillaryClientOnSourceDevice(t *testing.T) {
 	})
 }
 
+// A re-auth (client_id set) checks the client and its device before writing
+// either, so a refusal writes nothing. It used to update the client's
+// description and auth time first: "Device does not exist." then kept that
+// update, and a client with no device failed the call on a scan of its null
+// device id instead of being refused.
+func TestAuthNetworkClientReauthRefusalsWriteNothing(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		_, userSession := authClientTestNetwork(ctx, "test")
+
+		// a client with no device, from before clients had devices
+		noDeviceClientId, _ := authClientTestClient(ctx, t, userSession)
+		// a client whose device is gone
+		goneDeviceClientId, goneDeviceId := authClientTestClient(ctx, t, userSession)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_client SET device_id = NULL WHERE client_id = $1`,
+				noDeviceClientId,
+			))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM device WHERE device_id = $1`,
+				goneDeviceId,
+			))
+		})
+
+		for _, c := range []struct {
+			name     string
+			clientId server.Id
+			message  string
+		}{
+			{
+				name:     "a client with no device",
+				clientId: noDeviceClientId,
+				message:  "Client needs to be migrated (support@ur.io).",
+			},
+			{
+				name:     "a client whose device is gone",
+				clientId: goneDeviceClientId,
+				message:  "Device does not exist.",
+			},
+			{
+				name:     "a client that does not exist",
+				clientId: server.NewId(),
+				message:  "Client does not exist.",
+			},
+		} {
+			descriptionBefore, authTimeBefore, foundBefore := authClientTestClientState(ctx, c.clientId)
+			// a failed scan panics, and the other cases still run
+			result, panicValue, err := func() (result *AuthNetworkClientResult, panicValue any, err error) {
+				defer func() {
+					panicValue = recover()
+				}()
+				result, err = AuthNetworkClient(
+					&AuthNetworkClientArgs{
+						ClientId:    &c.clientId,
+						Description: "after",
+						DeviceSpec:  "after",
+					},
+					userSession,
+				)
+				return
+			}()
+			if panicValue != nil {
+				t.Errorf("%s: the re-auth panicked: %v", c.name, panicValue)
+			} else if err != nil {
+				t.Errorf("%s: the re-auth failed: %s", c.name, err)
+			} else if result == nil {
+				t.Errorf("%s: no result", c.name)
+			} else if result.Error == nil || result.Error.Message != c.message {
+				t.Errorf("%s: answered %+v, want the refusal %q", c.name, result, c.message)
+			} else if result.ClientId != nil || result.ByClientJwt != nil {
+				t.Errorf("%s: the refusal returned credentials", c.name)
+			}
+			descriptionAfter, authTimeAfter, foundAfter := authClientTestClientState(ctx, c.clientId)
+			if foundAfter != foundBefore || descriptionAfter != descriptionBefore || !authTimeAfter.Equal(authTimeBefore) {
+				t.Errorf(
+					"%s: the refused re-auth wrote the client: description %q -> %q, auth time %s -> %s",
+					c.name,
+					descriptionBefore,
+					descriptionAfter,
+					authTimeBefore,
+					authTimeAfter,
+				)
+			}
+		}
+	})
+}
+
+// A re-auth of a client and its device updates both, as it did before the
+// checks moved ahead of the writes.
+func TestAuthNetworkClientReauthUpdatesClientAndDevice(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		_, userSession := authClientTestNetwork(ctx, "test")
+		clientId, deviceId := authClientTestClient(ctx, t, userSession)
+		_, authTimeBefore, _ := authClientTestClientState(ctx, clientId)
+
+		result, err := AuthNetworkClient(
+			&AuthNetworkClientArgs{
+				ClientId:    &clientId,
+				Description: "after",
+				DeviceSpec:  "after",
+			},
+			userSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Error, nil)
+		connect.AssertEqual(t, *result.ClientId, clientId)
+		connect.AssertNotEqual(t, result.ByClientJwt, nil)
+
+		description, authTime, _ := authClientTestClientState(ctx, clientId)
+		connect.AssertEqual(t, description, "after")
+		if !authTimeBefore.Before(authTime) {
+			t.Fatalf("the re-auth did not update the auth time: %s -> %s", authTimeBefore, authTime)
+		}
+		var deviceSpec string
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(
+				ctx,
+				`SELECT device_spec FROM device WHERE device_id = $1`,
+				deviceId,
+			).Scan(&deviceSpec))
+		})
+		connect.AssertEqual(t, deviceSpec, "after")
+	})
+}
+
 // The countries that country_code selects are read once per process. A test
 // env starts each test on a new database, so the read is reset with the env,
 // as the other location caches are. Otherwise every later test would see the
@@ -446,6 +578,58 @@ func authClientTestNetworkCounts(ctx context.Context, networkId server.Id) (clie
 			`,
 			networkId,
 		).Scan(&clientCount, &deviceCount, &proxyCount))
+	})
+	return
+}
+
+// Creates a client with the description and device spec "before" and an auth
+// time a day back, so that a later write to any of them shows.
+func authClientTestClient(
+	ctx context.Context,
+	t testing.TB,
+	userSession *session.ClientSession,
+) (clientId server.Id, deviceId server.Id) {
+	result, err := AuthNetworkClient(
+		&AuthNetworkClientArgs{
+			Description: "before",
+			DeviceSpec:  "before",
+		},
+		userSession,
+	)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, result.Error, nil)
+	clientId = *result.ClientId
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`UPDATE network_client SET auth_time = $2 WHERE client_id = $1`,
+			clientId,
+			server.NowUtc().Add(-24*time.Hour),
+		))
+		server.Raise(tx.QueryRow(
+			ctx,
+			`SELECT device_id FROM network_client WHERE client_id = $1`,
+			clientId,
+		).Scan(&deviceId))
+	})
+	return
+}
+
+// Reads the client's stored description and auth time, and whether the client
+// exists.
+func authClientTestClientState(ctx context.Context, clientId server.Id) (description string, authTime time.Time, found bool) {
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT description, auth_time FROM network_client WHERE client_id = $1`,
+			clientId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&description, &authTime))
+				found = true
+			}
+		})
 	})
 	return
 }

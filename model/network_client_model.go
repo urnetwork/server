@@ -754,24 +754,31 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 				authClientError = err
 				return
 			}
-			tag := server.RaisePgResult(tx.Exec(
+			// the client and its device are checked before either is written,
+			// so a refusal writes nothing. The client row is still locked
+			// before the device row.
+			clientFound := false
+			var deviceId *server.Id
+			result, err := tx.Query(
 				session.Ctx,
 				`
-					UPDATE network_client
-					SET
-						description = $3,
-						auth_time = $4
+					SELECT device_id FROM network_client
 					WHERE
 						client_id = $1 AND
 						network_id = $2 AND
 						active = true
+					FOR NO KEY UPDATE
 				`,
 				authClient.ClientId,
 				session.ByJwt.NetworkId,
-				authClient.Description,
-				server.NowUtc(),
-			))
-			if tag.RowsAffected() == 0 {
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&deviceId))
+					clientFound = true
+				}
+			})
+			if !clientFound {
 				authClientResult = &AuthNetworkClientResult{
 					Error: &AuthNetworkClientError{
 						Message: "Client does not exist.",
@@ -779,23 +786,6 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 				}
 				return
 			}
-
-			result, err := tx.Query(
-				session.Ctx,
-				`
-					SELECT device_id FROM network_client
-					WHERE client_id = $1
-				`,
-				authClient.ClientId,
-			)
-			var deviceId *server.Id
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					var deviceIdValue server.Id
-					server.Raise(result.Scan(&deviceIdValue))
-					deviceId = &deviceIdValue
-				}
-			})
 
 			if deviceId == nil {
 				authClientResult = &AuthNetworkClientResult{
@@ -806,7 +796,7 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 				return
 			}
 
-			tag = server.RaisePgResult(tx.Exec(
+			tag := server.RaisePgResult(tx.Exec(
 				session.Ctx,
 				`
 					UPDATE device
@@ -826,6 +816,24 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 				}
 				return
 			}
+
+			server.RaisePgResult(tx.Exec(
+				session.Ctx,
+				`
+					UPDATE network_client
+					SET
+						description = $3,
+						auth_time = $4
+					WHERE
+						client_id = $1 AND
+						network_id = $2 AND
+						active = true
+				`,
+				authClient.ClientId,
+				session.ByJwt.NetworkId,
+				authClient.Description,
+				server.NowUtc(),
+			))
 
 			// the client jwt carries the client's stored identity
 			var principal string
