@@ -7306,3 +7306,37 @@ Evidence: paired reduction
 `astra-7cae4-v1-v2-coverage-rate-reduction.json` SHA256
 `d111fbceb75195585c5c950e0ac7058de0887ce8f646c5b2f9081e0c4a60dabe`,
 binding actual receipts `ccc723b2…89320` and `22965b2f…560f2`.
+
+### 2026-10-05 08:23 UTC current adoption and financial checkpoint
+
+The 07:52:21 finite census qualified all eight ready Taskworkers on source
+`f24c159789758928af1569f2ba9eb3c870e46439`. A separate 07:52:29 finite
+runtime read qualified all sixteen APIs ready on source
+`02d9f529808b5d1d8022f3a14104f8a330c9a1cc`. These are adoption and
+readiness observations, not proof that rolling quota, picker delivery or
+financial backlog has recovered. Fresh current-process throughput and quota
+receipts are still required; the 06:57 `7cae4081` deficit above is historical.
+
+The 08:10 finite contract-close snapshot counted 1,818 newly created and 403
+terminal-closed visible rows in its selected ten-second timestamp window. These
+are exact below-cap timestamp counts, not commit acknowledgments or a continuous
+settlement rate. The oldest open and disputed head timestamps did not advance
+in the paired close observations; the open population remains capped at a
+10,001-row lower bound, and disputed retained accounting failures remain
+separate. An earlier legacy-page sample selected work over 94 seconds; that was
+the selected finish age, not one page's runtime. Its maximum observed page
+runtime was 15.261217 seconds. Neither sample proves backlog drain.
+
+The separate 06:36–08:11 financial-counter pair advanced intent inserts by
+59,058 and deletes by 260,753 over 5,694.885 seconds. Counter movement is not
+an exact outstanding-intent delta or custody reconciliation, and the oldest
+legacy heads remained unchanged in the retained comparison. The tally repair
+is merged and pushed in canonical source `dc3891782`, while the next Taskworker
+image was still being built or verified at this checkpoint; no deployment or
+runtime effect is claimed. FP2FIX remains open pending current rolling quota,
+quality, speed, security and financial acceptance.
+
+Evidence: `root-tw-census-f24c1-known-runtime-v1/run-20261005T075221Z`,
+`root-api16-known-runtime-02d-v1/run-20261005T075229Z`,
+`close-progress-actual-v4.json`, and `backlog-v2-v3-paired-actual.json` in the
+retained `/home/by/urnetwork/temp` evidence tree.
