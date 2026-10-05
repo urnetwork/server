@@ -139,9 +139,10 @@ func verifyOriginalRequestTestContention(t testing.TB, canceled bool) {
 	waitingCtx, cancelWaiting := context.WithCancel(ctx)
 	defer cancelWaiting()
 	joined := false
+	started := false
 	defer func() {
 		cancelWaiting()
-		if !joined {
+		if started && !joined {
 			select {
 			case <-done:
 			case <-ctx.Done():
@@ -158,6 +159,7 @@ func verifyOriginalRequestTestContention(t testing.TB, canceled bool) {
 		}
 		var ownerPid int
 		server.Raise(tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&ownerPid))
+		started = true
 		go func() {
 			var value observed
 			server.HandleError(func() {

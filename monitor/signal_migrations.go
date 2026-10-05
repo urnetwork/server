@@ -2236,11 +2236,11 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			} else {
 				compareCount := min(dbVersion, requiredHead)
 				for index := 0; index < compareCount; index++ {
-					expectedIdentity, identityErr := server.MigrationIdentity(index)
+					matches, identityErr := server.MigrationIdentityMatches(index, strings.TrimSpace(catalogIdentities[index]))
 					if identityErr != nil {
 						return nil, identityErr
 					}
-					if strings.TrimSpace(catalogIdentities[index]) != expectedIdentity {
+					if !matches {
 						missing = append(missing, fmt.Sprintf("migration_catalog identity[%d]@v600", index))
 						break
 					}

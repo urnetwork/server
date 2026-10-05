@@ -20,22 +20,7 @@ CREATE FUNCTION verify_original_request_wire_lock(message bytea, signature bytea
  LANGUAGE sql AS $wire_lock$
  SELECT pg_advisory_xact_lock(775,('x'||substr(encode(sha256(message||signature),'hex'),1,8))::bit(32)::int);
 $wire_lock$;
-CREATE FUNCTION verify_original_request_closed_fence() RETURNS trigger LANGUAGE plpgsql AS $closed_fence$
-DECLARE body jsonb; message bytea; signature bytea;
-BEGIN
- body := convert_from(NEW.original_body,'UTF8')::jsonb;
- message := decode(body->>'request_message','base64');
- signature := decode(body->>'request_signature','base64');
- PERFORM verify_original_request_wire_lock(message,signature);
- IF EXISTS (SELECT 1 FROM verify_original_request_closed c
-  WHERE c.client_id=(body->'trail'->>'ClientId')::uuid
-  AND c.scope_json=COALESCE(body->'scope','null'::jsonb)
-  AND c.request_message=message AND c.request_signature=signature) THEN
-  RAISE EXCEPTION 'verification request permanently closed' USING ERRCODE='23514';
- END IF;
- RETURN NEW;
-END
-$closed_fence$;
+` + verifyOriginalRequestClosedFenceSql + `
 CREATE TRIGGER verify_original_request_closed_fence BEFORE INSERT ON verify_original_transition
  FOR EACH ROW EXECUTE FUNCTION verify_original_request_closed_fence();
 CREATE FUNCTION verify_original_request_no_received_tombstone() RETURNS trigger LANGUAGE plpgsql AS $no_received$
@@ -55,4 +40,24 @@ CREATE TRIGGER verify_original_request_closed_append_only BEFORE UPDATE OR DELET
  FOR EACH ROW EXECUTE FUNCTION verify_original_append_only_guard();
 CREATE TRIGGER verify_original_request_closed_no_truncate BEFORE TRUNCATE ON verify_original_request_closed
  FOR EACH STATEMENT EXECUTE FUNCTION verify_original_append_only_guard();
+`
+
+// Preserve exact client, scope, message and signature fencing on both install paths.
+const verifyOriginalRequestClosedFenceSql = `
+CREATE OR REPLACE FUNCTION verify_original_request_closed_fence() RETURNS trigger LANGUAGE plpgsql AS $closed_fence$
+DECLARE body jsonb; message bytea; signature bytea;
+BEGIN
+ body := verify_original_request_index_body(NEW.original_body);
+ message := decode(body->>'request_message','base64');
+ signature := decode(body->>'request_signature','base64');
+ PERFORM verify_original_request_wire_lock(message,signature);
+ IF EXISTS (SELECT 1 FROM verify_original_request_closed c
+  WHERE c.client_id=(body->'trail'->>'ClientId')::uuid
+  AND c.scope_json=COALESCE(body->'scope','null'::jsonb)
+  AND c.request_message=message AND c.request_signature=signature) THEN
+  RAISE EXCEPTION 'verification request permanently closed' USING ERRCODE='23514';
+ END IF;
+ RETURN NEW;
+END
+$closed_fence$;
 `

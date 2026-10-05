@@ -5,7 +5,7 @@ package server
 // This is appended after the full original-consent migration prefix. The
 // bounded expression index also finds retained pre-index originals; duplicates
 // remain a conflict instead of selecting an arbitrary historical winner.
-const verifyOriginalRequestSchemaSql = `
+const verifyOriginalRequestSchemaSql = verifyOriginalRequestIndexBodySql + `
 CREATE TABLE verify_original_request (
  request_hash bytea PRIMARY KEY CHECK (octet_length(request_hash)=32),
  trail_id uuid NOT NULL,
@@ -29,25 +29,30 @@ CREATE TABLE verify_original_request_lookup (
 CREATE INDEX verify_original_request_lookup_identity ON verify_original_request_lookup
  (client_id,sha256(request_message),sha256(request_signature));
 INSERT INTO verify_original_request_lookup
- SELECT trail_id,previous_depth,((convert_from(original_body,'UTF8')::jsonb)->'trail'->>'ClientId')::uuid,
- COALESCE((convert_from(original_body,'UTF8')::jsonb)->'scope','null'::jsonb),
- decode((convert_from(original_body,'UTF8')::jsonb)->>'request_message','base64'),
- decode((convert_from(original_body,'UTF8')::jsonb)->>'request_signature','base64')
- FROM verify_original_transition;
-CREATE FUNCTION verify_original_request_capture() RETURNS trigger LANGUAGE plpgsql AS $request_capture$
-DECLARE body jsonb;
-BEGIN
- body := convert_from(NEW.original_body,'UTF8')::jsonb;
- INSERT INTO verify_original_request_lookup VALUES
- (NEW.trail_id,NEW.previous_depth,(body->'trail'->>'ClientId')::uuid,
- COALESCE(body->'scope','null'::jsonb),decode(body->>'request_message','base64'),decode(body->>'request_signature','base64'));
- RETURN NEW;
-END
-$request_capture$;
+ SELECT trail_id,previous_depth,(body->'trail'->>'ClientId')::uuid,
+ COALESCE(body->'scope','null'::jsonb),
+ decode(body->>'request_message','base64'),decode(body->>'request_signature','base64')
+ FROM verify_original_transition
+ CROSS JOIN LATERAL (SELECT verify_original_request_index_body(original_body) AS body) AS original_index;
+` + verifyOriginalRequestCaptureSql + `
 CREATE TRIGGER verify_original_request_capture AFTER INSERT ON verify_original_transition
  FOR EACH ROW EXECUTE FUNCTION verify_original_request_capture();
 CREATE TRIGGER verify_original_request_lookup_append_only BEFORE UPDATE OR DELETE ON verify_original_request_lookup
  FOR EACH ROW EXECUTE FUNCTION verify_original_append_only_guard();
 CREATE TRIGGER verify_original_request_lookup_no_truncate BEFORE TRUNCATE ON verify_original_request_lookup
  FOR EACH STATEMENT EXECUTE FUNCTION verify_original_append_only_guard();
+`
+
+// The repaired reader is shared by initial installation and the append-only upgrade.
+const verifyOriginalRequestCaptureSql = `
+CREATE OR REPLACE FUNCTION verify_original_request_capture() RETURNS trigger LANGUAGE plpgsql AS $request_capture$
+DECLARE body jsonb;
+BEGIN
+ body := verify_original_request_index_body(NEW.original_body);
+ INSERT INTO verify_original_request_lookup VALUES
+ (NEW.trail_id,NEW.previous_depth,(body->'trail'->>'ClientId')::uuid,
+ COALESCE(body->'scope','null'::jsonb),decode(body->>'request_message','base64'),decode(body->>'request_signature','base64'));
+ RETURN NEW;
+END
+$request_capture$;
 `
