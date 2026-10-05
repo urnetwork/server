@@ -318,8 +318,25 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 
 		// the hosted proxy device applies the initial performance profile at
 		// every creation, so a profile connect refuses is refused here, before
-		// anything is created
-		message = validateProxyConfigArgs(authClient.ProxyConfig, session)
+		// anything is created. The profile is client input: a refusal is
+		// counted, its detail is logged only at V(1), and the message names
+		// only the caller's own values.
+		validateProxyConfigArgs := func() string {
+			proxyConfig := authClient.ProxyConfig
+			if proxyConfig == nil || proxyConfig.InitialDeviceState == nil {
+				return ""
+			}
+			err := validatePerformanceProfile(proxyConfig.InitialDeviceState.PerformanceProfile)
+			if err == nil {
+				return ""
+			}
+			proxyInvalidPerformanceProfilesAuthClient.Inc()
+			if glog.V(1) {
+				glog.Infof("[proxy][%s]auth-client refused the initial performance profile: %s\n", session.ByJwt.NetworkId, err)
+			}
+			return fmt.Sprintf("Invalid performance profile: %s", err)
+		}
+		message = validateProxyConfigArgs()
 		if message != "" {
 			authClientResult = &AuthNetworkClientResult{
 				Error: &AuthNetworkClientError{
@@ -421,7 +438,62 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 			return
 		}
 
+		// the proxy's rows are written in the client's own transaction, so a
+		// failure to create the proxy rolls the client back with it and hands
+		// out nothing. What that transaction cannot decide is settled before it:
+		// a server with no proxy hosts refuses with nothing created, and the
+		// plan's features are read live, outside the transaction.
+		var serverProxyConfig ServerProxyConfig
+		var proxyClientOptions CreateProxyClientOptions
+		if authClient.ProxyConfig != nil {
+			networkId := session.ByJwt.NetworkId
+
+			serverProxyConfig = LoadServerProxyConfig()
+			if len(serverProxyConfig.Hosts) == 0 {
+				// Log the real cause. The message returned to the caller
+				// stays generic on purpose -- it crosses a trust boundary
+				// and the underlying errors name server-side config -- but
+				// discarding it entirely turned a one-line diagnosis
+				// ("No proxy hosts available", i.e. proxy.yml has no hosts
+				// block) into a multi-hour one, because the operator saw
+				// only this sentence.
+				glog.Errorf(
+					"[proxy]could not create proxy client for network %s: %s\n",
+					networkId,
+					errNoProxyHosts,
+				)
+				authClientResult = &AuthNetworkClientResult{
+					Error: &AuthNetworkClientError{
+						Message: "Could not create proxy client",
+					},
+				}
+				return
+			}
+
+			// SOCKS and WireGuard are Pro-only (pro.yml features): a
+			// free-tier client is issued neither a SOCKS url nor a WireGuard
+			// config.
+			//
+			// NetworkFeatureAllowed resolves Pro live (never from the jwt's
+			// claim, which is stale for a user who just upgraded -- handing a
+			// fresh subscriber a config with no SOCKS/WireGuard until they
+			// re-auth is exactly the broken upgrade we are avoiding), and it
+			// short-circuits while enforce_features is dark, so today this
+			// costs no lookup and every tier still gets them.
+			proxyClientOptions = CreateProxyClientOptions{
+				HttpsRequireAuth: authClient.ProxyConfig.HttpsRequireAuth,
+				EnableSocks:      NetworkFeatureAllowed(session.Ctx, networkId, FeatureSocksProxy),
+				EnableWg: authClient.ProxyConfig.EnableWg &&
+					NetworkFeatureAllowed(session.Ctx, networkId, FeatureWireguardProxy),
+			}
+		}
+
 		var clientId server.Id
+		// the proxy's mirror json and its proxy client, from the transaction
+		// that committed, for the redis writes after the commit
+		var proxyDeviceConfigJson []byte
+		var proxyClient *ProxyClient
+
 		// A client JWT is durable, so entitlement must come from the source of
 		// truth. Resolve it before opening the write transaction: IsProFresh
 		// performs its own PostgreSQL read and Redis cache refresh.
@@ -434,6 +506,13 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 			registrationTxOptions = []any{server.TxReadCommitted}
 		}
 		server.Tx(session.Ctx, func(tx server.PgTx) {
+			// reset in case the tx is retried on a transient error: only the
+			// attempt that commits may answer or leave a proxy to publish
+			authClientResult = nil
+			authClientError = nil
+			proxyDeviceConfigJson = nil
+			proxyClient = nil
+
 			if err := lockProberShardClientAdmissionInTx(session.Ctx, tx, session.ByJwt.NetworkId); err != nil {
 				authClientError = err
 				return
@@ -635,6 +714,31 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 				registration.bindInTx(tx, session, clientId, deviceId)
 			}
 
+			// a failure here panics, which rolls back the client, its device
+			// and its roles with the proxy
+			if authClient.ProxyConfig != nil {
+				proxyDeviceConfig := &ProxyDeviceConfig{
+					ProxyDeviceConnection: ProxyDeviceConnection{
+						ClientId: clientId,
+					},
+					LockSubnets:        proxyLockSubnets,
+					InitialDeviceState: proxyInitialDeviceState,
+				}
+				var err error
+				proxyDeviceConfigJson, err = createProxyDeviceConfigInTx(session.Ctx, tx, proxyDeviceConfig)
+				server.Raise(err)
+				proxyClient, err = createProxyClientInTx(
+					session.Ctx,
+					tx,
+					serverProxyConfig,
+					proxyDeviceConfig.ProxyId,
+					proxyDeviceConfig.ClientId,
+					proxyDeviceConfig.InstanceId,
+					proxyClientOptions,
+				)
+				server.Raise(err)
+			}
+
 			// re-derive Pro from the source of truth rather than copying the caller's
 			// (possibly stale) jwt claim: a network that turned Pro after the caller's
 			// token was minted would otherwise get a client token stamped Pro=false for
@@ -658,76 +762,31 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 				ByClientJwt: &byClientJwtSigned,
 				ClientId:    &clientId,
 			}
+			if proxyClient != nil {
+				authClientResult.ProxyConfigResult = &ProxyConfigResult{
+					ProxyClient: *proxyClient,
+				}
+			}
 		}, registrationTxOptions...)
 
+		// only redis is written after the commit. The identity cache, the proxy
+		// device config mirror and the proxy hosts' wakeup are caches and a
+		// wakeup over the committed rows (their readers fall back to postgres,
+		// and the proxy hosts also poll), so a failure is logged and the call
+		// still returns the client it committed.
 		if authClientResult != nil && authClientResult.Error == nil {
 			setClientIdentityCache(session.Ctx, clientId, &ClientIdentity{
 				Roles:     roles,
 				Principal: principal,
 			})
-		}
 
-		if authClientResult != nil && authClientResult.Error == nil && authClient.ProxyConfig != nil {
-			proxyDeviceConfig := &ProxyDeviceConfig{
-				ProxyDeviceConnection: ProxyDeviceConnection{
-					ClientId: clientId,
-				},
-				LockSubnets:        proxyLockSubnets,
-				InitialDeviceState: proxyInitialDeviceState,
-			}
-			err := CreateProxyDeviceConfig(session.Ctx, proxyDeviceConfig)
-			if err == nil {
-
-				// SOCKS and WireGuard are Pro-only (pro.yml features): a
-				// free-tier client is issued neither a SOCKS url nor a WireGuard
-				// config.
-				//
-				// NetworkFeatureAllowed resolves Pro live (never from the jwt's
-				// claim, which is stale for a user who just upgraded -- handing a
-				// fresh subscriber a config with no SOCKS/WireGuard until they
-				// re-auth is exactly the broken upgrade we are avoiding), and it
-				// short-circuits while enforce_features is dark, so today this
-				// costs no lookup and every tier still gets them.
-				networkId := session.ByJwt.NetworkId
-				opts := CreateProxyClientOptions{
-					HttpsRequireAuth: authClient.ProxyConfig.HttpsRequireAuth,
-					EnableSocks:      NetworkFeatureAllowed(session.Ctx, networkId, FeatureSocksProxy),
-					EnableWg: authClient.ProxyConfig.EnableWg &&
-						NetworkFeatureAllowed(session.Ctx, networkId, FeatureWireguardProxy),
-				}
-				proxyClient, err := CreateProxyClient(
-					session.Ctx,
-					proxyDeviceConfig.ProxyId,
-					proxyDeviceConfig.ClientId,
-					proxyDeviceConfig.InstanceId,
-					opts,
-				)
-
-				if err == nil {
-					authClientResult.ProxyConfigResult = &ProxyConfigResult{
-						ProxyClient: *proxyClient,
-					}
-				} else {
-					// Log the real cause. The message returned to the caller
-					// stays generic on purpose -- it crosses a trust boundary
-					// and the underlying errors name server-side config -- but
-					// discarding it entirely turned a one-line diagnosis
-					// ("No proxy hosts available", i.e. proxy.yml has no hosts
-					// block) into a multi-hour one, because the operator saw
-					// only this sentence.
-					glog.Errorf(
-						"[proxy]could not create proxy client for %s: %s\n",
-						proxyDeviceConfig.ProxyId,
-						err,
-					)
-					authClientResult.Error = &AuthNetworkClientError{
-						Message: "Could not create proxy client",
-					}
-				}
-			} else {
-				authClientResult.Error = &AuthNetworkClientError{
-					Message: "Could not create proxy device",
-				}
+			if proxyClient != nil {
+				server.HandleError(func() {
+					setProxyDeviceConfigMirror(session.Ctx, proxyClient.ProxyId, proxyDeviceConfigJson)
+				})
+				server.HandleError(func() {
+					publishProxyClient(session.Ctx, proxyClient)
+				})
 			}
 		}
 	} else {
