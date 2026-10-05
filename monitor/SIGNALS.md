@@ -3508,6 +3508,24 @@ cannot become an attributed SQL failure. The finite envelope itself is capped
 at1KiB and validated for exact fields/enums before persistence. No raw exception
 or stderr fragment is retained, including unclassified failures.
 
+Qualify changes to the activity SQL with the exact candidate-generated query
+and a selected nonempty active statement under a size-qualified
+`track_activity_query_size` setting, such as `16kB`. Use
+`pg_size_bytes(current_setting('track_activity_query_size'))` before byte-length
+comparisons. A successful empty metadata frame exercises only the empty path;
+row-dependent expressions may not run. Source-string checks and synthetic
+reducer controls are useful regression guards, but do not replace a populated
+PostgreSQL control and a truncation-boundary control. A validated empty runtime
+frame remains an empty endpoint observation, not proof that populated
+predicates work or that process CPU is zero.
+
+For companion native CPU diagnostics, `source_complete` qualifies the guarded
+core collection; optional query and financial-stage metadata have separate
+availability. SQL failure or absent metadata leaves query attribution unknown.
+Populated metadata still requires the process/query generation and time-window
+guards before CPU attribution, and does not prove a native caller or ownership
+of a particular grant row.
+
 At startup, after the unchanged minimum cadence, the enabled recurring sampler
 owns the first finite turn before ordinary active probes begin. Standing log
 streams and drains continue independently. Later shared-slot collisions admit
