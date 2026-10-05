@@ -4805,20 +4805,40 @@ exact payer/provider accounting and empty replay with either cursor format.
 Require fresh source-qualified age reduction before claiming Main recovery.
 
 Head-revisit qualifier (2026-10-05): a large fixed cohort can still postpone a
-released old owner for many pages. Continued pages now visit one forward key,
-then spend at most one remaining slot on the oldest due key at or before the
-page's incoming cursor. The head visit preserves the forward cursor and cutoff;
-all visits share the existing 64-item limit and page budget. A busy head cannot
-consume every forward slot. A missing head consumes no visit, and single-item
-pages retain ordinary traversal. A head accounting/operational failure keeps its
+released old owner for many pages. Continued pages allocate up to one quarter
+of their configured limit to distinct due keys at or before the incoming cursor:
+one forward visit precedes the first head, then three forward visits separate
+later heads. A 64-visit page can visit 16 heads and 48 forward keys. Limits two
+and three retain one head slot; single-item pages retain ordinary traversal.
+The page-local head cursor advances past a busy head without rewinding the
+persisted forward cursor or cutoff. All visits share the existing 64-item limit
+and page budget. Missing heads consume no visits and return unused slots to
+forward traversal. A head accounting/operational failure keeps its
 15-minute/30-second delay and the already completed forward prefix.
 Task-result `head_visited`, `head_completed`, `head_busy_or_gone`, and `head_failed`
 are subsets of the corresponding total counts. `head_busy_or_gone` still includes
 missing owners and incomplete grant locks; it is not an exclusive contention
 count. No attempted head is counted complete before the existing financial
 ownership transaction succeeds. Cancellation preserves the prior forward cursor.
-The first forward visit must finish before the head slot; there is no fixed
-elapsed-time or whole-oldest-prefix recovery guarantee.
+The first forward visit must finish before a head slot; a short deadline can
+truncate either share. There is no fixed elapsed-time or whole-oldest-prefix
+recovery guarantee. Sixteen continuously busy oldest heads can still fill the
+head allocation; fixed-cohort forward traversal remains the fairness backstop.
+Readers must bind the producer artifact: earlier one-head results use the same
+four fields, absent fields are unknown, and JSON shape alone cannot establish
+the allocation policy. For this source each head count is at most 16 per page;
+completed plus the larger of busy/failed cannot exceed visited. Busy and failed
+can overlap when a transaction's acknowledgement fails.
+
+The 09:06:22 finite Main sample from the earlier one-head artifact had 158 known
+pages, 120 head completions and 38 head busy-or-gone outcomes, with head
+completions in every shard. Heads were 2.13% of visits; selected task history was
+not full fleet coverage. Together with due, failure-free sampled oldest open
+keys before their shard cursors, this supports revising the head allocation. It
+does not establish every row's lock availability, arrival rate, remaining
+cohort size or whole-queue recovery. Native controls hold the old prefix, then
+release all or all but its first owner, verifying 16 distinct head visits and
+48 forward visits with exact debit/payout conservation and cancellation replay.
 
 Interpret oldest-edge stalls separately from progress elsewhere: capped due
 sentinels are lower bounds, selected oldest open/disputed heads are different

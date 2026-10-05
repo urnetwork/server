@@ -22,8 +22,8 @@ func TestLegacySettlementDueSelectionBoundsFutureShard(t *testing.T) {
 		source, readErr := os.ReadFile("subscription_legacy_settlement.go")
 		server.Raise(readErr)
 		statements := regexp.MustCompile("(?s)`(SELECT next_attempt_time,contract_id,.*? FROM legacy_settlement_intent.*?)`").FindAllSubmatch(source, -1)
-		if len(statements) != 3 {
-			t.Fatal("expected initial, continued and head selection statements")
+		if len(statements) != 4 {
+			t.Fatal("expected initial, continued, head and continued-head selection statements")
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			server.RaisePgResult(conn.Exec(ctx, `CREATE TEMP TABLE legacy_settlement_intent (
@@ -40,6 +40,9 @@ func TestLegacySettlementDueSelectionBoundsFutureShard(t *testing.T) {
 				args := []any{0}
 				if index > 0 {
 					args = append(args, server.NowUtc().Add(-time.Second), server.Id{}, server.NowUtc())
+				}
+				if index == 3 {
+					args = append(args, server.NowUtc().Add(-2*time.Second), server.Id{})
 				}
 				var raw []byte
 				server.Raise(conn.QueryRow(ctx, "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) "+query, args...).Scan(&raw))

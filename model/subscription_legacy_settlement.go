@@ -162,8 +162,9 @@ func flushLegacySettlement(ctx context.Context, contractId server.Id) (completed
 // statement retains an indexable due bound; a volatile clock would scan future
 // rows even with LIMIT 1. Failed accounting stays visible, reserved and deferred.
 // Each task owns a bounded page and persists the cursor and fixed pass cutoff.
-// A continued page visits one forward key before spending at most one slot on
-// an older due head. That retry never rewinds the cursor or monopolizes the page.
+// A continued page gives up to one quarter of its slots to distinct older heads,
+// with one early retry and three forward visits between later retries. Its local
+// head cursor skips busy owners without rewinding the persisted forward cursor.
 // Exhausting this page's own budget after progress yields its completed prefix;
 // it must not turn durable per-contract progress into a task-wide error backoff.
 func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlementCursor, limit int) (result LegacySettlementFlushResult, returnErr error) {
@@ -183,12 +184,14 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 	}
 	server.HandleError(func() {
 		headCursor := after
-		headPending := headCursor != nil && limit > 1
+		var headAfter *LegacySettlementCursor
+		headRemaining := 0
+		if headCursor != nil && limit > 1 {
+			headRemaining = max(1, limit/4)
+		}
+		forwardUntilHead := 1
 		for remaining := limit; remaining > 0; {
-			visitHead := headPending && result.Visited > 0
-			if visitHead {
-				headPending = false
-			}
+			visitHead := headRemaining > 0 && forwardUntilHead == 0
 			var next *LegacySettlementCursor
 			server.Db(bounded, func(conn server.PgConn) {
 				query := `SELECT next_attempt_time,contract_id,statement_timestamp() AT TIME ZONE 'UTC' FROM legacy_settlement_intent
@@ -210,13 +213,21 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
                       WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
                       AND next_attempt_time<=COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC')
                       AND (next_attempt_time,contract_id)>($2,$3) ORDER BY next_attempt_time,contract_id LIMIT 1`
+					args = append(args, cursor.NextAttemptTime, cursor.ContractId, passEndTime)
 					if visitHead {
 						query = `SELECT next_attempt_time,contract_id,COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC') FROM legacy_settlement_intent
                       WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
                       AND next_attempt_time<=COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC')
                       AND (next_attempt_time,contract_id)<=($2,$3) ORDER BY next_attempt_time,contract_id LIMIT 1`
+						if headAfter != nil {
+							query = `SELECT next_attempt_time,contract_id,COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC') FROM legacy_settlement_intent
+                      WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
+                      AND next_attempt_time<=COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC')
+                      AND (next_attempt_time,contract_id)<=($2,$3) AND (next_attempt_time,contract_id)>($5,$6)
+                      ORDER BY next_attempt_time,contract_id LIMIT 1`
+							args = append(args, headAfter.NextAttemptTime, headAfter.ContractId)
+						}
 					}
-					args = append(args, cursor.NextAttemptTime, cursor.ContractId, passEndTime)
 				}
 				rows, err := conn.Query(bounded, query, args...)
 				server.WithPgResult(rows, err, func() {
@@ -229,6 +240,7 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 			})
 			if next == nil {
 				if visitHead {
+					headRemaining = 0
 					continue
 				}
 				result.Cursor = nil
@@ -245,6 +257,11 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 			remaining--
 			if visitHead {
 				result.HeadVisited++
+				headRemaining--
+				headAfter = next
+				forwardUntilHead = 3
+			} else if forwardUntilHead > 0 {
+				forwardUntilHead--
 			}
 			if completed && err == nil {
 				result.Completed++
