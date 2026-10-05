@@ -49,6 +49,11 @@ const PgPingTimeout = 5 * time.Second
 // Bounds best-effort disposal of an unusable PostgreSQL connection.
 const PgCloseTimeout = 5 * time.Second
 
+// Matches pgxpool's normal destructor budget. Failed AfterConnect hooks do not
+// run that destructor, so they must join pgx's asynchronous socket cleanup
+// before returning the constructor reservation to the pool.
+const PgStartupCleanupTimeout = 15 * time.Second
+
 // PgCommitTimeout bounds the commit round trip, which runs on a context
 // detached from the caller (see the commit in `txWithPool`).
 const PgCommitTimeout = 30 * time.Second
@@ -259,7 +264,28 @@ func configurePgPoolLiveness(config *pgxpool.Config) {
 	config.PingTimeout = PgPingTimeout
 	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		pgxRegisterIdType(conn.TypeMap())
-		return pingPgConnection(ctx, conn)
+		if err := pingPgConnection(ctx, conn); err != nil {
+			cleanupFailedPgStartup(ctx, conn.PgConn(), PgStartupCleanupTimeout)
+			return err
+		}
+		return nil
+	}
+}
+
+// A failed Ping can mark a PgConn closed before its cancel/Terminate cleanup
+// has disposed of the socket. Close alone then returns immediately. Retain the
+// failed constructor until CleanupDone, subject to the same finite budget used
+// by pgxpool's ordinary destructor. Acquire cancellation must not skip cleanup.
+func cleanupFailedPgStartup(ctx context.Context, conn interface {
+	Close(context.Context) error
+	CleanupDone() chan struct{}
+}, timeout time.Duration) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	_ = conn.Close(cleanupCtx)
+	select {
+	case <-conn.CleanupDone():
+	case <-cleanupCtx.Done():
 	}
 }
 
