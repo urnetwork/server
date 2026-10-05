@@ -2,10 +2,12 @@ package model
 
 import (
 	"context"
+	"errors"
 	"log"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
@@ -164,5 +166,60 @@ func TestCreateEthereumWallet(t *testing.T) {
 
 		walletId := CreateAccountWalletExternal(session, args)
 		connect.AssertNotEqual(t, walletId, nil)
+	})
+}
+
+// A failed write of the seeker holder mark raises its own error at once and
+// rolls the transaction back. The insert's error used to go to a variable that
+// shadowed the error result: the transaction then went on to commit after the
+// failed statement, server.Tx retried that commit for a minute, and the call
+// failed with "commit unexpectedly resulted in rollback", without the cause.
+func TestMarkWalletSeekerHolderRaisesWriteFailure(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "test", userId)
+		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			UserId:    userId,
+		})
+
+		// every insert into account_wallet fails, in this test's own database
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				CREATE FUNCTION seeker_test_fail_insert() RETURNS trigger
+				LANGUAGE plpgsql AS $$
+				BEGIN
+					RAISE EXCEPTION 'injected failure writing %', TG_TABLE_NAME;
+				END
+				$$
+				`,
+			))
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				CREATE TRIGGER seeker_test_fail_insert
+				BEFORE INSERT ON account_wallet
+				FOR EACH ROW EXECUTE FUNCTION seeker_test_fail_insert()
+				`,
+			))
+		})
+
+		// a wallet the network does not have yet, so the mark inserts it
+		panicValue := func() (panicValue any) {
+			defer func() {
+				panicValue = recover()
+			}()
+			MarkWalletSeekerHolder("seeker-test-wallet", userSession)
+			return
+		}()
+		var pgErr *pgconn.PgError
+		if panicErr, ok := panicValue.(error); !ok || !errors.As(panicErr, &pgErr) || pgErr.Message != "injected failure writing account_wallet" {
+			t.Fatalf("the failed write ended with %v, want the injected failure", panicValue)
+		}
 	})
 }
