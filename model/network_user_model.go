@@ -169,6 +169,10 @@ type AddAuthMethodResult struct {
 }
 
 type AddAuthMethodError struct {
+	// `WalletAuthErrorCodeSignatureMismatch` for a wallet signature that does
+	// not verify for its address, "" for every other refusal. Added after
+	// `Message`; older clients ignore it.
+	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 }
 
@@ -287,6 +291,15 @@ func AddAuth(
 			},
 			session.Ctx,
 		)
+		if errors.Is(err, errWalletSignatureMismatch) {
+			// coded, so the apps can say the wallet signed with another account
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Code:    WalletAuthErrorCodeSignatureMismatch,
+					Message: walletAuthSignatureMismatchMessage,
+				},
+			}, nil
+		}
 		if err != nil {
 			return &AddAuthMethodResult{
 				Error: &AddAuthMethodError{
@@ -747,6 +760,11 @@ func addWalletAuth(
 	if useErr != nil {
 		return useErr
 	}
+	if useResult.SignatureMismatch {
+		// validateWalletAuth already refuses this signature; kept so the code
+		// survives if that check ever goes
+		return errWalletSignatureMismatch
+	}
 	if !useResult.Valid {
 		if useResult.Error != nil {
 			return errors.New(useResult.Error.Message)
@@ -815,7 +833,8 @@ func validateWalletAuth(walletAuth *WalletAuthArgs) error {
 		return errors.New("401 invalid signature")
 	}
 	if !isValid {
-		return errors.New("401 invalid signature")
+		// decoded cleanly but not this address over this message
+		return errWalletSignatureMismatch
 	}
 	return nil
 }

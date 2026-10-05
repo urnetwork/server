@@ -115,6 +115,14 @@ func snAcceptWalletMapping(args *SnSetWalletArgs, clientSession *session.ClientS
 	if err != nil || len(signature) != 64 {
 		return nil, errors.Join(protocol.ErrWalletMappingIntegrity, err)
 	}
+	if snWalletMappingSignatureMismatch(args.Message, coldkey, strings.TrimSpace(args.ColdkeySs58), args.Signature) {
+		// coded like a login challenge signed by another account, before any
+		// mapping state is read
+		return &SnSetWalletResult{Error: &SnSetWalletError{
+			Code:    SnSetWalletErrorCodeSignatureMismatch,
+			Message: snSetWalletSignatureMismatchMessage,
+		}}, nil
+	}
 	original := protocol.WalletMappingConsent{Message: args.Message, Signature: [64]byte(signature)}
 	ctx, cancel := context.WithTimeout(clientSession.Ctx, 300*time.Second)
 	defer cancel()
@@ -127,6 +135,20 @@ func snAcceptWalletMapping(args *SnSetWalletArgs, clientSession *session.ClientS
 		return nil, err
 	}
 	return &SnSetWalletResult{MappingHash: hex.EncodeToString(accepted.OriginalHash[:]), MappingGeneration: accepted.Generation}, nil
+}
+
+// A consent that names the entered coldkey, with a well-formed signature that
+// verifies for it under neither substrate transcript: in practice another
+// account signed it. The same verification AcceptWalletMappingConsent starts
+// with; a consent for another coldkey, an undecodable message or signature,
+// and a signature that verifies are not a mismatch and keep its refusals.
+func snWalletMappingSignatureMismatch(message string, coldkey [32]byte, coldkeySs58 string, signature string) bool {
+	statement, err := protocol.DecodeWalletMappingStatement(message)
+	if err != nil || statement.Coldkey != coldkey {
+		return false
+	}
+	valid, err := model.VerifyBittensorSignature(coldkeySs58, message, signature)
+	return err == nil && !valid
 }
 
 // Readers must supply their independent head; the API never selects latest as

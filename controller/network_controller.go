@@ -9,6 +9,24 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+// A coded network create refusal for a client that asked for `result_errors`.
+// It keeps the refusal's HTTP status, because the signup liveness monitor counts
+// every 2xx network create as a created network, and the router answers it
+// with the result as the JSON body, where the client reads `error.code`.
+type networkCreateCodedRefusal struct {
+	result *model.NetworkCreateResult
+}
+
+// The refusal's "<status> <message>" transport text.
+func (self *networkCreateCodedRefusal) Error() string {
+	return self.result.Error.Error()
+}
+
+// The body the router writes with the refusal's status.
+func (self *networkCreateCodedRefusal) HttpErrorResultBody() any {
+	return self.result
+}
+
 func NetworkCreate(
 	networkCreate model.NetworkCreateArgs,
 	session *session.ClientSession,
@@ -18,6 +36,11 @@ func NetworkCreate(
 		return nil, err
 	}
 	if result.Error != nil {
+		if result.Error.Code != "" && networkCreate.ResultErrors {
+			// a coded refusal, for a client that reads the code: still the
+			// refusal's status, with the result as the body
+			return nil, &networkCreateCodedRefusal{result: result}
+		}
 		// Preserve the model's explicit client-refusal classification. Turning
 		// every result message into a plain error reported ordinary form and
 		// duplicate-account refusals as unhandled HTTP 500 failures.

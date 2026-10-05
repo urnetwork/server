@@ -92,6 +92,10 @@ type NetworkCreateArgs struct {
 	// Absent = on (the line ships ticked); false turns the preference off from
 	// the first moment, before any campaign mail can go out.
 	ProductUpdates *bool `json:"product_updates,omitempty"`
+	// answer a coded refusal (`NetworkCreateResultError.Code`) with the result
+	// as the body of its HTTP status (401), instead of the plain text message
+	// older clients expect; the status stays a refusal either way
+	ResultErrors bool `json:"result_errors,omitempty"`
 }
 
 type NetworkCreateResult struct {
@@ -122,6 +126,11 @@ type NetworkCreateResultVerification struct {
 }
 
 type NetworkCreateResultError struct {
+	// `WalletAuthErrorCodeSignatureMismatch` for a wallet signature that does
+	// not verify for its address, "" for every other refusal. Only a coded
+	// refusal reaches a client that asked for `result_errors` as a result, in
+	// the body of its refusal status.
+	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 	// Only an explicit input/duplicate refusal may become a client status.
 	// Internal and ambiguous creation failures retain the existing 500 path.
@@ -133,7 +142,7 @@ type NetworkCreateResultError struct {
 // Preserve the existing numeric-prefix HTTP error transport without changing JSON.
 func (self *NetworkCreateResultError) Error() string {
 	switch self.refusalStatus {
-	case http.StatusBadRequest, http.StatusConflict:
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusConflict:
 		return fmt.Sprintf("%d %s", self.refusalStatus, self.Message)
 	}
 	return self.Message
@@ -540,6 +549,17 @@ func NetworkCreate(
 		}, session.Ctx)
 		if err != nil {
 			return nil, err
+		}
+		if useResult.SignatureMismatch {
+			// coded, so the apps can say the wallet signed with another
+			// account; a client without `result_errors` gets the 401
+			return &NetworkCreateResult{
+				Error: &NetworkCreateResultError{
+					Code:          WalletAuthErrorCodeSignatureMismatch,
+					Message:       walletAuthSignatureMismatchMessage,
+					refusalStatus: http.StatusUnauthorized,
+				},
+			}, nil
 		}
 		if !useResult.Valid {
 			msg := "400 invalid wallet challenge"
