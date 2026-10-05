@@ -26,9 +26,10 @@ const (
 	// Checkpoint task success before the 30-minute task deadline. A 100,003-row
 	// production cohort hit that deadline exactly while transfer_contract was
 	// paying down retention/autovacuum write debt; its per-contract commits
-	// survived, but the task retried with a Timeout and had to rescan. A 25k
-	// per-scan cap keeps the same worker parallelism. Open and disputed rows
-	// are scanned independently, so their deduplicated union can reach 50k.
+	// survived, but the task retried with a Timeout and had to rescan. Retain
+	// the 25k per-stream total cap and worker parallelism; the model now
+	// checkpoints smaller raw subpages inside its own elapsed-time budget.
+	// Open and disputed rows remain independent, with a union up to 50k.
 	closeExpiredContractsMaxCount = 25_000
 	closeExpiredContractsParallel = 92
 )
@@ -108,7 +109,7 @@ func CloseExpiredContracts(
 ) (*CloseExpiredContractsResult, error) {
 	if closeExpiredContracts.BlockSize == DefaultCloseExpiredContractsBlockSize {
 		minTime := closeExpiredContractsCutoff(server.NowUtc())
-		c, next, err := model.ForceCloseOpenContractIdsPage(
+		c, next, err := model.ForceCloseOpenContractIdsBudgetedPage(
 			clientSession.Ctx,
 			minTime,
 			closeExpiredContractsMaxCount,

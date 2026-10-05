@@ -1716,6 +1716,11 @@ func UpdateClientReliabilityScores(ctx context.Context, maxTime time.Time, compl
 
 		}
 
+		// Publish scheduling hints with the scores: the preceding location pass
+		// saw the old generation, and unrelated network work may delay the next
+		// pass. Also seed providers whose old scores prevented cycle creation.
+		updateProviderUrlProbeEligibility(ctx, tx)
+
 	}, server.TxReadCommitted)
 }
 
@@ -3032,21 +3037,6 @@ func UpdateClientLocationReliabilitiesInTx(tx server.PgTx, ctx context.Context, 
 	    `,
 		updateBlockNumber,
 	))
-
-	// Seed quota scheduling once per existing location pass, not once per due
-	// request. Conflict leaves the current cycle and its retry deadline intact.
-	server.RaisePgResult(tx.Exec(ctx, `
-		INSERT INTO provider_egress_probe_cycle (client_id, cycle_started_at, next_attempt_at, eligible)
-		SELECT provider_location.client_id, $1, $1, true
-		FROM network_client_location_reliability AS provider_location
-		JOIN temp_network_client_location_reliability AS updated USING (client_id)
-		JOIN network_client AS provider ON provider.client_id = provider_location.client_id
-		WHERE provider_location.connected AND provider_location.valid
-		AND (provider_location.ipv4_proven OR NOT provider_location.ipv6_proven)
-		AND provider.active AND provider.source_client_id IS NULL
-		AND EXISTS (SELECT 1 FROM provide_key WHERE provide_key.client_id = provider_location.client_id AND provide_mode = $2)
-		AND `+providerProbeEligibilitySql("provider_location")+`
-		ON CONFLICT (client_id) DO NOTHING`, egressNow.UTC(), ProvideModePublic))
 
 	// TODO on pg17 this could be part of a MERGE with source missing
 	server.RaisePgResult(tx.Exec(

@@ -362,6 +362,12 @@ func ReapProberShard(ctx context.Context, key ProberShardKey) (deleted bool, ret
 			if owner.State != "draining" {
 				return
 			}
+			// Registry precedes the compatibility bridge; grants and client
+			// teardown follow it, matching normal authenticated admission.
+			providerWorkOptionalSchemaInTx(ctx, tx, func(optional server.PgTx) error {
+				_, err := optional.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`)
+				return err
+			})
 			// Settlement takes a contract lock before the balance lock. This read
 			// never locks contracts while holding a balance: its post-lock snapshot
 			// either sees a completed debit or retains the open/unsettled debt.
@@ -421,6 +427,11 @@ func ReapProberShard(ctx context.Context, key ProberShardKey) (deleted bool, ret
 			})
 			slices.SortFunc(clients, func(a, b server.Id) int { return a.Cmp(b) })
 			clients = slices.Compact(clients)
+			providerWorkLockSessionMutationInTx(ctx, tx, clients...)
+			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM network_client_connection WHERE client_id=ANY($1) AND connected)`, clients).Scan(&blocked))
+			if blocked {
+				return
+			}
 			// The durable post-delete record retains this cohort if Redis is down
 			// or the worker exits after the SQL commit. No identity can be reminted
 			// once the owner leaves active, and client UUIDs are never reused.

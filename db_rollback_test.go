@@ -70,8 +70,8 @@ func TestTxCanceledTransientRollbackDoesNotBecomeTxClosed(t *testing.T) {
 		if errors.Is(recoveredErr, pgx.ErrTxClosed) {
 			t.Fatalf("rollback cleanup replaced the transaction outcome with pgx.ErrTxClosed: %v", recoveredErr)
 		}
-		if recoveredErr != DbContextDoneError {
-			t.Fatalf("recovered error = %v; want DbContextDoneError", recoveredErr)
+		if !errors.Is(recoveredErr, DbContextDoneError) || !errors.Is(recoveredErr, context.Canceled) || !errors.Is(recoveredErr, original) {
+			t.Fatalf("recovered error = %v; want done, cancellation and original cause", recoveredErr)
 		}
 		requireDbRollbackEffectCount(t, 0)
 	})

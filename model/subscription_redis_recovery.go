@@ -216,30 +216,51 @@ func (self *redisContractAdmission) recoverRetainedPage(page context.Context) (p
 			redisContractReservationResults.WithLabelValues("recovery", "pending").Inc()
 		}
 	}()
-	remaining := redisReservationRecoveryBatch
-	server.Tx(page, func(tx server.PgTx) {
-		for _, balanceId := range ids {
-			if remaining == 0 || page.Err() != nil {
+	// Discover bounded candidates before acquiring PG. An empty page is normal
+	// after successful publication and needs no SQL transaction; cold Redis
+	// routing and candidate reads must not hold a PostgreSQL snapshot or slot.
+	// Discovery changes no token amount. The SQL fence still covers every
+	// custody check and exact Redis release/publication below.
+	type retainedCandidate struct {
+		balanceId server.Id
+		candidate redisReservationRecoveryCandidate
+	}
+	retained := make([]retainedCandidate, 0, redisReservationRecoveryBatch)
+	for _, balanceId := range ids {
+		if len(retained) == redisReservationRecoveryBatch || page.Err() != nil {
+			break
+		}
+		candidates, err := redisReservationRecoveryPage(page, balanceId)
+		if err != nil {
+			redisContractReservationResults.WithLabelValues("recovery", "pending").Inc()
+			continue
+		}
+		for _, candidate := range candidates {
+			if len(retained) == redisReservationRecoveryBatch || page.Err() != nil {
 				break
 			}
-			candidates, err := redisReservationRecoveryPage(page, balanceId)
+			retained = append(retained, retainedCandidate{balanceId: balanceId, candidate: candidate})
+		}
+	}
+	if page.Err() != nil {
+		redisContractReservationResults.WithLabelValues("recovery", "pending").Inc()
+		return false
+	}
+	if len(retained) == 0 {
+		return false
+	}
+	server.Tx(page, func(tx server.PgTx) {
+		for _, item := range retained {
+			if page.Err() != nil {
+				break
+			}
+			released, err := recoverRedisReservationInTx(page, tx, item.balanceId, item.candidate)
+			progress = progress || released
+			result := "completed"
 			if err != nil {
-				redisContractReservationResults.WithLabelValues("recovery", "pending").Inc()
-				continue
+				result = "pending"
 			}
-			for _, candidate := range candidates {
-				if remaining == 0 || page.Err() != nil {
-					break
-				}
-				remaining--
-				released, err := recoverRedisReservationInTx(page, tx, balanceId, candidate)
-				progress = progress || released
-				result := "completed"
-				if err != nil {
-					result = "pending"
-				}
-				redisContractReservationResults.WithLabelValues("recovery", result).Inc()
-			}
+			redisContractReservationResults.WithLabelValues("recovery", result).Inc()
 		}
 		server.Raise(page.Err())
 	}, server.TxReadCommitted, server.OptNoRetry())
@@ -393,38 +414,36 @@ func (self redisReservationCleanup) runOwned(owner context.Context, end time.Tim
 // All joined leaf causes must be transient. A schema, ownership, corrupt-token
 // or authentication refusal cannot be hidden behind a timeout sibling.
 func redisReservationRecoveryRetryable(err error) bool {
-	if err == nil {
+	causes := server.InspectErrorCauses(err)
+	if !causes.Complete {
 		return false
 	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		for _, cause := range joined.Unwrap() {
-			if cause != nil && !redisReservationRecoveryRetryable(cause) {
-				return false
+	for _, node := range causes.Nodes {
+		if !node.Leaf {
+			continue
+		}
+		cause := node.Err
+		if cause == errRedisReservationRequestActive || cause == context.DeadlineExceeded || cause == context.Canceled || cause == io.EOF || cause == net.ErrClosed || cause == redis.ErrClosed || cause == syscall.ECONNRESET || cause == syscall.ECONNREFUSED || cause == syscall.ETIMEDOUT || cause == syscall.EADDRNOTAVAIL {
+			continue
+		}
+		if database, ok := cause.(*pgconn.PgError); ok && database != nil {
+			if strings.HasPrefix(database.Code, "08") || strings.HasPrefix(database.Code, "53") || database.Code == "40001" || database.Code == "40P01" || database.Code == "55P03" || database.Code == "57014" {
+				continue
 			}
+			return false
 		}
-		return true
-	}
-	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		if cause := wrapped.Unwrap(); cause != nil {
-			return redisReservationRecoveryRetryable(cause)
+		if reply, ok := cause.(redis.Error); ok {
+			kind, _, _ := strings.Cut(reply.Error(), " ")
+			switch kind {
+			case "LOADING", "TRYAGAIN", "CLUSTERDOWN", "READONLY", "MASTERDOWN":
+				continue
+			}
+			return false
 		}
-	}
-	if err == errRedisReservationRequestActive || err == context.DeadlineExceeded || err == context.Canceled || err == io.EOF || err == net.ErrClosed || err == redis.ErrClosed || err == syscall.ECONNRESET || err == syscall.ECONNREFUSED || err == syscall.ETIMEDOUT || err == syscall.EADDRNOTAVAIL {
-		return true
-	}
-	if database, ok := err.(*pgconn.PgError); ok {
-		return strings.HasPrefix(database.Code, "08") || strings.HasPrefix(database.Code, "53") || database.Code == "40001" || database.Code == "40P01" || database.Code == "55P03" || database.Code == "57014"
-	}
-	if reply, ok := err.(redis.Error); ok {
-		kind, _, _ := strings.Cut(reply.Error(), " ")
-		switch kind {
-		case "LOADING", "TRYAGAIN", "CLUSTERDOWN", "READONLY", "MASTERDOWN":
-			return true
+		if timeout, ok := cause.(net.Error); ok && timeout.Timeout() {
+			continue
 		}
 		return false
 	}
-	if timeout, ok := err.(net.Error); ok {
-		return timeout.Timeout()
-	}
-	return false
+	return true
 }

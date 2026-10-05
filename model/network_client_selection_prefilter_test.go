@@ -138,12 +138,17 @@ func TestFindProviders2PrefilterBoundsSubscriberReadsUnderContention(t *testing.
 			})
 			batches := testutil.ToFloat64(subscriberEligibilityEventCounters["sql_batch"]) - beforeBatches
 			t.Logf("prefilter_contention source=%s concurrent_requests=%d pg_slots=1 cached_refusals=%d sql_batches=%g subscriber_candidate_reads=%d elapsed_ms=%.3f", source, requests, rejected, batches, candidateReads.Load(), float64(time.Since(started))/float64(time.Millisecond))
-			wantBatches, maxCandidateReads := float64(0), int64(0)
+			minBatches, maxBatches, maxCandidateReads := float64(0), float64(0), int64(0)
 			if source == "primary" {
-				wantBatches, maxCandidateReads = requests, requests*21
+				// The initial weighted draw validates only the twenty needed
+				// candidates. Its single subscriber refusal can require one
+				// replacement draw. The negative-only single-flight cache can
+				// split each draw into owned and fresh positive-follower reads;
+				// the 2,800 request refusals still cost no candidate reads.
+				minBatches, maxBatches, maxCandidateReads = requests, 4*requests, requests*21
 			}
-			if batches != wantBatches || candidateReads.Load() > maxCandidateReads {
-				t.Fatalf("%s request-only refusals consumed subscriber SQL: batches=%g candidates=%d; want %g batches and at most %d candidates", source, batches, candidateReads.Load(), wantBatches, maxCandidateReads)
+			if batches < minBatches || maxBatches < batches || candidateReads.Load() > maxCandidateReads {
+				t.Fatalf("%s request-only refusals consumed subscriber SQL: batches=%g candidates=%d; want %g..%g batches and at most %d candidates", source, batches, candidateReads.Load(), minBatches, maxBatches, maxCandidateReads)
 			}
 		}
 	})

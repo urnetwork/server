@@ -876,6 +876,27 @@ func (self *Exchange) NominateLocalResident(
 	instanceId server.Id,
 	residentIdToReplace *server.Id,
 ) bool {
+	return self.NominateLocalResidentWithContext(self.ctx, clientId, instanceId, residentIdToReplace)
+}
+
+// The requesting transport owns admission through metadata lookup and resident
+// construction. A successfully installed resident belongs to the exchange and
+// can serve other transports after this caller disconnects.
+func (self *Exchange) NominateLocalResidentWithContext(
+	callerCtx context.Context,
+	clientId server.Id,
+	instanceId server.Id,
+	residentIdToReplace *server.Id,
+) bool {
+	admissionCtx, admissionCancel := context.WithCancel(callerCtx)
+	stopExchangeCancel := context.AfterFunc(self.ctx, admissionCancel)
+	defer func() {
+		stopExchangeCancel()
+		admissionCancel()
+	}()
+	if admissionCtx.Err() != nil || self.ctx.Err() != nil {
+		return false
+	}
 	// Admit before any model work. Close takes the same lock, so WaitForIdle
 	// cannot observe a zero worker count while a pre-close nomination is still
 	// between its database work and goroutine handoff.
@@ -887,9 +908,20 @@ func (self *Exchange) NominateLocalResident(
 	self.residentWorkers.Add(1)
 	self.residentWorkerLock.Unlock()
 	workerStarted := false
+	var abandonedNomination *model.NetworkClientResident
 	defer func() {
 		if !workerStarted {
-			self.residentWorkers.Done()
+			defer self.residentWorkers.Done()
+			if abandonedNomination != nil {
+				// A reservation may have committed before the caller vanished.
+				// Remove only our generation, with a finite best-effort budget;
+				// the existing Redis TTL remains the unavailable-store backstop.
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(admissionCtx), time.Second)
+				defer cleanupCancel()
+				if err := model.RemoveResidentForClientWithDeadline(cleanupCtx, clientId, abandonedNomination.ResidentId); err != nil {
+					glog.V(1).Infof("[r]abandoned nomination cleanup = %s\n", err)
+				}
+			}
 		}
 	}()
 
@@ -909,7 +941,7 @@ func (self *Exchange) NominateLocalResident(
 	// exempt and a re-nomination of an already-connected client is not a new
 	// connection (see model.CanConnectNetworkPeer). This is a no-op while
 	// enforce_concurrent_clients is false in pro.yml.
-	if !model.CanConnectNetworkPeer(self.ctx, clientId) {
+	if !model.CanConnectNetworkPeer(admissionCtx, clientId) {
 		nominationRefusedCounter.WithLabelValues("concurrent_client_limit").Inc()
 		if glog.V(1) {
 			glog.Infof(
@@ -920,6 +952,9 @@ func (self *Exchange) NominateLocalResident(
 		return false
 	}
 
+	if admissionCtx.Err() != nil {
+		return false
+	}
 	residentId := server.NewId()
 
 	nomination := &model.NetworkClientResident{
@@ -931,23 +966,39 @@ func (self *Exchange) NominateLocalResident(
 		ResidentBlock:         self.block,
 		ResidentInternalPorts: slices.Collect(maps.Keys(self.hostToServicePorts)),
 	}
+	// Cleanup also covers an ambiguous canceled Redis command whose write may
+	// already have succeeded. Generation comparison preserves replacements.
+	abandonedNomination = nomination
 	nominated := model.NominateResident(
-		self.ctx,
+		admissionCtx,
 		residentIdToReplace,
 		nomination,
 		self.settings.ExchangeResidentTtl,
 	)
 	if !nominated {
+		if admissionCtx.Err() == nil {
+			abandonedNomination = nil
+		}
+		return false
+	}
+	if admissionCtx.Err() != nil {
 		return false
 	}
 
-	resident := NewResident(
+	resident := newResidentDuringAdmission(
 		self.ctx,
+		admissionCtx,
 		self,
 		clientId,
 		instanceId,
 		residentId,
 	)
+	if admissionCtx.Err() != nil || self.ctx.Err() != nil {
+		if err := resident.CloseAndWait(context.Background()); err != nil {
+			glog.Errorf("[r]abandoned resident close wait = %s\n", err)
+		}
+		return false
+	}
 	workerStarted = true
 	// note: initial peer registration happens in ConnectionAnnounce.run once
 	// the connection survives the announce window (2026-07-15: registration
@@ -1022,50 +1073,8 @@ func (self *Exchange) NominateLocalResident(
 			case <-time.After(self.settings.ExchangeResidentTtl / 4):
 			}
 
-			pollResident := func() bool {
-				return server.HandleErrorWithReturn(func() bool {
-					currentResident := model.GetResidentForClientWithInstance(self.ctx, clientId, instanceId, self.settings.ExchangeResidentTtl)
-					if currentResident == nil {
-						return false
-					}
-					return residentId == currentResident.ResidentId
-				})
-			}
-
-			if !pollResident() {
-				if glog.V(1) {
-					glog.Infof("[r]not current %s\n", clientId)
-				}
+			if !self.refreshResidentRegistration(resident) {
 				return
-			}
-
-			// heartbeat the network peer registration on the same poll.
-			// Refresh only while the client holds a transport to this
-			// resident: a resident can outlive its client's connection
-			// (e.g. kept active by inbound forward pings up to
-			// `ForwardIdleTimeout`), and without a refresh the registration
-			// expires after `ExchangeResidentTtl` and other residents prune
-			// it to a disconnect marker, bounding disconnect detection.
-			if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && 0 < resident.TransportCount() {
-				server.HandleError(func() {
-					if resident.peerCategory == model.NetworkPeerCategoryProxy {
-						// AddNetworkProxyPeer doubles as the heartbeat, and is
-						// also the initial proxy registration (proxy clients
-						// do not pass through ConnectionAnnounce)
-						model.AddNetworkProxyPeer(self.ctx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
-						return
-					}
-					if !model.RefreshNetworkPeer(self.ctx, *resident.peerNetworkId, clientId, residentId, self.settings.ExchangeResidentTtl) {
-						// the registration was lost (e.g. expired while the
-						// client was disconnected, or pruned at an expiry
-						// race); re-add with a fresh profile
-						// peersEnabled is not re-checked: peerNetworkId set means
-						// the network was enabled when the resident was created
-						if _, topLevel, _, peerProfile, _ := model.GetNetworkPeerProfile(self.ctx, clientId); topLevel && peerProfile != nil {
-							model.AddNetworkPeer(self.ctx, *resident.peerNetworkId, peerProfile, residentId, self.settings.ExchangeResidentTtl)
-						}
-					}
-				})
 			}
 		}
 	})
@@ -1086,6 +1095,61 @@ func (self *Exchange) NominateLocalResident(
 		glog.Infof("[r]open %s\n", clientId)
 	}
 
+	return true
+}
+
+// Refreshes metadata for one resident. Transport cancellation must not change
+// the lifetime of another resident or of the serving exchange.
+func (self *Exchange) refreshResidentRegistration(resident *Resident) bool {
+	if resident.ctx.Err() != nil {
+		return false
+	}
+	clientId, instanceId, residentId := resident.clientId, resident.instanceId, resident.residentId
+	pollResident := func() bool {
+		return server.HandleErrorWithReturn(func() bool {
+			currentResident := model.GetResidentForClientWithInstance(resident.ctx, clientId, instanceId, self.settings.ExchangeResidentTtl)
+			if currentResident == nil {
+				return false
+			}
+			return residentId == currentResident.ResidentId
+		})
+	}
+
+	if !pollResident() {
+		if glog.V(1) {
+			glog.Infof("[r]not current %s\n", clientId)
+		}
+		return false
+	}
+
+	// heartbeat the network peer registration on the same poll.
+	// Refresh only while the client holds a transport to this
+	// resident: a resident can outlive its client's connection
+	// (e.g. kept active by inbound forward pings up to
+	// `ForwardIdleTimeout`), and without a refresh the registration
+	// expires after `ExchangeResidentTtl` and other residents prune
+	// it to a disconnect marker, bounding disconnect detection.
+	if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && 0 < resident.TransportCount() {
+		server.HandleError(func() {
+			if resident.peerCategory == model.NetworkPeerCategoryProxy {
+				// AddNetworkProxyPeer doubles as the heartbeat, and is
+				// also the initial proxy registration (proxy clients
+				// do not pass through ConnectionAnnounce)
+				model.AddNetworkProxyPeer(resident.ctx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
+				return
+			}
+			if !model.RefreshNetworkPeer(resident.ctx, *resident.peerNetworkId, clientId, residentId, self.settings.ExchangeResidentTtl) {
+				// the registration was lost (e.g. expired while the
+				// client was disconnected, or pruned at an expiry
+				// race); re-add with a fresh profile
+				// peersEnabled is not re-checked: peerNetworkId set means
+				// the network was enabled when the resident was created
+				if _, topLevel, _, peerProfile, _ := model.GetNetworkPeerProfile(resident.ctx, clientId); topLevel && peerProfile != nil {
+					model.AddNetworkPeer(resident.ctx, *resident.peerNetworkId, peerProfile, residentId, self.settings.ExchangeResidentTtl)
+				}
+			}
+		})
+	}
 	return true
 }
 
@@ -3153,7 +3217,8 @@ func (self *ResidentTransport) Run() {
 		}
 
 		c := func() bool {
-			return self.exchange.NominateLocalResident(
+			return self.exchange.NominateLocalResidentWithContext(
+				self.ctx,
 				self.clientId,
 				self.instanceId,
 				residentIdToReplace,
@@ -3561,9 +3626,29 @@ func NewResident(
 	instanceId server.Id,
 	residentId server.Id,
 ) *Resident {
+	return newResidentDuringAdmission(ctx, nil, exchange, clientId, instanceId, residentId)
+}
+
+// Construction follows the caller until its owner can publish the resident.
+// After return, the exchange is the resident's sole lifetime parent.
+func newResidentDuringAdmission(
+	ctx context.Context,
+	admissionCtx context.Context,
+	exchange *Exchange,
+	clientId server.Id,
+	instanceId server.Id,
+	residentId server.Id,
+) *Resident {
 	glog.V(1).Infof("[r]create")
 
 	cancelCtx, cancel := context.WithCancel(ctx)
+	if admissionCtx != nil {
+		stopAdmissionCancel := context.AfterFunc(admissionCtx, cancel)
+		defer stopAdmissionCancel()
+		if admissionCtx.Err() != nil {
+			cancel()
+		}
+	}
 
 	// use a tag with the client so that the logging does not show up as the control id
 	clientTag := fmt.Sprintf("c(%s)", clientId.String())

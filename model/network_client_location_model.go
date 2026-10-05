@@ -3865,13 +3865,17 @@ type providerCountFilter struct {
 }
 
 // Complete means disconnected history too. The partial covering index supplies
-// only ARIN exceptions; observed score IDs bound the independent reliability
-// pass. Missing scores are neutral, and missing rollups retain their old scope.
+// only ARIN exceptions; one scan of failing scores supplies the independent
+// reliability pass. Missing scores are neutral, and missing rollups retain their
+// old scope. Rechecking every observed score against the same score table would
+// duplicate that work without changing the set of failed clients.
 func providerCountFilterCommonSql() string {
-	return `WITH failed_reliability AS MATERIALIZED (
-		SELECT DISTINCT observed_reliability.client_id
-		FROM client_connection_reliability_score AS observed_reliability
-		WHERE NOT (` + providerReliabilityEligibilitySql("observed_reliability.client_id") + `)
+	minimums := providerReliabilityMinimums()
+	return fmt.Sprintf(`WITH failed_reliability AS MATERIALIZED (
+		SELECT DISTINCT provider_reliability.client_id
+		FROM client_connection_reliability_score AS provider_reliability
+		WHERE provider_reliability.independent_reliability_weight < CASE provider_reliability.lookback_index
+			WHEN 1 THEN %g WHEN 2 THEN %g WHEN 3 THEN %g ELSE 0 END
 	)
 	SELECT client_id, arin_risk, arin_non_quality, false
 	FROM network_client_location_reliability
@@ -3882,7 +3886,7 @@ func providerCountFilterCommonSql() string {
 	WHERE EXISTS (
 		SELECT 1 FROM network_client_location_reliability AS provider_location
 		WHERE provider_location.client_id = failed_reliability.client_id
-	)`
+	)`, minimums[1], minimums[2], minimums[3])
 }
 
 // Load complete exception maps once for publication and provider diagnostics.
@@ -6541,6 +6545,87 @@ func FindProviders2(
 		qualityReadClientIds := map[server.Id]bool{}
 		var nativeClientScores map[server.Id]*ClientScore
 		var clientIds, borrowedClientIds []server.Id
+		// Draws up to n of the candidates by their weight in `mode` and bands
+		// the draw by their tier in `mode`. Weighted selection and tier banding
+		// run within each facet, and the preferred facet fills n first: a
+		// v4-capable request takes every dualstack provider it can before any
+		// v4-only one, so the single-family category only ever tops up a
+		// shortfall.
+		selectProviders := func(candidateClientScores map[server.Id]*ClientScore, mode RankMode, n int) []server.Id {
+			clientIds := []server.Id{}
+			for _, facet := range facets {
+				remainingCount := n - len(clientIds)
+				if remainingCount <= 0 {
+					break
+				}
+				facetClientIds := []server.Id{}
+				for clientId, clientScore := range candidateClientScores {
+					if clientScore.ipFamilyFacet() == facet {
+						facetClientIds = append(facetClientIds, clientId)
+					}
+				}
+				mathrand.Shuffle(len(facetClientIds), func(i int, j int) {
+					facetClientIds[i], facetClientIds[j] = facetClientIds[j], facetClientIds[i]
+				})
+
+				connect.WeightedSelectFunc(facetClientIds, remainingCount, func(clientId server.Id) float32 {
+					clientScore := candidateClientScores[clientId]
+					return clientScore.ScaledWeights[mode]
+				})
+				facetClientIds = facetClientIds[:min(remainingCount, len(facetClientIds))]
+
+				// band by tier
+				slices.SortStableFunc(facetClientIds, func(a server.Id, b server.Id) int {
+					clientScoreA := candidateClientScores[a]
+					clientScoreB := candidateClientScores[b]
+
+					return clientScoreA.Tiers[mode] - clientScoreB.Tiers[mode]
+				})
+				clientIds = append(clientIds, facetClientIds...)
+			}
+			return clientIds
+		}
+
+		validation := &providerQualityValidation{parent: session.Ctx}
+		defer validation.close()
+		pruneSelected := func() {
+			// A later bucket can expose common risk for an earlier selection.
+			// Revoke it before quota/refill counts or final answers use it.
+			rejectedSelection := func(clientId server.Id) bool {
+				if !hardExcludedClientIds[clientId] {
+					return false
+				}
+				delete(clientScores, clientId)
+				delete(nativeClientScores, clientId)
+				return true
+			}
+			clientIds = slices.DeleteFunc(clientIds, rejectedSelection)
+			borrowedClientIds = slices.DeleteFunc(borrowedClientIds, rejectedSelection)
+			providers = slices.DeleteFunc(providers, func(provider *FindProvidersProvider) bool { return hardExcludedClientIds[provider.ClientId] })
+			observation.explicitReturned = len(providers) - len(clientIds) - len(borrowedClientIds)
+		}
+		readQuality := func(ids []server.Id, strict bool) error {
+			if len(ids) == 0 {
+				return nil
+			}
+			observation.enter("hard_exclusions")
+			excluded, risky, err := validation.read(ids)
+			if err != nil {
+				if session.Ctx.Err() != nil || strict {
+					return err
+				}
+				observation.backfillUnavailable = true
+				return nil
+			}
+			maps.Copy(qualityExcludedClientIds, excluded)
+			maps.Copy(hardExcludedClientIds, risky)
+			for _, id := range ids {
+				qualityReadClientIds[id] = true
+			}
+			pruneSelected()
+			return nil
+		}
+
 		// Common refusals apply to every bucket. Subscriber refusals apply only
 		// to native Quality, including Quality borrowed by a Speed request.
 		readExclusions := func(scores map[server.Id]*ClientScore, mode RankMode, native bool, namedClientIds []server.Id) error {
@@ -6560,48 +6645,35 @@ func FindProviders2(
 				exclusionReadClientIds[clientId] = true
 			}
 			qualityClientIds := []server.Id{}
-			if mode == RankModeQuality && (native || findProviders2.ForceMinimum) {
-				now := server.NowUtc()
-				for _, clientId := range requestFilter.unchecked(scores, qualityReadClientIds) {
-					score := scores[clientId]
-					if !hardExcludedClientIds[clientId] && (findProviders2.ForceMinimum ||
-						(score.PassesMinimums[RankModeQuality] && score.EgressValidUntil != nil && now.Before(*score.EgressValidUntil))) {
-						qualityClientIds = append(qualityClientIds, clientId)
-					}
-				}
-			}
 			if rankMode == RankModeQuality {
-				for _, clientId := range namedClientIds {
-					if !hardExcludedClientIds[clientId] && !qualityReadClientIds[clientId] {
-						qualityClientIds = append(qualityClientIds, clientId)
+				for _, id := range namedClientIds {
+					if !hardExcludedClientIds[id] && !qualityReadClientIds[id] {
+						qualityClientIds = append(qualityClientIds, id)
 					}
 				}
 			}
-			if len(qualityClientIds) != 0 {
-				qualityExcluded, risky, err := getProviderSubscriberExclusions(session.Ctx, qualityClientIds)
-				if err != nil {
+			if err := readQuality(qualityClientIds, true); err != nil {
+				return err
+			}
+			// A later Quality page may expose common risk for an earlier
+			// Speed selection. Check that overlap before filterPool removes it.
+			if mode == RankModeQuality && native {
+				prior := []server.Id{}
+				now := server.NowUtc()
+				for _, provider := range providers {
+					id := provider.ClientId
+					if score := scores[id]; score != nil && !qualityReadClientIds[id] &&
+						!hardExcludedClientIds[id] && score.PassesMinimums[mode] &&
+						score.EgressValidUntil != nil && now.Before(*score.EgressValidUntil) {
+						prior = append(prior, id)
+					}
+				}
+				if err := readQuality(prior, findProviders2.ForceMinimum); err != nil {
 					return err
 				}
-				maps.Copy(qualityExcludedClientIds, qualityExcluded)
-				maps.Copy(hardExcludedClientIds, risky)
-				for _, clientId := range qualityClientIds {
-					qualityReadClientIds[clientId] = true
-				}
 			}
-			// A later bucket can expose common risk for an earlier selection.
-			// Revoke it before quota/refill counts or final answers use it.
-			rejectedSelection := func(clientId server.Id) bool {
-				if !hardExcludedClientIds[clientId] {
-					return false
-				}
-				delete(clientScores, clientId)
-				delete(nativeClientScores, clientId)
-				return true
-			}
-			clientIds = slices.DeleteFunc(clientIds, rejectedSelection)
-			borrowedClientIds = slices.DeleteFunc(borrowedClientIds, rejectedSelection)
-			providers = slices.DeleteFunc(providers, func(provider *FindProvidersProvider) bool { return hardExcludedClientIds[provider.ClientId] })
-			observation.explicitReturned = len(providers) - len(clientIds) - len(borrowedClientIds)
+
+			pruneSelected()
 			return nil
 		}
 		if err := readExclusions(clientScores, rankMode, true, specClientIds); err != nil {
@@ -6697,6 +6769,49 @@ func FindProviders2(
 			retainNativeClientScores(clientScores, rankMode)
 		}
 
+		// Read only the weighted native candidates needed after request filters.
+		// Unchecked Quality members remain available for refill but never count
+		// toward its native quota or enter a native response.
+		validateQualityPool := func(scores, priorScores map[server.Id]*ClientScore, mode RankMode, native bool) error {
+			if mode != RankModeQuality || (!native && !findProviders2.ForceMinimum) {
+				return nil
+			}
+
+			for {
+				pending := map[server.Id]*ClientScore{}
+				validated := 0
+				for id, score := range scores {
+					if hardExcludedClientIds[id] || qualityExcludedClientIds[id] {
+						if hardExcludedClientIds[id] || findProviders2.ForceMinimum {
+							delete(scores, id)
+						} else {
+							score.Online = true
+							score.PassesMinimums = maps.Clone(score.PassesMinimums)
+							delete(score.PassesMinimums, mode)
+						}
+						continue
+					}
+					if priorScores[id] != nil || (!findProviders2.ForceMinimum && !score.PassesMinimums[mode]) {
+						continue
+					}
+					if qualityReadClientIds[id] {
+						validated++
+					} else {
+						pending[id] = score
+					}
+				}
+				needed := count - len(priorScores) - validated
+				if needed <= 0 || len(pending) == 0 || validation.unavailable != nil {
+					return nil
+				}
+				// Query batches stay bounded even for unusually large requests.
+				ids := selectProviders(pending, mode, min(needed, 256))
+				if err := readQuality(ids, findProviders2.ForceMinimum); err != nil {
+					return err
+				}
+			}
+		}
+
 		// Native quota counts only native members after every request filter.
 		// Materialized native pages use bounded batches until quota or true
 		// exhaustion; online and pre-schema union reads keep their finite row
@@ -6706,9 +6821,15 @@ func FindProviders2(
 			if count <= 0 {
 				return nil
 			}
+			if err := validateQualityPool(scores, priorScores, mode, native); err != nil {
+				return err
+			}
 			uniqueCount := func() int {
 				uniqueCount := 0
 				for clientId, score := range scores {
+					if mode == RankModeQuality && (native || findProviders2.ForceMinimum) && !qualityReadClientIds[clientId] {
+						continue
+					}
 					if !findProviders2.ForceMinimum && ((native && !score.PassesMinimums[mode]) || (!native && !score.Online)) {
 						continue
 					}
@@ -6720,6 +6841,10 @@ func FindProviders2(
 			}
 			unknown := cursor == nil || cursor.sourceIncomplete || 0 < cursor.missingPages
 			for cursor.hasMore() {
+				if mode == RankModeQuality && native && validation.unavailable != nil {
+					unknown = true
+					break
+				}
 				if count <= len(priorScores)+uniqueCount() {
 					break
 				}
@@ -6762,10 +6887,14 @@ func FindProviders2(
 						scores[clientId] = clientScore
 					}
 				}
+				if err := validateQualityPool(scores, priorScores, mode, native); err != nil {
+					return err
+				}
 				if readFailed {
 					break
 				}
 			}
+			unknown = unknown || (mode == RankModeQuality && native && validation.unavailable != nil)
 			if unknown {
 				observation.backfillUnavailable = true
 			}
@@ -6785,47 +6914,6 @@ func FindProviders2(
 		}
 		observation.primaryClientScores = clientScores
 		observation.enter("select")
-
-		// Draws up to n of the candidates by their weight in `mode` and bands
-		// the draw by their tier in `mode`. Weighted selection and tier banding
-		// run within each facet, and the preferred facet fills n first: a
-		// v4-capable request takes every dualstack provider it can before any
-		// v4-only one, so the single-family category only ever tops up a
-		// shortfall.
-		selectProviders := func(candidateClientScores map[server.Id]*ClientScore, mode RankMode, n int) []server.Id {
-			clientIds := []server.Id{}
-			for _, facet := range facets {
-				remainingCount := n - len(clientIds)
-				if remainingCount <= 0 {
-					break
-				}
-				facetClientIds := []server.Id{}
-				for clientId, clientScore := range candidateClientScores {
-					if clientScore.ipFamilyFacet() == facet {
-						facetClientIds = append(facetClientIds, clientId)
-					}
-				}
-				mathrand.Shuffle(len(facetClientIds), func(i int, j int) {
-					facetClientIds[i], facetClientIds[j] = facetClientIds[j], facetClientIds[i]
-				})
-
-				connect.WeightedSelectFunc(facetClientIds, remainingCount, func(clientId server.Id) float32 {
-					clientScore := candidateClientScores[clientId]
-					return clientScore.ScaledWeights[mode]
-				})
-				facetClientIds = facetClientIds[:min(remainingCount, len(facetClientIds))]
-
-				// band by tier
-				slices.SortStableFunc(facetClientIds, func(a server.Id, b server.Id) int {
-					clientScoreA := candidateClientScores[a]
-					clientScoreB := candidateClientScores[b]
-
-					return clientScoreA.Tiers[mode] - clientScoreB.Tiers[mode]
-				})
-				clientIds = append(clientIds, facetClientIds...)
-			}
-			return clientIds
-		}
 
 		// Takes up to n of the online bucket in its order
 		// (connect/GEOMAP.md §10.3): reliability weight, highest first, then
@@ -6878,13 +6966,11 @@ func FindProviders2(
 
 		// Native membership comes only from the shared gate decision. The
 		// performance tier orders members within this bucket.
-		nativeClientScores = clientScores
-		if !findProviders2.ForceMinimum {
-			nativeClientScores = map[server.Id]*ClientScore{}
-			for clientId, clientScore := range clientScores {
-				if clientScore.PassesMinimums[rankMode] {
-					nativeClientScores[clientId] = clientScore
-				}
+		nativeClientScores = map[server.Id]*ClientScore{}
+		for clientId, clientScore := range clientScores {
+			if (findProviders2.ForceMinimum || clientScore.PassesMinimums[rankMode]) &&
+				(rankMode != RankModeQuality || qualityReadClientIds[clientId]) {
+				nativeClientScores[clientId] = clientScore
 			}
 		}
 		clientIds = selectProviders(nativeClientScores, rankMode, count)
@@ -6958,7 +7044,8 @@ func FindProviders2(
 				// 1. the other bucket's natives
 				borrowableClientScores := map[server.Id]*ClientScore{}
 				for clientId, clientScore := range otherClientScores {
-					if !clientScore.PassesMinimums[otherRankMode] {
+					if !clientScore.PassesMinimums[otherRankMode] ||
+						(otherRankMode == RankModeQuality && !qualityReadClientIds[clientId]) {
 						continue
 					}
 					if _, native := nativeClientScores[clientId]; native {

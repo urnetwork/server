@@ -245,7 +245,7 @@ var contractUsageGuardArtifactQuery = `(
     )
 )`
 
-var migrationArtifacts = []migrationArtifact{
+var migrationArtifacts = append([]migrationArtifact{
 	{name: "competition_round", requiredVersion: 588, rowColumn: 1},
 	{name: "competition_job_immutable_guard", requiredVersion: 589, rowColumn: 2},
 	{name: "competition_round.providers_sha256", requiredVersion: 590, rowColumn: 3},
@@ -423,7 +423,10 @@ var migrationArtifacts = []migrationArtifact{
 	{name: "logical contract close report receipts", requiredVersion: 764, rowColumn: 175},
 	{name: "Apple offer-code transaction bindings", requiredVersion: 765, rowColumn: 176},
 	{name: "Google Play purchase-token bindings", requiredVersion: 766, rowColumn: 177},
-}
+	{name: "original contract close evidence custody", requiredVersion: 767, rowColumn: 178},
+	{name: "original client close signature companions", requiredVersion: 768, rowColumn: 179},
+	{name: "original client report inventory", requiredVersion: 769, rowColumn: 180},
+}, snMainnetMigrationArtifacts()...)
 
 func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	// Every artifact is queried before its version is checked. Nullable catalog
@@ -2177,7 +2180,10 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 		       `+legacySettlementIntentArtifactQuery+`,
 		       `+contractCloseReportArtifactQuery+`,
 		       `+appleOfferCodeBindingArtifactQuery+`,
-		       `+playPurchaseBindingArtifactQuery+`
+		       `+playPurchaseBindingArtifactQuery+`,
+		       `+contractCloseEvidenceArtifactQuery+`,
+		       `+contractCloseOriginalArtifactQuery+`,
+		       `+contractCloseInventoryArtifactQuery+snMainnetMigrationArtifactQueries()+`
 		FROM version;
 	`)
 	if err != nil {
@@ -2230,11 +2236,11 @@ func (migrationsProbe) check(ctx context.Context, env *probeEnv) ([]finding, err
 			} else {
 				compareCount := min(dbVersion, requiredHead)
 				for index := 0; index < compareCount; index++ {
-					expectedIdentity, identityErr := server.MigrationIdentity(index)
+					matches, identityErr := server.MigrationIdentityMatches(index, strings.TrimSpace(catalogIdentities[index]))
 					if identityErr != nil {
 						return nil, identityErr
 					}
-					if strings.TrimSpace(catalogIdentities[index]) != expectedIdentity {
+					if !matches {
 						missing = append(missing, fmt.Sprintf("migration_catalog identity[%d]@v600", index))
 						break
 					}

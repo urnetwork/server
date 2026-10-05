@@ -173,11 +173,7 @@ func NewLocalClientSessionWithAddressHash(ctx context.Context, clientAddressHash
 }
 
 // Sets authentication claims or returns an authentication error.
-func (self *ClientSession) Auth(req *http.Request) (returnErr error) {
-	method := requestAuthMethod(req)
-	defer func() {
-		recordSessionAuth(method, self.ByJwt, returnErr)
-	}()
+func (self *ClientSession) authenticate(ctx context.Context, req *http.Request) error {
 	if auth := req.Header.Get("Authorization"); auth != "" {
 		if strings.HasPrefix(auth, authBearerPrefix) {
 			authStr := auth[len(authBearerPrefix):]
@@ -192,7 +188,7 @@ func (self *ClientSession) Auth(req *http.Request) (returnErr error) {
 					return errors.New("Invalid API key.")
 				}
 
-				network := apikey.GetNetworkByApiKey(authStr, self.Ctx)
+				network := apikey.GetNetworkByApiKey(authStr, ctx)
 				if network == nil {
 					return errors.New("Invalid API key.")
 				}
@@ -213,11 +209,11 @@ func (self *ClientSession) Auth(req *http.Request) (returnErr error) {
 				// to validate the jwt, parse it, which tests the signing key.
 				// this will fail if the signature is invalid.
 
-				byJwt, err := jwt.ParseByJwtForAudience(self.Ctx, authStr, jwt.ByJwtAudienceApi)
+				byJwt, err := jwt.ParseByJwtForAudience(ctx, authStr, jwt.ByJwtAudienceApi)
 				if err != nil {
 					return err
 				}
-				if err := jwt.ValidateByJwtState(self.Ctx, byJwt, false); err != nil {
+				if err := jwt.ValidateByJwtState(ctx, byJwt, false); err != nil {
 					return err
 				}
 				if glog.V(2) {

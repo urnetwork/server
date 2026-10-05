@@ -19,22 +19,43 @@ func runWithProviderEgressFleetHeartbeat(
 	refresh func(context.Context),
 	run func() (*ProviderEgressProbeResult, error),
 ) (*ProviderEgressProbeResult, error) {
+	return runWithProviderEgressFleetHeartbeatLifetime(ctx, interval, refresh, run, false)
+}
+
+// A URL census has its own ten-second read deadline. Let that already-started
+// read finish when a short pass returns normally, while stopping new periodic
+// work. Parent cancellation still aborts the read and every exit joins it.
+// Legacy refreshes retain their immediate cancellation at pass completion.
+func runWithProviderEgressFleetHeartbeatLifetime(
+	ctx context.Context,
+	interval time.Duration,
+	refresh func(context.Context),
+	run func() (*ProviderEgressProbeResult, error),
+	completeRefresh bool,
+) (*ProviderEgressProbeResult, error) {
 	if refresh == nil {
 		return run()
 	}
 	refreshCtx, cancel := context.WithCancel(ctx)
+	stopping := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {
-			if refreshCtx.Err() != nil {
+			select {
+			case <-refreshCtx.Done():
 				return
+			case <-stopping:
+				return
+			default:
 			}
 			server.HandleError(func() { refresh(refreshCtx) })
 			select {
 			case <-refreshCtx.Done():
+				return
+			case <-stopping:
 				return
 			case <-ticker.C:
 			}
@@ -43,8 +64,12 @@ func runWithProviderEgressFleetHeartbeat(
 	// Stop and join on every exit, including a recovered task panic. The
 	// caller may retire its published owner only after refresh has stopped.
 	defer func() {
-		cancel()
+		close(stopping)
+		if !completeRefresh {
+			cancel()
+		}
 		<-done
+		cancel()
 	}()
 	return run()
 }

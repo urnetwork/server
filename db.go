@@ -36,8 +36,10 @@ uses a private connection pool local to the current service:
 
 var DbContextDoneError = errors.New("Done")
 
-// Bounds PostgreSQL connection establishment and authentication.
-const PgConnectTimeout = 30 * time.Second
+// Bounds PostgreSQL startup per resolved address. Pool constructors outlive a
+// canceled Acquire, so a backend outage must not retain each attempt for the
+// much longer request or retry horizon.
+const PgConnectTimeout = 5 * time.Second
 
 // Bounds validation of an established PostgreSQL connection. Protocol reads
 // need a shorter budget than dialing so a stale socket cannot consume the
@@ -46,6 +48,11 @@ const PgPingTimeout = 5 * time.Second
 
 // Bounds best-effort disposal of an unusable PostgreSQL connection.
 const PgCloseTimeout = 5 * time.Second
+
+// Matches pgxpool's normal destructor budget. Failed AfterConnect hooks do not
+// run that destructor, so they must join pgx's asynchronous socket cleanup
+// before returning the constructor reservation to the pool.
+const PgStartupCleanupTimeout = 15 * time.Second
 
 // PgCommitTimeout bounds the commit round trip, which runs on a context
 // detached from the caller (see the commit in `txWithPool`).
@@ -243,10 +250,42 @@ func (self *safePgPool) open() *pgxpool.Pool {
 // the transaction pooler; failed callback connections still follow disposal
 // and safe-retry classification in dbWithPool.
 func configurePgPoolLiveness(config *pgxpool.Config) {
+	if config.ConnConfig.ConnectTimeout <= 0 || PgConnectTimeout < config.ConnConfig.ConnectTimeout {
+		config.ConnConfig.ConnectTimeout = PgConnectTimeout
+	}
+	// pgconn resolves names before applying ConnectTimeout. The pool supplies
+	// a detached constructor context, so give each lookup its own finite bound.
+	lookup := config.ConnConfig.LookupFunc
+	config.ConnConfig.LookupFunc = func(ctx context.Context, host string) ([]string, error) {
+		lookupCtx, cancel := context.WithTimeout(ctx, PgConnectTimeout)
+		defer cancel()
+		return lookup(lookupCtx, host)
+	}
 	config.PingTimeout = PgPingTimeout
 	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		pgxRegisterIdType(conn.TypeMap())
-		return pingPgConnection(ctx, conn)
+		if err := pingPgConnection(ctx, conn); err != nil {
+			cleanupFailedPgStartup(ctx, conn.PgConn(), PgStartupCleanupTimeout)
+			return err
+		}
+		return nil
+	}
+}
+
+// A failed Ping can mark a PgConn closed before its cancel/Terminate cleanup
+// has disposed of the socket. Close alone then returns immediately. Retain the
+// failed constructor until CleanupDone, subject to the same finite budget used
+// by pgxpool's ordinary destructor. Acquire cancellation must not skip cleanup.
+func cleanupFailedPgStartup(ctx context.Context, conn interface {
+	Close(context.Context) error
+	CleanupDone() chan struct{}
+}, timeout time.Duration) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	_ = conn.Close(cleanupCtx)
+	select {
+	case <-conn.CleanupDone():
+	case <-cleanupCtx.Done():
 	}
 }
 
@@ -583,7 +622,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				select {
 				case <-ctx.Done():
 					timing.finish(DbTimingRetryWait, waitStarted)
-					panic(DbContextDoneError)
+					panic(dbContextDoneCause(ctx, connErr))
 				case <-time.After(backoff.NextRetryTimeout()):
 					timing.finish(DbTimingRetryWait, waitStarted)
 					if retryEndTime.Before(NowUtc()) {
@@ -642,7 +681,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				select {
 				case <-ctx.Done():
 					timing.finish(DbTimingRetryWait, waitStarted)
-					panic(DbContextDoneError)
+					panic(dbContextDoneCause(ctx, pgErr))
 				case <-time.After(backoff.NextRetryTimeout()):
 					timing.finish(DbTimingRetryWait, waitStarted)
 					if retryEndTime.Before(NowUtc()) {
@@ -660,14 +699,14 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 		}
 		if connErr != nil {
 			if connectionContextDone {
-				panic(DbContextDoneError)
+				panic(dbContextDoneCause(ctx, connErr))
 			}
 			if retryOptions.rerunOnConnectionError && connectionRetrySafe && canRetryConnectionError(connErr) {
 				waitStarted := timing.start()
 				select {
 				case <-ctx.Done():
 					timing.finish(DbTimingRetryWait, waitStarted)
-					panic(DbContextDoneError)
+					panic(dbContextDoneCause(ctx, connErr))
 				case <-time.After(backoff.NextRetryTimeout()):
 					timing.finish(DbTimingRetryWait, waitStarted)
 					if retryEndTime.Before(NowUtc()) {
@@ -836,7 +875,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				select {
 				case <-ctx.Done():
 					timing.finish(DbTimingRetryWait, waitStarted)
-					panic(DbContextDoneError)
+					panic(dbContextDoneCause(ctx, pgErr))
 				case <-time.After(backoff.NextRetryTimeout()):
 					timing.finish(DbTimingRetryWait, waitStarted)
 				}
@@ -858,7 +897,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				select {
 				case <-ctx.Done():
 					timing.finish(DbTimingRetryWait, waitStarted)
-					panic(DbContextDoneError)
+					panic(dbContextDoneCause(ctx, commitErr))
 				case <-time.After(backoff.NextRetryTimeout()):
 					timing.finish(DbTimingRetryWait, waitStarted)
 				}

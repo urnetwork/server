@@ -337,11 +337,11 @@ func validateMigrationCatalog(version int, entries []migrationCatalogEntry) erro
 		if entry.Index != index {
 			return fmt.Errorf("migration catalog position %d records index %d", index, entry.Index)
 		}
-		identity, err := migrationIdentity(migrations[index])
+		matches, err := MigrationIdentityMatches(index, entry.Identity)
 		if err != nil {
 			return fmt.Errorf("migration %d identity: %w", index, err)
 		}
-		if entry.Identity != identity {
+		if !matches {
 			return fmt.Errorf("migration %d identity differs from durable catalog", index)
 		}
 	}

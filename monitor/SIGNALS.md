@@ -1181,7 +1181,9 @@ SELECT count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_tx,
        max(now() - xact_start) FILTER (WHERE state = 'idle in transaction') AS oldest
 FROM pg_stat_activity WHERE backend_type = 'client backend';
 ```
-- HEALTHY: idle_in_tx < 30, active < 20, oldest < 1 min.
+- HEALTHY: idle_in_tx < 30, active < 20, oldest < 1 min. This clears only
+  the PostgreSQL state band. Low backend activity cannot clear the separate
+  PgBouncer startup/queue path (§2.11) or API authentication pressure (§2.19e).
 - UNKNOWN: the executable state summary requires exactly one row with four
   nonnegative integers: active count, idle-in-transaction count, rounded
   oldest transaction age in seconds, and total client count. Missing, extra,
@@ -1345,9 +1347,12 @@ socket census rather than disclosing its address in monitor output.
   recovery record, and goroutine-shaped JSON. Class `pg-client-capacity` takes
   precedence over generic `panic`; raw line volume is diagnostic amplification,
   not a count of unique rejected PostgreSQL sessions.
-- This is distinct from `query_wait_timeout`, where a PgBouncer shard already
-  owns all of its server connections and kills a queued client, and from a
-  client write timeout on port 6432, where the request may not reach the pool.
+- This is distinct from `query_wait_timeout`, where a queued client did not
+  receive a server connection before its deadline. That can mean established
+  servers are busy or backend connection/startup is not progressing; the error
+  alone does not distinguish them. Use the native shard discriminator in §2.11.
+  A client write timeout on port 6432 is another boundary, where the request
+  may not reach the pool.
 - ROOT-CAUSE ORDER: first split active, young idle-in-transaction, idle, and
   starting owners. Correlate active and young transaction cohorts with direct
   wait events and completed statement or `COMMIT` latency in PostgreSQL logs.
@@ -1561,6 +1566,8 @@ including waits; it is never a CPU counter.
   systemd unit family need separate direct controls. No accounting source is
   a coverage failure. A below-band counter cannot dismiss WAL/buffer waits,
   write amplification, or other contention; retain §1.3d and §2.2 independently.
+  It also cannot clear §2.11: when poolers fail to establish backend sessions,
+  requests can accumulate outside PostgreSQL while its CPU falls.
 - ACTION: correlate direct active-query/wait observations, bounded statement
   call deltas, escrow fanout, and a healthy workload control. Distinguish useful
   demand from repeated work, CPU quotas, and hardware limits before changing
@@ -4958,12 +4965,20 @@ transfer_contract autovacuum phase. Apply the bounded retention correction only
 if that attribution is confirmed; the historical episodes below are not proof
 of the current running path.
 
-Current source has two independent scans, each limited to 25,000: aged open
-contracts and aged disputed/nonfinal contracts. Their deduplicated union can
-therefore contain up to 50,000 candidates. A merged selection above 25,000 does
-not prove a legacy deployment; establish the exact executor source and per-scan
-cap/count authority before prescribing a cap correction. Do not raise either
-scan to 50,000. Candidate count is not terminal-verified sibling progress.
+The scheduled closer retains two independent per-task totals of at most 25,000:
+aged open contracts and aged disputed/nonfinal contracts. It now visits raw
+subpages of at most 256 per scan and checks a 15-second elapsed budget between
+completed subpages. A subpage finishes its existing financial and cleanup
+phases before yielding; this is a cooperative budget, not a new cancellation
+deadline. Parent cancellation and operational failures remain errors. Only a
+complete, classified prefix can supply the next task's cursor; accounting
+rejections retain their typed failure and verified sibling counts. A skipped or
+durably delegated raw prefix can advance without claiming any financial close.
+The whole task's deduplicated union can still reach 50,000 candidates. A merged
+selection above 25,000 does not prove a legacy deployment; establish the exact
+executor source and per-scan cap/count authority before prescribing a cap
+correction. Candidate count is not terminal-verified sibling progress, and a
+short successful task alone does not prove that the aged backlog is draining.
 
 Also compare the complete stored failure and next due time with the attempt's
 duration. A verified underfunded dispute can leave unrelated per-contract
@@ -6888,7 +6903,7 @@ million, but that cleanup result does not make the 2.17M-row payment
 transaction bounded. Require the query id and deadline-error cohort to
 disappear after the queued cursor path is deployed.
 
-### 2.11 PgBouncer client-write stall — pool path vs postgres load
+### 2.11 PgBouncer pool-path stalls — startup progress vs busy servers
 Probe: `pgbouncer-stalls`
 
 The application-side error
@@ -6921,7 +6936,10 @@ focused detector tests do not prove Main recovery.
 
 Diagnosis order:
 1. Sample `pg_stat_activity` through direct 5432. Low active count/no blockers
-   rules out a postgres CPU or lock wall but does NOT clear the pool path.
+   does not establish a PostgreSQL CPU or lock wall and does NOT clear the
+   pool path. Require one bounded authenticated direct probe matching the
+   pooler's effective backend endpoint, role, database and TLS mode. An open
+   TCP listener or privileged Unix-socket query does not exercise that path.
 2. On the db host, remember 6432 is nginx in front of the 32 PgBouncer shards
    (6433-6464). Check `ss` listen/accept queues, nginx errors, every shard unit,
    and `SHOW POOLS`/`SHOW STATS` on the shards rather than the intentionally
@@ -6931,10 +6949,172 @@ Diagnosis order:
    lightly active. The provider route compounds the pool pressure with query
    ids `8120731601370473026` (hundreds of thousands of provider ids returned
    per call) and `6264993620546911677` (~3.3s lifetime mean aggregate).
-4. A route-specific cluster means bound/cache/page that route's database work;
-   a fleet-wide cluster with full shard queues means pool-path saturation.
-   Raising the socket timeout only hides either failure and retains scarce
-   connections longer.
+4. A route-specific cluster warrants attribution of that route's database
+   work. A fleet-wide cluster with waiting clients warrants native shard
+   evidence before choosing between busy established servers and backend
+   startup blockage. Raising the socket timeout hides either failure and
+   retains scarce connections longer.
+
+`FATAL: query_wait_timeout` means that a query did not receive a server before
+its queue deadline. Class `pgbouncer-query-wait` warns at one line/minute and
+pages at five, preserving the generic panic page threshold when the same
+error appears inside a recovery record. It takes precedence over generic
+`panic`, uses a fixed sample, and reports diagnostic lines rather than unique
+requests. The error does not prove that the pool owns its configured maximum
+of established servers.
+
+The bounded startup discriminator is a diagnosis under this signal, not a
+new automatic administrative probe:
+
+- Bind `SHOW POOLS`, `SHOW SERVERS` and effective `SHOW CONFIG` to each native
+  shard process and the same observation interval. Count active, idle, used,
+  tested, login, active-cancellation and being-canceled servers separately.
+  Keep client cancellation queues distinct from server ownership. Record
+  connection/request ages, effective `server_connect_timeout`, login retry,
+  and paused/disabled state without exporting endpoint or account values.
+- Waiting clients plus busy established servers require PostgreSQL wait and
+  owner attribution. Waiting clients with zero established normal and
+  cancellation servers but positive `sv_login` establish backend startup as
+  the blocked phase. They do not distinguish repeated failed attempts from
+  one overdue startup; successive server identities/ages and finite errors
+  are needed. Compare these with the matched authenticated direct control.
+- Missing shards, changed generations, capped rows, unparsed ages or failed
+  observations leave the affected causal fields unknown. A fresh startup can
+  be transient; one frame alone does not prove an overdue timer or a library
+  defect. A healthy direct control narrows the failure to the pooler path but
+  does not demonstrate application recovery.
+- Preserve bounded evidence before any explicitly authorized recovery.
+  Verify established-server progress on every shard, the matched direct
+  control, and affected API/Connect requests. Then require ten minutes of
+  complete fresh log windows and §1.3a headroom through the triggering work.
+  A restart that restores progress is recovery evidence; the durable fix
+  still requires the installed version and the responsible startup failure.
+
+The 2026-10-04 native control observed all 32 shards with 301,567 waiting
+clients, zero active/idle/used/tested or cancellation servers, and exactly one
+login per shard. Direct loopback TCP admission and authenticated SELECT 1 with
+the actual backend role and TLS disabled succeeded. One authorized shard
+restart restored 20 active servers and reduced that shard's waiting clients
+from 25,858 to 42 while the other 31 unit generations stayed unchanged. This
+establishes a real pooler startup/progress failure and a successful recovery
+control; it does not identify the triggering code defect. The earlier claim
+that every queue timeout meant busy established servers was false.
+
+The post-recovery native version check bound all 32 shards to PgBouncer 1.26.0,
+libevent 2.1.12-stable and c-ares 1.18.1. The effective backend was the literal
+IPv4 loopback address with TLS disabled, `server_connect_timeout=300` and
+`server_login_retry=15`. The matching upstream 1.26.0 source permits only one
+pending server startup per pool in
+[`launch_new_connection`](https://github.com/pgbouncer/pgbouncer/blob/pgbouncer_1_26_0/src/objects.c),
+while
+[`pool_server_maint`](https://github.com/pgbouncer/pgbouncer/blob/pgbouncer_1_26_0/src/janitor.c)
+closes every login-state server older than the configured startup timeout.
+That check has no exception for the server's `ready` flag. The missing
+pre-restart server identities and ages prevent a conclusion that one startup
+exceeded 300 seconds: repeated failed attempts can produce the same aggregate
+login-only state. Recovered-server ages cannot fill that evidence gap. Record
+the pending server identity and age before recovery, and do not describe a
+lower timeout, pool-size increase, library upgrade or process restart as a
+durable fix without identifying the failed progress path.
+
+The 2026-10-05 01:35:55–57Z recurrence supplied the missed outage shape again:
+all 32 native shards had waiting clients, zero established normal or
+cancellation servers, and one login each; `cl_waiting` summed to 306,598 and
+the maximum wait was 120.24 seconds. These are client connections, not unique
+users, logical requests or completed queries. The shards were read over
+1.4 seconds, not atomically. Login identities and ages were absent, and every
+selected log tail hit its cap: zero matched login-timeout/error lines cannot
+establish their absence. The separately qualified direct PostgreSQL control
+remained healthy. This is pool-path capacity loss even with healthy direct
+queries, low PostgreSQL CPU, active units and an open frontend listener.
+
+Progress must be measured at its actual boundary. In the installed 1.26.0
+[client request path](https://github.com/pgbouncer/pgbouncer/blob/pgbouncer_1_26_0/src/client.c),
+`total_query_count` and `total_xact_count` advance when client work starts,
+before server assignment; rising values do not prove completed PostgreSQL
+work. `total_server_assignment_count` advances on a successful client/server
+link in
+[`find_server`](https://github.com/pgbouncer/pgbouncer/blob/pgbouncer_1_26_0/src/objects.c).
+That proves assignment, not a successful query or financial commit. Pair
+assignment deltas with server response bytes and completed query/transaction
+time, queue age, established-server states and the affected application
+outcome. Response endings can include errors; they are not successful
+business outcomes. `cl_active` likewise is not a count of executing PostgreSQL queries.
+Use same-process, same-pool paired counters; resets, replacements, missing
+cells or unbound pool membership leave progress unknown.
+
+For paired login evidence, `SHOW SERVERS` calls the startup state `new`.
+Bind its stable connection `id` to the native process generation in the
+private reducer; do not use a reusable pointer as identity or emit those
+identifiers as metric labels. Parse `connect_time`/`request_time` only with
+the proven process-local timezone and their one-second precision. Unknown
+timezone means unknown age. A positive `remote_pid` proves receipt of
+BackendKeyData late in startup, not query readiness. Successive identities
+distinguish replacement from one persistent attempt only at the sampled
+boundaries; the observation can still miss intervening attempts.
+
+Local native PgBouncer 1.26/libevent 2.1.12 fixtures with a synthetic
+PostgreSQL-protocol backend, trust authentication and no TLS reject two causal
+shortcuts. A silent accepted backend with a one-second timeout produced
+login-only frames while startup identities changed and the timeout worked. Expired
+clients with a 6,200-byte queued query payload reproduced repeated backend closes,
+but a healthy 14-byte query control drained 30 expired waiters while preserving
+one backend. Thus login-only aggregates do not prove a stuck timer, and
+expired waiters alone do not prove the Main failure mechanism. The short pgx
+initial Ping is not reproduced by substituting the larger query. A matched
+Main startup identity/age/error observation is still required.
+
+PgBouncer pauses client reads in `CL_WAITING`. A closed application client can
+remain in that queue until server reactivation or queue expiry, after its
+application pool slot is already released. Thus `cl_waiting` is not a census
+of live application callers. The healthy small-query fixture retained all
+30 closed clients while the blocker was held, then drained them with one
+backend preserved. This is a count/lifetime discriminator, not proof that
+closed clients caused Main's loss of backend capacity.
+
+Required detector follow-up (prospective, not implemented by the current
+listener/log probe): collect the bounded native states and paired progress
+fields on the existing inventory-owned route at least once per minute.
+A complete fleet frame with waiting clients and zero established servers on
+every enabled shard warrants PAGE once queue age exceeds the affected
+application's admission budget, or the shape recurs in a second fresh
+one-minute observation. The old-wait shape needs no additional sustain,
+including when `sv_login` is positive and TCP accepts. A brief cold-start
+frame alone cannot prove sustained failure. Repeated login-only waits on an
+independently qualified shard warrant WARN after two fresh observations; a missing sibling
+prevents a fleet-health claim without suppressing the proven shard failure.
+Retain established-server pressure as a separate case. One new login beside
+working established servers is ordinary startup, not this outage condition.
+No log-rate, high-CPU, completed-query or five-minute process-age minimum may
+suppress the complete zero-backend outage shape. Failed administrative reads
+remain visibility loss. This requirement does not activate a new Main reader
+or imply the current monitor already evaluates it.
+
+An authorized restart restored backend capacity immediately, but the earlier
+restart did not prevent this recurrence. Keep the incident open until every
+enabled shard has established capacity and paired response/assignment progress
+under continuing demand, queue residence recovers, affected API/Connect
+outcomes recover, and the existing ten-minute complete-window rule passes.
+A fall in waiting clients can also mean disconnected callers; a quiet sample
+without demand cannot prove service recovery. Do not turn restart success
+into durable-root-cause attribution or restart PostgreSQL to change a healthy
+direct-PG observation. Recovery remains distinct from the unresolved startup
+mechanism and from the application containment fixes.
+
+A later qualified one-shard control at 02:16:44–48Z had 20 established
+servers, zero logins, 8,180 assignments and 997,784 server-response bytes
+over 3.574 seconds. Its queue moved from zero to 20 clients while maximum
+wait stayed at 14.669 milliseconds. This demonstrates current progress with
+a nonempty queue on that shard; it neither certifies the other 31 shards nor
+resolves the earlier startup cause. Unavailable kernel wait-state observations
+remain unknown and cannot identify an event-loop failure.
+
+False-negative qualifier: the application's five-second initial Ping can
+time out before the pooler's longer queue deadline. An absent queue-timeout
+line, lower database/Redis load, or a successful listener-only probe does not
+clear API/Connect failure. Bare `pgconn.errTimeout` and `Done` records retain
+their existing classification until exact deployed call-path evidence
+identifies the phase; they are not assigned to PgBouncer from wording alone.
 
 The 2026-09-08 CPU-wall investigation added a general route-cache containment
 boundary. A cold cached route now acquires a Redis `SETNX` fill lease with a
@@ -11594,6 +11774,55 @@ request. A 17:00 UTC control had zero constructing connections and 5,673 idle
 connections across the API fleet: the earlier state must not be described as
 continuously present or cleared by a later source-only change.
 
+The 2026-10-05 01:32:26Z control exposed an earlier admission boundary across
+16 qualified API processes: `authenticate` held 9,078 control HTTP handlers,
+while `prepare`, `controller`, `response` and every HTTP frame group were
+zero. Default pgx pools reported 5,472 total connections, one acquired and
+zero idle. On this pinned source, `total - acquired - idle` therefore gives
+5,471 constructing connections, not 5,471 active SQL queries or checked-out
+connections. The 8,192 aggregate configured maximum was not fully occupied;
+waiting for construction does not require the total to equal the maximum.
+Use the same pool/process/scrape for this derivation, reject negative or
+inconsistent states, and keep unopened-pool absence unknown. A sum across
+sequentially scraped processes is a bounded fleet observation, not an atomic
+snapshot or a causal join to the later PgBouncer frame (§2.11).
+
+Zero controller/frame occupancy here does not mean a quiet API: the JWT live
+state and legacy identity reads run before controller dispatch. Phase inflight
+is current residence; completed phase seconds and successful acquire duration
+exclude still-pending work. Acquire `empty` is a subset of successful
+acquisitions, not a disjoint failure count. Use reset-aware paired acquire,
+cancellation and connection-creation counters; lifetime totals alone cannot
+show the current wait rate. A healthy unauthenticated route proves only its
+own dependency path and cannot clear authenticated request failure.
+
+Required detector follow-up (prospective): extend this owning signal with an
+authentication/connection-construction branch independent of its completed
+request and five-minute process-age gates. Two complete fresh one-minute
+observations of at least 100 authentication handlers on one process, zero
+idle default-pool connections, and at least 90% of nonzero pool total still
+constructing warrant WARN. These are proposed containment-warning thresholds,
+not measured healthy baselines or service admission caps. Corroborating the
+complete native zero-backend outage from §2.11 warrants PAGE immediately;
+the temporal association still does not identify one handler's exact backend.
+Missing phase or pool evidence remains unobservable, not a zero workload.
+Cold startup, short demand bursts, draining generations and a replaced pool
+must be distinguished before claiming sustained failure or recovery.
+
+Local real-PostgreSQL controls require authentication operations, including
+live JWT state reads, to share one 30-second scoped deadline and return a
+retryable 503 for dependency unavailability. Existing detached bad-connection
+disposal may add its separate five-second bound; this is not a whole-handler
+30-second wall-clock guarantee. The lock control joins before releasing the
+held database lock. Healthy authentication must hand off to the original
+request context; subsequent controller and already admitted financial work
+must retain their existing lifetime. Native pgx constructor deadlines are a
+separate boundary because a canceled Acquire can leave connection construction
+running. A shorter per-address connection timeout or bounded DNS lookup is
+not one universal wall-clock constructor deadline. Source tests qualify these
+mechanisms; recovery requires the exact serving artifact and fresh route,
+pool, PgBouncer and durable financial progress observations.
+
 The owning contract path previously acquired two PostgreSQL connections in
 parallel for a destination's TLS certificate and signed public key. The
 combined metadata reader uses one indexed SELECT and releases its connection
@@ -14502,7 +14731,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `snapd.apparmor.service` failed with parser errors under `snap.lxd.*` while `snapd.service` is active | Installed LXD snap profiles are incompatible with the host AppArmor parser. This is independent of Docker/Warp unless the host intentionally runs production workloads in LXD. | LXD is deliberately absent from main edges; `run-edges.sh` purges it while preserving Snapd and Canonical Livepatch. Confirm `snap list lxd` is absent and both `snapd.service` and `snapd.apparmor.service` are active. A reinstalled LXD snap is configuration drift. |
 | `invalid alert rule: interval (<duration>) should be non-zero and divided exactly by scheduler interval: 10` | A file-provisioned Grafana alert group uses an evaluation interval outside Grafana 13's 10-second scheduler grid. Grafana provisioning fails, the child exits and restarts, `/status` never becomes ready, and Warp keeps the old generation serving. | Fix the rule interval to a positive multiple of 10 seconds and run `go test ./grafana` in Warp; `TestProvisionedAlertIntervalsMatchGrafanaScheduler` validates every embedded alert file. Do not restart Warp or remove the old healthy container—the same invalid image will continue failing. See §11.16. |
 | `redis: connection pool timeout` | Local pool exhausted for PoolTimeout — backpressure, not the root. Deliberately NOT retried in-client (retry amplifies to livelock). | Find what is slow/stuck consuming the pool (usually a wedged node); check pool_timeouts metric per service. |
-| `FATAL: query_wait_timeout` (pgbouncer) | pgbouncer server pool saturated — every server conn busy on slow queries; queued clients are killed at the timeout. A pg-side stall symptom, never a pgbouncer config problem. | Diagnose on direct 5432 (it still connects); check 1.3 active count + db host load → 5.8. |
+| `FATAL: query_wait_timeout` (`pgbouncer-query-wait`) | A queued query did not receive a server connection before its deadline. Busy established servers and backend-startup blockage can both cause this; the line alone leaves the cause unknown. WARN at one diagnostic line/minute, PAGE at five; fixed sample and precedence over generic panic. | Run §2.11: bind native states/ages/config across all active shards and require a bounded authenticated direct control matching backend endpoint, role, database and TLS mode. Split established-server waits from login-only nonprogress; low direct-PG load or an open listener does not clear the pool path. |
 | `server login has been failing, cached error: sorry, too many clients already (server_login_retry)` (`pg-client-capacity`) | PostgreSQL refused a PgBouncer server login at its connection ceiling and PgBouncer cached the result. A timed-out transaction can leave its old backend unwinding while PgBouncer opens a replacement. A single failed request can also be rendered as `Unexpected error`, route recovery, and goroutine-shaped JSON, so the class takes precedence over generic panic and raw log volume is not unique-failure count. The 2026-09-01 control tied the burst to legacy reindex WAL/storage stalls and 60–66-second `COMMIT`s, not idle retention. | Run direct §1.3a immediately; split active, young idle-in-transaction, idle, and starting owners and correlate PostgreSQL waits/commit latency with PgBouncer connection logs or `SHOW POOLS` where permitted. For the matching legacy-reindex chain, wait for index progress to empty and deploy current-main Taskworker fixes `908a8b2c` and `d8392c83`. Do not first tune pools, raise `max_connections`, restart the database/pools, or mass-terminate sessions; preserve the deployed `work_mem` memory-risk context. |
 | `pgproto3.writeError=write failed: write tcp ...->...:6432: i/o timeout` | The app could not write a request into the nginx/PgBouncer frontend before its socket deadline. Unlike `query_wait_timeout`, it may occur before postgres sees a query; direct-pg active load can stay low. | Split the 6432 nginx frontend, its 32 PgBouncer shard queues/listeners, and direct 5432 with §2.11. Group by route; do not merely increase the timeout. |
 | `[db]maintenance reindex[<i>/<n>] <excluded-table>` (`db-maintenance-legacy-reindex`) | A Taskworker selected a large or high-churn table that current policy excludes and entered the legacy full-table concurrent-reindex path. Because old code logs before acquiring its maintenance connection, the line proves selection/attempt, not that PostgreSQL began or completed the statement. Interruption plus lease recovery can strand `_ccnew`/`_ccold` artifacts and repeat the rebuild before old end-of-rotation cleanup. | Inspect `pg_stat_progress_create_index`, `reindex-debris`, and the exact DbMaintenance owner before changing Taskworker. Do not let a rollout implicitly cancel active work. After progress is empty, satisfy §8.13 and deploy a clean Taskworker containing current-main commits `908a8b2c` plus `d8392c83`; clean debris separately with explicit maintenance authorization and the supported cleanup-only command. Never wildcard-drop artifacts. See §2.2a. |
@@ -14541,7 +14770,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band and, above threshold, reconciles the bounded `missing_origin_details_total` resolution/relationship/lifecycle cohorts. Absent or incomplete detail is not zero and cannot support attribution. Never infer roles from the Boolean or print raw pairs; the higher `companion=true` band needs separate calibration. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
 | `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
-| Client UI/API callback `Timeout.` with no matching route in the exact LB/API interval | The request did not reach the public edge. In the 2026-09-01 Android acceptance failure, ordinary emulator reachability and concurrent API traffic were healthy, but a stale previously-successful Connect dialer received the complete request deadline and hid the healthy route; cold dialers were also incorrectly classified as prior successes. | Correlate the exact UTC action interval against the exact method/path, not the broader auth prefix. If absent, keep diagnosis client-side: inspect `[net]http serial`/`[net]http parallel` route selection and the embedded Connect revision. Require the bounded preferred-route scheduler and cold-route parallel discovery regression tests; do not restart API, increase the UI wait, or add an app-level retry. |
+| Client UI/API callback `Timeout.` with no matching route in the exact LB/API interval | No matching request was observed on those captured fronts. This excludes a server arrival only when the capture covers every route the shipped client can choose: Alt serves its own API over H3/WhoDis without the ordinary LB/API path (§16.9). In the 2026-09-01 Android acceptance failure, ordinary emulator reachability and concurrent API traffic were healthy, but a stale previously-successful Connect dialer received the complete request deadline and hid the healthy route; cold dialers were also incorrectly classified as prior successes. | Correlate the exact UTC action interval against the exact method/path and embedded client transport revision. Bind the ordinary API and Alt API/Connect handler generations and public carrier paths before assigning an absent request to the client. If a complete capture excludes arrival, inspect `[net]http serial`/`[net]http parallel` route selection and require the bounded preferred-route and cold-route discovery controls. Missing Alt coverage is unknown; it does not authorize a server restart, longer UI wait or app-level retry. |
 | `[netescrow]negative counter after <site>` | A Redis reservation mirror had fewer bytes than PostgreSQL durably released. Besides a lost create or replayed release, a legacy absolute reconcile can overwrite live mirror traffic (§5.11). The current page-local additive path still has two cross-store windows: a slow PostgreSQL page snapshot can become stale before its later Redis GET, and a committed settlement can precede its Redis post. Old binaries leave the negative value until reconciliation. Current release Lua emits `clamped_to=0` after atomically deleting the nonpositive result while retaining its diagnostic value. A later legitimate reservation or reconciliation can recreate a positive key. Any occurrence remains a defect. | Correlate the first burst with the exact `ReconcileNetEscrow` executor, immutable source, duration, reservation statement profile, aggregate drift, and Redis mutation errors. Retain the page-local additive reconciler and atomic release clamp; deploy single-attempt checked mirror mutations, migration 601, the unsettled-partial query, and the non-current-open pass. After rollout verify any residual line says `clamped_to=0`; a later key is either absent with no new reservations or exactly equals the current PostgreSQL open-reservation sum. Key presence alone does not disprove the clamp. Pages stay below one second and no matched reversal recurs. Alert artifacts retain only `site`; balance/contract ids are redacted. |
 
 For `payout-invalid-destination`, `invalid_destination_events` is the
@@ -14610,6 +14839,11 @@ report rate; sample one full line.
 3. Systemic: CLUSTER INFO → CLUSTERDOWN → 5.3. cluster ok → check pg (1.3),
    task canaries (1.2), recent deploys; new panic frame in logs → the stack
    names the broken path.
+   Low PostgreSQL CPU/activity does not end this branch: check native
+   PgBouncer established/login/wait states (§2.11), API authentication and
+   constructing-pool occupancy (§2.19e), and Connect handlers before resident
+   admission (§8.15), even while process readiness and unauthenticated routes
+   remain healthy.
 
 ### 5.2 Node wedge (PING hangs locally)
 This is a Redis-specific diagnosis, not a classification of every outgoing
@@ -18436,6 +18670,45 @@ equals the table-partition count, every index is valid, the old parent is
 absent, and no new `[crp]secondary index drift` warning appears for five
 minutes after log-ingestion delay.
 
+**Interrupted build and local pause controls (2026-10-04–05):** A serial
+concurrent build exited with `conn closed` after reporting 28 attached
+partitions. The next native catalog found 28 healthy attached children, one
+valid/ready/live detached covering child, five missing children, no invalid
+children, no scoped index progress and no scoped maintenance locks. The
+supported resume can attach that completed child and build the missing five.
+This proves the detached child's physical state, not whether the client
+received the successful build response or which connection operation failed.
+The connection-close cause remained unproved. Four truncated activity rows
+were an explicit ownership uncertainty; fingerprints alone cannot identify
+their SQL as DML. A scoped zero-progress/zero-lock snapshot is not future or
+atomic ownership proof. Root retains maintenance coordination and records its
+acceptance separately from the read-only source's conservative hold.
+
+The same operation exposed two local admission failures that must remain
+separate from database failures. An independently launched emergency `SIGCONT`
+helper contained an indentation error in its embedded Python; the outer
+recipe compiled and normal cleanup resumed the watcher, but the emergency
+unit exited 1. Compile the exact embedded source and prove its delayed action
+on an owned local test process before any authorized pause. Later, a successful
+capacity read left its 45-second helper armed. Its scheduled continuation at
+00:35:12.745Z overlapped the next paused launch; the new supervisor started at
+00:35:13.841Z and refused admission before any Main/forward/CLI spawn. This
+timing identifies an interfering continuation owner, while the old supervisor's
+coarse `AdmissionRejected` record does not establish its exact rejected budget.
+
+Use the bounded pause lifecycle in `RUN-MAIN.md`: no live prior continuation
+helpers, exact watcher generation, zero SSH children from the same audit used
+to pause, and a second zero-child audit after pausing. Continue the watcher in
+normal cleanup, then disarm only the helper whose current unit invocation and
+native process generation match that operation. Otherwise a successful older
+cleanup can invalidate a later pause. Keep the archive charged to the existing
+global/per-host limits. Persist finite admission phase/cause/budget and all
+spawn-attempt flags, never raw SSH argv or SQL. A proved precontact refusal does
+not itself interrupt a database build; any attempted or uncertain Main/CLI
+spawn requires native reconciliation before another invocation. These are
+operator harness controls and incident evidence, not new automated coverage
+provided by the `reliability-index` catalog probe.
+
 ### 8.11 Fleet rollout serialization and worker freshness
 Probe: `rollout-guard`
 
@@ -19394,6 +19667,46 @@ prove neither a leak nor a causal call site and never change the raw PAGE
 thresholds. A real zero count remains `resident_count=0` with ratios explicitly
 `undefined`: nonzero retained process state must not disappear or become zero
 cost through division by an empty population.
+
+Keep external connection handlers as a separate population boundary. The
+existing `urnetwork_connect_connected_clients` gauge belongs to H1/H1+
+handler entry/exit; it includes authentication and teardown residence and
+does not mean unique clients, authenticated users or admitted residents.
+`urnetwork_connect_exchange_active_connections` supplies finite
+inbound/outbound and transport/forward cells for established exchange owners.
+Neither family is interchangeable with the resident or SDK transfer ledger.
+Require their own unique fresh same-process cells; absence is unknown, and
+an enabled, complete ledger reporting zero says only that its measured owners
+are zero.
+
+At 2026-10-05 01:33:42Z, a source-qualified new `65e67454` Connect process had
+200,213 H1 handler owners and 402,650 goroutines, with zero residents,
+exchange endpoints and SDK transfer admissions/running/cleanup owners.
+RSS was about 11.29 GB, heap 6.81 GB and stacks 3.94 GB. The source has one
+request-context watcher beside each H1 handler; that is consistent with the
+roughly two-goroutine ratio, not stack attribution. This finite observation
+locates the large population outside established resident/transfer ownership.
+It does not by itself distinguish authentication, other admission dependencies
+or teardown. Only three of the 16 observed slots qualified as this new
+source; older generations cannot be treated as equivalent controls.
+
+The matched local failure control held the real PostgreSQL authorization
+table while valid H1 header, H1 frame, H1+ and QUIC clients authenticated.
+On `65e67454`, all four handlers remained live past the nominal auth-read
+timeout with no resident/SDK admission; closing the hijacked WebSocket peer
+did not retire its blocked database call. The corrected `1b796716` source
+uses one existing 30-second budget through auth I/O, JWT/state/membership
+reads and QUIC first-stream admission, then hands serving ownership to the
+original context. With short configured test deadlines, every blocked local
+carrier joins before lock release,
+H1+ reports nonterminal 503, healthy carriers continue beyond that budget,
+and acknowledged control work still finishes. This proves a retention
+mechanism, not that all Main handlers were parked at that call site.
+Native pgx constructors and existing background Redis disconnect cleanup
+remain separate owners. Keep the raw runtime PAGE and pool-path incident
+open until exact-generation handler, resident, exchange and SDK counts plus
+application progress recover; neither a resident cap nor a new zero-resident
+process clears the finding.
 
 For a capability-proven runaway, also join the identity-free
 `urnetwork_connect_resident_callback_workers`,
@@ -27612,6 +27925,66 @@ guards, privacy and bounded packet correlation. Native QUIC/TLS and all DNS
 codec controls use a synthetic in-memory packet network and generated test
 certificates, not production probes. Runtime enrollment or deployment still
 requires the normal separately authorized settings and watcher workflow.
+
+**Alt handler generation and API application outcome — prospective extension.**
+The 2026-10-05 source audit of server `6d52edbe` and the shipped Apple/SDK
+`v2026.10.1-1060587890` graph established a separate serving path. In
+`alt/run.go`, Alt constructs its own Connect router and calls `api.NewRouter`
+in-process; `alt/alt.go` mounts that API router on its own HTTP/3 server. It
+does not forward API requests to the ordinary API workers. The shipped
+NetworkSpace derives the Alt destination from the Connect origin. Its native
+API transport can use direct Alt H3 or WhoDis while preserving the original
+API Host and TLS SNI. A cold strategy races candidates; remembered successful
+routes run before cold routes. This proves path capability, not which route a
+particular app selected. The source audit alone does not establish an active
+Alt revision, an unhealthy Alt response, or the cause of the user's blank
+picker and missing provider dots.
+
+The owning coverage requirement is to observe Alt's API and Connect handlers
+separately from the ordinary API fleet, including the public application path:
+
+- Bind each enabled Alt host/block to actual native image, embedded source and
+  dependency graph, effective configuration and listener readiness. Both
+  handler generations belong to that Alt image. An ordinary API or Connect
+  deployment, a desired release label, or HTTP 200 from `/status` alone cannot
+  establish their adoption. Qualify the returned status and service/block
+  identity; distinguish ready, draining, failed and missing observations.
+- Pair each declared public Alt API carrier/family with the exact owned
+  destination, API Host/SNI, verified certificate, HTTP method/path, bounded
+  request interval and application result. For initial provider discovery,
+  distinguish nonempty country candidates, a valid empty list, non-200 status,
+  schema failure, TLS/transport failure and an incomplete/expired observation.
+  A QUIC handshake-only success in the existing `public-udp` signal does not
+  satisfy this application requirement. A forced native carrier sample also
+  does not prove the app selected it, or prove authenticated selection, Connect
+  admission or provider egress.
+- Keep independent denominators for ordinary API workers and enabled Alt
+  workers, with separate H3 and each configured WhoDis port/family. A healthy
+  ordinary TCP API sample must not resolve failed or unobserved Alt API paths;
+  healthy API-over-Alt must not resolve failed Alt Connect admission. Apply the
+  existing paused/shared-endpoint scope guard before contact, preserve explicit
+  rollout exclusions, and treat absent enrollment or unknown generation as
+  `cannot-observe`. Require fresh same-target recovery evidence. No retries,
+  different address/port, TCP fallback or sibling's success may silently replace
+  a failed declared path.
+
+Deterministic acceptance must include current ordinary API with stale Alt API,
+current Alt image with a failed listener, HTTP 200 status carrying an error or
+draining state, successful QUIC with malformed/non-200/empty picker response,
+wrong API SNI, H3 success with WhoDis failure, one failed owner hidden by a
+healthy sibling, excluded owners/shared endpoints, canceled or late results,
+and fully healthy matched controls. Native loopback H3 and WhoDis controls must
+exercise the exact shipped request shape, certificate verification and response
+body limit. A finite initial-country request needs no credentials and must not
+create a device or provider contract. Preserve only bounded identity labels,
+status/outcome/count aggregates and evidence hashes in alerts, never JWTs,
+provider identities or response bodies.
+
+This extension remains a detector/coverage requirement. The existing
+`public-udp` implementation still measures authenticated transport only;
+source documentation and local controls do not implement or activate these
+Alt application/generation checks, supply production enrollment, or close the
+user's incident.
 
 ## 17. Subtensor RPC gateway (snow)
 

@@ -35,5 +35,5 @@ func runWithProviderUrlProbeFleetHeartbeat(ctx context.Context, args *ProviderEg
 			}
 		}()
 	}
-	return runWithProviderEgressFleetHeartbeat(ctx, time.Minute, refresh, run)
+	return runWithProviderEgressFleetHeartbeatLifetime(ctx, time.Minute, refresh, run, args.UrlProbe != nil)
 }

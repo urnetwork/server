@@ -6925,3 +6925,312 @@ empty cohorts are outside this investigation as requested. The frozen next API
 candidate remains untouched; integration and deployment follow independent
 baseline, focused and race gates. Main selection, picker latency, durable URL
 quota, and sustained database recovery remain open.
+
+### 2026-10-04 22:26 UTC Main database-path recovery
+
+Main's outage included a failed backend-startup path across all 32 PgBouncer
+shards: the qualified 21:43 UTC native snapshot had no established backend
+connections, one pending login per shard, and 301,567 waiting clients.
+PostgreSQL itself answered an authenticated same-role IPv4 loopback `SELECT 1`
+with the pooler's configured TLS-disabled transport in approximately 53 ms.
+
+Controlled restarts of the failed pooler generations restored backend connections
+on every shard by 22:23 UTC. Pool configuration and PostgreSQL were unchanged.
+The 22:24 UTC native verification qualified all 32 shards with 565 active and
+47 idle backends, 4,808 waiting clients, and 4,940 active clients. This verifies
+restoration of the database connection path, not complete product recovery.
+
+The 22:26 UTC PostgreSQL activity census covered 600 rows and observed no
+heavyweight Lock waits; it retained 43 lightweight-lock waits and 121 sessions
+idle in transaction. Actual successful provider-selection responses, Connect
+recovery, deployed generations, and the initial stalled-login cause still need
+verification. Index repair remains held during acute outage recovery. Current
+FP2 quota coverage cannot be inferred from historical pre-outage worker samples.
+
+Root ledger T580 retains the immutable native recovery and verification receipts.
+
+### 2026-10-04 22:37 UTC successful provider responses after pool recovery
+
+Two fresh, same-process HTTP observations qualified all 16 API blocks on the
+selected `2026.10.4-api-bucket-fallback-v2+1063426840` build with readiness true.
+The latest matched interval observed 578 provider-selection requests and 578
+HTTP-200 responses, with no cancellations or panic outcomes; mean handler time
+was 24.6 ms. Initial picker requests were 30/30 HTTP-200 at 15.0 ms mean. Location
+search was 2/2 HTTP-200 across 14 observed slots; two slots had no qualified lazy
+search counters. Successful HTTP responses do not by themselves prove populated
+results or delivery to an individual user's app.
+
+A fresh probe in Connect edge1/g1's mounted configuration, network namespace,
+and UID authenticated and completed its PostgreSQL ping in 2.25 ms. This proves
+the current database path, not the application's cached pool or an end-to-end
+provider session. Authenticated Connect traffic and semantic contract-creation
+outcomes remain acceptance checks.
+
+The native 22:35 sample identified PgBouncer 1.26.0 with libevent 2.1.12-stable.
+All 32 shards had established backends and no pending backend login; PostgreSQL
+had no heavyweight Lock wait and one lightweight-lock wait. One long active
+statement was matched by its exact composed SQL hash to the seven-day network
+reliability full recompute, rather than the held covering-index repair. Its
+trigger and execution plan remain under investigation.
+
+Root ledger T581 retains the API paired counters, Connect path control, native
+version/owner census, and generated-cache reclamation evidence. The HTTP-200
+pair is retained separately for the next acceptance ledger record. Overall
+FP2 coverage and full Main recovery remain open until their own current evidence
+passes.
+
+### 2026-10-04 23:27 UTC transport recovered; financial admission remains open
+
+The matched 22:50–22:52 interval qualified all 16 Connect processes on the
+intended build with fresh authenticated carrier progress: 15,406 successful
+HTTP upgrades and more than 1.26 million completed HTTP carrier writes.
+These counters prove transport progress, not individual provider delivery.
+
+Current API contract outcomes remain unacceptable. The 23:09–23:13 pair
+observed 8,470 replies against 147,551 protocol rejections. Separate cause
+counters attribute 73.4% of rejections to insufficient balance and 18.9% to
+missing companion origins. Payer attribution and balance-release custody
+are not yet established; these counters alone do not prove a customer-wide
+allowance failure. Financial admission is the priority recovery lane.
+
+All eight Taskworkers are ready on the deployed close-progress build.
+Current quota-complete coverage remains only 0.56%, despite a large decrease
+in aggregate remaining checks between successive censuses. Historical
+pre-outage coverage must not be substituted for current coverage.
+
+Fresh representative plans for the long seven-day network reliability
+recompute use old noncovering scans across all eight recent partitions.
+Root resumed the serial concurrent covering-index repair in a durable user
+unit at 23:25 UTC. The valid detached child was attached, and the first
+missing child rebuild started. This is operation progress, not a completed
+catalog audit. The previously failed V3/V4 attempts made no Main contact.
+
+The independently tested cooperative close-page budget is ready for an
+urgent compatible Taskworker release. Main recovery and FP2 completion
+remain open until financial and provider outcomes are verified.
+
+### 2026-10-04 23:49 UTC populated picker and near-complete recovered quota
+
+The public provider-locations endpoint returned a qualified HTTPS200 response
+with66 country candidates in293ms at23:39:48. The SDK candidate set is nonempty.
+This verifies the initial picker response, not a particular user's contract.
+
+The newest pre-rollout census clock was23:36:21:17,321 of17,345 eligible providers
+were quota-complete (99.8616%);24 were deficient with197 measured checks remaining.
+Sparse Due responses and the low recent accepted rate are consistent with this
+near-complete quota, rather than stalled URL scheduler owners.100% remains open.
+
+Fresh paired debit clocks advanced for all16 logical shards.32 committed batches
+and32 released batches progressed; every latest pending and release oldest-age
+sample was zero. No aged asynchronous-debit backlog was observed. Financial
+correctness still requires independent reservation and token custody evidence.
+The API insufficient-balance label is substring-based and may include a joined
+compensation failure; it does not classify payer ownership or prove spending.
+
+The cooperative ordinary-close budget image was rebuilt from a source-identical
+standalone clone after Go omitted revision metadata for a worktree. Both published
+architectures now attest clean6e748b3, and the100% Taskworker rollout completed at
+23:44:12. Actual all-eight process convergence remains a separate acceptance.
+Root ledgerT583 retains these observations and the image/deployment receipts.
+
+### 2026-10-05 00:28 UTC new-worker acceptance and stale expanded census
+
+Two current observations qualify all eight Taskworkers on the new clean6e748b3
+budget release, ready across75–91second advancing scrape intervals. The initial
+picker and both public US Quality/Speed requests returned populated candidates
+in under300ms. This proves public selection, not authenticated provider delivery.
+
+The census source clocks did not advance on any worker and are20–24minutes old.
+The retained eligible population has expanded to78,212, so the earlier99.86%
+coverage of17,345 providers must not be treated as current. Current quota remains
+unknown until fresh comparisons succeed. Source investigation separately owns
+normal short-pass cancellation of census refresh and score-publication ordering
+that may leave cycle eligibility hints behind newly eligible providers.
+
+The V5 covering-index repair reported28 attached children before its CLI observed
+conn closed. Fresh native reconciliation confirms28 healthy attached children,
+one valid detached child and five missing children; no active build progress or
+index-owner locks were observed. The next repair should attach the valid child
+and concurrently build the remaining five serially. Four truncated activity rows
+remain an explicit uncertainty. Root is obtaining fresh capacity and repairing
+the independently supervised monitor-CONT fallback before the next quiet window.
+Root ledgerT584 retains the acceptance and reconciliation evidence.
+
+### 2026-10-05 00:56 UTC interrupted reliability-index repair complete
+
+The durable V7 repair completed successfully at00:55:20UTC. It attached the
+previously completed detached child and built the remaining five children with
+CREATE INDEX CONCURRENTLY, serially. The old parent index was then removed.
+
+Fresh native catalog verification at00:56:39UTC confirms34 of34 current
+partitions have healthy, correctly shaped, attached covering indexes. The new
+parent is valid; missing, invalid and wrong-shape children are all zero. No index
+build progress or index-owner locks remain. Independent replay of the retained
+native receipt confirms physical completion.
+
+Both representative enter/leave custom EXPLAIN plans use covering Index Only
+Scans. These are planned queries, not executed latency or CPU measurements, and
+do not establish the application's selected plan. The interrupted index repair
+is complete; broader database pressure and FP2 coverage remain separate work.
+
+Native receipt: temp/reliability-index-repair-20261004/root-reliability-v7-final-v1/
+run-20261005T005634.926225Z/receipt.json; SHA256
+f2446b4aeff3cc9aac5c37e3e7a3a1d8abd43ad5232abf6a07b1183fbb95ccc1.
+Independent closure gate SHA256
+047c82226b78a249bf81650ae54daf082a64c001b4ed06512fff35762b66170d.
+
+### 2026-10-05 02:10 UTC pooler outage recovery and current probe status
+
+The blank picker and connection outage coincided with all 32 native PgBouncer
+shards having zero established backends, one pending login each, and roughly
+300,000 waiting clients. Direct PostgreSQL authentication still succeeded.
+API phase evidence located the queue in authentication; sampled picker failures
+expired during pool acquisition before subscriber SQL executed. Low PostgreSQL
+load therefore did not establish application health.
+
+Bounded recovery replaced 31 failed pooler generations; the remaining shard was
+already healthy and was skipped. At 02:00 all 32 had established backends, 463
+total, with no waiting clients. The same generations remained established in the
+02:10 snapshot: 635 backends, 412 waiting clients, and a maximum wait of 57 ms.
+These snapshots establish recovery of backend capacity, not continuous health or
+resolution of the recurring login failure's root cause.
+
+The bounded Quality-validation API fix is merged into main and its deployment
+completed at 02:03. A public provider-location request returned 78 country
+entries in 0.29 seconds at 02:09. Running-version verification and actual provider
+connection progress remain separate acceptance gates. The Connect inclusive
+authentication-deadline fix passed independent normal and race controls; its
+verified image rollout is in progress.
+
+All eight current Taskworkers are ready. The shard-zero census owner has ten
+successful refreshes averaging 3.02 seconds, with no recorded cancellations.
+Census publication is owned by shard zero; absence on other workers is not a
+failure by itself. Fresh rolling quota coverage and accepted-probe throughput
+remain unmeasured after recovery. FP2FIX is not complete.
+
+Pooler baseline finite evidence SHA256
+8709207fda27b0ef9dec124d6efd79506807cf237644918b76c524001e0b73be;
+ten-minute comparison SHA256
+59b08d41426f7bc9c3d4d5ac9fb715bd7b07fa8056c02ad75f6357fe3f8bff96.
+Root ledger T588 retains the initial recovery and API deployment boundary.
+
+### 2026-10-05 02:24 UTC provider selection and probe measurements resume
+
+All 16 APIs were independently verified on the bounded Quality-validation
+release. Its process-lifetime means were 0.406 s for the initial picker, 0.947 s
+for search, and 0.465 s for selection; these are not interval rates or tail
+latency. Public US requests returned three providers in Quality mode in 0.746 s
+and Speed mode in 4.307 s. Public responses do not identify the serving build or
+prove contract creation and traffic delivery.
+
+All eight Taskworkers retained the same current processes across fresh samples
+at 02:20 and 02:22. Accepted results increased by 430 successes and 7,263 errors:
+approximately 3.70 successes/s and 62.78 errors/s over native intervals of
+106–121 s. The fresh shard-zero census reported 3,990 of 36,858 eligible providers
+quota-complete (10.83%), 3,987 secure-complete, and 178,487 runs still needed.
+Census age was 126.5 s. Its dynamic provider cohort and short sampling interval
+do not establish sustained per-provider capacity, completion time, or 100%
+coverage. Current shard ownership was not queried by this narrow census reader.
+
+Connect deployment is incomplete: only four of sixteen instances qualified on
+the inclusive authentication-deadline fix at 02:21; twelve still reported the
+preceding release. The deployment CLI timed out. The next API authentication
+containment image was selected successfully at 02:23; its actual adoption is
+still unverified. Root ledger T589 retains these distinct acceptance boundaries.
+
+Paired probe reduction SHA256
+3b7832974fe23e84bbbbcdc11837201cca0bc2774c1db20c748e9156b55856db.
+
+### 2026-10-05 03:19 UTC API adoption and Connect deployment lock
+
+All 16 APIs were independently verified ready on authentication-containment
+source `6d52edbecbb456f6c0972069085106a5b2f8618b` at 02:33. Their native pool
+snapshot contained seven constructing connections and 565 idle connections;
+these point samples do not establish continuous health or user delivery.
+The user still reports both a blank picker and no connected provider dot.
+
+The 03:19 edge1 read verified new Connect containers on all four blocks. Its
+g3 worker held the native host-wide Main/Connect lock while a joined descendant
+ran `docker stop -t 3600` against the old container for that block. The lease
+observation was complete and generation-stable. The overall reader remained
+partial because an additional active unit needs its deployment domain resolved.
+This proves the lock is retained during old-container drain; it does not prove
+the current adoption state of the other three enabled hosts or kernel-observed
+waiting Go routines.
+
+The Warp fix releases the promotion lock before draining the old container,
+preserving the existing drain grace. It is merged and pushed, with independent
+normal and race controls and clean binaries for both architectures. Native
+worker activation and fleet adoption verification are still pending.
+
+The private database capture identified the provider-count SQL source, with an
+active statement reaching about 13 seconds. Local dense fixtures reproduce a
+full historical-rollup scan. Native planning-only EXPLAIN and bounded system
+facts were captured successfully, but their public projection requires a
+validator correction for PostgreSQL JIT metadata. The retained private capture
+allows correction without repeating the read. These facts do not attribute
+total database CPU or establish the requesting process.
+
+Root ledger T590 records API adoption, local pooler compatibility controls,
+and remaining outage boundaries. FP2FIX and end-to-end recovery remain open.
+
+### 2026-10-05 04:35 UTC connection restored; rolling coverage remains open
+
+The user reports that provider connection is working again. Alt investigation is
+out of scope at the user's instruction; public discovery checks do not establish
+which service change restored the connection. The fresh 03:24 public picker
+returned 87 country candidates in 0.504 seconds. Quality and Speed selection each
+returned three valid US IPv4 candidates in 0.697 and 1.787 seconds respectively;
+the response bodies were parsed in memory and discarded.
+
+The retained 04:32:51 census reports 39,651 of 75,285 eligible providers
+quota-complete (52.67%), 39,632 secure-complete, and 61,760 measured runs needed.
+There are 34,859 overdue and 794 warming providers, with no uninitialized cycles.
+Its source age was 57.1 seconds. These dynamic-cohort counts show a lower aggregate
+deficit than the 03:16 snapshot, not fixed-provider progress or sustained capacity.
+The earlier 66.48 accepted outcomes/s remains historical; current hourly visibility
+is incomplete and a fresh rate is required after the next Taskworker rollout.
+
+Uniform release source `536c2f3db5c73a308e5d8b504ffcfbfcf2df42c8` retains the
+Taskworker census lifetime and eligibility repairs from `0c90117a`. Root started
+the API deployment after its image gate; Connect and Taskworker rollout/adoption
+remain separate acceptance steps. Do not delay that rollout for an old-generation
+rate pair. Root ledger T592 retains the recovery report and rollout boundary.
+FP2FIX remains open until current eligible providers satisfy the rolling quota
+and the independent quality, security and operational requirements.
+
+### 2026-10-05 05:40 UTC rolling quota recovery and rate interpretation
+
+The fresh 05:39:54.603 UTC global census reports 75,057 of 75,082 eligible
+providers quota-complete (99.9667%), with 126 measured runs still needed,
+22 warming providers and two uninitialized cycles. Four rows are due, and the
+oldest due age is 7.36 seconds. Secure completion is 75,033: all 24 outstanding
+security cases already have ten measured runs and remain a separate condition.
+This is a current aggregate snapshot, not proof of sustained 100% coverage.
+The earlier 04:49 census of 7,882/74,755 (10.54%) is historical; similar net
+population counts do not establish fixed-provider membership or the cause of
+recovery.
+
+All eight Taskworkers qualify on source `536c2f3d` and retain the same process
+identities as the earlier samples. Between the fresh 05:38 and 05:40 receipts,
+acknowledged measured outcomes increased by seven successes and seven failures
+across native intervals of 90.502–105.750 seconds, totaling 0.149797/s. With the
+cohort almost full and few due rows, this short rate does not measure maximum
+capacity. It is not directly comparable to the Oct 3 18:30–18:35 durable-history
+window's 78.94 unique measured runs/s; ACK counters can include acknowledged
+replays, and the history window counts immutable selected-policy run rows by
+measurement time. A matching current five-minute history read is being prepared.
+
+The deployed source parks a quota-full provider until the oldest of its latest
+ten measurements reaches age 3h54m, preserving six minutes for replacement.
+Clustered catch-up measurements can therefore produce quiet periods followed by
+renewal waves, but Main's per-provider expiry distribution has not yet proved
+that cause. No fairness, pacing, headroom or funding change follows from the
+0.15/s observation. The bounded 05:27 native read found no rows in the prior
+October 1 deadline's microsecond precision interval; it does not establish a
+current ancient tail or rule out stale hints elsewhere. FP2FIX remains open.
+
+Fresh paired reduction SHA256
+431197ab324c25b2c1755d49581f35c3fbd562b51b709a9db71123bfd63213d2;
+finite ancient-deadline reduction SHA256
+899a3177c02f7a52832c7b5ac433c58b0256d2dcaa95a22a8076536bab766bcb.

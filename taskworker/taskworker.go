@@ -31,6 +31,13 @@ var removedTaskTargets = []string{
 // InitTasks schedules the recurring tasks. It is invoked at startup by the
 // taskworkercli command (and by the `init-tasks` subcommand).
 func InitTasks(ctx context.Context) {
+	initTaskSchedule(ctx)
+	stats.ApplyStreamRetention(ctx)
+}
+
+// Scheduling is bounded startup work. Long-lived retention observers are
+// activated separately after the process acquires its runtime owner.
+func initTaskSchedule(ctx context.Context) {
 	// Run-once upserts merge independently with live claim updates. A fixed
 	// snapshot needlessly retries the entire initializer whenever a claim wins.
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -133,10 +140,6 @@ func InitTasks(ctx context.Context) {
 			glog.Infof("[taskworker]reaped %d pending provider egress probe tasks while probing is disabled\n", removedCount)
 		}
 	}, server.TxReadCommitted)
-
-	// apply per-stream stats retention (MinIO ILM, or the local reaper) once at
-	// init, from the central defaults in the stats package
-	stats.ApplyStreamRetention(ctx)
 }
 
 // InitTaskWorker preserves the historical exact Go signature, including

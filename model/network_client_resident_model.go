@@ -127,3 +127,33 @@ func RemoveResidentForClient(
 		}
 	})
 }
+
+// RemoveResidentForClientWithDeadline retires an abandoned admission without
+// keeping its constructor alive through ordinary Redis retries. The exact
+// encoded-value comparison cannot delete a newer resident generation. Failure
+// leaves the existing TTL to retire the optional registration.
+func RemoveResidentForClientWithDeadline(
+	ctx context.Context,
+	clientId server.Id,
+	residentId server.Id,
+) error {
+	return server.RedisWithDeadline(ctx, func(r server.RedisClient) error {
+		key := residentKey(clientId)
+		residentBytes, err := r.Get(ctx, key).Bytes()
+		if err == server.RedisNil {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		resident, err := loadResident(residentBytes)
+		if err != nil {
+			return err
+		}
+		if resident == nil || resident.ResidentId != residentId {
+			return nil
+		}
+		// This conditional deletion declares exactly one Redis key.
+		return server.RedisRemoveIfEqual(r, ctx, key, residentBytes).Err()
+	})
+}
