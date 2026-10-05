@@ -20,55 +20,57 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      GOTOOLCHAIN: local
+      GOWORK: 'off'
+      GOMAXPROCS: '2'
+      GOFLAGS: '-mod=readonly -p=2'
     steps:
       - uses: actions/checkout@v4
         with:
           path: server
 
-      # Every github.com/urnetwork/* dependency resolves through a `replace
-      # ../` directive (see go.mod), so a lone checkout does not build: it
-      # fails with "missing go.sum entry", which names nothing about the real
-      # cause. All ten siblings must sit beside the checkout, under exactly
-      # these directory names.
-      #
-      # Tracking each sibling's default branch would make this repo's CI a
-      # function of ten other repos' latest commits -- one unrelated push
-      # there turns every open PR here red at once. They are checked out at
-      # their default branch for now, which is the same thing a developer
-      # gets following the README; if that proves too noisy, pin `ref:` per
-      # sibling and bump deliberately.
+      # Local replacements use these sibling directories. Pin their complete
+      # source revisions so one Server commit selects one reproducible graph.
+      # Bump the refs together after compiling the service commands. Connect's
+      # tracked sctp/ directory supplies the SCTP fork from the same revision.
       - uses: actions/checkout@v4
-        with: { repository: urnetwork/connect, path: connect }
+        with: { repository: urnetwork/connect, path: connect, ref: 5e9a5fc4e17814608e6c420563aa09f153bc7d86 }
       - uses: actions/checkout@v4
-        with: { repository: urnetwork/glog, path: glog }
+        with: { repository: urnetwork/glog, path: glog, ref: 80a11b434ae90ae2221deb932daa21913919875a }
       - uses: actions/checkout@v4
-        with: { repository: urnetwork/sdk, path: sdk }
+        with: { repository: urnetwork/sdk, path: sdk, ref: 8d8ecc4d84763de09f0a69c355b3a65e79d38126 }
       - uses: actions/checkout@v4
-        with: { repository: urnetwork/proxy, path: proxy }
+        with: { repository: urnetwork/proxy, path: proxy, ref: e1da814937132eeca361bcd5defc12cde7e793cf }
       - uses: actions/checkout@v4
-        with: { repository: urnetwork/goidenticons, path: goidenticons }
+        with: { repository: urnetwork/goidenticons, path: goidenticons, ref: 06eb779a691e056be7dc5fa9a0239001c3ea390f }
       - uses: actions/checkout@v4
-        with: { repository: urnetwork/userwireguard, path: userwireguard }
+        with: { repository: urnetwork/userwireguard, path: userwireguard, ref: 85fb1ca4086fa5dbfcda526bec7a17a894e691b9 }
       - uses: actions/checkout@v4
-        with: { repository: urnetwork/operator-proxy, path: operator-proxy }
+        with: { repository: urnetwork/operator-proxy, path: operator-proxy, ref: 4c77a9ddf169f36d0c2ec14c4feed90782dffd83 }
       - uses: actions/checkout@v4
-        with: { repository: urnetwork/warp, path: warp }
+        with: { repository: urnetwork/warp, path: warp, ref: 3b6e875f83140b2de1a50d2bfffe0f7830edd74e }
       - uses: actions/checkout@v4
-        with: { repository: urfoundation/sn, path: sn }
-      # go.mod also has `replace gvisor.dev/gvisor => ../gvisor`: urnetwork's
-      # fork of gvisor, whose default branch is `go`. Without it Build stops at
-      # "reading ../gvisor/go.mod: no such file or directory".
+        with: { repository: urfoundation/sn, path: sn, ref: a70dae9c367868073f7325a16b34bd885f59b943 }
+      # Server pins this fork in go.mod. Its test generator also builds SN as
+      # a main module, where the local gvisor replacement still applies.
       - uses: actions/checkout@v4
-        with: { repository: urnetwork/gvisor, path: gvisor }
+        with: { repository: urnetwork/gvisor, path: gvisor, ref: c0783dba2eeff7b79692a7f122ffee5f8bd837c1 }
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: server/go.mod
+          go-version: '1.26.7'
           cache-dependency-path: server/go.sum
 
       - name: Build
         working-directory: server
         run: go build ./...
+
+      # Build populates the checksum-verified module cache first. The source
+      # gate then resolves the graph without permitting download fallback.
+      - name: Verify service source graph
+        working-directory: server
+        run: go test ./local/source-graph -count=1
 
       - name: Vet
         working-directory: server
