@@ -4180,18 +4180,42 @@ same-window sequence proves both the database-capacity mechanism and the
 five-minute lease-retry mechanism without inferring either from a later idle
 snapshot.
 
-Standing class `db-maintenance-legacy-reindex` matches only the old-format
-start line for an exact table or daily reliability partition excluded by
-current policy, groups it by table, and pages on the first occurrence. It
-deliberately excludes the later `reindex took` completion line, ordinary
-old-format tables, and the fixed
-`maintenance table[...] <step> <table>` state-machine format. Old code writes
-the start line before it opens the maintenance connection, so this proves
-legacy selection and call-path entry but not that PostgreSQL began the
-statement. The page gives that legacy attempt an immediate operational gate
-while `pg_stat_progress_create_index` and `reindex-debris` remain the sources
-of truth for an active backend and for confirmed inactive/active-table
-candidate artifacts.
+Standing class `db-maintenance-legacy-reindex` matches an exact table or daily
+reliability partition excluded by current scheduled policy in either the old
+`maintenance reindex[i/n] <table>` or current
+`maintenance table[i/n] reindex <table>` start format. It groups by table and
+pages on the first occurrence. Cleanup-before/after, ordinary tables,
+incomplete lines, and `took` completion messages are excluded. Both formats
+log before opening the maintenance connection: the start proves selection and
+call-path entry, not that PostgreSQL began or finished the statement, current
+CPU consumption, or the exact worker revision. Direct progress/catalog
+observations qualify the active relation and phase; native process CPU needs
+its own bounded interval measurement. Missing or failed observation remains
+unknown.
+
+On 2026-10-05 at 04:26:37Z, a direct native capture identified a concurrent
+whole-table rebuild of `network_client`, with
+`network_client_device_id_ccnew` in index validation at 6,492,493 of 8,844,599
+blocks after about 4,660.7 seconds. No blockers were observed in that bounded
+capture. The phase proves an active rebuild; neither its age nor a WAL wait in
+another snapshot proves that it is CPU-heavy. Scheduled maintenance selected
+this table by its hash epoch with `Reindex=true`, without a measured-bloat or
+invalid-index trigger. `network_client` was missing from the large/high-churn
+skip policy despite its tuned autovacuum settings. It now skips scheduled
+whole-table reindexing while retaining cleanup, analysis, ordinary-table
+rotation, and the existing targeted priority-index maintenance. Explicit
+repairs remain separate operational actions; no new automatic repair trigger
+or bloat threshold is introduced.
+
+False-positive qualifier: a completion line, cleanup step, ordinary table, or
+old/current log format alone is not a new excluded-table rebuild or proof of
+runtime source identity. False-negative qualifier: an old-format-only matcher
+misses a real current-format selection such as `network_client`; direct native
+progress/catalog evidence can still identify that operation. The synthetic
+control accepts both exact start formats and rejects those misleading or
+incomplete lines. This source policy change does not cancel the active rebuild
+or prove that the new policy has been deployed. Runtime identity and a later
+maintenance epoch must establish adoption before closure.
 
 The pool timeout was consequently a downstream queue symptom. The daily
 maintenance scheduler had two independent defects: `transfer_escrow` was not

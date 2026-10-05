@@ -52,6 +52,16 @@ func queueLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId s
 	return nil
 }
 
+// Count only this contract's joined grants without a parallel startup driven
+// by distorted historical cardinality. Missing grants keep the original inner-
+// join semantics. The subsequent sorted SKIP LOCKED ownership check is unchanged.
+const legacySettlementExpectedGrantCountSQL = `SELECT count(*)
+ FROM unnest(ARRAY[$1::uuid]) AS requested_contract(contract_id)
+ CROSS JOIN LATERAL (SELECT balance_id FROM transfer_escrow
+   WHERE contract_id=requested_contract.contract_id OFFSET 0) AS escrow
+ CROSS JOIN LATERAL (SELECT 1 FROM transfer_balance
+   WHERE balance_id=escrow.balance_id OFFSET 0) AS balance`
+
 // No ownership is inferred from a statement snapshot. Both the queue item and
 // contract, then every grant, are acquired with SKIP LOCKED. Busy owners leave
 // the intent untouched. Exact debit, payout, outcome, metadata and intent deletion share
@@ -89,7 +99,7 @@ func flushLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId s
 	}
 	{
 		var expected int
-		server.Raise(tx.QueryRow(ctx, `SELECT count(*) FROM transfer_escrow JOIN transfer_balance USING(balance_id) WHERE contract_id=$1`, contractId).Scan(&expected))
+		server.Raise(tx.QueryRow(ctx, legacySettlementExpectedGrantCountSQL, contractId).Scan(&expected))
 		locked := 0
 		rows, err = tx.Query(ctx, `SELECT balance.balance_id FROM transfer_balance AS balance
           INNER JOIN transfer_escrow AS escrow USING(balance_id) WHERE escrow.contract_id=$1
