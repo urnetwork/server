@@ -176,7 +176,10 @@ type ConnectionAnnounce struct {
 	// ipFamilyIntent is the family the transport declared it intends to
 	// prove: 0 (legacy), 4 or 6. Recorded with the connection; the observed
 	// family is derived from clientAddress at the model.
-	ipFamilyIntent  int
+	ipFamilyIntent int
+	// appVersion is the client's app version from its auth, for the provider
+	// rollout gauge (providerVersionConnection); "" when it sent none
+	appVersion      string
 	handlerId       server.Id
 	announceTimeout time.Duration
 
@@ -267,6 +270,7 @@ func NewConnectionAnnounce(
 		clientId,
 		clientAddress,
 		0,
+		"",
 		handlerId,
 		announceTimeout,
 		testConfig,
@@ -275,7 +279,8 @@ func NewConnectionAnnounce(
 }
 
 // NewConnectionAnnounceWithIpFamily is NewConnectionAnnounce with the address
-// family the transport declared it intends to prove (0, 4 or 6).
+// family the transport declared it intends to prove (0, 4 or 6) and the
+// client's app version from its auth.
 func NewConnectionAnnounceWithIpFamily(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -283,6 +288,7 @@ func NewConnectionAnnounceWithIpFamily(
 	clientId server.Id,
 	clientAddress string,
 	ipFamilyIntent int,
+	appVersion string,
 	handlerId server.Id,
 	announceTimeout time.Duration,
 	testConfig *TestConfig,
@@ -295,6 +301,7 @@ func NewConnectionAnnounceWithIpFamily(
 		clientId:               clientId,
 		clientAddress:          clientAddress,
 		ipFamilyIntent:         ipFamilyIntent,
+		appVersion:             appVersion,
 		handlerId:              handlerId,
 		announceTimeout:        announceTimeout,
 		settings:               settings,
@@ -470,6 +477,11 @@ func (self *ConnectionAnnounce) run() {
 		self.setSpeedWithLock()
 	}()
 
+	// the provider rollout gauge, kept current from the provide modes each
+	// sync below reads anyway
+	providerVersion := newProviderVersionConnection(defaultProviderVersionConnections, self.appVersion)
+	defer providerVersion.release()
+
 	// register this client in the network peer registry, now that the
 	// connection has survived the announce window. 2026-07-15 outage:
 	// registration used to run on the resident nomination hot path, where
@@ -588,6 +600,7 @@ func (self *ConnectionAnnounce) run() {
 
 			changedCount, currentProvideModes := model.GetProvideKeyChanges(self.ctx, self.clientId, startTime)
 			provideEnabled := currentProvideModes[model.ProvideModePublic]
+			providerVersion.update(provideEnabled, nextStartTime)
 			// stats only matter for providers
 			// avoid populating stats for non-providers
 			if provideEnabled || 0 < changedCount {
