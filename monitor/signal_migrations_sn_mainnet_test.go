@@ -1,5 +1,6 @@
 // Late migration contracts execute against the original append-only schema.
-// Every fault stays in a disposable transaction and rollback restores custody.
+// Physical faults stay in disposable transactions. RI trigger-state faults use
+// the existing catalog projection because the fixture has no superuser grant.
 package monitor
 
 import (
@@ -109,6 +110,74 @@ func snMainnetMigrationAdmitted(t testing.TB, ctx context.Context, tx server.PgT
 	}
 }
 
+// PostgreSQL may derive a table-level name for a cross-column CHECK or truncate
+// a generated name. Resolve exactly one original definition before changing it.
+func snMainnetMigrationDropConstraint(table, kind, definition string) string {
+	return fmt.Sprintf(`DO $sn_mainnet_fault$
+DECLARE matched_constraint name;
+BEGIN
+ SELECT conname INTO STRICT matched_constraint FROM pg_catalog.pg_constraint
+ WHERE conrelid=to_regclass(%s) AND contype=%s AND pg_get_constraintdef(oid)=%s;
+ EXECUTE format('ALTER TABLE public.%%I DROP CONSTRAINT %%I', %s, matched_constraint);
+END;
+$sn_mainnet_fault$;`, snMainnetMigrationLiteral("public."+table), snMainnetMigrationLiteral(kind), snMainnetMigrationLiteral(definition), snMainnetMigrationLiteral(table))
+}
+
+// Only the observed state of one real RI trigger changes. These are projected
+// catalog-read faults, not privileged ALTER TRIGGER operations or host drills.
+// Exact FK definitions distinguish multiple references to the same parent.
+func snMainnetMigrationForeignKeyCatalogFaults(t testing.TB, ctx context.Context, version int, child, parent, definition string) []snMainnetMigrationAlertObservation {
+	t.Helper()
+	contract := snMainnetMigrationTestContract(t, version)
+	var triggerIds []uint32
+	server.Db(ctx, func(conn server.PgConn) {
+		rows, err := conn.Query(ctx, `SELECT t.oid FROM pg_catalog.pg_trigger t
+ JOIN pg_catalog.pg_constraint k ON k.oid=t.tgconstraint
+ WHERE k.conrelid=to_regclass('public.'||$1) AND k.confrelid=to_regclass('public.'||$2)
+ AND k.contype='f' AND pg_get_constraintdef(k.oid)=$3 AND t.tgisinternal ORDER BY t.oid`, child, parent, definition)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var triggerId uint32
+			if err := rows.Scan(&triggerId); err != nil {
+				t.Fatal(err)
+			}
+			triggerIds = append(triggerIds, triggerId)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if len(triggerIds) != 4 {
+		t.Fatalf("exact FK %s / %s has %d RI triggers, want four", child, definition, len(triggerIds))
+	}
+	var observed []snMainnetMigrationAlertObservation
+	for _, triggerId := range triggerIds {
+		for _, enabled := range []string{"D", "R", "A"} {
+			source := &migrationFKTriggerProjectionSource{oid: triggerId, enabled: enabled}
+			alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if enabled == "A" {
+				for _, alert := range alerts {
+					if alert.Class == "migration-schema-drift" {
+						t.Fatalf("always-enabled RI trigger %d for %s reports drift: %s", triggerId, child, alert.Markdown())
+					}
+				}
+			} else {
+				observed = append(observed, snMainnetMigrationAlertObservation{alerts: alerts, want: fmt.Sprintf("%s@v%d", contract.artifact.name, version)})
+			}
+		}
+	}
+	if _, drift := migrationPingDatabaseCheck(t, ctx); drift != "" {
+		t.Fatalf("unchanged physical FK catalog after projection reports drift: %s", drift)
+	}
+	return observed
+}
+
 // These paths must be wired into the actual signal, including the original
 // positional row protocol, before any standalone predicate can count as done.
 func TestMigrationsMainnetOriginalSignalReportsEachMissingContract(t *testing.T) {
@@ -176,20 +245,20 @@ func TestMigrationsMainnetOriginalSchemaFaultsReachSignal(t *testing.T) {
 			version int
 			sql     string
 		}{
-			{version: 770, sql: `ALTER TABLE verify_original_transition DROP CONSTRAINT verify_original_transition_original_signature_check`},
+			{version: 770, sql: snMainnetMigrationDropConstraint("verify_original_transition", "c", "CHECK ((octet_length(original_signature) = 64))")},
 			{version: 770, sql: `ALTER TABLE st_fleet_binding_original ALTER COLUMN deployment_key TYPE varchar(97)`},
 			{version: 771, sql: `ALTER TABLE provider_work_request ALTER COLUMN epoch TYPE numeric(21,0)`},
-			{version: 771, sql: `ALTER TABLE provider_work_request DROP CONSTRAINT provider_work_request_expires_at_check`},
-			{version: 772, sql: `ALTER TABLE wallet_mapping_consent DROP CONSTRAINT wallet_mapping_consent_nonce_fkey`},
+			{version: 771, sql: snMainnetMigrationDropConstraint("provider_work_request", "c", "CHECK (((expires_at > issued_at) AND ((expires_at - issued_at) <= 3600)))")},
+			{version: 772, sql: snMainnetMigrationDropConstraint("wallet_mapping_consent", "f", "FOREIGN KEY (nonce) REFERENCES wallet_mapping_challenge(nonce)")},
 			{version: 773, sql: `DROP INDEX verify_original_request_lookup_identity`},
 			{version: 773, sql: `ALTER TABLE verify_original_request_lookup ALTER COLUMN request_signature SET DEFAULT decode(repeat('00',64),'hex')`},
-			{version: 774, sql: `ALTER TABLE provider_work_owner DROP CONSTRAINT provider_work_owner_owner_hash_key`},
-			{version: 775, sql: `ALTER TABLE verify_original_request_closed DROP CONSTRAINT verify_original_request_closed_receipt_body_check`},
-			{version: 776, sql: `ALTER TABLE provider_work_session_head DROP CONSTRAINT provider_work_session_head_sequence_check`},
+			{version: 774, sql: snMainnetMigrationDropConstraint("provider_work_owner", "u", "UNIQUE (owner_hash)")},
+			{version: 775, sql: snMainnetMigrationDropConstraint("verify_original_request_closed", "c", "CHECK (((octet_length(receipt_body) >= 1) AND (octet_length(receipt_body) <= 4096)))")},
+			{version: 776, sql: snMainnetMigrationDropConstraint("provider_work_session_head", "c", "CHECK ((sequence > 0))")},
 			{version: 776, sql: `DROP INDEX provider_work_session_event_transaction`},
-			{version: 777, sql: `ALTER TABLE st_operator_gas_reservation DROP CONSTRAINT st_operator_gas_reservation_attempt_check`},
+			{version: 777, sql: snMainnetMigrationDropConstraint("st_operator_gas_reservation", "c", "CHECK ((attempt > 0))")},
 			{version: 777, sql: `ALTER TABLE st_operator_gas_budget ALTER COLUMN maximum_lifetime_wei TYPE numeric(79,0)`},
-			{version: 778, sql: `ALTER TABLE provider_work_open_original DROP CONSTRAINT provider_work_open_original_observed_at_check`},
+			{version: 778, sql: snMainnetMigrationDropConstraint("provider_work_open_original", "c", "CHECK ((observed_at >= boundary_time))")},
 			{version: 778, sql: `ALTER TABLE provider_work_open_original SET UNLOGGED`},
 			{version: 779, sql: `ALTER FUNCTION verify_original_request_index_body(bytea) CALLED ON NULL INPUT`},
 		} {
@@ -219,31 +288,51 @@ func TestMigrationsMainnetOriginalSchemaFaultsReachSignal(t *testing.T) {
 	}
 }
 
-// A valid FK declaration cannot conceal disabled internal enforcement, and
-// retained originals cannot acquire a new cascading mutable-parent dependency.
+// Project disabled/replica-only states of each real FK's four internal guards;
+// an always-enabled projection and the unchanged catalog remain healthy. The
+// added cascading dependency is a physical transaction owned by this fixture.
 func TestMigrationsMainnetOriginalForeignKeyCustody(t *testing.T) {
+	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
-		for _, fault := range []struct {
-			version int
-			sql     string
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+		defer cancel()
+		for _, foreignKey := range []struct {
+			version                   int
+			child, parent, definition string
 		}{
-			{version: 771, sql: `ALTER TABLE provider_work_cut DISABLE TRIGGER ALL`},
-			{version: 772, sql: `ALTER TABLE wallet_mapping_challenge DISABLE TRIGGER ALL`},
-			{version: 773, sql: `ALTER TABLE verify_original_request_lookup DISABLE TRIGGER ALL`},
-			{version: 776, sql: `ALTER TABLE provider_work_session_receipt DISABLE TRIGGER ALL`},
-			{version: 777, sql: `ALTER TABLE st_operator_gas_reservation DISABLE TRIGGER ALL`},
-			{version: 778, sql: `ALTER TABLE provider_work_open_original ADD CONSTRAINT synthetic_mutable_contract_parent FOREIGN KEY(contract_id) REFERENCES transfer_contract(contract_id) ON DELETE CASCADE`},
+			{version: 771, child: "provider_work_cut", parent: "provider_work_request", definition: "FOREIGN KEY (request_hash) REFERENCES provider_work_request(request_hash)"},
+			{version: 772, child: "wallet_mapping_consent", parent: "wallet_mapping_challenge", definition: "FOREIGN KEY (nonce) REFERENCES wallet_mapping_challenge(nonce)"},
+			{version: 773, child: "verify_original_request_lookup", parent: "verify_original_transition", definition: "FOREIGN KEY (trail_id, previous_depth) REFERENCES verify_original_transition(trail_id, previous_depth)"},
+			{version: 776, child: "provider_work_session_receipt", parent: "provider_work_session_event", definition: "FOREIGN KEY (client_id, sequence) REFERENCES provider_work_session_event(client_id, sequence)"},
+			{version: 777, child: "st_operator_gas_reservation", parent: "st_transaction_intent", definition: "FOREIGN KEY (intent_id) REFERENCES st_transaction_intent(intent_id)"},
+			{version: 777, child: "st_operator_gas_reservation", parent: "st_operator_gas_budget", definition: "FOREIGN KEY (scope_key) REFERENCES st_operator_gas_budget(scope_key)"},
+			{version: 777, child: "st_operator_gas_reservation", parent: "st_operator_gas_intent", definition: "FOREIGN KEY (logical_key) REFERENCES st_operator_gas_intent(logical_key)"},
+			{version: 777, child: "st_operator_gas_reservation", parent: "st_operator_gas_policy", definition: "FOREIGN KEY (policy_sha256) REFERENCES st_operator_gas_policy(policy_sha256)"},
 		} {
-			snMainnetMigrationFaultTx(t, func(ctx context.Context, tx server.PgTx) {
-				contract := snMainnetMigrationTestContract(t, fault.version)
-				snMainnetMigrationAdmitted(t, ctx, tx, contract.query, true)
-				if _, err := tx.Exec(ctx, fault.sql); err != nil {
-					t.Fatal(err)
-				}
-				snMainnetMigrationAdmitted(t, ctx, tx, contract.query, false)
-			})
+			observed = append(observed, snMainnetMigrationForeignKeyCatalogFaults(t, ctx, foreignKey.version, foreignKey.child, foreignKey.parent, foreignKey.definition)...)
 		}
+		snMainnetMigrationFaultTx(t, func(ctx context.Context, tx server.PgTx) {
+			contract := snMainnetMigrationTestContract(t, 778)
+			snMainnetMigrationAdmitted(t, ctx, tx, contract.query, true)
+			if _, err := tx.Exec(ctx, `ALTER TABLE provider_work_open_original ADD CONSTRAINT synthetic_mutable_contract_parent FOREIGN KEY(contract_id) REFERENCES transfer_contract(contract_id) ON DELETE CASCADE`); err != nil {
+				t.Fatal(err)
+			}
+			snMainnetMigrationAdmitted(t, ctx, tx, contract.query, false)
+			alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(&snMainnetMigrationTxSource{tx: tx}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			observed = append(observed, snMainnetMigrationAlertObservation{alerts: alerts, want: contract.artifact.name + "@v778"})
+		})
 	})
+	if len(observed) != 65 {
+		t.Fatalf("mainnet FK fault fixture returned %d observations, want 64 projected faults and one physical fault", len(observed))
+	}
+	for _, observation := range observed {
+		if alert := requireAlertClass(t, observation.alerts, "migration-schema-drift"); !strings.Contains(alert.Markdown(), observation.want) {
+			t.Fatalf("FK catalog fault omitted %q: %s", observation.want, alert.Markdown())
+		}
+	}
 }
 
 // Trigger events and function authority are operative inputs, not names.
