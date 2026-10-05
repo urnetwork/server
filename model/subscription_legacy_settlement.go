@@ -191,14 +191,16 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 	}
 	bounded, cancel := context.WithTimeoutCause(ctx, 15*time.Second, errLegacySettlementPageBudget)
 	defer cancel()
-	contextDone := func(err error) bool {
-		// The database owner deliberately replaces interrupted connection
-		// failures with this exact sentinel after joining its cleanup.
-		return bounded.Err() != nil && (err == server.DbContextDoneError || errors.Is(err, bounded.Err()))
-	}
+	return flushLegacySettlementsPage(ctx, bounded, shard, after, limit, flushLegacySettlement)
+}
+
+// One traversal owns its settlement operation. Production supplies the durable
+// transaction; tests can interrupt the next visit after a real committed prefix.
+func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *LegacySettlementCursor, limit int,
+	settle func(context.Context, server.Id) (bool, bool, legacySettlementBusyGate, error)) (result LegacySettlementFlushResult, returnErr error) {
 	pageBudgetExceeded := func(err error) bool {
-		return ctx.Err() == nil && context.Cause(bounded) == errLegacySettlementPageBudget &&
-			contextDone(err)
+		return ctx.Err() == nil && bounded.Err() != nil && context.Cause(bounded) == errLegacySettlementPageBudget &&
+			isSettlementPageCancellation(err)
 	}
 	server.HandleError(func() {
 		headCursor := after
@@ -264,8 +266,8 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 				result.Cursor = nil
 				return
 			}
-			completed, busy, busyGate, err := flushLegacySettlement(bounded, next.ContractId)
-			if contextDone(err) {
+			completed, busy, busyGate, err := settle(bounded, next.ContractId)
+			if err != nil && bounded.Err() != nil {
 				// The current transaction may have rolled back or its commit
 				// acknowledgement may be unknown. Retain the previous cursor;
 				// replay still takes the existing intent/outcome ownership guard.

@@ -11,14 +11,19 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Both pgx's wrapped deadline and the pool's historical cancellation sentinel
-// must yield the completed prefix when only the worker's page budget expired.
+// Both pgx's wrapped deadline and the pool's retained cancellation graph must
+// yield the completed prefix when only the worker's page budget expired.
 func TestAsyncDebitPageDeadlinePreservesVisitedCursor(t *testing.T) {
 	for _, lookupErr := range []error{
 		context.DeadlineExceeded,
 		fmt.Errorf("synthetic query wrapper: %w", context.DeadlineExceeded),
 		server.DbContextDoneError,
 		fmt.Errorf("synthetic pool wrapper: %w", server.DbContextDoneError),
+		context.Canceled,
+		errors.Join(server.DbContextDoneError, context.Canceled, context.Canceled),
+		errors.Join(server.DbContextDoneError, context.DeadlineExceeded, context.DeadlineExceeded),
+		fmt.Errorf("synthetic joined pool wrapper: %w", errors.Join(server.DbContextDoneError, context.Canceled)),
+		errors.Join(context.Canceled, fmt.Errorf("synthetic nested deadline: %w", errors.Join(server.DbContextDoneError, context.DeadlineExceeded))),
 	} {
 		ctx := t.Context()
 		bounded, expire := context.WithCancelCause(ctx)
@@ -102,6 +107,11 @@ func TestAsyncDebitPageDeadlineKeepsForeignFailures(t *testing.T) {
 		{name: "unexpected_after_deadline", progress: true, pageCause: errTransferDebitPageDeadline, lookupErr: unrelated},
 		{name: "mixed_error", progress: true, pageCause: errTransferDebitPageDeadline, lookupErr: errors.Join(context.DeadlineExceeded, unrelated)},
 		{name: "unowned_pool_done", progress: true, lookupErr: server.DbContextDoneError},
+		{name: "joined_no_progress", pageCause: errTransferDebitPageDeadline, lookupErr: errors.Join(server.DbContextDoneError, context.Canceled)},
+		{name: "joined_parent_cancel", progress: true, pageCause: errTransferDebitPageDeadline, cancelParent: true, lookupErr: errors.Join(server.DbContextDoneError, context.Canceled)},
+		{name: "joined_foreign_budget", progress: true, pageCause: foreignBudget, lookupErr: errors.Join(server.DbContextDoneError, context.Canceled)},
+		{name: "joined_hard_cause", progress: true, pageCause: errTransferDebitPageDeadline, lookupErr: errors.Join(server.DbContextDoneError, unrelated, context.Canceled)},
+		{name: "joined_unowned_stop", progress: true, lookupErr: errors.Join(server.DbContextDoneError, context.Canceled)},
 	} {
 		ctx, cancelParent := context.WithCancel(t.Context())
 		bounded, expire := context.WithCancelCause(ctx)
@@ -178,7 +188,7 @@ func TestAsyncDebitPageDeadlineResumesCommittedAccounting(t *testing.T) {
 					}
 					expire(errTransferDebitPageDeadline)
 					server.HandleError(func() { nextTransferDebitBalance(pageCtx, shard, after) }, func(err error) { observedLookupErr = err })
-					if observedLookupErr != server.DbContextDoneError {
+					if !errors.Is(observedLookupErr, server.DbContextDoneError) || !errors.Is(observedLookupErr, pageCtx.Err()) {
 						t.Fatalf("real next-key checkout did not report its cancellation: %v", observedLookupErr)
 					}
 					panic(observedLookupErr)
