@@ -7483,3 +7483,37 @@ Finite evidence:
 and
 `temp/pg-contention-20261004/astra-d3f4f-current-coverage-stage-comparison.json`
 (SHA-256 `1b694dc27f059fe7d4b4979dbc0638466ef1ca8fb66cc25ab4bb90da0c288098`).
+
+### 2026-10-05 10:33 UTC durable history and later d8 coverage
+
+Root's primary read at 10:33:38 UTC found **25,294 unique accepted measured
+runs** in the fixed measurement-time window `(09:50, 09:55]` UTC: 10,296
+successes and 14,998 failures, or **84.3133 unique credits/s**. The selected
+policy-1 count definition matches the earlier October 3 windows of 88.7733/s
+and 78.94/s. All 25,294 runs belong to distinct providers, so each observed
+provider has exactly one qualifying run in this five-minute window. Current
+eligible membership and four-hour per-provider history were not joined.
+
+The rate is 49.824% above the nearby 09:54 census's static-cohort arithmetic
+requirement of 56.275/s. This establishes durable credit for that measurement
+window; it does not establish sustained maintenance, fixed-cohort coverage or
+arrival-time throughput. The 85.7552 ACK/s stage observation has different
+boundaries, so no ACK duplication, loss or conversion fraction follows.
+Historical negatives have not been reclassified.
+
+Separately, Root's 10:24:23 census qualified all eight ready Taskworkers on
+`d8f364edc4f0b15ba549f1fb9655107967fbad5d`, with no known-old or unknown
+slots. The single global publisher's 10:23:24.368 snapshot has **79,348
+eligible providers, zero quota-complete and zero secure-complete providers,
+and 339,939 runs needed**. Security-pending is 25. This changed denominator
+is not a fixed-cohort comparison with the earlier 81,036 providers. Runtime
+qualification remains a fresh self-report, not native executable ownership;
+one d8 frame provides no new d8 throughput rate. Full sustained coverage
+remains open.
+
+Finite reductions:
+`temp/pg-contention-20261004/astra-accepted-window-0950-0955-vs-oct3-reduction.json`
+(SHA-256 `4d0a732c1488781db53968604711d56e5c5c5198645e4c022ec749627078fc87`)
+and
+`temp/pg-contention-20261004/astra-d8f36-v1-current-adoption-census-reduction.json`
+(SHA-256 `d429fcfabd4af37df9446d6563ca0f13bfff60b9bfbc83a588a417f1f094b5d1`).
