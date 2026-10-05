@@ -7809,3 +7809,52 @@ Finite current evidence:
 independently corroborated by
 `temp/pg-contention-20261004/sol-77028-admission-cohort-v1-actual-corroboration-GO.json`
 (SHA-256 `68be6068833bf7fb14d4fd689266fd8a144f9cd12962dc81909eadd9704eeb43`).
+
+### 2026-10-05 21:43 UTC renewal ownership repair deployed
+
+The renewal ownership repair above is now deployed in Taskworker
+`a7ce7f73342c998e9e33a5c926b537b20aafdddd`. Root's rollout completed at
+**21:38:34.461 UTC**, and the 21:44:14 observation qualifies all eight selected
+workers on that source, image and readiness. The release also batches native
+score alias writes through the existing bounded export stream. Its source
+snapshot commit boundary is preserved; no export speedup is established by
+this observation.
+
+The uniquely latest coherent global census is **21:43:03.907 UTC**:
+
+| Current eligible cohort | Eligible | Ten-result quota complete | Deficient | Runs needed |
+| --- | ---: | ---: | ---: | ---: |
+| First admission at least four hours ago | 77,189 | 76,487 | 702 | 941 |
+| Warming, known first admission under four hours | 24 | 14 | 10 | 66 |
+| First-admission age unknown | 0 | 0 | 0 | 0 |
+| All current eligible providers | 77,213 | 76,501 | 712 | 1,007 |
+
+Known mature coverage is **99.090544%**; all-current coverage is
+**99.077875%**. Secure-complete remains a separate 76,474, with 27 security
+exceptions and zero unknown targets. Ten accepted measured successes or
+failures per rolling four hours, the 4/5 quality gate and TLS protections
+remain unchanged. The stock remains below the goal. Membership and source
+times differ from the earlier census, so the change does not identify a
+release effect, a current credit rate or sustained fixed-provider coverage.
+
+The corrected worker retains a newer claim for the same provider, joins the
+prior turn's publication, and rechecks cancellation and remaining work budget
+before dispatch. It preserves ordinal guards and cleanup of every distinct
+issued identity, including malformed duplicate-provider batches. Focused
+normal and race controls cover these ownership boundaries. Already-issued
+leases are not rewritten. A separate native control shows that ordinary
+local failures retry without credit after the normal short interval, while
+a readiness veto can leave a completed claim's fifteen-minute lease intact.
+`AllowPacing` is not stored in that claim row, so a completed long lease alone
+cannot establish this cause on Main. Neither local mechanism has a measured
+Main prevalence or an attributed share of the 702 mature deficits yet.
+
+Finite actual evidence is
+`temp/pg-contention-20261004/astra-a7ce7-admission-cohort-v1-current-reduction.json`
+(SHA-256 `0a013a51358fec1b8157c8db3924b5369ccfacf5e0d778437e3c8e6d1beed750`),
+independently corroborated by
+`temp/pg-contention-20261004/sol-a7ce7-admission-cohort-v1-current-corroboration.json`
+(SHA-256 `2e63ec89e031a84216f0ffe512533b1fe97fc8835ac8e124d896b9d129fb1974`).
+The deployment receipt is
+`temp/fp2-renewal-arin-taskworker-release-20261005/scaffold-vcs/taskworker-deploy-result.json`
+(SHA-256 `194c0bf3b262496120e83f9fbab4032643f7039fde0194077e77ec802ba2c595`).
