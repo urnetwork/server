@@ -4945,9 +4945,9 @@ func HasSubscriptionRenewal(
 	return active, market
 }
 
-// HasSubscriptionRenewalInTx is HasSubscriptionRenewal read in the caller's tx. It
-// sees the renewals the tx itself wrote and nothing committed outside its snapshot,
-// and it does not acquire a second pool connection while the tx holds one.
+// HasSubscriptionRenewal read in the caller's tx. It sees the renewals the tx itself
+// wrote and nothing committed outside its snapshot, and it does not acquire a second
+// pool connection while the tx holds one.
 func HasSubscriptionRenewalInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -4957,6 +4957,8 @@ func HasSubscriptionRenewalInTx(
 	return hasSubscriptionRenewal(ctx, tx, networkId, subscriptionType)
 }
 
+// The renewal read on query, a pooled connection or the caller's tx: whether a
+// renewal of subscriptionType is active now, and the market of one of them.
 func hasSubscriptionRenewal(
 	ctx context.Context,
 	query server.PgCanQuery,

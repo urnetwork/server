@@ -1,5 +1,7 @@
 package model
 
+// The supporter renewal read in the caller's transaction.
+
 import (
 	"context"
 	"testing"
@@ -10,8 +12,8 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// TestHasSubscriptionRenewalInTxSeesUncommittedRenewal: the in-tx read sees a renewal
-// the tx wrote and has not committed. The pooled read runs outside the tx and cannot.
+// The in-tx read sees a renewal the tx wrote and has not committed. The pooled read
+// runs outside the tx and cannot.
 func TestHasSubscriptionRenewalInTxSeesUncommittedRenewal(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

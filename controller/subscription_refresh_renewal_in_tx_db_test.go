@@ -19,33 +19,8 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// testingDefaultPgPoolMaximum reads the size of the default pool as it was opened.
-func testingDefaultPgPoolMaximum(t testing.TB) float64 {
-	t.Helper()
-	families, err := prometheus.DefaultGatherer.Gather()
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, family := range families {
-		if family.GetName() != "urnetwork_pg_pool_connections" {
-			continue
-		}
-		for _, metric := range family.Metric {
-			labels := map[string]string{}
-			for _, label := range metric.Label {
-				labels[label.GetName()] = label.GetValue()
-			}
-			if labels["pool"] == "default" && labels["state"] == "maximum" {
-				return metric.GetGauge().GetValue()
-			}
-		}
-	}
-	t.Fatal("the default pool size is unavailable")
-	return 0
-}
-
-// TestAddRefreshTransferBalanceInTxSeesItsOwnRenewal: a supporter renewal written
-// earlier in the same tx, not yet committed, makes the refresh grant the Pro grant.
+// A supporter renewal written earlier in the same tx, not yet committed, makes the
+// refresh grant the Pro grant.
 func TestAddRefreshTransferBalanceInTxSeesItsOwnRenewal(t *testing.T) {
 	skipWithoutProYml(t)
 
@@ -83,9 +58,9 @@ func TestAddRefreshTransferBalanceInTxSeesItsOwnRenewal(t *testing.T) {
 	})
 }
 
-// TestAddRefreshTransferBalanceInTxHoldsOneConnection: with the pool cut to one
-// connection, the tx holds that connection for the whole grant. A read on any other
-// pooled connection would wait for it until the deadline and fail the grant.
+// With the pool cut to one connection, the tx holds that connection for the whole
+// grant. A read on any other pooled connection would wait for it until the deadline
+// and fail the grant.
 func TestAddRefreshTransferBalanceInTxHoldsOneConnection(t *testing.T) {
 	skipWithoutProYml(t)
 
@@ -116,7 +91,32 @@ func TestAddRefreshTransferBalanceInTxHoldsOneConnection(t *testing.T) {
 		connect.AssertEqual(t, failure, nil)
 		connect.AssertEqual(t, grantErr, nil)
 		connect.AssertEqual(t, proGranted, true)
-		connect.AssertEqual(t, testingDefaultPgPoolMaximum(t), float64(1))
+
+		// the size of the default pool as it was opened
+		defaultPgPoolMaximum := func() float64 {
+			t.Helper()
+			families, err := prometheus.DefaultGatherer.Gather()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, family := range families {
+				if family.GetName() != "urnetwork_pg_pool_connections" {
+					continue
+				}
+				for _, metric := range family.Metric {
+					labels := map[string]string{}
+					for _, label := range metric.Label {
+						labels[label.GetName()] = label.GetValue()
+					}
+					if labels["pool"] == "default" && labels["state"] == "maximum" {
+						return metric.GetGauge().GetValue()
+					}
+				}
+			}
+			t.Fatal("the default pool size is unavailable")
+			return 0
+		}
+		connect.AssertEqual(t, defaultPgPoolMaximum(), float64(1))
 
 		transferBalances := model.GetActiveTransferBalances(ctx, networkId)
 		connect.AssertEqual(t, len(transferBalances), 1)
