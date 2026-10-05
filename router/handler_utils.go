@@ -132,6 +132,15 @@ func implName[R any](impl ImplFunction[R]) string {
 	return name
 }
 
+// Dependency failure is not a credential rejection. Keep the sentinel through
+// the wrapper so RaiseHttpError can emit a fixed JSON response without causes.
+func authenticationHttpError(err error) error {
+	if errors.Is(err, session.ErrAuthUnavailable) {
+		return err
+	}
+	return fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
+}
+
 // allow guest mode, or authenticated requests
 func WrapRequireAuth[R any](
 	impl ImplFunction[R],
@@ -143,7 +152,7 @@ func WrapRequireAuth[R any](
 		func(session *session.ClientSession) (R, error) {
 			if err := session.Auth(req); err != nil {
 				var empty R
-				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
+				return empty, authenticationHttpError(err)
 			}
 			r, err := impl(session)
 			return r, tagImplError(impl, err)
@@ -165,7 +174,7 @@ func WrapRequireClient[R any](
 		func(session *session.ClientSession) (R, error) {
 			if err := session.Auth(req); err != nil || session.ByJwt.ClientId == nil {
 				var empty R
-				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
+				return empty, authenticationHttpError(err)
 			}
 			r, err := impl(session)
 			return r, tagImplError(impl, err)
@@ -325,7 +334,7 @@ func WrapWithInputBodyFormatterRequireAuth[T any, R any](
 		func(arg T, session *session.ClientSession) (R, error) {
 			if err := session.Auth(req); err != nil {
 				var empty R
-				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
+				return empty, authenticationHttpError(err)
 			}
 			return impl(arg, session)
 		},
@@ -365,7 +374,7 @@ func WrapWithInputBodyFormatterRequireClient[T any, R any](
 			advanceControlHttpPhase(req, controlHttpAuthenticate)
 			if err := session.Auth(req); err != nil || session.ByJwt.ClientId == nil {
 				var empty R
-				return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
+				return empty, authenticationHttpError(err)
 			}
 			advanceControlHttpPhase(req, controlHttpController)
 			return impl(arg, session)
@@ -392,7 +401,7 @@ func WrapWithInputOptionalAuth[T any, R any](
 			if req.Header.Get("Authorization") != "" {
 				if err := session.Auth(req); err != nil {
 					var empty R
-					return empty, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
+					return empty, authenticationHttpError(err)
 				}
 			}
 			return impl(arg, session)
@@ -437,6 +446,13 @@ func WrapWithInputBodyFormatterNoAuth[T any, R any](
 }
 
 func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
+	if errors.Is(err, session.ErrAuthUnavailable) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("{\"error\":\"Authentication temporarily unavailable.\"}\n"))
+		return true
+	}
+
 	statusCode := http.StatusInternalServerError
 	message := err.Error()
 
