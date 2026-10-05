@@ -19,7 +19,9 @@ var ErrProviderPaymentOutcomeContradictory = errors.New("provider processor outc
 
 const providerPaymentReceiptLimit = 1024 * 1024
 
-type providerPaymentRequest struct {
+// The retained processor request is the authority for an ambiguous retry,
+// including after its original wallet has been deactivated.
+type ProviderPaymentRequest struct {
 	Basis   ProviderPaymentBasis `json:"basis"`
 	Amount  float64              `json:"amount_usdc"`
 	Network string               `json:"processor_network"`
@@ -32,24 +34,32 @@ func RetainProviderPaymentRequest(ctx context.Context, basis *ProviderPaymentBas
 	if basis == nil || math.IsNaN(amount) || math.IsInf(amount, 0) || amount <= 0 || network == "" {
 		return ErrProviderPaymentBasisChanged
 	}
-	details, err := json.Marshal(providerPaymentRequest{Basis: *basis, Amount: amount, Network: network})
+	details, err := json.Marshal(ProviderPaymentRequest{Basis: *basis, Amount: amount, Network: network})
 	if err != nil {
 		return err
 	}
 	server.Tx(ctx, func(tx server.PgTx) {
-		if !lockProviderPaymentBasis(ctx, tx, basis, true) {
-			returnErr = ErrProviderPaymentAttemptChanged
-			return
-		}
-		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO audit_account_payment(event_id,payment_id,event_type,event_details)
-			VALUES($1,$2,'circle_attempt_request',$3) ON CONFLICT(event_id) DO NOTHING`, basis.IdempotencyKey, basis.PaymentId, string(details)))
-		var matches bool
-		server.Raise(tx.QueryRow(ctx, `SELECT payment_id=$2 AND event_type='circle_attempt_request' AND event_details=$3 FROM audit_account_payment WHERE event_id=$1`, basis.IdempotencyKey, basis.PaymentId, string(details)).Scan(&matches))
-		if !matches {
-			returnErr = ErrProviderPaymentAttemptChanged
-		}
+		returnErr = retainProviderPaymentRequestInTx(ctx, tx, basis, details)
 	}, server.TxReadCommitted)
 	return
+}
+
+// A first request requires a currently active wallet. An already retained
+// request can only compare equal; retirement cannot manufacture new authority.
+func retainProviderPaymentRequestInTx(ctx context.Context, tx server.PgTx, basis *ProviderPaymentBasis, details []byte) error {
+	if len(details) > providerPaymentReceiptLimit || !lockProviderPaymentBasis(ctx, tx, basis, true) {
+		return ErrProviderPaymentAttemptChanged
+	}
+	server.RaisePgResult(tx.Exec(ctx, `INSERT INTO audit_account_payment(event_id,payment_id,event_type,event_details)
+		SELECT $1,$2,'circle_attempt_request',$3 WHERE EXISTS(SELECT 1 FROM account_wallet WHERE wallet_id=$4 AND active)
+		ON CONFLICT(event_id) DO NOTHING`, basis.IdempotencyKey, basis.PaymentId, string(details), basis.WalletId))
+	var matches bool
+	server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM audit_account_payment WHERE event_id=$1
+		AND payment_id=$2 AND event_type='circle_attempt_request' AND event_details=$3)`, basis.IdempotencyKey, basis.PaymentId, string(details)).Scan(&matches))
+	if !matches {
+		return ErrProviderPaymentAttemptChanged
+	}
+	return nil
 }
 
 func lockProviderPaymentBasis(ctx context.Context, tx server.PgTx, basis *ProviderPaymentBasis, requireNoRecord bool) bool {

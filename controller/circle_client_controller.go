@@ -59,7 +59,7 @@ func requireCircleProviderPayment(ctx context.Context) error {
 		if !ok {
 			return model.ErrProviderPaymentBasisChanged
 		}
-		return model.RequireProviderPaymentBasis(ctx, &submission.Basis)
+		return model.RequireProviderPaymentRequest(ctx, &submission.Basis, submission.Amount, submission.Network)
 	}
 	return nil
 }

@@ -183,6 +183,9 @@ func TestProviderTransitionFinalCircleAdmissionAndCustomerIsolation(t *testing.T
 			t.Fatal(err)
 		}
 		args := circleTransferArguments{IdempotencyKey: basis.IdempotencyKey, Amount: 9.99, Destination: wallet.WalletAddress, Network: "MATIC"}
+		if err := model.RetainProviderPaymentRequest(owner.Ctx, basis, args.Amount, args.Network); err != nil {
+			t.Fatal(err)
+		}
 		ctx := context.WithValue(owner.Ctx, providerUsdcPaymentContextKey{}, providerPaymentSubmission{Basis: *basis, Amount: args.Amount, Network: args.Network})
 		if err := requireCircleProviderPayment(ctx); err != nil {
 			t.Fatal(err)
