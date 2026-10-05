@@ -101,6 +101,11 @@ func newPostPrimaryOnboardingSession(
 	return &postSession, cancel
 }
 
+// Runs after the model committed the client and its proxy. The
+// RefreshVerifyProxyEgress task re-feeds every live allocation each
+// EgressRefreshInterval, so a failed feed only delays the egress index: it is
+// logged, and the call still returns the committed client. Failing the call
+// here would hand out no credentials for a proxy that stays allocated.
 func feedAuthNetworkClientVerifyEgress(
 	ctx context.Context,
 	result *model.AuthNetworkClientResult,
@@ -109,12 +114,14 @@ func feedAuthNetworkClientVerifyEgress(
 	if result == nil || result.ClientId == nil || result.ProxyConfigResult == nil || result.ProxyConfigResult.WgConfig == nil || settings == nil {
 		return
 	}
-	model.FeedVerifyEgress(
-		ctx,
-		*result.ClientId,
-		result.ProxyConfigResult.WgConfig.ClientIpv4,
-		settings,
-	)
+	server.HandleError(func() {
+		model.FeedVerifyEgress(
+			ctx,
+			*result.ClientId,
+			result.ProxyConfigResult.WgConfig.ClientIpv4,
+			settings,
+		)
+	})
 }
 
 // ConnectNetworkClient records a legacy, family-agnostic connection (intent
