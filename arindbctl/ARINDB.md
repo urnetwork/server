@@ -860,6 +860,25 @@ Measure coverage additions and explicit exclusions as well as actual FP2
 results. Keep incomplete observations explicit and use them to prioritize the
 next identity or discriminator review.
 
+The first post-selection Main coverage attempt hit its three-second statement
+deadline (`SQLSTATE 57014`); no classification counts were returned. A separate
+one-key native census attempt reached its connection timeout before issuing
+any Redis GET. As of `2026-10-05T07:19:03Z`, both measurements therefore remain
+**unknown**, not zero or evidence of recovered supply. The unchanged coverage
+query passed a local PostgreSQL fixture with 75,000 live connections under the
+same statement deadline, but that fixture cannot establish Main's plan, data
+layout or current load. Do not infer a production cause or relax the deadline
+from that local result.
+
+Connection facts advance only after a successful actual ARIN lookup during a
+connection location write. The c343 connection path retries a failed initial
+lookup; selecting Config does not stamp existing facts with the new epoch.
+Its active ARIN reader is process-local and opens once, so resolver selection
+and loaded process identity must be measured separately. The native census,
+when available, describes a completed cached score publication: retain its
+source start, completion and publication timestamps, and distinguish its
+bucket membership from durable current-generation classification coverage.
+
 For this release, retain the following evidence as rollout proceeds:
 
 1. The selected Config index and actual process resource path/hash/epoch after
