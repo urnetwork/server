@@ -4265,7 +4265,7 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 		if existing := func() *ResidentForward {
 			self.stateLock.RLock()
 			defer self.stateLock.RUnlock()
-			if f := self.forwards[destinationId]; f != nil && f.UpdateActivity() {
+			if f := self.forwards[destinationId]; f != nil && !f.IsDone() {
 				return f
 			}
 			return nil
@@ -4335,7 +4335,7 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 		func() {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
-			if existing := self.forwards[destinationId]; existing != nil && existing.UpdateActivity() {
+			if existing := self.forwards[destinationId]; existing != nil && !existing.IsDone() {
 				raceWinner = existing
 				return
 			}
@@ -4383,6 +4383,9 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 		case forward.send <- transferFrameBytes:
 			messageOwned = false
 			outputAccepted = true
+			// Refused offers must not renew a full destination queue's idle
+			// allowance. Only an accepted payload is forward activity.
+			forward.UpdateActivity()
 			return true
 		default:
 		}
@@ -4397,6 +4400,7 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 			case forward.send <- transferFrameBytes:
 				messageOwned = false
 				outputAccepted = true
+				forward.UpdateActivity()
 				return true
 			case <-time.After(self.exchange.settings.ForwardTimeout):
 			}
