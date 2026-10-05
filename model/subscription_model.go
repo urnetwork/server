@@ -2688,10 +2688,14 @@ func applyContractCloseReportInTx(ctx context.Context, tx server.PgTx,
 }
 
 func settleContract(ctx context.Context, contractId server.Id) (closed bool, returnErr error) {
+	return settleContractWithExpiryScope(ctx, contractId, nil)
+}
+
+func settleContractWithExpiryScope(ctx context.Context, contractId server.Id, scope *contractExpiryRepairScope) (closed bool, returnErr error) {
 	var posts []func() any
 	var clockTransferByteCount ByteCount
 
-	server.Tx(ctx, func(tx server.PgTx) {
+	contractExpiryContinuationTx(ctx, contractId, scope, func(tx server.PgTx) {
 		// party -> close record. Pull all close rows (checkpoint or not).
 		// Inline settlement fires only when BOTH parties have done a
 		// non-checkpoint close ("done"). A checkpoint means "pausing — the
@@ -2770,7 +2774,9 @@ func settleContract(ctx context.Context, contractId server.Id) (closed bool, ret
 					// fmt.Printf("CLOSE CONTRACT SETTLE (%s) %s\n", clientId.String(), contractId.String())
 					posts, closed, returnErr = settleEscrowForegroundInTx(ctx, tx, contractId, ContractOutcomeSettled)
 				} else {
-					glog.Infof("[sub]contract[%s]diff %d (%d <> %d)\n", contractId.String(), diff, sourceUsedTransferByteCount, destinationUsedTransferByteCount)
+					if scope == nil {
+						glog.Infof("[sub]contract[%s]diff %d (%d <> %d)\n", contractId.String(), diff, sourceUsedTransferByteCount, destinationUsedTransferByteCount)
+					}
 					// fmt.Printf("CLOSE CONTRACT DISPUTE (%s) %s\n", clientId.String(), contractId.String())
 					closed = setContractDisputeInTx(ctx, tx, contractId, true)
 				}
@@ -2782,7 +2788,10 @@ func settleContract(ctx context.Context, contractId server.Id) (closed bool, ret
 				}
 			}
 		}
-	}, server.TxReadCommitted)
+		if scope != nil {
+			server.Raise(returnErr)
+		}
+	})
 
 	if returnErr != nil {
 		return
@@ -4155,200 +4164,6 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 		return claimed
 	}
 
-	// Claim only a current dispute. Failed settlement must roll back its clear,
-	// leaving the reservation disputed rather than eligible for quarantine.
-	settleDispute := func(tag string, contractId server.Id) {
-		var posts []func() any
-		resolved := false
-		server.Tx(ctx, func(tx server.PgTx) {
-			posts = nil
-			resolved = false
-			// Keep the dispute and reservation intact while legacy work is
-			// queued. The worker clears it only in the debit/outcome transaction;
-			// an accounting rejection rolls that clear back with everything else.
-			var owned bool
-			rows, queryErr := tx.Query(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id=$1 AND dispute AND outcome IS NULL FOR UPDATE`, contractId)
-			server.WithPgResult(rows, queryErr, func() { owned = rows.Next() })
-			if !owned {
-				return
-			}
-			var legacy bool
-			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1 AND NOT redis_reserved)`, contractId).Scan(&legacy))
-			if legacy {
-				server.Raise(queueLegacySettlementInTx(ctx, tx, contractId, ContractOutcomeSettled, true))
-				return
-			}
-			changed := server.RaisePgResult(tx.Exec(
-				ctx,
-				`
-                    UPDATE transfer_contract
-                    SET dispute = false, close_time = $2
-                    WHERE contract_id = $1 AND dispute AND outcome IS NULL
-                `,
-				contractId,
-				server.NowUtc(),
-			))
-			if changed.RowsAffected() == 0 {
-				return
-			}
-			var err error
-			posts, resolved, err = settleEscrowInTx(ctx, tx, contractId, ContractOutcomeSettled)
-			server.Raise(err)
-			if !resolved {
-				panic(errors.New("contract remained non-final after force-close attempt"))
-			}
-		}, server.TxReadCommitted)
-		if resolved {
-			forceCloseContractCounter.WithLabelValues("dispute_both_sides").Inc()
-			if glog.V(1) {
-				glog.Infof("%ssettle contract dispute: both sides\n", tag)
-			}
-		}
-		server.RunPosts(ctx, posts...)
-	}
-
-	closeContract := func(tag string, openContract *OpenContract) error {
-		// Force close may synthesize a missing endpoint close. Its billing
-		// outcome must not be mistaken for verified bilateral subnet usage.
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET usage_unverified=true WHERE contract_id=$1 AND outcome IS NULL`, openContract.contractId))
-		}, server.TxReadCommitted)
-		if openContract.dispute {
-			settleDispute(tag, openContract.contractId)
-			return nil
-		}
-
-		if openContract.sourceCloseTime == nil && openContract.destinationCloseTime == nil {
-			// close with both sides 0
-			recordForceCloseContract("both sides", tag)
-
-			err := CloseContract(
-				ctx,
-				openContract.contractId,
-				openContract.sourceId,
-				ByteCount(0),
-				false,
-			)
-			if err != nil {
-				return err
-			}
-
-			err = CloseContract(
-				ctx,
-				openContract.contractId,
-				openContract.destinationId,
-				ByteCount(0),
-				false,
-			)
-			if err != nil {
-				return err
-			}
-
-		} else if openContract.sourceCloseTime == nil {
-			// Source accepts destination. A lone destination checkpoint must
-			// also be made final; adding the missing source close alone leaves
-			// one checkpoint row and therefore cannot settle the contract.
-			recordForceCloseContract("source accepts destination", tag)
-
-			err := CloseContract(
-				ctx,
-				openContract.contractId,
-				openContract.sourceId,
-				*openContract.destinationUsedTransferByteCount,
-				false,
-			)
-			if err != nil {
-				return err
-			}
-			if *openContract.destinationCheckpoint {
-				err = CloseContract(
-					ctx,
-					openContract.contractId,
-					openContract.destinationId,
-					ByteCount(0),
-					false,
-				)
-				if err != nil {
-					return err
-				}
-			}
-
-		} else if openContract.destinationCloseTime == nil {
-			// Destination accepts source. Mirror the checkpoint finalization
-			// above so either one-sided orientation converges in one sweep.
-			recordForceCloseContract("destination accepts source", tag)
-
-			err := CloseContract(
-				ctx,
-				openContract.contractId,
-				openContract.destinationId,
-				*openContract.sourceUsedTransferByteCount,
-				false,
-			)
-			if err != nil {
-				return err
-			}
-			if *openContract.sourceCheckpoint {
-				err = CloseContract(
-					ctx,
-					openContract.contractId,
-					openContract.sourceId,
-					ByteCount(0),
-					false,
-				)
-				if err != nil {
-					return err
-				}
-			}
-
-		} else if *openContract.sourceCheckpoint || *openContract.destinationCheckpoint {
-			// finalize one or more checkpoints
-
-			if *openContract.sourceCheckpoint {
-				recordForceCloseContract("finalize source checkpoint", tag)
-
-				err := CloseContract(
-					ctx,
-					openContract.contractId,
-					openContract.sourceId,
-					ByteCount(0),
-					false,
-				)
-				if err != nil {
-					return err
-				}
-			}
-
-			if *openContract.destinationCheckpoint {
-				recordForceCloseContract("finalize destination checkpoint", tag)
-				err := CloseContract(
-					ctx,
-					openContract.contractId,
-					openContract.destinationId,
-					ByteCount(0),
-					false,
-				)
-				if err != nil {
-					return err
-				}
-			}
-
-		} else {
-			// nothing to settle, just close the transaction
-			var posts []func() any
-			var err error
-			server.Tx(ctx, func(tx server.PgTx) {
-				posts, _, err = settleEscrowForegroundInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
-			}, server.TxReadCommitted)
-			if err != nil {
-				return err
-			}
-			server.RunPosts(ctx, posts...)
-		}
-
-		return nil
-	}
-
 	runForceClose := func(do func() error) (runErr error) {
 		var callErr error
 		recovered := server.HandleError(func() {
@@ -4402,7 +4217,7 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 			// A successful close can create a dispute after both selection scans.
 			// Resolve once, then re-read; failed closes never enter this path.
 			settleErr := runForceClose(func() error {
-				settleDispute(tag, openContract.contractId)
+				settleExpiredContractDispute(ctx, tag, openContract.contractId, nil)
 				return nil
 			})
 			if settleErr != nil {
@@ -4500,7 +4315,7 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 					if fresh != nil {
 						openContract = fresh
 						closeErr = runForceClose(func() error {
-							return closeContract(tag, openContract)
+							return continueContractExpiry(ctx, tag, openContract, nil)
 						})
 					}
 					var quarantineErr, cleanupErr error

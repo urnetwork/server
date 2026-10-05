@@ -1027,8 +1027,42 @@ dates that error nor establishes that the current attempt was canceled.
 Receipt `6cb36928c4b1b44760f3f80e85d09a7be7158db6bdca8e296592005d2406c80d`
 records a 1.222-millisecond point query. The row was present at that snapshot,
 but claim/release timestamps do not identify the worker, advisory owner,
-execution start or progress. Exact-process phase evidence is still needed;
-no cause of the publication delay or newer native supply is established.
+execution start or progress. No cause of the publication delay or newer native
+supply is established by the task row.
+
+At `2026-10-05T20:55:38Z`, the bounded phase observation joined all eight
+`77028804` workers to fresh source, image, build and process-start metrics.
+All 25 phase cells per process were available. One process had `source_load`
+active; two others each recorded one source-load exit, 7,404 target-export
+exits and 1,960,296 legacy SET attempts since startup. Their completed
+source-load spans were 87.996 and 80.719 seconds. These spans include failure
+cleanup and overlap across workers and parent/child phases; they do not prove
+successful native publication, advisory ownership or a cancellation cause.
+Receipt `6aa88da1ccf7a8316fb5cf942b77f35829297774b6bdbfe36dfd1bc4e8cfcae7`
+is a single frame, not an export progress rate or newer Quality census.
+
+A locally qualified batching candidate queues native baseline-alias SETs in
+the existing bounded stream after the baseline commits. Native snapshot
+GET/Lua operations, TTL duration, successful final flush, worker join and
+readiness/census ordering remain intact. A loaded synthetic transport control
+kept all 605,952 commands while reducing synchronous submissions from 201,216
+to 5,568; cancellation, failure and retry checks passed. This is not a measured
+Main latency improvement. With this candidate, `cache_write` also counts
+native alias attempts, so its old and new counters have different coverage.
+Actual release adoption and fresh native census clocks/counts remain required.
+
+The `21:11:37Z` fixed-key read returned a publication but failed at
+`utc`/`datetime.fromisoformat` with `ValueError`, before source freshness or
+bucket validation. Receipt
+`f98f8f818adddad5166c6b8be552a983535f8d1b3ecce15a53ed3b39664c564b`
+therefore provides no source clocks or counts. Local controls reproduce valid
+Go JSON timestamps with shortened fractional seconds being rejected by the
+Python 3.10 parser. A qualified reader correction parses exact UTC microsecond
+calendar timestamps and retains the 900-second cutoff, including refusal at
+900 seconds plus one microsecond. The native interpreter version and rejected
+clock were not retained, so that compatibility defect is not yet the proven
+cause of this Main refusal. Earlier invalid and stale publications remain
+separate observations; no current Quality supply has been established.
 
 Connection facts advance only after a successful actual ARIN lookup during a
 connection location write. The c343 connection path retries a failed initial

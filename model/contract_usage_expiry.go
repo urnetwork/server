@@ -75,6 +75,15 @@ func retainedContractExpiryUsage(data []byte) (*contractUsageSnapshot, error) {
 // synthesize or finalize a close. Restarts reuse that exact proof. A recent
 // real report withdraws a stale scan candidate without closing its stream.
 func prepareContractExpiryInTx(ctx context.Context, tx server.PgTx, contractId server.Id, cutoff time.Time) (*contractExpiryState, error) {
+	return inspectContractExpiryInTx(ctx, tx, contractId, cutoff, true)
+}
+
+// A read-only preview uses the same report/proof validation in a consistent snapshot.
+func inspectContractExpiryInTx(ctx context.Context, tx server.PgTx, contractId server.Id, cutoff time.Time, writeProof bool) (*contractExpiryState, error) {
+	lock := ""
+	if writeProof {
+		lock = " FOR UPDATE"
+	}
 	state := &contractExpiryState{contractId: contractId}
 	var outcome *ContractOutcome
 	var created time.Time
@@ -85,8 +94,8 @@ func prepareContractExpiryInTx(ctx context.Context, tx server.PgTx, contractId s
 	if err := tx.QueryRow(ctx, `
 		SELECT source_id, destination_id, dispute, outcome, create_time,
 			usage_origin_is_source, usage_unverified, provider_usage, transfer_byte_count
-		FROM transfer_contract WHERE contract_id=$1 FOR UPDATE
-	`, contractId).Scan(&state.sourceId, &state.destinationId, &state.dispute, &outcome, &created,
+		FROM transfer_contract WHERE contract_id=$1
+	`+lock, contractId).Scan(&state.sourceId, &state.destinationId, &state.dispute, &outcome, &created,
 		&originIsSource, &unverified, &retained, &proof.Capacity); err != nil {
 		return nil, fmt.Errorf("lock expiring contract: %w", err)
 	}
@@ -153,8 +162,10 @@ func prepareContractExpiryInTx(ctx context.Context, tx server.PgTx, contractId s
 			snapshot.Expiry = proof
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE transfer_contract SET usage_unverified=true,provider_usage=$2 WHERE contract_id=$1 AND outcome IS NULL`, contractId, snapshot); err != nil {
-		return nil, fmt.Errorf("retain original expiry proof: %w", err)
+	if writeProof {
+		if _, err := tx.Exec(ctx, `UPDATE transfer_contract SET usage_unverified=true,provider_usage=$2 WHERE contract_id=$1 AND outcome IS NULL`, contractId, snapshot); err != nil {
+			return nil, fmt.Errorf("retain original expiry proof: %w", err)
+		}
 	}
 	return state, nil
 }

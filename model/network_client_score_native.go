@@ -22,6 +22,22 @@ const clientScoreNativeBaseline = "b"
 
 var errClientScoreNativeUnavailable = errors.New("native client score source unavailable")
 
+// Native aliases become visible only after the baseline snapshot commits.
+// They share the bounded SET stream and its TTL/error handling; staging and
+// committing native snapshots retain their guarded publication boundary.
+func newClientScoreNativeFanout(ctx context.Context, r server.RedisClient, countsKey func(server.Id) string, ttl time.Duration, census *ClientScoreNativeCensus, emit func(clientScoreRedisSet) error) *clientScoreNativeFanout {
+	return &clientScoreNativeFanout{
+		publish: func(callerId server.Id, facets map[ipFamilyFacet]clientScoreFacetPayload) error {
+			return writeClientScoreNativeSnapshot(ctx, r, clientScoreNativeKey(countsKey(callerId)), ttl, facets, census)
+		},
+		alias: func(callerId server.Id) error {
+			return emit(clientScoreRedisSet{
+				key: clientScoreNativeKey(countsKey(callerId)), value: []byte(clientScoreNativeBaseline),
+			})
+		},
+	}
+}
+
 // Called after every exporter has joined and its error channel is closed.
 // Cancellation cannot discard worker errors or certify complete publication.
 func finishClientScoreExport(ctx context.Context, workerErrs <-chan error) error {
