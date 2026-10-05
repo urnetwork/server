@@ -24,19 +24,17 @@ import (
 // same. Apps upload logs only when the user sends feedback with logs.
 const LogFileMaxByteCount = int64(100 * 1024 * 1024)
 
-// FeedbackLogKeyPrefix is the object-key namespace of stored log files in the
-// feedback log bucket.
+// The object-key namespace of stored log files in the feedback log bucket.
 const FeedbackLogKeyPrefix = "logs"
 
-// FeedbackLogRetention is how long a stored log file is kept. The retention is
-// a code-owned minio ILM rule (ApplyFeedbackLogRetention), the same as for the
-// stats sample streams.
+// How long a stored log file is kept. The retention is a code-owned minio ILM
+// rule (ApplyFeedbackLogRetention), the same as for the stats sample streams.
 const FeedbackLogRetention = 7 * 24 * time.Hour
 
 // the sdk uploads one zip of its log files (sdk `DeviceLocal.UploadLogs`)
 const feedbackLogContentType = "application/zip"
 
-// FeedbackLogKey is the object key of the log file stored for a feedback.
+// The object key of the log file stored for a feedback.
 func FeedbackLogKey(networkId server.Id, feedbackId server.Id) string {
 	return fmt.Sprintf(
 		"%s/network_%s/feedback_%s.zip",
@@ -46,11 +44,11 @@ func FeedbackLogKey(networkId server.Id, feedbackId server.Id) string {
 	)
 }
 
-// LoadFeedbackLogStore returns the store that keeps uploaded log files, or
-// ok=false when log storage is off. It is on only when the vault `minio.yml`
-// names a `feedback_log_bucket` and a minio authority: the store uses the blob
-// store's minio endpoint and credentials, in that bucket. A local blob backend
-// never stores log files.
+// Returns the store that keeps uploaded log files, or ok=false when log
+// storage is off. It is on only when the vault `minio.yml` names a
+// `feedback_log_bucket` and a minio authority: the store uses the blob store's
+// minio endpoint and credentials, in that bucket. A local blob backend never
+// stores log files.
 func LoadFeedbackLogStore() (store server.BlobStore, ok bool) {
 	config, present := server.LoadBlobStoreConfig()
 	if !present || config.Local || config.FeedbackLogBucket == "" {
@@ -67,8 +65,7 @@ func LoadFeedbackLogStore() (store server.BlobStore, ok bool) {
 	return store, true
 }
 
-// feedbackLogLifecycleRules expires every stored log file after
-// FeedbackLogRetention.
+// Expires every stored log file after FeedbackLogRetention.
 func feedbackLogLifecycleRules(store server.BlobStore) []server.BlobLifecycleRule {
 	return []server.BlobLifecycleRule{
 		{
@@ -78,11 +75,10 @@ func feedbackLogLifecycleRules(store server.BlobStore) []server.BlobLifecycleRul
 	}
 }
 
-// ApplyFeedbackLogRetention installs the log file retention on the feedback log
-// bucket (minio ILM; see `server.BlobStore.SetLifecycle`), like
-// `stats.ApplyStreamRetention` does for the sample streams. Call once at
-// taskworker init. Best-effort: it logs and never fails, and does nothing while
-// log storage is off.
+// Installs the log file retention on the feedback log bucket (minio ILM; see
+// `server.BlobStore.SetLifecycle`), like `stats.ApplyStreamRetention` does for
+// the sample streams. Call once at taskworker init. Best-effort: it logs and
+// never fails, and does nothing while log storage is off.
 func ApplyFeedbackLogRetention(ctx context.Context) {
 	store, ok := LoadFeedbackLogStore()
 	if !ok {
@@ -153,14 +149,45 @@ func UploadLogFile(
 		}, nil
 	}
 
+	// stages the upload body in a temporary file, because the store uploads
+	// from a file, and puts it at key when the body fits the size cap. An
+	// oversize body is never stored. complete is false when the body was cut
+	// off by an error, exceeded the cap, or could not be stored.
+	storeLogFile := func(store server.BlobStore, key string) (byteCount int64, complete bool, err error) {
+		temporary, err := os.CreateTemp("", "urnetwork-feedback-log-*.zip")
+		if err != nil {
+			glog.Infof("[log]feedback log stage err=%s\n", err)
+			return 0, false, fmt.Errorf("%d Log file storage is unavailable.", 503)
+		}
+		temporaryPath := temporary.Name()
+		defer os.Remove(temporaryPath)
+
+		byteCount, err = io.Copy(temporary, io.LimitReader(body, LogFileMaxByteCount+1))
+		if closeErr := temporary.Close(); err == nil && closeErr != nil {
+			glog.Infof("[log]feedback log stage err=%s\n", closeErr)
+			return byteCount, false, fmt.Errorf("%d Log file storage is unavailable.", 503)
+		}
+		if err != nil {
+			// the body was cut off
+			return byteCount, false, err
+		}
+		if LogFileMaxByteCount < byteCount {
+			return byteCount, false, nil
+		}
+
+		if err := store.Put(session.Ctx, key, temporaryPath, feedbackLogContentType); err != nil {
+			glog.Infof("[log]feedback log store err=%s\n", err)
+			return byteCount, false, fmt.Errorf("%d Log file storage is unavailable.", 503)
+		}
+		return byteCount, true, nil
+	}
+
 	var byteCount int64
 	var complete bool
 	if store, ok := LoadFeedbackLogStore(); ok {
 		byteCount, complete, err = storeLogFile(
-			session.Ctx,
 			store,
 			FeedbackLogKey(feedback.NetworkId, feedback.FeedbackId),
-			body,
 		)
 	} else {
 		byteCount, err = io.Copy(io.Discard, io.LimitReader(body, LogFileMaxByteCount+1))
@@ -179,42 +206,4 @@ func UploadLogFile(
 	}
 
 	return &UploadLogFileResult{}, nil
-}
-
-// storeLogFile stages the upload body in a temporary file, because the store
-// uploads from a file, and puts it at key when the body fits the size cap. An
-// oversize body is never stored. complete is false when the body was cut off by
-// an error, exceeded the cap, or could not be stored.
-func storeLogFile(
-	ctx context.Context,
-	store server.BlobStore,
-	key string,
-	body io.Reader,
-) (byteCount int64, complete bool, err error) {
-	temporary, err := os.CreateTemp("", "urnetwork-feedback-log-*.zip")
-	if err != nil {
-		glog.Infof("[log]feedback log stage err=%s\n", err)
-		return 0, false, fmt.Errorf("%d Log file storage is unavailable.", 503)
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-
-	byteCount, err = io.Copy(temporary, io.LimitReader(body, LogFileMaxByteCount+1))
-	if closeErr := temporary.Close(); err == nil && closeErr != nil {
-		glog.Infof("[log]feedback log stage err=%s\n", closeErr)
-		return byteCount, false, fmt.Errorf("%d Log file storage is unavailable.", 503)
-	}
-	if err != nil {
-		// the body was cut off
-		return byteCount, false, err
-	}
-	if LogFileMaxByteCount < byteCount {
-		return byteCount, false, nil
-	}
-
-	if err := store.Put(ctx, key, temporaryPath, feedbackLogContentType); err != nil {
-		glog.Infof("[log]feedback log store err=%s\n", err)
-		return byteCount, false, fmt.Errorf("%d Log file storage is unavailable.", 503)
-	}
-	return byteCount, true, nil
 }

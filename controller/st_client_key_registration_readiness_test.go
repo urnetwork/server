@@ -41,15 +41,15 @@ func testStClientKeyRegistrationReadinessRetry(t testing.TB, failHistory bool) {
 	var blockedHistory string
 	if failHistory {
 		store, ok := server.LoadBlobStore()
-		config, present := server.LoadBlobStoreConfig()
-		if !ok || !present || !config.Local {
+		blobRoot := fixture.snapshot().blobRoot
+		if !ok || store.Authority() != "local:"+blobRoot {
 			t.Fatal("actual private local store was not configured")
 		}
 		prefix, err := startifact.EvidenceHistoryPrefix(store, cfg.DeploymentId, fixture.snapshot().domain.Netuid, startifact.ClientKeyRegistrationEvidenceKind)
 		if err != nil {
 			t.Fatal(err)
 		}
-		blockedHistory = filepath.Join(config.LocalPath, filepath.FromSlash(prefix))
+		blockedHistory = filepath.Join(blobRoot, filepath.FromSlash(prefix))
 		if err := os.MkdirAll(filepath.Dir(blockedHistory), 0o700); err != nil {
 			t.Fatal(err)
 		}

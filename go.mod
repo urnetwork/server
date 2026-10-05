@@ -228,4 +228,6 @@ replace github.com/urfoundation/sn => ../sn
 // native RPC transport and tracked upstream provenance in server binaries.
 replace github.com/centrifuge/go-substrate-rpc-client/v4 => ../sn/third_party/go-substrate-rpc-client
 
+// Share the fork's source with local builds and frozen PERF arms. CI locks this
+// sibling's full revision; the release builder converts it to an immutable pin.
 replace gvisor.dev/gvisor => ../gvisor

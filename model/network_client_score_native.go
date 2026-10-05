@@ -22,6 +22,22 @@ const clientScoreNativeBaseline = "b"
 
 var errClientScoreNativeUnavailable = errors.New("native client score source unavailable")
 
+// Native aliases become visible only after the baseline snapshot commits.
+// They share the bounded SET stream and its TTL/error handling; staging and
+// committing native snapshots retain their guarded publication boundary.
+func newClientScoreNativeFanout(ctx context.Context, r server.RedisClient, countsKey func(server.Id) string, ttl time.Duration, census *ClientScoreNativeCensus, emit func(clientScoreRedisSet) error) *clientScoreNativeFanout {
+	return &clientScoreNativeFanout{
+		publish: func(callerId server.Id, facets map[ipFamilyFacet]clientScoreFacetPayload) error {
+			return writeClientScoreNativeSnapshot(ctx, r, clientScoreNativeKey(countsKey(callerId)), ttl, facets, census)
+		},
+		alias: func(callerId server.Id) error {
+			return emit(clientScoreRedisSet{
+				key: clientScoreNativeKey(countsKey(callerId)), value: []byte(clientScoreNativeBaseline),
+			})
+		},
+	}
+}
+
 // Called after every exporter has joined and its error channel is closed.
 // Cancellation cannot discard worker errors or certify complete publication.
 func finishClientScoreExport(ctx context.Context, workerErrs <-chan error) error {
@@ -132,7 +148,7 @@ type clientScoreNativePublication struct {
 	pageFields []string
 }
 
-func beginClientScoreNativePublication(ctx context.Context, r server.RedisClient, key string, ttl time.Duration) (*clientScoreNativePublication, error) {
+func prepareClientScoreNativePublication(ctx context.Context, r server.RedisClient, key string, ttl time.Duration) (*clientScoreNativePublication, error) {
 	if ttl < time.Millisecond {
 		return nil, fmt.Errorf("native client score publication requires positive ttl")
 	}
@@ -152,14 +168,58 @@ func beginClientScoreNativePublication(ctx context.Context, r server.RedisClient
 		pointerKey: key, slotKey: clientScoreNativeSlotKey(key, slot),
 		expected: active, generation: server.NewId().String(), slot: slot, ttl: ttl,
 	}
-	result, err := r.Eval(ctx, clientScoreNativeBeginScript, []string{key, publication.slotKey}, active, publication.generation, ttl.Milliseconds(), slot).Int()
+	return publication, nil
+}
+
+func (self *clientScoreNativePublication) begin(ctx context.Context, r server.RedisClient) error {
+	result, err := r.Eval(ctx, clientScoreNativeBeginScript, []string{self.pointerKey, self.slotKey}, self.expected, self.generation, self.ttl.Milliseconds(), self.slot).Int()
+	if err != nil {
+		return err
+	}
+	if result != 1 {
+		return fmt.Errorf("native client score publisher lost its staging generation")
+	}
+	return nil
+}
+
+func beginClientScoreNativePublication(ctx context.Context, r server.RedisClient, key string, ttl time.Duration) (*clientScoreNativePublication, error) {
+	publication, err := prepareClientScoreNativePublication(ctx, r, key, ttl)
 	if err != nil {
 		return nil, err
 	}
-	if result != 1 {
-		return nil, fmt.Errorf("native client score publisher lost its staging generation")
+	if err := publication.begin(ctx, r); err != nil {
+		return nil, err
 	}
 	return publication, nil
+}
+
+// Staging and its first bounded page batch share one transport submission.
+// Both scripts retain their guards and run in order on the same hash slot.
+// Commit remains separate: no failed or unacknowledged batch can advance it.
+func (self *clientScoreNativePublication) beginWithPages(ctx context.Context, r server.RedisClient, pages []clientScoreRedisSet) error {
+	args := []any{self.expected, self.generation, self.ttl.Milliseconds()}
+	for _, page := range pages {
+		args = append(args, page.key, page.value)
+	}
+	pipe := r.Pipeline()
+	begin := pipe.Eval(ctx, clientScoreNativeBeginScript, []string{self.pointerKey, self.slotKey}, self.expected, self.generation, self.ttl.Milliseconds(), self.slot)
+	write := pipe.Eval(ctx, clientScoreNativePagesScript, []string{self.pointerKey, self.slotKey}, args...)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return err
+	}
+	for _, command := range []*redis.Cmd{begin, write} {
+		result, err := command.Int()
+		if err != nil {
+			return err
+		}
+		if result != 1 {
+			return fmt.Errorf("native client score publisher lost its staging generation")
+		}
+	}
+	for _, page := range pages {
+		self.pageFields = append(self.pageFields, page.key)
+	}
+	return nil
 }
 
 func (self *clientScoreNativePublication) writePages(ctx context.Context, r server.RedisClient, pages []clientScoreRedisSet) error {
@@ -225,7 +285,7 @@ func (self *clientScoreNativePublication) commit(ctx context.Context, r server.R
 // The encoder already owns native-only, bounded pages. Retain only one
 // bounded write batch and small per-page count/checksum metadata during export.
 func writeClientScoreNativeSnapshot(ctx context.Context, r server.RedisClient, key string, ttl time.Duration, facets map[ipFamilyFacet]clientScoreFacetPayload, sources ...*ClientScoreNativeCensus) error {
-	publication, err := beginClientScoreNativePublication(ctx, r, key, ttl)
+	publication, err := prepareClientScoreNativePublication(ctx, r, key, ttl)
 	if err != nil {
 		return err
 	}
@@ -235,6 +295,7 @@ func writeClientScoreNativeSnapshot(ctx context.Context, r server.RedisClient, k
 		manifest.SourceStartedAt = sources[0].SourceStartedAt
 		manifest.SourceCompletedAt = sources[0].SourceCompletedAt
 	}
+	staged := false
 	err = runClientScoreExportStream(ctx, clientScoreExportBatchSize, clientScoreExportBatchBytes, 1,
 		func(emit func(clientScoreRedisSet) error) error {
 			for _, facet := range ipFamilyFacets {
@@ -258,11 +319,25 @@ func writeClientScoreNativeSnapshot(ctx context.Context, r server.RedisClient, k
 			}
 			return nil
 		},
-		func(pages []clientScoreRedisSet) error { return publication.writePages(ctx, r, pages) },
+		func(pages []clientScoreRedisSet) error {
+			if !staged {
+				if err := publication.beginWithPages(ctx, r, pages); err != nil {
+					return err
+				}
+				staged = true
+				return nil
+			}
+			return publication.writePages(ctx, r, pages)
+		},
 		func(context.Context, int) error { return nil },
 	)
 	if err != nil {
 		return err
+	}
+	if !staged {
+		if err := publication.begin(ctx, r); err != nil {
+			return err
+		}
 	}
 	return publication.commit(ctx, r, manifest)
 }

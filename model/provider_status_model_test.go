@@ -73,12 +73,15 @@ func testingProviderStatusFilter(facts *providerStatusFacts) providerCountFilter
 
 var testingProviderStatusMinimums = map[int]float64{1: 0.95, 2: 0.7, 3: 0.6}
 
+// Decides facts against countFilter with the default egress settings and the
+// testing minimums, returning the evaluation and the wire status.
 func testingProviderStatus(facts *providerStatusFacts, countFilter providerCountFilter) (*providerStatusEvaluation, *ProviderStatus) {
 	settings := DefaultEgressIndexSettings()
 	evaluation := evaluateProviderStatus(facts, countFilter, settings, false, testingProviderStatusMinimums)
 	return evaluation, newProviderStatus(facts, evaluation, countFilter, settings, testingProviderStatusMinimums, testingProviderStatusNow)
 }
 
+// The status's ranking number with name, nil when it has none.
 func testingProviderStatusNumber(status *ProviderStatus, name string) *ProviderRankingNumber {
 	for _, number := range status.Ranking {
 		if number.Name == name {
@@ -172,21 +175,19 @@ func TestProviderStatusReasonOrder(t *testing.T) {
 			c.blackholed = map[server.Id]bool{f.clientId: true}
 		}, reason: ProviderStatusReasonNone},
 	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			facts := testingProviderStatusFacts()
-			countFilter := testingProviderStatusFilter(facts)
-			testCase.modify(facts, &countFilter)
-			_, status := testingProviderStatus(facts, countFilter)
-			if status.Reason != testCase.reason {
-				t.Fatalf("reason = %s, want %s", status.Reason, testCase.reason)
-			}
-			if status.ReasonText != providerStatusReasonTexts[testCase.reason] || status.ReasonText == "" {
-				t.Fatalf("reason text = %q", status.ReasonText)
-			}
-			if !slices.Contains(ProviderStatusReasons, status.Reason) {
-				t.Fatalf("reason %s is not listed", status.Reason)
-			}
-		})
+		facts := testingProviderStatusFacts()
+		countFilter := testingProviderStatusFilter(facts)
+		testCase.modify(facts, &countFilter)
+		_, status := testingProviderStatus(facts, countFilter)
+		if status.Reason != testCase.reason {
+			t.Errorf("%s: reason = %s, want %s", testCase.name, status.Reason, testCase.reason)
+		}
+		if status.ReasonText != providerStatusReasonTexts[testCase.reason] || status.ReasonText == "" {
+			t.Errorf("%s: reason text = %q", testCase.name, status.ReasonText)
+		}
+		if !slices.Contains(ProviderStatusReasons, status.Reason) {
+			t.Errorf("%s: reason %s is not listed", testCase.name, status.Reason)
+		}
 	}
 }
 

@@ -227,6 +227,85 @@ func TestUseWalletAuthChallengeSignatureErrorsStay4xx(t *testing.T) {
 	}
 }
 
+// A well formed signature that does not verify for the address is marked as a
+// mismatch, so POST /sn/wallet can tell the user they signed with another
+// account. Malformed input and a wrong challenge are not marked. sr25519
+// cannot recover the signing key, so the right key over other text is a
+// mismatch too.
+func TestUseWalletAuthChallengeSignatureMismatchIsMarked(t *testing.T) {
+	ctx := context.Background()
+	message := FormatWalletAuthChallengeMessage("c2lnbmF0dXJlLW1pc21hdGNo", server.NowUtc().Unix())
+	typed := newTestingBittensorWallet(t)
+	other := newTestingBittensorWallet(t)
+
+	cases := []struct {
+		name         string
+		message      string
+		signature    string
+		wantMismatch bool
+		wantMessage  string
+	}{
+		{
+			name:         "another account signed",
+			message:      message,
+			signature:    other.sign(message),
+			wantMismatch: true,
+			wantMessage:  "401 invalid signature",
+		},
+		{
+			name:         "the typed account signed other text",
+			message:      message,
+			signature:    typed.sign(FormatWalletAuthChallengeMessage("b3RoZXItdGV4dA==", server.NowUtc().Unix())),
+			wantMismatch: true,
+			wantMessage:  "401 invalid signature",
+		},
+		{
+			name:        "not hex",
+			message:     message,
+			signature:   "zzzz",
+			wantMessage: "400 invalid signature encoding",
+		},
+		{
+			name:        "63 bytes",
+			message:     message,
+			signature:   strings.Repeat("ab", 63),
+			wantMessage: "400 invalid signature encoding",
+		},
+		{
+			name:        "64 bytes that are no signature",
+			message:     message,
+			signature:   strings.Repeat("00", 64),
+			wantMessage: "400 invalid signature encoding",
+		},
+		{
+			name:        "not a challenge",
+			message:     "Sign in to URnetwork",
+			signature:   other.sign("Sign in to URnetwork"),
+			wantMessage: "400 invalid message format",
+		},
+		{
+			name:        "an expired challenge",
+			message:     FormatWalletAuthChallengeMessage("ZXhwaXJlZA==", server.NowUtc().Add(-time.Hour).Unix()),
+			signature:   other.sign(message),
+			wantMessage: "400 challenge timestamp too old",
+		},
+	}
+	for _, test := range cases {
+		result, err := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+			Blockchain: "TAO",
+			PublicKey:  typed.address,
+			Message:    test.message,
+			Signature:  test.signature,
+		}, ctx)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Valid, false)
+		if result.SignatureMismatch != test.wantMismatch {
+			t.Fatalf("%s: signature mismatch = %v, want %v (%q)", test.name, result.SignatureMismatch, test.wantMismatch, result.Error.Message)
+		}
+		connect.AssertEqual(t, result.Error.Message, test.wantMessage)
+	}
+}
+
 // A fixed size solana.Signature silently zero pads a short signature and
 // truncates a long one. Reject instead, matching the Bittensor verifier.
 func TestVerifySolanaSignatureLength(t *testing.T) {

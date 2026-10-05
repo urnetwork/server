@@ -483,9 +483,10 @@ func TestStClientKeyRegistrationCohortPublicationActualControllerOwnsFinalFailur
 			case <-release:
 			}
 		}
-		blobConfig, present := server.LoadBlobStoreConfig()
-		if !present || blobConfig == nil {
-			tb.Fatal("actual local blob configuration is absent")
+		blobRoot := fixture.snapshot().blobRoot
+		store, present := server.LoadBlobStore()
+		if !present || store.Authority() != "local:"+blobRoot {
+			tb.Fatal("actual local blob fixture is absent")
 		}
 		published, windows := 0, 0
 		var injectionErr error
@@ -498,7 +499,7 @@ func TestStClientKeyRegistrationCohortPublicationActualControllerOwnsFinalFailur
 		cohorts.afterPublicationForTest = func() {
 			published++
 			if published == 2 {
-				injectionErr = errors.Join(injectionErr, os.WriteFile(filepath.Join(blobConfig.LocalPath, "synthetic-unaccounted.json"), []byte("x"), 0o600))
+				injectionErr = errors.Join(injectionErr, os.WriteFile(filepath.Join(blobRoot, "synthetic-unaccounted.json"), []byte("x"), 0o600))
 			}
 		}
 		key := bytes.Repeat([]byte{9}, 32)

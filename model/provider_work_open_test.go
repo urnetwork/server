@@ -356,7 +356,9 @@ func (self providerWorkOpenClockRow) Scan(values ...any) error {
 	if !ok {
 		return errors.New("synthetic database clock destination is not time")
 	}
-	*destination = self.at
+	// The real timestamp-without-time-zone decoder returns UTC for
+	// clock_timestamp() AT TIME ZONE 'UTC', regardless of the handler's zone.
+	*destination = self.at.UTC()
 	return nil
 }
 
@@ -377,7 +379,9 @@ func TestProviderWorkOpenObservationAndOutcomeUseDatabaseClock(t *testing.T) {
 		}
 		// A database clock ahead of the handler reproduces the cross-clock
 		// risk without replacing any process-global clock or live dependency.
-		databaseTime := time.UnixMicro(original.Open.ObservedAtUnixMicro).Add(time.Minute)
+		// The fixture's host may be in any timezone. Keep an explicit non-UTC
+		// input so its timestamp decoder must model the real UTC database read.
+		databaseTime := time.UnixMicro(original.Open.ObservedAtUnixMicro).In(time.FixedZone("synthetic-handler", -5*60*60)).Add(time.Minute)
 		server.Tx(f.ctx, func(tx server.PgTx) {
 			for _, party := range []server.Id{f.sourceId, f.destinationId} {
 				if _, _, err := applyContractCloseReportInTx(f.ctx, tx, id, party, 121, false, nil); err != nil {
@@ -406,7 +410,7 @@ func TestProviderWorkOpenObservationAndOutcomeUseDatabaseClock(t *testing.T) {
 			var retained time.Time
 			server.Raise(conn.QueryRow(f.ctx, `SELECT close_time FROM transfer_contract WHERE contract_id=$1`, id).Scan(&retained))
 			if !retained.Equal(databaseTime) {
-				t.Fatal("financial row and original outcome use different clocks")
+				t.Fatalf("financial row and original outcome use different clocks: retained=%s original=%s", retained.Format(time.RFC3339Nano), databaseTime.Format(time.RFC3339Nano))
 			}
 		})
 	})

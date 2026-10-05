@@ -4911,6 +4911,41 @@ server lock residence nor Main latency. Busy attempts still acquire their
 per-contract owners and commit without economic DML; this inherited work and
 downstream provider-total contention require separate measurements.
 
+Bounded grant-queue opportunity (2026-10-05): the first selected old-head visit
+in a continued page issues the sorted grant preflight without `SKIP LOCKED`,
+under one 250ms statement budget. Intent and contract ownership still skip;
+forward visits and later heads retain the existing nonwaiting grant query.
+The query mode is chosen before acquiring any grant, avoiding an out-of-order
+retry of a partially acquired set. A successful preflight restores the normal
+two-second statement budget before the unchanged financial transaction.
+Recognized timeout from that exact query unwinds through full transaction
+rollback before becoming grant-busy; it neither changes the intent's due key
+nor logs an expected error, defers it as operational, or runs posts. Parent or
+operator cancellation, deadlock, later financial failure and ambiguous commit
+remain separate errors. Rollback/disposal and posts have their existing bounds;
+250ms describes the acquisition statement, not total request wall time.
+
+Source-qualified task results add `head_grant_wait_attempted`,
+`head_grant_wait_completed` and `head_grant_wait_timed_out`. Attempted means the
+blocking-mode query was issued, not that PostgreSQL actually waited. Completed
+means that visit returned financial success, not just grant acquisition. Each
+page has at most one attempted query; completed plus timed-out cannot exceed
+attempted, completed is a head-completed subset, and timed-out is a
+head-grant-busy subset. The existing grant-set counter now includes this scoped
+timeout as well as incomplete or changing joined membership. Missing fields
+from older producers remain unknown, not zero. Qualify the source separately
+from JSON shape and retain selected finished-task-head coverage limits.
+
+A native baseline skips the retained owner and returns before its subsequent
+release; the candidate is observed waiting on that owner and then commits exact
+debit, sweep, metadata and durable provider-total ownership after release.
+Held-budget, partial-grant, cancellation and later-failure controls preserve
+rollback and replay fences. This offers bounded acquisition opportunity, not a
+proof of Main's lock owner or guaranteed cohort drain: long owners, queue depth,
+membership changes and pages that never reach their head slot remain possible.
+Due-key order also differs from oldest-open creation order; an old open head
+before the persisted cursor need not occupy the first selected retry slot.
+
 The inline legacy metadata path now reuses its actual grant and escrow ownership
 only when every payout target exactly matches the captured positive unmarked
 reservation key and amount. It removes four redundant reads/locks, keeps
@@ -7686,6 +7721,13 @@ label_replace(
   and heap families for that boundary: 48 concurrent workers and other tasks
   make `runtime.MemStats` deltas inside an individual span non-attributable.
   Summed completed-span seconds are wall occupancy, not CPU attribution.
+  Parent/child spans and the 48 workers overlap: do not subtract their
+  accumulated seconds to infer elapsed time in an uninstrumented stage.
+  Exits include error and panic cleanup, not just successful exports. In the
+  reviewed `9577fddd` path, `cache_write` covers the legacy pipeline's SET
+  attempts; it does not include native snapshot GET/Lua calls, individual
+  native-alias SETs, retry sleeps, Redis acquisition or the final census SET.
+  A flat legacy-write counter therefore cannot clear a native-export stall.
 - Require all five metric families for all five phases from the exact runtime,
   including two samples for each rate. Every value/rate expression is filtered
   by `timestamp(original_metric)` between `time() - 90` and `time() + 30`
@@ -7696,6 +7738,17 @@ label_replace(
   process-rate warning. The same helper and one-query/25-series-per-process
   bound serve §2.12; each qualifying probe loads it at most once, without adding
   product metrics, labels, or a shared cache.
+- Native score-census freshness uses its original source-completion clock,
+  separately from these metric scrapes and URL-quota publication. Preserve
+  source start, completion, publication and read clocks; the 900-second source
+  limit is not renewed by publication or the 300-minute Redis TTL. A stale
+  value remains unknown supply. Freshness is checked before bucket/ratio
+  validation, so a later stale refusal does not resolve an earlier malformed
+  publication. The source-completion clock is stamped before exclusion/target
+  assembly and export and differs from the `source_load` span boundary.
+  The successful task schedules its next run after 30 seconds; that is not a
+  30-second publication guarantee. A pending-task claim/release timestamp is
+  scheduling metadata, not advisory-owner or native-publication proof.
 - A duplicate phase/family sample for the same exact host/block/instance
   invalidates that worker's entire phase observation, even when values agree
   or only ignored labels differ. Do not choose a last writer or combine
@@ -12200,6 +12253,55 @@ Deleting a grant while escrows or settlement remain open is not cleanup.
 
 ### 2.19f Rolling URL-probe coverage and measured-run capacity
 
+The quota objective applies **four hours after first admission**: every mature
+provider should have ten unique accepted measured outcomes, success plus
+failure, in `(now-4h, now]`. The immutable `cycle_started_at` establishes
+first-admission age, not uninterrupted historical eligibility. Known newcomers
+under four hours form a separate warming cohort, including providers already
+at quota. A brief withdrawal and re-entry preserves that original timestamp;
+an aged deficit cannot escape into a new warming interval. Missing or future
+first-admission timestamps remain `age_unknown`. There is no timestamp
+backfill or schema migration. The unchanged all-current quota stock includes
+all three cohorts and retains every missing measurement.
+
+The additive census family
+`urnetwork_url_probe_admission_cohort{cohort,state}` exposes `mature`,
+`warming`, and `age_unknown`, each with `eligible`, `quota_complete`, and
+`runs_needed`. Their sums must exactly equal the corresponding all-current
+fleet counts; each cohort also requires `quota_complete <= eligible` and
+`eligible-quota_complete <= runs_needed <= 10*(eligible-quota_complete)`.
+`urnetwork_url_probe_admission_cohort_contract=1` is part of the same immutable
+snapshot and uses its original observation clock. All ten extension cells must
+share the old census's underlying scrape timestamp. Missing, malformed, mixed
+or unsupported extension data is unobservable; it does not invalidate an
+independently coherent all-current census or invent an empty mature population.
+This extension reads existing first-admission timestamps without changing
+admission policy, pacing, or accepted-history rules. During mixed deployment,
+an old producer cannot establish mature coverage.
+
+The `url-probe-coverage-deficit` alert now applies to known mature quota
+deficits: WARN for any, PAGE for at least 10% of the mature denominator,
+sustained twice. Known warming deficits remain visible without counting as
+mature failures. Any unknown age also produces an observation warning.
+The known mature ratio may be 100% while unknown age is nonzero, but that is
+only the known subset and cannot establish a whole-fleet maturity verdict.
+A zero mature denominator is N/A, never 100%. Unresolved TLS state has the
+separate `url-probe-security-pending` finding at every eligibility age; the
+unknown-target recovery warning remains. The inclusive 4/5 success quality
+ratio, security exceptions, and ten-measured-outcome quota are distinct rules.
+Hourly acknowledgement capacity still uses all-current demand and cannot prove
+unique accepted credits, per-provider fairness, or sustained completion.
+
+The provider quality probes dashboard has a dedicated URL quota row with the
+known mature ratio, known warming count, unknown age count, all-current quota,
+all nine cohort counts, and separate TLS exceptions. It selects one current,
+unambiguous shard-zero publisher and checks source/scrape clocks and atomic
+cohort partitions. It never sums publisher replicas or substitutes zero for
+absent data. The standing monitor additionally binds desired inventory and
+all configured shard owners. First-admission age does not prove continuous
+eligibility, and two aggregate percentage snapshots alone do not establish
+sustained four-hour coverage of a fixed provider cohort.
+
 URL-turn health and completion counters take their country label from that
 turn's immutable Due place, the same country used to choose its URL catalog.
 Missing or invalid country is `unknown`; it does not trigger an optional
@@ -12451,9 +12553,12 @@ The shard-zero owner alone periodically produces the global census:
   all census cells, independently check the durable observation clock, and
   validate count relationships. Failed/canceled/over-deadline refresh retains
   the old timestamp. Never sum these global gauges across processes.
-- Warmup follows durable first eligibility, not a process restart. Missing
-  cycle rows remain in the eligible denominator, are explicitly uninitialized,
-  and cannot receive an invented new four-hour grace interval.
+- The compatibility `warming` state above remains the incomplete population
+  within four hours of its durable first-cycle timestamp; it is not the new
+  full warming cohort. Missing cycle rows remain in the eligible denominator,
+  are explicitly uninitialized, and cannot receive an invented new four-hour
+  grace interval. Use the additive eligibility-age partition for the mature
+  objective, rather than relabeling this historical state.
 
 `oldest_due_seconds` has a narrower meaning than "oldest overdue provider".
 `GetProviderUrlProbeFleet` (`model/provider_url_probe_fleet.go:33–59`) computes
@@ -12506,10 +12611,11 @@ qualifier: a valid first origin/return pair does not prove the encrypted reply
 carrier succeeded; preserve the exact request branch and local acquisition
 error. Such a setup failure is unmeasured, not a negative provider outcome.
 
-Emit `url-probe-coverage-deficit` WARN for any eligible provider lacking secure
-completion. Escalate to PAGE when at least 10% of eligible providers are
-overdue, sustained for two cadences. Report quota and security deficits
-separately. Emit `url-probe-security-recovery-unknown` WARN when legacy TLS
+Emit `url-probe-coverage-deficit` WARN for any known mature provider lacking
+measured-run quota. Escalate to PAGE when at least 10% of known mature providers
+are quota-deficient, sustained for two cadences. Keep all-current quota counts
+and warming deficits visible. Emit `url-probe-security-pending` WARN for any
+unresolved TLS exception, separately from maturity and quota. Emit `url-probe-security-recovery-unknown` WARN when legacy TLS
 quarantine has no trustworthy destination for same-URL recovery. A different
 URL's success, expired history, or a new policy version does not clear TLS.
 

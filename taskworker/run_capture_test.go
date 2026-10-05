@@ -3,9 +3,11 @@ package taskworker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"testing"
@@ -48,7 +50,22 @@ func TestRunStartsWorkerWhenOptionalCaptureIsUnavailable(t *testing.T) {
 			}
 			t.Setenv("ARIN_SHADOW_CAPTURE_CONFIG", path)
 			loaded, err := server.LoadArinShadowRuntimeConfig()
-			if which == "enabled_without_vcs" {
+			if runtime.GOOS != "linux" {
+				// Protected capture is deliberately disabled outside Linux. The
+				// primary worker must still start; Linux admission remains a
+				// separate required check on a Linux host.
+				t.Logf("UNSUPPORTED_HOST: %s has no protected capture runtime; verifying disabled capture and primary-worker startup only", runtime.GOOS)
+				if err != nil || loaded != nil {
+					t.Fatal("unsupported host enabled optional capture", loaded, err)
+				}
+				capture, startErr := server.StartArinShadowRuntime(context.Background(), &config, "native", func(context.Context) (server.ArinShadowRPCHandler, func(), error) {
+					t.Fatal("unsupported host ran the capture factory")
+					return nil, nil, nil
+				})
+				if capture != nil || !errors.Is(startErr, server.ErrArinShadowInput) {
+					t.Fatal("unsupported host accepted configured capture", capture, startErr)
+				}
+			} else if which == "enabled_without_vcs" {
 				if err != nil || loaded == nil {
 					t.Fatal("fresh capture fixture not enabled")
 				}
@@ -65,17 +82,23 @@ func TestRunStartsWorkerWhenOptionalCaptureIsUnavailable(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			runtime := &taskworkerLifecycleRuntime{drainStarted: make(chan struct{}), handbackDone: make(chan struct{})}
+			started := make(chan struct{})
 			starts, serves, stats := 0, 0, 0
 			err = runWithDependencies(ctx, RunOptions{Port: 8080, Count: 1, BatchSize: 1}, func(context.Context) error { return nil },
 				func(context.Context) func() { stats++; return func() {} },
 				func(context.Context, string, http.Handler, bool, server.HttpServerOptions) error {
+					<-started
 					serves++
 					cancel()
 					<-runtime.drainStarted
 					<-runtime.handbackDone
 					return nil
 				},
-				func(context.Context, context.CancelFunc, RunOptions) taskworkerRuntime { starts++; return runtime })
+				func(context.Context, context.Context, context.CancelFunc, RunOptions) (taskworkerRuntime, error) {
+					starts++
+					close(started)
+					return runtime, nil
+				})
 			if err != nil || starts != 1 || serves != 1 || stats != 1 {
 				t.Fatalf("optional capture blocked primary runtime: err=%v starts=%d serves=%d stats=%d", err, starts, serves, stats)
 			}

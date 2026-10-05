@@ -66,6 +66,57 @@ func TestGetUserAuthMissingRecipientIsTyped(t *testing.T) {
 	})
 }
 
+// The in-transaction read answers from the caller's transaction: it sees the
+// transaction's own uncommitted recipient, which a pooled read cannot, and
+// keeps the typed outcome for an admin without a recipient and the empty
+// answer for a missing network.
+func TestGetUserAuthInTxReadsTheCallersTransaction(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		userId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "synthetic-in-tx-recipient", userId)
+		guestNetworkId := server.NewId()
+		Testing_CreateGuestNetwork(ctx, guestNetworkId, "synthetic-in-tx-guest", server.NewId())
+		const recipient = "in-tx-recipient@synthetic.example"
+
+		var inTxUserAuth string
+		var inTxErr error
+		var pooledUserAuth string
+		var guestUserAuth string
+		var guestErr error
+		var missingUserAuth string
+		var missingErr error
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_user SET user_auth = $1 WHERE user_id = $2`,
+				recipient,
+				userId,
+			))
+			inTxUserAuth, inTxErr = GetUserAuthInTx(ctx, tx, networkId)
+			pooledUserAuth, _ = GetUserAuth(ctx, networkId)
+			guestUserAuth, guestErr = GetUserAuthInTx(ctx, tx, guestNetworkId)
+			missingUserAuth, missingErr = GetUserAuthInTx(ctx, tx, server.NewId())
+		})
+		if inTxErr != nil || inTxUserAuth != recipient {
+			t.Fatalf("in-transaction recipient=%q error=%v, want the uncommitted %q", inTxUserAuth, inTxErr, recipient)
+		}
+		if pooledUserAuth == recipient {
+			t.Fatal("the pooled read saw the uncommitted recipient")
+		}
+		if guestUserAuth != "" || !errors.Is(guestErr, ErrMissingUserAuth) {
+			t.Fatalf("guest recipient=%q error=%v, want typed missing recipient", guestUserAuth, guestErr)
+		}
+		if missingUserAuth != "" || missingErr != nil {
+			t.Fatalf("missing network recipient=%q error=%v, want empty", missingUserAuth, missingErr)
+		}
+		if userAuth, err := GetUserAuth(ctx, networkId); err != nil || userAuth != recipient {
+			t.Fatalf("committed recipient=%q error=%v, want %q", userAuth, err, recipient)
+		}
+	})
+}
+
 func TestResetPassword(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

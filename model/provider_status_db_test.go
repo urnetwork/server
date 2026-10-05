@@ -21,28 +21,29 @@ import (
 // redis layout trims and expires. Run with
 // `cd server/model && ../test.sh -run 'ProviderStatus|ProviderAppearance|ProviderCountFilterClient'`.
 
-// Seeds one provider of each kind the status tells apart, all at one city.
+// One provider of each kind the status tells apart, all at one city.
 type providerStatusTestFleet struct {
-	city      *Location
-	providers map[string]*egressTestProvider
+	city          *Location
+	nameProviders map[string]*egressTestProvider
 	// the reason each provider's status must give
-	reasons map[string]string
+	nameReasons map[string]string
 }
 
+// Seeds one provider of each kind the status tells apart, all at one city.
 func newProviderStatusTestFleet(ctx context.Context, t testing.TB) *providerStatusTestFleet {
 	t.Helper()
 	fleet := &providerStatusTestFleet{
-		city:      egressTestCity(ctx, "Palo Alto", "California", "United States", "us"),
-		providers: map[string]*egressTestProvider{},
-		reasons:   map[string]string{},
+		city:          egressTestCity(ctx, "Palo Alto", "California", "United States", "us"),
+		nameProviders: map[string]*egressTestProvider{},
+		nameReasons:   map[string]string{},
 	}
 	add := func(name string, reason string, performance egressTestPerformance, modes map[ProvideMode][]byte, scores *ConnectionLocationScores, failed int) *egressTestProvider {
 		provider := egressTestConnect(ctx, t, fleet.city, performance, modes, scores)
 		if 0 <= failed {
 			egressTestProbed(ctx, provider, fleet.city, failed, "us")
 		}
-		fleet.providers[name] = provider
-		fleet.reasons[name] = reason
+		fleet.nameProviders[name] = provider
+		fleet.nameReasons[name] = reason
 		return provider
 	}
 	steady := func(provider *egressTestProvider, hour float64, halfDay float64) {
@@ -90,7 +91,7 @@ func TestProviderStatusMatchesBulkDecision(t *testing.T) {
 			RankModeSpeed:   egressTestCachedScores(ctx, t, fleet.city, RankModeSpeed, false),
 		}
 
-		for name, provider := range fleet.providers {
+		for name, provider := range fleet.nameProviders {
 			clientIds := []server.Id{provider.clientId}
 			allFacts := loadProviderStatusFacts(ctx, provider.networkId, clientIds)
 			if len(allFacts) != 1 {
@@ -112,8 +113,8 @@ func TestProviderStatusMatchesBulkDecision(t *testing.T) {
 			}
 
 			status := GetClientProviderStatus(ctx, provider.networkId, provider.clientId)
-			if status == nil || status.Reason != fleet.reasons[name] {
-				t.Errorf("%s: status %v, want reason %s", name, status, fleet.reasons[name])
+			if status == nil || status.Reason != fleet.nameReasons[name] {
+				t.Errorf("%s: status %v, want reason %s", name, status, fleet.nameReasons[name])
 				continue
 			}
 
@@ -164,10 +165,10 @@ func TestProviderStatusScopedFilterParity(t *testing.T) {
 		fleetFilter := newProviderCountFilter(ctx, true)
 
 		allClientIds := []server.Id{}
-		for _, provider := range fleet.providers {
+		for _, provider := range fleet.nameProviders {
 			allClientIds = append(allClientIds, provider.clientId)
 		}
-		for _, clientIds := range [][]server.Id{allClientIds, allClientIds[:3], {fleet.providers["tls"].clientId, fleet.providers["risky"].clientId}} {
+		for _, clientIds := range [][]server.Id{allClientIds, allClientIds[:3], {fleet.nameProviders["tls"].clientId, fleet.nameProviders["risky"].clientId}} {
 			scoped := newProviderCountFilterForClients(ctx, clientIds)
 			restrict := func(in any) any {
 				value := reflect.ValueOf(in)
@@ -208,16 +209,16 @@ func TestProviderCountFilterClientSqlParity(t *testing.T) {
 			clientIds := []server.Id{}
 			for i, fixture := range []struct {
 				rollup, risk, nonQuality, connected, valid bool
-				weights                                    map[int]float64
+				lookbackWeights                            map[int]float64
 			}{
 				{rollup: true, connected: true, valid: true},
 				{rollup: true, risk: true},
 				{rollup: true, valid: true, nonQuality: true},
-				{rollup: true, weights: map[int]float64{1: minimums[1] - 0.001}},
-				{rollup: true, weights: map[int]float64{2: minimums[2] - 0.001}},
-				{rollup: true, weights: minimums},
-				{rollup: true, weights: map[int]float64{7: -0.001}},
-				{weights: map[int]float64{1: 0}},
+				{rollup: true, lookbackWeights: map[int]float64{1: minimums[1] - 0.001}},
+				{rollup: true, lookbackWeights: map[int]float64{2: minimums[2] - 0.001}},
+				{rollup: true, lookbackWeights: minimums},
+				{rollup: true, lookbackWeights: map[int]float64{7: -0.001}},
+				{lookbackWeights: map[int]float64{1: 0}},
 				{},
 			} {
 				clientId := server.Id{byte(i + 1)}
@@ -227,7 +228,7 @@ func TestProviderCountFilterClientSqlParity(t *testing.T) {
 						(client_id,arin_risk,arin_non_quality,connected,valid) VALUES($1,$2,$3,$4,$5)`,
 						clientId, fixture.risk, fixture.nonQuality, fixture.connected, fixture.valid))
 				}
-				for lookback, weight := range fixture.weights {
+				for lookback, weight := range fixture.lookbackWeights {
 					server.RaisePgResult(tx.Exec(t.Context(), `INSERT INTO client_connection_reliability_score VALUES($1,$2,$3)`, clientId, lookback, weight))
 				}
 			}
@@ -338,9 +339,9 @@ func TestFindProviders2CountsReturnedProviderAppearances(t *testing.T) {
 			connect.AssertEqual(t, err, nil)
 			return egressTestIds(result.Providers)
 		}
-		returned := find(WithProviderAppearances(ctx, appearances))
-		if len(returned) != 3 {
-			t.Fatalf("%d providers returned", len(returned))
+		returnedClientIds := find(WithProviderAppearances(ctx, appearances))
+		if len(returnedClientIds) != 3 {
+			t.Fatalf("%d providers returned", len(returnedClientIds))
 		}
 		// no owner: not counted
 		find(ctx)
@@ -356,7 +357,7 @@ func TestFindProviders2CountsReturnedProviderAppearances(t *testing.T) {
 				total += count
 			}
 			want := int64(0)
-			if slices.Contains(returned, clientId) {
+			if slices.Contains(returnedClientIds, clientId) {
 				want = 1
 			}
 			if total != want {

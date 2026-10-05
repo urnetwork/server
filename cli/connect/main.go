@@ -22,7 +22,7 @@ func main() {
 	usage := `BringYour connect server.
 
 Usage:
-  connect [--port=<port>] [--memory-owner-ledger]
+  connect [--port=<port>] [--memory-owner-ledger] [--private-heap-profile-target=<target>]
   connect -h | --help
   connect --version
 
@@ -30,7 +30,8 @@ Options:
   -h --help     Show this screen.
   --version     Show version.
   -p --port=<port>  Listen port [default: 80].
-  --memory-owner-ledger  Enable fixed resident transfer-owner metrics.`
+  --memory-owner-ledger  Enable fixed resident transfer-owner metrics.
+  --private-heap-profile-target=<target>  Root-only host/block, disabled, or optional startup Config [default: config].`
 
 	opts, err := docopt.ParseArgs(usage, os.Args[1:], server.RequireVersion())
 	if err != nil {
@@ -44,9 +45,16 @@ Options:
 	if err != nil {
 		panic(err)
 	}
+	privateHeapTarget, err := opts.String("--private-heap-profile-target")
+	if err != nil {
+		panic(err)
+	}
+	if privateHeapTarget == "config" {
+		privateHeapTarget = ""
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGQUIT, syscall.SIGTERM)
 	defer stop()
-	if err := connectserver.Run(ctx, connectserver.RunOptions{Port: port, MemoryOwnerLedger: memoryOwnerLedger}); err != nil {
+	if err := connectserver.Run(ctx, connectserver.RunOptions{Port: port, MemoryOwnerLedger: memoryOwnerLedger, PrivateHeapProfileTarget: privateHeapTarget}); err != nil {
 		panic(err)
 	}
 }

@@ -178,20 +178,46 @@ func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *P
 					ordinal  int64
 				}
 				seen := map[claimIdentity]bool{}
+				seenProvider := map[string]bool{}
 				for _, provider := range due {
-					identity := claimIdentity{provider.ClientId, provider.ClaimOrdinal}
+					identity := claimIdentity{clientId: provider.ClientId, ordinal: provider.ClaimOrdinal}
 					if provider.ClientId == "" || seen[identity] {
 						runErr = errors.Join(runErr, fmt.Errorf("URL probe due response contains an empty or repeated claim"))
 						stopAdmission(urlSchedulerInvalidDue)
 						continue
 					}
 					seen[identity] = true
-					if ordinal, exists := active[provider.ClientId]; exists {
+					repeatedProvider := seenProvider[provider.ClientId]
+					seenProvider[provider.ClientId] = true
+					ordinal, exists := active[provider.ClientId]
+					if exists && admit && !repeatedProvider && ordinal > 0 && provider.ClaimOrdinal > ordinal {
+						// Health can expose the next claim before old publication
+						// finishes. Keep that issued identity until its owner joins.
+						for {
+							if _, pending := active[provider.ClientId]; !pending {
+								break
+							}
+							if admit {
+								observation.enter(urlSchedulerWait)
+							} else {
+								observation.enter(urlSchedulerDrain)
+							}
+							collect(<-completed)
+						}
+						observation.enter(urlSchedulerDispatch)
+						if err := ctx.Err(); err != nil {
+							runErr = errors.Join(runErr, err)
+							stopAdmission(urlSchedulerCanceled)
+						} else if deadline, bounded := ctx.Deadline(); bounded &&
+							time.Until(deadline) < providerUrlProbeRunBudget(args)+3*providerEgressControlPlaneTimeout {
+							stopAdmission(urlSchedulerReserve)
+						}
+					} else if exists || repeatedProvider {
 						runErr = errors.Join(runErr, fmt.Errorf("URL probe due response contains an in-flight provider"))
 						stopAdmission(urlSchedulerInvalidDue)
 						// An exact replay is already owned by the running turn. A
 						// distinct issued ordinal still needs its own completion.
-						if ordinal == provider.ClaimOrdinal {
+						if exists && ordinal == provider.ClaimOrdinal {
 							continue
 						}
 					}

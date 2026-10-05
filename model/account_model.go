@@ -105,7 +105,7 @@ func FindNetworksByUserAuth(ctx context.Context, userAuth string) ([]*FindNetwor
 	return findNetworkResults, nil
 }
 
-// RemoveNetworkOutcome is what RemoveNetworkWithStoreSnapshot did.
+// What RemoveNetworkWithStoreSnapshot did.
 type RemoveNetworkOutcome string
 
 const (
@@ -121,17 +121,17 @@ const (
 	RemoveNetworkStoreRenewalUnchecked RemoveNetworkOutcome = "store_renewal_unchecked"
 )
 
-// RemoveNetworkStoreSnapshot names the App Store and Google Play renewals an
-// account deletion checked with the stores before it removes the network: the
-// App Store transactions it looked up and the Google Play purchases it
-// cancelled. RemoveNetworkWithStoreSnapshot refuses any other active renewal
-// from those stores that it finds under the deletion lock.
+// Names the App Store and Google Play renewals an account deletion checked with
+// the stores before it removes the network: the App Store transactions it
+// looked up and the Google Play purchases it cancelled.
+// RemoveNetworkWithStoreSnapshot refuses any other active renewal from those
+// stores that it finds under the deletion lock.
 type RemoveNetworkStoreSnapshot struct {
 	AppleTransactionIds []string
 	PlayPurchaseTokens  []string
 }
 
-// Covers reports whether the deletion's store steps checked renewal. A nil
+// Reports whether the deletion's store steps checked renewal. A nil
 // snapshot (a caller that ran no store steps) covers nothing, and a renewal
 // without a store identity is never covered: the store steps refuse it too.
 func (self *RemoveNetworkStoreSnapshot) Covers(renewal *ActiveSubscriptionRenewal) bool {
@@ -148,9 +148,9 @@ func (self *RemoveNetworkStoreSnapshot) Covers(renewal *ActiveSubscriptionRenewa
 	}
 }
 
-// GetRemoveNetworkStoreSnapshot reads the App Store and Google Play renewals
-// that may still bill the network, for an account deletion to check with the
-// stores and then hand to RemoveNetworkWithStoreSnapshot.
+// Reads the App Store and Google Play renewals that may still bill the
+// network, for an account deletion to check with the stores and then hand to
+// RemoveNetworkWithStoreSnapshot.
 func GetRemoveNetworkStoreSnapshot(ctx context.Context, networkId server.Id) *RemoveNetworkStoreSnapshot {
 	storeSnapshot := &RemoveNetworkStoreSnapshot{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -166,11 +166,10 @@ func GetRemoveNetworkStoreSnapshot(ctx context.Context, networkId server.Id) *Re
 	return storeSnapshot
 }
 
-// removeNetworkStoreRenewals reads every App Store and Google Play supporter
-// renewal whose window has not ended, including one queued to start later (as
-// the Stripe check reads Stripe renewals). The snapshot and the check under
-// the deletion lock read the same rows, so only a renewal credited in between
-// tells them apart.
+// Reads every App Store and Google Play supporter renewal whose window has not
+// ended, including one queued to start later (as the Stripe check reads Stripe
+// renewals). The snapshot and the check under the deletion lock read the same
+// rows, so only a renewal credited in between tells them apart.
 func removeNetworkStoreRenewals(
 	ctx context.Context,
 	query server.PgCanQuery,
@@ -211,8 +210,8 @@ func removeNetworkStoreRenewals(
 	return renewals
 }
 
-// RemoveNetwork is RemoveNetworkWithStoreSnapshot with no store snapshot: it
-// refuses while any Stripe, App Store or Google Play renewal is active.
+// RemoveNetworkWithStoreSnapshot with no store snapshot: it refuses while any
+// Stripe, App Store or Google Play renewal is active.
 func RemoveNetwork(
 	ctx context.Context,
 	networkId server.Id,
@@ -222,10 +221,10 @@ func RemoveNetwork(
 	return outcome == RemoveNetworkRemoved, userAuths
 }
 
-// RemoveNetworkWithStoreSnapshot removes the network and its users.
-// storeSnapshot names the App Store and Google Play renewals the caller
-// already checked with the stores; any other active renewal from those stores
-// refuses the removal. Pass nil when no store steps ran.
+// Removes the network and its users. storeSnapshot names the App Store and
+// Google Play renewals the caller already checked with the stores; any other
+// active renewal from those stores refuses the removal. Pass nil when no store
+// steps ran.
 func RemoveNetworkWithStoreSnapshot(
 	ctx context.Context,
 	networkId server.Id,

@@ -7626,3 +7626,235 @@ and `temp/fp2-public-admission-cycle-74810-20261005/source-manifest.json`
 
 Independent candidate gate: `temp/fp2-public-admission-cycle-74810-20261005/sol-independent-source-GO.json`
 (SHA-256 `284666bb501a2243dca3ad168637ee7abb735f68f1c731454c7de23ebc6e6b8b`).
+
+### 2026-10-05 17:28 UTC rolling quota and the maturation deadline boundary
+
+Root's 17:28:03 census receipt again qualifies all eight selected
+`9577fdddc26cdbc9616a507788b28363f0c880d7` workers as ready. The latest
+coherent global source snapshot is 17:26:39.687 UTC: **79,463 eligible,
+79,200 quota-complete (99.669028%), 263 deficient and 1,569 runs needed**.
+No eligible provider lacks a cycle row. Secure-complete is 79,172, with
+28 security exceptions; those exceptions do not remove accepted failed
+measurements from the ten-result quota. Two fresh snapshots are retained
+separately. The earlier 16:42:30 snapshot had 79,173 eligible, 79,157 at
+quota and 76 missing runs. Changed membership and separate clocks prevent
+a fixed-provider expiry or rollout-effect conclusion from these stocks.
+
+The current snapshot has eight due hints, 277 overdue and 14 warming
+providers. Due uses the deadline hint; overdue uses an old enough cycle
+with missing measurements or a security exception. These sets differ:
+at least 255 of the 263 deficient providers therefore have future
+deadlines, but no identity intersection or deadline distribution was
+retained. Current claims can legitimately reserve fifteen minutes;
+completed claims can retain that deadline under readiness, identity or
+latest-result guards. Their persisted rows do not record `AllowPacing`.
+
+A native regression on the actual API writer base
+`a357c978d4646cfe84b3451d37e1688445b39072` reproduced a distinct defect.
+Eight earlier credits plus an accepted success at cycle age 3h59m left
+nine credits, yet the warm success pace postponed the next attempt by
+20m26.52s. Successful completion preserved it. At cycle age 4h00m30s,
+an earlier credit had expired: two runs were missing and the provider was
+overdue, but it was not due. No maturation event revisits that deadline.
+The API's claim, health, completion and census owners are byte-identical
+to the retained 9577 worker source; mounted production pacing rules and
+the number of affected Main providers remain unobserved.
+
+Isolated candidate `5f321ce75634a0c47751c866e95617afcdc32cd0` caps only a
+new accepted warm-success deficit's next deadline at cycle maturation.
+The same native case becomes due at that boundary. Seven focused native
+controls and their race runs pass independently; review also reproduces
+the exact baseline failure. Controls preserve live fifteen-minute claims,
+old-token/replay guards, local completions without quota credit, mature
+recovery pacing, and full-quota renewal six minutes before oldest-credit
+expiry. Existing parked rows are not swept or rewritten; they retain
+their current deadline unless another legitimate publication changes it.
+This is a tested candidate, not proof of deployment or Main prevalence.
+
+The separately timed 17:11–17:12 worker phase pair qualifies the same eight
+processes over native intervals of 105.698–121.076 seconds. It measures
+23.8312 acknowledged results/s, with checking/buffering 97.763% of
+completed timed-turn wall time and publication 1.063%. Scheduler waiting
+occupies 64.102% of its measured phase residence. These are finite process
+counters, not unique durable quota credits, capacity or a rate joined to
+the later census. Full sustained coverage remains open; accepted successes
+and failures still count equally toward ten per four hours, while the
+4/5 quality gate, TLS exclusions and probe deadlines remain unchanged.
+
+Finite evidence: `temp/pg-contention-20261004/astra-9577f-v2-current-adoption-census-reduction.json`
+(SHA-256 `28fa1117933a8a9a5cfb14bb5b344a1f8a1c184050d8eb9932e59e3b8756e9f0`),
+`temp/pg-contention-20261004/sol-9577f-typed-v1-v2-stage-corroboration.json`
+(SHA-256 `175b5e3579bab2454159917af0f9f89ff75f03626fa9fbb0b0daa6afe82e6fd2`),
+and `temp/url-maturity-cap-20261005/sol-independent-source-gate.json`
+(SHA-256 `cbb84a8fbb3f1b3c389f8f8726c53d5064faec8d0bf31019030087234083899f`).
+
+### 2026-10-05 18:25 UTC maturation fix rollout
+
+The isolated API maturation fix `5f321ce75634a0c47751c866e95617afcdc32cd0`
+was built and verified, then deployed successfully at 18:13:46 UTC. The
+18:25:46 runtime read found all sixteen g1–g4 API slots on that build with
+readiness equal to one; no previous or unknown build was observed in those
+slots. This supersedes the deployment status in the earlier checkpoint,
+without establishing an effect on quota coverage or rewriting existing
+parked deadlines. Beta adoption was outside the runtime read's scope.
+
+The finite runtime receipt is
+`temp/pg-contention-20261004/root-api16-known-runtime-5f321-v1/run-20261005T182546Z/receipt.json`
+(SHA-256 `b41821d1c245beac467ca38296e790e2f6cfcc0fadc2e631c88b97c319f5b626`).
+A new coherent quota measurement and sustained coverage remain required.
+
+### 2026-10-05 first-admission coverage denominator
+
+The coverage goal gives a newly admitted provider four hours to collect its
+first ten accepted measurements. It does not grant an older provider another
+four-hour grace period after a brief withdrawal or re-entry. The existing
+`provider_egress_probe_cycle.cycle_started_at` is preserved across those
+transitions, so the new metric uses that first durable probe-admission time
+without a schema migration or a change to admission, scheduling or history.
+The timestamp records cycle insertion, including delayed initialization or
+bootstrap; it is not a historical physical-join timestamp.
+
+The same coherent fleet aggregate now separates currently eligible providers
+into mature (first admission at least four hours ago), warming (known younger
+admission) and age unknown (missing cycle or future timestamp). Each partition
+retains eligible count, quota-complete count and runs needed. Their sums equal
+the unchanged all-current totals. The headline mature coverage is the fraction
+of known mature providers with ten accepted measured successes or failures in
+the rolling four-hour window. A zero mature denominator is unavailable;
+age-unknown providers remain a separate warning, including when the known
+mature cohort is at 100%. The all-current quota, secure coverage and warming
+counts remain visible. Neither a measured failure nor a security exception is
+silently removed from quota accounting.
+
+The new contract and cohort cells are emitted from the same atomic census
+snapshot. An older producer without those cells still supplies its existing
+all-current census, but cannot supply mature coverage. Monitor and dashboard
+queries retain the source-clock qualification and do not infer an age from an
+old aggregate. Five native model controls pass: first admission and the exact
+four-hour boundary, mixed accepted successes/failures with separate TLS state,
+withdrawal and re-entry without a renewed exemption, missing/future ages, and
+unchanged current admission gates. Deployment and a new mature-cohort census
+remain required before reporting this metric for Main.
+
+The retained 18:54:54 UTC all-current snapshot on 95639 has 78,409 eligible,
+78,068 quota-complete, 341 deficient and 369 runs needed. Only two providers
+are in the old warming-deficit counter and none lacks a cycle, so at least
+339 of those deficits have already reached first-admission age four hours.
+The new denominator does not erase that remaining work. A later qualified
+19:38–19:40 worker pair measures 74.3056 acknowledged measurements per second;
+one acknowledged measured result represents at most one durable quota credit.
+Root's separate indexed history read at 19:52:38 UTC finds 22,763 unique
+admitted policy-1 runs measured in (19:35, 19:40], or 75.8767 credits/s:
+12,518 successes and 10,245 measured failures across 22,746 providers. That
+five-minute measurement-time window partially overlaps the shorter worker
+counter intervals; it does not measure arrival time, duplicate ACK volume or
+renewal of a fixed current provider cohort. Aggregate durable headroom is
+present in that window; sustained full mature coverage remains open.
+
+The finite history reduction is
+`temp/pg-contention-20261004/astra-url-accepted-window-1935-current-durable-reduction.json`
+(SHA-256 `0d2f485f36422161b0da9b65c497b379a652d9adf4122ae23d12c1f6ac6140db`),
+independently corroborated by `sol-url-accepted-window-1935-actual-GO.json`
+(SHA-256 `a0441b3a49c6e19a70400e0c4be2a1534bbc1da568463d90a15a5170ff6fc2de`).
+
+### 2026-10-05 20:44 UTC first-admission coverage on Main
+
+Root's 20:44:56 runtime read qualifies all eight selected Taskworkers on
+`7702880446dd4c4b530e822133333d87ee388524`, with the expected image and
+readiness. This producer rollout completed at 20:42:34 UTC. The uniquely
+latest coherent global source snapshot is **20:44:46.174 UTC**:
+
+| Current eligible cohort | Eligible | Ten-result quota complete | Deficient | Runs needed |
+| --- | ---: | ---: | ---: | ---: |
+| First admission at least four hours ago | 77,206 | 77,084 | 122 | 281 |
+| Warming, known first admission under four hours | 15 | 12 | 3 | 15 |
+| First-admission age unknown | 0 | 0 | 0 | 0 |
+| All current eligible providers | 77,221 | 77,096 | 125 | 296 |
+
+Known mature coverage is **99.841981%**; the unchanged all-current coverage
+is **99.838127%**. The newcomer exemption therefore leaves 122 mature
+providers below quota. Secure-complete is separately 77,069, with 27
+security exceptions including one unknown target. Measured failures still
+count toward quota; neither TLS quarantine nor the 4/5 quality gate is
+relaxed. These producer facts supersede the earlier pending-deployment
+statement. They do not establish monitor/dashboard deployment, predecessor
+retirement, continuous eligibility or sustained fixed-provider coverage.
+
+The historical 75.8767 unique credits/s above covers measurement timestamps
+in (19:35, 19:40], observed durably at 19:52. It cannot be carried forward as
+the current arrival or renewal rate of this 20:44 cohort. Publisher snapshots
+are retained separately, never summed; changed membership and separate
+clocks also prevent assigning stock changes to this metrics-only release.
+Sustained 100% mature coverage remains open.
+
+The scheduler already requests full-quota renewal six minutes before the
+oldest retained credit expires. Local controls have reproduced a narrower
+ownership race: accepted health can make a clustered renewal due again while
+the original worker turn still publishes completion.
+A second Due call can issue a newer claim; the worker currently rejects an
+already-active provider without retaining that new claim for dispatch. The
+newer claim's fifteen-minute deadline can then outlive the old completion,
+whose ordinal guard prevents it from changing a newer claim. The native API
+control retains that new lease with nine credits and 801 seconds still to
+wait; the worker barrier control exposes three issued claims but only two
+retained/completed. These are local mechanism proofs. A repair and its
+independent gate remain in progress, with no Main incidence or contribution
+to these 122 deficits established. The scheduler
+`completion_acknowledged` counter covers only unstarted claims, so its small
+value is not evidence that normal measured completions are missing.
+
+Finite current evidence:
+`temp/pg-contention-20261004/astra-77028-admission-cohort-v1-current-reduction.json`
+(SHA-256 `df2ab6ff82b28b96e26238f0ff7444db45a7d8e67234d7c428dbe1b4f563e4ae`),
+independently corroborated by
+`temp/pg-contention-20261004/sol-77028-admission-cohort-v1-actual-corroboration-GO.json`
+(SHA-256 `68be6068833bf7fb14d4fd689266fd8a144f9cd12962dc81909eadd9704eeb43`).
+
+### 2026-10-05 21:43 UTC renewal ownership repair deployed
+
+The renewal ownership repair above is now deployed in Taskworker
+`a7ce7f73342c998e9e33a5c926b537b20aafdddd`. Root's rollout completed at
+**21:38:34.461 UTC**, and the 21:44:14 observation qualifies all eight selected
+workers on that source, image and readiness. The release also batches native
+score alias writes through the existing bounded export stream. Its source
+snapshot commit boundary is preserved; no export speedup is established by
+this observation.
+
+The uniquely latest coherent global census is **21:43:03.907 UTC**:
+
+| Current eligible cohort | Eligible | Ten-result quota complete | Deficient | Runs needed |
+| --- | ---: | ---: | ---: | ---: |
+| First admission at least four hours ago | 77,189 | 76,487 | 702 | 941 |
+| Warming, known first admission under four hours | 24 | 14 | 10 | 66 |
+| First-admission age unknown | 0 | 0 | 0 | 0 |
+| All current eligible providers | 77,213 | 76,501 | 712 | 1,007 |
+
+Known mature coverage is **99.090544%**; all-current coverage is
+**99.077875%**. Secure-complete remains a separate 76,474, with 27 security
+exceptions and zero unknown targets. Ten accepted measured successes or
+failures per rolling four hours, the 4/5 quality gate and TLS protections
+remain unchanged. The stock remains below the goal. Membership and source
+times differ from the earlier census, so the change does not identify a
+release effect, a current credit rate or sustained fixed-provider coverage.
+
+The corrected worker retains a newer claim for the same provider, joins the
+prior turn's publication, and rechecks cancellation and remaining work budget
+before dispatch. It preserves ordinal guards and cleanup of every distinct
+issued identity, including malformed duplicate-provider batches. Focused
+normal and race controls cover these ownership boundaries. Already-issued
+leases are not rewritten. A separate native control shows that ordinary
+local failures retry without credit after the normal short interval, while
+a readiness veto can leave a completed claim's fifteen-minute lease intact.
+`AllowPacing` is not stored in that claim row, so a completed long lease alone
+cannot establish this cause on Main. Neither local mechanism has a measured
+Main prevalence or an attributed share of the 702 mature deficits yet.
+
+Finite actual evidence is
+`temp/pg-contention-20261004/astra-a7ce7-admission-cohort-v1-current-reduction.json`
+(SHA-256 `0a013a51358fec1b8157c8db3924b5369ccfacf5e0d778437e3c8e6d1beed750`),
+independently corroborated by
+`temp/pg-contention-20261004/sol-a7ce7-admission-cohort-v1-current-corroboration.json`
+(SHA-256 `2e63ec89e031a84216f0ffe512533b1fe97fc8835ac8e124d896b9d129fb1974`).
+The deployment receipt is
+`temp/fp2-renewal-arin-taskworker-release-20261005/scaffold-vcs/taskworker-deploy-result.json`
+(SHA-256 `194c0bf3b262496120e83f9fbab4032643f7039fde0194077e77ec802ba2c595`).

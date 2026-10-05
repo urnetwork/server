@@ -83,12 +83,11 @@ func TestNetworkReferral(t *testing.T) {
 	})
 }
 
-// TestSetNetworkReferralRefusesOwnCodeWithDotlessI covers the app path
-// (/account/set-referral). The controller refuses the network's own code with
-// strings.EqualFold, but the code lookup upper-cases it, and a dotless "ı"
-// (U+0131) upper-cases to "I" without case-folding to it. That spelling passes
-// the controller check and resolves to the caller's own network, so only the
-// model guard can refuse it.
+// Covers the app path (/account/set-referral). The controller refuses the
+// network's own code with strings.EqualFold, but the code lookup upper-cases
+// it, and a dotless "ı" (U+0131) upper-cases to "I" without case-folding to it.
+// That spelling passes the controller check and resolves to the caller's own
+// network, so only the model guard can refuse it.
 func TestSetNetworkReferralRefusesOwnCodeWithDotlessI(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

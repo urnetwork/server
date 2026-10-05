@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"time"
 
-	connectcore "github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -168,7 +167,7 @@ func runWithDependencies(
 	if err := readiness(runCtx); err != nil {
 		return fmt.Errorf("alt not ready: %w", err)
 	}
-	connectcore.ResizeMessagePools(connectcore.Gib(16))
+	connectserver.ConfigureMessagePools()
 
 	exchange := connectserver.NewExchangeFromEnv(runCtx, settings.ExchangeSettings)
 	defer exchange.Close()

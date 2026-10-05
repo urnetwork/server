@@ -53,13 +53,13 @@ func TestLegacySettlementPageDeadlinePreservesJoinedFailureAndCommittedCursor(t 
 			calls := 0
 			shard := int(firstId[15]) % LegacySettlementShardCount
 			result, err := flushLegacySettlementsPage(owner, bounded, shard, nil, 64,
-				func(pageCtx context.Context, id server.Id) (bool, bool, legacySettlementBusyGate, error) {
+				func(pageCtx context.Context, id server.Id, wait *legacySettlementGrantWait) (bool, bool, legacySettlementBusyGate, error) {
 					calls++
 					if calls == 1 {
 						if id != firstId {
 							t.Fatal("legacy page selected a different first intent")
 						}
-						return flushLegacySettlement(pageCtx, id)
+						return flushLegacySettlementWithGrantWait(pageCtx, id, wait)
 					}
 					if calls != 2 || id != secondId {
 						t.Fatal("legacy page changed the interrupted visit")

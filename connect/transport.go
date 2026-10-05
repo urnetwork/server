@@ -1411,50 +1411,45 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// auth failures are client-driven and unbounded in rate, so they are
-	// counted in the jwt package (urnetwork_auth_jwt_rejections_total) rather
-	// than logged per occurrence; the detail is at V(1)
-	byJwt, err := jwt.ParseByJwtForAudience(authCtx, auth.ByJwt, jwt.ByJwtAudienceConnect)
-	if err != nil {
-		rejectCustomAuth(http.StatusUnauthorized)
-		if glog.V(1) {
-			glog.Infof("[t]auth jwt err = %s\n", err)
+	var byJwt *jwt.ByJwt
+	var instanceId server.Id
+	var networkId *server.Id
+	authStatus := connectH1AuthenticationStatus(authCtx, func() (int, error) {
+		// Auth failures are client-driven and unbounded in rate, so they are
+		// counted in the jwt package rather than logged per occurrence.
+		var err error
+		byJwt, err = jwt.ParseByJwtForAudience(authCtx, auth.ByJwt, jwt.ByJwtAudienceConnect)
+		if err != nil {
+			if glog.V(1) {
+				glog.Infof("[t]auth jwt err = %s\n", err)
+			}
+			return http.StatusUnauthorized, err
 		}
-		return
-	}
-
-	if byJwt.ClientId == nil {
-		rejectCustomAuth(http.StatusForbidden)
-		return
-	}
-	if err := jwt.ValidateByJwtState(authCtx, byJwt, true); err != nil {
-		rejectCustomAuth(http.StatusUnauthorized)
-		if glog.V(1) {
-			glog.Infof("[t]inactive auth jwt: %s\n", err)
+		if byJwt.ClientId == nil {
+			return http.StatusForbidden, nil
 		}
+		if err := jwt.ValidateByJwtState(authCtx, byJwt, true); err != nil {
+			if glog.V(1) {
+				glog.Infof("[t]inactive auth jwt: %s\n", err)
+			}
+			return http.StatusUnauthorized, err
+		}
+		instanceId, err = server.IdFromBytes(auth.InstanceId)
+		if err != nil {
+			return http.StatusBadRequest, err
+		}
+		// Verify that the client is still part of the network.
+		networkId = model.GetNetworkClientNetwork(authCtx, *byJwt.ClientId)
+		if networkId == nil || *networkId != byJwt.NetworkId {
+			return http.StatusForbidden, nil
+		}
+		return 0, nil
+	})
+	if authStatus != 0 {
+		rejectCustomAuth(authStatus)
 		return
 	}
-
 	clientId := *byJwt.ClientId
-
-	instanceId, err := server.IdFromBytes(auth.InstanceId)
-	if err != nil {
-		rejectCustomAuth(http.StatusBadRequest)
-		return
-	}
-
-	// verify the client is still part of the network
-	// this will fail for example if the client has been removed
-	networkId := model.GetNetworkClientNetwork(authCtx, clientId)
-	if networkId == nil || *networkId != byJwt.NetworkId {
-		rejectCustomAuth(http.StatusForbidden)
-		// server.Logger("ERROR HB\n")
-		return
-	}
-	if authCtx.Err() != nil {
-		rejectCustomAuth(http.StatusServiceUnavailable)
-		return
-	}
 	if custom {
 		conn, upgradeErr := connect.AcceptFramedUpgrade(w, r, connect.H1FramerProtocol, max(time.Nanosecond, min(self.settings.WriteTimeout, time.Until(authDeadline))))
 		connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), upgradeErr)

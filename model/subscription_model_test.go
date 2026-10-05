@@ -1066,7 +1066,8 @@ func TestClosePartialCompanionContractWithCheckpoint(t *testing.T) {
 						ByteCount(1024*1024),
 					)
 				} else {
-					_, _, err := CreateContract(
+					// the origin contract of the companion
+					_, _, err = CreateContract(
 						ctx,
 						destinationNetworkId,
 						destinationId,

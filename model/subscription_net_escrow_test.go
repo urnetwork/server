@@ -57,8 +57,18 @@ func TestNetEscrowReservationPageForcesPerBalanceIndexBoundary(t *testing.T) {
 	if strings.Contains(netEscrowReservationPageSQL, "balance_id = ANY") {
 		t.Fatalf("net-escrow reservation page restored the full-scan-prone ANY shape:\n%s", netEscrowReservationPageSQL)
 	}
-	if strings.Index(netEscrowReservationPageSQL, "transfer_escrow.settled = false") >
-		strings.Index(netEscrowReservationPageSQL, "OFFSET 0") {
+	escrowStart := strings.Index(netEscrowReservationPageSQL, "FROM transfer_escrow")
+	if escrowStart < 0 {
+		t.Fatal("net-escrow reservation page lost its escrow subquery")
+	}
+	escrowSQL := netEscrowReservationPageSQL[escrowStart:]
+	escrowEnd := strings.Index(escrowSQL, "AS selected_escrow")
+	if escrowEnd < 0 {
+		t.Fatal("net-escrow reservation page lost its escrow boundary")
+	}
+	escrowSQL = escrowSQL[:escrowEnd]
+	if offset := strings.Index(escrowSQL, "OFFSET 0"); offset < 0 ||
+		strings.Index(escrowSQL, "transfer_escrow.settled = false") > offset {
 		t.Fatalf("unsettled prefilter escaped the lateral optimization boundary:\n%s", netEscrowReservationPageSQL)
 	}
 }
@@ -80,7 +90,7 @@ func TestNetEscrowReservationPageConfiguresServerSideTimeout(t *testing.T) {
 	if len(recorder.statements) != 1 {
 		t.Fatalf("reservation page timeout statements = %d, want 1", len(recorder.statements))
 	}
-	if got, want := recorder.statements[0], `SELECT set_config('statement_timeout', $1, true)`; got != want {
+	if got, want := recorder.statements[0], `SELECT set_config('statement_timeout', $1, true), set_config('jit', 'off', true)`; got != want {
 		t.Fatalf("reservation page timeout statement = %q, want %q", got, want)
 	}
 	if len(recorder.arguments) != 1 || len(recorder.arguments[0]) != 1 {

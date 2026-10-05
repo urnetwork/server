@@ -1,5 +1,26 @@
 # server
 
+## Canonical build sources
+
+[The CI workflow](.github/workflows/test.yml) locks the sibling repositories to
+complete commit IDs. Check out those revisions beside `server`, using the listed
+directory names, and use Go 1.26.7. The source gate verifies the effective module
+replacements and refuses stale or dirty sibling inputs. Build first to populate
+the checksum-verified module cache used by the offline source check:
+
+```sh
+GOWORK=off GOTOOLCHAIN=local CGO_ENABLED=0 go build -mod=readonly -p 2 ./cli/api ./cli/taskworker ./cli/connect ./cli/proxy
+GOWORK=off GOTOOLCHAIN=local go test -mod=readonly -p 2 ./local/source-graph -count=1
+```
+
+Review and update the workflow refs together when changing the source graph.
+Connect owns the tracked `sctp/` fork. Server and SN's fixture generator consume
+the same local gVisor sibling, whose revision is locked by the workflow. Frozen
+PERF arms therefore use their own captured source. The release builder converts
+this local replacement to the checked-out fork's immutable module revision when
+preparing published modules.
+These compile checks do not run integration fixtures.
+
 ## Local integration tests
 
 Server integration tests create and drop PostgreSQL databases and lease Redis

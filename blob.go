@@ -255,8 +255,8 @@ type BlobStoreConfig struct {
 	LocalMaxBytes int64
 	// Explicit local service storage requires an independently pinned declaration.
 	DurableVolumes durablevolume.Reference
-	// FeedbackLogBucket is the MinIO bucket that keeps feedback log uploads
-	// (`feedback_log_bucket`). Empty means log uploads are not stored (see
+	// The MinIO bucket that keeps feedback log uploads (`feedback_log_bucket`).
+	// Empty means log uploads are not stored (see
 	// controller.LoadFeedbackLogStore).
 	FeedbackLogBucket string
 }

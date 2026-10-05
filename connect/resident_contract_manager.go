@@ -23,6 +23,9 @@ type residentContractManager struct {
 
 	stateLock       sync.Mutex
 	activeContracts map[model.TransferPair]*activeContractEntry
+	activeReads     map[model.TransferPair]*activeContractRead
+	readSequence    uint64
+	readContract    func(context.Context, server.Id, server.Id) bool
 }
 
 func newResidentContractManager(
@@ -37,6 +40,8 @@ func newResidentContractManager(
 		clientId:        clientId,
 		settings:        settings,
 		activeContracts: map[model.TransferPair]*activeContractEntry{},
+		activeReads:     map[model.TransferPair]*activeContractRead{},
+		readContract:    model.HasOpenContractForPair,
 	}
 
 	return residentContractManager
@@ -65,12 +70,14 @@ func (self *residentContractManager) HasActiveContract(sourceId server.Id, desti
 	// entry is either not expired or nil
 	var entry *activeContractEntry
 	refresh := false
+	var startedSequence uint64
 
-	if 0 < self.settings.ContractManagerCheckTimeout {
-		func() {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		startedSequence = self.readSequence
 
+		if 0 < self.settings.ContractManagerCheckTimeout {
 			var ok bool
 			entry, ok = self.activeContracts[transferPair]
 			if ok {
@@ -81,55 +88,119 @@ func (self *residentContractManager) HasActiveContract(sourceId server.Id, desti
 					refresh = true
 				}
 			}
-		}()
-	}
-
-	next := func() (nextEntry *activeContractEntry) {
-		handleContractManagerDone(func() {
-			c := func() bool {
-				contractIds1 := model.GetOpenContractIdsWithNoPartialClose(self.ctx, sourceId, destinationId)
-				if 0 < len(contractIds1) {
-					return true
-				}
-
-				contractIds2 := model.GetOpenContractIdsWithNoPartialClose(self.ctx, destinationId, sourceId)
-				if 0 < len(contractIds2) {
-					return true
-				}
-
-				return false
-			}
-			hasActiveContract := c()
-
-			func() {
-				self.stateLock.Lock()
-				defer self.stateLock.Unlock()
-				if hasActiveContract {
-					nextEntry = &activeContractEntry{
-						checkTime: time.Now(),
-						refresh:   false,
-					}
-					self.activeContracts[transferPair] = nextEntry
-				} else {
-					delete(self.activeContracts, transferPair)
-				}
-			}()
-		})
-		return
-	}
+		}
+	}()
 
 	if entry == nil {
-		entry = next()
+		entry = self.readActiveContract(transferPair, sourceId, destinationId, startedSequence, nil)
 	} else if refresh {
 		go server.HandleError(func() {
-			next()
+			self.readActiveContract(transferPair, sourceId, destinationId, 0, entry)
 		})
 	}
 
 	return entry != nil
 }
 
+// Reads for one pair share their result without holding stateLock during the
+// database call or the wait. A negative result from a read that started before
+// this invocation must be checked again: a contract may have opened meanwhile.
+func (self *residentContractManager) readActiveContract(
+	transferPair model.TransferPair,
+	sourceId server.Id,
+	destinationId server.Id,
+	startedSequence uint64,
+	refreshEntry *activeContractEntry,
+) *activeContractEntry {
+	for {
+		if self.ctx.Err() != nil {
+			return nil
+		}
+		self.stateLock.Lock()
+		entry := self.activeContracts[transferPair]
+		if refreshEntry != nil {
+			if entry != refreshEntry {
+				self.stateLock.Unlock()
+				return entry
+			}
+		} else if entry != nil && 0 < self.settings.ContractManagerCheckTimeout && !entry.checkTime.Add(self.settings.ContractManagerCheckTimeout).Before(time.Now()) {
+			self.stateLock.Unlock()
+			return entry
+		}
+		read := self.activeReads[transferPair]
+		if read == nil {
+			self.readSequence++
+			read = &activeContractRead{done: make(chan struct{}), sequence: self.readSequence}
+			self.activeReads[transferPair] = read
+			self.stateLock.Unlock()
+			return self.performActiveContractRead(transferPair, sourceId, destinationId, read)
+		}
+		read.waiters++
+		self.stateLock.Unlock()
+
+		select {
+		case <-read.done:
+		case <-self.ctx.Done():
+		}
+		self.stateLock.Lock()
+		read.waiters--
+		self.stateLock.Unlock()
+		if self.ctx.Err() != nil {
+			return nil
+		}
+		if read.panicValue != nil {
+			panic(read.panicValue)
+		}
+		if read.entry != nil || read.sequence > startedSequence {
+			return read.entry
+		}
+	}
+}
+
+func (self *residentContractManager) performActiveContractRead(
+	transferPair model.TransferPair,
+	sourceId server.Id,
+	destinationId server.Id,
+	read *activeContractRead,
+) *activeContractEntry {
+	var hasActiveContract, completed bool
+	var panicValue any
+	func() {
+		defer func() { panicValue = recover() }()
+		handleContractManagerDone(func() {
+			hasActiveContract = self.readContract(self.ctx, sourceId, destinationId)
+			completed = true
+		})
+	}()
+
+	self.stateLock.Lock()
+	if completed {
+		if hasActiveContract {
+			read.entry = &activeContractEntry{checkTime: time.Now()}
+			self.activeContracts[transferPair] = read.entry
+		} else {
+			delete(self.activeContracts, transferPair)
+		}
+	}
+	read.panicValue = panicValue
+	delete(self.activeReads, transferPair)
+	close(read.done)
+	self.stateLock.Unlock()
+	if panicValue != nil {
+		panic(panicValue)
+	}
+	return read.entry
+}
+
 type activeContractEntry struct {
 	checkTime time.Time
 	refresh   bool
+}
+
+type activeContractRead struct {
+	done       chan struct{}
+	sequence   uint64
+	waiters    int
+	entry      *activeContractEntry
+	panicValue any
 }

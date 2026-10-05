@@ -89,6 +89,7 @@ type urlProbeCoverageProcess struct {
 	host, block, instance string
 	values                map[string]float64
 	invalid               bool
+	cohortInvalid         bool
 }
 
 func urlProbeCoverageQuery(environment string) string {
@@ -106,6 +107,8 @@ func urlProbeCoverageQuery(environment string) string {
 		{"observed", "urnetwork_url_probe_fleet_observed_timestamp_seconds{" + base + "}"},
 		{"oldest", "urnetwork_url_probe_oldest_due_seconds{" + base + "}"},
 		{"cohort_started", "urnetwork_url_probe_cohort_started_timestamp_seconds{" + base + "}"},
+		{"cohort", "urnetwork_url_probe_admission_cohort{" + base + "}"},
+		{"cohort_contract", "urnetwork_url_probe_admission_cohort_contract{" + base + "}"},
 	} {
 		add(metric.name, metric.selector)
 		add(metric.name+"_time", "timestamp("+metric.selector+")")
@@ -184,8 +187,22 @@ func parseUrlProbeCoverage(payload, environment string, now time.Time) ([]*urlPr
 			byProcess[key] = process
 		}
 		name := labels["monitor_metric"]
+		cohortMetric := name == "cohort" || name == "cohort_time" || name == "cohort_contract" || name == "cohort_contract_time"
+		invalidate := func() {
+			if cohortMetric {
+				process.cohortInvalid = true
+			} else {
+				process.invalid = true
+			}
+		}
 		switch name {
 		case "start", "start_time", "configured", "configured_time", "capability", "capability_time", "observed", "observed_time", "oldest", "oldest_time", "cohort_started", "cohort_started_time", "success", "success_time", "success_samples", "success_early", "error", "error_time", "error_samples", "error_early":
+		case "cohort_contract", "cohort_contract_time":
+		case "cohort", "cohort_time":
+			if !urlProbeAdmissionCohortLabelValid(labels["cohort"], labels["state"]) {
+				invalidate()
+			}
+			name += ":" + labels["cohort"] + ":" + labels["state"]
 		case "fleet", "fleet_time":
 			valid := false
 			for _, state := range urlProbeFleetStates {
@@ -206,11 +223,11 @@ func parseUrlProbeCoverage(payload, environment string, now time.Time) ([]*urlPr
 		}
 		observedAt, value, err := mimirInstantValue(series.Value)
 		if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || value < 0 || now.Sub(observedAt) > urlProbeCoverageFreshness || observedAt.Sub(now) > 30*time.Second {
-			process.invalid = true
+			invalidate()
 			continue
 		}
 		if _, exists := process.values[name]; exists {
-			process.invalid = true
+			invalidate()
 		}
 		process.values[name] = value
 	}
@@ -324,14 +341,27 @@ func evaluateUrlProbeCoverage(processes []*urlProbeCoverageProcess, expected map
 	observed := fmt.Sprintf("eligible=%.0f quota_complete=%.0f secure_complete=%.0f due=%.0f overdue=%.0f warming=%.0f uninitialized=%.0f runs_needed=%.0f security_pending=%.0f security_unknown_targets=%.0f oldest_due_seconds=%.1f",
 		eligible, values["fleet:quota_complete"], complete, values["fleet:due"], values["fleet:overdue"], values["fleet:warming"], values["fleet:uninitialized"], values["fleet:runs_needed"], values["fleet:security_pending"], values["fleet:security_unknown_targets"], values["oldest"])
 	observed += " " + census.projection()
-	if eligible > complete {
+	cohort := diagnoseUrlProbeAdmissionCohort(owners[0][0])
+	observed += " " + cohort.projection(values)
+	if !cohort.valid {
+		gaps = append(gaps, "mature_cohort_unobservable")
+	} else if values["cohort:age_unknown:eligible"] > 0 {
+		gaps = append(gaps, "admission_age_unknown_blocks_whole_fleet_verdict")
+	}
+	if cohort.valid && values["cohort:mature:eligible"] > values["cohort:mature:quota_complete"] {
 		tier, sustain := tierWarn, 1
-		if values["fleet:overdue"] >= 0.10*eligible {
+		mature := values["cohort:mature:eligible"]
+		if mature-values["cohort:mature:quota_complete"] >= 0.10*mature {
 			tier, sustain = tierPage, 2
 		}
 		findings = append(findings, urlProbeCoverageFinding("url-probe-coverage-deficit", tier, sustain, observed,
-			"Eligible providers lack ten accepted measured URL runs, success or failure, in the rolling four-hour window or still have unresolved TLS exceptions.",
-			"Every currently eligible provider should meet the rolling ten-run quota and have no TLS exceptions. WARN for any deficit; PAGE when at least 10% are overdue, sustained twice."))
+			"Providers first admitted at least four hours ago lack ten accepted measured URL runs, success or failure, in the rolling four-hour window.",
+			"Every known mature provider should meet the rolling ten-run quota. WARN for any mature deficit; PAGE when at least 10% of the mature cohort is deficient, sustained twice. Known newcomers remain visible as warming; unknown first-admission age cannot establish whole-fleet coverage."))
+	}
+	if values["fleet:security_pending"] > 0 {
+		findings = append(findings, urlProbeCoverageFinding("url-probe-security-pending", tierWarn, 1, observed,
+			"Currently eligible providers have unresolved TLS exceptions, independently of measured-run quota or first-admission age.",
+			"No unresolved TLS exceptions; ten measured outcomes and a mature-quota percentage cannot clear security quarantine."))
 	}
 	if values["fleet:security_unknown_targets"] > 0 {
 		findings = append(findings, urlProbeCoverageFinding("url-probe-security-recovery-unknown", tierWarn, 1, observed,
@@ -384,7 +414,7 @@ func urlProbeCoverageFinding(class, tier string, sustain int, observed, symptom,
 		symptom: symptom, baseline: baseline, observed: observed,
 		mechanism: "The URL workflow serves the same reliability and ARIN-risk eligible cohort as FP2. Accepted measured success and failure, not attempted requests, setup-only turns or legacy full/blackhole counters, replenish its rolling quota; TLS recovery remains independent of content quality.",
 		evidence:  "One atomic global census from the uniquely observed shard-zero owner; process identities, underlying scrape times, and durable observation time are checked independently. Global fleet gauges are never summed across processes.",
-		context:   "Newly eligible providers can need warmup; ordinary URL failure does not independently exclude online fallback. Hourly rate is a forecast and does not prove unique provider coverage. Missing/ambiguous sources remain unobservable. These thresholds are alerts, not hard service limits.",
+		context:   "Providers first admitted less than four hours ago have a warming interval; unknown first-admission age is separate. The known mature ratio is N/A for an empty cohort, and even 100% cannot establish whole-fleet coverage while any age is unknown. Ordinary URL failure does not independently exclude online fallback; quality's 4/5 success ratio and TLS security are separate. Hourly rate is a forecast and does not prove unique provider coverage. Missing/ambiguous sources remain unobservable. These thresholds are alerts, not hard service limits.",
 		action:    "Compare fixed-slot due selection and oldest-work fairness, private tunnel/DNS/HTTP stages, accepted receipt rate, and PG CPU/query work. Check URL catalog compatibility and per-URL TLS recovery. Do not relabel local setup errors as provider failures or weaken the common reliability/risk/security gates.",
 		verify:    "Require fresh unique owners for every configured shard, coherent complete censuses across two cadences, and rolling per-provider quota recovery. Confirm FP2 online backfill and normal PG CPU independently; a fast aggregate rate or ten historical runs is insufficient.",
 		playbook:  "SIGNALS.md §2.19f",

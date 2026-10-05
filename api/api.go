@@ -180,7 +180,8 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/network/peers", handlers.NetworkPeers),
 		router.NewRoute("GET", "/network/provider-locations", handlers.NetworkGetProviderLocations),
 		router.NewRoute("POST", "/network/find-provider-locations", handlers.NetworkFindProviderLocations),
-		router.NewRoute("POST", "/network/find-providers2", findProviders2), router.NewRoute("GET", "/network/user", handlers.GetNetworkUser),
+		router.NewRoute("POST", "/network/find-providers2", findProviders2),
+		router.NewRoute("GET", "/network/user", handlers.GetNetworkUser),
 		// the caller's own providers: why each is or is not offered to clients,
 		// with its FindProviders2 appearances per minute over the last hour
 		router.NewRoute("GET", "/network/provider-status", handlers.GetProviderStatus),

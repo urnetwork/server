@@ -1,5 +1,7 @@
 package model
 
+// The recorded grant kind and the balance summary against the database.
+
 import (
 	"context"
 	"slices"
@@ -10,9 +12,9 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// TestGrantWritersRecordGrantKind: every recurring grant writer records its kind and
-// every other writer leaves it NULL. The balance summary relies on the kind to tell a
-// grant from the next grant of its kind.
+// Every recurring grant writer records its kind and every other writer leaves it
+// NULL. The balance summary relies on the kind to tell a grant from the next grant of
+// its kind.
 func TestGrantWritersRecordGrantKind(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -104,12 +106,11 @@ func TestGrantWritersRecordGrantKind(t *testing.T) {
 	})
 }
 
-// TestTransferBalanceSummaryCountsCurrentGrants reads real balances and escrow at
-// each kind's boundary. The clock cannot be moved, so each boundary is placed just
-// before now, with windows that straddle now the way they do at a real boundary.
-// Recorded grants are matched by kind, not by window, so their windows can be placed
-// anywhere; unrecorded (legacy) grants need their exact window, so they use the
-// referral window, which starts whenever its run does.
+// Reads real balances and escrow at each kind's boundary. The clock cannot be moved,
+// so each boundary is placed just before now, with windows that straddle now the way
+// they do at a real boundary. Recorded grants are matched by kind, not by window, so
+// their windows can be placed anywhere; unrecorded (legacy) grants need their exact
+// window, so they use the referral window, which starts whenever its run does.
 func TestTransferBalanceSummaryCountsCurrentGrants(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

@@ -383,6 +383,20 @@ missing regional ranking work; neither a sibling relationship nor a top-30
 position substitutes for that review. Keep smaller reviewed access providers
 eligible under the same clean-default rule and preserve explicit contrary use.
 
+
+A separate source-only proposal now adds `nt-th`, **AS23969 in Thailand only**.
+APNIC's exact ASN record, the official TOT/CAT-to-NT merger history, and NT's
+[current residential fiber terms](https://ntplc.co.th/promotions/detail/nt-fiber-care-plus)
+support subscriber access. Independent review preserved every v13 entry and
+all routing, country, hosting and risk vetoes; no generic National Telecom
+name rule was added. This proposal is not built or selected and adds no named
+provincial service/ranking evidence. Sify AS9583 remains a precise mixed-scope
+research item: business Internet access is eligible subscriber evidence, while
+its official wholesale-transit material does not identify the serving ASN.
+Neither household-service absence nor that unresolved corporate evidence
+justifies a blanket ASN decision. These findings do not attribute the native
+Speed-minus-Quality population to either operator.
+
 ## Output and provenance
 
 Each build produces `arin.mmdb` and `manifest.json`. The MMDB contains direct
@@ -735,6 +749,40 @@ address representation is insufficient to reconstruct exact historical IPs for
 an offline reclassification; owner-side capture can compare candidates where
 the actual address is available.
 
+The provider rollup stores one summary per client, not one per former connection.
+Its active pass replaces ARIN flags from connected connections with live handlers;
+its disconnected fallback initializes only clients missing a summary. On the
+admitted `a7ce7f73` source, a local PG/Redis control showed that a new verified
+subscriber connection can pass the live request guard while the prior rollup and
+publication remain Speed-only. Running the actual rollup and publisher admitted
+native Quality without rewriting the old disconnected location records. This
+rules out a permanent former-row veto in those controlled cases, not stale
+summaries on Main. The location rollup runs at the start of `update_reliabilities`,
+which reschedules 30 minutes after the whole task completes; later network work
+can extend that delay. The independent score publisher reschedules 30 seconds
+after its own completion. Faster export alone does not refresh that summary.
+Retained disconnected hard-risk flags still block common gates before an actual
+rollup refresh; filtering all exceptions to connected rows would remove that
+protection. Any Main attribution needs a bounded current-fact/rollup comparison
+and a separate join to native membership, rather than inferring the cause from
+the native Speed-minus-Quality count.
+
+A bounded Main read at `2026-10-05T23:17:52Z` examined the first 257 connected
+rows in client order, withheld the final provider, and retained 256 rows before
+the active/public/live-handler filters. The resulting 119 connections belonged
+to 112 providers. All 112 evaluated connections had the selected v13 epoch and
+post-cutover lookup time; seven location records were missing or mismatched.
+Thirteen providers had entirely clean, verified current subscriber facts, and
+none had a non-Quality/non-risk rollup, a risk rollup, or a missing rollup.
+The live non-Quality count of 97 providers and rollup non-Quality count of 96
+are separate marginal counts; both risk marginals were seven. This read found
+no old-epoch or clean-subscriber/soft-rollup discrepancy and supplies no basis
+for a classification rewrite. The sorted prefix is nonrepresentative and has
+no membership or generation join to the earlier 10,616 native Speed-only
+providers, so it neither explains nor rules out a fleet-wide cause. The rollup
+watermark records the caller's minute of source evaluation, not database write
+time; it cannot establish write order.
+
 ## Boundary with FP2 and fallback behavior
 
 The uniform FP2 fallback requirement belongs to provider selection across
@@ -898,6 +946,38 @@ layout or current load. Do not infer a production cause or relax the deadline
 from that local result. Durable current, outdated and missing classification
 coverage remains **unknown**.
 
+A second current-cohort Main read at `2026-10-05T15:42:30.468457Z` also
+ended with `SQLSTATE 57014`. This version capped enumeration at 200,000
+connected rows and grouped each provider once; it retained the three-second
+statement deadline. Its 75,000-live-row local fixture completed the query in
+1.221 seconds, but Main returned neither counts nor a surviving plan. The
+retained receipt is
+`0efc3e3dc82b3456468ef2a765f913c96715e487a91d006ff5be3dba1081d57f`.
+Neither timeout confirms stale stored facts or justifies a classification
+write. Any smaller diagnostic must identify its subset explicitly; it cannot
+stand in for complete fleet coverage.
+
+A smaller Main read succeeded at `2026-10-05T16:26:47.184608Z`, with the
+query taking 0.031563 seconds. It enumerated the first 257 connected rows in
+client order and withheld the entire final provider at the boundary (one row).
+The remaining 256 rows yielded 119 live eligible connections across 118
+providers after the active/public/handler filters. Of those connections, 116
+had epoch `1791162091` and lookup times within the selected cutover and
+observation bounds; three had missing or mismatched location ownership. No
+older epoch, newer epoch, pre-cutover or future lookup was observed.
+
+Within that subset, 115 providers were current on all included live
+connections, and 20 had verified nonrisk subscriber classifications on all of
+them (21 connections). Live location flags marked 95 providers non-Quality and
+six risky; those counts can overlap. A non-Quality flag does not distinguish
+excluded, unknown and ambiguous states and is not a proxy count. Receipt
+`0eb8161c707094575a03a16689a5ba6bf96460d4cfdf3d672c7eeca614ab2557`
+contains aggregate counts only. This sorted prefix is not representative of
+the fleet and does not establish native Quality supply, source-process
+ownership or the persistence/cause of the three missing or mismatched rows.
+It supplies no evidence for refreshing an older epoch in those observed rows;
+the classification-only CAS cannot insert or repair their location identity.
+
 A later bounded native-host census read succeeded at
 `2026-10-05T08:51:36.381701Z`. It returned one complete cached publication from
 source evaluation `08:40:09.693091Z`–`08:40:57.573495Z`, published at
@@ -926,6 +1006,165 @@ publication, while fleet-wide v13 adoption, classification coverage and its
 causal effect on the Quality count remain unverified. A new publication after
 selection does not establish that its stored classification inputs came from
 the new resource.
+
+The later read at `2026-10-05T15:11:40.231020Z` reached Redis and decoded a
+present publication, but refused it because its source was 1,213.599842 seconds
+old against a 900-second limit. Source evaluation completed at
+`14:51:26.631178Z`; publication followed at `15:01:04.938704Z`. The
+578.307526 seconds between those events and the further 635.292316 seconds
+until observation are distinct delays, with no established cause or producing
+process identity. Receipt
+`f8e539aae1c51787fe1bf6f93d2db86cf5263aaf577b676e77c44f846f12fbd3`
+therefore supplies no qualified newer bucket counts. The historical 4/82/80,593
+counts above are not a current result, and a later publication timestamp does
+not renew its source evaluation.
+
+A subsequent read at `2026-10-05T17:44:57.444113Z` reached the same key, but
+failed publication validation during decoding. Its native child exited zero
+and completed the bounded read in 25.482 milliseconds. Receipt
+`8b9c64ef61b46efca14becc12d33e63c98b39bd5c7b820aa8746dce41cd8330c`
+retains no qualified source clocks or bucket counts. This is a different
+failure from the earlier stale-source refusal: neither current freshness nor
+a publisher stall is established. The invalid value was not retained; a
+bounded diagnostic of the failed validation location is needed before changing
+reader or producer behavior. A fresh URL-quota census cannot substitute for
+this independent native publication.
+
+The diagnostic read at `2026-10-05T18:41:34.320881Z` refused a present
+publication as `source_stale`: source evaluation ran from
+`18:12:13.641328Z` to `18:13:49.203099Z`, and publication was stamped at
+`18:25:05.820968Z`. The source was 1,665.117782 seconds old against the
+unchanged 900-second limit: 676.617869 seconds from source completion to
+publication, then 988.499913 seconds until the read. Source evaluation itself
+took 95.561771 seconds; only 223.382131 seconds of source freshness remained
+at publication. Receipt
+`966c5cec60db28db61132c4ec6869d206b2e1b65555a11faf8f15fd4d92e81de`
+and independent gate
+`b5ec59d69d34402a5758358c1dc77954d72dddcda321a6685f484cbe330e84aa`
+retain this clock partition, but no current Quality/Speed counts. The reader
+checks freshness before bucket and ratio validation, so those checks were not
+reached and the earlier `publication_invalid` remains unresolved. No retained
+publication identifier joins the two observations or identifies their writers.
+
+In the reviewed `9577fddd` producer, source evaluation completes before target
+export; the native census is written only after the export and readiness
+markers succeed. Failed exports preserve the prior key and its clocks. The
+key's 300-minute TTL and the task's 120-minute execution limit do not promise
+fresh data. The successful task schedules its next run after 30 seconds. Task
+ownership separately uses a direct PostgreSQL advisory-lock session and a
+five-minute timestamp lease for crash recovery. These source limits identify
+possible diagnostic boundaries, not the actual owner or cause of this refusal.
+
+The source-completion timestamp precedes exclusion-network queries, target
+assembly and export; the 676.6-second interval is therefore not a measured
+Redis-only duration. Export fans out four passes per location/group through
+up to 48 workers. Native snapshot GET/Lua operations and individual alias SETs
+are synchronous alongside the bounded legacy pipeline. The existing
+`cache_write` metric measures legacy SET attempts, including retries; it omits
+those native operations, retry sleeps, connection acquisition and the final
+census SET. Phase durations overlap across parent/child spans and workers,
+and exits include error cleanup, so neither subtraction nor an exit count
+establishes successful publication. The task has no durable target cursor.
+
+The unique-key task observation at `2026-10-05T19:59:14.360996Z` found the
+expected scheduled function with empty arguments and a 7,200-second execution
+limit. It was due by 41.720312 seconds, its stored claim timestamp was
+9.586317 seconds old, and its timestamp lease had 290.413683 seconds remaining.
+The row retained one retry and an error classified as `canceled`; this neither
+dates that error nor establishes that the current attempt was canceled.
+Receipt `6cb36928c4b1b44760f3f80e85d09a7be7158db6bdca8e296592005d2406c80d`
+records a 1.222-millisecond point query. The row was present at that snapshot,
+but claim/release timestamps do not identify the worker, advisory owner,
+execution start or progress. No cause of the publication delay or newer native
+supply is established by the task row.
+
+At `2026-10-05T20:55:38Z`, the bounded phase observation joined all eight
+`77028804` workers to fresh source, image, build and process-start metrics.
+All 25 phase cells per process were available. One process had `source_load`
+active; two others each recorded one source-load exit, 7,404 target-export
+exits and 1,960,296 legacy SET attempts since startup. Their completed
+source-load spans were 87.996 and 80.719 seconds. These spans include failure
+cleanup and overlap across workers and parent/child phases; they do not prove
+successful native publication, advisory ownership or a cancellation cause.
+Receipt `6aa88da1ccf7a8316fb5cf942b77f35829297774b6bdbfe36dfd1bc4e8cfcae7`
+is a single frame, not an export progress rate or newer Quality census.
+
+A locally qualified batching candidate queues native baseline-alias SETs in
+the existing bounded stream after the baseline commits. Native snapshot
+GET/Lua operations, TTL duration, successful final flush, worker join and
+readiness/census ordering remain intact. A loaded synthetic transport control
+kept all 605,952 commands while reducing synchronous submissions from 201,216
+to 5,568; cancellation, failure and retry checks passed. This is not a measured
+Main latency improvement. With this candidate, `cache_write` also counts
+native alias attempts, so its old and new counters have different coverage.
+Actual release adoption and fresh native census clocks/counts remain required.
+
+The `21:11:37Z` fixed-key read returned a publication but failed at
+`utc`/`datetime.fromisoformat` with `ValueError`, before source freshness or
+bucket validation. Receipt
+`f98f8f818adddad5166c6b8be552a983535f8d1b3ecce15a53ed3b39664c564b`
+therefore provides no source clocks or counts. Local controls reproduce valid
+Go JSON timestamps with shortened fractional seconds being rejected by the
+Python 3.10 parser. A qualified reader correction parses exact UTC microsecond
+calendar timestamps and retains the 900-second cutoff, including refusal at
+900 seconds plus one microsecond. The native interpreter version and rejected
+clock were not retained, so that compatibility defect is not yet the proven
+cause of this Main refusal. Earlier invalid and stale publications remain
+separate observations.
+
+The latest qualified read at `2026-10-05T22:50:35.905458Z` passed the unchanged
+900-second source-age limit. Its source evaluation ran from
+`22:37:19.796171Z` to `22:38:48.039397Z`, with publication at
+`22:44:14.292528Z`: 88.243226 seconds of evaluation, 326.253131 seconds from
+completion to publication, and 381.612930 seconds until observation. Source
+age was 707.866061 seconds. These one-publication counts qualify at that
+observation time:
+
+| Native bucket | Deduplicated public providers |
+| --- | ---: |
+| Quality | 360 |
+| Speed | 10,976 |
+| Online | 77,646 |
+
+The buckets overlap: Quality is a subset of Speed, which is a subset of
+Online under the reviewed producer rules. The 10,616 Speed providers outside
+Quality pass the common native gates and fail the additional stored ARIN
+non-Quality gate. Quality is 3.279883% of Speed. That gap is not a proxy count:
+the key cannot distinguish absent verification, unknown or ambiguous identity,
+explicit non-subscriber use, or missing/mismatched connection facts. It cannot
+identify dominant countries or operators. Known subscriber inference remains
+appropriate only without contrary applicable evidence; risk, virtual-ISP,
+proxy and explicit exclusion evidence remain independent vetoes.
+
+Within Online, 10,976 providers passed the selected-policy 4/5 URL ratio,
+66,668 failed and two had no accepted evidence. The evidence window was
+`(2026-10-05T14:37:20.448930Z, 2026-10-05T22:37:20.448930Z]`.
+Changing subscriber classification cannot admit those 66,670 ratio-failing or
+unmeasured providers to native Quality. Of the Quality providers, 357 had at
+least ten accepted outcomes and three had three or four; Speed had 10,970
+with at least ten and six with three or four. These are outcome counts, not
+success counts or four-hour quota completion, and do not establish a ten-outcome
+minimum for native Quality.
+
+Receipt `6016bf8f96178a5ccef733cd29e71a9dffecc38e623815631dfb1f280ca2f9fa`
+and independent gate
+`8e6c40f39b55080dbe2874267b4209f432a01246ed9b2e1e84f862d876b8f8d3`
+bind these counts and original clocks. Evaluation began after the `a7ce7f73`
+batching deployment completed, but the global key contains no publisher-process
+identity. It also contains no loaded ARIN epoch, country/operator provenance or
+excluded-provider intersections. This is a completed score-source cohort, not
+an instantaneous fleet census or proof that v13 caused the Quality count.
+
+The earlier qualified `21:43:05Z` read had 327 Quality, 10,338 Speed and
+77,183 Online providers, with a 253.473590-second export tail. These are separate
+publications without retained membership or writer joins; count and duration
+differences do not establish a batching benefit or regression. The newer
+326.253131-second tail already exceeds the separate 90-second score-shadow
+lease source-age window before publication. Its successful 900-second census
+validation therefore does not make that shadow capture eligible. Neither bound
+was relaxed. The publisher uses a five-hour Redis TTL and schedules its next
+run 30 seconds after completion; key presence and the nominal interval do not
+establish source freshness.
 
 Connection facts advance only after a successful actual ARIN lookup during a
 connection location write. The c343 connection path retries a failed initial
@@ -971,13 +1210,44 @@ Existing `urnetwork_stats_provider_excluded{reason}` and
 `urnetwork_stats_provider_egress_index{bucket,index}` gauges provide
 replica-backed rule diagnostics. Exclusion reasons report the first failing
 rule, so an early reliability, risk or TLS failure can hide later failures.
-These gauges have no producer observation timestamp and retain the previous
-successful values when a refresh fails; a recent scrape cannot make them a
-fresh exclusion census. The native publication has source clocks but lacks
-ARIN epochs and exclusion reasons. No loaded-ARIN epoch gauge is exported by
-this graph. The bounded process observation above supplies a mapped epoch for
-one process; its partial-file fingerprint does not establish a whole-file
-hash, application-reader use, fleet convergence or provider-level effect.
+The earlier graph had no producer observation timestamp for these gauges.
+Taskworker source `47952095` adds
+`urnetwork_stats_provider_egress_refresh_available` and the
+`urnetwork_stats_provider_egress_source_started_seconds` and
+`urnetwork_stats_provider_egress_source_completed_seconds` clocks. A failed
+refresh leaves availability zero; successful cache hits preserve the original
+source clocks. Retained counts and a recent scrape alone still cannot establish
+a fresh exclusion census. These are `CountProviderEgress` dashboard snapshots,
+separate from both the native score-target census key and URL quota publication.
+No qualified current read of these timestamped gauges is retained here.
+The individual count vectors and clocks are updated sequentially; availability
+one and a shared scrape timestamp do not by themselves prove an atomic
+counts-and-clock snapshot if collection overlaps a refresh.
+
+The native publication has source clocks but lacks ARIN epochs and exclusion
+reasons. These reviewed sources export no loaded-ARIN epoch gauge. The bounded
+process observation above supplies a mapped epoch for one process; its
+partial-file fingerprint does not establish a whole-file hash, application-reader
+use, fleet convergence or provider-level effect.
+
+An isolated classification-only refresh prototype passed nine local controls,
+including concurrent single-winner and mixed-writer checks. It compares the
+exact previous ARIN fields and write token before replacing six classification
+fields after an actual lookup; it does not rewrite location, URL/TLS evidence
+or reliability. It remains inactive: Main stale facts are unconfirmed, and
+bounded live-owner integration is unfinished. Owner changes during a write
+and uncertain commit outcomes require explicit handling; the local tests do
+not establish production activation or recovered Quality supply.
+
+The retained Connect `12c5c0ac` and API `a357c978` source trees each preserve
+25 reviewed ARIN loader, owner-capture, classification and native-score files
+from the earlier `1a46ab5f` graph byte for byte. This source comparison is not a
+live-owner join or proof of loaded resources in those newer processes. The
+aggregate database read retains no provider identifiers or addresses. Any
+future owner-side correction must first join a current live owner and address,
+its actual lookup generation, and the exact durable row/token; the earlier
+one-process mapping and a cached score-publication clock cannot supply that
+join.
 
 For this release, retain the following evidence as rollout proceeds:
 

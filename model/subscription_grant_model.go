@@ -15,16 +15,15 @@ import (
 // and a client never sees a gap at the boundary. Spending draws the balance that
 // ends first, so the old grant's leftover is used up before the new grant.
 
-// FreeGrantGrace is how long past the end of the day a daily free balance stays
-// valid.
+// How long past the end of the day a daily free balance stays valid.
 const FreeGrantGrace = 1 * time.Hour
 
-// ProGrantGrace is how long past the end of the month a monthly Pro balance stays
-// valid. It is also the window in which a lapsed subscriber is still Pro, because
-// the Pro entitlement is exactly "has an in-window pro balance" (see pro_model.go).
+// How long past the end of the month a monthly Pro balance stays valid. It is also
+// the window in which a lapsed subscriber is still Pro, because the Pro entitlement
+// is exactly "has an in-window pro balance" (see pro_model.go).
 const ProGrantGrace = 24 * time.Hour
 
-// FreeGrantWindow is the window for the daily free grant covering `now`:
+// The window for the daily free grant covering `now`:
 // [start of day, start of next day + 1 hour).
 func FreeGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
 	year, month, day := now.UTC().Date()
@@ -33,7 +32,7 @@ func FreeGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
 	return
 }
 
-// ProGrantWindow is the window for the monthly Pro grant covering `now`:
+// The window for the monthly Pro grant covering `now`:
 // [start of month, start of next month + 1 day).
 func ProGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
 	year, month, _ := now.UTC().Date()
@@ -42,15 +41,15 @@ func ProGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
 	return
 }
 
-// ReferralGrantWindow is the window for one referral grant period, from `now`.
+// The window for one referral grant period, from `now`.
 func ReferralGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
 	startTime = now.UTC()
 	endTime = startTime.Add(Pro().ReferralGrantPeriod()).Add(FreeGrantGrace)
 	return
 }
 
-// GrantKind is the recurring grant that wrote a balance (transfer_balance.grant_kind).
-// The balance summary uses it to tell a grant from the next grant of its kind (see
+// The recurring grant that wrote a balance (transfer_balance.grant_kind). The balance
+// summary uses it to tell a grant from the next grant of its kind (see
 // SupersededGrants). Every other balance -- purchases, subscriptions, data codes,
 // prober credit -- has no kind, and so do grants written before the kind was
 // recorded.
@@ -63,9 +62,9 @@ const (
 	GrantKindReferral GrantKind = "referral"
 )
 
-// grantGrace is how long a grant of the kind stays valid past the end of its
-// period, i.e. its overlap with the next grant of the kind. false for no kind or a
-// kind this binary does not know.
+// How long a grant of the kind stays valid past the end of its period, i.e. its
+// overlap with the next grant of the kind. false for no kind or a kind this binary
+// does not know.
 func grantGrace(grantKind GrantKind) (time.Duration, bool) {
 	switch grantKind {
 	case GrantKindFree, GrantKindReferral:
@@ -77,11 +76,11 @@ func grantGrace(grantKind GrantKind) (time.Duration, bool) {
 	}
 }
 
-// AddGrantTransferBalanceInTx adds one recurring grant at no cost -- the daily free
-// grant, the monthly Pro grant or a referral bonus -- and records its kind. The Pro
-// grant carries pro = true, which is what confers the entitlement (see
-// pro_model.go); the caller must refresh the Pro cache (UpdateProNetwork) once the
-// tx commits. Free and referral grants never confer Pro.
+// Adds one recurring grant at no cost -- the daily free grant, the monthly Pro grant
+// or a referral bonus -- and records its kind. The Pro grant carries pro = true,
+// which is what confers the entitlement (see pro_model.go); the caller must refresh
+// the Pro cache (UpdateProNetwork) once the tx commits. Free and referral grants
+// never confer Pro.
 func AddGrantTransferBalanceInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -127,15 +126,15 @@ func AddGrantTransferBalanceInTx(
 	return
 }
 
-// SupersededGrants returns the balances, among one network's active balances, that
-// are grants superseded by the next grant of their kind. Consecutive grants of a
-// kind overlap by the kind's grace, so at every boundary two are active: the old
-// grant in its grace and the new grant. The old grant is superseded once a recorded
-// grant of its kind has started at or after the end of the old grant's period (its
-// end time less the grace). It stays spendable, and since it ends first it is still
-// drawn first; only the summary leaves it out. Grants of the same period all count:
-// a network that is both a referrer and a referee gets two referral grants from one
-// run, and a refresh can add a second grant of the day.
+// The balances, among one network's active balances, that are grants superseded by
+// the next grant of their kind. Consecutive grants of a kind overlap by the kind's
+// grace, so at every boundary two are active: the old grant in its grace and the new
+// grant. The old grant is superseded once a recorded grant of its kind has started at
+// or after the end of the old grant's period (its end time less the grace). It stays
+// spendable, and since it ends first it is still drawn first; only the summary leaves
+// it out. Grants of the same period all count: a network that is both a referrer and
+// a referee gets two referral grants from one run, and a refresh can add a second
+// grant of the day.
 //
 // A balance without a recorded kind was written before grant kinds were recorded,
 // or by a binary that predates them during a rollout. It counts as a grant only when
@@ -143,21 +142,56 @@ func AddGrantTransferBalanceInTx(
 // supersedes: only a recorded grant replaces a balance in the summary, so a legacy
 // balance never hides another one.
 func SupersededGrants(transferBalances []*TransferBalance) map[server.Id]bool {
+	// recognizes a grant that has no recorded kind by its exact window, which
+	// the grant writers compute from the grant time (see the grant windows
+	// above), and by its flags. A free window starts at midnight UTC and lasts a
+	// day plus the grace; a Pro window starts at midnight UTC on the first of a
+	// month and lasts the month plus the grace; a referral window lasts the
+	// referral period plus the grace from whenever the run started. Free and
+	// referral grants carry no revenue and no Pro. The Pro grant carries Pro and
+	// no net revenue (the monthly grant does carry subsidy revenue). Purchases,
+	// subscriptions, data codes and prober credit start when they are bought or
+	// granted and run for their own durations, so they match none of these
+	// windows exactly.
+	legacyGrantKind := func(transferBalance *TransferBalance) GrantKind {
+		hasWindow := func(grantWindow func(time.Time) (time.Time, time.Time)) bool {
+			startTime, endTime := grantWindow(transferBalance.StartTime)
+			return startTime.Equal(transferBalance.StartTime) && endTime.Equal(transferBalance.EndTime)
+		}
+
+		if transferBalance.Pro {
+			if transferBalance.NetRevenue == 0 && hasWindow(ProGrantWindow) {
+				return GrantKindPro
+			}
+			return GrantKindNone
+		}
+		if transferBalance.Paid {
+			return GrantKindNone
+		}
+		if hasWindow(FreeGrantWindow) {
+			return GrantKindFree
+		}
+		if hasWindow(ReferralGrantWindow) {
+			return GrantKindReferral
+		}
+		return GrantKindNone
+	}
+
 	// the newest recorded grant of each kind. A balance is superseded by some
 	// recorded grant of its kind exactly when it is superseded by the newest one,
 	// since both tests only bound the newer grant's start from below.
-	newestStartTimes := map[GrantKind]time.Time{}
+	grantKindNewestStartTimes := map[GrantKind]time.Time{}
 	for _, transferBalance := range transferBalances {
 		if _, ok := grantGrace(transferBalance.GrantKind); !ok {
 			continue
 		}
-		newestStartTime, ok := newestStartTimes[transferBalance.GrantKind]
+		newestStartTime, ok := grantKindNewestStartTimes[transferBalance.GrantKind]
 		if !ok || newestStartTime.Before(transferBalance.StartTime) {
-			newestStartTimes[transferBalance.GrantKind] = transferBalance.StartTime
+			grantKindNewestStartTimes[transferBalance.GrantKind] = transferBalance.StartTime
 		}
 	}
 
-	superseded := map[server.Id]bool{}
+	supersededBalanceIds := map[server.Id]bool{}
 	for _, transferBalance := range transferBalances {
 		grantKind := transferBalance.GrantKind
 		if grantKind == GrantKindNone {
@@ -167,55 +201,21 @@ func SupersededGrants(transferBalances []*TransferBalance) map[server.Id]bool {
 		if !ok {
 			continue
 		}
-		newestStartTime, ok := newestStartTimes[grantKind]
+		newestStartTime, ok := grantKindNewestStartTimes[grantKind]
 		if !ok {
 			continue
 		}
 		periodEndTime := transferBalance.EndTime.Add(-grace)
 		if transferBalance.StartTime.Before(newestStartTime) && !newestStartTime.Before(periodEndTime) {
-			superseded[transferBalance.BalanceId] = true
+			supersededBalanceIds[transferBalance.BalanceId] = true
 		}
 	}
-	return superseded
+	return supersededBalanceIds
 }
 
-// legacyGrantKind recognizes a grant that has no recorded kind by its exact window,
-// which the grant writers compute from the grant time (see the grant windows above),
-// and by its flags. A free window starts at midnight UTC and lasts a day plus the
-// grace; a Pro window starts at midnight UTC on the first of a month and lasts the
-// month plus the grace; a referral window lasts the referral period plus the grace
-// from whenever the run started. Free and referral grants carry no revenue and no
-// Pro. The Pro grant carries Pro and no net revenue (the monthly grant does carry
-// subsidy revenue). Purchases, subscriptions, data codes and prober credit start when
-// they are bought or granted and run for their own durations, so they match none of
-// these windows exactly.
-func legacyGrantKind(transferBalance *TransferBalance) GrantKind {
-	hasWindow := func(grantWindow func(time.Time) (time.Time, time.Time)) bool {
-		startTime, endTime := grantWindow(transferBalance.StartTime)
-		return startTime.Equal(transferBalance.StartTime) && endTime.Equal(transferBalance.EndTime)
-	}
-
-	if transferBalance.Pro {
-		if transferBalance.NetRevenue == 0 && hasWindow(ProGrantWindow) {
-			return GrantKindPro
-		}
-		return GrantKindNone
-	}
-	if transferBalance.Paid {
-		return GrantKindNone
-	}
-	if hasWindow(FreeGrantWindow) {
-		return GrantKindFree
-	}
-	if hasWindow(ReferralGrantWindow) {
-		return GrantKindReferral
-	}
-	return GrantKindNone
-}
-
-// TransferBalanceSummary is the data balance the apps show (the "Daily Data
-// Balance" bar): the start, available and pending bytes of the network's active
-// balances, with superseded grants left out (see SummarizeTransferBalances).
+// The data balance the apps show (the "Daily Data Balance" bar): the start, available
+// and pending bytes of the network's active balances, with superseded grants left out
+// (see SummarizeTransferBalances).
 type TransferBalanceSummary struct {
 	StartBalanceByteCount ByteCount
 	// available: the balance less what open contracts reserve from it
@@ -226,22 +226,22 @@ type TransferBalanceSummary struct {
 	ActiveTransferBalances []*TransferBalance
 }
 
-// GetTransferBalanceSummary reads the network's active balances and open contracts
-// and summarizes them (see SummarizeTransferBalances).
+// Reads the network's active balances and open contracts and summarizes them (see
+// SummarizeTransferBalances).
 func GetTransferBalanceSummary(ctx context.Context, networkId server.Id) *TransferBalanceSummary {
 	transferBalances := GetActiveTransferBalances(ctx, networkId)
 	openTransferByteCount := GetOpenTransferByteCount(ctx, networkId)
 	return SummarizeTransferBalances(transferBalances, openTransferByteCount, server.NowUtc())
 }
 
-// SummarizeTransferBalances sums the active balances. A grant superseded by the next
-// grant of its kind (see SupersededGrants) is left out of all three numbers: its
-// start, its available bytes, and the bytes open contracts reserve from it, which
-// openTransferByteCount (every open contract of the payer) includes. So from 00:00 to
-// 01:00 UTC the daily bar reads today's grant with nothing used, instead of
-// yesterday's and today's grants added together. Spending is unchanged: the
-// superseded grant ends first, so its leftover is still drawn first, and until it
-// ends the summary understates what is available by that leftover.
+// Sums the active balances. A grant superseded by the next grant of its kind (see
+// SupersededGrants) is left out of all three numbers: its start, its available bytes,
+// and the bytes open contracts reserve from it, which openTransferByteCount (every
+// open contract of the payer) includes. So from 00:00 to 01:00 UTC the daily bar
+// reads today's grant with nothing used, instead of yesterday's and today's grants
+// added together. Spending is unchanged: the superseded grant ends first, so its
+// leftover is still drawn first, and until it ends the summary understates what is
+// available by that leftover.
 func SummarizeTransferBalances(
 	transferBalances []*TransferBalance,
 	openTransferByteCount ByteCount,
@@ -251,12 +251,12 @@ func SummarizeTransferBalances(
 		OpenTransferByteCount:  openTransferByteCount,
 		ActiveTransferBalances: transferBalances,
 	}
-	superseded := SupersededGrants(transferBalances)
+	supersededBalanceIds := SupersededGrants(transferBalances)
 	for _, transferBalance := range transferBalances {
 		if !transferBalance.EndTime.After(now) {
 			continue
 		}
-		if superseded[transferBalance.BalanceId] {
+		if supersededBalanceIds[transferBalance.BalanceId] {
 			summary.OpenTransferByteCount -= transferBalance.reservedByteCount
 			continue
 		}

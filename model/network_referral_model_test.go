@@ -133,10 +133,10 @@ func TestAddReferralBonusesGrantsBothSides(t *testing.T) {
 	})
 }
 
-// TestNetworkReferralRefusesSelfReferral pins that a network can never be its own
-// referral network, however its own code is spelled. The guard compared the looked-up
-// id pointer with the address of the local network id, which is never equal, so a
-// network could refer itself and collect both sides of the referral bonus.
+// Pins that a network can never be its own referral network, however its own code is
+// spelled. The guard compared the looked-up id pointer with the address of the local
+// network id, which is never equal, so a network could refer itself and collect both
+// sides of the referral bonus.
 func TestNetworkReferralRefusesSelfReferral(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -182,9 +182,9 @@ func TestNetworkReferralRefusesSelfReferral(t *testing.T) {
 	})
 }
 
-// TestIsSelfReferral pins that the self-referral guard compares id values. The
-// looked-up id is a separate copy of the network id, as GetNetworkIdByReferralCode
-// returns it, so a pointer comparison never matches.
+// Pins that the self-referral guard compares id values. The looked-up id is a
+// separate copy of the network id, as GetNetworkIdByReferralCode returns it, so a
+// pointer comparison never matches.
 func TestIsSelfReferral(t *testing.T) {
 	networkId := server.NewId()
 	sameNetworkId := networkId

@@ -222,6 +222,8 @@ func (discardableReader) Read(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// A stored log file's key names its network and feedback under the logs/
+// namespace.
 func TestFeedbackLogKey(t *testing.T) {
 	networkId := server.RequireParseId("0199a000-0000-7000-8000-00000000000a")
 	feedbackId := server.RequireParseId("0199a000-0000-7000-8000-00000000000b")
@@ -495,8 +497,8 @@ func TestApplyFeedbackLogRetentionSetsBucketLifecycle(t *testing.T) {
 	connect.AssertEqual(t, int(config.Rules[0].Expiration.Days), 7)
 }
 
-// fakeMinioYml is a vault `minio.yml` that points the blob store at fake, with
-// the given feedback log bucket (empty for none).
+// A vault `minio.yml` that points the blob store at fake, with the given
+// feedback log bucket (empty for none).
 func fakeMinioYml(fake *fakeMinio, feedbackLogBucket string) string {
 	return fmt.Sprintf(`
 authority: %s
@@ -508,7 +510,7 @@ feedback_log_bucket: %q
 `, fake.Authority(), feedbackLogBucket)
 }
 
-// fakeMinio is a minimal S3 endpoint for the minio client behind the feedback
+// A minimal S3 endpoint for the minio client behind the feedback
 // log store; the repo has no local minio fixture. It answers bucket location
 // reads (the client asks before its first request to a bucket), serves retained
 // lifecycle state, accepts object and lifecycle writes, and records them.
@@ -524,6 +526,7 @@ type fakeMinio struct {
 	afterLifecycleWrite func(string)
 }
 
+// One write the fake accepted.
 type fakeMinioWrite struct {
 	path        string
 	query       url.Values
@@ -532,6 +535,7 @@ type fakeMinioWrite struct {
 	body []byte
 }
 
+// A running fake, closed when the test ends.
 func newFakeMinio(t testing.TB) *fakeMinio {
 	fake := &fakeMinio{}
 	fake.server = httptest.NewServer(http.HandlerFunc(fake.serve))
@@ -539,30 +543,33 @@ func newFakeMinio(t testing.TB) *fakeMinio {
 	return fake
 }
 
+// The host:port a `minio.yml` names to reach the fake.
 func (self *fakeMinio) Authority() string {
 	return strings.TrimPrefix(self.server.URL, "http://")
 }
 
+// The requests the fake has answered.
 func (self *fakeMinio) RequestCount() int {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return self.requestCount
 }
 
+// The writes the fake has accepted, oldest first.
 func (self *fakeMinio) Writes() []fakeMinioWrite {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return slices.Clone(self.writes)
 }
 
-// DenyWrites makes every later write fail with a non-retryable access error.
+// Makes every later write fail with a non-retryable access error.
 func (self *fakeMinio) DenyWrites() {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.denyWrites = true
 }
 
-// countRequest counts one request and returns whether writes are denied.
+// Counts one request and returns whether writes are denied.
 func (self *fakeMinio) countRequest() (denyWrites bool) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
@@ -570,6 +577,7 @@ func (self *fakeMinio) countRequest() (denyWrites bool) {
 	return self.denyWrites
 }
 
+// Keeps an accepted write, and a lifecycle write as the bucket's lifecycle.
 func (self *fakeMinio) recordWrite(write fakeMinioWrite) {
 	self.stateLock.Lock()
 	self.writes = append(self.writes, write)
@@ -588,6 +596,7 @@ func (self *fakeMinio) recordWrite(write fakeMinioWrite) {
 	}
 }
 
+// Answers one S3 request the way minio would for the requests the store sends.
 func (self *fakeMinio) serve(w http.ResponseWriter, r *http.Request) {
 	denyWrites := self.countRequest()
 	query := r.URL.Query()
@@ -615,6 +624,32 @@ func (self *fakeMinio) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPut && denyWrites:
 		writeFakeMinioXml(w, http.StatusForbidden, `<Error><Code>AccessDenied</Code><Message>denied</Message></Error>`)
 	case r.Method == http.MethodPut:
+		// removes the aws-chunked framing the minio client signs a streaming
+		// upload with: chunks of "<hex size>;chunk-signature=<sig>\r\n<data>\r\n",
+		// ended by a zero-size chunk (and any trailer after it)
+		decodeAwsChunked := func(body []byte) ([]byte, error) {
+			decoded := []byte{}
+			for {
+				header, rest, ok := bytes.Cut(body, []byte("\r\n"))
+				if !ok {
+					return nil, errors.New("aws-chunked header is truncated")
+				}
+				sizeHex, _, _ := bytes.Cut(header, []byte(";"))
+				size, err := strconv.ParseUint(string(sizeHex), 16, 31)
+				if err != nil {
+					return nil, err
+				}
+				if size == 0 {
+					return decoded, nil
+				}
+				if uint64(len(rest)) < size+2 || !bytes.Equal(rest[size:size+2], []byte("\r\n")) {
+					return nil, errors.New("aws-chunked data is truncated")
+				}
+				decoded = append(decoded, rest[:size]...)
+				body = rest[size+2:]
+			}
+		}
+
 		body, err := io.ReadAll(r.Body)
 		if err == nil && strings.HasPrefix(r.Header.Get("X-Amz-Content-Sha256"), "STREAMING-") {
 			body, err = decodeAwsChunked(body)
@@ -636,34 +671,9 @@ func (self *fakeMinio) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// Answers with an S3 xml document.
 func writeFakeMinioXml(w http.ResponseWriter, statusCode int, body string) {
 	w.Header().Set("Content-Type", "application/xml")
 	w.WriteHeader(statusCode)
 	io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?>`+body)
-}
-
-// decodeAwsChunked removes the aws-chunked framing the minio client signs a
-// streaming upload with: chunks of "<hex size>;chunk-signature=<sig>\r\n<data>\r\n",
-// ended by a zero-size chunk (and any trailer after it).
-func decodeAwsChunked(body []byte) ([]byte, error) {
-	decoded := []byte{}
-	for {
-		header, rest, ok := bytes.Cut(body, []byte("\r\n"))
-		if !ok {
-			return nil, errors.New("aws-chunked header is truncated")
-		}
-		sizeHex, _, _ := bytes.Cut(header, []byte(";"))
-		size, err := strconv.ParseUint(string(sizeHex), 16, 31)
-		if err != nil {
-			return nil, err
-		}
-		if size == 0 {
-			return decoded, nil
-		}
-		if uint64(len(rest)) < size+2 || !bytes.Equal(rest[size:size+2], []byte("\r\n")) {
-			return nil, errors.New("aws-chunked data is truncated")
-		}
-		decoded = append(decoded, rest[:size]...)
-		body = rest[size+2:]
-	}
 }

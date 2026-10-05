@@ -1,0 +1,53 @@
+package connect
+
+import (
+	"context"
+	"errors"
+	"net/http"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/urnetwork/server"
+)
+
+// Only the pre-admission checks cross this boundary. Db reports exhausted
+// dependency work by panic, but H1+ must reject it before writing its 101.
+// Unexpected panics still belong to the router's internal-error handling,
+// even when the authentication deadline happens to expire at the same time.
+func connectH1AuthenticationStatus(ctx context.Context, authenticate func() (int, error)) (status int) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err, ok := recovered.(error)
+			if !ok || !connectAuthDependencyUnavailable(err) {
+				panic(recovered)
+			}
+			status = http.StatusServiceUnavailable
+		}
+		if ctx.Err() != nil {
+			status = http.StatusServiceUnavailable
+		}
+	}()
+	if ctx.Err() != nil {
+		return http.StatusServiceUnavailable
+	}
+	status, err := authenticate()
+	if connectAuthDependencyUnavailable(err) {
+		return http.StatusServiceUnavailable
+	}
+	if err != nil && status == 0 {
+		// A callback must never publish successful admission with an error.
+		// Preserve an unchecked program failure for the router, not a retry.
+		panic(err)
+	}
+	return status
+}
+
+// Match session authentication's selective dependency classification. A bad
+// credential or an unrelated program error must not become a retryable outage.
+func connectAuthDependencyUnavailable(err error) bool {
+	if errors.Is(err, server.DbContextDoneError) ||
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || pgconn.Timeout(err) {
+		return true
+	}
+	var connectError *pgconn.ConnectError
+	return errors.As(err, &connectError)
+}

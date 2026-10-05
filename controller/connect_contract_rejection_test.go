@@ -185,28 +185,28 @@ func TestCreateContractIncompleteGrantCensusIsNotInsufficientBalance(t *testing.
 	env.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 		defer cancel()
-		network, peerNetwork, source, destination := server.NewId(), server.NewId(), server.NewId(), server.NewId()
-		for _, n := range []server.Id{network, peerNetwork} {
-			model.Testing_CreateNetwork(ctx, n, "census-fixture-"+n.String(), server.NewId())
+		networkId, peerNetworkId, sourceId, destinationId := server.NewId(), server.NewId(), server.NewId(), server.NewId()
+		for _, fixtureNetworkId := range []server.Id{networkId, peerNetworkId} {
+			model.Testing_CreateNetwork(ctx, fixtureNetworkId, "census-fixture-"+fixtureNetworkId.String(), server.NewId())
 		}
-		model.Testing_CreateDevice(ctx, network, server.NewId(), source, "source", "fixture")
-		model.Testing_CreateDevice(ctx, peerNetwork, server.NewId(), destination, "destination", "fixture")
+		model.Testing_CreateDevice(ctx, networkId, server.NewId(), sourceId, "source", "fixture")
+		model.Testing_CreateDevice(ctx, peerNetworkId, server.NewId(), destinationId, "destination", "fixture")
 		// 400 grants of 3 KiB hold 1200 KiB, more than the 1 MiB request. The
 		// default selection bound of 256 grants stops the census at 768 KiB.
 		startTime, endTime := server.NowUtc(), server.NowUtc().Add(time.Hour)
 		server.Tx(ctx, func(tx server.PgTx) {
 			for range 400 {
-				server.Raise(model.AddBasicTransferBalanceInTx(tx, ctx, network, 3*1024, startTime, endTime))
+				server.Raise(model.AddBasicTransferBalanceInTx(tx, ctx, networkId, 3*1024, startTime, endTime))
 			}
 		})
-		model.SetProvide(ctx, destination, map[model.ProvideMode][]byte{model.ProvideModePublic: bytes.Repeat([]byte{42}, 32)})
+		model.SetProvide(ctx, destinationId, map[model.ProvideMode][]byte{model.ProvideModePublic: bytes.Repeat([]byte{42}, 32)})
 
 		failureCount := func(cause string) float64 {
 			return testutil.ToFloat64(contractFailureCounter.WithLabelValues(cause, "false"))
 		}
 		beforeOther, beforeBalance := failureCount("other"), failureCount("insufficient_balance")
 		beforeRejection := rejectionCount(t, "internal", "other", "false")
-		frames, err := CreateContract(ctx, source, &protocol.CreateContract{DestinationId: destination.Bytes(), TransferByteCount: 1024 * 1024}, connect.DefaultContractManagerSettings())
+		frames, err := CreateContract(ctx, sourceId, &protocol.CreateContract{DestinationId: destinationId.Bytes(), TransferByteCount: 1024 * 1024}, connect.DefaultContractManagerSettings())
 		if err != nil || len(frames) != 1 {
 			t.Fatalf("census refusal changed transport outcome: %v", err)
 		}
@@ -228,7 +228,7 @@ func TestCreateContractIncompleteGrantCensusIsNotInsufficientBalance(t *testing.
 		if got := rejectionCount(t, "internal", "other", "false"); got != beforeRejection+1 {
 			t.Fatalf("rejection cause other = %v, want %v", got, beforeRejection+1)
 		}
-		if model.GetOpenTransferByteCount(ctx, network) != 0 {
+		if model.GetOpenTransferByteCount(ctx, networkId) != 0 {
 			t.Fatal("refusal changed reservation accounting")
 		}
 	})

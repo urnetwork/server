@@ -262,15 +262,15 @@ const (
 
 const purchaseGuestSignInRequiredMessage = "Add a sign-in to your account before buying a plan."
 
-// purchaseHasAnyAuthMethod is model.HasAnyAuthMethod. Replaceable only by
-// hermetic tests, which answer the lookup without a database. Production never
-// mutates it.
+// The auth-method lookup, model.HasAnyAuthMethod. Replaceable only by hermetic
+// tests, which answer the lookup without a database. Production never mutates
+// it.
 var purchaseHasAnyAuthMethod = model.HasAnyAuthMethod
 
-// refuseGuestPurchase reports whether the session's network must not start a
-// checkout or a payment intent: a legacy guest network has no login method, so
-// nothing could sign back in to the plan it bought. Current apps convert a
-// guest in place before checkout; this covers the builds from before that.
+// Reports whether the session's network must not start a checkout or a
+// payment intent: a legacy guest network has no login method, so nothing could
+// sign back in to the plan it bought. Current apps convert a guest in place
+// before checkout; this covers the builds from before that.
 //
 // Only the server-created checkouts and intents call this. A store-verified
 // purchase (verify-play-purchase, verify-apple-transaction) and every webhook
@@ -279,7 +279,9 @@ func refuseGuestPurchase(session *session.ClientSession) bool {
 	if !isGuestNetwork(session, purchaseHasAnyAuthMethod) {
 		return false
 	}
-	glog.V(1).Infof("[sub]refused a purchase for guest network %s\n", session.ByJwt.NetworkId)
+	if glog.V(1) {
+		glog.Infof("[sub]refused a purchase for guest network %s\n", session.ByJwt.NetworkId)
+	}
 	return true
 }
 
@@ -1449,12 +1451,16 @@ func endTerminalPlaySubscriptionRenewal(
 	}, nil
 }
 
+// Runs in the transaction that finishes the renewal task and schedules the
+// next poll there. The subscription-ended notice is returned as work for after
+// that transaction commits: a finish that rolls back, or reruns its callback,
+// sends nothing, and the send does not hold the transaction open.
 func PlaySubscriptionRenewalPost(
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 	playSubscriptionRenewalResult *PlaySubscriptionRenewalResult,
 	clientSession *session.ClientSession,
 	tx server.PgTx,
-) error {
+) ([]server.PostFunction, error) {
 	if playSubscriptionRenewalResult.Canceled {
 		if !playSubscriptionRenewalResult.Terminal &&
 			!playSubscriptionRenewalResult.ExpiryTime.IsZero() {
@@ -1471,7 +1477,7 @@ func PlaySubscriptionRenewalPost(
 				playSubscriptionRenewal,
 			)
 		}
-		return nil
+		return nil, nil
 	}
 
 	if playSubscriptionRenewalResult.Renewed {
@@ -1495,23 +1501,34 @@ func PlaySubscriptionRenewalPost(
 		)
 	} else {
 		// else not renewed, stop trying
-		userAuth, err := model.GetUserAuth(clientSession.Ctx, playSubscriptionRenewal.NetworkId)
+		networkId := playSubscriptionRenewal.NetworkId
+		userAuth, err := model.GetUserAuthInTx(clientSession.Ctx, tx, networkId)
 		if err != nil {
 			if errors.Is(err, model.ErrMissingUserAuth) {
 				// The notice is optional; a wallet/guest account must not strand
 				// completed renewal post-processing for lack of a recipient.
-				return nil
+				return nil, nil
 			}
-			return err
+			return nil, err
 		}
-		awsMessageSender := GetAWSMessageSender()
-		awsMessageSender.SendAccountMessageTemplate(
-			userAuth,
-			&SubscriptionEndedTemplate{},
-		)
+		if userAuth == "" {
+			// the network or its admin is gone
+			return nil, nil
+		}
+		return []server.PostFunction{func() any {
+			awsMessageSender := GetAWSMessageSender()
+			err := awsMessageSender.SendAccountMessageTemplate(
+				userAuth,
+				&SubscriptionEndedTemplate{},
+			)
+			if err != nil {
+				glog.Infof("[sub]could not send the subscription ended notice for network %s: %s\n", networkId, err)
+			}
+			return nil
+		}}, nil
 	}
 
-	return nil
+	return nil, nil
 }
 
 func VerifyCoinbaseBody(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
@@ -1619,13 +1636,17 @@ func AddRefreshTransferBalance(ctx context.Context, networkId server.Id) (return
 	return
 }
 
-// AddRefreshTransferBalanceInTx writes the refresh grant in the caller's tx and
+// Writes the refresh grant in the caller's tx and
 // returns true when it is the Pro grant. The caller must then refresh the Pro cache
 // (model.UpdateProNetwork) after the tx commits. A refresh inside the tx reads on its
 // own connection, so it would cache the entitlement from before the grant for up to
 // ProCacheTtl, and a tx that rolled back would still have written the cache.
+//
+// The tier comes from the renewals as the tx sees them, read on the tx's own
+// connection: a renewal the tx itself wrote counts, and the tx does not hold a second
+// pool connection while it holds this one.
 func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkId server.Id) (proGranted bool, returnErr error) {
-	pro, _ := model.HasSubscriptionRenewal(ctx, networkId, model.SubscriptionTypeSupporter)
+	pro, _ := model.HasSubscriptionRenewalInTx(tx, ctx, networkId, model.SubscriptionTypeSupporter)
 
 	// Nothing to grant -> grant nothing. With no pro.yml the amount is ZERO, and granting
 	// zero is not a no-op: it writes a real transfer_balance row with nothing in it.
@@ -1968,11 +1989,22 @@ type HeliusWebhookResult struct {
 
 const solanaUsdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
-// the webhook credits payments to any of these; the first is the one quoted
-// to clients (SolanaPaymentIntentResult.Recipient)
+// The one source of where a Solana Pay payment goes. The webhook credits a
+// USDC transfer to any of these; the first is the one every intent path
+// quotes (solanaPaymentRecipient). Clients pay the address the quote names
+// and keep none of their own, so rotating the receiver is an edit here: the
+// new address first, and the old one listed after it while payments quoted
+// to it can still arrive.
 var solanaReceiverAddresses = []string{
 	"4Fj9RCwJqHLdLNK28DwWHunHqWapxKbbzeYZLmreSYCM", // coinbase account address
 	"74UNdYRpvakSABaYHSZMQNaXBVtA6eY9Nt8chcqocKe7", // deprecating this
+}
+
+// The receiver a client is told to pay: the one every intent result names
+// (SolanaPaymentIntentResult.Recipient, PayDataSolanaIntentResult.Recipient)
+// and the one the browser-wallet transfer pays (CreateSolanaPaymentTransaction).
+func solanaPaymentRecipient() string {
+	return solanaReceiverAddresses[0]
 }
 
 // db lookups and writes HeliusWebhook makes, as seams so a test can drive a batch
@@ -2610,7 +2642,7 @@ func solanaPaymentIntentQuote(
 		RegularAmountUsd: regularUsd,
 		OfferApplied:     offerApplied,
 		Currency:         model.PriceTierCurrency,
-		Recipient:        solanaReceiverAddresses[0],
+		Recipient:        solanaPaymentRecipient(),
 		SplTokenMint:     solanaUsdcMint,
 	}
 }

@@ -441,12 +441,12 @@ func getProviderEgressHealthCountsSnapshot(ctx context.Context, clientIds []serv
 // gradually becomes unknown. Only a newer authenticated response from each
 // affected URL clears its finding. An unidentified legacy finding is retained.
 func GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx context.Context) map[server.Id]bool {
-	return getProviderEgressTLSAuthenticationFailedClientIds(ctx, nil)
+	return getProviderEgressTlsAuthenticationFailedClientIds(ctx, nil)
 }
 
 // The same findings for only clientIds, or for every provider when clientIds
 // is nil.
-func getProviderEgressTLSAuthenticationFailedClientIds(ctx context.Context, clientIds []server.Id) map[server.Id]bool {
+func getProviderEgressTlsAuthenticationFailedClientIds(ctx context.Context, clientIds []server.Id) map[server.Id]bool {
 	failed := map[server.Id]bool{}
 	query := `
 			SELECT client_id

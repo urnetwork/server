@@ -279,7 +279,7 @@ func providerWorkActualSdkPublication(t *testing.T, missingSessionOriginal, keep
 			settings.ContractManagerSettings.CloseReportDomainHash = f.domain
 			settings.ContractManagerSettings.InitialContractTransferByteCount = 121
 			scope := connect.OriginalContractStoreScope{DomainHash: f.domain, ClientId: [16]byte(id), PublicKey: [32]byte(key.Public().(ed25519.PublicKey)), SourceGeneration: [16]byte{byte(174 + index)}}
-			settings.ContractManagerSettings.OriginalContractCapture = &connect.OriginalContractCaptureSettings{Directory: filepath.Join(t.TempDir(), "requests"), PublicKey: scope.PublicKey, SourceGeneration: scope.SourceGeneration}
+			settings.ContractManagerSettings.OriginalContractCapture = &connect.OriginalContractCaptureSettings{Directory: filepath.Join(providerWorkPhysicalTempDir(t), "requests"), PublicKey: scope.PublicKey, SourceGeneration: scope.SourceGeneration}
 			providerWorkPrepareCreationStore(t, settings.ContractManagerSettings.OriginalContractCapture.Directory, scope)
 			transport := &providerWorkPublisherOob{ctx: ctx, clientId: id, directory: settings.ContractManagerSettings.OriginalContractCapture.Directory, settings: settings.ContractManagerSettings}
 			client := connect.NewClient(ctx, connect.Id(id), transport, settings)

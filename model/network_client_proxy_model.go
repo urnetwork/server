@@ -346,48 +346,67 @@ func GetProxyDeviceConnectionForClient(
 	return
 }
 
+// Creates the config in its own transaction, then its redis mirror.
+// auth-client writes the config in the client's own transaction instead (see
+// createProxyDeviceConfigInTx).
 func CreateProxyDeviceConfig(ctx context.Context, proxyDeviceConfig *ProxyDeviceConfig) (returnErr error) {
 
 	var proxyDeviceConfigJson []byte
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		proxyDeviceConfig.ProxyId = server.NewId()
-		proxyDeviceConfig.InstanceId = server.NewId()
-
-		var err error
-		proxyDeviceConfigJson, err = json.Marshal(proxyDeviceConfig)
-		if err != nil {
-			returnErr = err
-			return
-		}
-
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			INSERT INTO proxy_device_config (
-				proxy_id,
-				client_id,
-				instance_id,
-				config_json
-			)
-			VALUES ($1, $2, $3, $4)
-			`,
-			proxyDeviceConfig.ProxyId,
-			proxyDeviceConfig.ClientId,
-			proxyDeviceConfig.InstanceId,
-			proxyDeviceConfigJson,
-		))
+		proxyDeviceConfigJson, returnErr = createProxyDeviceConfigInTx(ctx, tx, proxyDeviceConfig)
 	})
 
 	if returnErr != nil {
 		return returnErr
 	}
 
-	server.Redis(ctx, func(r server.RedisClient) {
-		server.Raise(r.Set(ctx, proxyDeviceConfigKey(proxyDeviceConfig.ProxyId), proxyDeviceConfigJson, proxyDeviceConfigMirrorTtl).Err())
-	})
+	setProxyDeviceConfigMirror(ctx, proxyDeviceConfig.ProxyId, proxyDeviceConfigJson)
 
 	return nil
+}
+
+// Assigns the config a new proxy id and instance id and writes its row in the
+// caller's transaction. Returns the json for the redis mirror, which the
+// caller writes after the commit.
+func createProxyDeviceConfigInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	proxyDeviceConfig *ProxyDeviceConfig,
+) (proxyDeviceConfigJson []byte, returnErr error) {
+	proxyDeviceConfig.ProxyId = server.NewId()
+	proxyDeviceConfig.InstanceId = server.NewId()
+
+	proxyDeviceConfigJson, returnErr = json.Marshal(proxyDeviceConfig)
+	if returnErr != nil {
+		return
+	}
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		INSERT INTO proxy_device_config (
+			proxy_id,
+			client_id,
+			instance_id,
+			config_json
+		)
+		VALUES ($1, $2, $3, $4)
+		`,
+		proxyDeviceConfig.ProxyId,
+		proxyDeviceConfig.ClientId,
+		proxyDeviceConfig.InstanceId,
+		proxyDeviceConfigJson,
+	))
+	return
+}
+
+// The mirror is a cache: GetProxyDeviceConfig falls back to the
+// proxy_device_config row when it is missing.
+func setProxyDeviceConfigMirror(ctx context.Context, proxyId server.Id, proxyDeviceConfigJson []byte) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		server.Raise(r.Set(ctx, proxyDeviceConfigKey(proxyId), proxyDeviceConfigJson, proxyDeviceConfigMirrorTtl).Err())
+	})
 }
 
 func RemoveProxyDeviceConfig(ctx context.Context, proxyId server.Id) {
@@ -534,8 +553,20 @@ type connectCountry struct {
 	CountryCode string
 }
 
+// The countries are read once per process. A test env starts each test on a
+// new database, so the read is reset with the env, as the other location
+// caches are.
+func init() {
+	server.OnReset(func() {
+		countryCodeConnectCountries = sync.OnceValue(loadCountryCodeConnectCountries)
+	})
+}
+
 // county code is lower
-var countryCodeConnectCountries = sync.OnceValue(func() map[string]*connectCountry {
+var countryCodeConnectCountries = sync.OnceValue(loadCountryCodeConnectCountries)
+
+// Reads every country location, keyed by its lowercase country code.
+func loadCountryCodeConnectCountries() map[string]*connectCountry {
 	ctx := context.Background()
 
 	m := map[string]*connectCountry{}
@@ -567,7 +598,7 @@ var countryCodeConnectCountries = sync.OnceValue(func() map[string]*connectCount
 	})
 
 	return m
-})
+}
 
 func GetConnectLocationForCountryCode(ctx context.Context, countryCode string) *sdk.ConnectLocation {
 	normalCountryCode := strings.ToLower(countryCode)
@@ -633,6 +664,13 @@ type CreateProxyClientOptions struct {
 	EnableWg    bool
 }
 
+// The server's proxy config has no hosts (proxy.yml has no hosts block), so
+// no proxy client can be created.
+var errNoProxyHosts = errors.New("No proxy hosts available")
+
+// Creates the proxy client in its own transaction, then wakes the proxy hosts
+// of its block. auth-client writes the proxy client in the client's own
+// transaction instead (see createProxyClientInTx).
 func CreateProxyClient(
 	ctx context.Context,
 	proxyId server.Id,
@@ -643,136 +681,178 @@ func CreateProxyClient(
 	proxyClient *ProxyClient,
 	returnErr error,
 ) {
-	proxyConfig := LoadServerProxyConfig()
-	signedProxyId := SignProxyId(proxyId)
+	serverProxyConfig := LoadServerProxyConfig()
 
 	server.Tx(ctx, func(tx server.PgTx) {
-		hosts := slices.Collect(maps.Keys(proxyConfig.Hosts))
-		if len(hosts) == 0 {
-			returnErr = fmt.Errorf("No proxy hosts available")
+		proxyClient, returnErr = createProxyClientInTx(
+			ctx,
+			tx,
+			serverProxyConfig,
+			proxyId,
+			clientId,
+			instanceId,
+			opts,
+		)
+	})
+
+	if returnErr == nil {
+		publishProxyClient(ctx, proxyClient)
+
+		// The API controller feeds a newly allocated WireGuard egress with the
+		// canonical verify.yml settings. The taskworker periodically re-feeds
+		// all live allocations with those same settings. This model layer must
+		// not create an unkeyed default entry beside that keyed namespace.
+	}
+
+	return
+}
+
+// Writes the proxy client's rows in the caller's transaction: a random host
+// and block, a free client ipv4 when wireguard is enabled, and the change row
+// that the proxy hosts poll. A block with no free ipv4 panics with
+// server.PgRetry, so the transaction retries with a new host, block and start.
+// An error returns before anything is written. The caller publishes the proxy
+// client after the commit (see publishProxyClient).
+func createProxyClientInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	serverProxyConfig ServerProxyConfig,
+	proxyId server.Id,
+	clientId server.Id,
+	instanceId server.Id,
+	opts CreateProxyClientOptions,
+) (
+	proxyClient *ProxyClient,
+	returnErr error,
+) {
+	signedProxyId := SignProxyId(proxyId)
+
+	hosts := slices.Collect(maps.Keys(serverProxyConfig.Hosts))
+	if len(hosts) == 0 {
+		returnErr = errNoProxyHosts
+		return
+	}
+	proxyHost := hosts[mathrand.Intn(len(hosts))]
+
+	blockServicePorts := serverProxyConfig.Hosts[proxyHost]
+
+	blocks := slices.Collect(maps.Keys(blockServicePorts))
+	block := blocks[mathrand.Intn(len(blocks))]
+
+	servicePorts := blockServicePorts[block]
+
+	socksProxyPort := servicePorts["socks"]
+	httpProxyPort := servicePorts["http"]
+	httpsProxyPort := servicePorts["https"]
+	apiPort := servicePorts["api"]
+	wgPort := servicePorts["wg"]
+
+	// SOCKS is a Pro-only feature. A client whose plan does not include it is
+	// issued no SOCKS url, so it never gets SOCKS credentials.
+	socksProxyUrl := ""
+	if opts.EnableSocks {
+		socksProxyUrl = fmt.Sprintf("socks5h://%s:%d", proxyHost, socksProxyPort)
+	} else {
+		socksProxyPort = 0
+	}
+
+	httpProxyUrl := fmt.Sprintf(
+		"http://%s:%d",
+		proxyHost,
+		httpProxyPort,
+	)
+
+	var httpsProxyUrl string
+	if opts.HttpsRequireAuth {
+		// use the encoded proxy id for the url, since the signed proxy id will be passed in auth
+		httpsProxyUrl = fmt.Sprintf(
+			"https://%s:%d",
+			proxyHost,
+			httpsProxyPort,
+		)
+	} else {
+		httpsProxyUrl = fmt.Sprintf(
+			"https://%s.%s:%d",
+			strings.ToLower(signedProxyId),
+			proxyHost,
+			httpsProxyPort,
+		)
+	}
+
+	apiBaseUrl := fmt.Sprintf(
+		"https://api.%s:%d",
+		proxyHost,
+		apiPort,
+	)
+
+	proxyClient = &ProxyClient{
+		CreateTime:     server.NowUtc(),
+		ProxyId:        proxyId,
+		ClientId:       clientId,
+		InstanceId:     instanceId,
+		SocksProxyUrl:  socksProxyUrl,
+		HttpProxyUrl:   httpProxyUrl,
+		HttpsProxyUrl:  httpsProxyUrl,
+		ApiBaseUrl:     apiBaseUrl,
+		AuthToken:      signedProxyId,
+		ProxyHost:      proxyHost,
+		Block:          block,
+		HttpProxyPort:  httpProxyPort,
+		HttpsProxyPort: httpsProxyPort,
+		SocksProxyPort: socksProxyPort,
+		ApiPort:        apiPort,
+	}
+
+	if opts.EnableWg {
+
+		var clientIpv4 int64
+
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT
+				proxy_client_ipv4.client_ipv4
+			FROM proxy_client_ipv4
+			LEFT JOIN proxy_client ON
+				proxy_client.proxy_host = $1 AND
+				proxy_client.block = $2 AND
+				proxy_client.client_ipv4 = proxy_client_ipv4.client_ipv4
+			WHERE
+				$3 <= proxy_client_ipv4.sequence_id AND
+				proxy_client.client_ipv4 IS NULL
+			ORDER BY proxy_client_ipv4.sequence_id
+			LIMIT 1
+			`,
+			proxyHost,
+			block,
+			mathrand.Intn((31*ProxyClientIpv4Count)/32),
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&clientIpv4))
+			} else {
+				panic(&server.PgRetry{})
+			}
+		})
+
+		clientPrivateKey, clientPublicKey, err := proxy.WgGenKeyPairStrings()
+		if err != nil {
+			returnErr = err
 			return
 		}
-		proxyHost := hosts[mathrand.Intn(len(hosts))]
 
-		blockServicePorts := proxyConfig.Hosts[proxyHost]
+		proxyPublicKey := serverProxyConfig.Wg.PublicKey
 
-		blocks := slices.Collect(maps.Keys(blockServicePorts))
-		block := blocks[mathrand.Intn(len(blocks))]
+		clientAddr := IntToIpv4(clientIpv4)
 
-		servicePorts := blockServicePorts[block]
-
-		socksProxyPort := servicePorts["socks"]
-		httpProxyPort := servicePorts["http"]
-		httpsProxyPort := servicePorts["https"]
-		apiPort := servicePorts["api"]
-		wgPort := servicePorts["wg"]
-
-		// SOCKS is a Pro-only feature. A client whose plan does not include it is
-		// issued no SOCKS url, so it never gets SOCKS credentials.
-		socksProxyUrl := ""
-		if opts.EnableSocks {
-			socksProxyUrl = fmt.Sprintf("socks5h://%s:%d", proxyHost, socksProxyPort)
-		} else {
-			socksProxyPort = 0
-		}
-
-		httpProxyUrl := fmt.Sprintf(
-			"http://%s:%d",
-			proxyHost,
-			httpProxyPort,
-		)
-
-		var httpsProxyUrl string
-		if opts.HttpsRequireAuth {
-			// use the encoded proxy id for the url, since the signed proxy id will be passed in auth
-			httpsProxyUrl = fmt.Sprintf(
-				"https://%s:%d",
-				proxyHost,
-				httpsProxyPort,
-			)
-		} else {
-			httpsProxyUrl = fmt.Sprintf(
-				"https://%s.%s:%d",
-				strings.ToLower(signedProxyId),
-				proxyHost,
-				httpsProxyPort,
-			)
-		}
-
-		apiBaseUrl := fmt.Sprintf(
-			"https://api.%s:%d",
-			proxyHost,
-			apiPort,
-		)
-
-		proxyClient = &ProxyClient{
-			CreateTime:     server.NowUtc(),
-			ProxyId:        proxyId,
-			ClientId:       clientId,
-			InstanceId:     instanceId,
-			SocksProxyUrl:  socksProxyUrl,
-			HttpProxyUrl:   httpProxyUrl,
-			HttpsProxyUrl:  httpsProxyUrl,
-			ApiBaseUrl:     apiBaseUrl,
-			AuthToken:      signedProxyId,
-			ProxyHost:      proxyHost,
-			Block:          block,
-			HttpProxyPort:  httpProxyPort,
-			HttpsProxyPort: httpsProxyPort,
-			SocksProxyPort: socksProxyPort,
-			ApiPort:        apiPort,
-		}
-
-		if opts.EnableWg {
-
-			var clientIpv4 int64
-
-			result, err := tx.Query(
-				ctx,
-				`
-				SELECT
-					proxy_client_ipv4.client_ipv4
-				FROM proxy_client_ipv4
-				LEFT JOIN proxy_client ON
-					proxy_client.proxy_host = $1 AND
-					proxy_client.block = $2 AND
-					proxy_client.client_ipv4 = proxy_client_ipv4.client_ipv4
-				WHERE
-					$3 <= proxy_client_ipv4.sequence_id AND
-					proxy_client.client_ipv4 IS NULL
-				ORDER BY proxy_client_ipv4.sequence_id
-				LIMIT 1
-				`,
-				proxyHost,
-				block,
-				mathrand.Intn((31*ProxyClientIpv4Count)/32),
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&clientIpv4))
-				} else {
-					panic(&server.PgRetry{})
-				}
-			})
-
-			clientPrivateKey, clientPublicKey, err := proxy.WgGenKeyPairStrings()
-			if err != nil {
-				returnErr = err
-				return
-			}
-
-			proxyPublicKey := proxyConfig.Wg.PublicKey
-
-			clientAddr := IntToIpv4(clientIpv4)
-
-			// PersistentKeepalive keeps the client sending even when idle, so it
-			// detects a dead session (e.g. proxy instance restart) and
-			// re-handshakes on its own within the rekey/reject window (~2-3min).
-			// It also keeps the client's NAT mapping open. Without it an idle
-			// client never notices a server restart and the tunnel appears
-			// permanently dead until new client traffic.
-			config := fmt.Sprintf(
-				`[Interface]
+		// PersistentKeepalive keeps the client sending even when idle, so it
+		// detects a dead session (e.g. proxy instance restart) and
+		// re-handshakes on its own within the rekey/reject window (~2-3min).
+		// It also keeps the client's NAT mapping open. Without it an idle
+		// client never notices a server restart and the tunnel appears
+		// permanently dead until new client traffic.
+		config := fmt.Sprintf(
+			`[Interface]
 PrivateKey = %s
 Address = %s/32
 DNS = 1.1.1.1
@@ -782,100 +862,96 @@ PublicKey = %s
 Endpoint = %s
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25`,
-				clientPrivateKey,
-				clientAddr,
-				proxyPublicKey,
-				fmt.Sprintf("%s:%d", proxyHost, wgPort),
-			)
-
-			proxyClient.WgConfig = &WgConfig{
-				WgProxyPort:      wgPort,
-				ClientPrivateKey: clientPrivateKey,
-				ClientPublicKey:  clientPublicKey,
-				ProxyPublicKey:   proxyPublicKey,
-				ClientIpv4:       clientAddr,
-				Config:           config,
-			}
-		}
-
-		var clientIpv4 *int64
-		var clientPublicKey *string
-		if proxyClient.WgConfig != nil {
-			b := Ipv4ToInt(proxyClient.WgConfig.ClientIpv4)
-			clientIpv4 = &b
-			clientPublicKey = &proxyClient.WgConfig.ClientPublicKey
-		}
-
-		proxyClientJson, err := json.Marshal(proxyClient)
-		if err != nil {
-			returnErr = err
-			return
-		}
-
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			INSERT INTO proxy_client (
-				proxy_id,
-				client_id,
-				instance_id,
-				proxy_host,
-				block,
-				client_ipv4,
-				client_public_key,
-				proxy_client_json
-			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			`,
-			proxyId,
-			clientId,
-			instanceId,
-			proxyClient.ProxyHost,
-			proxyClient.Block,
-			clientIpv4,
-			clientPublicKey,
-			proxyClientJson,
-		))
-
-		result, err := tx.Query(
-			ctx,
-			`
-			INSERT INTO proxy_client_change (
-				proxy_host,
-            	block,
-				proxy_id
-			)
-			VALUES ($1, $2, $3)
-			RETURNING change_id
-			`,
-			proxyClient.ProxyHost,
-			proxyClient.Block,
-			proxyId,
+			clientPrivateKey,
+			clientAddr,
+			proxyPublicKey,
+			fmt.Sprintf("%s:%d", proxyHost, wgPort),
 		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&proxyClient.ChangeId))
-			}
-		})
 
-	})
-
-	if returnErr == nil {
-		server.Redis(ctx, func(r server.RedisClient) {
-			r.SPublish(
-				ctx,
-				ProxyClientChannel(proxyClient.ProxyHost, proxyClient.Block),
-				proxyId.String(),
-			)
-		})
-
-		// The API controller feeds a newly allocated WireGuard egress with the
-		// canonical verify.yml settings. The taskworker periodically re-feeds
-		// all live allocations with those same settings. This model layer must
-		// not create an unkeyed default entry beside that keyed namespace.
+		proxyClient.WgConfig = &WgConfig{
+			WgProxyPort:      wgPort,
+			ClientPrivateKey: clientPrivateKey,
+			ClientPublicKey:  clientPublicKey,
+			ProxyPublicKey:   proxyPublicKey,
+			ClientIpv4:       clientAddr,
+			Config:           config,
+		}
 	}
 
+	var clientIpv4 *int64
+	var clientPublicKey *string
+	if proxyClient.WgConfig != nil {
+		b := Ipv4ToInt(proxyClient.WgConfig.ClientIpv4)
+		clientIpv4 = &b
+		clientPublicKey = &proxyClient.WgConfig.ClientPublicKey
+	}
+
+	proxyClientJson, err := json.Marshal(proxyClient)
+	if err != nil {
+		returnErr = err
+		return
+	}
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		INSERT INTO proxy_client (
+			proxy_id,
+			client_id,
+			instance_id,
+			proxy_host,
+			block,
+			client_ipv4,
+			client_public_key,
+			proxy_client_json
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		`,
+		proxyId,
+		clientId,
+		instanceId,
+		proxyClient.ProxyHost,
+		proxyClient.Block,
+		clientIpv4,
+		clientPublicKey,
+		proxyClientJson,
+	))
+
+	result, err := tx.Query(
+		ctx,
+		`
+		INSERT INTO proxy_client_change (
+			proxy_host,
+			block,
+			proxy_id
+		)
+		VALUES ($1, $2, $3)
+		RETURNING change_id
+		`,
+		proxyClient.ProxyHost,
+		proxyClient.Block,
+		proxyId,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&proxyClient.ChangeId))
+		}
+	})
+
 	return
+}
+
+// Wakes the proxy hosts of the proxy client's block. The hosts also poll the
+// change rows, so a lost wakeup only delays the proxy client until their next
+// poll.
+func publishProxyClient(ctx context.Context, proxyClient *ProxyClient) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		r.SPublish(
+			ctx,
+			ProxyClientChannel(proxyClient.ProxyHost, proxyClient.Block),
+			proxyClient.ProxyId.String(),
+		)
+	})
 }
 
 func GetProxyClientsSince(

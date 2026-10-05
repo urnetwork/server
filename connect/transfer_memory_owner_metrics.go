@@ -10,6 +10,7 @@ import (
 func (self *Exchange) residentClientSettings() *connectcore.ClientSettings {
 	settings := connectcore.DefaultClientSettingsWithBufferSize(self.settings.ExchangeBufferSize)
 	settings.MemoryOwnerLedger = self.memoryOwnerLedger
+	settings.PayloadOwnerLedger = self.sdkPayloadOwnerLedger
 	return settings
 }
 
