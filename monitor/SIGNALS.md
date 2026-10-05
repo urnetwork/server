@@ -12311,6 +12311,28 @@ profile alone. False-negative qualifier: local transport controls do not model
 provider scheduling, Main contract availability or the live eligible population;
 retain the independently observed per-provider quota and ownership requirements.
 
+URL content matcher v2 records changed HTML semantics separately from the
+unchanged result-policy version. It ignores controls in inert, hidden and example
+subtrees, parses script/form marker URLs, and requires a document title or H1
+human prompt plus live challenge structure. A custom-title browser gate can use
+its JavaScript-and-cookies instruction plus a non-passive platform script.
+Ordinary article content defeats generic widget heuristics; corroborated
+platform scripts and explicit response decisions remain authoritative. Auxiliary
+widgets do not establish a document gate. The detector does not
+render overlays or interpret inline script bootstraps, and a partial content
+prefix still does not certify a requested article. The deterministic
+`qualityprobe/egresshealth/TestUrlProbeHumanGate*` controls cover the repaired
+misses, inactive markers, passive scripts, articles and mixed matcher receipts.
+
+Deploy v1/v2-compatible API evidence readers before enabling v2 producers in
+Taskworker or standalone probes. The shared validator is also used by
+API ingress, model storage and probe publication; old v1-only readers reject v2.
+Historical v1 evidence retains its recorded provenance during a mixed rollout.
+This detector change does not alter phase limits, body sampling, the ten accepted
+measured outcomes per four hours, the inclusive 0.8 quality ratio, or the local
+setup versus measured-provider boundary. Local fixtures establish matcher
+behavior, not deployed Main recovery or rendered access to a live publisher.
+
 A completed URL pass must stop and join its heartbeat refresher, then publish
 zero for its shard if no other invocation in that process still owns it. A
 nonzero final timestamp left by a completed pass can remain fresh for the
@@ -31216,3 +31238,41 @@ A positive XL server-write witness is device RPC activity, not downstream
 customer data-plane success. Some early admission/capacity rejections occur
 before these counters. Keep client selection/fallback evidence separate and
 do not weaken authentication or TLS to make compatibility appear healthy.
+
+## Shared provider-egress dashboard refresh
+
+Every Taskworker process starts its own stats collector. The provider-egress
+dashboard aggregate now shares one completed, policy-keyed Redis snapshot for
+300 seconds after the original source completion. Its elected refresher still
+runs the full `CountProviderEgress` path: historical ARIN exclusions, reliability
+gates, all bucket/index labels and exclusion reasons retain their existing
+meaning. Location/score refresh tasks, provider selection and admission do not
+use this dashboard cache. This removes duplicate stats work; it does not prove
+which caller produced a sampled query or what fraction of Main CPU it used.
+
+The winner has a 120-second source deadline and a 180-second token lease. Redis
+operations use the non-retrying deadline pool with a two-second operation
+budget. Publication atomically checks the lease token, installs the complete
+aggregate and releases that token. A failed source leaves the lease as a retry
+fence; it cannot publish partial counts. Losing collectors keep their prior
+gauges and retry the cache on later minute ticks, without moving other DB stats
+off their five-tick cadence. These intervals are nominal: earlier synchronous
+collector work can delay them. A successful fresh snapshot suppresses new fills
+for 300 seconds; failed fills can retry after the 180-second fence expires.
+
+`urnetwork_stats_provider_egress_refresh_available` is one only when the last
+attempt obtained a complete fresh snapshot. Missing Redis, a cold owner still
+working, malformed data or a failed source yields zero, not healthy zero
+providers. The count gauges and their last source times remain unchanged on
+failure. Legitimate complete all-zero counts remain valid. Compare
+`urnetwork_stats_provider_egress_source_started_seconds` and
+`urnetwork_stats_provider_egress_source_completed_seconds` with scrape time;
+cache hits never advance these times or renew the cache TTL. An old exported
+gauge or a missing availability series is not a current population proof.
+
+The cache key separates resolved count policy, including accepted probe-policy
+version and the conservative configuration-error selection. It is not a data
+generation marker: provider and evidence changes can appear on the next source
+refresh. Different worker policies can each refresh their own key during a
+mixed rollout. Verify actual worker adoption and later source completions before
+claiming runtime scan reduction; a deployment result alone is insufficient.

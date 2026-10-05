@@ -1114,22 +1114,26 @@ func (self *Exchange) refreshResidentRegistration(resident *Resident) bool {
 	// expires after `ExchangeResidentTtl` and other residents prune
 	// it to a disconnect marker, bounding disconnect detection.
 	if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && 0 < resident.TransportCount() {
+		// Give optional peer metadata one poll interval of caller time.
+		// Keep this context separate from resident and control lifetimes.
+		peerCtx, peerCancel := context.WithTimeout(resident.ctx, self.settings.ExchangeResidentTtl/4)
+		defer peerCancel()
 		server.HandleError(func() {
 			if resident.peerCategory == model.NetworkPeerCategoryProxy {
 				// AddNetworkProxyPeer doubles as the heartbeat, and is
 				// also the initial proxy registration (proxy clients
 				// do not pass through ConnectionAnnounce)
-				model.AddNetworkProxyPeer(resident.ctx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
+				model.AddNetworkProxyPeer(peerCtx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
 				return
 			}
-			if !model.RefreshNetworkPeer(resident.ctx, *resident.peerNetworkId, clientId, residentId, self.settings.ExchangeResidentTtl) {
+			if !model.RefreshNetworkPeer(peerCtx, *resident.peerNetworkId, clientId, residentId, self.settings.ExchangeResidentTtl) {
 				// the registration was lost (e.g. expired while the
 				// client was disconnected, or pruned at an expiry
 				// race); re-add with a fresh profile
 				// peersEnabled is not re-checked: peerNetworkId set means
 				// the network was enabled when the resident was created
-				if _, topLevel, _, peerProfile, _ := model.GetNetworkPeerProfile(resident.ctx, clientId); topLevel && peerProfile != nil {
-					model.AddNetworkPeer(resident.ctx, *resident.peerNetworkId, peerProfile, residentId, self.settings.ExchangeResidentTtl)
+				if _, topLevel, _, peerProfile, _ := model.GetNetworkPeerProfile(peerCtx, clientId); topLevel && peerProfile != nil {
+					model.AddNetworkPeer(peerCtx, *resident.peerNetworkId, peerProfile, residentId, self.settings.ExchangeResidentTtl)
 				}
 			}
 		})
@@ -3138,7 +3142,9 @@ func (self *ResidentTransport) Run() {
 	skippedReconnectWait := false
 	for {
 		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
-		resident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, self.exchange.settings.ExchangeResidentTtl)
+		// Routing does not own the registration heartbeat. Failed dialing must
+		// not keep a departed resident's registration alive.
+		resident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, 0)
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			headerCopy := self.header
@@ -3399,7 +3405,8 @@ func (self *ResidentForward) runWithResidentLookup(
 		}
 		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
 		resident := defaultResidentForwardLookupMetrics.observe(initialLookup, hasPending || len(self.send) > 0, func() *model.NetworkClientResident {
-			return lookup(self.ctx, self.clientId, self.exchange.settings.ExchangeResidentTtl)
+			// Pending traffic must not prolong a departed registration.
+			return lookup(self.ctx, self.clientId, 0)
 		})
 		initialLookup = false
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {

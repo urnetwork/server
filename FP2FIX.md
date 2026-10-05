@@ -7573,3 +7573,56 @@ Finite evidence: `temp/pg-contention-20261004/astra-5f613-v1-current-adoption-ce
 (SHA-256 `ecb8b28dbfc5891a9075b5bb2b3e6d57031b8deab240fe80eae2791e6f8df247`),
 and `temp/sol-quota-boundary-5f613-review-20261005/sol-independent-quota-boundary-GO.json`
 (SHA-256 `c67d4d3b801f907a5c175ecf397b07986c87ded39c2be8b6d20146cd24231a69`).
+
+### 2026-10-05 14:29 UTC current coverage and public admission boundary
+
+The retained 13:48:05 reader qualified all eight selected 74810 workers.
+Its one fresh global snapshot, observed at 13:47:19.894 UTC, had **80,271
+eligible providers and 80,251 at the ten-measurement quota (99.975084%)**:
+20 were short by a total of 173 runs; 17 had no cycle row. The overlap
+between these groups was not observed. Earlier bounded deadline sampling
+found 128 quota-complete providers; that cycle-only head could not include
+missing cycle rows or false scheduling hints.
+
+Root's 14:29:37 writer receipt qualifies all eight selected workers on
+`5de9e8cb25e51962364e0f819edca2bc8d07bd8e`. Two fresh coherent global
+snapshots are retained without summing them. The latest unique source clock,
+14:28:37.872 UTC, reports **80,023 eligible, 79,539 quota-complete
+(99.395174%), 484 deficient, 1,035 runs needed and 27 missing cycles**.
+Secure-complete is 79,514, with 25 security exceptions. This changed dynamic
+cohort and process generation do not establish fixed-membership expiry,
+writer causality or throughput; one frame supplies no rate.
+
+An exact-748 native regression reproduced an admission gap: the real
+`SetProvide` public-mode transaction made a valid connected identity
+census-eligible, but left it without a cycle, so the real claim owner
+returned no work. Ordinary cycle reconciliation runs with location/score
+publication; the enclosing reliability task is scheduled 30 minutes after
+its previous completion. A separate control proves that a missing cycle
+can retain all ten accepted measurements, so missing-cycle counts cannot
+be converted directly into missing runs.
+
+Isolated candidate `9ab6ea54b5cfa961c448f2e8691a9ea5954defe3` adds
+pointwise reconciliation inside the existing provide-key transaction.
+Eight author and independent native controls pass, including atomic
+rollback, preserved leases/deadlines, unchanged eligibility and security
+gates, and a 100,000-provider point-plan control. Independent review also
+reproduced the baseline failure and passed two focused race controls.
+Existing orphan rows without a new provide publication, absent location
+and concurrent changes by other eligibility owners retain the ordinary
+reconciliation backstop. API and Connect both own this control path;
+a Taskworker-only rollout would not activate the change.
+
+The target remains ten accepted measured successes or failures per four
+hours, distinct from the 4/5 quality gate and TLS quarantine. Setup-only
+completions remain uncredited. Full sustained coverage is not established.
+
+Finite evidence: `temp/pg-contention-20261004/astra-74810-v3-current-coverage-stock-interpretation.json`
+(SHA-256 `c1a61273aaab0974ac33b7d346a6dd2a2796609c94856b0daf0dfc8aebbaad6c`),
+`temp/pg-contention-20261004/astra-5de9e-v1-current-global-census-snapshots.json`
+(SHA-256 `f831c27ad23a49fceca96466225400cb4acb3fc963ff61453bd93086470c1ebd`),
+and `temp/fp2-public-admission-cycle-74810-20261005/source-manifest.json`
+(SHA-256 `a2c0e804363688067adca5c7c419cbd4f8c4cad993ea664ea865c9f46f80c324`).
+
+Independent candidate gate: `temp/fp2-public-admission-cycle-74810-20261005/sol-independent-source-GO.json`
+(SHA-256 `284666bb501a2243dca3ad168637ee7abb735f68f1c731454c7de23ebc6e6b8b`).
