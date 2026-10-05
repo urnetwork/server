@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/task"
 )
 
 func legacySettlementTestIntent(t testing.TB, ctx context.Context) (netEscrowOrderingTestFixture, server.Id) {
@@ -38,21 +39,65 @@ func requireLegacySettlementTestState(t testing.TB, ctx context.Context, f netEs
 	}
 }
 
+// Account totals are now projected separately from the financial commit. Tests
+// that inspect the applied account explicitly run the real task target first;
+// this helper leaves each applied pending row for the worker lifecycle controls.
+func projectLegacyProviderTotalsForTest(t testing.TB, ctx context.Context) {
+	t.Helper()
+	target := task.NewTaskTarget(ApplyLegacyProviderTotals)
+	taskIds := []server.Id{}
+	server.Db(ctx, func(conn server.PgConn) {
+		rows, err := conn.Query(ctx, `SELECT task_id FROM pending_task
+            WHERE function_name=$1 AND NOT COALESCE((args_json::jsonb->>'applied')::boolean,false)
+            ORDER BY task_id`, target.TargetFunctionName())
+		server.WithPgResult(rows, err, func() {
+			for rows.Next() {
+				var taskId server.Id
+				server.Raise(rows.Scan(&taskId))
+				taskIds = append(taskIds, taskId)
+			}
+		})
+	})
+	pending := task.GetTasks(ctx, taskIds...)
+	for _, taskId := range taskIds {
+		owner := pending[taskId]
+		if owner == nil {
+			t.Fatal("legacy provider projection lost its pending owner")
+		}
+		if _, _, err := target.RunSpecific(ctx, owner); err != nil {
+			t.Fatalf("legacy provider total projection failed: %v", err)
+		}
+	}
+}
+
+// This remains assertion-only: lost acknowledgements and omitted posts must
+// leave exact totals durable without executing their projection. One statement
+// observes the account plus unapplied payloads consistently across an apply commit.
 func requireLegacyProviderDurability(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture, id server.Id, bytes int64, expectedRevenue ...int64) {
 	t.Helper()
 	server.Db(ctx, func(conn server.PgConn) {
 		var swept, provided, sweptRevenue, providedRevenue int64
-		server.Raise(conn.QueryRow(ctx, `SELECT COALESCE((SELECT sum(payout_byte_count) FROM transfer_escrow_sweep
+		var pendingBytes, pendingRevenue int64
+		server.Raise(conn.QueryRow(ctx, `WITH unapplied AS (
+            SELECT allocation
+            FROM pending_task
+            CROSS JOIN LATERAL jsonb_array_elements(args_json::jsonb->'totals') AS allocation
+            WHERE function_name=$3 AND (args_json::jsonb->>'applied')::boolean=false
+                AND (allocation->>'network_id')::uuid=$2
+        ) SELECT COALESCE((SELECT sum(payout_byte_count) FROM transfer_escrow_sweep
             WHERE contract_id=$1 AND network_id=$2),0),COALESCE((SELECT provided_byte_count FROM account_balance WHERE network_id=$2),0),
             COALESCE((SELECT sum(payout_net_revenue_nano_cents) FROM transfer_escrow_sweep WHERE contract_id=$1 AND network_id=$2),0),
-            COALESCE((SELECT provided_net_revenue_nano_cents FROM account_balance WHERE network_id=$2),0)`,
-			id, f.destinationNetworkId).Scan(&swept, &provided, &sweptRevenue, &providedRevenue))
+            COALESCE((SELECT provided_net_revenue_nano_cents FROM account_balance WHERE network_id=$2),0),
+            COALESCE((SELECT sum((allocation->>'bytes')::bigint) FROM unapplied),0),
+            COALESCE((SELECT sum((allocation->>'revenue')::bigint) FROM unapplied),0)`,
+			id, f.destinationNetworkId, task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName()).Scan(
+			&swept, &provided, &sweptRevenue, &providedRevenue, &pendingBytes, &pendingRevenue))
 		revenue := int64(0)
 		if len(expectedRevenue) > 0 {
 			revenue = expectedRevenue[0]
 		}
-		if swept != bytes || provided != bytes || sweptRevenue != revenue || providedRevenue != revenue {
-			t.Fatalf("durable provider accounting swept=%d provided=%d revenue=%d/%d want=%d/%d", swept, provided, sweptRevenue, providedRevenue, bytes, revenue)
+		if swept != bytes || provided+pendingBytes != bytes || sweptRevenue != revenue || providedRevenue+pendingRevenue != revenue {
+			t.Fatalf("durable provider accounting swept=%d provided=%d pending=%d revenue=%d/%d/%d want=%d/%d", swept, provided, pendingBytes, sweptRevenue, providedRevenue, pendingRevenue, bytes, revenue)
 		}
 	})
 	server.Redis(ctx, func(r server.RedisClient) {
@@ -85,7 +130,8 @@ func TestLegacySettlementRollbackAndLostAcknowledgement(t *testing.T) {
 		requireLegacyProviderDurability(t, ctx, f, id, 0)
 		requireLegacySettlementTestState(t, ctx, f, id, true, false, 1000, 100)
 		// Model a committed transaction whose caller never receives its reply
-		// and never starts the post callbacks. All financial state is durable.
+		// and never starts the post callbacks or provider projection. Sweeps,
+		// exact queued totals, payer debit and the terminal outcome are durable.
 		tx, err = conn.Begin(ctx)
 		server.Raise(err)
 		posts, complete, busy, _, err := flushLegacySettlementInTx(ctx, tx, id)

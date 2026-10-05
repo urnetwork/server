@@ -75,6 +75,7 @@ func TestLegacySettlementHeadRevisitBeforeLargeFinitePassEnds(t *testing.T) {
 		if err != nil || last.Completed != 2 || last.Cursor != nil {
 			t.Fatalf("remaining tail did not finish exactly once: %+v, %v", last, err)
 		}
+		projectLegacyProviderTotalsForTest(t, ctx)
 		server.Db(ctx, func(conn server.PgConn) {
 			var pending, terminal int
 			var credit, swept, provided ByteCount

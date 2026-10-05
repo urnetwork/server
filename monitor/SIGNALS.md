@@ -4752,10 +4752,12 @@ Migration 763 gives legacy unmarked or mixed escrow contracts an independent
 per-contract settlement intent. Foreground acknowledgement leaves the outcome
 unset and the SQL reservation intact. Sixteen bounded recovery partitions take
 queue, contract and sorted grant ownership with `SKIP LOCKED`. One transaction
-commits payer debit, provider sweep/attribution, durable provider totals, escrow
-metadata, final outcome and intent deletion. Provider totals from this worker go
-to the existing `account_balance.provided_*` fields; the API already adds those
-to the Redis deltas from other writers. They are not incremented in Redis again.
+commits payer debit, provider sweep/attribution, escrow metadata, final outcome,
+intent deletion and exact durable ownership of the provider-total projection.
+The projection writes the existing `account_balance.provided_*` fields; the API
+already adds those to Redis deltas from other writers. They are not incremented
+in Redis again. Payment selection still uses the committed sweep ledger, while
+the lifetime totals returned by `GetAccountBalance` can catch up afterward.
 
 The outcome trigger refuses an old writer after an intent has been accepted;
 the worker deletes its locked intent inside the financial transaction before
@@ -4911,8 +4913,8 @@ downstream provider-total contention require separate measurements.
 
 The inline legacy metadata path now reuses its actual grant and escrow ownership
 only when every payout target exactly matches the captured positive unmarked
-reservation key and amount. It removes four redundant reads/locks, keeps both
-metadata and provider totals in the financial commit, and advances the same
+reservation key and amount. It removes four redundant reads/locks, keeps
+metadata in the financial commit, and advances the same
 snapshot prediction a second time without subtracting the reservation again.
 Cold snapshots stay absent; an intervening revision invalidates both predictions.
 Mixed, zero, settled and incomplete target sets retain the full locking path.
@@ -4951,6 +4953,40 @@ lost replies, partial multi-provider failure, finalization rollback, unknown-tar
 retry and finished cleanup. These establish local accounting and compatibility;
 they do not identify Main's current provider-row owner, queue capacity or drain
 rate. A healthy total projection does not clear a retained legacy accounting hold.
+
+Provider-total writer boundary: only the already-claimed terminal-outcome branch
+queues the self-contained allocation, in the same transaction as debit and sweep
+insertion. A duplicate queue key is an error that rolls back that whole financial
+prefix; it cannot merge or replace an earlier allocation. The terminal outcome
+remains the lifetime enqueue fence after normal task finalization releases the
+queue key. No provider-total row is acquired while this transaction owns grants.
+For a contract with N eligible provider networks this replaces N inline total
+upserts with one independent task insertion. Application still needs N upserts,
+one owning-row read and one marker write, plus ordinary scheduler claim and
+finalization work. It adds one task per legacy settlement; it does not establish
+task capacity, reduce the total write count or add a shared-provider queue key.
+
+The baseline native control fails at a held provider row. With the writer, an
+exact `pg_blocking_pids` projection-to-provider edge remains present before and
+after a same-grant sibling commits, and the holder transaction survives a full
+512-contract financial drain. Each contract retains one exact unapplied task;
+real payment selection still reads all committed sweeps. After release, actual
+task execution and finalization consume those exact owners without duplication.
+The synthetic owner timeout and forced task due times are diagnostic controls,
+not production latency or retry-cadence measurements. This establishes a local
+causal mechanism, not Main's current blocker or its frequency.
+
+False-positive qualifier: a pending projection whose marker is already applied
+can await ordinary task finalization with correct totals, and a short unapplied
+lag does not mean a provider earning is missing from the sweep ledger.
+False-negative qualifier: drained legacy intents and closed contracts no longer
+certify that lifetime totals have caught up; generic task errors/durations must
+be considered with exact source-qualified projection ownership and freshness.
+There is no dedicated projection-age probe in this change. Missing task evidence
+or a quiet log is not proof of complete projection, and failed or unsupported
+owners must retain their recovery payloads until applied. Explicit task deletion
+or retiring the target before that point is unsafe. Existing insufficient-escrow,
+dispute, reservation and payout-attribution holds remain unchanged.
 
 A normalized `panic` log class is not proof of an uncaught worker failure.
 `server.HandleError` recovers a raised error, emits `Unexpected error` unless it

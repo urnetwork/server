@@ -90,8 +90,8 @@ const legacySettlementExpectedGrantCountSQL = `SELECT count(*)
 
 // No ownership is inferred from a statement snapshot. Both the queue item and
 // contract, then every grant, are acquired with SKIP LOCKED. Busy owners leave
-// the intent untouched. Exact debit, payout, outcome, metadata and intent deletion share
-// one commit; a lost commit acknowledgement can never repeat consumption.
+// the intent untouched. Exact debit, payout, outcome, metadata, total-projection ownership and intent
+// deletion share one commit; a lost commit acknowledgement can never repeat consumption.
 func flushLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId server.Id) (posts []func() any, completed, busy bool, busyGate legacySettlementBusyGate, returnErr error) {
 	var outcome ContractOutcome
 	var clearDispute bool
