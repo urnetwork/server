@@ -76,7 +76,7 @@ func (self *CoreStClient) operatorGasAdmission(ctx context.Context, signingAccou
 		if loadErr != nil {
 			return refuse(loadErr)
 		}
-		encoded, err = resource.BytesE()
+		encoded, err = resource.BytesBoundedE(ctx, 16*1024)
 	}
 	if err != nil {
 		return refuse(err)
@@ -140,6 +140,9 @@ func (self *CoreStClient) signReservedStTransaction(ctx context.Context, client 
 			}
 		}
 		return nil, errors.New("operator gas original signed reservation has no matching durable attempt")
+	}
+	if err := model.RequireStTransactionGasUnsettled(ctx, intent.IntentId); err != nil {
+		return nil, err
 	}
 	var signed *types.Transaction
 	if self.transactionSigner != nil {
