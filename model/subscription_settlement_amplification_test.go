@@ -96,13 +96,13 @@ func TestEscrowSettlementLegacyRowsPreserveAccounting(t *testing.T) {
 		if selected != 0 || err != nil {
 			t.Fatalf("queued legacy close was counted as settled: closed=%d error=%v", selected, err)
 		}
-		assertLegacyAmplificationPending(t, ctx, fixture, false, 2048, "none")
+		assertLegacyAmplificationPending(t, ctx, fixture, false, true, 2048, "none")
 		proof, _ := readContractExpiryTestSnapshot(t, ctx, fixture.contractId)
 		selected, err = ForceCloseOpenContractIds(ctx, fixture.cutoff, 10, 1, 1, 0)
 		if selected != 0 || err != nil {
 			t.Fatalf("pending legacy close repeated work: closed=%d error=%v", selected, err)
 		}
-		assertLegacyAmplificationPending(t, ctx, fixture, false, 2048, "none")
+		assertLegacyAmplificationPending(t, ctx, fixture, false, true, 2048, "none")
 		if account := readLegacyAmplificationAccount(t, ctx, fixture.providerNetworkId); account != initialAccount {
 			t.Fatalf("queued legacy intent published payout: got=%+v want=%+v", account, initialAccount)
 		}
@@ -267,14 +267,14 @@ func TestEscrowSettlementLegacyRejectionKeepsReservation(t *testing.T) {
 		if selected != 0 || err != nil {
 			t.Fatalf("queued legacy dispute was counted as settled: closed=%d error=%v", selected, err)
 		}
-		assertLegacyAmplificationPending(t, ctx, fixture, true, grant, "none")
+		assertLegacyAmplificationPending(t, ctx, fixture, true, before.streamFound, grant, "none")
 		proof, _ := readContractExpiryTestSnapshot(t, ctx, fixture.contractId)
 		shard := int(fixture.contractId[15]) % LegacySettlementShardCount
 		flushed, err := FlushLegacySettlements(ctx, shard, nil, 64)
 		if err != nil || flushed.Visited != 1 || flushed.Failed != 1 || flushed.Completed != 0 || flushed.BusyOrGone != 0 {
 			t.Fatalf("legacy accounting refusal was not retained by its worker: %+v %v", flushed, err)
 		}
-		nextAttempt := assertLegacyAmplificationPending(t, ctx, fixture, true, grant, "accounting")
+		nextAttempt := assertLegacyAmplificationPending(t, ctx, fixture, true, before.streamFound, grant, "accounting")
 		server.Db(ctx, func(conn server.PgConn) {
 			rows, err := conn.Query(ctx, `SELECT count(*), count(*) FILTER(WHERE settled), coalesce(sum(payout_byte_count),0),
 				(SELECT dispute AND outcome IS NULL FROM transfer_contract WHERE contract_id=$1),
@@ -307,7 +307,7 @@ func TestEscrowSettlementLegacyRejectionKeepsReservation(t *testing.T) {
 		if err != nil || flushed.Visited != 0 {
 			t.Fatalf("unchanged accounting refusal entered a hot retry: %+v %v", flushed, err)
 		}
-		if again := assertLegacyAmplificationPending(t, ctx, fixture, true, grant, "accounting"); !again.Equal(nextAttempt) {
+		if again := assertLegacyAmplificationPending(t, ctx, fixture, true, before.streamFound, grant, "accounting"); !again.Equal(nextAttempt) {
 			t.Fatal("retry changed the retained accounting backoff")
 		}
 		replayedProof, _ := readContractExpiryTestSnapshot(t, ctx, fixture.contractId)
@@ -330,7 +330,7 @@ func readLegacyAmplificationAccount(t testing.TB, ctx context.Context, networkId
 
 // Pending legacy intent retains every captured row and grant until one worker
 // owns the atomic financial transaction. Refusal retains the original deadline.
-func assertLegacyAmplificationPending(t testing.TB, ctx context.Context, fixture *forceCloseDisputeFixture, wantDispute bool, wantReservation ByteCount, wantFailure string) time.Time {
+func assertLegacyAmplificationPending(t testing.TB, ctx context.Context, fixture *forceCloseDisputeFixture, wantDispute, wantStream bool, wantReservation ByteCount, wantFailure string) time.Time {
 	t.Helper()
 	var nextAttempt time.Time
 	server.Db(ctx, func(conn server.PgConn) {
@@ -360,8 +360,8 @@ func assertLegacyAmplificationPending(t testing.TB, ctx context.Context, fixture
 			t.Fatalf("pending legacy reservation=%d want=%d error=%v", reservation, wantReservation, err)
 		}
 	})
-	if _, _, found := GetStream(ctx, fixture.contractId); !found {
-		t.Fatal("pending legacy intent lost its stream before settlement")
+	if _, _, found := GetStream(ctx, fixture.contractId); found != wantStream {
+		t.Fatalf("pending legacy intent changed original stream state: got=%t want=%t", found, wantStream)
 	}
 	return nextAttempt
 }
