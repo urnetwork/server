@@ -4953,35 +4953,59 @@ func HasSubscriptionRenewal(
 	active := false
 	var market *string
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-			SELECT
-				MIN(market) AS market,
-				COUNT(*) AS subscription_renewal_count
-			FROM subscription_renewal
-			WHERE
-				network_id = $1
-				AND subscription_type = $2
-				AND start_time <= $3
-				AND $3 < end_time;
-			`,
-			networkId,
-			subscriptionType,
-			server.NowUtc(),
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				var count int
-				server.Raise(result.Scan(
-					&market,
-					&count,
-				))
-				active = (0 < count)
-			}
-		})
+		active, market = hasSubscriptionRenewal(ctx, conn, networkId, subscriptionType)
 	})
 	return active, market
+}
+
+// HasSubscriptionRenewal read in the caller's tx. It sees the renewals the tx itself
+// wrote and nothing committed outside its snapshot, and it does not acquire a second
+// pool connection while the tx holds one.
+func HasSubscriptionRenewalInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	networkId server.Id,
+	subscriptionType SubscriptionType,
+) (bool, *string) {
+	return hasSubscriptionRenewal(ctx, tx, networkId, subscriptionType)
+}
+
+// The renewal read on query, a pooled connection or the caller's tx: whether a
+// renewal of subscriptionType is active now, and the market of one of them.
+func hasSubscriptionRenewal(
+	ctx context.Context,
+	query server.PgCanQuery,
+	networkId server.Id,
+	subscriptionType SubscriptionType,
+) (active bool, market *string) {
+	result, err := query.Query(
+		ctx,
+		`
+		SELECT
+			MIN(market) AS market,
+			COUNT(*) AS subscription_renewal_count
+		FROM subscription_renewal
+		WHERE
+			network_id = $1
+			AND subscription_type = $2
+			AND start_time <= $3
+			AND $3 < end_time;
+		`,
+		networkId,
+		subscriptionType,
+		server.NowUtc(),
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			var count int
+			server.Raise(result.Scan(
+				&market,
+				&count,
+			))
+			active = (0 < count)
+		}
+	})
+	return
 }
 
 // GetActiveSubscriptionRenewalMarkets returns every market that is currently

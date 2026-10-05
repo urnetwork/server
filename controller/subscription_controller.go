@@ -1624,8 +1624,12 @@ func AddRefreshTransferBalance(ctx context.Context, networkId server.Id) (return
 // (model.UpdateProNetwork) after the tx commits. A refresh inside the tx reads on its
 // own connection, so it would cache the entitlement from before the grant for up to
 // ProCacheTtl, and a tx that rolled back would still have written the cache.
+//
+// The tier comes from the renewals as the tx sees them, read on the tx's own
+// connection: a renewal the tx itself wrote counts, and the tx does not hold a second
+// pool connection while it holds this one.
 func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkId server.Id) (proGranted bool, returnErr error) {
-	pro, _ := model.HasSubscriptionRenewal(ctx, networkId, model.SubscriptionTypeSupporter)
+	pro, _ := model.HasSubscriptionRenewalInTx(tx, ctx, networkId, model.SubscriptionTypeSupporter)
 
 	// Nothing to grant -> grant nothing. With no pro.yml the amount is ZERO, and granting
 	// zero is not a no-op: it writes a real transfer_balance row with nothing in it.
