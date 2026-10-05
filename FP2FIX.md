@@ -7435,3 +7435,51 @@ same-URL quarantine/revalidation, ratio threshold and probe deadlines. No
 scoring-policy change follows from this audit. Full sustained coverage and
 accurate production failure attribution remain open.
 
+### 2026-10-05 09:55 UTC post-rollout throughput and remaining coverage
+
+Root's 09:45:44 and 09:55:35 census receipts qualify the same eight ready
+Taskworkers on `d3f4f5729c4cf9e007043bf32dfd05a0f34c19b0`, with no known-old
+or unknown slots. These are fresh paired runtime self-reports, not native
+executable ownership or proof that all predecessor processes have retired.
+
+The separate 09:53:23–09:55:35 phase pair spans native intervals of
+120.806–137.953 seconds. It records 4,858 acknowledged measured successes and
+6,655 failures: **85.7552 ACK/s**. Across 11,512 completed timed turns,
+publication averaged 0.502834 seconds (8.949% of total completed wall time),
+readiness 0.044886 seconds, checking/buffering 4.774119 seconds, and closing
+0.295468 seconds; total mean was 5.618898 seconds. Scheduler Due residence
+was 95.800%, which is neither CPU utilization nor proof of a blocked Due
+handler. Checking/buffering includes several network and local stages; its
+84.965% share does not identify external DNS as the cause. Stage observations
+contain no readiness metric; the matching processes were separately ready at
+the census clocks. Earlier 7cc timing is an uncontrolled prior window, since
+API Redis compensation and Taskworker head allocation changed together.
+
+The single global publisher observed 81,036 eligible providers at
+09:54:46.566 UTC: **4 met measured quota (0.004936%)**, none were
+secure-complete, and **449,919 measured runs remained**. Security-pending was
+24. From the preceding 09:43:54.286 census, missing runs fell by 53,094 while
+quota-complete providers fell from 147 to 4 and the denominator rose by one.
+These state changes can move in opposite directions at the ten-run threshold;
+net denominator stability does not prove fixed provider IDs or attribute the
+change to expiry. The census source clocks advanced 652.280 seconds. Census
+native scrape intervals reached 604.494 seconds, so no all-eight census ACK
+rate qualifies under the 600-second limit; the reported rate uses only the
+valid stage pair.
+
+The current arithmetic requirement is 56.275 unique measured credits/s for a
+stable 81,036-provider cohort. Acknowledgments are not unique durable history
+credits, and this short interval does not establish sustained headroom or
+completion. The next bounded history discriminator uses the same selected
+policy, admitted measured-run definition and five-minute window semantics as
+the earlier history measurements. Historical negatives remain unchanged;
+genuine provider silence and TLS failures retain their existing treatment.
+Full sustained measured coverage and accurate production failure attribution
+remain open.
+
+Finite evidence:
+`temp/pg-contention-20261004/astra-d3f4f-v1-v2-current-stage-reduction.json`
+(SHA-256 `9eb481c31a1d2d54a60e249a94865286db6fd6c4ab8a9f07c1d9d9141c6f3e01`)
+and
+`temp/pg-contention-20261004/astra-d3f4f-current-coverage-stage-comparison.json`
+(SHA-256 `1b694dc27f059fe7d4b4979dbc0638466ef1ca8fb66cc25ab4bb90da0c288098`).
