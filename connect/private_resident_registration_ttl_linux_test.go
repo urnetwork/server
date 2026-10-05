@@ -80,6 +80,86 @@ func privateJoin(t *testing.T, done <-chan struct{}, owner string) {
 	}
 }
 
+// Production runs forwards inside server.HandleError. Keep the private
+// boundary narrower: only the exact expected cancellation errors are benign,
+// and only after this forward's own context has actually been canceled.
+func privateRunResidentForward(t *testing.T, f *ResidentForward) (canceled bool) {
+	t.Helper()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err, ok := recovered.(error)
+			if !ok || f.ctx.Err() == nil || (!errors.Is(err, context.Canceled) && !errors.Is(err, server.DbContextDoneError)) {
+				panic(recovered)
+			}
+			canceled = true
+		}
+	}()
+	f.Run()
+	return false
+}
+
+type privateRegistrationCancelBarrier struct {
+	key, command string
+	entered      chan struct{}
+	release      chan struct{}
+	once         sync.Once
+}
+
+func (h *privateRegistrationCancelBarrier) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+func (h *privateRegistrationCancelBarrier) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+func (h *privateRegistrationCancelBarrier) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		args := cmd.Args()
+		if cmd.Name() == h.command && (h.command == "ping" || (len(args) > 1 && args[1] == h.key)) {
+			h.once.Do(func() { close(h.entered); <-h.release })
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func TestPrivateResidentRegistrationForwardCancellationAtLookupJoins(t *testing.T) {
+	for _, command := range []string{"ping", "get"} {
+		t.Run(command, func(t *testing.T) {
+			r := privateRegistrationRedis(t)
+			n := privateRegistrationNominee()
+			privateNominate(t, r, n, nil, time.Second)
+			barrier := &privateRegistrationCancelBarrier{key: privateRegistrationKey(n.ClientId), command: command, entered: make(chan struct{}), release: make(chan struct{})}
+			r.AddHook(barrier)
+			f := NewResidentForward(context.Background(), &Exchange{settings: privateTTLSettings()}, n.ClientId)
+			var witnesses [][]byte
+			for _, body := range []string{"pending-at-cancel", "queued-at-cancel"} {
+				message := clientconnect.MessagePoolCopy([]byte(body))
+				witnesses = append(witnesses, retainResidentPoolWitness(message))
+				f.send <- message
+			}
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(barrier.release) }) }
+			done := make(chan struct{})
+			result := make(chan bool, 1)
+			go func() { defer close(done); result <- privateRunResidentForward(t, f) }()
+			defer func() {
+				f.Cancel()
+				release()
+				privateJoin(t, done, "canceled lookup forward")
+			}()
+			privateJoin(t, barrier.entered, "real Redis command barrier")
+			f.Cancel()
+			release()
+			privateJoin(t, done, "canceled lookup forward")
+			cancellationRaised := <-result
+			if command == "ping" && !cancellationRaised {
+				t.Fatal("real canceled Redis PING did not exercise the expected cancellation boundary")
+			}
+			requireResidentPoolOwnersReturned(t, witnesses, "pending and queued owners after canceled lookup")
+			t.Logf("real_redis_command=%s canceled_at_barrier=true exact_cancellation_raised=%t forward_joined=true pending_and_queued_payload_owners_returned=true", command, cancellationRaised)
+		})
+	}
+}
+
 type privateRegistrationHook struct {
 	key           string
 	gets, expires atomic.Int64
@@ -214,7 +294,7 @@ func TestPrivateResidentRegistrationForwardReadsMustNotRenewOrphan(t *testing.T)
 	f.send <- message
 	started := time.Now()
 	runDone, idleDone := make(chan struct{}), make(chan struct{})
-	go func() { defer close(runDone); f.Run() }()
+	go func() { defer close(runDone); privateRunResidentForward(t, f) }()
 	go func() { defer close(idleDone); f.runIdleWatcher(server.NewId()) }()
 	defer func() {
 		f.Cancel()
@@ -326,7 +406,7 @@ func TestPrivateResidentRegistrationForwardReplacementDeliversPendingFIFO(t *tes
 	}
 	f := NewResidentForward(ctx, exchange, n.ClientId)
 	done := make(chan struct{})
-	go func() { defer close(done); f.Run() }()
+	go func() { defer close(done); privateRunResidentForward(t, f) }()
 	defer func() {
 		f.Cancel()
 		cancel()
