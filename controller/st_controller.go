@@ -1363,7 +1363,7 @@ func (self *CoreStClient) runTransactionIntent(
 // A close that expired at a finalized block cannot become valid again. Retire
 // its nonce through the ordinary cancellation transaction so a later defer can
 // proceed without discarding the original intent or any signed attempt.
-func (self *CoreStClient) expiredCloseIntent(ctx context.Context, intent *model.StTransactionIntent, finalized uint64) (bool, error) {
+func (self *CoreStClient) expiredCloseIntent(ctx context.Context, client *ethclient.Client, intent *model.StTransactionIntent, finalized *stBlockIdentity) (bool, error) {
 	if self.coordinator == nil || intent.DeploymentKey != self.cfg.DeploymentKey() ||
 		!strings.EqualFold(intent.ToAddress, self.cfg.ContractAddress.Hex()) || len(intent.Calldata) != 68 {
 		return false, nil
@@ -1380,22 +1380,51 @@ func (self *CoreStClient) expiredCloseIntent(ctx context.Context, intent *model.
 	if err != nil || intent.LogicalKey != logicalKey || !strings.EqualFold(intent.CalldataHash, crypto.Keccak256Hash(intent.Calldata).Hex()) {
 		return false, errors.New("st: close intent has inconsistent immutable operation identity")
 	}
-	policy, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, finalized, self.coordinator.PackPolicyAt(epoch), self.coordinator.UnpackPolicyAt)
+	if client == nil || finalized == nil || finalized.Hash == ([32]byte{}) {
+		return false, errors.New("st: close intent finalized nonce boundary is absent")
+	}
+	// Expiry is a signing decision. Its complete policy/end read belongs to
+	// the same endpoint and original canonical hash that proved this nonce.
+	// A transient retry cannot replace that boundary or borrow another route.
+	boundary := *finalized
+	var deadline uint64
+	err = self.readTransactionRpc(ctx, client, func(ctx context.Context) error {
+		selector := rpc.BlockNumberOrHashWithHash(common.Hash(boundary.Hash), true)
+		var policyRaw, endRaw hexutil.Bytes
+		if err := client.Client().CallContext(ctx, &policyRaw, "eth_call", map[string]any{"to": self.cfg.ContractAddress, "data": hexutil.Bytes(self.coordinator.PackPolicyAt(epoch))}, selector); err != nil {
+			return fmt.Errorf("st: close intent epoch policy: %w", err)
+		}
+		policy, err := self.coordinator.UnpackPolicyAt(policyRaw)
+		if err != nil {
+			return fmt.Errorf("st: close intent epoch policy: %w", err)
+		}
+		if err := client.Client().CallContext(ctx, &endRaw, "eth_call", map[string]any{"to": self.cfg.ContractAddress, "data": hexutil.Bytes(self.coordinator.PackEpochEndBlock(epoch))}, selector); err != nil {
+			return fmt.Errorf("st: close intent epoch end: %w", err)
+		}
+		end, err := self.coordinator.UnpackEpochEndBlock(endRaw)
+		if err != nil {
+			return fmt.Errorf("st: close intent epoch end: %w", err)
+		}
+		if end == nil || !end.IsUint64() || end.Uint64() > math.MaxUint64-policy.CloseGraceBlocks {
+			return errors.New("st: close intent deadline exceeds supported range")
+		}
+		closing, err := readStRPCBlockIdentity(ctx, client, hexutil.EncodeUint64(boundary.Number), &boundary.Number)
+		if err != nil {
+			return err
+		}
+		if closing.Hash != boundary.Hash {
+			return errors.New("st: finalized transaction boundary changed during close expiry observation")
+		}
+		deadline = end.Uint64() + policy.CloseGraceBlocks
+		return nil
+	})
 	if err != nil {
-		return false, fmt.Errorf("st: close intent epoch policy: %w", err)
+		return false, err
 	}
-	end, err := stViewAtBlock(self, ctx, self.cfg.ContractAddress, finalized, self.coordinator.PackEpochEndBlock(epoch), self.coordinator.UnpackEpochEndBlock)
-	if err != nil {
-		return false, fmt.Errorf("st: close intent epoch end: %w", err)
-	}
-	if end == nil || !end.IsUint64() || end.Uint64() > math.MaxUint64-policy.CloseGraceBlocks {
-		return false, errors.New("st: close intent deadline exceeds supported range")
-	}
-	deadline := end.Uint64() + policy.CloseGraceBlocks
-	if finalized <= deadline {
+	if boundary.Number <= deadline {
 		return false, nil
 	}
-	glog.Infof("[st]cancel expired close intent %s nonce %d epoch %d operator %d finalized_block %d close_deadline %d", intent.IntentKey, intent.Nonce, epoch.Uint64(), noID.Uint64(), finalized, deadline)
+	glog.Infof("[st]cancel expired close intent %s nonce %d epoch %d operator %d finalized_block %d close_deadline %d", intent.IntentKey, intent.Nonce, epoch.Uint64(), noID.Uint64(), boundary.Number, deadline)
 	return true, nil
 }
 
@@ -1497,7 +1526,7 @@ func (self *CoreStClient) reconcileAccountIntents(
 		}
 
 		stale := intent.DeploymentKey != self.cfg.DeploymentKey()
-		expiredClose, err := self.expiredCloseIntent(ctx, intent, finalized.Number)
+		expiredClose, err := self.expiredCloseIntent(ctx, client, intent, finalized)
 		if err != nil {
 			return err
 		}
