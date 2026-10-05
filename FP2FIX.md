@@ -7032,3 +7032,26 @@ standalone clone after Go omitted revision metadata for a worktree. Both publish
 architectures now attest clean6e748b3, and the100% Taskworker rollout completed at
 23:44:12. Actual all-eight process convergence remains a separate acceptance.
 Root ledgerT583 retains these observations and the image/deployment receipts.
+
+### 2026-10-05 00:28 UTC new-worker acceptance and stale expanded census
+
+Two current observations qualify all eight Taskworkers on the new clean6e748b3
+budget release, ready across75–91second advancing scrape intervals. The initial
+picker and both public US Quality/Speed requests returned populated candidates
+in under300ms. This proves public selection, not authenticated provider delivery.
+
+The census source clocks did not advance on any worker and are20–24minutes old.
+The retained eligible population has expanded to78,212, so the earlier99.86%
+coverage of17,345 providers must not be treated as current. Current quota remains
+unknown until fresh comparisons succeed. Source investigation separately owns
+normal short-pass cancellation of census refresh and score-publication ordering
+that may leave cycle eligibility hints behind newly eligible providers.
+
+The V5 covering-index repair reported28 attached children before its CLI observed
+conn closed. Fresh native reconciliation confirms28 healthy attached children,
+one valid detached child and five missing children; no active build progress or
+index-owner locks were observed. The next repair should attach the valid child
+and concurrently build the remaining five serially. Four truncated activity rows
+remain an explicit uncertainty. Root is obtaining fresh capacity and repairing
+the independently supervised monitor-CONT fallback before the next quiet window.
+Root ledgerT584 retains the acceptance and reconciliation evidence.
