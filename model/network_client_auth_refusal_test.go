@@ -265,6 +265,135 @@ func TestAuthNetworkClientCreatesValidProxyConfig(t *testing.T) {
 	})
 }
 
+// auth-client refuses a source_client_id that is not a client of the
+// caller's network, and creates nothing. The refusal used to be set inside
+// the lookup's result callback, and returning from that callback did not stop
+// the transaction: the client was created anyway, on the zero device id, and
+// the call answered with its credentials.
+func TestAuthNetworkClientRefusesUnknownSourceClient(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId, userSession := authClientTestNetwork(ctx, "test")
+		otherNetworkId, otherSession := authClientTestNetwork(ctx, "other")
+		otherResult, err := AuthNetworkClient(
+			&AuthNetworkClientArgs{
+				Description: "device",
+				DeviceSpec:  "device",
+			},
+			otherSession,
+		)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, otherResult.Error, nil)
+
+		for _, c := range []struct {
+			name           string
+			sourceClientId server.Id
+		}{
+			{
+				name:           "a client that does not exist",
+				sourceClientId: server.NewId(),
+			},
+			{
+				name:           "a client of another network",
+				sourceClientId: *otherResult.ClientId,
+			},
+		} {
+			clientCountBefore, deviceCountBefore, _ := authClientTestNetworkCounts(ctx, networkId)
+			result, err := AuthNetworkClient(
+				&AuthNetworkClientArgs{
+					SourceClientId: &c.sourceClientId,
+					Description:    "device",
+					DeviceSpec:     "device",
+				},
+				userSession,
+			)
+			if err != nil {
+				t.Errorf("%s: the refusal failed the call: %s", c.name, err)
+			} else if result == nil {
+				t.Errorf("%s: no result", c.name)
+			} else if result.Error == nil {
+				t.Errorf("%s: the source client was accepted: client_id=%v", c.name, result.ClientId)
+			} else {
+				if result.Error.Message != "Client does not exist." {
+					t.Errorf("%s: refused with %q", c.name, result.Error.Message)
+				}
+				if result.ClientId != nil || result.ByClientJwt != nil {
+					t.Errorf(
+						"%s: the refusal returned client_id=%v by_client_jwt=%t",
+						c.name,
+						result.ClientId,
+						result.ByClientJwt != nil,
+					)
+				}
+			}
+			clientCount, deviceCount, _ := authClientTestNetworkCounts(ctx, networkId)
+			if clientCount != clientCountBefore || deviceCount != deviceCountBefore {
+				t.Errorf(
+					"%s: created %d clients and %d devices",
+					c.name,
+					clientCount-clientCountBefore,
+					deviceCount-deviceCountBefore,
+				)
+			}
+		}
+		otherClientCount, _, _ := authClientTestNetworkCounts(ctx, otherNetworkId)
+		connect.AssertEqual(t, otherClientCount, 1)
+	})
+}
+
+// A source client of the caller's network still gets its ancillary client,
+// on the source's own device, now that the source is checked before any
+// write.
+func TestAuthNetworkClientCreatesAncillaryClientOnSourceDevice(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId, userSession := authClientTestNetwork(ctx, "test")
+		authClient := func(sourceClientId *server.Id) *AuthNetworkClientResult {
+			result, err := AuthNetworkClient(
+				&AuthNetworkClientArgs{
+					SourceClientId: sourceClientId,
+					Description:    "device",
+					DeviceSpec:     "device",
+				},
+				userSession,
+			)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, result.Error, nil)
+			connect.AssertNotEqual(t, result.ClientId, nil)
+			connect.AssertNotEqual(t, result.ByClientJwt, nil)
+			return result
+		}
+
+		sourceResult := authClient(nil)
+		result := authClient(sourceResult.ClientId)
+
+		var deviceId server.Id
+		var sourceClientId *server.Id
+		var sourceDeviceId server.Id
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(
+				ctx,
+				`SELECT device_id, source_client_id FROM network_client WHERE client_id = $1`,
+				*result.ClientId,
+			).Scan(&deviceId, &sourceClientId))
+			server.Raise(conn.QueryRow(
+				ctx,
+				`SELECT device_id FROM network_client WHERE client_id = $1`,
+				*sourceResult.ClientId,
+			).Scan(&sourceDeviceId))
+		})
+		connect.AssertEqual(t, deviceId, sourceDeviceId)
+		connect.AssertNotEqual(t, sourceClientId, nil)
+		connect.AssertEqual(t, *sourceClientId, *sourceResult.ClientId)
+
+		clientCount, deviceCount, _ := authClientTestNetworkCounts(ctx, networkId)
+		connect.AssertEqual(t, clientCount, 2)
+		connect.AssertEqual(t, deviceCount, 1)
+	})
+}
+
 // The countries that country_code selects are read once per process. A test
 // env starts each test on a new database, so the read is reset with the env,
 // as the other location caches are. Otherwise every later test would see the

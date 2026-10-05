@@ -522,6 +522,7 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 			} else {
 				// copy the device id from the source
 				// important: validate the source client id is in the same network
+				sourceFound := false
 				result, err := tx.Query(
 					session.Ctx,
 					`
@@ -538,15 +539,19 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 				server.WithPgResult(result, err, func() {
 					if result.Next() {
 						server.Raise(result.Scan(&deviceId))
-					} else {
-						authClientResult = &AuthNetworkClientResult{
-							Error: &AuthNetworkClientError{
-								Message: "Client does not exist.",
-							},
-						}
-						return
+						sourceFound = true
 					}
 				})
+				// the refusal must return from the transaction callback, not
+				// from the result callback above, so that nothing is written
+				if !sourceFound {
+					authClientResult = &AuthNetworkClientResult{
+						Error: &AuthNetworkClientError{
+							Message: "Client does not exist.",
+						},
+					}
+					return
+				}
 			}
 
 			// device_name/device_spec are written once at device creation, so a
