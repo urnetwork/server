@@ -428,18 +428,22 @@ func TestProviderStatusReliabilityNumbersFollowClientLookbacks(t *testing.T) {
 	}
 }
 
-// The scoped filter reads with the fleet filter's predicates, limited to the
-// requested providers in every relation it scans.
+// The scoped filter is the fleet filter with only the two scope predicates
+// added, one per scan: removing them gives back the fleet query exactly.
 func TestProviderStatusScopedFilterSql(t *testing.T) {
 	scoped := providerCountFilterClientSql()
 	fleet := providerCountFilterCommonSql()
-	if !strings.Contains(scoped, providerReliabilityEligibilitySql("observed_reliability.client_id")) || !strings.Contains(fleet, providerReliabilityEligibilitySql("observed_reliability.client_id")) {
-		t.Fatal("the scoped and fleet filters read different reliability predicates")
-	}
-	if strings.Count(scoped, "client_id = ANY($1)") != 2 {
+	reliabilityScope := "provider_reliability.client_id = ANY($1) AND "
+	exceptionScope := "client_id = ANY($1) AND (arin_risk OR arin_non_quality)"
+	if strings.Count(scoped, reliabilityScope) != 1 || strings.Count(scoped, exceptionScope) != 1 || strings.Count(scoped, "ANY($1)") != 2 {
 		t.Fatal("the scoped filter does not limit both of its scans to the requested providers")
 	}
-	if !strings.Contains(scoped, "AND (arin_risk OR arin_non_quality)") || !strings.Contains(fleet, "WHERE arin_risk OR arin_non_quality") {
-		t.Fatal("the scoped and fleet filters read different ARIN predicates")
+	unscoped := strings.Replace(scoped, reliabilityScope, "", 1)
+	unscoped = strings.Replace(unscoped, exceptionScope, "arin_risk OR arin_non_quality", 1)
+	if unscoped != fleet {
+		t.Fatalf("the scoped and fleet filters read different predicates:\n%s\n%s", unscoped, fleet)
+	}
+	if strings.Contains(fleet, "ANY($1)") {
+		t.Fatal("the fleet filter is scoped")
 	}
 }

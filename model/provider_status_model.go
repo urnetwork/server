@@ -184,24 +184,10 @@ type ProviderStatusesResult struct {
 }
 
 // The common SQL of providerCountFilterCommonSql scoped to the client ids in
-// $1: the same predicates, so a scoped map holds exactly the fleet map's
+// $1. One builder writes both, so a scoped map holds exactly the fleet map's
 // entries for those providers.
 func providerCountFilterClientSql() string {
-	return `WITH failed_reliability AS MATERIALIZED (
-		SELECT DISTINCT observed_reliability.client_id
-		FROM client_connection_reliability_score AS observed_reliability
-		WHERE observed_reliability.client_id = ANY($1) AND NOT (` + providerReliabilityEligibilitySql("observed_reliability.client_id") + `)
-	)
-	SELECT client_id, arin_risk, arin_non_quality, false
-	FROM network_client_location_reliability
-	WHERE client_id = ANY($1) AND (arin_risk OR arin_non_quality)
-	UNION ALL
-	SELECT failed_reliability.client_id, false, false, true
-	FROM failed_reliability
-	WHERE EXISTS (
-		SELECT 1 FROM network_client_location_reliability AS provider_location
-		WHERE provider_location.client_id = failed_reliability.client_id
-	)`
+	return providerCountFilterSql(true)
 }
 
 // newProviderCountFilter for only clientIds: every map holds what the fleet

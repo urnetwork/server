@@ -3870,23 +3870,38 @@ type providerCountFilter struct {
 // old scope. Rechecking every observed score against the same score table would
 // duplicate that work without changing the set of failed clients.
 func providerCountFilterCommonSql() string {
+	return providerCountFilterSql(false)
+}
+
+// The common SQL, or with clientScoped the same predicates over only the
+// client ids in $1 (providerCountFilterClientSql). Unscoped, the scope
+// fragments are empty and the text is exactly the fleet query.
+func providerCountFilterSql(clientScoped bool) string {
 	minimums := providerReliabilityMinimums()
+	reliabilityScope := ""
+	exceptionScope := ""
+	exceptionScopeEnd := ""
+	if clientScoped {
+		reliabilityScope = "provider_reliability.client_id = ANY($1) AND "
+		exceptionScope = "client_id = ANY($1) AND ("
+		exceptionScopeEnd = ")"
+	}
 	return fmt.Sprintf(`WITH failed_reliability AS MATERIALIZED (
 		SELECT DISTINCT provider_reliability.client_id
 		FROM client_connection_reliability_score AS provider_reliability
-		WHERE provider_reliability.independent_reliability_weight < CASE provider_reliability.lookback_index
+		WHERE %sprovider_reliability.independent_reliability_weight < CASE provider_reliability.lookback_index
 			WHEN 1 THEN %g WHEN 2 THEN %g WHEN 3 THEN %g ELSE 0 END
 	)
 	SELECT client_id, arin_risk, arin_non_quality, false
 	FROM network_client_location_reliability
-	WHERE arin_risk OR arin_non_quality
+	WHERE %sarin_risk OR arin_non_quality%s
 	UNION ALL
 	SELECT failed_reliability.client_id, false, false, true
 	FROM failed_reliability
 	WHERE EXISTS (
 		SELECT 1 FROM network_client_location_reliability AS provider_location
 		WHERE provider_location.client_id = failed_reliability.client_id
-	)`, minimums[1], minimums[2], minimums[3])
+	)`, reliabilityScope, minimums[1], minimums[2], minimums[3], exceptionScope, exceptionScopeEnd)
 }
 
 // Load complete exception maps once for publication and provider diagnostics.
