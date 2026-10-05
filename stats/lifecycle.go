@@ -72,7 +72,7 @@ func ApplyStreamRetention(ctx context.Context) {
 		return
 	}
 	env, _ := server.Env()
-	rules := streamLifecycleRules(store, env)
+	rules := StreamLifecycleRules(store, env)
 	if len(rules) == 0 {
 		glog.Infof("[stats]retention: no streams with a TTL\n")
 		return
@@ -84,9 +84,10 @@ func ApplyStreamRetention(ctx context.Context) {
 	glog.Infof("[stats]retention set for %d stream(s) -> %s/%s\n", len(rules), store.Authority(), store.Bucket())
 }
 
-// streamLifecycleRules builds the blob lifecycle rules for the registered
-// streams under env, each keyed <prefix>/<env>/<stream>/.
-func streamLifecycleRules(store server.BlobStore, env string) []server.BlobLifecycleRule {
+// StreamLifecycleRules snapshots the desired rules without writing storage.
+// Taskworker initialization joins them with other rules for the same bucket.
+// Each stream is keyed <prefix>/<env>/<stream>/.
+func StreamLifecycleRules(store server.BlobStore, env string) []server.BlobLifecycleRule {
 	rules := []server.BlobLifecycleRule{}
 	for stream, ttl := range StreamTTLs() {
 		if ttl <= 0 {
