@@ -7756,3 +7756,56 @@ The finite history reduction is
 (SHA-256 `0d2f485f36422161b0da9b65c497b379a652d9adf4122ae23d12c1f6ac6140db`),
 independently corroborated by `sol-url-accepted-window-1935-actual-GO.json`
 (SHA-256 `a0441b3a49c6e19a70400e0c4be2a1534bbc1da568463d90a15a5170ff6fc2de`).
+
+### 2026-10-05 20:44 UTC first-admission coverage on Main
+
+Root's 20:44:56 runtime read qualifies all eight selected Taskworkers on
+`7702880446dd4c4b530e822133333d87ee388524`, with the expected image and
+readiness. This producer rollout completed at 20:42:34 UTC. The uniquely
+latest coherent global source snapshot is **20:44:46.174 UTC**:
+
+| Current eligible cohort | Eligible | Ten-result quota complete | Deficient | Runs needed |
+| --- | ---: | ---: | ---: | ---: |
+| First admission at least four hours ago | 77,206 | 77,084 | 122 | 281 |
+| Warming, known first admission under four hours | 15 | 12 | 3 | 15 |
+| First-admission age unknown | 0 | 0 | 0 | 0 |
+| All current eligible providers | 77,221 | 77,096 | 125 | 296 |
+
+Known mature coverage is **99.841981%**; the unchanged all-current coverage
+is **99.838127%**. The newcomer exemption therefore leaves 122 mature
+providers below quota. Secure-complete is separately 77,069, with 27
+security exceptions including one unknown target. Measured failures still
+count toward quota; neither TLS quarantine nor the 4/5 quality gate is
+relaxed. These producer facts supersede the earlier pending-deployment
+statement. They do not establish monitor/dashboard deployment, predecessor
+retirement, continuous eligibility or sustained fixed-provider coverage.
+
+The historical 75.8767 unique credits/s above covers measurement timestamps
+in (19:35, 19:40], observed durably at 19:52. It cannot be carried forward as
+the current arrival or renewal rate of this 20:44 cohort. Publisher snapshots
+are retained separately, never summed; changed membership and separate
+clocks also prevent assigning stock changes to this metrics-only release.
+Sustained 100% mature coverage remains open.
+
+The scheduler already requests full-quota renewal six minutes before the
+oldest retained credit expires. Local controls have reproduced a narrower
+ownership race: accepted health can make a clustered renewal due again while
+the original worker turn still publishes completion.
+A second Due call can issue a newer claim; the worker currently rejects an
+already-active provider without retaining that new claim for dispatch. The
+newer claim's fifteen-minute deadline can then outlive the old completion,
+whose ordinal guard prevents it from changing a newer claim. The native API
+control retains that new lease with nine credits and 801 seconds still to
+wait; the worker barrier control exposes three issued claims but only two
+retained/completed. These are local mechanism proofs. A repair and its
+independent gate remain in progress, with no Main incidence or contribution
+to these 122 deficits established. The scheduler
+`completion_acknowledged` counter covers only unstarted claims, so its small
+value is not evidence that normal measured completions are missing.
+
+Finite current evidence:
+`temp/pg-contention-20261004/astra-77028-admission-cohort-v1-current-reduction.json`
+(SHA-256 `df2ab6ff82b28b96e26238f0ff7444db45a7d8e67234d7c428dbe1b4f563e4ae`),
+independently corroborated by
+`temp/pg-contention-20261004/sol-77028-admission-cohort-v1-actual-corroboration-GO.json`
+(SHA-256 `68be6068833bf7fb14d4fd689266fd8a144f9cd12962dc81909eadd9704eeb43`).
