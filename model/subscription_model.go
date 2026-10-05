@@ -3457,10 +3457,12 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 			return nil
 		}
 		if inlineFinancial {
-			// The legacy worker already owns the contract and every grant. Do
-			// this before releasing those locks so metadata never queues behind
-			// a different worker's next contract on the same payer.
-			settleEscrowMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts)
+			// Only the synchronous branch actually owns the grant rows. Reuse
+			// its exact reservation locks and already-advanced snapshots when
+			// they cover every metadata target; unusual sets retain fresh locks.
+			if asyncDebit || !settleEscrowOwnedMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts, positiveReservations, reservationSnapshots) {
+				settleEscrowMetadataInTx(ctx, tx, contractId, server.NowUtc(), sweepPayouts)
+			}
 			metadataPost = func() any { return nil }
 		}
 

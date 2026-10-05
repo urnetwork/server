@@ -3508,6 +3508,24 @@ cannot become an attributed SQL failure. The finite envelope itself is capped
 at1KiB and validated for exact fields/enums before persistence. No raw exception
 or stderr fragment is retained, including unclassified failures.
 
+Qualify changes to the activity SQL with the exact candidate-generated query
+and a selected nonempty active statement under a size-qualified
+`track_activity_query_size` setting, such as `16kB`. Use
+`pg_size_bytes(current_setting('track_activity_query_size'))` before byte-length
+comparisons. A successful empty metadata frame exercises only the empty path;
+row-dependent expressions may not run. Source-string checks and synthetic
+reducer controls are useful regression guards, but do not replace a populated
+PostgreSQL control and a truncation-boundary control. A validated empty runtime
+frame remains an empty endpoint observation, not proof that populated
+predicates work or that process CPU is zero.
+
+For companion native CPU diagnostics, `source_complete` qualifies the guarded
+core collection; optional query and financial-stage metadata have separate
+availability. SQL failure or absent metadata leaves query attribution unknown.
+Populated metadata still requires the process/query generation and time-window
+guards before CPU attribution, and does not prove a native caller or ownership
+of a particular grant row.
+
 At startup, after the unchanged minimum cadence, the enabled recurring sampler
 owns the first finite turn before ordinary active probes begin. Standing log
 streams and drains continue independently. Later shared-slot collisions admit
@@ -4878,12 +4896,61 @@ span the sixteen contract-id shards; per-shard task ownership does not serialize
 their financial transactions. Observe gate outcomes before changing allocation
 or claiming that improved API connection pressure resolved settlement contention.
 
+Shared-grant owner qualifier (2026-10-05): the 10:25:39 source-qualified finite
+sample attributed 1,022 of 1,024 head busy outcomes to grant-set mismatch; these
+are busy outcomes, not all visits or a proved census of lock owners. Zero
+endpoint waiters do not clear this cause: `SKIP LOCKED` refuses ownership without
+joining a wait queue. A native 512-contract, sixteen-shard control holds one real
+legacy financial owner and produces 480 grant skips from its fifteen siblings,
+then verifies exact debit, metadata, monetary provider payouts and finite drain.
+Its client-observed grant completion duration excludes acquisition and the
+synthetic barrier but includes the commit acknowledgement; it is neither exact
+server lock residence nor Main latency. Busy attempts still acquire their
+per-contract owners and commit without economic DML; this inherited work and
+downstream provider-total contention require separate measurements.
+
+The inline legacy metadata path now reuses its actual grant and escrow ownership
+only when every payout target exactly matches the captured positive unmarked
+reservation key and amount. It removes four redundant reads/locks, keeps both
+metadata and provider totals in the financial commit, and advances the same
+snapshot prediction a second time without subtracting the reservation again.
+Cold snapshots stay absent; an intervening revision invalidates both predictions.
+Mixed, zero, settled and incomplete target sets retain the full locking path.
+Native controls cover these fallbacks, multiple grants, revision invalidation,
+rollback and lost-reply replay, with explicit Redis error checks. This reduces
+known local ownership work; fresh owner outcomes and age reduction are still
+required to establish Main recovery or identify a dominant downstream owner.
+
 Clock, legacy reservation mirror and stream cleanup remain post-commit
 projections: the clock uses its existing aggregate backfill with its documented
 ambiguity; the mirror is rebuilt from durable revisions; mixed Redis reservation
 leases and stream memberships retain their existing bounded expiry/reconciliation.
 No replay of a non-idempotent Redis increment is added. A quiet error log or low
 CPU does not establish complete recovery or current provider payout success.
+
+Provider-total projection reader prerequisite (2026-10-05): the existing task
+queue can durably carry an exact provider-total allocation independently of the
+grant owner. `ApplyLegacyProviderTotals` reads and locks its own pending task,
+updates sorted account totals and an `applied` marker in one transaction, and has
+no task post. An invocation's captured arguments are not replay authority. The
+payload retains exact allocations after contract/sweep retention; ordinary
+finished-task cleanup cannot remove a pending allocation. A missing owner or
+invalid payload remains an error, and this target must not be retired or its
+pending rows canceled before every allocation is applied. The reader commit
+alone leaves the inline producer unchanged.
+
+Deploy private-task argument logging and the registered reader to every
+Taskworker before enabling the separate producer change. Old workers retain an
+unknown target through their existing short version-skew retry, but binaries
+without private-argument logging can print its recovery payload. The new marker
+redacts arguments even for an unknown target, malformed data and operator task
+listing; lifecycle/error envelopes remain visible. Producer activation requires
+complete running-generation evidence, not a successful build or partial fleet.
+Native controls cover enqueue/application rollback, stale duplicate invocations,
+lost replies, partial multi-provider failure, finalization rollback, unknown-target
+retry and finished cleanup. These establish local accounting and compatibility;
+they do not identify Main's current provider-row owner, queue capacity or drain
+rate. A healthy total projection does not clear a retained legacy accounting hold.
 
 A normalized `panic` log class is not proof of an uncaught worker failure.
 `server.HandleError` recovers a raised error, emits `Unexpected error` unless it

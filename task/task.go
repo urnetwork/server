@@ -1660,7 +1660,7 @@ func (self *TaskWorker) RunPost(
 	// class visible to the reschedule write, e.g. ErrTargetNotFound)
 	defer func() {
 		if returnErr != nil {
-			returnErr = fmt.Errorf("%s(%s) = %w", finishedTask.FunctionName, finishedTask.ArgsJson, returnErr)
+			returnErr = fmt.Errorf("%s(%s) = %w", finishedTask.FunctionName, ArgumentsForLog(finishedTask.ArgsJson), returnErr)
 		}
 	}()
 
@@ -2084,7 +2084,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 					},
 				}
 				if target, ok := self.targets[task.FunctionName]; ok {
-					glog.V(1).Infof("[%s]eval start %s(%s)\n", task.TaskId, task.FunctionName, task.ArgsJson)
+					glog.V(1).Infof("[%s]eval start %s(%s)\n", task.TaskId, task.FunctionName, ArgumentsForLog(task.ArgsJson))
 					r.runStartTime = server.NowUtc()
 					var result any
 					var err error
@@ -2175,10 +2175,10 @@ func (self *TaskWorker) EvalTasks(n int) (
 				}
 				elapsedSeconds := float32(r.runEndTime.Sub(r.runStartTime)/time.Millisecond) / 1000
 				if r.err == nil {
-					glog.V(1).Infof("[%s]eval done(%.2fs) %s(%s) = %s\n", r.task.TaskId, elapsedSeconds, r.task.FunctionName, r.task.ArgsJson, string(r.resultJson))
+					glog.V(1).Infof("[%s]eval done(%.2fs) %s(%s) = %s\n", r.task.TaskId, elapsedSeconds, r.task.FunctionName, ArgumentsForLog(r.task.ArgsJson), string(r.resultJson))
 					finishedTasks[r.task.TaskId] = &r.finished
 				} else {
-					glog.Infof("[%s]eval error(%.2fs) (reschedule) %s(%s) = %s\n", r.task.TaskId, elapsedSeconds, r.task.FunctionName, r.task.ArgsJson, r.err)
+					glog.Infof("[%s]eval error(%.2fs) (reschedule) %s(%s) = %s\n", r.task.TaskId, elapsedSeconds, r.task.FunctionName, ArgumentsForLog(r.task.ArgsJson), r.err)
 					rescheduledTasks[r.task.TaskId] = r.err
 				}
 
@@ -2186,7 +2186,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 				elapsedSeconds := float32(time.Now().Sub(startTime)/time.Millisecond) / 1000
 				if 10 <= elapsedSeconds {
 					for _, task := range tasks {
-						glog.Infof("[%s]eval active(%.2fs) %s(%s)\n", task.TaskId, elapsedSeconds, task.FunctionName, task.ArgsJson)
+						glog.Infof("[%s]eval active(%.2fs) %s(%s)\n", task.TaskId, elapsedSeconds, task.FunctionName, ArgumentsForLog(task.ArgsJson))
 					}
 				}
 
