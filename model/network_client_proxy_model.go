@@ -485,6 +485,9 @@ func GetProxyDeviceConfig(ctx context.Context, proxyId server.Id) *ProxyDeviceCo
 	if err != nil {
 		return nil
 	}
+	// the hosted proxy device applies this config's initial state at every
+	// creation
+	proxyDeviceConfig.normalizeStoredPerformanceProfile()
 	return &proxyDeviceConfig
 }
 
@@ -521,6 +524,7 @@ func GetProxyDeviceConfigForClient(ctx context.Context, clientId server.Id, inst
 	if err != nil {
 		return nil
 	}
+	proxyDeviceConfig.normalizeStoredPerformanceProfile()
 	return &proxyDeviceConfig
 }
 

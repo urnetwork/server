@@ -83,7 +83,7 @@ func TestCloseReportRollbackCommitLossAndFinalReplay(t *testing.T) {
 			t.Fatal("source final report was lost")
 		}
 		requireCloseReportState(t, ctx, e.ContractId, 4, 400)
-		complete, busy, err := flushLegacySettlement(ctx, e.ContractId)
+		complete, busy, _, err := flushLegacySettlement(ctx, e.ContractId)
 		if err != nil || !complete || busy {
 			t.Fatal("idempotent reports did not settle")
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"math"
 	"net"
 	"testing"
@@ -39,24 +40,66 @@ func TestExtenderHintPlacesTheCallerAddress(t *testing.T) {
 	ipInfo, err := server.GetIpInfoFromString("67.43.156.1")
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, result.ContinentCode, model.ContinentCodeForCountry(ipInfo.CountryCode))
+	// and its country, which picks the client's spoof list
+	connect.AssertEqual(t, result.CountryCode, "us")
+	connect.AssertEqual(t, result.CountryCode, ipInfo.CountryCode)
 
 	// an ipv6 address is placed the same way (MaxMind test data as well)
 	clientSession.ClientAddress = net.JoinHostPort("2a02:ec80::1", "443")
 	result, err = ExtenderHint(clientSession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, result.ContinentCode, "NA")
+	connect.AssertEqual(t, result.CountryCode, "us")
 
 	// loopback is nowhere, and nowhere is an empty hint, not an error
 	clientSession.ClientAddress = net.JoinHostPort("127.0.0.1", "443")
 	result, err = ExtenderHint(clientSession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, result.ContinentCode, "")
+	connect.AssertEqual(t, result.CountryCode, "")
 
 	// as is an address that cannot be read
 	clientSession.ClientAddress = ""
 	result, err = ExtenderHint(clientSession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, result.ContinentCode, "")
+	connect.AssertEqual(t, result.CountryCode, "")
+}
+
+// The hint of a placed address is filled from its location alone: the
+// continent its country maps to, and the country itself in the lower case
+// form every location the api returns carries, which is what a client names
+// its country spoof list by (connect SpoofDomainsForCountry). No address and
+// no database is involved.
+func TestExtenderHintForLocationFillsTheCountry(t *testing.T) {
+	cases := []struct {
+		countryCode   string
+		continentCode string
+		hintCountry   string
+	}{
+		{countryCode: "ru", continentCode: "EU", hintCountry: "ru"},
+		{countryCode: "us", continentCode: "NA", hintCountry: "us"},
+		{countryCode: " KZ ", continentCode: "AS", hintCountry: "kz"},
+		{countryCode: "", continentCode: "", hintCountry: ""},
+	}
+	for _, c := range cases {
+		result := extenderHintForLocation(&model.Location{
+			LocationType: model.LocationTypeCountry,
+			Country:      "Somewhere",
+			CountryCode:  c.countryCode,
+		})
+		connect.AssertEqual(t, result.ContinentCode, c.continentCode)
+		connect.AssertEqual(t, result.CountryCode, c.hintCountry)
+	}
+
+	// no location is no hint
+	result := extenderHintForLocation(nil)
+	connect.AssertEqual(t, *result, ExtenderHintResult{})
+
+	// the wire names are the connect client's contract
+	resultJson, err := json.Marshal(extenderHintForLocation(&model.Location{CountryCode: "ru"}))
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, string(resultJson), `{"continent_code":"EU","country_code":"ru"}`)
 }
 
 // A provider with a registered client key, and the attestor its probes sign

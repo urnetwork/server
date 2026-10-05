@@ -9563,4 +9563,17 @@ var migrations = []any{
 	newSqlMigration(providerWorkOpenSchemaSql),
 	newSqlMigration(verifyOriginalRequestJsonRepairSql),
 	newSqlMigration(stNativeFeeSettlementSchemaSql),
+	// The recurring grant that wrote a balance (model.GrantKind: free, pro,
+	// referral), so the balance summary can leave out a grant in its grace once the
+	// next grant of its kind has started. Nullable without a default, so adding it
+	// rewrites no rows, and nothing is backfilled: older rows, and rows from
+	// binaries that predate it during a rollout, stay NULL and the summary
+	// recognizes those grants by their exact window. The lock timeout keeps the
+	// ALTER from waiting behind a long lock holder (the nightly pg_dump holds its
+	// share lock for hours) with every balance query queued behind it; a migrate
+	// that times out is re-run.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE transfer_balance ADD COLUMN grant_kind varchar(32) NULL;
+	`),
 }

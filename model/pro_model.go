@@ -122,6 +122,12 @@ func IsProNetwork(ctx context.Context, networkId server.Id) bool {
 // change -- subscription activation, the monthly Pro grant, an x402 payment -- so the
 // upgrade takes effect immediately instead of after a ttl.
 //
+// Call it AFTER the transaction that changed the balances commits, never inside it.
+// It reads on its own connection, so inside the tx it would load the entitlement from
+// before the change and cache that for up to ProCacheTtl, and a tx that then rolled
+// back would still have written the cache. InTx writers return what changed and leave
+// the refresh to whoever commits.
+//
 // Note this can only clear THIS process's local tier. Other processes keep their own
 // entry until ProLocalCacheTtl expires, which is why that ttl is short.
 func UpdateProNetwork(ctx context.Context, networkId server.Id) bool {
@@ -161,6 +167,15 @@ func InvalidateProNetwork(ctx context.Context, networkId server.Id) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		r.Del(ctx, proNetworkKey(networkId))
 	})
+}
+
+// Testing_ProNetworkCacheEntries reads both cache tiers for a network without loading
+// the entitlement or filling either tier, for tests that pin when a writer refreshes
+// the cache. An ok is false when that tier holds no live entry.
+func Testing_ProNetworkCacheEntries(ctx context.Context, networkId server.Id) (localPro bool, localOk bool, cachedPro bool, cachedOk bool) {
+	localPro, localOk = getProNetworkLocal(networkId)
+	cachedPro, cachedOk = getProNetworkCached(ctx, networkId)
+	return
 }
 
 // loadProNetwork reads the entitlement from the source of truth.

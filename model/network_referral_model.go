@@ -237,9 +237,9 @@ func ReferralBonusCount(referralCount int) int {
 // Called on the recurring refresh cadence alongside the tier data grant. Both sides are
 // granted in ONE transaction so a run is atomic.
 //
-// Balances are added with AddBasicTransferBalance, i.e. net revenue 0, so they are
-// UNPAID: referral data can never by itself confer Pro (Pro keys off
-// subscription_renewal — see IsPro).
+// Balances are added as referral grants (AddGrantTransferBalanceInTx), i.e. net
+// revenue 0, so they are UNPAID: referral data can never by itself confer Pro (Pro
+// keys off subscription_renewal — see IsPro).
 //
 // Returns the total byte count granted per network (a network that is both a referrer
 // and a referee accumulates both grants).
@@ -271,7 +271,7 @@ func AddReferralBonusesToAllNetworks(
 			if byteCount <= 0 {
 				return
 			}
-			if err := AddBasicTransferBalanceInTx(tx, ctx, networkId, byteCount, startTime, endTime); err != nil {
+			if err := AddGrantTransferBalanceInTx(tx, ctx, networkId, GrantKindReferral, byteCount, startTime, endTime); err != nil {
 				// do not fail the whole batch for one network
 				return
 			}
