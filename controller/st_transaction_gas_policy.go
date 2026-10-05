@@ -141,6 +141,9 @@ func (self *CoreStClient) signReservedStTransaction(ctx context.Context, client 
 		}
 		return nil, errors.New("operator gas original signed reservation has no matching durable attempt")
 	}
+	if err := model.RequireStTransactionGasUnsettled(ctx, intent.IntentId); err != nil {
+		return nil, err
+	}
 	var signed *types.Transaction
 	if self.transactionSigner != nil {
 		signed, err = self.transactionSigner(ctx, &unsigned, signer, key)
