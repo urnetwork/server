@@ -61,9 +61,26 @@ func providerProbeEligibilitySql(rollupAlias string) string {
 	return fmt.Sprintf(`NOT %s.arin_risk AND %s`, rollupAlias, providerReliabilityEligibilitySql(rollupAlias+".client_id"))
 }
 
-// Refreshes the indexed scheduling hint after connection invalidation. Claims
-// still recheck current gates; tokens, progress and retry deadlines never move.
+// Synchronize indexed scheduling with location and score publication. A score
+// recovery can admit a provider that had no cycle at the preceding location
+// pass, or reactivate a false hint. Keep this maintenance outside claim calls;
+// existing tokens, progress and retry deadlines never move.
 func updateProviderUrlProbeEligibility(ctx context.Context, tx server.PgTx) {
+	server.RaisePgResult(tx.Exec(ctx, `
+		INSERT INTO provider_egress_probe_cycle (client_id, cycle_started_at, next_attempt_at, eligible)
+		SELECT provider_location.client_id, $1, $1, true
+		FROM network_client_location_reliability AS provider_location
+		JOIN network_client AS provider USING (client_id)
+		WHERE provider_location.connected AND provider_location.valid
+		AND (provider_location.ipv4_proven OR NOT provider_location.ipv6_proven)
+		AND provider.active AND provider.source_client_id IS NULL
+		AND NOT EXISTS (SELECT 1 FROM provider_egress_probe_cycle AS cycle WHERE cycle.client_id = provider_location.client_id)
+		AND EXISTS (SELECT 1 FROM provide_key WHERE provide_key.client_id = provider_location.client_id AND provide_mode = $2)
+		AND `+providerProbeEligibilitySql("provider_location")+`
+		ON CONFLICT (client_id) DO NOTHING`, server.NowUtc(), ProvideModePublic))
+
+	// Claims still recheck current gates. Reconcile both admission and rejection
+	// in the same transaction as the scores that determine their eligibility.
 	server.RaisePgResult(tx.Exec(ctx, `
 		WITH eligibility AS (
 			SELECT cycle.client_id, EXISTS (
