@@ -3,7 +3,6 @@ package model
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -151,80 +150,12 @@ func arinRemoteFullPopulation(t *testing.T, hosts int) {
 		epoch := server.NowUtc().Add(-72 * time.Hour).Unix()
 		lookup := server.NowUtc().Add(-48 * time.Hour).Truncate(time.Microsecond)
 		server.Raise(SetConnectionLocation(ctx, seed.connectionId, city.LocationId, &ConnectionLocationScores{ArinLookupAt: &lookup, ArinDatabaseBuildEpoch: epoch, ArinQualityVerified: true}))
-		var originalHandler server.Id
-		handlers := make([]server.Id, 20)
-		for i := range handlers {
-			handlers[i] = server.NewId()
-		}
-		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT handler_id FROM network_client_connection WHERE connection_id=$1`, seed.connectionId).Scan(&originalHandler))
-			// Clone faithful real rows, including every required modern column.
-			// All 100001 connections remain real source members in these tables.
-			for _, spec := range []struct {
-				table, key string
-				id         server.Id
-				count      int
-			}{
-				{"network_client_handler", "handler_id", originalHandler, 20},
-				{"network_client", "client_id", seed.clientId, 100000},
-				{"provide_key", "client_id", seed.clientId, 100000},
-				{"network_client_connection", "connection_id", seed.connectionId, 100000},
-				{"network_client_location", "connection_id", seed.connectionId, 100000},
-			} {
-				var columns, values []string
-				rows, err := conn.Query(ctx, `SELECT quote_ident(attname) FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped AND attgenerated='' ORDER BY attnum`, spec.table)
-				server.WithPgResult(rows, err, func() {
-					for rows.Next() {
-						var col string
-						server.Raise(rows.Scan(&col))
-						columns = append(columns, col)
-						switch {
-						case spec.table == "network_client_handler" && col == "handler_id":
-							values = append(values, `($2::uuid[])[n]`)
-						case col == "client_id" || col == "connection_id":
-							values = append(values, `md5('arin-full-'||n)::uuid`)
-						case spec.table == "network_client_connection" && col == "handler_id":
-							values = append(values, `($2::uuid[])[get_byte(uuid_send(md5('arin-full-'||n)::uuid),0)%20+1]`)
-						default:
-							values = append(values, "seed."+col)
-						}
-					}
-				})
-				where := ""
-				if spec.table == "provide_key" {
-					where = " AND provide_mode=3"
-				}
-				// The unused array is bound with an explicit type in all copies.
-				server.RaisePgResult(conn.Exec(ctx, `INSERT INTO `+spec.table+` (`+strings.Join(columns, ",")+`) SELECT `+strings.Join(values, ",")+` FROM `+spec.table+` seed CROSS JOIN generate_series(1,$3::integer) n WHERE seed.`+spec.key+`=$1 AND cardinality($2::uuid[])=20`+where, spec.id, handlers, spec.count))
-			}
-		})
-		extra := map[server.Id]server.Id{}
+		extraCount := 0
 		if remote {
-			for n := 1; n <= 5000; n++ {
-				connection := md5.Sum([]byte("arin-extra-" + strconv.Itoa(n)))
-				client := md5.Sum([]byte("arin-full-" + strconv.Itoa(n)))
-				extra[server.Id(connection)] = server.Id(client)
-			}
-			server.Db(ctx, func(conn server.PgConn) {
-				for _, table := range []string{"network_client_connection", "network_client_location"} {
-					var cols, values []string
-					rows, err := conn.Query(ctx, `SELECT quote_ident(attname) FROM pg_attribute WHERE attrelid=$1::regclass AND attnum>0 AND NOT attisdropped AND attgenerated='' ORDER BY attnum`, table)
-					server.WithPgResult(rows, err, func() {
-						for rows.Next() {
-							var col string
-							server.Raise(rows.Scan(&col))
-							cols = append(cols, col)
-							if col == "connection_id" {
-								values = append(values, `md5('arin-extra-'||n)::uuid`)
-							} else {
-								values = append(values, "seed."+col)
-							}
-						}
-					})
-					server.RaisePgResult(conn.Exec(ctx, `INSERT INTO `+table+` (`+strings.Join(cols, ",")+`) SELECT `+strings.Join(values, ",")+` FROM generate_series(1,5000) n JOIN `+table+` seed ON seed.connection_id=md5('arin-full-'||n)::uuid`))
-				}
-			})
+			extraCount = 5000
 		}
+		population := newArinRemotePopulationFixture(t, ctx, seed, 100000, extraCount)
+		originalHandler, handlers, extra := population.originalHandler, population.handlers, population.extraKVs
 		recorder := arinRemoteRecorder(t, epoch)
 		var key [32]byte
 		key[0] = 71
