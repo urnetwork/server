@@ -898,6 +898,17 @@ layout or current load. Do not infer a production cause or relax the deadline
 from that local result. Durable current, outdated and missing classification
 coverage remains **unknown**.
 
+A second current-cohort Main read at `2026-10-05T15:42:30.468457Z` also
+ended with `SQLSTATE 57014`. This version capped enumeration at 200,000
+connected rows and grouped each provider once; it retained the three-second
+statement deadline. Its 75,000-live-row local fixture completed the query in
+1.221 seconds, but Main returned neither counts nor a surviving plan. The
+retained receipt is
+`0efc3e3dc82b3456468ef2a765f913c96715e487a91d006ff5be3dba1081d57f`.
+Neither timeout confirms stale stored facts or justifies a classification
+write. Any smaller diagnostic must identify its subset explicitly; it cannot
+stand in for complete fleet coverage.
+
 A later bounded native-host census read succeeded at
 `2026-10-05T08:51:36.381701Z`. It returned one complete cached publication from
 source evaluation `08:40:09.693091Z`–`08:40:57.573495Z`, published at
@@ -926,6 +937,18 @@ publication, while fleet-wide v13 adoption, classification coverage and its
 causal effect on the Quality count remain unverified. A new publication after
 selection does not establish that its stored classification inputs came from
 the new resource.
+
+The later read at `2026-10-05T15:11:40.231020Z` reached Redis and decoded a
+present publication, but refused it because its source was 1,213.599842 seconds
+old against a 900-second limit. Source evaluation completed at
+`14:51:26.631178Z`; publication followed at `15:01:04.938704Z`. The
+578.307526 seconds between those events and the further 635.292316 seconds
+until observation are distinct delays, with no established cause or producing
+process identity. Receipt
+`f8e539aae1c51787fe1bf6f93d2db86cf5263aaf577b676e77c44f846f12fbd3`
+therefore supplies no qualified newer bucket counts. The historical 4/82/80,593
+counts above are not a current result, and a later publication timestamp does
+not renew its source evaluation.
 
 Connection facts advance only after a successful actual ARIN lookup during a
 connection location write. The c343 connection path retries a failed initial
@@ -971,13 +994,31 @@ Existing `urnetwork_stats_provider_excluded{reason}` and
 `urnetwork_stats_provider_egress_index{bucket,index}` gauges provide
 replica-backed rule diagnostics. Exclusion reasons report the first failing
 rule, so an early reliability, risk or TLS failure can hide later failures.
-These gauges have no producer observation timestamp and retain the previous
-successful values when a refresh fails; a recent scrape cannot make them a
-fresh exclusion census. The native publication has source clocks but lacks
-ARIN epochs and exclusion reasons. No loaded-ARIN epoch gauge is exported by
-this graph. The bounded process observation above supplies a mapped epoch for
-one process; its partial-file fingerprint does not establish a whole-file
-hash, application-reader use, fleet convergence or provider-level effect.
+The earlier graph had no producer observation timestamp for these gauges.
+Taskworker source `47952095` adds
+`urnetwork_stats_provider_egress_refresh_available` and the
+`urnetwork_stats_provider_egress_source_started_seconds` and
+`urnetwork_stats_provider_egress_source_completed_seconds` clocks. A failed
+refresh leaves availability zero; successful cache hits preserve the original
+source clocks. Retained counts and a recent scrape alone still cannot establish
+a fresh exclusion census. These are `CountProviderEgress` dashboard snapshots,
+separate from both the native score-target census key and URL quota publication.
+No qualified current read of these timestamped gauges is retained here.
+
+The native publication has source clocks but lacks ARIN epochs and exclusion
+reasons. These reviewed sources export no loaded-ARIN epoch gauge. The bounded
+process observation above supplies a mapped epoch for one process; its
+partial-file fingerprint does not establish a whole-file hash, application-reader
+use, fleet convergence or provider-level effect.
+
+An isolated classification-only refresh prototype passed nine local controls,
+including concurrent single-winner and mixed-writer checks. It compares the
+exact previous ARIN fields and write token before replacing six classification
+fields after an actual lookup; it does not rewrite location, URL/TLS evidence
+or reliability. It remains inactive: Main stale facts are unconfirmed, and
+bounded live-owner integration is unfinished. Owner changes during a write
+and uncertain commit outcomes require explicit handling; the local tests do
+not establish production activation or recovered Quality supply.
 
 For this release, retain the following evidence as rollout proceeds:
 
