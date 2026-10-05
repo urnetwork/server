@@ -31216,3 +31216,41 @@ A positive XL server-write witness is device RPC activity, not downstream
 customer data-plane success. Some early admission/capacity rejections occur
 before these counters. Keep client selection/fallback evidence separate and
 do not weaken authentication or TLS to make compatibility appear healthy.
+
+## Shared provider-egress dashboard refresh
+
+Every Taskworker process starts its own stats collector. The provider-egress
+dashboard aggregate now shares one completed, policy-keyed Redis snapshot for
+300 seconds after the original source completion. Its elected refresher still
+runs the full `CountProviderEgress` path: historical ARIN exclusions, reliability
+gates, all bucket/index labels and exclusion reasons retain their existing
+meaning. Location/score refresh tasks, provider selection and admission do not
+use this dashboard cache. This removes duplicate stats work; it does not prove
+which caller produced a sampled query or what fraction of Main CPU it used.
+
+The winner has a 120-second source deadline and a 180-second token lease. Redis
+operations use the non-retrying deadline pool with a two-second operation
+budget. Publication atomically checks the lease token, installs the complete
+aggregate and releases that token. A failed source leaves the lease as a retry
+fence; it cannot publish partial counts. Losing collectors keep their prior
+gauges and retry the cache on later minute ticks, without moving other DB stats
+off their five-tick cadence. These intervals are nominal: earlier synchronous
+collector work can delay them. A successful fresh snapshot suppresses new fills
+for 300 seconds; failed fills can retry after the 180-second fence expires.
+
+`urnetwork_stats_provider_egress_refresh_available` is one only when the last
+attempt obtained a complete fresh snapshot. Missing Redis, a cold owner still
+working, malformed data or a failed source yields zero, not healthy zero
+providers. The count gauges and their last source times remain unchanged on
+failure. Legitimate complete all-zero counts remain valid. Compare
+`urnetwork_stats_provider_egress_source_started_seconds` and
+`urnetwork_stats_provider_egress_source_completed_seconds` with scrape time;
+cache hits never advance these times or renew the cache TTL. An old exported
+gauge or a missing availability series is not a current population proof.
+
+The cache key separates resolved count policy, including accepted probe-policy
+version and the conservative configuration-error selection. It is not a data
+generation marker: provider and evidence changes can appear on the next source
+refresh. Different worker policies can each refresh their own key during a
+mixed rollout. Verify actual worker adoption and later source completions before
+claiming runtime scan reduction; a deployment result alone is insufficient.

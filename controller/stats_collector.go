@@ -81,8 +81,9 @@ package controller
 //
 // StartStatsCollector is called only by the taskworker
 // (cli/taskworker/main.go), so only taskworker registries export these
-// series, and every taskworker host recomputes the same values on its own
-// clock — the feed reads each gauge with max across hosts. a gauge
+// series. Most values are recomputed on each host's own clock; provider-egress
+// aggregates share one completed snapshot across hosts. The feed reads each
+// gauge with max across hosts. a gauge
 // registers with the default registry (pushed by server.StartStatsPusher)
 // on its first set, so a stat that never has a value here (st disabled,
 // no netuid) is never exported at all rather than exported as 0.
@@ -312,6 +313,21 @@ var statsProviderExcludedGauge = newStatsGaugeVec(
 	"provider_excluded",
 	"Connected valid public providers the egress rules leave out of a bucket, per reason",
 	"reason",
+)
+
+var statsProviderEgressAvailableGauge = newStatsGauge(
+	"provider_egress_refresh_available",
+	"One when the last provider-egress refresh obtained a complete fresh snapshot; zero means unavailable",
+)
+
+var statsProviderEgressStartedGauge = newStatsGauge(
+	"provider_egress_source_started_seconds",
+	"Original source-read start time of the published provider-egress counts; cache hits do not advance it",
+)
+
+var statsProviderEgressCompletedGauge = newStatsGauge(
+	"provider_egress_source_completed_seconds",
+	"Original successful source-read completion time of the published provider-egress counts; cache hits do not advance it",
 )
 
 // the extender gauges are internal and are read only by
@@ -612,6 +628,12 @@ func StartStatsCollector(ctx context.Context) {
 				server.HandleError(func() {
 					statsRefreshDb(ctx)
 				})
+			} else {
+				// A cold follower must pick up the completed shared snapshot on
+				// a later minute tick instead of racing the next five-minute fill.
+				server.HandleError(func() {
+					statsRefreshProviderEgress(ctx)
+				})
 			}
 			dbTick = (dbTick + 1) % statsCollectorDbTicks
 			server.HandleError(func() {
@@ -745,7 +767,16 @@ func statsRefreshDb(ctx context.Context) {
 // Publishes the pool as the egress rules decide it, with the rollout flag as
 // it is now (model.CountProviderEgress).
 func statsRefreshProviderEgress(ctx context.Context) {
-	counts := model.CountProviderEgress(ctx)
+	statsProviderEgressAvailableGauge.set(0)
+	snapshot, err := getStatsProviderEgressSnapshot(ctx, model.ProviderEgressCountsPolicyKey())
+	server.Raise(err)
+	statsPublishProviderEgressCounts(snapshot.Counts)
+	statsProviderEgressStartedGauge.set(float64(snapshot.StartedAt.UnixNano()) / float64(time.Second))
+	statsProviderEgressCompletedGauge.set(float64(snapshot.CompletedAt.UnixNano()) / float64(time.Second))
+	statsProviderEgressAvailableGauge.set(1)
+}
+
+func statsPublishProviderEgressCounts(counts *model.ProviderEgressCounts) {
 	indexValues := []statsLabeledValue{}
 	for _, bucket := range model.ProviderEgressBuckets {
 		indexLabelCounts := counts.BucketIndexCounts[bucket]
