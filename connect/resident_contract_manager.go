@@ -86,20 +86,7 @@ func (self *residentContractManager) HasActiveContract(sourceId server.Id, desti
 
 	next := func() (nextEntry *activeContractEntry) {
 		handleContractManagerDone(func() {
-			c := func() bool {
-				contractIds1 := model.GetOpenContractIdsWithNoPartialClose(self.ctx, sourceId, destinationId)
-				if 0 < len(contractIds1) {
-					return true
-				}
-
-				contractIds2 := model.GetOpenContractIdsWithNoPartialClose(self.ctx, destinationId, sourceId)
-				if 0 < len(contractIds2) {
-					return true
-				}
-
-				return false
-			}
-			hasActiveContract := c()
+			hasActiveContract := model.HasOpenContractForPair(self.ctx, sourceId, destinationId)
 
 			func() {
 				self.stateLock.Lock()
