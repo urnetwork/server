@@ -216,30 +216,51 @@ func (self *redisContractAdmission) recoverRetainedPage(page context.Context) (p
 			redisContractReservationResults.WithLabelValues("recovery", "pending").Inc()
 		}
 	}()
-	remaining := redisReservationRecoveryBatch
-	server.Tx(page, func(tx server.PgTx) {
-		for _, balanceId := range ids {
-			if remaining == 0 || page.Err() != nil {
+	// Discover bounded candidates before acquiring PG. An empty page is normal
+	// after successful publication and needs no SQL transaction; cold Redis
+	// routing and candidate reads must not hold a PostgreSQL snapshot or slot.
+	// Discovery changes no token amount. The SQL fence still covers every
+	// custody check and exact Redis release/publication below.
+	type retainedCandidate struct {
+		balanceId server.Id
+		candidate redisReservationRecoveryCandidate
+	}
+	retained := make([]retainedCandidate, 0, redisReservationRecoveryBatch)
+	for _, balanceId := range ids {
+		if len(retained) == redisReservationRecoveryBatch || page.Err() != nil {
+			break
+		}
+		candidates, err := redisReservationRecoveryPage(page, balanceId)
+		if err != nil {
+			redisContractReservationResults.WithLabelValues("recovery", "pending").Inc()
+			continue
+		}
+		for _, candidate := range candidates {
+			if len(retained) == redisReservationRecoveryBatch || page.Err() != nil {
 				break
 			}
-			candidates, err := redisReservationRecoveryPage(page, balanceId)
+			retained = append(retained, retainedCandidate{balanceId: balanceId, candidate: candidate})
+		}
+	}
+	if page.Err() != nil {
+		redisContractReservationResults.WithLabelValues("recovery", "pending").Inc()
+		return false
+	}
+	if len(retained) == 0 {
+		return false
+	}
+	server.Tx(page, func(tx server.PgTx) {
+		for _, item := range retained {
+			if page.Err() != nil {
+				break
+			}
+			released, err := recoverRedisReservationInTx(page, tx, item.balanceId, item.candidate)
+			progress = progress || released
+			result := "completed"
 			if err != nil {
-				redisContractReservationResults.WithLabelValues("recovery", "pending").Inc()
-				continue
+				result = "pending"
 			}
-			for _, candidate := range candidates {
-				if remaining == 0 || page.Err() != nil {
-					break
-				}
-				remaining--
-				released, err := recoverRedisReservationInTx(page, tx, balanceId, candidate)
-				progress = progress || released
-				result := "completed"
-				if err != nil {
-					result = "pending"
-				}
-				redisContractReservationResults.WithLabelValues("recovery", result).Inc()
-			}
+			redisContractReservationResults.WithLabelValues("recovery", result).Inc()
 		}
 		server.Raise(page.Err())
 	}, server.TxReadCommitted, server.OptNoRetry())
