@@ -17,7 +17,10 @@ func CreateStripeCustomer(
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 
-		tag, execErr := tx.Exec(
+		// a failed insert raises, which ends the transaction at once. It used
+		// to set the error result while the transaction went on to a commit
+		// that server.Tx retried for a minute.
+		tag := server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				INSERT INTO stripe_customer
@@ -27,11 +30,7 @@ func CreateStripeCustomer(
 			`,
 			session.ByJwt.NetworkId,
 			stripeCustomerId,
-		)
-		if execErr != nil {
-			err = execErr
-			return
-		}
+		))
 		if tag.RowsAffected() == 0 {
 			err = errors.New("stripe_customer already exists")
 			return
@@ -59,12 +58,10 @@ func GetStripeCustomer(
 			session.ByJwt.NetworkId,
 		)
 
-		if queryErr != nil {
-			err = queryErr
-			return
-		}
-
-		server.WithPgResult(result, err, func() {
+		// a failed query raises, which ends the transaction at once. It used to
+		// set the error result while the transaction went on to a commit that
+		// server.Tx retried for a minute.
+		server.WithPgResult(result, queryErr, func() {
 			if result.Next() {
 				server.Raise(result.Scan(
 					&stripeCustomerId,

@@ -325,8 +325,11 @@ func SetPaymentReconcileWatermark(
 	store string,
 	watermarkTime time.Time,
 ) (err error) {
+	// a failed statement raises, which ends the transaction at once; the error
+	// result is always nil. Its error used to be assigned to the result while
+	// the transaction went on to a commit that server.Tx retried for a minute.
 	server.Tx(ctx, func(tx server.PgTx) {
-		_, err = tx.Exec(
+		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 			INSERT INTO payment_reconciliation_watermark (store, watermark_time, update_time)
@@ -337,7 +340,7 @@ func SetPaymentReconcileWatermark(
 			store,
 			watermarkTime,
 			server.NowUtc(),
-		)
+		))
 	})
 	return
 }

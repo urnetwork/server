@@ -450,7 +450,7 @@ func advancePayment(
 				// cancel this payment, and let the next plan pick up the contracts
 				// in a new (larger) payment. Otherwise, we will likely keep failing due
 				// to the payment not being large enough to cover the transfer fee.
-				glog.Info("[payout][%s]payout - fee is negative\n", payment.PaymentId)
+				glog.Infof("[payout][%s]payout - fee is negative\n", payment.PaymentId)
 
 				if err := model.CancelPayment(clientSession.Ctx, payment.PaymentId); err != nil {
 					returnErr = fmt.Errorf("[%s]Payment cancellation error: %w", payment.PaymentId, err)

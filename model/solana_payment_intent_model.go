@@ -37,7 +37,10 @@ func CreateSolanaPaymentIntent(
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 
-		tag, execErr := tx.Exec(
+		// a failed insert raises, which ends the transaction at once. It used
+		// to set the error result while the transaction went on to a commit
+		// that server.Tx retried for a minute.
+		tag := server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				INSERT INTO solana_payment_intent
@@ -50,11 +53,7 @@ func CreateSolanaPaymentIntent(
 			server.NowUtc().Add(1*time.Hour),
 			expectedAmountUsd,
 			subscriptionPlan,
-		)
-		if execErr != nil {
-			err = execErr
-			return
-		}
+		))
 		if tag.RowsAffected() == 0 {
 			err = errors.New("payment_reference already exists")
 			return
@@ -236,8 +235,11 @@ func RecordUnfulfilledSolanaPayment(
 		}
 	}
 
+	// a failed insert raises, which ends the transaction at once; the error
+	// result is always nil. It used to be assigned to the result while the
+	// transaction went on to a commit that server.Tx retried for a minute.
 	server.Tx(ctx, func(tx server.PgTx) {
-		_, err = tx.Exec(
+		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 			INSERT INTO solana_unfulfilled_payment
@@ -257,7 +259,7 @@ func RecordUnfulfilledSolanaPayment(
 			payment.TransactionTime,
 			payment.SenderAccount,
 			payment.MatchNote,
-		)
+		))
 	})
 
 	return
@@ -318,15 +320,17 @@ func RemoveUnfulfilledSolanaPayment(
 	ctx context.Context,
 	txSignature string,
 ) (err error) {
+	// a failed delete raises, which ends the transaction at once; the error
+	// result is always nil
 	server.Tx(ctx, func(tx server.PgTx) {
-		_, err = tx.Exec(
+		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 			DELETE FROM solana_unfulfilled_payment
 			WHERE tx_signature = $1
 			`,
 			txSignature,
-		)
+		))
 	})
 	return
 }
@@ -465,7 +469,8 @@ func CreateSolanaPaymentIntentForNetwork(
 	expiresAt time.Time,
 ) (err error) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		tag, execErr := tx.Exec(
+		// a failed insert raises, which ends the transaction at once
+		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				INSERT INTO solana_payment_intent
@@ -478,11 +483,7 @@ func CreateSolanaPaymentIntentForNetwork(
 			expiresAt,
 			expectedAmountUsd,
 			subscriptionPlan,
-		)
-		if execErr != nil {
-			err = execErr
-			return
-		}
+		))
 		if tag.RowsAffected() == 0 {
 			err = errors.New("payment_reference already exists")
 			return
@@ -620,7 +621,10 @@ func CreateSolanaPaymentIntentWithUniqueAmount(
 	server.Tx(ctx, func(tx server.PgTx) {
 		amountUsd = 0
 		err = nil
-		tag, execErr := tx.Exec(
+		// a failed statement raises, which ends the transaction at once. Each
+		// used to set the error result while the transaction went on to a
+		// commit that server.Tx retried for a minute.
+		tag := server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				INSERT INTO solana_payment_intent
@@ -634,11 +638,7 @@ func CreateSolanaPaymentIntentWithUniqueAmount(
 			expiresAt,
 			priceUsd,
 			subscriptionPlan,
-		)
-		if execErr != nil {
-			err = execErr
-			return
-		}
+		))
 		if tag.RowsAffected() == 0 {
 			err = errors.New("payment_reference already exists")
 			return
@@ -650,7 +650,7 @@ func CreateSolanaPaymentIntentWithUniqueAmount(
 			if !ok {
 				continue
 			}
-			tag, execErr := tx.Exec(
+			tag := server.RaisePgResult(tx.Exec(
 				ctx,
 				`
 					INSERT INTO solana_payment_amount_reservation
@@ -665,16 +665,12 @@ func CreateSolanaPaymentIntentWithUniqueAmount(
 				reference,
 				expiresAt.Add(SolanaUniqueAmountHold),
 				now,
-			)
-			if execErr != nil {
-				err = execErr
-				return
-			}
+			))
 			if tag.RowsAffected() == 0 {
 				// held by another quote
 				continue
 			}
-			_, execErr = tx.Exec(
+			server.RaisePgResult(tx.Exec(
 				ctx,
 				`
 					UPDATE solana_payment_intent
@@ -685,11 +681,7 @@ func CreateSolanaPaymentIntentWithUniqueAmount(
 				reference,
 				SolanaMicroToUsd(amountMicro),
 				amountMicro,
-			)
-			if execErr != nil {
-				err = execErr
-				return
-			}
+			))
 			amountUsd = SolanaMicroToUsd(amountMicro)
 			return
 		}
