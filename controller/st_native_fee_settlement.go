@@ -1,3 +1,5 @@
+// Operator fee settlement joins protected public approval to actual native
+// verification before the model can release an original signed fee ceiling.
 package controller
 
 import (
@@ -28,6 +30,7 @@ func (self *CoreStClient) SettleNativeTransactionFee(ctx context.Context, intent
 	return settleNativeTransactionFee(ctx, self.cfg, intentId, request, transactionHash, budget)
 }
 
+// One owner covers public policy admission, original proof execution and commit.
 func settleNativeTransactionFee(ctx context.Context, cfg *StConfig, intentId server.Id, request nativefee.Reference, transactionHash string, budget time.Duration) (*model.StTransactionNativeFeeSettlement, error) {
 	if ctx == nil || budget < time.Minute || budget > 15*time.Minute {
 		return nil, errors.New("native fee settlement requires an owned 60s–15m budget")
@@ -56,6 +59,7 @@ func settleNativeTransactionFee(ctx context.Context, cfg *StConfig, intentId ser
 	return model.SettleStTransactionNativeFee(owner, intentId, policy, authority, verified)
 }
 
+// A protected authority selects the scope; an existing client also binds its cfg.
 func loadNativeFeeDenomination(ctx context.Context, cfg *StConfig, read func(context.Context, string) ([]byte, error)) (*server.StNativeFeeDenominationPolicy, *server.StNativeFeeDenominationAuthority, error) {
 	if ctx == nil || read == nil {
 		return nil, nil, errStNotConfigured

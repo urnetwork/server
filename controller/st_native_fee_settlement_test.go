@@ -1,3 +1,5 @@
+// These deterministic fixtures admit synthetic public policy without reading
+// a vault or invoking a signer. Actual original proof joins have separate roots.
 package controller
 
 import (
@@ -15,6 +17,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// The fixture independently signs public test authority and deployment identity.
 func nativeFeeDenominationFixture(t *testing.T) (*StConfig, map[string][]byte) {
 	t.Helper()
 	var genesis [32]byte

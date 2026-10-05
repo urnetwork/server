@@ -23,6 +23,7 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
+// Signals cancel both the native proof worker and the local database owner.
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	err := run(ctx, os.Args[1:], os.Stdout, controller.SettleNativeTransactionFee)
@@ -33,8 +34,10 @@ func main() {
 	}
 }
 
+// Tests observe dispatch through this private seam without manufacturing proof.
 type settleNativeFee func(context.Context, server.Id, nativefee.Reference, string, time.Duration) (*model.StTransactionNativeFeeSettlement, error)
 
+// Only original intent/proof selection crosses the public command boundary.
 func run(ctx context.Context, args []string, stdout io.Writer, settle settleNativeFee) error {
 	if ctx == nil || settle == nil || len(args) == 0 || args[0] != "settle" {
 		return errors.New("usage: stnativefees settle --intent ID --request ABSOLUTE_PATH --request-sha256 sha256:DIGEST --transaction 0xHASH [--budget 5m]")
