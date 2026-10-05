@@ -49,7 +49,21 @@ type SnSetWalletArgs struct {
 	Message   string `json:"message,omitempty"`
 }
 
+// Stable machine codes for a refused wallet set. Apps pick a localized
+// message from the code and fall back to `Message`.
+const (
+	// the signature is well formed but does not verify for the coldkey over
+	// the challenge: in practice the user signed with another account than the
+	// address they typed (or signed other text). sr25519 cannot name the key
+	// that did sign. Malformed input and a wrong, used or expired challenge
+	// carry no code.
+	SnSetWalletErrorCodeSignatureMismatch = "signature_mismatch"
+)
+
 type SnSetWalletError struct {
+	// one of the `SnSetWalletErrorCode*` values. Added after `Message`; older
+	// clients ignore it.
+	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 }
 
@@ -108,6 +122,12 @@ func SnSetWallet(
 			return nil, useErr
 		}
 		if !use.Valid {
+			if use.SignatureMismatch {
+				return &SnSetWalletResult{Error: &SnSetWalletError{
+					Code:    SnSetWalletErrorCodeSignatureMismatch,
+					Message: "The signature does not match this coldkey address. Sign the challenge with this address.",
+				}}, nil
+			}
 			message := "Invalid wallet signature."
 			if use.Error != nil {
 				message = use.Error.Message
