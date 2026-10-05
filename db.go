@@ -36,8 +36,10 @@ uses a private connection pool local to the current service:
 
 var DbContextDoneError = errors.New("Done")
 
-// Bounds PostgreSQL connection establishment and authentication.
-const PgConnectTimeout = 30 * time.Second
+// Bounds PostgreSQL startup per resolved address. Pool constructors outlive a
+// canceled Acquire, so a backend outage must not retain each attempt for the
+// much longer request or retry horizon.
+const PgConnectTimeout = 5 * time.Second
 
 // Bounds validation of an established PostgreSQL connection. Protocol reads
 // need a shorter budget than dialing so a stale socket cannot consume the
@@ -243,6 +245,17 @@ func (self *safePgPool) open() *pgxpool.Pool {
 // the transaction pooler; failed callback connections still follow disposal
 // and safe-retry classification in dbWithPool.
 func configurePgPoolLiveness(config *pgxpool.Config) {
+	if config.ConnConfig.ConnectTimeout <= 0 || PgConnectTimeout < config.ConnConfig.ConnectTimeout {
+		config.ConnConfig.ConnectTimeout = PgConnectTimeout
+	}
+	// pgconn resolves names before applying ConnectTimeout. The pool supplies
+	// a detached constructor context, so give each lookup its own finite bound.
+	lookup := config.ConnConfig.LookupFunc
+	config.ConnConfig.LookupFunc = func(ctx context.Context, host string) ([]string, error) {
+		lookupCtx, cancel := context.WithTimeout(ctx, PgConnectTimeout)
+		defer cancel()
+		return lookup(lookupCtx, host)
+	}
 	config.PingTimeout = PgPingTimeout
 	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		pgxRegisterIdType(conn.TypeMap())
