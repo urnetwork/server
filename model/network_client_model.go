@@ -329,6 +329,78 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 			return
 		}
 
+		// the proxy's lock subnets and initial device state are resolved before
+		// anything is created too, so a refusal creates nothing
+		var proxyLockSubnets []netip.Prefix
+		var proxyInitialDeviceState *ProxyDeviceState
+		if proxyConfig := authClient.ProxyConfig; proxyConfig != nil {
+			if proxyConfig.LockCallerIp {
+				// the caller's ip is the server's own input, so this is an error,
+				// not a refusal
+				addr, _, err := session.ParseClientIpPort()
+				if err != nil {
+					authClientError = fmt.Errorf("Could not lock caller ip")
+					return
+				}
+				prefix, _ := addr.Prefix(addr.BitLen())
+				proxyLockSubnets = append(proxyLockSubnets, prefix)
+			}
+			for _, lockIp := range proxyConfig.LockIpList {
+				addr, err := netip.ParseAddr(lockIp)
+				if err == nil {
+					prefix, _ := addr.Prefix(addr.BitLen())
+					proxyLockSubnets = append(proxyLockSubnets, prefix)
+				} else {
+					prefix, err := netip.ParsePrefix(lockIp)
+					if err != nil {
+						authClientResult = &AuthNetworkClientResult{
+							Error: &AuthNetworkClientError{
+								Message: fmt.Sprintf("Could not parse lock ip %s", lockIp),
+							},
+						}
+						return
+					}
+					proxyLockSubnets = append(proxyLockSubnets, prefix)
+				}
+			}
+
+			// InitialDeviceState is optional -- it is a pointer tagged
+			// `omitempty`, so a caller may legitimately send a proxy_config
+			// without it. Dereferencing it unconditionally panicked the whole
+			// request into a 500 with no usable message.
+			//
+			// A zero value falls through to the "Invalid location" refusal
+			// below, which is exactly what a caller who sent an empty device
+			// state already got. That keeps the failure a clean, described
+			// error instead of a crash.
+			initialDeviceState := proxyConfig.InitialDeviceState
+			if initialDeviceState == nil {
+				initialDeviceState = &ExtendedProxyDeviceState{}
+			}
+
+			proxyDeviceState := initialDeviceState.ProxyDeviceState
+			if proxyDeviceState.Location == nil {
+				// try the country code
+				proxyDeviceState.Location = GetConnectLocationForCountryCode(
+					session.Ctx,
+					initialDeviceState.CountryCode,
+				)
+			}
+			if proxyDeviceState.Location == nil {
+				authClientResult = &AuthNetworkClientResult{
+					Error: &AuthNetworkClientError{
+						Message: "Invalid location",
+					},
+				}
+				return
+			}
+			proxyDeviceState.DnsResolverSettings = proxyDnsResolverSettings(
+				proxyDeviceState.DnsResolverSettings,
+				proxyDeviceState.Location.CountryCode,
+			)
+			proxyInitialDeviceState = &proxyDeviceState
+		}
+
 		// Client-creation gate for the plan's concurrent connected-client limit:
 		// Do not provision a new top-level client while the network is already at its
 		// connected limit. Only top-level clients count and public providers are
@@ -450,6 +522,7 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 			} else {
 				// copy the device id from the source
 				// important: validate the source client id is in the same network
+				sourceFound := false
 				result, err := tx.Query(
 					session.Ctx,
 					`
@@ -466,15 +539,19 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 				server.WithPgResult(result, err, func() {
 					if result.Next() {
 						server.Raise(result.Scan(&deviceId))
-					} else {
-						authClientResult = &AuthNetworkClientResult{
-							Error: &AuthNetworkClientError{
-								Message: "Client does not exist.",
-							},
-						}
-						return
+						sourceFound = true
 					}
 				})
+				// the refusal must return from the transaction callback, not
+				// from the result callback above, so that nothing is written
+				if !sourceFound {
+					authClientResult = &AuthNetworkClientResult{
+						Error: &AuthNetworkClientError{
+							Message: "Client does not exist.",
+						},
+					}
+					return
+				}
 			}
 
 			// device_name/device_spec are written once at device creation, so a
@@ -591,124 +668,65 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 		}
 
 		if authClientResult != nil && authClientResult.Error == nil && authClient.ProxyConfig != nil {
-			var lockSubnets []netip.Prefix
-			if authClient.ProxyConfig.LockCallerIp {
-				addr, _, err := session.ParseClientIpPort()
-				if err != nil {
-					authClientError = fmt.Errorf("Could not lock caller ip")
-					return
-				}
-				prefix, _ := addr.Prefix(addr.BitLen())
-				lockSubnets = append(lockSubnets, prefix)
+			proxyDeviceConfig := &ProxyDeviceConfig{
+				ProxyDeviceConnection: ProxyDeviceConnection{
+					ClientId: clientId,
+				},
+				LockSubnets:        proxyLockSubnets,
+				InitialDeviceState: proxyInitialDeviceState,
 			}
-			for _, lockIp := range authClient.ProxyConfig.LockIpList {
-				addr, err := netip.ParseAddr(lockIp)
-				if err == nil {
-					prefix, _ := addr.Prefix(addr.BitLen())
-					lockSubnets = append(lockSubnets, prefix)
-				} else {
-					prefix, err := netip.ParsePrefix(lockIp)
-					if err != nil {
-						authClientError = fmt.Errorf("Could not parse lock ip %s", lockIp)
-						return
-					}
-					lockSubnets = append(lockSubnets, prefix)
-				}
-			}
+			err := CreateProxyDeviceConfig(session.Ctx, proxyDeviceConfig)
+			if err == nil {
 
-			// InitialDeviceState is optional -- it is a pointer tagged
-			// `omitempty`, so a caller may legitimately send a proxy_config
-			// without it. Dereferencing it unconditionally panicked the whole
-			// request into a 500 with no usable message.
-			//
-			// A zero value falls through to the "Invalid location" branch
-			// below, which is exactly what a caller who sent an empty device
-			// state already got. That keeps the failure a clean, described
-			// error instead of a crash.
-			initialDeviceState := authClient.ProxyConfig.InitialDeviceState
-			if initialDeviceState == nil {
-				initialDeviceState = &ExtendedProxyDeviceState{}
-			}
-
-			proxyDeviceState := initialDeviceState.ProxyDeviceState
-			if proxyDeviceState.Location == nil {
-				// try the country code
-				proxyDeviceState.Location = GetConnectLocationForCountryCode(
+				// SOCKS and WireGuard are Pro-only (pro.yml features): a
+				// free-tier client is issued neither a SOCKS url nor a WireGuard
+				// config.
+				//
+				// NetworkFeatureAllowed resolves Pro live (never from the jwt's
+				// claim, which is stale for a user who just upgraded -- handing a
+				// fresh subscriber a config with no SOCKS/WireGuard until they
+				// re-auth is exactly the broken upgrade we are avoiding), and it
+				// short-circuits while enforce_features is dark, so today this
+				// costs no lookup and every tier still gets them.
+				networkId := session.ByJwt.NetworkId
+				opts := CreateProxyClientOptions{
+					HttpsRequireAuth: authClient.ProxyConfig.HttpsRequireAuth,
+					EnableSocks:      NetworkFeatureAllowed(session.Ctx, networkId, FeatureSocksProxy),
+					EnableWg: authClient.ProxyConfig.EnableWg &&
+						NetworkFeatureAllowed(session.Ctx, networkId, FeatureWireguardProxy),
+				}
+				proxyClient, err := CreateProxyClient(
 					session.Ctx,
-					initialDeviceState.CountryCode,
+					proxyDeviceConfig.ProxyId,
+					proxyDeviceConfig.ClientId,
+					proxyDeviceConfig.InstanceId,
+					opts,
 				)
-			}
 
-			if proxyDeviceState.Location == nil {
-				authClientResult.Error = &AuthNetworkClientError{
-					Message: "Invalid location",
+				if err == nil {
+					authClientResult.ProxyConfigResult = &ProxyConfigResult{
+						ProxyClient: *proxyClient,
+					}
+				} else {
+					// Log the real cause. The message returned to the caller
+					// stays generic on purpose -- it crosses a trust boundary
+					// and the underlying errors name server-side config -- but
+					// discarding it entirely turned a one-line diagnosis
+					// ("No proxy hosts available", i.e. proxy.yml has no hosts
+					// block) into a multi-hour one, because the operator saw
+					// only this sentence.
+					glog.Errorf(
+						"[proxy]could not create proxy client for %s: %s\n",
+						proxyDeviceConfig.ProxyId,
+						err,
+					)
+					authClientResult.Error = &AuthNetworkClientError{
+						Message: "Could not create proxy client",
+					}
 				}
 			} else {
-				proxyDeviceState.DnsResolverSettings = proxyDnsResolverSettings(
-					proxyDeviceState.DnsResolverSettings,
-					proxyDeviceState.Location.CountryCode,
-				)
-
-				proxyDeviceConfig := &ProxyDeviceConfig{
-					ProxyDeviceConnection: ProxyDeviceConnection{
-						ClientId: clientId,
-					},
-					LockSubnets:        lockSubnets,
-					InitialDeviceState: &proxyDeviceState,
-				}
-				err := CreateProxyDeviceConfig(session.Ctx, proxyDeviceConfig)
-				if err == nil {
-
-					// SOCKS and WireGuard are Pro-only (pro.yml features): a
-					// free-tier client is issued neither a SOCKS url nor a WireGuard
-					// config.
-					//
-					// NetworkFeatureAllowed resolves Pro LIVE (never from the jwt's
-					// claim, which is stale for a user who just upgraded -- handing a
-					// fresh subscriber a config with no SOCKS/WireGuard until they
-					// re-auth is exactly the broken upgrade we are avoiding), and it
-					// short-circuits while enforce_features is dark, so today this
-					// costs no lookup and every tier still gets them.
-					networkId := session.ByJwt.NetworkId
-					opts := CreateProxyClientOptions{
-						HttpsRequireAuth: authClient.ProxyConfig.HttpsRequireAuth,
-						EnableSocks:      NetworkFeatureAllowed(session.Ctx, networkId, FeatureSocksProxy),
-						EnableWg: authClient.ProxyConfig.EnableWg &&
-							NetworkFeatureAllowed(session.Ctx, networkId, FeatureWireguardProxy),
-					}
-					proxyClient, err := CreateProxyClient(
-						session.Ctx,
-						proxyDeviceConfig.ProxyId,
-						proxyDeviceConfig.ClientId,
-						proxyDeviceConfig.InstanceId,
-						opts,
-					)
-
-					if err == nil {
-						authClientResult.ProxyConfigResult = &ProxyConfigResult{
-							ProxyClient: *proxyClient,
-						}
-					} else {
-						// Log the real cause. The message returned to the caller
-						// stays generic on purpose -- it crosses a trust boundary
-						// and the underlying errors name server-side config -- but
-						// discarding it entirely turned a one-line diagnosis
-						// ("No proxy hosts available", i.e. proxy.yml has no hosts
-						// block) into a multi-hour one, because the operator saw
-						// only this sentence.
-						glog.Errorf(
-							"[proxy]could not create proxy client for %s: %s\n",
-							proxyDeviceConfig.ProxyId,
-							err,
-						)
-						authClientResult.Error = &AuthNetworkClientError{
-							Message: "Could not create proxy client",
-						}
-					}
-				} else {
-					authClientResult.Error = &AuthNetworkClientError{
-						Message: "Could not create proxy device",
-					}
+				authClientResult.Error = &AuthNetworkClientError{
+					Message: "Could not create proxy device",
 				}
 			}
 		}
@@ -736,24 +754,31 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 				authClientError = err
 				return
 			}
-			tag := server.RaisePgResult(tx.Exec(
+			// the client and its device are checked before either is written,
+			// so a refusal writes nothing. The client row is still locked
+			// before the device row.
+			clientFound := false
+			var deviceId *server.Id
+			result, err := tx.Query(
 				session.Ctx,
 				`
-					UPDATE network_client
-					SET
-						description = $3,
-						auth_time = $4
+					SELECT device_id FROM network_client
 					WHERE
 						client_id = $1 AND
 						network_id = $2 AND
 						active = true
+					FOR NO KEY UPDATE
 				`,
 				authClient.ClientId,
 				session.ByJwt.NetworkId,
-				authClient.Description,
-				server.NowUtc(),
-			))
-			if tag.RowsAffected() == 0 {
+			)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&deviceId))
+					clientFound = true
+				}
+			})
+			if !clientFound {
 				authClientResult = &AuthNetworkClientResult{
 					Error: &AuthNetworkClientError{
 						Message: "Client does not exist.",
@@ -761,23 +786,6 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 				}
 				return
 			}
-
-			result, err := tx.Query(
-				session.Ctx,
-				`
-					SELECT device_id FROM network_client
-					WHERE client_id = $1
-				`,
-				authClient.ClientId,
-			)
-			var deviceId *server.Id
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					var deviceIdValue server.Id
-					server.Raise(result.Scan(&deviceIdValue))
-					deviceId = &deviceIdValue
-				}
-			})
 
 			if deviceId == nil {
 				authClientResult = &AuthNetworkClientResult{
@@ -788,7 +796,7 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 				return
 			}
 
-			tag = server.RaisePgResult(tx.Exec(
+			tag := server.RaisePgResult(tx.Exec(
 				session.Ctx,
 				`
 					UPDATE device
@@ -808,6 +816,24 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 				}
 				return
 			}
+
+			server.RaisePgResult(tx.Exec(
+				session.Ctx,
+				`
+					UPDATE network_client
+					SET
+						description = $3,
+						auth_time = $4
+					WHERE
+						client_id = $1 AND
+						network_id = $2 AND
+						active = true
+				`,
+				authClient.ClientId,
+				session.ByJwt.NetworkId,
+				authClient.Description,
+				server.NowUtc(),
+			))
 
 			// the client jwt carries the client's stored identity
 			var principal string
