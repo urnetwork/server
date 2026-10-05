@@ -25,6 +25,9 @@ type RunOptions struct {
 	DirectH3LoopbackMode bool
 	// Startup-only, opt-in accounting for resident SDK transfer owners.
 	MemoryOwnerLedger bool
+	// Optional exact host/block diagnostic scope. Empty reads the optional
+	// startup Config resource; "disabled" explicitly installs no socket.
+	PrivateHeapProfileTarget string
 }
 
 func connectWarmupTargets() []server.WarmupTarget {
@@ -54,6 +57,9 @@ func exchangeSettingsForRun(options RunOptions) *ExchangeSettings {
 	if options.MemoryOwnerLedger {
 		settings.MemoryOwnerLedger = &connectcore.TransferMemoryOwnerLedger{}
 		settings.payloadOwnerLedger = &residentPayloadLedger{}
+	}
+	if privateHeapProfileTargetsThisInstance(options.PrivateHeapProfileTarget) {
+		settings.SDKPayloadOwnerLedger = &connectcore.TransferPayloadOwnerLedger{}
 	}
 	settings.ConnectHandlerSettings.TransportTlsSettings.DefaultHostName = options.TLSDefaultHostName
 	if options.DirectH3LoopbackMode {
@@ -97,6 +103,12 @@ func runWithDependencies(
 	if err := options.Validate(); err != nil {
 		return err
 	}
+	privateHeapTarget, privateHeapTargetErr := privateHeapProfileStartupTarget(options.PrivateHeapProfileTarget)
+	if privateHeapTargetErr != nil {
+		// A missing or invalid optional diagnostic must not gate serving.
+		glog.Errorf("[connect]optional private heap configuration unavailable; continuing primary startup\n")
+	}
+	options.PrivateHeapProfileTarget = privateHeapTarget
 	listenIPv4, _, listenPort := server.RequireListenIpPort(options.Port)
 	if err := validateRunListenIPv4(options, listenIPv4); err != nil {
 		return err
@@ -130,6 +142,12 @@ func runWithDependencies(
 		}
 		statusHandler = connectRouter.Status
 		routes = append(routes, router.NewRoute("GET", "/", connectRouter.Connect))
+		privateProfile, privateProfileErr := startPrivateHeapProfile(runCtx, options.PrivateHeapProfileTarget, exchange, connectRouter.connectHandler)
+		if privateProfileErr != nil {
+			// Optional diagnostics must not gate serving or expose private paths.
+			glog.Errorf("[connect]optional private heap diagnostics unavailable; continuing primary startup\n")
+		}
+		defer privateProfile.Close()
 		server.Warmup(connectWarmupTargets()...)
 		capture, captureErr := startArinShadowCaptureRuntime(runCtx)
 		if captureErr != nil {

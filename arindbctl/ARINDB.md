@@ -735,6 +735,24 @@ address representation is insufficient to reconstruct exact historical IPs for
 an offline reclassification; owner-side capture can compare candidates where
 the actual address is available.
 
+The provider rollup stores one summary per client, not one per former connection.
+Its active pass replaces ARIN flags from connected connections with live handlers;
+its disconnected fallback initializes only clients missing a summary. On the
+admitted `a7ce7f73` source, a local PG/Redis control showed that a new verified
+subscriber connection can pass the live request guard while the prior rollup and
+publication remain Speed-only. Running the actual rollup and publisher admitted
+native Quality without rewriting the old disconnected location records. This
+rules out a permanent former-row veto in those controlled cases, not stale
+summaries on Main. The location rollup runs at the start of `update_reliabilities`,
+which reschedules 30 minutes after the whole task completes; later network work
+can extend that delay. The independent score publisher reschedules 30 seconds
+after its own completion. Faster export alone does not refresh that summary.
+Retained disconnected hard-risk flags still block common gates before an actual
+rollup refresh; filtering all exceptions to connected rows would remove that
+protection. Any Main attribution needs a bounded current-fact/rollup comparison
+and a separate join to native membership, rather than inferring the cause from
+the native Speed-minus-Quality count.
+
 ## Boundary with FP2 and fallback behavior
 
 The uniform FP2 fallback requirement belongs to provider selection across
@@ -1062,7 +1080,49 @@ calendar timestamps and retains the 900-second cutoff, including refusal at
 900 seconds plus one microsecond. The native interpreter version and rejected
 clock were not retained, so that compatibility defect is not yet the proven
 cause of this Main refusal. Earlier invalid and stale publications remain
-separate observations; no current Quality supply has been established.
+separate observations.
+
+The subsequent read at `2026-10-05T21:43:05.042608Z` passed the unchanged
+900-second source-age limit. Its source evaluation ran from
+`21:33:13.627767Z` to `21:34:47.485208Z`, with publication at
+`21:39:00.958798Z`: 93.857441 seconds of evaluation, 253.473590 seconds from
+completion to publication, and 244.083810 seconds until observation. Source
+age was 497.557400 seconds. This qualifies the following one-publication
+counts at that observation time:
+
+| Native bucket | Deduplicated public providers |
+| --- | ---: |
+| Quality | 327 |
+| Speed | 10,338 |
+| Online | 77,183 |
+
+The buckets overlap: Quality is a subset of Speed, which is a subset of
+Online under the reviewed producer rules. The 10,011 Speed providers outside
+Quality pass the common native gates and fail the additional stored ARIN
+non-Quality gate. Quality is 3.163088% of Speed. That gap is not a proxy count:
+the key cannot distinguish absent verification, unknown or ambiguous identity,
+explicit non-subscriber use, or missing/mismatched connection facts. It cannot
+identify dominant countries or operators. Known subscriber inference remains
+appropriate only without contrary applicable evidence; risk, virtual-ISP,
+proxy and explicit exclusion evidence remain independent vetoes.
+
+Within Online, 10,338 providers passed the selected-policy 4/5 URL ratio,
+66,841 failed and four had no accepted evidence. The evidence window was
+`(2026-10-05T13:33:14.216146Z, 2026-10-05T21:33:14.216146Z]`.
+Changing subscriber classification cannot admit those 66,845 ratio-failing or
+unmeasured providers to native Quality. All 327 Quality providers had at least
+ten accepted outcomes; Speed had 10,336 with at least ten and two with two.
+These are outcome counts, not success counts or four-hour quota completion.
+
+Receipt `fcf577593551c81cd03873d1d4659f940949d031179f871c0255a622a8df1625`
+and independent gate
+`02cc21c7d6bd5322cbf8805d061100cc5bea808b33eb14dfcf5bc0225caea393`
+bind these counts and original clocks. The source completed before the
+`a7ce7f73` batching deployment began at `21:37:03Z`; publication after that
+deployment does not establish a batching benefit. The key contains no
+publisher-process identity, loaded ARIN epoch, country/operator provenance or
+excluded-provider intersections. It is a completed score-source cohort, not
+an instantaneous fleet census or proof that v13 caused the Quality count.
 
 Connection facts advance only after a successful actual ARIN lookup during a
 connection location write. The c343 connection path retries a failed initial
