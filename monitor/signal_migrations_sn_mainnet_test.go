@@ -152,7 +152,7 @@ func TestMigrationsMainnetOriginalCatalogAcrossPublishedPrefixes(t *testing.T) {
 				if contract.artifact.requiredVersion == 779 && version >= 775 {
 					want = true
 				}
-				if actual := migrationBool(row.str(contract.artifact.rowColumn)); actual != want {
+				if actual := migrationBool(pgRow(row).str(contract.artifact.rowColumn)); actual != want {
 					t.Fatalf("mainnet prefix %d contract %d=%t, want %t", version, contract.artifact.requiredVersion, actual, want)
 				}
 			}
@@ -163,6 +163,7 @@ func TestMigrationsMainnetOriginalCatalogAcrossPublishedPrefixes(t *testing.T) {
 // Column width, a missing bound, an unreviewed default, a disabled foreign key
 // or a dropped read index must survive through to the actual versioned page.
 func TestMigrationsMainnetOriginalSchemaFaultsReachSignal(t *testing.T) {
+	alertTest := t
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
 		for _, fault := range []struct {
 			version int
@@ -197,7 +198,7 @@ func TestMigrationsMainnetOriginalSchemaFaultsReachSignal(t *testing.T) {
 					t.Fatal(err)
 				}
 				want := fmt.Sprintf("%s@v%d", contract.artifact.name, fault.version)
-				if alert := requireAlertClass(t, alerts, "migration-schema-drift"); !strings.Contains(alert.Markdown(), want) {
+				if alert := requireAlertClass(alertTest, alerts, "migration-schema-drift"); !strings.Contains(alert.Markdown(), want) {
 					t.Fatalf("actual changed schema omitted %q: %s", want, alert.Markdown())
 				}
 			})
@@ -269,6 +270,7 @@ func TestMigrationsMainnetOriginalFunctionAndTriggerCustody(t *testing.T) {
 // The approved historical functions remain interpretable as their old
 // contracts, but head779 must identify either unupgraded consumer as drift.
 func TestMigrationsMainnetOriginalJsonUpgradeRejectsLegacyConsumers(t *testing.T) {
+	alertTest := t
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
 		for _, legacy := range []struct {
 			version int
@@ -290,7 +292,7 @@ func TestMigrationsMainnetOriginalJsonUpgradeRejectsLegacyConsumers(t *testing.T
 				if err != nil {
 					t.Fatal(err)
 				}
-				if alert := requireAlertClass(t, alerts, "migration-schema-drift"); !strings.Contains(alert.Markdown(), upgrade.artifact.name+"@v779") {
+				if alert := requireAlertClass(alertTest, alerts, "migration-schema-drift"); !strings.Contains(alert.Markdown(), upgrade.artifact.name+"@v779") {
 					t.Fatal("legacy request consumer hid the required v779 repair", alert.Markdown())
 				}
 			})
