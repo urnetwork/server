@@ -7140,3 +7140,36 @@ still unverified. Root ledger T589 retains these distinct acceptance boundaries.
 
 Paired probe reduction SHA256
 3b7832974fe23e84bbbbcdc11837201cca0bc2774c1db20c748e9156b55856db.
+
+### 2026-10-05 03:19 UTC API adoption and Connect deployment lock
+
+All 16 APIs were independently verified ready on authentication-containment
+source `6d52edbecbb456f6c0972069085106a5b2f8618b` at 02:33. Their native pool
+snapshot contained seven constructing connections and 565 idle connections;
+these point samples do not establish continuous health or user delivery.
+The user still reports both a blank picker and no connected provider dot.
+
+The 03:19 edge1 read verified new Connect containers on all four blocks. Its
+g3 worker held the native host-wide Main/Connect lock while a joined descendant
+ran `docker stop -t 3600` against the old container for that block. The lease
+observation was complete and generation-stable. The overall reader remained
+partial because an additional active unit needs its deployment domain resolved.
+This proves the lock is retained during old-container drain; it does not prove
+the current adoption state of the other three enabled hosts or kernel-observed
+waiting Go routines.
+
+The Warp fix releases the promotion lock before draining the old container,
+preserving the existing drain grace. It is merged and pushed, with independent
+normal and race controls and clean binaries for both architectures. Native
+worker activation and fleet adoption verification are still pending.
+
+The private database capture identified the provider-count SQL source, with an
+active statement reaching about 13 seconds. Local dense fixtures reproduce a
+full historical-rollup scan. Native planning-only EXPLAIN and bounded system
+facts were captured successfully, but their public projection requires a
+validator correction for PostgreSQL JIT metadata. The retained private capture
+allows correction without repeating the read. These facts do not attribute
+total database CPU or establish the requesting process.
+
+Root ledger T590 records API adoption, local pooler compatibility controls,
+and remaining outage boundaries. FP2FIX and end-to-end recovery remain open.
