@@ -585,6 +585,50 @@ transfer that proof to the current authoritative watcher. Re-enable a paused
 host only when its recorded operator condition is met and a current-generation
 validation and controlled handoff succeed.
 
+### Explicitly authorized bounded process pause
+
+The standing watcher remains continuous by default. If Root has explicit
+authority for a brief process pause to admit one diagnostic or maintenance
+owner, record the reason, exact watcher generation, UTC pause/resume times,
+maximum pause and coverage gap in the single-writer ledger. This is separate
+from a host exclusion. Preserve the archive and every existing global/per-host
+SSH limit; a quiet observation is not a reservation.
+
+Before pausing, independently gate the exact emergency continuation helper.
+Compile its embedded Python bytes as well as its outer launcher, then use a
+harmless owned local process to prove the same user-unit invocation actually
+delivers the delayed `SIGCONT` and survives its submitting command's exit.
+`systemd-run` success or an instantaneous `active` state does not prove that
+the helper body parses or that the delayed action works. Retain source hashes,
+unit InvocationID, PID/start ticks/cgroup/boot ID and the control outcome.
+
+Refuse a new pause while any prior continuation helper remains live. Arm the
+new independently owned, bounded helper before the final zero-child wait.
+Within the existing sample/deadline limits, use the first admissible audit
+showing zero watcher SSH children to signal the verified watcher immediately;
+do not insert another running-watcher audit or unit launch between that audit
+and `SIGSTOP`. Then audit again while stopped and refuse contact if any child
+remains. A stopped parent cannot reap an exiting SSH child. Preserve enough
+time before emergency continuation for the reviewed contact boundary; expiry
+or a busy window consumes that local attempt without an automatic Main retry.
+
+Normal cleanup must continue the exact watcher generation and then disarm
+only its own helper after verifying the helper's current unit InvocationID and
+native process generation. Never stop a reused or unrelated unit. Otherwise an
+earlier successful operation's still-armed helper can resume the watcher during
+the next operation's pause. Record fallback arming, deadline, normal
+continuation, disarm outcome and any overlap in the timing ledger; reconcile
+missing cleanup evidence before another pause.
+
+Persist typed admission phase/cause/budget alongside Main-contact, forward-spawn
+and CLI-spawn attempt flags. All three false establishes a local precontact
+refusal; preserve the current catalog/capacity authority and its original age
+instead of inventing an interrupted database operation. Any true or uncertain
+spawn flag requires actual native progress/catalog/owner reconciliation. A
+later local audit cannot recover an older rejection's exact cause. Keep raw
+SQL, process argv and credentials out of public evidence. See `SIGNALS.md`
+§8.10 for the observed embedded-code and delayed-continuation failures.
+
 ## Safe watcher promotion
 
 Any monitor code, catalog, inventory-loading, tailer, alert-rendering, or

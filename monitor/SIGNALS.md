@@ -18520,6 +18520,45 @@ equals the table-partition count, every index is valid, the old parent is
 absent, and no new `[crp]secondary index drift` warning appears for five
 minutes after log-ingestion delay.
 
+**Interrupted build and local pause controls (2026-10-04–05):** A serial
+concurrent build exited with `conn closed` after reporting 28 attached
+partitions. The next native catalog found 28 healthy attached children, one
+valid/ready/live detached covering child, five missing children, no invalid
+children, no scoped index progress and no scoped maintenance locks. The
+supported resume can attach that completed child and build the missing five.
+This proves the detached child's physical state, not whether the client
+received the successful build response or which connection operation failed.
+The connection-close cause remained unproved. Four truncated activity rows
+were an explicit ownership uncertainty; fingerprints alone cannot identify
+their SQL as DML. A scoped zero-progress/zero-lock snapshot is not future or
+atomic ownership proof. Root retains maintenance coordination and records its
+acceptance separately from the read-only source's conservative hold.
+
+The same operation exposed two local admission failures that must remain
+separate from database failures. An independently launched emergency `SIGCONT`
+helper contained an indentation error in its embedded Python; the outer
+recipe compiled and normal cleanup resumed the watcher, but the emergency
+unit exited 1. Compile the exact embedded source and prove its delayed action
+on an owned local test process before any authorized pause. Later, a successful
+capacity read left its 45-second helper armed. Its scheduled continuation at
+00:35:12.745Z overlapped the next paused launch; the new supervisor started at
+00:35:13.841Z and refused admission before any Main/forward/CLI spawn. This
+timing identifies an interfering continuation owner, while the old supervisor's
+coarse `AdmissionRejected` record does not establish its exact rejected budget.
+
+Use the bounded pause lifecycle in `RUN-MAIN.md`: no live prior continuation
+helpers, exact watcher generation, zero SSH children from the same audit used
+to pause, and a second zero-child audit after pausing. Continue the watcher in
+normal cleanup, then disarm only the helper whose current unit invocation and
+native process generation match that operation. Otherwise a successful older
+cleanup can invalidate a later pause. Keep the archive charged to the existing
+global/per-host limits. Persist finite admission phase/cause/budget and all
+spawn-attempt flags, never raw SSH argv or SQL. A proved precontact refusal does
+not itself interrupt a database build; any attempted or uncertain Main/CLI
+spawn requires native reconciliation before another invocation. These are
+operator harness controls and incident evidence, not new automated coverage
+provided by the `reliability-index` catalog probe.
+
 ### 8.11 Fleet rollout serialization and worker freshness
 Probe: `rollout-guard`
 
