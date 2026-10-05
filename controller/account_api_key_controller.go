@@ -20,7 +20,9 @@ func GetApiKeys(session *session.ClientSession) (result *GetApiKeysResult, err e
 
 	keys, err := model.GetAccountApiKeys(session)
 	if err != nil {
-		glog.Info("Error getting account api keys", "error", err)
+		// a server-side failure (a key row the listing cannot read), not client
+		// input, so it is logged at the default level
+		glog.Infof("[api key][%s]error getting account api keys: %s\n", session.ByJwt.NetworkId, err)
 		return &GetApiKeysResult{
 			Error: &GetApiKeysError{
 				Message: "Error getting account api keys",
@@ -49,7 +51,9 @@ type DeleteApiKeyArgs struct {
 func DeleteApiKey(deleteApiKey *DeleteApiKeyArgs, session *session.ClientSession) (*DeleteApiKeyResult, error) {
 	err := model.DeleteApiKey(deleteApiKey.Id, session)
 	if err != nil {
-		glog.Info("Error deleting api key: %s", err.Error())
+		// a server-side failure (of the delete statement), not client input: an
+		// unknown or missing id deletes nothing and is no error
+		glog.Infof("[api key][%s]error deleting api key: %s\n", session.ByJwt.NetworkId, err)
 		return &DeleteApiKeyResult{
 			Error: &DeleteApiKeyError{
 				Message: "Error deleting api key",
