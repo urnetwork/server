@@ -381,8 +381,11 @@ type RemoveWalletError struct {
 }
 
 type RemoveWalletResult struct {
-	Success bool               `json:"success"`
-	Error   *RemoveWalletError `json:"error,omitempty"`
+	Success bool `json:"success"`
+	// set when the removed wallet was the payout wallet and another of the
+	// network's wallets took over. Added later; older clients ignore it.
+	PayoutWalletId *server.Id         `json:"payout_wallet_id,omitempty"`
+	Error          *RemoveWalletError `json:"error,omitempty"`
 }
 
 type RemoveWalletArgs struct {
@@ -397,6 +400,7 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 		result.Success = false
+		result.PayoutWalletId = nil
 		tag := server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
@@ -413,7 +417,9 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 		))
 
 		if tag.RowsAffected() == 1 {
-			deletePayoutWalletInTx(session.Ctx, tx, id, session.ByJwt.NetworkId)
+			if deletePayoutWalletInTx(session.Ctx, tx, id, session.ByJwt.NetworkId) {
+				result.PayoutWalletId = promotePayoutWalletInTx(session.Ctx, tx, session.ByJwt.NetworkId, id)
+			}
 			result.Success = true
 		}
 
