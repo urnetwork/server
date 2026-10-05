@@ -7113,3 +7113,30 @@ Pooler baseline finite evidence SHA256
 ten-minute comparison SHA256
 59b08d41426f7bc9c3d4d5ac9fb715bd7b07fa8056c02ad75f6357fe3f8bff96.
 Root ledger T588 retains the initial recovery and API deployment boundary.
+
+### 2026-10-05 02:24 UTC provider selection and probe measurements resume
+
+All 16 APIs were independently verified on the bounded Quality-validation
+release. Its process-lifetime means were 0.406 s for the initial picker, 0.947 s
+for search, and 0.465 s for selection; these are not interval rates or tail
+latency. Public US requests returned three providers in Quality mode in 0.746 s
+and Speed mode in 4.307 s. Public responses do not identify the serving build or
+prove contract creation and traffic delivery.
+
+All eight Taskworkers retained the same current processes across fresh samples
+at 02:20 and 02:22. Accepted results increased by 430 successes and 7,263 errors:
+approximately 3.70 successes/s and 62.78 errors/s over native intervals of
+106–121 s. The fresh shard-zero census reported 3,990 of 36,858 eligible providers
+quota-complete (10.83%), 3,987 secure-complete, and 178,487 runs still needed.
+Census age was 126.5 s. Its dynamic provider cohort and short sampling interval
+do not establish sustained per-provider capacity, completion time, or 100%
+coverage. Current shard ownership was not queried by this narrow census reader.
+
+Connect deployment is incomplete: only four of sixteen instances qualified on
+the inclusive authentication-deadline fix at 02:21; twelve still reported the
+preceding release. The deployment CLI timed out. The next API authentication
+containment image was selected successfully at 02:23; its actual adoption is
+still unverified. Root ledger T589 retains these distinct acceptance boundaries.
+
+Paired probe reduction SHA256
+3b7832974fe23e84bbbbcdc11837201cca0bc2774c1db20c748e9156b55856db.
