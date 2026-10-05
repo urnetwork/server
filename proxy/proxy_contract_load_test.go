@@ -497,6 +497,13 @@ func TestProxyContractChurnLoad(t *testing.T) {
 		case <-time.After(3 * time.Second):
 		}
 		settleAllEscrowedContracts(t, ctx, h.pdNetworkId)
+		// settlement journals the payer's debits and applies them to the
+		// balance in asynchronous batches; apply them before reconciling
+		for shard := range model.TransferDebitShardCount {
+			if _, err := model.FlushTransferDebits(ctx, shard, nil, 64); err != nil {
+				t.Fatal("asynchronous payer debit", err)
+			}
+		}
 		fmt.Printf("[progress]all contracts settled\n")
 
 		// ---- ledger reconciliation ----
