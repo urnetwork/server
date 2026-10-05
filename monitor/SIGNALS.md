@@ -4804,6 +4804,32 @@ arrivals before every page reproduce the old starvation, then verify revisits,
 exact payer/provider accounting and empty replay with either cursor format.
 Require fresh source-qualified age reduction before claiming Main recovery.
 
+Head-revisit qualifier (2026-10-05): a large fixed cohort can still postpone a
+released old owner for many pages. Continued pages now visit one forward key,
+then spend at most one remaining slot on the oldest due key at or before the
+page's incoming cursor. The head visit preserves the forward cursor and cutoff;
+all visits share the existing 64-item limit and page budget. A busy head cannot
+consume every forward slot. A missing head consumes no visit, and single-item
+pages retain ordinary traversal. A head accounting/operational failure keeps its
+15-minute/30-second delay and the already completed forward prefix.
+Task-result `head_visited`, `head_completed`, `head_busy_or_gone`, and `head_failed`
+are subsets of the corresponding total counts. `head_busy_or_gone` still includes
+missing owners and incomplete grant locks; it is not an exclusive contention
+count. No attempted head is counted complete before the existing financial
+ownership transaction succeeds. Cancellation preserves the prior forward cursor.
+The first forward visit must finish before the head slot; there is no fixed
+elapsed-time or whole-oldest-prefix recovery guarantee.
+
+Interpret oldest-edge stalls separately from progress elsewhere: capped due
+sentinels are lower bounds, selected oldest open/disputed heads are different
+cohorts, and stored failure classes are historical state. A cursor hash can
+change solely because a missing pass cutoff was initialized. Compare actual
+cursor positions and cutoffs, bounded remaining-pass seeks, head outcomes and
+fresh ages; neither hash movement nor delayed table counters proves recovery.
+The 06:40 finite task sample's 94-second oldest finish age was its observation
+span; maximum selected page runtime was 15.261 seconds. Page execution, task
+finalization and scheduling delay remain separate throughput terms.
+
 Clock, legacy reservation mirror and stream cleanup remain post-commit
 projections: the clock uses its existing aggregate backfill with its documented
 ambiguity; the mirror is rebuilt from durable revisions; mixed Redis reservation
