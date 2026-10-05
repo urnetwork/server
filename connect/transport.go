@@ -520,7 +520,8 @@ type ConnectHandlerSettings struct {
 	MaxPingTimeout   time.Duration
 	PingTrackerCount int
 	WriteTimeout     time.Duration
-	ReadTimeout      time.Duration
+	// Bounds the complete authentication phase, then each serving read.
+	ReadTimeout time.Duration
 	// MaximumExchangeMessageByteCount ByteCount
 	QuicConnectTimeout          time.Duration
 	QuicHandshakeTimeout        time.Duration
@@ -1214,6 +1215,11 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
+	// One deadline covers the initial frame, JWT/state/membership reads and
+	// upgrade response. Serving work retains handleCtx after successful auth.
+	authCtx, authCancel := context.WithTimeout(handleCtx, self.settings.ReadTimeout)
+	defer authCancel()
+	authDeadline, _ := authCtx.Deadline()
 	// handleCancel := func() {
 	// 	defer handleCancel_()
 	// 	var first bool
@@ -1260,7 +1266,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rateLimit, err := NewConnectionRateLimit(
-		handleCtx,
+		authCtx,
 		clientAddress,
 		self.handlerId,
 		&self.settings.ConnectionRateLimitSettings,
@@ -1271,6 +1277,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	}
 	err, disconnect := rateLimit.Connect()
 	defer disconnect()
+	if authCtx.Err() != nil {
+		http.Error(w, "Service temporarily unavailable.", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil {
 		if glog.V(1) {
 			glog.Infof("[t]rate limit err = %s\n", err)
@@ -1343,8 +1353,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		upgrader := websocket.Upgrader{
-			ReadBufferSize:  4 * 1024,
-			WriteBufferSize: 4 * 1024,
+			HandshakeTimeout: max(time.Nanosecond, time.Until(authDeadline)),
+			ReadBufferSize:   4 * 1024,
+			WriteBufferSize:  4 * 1024,
 		}
 
 		batchResponseWriter := &connectH1BatchResponseWriter{ResponseWriter: w}
@@ -1359,7 +1370,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		ws.SetReadLimit(int64(self.settings.FramerSettings.MaxMessageLen + 4))
 
 		if auth == nil {
-			messageType, authFrameBytes, err := readConnectH1AuthWithDeadline(ws, self.settings.ReadTimeout)
+			messageType, authFrameBytes, err := readConnectH1AuthWithDeadline(ws, time.Until(authDeadline))
 			if err != nil {
 				// server.Logger("TIMEOUT HA\n")
 				return
@@ -1379,7 +1390,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// echo the auth message on successful auth
-			err = echoConnectH1AuthWithDeadline(ws, self.settings.WriteTimeout, authFrameBytes)
+			err = echoConnectH1AuthWithDeadline(ws, min(self.settings.WriteTimeout, time.Until(authDeadline)), authFrameBytes)
 			if err != nil {
 				// server.Logger("TIMEOUT HC\n")
 				return
@@ -1387,16 +1398,23 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rejectCustomAuth := func(status int) {
+		if authCtx.Err() != nil {
+			status = http.StatusServiceUnavailable
+		}
 		if custom {
-			connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), &connect.HTTPUpgradeError{StatusCode: status, Reason: "authorization", Terminal: true})
-			http.Error(w, "unauthorized", status)
+			connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), &connect.HTTPUpgradeError{StatusCode: status, Reason: "authorization", Terminal: status != http.StatusServiceUnavailable})
+			message := "unauthorized"
+			if status == http.StatusServiceUnavailable {
+				message = "Service temporarily unavailable."
+			}
+			http.Error(w, message, status)
 		}
 	}
 
 	// auth failures are client-driven and unbounded in rate, so they are
 	// counted in the jwt package (urnetwork_auth_jwt_rejections_total) rather
 	// than logged per occurrence; the detail is at V(1)
-	byJwt, err := jwt.ParseByJwtForAudience(handleCtx, auth.ByJwt, jwt.ByJwtAudienceConnect)
+	byJwt, err := jwt.ParseByJwtForAudience(authCtx, auth.ByJwt, jwt.ByJwtAudienceConnect)
 	if err != nil {
 		rejectCustomAuth(http.StatusUnauthorized)
 		if glog.V(1) {
@@ -1409,7 +1427,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		rejectCustomAuth(http.StatusForbidden)
 		return
 	}
-	if err := jwt.ValidateByJwtState(handleCtx, byJwt, true); err != nil {
+	if err := jwt.ValidateByJwtState(authCtx, byJwt, true); err != nil {
 		rejectCustomAuth(http.StatusUnauthorized)
 		if glog.V(1) {
 			glog.Infof("[t]inactive auth jwt: %s\n", err)
@@ -1427,14 +1445,18 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 
 	// verify the client is still part of the network
 	// this will fail for example if the client has been removed
-	networkId := model.GetNetworkClientNetwork(handleCtx, clientId)
+	networkId := model.GetNetworkClientNetwork(authCtx, clientId)
 	if networkId == nil || *networkId != byJwt.NetworkId {
 		rejectCustomAuth(http.StatusForbidden)
 		// server.Logger("ERROR HB\n")
 		return
 	}
+	if authCtx.Err() != nil {
+		rejectCustomAuth(http.StatusServiceUnavailable)
+		return
+	}
 	if custom {
-		conn, upgradeErr := connect.AcceptFramedUpgrade(w, r, connect.H1FramerProtocol, self.settings.WriteTimeout)
+		conn, upgradeErr := connect.AcceptFramedUpgrade(w, r, connect.H1FramerProtocol, max(time.Nanosecond, min(self.settings.WriteTimeout, time.Until(authDeadline))))
 		connect.RecordH1PlusSelection(self.settings.H1PlusStats, time.Since(upgradeStart), upgradeErr)
 		if upgradeErr != nil {
 			return
@@ -1446,6 +1468,13 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		}
 		ws = framedConn
 	}
+
+	if authCtx.Err() != nil {
+		return
+	}
+	// Retire the authentication timer before publishing serving ownership.
+	// Its deadline must never become the resident or financial-control lifetime.
+	authCancel()
 
 	// the declared family rides with the connection record; the observed
 	// family is re-derived from the same address at the model
@@ -2080,6 +2109,11 @@ func withObservedConnectQuicAuthFrame(
 
 func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
+	// H3, DNS-carried H3 and externally dispatched QUIC share this bounded
+	// admission path. Accepting the first stream consumes the same auth budget.
+	authCtx, authCancel := context.WithTimeout(handleCtx, self.settings.ReadTimeout)
+	defer authCancel()
+	authDeadline, _ := authCtx.Deadline()
 	var connectionWorkers connectHandlerWorkers
 	defer func() {
 		handleCancel()
@@ -2105,7 +2139,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	}
 
 	rateLimit, err := NewConnectionRateLimit(
-		handleCtx,
+		authCtx,
 		clientAddress,
 		self.handlerId,
 		&self.settings.ConnectionRateLimitSettings,
@@ -2121,7 +2155,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 		return err
 	}
 
-	stream, err := conn.AcceptStream(handleCtx)
+	stream, err := conn.AcceptStream(authCtx)
 	if err != nil {
 		return err
 	}
@@ -2147,11 +2181,11 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	err = withConnectQuicAuthFrameWithDeadline(
 		framer,
 		stream,
-		self.settings.ReadTimeout,
+		time.Until(authDeadline),
 		func(auth *protocol.Auth, authFrameBytes []byte) error {
 			var authErr error
 			byJwt, authErr = jwt.ParseByJwtForAudience(
-				handleCtx,
+				authCtx,
 				auth.ByJwt,
 				jwt.ByJwtAudienceConnect,
 			)
@@ -2161,7 +2195,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			if byJwt.ClientId == nil {
 				return fmt.Errorf("Missing client id.")
 			}
-			if authErr = jwt.ValidateByJwtState(handleCtx, byJwt, true); authErr != nil {
+			if authErr = jwt.ValidateByJwtState(authCtx, byJwt, true); authErr != nil {
 				return authErr
 			}
 
@@ -2172,16 +2206,16 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			}
 
 			// Verify the client is still part of the network.
-			networkId := model.GetNetworkClientNetwork(handleCtx, clientId)
+			networkId := model.GetNetworkClientNetwork(authCtx, clientId)
 			if networkId == nil || *networkId != byJwt.NetworkId {
 				return fmt.Errorf("Client id is not part of network.")
 			}
 
 			_, ipFamilyIntent = connectionIpFamily(clientId, clientAddress, auth)
 
-			connectionId = server.NewId()
-			self.exchange.registerConnection(clientId, connectionId, handleCancel)
-			connectionRegistered = true
+			if authCtx.Err() != nil {
+				return authCtx.Err()
+			}
 
 			connectionState := conn.ConnectionState()
 			authResponse, accepted := connect.AcceptH3DatagramAuthOffer(
@@ -2195,7 +2229,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			if !useH3Datagrams {
 				// Byte-for-byte echo preserves old-client behavior. A new client
 				// talking to an old server sees accepted_version=0 and falls back.
-				return writeConnectQuicAuthWithDeadline(framer, stream, self.settings.WriteTimeout, authFrameBytes)
+				return writeConnectQuicAuthWithDeadline(framer, stream, min(self.settings.WriteTimeout, time.Until(authDeadline)), authFrameBytes)
 			}
 			responseBytes, responseErr := connect.EncodeFrame(
 				authResponse,
@@ -2205,12 +2239,19 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				return responseErr
 			}
 			defer connect.MessagePoolReturn(responseBytes)
-			return writeConnectQuicAuthWithDeadline(framer, stream, self.settings.WriteTimeout, responseBytes)
+			return writeConnectQuicAuthWithDeadline(framer, stream, min(self.settings.WriteTimeout, time.Until(authDeadline)), responseBytes)
 		},
 	)
 	if err != nil {
 		return err
 	}
+	if authCtx.Err() != nil {
+		return authCtx.Err()
+	}
+	authCancel()
+	connectionId = server.NewId()
+	self.exchange.registerConnection(clientId, connectionId, handleCancel)
+	connectionRegistered = true
 
 	c := func() {
 		announceTimeout := time.Duration(0)
