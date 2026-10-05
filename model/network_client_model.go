@@ -2328,6 +2328,9 @@ func SetProvide(
 			changeTime,
 		))
 
+		// Public re-entry must not wait for the next fleet reliability rollup.
+		updateProviderUrlProbeEligibilityForClient(ctx, tx, clientId)
+
 	})
 
 	server.Redis(ctx, func(r server.RedisClient) {
