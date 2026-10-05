@@ -60,7 +60,8 @@ func (self *snMainnetMigrationTxSource) PostgreSQL(ctx context.Context, query st
 // The independent local fixture owns both the connection and joined rollback.
 func snMainnetMigrationFaultTx(t testing.TB, callback func(context.Context, server.PgTx)) {
 	t.Helper()
-	ctx := t.Context()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+	defer cancel()
 	server.Db(ctx, func(conn server.PgConn) {
 		tx, err := conn.Begin(ctx)
 		if err != nil {
@@ -109,26 +110,24 @@ func TestMigrationsMainnetOriginalSignalReportsEachMissingContract(t *testing.T)
 		t.Fatalf("mainnet catalog requires the original JSON repair at head779, got %d", head)
 	}
 	for _, contract := range snMainnetMigrationContracts {
-		t.Run(fmt.Sprint(contract.artifact.requiredVersion), func(t *testing.T) {
-			row := syntheticMigrationMissingArtifactRow(t, head, contract.artifact.name)
-			source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
-				if strings.Contains(query, "FROM migration_catalog") {
-					return syntheticMigrationCatalogRows(head), nil
-				}
-				if !strings.Contains(query, contract.query) {
-					return nil, fmt.Errorf("signal omitted original mainnet contract %d", contract.artifact.requiredVersion)
-				}
-				return []Row{row}, nil
-			}}
-			alerts, err := NewMigrationsSignal().Run(t.Context(), syntheticSettings(source))
-			if err != nil {
-				t.Fatal(err)
+		row := syntheticMigrationMissingArtifactRow(t, head, contract.artifact.name)
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM migration_catalog") {
+				return syntheticMigrationCatalogRows(head), nil
 			}
-			want := fmt.Sprintf("%s@v%d", contract.artifact.name, contract.artifact.requiredVersion)
-			if alert := requireAlertClass(t, alerts, "migration-schema-drift"); !strings.Contains(alert.Markdown(), want) {
-				t.Fatalf("original mainnet drift lost its version: %s", alert.Markdown())
+			if !strings.Contains(query, contract.query) {
+				return nil, fmt.Errorf("signal omitted original mainnet contract %d", contract.artifact.requiredVersion)
 			}
-		})
+			return []Row{row}, nil
+		}}
+		alerts, err := NewMigrationsSignal().Run(t.Context(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := fmt.Sprintf("%s@v%d", contract.artifact.name, contract.artifact.requiredVersion)
+		if alert := requireAlertClass(t, alerts, "migration-schema-drift"); !strings.Contains(alert.Markdown(), want) {
+			t.Fatalf("original mainnet drift lost its version: %s", alert.Markdown())
+		}
 	}
 }
 
@@ -137,7 +136,8 @@ func TestMigrationsMainnetOriginalSignalReportsEachMissingContract(t *testing.T)
 // old deployed 773/775 bodies are tested separately through the upgrade below.
 func TestMigrationsMainnetOriginalCatalogAcrossPublishedPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
-		ctx := t.Context()
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
+		defer cancel()
 		for version := 769; version <= 779; version++ {
 			server.ApplyDbMigrationsUpTo(ctx, version)
 			row, drift := migrationPingDatabaseCheck(t, ctx)
@@ -168,22 +168,22 @@ func TestMigrationsMainnetOriginalSchemaFaultsReachSignal(t *testing.T) {
 			version int
 			sql     string
 		}{
-			{770, `ALTER TABLE verify_original_transition DROP CONSTRAINT verify_original_transition_original_signature_check`},
-			{770, `ALTER TABLE st_fleet_binding_original ALTER COLUMN deployment_key TYPE varchar(97)`},
-			{771, `ALTER TABLE provider_work_request ALTER COLUMN epoch TYPE numeric(21,0)`},
-			{771, `ALTER TABLE provider_work_request DROP CONSTRAINT provider_work_request_expires_at_check`},
-			{772, `ALTER TABLE wallet_mapping_consent DROP CONSTRAINT wallet_mapping_consent_nonce_fkey`},
-			{773, `DROP INDEX verify_original_request_lookup_identity`},
-			{773, `ALTER TABLE verify_original_request_lookup ALTER COLUMN request_signature SET DEFAULT decode(repeat('00',64),'hex')`},
-			{774, `ALTER TABLE provider_work_owner DROP CONSTRAINT provider_work_owner_owner_hash_key`},
-			{775, `ALTER TABLE verify_original_request_closed DROP CONSTRAINT verify_original_request_closed_receipt_body_check`},
-			{776, `ALTER TABLE provider_work_session_head DROP CONSTRAINT provider_work_session_head_sequence_check`},
-			{776, `DROP INDEX provider_work_session_event_transaction`},
-			{777, `ALTER TABLE st_operator_gas_reservation DROP CONSTRAINT st_operator_gas_reservation_attempt_check`},
-			{777, `ALTER TABLE st_operator_gas_budget ALTER COLUMN maximum_lifetime_wei TYPE numeric(79,0)`},
-			{778, `ALTER TABLE provider_work_open_original DROP CONSTRAINT provider_work_open_original_observed_at_check`},
-			{778, `ALTER TABLE provider_work_open_original SET UNLOGGED`},
-			{779, `ALTER FUNCTION verify_original_request_index_body(bytea) CALLED ON NULL INPUT`},
+			{version: 770, sql: `ALTER TABLE verify_original_transition DROP CONSTRAINT verify_original_transition_original_signature_check`},
+			{version: 770, sql: `ALTER TABLE st_fleet_binding_original ALTER COLUMN deployment_key TYPE varchar(97)`},
+			{version: 771, sql: `ALTER TABLE provider_work_request ALTER COLUMN epoch TYPE numeric(21,0)`},
+			{version: 771, sql: `ALTER TABLE provider_work_request DROP CONSTRAINT provider_work_request_expires_at_check`},
+			{version: 772, sql: `ALTER TABLE wallet_mapping_consent DROP CONSTRAINT wallet_mapping_consent_nonce_fkey`},
+			{version: 773, sql: `DROP INDEX verify_original_request_lookup_identity`},
+			{version: 773, sql: `ALTER TABLE verify_original_request_lookup ALTER COLUMN request_signature SET DEFAULT decode(repeat('00',64),'hex')`},
+			{version: 774, sql: `ALTER TABLE provider_work_owner DROP CONSTRAINT provider_work_owner_owner_hash_key`},
+			{version: 775, sql: `ALTER TABLE verify_original_request_closed DROP CONSTRAINT verify_original_request_closed_receipt_body_check`},
+			{version: 776, sql: `ALTER TABLE provider_work_session_head DROP CONSTRAINT provider_work_session_head_sequence_check`},
+			{version: 776, sql: `DROP INDEX provider_work_session_event_transaction`},
+			{version: 777, sql: `ALTER TABLE st_operator_gas_reservation DROP CONSTRAINT st_operator_gas_reservation_attempt_check`},
+			{version: 777, sql: `ALTER TABLE st_operator_gas_budget ALTER COLUMN maximum_lifetime_wei TYPE numeric(79,0)`},
+			{version: 778, sql: `ALTER TABLE provider_work_open_original DROP CONSTRAINT provider_work_open_original_observed_at_check`},
+			{version: 778, sql: `ALTER TABLE provider_work_open_original SET UNLOGGED`},
+			{version: 779, sql: `ALTER FUNCTION verify_original_request_index_body(bytea) CALLED ON NULL INPUT`},
 		} {
 			snMainnetMigrationFaultTx(t, func(ctx context.Context, tx server.PgTx) {
 				contract := snMainnetMigrationTestContract(t, fault.version)
@@ -213,12 +213,12 @@ func TestMigrationsMainnetOriginalForeignKeyCustody(t *testing.T) {
 			version int
 			sql     string
 		}{
-			{771, `ALTER TABLE provider_work_cut DISABLE TRIGGER ALL`},
-			{772, `ALTER TABLE wallet_mapping_challenge DISABLE TRIGGER ALL`},
-			{773, `ALTER TABLE verify_original_request_lookup DISABLE TRIGGER ALL`},
-			{776, `ALTER TABLE provider_work_session_receipt DISABLE TRIGGER ALL`},
-			{777, `ALTER TABLE st_operator_gas_reservation DISABLE TRIGGER ALL`},
-			{778, `ALTER TABLE provider_work_open_original ADD CONSTRAINT synthetic_mutable_contract_parent FOREIGN KEY(contract_id) REFERENCES transfer_contract(contract_id) ON DELETE CASCADE`},
+			{version: 771, sql: `ALTER TABLE provider_work_cut DISABLE TRIGGER ALL`},
+			{version: 772, sql: `ALTER TABLE wallet_mapping_challenge DISABLE TRIGGER ALL`},
+			{version: 773, sql: `ALTER TABLE verify_original_request_lookup DISABLE TRIGGER ALL`},
+			{version: 776, sql: `ALTER TABLE provider_work_session_receipt DISABLE TRIGGER ALL`},
+			{version: 777, sql: `ALTER TABLE st_operator_gas_reservation DISABLE TRIGGER ALL`},
+			{version: 778, sql: `ALTER TABLE provider_work_open_original ADD CONSTRAINT synthetic_mutable_contract_parent FOREIGN KEY(contract_id) REFERENCES transfer_contract(contract_id) ON DELETE CASCADE`},
 		} {
 			snMainnetMigrationFaultTx(t, func(ctx context.Context, tx server.PgTx) {
 				contract := snMainnetMigrationTestContract(t, fault.version)
@@ -239,20 +239,20 @@ func TestMigrationsMainnetOriginalFunctionAndTriggerCustody(t *testing.T) {
 			version int
 			sql     string
 		}{
-			{770, `CREATE OR REPLACE FUNCTION verify_original_append_only_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
-			{771, `CREATE OR REPLACE FUNCTION provider_work_original_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
-			{772, `ALTER FUNCTION wallet_mapping_original_guard() SECURITY DEFINER`},
-			{773, `ALTER TABLE verify_original_transition DISABLE TRIGGER verify_original_request_capture`},
-			{774, `ALTER TABLE provider_work_owner DISABLE TRIGGER provider_work_owner_truncate_guard`},
-			{775, `CREATE OR REPLACE FUNCTION verify_original_request_wire_lock(message bytea, signature bytea) RETURNS void LANGUAGE plpgsql AS 'BEGIN RETURN; END'`},
-			{775, `CREATE OR REPLACE FUNCTION verify_original_request_no_received_tombstone() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
-			{776, `CREATE OR REPLACE FUNCTION provider_work_endpoint_lock(client uuid) RETURNS void LANGUAGE plpgsql AS 'BEGIN RETURN; END'`},
-			{776, `ALTER FUNCTION provider_work_session_append(uuid,uuid,text,uuid) SECURITY DEFINER`},
-			{776, `ALTER TABLE network_client_connection DISABLE TRIGGER provider_work_session_statement_fence`},
-			{776, `DROP TRIGGER provider_work_session_mutation ON network_client_connection; CREATE TRIGGER provider_work_session_mutation AFTER UPDATE ON network_client_connection FOR EACH ROW EXECUTE FUNCTION provider_work_session_mutation()`},
-			{776, `CREATE OR REPLACE FUNCTION provider_work_session_head_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
-			{778, `DROP TRIGGER provider_work_open_guard ON provider_work_open_original; CREATE TRIGGER provider_work_open_guard BEFORE UPDATE ON provider_work_open_original FOR EACH ROW EXECUTE FUNCTION provider_work_original_guard()`},
-			{779, `CREATE OR REPLACE FUNCTION verify_original_request_index_body(original bytea) RETURNS jsonb LANGUAGE plpgsql IMMUTABLE STRICT AS 'BEGIN RETURN ''{}''::jsonb; END'`},
+			{version: 770, sql: `CREATE OR REPLACE FUNCTION verify_original_append_only_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
+			{version: 771, sql: `CREATE OR REPLACE FUNCTION provider_work_original_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
+			{version: 772, sql: `ALTER FUNCTION wallet_mapping_original_guard() SECURITY DEFINER`},
+			{version: 773, sql: `ALTER TABLE verify_original_transition DISABLE TRIGGER verify_original_request_capture`},
+			{version: 774, sql: `ALTER TABLE provider_work_owner DISABLE TRIGGER provider_work_owner_truncate_guard`},
+			{version: 775, sql: `CREATE OR REPLACE FUNCTION verify_original_request_wire_lock(message bytea, signature bytea) RETURNS void LANGUAGE plpgsql AS 'BEGIN RETURN; END'`},
+			{version: 775, sql: `CREATE OR REPLACE FUNCTION verify_original_request_no_received_tombstone() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
+			{version: 776, sql: `CREATE OR REPLACE FUNCTION provider_work_endpoint_lock(client uuid) RETURNS void LANGUAGE plpgsql AS 'BEGIN RETURN; END'`},
+			{version: 776, sql: `ALTER FUNCTION provider_work_session_append(uuid,uuid,text,uuid) SECURITY DEFINER`},
+			{version: 776, sql: `ALTER TABLE network_client_connection DISABLE TRIGGER provider_work_session_statement_fence`},
+			{version: 776, sql: `DROP TRIGGER provider_work_session_mutation ON network_client_connection; CREATE TRIGGER provider_work_session_mutation AFTER UPDATE ON network_client_connection FOR EACH ROW EXECUTE FUNCTION provider_work_session_mutation()`},
+			{version: 776, sql: `CREATE OR REPLACE FUNCTION provider_work_session_head_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`},
+			{version: 778, sql: `DROP TRIGGER provider_work_open_guard ON provider_work_open_original; CREATE TRIGGER provider_work_open_guard BEFORE UPDATE ON provider_work_open_original FOR EACH ROW EXECUTE FUNCTION provider_work_original_guard()`},
+			{version: 779, sql: `CREATE OR REPLACE FUNCTION verify_original_request_index_body(original bytea) RETURNS jsonb LANGUAGE plpgsql IMMUTABLE STRICT AS 'BEGIN RETURN ''{}''::jsonb; END'`},
 		} {
 			snMainnetMigrationFaultTx(t, func(ctx context.Context, tx server.PgTx) {
 				contract := snMainnetMigrationTestContract(t, fault.version)
@@ -275,8 +275,8 @@ func TestMigrationsMainnetOriginalJsonUpgradeRejectsLegacyConsumers(t *testing.T
 			name    string
 			body    string
 		}{
-			{773, "verify_original_request_capture", snMainnetVerifyCaptureLegacyBody},
-			{775, "verify_original_request_closed_fence", snMainnetVerifyFenceLegacyBody},
+			{version: 773, name: "verify_original_request_capture", body: snMainnetVerifyCaptureLegacyBody},
+			{version: 775, name: "verify_original_request_closed_fence", body: snMainnetVerifyFenceLegacyBody},
 		} {
 			snMainnetMigrationFaultTx(t, func(ctx context.Context, tx server.PgTx) {
 				upgrade := snMainnetMigrationTestContract(t, 779)
