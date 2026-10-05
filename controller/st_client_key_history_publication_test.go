@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -298,9 +297,7 @@ func TestStClientKeyPublicationBatchRejectsUnownedAdmission(t *testing.T) {
 func TestStClientKeyPublicationBatchActualControllerClearsFinalFailedResponse(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		fixture, credential, _ := newStClientKeyHistoryControllerFixture(tb)
-		root := tb.TempDir()
-		pop := server.Vault.PushSimpleResource("minio.yml", []byte(fmt.Sprintf("authority: local\npath: %s\nprefix: key-history\nmax_bytes: %d\n", root, 32*1024*1024)))
-		tb.Cleanup(pop)
+		root := fixture.blobRoot
 		if err := SetClientKey(tb.Context(), *credential.ClientId, &connectprotocol.ClientKey{PublicKey: bytes.Repeat([]byte{9}, 32)}); err != nil {
 			tb.Fatal(err)
 		}

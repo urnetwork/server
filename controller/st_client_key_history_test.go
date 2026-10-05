@@ -8,7 +8,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -33,6 +32,7 @@ import (
 
 // Values are changed only between fully joined requests, not under RPC reads.
 type stClientKeyHistoryRPCFixture struct {
+	blobRoot string
 	domain   protocol.ClientKeyHistoryDomain
 	boundary protocol.ClientKeyEffectiveBoundary
 	root     common.Address
@@ -156,6 +156,20 @@ func (self *stClientKeyHistoryRPCFixture) Call(_ context.Context, call map[strin
 // Ethereum JSON-RPC. Each private signer and blob store belongs to this test.
 func newStClientKeyHistoryControllerFixture(t testing.TB) (*stClientKeyHistoryRPCFixture, *jwt.ByJwt, *StConfig) {
 	t.Helper()
+	fixture, credential, cfg := newStClientKeyHistoryControllerFixtureWithoutBlobStore(t)
+	// Initialize the existing local test JWT owner before selecting an isolated
+	// blob vault. Its process-cached keys continue to authenticate real requests;
+	// no signer, credentials or cloud endpoint are copied into the private vault.
+	_ = credential.Sign()
+	fixture.blobRoot = controllerUseLocalBlobStore(t)
+	return fixture, credential, cfg
+}
+
+// Share the concrete RPC, signer and SQL owners with fixtures that select their
+// own storage backend. In particular, dev-local storage is not a declaration of
+// production Linux durable-volume custody.
+func newStClientKeyHistoryControllerFixtureWithoutBlobStore(t testing.TB) (*stClientKeyHistoryRPCFixture, *jwt.ByJwt, *StConfig) {
+	t.Helper()
 	root, err := crypto.HexToECDSA(strings.Repeat("12", 32))
 	if err != nil {
 		t.Fatal(err)
@@ -187,8 +201,6 @@ func newStClientKeyHistoryControllerFixture(t testing.TB) (*stClientKeyHistoryRP
 		httpRPC.Close()
 		rpc.Stop()
 	})
-	pop := server.Vault.PushSimpleResource("minio.yml", []byte(fmt.Sprintf("authority: local\npath: %s\nprefix: key-history\nmax_bytes: %d\n", t.TempDir(), 32*1024*1024)))
-	t.Cleanup(pop)
 	networkID, userID, clientID, deviceID := server.NewId(), server.NewId(), server.NewId(), server.NewId()
 	model.Testing_CreateNetwork(t.Context(), networkID, "key-history-"+networkID.String(), userID)
 	model.Testing_CreateDevice(t.Context(), networkID, deviceID, clientID, "key-history", "test")

@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -25,8 +26,46 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
+	"github.com/urnetwork/server/startifact"
 	"google.golang.org/protobuf/proto"
 )
+
+// Two signed records occupy about 42 KiB under the model's complete accounting.
+// This is a fixed fixture allowance, not one selected from untrusted row sizes.
+const stClientKeyDomainFixtureMaximumBytes = uint64(64 * 1024)
+
+// Account the fixture's exact retained census independently of blob paths.
+// The model allowance covers decoded/canonical copies and control structures,
+// not only the two serialized evidence envelopes.
+func stClientKeyDomainCheckFixtureHistoryBudget(t testing.TB, ctx context.Context, domain snprotocol.ClientKeyHistoryDomain, clientID server.Id, wantCount int64) {
+	t.Helper()
+	digest, err := domain.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlBytes := int64(reflect.TypeFor[model.StClientKeyHistoryRecord]().Size() + reflect.TypeFor[startifact.EvidenceEnvelope]().Size() + reflect.TypeFor[snprotocol.ClientKeyRegistration]().Size() + 256)
+	var count, first, last, accountedBytes int64
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `
+			SELECT COUNT(*), COALESCE(MIN(generation), 0), COALESCE(MAX(generation), 0),
+				COALESCE(SUM(6 * octet_length(registration) + 6 * octet_length(evidence) + 2 * octet_length(evidence_hash) + octet_length(registration_hash) + $3), 0)::bigint
+			FROM st_client_key_history WHERE client_id = $1 AND domain_hash = $2
+		`, clientID, digest[:], controlBytes).Scan(&count, &first, &last, &accountedBytes))
+	})
+	if count != wantCount || first != 1 || last != wantCount || accountedBytes <= 0 {
+		t.Fatalf("fixture retained census differs: count=%d first=%d last=%d accounted_bytes=%d", count, first, last, accountedBytes)
+	}
+	t.Logf("fixture retained census: count=%d first=%d last=%d accounted_bytes=%d", count, first, last, accountedBytes)
+	if uint64(accountedBytes) > stClientKeyDomainFixtureMaximumBytes {
+		t.Fatal("fixture exceeds its independently fixed history allowance", accountedBytes)
+	}
+	if history, err := model.LoadStClientKeyHistory(ctx, domain, clientID, uint64(wantCount), uint64(accountedBytes-1)); err == nil || history != nil {
+		t.Fatal("one-byte-short history allowance returned partial or complete authority", err)
+	}
+	if history, err := model.LoadStClientKeyHistory(ctx, domain, clientID, uint64(wantCount), uint64(accountedBytes)); err != nil || len(history) != int(wantCount) {
+		t.Fatal("exact complete history allowance rejected original authority", len(history), err)
+	}
+}
 
 // This joins the actual launch parser/settings and Core Http producer to the
 // independently signed Server history, then verifies the same original in SQL.
@@ -128,7 +167,8 @@ func TestProviderDomainActualEnrollmentRotationAndClosedWork(t *testing.T) {
 		if err := manager.WaitForRegistration(owner); err != nil {
 			t.Fatal("actual provider rotation lost its original enrollment domain", err)
 		}
-		history, err := model.LoadStClientKeyHistory(owner, fixture.domain, *credential.ClientId, 4, 32*1024)
+		stClientKeyDomainCheckFixtureHistoryBudget(t, owner, fixture.domain, *credential.ClientId, 2)
+		history, err := model.LoadStClientKeyHistory(owner, fixture.domain, *credential.ClientId, 4, stClientKeyDomainFixtureMaximumBytes)
 		if err != nil || len(history) != 2 || history[1].Registration.PublicKey != [32]byte(manager.PublicKey()) {
 			t.Fatal("actual key enrollment and rotation were not retained in original domain", len(history), err)
 		}
@@ -237,7 +277,8 @@ func TestClientKeyEnrollmentRefusesEveryForeignDomainAndKeepsLegacy(t *testing.T
 		if err := SetClientKey(t.Context(), clientId, &protocol.ClientKey{PublicKey: legacy}); err != nil {
 			t.Fatal("rolling legacy enrollment was rejected", err)
 		}
-		history, err := model.LoadStClientKeyHistory(t.Context(), fixture.domain, clientId, 4, 32*1024)
+		stClientKeyDomainCheckFixtureHistoryBudget(t, t.Context(), fixture.domain, clientId, 2)
+		history, err := model.LoadStClientKeyHistory(t.Context(), fixture.domain, clientId, 4, stClientKeyDomainFixtureMaximumBytes)
 		if err != nil || len(history) != 2 || history[1].Registration.PublicKey != [32]byte(legacy) {
 			t.Fatal("failed optional namespace operations blocked healthy legacy history", len(history), err)
 		}

@@ -90,7 +90,7 @@ func providerWorkInheritedNewSdk(t testing.TB, ctx context.Context, f *providerW
 	settings.ContractManagerSettings.CloseReportDomainHash = f.domain
 	settings.ContractManagerSettings.InitialContractTransferByteCount = 121
 	scope := connect.OriginalContractStoreScope{DomainHash: f.domain, ClientId: [16]byte(id), PublicKey: [32]byte(key.Public().(ed25519.PublicKey)), SourceGeneration: [16]byte{byte(180 + 3*generation + index)}}
-	settings.ContractManagerSettings.OriginalContractCapture = &connect.OriginalContractCaptureSettings{Directory: filepath.Join(t.TempDir(), "requests"), PublicKey: scope.PublicKey, SourceGeneration: scope.SourceGeneration}
+	settings.ContractManagerSettings.OriginalContractCapture = &connect.OriginalContractCaptureSettings{Directory: filepath.Join(providerWorkPhysicalTempDir(t), "requests"), PublicKey: scope.PublicKey, SourceGeneration: scope.SourceGeneration}
 	providerWorkPrepareCreationStore(t, settings.ContractManagerSettings.OriginalContractCapture.Directory, scope)
 	transport := &providerWorkPublisherOob{ctx: ctx, clientId: id, directory: settings.ContractManagerSettings.OriginalContractCapture.Directory, settings: settings.ContractManagerSettings}
 	client := connect.NewClient(ctx, connect.Id(id), transport, settings)
@@ -109,7 +109,7 @@ func providerWorkInheritedNewSdk(t testing.TB, ctx context.Context, f *providerW
 }
 
 // The real destination authenticates and enrolls each returned reservation.
-func providerWorkInheritedCreate(t testing.TB, ctx context.Context, source, destination *providerWorkInheritedSdk, key connect.ContractKey) protocol.StoredContract {
+func providerWorkInheritedCreate(t testing.TB, ctx context.Context, source, destination *providerWorkInheritedSdk, key connect.ContractKey) *protocol.StoredContract {
 	t.Helper()
 	manager := source.client.ContractManager()
 	manager.CreateContract(key, 0, 121)
@@ -124,7 +124,26 @@ func providerWorkInheritedCreate(t testing.TB, ctx context.Context, source, dest
 	if err := proto.Unmarshal(contract.StoredContractBytes, &stored); err != nil || len(stored.ContractId) != 16 || len(stored.StreamId) != 16 {
 		t.Fatal("actual inherited reservation lost its stream", err)
 	}
-	return stored
+	return &stored
+}
+
+// Restoring a key does not enable a retired provider mode. Each SDK generation
+// independently registers its actual mode and waits for the server's ACK before
+// it can authenticate a new reservation.
+func providerWorkInheritedEnableDestination(t testing.TB, ctx context.Context, sdk *providerWorkInheritedSdk, secret []byte) {
+	t.Helper()
+	manager := sdk.client.ContractManager()
+	manager.LoadProvideSecretKeys(map[protocol.ProvideMode][]byte{protocol.ProvideMode_Network: secret})
+	provided := make(chan error, 1)
+	manager.SetProvideModesWithOobAckCallback(map[protocol.ProvideMode]bool{protocol.ProvideMode_Network: true}, func(err error) { provided <- err })
+	select {
+	case err := <-provided:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
 }
 
 func providerWorkInheritedClose(t testing.TB, source, destination *providerWorkInheritedSdk, contractId []byte) {
@@ -214,17 +233,7 @@ func newProviderWorkInheritedFixture(t testing.TB) *providerWorkInheritedFixture
 		providerWorkRetainActualCut(t, f, old[index].client.ContractManager(), "start")
 	}
 	secret := bytes.Repeat([]byte{167}, 32)
-	old[1].client.ContractManager().LoadProvideSecretKeys(map[protocol.ProvideMode][]byte{protocol.ProvideMode_Network: secret})
-	provided := make(chan error, 1)
-	old[1].client.ContractManager().SetProvideModesWithOobAckCallback(map[protocol.ProvideMode]bool{protocol.ProvideMode_Network: true}, func(err error) { provided <- err })
-	select {
-	case err := <-provided:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-ctx.Done():
-		t.Fatal(ctx.Err())
-	}
+	providerWorkInheritedEnableDestination(t, ctx, old[1], secret)
 	handler := model.CreateNetworkClientHandler(ctx)
 	for index, id := range []server.Id{{1}, {2}} {
 		if _, _, _, _, err := model.ConnectNetworkClientWithIpFamily(ctx, id, fmt.Sprintf("192.0.2.%d:12001", 20+index), handler, 4); err != nil {
@@ -233,7 +242,7 @@ func newProviderWorkInheritedFixture(t testing.TB) *providerWorkInheritedFixture
 	}
 	origin := providerWorkInheritedCreate(t, ctx, old[0], old[1], connect.ContractKey{Destination: connect.DestinationId(old[1].client.ClientId()), IntermediaryIds: connect.RequireMultiHopId(old[2].client.ClientId())})
 	current := []*providerWorkInheritedSdk{providerWorkInheritedNewSdk(t, ctx, f, 0, 1), providerWorkInheritedNewSdk(t, ctx, f, 1, 1), old[2]}
-	current[1].client.ContractManager().LoadProvideSecretKeys(map[protocol.ProvideMode][]byte{protocol.ProvideMode_Network: secret})
+	providerWorkInheritedEnableDestination(t, ctx, current[1], secret)
 	for _, sdk := range current[:2] {
 		providerWorkRetainActualCut(t, f, sdk.client.ContractManager(), "start")
 	}
@@ -400,11 +409,7 @@ func TestProviderWorkInheritedStreamMissingPriorCannotPublish(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		f := newProviderWorkInheritedFixture(t)
-		config, ok := server.LoadBlobStoreConfig()
-		if !ok || !config.Local {
-			t.Fatal("fixture does not own a local immutable artifact")
-		}
-		if err := os.Remove(filepath.Join(config.LocalPath, f.prior.ContentKey)); err != nil {
+		if err := os.Remove(filepath.Join(f.f.blobRoot, f.prior.ContentKey)); err != nil {
 			t.Fatal(err)
 		}
 		client := &providerWorkRosterClient{StClient: newStubStClient(&StEpochState{})}
@@ -424,11 +429,7 @@ func TestProviderWorkInheritedStreamMutatedPriorCannotPublish(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		f := newProviderWorkInheritedFixture(t)
-		config, ok := server.LoadBlobStoreConfig()
-		if !ok || !config.Local {
-			t.Fatal("fixture does not own a local immutable artifact")
-		}
-		path := filepath.Join(config.LocalPath, f.prior.ContentKey)
+		path := filepath.Join(f.f.blobRoot, f.prior.ContentKey)
 		raw, err := os.ReadFile(path)
 		if err != nil || len(raw) == 0 {
 			t.Fatal(err)

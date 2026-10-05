@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -16,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/connect"
@@ -24,6 +27,354 @@ import (
 // These tests exercise the TestEnv retry loop with hermetic lifecycle
 // boundaries: a flaky failure on early attempts is retried and rescued, while
 // a failure that persists across every attempt still fails the test.
+
+func TestTestPgDbLeaseUsesPreflightResolver(t *testing.T) {
+	resolver := newTestEnvironmentProbeResolver()
+	resolver.Dial = func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("fixture resolver must use the hosts file")
+	}
+	addresses, err := resolver.LookupHost(context.Background(), "localhost")
+	if err != nil || len(addresses) == 0 {
+		t.Fatalf("files-first preflight lookup failed: addresses=%v error=%v", addresses, err)
+	}
+	configuration, err := pgxpool.ParseConfig("postgres://fixture:fixture@localhost:5432/postgres?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nativeFailure := errors.New("injected native resolver timeout")
+	configuration.ConnConfig.LookupFunc = func(context.Context, string) ([]string, error) {
+		return nil, nativeFailure
+	}
+	configuration.ConnConfig.RuntimeParams["application_name"] = "original-application"
+	configuration.ConnConfig.RuntimeParams["fixture_parameter"] = "preserved"
+	configurePgPoolLiveness(configuration)
+	lease := testPgDbLeaseConfiguration(configuration.ConnConfig, "test_fixture")
+	got, err := lease.LookupFunc(context.Background(), "localhost")
+	if err != nil || len(got) == 0 {
+		t.Fatalf("lease must use the same files-first fixture resolution as preflight: addresses=%v error=%v", got, err)
+	}
+	if lease.Host != configuration.ConnConfig.Host || lease.Port != configuration.ConnConfig.Port ||
+		lease.User != configuration.ConnConfig.User || lease.Password != configuration.ConnConfig.Password ||
+		lease.ConnectTimeout != configuration.ConnConfig.ConnectTimeout ||
+		lease.Database != "test_fixture" || lease.RuntimeParams["application_name"] != "urnetwork-test-database-owner" ||
+		lease.RuntimeParams["fixture_parameter"] != "preserved" {
+		t.Fatal("lease config changed connection identity, timeout, or unrelated runtime parameters")
+	}
+	if configuration.ConnConfig.Database != "postgres" || configuration.ConnConfig.RuntimeParams["application_name"] != "original-application" {
+		t.Fatal("lease mutated the source configuration")
+	}
+	if _, err := configuration.ConnConfig.LookupFunc(context.Background(), "localhost"); !errors.Is(err, nativeFailure) {
+		t.Fatalf("fixture repair changed the production source resolver: %v", err)
+	}
+}
+
+func TestTestEnvironmentLookupRetainsFiniteBudget(t *testing.T) {
+	for _, shorter := range []bool{false, true} {
+		t.Run(fmt.Sprint(shorter), func(t *testing.T) {
+			ctx := context.Background()
+			var expectedDeadline time.Time
+			if shorter {
+				var cancel context.CancelFunc
+				expectedDeadline = time.Now().Add(time.Second)
+				ctx, cancel = context.WithDeadline(ctx, expectedDeadline)
+				defer cancel()
+			}
+			called := false
+			lookup := boundedTestEnvironmentLookup(func(ctx context.Context, host string) ([]string, error) {
+				called = true
+				deadline, ok := ctx.Deadline()
+				if !ok || time.Until(deadline) > PgConnectTimeout || time.Until(deadline) <= 0 {
+					t.Fatal("fixture lookup lost the finite PostgreSQL deadline")
+				}
+				if shorter && !deadline.Equal(expectedDeadline) {
+					t.Fatal("fixture lookup extended the caller deadline")
+				}
+				return []string{"127.0.0.1"}, nil
+			})
+			if _, err := lookup(ctx, "fixture.test"); err != nil || !called {
+				t.Fatalf("lookup did not run: %v", err)
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	lookup := boundedTestEnvironmentLookup(func(ctx context.Context, _ string) ([]string, error) {
+		return nil, ctx.Err()
+	})
+	if _, err := lookup(ctx, "fixture.test"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("fixture lookup lost caller cancellation: %v", err)
+	}
+}
+
+func TestResolveTestPgResourcePreservesIdentityAndAllFallbacks(t *testing.T) {
+	source := map[string]any{
+		"authority": "fixture.test:15432", "user": "fixture-user", "password": "quoted\"secret\\value",
+		"db": "fixture-db", "extra": "retained",
+	}
+	original := map[string]any{}
+	for key, value := range source {
+		original[key] = value
+	}
+	defaultResolver := net.DefaultResolver
+	resolved, err := resolveTestPgResource(context.Background(), source, func(ctx context.Context, host string) ([]string, error) {
+		if host != "fixture.test" {
+			t.Fatalf("resolved a different fixture host %q", host)
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > PgConnectTimeout {
+			t.Fatal("resource resolution lost the finite lookup budget")
+		}
+		return []string{"::1", "127.0.0.1", "127.0.0.2"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(source, original) || net.DefaultResolver != defaultResolver {
+		t.Fatal("fixture pinning changed original resources or the global resolver")
+	}
+	if resolved["authority"] != "::1,127.0.0.1,127.0.0.2,:15432" {
+		t.Fatalf("lost ordered fixture addresses: %v", resolved["authority"])
+	}
+	for _, key := range []string{"user", "password", "db", "extra"} {
+		if resolved[key] != source[key] {
+			t.Fatalf("resource identity changed at %s", key)
+		}
+	}
+	parsed, err := pgxpool.ParseConfig(fmt.Sprintf("postgres://fixture:fixture@%s/postgres?sslmode=disable", resolved["authority"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.ConnConfig.Host != "::1" || parsed.ConnConfig.Port != 15432 || len(parsed.ConnConfig.Fallbacks) != 2 ||
+		parsed.ConnConfig.Fallbacks[0].Host != "127.0.0.1" || parsed.ConnConfig.Fallbacks[0].Port != 15432 ||
+		parsed.ConnConfig.Fallbacks[1].Host != "127.0.0.2" || parsed.ConnConfig.Fallbacks[1].Port != 15432 {
+		t.Fatal("pinned resource lost pgx connection fallback order or port")
+	}
+	pop := Vault.PushSimpleResource("fixture-pg-identity.yml", testPgResourceForDatabase(resolved, "ephemeral-db"))
+	defer pop()
+	resource := Vault.RequireSimpleResource("fixture-pg-identity.yml")
+	if resource.RequireString("password") != source["password"] || resource.RequireString("db") != "ephemeral-db" || resource.RequireString("extra") != "retained" {
+		t.Fatal("private resource serialization changed identity or extra settings")
+	}
+}
+
+func TestResolveTestPgResourceFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		authority any
+		addresses []string
+		lookupErr error
+	}{
+		{name: "missing", authority: nil},
+		{name: "missing-port", authority: "fixture.test"},
+		{name: "invalid-port", authority: "fixture.test:0"},
+		{name: "empty-host", authority: ":5432"},
+		{name: "empty-answer", authority: "fixture.test:5432"},
+		{name: "hostname-answer", authority: "fixture.test:5432", addresses: []string{"another.test"}},
+		{name: "mixed-answer", authority: "fixture.test:5432", addresses: []string{"127.0.0.1", "bad"}},
+		{name: "lookup-error", authority: "fixture.test:5432", lookupErr: errors.New("injected timeout")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolved, err := resolveTestPgResource(context.Background(), map[string]any{"authority": tc.authority}, func(context.Context, string) ([]string, error) {
+				return tc.addresses, tc.lookupErr
+			})
+			if err == nil || resolved != nil {
+				t.Fatal("invalid fixture resolution did not fail closed")
+			}
+		})
+	}
+	for _, authority := range []string{"127.0.0.1:5432", "[::1]:5432"} {
+		resolved, err := resolveTestPgResource(context.Background(), map[string]any{"authority": authority}, func(context.Context, string) ([]string, error) {
+			t.Fatal("literal fixture endpoint must not use any resolver")
+			return nil, nil
+		})
+		if err != nil || resolved["authority"] != authority {
+			t.Fatalf("literal fixture identity changed: %v", err)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := resolveTestPgResource(ctx, map[string]any{"authority": "127.0.0.1:5432"}, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled fixture setup was accepted: %v", err)
+	}
+}
+
+func TestResolveTestPgResourceDialsEveryPinnedAddressWithoutHostnameLookup(t *testing.T) {
+	for _, addresses := range [][]string{
+		{"127.0.0.1"}, {"::1"}, {"127.0.0.1", "127.0.0.2"},
+		{"::1", "::2"}, {"::1", "127.0.0.1"}, {"127.0.0.1", "::1"},
+	} {
+		t.Run(strings.Join(addresses, ","), func(t *testing.T) {
+			resource, err := resolveTestPgResource(context.Background(), map[string]any{"authority": "fixture.test:15432"}, func(context.Context, string) ([]string, error) {
+				return addresses, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			configuration, err := pgx.ParseConfig(fmt.Sprintf("postgres://fixture:fixture@%s/fixture?sslmode=disable", resource["authority"]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			configuration.LookupFunc = func(ctx context.Context, host string) ([]string, error) {
+				// pgx calls LookupFunc even for IPs. net.Resolver returns those
+				// directly without entering either native or DNS resolution.
+				if net.ParseIP(host) == nil {
+					return nil, errors.New("injected native hostname resolver timeout")
+				}
+				return net.DefaultResolver.LookupHost(ctx, host)
+			}
+			var dialed []string
+			stopDial := errors.New("synthetic dial boundary: no network")
+			configuration.DialFunc = func(_ context.Context, network, authority string) (net.Conn, error) {
+				if network != "tcp" {
+					t.Fatalf("unexpected fixture network %q", network)
+				}
+				dialed = append(dialed, authority)
+				return nil, stopDial
+			}
+			if connection, err := pgx.ConnectConfig(context.Background(), configuration); connection != nil || !errors.Is(err, stopDial) {
+				t.Fatalf("expected every attempt to stop at the injected dial boundary: %v", err)
+			}
+			expected := make([]string, len(addresses))
+			for index, address := range addresses {
+				expected[index] = net.JoinHostPort(address, "15432")
+			}
+			if !reflect.DeepEqual(dialed, expected) {
+				t.Fatalf("fixture dial graph changed: got %v want %v", dialed, expected)
+			}
+		})
+	}
+}
+
+func TestPrepareResolvedTestPgResourcesRetainsScopesAndRestores(t *testing.T) {
+	pushTestEnvironmentPreflightResources(t)
+	popMaintenance := Vault.PushSimpleResource(MaintenancePgVaultResourceName, []byte("authority: direct.test:15433\nuser: direct-user\npassword: direct-secret\ndb: direct-db\n"))
+	defer popMaintenance()
+	originalPg := Vault.RequireSimpleResource(DefaultPgVaultResourceName).Parse()
+	originalMaintenance := Vault.RequireSimpleResource(MaintenancePgVaultResourceName).Parse()
+	var lookedUp []string
+	pg, maintenance, pop, err := prepareResolvedTestPgResources(context.Background(), func(_ context.Context, host string) ([]string, error) {
+		lookedUp = append(lookedUp, host)
+		switch host {
+		case "postgres.test":
+			return []string{"127.0.0.1"}, nil
+		case "direct.test":
+			return []string{"::1", "127.0.0.2"}, nil
+		default:
+			return nil, errors.New("unexpected fixture host")
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pop()
+	if !reflect.DeepEqual(lookedUp, []string{"postgres.test", "direct.test"}) {
+		t.Fatalf("did not resolve each original authority independently: %v", lookedUp)
+	}
+	for _, pair := range [][2]map[string]any{{pg, originalPg}, {maintenance, originalMaintenance}} {
+		for _, key := range []string{"user", "password", "db"} {
+			if pair[0][key] != pair[1][key] {
+				t.Fatalf("fixture lost independent connection identity at %s", key)
+			}
+		}
+	}
+	assertScope := func(database, maintenanceDatabase string) {
+		t.Helper()
+		for _, tc := range []struct {
+			name     string
+			resource map[string]any
+			database string
+		}{{DefaultPgVaultResourceName, pg, database}, {MaintenancePgVaultResourceName, maintenance, maintenanceDatabase}} {
+			active := Vault.RequireSimpleResource(tc.name)
+			if active.RequireString("authority") != tc.resource["authority"] || active.RequireString("db") != tc.database {
+				t.Fatalf("fixture resource scope changed for %s", tc.name)
+			}
+		}
+	}
+	assertScope(originalPg["db"].(string), originalMaintenance["db"].(string))
+	popDatabase := pushTestPgResources(pg, maintenance, "test_ephemeral")
+	assertScope("test_ephemeral", "test_ephemeral")
+	PgReset()
+	assertScope("test_ephemeral", "test_ephemeral")
+	popDatabase()
+	assertScope(originalPg["db"].(string), originalMaintenance["db"].(string))
+	popDatabase() // Cleanup after an earlier teardown stage must be idempotent.
+	pop()
+	pop()
+	if !reflect.DeepEqual(Vault.RequireSimpleResource(DefaultPgVaultResourceName).Parse(), originalPg) ||
+		!reflect.DeepEqual(Vault.RequireSimpleResource(MaintenancePgVaultResourceName).Parse(), originalMaintenance) {
+		t.Fatal("fixture endpoint resources were not completely restored")
+	}
+}
+
+func TestPrepareResolvedTestPgResourcesFailsBeforeMutation(t *testing.T) {
+	for _, kind := range []string{"original-authority-mismatch", "maintenance-resolution-failure"} {
+		t.Run(kind, func(t *testing.T) {
+			pushTestEnvironmentPreflightResources(t)
+			popMaintenance := Vault.PushSimpleResource(MaintenancePgVaultResourceName, []byte("authority: direct.test:15433\nuser: direct\npassword: direct\ndb: direct\n"))
+			defer popMaintenance()
+			originalPg := Vault.RequireSimpleResource(DefaultPgVaultResourceName).Parse()
+			originalMaintenance := Vault.RequireSimpleResource(MaintenancePgVaultResourceName).Parse()
+			if kind == "original-authority-mismatch" {
+				t.Setenv("BRINGYOUR_POSTGRES_HOSTNAME", "wrong.test")
+			}
+			lookupCalls := 0
+			pg, maintenance, pop, err := prepareResolvedTestPgResources(context.Background(), func(_ context.Context, host string) ([]string, error) {
+				lookupCalls++
+				if host == "direct.test" {
+					return nil, errors.New("injected maintenance resolver failure")
+				}
+				return []string{"127.0.0.1"}, nil
+			})
+			if err == nil || pg != nil || maintenance != nil || pop != nil {
+				t.Fatal("invalid original fixture authority did not fail closed")
+			}
+			if kind == "original-authority-mismatch" && lookupCalls != 0 {
+				t.Fatal("authority mismatch reached resolution")
+			}
+			if !reflect.DeepEqual(Vault.RequireSimpleResource(DefaultPgVaultResourceName).Parse(), originalPg) ||
+				!reflect.DeepEqual(Vault.RequireSimpleResource(MaintenancePgVaultResourceName).Parse(), originalMaintenance) {
+				t.Fatal("failed fixture preparation changed resources")
+			}
+		})
+	}
+}
+
+func TestTestPgResourcePairRollsBackConstructionAndCleanupPanics(t *testing.T) {
+	for _, stage := range []string{"encode-maintenance", "initial-reset", "cleanup-reset"} {
+		t.Run(stage, func(t *testing.T) {
+			pushTestEnvironmentPreflightResources(t)
+			popMaintenance := Vault.PushSimpleResource(MaintenancePgVaultResourceName, []byte("authority: direct.test:15433\nuser: direct\npassword: direct\ndb: direct\n"))
+			defer popMaintenance()
+			originalPg := Vault.RequireSimpleResource(DefaultPgVaultResourceName).Parse()
+			originalMaintenance := Vault.RequireSimpleResource(MaintenancePgVaultResourceName).Parse()
+			pg := map[string]any{"authority": "127.0.0.1:5432", "user": "fixture", "password": "fixture"}
+			maintenance := map[string]any{"authority": "[::1]:15433", "user": "direct", "password": "direct"}
+			if stage == "encode-maintenance" {
+				maintenance["unencodable"] = func() {}
+			}
+			panicked := false
+			resetCalls := 0
+			func() {
+				defer func() { panicked = recover() != nil }()
+				pop := pushTestPgResourcePairWithReset(pg, maintenance, "fixture", "fixture", func() {
+					resetCalls++
+					if stage == "initial-reset" || stage == "cleanup-reset" && resetCalls == 2 {
+						panic("injected reset failure")
+					}
+				})
+				defer pop()
+				pop()
+			}()
+			if !panicked {
+				t.Fatal("test did not exercise the requested constructor/cleanup failure")
+			}
+			if !reflect.DeepEqual(Vault.RequireSimpleResource(DefaultPgVaultResourceName).Parse(), originalPg) ||
+				!reflect.DeepEqual(Vault.RequireSimpleResource(MaintenancePgVaultResourceName).Parse(), originalMaintenance) {
+				t.Fatal("failed fixture resource constructor or cleanup left an override behind")
+			}
+		})
+	}
+}
 
 func retryTestEnv(rerunCount int) *TestEnv {
 	return &TestEnv{

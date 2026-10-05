@@ -25,6 +25,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/glog"
+	"gopkg.in/yaml.v3"
 )
 
 // each test runs with its own postgres and redis db
@@ -510,11 +511,82 @@ func loadTestEnvironmentConfiguration() (
 	return configuration, nil
 }
 
-// Uses the files-first Go resolver for local service probes. On Darwin the
+// Uses the files-first Go resolver for local fixture connections. On Darwin the
 // native resolver sends even /etc/hosts lookups through mDNSResponder, so an
 // unrelated DNS reconfiguration can otherwise consume the short probe budget.
 func newTestEnvironmentProbeResolver() *net.Resolver {
 	return &net.Resolver{PreferGo: true}
+}
+
+// Keep the production PostgreSQL lookup budget even when a fixture replaces
+// the native resolver. WithTimeout also preserves an earlier caller deadline.
+func boundedTestEnvironmentLookup(lookup func(context.Context, string) ([]string, error)) func(context.Context, string) ([]string, error) {
+	return func(ctx context.Context, host string) ([]string, error) {
+		lookupCtx, cancel := context.WithTimeout(ctx, PgConnectTimeout)
+		defer cancel()
+		return lookup(lookupCtx, host)
+	}
+}
+
+// Resolve the original fixture authority once before setup mutates anything.
+// Every returned address is retained in pgx's ordered multi-host authority, so
+// pinning does not discard an IPv4/IPv6 or other connection fallback. Only this
+// private resource copy changes; production pools and net.DefaultResolver do not.
+func resolveTestPgResource(ctx context.Context, source map[string]any, lookup func(context.Context, string) ([]string, error)) (map[string]any, error) {
+	authority, ok := source["authority"].(string)
+	if !ok {
+		return nil, errors.New("local PostgreSQL fixture authority must be a string")
+	}
+	host, port, err := net.SplitHostPort(authority)
+	portNumber, portErr := strconv.Atoi(port)
+	if err != nil || host == "" || portErr != nil || portNumber < 1 || portNumber > 65535 {
+		return nil, errors.New("invalid local PostgreSQL fixture authority")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	addresses := []string{host}
+	if net.ParseIP(host) == nil {
+		addresses, err = boundedTestEnvironmentLookup(lookup)(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("resolve local PostgreSQL fixture authority: %w", err)
+		}
+	}
+	if len(addresses) == 0 {
+		return nil, errors.New("local PostgreSQL fixture authority resolved no addresses")
+	}
+	for _, address := range addresses {
+		if net.ParseIP(address) == nil {
+			return nil, errors.New("local PostgreSQL fixture resolver returned a non-IP address")
+		}
+	}
+	pinnedAuthority := net.JoinHostPort(addresses[0], port)
+	if len(addresses) > 1 {
+		// pgx parses a list of bare IPs plus a port-only entry as ordered
+		// hosts sharing one port. Unlike bracketed IPv6 host:port lists,
+		// this survives net/url parsing. Verify the effective connection
+		// graph below so a parser change cannot add a default host, reorder
+		// addresses, or silently discard an IPv6/IPv4 fallback.
+		pinnedAuthority = strings.Join(addresses, ",") + ",:" + port
+	}
+	parsed, err := pgx.ParseConfig("postgres://fixture:fixture@" + pinnedAuthority + "/fixture?sslmode=disable")
+	if err != nil {
+		return nil, fmt.Errorf("parse pinned local PostgreSQL fixture authority: %w", err)
+	}
+	if parsed.Host != addresses[0] || int(parsed.Port) != portNumber || len(parsed.Fallbacks) != len(addresses)-1 {
+		return nil, errors.New("pinned local PostgreSQL fixture authority changed connection identity")
+	}
+	for index, fallback := range parsed.Fallbacks {
+		if fallback.Host != addresses[index+1] || int(fallback.Port) != portNumber {
+			return nil, errors.New("pinned local PostgreSQL fixture authority changed fallback identity")
+		}
+	}
+	resolved := make(map[string]any, len(source))
+	for key, value := range source {
+		resolved[key] = value
+	}
+	resolved["authority"] = pinnedAuthority
+	return resolved, nil
 }
 
 // Accepts injected network boundaries so the resolver behavior can be tested
@@ -708,17 +780,92 @@ func runTestMain(setup func() func(), run func() int) int {
 }
 
 func testPgResourceForDatabase(pg map[string]any, database string) []byte {
-	return []byte(fmt.Sprintf(
-		`
-authority: "%s"
-user: "%s"
-password: "%s"
-db: "%s"`,
-		pg["authority"],
-		pg["user"],
-		pg["password"],
-		database,
-	))
+	resource := make(map[string]any, len(pg))
+	for key, value := range pg {
+		resource[key] = value
+	}
+	resource["db"] = database
+	wire, err := yaml.Marshal(resource)
+	Raise(err)
+	return wire
+}
+
+func pushTestPgResourcePair(pg, maintenancePg map[string]any, database, maintenanceDatabase string) func() {
+	return pushTestPgResourcePairWithReset(pg, maintenancePg, database, maintenanceDatabase, PgReset)
+}
+
+func pushTestPgResourcePairWithReset(pg, maintenancePg map[string]any, database, maintenanceDatabase string, reset func()) func() {
+	pgWire := testPgResourceForDatabase(pg, database)
+	maintenanceWire := testPgResourceForDatabase(maintenancePg, maintenanceDatabase)
+	popPg := Vault.PushSimpleResource(DefaultPgVaultResourceName, pgWire)
+	constructed := false
+	defer func() {
+		if !constructed {
+			popPg()
+		}
+	}()
+	popMaintenance := Vault.PushSimpleResource(MaintenancePgVaultResourceName, maintenanceWire)
+	defer func() {
+		if !constructed {
+			popMaintenance()
+		}
+	}()
+	reset()
+	constructed = true
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			// Close every pool made from this scope before restoring the outer
+			// resources. Repeated cleanup after a setup/teardown panic is safe.
+			defer popPg()
+			defer popMaintenance()
+			reset()
+		})
+	}
+}
+
+func prepareResolvedTestPgResources(ctx context.Context, lookup func(context.Context, string) ([]string, error)) (pg, maintenancePg map[string]any, pop func(), err error) {
+	// Validate original hostname/portable authority before private endpoint
+	// pinning. Rewritten literal resources are never authority attestation.
+	if _, err = loadTestEnvironmentConfiguration(); err != nil {
+		return nil, nil, nil, err
+	}
+	// Parse returns raw YAML, while connection pools use RequireString's
+	// template expansion. Snapshot those same effective values on a copy.
+	snapshot := func(resource *SimpleResource) map[string]any {
+		values := make(map[string]any)
+		for key, value := range resource.Parse() {
+			values[key] = value
+		}
+		for _, key := range []string{"authority", "user", "password", "db"} {
+			values[key] = resource.RequireString(key)
+		}
+		return values
+	}
+	pg = snapshot(Vault.RequireSimpleResource(DefaultPgVaultResourceName))
+	maintenancePg = pg
+	if resource, resourceErr := Vault.SimpleResource(MaintenancePgVaultResourceName); resourceErr == nil {
+		maintenancePg = snapshot(resource)
+	}
+	resolvedPg, err := resolveTestPgResource(ctx, pg, lookup)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	var resolvedMaintenancePg map[string]any
+	if maintenancePg["authority"] == pg["authority"] {
+		resolvedMaintenancePg = make(map[string]any, len(maintenancePg))
+		for key, value := range maintenancePg {
+			resolvedMaintenancePg[key] = value
+		}
+		resolvedMaintenancePg["authority"] = resolvedPg["authority"]
+	} else {
+		resolvedMaintenancePg, err = resolveTestPgResource(ctx, maintenancePg, lookup)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	pop = pushTestPgResourcePair(resolvedPg, resolvedMaintenancePg, pg["db"].(string), maintenancePg["db"].(string))
+	return resolvedPg, resolvedMaintenancePg, pop, nil
 }
 
 // Redirect both application and direct-maintenance pools to one ephemeral
@@ -726,20 +873,7 @@ db: "%s"`,
 // remained pointed at the persistent database, migrations would run there
 // while the test itself saw an empty temporary schema.
 func pushTestPgResources(pg, maintenancePg map[string]any, database string) func() {
-	popPg := Vault.PushSimpleResource(
-		DefaultPgVaultResourceName,
-		testPgResourceForDatabase(pg, database),
-	)
-	popMaintenance := Vault.PushSimpleResource(
-		MaintenancePgVaultResourceName,
-		testPgResourceForDatabase(maintenancePg, database),
-	)
-	PgReset()
-	return func() {
-		popMaintenance()
-		popPg()
-		PgReset()
-	}
+	return pushTestPgResourcePair(pg, maintenancePg, database, database)
 }
 
 // in each test file, `func TestMain(m *testing.M) {(&server.TestEnv{}).TestMain(m)}`
@@ -991,12 +1125,17 @@ func (self *TestEnv) setup() func() {
 	}
 
 	ctx := context.Background()
+	pg, maintenancePg, popResolvedPg, resolveErr := prepareResolvedTestPgResources(ctx, newTestEnvironmentProbeResolver().LookupHost)
+	Raise(resolveErr)
+	// This outer scope spans orphan sweep, CREATE, the independent owner,
+	// migrated pools (including PgReset/reconnect), and DROP. Pop it last.
+	setupSucceeded := false
+	defer func() {
+		if !setupSucceeded {
+			popResolvedPg()
+		}
+	}()
 
-	pg := Vault.RequireSimpleResource(DefaultPgVaultResourceName).Parse()
-	maintenancePg := pg
-	if resource, resourceErr := Vault.SimpleResource(MaintenancePgVaultResourceName); resourceErr == nil {
-		maintenancePg = resource.Parse()
-	}
 	redisResource := Vault.RequireSimpleResource("redis.yml")
 	redisAuthority := redisResource.RequireString("authority")
 	redisPassword := redisResource.RequireString("password")
@@ -1004,7 +1143,6 @@ func (self *TestEnv) setup() func() {
 	if redisResource.RequireBool("cluster") {
 		panic(fmt.Errorf("local tests require logical redis databases, not a redis cluster"))
 	}
-
 	bytes := make([]byte, 16)
 	_, err := rand.Read(bytes)
 	Raise(err)
@@ -1024,7 +1162,6 @@ func (self *TestEnv) setup() func() {
 		int(bytes[0]),
 		testRedisLeaseTtl,
 	)
-	setupSucceeded := false
 	defer func() {
 		if !setupSucceeded {
 			testRedisLease.release(ctx)
@@ -1062,6 +1199,11 @@ func (self *TestEnv) setup() func() {
 	}()
 
 	popPgResources := pushTestPgResources(pg, maintenancePg, testPgDbName)
+	defer func() {
+		if !setupSucceeded {
+			popPgResources()
+		}
+	}()
 
 	popRedis := Vault.PushSimpleResource(
 		"redis.yml",
@@ -1077,6 +1219,18 @@ cluster: %t`,
 			false,
 		)),
 	)
+	var popRedisOnce sync.Once
+	popRedisResources := func() {
+		popRedisOnce.Do(func() {
+			defer popRedis()
+			RedisReset()
+		})
+	}
+	defer func() {
+		if !setupSucceeded {
+			popRedisResources()
+		}
+	}()
 	RedisReset()
 
 	Redis(ctx, func(client RedisClient) {
@@ -1106,8 +1260,11 @@ cluster: %t`,
 
 	setupSucceeded = true
 	return func() {
+		defer popResolvedPg()
 		defer testRedisLease.release(ctx)
 		defer closePgConnection(ctx, testPgDbLease)
+		defer popPgResources()
+		defer popRedisResources()
 
 		Reset()
 
@@ -1117,8 +1274,7 @@ cluster: %t`,
 			Raise(err)
 		})
 
-		popRedis()
-		RedisReset()
+		popRedisResources()
 
 		popPgResources()
 		closePgConnection(ctx, testPgDbLease)
@@ -1145,12 +1301,18 @@ cluster: %t`,
 // application pool resets. Non-forced database deletion then refuses to reap
 // a live fixture even when a stalled test outlives the orphan age.
 func acquireTestPgDbLease(ctx context.Context, datname string) *pgx.Conn {
-	configuration := safeMaintenancePool.open().Config().ConnConfig.Copy()
-	configuration.Database = datname
-	configuration.RuntimeParams["application_name"] = "urnetwork-test-database-owner"
+	configuration := testPgDbLeaseConfiguration(safeMaintenancePool.open().Config().ConnConfig, datname)
 	connection, err := pgx.ConnectConfig(ctx, configuration)
 	Raise(err)
 	return connection
+}
+
+func testPgDbLeaseConfiguration(source *pgx.ConnConfig, datname string) *pgx.ConnConfig {
+	configuration := source.Copy()
+	configuration.Database = datname
+	configuration.RuntimeParams["application_name"] = "urnetwork-test-database-owner"
+	configuration.LookupFunc = boundedTestEnvironmentLookup(newTestEnvironmentProbeResolver().LookupHost)
+	return configuration
 }
 
 // Age makes a database eligible for orphan cleanup, not proof that it is dead.

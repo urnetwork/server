@@ -24,6 +24,7 @@ import (
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/startifact"
 	"google.golang.org/protobuf/proto"
+	"gopkg.in/yaml.v3"
 )
 
 // The cutoff is the second actual immutable close instant, prepared before the
@@ -33,8 +34,9 @@ func TestProviderWorkFirstPartialSdkEpochPublishesOnlyNewEarnings(t *testing.T) 
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		f := newProviderWorkWindowFixture(t)
-		// Match the synthetic deployment identity in controllerPayoutSchedule;
-		// no mainnet readiness or operator send is supplied by this fixture.
+		// Match the synthetic deployment identity in controllerPayoutSchedule.
+		// Admission below requires a separate synthetic reviewed declaration;
+		// this fixture supplies no production identity or operator send.
 		f.cfg.Profile, f.cfg.ChainId, f.cfg.Netuid = "mainnet", 964, 25
 		copy(f.cfg.GenesisHash[:], bytes.Repeat([]byte{0x11}, 32))
 		f.authority.Domain.ChainID, f.authority.Domain.Netuid, f.authority.Domain.GenesisHash = f.cfg.ChainId, uint16(f.cfg.Netuid), f.cfg.GenesisHash
@@ -88,7 +90,7 @@ func TestProviderWorkFirstPartialSdkEpochPublishesOnlyNewEarnings(t *testing.T) 
 			settings.ContractManagerSettings.InitialContractTransferByteCount = 121
 			settings.ContractManagerSettings.StandardContractTransferByteCount = 122
 			scope := connect.OriginalContractStoreScope{DomainHash: f.domain, ClientId: [16]byte(id), PublicKey: [32]byte(key.Public().(ed25519.PublicKey)), SourceGeneration: [16]byte{byte(194 + index)}}
-			settings.ContractManagerSettings.OriginalContractCapture = &connect.OriginalContractCaptureSettings{Directory: filepath.Join(t.TempDir(), "requests"), PublicKey: scope.PublicKey, SourceGeneration: scope.SourceGeneration}
+			settings.ContractManagerSettings.OriginalContractCapture = &connect.OriginalContractCaptureSettings{Directory: filepath.Join(providerWorkPhysicalTempDir(t), "requests"), PublicKey: scope.PublicKey, SourceGeneration: scope.SourceGeneration}
 			providerWorkPrepareCreationStore(t, settings.ContractManagerSettings.OriginalContractCapture.Directory, scope)
 			transport := &providerWorkPublisherOob{ctx: ctx, clientId: id, directory: settings.ContractManagerSettings.OriginalContractCapture.Directory, settings: settings.ContractManagerSettings}
 			client := connect.NewClient(ctx, connect.Id(id), transport, settings)
@@ -183,6 +185,26 @@ func TestProviderWorkFirstPartialSdkEpochPublishesOnlyNewEarnings(t *testing.T) 
 			t.Fatal("serial original closes did not bracket the synthetic cutoff")
 		}
 		controllerPayoutSchedule(t, cutoff)
+		if err := stPayoutAdmission(ctx, f.cfg); err == nil || !strings.Contains(err.Error(), "mainnet deployment readiness is blocked") {
+			t.Fatal("unreviewed first-partial fixture unexpectedly acquired mainnet admission", err)
+		}
+		// The readiness declaration changes admission, not the already prepared
+		// earning boundary. Bind it to this fixture's exact synthetic identity.
+		policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
+		if err != nil || policy == nil {
+			t.Fatal("first-partial earning policy is unavailable", err)
+		}
+		f.cfg.LaunchReadinessSha256 = strings.Repeat("ab", 32)
+		policy.Mainnet = stPayoutIdentity(f.cfg)
+		policy.Mainnet.Activation = "reviewed"
+		declaration, err := yaml.Marshal(policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(server.Config.PushSimpleResource("sn.yml", declaration))
+		if err := stPayoutAdmission(ctx, f.cfg); err != nil {
+			t.Fatal("synthetic reviewed first-partial declaration was not admitted", err)
+		}
 		// Only the original header clock needs the next full second. This wait
 		// does not establish completion, which the synchronous reads proved above.
 		end := server.NowUtc().Truncate(time.Second).Add(time.Second)
@@ -298,7 +320,7 @@ func TestProviderWorkFirstPartialSdkEpochPublishesOnlyNewEarnings(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		policy, err := server.LoadProviderPayoutEarningPolicy(ctx)
+		policy, err = server.LoadProviderPayoutEarningPolicy(ctx)
 		if err != nil || policy == nil {
 			t.Fatal(err)
 		}

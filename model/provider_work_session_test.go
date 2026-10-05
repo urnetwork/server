@@ -367,7 +367,7 @@ func TestProviderWorkSessionPaidAndFreeAdmissionsKeepEqualOriginalWork(t *testin
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		f := newProviderWorkSessionFixture(t)
-		addContractPayoutTestBalance(f.ctx, f.sourceNetworkId, 1000)
+		balance := addContractPayoutTestBalance(f.ctx, f.sourceNetworkId, 1000)
 		var escrow *TransferEscrow
 		var posts []func() any
 		server.Tx(f.ctx, func(tx server.PgTx) {
@@ -381,6 +381,30 @@ func TestProviderWorkSessionPaidAndFreeAdmissionsKeepEqualOriginalWork(t *testin
 		free := f.contract(t)
 		for _, id := range []server.Id{escrow.ContractId, free} {
 			f.close(t, id)
+		}
+		// Legacy admission acknowledges a durable settlement intent. It must
+		// retain its reservation without inventing a terminal original before
+		// the worker owns the financial transition; the free close is immediate.
+		server.Db(f.ctx, func(conn server.PgConn) {
+			var pending, paidTerminal, paidOriginal, freeTerminal, freeOriginal bool
+			server.Raise(conn.QueryRow(f.ctx, `SELECT
+                EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1),
+                (SELECT outcome IS NOT NULL FROM transfer_contract WHERE contract_id=$1),
+                EXISTS(SELECT 1 FROM provider_work_outcome_original WHERE contract_id=$1),
+                (SELECT outcome='settled' FROM transfer_contract WHERE contract_id=$2),
+                EXISTS(SELECT 1 FROM provider_work_outcome_original WHERE contract_id=$2)`,
+				escrow.ContractId, free).Scan(&pending, &paidTerminal, &paidOriginal, &freeTerminal, &freeOriginal))
+			if !pending || paidTerminal || paidOriginal || !freeTerminal || !freeOriginal {
+				t.Fatalf("close acknowledgement lost its durable boundary: pending=%t paid_terminal=%t paid_original=%t free_terminal=%t free_original=%t", pending, paidTerminal, paidOriginal, freeTerminal, freeOriginal)
+			}
+		})
+		if reserved := Testing_NetEscrowByteCount(f.ctx, balance.BalanceId); reserved != 121 {
+			t.Fatal("pending settlement released its reservation", reserved)
+		}
+		shard := int(escrow.ContractId[15]) % LegacySettlementShardCount
+		result, err := FlushLegacySettlements(f.ctx, shard, nil, 2)
+		if err != nil || result.Visited != 1 || result.Completed != 1 || result.BusyOrGone != 0 || result.Failed != 0 || result.More {
+			t.Fatal("actual settlement worker did not retain the paid original", result, err)
 		}
 		receipts := providerWorkFixtureReceipts(t, f.ctx, escrow.ContractId, free)
 		for _, id := range []server.Id{escrow.ContractId, free} {
@@ -400,6 +424,33 @@ func TestProviderWorkSessionPaidAndFreeAdmissionsKeepEqualOriginalWork(t *testin
 		}
 		if count != 2 {
 			t.Fatal("paid/free original outcomes missing", count)
+		}
+		originals, err := ListProviderWorkOriginals(f.ctx, []server.Id{escrow.ContractId, free})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err = FlushLegacySettlements(f.ctx, shard, nil, 2)
+		if err != nil || result.Visited != 0 || result.Completed != 0 || result.Failed != 0 || result.More {
+			t.Fatal("settlement replay repeated terminal work", result, err)
+		}
+		replayed, err := ListProviderWorkOriginals(f.ctx, []server.Id{escrow.ContractId, free})
+		if err != nil || !slices.EqualFunc(originals, replayed, bytes.Equal) {
+			t.Fatal("settlement replay changed retained originals", err)
+		}
+		server.Db(f.ctx, func(conn server.PgConn) {
+			var pending, settled bool
+			var remaining, consumed ByteCount
+			server.Raise(conn.QueryRow(f.ctx, `SELECT
+                EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1),
+                e.settled,b.balance_byte_count,e.payout_byte_count
+                FROM transfer_escrow e JOIN transfer_balance b USING(balance_id)
+                WHERE e.contract_id=$1 AND b.balance_id=$2`, escrow.ContractId, balance.BalanceId).Scan(&pending, &settled, &remaining, &consumed))
+			if pending || !settled || remaining != 879 || consumed != 121 {
+				t.Fatalf("settlement replay changed finances: pending=%t settled=%t remaining=%d consumed=%d", pending, settled, remaining, consumed)
+			}
+		})
+		if reserved := Testing_NetEscrowByteCount(f.ctx, balance.BalanceId); reserved != 0 {
+			t.Fatal("completed settlement kept its reservation", reserved)
 		}
 	})
 }

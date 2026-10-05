@@ -25,6 +25,7 @@ import (
 
 // The independently provisioned fixture owns no live key or network authority.
 type providerWorkWindowFixture struct {
+	blobRoot  string
 	cfg       *StConfig
 	epoch     *StPayoutEpochAuthority
 	authority payoutartifact.WholeWorkAuthority
@@ -37,9 +38,9 @@ type providerWorkWindowFixture struct {
 // empty and may be populated by an individual test before its immutable intake.
 func newProviderWorkWindowFixture(t testing.TB) *providerWorkWindowFixture {
 	t.Helper()
-	base, _, cfg := newStClientKeyHistoryControllerFixture(t)
+	base, _, cfg := newStClientKeyHistoryControllerFixtureWithoutBlobStore(t)
 	cfg.ReliabilityAMin = 8
-	f := &providerWorkWindowFixture{cfg: cfg, approver: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{101}, 32))}
+	f := &providerWorkWindowFixture{blobRoot: controllerUseLocalBlobStore(t), cfg: cfg, approver: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{101}, 32))}
 	startTime := time.Unix(1_800_000_000, 0).UTC()
 	endTime := startTime.Add(time.Hour)
 	startHeader := &types.Header{Number: big.NewInt(20), Time: uint64(startTime.Unix()), Difficulty: big.NewInt(0), GasLimit: 1, Extra: []byte{1}}
