@@ -19,7 +19,8 @@ import (
 )
 
 const MaxRows = 256
-const ReadTimeout = 15 * time.Second
+const ReadTimeout = 300 * time.Second
+const ReadAttemptTimeout = 60 * time.Second
 
 // Source comes from the independent operations census. Accounts include every
 // approved nonce owner, including owners with pending work from an older deployment.
@@ -151,7 +152,7 @@ func connectionConfig(dsn string, source Source) (*pgx.ConnConfig, error) {
 	// Remove environment-derived session options. All execution settings below
 	// are fixed by this owner, never supplied by the database or query input.
 	cfg.RuntimeParams = map[string]string{"application_name": "sn-operator-monitor", "timezone": "UTC"}
-	cfg.ConnectTimeout = ReadTimeout
+	cfg.ConnectTimeout = ReadAttemptTimeout
 	cfg.DefaultQueryExecMode = pgx.QueryExecModeExec
 	cfg.Fallbacks = nil
 	return cfg, nil
@@ -163,19 +164,28 @@ func ValidateConnection(dsn string, source Source) error {
 	return err
 }
 
-// Read owns a fresh connection and one repeatable-read read-only transaction.
-// Every statement, row iterator, rollback and close remains joined to this call.
-func Read(ctx context.Context, dsn string, source Source) (value *Snapshot, resultErr error) {
+// Each repeatable read has one five-minute operation budget and one-minute
+// attempts. A failed attempt is fully joined before another connection starts.
+// The original source remains fixed, and completed refusal never inherits a
+// prior transport failure's retry classification.
+func Read(ctx context.Context, dsn string, source Source) (*Snapshot, error) {
 	if ctx == nil {
 		return nil, refuse("invalid", nil)
 	}
+	source.Accounts = append([]string(nil), source.Accounts...)
 	cfg, err := connectionConfig(dsn, source)
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, ReadTimeout)
+	return readWithBudget(ctx, cfg, source)
+}
+
+// This owner keeps every statement, row iterator, rollback and physical close
+// joined. Only a completed read-only snapshot may leave with a nil error.
+func readAttempt(ctx context.Context, cfg *pgx.ConnConfig, source Source, hooks readObservationHooks) (value *Snapshot, resultErr error) {
+	ctx, cancel := context.WithTimeout(ctx, ReadAttemptTimeout)
 	defer cancel()
-	conn, err := pgx.ConnectConfig(ctx, cfg)
+	conn, err := pgx.ConnectConfig(ctx, cfg.Copy())
 	if err != nil {
 		return nil, refuse("unavailable", err)
 	}
@@ -183,7 +193,9 @@ func Read(ctx context.Context, dsn string, source Source) (value *Snapshot, resu
 	defer func() {
 		cleanup, cancelCleanup := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancelCleanup()
-		if tx != nil {
+		// A fatal backend message already closes pgx. Issuing another command
+		// on that closed connection would fabricate a second local failure.
+		if tx != nil && !conn.IsClosed() {
 			err := tx.Rollback(cleanup)
 			if !errors.Is(err, pgx.ErrTxClosed) {
 				resultErr = errors.Join(resultErr, err)
@@ -202,8 +214,13 @@ func Read(ctx context.Context, dsn string, source Source) (value *Snapshot, resu
 	if err != nil {
 		return nil, refuse("unavailable", err)
 	}
-	for _, statement := range []string{"SET LOCAL statement_timeout = '10000ms'", "SET LOCAL lock_timeout = '1000ms'", "SET LOCAL idle_in_transaction_session_timeout = '15000ms'"} {
+	for _, statement := range []string{"SET LOCAL statement_timeout = '60000ms'", "SET LOCAL lock_timeout = '60000ms'", "SET LOCAL idle_in_transaction_session_timeout = '60000ms'"} {
 		if _, err := tx.Exec(ctx, statement); err != nil {
+			return nil, refuse("unavailable", err)
+		}
+	}
+	if hooks.afterBegin != nil {
+		if err := hooks.afterBegin(ctx, conn, tx); err != nil {
 			return nil, refuse("unavailable", err)
 		}
 	}

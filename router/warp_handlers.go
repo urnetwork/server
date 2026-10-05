@@ -128,7 +128,7 @@ func collectStatus(ctx context.Context) (string, error) {
 
 // StartupReadiness runs the one-shot deep checks behind the /status readiness
 // latch — the database's successful migration head must be at least the
-// binary-required head, then Redis must answer PING, all under a 15s budget —
+// binary-required head, then Redis must answer PING, all under a 300s budget —
 // and latches the outcome: ready ("ok") or not ready ("error not ready: ...",
 // which the deploy poll fails on). Allowing the database to be ahead preserves
 // rollback compatibility for older binaries after append-only migrations.
@@ -156,7 +156,13 @@ func CheckStartupReadiness(ctx context.Context) error {
 }
 
 func startupReadinessCheckAtMigration(ctx context.Context, requiredMigrationVersion int) error {
-	checkCtx, checkCancel := context.WithTimeout(ctx, 15*time.Second)
+	if ctx == nil {
+		return fmt.Errorf("startup readiness context is absent")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	checkCtx, checkCancel := context.WithTimeout(ctx, 300*time.Second)
 	defer checkCancel()
 
 	databaseVersion := 0
@@ -174,7 +180,7 @@ func startupReadinessCheckAtMigration(ctx context.Context, requiredMigrationVers
 			})
 		})
 	}); r != nil {
-		return fmt.Errorf("pg: %s", r)
+		return startupReadinessReadError("pg", r)
 	}
 	if err := validateMigrationHead(databaseVersion, requiredMigrationVersion); err != nil {
 		return fmt.Errorf("pg: %w", err)
@@ -185,10 +191,10 @@ func startupReadinessCheckAtMigration(ctx context.Context, requiredMigrationVers
 			server.Raise(client.Ping(checkCtx).Err())
 		})
 	}); r != nil {
-		return fmt.Errorf("redis: %s", r)
+		return startupReadinessReadError("redis", r)
 	}
 
-	return nil
+	return checkCtx.Err()
 }
 
 func validateMigrationHead(databaseVersion int, requiredMigrationVersion int) error {

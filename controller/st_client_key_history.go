@@ -39,6 +39,10 @@ type stClientKeyAuthorityOwner struct {
 	store        server.BlobStore
 }
 
+// This is a scoped request/domain disagreement, never a caller-selected domain
+// to be signed by a different operator or a reason to alter other key owners.
+var ErrStClientKeyDomain = errors.New("client-key enrollment domain differs from the actual operator owner")
+
 // Ordinary key registration never falls back to a legacy unsigned write when
 // a configured release operator lacks its real signer, RPC owner or evidence.
 func newStClientKeyAuthorityOwner() (*stClientKeyAuthorityOwner, error) {
@@ -100,42 +104,50 @@ func (self *stClientKeyAuthorityOwner) readBoundary(ctx context.Context, request
 	if self == nil || self.client == nil || ctx == nil {
 		return protocol.ClientKeyEffectiveBoundary{}, stabi.STCoordinatorOperatorVersion{}, errors.New("client-key chain owner is absent")
 	}
-	var failures []error
-	for _, endpoint := range self.rpcURLs {
-		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
-		client, err := self.client.client(callCtx, endpoint)
-		if err != nil {
-			cancel()
-			failures = append(failures, err)
-			continue
-		}
-		boundary, operator, err := readStClientKeyAuthorityAt(callCtx, client, self.domain, requested)
-		cancel()
-		if err == nil {
-			return boundary, operator, ctx.Err()
-		}
-		failures = append(failures, err)
-		if ctx.Err() != nil {
-			break
-		}
+	var boundary protocol.ClientKeyEffectiveBoundary
+	var operator stabi.STCoordinatorOperatorVersion
+	err := self.client.eachRpcUrls(ctx, self.rpcURLs, func(ctx context.Context, client *ethclient.Client) error {
+		var err error
+		boundary, operator, err = readStClientKeyAuthorityAt(ctx, client, self.domain, requested)
+		return err
+	})
+	if err != nil {
+		return protocol.ClientKeyEffectiveBoundary{}, stabi.STCoordinatorOperatorVersion{}, err
 	}
-	return protocol.ClientKeyEffectiveBoundary{}, stabi.STCoordinatorOperatorVersion{}, errors.Join(errors.New("client-key boundary has no complete authenticated RPC observation"), errors.Join(failures...), ctx.Err())
+	return boundary, operator, ctx.Err()
 }
 
 // Called directly by the existing authenticated ClientKey control dispatch.
 // Public publication failure does not discard the committed signed generation;
 // the exact same bytes are retried by this API and by observation capture.
 func StRegisterClientKey(ctx context.Context, clientID server.Id, publicKey []byte) error {
+	return StRegisterClientKeyForDomain(ctx, clientID, publicKey, nil)
+}
+
+// The optional digest is supplied by the actual provider launch domain and is
+// compared against this operation's owned configuration before RPC or mutation.
+// Empty legacy messages retain the existing operator-selected namespace.
+func StRegisterClientKeyForDomain(ctx context.Context, clientID server.Id, publicKey, domainHash []byte) error {
 	if ctx == nil || clientID == (server.Id{}) || len(publicKey) != 0 && len(publicKey) != 32 {
 		return errors.New("client-key registration context, identity or key length is invalid")
+	}
+	if len(domainHash) != 0 && len(domainHash) != 32 {
+		return ErrStClientKeyDomain
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	publicKey = bytes.Clone(publicKey)
+	domainHash = bytes.Clone(domainHash)
 	owner, err := newStClientKeyAuthorityOwner()
 	if err != nil {
 		return err
+	}
+	if len(domainHash) != 0 {
+		actual, err := owner.domain.Digest()
+		if err != nil || !bytes.Equal(domainHash, actual[:]) {
+			return errors.Join(ErrStClientKeyDomain, err)
+		}
 	}
 	operationCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
 	defer cancel()

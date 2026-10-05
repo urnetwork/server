@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"maps"
 	"testing"
 	"time"
 
@@ -153,6 +154,41 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 		ctx := context.Background()
 
 		sourceNetworkId, sourceId, destinationNetworkId, destinationId, paidContractIds := testingSettledPayoutContracts(ctx, t)
+		funding := GetActiveTransferBalances(ctx, sourceNetworkId)
+		if len(funding) != 1 || funding[0].StartBalanceByteCount != 1024*1024 || len(paidContractIds) == 0 {
+			t.Fatal("retention fixture does not own its original grant and paid contracts")
+		}
+		balanceId := funding[0].BalanceId
+		type journalEntry struct {
+			bytes   ByteCount
+			applied bool
+		}
+		readJournal := func() map[server.Id]journalEntry {
+			entries := map[server.Id]journalEntry{}
+			server.Db(ctx, func(conn server.PgConn) {
+				rows, err := conn.Query(ctx, `SELECT contract_id,debit_byte_count,applied
+					FROM transfer_debit_journal WHERE balance_id=$1`, balanceId)
+				server.WithPgResult(rows, err, func() {
+					for rows.Next() {
+						var contractId server.Id
+						var entry journalEntry
+						server.Raise(rows.Scan(&contractId, &entry.bytes, &entry.applied))
+						entries[contractId] = entry
+					}
+				})
+			})
+			return entries
+		}
+		// Capture the actual independent journal before removing any metadata.
+		originalJournalKVs := readJournal()
+		if len(originalJournalKVs) != len(paidContractIds) {
+			t.Fatal("paid fixture lacks one exact debit per contract", originalJournalKVs)
+		}
+		for _, contractId := range paidContractIds {
+			if entry, found := originalJournalKVs[contractId]; !found || entry != (journalEntry{bytes: 1024}) {
+				t.Fatal("paid contract lacks its original unapplied consumption", contractId, entry, found)
+			}
+		}
 
 		// Pay out the plan. Completing the payment must commit without fanning out
 		// an update to every contract.
@@ -214,6 +250,9 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 			connect.AssertEqual(t, escrowCount, 0)
 			connect.AssertEqual(t, sweepCount, 0)
 		}
+		if after := readJournal(); !maps.Equal(originalJournalKVs, after) {
+			t.Fatal("contract cascade changed original payer obligations", originalJournalKVs, after)
+		}
 
 		// the open contract survives with its escrow
 		contractCount, _, escrowCount, _ := testingCountContractRows(ctx, liveEscrow.ContractId)
@@ -244,6 +283,23 @@ func TestRemoveCompletedContractsCascades(t *testing.T) {
 		for _, clientId := range []server.Id{sourceId, destinationId} {
 			server.Raise(CloseContract(ctx, liveEscrow.ContractId, clientId, 512, false))
 		}
+		RemoveCompletedContracts(ctx, server.NowUtc().Add(2*365*24*time.Hour))
+		connect.AssertEqual(t, countBalances(), 1)
+		// The paid contracts were deleted above, but their independent debit
+		// records must still identify every original obligation exactly once.
+		journalKVs := maps.Clone(originalJournalKVs)
+		journalKVs[liveEscrow.ContractId] = journalEntry{bytes: 512}
+		if after := readJournal(); !maps.Equal(journalKVs, after) {
+			t.Fatal("retention changed original asynchronous consumption", journalKVs, after)
+		}
+		before := readPayoutDebitTestState(t, ctx, balanceId)
+		consumed := ByteCount(len(paidContractIds))*1024 + 512
+		if before.initial != 1024*1024 || before.credit != before.initial || before.pending != len(paidContractIds)+1 ||
+			before.pendingBytes != consumed || before.applied != 0 || before.reserved != consumed || before.legacy != 0 ||
+			before.escrows != 1 || before.invalid != 0 || before.settled != 512 {
+			t.Fatalf("cascade lost retained credit, consumption or live metadata: %+v", before)
+		}
+		drainPayoutDebitTestPending(t, ctx, balanceId, before)
 		RemoveCompletedContracts(ctx, server.NowUtc().Add(2*365*24*time.Hour))
 		connect.AssertEqual(t, countBalances(), 0)
 	})

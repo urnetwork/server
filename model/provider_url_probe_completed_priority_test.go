@@ -74,6 +74,7 @@ func TestUrlCompletedPriorityLockedMaintenanceAndReceipt(t *testing.T) {
 	}
 }
 
+// Completion priority preserves measured quota, early renewal, and unresolved security work.
 func TestUrlCompletedPriorityPreservesQuotaSecurityAndFreshness(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -115,8 +116,12 @@ func TestUrlCompletedPriorityPreservesQuotaSecurityAndFreshness(t *testing.T) {
 			t.Fatalf("security exception or expired success window lost: %+v", result.Providers)
 		}
 		full := testingReadUrlCompletionCycle(t, ctx, clients[0])
-		if full.ordinal != 0 || !full.next.Equal(now.Add(3*time.Hour)) || full.history != 10 {
-			t.Fatalf("quota-full provider acquired a completed turn or lost oldest-success pacing: %+v", full)
+		if full.count != 0 || full.ordinal != 0 || full.successes != ProviderUrlProbeRunTarget || full.errors != 0 || full.history != ProviderUrlProbeRunTarget {
+			t.Fatalf("quota-full provider acquired a completed turn or changed measured quota: %+v", full)
+		}
+		renewalAt := now.Add(-time.Hour + ProviderEgressProbeRefreshAge - ProviderUrlProbeRenewalHeadroom)
+		if !full.next.Equal(renewalAt) {
+			t.Fatalf("quota-full provider lost oldest-measurement renewal pacing: got %s, want %s", full.next, renewalAt)
 		}
 		for _, due := range result.Providers {
 			testingCompleteUrlClaim(t, ctx, due, now.Add(time.Second), "tunnel_failed")
