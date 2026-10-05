@@ -5819,14 +5819,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 									}
 									var nativeFanout *clientScoreNativeFanout
 									if !forceMinimum {
-										nativeFanout = &clientScoreNativeFanout{
-											publish: func(callerId server.Id, facets map[ipFamilyFacet]clientScoreFacetPayload) error {
-												return writeClientScoreNativeSnapshot(ctx, r, clientScoreNativeKey(keys.counts(callerId)), ttl, facets, nativeCensus)
-											},
-											alias: func(callerId server.Id) error {
-												return r.Set(ctx, clientScoreNativeKey(keys.counts(callerId)), clientScoreNativeBaseline, ttl).Err()
-											},
-										}
+										nativeFanout = newClientScoreNativeFanout(ctx, r, keys.counts, ttl, nativeCensus, emit)
 									}
 									if err := emitClientScoreTargetFanout(
 										clientLocationIds,
