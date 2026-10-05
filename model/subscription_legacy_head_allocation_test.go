@@ -96,6 +96,7 @@ func TestLegacySettlementHeadAllocationCancellationRetainsInterleavedProgress(t 
 		requireLegacySettlementTestState(t, ctx, head, headId, true, false, 1000, 100)
 		requireLegacyProviderDurability(t, ctx, head, headId, 0)
 		requireLegacySettlementTestState(t, ctx, tail, tailIds[0], true, false, 999956, 400)
+		projectLegacyProviderTotalsForTest(t, ctx)
 		server.Db(ctx, func(conn server.PgConn) {
 			var swept, provided ByteCount
 			server.Raise(conn.QueryRow(ctx, `SELECT
@@ -120,6 +121,7 @@ func TestLegacySettlementHeadAllocationCancellationRetainsInterleavedProgress(t 
 		requireLegacySettlementTestState(t, ctx, head, headId, false, true, 989, 0)
 		requireLegacyProviderDurability(t, ctx, head, headId, 11)
 		requireLegacySettlementTestState(t, ctx, tail, tailIds[0], false, true, 999912, 0)
+		projectLegacyProviderTotalsForTest(t, ctx)
 		server.Db(ctx, func(conn server.PgConn) {
 			var swept, provided ByteCount
 			server.Raise(conn.QueryRow(ctx, `SELECT
@@ -205,6 +207,7 @@ func legacySettlementHeadAllocationControl(t *testing.T, keepFirstBusy bool) {
 		}
 		requireLegacySettlementTestState(t, ctx, head, headId, false, true, 989, 0)
 		requireLegacyProviderDurability(t, ctx, head, headId, 11)
+		projectLegacyProviderTotalsForTest(t, ctx)
 		server.Db(ctx, func(conn server.PgConn) {
 			var pending, terminal int
 			var credit, swept, provided ByteCount

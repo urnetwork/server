@@ -62,6 +62,7 @@ func TestForceCloseDeferredLegacySiblingKeepsAccountingRetryAuthority(t *testing
 		if completed != len(deferred) || bad.state(t, ctx) != before {
 			t.Fatal("deferred worker count or protected refused reservation changed")
 		}
+		projectLegacyProviderTotalsForTest(t, ctx)
 		for _, fixture := range deferred {
 			state := fixture.state(t, ctx)
 			var swept, provided ByteCount
@@ -73,9 +74,9 @@ func TestForceCloseDeferredLegacySiblingKeepsAccountingRetryAuthority(t *testing
                 EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`,
 					fixture.contractId, fixture.providerNetworkId).Scan(&swept, &provided, &pending))
 			})
-			// Legacy workers commit provider totals in PostgreSQL. The shared
-			// fixture exposes only the Redis delta, which must remain zero to
-			// avoid counting the same contribution twice in the account API.
+			// The separate projection has applied the worker's durable totals in
+			// PostgreSQL. The fixture's Redis delta stays zero to avoid counting
+			// the same contribution twice in the account API.
 			if state.outcome != ContractOutcomeSettled || !state.escrowSettled || state.escrowPayoutByteCount != 1024 ||
 				state.streamFound || state.providerPayoutByteCount != 0 || swept != 1024 || provided != 1024 || pending ||
 				state.payerBalanceByteCount != forceCloseDisputeInitialBalance-1024 || state.netEscrowByteCount != 0 {

@@ -3195,7 +3195,7 @@ func settleEscrowForegroundInTx(ctx context.Context, tx server.PgTx, contractId 
 
 // Current Redis contracts append independent consumption records. Legacy
 // callers queue an intent without releasing their reservation; the worker uses
-// the original atomic debit/outcome path and completes all financial writes before commit.
+// the original atomic debit/outcome path and commits exact earnings plus durable total-projection ownership.
 func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial bool) (posts []func() any, closed bool, returnErr error) {
 	// CloseContract already owns this lock; direct and recovery settlement
 	// must acquire it before balance locks to keep the same lock order.
@@ -3528,23 +3528,11 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	}
 
 	if inlineFinancial && len(accountPayouts) > 0 {
-		// The API already adds durable provided totals to the Redis deltas.
-		// Record this worker's contribution only in PG: a crash or ambiguous
-		// Redis INCRBY reply must neither lose nor duplicate provider totals.
-		networkIds := make([]server.Id, 0, len(accountPayouts))
-		for networkId := range accountPayouts {
-			networkIds = append(networkIds, networkId)
-		}
-		slices.SortFunc(networkIds, server.Id.Cmp)
-		for _, networkId := range networkIds {
-			payout := accountPayouts[networkId]
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO account_balance
-                (network_id,provided_byte_count,provided_net_revenue_nano_cents) VALUES($1,$2,$3)
-                ON CONFLICT(network_id) DO UPDATE SET
-                provided_byte_count=account_balance.provided_byte_count+EXCLUDED.provided_byte_count,
-                provided_net_revenue_nano_cents=account_balance.provided_net_revenue_nano_cents+EXCLUDED.provided_net_revenue_nano_cents`,
-				networkId, payout.payoutByteCount, payout.payout))
-		}
+		// Exact earnings remain in the sweep ledger. Their lifetime display
+		// totals have an independent durable owner, so a held provider row
+		// cannot retain this transaction's payer grants. No Redis increment is
+		// added; account totals and their task's replay marker commit together.
+		queueLegacyProviderTotalsInTx(ctx, tx, contractId, accountPayouts)
 	} else if 0 < len(accountPayouts) {
 		posts = append(posts, func() any {
 			server.Redis(ctx, func(r server.RedisClient) {

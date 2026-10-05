@@ -91,6 +91,7 @@ func TestLegacySettlementLoadedPageBudgetPreservesContinuation(t *testing.T) {
 		if err != nil || second.Failed != 0 || first.Completed+second.Completed != count || second.Cursor != nil {
 			t.Fatalf("continued page skipped the interrupted intent: %+v, %v", second, err)
 		}
+		projectLegacyProviderTotalsForTest(t, ctx)
 		server.Db(ctx, func(conn server.PgConn) {
 			var provided, swept int64
 			server.Raise(conn.QueryRow(ctx, `SELECT

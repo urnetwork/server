@@ -155,6 +155,8 @@ func TestLegacySettlementSharedGrantAcrossAllShards(t *testing.T) {
 				t.Fatalf("released cohort failed its finite drain: %+v %v", page, err)
 			}
 		}
+		// Projection runs after the measured grant ownership and financial drain.
+		projectLegacyProviderTotalsForTest(t, ctx)
 		server.Db(ctx, func(conn server.PgConn) {
 			var pending, terminal, metadata int
 			var credit, swept, provided ByteCount
