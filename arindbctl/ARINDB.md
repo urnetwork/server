@@ -383,6 +383,20 @@ missing regional ranking work; neither a sibling relationship nor a top-30
 position substitutes for that review. Keep smaller reviewed access providers
 eligible under the same clean-default rule and preserve explicit contrary use.
 
+
+A separate source-only proposal now adds `nt-th`, **AS23969 in Thailand only**.
+APNIC's exact ASN record, the official TOT/CAT-to-NT merger history, and NT's
+[current residential fiber terms](https://ntplc.co.th/promotions/detail/nt-fiber-care-plus)
+support subscriber access. Independent review preserved every v13 entry and
+all routing, country, hosting and risk vetoes; no generic National Telecom
+name rule was added. This proposal is not built or selected and adds no named
+provincial service/ranking evidence. Sify AS9583 remains a precise mixed-scope
+research item: business Internet access is eligible subscriber evidence, while
+its official wholesale-transit material does not identify the serving ASN.
+Neither household-service absence nor that unresolved corporate evidence
+justifies a blanket ASN decision. These findings do not attribute the native
+Speed-minus-Quality population to either operator.
+
 ## Output and provenance
 
 Each build produces `arin.mmdb` and `manifest.json`. The MMDB contains direct
@@ -1082,47 +1096,59 @@ clock were not retained, so that compatibility defect is not yet the proven
 cause of this Main refusal. Earlier invalid and stale publications remain
 separate observations.
 
-The subsequent read at `2026-10-05T21:43:05.042608Z` passed the unchanged
+The latest qualified read at `2026-10-05T22:50:35.905458Z` passed the unchanged
 900-second source-age limit. Its source evaluation ran from
-`21:33:13.627767Z` to `21:34:47.485208Z`, with publication at
-`21:39:00.958798Z`: 93.857441 seconds of evaluation, 253.473590 seconds from
-completion to publication, and 244.083810 seconds until observation. Source
-age was 497.557400 seconds. This qualifies the following one-publication
-counts at that observation time:
+`22:37:19.796171Z` to `22:38:48.039397Z`, with publication at
+`22:44:14.292528Z`: 88.243226 seconds of evaluation, 326.253131 seconds from
+completion to publication, and 381.612930 seconds until observation. Source
+age was 707.866061 seconds. These one-publication counts qualify at that
+observation time:
 
 | Native bucket | Deduplicated public providers |
 | --- | ---: |
-| Quality | 327 |
-| Speed | 10,338 |
-| Online | 77,183 |
+| Quality | 360 |
+| Speed | 10,976 |
+| Online | 77,646 |
 
 The buckets overlap: Quality is a subset of Speed, which is a subset of
-Online under the reviewed producer rules. The 10,011 Speed providers outside
+Online under the reviewed producer rules. The 10,616 Speed providers outside
 Quality pass the common native gates and fail the additional stored ARIN
-non-Quality gate. Quality is 3.163088% of Speed. That gap is not a proxy count:
+non-Quality gate. Quality is 3.279883% of Speed. That gap is not a proxy count:
 the key cannot distinguish absent verification, unknown or ambiguous identity,
 explicit non-subscriber use, or missing/mismatched connection facts. It cannot
 identify dominant countries or operators. Known subscriber inference remains
 appropriate only without contrary applicable evidence; risk, virtual-ISP,
 proxy and explicit exclusion evidence remain independent vetoes.
 
-Within Online, 10,338 providers passed the selected-policy 4/5 URL ratio,
-66,841 failed and four had no accepted evidence. The evidence window was
-`(2026-10-05T13:33:14.216146Z, 2026-10-05T21:33:14.216146Z]`.
-Changing subscriber classification cannot admit those 66,845 ratio-failing or
-unmeasured providers to native Quality. All 327 Quality providers had at least
-ten accepted outcomes; Speed had 10,336 with at least ten and two with two.
-These are outcome counts, not success counts or four-hour quota completion.
+Within Online, 10,976 providers passed the selected-policy 4/5 URL ratio,
+66,668 failed and two had no accepted evidence. The evidence window was
+`(2026-10-05T14:37:20.448930Z, 2026-10-05T22:37:20.448930Z]`.
+Changing subscriber classification cannot admit those 66,670 ratio-failing or
+unmeasured providers to native Quality. Of the Quality providers, 357 had at
+least ten accepted outcomes and three had three or four; Speed had 10,970
+with at least ten and six with three or four. These are outcome counts, not
+success counts or four-hour quota completion, and do not establish a ten-outcome
+minimum for native Quality.
 
-Receipt `fcf577593551c81cd03873d1d4659f940949d031179f871c0255a622a8df1625`
+Receipt `6016bf8f96178a5ccef733cd29e71a9dffecc38e623815631dfb1f280ca2f9fa`
 and independent gate
-`02cc21c7d6bd5322cbf8805d061100cc5bea808b33eb14dfcf5bc0225caea393`
-bind these counts and original clocks. The source completed before the
-`a7ce7f73` batching deployment began at `21:37:03Z`; publication after that
-deployment does not establish a batching benefit. The key contains no
-publisher-process identity, loaded ARIN epoch, country/operator provenance or
-excluded-provider intersections. It is a completed score-source cohort, not
+`8e6c40f39b55080dbe2874267b4209f432a01246ed9b2e1e84f862d876b8f8d3`
+bind these counts and original clocks. Evaluation began after the `a7ce7f73`
+batching deployment completed, but the global key contains no publisher-process
+identity. It also contains no loaded ARIN epoch, country/operator provenance or
+excluded-provider intersections. This is a completed score-source cohort, not
 an instantaneous fleet census or proof that v13 caused the Quality count.
+
+The earlier qualified `21:43:05Z` read had 327 Quality, 10,338 Speed and
+77,183 Online providers, with a 253.473590-second export tail. These are separate
+publications without retained membership or writer joins; count and duration
+differences do not establish a batching benefit or regression. The newer
+326.253131-second tail already exceeds the separate 90-second score-shadow
+lease source-age window before publication. Its successful 900-second census
+validation therefore does not make that shadow capture eligible. Neither bound
+was relaxed. The publisher uses a five-hour Redis TTL and schedules its next
+run 30 seconds after completion; key presence and the nominal interval do not
+establish source freshness.
 
 Connection facts advance only after a successful actual ARIN lookup during a
 connection location write. The c343 connection path retries a failed initial
