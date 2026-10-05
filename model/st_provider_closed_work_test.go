@@ -4,6 +4,7 @@ package model
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,19 +96,63 @@ func TestStClosedWorkCensusRetainsLiveAndArchivedOriginalRows(t *testing.T) {
 	})
 }
 
-// A missing original proof still refuses the existing payout operation; the
-// optional recorder cannot convert one valid prefix into a complete witness.
+// Historical missing proof survives the prospective guard, while current work
+// settles through the actual owner. Neither public census may return a partial
+// result when the full window includes both, regardless of database scan order.
 func TestStClosedWorkCensusMissingOriginalNeverReturnsPrefix(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
+	env.ApplyDbMigrations = false
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		start := server.NowUtc().Truncate(time.Microsecond)
-		addStContractUsageSnapshotTestRow(t, ctx, start, &contractUsageSnapshot{Version: 1, ByteCount: 73, Providers: []contractProviderUsage{{ClientId: server.NewId(), NetworkId: server.NewId(), ByteCount: 73}}})
-		addStContractUsageSnapshotTestRow(t, ctx, start, nil)
-		usages, census, err := GetStEpochProviderUsageCensus(ctx, 17, start, start.Add(time.Hour))
-		if err == nil || usages != nil || census != nil {
+		server.ApplyDbMigrationsUpTo(ctx, 744)
+		start := time.Unix(1_700_000_000, 0).UTC()
+		missingId := addStContractUsageSnapshotTestRow(t, ctx, start, nil)
+		server.ApplyDbMigrations(ctx)
+
+		networkId, originId, providerId := server.NewId(), server.NewId(), server.NewId()
+		addContractPayoutTestClients(ctx, map[server.Id]server.Id{originId: networkId, providerId: networkId})
+		currentId, err := CreateContractNoEscrow(ctx, networkId, originId, networkId, providerId, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := CloseContract(ctx, currentId, originId, 74, false); err != nil {
+			t.Fatal(err)
+		}
+		if err := CloseContract(ctx, currentId, providerId, 73, false); err != nil {
+			t.Fatal(err)
+		}
+		var currentClosedAt time.Time
+		var currentOriginal []byte
+		var retainedMissing bool
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT close_time,provider_usage FROM transfer_contract WHERE contract_id=$1`, currentId).Scan(&currentClosedAt, &currentOriginal))
+			server.Raise(conn.QueryRow(ctx, `SELECT provider_usage IS NULL AND outcome='settled' AND close_time=$2 FROM transfer_contract WHERE contract_id=$1`, missingId, start).Scan(&retainedMissing))
+		})
+		if !retainedMissing || !currentClosedAt.After(start) || len(currentOriginal) == 0 {
+			t.Fatal("migration lost the historical omission or current settlement failed to retain original usage", retainedMissing, currentClosedAt, currentOriginal)
+		}
+		end := currentClosedAt.Add(time.Microsecond)
+		usages, census, window, err := GetStEpochProviderUsageWholeCensus(ctx, 17, currentClosedAt, end)
+		if err != nil || len(usages) != 1 || usages[0].ClientId != providerId || usages[0].NetworkId != networkId || usages[0].PayoutByteCount != 73 {
+			t.Fatal("current settlement alone did not produce expected provider usage", usages, err)
+		}
+		if census == nil || census.Count != 1 || len(census.Records) != 1 || census.Records[0].ContractId != [16]byte(currentId) || !bytes.Equal(census.Records[0].Original, currentOriginal) {
+			t.Fatal("current settlement census did not retain its exact original", census)
+		}
+		if window == nil || len(window.Records) != 1 || window.Records[0].ContractId != currentId.String() || window.Records[0].Disposition != "credited" || !bytes.Equal(window.Records[0].Original, currentOriginal) {
+			t.Fatal("current settlement alone did not produce complete original usage", usages, census, window, err)
+		}
+		missingOriginal := func(err error) bool {
+			return err != nil && strings.Contains(err.Error(), missingId.String()) && strings.Contains(err.Error(), "missing immutable contract usage")
+		}
+		usages, census, err = GetStEpochProviderUsageCensus(ctx, 17, start, end)
+		if !missingOriginal(err) || usages != nil || census != nil {
 			t.Fatal("incomplete original work returned a successful census prefix", usages, census, err)
+		}
+		usages, census, window, err = GetStEpochProviderUsageWholeCensus(ctx, 17, start, end)
+		if !missingOriginal(err) || usages != nil || census != nil || window != nil {
+			t.Fatal("incomplete original work returned a partial whole-window result", usages, census, window, err)
 		}
 	})
 }
