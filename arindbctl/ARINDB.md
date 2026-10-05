@@ -767,6 +767,22 @@ protection. Any Main attribution needs a bounded current-fact/rollup comparison
 and a separate join to native membership, rather than inferring the cause from
 the native Speed-minus-Quality count.
 
+A bounded Main read at `2026-10-05T23:17:52Z` examined the first 257 connected
+rows in client order, withheld the final provider, and retained 256 rows before
+the active/public/live-handler filters. The resulting 119 connections belonged
+to 112 providers. All 112 evaluated connections had the selected v13 epoch and
+post-cutover lookup time; seven location records were missing or mismatched.
+Thirteen providers had entirely clean, verified current subscriber facts, and
+none had a non-Quality/non-risk rollup, a risk rollup, or a missing rollup.
+The live non-Quality count of 97 providers and rollup non-Quality count of 96
+are separate marginal counts; both risk marginals were seven. This read found
+no old-epoch or clean-subscriber/soft-rollup discrepancy and supplies no basis
+for a classification rewrite. The sorted prefix is nonrepresentative and has
+no membership or generation join to the earlier 10,616 native Speed-only
+providers, so it neither explains nor rules out a fleet-wide cause. The rollup
+watermark records the caller's minute of source evaluation, not database write
+time; it cannot establish write order.
+
 ## Boundary with FP2 and fallback behavior
 
 The uniform FP2 fallback requirement belongs to provider selection across
