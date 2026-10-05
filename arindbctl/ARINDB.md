@@ -909,6 +909,27 @@ Neither timeout confirms stale stored facts or justifies a classification
 write. Any smaller diagnostic must identify its subset explicitly; it cannot
 stand in for complete fleet coverage.
 
+A smaller Main read succeeded at `2026-10-05T16:26:47.184608Z`, with the
+query taking 0.031563 seconds. It enumerated the first 257 connected rows in
+client order and withheld the entire final provider at the boundary (one row).
+The remaining 256 rows yielded 119 live eligible connections across 118
+providers after the active/public/handler filters. Of those connections, 116
+had epoch `1791162091` and lookup times within the selected cutover and
+observation bounds; three had missing or mismatched location ownership. No
+older epoch, newer epoch, pre-cutover or future lookup was observed.
+
+Within that subset, 115 providers were current on all included live
+connections, and 20 had verified nonrisk subscriber classifications on all of
+them (21 connections). Live location flags marked 95 providers non-Quality and
+six risky; those counts can overlap. A non-Quality flag does not distinguish
+excluded, unknown and ambiguous states and is not a proxy count. Receipt
+`0eb8161c707094575a03a16689a5ba6bf96460d4cfdf3d672c7eeca614ab2557`
+contains aggregate counts only. This sorted prefix is not representative of
+the fleet and does not establish native Quality supply, source-process
+ownership or the persistence/cause of the three missing or mismatched rows.
+It supplies no evidence for refreshing an older epoch in those observed rows;
+the classification-only CAS cannot insert or repair their location identity.
+
 A later bounded native-host census read succeeded at
 `2026-10-05T08:51:36.381701Z`. It returned one complete cached publication from
 source evaluation `08:40:09.693091Z`–`08:40:57.573495Z`, published at
@@ -1004,6 +1025,9 @@ source clocks. Retained counts and a recent scrape alone still cannot establish
 a fresh exclusion census. These are `CountProviderEgress` dashboard snapshots,
 separate from both the native score-target census key and URL quota publication.
 No qualified current read of these timestamped gauges is retained here.
+The individual count vectors and clocks are updated sequentially; availability
+one and a shared scrape timestamp do not by themselves prove an atomic
+counts-and-clock snapshot if collection overlaps a refresh.
 
 The native publication has source clocks but lacks ARIN epochs and exclusion
 reasons. These reviewed sources export no loaded-ARIN epoch gauge. The bounded
@@ -1019,6 +1043,16 @@ or reliability. It remains inactive: Main stale facts are unconfirmed, and
 bounded live-owner integration is unfinished. Owner changes during a write
 and uncertain commit outcomes require explicit handling; the local tests do
 not establish production activation or recovered Quality supply.
+
+The retained Connect `12c5c0ac` and API `a357c978` source trees each preserve
+25 reviewed ARIN loader, owner-capture, classification and native-score files
+from the earlier `1a46ab5f` graph byte for byte. This source comparison is not a
+live-owner join or proof of loaded resources in those newer processes. The
+aggregate database read retains no provider identifiers or addresses. Any
+future owner-side correction must first join a current live owner and address,
+its actual lookup generation, and the exact durable row/token; the earlier
+one-process mapping and a cached score-publication clock cannot supply that
+join.
 
 For this release, retain the following evidence as rollout proceeds:
 
