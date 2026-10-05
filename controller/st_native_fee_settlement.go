@@ -45,7 +45,11 @@ func settleNativeTransactionFee(ctx context.Context, cfg *StConfig, intentId ser
 		if err != nil {
 			return nil, err
 		}
-		raw, err := resource.BytesE()
+		maximum := 16 * 1024
+		if name == "native-fee-denomination-policy.yml" {
+			maximum = 64 * 1024
+		}
+		raw, err := resource.BytesBoundedE(ctx, maximum)
 		return raw, errors.Join(err, ctx.Err())
 	}
 	policy, authority, err := loadNativeFeeDenomination(owner, cfg, read)

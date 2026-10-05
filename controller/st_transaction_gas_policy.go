@@ -76,7 +76,7 @@ func (self *CoreStClient) operatorGasAdmission(ctx context.Context, signingAccou
 		if loadErr != nil {
 			return refuse(loadErr)
 		}
-		encoded, err = resource.BytesE()
+		encoded, err = resource.BytesBoundedE(ctx, 16*1024)
 	}
 	if err != nil {
 		return refuse(err)
