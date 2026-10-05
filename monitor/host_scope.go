@@ -4,7 +4,6 @@ package monitor
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -14,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 // Return a policy-only copy with sorted exact selectors. Unknown, malformed,
@@ -395,25 +396,18 @@ func (self *hostScopeRunner) reduceFindings(settings SignalSettings, findings []
 // A joined failure is intentional policy only when every leaf is a scope
 // denial; another observation failure must not become successful scope.
 func hostScopeOnlyError(err error) bool {
-	if err == nil {
+	causes := server.InspectErrorCauses(err)
+	if !causes.Complete || causes.NilBranches != 0 {
 		return false
 	}
-	if _, ok := err.(*hostScopeExcludedError); ok {
-		return true
-	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		children := joined.Unwrap()
-		if len(children) == 0 {
-			return false
-		}
-		for _, child := range children {
-			if !hostScopeOnlyError(child) {
+	for _, node := range causes.Nodes {
+		if node.Leaf {
+			if value, excluded := node.Err.(*hostScopeExcludedError); !excluded || value == nil {
 				return false
 			}
 		}
-		return true
 	}
-	return hostScopeOnlyError(errors.Unwrap(err))
+	return true
 }
 
 // Operational partial coverage never pages because the pause persists.

@@ -191,8 +191,9 @@ func TestDbCanceledWriteTimeoutUsesDonePathWithoutReplay(t *testing.T) {
 					WithPgResult(nil, writeErr, func() {})
 				}, testCase.options...)
 			})
-			if recovered != DbContextDoneError {
-				t.Errorf("%s: canceled write recovered %T %v; want DbContextDoneError", testCase.name, recovered, recovered)
+			recoveredErr, _ := recovered.(error)
+			if !errors.Is(recoveredErr, DbContextDoneError) || !errors.Is(recoveredErr, context.Canceled) || !errors.Is(recoveredErr, writeErr) {
+				t.Errorf("%s: canceled write lost done, context or physical cause: %T %v", testCase.name, recovered, recovered)
 			}
 			if callbackCount != 1 {
 				t.Errorf("%s: canceled database callback count = %d; want 1", testCase.name, callbackCount)

@@ -19,7 +19,7 @@ func GetStProviderWalletsForNetwork(ctx context.Context, networkId server.Id) []
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(ctx, `
             SELECT DISTINCT ON (client_id)
-                client_id, network_id, coldkey_ss58, coldkey_pubkey, set_time
+                client_id, network_id, coldkey_ss58, coldkey_pubkey, set_time, original_message, original_signature
             FROM st_provider_wallet_history
             WHERE network_id = $1
             ORDER BY client_id, set_time DESC, wallet_version DESC
@@ -34,6 +34,8 @@ func GetStProviderWalletsForNetwork(ctx context.Context, networkId server.Id) []
 					&wallet.ColdkeySs58,
 					&pubkey,
 					&wallet.SetTime,
+					&wallet.OriginalMessage,
+					&wallet.OriginalSignature,
 				))
 				copy(wallet.ColdkeyPubkey[:], pubkey)
 				wallets = append(wallets, wallet)
@@ -273,6 +275,7 @@ type StFleetBindingSignature struct {
 func SetStFleetBindingSignature(ctx context.Context, signature *StFleetBindingSignature) {
 	key := requireStDeploymentKey(signature.DeploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
+		retainStFleetBindingOriginalInTx(ctx, tx, signature)
 		server.RaisePgResult(tx.Exec(ctx, `
             INSERT INTO st_fleet_binding_signature (
                 deployment_key, client_id, network_id, generation, hotkey, digest, binding_json,

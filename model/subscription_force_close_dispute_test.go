@@ -303,10 +303,13 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 }
 
 // A statement trigger rejects even zero-row dispute updates, proving healthy
-// finalized rows do not enter the extra settlement transaction.
+// finalized rows do not enter the extra settlement transaction. Consumed bytes
+// remain reserved until the public debit worker applies them exactly once.
 func TestForceCloseHealthyFinalizationSkipsDisputeSettlement(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx := context.Background()
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
 		fixtures := []*forceCloseDisputeFixture{
 			newForceCloseDisputeFixture(t, ctx, true, false, 1024, 1024, 4096),
 			newForceCloseDisputeFixture(t, ctx, false, true, 1024, 1024, 4096),
@@ -335,15 +338,51 @@ func TestForceCloseHealthyFinalizationSkipsDisputeSettlement(t *testing.T) {
 		}
 		closeCount, err := ForceCloseOpenContractIds(ctx, fixtures[0].cutoff, 10, 1, 0, 0)
 		if err != nil || closeCount != int64(len(fixtures)) {
-			t.Error("healthy finalization entered dispute settlement")
+			t.Fatalf("healthy finalization entered dispute settlement: closed=%d err=%v", closeCount, err)
 		}
-		for _, fixture := range fixtures {
+		pendingStates := make([]forceCloseDisputeState, 0, len(fixtures))
+		for index, fixture := range fixtures {
 			state := fixture.state(t, ctx)
+			pendingStates = append(pendingStates, state)
 			if state.outcome != ContractOutcomeSettled || state.dispute || state.open || state.streamFound ||
-				!state.escrowSettled || state.escrowPayoutByteCount != 1024 || state.netEscrowByteCount != 0 ||
-				state.providerPayoutByteCount != 1024 || state.payerBalanceByteCount != forceCloseDisputeInitialBalance-1024 ||
-				state.requestTokenByteCount != 0 || state.redisEscrowByteCount != 0 {
-				t.Error("healthy finalization changed settlement accounting")
+				!state.escrowSettled || !state.redisReserved || state.sourceCheckpoint || state.destinationCheckpoint ||
+				state.sourceByteCount != 1024 || state.destinationByteCount != 1024 ||
+				state.escrowPayoutByteCount != 1024 || state.providerPayoutByteCount != 1024 ||
+				state.payerBalanceByteCount != forceCloseDisputeInitialBalance || state.legacyEscrowByteCount != 0 ||
+				state.netEscrowByteCount != 1024 || state.requestTokenByteCount != 1024 || state.redisEscrowByteCount != 1024 {
+				t.Fatalf("case %d: healthy finalization did not retain exact pending debt: %+v", index, state)
+			}
+		}
+		closeCount, err = ForceCloseOpenContractIds(ctx, fixtures[0].cutoff, 10, 1, 0, 0)
+		if err != nil || closeCount != 0 {
+			t.Fatalf("healthy pending settlement repeated the close: closed=%d err=%v", closeCount, err)
+		}
+		finalStates := make([]forceCloseDisputeState, 0, len(fixtures))
+		for index, fixture := range fixtures {
+			if state := fixture.state(t, ctx); state != pendingStates[index] {
+				t.Fatalf("case %d: repeated healthy close changed pending accounting: before=%+v after=%+v", index, pendingStates[index], state)
+			}
+			// Verify the journal and public available credit before the actual
+			// worker drains it, preserving all provider allocations and payouts.
+			assertPayoutDebitTestConsumptionAndDrain(t, ctx, fixture.balanceId, forceCloseDisputeInitialBalance, 1024)
+			expected := pendingStates[index]
+			expected.payerBalanceByteCount -= 1024
+			expected.netEscrowByteCount = 0
+			expected.requestTokenByteCount = 0
+			expected.redisEscrowByteCount = 0
+			state := fixture.state(t, ctx)
+			if state != expected {
+				t.Fatalf("case %d: healthy debit changed settlement identity or accounting: got=%+v want=%+v", index, state, expected)
+			}
+			finalStates = append(finalStates, state)
+		}
+		closeCount, err = ForceCloseOpenContractIds(ctx, fixtures[0].cutoff, 10, 1, 0, 0)
+		if err != nil || closeCount != 0 {
+			t.Fatalf("healthy drained settlement repeated the close: closed=%d err=%v", closeCount, err)
+		}
+		for index, fixture := range fixtures {
+			if state := fixture.state(t, ctx); state != finalStates[index] {
+				t.Fatalf("case %d: repeated healthy close changed drained accounting: before=%+v after=%+v", index, finalStates[index], state)
 			}
 		}
 	})

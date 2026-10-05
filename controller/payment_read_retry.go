@@ -10,7 +10,6 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -182,7 +181,17 @@ func paymentHttpGet[R any](ctx context.Context, settings PaymentReadSettings, ho
 // headers retain the normal short pause, and past dates never spin immediately.
 func paymentReadRetryAfter(err error, now time.Time, remaining time.Duration) time.Duration {
 	var status *paymentReadStatusError
-	if !errors.As(err, &status) {
+	causes := server.InspectErrorCauses(err)
+	if !causes.Complete {
+		return 0
+	}
+	for _, node := range causes.Nodes {
+		if candidate, ok := node.Err.(*paymentReadStatusError); ok && candidate != nil {
+			status = candidate
+			break
+		}
+	}
+	if status == nil {
 		return 0
 	}
 	value := strings.TrimSpace(status.retryAfter)
@@ -261,50 +270,46 @@ func paymentHttpGetAttempt[R any](ctx context.Context, do func(*http.Request) (*
 // All joined causes must permit retry. Authentication, malformed payloads,
 // identity conflicts and close failures dominate a coincident timeout/503.
 func retryablePaymentReadError(err error, transport bool) bool {
-	if err == nil || err == context.Canceled {
+	causes := server.InspectErrorCauses(err)
+	if !causes.Complete {
 		return false
 	}
-	switch value := err.(type) {
-	case *paymentReadCloseError:
-		return false
-	case *paymentReadStatusError:
-		switch value.cause.StatusCode {
-		case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-			return true
+	transportOrigins := make([]bool, len(causes.Nodes))
+	statusOrigins := make([]bool, len(causes.Nodes))
+	for index, node := range causes.Nodes {
+		transportOrigins[index] = transport
+		if node.Parent >= 0 {
+			transportOrigins[index] = transportOrigins[node.Parent]
+			statusOrigins[index] = statusOrigins[node.Parent]
 		}
-		return false
-	case *paymentReadTransportError:
-		return retryablePaymentReadError(value.cause, true)
-	case *os.PathError:
-		return false
-	case *url.Error:
-		return retryablePaymentReadError(value.Err, transport)
-	case *net.OpError:
-		return retryablePaymentReadError(value.Err, transport)
-	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		found := false
-		for _, cause := range joined.Unwrap() {
-			if cause != nil {
-				found = true
-				if !retryablePaymentReadError(cause, transport) {
-					return false
-				}
+		switch node.Err.(type) {
+		case *paymentReadCloseError, *os.PathError:
+			return false
+		case *paymentReadTransportError:
+			transportOrigins[index] = true
+		case *paymentReadStatusError:
+			statusOrigins[index] = true
+		}
+		if !node.Leaf {
+			continue
+		}
+		if value, ok := node.Err.(*server.HttpStatusError); ok && statusOrigins[index] && value != nil {
+			switch value.StatusCode {
+			case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+				continue
 			}
+			return false
 		}
-		return found
-	}
-	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		return retryablePaymentReadError(wrapped.Unwrap(), transport)
-	}
-	if !transport {
+		if !transportOrigins[index] || node.Err == context.Canceled {
+			return false
+		}
+		if node.Err == context.DeadlineExceeded || node.Err == io.EOF || node.Err == io.ErrUnexpectedEOF || node.Err == net.ErrClosed || node.Err == syscall.ECONNRESET || node.Err == syscall.ECONNREFUSED || node.Err == syscall.EPIPE || node.Err == syscall.ETIMEDOUT || node.Err == syscall.ENETUNREACH || node.Err == syscall.EHOSTUNREACH {
+			continue
+		}
+		if network, ok := node.Err.(net.Error); ok && (network.Timeout() || network.Temporary()) {
+			continue
+		}
 		return false
 	}
-	if err == context.DeadlineExceeded || err == io.EOF || err == io.ErrUnexpectedEOF || err == net.ErrClosed || err == syscall.ECONNRESET || err == syscall.ECONNREFUSED || err == syscall.EPIPE || err == syscall.ETIMEDOUT || err == syscall.ENETUNREACH || err == syscall.EHOSTUNREACH {
-		return true
-	}
-	if network, ok := err.(net.Error); ok {
-		return network.Timeout() || network.Temporary()
-	}
-	return false
+	return true
 }

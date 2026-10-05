@@ -31,6 +31,7 @@ func TestRunShutdownDoesNotWaitForLogSink(t *testing.T) {
 		handbackDone: make(chan struct{}),
 	}
 	done := make(chan error, 1)
+	started := make(chan struct{})
 	go func() {
 		done <- runWithDependenciesAndDrainLogger(
 			ctx,
@@ -38,11 +39,15 @@ func TestRunShutdownDoesNotWaitForLogSink(t *testing.T) {
 			func(context.Context) error { return nil },
 			func(context.Context) func() { return func() {} },
 			func(runCtx context.Context, _ string, _ http.Handler, _ bool, _ server.HttpServerOptions) error {
+				<-started
 				cancel()
 				<-runCtx.Done()
 				return nil
 			},
-			func(context.Context, context.CancelFunc, RunOptions) taskworkerRuntime { return runtime },
+			func(context.Context, context.Context, context.CancelFunc, RunOptions) (taskworkerRuntime, error) {
+				close(started)
+				return runtime, nil
+			},
 			func(string, ...any) {
 				logEntered <- struct{}{}
 				<-releaseLog

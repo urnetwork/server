@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -19,9 +20,11 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/urfoundation/sn/payoutartifact"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/stabi"
 	"github.com/urfoundation/sn/validator"
@@ -46,11 +49,17 @@ func stPayoutPolicyBoundary(block uint64) protocol.ClientKeyEffectiveBoundary {
 	if block >= 200 {
 		epoch = 1 + (block-200)/50
 	}
-	return protocol.ClientKeyEffectiveBoundary{Block: block, Hash: [32]byte(crypto.Keccak256Hash([]byte(fmt.Sprintf("synthetic-policy-block-%d", block)))), Epoch: epoch}
+	return protocol.ClientKeyEffectiveBoundary{Block: block, Hash: [32]byte(stPayoutPolicyHeader(block).Hash()), Epoch: epoch}
 }
 
 func stPayoutPolicyTime(block uint64) time.Time {
 	return time.Unix(1_700_000_000+int64(block)*12, 0).UTC()
+}
+
+// The original Frontier commitment uses milliseconds while its public JSON
+// clock renders seconds. Every boundary uses this same recoverable RLP15 hash.
+func stPayoutPolicyHeader(block uint64) *types.Header {
+	return &types.Header{Number: new(big.Int).SetUint64(block), Time: uint64(stPayoutPolicyTime(block).UnixMilli()), Difficulty: big.NewInt(0), GasLimit: 1, Extra: []byte{7}}
 }
 
 func stPayoutPolicySnapshot(epoch uint64) stabi.STCoordinatorPolicySnapshot {
@@ -116,7 +125,16 @@ func (self *stPayoutPolicyRpcFixture) GetBlockByNumber(ctx context.Context, tag 
 	if fault == "missing-time" && block == 100 {
 		return map[string]any{"number": hexutil.EncodeUint64(block), "hash": common.Hash(boundary.Hash)}, nil
 	}
-	return map[string]any{"number": hexutil.EncodeUint64(block), "hash": common.Hash(boundary.Hash), "timestamp": stamp}, nil
+	raw, err := json.Marshal(stPayoutPolicyHeader(block))
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	fields["hash"], fields["timestamp"] = common.Hash(boundary.Hash), stamp
+	return fields, nil
 }
 
 func (self *stPayoutPolicyRpcFixture) Call(ctx context.Context, call map[string]hexutil.Bytes, selector rpc.BlockNumberOrHash) (hexutil.Bytes, error) {
@@ -238,6 +256,32 @@ func newStPayoutPolicyFixture(t testing.TB, noId uint64) (*stPayoutPolicyRpcFixt
 		return client
 	}
 	return fixture, credential, &cfg, restart
+}
+
+// No SDK owner has enrolled or produced work in this fixture. An independent
+// signed empty roster proves that fact; an empty SQL query alone cannot. Epoch
+// and clock still come through the actual policy RPC reader used by payout.
+func stPayoutPolicyEmptyWorkAuthority(t testing.TB, cfg *StConfig, client *CoreStClient, epoch uint64) (payoutartifact.WholeWorkAuthority, [32]byte) {
+	t.Helper()
+	boundary, err := client.PayoutEpochAuthority(t.Context(), epoch)
+	if err != nil || boundary == nil || len(boundary.StartHeader) == 0 || len(boundary.EndHeader) == 0 || boundary.ClockProfile != payoutartifact.FrontierWindowClockProfile {
+		t.Fatal("fresh payout fixture lacks original authenticated Frontier clock", err)
+	}
+	domain := protocol.ClientKeyHistoryDomain{ChainID: cfg.ChainId, GenesisHash: cfg.GenesisHash, Netuid: uint16(cfg.Netuid), Coordinator: cfg.ContractAddress, SettlementVault: cfg.SettlementVault, DeploymentIDHash: sha256.Sum256([]byte(cfg.DeploymentId)), PolicyHash: boundary.PolicyHash, NoID: cfg.NoId}
+	domainHash, err := domain.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	approver := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{83}, ed25519.SeedSize))
+	publicKey := [32]byte(approver.Public().(ed25519.PublicKey))
+	root := crypto.PubkeyToAddress(cfg.RootKey.PublicKey)
+	t.Cleanup(server.Vault.PushSimpleResource("provider_work.yml", []byte(fmt.Sprintf("schema: %s\ndomain_hash: %x\nrequest_public_key: %x\nauthority_signer: %s\nclient_key_root_signer: %s\n", ProviderWorkPolicySchema, domainHash, publicKey, root.Hex(), root.Hex()))))
+	authority := payoutartifact.WholeWorkAuthority{Domain: domain, Epoch: epoch, Start: payoutartifact.Boundary{Number: boundary.Start.Block, Hash: common.Hash(boundary.Start.Hash).Hex()}, End: payoutartifact.Boundary{Number: boundary.End.Block, Hash: common.Hash(boundary.End.Hash).Hex()}, RequestPublicKey: publicKey, ClockProfile: boundary.ClockProfile, Owners: []payoutartifact.WholeWorkOwner{}, ExpectedProviders: []payoutartifact.WholeWorkExpectedProvider{}, PriorContracts: []payoutartifact.WholeWorkPriorContract{}}
+	authority, err = payoutartifact.SignWholeWorkAuthority(t.Context(), authority, cfg.RootKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return authority, domainHash
 }
 
 // Exact original payouts are created before rollover and never rewritten by
@@ -503,6 +547,7 @@ func TestStPayoutPolicyRolloverRejectsMissingCorruptAndForeignAuthority(t *testi
 // usage or leaves; the successor policy cannot be backdated into epoch zero.
 func TestStPayoutPolicyRolloverFreshIssuanceRejectsBackdating(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		controllerPayoutSchedule(tb, stPayoutPolicyTime(100))
 		fixture, _, cfg, restart := newStPayoutPolicyFixture(tb, 1)
 		client := restart()
 		for _, fault := range []string{"", "missing-history", "foreign-history"} {
@@ -515,6 +560,20 @@ func TestStPayoutPolicyRolloverFreshIssuanceRejectsBackdating(t *testing.T) {
 			}
 		}
 		fixture.configure(275, "")
+		workAuthority, domainHash := stPayoutPolicyEmptyWorkAuthority(tb, cfg, client, 1)
+		if _, _, err := stComputeReleasePayout(tb.Context(), cfg, client, 1, stPayoutPolicyTime(200), stPayoutPolicyTime(250), 200, 250, nil); !errors.Is(err, protocol.ErrWalletMappingUnavailable) {
+			tb.Fatal("fresh epoch without independently approved provider authority escaped pending", err)
+		}
+		if model.GetStPayoutArtifact(tb.Context(), cfg.DeploymentKey(), 1, cfg.NoId) != nil {
+			tb.Fatal("missing provider authority published a fresh artifact")
+		}
+		authorityRaw, err := workAuthority.Bytes(tb.Context())
+		if err != nil {
+			tb.Fatal(err)
+		}
+		if _, err := model.RetainProviderWorkAuthority(tb.Context(), authorityRaw, domainHash, workAuthority.RequestPublicKey, crypto.PubkeyToAddress(cfg.RootKey.PublicKey)); err != nil {
+			tb.Fatal(err)
+		}
 		if _, _, err := stComputeReleasePayout(tb.Context(), cfg, client, 1, stPayoutPolicyTime(200), stPayoutPolicyTime(250), 200, 250, nil); err != nil {
 			tb.Fatal("fresh successor-policy epoch failed", err)
 		}
@@ -522,9 +581,60 @@ func TestStPayoutPolicyRolloverFreshIssuanceRejectsBackdating(t *testing.T) {
 		if prior == nil {
 			tb.Fatal("fresh epoch artifact missing")
 		}
+		store, ok := server.LoadBlobStore()
+		if !ok {
+			tb.Fatal("fresh payout store is unavailable")
+		}
+		artifact, raw, err := startifact.Read(tb.Context(), store, prior.ContentHash)
+		if err != nil || artifact == nil || artifact.ClosedWork == nil || artifact.ClosedWork.WholeInventory == nil || artifact.ClosedWork.WholeInventory.Clock == nil || artifact.ClosedWork.WholeInventory.Clock.HeaderProfile != payoutartifact.FrontierWindowClockProfile || len(artifact.Providers) != 0 {
+			tb.Fatal("fresh epoch omitted its independently known-empty original work", err)
+		}
+		boundary, err := client.PayoutEpochAuthority(tb.Context(), 1)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		approved, err := stLoadProviderWorkAuthority(tb.Context(), cfg, boundary)
+		if err != nil || approved == nil {
+			tb.Fatal("fresh provider authority is unavailable", err)
+		}
+		verified, err := payoutartifact.VerifyWholeWorkInventory(tb.Context(), artifact, approved.Expectation)
+		if err != nil || verified == nil || !verified.Complete || verified.Contracts != 0 || len(verified.ExpectedProviders) != 0 {
+			tb.Fatal("original empty window failed independent verification", verified, err)
+		}
 		fixture.configure(275, "missing-history")
 		if _, _, err := stComputeReleasePayout(tb.Context(), cfg, client, 1, time.Time{}, time.Time{}, 0, 0, nil); err != nil {
 			tb.Fatal("immutable retry demanded current authority", err)
+		}
+		_, again, err := startifact.Read(tb.Context(), store, prior.ContentHash)
+		if err != nil || !bytes.Equal(raw, again) {
+			tb.Fatal("fresh original authority was reinterpreted on immutable retry", err)
+		}
+	})
+}
+
+// Existing signed artifacts are consumed without a backfill or re-signature.
+// This retained-only test stays portable; it requires no new SDK custody.
+func TestStClosedWorkLegacyPublishedArtifactRemainsExactOnRetry(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		fixture, _, cfg, restart := newStPayoutPolicyFixture(t, 1)
+		original, record := stRetainPolicyPayout(t, cfg)
+		fixture.configure(275, "missing-history")
+		if _, _, err := stComputeReleasePayout(t.Context(), cfg, restart(), 0, time.Time{}, time.Time{}, 0, 0, nil); err != nil {
+			t.Fatal("legacy original retry demanded component backfill", err)
+		}
+		store, ok := server.LoadBlobStore()
+		if !ok {
+			t.Fatal("original store is absent")
+		}
+		artifact, again, err := startifact.Read(t.Context(), store, record.ContentHash)
+		if err != nil || artifact.ClosedWork != nil || !bytes.Equal(original, again) {
+			t.Fatal("legacy published bytes changed on rolling retry", err)
+		}
+		var wire map[string]json.RawMessage
+		if err := json.Unmarshal(again, &wire); err != nil || wire["original_closed_work"] != nil {
+			t.Fatal("legacy original acquired a serialized evidence claim", err)
 		}
 	})
 }

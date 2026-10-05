@@ -170,7 +170,7 @@ func (self *nativeStorageTrie) read(ctx context.Context, root [32]byte, key []by
 			var present bool
 			raw, present = self.blobs[hash]
 			if !present {
-				return nil, false, errors.New("native storage proof is incomplete: missing node")
+				return nil, false, fmt.Errorf("%w: missing node", ErrNativeStorageIncomplete)
 			}
 		} else {
 			hash = blake2b.Sum256(raw)
@@ -208,7 +208,7 @@ func (self *nativeStorageTrie) read(ctx context.Context, root [32]byte, key []by
 				var present bool
 				value, present = self.blobs[valueHash]
 				if !present {
-					return nil, false, errors.New("native storage proof is incomplete: missing value")
+					return nil, false, fmt.Errorf("%w: missing value", ErrNativeStorageIncomplete)
 				}
 			}
 			return value, true, nil
@@ -229,7 +229,13 @@ func (self *nativeStorageTrie) read(ctx context.Context, root [32]byte, key []by
 // This internal primitive verifies only math against a supplied root. The sole
 // public entry point derives that root by replaying receipt and finality proofs.
 func verifyNativeStorageReads(ctx context.Context, root string, nodes []string, reads []NativeStorageRead) ([]NativeStorageRead, error) {
-	if ctx == nil || !canonicalHex(root, 32) || len(nodes) > maximumNativeStorageNodes || len(reads) == 0 || len(reads) > maximumNativeStorageReads {
+	return verifyBoundedNativeStorageReads(ctx, root, nodes, reads, maximumNativeStorageReads, maximumNativeStorageNodes)
+}
+
+// Both public profiles supply fixed limits. One invocation decodes/hashes each
+// node once and shares its byte budget across all keys and claimed values.
+func verifyBoundedNativeStorageReads(ctx context.Context, root string, nodes []string, reads []NativeStorageRead, maximumReads, maximumNodes int) ([]NativeStorageRead, error) {
+	if ctx == nil || !canonicalHex(root, 32) || len(nodes) > maximumNodes || len(reads) == 0 || len(reads) > maximumReads {
 		return nil, errors.New("native storage root or count differs")
 	}
 	if err := ctx.Err(); err != nil {

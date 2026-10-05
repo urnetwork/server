@@ -19,6 +19,8 @@ func addStContractUsageSnapshotTestRow(t testing.TB, ctx context.Context, closeT
 
 // Terminal variants are seeded with their original verdict, never rewritten
 // after insertion now that the database protects exact epoch attribution.
+// Missing credit-bearing snapshots belong before migration 745; apply current
+// migrations before reading them instead of disabling the live settlement guard.
 func addStContractUsageSnapshotTestOutcome(t testing.TB, ctx context.Context, closeTime time.Time, snapshot *contractUsageSnapshot, outcome ContractOutcome) server.Id {
 	t.Helper()
 	contractId := server.NewId()
