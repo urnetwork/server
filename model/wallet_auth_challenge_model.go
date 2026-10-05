@@ -201,7 +201,14 @@ type UseWalletAuthChallengeArgs struct {
 
 type UseWalletAuthChallengeResult struct {
 	Valid bool
-	Error *WalletAuthChallengeResultError
+	// a signature that decoded cleanly but does not verify for PublicKey over
+	// Message (`401 invalid signature`), as distinct from malformed input and a
+	// wrong, used or expired challenge. An sr25519 signature cannot be
+	// recovered to the key that made it, so this cannot say which key (or
+	// which text) was signed, only that it was not this address over this
+	// message.
+	SignatureMismatch bool
+	Error             *WalletAuthChallengeResultError
 }
 
 func UseWalletAuthChallenge(
@@ -293,8 +300,9 @@ func UseWalletAuthChallenge(
 	}
 	if !isValid {
 		return &UseWalletAuthChallengeResult{
-			Valid: false,
-			Error: &WalletAuthChallengeResultError{Message: "401 invalid signature"},
+			Valid:             false,
+			SignatureMismatch: true,
+			Error:             &WalletAuthChallengeResultError{Message: "401 invalid signature"},
 		}, nil
 	}
 
