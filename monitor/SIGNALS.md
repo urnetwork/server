@@ -4791,6 +4791,19 @@ task continuation gate passed. These are local controls, not Main throughput
 or attribution of its current backlog; require current qualified task outcomes,
 queue ages and progress before claiming production recovery.
 
+Growing-tail qualifier (2026-10-05): busy owners retain their original due key.
+An advancing cursor that wraps only after exhausting all later due work can
+skip an available old owner indefinitely while new tail rows keep arriving.
+The cursor now persists the first selection's database-clock `pass_end_time`;
+continued selections retain that indexed upper bound until the pass wraps.
+Older persisted cursors establish the bound on their first continuation.
+New arrivals and deferred accounting retries beyond the cutoff wait for a later
+pass. This bounds the cohort, not its size or elapsed duration: a large existing
+backlog can still delay revisits. Native locked-owner/release controls with new
+arrivals before every page reproduce the old starvation, then verify revisits,
+exact payer/provider accounting and empty replay with either cursor format.
+Require fresh source-qualified age reduction before claiming Main recovery.
+
 Clock, legacy reservation mirror and stream cleanup remain post-commit
 projections: the clock uses its existing aggregate backfill with its documented
 ambiguity; the mirror is rebuilt from durable revisions; mixed Redis reservation
