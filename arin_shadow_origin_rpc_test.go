@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/maxmind/mmdbwriter/mmdbtype"
 	mmdb "github.com/oschwald/maxminddb-golang/v2"
@@ -97,5 +98,52 @@ func testArinOriginCurrentOwnerResearchRPC(t *testing.T, originState string) {
 		if bytes.Contains(encoded, []byte(private)) {
 			t.Fatal("private source identity escaped aggregate")
 		}
+	}
+}
+
+// Coordinator-first rollout accepts the exact old row schema as unattributed.
+// The old strict decoder must refuse the new origin field rather than silently
+// discard research identity; this documents the required producer rollout order.
+func TestArinOriginCoordinatorFirstWireCompatibility(t *testing.T) {
+	type legacyRow struct {
+		ConnectionId Id                     `json:"connection_id"`
+		ClientId     Id                     `json:"client_id"`
+		HandlerId    Id                     `json:"handler_id"`
+		ActualAt     time.Time              `json:"actual_at"`
+		ObservedAt   time.Time              `json:"observed_at"`
+		CapturedAt   time.Time              `json:"captured_at"`
+		State        string                 `json:"state"`
+		Risk         bool                   `json:"risk"`
+		ProxyRisk    bool                   `json:"proxy_risk"`
+		Verified     bool                   `json:"verified"`
+		Reason       string                 `json:"reason"`
+		Registration ArinShadowRegistration `json:"registration"`
+	}
+	type legacyReply struct {
+		Pins ArinShadowResourcePins `json:"pins"`
+		Rows []legacyRow            `json:"rows"`
+	}
+	now := NowUtc()
+	old := legacyReply{Pins: ArinShadowResourcePins{ActiveSHA256: strings.Repeat("ab", 32), CandidateSHA256: strings.Repeat("cd", 32), ActiveEpoch: 1, CandidateEpoch: 2}, Rows: []legacyRow{{ConnectionId: NewId(), ClientId: NewId(), HandlerId: NewId(), ActualAt: now, ObservedAt: now, CapturedAt: now, State: "unknown", Reason: "qualified"}}}
+	legacyBytes, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var received arinShadowCaptureRPCReply
+	if DecodeArinShadowRPC(legacyBytes, &received) != nil || received.Pins != old.Pins || len(received.Rows) != 1 || received.Rows[0].ConnectionId != old.Rows[0].ConnectionId || !validArinShadowOrigin(received.Rows[0].Origin) || len(received.Rows[0].Origin.ASNs) != 0 || received.Rows[0].Origin.UseState != "" {
+		t.Fatal("new coordinator rejected or invented legacy origin evidence")
+	}
+	received.Rows[0].Origin = newArinShadowOrigin([]uint32{12345, 12346}, "unknown")
+	currentBytes, err := json.Marshal(received)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var current arinShadowCaptureRPCReply
+	if DecodeArinShadowRPC(currentBytes, &current) != nil || !slices.Equal(current.Rows[0].Origin.ASNs, []uint32{12345, 12346}) || current.Rows[0].Origin.UseState != "unknown" {
+		t.Fatal("new coordinator lost typed origin identity")
+	}
+	var oldConsumer legacyReply
+	if DecodeArinShadowRPC(currentBytes, &oldConsumer) != ErrArinShadowInput {
+		t.Fatal("old strict coordinator accepted an unrecognized origin field")
 	}
 }

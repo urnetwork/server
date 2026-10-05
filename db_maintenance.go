@@ -48,6 +48,7 @@ var dbMaintenanceSkipReindexTables = map[string]bool{
 	"client_reliability":                  true,
 	"contract_participant":                true,
 	"contract_close":                      true,
+	"network_client":                      true,
 	"network_client_location_reliability": true,
 	"network_client_connection":           true,
 	"transfer_contract":                   true,

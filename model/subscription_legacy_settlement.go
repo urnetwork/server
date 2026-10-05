@@ -14,9 +14,12 @@ const LegacySettlementShardCount = 16
 var errLegacySettlementPending = errors.New("legacy settlement is durably pending")
 var errLegacySettlementPageBudget = errors.New("legacy settlement page budget elapsed")
 
+// The fixed pass cutoff lets skipped owners return after a finite cohort.
+// It bounds traversal growth, not elapsed time or the existing cohort size.
 type LegacySettlementCursor struct {
 	NextAttemptTime time.Time `json:"next_attempt_time"`
 	ContractId      server.Id `json:"contract_id"`
+	PassEndTime     time.Time `json:"pass_end_time,omitzero"`
 }
 
 type LegacySettlementFlushResult struct {
@@ -51,6 +54,16 @@ func queueLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId s
 	}
 	return nil
 }
+
+// Count only this contract's joined grants without a parallel startup driven
+// by distorted historical cardinality. Missing grants keep the original inner-
+// join semantics. The subsequent sorted SKIP LOCKED ownership check is unchanged.
+const legacySettlementExpectedGrantCountSQL = `SELECT count(*)
+ FROM unnest(ARRAY[$1::uuid]) AS requested_contract(contract_id)
+ CROSS JOIN LATERAL (SELECT balance_id FROM transfer_escrow
+   WHERE contract_id=requested_contract.contract_id OFFSET 0) AS escrow
+ CROSS JOIN LATERAL (SELECT 1 FROM transfer_balance
+   WHERE balance_id=escrow.balance_id OFFSET 0) AS balance`
 
 // No ownership is inferred from a statement snapshot. Both the queue item and
 // contract, then every grant, are acquired with SKIP LOCKED. Busy owners leave
@@ -89,7 +102,7 @@ func flushLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId s
 	}
 	{
 		var expected int
-		server.Raise(tx.QueryRow(ctx, `SELECT count(*) FROM transfer_escrow JOIN transfer_balance USING(balance_id) WHERE contract_id=$1`, contractId).Scan(&expected))
+		server.Raise(tx.QueryRow(ctx, legacySettlementExpectedGrantCountSQL, contractId).Scan(&expected))
 		locked := 0
 		rows, err = tx.Query(ctx, `SELECT balance.balance_id FROM transfer_balance AS balance
           INNER JOIN transfer_escrow AS escrow USING(balance_id) WHERE escrow.contract_id=$1
@@ -139,10 +152,11 @@ func flushLegacySettlement(ctx context.Context, contractId server.Id) (completed
 	return
 }
 
-// Each statement takes a fresh cutoff that bounds the due-time index. A
-// per-row volatile clock would scan future rows even with LIMIT 1. Failed accounting
-// remains visible and reserved; it is not quarantined or retried in a hot loop.
-// Each next task owns a fresh bounded page and persists this composite cursor.
+// The first selection fixes a database-clock cutoff for this traversal. New due
+// arrivals cannot extend its tail forever and starve earlier busy intents. Each
+// statement retains an indexable due bound; a volatile clock would scan future
+// rows even with LIMIT 1. Failed accounting stays visible, reserved and deferred.
+// Each task owns a bounded page and persists the cursor and fixed pass cutoff.
 // Exhausting this page's own budget after progress yields its completed prefix;
 // it must not turn durable per-contract progress into a task-wide error backoff.
 func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlementCursor, limit int) (result LegacySettlementFlushResult, returnErr error) {
@@ -164,21 +178,28 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 		for range limit {
 			var next *LegacySettlementCursor
 			server.Db(bounded, func(conn server.PgConn) {
-				query := `SELECT next_attempt_time,contract_id FROM legacy_settlement_intent
+				query := `SELECT next_attempt_time,contract_id,statement_timestamp() AT TIME ZONE 'UTC' FROM legacy_settlement_intent
                   WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
                   ORDER BY next_attempt_time,contract_id LIMIT 1`
 				args := []any{shard}
 				if after != nil {
-					query = `SELECT next_attempt_time,contract_id FROM legacy_settlement_intent
+					// Older task cursors have no cutoff. Establish it once on
+					// their first continuation, then preserve it across pages.
+					var passEndTime any
+					if !after.PassEndTime.IsZero() {
+						passEndTime = after.PassEndTime
+					}
+					query = `SELECT next_attempt_time,contract_id,COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC') FROM legacy_settlement_intent
                       WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
+                      AND next_attempt_time<=COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC')
                       AND (next_attempt_time,contract_id)>($2,$3) ORDER BY next_attempt_time,contract_id LIMIT 1`
-					args = append(args, after.NextAttemptTime, after.ContractId)
+					args = append(args, after.NextAttemptTime, after.ContractId, passEndTime)
 				}
 				rows, err := conn.Query(bounded, query, args...)
 				server.WithPgResult(rows, err, func() {
 					if rows.Next() {
 						value := LegacySettlementCursor{}
-						server.Raise(rows.Scan(&value.NextAttemptTime, &value.ContractId))
+						server.Raise(rows.Scan(&value.NextAttemptTime, &value.ContractId, &value.PassEndTime))
 						next = &value
 					}
 				})

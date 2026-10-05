@@ -11,6 +11,7 @@ func TestDbMaintenanceSkipsWholeReindexForLargeHighChurnTables(t *testing.T) {
 	for _, tableName := range []string{
 		"contract_participant",
 		"contract_close",
+		"network_client",
 		"transfer_contract",
 		"transfer_escrow",
 		"transfer_escrow_sweep",
@@ -18,6 +19,14 @@ func TestDbMaintenanceSkipsWholeReindexForLargeHighChurnTables(t *testing.T) {
 		if dbMaintenanceShouldReindexTable(tableName) {
 			t.Fatalf("%s would still be rebuilt as a whole", tableName)
 		}
+	}
+	opts := DefaultDbMaintenanceOptions()
+	if !opts.Cleanup || !opts.Analyze || !opts.Reindex {
+		t.Fatal("table exclusion changed the default maintenance actions")
+	}
+	steps := dbMaintenanceObjectSteps(opts.Cleanup, opts.Reindex && dbMaintenanceShouldReindexTable("network_client"))
+	if !slices.Equal(steps, []dbMaintenanceObjectStep{dbMaintenanceCleanupBefore}) {
+		t.Fatalf("excluded network_client steps = %v, want cleanup without a whole-table rebuild", steps)
 	}
 	if !dbMaintenanceShouldReindexTable("account_feedback") {
 		t.Fatal("ordinary table was excluded from the reindex rotation")

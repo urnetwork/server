@@ -1114,24 +1114,33 @@ func TestLogErrorsSignalExplainsLegacyDatabaseMaintenanceReindex(t *testing.T) {
 		"client_reliability",
 		"client_reliability_p20260901",
 		"contract_close",
+		"network_client",
 		"network_client_location_reliability",
 		"network_client_connection",
 		"transfer_contract",
 		"transfer_escrow",
 		"transfer_escrow_sweep",
 	} {
-		line := "[db]maintenance reindex[1/22] " + tableName
-		if !dbMaintenanceLegacyReindexRe.MatchString(line) {
-			t.Fatalf("excluded table %s is not recognized in the legacy start format", tableName)
-		}
-		if got := dbMaintenanceLegacyReindexLogGroup(line); got != "table="+tableName {
-			t.Fatalf("excluded table %s has frame %q", tableName, got)
+		for _, prefix := range []string{"[db]maintenance reindex[1/22] ", "[db]maintenance table[1/22] reindex "} {
+			line := prefix + tableName
+			if !dbMaintenanceLegacyReindexRe.MatchString(line) {
+				t.Fatalf("excluded table %s is not recognized with prefix %q", tableName, prefix)
+			}
+			if got := dbMaintenanceLegacyReindexLogGroup(line); got != "table="+tableName {
+				t.Fatalf("excluded table %s has frame %q", tableName, got)
+			}
 		}
 	}
 
 	queryLines := strings.Join([]string{
-		// The fixed table/step state machine and an ordinary old-format table
-		// are not evidence that an excluded full-table rebuild was selected.
+		`[db]maintenance table[1/22] cleanup-before network_client`,
+		`[db]maintenance table[1/22] cleanup-after network_client`,
+		`[db]maintenance table[1/22] reindex account_feedback`,
+		`[db]maintenance table[1/22] reindex network_client took 300.00s`,
+		`[db]maintenance table[1/22] reindex network_client_ccnew`,
+		`[db]maintenance table[1/22] reindex`,
+		// Cleanup, ordinary tables, incomplete lines, and completion messages
+		// do not prove a new excluded-table rebuild was selected.
 		`[edge-3][taskworker][g2][cid:fixed][I][2026-09-01T11:50:38.900708-05:00][db_maintenance.go:300][db]maintenance table[16/22] cleanup-before transfer_escrow`,
 		`[edge-3][taskworker][g2][cid:ordinary][I][2026-09-01T11:50:38.900708-05:00][db_maintenance.go:225][db]maintenance reindex[1/22] st_epoch`,
 		// A completion line is not a second launch event.
@@ -1167,7 +1176,9 @@ func TestLogErrorsSignalExplainsLegacyDatabaseMaintenanceReindex(t *testing.T) {
 	}
 	for _, detail := range []string{
 		"frame=table=contract_close",
-		"legacy full-table concurrent-reindex path",
+		"excluded from scheduled whole-table concurrent reindexing",
+		"Log format alone does not identify a worker revision",
+		"measure native process CPU separately",
 		"908a8b2c",
 		"d8392c83",
 		"patch-identical",
@@ -1179,12 +1190,22 @@ func TestLogErrorsSignalExplainsLegacyDatabaseMaintenanceReindex(t *testing.T) {
 		"cancellation is a database mutation and requires authorization",
 		"supported cleanup-only maintenance command",
 		"never wildcard-drop _ccnew/_ccold indexes",
-		"one complete maintenance epoch emits no legacy start line",
+		"one complete maintenance epoch emits no excluded-table start line in either format",
 	} {
 		if !strings.Contains(alert.Markdown(), detail) {
 			t.Fatalf("legacy maintenance alert missing %q:\n%s", detail, alert.Markdown())
 		}
 	}
+	queryLines = `[edge-3][taskworker][g2][cid:current][I][2026-10-05T04:00:00Z][db_maintenance.go:291][db]maintenance table[1/22] reindex network_client`
+	alerts, err = NewLogErrorsSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alert = requireAlertClass(t, alerts, "db-maintenance-legacy-reindex")
+	if alert.Frame != "table=network_client" || alert.Severity != SeverityPage {
+		t.Fatalf("current-format network_client alert = %s", alert.Markdown())
+	}
+
 }
 
 func TestLogErrorsSignalSeparatesPostgresClientExhaustionFromPanic(t *testing.T) {

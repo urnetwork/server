@@ -781,7 +781,7 @@ before or after activation, actual resource and process observations establish
 which classifier was used. Operational receipts retain those release-specific
 claims. Main execution follows [RUN-MAIN.md](../monitor/RUN-MAIN.md).
 
-### Qualified v13 artifact and publication (2026-10-05)
+### Qualified v13 artifact and Config selection (2026-10-05)
 
 The full normal update completed with every requested evidence source
 available. Its final artifact is:
@@ -805,14 +805,18 @@ inside identified subscriber-carrier networks. Those samples qualify the
 specified controls; they do not claim every published prefix or live provider
 was measured.
 
-The 592 MB file exceeds the legacy 512 MiB capture limit. The qualified c343
+The 592 MB file exceeds the legacy 512 MiB shadow snapshot limit. The qualified c343
 consumer graph keeps the legacy snapshot refusal and uses a bounded 1 GiB
 mapped capture reader. Its focused tests also qualify typed Origin replies and
 maximum wire size. Select the compatible standalone coordinator before using
 new Connect capture replies: the new decoder accepts omitted legacy Origin
 fields, while the old strict decoder refuses the new field. The host bridge
 forwards bounded opaque replies; the typed interpretation belongs to the
-coordinator.
+coordinator. These file limits belong to shadow instrumentation. The active
+serving reader is byte-identical in the preceding 536c and qualified c343
+graphs: it opens the selected MMDB directly without that 512 MiB limit. The
+capture cap therefore does not impose a full-fleet consumer upgrade before
+the new resource can load; actual loaded-resource identity still needs proof.
 
 Physical staging preserved the complete selected active-v7 Config baseline,
 including policy two and the native reader setting, and added exactly seven
@@ -822,13 +826,19 @@ comparison. The actual c343 native resolver selected all three new resource
 paths, and its serving ARIN reader loaded epoch `1791162091`. Both published
 image architectures were extracted and checked against that tree.
 
-**This checkpoint proves the artifact, local staging and registry publication;
-Main Config activation and loaded-consumer convergence remain unverified.**
-The release manifest records `selection_executed: false` and
-`runtime_identity_proven: false`; later selector and process receipts must be
-recorded separately. The qualified c343 runtime graph uses schema 763; a newer
-canonical source revision or migration inventory is not evidence that a
-running process uses that graph.
+**Root's Main Config deployment completed successfully at
+`2026-10-05T06:07:50.840855Z`, selecting the version and OCI index above.
+Loaded-consumer convergence and recovered provider supply remain unverified.**
+The separate deployment receipt has exit status zero and SHA-256
+`ccea1d2e8235eda5ef47209a70a5708c59329a1abb6d488915c968a8ff286551`;
+it retains `runtime_resource_identity_proven: false` and
+`provider_supply_proven: false`. The immutable publication manifest's
+`selection_executed: false` describes its earlier publication checkpoint,
+not this later selection. The typed coordinator was selected locally before
+the Connect rollout, but neither that selection nor the service deployment
+receipts establish fleet-wide adoption. The qualified c343 runtime graph uses
+schema 763; a newer canonical source revision or migration inventory is not
+evidence that a running process uses that graph.
 
 Freshness is also bounded. The pinned RIS IPv4 snapshot was observed at
 `2026-10-04T18:03:14Z` and expires at `2026-10-06T18:03:14Z`; IPv6 was observed
