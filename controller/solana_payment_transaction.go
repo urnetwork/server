@@ -35,9 +35,9 @@ import (
 //     the payment url, which the Helius webhook credits by reference. The
 //     amount is the quote with its unique suffix, so the memo-less match
 //     would identify it too.
-//   - The recipient and the mint are the ones the webhook credits
-//     (solanaReceiverAddresses[0], solanaUsdcMint). Nothing in the request can
-//     change them or the amount.
+//   - The recipient and the mint are the ones every intent quotes and the
+//     webhook credits (solanaPaymentRecipient, solanaUsdcMint). Nothing in the
+//     request can change them or the amount.
 //   - The payer is the fee payer and the only signer. The server handles no
 //     keys and signs nothing; the wallet shows the transfer before it signs.
 //   - The recent blockhash comes from the server's Helius rpc. That request
@@ -164,7 +164,13 @@ func CreateSolanaPaymentTransaction(
 		), nil
 	}
 
-	transaction, err := solanaPaymentTransaction(payer, referenceKey, uint64(amountMicro), recentBlockhash)
+	// the receiver every intent quotes; a client checks the transfer against
+	// the recipient its own quote named before the wallet signs
+	recipient, err := solana.PublicKeyFromBase58(solanaPaymentRecipient())
+	var transaction *solana.Transaction
+	if err == nil {
+		transaction, err = solanaPaymentTransaction(payer, recipient, referenceKey, uint64(amountMicro), recentBlockhash)
+	}
 	var transactionBytes []byte
 	if err == nil {
 		transactionBytes, err = transaction.MarshalBinary()
@@ -183,19 +189,16 @@ func CreateSolanaPaymentTransaction(
 	}, nil
 }
 
-// solanaPaymentTransaction is the unsigned USDC transfer of amountMicro from
-// payer to the merchant, carrying reference as the memo and as a read-only
-// account, the way a wallet builds it from a Solana Pay url (memo first).
+// The unsigned USDC transfer of amountMicro from payer to recipient (the
+// merchant), carrying reference as the memo and as a read-only account, the
+// way a wallet builds it from a Solana Pay url (memo first).
 func solanaPaymentTransaction(
 	payer solana.PublicKey,
+	recipient solana.PublicKey,
 	reference solana.PublicKey,
 	amountMicro uint64,
 	recentBlockhash solana.Hash,
 ) (*solana.Transaction, error) {
-	recipient, err := solana.PublicKeyFromBase58(solanaReceiverAddresses[0])
-	if err != nil {
-		return nil, err
-	}
 	mint, err := solana.PublicKeyFromBase58(solanaUsdcMint)
 	if err != nil {
 		return nil, err

@@ -1968,11 +1968,22 @@ type HeliusWebhookResult struct {
 
 const solanaUsdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
-// the webhook credits payments to any of these; the first is the one quoted
-// to clients (SolanaPaymentIntentResult.Recipient)
+// The one source of where a Solana Pay payment goes. The webhook credits a
+// USDC transfer to any of these; the first is the one every intent path
+// quotes (solanaPaymentRecipient). Clients pay the address the quote names
+// and keep none of their own, so rotating the receiver is an edit here: the
+// new address first, and the old one listed after it while payments quoted
+// to it can still arrive.
 var solanaReceiverAddresses = []string{
 	"4Fj9RCwJqHLdLNK28DwWHunHqWapxKbbzeYZLmreSYCM", // coinbase account address
 	"74UNdYRpvakSABaYHSZMQNaXBVtA6eY9Nt8chcqocKe7", // deprecating this
+}
+
+// The receiver a client is told to pay: the one every intent result names
+// (SolanaPaymentIntentResult.Recipient, PayDataSolanaIntentResult.Recipient)
+// and the one the browser-wallet transfer pays (CreateSolanaPaymentTransaction).
+func solanaPaymentRecipient() string {
+	return solanaReceiverAddresses[0]
 }
 
 // db lookups and writes HeliusWebhook makes, as seams so a test can drive a batch
@@ -2610,7 +2621,7 @@ func solanaPaymentIntentQuote(
 		RegularAmountUsd: regularUsd,
 		OfferApplied:     offerApplied,
 		Currency:         model.PriceTierCurrency,
-		Recipient:        solanaReceiverAddresses[0],
+		Recipient:        solanaPaymentRecipient(),
 		SplTokenMint:     solanaUsdcMint,
 	}
 }

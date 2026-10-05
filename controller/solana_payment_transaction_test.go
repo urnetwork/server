@@ -2,8 +2,10 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -28,26 +30,51 @@ import (
 // The browser-wallet transfer (POST /solana/payment-transaction). Built and
 // decoded offline: the intent lookup and the rpc are seams, nothing is sent.
 
-// pinned on purpose: the official merchant, the USDC mint, the merchant's USDC
-// token account (its associated token account, derived) and the programs
+// pinned on purpose: the USDC mint and the programs
 const (
-	solanaTestMerchant            = "4Fj9RCwJqHLdLNK28DwWHunHqWapxKbbzeYZLmreSYCM"
-	solanaTestUsdcMint            = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-	solanaTestMerchantUsdcAccount = "BSQfrMWAVTV6Z22pQmz9getrBB4eoNNEH6KxyYq9B2j6"
-	solanaTestTokenProgram        = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-	solanaTestMemoProgram         = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+	solanaTestUsdcMint     = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+	solanaTestTokenProgram = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+	solanaTestMemoProgram  = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
 
-	// fixture keys (sha256 of a fixed phrase), not wallets
-	solanaTestPayer            = "EvfsGBeCMZcgYphDZkyitoEe9HqWn2GZDyrMpuSngBGE"
-	solanaTestPayerUsdcAccount = "61XgyVCyMAtnghXkEqCQDUPiAEWvyDadjLjytcXDbgcc"
-	solanaTestReference        = "9LyJFGoWExmu98m1wn2LACRfhwQtmKUE8Bv2hwkCktBR"
-	solanaTestBlockhash        = "4Yj9uZgYU9PSzQVfJZWZEuVQxcAzcideeApkA27t3CCW"
+	// fixture keys (sha256 of a fixed phrase), not wallets: the merchant, a
+	// stand-in for the receiver being retired, the payer, the reference and
+	// the blockhash. The tests configure the merchant as the server's receiver
+	// (solanaTestReceivers); the official address stays out of test data.
+	solanaTestMerchant        = "835ygSFyB6b9Ghz5yXjv8QiiKDrzHA8rJzoVPChGJYmX"
+	solanaTestRetiredReceiver = "3zNbojjtBaA1KUhY1SJurrkgjzsPyRAPHtmqST7W5Q1N"
+	solanaTestPayer           = "EvfsGBeCMZcgYphDZkyitoEe9HqWn2GZDyrMpuSngBGE"
+	solanaTestReference       = "9LyJFGoWExmu98m1wn2LACRfhwQtmKUE8Bv2hwkCktBR"
+	solanaTestBlockhash       = "4Yj9uZgYU9PSzQVfJZWZEuVQxcAzcideeApkA27t3CCW"
+	// their USDC token accounts (associated token accounts, derived)
+	solanaTestMerchantUsdcAccount = "ALBe7k9w9FfxMUL2uzNYeV87Azurtjs69YLyPaSK7axo"
+	solanaTestPayerUsdcAccount    = "61XgyVCyMAtnghXkEqCQDUPiAEWvyDadjLjytcXDbgcc"
 
-	// the wire bytes of the fixture transfer of 40.004317 USDC; ur.io's
-	// verifier test (mmm ur.io/react tests/usdc-transfer.test.mjs) accepts
-	// exactly these
-	solanaTestTransferBase64 = "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAQHzueo1YwjMkDqsndkJzm2PkQI84CByKoWyvW5KciyK+NKbSKRHGMtg6L1xyxZfLY/5k2GUin6u19r52sol+exnZsXJy9y0AbkHkkzBK5FL6fEUJNrlPfFQTy4yZJfPk99BUpTWpkpIQZNJOhxYNo4fHw1td28kruB5B+oQEEFRI0G3fbh12Whk9nL4UbO63msHLSF7V9bN5E6jPWFfv8AqXv7L7edG2plPJCI9sZyjADAQn9uQkDUYf6CdaTHvF9Qxvp6877brTo9ZfNqq8l0MbG75MLS9uDkfKYCA0UvXWE0s7qiQ/Ayt+7UBcpiZ8soc9YWjgff52GAwxOtOoP1JwIDACw5THlKRkdvV0V4bXU5OG0xd24yTEFDUmZod1F0bUtVRThCdjJod2tDa3RCUgQFAQYCAAUKDN1qYgIAAAAABg=="
+	// the builder's wire bytes for the fixture transfer of 40.004317 USDC to
+	// the fixture merchant; ur.io's transfer fixture (mmm
+	// ur.io/react/tests/usdc-transfer-fixture.mjs, TRANSFER_BASE64) carries
+	// the same bytes, so its verifier test checks what this builder makes
+	solanaTestTransferBase64 = "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAQHzueo1YwjMkDqsndkJzm2PkQI84CByKoWyvW5KciyK+NKbSKRHGMtg6L1xyxZfLY/5k2GUin6u19r52sol+exnYqjP5IerVOQEx8NA1I8c31RKEOpn9hwCed0rVpLp4o4BUpTWpkpIQZNJOhxYNo4fHw1td28kruB5B+oQEEFRI0G3fbh12Whk9nL4UbO63msHLSF7V9bN5E6jPWFfv8AqXv7L7edG2plPJCI9sZyjADAQn9uQkDUYf6CdaTHvF9Qxvp6877brTo9ZfNqq8l0MbG75MLS9uDkfKYCA0UvXWE0s7qiQ/Ayt+7UBcpiZ8soc9YWjgff52GAwxOtOoP1JwIDACw5THlKRkdvV0V4bXU5OG0xd24yTEFDUmZod1F0bUtVRThCdjJod2tDa3RCUgQFAQYCAAUKDN1qYgIAAAAABg=="
+
+	// the official merchant by its sha256 (hex), so the address itself stays
+	// out of test data
+	solanaOfficialMerchantSha256 = "b6fed7b0a3462afeda2f9703ecc17076b664bb8b1129bb0b62c70304bd50ab2c"
 )
+
+// Configures receivers as the server's receiving addresses for the test, the
+// first the one every intent quotes, as a rotation does.
+func solanaTestReceivers(t testing.TB, receivers ...string) {
+	previousReceivers := solanaReceiverAddresses
+	t.Cleanup(func() {
+		solanaReceiverAddresses = previousReceivers
+	})
+	solanaReceiverAddresses = receivers
+}
+
+// A fixture key, not a wallet: sha256 of the phrase as a public key.
+func solanaTestKey(phrase string) solana.PublicKey {
+	sum := sha256.Sum256([]byte(phrase))
+	return solana.PublicKeyFromBytes(sum[:])
+}
 
 // solanaDecodedTransfer is a built transaction read back from its wire bytes.
 type solanaDecodedTransfer struct {
@@ -59,7 +86,7 @@ type solanaDecodedTransfer struct {
 	data     [][]byte
 }
 
-func solanaDecodeTransfer(t *testing.T, transactionBytes []byte) *solanaDecodedTransfer {
+func solanaDecodeTransfer(t testing.TB, transactionBytes []byte) *solanaDecodedTransfer {
 	t.Helper()
 	transaction, err := solana.TransactionFromBytes(transactionBytes)
 	connect.AssertEqual(t, err, nil)
@@ -95,16 +122,23 @@ func solanaTransferCheckedData(amountMicro uint64) []byte {
 	return data
 }
 
+// The receiver every intent quotes is the official merchant, compared by its
+// sha256 so the address stays out of test data, and the mint is USDC.
+func TestSolanaPaymentRecipientIsTheOfficialMerchant(t *testing.T) {
+	sum := sha256.Sum256([]byte(solanaPaymentRecipient()))
+	connect.AssertEqual(t, hex.EncodeToString(sum[:]), solanaOfficialMerchantSha256)
+	connect.AssertEqual(t, solanaUsdcMint, solanaTestUsdcMint)
+}
+
 // The transfer moves exactly the quote, in USDC, from the payer's USDC account
-// to the official merchant's, and does nothing else. Only the payer signs, and
-// the server signs nothing.
+// to the merchant's, and does nothing else. Only the payer signs, and the
+// server signs nothing.
 func TestSolanaPaymentTransactionPaysOnlyTheMerchantTheQuotedUsdc(t *testing.T) {
-	// the server's constants are the official ones
-	connect.AssertEqual(t, solanaReceiverAddresses[0], solanaTestMerchant)
 	connect.AssertEqual(t, solanaUsdcMint, solanaTestUsdcMint)
 
 	transaction, err := solanaPaymentTransaction(
 		solana.MustPublicKeyFromBase58(solanaTestPayer),
+		solana.MustPublicKeyFromBase58(solanaTestMerchant),
 		solana.MustPublicKeyFromBase58(solanaTestReference),
 		40_004_317,
 		solana.MustHashFromBase58(solanaTestBlockhash),
@@ -229,6 +263,7 @@ func solanaTestPaymentSession(networkId server.Id) *session.ClientSession {
 // Only an open intent of the caller's own network is built, for its quote; a
 // refused request never reaches the rpc.
 func TestSolanaPaymentTransactionUsesTheCallersOpenIntent(t *testing.T) {
+	solanaTestReceivers(t, solanaTestMerchant, solanaTestRetiredReceiver)
 	networkId := server.NewId()
 	otherNetworkId := server.NewId()
 	future := server.NowUtc().Add(time.Hour)
