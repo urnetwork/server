@@ -52,8 +52,8 @@ jobs:
         with: { repository: urnetwork/warp, path: warp, ref: 3b6e875f83140b2de1a50d2bfffe0f7830edd74e }
       - uses: actions/checkout@v4
         with: { repository: urfoundation/sn, path: sn, ref: a70dae9c367868073f7325a16b34bd885f59b943 }
-      # Server pins this fork in go.mod. Its test generator also builds SN as
-      # a main module, where the local gvisor replacement still applies.
+      # Server and SN's fixture generator use this same reviewed local fork.
+      # Published release modules receive an immutable replacement from the builder.
       - uses: actions/checkout@v4
         with: { repository: urnetwork/gvisor, path: gvisor, ref: c0783dba2eeff7b79692a7f122ffee5f8bd837c1 }
 
