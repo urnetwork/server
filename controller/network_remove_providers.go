@@ -127,6 +127,7 @@ func networkRemoveWithSteps(
 	return nil, fmt.Errorf("Could not remove network")
 }
 
+// The App Store step: asks the App Store about each subscription.
 func networkRemoveAppleRenewing(clientSession *session.ClientSession, originalTransactionIds []string) (bool, error) {
 	return appleSubscriptionsRenewing(
 		clientSession.Ctx,
@@ -169,6 +170,7 @@ func appleSubscriptionsRenewing(
 	return false, nil
 }
 
+// The Google Play step: cancels each subscription's renewal at Google Play.
 func networkRemoveCancelPlay(clientSession *session.ClientSession, purchaseTokens []string) error {
 	return playCancelDeletionSubscriptions(clientSession.Ctx, purchaseTokens)
 }

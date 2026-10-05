@@ -1,5 +1,7 @@
 package controller
 
+// The order of the provider statuses an answer returns.
+
 import (
 	"testing"
 
@@ -35,8 +37,8 @@ func TestOrderProviderStatuses(t *testing.T) {
 
 	check(orderProviderStatuses([]*model.ProviderStatus{a, b, c}, &c.ClientId), c, a, b)
 	check(orderProviderStatuses([]*model.ProviderStatus{a, b, c}, nil), a, b, c)
-	other := server.NewId()
-	check(orderProviderStatuses([]*model.ProviderStatus{a, b, c}, &other), a, b, c)
+	otherClientId := server.NewId()
+	check(orderProviderStatuses([]*model.ProviderStatus{a, b, c}, &otherClientId), a, b, c)
 	// the caller fetched separately and also in the list appears once
 	check(orderProviderStatuses([]*model.ProviderStatus{b, a, b, c}, &b.ClientId), b, a, c)
 	if !providerStatusesContain([]*model.ProviderStatus{a, b}, b.ClientId) || providerStatusesContain([]*model.ProviderStatus{a, b}, c.ClientId) {

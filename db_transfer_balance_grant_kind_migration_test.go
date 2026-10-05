@@ -1,5 +1,7 @@
 package server
 
+// The grant_kind migration on the hot transfer_balance table.
+
 import (
 	"context"
 	"errors"
@@ -12,11 +14,11 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// TestTransferBalanceGrantKindMigrationGivesUpBehindALongLock: transfer_balance is a
-// hot table. The ALTER that adds grant_kind must give up after its lock timeout
-// instead of waiting behind a long lock holder (the nightly pg_dump holds a share
-// lock on it for hours) with every balance query queued behind the ALTER. A migrate
-// that gave up applies on a later run, and the column is a plain nullable varchar.
+// transfer_balance is a hot table. The ALTER that adds grant_kind must give up after
+// its lock timeout instead of waiting behind a long lock holder (the nightly pg_dump
+// holds a share lock on it for hours) with every balance query queued behind the
+// ALTER. A migrate that gave up applies on a later run, and the column is a plain
+// nullable varchar.
 func TestTransferBalanceGrantKindMigrationGivesUpBehindALongLock(t *testing.T) {
 	index := slices.IndexFunc(migrations, func(migration any) bool {
 		sqlMigration, ok := migration.(*SqlMigration)

@@ -262,15 +262,15 @@ const (
 
 const purchaseGuestSignInRequiredMessage = "Add a sign-in to your account before buying a plan."
 
-// purchaseHasAnyAuthMethod is model.HasAnyAuthMethod. Replaceable only by
-// hermetic tests, which answer the lookup without a database. Production never
-// mutates it.
+// The auth-method lookup, model.HasAnyAuthMethod. Replaceable only by hermetic
+// tests, which answer the lookup without a database. Production never mutates
+// it.
 var purchaseHasAnyAuthMethod = model.HasAnyAuthMethod
 
-// refuseGuestPurchase reports whether the session's network must not start a
-// checkout or a payment intent: a legacy guest network has no login method, so
-// nothing could sign back in to the plan it bought. Current apps convert a
-// guest in place before checkout; this covers the builds from before that.
+// Reports whether the session's network must not start a checkout or a
+// payment intent: a legacy guest network has no login method, so nothing could
+// sign back in to the plan it bought. Current apps convert a guest in place
+// before checkout; this covers the builds from before that.
 //
 // Only the server-created checkouts and intents call this. A store-verified
 // purchase (verify-play-purchase, verify-apple-transaction) and every webhook
@@ -279,7 +279,9 @@ func refuseGuestPurchase(session *session.ClientSession) bool {
 	if !isGuestNetwork(session, purchaseHasAnyAuthMethod) {
 		return false
 	}
-	glog.V(1).Infof("[sub]refused a purchase for guest network %s\n", session.ByJwt.NetworkId)
+	if glog.V(1) {
+		glog.Infof("[sub]refused a purchase for guest network %s\n", session.ByJwt.NetworkId)
+	}
 	return true
 }
 
@@ -1619,7 +1621,7 @@ func AddRefreshTransferBalance(ctx context.Context, networkId server.Id) (return
 	return
 }
 
-// AddRefreshTransferBalanceInTx writes the refresh grant in the caller's tx and
+// Writes the refresh grant in the caller's tx and
 // returns true when it is the Pro grant. The caller must then refresh the Pro cache
 // (model.UpdateProNetwork) after the tx commits. A refresh inside the tx reads on its
 // own connection, so it would cache the entitlement from before the grant for up to

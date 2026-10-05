@@ -15,8 +15,8 @@ import (
 // is answered in memory, and every refusal returns before Stripe, the price
 // tier or the database is touched.
 
-// guestPurchaseTestSession answers the auth-method lookup for the session's
-// user with hasAnyAuthMethod, and returns a session carrying guestMode.
+// Answers the auth-method lookup for the session's user with
+// hasAnyAuthMethod, and returns a session carrying guestMode.
 func guestPurchaseTestSession(t *testing.T, hasAnyAuthMethod bool, guestMode bool) *session.ClientSession {
 	t.Helper()
 	userId := server.NewId()
@@ -37,95 +37,92 @@ func guestPurchaseTestSession(t *testing.T, hasAnyAuthMethod bool, guestMode boo
 	})
 }
 
-// guestPurchaseWireError marshals a result as the api sends it and returns
-// its `error` object.
-func guestPurchaseWireError(t *testing.T, entry string, result any) map[string]any {
-	t.Helper()
-	b, err := json.Marshal(result)
-	if err != nil {
-		t.Fatalf("%s: marshal: %v", entry, err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		t.Fatalf("%s: unmarshal: %v", entry, err)
-	}
-	wireError, _ := m["error"].(map[string]any)
-	if wireError == nil {
-		t.Fatalf("%s: no error on the wire: %s", entry, b)
-	}
-	return wireError
-}
-
 // A refreshed legacy guest (no login method; RefreshToken cleared the
 // GuestMode claim) gets the guest refusal from every server-created checkout
 // and payment intent, with nothing to pay against. Before the guard each of
 // these went on to create the checkout, so a pre-conversion app build could
 // sell a plan to a network nothing can sign back in to.
 func TestGuestPurchaseRefusedAtEveryEntry(t *testing.T) {
+	// marshals a result as the api sends it and returns its `error` object
+	wireErrorOf := func(entry string, result any) map[string]any {
+		t.Helper()
+		b, err := json.Marshal(result)
+		if err != nil {
+			t.Fatalf("%s: marshal: %v", entry, err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatalf("%s: unmarshal: %v", entry, err)
+		}
+		wireError, _ := m["error"].(map[string]any)
+		if wireError == nil {
+			t.Fatalf("%s: no error on the wire: %s", entry, b)
+		}
+		return wireError
+	}
+
 	for _, entry := range []struct {
 		name string
 		// calls the entry, checks the result carries nothing to pay against,
 		// and returns it
 		purchase func(t *testing.T, clientSession *session.ClientSession) any
 	}{
-		{"checkout session", func(t *testing.T, clientSession *session.ClientSession) any {
+		{name: "checkout session", purchase: func(t *testing.T, clientSession *session.ClientSession) any {
 			result, err := StripeCreateCheckoutSession(&StripeCreateCheckoutSessionArgs{
 				ItemId: StripeItemProYearly,
 			}, clientSession)
 			if err != nil || result == nil {
-				t.Fatalf("result=%v err=%v, want a refusal", result, err)
+				t.Fatalf("checkout session: result=%v err=%v, want a refusal", result, err)
 			}
 			if result.CheckoutUrl != "" || result.ClientSecret != "" || result.SessionId != "" {
-				t.Fatalf("refusal carries a checkout: %+v", result)
+				t.Fatalf("checkout session: refusal carries a checkout: %+v", result)
 			}
 			return result
 		}},
-		{"payment sheet", func(t *testing.T, clientSession *session.ClientSession) any {
+		{name: "payment sheet", purchase: func(t *testing.T, clientSession *session.ClientSession) any {
 			result, err := StripePaymentSheet(&StripePaymentSheetArgs{
 				Plan: model.PlanYearly,
 			}, clientSession)
 			if err != nil || result == nil {
-				t.Fatalf("result=%v err=%v, want a refusal", result, err)
+				t.Fatalf("payment sheet: result=%v err=%v, want a refusal", result, err)
 			}
 			if result.CustomerId != "" || result.SubscriptionId != "" || result.SetupIntentClientSecret != "" || result.PaymentIntentClientSecret != "" {
-				t.Fatalf("refusal carries a payment: %+v", result)
+				t.Fatalf("payment sheet: refusal carries a payment: %+v", result)
 			}
 			return result
 		}},
-		{"payment intent", func(t *testing.T, clientSession *session.ClientSession) any {
+		{name: "payment intent", purchase: func(t *testing.T, clientSession *session.ClientSession) any {
 			result, err := StripeCreatePaymentIntent(&StripeCreatePaymentIntentArgs{}, clientSession)
 			if err != nil || result == nil {
-				t.Fatalf("result=%v err=%v, want a refusal", result, err)
+				t.Fatalf("payment intent: result=%v err=%v, want a refusal", result, err)
 			}
 			if len(result.PaymentIntents) != 0 || result.CustomerId != nil || result.EphemeralKey != nil {
-				t.Fatalf("refusal carries a payment: %+v", result)
+				t.Fatalf("payment intent: refusal carries a payment: %+v", result)
 			}
 			return result
 		}},
-		{"solana payment intent", func(t *testing.T, clientSession *session.ClientSession) any {
+		{name: "solana payment intent", purchase: func(t *testing.T, clientSession *session.ClientSession) any {
 			result, err := CreateSolanaPaymentIntent(&SolanaPaymentIntentArgs{
 				Reference: "synthetic-guest-reference",
 				Plan:      model.SolanaPlanMonthly,
 			}, clientSession)
 			if err != nil || result == nil {
-				t.Fatalf("result=%v err=%v, want a refusal", result, err)
+				t.Fatalf("solana payment intent: result=%v err=%v, want a refusal", result, err)
 			}
 			if result.AmountUsd != 0 || result.Recipient != "" {
-				t.Fatalf("refusal carries a quote: %+v", result)
+				t.Fatalf("solana payment intent: refusal carries a quote: %+v", result)
 			}
 			return result
 		}},
 	} {
-		t.Run(entry.name, func(t *testing.T) {
-			clientSession := guestPurchaseTestSession(t, false, false)
-			wireError := guestPurchaseWireError(t, entry.name, entry.purchase(t, clientSession))
-			if wireError["code"] != PurchaseErrorCodeGuestSignInRequired {
-				t.Errorf("error code %v, want %s", wireError["code"], PurchaseErrorCodeGuestSignInRequired)
-			}
-			if wireError["message"] != "Add a sign-in to your account before buying a plan." {
-				t.Errorf("error message %q", wireError["message"])
-			}
-		})
+		clientSession := guestPurchaseTestSession(t, false, false)
+		wireError := wireErrorOf(entry.name, entry.purchase(t, clientSession))
+		if wireError["code"] != PurchaseErrorCodeGuestSignInRequired {
+			t.Errorf("%s: error code %v, want %s", entry.name, wireError["code"], PurchaseErrorCodeGuestSignInRequired)
+		}
+		if wireError["message"] != "Add a sign-in to your account before buying a plan." {
+			t.Errorf("%s: error message %q", entry.name, wireError["message"])
+		}
 	}
 }
 

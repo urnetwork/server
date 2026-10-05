@@ -1,5 +1,9 @@
 package model
 
+// The initial performance profile of a hosted proxy device: the validation
+// that mirrors connect's, the refusal on auth-client, and the read back of a
+// stored profile that connect refuses.
+
 import (
 	"context"
 	"encoding/json"

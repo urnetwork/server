@@ -1,13 +1,13 @@
 package model
 
+// The ranking UpdateClientScores gives each pool score, shared with the
+// per-provider status (GetProviderStatuses) so a provider is told the numbers
+// FindProviders2 actually draws and orders it by.
+
 import (
 	"maps"
 	"slices"
 )
-
-// The ranking UpdateClientScores gives each pool score, shared with the
-// per-provider status (GetProviderStatuses) so a provider is told the numbers
-// FindProviders2 actually draws and orders it by.
 
 // One rank mode's performance targets (connect/GEOMAP.md §10.1): past a
 // cutoff excludes the provider from the mode's tiers, between the threshold

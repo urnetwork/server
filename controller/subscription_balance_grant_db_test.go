@@ -20,11 +20,11 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// TestSubscriptionBalanceCountsOnlyTheCurrentGrant places each boundary just before
-// now, since the clock cannot be moved: windows that straddle now the way they do at
-// a real boundary. Recorded grants are matched by kind, so their windows can be
-// placed anywhere; legacy (unrecorded) grants need their exact window, so they use
-// the referral window, which starts whenever its run does.
+// Places each boundary just before now, since the clock cannot be moved: windows that
+// straddle now the way they do at a real boundary. Recorded grants are matched by
+// kind, so their windows can be placed anywhere; legacy (unrecorded) grants need
+// their exact window, so they use the referral window, which starts whenever its run
+// does.
 func TestSubscriptionBalanceCountsOnlyTheCurrentGrant(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -120,9 +120,9 @@ func TestSubscriptionBalanceCountsOnlyTheCurrentGrant(t *testing.T) {
 	})
 }
 
-// TestAddRefreshTransferBalanceRecordsGrantKind: the grant a network gets when it is
-// created or changes plan is the current period's free or Pro grant, and is recorded
-// as such, so the next scheduled grant supersedes it at the boundary.
+// The grant a network gets when it is created or changes plan is the current period's
+// free or Pro grant, and is recorded as such, so the next scheduled grant supersedes
+// it at the boundary.
 func TestAddRefreshTransferBalanceRecordsGrantKind(t *testing.T) {
 	if model.Pro().DataAmount(false) <= 0 || model.Pro().DataAmount(true) <= 0 {
 		t.Skip("pro.yml is not present in this environment; there is nothing to grant")

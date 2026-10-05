@@ -19,12 +19,12 @@ import (
 
 // A redis stand-in with the hash, expiry and failure behavior the flush and
 // the read rely on. Writes apply in full or not at all, like the MULTI/EXEC
-// of writeProviderAppearance.
+// of each write in redisProviderAppearanceStore.writeAll.
 type testingProviderAppearanceStore struct {
-	stateLock sync.Mutex
-	nowFunc   func() time.Time
-	hashes    map[string]map[string]int64
-	expires   map[string]time.Time
+	stateLock      sync.Mutex
+	nowFunc        func() time.Time
+	keyHashes      map[string]map[string]int64
+	keyExpireTimes map[string]time.Time
 	// every write fails with this error
 	writeErr error
 	// every write waits for its context to end
@@ -32,14 +32,16 @@ type testingProviderAppearanceStore struct {
 	writes []*providerAppearanceWrite
 }
 
+// An empty store whose expiry reads the time from nowFunc.
 func newTestingProviderAppearanceStore(nowFunc func() time.Time) *testingProviderAppearanceStore {
 	return &testingProviderAppearanceStore{
-		nowFunc: nowFunc,
-		hashes:  map[string]map[string]int64{},
-		expires: map[string]time.Time{},
+		nowFunc:        nowFunc,
+		keyHashes:      map[string]map[string]int64{},
+		keyExpireTimes: map[string]time.Time{},
 	}
 }
 
+// Applies each write in order, or fails it as the store is set to.
 func (self *testingProviderAppearanceStore) writeAll(ctx context.Context, writes []*providerAppearanceWrite, parallel int) []error {
 	errs := make([]error, len(writes))
 	for i, write := range writes {
@@ -56,39 +58,43 @@ func (self *testingProviderAppearanceStore) writeAll(ctx context.Context, writes
 	return errs
 }
 
-func (self *testingProviderAppearanceStore) expireLocked(key string) {
-	if expiry, ok := self.expires[key]; ok && !self.nowFunc().Before(expiry) {
-		delete(self.hashes, key)
-		delete(self.expires, key)
+// Drops the key's hash once its expiry has passed.
+func (self *testingProviderAppearanceStore) expireWithLock(key string) {
+	if expiry, ok := self.keyExpireTimes[key]; ok && !self.nowFunc().Before(expiry) {
+		delete(self.keyHashes, key)
+		delete(self.keyExpireTimes, key)
 	}
 }
 
+// Applies one write: its increments, its stale field removals and its expiry.
 func (self *testingProviderAppearanceStore) apply(write *providerAppearanceWrite) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.writes = append(self.writes, write)
-	self.expireLocked(write.key)
-	hash, ok := self.hashes[write.key]
+	self.expireWithLock(write.key)
+	hash, ok := self.keyHashes[write.key]
 	if !ok {
 		hash = map[string]int64{}
-		self.hashes[write.key] = hash
+		self.keyHashes[write.key] = hash
 	}
-	for field, count := range write.increments {
+	for field, count := range write.fieldIncrements {
 		hash[field] += count
 	}
 	for _, field := range write.staleFields {
 		delete(hash, field)
 	}
-	self.expires[write.key] = self.nowFunc().Add(write.ttl)
+	self.keyExpireTimes[write.key] = self.nowFunc().Add(write.ttl)
 }
 
+// The key's live hash, nil once it has expired or was never written.
 func (self *testingProviderAppearanceStore) hash(key string) map[string]int64 {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	self.expireLocked(key)
-	return self.hashes[key]
+	self.expireWithLock(key)
+	return self.keyHashes[key]
 }
 
+// Reads each client's live hash as redis returns it, as strings.
 func (self *testingProviderAppearanceStore) readAll(ctx context.Context, clientIds []server.Id) ([]map[string]string, error) {
 	fieldsList := []map[string]string{}
 	for _, clientId := range clientIds {
@@ -101,6 +107,7 @@ func (self *testingProviderAppearanceStore) readAll(ctx context.Context, clientI
 	return fieldsList, nil
 }
 
+// The default settings with a short flush timeout.
 func testingProviderAppearanceSettings() *ProviderAppearanceSettings {
 	settings := DefaultProviderAppearanceSettings()
 	settings.FlushTimeout = 200 * time.Millisecond
@@ -172,7 +179,7 @@ func TestProviderAppearanceMinuteBucketing(t *testing.T) {
 // The counter sums repeats per (client, minute), drains to empty, and past its
 // capacity drops only appearances that would add a new count.
 func TestProviderAppearanceCounterDrainAndCapacity(t *testing.T) {
-	counter := newProviderAppearanceCounter(1 << 10)
+	counter := newProviderAppearanceCounter(1024)
 	a := server.NewId()
 	b := server.NewId()
 	if dropped := counter.add([]server.Id{a, b, a}, 10); dropped != 0 {
@@ -190,14 +197,16 @@ func TestProviderAppearanceCounterDrainAndCapacity(t *testing.T) {
 	// one count per shard: a client whose shard holds a count drops new keys
 	full := newProviderAppearanceCounter(providerAppearanceShardCount)
 	full.add([]server.Id{a}, 10)
-	sameShard := server.NewId()
-	for full.shard(sameShard) != full.shard(a) || sameShard == a {
-		sameShard = server.NewId()
+	// another client in a's shard: the shard is picked by the id's last byte
+	sameShardClientId := a
+	sameShardClientId[0] ^= 0xff
+	if full.shard(sameShardClientId) != full.shard(a) {
+		t.Fatal("the ids are not in one shard")
 	}
-	if dropped := full.add([]server.Id{a, sameShard}, 10); dropped != 1 {
+	if dropped := full.add([]server.Id{a, sameShardClientId}, 10); dropped != 1 {
 		t.Fatalf("dropped %d, want only the new count", dropped)
 	}
-	if counts := full.drain(); counts[a][10] != 2 || counts[sameShard] != nil {
+	if counts := full.drain(); counts[a][10] != 2 || counts[sameShardClientId] != nil {
 		t.Fatalf("counts = %v", counts)
 	}
 }
@@ -258,7 +267,7 @@ func TestProviderAppearanceFlushFailureDropsAndLogsBounded(t *testing.T) {
 	for i := 0; i < 100; i += 1 {
 		appearances.Record(clientIds, now)
 		result := appearances.flush(context.Background())
-		if result.failedCount != 3 || result.failedProviders != 3 || result.writtenCount != 0 {
+		if result.failedCount != 3 || result.failedProviderCount != 3 || result.writtenCount != 0 {
 			t.Fatalf("result = %+v", result)
 		}
 		now = now.Add(settings.FlushInterval)
@@ -408,21 +417,21 @@ func TestProviderAppearanceRecordFlushRead(t *testing.T) {
 	now := time.Date(2026, 10, 4, 12, 0, 30, 0, time.UTC)
 	store := newTestingProviderAppearanceStore(func() time.Time { return now })
 	appearances := newProviderAppearancesWithoutRun(context.Background(), testingProviderAppearanceSettings(), store, func() time.Time { return now })
-	offered := []server.Id{server.NewId(), server.NewId()}
-	idle := server.NewId()
-	appearances.Record(offered, now)
-	appearances.Record(offered[:1], now)
+	offeredClientIds := []server.Id{server.NewId(), server.NewId()}
+	idleClientId := server.NewId()
+	appearances.Record(offeredClientIds, now)
+	appearances.Record(offeredClientIds[:1], now)
 	appearances.flush(context.Background())
 
-	histograms, err := getProviderAppearanceHistograms(context.Background(), store, append(offered, idle), now)
+	histograms, err := getProviderAppearanceHistograms(context.Background(), store, append(offeredClientIds, idleClientId), now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	last := ProviderAppearanceWindowBuckets - 1
-	if histograms[offered[0]].AppearancesPerMinute[last] != 2 || histograms[offered[1]].AppearancesPerMinute[last] != 1 {
+	if histograms[offeredClientIds[0]].AppearancesPerMinute[last] != 2 || histograms[offeredClientIds[1]].AppearancesPerMinute[last] != 1 {
 		t.Fatal("the offered providers' current minute is wrong")
 	}
-	for _, count := range histograms[idle].AppearancesPerMinute {
+	for _, count := range histograms[idleClientId].AppearancesPerMinute {
 		if count != 0 {
 			t.Fatal("a provider never offered read a count")
 		}

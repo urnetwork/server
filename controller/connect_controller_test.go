@@ -173,14 +173,12 @@ func TestContractResultErrorReportsOnlyBalanceRefusalsAsInsufficientBalance(t *t
 			cause: "other",
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := contractResultError(test.err); got != test.want {
-				t.Fatalf("contractResultError() = %s, want %s", got, test.want)
-			}
-			if got := contractFailureClass(test.err); got != test.cause {
-				t.Fatalf("contractFailureClass() = %q, want %q", got, test.cause)
-			}
-		})
+		if got := contractResultError(test.err); got != test.want {
+			t.Errorf("%s: contractResultError() = %s, want %s", test.name, got, test.want)
+		}
+		if got := contractFailureClass(test.err); got != test.cause {
+			t.Errorf("%s: contractFailureClass() = %q, want %q", test.name, got, test.cause)
+		}
 	}
 }
 

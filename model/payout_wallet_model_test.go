@@ -226,30 +226,30 @@ func TestChoosePromotedPayoutWallet(t *testing.T) {
 		candidates []string
 		want       string
 	}{
-		{"newest solana past a newer bittensor", "SOL", []string{"tao:TAO", "sol-newer:solana", "sol-older:SOL"}, "sol-newer"},
-		{"same chain over a newer polygon", "SOL", []string{"matic-newer:MATIC", "sol-older:sol"}, "sol-older"},
-		{"same chain over a newer solana", "polygon", []string{"sol-newer:SOL", "poly-older:POLY"}, "poly-older"},
-		{"other chain when the removed chain is gone", "SOL", []string{"eth-newer:ETHEREUM", "matic-older:matic"}, "matic-older"},
-		{"removed chain unknown", "", []string{"unknown:DOGE", "matic:MATIC", "sol:SOL"}, "matic"},
-		{"only bittensor and ethereum", "SOL", []string{"tao:bittensor", "eth:ETH"}, ""},
-		{"no candidates", "SOL", nil, ""},
+		{name: "newest solana past a newer bittensor", removed: "SOL", candidates: []string{"tao:TAO", "sol-newer:solana", "sol-older:SOL"}, want: "sol-newer"},
+		{name: "same chain over a newer polygon", removed: "SOL", candidates: []string{"matic-newer:MATIC", "sol-older:sol"}, want: "sol-older"},
+		{name: "same chain over a newer solana", removed: "polygon", candidates: []string{"sol-newer:SOL", "poly-older:POLY"}, want: "poly-older"},
+		{name: "other chain when the removed chain is gone", removed: "SOL", candidates: []string{"eth-newer:ETHEREUM", "matic-older:matic"}, want: "matic-older"},
+		{name: "removed chain unknown", removed: "", candidates: []string{"unknown:DOGE", "matic:MATIC", "sol:SOL"}, want: "matic"},
+		{name: "only bittensor and ethereum", removed: "SOL", candidates: []string{"tao:bittensor", "eth:ETH"}, want: ""},
+		{name: "no candidates", removed: "SOL", candidates: nil, want: ""},
 	} {
-		ids := map[string]server.Id{}
+		nameWalletIds := map[string]server.Id{}
 		candidates := []*payoutWalletCandidate{}
 		for _, nameBlockchain := range c.candidates {
 			name, blockchain, _ := strings.Cut(nameBlockchain, ":")
-			ids[name] = server.NewId()
-			candidates = append(candidates, &payoutWalletCandidate{walletId: ids[name], blockchain: blockchain})
+			nameWalletIds[name] = server.NewId()
+			candidates = append(candidates, &payoutWalletCandidate{walletId: nameWalletIds[name], blockchain: blockchain})
 		}
-		promoted := choosePromotedPayoutWallet(c.removed, candidates)
+		promotedWalletId := choosePromotedPayoutWallet(c.removed, candidates)
 		if c.want == "" {
-			if promoted != nil {
-				t.Errorf("%s: promoted %s, want none", c.name, *promoted)
+			if promotedWalletId != nil {
+				t.Errorf("%s: promoted %s, want none", c.name, *promotedWalletId)
 			}
 			continue
 		}
-		if promoted == nil || *promoted != ids[c.want] {
-			t.Errorf("%s: promoted %v, want %s (%s)", c.name, promoted, c.want, ids[c.want])
+		if promotedWalletId == nil || *promotedWalletId != nameWalletIds[c.want] {
+			t.Errorf("%s: promoted %v, want %s (%s)", c.name, promotedWalletId, c.want, nameWalletIds[c.want])
 		}
 	}
 }
@@ -262,7 +262,7 @@ func TestChoosePromotedPayoutWallet(t *testing.T) {
 func TestRemoveWalletPromotesActivePayoutWallet(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		start := server.NowUtc().Add(-time.Hour)
+		startTime := server.NowUtc().Add(-time.Hour)
 
 		newNetwork := func() (server.Id, *session.ClientSession) {
 			networkId := server.NewId()
@@ -272,7 +272,7 @@ func TestRemoveWalletPromotesActivePayoutWallet(t *testing.T) {
 				ClientId:  &clientId,
 			})
 		}
-		// a wallet created `minute` minutes after start, so newest is explicit
+		// a wallet created `minute` minutes after startTime, so newest is explicit
 		addWallet := func(clientSession *session.ClientSession, blockchain string, address string, minute int) server.Id {
 			walletId := CreateAccountWalletExternal(clientSession, &CreateAccountWalletExternalArgs{
 				NetworkId:        clientSession.ByJwt.NetworkId,
@@ -288,7 +288,7 @@ func TestRemoveWalletPromotesActivePayoutWallet(t *testing.T) {
 					ctx,
 					`UPDATE account_wallet SET create_time = $2 WHERE wallet_id = $1`,
 					*walletId,
-					start.Add(time.Duration(minute)*time.Minute),
+					startTime.Add(time.Duration(minute)*time.Minute),
 				))
 			})
 			return *walletId
@@ -318,38 +318,38 @@ func TestRemoveWalletPromotesActivePayoutWallet(t *testing.T) {
 
 		// the newest Solana wallet, past a newer Bittensor wallet
 		networkId, owner := newNetwork()
-		payout := addWallet(owner, "SOL", "synthetic-sol-payout", 1)
-		older := addWallet(owner, "SOL", "synthetic-sol-older", 2)
-		newer := addWallet(owner, "solana", "synthetic-sol-newer", 3)
+		payoutWalletId := addWallet(owner, "SOL", "synthetic-sol-payout", 1)
+		olderWalletId := addWallet(owner, "SOL", "synthetic-sol-older", 2)
+		newerWalletId := addWallet(owner, "solana", "synthetic-sol-newer", 3)
 		addWallet(owner, "TAO", "synthetic-tao-newest", 4)
-		connect.AssertEqual(t, SetPayoutWallet(ctx, networkId, payout), nil)
+		connect.AssertEqual(t, SetPayoutWallet(ctx, networkId, payoutWalletId), nil)
 		// not the payout wallet: nothing changes
-		result := removeWallet(owner, older)
+		result := removeWallet(owner, olderWalletId)
 		if result.PayoutWalletId != nil {
 			t.Fatalf("removing a non-payout wallet promoted %s", *result.PayoutWalletId)
 		}
-		connect.AssertEqual(t, *GetPayoutWalletId(ctx, networkId), payout)
-		result = removeWallet(owner, payout)
-		assertPayoutWallet("newest solana", networkId, result, &newer)
+		connect.AssertEqual(t, *GetPayoutWalletId(ctx, networkId), payoutWalletId)
+		result = removeWallet(owner, payoutWalletId)
+		assertPayoutWallet("newest solana", networkId, result, &newerWalletId)
 
 		// the removed wallet's chain wins over a newer Polygon wallet
 		sameChainNetworkId, sameChainOwner := newNetwork()
-		sameChainPayout := addWallet(sameChainOwner, "SOL", "synthetic-sol-payout-2", 1)
-		sameChain := addWallet(sameChainOwner, "SOL", "synthetic-sol-same-chain", 2)
+		sameChainPayoutWalletId := addWallet(sameChainOwner, "SOL", "synthetic-sol-payout-2", 1)
+		sameChainWalletId := addWallet(sameChainOwner, "SOL", "synthetic-sol-same-chain", 2)
 		addWallet(sameChainOwner, "MATIC", "synthetic-matic-newer", 3)
-		connect.AssertEqual(t, SetPayoutWallet(ctx, sameChainNetworkId, sameChainPayout), nil)
-		result = removeWallet(sameChainOwner, sameChainPayout)
-		assertPayoutWallet("same chain", sameChainNetworkId, result, &sameChain)
+		connect.AssertEqual(t, SetPayoutWallet(ctx, sameChainNetworkId, sameChainPayoutWalletId), nil)
+		result = removeWallet(sameChainOwner, sameChainPayoutWalletId)
+		assertPayoutWallet("same chain", sameChainNetworkId, result, &sameChainWalletId)
 
 		// only a Bittensor wallet is left, and a newer wallet belongs to
 		// another network: no payout wallet
 		taoNetworkId, taoOwner := newNetwork()
-		taoPayout := addWallet(taoOwner, "MATIC", "synthetic-matic-payout-3", 1)
+		taoPayoutWalletId := addWallet(taoOwner, "MATIC", "synthetic-matic-payout-3", 1)
 		addWallet(taoOwner, "TAO", "synthetic-tao-only", 2)
 		_, otherOwner := newNetwork()
 		addWallet(otherOwner, "MATIC", "synthetic-matic-other-network", 3)
-		connect.AssertEqual(t, SetPayoutWallet(ctx, taoNetworkId, taoPayout), nil)
-		result = removeWallet(taoOwner, taoPayout)
+		connect.AssertEqual(t, SetPayoutWallet(ctx, taoNetworkId, taoPayoutWalletId), nil)
+		result = removeWallet(taoOwner, taoPayoutWalletId)
 		assertPayoutWallet("only bittensor", taoNetworkId, result, nil)
 	})
 }

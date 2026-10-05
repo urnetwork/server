@@ -98,7 +98,7 @@ func registry() []specEndpoint {
 		{"POST", "/network/unblock-location", rt(controller.NetworkUnblockLocationArgs{}), rt(controller.NetworkUnblockLocationResult{})},
 		{"GET", "/network/blocked-locations", nil, rt(controller.GetNetworkBlockedLocationsResult{})},
 		{"GET", "/network/reliability", nil, rt(controller.GetNetworkReliabilityResult{})},
-		{"GET", "/network/provider-status", nil, rt(controller.GetProviderStatusResult{})},
+		{method: "GET", path: "/network/provider-status", argType: nil, resultType: rt(controller.GetProviderStatusResult{})},
 		{"GET", "/network/user", nil, rt(controller.GetNetworkUserResult{})},
 		{"POST", "/network/user/update", rt(controller.UpdateNetworkNameArgs{}), rt(controller.UpdateNetworkNameResult{})},
 		{method: "POST", path: "/network/extender-activate", argType: rt(controller.ExtenderActivateArgs{}), resultType: rt(controller.ExtenderActivateResult{})},
@@ -169,7 +169,7 @@ func registry() []specEndpoint {
 
 		{"GET", "/transfer/stats", nil, rt(model.TransferStats{})},
 		{"POST", "/solana/payment-intent", rt(controller.SolanaPaymentIntentArgs{}), rt(controller.SolanaPaymentIntentResult{})},
-		{"POST", "/solana/payment-transaction", rt(controller.SolanaPaymentTransactionArgs{}), rt(controller.SolanaPaymentTransactionResult{})},
+		{method: "POST", path: "/solana/payment-transaction", argType: rt(controller.SolanaPaymentTransactionArgs{}), resultType: rt(controller.SolanaPaymentTransactionResult{})},
 		{"POST", "/stripe/payment-intent", rt(controller.StripeCreatePaymentIntentArgs{}), rt(controller.StripeCreatePaymentIntentResult{})},
 		{"POST", "/stripe/customer-portal", rt(controller.StripeCreateCustomerPortalArgs{}), rt(controller.StripeCreateCustomerPortalResult{})},
 		{"POST", "/pay/data/checkout", rt(controller.PayDataCheckoutArgs{}), rt(controller.PayDataCheckoutResult{})},

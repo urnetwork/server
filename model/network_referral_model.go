@@ -14,9 +14,9 @@ type NetworkReferral struct {
 	CreateTime        time.Time  `json:"create_time"`
 }
 
-// isSelfReferral reports whether a referral code resolved to the network being
-// referred. A network can never be its own referral network. Compare the ids:
-// the looked-up pointer never equals the address of the local network id.
+// Reports whether a referral code resolved to the network being referred. A
+// network can never be its own referral network. Compare the ids: the looked-up
+// pointer never equals the address of the local network id.
 func isSelfReferral(networkId server.Id, referralNetworkId *server.Id) bool {
 	return referralNetworkId != nil && *referralNetworkId == networkId
 }
@@ -238,7 +238,7 @@ func ReferralBonusCount(referralCount int) int {
 // granted in ONE transaction so a run is atomic.
 //
 // Balances are added as referral grants (AddGrantTransferBalanceInTx), i.e. net
-// revenue 0, so they are UNPAID: referral data can never by itself confer Pro (Pro
+// revenue 0, so they are unpaid: referral data can never by itself confer Pro (Pro
 // keys off subscription_renewal — see IsPro).
 //
 // Returns the total byte count granted per network (a network that is both a referrer

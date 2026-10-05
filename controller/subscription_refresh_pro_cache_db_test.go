@@ -18,8 +18,8 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// testingCreateSupporterNetwork creates a network with an active supporter renewal, so
-// its refresh grant is the monthly Pro grant.
+// A network with an active supporter renewal, so its refresh grant is the
+// monthly Pro grant.
 func testingCreateSupporterNetwork(t testing.TB, ctx context.Context) server.Id {
 	networkId := server.NewId()
 	model.Testing_CreateNetwork(ctx, networkId, "refreshpro", server.NewId())
@@ -37,9 +37,9 @@ func testingCreateSupporterNetwork(t testing.TB, ctx context.Context) server.Id 
 	return networkId
 }
 
-// TestAddRefreshTransferBalanceProReadsTrueAfterCommit: once the Pro refresh grant
-// commits, both cache tiers hold Pro, so this process and every process reading the
-// shared redis tier see the upgrade at once, not after ProCacheTtl.
+// Once the Pro refresh grant commits, both cache tiers hold Pro, so this process and
+// every process reading the shared redis tier see the upgrade at once, not after
+// ProCacheTtl.
 func TestAddRefreshTransferBalanceProReadsTrueAfterCommit(t *testing.T) {
 	skipWithoutProYml(t)
 
@@ -65,9 +65,8 @@ func TestAddRefreshTransferBalanceProReadsTrueAfterCommit(t *testing.T) {
 	})
 }
 
-// TestAddRefreshTransferBalanceInTxRollbackCachesNothing: a Pro refresh grant whose
-// transaction rolls back writes neither cache tier. The refresh belongs to whoever
-// commits the transaction.
+// A Pro refresh grant whose transaction rolls back writes neither cache tier. The
+// refresh belongs to whoever commits the transaction.
 func TestAddRefreshTransferBalanceInTxRollbackCachesNothing(t *testing.T) {
 	skipWithoutProYml(t)
 
