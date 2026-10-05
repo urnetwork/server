@@ -7314,8 +7314,9 @@ The 07:52:21 finite census qualified all eight ready Taskworkers on source
 runtime read qualified all sixteen APIs ready on source
 `02d9f529808b5d1d8022f3a14104f8a330c9a1cc`. These are adoption and
 readiness observations, not proof that rolling quota, picker delivery or
-financial backlog has recovered. Fresh current-process throughput and quota
-receipts are still required; the 06:57 `7cae4081` deficit above is historical.
+financial backlog has recovered. The source-qualified 08:11–08:14 phase pair
+below now measures current throughput and delay; a newer quota census remains
+separate. The 06:57 `7cae4081` deficit above is historical.
 
 The 08:10 finite contract-close snapshot counted 1,818 newly created and 403
 terminal-closed visible rows in its selected ten-second timestamp window. These
@@ -7340,3 +7341,51 @@ Evidence: `root-tw-census-f24c1-known-runtime-v1/run-20261005T075221Z`,
 `root-api16-known-runtime-02d-v1/run-20261005T075229Z`,
 `close-progress-actual-v4.json`, and `backlog-v2-v3-paired-actual.json` in the
 retained `/home/by/urnetwork/temp` evidence tree.
+
+
+### 2026-10-05 08:14 UTC current connection acquisition and publication delay
+
+The 08:11:47–08:14:04 API pair qualifies the same four ready `02d9f529`
+processes on enabled hosts 0, 1, 3 and 4, block g1, over native intervals of
+135.401–135.624 seconds. On E3g1, 15 returned Due calls averaged 1.772 seconds:
+1.468 acquiring a database connection, 0.182 beginning the transaction and
+0.122 in its body. On E4g1, 57 returned calls averaged 2.308 seconds: 1.717
+acquiring, 0.455 beginning and 0.135 in the body. Connection acquisition is
+74–83% of these measured handler times; query-row phases average 49–52 ms.
+These inclusive phases are wall time, not CPU, and exclude unfinished calls.
+
+Both affected processes had total/max connections 512/512 and zero idle at
+each snapshot. Their canceled-acquire counters increased by 831,985 and
+1,170,472; successful acquires averaged 1.489 and 1.560 seconds. E0g1 and E1g1
+had spare connections and no returned Due calls in this interval. This proves
+process-level pool pressure and skew, but does not identify the occupying
+handler, repeated-cancellation owner or routing cause. Canceled attempts are
+not distinct requests; constructing connections were not separately observed.
+The four-process reader does not establish all-sixteen API behavior.
+
+The matching Taskworker stage pair qualifies the same eight `f24c1597`
+source/build/image/start identities across 135.652–136.133-second native
+intervals. ACK counters increased by 181 measured successes and 3,147 failures,
+totaling 24.4989/s. Across 3,666 completed timed turns, mean total wall time was
+15.778 seconds: publication 7.927 (50.242%), check and buffer 5.252, close and
+join 1.707, and initial readiness observation 0.866. The synchronous schedulers
+spent 96.862% of their measured slot time in Due. This stage reader does not
+collect Taskworker readiness; the separate 07:52 census supplies historical
+ready evidence. ACKs are not unique durable-history credit, and these phase
+receipts do not establish current rolling quota or maximum capacity.
+
+Publication includes synchronous Taskworker tally work as well as API calls.
+Separate deterministic local PostgreSQL controls prove repeatable-read retry
+amplification on shared country/day/region tally rows; the narrow read-committed
+candidate preserves exact counters and transactional rollback in those tests.
+Its faster local completion also increases pool waiting in one loaded control,
+so neither Main publication improvement nor lower pool pressure follows from
+that local result. The 08:14 pair precedes the tally rollout. API pool ownership
+and the deployed tally effect require separate evidence. No fairness, six-minute
+renewal headroom, funding, measurement-credit or security rule changes follow
+from these observations. FP2 completion remains open.
+
+Evidence: `astra-api02d-f24c-current-phase-pair-20261005T081404Z.json` SHA256
+`3c6d5a28e21ea8bdc035f5f18065ec6039f78c5f65382dc326dce859dcfbbe3f`,
+binding all four actual receipts and both qualified deltas; local tally evidence
+SHA256 `47a688edca496beefb8e94fd4de19a6044a3abdd69653eff8fda3d7d5f840c0d`.
