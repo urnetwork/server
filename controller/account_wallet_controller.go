@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
@@ -20,6 +21,8 @@ type AccountErrorMessage string
 var (
 	ErrInvalidBlockchain    = errors.New("invalid blockchain, use SOL, MATIC, or TAO")
 	ErrInvalidWalletAddress = errors.New("invalid wallet address")
+	// a 400: the router answers the status and logs nothing for client input
+	ErrInvalidDefaultTokenType = errors.New("400 invalid default token type")
 )
 
 // used for creating external wallets
@@ -42,6 +45,15 @@ func CreateAccountWalletExternal(
 
 	wallet.Blockchain = blockchain.String()
 	wallet.WalletAddress = strings.TrimSpace(wallet.WalletAddress)
+
+	// the token type is client input: a value the column cannot store (over
+	// its length, or with a NUL character, which postgres text cannot hold) is
+	// refused here. It used to fail the insert, after which the transaction
+	// went on to a commit that server.Tx retried for a minute.
+	if model.MaxWalletDefaultTokenTypeLength < utf8.RuneCountInString(wallet.DefaultTokenType) ||
+		strings.ContainsRune(wallet.DefaultTokenType, 0) {
+		return nil, ErrInvalidDefaultTokenType
+	}
 
 	walletValidateAddressArgs := WalletValidateAddressArgs{
 		Address: wallet.WalletAddress,
