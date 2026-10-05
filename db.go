@@ -517,8 +517,7 @@ func AcquireMaintenanceDbConn(ctx context.Context) (PgConn, error) {
 		return nil, err
 	}
 	if err := pingPgConnection(ctx, conn); err != nil {
-		pgxConn := conn.Hijack()
-		closePgConnection(ctx, pgxConn)
+		discardPgConnection(ctx, conn)
 		return nil, err
 	}
 	return conn, nil
@@ -586,6 +585,15 @@ func closePgConnection(ctx context.Context, conn interface {
 	_ = conn.Close(closeCtx)
 }
 
+// Close while the pool still owns this borrowed resource, then let Release
+// destroy the closed connection. pgxpool's bounded destructor joins CleanupDone
+// before returning capacity; Hijack would release capacity before that cleanup.
+// The original callback outcome need not wait for asynchronous disposal.
+func discardPgConnection(ctx context.Context, conn PgConn) {
+	closePgConnection(ctx, conn.Conn())
+	conn.Release()
+}
+
 func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), options ...any) {
 	retryOptions := OptRetryDefault()
 	rwOptions := OptReadOnly()
@@ -639,9 +647,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 			// the recovery defer runs before it during panic unwinding.
 			defer func() {
 				if connErr != nil {
-					// take the bad connection out of the pool
-					pgxConn := conn.Hijack()
-					closePgConnection(ctx, pgxConn)
+					discardPgConnection(ctx, conn)
 					conn = nil
 				} else {
 					conn.Release()
