@@ -4850,6 +4850,34 @@ The 06:40 finite task sample's 94-second oldest finish age was its observation
 span; maximum selected page runtime was 15.261 seconds. Page execution, task
 finalization and scheduling delay remain separate throughput terms.
 
+Busy-gate qualifier (2026-10-05): the allocation-qualified 09:48:17 finite
+sample recorded 1,886 head visits, 415 completions and 1,471 busy-or-gone outcomes
+across 144 selected pages. Every shard completed heads, while the selected oldest
+open edge barely advanced. This does not identify the busy gate or a current
+lock owner. The worker now records `busy_intent_unavailable`,
+`busy_contract_unavailable`, and `busy_grant_set_mismatch`, plus corresponding
+`head_busy_...` counters, directly at the existing refusal branches. These add
+no queries, locks, retry mutations or concurrency. Each three-counter sum equals
+its recorded busy-or-gone total; each head reason is a subset of its total reason.
+Readers require all six source-qualified fields. Missing fields remain unknown,
+partial or contradictory fields are invalid, and sums include only gate-valid
+pages. Busy and failed may still overlap after a commit acknowledgement error.
+
+Intent/contract unavailability means the existing `SKIP LOCKED` query returned
+no owner; it does not distinguish disappearance from a skipped lock. A joined
+grant-set mismatch likewise does not prove a held lock: its count and ownership
+statements take separate ReadCommitted snapshots. Native controls force each
+gate with granted locks, then prove exact recovery; another commits a previously
+missing joined balance between the statements and reproduces the mismatch
+without an externally held grant lock. Both queries use the same inner join and
+neither filters expiry. Static missing unused grants and expired funded grants
+settle normally; missing required funding produces the accounting hold rather
+than a busy gate. These controls refute that static false-busy mechanism, without
+attributing Main rows or authorizing a reservation release. Shared grants can
+span the sixteen contract-id shards; per-shard task ownership does not serialize
+their financial transactions. Observe gate outcomes before changing allocation
+or claiming that improved API connection pressure resolved settlement contention.
+
 Clock, legacy reservation mirror and stream cleanup remain post-commit
 projections: the clock uses its existing aggregate backfill with its documented
 ambiguity; the mirror is rebuilt from durable revisions; mixed Redis reservation

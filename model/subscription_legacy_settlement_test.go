@@ -76,7 +76,7 @@ func TestLegacySettlementRollbackAndLostAcknowledgement(t *testing.T) {
 		defer conn.Release()
 		tx, err := conn.Begin(ctx)
 		server.Raise(err)
-		_, complete, busy, err := flushLegacySettlementInTx(ctx, tx, id)
+		_, complete, busy, _, err := flushLegacySettlementInTx(ctx, tx, id)
 		server.Raise(err)
 		if !complete || busy {
 			t.Fatal("rollback transaction never reached its outcome")
@@ -88,14 +88,14 @@ func TestLegacySettlementRollbackAndLostAcknowledgement(t *testing.T) {
 		// and never starts the post callbacks. All financial state is durable.
 		tx, err = conn.Begin(ctx)
 		server.Raise(err)
-		posts, complete, busy, err := flushLegacySettlementInTx(ctx, tx, id)
+		posts, complete, busy, _, err := flushLegacySettlementInTx(ctx, tx, id)
 		server.Raise(err)
 		if !complete || busy {
 			t.Fatal("commit owner did not settle")
 		}
 		server.Raise(tx.Commit(ctx))
 		requireLegacyProviderDurability(t, ctx, f, id, 11, 11)
-		complete, busy, err = flushLegacySettlement(ctx, id)
+		complete, busy, _, err = flushLegacySettlement(ctx, id)
 		if err != nil || complete {
 			t.Fatal("lost-ack replay repeated a financial transition", complete, busy, err)
 		}
@@ -129,7 +129,7 @@ func TestLegacySettlementOldWriterAndWorkerCannotDoubleDebit(t *testing.T) {
 			t.Fatal("old writer bypassed pending financial owner")
 		}
 		requireLegacySettlementTestState(t, ctx, f, id, true, false, 1000, 100)
-		complete, busy, err := flushLegacySettlement(ctx, id)
+		complete, busy, _, err := flushLegacySettlement(ctx, id)
 		if err != nil || busy || !complete {
 			t.Fatal("worker failed mixed-version handoff", complete, busy, err)
 		}
@@ -181,7 +181,7 @@ func TestLegacySettlementPendingProtectsOldAndCurrentRetention(t *testing.T) {
 		removeCompletedTransferBalanceBatch(ctx, []server.Id{f.balanceId}, server.NowUtc())
 		removeDueContractBatches(ctx, server.NowUtc(), server.NowUtc().Add(-300*24*time.Hour), 128)
 		requireLegacySettlementTestState(t, ctx, f, id, true, false, 1000, 100)
-		complete, busy, err := flushLegacySettlement(ctx, id)
+		complete, busy, _, err := flushLegacySettlement(ctx, id)
 		if err != nil || busy || !complete {
 			t.Fatal("retained intent lost financial inputs", complete, busy, err)
 		}
@@ -284,7 +284,7 @@ func TestLegacySettlementBusyCursorAndConcurrentWorkers(t *testing.T) {
 		start := make(chan struct{})
 		done := make(chan completion, 2)
 		for range 2 {
-			go func() { <-start; a, b, e := flushLegacySettlement(ctx, firstId); done <- completion{a, b, e} }()
+			go func() { <-start; a, b, _, e := flushLegacySettlement(ctx, firstId); done <- completion{a, b, e} }()
 		}
 		close(start)
 		completed := 0
@@ -323,7 +323,7 @@ func TestLegacySettlementCancellationAndConflictingIntent(t *testing.T) {
 		}
 		canceled, cancel := context.WithCancel(ctx)
 		cancel()
-		_, _, err := flushLegacySettlement(canceled, id)
+		_, _, _, err := flushLegacySettlement(canceled, id)
 		if err == nil {
 			t.Fatal("canceled worker acknowledged financial work")
 		}
@@ -335,7 +335,7 @@ func TestLegacySettlementCancellationAndConflictingIntent(t *testing.T) {
 				t.Fatal("conflicting intent changed accepted outcome")
 			}
 		})
-		completed, busy, err := flushLegacySettlement(ctx, id)
+		completed, busy, _, err := flushLegacySettlement(ctx, id)
 		if err != nil || busy || !completed {
 			t.Fatal("healthy successor could not recover cancellation", completed, busy, err)
 		}
@@ -362,13 +362,13 @@ func TestLegacySettlementPartialGrantLockAndMissingUnusedGrant(t *testing.T) {
 		server.Raise(err)
 		defer held.Rollback(context.Background())
 		server.RaisePgResult(held.Exec(ctx, `SELECT balance_id FROM transfer_balance WHERE balance_id=$1 FOR UPDATE`, f.balanceId))
-		completed, busy, err := flushLegacySettlement(ctx, id)
+		completed, busy, _, err := flushLegacySettlement(ctx, id)
 		if err != nil || completed || !busy {
 			t.Fatal("partial grant ownership did not defer without mutation", completed, busy, err)
 		}
 		requireLegacyProviderDurability(t, ctx, f, id, 0)
 		server.Raise(held.Rollback(ctx))
-		completed, busy, err = flushLegacySettlement(ctx, id)
+		completed, busy, _, err = flushLegacySettlement(ctx, id)
 		if err != nil || !completed || busy {
 			t.Fatal("missing unused grant changed original funding policy", completed, busy, err)
 		}
@@ -404,7 +404,7 @@ func TestLegacySettlementShardHardDeleteRetainsIntent(t *testing.T) {
 		if err != nil || deleted {
 			t.Fatal("shard deletion bypassed pending legacy reservation", deleted, err)
 		}
-		completed, busy, err := flushLegacySettlement(ctx, c.ContractId)
+		completed, busy, _, err := flushLegacySettlement(ctx, c.ContractId)
 		if err != nil || busy || !completed {
 			t.Fatal("draining shard lost settlement authority", completed, busy, err)
 		}

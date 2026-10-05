@@ -14,6 +14,17 @@ const LegacySettlementShardCount = 16
 var errLegacySettlementPending = errors.New("legacy settlement is durably pending")
 var errLegacySettlementPageBudget = errors.New("legacy settlement page budget elapsed")
 
+// A skipped owner identifies a gate, not a live lock census. Grant membership
+// can also change between the count and lock statements' ReadCommitted snapshots.
+type legacySettlementBusyGate int
+
+const (
+	legacySettlementBusyNone legacySettlementBusyGate = iota
+	legacySettlementBusyIntent
+	legacySettlementBusyContract
+	legacySettlementBusyGrantSet
+)
+
 // The fixed pass cutoff lets skipped owners return after a finite cohort.
 // It bounds traversal growth, not elapsed time or the existing cohort size.
 type LegacySettlementCursor struct {
@@ -34,6 +45,13 @@ type LegacySettlementFlushResult struct {
 	HeadCompleted  int `json:"head_completed"`
 	HeadBusyOrGone int `json:"head_busy_or_gone"`
 	HeadFailed     int `json:"head_failed"`
+	// The three gates partition busy visits; head counts remain total subsets.
+	BusyIntentUnavailable       int `json:"busy_intent_unavailable"`
+	BusyContractUnavailable     int `json:"busy_contract_unavailable"`
+	BusyGrantSetMismatch        int `json:"busy_grant_set_mismatch"`
+	HeadBusyIntentUnavailable   int `json:"head_busy_intent_unavailable"`
+	HeadBusyContractUnavailable int `json:"head_busy_contract_unavailable"`
+	HeadBusyGrantSetMismatch    int `json:"head_busy_grant_set_mismatch"`
 }
 
 // The caller owns the contract row. Neither admission debt nor outcome changes
@@ -74,7 +92,7 @@ const legacySettlementExpectedGrantCountSQL = `SELECT count(*)
 // contract, then every grant, are acquired with SKIP LOCKED. Busy owners leave
 // the intent untouched. Exact debit, payout, outcome, metadata and intent deletion share
 // one commit; a lost commit acknowledgement can never repeat consumption.
-func flushLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId server.Id) (posts []func() any, completed, busy bool, returnErr error) {
+func flushLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId server.Id) (posts []func() any, completed, busy bool, busyGate legacySettlementBusyGate, returnErr error) {
 	var outcome ContractOutcome
 	var clearDispute bool
 	var found bool
@@ -86,7 +104,7 @@ func flushLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId s
 		}
 	})
 	if !found {
-		return nil, false, true, nil
+		return nil, false, true, legacySettlementBusyIntent, nil
 	}
 	var terminal bool
 	found = false
@@ -98,12 +116,12 @@ func flushLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId s
 		}
 	})
 	if !found {
-		return nil, false, true, nil
+		return nil, false, true, legacySettlementBusyContract, nil
 	}
 	if terminal {
 		// The schema guard makes this impossible for ordinary writers. Do
 		// not guess whether an external repair completed required payouts.
-		return nil, false, false, fmt.Errorf("legacy settlement intent has a terminal contract")
+		return nil, false, false, legacySettlementBusyNone, fmt.Errorf("legacy settlement intent has a terminal contract")
 	}
 	{
 		var expected int
@@ -121,7 +139,7 @@ func flushLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId s
 			// Only joined grants can be locked. The original settlement core
 			// decides whether their actual amounts fund usage; an absent,
 			// unused legacy grant must not become a new accounting refusal.
-			return nil, false, true, nil
+			return nil, false, true, legacySettlementBusyGrantSet, nil
 		}
 
 		if clearDispute {
@@ -135,21 +153,21 @@ func flushLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId s
 			return
 		}
 		if !completed {
-			return nil, false, false, fmt.Errorf("legacy worker did not claim locked open contract")
+			return nil, false, false, legacySettlementBusyNone, fmt.Errorf("legacy worker did not claim locked open contract")
 		}
 	}
 	// Only best-effort projections with separate recovery/expiry remain after commit.
 	posts = append(posts, func() any { RemoveFromStream(ctx, contractId); return nil })
-	return posts, true, false, nil
+	return posts, true, false, legacySettlementBusyNone, nil
 }
 
-func flushLegacySettlement(ctx context.Context, contractId server.Id) (completed, busy bool, returnErr error) {
+func flushLegacySettlement(ctx context.Context, contractId server.Id) (completed, busy bool, busyGate legacySettlementBusyGate, returnErr error) {
 	var posts []func() any
 	server.HandleError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='250ms'`))
 			var err error
-			posts, completed, busy, err = flushLegacySettlementInTx(ctx, tx, contractId)
+			posts, completed, busy, busyGate, err = flushLegacySettlementInTx(ctx, tx, contractId)
 			server.Raise(err)
 		}, server.TxReadCommitted, server.OptNoRetry())
 		server.RunPosts(ctx, posts...)
@@ -246,7 +264,7 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 				result.Cursor = nil
 				return
 			}
-			completed, busy, err := flushLegacySettlement(bounded, next.ContractId)
+			completed, busy, busyGate, err := flushLegacySettlement(bounded, next.ContractId)
 			if contextDone(err) {
 				// The current transaction may have rolled back or its commit
 				// acknowledgement may be unknown. Retain the previous cursor;
@@ -273,6 +291,23 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 				result.BusyOrGone++
 				if visitHead {
 					result.HeadBusyOrGone++
+				}
+				switch busyGate {
+				case legacySettlementBusyIntent:
+					result.BusyIntentUnavailable++
+					if visitHead {
+						result.HeadBusyIntentUnavailable++
+					}
+				case legacySettlementBusyContract:
+					result.BusyContractUnavailable++
+					if visitHead {
+						result.HeadBusyContractUnavailable++
+					}
+				case legacySettlementBusyGrantSet:
+					result.BusyGrantSetMismatch++
+					if visitHead {
+						result.HeadBusyGrantSetMismatch++
+					}
 				}
 			}
 			if err != nil {
