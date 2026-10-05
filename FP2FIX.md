@@ -7389,3 +7389,49 @@ Evidence: `astra-api02d-f24c-current-phase-pair-20261005T081404Z.json` SHA256
 `3c6d5a28e21ea8bdc035f5f18065ec6039f78c5f65382dc326dce859dcfbbe3f`,
 binding all four actual receipts and both qualified deltas; local tally evidence
 SHA256 `47a688edca496beefb8e94fd4de19a6044a3abdd69653eff8fda3d7d5f840c0d`.
+
+### 2026-10-05 09:05 UTC current Taskworker renewal and failure attribution
+
+Root's fresh census receipts qualify all eight Taskworkers as ready on
+`7cc33c58303d6eadfac95ad78b31de4294c45146`, with the same processes across the
+pair. The current single global publisher observed 81,034 eligible providers
+at 09:03:53 UTC: 546 met measured quota (0.673791%), 526 were secure-complete,
+and 512,381 measured runs remained. There were 78,778 due providers and 24
+security-pending cases. This is the current dynamic cohort; earlier near-full
+coverage is historical and does not establish current completion.
+
+The separate 09:02–09:05 phase pair spans native intervals of 165.727–166.396
+seconds. It records 330 acknowledged measured successes and 3,449 failures,
+or 22.7682 ACK/s. Across 4,301 completed timed turns, publication averaged
+7.797 seconds (50.247% of total completed wall time), readiness 1.041 seconds,
+and checking/buffering 5.186 seconds. Scheduler Due residence was 92.921%.
+These are acknowledged outcomes and completed phase observations, not unique
+history credit, worker utilization or a controlled estimate of either recent
+repair. Census and stage baseline scrapes differ; readiness was observed at
+the separate census clocks. The frozen reduction is
+`temp/pg-contention-20261004/astra-7cc33-v1-v2-current-coverage-stage-reduction.json`
+(SHA-256 `5580f95a1d87da64faadfe93c69d1891b9b0ba2f73b3a90991d099c259a0c38e`).
+
+A local audit on unchanged 7cc production source establishes an additional
+failure-attribution mechanism. With real authority/controller/model calls,
+Exchange, provider NAT and the URL checker, holding only a successful provider
+return-companion reply produced a measured `dial_dns` negative at 5.0008
+seconds. All three caller-local unavailable witnesses were false. Releasing
+only that callback restored DNS and authenticated HTTPS payload through the
+same provider. The recovery request used a loopback fixture's ordinary HTTPS
+path; it is not a claimed URL-policy pass or quota receipt. A separate real
+paired-client control also verified forward receipt/ACK before the held return
+grant. The evidence is
+`temp/fp2-failure-validity-audit-20261005/failure-validity-evidence.json`
+(SHA-256 `f92ddd5f38954bcd179545ebd6999981344090fea8d10d94fe896db416088358`),
+with its separately pinned scope addendum.
+
+This callback-delay counterfactual does not reproduce the Redis zero-refusal
+cleanup branch or determine the production share of affected DNS failures.
+Correct the proven control-plane delay owner and measure fresh outcomes;
+historical negatives cannot be safely relabeled from aggregate counters.
+Genuine provider silence and TLS failures must remain failures, with unchanged
+same-URL quarantine/revalidation, ratio threshold and probe deadlines. No
+scoring-policy change follows from this audit. Full sustained coverage and
+accurate production failure attribution remain open.
+
