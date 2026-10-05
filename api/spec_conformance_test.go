@@ -174,6 +174,8 @@ func registry() []specEndpoint {
 		{"POST", "/stripe/customer-portal", rt(controller.StripeCreateCustomerPortalArgs{}), rt(controller.StripeCreateCustomerPortalResult{})},
 		{"POST", "/pay/data/checkout", rt(controller.PayDataCheckoutArgs{}), rt(controller.PayDataCheckoutResult{})},
 		{"POST", "/pay/data/network-lookup", rt(controller.PayDataNetworkLookupArgs{}), rt(controller.PayDataNetworkLookupResult{})},
+		{method: "POST", path: "/pay/data/solana-intent", argType: rt(controller.PayDataSolanaIntentArgs{}), resultType: rt(controller.PayDataSolanaIntentResult{})},
+		{method: "POST", path: "/pay/data/solana-status", argType: rt(controller.PayDataSolanaStatusArgs{}), resultType: rt(controller.PayDataSolanaStatusResult{})},
 
 		{"GET", "/verify/keys", nil, rt(controller.GetVerifyKeysResult{})},
 		{"POST", "/sn/wallet", rt(controller.SnSetWalletArgs{}), rt(controller.SnSetWalletResult{})},
