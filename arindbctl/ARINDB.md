@@ -837,7 +837,8 @@ image architectures were extracted and checked against that tree.
 
 **Root's Main Config deployment completed successfully at
 `2026-10-05T06:07:50.840855Z`, selecting the version and OCI index above.
-Loaded-consumer convergence and recovered provider supply remain unverified.**
+Fleet-wide loaded-consumer convergence and recovered provider supply remain
+unverified.**
 The separate deployment receipt has exit status zero and SHA-256
 `ccea1d2e8235eda5ef47209a70a5708c59329a1abb6d488915c968a8ff286551`;
 it retains `runtime_resource_identity_proven: false` and
@@ -856,6 +857,24 @@ recorded evidence expiries in this bundle. Recheck freshness before selecting
 or reproducing it, and refresh through the normal update path as evidence ages.
 The process-local reader does not automatically unload or reclassify records
 when an evidence timestamp expires.
+
+### One mapped-process observation (2026-10-05)
+
+At `13:54:46.879280Z`–`13:54:47.100884Z`, one selected Main Connect process
+(amd64, source `1a46ab5f`) had a stable read-only file mapping whose ARIN
+metadata reported build epoch `1791162091`. Native container, PID, process
+start, executable and mapped device/inode identity stayed unchanged through
+the read. The file length was 592,226,645 bytes; its final 131,072 bytes and
+decoded metadata matched the qualified v13 fingerprints. The native read took
+0.221604 seconds under an eight-second deadline. The retained Main receipt has
+SHA-256 `d14c692da126d5fb7ff6c0183a28ed7e703c010079def63528f946c9f077ad33`.
+
+This is evidence for one process mapping and a bounded fingerprint. It does
+not hash the complete file or prove which application reader used it, request
+routing, fleet convergence, refreshed connection classifications, or recovered
+Quality supply. Those remain separate measurements. The deployed Connect and
+Taskworker ARIN source comparison preserves the same classification rules;
+this observation does not expand the catalog or change health/security gates.
 
 ### Measurements to complete after selection
 
@@ -891,8 +910,8 @@ read, and its whole evaluation occurred after the Config selection cutoff.
 | Speed | 82 |
 | Online | 80,593 |
 
-These counts overlap across buckets. Under selected evidence policy 1, the
-Online cohort contained 82 URL-ratio passes, 80,243 failures and 268 providers
+These counts overlap across buckets. Under selected URL-probe evidence policy
+1, the Online cohort contained 82 URL-ratio passes, 80,243 failures and 268 providers
 with no accepted evidence. The ratio uses the inclusive 4/5 threshold over
 `(2026-10-05T00:40:13.425409Z, 2026-10-05T08:40:13.425409Z]`; it is separate
 from native bucket admission. All four Quality providers had at least ten
@@ -903,9 +922,10 @@ The retained Main receipt has SHA-256
 `e1e8062bb589d58013d1d0c20f80108540d96e8e5b5a4520ff94c8edc46cb373`.
 It contains no risk-exclusion counts, ARIN lookup epochs, loaded file identity
 or provider-level joins. Thus the native supply is measured for that source
-publication, while v13 adoption, classification coverage and its causal effect
-on the Quality count remain unverified. A new publication after selection does
-not establish that its stored classification inputs came from the new resource.
+publication, while fleet-wide v13 adoption, classification coverage and its
+causal effect on the Quality count remain unverified. A new publication after
+selection does not establish that its stored classification inputs came from
+the new resource.
 
 Connection facts advance only after a successful actual ARIN lookup during a
 connection location write. The c343 connection path retries a failed initial
@@ -916,12 +936,14 @@ when available, describes a completed cached score publication: retain its
 source start, completion and publication timestamps, and distinguish its
 bucket membership from durable current-generation classification coverage.
 
-The deployed Taskworker source `5f613cbe` preserves that loader and connection
-fact contract. The eight-slot observation at `2026-10-05T11:24Z` established
-ready workers on that revision, not their loaded ARIN epoch. Taskworker startup
-does not eagerly warm the IP database; its score publisher consumes stored
-connection facts. The legacy missing-connection location task is a no-op.
-Restarting the publisher therefore does not reclassify the fleet.
+The observed Taskworker source `74810db4` preserves that loader and
+connection-fact contract. Twenty-five reviewed ARIN loader, classifier, capture
+and native-score files match the selected Connect `1a46ab5f` source exactly.
+The eight-slot observation at `2026-10-05T12:10Z` established ready workers on
+that revision, not their loaded ARIN epoch. Taskworker startup does not eagerly
+warm the IP database; its score publisher consumes stored connection facts.
+The legacy missing-connection location task is a no-op. Restarting the
+publisher therefore does not reclassify the fleet.
 
 Keep these separate measurements and gates when interpreting recovery:
 
@@ -934,12 +956,16 @@ Keep these separate measurements and gates when interpreting recovery:
 | Risk and reliability | Common serving exclusions remain, while an operator-side probe setup failure without a provider measurement supplies no negative provider verdict. |
 | Resource adoption | Actual loaded generation and subsequent connection lookups; Config selection, worker readiness and score-publication clocks cannot substitute. |
 
-The `11:23:51Z` global quota source reported 79,664 eligible providers, zero
-quota-complete providers and 141,919 remaining measured runs. These quota
-figures are not a newer Quality/Speed census or proof of a classifier defect.
-Six native local controls on exact `5f613cbe` verified the quota boundary,
-including accepted failures and progression through eight, nine and ten runs;
-they do not establish Main's outcome distribution, expiry or probe delivery.
+The earlier `11:23:51Z` quota source reported zero completion among 79,664
+eligible providers. The later `2026-10-05T12:14:55.902994Z` source reported
+79,775 of 80,053 quota-complete (99.652730%), 79,751 security-complete, and
+524 remaining measured runs across 278 deficient providers. The cohort changed,
+so this is not a fixed-provider comparison. These figures are not a newer
+Quality/Speed census, a passing URL ratio, or proof of ARIN classification.
+The 24-provider security gap cannot be cleared merely by filling quota.
+Six native local controls on exact `5f613cbe` verified the ten-total-outcome
+boundary, including accepted failures and progression through eight, nine and
+ten runs; they do not establish Main's outcome distribution or probe delivery.
 
 Existing `urnetwork_stats_provider_excluded{reason}` and
 `urnetwork_stats_provider_egress_index{bucket,index}` gauges provide
@@ -949,9 +975,9 @@ These gauges have no producer observation timestamp and retain the previous
 successful values when a refresh fails; a recent scrape cannot make them a
 fresh exclusion census. The native publication has source clocks but lacks
 ARIN epochs and exclusion reasons. No loaded-ARIN epoch gauge is exported by
-this graph. A bounded current-process mapping/metadata observation can close
-that identity gap for the observed process; a partial-file fingerprint does
-not establish a whole-file hash, fleet convergence or provider-level effect.
+this graph. The bounded process observation above supplies a mapped epoch for
+one process; its partial-file fingerprint does not establish a whole-file
+hash, application-reader use, fleet convergence or provider-level effect.
 
 For this release, retain the following evidence as rollout proceeds:
 
