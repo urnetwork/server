@@ -478,38 +478,33 @@ func validateUserAuthAvailability(
 	userId server.Id,
 ) error {
 
+	// Every row counts: the user auth is unique per auth type, so this user
+	// and another can each hold it under a different type, and the first row
+	// alone could be this user's while the insert then meets the other's on
+	// the unique index. A failed query raises.
+	heldByOther := func(sql string) bool {
+		query, err := tx.Query(ctx, sql, userAuth)
+		held := false
+		server.WithPgResult(query, err, func() {
+			for query.Next() {
+				var holderUserId server.Id
+				server.Raise(query.Scan(&holderUserId))
+				if holderUserId != userId {
+					held = true
+				}
+			}
+		})
+		return held
+	}
+
 	/**
 	 * check if the user_auth is already associated with a different user in sso table
 	 */
-	query, err := tx.Query(
-		ctx,
-		`
+	if heldByOther(`
 		SELECT user_id
 		   FROM network_user_auth_sso
 		   WHERE user_auth = $1
-		`,
-		userAuth,
-	)
-
-	if err != nil {
-		glog.Errorf("Error querying for user auth conflicts: %s", err.Error())
-		return err
-	}
-
-	// conflictCount := 0
-	var ssoUserAuthId *server.Id
-
-	server.WithPgResult(query, err, func() {
-		if query.Next() {
-			server.Raise(
-				query.Scan(
-					&ssoUserAuthId,
-				),
-			)
-		}
-	})
-
-	if ssoUserAuthId != nil && *ssoUserAuthId != userId {
+		`) {
 		// user auth is associated with a different user
 		return fmt.Errorf("user_auth %s already exists for a different user", userAuth)
 	}
@@ -517,34 +512,11 @@ func validateUserAuthAvailability(
 	/**
 	 * check if the user_auth is already associated with a different user in email/phone + password table
 	 */
-	query, err = tx.Query(
-		ctx,
-		`
+	if heldByOther(`
 		SELECT user_id
 		   FROM network_user_auth_password
 		   WHERE user_auth = $1
-		`,
-		userAuth,
-	)
-
-	if err != nil {
-		glog.Errorf("Error querying for user auth conflicts: %s", err.Error())
-		return err
-	}
-
-	var passwordUserAuthId *server.Id
-
-	server.WithPgResult(query, err, func() {
-		if query.Next() {
-			server.Raise(
-				query.Scan(
-					&passwordUserAuthId,
-				),
-			)
-		}
-	})
-
-	if passwordUserAuthId != nil && *passwordUserAuthId != userId {
+		`) {
 		// user already exists with this user_auth
 		return fmt.Errorf("user_auth %s already exists for a different user", userAuth)
 	}
@@ -593,7 +565,11 @@ func addSsoAuthInTx(
 		return
 	}
 
-	result, err := tx.Exec(
+	// A failed insert raises, so it never reads as the refusal below. Another
+	// user's concurrent link of the same identity commits after this
+	// transaction's snapshot and meets the insert on UNIQUE (user_auth,
+	// auth_type); the rerun's availability check then refuses it.
+	result := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
 			INSERT INTO network_user_auth_sso
@@ -605,7 +581,7 @@ func addSsoAuthInTx(
 		parsedAuthJwt.AuthType,
 		normalJwtUserAuth,
 		args.AuthJwt,
-	)
+	))
 
 	if result.RowsAffected() <= 0 {
 		// If no rows were affected, it means the user_id and auth_type already exist
@@ -613,11 +589,7 @@ func addSsoAuthInTx(
 		return
 	}
 
-	if err != nil {
-		returnErr = err
-	}
-
-	return returnErr
+	return nil
 
 }
 
@@ -838,13 +810,12 @@ func addWalletAuthInTx(
 	// Check for an existing binding of this wallet to a different user
 	// before attempting the INSERT below, mirroring the
 	// validateUserAuthAvailability pre-check addUserAuthInTx does for
-	// email/phone auth. A raw unique-constraint violation from the
-	// INSERT would abort this transaction; server.Tx's default retry
-	// options blindly retry the subsequent failed COMMIT for up to 60s
-	// regardless of whether the underlying cause is actually
-	// retryable, so on the ordinary (non-racing) "wallet already taken"
-	// path this would otherwise stall the request for up to a minute
-	// with no error ever reaching the client instead of failing fast.
+	// email/phone auth. A unique violation from the INSERT or the mirror
+	// update aborts this transaction and is no answer for the client, so
+	// every conflict that is already committed is refused here, at once.
+	// Only a concurrent link of the same wallet, committed after this
+	// transaction's snapshot, can still meet a unique index; the statement
+	// raises, and server.Tx's rerun sees that link in these checks.
 	//
 	// The wallet half of this deliberately does NOT filter on blockchain.
 	// UNIQUE (wallet_address, blockchain) is byte exact, so a row holding a
@@ -880,10 +851,6 @@ func addWalletAuthInTx(
 		walletAuth.PublicKey,
 		addWalletAuth.UserId,
 	)
-	if queryErr != nil {
-		err = queryErr
-		return
-	}
 	server.WithPgResult(result, queryErr, func() {
 		for result.Next() {
 			var rowUserId *server.Id
@@ -907,7 +874,29 @@ func addWalletAuthInTx(
 		return
 	}
 
-	_, dbErr := tx.Exec(
+	// network_user.wallet_address has a global (not per-user) unique index
+	// too, and a legacy account can hold the wallet there alone: its
+	// network_user.wallet_address was set before network_user_auth_wallet
+	// existed and was never cleared. That is the same refusal; without it the
+	// mirror update below fails on the index and the client gets no answer.
+	var legacyHolder bool
+	server.Raise(tx.QueryRow(
+		ctx,
+		`
+			SELECT EXISTS (
+				SELECT 1 FROM network_user
+				WHERE wallet_address = $1 AND user_id <> $2
+			)
+		`,
+		walletAuth.PublicKey,
+		addWalletAuth.UserId,
+	).Scan(&legacyHolder))
+	if legacyHolder {
+		err = errors.New("409 This wallet is already linked to another account.")
+		return
+	}
+
+	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
 				INSERT INTO network_user_auth_wallet
@@ -922,37 +911,13 @@ func addWalletAuthInTx(
 		addWalletAuth.UserId,
 		walletAuth.PublicKey,
 		walletAuth.Blockchain,
-	)
-	if dbErr != nil {
-
-		glog.Infof(
-			"Error adding wallet auth: %s user_id=%s wallet_address=%s blockchain=%s",
-			dbErr.Error(),
-			addWalletAuth.UserId,
-			walletAuth.PublicKey,
-			walletAuth.Blockchain,
-		)
-
-		// the detail is in the log above; the client gets a message it can act
-		// on, not the database's text
-		err = errors.New("Could not link this wallet. Please try again.")
-		return
-	}
+	))
 
 	// Mirror onto network_user's top-level wallet columns, symmetric
 	// with RemoveAuth's solana branch which clears them. Without this,
 	// a remove-then-re-add cycle leaves wallet_address/wallet_blockchain
 	// nil even though network_user_auth_wallet has the wallet bound.
-	//
-	// network_user.wallet_address has a global (not per-user) unique
-	// index, so this can legitimately conflict -- e.g. a legacy account
-	// whose network_user.wallet_address was set before
-	// network_user_auth_wallet existed and was never cleared. Handle
-	// that the same way the INSERT above does (return a clean error)
-	// instead of panicking, which would otherwise surface as an
-	// uncaught 500 after server.Tx's transient-error retry loop burns
-	// up to a minute on a permanent constraint violation.
-	_, dbErr = tx.Exec(
+	server.RaisePgResult(tx.Exec(
 		ctx,
 		`UPDATE network_user
 			 SET wallet_address = $2, wallet_blockchain = $3
@@ -960,21 +925,8 @@ func addWalletAuthInTx(
 		addWalletAuth.UserId,
 		walletAuth.PublicKey,
 		walletAuth.Blockchain,
-	)
-	if dbErr != nil {
-
-		glog.Infof(
-			"Error mirroring wallet auth onto network_user: %s user_id=%s wallet_address=%s blockchain=%s",
-			dbErr.Error(),
-			addWalletAuth.UserId,
-			walletAuth.PublicKey,
-			walletAuth.Blockchain,
-		)
-
-		err = errors.New("Could not link this wallet. Please try again.")
-		return
-	}
-	return err
+	))
+	return nil
 }
 
 func getWalletAuths(
