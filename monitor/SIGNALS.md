@@ -1181,7 +1181,9 @@ SELECT count(*) FILTER (WHERE state = 'idle in transaction') AS idle_in_tx,
        max(now() - xact_start) FILTER (WHERE state = 'idle in transaction') AS oldest
 FROM pg_stat_activity WHERE backend_type = 'client backend';
 ```
-- HEALTHY: idle_in_tx < 30, active < 20, oldest < 1 min.
+- HEALTHY: idle_in_tx < 30, active < 20, oldest < 1 min. This clears only
+  the PostgreSQL state band. Low backend activity cannot clear the separate
+  PgBouncer startup/queue path (§2.11) or API authentication pressure (§2.19e).
 - UNKNOWN: the executable state summary requires exactly one row with four
   nonnegative integers: active count, idle-in-transaction count, rounded
   oldest transaction age in seconds, and total client count. Missing, extra,
@@ -1564,6 +1566,8 @@ including waits; it is never a CPU counter.
   systemd unit family need separate direct controls. No accounting source is
   a coverage failure. A below-band counter cannot dismiss WAL/buffer waits,
   write amplification, or other contention; retain §1.3d and §2.2 independently.
+  It also cannot clear §2.11: when poolers fail to establish backend sessions,
+  requests can accumulate outside PostgreSQL while its CPU falls.
 - ACTION: correlate direct active-query/wait observations, bounded statement
   call deltas, escrow fanout, and a healthy workload control. Distinguish useful
   demand from repeated work, CPU quotas, and hardware limits before changing
@@ -7013,6 +7017,98 @@ the pending server identity and age before recovery, and do not describe a
 lower timeout, pool-size increase, library upgrade or process restart as a
 durable fix without identifying the failed progress path.
 
+The 2026-10-05 01:35:55–57Z recurrence supplied the missed outage shape again:
+all 32 native shards had waiting clients, zero established normal or
+cancellation servers, and one login each; `cl_waiting` summed to 306,598 and
+the maximum wait was 120.24 seconds. These are client connections, not unique
+users, logical requests or completed queries. The shards were read over
+1.4 seconds, not atomically. Login identities and ages were absent, and every
+selected log tail hit its cap: zero matched login-timeout/error lines cannot
+establish their absence. The separately qualified direct PostgreSQL control
+remained healthy. This is pool-path capacity loss even with healthy direct
+queries, low PostgreSQL CPU, active units and an open frontend listener.
+
+Progress must be measured at its actual boundary. In the installed 1.26.0
+[client request path](https://github.com/pgbouncer/pgbouncer/blob/pgbouncer_1_26_0/src/client.c),
+`total_query_count` and `total_xact_count` advance when client work starts,
+before server assignment; rising values do not prove completed PostgreSQL
+work. `total_server_assignment_count` advances on a successful client/server
+link in
+[`find_server`](https://github.com/pgbouncer/pgbouncer/blob/pgbouncer_1_26_0/src/objects.c).
+That proves assignment, not a successful query or financial commit. Pair
+assignment deltas with server response bytes and completed query/transaction
+time, queue age, established-server states and the affected application
+outcome. Response endings can include errors; they are not successful
+business outcomes. `cl_active` likewise is not a count of executing PostgreSQL queries.
+Use same-process, same-pool paired counters; resets, replacements, missing
+cells or unbound pool membership leave progress unknown.
+
+For paired login evidence, `SHOW SERVERS` calls the startup state `new`.
+Bind its stable connection `id` to the native process generation in the
+private reducer; do not use a reusable pointer as identity or emit those
+identifiers as metric labels. Parse `connect_time`/`request_time` only with
+the proven process-local timezone and their one-second precision. Unknown
+timezone means unknown age. A positive `remote_pid` proves receipt of
+BackendKeyData late in startup, not query readiness. Successive identities
+distinguish replacement from one persistent attempt only at the sampled
+boundaries; the observation can still miss intervening attempts.
+
+Local native PgBouncer 1.26/libevent 2.1.12 fixtures with a synthetic
+PostgreSQL-protocol backend, trust authentication and no TLS reject two causal
+shortcuts. A silent accepted backend with a one-second timeout produced
+login-only frames while startup identities changed and the timeout worked. Expired
+clients with a 6,200-byte queued query payload reproduced repeated backend closes,
+but a healthy 14-byte query control drained 30 expired waiters while preserving
+one backend. Thus login-only aggregates do not prove a stuck timer, and
+expired waiters alone do not prove the Main failure mechanism. The short pgx
+initial Ping is not reproduced by substituting the larger query. A matched
+Main startup identity/age/error observation is still required.
+
+PgBouncer pauses client reads in `CL_WAITING`. A closed application client can
+remain in that queue until server reactivation or queue expiry, after its
+application pool slot is already released. Thus `cl_waiting` is not a census
+of live application callers. The healthy small-query fixture retained all
+30 closed clients while the blocker was held, then drained them with one
+backend preserved. This is a count/lifetime discriminator, not proof that
+closed clients caused Main's loss of backend capacity.
+
+Required detector follow-up (prospective, not implemented by the current
+listener/log probe): collect the bounded native states and paired progress
+fields on the existing inventory-owned route at least once per minute.
+A complete fleet frame with waiting clients and zero established servers on
+every enabled shard warrants PAGE once queue age exceeds the affected
+application's admission budget, or the shape recurs in a second fresh
+one-minute observation. The old-wait shape needs no additional sustain,
+including when `sv_login` is positive and TCP accepts. A brief cold-start
+frame alone cannot prove sustained failure. Repeated login-only waits on an
+independently qualified shard warrant WARN after two fresh observations; a missing sibling
+prevents a fleet-health claim without suppressing the proven shard failure.
+Retain established-server pressure as a separate case. One new login beside
+working established servers is ordinary startup, not this outage condition.
+No log-rate, high-CPU, completed-query or five-minute process-age minimum may
+suppress the complete zero-backend outage shape. Failed administrative reads
+remain visibility loss. This requirement does not activate a new Main reader
+or imply the current monitor already evaluates it.
+
+An authorized restart restored backend capacity immediately, but the earlier
+restart did not prevent this recurrence. Keep the incident open until every
+enabled shard has established capacity and paired response/assignment progress
+under continuing demand, queue residence recovers, affected API/Connect
+outcomes recover, and the existing ten-minute complete-window rule passes.
+A fall in waiting clients can also mean disconnected callers; a quiet sample
+without demand cannot prove service recovery. Do not turn restart success
+into durable-root-cause attribution or restart PostgreSQL to change a healthy
+direct-PG observation. Recovery remains distinct from the unresolved startup
+mechanism and from the application containment fixes.
+
+A later qualified one-shard control at 02:16:44–48Z had 20 established
+servers, zero logins, 8,180 assignments and 997,784 server-response bytes
+over 3.574 seconds. Its queue moved from zero to 20 clients while maximum
+wait stayed at 14.669 milliseconds. This demonstrates current progress with
+a nonempty queue on that shard; it neither certifies the other 31 shards nor
+resolves the earlier startup cause. Unavailable kernel wait-state observations
+remain unknown and cannot identify an event-loop failure.
+
 False-negative qualifier: the application's five-second initial Ping can
 time out before the pooler's longer queue deadline. An absent queue-timeout
 line, lower database/Redis load, or a successful listener-only probe does not
@@ -11678,6 +11774,55 @@ request. A 17:00 UTC control had zero constructing connections and 5,673 idle
 connections across the API fleet: the earlier state must not be described as
 continuously present or cleared by a later source-only change.
 
+The 2026-10-05 01:32:26Z control exposed an earlier admission boundary across
+16 qualified API processes: `authenticate` held 9,078 control HTTP handlers,
+while `prepare`, `controller`, `response` and every HTTP frame group were
+zero. Default pgx pools reported 5,472 total connections, one acquired and
+zero idle. On this pinned source, `total - acquired - idle` therefore gives
+5,471 constructing connections, not 5,471 active SQL queries or checked-out
+connections. The 8,192 aggregate configured maximum was not fully occupied;
+waiting for construction does not require the total to equal the maximum.
+Use the same pool/process/scrape for this derivation, reject negative or
+inconsistent states, and keep unopened-pool absence unknown. A sum across
+sequentially scraped processes is a bounded fleet observation, not an atomic
+snapshot or a causal join to the later PgBouncer frame (§2.11).
+
+Zero controller/frame occupancy here does not mean a quiet API: the JWT live
+state and legacy identity reads run before controller dispatch. Phase inflight
+is current residence; completed phase seconds and successful acquire duration
+exclude still-pending work. Acquire `empty` is a subset of successful
+acquisitions, not a disjoint failure count. Use reset-aware paired acquire,
+cancellation and connection-creation counters; lifetime totals alone cannot
+show the current wait rate. A healthy unauthenticated route proves only its
+own dependency path and cannot clear authenticated request failure.
+
+Required detector follow-up (prospective): extend this owning signal with an
+authentication/connection-construction branch independent of its completed
+request and five-minute process-age gates. Two complete fresh one-minute
+observations of at least 100 authentication handlers on one process, zero
+idle default-pool connections, and at least 90% of nonzero pool total still
+constructing warrant WARN. These are proposed containment-warning thresholds,
+not measured healthy baselines or service admission caps. Corroborating the
+complete native zero-backend outage from §2.11 warrants PAGE immediately;
+the temporal association still does not identify one handler's exact backend.
+Missing phase or pool evidence remains unobservable, not a zero workload.
+Cold startup, short demand bursts, draining generations and a replaced pool
+must be distinguished before claiming sustained failure or recovery.
+
+Local real-PostgreSQL controls require authentication operations, including
+live JWT state reads, to share one 30-second scoped deadline and return a
+retryable 503 for dependency unavailability. Existing detached bad-connection
+disposal may add its separate five-second bound; this is not a whole-handler
+30-second wall-clock guarantee. The lock control joins before releasing the
+held database lock. Healthy authentication must hand off to the original
+request context; subsequent controller and already admitted financial work
+must retain their existing lifetime. Native pgx constructor deadlines are a
+separate boundary because a canceled Acquire can leave connection construction
+running. A shorter per-address connection timeout or bounded DNS lookup is
+not one universal wall-clock constructor deadline. Source tests qualify these
+mechanisms; recovery requires the exact serving artifact and fresh route,
+pool, PgBouncer and durable financial progress observations.
+
 The owning contract path previously acquired two PostgreSQL connections in
 parallel for a destination's TLS certificate and signed public key. The
 combined metadata reader uses one indexed SELECT and releases its connection
@@ -14694,6 +14839,11 @@ report rate; sample one full line.
 3. Systemic: CLUSTER INFO → CLUSTERDOWN → 5.3. cluster ok → check pg (1.3),
    task canaries (1.2), recent deploys; new panic frame in logs → the stack
    names the broken path.
+   Low PostgreSQL CPU/activity does not end this branch: check native
+   PgBouncer established/login/wait states (§2.11), API authentication and
+   constructing-pool occupancy (§2.19e), and Connect handlers before resident
+   admission (§8.15), even while process readiness and unauthenticated routes
+   remain healthy.
 
 ### 5.2 Node wedge (PING hangs locally)
 This is a Redis-specific diagnosis, not a classification of every outgoing
@@ -19517,6 +19667,46 @@ prove neither a leak nor a causal call site and never change the raw PAGE
 thresholds. A real zero count remains `resident_count=0` with ratios explicitly
 `undefined`: nonzero retained process state must not disappear or become zero
 cost through division by an empty population.
+
+Keep external connection handlers as a separate population boundary. The
+existing `urnetwork_connect_connected_clients` gauge belongs to H1/H1+
+handler entry/exit; it includes authentication and teardown residence and
+does not mean unique clients, authenticated users or admitted residents.
+`urnetwork_connect_exchange_active_connections` supplies finite
+inbound/outbound and transport/forward cells for established exchange owners.
+Neither family is interchangeable with the resident or SDK transfer ledger.
+Require their own unique fresh same-process cells; absence is unknown, and
+an enabled, complete ledger reporting zero says only that its measured owners
+are zero.
+
+At 2026-10-05 01:33:42Z, a source-qualified new `65e67454` Connect process had
+200,213 H1 handler owners and 402,650 goroutines, with zero residents,
+exchange endpoints and SDK transfer admissions/running/cleanup owners.
+RSS was about 11.29 GB, heap 6.81 GB and stacks 3.94 GB. The source has one
+request-context watcher beside each H1 handler; that is consistent with the
+roughly two-goroutine ratio, not stack attribution. This finite observation
+locates the large population outside established resident/transfer ownership.
+It does not by itself distinguish authentication, other admission dependencies
+or teardown. Only three of the 16 observed slots qualified as this new
+source; older generations cannot be treated as equivalent controls.
+
+The matched local failure control held the real PostgreSQL authorization
+table while valid H1 header, H1 frame, H1+ and QUIC clients authenticated.
+On `65e67454`, all four handlers remained live past the nominal auth-read
+timeout with no resident/SDK admission; closing the hijacked WebSocket peer
+did not retire its blocked database call. The corrected `1b796716` source
+uses one existing 30-second budget through auth I/O, JWT/state/membership
+reads and QUIC first-stream admission, then hands serving ownership to the
+original context. With short configured test deadlines, every blocked local
+carrier joins before lock release,
+H1+ reports nonterminal 503, healthy carriers continue beyond that budget,
+and acknowledged control work still finishes. This proves a retention
+mechanism, not that all Main handlers were parked at that call site.
+Native pgx constructors and existing background Redis disconnect cleanup
+remain separate owners. Keep the raw runtime PAGE and pool-path incident
+open until exact-generation handler, resident, exchange and SDK counts plus
+application progress recover; neither a resident cap nor a new zero-resident
+process clears the finding.
 
 For a capability-proven runaway, also join the identity-free
 `urnetwork_connect_resident_callback_workers`,
