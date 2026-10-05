@@ -3138,7 +3138,9 @@ func (self *ResidentTransport) Run() {
 	skippedReconnectWait := false
 	for {
 		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
-		resident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, self.exchange.settings.ExchangeResidentTtl)
+		// Routing does not own the registration heartbeat. Failed dialing must
+		// not keep a departed resident's registration alive.
+		resident := model.GetResidentForClientWithInstance(self.ctx, self.clientId, self.instanceId, 0)
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
 			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			headerCopy := self.header
@@ -3399,7 +3401,8 @@ func (self *ResidentForward) runWithResidentLookup(
 		}
 		reconnect := connect.NewReconnect(self.exchange.settings.ExchangeReconnectAfterErrorTimeout)
 		resident := defaultResidentForwardLookupMetrics.observe(initialLookup, hasPending || len(self.send) > 0, func() *model.NetworkClientResident {
-			return lookup(self.ctx, self.clientId, self.exchange.settings.ExchangeResidentTtl)
+			// Pending traffic must not prolong a departed registration.
+			return lookup(self.ctx, self.clientId, 0)
 		})
 		initialLookup = false
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
