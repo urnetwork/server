@@ -265,7 +265,9 @@ func TestStCloseExpiryTransientReadStaysOnSelectedEndpoint(t *testing.T) {
 		client, intent, fixture := newStCloseExpiryFixture(t, "soft-policy", false)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
+		fixture.stateLock.Lock()
 		fixture.cancelForeign = cancel
+		fixture.stateLock.Unlock()
 		now, waits := time.Now(), 0
 		client.readHooks = stRpcReadHooks{now: func() time.Time { return now }, wait: func(ctx context.Context, delay time.Duration) error { waits++; now = now.Add(delay); return ctx.Err() }}
 		if _, err := client.CloseOperatorEpoch(ctx, 7, 1); err != nil {
