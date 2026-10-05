@@ -6656,7 +6656,8 @@ func FindProviders2(
 			if mode == RankModeQuality && native {
 				prior := []server.Id{}
 				now := server.NowUtc()
-				for _, id := range append(slices.Clone(clientIds), borrowedClientIds...) {
+				for _, provider := range providers {
+					id := provider.ClientId
 					if score := scores[id]; score != nil && !qualityReadClientIds[id] &&
 						!hardExcludedClientIds[id] && score.PassesMinimums[mode] &&
 						score.EgressValidUntil != nil && now.Before(*score.EgressValidUntil) {
