@@ -4911,6 +4911,41 @@ server lock residence nor Main latency. Busy attempts still acquire their
 per-contract owners and commit without economic DML; this inherited work and
 downstream provider-total contention require separate measurements.
 
+Bounded grant-queue opportunity (2026-10-05): the first selected old-head visit
+in a continued page issues the sorted grant preflight without `SKIP LOCKED`,
+under one 250ms statement budget. Intent and contract ownership still skip;
+forward visits and later heads retain the existing nonwaiting grant query.
+The query mode is chosen before acquiring any grant, avoiding an out-of-order
+retry of a partially acquired set. A successful preflight restores the normal
+two-second statement budget before the unchanged financial transaction.
+Recognized timeout from that exact query unwinds through full transaction
+rollback before becoming grant-busy; it neither changes the intent's due key
+nor logs an expected error, defers it as operational, or runs posts. Parent or
+operator cancellation, deadlock, later financial failure and ambiguous commit
+remain separate errors. Rollback/disposal and posts have their existing bounds;
+250ms describes the acquisition statement, not total request wall time.
+
+Source-qualified task results add `head_grant_wait_attempted`,
+`head_grant_wait_completed` and `head_grant_wait_timed_out`. Attempted means the
+blocking-mode query was issued, not that PostgreSQL actually waited. Completed
+means that visit returned financial success, not just grant acquisition. Each
+page has at most one attempted query; completed plus timed-out cannot exceed
+attempted, completed is a head-completed subset, and timed-out is a
+head-grant-busy subset. The existing grant-set counter now includes this scoped
+timeout as well as incomplete or changing joined membership. Missing fields
+from older producers remain unknown, not zero. Qualify the source separately
+from JSON shape and retain selected finished-task-head coverage limits.
+
+A native baseline skips the retained owner and returns before its subsequent
+release; the candidate is observed waiting on that owner and then commits exact
+debit, sweep, metadata and durable provider-total ownership after release.
+Held-budget, partial-grant, cancellation and later-failure controls preserve
+rollback and replay fences. This offers bounded acquisition opportunity, not a
+proof of Main's lock owner or guaranteed cohort drain: long owners, queue depth,
+membership changes and pages that never reach their head slot remain possible.
+Due-key order also differs from oldest-open creation order; an old open head
+before the persisted cursor need not occupy the first selected retry slot.
+
 The inline legacy metadata path now reuses its actual grant and escrow ownership
 only when every payout target exactly matches the captured positive unmarked
 reservation key and amount. It removes four redundant reads/locks, keeps

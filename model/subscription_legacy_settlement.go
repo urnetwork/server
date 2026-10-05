@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
 )
 
@@ -13,6 +14,13 @@ const LegacySettlementShardCount = 16
 
 var errLegacySettlementPending = errors.New("legacy settlement is durably pending")
 var errLegacySettlementPageBudget = errors.New("legacy settlement page budget elapsed")
+var errLegacySettlementGrantWaitBusy = errors.New("legacy settlement bounded grant wait elapsed")
+
+// Local query-stage evidence; it is recorded only after the attempt returns.
+type legacySettlementGrantWait struct {
+	attempted bool
+	timedOut  bool
+}
 
 // A skipped owner identifies a gate, not a live lock census. Grant membership
 // can also change between the count and lock statements' ReadCommitted snapshots.
@@ -52,6 +60,11 @@ type LegacySettlementFlushResult struct {
 	HeadBusyIntentUnavailable   int `json:"head_busy_intent_unavailable"`
 	HeadBusyContractUnavailable int `json:"head_busy_contract_unavailable"`
 	HeadBusyGrantSetMismatch    int `json:"head_busy_grant_set_mismatch"`
+	// At most the first head joins the grant queue. These are head subsets,
+	// not additional visits, and absent fields in earlier results are unknown.
+	HeadGrantWaitAttempted int `json:"head_grant_wait_attempted"`
+	HeadGrantWaitCompleted int `json:"head_grant_wait_completed"`
+	HeadGrantWaitTimedOut  int `json:"head_grant_wait_timed_out"`
 }
 
 // The caller owns the contract row. Neither admission debt nor outcome changes
@@ -93,6 +106,12 @@ const legacySettlementExpectedGrantCountSQL = `SELECT count(*)
 // the intent untouched. Exact debit, payout, outcome, metadata, total-projection ownership and intent
 // deletion share one commit; a lost commit acknowledgement can never repeat consumption.
 func flushLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId server.Id) (posts []func() any, completed, busy bool, busyGate legacySettlementBusyGate, returnErr error) {
+	return flushLegacySettlementWithGrantWaitInTx(ctx, tx, contractId, nil)
+}
+
+// A nonnil wait is reserved for the first head's grant preflight. All other
+// ownership gates and the financial transaction retain their existing behavior.
+func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx, contractId server.Id, wait *legacySettlementGrantWait) (posts []func() any, completed, busy bool, busyGate legacySettlementBusyGate, returnErr error) {
 	var outcome ContractOutcome
 	var clearDispute bool
 	var found bool
@@ -126,15 +145,10 @@ func flushLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId s
 	{
 		var expected int
 		server.Raise(tx.QueryRow(ctx, legacySettlementExpectedGrantCountSQL, contractId).Scan(&expected))
-		locked := 0
-		rows, err = tx.Query(ctx, `SELECT balance.balance_id FROM transfer_balance AS balance
-          INNER JOIN transfer_escrow AS escrow USING(balance_id) WHERE escrow.contract_id=$1
-          ORDER BY balance.balance_id FOR UPDATE OF balance SKIP LOCKED`, contractId)
-		server.WithPgResult(rows, err, func() {
-			for rows.Next() {
-				locked++
-			}
-		})
+		locked, err := lockLegacySettlementGrantsInTx(ctx, tx, contractId, wait)
+		if err != nil {
+			return nil, false, false, legacySettlementBusyNone, err
+		}
 		if locked != expected {
 			// Only joined grants can be locked. The original settlement core
 			// decides whether their actual amounts fund usage; an absent,
@@ -161,15 +175,83 @@ func flushLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId s
 	return posts, true, false, legacySettlementBusyNone, nil
 }
 
+// Choose the ownership mode before locking any grant. Retrying a partial
+// SKIP LOCKED set in place could invert the sorted grant order. The first head
+// instead gets one whole-statement wait budget, not a budget per grant row.
+func lockLegacySettlementGrantsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, wait *legacySettlementGrantWait) (locked int, returnErr error) {
+	query := `SELECT balance.balance_id FROM transfer_balance AS balance
+          INNER JOIN transfer_escrow AS escrow USING(balance_id) WHERE escrow.contract_id=$1
+	          ORDER BY balance.balance_id FOR UPDATE OF balance`
+	if wait == nil {
+		query += ` SKIP LOCKED`
+	} else {
+		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout='250ms'`))
+		wait.attempted = true
+	}
+	rows, err := tx.Query(ctx, query, contractId)
+	if err == nil {
+		for rows.Next() {
+			locked++
+		}
+		err = rows.Err()
+		rows.Close()
+	}
+	if err != nil {
+		if wait != nil && ctx.Err() == nil && legacySettlementGrantWaitExpired(err) {
+			wait.timedOut = true
+			// The transaction is aborted. The caller must unwind through Tx's
+			// rollback before treating this expected ownership refusal as busy.
+			return 0, errLegacySettlementGrantWaitBusy
+		}
+		return 0, err
+	}
+	if wait != nil {
+		server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout='2s'`))
+	}
+	return locked, nil
+}
+
+// Classify only errors returned by the bounded grant query, never later DML.
+func legacySettlementGrantWaitExpired(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	// Operator cancellation shares 57014 but is not this bounded wait.
+	return pgErr.Code == "55P03" || (pgErr.Code == "57014" && pgErr.Message == "canceling statement due to statement timeout")
+}
+
 func flushLegacySettlement(ctx context.Context, contractId server.Id) (completed, busy bool, busyGate legacySettlementBusyGate, returnErr error) {
+	return flushLegacySettlementWithGrantWait(ctx, contractId, nil)
+}
+
+// Expected grant-wait exhaustion crosses the normal rollback boundary before
+// becoming a busy result. Cancellation and every other error stay visible.
+func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.Id, wait *legacySettlementGrantWait) (completed, busy bool, busyGate legacySettlementBusyGate, returnErr error) {
 	var posts []func() any
 	server.HandleError(func() {
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='250ms'`))
-			var err error
-			posts, completed, busy, busyGate, err = flushLegacySettlementInTx(ctx, tx, contractId)
-			server.Raise(err)
-		}, server.TxReadCommitted, server.OptNoRetry())
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					if r == errLegacySettlementGrantWaitBusy {
+						if ctx.Err() != nil {
+							panic(ctx.Err())
+						}
+						// Tx has already rolled back and released every acquired
+						// owner. Do not log expected contention or run any posts.
+						posts, completed, busy, busyGate = nil, false, true, legacySettlementBusyGrantSet
+						return
+					}
+					panic(r)
+				}
+			}()
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='250ms'`))
+				var err error
+				posts, completed, busy, busyGate, err = flushLegacySettlementWithGrantWaitInTx(ctx, tx, contractId, wait)
+				server.Raise(err)
+			}, server.TxReadCommitted, server.OptNoRetry())
+		}()
 		server.RunPosts(ctx, posts...)
 	}, func(err error) { returnErr = err })
 	return
@@ -191,13 +273,13 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 	}
 	bounded, cancel := context.WithTimeoutCause(ctx, 15*time.Second, errLegacySettlementPageBudget)
 	defer cancel()
-	return flushLegacySettlementsPage(ctx, bounded, shard, after, limit, flushLegacySettlement)
+	return flushLegacySettlementsPage(ctx, bounded, shard, after, limit, flushLegacySettlementWithGrantWait)
 }
 
-// One traversal owns its settlement operation. Production supplies the durable
-// transaction; tests can interrupt the next visit after a real committed prefix.
+// One traversal owns its settlement operation, including the first head's
+// bounded grant wait. Tests can interrupt after a real committed prefix.
 func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *LegacySettlementCursor, limit int,
-	settle func(context.Context, server.Id) (bool, bool, legacySettlementBusyGate, error)) (result LegacySettlementFlushResult, returnErr error) {
+	settle func(context.Context, server.Id, *legacySettlementGrantWait) (bool, bool, legacySettlementBusyGate, error)) (result LegacySettlementFlushResult, returnErr error) {
 	pageBudgetExceeded := func(err error) bool {
 		return ctx.Err() == nil && bounded.Err() != nil && context.Cause(bounded) == errLegacySettlementPageBudget &&
 			isSettlementPageCancellation(err)
@@ -266,7 +348,11 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 				result.Cursor = nil
 				return
 			}
-			completed, busy, busyGate, err := settle(bounded, next.ContractId)
+			var grantWait *legacySettlementGrantWait
+			if visitHead && result.HeadVisited == 0 {
+				grantWait = &legacySettlementGrantWait{}
+			}
+			completed, busy, busyGate, err := settle(bounded, next.ContractId, grantWait)
 			if err != nil && bounded.Err() != nil {
 				// The current transaction may have rolled back or its commit
 				// acknowledgement may be unknown. Retain the previous cursor;
@@ -277,6 +363,15 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 			remaining--
 			if visitHead {
 				result.HeadVisited++
+				if grantWait != nil && grantWait.attempted {
+					result.HeadGrantWaitAttempted++
+					if completed && err == nil {
+						result.HeadGrantWaitCompleted++
+					}
+					if grantWait.timedOut && err == nil {
+						result.HeadGrantWaitTimedOut++
+					}
+				}
 				headRemaining--
 				headAfter = next
 				forwardUntilHead = 3
