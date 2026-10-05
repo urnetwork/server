@@ -34,8 +34,8 @@ const InitialTransferBalance = 32 * model.Gib
 const InitialTransferBalanceDuration = 30 * 24 * time.Hour
 
 // The recurring per-tier data grants come from pro.yml (model.Pro().DataAmount),
-// on three separate schedules -- see FreeGrantWindow / ProGrantWindow /
-// ReferralGrantWindow and the three Refresh*TransferBalances tasks below.
+// on three separate schedules -- see model.FreeGrantWindow / model.ProGrantWindow /
+// model.ReferralGrantWindow and the three Refresh*TransferBalances tasks below.
 //
 // RefreshSupporterTransferBalance is the legacy amount still used at subscription
 // ACTIVATION, where the balance spans the whole subscription period alongside the
@@ -187,26 +187,14 @@ type Subscription struct {
 }
 
 func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceResult, error) {
-	transferBalances := model.GetActiveTransferBalances(session.Ctx, session.ByJwt.NetworkId)
-
-	netBalanceByteCount := model.ByteCount(0)
-	startBalanceByteCount := model.ByteCount(0)
+	// at a grant boundary the old grant is still active through its grace; the
+	// summary counts only the new one (see model.SummarizeTransferBalances)
+	transferBalanceSummary := model.GetTransferBalanceSummary(session.Ctx, session.ByJwt.NetworkId)
 
 	// Pro comes from pro_model, the single place it is tracked. It is NOT "has a
 	// paid balance": a data code is paid but data-only, so that test would report
 	// a data-code buyer as Pro.
 	isPro := model.IsProNetwork(session.Ctx, session.ByJwt.NetworkId)
-
-	for _, transferBalance := range transferBalances {
-
-		if transferBalance.EndTime.After(server.NowUtc()) {
-			netBalanceByteCount += transferBalance.BalanceByteCount
-			startBalanceByteCount += transferBalance.StartBalanceByteCount
-		}
-
-	}
-
-	openTransferByteCount := model.GetOpenTransferByteCount(session.Ctx, session.ByJwt.NetworkId)
 
 	var currentSubscription *Subscription
 
@@ -241,12 +229,12 @@ func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceRe
 	pendingPayout := model.ByteCount(0)
 
 	return &SubscriptionBalanceResult{
-		BalanceByteCount:          netBalanceByteCount,
-		StartBalanceByteCount:     startBalanceByteCount,
-		OpenTransferByteCount:     openTransferByteCount,
+		BalanceByteCount:          transferBalanceSummary.BalanceByteCount,
+		StartBalanceByteCount:     transferBalanceSummary.StartBalanceByteCount,
+		OpenTransferByteCount:     transferBalanceSummary.OpenTransferByteCount,
 		CurrentSubscription:       currentSubscription,
 		Subscriptions:             subscriptions,
-		ActiveTransferBalances:    transferBalances,
+		ActiveTransferBalances:    transferBalanceSummary.ActiveTransferBalances,
 		PendingPayoutUsdNanoCents: pendingPayout,
 		UpdateTime:                server.NowUtc(),
 		Guest:                     isGuestNetwork(session, model.HasAnyAuthMethod),
@@ -1606,45 +1594,9 @@ func verifyPlayAuth(ctx context.Context, auth string) error {
 	return errors.New("Missing authorization.")
 }
 
-// ----- grant windows -----
-//
-// The three grants run on three different schedules, and each balance's window
-// extends a little past the end of its period so consecutive grants overlap and a
-// client never sees a gap at the boundary.
-
-// FreeGrantGrace is how long past the end of the day a daily free balance stays
-// valid.
-const FreeGrantGrace = 1 * time.Hour
-
-// ProGrantGrace is how long past the end of the month a monthly Pro balance stays
-// valid. It is also the window in which a lapsed subscriber is still Pro, because
-// the Pro entitlement is exactly "has an in-window pro balance" (see pro_model.go).
-const ProGrantGrace = 24 * time.Hour
-
-// FreeGrantWindow is the window for the daily free grant covering `now`:
-// [start of day, start of next day + 1 hour).
-func FreeGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
-	year, month, day := now.UTC().Date()
-	startTime = time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
-	endTime = startTime.AddDate(0, 0, 1).Add(FreeGrantGrace)
-	return
-}
-
-// ProGrantWindow is the window for the monthly Pro grant covering `now`:
-// [start of month, start of next month + 1 day).
-func ProGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
-	year, month, _ := now.UTC().Date()
-	startTime = time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)
-	endTime = startTime.AddDate(0, 1, 0).Add(ProGrantGrace)
-	return
-}
-
-// ReferralGrantWindow is the window for one referral grant period, from `now`.
-func ReferralGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
-	startTime = now.UTC()
-	endTime = startTime.Add(model.Pro().ReferralGrantPeriod()).Add(FreeGrantGrace)
-	return
-}
+// The grant windows (model.FreeGrantWindow, model.ProGrantWindow,
+// model.ReferralGrantWindow) live in the model, next to the balance summary that
+// tells a grant in its grace from the next grant of its kind.
 
 // AddRefreshTransferBalance grants one network the data allowance for its CURRENT
 // tier and period: a Pro network gets the monthly Pro amount, everyone else gets the
@@ -1671,11 +1623,12 @@ func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkI
 
 	if pro {
 		// the Pro grant carries pro = true, which is what confers the entitlement
-		startTime, endTime := ProGrantWindow(server.NowUtc())
-		err := model.AddProTransferBalanceInTx(
+		startTime, endTime := model.ProGrantWindow(server.NowUtc())
+		err := model.AddGrantTransferBalanceInTx(
 			tx,
 			ctx,
 			networkId,
+			model.GrantKindPro,
 			model.Pro().DataAmount(true),
 			startTime,
 			endTime,
@@ -1687,11 +1640,12 @@ func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkI
 		return nil
 	}
 
-	startTime, endTime := FreeGrantWindow(server.NowUtc())
-	return model.AddBasicTransferBalanceInTx(
+	startTime, endTime := model.FreeGrantWindow(server.NowUtc())
+	return model.AddGrantTransferBalanceInTx(
 		tx,
 		ctx,
 		networkId,
+		model.GrantKindFree,
 		model.Pro().DataAmount(false),
 		startTime,
 		endTime,
@@ -1735,7 +1689,7 @@ func RefreshFreeTransferBalances(
 		return &RefreshFreeTransferBalancesResult{}, nil
 	}
 
-	startTime, endTime := FreeGrantWindow(server.NowUtc())
+	startTime, endTime := model.FreeGrantWindow(server.NowUtc())
 	model.AddFreeTransferBalanceToAllNetworks(
 		clientSession.Ctx,
 		startTime,
@@ -1794,7 +1748,7 @@ func RefreshProTransferBalances(
 		return &RefreshProTransferBalancesResult{}, nil
 	}
 
-	startTime, endTime := ProGrantWindow(server.NowUtc())
+	startTime, endTime := model.ProGrantWindow(server.NowUtc())
 	model.AddProTransferBalanceToAllNetworks(
 		clientSession.Ctx,
 		startTime,
@@ -1854,7 +1808,7 @@ func RefreshReferralTransferBalances(
 		return &RefreshReferralTransferBalancesResult{}, nil
 	}
 
-	startTime, endTime := ReferralGrantWindow(server.NowUtc())
+	startTime, endTime := model.ReferralGrantWindow(server.NowUtc())
 	model.AddReferralBonusesToAllNetworks(
 		clientSession.Ctx,
 		startTime,
