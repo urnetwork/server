@@ -729,14 +729,26 @@ func ReconcileNetEscrowForNetwork(ctx context.Context, networkId server.Id, appl
 // of unrelated unresolved contracts while an admission holds its grant locks.
 // Apply outcome outside this boundary so it cannot replace the exact lookup
 // with a global partial-index scan; disputed unresolved contracts still count.
+// Fence the two metadata lookups as well: stale estimates can otherwise turn
+// even a late ten-balance page into full balance and revision table scans.
 const netEscrowReservationPageSQL = `
     SELECT requested_balance.balance_id,
         COALESCE(revision.revision, 0),
         CASE WHEN balance.balance_id IS NULL THEN 0 ELSE reserved.byte_count END,
         balance.end_time
     FROM unnest($1::uuid[]) AS requested_balance(balance_id)
-    LEFT JOIN transfer_balance_net_escrow_revision AS revision USING (balance_id)
-    LEFT JOIN transfer_balance AS balance USING (balance_id)
+    LEFT JOIN LATERAL (
+        SELECT revision
+        FROM transfer_balance_net_escrow_revision
+        WHERE balance_id = requested_balance.balance_id
+        OFFSET 0
+    ) AS revision ON true
+    LEFT JOIN LATERAL (
+        SELECT balance_id, end_time
+        FROM transfer_balance
+        WHERE balance_id = requested_balance.balance_id
+        OFFSET 0
+    ) AS balance ON true
     CROSS JOIN LATERAL (
         SELECT COALESCE(SUM(selected_escrow.balance_byte_count), 0) AS byte_count
         FROM (
@@ -769,7 +781,8 @@ type netEscrowReservationPageConfigurer interface {
 }
 
 // Applies the server-side fence only to the transaction containing one page;
-// pooled sessions and unrelated maintenance retain their configured timeout.
+// generic-plan JIT compilation can dominate this bounded census. Keep both
+// settings local so pooled sessions retain their configured timeout and JIT.
 func configureNetEscrowReservationPageTimeout(
 	ctx context.Context,
 	tx netEscrowReservationPageConfigurer,
@@ -777,7 +790,7 @@ func configureNetEscrowReservationPageTimeout(
 ) {
 	server.RaisePgResult(tx.Exec(
 		ctx,
-		`SELECT set_config('statement_timeout', $1, true)`,
+		`SELECT set_config('statement_timeout', $1, true), set_config('jit', 'off', true)`,
 		strconv.FormatInt(timeout.Milliseconds(), 10)+"ms",
 	))
 }
