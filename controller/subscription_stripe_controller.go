@@ -1292,6 +1292,9 @@ const (
 type StripeCreatePaymentIntentArgs struct{}
 
 type StripeCreatePaymentIntentArgsErr struct {
+	// one of the `PurchaseErrorCode*` values, when the refusal has one. Added
+	// after `Message`; older clients ignore it.
+	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 }
 
@@ -1312,6 +1315,14 @@ func StripeCreatePaymentIntent(
 	args *StripeCreatePaymentIntentArgs,
 	session *session.ClientSession,
 ) (*StripeCreatePaymentIntentResult, error) {
+	if refuseGuestPurchase(session) {
+		return &StripeCreatePaymentIntentResult{
+			Error: &StripeCreatePaymentIntentArgsErr{
+				Code:    PurchaseErrorCodeGuestSignInRequired,
+				Message: purchaseGuestSignInRequiredMessage,
+			},
+		}, nil
+	}
 
 	// check if user has a stripe customer id
 	stripeCustomerId, _ := model.GetStripeCustomer(session)
@@ -1661,6 +1672,9 @@ type StripeCreateCheckoutSessionArgs struct {
 }
 
 type StripeCreateCheckoutSessionError struct {
+	// one of the `PurchaseErrorCode*` values, when the refusal has one. Added
+	// after `Message`; older clients ignore it.
+	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 }
 
@@ -1845,6 +1859,14 @@ func StripeCreateCheckoutSession(
 	args *StripeCreateCheckoutSessionArgs,
 	clientSession *session.ClientSession,
 ) (*StripeCreateCheckoutSessionResult, error) {
+	if refuseGuestPurchase(clientSession) {
+		return &StripeCreateCheckoutSessionResult{
+			Error: &StripeCreateCheckoutSessionError{
+				Code:    PurchaseErrorCodeGuestSignInRequired,
+				Message: purchaseGuestSignInRequiredMessage,
+			},
+		}, nil
+	}
 
 	uiMode, ok := stripeCheckoutUiMode(args.UiMode)
 	if !ok {

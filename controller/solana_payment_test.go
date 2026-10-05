@@ -132,11 +132,16 @@ func TestSolanaIntentRefusedPlansCreateNothing(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
+		// a network with a login method: a guest network is refused before the
+		// plan is read (subscription_guest_purchase_test.go)
 		networkId := server.NewId()
 		clientId := server.NewId()
+		userId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "solanarefused", userId)
 		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
+			UserId:    userId,
 		})
 
 		assertRefusedAndNothingStored := func(reference string, plan string) {
@@ -146,6 +151,8 @@ func TestSolanaIntentRefusedPlansCreateNothing(t *testing.T) {
 			}, userSession)
 			connect.AssertEqual(t, err, nil)
 			connect.AssertNotEqual(t, result.Error, nil)
+			// the plan refusal, not the guest refusal
+			connect.AssertEqual(t, result.Error.Code, "")
 			// an errored result must not carry a price the client could act on
 			connect.AssertEqual(t, result.AmountUsd, float64(0))
 
@@ -200,11 +207,16 @@ func TestSolanaIntentQuoteIsTheServersAndDuplicatesAreLoud(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
+		// a network with a login method: a guest network is refused before the
+		// quote (subscription_guest_purchase_test.go)
 		networkId := server.NewId()
 		clientId := server.NewId()
+		userId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "solanaquote", userId)
 		userSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: networkId,
 			ClientId:  &clientId,
+			UserId:    userId,
 		})
 
 		reference := "intent-quote-1"
