@@ -3865,13 +3865,17 @@ type providerCountFilter struct {
 }
 
 // Complete means disconnected history too. The partial covering index supplies
-// only ARIN exceptions; observed score IDs bound the independent reliability
-// pass. Missing scores are neutral, and missing rollups retain their old scope.
+// only ARIN exceptions; one scan of failing scores supplies the independent
+// reliability pass. Missing scores are neutral, and missing rollups retain their
+// old scope. Rechecking every observed score against the same score table would
+// duplicate that work without changing the set of failed clients.
 func providerCountFilterCommonSql() string {
-	return `WITH failed_reliability AS MATERIALIZED (
-		SELECT DISTINCT observed_reliability.client_id
-		FROM client_connection_reliability_score AS observed_reliability
-		WHERE NOT (` + providerReliabilityEligibilitySql("observed_reliability.client_id") + `)
+	minimums := providerReliabilityMinimums()
+	return fmt.Sprintf(`WITH failed_reliability AS MATERIALIZED (
+		SELECT DISTINCT provider_reliability.client_id
+		FROM client_connection_reliability_score AS provider_reliability
+		WHERE provider_reliability.independent_reliability_weight < CASE provider_reliability.lookback_index
+			WHEN 1 THEN %g WHEN 2 THEN %g WHEN 3 THEN %g ELSE 0 END
 	)
 	SELECT client_id, arin_risk, arin_non_quality, false
 	FROM network_client_location_reliability
@@ -3882,7 +3886,7 @@ func providerCountFilterCommonSql() string {
 	WHERE EXISTS (
 		SELECT 1 FROM network_client_location_reliability AS provider_location
 		WHERE provider_location.client_id = failed_reliability.client_id
-	)`
+	)`, minimums[1], minimums[2], minimums[3])
 }
 
 // Load complete exception maps once for publication and provider diagnostics.
