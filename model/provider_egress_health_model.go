@@ -388,18 +388,31 @@ func GetAllProviderEgressHealthCounts(ctx context.Context) map[server.Id]Provide
 // Keep the exact query endpoint with its already loaded map. Publication
 // diagnostics must not relabel the later export time as the evidence window.
 func getAllProviderEgressHealthCountsSnapshot(ctx context.Context) (map[server.Id]ProviderEgressHealthCounts, time.Time) {
+	return getProviderEgressHealthCountsSnapshot(ctx, nil)
+}
+
+// The same window and aggregate for only clientIds, or for every provider
+// when clientIds is nil.
+func getProviderEgressHealthCountsSnapshot(ctx context.Context, clientIds []server.Id) (map[server.Id]ProviderEgressHealthCounts, time.Time) {
 	healthCounts := map[server.Id]ProviderEgressHealthCounts{}
 
 	now := server.NowUtc()
 	minMeasuredAt := now.Add(-ProviderEgressHealthMaxAge)
 
+	query := `SELECT client_id, MAX(measured_at), MIN(measured_at), SUM(ok_count), SUM(total_count)
+			FROM (` + providerEgressHealthWindowSql() + `) AS evidence GROUP BY client_id`
+	args := []any{minMeasuredAt.UTC(), now.UTC()}
+	if clientIds != nil {
+		query = `SELECT client_id, MAX(measured_at), MIN(measured_at), SUM(ok_count), SUM(total_count)
+			FROM (` + providerEgressHealthWindowSql() + `) AS evidence WHERE client_id = ANY($3) GROUP BY client_id`
+		args = append(args, clientIds)
+	}
+
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`SELECT client_id, MAX(measured_at), MIN(measured_at), SUM(ok_count), SUM(total_count)
-			FROM (`+providerEgressHealthWindowSql()+`) AS evidence GROUP BY client_id`,
-			minMeasuredAt.UTC(),
-			now.UTC(),
+			query,
+			args...,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -428,16 +441,34 @@ func getAllProviderEgressHealthCountsSnapshot(ctx context.Context) (map[server.I
 // gradually becomes unknown. Only a newer authenticated response from each
 // affected URL clears its finding. An unidentified legacy finding is retained.
 func GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx context.Context) map[server.Id]bool {
+	return getProviderEgressTLSAuthenticationFailedClientIds(ctx, nil)
+}
+
+// The same findings for only clientIds, or for every provider when clientIds
+// is nil.
+func getProviderEgressTLSAuthenticationFailedClientIds(ctx context.Context, clientIds []server.Id) map[server.Id]bool {
 	failed := map[server.Id]bool{}
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
+	query := `
 			SELECT client_id
 			FROM provider_egress_health
 			WHERE tls_authentication_failure OR legacy_tls_authentication_failure
 			UNION SELECT client_id FROM provider_egress_url_security WHERE tls_failure
-			`,
+			`
+	args := []any{}
+	if clientIds != nil {
+		query = `
+			SELECT client_id
+			FROM provider_egress_health
+			WHERE client_id = ANY($1) AND (tls_authentication_failure OR legacy_tls_authentication_failure)
+			UNION SELECT client_id FROM provider_egress_url_security WHERE client_id = ANY($1) AND tls_failure
+			`
+		args = append(args, clientIds)
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			query,
+			args...,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

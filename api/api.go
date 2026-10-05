@@ -19,15 +19,26 @@ import (
 // service; the routes themselves are path-matched, so they answer on either
 // host. The issuer published in the discovery documents is what clients use.
 func Routes() []*router.Route {
-	return routesWithReservedAttemptUpload(nil)
+	return routesWithReservedAttemptUpload(nil, routeOwners{})
+}
+
+// The background owners only the API lifecycle supplies. A nil owner leaves
+// its route bare: the route never starts one itself.
+type routeOwners struct {
+	notifications *model.ContractOriginNotifications
+	appearances   *model.ProviderAppearances
 }
 
 // Only the API lifecycle supplies this authenticated cache; the route never
 // starts a background owner or dials a provider on an upload request.
-func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUpload, notifications ...*model.ContractOriginNotifications) []*router.Route {
+func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUpload, owners routeOwners) []*router.Route {
 	connectControl := handlers.ConnectControl
-	if len(notifications) > 0 {
-		connectControl = handlers.ConnectControlWithOriginNotifications(notifications[0])
+	if owners.notifications != nil {
+		connectControl = handlers.ConnectControlWithOriginNotifications(owners.notifications)
+	}
+	findProviders2 := handlers.NetworkFindProviders2
+	if owners.appearances != nil {
+		findProviders2 = handlers.NetworkFindProviders2WithAppearances(owners.appearances)
 	}
 	routes := []*router.Route{
 		router.NewRoute("GET", "/privacy.txt", router.Txt),
@@ -156,7 +167,10 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("GET", "/network/peers", handlers.NetworkPeers),
 		router.NewRoute("GET", "/network/provider-locations", handlers.NetworkGetProviderLocations),
 		router.NewRoute("POST", "/network/find-provider-locations", handlers.NetworkFindProviderLocations),
-		router.NewRoute("POST", "/network/find-providers2", handlers.NetworkFindProviders2), router.NewRoute("GET", "/network/user", handlers.GetNetworkUser),
+		router.NewRoute("POST", "/network/find-providers2", findProviders2), router.NewRoute("GET", "/network/user", handlers.GetNetworkUser),
+		// the caller's own providers: why each is or is not offered to clients,
+		// with its FindProviders2 appearances per minute over the last hour
+		router.NewRoute("GET", "/network/provider-status", handlers.GetProviderStatus),
 		router.NewRoute("POST", "/network/user/update", handlers.UpdateNetworkName),
 		router.NewRoute("GET", "/network/ranking", handlers.GetLeaderboardNetworkRanking),
 		router.NewRoute("POST", "/network/ranking-visibility", handlers.SetNetworkLeaderboardPublic),
