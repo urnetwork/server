@@ -1,5 +1,8 @@
 package controller
 
+// The purchase guard against the database: a real legacy guest network, and
+// the sign-in that lifts the refusal.
+
 import (
 	"context"
 	"fmt"
@@ -11,11 +14,11 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// TestGuestPurchaseRefusedUntilSignInAdded runs the purchase guard against a
-// real legacy guest network (no row in any auth table) holding a refreshed jwt
-// without the GuestMode claim. It reads as a guest on the balance and every
-// checkout and intent refuses it. Adding an email and password in place
-// (AddAuth) clears both, on the same network. Needs the test database.
+// Runs the purchase guard against a real legacy guest network (no row in any
+// auth table) holding a refreshed jwt without the GuestMode claim. It reads as
+// a guest on the balance and every checkout and intent refuses it. Adding an
+// email and password in place (AddAuth) clears both, on the same network. Needs
+// the test database.
 func TestGuestPurchaseRefusedUntilSignInAdded(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

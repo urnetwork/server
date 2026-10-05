@@ -158,7 +158,7 @@ func (t *ProPriceTier) hasCountry(countryCode string) bool {
 //	no data amounts      -> the grants NO-OP (they never write a zero-byte balance)
 //	no referral cap      -> referrals UNCAPPED (never capped at zero, which would
 //	                        make `count >= cap` true for everyone and block them all)
-//	no contract cap      -> contracts UNCAPPED (a zero cap is never applied, since a
+//	no contract cap      -> contracts uncapped (a zero cap is never applied, since a
 //	                        contract granted zero bytes carries nothing)
 //	no price / duration  -> purchases REFUSED, loudly, rather than sold for nothing
 //
@@ -379,11 +379,10 @@ func Testing_SetConcurrentClientsLimit(free int, pro int) func() {
 	}
 }
 
-// Testing_SetMaxContractTransferByteCount overrides the per-tier contract size
-// caps on the process's parsed config, returning a restore function. Same
-// caveats as Testing_SetEnforceConcurrentClients (mutates the shared config;
-// defer the return). For tests exercising the contract cap, which no pro.yml
-// sets yet.
+// Overrides the per-tier contract size caps on the process's parsed config,
+// returning a restore function. Same caveats as
+// Testing_SetEnforceConcurrentClients (mutates the shared config; defer the
+// return). For tests exercising the contract cap, which no pro.yml sets yet.
 func Testing_SetMaxContractTransferByteCount(free ByteCount, pro ByteCount) func() {
 	c := Pro()
 	prevFree := c.Free.MaxContractTransferByteCount
@@ -429,13 +428,13 @@ func (c *ProConfig) ConcurrentClientsExceeded(pro bool, connectedCount int) bool
 	return max <= connectedCount
 }
 
-// MaxContractTransferByteCount is the largest contract granted against the
-// balance of a payer on the tier (pro.yml <tier>.max_contract_transfer_byte_count).
-// Zero means no cap, and so does an unset or negative value: a cap of zero would
-// grant contracts that carry nothing. The cap ships off, because smaller
-// contracts mean more contract creations and closes; setting it is an ops step.
-func (c *ProConfig) MaxContractTransferByteCount(pro bool) ByteCount {
-	return max(0, c.Tier(pro).MaxContractTransferByteCount)
+// The largest contract granted against the balance of a payer on the tier
+// (pro.yml <tier>.max_contract_transfer_byte_count). Zero means no cap, and so
+// does an unset or negative value: a cap of zero would grant contracts that
+// carry nothing. The cap ships off, because smaller contracts mean more
+// contract creations and closes; setting it is an ops step.
+func (self *ProConfig) MaxContractTransferByteCount(pro bool) ByteCount {
+	return max(0, self.Tier(pro).MaxContractTransferByteCount)
 }
 
 // DataAmount / DataPeriod are the recurring data grant for the tier.

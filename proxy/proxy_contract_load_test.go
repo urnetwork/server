@@ -339,32 +339,6 @@ func escrowedContractCounts(ctx context.Context, payerNetworkId server.Id) (tota
 	return
 }
 
-// maxEscrowedContractByteCount returns the largest contract size granted
-// against the network's balance, over every escrowed contract it paid for.
-func maxEscrowedContractByteCount(ctx context.Context, payerNetworkId server.Id) model.ByteCount {
-	var maxByteCount model.ByteCount
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT COALESCE(MAX(transfer_contract.transfer_byte_count), 0)
-				FROM transfer_contract
-				INNER JOIN transfer_escrow ON
-					transfer_escrow.contract_id = transfer_contract.contract_id
-				WHERE
-					transfer_contract.payer_network_id = $1
-			`,
-			payerNetworkId,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&maxByteCount))
-			}
-		})
-	})
-	return maxByteCount
-}
-
 // settledPayoutSum returns the total payout bytes swept out of the network's
 // escrows so far.
 func settledPayoutSum(ctx context.Context, payerNetworkId server.Id) model.ByteCount {
@@ -432,12 +406,11 @@ func TestProxyContractChurnLoad(t *testing.T) {
 	testProxyContractChurnLoad(t, testSmallContractByteCount)
 }
 
-// TestProxyContractChurnLoadFreePayerCap is the same churn load with the
-// contract size capped by the free tier's pro.yml cap
-// (free.max_contract_transfer_byte_count) instead of the controller's maximum.
-// The proxy device network holds only a redeemed data code, which does not make
-// it Pro, and it pays for both directions. Every contract it pays for must be
-// granted at most the cap, and the ledger must still reconcile exactly.
+// The same churn load with the contract size capped by the free tier's pro.yml
+// cap (free.max_contract_transfer_byte_count) instead of the controller's
+// maximum. The proxy device network holds only a redeemed data code, which does
+// not make it Pro, and it pays for both directions. Every contract it pays for
+// must be granted at most the cap, and the ledger must still reconcile exactly.
 func TestProxyContractChurnLoadFreePayerCap(t *testing.T) {
 	if testing.Short() {
 		return
@@ -448,8 +421,8 @@ func TestProxyContractChurnLoadFreePayerCap(t *testing.T) {
 	testProxyContractChurnLoad(t, testSmallContractByteCount)
 }
 
-// testProxyContractChurnLoad runs the churn load and the ledger reconciliation
-// with granted contracts limited to maxContractByteCount.
+// Runs the churn load and the ledger reconciliation with granted contracts
+// limited to maxContractByteCount.
 func testProxyContractChurnLoad(t *testing.T, maxContractByteCount model.ByteCount) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -530,7 +503,32 @@ func testProxyContractChurnLoad(t *testing.T, maxContractByteCount model.ByteCou
 		totalContracts, openContracts := escrowedContractCounts(ctx, h.pdNetworkId)
 		fmt.Printf("[progress]load done: %d escrowed contracts (%d open)\n", totalContracts, openContracts)
 
-		if maxByteCount := maxEscrowedContractByteCount(ctx, h.pdNetworkId); maxContractByteCount < maxByteCount {
+		// the largest contract size granted against the network's balance, over
+		// every escrowed contract it paid for
+		maxEscrowedContractByteCount := func(payerNetworkId server.Id) model.ByteCount {
+			var maxByteCount model.ByteCount
+			server.Db(ctx, func(conn server.PgConn) {
+				result, err := conn.Query(
+					ctx,
+					`
+						SELECT COALESCE(MAX(transfer_contract.transfer_byte_count), 0)
+						FROM transfer_contract
+						INNER JOIN transfer_escrow ON
+							transfer_escrow.contract_id = transfer_contract.contract_id
+						WHERE
+							transfer_contract.payer_network_id = $1
+					`,
+					payerNetworkId,
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(&maxByteCount))
+					}
+				})
+			})
+			return maxByteCount
+		}
+		if maxByteCount := maxEscrowedContractByteCount(h.pdNetworkId); maxContractByteCount < maxByteCount {
 			t.Fatalf("a contract was granted %d bytes, above the %d byte cap", maxByteCount, maxContractByteCount)
 		}
 		// the cap (4MiB) must have forced real churn: ~98MiB of payload cannot

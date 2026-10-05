@@ -398,6 +398,65 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 		Success: false,
 	}
 
+	// runs after id, the payout wallet, was removed in tx. Payments planned
+	// while a network has no payout wallet are held until the user picks one,
+	// so another active wallet the network owns takes over instead. Returns the
+	// promoted wallet, or nil when no active Solana or Polygon wallet is left.
+	promotePayoutWalletInTx := func(tx server.PgTx) *server.Id {
+		var removedBlockchain string
+		removedResult, err := tx.Query(
+			session.Ctx,
+			`
+				SELECT blockchain
+				FROM account_wallet
+				WHERE
+						wallet_id = $2 AND
+						network_id = $1
+			`,
+			session.ByJwt.NetworkId,
+			id,
+		)
+		server.WithPgResult(removedResult, err, func() {
+			if removedResult.Next() {
+				server.Raise(removedResult.Scan(&removedBlockchain))
+			}
+		})
+
+		candidates := []*payoutWalletCandidate{}
+		candidateResult, err := tx.Query(
+			session.Ctx,
+			`
+				SELECT
+						wallet_id,
+						blockchain
+				FROM account_wallet
+				WHERE
+						network_id = $1 AND
+						active = true AND
+						wallet_id <> $2
+				ORDER BY create_time DESC, wallet_id
+			`,
+			session.ByJwt.NetworkId,
+			id,
+		)
+		server.WithPgResult(candidateResult, err, func() {
+			for candidateResult.Next() {
+				candidate := &payoutWalletCandidate{}
+				server.Raise(candidateResult.Scan(&candidate.walletId, &candidate.blockchain))
+				candidates = append(candidates, candidate)
+			}
+		})
+
+		promotedWalletId := choosePromotedPayoutWallet(removedBlockchain, candidates)
+		if promotedWalletId == nil {
+			return nil
+		}
+		if err := setPayoutWalletInTx(session.Ctx, tx, session.ByJwt.NetworkId, *promotedWalletId); err != nil {
+			return nil
+		}
+		return promotedWalletId
+	}
+
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 		result.Success = false
 		result.PayoutWalletId = nil
@@ -418,7 +477,7 @@ func RemoveWallet(id server.Id, session *session.ClientSession) *RemoveWalletRes
 
 		if tag.RowsAffected() == 1 {
 			if deletePayoutWalletInTx(session.Ctx, tx, id, session.ByJwt.NetworkId) {
-				result.PayoutWalletId = promotePayoutWalletInTx(session.Ctx, tx, session.ByJwt.NetworkId, id)
+				result.PayoutWalletId = promotePayoutWalletInTx(tx)
 			}
 			result.Success = true
 		}

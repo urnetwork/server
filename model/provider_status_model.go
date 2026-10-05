@@ -1,7 +1,7 @@
 package model
 
-// provider_status_model.go — why each of a network's own provider clients is
-// or is not offered to clients (GET /network/provider-status).
+// Why each of a network's own provider clients is or is not offered to
+// clients (GET /network/provider-status).
 //
 // The status is the decision FindProviders2 draws from: the common gates, the
 // egress decision and the ranking UpdateClientScores publishes, computed for
@@ -159,6 +159,8 @@ type ProviderStatusCountry struct {
 	Explanation         string `json:"explanation"`
 }
 
+// One provider client's status: the first reason it is not offered, the gates
+// it passes and the numbers it is ranked by, each with an English explanation.
 type ProviderStatus struct {
 	ClientId server.Id `json:"client_id"`
 	// the first reason in ProviderStatusReasons that holds the provider back,
@@ -177,6 +179,7 @@ type ProviderStatus struct {
 // The most provider clients one status answer decides.
 const ProviderStatusMaxClients = 32
 
+// The statuses of a network's provider clients.
 type ProviderStatusesResult struct {
 	Providers []*ProviderStatus `json:"providers"`
 	// the network has more provider clients than one answer decides
@@ -198,7 +201,7 @@ func newProviderCountFilterForClients(ctx context.Context, clientIds []server.Id
 		arinRisk:                map[server.Id]bool{},
 		arinNonQuality:          map[server.Id]bool{},
 		reliabilityFailed:       map[server.Id]bool{},
-		tlsAuthenticationFailed: getProviderEgressTLSAuthenticationFailedClientIds(ctx, clientIds),
+		tlsAuthenticationFailed: getProviderEgressTlsAuthenticationFailedClientIds(ctx, clientIds),
 		countryCodes:            getProviderEgressCountryCodes(ctx, clientIds),
 	}
 	f.healthCounts, f.healthWindowEnd = getProviderEgressHealthCountsSnapshot(ctx, clientIds)
@@ -224,6 +227,7 @@ func newProviderCountFilterForClients(ctx context.Context, clientIds []server.Id
 	return f
 }
 
+// The weights of one reliability lookback, as the pool query reads them.
 type providerStatusLookback struct {
 	reliabilityWeight            float64
 	independentReliabilityWeight float64
@@ -498,17 +502,6 @@ func evaluateProviderStatus(
 	return evaluation
 }
 
-func providerEgressVerdict(egressQuality *bool) string {
-	switch {
-	case egressQuality == nil:
-		return ProviderEgressUnprobed
-	case *egressQuality:
-		return ProviderEgressPass
-	default:
-		return ProviderEgressFail
-	}
-}
-
 // Megabytes per second with one decimal, for the explanations.
 func formatProviderStatusBytesPerSecond(bytesPerSecond ByteCount) string {
 	return fmt.Sprintf("%.1f MB/s", float64(bytesPerSecond)/1e6)
@@ -537,7 +530,17 @@ func newProviderStatus(
 ) *ProviderStatus {
 	healthCounts, hasHealthCounts := countFilter.healthCounts[facts.clientId]
 	hasHealthCounts = hasHealthCounts && 0 < healthCounts.Total
-	egress := providerEgressVerdict(evaluation.egressFacts.egressQuality)
+	// the URL check verdict of the egress decision
+	egress := func(egressQuality *bool) string {
+		switch {
+		case egressQuality == nil:
+			return ProviderEgressUnprobed
+		case *egressQuality:
+			return ProviderEgressPass
+		default:
+			return ProviderEgressFail
+		}
+	}(evaluation.egressFacts.egressQuality)
 
 	status := &ProviderStatus{
 		ClientId:   facts.clientId,
@@ -560,9 +563,9 @@ func newProviderStatus(
 	}
 
 	// reliability, per lookback
-	reliabilityNames := map[int]bool{}
+	namedLookbackIndexes := map[int]bool{}
 	for _, reliabilityNumber := range providerStatusReliabilityNumbers {
-		reliabilityNames[reliabilityNumber.lookbackIndex] = true
+		namedLookbackIndexes[reliabilityNumber.lookbackIndex] = true
 		number := &ProviderRankingNumber{
 			Name:   reliabilityNumber.name,
 			Passes: true,
@@ -592,7 +595,7 @@ func newProviderStatus(
 	if facts.hasReliabilityHistory {
 		otherLookbackIndexes := []int{}
 		for lookbackIndex := range facts.lookbacks {
-			if !reliabilityNames[lookbackIndex] {
+			if !namedLookbackIndexes[lookbackIndex] {
 				otherLookbackIndexes = append(otherLookbackIndexes, lookbackIndex)
 			}
 		}
@@ -725,45 +728,6 @@ func newProviderStatus(
 	return status
 }
 
-// Lists the network's provider clients (active, top level, any provide key)
-// in client id order: at most limit, and whether there were more.
-func getNetworkProviderClientIds(ctx context.Context, networkId server.Id, limit int) (clientIds []server.Id, truncated bool) {
-	clientIds = []server.Id{}
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-			SELECT network_client.client_id
-			FROM network_client
-			WHERE
-				network_client.network_id = $1 AND
-				network_client.active = true AND
-				network_client.source_client_id IS NULL AND
-				EXISTS (
-					SELECT 1 FROM provide_key
-					WHERE provide_key.client_id = network_client.client_id
-				)
-			ORDER BY network_client.client_id
-			LIMIT $2
-			`,
-			networkId,
-			limit+1,
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var clientId server.Id
-				server.Raise(result.Scan(&clientId))
-				clientIds = append(clientIds, clientId)
-			}
-		})
-	})
-	if limit < len(clientIds) {
-		clientIds = clientIds[:limit]
-		truncated = true
-	}
-	return
-}
-
 // Decides each of clientIds that is a provider client of networkId, with the
 // bulk filter scoped to those ids. Others are left out.
 func GetProviderStatuses(ctx context.Context, networkId server.Id, clientIds []server.Id) []*ProviderStatus {
@@ -796,7 +760,46 @@ func GetProviderStatuses(ctx context.Context, networkId server.Id, clientIds []s
 // ProviderStatusMaxClients of them in client id order. The histograms are
 // not part of it.
 func GetNetworkProviderStatuses(ctx context.Context, networkId server.Id) *ProviderStatusesResult {
-	clientIds, truncated := getNetworkProviderClientIds(ctx, networkId, ProviderStatusMaxClients)
+	// lists the network's provider clients (active, top level, any provide key)
+	// in client id order: at most limit, and whether there were more
+	getNetworkProviderClientIds := func(limit int) (clientIds []server.Id, truncated bool) {
+		clientIds = []server.Id{}
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(
+				ctx,
+				`
+				SELECT network_client.client_id
+				FROM network_client
+				WHERE
+					network_client.network_id = $1 AND
+					network_client.active = true AND
+					network_client.source_client_id IS NULL AND
+					EXISTS (
+						SELECT 1 FROM provide_key
+						WHERE provide_key.client_id = network_client.client_id
+					)
+				ORDER BY network_client.client_id
+				LIMIT $2
+				`,
+				networkId,
+				limit+1,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var clientId server.Id
+					server.Raise(result.Scan(&clientId))
+					clientIds = append(clientIds, clientId)
+				}
+			})
+		})
+		if limit < len(clientIds) {
+			clientIds = clientIds[:limit]
+			truncated = true
+		}
+		return
+	}
+
+	clientIds, truncated := getNetworkProviderClientIds(ProviderStatusMaxClients)
 	return &ProviderStatusesResult{
 		Providers: GetProviderStatuses(ctx, networkId, clientIds),
 		Truncated: truncated,

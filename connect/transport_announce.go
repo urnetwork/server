@@ -177,8 +177,8 @@ type ConnectionAnnounce struct {
 	// prove: 0 (legacy), 4 or 6. Recorded with the connection; the observed
 	// family is derived from clientAddress at the model.
 	ipFamilyIntent int
-	// appVersion is the client's app version from its auth, for the provider
-	// rollout gauge (providerVersionConnection); "" when it sent none
+	// the client's app version from its auth, for the provider rollout gauge
+	// (providerVersionConnection); "" when it sent none
 	appVersion      string
 	handlerId       server.Id
 	announceTimeout time.Duration

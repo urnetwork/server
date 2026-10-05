@@ -296,8 +296,8 @@ type TransferBalance struct {
 	// Pro means the balance carries the Pro entitlement. A network is Pro iff it
 	// has an in-window balance with this set -- see pro_model.go.
 	Pro bool `json:"pro,omitempty"`
-	// GrantKind is the recurring grant that wrote the balance, GrantKindNone for
-	// any other balance. Read by the balance summary (see SupersededGrants).
+	// the recurring grant that wrote the balance, GrantKindNone for any other
+	// balance. Read by the balance summary (see SupersededGrants).
 	GrantKind GrantKind `json:"-"`
 	// what open contracts reserve from the balance, already subtracted from
 	// BalanceByteCount (see applyActiveTransferEscrow)

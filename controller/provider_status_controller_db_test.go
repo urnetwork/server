@@ -1,5 +1,8 @@
 package controller
 
+// GET /network/provider-status against the database: what it caches and what
+// it reads fresh.
+
 import (
 	"bytes"
 	"context"
