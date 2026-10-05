@@ -12,7 +12,6 @@ import (
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
-	"github.com/urnetwork/server/stats"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
 )
@@ -43,8 +42,7 @@ func InitTasksForProfile(ctx context.Context, profile WorkloadProfile) error {
 	if err := initTaskScheduleForProfile(ctx, profile); err != nil {
 		return err
 	}
-	stats.ApplyStreamRetention(ctx)
-	controller.ApplyFeedbackLogRetention(ctx)
+	controller.ApplyBlobRetention(ctx)
 	return nil
 }
 

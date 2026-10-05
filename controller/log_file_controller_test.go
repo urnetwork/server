@@ -510,15 +510,18 @@ feedback_log_bucket: %q
 
 // fakeMinio is a minimal S3 endpoint for the minio client behind the feedback
 // log store; the repo has no local minio fixture. It answers bucket location
-// reads (the client asks before its first request to a bucket), reports that
-// no lifecycle is set, accepts object and lifecycle writes, and records them.
+// reads (the client asks before its first request to a bucket), serves retained
+// lifecycle state, accepts object and lifecycle writes, and records them.
 type fakeMinio struct {
 	server *httptest.Server
 
-	stateLock    sync.Mutex
-	requestCount int
-	writes       []fakeMinioWrite
-	denyWrites   bool
+	stateLock           sync.Mutex
+	requestCount        int
+	writes              []fakeMinioWrite
+	denyWrites          bool
+	lifecycleConfigs    map[string][]byte
+	afterLifecycleRead  func(context.Context, string) error
+	afterLifecycleWrite func(string)
 }
 
 type fakeMinioWrite struct {
@@ -569,8 +572,20 @@ func (self *fakeMinio) countRequest() (denyWrites bool) {
 
 func (self *fakeMinio) recordWrite(write fakeMinioWrite) {
 	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
 	self.writes = append(self.writes, write)
+	var afterWrite func(string)
+	bucket := strings.Trim(write.path, "/")
+	if write.query.Has("lifecycle") {
+		if self.lifecycleConfigs == nil {
+			self.lifecycleConfigs = map[string][]byte{}
+		}
+		self.lifecycleConfigs[bucket] = bytes.Clone(write.body)
+		afterWrite = self.afterLifecycleWrite
+	}
+	self.stateLock.Unlock()
+	if afterWrite != nil {
+		afterWrite(bucket)
+	}
 }
 
 func (self *fakeMinio) serve(w http.ResponseWriter, r *http.Request) {
@@ -580,7 +595,23 @@ func (self *fakeMinio) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && query.Has("location"):
 		writeFakeMinioXml(w, http.StatusOK, `<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/"></LocationConstraint>`)
 	case r.Method == http.MethodGet && query.Has("lifecycle"):
-		writeFakeMinioXml(w, http.StatusNotFound, `<Error><Code>NoSuchLifecycleConfiguration</Code><Message>none</Message></Error>`)
+		bucket := strings.Trim(r.URL.Path, "/")
+		self.stateLock.Lock()
+		current := bytes.Clone(self.lifecycleConfigs[bucket])
+		afterRead := self.afterLifecycleRead
+		self.stateLock.Unlock()
+		if afterRead != nil {
+			if err := afterRead(r.Context(), bucket); err != nil {
+				writeFakeMinioXml(w, http.StatusForbidden, `<Error><Code>AccessDenied</Code><Message>lifecycle read refused</Message></Error>`)
+				return
+			}
+		}
+		if len(current) == 0 {
+			writeFakeMinioXml(w, http.StatusNotFound, `<Error><Code>NoSuchLifecycleConfiguration</Code><Message>none</Message></Error>`)
+		} else {
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write(current)
+		}
 	case r.Method == http.MethodPut && denyWrites:
 		writeFakeMinioXml(w, http.StatusForbidden, `<Error><Code>AccessDenied</Code><Message>denied</Message></Error>`)
 	case r.Method == http.MethodPut:

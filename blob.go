@@ -731,6 +731,17 @@ func (self *minioBlobStore) Bucket() string    { return self.bucket }
 func (self *minioBlobStore) Prefix() string    { return self.prefix }
 func (self *minioBlobStore) Authority() string { return self.authority }
 
+// BlobStoresShareLifecycle identifies one remote bucket-wide configuration.
+// Prefixes and client instances do not separate MinIO lifecycle ownership;
+// schemes do. Local stores retain independent in-process reaper state.
+func BlobStoresShareLifecycle(first, second BlobStore) bool {
+	left, leftOk := first.(*minioBlobStore)
+	right, rightOk := second.(*minioBlobStore)
+	return leftOk && rightOk && left != nil && right != nil &&
+		left.client != nil && right.client != nil && left.bucket == right.bucket &&
+		left.client.EndpointURL().String() == right.client.EndpointURL().String()
+}
+
 // NewLocalBlobStore builds a filesystem-backed store rooted at root with the
 // default aggregate byte cap.
 func NewLocalBlobStore(root string, prefix string) BlobStore {

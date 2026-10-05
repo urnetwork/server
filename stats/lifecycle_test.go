@@ -15,10 +15,10 @@ func TestDefaultStreamTTLRegistered(t *testing.T) {
 	}
 }
 
-// streamLifecycleRules keys each stream by <prefix>/<env>/<stream>/ with its TTL
+// StreamLifecycleRules keys each stream by <prefix>/<env>/<stream>/ with its TTL
 func TestStreamLifecycleRules(t *testing.T) {
 	store := server.NewLocalBlobStore("/tmp/blob-test", "stats")
-	rules := streamLifecycleRules(store, "main")
+	rules := StreamLifecycleRules(store, "main")
 
 	var found *server.BlobLifecycleRule
 	for i := range rules {
@@ -36,7 +36,7 @@ func TestStreamLifecycleRules(t *testing.T) {
 	// a ttl<=0 stream is excluded (kept forever)
 	RegisterStreamTTL("keepforever", 0)
 	defer RegisterStreamTTL("keepforever", 0) // leave disabled
-	for _, r := range streamLifecycleRules(store, "main") {
+	for _, r := range StreamLifecycleRules(store, "main") {
 		if r.KeyPrefix == "stats/main/keepforever/" {
 			t.Fatal("ttl<=0 stream should not produce a lifecycle rule")
 		}
