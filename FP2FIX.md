@@ -7055,3 +7055,26 @@ and concurrently build the remaining five serially. Four truncated activity rows
 remain an explicit uncertainty. Root is obtaining fresh capacity and repairing
 the independently supervised monitor-CONT fallback before the next quiet window.
 Root ledgerT584 retains the acceptance and reconciliation evidence.
+
+### 2026-10-05 00:56 UTC interrupted reliability-index repair complete
+
+The durable V7 repair completed successfully at00:55:20UTC. It attached the
+previously completed detached child and built the remaining five children with
+CREATE INDEX CONCURRENTLY, serially. The old parent index was then removed.
+
+Fresh native catalog verification at00:56:39UTC confirms34 of34 current
+partitions have healthy, correctly shaped, attached covering indexes. The new
+parent is valid; missing, invalid and wrong-shape children are all zero. No index
+build progress or index-owner locks remain. Independent replay of the retained
+native receipt confirms physical completion.
+
+Both representative enter/leave custom EXPLAIN plans use covering Index Only
+Scans. These are planned queries, not executed latency or CPU measurements, and
+do not establish the application's selected plan. The interrupted index repair
+is complete; broader database pressure and FP2 coverage remain separate work.
+
+Native receipt: temp/reliability-index-repair-20261004/root-reliability-v7-final-v1/
+run-20261005T005634.926225Z/receipt.json; SHA256
+f2446b4aeff3cc9aac5c37e3e7a3a1d8abd43ad5232abf6a07b1183fbb95ccc1.
+Independent closure gate SHA256
+047c82226b78a249bf81650ae54daf082a64c001b4ed06512fff35762b66170d.
