@@ -2,13 +2,24 @@ package model
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
 	"github.com/urnetwork/server/session"
 )
+
+// Bounds a call whose transaction would otherwise be retried for server.Tx's
+// one-minute window: a call that holds a transaction fails at this deadline.
+const apiKeyTestCallTimeout = 10 * time.Second
 
 func TestAccountApiKeys(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -116,4 +127,208 @@ func TestGetAccountApiKeysReturnsScanError(t *testing.T) {
 			t.Fatalf("the failed listing returned %d keys", len(apiKeys))
 		}
 	})
+}
+
+// A name the column cannot store is refused before the transaction, with the
+// endpoint's refusal and nothing created: a name over 128 characters, counted
+// in characters as varchar counts them, and a name with a NUL character. Such
+// a name used to fail the insert, after which the transaction went on to a
+// commit that server.Tx retried for a minute before the call failed. Each call
+// here has a deadline far inside that minute, and each refused name is also
+// refused with the caller's context already canceled, so no transaction is
+// opened for it at all.
+func TestCreateApiKeyRefusesNameTheColumnCannotStore(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "test", userId)
+		byJwt := &jwt.ByJwt{
+			NetworkId: networkId,
+			UserId:    userId,
+		}
+
+		apiKeyCount := func() (count int) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(
+					ctx,
+					`SELECT count(*) FROM account_api_key WHERE network_id = $1`,
+					networkId,
+				).Scan(&count))
+			})
+			return
+		}
+
+		tooLongMessage := fmt.Sprintf("Name is too long (limit %d characters).", MaxApiKeyNameLength)
+		for _, c := range []struct {
+			name    string
+			keyName string
+			message string
+		}{
+			{
+				name:    "129 ascii characters",
+				keyName: strings.Repeat("n", MaxApiKeyNameLength+1),
+				message: tooLongMessage,
+			},
+			{
+				name:    "129 two-byte characters",
+				keyName: strings.Repeat("é", MaxApiKeyNameLength+1),
+				message: tooLongMessage,
+			},
+			{
+				name:    "a nul character",
+				keyName: "api\x00key",
+				message: "Name contains a NUL character.",
+			},
+		} {
+			callCtx, cancel := context.WithTimeout(ctx, apiKeyTestCallTimeout)
+			canceledCtx, cancelCanceled := context.WithCancel(ctx)
+			cancelCanceled()
+			for _, callSession := range []*session.ClientSession{
+				session.Testing_CreateClientSession(callCtx, byJwt),
+				session.Testing_CreateClientSession(canceledCtx, byJwt),
+			} {
+				result, err, panicValue := func() (createResult *CreateApiKeyResult, createErr error, panicValue any) {
+					defer func() {
+						panicValue = recover()
+					}()
+					createResult, createErr = CreateApiKey(&CreateApiKeyArgs{Name: c.keyName}, callSession)
+					return
+				}()
+				if panicValue != nil || err != nil {
+					t.Errorf("%s: the call failed instead of refusing: %v %v", c.name, panicValue, err)
+				} else if result.Error == nil || result.Error.Message != c.message || result.ApiKey != "" || result.Id != (server.Id{}) {
+					t.Errorf("%s: answered %+v, want the refusal %q", c.name, result, c.message)
+				}
+			}
+			if callCtx.Err() != nil {
+				t.Errorf("%s: the call outlasted its deadline", c.name)
+			}
+			cancel()
+		}
+		connect.AssertEqual(t, apiKeyCount(), 0)
+
+		// the longest name the column stores, in two-byte characters
+		longestName := strings.Repeat("é", MaxApiKeyNameLength)
+		userSession := session.Testing_CreateClientSession(ctx, byJwt)
+		result, err := CreateApiKey(&CreateApiKeyArgs{Name: longestName}, userSession)
+		connect.AssertEqual(t, err, nil)
+		if result.Error != nil || result.ApiKey == "" {
+			t.Fatalf("the longest name was refused: %+v", result)
+		}
+		apiKeys, err := GetAccountApiKeys(userSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(apiKeys), 1)
+		connect.AssertEqual(t, apiKeys[0].Name, longestName)
+	})
+}
+
+// The name limit is the column's own: information_schema reports the
+// account_api_key.name length the migrations created.
+func TestApiKeyNameLimitMatchesColumn(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		var columnLength int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(
+				ctx,
+				`
+				SELECT character_maximum_length
+				FROM information_schema.columns
+				WHERE table_schema = current_schema() AND table_name = 'account_api_key' AND column_name = 'name'
+				`,
+			).Scan(&columnLength))
+		})
+		connect.AssertEqual(t, columnLength, MaxApiKeyNameLength)
+	})
+}
+
+// A failed delete surfaces at once with its own error, and deletes nothing.
+// Its error used to be assigned to the result while the transaction went on to
+// a commit that server.Tx retried for a minute, after which the call failed
+// with "commit unexpectedly resulted in rollback".
+func TestDeleteApiKeyStatementFailureSurfacesAtOnce(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "test", userId)
+		byJwt := &jwt.ByJwt{
+			NetworkId: networkId,
+			UserId:    userId,
+		}
+		userSession := session.Testing_CreateClientSession(ctx, byJwt)
+
+		created, err := CreateApiKey(&CreateApiKeyArgs{Name: "key"}, userSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, created.Error, nil)
+
+		removeFailure := apiKeyTestFailStatements(ctx, "account_api_key", "DELETE")
+		callCtx, cancel := context.WithTimeout(ctx, apiKeyTestCallTimeout)
+		defer cancel()
+		panicValue := func() (panicValue any) {
+			defer func() {
+				panicValue = recover()
+			}()
+			DeleteApiKey(&created.Id, session.Testing_CreateClientSession(callCtx, byJwt))
+			return
+		}()
+		removeFailure()
+		var pgErr *pgconn.PgError
+		if panicErr, ok := panicValue.(error); !ok || !errors.As(panicErr, &pgErr) || pgErr.Message != "injected failure on DELETE account_api_key" {
+			t.Fatalf("the failed delete ended with %v, want the injected failure", panicValue)
+		}
+
+		// the key was not deleted, and a later delete works
+		apiKeys, err := GetAccountApiKeys(userSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(apiKeys), 1)
+		connect.AssertEqual(t, DeleteApiKey(&created.Id, userSession), nil)
+		apiKeys, err = GetAccountApiKeys(userSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(apiKeys), 0)
+	})
+}
+
+// Fails every statement of the event (INSERT, UPDATE or DELETE) on the table
+// with an injected error, in this test's own database, until the returned func
+// removes the failure.
+func apiKeyTestFailStatements(ctx context.Context, table string, event string) (removeFailure func()) {
+	sanitizedTable := pgx.Identifier{table}.Sanitize()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			CREATE OR REPLACE FUNCTION api_key_test_fail_statement() RETURNS trigger
+			LANGUAGE plpgsql AS $$
+			BEGIN
+				RAISE EXCEPTION 'injected failure on % %', TG_OP, TG_TABLE_NAME;
+			END
+			$$
+			`,
+		))
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			fmt.Sprintf(
+				`
+				CREATE TRIGGER api_key_test_fail_statement
+				BEFORE %s ON %s
+				FOR EACH ROW EXECUTE FUNCTION api_key_test_fail_statement()
+				`,
+				event,
+				sanitizedTable,
+			),
+		))
+	})
+	return func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				fmt.Sprintf(`DROP TRIGGER api_key_test_fail_statement ON %s`, sanitizedTable),
+			))
+		})
+	}
 }
