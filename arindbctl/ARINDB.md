@@ -1,8 +1,8 @@
 # ARIN database design
 
-This document describes the implementation as of 2026-10-04, including the
-discriminators, evidence sources and validation added by the same-day
-classifier reviews recorded in [CLASSIFICATION.md](CLASSIFICATION.md).
+This document describes the implementation and qualified v13 research as of
+2026-10-05, including the discriminator reviews recorded in
+[CLASSIFICATION.md](CLASSIFICATION.md) and the release evidence below.
 `arindbctl` builds an immutable IPv4/IPv6 MaxMind database that combines
 registration facts, reviewed network-use evidence, and geographic risk. A
 separate augmentation step joins reviewed subscriber-ISP identities to
@@ -339,6 +339,41 @@ ASN queues and administrative-region indexes are discovery inputs, not reviewed
 subscriber proof. See [SUBSCRIBER-ORIGINS.md](SUBSCRIBER-ORIGINS.md) for the catalog
 schema and research contract.
 
+### Qualified catalog scope (v13)
+
+The frozen v13 catalog contains **5,190 reviewed subscriber operator groups,
+5,432 subscriber ASNs and 160 country contexts**, alongside six explicit
+negative operator groups. The full update preserves these reviewed identities
+while refreshing their routing and other evidence. This is a global catalog,
+with incomplete coverage; these counts are neither a census of every ISP nor
+counts of live providers. Coverage is uneven: 4,694 subscriber groups include
+Brazil in their review context, where the regulator/NIR identity join supplied
+much of the catalog's breadth. Corporate affiliation, an ASN label, a traffic
+estimate or a regulator ranking alone cannot approve another ASN. Research
+must join the exact ASN and operator identity to actual subscriber service,
+retain contrary evidence, and keep regional service presence separate from
+prefix location and market rank.
+
+The retained country/admin1 inventory spans 242 country contexts and 3,865
+first-level administrative regions. It has reviewed subscriber identities in
+160 contexts and reviewed service-presence evidence in 131 regions; 82 contexts
+and 3,734 regions still lack those respective reviews. No region is marked
+complete for a combined subscriber-services top 30. Missing regional research
+does not negate an otherwise reviewed subscriber identity, and a national
+operator's presence does not establish service in every state or province.
+
+Brazil's 27 regions have derived, metric-specific top-30 tables from Anatel's
+August 2026 **fixed Internet** subscriptions, covering both individual and
+business subscribers. These are derived ranks within the reporting universe,
+with economic-group/legal-entity deduplication, not a regulator-published
+ordinal ranking or a combined fixed/mobile ranking. The 601 entities in the
+union of those top-30 queues still require their own ASN review; the frozen
+coverage report has only 13–29 reviewed top-30 entities per region. Therefore
+neither complete classification coverage nor complete all-service rankings
+follow from the existence of those 27 tables. Colombia, Chile and other
+regional reporting queues retain their source, metric, period and unresolved
+identity joins without being promoted to complete operator coverage.
+
 ## Output and provenance
 
 Each build produces `arin.mmdb` and `manifest.json`. The MMDB contains direct
@@ -363,6 +398,24 @@ subscriber approval and all independent risk evidence. It supplies the bounded
 current-owner research aggregate in [CAPTURE.md](../arinshadowctl/CAPTURE.md)
 without exporting provider addresses. Withheld origin identities remain distinct
 from unknown origins in that aggregate; neither adds an approval.
+
+Keep allocation ownership, classification authority and routing origin as
+separate evidence. The MMDB's `org_handle` and `net_handle` identify the direct
+allocation owner; `classification_org_handle` and
+`classification_network_handle` identify where the rule came from. Exact
+positive allocation scopes bind the complete owner/network/prefix tuple and
+cannot approve a separately registered child. An observed origin ASN does not
+replace any of those registration identities.
+
+The bounded capture reports both `Registration` and `Origin` aggregates.
+Registration carries public organization/network handles, the classification
+organization and a hash of the rule name; Origin carries the complete sorted
+ASN set and its use state. Multiple origins remain a set rather than being
+assigned to one arbitrary operator. Sets larger than eight ASNs become
+unattributed, and each aggregation dimension has a 4,096-group limit with
+explicit overflow counts. These reports support exact owner/origin research
+without exporting provider addresses or customer identities; attribution alone
+never changes subscriber state or clears risk.
 
 The full augmentation walk reuses successful immutable decoded records by
 reader-local MMDB offset. Each reader has a 65,536-record FIFO cache; evicted
@@ -545,6 +598,24 @@ leans towards Europe and technical users, so the estimate informs review and
 never gates a release. Residential recall measures catalog coverage as much as
 rule cost.
 
+The full v13 update's 2026-10-05 validation uses 6,865 residential and 3,045
+datacentre networks, after dropping 30 networks with conflicting tags:
+
+| Measure against Atlas tags | Count | Estimate | Wilson 95% interval |
+| --- | --- | --- | --- |
+| Clean-label precision | 3,618 / 3,689 clean networks | 98.08% | 97.58–98.47% |
+| Residential recall | 3,618 / 6,865 residential networks | 52.70% | 51.52–53.88% |
+| Datacentre clean rate | 71 / 3,045 datacentre networks | 2.33% | 1.85–2.93% |
+
+Of the 3,247 residential networks not labelled clean, 3,216 have no identified
+operator. This makes exact operator/ASN review the largest measured recall
+opportunity in this sample. The 71 clean datacentre-labelled networks remain
+review targets for mixed-use, hosting, leased-space or proxy evidence; a label
+conflict is not itself a new exclusion rule. Self-reported tags, European and
+technical-user bias, /24-or-/48 aggregation and the any-clean-probe rule limit
+these estimates. They are not live-provider recall, worldwide accuracy or
+proof that all hosting and residential proxies have been excluded.
+
 ## Research and evidence sources
 
 Two research passes on 2026-10-04 surveyed public data for distinguishing
@@ -667,13 +738,18 @@ In the implementation documented here,
 [provider_subscriber_eligibility.go](../model/provider_subscriber_eligibility.go)
 enables the subscriber predicate through
 `subscriber_quality_policy_version: 2` in `provider.yml`. Missing or zero policy
-retains legacy behavior; invalid policy fails. For an original Quality request,
-the predicate requires live connection evidence and all live connections to be
-verified, non-risky subscribers. It applies to named providers, forced minimums,
-Speed borrowing, Online fallback, and refills. Speed requests do not acquire
-that Quality-only predicate. This describes the current consumer boundary;
-implementing or changing uniform fallback is a separate FP2 change with its own
-behavior tests.
+retains legacy behavior; invalid policy fails. Native Quality membership
+requires live connection evidence and all live connections to be verified,
+non-risky subscribers. Named-provider and forced-minimum checks retain the
+requested bucket's policy. Discovery, borrowing and refills evaluate the
+selected bucket: a Quality request can use independently eligible Speed or
+Online supply without turning an unknown subscriber classification into
+Quality. Common risk and other hard exclusions still apply across every tier,
+including risk newly observed while rechecking stale Quality evidence. See
+[provider_selection_bucket_policy_test.go](../model/provider_selection_bucket_policy_test.go)
+for the selected-bucket fallback and risk-preservation controls. These are
+consumer semantics; catalog expansion does not change their thresholds or
+fallback ordering.
 
 [egress_index.go](../model/egress_index.go) combines classification with accepted
 health and common exclusions. Passing health can enter Speed; Quality also
@@ -705,6 +781,65 @@ before or after activation, actual resource and process observations establish
 which classifier was used. Operational receipts retain those release-specific
 claims. Main execution follows [RUN-MAIN.md](../monitor/RUN-MAIN.md).
 
+### Qualified v13 artifact and publication (2026-10-05)
+
+The full normal update completed with every requested evidence source
+available. Its final artifact is:
+
+| Identity | Value |
+| --- | --- |
+| Builder revision | `0bb38ed62d5daeb61d3f911f4fb9c72e5ae33ed1` |
+| ARIN resource version / build epoch | `2026.10.5+1791162091` / `1791162091` |
+| ARIN file size | 592,226,645 bytes |
+| ARIN SHA-256 | `2095612c250649c0e316651599e1c84db74d393ee7ae569e5f97f658c5609da3` |
+| Config release | `2026.10.5-arin-active-v13+1063773520` |
+| Published Config OCI index | `sha256:4ef7398b4bd4f0436e21da46fde31b6e382d7ad79b3924db0937452f21578ae4` |
+
+Independent qualification traversed 6,956,913 registration-base, 7,884,021
+final-database and 1,226,535 independent routing-reference boundaries. It
+checked the origin sets against independent longest-prefix lookup and preserved
+registration, base risk and non-Quality invariants. Native serving and mapped
+capture each passed 2,048 public readback samples. A further 305 sampled policy
+checks covered all 14 hosting/relay/VPN/Tor feeds, including 72 hosting cases
+inside identified subscriber-carrier networks. Those samples qualify the
+specified controls; they do not claim every published prefix or live provider
+was measured.
+
+The 592 MB file exceeds the legacy 512 MiB capture limit. The qualified c343
+consumer graph keeps the legacy snapshot refusal and uses a bounded 1 GiB
+mapped capture reader. Its focused tests also qualify typed Origin replies and
+maximum wire size. Select the compatible standalone coordinator before using
+new Connect capture replies: the new decoder accepts omitted legacy Origin
+fields, while the old strict decoder refuses the new field. The host bridge
+forwards bounded opaque replies; the typed interpretation belongs to the
+coordinator.
+
+Physical staging preserved the complete selected active-v7 Config baseline,
+including policy two and the native reader setting, and added exactly seven
+matched ARIN/GeoLite/places files in two version directories (667,548,482 added
+bytes). The resulting 96-path, 4,417,597,032-byte tree passed complete inventory
+comparison. The actual c343 native resolver selected all three new resource
+paths, and its serving ARIN reader loaded epoch `1791162091`. Both published
+image architectures were extracted and checked against that tree.
+
+**This checkpoint proves the artifact, local staging and registry publication;
+Main Config activation and loaded-consumer convergence remain unverified.**
+The release manifest records `selection_executed: false` and
+`runtime_identity_proven: false`; later selector and process receipts must be
+recorded separately. The qualified c343 runtime graph uses schema 763; a newer
+canonical source revision or migration inventory is not evidence that a
+running process uses that graph.
+
+Freshness is also bounded. The pinned RIS IPv4 snapshot was observed at
+`2026-10-04T18:03:14Z` and expires at `2026-10-06T18:03:14Z`; IPv6 was observed
+three minutes later and expires at `2026-10-06T18:06:14Z`. These are the earliest
+recorded evidence expiries in this bundle. Recheck freshness before selecting
+or reproducing it, and refresh through the normal update path as evidence ages.
+The process-local reader does not automatically unload or reclassify records
+when an evidence timestamp expires.
+
+### Measurements to complete after selection
+
 After activation, establish the selected resource hash and resolver path, the
 loaded epoch in actual consumers, fresh connection classifications, provider
 rollup convergence, and complete native publication. The aggregate coverage
@@ -714,6 +849,23 @@ epoch and lookup cutoff. It does not independently establish Quality eligibility
 Measure coverage additions and explicit exclusions as well as actual FP2
 results. Keep incomplete observations explicit and use them to prioritize the
 next identity or discriminator review.
+
+For this release, retain the following evidence as rollout proceeds:
+
+1. The selected Config index and actual process resource path/hash/epoch after
+   the owning restart; desired selectors and successful image publication are
+   insufficient by themselves.
+2. Aggregate current, outdated and missing lookups at epoch `1791162091`, using
+   the actual cutover time, followed by native score-generation and provider
+   rollup convergence. Do not treat old stored facts as freshly reclassified.
+3. Actual Quality, Speed and Online results under their existing health,
+   reliability and common-risk gates, including fallback and publication age.
+4. Complete owner-side capture aggregates where available, preserving unknown,
+   withheld, conflicting and overflow populations. Prioritize exact
+   allocation-owner and origin-set research from those gaps, review the Atlas
+   disagreements with narrow evidence, and keep unfinished country/admin1
+   rankings explicit. New catalog or discriminator changes need their own
+   review and artifact qualification.
 
 ## Verification and known limits
 
