@@ -326,20 +326,25 @@ func stGasEnsureLogical(ctx context.Context, tx server.PgTx, policy *server.StOp
 	}
 }
 
-// Never subtract a terminal status or receipt gas product from these totals.
-// Each nonce can charge at most one candidate, so its retained maximum counts
-// once; a reverted generation has a different nonce and is added in full.
+// Only an admitted original native settlement replaces a nonce's full ceiling.
+// Terminal labels, receipt gas products and policy revisions change no charge.
+// A reverted generation has its own nonce and remains part of the same total.
 func stGasCheckTotals(ctx context.Context, tx server.PgTx, policy *server.StOperatorGasPolicy) {
+	var nativeConflict bool
+	server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM st_operator_native_fee_hold WHERE scope_key=$1)`, policy.Scope()).Scan(&nativeConflict))
+	if nativeConflict {
+		panic(errors.Join(ErrStOperatorGasAllowance, ErrStNativeFeeConflict))
+	}
 	var total string
 	var attempts int64
-	server.Raise(tx.QueryRow(ctx, `SELECT COALESCE(SUM(maximum),0)::text FROM (SELECT MAX(maximum_liability_wei) maximum FROM st_operator_gas_reservation WHERE scope_key=$1 GROUP BY intent_id) nonces`, policy.Scope()).Scan(&total))
+	server.Raise(tx.QueryRow(ctx, `SELECT COALESCE(SUM(charge),0)::text FROM (`+stGasNonceChargesSql+`) nonces`, policy.Scope()).Scan(&total))
 	server.Raise(tx.QueryRow(ctx, `SELECT COUNT(*) FROM st_operator_gas_reservation WHERE scope_key=$1`, policy.Scope()).Scan(&attempts))
 	value, ok := new(big.Int).SetString(total, 10)
 	limit, _ := server.StOperatorGasQuantity(policy.MaximumLifetimeLiabilityWei)
 	if !ok || value.Cmp(limit) > 0 || uint64(attempts) > policy.MaximumLifetimeAttempts {
 		panic(fmt.Errorf("%w: cumulative lifetime liability or signing count", ErrStOperatorGasAllowance))
 	}
-	rows, err := tx.Query(ctx, `SELECT limits.logical_key,limits.maximum_liability_wei::text,limits.maximum_attempts,COALESCE(totals.total,0)::text,COALESCE(counts.count,0) FROM st_operator_gas_intent limits LEFT JOIN (SELECT logical_key,SUM(maximum) total FROM (SELECT logical_key,intent_id,MAX(maximum_liability_wei) maximum FROM st_operator_gas_reservation WHERE scope_key=$1 GROUP BY logical_key,intent_id) nonces GROUP BY logical_key) totals ON totals.logical_key=limits.logical_key LEFT JOIN (SELECT logical_key,COUNT(*) count FROM st_operator_gas_reservation WHERE scope_key=$1 GROUP BY logical_key) counts ON counts.logical_key=limits.logical_key WHERE limits.scope_key=$1`, policy.Scope())
+	rows, err := tx.Query(ctx, `SELECT limits.logical_key,limits.maximum_liability_wei::text,limits.maximum_attempts,COALESCE(totals.total,0)::text,COALESCE(counts.count,0) FROM st_operator_gas_intent limits LEFT JOIN (SELECT logical_key,SUM(charge) total FROM (`+stGasNonceChargesSql+`) nonces GROUP BY logical_key) totals ON totals.logical_key=limits.logical_key LEFT JOIN (SELECT logical_key,COUNT(*) count FROM st_operator_gas_reservation WHERE scope_key=$1 GROUP BY logical_key) counts ON counts.logical_key=limits.logical_key WHERE limits.scope_key=$1`, policy.Scope())
 	server.Raise(err)
 	defer rows.Close()
 	currentLimit, _ := server.StOperatorGasQuantity(policy.MaximumIntentLiabilityWei)
@@ -507,6 +512,7 @@ func ReserveStTransactionGasAttempt(ctx context.Context, policy *server.StOperat
 	server.Tx(ctx, func(tx server.PgTx) {
 		digest := stGasAdmitPolicy(ctx, tx, policy, authority)
 		intent := scanStTransactionIntent(tx.QueryRow(ctx, `SELECT `+stTransactionIntentColumns+` FROM st_transaction_intent WHERE intent_id=$1 FOR UPDATE`, intentId))
+		stGasRequireUnsettled(ctx, tx, intentId)
 		allowed := false
 		for _, account := range policy.Accounts {
 			allowed = allowed || account.Address == intent.FromAddress
@@ -578,6 +584,7 @@ func ValidateStTransactionGasBroadcast(ctx context.Context, policy *server.StOpe
 	server.Tx(ctx, func(tx server.PgTx) {
 		stGasAdmitPolicy(ctx, tx, policy, authority)
 		intent := scanStTransactionIntent(tx.QueryRow(ctx, `SELECT `+stTransactionIntentColumns+` FROM st_transaction_intent WHERE intent_id=$1 FOR UPDATE`, intentId))
+		stGasRequireUnsettled(ctx, tx, intentId)
 		allowed := false
 		for _, account := range policy.Accounts {
 			allowed = allowed || account.Address == intent.FromAddress
@@ -596,6 +603,11 @@ func ValidateStTransactionGasBroadcast(ctx context.Context, policy *server.StOpe
 
 type StOperatorGasBudgetSnapshot struct {
 	MaximumLiabilityWei string
+	BudgetChargeWei     string
+	PaidFeesWei         string
+	OutstandingWei      string
+	SettledNonces       int64
+	HeldNonces          int64
 	Attempts            int64
 	PolicySha256        string
 	Revision            uint64
@@ -618,7 +630,7 @@ func GetStOperatorGasBudgetSnapshot(ctx context.Context, scope string) (result *
 		}
 		server.Raise(err)
 		result.Revision = uint64(revision)
-		server.Raise(tx.QueryRow(ctx, `SELECT COALESCE(SUM(maximum),0)::text FROM (SELECT MAX(maximum_liability_wei) maximum FROM st_operator_gas_reservation WHERE scope_key=$1 GROUP BY intent_id) nonces`, scope).Scan(&result.MaximumLiabilityWei))
+		server.Raise(tx.QueryRow(ctx, `SELECT COALESCE(SUM(original_ceiling),0)::text,COALESCE(SUM(charge),0)::text,COALESCE(SUM(paid),0)::text,COALESCE(SUM(outstanding),0)::text,COUNT(*) FILTER(WHERE settled),COUNT(*) FILTER(WHERE held) FROM (`+stGasNonceChargesSql+`) nonces`, scope).Scan(&result.MaximumLiabilityWei, &result.BudgetChargeWei, &result.PaidFeesWei, &result.OutstandingWei, &result.SettledNonces, &result.HeldNonces))
 		server.Raise(tx.QueryRow(ctx, `SELECT COUNT(*) FROM st_operator_gas_reservation WHERE scope_key=$1`, scope).Scan(&result.Attempts))
 	})
 	return result, nil
