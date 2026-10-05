@@ -3870,23 +3870,38 @@ type providerCountFilter struct {
 // old scope. Rechecking every observed score against the same score table would
 // duplicate that work without changing the set of failed clients.
 func providerCountFilterCommonSql() string {
+	return providerCountFilterSql(false)
+}
+
+// The common SQL, or with clientScoped the same predicates over only the
+// client ids in $1 (providerCountFilterClientSql). Unscoped, the scope
+// fragments are empty and the text is exactly the fleet query.
+func providerCountFilterSql(clientScoped bool) string {
 	minimums := providerReliabilityMinimums()
+	reliabilityScope := ""
+	exceptionScope := ""
+	exceptionScopeEnd := ""
+	if clientScoped {
+		reliabilityScope = "provider_reliability.client_id = ANY($1) AND "
+		exceptionScope = "client_id = ANY($1) AND ("
+		exceptionScopeEnd = ")"
+	}
 	return fmt.Sprintf(`WITH failed_reliability AS MATERIALIZED (
 		SELECT DISTINCT provider_reliability.client_id
 		FROM client_connection_reliability_score AS provider_reliability
-		WHERE provider_reliability.independent_reliability_weight < CASE provider_reliability.lookback_index
+		WHERE %sprovider_reliability.independent_reliability_weight < CASE provider_reliability.lookback_index
 			WHEN 1 THEN %g WHEN 2 THEN %g WHEN 3 THEN %g ELSE 0 END
 	)
 	SELECT client_id, arin_risk, arin_non_quality, false
 	FROM network_client_location_reliability
-	WHERE arin_risk OR arin_non_quality
+	WHERE %sarin_risk OR arin_non_quality%s
 	UNION ALL
 	SELECT failed_reliability.client_id, false, false, true
 	FROM failed_reliability
 	WHERE EXISTS (
 		SELECT 1 FROM network_client_location_reliability AS provider_location
 		WHERE provider_location.client_id = failed_reliability.client_id
-	)`, minimums[1], minimums[2], minimums[3])
+	)`, reliabilityScope, minimums[1], minimums[2], minimums[3], exceptionScope, exceptionScopeEnd)
 }
 
 // Load complete exception maps once for publication and provider diagnostics.
@@ -5153,98 +5168,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	locationClientScores := map[server.Id]map[server.Id]*ClientScore{}
 	locationGroupClientScores := map[server.Id]map[server.Id]*ClientScore{}
 
-	type performanceTarget struct {
-		relativeLatencyMillisThreshold int
-		relativeLatencyMillisCutoff    int
-		relativeLatencyMillisPerScore  int
-		bytesPerSecondThreshold        ByteCount
-		bytesPerSecondCutoff           ByteCount
-		bytesPerSecondPerScore         ByteCount
-	}
-
-	scorePerTier := ClientScorePerTier
-	missingLatencyScore := 2 * scorePerTier
-	missingSpeedScore := 2 * scorePerTier
-
-	performanceTargets := map[RankMode]performanceTarget{
-		RankModeQuality: performanceTarget{
-			relativeLatencyMillisThreshold: 50,
-			relativeLatencyMillisCutoff:    200,
-			relativeLatencyMillisPerScore:  20,
-			bytesPerSecondThreshold:        8 * Mib,
-			bytesPerSecondCutoff:           800 * Kib,
-			bytesPerSecondPerScore:         200 * Kib,
-		},
-		RankModeSpeed: performanceTarget{
-			relativeLatencyMillisThreshold: 20,
-			relativeLatencyMillisCutoff:    50,
-			relativeLatencyMillisPerScore:  5,
-			bytesPerSecondThreshold:        40 * Mib,
-			bytesPerSecondCutoff:           4 * Mib,
-			bytesPerSecondPerScore:         1 * Mib,
-		},
-	}
-
-	// Per mode, score = min(20·base + adjust, MaxClientScore) and the tier its
-	// twentieths, where the performance tests make the adjust and a cutoff
-	// excludes (connect/GEOMAP.md §10.1). The base is the egress index in
-	// quality and zero in speed (§10.3), or each mode's net-type score for a
-	// row the new rollup has not written. rankModeMinimumBases is the base of
-	// the score the minimum and the weight read (see
-	// ClientScore.minimumScores).
-	setScore := func(
-		clientScore *ClientScore,
-		rankModeBases map[RankMode]int,
-		rankModeMinimumBases map[RankMode]int,
-		minRelativeLatencyMillis int,
-		maxBytesPerSecond ByteCount,
-		hasLatencyTest bool,
-		hasSpeedTest bool,
-	) {
-		clientScore.minimumScores = map[string]int{}
-		for rankMode, target := range performanceTargets {
-			exclude := false
-			scoreAdjust := 0
-
-			if hasLatencyTest {
-				if target.relativeLatencyMillisCutoff < minRelativeLatencyMillis {
-					exclude = true
-				} else if d := minRelativeLatencyMillis - target.relativeLatencyMillisThreshold; 0 < d {
-					scoreAdjust += (d + target.relativeLatencyMillisPerScore/2) / target.relativeLatencyMillisPerScore
-				}
-			} else {
-				scoreAdjust += missingLatencyScore
-			}
-
-			if hasSpeedTest {
-				if maxBytesPerSecond < target.bytesPerSecondCutoff {
-					exclude = true
-				} else if d := target.bytesPerSecondThreshold - maxBytesPerSecond; 0 < d {
-					scoreAdjust += int((d + target.bytesPerSecondPerScore/2) / target.bytesPerSecondPerScore)
-				}
-			} else {
-				scoreAdjust += missingSpeedScore
-			}
-
-			if !exclude {
-				score := min(
-					scorePerTier*rankModeBases[rankMode]+scoreAdjust,
-					MaxClientScore,
-				)
-				clientScore.Scores[rankMode] = score
-				clientScore.Tiers[rankMode] = score / scorePerTier
-				clientScore.minimumScores[rankMode] = min(
-					scorePerTier*rankModeMinimumBases[rankMode]+scoreAdjust,
-					MaxClientScore,
-				)
-			} else {
-				clientScore.Scores[rankMode] = MaxClientScore
-				clientScore.Tiers[rankMode] = ClientScoreCutoffTier
-				clientScore.minimumScores[rankMode] = MaxClientScore
-			}
-		}
-	}
-
 	// What the rules of connect/GEOMAP.md §10.3 read about a provider from its
 	// rollup row, the same in both pool queries.
 	type clientScoreEgress struct {
@@ -5310,26 +5233,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			Tiers:                        map[string]int{},
 		}
 
-		// the old fields stay authoritative wherever the new one is empty
-		// (connect/GEOMAP.md §10.4): a row the new rollup has not written
-		// ranks exactly as it did, on its net-type score in both modes
-		rankModeBases := map[RankMode]int{
-			RankModeQuality: netTypeScore,
-			RankModeSpeed:   netTypeScoreSpeed,
-		}
-		rankModeMinimumBases := rankModeBases
-		if egress.egressIndex != nil {
-			rankModeBases = map[RankMode]int{
-				RankModeQuality: *egress.egressIndex,
-				RankModeSpeed:   0,
-			}
-			rankModeMinimumBases = map[RankMode]int{
-				RankModeQuality: 0,
-				RankModeSpeed:   0,
-			}
-		}
-
-		setScore(
+		rankModeBases, rankModeMinimumBases := clientScoreRankModeBases(netTypeScore, netTypeScoreSpeed, egress.egressIndex)
+		setClientScoreRanks(
 			lookbackClientScore,
 			rankModeBases,
 			rankModeMinimumBases,
@@ -5606,18 +5511,6 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		})
 	})
 
-	type filter struct {
-		maxScore                         int
-		minIndependentReliabilityWeights map[int]float64
-		// minBytesPerSecond                ByteCount
-		// maxRelativeLatencyMillis         int
-	}
-	// filters are tested in order of declaration for `MinExportNetReliabilityWeight`
-	// to minimize the chance of bad providers in the `FindProviders2` randomized shuffle
-	// the last filter represents the worst case the network will expose to users
-	minFilter := filter{
-		maxScore: 2 * scorePerTier,
-	}
 	// keyed by lookback index (see ClientLookbacks): 1 = the hour, 2 = 12h.
 	// The hour threshold is the gate that decides whether a provider is in the
 	// market at all. It sat at 0.99 -- less than one bad block in 60 -- which
@@ -5626,11 +5519,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	// invalid however tolerant the rule is). 0.95 allows three such blocks an
 	// hour. Repeated reconnects still fail it: they are real user impact, and
 	// `client_reliability_valid` only forgives ONE per block.
-	minFilter.minIndependentReliabilityWeights = providerReliabilityMinimums()
-	minReliabilityWeightScale := 0.1
-	maxReliabilityWeightScale := 1.0
-	minScoreScale := 0.1
-	maxScoreScale := 1.0
+	minIndependentReliabilityWeights := providerReliabilityMinimums()
 
 	// The rules of connect/GEOMAP.md §10.3 for every provider of the pool, once
 	// each: a client sits in several location and group maps, each with its
@@ -5665,61 +5554,16 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		onlineCount,
 	)
 
-	// migration: set each client score to the lowest lookback index index
+	// set each client score to its lowest lookback, decided the same way in
+	// every location and group map it sits in
 	migrateClientScore := func(clientScore *ClientScore) {
-		lookbackIndexes := slices.Collect(maps.Keys(clientScore.LookbackClientScores))
-		slices.Sort(lookbackIndexes)
-		minLookbackIndex := lookbackIndexes[0]
-
-		minClientScore := clientScore.LookbackClientScores[minLookbackIndex]
-
-		clientScore.Scores = minClientScore.Scores
-		clientScore.ReliabilityWeight = minClientScore.ReliabilityWeight
-		clientScore.IndependentReliabilityWeight = minClientScore.IndependentReliabilityWeight
-		clientScore.Tiers = minClientScore.Tiers
-		clientScore.MinRelativeLatencyMillis = minClientScore.MinRelativeLatencyMillis
-		clientScore.MaxBytesPerSecond = minClientScore.MaxBytesPerSecond
-		clientScore.HasLatencyTest = minClientScore.HasLatencyTest
-		clientScore.HasSpeedTest = minClientScore.HasSpeedTest
-		clientScore.minimumScores = minClientScore.minimumScores
-
-		clientScore.ScaledWeights = map[string]float32{}
-		clientScore.PassesMinimums = map[string]bool{}
-
-		// Both native modes require passing accepted URL evidence; only quality
-		// additionally excludes the explicit ARIN non-quality class.
-		decision := clientIdEgressDecisions[clientScore.ClientId]
-		rankModePassesBucket := map[RankMode]bool{
-			RankModeQuality: decision.quality,
-			RankModeSpeed:   decision.speed,
-		}
-
-		// Online is all common-gate passes. Missing latency/throughput tests
-		// and low performance change ordering without reducing membership.
-		weights := map[int]float64{}
-		for lookbackIndex, lookbackClientScore := range clientScore.LookbackClientScores {
-			weights[lookbackIndex] = lookbackClientScore.IndependentReliabilityWeight
-		}
-		passesReliability := providerReliabilityPasses(weights, minFilter.minIndependentReliabilityWeights)
-		clientScore.Online = decision.online && passesReliability
-		clientScore.UrlProbeSuccessWeight = providerUrlProbeSuccessWeight(countFilter.healthCounts[clientScore.ClientId])
-		if counts, ok := countFilter.healthCounts[clientScore.ClientId]; ok && counts.Total > 0 {
-			validUntil := counts.FirstMeasuredAt.Add(min(egressSettings.EvidenceMaxAge, ProviderEgressHealthMaxAge))
-			clientScore.EgressValidUntil = &validUntil
-		}
-
-		for _, rankMode := range slices.Collect(maps.Keys(clientScore.Scores)) {
-			passesMinimum := rankModePassesBucket[rankMode] && passesReliability
-
-			if passesMinimum {
-				u := max(0.0, min(1.0, float64(minClientScore.IndependentReliabilityWeight-minFilter.minIndependentReliabilityWeights[minLookbackIndex])/(1.0-minFilter.minIndependentReliabilityWeights[minLookbackIndex])))
-				reliabilityWeightScale := (1-u)*minReliabilityWeightScale + u*maxReliabilityWeightScale
-				v := max(0.0, min(1.0, float64(minFilter.maxScore-clientScore.minimumScores[rankMode])/float64(minFilter.maxScore)))
-				scoreScale := (1-v)*minScoreScale + v*maxScoreScale
-				clientScore.ScaledWeights[rankMode] = float32(reliabilityWeightScale * clientScore.ReliabilityWeight * scoreScale * clientScore.UrlProbeSuccessWeight)
-				clientScore.PassesMinimums[rankMode] = true
-			}
-		}
+		rankClientScore(
+			clientScore,
+			clientIdEgressDecisions[clientScore.ClientId],
+			countFilter,
+			egressSettings,
+			minIndependentReliabilityWeights,
+		)
 	}
 	for _, clientScores := range locationClientScores {
 		for _, clientScore := range clientScores {
@@ -5890,7 +5734,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	var exportCount atomic.Uint32
 	workerLimit := max(1, parallel)
 	returnErrs := make(chan error, workerLimit)
-	targetExportTotal := 2 * len(performanceTargets) * len(targets)
+	targetExportTotal := 2 * len(clientScorePerformanceTargets) * len(targets)
 	targetBlockSize := 0
 	if len(targets) != 0 {
 		targetBlockSize = (len(targets) + workerLimit - 1) / workerLimit
@@ -5905,7 +5749,7 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			connect.HandleError(func() {
 				server.Redis(ctx, func(r server.RedisClient) {
 					for _, forceMinimum := range []bool{false, true} {
-						for rankMode, _ := range performanceTargets {
+						for rankMode, _ := range clientScorePerformanceTargets {
 							// The sets are independent and hash to different cluster slots, so
 							// multi/exec cannot span them. Encode directly into the bounded
 							// writer. Partitioning by target, rather than caller, lets one gob
@@ -7156,7 +7000,11 @@ func FindProviders2(
 		for _, provider := range providers {
 			providerClientIds = append(providerClientIds, provider.ClientId)
 		}
-		RecordProviderSearchMatches(session.Ctx, providerClientIds, server.NowUtc())
+		now := server.NowUtc()
+		RecordProviderSearchMatches(session.Ctx, providerClientIds, now)
+		// each provider's per-minute appearances, counted in process; the
+		// owner in the context writes them in the background
+		recordProviderAppearances(session.Ctx, providerClientIds, now)
 	}
 
 	result := &FindProviders2Result{

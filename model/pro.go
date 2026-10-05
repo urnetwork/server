@@ -38,12 +38,13 @@ type proPriceTierYaml struct {
 }
 
 type proTierYaml struct {
-	ConcurrentClients int                `yaml:"concurrent_clients"`
-	Data              string             `yaml:"data"`
-	DataPeriod        string             `yaml:"data_period"`
-	PriceUsd          proPriceYaml       `yaml:"price_usd"`
-	PriceTiers        []proPriceTierYaml `yaml:"price_tiers"`
-	Features          proFeaturesYaml    `yaml:"features"`
+	ConcurrentClients            int                `yaml:"concurrent_clients"`
+	Data                         string             `yaml:"data"`
+	DataPeriod                   string             `yaml:"data_period"`
+	MaxContractTransferByteCount string             `yaml:"max_contract_transfer_byte_count"`
+	PriceUsd                     proPriceYaml       `yaml:"price_usd"`
+	PriceTiers                   []proPriceTierYaml `yaml:"price_tiers"`
+	Features                     proFeaturesYaml    `yaml:"features"`
 }
 
 type proReferralYaml struct {
@@ -83,6 +84,11 @@ type ProTier struct {
 	ConcurrentClients int
 	Data              ByteCount
 	DataPeriod        time.Duration
+	// The largest contract granted against a payer's balance on this tier. An
+	// abandoned contract keeps its escrow reserved until it is force-closed, so
+	// a smaller cap bounds how much of a balance such contracts can hold. Zero
+	// (unset) is no cap; read it through MaxContractTransferByteCount.
+	MaxContractTransferByteCount ByteCount
 	// The subscription price in USD. The server quotes from this so a client can never
 	// name its own price.
 	PriceMonthlyUsd float64
@@ -152,6 +158,8 @@ func (t *ProPriceTier) hasCountry(countryCode string) bool {
 //	no data amounts      -> the grants NO-OP (they never write a zero-byte balance)
 //	no referral cap      -> referrals UNCAPPED (never capped at zero, which would
 //	                        make `count >= cap` true for everyone and block them all)
+//	no contract cap      -> contracts UNCAPPED (a zero cap is never applied, since a
+//	                        contract granted zero bytes carries nothing)
 //	no price / duration  -> purchases REFUSED, loudly, rather than sold for nothing
 //
 // The checks key off the VALUE, never off a "was it loaded" flag. A flag has to be
@@ -220,15 +228,16 @@ func mustParseDuration(s string) time.Duration {
 
 func parseProTier(y proTierYaml) ProTier {
 	return ProTier{
-		ConcurrentClients: y.ConcurrentClients,
-		Data:              mustParseByteCount(y.Data),
-		DataPeriod:        mustParseDuration(y.DataPeriod),
-		PriceMonthlyUsd:   y.PriceUsd.Monthly,
-		PriceYearlyUsd:    y.PriceUsd.Yearly,
-		HttpProxy:         y.Features.HttpProxy,
-		HttpsProxy:        y.Features.HttpsProxy,
-		SocksProxy:        y.Features.SocksProxy,
-		WireguardProxy:    y.Features.WireguardProxy,
+		ConcurrentClients:            y.ConcurrentClients,
+		Data:                         mustParseByteCount(y.Data),
+		DataPeriod:                   mustParseDuration(y.DataPeriod),
+		MaxContractTransferByteCount: parseByteCountOrZero(y.MaxContractTransferByteCount),
+		PriceMonthlyUsd:              y.PriceUsd.Monthly,
+		PriceYearlyUsd:               y.PriceUsd.Yearly,
+		HttpProxy:                    y.Features.HttpProxy,
+		HttpsProxy:                   y.Features.HttpsProxy,
+		SocksProxy:                   y.Features.SocksProxy,
+		WireguardProxy:               y.Features.WireguardProxy,
 	}
 }
 
@@ -370,6 +379,23 @@ func Testing_SetConcurrentClientsLimit(free int, pro int) func() {
 	}
 }
 
+// Testing_SetMaxContractTransferByteCount overrides the per-tier contract size
+// caps on the process's parsed config, returning a restore function. Same
+// caveats as Testing_SetEnforceConcurrentClients (mutates the shared config;
+// defer the return). For tests exercising the contract cap, which no pro.yml
+// sets yet.
+func Testing_SetMaxContractTransferByteCount(free ByteCount, pro ByteCount) func() {
+	c := Pro()
+	prevFree := c.Free.MaxContractTransferByteCount
+	prevPro := c.Pro.MaxContractTransferByteCount
+	c.Free.MaxContractTransferByteCount = free
+	c.Pro.MaxContractTransferByteCount = pro
+	return func() {
+		c.Free.MaxContractTransferByteCount = prevFree
+		c.Pro.MaxContractTransferByteCount = prevPro
+	}
+}
+
 // Tier returns the free or pro tier limits/features.
 func (c *ProConfig) Tier(pro bool) *ProTier {
 	if pro {
@@ -401,6 +427,15 @@ func (c *ProConfig) ConcurrentClientsExceeded(pro bool, connectedCount int) bool
 		return false
 	}
 	return max <= connectedCount
+}
+
+// MaxContractTransferByteCount is the largest contract granted against the
+// balance of a payer on the tier (pro.yml <tier>.max_contract_transfer_byte_count).
+// Zero means no cap, and so does an unset or negative value: a cap of zero would
+// grant contracts that carry nothing. The cap ships off, because smaller
+// contracts mean more contract creations and closes; setting it is an ops step.
+func (c *ProConfig) MaxContractTransferByteCount(pro bool) ByteCount {
+	return max(0, c.Tier(pro).MaxContractTransferByteCount)
 }
 
 // DataAmount / DataPeriod are the recurring data grant for the tier.

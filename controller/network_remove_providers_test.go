@@ -13,6 +13,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/jwt"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
 
@@ -20,33 +21,53 @@ import (
 // store answer is fixed by the test, so the outcome depends on nothing but
 // the deletion logic.
 type networkRemoveStepsFake struct {
+	storeSnapshot *model.RemoveNetworkStoreSnapshot
 	appleRenewing bool
 	appleErr      error
 	stripeErr     error
 	playErr       error
+	// the removal's outcome; empty means removed
+	removeOutcome model.RemoveNetworkOutcome
 
 	calls   []string
 	removed bool
+	// what each step was handed
+	appleTransactionIds []string
+	playPurchaseTokens  []string
+	removeStoreSnapshot *model.RemoveNetworkStoreSnapshot
 }
 
 func (self *networkRemoveStepsFake) steps() *networkRemoveSteps {
 	return &networkRemoveSteps{
-		appleRenewing: func(clientSession *session.ClientSession) (bool, error) {
+		storeSnapshot: func(clientSession *session.ClientSession) *model.RemoveNetworkStoreSnapshot {
+			self.calls = append(self.calls, "snapshot")
+			if self.storeSnapshot == nil {
+				return &model.RemoveNetworkStoreSnapshot{}
+			}
+			return self.storeSnapshot
+		},
+		appleRenewing: func(clientSession *session.ClientSession, originalTransactionIds []string) (bool, error) {
 			self.calls = append(self.calls, "apple")
+			self.appleTransactionIds = originalTransactionIds
 			return self.appleRenewing, self.appleErr
 		},
 		unsubscribeStripe: func(clientSession *session.ClientSession) error {
 			self.calls = append(self.calls, "stripe")
 			return self.stripeErr
 		},
-		cancelPlay: func(clientSession *session.ClientSession) error {
+		cancelPlay: func(clientSession *session.ClientSession, purchaseTokens []string) error {
 			self.calls = append(self.calls, "play")
+			self.playPurchaseTokens = purchaseTokens
 			return self.playErr
 		},
-		removeNetwork: func(clientSession *session.ClientSession) (bool, map[string]bool) {
+		removeNetwork: func(clientSession *session.ClientSession, storeSnapshot *model.RemoveNetworkStoreSnapshot) (model.RemoveNetworkOutcome, map[string]bool) {
 			self.calls = append(self.calls, "remove")
+			self.removeStoreSnapshot = storeSnapshot
+			if self.removeOutcome != "" && self.removeOutcome != model.RemoveNetworkRemoved {
+				return self.removeOutcome, nil
+			}
 			self.removed = true
-			return true, map[string]bool{"synthetic@example.invalid": true}
+			return model.RemoveNetworkRemoved, map[string]bool{"synthetic@example.invalid": true}
 		},
 		scheduleRemoveProductUpdates: func(clientSession *session.ClientSession, userAuths map[string]bool) {
 			self.calls = append(self.calls, "product-updates")
@@ -70,9 +91,52 @@ func TestNetworkRemoveCancelsPlayBeforeRemoval(t *testing.T) {
 	if err != nil || result == nil || result.Error != nil {
 		t.Fatalf("remove result=%+v err=%v, want success", result, err)
 	}
-	want := []string{"apple", "stripe", "play", "remove", "product-updates"}
+	want := []string{"snapshot", "apple", "stripe", "play", "remove", "product-updates"}
 	if !reflect.DeepEqual(fake.calls, want) {
 		t.Fatalf("steps = %v, want %v", fake.calls, want)
+	}
+}
+
+// The App Store check, the Play cancellation and the removal work from one
+// read of the store renewals, so the removal can tell a renewal credited
+// after the store steps from one they checked.
+func TestNetworkRemoveFeedsOneStoreSnapshotToEveryStep(t *testing.T) {
+	storeSnapshot := &model.RemoveNetworkStoreSnapshot{
+		AppleTransactionIds: []string{"synthetic-apple-1"},
+		PlayPurchaseTokens:  []string{"synthetic-play-1", "synthetic-play-2"},
+	}
+	fake := &networkRemoveStepsFake{storeSnapshot: storeSnapshot}
+	result, err := networkRemoveWithSteps(networkRemoveStepsTestSession(), fake.steps())
+	if err != nil || result == nil || result.Error != nil {
+		t.Fatalf("remove result=%+v err=%v, want success", result, err)
+	}
+	if !reflect.DeepEqual(fake.appleTransactionIds, storeSnapshot.AppleTransactionIds) {
+		t.Fatalf("App Store check got %v, want %v", fake.appleTransactionIds, storeSnapshot.AppleTransactionIds)
+	}
+	if !reflect.DeepEqual(fake.playPurchaseTokens, storeSnapshot.PlayPurchaseTokens) {
+		t.Fatalf("Play cancellation got %v, want %v", fake.playPurchaseTokens, storeSnapshot.PlayPurchaseTokens)
+	}
+	if fake.removeStoreSnapshot != storeSnapshot {
+		t.Fatalf("removal got snapshot %+v, want the one the store steps used", fake.removeStoreSnapshot)
+	}
+}
+
+// A store renewal credited while the deletion ran keeps the network and asks
+// the customer to retry; the retry's store steps see the new renewal.
+func TestNetworkRemoveStoreRenewalChangedAsksForRetry(t *testing.T) {
+	fake := &networkRemoveStepsFake{removeOutcome: model.RemoveNetworkStoreRenewalUnchecked}
+	result, err := networkRemoveWithSteps(networkRemoveStepsTestSession(), fake.steps())
+	if err != nil {
+		t.Fatalf("remove err = %v, want a result error", err)
+	}
+	if fake.removed {
+		t.Fatalf("network removed although a store renewal changed (steps %v)", fake.calls)
+	}
+	if result == nil || result.Error == nil || result.Error.Message != networkRemoveStoreRenewalChangedMessage {
+		t.Fatalf("remove result = %+v, want the retry message", result)
+	}
+	if want := []string{"snapshot", "apple", "stripe", "play", "remove"}; !reflect.DeepEqual(fake.calls, want) {
+		t.Fatalf("steps = %v, want %v (no product-update removal)", fake.calls, want)
 	}
 }
 
@@ -107,8 +171,8 @@ func TestNetworkRemoveAppleRenewingBlocksRemoval(t *testing.T) {
 			if fake.removed {
 				t.Fatalf("network removed while an App Store subscription renews (steps %v)", fake.calls)
 			}
-			if !reflect.DeepEqual(fake.calls, []string{"apple"}) {
-				t.Fatalf("steps = %v, want only the App Store check", fake.calls)
+			if !reflect.DeepEqual(fake.calls, []string{"snapshot", "apple"}) {
+				t.Fatalf("steps = %v, want only the snapshot and the App Store check", fake.calls)
 			}
 			if result == nil || result.Error == nil || result.Error.Message != networkRemoveAppleRenewingMessage {
 				t.Fatalf("remove result = %+v, want the App Store message", result)
@@ -123,8 +187,8 @@ func TestNetworkRemoveStripeFailureBlocksRemoval(t *testing.T) {
 	if err != nil || result == nil || result.Error == nil || result.Error.Message != networkRemoveStripeFailedMessage {
 		t.Fatalf("remove result=%+v err=%v, want the Stripe failure message", result, err)
 	}
-	if !reflect.DeepEqual(fake.calls, []string{"apple", "stripe"}) {
-		t.Fatalf("steps = %v, want the App Store check and Stripe only", fake.calls)
+	if !reflect.DeepEqual(fake.calls, []string{"snapshot", "apple", "stripe"}) {
+		t.Fatalf("steps = %v, want the snapshot, the App Store check and Stripe only", fake.calls)
 	}
 }
 

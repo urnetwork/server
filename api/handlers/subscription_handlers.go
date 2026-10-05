@@ -147,6 +147,13 @@ func CreateSolanaPaymentIntent(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.CreateSolanaPaymentIntent, w, r)
 }
 
+// CreateSolanaPaymentTransaction builds the unsigned USDC transfer for an open
+// Solana Pay intent of the caller's network, for a browser wallet to sign and
+// send.
+func CreateSolanaPaymentTransaction(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.CreateSolanaPaymentTransaction, w, r)
+}
+
 func CreateStripePaymentIntent(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.StripeCreatePaymentIntent, w, r)
 }

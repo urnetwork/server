@@ -579,21 +579,41 @@ func GetProviderEgressLocation(ctx context.Context, clientId server.Id) *Provide
 // judgement nothing else in the system honors, and would shrink this map
 // enough to matter for the fleet-wide floor in shouldSkipCountGate.
 func GetAllProviderEgressCountryCodes(ctx context.Context) map[server.Id]string {
+	return getProviderEgressCountryCodes(ctx, nil)
+}
+
+// The same fresh countries for only clientIds, or for every provider when
+// clientIds is nil.
+func getProviderEgressCountryCodes(ctx context.Context, clientIds []server.Id) map[server.Id]string {
 	countryCodes := map[server.Id]string{}
 
 	minObservedAt := server.NowUtc().Add(-ProviderEgressLocationMaxAge)
 
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
+	query := `
 			SELECT client_id, country_code
 			FROM provider_egress_location
 			WHERE
 				observed_at >= $1 AND
 				country_code IS NOT NULL AND country_code != ''
-			`,
-			minObservedAt,
+			`
+	args := []any{minObservedAt}
+	if clientIds != nil {
+		query = `
+			SELECT client_id, country_code
+			FROM provider_egress_location
+			WHERE
+				client_id = ANY($2) AND
+				observed_at >= $1 AND
+				country_code IS NOT NULL AND country_code != ''
+			`
+		args = append(args, clientIds)
+	}
+
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			query,
+			args...,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

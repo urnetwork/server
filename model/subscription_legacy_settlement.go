@@ -14,9 +14,12 @@ const LegacySettlementShardCount = 16
 var errLegacySettlementPending = errors.New("legacy settlement is durably pending")
 var errLegacySettlementPageBudget = errors.New("legacy settlement page budget elapsed")
 
+// The fixed pass cutoff lets skipped owners return after a finite cohort.
+// It bounds traversal growth, not elapsed time or the existing cohort size.
 type LegacySettlementCursor struct {
 	NextAttemptTime time.Time `json:"next_attempt_time"`
 	ContractId      server.Id `json:"contract_id"`
+	PassEndTime     time.Time `json:"pass_end_time,omitzero"`
 }
 
 type LegacySettlementFlushResult struct {
@@ -26,6 +29,11 @@ type LegacySettlementFlushResult struct {
 	BusyOrGone int                     `json:"busy_or_gone"`
 	Failed     int                     `json:"failed"`
 	More       bool                    `json:"more"`
+	// Head outcomes are included in the total counts, not extra visits.
+	HeadVisited    int `json:"head_visited"`
+	HeadCompleted  int `json:"head_completed"`
+	HeadBusyOrGone int `json:"head_busy_or_gone"`
+	HeadFailed     int `json:"head_failed"`
 }
 
 // The caller owns the contract row. Neither admission debt nor outcome changes
@@ -149,10 +157,13 @@ func flushLegacySettlement(ctx context.Context, contractId server.Id) (completed
 	return
 }
 
-// Each statement takes a fresh cutoff that bounds the due-time index. A
-// per-row volatile clock would scan future rows even with LIMIT 1. Failed accounting
-// remains visible and reserved; it is not quarantined or retried in a hot loop.
-// Each next task owns a fresh bounded page and persists this composite cursor.
+// The first selection fixes a database-clock cutoff for this traversal. New due
+// arrivals cannot extend its tail forever and starve earlier busy intents. Each
+// statement retains an indexable due bound; a volatile clock would scan future
+// rows even with LIMIT 1. Failed accounting stays visible, reserved and deferred.
+// Each task owns a bounded page and persists the cursor and fixed pass cutoff.
+// A continued page visits one forward key before spending at most one slot on
+// an older due head. That retry never rewinds the cursor or monopolizes the page.
 // Exhausting this page's own budget after progress yields its completed prefix;
 // it must not turn durable per-contract progress into a task-wide error backoff.
 func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlementCursor, limit int) (result LegacySettlementFlushResult, returnErr error) {
@@ -171,29 +182,55 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 			contextDone(err)
 	}
 	server.HandleError(func() {
-		for range limit {
+		headCursor := after
+		headPending := headCursor != nil && limit > 1
+		for remaining := limit; remaining > 0; {
+			visitHead := headPending && result.Visited > 0
+			if visitHead {
+				headPending = false
+			}
 			var next *LegacySettlementCursor
 			server.Db(bounded, func(conn server.PgConn) {
-				query := `SELECT next_attempt_time,contract_id FROM legacy_settlement_intent
+				query := `SELECT next_attempt_time,contract_id,statement_timestamp() AT TIME ZONE 'UTC' FROM legacy_settlement_intent
                   WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
                   ORDER BY next_attempt_time,contract_id LIMIT 1`
 				args := []any{shard}
 				if after != nil {
-					query = `SELECT next_attempt_time,contract_id FROM legacy_settlement_intent
+					// Older task cursors have no cutoff. Establish it once on
+					// their first continuation, then preserve it across pages.
+					cursor := after
+					if visitHead {
+						cursor = headCursor
+					}
+					var passEndTime any
+					if !cursor.PassEndTime.IsZero() {
+						passEndTime = cursor.PassEndTime
+					}
+					query = `SELECT next_attempt_time,contract_id,COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC') FROM legacy_settlement_intent
                       WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
+                      AND next_attempt_time<=COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC')
                       AND (next_attempt_time,contract_id)>($2,$3) ORDER BY next_attempt_time,contract_id LIMIT 1`
-					args = append(args, after.NextAttemptTime, after.ContractId)
+					if visitHead {
+						query = `SELECT next_attempt_time,contract_id,COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC') FROM legacy_settlement_intent
+                      WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
+                      AND next_attempt_time<=COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC')
+                      AND (next_attempt_time,contract_id)<=($2,$3) ORDER BY next_attempt_time,contract_id LIMIT 1`
+					}
+					args = append(args, cursor.NextAttemptTime, cursor.ContractId, passEndTime)
 				}
 				rows, err := conn.Query(bounded, query, args...)
 				server.WithPgResult(rows, err, func() {
 					if rows.Next() {
 						value := LegacySettlementCursor{}
-						server.Raise(rows.Scan(&value.NextAttemptTime, &value.ContractId))
+						server.Raise(rows.Scan(&value.NextAttemptTime, &value.ContractId, &value.PassEndTime))
 						next = &value
 					}
 				})
 			})
 			if next == nil {
+				if visitHead {
+					continue
+				}
 				result.Cursor = nil
 				return
 			}
@@ -205,14 +242,27 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 				server.Raise(err)
 			}
 			result.Visited++
+			remaining--
+			if visitHead {
+				result.HeadVisited++
+			}
 			if completed && err == nil {
 				result.Completed++
+				if visitHead {
+					result.HeadCompleted++
+				}
 			}
 			if busy {
 				result.BusyOrGone++
+				if visitHead {
+					result.HeadBusyOrGone++
+				}
 			}
 			if err != nil {
 				result.Failed++
+				if visitHead {
+					result.HeadFailed++
+				}
 				code, delay := "operational", 30*time.Second
 				if errors.Is(err, errContractInsufficientEscrow) {
 					code, delay = "accounting", 15*time.Minute
@@ -222,11 +272,15 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
                       failure_code=$2,next_attempt_time=clock_timestamp() AT TIME ZONE 'UTC'+$3::interval
                       WHERE contract_id=$1`, next.ContractId, code, delay.String()))
 				}, server.TxReadCommitted, server.OptNoRetry())
-				result.Cursor = next
+				if !visitHead {
+					result.Cursor = next
+				}
 				return
 			}
-			result.Cursor = next
-			after = next
+			if !visitHead {
+				result.Cursor = next
+				after = next
+			}
 		}
 		result.More = true
 	}, func(err error) {

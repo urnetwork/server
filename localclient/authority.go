@@ -35,6 +35,9 @@ type Authority struct {
 	cancel        context.CancelFunc
 	closeOnce     sync.Once
 	closed        atomic.Bool
+	// the hosting process's appearance counter, nil when it has none; the
+	// process owns and closes it
+	appearances *model.ProviderAppearances
 }
 
 // Signature, audience, current client and credential rotation are checked now
@@ -54,7 +57,7 @@ func New(ctx context.Context, token, apiUrl string) (*Authority, error) {
 		}
 		publisherCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		return &Authority{networkId: claims.NetworkId, userId: claims.UserId, clientId: *claims.ClientId, deviceId: *claims.DeviceId, apiUrl: strings.TrimRight(apiUrl, "/"), parentJwt: token,
-			notifications: model.NewContractOriginNotifications(publisherCtx, model.DefaultContractOriginNotificationSettings()), cancel: cancel}, nil
+			notifications: model.NewContractOriginNotifications(publisherCtx, model.DefaultContractOriginNotificationSettings()), appearances: model.GetProviderAppearances(ctx), cancel: cancel}, nil
 	}, func(err error) (*Authority, error) { return nil, err })
 }
 
@@ -99,7 +102,11 @@ func (self *Authority) authenticate(ctx context.Context, token string, parentOnl
 		}
 		return nil, &connect.HttpStatusError{StatusCode: http.StatusUnauthorized}
 	}
-	return session.NewLocalClientSession(model.WithContractOriginNotifications(ctx, self.notifications), "0.0.0.0:0", claims), nil
+	ctx = model.WithContractOriginNotifications(ctx, self.notifications)
+	if self.appearances != nil {
+		ctx = model.WithProviderAppearances(ctx, self.appearances)
+	}
+	return session.NewLocalClientSession(ctx, "0.0.0.0:0", claims), nil
 }
 
 // Restored window identities belong to the durable parent, not merely an

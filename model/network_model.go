@@ -1407,6 +1407,26 @@ func Testing_CreateNetwork(
 	return
 }
 
+// Testing_CreateLegacyGuestNetwork inserts a network_user/network pair shaped
+// exactly like the pre-removal networkCreateGuest function used to create:
+// auth_type='guest', no user_auth, no password, no rows in any auth table.
+// Guest signup is retired, but rows shaped like this still exist in
+// production and this fork's code must not mistreat them.
+func Testing_CreateLegacyGuestNetwork(ctx context.Context, networkId server.Id, userId server.Id) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`INSERT INTO network_user (user_id, user_name, auth_type) VALUES ($1, $2, $3)`,
+			userId, "guest", "guest",
+		))
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`INSERT INTO network (network_id, network_name, admin_user_id) VALUES ($1, $2, $3)`,
+			networkId, "g"+networkId.String(), userId,
+		))
+	})
+}
+
 func Testing_CreateNetworkByWallet(
 	ctx context.Context,
 	networkId server.Id,
