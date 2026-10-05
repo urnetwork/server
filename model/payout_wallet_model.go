@@ -23,9 +23,9 @@ func SetPayoutWallet(ctx context.Context, networkId server.Id, walletId server.I
 	return
 }
 
-// setPayoutWalletInTx is SetPayoutWallet in the caller's transaction. Every
-// payout wallet selection goes through it, so the ownership, active and chain
-// rules are the same for an explicit choice and for a promotion.
+// SetPayoutWallet in the caller's transaction. Every payout wallet selection
+// goes through it, so the ownership, active and chain rules are the same for an
+// explicit choice and for a promotion.
 func setPayoutWalletInTx(ctx context.Context, tx server.PgTx, networkId server.Id, walletId server.Id) error {
 	// bittensor wallets are recorded for future use only; payouts run
 	// USDC on Solana/Polygon, so a TAO payout wallet would silently
@@ -87,74 +87,14 @@ type payoutWalletCandidate struct {
 	blockchain string
 }
 
-// promotePayoutWalletInTx runs after removedWalletId, the payout wallet, was
-// removed in tx. Payments planned while a network has no payout wallet are
-// held until the user picks one, so another active wallet the network owns
-// takes over instead. Returns the promoted wallet, or nil when no active
-// Solana or Polygon wallet is left.
-func promotePayoutWalletInTx(ctx context.Context, tx server.PgTx, networkId server.Id, removedWalletId server.Id) *server.Id {
-	var removedBlockchain string
-	removedResult, err := tx.Query(
-		ctx,
-		`
-			SELECT blockchain
-			FROM account_wallet
-			WHERE
-					wallet_id = $2 AND
-					network_id = $1
-		`,
-		networkId,
-		removedWalletId,
-	)
-	server.WithPgResult(removedResult, err, func() {
-		if removedResult.Next() {
-			server.Raise(removedResult.Scan(&removedBlockchain))
-		}
-	})
-
-	candidates := []*payoutWalletCandidate{}
-	result, err := tx.Query(
-		ctx,
-		`
-			SELECT
-					wallet_id,
-					blockchain
-			FROM account_wallet
-			WHERE
-					network_id = $1 AND
-					active = true AND
-					wallet_id <> $2
-			ORDER BY create_time DESC, wallet_id
-		`,
-		networkId,
-		removedWalletId,
-	)
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			candidate := &payoutWalletCandidate{}
-			server.Raise(result.Scan(&candidate.walletId, &candidate.blockchain))
-			candidates = append(candidates, candidate)
-		}
-	})
-
-	walletId := choosePromotedPayoutWallet(removedBlockchain, candidates)
-	if walletId == nil {
-		return nil
-	}
-	if err := setPayoutWalletInTx(ctx, tx, networkId, *walletId); err != nil {
-		return nil
-	}
-	return walletId
-}
-
-// choosePromotedPayoutWallet picks from candidates, newest first, the wallet
-// to promote: only a Solana or Polygon wallet can receive payouts (never a
-// Bittensor or Ethereum wallet, the same rule as adding a wallet), and the
-// removed wallet's chain wins over a newer wallet on the other chain. Stored
-// chain names vary in case and spelling, so they are parsed.
+// Picks from candidates, newest first, the wallet to promote: only a Solana or
+// Polygon wallet can receive payouts (never a Bittensor or Ethereum wallet, the
+// same rule as adding a wallet), and the removed wallet's chain wins over a
+// newer wallet on the other chain. Stored chain names vary in case and
+// spelling, so they are parsed.
 func choosePromotedPayoutWallet(removedBlockchain string, candidates []*payoutWalletCandidate) *server.Id {
 	removedChain, removedErr := ParseBlockchain(removedBlockchain)
-	var promoted *server.Id
+	var promotedWalletId *server.Id
 	for _, candidate := range candidates {
 		chain, err := ParseBlockchain(candidate.blockchain)
 		if err != nil || (chain != SOL && chain != MATIC) {
@@ -164,11 +104,11 @@ func choosePromotedPayoutWallet(removedBlockchain string, candidates []*payoutWa
 		if removedErr == nil && chain == removedChain {
 			return &walletId
 		}
-		if promoted == nil {
-			promoted = &walletId
+		if promotedWalletId == nil {
+			promotedWalletId = &walletId
 		}
 	}
-	return promoted
+	return promotedWalletId
 }
 
 // returns the payout wallet only when it is an active wallet owned by the

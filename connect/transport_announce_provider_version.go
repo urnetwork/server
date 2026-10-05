@@ -1,5 +1,8 @@
 package connect
 
+// The provider rollout gauge and the bookkeeping that counts each transport of
+// a publicly providing client under one bounded app release label.
+
 import (
 	"fmt"
 	"strconv"
@@ -24,6 +27,7 @@ var providerConnectionsGauge = prometheus.NewGaugeVec(
 	[]string{"app_version"},
 )
 
+// Registers the gauge with the default registry.
 func init() {
 	prometheus.MustRegister(providerConnectionsGauge)
 }
@@ -42,14 +46,14 @@ const (
 	providerAppVersionMinYear = 2025
 )
 
-// providerAppVersionLabel normalizes a client's app version (X-UR-AppVersion,
-// or the auth message's app_version) to a bounded label. The apps send their
-// calendar release with an optional build code: "2026.10.1-1060587890"
-// (Android, Windows) or "2026.10.1" (Apple). The build code is dropped. A
-// release within providerAppVersionDayWindow of now keeps its day,
-// "2026.10.1"; an older one is its month, "2025.12". No version is unknown;
-// anything else, including a date in the future, is other, so the label set
-// stays bounded whatever a client sends.
+// Normalizes a client's app version (X-UR-AppVersion, or the auth message's
+// app_version) to a bounded label. The apps send their calendar release with an
+// optional build code: "2026.10.1-1060587890" (Android, Windows) or "2026.10.1"
+// (Apple). The build code is dropped. A release within
+// providerAppVersionDayWindow of now keeps its day, "2026.10.1"; an older one
+// is its month, "2025.12". No version is unknown; anything else, including a
+// date in the future, is other, so the label set stays bounded whatever a
+// client sends.
 func providerAppVersionLabel(appVersion string, now time.Time) string {
 	appVersion = strings.TrimSpace(appVersion)
 	if appVersion == "" {
@@ -83,49 +87,54 @@ func providerAppVersionLabel(appVersion string, now time.Time) string {
 	return fmt.Sprintf("%d.%d", year, month)
 }
 
-// providerVersionConnections counts connections per label and deletes a
-// label's series when its count returns to zero, so only labels with a live
-// provider connection are exported.
+// Counts connections per label and deletes a label's series when its count
+// returns to zero, so only labels with a live provider connection are exported.
+// The gauge is set under stateLock, so a series always carries the count of the
+// last change and a removal cannot delete a series another connection just set;
+// the gauge itself takes only its own short in-memory lock.
 type providerVersionConnections struct {
 	gauge *prometheus.GaugeVec
 
-	stateLock sync.Mutex
-	counts    map[string]int
+	stateLock   sync.Mutex
+	labelCounts map[string]int
 }
 
+// Counts that export into gauge, starting at zero.
 func newProviderVersionConnections(gauge *prometheus.GaugeVec) *providerVersionConnections {
 	return &providerVersionConnections{
-		gauge:  gauge,
-		counts: map[string]int{},
+		gauge:       gauge,
+		labelCounts: map[string]int{},
 	}
 }
 
 var defaultProviderVersionConnections = newProviderVersionConnections(providerConnectionsGauge)
 
+// Counts one more connection under label.
 func (self *providerVersionConnections) add(label string) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	self.counts[label] += 1
-	self.gauge.WithLabelValues(label).Set(float64(self.counts[label]))
+	self.labelCounts[label] += 1
+	self.gauge.WithLabelValues(label).Set(float64(self.labelCounts[label]))
 }
 
+// Counts one connection less under label, deleting its series at zero.
 func (self *providerVersionConnections) remove(label string) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
-	count := self.counts[label] - 1
+	count := self.labelCounts[label] - 1
 	if count <= 0 {
-		delete(self.counts, label)
+		delete(self.labelCounts, label)
 		self.gauge.DeleteLabelValues(label)
 		return
 	}
-	self.counts[label] = count
+	self.labelCounts[label] = count
 	self.gauge.WithLabelValues(label).Set(float64(count))
 }
 
-// providerVersionConnection is one transport's place in the gauge. Only the
-// announce run goroutine touches it.
+// One transport's place in the gauge. Only the announce run goroutine touches
+// it.
 type providerVersionConnection struct {
 	connections *providerVersionConnections
 	appVersion  string
@@ -133,6 +142,7 @@ type providerVersionConnection struct {
 	label string
 }
 
+// A connection of a client with appVersion, not counted until its first update.
 func newProviderVersionConnection(connections *providerVersionConnections, appVersion string) *providerVersionConnection {
 	return &providerVersionConnection{
 		connections: connections,
@@ -140,9 +150,9 @@ func newProviderVersionConnection(connections *providerVersionConnections, appVe
 	}
 }
 
-// update counts the connection under its current label while its client
-// provides publicly, and not otherwise. The label is recomputed each time, so
-// a long connection moves from its release day to its month.
+// Counts the connection under its current label while its client provides
+// publicly, and not otherwise. The label is recomputed each time, so a long
+// connection moves from its release day to its month.
 func (self *providerVersionConnection) update(providing bool, now time.Time) {
 	label := ""
 	if providing {
@@ -160,7 +170,7 @@ func (self *providerVersionConnection) update(providing bool, now time.Time) {
 	self.label = label
 }
 
-// release removes the connection from the gauge when it ends.
+// Removes the connection from the gauge when it ends.
 func (self *providerVersionConnection) release() {
 	if self.label != "" {
 		self.connections.remove(self.label)

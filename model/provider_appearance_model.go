@@ -1,8 +1,7 @@
 package model
 
-// provider_appearance_model.go — how often each provider client was offered
-// to clients, per minute, over the last hour (the provider status histogram,
-// GET /network/provider-status).
+// How often each provider client was offered to clients, per minute, over the
+// last hour (the provider status histogram, GET /network/provider-status).
 //
 // FindProviders2 is a hot path, so an answer never touches redis here: the
 // lifecycle owner (ProviderAppearances, one per API router or proxy process)
@@ -65,10 +64,12 @@ var (
 	providerAppearancesUnowned         = providerAppearanceEvents.WithLabelValues("unowned")
 )
 
+// Registers the appearance counter with the default registry.
 func init() {
 	prometheus.MustRegister(providerAppearanceEvents)
 }
 
+// How a lifecycle owner collects and writes the appearance counts.
 type ProviderAppearanceSettings struct {
 	// how often the counts collected in process are written
 	FlushInterval time.Duration
@@ -84,12 +85,13 @@ type ProviderAppearanceSettings struct {
 	FailureLogInterval time.Duration
 }
 
+// The settings of the API router and proxy process owners.
 func DefaultProviderAppearanceSettings() *ProviderAppearanceSettings {
 	return &ProviderAppearanceSettings{
 		FlushInterval:      5 * time.Second,
 		FlushTimeout:       4 * time.Second,
 		FlushParallel:      8,
-		MaxPendingCounts:   1 << 17,
+		MaxPendingCounts:   128 * 1024,
 		FailureLogInterval: time.Minute,
 	}
 }
@@ -106,10 +108,12 @@ func providerAppearanceKey(clientId server.Id) string {
 	return fmt.Sprintf("{pa_%s}m", clientId)
 }
 
+// The hash field of a unix minute.
 func providerAppearanceField(minute int64) string {
 	return strconv.FormatInt(minute, 10)
 }
 
+// One provider's count in one minute, as the counter keys it in process.
 type providerAppearanceKeyMinute struct {
 	clientId server.Id
 	minute   int64
@@ -119,27 +123,28 @@ const providerAppearanceShardCount = 32
 
 // Requests touching different providers rarely share a shard lock.
 type providerAppearanceShard struct {
-	stateLock sync.Mutex
-	counts    map[providerAppearanceKeyMinute]int64
+	stateLock       sync.Mutex
+	keyMinuteCounts map[providerAppearanceKeyMinute]int64
 }
 
 // Counts one appearance unless the shard is full and the count is new.
 func (self *providerAppearanceShard) add(key providerAppearanceKeyMinute, maxCounts int) bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	if _, ok := self.counts[key]; !ok && maxCounts <= len(self.counts) {
+	if _, ok := self.keyMinuteCounts[key]; !ok && maxCounts <= len(self.keyMinuteCounts) {
 		return false
 	}
-	self.counts[key] += 1
+	self.keyMinuteCounts[key] += 1
 	return true
 }
 
+// Takes every count of the shard, leaving it empty.
 func (self *providerAppearanceShard) drain() map[providerAppearanceKeyMinute]int64 {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	counts := self.counts
-	self.counts = map[providerAppearanceKeyMinute]int64{}
-	return counts
+	keyMinuteCounts := self.keyMinuteCounts
+	self.keyMinuteCounts = map[providerAppearanceKeyMinute]int64{}
+	return keyMinuteCounts
 }
 
 // The counts collected between flushes, bounded by maxPendingCounts.
@@ -148,16 +153,18 @@ type providerAppearanceCounter struct {
 	shards         [providerAppearanceShardCount]providerAppearanceShard
 }
 
+// An empty counter whose shards together hold at most maxPendingCounts counts.
 func newProviderAppearanceCounter(maxPendingCounts int) *providerAppearanceCounter {
 	counter := &providerAppearanceCounter{
 		maxShardCounts: max(1, maxPendingCounts/providerAppearanceShardCount),
 	}
 	for i := range counter.shards {
-		counter.shards[i].counts = map[providerAppearanceKeyMinute]int64{}
+		counter.shards[i].keyMinuteCounts = map[providerAppearanceKeyMinute]int64{}
 	}
 	return counter
 }
 
+// The shard that holds the client's counts.
 func (self *providerAppearanceCounter) shard(clientId server.Id) *providerAppearanceShard {
 	return &self.shards[int(clientId[len(clientId)-1])%providerAppearanceShardCount]
 }
@@ -192,11 +199,11 @@ func (self *providerAppearanceCounter) drain() map[server.Id]map[int64]int64 {
 // One provider's write: its new counts, the stale minutes it removes and the
 // renewed expiry, all on one key.
 type providerAppearanceWrite struct {
-	clientId    server.Id
-	key         string
-	increments  map[string]int64
-	staleFields []string
-	ttl         time.Duration
+	clientId        server.Id
+	key             string
+	fieldIncrements map[string]int64
+	staleFields     []string
+	ttl             time.Duration
 	// the appearances the increments carry
 	count int64
 }
@@ -205,10 +212,10 @@ type providerAppearanceWrite struct {
 // longer holds are dropped, never written.
 func newProviderAppearanceWrite(clientId server.Id, minuteCounts map[int64]int64, nowMinute int64) (write *providerAppearanceWrite, staleCount int64) {
 	write = &providerAppearanceWrite{
-		clientId:   clientId,
-		key:        providerAppearanceKey(clientId),
-		increments: map[string]int64{},
-		ttl:        ProviderAppearanceTtl,
+		clientId:        clientId,
+		key:             providerAppearanceKey(clientId),
+		fieldIncrements: map[string]int64{},
+		ttl:             ProviderAppearanceTtl,
 	}
 	oldestMinute := nowMinute - int64(providerAppearanceRetainedBuckets) + 1
 	for minute, count := range minuteCounts {
@@ -216,7 +223,7 @@ func newProviderAppearanceWrite(clientId server.Id, minuteCounts map[int64]int64
 			staleCount += count
 			continue
 		}
-		write.increments[providerAppearanceField(minute)] += count
+		write.fieldIncrements[providerAppearanceField(minute)] += count
 		write.count += count
 	}
 	for minute := oldestMinute - providerAppearanceStaleBuckets; minute < oldestMinute; minute += 1 {
@@ -233,6 +240,7 @@ type providerAppearanceStore interface {
 	readAll(ctx context.Context, clientIds []server.Id) ([]map[string]string, error)
 }
 
+// The store a flush and a read use outside tests.
 type redisProviderAppearanceStore struct{}
 
 // Runs one redis callback, returning a connection failure instead of raising
@@ -252,9 +260,26 @@ func providerAppearanceRedis(ctx context.Context, callback func(server.RedisClie
 	return
 }
 
+// Applies each write as one transaction on its provider key. Every command of
+// a write targets that one key (one slot), so batching it in a transaction is
+// cluster-safe.
 func (self redisProviderAppearanceStore) writeAll(ctx context.Context, writes []*providerAppearanceWrite, parallel int) []error {
 	errs := make([]error, len(writes))
 	err := providerAppearanceRedis(ctx, func(r server.RedisClient) {
+		writeProviderAppearance := func(write *providerAppearanceWrite) error {
+			_, err := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				for field, count := range write.fieldIncrements {
+					pipe.HIncrBy(ctx, write.key, field, count)
+				}
+				if 0 < len(write.staleFields) {
+					pipe.HDel(ctx, write.key, write.staleFields...)
+				}
+				pipe.PExpire(ctx, write.key, write.ttl)
+				return nil
+			})
+			return err
+		}
+
 		next := make(chan int)
 		var wg sync.WaitGroup
 		for range max(1, min(parallel, len(writes))) {
@@ -263,7 +288,7 @@ func (self redisProviderAppearanceStore) writeAll(ctx context.Context, writes []
 				defer wg.Done()
 				for i := range next {
 					server.HandleError(func() {
-						errs[i] = writeProviderAppearance(ctx, r, writes[i])
+						errs[i] = writeProviderAppearance(writes[i])
 					}, func(err error) {
 						errs[i] = err
 					})
@@ -296,22 +321,6 @@ func (self redisProviderAppearanceStore) writeAll(ctx context.Context, writes []
 	return errs
 }
 
-// Every command targets the one provider key (one slot), so batching in a
-// transaction is cluster-safe.
-func writeProviderAppearance(ctx context.Context, r server.RedisClient, write *providerAppearanceWrite) error {
-	_, err := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-		for field, count := range write.increments {
-			pipe.HIncrBy(ctx, write.key, field, count)
-		}
-		if 0 < len(write.staleFields) {
-			pipe.HDel(ctx, write.key, write.staleFields...)
-		}
-		pipe.PExpire(ctx, write.key, write.ttl)
-		return nil
-	})
-	return err
-}
-
 // One command per provider key; the keys are different slots, so they are
 // read one by one.
 func (self redisProviderAppearanceStore) readAll(ctx context.Context, clientIds []server.Id) (fieldsList []map[string]string, returnErr error) {
@@ -335,11 +344,11 @@ func (self redisProviderAppearanceStore) readAll(ctx context.Context, clientIds 
 	return
 }
 
-// ProviderAppearances counts the providers FindProviders2 answers return and
-// writes the counts in the background. A router or process owns one, installs
-// it with WithProviderAppearances, and closes it after its requests drain;
-// a context without an owner counts nothing (and no hidden singleton or lazy
-// goroutine stands in for one).
+// Counts the providers FindProviders2 answers return and writes the counts in
+// the background. A router or process owns one, installs it with
+// WithProviderAppearances, and closes it after its requests drain; a context
+// without an owner counts nothing (and no hidden singleton or lazy goroutine
+// stands in for one).
 type ProviderAppearances struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -350,17 +359,19 @@ type ProviderAppearances struct {
 	logFunc  func(format string, args ...any)
 
 	// flush failures since the last failure line
-	failureLock     sync.Mutex
-	failedCount     int64
-	failedProviders int
-	lastFailure     error
-	lastFailureLog  time.Time
+	stateLock           sync.Mutex
+	failedCount         int64
+	failedProviderCount int
+	lastFailure         error
+	lastFailureLog      time.Time
 
 	// nil without the flush loop
 	loopDone  chan struct{}
 	closeOnce sync.Once
 }
 
+// A running owner: its flush loop writes the counts every FlushInterval until
+// Close.
 func NewProviderAppearances(ctx context.Context, settings *ProviderAppearanceSettings) *ProviderAppearances {
 	appearances := newProviderAppearancesWithoutRun(ctx, settings, redisProviderAppearanceStore{}, time.Now)
 	appearances.loopDone = make(chan struct{})
@@ -387,6 +398,7 @@ func newProviderAppearancesWithoutRun(
 	}
 }
 
+// The context key of the lifecycle owner.
 type providerAppearancesContextKey struct{}
 
 // Only an explicit lifecycle owner installs this context value.
@@ -394,6 +406,7 @@ func WithProviderAppearances(ctx context.Context, appearances *ProviderAppearanc
 	return context.WithValue(ctx, providerAppearancesContextKey{}, appearances)
 }
 
+// The lifecycle owner the context carries, nil when it has none.
 func GetProviderAppearances(ctx context.Context) *ProviderAppearances {
 	appearances, _ := ctx.Value(providerAppearancesContextKey{}).(*ProviderAppearances)
 	return appearances
@@ -413,6 +426,8 @@ func recordProviderAppearances(ctx context.Context, clientIds []server.Id, now t
 	appearances.Record(clientIds, now)
 }
 
+// Counts one appearance for each of clientIds at now, in process only. A count
+// the counter has no room for is dropped. A nil owner counts nothing.
 func (self *ProviderAppearances) Record(clientIds []server.Id, now time.Time) {
 	if self == nil || len(clientIds) == 0 {
 		return
@@ -424,6 +439,7 @@ func (self *ProviderAppearances) Record(clientIds []server.Id, now time.Time) {
 	}
 }
 
+// The flush loop: one flush every FlushInterval until the owner closes.
 func (self *ProviderAppearances) run() {
 	defer close(self.loopDone)
 	for {
@@ -438,11 +454,11 @@ func (self *ProviderAppearances) run() {
 
 // What one flush did with the counts it drained.
 type providerAppearanceFlushResult struct {
-	writtenCount    int64
-	staleCount      int64
-	failedCount     int64
-	failedProviders int
-	firstErr        error
+	writtenCount        int64
+	staleCount          int64
+	failedCount         int64
+	failedProviderCount int
+	firstErr            error
 }
 
 // Writes every pending count, bounded by FlushTimeout. A failed write drops
@@ -458,7 +474,7 @@ func (self *ProviderAppearances) flush(ctx context.Context) (result providerAppe
 	for clientId, minuteCounts := range clientMinuteCounts {
 		write, staleCount := newProviderAppearanceWrite(clientId, minuteCounts, nowMinute)
 		result.staleCount += staleCount
-		if 0 < len(write.increments) {
+		if 0 < len(write.fieldIncrements) {
 			writes = append(writes, write)
 		}
 	}
@@ -472,7 +488,7 @@ func (self *ProviderAppearances) flush(ctx context.Context) (result providerAppe
 				continue
 			}
 			result.failedCount += writes[i].count
-			result.failedProviders += 1
+			result.failedProviderCount += 1
 			if result.firstErr == nil {
 				result.firstErr = err
 			}
@@ -489,27 +505,34 @@ func (self *ProviderAppearances) flush(ctx context.Context) (result providerAppe
 // At most one line per FailureLogInterval, summarizing every drop since the
 // previous line.
 func (self *ProviderAppearances) logFailures(now time.Time, result providerAppearanceFlushResult) {
-	self.failureLock.Lock()
-	defer self.failureLock.Unlock()
-	if result.firstErr != nil {
-
-		self.failedCount += result.failedCount
-		self.failedProviders += result.failedProviders
-		self.lastFailure = result.firstErr
-	}
-	if self.lastFailure == nil || now.Sub(self.lastFailureLog) < self.settings.FailureLogInterval {
+	// the line is taken under the lock and logged after it
+	failedCount, failedProviderCount, lastFailure, report := func() (int64, int, error, bool) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if result.firstErr != nil {
+			self.failedCount += result.failedCount
+			self.failedProviderCount += result.failedProviderCount
+			self.lastFailure = result.firstErr
+		}
+		if self.lastFailure == nil || now.Sub(self.lastFailureLog) < self.settings.FailureLogInterval {
+			return 0, 0, nil, false
+		}
+		failedCount, failedProviderCount, lastFailure := self.failedCount, self.failedProviderCount, self.lastFailure
+		self.failedCount = 0
+		self.failedProviderCount = 0
+		self.lastFailure = nil
+		self.lastFailureLog = now
+		return failedCount, failedProviderCount, lastFailure, true
+	}()
+	if !report {
 		return
 	}
 	self.logFunc(
 		"[pa]dropped %d provider appearances of %d provider writes since the last report (%s)\n",
-		self.failedCount,
-		self.failedProviders,
-		self.lastFailure,
+		failedCount,
+		failedProviderCount,
+		lastFailure,
 	)
-	self.failedCount = 0
-	self.failedProviders = 0
-	self.lastFailure = nil
-	self.lastFailureLog = now
 }
 
 // Stops the loop and writes what is left once, bounded by FlushTimeout.
@@ -567,6 +590,7 @@ func GetProviderAppearanceHistograms(ctx context.Context, clientIds []server.Id,
 	return getProviderAppearanceHistograms(ctx, redisProviderAppearanceStore{}, clientIds, now)
 }
 
+// The histograms from store, so a test reads them without redis.
 func getProviderAppearanceHistograms(
 	ctx context.Context,
 	store providerAppearanceStore,

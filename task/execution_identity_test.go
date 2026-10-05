@@ -34,7 +34,7 @@ func TestTaskExecutionIdentityChangesOnRetryAndSurvivesPost(t *testing.T) {
 		if err != nil || post == nil {
 			t.Fatal("task did not finish", err)
 		}
-		if err := post(nil); err != nil {
+		if _, err := post(nil); err != nil {
 			t.Fatal(err)
 		}
 	}

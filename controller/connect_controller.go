@@ -226,7 +226,7 @@ func contractRejectionFailureClass(err error) string {
 	}
 }
 
-// contractResultError preserves wire meaning while isolating the failure
+// Preserves wire meaning while isolating the failure
 // classes a client can act on safely. A missing companion origin or an
 // inactive destination means the selected route itself is stale, so a current
 // client must retire that exact window entry. A missing or inactive source is
@@ -1014,10 +1014,10 @@ var findActiveClientPairNetworks = model.FindActiveClientPairNetworks
 var createTransferEscrow = model.CreateTransferEscrow
 var isProNetwork = model.IsProNetwork
 
-// contractPayerNetworkId returns the network whose balance escrows a contract,
-// following the order in which newContract chooses the funding path. Network
-// and friends-and-family contracts escrow nothing, so they have no payer. A
-// companion contract is paid by its destination, the source of its origin.
+// Returns the network whose balance escrows a contract, following the order in
+// which newContract chooses the funding path. Network and friends-and-family
+// contracts escrow nothing, so they have no payer. A companion contract is paid
+// by its destination, the source of its origin.
 func contractPayerNetworkId(
 	provideMode model.ProvideMode,
 	companionContract bool,
@@ -1034,14 +1034,14 @@ func contractPayerNetworkId(
 	}
 }
 
-// payerMaxContractTransferByteCount is the largest contract, per hop, granted
-// against the payer's balance. pro.yml may cap the contracts of a tier
-// (<tier>.max_contract_transfer_byte_count, e.g. free) so that a contract
-// abandoned by its client holds less of the payer's balance until it is
-// force-closed. The grant is signed into the contract and clients size from it,
-// so a smaller grant is transparent to them. While no tier sets a cap, the
-// payer's plan is not looked up at all. A cap never goes below
-// MinContractTransferByteCount, so a granted contract still fits a message.
+// The largest contract, per hop, granted against the payer's balance. pro.yml
+// may cap the contracts of a tier (<tier>.max_contract_transfer_byte_count,
+// e.g. free) so that a contract abandoned by its client holds less of the
+// payer's balance until it is force-closed. The grant is signed into the
+// contract and clients size from it, so a smaller grant is transparent to them.
+// While no tier sets a cap, the payer's plan is not looked up at all. A cap
+// never goes below MinContractTransferByteCount, so a granted contract still
+// fits a message.
 func payerMaxContractTransferByteCount(ctx context.Context, payerNetworkId server.Id) model.ByteCount {
 	c := model.Pro()
 	if c.MaxContractTransferByteCount(false) == 0 && c.MaxContractTransferByteCount(true) == 0 {

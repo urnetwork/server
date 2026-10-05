@@ -1,5 +1,7 @@
 package model
 
+// The per-tier contract size cap read from pro.yml.
+
 import (
 	"testing"
 
@@ -58,16 +60,18 @@ free:
 			want: 64 * Mib,
 		},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			var y proConfigYaml
-			if err := yaml.Unmarshal([]byte(test.yaml), &y); err != nil {
-				t.Fatal(err)
-			}
-			c := &ProConfig{Free: parseProTier(y.Free)}
-			connect.AssertEqual(t, test.want, c.MaxContractTransferByteCount(false))
-			// the pro tier has its own key and stays uncapped
-			connect.AssertEqual(t, ByteCount(0), c.MaxContractTransferByteCount(true))
-		})
+		var y proConfigYaml
+		if err := yaml.Unmarshal([]byte(test.yaml), &y); err != nil {
+			t.Fatalf("%s: %s", test.name, err)
+		}
+		c := &ProConfig{Free: parseProTier(y.Free)}
+		if got := c.MaxContractTransferByteCount(false); got != test.want {
+			t.Errorf("%s: free cap = %d, want %d", test.name, got, test.want)
+		}
+		// the pro tier has its own key and stays uncapped
+		if got := c.MaxContractTransferByteCount(true); got != 0 {
+			t.Errorf("%s: pro cap = %d, want 0", test.name, got)
+		}
 	}
 
 	// an absent pro.yml caps nothing

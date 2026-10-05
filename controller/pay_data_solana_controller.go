@@ -20,9 +20,11 @@ import (
 //
 // POST /pay/data/solana-intent quotes a data pack for a NAMED network and records
 // the payment intent the Helius webhook (POST /pay/solana) credits when the USDC
-// arrives at one of our receiving addresses. The buyer sends exactly the quoted
-// amount either through a Solana Pay url, whose wallet attaches the reference as
-// an account key of the transfer, or by hand from any wallet or exchange with the
+// arrives at one of our receiving addresses. The quote names where to pay (the
+// receiver and the mint, the same ones a plan intent names), so the page keeps
+// no merchant address of its own. The buyer sends exactly the quoted amount
+// either through a Solana Pay url, whose wallet attaches the reference as an
+// account key of the transfer, or by hand from any wallet or exchange with the
 // reference as the transfer MEMO. The webhook matches both
 // (solanaReferenceCandidates), so there is no email, no hosted checkout and no
 // code: the data lands on the network. A wallet that cannot add a memo still
@@ -73,9 +75,15 @@ type PayDataSolanaIntentResult struct {
 	Memo      string     `json:"memo,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 	// the resolved network
-	NetworkName string                `json:"network_name,omitempty"`
-	NetworkId   *server.Id            `json:"network_id,omitempty"`
-	Error       *PayDataCheckoutError `json:"error,omitempty"`
+	NetworkName string     `json:"network_name,omitempty"`
+	NetworkId   *server.Id `json:"network_id,omitempty"`
+	// where to pay: the merchant address and the SPL token mint (USDC), both
+	// base58, the same as a plan intent's. Empty from a server that predates
+	// them, and then a client has nowhere to pay: it must not substitute an
+	// address of its own.
+	Recipient    string                `json:"recipient,omitempty"`
+	SplTokenMint string                `json:"spl_token_mint,omitempty"`
+	Error        *PayDataCheckoutError `json:"error,omitempty"`
 }
 
 func payDataSolanaIntentError(message string) *PayDataSolanaIntentResult {
@@ -200,12 +208,14 @@ func PayDataSolanaIntent(
 	)
 
 	return &PayDataSolanaIntentResult{
-		AmountUsd:   amountUsd,
-		Reference:   reference,
-		Memo:        reference,
-		ExpiresAt:   &expiresAt,
-		NetworkName: storedName,
-		NetworkId:   networkId,
+		AmountUsd:    amountUsd,
+		Reference:    reference,
+		Memo:         reference,
+		ExpiresAt:    &expiresAt,
+		NetworkName:  storedName,
+		NetworkId:    networkId,
+		Recipient:    solanaPaymentRecipient(),
+		SplTokenMint: solanaUsdcMint,
 	}, nil
 }
 

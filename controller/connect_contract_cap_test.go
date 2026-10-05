@@ -17,45 +17,48 @@ func TestContractPayerNetworkId(t *testing.T) {
 	sourceNetworkId := server.NewId()
 	destinationNetworkId := server.NewId()
 	for _, test := range []struct {
-		name        string
-		provideMode model.ProvideMode
-		companion   bool
-		wantPayer   server.Id
-		wantEscrow  bool
+		name               string
+		provideMode        model.ProvideMode
+		companion          bool
+		wantPayerNetworkId server.Id
+		wantEscrow         bool
 	}{
-		{name: "public", provideMode: model.ProvideModePublic, wantPayer: sourceNetworkId, wantEscrow: true},
-		{name: "public companion", provideMode: model.ProvideModePublic, companion: true, wantPayer: destinationNetworkId, wantEscrow: true},
-		{name: "stream companion", provideMode: model.ProvideModeStream, companion: true, wantPayer: destinationNetworkId, wantEscrow: true},
+		{name: "public", provideMode: model.ProvideModePublic, wantPayerNetworkId: sourceNetworkId, wantEscrow: true},
+		{name: "public companion", provideMode: model.ProvideModePublic, companion: true, wantPayerNetworkId: destinationNetworkId, wantEscrow: true},
+		{name: "stream companion", provideMode: model.ProvideModeStream, companion: true, wantPayerNetworkId: destinationNetworkId, wantEscrow: true},
 		{name: "network", provideMode: model.ProvideModeNetwork},
 		{name: "network companion", provideMode: model.ProvideModeNetwork, companion: true},
 		{name: "friends and family", provideMode: model.ProvideModeFriendsAndFamily},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			payer, escrowed := contractPayerNetworkId(test.provideMode, test.companion, sourceNetworkId, destinationNetworkId)
-			if payer != test.wantPayer || escrowed != test.wantEscrow {
-				t.Fatalf("payer = %s escrowed = %t, want %s %t", payer, escrowed, test.wantPayer, test.wantEscrow)
-			}
-		})
+		payerNetworkId, escrowed := contractPayerNetworkId(test.provideMode, test.companion, sourceNetworkId, destinationNetworkId)
+		if payerNetworkId != test.wantPayerNetworkId || escrowed != test.wantEscrow {
+			t.Errorf("%s: payer = %s escrowed = %t, want %s %t", test.name, payerNetworkId, escrowed, test.wantPayerNetworkId, test.wantEscrow)
+		}
 	}
 }
 
-// proLookup replaces the payer plan lookup and records each lookup.
+// Replaces the payer plan lookup and records each lookup.
 type proLookup struct {
-	pro     bool
-	lookups []server.Id
+	pro              bool
+	lookupNetworkIds []server.Id
 }
 
+// The isProNetwork replacement: records networkId and answers pro.
 func (self *proLookup) isProNetwork(ctx context.Context, networkId server.Id) bool {
-	self.lookups = append(self.lookups, networkId)
+	self.lookupNetworkIds = append(self.lookupNetworkIds, networkId)
 	return self.pro
 }
 
+// Installs lookup as the payer plan lookup, returning the restore.
 func withProLookup(lookup *proLookup) func() {
 	previous := isProNetwork
 	isProNetwork = lookup.isProNetwork
 	return func() { isProNetwork = previous }
 }
 
+// The cap applies only to the tier that sets it, never goes below the smallest
+// contract or above the largest, and the payer's plan is looked up only while
+// a tier sets one.
 func TestPayerMaxContractTransferByteCount(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -77,22 +80,22 @@ func TestPayerMaxContractTransferByteCount(t *testing.T) {
 		{name: "pro cap pro payer", proMax: 32 * model.Mib, pro: true, want: 32 * model.Mib, wantLookup: true},
 		{name: "pro cap free payer", proMax: 32 * model.Mib, want: MaxContractTransferByteCount, wantLookup: true},
 	} {
-		t.Run(test.name, func(t *testing.T) {
+		func() {
 			defer model.Testing_SetMaxContractTransferByteCount(test.freeMax, test.proMax)()
 			lookup := &proLookup{pro: test.pro}
 			defer withProLookup(lookup)()
 			payerNetworkId := server.NewId()
 
 			if got := payerMaxContractTransferByteCount(context.Background(), payerNetworkId); got != test.want {
-				t.Fatalf("max contract = %d, want %d", got, test.want)
+				t.Errorf("%s: max contract = %d, want %d", test.name, got, test.want)
 			}
-			if !test.wantLookup && len(lookup.lookups) != 0 {
-				t.Fatalf("looked up the payer's plan %d times with no cap configured", len(lookup.lookups))
+			if !test.wantLookup && len(lookup.lookupNetworkIds) != 0 {
+				t.Errorf("%s: looked up the payer's plan %d times with no cap configured", test.name, len(lookup.lookupNetworkIds))
 			}
-			if test.wantLookup && (len(lookup.lookups) != 1 || lookup.lookups[0] != payerNetworkId) {
-				t.Fatalf("plan lookups = %v, want only the payer %s", lookup.lookups, payerNetworkId)
+			if test.wantLookup && (len(lookup.lookupNetworkIds) != 1 || lookup.lookupNetworkIds[0] != payerNetworkId) {
+				t.Errorf("%s: plan lookups = %v, want only the payer %s", test.name, lookup.lookupNetworkIds, payerNetworkId)
 			}
-		})
+		}()
 	}
 }
 
@@ -113,7 +116,7 @@ func TestNewContractCapsFreePayerEscrow(t *testing.T) {
 		{name: "pro payer", freeMax: 64 * model.Mib, pro: true, want: requested},
 		{name: "request under the cap", freeMax: 256 * model.Mib, want: requested},
 	} {
-		t.Run(test.name, func(t *testing.T) {
+		func() {
 			defer model.Testing_SetMaxContractTransferByteCount(test.freeMax, 0)()
 			lookup := &proLookup{pro: test.pro}
 			defer withProLookup(lookup)()
@@ -160,20 +163,20 @@ func TestNewContractCapsFreePayerEscrow(t *testing.T) {
 				connect.DefaultContractManagerSettings(),
 			)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("%s: %s", test.name, err)
 			}
 			if escrowRequest != test.want {
-				t.Fatalf("escrow requested %d, want %d", escrowRequest, test.want)
+				t.Errorf("%s: escrow requested %d, want %d", test.name, escrowRequest, test.want)
 			}
 			if contractId != grantedContractId || count != test.want {
-				t.Fatalf("contract %s signs %d bytes, want %s %d", contractId, count, grantedContractId, test.want)
+				t.Errorf("%s: contract %s signs %d bytes, want %s %d", test.name, contractId, count, grantedContractId, test.want)
 			}
-			if 0 < test.freeMax && (len(lookup.lookups) != 1 || lookup.lookups[0] != sourceNetworkId) {
-				t.Fatalf("plan lookups = %v, want only the paying source network %s", lookup.lookups, sourceNetworkId)
+			if 0 < test.freeMax && (len(lookup.lookupNetworkIds) != 1 || lookup.lookupNetworkIds[0] != sourceNetworkId) {
+				t.Errorf("%s: plan lookups = %v, want only the paying source network %s", test.name, lookup.lookupNetworkIds, sourceNetworkId)
 			}
-			if test.freeMax == 0 && len(lookup.lookups) != 0 {
-				t.Fatalf("looked up the payer's plan %d times with the cap unset", len(lookup.lookups))
+			if test.freeMax == 0 && len(lookup.lookupNetworkIds) != 0 {
+				t.Errorf("%s: looked up the payer's plan %d times with the cap unset", test.name, len(lookup.lookupNetworkIds))
 			}
-		})
+		}()
 	}
 }

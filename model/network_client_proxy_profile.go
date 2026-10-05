@@ -1,16 +1,16 @@
 package model
 
-import (
-	"fmt"
+// The initial performance profile of a hosted proxy device: refused on
+// auth-client when connect would refuse it, and read back in auto from a
+// config stored before that.
 
+import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sdk"
-
-	"github.com/urnetwork/server/session"
 )
 
 // A hosted proxy device applies the initial performance profile of its config
@@ -31,31 +31,14 @@ var (
 	proxyInvalidPerformanceProfilesStoredConfig = proxyInvalidPerformanceProfiles.WithLabelValues("stored_config")
 )
 
+// Registers the invalid profile counter with the default registry.
 func init() {
 	prometheus.MustRegister(proxyInvalidPerformanceProfiles)
 }
 
-// validateProxyConfigArgs refuses a proxy config whose initial performance
-// profile connect refuses. auth-client checks it before the client is
-// created, so a refused request creates nothing. The message names only the
-// caller's own values.
-func validateProxyConfigArgs(proxyConfig *ProxyConfig, session *session.ClientSession) (message string) {
-	if proxyConfig == nil || proxyConfig.InitialDeviceState == nil {
-		return
-	}
-	err := validatePerformanceProfile(proxyConfig.InitialDeviceState.PerformanceProfile)
-	if err == nil {
-		return
-	}
-	proxyInvalidPerformanceProfilesAuthClient.Inc()
-	glog.V(1).Infof("[proxy][%s]auth-client refused the initial performance profile: %s\n", session.ByJwt.NetworkId, err)
-	message = fmt.Sprintf("Invalid performance profile: %s", err)
-	return
-}
-
-// validatePerformanceProfile is connect's own validation of the profile as the
-// sdk device converts it for its multi client, so the server refuses exactly
-// the profiles that connect refuses. nil, the auto default, is valid.
+// Connect's own validation of the profile as the sdk device converts it for its
+// multi client, so the server refuses exactly the profiles that connect
+// refuses. nil, the auto default, is valid.
 func validatePerformanceProfile(performanceProfile *sdk.PerformanceProfile) error {
 	if performanceProfile == nil {
 		return nil
@@ -63,10 +46,10 @@ func validatePerformanceProfile(performanceProfile *sdk.PerformanceProfile) erro
 	return connectPerformanceProfile(performanceProfile).Validate()
 }
 
-// connectPerformanceProfile converts the profile the way the sdk device does
-// for its multi client (sdk toConnectPerformanceProfile): a window type other
-// than quality or speed is auto, no window size is connect's default, and a
-// min equal to the max fixes the window size.
+// Converts the profile the way the sdk device does for its multi client (sdk
+// toConnectPerformanceProfile): a window type other than quality or speed is
+// auto, no window size is connect's default, and a min equal to the max fixes
+// the window size.
 func connectPerformanceProfile(performanceProfile *sdk.PerformanceProfile) *connect.PerformanceProfile {
 	var windowType connect.WindowType
 	switch performanceProfile.WindowType {
@@ -102,11 +85,10 @@ func connectPerformanceProfile(performanceProfile *sdk.PerformanceProfile) *conn
 	}
 }
 
-// normalizeStoredPerformanceProfile reads back the stored initial performance
-// profile. Before auth-client refused them, a client could store a profile
-// that connect refuses. Such a profile reads back in auto, keeping its direct
-// and post-quantum choices, the way the sdk device reads back a saved one.
-// The stored config is not rewritten.
+// Reads back the stored initial performance profile. Before auth-client refused
+// them, a client could store a profile that connect refuses. Such a profile
+// reads back in auto, keeping its direct and post-quantum choices, the way the
+// sdk device reads back a saved one. The stored config is not rewritten.
 func (self *ProxyDeviceConfig) normalizeStoredPerformanceProfile() {
 	initialDeviceState := self.InitialDeviceState
 	if initialDeviceState == nil {
@@ -118,7 +100,9 @@ func (self *ProxyDeviceConfig) normalizeStoredPerformanceProfile() {
 		return
 	}
 	proxyInvalidPerformanceProfilesStoredConfig.Inc()
-	glog.V(1).Infof("[proxy][%s]stored initial performance profile reads back in auto: %s\n", self.ProxyId, err)
+	if glog.V(1) {
+		glog.Infof("[proxy][%s]stored initial performance profile reads back in auto: %s\n", self.ProxyId, err)
+	}
 	initialDeviceState.PerformanceProfile = &sdk.PerformanceProfile{
 		WindowType:            sdk.WindowTypeAuto,
 		AllowDirect:           performanceProfile.AllowDirect,

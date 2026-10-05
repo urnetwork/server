@@ -2121,32 +2121,45 @@ func AuthCodeLogin(
 // skip this outcome, but must still propagate database failures.
 var ErrMissingUserAuth = errors.New("Missing user auth.")
 
+// The network admin's email or phone, read on a pooled connection.
 func GetUserAuth(ctx context.Context, networkId server.Id) (userAuth string, returnErr error) {
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT
-					network_user.user_auth
-				FROM network
-				INNER JOIN network_user ON network_user.user_id = network.admin_user_id
-				WHERE network.network_id = $1
-			`,
-			networkId,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				var userAuth_ *string
-				server.Raise(result.Scan(&userAuth_))
-				if userAuth_ != nil {
-					userAuth = *userAuth_
-				} else {
-					// jwt auth
-					returnErr = ErrMissingUserAuth
-				}
-			}
-		})
+		userAuth, returnErr = getUserAuth(ctx, conn, networkId)
 	})
+	return
+}
 
+// Reads on the caller's transaction, so code that runs in an open transaction
+// does not hold a second pooled connection for the read.
+func GetUserAuthInTx(ctx context.Context, tx server.PgTx, networkId server.Id) (string, error) {
+	return getUserAuth(ctx, tx, networkId)
+}
+
+// An admin without email or phone auth is `ErrMissingUserAuth`; a missing
+// network is an empty user auth and no error.
+func getUserAuth(ctx context.Context, query server.PgCanQuery, networkId server.Id) (userAuth string, returnErr error) {
+	result, err := query.Query(
+		ctx,
+		`
+			SELECT
+				network_user.user_auth
+			FROM network
+			INNER JOIN network_user ON network_user.user_id = network.admin_user_id
+			WHERE network.network_id = $1
+		`,
+		networkId,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			var userAuth_ *string
+			server.Raise(result.Scan(&userAuth_))
+			if userAuth_ != nil {
+				userAuth = *userAuth_
+			} else {
+				// jwt auth
+				returnErr = ErrMissingUserAuth
+			}
+		}
+	})
 	return
 }

@@ -1,5 +1,30 @@
 package controller
 
+// Paying a Solana Pay intent from a browser wallet.
+//
+// A desktop browser hands the solana: payment url to an app the OS registered
+// for it, never to a browser extension wallet, so ur.io asks the wallet itself
+// to sign and send the transfer (the Wallet Standard
+// `solana:signAndSendTransaction` feature). POST /solana/payment-transaction
+// builds that transfer here, unsigned, so the page needs no Solana library
+// and no rpc endpoint of its own:
+//
+//   - Memo(reference), then TransferChecked of exactly the intent's quote from
+//     the payer's USDC token account to the merchant's, with the reference
+//     appended as a read-only account: the transaction a wallet builds from
+//     the payment url, which the Helius webhook credits by reference. The
+//     amount is the quote with its unique suffix, so the memo-less match
+//     would identify it too.
+//   - The recipient and the mint are the ones every intent quotes and the
+//     webhook credits (solanaPaymentRecipient, solanaUsdcMint). Nothing in the
+//     request can change them or the amount.
+//   - The payer is the fee payer and the only signer. The server handles no
+//     keys and signs nothing; the wallet shows the transfer before it signs.
+//   - The recent blockhash comes from the server's Helius rpc. That request
+//     carries nothing about the payer or the intent.
+//
+// Only an open intent of the caller's own network is built.
+
 import (
 	"context"
 	"encoding/base64"
@@ -20,31 +45,7 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// Paying a Solana Pay intent from a browser wallet.
-//
-// A desktop browser hands the solana: payment url to an app the OS registered
-// for it, never to a browser extension wallet, so ur.io asks the wallet itself
-// to sign and send the transfer (the Wallet Standard
-// `solana:signAndSendTransaction` feature). POST /solana/payment-transaction
-// builds that transfer here, unsigned, so the page needs no Solana library
-// and no rpc endpoint of its own:
-//
-//   - Memo(reference), then TransferChecked of exactly the intent's quote from
-//     the payer's USDC token account to the merchant's, with the reference
-//     appended as a read-only account: the transaction a wallet builds from
-//     the payment url, which the Helius webhook credits by reference. The
-//     amount is the quote with its unique suffix, so the memo-less match
-//     would identify it too.
-//   - The recipient and the mint are the ones the webhook credits
-//     (solanaReceiverAddresses[0], solanaUsdcMint). Nothing in the request can
-//     change them or the amount.
-//   - The payer is the fee payer and the only signer. The server handles no
-//     keys and signs nothing; the wallet shows the transfer before it signs.
-//   - The recent blockhash comes from the server's Helius rpc. That request
-//     carries nothing about the payer or the intent.
-//
-// Only an open intent of the caller's own network is built.
-
+// The request of POST /solana/payment-transaction.
 type SolanaPaymentTransactionArgs struct {
 	// the reference of an open intent of the caller's network, from
 	// /solana/payment-intent or /pay/data/solana-intent
@@ -53,6 +54,7 @@ type SolanaPaymentTransactionArgs struct {
 	Payer string `json:"payer"`
 }
 
+// The unsigned transfer, or why it was not built.
 type SolanaPaymentTransactionResult struct {
 	// the unsigned transaction (a legacy message, base64 wire format) for the
 	// wallet to sign and send
@@ -60,6 +62,7 @@ type SolanaPaymentTransactionResult struct {
 	Error       *SolanaPaymentTransactionError `json:"error,omitempty"`
 }
 
+// A refusal the page shows the user as is.
 type SolanaPaymentTransactionError struct {
 	Message string `json:"message"`
 }
@@ -93,10 +96,12 @@ var solanaPaymentTransactionResults = prometheus.NewCounterVec(prometheus.Counte
 	Help:      "Unsigned wallet payment transactions requested for Solana Pay intents, by result",
 }, []string{"result"})
 
+// Registers the result counter with the default registry.
 func init() {
 	prometheus.MustRegister(solanaPaymentTransactionResults)
 }
 
+// Counts a refused request under result and answers it with message.
 func solanaPaymentTransactionRefused(result string, message string) *SolanaPaymentTransactionResult {
 	solanaPaymentTransactionResults.WithLabelValues(result).Inc()
 	return &SolanaPaymentTransactionResult{
@@ -104,6 +109,9 @@ func solanaPaymentTransactionRefused(result string, message string) *SolanaPayme
 	}
 }
 
+// Builds the unsigned USDC transfer of an open intent of the caller's network
+// for the paying wallet to sign and send. A refusal is a result error, never
+// an error.
 func CreateSolanaPaymentTransaction(
 	args *SolanaPaymentTransactionArgs,
 	clientSession *session.ClientSession,
@@ -117,7 +125,9 @@ func CreateSolanaPaymentTransaction(
 		err = errors.New("not in canonical form")
 	}
 	if err != nil {
-		glog.V(1).Infof("[sub]solana payment transaction: the reference is not a public key: %s\n", err)
+		if glog.V(1) {
+			glog.Infof("[sub]solana payment transaction: the reference is not a public key: %s\n", err)
+		}
 		return solanaPaymentTransactionRefused(
 			"invalid",
 			"This payment cannot be sent from a browser wallet. Scan the QR code or send it by hand.",
@@ -125,7 +135,9 @@ func CreateSolanaPaymentTransaction(
 	}
 	payer, err := solana.PublicKeyFromBase58(strings.TrimSpace(args.Payer))
 	if err != nil {
-		glog.V(1).Infof("[sub]solana payment transaction: the payer is not a public key: %s\n", err)
+		if glog.V(1) {
+			glog.Infof("[sub]solana payment transaction: the payer is not a public key: %s\n", err)
+		}
 		return solanaPaymentTransactionRefused("invalid", "The wallet did not give a Solana address."), nil
 	}
 
@@ -139,7 +151,9 @@ func CreateSolanaPaymentTransaction(
 	intent := solanaPaymentTransactionIntent(clientSession.Ctx, reference)
 	// another network's intent reads as no intent
 	if intent == nil || intent.NetworkId != clientSession.ByJwt.NetworkId {
-		glog.V(1).Infof("[sub]solana payment transaction: no intent %s for the caller's network\n", reference)
+		if glog.V(1) {
+			glog.Infof("[sub]solana payment transaction: no intent %s for the caller's network\n", reference)
+		}
 		return solanaPaymentTransactionRefused("no_intent", "This payment was not found. Start again."), nil
 	}
 	switch payDataSolanaStatusOf(intent, server.NowUtc()) {
@@ -164,7 +178,13 @@ func CreateSolanaPaymentTransaction(
 		), nil
 	}
 
-	transaction, err := solanaPaymentTransaction(payer, referenceKey, uint64(amountMicro), recentBlockhash)
+	// the receiver every intent quotes; a client checks the transfer against
+	// the recipient its own quote named before the wallet signs
+	recipient, err := solana.PublicKeyFromBase58(solanaPaymentRecipient())
+	var transaction *solana.Transaction
+	if err == nil {
+		transaction, err = solanaPaymentTransaction(payer, recipient, referenceKey, uint64(amountMicro), recentBlockhash)
+	}
 	var transactionBytes []byte
 	if err == nil {
 		transactionBytes, err = transaction.MarshalBinary()
@@ -183,19 +203,16 @@ func CreateSolanaPaymentTransaction(
 	}, nil
 }
 
-// solanaPaymentTransaction is the unsigned USDC transfer of amountMicro from
-// payer to the merchant, carrying reference as the memo and as a read-only
-// account, the way a wallet builds it from a Solana Pay url (memo first).
+// The unsigned USDC transfer of amountMicro from payer to recipient (the
+// merchant), carrying reference as the memo and as a read-only account, the
+// way a wallet builds it from a Solana Pay url (memo first).
 func solanaPaymentTransaction(
 	payer solana.PublicKey,
+	recipient solana.PublicKey,
 	reference solana.PublicKey,
 	amountMicro uint64,
 	recentBlockhash solana.Hash,
 ) (*solana.Transaction, error) {
-	recipient, err := solana.PublicKeyFromBase58(solanaReceiverAddresses[0])
-	if err != nil {
-		return nil, err
-	}
 	mint, err := solana.PublicKeyFromBase58(solanaUsdcMint)
 	if err != nil {
 		return nil, err
@@ -244,6 +261,7 @@ func solanaPaymentTransaction(
 	)
 }
 
+// The getLatestBlockhash answer: a result or an rpc error.
 type solanaLatestBlockhashResponse struct {
 	Result *struct {
 		Value struct {
@@ -256,8 +274,8 @@ type solanaLatestBlockhashResponse struct {
 	} `json:"error"`
 }
 
-// solanaRpcLatestBlockhash asks the server's Helius rpc for a recent
-// blockhash. The request names no account.
+// Asks the server's Helius rpc for a recent blockhash. The request names no
+// account.
 func solanaRpcLatestBlockhash(ctx context.Context) (solana.Hash, error) {
 	ctx, cancel := context.WithTimeout(ctx, solanaRpcBlockhashTimeout)
 	defer cancel()
@@ -293,8 +311,8 @@ func solanaRpcLatestBlockhash(ctx context.Context) (solana.Hash, error) {
 
 var solanaRpcApiKeyPattern = regexp.MustCompile(`api-key=[^&\s"']*`)
 
-// solanaRpcErrorText is an rpc failure for the log without the endpoint url,
-// whose query carries the api key
+// An rpc failure for the log without the endpoint url, whose query carries the
+// api key.
 func solanaRpcErrorText(err error) string {
 	text := err.Error()
 	var urlErr *url.Error

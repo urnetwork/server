@@ -36,20 +36,20 @@ type claimProfileTarget struct {
 }
 
 // Run counts actual dispatch and supplies the same post hook as a retry.
-func (self *claimProfileTarget) Run(ctx context.Context, _ *Task) (any, func(server.PgTx) error, error) {
+func (self *claimProfileTarget) Run(ctx context.Context, _ *Task) (any, func(server.PgTx) ([]server.PostFunction, error), error) {
 	self.runs.Add(1)
-	return &claimProfileResult{}, func(tx server.PgTx) error {
+	return &claimProfileResult{}, func(tx server.PgTx) ([]server.PostFunction, error) {
 		return self.RunPost(ctx, nil, tx)
 	}, nil
 }
 
 // RunPost can deliberately leave a durable retry for another worker generation.
-func (self *claimProfileTarget) RunPost(_ context.Context, _ *FinishedTask, _ server.PgTx) error {
+func (self *claimProfileTarget) RunPost(_ context.Context, _ *FinishedTask, _ server.PgTx) ([]server.PostFunction, error) {
 	self.posts.Add(1)
 	if self.failPosts {
-		return errors.New("synthetic post retry")
+		return nil, errors.New("synthetic post retry")
 	}
-	return nil
+	return nil, nil
 }
 
 // TestTaskClaimProfilePreservesExcludedBacklog proves filtering occurs before

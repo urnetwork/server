@@ -118,16 +118,14 @@ func TestProJwtAuthClientReadsSourceOfTruthNotCache(t *testing.T) {
 		proJwtGrantPro(t, ctx, networkId)
 
 		// poison both cache tiers with a stale false, as if cached just before the upgrade
-		setProNetworkLocal(networkId, false)
-		setProNetworkCached(ctx, networkId, false)
+		testingPoisonProNetworkCache(ctx, networkId, false)
 		// the read-through cache lies...
 		connect.AssertEqual(t, IsProNetwork(ctx, networkId), false)
 		// ...but the source of truth is authoritative
 		connect.AssertEqual(t, IsProNetworkFresh(ctx, networkId), true)
 
 		// re-poison (the fresh read above refreshed the cache) and issue a token
-		setProNetworkLocal(networkId, false)
-		setProNetworkCached(ctx, networkId, false)
+		testingPoisonProNetworkCache(ctx, networkId, false)
 		sess := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
 			NetworkId: networkId, UserId: userId, NetworkName: "test", Pro: false,
 		})

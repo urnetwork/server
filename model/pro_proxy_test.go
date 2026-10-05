@@ -40,14 +40,20 @@ func TestProLocalCacheServesAndExpires(t *testing.T) {
 	_, ok := getProNetworkLocal(networkId)
 	connect.AssertEqual(t, ok, false)
 
-	setProNetworkLocal(networkId, true)
+	setProNetworkLocal(networkId, proEntitlement{pro: true, version: 2})
 
-	pro, ok := getProNetworkLocal(networkId)
+	entitlement, ok := getProNetworkLocal(networkId)
 	connect.AssertEqual(t, ok, true)
-	connect.AssertEqual(t, pro, true)
+	connect.AssertEqual(t, entitlement.pro, true)
 
-	// an upgrade clears this process's entry so the next read reloads
-	clearProNetworkLocal(networkId)
+	// once the entry expires it is no longer served
+	func() {
+		proLocalCacheMutex.Lock()
+		defer proLocalCacheMutex.Unlock()
+		entry := proLocalCache[networkId]
+		entry.expiry = server.NowUtc()
+		proLocalCache[networkId] = entry
+	}()
 	_, ok = getProNetworkLocal(networkId)
 	connect.AssertEqual(t, ok, false)
 }
@@ -57,7 +63,7 @@ func TestProLocalCacheServesAndExpires(t *testing.T) {
 // networks must not leak memory.
 func TestProLocalCacheIsBounded(t *testing.T) {
 	for i := 0; i < proLocalCacheMaxSize+64; i += 1 {
-		setProNetworkLocal(server.NewId(), true)
+		setProNetworkLocal(server.NewId(), proEntitlement{pro: true, version: 1})
 	}
 
 	proLocalCacheMutex.Lock()
@@ -69,7 +75,7 @@ func TestProLocalCacheIsBounded(t *testing.T) {
 
 // TestProLocalCacheTtlIsShorterThanRedis pins the relationship between the two ttls.
 //
-// The local tier can only be cleared in the process that did the upgrade; every OTHER
+// The local tier can only be replaced in the process that did the upgrade; every other
 // process keeps its stale entry until the local ttl runs out. That window is the delay
 // between a customer paying and, say, SOCKS working on some other proxy instance -- so
 // it must stay well under the shared redis window.
