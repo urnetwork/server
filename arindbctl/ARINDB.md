@@ -982,6 +982,22 @@ bounded diagnostic of the failed validation location is needed before changing
 reader or producer behavior. A fresh URL-quota census cannot substitute for
 this independent native publication.
 
+The diagnostic read at `2026-10-05T18:41:34.320881Z` refused a present
+publication as `source_stale`: source evaluation ran from
+`18:12:13.641328Z` to `18:13:49.203099Z`, and publication was stamped at
+`18:25:05.820968Z`. The source was 1,665.117782 seconds old against the
+unchanged 900-second limit: 676.617869 seconds from source completion to
+publication, then 988.499913 seconds until the read. Source evaluation itself
+took 95.561771 seconds; only 223.382131 seconds of source freshness remained
+at publication. Receipt
+`966c5cec60db28db61132c4ec6869d206b2e1b65555a11faf8f15fd4d92e81de`
+and independent gate
+`b5ec59d69d34402a5758358c1dc77954d72dddcda321a6685f484cbe330e84aa`
+retain this clock partition, but no current Quality/Speed counts. The reader
+checks freshness before bucket and ratio validation, so those checks were not
+reached and the earlier `publication_invalid` remains unresolved. No retained
+publication identifier joins the two observations or identifies their writers.
+
 In the reviewed `9577fddd` producer, source evaluation completes before target
 export; the native census is written only after the export and readiness
 markers succeed. Failed exports preserve the prior key and its clocks. The
@@ -990,6 +1006,20 @@ fresh data. The successful task schedules its next run after 30 seconds. Task
 ownership separately uses a direct PostgreSQL advisory-lock session and a
 five-minute timestamp lease for crash recovery. These source limits identify
 possible diagnostic boundaries, not the actual owner or cause of this refusal.
+
+The source-completion timestamp precedes exclusion-network queries, target
+assembly and export; the 676.6-second interval is therefore not a measured
+Redis-only duration. Export fans out four passes per location/group through
+up to 48 workers. Native snapshot GET/Lua operations and individual alias SETs
+are synchronous alongside the bounded legacy pipeline. The existing
+`cache_write` metric measures legacy SET attempts, including retries; it omits
+those native operations, retry sleeps, connection acquisition and the final
+census SET. Phase durations overlap across parent/child spans and workers,
+and exits include error cleanup, so neither subtraction nor an exit count
+establishes successful publication. The task has no durable target cursor;
+a current unique-key task-row observation and exact-process phase samples are
+needed to distinguish scheduling delay from active export. Neither is yet a
+qualified explanation of the observed publication delay.
 
 Connection facts advance only after a successful actual ARIN lookup during a
 connection location write. The c343 connection path retries a failed initial

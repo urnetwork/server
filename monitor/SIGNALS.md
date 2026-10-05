@@ -7721,6 +7721,13 @@ label_replace(
   and heap families for that boundary: 48 concurrent workers and other tasks
   make `runtime.MemStats` deltas inside an individual span non-attributable.
   Summed completed-span seconds are wall occupancy, not CPU attribution.
+  Parent/child spans and the 48 workers overlap: do not subtract their
+  accumulated seconds to infer elapsed time in an uninstrumented stage.
+  Exits include error and panic cleanup, not just successful exports. In the
+  reviewed `9577fddd` path, `cache_write` covers the legacy pipeline's SET
+  attempts; it does not include native snapshot GET/Lua calls, individual
+  native-alias SETs, retry sleeps, Redis acquisition or the final census SET.
+  A flat legacy-write counter therefore cannot clear a native-export stall.
 - Require all five metric families for all five phases from the exact runtime,
   including two samples for each rate. Every value/rate expression is filtered
   by `timestamp(original_metric)` between `time() - 90` and `time() + 30`
@@ -7731,6 +7738,17 @@ label_replace(
   process-rate warning. The same helper and one-query/25-series-per-process
   bound serve §2.12; each qualifying probe loads it at most once, without adding
   product metrics, labels, or a shared cache.
+- Native score-census freshness uses its original source-completion clock,
+  separately from these metric scrapes and URL-quota publication. Preserve
+  source start, completion, publication and read clocks; the 900-second source
+  limit is not renewed by publication or the 300-minute Redis TTL. A stale
+  value remains unknown supply. Freshness is checked before bucket/ratio
+  validation, so a later stale refusal does not resolve an earlier malformed
+  publication. The source-completion clock is stamped before exclusion/target
+  assembly and export and differs from the `source_load` span boundary.
+  The successful task schedules its next run after 30 seconds; that is not a
+  30-second publication guarantee. A pending-task claim/release timestamp is
+  scheduling metadata, not advisory-owner or native-publication proof.
 - A duplicate phase/family sample for the same exact host/block/instance
   invalidates that worker's entire phase observation, even when values agree
   or only ignored labels differ. Do not choose a last writer or combine
