@@ -201,7 +201,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.CancelHungAccountPayments,
 			work.CancelHungAccountPaymentsPost,
 		),
-		task.NewTaskTargetWithPost(
+		task.NewTaskTargetWithCommitPost(
 			controller.PlaySubscriptionRenewal,
 			controller.PlaySubscriptionRenewalPost,
 			"bringyour.com/bringyour/controller.PlaySubscriptionRenewal",
