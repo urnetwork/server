@@ -7626,3 +7626,79 @@ and `temp/fp2-public-admission-cycle-74810-20261005/source-manifest.json`
 
 Independent candidate gate: `temp/fp2-public-admission-cycle-74810-20261005/sol-independent-source-GO.json`
 (SHA-256 `284666bb501a2243dca3ad168637ee7abb735f68f1c731454c7de23ebc6e6b8b`).
+
+### 2026-10-05 17:28 UTC rolling quota and the maturation deadline boundary
+
+Root's 17:28:03 census receipt again qualifies all eight selected
+`9577fdddc26cdbc9616a507788b28363f0c880d7` workers as ready. The latest
+coherent global source snapshot is 17:26:39.687 UTC: **79,463 eligible,
+79,200 quota-complete (99.669028%), 263 deficient and 1,569 runs needed**.
+No eligible provider lacks a cycle row. Secure-complete is 79,172, with
+28 security exceptions; those exceptions do not remove accepted failed
+measurements from the ten-result quota. Two fresh snapshots are retained
+separately. The earlier 16:42:30 snapshot had 79,173 eligible, 79,157 at
+quota and 76 missing runs. Changed membership and separate clocks prevent
+a fixed-provider expiry or rollout-effect conclusion from these stocks.
+
+The current snapshot has eight due hints, 277 overdue and 14 warming
+providers. Due uses the deadline hint; overdue uses an old enough cycle
+with missing measurements or a security exception. These sets differ:
+at least 255 of the 263 deficient providers therefore have future
+deadlines, but no identity intersection or deadline distribution was
+retained. Current claims can legitimately reserve fifteen minutes;
+completed claims can retain that deadline under readiness, identity or
+latest-result guards. Their persisted rows do not record `AllowPacing`.
+
+A native regression on the actual API writer base
+`a357c978d4646cfe84b3451d37e1688445b39072` reproduced a distinct defect.
+Eight earlier credits plus an accepted success at cycle age 3h59m left
+nine credits, yet the warm success pace postponed the next attempt by
+20m26.52s. Successful completion preserved it. At cycle age 4h00m30s,
+an earlier credit had expired: two runs were missing and the provider was
+overdue, but it was not due. No maturation event revisits that deadline.
+The API's claim, health, completion and census owners are byte-identical
+to the retained 9577 worker source; mounted production pacing rules and
+the number of affected Main providers remain unobserved.
+
+Isolated candidate `5f321ce75634a0c47751c866e95617afcdc32cd0` caps only a
+new accepted warm-success deficit's next deadline at cycle maturation.
+The same native case becomes due at that boundary. Seven focused native
+controls and their race runs pass independently; review also reproduces
+the exact baseline failure. Controls preserve live fifteen-minute claims,
+old-token/replay guards, local completions without quota credit, mature
+recovery pacing, and full-quota renewal six minutes before oldest-credit
+expiry. Existing parked rows are not swept or rewritten; they retain
+their current deadline unless another legitimate publication changes it.
+This is a tested candidate, not proof of deployment or Main prevalence.
+
+The separately timed 17:11–17:12 worker phase pair qualifies the same eight
+processes over native intervals of 105.698–121.076 seconds. It measures
+23.8312 acknowledged results/s, with checking/buffering 97.763% of
+completed timed-turn wall time and publication 1.063%. Scheduler waiting
+occupies 64.102% of its measured phase residence. These are finite process
+counters, not unique durable quota credits, capacity or a rate joined to
+the later census. Full sustained coverage remains open; accepted successes
+and failures still count equally toward ten per four hours, while the
+4/5 quality gate, TLS exclusions and probe deadlines remain unchanged.
+
+Finite evidence: `temp/pg-contention-20261004/astra-9577f-v2-current-adoption-census-reduction.json`
+(SHA-256 `28fa1117933a8a9a5cfb14bb5b344a1f8a1c184050d8eb9932e59e3b8756e9f0`),
+`temp/pg-contention-20261004/sol-9577f-typed-v1-v2-stage-corroboration.json`
+(SHA-256 `175b5e3579bab2454159917af0f9f89ff75f03626fa9fbb0b0daa6afe82e6fd2`),
+and `temp/url-maturity-cap-20261005/sol-independent-source-gate.json`
+(SHA-256 `cbb84a8fbb3f1b3c389f8f8726c53d5064faec8d0bf31019030087234083899f`).
+
+### 2026-10-05 18:25 UTC maturation fix rollout
+
+The isolated API maturation fix `5f321ce75634a0c47751c866e95617afcdc32cd0`
+was built and verified, then deployed successfully at 18:13:46 UTC. The
+18:25:46 runtime read found all sixteen g1–g4 API slots on that build with
+readiness equal to one; no previous or unknown build was observed in those
+slots. This supersedes the deployment status in the earlier checkpoint,
+without establishing an effect on quota coverage or rewriting existing
+parked deadlines. Beta adoption was outside the runtime read's scope.
+
+The finite runtime receipt is
+`temp/pg-contention-20261004/root-api16-known-runtime-5f321-v1/run-20261005T182546Z/receipt.json`
+(SHA-256 `b41821d1c245beac467ca38296e790e2f6cfcc0fadc2e631c88b97c319f5b626`).
+A new coherent quota measurement and sustained coverage remain required.

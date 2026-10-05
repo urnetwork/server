@@ -971,6 +971,26 @@ therefore supplies no qualified newer bucket counts. The historical 4/82/80,593
 counts above are not a current result, and a later publication timestamp does
 not renew its source evaluation.
 
+A subsequent read at `2026-10-05T17:44:57.444113Z` reached the same key, but
+failed publication validation during decoding. Its native child exited zero
+and completed the bounded read in 25.482 milliseconds. Receipt
+`8b9c64ef61b46efca14becc12d33e63c98b39bd5c7b820aa8746dce41cd8330c`
+retains no qualified source clocks or bucket counts. This is a different
+failure from the earlier stale-source refusal: neither current freshness nor
+a publisher stall is established. The invalid value was not retained; a
+bounded diagnostic of the failed validation location is needed before changing
+reader or producer behavior. A fresh URL-quota census cannot substitute for
+this independent native publication.
+
+In the reviewed `9577fddd` producer, source evaluation completes before target
+export; the native census is written only after the export and readiness
+markers succeed. Failed exports preserve the prior key and its clocks. The
+key's 300-minute TTL and the task's 120-minute execution limit do not promise
+fresh data. The successful task schedules its next run after 30 seconds. Task
+ownership separately uses a direct PostgreSQL advisory-lock session and a
+five-minute timestamp lease for crash recovery. These source limits identify
+possible diagnostic boundaries, not the actual owner or cause of this refusal.
+
 Connection facts advance only after a successful actual ARIN lookup during a
 connection location write. The c343 connection path retries a failed initial
 lookup; selecting Config does not stamp existing facts with the new epoch.
