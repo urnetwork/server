@@ -204,13 +204,15 @@ require (
 	src.agwa.name/tlshacks v0.0.4 // indirect
 )
 
-replace github.com/urnetwork/connect => github.com/urnetwork/connect v0.0.0-20261004062731-aab49d971580
+// Use the same sibling sources in local builds and frozen PERF arms.
+// Replacements in imported modules are not inherited by Go.
+replace github.com/urnetwork/connect => ../connect
 
-replace github.com/pion/sctp => github.com/urnetwork/connect/sctp v0.0.0-20261002163341-6443417d70dc
+replace github.com/pion/sctp => ../connect/sctp
 
 replace github.com/urnetwork/proxy => ../proxy
 
-replace github.com/urnetwork/sdk => github.com/urnetwork/sdk v0.0.0-20261003032453-9ae95704a230
+replace github.com/urnetwork/sdk => ../sdk
 
 replace github.com/urnetwork/glog => ../glog
 
@@ -224,6 +226,4 @@ replace github.com/urfoundation/sn => ../sn
 // native RPC transport and tracked upstream provenance in server binaries.
 replace github.com/centrifuge/go-substrate-rpc-client/v4 => ../sn/third_party/go-substrate-rpc-client
 
-// Pin the published shared fork in this main-module context as well.
-// Replacements in the imported SN module are not inherited by Go.
-replace gvisor.dev/gvisor => github.com/urnetwork/gvisor v0.0.0-20261004152605-c0783dba2eef
+replace gvisor.dev/gvisor => ../gvisor
