@@ -7234,3 +7234,42 @@ Fresh paired reduction SHA256
 431197ab324c25b2c1755d49581f35c3fbd562b51b709a9db71123bfd63213d2;
 finite ancient-deadline reduction SHA256
 899a3177c02f7a52832c7b5ac433c58b0256d2dcaa95a22a8076536bab766bcb.
+
+### 2026-10-05 06:18 UTC renewed backlog after the quiet interval
+
+The native primary read confirms that 05:35–05:40 contained 33 unique accepted
+policy-1 measured runs across 17 providers: 13 successes and 20 failures, or
+0.11/s. This uses the same durable-history definition as the Oct 3 comparison,
+but observes measurement timestamps rather than arrival times or fixed provider
+membership. It confirms low production during the earlier near-full snapshot;
+it does not measure capacity under load or describe the later c343 processes.
+
+Fresh c343 runtime receipts now qualify all eight ready Taskworkers on identical
+processes across native intervals of 361.196–361.885 seconds. Their measured ACK
+counters increased by 68 successes and 6,591 failures, totaling 18.4174/s. The
+fresh global census at 06:16:49.755 reports 50,990 of 75,231 eligible providers
+quota-complete (67.7779%), 31,932 measured runs needed and 28,832 due providers.
+Over six minutes, quota completion fell by 6,646 and missing runs increased by
+12,977. Current demand is substantial; the earlier quiet-period interpretation
+must not be carried into this interval. These ACKs have not yet been joined to a
+matching durable-history window, and net population change does not prove a
+fixed cohort. Completed-stage and indexed measurement-expiry evidence are needed
+to separate execution limits, renewal timing and membership changes.
+
+Five existing local PostgreSQL renewal tests pass with relevant source bytes
+identical to c343: the six-minute headroom preserves coverage in the tested
+spacing/latency cases, clustered expiries require bounded replacement work,
+setup failures earn no credit, and acknowledged replays do not advance pacing.
+They establish the mechanism, not Main's expiry distribution. No fairness or
+headroom change follows from the rate comparison. The current oldest due age is
+938.75 seconds; the prior October 4 derived deadline is no longer current.
+
+The 24 outstanding security cases remain separate from measured quota. They may
+be correctly quarantined providers; completion requires accurate same-URL
+revalidation and exclusion, not forcing genuine failures to pass. FP2FIX remains
+open. Root alone owns any further observation and rollout.
+
+Finite history comparison SHA256
+7c9b951cdae1b9ecc2d93814c397c478e1b4e9fe221c7d43df63adf2509723fd;
+current c343 paired reduction SHA256
+58532d3cb6da7290d6fa91621e3caf9e0c37d684748b5458c0fd173da84cda75.
