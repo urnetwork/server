@@ -1016,10 +1016,19 @@ are synchronous alongside the bounded legacy pipeline. The existing
 those native operations, retry sleeps, connection acquisition and the final
 census SET. Phase durations overlap across parent/child spans and workers,
 and exits include error cleanup, so neither subtraction nor an exit count
-establishes successful publication. The task has no durable target cursor;
-a current unique-key task-row observation and exact-process phase samples are
-needed to distinguish scheduling delay from active export. Neither is yet a
-qualified explanation of the observed publication delay.
+establishes successful publication. The task has no durable target cursor.
+
+The unique-key task observation at `2026-10-05T19:59:14.360996Z` found the
+expected scheduled function with empty arguments and a 7,200-second execution
+limit. It was due by 41.720312 seconds, its stored claim timestamp was
+9.586317 seconds old, and its timestamp lease had 290.413683 seconds remaining.
+The row retained one retry and an error classified as `canceled`; this neither
+dates that error nor establishes that the current attempt was canceled.
+Receipt `6cb36928c4b1b44760f3f80e85d09a7be7158db6bdca8e296592005d2406c80d`
+records a 1.222-millisecond point query. The row was present at that snapshot,
+but claim/release timestamps do not identify the worker, advisory owner,
+execution start or progress. Exact-process phase evidence is still needed;
+no cause of the publication delay or newer native supply is established.
 
 Connection facts advance only after a successful actual ARIN lookup during a
 connection location write. The c343 connection path retries a failed initial
