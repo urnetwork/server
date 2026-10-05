@@ -374,6 +374,15 @@ follow from the existence of those 27 tables. Colombia, Chile and other
 regional reporting queues retain their source, metric, period and unresolved
 identity joins without being promoted to complete operator coverage.
 
+A separately retained draft adds 12 sibling ASNs to five already reviewed
+subscriber operators. It adds no operator groups, country contexts or regional
+service-presence pairs, and has not passed a new full-artifact/native gate.
+Those draft identities are not part of the selected v13 counts above. Broader
+expansion must continue exact ASN-to-subscriber-service review alongside the
+missing regional ranking work; neither a sibling relationship nor a top-30
+position substitutes for that review. Keep smaller reviewed access providers
+eligible under the same clean-default rule and preserve explicit contrary use.
+
 ## Output and provenance
 
 Each build produces `arin.mmdb` and `manifest.json`. The MMDB contains direct
@@ -906,6 +915,43 @@ and loaded process identity must be measured separately. The native census,
 when available, describes a completed cached score publication: retain its
 source start, completion and publication timestamps, and distinguish its
 bucket membership from durable current-generation classification coverage.
+
+The deployed Taskworker source `5f613cbe` preserves that loader and connection
+fact contract. The eight-slot observation at `2026-10-05T11:24Z` established
+ready workers on that revision, not their loaded ARIN epoch. Taskworker startup
+does not eagerly warm the IP database; its score publisher consumes stored
+connection facts. The legacy missing-connection location task is a no-op.
+Restarting the publisher therefore does not reclassify the fleet.
+
+Keep these separate measurements and gates when interpreting recovery:
+
+| Boundary | What it establishes |
+| --- | --- |
+| Four-hour URL quota | Ten accepted measured successes or failures; not ten successes or a passing health ratio. |
+| Eight-hour URL health | A nonzero selected-policy denominator and success ratio at least 4/5 for native Quality and Speed. |
+| Probe security | Persistent security failures exclude serving buckets until the required authenticated recovery; quota progress alone does not clear them. |
+| Subscriber identity | Verified policy-two subscriber evidence is additionally required for native Quality; eligible Speed/Online fallback retains its own rules. |
+| Risk and reliability | Common serving exclusions remain, while an operator-side probe setup failure without a provider measurement supplies no negative provider verdict. |
+| Resource adoption | Actual loaded generation and subsequent connection lookups; Config selection, worker readiness and score-publication clocks cannot substitute. |
+
+The `11:23:51Z` global quota source reported 79,664 eligible providers, zero
+quota-complete providers and 141,919 remaining measured runs. These quota
+figures are not a newer Quality/Speed census or proof of a classifier defect.
+Six native local controls on exact `5f613cbe` verified the quota boundary,
+including accepted failures and progression through eight, nine and ten runs;
+they do not establish Main's outcome distribution, expiry or probe delivery.
+
+Existing `urnetwork_stats_provider_excluded{reason}` and
+`urnetwork_stats_provider_egress_index{bucket,index}` gauges provide
+replica-backed rule diagnostics. Exclusion reasons report the first failing
+rule, so an early reliability, risk or TLS failure can hide later failures.
+These gauges have no producer observation timestamp and retain the previous
+successful values when a refresh fails; a recent scrape cannot make them a
+fresh exclusion census. The native publication has source clocks but lacks
+ARIN epochs and exclusion reasons. No loaded-ARIN epoch gauge is exported by
+this graph. A bounded current-process mapping/metadata observation can close
+that identity gap for the observed process; a partial-file fingerprint does
+not establish a whole-file hash, fleet convergence or provider-level effect.
 
 For this release, retain the following evidence as rollout proceeds:
 

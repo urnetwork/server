@@ -7517,3 +7517,59 @@ Finite reductions:
 and
 `temp/pg-contention-20261004/astra-d8f36-v1-current-adoption-census-reduction.json`
 (SHA-256 `d429fcfabd4af37df9446d6563ca0f13bfff60b9bfbc83a588a417f1f094b5d1`).
+
+### 2026-10-05 11:40 UTC current throughput and quota boundary audit
+
+Root's 11:24:37 receipt qualified all eight ready Taskworkers on
+`5f613cbe09f538b612c1272201e80ca0dbe9cda5`, with no known-old or unknown
+slots. The global census was observed at 11:23:51.475 UTC: **79,664 eligible
+providers, zero quota-complete and zero secure-complete, and 141,919 runs
+needed**. Security-pending was 26. These observations remain runtime
+self-reports, with one separately qualified global census publisher.
+
+The coherent census implies 654,721 capped measured credits, averaging
+8.21853 per provider. With no provider at ten, at least 17,409 were exactly
+at nine and at least 48,537 were at eight or nine. The exact distribution
+and provider membership overlap with older cohorts were not observed.
+Zero completed quota therefore does not mean zero measured credit.
+Warming counts recent cycle starts rather than newly returning members.
+Eligibility publication preserves existing cycle progress and deadlines, so
+a returning provider with an old cycle can be mature immediately. A low
+warming count and similar population size do not exclude membership turnover.
+
+The separate 11:37:23–11:40:56 stage pair qualified the same eight processes
+across native intervals of 211.410–212.134 seconds. It recorded 10,177
+acknowledged measured successes and 6,800 failures: **80.2397 ACK/s**.
+Across 16,956 timed completed turns, publication averaged 0.818653 seconds
+(14.974% of total completed wall time), checking/buffering 4.399399 seconds,
+readiness 0.031111 seconds and closing 0.216415 seconds; total mean was
+5.467027 seconds. Due phase residence was 87.959%, which is not CPU or
+worker utilization. This pair contains no new quota snapshot or unique
+history count, and completed timing excludes unfinished turns. Readiness
+was observed at the earlier census clocks, not by the stage query.
+
+Six author and independent native controls on unchanged 5f production
+owners found no count or stop-at-nine defect. A fixed local fixture with
+79,664 providers, 654,721 measured history rows and 796,640 completed turns
+started at the same aggregate quota/deficit. Real claims and 256 accepted
+publications advanced 197 providers from eight to nine and 59 from nine to
+ten; missing runs fell by 256. Ten prior finished turns did not prevent
+another claim. A separate control followed actual deadlines without
+forcing them: mature deficits used the default 54–66-second recovery pace,
+full quota parked until oldest measurement plus 3h54m, and an accepted
+failure renewed coverage before expiry. Failed measurements count toward
+ten; setup-only completions and replays do not. The 4/5 serving-quality
+threshold and TLS exclusions remain separate.
+
+The local fixture does not reproduce Main workload, locks, configured
+pacing, provider turnover, expiry distribution or publication arrival
+delay. Its eight/nine distribution is one construction matching the
+aggregate, not a measured Main distribution. No policy or production
+change follows from this audit. Full sustained coverage remains open.
+
+Finite evidence: `temp/pg-contention-20261004/astra-5f613-v1-current-adoption-census-reduction.json`
+(SHA-256 `9065f467a0a0790d04fbc13d178482f0958da4f5d8bb982f2f41779502f1b03f`),
+`temp/pg-contention-20261004/astra-5f613-v1-v2-current-stage-reduction.json`
+(SHA-256 `ecb8b28dbfc5891a9075b5bb2b3e6d57031b8deab240fe80eae2791e6f8df247`),
+and `temp/sol-quota-boundary-5f613-review-20261005/sol-independent-quota-boundary-GO.json`
+(SHA-256 `c67d4d3b801f907a5c175ecf397b07986c87ded39c2be8b6d20146cd24231a69`).
