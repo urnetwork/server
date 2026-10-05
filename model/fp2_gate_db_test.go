@@ -2,6 +2,7 @@
 package model
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -35,8 +36,10 @@ func TestFp2BucketMembershipAndCommonGates(t *testing.T) {
 		egressTestReliability(ctx, unreliable.clientId, 1, 0.1, 1)
 		egressTestPasses(ctx, t)
 		common := []*egressTestProvider{passing, nonQuality, unprobed, failing, dark, mislocated}
+		cached := map[RankMode]map[server.Id]*ClientScore{}
 		for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
 			scores := egressTestCachedScores(ctx, t, city, mode, false)
+			cached[mode] = scores
 			if len(scores) != len(common) {
 				t.Fatalf("mode=%s scores=%d want=%d", mode, len(scores), len(common))
 			}
@@ -58,24 +61,79 @@ func TestFp2BucketMembershipAndCommonGates(t *testing.T) {
 					t.Errorf("mode=%s native=%t want=%t", mode, score.PassesMinimums[mode], wantNative)
 				}
 			}
-			providers := egressTestFind(ctx, t, []*ProviderSpec{{LocationId: &city.LocationId}}, mode, len(common), false, server.NewId())
-			wantCount := len(common)
-			if mode == RankModeQuality {
-				wantCount-- // non-subscriber access cannot enter Quality through Online.
-			}
-			if len(providers) != wantCount {
-				t.Fatalf("mode=%s returned=%d want=%d", mode, len(providers), wantCount)
-			}
-			assertEgressTestNoRepeats(t, providers)
-			assertEgressTestTiersKeepOrder(t, providers)
 		}
-		for _, provider := range []*egressTestProvider{risk, tls, unreliable} {
-			for _, forced := range []bool{false, true} {
-				providers := egressTestFind(ctx, t, []*ProviderSpec{{ClientId: &provider.clientId}}, RankModeQuality, 1, forced, server.NewId())
-				if len(providers) != 0 {
-					t.Errorf("common gate bypassed with forced=%t", forced)
+		for _, nativeReader := range []bool{false, true} {
+			func() {
+				pop := server.Config.PushSimpleResource(providerConfigResourceName, []byte(fmt.Sprintf("subscriber_quality_policy_version: 2\negress_index:\n  native_reader_enabled: %t\n", nativeReader)))
+				defer pop()
+				requestEgressIndexSettingsSnapshot.Store(nil)
+				defer requestEgressIndexSettingsSnapshot.Store(nil)
+				for _, mode := range []RankMode{RankModeQuality, RankModeSpeed} {
+					// ARIN subscriber evidence controls native Quality, not a
+					// Quality request's independent Speed/Online fallback.
+					// Assert identities and priority, not only a total count.
+					wantTiers := map[server.Id]int{}
+					for _, provider := range common {
+						tier := 2 * egressTestBackfillOffset()
+						if provider == passing || provider == mislocated || provider == nonQuality && mode == RankModeSpeed {
+							tier = cached[mode][provider.clientId].Tiers[mode]
+						} else if provider == nonQuality {
+							tier = cached[RankModeSpeed][provider.clientId].Tiers[RankModeSpeed] + egressTestBackfillOffset()
+						}
+						wantTiers[provider.clientId] = tier
+					}
+					providers := egressTestFind(ctx, t, egressTestLocationSpec(city), mode, len(common), false, server.NewId())
+					if len(providers) != len(wantTiers) {
+						t.Fatalf("reader=%t mode=%s returned=%d want=%d", nativeReader, mode, len(providers), len(wantTiers))
+					}
+					assertEgressTestNoRepeats(t, providers)
+					assertEgressTestTiersKeepOrder(t, providers)
+					for index, provider := range providers {
+						wantTier, exists := wantTiers[provider.ClientId]
+						if !exists || provider.Tier != wantTier {
+							t.Fatalf("reader=%t mode=%s index=%d: unexpected provider or bucket tier=%d want=%d", nativeReader, mode, index, provider.Tier, wantTier)
+						}
+						wantNativeCount := 2
+						native := provider.ClientId == passing.clientId || provider.ClientId == mislocated.clientId
+						if mode == RankModeSpeed {
+							wantNativeCount = 3
+							native = native || provider.ClientId == nonQuality.clientId
+						}
+						if native != (index < wantNativeCount) || mode == RankModeQuality && (provider.ClientId == nonQuality.clientId) != (index == 2) {
+							t.Fatalf("reader=%t mode=%s: native, borrowed and Online priorities changed", nativeReader, mode)
+						}
+					}
+
+					// Forced and explicitly named Quality retain the requested
+					// bucket policy. They cannot promote the Speed borrower.
+					forced := egressTestFind(ctx, t, egressTestLocationSpec(city), mode, len(common), true, server.NewId())
+					wantForced := len(common)
+					if mode == RankModeQuality {
+						wantForced--
+					}
+					if len(forced) != wantForced {
+						t.Fatalf("reader=%t mode=%s: forced membership=%d want=%d", nativeReader, mode, len(forced), wantForced)
+					}
+					assertEgressTestNoRepeats(t, forced)
+					for _, provider := range forced {
+						if _, exists := wantTiers[provider.ClientId]; !exists || mode == RankModeQuality && provider.ClientId == nonQuality.clientId {
+							t.Fatalf("reader=%t mode=%s: forced selection bypassed a bucket or common gate", nativeReader, mode)
+						}
+					}
+					for _, forceMinimum := range []bool{false, true} {
+						named := egressTestFind(ctx, t, []*ProviderSpec{{ClientId: &nonQuality.clientId}}, mode, 1, forceMinimum, server.NewId())
+						if mode == RankModeQuality && len(named) != 0 || mode == RankModeSpeed && (len(named) != 1 || named[0].ClientId != nonQuality.clientId) {
+							t.Fatalf("reader=%t mode=%s forced=%t: named provider lost its requested bucket policy", nativeReader, mode, forceMinimum)
+						}
+						for _, excluded := range []*egressTestProvider{risk, tls, unreliable} {
+							providers := egressTestFind(ctx, t, []*ProviderSpec{{ClientId: &excluded.clientId}}, mode, 1, forceMinimum, server.NewId())
+							if len(providers) != 0 {
+								t.Errorf("reader=%t mode=%s forced=%t: common gate bypassed", nativeReader, mode, forceMinimum)
+							}
+						}
+					}
 				}
-			}
+			}()
 		}
 		counts := CountProviderEgress(ctx)
 		onlineCount := int64(0)

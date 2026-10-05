@@ -296,6 +296,12 @@ type TransferBalance struct {
 	// Pro means the balance carries the Pro entitlement. A network is Pro iff it
 	// has an in-window balance with this set -- see pro_model.go.
 	Pro bool `json:"pro,omitempty"`
+	// GrantKind is the recurring grant that wrote the balance, GrantKindNone for
+	// any other balance. Read by the balance summary (see SupersededGrants).
+	GrantKind GrantKind `json:"-"`
+	// what open contracts reserve from the balance, already subtracted from
+	// BalanceByteCount (see applyActiveTransferEscrow)
+	reservedByteCount ByteCount
 }
 
 func GetActiveTransferBalances(ctx context.Context, networkId server.Id) []*TransferBalance {
@@ -323,7 +329,8 @@ const activeTransferBalanceSql = `
                     net_revenue_nano_cents,
                     balance_byte_count,
                     paid,
-                    pro
+                    pro,
+                    COALESCE(grant_kind, '')
                 FROM transfer_balance
                 WHERE
                     network_id = $1 AND
@@ -355,6 +362,7 @@ func getActiveTransferBalanceRows(ctx context.Context, query server.PgCanQuery, 
 				&transferBalance.BalanceByteCount,
 				&transferBalance.Paid,
 				&transferBalance.Pro,
+				&transferBalance.GrantKind,
 			))
 			transferBalances = append(transferBalances, transferBalance)
 		}
@@ -396,6 +404,7 @@ func applyActiveTransferEscrow(ctx context.Context, transferBalances []*Transfer
 				server.Raise(err)
 			}
 			transferBalance.BalanceByteCount = max(0, transferBalance.BalanceByteCount-max(0, approx))
+			transferBalance.reservedByteCount = ByteCount(netEscrowBalanceByteCount) + ByteCount(max(0, approx))
 		}
 	})
 }
@@ -933,9 +942,10 @@ func AddBasicTransferBalanceInTx(
 ) (returnErr error) {
 	balanceId := server.NewId()
 
-	// pro = false: this is the unpaid, data-only grant path (the daily free-tier
-	// grant and referral bonuses). It must never confer Pro -- see pro_model.go.
-	// For a Pro grant use AddProTransferBalanceInTx.
+	// pro = false: an unpaid, data-only balance. It must never confer Pro -- see
+	// pro_model.go. It records no grant kind, so it is for balances that are not a
+	// recurring grant (prober credit, fixtures); the daily free grant and referral
+	// bonuses use AddGrantTransferBalanceInTx.
 	_, err := tx.Exec(
 		ctx,
 		`
@@ -970,6 +980,10 @@ func AddBasicTransferBalanceInTx(
 // balance carries pro = true, which is what confers the Pro entitlement -- see
 // pro_model.go. The caller must refresh the Pro cache (UpdateProNetwork) once the
 // tx commits, so the upgrade is visible immediately.
+//
+// It records no grant kind: it is for a Pro balance bought for its own window
+// (x402), which the next monthly grant must not supersede in the summary. The
+// monthly Pro grant uses AddGrantTransferBalanceInTx.
 func AddProTransferBalanceInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -5120,9 +5134,10 @@ func AddProTransferBalanceToAllNetworks(
 		                    net_revenue_nano_cents,
 		                    subsidy_net_revenue_nano_cents,
 		                    balance_byte_count,
-		                    pro
+		                    pro,
+		                    grant_kind
 		                )
-		                VALUES ($1, $2, $3, $4, $5, $6, $7, $5, true)
+		                VALUES ($1, $2, $3, $4, $5, $6, $7, $5, true, $8)
 		            `,
 					server.NewId(),
 					networkId,
@@ -5131,6 +5146,7 @@ func AddProTransferBalanceToAllNetworks(
 					balanceByteCount,
 					NanoCents(0),
 					subsidyNetRevenue,
+					GrantKindPro,
 				)
 				addedTransferBalances[networkId] = balanceByteCount
 			}
@@ -5208,9 +5224,10 @@ func AddFreeTransferBalanceToAllNetworks(
 		                    net_revenue_nano_cents,
 		                    subsidy_net_revenue_nano_cents,
 		                    balance_byte_count,
-		                    pro
+		                    pro,
+		                    grant_kind
 		                )
-		                VALUES ($1, $2, $3, $4, $5, $6, $7, $5, false)
+		                VALUES ($1, $2, $3, $4, $5, $6, $7, $5, false, $8)
 		            `,
 					server.NewId(),
 					networkId,
@@ -5219,6 +5236,7 @@ func AddFreeTransferBalanceToAllNetworks(
 					byteCount,
 					NanoCents(0),
 					NanoCents(0),
+					GrantKindFree,
 				)
 				addedTransferBalances[networkId] = byteCount
 			}

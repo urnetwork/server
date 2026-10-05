@@ -39,9 +39,10 @@ func SnSetWallet(w http.ResponseWriter, r *http.Request) {
 // SnPoolClaim backs `GET /sn/pool/claim?epoch=N` (sn/PLAN.md §5): the
 // caller network's merkle pool-payout claim. `epoch` is optional and
 // defaults to the latest finalized epoch (epoch 0 is a real epoch, so only
-// absence defaults). Network JWT auth — a provider fetches its own claim.
+// absence defaults). Provider JWT auth selects its original contribution. An explicit legacy_coldkey
+// selects public committed legacy proof bytes, never current-wallet ownership.
 func SnPoolClaim(w http.ResponseWriter, r *http.Request) {
-	poolClaim := &controller.SnPoolClaimArgs{}
+	poolClaim := &controller.SnPoolClaimArgs{LegacyColdkey: r.URL.Query().Get("legacy_coldkey")}
 	if epochStr := r.URL.Query().Get("epoch"); epochStr != "" {
 		epoch, err := strconv.ParseUint(epochStr, 10, 64)
 		if err != nil {

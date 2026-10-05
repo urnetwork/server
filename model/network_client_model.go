@@ -316,6 +316,19 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 			return
 		}
 
+		// the hosted proxy device applies the initial performance profile at
+		// every creation, so a profile connect refuses is refused here, before
+		// anything is created
+		message = validateProxyConfigArgs(authClient.ProxyConfig, session)
+		if message != "" {
+			authClientResult = &AuthNetworkClientResult{
+				Error: &AuthNetworkClientError{
+					Message: message,
+				},
+			}
+			return
+		}
+
 		// Client-creation gate for the plan's concurrent connected-client limit:
 		// Do not provision a new top-level client while the network is already at its
 		// connected limit. Only top-level clients count and public providers are

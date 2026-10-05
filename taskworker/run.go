@@ -130,6 +130,7 @@ func startTaskworkerRuntime(admission context.Context, ctx context.Context, canc
 	// Retention is a best-effort lifetime observer. Its local reaper must not
 	// inherit the finite scheduling attempt, and storage I/O cannot gate work.
 	go server.HandleError(func() { stats.ApplyStreamRetention(ctx) })
+	go server.HandleError(func() { controller.ApplyFeedbackLogRetention(ctx) })
 	controller.StartStatsCollector(ctx)
 	task.StartQueueMetrics(ctx)
 	for range options.Count {

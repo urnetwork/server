@@ -37,8 +37,10 @@ func snWalletMappingOwner(clientId *server.Id, clientSession *session.ClientSess
 	if clientSession == nil || clientSession.Ctx == nil || clientSession.ByJwt == nil {
 		return model.WalletMappingOwner{}, protocol.ErrWalletMappingUnavailable
 	}
-	if clientId == nil {
-		clientId = clientSession.ByJwt.ClientId
+	var err error
+	clientId, err = snWalletClientOwner(clientId, clientSession)
+	if err != nil {
+		return model.WalletMappingOwner{}, err
 	}
 	if clientId == nil || *clientId == (server.Id{}) || clientSession.ByJwt.UserId == (server.Id{}) || clientSession.ByJwt.NetworkId == (server.Id{}) {
 		return model.WalletMappingOwner{}, protocol.ErrWalletMappingIntegrity
@@ -152,4 +154,19 @@ func SnWalletMappingHistory(args *SnWalletMappingHistoryArgs, clientSession *ses
 		return nil, err
 	}
 	return &SnWalletMappingHistoryResult{Originals: originals}, nil
+}
+
+// A scoped provider can name only itself. A network owner may still select a
+// network-owned provider; the existing database ownership/proof checks apply.
+func snWalletClientOwner(clientId *server.Id, clientSession *session.ClientSession) (*server.Id, error) {
+	if clientSession == nil || clientSession.Ctx == nil || clientSession.ByJwt == nil {
+		return nil, protocol.ErrWalletMappingUnavailable
+	}
+	if authenticated := clientSession.ByJwt.ClientId; authenticated != nil {
+		if *authenticated == (server.Id{}) || (clientId != nil && *clientId != *authenticated) {
+			return nil, protocol.ErrWalletMappingIntegrity
+		}
+		return authenticated, nil
+	}
+	return clientId, nil
 }
