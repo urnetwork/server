@@ -168,6 +168,7 @@ func registry() []specEndpoint {
 
 		{"GET", "/transfer/stats", nil, rt(model.TransferStats{})},
 		{"POST", "/solana/payment-intent", rt(controller.SolanaPaymentIntentArgs{}), rt(controller.SolanaPaymentIntentResult{})},
+		{"POST", "/solana/payment-transaction", rt(controller.SolanaPaymentTransactionArgs{}), rt(controller.SolanaPaymentTransactionResult{})},
 		{"POST", "/stripe/payment-intent", rt(controller.StripeCreatePaymentIntentArgs{}), rt(controller.StripeCreatePaymentIntentResult{})},
 		{"POST", "/stripe/customer-portal", rt(controller.StripeCreateCustomerPortalArgs{}), rt(controller.StripeCreateCustomerPortalResult{})},
 		{"POST", "/pay/data/checkout", rt(controller.PayDataCheckoutArgs{}), rt(controller.PayDataCheckoutResult{})},

@@ -180,6 +180,7 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/pay/play", handlers.PlayWebhook),
 		router.NewRoute("POST", "/pay/solana", handlers.HeliusWebhook),
 		router.NewRoute("POST", "/solana/payment-intent", handlers.CreateSolanaPaymentIntent),
+		router.NewRoute("POST", "/solana/payment-transaction", handlers.CreateSolanaPaymentTransaction),
 		router.NewRoute("POST", "/stripe/payment-intent", handlers.CreateStripePaymentIntent),
 		router.NewRoute("POST", "/stripe/customer-portal", handlers.StripeCreateCustomerPortal),
 		router.NewRoute("POST", "/stripe/create-checkout-session", handlers.StripeCreateCheckoutSession),
