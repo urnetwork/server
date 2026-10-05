@@ -339,6 +339,32 @@ func escrowedContractCounts(ctx context.Context, payerNetworkId server.Id) (tota
 	return
 }
 
+// maxEscrowedContractByteCount returns the largest contract size granted
+// against the network's balance, over every escrowed contract it paid for.
+func maxEscrowedContractByteCount(ctx context.Context, payerNetworkId server.Id) model.ByteCount {
+	var maxByteCount model.ByteCount
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT COALESCE(MAX(transfer_contract.transfer_byte_count), 0)
+				FROM transfer_contract
+				INNER JOIN transfer_escrow ON
+					transfer_escrow.contract_id = transfer_contract.contract_id
+				WHERE
+					transfer_contract.payer_network_id = $1
+			`,
+			payerNetworkId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&maxByteCount))
+			}
+		})
+	})
+	return maxByteCount
+}
+
 // settledPayoutSum returns the total payout bytes swept out of the network's
 // escrows so far.
 func settledPayoutSum(ctx context.Context, payerNetworkId server.Id) model.ByteCount {
@@ -403,10 +429,32 @@ func TestProxyContractChurnLoad(t *testing.T) {
 	restore := withSmallContracts()
 	defer restore()
 
+	testProxyContractChurnLoad(t, testSmallContractByteCount)
+}
+
+// TestProxyContractChurnLoadFreePayerCap is the same churn load with the
+// contract size capped by the free tier's pro.yml cap
+// (free.max_contract_transfer_byte_count) instead of the controller's maximum.
+// The proxy device network holds only a redeemed data code, which does not make
+// it Pro, and it pays for both directions. Every contract it pays for must be
+// granted at most the cap, and the ledger must still reconcile exactly.
+func TestProxyContractChurnLoadFreePayerCap(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	restore := model.Testing_SetMaxContractTransferByteCount(testSmallContractByteCount, 0)
+	defer restore()
+
+	testProxyContractChurnLoad(t, testSmallContractByteCount)
+}
+
+// testProxyContractChurnLoad runs the churn load and the ledger reconciliation
+// with granted contracts limited to maxContractByteCount.
+func testProxyContractChurnLoad(t *testing.T, maxContractByteCount model.ByteCount) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
-		fmt.Printf("[progress]start TestProxyContractChurnLoad\n")
+		fmt.Printf("[progress]start %s\n", t.Name())
 		opts := defaultProxyTestOptions()
 		opts.disableSecurityPolicies = true
 		h := setupProxyTestWithOptions(t, opts)
@@ -416,6 +464,10 @@ func TestProxyContractChurnLoad(t *testing.T) {
 		defer closeTarget()
 
 		ctx := h.ctx
+
+		if model.IsProNetwork(ctx, h.pdNetworkId) {
+			t.Fatal("the proxy device network must pay as a free network")
+		}
 
 		// make sure the path works before applying load
 		warmClient := newSocksProxyClient(t, h.signedProxyId, h.socksPort, 60*time.Second)
@@ -478,6 +530,9 @@ func TestProxyContractChurnLoad(t *testing.T) {
 		totalContracts, openContracts := escrowedContractCounts(ctx, h.pdNetworkId)
 		fmt.Printf("[progress]load done: %d escrowed contracts (%d open)\n", totalContracts, openContracts)
 
+		if maxByteCount := maxEscrowedContractByteCount(ctx, h.pdNetworkId); maxContractByteCount < maxByteCount {
+			t.Fatalf("a contract was granted %d bytes, above the %d byte cap", maxByteCount, maxContractByteCount)
+		}
 		// the cap (4MiB) must have forced real churn: ~98MiB of payload cannot
 		// fit in a handful of contracts
 		if totalContracts < 16 {
@@ -497,6 +552,13 @@ func TestProxyContractChurnLoad(t *testing.T) {
 		case <-time.After(3 * time.Second):
 		}
 		settleAllEscrowedContracts(t, ctx, h.pdNetworkId)
+		// settlement journals the payer's debits and applies them to the
+		// balance in asynchronous batches; apply them before reconciling
+		for shard := range model.TransferDebitShardCount {
+			if _, err := model.FlushTransferDebits(ctx, shard, nil, 64); err != nil {
+				t.Fatal("asynchronous payer debit", err)
+			}
+		}
 		fmt.Printf("[progress]all contracts settled\n")
 
 		// ---- ledger reconciliation ----
