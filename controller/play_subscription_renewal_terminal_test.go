@@ -273,12 +273,13 @@ func TestPlaySubscriptionRenewalPostWithoutEmailCompletes(t *testing.T) {
 					wallet.PublicKey().String(), base64.StdEncoding.EncodeToString(signature[:]), message)
 			}
 			args := playTerminalTestArgs(networkId, "synthetic.package", "synthetic-no-email-"+accountType)
+			var posts []server.PostFunction
 			var postErr error
 			server.Tx(ctx, func(tx server.PgTx) {
-				postErr = PlaySubscriptionRenewalPost(args, result, clientSession, tx)
+				posts, postErr = PlaySubscriptionRenewalPost(args, result, clientSession, tx)
 			})
-			if postErr != nil {
-				t.Fatalf("%s completed post without recipient: %v", accountType, postErr)
+			if postErr != nil || len(posts) != 0 {
+				t.Fatalf("%s completed post without recipient: posts=%d err=%v", accountType, len(posts), postErr)
 			}
 			if count, _ := countScheduledPlayRenewals(t, ctx, args.PurchaseToken); count != 0 {
 				t.Fatalf("%s completed post scheduled %d additional renewals, want none", accountType, count)
@@ -291,7 +292,8 @@ func TestPlaySubscriptionRenewalPostWithoutEmailCompletes(t *testing.T) {
 }
 
 // An existing recipient still receives exactly one notice with the intended
-// template when the completed renewal stops scheduling itself.
+// template when the completed renewal stops scheduling itself. The post sends
+// nothing in its transaction; it returns the send for after the commit.
 func TestPlaySubscriptionRenewalPostWithEmailSendsNotice(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -323,12 +325,20 @@ func TestPlaySubscriptionRenewalPostWithEmailSendsNotice(t *testing.T) {
 		clientSession := session.Testing_CreateClientSession(ctx, nil)
 		args := playTerminalTestArgs(networkId, "synthetic.package", "synthetic-email-token")
 		result := &PlaySubscriptionRenewalResult{ExpiryTime: server.NowUtc().Add(-2 * SubscriptionGracePeriod)}
+		var posts []server.PostFunction
 		var postErr error
+		openSent := 0
 		server.Tx(ctx, func(tx server.PgTx) {
-			postErr = PlaySubscriptionRenewalPost(args, result, clientSession, tx)
+			posts, postErr = PlaySubscriptionRenewalPost(args, result, clientSession, tx)
+			openSent = sent
 		})
-		if postErr != nil || sent != 1 {
-			t.Fatalf("email completed post error=%v notices=%d, want one", postErr, sent)
+		if postErr != nil || openSent != 0 {
+			t.Fatalf("email completed post error=%v notices in its transaction=%d, want none", postErr, openSent)
+		}
+		// the worker runs the post's work after the finish commits
+		server.RunPosts(ctx, posts...)
+		if sent != 1 {
+			t.Fatalf("email completed post notices=%d, want one", sent)
 		}
 		if count, _ := countScheduledPlayRenewals(t, ctx, args.PurchaseToken); count != 0 {
 			t.Fatalf("email completed post scheduled %d additional renewals, want none", count)
@@ -338,6 +348,8 @@ func TestPlaySubscriptionRenewalPostWithEmailSendsNotice(t *testing.T) {
 
 // A canceled database lookup must remain a failed post even for an account
 // whose successful lookup would have produced the skippable recipient error.
+// The lookup reads on the post's transaction with the session's context, so the
+// failure is that context's cancellation.
 func TestPlaySubscriptionRenewalPostPreservesDatabaseCancellation(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -368,13 +380,13 @@ func TestPlaySubscriptionRenewalPostPreservesDatabaseCancellation(t *testing.T) 
 					}
 				}
 			}()
-			// Keep the transaction live so cancellation occurs in GetUserAuth.
+			// Keep the transaction live so cancellation occurs in GetUserAuthInTx.
 			server.Tx(ctx, func(tx server.PgTx) {
-				postErr = PlaySubscriptionRenewalPost(args, result, clientSession, tx)
+				_, postErr = PlaySubscriptionRenewalPost(args, result, clientSession, tx)
 			})
 		}()
-		if !errors.Is(postErr, server.DbContextDoneError) {
-			t.Fatalf("canceled lookup error = %v, want database cancellation", postErr)
+		if !errors.Is(postErr, context.Canceled) {
+			t.Fatalf("canceled lookup error = %v, want the session's cancellation", postErr)
 		}
 		if sent != 0 {
 			t.Fatalf("sent %d notices after failed recipient lookup", sent)
@@ -447,8 +459,8 @@ func TestPlaySubscriptionRenewalFutureCancellationPreservesAndReschedules(t *tes
 		}
 
 		server.Tx(ctx, func(tx server.PgTx) {
-			if err := PlaySubscriptionRenewalPost(args, result, clientSession, tx); err != nil {
-				t.Fatalf("future cancellation post: %v", err)
+			if posts, err := PlaySubscriptionRenewalPost(args, result, clientSession, tx); err != nil || len(posts) != 0 {
+				t.Fatalf("future cancellation post: posts=%d err=%v", len(posts), err)
 			}
 		})
 		count, runAt := countScheduledPlayRenewals(t, ctx, purchaseToken)
@@ -465,13 +477,13 @@ func TestPlaySubscriptionRenewalFutureCancellationPreservesAndReschedules(t *tes
 		legacyToken := "synthetic-legacy-canceled"
 		legacyArgs := playTerminalTestArgs(networkId, env.packageName, legacyToken)
 		server.Tx(ctx, func(tx server.PgTx) {
-			if err := PlaySubscriptionRenewalPost(
+			if posts, err := PlaySubscriptionRenewalPost(
 				legacyArgs,
 				&PlaySubscriptionRenewalResult{Canceled: true},
 				clientSession,
 				tx,
-			); err != nil {
-				t.Fatalf("legacy canceled post: %v", err)
+			); err != nil || len(posts) != 0 {
+				t.Fatalf("legacy canceled post: posts=%d err=%v", len(posts), err)
 			}
 		})
 		if count, _ := countScheduledPlayRenewals(t, ctx, legacyToken); count != 0 {
@@ -485,7 +497,7 @@ func TestPlaySubscriptionRenewalFutureCancellationPreservesAndReschedules(t *tes
 		crossedArgs := playTerminalTestArgs(networkId, env.packageName, crossedToken)
 		beforePost := server.NowUtc()
 		server.Tx(ctx, func(tx server.PgTx) {
-			if err := PlaySubscriptionRenewalPost(
+			if posts, err := PlaySubscriptionRenewalPost(
 				crossedArgs,
 				&PlaySubscriptionRenewalResult{
 					Canceled:   true,
@@ -493,8 +505,8 @@ func TestPlaySubscriptionRenewalFutureCancellationPreservesAndReschedules(t *tes
 				},
 				clientSession,
 				tx,
-			); err != nil {
-				t.Fatalf("crossed-boundary canceled post: %v", err)
+			); err != nil || len(posts) != 0 {
+				t.Fatalf("crossed-boundary canceled post: posts=%d err=%v", len(posts), err)
 			}
 		})
 		afterPost := server.NowUtc()
@@ -633,8 +645,8 @@ func TestPlaySubscriptionRenewalGoneEndsIdempotentlyAndStops(t *testing.T) {
 			t.Fatalf("first gone result = %+v, want terminal end", first)
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
-			if err := PlaySubscriptionRenewalPost(args, first, clientSession, tx); err != nil {
-				t.Fatalf("gone renewal post: %v", err)
+			if posts, err := PlaySubscriptionRenewalPost(args, first, clientSession, tx); err != nil || len(posts) != 0 {
+				t.Fatalf("gone renewal post: posts=%d err=%v", len(posts), err)
 			}
 		})
 		if count, _ := countScheduledPlayRenewals(t, ctx, purchaseToken); count != 0 {

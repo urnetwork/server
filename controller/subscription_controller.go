@@ -1449,12 +1449,16 @@ func endTerminalPlaySubscriptionRenewal(
 	}, nil
 }
 
+// Runs in the transaction that finishes the renewal task and schedules the
+// next poll there. The subscription-ended notice is returned as work for after
+// that transaction commits: a finish that rolls back, or reruns its callback,
+// sends nothing, and the send does not hold the transaction open.
 func PlaySubscriptionRenewalPost(
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 	playSubscriptionRenewalResult *PlaySubscriptionRenewalResult,
 	clientSession *session.ClientSession,
 	tx server.PgTx,
-) error {
+) ([]server.PostFunction, error) {
 	if playSubscriptionRenewalResult.Canceled {
 		if !playSubscriptionRenewalResult.Terminal &&
 			!playSubscriptionRenewalResult.ExpiryTime.IsZero() {
@@ -1471,7 +1475,7 @@ func PlaySubscriptionRenewalPost(
 				playSubscriptionRenewal,
 			)
 		}
-		return nil
+		return nil, nil
 	}
 
 	if playSubscriptionRenewalResult.Renewed {
@@ -1495,23 +1499,34 @@ func PlaySubscriptionRenewalPost(
 		)
 	} else {
 		// else not renewed, stop trying
-		userAuth, err := model.GetUserAuth(clientSession.Ctx, playSubscriptionRenewal.NetworkId)
+		networkId := playSubscriptionRenewal.NetworkId
+		userAuth, err := model.GetUserAuthInTx(clientSession.Ctx, tx, networkId)
 		if err != nil {
 			if errors.Is(err, model.ErrMissingUserAuth) {
 				// The notice is optional; a wallet/guest account must not strand
 				// completed renewal post-processing for lack of a recipient.
-				return nil
+				return nil, nil
 			}
-			return err
+			return nil, err
 		}
-		awsMessageSender := GetAWSMessageSender()
-		awsMessageSender.SendAccountMessageTemplate(
-			userAuth,
-			&SubscriptionEndedTemplate{},
-		)
+		if userAuth == "" {
+			// the network or its admin is gone
+			return nil, nil
+		}
+		return []server.PostFunction{func() any {
+			awsMessageSender := GetAWSMessageSender()
+			err := awsMessageSender.SendAccountMessageTemplate(
+				userAuth,
+				&SubscriptionEndedTemplate{},
+			)
+			if err != nil {
+				glog.Infof("[sub]could not send the subscription ended notice for network %s: %s\n", networkId, err)
+			}
+			return nil
+		}}, nil
 	}
 
-	return nil
+	return nil, nil
 }
 
 func VerifyCoinbaseBody(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
