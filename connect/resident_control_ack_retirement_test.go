@@ -15,6 +15,14 @@ import (
 // a queued pack. The parked first operation is an exact dependency barrier;
 // no sleeps, database, customer traffic or remote contact are used.
 func TestResidentAcknowledgedControlQueueSurvivesTransportClose(t *testing.T) {
+	testResidentAcknowledgedControlQueueSurvivesRetirement(t, false)
+}
+
+func TestResidentAcknowledgedControlQueueSurvivesIdleExpiry(t *testing.T) {
+	testResidentAcknowledgedControlQueueSurvivesRetirement(t, true)
+}
+
+func testResidentAcknowledgedControlQueueSurvivesRetirement(t *testing.T, idleExpiry bool) {
 	testCtx, testCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer testCancel()
 	exchangeCtx, exchangeCancel := context.WithCancel(context.Background())
@@ -61,7 +69,16 @@ func TestResidentAcknowledgedControlQueueSurvivesTransportClose(t *testing.T) {
 		clientForwardUnsub: func() {},
 	}
 	resident.startClientCallbackWorkers()
-	resident.clientReceiveUnsub = residentClient.AddReceiveCallback(resident.handleClientReceive)
+	resident.clientReceiveUnsub = residentClient.AddReceiveCallback(func(source clientconnect.TransferPath, frames []*protocol.Frame, peer clientconnect.Peer) {
+		// Count only this control's two explicit frames. The SDK constructor
+		// can independently publish ClientKey before or after route attachment;
+		// counting that announcement made an otherwise correct join flaky.
+		for _, frame := range frames {
+			if frame.MessageType == protocol.MessageType_TestSimpleMessage || frame.MessageType == protocol.MessageType_TransferControlPing {
+				resident.handleClientReceive(source, []*protocol.Frame{frame}, peer)
+			}
+		}
+	})
 	exchange.residents[clientId] = resident
 
 	residentSend, residentReceive, closeTransport, err := resident.AddTransport()
@@ -164,6 +181,22 @@ func TestResidentAcknowledgedControlQueueSurvivesTransportClose(t *testing.T) {
 		t.Fatal("blocked first operation did not preserve ordered queue")
 	}
 
+	if idleExpiry {
+		// The control queue is ACKed and held before the watcher sees an
+		// expired resident. Use its actual cancellation/retirement path while
+		// keeping the exchange lifetime live through that observation.
+		resident.lastActivityNanos.Store(time.Now().Add(-settings.ExchangeResidentTtl).UnixNano())
+		idleDone := make(chan struct{})
+		go func() { defer close(idleDone); resident.runIdleWatcher() }()
+		select {
+		case <-idleDone:
+		case <-testCtx.Done():
+			t.Fatal("idle watcher did not retire the expired resident")
+		}
+		if exchange.ctx.Err() != nil {
+			t.Fatal("idle resident canceled its exchange")
+		}
+	}
 	exchange.Close()
 	idleResult := make(chan bool, 1)
 	go func() {

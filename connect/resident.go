@@ -1046,23 +1046,7 @@ func (self *Exchange) NominateLocalResidentWithContext(
 			glog.Infof("[r]close %s\n", clientId)
 		}
 	})
-	go server.HandleError(func() {
-		defer resident.Cancel()
-		for {
-			if resident.CancelIfIdle() {
-				if glog.V(1) {
-					glog.Infof("[r]idle %s\n", clientId)
-				}
-				return
-			}
-
-			select {
-			case <-resident.Done():
-				return
-			case <-time.After(self.settings.ExchangeResidentTtl):
-			}
-		}
-	})
+	go server.HandleError(resident.runIdleWatcher)
 	// poll the resident the same as exchange connections
 	go server.HandleError(func() {
 		defer resident.Cancel()
@@ -4647,6 +4631,31 @@ func (self *Resident) CancelIfIdle() bool {
 		return true
 	}
 	return false
+}
+
+// Retire after the existing idle allowance. A late constructor or activity
+// between timer wakes must not round that deadline up by another whole TTL.
+// Activity can move the deadline after arming; rechecking on wake preserves
+// that activity's full allowance without changing accepted control teardown.
+func (self *Resident) runIdleWatcher() {
+	defer self.Cancel()
+	timer := time.NewTimer(self.exchange.settings.ExchangeResidentTtl)
+	defer timer.Stop()
+	for {
+		if self.CancelIfIdle() {
+			if glog.V(1) {
+				glog.Infof("[r]idle %s\n", self.clientId)
+			}
+			return
+		}
+		remaining := self.exchange.settings.ExchangeResidentTtl - time.Since(time.Unix(0, self.lastActivityNanos.Load()))
+		timer.Reset(max(0, remaining))
+		select {
+		case <-self.Done():
+			return
+		case <-timer.C:
+		}
+	}
 }
 
 func (self *Resident) IsDone() bool {
