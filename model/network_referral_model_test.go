@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,4 +131,66 @@ func TestAddReferralBonusesGrantsBothSides(t *testing.T) {
 		connect.AssertEqual(t, GetActiveTransferBalanceByteCount(ctx, refereeAId)-beforeA, referredBonus)
 		connect.AssertEqual(t, GetActiveTransferBalanceByteCount(ctx, refereeBId)-beforeB, referredBonus)
 	})
+}
+
+// TestNetworkReferralRefusesSelfReferral pins that a network can never be its own
+// referral network, however its own code is spelled. The guard compared the looked-up
+// id pointer with the address of the local network id, which is never equal, so a
+// network could refer itself and collect both sides of the referral bonus.
+func TestNetworkReferralRefusesSelfReferral(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		referrerId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "self", networkId)
+		Testing_CreateNetwork(ctx, referrerId, "referrer", referrerId)
+
+		// give the network a code with an "I", so it can also be spelled with a
+		// dotless "ı" (U+0131), which upper-cases to "I" but does not case-fold to it
+		CreateNetworkReferralCode(ctx, networkId)
+		code := "I" + generateAlphanumericCode(5)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+					UPDATE network_referral_code
+					SET referral_code = $2
+					WHERE network_id = $1
+				`,
+				networkId,
+				code,
+			))
+		})
+		referrerCode := CreateNetworkReferralCode(ctx, referrerId)
+
+		// a refused self-referral must leave the existing referral in place
+		connect.AssertNotEqual(t, CreateNetworkReferral(ctx, networkId, referrerCode.ReferralCode), nil)
+
+		for _, spelling := range []string{
+			code,
+			strings.ToLower(code),
+			strings.ReplaceAll(strings.ToLower(code), "i", "\u0131"),
+		} {
+			connect.AssertEqual(t, CreateNetworkReferral(ctx, networkId, spelling), nil)
+		}
+
+		referralNetwork := GetReferralNetworkByChildNetworkId(ctx, networkId)
+		connect.AssertNotEqual(t, referralNetwork, nil)
+		connect.AssertEqual(t, referralNetwork.Id, referrerId)
+		connect.AssertEqual(t, len(GetReferralsByReferralNetworkId(ctx, networkId)), 0)
+	})
+}
+
+// TestIsSelfReferral pins that the self-referral guard compares id values. The
+// looked-up id is a separate copy of the network id, as GetNetworkIdByReferralCode
+// returns it, so a pointer comparison never matches.
+func TestIsSelfReferral(t *testing.T) {
+	networkId := server.NewId()
+	sameNetworkId := networkId
+	otherNetworkId := server.NewId()
+
+	connect.AssertEqual(t, isSelfReferral(networkId, &sameNetworkId), true)
+	connect.AssertEqual(t, isSelfReferral(networkId, &otherNetworkId), false)
+	connect.AssertEqual(t, isSelfReferral(networkId, nil), false)
 }

@@ -18,61 +18,157 @@ type SetPayoutWalletResult struct{}
 // so that a payout can never be directed to another network's wallet
 func SetPayoutWallet(ctx context.Context, networkId server.Id, walletId server.Id) (returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		// bittensor wallets are recorded for future use only; payouts run
-		// USDC on Solana/Polygon, so a TAO payout wallet would silently
-		// break payouts
-		var blockchain string
-		blockchainResult, err := tx.Query(
-			ctx,
-			`
-				SELECT blockchain
-				FROM account_wallet
-				WHERE
-						wallet_id = $2 AND
-						network_id = $1 AND
-						active = true
-			`,
-			networkId,
-			walletId,
-		)
-		server.WithPgResult(blockchainResult, err, func() {
-			if blockchainResult.Next() {
-				server.Raise(blockchainResult.Scan(&blockchain))
-			}
-		})
-		if parsedBlockchain, err := ParseBlockchain(blockchain); err == nil && parsedBlockchain == TAO {
-			returnErr = fmt.Errorf("Bittensor wallets cannot be the payout wallet.")
-			return
-		}
-
-		tag := server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-				INSERT INTO payout_wallet (
-						network_id,
-						wallet_id
-				)
-				SELECT
-						account_wallet.network_id,
-						account_wallet.wallet_id
-				FROM account_wallet
-				WHERE
-						account_wallet.wallet_id = $2 AND
-						account_wallet.network_id = $1 AND
-						account_wallet.active = true
-				ON CONFLICT (network_id) DO UPDATE
-				SET
-						wallet_id = $2
-			`,
-			networkId,
-			walletId,
-		))
-		if tag.RowsAffected() != 1 {
-			returnErr = fmt.Errorf("Wallet must be an active wallet owned by the network.")
-			return
-		}
+		returnErr = setPayoutWalletInTx(ctx, tx, networkId, walletId)
 	})
 	return
+}
+
+// setPayoutWalletInTx is SetPayoutWallet in the caller's transaction. Every
+// payout wallet selection goes through it, so the ownership, active and chain
+// rules are the same for an explicit choice and for a promotion.
+func setPayoutWalletInTx(ctx context.Context, tx server.PgTx, networkId server.Id, walletId server.Id) error {
+	// bittensor wallets are recorded for future use only; payouts run
+	// USDC on Solana/Polygon, so a TAO payout wallet would silently
+	// break payouts
+	var blockchain string
+	blockchainResult, err := tx.Query(
+		ctx,
+		`
+			SELECT blockchain
+			FROM account_wallet
+			WHERE
+					wallet_id = $2 AND
+					network_id = $1 AND
+					active = true
+		`,
+		networkId,
+		walletId,
+	)
+	server.WithPgResult(blockchainResult, err, func() {
+		if blockchainResult.Next() {
+			server.Raise(blockchainResult.Scan(&blockchain))
+		}
+	})
+	if parsedBlockchain, err := ParseBlockchain(blockchain); err == nil && parsedBlockchain == TAO {
+		return fmt.Errorf("Bittensor wallets cannot be the payout wallet.")
+	}
+
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO payout_wallet (
+					network_id,
+					wallet_id
+			)
+			SELECT
+					account_wallet.network_id,
+					account_wallet.wallet_id
+			FROM account_wallet
+			WHERE
+					account_wallet.wallet_id = $2 AND
+					account_wallet.network_id = $1 AND
+					account_wallet.active = true
+			ON CONFLICT (network_id) DO UPDATE
+			SET
+					wallet_id = $2
+		`,
+		networkId,
+		walletId,
+	))
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("Wallet must be an active wallet owned by the network.")
+	}
+	return nil
+}
+
+// an active wallet that could take over as the payout wallet
+type payoutWalletCandidate struct {
+	walletId   server.Id
+	blockchain string
+}
+
+// promotePayoutWalletInTx runs after removedWalletId, the payout wallet, was
+// removed in tx. Payments planned while a network has no payout wallet are
+// held until the user picks one, so another active wallet the network owns
+// takes over instead. Returns the promoted wallet, or nil when no active
+// Solana or Polygon wallet is left.
+func promotePayoutWalletInTx(ctx context.Context, tx server.PgTx, networkId server.Id, removedWalletId server.Id) *server.Id {
+	var removedBlockchain string
+	removedResult, err := tx.Query(
+		ctx,
+		`
+			SELECT blockchain
+			FROM account_wallet
+			WHERE
+					wallet_id = $2 AND
+					network_id = $1
+		`,
+		networkId,
+		removedWalletId,
+	)
+	server.WithPgResult(removedResult, err, func() {
+		if removedResult.Next() {
+			server.Raise(removedResult.Scan(&removedBlockchain))
+		}
+	})
+
+	candidates := []*payoutWalletCandidate{}
+	result, err := tx.Query(
+		ctx,
+		`
+			SELECT
+					wallet_id,
+					blockchain
+			FROM account_wallet
+			WHERE
+					network_id = $1 AND
+					active = true AND
+					wallet_id <> $2
+			ORDER BY create_time DESC, wallet_id
+		`,
+		networkId,
+		removedWalletId,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			candidate := &payoutWalletCandidate{}
+			server.Raise(result.Scan(&candidate.walletId, &candidate.blockchain))
+			candidates = append(candidates, candidate)
+		}
+	})
+
+	walletId := choosePromotedPayoutWallet(removedBlockchain, candidates)
+	if walletId == nil {
+		return nil
+	}
+	if err := setPayoutWalletInTx(ctx, tx, networkId, *walletId); err != nil {
+		return nil
+	}
+	return walletId
+}
+
+// choosePromotedPayoutWallet picks from candidates, newest first, the wallet
+// to promote: only a Solana or Polygon wallet can receive payouts (never a
+// Bittensor or Ethereum wallet, the same rule as adding a wallet), and the
+// removed wallet's chain wins over a newer wallet on the other chain. Stored
+// chain names vary in case and spelling, so they are parsed.
+func choosePromotedPayoutWallet(removedBlockchain string, candidates []*payoutWalletCandidate) *server.Id {
+	removedChain, removedErr := ParseBlockchain(removedBlockchain)
+	var promoted *server.Id
+	for _, candidate := range candidates {
+		chain, err := ParseBlockchain(candidate.blockchain)
+		if err != nil || (chain != SOL && chain != MATIC) {
+			continue
+		}
+		walletId := candidate.walletId
+		if removedErr == nil && chain == removedChain {
+			return &walletId
+		}
+		if promoted == nil {
+			promoted = &walletId
+		}
+	}
+	return promoted
 }
 
 // returns the payout wallet only when it is an active wallet owned by the
@@ -114,8 +210,9 @@ func deletePayoutWallet(walletId server.Id, session *session.ClientSession) {
 
 // Wallet deactivation owns the same transaction as its payout selection. An
 // independent checkout can exhaust the pool and commit only half the removal.
-func deletePayoutWalletInTx(ctx context.Context, tx server.PgTx, walletId, networkId server.Id) {
-	server.RaisePgResult(tx.Exec(
+// Returns whether walletId was the network's payout wallet.
+func deletePayoutWalletInTx(ctx context.Context, tx server.PgTx, walletId, networkId server.Id) bool {
+	tag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
             DELETE FROM payout_wallet
@@ -126,4 +223,5 @@ func deletePayoutWalletInTx(ctx context.Context, tx server.PgTx, walletId, netwo
 		walletId,
 		networkId,
 	))
+	return tag.RowsAffected() == 1
 }

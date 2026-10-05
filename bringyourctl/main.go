@@ -1024,7 +1024,15 @@ func networkRemove(opts docopt.Opts) {
 	if err != nil {
 		panic(err)
 	}
-	model.RemoveNetwork(ctx, networkId, &userId)
+	// No store steps run here, so this passes no store snapshot: any active
+	// Stripe, App Store or Google Play renewal refuses the removal. Cancel it
+	// at the store (or let it end) first.
+	outcome, _ := model.RemoveNetworkWithStoreSnapshot(ctx, networkId, &userId, nil)
+	if outcome != model.RemoveNetworkRemoved {
+		fmt.Printf("network %s was not removed: %s\n", networkId, outcome)
+		os.Exit(1)
+	}
+	fmt.Printf("network %s removed\n", networkId)
 }
 
 func balanceCodeCreate(opts docopt.Opts) {

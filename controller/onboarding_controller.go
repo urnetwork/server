@@ -25,6 +25,9 @@ import (
 // onboarding_stripe_controller.go.
 
 type OnboardingError struct {
+	// one of the `PurchaseErrorCode*` values, when the refusal has one. Added
+	// after `Message`; older clients ignore it.
+	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 }
 

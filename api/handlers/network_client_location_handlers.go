@@ -38,3 +38,11 @@ func NetworkFindProviders(w http.ResponseWriter, r *http.Request) {
 func NetworkFindProviders2(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputNoAuth(model.FindProviders2, w, r)
 }
+
+// Bind the router-owned appearance counter without replacing the HTTP
+// request's cancellation and deadline.
+func NetworkFindProviders2WithAppearances(appearances *model.ProviderAppearances) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		NetworkFindProviders2(w, r.WithContext(model.WithProviderAppearances(r.Context(), appearances)))
+	}
+}
