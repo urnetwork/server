@@ -829,4 +829,5 @@ var snMainnetMigrationContracts = []snMainnetMigrationContract{
 		snMainnetMigrationFunction("verify_original_request_index_body(bytea)", "jsonb", "plpgsql", "i", true, snMainnetVerifyIndexProjectionBody, "original"),
 		snMainnetMigrationFunction("verify_original_request_capture()", "trigger", "plpgsql", "v", false, snMainnetVerifyCaptureBody),
 		snMainnetMigrationFunction("verify_original_request_closed_fence()", "trigger", "plpgsql", "v", false, snMainnetVerifyFenceBody)),
+	snMainnetNativeFeeMigrationContract(),
 }
