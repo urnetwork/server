@@ -7173,3 +7173,28 @@ total database CPU or establish the requesting process.
 
 Root ledger T590 records API adoption, local pooler compatibility controls,
 and remaining outage boundaries. FP2FIX and end-to-end recovery remain open.
+
+### 2026-10-05 04:35 UTC connection restored; rolling coverage remains open
+
+The user reports that provider connection is working again. Alt investigation is
+out of scope at the user's instruction; public discovery checks do not establish
+which service change restored the connection. The fresh 03:24 public picker
+returned 87 country candidates in 0.504 seconds. Quality and Speed selection each
+returned three valid US IPv4 candidates in 0.697 and 1.787 seconds respectively;
+the response bodies were parsed in memory and discarded.
+
+The retained 04:32:51 census reports 39,651 of 75,285 eligible providers
+quota-complete (52.67%), 39,632 secure-complete, and 61,760 measured runs needed.
+There are 34,859 overdue and 794 warming providers, with no uninitialized cycles.
+Its source age was 57.1 seconds. These dynamic-cohort counts show a lower aggregate
+deficit than the 03:16 snapshot, not fixed-provider progress or sustained capacity.
+The earlier 66.48 accepted outcomes/s remains historical; current hourly visibility
+is incomplete and a fresh rate is required after the next Taskworker rollout.
+
+Uniform release source `536c2f3db5c73a308e5d8b504ffcfbfcf2df42c8` retains the
+Taskworker census lifetime and eligibility repairs from `0c90117a`. Root started
+the API deployment after its image gate; Connect and Taskworker rollout/adoption
+remain separate acceptance steps. Do not delay that rollout for an old-generation
+rate pair. Root ledger T592 retains the recovery report and rollout boundary.
+FP2FIX remains open until current eligible providers satisfy the rolling quota
+and the independent quality, security and operational requirements.
