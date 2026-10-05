@@ -1,3 +1,4 @@
+// Collect bounded command output before admitting host inventory identities.
 package main
 
 import (
@@ -22,25 +23,32 @@ import (
 
 const captureInspectTemplate = `{"id":{{json .Id}},"pid":{{json .State.Pid}},"image":{{json .Image}},"started_at":{{json .State.StartedAt}},"environment":{{json (index .Config.Labels "warp.env")}},"service":{{json (index .Config.Labels "warp.service")}},"block":{{json (index .Config.Labels "warp.block")}},"version":{{json (index .Config.Labels "version")}}`
 
+// A private buffer prevents ReadFrom promotion from bypassing Write's bound
+// while the owned Docker command drains its output pipe.
 type captureBoundedOutput struct {
-	bytes.Buffer
-	limit int
+	buffer bytes.Buffer
+	limit  int
 }
 
-func (b *captureBoundedOutput) Write(p []byte) (int, error) {
-	if b.Len()+len(p) > b.limit {
+// Excess output is rejected before growing the retained inventory.
+func (self *captureBoundedOutput) Write(raw []byte) (int, error) {
+	if len(raw) > self.limit-self.buffer.Len() {
 		return 0, invalid
 	}
-	return b.Buffer.Write(p)
+	return self.buffer.Write(raw)
 }
 
+// The caller borrows the bounded result after the command has joined.
+func (self *captureBoundedOutput) Bytes() []byte { return self.buffer.Bytes() }
+
+// Own and join the command before exposing its bounded inventory bytes.
 func captureDocker(ctx context.Context, executable string, args ...string) ([]byte, error) {
 	bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	command := exec.CommandContext(bounded, executable, args...)
 	command.Stderr = nil
 	command.WaitDelay = time.Second
-	output := &captureBoundedOutput{limit: 256 << 10}
+	output := &captureBoundedOutput{limit: 256 * 1024}
 	command.Stdout = output
 	if command.Run() != nil || bounded.Err() != nil {
 		return nil, invalid
