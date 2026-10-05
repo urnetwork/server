@@ -391,6 +391,9 @@ type ExchangeSettings struct {
 	// the Exchange; nil leaves SDK lifecycle accounting disabled.
 	MemoryOwnerLedger  *connect.TransferMemoryOwnerLedger
 	payloadOwnerLedger *residentPayloadLedger
+	// Optional private diagnostic scope, independent of lifecycle metrics.
+	// Captured once; nil leaves SDK packet-path accounting disabled.
+	SDKPayloadOwnerLedger *connect.TransferPayloadOwnerLedger
 
 	// `send` queue depth of a `ResidentForward` to a peer resident. Kept
 	// separate from `ExchangeBufferSize` so production can hold a deep queue
@@ -655,9 +658,10 @@ type Exchange struct {
 	hostToServicePorts map[int]int
 	routes             map[string]string
 
-	settings           *ExchangeSettings
-	memoryOwnerLedger  *connect.TransferMemoryOwnerLedger
-	payloadOwnerLedger *residentPayloadLedger
+	settings              *ExchangeSettings
+	memoryOwnerLedger     *connect.TransferMemoryOwnerLedger
+	payloadOwnerLedger    *residentPayloadLedger
+	sdkPayloadOwnerLedger *connect.TransferPayloadOwnerLedger
 	// Optional already-bound sockets keyed by service port. Tests use these to
 	// eliminate release-to-rebind races and cross-process SO_REUSEPORT
 	// interference. The Exchange owns and closes every supplied listener.
@@ -766,21 +770,22 @@ func newExchange(
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	exchange := &Exchange{
-		ctx:                  cancelCtx,
-		cancel:               cancel,
-		host:                 host,
-		service:              service,
-		block:                block,
-		hostToServicePorts:   hostToServicePorts,
-		routes:               routes,
-		settings:             settings,
-		memoryOwnerLedger:    settings.MemoryOwnerLedger,
-		payloadOwnerLedger:   settings.payloadOwnerLedger,
-		servicePortListeners: servicePortListeners,
-		residents:            map[server.Id]*Resident{},
-		residentChanges:      map[server.Id]chan struct{}{},
-		connections:          map[server.Id]map[server.Id]context.CancelFunc{},
-		drainedClients:       map[server.Id]struct{}{},
+		ctx:                   cancelCtx,
+		cancel:                cancel,
+		host:                  host,
+		service:               service,
+		block:                 block,
+		hostToServicePorts:    hostToServicePorts,
+		routes:                routes,
+		settings:              settings,
+		memoryOwnerLedger:     settings.MemoryOwnerLedger,
+		payloadOwnerLedger:    settings.payloadOwnerLedger,
+		sdkPayloadOwnerLedger: settings.SDKPayloadOwnerLedger,
+		servicePortListeners:  servicePortListeners,
+		residents:             map[server.Id]*Resident{},
+		residentChanges:       map[server.Id]chan struct{}{},
+		connections:           map[server.Id]map[server.Id]context.CancelFunc{},
+		drainedClients:        map[server.Id]struct{}{},
 	}
 
 	if settings.KeyEventDelivery.Enabled {
