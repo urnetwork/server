@@ -217,7 +217,7 @@ func TestGetPayoutWalletIdIgnoresStaleRows(t *testing.T) {
 // The promoted wallet can receive payouts (Solana or Polygon, whatever the
 // stored spelling), the removed wallet's chain wins over a newer wallet on
 // the other chain, and otherwise the newest wallet wins. Candidates are
-// newest first, as promotePayoutWalletInTx reads them.
+// newest first, as RemoveWallet reads them.
 func TestChoosePromotedPayoutWallet(t *testing.T) {
 	// a candidate is "name:blockchain"
 	for _, c := range []struct {

@@ -87,65 +87,6 @@ type payoutWalletCandidate struct {
 	blockchain string
 }
 
-// Runs after removedWalletId, the payout wallet, was removed in tx. Payments
-// planned while a network has no payout wallet are held until the user picks
-// one, so another active wallet the network owns takes over instead. Returns
-// the promoted wallet, or nil when no active Solana or Polygon wallet is left.
-func promotePayoutWalletInTx(ctx context.Context, tx server.PgTx, networkId server.Id, removedWalletId server.Id) *server.Id {
-	var removedBlockchain string
-	removedResult, err := tx.Query(
-		ctx,
-		`
-			SELECT blockchain
-			FROM account_wallet
-			WHERE
-					wallet_id = $2 AND
-					network_id = $1
-		`,
-		networkId,
-		removedWalletId,
-	)
-	server.WithPgResult(removedResult, err, func() {
-		if removedResult.Next() {
-			server.Raise(removedResult.Scan(&removedBlockchain))
-		}
-	})
-
-	candidates := []*payoutWalletCandidate{}
-	result, err := tx.Query(
-		ctx,
-		`
-			SELECT
-					wallet_id,
-					blockchain
-			FROM account_wallet
-			WHERE
-					network_id = $1 AND
-					active = true AND
-					wallet_id <> $2
-			ORDER BY create_time DESC, wallet_id
-		`,
-		networkId,
-		removedWalletId,
-	)
-	server.WithPgResult(result, err, func() {
-		for result.Next() {
-			candidate := &payoutWalletCandidate{}
-			server.Raise(result.Scan(&candidate.walletId, &candidate.blockchain))
-			candidates = append(candidates, candidate)
-		}
-	})
-
-	walletId := choosePromotedPayoutWallet(removedBlockchain, candidates)
-	if walletId == nil {
-		return nil
-	}
-	if err := setPayoutWalletInTx(ctx, tx, networkId, *walletId); err != nil {
-		return nil
-	}
-	return walletId
-}
-
 // Picks from candidates, newest first, the wallet to promote: only a Solana or
 // Polygon wallet can receive payouts (never a Bittensor or Ethereum wallet, the
 // same rule as adding a wallet), and the removed wallet's chain wins over a
