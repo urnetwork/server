@@ -307,6 +307,7 @@ func TestUrlProbeConcurrentReceiptsKeepRollingProgress(t *testing.T) {
 				(client_id,cycle_started_at,next_attempt_at) VALUES($1,$2,$2)`, clientId, token))
 		})
 		var receipts sync.WaitGroup
+		start := make(chan struct{})
 		for index := range 20 {
 			ok := index % 2
 			health := ProviderEgressHealth{RunId: server.NewId(), ClientId: clientId,
@@ -315,10 +316,12 @@ func TestUrlProbeConcurrentReceiptsKeepRollingProgress(t *testing.T) {
 				receipts.Add(1)
 				go func() {
 					defer receipts.Done()
+					<-start
 					testingSetUrlProbeHealth(ctx, &health)
 				}()
 			}
 		}
+		close(start)
 		receipts.Wait()
 		server.Db(ctx, func(conn server.PgConn) {
 			rows, err := conn.Query(ctx, `SELECT success_count,error_count,outcome_count,next_attempt_at,
@@ -331,8 +334,12 @@ func TestUrlProbeConcurrentReceiptsKeepRollingProgress(t *testing.T) {
 				var successes, errors, ordinal, history int
 				var next time.Time
 				server.Raise(rows.Scan(&successes, &errors, &ordinal, &next, &history))
-				if successes != 10 || errors != 10 || ordinal != 20 || history != 20 || !next.Equal(now.Add(4*time.Hour)) {
-					t.Fatalf("concurrent receipts lost or duplicated progress: success=%d error=%d ordinal=%d history=%d next=%s", successes, errors, ordinal, history, next)
+				if successes != 10 || errors != 10 || ordinal != 20 || history != 20 {
+					t.Fatalf("concurrent receipts lost or duplicated progress: success=%d error=%d ordinal=%d history=%d", successes, errors, ordinal, history)
+				}
+				renewalAt := now.Add(ProviderEgressProbeRefreshAge - ProviderUrlProbeRenewalHeadroom)
+				if !next.Equal(renewalAt) {
+					t.Fatalf("concurrent receipts lost oldest-measurement renewal pacing: got %s, want %s", next, renewalAt)
 				}
 			})
 		})
