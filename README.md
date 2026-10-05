@@ -14,9 +14,11 @@ GOWORK=off GOTOOLCHAIN=local go test -mod=readonly -p 2 ./local/source-graph -co
 ```
 
 Review and update the workflow refs together when changing the source graph.
-Connect owns the tracked `sctp/` fork. The pinned gVisor sibling also supplies
-SN's module when the server test suite compiles its fixture generator; the
-server module selects the same fork through its immutable module replacement.
+Connect owns the tracked `sctp/` fork. Server and SN's fixture generator consume
+the same local gVisor sibling, whose revision is locked by the workflow. Frozen
+PERF arms therefore use their own captured source. The release builder converts
+this local replacement to the checked-out fork's immutable module revision when
+preparing published modules.
 These compile checks do not run integration fixtures.
 
 ## Local integration tests
