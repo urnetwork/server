@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -9,6 +10,10 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
+
+// The account_wallet.default_token_type column is varchar(16)
+// (db_migrations.go), and varchar counts characters, not bytes.
+const MaxWalletDefaultTokenTypeLength = 16
 
 type WalletType = string
 
@@ -77,6 +82,13 @@ func CreateAccountWalletExternal(
 		)
 
 		err := existingRow.Scan(&existingWalletId)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			// a failed statement ends the transaction at once. It used to be
+			// taken for "no wallet", and the insert below then failed too,
+			// after which the transaction went on to a commit that server.Tx
+			// retried for a minute.
+			server.Raise(err)
+		}
 		if err == nil {
 
 			glog.Infof("[wm][%s]found existing wallet %s for address %s", createAccountWallet.NetworkId, existingWalletId, createAccountWallet.WalletAddress)
@@ -96,8 +108,9 @@ func CreateAccountWalletExternal(
 			return
 		}
 
-		// No existing wallet found, create a new one
-		_, err = tx.Exec(
+		// No existing wallet found, create a new one. A failed insert raises,
+		// which ends the transaction at once.
+		server.RaisePgResult(tx.Exec(
 			session.Ctx,
 			`
 				INSERT INTO account_wallet (
@@ -120,11 +133,7 @@ func CreateAccountWalletExternal(
 			active,
 			createAccountWallet.DefaultTokenType,
 			createTime,
-		)
-
-		if err != nil {
-			return
-		}
+		))
 
 		walletId = &id
 	})
@@ -145,7 +154,8 @@ func CreateAccountWalletCircle(
 		active := true
 		createTime := server.NowUtc()
 
-		_, err := tx.Exec(
+		// a failed insert raises, which ends the transaction at once
+		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				INSERT INTO account_wallet (
@@ -170,11 +180,7 @@ func CreateAccountWalletCircle(
 			createAccountWallet.DefaultTokenType,
 			createTime,
 			createAccountWallet.CircleWalletId,
-		)
-
-		if err != nil {
-			return
-		}
+		))
 
 		walletId = &id
 	})

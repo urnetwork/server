@@ -2,10 +2,15 @@ package controller
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
@@ -196,4 +201,92 @@ func TestSeekerNFTVerification(t *testing.T) {
 	connect.AssertEqual(t, isSeekerNftHolder(loadAssets("non_holder")), false)
 	// saga holding alone does not make a seeker holder
 	connect.AssertEqual(t, isSeekerNftHolder(loadAssets("saga_holder")), false)
+}
+
+// A default token type the column cannot store is refused with a 400 before
+// anything is written: over the varchar(16) column, counted in characters, or
+// with a NUL character. Such a value used to fail the insert, after which the
+// transaction went on to a commit that server.Tx retried for a minute. Each
+// call here has a deadline far inside that minute, and each refused value is
+// also refused with the caller's context already canceled, so no transaction is
+// opened for it at all.
+func TestCreateAccountWalletExternalRefusesTokenTypeTheColumnCannotStore(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "test", userId)
+		byJwt := &jwt.ByJwt{
+			NetworkId: networkId,
+			UserId:    userId,
+		}
+
+		// a synthetic polygon address, valid for the endpoint
+		addressBytes := make([]byte, 20)
+		if _, err := rand.Read(addressBytes); err != nil {
+			t.Fatal(err)
+		}
+		walletAddress := "0x" + hex.EncodeToString(addressBytes)
+
+		for _, c := range []struct {
+			name      string
+			tokenType string
+		}{
+			{
+				name:      "17 characters",
+				tokenType: strings.Repeat("T", model.MaxWalletDefaultTokenTypeLength+1),
+			},
+			{
+				name:      "17 two-byte characters",
+				tokenType: strings.Repeat("é", model.MaxWalletDefaultTokenTypeLength+1),
+			},
+			{
+				name:      "a nul character",
+				tokenType: "US\x00DC",
+			},
+		} {
+			callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			canceledCtx, cancelCanceled := context.WithCancel(ctx)
+			cancelCanceled()
+			for _, callSession := range []*session.ClientSession{
+				session.Testing_CreateClientSession(callCtx, byJwt),
+				session.Testing_CreateClientSession(canceledCtx, byJwt),
+			} {
+				result, err, panicValue := func() (createResult *model.CreateAccountWalletResult, createErr error, panicValue any) {
+					defer func() {
+						panicValue = recover()
+					}()
+					createResult, createErr = CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{
+						Blockchain:       "MATIC",
+						WalletAddress:    walletAddress,
+						DefaultTokenType: c.tokenType,
+					}, callSession)
+					return
+				}()
+				if panicValue != nil || result != nil || !errors.Is(err, ErrInvalidDefaultTokenType) {
+					t.Errorf("%s: answered %+v %v %v, want the refusal", c.name, result, err, panicValue)
+				}
+			}
+			if callCtx.Err() != nil {
+				t.Errorf("%s: the call outlasted its deadline", c.name)
+			}
+			cancel()
+		}
+		wallets := model.GetActiveAccountWallets(session.Testing_CreateClientSession(ctx, byJwt))
+		connect.AssertEqual(t, len(wallets.Wallets), 0)
+
+		// the longest token type the column stores
+		longestTokenType := strings.Repeat("é", model.MaxWalletDefaultTokenTypeLength)
+		result, err := CreateAccountWalletExternal(&model.CreateAccountWalletExternalArgs{
+			Blockchain:       "MATIC",
+			WalletAddress:    walletAddress,
+			DefaultTokenType: longestTokenType,
+		}, session.Testing_CreateClientSession(ctx, byJwt))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertNotEqual(t, result, nil)
+		wallets = model.GetActiveAccountWallets(session.Testing_CreateClientSession(ctx, byJwt))
+		connect.AssertEqual(t, len(wallets.Wallets), 1)
+		connect.AssertEqual(t, wallets.Wallets[0].DefaultTokenType, longestTokenType)
+	})
 }

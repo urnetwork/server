@@ -329,7 +329,10 @@ func LoadAppleOfferCodePool(ctx context.Context, codes []*AppleOfferCode) (added
 			if value == "" {
 				continue
 			}
-			tag, err := tx.Exec(
+			// a failed insert raises, which ends the transaction at once. It
+			// used to set the error result while the transaction went on to a
+			// commit that server.Tx retried for a minute.
+			tag := server.RaisePgResult(tx.Exec(
 				ctx,
 				`
 					INSERT INTO network_onboarding_apple_offer_code (code, expires_at)
@@ -338,11 +341,7 @@ func LoadAppleOfferCodePool(ctx context.Context, codes []*AppleOfferCode) (added
 				`,
 				value,
 				code.ExpiresAt,
-			)
-			if err != nil {
-				returnErr = err
-				return
-			}
+			))
 			added += int(tag.RowsAffected())
 		}
 	}, server.TxReadCommitted)

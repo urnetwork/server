@@ -312,40 +312,6 @@ func GetProxyDeviceConnection(ctx context.Context, proxyId server.Id) (proxyDevi
 	return
 }
 
-func GetProxyDeviceConnectionForClient(
-	ctx context.Context,
-	clientId server.Id,
-	instanceId server.Id,
-) (proxyDeviceConnection *ProxyDeviceConnection) {
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-			SELECT
-				proxy_id
-			FROM proxy_device_config
-			WHERE
-				client_id = $1 AND
-				instance_id = $2
-			`,
-			clientId,
-			instanceId,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				var proxyId server.Id
-				server.Raise(result.Scan(&clientId, &instanceId))
-				proxyDeviceConnection = &ProxyDeviceConnection{
-					ProxyId:    proxyId,
-					ClientId:   clientId,
-					InstanceId: instanceId,
-				}
-			}
-		})
-	})
-	return
-}
-
 // Creates the config in its own transaction, then its redis mirror.
 // auth-client writes the config in the client's own transaction instead (see
 // createProxyDeviceConfigInTx).

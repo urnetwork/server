@@ -223,3 +223,117 @@ func TestMarkWalletSeekerHolderRaisesWriteFailure(t *testing.T) {
 		}
 	})
 }
+
+// A failed statement in a wallet creation surfaces at once with its own
+// error and creates nothing. CreateAccountWalletExternal used to take any
+// failed lookup for "no wallet" and then return nil after a failed insert, and
+// CreateAccountWalletCircle returned nil after a failed insert; either way the
+// transaction went on to a commit that server.Tx retried for a minute.
+func TestCreateAccountWalletStatementFailuresSurfaceAtOnce(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		networkId := server.NewId()
+		userId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "test", userId)
+		byJwt := &jwt.ByJwt{
+			NetworkId: networkId,
+			UserId:    userId,
+		}
+
+		walletCount := func() (count int) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(
+					ctx,
+					`SELECT count(*) FROM account_wallet WHERE network_id = $1`,
+					networkId,
+				).Scan(&count))
+			})
+			return
+		}
+		createExternal := func(callCtx context.Context) {
+			CreateAccountWalletExternal(
+				session.Testing_CreateClientSession(callCtx, byJwt),
+				&CreateAccountWalletExternalArgs{
+					NetworkId:        networkId,
+					Blockchain:       SOL.String(),
+					WalletAddress:    "external-wallet-test-address",
+					DefaultTokenType: "USDC",
+				},
+			)
+		}
+		createCircle := func(callCtx context.Context) {
+			CreateAccountWalletCircle(callCtx, &CreateAccountWalletCircleArgs{
+				NetworkId:        networkId,
+				Blockchain:       SOL.String(),
+				WalletAddress:    "circle-wallet-test-address",
+				DefaultTokenType: "USDC",
+				CircleWalletId:   server.NewId().String(),
+			})
+		}
+
+		for _, c := range []struct {
+			name    string
+			force   func() (restore func())
+			call    func(callCtx context.Context)
+			code    string
+			message string
+		}{
+			{
+				name: "the external wallet's insert",
+				force: func() func() {
+					return forceStatementFailures(ctx, "account_wallet", "INSERT")
+				},
+				call:    createExternal,
+				code:    "P0001",
+				message: "injected failure on INSERT account_wallet",
+			},
+			{
+				name: "the external wallet's lookup",
+				force: func() func() {
+					return forceTableUnavailable(ctx, "account_wallet")
+				},
+				call: createExternal,
+				code: "42P01",
+			},
+			{
+				name: "the circle wallet's insert",
+				force: func() func() {
+					return forceStatementFailures(ctx, "account_wallet", "INSERT")
+				},
+				call:    createCircle,
+				code:    "P0001",
+				message: "injected failure on INSERT account_wallet",
+			},
+		} {
+			restore := c.force()
+			panicValue := callWithForcedFailure(ctx, c.call)
+			restore()
+			if !isForcedFailure(panicValue, c.code, c.message) {
+				t.Errorf("%s: the failed statement ended with %v, want the %s failure", c.name, panicValue, c.code)
+			}
+		}
+		connect.AssertEqual(t, walletCount(), 0)
+	})
+}
+
+// The token type limit is the column's own: information_schema reports the
+// account_wallet.default_token_type length the migrations created.
+func TestWalletDefaultTokenTypeLimitMatchesColumn(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+
+		var columnLength int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(
+				ctx,
+				`
+				SELECT character_maximum_length
+				FROM information_schema.columns
+				WHERE table_schema = current_schema() AND table_name = 'account_wallet' AND column_name = 'default_token_type'
+				`,
+			).Scan(&columnLength))
+		})
+		connect.AssertEqual(t, columnLength, MaxWalletDefaultTokenTypeLength)
+	})
+}
