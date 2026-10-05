@@ -80,7 +80,7 @@ func (self *UrlProbeEvidence) Validate() error {
 	if err := self.Policy.Validate(); err != nil {
 		return err
 	}
-	if self.ContentMatcherVersion != 1 {
+	if self.ContentMatcherVersion != 1 && self.ContentMatcherVersion != UrlProbeContentMatcherVersion {
 		return fmt.Errorf("URL content matcher version %d is unsupported", self.ContentMatcherVersion)
 	}
 	if UrlProbeDestinationKey(self.Destination) == "" || len(self.Destination.Name) == 0 || len(self.Destination.Name) > 256 || len(self.Destination.Url) > 4096 || self.MeasuredAt.IsZero() || len(self.Security) > 6 {
@@ -130,7 +130,7 @@ func (self *UrlProbeEvidence) ValidateOutcome(ok, total int, tlsFailure bool) er
 	if ok == 0 {
 		return nil
 	}
-	if tlsFailure || self.ContentMatcherVersion != 1 || self.ContentClassification != "content" || self.FailureStage != "" ||
+	if tlsFailure || self.ContentClassification != "content" || self.FailureStage != "" ||
 		self.StatusCode < 200 || self.StatusCode >= 300 || self.ByteCount == 0 || self.WireByteCount == 0 ||
 		!self.RequestWritten || !self.FirstByteReceived || len(self.Security) != self.RedirectCount+1 {
 		return fmt.Errorf("URL success is missing authenticated real-content or final-request timing evidence")

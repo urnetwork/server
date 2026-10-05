@@ -12,8 +12,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-
-	"golang.org/x/net/html"
 )
 
 // A production transport grants only this request's exact redirect target.
@@ -331,8 +329,7 @@ func judgeUrlProbeContent(destination Destination, response *http.Response, body
 	if strings.EqualFold(response.Header.Get("Cf-Mitigated"), "challenge") ||
 		strings.EqualFold(response.Header.Get("X-Amzn-Waf-Action"), "captcha") ||
 		strings.EqualFold(response.Header.Get("X-Amzn-Waf-Action"), "challenge") ||
-		(page.challengeTitle && (page.challengeScript || page.captchaWidget)) ||
-		(page.googleSorryForm && page.unusualTraffic) {
+		page.humanGate {
 		return "captcha", fmt.Errorf("URL returned a CAPTCHA or browser challenge")
 	}
 	if response.StatusCode == http.StatusNetworkAuthenticationRequired ||
@@ -349,66 +346,4 @@ func judgeUrlProbeContent(destination Destination, response *http.Response, body
 		return "body_contract", fmt.Errorf("final URL body did not match its configured contract: %w", err)
 	}
 	return "content", nil
-}
-
-type urlProbeHtml struct {
-	form, captchaWidget, challengeScript, challengeTitle, googleSorryForm, unusualTraffic, portalTitle bool
-}
-
-// Matcher version1. Markers must occur in live HTML structure, not comments or
-// script/article strings. Widgets and Cloudflare JS detection alone are normal
-// page features. Provider docs: cf-mitigated and x-amzn-waf-action are explicit;
-// Google /sorry plus visible unusual-traffic text is a conservative heuristic.
-func inspectUrlProbeHtml(body []byte) urlProbeHtml {
-	page := urlProbeHtml{}
-	root, err := html.Parse(bytes.NewReader(body))
-	if err != nil {
-		return page
-	}
-	var visit func(*html.Node, bool, bool)
-	visit = func(node *html.Node, inTitle, ignored bool) {
-		if node.Type == html.ElementNode {
-			switch node.Data {
-			case "title":
-				inTitle = true
-			case "script", "style", "template", "pre", "code":
-				ignored = true
-			case "form":
-				page.form = true
-			}
-			for _, attribute := range node.Attr {
-				value := strings.ToLower(attribute.Val)
-				if node.Data == "script" && attribute.Key == "src" && strings.Contains(value, "/cdn-cgi/challenge-platform/") && !strings.Contains(value, "/scripts/jsd") {
-					page.challengeScript = true
-				}
-				if attribute.Key == "class" || attribute.Key == "id" {
-					for _, token := range strings.Fields(value) {
-						if token == "g-recaptcha" || token == "h-captcha" || token == "cf-turnstile" {
-							page.captchaWidget = true
-						}
-					}
-				}
-				if node.Data == "form" && attribute.Key == "action" && (strings.HasPrefix(value, "/sorry/") || strings.Contains(value, "google.com/sorry/")) {
-					page.googleSorryForm = true
-				}
-			}
-		}
-		if node.Type == html.TextNode && !ignored {
-			value := strings.ToLower(strings.Join(strings.Fields(node.Data), " "))
-			if inTitle {
-				for _, marker := range []string{"verify you are human", "confirm you are human", "security check", "just a moment", "captcha verification"} {
-					page.challengeTitle = page.challengeTitle || strings.Contains(value, marker)
-				}
-				for _, marker := range []string{"wi-fi sign in", "wifi sign in", "captive portal", "sign in to this network", "log in to this network"} {
-					page.portalTitle = page.portalTitle || strings.Contains(value, marker)
-				}
-			}
-			page.unusualTraffic = page.unusualTraffic || strings.Contains(value, "unusual traffic from your computer network")
-		}
-		for child := node.FirstChild; child != nil; child = child.NextSibling {
-			visit(child, inTitle, ignored)
-		}
-	}
-	visit(root, false, false)
-	return page
 }

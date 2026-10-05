@@ -58,7 +58,7 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 				PolicyVersion: UrlProbePolicyVersion, Policy: opts.urlProbePolicy(),
 				Destination: chosen, MeasuredAt: opts.now(), Security: check.UrlProbeSecurity,
 				ContentClassification: check.ContentClassification, PerformanceClassification: check.PerformanceClassification,
-				FailureStage: check.FailureStage, ContentMatcherVersion: 1,
+				FailureStage: check.FailureStage, ContentMatcherVersion: UrlProbeContentMatcherVersion,
 				StatusCode: check.StatusCode, RedirectCount: check.RedirectCount, ByteCount: check.ByteCount, WireByteCount: check.WireByteCount, BodyComplete: check.BodyComplete,
 				BodySampled:         check.BodySampled,
 				WireSampleByteCount: check.WireSampleByteCount,
