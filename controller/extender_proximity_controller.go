@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -61,31 +62,45 @@ func DefaultExtenderLatencyReportSettings() *ExtenderLatencyReportSettings {
 }
 
 // The hint: the continent the operator places the caller's address on, upper
-// case, the same mapping the geo dns and the record tag use. Empty when the
-// operator cannot place the caller, which a client treats as no hint rather
-// than as a continent.
+// case, the same mapping the geo dns and the record tag use, and the country
+// of that address, lower case ISO 3166-1 alpha-2 as every location the api
+// returns, which picks the spoof list the client fronts its extender dials
+// with (connect/EXTENDER.md A10). Each is empty when the operator cannot place
+// the caller, which a client treats as no hint rather than as a place.
 type ExtenderHintResult struct {
 	ContinentCode string `json:"continent_code"`
+	CountryCode   string `json:"country_code"`
 }
 
 // Answers `GET /network/extender-hint` (connect/DESIGNNOTES4.md §4). Nothing
 // here can fail the request: an address the operator cannot read or place is
 // an empty hint.
 func ExtenderHint(clientSession *session.ClientSession) (*ExtenderHintResult, error) {
-	result := &ExtenderHintResult{}
 	clientIp, _, err := server.SplitClientAddress(clientSession.ClientAddress)
 	if err != nil {
-		return result, nil
+		return &ExtenderHintResult{}, nil
 	}
 	location, _, err := GetLocationForIp(clientSession.Ctx, clientIp)
 	if err != nil {
 		if glog.V(2) {
 			glog.Infof("[extender]no location for the hint: %s\n", err)
 		}
-		return result, nil
+		return &ExtenderHintResult{}, nil
 	}
-	result.ContinentCode = model.ContinentCodeForCountry(location.CountryCode)
-	return result, nil
+	return extenderHintForLocation(location), nil
+}
+
+// The hint of one placed address: the continent its country maps to and the
+// country itself. A location with no country is an empty hint.
+func extenderHintForLocation(location *model.Location) *ExtenderHintResult {
+	if location == nil {
+		return &ExtenderHintResult{}
+	}
+	countryCode := strings.ToLower(strings.TrimSpace(location.CountryCode))
+	return &ExtenderHintResult{
+		ContinentCode: model.ContinentCodeForCountry(countryCode),
+		CountryCode:   countryCode,
+	}
 }
 
 // One attestation as the report carries it: the fields of the signed message
