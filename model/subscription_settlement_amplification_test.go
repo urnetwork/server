@@ -111,6 +111,9 @@ func TestEscrowSettlementLegacyRowsPreserveAccounting(t *testing.T) {
 		if err != nil || flushed.Visited != 1 || flushed.Completed != 1 || flushed.Failed != 0 || flushed.BusyOrGone != 0 {
 			t.Fatalf("public legacy worker did not settle the exact cohort: %+v %v", flushed, err)
 		}
+		if _, _, found := GetStream(ctx, fixture.contractId); found {
+			t.Fatal("completed legacy worker retained its retired stream")
+		}
 		assertSettlementEscrowState(t, ctx, fixture, 46, used, forceCloseDisputeInitialBalance-used)
 		settledProof, snapshot := readContractExpiryTestSnapshot(t, ctx, fixture.contractId)
 		if !bytes.Equal(proof, settledProof) {
@@ -270,11 +273,23 @@ func TestEscrowSettlementLegacyRejectionKeepsReservation(t *testing.T) {
 		assertLegacyAmplificationPending(t, ctx, fixture, true, before.streamFound, grant, "none")
 		proof, _ := readContractExpiryTestSnapshot(t, ctx, fixture.contractId)
 		shard := int(fixture.contractId[15]) % LegacySettlementShardCount
+		readDatabaseTime := func() time.Time {
+			var now time.Time
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT clock_timestamp() AT TIME ZONE 'UTC'`).Scan(&now))
+			})
+			return now
+		}
+		beforeRefusal := readDatabaseTime()
 		flushed, err := FlushLegacySettlements(ctx, shard, nil, 64)
+		afterRefusal := readDatabaseTime()
 		if err != nil || flushed.Visited != 1 || flushed.Failed != 1 || flushed.Completed != 0 || flushed.BusyOrGone != 0 {
 			t.Fatalf("legacy accounting refusal was not retained by its worker: %+v %v", flushed, err)
 		}
 		nextAttempt := assertLegacyAmplificationPending(t, ctx, fixture, true, before.streamFound, grant, "accounting")
+		if nextAttempt.Before(beforeRefusal.Add(15*time.Minute)) || nextAttempt.After(afterRefusal.Add(15*time.Minute)) {
+			t.Fatalf("accounting backoff differs from its database clock: before=%s after=%s next=%s", beforeRefusal, afterRefusal, nextAttempt)
+		}
 		server.Db(ctx, func(conn server.PgConn) {
 			rows, err := conn.Query(ctx, `SELECT count(*), count(*) FILTER(WHERE settled), coalesce(sum(payout_byte_count),0),
 				(SELECT dispute AND outcome IS NULL FROM transfer_contract WHERE contract_id=$1),
@@ -335,7 +350,7 @@ func assertLegacyAmplificationPending(t testing.TB, ctx context.Context, fixture
 	var nextAttempt time.Time
 	server.Db(ctx, func(conn server.PgConn) {
 		var count, settled, payout, balance int64
-		var open, dispute, clearDispute, delayed bool
+		var open, dispute, clearDispute bool
 		var outcome, failure string
 		server.Raise(conn.QueryRow(ctx, `SELECT count(*),count(*) FILTER(WHERE settled),COALESCE(sum(payout_byte_count),0),
 			(SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$2),
@@ -344,14 +359,13 @@ func assertLegacyAmplificationPending(t testing.TB, ctx context.Context, fixture
 			(SELECT outcome FROM legacy_settlement_intent WHERE contract_id=$1),
 			(SELECT clear_dispute FROM legacy_settlement_intent WHERE contract_id=$1),
 			(SELECT COALESCE(failure_code,'') FROM legacy_settlement_intent WHERE contract_id=$1),
-			(SELECT next_attempt_time FROM legacy_settlement_intent WHERE contract_id=$1),
-			(SELECT next_attempt_time>statement_timestamp() AT TIME ZONE 'UTC'+interval '14 minutes' FROM legacy_settlement_intent WHERE contract_id=$1)
+			(SELECT next_attempt_time FROM legacy_settlement_intent WHERE contract_id=$1)
 			FROM transfer_escrow WHERE contract_id=$1`, fixture.contractId, fixture.balanceId).Scan(
-			&count, &settled, &payout, &balance, &open, &dispute, &outcome, &clearDispute, &failure, &nextAttempt, &delayed))
+			&count, &settled, &payout, &balance, &open, &dispute, &outcome, &clearDispute, &failure, &nextAttempt))
 		if count != 46 || settled != 0 || payout != 0 || balance != forceCloseDisputeInitialBalance || !open || dispute != wantDispute ||
-			outcome != ContractOutcomeSettled || clearDispute != wantDispute || failure != wantFailure || (wantFailure == "accounting" && !delayed) {
-			t.Fatalf("pending legacy custody changed: rows=%d settled=%d payout=%d balance=%d open=%t dispute=%t intent=%s clear=%t failure=%s delayed=%t",
-				count, settled, payout, balance, open, dispute, outcome, clearDispute, failure, delayed)
+			outcome != ContractOutcomeSettled || clearDispute != wantDispute || failure != wantFailure {
+			t.Fatalf("pending legacy custody changed: rows=%d settled=%d payout=%d balance=%d open=%t dispute=%t intent=%s clear=%t failure=%s",
+				count, settled, payout, balance, open, dispute, outcome, clearDispute, failure)
 		}
 	})
 	server.Redis(ctx, func(r server.RedisClient) {
