@@ -228,4 +228,6 @@ replace github.com/urfoundation/sn => ../sn
 // native RPC transport and tracked upstream provenance in server binaries.
 replace github.com/centrifuge/go-substrate-rpc-client/v4 => ../sn/third_party/go-substrate-rpc-client
 
-replace gvisor.dev/gvisor => ../gvisor
+// Pin the shared fork so a clean source graph does not depend on an untracked
+// sibling checkout. Its transport ownership extensions are required by Connect.
+replace gvisor.dev/gvisor => github.com/urnetwork/gvisor v0.0.0-20261004152605-c0783dba2eef
