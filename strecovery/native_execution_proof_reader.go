@@ -56,17 +56,28 @@ func (self *NativeExecutionProofReader) Read(ctx context.Context, parent string,
 		method = "state_getChildReadProof"
 		params = []any{"0x" + hex.EncodeToString(child), []string{"0x" + hex.EncodeToString(key)}, parent}
 	}
-	var proof NativeExecutionReadProof
+	var proof *NativeExecutionReadProof
 	self.rpc.validateResult = func(raw json.RawMessage) error {
+		// Each physical reply owns a fresh candidate. A successful decode with
+		// a transient transport tail must not seed fields in a later reply.
+		proof = nil
 		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 			return nil
 		}
-		if err := json.Unmarshal(raw, &proof); err != nil {
+		var candidate struct {
+			At    *string   `json:"at"`
+			Proof *[]string `json:"proof"`
+		}
+		if err := json.Unmarshal(raw, &candidate); err != nil {
 			return errors.Join(ErrNativeExecutionProofConflict, err)
 		}
-		if proof.At != parent || len(proof.Proof) > MaximumNativeExecutionStorageNodes {
+		if candidate.At != nil && *candidate.At != "" && *candidate.At != parent || candidate.Proof != nil && len(*candidate.Proof) > MaximumNativeExecutionStorageNodes {
 			return errors.Join(ErrNativeExecutionProofConflict, errors.New("native proof reply differs from original parent or bounded node profile"))
 		}
+		if candidate.At == nil || *candidate.At == "" || candidate.Proof == nil {
+			return ErrNativeStorageIncomplete
+		}
+		proof = &NativeExecutionReadProof{At: *candidate.At, Proof: *candidate.Proof}
 		return nil
 	}
 	defer func() { self.rpc.validateResult = nil }()
@@ -74,7 +85,10 @@ func (self *NativeExecutionProofReader) Read(ctx context.Context, parent string,
 	if err != nil {
 		return nil, err
 	}
-	return &proof, nil
+	if proof == nil {
+		return nil, ErrNativeStorageIncomplete
+	}
+	return proof, nil
 }
 
 func (self *NativeExecutionProofReader) Close() {
