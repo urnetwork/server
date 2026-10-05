@@ -14,6 +14,13 @@ type NetworkReferral struct {
 	CreateTime        time.Time  `json:"create_time"`
 }
 
+// isSelfReferral reports whether a referral code resolved to the network being
+// referred. A network can never be its own referral network. Compare the ids:
+// the looked-up pointer never equals the address of the local network id.
+func isSelfReferral(networkId server.Id, referralNetworkId *server.Id) bool {
+	return referralNetworkId != nil && *referralNetworkId == networkId
+}
+
 func CreateNetworkReferral(
 	ctx context.Context,
 	networkId server.Id,
@@ -31,7 +38,7 @@ func CreateNetworkReferral(
 		return nil
 	}
 
-	if referralNetworkId == &networkId {
+	if isSelfReferral(networkId, referralNetworkId) {
 		return nil
 	}
 
