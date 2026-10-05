@@ -44,6 +44,7 @@ func InitTasksForProfile(ctx context.Context, profile WorkloadProfile) error {
 		return err
 	}
 	stats.ApplyStreamRetention(ctx)
+	controller.ApplyFeedbackLogRetention(ctx)
 	return nil
 }
 

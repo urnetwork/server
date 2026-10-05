@@ -33,6 +33,7 @@ var removedTaskTargets = []string{
 func InitTasks(ctx context.Context) {
 	initTaskSchedule(ctx)
 	stats.ApplyStreamRetention(ctx)
+	controller.ApplyFeedbackLogRetention(ctx)
 }
 
 // Scheduling is bounded startup work. Long-lived retention observers are
