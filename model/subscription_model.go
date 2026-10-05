@@ -543,16 +543,24 @@ func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[s
 	// final interval could therefore never be repaired before the delayed
 	// settlement released it and drove the counter negative.
 	//
-	// Visit only non-current balances that still have authoritative open escrow.
-	// The settled=false predicate is the same safe partial-index prefilter used
-	// by the reservation query; outcome IS NULL remains authoritative. This keeps
-	// the second pass proportional to live stragglers rather than every expired
-	// balance, and it remains correct for arbitrarily delayed close work.
+	// Check non-current balances in bounded primary-key pages. Every candidate
+	// advances the cursor, including pages with no live escrow. An existence
+	// check stops at the first live witness instead of grouping every unsettled
+	// row; zero-byte and Redis-owned witnesses still allow stale legacy mirrors
+	// to be cleared without changing their separate reservation owner.
 	cursor = server.Id{}
 	for {
 		rows := []balanceRow{}
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(
+		candidateCount := 0
+		nextCursor := cursor
+		server.Tx(ctx, func(tx server.PgTx) {
+			// A transaction retry must restart from the same input cursor and
+			// discard any rows returned by its previous attempt.
+			pageRows := []balanceRow{}
+			pageCount := 0
+			pageCursor := cursor
+			configureNetEscrowReservationPageTimeout(ctx, tx, netEscrowReservationPageStatementTimeout)
+			result, err := tx.Query(
 				ctx,
 				netEscrowNoncurrentOpenBalancePageSQL,
 				now,
@@ -562,13 +570,23 @@ func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[s
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
 					var row balanceRow
-					server.Raise(result.Scan(&row.balanceId, &row.networkId))
-					rows = append(rows, row)
+					var hasOpenEscrow bool
+					server.Raise(result.Scan(&row.balanceId, &row.networkId, &hasOpenEscrow))
+					pageCount++
+					pageCursor = row.balanceId
+					if hasOpenEscrow {
+						pageRows = append(pageRows, row)
+					}
 				}
 			})
-		})
+			rows, candidateCount, nextCursor = pageRows, pageCount, pageCursor
+		}, server.TxReadCommitted, pgx.ReadOnly)
+		cursor = nextCursor
 		if len(rows) == 0 {
-			break
+			if candidateCount < batchSize {
+				break
+			}
+			continue
 		}
 		balanceIds := make([]server.Id, len(rows))
 		for i, row := range rows {
@@ -580,8 +598,7 @@ func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[s
 			driftByNetworkId[row.networkId] += drift[row.balanceId]
 		}
 		balanceCount += len(rows)
-		cursor = rows[len(rows)-1].balanceId
-		if len(rows) < batchSize {
+		if candidateCount < batchSize {
 			break
 		}
 	}
@@ -595,31 +612,51 @@ func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[s
 	return
 }
 
-// netEscrowNoncurrentOpenBalancePageSQL discovers balances that the ordinary
-// availability-window scan deliberately excludes but that still own a live
-// PostgreSQL reservation. transfer_escrow_unsettled_balance_contract makes the
-// balance-id keyset scan bounded; the outcome join excludes closed rows whose
-// best-effort settled post was missed.
+// A live zero-byte or Redis-owned row remains a cleanup witness for a stale
+// legacy mirror. Preserve that lifecycle set, but stop at the first live row
+// rather than aggregating all unsettled history. The escrow and contract
+// boundaries prevent stale statistics from replacing either key lookup with
+// a scan of unrelated history. Disputes hold their reservation until outcome
+// is non-NULL, even though their generated open flag is false.
+const netEscrowOpenBalanceWitnessSQL = `
+    EXISTS (
+        SELECT 1
+        FROM (
+            SELECT contract_id
+            FROM transfer_escrow
+            WHERE transfer_escrow.balance_id = transfer_balance.balance_id AND
+                transfer_escrow.settled = false
+            OFFSET 0
+        ) AS selected_escrow
+        INNER JOIN LATERAL (
+            SELECT outcome FROM transfer_contract
+            WHERE contract_id = selected_escrow.contract_id
+            OFFSET 0
+        ) AS transfer_contract ON transfer_contract.outcome IS NULL
+    )
+`
+
+// Page candidate balances before testing their witnesses. LIMIT after a
+// GROUP BY bounded output only: discovery could still join millions of native
+// or zero-byte rows for a single balance before returning the first page.
+// Returning the witness flag also lets an empty candidate page advance the
+// caller's cursor without reconciling balances that have no live reservation.
 const netEscrowNoncurrentOpenBalancePageSQL = `
-    SELECT
-        transfer_escrow.balance_id,
-        transfer_balance.network_id
-    FROM transfer_escrow
-    INNER JOIN transfer_contract ON
-        transfer_contract.contract_id = transfer_escrow.contract_id
-    INNER JOIN transfer_balance ON
-        transfer_balance.balance_id = transfer_escrow.balance_id
-    WHERE
-        transfer_escrow.settled = false AND
-        transfer_contract.outcome IS NULL AND
-        NOT (
-            transfer_balance.active = true AND
-            transfer_balance.start_time <= $1 AND $1 < transfer_balance.end_time
-        ) AND
-        transfer_escrow.balance_id > $2
-    GROUP BY transfer_escrow.balance_id, transfer_balance.network_id
-    ORDER BY transfer_escrow.balance_id
-    LIMIT $3
+    SELECT transfer_balance.balance_id, transfer_balance.network_id,
+        ` + netEscrowOpenBalanceWitnessSQL + ` AS has_open_escrow
+    FROM (
+        SELECT balance_id, network_id
+        FROM transfer_balance
+        WHERE
+            NOT (
+                transfer_balance.active = true AND
+                transfer_balance.start_time <= $1 AND $1 < transfer_balance.end_time
+            ) AND
+            transfer_balance.balance_id > $2
+        ORDER BY transfer_balance.balance_id
+        LIMIT $3
+    ) AS transfer_balance
+    ORDER BY transfer_balance.balance_id
 `
 
 // ReconcileNetEscrowForNetwork reconciles the redis net escrow counters for one
@@ -658,22 +695,15 @@ func ReconcileNetEscrowForNetwork(ctx context.Context, networkId server.Id, appl
 		result, err := conn.Query(
 			ctx,
 			`
-                SELECT transfer_escrow.balance_id
-                FROM transfer_escrow
-                INNER JOIN transfer_contract ON
-                    transfer_contract.contract_id = transfer_escrow.contract_id
-                INNER JOIN transfer_balance ON
-                    transfer_balance.balance_id = transfer_escrow.balance_id
+                SELECT transfer_balance.balance_id
+                FROM transfer_balance
                 WHERE
                     transfer_balance.network_id = $1 AND
-                    transfer_escrow.settled = false AND
-                    transfer_contract.outcome IS NULL AND
                     NOT (
                         transfer_balance.active = true AND
                         transfer_balance.start_time <= $2 AND $2 < transfer_balance.end_time
-                    )
-                GROUP BY transfer_escrow.balance_id
-                ORDER BY transfer_escrow.balance_id
+                    ) AND `+netEscrowOpenBalanceWitnessSQL+`
+                ORDER BY transfer_balance.balance_id
             `,
 			networkId,
 			now,
