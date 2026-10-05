@@ -162,17 +162,12 @@ func TestReleaseSourceGraphPinsRemainingServiceSiblings(t *testing.T) {
 	}
 }
 
-// The module pin and the sibling used when SN becomes the main module must
-// select the same fork. Upstream gVisor lacks Connect's ownership extensions.
+// Server and the SN fixture generator must consume the same reviewed sibling.
+// A cached module at that revision would bypass the frozen PERF arm's source.
 func TestReleaseSourceGraphPinsSharedGvisorFork(t *testing.T) {
-	revision := reviewedRevision(t, "gvisor", "urnetwork/gvisor")
-	module := resolvedSourceModule(t, "gvisor.dev/gvisor")
-	if module.Path != "gvisor.dev/gvisor" || module.Replace == nil || module.Replace.Path != "github.com/urnetwork/gvisor" || !strings.HasSuffix(module.Replace.Version, "-"+revision[:12]) {
-		t.Fatalf("gVisor resolved outside the shared reviewed fork: %+v replacement=%+v", module, module.Replace)
-	}
-	requireReviewedCheckout(t, "gvisor", "urnetwork/gvisor")
+	requireReviewedSibling(t, "gvisor.dev/gvisor", "gvisor", "urnetwork/gvisor", "")
 	snDirectory := filepath.Join(serverDirectory(t), "..", "sn")
-	module = resolvedSourceModuleIn(t, snDirectory, "gvisor.dev/gvisor")
+	module := resolvedSourceModuleIn(t, snDirectory, "gvisor.dev/gvisor")
 	if module.Path != "gvisor.dev/gvisor" || module.Replace == nil || module.Replace.Path != "../gvisor" || module.Replace.Version != "" || module.Replace.Dir != filepath.Join(snDirectory, "..", "gvisor") {
 		t.Fatalf("SN's fixture generator resolved a different gVisor source: %+v replacement=%+v", module, module.Replace)
 	}
