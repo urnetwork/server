@@ -548,6 +548,8 @@ func AddProviderEgressRunTally(ctx context.Context, measuredAt time.Time, run Pr
 		}
 		return 0
 	}
+	// Read committed lets additive upserts wait for the current row version
+	// while keeping every counter for the run in one atomic transaction.
 	server.Tx(ctx, func(tx server.PgTx) {
 		now := server.NowUtc()
 		server.RaisePgResult(tx.Exec(
@@ -634,7 +636,7 @@ func AddProviderEgressRunTally(ctx context.Context, measuredAt time.Time, run Pr
 				now,
 			))
 		}
-	})
+	}, server.TxReadCommitted)
 }
 
 // One site's summed loads at one place.
