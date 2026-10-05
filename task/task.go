@@ -254,6 +254,16 @@ type TaskFunction[T any, R any] func(T, *session.ClientSession) (R, error)
 
 type TaskPostFunction[T any, R any] func(T, R, *session.ClientSession, server.PgTx) error
 
+// A post that also returns work for after the finishing transaction commits.
+// External side effects (account messages, outbound calls) belong in that
+// work, not in the transaction: the transaction can roll back or rerun its
+// callback, and it holds its connection and row locks until the commit. The
+// worker runs the work once per committed finish, after `server.Tx` returns,
+// and waits for it; a post that returns an error, or a finish that rolls back,
+// drops it, and a crash between the commit and the work loses it. The post's
+// client session is canceled by then, so the work must not use its context.
+type TaskCommitPostFunction[T any, R any] func(T, R, *session.ClientSession, server.PgTx) ([]server.PostFunction, error)
+
 // type ScheduleTaskFunction[T any, R any] func(TaskFunction[T, R], T, *session.ClientSession, ...any)
 
 type RunAtOption struct {
@@ -1091,19 +1101,21 @@ func (self *FinishedTask) ClientSession(ctx context.Context) (*session.ClientSes
 	return clientSession, nil
 }
 
+// The post hooks run in the caller's transaction and return the work to run
+// after it commits (see `TaskCommitPostFunction`).
 type Target interface {
 	TargetFunctionName() string
 	// TargetFunction() TaskFunction[T, R]
 	// PostFunction() TaskPostFunction[T, R]
 	AlternateFunctionNames() []string
-	Run(context.Context, *Task) (any, func(server.PgTx) error, error)
-	RunPost(context.Context, *FinishedTask, server.PgTx) error
+	Run(context.Context, *Task) (any, func(server.PgTx) ([]server.PostFunction, error), error)
+	RunPost(context.Context, *FinishedTask, server.PgTx) ([]server.PostFunction, error)
 }
 
 type TaskTarget[T any, R any] struct {
 	targetFunctionName     string
 	targetFunction         TaskFunction[T, R]
-	postFunction           TaskPostFunction[T, R]
+	postFunction           TaskCommitPostFunction[T, R]
 	alternateFunctionNames []string
 	// An instance-local timer boundary permits deterministic max-time controls.
 	runAfter func(time.Duration) <-chan time.Time
@@ -1120,9 +1132,25 @@ func NewTaskTarget[T any, R any](
 	}
 }
 
+// The post has no work for after the commit.
 func NewTaskTargetWithPost[T any, R any](
 	targetFunction TaskFunction[T, R],
 	postFunction TaskPostFunction[T, R],
+	alternateFunctionNames ...string,
+) *TaskTarget[T, R] {
+	var commitPostFunction TaskCommitPostFunction[T, R]
+	if postFunction != nil {
+		commitPostFunction = func(args T, result R, clientSession *session.ClientSession, tx server.PgTx) ([]server.PostFunction, error) {
+			return nil, postFunction(args, result, clientSession, tx)
+		}
+	}
+	return NewTaskTargetWithCommitPost(targetFunction, commitPostFunction, alternateFunctionNames...)
+}
+
+// The post can return work for after the finishing transaction commits.
+func NewTaskTargetWithCommitPost[T any, R any](
+	targetFunction TaskFunction[T, R],
+	postFunction TaskCommitPostFunction[T, R],
 	alternateFunctionNames ...string,
 ) *TaskTarget[T, R] {
 	return &TaskTarget[T, R]{
@@ -1161,7 +1189,7 @@ func (self *TaskTarget[T, R]) AlternateFunctionNames() []string {
 
 func (self *TaskTarget[T, R]) Run(ctx context.Context, task *Task) (
 	result any,
-	runPost func(server.PgTx) error,
+	runPost func(server.PgTx) ([]server.PostFunction, error),
 	returnErr error,
 ) {
 	return self.RunSpecific(ctx, task)
@@ -1169,7 +1197,7 @@ func (self *TaskTarget[T, R]) Run(ctx context.Context, task *Task) (
 
 func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 	result R,
-	runPost func(server.PgTx) error,
+	runPost func(server.PgTx) ([]server.PostFunction, error),
 	returnErr error,
 ) {
 	ctx = withExecutionIdentity(ctx, task.TaskId)
@@ -1229,7 +1257,7 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 		return
 	}
 
-	runPost = func(tx server.PgTx) error {
+	runPost = func(tx server.PgTx) ([]server.PostFunction, error) {
 		// the post runs in the finalize tx AFTER the function completed. It
 		// must not be severed by the function's max-time/drain cancel (a
 		// completed task's chain re-arm would strand into the RunPost retry
@@ -1242,11 +1270,11 @@ func (self *TaskTarget[T, R]) RunSpecific(ctx context.Context, task *Task) (
 		defer postCancel()
 		clientSession, err := task.ClientSession(postCtx)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		defer clientSession.Cancel()
 		if self.postFunction == nil {
-			return nil
+			return nil, nil
 		} else {
 			return self.postFunction(args, result, clientSession, tx)
 		}
@@ -1259,7 +1287,7 @@ func (self *TaskTarget[T, R]) RunPost(
 	ctx context.Context,
 	finishedTask *FinishedTask,
 	tx server.PgTx,
-) (returnErr error) {
+) (commitPosts []server.PostFunction, returnErr error) {
 	if self.postFunction == nil {
 		returnErr = errors.New("No post")
 		return
@@ -1315,9 +1343,13 @@ func (self *TaskTarget[T, R]) RunPost(
 		if timeout {
 			returnErr = errors.Join(errors.New("Timeout"), returnErr)
 		}
+		if returnErr != nil {
+			// a failed post is retried whole, with its work
+			commitPosts = nil
+		}
 	}()
 
-	returnErr = self.postFunction(args, result, clientSession, tx)
+	commitPosts, returnErr = self.postFunction(args, result, clientSession, tx)
 
 	return
 }
@@ -1668,8 +1700,15 @@ func (self *TaskWorker) RunPost(
 	finishedTask.FunctionName = updateFunctionName(finishedTask.FunctionName)
 
 	if target, ok := self.targets[finishedTask.FunctionName]; ok {
+		var commitPosts []server.PostFunction
 		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-			if err := target.RunPost(clientSession.Ctx, finishedTask, tx); err == nil {
+			// a rerun callback starts over: neither the outcome nor the work
+			// of a rolled-back attempt may outlive it
+			commitPosts = nil
+			runPostResult = nil
+			returnErr = nil
+			if posts, err := target.RunPost(clientSession.Ctx, finishedTask, tx); err == nil {
+				commitPosts = posts
 				runPostResult = &RunPostResult{}
 				return
 			} else {
@@ -1677,6 +1716,8 @@ func (self *TaskWorker) RunPost(
 				return
 			}
 		})
+		// the post's transaction committed
+		server.RunPosts(clientSession.Ctx, commitPosts...)
 		return
 	} else {
 		returnErr = fmt.Errorf("%w (%s).", ErrTargetNotFound, finishedTask.FunctionName)
@@ -2042,7 +2083,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 		runStartTime time.Time
 		runEndTime   time.Time
 		resultJson   string
-		runPost      func(server.PgTx) error
+		runPost      func(server.PgTx) ([]server.PostFunction, error)
 	}
 
 	type result struct {
@@ -2246,7 +2287,13 @@ func (self *TaskWorker) EvalTasks(n int) (
 	)
 	defer finalizeCancel()
 
+	var commitPosts []server.PostFunction
 	server.Tx(finalizeCtx, func(tx server.PgTx) {
+		// a rerun callback starts over: the post errors and the work of a
+		// rolled-back attempt must not outlive it
+		commitPosts = nil
+		clear(postRescheduledTasks)
+
 		server.BatchInTx(finalizeCtx, tx, func(batch server.PgBatch) {
 			for taskId, finished := range finishedTasks {
 				batch.Queue(
@@ -2356,7 +2403,9 @@ func (self *TaskWorker) EvalTasks(n int) (
 		})
 
 		for taskId, finished := range finishedTasks {
-			if err := finished.runPost(tx); err != nil {
+			if posts, err := finished.runPost(tx); err == nil {
+				commitPosts = append(commitPosts, posts...)
+			} else {
 				// record the post error
 
 				postRescheduledTasks[taskId] = err
@@ -2395,6 +2444,8 @@ func (self *TaskWorker) EvalTasks(n int) (
 			}
 		}
 	})
+	// the finish committed
+	server.RunPosts(evalCtx, commitPosts...)
 
 	for taskId, _ := range finishedTasks {
 		if _, postRescheduled := postRescheduledTasks[taskId]; !postRescheduled {

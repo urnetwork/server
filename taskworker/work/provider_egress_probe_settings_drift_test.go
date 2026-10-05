@@ -203,7 +203,7 @@ func TestProviderEgressProbeSettingsDriftFinalizesCurrentSuccessor(t *testing.T)
 		}
 		ctx := context.Background()
 		server.Tx(ctx, func(tx server.PgTx) {
-			if err := post(tx); err != nil {
+			if _, err := post(tx); err != nil {
 				t.Fatal(err)
 			}
 		})

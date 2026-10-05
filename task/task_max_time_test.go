@@ -42,7 +42,7 @@ func TestTaskPostMaxTimePanicRetainsTimeout(t *testing.T) {
 		},
 	)
 	target.runAfter = func(time.Duration) <-chan time.Time { return timer }
-	err := target.RunPost(context.Background(), &FinishedTask{ArgsJson: `{}`, ResultJson: `{}`}, nil)
+	_, err := target.RunPost(context.Background(), &FinishedTask{ArgsJson: `{}`, ResultJson: `{}`}, nil)
 	if err == nil || !strings.Contains(err.Error(), "Timeout") || !strings.Contains(err.Error(), "Interrupted: context canceled") {
 		t.Fatalf("max-time post panic lost its cause: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestTaskPostMaxTimeReturnedResultsRetainTimeout(t *testing.T) {
 			},
 		)
 		target.runAfter = func(time.Duration) <-chan time.Time { return timer }
-		err := target.RunPost(context.Background(), &FinishedTask{ArgsJson: `{}`, ResultJson: `{}`}, nil)
+		_, err := target.RunPost(context.Background(), &FinishedTask{ArgsJson: `{}`, ResultJson: `{}`}, nil)
 		if err == nil || !strings.Contains(err.Error(), "Timeout") || (taskErr != nil && !errors.Is(err, taskErr)) {
 			t.Fatalf("max-time post return lost cause: %v", err)
 		}
@@ -83,7 +83,7 @@ func TestTaskPostParentCancellationIsNotMaxTime(t *testing.T) {
 		},
 	)
 	target.runAfter = func(time.Duration) <-chan time.Time { return timer }
-	err := target.RunPost(ctx, &FinishedTask{ArgsJson: `{}`, ResultJson: `{}`}, nil)
+	_, err := target.RunPost(ctx, &FinishedTask{ArgsJson: `{}`, ResultJson: `{}`}, nil)
 	if err == nil || strings.Contains(err.Error(), "Timeout") || !strings.Contains(err.Error(), "Interrupted: context canceled") {
 		t.Fatalf("post parent cancellation misclassified: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestTaskMaxTimeSuccessKeepsDetachedPost(t *testing.T) {
 		t.Fatalf("success lost post: %v", err)
 	}
 	cancel()
-	if err := post(nil); err != nil || !postCalled {
+	if _, err := post(nil); err != nil || !postCalled {
 		t.Fatalf("completed task post inherited canceled context: %v", err)
 	}
 }

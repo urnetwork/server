@@ -22,8 +22,8 @@ type claimAdmissionLifecycleTarget struct {
 
 // The caller can hold execution after cancellation without delaying unrelated
 // callbacks, making the real goroutine-retirement boundary observable.
-func (self *claimAdmissionLifecycleTarget) Run(ctx context.Context, _ *Task) (any, func(server.PgTx) error, error) {
-	return &claimProfileResult{}, func(server.PgTx) error { return nil }, self.run(ctx)
+func (self *claimAdmissionLifecycleTarget) Run(ctx context.Context, _ *Task) (any, func(server.PgTx) ([]server.PostFunction, error), error) {
+	return &claimProfileResult{}, func(server.PgTx) ([]server.PostFunction, error) { return nil, nil }, self.run(ctx)
 }
 
 // Wrap the already-owned capacity return at the pre-commit test seam. Closing
