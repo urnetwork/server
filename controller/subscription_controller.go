@@ -265,6 +265,36 @@ func isGuestNetwork(
 	return !hasAnyAuthMethod(session.Ctx, session.ByJwt.UserId)
 }
 
+// Stable machine codes for a refused checkout or payment intent. Clients pick
+// a localized message (or flow) from the code and fall back to `Message`.
+const (
+	// the network has no login method; add one (AddAuth) before buying
+	PurchaseErrorCodeGuestSignInRequired = "guest_sign_in_required"
+)
+
+const purchaseGuestSignInRequiredMessage = "Add a sign-in to your account before buying a plan."
+
+// purchaseHasAnyAuthMethod is model.HasAnyAuthMethod. Replaceable only by
+// hermetic tests, which answer the lookup without a database. Production never
+// mutates it.
+var purchaseHasAnyAuthMethod = model.HasAnyAuthMethod
+
+// refuseGuestPurchase reports whether the session's network must not start a
+// checkout or a payment intent: a legacy guest network has no login method, so
+// nothing could sign back in to the plan it bought. Current apps convert a
+// guest in place before checkout; this covers the builds from before that.
+//
+// Only the server-created checkouts and intents call this. A store-verified
+// purchase (verify-play-purchase, verify-apple-transaction) and every webhook
+// still credit a guest network: the store has already taken the money.
+func refuseGuestPurchase(session *session.ClientSession) bool {
+	if !isGuestNetwork(session, purchaseHasAnyAuthMethod) {
+		return false
+	}
+	glog.V(1).Infof("[sub]refused a purchase for guest network %s\n", session.ByJwt.NetworkId)
+	return true
+}
+
 type CoinbaseWebhookArgs struct {
 	Event *CoinbaseEvent `json:"event"`
 }
@@ -2485,6 +2515,9 @@ type SolanaPaymentIntentResult struct {
 }
 
 type SolanaPaymentIntentError struct {
+	// one of the `PurchaseErrorCode*` values, when the refusal has one. Added
+	// after `Message`; older clients ignore it.
+	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 }
 
@@ -2533,6 +2566,14 @@ func CreateSolanaPaymentIntent(
 	intent *SolanaPaymentIntentArgs,
 	clientSession *session.ClientSession,
 ) (*SolanaPaymentIntentResult, error) {
+	if refuseGuestPurchase(clientSession) {
+		return &SolanaPaymentIntentResult{
+			Error: &SolanaPaymentIntentError{
+				Code:    PurchaseErrorCodeGuestSignInRequired,
+				Message: purchaseGuestSignInRequiredMessage,
+			},
+		}, nil
+	}
 
 	// The price comes from pro.yml, keyed by the plan and the caller's regional
 	// price tier. It is NEVER taken from the client.
