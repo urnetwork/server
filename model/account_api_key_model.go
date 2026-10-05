@@ -97,10 +97,18 @@ type PublicAccountApiKey struct {
 
 /**
  * for dashboard listing of API keys
+ *
+ * A key row that cannot be scanned fails the listing with the scan's error and
+ * no keys, which the controller answers with its error message. A failed
+ * query raises, as every model read does.
  */
 func GetAccountApiKeys(session *session.ClientSession) (apiKeys []*PublicAccountApiKey, err error) {
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-		result, err := tx.Query(
+		// reset in case the tx is retried on a transient error
+		apiKeys = nil
+		err = nil
+
+		result, queryErr := tx.Query(
 			session.Ctx,
 			`
 				SELECT api_key_id, name, create_time
@@ -109,23 +117,27 @@ func GetAccountApiKeys(session *session.ClientSession) (apiKeys []*PublicAccount
 			`,
 			session.ByJwt.NetworkId,
 		)
+		server.Raise(queryErr)
+		// not server.WithPgResult: it raises a failed scan, which pgx records
+		// as the rows' error, after the callback returns
+		defer result.Close()
 
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var apiKeyId server.Id
-				var name string
-				var createTime time.Time
-				err = result.Scan(&apiKeyId, &name, &createTime)
-				if err != nil {
-					return
-				}
-				apiKeys = append(apiKeys, &PublicAccountApiKey{
-					Id:         apiKeyId,
-					Name:       name,
-					CreateTime: createTime,
-				})
+		for result.Next() {
+			var apiKeyId server.Id
+			var name string
+			var createTime time.Time
+			err = result.Scan(&apiKeyId, &name, &createTime)
+			if err != nil {
+				apiKeys = nil
+				return
 			}
-		})
+			apiKeys = append(apiKeys, &PublicAccountApiKey{
+				Id:         apiKeyId,
+				Name:       name,
+				CreateTime: createTime,
+			})
+		}
+		server.Raise(result.Err())
 	})
 	return
 }
