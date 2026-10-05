@@ -14770,7 +14770,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band and, above threshold, reconciles the bounded `missing_origin_details_total` resolution/relationship/lifecycle cohorts. Absent or incomplete detail is not zero and cannot support attribution. Never infer roles from the Boolean or print raw pairs; the higher `companion=true` band needs separate calibration. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
 | `[session]X-UR-Forwarded-For ... was not one ip:port value` or legacy `X-UR-Forwarded-For from untrusted peer` | Source attribution fell back to the ingress peer, collapsing users onto one address for signup/login limits and `/my-ip-info`. The legacy line proves a pre-standardization binary is still active. | Verify Warp overwrites one bracket-safe `ip:port` value, backend ports are not publicly reachable, and every active api/connect generation accepts the UR header. Probe both address families as in §8.8; do not add a proxy CIDR. |
-| Client UI/API callback `Timeout.` with no matching route in the exact LB/API interval | The request did not reach the public edge. In the 2026-09-01 Android acceptance failure, ordinary emulator reachability and concurrent API traffic were healthy, but a stale previously-successful Connect dialer received the complete request deadline and hid the healthy route; cold dialers were also incorrectly classified as prior successes. | Correlate the exact UTC action interval against the exact method/path, not the broader auth prefix. If absent, keep diagnosis client-side: inspect `[net]http serial`/`[net]http parallel` route selection and the embedded Connect revision. Require the bounded preferred-route scheduler and cold-route parallel discovery regression tests; do not restart API, increase the UI wait, or add an app-level retry. |
+| Client UI/API callback `Timeout.` with no matching route in the exact LB/API interval | No matching request was observed on those captured fronts. This excludes a server arrival only when the capture covers every route the shipped client can choose: Alt serves its own API over H3/WhoDis without the ordinary LB/API path (§16.9). In the 2026-09-01 Android acceptance failure, ordinary emulator reachability and concurrent API traffic were healthy, but a stale previously-successful Connect dialer received the complete request deadline and hid the healthy route; cold dialers were also incorrectly classified as prior successes. | Correlate the exact UTC action interval against the exact method/path and embedded client transport revision. Bind the ordinary API and Alt API/Connect handler generations and public carrier paths before assigning an absent request to the client. If a complete capture excludes arrival, inspect `[net]http serial`/`[net]http parallel` route selection and require the bounded preferred-route and cold-route discovery controls. Missing Alt coverage is unknown; it does not authorize a server restart, longer UI wait or app-level retry. |
 | `[netescrow]negative counter after <site>` | A Redis reservation mirror had fewer bytes than PostgreSQL durably released. Besides a lost create or replayed release, a legacy absolute reconcile can overwrite live mirror traffic (§5.11). The current page-local additive path still has two cross-store windows: a slow PostgreSQL page snapshot can become stale before its later Redis GET, and a committed settlement can precede its Redis post. Old binaries leave the negative value until reconciliation. Current release Lua emits `clamped_to=0` after atomically deleting the nonpositive result while retaining its diagnostic value. A later legitimate reservation or reconciliation can recreate a positive key. Any occurrence remains a defect. | Correlate the first burst with the exact `ReconcileNetEscrow` executor, immutable source, duration, reservation statement profile, aggregate drift, and Redis mutation errors. Retain the page-local additive reconciler and atomic release clamp; deploy single-attempt checked mirror mutations, migration 601, the unsettled-partial query, and the non-current-open pass. After rollout verify any residual line says `clamped_to=0`; a later key is either absent with no new reservations or exactly equals the current PostgreSQL open-reservation sum. Key presence alone does not disprove the clamp. Pages stay below one second and no matched reversal recurs. Alert artifacts retain only `site`; balance/contract ids are redacted. |
 
 For `payout-invalid-destination`, `invalid_destination_events` is the
@@ -27925,6 +27925,66 @@ guards, privacy and bounded packet correlation. Native QUIC/TLS and all DNS
 codec controls use a synthetic in-memory packet network and generated test
 certificates, not production probes. Runtime enrollment or deployment still
 requires the normal separately authorized settings and watcher workflow.
+
+**Alt handler generation and API application outcome — prospective extension.**
+The 2026-10-05 source audit of server `6d52edbe` and the shipped Apple/SDK
+`v2026.10.1-1060587890` graph established a separate serving path. In
+`alt/run.go`, Alt constructs its own Connect router and calls `api.NewRouter`
+in-process; `alt/alt.go` mounts that API router on its own HTTP/3 server. It
+does not forward API requests to the ordinary API workers. The shipped
+NetworkSpace derives the Alt destination from the Connect origin. Its native
+API transport can use direct Alt H3 or WhoDis while preserving the original
+API Host and TLS SNI. A cold strategy races candidates; remembered successful
+routes run before cold routes. This proves path capability, not which route a
+particular app selected. The source audit alone does not establish an active
+Alt revision, an unhealthy Alt response, or the cause of the user's blank
+picker and missing provider dots.
+
+The owning coverage requirement is to observe Alt's API and Connect handlers
+separately from the ordinary API fleet, including the public application path:
+
+- Bind each enabled Alt host/block to actual native image, embedded source and
+  dependency graph, effective configuration and listener readiness. Both
+  handler generations belong to that Alt image. An ordinary API or Connect
+  deployment, a desired release label, or HTTP 200 from `/status` alone cannot
+  establish their adoption. Qualify the returned status and service/block
+  identity; distinguish ready, draining, failed and missing observations.
+- Pair each declared public Alt API carrier/family with the exact owned
+  destination, API Host/SNI, verified certificate, HTTP method/path, bounded
+  request interval and application result. For initial provider discovery,
+  distinguish nonempty country candidates, a valid empty list, non-200 status,
+  schema failure, TLS/transport failure and an incomplete/expired observation.
+  A QUIC handshake-only success in the existing `public-udp` signal does not
+  satisfy this application requirement. A forced native carrier sample also
+  does not prove the app selected it, or prove authenticated selection, Connect
+  admission or provider egress.
+- Keep independent denominators for ordinary API workers and enabled Alt
+  workers, with separate H3 and each configured WhoDis port/family. A healthy
+  ordinary TCP API sample must not resolve failed or unobserved Alt API paths;
+  healthy API-over-Alt must not resolve failed Alt Connect admission. Apply the
+  existing paused/shared-endpoint scope guard before contact, preserve explicit
+  rollout exclusions, and treat absent enrollment or unknown generation as
+  `cannot-observe`. Require fresh same-target recovery evidence. No retries,
+  different address/port, TCP fallback or sibling's success may silently replace
+  a failed declared path.
+
+Deterministic acceptance must include current ordinary API with stale Alt API,
+current Alt image with a failed listener, HTTP 200 status carrying an error or
+draining state, successful QUIC with malformed/non-200/empty picker response,
+wrong API SNI, H3 success with WhoDis failure, one failed owner hidden by a
+healthy sibling, excluded owners/shared endpoints, canceled or late results,
+and fully healthy matched controls. Native loopback H3 and WhoDis controls must
+exercise the exact shipped request shape, certificate verification and response
+body limit. A finite initial-country request needs no credentials and must not
+create a device or provider contract. Preserve only bounded identity labels,
+status/outcome/count aggregates and evidence hashes in alerts, never JWTs,
+provider identities or response bodies.
+
+This extension remains a detector/coverage requirement. The existing
+`public-udp` implementation still measures authenticated transport only;
+source documentation and local controls do not implement or activate these
+Alt application/generation checks, supply production enrollment, or close the
+user's incident.
 
 ## 17. Subtensor RPC gateway (snow)
 
