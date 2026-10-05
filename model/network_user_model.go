@@ -1225,19 +1225,17 @@ func MigrateNetworkUserChildAuthsOriginal(
 				FROM network_user
 				`,
 			)
-			if err != nil {
-				glog.Infof("Error querying network_user: %v", err)
-				return
-			}
 
 			var networkUsers []NetworkUserToMigrate
 
+			// a failed query or scan raises, which ends the migration with its
+			// cause
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
 
 					networkUser := NetworkUserToMigrate{}
 
-					result.Scan(
+					server.Raise(result.Scan(
 						&networkUser.UserId,
 						&networkUser.UserAuth,
 						&networkUser.Verified,
@@ -1247,7 +1245,7 @@ func MigrateNetworkUserChildAuthsOriginal(
 						&networkUser.AuthJwt,
 						&networkUser.WalletAddress,
 						&networkUser.Blockchain,
-					)
+					))
 
 					networkUsers = append(networkUsers, networkUser)
 				}
@@ -1315,7 +1313,9 @@ func MigrateNetworkUserChildAuthsOriginal(
 					 * Wallet auth
 					 */
 
-					_, err := tx.Exec(
+					// a failed insert aborts the migration's transaction, so it
+					// raises rather than go on to commit a rollback
+					server.RaisePgResult(tx.Exec(
 						ctx,
 						`
 							INSERT INTO network_user_auth_wallet
@@ -1328,13 +1328,8 @@ func MigrateNetworkUserChildAuthsOriginal(
 						// AuthTypeSolana ("solana") here produced rows that the
 						// byte-exact 'SOL' uniqueness checks could not see
 						migratedWalletBlockchain(networkUser.Blockchain),
-					)
-
-					if err != nil {
-						glog.Errorf("Error adding wallet auth for user %s: %v", networkUser.UserId, err)
-					} else {
-						glog.Infof("Added wallet auth for user %s: %s", networkUser.UserId, *networkUser.WalletAddress)
-					}
+					))
+					glog.Infof("Added wallet auth for user %s: %s", networkUser.UserId, *networkUser.WalletAddress)
 
 				}
 
@@ -1381,20 +1376,18 @@ func MigrateNetworkUserChildAuths(
 				AND nu.auth_type != 'guest';
 			`,
 		)
-		if err != nil {
-			glog.Infof("Error querying network_user: %v", err)
-			return
-		}
 
 		var networkUsers []NetworkUserToMigrate
 		userCount := 0
 
+		// a failed query or scan raises, which ends the migration with its
+		// cause
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 
 				networkUser := NetworkUserToMigrate{}
 
-				result.Scan(
+				server.Raise(result.Scan(
 					&networkUser.UserId,
 					&networkUser.UserAuth,
 					&networkUser.Verified,
@@ -1404,7 +1397,7 @@ func MigrateNetworkUserChildAuths(
 					&networkUser.AuthJwt,
 					&networkUser.WalletAddress,
 					&networkUser.Blockchain,
-				)
+				))
 
 				networkUsers = append(networkUsers, networkUser)
 				userCount += 1
@@ -1481,7 +1474,9 @@ func MigrateNetworkUserChildAuths(
 				 * Wallet auth
 				 */
 
-				_, err := tx.Exec(
+				// a failed insert aborts the migration's transaction, so it
+				// raises rather than go on to commit a rollback
+				server.RaisePgResult(tx.Exec(
 					ctx,
 					`
 						INSERT INTO network_user_auth_wallet
@@ -1493,13 +1488,8 @@ func MigrateNetworkUserChildAuths(
 					// the blockchain column, not the auth type -- see the same
 					// fix in MigrateNetworkUserChildAuthsOriginal
 					migratedWalletBlockchain(networkUser.Blockchain),
-				)
-
-				if err != nil {
-					glog.Errorf("Error adding wallet auth for user %s: %v", networkUser.UserId, err)
-				} else {
-					glog.Infof("Added wallet auth for user %s: %s", networkUser.UserId, *networkUser.WalletAddress)
-				}
+				))
+				glog.Infof("Added wallet auth for user %s: %s", networkUser.UserId, *networkUser.WalletAddress)
 
 			}
 

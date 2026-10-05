@@ -130,7 +130,9 @@ func MarkPaymentIntentCompletedInTx(
 	signature string,
 	session *session.ClientSession,
 ) (completed bool, err error) {
-	tag, err := tx.Exec(
+	// a failed update aborts the caller's transaction, so it raises rather
+	// than leave the credit path to commit a rollback
+	tag := server.RaisePgResult(tx.Exec(
 		session.Ctx,
 		`
 		UPDATE solana_payment_intent
@@ -140,10 +142,7 @@ func MarkPaymentIntentCompletedInTx(
 		`,
 		signature,
 		reference,
-	)
-	if err != nil {
-		return false, err
-	}
+	))
 	return tag.RowsAffected() != 0, nil
 }
 
