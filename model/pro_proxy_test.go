@@ -75,7 +75,7 @@ func TestProLocalCacheIsBounded(t *testing.T) {
 
 // TestProLocalCacheTtlIsShorterThanRedis pins the relationship between the two ttls.
 //
-// The local tier can only be replaced in the process that did the upgrade; every OTHER
+// The local tier can only be replaced in the process that did the upgrade; every other
 // process keeps its stale entry until the local ttl runs out. That window is the delay
 // between a customer paying and, say, SOCKS working on some other proxy instance -- so
 // it must stay well under the shared redis window.

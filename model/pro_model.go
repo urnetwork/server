@@ -54,13 +54,13 @@ import (
 const ProCacheTtl = 60 * time.Second
 const ProLocalCacheTtl = 5 * time.Second
 
-// Writes to both tiers are ORDERED. A read loads the entitlement and then writes it to
+// Writes to both tiers are ordered. A read loads the entitlement and then writes it to
 // the cache, and any number of reads and refreshes can be in flight for one network at
 // once; without an order, a read that loaded "not Pro" just before an upgrade committed
 // could write that over the refresh made after the commit, and every process would
 // read "not Pro" for up to ProCacheTtl.
 //
-// So every entry carries a VERSION: the postgres time at which the transaction of the
+// So every entry carries a version: the postgres time at which the transaction of the
 // read that produced it began (transaction_timestamp(), in microseconds). That time
 // comes before the snapshot the read sees, so a read that begins after a commit has a
 // later version than any read whose snapshot missed the commit. Each tier keeps the
@@ -72,6 +72,7 @@ const ProLocalCacheTtl = 5 * time.Second
 // or more after its snapshot, or redis evicting the entry early) can still put back an
 // older entitlement, for at most ProCacheTtl, the bound the cache always had.
 
+// A network's entitlement, with the version of the read that produced it.
 type proEntitlement struct {
 	pro bool
 	// microseconds since the unix epoch, postgres clock; see the ordering note above
@@ -93,6 +94,7 @@ func proNetworkKey(networkId server.Id) string {
 	return fmt.Sprintf("pro_versioned:%s", networkId)
 }
 
+// The redis value of an entitlement, "<pro>:<version>".
 func formatProEntitlement(entitlement proEntitlement) string {
 	pro := "0"
 	if entitlement.pro {
@@ -101,6 +103,7 @@ func formatProEntitlement(entitlement proEntitlement) string {
 	return pro + ":" + strconv.FormatInt(entitlement.version, 10)
 }
 
+// The entitlement of a redis value, ok false for a value in any other format.
 func parseProEntitlement(value string) (entitlement proEntitlement, ok bool) {
 	pro, versionString, found := strings.Cut(value, ":")
 	if !found || (pro != "0" && pro != "1") {
@@ -116,6 +119,7 @@ func parseProEntitlement(value string) (entitlement proEntitlement, ok bool) {
 	}, true
 }
 
+// This process's live entry for the network, ok false when it holds none.
 func getProNetworkLocal(networkId server.Id) (entitlement proEntitlement, ok bool) {
 	proLocalCacheMutex.Lock()
 	defer proLocalCacheMutex.Unlock()
@@ -127,8 +131,8 @@ func getProNetworkLocal(networkId server.Id) (entitlement proEntitlement, ok boo
 	return entry.entitlement, true
 }
 
-// setProNetworkLocal stores the entitlement unless this process holds a live entry
-// with a newer version.
+// Stores the entitlement unless this process holds a live entry with a newer
+// version.
 func setProNetworkLocal(networkId server.Id, entitlement proEntitlement) {
 	proLocalCacheMutex.Lock()
 	defer proLocalCacheMutex.Unlock()
@@ -180,7 +184,7 @@ func IsProNetwork(ctx context.Context, networkId server.Id) bool {
 // back would still have written the cache. InTx writers return what changed and leave
 // the refresh to whoever commits.
 //
-// Note this can only replace THIS process's local tier. Other processes keep their own
+// Note this can only replace this process's local tier. Other processes keep their own
 // entry until ProLocalCacheTtl expires, which is why that ttl is short.
 func UpdateProNetwork(ctx context.Context, networkId server.Id) bool {
 	return refreshProNetwork(ctx, networkId)
@@ -209,10 +213,10 @@ func IsProNetworkFresh(ctx context.Context, networkId server.Id) bool {
 	return UpdateProNetwork(ctx, networkId)
 }
 
-// InvalidateProNetwork makes the cached entitlement current in BOTH tiers. It reloads
-// and stores the entitlement (UpdateProNetwork) rather than deleting the entries:
-// deleting would also drop the newest version, and a read that loaded before the
-// change could then write its older entitlement back.
+// Makes the cached entitlement current in both tiers. It reloads and stores the
+// entitlement (UpdateProNetwork) rather than deleting the entries: deleting would
+// also drop the newest version, and a read that loaded before the change could then
+// write its older entitlement back.
 func InvalidateProNetwork(ctx context.Context, networkId server.Id) {
 	UpdateProNetwork(ctx, networkId)
 }
@@ -227,14 +231,13 @@ func Testing_ProNetworkCacheEntries(ctx context.Context, networkId server.Id) (l
 	return localEntitlement.pro, localOk, cachedEntitlement.pro, cachedOk
 }
 
-// testingProNetworkLoaded, when set, runs after a refresh has loaded a network's
-// entitlement and before it writes the cache. It exists so a test can hold a read
-// there and land a commit and its refresh in between. Test only, and never set in
-// production.
+// When set, runs after a refresh has loaded a network's entitlement and before it
+// writes the cache. It exists so a test can hold a read there and land a commit and
+// its refresh in between. Test only, and never set in production.
 var testingProNetworkLoaded atomic.Pointer[func(networkId server.Id)]
 
-// refreshProNetwork loads the entitlement from the db and stores it in both tiers,
-// returning the loaded value.
+// Loads the entitlement from the db and stores it in both tiers, returning the loaded
+// value.
 func refreshProNetwork(ctx context.Context, networkId server.Id) bool {
 	entitlement := loadProNetwork(ctx, networkId)
 	if loaded := testingProNetworkLoaded.Load(); loaded != nil {
@@ -244,10 +247,10 @@ func refreshProNetwork(ctx context.Context, networkId server.Id) bool {
 	return entitlement.pro
 }
 
-// storeProNetwork writes a loaded entitlement to both tiers, neither of which takes it
-// over a newer one. The local tier stores what redis holds afterwards (this entitlement
-// or a newer one), so this process agrees with the others; with redis unavailable it
-// stores this entitlement.
+// Writes a loaded entitlement to both tiers, neither of which takes it over a newer
+// one. The local tier stores what redis holds afterwards (this entitlement or a newer
+// one), so this process agrees with the others; with redis unavailable it stores this
+// entitlement.
 func storeProNetwork(ctx context.Context, networkId server.Id, entitlement proEntitlement) {
 	if stored, ok := setProNetworkCached(ctx, networkId, entitlement); ok {
 		entitlement = stored
@@ -255,9 +258,9 @@ func storeProNetwork(ctx context.Context, networkId server.Id, entitlement proEn
 	setProNetworkLocal(networkId, entitlement)
 }
 
-// loadProNetwork reads the entitlement from the source of truth, with its version. The
-// query runs alone in its own implicit transaction, so transaction_timestamp() is when
-// this read began, before the snapshot it reads. Keep it on the primary (server.Db): a
+// Reads the entitlement from the source of truth, with its version. The query runs
+// alone in its own implicit transaction, so transaction_timestamp() is when this read
+// began, before the snapshot it reads. Keep it on the primary (server.Db): a
 // replica's clock and replay lag would not order its reads against the primary's.
 func loadProNetwork(ctx context.Context, networkId server.Id) (entitlement proEntitlement) {
 	server.Db(ctx, func(conn server.PgConn) {
@@ -291,6 +294,8 @@ func loadProNetwork(ctx context.Context, networkId server.Id) (entitlement proEn
 	return
 }
 
+// The redis entry for the network, ok false on a miss, an error or a value in
+// another format.
 func getProNetworkCached(ctx context.Context, networkId server.Id) (entitlement proEntitlement, ok bool) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		value, err := r.Get(ctx, proNetworkKey(networkId)).Result()
@@ -304,11 +309,10 @@ func getProNetworkCached(ctx context.Context, networkId server.Id) (entitlement 
 	return
 }
 
-// proNetworkCacheSetScript stores ARGV[1], an entry with version ARGV[2], for ARGV[3]
-// milliseconds, unless the key holds an entry with a newer version, and returns the
-// entry the key holds afterwards. Versions are compared as decimal strings (length,
-// then digits), so Lua number rounding never enters the comparison. One key, so one
-// slot.
+// Stores ARGV[1], an entry with version ARGV[2], for ARGV[3] milliseconds, unless the
+// key holds an entry with a newer version, and returns the entry the key holds
+// afterwards. Versions are compared as decimal strings (length, then digits), so Lua
+// number rounding never enters the comparison. One key, so one slot.
 const proNetworkCacheSetScript = `
 local current = redis.call('GET', KEYS[1])
 if current then
@@ -321,8 +325,8 @@ redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[3])
 return ARGV[1]
 `
 
-// setProNetworkCached stores the entitlement in redis unless redis holds a newer one,
-// and returns the entitlement redis holds afterwards. ok is false on a cache error.
+// Stores the entitlement in redis unless redis holds a newer one, and returns the
+// entitlement redis holds afterwards. ok is false on a cache error.
 func setProNetworkCached(ctx context.Context, networkId server.Id, entitlement proEntitlement) (stored proEntitlement, ok bool) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		value, err := r.Eval(

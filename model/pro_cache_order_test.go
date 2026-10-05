@@ -17,8 +17,8 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// proLoadHold parks the first refresh of one network between its load and its cache
-// write (testingProNetworkLoaded), so a test can land a commit and a refresh while it
+// Parks the first refresh of one network between its load and its cache write
+// (testingProNetworkLoaded), so a test can land a commit and a refresh while it
 // waits. Refreshes of other networks, and later refreshes of this one, pass through.
 type proLoadHold struct {
 	loaded      chan struct{}
@@ -26,6 +26,8 @@ type proLoadHold struct {
 	releaseOnce sync.Once
 }
 
+// Holds the next refresh of networkId between its load and its cache write until
+// Release.
 func testingHoldProNetworkLoad(networkId server.Id) *proLoadHold {
 	hold := &proLoadHold{
 		loaded:  make(chan struct{}),
@@ -42,7 +44,7 @@ func testingHoldProNetworkLoad(networkId server.Id) *proLoadHold {
 	return hold
 }
 
-// WaitLoaded returns once the held refresh has loaded.
+// Returns once the held refresh has loaded.
 func (self *proLoadHold) WaitLoaded(t testing.TB) {
 	t.Helper()
 	select {
@@ -52,7 +54,7 @@ func (self *proLoadHold) WaitLoaded(t testing.TB) {
 	}
 }
 
-// Release lets the held refresh write the cache, and stops holding.
+// Lets the held refresh write the cache, and stops holding.
 func (self *proLoadHold) Release() {
 	self.releaseOnce.Do(func() {
 		testingProNetworkLoaded.Store(nil)
@@ -60,6 +62,7 @@ func (self *proLoadHold) Release() {
 	})
 }
 
+// The answer of a released refresh, bounded so a stuck refresh fails the test.
 func testingReceiveProResult(t testing.TB, results chan bool) bool {
 	t.Helper()
 	select {
@@ -71,9 +74,9 @@ func testingReceiveProResult(t testing.TB, results chan bool) bool {
 	}
 }
 
-// testingPoisonProNetworkCache plants an entitlement in both tiers as if it had been
-// cached just before the network's last change: older than any load since, and written
-// over whatever the tiers hold.
+// Plants an entitlement in both tiers as if it had been cached just before the
+// network's last change: older than any load since, and written over whatever the
+// tiers hold.
 func testingPoisonProNetworkCache(ctx context.Context, networkId server.Id, pro bool) {
 	entitlement := proEntitlement{pro: pro, version: 1}
 	func() {
@@ -89,10 +92,9 @@ func testingPoisonProNetworkCache(ctx context.Context, networkId server.Id, pro 
 	})
 }
 
-// TestIsProNetworkReadBeforeUpgradeDoesNotOverwriteRefresh: a hot-path read misses both
-// tiers and loads "not Pro"; before it writes the cache, the upgrade commits and its
-// writer refreshes the cache. The read then writes what it loaded. The refresh survives
-// in both tiers.
+// A hot-path read misses both tiers and loads "not Pro"; before it writes the cache,
+// the upgrade commits and its writer refreshes the cache. The read then writes what
+// it loaded. The refresh survives in both tiers.
 func TestIsProNetworkReadBeforeUpgradeDoesNotOverwriteRefresh(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -130,10 +132,9 @@ func TestIsProNetworkReadBeforeUpgradeDoesNotOverwriteRefresh(t *testing.T) {
 	})
 }
 
-// TestProNetworkRefreshBeforeRevocationDoesNotOverwriteRefresh: the other direction,
-// between two refreshes. A fresh read (as at token issue) loads Pro; before it writes
-// the cache, the Pro balance is ended and that writer refreshes the cache. "Not Pro"
-// survives in both tiers.
+// The other direction, between two refreshes. A fresh read (as at token issue) loads
+// Pro; before it writes the cache, the Pro balance is ended and that writer refreshes
+// the cache. "Not Pro" survives in both tiers.
 func TestProNetworkRefreshBeforeRevocationDoesNotOverwriteRefresh(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -181,9 +182,9 @@ func TestProNetworkRefreshBeforeRevocationDoesNotOverwriteRefresh(t *testing.T) 
 	})
 }
 
-// TestProNetworkCacheKeepsNewestVersion pins the redis compare-and-set: an older version
-// never replaces a newer one, the same or a newer version does, an entry it cannot read
-// is replaced, and it reports the entry the key holds afterwards.
+// Pins the redis compare-and-set: an older version never replaces a newer one, the
+// same or a newer version does, an entry it cannot read is replaced, and it reports
+// the entry the key holds afterwards.
 func TestProNetworkCacheKeepsNewestVersion(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -226,9 +227,9 @@ func TestProNetworkCacheKeepsNewestVersion(t *testing.T) {
 	})
 }
 
-// TestProLocalCacheKeepsNewestVersion pins the same rule in the local tier: an older
-// version does not replace a live newer entry, the same or a newer version does, and
-// once the entry has expired any version does.
+// Pins the same rule in the local tier: an older version does not replace a live
+// newer entry, the same or a newer version does, and once the entry has expired any
+// version does.
 func TestProLocalCacheKeepsNewestVersion(t *testing.T) {
 	networkId := server.NewId()
 
