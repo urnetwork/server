@@ -318,8 +318,25 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 
 		// the hosted proxy device applies the initial performance profile at
 		// every creation, so a profile connect refuses is refused here, before
-		// anything is created
-		message = validateProxyConfigArgs(authClient.ProxyConfig, session)
+		// anything is created. The profile is client input: a refusal is
+		// counted, its detail is logged only at V(1), and the message names
+		// only the caller's own values.
+		validateProxyConfigArgs := func() string {
+			proxyConfig := authClient.ProxyConfig
+			if proxyConfig == nil || proxyConfig.InitialDeviceState == nil {
+				return ""
+			}
+			err := validatePerformanceProfile(proxyConfig.InitialDeviceState.PerformanceProfile)
+			if err == nil {
+				return ""
+			}
+			proxyInvalidPerformanceProfilesAuthClient.Inc()
+			if glog.V(1) {
+				glog.Infof("[proxy][%s]auth-client refused the initial performance profile: %s\n", session.ByJwt.NetworkId, err)
+			}
+			return fmt.Sprintf("Invalid performance profile: %s", err)
+		}
+		message = validateProxyConfigArgs()
 		if message != "" {
 			authClientResult = &AuthNetworkClientResult{
 				Error: &AuthNetworkClientError{

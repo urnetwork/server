@@ -1,16 +1,12 @@
 package model
 
 import (
-	"fmt"
-
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sdk"
-
-	"github.com/urnetwork/server/session"
 )
 
 // A hosted proxy device applies the initial performance profile of its config
@@ -33,24 +29,6 @@ var (
 
 func init() {
 	prometheus.MustRegister(proxyInvalidPerformanceProfiles)
-}
-
-// validateProxyConfigArgs refuses a proxy config whose initial performance
-// profile connect refuses. auth-client checks it before the client is
-// created, so a refused request creates nothing. The message names only the
-// caller's own values.
-func validateProxyConfigArgs(proxyConfig *ProxyConfig, session *session.ClientSession) (message string) {
-	if proxyConfig == nil || proxyConfig.InitialDeviceState == nil {
-		return
-	}
-	err := validatePerformanceProfile(proxyConfig.InitialDeviceState.PerformanceProfile)
-	if err == nil {
-		return
-	}
-	proxyInvalidPerformanceProfilesAuthClient.Inc()
-	glog.V(1).Infof("[proxy][%s]auth-client refused the initial performance profile: %s\n", session.ByJwt.NetworkId, err)
-	message = fmt.Sprintf("Invalid performance profile: %s", err)
-	return
 }
 
 // validatePerformanceProfile is connect's own validation of the profile as the
