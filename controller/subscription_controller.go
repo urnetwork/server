@@ -1651,13 +1651,28 @@ func ReferralGrantWindow(now time.Time) (startTime time.Time, endTime time.Time)
 // daily free amount. Used when a network is created and when a subscription changes,
 // so the network does not have to wait for the next scheduled grant.
 func AddRefreshTransferBalance(ctx context.Context, networkId server.Id) (returnErr error) {
+	proGranted := false
 	server.Tx(ctx, func(tx server.PgTx) {
-		returnErr = AddRefreshTransferBalanceInTx(tx, ctx, networkId)
+		proGranted, returnErr = AddRefreshTransferBalanceInTx(tx, ctx, networkId)
 	})
+	if returnErr != nil {
+		return
+	}
+
+	if proGranted {
+		// the Pro grant is committed -- refresh the entitlement so the upgrade is
+		// visible immediately rather than after ProCacheTtl
+		model.UpdateProNetwork(ctx, networkId)
+	}
 	return
 }
 
-func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkId server.Id) error {
+// AddRefreshTransferBalanceInTx writes the refresh grant in the caller's tx and
+// returns true when it is the Pro grant. The caller must then refresh the Pro cache
+// (model.UpdateProNetwork) after the tx commits. A refresh inside the tx reads on its
+// own connection, so it would cache the entitlement from before the grant for up to
+// ProCacheTtl, and a tx that rolled back would still have written the cache.
+func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkId server.Id) (proGranted bool, returnErr error) {
 	pro, _ := model.HasSubscriptionRenewal(ctx, networkId, model.SubscriptionTypeSupporter)
 
 	// Nothing to grant -> grant nothing. With no pro.yml the amount is ZERO, and granting
@@ -1666,7 +1681,7 @@ func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkI
 	// present but says `data: 0` is handled the same way.
 	if model.Pro().DataAmount(pro) <= 0 {
 		glog.Errorf("[sub]no data amount configured for pro = %t; skipping the grant\n", pro)
-		return nil
+		return false, nil
 	}
 
 	if pro {
@@ -1681,14 +1696,13 @@ func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkI
 			endTime,
 		)
 		if err != nil {
-			return err
+			return false, err
 		}
-		model.UpdateProNetwork(ctx, networkId)
-		return nil
+		return true, nil
 	}
 
 	startTime, endTime := FreeGrantWindow(server.NowUtc())
-	return model.AddBasicTransferBalanceInTx(
+	return false, model.AddBasicTransferBalanceInTx(
 		tx,
 		ctx,
 		networkId,
