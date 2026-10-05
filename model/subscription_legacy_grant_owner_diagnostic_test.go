@@ -26,7 +26,7 @@ func TestLegacySettlementSharedGrantAcrossAllShards(t *testing.T) {
 		const count = LegacySettlementShardCount * perShard
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET start_balance_byte_count=1000000,balance_byte_count=1000000 WHERE balance_id=$1`, f.balanceId))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET start_balance_byte_count=1000000,balance_byte_count=1000000,net_revenue_nano_cents=2000000 WHERE balance_id=$1`, f.balanceId))
 		})
 		ids := make([]server.Id, count)
 		for index := range ids {
@@ -42,6 +42,7 @@ func TestLegacySettlementSharedGrantAcrossAllShards(t *testing.T) {
 			server.Raise(CloseContract(ctx, id, f.destinationId, 11, false))
 			ids[index] = id
 		}
+		before := openEscrowReservedForBalances(ctx, []server.Id{f.balanceId})[f.balanceId]
 		acquired := make(chan struct{})
 		release := make(chan struct{})
 		var releaseOnce sync.Once
@@ -155,21 +156,28 @@ func TestLegacySettlementSharedGrantAcrossAllShards(t *testing.T) {
 			}
 		}
 		server.Db(ctx, func(conn server.PgConn) {
-			var pending, terminal int
+			var pending, terminal, metadata int
 			var credit, swept, provided ByteCount
+			var sweptRevenue, providedRevenue NanoCents
 			server.Raise(conn.QueryRow(ctx, `SELECT
                 (SELECT count(*) FROM legacy_settlement_intent WHERE contract_id=ANY($1)),
                 (SELECT count(*) FROM transfer_contract WHERE contract_id=ANY($1) AND outcome='settled'),
                 (SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$2),
                 (SELECT COALESCE(sum(payout_byte_count),0) FROM transfer_escrow_sweep WHERE contract_id=ANY($1)),
-                (SELECT provided_byte_count FROM account_balance WHERE network_id=$3)`, ids, f.balanceId, f.destinationNetworkId).Scan(&pending, &terminal, &credit, &swept, &provided))
-			if pending != 0 || terminal != count || credit != 1000000-11*count || swept != 11*count || provided != swept {
-				t.Fatal("shared-grant conservation failed", pending, terminal, credit, swept, provided)
+                (SELECT provided_byte_count FROM account_balance WHERE network_id=$3),
+                (SELECT count(*) FROM transfer_escrow WHERE contract_id=ANY($1) AND settled AND settle_time IS NOT NULL AND payout_byte_count=11),
+                (SELECT COALESCE(sum(payout_net_revenue_nano_cents),0) FROM transfer_escrow_sweep WHERE contract_id=ANY($1)),
+                (SELECT provided_net_revenue_nano_cents FROM account_balance WHERE network_id=$3)`, ids, f.balanceId, f.destinationNetworkId).Scan(&pending, &terminal, &credit, &swept, &provided, &metadata, &sweptRevenue, &providedRevenue))
+			if pending != 0 || terminal != count || metadata != count || credit != 1000000-11*count || swept != 11*count || provided != swept || sweptRevenue != 11*count || providedRevenue != sweptRevenue {
+				t.Fatal("shared-grant conservation failed", pending, terminal, credit, swept, provided, metadata, sweptRevenue, providedRevenue)
 			}
 		})
-		if Testing_NetEscrowByteCount(ctx, f.balanceId) != 0 {
-			t.Fatal("drained same-grant cohort retained reservations")
+		after := openEscrowReservedForBalances(ctx, []server.Id{f.balanceId})[f.balanceId]
+		cache := settlementCacheSnapshot(ctx, []server.Id{f.balanceId})[f.balanceId]
+		if after.reserved != 0 || after.revision != before.revision+2*count || cache.reserved != 0 || cache.revision != after.revision {
+			t.Fatal("shared-grant revision conservation failed", before, after, cache)
 		}
+		requireLegacyOwnedMetadataRedis(t, ctx, f.balanceId, 0)
 	})
 }
 

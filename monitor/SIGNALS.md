@@ -4878,6 +4878,31 @@ span the sixteen contract-id shards; per-shard task ownership does not serialize
 their financial transactions. Observe gate outcomes before changing allocation
 or claiming that improved API connection pressure resolved settlement contention.
 
+Shared-grant owner qualifier (2026-10-05): the 10:25:39 source-qualified finite
+sample attributed 1,022 of 1,024 head busy outcomes to grant-set mismatch; these
+are busy outcomes, not all visits or a proved census of lock owners. Zero
+endpoint waiters do not clear this cause: `SKIP LOCKED` refuses ownership without
+joining a wait queue. A native 512-contract, sixteen-shard control holds one real
+legacy financial owner and produces 480 grant skips from its fifteen siblings,
+then verifies exact debit, metadata, monetary provider payouts and finite drain.
+Its client-observed grant completion duration excludes acquisition and the
+synthetic barrier but includes the commit acknowledgement; it is neither exact
+server lock residence nor Main latency. Busy attempts still acquire their
+per-contract owners and commit without economic DML; this inherited work and
+downstream provider-total contention require separate measurements.
+
+The inline legacy metadata path now reuses its actual grant and escrow ownership
+only when every payout target exactly matches the captured positive unmarked
+reservation key and amount. It removes four redundant reads/locks, keeps both
+metadata and provider totals in the financial commit, and advances the same
+snapshot prediction a second time without subtracting the reservation again.
+Cold snapshots stay absent; an intervening revision invalidates both predictions.
+Mixed, zero, settled and incomplete target sets retain the full locking path.
+Native controls cover these fallbacks, multiple grants, revision invalidation,
+rollback and lost-reply replay, with explicit Redis error checks. This reduces
+known local ownership work; fresh owner outcomes and age reduction are still
+required to establish Main recovery or identify a dominant downstream owner.
+
 Clock, legacy reservation mirror and stream cleanup remain post-commit
 projections: the clock uses its existing aggregate backfill with its documented
 ambiguity; the mirror is rebuilt from durable revisions; mixed Redis reservation
