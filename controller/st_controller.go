@@ -1549,18 +1549,14 @@ func (self *CoreStClient) sendPrepared(ctx context.Context, key *ecdsa.PrivateKe
 	}
 
 	var client *ethclient.Client
-	var errs []error
-	for _, url := range self.cfg.RpcUrls {
-		dialed, err := self.client(ctx, url)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", url, err))
-			continue
-		}
-		client = dialed
-		break
-	}
-	if client == nil {
-		return "", fmt.Errorf("st: no rpc endpoint answered: %w", errors.Join(errs...))
+	// The chain identity handshake is a read and shares the bounded transient
+	// retry policy. Select one verified endpoint before any durable transaction
+	// work; retries here never enclose preparation, signing or broadcast.
+	if err := self.eachRpc(ctx, func(_ context.Context, candidate *ethclient.Client) error {
+		client = candidate
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("st: no rpc endpoint answered: %w", err)
 	}
 
 	from := crypto.PubkeyToAddress(key.PublicKey)
