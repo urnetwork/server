@@ -417,10 +417,22 @@ removes its member even when financial settlement still has a null outcome.
 Empty/null party metadata is not a final close. Clearing a dispute invalidates
 the pair until its complete eligibility predicate is re-read in the background.
 
-The packet reader never accesses PostgreSQL or rebuilds a missing key. Missing,
-expired, malformed, or unavailable Redis counts deny. Source and destination
+The Redis reader never accesses PostgreSQL or rebuilds a missing key. Its
+tri-state result distinguishes valid positive authority, a valid expiring zero,
+and unknown evidence. Missing/expired keys are unknown without an error;
+malformed/unavailable keys are unknown with an error. Lifecycle removal deletes
+the zero count, so that absence does not prove an explicit negative. The final
+Redis-only policy denies both negative and unknown results. Source and destination
 identity/activity checks remain separate from this contract predicate. Client
 retirement alone does not rewrite contract accounting or its open status.
+
+An explicitly enabled, time-bounded rollout bridge may separately check the
+source for unknown results. Its owning resident controls per-pair admission,
+the global concurrency bound, query deadline and absolute cutoff; explicit
+negative Redis evidence never needs a source check. The source seam uses the
+same resumable-checkpoint predicate as this projection and never publishes a
+partial count from an existence result. After the cutoff, unknown remains
+fail-closed without invoking that source seam.
 
 Committed lifecycle events use existing transaction identities, with no added
 source query or financial lock. Optional posts run after connection release in
@@ -479,7 +491,7 @@ cancellation. If Redis itself refuses that cleanup, invalidation is best effort:
 the previous receipt still expires at its original pass-start deadline. Assess
 the receipt alongside current failure/availability observations during rollout.
 
-Before reader rollout, prove task adoption, initial coverage against a fresh
+Before removing the rollout bridge, prove task adoption, initial coverage against a fresh
 distinct Main cohort census, and repeated full-pass completion inside the
 half-TTL margin with actual scheduler latency. Retain the receipt, pair counts,
 unknown visits and minimum observed Redis TTL for that qualification. The local
@@ -487,6 +499,15 @@ unknown visits and minimum observed Redis TTL for that qualification. The local
 capacity and repeated half-TTL refresh; it does not predict Main capacity.
 These producer metrics and receipts are qualification evidence; this
 documentation adds no new monitor probe.
+
+There is no fixed maximum effective contract lifetime to use as a rollout
+timer. The server's 12-minute expiration cutoff is a quiet period since creation
+or the latest report; a real checkpoint updates that report time and preserves
+the same resumable contract. SDK unused-queue expiry and companion-origin linger
+also do not cap an active contract's lifetime. Record when every old creation
+writer has retired, then prove coverage of surviving pre-retirement contracts
+before permanently removing the bridge. An elapsed quiet-period estimate alone
+does not establish that all old contracts have closed.
 
 ### 1.2 Task canaries — the cheapest end-to-end redis probes
 Probe: `task-canaries`

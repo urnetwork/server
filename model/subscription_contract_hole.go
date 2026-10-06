@@ -54,17 +54,30 @@ func contractHoleKeys(sourceClientId, destinationClientId server.Id) []string {
 const contractHoleReadScript = `
 local value = redis.call('GET', KEYS[1])
 local ttl = redis.call('PTTL', KEYS[1])
-if not value or ttl <= 0 or ttl > tonumber(ARGV[2]) then return false end
+if not value then return false end
+if ttl == -1 or ttl > tonumber(ARGV[2]) then return redis.error_reply('invalid contract hole expiry') end
+if ttl <= 0 then return false end
 if value ~= '0' and not string.match(value, '^[1-9]%d*$') then return redis.error_reply('invalid contract hole count') end
 local count = tonumber(value)
 if not count or count > tonumber(ARGV[1]) then return redis.error_reply('invalid contract hole count') end
 return count
 `
 
-// Missing, expired, malformed and unavailable projections deny. This function
-// never warms a cache or calls PostgreSQL; only lifecycle owners and the task
-// below may populate it. The resident owns its own recheck rate limiter.
-func HasOpenContractHole(ctx context.Context, sourceClientId, destinationClientId server.Id) bool {
+// Unknown carries no authorization evidence. A valid expiring zero is an
+// explicit negative; lifecycle removal currently deletes zero rather than
+// publishing such a marker, so a missing key remains ambiguous during rollout.
+type ContractHoleStatus uint8
+
+const (
+	ContractHoleUnknown ContractHoleStatus = iota
+	ContractHolePositive
+	ContractHoleNegative
+)
+
+// Missing or expired returns unknown with nil error. Malformed, unavailable or
+// canceled returns unknown with its error. This reader never calls PostgreSQL,
+// schedules source work or interprets the optional rollout fallback policy.
+func ReadContractHole(ctx context.Context, sourceClientId, destinationClientId server.Id) (ContractHoleStatus, error) {
 	ctx, cancel := context.WithTimeout(ctx, contractHoleRedisTimeout)
 	defer cancel()
 	var count int64
@@ -77,17 +90,25 @@ func HasOpenContractHole(ctx context.Context, sourceClientId, destinationClientI
 	if err != nil {
 		if errors.Is(err, server.RedisNil) {
 			contractHoleCounter.WithLabelValues("read_missing").Inc()
+			return ContractHoleUnknown, nil
 		} else {
 			contractHoleCounter.WithLabelValues("read_error").Inc()
 		}
-		return false
+		return ContractHoleUnknown, err
 	}
 	if count > 0 {
 		contractHoleCounter.WithLabelValues("read_positive").Inc()
-		return true
+		return ContractHolePositive, nil
 	}
 	contractHoleCounter.WithLabelValues("read_zero").Inc()
-	return false
+	return ContractHoleNegative, nil
+}
+
+// The final Redis-only policy refuses both negative and unknown observations.
+// The resident separately owns any explicitly configured temporary bridge.
+func HasOpenContractHole(ctx context.Context, sourceClientId, destinationClientId server.Id) bool {
+	status, _ := ReadContractHole(ctx, sourceClientId, destinationClientId)
+	return status == ContractHolePositive
 }
 
 // Tombstones outlive every admitted event. An old create cannot follow a close
