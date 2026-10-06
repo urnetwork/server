@@ -37,7 +37,7 @@ func TestX402GrantProMonthRollingWindow(t *testing.T) {
 			Success:     true,
 			Transaction: "0xrolling1",
 			Network:     "base",
-		})
+		}, nil)
 		connect.AssertEqual(t, err, nil)
 		after := server.NowUtc()
 
@@ -91,11 +91,11 @@ func TestX402GrantIdempotentOnSettleTransaction(t *testing.T) {
 			Network:     "base",
 		}
 
-		err := x402GrantProMonth(ctx, networkId, sku, netRevenue, settle)
+		err := x402GrantProMonth(ctx, networkId, sku, netRevenue, settle, nil)
 		connect.AssertEqual(t, err, nil)
 
 		// the retry with the same settle transaction grants nothing new
-		err = x402GrantProMonth(ctx, networkId, sku, netRevenue, settle)
+		err = x402GrantProMonth(ctx, networkId, sku, netRevenue, settle, nil)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 1)
 
@@ -105,7 +105,7 @@ func TestX402GrantIdempotentOnSettleTransaction(t *testing.T) {
 			Success:     true,
 			Transaction: "0xidem2",
 			Network:     "base",
-		})
+		}, nil)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 2)
 
@@ -145,7 +145,7 @@ func TestX402GrantIdempotentOnSettleTransaction(t *testing.T) {
 			Network:     "base",
 		}
 		for i := 0; i < 2; i += 1 {
-			err = x402GrantData(ctx, dataNetworkId, dataSku, model.UsdToNanoCents(dataSku.PriceUsd), dataSettle)
+			err = x402GrantData(ctx, dataNetworkId, dataSku, model.UsdToNanoCents(dataSku.PriceUsd), dataSettle, nil)
 			connect.AssertEqual(t, err, nil)
 		}
 		dataBalances := model.GetActiveTransferBalances(ctx, dataNetworkId)
@@ -181,7 +181,7 @@ func TestX402SecondPurchaseInOneCalendarMonthExtends(t *testing.T) {
 
 		err := x402GrantProMonth(ctx, networkId, sku, netRevenue, &X402SettleResponse{
 			Success: true, Transaction: "0xextend1", Network: "base",
-		})
+		}, nil)
 		connect.AssertEqual(t, err, nil)
 
 		// time passes within the same calendar month
@@ -189,7 +189,7 @@ func TestX402SecondPurchaseInOneCalendarMonthExtends(t *testing.T) {
 
 		err = x402GrantProMonth(ctx, networkId, sku, netRevenue, &X402SettleResponse{
 			Success: true, Transaction: "0xextend2", Network: "base",
-		})
+		}, nil)
 		connect.AssertEqual(t, err, nil)
 
 		balances := model.GetActiveTransferBalances(ctx, networkId)

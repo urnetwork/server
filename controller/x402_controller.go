@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -537,8 +539,16 @@ func X402Purchase(
 		return nil, fmt.Errorf("x402 settlement failed: %s", settleResponse.ErrorReason)
 	}
 
-	// paid. grant it.
-	if err := x402GrantSettled(ctx, networkId, sku, settleResponse); err != nil {
+	// paid. grant it. The receipt, when one was asked for, commits with the
+	// grant in the account message outbox.
+	var receipt *x402Receipt
+	if c.Receipt.Enabled && purchase.Email != "" {
+		receipt = &x402Receipt{
+			email: purchase.Email,
+			asset: c.Asset,
+		}
+	}
+	if err := x402GrantSettled(ctx, networkId, sku, settleResponse, receipt); err != nil {
 		return nil, err
 	}
 
@@ -546,10 +556,6 @@ func X402Purchase(
 	// the entitlement is already granted, so this is bookkeeping: a failure is
 	// logged loudly and never propagated (see x402RecordStripePayment).
 	x402RecordStripePayment(ctx, sku, requirements, settleResponse)
-
-	if c.Receipt.Enabled && purchase.Email != "" {
-		x402SendReceipt(ctx, purchase.Email, sku, settleResponse)
-	}
 
 	glog.Infof(
 		"[x402]granted network=%s sku=%s tx=%s network=%s\n",
@@ -576,20 +582,22 @@ var (
 // grant failure is recorded durably as a settled_not_granted reconciliation event
 // keyed by the settle transaction; the payment reconciler retries the grant from
 // it (the grant is idempotent on that transaction), so repair no longer depends
-// on someone reading the logs.
+// on someone reading the logs. A receipt, when the purchase asked for one, is
+// owed with the grant (see addX402ReceiptInTx).
 func x402GrantSettled(
 	ctx context.Context,
 	networkId server.Id,
 	sku *X402Sku,
 	settleResponse *X402SettleResponse,
+	receipt *x402Receipt,
 ) error {
 	netRevenue := model.UsdToNanoCents(sku.PriceUsd)
 
 	var err error
 	if sku.Pro {
-		err = x402GrantProMonthFunc(ctx, networkId, sku, netRevenue, settleResponse)
+		err = x402GrantProMonthFunc(ctx, networkId, sku, netRevenue, settleResponse, receipt)
 	} else {
-		err = x402GrantDataFunc(ctx, networkId, sku, netRevenue, settleResponse)
+		err = x402GrantDataFunc(ctx, networkId, sku, netRevenue, settleResponse, receipt)
 	}
 	if err != nil {
 		glog.Errorf(
@@ -822,13 +830,14 @@ func x402AlreadyGrantedForTransaction(
 // purchase lands a second renewal row (the renewal key includes market and the
 // windows are distinct) and EXTENDS the entitlement rather than collapsing onto
 // the first. The grant is idempotent on the settle transaction: a retry after a
-// lost response grants nothing twice.
+// lost response grants nothing twice, and owes no second receipt.
 func x402GrantProMonth(
 	ctx context.Context,
 	networkId server.Id,
 	sku *X402Sku,
 	netRevenue model.NanoCents,
 	settleResponse *X402SettleResponse,
+	receipt *x402Receipt,
 ) (returnErr error) {
 	startTime := server.NowUtc()
 	endTime := startTime.Add(x402ProMonthDuration + manualPaymentGracePeriod)
@@ -874,6 +883,7 @@ func x402GrantProMonth(
 		)
 		if returnErr == nil {
 			granted = true
+			addX402ReceiptInTx(ctx, tx, networkId, receipt, sku, settleResponse)
 		}
 	}, server.TxReadCommitted)
 
@@ -892,13 +902,15 @@ func x402GrantProMonth(
 // x402GrantData adds a data balance. pro = false: buying data never grants Pro. The
 // balance is valid for pro.yml data_code.duration (1 year), the same as a data code.
 // Idempotent on the settle transaction (carried as the balance's purchase token),
-// so an agent retry of a settled purchase does not credit twice.
+// so an agent retry of a settled purchase does not credit twice or owe a second
+// receipt.
 func x402GrantData(
 	ctx context.Context,
 	networkId server.Id,
 	sku *X402Sku,
 	netRevenue model.NanoCents,
 	settleResponse *X402SettleResponse,
+	receipt *x402Receipt,
 ) error {
 	startTime := server.NowUtc()
 	endTime := startTime.Add(model.Pro().DataCodeDuration)
@@ -927,45 +939,87 @@ func x402GrantData(
 			NetRevenue:            netRevenue,
 			PurchaseToken:         settleResponse.Transaction,
 		})
+		addX402ReceiptInTx(ctx, tx, networkId, receipt, sku, settleResponse)
 	}, server.TxReadCommitted)
 
 	return returnErr
 }
 
-// x402SendReceipt emails a receipt for a settled purchase, through the normal
-// account message template system (see X402ReceiptTemplate in aws_controller).
+// The longest receipt address the account message outbox stores.
+const x402ReceiptEmailMaxLength = 256
+
+// The receipt a purchase asked for: where to send it, and the asset it was
+// paid in (from the x402 config the purchase was checked against).
+type x402Receipt struct {
+	email string
+	asset string
+}
+
+// Counts x402 receipts not owed because the purchase's email is not one an
+// account message can go to.
+var x402ReceiptRefusedCounter = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "x402",
+		Name:      "receipts_refused_total",
+		Help:      "x402 receipts skipped because the purchase's email is not a deliverable address",
+	},
+)
+
+// Registers the receipt metric with the default registry.
+func init() {
+	prometheus.MustRegister(x402ReceiptRefusedCounter)
+}
+
+// Adds the receipt for a granted purchase to the account message outbox, in the
+// grant's transaction, through the normal account message template system (see
+// X402ReceiptTemplate in aws_controller). One receipt per settle transaction.
 //
-// Only sent when the caller supplied an email. A failed receipt must NEVER fail the
-// purchase: the money already moved and the grant already landed, so the receipt is
-// a courtesy and its failure is logged, not propagated.
-func x402SendReceipt(ctx context.Context, email string, sku *X402Sku, settleResponse *X402SettleResponse) {
-	defer func() {
-		if err := recover(); err != nil {
-			glog.Errorf("[x402]receipt panicked for %s: %v\n", email, err)
+// Only when the caller supplied an email (a nil receipt is none). The receipt
+// must NEVER fail the purchase: the email is the agent's input, so one that is
+// not an address an account message can go to, or does not fit the outbox, is
+// counted and skipped, never written. The delivery task retries a failed send
+// after the commit.
+func addX402ReceiptInTx(
+	ctx context.Context,
+	tx server.PgTx,
+	networkId server.Id,
+	receipt *x402Receipt,
+	sku *X402Sku,
+	settleResponse *X402SettleResponse,
+) {
+	if receipt == nil {
+		return
+	}
+	normalEmail, userAuthType := model.NormalUserAuth(receipt.email)
+	if userAuthType != model.UserAuthTypeEmail || x402ReceiptEmailMaxLength < len(normalEmail) {
+		// agent input: counted, and detailed only at verbose level
+		x402ReceiptRefusedCounter.Inc()
+		if glog.V(1) {
+			glog.Infof("[x402]no receipt for tx %s: the email is not a deliverable address\n", settleResponse.Transaction)
 		}
-	}()
+		return
+	}
 
 	network := settleResponse.Network
 	if network == "" {
 		network = "chain"
 	}
 
-	awsMessageSender := GetAWSMessageSender()
-	err := awsMessageSender.SendAccountMessageTemplate(
-		email,
-		&X402ReceiptTemplate{
+	addAccountMessageInTx(ctx, tx, &accountMessage{
+		key:       settleResponse.Transaction,
+		networkId: &networkId,
+		userAuth:  normalEmail,
+		template: &X402ReceiptTemplate{
 			Description:      sku.Description,
 			PriceUsd:         sku.PriceUsd,
-			Asset:            X402().Asset,
+			Asset:            receipt.asset,
 			Network:          network,
 			Transaction:      settleResponse.Transaction,
 			Pro:              sku.Pro,
 			BalanceByteCount: sku.ByteCount,
 		},
-	)
-	if err != nil {
-		glog.Errorf("[x402]receipt failed for %s: %s\n", email, err)
-	}
+	})
 }
 
 // x402PurchaseResource is the resource the terms are bound to.

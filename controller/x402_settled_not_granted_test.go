@@ -90,7 +90,7 @@ type x402FakeGrants struct {
 	calls   int
 }
 
-func (self *x402FakeGrants) grant(_ context.Context, _ server.Id, sku *X402Sku, _ model.NanoCents, settleResponse *X402SettleResponse) error {
+func (self *x402FakeGrants) grant(_ context.Context, _ server.Id, sku *X402Sku, _ model.NanoCents, settleResponse *X402SettleResponse, _ *x402Receipt) error {
 	self.calls += 1
 	if self.err != nil {
 		return self.err
@@ -162,7 +162,7 @@ func TestX402SettledButNotGrantedIsRecordedAndReconciled(t *testing.T) {
 
 	// the facilitator settled; the grant fails
 	grants.err = errors.New("synthetic grant failure")
-	err := x402GrantSettled(ctx, networkId, sku, settleResponse)
+	err := x402GrantSettled(ctx, networkId, sku, settleResponse, nil)
 	connect.AssertNotEqual(t, err, nil)
 
 	recorded := table.count(model.PaymentReconcileActionSettledNotGranted, settleResponse.Transaction, false)
@@ -219,23 +219,23 @@ func TestX402ReconcileResolvesWithoutDoubleGrant(t *testing.T) {
 	retriedNetworkId := server.NewId()
 	retried := &X402SettleResponse{Success: true, Transaction: "0xretried", Network: "base"}
 	grants.err = errors.New("synthetic grant failure")
-	connect.AssertNotEqual(t, x402GrantSettled(ctx, retriedNetworkId, dataSku, retried), nil)
+	connect.AssertNotEqual(t, x402GrantSettled(ctx, retriedNetworkId, dataSku, retried, nil), nil)
 	grants.err = nil
-	connect.AssertEqual(t, x402GrantSettled(ctx, retriedNetworkId, dataSku, retried), nil)
+	connect.AssertEqual(t, x402GrantSettled(ctx, retriedNetworkId, dataSku, retried, nil), nil)
 
 	// a network deleted after it paid
 	deletedNetworkId := server.NewId()
 	deleted := &X402SettleResponse{Success: true, Transaction: "0xdeleted", Network: "base"}
 	grants.err = errors.New("synthetic grant failure")
-	connect.AssertNotEqual(t, x402GrantSettled(ctx, deletedNetworkId, dataSku, deleted), nil)
+	connect.AssertNotEqual(t, x402GrantSettled(ctx, deletedNetworkId, dataSku, deleted, nil), nil)
 
 	grants.err = nil
 	callsBefore := grants.calls
-	x402GrantDataFunc = func(ctx context.Context, networkId server.Id, sku *X402Sku, netRevenue model.NanoCents, settleResponse *X402SettleResponse) error {
+	x402GrantDataFunc = func(ctx context.Context, networkId server.Id, sku *X402Sku, netRevenue model.NanoCents, settleResponse *X402SettleResponse, receipt *x402Receipt) error {
 		if networkId == deletedNetworkId {
 			return model.ErrPaymentNetworkNotFound
 		}
-		return grants.grant(ctx, networkId, sku, netRevenue, settleResponse)
+		return grants.grant(ctx, networkId, sku, netRevenue, settleResponse, receipt)
 	}
 
 	run := x402ReconcileTestRun(false)

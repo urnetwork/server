@@ -1612,26 +1612,38 @@ func FindNetworkByName(ctx context.Context, networkName string) (networkId *serv
 // is empty for an admin with no email or phone login (wallet, seed phrase).
 func GetNetworkAdminUserAuth(ctx context.Context, networkId server.Id) (networkName string, userAuth string, ok bool) {
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-			SELECT network.network_name, network_user.user_auth
-			FROM network
-			LEFT JOIN network_user ON network_user.user_id = network.admin_user_id
-			WHERE network.network_id = $1
-			`,
-			networkId,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				var adminUserAuth *string
-				server.Raise(result.Scan(&networkName, &adminUserAuth))
-				if adminUserAuth != nil {
-					userAuth = *adminUserAuth
-				}
-				ok = true
+		networkName, userAuth, ok = getNetworkAdminUserAuth(ctx, conn, networkId)
+	})
+	return
+}
+
+// GetNetworkAdminUserAuth on the caller's transaction, for a note written in
+// the transaction that owes it.
+func GetNetworkAdminUserAuthInTx(ctx context.Context, tx server.PgTx, networkId server.Id) (networkName string, userAuth string, ok bool) {
+	return getNetworkAdminUserAuth(ctx, tx, networkId)
+}
+
+// The network's name and admin login, read with `query`.
+func getNetworkAdminUserAuth(ctx context.Context, query server.PgCanQuery, networkId server.Id) (networkName string, userAuth string, ok bool) {
+	result, err := query.Query(
+		ctx,
+		`
+		SELECT network.network_name, network_user.user_auth
+		FROM network
+		LEFT JOIN network_user ON network_user.user_id = network.admin_user_id
+		WHERE network.network_id = $1
+		`,
+		networkId,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			var adminUserAuth *string
+			server.Raise(result.Scan(&networkName, &adminUserAuth))
+			if adminUserAuth != nil {
+				userAuth = *adminUserAuth
 			}
-		})
+			ok = true
+		}
 	})
 	return
 }

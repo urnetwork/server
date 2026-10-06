@@ -73,6 +73,12 @@ var accountMessageTemplates = map[string]func() Template{
 	(&SubscriptionEndedTemplate{}).Name(): func() Template {
 		return &SubscriptionEndedTemplate{}
 	},
+	(&SubscriptionDataAppliedTemplate{}).Name(): func() Template {
+		return &SubscriptionDataAppliedTemplate{}
+	},
+	(&X402ReceiptTemplate{}).Name(): func() Template {
+		return &X402ReceiptTemplate{}
+	},
 }
 
 // Counts delivery outcomes by template and result (sent, retried, abandoned,
