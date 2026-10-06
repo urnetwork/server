@@ -1,0 +1,228 @@
+package model
+
+// The PostgreSQL/Redis fixture drives the real model entry points and the
+// background predicate, including legacy null-outcome settlement and lost posts.
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server"
+)
+
+// Public Redis admission, legacy direct admission, companion and no-escrow
+// creation all publish. Checkpoints permit resuming the same contract; a first
+// final party close revokes before settlement, including the legacy null outcome.
+func TestContractHoleModelCreationModesCheckpointResumeAndFinalClose(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		f := newNetEscrowOrderingTestFixture(t, ctx)
+		legacy, posts := createNetEscrowOrderingTestContract(ctx, f, 100)
+		server.RunPosts(ctx, posts...)
+		current := createRedisAdmissionTest(ctx, f, 100)
+		companion, err := CreateCompanionTransferEscrow(ctx, f.destinationNetworkId, f.destinationId,
+			f.sourceNetworkId, f.sourceId, 100, time.Hour)
+		server.Raise(err)
+		noEscrow, err := CreateContractNoEscrow(ctx, f.sourceNetworkId, f.sourceId, f.destinationNetworkId, f.destinationId, 100)
+		server.Raise(err)
+		requireContractHoleCount(t, ctx, f.sourceId, f.destinationId, 4)
+		ids := []server.Id{legacy.ContractId, current.ContractId, companion.ContractId, noEscrow}
+		for _, id := range ids {
+			clientId := f.sourceId
+			if id == companion.ContractId {
+				clientId = f.destinationId
+			}
+			reportId := server.NewId()
+			applied, err := CloseContractReport(ctx, id, clientId, 0, true, reportId)
+			if err != nil || !applied {
+				t.Fatalf("first checkpoint applied=%t error=%v", applied, err)
+			}
+			applied, err = CloseContractReport(ctx, id, clientId, 0, true, reportId)
+			if err != nil || applied {
+				t.Fatalf("checkpoint replay applied=%t error=%v", applied, err)
+			}
+			requireContractHoleCount(t, ctx, f.sourceId, f.destinationId, 4)
+			server.Db(ctx, func(conn server.PgConn) {
+				var outcome *ContractOutcome
+				server.Raise(conn.QueryRow(ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1`, id).Scan(&outcome))
+				if outcome != nil {
+					t.Fatal("checkpoint unexpectedly settled contract")
+				}
+			})
+		}
+		for index, id := range ids {
+			clientId := f.sourceId
+			if id == companion.ContractId {
+				clientId = f.destinationId
+			}
+			server.Raise(CloseContract(ctx, id, clientId, 0, false))
+			requireContractHoleCount(t, ctx, f.sourceId, f.destinationId, int64(3-index))
+		}
+	})
+}
+
+// Inserts legacy source rows without a projection, representing a pre-rollout
+// contract or a confirmed commit whose process died before its optional post.
+func insertContractHoleSourceRow(ctx context.Context, source, destination server.Id) server.Id {
+	id := server.NewId()
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
+ (contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count)
+ VALUES($1,$2,$3,$4,$5,0)`, id, server.NewId(), source, server.NewId(), destination))
+	})
+	return id
+}
+
+// Reconciliation preserves resumable checkpoints, both directions and empty
+// party metadata, while counting a self-contract exactly once.
+func TestContractHoleBackgroundPreservesOpenPredicateAndRepairsDrift(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		source, destination := server.NewId(), server.NewId()
+		forward := insertContractHoleSourceRow(ctx, source, destination)
+		reverse := insertContractHoleSourceRow(ctx, destination, source)
+		empty := insertContractHoleSourceRow(ctx, source, destination)
+		checkpoint := insertContractHoleSourceRow(ctx, source, destination)
+		closed := insertContractHoleSourceRow(ctx, destination, source)
+		disputed := insertContractHoleSourceRow(ctx, source, destination)
+		settled := insertContractHoleSourceRow(ctx, source, destination)
+		self := insertContractHoleSourceRow(ctx, source, source)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close(contract_id,party,used_transfer_byte_count,checkpoint)
+ VALUES($1,'',0,false),($2,'',0,true),($3,'source',0,false)`, empty, checkpoint, closed))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET dispute=true WHERE contract_id=$1`, disputed))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET outcome=$2 WHERE contract_id=$1`, settled, ContractOutcomeSettled))
+		})
+		if HasOpenContractHole(ctx, source, destination) {
+			t.Fatal("cold reader performed inline source rebuild")
+		}
+		published, err := refreshContractHole(ctx, source, destination)
+		if err != nil || !published {
+			t.Fatalf("background repair published=%t error=%v", published, err)
+		}
+		requireContractHoleCount(t, ctx, source, destination, 4)
+		server.Raise(func() error { _, err := refreshContractHole(ctx, source, source); return err }())
+		requireContractHoleCount(t, ctx, source, source, 1)
+		server.Redis(ctx, func(client server.RedisClient) {
+			for _, id := range []server.Id{forward, reverse, empty, checkpoint} {
+				found, err := client.SIsMember(ctx, contractHoleKeys(source, destination)[1], id.String()).Result()
+				if err != nil || !found {
+					t.Fatal("eligible source member missing", err)
+				}
+			}
+			found, err := client.SIsMember(ctx, contractHoleKeys(source, source)[1], self.String()).Result()
+			if err != nil || !found {
+				t.Fatal("self source member missing", err)
+			}
+			server.Raise(client.Set(ctx, contractHoleKeys(source, destination)[0], 99, ContractHoleTtl).Err())
+		})
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_contract WHERE contract_id=ANY($1)`, []server.Id{forward, reverse, empty, checkpoint}))
+		})
+		published, err = refreshContractHole(ctx, source, destination)
+		if err != nil || !published {
+			t.Fatalf("deletion repair published=%t error=%v", published, err)
+		}
+		requireContractHoleCount(t, ctx, source, destination, 0)
+	})
+}
+
+// Dispute revocation is immediate, reopening is conservative until authoritative
+// reconciliation, and a direct outcome claim also removes its member.
+func TestContractHoleModelDisputeReopenAndDirectOutcome(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		source, destination := server.NewId(), server.NewId()
+		id := insertContractHoleSourceRow(ctx, source, destination)
+		_, err := refreshContractHole(ctx, source, destination)
+		server.Raise(err)
+		SetContractDispute(ctx, id, true)
+		requireContractHoleCount(t, ctx, source, destination, 0)
+		SetContractDispute(ctx, id, false)
+		requireContractHoleCount(t, ctx, source, destination, 0)
+		_, err = refreshContractHole(ctx, source, destination)
+		server.Raise(err)
+		requireContractHoleCount(t, ctx, source, destination, 1)
+		server.Tx(ctx, func(tx server.PgTx) {
+			claimed, err := claimContractOutcomeInTx(ctx, tx, id, ContractOutcomeSettled)
+			server.Raise(err)
+			if !claimed {
+				t.Fatal("outcome was not claimed")
+			}
+		})
+		requireContractHoleCount(t, ctx, source, destination, 0)
+	})
+}
+
+// The actual bounded retention delete returns identities from its existing
+// mutation, so a deleted unresolved straggler cannot leave an authorization.
+func TestContractHoleRetentionDeleteRevokesMembership(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		source, destination := server.NewId(), server.NewId()
+		id := insertContractHoleSourceRow(ctx, source, destination)
+		_, err := refreshContractHole(ctx, source, destination)
+		server.Raise(err)
+		requireContractHoleCount(t, ctx, source, destination, 1)
+		old := server.NowUtc().Add(-400 * 24 * time.Hour)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET create_time=$2,close_time=$2,reap_time=$2 WHERE contract_id=$1`, id, old))
+		})
+		removeDueContractBatches(ctx, server.NowUtc(), server.NowUtc().Add(-300*24*time.Hour), 8)
+		requireContractHoleCount(t, ctx, source, destination, 0)
+		server.Db(ctx, func(conn server.PgConn) {
+			var exists bool
+			server.Raise(conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$1)`, id).Scan(&exists))
+			if exists {
+				t.Fatal("retention fixture did not delete source")
+			}
+		})
+	})
+}
+
+// Equal creation timestamps force the included contract-id tie breaker across
+// page boundaries, without an unbounded read or skipped members.
+func TestContractHoleBackgroundCursorAndMemberBound(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		source, destination := server.NewId(), server.NewId()
+		count := ContractHoleRefreshPageSize + 1
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
+ (contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count)
+ SELECT gen_random_uuid(),$1,$2,$3,$4,0 FROM generate_series(1,$5)`, server.NewId(), source, server.NewId(), destination, count))
+		})
+		cursor, pairs, err := RefreshContractHolesPage(ctx, nil)
+		if err != nil || cursor == nil || pairs != 1 {
+			t.Fatalf("first cursor=%v pairs=%d error=%v", cursor, pairs, err)
+		}
+		requireContractHoleCount(t, ctx, source, destination, int64(count))
+		next, pairs, err := RefreshContractHolesPage(ctx, cursor)
+		if err != nil || next != nil || pairs != 1 {
+			t.Fatalf("final cursor=%v pairs=%d error=%v", next, pairs, err)
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
+ (contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count)
+ SELECT gen_random_uuid(),$1,$2,$3,$4,0 FROM generate_series(1,$5)`, server.NewId(), source, server.NewId(), destination, contractHoleMemberLimit+1-count))
+		})
+		published, err := refreshContractHole(ctx, source, destination)
+		if err != nil || published {
+			t.Fatalf("oversized snapshot published=%t error=%v", published, err)
+		}
+		requireContractHoleCount(t, ctx, source, destination, 0)
+		server.Raise(applyContractHoleEvent(ctx, server.NewId(), source, destination, "create"))
+		requireContractHoleCount(t, ctx, source, destination, 0)
+	})
+}

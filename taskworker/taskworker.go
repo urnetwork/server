@@ -66,6 +66,7 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveDisconnectedNetworkClients(clientSession, tx)
 		work.ScheduleSweepOrphanNetworkClientData(clientSession, tx)
 		work.ScheduleSweepOrphanContractData(clientSession, tx)
+		work.ScheduleRefreshContractHoles(clientSession, tx)
 		task.ScheduleTaskCleanup(clientSession, tx)
 		work.ScheduleBackfillInitialTransferBalance(clientSession, tx)
 		work.ScheduleIndexSearchLocations(clientSession, tx)
@@ -252,6 +253,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.SweepOrphanContractData,
 			work.SweepOrphanContractDataPost,
 		),
+		task.NewTaskTargetWithPost(work.RefreshContractHoles, work.RefreshContractHolesPost),
 		task.NewTaskTargetWithPost(
 			work.IndexSearchLocations,
 			work.IndexSearchLocationsPost,
