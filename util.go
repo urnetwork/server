@@ -331,3 +331,22 @@ func runPosts(
 func RunPosts(ctx context.Context, posts ...PostFunction) {
 	runPosts(ctx, nil, posts...)
 }
+
+// Combines the posts into one post that runs them one after another, in the
+// order given, for posts whose effects must apply in order: RunPosts runs the
+// posts of one generation in parallel. The next generations the posts return
+// are the combined post's next generation.
+func SequencePosts(posts ...PostFunction) PostFunction {
+	return func() any {
+		var nextPosts []PostFunction
+		for _, post := range posts {
+			switch v := post().(type) {
+			case []PostFunction:
+				nextPosts = append(nextPosts, v...)
+			case PostFunction:
+				nextPosts = append(nextPosts, v)
+			}
+		}
+		return nextPosts
+	}
+}

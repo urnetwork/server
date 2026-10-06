@@ -48,7 +48,11 @@ func createLocationGroupSearch() *search.SearchLocal {
 var locationSearch = sync.OnceValue(createLocationSearch)
 var locationGroupSearch = sync.OnceValue(createLocationGroupSearch)
 
-func IndexSearchLocationsInTx(ctx context.Context, tx server.PgTx) {
+// Re-indexes, in the caller's transaction, every location and location group
+// whose search strings changed. Returns the posts that move the searches'
+// in-memory indexes, for the caller to run, in order (server.SequencePosts),
+// once the transaction has committed.
+func IndexSearchLocationsInTx(ctx context.Context, tx server.PgTx) (posts []server.PostFunction) {
 	// locations
 	result, err := tx.Query(ctx,
 		`
@@ -127,9 +131,9 @@ func IndexSearchLocationsInTx(ctx context.Context, tx server.PgTx) {
 			locationUpToDateCount += 1
 			continue
 		}
-		locationSearch().RemoveInTx(ctx, locationId, tx)
+		posts = append(posts, locationSearch().RemoveInTxPost(ctx, locationId, tx))
 		for j, searchStr := range searchStrings {
-			locationSearch().AddInTx(ctx, searchStr, locationId, j, tx)
+			posts = append(posts, locationSearch().AddInTxPost(ctx, searchStr, locationId, j, tx))
 			glog.Infof("[location]index %d/%d %d/%d: %s\n", i+1, len(locationIds), j+1, len(searchStrings), searchStr)
 		}
 	}
@@ -191,11 +195,12 @@ func IndexSearchLocationsInTx(ctx context.Context, tx server.PgTx) {
 			locationGroupUpToDateCount += 1
 			continue
 		}
-		locationGroupSearch().RemoveInTx(ctx, locationGroupId, tx)
+		posts = append(posts, locationGroupSearch().RemoveInTxPost(ctx, locationGroupId, tx))
 		for j, searchStr := range searchStrings {
-			locationGroupSearch().AddInTx(ctx, searchStr, locationGroupId, j, tx)
+			posts = append(posts, locationGroupSearch().AddInTxPost(ctx, searchStr, locationGroupId, j, tx))
 			glog.Infof("[location]index group %d/%d %d/%d: %s\n", i+1, len(locationGroupIds), j+1, len(searchStrings), searchStr)
 		}
 	}
 	glog.Infof("[location]index group %d/%d up to date\n", locationGroupUpToDateCount, len(locationGroupIds))
+	return
 }
