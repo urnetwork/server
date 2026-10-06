@@ -420,8 +420,7 @@ func dbVersion(opts docopt.Opts) {
 func dbMigrate(opts docopt.Opts) {
 	fmt.Printf("Applying DB migrations ...\n")
 	server.DbMigrationVerbose = true
-	server.ApplyDbMigrations(context.Background())
-	server.Raise(preparePayoutBoundaryAfterMigrate(context.Background(), opts))
+	server.Raise(migrateWithPayoutBoundary(context.Background(), opts, os.Stdout, server.ApplyDbMigrations))
 }
 
 // dbScrubClientAddresses re-runs the 20260807 raw-client-address scrub
