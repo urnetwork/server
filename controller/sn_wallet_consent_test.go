@@ -28,9 +28,17 @@ func walletMappingControllerHttp(t testing.TB) *httptest.Server {
 		case "/sn/wallet/consent":
 			router.WrapWithInputRequireAuth(SnWalletMappingChallenge, w, r)
 		case "/sn/wallet":
-			router.WrapWithInputRequireAuth(SnSetWallet, w, r)
+			if r.Method == http.MethodGet {
+				router.WrapRequireAuth(SnGetWallet, w, r)
+			} else {
+				router.WrapWithInputRequireAuth(SnSetWallet, w, r)
+			}
 		case "/sn/wallet/consent/history":
 			router.WrapWithInputNoAuth(SnWalletMappingHistory, w, r)
+		case "/sn/wallet/network-consent":
+			router.WrapWithInputRequireAuth(SnNetworkWalletMappingChallenge, w, r)
+		case "/sn/wallet/network-consent/history":
+			router.WrapWithInputNoAuth(SnNetworkWalletMappingHistory, w, r)
 		default:
 			http.NotFound(w, r)
 		}

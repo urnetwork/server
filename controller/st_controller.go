@@ -3487,6 +3487,17 @@ func stComputeReleasePayout(
 	if err != nil {
 		return [32]byte{}, 0, err
 	}
+	// which consent selected each earning wallet, retained before the artifact
+	// record so a recorded artifact always has its resolutions
+	resolutions := make([]*model.StPayoutWalletResolution, 0, len(wallets))
+	for _, wallet := range wallets {
+		if wallet.Resolution != nil {
+			resolutions = append(resolutions, wallet.Resolution)
+		}
+	}
+	if err := model.AddStPayoutWalletResolutions(ctx, cfg.DeploymentKey(), epoch, cfg.NoId, resolutions); err != nil {
+		return [32]byte{}, 0, err
+	}
 	leaves := make([]*model.StPayoutLeaf, len(artifact.Leaves))
 	for i, leaf := range artifact.Leaves {
 		clientId := server.Id(leaf.ClientID)
