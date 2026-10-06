@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || darwin
 
 // File custody tests force path, ambiguity, ownership and publication conflicts
 // directly; no timing assumptions or externally owned files are involved.
