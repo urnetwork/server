@@ -85,8 +85,12 @@ external blocker is documented with the evidence needed to remove it.
 
   | Role | Serial | Model |
   |---|---|---|
-  | `device-a` | `3B161FDJG001KT` | Pixel 8 Pro |
-  | `device-b` | `R5CX21FY6ND` | Galaxy S24 Ultra |
+  | `device-a` | first in `android.performance_device_serials` | Pixel 8 Pro |
+  | `device-b` | second in `android.performance_device_serials` | Galaxy S24 Ultra |
+
+  The serials live in tests.yml (`vault/main/tests.yml`, beside
+  `android.unlock_code`) and are read through `tests/read-tests-config.sh`; no
+  repository writes them.
 
   Before each PERFVAR, LOWBAR, or MEMSTEADY block, require `adb devices -l` to
   show both allowlisted serials in `device` state. Ignore every other entry,
@@ -100,7 +104,8 @@ external blocker is documented with the evidence needed to remove it.
   A fail-closed preflight is:
 
   ```sh
-  for serial in 3B161FDJG001KT R5CX21FY6ND; do
+  # from the workspace root
+  for serial in $(tests/read-tests-config.sh get android.performance_device_serials); do
     adb devices | awk -v serial="$serial" \
       '$1 == serial && $2 == "device" { ok = 1 } END { exit !ok }' || {
         echo 'allowlisted Android device unavailable' >&2
