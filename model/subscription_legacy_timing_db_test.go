@@ -89,10 +89,24 @@ func TestLegacySettlementTimingAttributesJoinedCallbackWait(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 				defer cancel()
 				first, firstId := legacySettlementTestIntent(t, ctx)
-				second, secondId := legacySettlementTestIntent(t, ctx)
+				second := newNetEscrowOrderingTestFixture(t, ctx)
+				escrow, createPosts := createNetEscrowOrderingTestContract(ctx, second, 100)
+				server.RunPosts(ctx, createPosts...)
+				// Establish the shared hash shard before any close or intent
+				// exists. The real intent CHECK remains enabled throughout.
+				secondId := escrow.ContractId
+				secondId[15] = firstId[15]
 				server.Tx(ctx, func(tx server.PgTx) {
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET shard=0,next_attempt_time=$2 WHERE contract_id=$1`, firstId, server.NowUtc().Add(-time.Hour)))
-					server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET shard=0,next_attempt_time=$2 WHERE contract_id=$1`, secondId, server.NowUtc().Add(-30*time.Minute)))
+					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET contract_id=$2 WHERE contract_id=$1`, escrow.ContractId, secondId))
+					server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_escrow SET contract_id=$2 WHERE contract_id=$1`, escrow.ContractId, secondId))
+				})
+				server.Raise(CloseContract(ctx, secondId, second.sourceId, 11, false))
+				server.Raise(CloseContract(ctx, secondId, second.destinationId, 11, false))
+				refreshNetEscrow(ctx, []server.Id{second.balanceId})
+				shard := int(firstId[15]) % LegacySettlementShardCount
+				server.Tx(ctx, func(tx server.PgTx) {
+					server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET next_attempt_time=$2 WHERE contract_id=$1`, firstId, server.NowUtc().Add(-time.Hour)))
+					server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET next_attempt_time=$2 WHERE contract_id=$1`, secondId, server.NowUtc().Add(-30*time.Minute)))
 					// One cold legacy mirror is the exact-census positive control;
 					// the second grant retains its current cache and needs no scan.
 					server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance_net_escrow_snapshot WHERE balance_id=$1`, first.balanceId))
@@ -112,7 +126,7 @@ func TestLegacySettlementTimingAttributesJoinedCallbackWait(t *testing.T) {
 				retired := make(chan struct{})
 				go func() {
 					defer close(retired)
-					result, err := FlushLegacySettlements(ctx, 0, nil, 2)
+					result, err := FlushLegacySettlements(ctx, shard, nil, 2)
 					done <- completion{result, err}
 				}()
 				defer func() {
@@ -168,7 +182,7 @@ func TestLegacySettlementTimingAttributesJoinedCallbackWait(t *testing.T) {
 				requireLegacyProviderDurability(t, ctx, first, firstId, 11)
 				requireLegacyProviderDurability(t, ctx, second, secondId, 11)
 				requireRedisExpiryClock(t, ctx, "22")
-				again, err := FlushLegacySettlements(ctx, 0, nil, 2)
+				again, err := FlushLegacySettlements(ctx, shard, nil, 2)
 				if err != nil || again.Visited != 0 || again.Completed != 0 || again.Timings.Selection.Count != 1 || again.Timings.Financial.Count != 0 {
 					t.Fatal("observed page replay duplicated work or lost the empty selector observation")
 				}
