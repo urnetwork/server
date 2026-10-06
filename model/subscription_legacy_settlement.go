@@ -50,12 +50,13 @@ type LegacySettlementPosition struct {
 }
 
 type LegacySettlementFlushResult struct {
-	Cursor     *LegacySettlementCursor `json:"cursor,omitempty"`
-	Visited    int                     `json:"visited"`
-	Completed  int                     `json:"completed"`
-	BusyOrGone int                     `json:"busy_or_gone"`
-	Failed     int                     `json:"failed"`
-	More       bool                    `json:"more"`
+	Cursor     *LegacySettlementCursor  `json:"cursor,omitempty"`
+	Visited    int                      `json:"visited"`
+	Completed  int                      `json:"completed"`
+	BusyOrGone int                      `json:"busy_or_gone"`
+	Failed     int                      `json:"failed"`
+	More       bool                     `json:"more"`
+	Timings    *LegacySettlementTimings `json:"timings,omitempty"`
 	// Head outcomes are included in the total counts, not extra visits.
 	HeadVisited    int `json:"head_visited"`
 	HeadCompleted  int `json:"head_completed"`
@@ -179,7 +180,8 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 		}
 	}
 	// Only best-effort projections with separate recovery/expiry remain after commit.
-	posts = append(posts, func() any { RemoveFromStream(ctx, contractId); return nil })
+	posts = append(posts, observeLegacySettlementPost(ctx, legacySettlementStream,
+		func() any { RemoveFromStream(ctx, contractId); return nil }))
 	return posts, true, false, legacySettlementBusyNone, nil
 }
 
@@ -239,6 +241,7 @@ func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.I
 	var posts []func() any
 	server.HandleError(func() {
 		func() {
+			defer enterLegacySettlementTiming(ctx, legacySettlementFinancial)()
 			defer func() {
 				if r := recover(); r != nil {
 					if r == errLegacySettlementGrantWaitBusy {
@@ -260,7 +263,10 @@ func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.I
 				server.Raise(err)
 			}, server.TxReadCommitted, server.OptNoRetry())
 		}()
-		server.RunPosts(ctx, posts...)
+		func() {
+			defer enterLegacySettlementTiming(ctx, legacySettlementJoinedPosts)()
+			server.RunPosts(ctx, posts...)
+		}()
 	}, func(err error) { returnErr = err })
 	return
 }
@@ -281,7 +287,11 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 	}
 	bounded, cancel := context.WithTimeoutCause(ctx, 15*time.Second, errLegacySettlementPageBudget)
 	defer cancel()
-	return flushLegacySettlementsPage(ctx, bounded, shard, after, limit, flushLegacySettlementWithGrantWait)
+	observer := &legacySettlementTimingObserver{now: time.Now}
+	bounded = context.WithValue(bounded, legacySettlementTimingKey{}, observer)
+	result, returnErr = flushLegacySettlementsPage(ctx, bounded, shard, after, limit, flushLegacySettlementWithGrantWait)
+	result.Timings = observer.snapshot()
+	return
 }
 
 // One traversal owns its settlement operation, including the first head's
@@ -308,54 +318,57 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 		for remaining := limit; remaining > 0; {
 			visitHead := headRemaining > 0 && forwardUntilHead == 0
 			var next *LegacySettlementCursor
-			server.Db(bounded, func(conn server.PgConn) {
-				query := `SELECT next_attempt_time,contract_id,statement_timestamp() AT TIME ZONE 'UTC' FROM legacy_settlement_intent
+			func() {
+				defer enterLegacySettlementTiming(bounded, legacySettlementSelection)()
+				server.Db(bounded, func(conn server.PgConn) {
+					query := `SELECT next_attempt_time,contract_id,statement_timestamp() AT TIME ZONE 'UTC' FROM legacy_settlement_intent
                   WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
                   ORDER BY next_attempt_time,contract_id LIMIT 1`
-				args := []any{shard}
-				if after != nil {
-					// Older task cursors have no cutoff. Establish it once on
-					// their first continuation, then preserve it across pages.
-					cursor := after
-					if visitHead {
-						cursor = headCursor
-					}
-					var passEndTime any
-					if !cursor.PassEndTime.IsZero() {
-						passEndTime = cursor.PassEndTime
-					}
-					query = `SELECT next_attempt_time,contract_id,COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC') FROM legacy_settlement_intent
-                      WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
-                      AND next_attempt_time<=COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC')
-                      AND (next_attempt_time,contract_id)>($2,$3) ORDER BY next_attempt_time,contract_id LIMIT 1`
-					args = append(args, cursor.NextAttemptTime, cursor.ContractId, passEndTime)
-					if visitHead {
+					args := []any{shard}
+					if after != nil {
+						// Older task cursors have no cutoff. Establish it once on
+						// their first continuation, then preserve it across pages.
+						cursor := after
+						if visitHead {
+							cursor = headCursor
+						}
+						var passEndTime any
+						if !cursor.PassEndTime.IsZero() {
+							passEndTime = cursor.PassEndTime
+						}
 						query = `SELECT next_attempt_time,contract_id,COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC') FROM legacy_settlement_intent
                       WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
                       AND next_attempt_time<=COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC')
+                      AND (next_attempt_time,contract_id)>($2,$3) ORDER BY next_attempt_time,contract_id LIMIT 1`
+						args = append(args, cursor.NextAttemptTime, cursor.ContractId, passEndTime)
+						if visitHead {
+							query = `SELECT next_attempt_time,contract_id,COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC') FROM legacy_settlement_intent
+                      WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
+                      AND next_attempt_time<=COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC')
                       AND (next_attempt_time,contract_id)<=($2,$3)`
-						if headAfter != nil {
-							query += ` AND (next_attempt_time,contract_id)>($5,$6)`
-							args = append(args, headAfter.NextAttemptTime, headAfter.ContractId)
+							if headAfter != nil {
+								query += ` AND (next_attempt_time,contract_id)>($5,$6)`
+								args = append(args, headAfter.NextAttemptTime, headAfter.ContractId)
+							}
+							if headWrapped {
+								// A page can wrap once. Its second segment ends at the
+								// original lower bound so no head is visited twice.
+								query += fmt.Sprintf(` AND (next_attempt_time,contract_id)<=($%d,$%d)`, len(args)+1, len(args)+2)
+								args = append(args, headCycleBefore.NextAttemptTime, headCycleBefore.ContractId)
+							}
+							query += ` ORDER BY next_attempt_time,contract_id LIMIT 1`
 						}
-						if headWrapped {
-							// A page can wrap once. Its second segment ends at the
-							// original lower bound so no head is visited twice.
-							query += fmt.Sprintf(` AND (next_attempt_time,contract_id)<=($%d,$%d)`, len(args)+1, len(args)+2)
-							args = append(args, headCycleBefore.NextAttemptTime, headCycleBefore.ContractId)
+					}
+					rows, err := conn.Query(bounded, query, args...)
+					server.WithPgResult(rows, err, func() {
+						if rows.Next() {
+							value := LegacySettlementCursor{}
+							server.Raise(rows.Scan(&value.NextAttemptTime, &value.ContractId, &value.PassEndTime))
+							next = &value
 						}
-						query += ` ORDER BY next_attempt_time,contract_id LIMIT 1`
-					}
-				}
-				rows, err := conn.Query(bounded, query, args...)
-				server.WithPgResult(rows, err, func() {
-					if rows.Next() {
-						value := LegacySettlementCursor{}
-						server.Raise(rows.Scan(&value.NextAttemptTime, &value.ContractId, &value.PassEndTime))
-						next = &value
-					}
+					})
 				})
-			})
+			}()
 			if next == nil {
 				if visitHead {
 					if headCycleBefore != nil && !headWrapped {
