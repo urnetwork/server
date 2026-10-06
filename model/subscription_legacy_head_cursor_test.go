@@ -65,10 +65,10 @@ func TestLegacySettlementHeadCursorPassesPersistentBusyPrefix(t *testing.T) {
 				t.Fatal("head revisit mutated or rewound the independent forward cursor")
 			}
 			if turn == 0 {
-				if page.HeadBusyOrGone != 2 || page.HeadCompleted != 0 {
+				if page.HeadBusyOrGone != 2 || page.HeadCompleted != 0 || page.HeadBusyGrantSetMismatch != 2 || page.HeadGrantWaitTimedOut != 1 {
 					t.Fatal("initial head revisit did not observe its entire held prefix")
 				}
-			} else if page.HeadCompleted != 2 || page.HeadBusyOrGone != 0 || page.Completed != 8 ||
+			} else if page.HeadCompleted != 2 || page.HeadBusyOrGone != 0 || page.Completed != 8 || page.HeadGrantWaitCompleted != 1 ||
 				page.Cursor.HeadAfter == nil || page.Cursor.HeadAfter.ContractId != tailIds[1] {
 				t.Fatal("persistent busy prefix starved the independently funded next head")
 			}
@@ -134,6 +134,10 @@ func TestLegacySettlementHeadCursorPassesPersistentBusyPrefix(t *testing.T) {
 		replayed, err := FlushLegacySettlements(ctx, shard, nil, 8)
 		if err != nil || replayed.Visited != 0 {
 			t.Fatal("head revisit repeated a completed financial owner")
+		}
+		clock, ok := GetClock(ctx)
+		if !ok || clock.TotalTransferByteCount != "286" {
+			t.Fatal("head cursor recovery omitted or repeated a finalized clock contribution")
 		}
 	})
 }
