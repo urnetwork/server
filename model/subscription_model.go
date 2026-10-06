@@ -2800,7 +2800,7 @@ func settleContractWithExpiryScope(ctx context.Context, contractId server.Id, sc
 				diff := sourceUsedTransferByteCount - destinationUsedTransferByteCount
 				if math.Abs(float64(diff)) <= AcceptableTransfersByteDifference {
 					// fmt.Printf("CLOSE CONTRACT SETTLE (%s) %s\n", clientId.String(), contractId.String())
-					posts, closed, returnErr = settleEscrowForegroundInTx(ctx, tx, contractId, ContractOutcomeSettled)
+					posts, closed, returnErr = settleEscrowForegroundWithExpiryScopeInTx(ctx, tx, contractId, ContractOutcomeSettled, scope)
 				} else {
 					if scope == nil {
 						glog.Infof("[sub]contract[%s]diff %d (%d <> %d)\n", contractId.String(), diff, sourceUsedTransferByteCount, destinationUsedTransferByteCount)
@@ -3240,13 +3240,24 @@ func settleEscrowInTx(
 }
 
 func settleEscrowForegroundInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome) ([]func() any, bool, error) {
-	return settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, true, false)
+	return settleEscrowForegroundWithExpiryScopeInTx(ctx, tx, contractId, outcome, nil)
+}
+
+// Scoped Redis expiry already commits the debit worker's recovery authority.
+// It leaves metadata and reservation release to that owner, preserving clock
+// posts: the clock's startup aggregate backfill is not a per-contract retry.
+func settleEscrowForegroundWithExpiryScopeInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, scope *contractExpiryRepairScope) ([]func() any, bool, error) {
+	return settleEscrowWithProjectionOptionsInTx(ctx, tx, contractId, outcome, true, false, scope != nil && scope.redis != nil)
 }
 
 // Current Redis contracts append independent consumption records. Legacy
 // callers queue an intent without releasing their reservation; the worker uses
 // the original atomic debit/outcome path and commits exact earnings plus durable total-projection ownership.
 func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial bool) (posts []func() any, closed bool, returnErr error) {
+	return settleEscrowWithProjectionOptionsInTx(ctx, tx, contractId, outcome, deferLegacy, inlineFinancial, false)
+}
+
+func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial, deferRedisDebitPosts bool) (posts []func() any, closed bool, returnErr error) {
 	// CloseContract already owns this lock; direct and recovery settlement
 	// must acquire it before balance locks to keep the same lock order.
 	server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id = $1 FOR UPDATE`, contractId))
@@ -3255,6 +3266,7 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	var asyncDebit, hasEscrow bool
 	server.Raise(tx.QueryRow(ctx, `SELECT COALESCE(bool_and(redis_reserved),false),count(*)>0
         FROM transfer_escrow WHERE contract_id=$1`, contractId).Scan(&asyncDebit, &hasEscrow))
+	deferRedisDebitPosts = deferRedisDebitPosts && asyncDebit
 	if deferLegacy && hasEscrow && !asyncDebit {
 		return nil, false, queueLegacySettlementInTx(ctx, tx, contractId, outcome, false)
 	}
@@ -3563,12 +3575,12 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 			} else {
 				posts = append(posts, metadataPost, mirrorPost)
 			}
-		} else {
+		} else if !deferRedisDebitPosts {
 			posts = append(posts, metadataPost)
 		}
 	}
 
-	if len(redisReservations) > 0 {
+	if len(redisReservations) > 0 && !deferRedisDebitPosts {
 		posts = append(posts, func() any {
 			// Read committed journal state, not captured transaction predictions.
 			// Lost posts leave the original reservation conservatively outstanding.

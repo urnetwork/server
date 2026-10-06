@@ -32,7 +32,7 @@ func closeContractWithExpiryScope(ctx context.Context, scope *contractExpiryRepa
 	if err != nil {
 		return err
 	}
-	if closed {
+	if closed && scope.redis == nil {
 		RemoveFromStream(ctx, contractId)
 	}
 	return nil
@@ -225,7 +225,7 @@ func continueContractExpiry(ctx context.Context, tag string, openContract *contr
 		var posts []func() any
 		var err error
 		contractExpiryContinuationTx(ctx, openContract.contractId, scope, func(tx server.PgTx) {
-			posts, _, err = settleEscrowForegroundInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled)
+			posts, _, err = settleEscrowForegroundWithExpiryScopeInTx(ctx, tx, openContract.contractId, ContractOutcomeSettled, scope)
 			if scope != nil {
 				server.Raise(err)
 			}
