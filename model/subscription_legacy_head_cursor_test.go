@@ -33,6 +33,7 @@ func TestLegacySettlementHeadCursorPassesPersistentBusyPrefix(t *testing.T) {
 		})
 		server.Raise(CloseContract(ctx, secondHead, head.sourceId, 11, false))
 		server.Raise(CloseContract(ctx, secondHead, head.destinationId, 11, false))
+		refreshNetEscrow(ctx, []server.Id{head.balanceId})
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET next_attempt_time=$2 WHERE contract_id=$1`, secondHead, oldest.Add(time.Second)))
 		})

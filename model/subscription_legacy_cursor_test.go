@@ -47,6 +47,7 @@ func legacySettlementGrowingTailControl(t *testing.T, oldCursor bool) {
 			})
 			server.Raise(CloseContract(ctx, id, fixture.sourceId, 11, false))
 			server.Raise(CloseContract(ctx, id, fixture.destinationId, 11, false))
+			refreshNetEscrow(ctx, []server.Id{fixture.balanceId})
 			contracts = append(contracts, queuedContract{fixture: fixture, contractId: id})
 			return id
 		}
@@ -136,6 +137,7 @@ func TestLegacySettlementDeferredFailureLeavesFixedPass(t *testing.T) {
 		})
 		server.Raise(CloseContract(ctx, healthyId, healthy.sourceId, 11, false))
 		server.Raise(CloseContract(ctx, healthyId, healthy.destinationId, 11, false))
+		refreshNetEscrow(ctx, []server.Id{healthy.balanceId})
 		oldestTime := time.Date(2010, time.January, 1, 0, 0, 0, 0, time.UTC)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET next_attempt_time=$2 WHERE contract_id=$1`, failedId, oldestTime))

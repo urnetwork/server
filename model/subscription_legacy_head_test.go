@@ -38,6 +38,9 @@ func legacyHeadRevisitFixture(t testing.TB, ctx context.Context, count int) (net
 		})
 		tailIds[index] = id
 	}
+	// Synthetic ID rewrites invalidate the cache. Keep this cursor fixture
+	// warm; cold-mirror controls explicitly remove it after setup.
+	refreshNetEscrow(ctx, []server.Id{tail.balanceId})
 	return head, headId, tail, tailIds
 }
 

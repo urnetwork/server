@@ -27,6 +27,7 @@ func TestLegacyRefusalPreservesDebtAndSamePayerSuccessorProgress(t *testing.T) {
 		})
 		server.Raise(CloseContract(ctx, goodID, f.sourceId, 11, false))
 		server.Raise(CloseContract(ctx, goodID, f.destinationId, 11, false))
+		refreshNetEscrow(ctx, []server.Id{f.balanceId})
 		// Seed the already-observed over-grant report shape. This is a queue
 		// ownership control, not evidence of how any Main report was produced.
 		oldest := server.NowUtc().Add(-2 * time.Minute)

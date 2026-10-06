@@ -5,24 +5,26 @@ package taskworker
 import (
 	"maps"
 
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
 )
 
 // One provider-probe shard per instance prevents several polling loops from
-// co-locating long-lived tunnel pools. No other production target is limited,
-// and a separate worker receives independent capacity. Caller settings stay
-// unchanged, including their map if they also opted other targets in.
+// co-locating long-lived tunnel pools. One legacy mirror repair bounds cold
+// history work moved off the financial page. Each worker has independent
+// capacity, and caller-owned settings and maps remain unchanged.
 func taskWorkerSettingsForProfile(settings *task.TaskWorkerSettings, profile WorkloadProfile) *task.TaskWorkerSettings {
 	if settings == nil {
 		settings = task.DefaultTaskWorkerSettings()
 	}
 	ownerSettings := *settings
 	ownerSettings.TargetClaimLimits = maps.Clone(settings.TargetClaimLimits)
+	if ownerSettings.TargetClaimLimits == nil {
+		ownerSettings.TargetClaimLimits = map[string]int{}
+	}
+	ownerSettings.TargetClaimLimits[task.NewTaskTarget(model.ApplyLegacyNetEscrowMirror).TargetFunctionName()] = 1
 	if profile == WorkloadProfileProduction {
-		if ownerSettings.TargetClaimLimits == nil {
-			ownerSettings.TargetClaimLimits = map[string]int{}
-		}
 		name := task.NewTaskTarget(work.ProviderEgressProbe).TargetFunctionName()
 		ownerSettings.TargetClaimLimits[name] = 1
 	} else if profile == WorkloadProfileSubnetOperator {
