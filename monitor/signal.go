@@ -96,6 +96,19 @@ func (s *signalAdapter) Run(ctx context.Context, settings SignalSettings) (Alert
 			return alerts, fmt.Errorf("monitor: URL coverage observation output failed")
 		}
 	}
+	if settings.ProviderSelectionObserver != nil && env.providerSelectionObservation != nil {
+		observation := env.providerSelectionObservation
+		for _, finding := range findings {
+			if finding.class == "monitor-host-scope-partial" {
+				observation.SourceCoverageComplete = false
+				observation.ShapeCoverageComplete = false
+				observation.Reason = "monitor-host-scope-partial"
+			}
+		}
+		if err := settings.ProviderSelectionObserver(*observation); err != nil {
+			return alerts, fmt.Errorf("monitor: selection observation output failed")
+		}
+	}
 	return alerts, nil
 }
 

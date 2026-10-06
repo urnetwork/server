@@ -183,7 +183,7 @@ func TestProviderSelectionSignalCacheGapBoundary(t *testing.T) {
 // Legitimate restrictive/intentional zeroes and positive lists remain visible
 // as metrics but cannot be promoted into a new generic scarcity page.
 func TestProviderSelectionSignalHealthyAndRestrictedControls(t *testing.T) {
-	for _, reason := range []string{"returned", "intentional_zero", "no_specs", "direct_excluded", "cache_empty", "cache_missing", "filtered_hard", "filtered_network", "filtered_family", "filtered_explicit", "filtered_mixed"} {
+	for _, reason := range []string{"returned", "intentional_zero", "no_specs", "direct_excluded", "cache_empty", "filtered_hard", "filtered_network", "filtered_family", "filtered_explicit", "filtered_mixed"} {
 		alerts, err := NewProviderSelectionSignal().Run(context.Background(), selectionTestSettings(t, pickerTestPayload(t, selectionTestRows(reason, 500))))
 		if err != nil || len(alerts) != 0 {
 			t.Fatalf("%s manufactured scarcity or visibility error: alerts=%d err=%v", reason, len(alerts), err)

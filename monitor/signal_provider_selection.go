@@ -17,8 +17,8 @@ import (
 
 const providerSelectionMaxBytes = 4 * 1024 * 1024
 
-// Retains the existing provider-count thresholds; only explicit internal
-// inconsistencies and positive-count/missing-page gaps get new findings.
+// Retains the existing provider-count thresholds and distinguishes proven
+// selection inconsistencies from missing cache metadata in completed zeroes.
 func NewProviderSelectionSignal() Signal {
 	return &signalAdapter{number: "2.9c", key: "provider-selection", name: "Provider selection boundary diagnostics", probe: providerSelectionProbe{}}
 }
@@ -213,13 +213,18 @@ func (providerSelectionProbe) check(ctx context.Context, env *probeEnv) ([]findi
 		return nil, err
 	}
 	scope := pickerScope(env)
+	now := env.now()
+	reduce := func(evidence providerSelectionEvidence) ([]finding, error) {
+		observation := newProviderSelectionObservation(env.cfg.env, now, evidence)
+		env.providerSelectionObservation = &observation
+		return providerSelectionFindings(evidence), nil
+	}
 	unknown := func(reason string) ([]finding, error) {
-		return providerSelectionFindings(providerSelectionEvidence{expected: len(scope.slots), reason: reason}), nil
+		return reduce(providerSelectionEvidence{expected: len(scope.slots), reason: reason})
 	}
 	if len(scope.slots) == 0 || len(scope.slots) > 32 || len(scope.hosts) == 0 || len(scope.blocks) == 0 {
 		return unknown("inventory-unavailable-or-over-bound")
 	}
-	now := env.now()
 	command := "curl -fsS --max-time 15 --max-filesize " + strconv.Itoa(providerSelectionMaxBytes) + " --data-urlencode " + shellSingleQuote("query="+providerSelectionQuery(env.cfg.env, scope)) + " --data-urlencode " + shellSingleQuote("time="+strconv.FormatInt(now.Unix(), 10)) + " 'http://127.0.0.1:3100/prometheus/api/v1/query'"
 	out, _, err := shellFirstServiceGateway(ctx, env.runner, env.cfg.hostsWithRole("services"), nil, command)
 	if ctx.Err() != nil {
@@ -228,7 +233,7 @@ func (providerSelectionProbe) check(ctx context.Context, env *probeEnv) ([]findi
 	if err != nil {
 		return unknown("bounded-source-unavailable")
 	}
-	return providerSelectionFindings(parseProviderSelection(out, env.cfg.env, now, scope)), nil
+	return reduce(parseProviderSelection(out, env.cfg.env, now, scope))
 }
 
 // Observational zero reasons do not create a new generic scarcity threshold.
@@ -268,6 +273,11 @@ func providerSelectionFindings(evidence providerSelectionEvidence) []finding {
 			class, tier, threshold = "provider-selection-empty-despite-eligible", tierPage, 3
 		case "cache_page_gap":
 			class = "provider-selection-cache-page-gap"
+		case "cache_missing":
+			if count >= threshold {
+				findings = append(findings, providerSelectionMissingCacheFinding(evidence, key, count))
+			}
+			continue
 		}
 		if class == "" || count < threshold {
 			continue
@@ -285,4 +295,21 @@ func providerSelectionFindings(evidence providerSelectionEvidence) []finding {
 		})
 	}
 	return findings
+}
+
+// Missing target metadata is an observed response boundary, not proof of a
+// publication defect or an unavailable global provider population.
+func providerSelectionMissingCacheFinding(evidence providerSelectionEvidence, key providerSelectionKey, count float64) finding {
+	return finding{
+		probeId: "mimir/provider-selection", tier: tierWarn, class: "provider-selection-cache-missing", target: "api-fleet", frame: key.frame(), sustain: 2,
+		symptom:   "Completed provider selections returned zero with missing target cache metadata",
+		mechanism: "The reader observed at least one same-target cache read without usable count metadata after resolving the caller alias. The priority reason can cover a primary, alternate or online read; it does not prove every target was missing or identify the publisher, expiry, membership or request-intent cause.",
+		baseline:  "At least 20 ordinary positive-intent completed zero responses in five minutes, sustained for two one-minute observations. Intentional zero-count and ForceMinimum requests are excluded.",
+		observed:  fmt.Sprintf("requests=%.3f reason=cache_missing target_kind=%s ip_family=%s rank_mode=%s request_class=%s paired_processes=%d expected_slots=%d scope_complete=%t", count, key.targetKind, key.family, key.rankMode, key.requestClass, evidence.paired, evidence.expected, evidence.complete),
+		evidence:  "The completed response supplies the fixed cache_missing reason. The optional provider-selection JSONL output retains every validated reason partition, source completeness and the exact evaluation window without request, group, caller or process identities.",
+		context:   "A nonexistent or empty group can produce this boundary, as can missing publication or alias metadata; none is established by this aggregate. A nonempty country cache or a different group is not an affected-target control. Partial sources and absent lazy reason partitions cannot establish recovery. The independent provider-count and picker findings remain active.",
+		action:    "Privately bind one naturally failing request to its actual group or location, resolved caller location and request intent. Use bounded exact-target metadata and membership evidence, then repair the proven publication or intent owner. Preserve target scope and all safety filters.",
+		verify:    "Require positive naturally occurring responses for the same target and caller, two complete fresh reason windows and independent route success. Missing alerts, quiet traffic, unrelated healthy groups or source-unavailable windows cannot close the incident.",
+		playbook:  "SIGNALS.md §2.9c and §2.9a",
+	}
 }
