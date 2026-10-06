@@ -7221,6 +7221,17 @@ configured slot, including fully quiet processes. Quiet complete authority is
 not positive request traffic or proof of target-level supply; the lazy first
 event can still be unobserved by a counter increase.
 
+`-provider-selection-output <path>` appends one JSONL observation for every
+existing probe execution, including qualified nonempty/quiet windows and
+source-unavailable windows. It adds no source query. Each record retains the
+exact evaluation and five-minute window clocks, expected/paired process
+counts, source/shape completeness, and every validated positive reason
+partition. Only fixed labels and aggregate counter increases leave the private
+process join. Missing partitions are omitted, never emitted as zero; partial
+fleet evidence remains an observed-process subset. The local output callback
+does not change settings-generation authority. A local write failure remains
+visible alongside actual alerts.
+
 - `provider-selection-empty-despite-eligible` **PAGE**: at least 3 completed
   zero responses in five minutes with positive discovery count, known rank and
   eligible candidates remaining after all request filters, sustained for two
@@ -7229,6 +7240,13 @@ event can still be unobserved by a counter increase.
   responses referencing absent positive-count cache pages in five minutes,
   sustained for two observations. Inspect publication/expiry and exact reader
   and writer generations; do not clear keys or widen targets.
+- `provider-selection-cache-missing` **WARN**: at least 20 ordinary
+  positive-intent completed zero responses with missing target count metadata
+  after caller alias resolution, sustained for two observations. The reason
+  can originate from a primary, alternate or online read. It does not prove
+  every requested target is missing, identify a publisher failure, or establish
+  global scarcity. Bind the actual natural request target/caller and membership
+  privately before choosing a product fix.
 - `provider-selection-unavailable` **WARN**: missing/old/partial/excluded,
   stale, restarted, reset, malformed or over-bound evidence. It never becomes
   healthy zero. A valid observed-subset invariant finding is retained alongside
@@ -7247,7 +7265,12 @@ Intentional zero-count and ForceMinimum cohorts do not enter those thresholds.
 Other zero reasons are diagnostic evidence, not new generic zero-tail alerts:
 a lower scarcity threshold still requires the request-intent and pre-incident
 baseline authority described in §2.9a. A complete quiet source or absence of
-these two narrow failures cannot certify the broader location zero tail.
+these narrow findings cannot certify the broader location zero tail. Missing
+metadata below its warning threshold still appears in the JSONL distribution.
+Without that retained distribution, absence of a cache warning is unknown,
+not a zero count. An unrelated healthy group or the zero-caller US country
+cache sampled by §2.9 cannot clear an affected group/caller incident. Restoring
+the diagnostic output alone is not product recovery.
 
 False-positive qualifiers: cache publication/expiry can transiently expose a
 positive count before its page; the sustained warning identifies that boundary
@@ -7257,7 +7280,7 @@ its sample. Counter increases count requests, not users. Do not infer a global
 selection failure, health-probe cause, or caller/target-country equivalence.
 
 False-negative qualifiers: unknown target type, sampled cache pages, lazy
-first-observation counters, partial metrics coverage, low volume and the two
+first-observation counters, partial metrics coverage, low volume and the
 thresholds can hide real failures. Error/canceled requests are separate from
 completed zeroes. Per-request final reasons are a priority explanation, not a
 complete per-provider causal trace; multiple missing and filtered boundaries

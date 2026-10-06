@@ -45,6 +45,7 @@ type monitorOptions struct {
 	pgQuerySampleUntil      string
 	pgQuerySampleContinuous bool
 	urlProbeCoverageOutput  string
+	providerSelectionOutput string
 }
 
 // Exit only after the command-owned process lifecycle has returned.
@@ -115,6 +116,15 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 			return errors.New("monitor: URL coverage output requires the URL coverage signal")
 		}
 	}
+	if opts.providerSelectionOutput != "" {
+		selected := false
+		for _, signal := range signals {
+			selected = selected || signal.Key() == "provider-selection"
+		}
+		if !selected {
+			return errors.New("monitor: selection output requires the provider-selection signal")
+		}
+	}
 
 	if opts.pgQuerySampleContinuous || !pgSampleUntil.IsZero() {
 		selected := false
@@ -162,6 +172,16 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 		}
 		defer func() { resultErr = errors.Join(resultErr, output.Close()) }()
 		settings.UrlProbeCoverageObserver = func(observation servermonitor.UrlProbeCoverageObservation) error {
+			return observation.WriteJsonl(output)
+		}
+	}
+	if opts.providerSelectionOutput != "" {
+		output, err := os.OpenFile(opts.providerSelectionOutput, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
+		if err != nil {
+			return errors.New("monitor: selection output cannot be opened")
+		}
+		defer func() { resultErr = errors.Join(resultErr, output.Close()) }()
+		settings.ProviderSelectionObserver = func(observation servermonitor.ProviderSelectionObservation) error {
 			return observation.WriteJsonl(output)
 		}
 	}
@@ -215,6 +235,7 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	flags.StringVar(&opts.output, "output", "", "write one-shot alert output directly to this file")
 	flags.BoolVar(&opts.pgQuerySampleContinuous, "pg-query-sample-continuous", false, "continuously collect bounded PostgreSQL query/load samples at the 15m cadence floor")
 	flags.StringVar(&opts.urlProbeCoverageOutput, "url-probe-coverage-output", "", "append one URL quota observation per existing signal execution, including healthy and unavailable results, as JSONL")
+	flags.StringVar(&opts.providerSelectionOutput, "provider-selection-output", "", "append every bounded selection reason observation per existing signal execution, including nonempty and unavailable results, as JSONL")
 	flags.StringVar(&opts.pgQuerySampleUntil, "pg-query-sample-until", "", "UTC expiry for one optional bounded PostgreSQL query/load sample")
 	flags.StringVar(&opts.apiReleaseProofFile, "api-release-proof", "", "private local JSON expectation for the optional bounded API release proof")
 	flags.DurationVar(&opts.minimumProbeCadence, "min-probe-cadence", 0, "continuous active-probe cadence floor and first-run delay; standing logs are unchanged")
@@ -231,6 +252,9 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	}
 	if opts.urlProbeCoverageOutput != "" && (opts.listSignals || opts.urlProbeCoverageOutput == opts.output) {
 		return monitorOptions{}, errors.New("monitor: URL coverage output requires a distinct observation file and cannot be used with -list-signals")
+	}
+	if opts.providerSelectionOutput != "" && (opts.listSignals || opts.providerSelectionOutput == opts.output || opts.providerSelectionOutput == opts.urlProbeCoverageOutput) {
+		return monitorOptions{}, errors.New("monitor: selection output requires a distinct observation file and cannot be used with -list-signals")
 	}
 	if opts.pgQuerySampleContinuous && opts.pgQuerySampleUntil != "" {
 		return monitorOptions{}, errors.New("monitor: continuous and expiring PG sample modes are mutually exclusive")
