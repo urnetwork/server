@@ -2207,6 +2207,13 @@ func (self *TaskWorker) EvalTasks(n int) (
 		heartbeatTasks[taskId] = task
 	}
 	var commitPosts []server.PostFunction
+	defer func() {
+		// A later collector/ownership failure must not discard work from an
+		// already committed finish. Cancel live functions before external work,
+		// keeping that handback detached and the batch guard until it returns.
+		evalCancel()
+		server.RunPosts(context.WithoutCancel(evalCtx), commitPosts...)
+	}()
 	var finalizePanic any
 	finalize := func(r *taskExecutionResult) {
 		// A failed handback must not unwind the batch guard while unrelated
@@ -2315,9 +2322,6 @@ func (self *TaskWorker) EvalTasks(n int) (
 	for _, task := range unreceivedTasks {
 		finalize(&taskExecutionResult{task: task, err: errors.New("Task not run.")})
 	}
-	// External post work retains the batch join boundary; it must not block
-	// collection/heartbeats while sibling functions are still executing.
-	server.RunPosts(evalCtx, commitPosts...)
 	if finalizePanic != nil {
 		panic(finalizePanic)
 	}

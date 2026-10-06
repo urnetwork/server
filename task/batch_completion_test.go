@@ -4,6 +4,7 @@ package task
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ type taskBatchCompletionSlowTarget struct {
 
 // Cancellation remains visible after the explicit unwind barrier releases.
 func (self *taskBatchCompletionSlowTarget) Run(ctx context.Context, _ *Task) (any, func(server.PgTx) ([]server.PostFunction, error), error) {
+	defer close(self.fixture.slowDone)
 	self.fixture.slowCtx = ctx
 	close(self.started)
 	<-self.fixture.releaseSlow
@@ -63,6 +65,7 @@ type taskBatchCompletionFixture struct {
 	collected         chan struct{}
 	continueCollector chan struct{}
 	releaseSlow       chan struct{}
+	slowDone          chan struct{}
 	heartbeatTick     chan time.Time
 	heartbeatTaskIds  chan []server.Id
 	done              chan struct{}
@@ -83,6 +86,7 @@ func newTaskBatchCompletionFixture(
 		collected:         make(chan struct{}),
 		continueCollector: make(chan struct{}),
 		releaseSlow:       make(chan struct{}),
+		slowDone:          make(chan struct{}),
 		heartbeatTick:     make(chan time.Time, 1),
 		heartbeatTaskIds:  make(chan []server.Id, 1),
 		done:              make(chan struct{}),
@@ -139,6 +143,7 @@ func (self *taskBatchCompletionFixture) close(t testing.TB) {
 	self.releaseOnce.Do(func() { close(self.releaseSlow) })
 	self.continueOnce.Do(func() { close(self.continueCollector) })
 	waitForSignal(t, self.done, 10*time.Second, "batch completion cleanup")
+	waitForSignal(t, self.slowDone, 10*time.Second, "batch sibling unwind")
 	self.worker.Close()
 }
 
@@ -203,7 +208,9 @@ func TestTaskBatchCompletionFailureRetainsUnrelatedOwner(t *testing.T) {
 		ctx := context.Background()
 		createCommitPostFault(ctx, 0, true)
 		var commitCount atomic.Int32
+		var postCount atomic.Int32
 		fixture := newTaskBatchCompletionFixture(ctx, func(args *commitPostArgs, _ *commitPostResult, clientSession *session.ClientSession, tx server.PgTx) ([]server.PostFunction, error) {
+			postCount.Add(1)
 			writeCommitPostMarker(clientSession.Ctx, tx, args.MarkerId)
 			return []server.PostFunction{func() any { commitCount.Add(1); return nil }}, nil
 		})
@@ -241,8 +248,49 @@ func TestTaskBatchCompletionFailureRetainsUnrelatedOwner(t *testing.T) {
 		if GetFinishedTasks(ctx, fixture.slowTaskId)[fixture.slowTaskId] == nil || fixture.slowCommitCount.Load() != 1 {
 			t.Fatal("sibling success or committed external work was lost with the failed completion")
 		}
-		if GetTasks(ctx, fixture.fastTaskId)[fixture.fastTaskId] == nil || commitCount.Load() != 0 {
+		if GetTasks(ctx, fixture.fastTaskId)[fixture.fastTaskId] == nil || commitCount.Load() != 0 || postCount.Load() != 1 {
 			t.Fatal("failed completion was replayed or ran its rolled-back external work")
+		}
+	})
+}
+
+// A fatal collector error after an early commit must still hand off that
+// commit's external work, with live function cancellation preceding handoff.
+func TestTaskBatchCompletionCollectorPanicPreservesCommittedPosts(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		want := errors.New("synthetic collector failure after committed completion")
+		var commitCount atomic.Int32
+		var canceledBeforePost atomic.Bool
+		postCtx := make(chan context.Context, 1)
+		fixture := newTaskBatchCompletionFixture(ctx, func(_ *commitPostArgs, _ *commitPostResult, _ *session.ClientSession, _ server.PgTx) ([]server.PostFunction, error) {
+			return []server.PostFunction{func() any {
+				commitCount.Add(1)
+				canceledBeforePost.Store((<-postCtx).Err() != nil)
+				return nil
+			}}, nil
+		}, func(worker *TaskWorker) {
+			after := worker.heartbeatAfter
+			selectCount := 0
+			worker.heartbeatAfter = func(duration time.Duration) <-chan time.Time {
+				selectCount++
+				result := after(duration)
+				if selectCount == 2 {
+					panic(want)
+				}
+				return result
+			}
+		})
+		defer fixture.close(t)
+		waitForSignal(t, fixture.collected, 10*time.Second, "committed result before collector failure")
+		postCtx <- fixture.slowCtx
+		fixture.continueOnce.Do(func() { close(fixture.continueCollector) })
+		waitForSignal(t, fixture.done, 10*time.Second, "collector failure handback")
+		if fixture.outcome.panicValue != want || commitCount.Load() != 1 || !canceledBeforePost.Load() {
+			t.Fatalf("collector failure lost committed handback or cancellation order: panic=%v commit_count=%d canceled=%t", fixture.outcome.panicValue, commitCount.Load(), canceledBeforePost.Load())
+		}
+		if GetFinishedTasks(ctx, fixture.fastTaskId)[fixture.fastTaskId] == nil {
+			t.Fatal("collector failure lost the already committed completion")
 		}
 	})
 }
