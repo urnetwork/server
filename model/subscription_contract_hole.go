@@ -47,6 +47,17 @@ func contractHoleKeys(sourceClientId, destinationClientId server.Id) []string {
 	return []string{prefix + "count", prefix + "members", prefix + "closed", prefix + "publication", prefix + "oversized"}
 }
 
+// Treat a persistent or malformed scalar as absent authority, even if a Redis
+// script was interrupted by an operational error after creating that scalar.
+const contractHoleReadScript = `
+local value = redis.call('GET', KEYS[1])
+if not value or redis.call('PTTL', KEYS[1]) <= 0 then return false end
+if not string.match(value, '^%-?%d+$') then return redis.error_reply('invalid contract hole count') end
+local count = tonumber(value)
+if not count or count > tonumber(ARGV[1]) then return redis.error_reply('invalid contract hole count') end
+return count
+`
+
 // Missing, expired, malformed and unavailable projections deny. This function
 // never warms a cache or calls PostgreSQL; only lifecycle owners and the task
 // below may populate it. The resident owns its own recheck rate limiter.
@@ -56,7 +67,8 @@ func HasOpenContractHole(ctx context.Context, sourceClientId, destinationClientI
 	var count int64
 	err := server.RedisWithDeadline(ctx, func(client server.RedisClient) error {
 		var err error
-		count, err = client.Get(ctx, contractHoleKeys(sourceClientId, destinationClientId)[0]).Int64()
+		count, err = client.Eval(ctx, contractHoleReadScript,
+			contractHoleKeys(sourceClientId, destinationClientId)[:1], contractHoleMemberLimit).Int64()
 		return err
 	})
 	if err != nil {
