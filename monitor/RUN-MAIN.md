@@ -876,6 +876,15 @@ production resources to make a fixture pass. Any derived metric in an evidence
 receipt must carry its unit and expression so rates per second and per minute
 cannot be silently exchanged.
 
+For a read-only diagnostic binder, exercise the unchanged invocation guard
+against the exact enabled artifact before reporting successful binding. The
+disabled source can fit a manifest byte bound while activation timestamps,
+watcher identity and added lineage pins push the enabled artifact past it.
+Serialize and check that bound before creating its one-use target; lossless
+compact JSON can preserve the existing cap. A local invocation refusal proves
+no runtime fact. Preserve the refused namespace and require a separately gated
+successor with a fresh authority window, without broadening remote limits.
+
 For every iOS/Apple issue, cross-validate the same failure mechanism on Android,
 Windows, Linux, macOS, `mmm/ur.io`, and `extension` before closing the finding.
 This applies to the initial cause, adjacent defects, and the proposed fix.

@@ -20314,6 +20314,17 @@ extended five seconds backwards exceeded the reader's ten-minute maximum and
 correctly refused before contact; disabled source manifests still need no
 activation fence.
 
+The 2026-10-06 Connect owner reader refused locally before contacting Main:
+its disabled manifest was 128,320 bytes, but activation metadata expanded the
+bound manifest to 136,200 bytes, beyond the unchanged 131,072-byte invocation
+guard. Source and binder gates had omitted the final enabled artifact's size.
+That refusal yielded no runtime census or evidence of service recovery or
+regression and does not change the independent runtime PAGE. Lossless compact
+serialization reduces the same bound JSON object to
+121,590 bytes. A successor must check its serialized size before creating the
+one-use target, pass the copied invocation guard locally, and receive a fresh
+authority fence. Preserve the original refusal and every remote query bound.
+
 Use existing same-process pool, heap, stack, resident and worker counters
 before adding a live profile. `resident_clients` leaves the residents map
 before `CloseAndWait` completes, whereas callback, forward and idle-watch
