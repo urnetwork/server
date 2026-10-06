@@ -46,6 +46,7 @@ const snNanoPointsPerPoint = 1_000_000
 const (
 	SnWalletConsentScopeProvider = protocol.EarningWalletModeProvider
 	SnWalletConsentScopeNetwork  = protocol.EarningWalletModeNetwork
+	SnWalletConsentScopeHotkey   = protocol.EarningWalletModeHotkey
 )
 
 // SnWallet is one attached coldkey. ClientId is nil for the network-level
@@ -59,6 +60,13 @@ type SnWallet struct {
 	// for a consent: its first and last earning epochs
 	FromEpoch    uint64 `json:"from_epoch,omitempty"`
 	ThroughEpoch uint64 `json:"through_epoch,omitempty"`
+	// hotkey scope only: the delegated hotkey, the global consent head the
+	// delegation pins and the delegation chain head, hashes as 0x hex
+	HotkeySs58        string `json:"hotkey_ss58,omitempty"`
+	ConsentHeadHash   string `json:"consent_head_hash,omitempty"`
+	ConsentGeneration uint64 `json:"consent_generation,omitempty"`
+	MappingHash       string `json:"mapping_hash,omitempty"`
+	MappingGeneration uint64 `json:"mapping_generation,omitempty"`
 }
 
 type SnGetWalletError struct {
@@ -67,9 +75,10 @@ type SnGetWalletError struct {
 
 // SnGetWalletResult lists every wallet attached inside the network. `Wallet`
 // is the effective one for the session, in settlement's precedence: a client
-// session's own provider consent, else the network consent, else the
-// client's own wallet without a consent, else the network side copy. A network
-// session: the network consent, else the side copy. Nil when none.
+// session's own provider consent, else the network consent, else the hotkey
+// delegation, else the client's own wallet without a consent, else the network
+// side copy. A network session: the network consent, else the hotkey
+// delegation, else the side copy. Nil when none.
 type SnGetWalletResult struct {
 	Wallet  *SnWallet         `json:"wallet,omitempty"`
 	Wallets []SnWallet        `json:"wallets"`
@@ -81,9 +90,10 @@ func SnGetWallet(clientSession *session.ClientSession) (*SnGetWalletResult, erro
 	networkId := clientSession.ByJwt.NetworkId
 	result := &SnGetWalletResult{Wallets: []SnWallet{}}
 	// the effective candidates in precedence order
-	var ownConsent, networkConsent, ownProjection, sideCopy *SnWallet
-	// the network consent is listed before the side copy, so a client that
-	// takes the first network-level entry finds the consent
+	var ownConsent, networkConsent, hotkeyDelegation, ownProjection, sideCopy *SnWallet
+	// the network consent and then the hotkey delegation are listed before the
+	// side copy, so a client that takes the first network-level entry follows
+	// settlement's order
 	if domain, ok := stClientKeyHistoryDomain(); ok {
 		consent, err := model.GetNetworkWalletMappingConsent(ctx, domain, networkId)
 		if err != nil {
@@ -99,6 +109,13 @@ func SnGetWallet(clientSession *session.ClientSession) (*SnGetWalletResult, erro
 			}
 			result.Wallets = append(result.Wallets, wallet)
 			networkConsent = &wallet
+		}
+		hotkeyDelegation, err = snHotkeyWallet(ctx, domain, networkId)
+		if err != nil {
+			return nil, err
+		}
+		if hotkeyDelegation != nil {
+			result.Wallets = append(result.Wallets, *hotkeyDelegation)
 		}
 	}
 	if wallet := model.GetStWallet(ctx, networkId); wallet != nil {
@@ -128,7 +145,7 @@ func SnGetWallet(clientSession *session.ClientSession) (*SnGetWalletResult, erro
 			}
 		}
 	}
-	for _, effective := range []*SnWallet{ownConsent, networkConsent, ownProjection, sideCopy} {
+	for _, effective := range []*SnWallet{ownConsent, networkConsent, hotkeyDelegation, ownProjection, sideCopy} {
 		if effective != nil {
 			wallet := *effective
 			result.Wallet = &wallet

@@ -18430,6 +18430,31 @@ hashes, generations 1 to 4096). All three tables carry the row and truncate
 guards of `wallet_mapping_original_guard`: a missing or disabled guard, a
 nullable network or a widened mode is drift at head 786.
 
+Version 789 adds the hotkey wallet mapping of the operator discovery design.
+`hotkey_wallet_mapping_consent` holds the global consent chains that the
+coldkey and the hotkey both sign (primary key `(subnet_hash, hotkey,
+generation)`, unique original hash, 32-byte subnet hash and hotkey, generation 1
+to 4096, originals of at most 12288 bytes, and no challenge). Because nothing
+issues them, `hotkey_wallet_mapping_submitter` links each submitting network to
+the hotkeys whose chains it stored (primary key `(network_id, hotkey)`, 32-byte
+hotkey, `NOT NULL` `create_time`); the API admits at most 8 hotkeys per network
+and 64 new generations per submission, so a widened key would lift that bound.
+`hotkey_network_delegation_challenge` and `hotkey_network_delegation` hold the
+per-network delegations, shaped like the network consent tables of 786 (owner
+index on `(domain_hash, network_id, expires_at)`, unique original hash and
+nonce, and the nonce foreign key to its challenge). All four tables carry the
+row and truncate guards of `wallet_mapping_original_guard`. The version also
+widens `st_payout_wallet_resolution.mode` to `provider`, `network` or `hotkey`
+and adds the nullable `hotkey`, `hotkey_consent_hash`,
+`hotkey_consent_generation`, `hotkey_consent_head_hash` and
+`hotkey_consent_head_generation` columns with their 32-byte and 1 to 4096
+bounds; a resolution has all five exactly when its mode is `hotkey`. The 786
+contract admits either published mode set. 789 requires the widened set and
+refuses the 786 set beside it, which would refuse every hotkey resolution. A
+missing or disabled guard, a nullable key column, a widened link key, a missing
+nonce reference or owner index, a narrowed or widened mode, or a dropped hotkey
+column rule is drift at head 789.
+
 Migration764 appends logical close-report receipts after the unchanged deployed
 1–763 prefix. The artifact contract checks the exact contract/party/report key,
 nonzero report IDs, nonnegative acknowledged bytes, finality and timestamp

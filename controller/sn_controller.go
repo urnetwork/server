@@ -84,8 +84,10 @@ type SnSetWalletResult struct {
 // sees subnet wallets. The upsert is idempotent; the latest set wins and
 // applies from the next committed epoch's leaf set. A message that starts
 // with a wallet mapping consent prefix is accepted as that consent instead:
-// a provider consent (sn_wallet_consent.go) or a network consent from the
-// network owner's session (sn_network_wallet_consent.go).
+// a provider consent (sn_wallet_consent.go), or a network consent or a hotkey
+// network delegation from the network owner's session
+// (sn_network_wallet_consent.go, sn_hotkey_wallet_consent.go). A global hotkey
+// consent is submitted as a chain to POST /sn/wallet/hotkey-consent, never here.
 func SnSetWallet(
 	setWallet *SnSetWalletArgs,
 	clientSession *session.ClientSession,
@@ -98,6 +100,12 @@ func SnSetWallet(
 	}
 	if strings.HasPrefix(setWallet.Message, protocol.NetworkWalletMappingConsentPrefix) {
 		return snAcceptNetworkWalletMapping(setWallet, clientSession)
+	}
+	if strings.HasPrefix(setWallet.Message, protocol.HotkeyNetworkDelegationPrefix) {
+		return snAcceptHotkeyNetworkDelegation(setWallet, clientSession)
+	}
+	if strings.HasPrefix(setWallet.Message, protocol.HotkeyWalletMappingConsentPrefix) {
+		return nil, protocol.ErrWalletMappingIntegrity
 	}
 	fail := func(message string) (*SnSetWalletResult, error) {
 		return &SnSetWalletResult{Error: &SnSetWalletError{Message: message}}, nil

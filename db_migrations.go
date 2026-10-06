@@ -9611,4 +9611,11 @@ var migrations = []any{
 	// published release epoch (db_network_wallet_mapping_consent.go). New
 	// tables: nothing is rewritten, and old binaries never read them.
 	newSqlMigration(networkWalletMappingConsentSchemaSql),
+	// 789: global hotkey wallet consent chains and the networks that submitted
+	// them, per-network hotkey delegations and the hotkey mode of settled
+	// earning wallets (db_hotkey_wallet_mapping_consent.go). New tables plus
+	// nullable columns and a widened mode check on st_payout_wallet_resolution:
+	// existing rows are validated, not rewritten, and old binaries keep writing
+	// valid rows.
+	newSqlMigration(hotkeyWalletMappingConsentSchemaSql),
 }
