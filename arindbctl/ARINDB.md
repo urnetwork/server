@@ -487,7 +487,8 @@ cumulative global follow-up (`924e1aff`, review `60d42484`) adds Indosat AS4761,
 BT/Plusnet AS6871, OneBroadband AS17665, XL Axiata AS24203 and YouFibre
 AS212655. It would contain 5,209 subscriber groups and 5,478 ASNs across the
 same 160 country contexts. Both preserve every negative object, policy and
-feed; their native parser/augmentation gates and artifact builds remain pending.
+feed. Their cumulative native parser/augmentation controls later passed with
+the five-ASN successor below; its complete artifact build remains pending.
 No retained Main provider sample is joined to these additions.
 
 A further cumulative candidate (`320b4c10`) appends five exact US ASNs to
@@ -510,9 +511,11 @@ source controls passed, including rejection of an unchanged predecessor,
 unreviewed AS3356 expansion, negative removal, weaker visibility policy,
 changed existing provenance and country expansion. Independent composition
 review `5dd1d47d` verified all 26 source pins, the exact predecessor byte prefix
-and five appended entries, and repeated all seven controls. These are source
-controls; the incremental native parser/augmentation controls and a complete
-generated artifact still need qualification. No AS3356, AS3549, affiliate, parent or
+and five appended entries, and repeated all seven controls. Six cumulative
+native parser/augmentation tests then passed under independent gate `ddd88d32`
+in 9.0 seconds with 297,844,736 bytes of sampled group RSS. They exercise the
+19 prior additions and five new identities with the existing vetoes. A complete
+generated artifact still needs qualification. No AS3356, AS3549, affiliate, parent or
 customer ASN gains approval by association. Neither the frozen `4bc85427`
 update nor the separate earlier candidates were changed in place.
 
@@ -536,11 +539,13 @@ work but does not establish a four-GiB build budget. The disabled reuse
 executor retains 12-GiB host admission and RSS caps, the immediate one-GiB
 host floor and existing disk floors; only its native and wall deadlines shrink
 to 30 and 31 minutes. All 40 builder Go files, including tests, match between
-qualified source `0bb38ed6` and canonical `6717f8f5`. This file parity does not
+qualified source `0bb38ed6` and canonical `8be38525`. This file parity does not
 establish equivalence of their surrounding module graphs. The prepared
-executor requires the qualified binary and original frozen graph, six actual
-cumulative native catalog controls, independent executor review and Root's
-exclusive resource window. Full, native, mapped and targeted policy readbacks
+executor requires the qualified binary and original frozen graph. Independent
+gate `d9de0c9a` binds the six actual catalog controls, 14 synthetic controls,
+executor/Root-binder review and readback source review. The review-bound
+disabled manifest checks as ready while execution remains disabled. Root's
+exclusive resource window is still required. Full, native, mapped and targeted policy readbacks
 must bind the new final hash and retained-base lineage before release review.
 Neither reuse preparation nor its source controls establish Main activation
 or recovered provider Quality.
