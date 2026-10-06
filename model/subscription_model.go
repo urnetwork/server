@@ -844,6 +844,7 @@ func openEscrowReservedForBalances(ctx context.Context, balanceIds []server.Id) 
 	if len(balanceIds) == 0 {
 		return pending
 	}
+	defer enterLegacySettlementTiming(ctx, legacySettlementColdCensus)()
 	server.Tx(ctx, func(tx server.PgTx) {
 		configureNetEscrowReservationPageTimeout(ctx, tx, netEscrowReservationPageStatementTimeout)
 		pending = readNetEscrowSnapshots(ctx, tx, balanceIds)
@@ -3520,7 +3521,7 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 	}
 	publishSettlementNetEscrowSnapshots(ctx, tx, reservationSnapshots, positiveReservations, true)
 	if 0 < clockTransferByteCount {
-		posts = append(posts, clockTransferPost(ctx, clockTransferByteCount))
+		posts = append(posts, observeLegacySettlementPost(ctx, legacySettlementClock, clockTransferPost(ctx, clockTransferByteCount)))
 	}
 
 	// run all the posts in parallel in as small blocks as reasonable to minimize the work for serialization errors
@@ -3571,10 +3572,10 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 			}
 		}
 		if len(mirrorBalanceIds) > 0 {
-			mirrorPost := func() any {
+			mirrorPost := observeLegacySettlementPost(ctx, legacySettlementMirror, func() any {
 				refreshNetEscrow(ctx, mirrorBalanceIds)
 				return nil
-			}
+			})
 			if len(reservationSnapshots) < len(positiveReservations) {
 				// A cold mirror must follow this metadata attempt: otherwise it
 				// can warm the preceding revision after metadata already read a
