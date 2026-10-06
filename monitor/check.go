@@ -19,10 +19,11 @@ import (
 
 // probeEnv is what a probe needs to run.
 type probeEnv struct {
-	cfg      *monitorConfig
-	runner   probeRunner
-	baseline *baselineStore
-	now      func() time.Time
+	cfg                         *monitorConfig
+	runner                      probeRunner
+	baseline                    *baselineStore
+	now                         func() time.Time
+	urlProbeCoverageObservation *UrlProbeCoverageObservation
 }
 
 // probeRunner is the internal transport shape used by the named probes.

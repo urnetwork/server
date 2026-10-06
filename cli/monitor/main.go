@@ -44,6 +44,7 @@ type monitorOptions struct {
 	apiReleaseProofFile     string
 	pgQuerySampleUntil      string
 	pgQuerySampleContinuous bool
+	urlProbeCoverageOutput  string
 }
 
 // Exit only after the command-owned process lifecycle has returned.
@@ -73,7 +74,7 @@ func run(args []string, stdout io.Writer) error {
 	return runWithSettingsLoader(args, stdout, servermonitor.LoadSignalSettings)
 }
 
-func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() (servermonitor.SignalSettings, error)) error {
+func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() (servermonitor.SignalSettings, error)) (resultErr error) {
 	opts, err := parseMonitorOptions(args)
 	if err != nil {
 		return err
@@ -104,6 +105,15 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 	}
 	if err != nil {
 		return err
+	}
+	if opts.urlProbeCoverageOutput != "" {
+		selected := false
+		for _, signal := range signals {
+			selected = selected || signal.Key() == "url-probe-coverage"
+		}
+		if !selected {
+			return errors.New("monitor: URL coverage output requires the URL coverage signal")
+		}
 	}
 
 	if opts.pgQuerySampleContinuous || !pgSampleUntil.IsZero() {
@@ -144,6 +154,16 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 	settings.SettingsGenerationCheck = servermonitor.NewSettingsGenerationCheck(loadEffectiveSettings)
 	if err := settings.Validate(); err != nil {
 		return err
+	}
+	if opts.urlProbeCoverageOutput != "" {
+		output, err := os.OpenFile(opts.urlProbeCoverageOutput, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
+		if err != nil {
+			return errors.New("monitor: URL coverage output cannot be opened")
+		}
+		defer func() { resultErr = errors.Join(resultErr, output.Close()) }()
+		settings.UrlProbeCoverageObserver = func(observation servermonitor.UrlProbeCoverageObservation) error {
+			return observation.WriteJsonl(output)
+		}
 	}
 	monitor := servermonitor.NewWithSignals(settings, signals...)
 
@@ -194,6 +214,7 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	flags.StringVar(&opts.format, "format", alertFormatMarkdown, "alert output format: markdown or jsonl")
 	flags.StringVar(&opts.output, "output", "", "write one-shot alert output directly to this file")
 	flags.BoolVar(&opts.pgQuerySampleContinuous, "pg-query-sample-continuous", false, "continuously collect bounded PostgreSQL query/load samples at the 15m cadence floor")
+	flags.StringVar(&opts.urlProbeCoverageOutput, "url-probe-coverage-output", "", "append one URL quota observation per existing signal execution, including healthy and unavailable results, as JSONL")
 	flags.StringVar(&opts.pgQuerySampleUntil, "pg-query-sample-until", "", "UTC expiry for one optional bounded PostgreSQL query/load sample")
 	flags.StringVar(&opts.apiReleaseProofFile, "api-release-proof", "", "private local JSON expectation for the optional bounded API release proof")
 	flags.DurationVar(&opts.minimumProbeCadence, "min-probe-cadence", 0, "continuous active-probe cadence floor and first-run delay; standing logs are unchanged")
@@ -207,6 +228,9 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	}
 	if opts.minimumProbeCadence < 0 {
 		return monitorOptions{}, errors.New("monitor: -min-probe-cadence must not be negative")
+	}
+	if opts.urlProbeCoverageOutput != "" && (opts.listSignals || opts.urlProbeCoverageOutput == opts.output) {
+		return monitorOptions{}, errors.New("monitor: URL coverage output requires a distinct observation file and cannot be used with -list-signals")
 	}
 	if opts.pgQuerySampleContinuous && opts.pgQuerySampleUntil != "" {
 		return monitorOptions{}, errors.New("monitor: continuous and expiring PG sample modes are mutually exclusive")

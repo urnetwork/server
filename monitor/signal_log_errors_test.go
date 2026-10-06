@@ -1624,7 +1624,7 @@ func TestLogErrorsSignalExplainsInvalidPayoutDestination(t *testing.T) {
 func TestLogErrorsSignalSeparatesInvalidDestinationResetFailure(t *testing.T) {
 	const paymentId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 	const taskId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-	line := `[synthetic-host][taskworker][synthetic-block][cid:fixture][I][2026-09-01T12:00:00Z][task.go:1930][` + taskId + `]eval error = AdvancePayment({"payment_id":"` + paymentId + `"}) = [` + paymentId + `]Payment create transaction error = Bad status: 400 Bad Request {"code":155219,"message":"Invalid destination address."}; invalid destination reset error = private.fixture.example dial tcp 192.0.2.83:5432 i/o timeout wallet=2001:db8::83 goroutine 123 [synthetic.Stack]`
+	line := `[synthetic-host][taskworker][synthetic-block][cid:fixture][I][2026-09-01T12:00:00Z][task.go:1930][` + taskId + `]eval error = AdvancePayment({"payment_id":"` + paymentId + `"}) = [` + paymentId + `]Payment create transaction error: Bad status: 400 Bad Request {"code":155219,"message":"Invalid destination address."}; invalid destination reset error: private.fixture.example dial tcp 192.0.2.83:5432 i/o timeout wallet=2001:db8::83 goroutine 123 [synthetic.Stack]`
 	source := &syntheticSource{localFn: func(_ string, args ...string) (string, error) {
 		if len(args) > 1 && args[0] == "ls" {
 			return "repo names synthetic-taskworker", nil

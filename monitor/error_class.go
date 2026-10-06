@@ -39,6 +39,12 @@ func (*observationStateUnavailableError) Error() string {
 
 var taskDeadlineTimeoutPattern = regexp.MustCompile(`(?i)^timeout(?:\s+\[[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\])?$`)
 
+// The controller changed both separators together. Share the complete owned
+// forms with PostgreSQL and logs; a suffix alone or empty detail is not proof.
+const invalidDestinationResetErrorPattern = `(?is)Payment create transaction error( = .*; invalid destination reset error = |: .*; invalid destination reset error: )[^[:space:]]`
+
+var invalidDestinationResetErrorRe = regexp.MustCompile(invalidDestinationResetErrorPattern)
+
 // classifyTaskError reduces task-owned or dependency-owned error text to a
 // fixed vocabulary before it reaches Alert Markdown. Callers may still use the
 // original text in memory to select established operational guidance, but no
@@ -48,7 +54,7 @@ func classifyTaskError(taskName, value string) string {
 	trimmed := strings.TrimSpace(value)
 	lower := strings.ToLower(trimmed)
 	switch {
-	case taskName == "AdvancePayment" && strings.Contains(lower, "; invalid destination reset error = "):
+	case taskName == "AdvancePayment" && invalidDestinationResetErrorRe.MatchString(trimmed):
 		return taskErrorClassInvalidDestinationResetFailed
 	case strings.Contains(lower, "statement timeout") && strings.Contains(lower, "sqlstate 57014"):
 		return taskErrorClassPostgresStatementTimeout
