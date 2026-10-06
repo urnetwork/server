@@ -57,7 +57,7 @@ func startTaskworkerAfterReadiness(
 				result.err = fmt.Errorf("taskworker startup: %v", recovered)
 			}
 			readyGauge.Set(0)
-			router.SetWarpStatusNotReady(result.err)
+			options.WarpStatus.SetNotReady(result.err)
 			if result.worker != nil {
 				cancel()
 			}
@@ -105,13 +105,13 @@ func startTaskworkerAfterReadiness(
 			result.flushStats = startStatsPusher(lifetime)
 			if admission.Err() == nil {
 				readyGauge.Set(1)
-				router.SetWarpStatusReady()
+				options.WarpStatus.SetReady()
 			}
 			return result
 		}
 		result.err = errors.Join(err, admission.Err())
 		readyGauge.Set(0)
-		router.SetWarpStatusNotReady(result.err)
+		options.WarpStatus.SetNotReady(result.err)
 		if result.worker != nil || !router.RetryableStartupReadinessError(result.err) {
 			if result.worker != nil {
 				cancel()
