@@ -398,7 +398,7 @@ rule, preserving explicit contrary use.
 
 ### US origin-identity gaps under review
 
-A fresh count of the selected successor's pinned catalog (`ec316ffc`) finds
+The retained October 6 count of the selected successor's catalog (`ec316ffc`) finds
 **nine subscriber groups with 13 ASNs in the US review context**, compared with
 **4,694 groups in Brazil**: 90.43% of its 5,191 subscriber groups. The global
 160-country count therefore does not establish balanced country coverage.
@@ -490,14 +490,53 @@ same 160 country contexts. Both preserve every negative object, policy and
 feed; their native parser/augmentation gates and artifact builds remain pending.
 No retained Main provider sample is joined to these additions.
 
-Source review also found a diagnostic loss: the MMDB retains
-`origin_withheld_reason`, while the deployed shadow projection retains only
-origin ASNs and use state. A prepared typed projection preserves the four
-closed withholding reasons for visibility, RPKI, reviewed-country policy and
-registry hosting assignment; the selected catalog does not enable the optional
-reviewed-country policy. It changes no classification or eligibility rule.
-An older strict coordinator rejects the added field, requiring coordinator
-compatibility before using an updated capture producer.
+A further cumulative candidate (`320b4c10`) appends five exact US ASNs to
+`924e1aff`. Independent source review `97259b87` accepted the registry,
+operator and first-party service joins under `identified-subscriber-default`:
+
+| Subscriber operator | Exact ASN | First-party service evidence and scope |
+| --- | --- | --- |
+| Lumen / CenturyLink Communications LLC | 209 | The [business Internet schedule](https://assets.lumen.com/is/content/Lumen/internet-services-service-schedule) names the matching legal provider and AS209 as a Lumen-network destination. It also covers transit; this is not proof that every AS209 prefix serves subscribers. |
+| Shentel / Glo Fiber | 4922 | [Glo Fiber terms](https://www.glofiber.com/en/terms) identify the exact registrant, Shenandoah Cable Television LLC, and its residential fiber-to-the-home service. |
+| Hughesnet | 6621 | The [current subscriber agreement](https://legal.hughesnet.com/ServiceTermsAndConditions-current.cfm) identifies Hughes Network Systems LLC and its residential satellite/Fusion service. |
+| Viasat | 7155 | The [currently linked residential agreement](https://www.viasat.com/content/dam/us-site/legal/documents/Customer_Agreement_Residential_v9_21.pdf) identifies Viasat Inc and residential Internet service. The registry's backbone label does not alone establish transit-only use. |
+| ALLO Communications | 15108 | The [residential subscriber agreement](https://www.allocommunications.com/terms-and-conditions/subscriber-agreement-for-residential-services/) identifies the exact legal registrant. Its general AUP also names web hosting; address-level exclusions remain necessary. |
+
+This successor contains **5,214 subscriber groups and 5,483 ASNs** across the
+same 160 country contexts, including **28 US groups and 46 US ASNs**. All
+prior catalog bytes, identities, six negative groups, policy and evidence feeds
+are preserved; the five entries are appended. Seven deterministic Python
+source controls passed, including rejection of an unchanged predecessor,
+unreviewed AS3356 expansion, negative removal, weaker visibility policy,
+changed existing provenance and country expansion. These are source controls;
+the incremental native parser/augmentation controls and a complete generated
+artifact still need qualification. No AS3356, AS3549, affiliate, parent or
+customer ASN gains approval by association. Neither the frozen `4bc85427`
+update nor the separate earlier candidates were changed in place.
+
+Retained RIS routing measurements must also distinguish direct observations
+from inherited visibility. On the October 6 `02:03:14Z` IPv4 snapshot,
+PenTeleData AS3737 has 27 of 1,229 observed prefixes directly meeting the
+ten-peer floor. A bounded Python calculation of the classifier's nearest
+matching-parent rule brings all 1,229 to that floor or higher; TDS AS4181 similarly
+goes from 83 to 535 of 535. The calculation uses complete origin sets and
+reviewed operator identities and never sums peer counts (`7b353111`). It does
+not join RPKI, registration, risk/cloud, address lists, assignment, country
+policy or longest-prefix classification partitions. These are route visibility
+counts, not eligible addresses, customers, current Main providers or measured
+Quality gains. APNIC user estimates remain audit-priority inputs only.
+
+Source review also found a diagnostic loss in the inspected `db9f90a` shadow
+projection: the MMDB retains `origin_withheld_reason`, but the projection
+retains only origin ASNs and use state. The change prepared as `4ec4f8ab4`
+preserves the four closed withholding reasons for visibility, RPKI,
+reviewed-country policy and registry hosting assignment. Its exact production
+and test postimages passed ten local decoder, aggregation, authenticated-wire
+and compatibility controls; later module composition and runtime adoption
+remain separate checks. The selected catalog does not enable the optional
+reviewed-country policy, and the projection changes no classification or
+eligibility rule. An older strict coordinator rejects the added field, requiring
+coordinator compatibility before using an updated capture producer.
 
 The next bounded attribution needs a fresh generation-bound private sample,
 complete connection groups and an authenticated current owner to join typed
