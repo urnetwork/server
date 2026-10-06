@@ -153,10 +153,12 @@ func (self *blobArtifactArchive) ArchiveRound(
 	return err
 }
 
-// ArchiveSubmission durably retains canonical patch bytes before the queue row
-// becomes claimable. Attempts retain the patch again inside their complete
-// evidence bundle; this admission copy proves that even a not-yet-evaluated
-// submission survives outside the control-plane database.
+// Durably retains canonical patch bytes before the queue row becomes claimable.
+// Attempts retain the patch again inside their complete evidence bundle; this
+// admission copy proves that even a not-yet-evaluated submission survives
+// outside the control-plane database. Enqueue calls it with no transaction or
+// lock held. The key is content addressed, so a repeated upload of the same
+// bytes for the same round adds a version of the same object.
 func (self *blobArtifactArchive) ArchiveSubmission(
 	ctx context.Context,
 	settings *Settings,
@@ -3884,9 +3886,13 @@ type Store interface {
 	HandBack(context.Context, string, server.Id, string) error
 }
 
+// The durable competition store. Its zero value is the production store; the
+// fields are test seams.
 type PostgresStore struct {
 	now                      func() time.Time
 	dequeueCompetitionSignal func(context.Context, *Settings) (*server.Id, error)
+	// bounds the admission upload in Enqueue; zero selects defaultSubmissionArchiveTimeout
+	submissionArchiveTimeout time.Duration
 }
 
 func (self PostgresStore) nowUtc() time.Time {
@@ -5145,6 +5151,31 @@ func cacheKey(roundId server.Id, patch []byte) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// Bounds the retained admission copy of one submission. The upload holds no
+// transaction or lock, so the bound limits only its own submitter's wait; it
+// stays under the api's 30 s write timeout so the refusal still gets answered.
+const defaultSubmissionArchiveTimeout = 15 * time.Second
+
+// Admits one canonical patch for a round as a new job, or as a cache hit on the
+// job that already holds the same bytes. Every decision is made under the
+// global submit lock with the round row shared, so admissions serialize with
+// each other and with closing, replacing and finalizing the round.
+//
+// The retained admission copy is written ahead of the queue row: a job never
+// commits without its authenticated artifact. The upload runs between two
+// admission passes with no transaction or lock held, so a slow or hung object
+// store delays only its own submission. The first pass writes nothing when a
+// new job is needed, so cache hits and refusals never upload; the second
+// rechecks everything with the artifact in hand and commits the job, or ends
+// as a cache hit when an identical submission committed first. The window is
+// judged at receipt time, so a slow upload does not make an on-time submission
+// late, but a round that stopped admitting while the upload ran refuses it.
+//
+// A failed upload, including one cut off by the timeout, refuses the
+// submission with nothing written (the service answers a retriable 503
+// enqueue_failed). An upload whose admission is refused or fails afterwards
+// leaves only a retention-bounded version under its content-addressed key,
+// which a resubmission writes again.
 func (self PostgresStore) Enqueue(
 	ctx context.Context,
 	settings *Settings,
@@ -5160,62 +5191,90 @@ func (self PostgresStore) Enqueue(
 		return nil, false, errors.New("competition submission archive is unavailable")
 	}
 	now := self.nowUtc()
+	key := cacheKey(roundId, patch.Bytes)
+	var submissionArtifact *retainedArtifact
 	var stateErr error
-	err = captureDatabaseError(func() {
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-submit-v1', 0))`))
-			round, scanErr := scanRound(tx.QueryRow(ctx, `
-				SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
-				       seed_ciphertext, providers_sha256, providers_path,
-				       policy_json, opens_at, closes_at, reveal_at,
-			       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
-				FROM competition_round WHERE round_id = $1 FOR SHARE
-			`, roundId))
-			if errors.Is(scanErr, pgx.ErrNoRows) || round.CompetitionId != settings.CompetitionId {
-				stateErr = ErrNotFound
-				return
-			}
-			server.Raise(scanErr)
-			if round.Canceled || !submissionWithinEpoch(round, now) {
-				stateErr = ErrRoundClosed
-				return
-			}
-			key := cacheKey(roundId, patch.Bytes)
-			job, scanErr = scanJob(tx.QueryRow(ctx, jobSelect+` WHERE j.cache_key = $1`, key), true, self.nowUtc())
-			if scanErr == nil {
-				cacheHit = true
-				addPrincipal(ctx, tx, job.JobId, principalId, now)
-				appendEvent(ctx, tx, job.JobId, now, "cache_hit", principalId, map[string]any{
-					"cache_key": key, "api_image_digest": apiImageDigest,
-				})
-				return
-			}
-			if !errors.Is(scanErr, pgx.ErrNoRows) {
+	archiveRequired := false
+	// One admission pass. server.Tx can rerun the callback, so every run starts
+	// from empty results.
+	admit := func() error {
+		return captureDatabaseError(func() {
+			server.Tx(ctx, func(tx server.PgTx) {
+				job, cacheHit, stateErr, archiveRequired = nil, false, nil, false
+				server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-submit-v1', 0))`))
+				round, scanErr := scanRound(tx.QueryRow(ctx, `
+					SELECT round_id, competition_id, epoch_number, staging, workload_commitment, seed_nonce,
+					       seed_ciphertext, providers_sha256, providers_path,
+					       policy_json, opens_at, closes_at, reveal_at,
+					       created_at, canceled, finalized_at, winner_job_id, admission_closed_at
+					FROM competition_round WHERE round_id = $1 FOR SHARE
+				`, roundId))
+				if errors.Is(scanErr, pgx.ErrNoRows) || round.CompetitionId != settings.CompetitionId {
+					stateErr = ErrNotFound
+					return
+				}
 				server.Raise(scanErr)
-			}
-			jobId := server.NewId()
-			submissionArtifact, archiveErr := settings.artifactArchive.ArchiveSubmission(
-				ctx,
-				settings,
-				roundId,
-				patch,
-			)
-			server.Raise(archiveErr)
-			server.RaisePgResult(tx.Exec(ctx, `
-				INSERT INTO competition_job (
-					job_id, round_id, patch_bytes, patch_sha256, cache_key, state,
-					submitted_at, available_at, artifact_retain_until, api_image_digest
-				) VALUES ($1, $2, $3, $4, $5, 'queued', $6, $6, $7, $8)
-			`, jobId, roundId, patch.Bytes, patch.Sha256, key, now, settings.RetainUntil, apiImageDigest))
-			addPrincipal(ctx, tx, jobId, principalId, now)
-			appendEvent(ctx, tx, jobId, now, "submitted", principalId, map[string]any{
-				"round_id": roundId.String(), "patch_sha256": patch.Sha256, "cache_key": key,
-				"api_image_digest": apiImageDigest, "submission_artifact": submissionArtifact,
+				// The upload can end after the receipt time, and production
+				// finalization does not close admission, so a finalized round refuses.
+				if round.Canceled || round.FinalizedAt != nil || !submissionWithinEpoch(round, now) {
+					stateErr = ErrRoundClosed
+					return
+				}
+				job, scanErr = scanJob(tx.QueryRow(ctx, jobSelect+` WHERE j.cache_key = $1`, key), true, self.nowUtc())
+				if scanErr == nil {
+					cacheHit = true
+					addPrincipal(ctx, tx, job.JobId, principalId, now)
+					appendEvent(ctx, tx, job.JobId, now, "cache_hit", principalId, map[string]any{
+						"cache_key": key, "api_image_digest": apiImageDigest,
+					})
+					return
+				}
+				if !errors.Is(scanErr, pgx.ErrNoRows) {
+					server.Raise(scanErr)
+				}
+				if submissionArtifact == nil {
+					// The upload must hold neither this transaction nor the lock.
+					archiveRequired = true
+					return
+				}
+				jobId := server.NewId()
+				server.RaisePgResult(tx.Exec(ctx, `
+					INSERT INTO competition_job (
+						job_id, round_id, patch_bytes, patch_sha256, cache_key, state,
+						submitted_at, available_at, artifact_retain_until, api_image_digest
+					) VALUES ($1, $2, $3, $4, $5, 'queued', $6, $6, $7, $8)
+				`, jobId, roundId, patch.Bytes, patch.Sha256, key, now, settings.RetainUntil, apiImageDigest))
+				addPrincipal(ctx, tx, jobId, principalId, now)
+				appendEvent(ctx, tx, jobId, now, "submitted", principalId, map[string]any{
+					"round_id": roundId.String(), "patch_sha256": patch.Sha256, "cache_key": key,
+					"api_image_digest": apiImageDigest, "submission_artifact": submissionArtifact,
+				})
+				job, scanErr = scanJob(tx.QueryRow(ctx, jobSelect+` WHERE j.job_id = $1`, jobId), true, self.nowUtc())
+				server.Raise(scanErr)
 			})
-			job, scanErr = scanJob(tx.QueryRow(ctx, jobSelect+` WHERE j.job_id = $1`, jobId), true, self.nowUtc())
-			server.Raise(scanErr)
 		})
-	})
+	}
+	err = admit()
+	if err == nil && archiveRequired {
+		archiveTimeout := self.submissionArchiveTimeout
+		if archiveTimeout <= 0 {
+			archiveTimeout = defaultSubmissionArchiveTimeout
+		}
+		archiveCtx, archiveCancel := context.WithTimeout(ctx, archiveTimeout)
+		submissionArtifact, err = settings.artifactArchive.ArchiveSubmission(archiveCtx, settings, roundId, patch)
+		archiveCancel()
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				// The caller went away; its own cancellation is not an archive fault.
+			default:
+				glog.Warningf("[competition]submission archive failed round=%s patch_sha256=%s: %s\n", roundId, patch.Sha256, err)
+			}
+			return nil, false, fmt.Errorf("archive competition submission: %w", err)
+		}
+		// With the artifact in hand the second pass never asks for another.
+		err = admit()
+	}
 	if err == nil && stateErr != nil {
 		err = stateErr
 	}
