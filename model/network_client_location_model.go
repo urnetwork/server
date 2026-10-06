@@ -3876,8 +3876,8 @@ func providerEgressTestEnabledFromResource(resource *server.SimpleResource, err 
 	return len(enabled) == 1 && enabled[0]
 }
 
-// Bulk evidence for the shared provider decision. Database lookups are once per
-// publication pass; request paths use its complete hard-exclusion snapshot.
+// Bulk evidence for the shared provider decision. Publications load their own
+// cohort; request paths read through for candidates outside the cached cohort.
 type providerCountFilter struct {
 	now               time.Time
 	arinRisk          map[server.Id]bool
@@ -4016,41 +4016,13 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 
 	initialClientLocations := &InitialClientLocations{}
 
-	// Counts and score export use one bulk snapshot of the common gates.
+	// Counts and score export use the same common gates for their captured clients.
 	egressTestEnabled := providerEgressTestEnabled()
 	egressSettings := egressIndexSettings()
-	countFilter := newProviderCountFilter(ctx, egressTestEnabled)
-
-	// Publish the complete common-gate exclusion snapshot atomically, including
-	// a versioned marker for an authoritative empty set. Missing snapshots use SQL.
-	hardExcludedMembers := []any{providerHardExclusionsReadyMember}
-	seenHardExcludedClientIds := map[server.Id]bool{}
-	for _, exclusions := range []map[server.Id]bool{countFilter.arinRisk, countFilter.reliabilityFailed, countFilter.tlsAuthenticationFailed} {
-		for clientId, failed := range exclusions {
-			if failed && !seenHardExcludedClientIds[clientId] {
-				hardExcludedMembers = append(hardExcludedMembers, clientId.String())
-				seenHardExcludedClientIds[clientId] = true
-			}
-		}
-	}
-	var hardExclusionsErr error
-	server.Redis(ctx, func(r server.RedisClient) {
-		_, hardExclusionsErr = r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-			pipe.Del(ctx, providerHardExclusionsKey)
-			pipe.SAdd(ctx, providerHardExclusionsKey, hardExcludedMembers...)
-			pipe.Expire(ctx, providerHardExclusionsKey, ttl)
-			return nil
-		})
-	})
-	if hardExclusionsErr != nil {
-		return fmt.Errorf("publish provider hard exclusions: %w", hardExclusionsErr)
-	}
-
-	server.Tx(ctx, func(tx server.PgTx) {
-
-		providerCountRows := []providerCountRow{}
-
-		result, err := tx.Query(
+	providerCountRows := []providerCountRow{}
+	clientIds := []server.Id{}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
 			ctx,
 			`
 	        SELECT
@@ -4144,8 +4116,16 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 					&row.egressQuality,
 				))
 				providerCountRows = append(providerCountRows, row)
+				clientIds = append(clientIds, row.clientId)
 			}
 		})
+	})
+	countFilter := newProviderCountFilterForClients(ctx, clientIds)
+	if err := publishProviderHardExclusions(ctx, clientIds, countFilter, ttl); err != nil {
+		return fmt.Errorf("publish provider hard exclusions: %w", err)
+	}
+
+	server.Tx(ctx, func(tx server.PgTx) {
 
 		// Count the same common-gate passes exposed as online supply.
 		countProviderRows := func() map[server.Id]int {
@@ -4205,7 +4185,7 @@ func UpdateClientLocations(ctx context.Context, ttl time.Duration) (returnErr er
 			slices.Collect(maps.Keys(locationClientCounts))...,
 		)
 
-		result, err = tx.Query(
+		result, err := tx.Query(
 			ctx,
 			`
                 SELECT
@@ -5275,11 +5255,19 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 		return
 	}
 
-	// Load common gates and accepted URL history once before assembling any
-	// location or group pool. Every advertised count uses this same decision.
+	// Capture both actual source populations before loading their common gates.
+	// A client added between the two queries must receive evidence as well.
 	egressTestEnabled := providerEgressTestEnabled()
 	egressSettings := egressIndexSettings()
-	countFilter := newProviderCountFilter(ctx, egressTestEnabled)
+	type pendingClientScore struct {
+		score                       *ClientScore
+		cityId, regionId, countryId *server.Id
+		reputationFailedNames       string
+		egress                      *clientScoreEgress
+		locationGroup               bool
+	}
+	pendingScores := []pendingClientScore{}
+	cohort := map[server.Id]bool{}
 	clientIdEgresses := map[server.Id]*clientScoreEgress{}
 	hardExcludedClientIds := map[server.Id]bool{}
 	shadowScoreCapture := beginArinShadowScoreCapture()
@@ -5385,41 +5373,11 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			for result.Next() {
 				sourceRows++
 				lookbackClientScore, cityLocationId, regionLocationId, countryLocationId, reputationFailedNames, egress := loadClientScore(result)
-				if shadowScoreCapture != nil {
-					shadowScoreCapture.observe(lookbackClientScore, egress.publishedCountryCode, countFilter.egressFacts(lookbackClientScore.ClientId, egress.publishedCountryCode, egress.egressIndex, egress.egressQuality, egressSettings), egressTestEnabled)
-				}
-				if countFilter.hasHardEgressFailure(lookbackClientScore.ClientId) {
-					hardExcludedClientIds[lookbackClientScore.ClientId] = true
-					continue
-				}
-				clientIdEgresses[lookbackClientScore.ClientId] = egress
-
-				// top-level only; the lookback copies stay nil (see `ClientScore`)
-				setLocationIds := func(clientScore *ClientScore) {
-					clientScore.CityLocationId = cityLocationId
-					clientScore.RegionLocationId = regionLocationId
-					clientScore.CountryLocationId = countryLocationId
-				}
-
-				// once per distinct location id: a country-only client stores
-				// its country id in all three columns (see
-				// SetConnectionLocation), and a client belongs in a location's
-				// pool once. The per-location map is keyed by client id so a
-				// repeat is already absorbed, but going through the set makes
-				// the intent explicit and keeps this loop in step with the
-				// counting loop in UpdateClientLocations.
-				for _, locationId := range distinctIds(
-					cityLocationId,
-					regionLocationId,
-					countryLocationId,
-				) {
-					clientScores, ok := locationClientScores[locationId]
-					if !ok {
-						clientScores = map[server.Id]*ClientScore{}
-						locationClientScores[locationId] = clientScores
-					}
-					setLocationIds(addClientScore(lookbackClientScore, reputationFailedNames, clientScores))
-				}
+				pendingScores = append(pendingScores, pendingClientScore{
+					score: lookbackClientScore, cityId: cityLocationId, regionId: regionLocationId,
+					countryId: countryLocationId, reputationFailedNames: reputationFailedNames, egress: egress,
+				})
+				cohort[lookbackClientScore.ClientId] = true
 			}
 		})
 
@@ -5511,33 +5469,84 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 			for result.Next() {
 				sourceRows++
 				lookbackClientScore, cityLocationGroupId, regionLocationGroupId, countryLocationGroupId, reputationFailedNames, egress := loadClientScore(result)
-				if shadowScoreCapture != nil {
-					shadowScoreCapture.observe(lookbackClientScore, egress.publishedCountryCode, countFilter.egressFacts(lookbackClientScore.ClientId, egress.publishedCountryCode, egress.egressIndex, egress.egressQuality, egressSettings), egressTestEnabled)
-				}
-				if countFilter.hasHardEgressFailure(lookbackClientScore.ClientId) {
-					hardExcludedClientIds[lookbackClientScore.ClientId] = true
-					continue
-				}
-				clientIdEgresses[lookbackClientScore.ClientId] = egress
-
-				// once per distinct group id. The three location columns can
-				// be the same id (a country-only client), in which case all
-				// three group joins resolve to the same membership rows.
-				for _, locationGroupId := range distinctIds(
-					cityLocationGroupId,
-					regionLocationGroupId,
-					countryLocationGroupId,
-				) {
-					clientScores, ok := locationGroupClientScores[locationGroupId]
-					if !ok {
-						clientScores = map[server.Id]*ClientScore{}
-						locationGroupClientScores[locationGroupId] = clientScores
-					}
-					addClientScore(lookbackClientScore, reputationFailedNames, clientScores)
-				}
+				pendingScores = append(pendingScores, pendingClientScore{
+					score: lookbackClientScore, cityId: cityLocationGroupId, regionId: regionLocationGroupId,
+					countryId: countryLocationGroupId, reputationFailedNames: reputationFailedNames, egress: egress,
+					locationGroup: true,
+				})
+				cohort[lookbackClientScore.ClientId] = true
 			}
 		})
 	})
+
+	countFilter := newProviderCommonFilterForClients(ctx, slices.Collect(maps.Keys(cohort)))
+	// SourceMap in the native census has always covered the full accepted
+	// health map, including providers outside this serving cohort. Keep that
+	// diagnostic population and its exact evidence window unchanged.
+	countFilter.healthCounts, countFilter.healthWindowEnd = getAllProviderEgressHealthCountsSnapshot(ctx)
+	for i, row := range pendingScores {
+		// Release staging references as each row is moved into its target maps.
+		pendingScores[i] = pendingClientScore{}
+		lookbackClientScore, reputationFailedNames, egress := row.score, row.reputationFailedNames, row.egress
+		if shadowScoreCapture != nil {
+			shadowScoreCapture.observe(lookbackClientScore, egress.publishedCountryCode, countFilter.egressFacts(lookbackClientScore.ClientId, egress.publishedCountryCode, egress.egressIndex, egress.egressQuality, egressSettings), egressTestEnabled)
+		}
+		if countFilter.hasHardEgressFailure(lookbackClientScore.ClientId) {
+			hardExcludedClientIds[lookbackClientScore.ClientId] = true
+			continue
+		}
+		clientIdEgresses[lookbackClientScore.ClientId] = egress
+		if !row.locationGroup {
+			cityLocationId, regionLocationId, countryLocationId := row.cityId, row.regionId, row.countryId
+
+			// top-level only; the lookback copies stay nil (see `ClientScore`)
+			setLocationIds := func(clientScore *ClientScore) {
+				clientScore.CityLocationId = cityLocationId
+				clientScore.RegionLocationId = regionLocationId
+				clientScore.CountryLocationId = countryLocationId
+			}
+
+			// once per distinct location id: a country-only client stores
+			// its country id in all three columns (see
+			// SetConnectionLocation), and a client belongs in a location's
+			// pool once. The per-location map is keyed by client id so a
+			// repeat is already absorbed, but going through the set makes
+			// the intent explicit and keeps this loop in step with the
+			// counting loop in UpdateClientLocations.
+			for _, locationId := range distinctIds(
+				cityLocationId,
+				regionLocationId,
+				countryLocationId,
+			) {
+				clientScores, ok := locationClientScores[locationId]
+				if !ok {
+					clientScores = map[server.Id]*ClientScore{}
+					locationClientScores[locationId] = clientScores
+				}
+				setLocationIds(addClientScore(lookbackClientScore, reputationFailedNames, clientScores))
+			}
+		} else {
+			cityLocationGroupId, regionLocationGroupId, countryLocationGroupId := row.cityId, row.regionId, row.countryId
+
+			// once per distinct group id. The three location columns can
+			// be the same id (a country-only client), in which case all
+			// three group joins resolve to the same membership rows.
+			for _, locationGroupId := range distinctIds(
+				cityLocationGroupId,
+				regionLocationGroupId,
+				countryLocationGroupId,
+			) {
+				clientScores, ok := locationGroupClientScores[locationGroupId]
+				if !ok {
+					clientScores = map[server.Id]*ClientScore{}
+					locationGroupClientScores[locationGroupId] = clientScores
+				}
+				addClientScore(lookbackClientScore, reputationFailedNames, clientScores)
+			}
+		}
+	}
+	pendingScores = nil
+	cohort = nil
 
 	// keyed by lookback index (see ClientLookbacks): 1 = the hour, 2 = 12h.
 	// The hour threshold is the gate that decides whether a provider is in the

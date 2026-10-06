@@ -3751,13 +3751,39 @@ not interchangeable. A current catalog estimate and non-executing plan can
 establish the historical-scan risk without running an incident-time full
 count; they do not measure exact live rows or execution cost. Performance
 controls must include large neutral history, not only current providers.
-Preserve the complete `ready:v2` exclusion contract for disconnected, invalid
-and explicitly requested identities when replacing that scan with sparse
-exception reads. Restricting the snapshot to connected providers would silently
-weaken stale-cache and explicit-client safety. Verify the online partial index
-is valid and used, task completion resumes, the cache marker/TTL is renewed,
-and request read-through call volume falls before claiming recovery. An empty
-or expired snapshot remains unknown coverage, never an empty exclusion set.
+Preserve safety for disconnected, invalid and explicitly requested identities
+when replacing that scan. A `ready:v2` set claims complete coverage; publishing
+only connected clients under that marker silently weakens explicit-client
+safety. A `ready:v3:cohort` set instead carries one `checked:<id>` member for
+every evaluated client, its positive exclusions and its TTL in one Redis
+transaction. It omits `ready:v2`, so older readers use their bounded primary
+fallback during rollout. New readers accept complete v2 sets or checked v3
+members, and read uncovered candidates in deduplicated batches of at most 256.
+Missing, expired, unrecognized or conflicting markers mean unknown coverage;
+backend errors cannot become an empty allowed set. Verify running reader and
+writer ancestry, task completion, renewed coverage/TTL and bounded fallback
+work under comparable successful requests before claiming recovery.
+
+The October 6 07:46Z non-executing plan showed why the sparse-index repair was
+insufficient: the unscoped query still estimated 54.4 million output rows,
+including 52.8 million ARIN exceptions, with all six inspected indexes valid
+and ready. These are optimizer estimates, not executed rows or CPU. The cohort
+repair first captures the exact dashboard/location or both score-query
+populations, then loads their common evidence in batches of at most 1,024
+unique clients. It preserves public-only counts, network-only score supply,
+neutral missing reliability history, retained TLS failures and accepted health
+policy/window rules. Score publication retains the existing fleet-wide health
+`SourceMap` diagnostic census; it is not a serving-cohort denominator.
+
+Qualify this boundary with dense historical exceptions, all three actual
+export callers, full examined-row plans under custom and generic planning,
+multi-batch tails, both score populations, contradictory cache generations and
+rolling old/new readers. False-positive qualifier: output estimates and a
+ClientWrite observation do not establish CPU attribution or one runtime caller.
+False-negative qualifier: a small sparse fixture or a warm complete cache can
+hide historical output and uncovered-client work. Local controls do not prove
+production recovery; require fresh task/source completions and independent CPU
+and wait observations after the owning API/Taskworker artifacts adopt the fix.
 Statement wall-time deltas may include waits; use §1.3c for CPU and the wait
 history below for persistence rather than assigning CPU shares from SQL time.
 
@@ -31463,9 +31489,9 @@ do not weaken authentication or TLS to make compatibility appear healthy.
 Every Taskworker process starts its own stats collector. The provider-egress
 dashboard aggregate now shares one completed, policy-keyed Redis snapshot for
 300 seconds after the original source completion. Its elected refresher still
-runs the full `CountProviderEgress` path: historical ARIN exclusions, reliability
-gates, all bucket/index labels and exclusion reasons retain their existing
-meaning. Location/score refresh tasks, provider selection and admission do not
+runs the full `CountProviderEgress` path: ARIN and reliability evidence for its
+captured provider cohort, all bucket/index labels and exclusion reasons retain
+their existing meaning. Location/score refresh tasks, provider selection and admission do not
 use this dashboard cache. This removes duplicate stats work; it does not prove
 which caller produced a sampled query or what fraction of Main CPU it used.
 

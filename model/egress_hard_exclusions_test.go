@@ -86,7 +86,7 @@ func TestProviderHardExclusionsLegacyCacheReadsThrough(t *testing.T) {
 	})
 }
 
-// Even an empty count pass publishes evidence of its complete exclusion set,
+// Even an empty count pass publishes evidence of its checked cohort,
 // with the same expiry as a nonempty pass. Key absence cannot mean both states.
 func TestProviderHardExclusionsEmptyPublicationIsObservable(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
@@ -97,7 +97,7 @@ func TestProviderHardExclusionsEmptyPublicationIsObservable(t *testing.T) {
 		}
 		server.Redis(ctx, func(r server.RedisClient) {
 			members, err := r.SMembers(ctx, providerHardExclusionsKey).Result()
-			if err != nil || len(members) != 1 || members[0] != hardExclusionReadyMemberForTest {
+			if err != nil || len(members) != 1 || members[0] != providerHardExclusionsCohortReadyMember {
 				t.Fatalf("empty publication is indistinguishable from missing: members=%d err=%v", len(members), err)
 			}
 			ttl, err := r.TTL(ctx, providerHardExclusionsKey).Result()
