@@ -4055,6 +4055,8 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 	discardedStagingJobs := []server.Id{}
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			// server.Tx can rerun the callback; only the committed run's discards count.
+			discardedStagingJobs = []server.Id{}
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-round-v1', 0))`))
 			var previousEpoch int
 			server.Raise(tx.QueryRow(ctx, `
@@ -4210,6 +4212,8 @@ func (self PostgresStore) CreateStagingRound(
 	replaced := false
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			// server.Tx can rerun the callback; only the committed run's supersedes count.
+			supersededJobs = []server.Id{}
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-round-v1', 0))`))
 			var productionExists bool
 			server.Raise(tx.QueryRow(ctx, `
@@ -5492,6 +5496,8 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 	}
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			// server.Tx can rerun the callback; only the committed run's discards count.
+			discarded = []server.Id{}
 			var slotWorker *string
 			var slotJob *server.Id
 			var slotLease *time.Time
