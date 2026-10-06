@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -820,7 +821,7 @@ func NewProxyDevice(
 	if initialDeviceState := proxyDeviceConfig.InitialDeviceState; initialDeviceState != nil {
 		deviceLocal.SetPerformanceProfile(initialDeviceState.PerformanceProfile)
 		deviceLocal.SetConnectLocation(initialDeviceState.Location)
-		dnsResolverSettings = initialDeviceState.DnsResolverSettings
+		dnsResolverSettings = hostedDnsResolverSettings(initialDeviceState.DnsResolverSettings)
 	}
 
 	// The manager creates one ProxyDevice per client and closes it on disconnect.
@@ -953,6 +954,48 @@ func newProxyDeviceLocalSettings(
 	// hosted, via the host addresses in the direct connection setup.
 	deviceLocalSettings.HostedIncompatible = true
 	return deviceLocalSettings
+}
+
+// The resolver settings a hosted device's tun is built with: the provisioned
+// settings with only built-in servers on the host side. The tun queries its
+// local DoH and dns servers from the proxy host itself, and a cloud host must
+// never query a server a proxy client names, so a local server that is not one
+// of connect's defaults is left out. The remote servers are queried through
+// the tunnel, from a provider, like any destination of the client's traffic,
+// and are kept as provisioned, as are the toggles; a local list left empty
+// queries nothing.
+func hostedDnsResolverSettings(dnsResolverSettings *connect.DnsResolverSettings) *connect.DnsResolverSettings {
+	if dnsResolverSettings == nil {
+		return nil
+	}
+	defaultResolverSettings := connect.DefaultDnsResolverSettings()
+	builtInDohUrls := slices.Concat(
+		defaultResolverSettings.RemoteDohUrlsIpv4,
+		defaultResolverSettings.RemoteDohUrlsIpv6,
+		defaultResolverSettings.LocalDohUrlsIpv4,
+		defaultResolverSettings.LocalDohUrlsIpv6,
+	)
+	builtInDnsServers := slices.Concat(
+		defaultResolverSettings.RemoteDnsIpv4,
+		defaultResolverSettings.RemoteDnsIpv6,
+		defaultResolverSettings.LocalDnsIpv4,
+		defaultResolverSettings.LocalDnsIpv6,
+	)
+	builtInOnly := func(resolverServers []string, builtInServers []string) []string {
+		keptServers := []string{}
+		for _, resolverServer := range resolverServers {
+			if slices.Contains(builtInServers, resolverServer) {
+				keptServers = append(keptServers, resolverServer)
+			}
+		}
+		return keptServers
+	}
+	hosted := *dnsResolverSettings
+	hosted.LocalDohUrlsIpv4 = builtInOnly(dnsResolverSettings.LocalDohUrlsIpv4, builtInDohUrls)
+	hosted.LocalDohUrlsIpv6 = builtInOnly(dnsResolverSettings.LocalDohUrlsIpv6, builtInDohUrls)
+	hosted.LocalDnsIpv4 = builtInOnly(dnsResolverSettings.LocalDnsIpv4, builtInDnsServers)
+	hosted.LocalDnsIpv6 = builtInOnly(dnsResolverSettings.LocalDnsIpv6, builtInDnsServers)
+	return &hosted
 }
 
 // PushDeviceRpc serves a device-rpc websocket (relayed from the resident) to
