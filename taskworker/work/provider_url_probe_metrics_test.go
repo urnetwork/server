@@ -20,33 +20,42 @@ func TestUrlProbeFleetScrapeUsesOneAtomicGeneration(t *testing.T) {
 			Warming: 1, MissingCycles: 1, CohortStartedAtSeconds: 1,
 			MatureEligible: 1, MatureQuotaComplete: 1, MatureRunsNeeded: 1,
 			WarmingEligible: 1, WarmingQuotaComplete: 1, WarmingRunsNeeded: 1,
-			EligibilityAgeUnknown: 1, AgeUnknownQuotaComplete: 1, AgeUnknownRunsNeeded: 1},
+			EligibilityAgeUnknown: 1, AgeUnknownQuotaComplete: 1, AgeUnknownRunsNeeded: 1,
+			MatureDeficitDiagnostics: urlProbeMatureDeficitMetricFixture()},
 		observedAt: time.Unix(1, 0),
 	})
+	expected := urlProbeFleetMetricValues(t, collector)
 	go func() {
 		collector.Collect(metrics)
 		close(metrics)
 	}()
 	first := <-metrics
 	// Publication happens while Collect is blocked partway through this scrape.
-	collector.snapshot.Store(&providerUrlProbeFleetSnapshot{fleet: model.ProviderUrlProbeFleet{Eligible: 99}, observedAt: time.Unix(99, 0)})
+	collector.snapshot.Store(&providerUrlProbeFleetSnapshot{fleet: model.ProviderUrlProbeFleet{
+		Eligible: 99, MatureDeficitDiagnostics: model.ProviderUrlProbeMatureDeficitDiagnostics{ContractVersion: 1, Selected: 99},
+	}, observedAt: time.Unix(99, 0)})
+	// Drain the blocked collection before asserting so a failed assertion does
+	// not leave a producer goroutine behind.
+	scrape := []prometheus.Metric{first}
+	for metric := range metrics {
+		scrape = append(scrape, metric)
+	}
 	assertOld := func(metric prometheus.Metric) {
 		var value dto.Metric
 		if err := metric.Write(&value); err != nil {
 			t.Fatal(err)
 		}
-		if value.GetGauge().GetValue() != 1 {
+		key := urlProbeFleetMetricKey(metric, &value)
+		want, exists := expected[key]
+		if !exists || value.GetGauge().GetValue() != want {
 			t.Fatalf("scrape mixed fleet generations: %s", value.String())
 		}
 	}
-	assertOld(first)
-	count := 1
-	for metric := range metrics {
+	for _, metric := range scrape {
 		assertOld(metric)
-		count++
 	}
-	if count != 25 {
-		t.Fatalf("incomplete fleet scrape: got %d series, want 25", count)
+	if len(scrape) != 77 || len(expected) != 77 {
+		t.Fatalf("incomplete atomic census and diagnostic scrape: got %d series, want77", len(scrape))
 	}
 }
 

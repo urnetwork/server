@@ -7858,3 +7858,94 @@ independently corroborated by
 The deployment receipt is
 `temp/fp2-renewal-arin-taskworker-release-20261005/scaffold-vcs/taskworker-deploy-result.json`
 (SHA-256 `194c0bf3b262496120e83f9fbab4032643f7039fde0194077e77ec802ba2c595`).
+
+### 2026-10-05 23:53 UTC current mature coverage and deficit investigation
+
+Root's 23:55:27 observation qualifies all eight selected Taskworkers as ready
+on `49b3cf2ae966f95d90775e99c945ddb301911990`, matching the deployed image.
+The latest coherent global source snapshot is **23:53:19.685884 UTC**:
+**70,181 / 70,285 mature providers meet quota (99.852031%)**. The remaining
+104 mature providers need 109 credits; integer arithmetic implies at least
+99 of them are exactly one credit short. Warming is separately 16 complete
+of 27 eligible, with 11 deficient providers needing 60 credits. Unknown
+first-admission age is zero. All-current quota is 70,197 / 70,312;
+secure-complete is separately 70,171, with 26 unresolved security exceptions
+and zero unknown security targets.
+
+This is a fresh stock at its original comparison time. It does not establish
+a current credit rate, fixed-provider continuity, predecessor retirement or
+a rollout effect. Membership differs from the earlier roughly 77,000-provider
+cohort, so the percentages are not a fixed-cohort trend. **Sustained 100%
+mature coverage remains unproven.** Quota still counts ten unique accepted
+measured successes plus failures per rolling four hours; newcomer warming,
+the 4/5 quality gate and TLS security remain separate.
+
+The bounded V5 diagnostic at 23:48:09 UTC passed its read and plan guards
+but found zero matches for its narrow completed-setup-failure predicate with
+an unchanged fifteen-minute claim deadline. It did not sample the full
+deficient cohort and does not establish a global cause or the absence of
+other long leases. The next diagnostic is being implemented in the existing
+census: select mature measured-deficient providers before a 128-provider
+cap, then join their claim, attempt and latest-ten credit/expiry evidence
+within that same database snapshot. It adds no credits or scheduling change.
+
+Finite coverage evidence is
+`temp/pg-contention-20261004/astra-49b3c-admission-cohort-v2-current-reduction.json`
+(SHA-256 `7c83d055805d48c96e364747f5fd03de1089bae81e37a287e1ed1994638af437`),
+independently corroborated by
+`temp/pg-contention-20261004/sol-49b3c-admission-cohort-v2-actual-corroboration.json`
+(SHA-256 `54f4fd11fd39159718ca379f8921a8c25ece97c6705198be658543a57a34090d`).
+The V5 finite reduction is
+`temp/pg-contention-20261004/astra-future-frontier-native-v5-reduction.json`
+(SHA-256 `8f394f3aa9d30fb51d4fe320d2d51071c20e7537b07b0dc2accc721d60d8c859`),
+with independent corroboration
+`temp/pg-contention-20261004/sol-future-frontier-native-v5-actual-corroboration.json`
+(SHA-256 `b6a1f0bf1439cecb678e5e48ce61be59219a354adc3ea6eaf54e5fcf54380a71`).
+
+### 2026-10-06 00:21 UTC current rollout and first-admission age limits
+
+Taskworker `775f6d327dcff3f55b065aece6a3c5621eaf78d2` completed rollout at
+**00:20:57.345357 UTC**. Root's 00:22:41 observation qualifies all eight
+selected workers on the expected source, image and readiness. Its latest
+coherent global source snapshot is **00:21:55.418379 UTC**:
+
+| Current eligible cohort | Eligible | Ten-result quota complete | Deficient | Runs needed |
+| --- | ---: | ---: | ---: | ---: |
+| Durable first-admission cycle at least four hours old | 63,250 | 63,244 | 6 | 12 |
+| Warming, durable cycle under four hours old | 5,259 | 91 | 5,168 | 41,178 |
+| Cycle age unknown | 0 | 0 | 0 | 0 |
+| All current eligible providers | 68,509 | 63,335 | 5,174 | 41,190 |
+
+Known-cycle-age mature coverage is **99.990514%**. Secure-complete remains a
+separate 63,308, with 27 security exceptions and zero unknown security
+targets. Six mature providers still lack quota. This point does not establish
+sustained 100%, a current credit rate or an effect of the rollout.
+
+The warming population rose from 27 in the preceding 23:53 snapshot to
+5,259, while the mature population changed from 70,285 to 63,250. Those
+stocks do not identify the same providers and must not be presented as a
+recovery trend. In particular, the current observation does not prove that
+all 5,259 warming identities are genuinely new providers.
+
+The age field is `provider_egress_probe_cycle.cycle_started_at`; there is no
+separate `first_eligible_at` field. The current admission owners preserve an
+existing cycle's age through eligibility reactivation and repeated provide-key
+publication. Transport reconnects retain the authenticated client ID. A
+missing cycle, however, is first stamped at initialization even for an old
+client, and ordinary creation without a retained client ID allocates a new
+identity. These paths leave first physical join and age continuity across
+changed client IDs unproved. The same-ID retention controls and the actual
+population change are separate questions. The newcomer requirement is not
+relaxed by treating an unexplained age reset as a genuine new join.
+
+Quota remains ten unique accepted measured successes plus failures in the
+rolling four hours; local unmeasured failures earn no credit. The 4/5 quality
+gate and TLS security remain separate. The exact mature-deficit diagnostic
+is source-qualified for release; it changes observation only.
+
+Finite actual evidence is
+`temp/pg-contention-20261004/astra-775f6-admission-cohort-v1-current-reduction.json`
+(SHA-256 `3736b6765ade172bde649b83bbfbdd0e415854739a466a1950623e3465b25814`),
+independently corroborated by
+`temp/pg-contention-20261004/sol-775f6-admission-cohort-v1-actual-corroboration.json`
+(SHA-256 `2d998210c8b30e079311b647232d3d1ecfb5ce7d7db329bb7ae1a91f1bc68884`).

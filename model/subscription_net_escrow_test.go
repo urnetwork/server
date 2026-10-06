@@ -152,18 +152,20 @@ func TestNetEscrowReservationPageTimeoutCancelsAndStaysLocal(t *testing.T) {
 	})
 }
 
-// The expiry-boundary repair must stay proportional to authoritative open
-// escrow. Scanning all historical balances would turn one five-minute repair
-// pass into a production-cardinality table walk.
+// Discovery must page balances before testing for live witnesses, so many
+// zero-byte or Redis-owned escrow rows cannot amplify one discovery page.
 func TestNetEscrowNoncurrentOpenBalancePageStaysIndexBounded(t *testing.T) {
 	for _, want := range []string{
 		"transfer_escrow.settled = false",
 		"transfer_contract.outcome IS NULL",
 		"NOT (",
 		"transfer_balance.start_time <= $1 AND $1 < transfer_balance.end_time",
-		"transfer_escrow.balance_id > $2",
-		"GROUP BY transfer_escrow.balance_id",
-		"ORDER BY transfer_escrow.balance_id",
+		"transfer_balance.balance_id > $2",
+		"AS has_open_escrow",
+		"ORDER BY transfer_balance.balance_id",
+		"transfer_escrow.balance_id = transfer_balance.balance_id",
+		"WHERE contract_id = selected_escrow.contract_id",
+		"OFFSET 0",
 		"LIMIT $3",
 	} {
 		if !strings.Contains(netEscrowNoncurrentOpenBalancePageSQL, want) {

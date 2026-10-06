@@ -1224,6 +1224,25 @@ The individual count vectors and clocks are updated sequentially; availability
 one and a shared scrape timestamp do not by themselves prove an atomic
 counts-and-clock snapshot if collection overlaps a refresh.
 
+A bounded private diagnostic now accompanies newly produced native censuses in
+source. It selects at most 256 distinct Speed-without-Quality providers by the
+lowest publication-salted hashes, retaining their source health counts. The
+private companion is capped at 64 KiB and is written only after the existing
+census succeeds, using a same-slot Lua comparison against the exact census
+bytes. Serving eligibility and the existing public census JSON are unchanged;
+a missing or superseded companion remains unknown. No provider identifiers are
+added to public APIs, metrics or logs.
+
+Four focused local controls passed: an 80,000-provider selection fixture,
+target membership and wire privacy, malformed evidence, and an owned loopback
+Redis commit/TTL/supersession check. This qualifies the source change, not a
+Main deployment or Redis Cluster performance. A new completed publication
+and a separately qualified reader that brackets bounded current-fact SQL with
+matching census/companion reads are still required. A 256-provider diagnostic
+can rank reasons within that sample; it cannot reconstruct the historical
+10,616-provider gap or establish whole-fleet operator coverage. The existing
+900-second census and 90-second shadow bounds remain separate and unchanged.
+
 The native publication has source clocks but lacks ARIN epochs and exclusion
 reasons. These reviewed sources export no loaded-ARIN epoch gauge. The bounded
 process observation above supplies a mapped epoch for one process; its

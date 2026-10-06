@@ -59,7 +59,9 @@ func receiptCollectorRetryable(err error) bool {
 				break
 			}
 		}
-		if network, ok := cause.(net.Error); ok {
+		// Errno also implements net.Error, but its optional flags must not
+		// erase the explicit physical-read admission established above.
+		if network, ok := cause.(net.Error); ok && !retry {
 			retry = network.Timeout() || network.Temporary()
 		}
 		if !retry {
