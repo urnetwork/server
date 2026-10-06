@@ -36,14 +36,39 @@ func init() {
 	})
 }
 
+// The database index of the network name search.
+func newNetworkNameSearchDb() *search.SearchDb {
+	return search.NewSearchDb("network_name", search.SearchTypeFull)
+}
+
 func createNetworkNameSearch() *search.SearchLocal {
 	return search.NewSearchLocalWithDefaults(
 		context.Background(),
-		search.NewSearchDb("network_name", search.SearchTypeFull),
+		newNetworkNameSearchDb(),
 	)
 }
 
 var networkNameSearch = sync.OnceValue(createNetworkNameSearch)
+
+// Testing_InMemoryNetworkNameSearch replaces the network name search with one
+// whose in-memory index changes only through the writes a test makes: its
+// context is canceled before it starts, so its background load fails at once
+// and it never loads or polls the database index, and it answers queries from
+// memory. Its writes still reach the database index. Returns the search, and
+// the func that restores the previous one.
+func Testing_InMemoryNetworkNameSearch(ctx context.Context) (inMemorySearch *search.SearchLocal, restore func()) {
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	inMemorySearch = search.NewSearchLocalWithDefaults(canceledCtx, newNetworkNameSearchDb())
+	previousNetworkNameSearch := networkNameSearch
+	networkNameSearch = func() *search.SearchLocal {
+		return inMemorySearch
+	}
+	restore = func() {
+		networkNameSearch = previousNetworkNameSearch
+	}
+	return
+}
 
 const MinPasswordLength = 6
 
@@ -1330,13 +1355,14 @@ func networkNameHeldInTx(ctx context.Context, tx server.PgTx, networkName string
 }
 
 // Replaces the network's entry in the network name search with the name, in
-// the caller's transaction, so the entry commits or rolls back with the
-// rename. Network create adds the same entry (the network id, variant 0) after
-// its commit. The search also updates this process's in-memory index at the
-// call, as account removal's RemoveInTx does; other processes load the
-// committed entry from the search's update log.
-func IndexNetworkNameInTx(ctx context.Context, tx server.PgTx, networkId server.Id, networkName string) {
-	networkNameSearch().AddInTx(ctx, networkName, networkId, 0, tx)
+// the caller's transaction, so the database entry commits or rolls back with
+// the rename. Network create adds the same entry (the network id, variant 0)
+// after its commit. Returns the post that moves the network in this process's
+// in-memory index, which the caller runs only once the transaction has
+// committed (server.RunPosts); other processes load the committed entry from
+// the search's update log.
+func IndexNetworkNameInTx(ctx context.Context, tx server.PgTx, networkId server.Id, networkName string) server.PostFunction {
+	return networkNameSearch().AddInTxPost(ctx, networkName, networkId, 0, tx)
 }
 
 func checkNetworkNameAvailability(
@@ -1380,7 +1406,8 @@ var networkUpdateBeforeWrite func()
 // transaction, and a write that meets another network holding the name on the
 // unique index (committed after that transaction's snapshot) is refused the
 // same way, instead of failing the call. The rename's transaction also
-// replaces the network's entry in the network name search.
+// replaces the network's entry in the network name search, and this process's
+// in-memory index follows once it has committed.
 func NetworkUpdate(
 	networkUpdate NetworkUpdateArgs,
 	session *session.ClientSession,
@@ -1402,7 +1429,10 @@ func NetworkUpdate(
 	}
 
 	held := false
+	var posts []server.PostFunction
 	taken := NetworkNameTx(session.Ctx, func(tx server.PgTx) {
+		// a rerun starts over
+		posts = nil
 		held = networkNameHeldInTx(session.Ctx, tx, validatedNetworkName)
 		if held {
 			return
@@ -1421,12 +1451,14 @@ func NetworkUpdate(
 			validatedNetworkName,
 		))
 		if tag.RowsAffected() == 1 {
-			IndexNetworkNameInTx(session.Ctx, tx, session.ByJwt.NetworkId, validatedNetworkName)
+			posts = append(posts, IndexNetworkNameInTx(session.Ctx, tx, session.ByJwt.NetworkId, validatedNetworkName))
 		}
 	})
 	if held || taken {
 		return refusal(networkNameNotAvailableMessage)
 	}
+	// the rename committed
+	server.RunPosts(session.Ctx, posts...)
 
 	return &NetworkUpdateResult{}, nil
 }

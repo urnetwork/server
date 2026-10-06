@@ -56,7 +56,8 @@ var changeNetworkNameBeforeWrite func()
 // reclaim cooldown since is refused too. Another network committing the name
 // after that transaction's snapshot meets the write on the unique index, which
 // is refused the same way and rolls back the old name's cooldown. The write's
-// transaction also replaces the network's entry in the network name search.
+// transaction also replaces the network's entry in the network name search,
+// and this process's in-memory index follows once it has committed.
 func changeNetworkName(
 	args ChangeNetworkNameArgs,
 	session *session.ClientSession,
@@ -125,7 +126,10 @@ func changeNetworkName(
 		}, nil
 	}
 
+	var posts []server.PostFunction
 	taken := model.NetworkNameTx(session.Ctx, func(tx server.PgTx) {
+		// a rerun starts over
+		posts = nil
 		available = networkNameAvailableForUser(session.Ctx, tx, normalizedName, session.ByJwt.UserId)
 		if !available {
 			return
@@ -181,12 +185,14 @@ func changeNetworkName(
 		// the unique index lets the update set the name on one network only,
 		// the one read above
 		if networkId != nil && tag.RowsAffected() == 1 {
-			model.IndexNetworkNameInTx(session.Ctx, tx, *networkId, normalizedName)
+			posts = append(posts, model.IndexNetworkNameInTx(session.Ctx, tx, *networkId, normalizedName))
 		}
 	})
 	if !available || taken {
 		return notAvailable, nil
 	}
+	// the rename committed
+	server.RunPosts(session.Ctx, posts...)
 
 	return &ChangeNetworkNameResult{
 		NetworkName: normalizedName,

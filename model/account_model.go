@@ -231,11 +231,13 @@ func RemoveNetworkWithStoreSnapshot(
 	adminUserId *server.Id,
 	storeSnapshot *RemoveNetworkStoreSnapshot,
 ) (outcome RemoveNetworkOutcome, userAuths map[string]bool) {
+	var posts []server.PostFunction
 	server.Tx(ctx, func(tx server.PgTx) {
 		// Tx may rerun the callback after a transient database failure. Never let
 		// a value produced by an aborted attempt escape a later refusal.
 		outcome = ""
 		userAuths = nil
+		posts = nil
 
 		// Serialize deletion against every renewal credit. The matching credit
 		// path takes FOR KEY SHARE before it consumes a provider idempotency
@@ -373,12 +375,15 @@ func RemoveNetworkWithStoreSnapshot(
 			networkId,
 		))
 
-		networkNameSearch().RemoveInTx(ctx, networkId, tx)
+		// the network leaves this process's in-memory name index only once the
+		// removal has committed
+		posts = append(posts, networkNameSearch().RemoveInTxPost(ctx, networkId, tx))
 
 		outcome = RemoveNetworkRemoved
 	}, server.TxReadCommitted)
 
 	if outcome == RemoveNetworkRemoved {
+		server.RunPosts(ctx, posts...)
 		// the networks stats series (ComputeStats) replays created/deleted
 		// events; creation is recorded in network_model.go, and without this
 		// the active-network count only ever grew
