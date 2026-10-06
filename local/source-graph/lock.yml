@@ -26,9 +26,6 @@ siblings:
   - repository: urnetwork/userwireguard
     path: userwireguard
     ref: 85fb1ca4086fa5dbfcda526bec7a17a894e691b9
-  - repository: urnetwork/operator-proxy
-    path: operator-proxy
-    ref: 4c77a9ddf169f36d0c2ec14c4feed90782dffd83
   - repository: urnetwork/warp
     path: warp
     ref: 3b6e875f83140b2de1a50d2bfffe0f7830edd74e

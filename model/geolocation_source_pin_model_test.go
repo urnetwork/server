@@ -2,10 +2,6 @@ package model
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"regexp"
-	"sort"
 	"testing"
 	"time"
 
@@ -83,85 +79,4 @@ func TestSetGeolocationSourcePinStoresAndReplacesPerHost(t *testing.T) {
 			t.Fatal("expected an unobserved host to be absent from the pin map")
 		}
 	})
-}
-
-var sourceUrlPattern = regexp.MustCompile(`URL:\s*"https://([^/"]+)`)
-
-// TestGeolocationSourceHostsMatchProberSourcesWhenCheckedOutAlongside is the
-// only mechanism available for linking GeolocationSourceHosts to its
-// counterpart in the operator-proxy repo. The prober is a separate Go module in
-// a separate repository that depends on this server, so the list genuinely
-// cannot be imported -- see the GeolocationSourceHosts comment.
-//
-// What this covers: a machine that has both repositories checked out as
-// siblings (or names one via URNETWORK_OPERATOR_PROXY) will fail this test the
-// moment the two lists disagree, which is the case that matters -- whoever
-// changes a source endpoint is working in both trees.
-//
-// What it does NOT cover: CI, or any checkout without the prober beside it. It
-// skips there rather than passing vacuously. The real backstop for drift is at
-// runtime and fails closed: the prober treats a source host with no served pin
-// as a hard error and refuses to probe.
-func TestGeolocationSourceHostsMatchProberSourcesWhenCheckedOutAlongside(t *testing.T) {
-	// Both directory names are accepted: a checkout cloned from
-	// github.com/urnetwork/operator-proxy lands in `operator-proxy`, while
-	// older checkouts predating the move sit in `urnetwork-operator-proxy`.
-	// URNETWORK_OPERATOR_PROXY overrides both for any other layout.
-	candidates := []string{
-		os.Getenv("URNETWORK_OPERATOR_PROXY"),
-		filepath.Join("..", "..", "operator-proxy"),
-		filepath.Join("..", "..", "urnetwork-operator-proxy"),
-	}
-
-	var sourcesPath string
-	for _, candidate := range candidates {
-		if candidate == "" {
-			continue
-		}
-		path := filepath.Join(candidate, "geolocate", "sources.go")
-		if _, err := os.Stat(path); err == nil {
-			sourcesPath = path
-			break
-		}
-	}
-	if sourcesPath == "" {
-		t.Skip("operator-proxy checkout not found beside this one; set URNETWORK_OPERATOR_PROXY to enable this check")
-	}
-
-	b, err := os.ReadFile(sourcesPath)
-	if err != nil {
-		t.Fatalf("read %s: %v", sourcesPath, err)
-	}
-
-	matches := sourceUrlPattern.FindAllStringSubmatch(string(b), -1)
-	if len(matches) == 0 {
-		// the file exists but no longer looks the way this test assumes. Fail
-		// rather than skip: a silently-inert drift check is worse than none,
-		// because it reads as coverage.
-		t.Fatalf("no source URLs found in %s -- the prober's source table has changed shape and this check needs updating", sourcesPath)
-	}
-
-	seen := map[string]bool{}
-	proberHosts := []string{}
-	for _, match := range matches {
-		host := match[1]
-		if seen[host] {
-			continue
-		}
-		seen[host] = true
-		proberHosts = append(proberHosts, host)
-	}
-
-	serverHosts := append([]string{}, GeolocationSourceHosts...)
-	sort.Strings(proberHosts)
-	sort.Strings(serverHosts)
-
-	if len(proberHosts) != len(serverHosts) {
-		t.Fatalf("host lists disagree: prober %v (%s), server %v", proberHosts, sourcesPath, serverHosts)
-	}
-	for i := range proberHosts {
-		if proberHosts[i] != serverHosts[i] {
-			t.Fatalf("host lists disagree: prober %v (%s), server %v", proberHosts, sourcesPath, serverHosts)
-		}
-	}
 }

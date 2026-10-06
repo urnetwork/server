@@ -109,6 +109,16 @@ func TestPanicOwnerMixedThreePlusTwoPreservesAggregate(t *testing.T) {
 	}
 }
 
+// The quality probes are Server packages now. A frame from their retired
+// standalone module is outside every application's module closure, so the
+// record stays aggregate-only instead of naming that module as its owner.
+func TestPanicOwnerExcludesRetiredProbeModule(t *testing.T) {
+	line := panicOwnerTestLine(t, "*errors.errorString=synthetic-secret", "github.com/urnetwork/operator-proxy/ingest.(*SyntheticClient).Submit")
+	if owner := panicLogOwner(line); owner != "" {
+		t.Fatalf("retired probe module frame became owner %q", owner)
+	}
+}
+
 // Compiler closure numbers and receiver notation do not create new identities;
 // different application owners still retain their own matching samples.
 func TestPanicOwnerNormalizationAndSampleSeparation(t *testing.T) {
@@ -117,7 +127,7 @@ func TestPanicOwnerNormalizationAndSampleSeparation(t *testing.T) {
 		{function: "connect.(*SyntheticResident).Forward.func2", owner: "connect.SyntheticResident.Forward"},
 		{function: "sdk.SyntheticDevice.Load-fm", owner: "sdk.SyntheticDevice.Load"},
 		{function: "proxy.SyntheticStart.gowrap2", owner: "proxy.SyntheticStart"},
-		{function: "operator-proxy/ingest.(*SyntheticClient).Submit", owner: "operator-proxy/ingest.SyntheticClient.Submit"},
+		{function: "server/qualityprobe/ingest.(*SyntheticClient).Submit", owner: "server/qualityprobe/ingest.SyntheticClient.Submit"},
 		{function: "userwireguard.SyntheticRun", owner: "userwireguard.SyntheticRun"},
 		{function: "warp/services.SyntheticRun.func1.2", owner: "warp/services.SyntheticRun"},
 		{function: "server/model.SyntheticWrite[...].func1", owner: "server/model.SyntheticWrite"},
