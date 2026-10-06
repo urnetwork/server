@@ -5,6 +5,10 @@
 **/profile
 **/*.test
 
+# Python diagnostic bytecode
+**/__pycache__/
+**/*.pyc
+
 # binaries
 client/build
 bringyourctl/bringyourctl

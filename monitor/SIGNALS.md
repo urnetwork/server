@@ -5284,6 +5284,34 @@ executor source and per-scan cap/count authority before prescribing a cap
 correction. Candidate count is not terminal-verified sibling progress, and a
 short successful task alone does not prove that the aged backlog is draining.
 
+2026-10-06 retained-epoch discriminator: a fresh claim with no retry error can
+still traverse a historical scan epoch for days. An exact private cursor join
+found post-epoch contracts outside that pass and older candidates still ahead
+of its open cursor; none had yet been visited. Task freshness therefore proves
+executor activity, not coverage of recently created contracts. Preserve that
+historical epoch and position, and alternate its complete raw subpages with a
+second pass covering contracts created strictly after the historical epoch.
+The second pass has its own fixed upper boundary and repeats from the same
+lower boundary, so arrivals cannot extend a pass and recently active rows do
+not age out of coverage. A sliding trailing-day lower bound is insufficient:
+post-epoch contracts already older than a day would be excluded from both
+passes. Both lanes share the existing raw-row, parallelism and elapsed budgets,
+financial guards, classified-error handling and required payout posts.
+
+The deterministic control retains a million historical rows while continuously
+adding eligible arrivals, round-trips each checkpoint through JSON, and requires
+both historical progress and timely visits to the arrivals. Native controls
+retain recently reported rows, exercise both open/dispute selectors and equal
+timestamp boundaries, and verify that the task persists both lane cursors.
+Before release, compare the running taskworker source with this selection
+policy. After all taskworkers converge, verify consecutive persisted lane
+handoffs and a decreasing post-epoch eligible set alongside the historical
+cursor advancing. A cursor crossing a creation key is only a visit: a fresh
+report, settlement intent or accounting refusal can correctly preserve the
+contract. Conversely, aggregate close acknowledgements, fresh claims or an
+error-free task cannot prove account clearance; require a fresh bounded payer
+face and unsettled-escrow witness, with capped or unavailable coverage unknown.
+
 Also compare the complete stored failure and next due time with the attempt's
 duration. A verified underfunded dispute can leave unrelated per-contract
 commits durable while the whole task fails and backs off. The narrow §1.2 retry
@@ -20340,6 +20368,17 @@ extended five seconds backwards exceeded the reader's ten-minute maximum and
 correctly refused before contact; disabled source manifests still need no
 activation fence.
 
+The 2026-10-06 Connect owner reader refused locally before contacting Main:
+its disabled manifest was 128,320 bytes, but activation metadata expanded the
+bound manifest to 136,200 bytes, beyond the unchanged 131,072-byte invocation
+guard. Source and binder gates had omitted the final enabled artifact's size.
+That refusal yielded no runtime census or evidence of service recovery or
+regression and does not change the independent runtime PAGE. Lossless compact
+serialization reduces the same bound JSON object to
+121,590 bytes. A successor must check its serialized size before creating the
+one-use target, pass the copied invocation guard locally, and receive a fresh
+authority fence. Preserve the original refusal and every remote query bound.
+
 Use existing same-process pool, heap, stack, resident and worker counters
 before adding a live profile. `resident_clients` leaves the residents map
 before `CloseAndWait` completes, whereas callback, forward and idle-watch
@@ -20353,6 +20392,28 @@ budget. Preserve all generations, exact metric scrape anchors, and a unique
 native host/block/start/source match; a missing hot process cannot borrow a
 healthy peer's counters. No full heap or goroutine traversal is made
 pause-bounded merely by limiting the returned bytes.
+
+Resident and forward routing entries must be published before their lifecycle
+workers can retire them. A resident can consume its existing idle allowance
+while construction waits for peer metadata; an immediately retiring worker
+must not remove an absent entry and then leave a later insertion behind.
+Forward construction has the same ordering requirement. Publish each owner
+before launch, and remove only that exact forward candidate if worker admission
+has already closed. Concurrent live forwards remain the routing winner.
+
+The native publication controls force real worker retirement before construction
+returns and check the owning map after the join. Both original-order controls
+reproduce a retained entry; the correction passes normal and race controls,
+including caller-to-exchange lifetime transfer, refused-forward reclamation,
+and accepted control completion across transport and idle retirement. The
+separate active-forward control preserves native ACK delivery. A joined resident
+graph may still be reachable through a stale map entry; joined worker counts
+alone do not establish reclamation. Normal parent retirement performs a final
+forward-map sweep, so the adjacent forward ordering defect does not by itself
+prove process-long forward retention. These source controls do not establish
+Main incidence or explain its goroutine remainder. Keep the runtime PAGE open
+until qualified executable, population, and matched runtime observations show
+recovery; a deployment or restart alone is not that evidence.
 
 `connect-resident-cost-unobservable` WARNs immediately when the newest Connect
 population join is missing/stale, duplicated, invalid, or cannot select an

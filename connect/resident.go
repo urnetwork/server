@@ -676,6 +676,9 @@ type Exchange struct {
 	// Nil in production; constructor tests inject failure after child ownership
 	// exists but before the fallible peer-profile lookup publishes callbacks.
 	beforeResidentProfileForTest func(*Resident)
+	// Nil in production; nomination tests wait for retirement after lifecycle
+	// workers start to verify that cleanup cannot precede map publication.
+	afterResidentWorkersStartedForTest func(*Resident)
 
 	// the shared key-event subscriber (PEERSSTREAMS2.md); nil unless
 	// KeyEventDelivery.Enabled
@@ -1004,6 +1007,23 @@ func (self *Exchange) NominateLocalResidentWithContext(
 		}
 		return false
 	}
+	// Publish before any lifecycle worker can remove this generation. A worker
+	// that retires immediately must not leave a later insertion behind it.
+	var replacedResident *Resident
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		replacedResident = self.residents[clientId]
+		self.residents[clientId] = resident
+		self.notifyResidentChangedLocked(clientId)
+		residentClientsGauge.Set(float64(len(self.residents)))
+	}()
+	if replacedResident != nil {
+		replacedResident.Cancel()
+	}
+	if glog.V(1) {
+		glog.Infof("[r]open %s\n", clientId)
+	}
 	workerStarted = true
 	// note: initial peer registration happens in ConnectionAnnounce.run once
 	// the connection survives the announce window (2026-07-15: registration
@@ -1067,21 +1087,8 @@ func (self *Exchange) NominateLocalResidentWithContext(
 			}
 		}
 	})
-
-	var replacedResident *Resident
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		replacedResident = self.residents[clientId]
-		self.residents[clientId] = resident
-		self.notifyResidentChangedLocked(clientId)
-		residentClientsGauge.Set(float64(len(self.residents)))
-	}()
-	if replacedResident != nil {
-		replacedResident.Cancel()
-	}
-	if glog.V(1) {
-		glog.Infof("[r]open %s\n", clientId)
+	if afterStarted := self.afterResidentWorkersStartedForTest; afterStarted != nil {
+		afterStarted(resident)
 	}
 
 	return true
@@ -3603,6 +3610,8 @@ type Resident struct {
 	// Nil in production; tests use this barrier after forward cancellation and
 	// immediately before teardown joins the active consumer.
 	beforeForwardCloseJoinForTest func()
+	// Nil in production; forward tests force cleanup immediately after launch.
+	afterForwardWorkersStartedForTest func(*ResidentForward)
 	// Nil in production; tests observe the exact internal-client join boundary.
 	beforeClientCloseJoinForTest func()
 	// Nil in production; tests pause lazy shard construction before its worker
@@ -4318,6 +4327,27 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 
 		// Build a new forward. No lock needed.
 		forward := NewResidentForward(self.ctx, self.exchange, destinationId)
+		// Install before its worker can retire. A concurrent live candidate
+		// wins without starting any work for this unpublished candidate.
+		var replacedForward *ResidentForward
+		var raceWinner *ResidentForward
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+			if existing := self.forwards[destinationId]; existing != nil && !existing.IsDone() {
+				raceWinner = existing
+				return
+			}
+			replacedForward = self.forwards[destinationId]
+			self.forwards[destinationId] = forward
+		}()
+		if raceWinner != nil {
+			forward.Close()
+			return raceWinner
+		}
+		if replacedForward != nil {
+			replacedForward.Cancel()
+		}
 		if !self.startForwardWorker(forward, func() {
 			defer func() {
 				forward.Cancel()
@@ -4336,6 +4366,13 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 			}
 		}) {
 			forward.Close()
+			func() {
+				self.stateLock.Lock()
+				defer self.stateLock.Unlock()
+				if self.forwards[destinationId] == forward {
+					delete(self.forwards, destinationId)
+				}
+			}()
 			return nil
 		}
 		residentForwardIdleWatchersGauge.Inc()
@@ -4343,27 +4380,8 @@ func (self *Resident) processClientForward(path connect.TransferPath, transferFr
 			defer residentForwardIdleWatchersGauge.Dec()
 			forward.runIdleWatcher(sourceId)
 		})
-
-		// Install. Another goroutine may have raced ahead with a live forward
-		// while we were doing the contract check; if so, yield to it.
-		var replacedForward *ResidentForward
-		var raceWinner *ResidentForward
-		func() {
-			self.stateLock.Lock()
-			defer self.stateLock.Unlock()
-			if existing := self.forwards[destinationId]; existing != nil && !existing.IsDone() {
-				raceWinner = existing
-				return
-			}
-			replacedForward = self.forwards[destinationId]
-			self.forwards[destinationId] = forward
-		}()
-		if raceWinner != nil {
-			forward.Cancel()
-			return raceWinner
-		}
-		if replacedForward != nil {
-			replacedForward.Cancel()
+		if afterStarted := self.afterForwardWorkersStartedForTest; afterStarted != nil {
+			afterStarted(forward)
 		}
 		if glog.V(1) {
 			glog.Infof("[rf]open %s->%s\n", sourceId, destinationId)
