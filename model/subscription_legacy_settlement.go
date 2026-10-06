@@ -36,9 +36,17 @@ const (
 // The fixed pass cutoff lets skipped owners return after a finite cohort.
 // It bounds traversal growth, not elapsed time or the existing cohort size.
 type LegacySettlementCursor struct {
+	NextAttemptTime time.Time                 `json:"next_attempt_time"`
+	ContractId      server.Id                 `json:"contract_id"`
+	PassEndTime     time.Time                 `json:"pass_end_time,omitzero"`
+	HeadAfter       *LegacySettlementPosition `json:"head_after,omitempty"`
+}
+
+// The head revisit position is independent of the forward pass. Persisting it
+// prevents a permanently busy prefix from consuming every page's head share.
+type LegacySettlementPosition struct {
 	NextAttemptTime time.Time `json:"next_attempt_time"`
 	ContractId      server.Id `json:"contract_id"`
-	PassEndTime     time.Time `json:"pass_end_time,omitzero"`
 }
 
 type LegacySettlementFlushResult struct {
@@ -263,8 +271,8 @@ func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.I
 // rows even with LIMIT 1. Failed accounting stays visible, reserved and deferred.
 // Each task owns a bounded page and persists the cursor and fixed pass cutoff.
 // A continued page gives up to one quarter of its slots to distinct older heads,
-// with one early retry and three forward visits between later retries. Its local
-// head cursor skips busy owners without rewinding the persisted forward cursor.
+// with one early retry and three forward visits between later retries. Its
+// durable head cursor skips busy owners without rewinding the forward cursor.
 // Exhausting this page's own budget after progress yields its completed prefix;
 // it must not turn durable per-contract progress into a task-wide error backoff.
 func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlementCursor, limit int) (result LegacySettlementFlushResult, returnErr error) {
@@ -286,7 +294,12 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 	}
 	server.HandleError(func() {
 		headCursor := after
-		var headAfter *LegacySettlementCursor
+		var headAfter *LegacySettlementPosition
+		if after != nil {
+			headAfter = after.HeadAfter
+		}
+		headCycleBefore := headAfter
+		headWrapped := false
 		headRemaining := 0
 		if headCursor != nil && limit > 1 {
 			headRemaining = max(1, limit/4)
@@ -320,15 +333,18 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 						query = `SELECT next_attempt_time,contract_id,COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC') FROM legacy_settlement_intent
                       WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
                       AND next_attempt_time<=COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC')
-                      AND (next_attempt_time,contract_id)<=($2,$3) ORDER BY next_attempt_time,contract_id LIMIT 1`
+                      AND (next_attempt_time,contract_id)<=($2,$3)`
 						if headAfter != nil {
-							query = `SELECT next_attempt_time,contract_id,COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC') FROM legacy_settlement_intent
-                      WHERE shard=$1 AND next_attempt_time<=statement_timestamp() AT TIME ZONE 'UTC'
-                      AND next_attempt_time<=COALESCE($4::timestamp,statement_timestamp() AT TIME ZONE 'UTC')
-                      AND (next_attempt_time,contract_id)<=($2,$3) AND (next_attempt_time,contract_id)>($5,$6)
-                      ORDER BY next_attempt_time,contract_id LIMIT 1`
+							query += ` AND (next_attempt_time,contract_id)>($5,$6)`
 							args = append(args, headAfter.NextAttemptTime, headAfter.ContractId)
 						}
+						if headWrapped {
+							// A page can wrap once. Its second segment ends at the
+							// original lower bound so no head is visited twice.
+							query += fmt.Sprintf(` AND (next_attempt_time,contract_id)<=($%d,$%d)`, len(args)+1, len(args)+2)
+							args = append(args, headCycleBefore.NextAttemptTime, headCycleBefore.ContractId)
+						}
+						query += ` ORDER BY next_attempt_time,contract_id LIMIT 1`
 					}
 				}
 				rows, err := conn.Query(bounded, query, args...)
@@ -342,6 +358,15 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 			})
 			if next == nil {
 				if visitHead {
+					if headCycleBefore != nil && !headWrapped {
+						// Resume after the previous page's head position first,
+						// then revisit its earlier busy owners in this same bounded
+						// allocation. Empty probes do not consume financial slots.
+						headAfter = nil
+						headWrapped = true
+						result.Cursor.HeadAfter = nil
+						continue
+					}
 					headRemaining = 0
 					continue
 				}
@@ -373,7 +398,7 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 					}
 				}
 				headRemaining--
-				headAfter = next
+				headAfter = &LegacySettlementPosition{NextAttemptTime: next.NextAttemptTime, ContractId: next.ContractId}
 				forwardUntilHead = 3
 			} else if forwardUntilHead > 0 {
 				forwardUntilHead--
@@ -422,13 +447,19 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
                       WHERE contract_id=$1`, next.ContractId, code, delay.String()))
 				}, server.TxReadCommitted, server.OptNoRetry())
 				if !visitHead {
+					next.HeadAfter = headAfter
 					result.Cursor = next
+				} else {
+					result.Cursor.HeadAfter = headAfter
 				}
 				return
 			}
 			if !visitHead {
+				next.HeadAfter = headAfter
 				result.Cursor = next
 				after = next
+			} else {
+				result.Cursor.HeadAfter = headAfter
 			}
 		}
 		result.More = true
