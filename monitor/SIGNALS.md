@@ -446,8 +446,8 @@ The full fleet pass has no fixed capacity guarantee: scheduler lag or a cohort
 too large for the cadence can expire valid permissions and must be measured
 before enabling Redis-only reads for an existing fleet.
 
-`urnetwork_contract_hole_operations_total{outcome=...}` separates missing/error
-reads, expired/failed events, publication, supersession, source failure and
+`urnetwork_contract_hole_operations_total{outcome=...}` separates positive/zero,
+missing/error reads, expired/failed events, publication, supersession, source failure and
 oversized pairs. `urnetwork_contract_hole_refresh_completed_seconds` and
 `urnetwork_contract_hole_refresh_duration_seconds` report the last completed
 source pass per worker; missing/zero/stale completion is unknown coverage, not

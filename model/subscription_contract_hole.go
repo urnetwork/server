@@ -30,6 +30,10 @@ var contractHoleCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 }, []string{"outcome"})
 
 func init() {
+	for _, outcome := range []string{"read_positive", "read_zero", "read_missing", "read_error", "event_expired", "event_error",
+		"event_create", "event_remove", "event_invalidate", "refresh_oversized", "refresh_published", "refresh_superseded", "refresh_error"} {
+		contractHoleCounter.WithLabelValues(outcome)
+	}
 	prometheus.MustRegister(contractHoleCounter)
 }
 
@@ -63,7 +67,12 @@ func HasOpenContractHole(ctx context.Context, sourceClientId, destinationClientI
 		}
 		return false
 	}
-	return count > 0
+	if count > 0 {
+		contractHoleCounter.WithLabelValues("read_positive").Inc()
+		return true
+	}
+	contractHoleCounter.WithLabelValues("read_zero").Inc()
+	return false
 }
 
 // Tombstones outlive every admitted event. An old create cannot follow a close

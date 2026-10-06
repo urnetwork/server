@@ -226,3 +226,38 @@ func TestContractHoleBackgroundCursorAndMemberBound(t *testing.T) {
 		requireContractHoleCount(t, ctx, source, destination, 0)
 	})
 }
+
+// Partial progress survives a dependency failure, preventing a slow or broken
+// later pair from repeatedly refreshing only the already-completed page prefix.
+func TestContractHoleBackgroundFailurePreservesCursor(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		source := server.NewId()
+		first, second, third := server.NewId(), server.NewId(), server.NewId()
+		firstContract := insertContractHoleSourceRow(ctx, source, first)
+		insertContractHoleSourceRow(ctx, source, second)
+		insertContractHoleSourceRow(ctx, source, third)
+		failure := &contractHoleRedisFailure{key: contractHoleKeys(source, second)[0]}
+		install, cancel := context.WithTimeout(ctx, time.Second)
+		server.Raise(server.RedisWithDeadline(install, func(client server.RedisClient) error { client.AddHook(failure); return nil }))
+		cancel()
+		failure.enabled.Store(true)
+		defer failure.enabled.Store(false)
+		cursor, _, err := RefreshContractHolesPage(ctx, nil)
+		if err == nil || cursor == nil || cursor.ContractId != firstContract {
+			t.Fatalf("partial source progress lost: cursor=%v error=%v", cursor, err)
+		}
+		requireContractHoleCount(t, ctx, source, first, 1)
+		requireContractHoleCount(t, ctx, source, second, 0)
+		requireContractHoleCount(t, ctx, source, third, 0)
+		failure.enabled.Store(false)
+		next, _, err := RefreshContractHolesPage(ctx, cursor)
+		if err != nil || next != nil {
+			t.Fatalf("retry did not complete: cursor=%v error=%v", next, err)
+		}
+		requireContractHoleCount(t, ctx, source, second, 1)
+		requireContractHoleCount(t, ctx, source, third, 1)
+	})
+}
