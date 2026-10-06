@@ -107,9 +107,11 @@ func TestLegacySettlementTimingAttributesJoinedCallbackWait(t *testing.T) {
 				server.Tx(ctx, func(tx server.PgTx) {
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET next_attempt_time=$2 WHERE contract_id=$1`, firstId, server.NowUtc().Add(-time.Hour)))
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET next_attempt_time=$2 WHERE contract_id=$1`, secondId, server.NowUtc().Add(-30*time.Minute)))
-					// One cold legacy mirror is the exact-census positive control;
-					// the second grant retains its current cache and needs no scan.
-					server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance_net_escrow_snapshot WHERE balance_id=$1`, first.balanceId))
+					// The mirror gate observes the bounded warm foreground write.
+					// Cold clock/stream cases leave repair to the durable owner.
+					if family != "mirror" {
+						server.RaisePgResult(tx.Exec(ctx, `DELETE FROM transfer_balance_net_escrow_snapshot WHERE balance_id=$1`, first.balanceId))
+					}
 				})
 				gate := &legacySettlementTimingGate{family: family, streamKey: contractStreamKey(firstId),
 					entered: make(chan struct{}, 1), release: make(chan struct{})}
@@ -174,8 +176,11 @@ func TestLegacySettlementTimingAttributesJoinedCallbackWait(t *testing.T) {
 				}
 				timings := got.result.Timings
 				if timings.Selection.Count != 2 || timings.Financial.Count != 2 || timings.JoinedPosts.Count != 2 ||
-					timings.Mirror.Count != 2 || timings.ColdCensus.Count != 1 || timings.Clock.Count != 2 || timings.Stream.Count != 2 {
+					timings.Mirror.Count != 2 || timings.ColdCensus.Count != 0 || timings.Clock.Count != 2 || timings.Stream.Count != 2 {
 					t.Fatalf("actual phase ownership differed: %+v", timings)
+				}
+				if family != "mirror" {
+					legacyMirrorTestRun(t, ctx, first.balanceId)
 				}
 				requireLegacySettlementTestState(t, ctx, first, firstId, false, true, 989, 0)
 				requireLegacySettlementTestState(t, ctx, second, secondId, false, true, 989, 0)
@@ -187,7 +192,7 @@ func TestLegacySettlementTimingAttributesJoinedCallbackWait(t *testing.T) {
 					t.Fatal("observed page replay duplicated work or lost the empty selector observation")
 				}
 				requireRedisExpiryClock(t, ctx, "22")
-				t.Logf("family=%s visited=2 committed=2 cold_census=1 grant_available_at_callback=true", family)
+				t.Logf("family=%s visited=2 committed=2 cold_census=0 grant_available_at_callback=true; delayed mirror repaired outside measured page", family)
 			})
 		})
 	}

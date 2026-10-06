@@ -21,10 +21,10 @@ free/pro: `concurrent_clients`, `data`, `data_period`, `features{http_proxy,http
 
 ## 3. Enforcement + 402
 
-**Concurrent = CONNECTED top-level clients (not provisioned).** The limit counts *active* connections, with a public-provider exemption. Enforce in two places:
+**Concurrent = CONNECTED top-level clients (not provisioned).** The limit counts *active* connections, with an exemption for clients that declare provider intent and qualify (see "Provider intent" below). Enforce in two places:
 - **Connection activation** — when a client goes active (websocket connect, `connect/transport.go:169`), reject if the network is already at `server.Pro().MaxConcurrent(byJwt.Pro)` connected clients. This is a *new* count source: live connections via `exchange.registerConnection` (`connect/transport.go:345`), **not** the `network_client` provisioned count.
 - **Client creation** — `model.AuthNetworkClient` new-client branch (`network_client_model.go:221-252`): also reject provisioning a new top-level client when already at the connected limit (replaces the fixed `LimitTopLevelClientIdsPerNetwork=100`).
-- **Exemption:** a client running as a **public provider (public + stream provide mode)** does NOT count toward the limit. The active-count query/registry must exclude public providers (provide mode is available at the connect handshake).
+- **Exemption (superseded 2026-10-06, see "Provider intent"):** the blanket public provider (public + stream provide mode) exemption is gone. Only a connection that declares provide intent is judged as a provider; without intent a public provider counts like any client.
 
 **OPEN — cross-instance counting:** a per-network *connected* limit is global, but connections land on different server instances (`registerConnection` is in-memory). Enforcing it needs a shared per-network live-connection count (redis incr-on-connect / decr-on-disconnect, with crash reconciliation like the net-escrow pattern), or a residency service. This is the main new infrastructure piece for decision 4.
 
@@ -67,13 +67,27 @@ Both apple & android are structurally identical: **the redeem-data-code UI and t
 1. ✅ Binary units (GiB/TiB), shown on the user-facing site too.
 2. ✅ SOCKS + WireGuard are Pro-only (free: http + https only).
 3. ✅ Referral cap = 10.
-4. ✅ Concurrent = CONNECTED top-level clients; gate at connect AND create; public providers (public+stream) exempt.
+4. ✅ Concurrent = CONNECTED top-level clients; gate at connect AND create; providers exempt only with declared provide intent and qualification (2026-10-06, see "Provider intent").
 
 ## Still open
 - **402 delivery mechanics:** error-code in body + 402 status on HTTP endpoints, protocol code on connect/contract (recommended cross-client-safe approach).
 - **Cross-instance live-connection count** store for the connected limit (see §3) — the main new infra piece.
 - **Data-code Pro skew:** a *paid* data code currently reads as Pro via `IsPro` (any paid balance). Should buying a data code grant Pro *entitlements* (1k concurrent, socks/wireguard) or only data? Recommend **data-only** — decouple entitlements from data-code balances so features stay tied to the subscription.
 - **Public-provider detection:** confirm "public + stream" maps to the provide-mode flags available at the connect handshake for the exemption query.
+
+## Provider intent (owner decisions 2026-10-06)
+
+Wire contract: the H1 handshake header `X-UR-Provide-Intent: 1`, or `Auth.provide_intent` (field 7) on frame-authenticated transports (H3, DNS-carried H3, legacy H1 first frame); `provide_intent` on `POST /network/auth-client`; the client limit exceeded close (H1: 5 byte control `[3, 0, 0, 0, 1]` then WebSocket close 4001; H3: QUIC application close 4001), after which the client backs off at least 15 minutes on every transport and shows `client_limit_exceeded`.
+
+- **No intent, no exemption.** Without the declaration a client counts toward the limit, provider or not.
+- **Separate counts.** Intent clients in their grace or qualified are counted apart from normal clients (`model.GetNetworkConnectedClientCounts`); the limit applies to the normal count. Exemption also needs a live intent connection (a presence the connection refreshes), so a client that reconnects without intent counts as normal.
+- **Qualification** (`model/provider_intent_model.go`, run by the taskworker chain `controller.ProviderIntentCheck`, one RunOnce chain per client id while the client is connected with intent): a grace of 0.25 x the 4 hour probe refresh (1 hour) that does not close until an egress URL probe was attempted (a broken probe system extends it without bound); then provide mode public with provide keys, at least one passing URL probe in the grace, and the 12 hour reliability floor (0.7) once the client has 12 hours of history. Qualified providers are re-checked every 4 hours (a window with no attempted probe is neutral).
+- **Failure.** A client that fails takes a normal slot when one is free (decided atomically with the count), else it is over the limit and its connections are closed with the client limit exceeded signal. One attempt per client per 8 hours; leaving qualification at a re-check restarts the allowance.
+- **Probe priority.** An intent provider in its grace is admitted to URL probes without reliability history (`provider_intent_probe_priority`, URL probe admission only; serving eligibility unchanged), and its probe cycle is due from the start of its attempt.
+- **Creation.** `provide_intent` exempts a new top-level client from the 100 top-level client cap and the concurrent connected client check; the connect-time check keeps it honest.
+- **Provider installs (owner, 2026-10-06).** A top-level client created with `provide_intent` (embedded provider installs) is a provider install for its life (`network_client_provider_intent`, like `proxy_device_config` for proxies): never in the network's peer list and never subscribed to it, not counted by the peer valve (`NetworkPeersEnabled`) or the 100 top-level client cap, and registered in its own zset that the client limit counts by the provider intent rules. Keyed on the creation flag, not on a connection's declaration: the valve counts client rows, so it needs a stored category, and the valve and the peer list must exclude the same clients; people's devices that provide publicly declare intent on their connections and stay network peers, which is what the peer list is for (connecting to your own providing devices).
+- **Shadow rollout.** Everything above ships live except the enforcement: while `enforce_concurrent_clients` is false, decisions are computed and counted (`urnetwork_provider_intent_slot_decisions_total{mode="shadow"}`, `urnetwork_connect_client_limit_kicks_total{mode="shadow"}`) and nothing is refused or closed. Live metrics: `urnetwork_connect_provide_intent_connections{transport,intent}`, `urnetwork_provider_intent_attempts_total{event}`, `urnetwork_connect_provide_intent_check_errors_total`.
+- **Limit of the count.** The connected count is the peer registry, which networks over 100 recently active top-level clients do not populate; the limit (and so the provider intent kick) only bites on networks with peers enabled.
 
 ## Suggested build order
 1. `pro.go` + wire data-grant amounts (behavior-neutral: matches product page) + fix `by_jwt.go:516`.

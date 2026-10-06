@@ -1,5 +1,14 @@
 # FindProviders2 supply and quality-probe repair plan
 
+Latest URL-quota checkpoint, 2026-10-06 21:01 UTC: the sole qualified aa71
+watcher reports **75,052 / 75,173 mature providers at quota (99.839038%)**
+from the 20:57:32 UTC source snapshot, leaving 121 deficient providers needing
+871 measured credits. Warming providers remain separate. Sustained 100%
+mature coverage and a current durable credit rate are unproved. The
+[21:01 checkpoint](#2026-10-06-2101-utc-mature-quota-variation-and-url-refill-investigation)
+supersedes the earlier URL quota/monitor status; the dated evidence below
+remains historical.
+
 Expanded offline subscriber candidate, 2026-10-04 07:55 UTC: the second reviewed
 catalog covers 78 subscriber operators, 85 ASNs and 45 countries, preserving
 the same four hosting vetoes and excluding four pending identities. Full build
@@ -8136,3 +8145,145 @@ Finite evidence under `temp/pg-contention-20261004`:
   (SHA-256 `f05c3af13b72a4847374e518eef0dfcdb65ef1c18a01e5c5e4b491cf0fc857fe`),
   independently corroborated by `sol-url-accepted-window-0550-actual-corroboration.json`
   (SHA-256 `962a5e5f41f15f9e390837c763a7cdfca6c32957e979aa617208570f3c56d016`).
+
+### 2026-10-06 21:01 UTC mature quota variation and URL refill investigation
+
+The current observation authority is the sole
+`fp2-main-monitor-mature-quota-aa71-20261006.service` watcher. Sol's retained
+21:01:04 UTC local check found it active/running with PID `1566642`,
+`NRestarts=0`, invocation `c399ad7e2584479d9fb7d6a133d72a41`, and executable
+SHA-256 `1fad7b5850990a7214f1f4f7873440a3e6aff6bfd43ffef4a9a01dbae7bc3c84`.
+Its existing observation sink is
+`monitor/server-monitor.mature-quota.aa71c571d/url-probe-coverage.jsonl`.
+These facts supersede the 06:33 checkpoint's older watcher/candidate status.
+This update uses retained local evidence; it starts no additional watcher or
+Main probe. Root remains the production and run-ledger owner.
+
+The four retained coherent censuses have these original source clocks:
+
+| Source time, UTC | Mature at quota / eligible | Mature quota | Deficient providers | Measured credits needed |
+| --- | --- | --- | --- | --- |
+| 20:12:00.666 | 74,489 / 74,491 | 99.997315% | 2 | 6 |
+| 20:26:31.052 | 74,718 / 75,120 | 99.464856% | 402 | 2,753 |
+| 20:41:41.019 | 75,116 / 75,120 | 99.994675% | 4 | 9 |
+| 20:57:32.292 | 75,052 / 75,173 | 99.839038% | 121 | 871 |
+
+The watcher recorded those rows at 20:12:17, 20:27:29, 20:42:41 and 20:57:53
+UTC respectively. The latest warming cohort is **8 / 345 at quota**, needing
+3,025 credits; unknown cycle age is zero. Warming is not a mature failure.
+Maturity uses immutable stored first-admission cycle age, not physical first
+join or uninterrupted eligibility. Quota requires ten unique accepted measured
+successes or failures in `(now-4h, now]`; local setup failures, claims,
+security-only results and report retries add no credit.
+
+All four rows retain `source_coverage_complete=false` because hourly measured
+run ranges or expected process coverage are incomplete. The first also has
+missing shard-owner observations for shards 3, 5 and 6. Their coherent global
+census still qualifies these numeric quota stocks. It does not qualify an
+hourly fleet rate. Membership can change even when two denominator counts are
+equal, so these points are not a fixed-provider recovery trend. **Sustained
+100% mature coverage remains open.**
+
+Root's earlier V10 adoption receipt at **19:29:52.776812 UTC** qualified all
+eight selected Taskworker slots as ready on source
+`e3eed7225c6db3456b8912070c89eea33857a7ec`, image
+`sha256:c14a51d6c0218cec54721872e2e5a1ec8e763981f0343c5061ac0ecc38786eb6`.
+This is a scoped source/config/start/readiness self-report at that time, not
+native executable identity, uninterrupted ownership or a later adoption proof.
+The two finite V10 stage receipts at **19:38:02.958** and **19:44:45.420 UTC**
+each contain the complete bounded 1,008-row shape. All eight process identities
+and starts match, with monotonic counters and native per-process separations of
+392.721–408.188 seconds.
+
+That pair advances 17,776 completed attempted turns, 17,333 acknowledged
+measured outcomes (9,709 successes and 7,624 failures), 443 local failures and
+17,668 admitted claims. The **sum of the eight process-average acknowledged
+outcome rates is 42.975934/s**. Their windows differ; this is neither a
+synchronized fleet interval nor a distinct durable-history credit rate.
+The qualified V6 pair at 18:09–18:16 had a corresponding **71.783999/s** sum.
+Its per-slot rates were 8.67–9.21/s, compared with V10's 2.00–8.19/s. The
+preceding 18:09 mature census was 91.3965%; it is not a simultaneous paired
+coverage/rate join. Twelve inspected URL scheduler, prober, timing, heartbeat
+and control files are byte-identical between V6 and V10; generic `task.go`
+differs. No release-caused throughput change is established.
+
+For a fixed population of 75,173 mature providers, the necessary long-run
+mean is `75,173 * 10 / 14,400 = 52.203472` unique measured credits/second,
+before catch-up or distribution headroom. That later population is not joined
+to the earlier stage interval. Comparing it with 42.98 acknowledged outcomes/s
+does not establish a current durable-credit deficit, sustained capacity limit
+or causal explanation for any quota snapshot. The 05:50–05:55 primary-history
+rate in the 06:33 checkpoint remains a separate historical durable observation;
+there is no newer qualified durable-rate observation in this evidence set.
+
+Completed V10 turns average **4.539 seconds**: readiness 0.053, constructor
+return 0.0013, combined check/buffer 3.970, joined close 0.224, attempt reporting
+0.0077 and publication 0.282 seconds. The combined check/buffer stage is
+87.46% of returned wall time and includes asynchronous route setup as well as
+the URL checks and buffering. It cannot isolate setup, DNS, HTTP, contract
+funding or database latency. Still-running turns are absent from this completed
+cohort. Synchronous scheduler residence totals 1,609.758 seconds in Due and
+1,299.519 seconds waiting for completion, respectively 54.56% and 44.04% of
+owned scheduler time. Those phases overlap provider work and are not CPU or
+worker utilization. Current provider distribution, logical-shard mapping,
+Due-call counts and subphase timing remain unknown in this reader.
+
+Source inspection identifies a concrete refill boundary: after a partial or
+empty Due response, an admitting scheduler with spare worker slots waits for
+an existing provider to complete. Newly due independent providers can therefore
+wait behind an unrelated slow turn. Test-only commit
+`94e590631a7e9376dcaa484f92217f2092c4f24e` retains six source controls for initial
+partial and post-fast empty responses, bounded polling, full capacity,
+admission reserve and joined cancellation with exact claim completion. The
+separate isolated candidate adds a refill timer at the configured idle cadence,
+clipped by the existing owner reserve. It preserves the original Due deadline,
+worker limit and same-provider ordinal joins. **The controls and candidate are
+not compiled or run, are not deployed, and do not establish this mechanism's
+Main prevalence.** The controls passed formatting and independent static
+review; the candidate still requires its own review and native gates.
+The customer-account expiry lane retains priority for the sole native fixture.
+
+The conditional completed-priority maintenance barrier remains a separate
+source candidate. All eight V10 maintenance-response deltas are zero, which
+provides no positive activation witness and does not prove the policy disabled.
+There is no authorization from this evidence to expand its cursor or schema.
+No concurrency, timeout, quota or financial-policy change follows from the
+performance observations.
+
+Other FP2 acceptance boundaries remain distinct: the retained 21:00:55 UTC
+five-minute provider-list sample has 20 ordinary US/group/Quality requests and
+20 empty results, while the 20:47:51 provider-cache source is unobservable.
+Near-complete URL quota does not establish usable native provider supply.
+The separate 20:58:22 PostgreSQL sample uses 50.11% of 96 logical CPUs over
+5.02 seconds; it does not attribute CPU to URL probing or the refill mechanism.
+
+False-positive qualifiers: newcomer deficits do not lower mature coverage;
+incomplete hourly visibility does not invalidate a separately coherent global
+census; acknowledged outcomes and scheduler residence are not durable credit
+or CPU measurements. False-negative qualifiers: unavailable census ownership
+cannot inherit a prior percentage, completed timing omits unfinished tails,
+and zero maintenance-counter increments cannot establish inactive priority.
+
+Finite evidence under `temp/pg-contention-20261004`:
+
+- `sol-sole-watcher-triage-2101-v1.json` (SHA-256
+  `6af2831cd9adcaa4dd0c781049ae514e0b1797f5a91d1e83e68258668f2b759d`)
+  pins the watcher, four exact quota lines, and the separate retained alerts.
+- `root-tw-census-v10-e3eed-runtime-v1/run-20261006T192952Z/receipt.json`
+  (SHA-256 `2c77a7014ff857e2fed783bd2e665603e80fb1258e1709a564123b394ea3cf69`),
+  with sibling `sol-independent-actual-census-gate.json` (SHA-256
+  `25530b7ffc0cab5e81ec3486f80faa704479a705fdb4218cf54f0d0d6911868e`).
+- `root-tw-url-throughput-v10-e3eed-positive-v2/run-20261006T193802Z/receipt.json`
+  (SHA-256 `793bc95fe1c7769c861452ba87b0079c8db950e266c9f59132b0ead2d88da6c8`)
+  and `root-tw-url-throughput-v10-e3eed-positive-v3/run-20261006T194445Z/receipt.json`
+  (SHA-256 `d8e0c31af90bf77a254de530c692b08c1aad8ab179c8f752d90da6b1f8690df6`).
+- `sol-v10-positive-stage-paired-194445-reduction.json` (SHA-256
+  `02373e4ea48bf06acddc5b3820c1e5a42af768ecd62ca29b94353c5318edbbc1`)
+  and `astra-v10-stage-pair-194445-profile.json` (SHA-256
+  `9a38069027670dc7b48258a5473c32928ff312d550081385ab1f7eff85c6f3f7`).
+  The latter pins both V6 receipts and the source comparisons; its quota context
+  stops at 19:57 and is superseded by the four-row evidence above.
+
+The frozen, unrun control handoff is
+`temp/fp2-underfilled-due-20261006/source-only-controls.json` (SHA-256
+`d166b89e84089a77b8d882d85d3e44e74989b365cfebf4449f4ab0fbec8e0c9a`).

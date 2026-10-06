@@ -76,7 +76,7 @@ func requireResidentPoolOwnersReturned(t *testing.T, witnesses [][]byte, descrip
 // Creates only the callback-side Resident lifecycle used by queue ownership
 // tests; it does not attach transports or invoke database-backed controllers.
 func newResidentCallbackLifecycleFixture(
-	t *testing.T,
+	t testing.TB,
 	parentCtx context.Context,
 	settings *ExchangeSettings,
 ) *Resident {

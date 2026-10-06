@@ -9611,6 +9611,30 @@ var migrations = []any{
 	// published release epoch (db_network_wallet_mapping_consent.go). New
 	// tables: nothing is rewritten, and old binaries never read them.
 	newSqlMigration(networkWalletMappingConsentSchemaSql),
+	// Egress URL probe priority for intent providers in their qualification
+	// grace (model/provider_intent_model.go): one row per provider while its
+	// attempt is pending, read by primary key from the URL probe admission. A
+	// new table: nothing is rewritten. It must exist before a binary that reads
+	// it serves.
+	newSqlMigration(`
+		CREATE TABLE provider_intent_probe_priority (
+			client_id uuid NOT NULL PRIMARY KEY,
+			priority_since timestamp NOT NULL,
+			update_time timestamp NOT NULL
+		)
+	`),
+	// Provider installs: top-level clients created with provide intent
+	// (POST /network/auth-client provide_intent). Like proxy_device_config, the
+	// row is the client's category for its life: never a network peer and not
+	// counted by the peer valve or the top-level client cap
+	// (model/peer_model.go). A new table: nothing is rewritten. It must exist
+	// before a binary that reads it serves.
+	newSqlMigration(`
+		CREATE TABLE network_client_provider_intent (
+			client_id uuid NOT NULL PRIMARY KEY,
+			create_time timestamp NOT NULL
+		)
+	`),
 	// 789: global hotkey wallet consent chains and the networks that submitted
 	// them, per-network hotkey delegations and the hotkey mode of settled
 	// earning wallets (db_hotkey_wallet_mapping_consent.go). New tables plus

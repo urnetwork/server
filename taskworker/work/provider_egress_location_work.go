@@ -41,6 +41,8 @@ func RemoveExpiredProviderEgressLocations(
 	// orphaned rows past this storage horizon.
 	minAttemptAt := now.Add(-4 * model.ProviderEgressProbeAttemptBackoff)
 	model.RemoveExpiredProviderEgressProbeAttempts(clientSession.Ctx, minAttemptAt)
+	// probe priorities of provider intent chains that ended without removing them
+	model.RemoveExpiredProviderIntentProbePriorities(clientSession.Ctx, now)
 	return &RemoveExpiredProviderEgressLocationsResult{}, nil
 }
 

@@ -12,6 +12,14 @@ import (
 
 const LegacySettlementShardCount = 16
 
+// A larger row ceiling amortizes dispatch while the existing fifteen-second
+// context still bounds every page. Each contract retains its own transaction.
+const LegacySettlementPageLimit = 256
+
+// Preserve one bounded grant-wait opportunity per sixteen head visits, including
+// when a page continues beyond the former sixty-four-visit ceiling.
+const legacySettlementHeadGrantWaitStride = 16
+
 var errLegacySettlementPending = errors.New("legacy settlement is durably pending")
 var errLegacySettlementPageBudget = errors.New("legacy settlement page budget elapsed")
 var errLegacySettlementGrantWaitBusy = errors.New("legacy settlement bounded grant wait elapsed")
@@ -69,8 +77,8 @@ type LegacySettlementFlushResult struct {
 	HeadBusyIntentUnavailable   int `json:"head_busy_intent_unavailable"`
 	HeadBusyContractUnavailable int `json:"head_busy_contract_unavailable"`
 	HeadBusyGrantSetMismatch    int `json:"head_busy_grant_set_mismatch"`
-	// At most the first head joins the grant queue. These are head subsets,
-	// not additional visits, and absent fields in earlier results are unknown.
+	// One of each sixteen head visits may join the grant queue. These are head
+	// subsets, not additional visits; absent fields in earlier results are unknown.
 	HeadGrantWaitAttempted int `json:"head_grant_wait_attempted"`
 	HeadGrantWaitCompleted int `json:"head_grant_wait_completed"`
 	HeadGrantWaitTimedOut  int `json:"head_grant_wait_timed_out"`
@@ -118,7 +126,7 @@ func flushLegacySettlementInTx(ctx context.Context, tx server.PgTx, contractId s
 	return flushLegacySettlementWithGrantWaitInTx(ctx, tx, contractId, nil)
 }
 
-// A nonnil wait is reserved for the first head's grant preflight. All other
+// A nonnil wait is reserved for an allocated head grant preflight. All other
 // ownership gates and the financial transaction retain their existing behavior.
 func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx, contractId server.Id, wait *legacySettlementGrantWait) (posts []func() any, completed, busy bool, busyGate legacySettlementBusyGate, returnErr error) {
 	var outcome ContractOutcome
@@ -186,8 +194,8 @@ func flushLegacySettlementWithGrantWaitInTx(ctx context.Context, tx server.PgTx,
 }
 
 // Choose the ownership mode before locking any grant. Retrying a partial
-// SKIP LOCKED set in place could invert the sorted grant order. The first head
-// instead gets one whole-statement wait budget, not a budget per grant row.
+// SKIP LOCKED set in place could invert the sorted grant order. An allocated
+// head instead gets one whole-statement wait budget, not a budget per grant row.
 func lockLegacySettlementGrantsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, wait *legacySettlementGrantWait) (locked int, returnErr error) {
 	query := `SELECT balance.balance_id FROM transfer_balance AS balance
           INNER JOIN transfer_escrow AS escrow USING(balance_id) WHERE escrow.contract_id=$1
@@ -282,7 +290,7 @@ func flushLegacySettlementWithGrantWait(ctx context.Context, contractId server.I
 // Exhausting this page's own budget after progress yields its completed prefix;
 // it must not turn durable per-contract progress into a task-wide error backoff.
 func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlementCursor, limit int) (result LegacySettlementFlushResult, returnErr error) {
-	if shard < 0 || shard >= LegacySettlementShardCount || limit < 1 || limit > 64 {
+	if shard < 0 || shard >= LegacySettlementShardCount || limit < 1 || limit > LegacySettlementPageLimit {
 		return result, fmt.Errorf("invalid legacy settlement limit")
 	}
 	bounded, cancel := context.WithTimeoutCause(ctx, 15*time.Second, errLegacySettlementPageBudget)
@@ -294,8 +302,8 @@ func FlushLegacySettlements(ctx context.Context, shard int, after *LegacySettlem
 	return
 }
 
-// One traversal owns its settlement operation, including the first head's
-// bounded grant wait. Tests can interrupt after a real committed prefix.
+// One traversal owns its settlement operation and bounded head grant waits.
+// Tests can interrupt after a real committed prefix.
 func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *LegacySettlementCursor, limit int,
 	settle func(context.Context, server.Id, *legacySettlementGrantWait) (bool, bool, legacySettlementBusyGate, error)) (result LegacySettlementFlushResult, returnErr error) {
 	pageBudgetExceeded := func(err error) bool {
@@ -387,7 +395,7 @@ func flushLegacySettlementsPage(ctx, bounded context.Context, shard int, after *
 				return
 			}
 			var grantWait *legacySettlementGrantWait
-			if visitHead && result.HeadVisited == 0 {
+			if visitHead && result.HeadVisited%legacySettlementHeadGrantWaitStride == 0 {
 				grantWait = &legacySettlementGrantWait{}
 			}
 			completed, busy, busyGate, err := settle(bounded, next.ContractId, grantWait)

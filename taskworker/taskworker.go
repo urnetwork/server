@@ -243,6 +243,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.SweepOrphanNetworkClientDataPost,
 		),
 		task.NewTaskTarget(model.ApplyLegacyProviderTotals),
+		task.NewTaskTargetWithPost(model.ApplyLegacyNetEscrowMirror, model.ApplyLegacyNetEscrowMirrorPost),
 		task.NewTaskTargetWithPost(
 			model.RemoveNetworkClientsTask,
 			model.RemoveNetworkClientsTaskPost,
@@ -280,6 +281,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			controller.AdvancePayment,
 			controller.AdvancePaymentPost,
 			"bringyour.com/bringyour/controller.AdvancePayment",
+		),
+		task.NewTaskTargetWithPost(
+			controller.ProviderIntentCheck,
+			controller.ProviderIntentCheckPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.SetMissingConnectionLocations,
