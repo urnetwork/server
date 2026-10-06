@@ -53,7 +53,8 @@ func contractHoleKeys(sourceClientId, destinationClientId server.Id) []string {
 // script was interrupted by an operational error after creating that scalar.
 const contractHoleReadScript = `
 local value = redis.call('GET', KEYS[1])
-if not value or redis.call('PTTL', KEYS[1]) <= 0 then return false end
+local ttl = redis.call('PTTL', KEYS[1])
+if not value or ttl <= 0 or ttl > tonumber(ARGV[2]) then return false end
 if value ~= '0' and not string.match(value, '^[1-9]%d*$') then return redis.error_reply('invalid contract hole count') end
 local count = tonumber(value)
 if not count or count > tonumber(ARGV[1]) then return redis.error_reply('invalid contract hole count') end
@@ -70,7 +71,7 @@ func HasOpenContractHole(ctx context.Context, sourceClientId, destinationClientI
 	err := server.RedisWithDeadline(ctx, func(client server.RedisClient) error {
 		var err error
 		count, err = client.Eval(ctx, contractHoleReadScript,
-			contractHoleKeys(sourceClientId, destinationClientId)[:1], contractHoleMemberLimit).Int64()
+			contractHoleKeys(sourceClientId, destinationClientId)[:1], contractHoleMemberLimit, ContractHoleTtl.Milliseconds()).Int64()
 		return err
 	})
 	if err != nil {

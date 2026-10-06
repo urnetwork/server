@@ -200,11 +200,19 @@ func TestContractHoleRedisExpiryAndMalformedReadsFailClosed(t *testing.T) {
 				t.Fatalf("malformed count %q authorized", value)
 			}
 		}
+		for _, expiry := range []time.Duration{0, ContractHoleTtl + time.Hour} {
+			server.Redis(ctx, func(client server.RedisClient) {
+				server.Raise(client.Set(ctx, contractHoleKeys(source, destination)[0], "1", expiry).Err())
+			})
+			if HasOpenContractHole(ctx, source, destination) {
+				t.Fatalf("scalar escaped the authorization ttl: expiry=%s", expiry)
+			}
+		}
 		server.Redis(ctx, func(client server.RedisClient) {
-			server.Raise(client.Set(ctx, contractHoleKeys(source, destination)[0], "1", 0).Err())
+			server.Raise(client.Set(ctx, contractHoleKeys(source, destination)[0], "1", ContractHoleTtl).Err())
 		})
-		if HasOpenContractHole(ctx, source, destination) {
-			t.Fatal("persistent scalar escaped the authorization TTL")
+		if !HasOpenContractHole(ctx, source, destination) {
+			t.Fatal("cancellation control lacks a healthy permission")
 		}
 		canceled, cancel := context.WithCancel(ctx)
 		cancel()
