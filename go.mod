@@ -208,26 +208,26 @@ require (
 
 // Use the same sibling sources in local builds and frozen PERF arms.
 // Replacements in imported modules are not inherited by Go.
-replace github.com/urnetwork/connect => ../connect
+replace github.com/urnetwork/connect => github.com/urnetwork/connect v0.0.0-20261005210826-5e9a5fc4e178
 
-replace github.com/pion/sctp => ../connect/sctp
+replace github.com/pion/sctp => github.com/urnetwork/connect/sctp v0.0.0-20261005210826-5e9a5fc4e178
 
-replace github.com/urnetwork/proxy => ../proxy
+replace github.com/urnetwork/proxy => github.com/urnetwork/proxy v0.0.0-20261003045554-e1da81493713
 
-replace github.com/urnetwork/sdk => ../sdk
+replace github.com/urnetwork/sdk => github.com/urnetwork/sdk v0.0.0-20261005192616-8d8ecc4d8476
 
-replace github.com/urnetwork/glog => ../glog
+replace github.com/urnetwork/glog => github.com/urnetwork/glog v1.2.10-0.20260921102920-80a11b434ae9
 
-replace github.com/urnetwork/goidenticons => ../goidenticons
+replace github.com/urnetwork/goidenticons => github.com/urnetwork/goidenticons v0.0.0-20260925081816-06eb779a691e
 
-replace github.com/urnetwork/userwireguard => ../userwireguard
+replace github.com/urnetwork/userwireguard => github.com/urnetwork/userwireguard v0.0.3-0.20260831102908-85fb1ca4086f
 
-replace github.com/urfoundation/sn => ../sn
+replace github.com/urfoundation/sn => github.com/urfoundation/sn v0.0.0-20261005192924-a70dae9c3678
 
 // Dependency replacements are not inherited from SN; share its corrected
 // native RPC transport and tracked upstream provenance in server binaries.
-replace github.com/centrifuge/go-substrate-rpc-client/v4 => ../sn/third_party/go-substrate-rpc-client
+replace github.com/centrifuge/go-substrate-rpc-client/v4 => github.com/urfoundation/sn/third_party/go-substrate-rpc-client/v4 v4.0.0-20261005192924-a70dae9c3678
 
 // Share the fork's source with local builds and frozen PERF arms. CI locks this
 // sibling's full revision; the release builder converts it to an immutable pin.
-replace gvisor.dev/gvisor => ../gvisor
+replace gvisor.dev/gvisor => github.com/urnetwork/gvisor v0.0.0-20261004152605-c0783dba2eef
