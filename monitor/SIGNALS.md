@@ -12444,28 +12444,35 @@ profile alone. False-negative qualifier: local transport controls do not model
 provider scheduling, Main contract availability or the live eligible population;
 retain the independently observed per-provider quota and ownership requirements.
 
-URL content matcher v2 records changed HTML semantics separately from the
+URL content matcher v3 records changed HTML semantics separately from the
 unchanged result-policy version. It ignores controls in inert, hidden and example
 subtrees, parses script/form marker URLs, and requires a document title or H1
-human prompt plus live challenge structure. A custom-title browser gate can use
-its JavaScript-and-cookies instruction plus a non-passive platform script.
+human prompt or a direct paragraph/button instruction plus live challenge
+structure. Human prompts allow optional "that" and "a"; line breaks separate
+words while inline formatting preserves them. Body instructions exclude quoted
+prose and form controls. Generic widgets and human prompts inside forms cannot
+corroborate unrelated page content, even when a tutorial has a challenge-like
+title or heading without semantic article markup. A prompt with a CAPTCHA-only
+form remains a gate when no unrelated visible prose or data-entry fields are
+present. Quoted article prose remains content, while quoted prompts and markers
+cannot corroborate a gate. Explicit response decisions,
+platform scripts and the separately corroborated unusual-traffic form retain
+their own rules. A custom-title browser gate can use its JavaScript-and-cookies
+instruction plus a non-passive platform script.
 Ordinary article content defeats generic widget heuristics; corroborated
 platform scripts and explicit response decisions remain authoritative. Auxiliary
 widgets do not establish a document gate. The detector does not
 render overlays or interpret inline script bootstraps, and a partial content
-prefix still does not certify a requested article. The deterministic
+prefix still does not certify a requested article. A JavaScript modal can preserve
+the underlying article; article metadata alone does not prove rendered access.
+The deterministic
 `qualityprobe/egresshealth/TestUrlProbeHumanGate*` controls cover the repaired
 misses, inactive markers, passive scripts, articles and mixed matcher receipts.
 
-Deploy v1/v2-compatible API evidence readers before enabling v2 producers in
+Deploy v1/v2/v3-compatible API evidence readers before enabling v3 producers in
 Taskworker or standalone probes. The shared validator is also used by
-API ingress, model storage and probe publication; old v1-only readers reject v2.
-Historical v1 evidence retains its recorded provenance during a mixed rollout.
-The v3 rollout begins with a reader-only compatibility stage: the shared evidence
-validator accepts matcher versions 1, 2 and 3 while producers remain at version 2.
-API ingress, model storage, Taskworker and the shared standalone/fleet prober use
-that validator. Verify every API reader has this compatibility stage before
-enabling v3 producers; accepting v3 receipts does not activate the v3 detector.
+API ingress, model storage and probe publication; old v2 readers reject v3.
+Historical v1/v2 evidence retains its recorded provenance during a mixed rollout.
 This detector change does not alter phase limits, body sampling, the ten accepted
 measured outcomes per four hours, the inclusive 0.8 quality ratio, or the local
 setup versus measured-provider boundary. Local fixtures establish matcher
