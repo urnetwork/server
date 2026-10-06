@@ -3249,7 +3249,8 @@ a partial hot reload.
 Every minute, load the current effective Config and Vault inputs again and
 compare the resulting complete settings value with the startup snapshot only
 in memory. Ignore process-only test/runtime seams (`Now`, synthetic `Source`,
-runtime limiters, and the checker itself). Never render, hash, log, serialize,
+the URL coverage output callback, runtime limiters, and the checker itself).
+Never render, hash, log, serialize,
 or persist either settings value, any credential, or a content-derived
 fingerprint. Production `LoadSignalSettings` always arms this local-only check;
 manually assembled library settings may omit it for compatibility.
@@ -3264,6 +3265,20 @@ manually assembled library settings may omit it for compatibility.
   Alert.
 - Context cancellation is watcher lifecycle, not settings loss, and returns
   `context.Canceled` without an Alert.
+
+False-positive qualifier: the URL coverage writer introduced in `9cf0f197c`
+attached a process-local callback after loading the startup settings. Before
+that callback was excluded from generation comparison, enabling
+`-url-probe-coverage-output` made unchanged settings compare unequal: a nonnil
+Go function never passes deep equality, even against itself. This also refused
+the PG query sampler at its settings preflight, before source contact or
+durable cadence admission. A first alert after a 15-minute startup floor does
+not date a Config or Vault change. Qualify the callback exclusion with unchanged
+and genuinely changed settings, then use controlled watcher promotion while
+retaining the coverage writer, complete-generation guard, state directory and
+15-minute sampling floor. Actual credential, topology or desired-state changes
+must still report stale; successful local controls do not establish Main query
+coverage until the replacement records a completed sample.
 
 An explicit whole-host pause uses repeatable `-exclude-host HOSTNAME` selectors.
 Match exact current inventory names; empty, wildcard, unknown, or ambiguous
