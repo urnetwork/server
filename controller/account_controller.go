@@ -44,6 +44,18 @@ func ClaimNetworkName(
 	return changeNetworkName(args, session, false)
 }
 
+// Test-only scheduling hook between changeNetworkName's availability check and
+// its write, in the write's transaction. Production leaves it nil; controller
+// tests use it to commit the name for another network in between, without
+// sleeps or scheduler luck.
+var changeNetworkNameBeforeWrite func()
+
+// Sets the name of the network the user administers. The name is checked
+// before the rate limit, so a taken name costs no attempt, and again in the
+// write's own transaction, so a name another network took or that entered its
+// reclaim cooldown since is refused too. Another network committing the name
+// after that transaction's snapshot meets the write on the unique index, which
+// is refused the same way and rolls back the old name's cooldown.
 func changeNetworkName(
 	args ChangeNetworkNameArgs,
 	session *session.ClientSession,
@@ -74,16 +86,18 @@ func changeNetworkName(
 		}, nil
 	}
 
-	available, err := isNetworkNameAvailableForUser(session.Ctx, normalizedName, session.ByJwt.UserId)
-	if err != nil {
-		return nil, err
+	notAvailable := &ChangeNetworkNameResult{
+		Error: &ChangeNetworkNameError{
+			Message: "Network name not available.",
+		},
 	}
+
+	available := false
+	server.Db(session.Ctx, func(conn server.PgConn) {
+		available = networkNameAvailableForUser(session.Ctx, conn, normalizedName, session.ByJwt.UserId)
+	})
 	if !available {
-		return &ChangeNetworkNameResult{
-			Error: &ChangeNetworkNameError{
-				Message: "Network name not available.",
-			},
-		}, nil
+		return notAvailable, nil
 	}
 
 	// Claim (first-time name set, reachable once per account) and change
@@ -110,9 +124,14 @@ func changeNetworkName(
 		}, nil
 	}
 
-	var oldName *string
-	server.Db(session.Ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
+	taken := model.NetworkNameTx(session.Ctx, func(tx server.PgTx) {
+		available = networkNameAvailableForUser(session.Ctx, tx, normalizedName, session.ByJwt.UserId)
+		if !available {
+			return
+		}
+
+		var oldName *string
+		result, err := tx.Query(
 			session.Ctx,
 			`
 			SELECT network_name FROM network
@@ -127,9 +146,11 @@ func changeNetworkName(
 				oldName = &name
 			}
 		})
-	})
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
+		if changeNetworkNameBeforeWrite != nil {
+			changeNetworkNameBeforeWrite()
+		}
+
 		if reclaimCooldown && oldName != nil && *oldName != normalizedName {
 			coolDownUntil := server.NowUtc().Add(networkNameReclaimCooldown)
 			server.RaisePgResult(tx.Exec(
@@ -145,7 +166,7 @@ func changeNetworkName(
 			))
 		}
 
-		server.RaisePgResult(tx.Exec(
+		model.RaiseNetworkNameWrite(tx.Exec(
 			session.Ctx,
 			`
 				UPDATE network
@@ -156,69 +177,69 @@ func changeNetworkName(
 			normalizedName,
 		))
 	})
+	if !available || taken {
+		return notAvailable, nil
+	}
 
 	return &ChangeNetworkNameResult{
 		NetworkName: normalizedName,
 	}, nil
 }
 
-func isNetworkNameAvailableForUser(
+// Whether the user may take the name: no other user's network holds it, and it
+// is not in its reclaim cooldown. Reads through the query's snapshot, so the
+// write's transaction repeats the check that came before it.
+func networkNameAvailableForUser(
 	ctx context.Context,
+	query server.PgCanQuery,
 	name string,
 	userId server.Id,
-) (bool, error) {
+) bool {
 	available := true
-	reasonErr := error(nil)
 
-	server.Db(ctx, func(conn server.PgConn) {
-		// check if the name is taken by another network
-		result, err := conn.Query(
-			ctx,
-			`
-				SELECT admin_user_id FROM network
-				WHERE network_name = $1
-			`,
-			name,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				var owner server.Id
-				server.Raise(result.Scan(&owner))
-				if owner != userId {
-					available = false
-				}
+	// check if the name is taken by another network
+	result, err := query.Query(
+		ctx,
+		`
+			SELECT admin_user_id FROM network
+			WHERE network_name = $1
+		`,
+		name,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			var owner server.Id
+			server.Raise(result.Scan(&owner))
+			if owner != userId {
+				available = false
 			}
-		})
-
-		if !available {
-			return
 		}
-
-		// check if the name is in cooldown (network_name_reclaim)
-		result, err = conn.Query(
-			ctx,
-			`
-				SELECT cool_down_until FROM network_name_reclaim
-				WHERE old_name = $1
-			`,
-			name,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				var coolDownUntil time.Time
-				server.Raise(result.Scan(&coolDownUntil))
-				if server.NowUtc().Before(coolDownUntil) {
-					available = false
-				}
-			}
-		})
 	})
 
-	if reasonErr != nil {
-		return false, fmt.Errorf("failed to check network name availability: %w", reasonErr)
+	if !available {
+		return false
 	}
 
-	return available, nil
+	// check if the name is in cooldown (network_name_reclaim)
+	result, err = query.Query(
+		ctx,
+		`
+			SELECT cool_down_until FROM network_name_reclaim
+			WHERE old_name = $1
+		`,
+		name,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			var coolDownUntil time.Time
+			server.Raise(result.Scan(&coolDownUntil))
+			if server.NowUtc().Before(coolDownUntil) {
+				available = false
+			}
+		}
+	})
+
+	return available
 }
 
 // requireVerifiedIdentityBound checks that the user has at least one verified
