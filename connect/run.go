@@ -28,6 +28,9 @@ type RunOptions struct {
 	// Optional exact host/block diagnostic scope. Empty reads the optional
 	// startup Config resource; "disabled" explicitly installs no socket.
 	PrivateHeapProfileTarget string
+	// Optional owners for a process composing multiple service runners.
+	WarpStatus       *router.WarpStatusState
+	StartStatsPusher func(context.Context) func()
 }
 
 func connectWarmupTargets() []server.WarmupTarget {
@@ -87,7 +90,20 @@ func validateRunListenIPv4(options RunOptions, listenIPv4 string) error {
 // Run serves the production connect module until ctx is canceled. The CLI and
 // simulator use the same exchange, router, readiness latch, and drain path.
 func Run(ctx context.Context, options RunOptions) error {
-	return runWithDependencies(ctx, options, router.StartupReadiness, server.StartStatsPusher, server.HttpListenAndServeWithReusePort)
+	startStatsPusher := options.StartStatsPusher
+	if startStatsPusher == nil {
+		startStatsPusher = server.StartStatsPusher
+	}
+	readiness := func(ctx context.Context) error {
+		err := router.CheckStartupReadiness(ctx)
+		if err != nil {
+			options.WarpStatus.SetNotReady(err)
+		} else {
+			options.WarpStatus.SetReady()
+		}
+		return err
+	}
+	return runWithDependencies(ctx, options, readiness, startStatsPusher, server.HttpListenAndServeWithReusePort)
 }
 
 func runWithDependencies(
@@ -117,8 +133,12 @@ func runWithDependencies(
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// Startup has no established sessions to drain. Cancel dependency reads
+	// and construction immediately if the caller or a sibling has stopped.
+	stopStartup := context.AfterFunc(ctx, cancel)
+	defer stopStartup()
 	routes := []*router.Route{}
-	statusHandler := router.WarpStatus
+	statusHandler := options.WarpStatus.Handler
 	var exchange *Exchange
 	if err := readiness(runCtx); err != nil {
 		glog.Infof("[connect]not ready (%s)\n", err)
@@ -140,7 +160,9 @@ func runWithDependencies(
 		if err != nil {
 			return fmt.Errorf("initialize Connect ingress: %w", err)
 		}
-		statusHandler = connectRouter.Status
+		statusHandler = func(w http.ResponseWriter, r *http.Request) {
+			connectRouter.statusWithWarpStatus(w, r, options.WarpStatus)
+		}
 		routes = append(routes, router.NewRoute("GET", "/", connectRouter.Connect))
 		privateProfile, privateProfileErr := startPrivateHeapProfile(runCtx, options.PrivateHeapProfileTarget, exchange, connectRouter.connectHandler)
 		if privateProfileErr != nil {
@@ -159,12 +181,13 @@ func runWithDependencies(
 		startStatsPusher(runCtx)
 	}
 	routes = append([]*router.Route{router.NewRoute("GET", "/status", statusHandler)}, routes...)
+	stopStartup()
 
 	draining := make(chan struct{})
 	go func() {
 		select {
 		case <-ctx.Done():
-			router.SetWarpStatusDrainingIfReady()
+			options.WarpStatus.SetDrainingIfReady()
 			if exchange != nil {
 				exchange.Drain()
 			}
