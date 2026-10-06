@@ -13,6 +13,10 @@ import (
 	servermonitor "github.com/urnetwork/server/monitor"
 )
 
+// A nil embedded transport fails immediately if these contact-free paths
+// unexpectedly attempt any source operation.
+type urlProbeCoverageNoContactSource struct{ servermonitor.SignalSource }
+
 // The standing watcher needs a destination even when coverage has no alert.
 func TestMonitorAcceptsUrlProbeCoverageOutput(t *testing.T) {
 	if _, err := parseMonitorOptions([]string{"-url-probe-coverage-output", filepath.Join(t.TempDir(), "coverage.jsonl")}); err != nil {
@@ -24,7 +28,7 @@ func TestMonitorAcceptsUrlProbeCoverageOutput(t *testing.T) {
 func TestMonitorUrlProbeCoverageOutputAppendsWithoutAlerts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "coverage.jsonl")
 	loader := func() (servermonitor.SignalSettings, error) {
-		return servermonitor.SignalSettings{Environment: "synthetic"}, nil
+		return servermonitor.SignalSettings{Environment: "synthetic", Source: &urlProbeCoverageNoContactSource{}}, nil
 	}
 	for _, configuration := range []string{"enabled: false", "enabled: true"} {
 		pop := server.Config.PushSimpleResource("provider_egress_probe.yml", []byte(configuration))
