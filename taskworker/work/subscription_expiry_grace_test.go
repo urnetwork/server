@@ -10,12 +10,17 @@ import (
 )
 
 // Walk the ordinary idle sequence using virtual timestamps, including one
-// application interval before the final payload, without sleeping.
+// application interval before the final payload, without sleeping. Explicit
+// lifetimes force the later receiver report; the next test checks live defaults.
 func TestCloseExpiredContractsQuietGraceKeepsReceiverReport(t *testing.T) {
+	senderSettings := connect.DefaultSendBufferSettings()
+	receiverSettings := connect.DefaultReceiveBufferSettings()
+	senderSettings.IdleTimeout = 5 * time.Minute
+	receiverSettings.IdleTimeout = 6 * time.Minute
 	created := time.Unix(10000, 0).UTC()
 	lastPayload := created.Add(30 * time.Second)
-	senderFinished := lastPayload.Add(connect.DefaultSendBufferSettings().IdleTimeout)
-	receiverReported := lastPayload.Add(connect.DefaultReceiveBufferSettings().IdleTimeout)
+	senderFinished := lastPayload.Add(senderSettings.IdleTimeout)
+	receiverReported := lastPayload.Add(receiverSettings.IdleTimeout)
 	if !senderFinished.Before(receiverReported) {
 		t.Fatal("fixture requires the receive owner to outlive its sender")
 	}
