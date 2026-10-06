@@ -1,7 +1,7 @@
 # ARIN database design
 
-This document describes the implementation and qualified v13 research as of
-2026-10-05, including the discriminator reviews recorded in
+This document describes the implementation and retained research and measurements
+through 2026-10-06, including the discriminator reviews recorded in
 [CLASSIFICATION.md](CLASSIFICATION.md) and the release evidence below.
 `arindbctl` builds an immutable IPv4/IPv6 MaxMind database that combines
 registration facts, reviewed network-use evidence, and geographic risk. A
@@ -374,28 +374,26 @@ follow from the existence of those 27 tables. Colombia, Chile and other
 regional reporting queues retain their source, metric, period and unresolved
 identity joins without being promoted to complete operator coverage.
 
-A separately retained draft adds 12 sibling ASNs to five already reviewed
-subscriber operators. It adds no operator groups, country contexts or regional
-service-presence pairs, and has not passed a new full-artifact/native gate.
-Those draft identities are not part of the selected v13 counts above. Broader
-expansion must continue exact ASN-to-subscriber-service review alongside the
-missing regional ranking work; neither a sibling relationship nor a top-30
-position substitutes for that review. Keep smaller reviewed access providers
-eligible under the same clean-default rule and preserve explicit contrary use.
+The completed October 6 successor contains **5,191 subscriber groups, 5,445
+ASNs and the same 160 country contexts**. It adds 12 reviewed sibling ASNs to
+five existing operators and one new Thailand operator, `nt-th` with AS23969.
+Previous reviewed identities and all six negative groups are retained. These
+additions have passed native catalog parsing and the complete new artifact's
+readback gates; the selected-v13 counts above remain the baseline until the
+new resource is deployed and loaded. No regional ranking or service-presence
+completion follows from these additions.
 
-
-A separate source-only proposal now adds `nt-th`, **AS23969 in Thailand only**.
-APNIC's exact ASN record, the official TOT/CAT-to-NT merger history, and NT's
-[current residential fiber terms](https://ntplc.co.th/promotions/detail/nt-fiber-care-plus)
-support subscriber access. Independent review preserved every v13 entry and
-all routing, country, hosting and risk vetoes; no generic National Telecom
-name rule was added. This proposal is not built or selected and adds no named
-provincial service/ranking evidence. Sify AS9583 remains a precise mixed-scope
-research item: business Internet access is eligible subscriber evidence, while
-its official wholesale-transit material does not identify the serving ASN.
-Neither household-service absence nor that unresolved corporate evidence
-justifies a blanket ASN decision. These findings do not attribute the native
-Speed-minus-Quality population to either operator.
+For NT, APNIC's exact ASN record, the official TOT/CAT-to-NT merger history,
+and NT's [current residential fiber terms](https://ntplc.co.th/promotions/detail/nt-fiber-care-plus)
+support subscriber access. No generic National Telecom name rule was added.
+Sify AS9583 remains a precise mixed-scope research item: business Internet
+access is eligible subscriber evidence, while its official wholesale-transit
+material does not identify the serving ASN. Neither household-service absence
+nor unresolved corporate evidence justifies a blanket ASN decision. These
+findings do not attribute the native Speed-minus-Quality population to either
+operator. Continue exact identity review for smaller access providers and the
+unfinished country/state/province ranking work under the same clean-default
+rule, preserving explicit contrary use.
 
 ## Output and provenance
 
@@ -906,6 +904,38 @@ or reproducing it, and refresh through the normal update path as evidence ages.
 The process-local reader does not automatically unload or reclassify records
 when an evidence timestamp expires.
 
+### Reviewed catalog artifact and staging (2026-10-06)
+
+The normal update produced resource `2026.10.6+1791253792`: 571,201,428 bytes,
+SHA-256 `2952a3458a574ffea68cf726a9e5d0116b49d6dbe6a105fccd287064875349d1`,
+using the same qualified `0bb38ed6` builder. Independent full readback traversed
+6,956,934 registration, 7,886,070 final and 1,227,465 independent-origin
+boundaries, preserving registration fields, base risk and explicit non-Quality
+exclusions. Separate native, mapped and targeted policy controls passed;
+the policy set contains 305 samples across 14 feeds, including 72 hosting
+exclusions inside identified subscriber-carrier networks. Combined gate
+`66c950d59890df417d965ecb1fa21e6ed3475512b5a1fab9fc5ff2e3357e44b8`
+binds these results to that exact artifact.
+
+The refreshed RIS IPv4 evidence was observed at `2026-10-06T02:03:14Z` and
+expires at `2026-10-08T02:03:14Z`; IPv6 observation and expiry are three minutes
+later. GeoLite2 and places remained byte-identical to v13 because upstream
+provided the same data. This refresh therefore does not imply that every
+upstream dataset changed. Atlas's biased tagged-probe reference measured
+3,628/3,700 clean-label precision (98.05%), 3,628/6,876 residential recall
+(52.76%) and 72/3,045 datacenter clean classifications (2.36%); 31 networks
+with mixed residential/datacenter tags were omitted. These are reference
+sample results, not live-provider accuracy or geographic ranking coverage.
+
+Root physically staged the new resources while preserving all 97 selected
+Config paths, including the private-profile resource. Seven added files and
+two directories produce 106 paths totaling 5,064,120,310 bytes. Artifact and
+physical-inventory qualification are complete. The actual `6bd44a1b` native
+resolver control also selected all three pinned ARIN/GeoLite/places resources
+and loaded epoch `1791253792`. Image publication, Config selection and loaded
+Main-process proof remain separate rollout checkpoints at this recorded stage.
+No Main classification or Quality gain is attributed to this new artifact.
+
 ### One mapped-process observation (2026-10-05)
 
 At `13:54:46.879280Z`–`13:54:47.100884Z`, one selected Main Connect process
@@ -1235,13 +1265,52 @@ added to public APIs, metrics or logs.
 
 Four focused local controls passed: an 80,000-provider selection fixture,
 target membership and wire privacy, malformed evidence, and an owned loopback
-Redis commit/TTL/supersession check. This qualifies the source change, not a
-Main deployment or Redis Cluster performance. A new completed publication
-and a separately qualified reader that brackets bounded current-fact SQL with
-matching census/companion reads are still required. A 256-provider diagnostic
-can rank reasons within that sample; it cannot reconstruct the historical
-10,616-provider gap or establish whole-fleet operator coverage. The existing
+Redis commit/TTL/supersession check. They qualify the source change and local
+compare semantics, without proving Redis Cluster performance. The existing
 900-second census and 90-second shadow bounds remain separate and unchanged.
+
+The first complete generation-bound Main sample succeeded at
+`2026-10-06T03:53:14Z`. Two matching census/companion reads bracketed one
+read-only current-fact statement, which completed in 0.417155 seconds. The
+native publication contained **547 Quality, 6,569 Speed and 56,100 Online**
+providers, hence 6,022 Speed-without-Quality members. Its source ran from
+`03:45:23.220323Z` to `03:47:15.684629Z` and published at
+`03:50:21.642699Z`: 112.464306 seconds of evaluation and 185.958070 seconds
+from completion to publication. Source age at the last read was 358.316306
+seconds, within the unchanged 900-second bound. Of Online providers, 6,569
+passed the selected-policy 4/5 URL ratio and 49,531 failed; none lacked evidence.
+Changing subscriber classification cannot clear those ratio failures.
+
+The 256 private sample members were native Speed-only at source evaluation.
+Current facts assigned one first-failing reason per sampled provider:
+
+| Current reason | Sample providers |
+| --- | ---: |
+| Non-Quality in both current connection facts and provider rollup | 220 |
+| URL ratio below 4/5 in the later rolling window | 29 |
+| No connection with a live handler | 5 |
+| Incomplete current classification | 2 |
+
+The 220 consistent non-Quality cases passed preceding identity, public-key,
+rollup, reliability, TLS and current URL checks. They had complete selected-v13
+live lookups, no live hard-risk flag, at least one live non-Quality flag and a
+non-Quality rollup. No provider reached the verified-current-subscriber with
+soft non-Quality rollup discrepancy category. Those booleans still cannot
+separate unknown or ambiguous evidence from explicit hosting/proxy/virtual-ISP
+exclusions. Exact owner-side lookup provenance is needed before changing a
+rule; these results supply no reason to loosen health/risk gates or rewrite
+classification facts.
+
+Stored rollup country codes placed 191 of those 220 cases in the US and 29
+across 12 other countries. This is neither a fresh-IP location observation nor
+an operator ranking. The publication-salted sample covers 256 of 6,022 members,
+not the entire gap or connected fleet; reason order can hide later dimensions.
+All sampled members passed the earlier source ratio, so the 29 later failures
+are not evidence of an incorrect original publication. The statement explicitly
+used v13 epoch `1791162091` and its cutover, not the new artifact's epoch.
+Receipt `ec486133c964eea273c6d0abe1a61d237b17ac7c8c95d4ff8c7675c8335bf637`
+retains only aggregate output. No publisher identity, loaded-resource use,
+fixed-cohort improvement or historical 10,616-member attribution follows.
 
 The native publication has source clocks but lacks ARIN epochs and exclusion
 reasons. These reviewed sources export no loaded-ARIN epoch gauge. The bounded
