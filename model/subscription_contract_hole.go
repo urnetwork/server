@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -22,6 +23,7 @@ const (
 	contractHoleSourceTimeout   = 5 * time.Second
 	contractHoleMemberLimit     = 8192
 	ContractHoleRefreshPageSize = 256
+	contractHoleRefreshWorkers  = 8
 )
 
 var contractHoleCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -31,7 +33,7 @@ var contractHoleCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 
 func init() {
 	for _, outcome := range []string{"read_positive", "read_zero", "read_missing", "read_error", "event_expired", "event_error",
-		"event_create", "event_remove", "event_invalidate", "refresh_oversized", "refresh_published", "refresh_superseded", "refresh_error"} {
+		"event_create", "event_remove", "event_invalidate", "refresh_oversized", "refresh_published", "refresh_superseded", "refresh_error", "refresh_incomplete"} {
 		contractHoleCounter.WithLabelValues(outcome)
 	}
 	prometheus.MustRegister(contractHoleCounter)
@@ -52,7 +54,7 @@ func contractHoleKeys(sourceClientId, destinationClientId server.Id) []string {
 const contractHoleReadScript = `
 local value = redis.call('GET', KEYS[1])
 if not value or redis.call('PTTL', KEYS[1]) <= 0 then return false end
-if not string.match(value, '^%-?%d+$') then return redis.error_reply('invalid contract hole count') end
+if value ~= '0' and not string.match(value, '^[1-9]%d*$') then return redis.error_reply('invalid contract hole count') end
 local count = tonumber(value)
 if not count or count > tonumber(ARGV[1]) then return redis.error_reply('invalid contract hole count') end
 return count
@@ -91,6 +93,8 @@ func HasOpenContractHole(ctx context.Context, sourceClientId, destinationClientI
 // after its tombstone expires because the create's fixed deadline has expired.
 // Mutation also cancels an in-flight source snapshot. Membership guards make
 // duplicate and ambiguous Redis replies safe to replay within that deadline.
+// Lifecycle traffic preserves the existing expiry, so repeated events cannot
+// renew a stale member while source reconciliation is unavailable.
 const contractHoleEventScript = `
 local now = redis.call('TIME')
 local nowms = tonumber(now[1])*1000 + math.floor(tonumber(now[2])/1000)
@@ -105,6 +109,15 @@ if ARGV[1] == 'oversized' then
     redis.call('DEL', KEYS[1], KEYS[2])
     return 0
 end
+local ttl = redis.call('PTTL', KEYS[2])
+if ttl <= 0 then
+    redis.call('DEL', KEYS[1], KEYS[2])
+    ttl = tonumber(ARGV[3])
+else
+    local countttl = redis.call('PTTL', KEYS[1])
+    if countttl > 0 then ttl = math.min(ttl, countttl) end
+end
+local expires = nowms + ttl
 local before = redis.call('SCARD', KEYS[2])
 if before > 0 then
     redis.call('SET', KEYS[1], before, 'KEEPTTL')
@@ -133,8 +146,8 @@ local count = redis.call('SCARD', KEYS[2])
 if count == 0 then
     redis.call('DEL', KEYS[1], KEYS[2])
 else
-    redis.call('PEXPIRE', KEYS[1], ARGV[3])
-    redis.call('PEXPIRE', KEYS[2], ARGV[3])
+    redis.call('PEXPIREAT', KEYS[1], expires)
+    redis.call('PEXPIREAT', KEYS[2], expires)
 end
 return count
 `
@@ -244,6 +257,13 @@ SELECT contract_id FROM (
 // Background-only source read. A fixed member ceiling bounds Redis script work;
 // an oversized pair loses its projection instead of receiving a partial count.
 func refreshContractHole(ctx context.Context, sourceClientId, destinationClientId server.Id) (published bool, returnErr error) {
+	return refreshContractHoleObserved(ctx, sourceClientId, destinationClientId, nil)
+}
+
+// The source-start witness is earlier than publication, providing a conservative
+// lower bound on remaining TTL for rollout qualification after the full pass.
+func refreshContractHoleObserved(ctx context.Context, sourceClientId, destinationClientId server.Id, observe func(time.Time, int)) (published bool, returnErr error) {
+	started := server.NowUtc()
 	ctx, cancel := context.WithTimeout(ctx, contractHoleSourceTimeout)
 	defer cancel()
 	keys := contractHoleKeys(sourceClientId, destinationClientId)
@@ -266,6 +286,9 @@ func refreshContractHole(ctx context.Context, sourceClientId, destinationClientI
 			})
 		}, server.OptNoRetry())
 	}); recovered != nil {
+		if err, ok := recovered.(error); ok {
+			return false, fmt.Errorf("contract hole source read failed: %w", err)
+		}
 		return false, fmt.Errorf("contract hole source read failed: %v", recovered)
 	}
 	if len(contractIds) > contractHoleMemberLimit {
@@ -284,6 +307,9 @@ func refreshContractHole(ctx context.Context, sourceClientId, destinationClientI
 	if err == nil {
 		if published {
 			contractHoleCounter.WithLabelValues("refresh_published").Inc()
+			if observe != nil {
+				observe(started, len(contractIds))
+			}
 		} else {
 			contractHoleCounter.WithLabelValues("refresh_superseded").Inc()
 		}
@@ -310,10 +336,21 @@ ORDER BY source_id, destination_id, create_time, contract_id
 LIMIT $5
 `
 
+// Pair failures are independent observations. The cursor covers known candidate
+// rows, including failed pairs, which are retried on the next full source pass.
+type ContractHoleRefreshPageResult struct {
+	Cursor           *ContractHoleCursor
+	Pairs            int
+	FailedPairs      int
+	PositivePairs    int
+	EarliestPositive *ContractHoleWitness
+}
+
 // Advances a bounded indexed candidate page. Final-close candidates are retained
 // here deliberately: their pair snapshot can revoke a lost lifecycle event.
-// A complete fleet pass may exceed its nominal interval; expired keys then deny.
-func RefreshContractHolesPage(ctx context.Context, cursor *ContractHoleCursor) (*ContractHoleCursor, int, error) {
+// A failed candidate query never advances unread source state. Individual pair
+// failures do not starve healthy Redis slots, and leave full-pass coverage unknown.
+func RefreshContractHolesPage(ctx context.Context, cursor *ContractHoleCursor) (*ContractHoleRefreshPageResult, error) {
 	start := ContractHoleCursor{}
 	if cursor != nil {
 		start = *cursor
@@ -332,25 +369,84 @@ func RefreshContractHolesPage(ctx context.Context, cursor *ContractHoleCursor) (
 			})
 		}, server.OptNoRetry())
 	}); recovered != nil {
-		return cursor, 0, fmt.Errorf("contract hole candidate read failed: %v", recovered)
+		if err, ok := recovered.(error); ok {
+			return nil, fmt.Errorf("contract hole candidate read failed: %w", err)
+		}
+		return nil, fmt.Errorf("contract hole candidate read failed: %v", recovered)
 	}
+	result := &ContractHoleRefreshPageResult{}
+	var stateLock sync.Mutex
+	result.Pairs, result.FailedPairs = refreshContractHolePairs(ctx, positions, func(ctx context.Context, source, destination server.Id) (bool, error) {
+		return refreshContractHoleObserved(ctx, source, destination, func(started time.Time, members int) {
+			if members == 0 {
+				return
+			}
+			stateLock.Lock()
+			defer stateLock.Unlock()
+			result.PositivePairs++
+			if result.EarliestPositive == nil || started.Before(result.EarliestPositive.SourceStarted) {
+				result.EarliestPositive = &ContractHoleWitness{SourceClientId: source, DestinationClientId: destination, SourceStarted: started}
+			}
+		})
+	})
+	if len(positions) == ContractHoleRefreshPageSize {
+		result.Cursor = &positions[len(positions)-1]
+	}
+	return result, nil
+}
+
+// One page owns at most eight source/Redis workers and joins all admitted work.
+// The callback seam drives the actual bounded worker loop in ordering controls.
+func refreshContractHolePairs(ctx context.Context, positions []ContractHoleCursor,
+	refresh func(context.Context, server.Id, server.Id) (bool, error),
+) (int, int) {
 	seenPairs := map[string]bool{}
-	progress := cursor
+	pairs := make([]ContractHoleCursor, 0, len(positions))
 	for _, position := range positions {
 		pair := contractHoleKeys(position.SourceClientId, position.DestinationClientId)[0]
 		if seenPairs[pair] {
-			progress = &position
 			continue
 		}
 		seenPairs[pair] = true
-		if _, err := refreshContractHole(ctx, position.SourceClientId, position.DestinationClientId); err != nil {
-			contractHoleCounter.WithLabelValues("refresh_error").Inc()
-			return progress, len(seenPairs), err
+		pairs = append(pairs, position)
+	}
+	jobs := make(chan int, len(pairs))
+	for index := range pairs {
+		jobs <- index
+	}
+	close(jobs)
+	outcomes := make([]uint8, len(pairs))
+	var workers sync.WaitGroup
+	for range min(contractHoleRefreshWorkers, len(pairs)) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				if ctx.Err() != nil {
+					outcomes[index] = 1
+					continue
+				}
+				pair := pairs[index]
+				published, err := refresh(ctx, pair.SourceClientId, pair.DestinationClientId)
+				if err != nil {
+					outcomes[index] = 1
+				} else if !published {
+					outcomes[index] = 2
+				}
+			}
+		}()
+	}
+	workers.Wait()
+	failed := 0
+	for _, outcome := range outcomes {
+		if outcome != 0 {
+			label := "refresh_error"
+			if outcome == 2 {
+				label = "refresh_incomplete"
+			}
+			contractHoleCounter.WithLabelValues(label).Inc()
+			failed++
 		}
-		progress = &position
 	}
-	if len(positions) < ContractHoleRefreshPageSize {
-		return nil, len(seenPairs), nil
-	}
-	return &positions[len(positions)-1], len(seenPairs), nil
+	return len(pairs), failed
 }
