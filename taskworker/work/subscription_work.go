@@ -423,7 +423,7 @@ func ReconcileNetEscrow(
 	reconcileNetEscrow *ReconcileNetEscrowArgs,
 	clientSession *session.ClientSession,
 ) (*ReconcileNetEscrowResult, error) {
-	driftByNetworkId, balanceCount := model.ReconcileNetEscrow(clientSession.Ctx, true)
+	driftByNetworkId, balanceCount := model.ReconcileCachedNetEscrow(clientSession.Ctx)
 
 	overReserved := model.ByteCount(0)
 	underReserved := model.ByteCount(0)
