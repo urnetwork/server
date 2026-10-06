@@ -195,6 +195,16 @@ func TestLegacySettlementHeadFailurePreservesForwardCursor(t *testing.T) {
 // Cancellation during the head's actual financial transaction preserves the
 // preceding forward commit and cursor, while rollback keeps the head reserved.
 func TestLegacySettlementCanceledHeadPreservesForwardCursor(t *testing.T) {
+	testLegacySettlementCanceledHeadPreservesForwardCursor(t, false)
+}
+
+// Cancellation after an empty resumed segment must retain the same financial
+// boundary when this page wraps to an earlier held head.
+func TestLegacySettlementCanceledWrappedHeadPreservesForwardCursor(t *testing.T) {
+	testLegacySettlementCanceledHeadPreservesForwardCursor(t, true)
+}
+
+func testLegacySettlementCanceledHeadPreservesForwardCursor(t *testing.T, wrap bool) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -211,6 +221,9 @@ func TestLegacySettlementCanceledHeadPreservesForwardCursor(t *testing.T) {
 		first, err := FlushLegacySettlements(ctx, shard, nil, 1)
 		if err != nil || first.BusyOrGone != 1 || first.Cursor == nil {
 			t.Fatalf("first owner was not held: %+v, %v", first, err)
+		}
+		if wrap {
+			first.Cursor.HeadAfter = &LegacySettlementPosition{NextAttemptTime: first.Cursor.NextAttemptTime, ContractId: first.Cursor.ContractId}
 		}
 		server.Raise(held.Rollback(ctx))
 		server.Tx(ctx, func(tx server.PgTx) {

@@ -141,3 +141,36 @@ func TestLegacySettlementHeadCursorPassesPersistentBusyPrefix(t *testing.T) {
 		}
 	})
 }
+
+// Old or interrupted serialized state can point at the upper bound or beyond
+// it. The resumed empty segment wraps once and still respects the forward key.
+func TestLegacySettlementHeadCursorWrapsAtOrBeyondForwardBoundary(t *testing.T) {
+	for _, beyond := range []bool{false, true} {
+		env := server.DefaultTestEnv()
+		env.RerunCount = 0
+		env.Run(t, func(t testing.TB) {
+			ctx := t.Context()
+			head, headId, _, tailIds := legacyHeadRevisitFixture(t, ctx, 2)
+			oldest := time.Date(2010, time.January, 1, 0, 0, 0, 0, time.UTC)
+			position := &LegacySettlementPosition{NextAttemptTime: oldest, ContractId: headId}
+			if beyond {
+				position.NextAttemptTime = oldest.Add(time.Hour)
+			}
+			cursor := &LegacySettlementCursor{NextAttemptTime: oldest, ContractId: headId, PassEndTime: server.NowUtc(), HeadAfter: position}
+			before, _ := json.Marshal(cursor)
+			page, err := FlushLegacySettlements(ctx, int(headId[15])%LegacySettlementShardCount, cursor, 2)
+			after, _ := json.Marshal(cursor)
+			if err != nil || page.Completed != 2 || page.HeadCompleted != 1 || page.HeadVisited != 1 || page.Cursor == nil ||
+				page.Cursor.ContractId != tailIds[0] || page.Cursor.HeadAfter == nil || page.Cursor.HeadAfter.ContractId != headId ||
+				!bytes.Equal(before, after) {
+				t.Fatal("resumed head boundary skipped its wrap, repeated work, or changed the caller's cursor")
+			}
+			requireLegacySettlementTestState(t, ctx, head, headId, false, true, 989, 0)
+			requireLegacyProviderDurability(t, ctx, head, headId, 11)
+			last, err := FlushLegacySettlements(ctx, int(headId[15])%LegacySettlementShardCount, page.Cursor, 2)
+			if err != nil || last.Completed != 1 || last.HeadVisited != 0 || last.Cursor != nil {
+				t.Fatal("completed forward pass retained a stale head cursor")
+			}
+		})
+	}
+}
