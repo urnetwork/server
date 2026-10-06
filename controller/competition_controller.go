@@ -4055,8 +4055,8 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 	discardedStagingJobs := []server.Id{}
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			// server.Tx can rerun the callback; only the committed run's discards count.
-			discardedStagingJobs = []server.Id{}
+			// server.Tx can rerun the callback; every run starts from empty results.
+			conflict, stateErr, discardedStagingJobs = false, nil, []server.Id{}
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-round-v1', 0))`))
 			var previousEpoch int
 			server.Raise(tx.QueryRow(ctx, `
@@ -4212,8 +4212,8 @@ func (self PostgresStore) CreateStagingRound(
 	replaced := false
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			// server.Tx can rerun the callback; only the committed run's supersedes count.
-			supersededJobs = []server.Id{}
+			// server.Tx can rerun the callback; every run starts from empty results.
+			stateErr, supersededJobs, replaced = nil, []server.Id{}, false
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-round-v1', 0))`))
 			var productionExists bool
 			server.Raise(tx.QueryRow(ctx, `
@@ -4391,6 +4391,8 @@ func (self PostgresStore) CloseStagingRound(
 	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			// server.Tx can rerun the callback; every run starts from empty results.
+			round, closed, stateErr = nil, false, nil
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-submit-v1', 0))`))
 			var scanErr error
 			round, scanErr = scanRound(tx.QueryRow(ctx, `
@@ -4453,6 +4455,8 @@ func (self PostgresStore) FinalizeStagingRound(
 	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			// server.Tx can rerun the callback; every run starts from empty results.
+			round, finalized, stateErr = nil, false, nil
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-finalize-v2', 0))`))
 			var scanErr error
 			round, scanErr = scanRound(tx.QueryRow(ctx, `
@@ -4746,6 +4750,8 @@ func (self PostgresStore) PrepareCandidateReview(
 	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			// server.Tx can rerun the callback; every run starts from empty results.
+			state, finalized, stateErr = nil, false, nil
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-finalize-v2', 0))`))
 			round, scanErr := loadCandidateReviewRound(ctx, tx, settings, epoch)
 			if errors.Is(scanErr, pgx.ErrNoRows) {
@@ -4802,6 +4808,8 @@ func (self PostgresStore) RecordCandidateReview(
 	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			// server.Tx can rerun the callback; every run starts from empty results.
+			state, finalized, stateErr = nil, false, nil
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-finalize-v2', 0))`))
 			round, scanErr := loadCandidateReviewRound(ctx, tx, settings, epoch)
 			if errors.Is(scanErr, pgx.ErrNoRows) {
@@ -4900,6 +4908,8 @@ func (self PostgresStore) PrepareStagingWinnerReview(
 	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			// server.Tx can rerun the callback; every run starts from empty results.
+			state, stateErr = nil, nil
 			round, candidate, loadErr := stagingWinnerForReview(ctx, tx, settings, epoch)
 			if errors.Is(loadErr, pgx.ErrNoRows) {
 				stateErr = ErrNotFound
@@ -4941,6 +4951,8 @@ func (self PostgresStore) ApproveStagingWinner(
 	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			// server.Tx can rerun the callback; every run starts from empty results.
+			state, stateErr = nil, nil
 			round, candidate, loadErr := stagingWinnerForReview(ctx, tx, settings, epoch)
 			if errors.Is(loadErr, pgx.ErrNoRows) {
 				stateErr = ErrNotFound
@@ -5496,8 +5508,8 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 	}
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			// server.Tx can rerun the callback; only the committed run's discards count.
-			discarded = []server.Id{}
+			// server.Tx can rerun the callback; every run starts from empty results.
+			job, discarded = nil, []server.Id{}
 			var slotWorker *string
 			var slotJob *server.Id
 			var slotLease *time.Time
@@ -5609,6 +5621,8 @@ func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, wor
 	leaseLost := false
 	err := captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			// server.Tx can rerun the callback; every run starts from empty results.
+			leaseLost = false
 			result, err := tx.Exec(ctx, `
 				UPDATE competition_worker_slot SET lease_expires_at = $3, heartbeat_at = $4
 				WHERE slot_id = 1 AND worker_id = $1 AND job_id = $2
@@ -5662,6 +5676,8 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 	leaseLost := false
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			// server.Tx can rerun the callback; every run starts from empty results.
+			retry, leaseLost = false, false
 			var state, owner string
 			var attempts int
 			var apiImageDigest, workerImageDigest string
