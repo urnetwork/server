@@ -1676,8 +1676,8 @@ revision-matched PostgreSQL snapshot used by admission before exact fallback.
 A delayed-settlement control with 10,001 surviving reservations blocked on
 escrow history despite a current cache before the change; the repaired mirror
 completed while that history table remained locked. Missing/stale snapshots,
-legacy mutations and deleted balances still require the exact census, and
-reconciliation itself remains exact. The two finite `result` values of
+legacy mutations and deleted balances still require the exact census. Operator
+reconciliation remains exact; scheduled repair is distinguished below. The two finite `result` values of
 `urnetwork_net_escrow_refresh_snapshot_total` count `reused`/`reloaded` balance
 snapshots after source reads, not distinct SQL calls, successful Redis writes,
 settlements, or committed admissions. They do not identify the production
@@ -1685,6 +1685,34 @@ census caller. A current cache can remove repeat reads without reducing
 required settlement work; persistent misses can leave CPU high. Verify fresh
 per-process counter continuity and source coverage alongside independent CPU
 and successful traffic before claiming recovery.
+
+Scheduled `ReconcileCachedNetEscrow` now uses that same committed revision
+cache for each current and noncurrent balance page. Previously the recurring
+task rescanned every qualifying legacy reservation even when no writer had
+changed its cached revision. Exact misses remain read-only in PostgreSQL;
+targeted posts and admission remain the cache warmers. This avoids creating
+snapshot rows for the fleet's mostly-empty cold balances. Page-local reads and
+the Redis revision fence remain in place. The explicit fleet and per-network `ReconcileNetEscrow` audit/repair
+entry points always census history, including dry runs, and never trust or
+write the optional PostgreSQL snapshot cache. A corrupted cache amount at a
+matching revision must therefore still be detected as Redis drift by those
+operator paths. Scheduled reuse assumes the existing revision triggers cover
+all authoritative legacy writes; it is not an independent corruption audit.
+
+The owning controls in `subscription_net_escrow_reconcile_cache_test.go`
+hold historical escrow access while the scheduled current page must publish
+10,001 cached reservations, then join after discovery's separate relation lock
+is released. They also cover cold/warm noncurrent pages, mutation invalidation,
+neighbor reservations, a deleted balance captured by an earlier page, and
+operator audit/apply against deliberately corrupt same-revision cache data.
+Retain the existing rollback, delayed-publication and mixed Redis/legacy owner
+controls. These establish source behavior, not that a sampled 107.5-second
+`reservation_census_prefix` query came from this task. Truncated shared SQL,
+completed cache counters and query age alone cannot identify that caller or
+assign PostgreSQL CPU. Cold or continuously invalidated history and noncurrent
+discovery can remain expensive; missing full-statement or owner evidence stays
+unknown. Require current deployed-source coverage, successful financial traffic
+and independent CPU observations before reporting incident recovery.
 
 Settlement metadata also advances reservation revisions when it marks escrow
 rows settled. Its post must lock the contract's existing balances in sorted
