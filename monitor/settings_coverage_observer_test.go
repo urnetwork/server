@@ -47,10 +47,9 @@ func TestSettingsFreshnessCoverageObserverIsProcessOnly(t *testing.T) {
 func TestPgQuerySampleCoverageObserverPreservesGenerationAndCadence(t *testing.T) {
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	contacts, observerCalls := 0, 0
-	settings := syntheticSettings(&syntheticSource{hostTimeoutFn: func(HostSettings, string, time.Duration) (string, error) {
-		contacts++
-		return pgSampleTestEncode(t, pgSampleTestFrames(now)), nil
-	}})
+	settings := syntheticSettings(nil)
+	settings.SSHUser = "fixture"
+	settings.Hosts[0].OverlayAddress = "192.0.2.1"
 	settings.Now = func() time.Time { return now }
 	settings.StateDir = t.TempDir()
 	settings.PGQuerySampleContinuous = true
@@ -60,6 +59,10 @@ func TestPgQuerySampleCoverageObserverPreservesGenerationAndCadence(t *testing.T
 	env, err := newProbeEnv(settings.withDefaults().withRuntime())
 	if err != nil {
 		t.Fatal(err)
+	}
+	env.runner.(*runner).runSSH = func(context.Context, []string, string) (string, string, error) {
+		contacts++
+		return pgSampleTestEncode(t, pgSampleTestFrames(now)), "", nil
 	}
 	probe := pgQuerySampleProbe{}
 	findings, err := probe.check(context.Background(), env)
