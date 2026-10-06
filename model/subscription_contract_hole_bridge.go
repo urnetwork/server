@@ -1,7 +1,7 @@
 package model
 
-// Temporary rollout callers own permission to query the source, rate limits and
-// the absolute bridge cutoff. The ordinary Redis reader never calls this seam.
+// Temporary rollout callers own source permission, rate limits and the
+// coverage-based transition to Redis-only. The Redis reader never calls this seam.
 
 import (
 	"context"

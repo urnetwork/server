@@ -426,12 +426,12 @@ Redis-only policy denies both negative and unknown results. Source and destinati
 identity/activity checks remain separate from this contract predicate. Client
 retirement alone does not rewrite contract accounting or its open status.
 
-An explicitly enabled, time-bounded rollout bridge may separately check the
+An explicitly enabled, temporary rollout bridge may separately check the
 source for unknown results. Its owning resident controls per-pair admission,
-the global concurrency bound, query deadline and absolute cutoff; explicit
+the global concurrency bound, query deadline and rollout phase; explicit
 negative Redis evidence never needs a source check. The source seam uses the
 same resumable-checkpoint predicate as this projection and never publishes a
-partial count from an existence result. After the cutoff, unknown remains
+partial count from an existence result. After the bridge is disabled, unknown remains
 fail-closed without invoking that source seam.
 
 Committed lifecycle events use existing transaction identities, with no added
