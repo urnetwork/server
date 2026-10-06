@@ -1,0 +1,1768 @@
+package model
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/gagliardetto/solana-go"
+	"github.com/urnetwork/glog/v2026"
+	"github.com/urnetwork/server/v2026"
+	"github.com/urnetwork/server/v2026/session"
+)
+
+type NetworkUser struct {
+	UserId          server.Id                   `json:"user_id"`
+	UserAuth        *string                     `json:"user_auth,omitempty"`
+	Verified        bool                        `json:"verified"`
+	AuthType        string                      `json:"auth_type"`
+	NetworkName     string                      `json:"network_name"`
+	WalletAddress   *string                     `json:"wallet_address,omitempty"`
+	UserAuths       []NetworkUserUserAuth       `json:"user_auths,omitempty"`
+	SsoAuths        []NetworkUserSsoAuth        `json:"sso_auths,omitempty"`
+	WalletAuths     []NetworkUserWalletAuth     `json:"wallet_auths,omitempty"`
+	SeedphraseAuths []NetworkUserSeedphraseAuth `json:"seedphrase_auths,omitempty"`
+	AuthTypes       []string                    `json:"auth_types"`
+}
+
+type NetworkUserUserAuth struct {
+	UserAuth     string       `json:"user_auth,omitempty"`
+	AuthType     UserAuthType `json:"auth_type"`
+	PasswordHash []byte       `json:"-"`
+	PasswordSalt []byte       `json:"-"`
+}
+
+type NetworkUserSsoAuth struct {
+	UserId   *server.Id  `json:"user_id,omitempty"`
+	AuthType SsoAuthType `json:"auth_type"`
+	AuthJwt  string      `json:"auth_jwt"`
+	UserAuth *string     `json:"user_auth,omitempty"`
+}
+
+type NetworkUserWalletAuth struct {
+	UserId        *server.Id `json:"user_id,omitempty"`
+	WalletAddress *string    `json:"wallet_address,omitempty"`
+	Blockchain    string     `json:"blockchain"`
+}
+
+type NetworkUserSeedphraseAuth struct {
+	Seedphrase string    `json:"-"`
+	CreateTime time.Time `json:"create_time"`
+}
+
+func GetNetworkUser(
+	ctx context.Context,
+	userId server.Id,
+) *NetworkUser {
+
+	var networkUser *NetworkUser
+
+	server.Db(ctx, func(conn server.PgConn) {
+
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT
+				network_user.user_id,
+				network_user.auth_type,
+				network_user.user_auth,
+				network_user.verified,
+				network_user.wallet_address,
+				network.network_name
+			FROM network_user
+			LEFT JOIN network ON
+				network.admin_user_id = network_user.user_id
+			WHERE network_user.user_id = $1
+		`,
+			userId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+
+				networkUser = &NetworkUser{}
+
+				server.Raise(result.Scan(
+					&networkUser.UserId,
+					&networkUser.AuthType,
+					&networkUser.UserAuth,
+					&networkUser.Verified,
+					&networkUser.WalletAddress,
+					&networkUser.NetworkName,
+				))
+			}
+		})
+
+	})
+
+	// Authentication readers own separate transactions. Release the profile
+	// connection before they acquire another slot from the same pool.
+
+	if networkUser == nil {
+		glog.Infof("No network user found for user ID: %s", userId)
+		// No user found with this ID
+		return nil
+	}
+
+	/**
+	 * Get SSO auths for the user
+	 */
+	ssoAuths, err := getSsoAuths(ctx, userId)
+	server.Raise(err)
+	networkUser.SsoAuths = ssoAuths
+
+	/**
+	 * Get email/phone + password auths for the user
+	 */
+	userAuths, err := getUserAuths(userId, ctx)
+	server.Raise(err)
+	networkUser.UserAuths = userAuths
+
+	/**
+	 * Get wallet auths for the user
+	 */
+	walletAuths, err := getWalletAuths(ctx, userId)
+	server.Raise(err)
+	networkUser.WalletAuths = walletAuths
+
+	/**
+	 * Get seedphrase auths for the user
+	 */
+	seedphraseAuths, err := getSeedphraseAuths(ctx, userId)
+	server.Raise(err)
+	networkUser.SeedphraseAuths = seedphraseAuths
+
+	/**
+	 * Build composite auth_types list
+	 */
+	for _, a := range userAuths {
+		networkUser.AuthTypes = append(networkUser.AuthTypes, string(a.AuthType))
+	}
+	for _, a := range ssoAuths {
+		networkUser.AuthTypes = append(networkUser.AuthTypes, string(a.AuthType))
+	}
+	if len(walletAuths) > 0 {
+		networkUser.AuthTypes = append(networkUser.AuthTypes, walletAuthType(walletAuths[0].Blockchain))
+	}
+	if len(seedphraseAuths) > 0 {
+		networkUser.AuthTypes = append(networkUser.AuthTypes, "seedphrase")
+	}
+
+	return networkUser
+}
+
+/**
+ * Add an authentication method to a network user
+ * Allows user to add an email, phone, password, sso, or wallet authentication method
+ */
+type AddAuthMethod struct {
+	UserAuth    *string         `json:"user_auth,omitempty"`
+	AuthJwt     *string         `json:"auth_jwt,omitempty"`
+	AuthJwtType *string         `json:"auth_jwt_type,omitempty"`
+	Password    *string         `json:"password,omitempty"`
+	WalletAuth  *WalletAuthArgs `json:"wallet_auth,omitempty"`
+}
+
+type AddAuthMethodResult struct {
+	Error *AddAuthMethodError `json:"error,omitempty"`
+}
+
+type AddAuthMethodError struct {
+	// `WalletAuthErrorCodeSignatureMismatch` for a wallet signature that does
+	// not verify for its address, "" for every other refusal. Added after
+	// `Message`; older clients ignore it.
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message"`
+}
+
+func AddAuth(
+	authArgs AddAuthMethod,
+	session *session.ClientSession,
+) (result *AddAuthMethodResult, resultErr error) {
+	if err := CheckAccountActionRateLimit(
+		session.Ctx,
+		session.ByJwt.UserId,
+		AccountActionAddAuth,
+		AccountActionAddAuthDailyLimit,
+		AccountActionDailyWindow,
+	); err != nil {
+		return &AddAuthMethodResult{
+			Error: &AddAuthMethodError{
+				Message: err.Error(),
+			},
+		}, nil
+	}
+
+	defer func() {
+		if resultErr == nil && result != nil && result.Error == nil {
+			RecordAccountActionAttempt(session.Ctx, session.ByJwt.UserId, AccountActionAddAuth)
+		}
+	}()
+
+	if authArgs.UserAuth != nil && authArgs.Password != nil {
+		/**
+		 * user is adding an email/phone + password auth method
+		 */
+
+		// todo - check if userAuth is email or phone
+		//
+		if !passwordValid(*authArgs.Password) {
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Message: fmt.Sprintf("Password must have at least %d characters", MinPasswordLength),
+				},
+			}, nil
+		}
+
+		passwordSalt := createPasswordSalt()
+		passwordHash := computePasswordHashV1([]byte(*authArgs.Password), passwordSalt)
+
+		err := addUserAuth(
+			&AddUserAuthArgs{
+				UserId:       session.ByJwt.UserId,
+				UserAuth:     authArgs.UserAuth,
+				PasswordHash: passwordHash,
+				PasswordSalt: passwordSalt,
+			},
+			session.Ctx,
+		)
+		if err != nil {
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Message: PeelStatusPrefix(err.Error()),
+				},
+			}, nil
+		}
+
+		return &AddAuthMethodResult{}, nil
+	} else if authArgs.AuthJwt != nil && authArgs.AuthJwtType != nil {
+		// user is adding a social login auth method
+
+		parsedAuthJwt, err := ParseAuthJwt(*authArgs.AuthJwt, AuthType(*authArgs.AuthJwtType))
+
+		if err != nil {
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					// NOT peeled, unlike the other three branches: ParseAuthJwt
+					// propagates errors from the third-party JWT parsers, so
+					// this is the one message here the model did not construct.
+					// Peeling it could truncate a provider string that merely
+					// happens to begin with digits (an echoed "400 Bad
+					// Request"), and there is no prefix to remove because
+					// nothing on this path adds one.
+					Message: fmt.Sprintf("Error parsing auth jwt: %s", err.Error()),
+				},
+			}, nil
+		}
+
+		if parsedAuthJwt == nil {
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Message: fmt.Sprintf("Parsed auth jwt is nil for auth type %s", *authArgs.AuthJwtType),
+				},
+			}, nil
+		}
+
+		err = addSsoAuth(
+			&AddSsoAuthArgs{
+				ParsedAuthJwt: *parsedAuthJwt,
+				AuthJwtType:   SsoAuthType(*authArgs.AuthJwtType),
+				AuthJwt:       *authArgs.AuthJwt,
+				UserId:        session.ByJwt.UserId,
+			},
+			session.Ctx,
+		)
+		if err != nil {
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Message: PeelStatusPrefix(err.Error()),
+				},
+			}, nil
+		}
+
+		return &AddAuthMethodResult{}, nil
+	} else if authArgs.WalletAuth != nil {
+		// user is adding a wallet auth method
+		err := addWalletAuth(
+			&AddWalletAuthArgs{
+				WalletAuth: authArgs.WalletAuth,
+				UserId:     session.ByJwt.UserId,
+			},
+			session.Ctx,
+		)
+		if errors.Is(err, errWalletSignatureMismatch) {
+			// coded, so the apps can say the wallet signed with another account
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Code:    WalletAuthErrorCodeSignatureMismatch,
+					Message: walletAuthSignatureMismatchMessage,
+				},
+			}, nil
+		}
+		if err != nil {
+			return &AddAuthMethodResult{
+				Error: &AddAuthMethodError{
+					Message: PeelStatusPrefix(err.Error()),
+				},
+			}, nil
+		}
+		return &AddAuthMethodResult{}, nil
+	}
+
+	// A body that matches none of the three branches above.
+	//
+	// This used to `return nil, nil`. The router sees a nil error and marshals
+	// the typed-nil result, so the caller got HTTP 200 with the body `null` --
+	// indistinguishable from success to a status-checking client, and not the
+	// AddAuthResult shape the spec describes. Reachable from an ordinary
+	// request: {"user_auth":"a@b.com"} with no password, {"auth_jwt":"..."}
+	// with no auth_jwt_type, or {}.
+	return &AddAuthMethodResult{
+		Error: &AddAuthMethodError{
+			Message: "no auth method supplied",
+		},
+	}, nil
+}
+
+type AddUserAuthArgs struct {
+	UserId   server.Id
+	UserAuth *string
+	// password string,
+	PasswordHash []byte
+	PasswordSalt []byte
+	Verified     bool
+}
+
+func addUserAuth(
+	args *AddUserAuthArgs,
+	ctx context.Context,
+) (returnErr error) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		returnErr = addUserAuthInTx(tx, args, ctx)
+	})
+	return
+}
+
+// Adds an email or phone password auth to the user in the caller's
+// transaction. Returns a refusal (no user auth, another user holds it, or the
+// user has one of its type), and raises a failed statement.
+func addUserAuthInTx(
+	tx server.PgTx,
+	args *AddUserAuthArgs,
+	ctx context.Context,
+) (returnErr error) {
+	userAuth, userAuthType := NormalUserAuthV1(args.UserAuth)
+
+	if userAuth == nil {
+		returnErr = fmt.Errorf("user_auth is required")
+		return
+	}
+
+	// TODO - if they have authed through SSO, mark them as verified
+
+	/**
+	 * Check if this user_auth is already associated with a different user
+	 */
+	err := validateUserAuthAvailability(
+		ctx,
+		tx,
+		*userAuth,
+		args.UserId,
+	)
+	if err != nil {
+		returnErr = err
+		return
+	}
+
+	/**
+	 * Check if this type of userauth already exists for the user
+	 */
+	// A failed query raises, through WithPgResult, which ends the transaction
+	// at once with its own error. It used to be returned, and the caller's
+	// callback went on to a commit that postgres rolled back.
+	result, queryErr := tx.Query(
+		ctx,
+		`
+		SELECT
+			auth_type
+		FROM network_user_auth_password
+		WHERE user_id = $1 AND auth_type = $2
+	`,
+		args.UserId,
+		userAuthType,
+	)
+
+	exists := false
+
+	server.WithPgResult(result, queryErr, func() {
+		if result.Next() {
+			exists = true
+		}
+	})
+
+	if exists {
+		err := fmt.Errorf("User exists with auth type %s", userAuthType)
+		returnErr = err
+		return
+	}
+
+	/**
+	 * No record exists with this auth type, create a new one
+	 */
+
+	_, dbErr := tx.Exec(
+		ctx,
+		`
+			INSERT INTO network_user_auth_password
+			(user_id, user_auth, auth_type, password_salt, password_hash, verified)
+			VALUES ($1, $2, $3, $4, $5, $6)
+		`,
+		args.UserId,
+		userAuth,
+		userAuthType,
+		args.PasswordSalt,
+		args.PasswordHash,
+		args.Verified,
+	)
+	server.Raise(dbErr)
+
+	return
+}
+
+func getUserAuths(
+	userId server.Id,
+	ctx context.Context,
+) ([]NetworkUserUserAuth, error) {
+
+	var userAuths []NetworkUserUserAuth
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT
+				user_auth,
+				auth_type,
+				password_hash,
+				password_salt
+			FROM network_user_auth_password
+			WHERE user_id = $1
+		`,
+			userId,
+		)
+		if err != nil {
+			server.Raise(err)
+		}
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				userAuth := NetworkUserUserAuth{}
+				server.Raise(result.Scan(
+					&userAuth.UserAuth,
+					&userAuth.AuthType,
+					&userAuth.PasswordHash,
+					&userAuth.PasswordSalt,
+				))
+				userAuths = append(userAuths, userAuth)
+			}
+		})
+
+	})
+
+	return userAuths, nil
+
+}
+
+/**
+ * Allow different SSO auth methods
+ */
+
+type AddSsoAuthArgs struct {
+	ParsedAuthJwt AuthJwt     `json:"auth_jwt"`
+	AuthJwt       string      `json:"auth_jwt_str"`
+	AuthJwtType   SsoAuthType `json:"auth_jwt_type"`
+	UserId        server.Id   `json:"user_id"`
+}
+
+func validateUserAuthAvailability(
+	ctx context.Context,
+	tx server.PgTx,
+	userAuth string,
+	userId server.Id,
+) error {
+
+	// Every row counts: the user auth is unique per auth type, so this user
+	// and another can each hold it under a different type, and the first row
+	// alone could be this user's while the insert then meets the other's on
+	// the unique index. A failed query raises.
+	heldByOther := func(sql string) bool {
+		query, err := tx.Query(ctx, sql, userAuth)
+		held := false
+		server.WithPgResult(query, err, func() {
+			for query.Next() {
+				var holderUserId server.Id
+				server.Raise(query.Scan(&holderUserId))
+				if holderUserId != userId {
+					held = true
+				}
+			}
+		})
+		return held
+	}
+
+	/**
+	 * check if the user_auth is already associated with a different user in sso table
+	 */
+	if heldByOther(`
+		SELECT user_id
+		   FROM network_user_auth_sso
+		   WHERE user_auth = $1
+		`) {
+		// user auth is associated with a different user
+		return fmt.Errorf("user_auth %s already exists for a different user", userAuth)
+	}
+
+	/**
+	 * check if the user_auth is already associated with a different user in email/phone + password table
+	 */
+	if heldByOther(`
+		SELECT user_id
+		   FROM network_user_auth_password
+		   WHERE user_auth = $1
+		`) {
+		// user already exists with this user_auth
+		return fmt.Errorf("user_auth %s already exists for a different user", userAuth)
+	}
+
+	return nil
+}
+
+func addSsoAuth(
+	args *AddSsoAuthArgs,
+	ctx context.Context,
+) (returnErr error) {
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		returnErr = addSsoAuthInTx(tx, ctx, args)
+
+	})
+
+	return returnErr
+
+}
+
+func addSsoAuthInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	args *AddSsoAuthArgs,
+) (returnErr error) {
+
+	parsedAuthJwt := args.ParsedAuthJwt
+
+	normalJwtUserAuth, _ := NormalUserAuth(parsedAuthJwt.UserAuth)
+
+	/**
+	 * Check user auth isn't already associated with a different user
+	 */
+	// rows are stored under the normalized user auth, so the conflict check
+	// must use it too
+	err := validateUserAuthAvailability(
+		ctx,
+		tx,
+		normalJwtUserAuth,
+		args.UserId,
+	)
+	if err != nil {
+		returnErr = err
+		return
+	}
+
+	// A failed insert raises, so it never reads as the refusal below. Another
+	// user's concurrent link of the same identity commits after this
+	// transaction's snapshot and meets the insert on UNIQUE (user_auth,
+	// auth_type); the rerun's availability check then refuses it.
+	result := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO network_user_auth_sso
+			(user_id, auth_type, user_auth, auth_jwt)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (user_id, auth_type) DO NOTHING;
+		`,
+		args.UserId,
+		parsedAuthJwt.AuthType,
+		normalJwtUserAuth,
+		args.AuthJwt,
+	))
+
+	if result.RowsAffected() <= 0 {
+		// If no rows were affected, it means the user_id and auth_type already exist
+		returnErr = fmt.Errorf("SSO auth for user_id %s and auth_type %s already exists", args.UserId, parsedAuthJwt.AuthType)
+		return
+	}
+
+	return nil
+
+}
+
+/**
+ * Get all SSO auths for a user by user ID
+ */
+func getSsoAuths(
+	ctx context.Context,
+	userId server.Id,
+) ([]NetworkUserSsoAuth, error) {
+
+	var ssoAuths []NetworkUserSsoAuth
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT
+				user_id,
+				auth_type,
+				auth_jwt,
+				user_auth
+			FROM network_user_auth_sso
+			WHERE user_id = $1
+		`,
+			userId,
+		)
+		if err != nil {
+			server.Raise(err)
+		}
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				ssoAuth := NetworkUserSsoAuth{}
+				server.Raise(result.Scan(
+					&ssoAuth.UserId,
+					&ssoAuth.AuthType,
+					&ssoAuth.AuthJwt,
+					&ssoAuth.UserAuth,
+				))
+				ssoAuths = append(ssoAuths, ssoAuth)
+			}
+		})
+
+	})
+
+	return ssoAuths, nil
+}
+
+/**
+ * Get SSO auths by user auth
+ */
+func getSsoAuthsByUserAuth(
+	ctx context.Context,
+	userAuth string,
+) ([]NetworkUserSsoAuth, error) {
+
+	var ssoAuths []NetworkUserSsoAuth
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT
+					user_id,
+					auth_type,
+					auth_jwt,
+					user_auth
+				FROM network_user_auth_sso
+				WHERE user_auth = $1
+			`,
+			userAuth,
+		)
+		if err != nil {
+			server.Raise(err)
+		}
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				ssoAuth := NetworkUserSsoAuth{}
+				server.Raise(result.Scan(
+					&ssoAuth.UserId,
+					&ssoAuth.AuthType,
+					&ssoAuth.AuthJwt,
+					&ssoAuth.UserAuth,
+				))
+				ssoAuths = append(ssoAuths, ssoAuth)
+			}
+		})
+
+	})
+
+	return ssoAuths, nil
+}
+
+/**
+ * Currently only allowing 1 wallet auth per user
+ * We can expand on this if needed
+ */
+type AddWalletAuthArgs struct {
+	UserId     server.Id       `json:"user_id"`
+	WalletAuth *WalletAuthArgs `json:"wallet_auth"`
+}
+
+func addWalletAuth(
+	addWalletAuth *AddWalletAuthArgs,
+	ctx context.Context,
+) (err error) {
+	if err = validateWalletAuth(addWalletAuth.WalletAuth); err != nil {
+		return err
+	}
+	// Adding a wallet is proof of key possession, so it takes the same
+	// server-issued single-use challenge as wallet login and network create:
+	// the signed message must be the exact text issued by
+	// POST /auth/wallet-challenge (challenge value + timestamp), unexpired and
+	// unused. A signature over any other text is rejected here so a captured
+	// signature cannot be replayed to bind the wallet to another account.
+	walletAuth := addWalletAuth.WalletAuth
+	useResult, useErr := UseWalletAuthChallenge(&UseWalletAuthChallengeArgs{
+		Blockchain: walletAuth.Blockchain,
+		PublicKey:  walletAuth.PublicKey,
+		Message:    walletAuth.Message,
+		Signature:  walletAuth.Signature,
+	}, ctx)
+	if useErr != nil {
+		return useErr
+	}
+	if useResult.SignatureMismatch {
+		// validateWalletAuth already refuses this signature; kept so the code
+		// survives if that check ever goes
+		return errWalletSignatureMismatch
+	}
+	if !useResult.Valid {
+		if useResult.Error != nil {
+			return errors.New(useResult.Error.Message)
+		}
+		return errors.New("401 invalid wallet challenge")
+	}
+	server.Tx(ctx, func(tx server.PgTx) {
+		err = addWalletAuthInTx(tx, addWalletAuth, ctx)
+	})
+	return err
+}
+
+func validateWalletAuth(walletAuth *WalletAuthArgs) error {
+	if walletAuth == nil {
+		return errors.New("400 wallet auth is required")
+	}
+	if walletAuth.Signature == "" || walletAuth.Message == "" {
+		return errors.New("400 wallet signature and message are required")
+	}
+	if walletAuth.Blockchain == "" {
+		walletAuth.Blockchain = SOL.String()
+	}
+	parsedBlockchain, err := ParseBlockchain(walletAuth.Blockchain)
+	if err != nil {
+		return errors.New("400 " + err.Error())
+	}
+	if parsedBlockchain != SOL && parsedBlockchain != TAO {
+		return errors.New("400 wallet auth only supports solana and bittensor")
+	}
+	walletAuth.Blockchain = parsedBlockchain.String()
+	// Validate the address before verifying, the way CreateWalletAuthChallenge
+	// and UseWalletAuthChallenge do. Without it a malformed address surfaces
+	// from the chain verifier as a signature problem, which points an
+	// integrator at the wrong half of the request.
+	validAddress := false
+	switch parsedBlockchain {
+	case SOL:
+		_, addrErr := solana.PublicKeyFromBase58(walletAuth.PublicKey)
+		validAddress = addrErr == nil
+	case TAO:
+		validAddress = IsValidBittensorAddress(walletAuth.PublicKey)
+	}
+	if !validAddress {
+		return errors.New("400 invalid wallet address")
+	}
+	isValid, err := VerifySignature(
+		walletAuth.Blockchain,
+		walletAuth.PublicKey,
+		walletAuth.Message,
+		walletAuth.Signature,
+	)
+	if err != nil {
+		// A verifier error is always client input (an undecodable signature,
+		// or a key the curve rejects), never a server fault. Returning it
+		// verbatim reaches the router as an unprefixed error and becomes a
+		// 500 carrying the raw text; answer in the same shape as a signature
+		// that decoded and simply did not verify.
+		glog.Infof(
+			"Wallet signature verification failed: blockchain=%s err=%s",
+			walletAuth.Blockchain,
+			err.Error(),
+		)
+		if errors.Is(err, ErrWalletSignatureEncoding) {
+			return errors.New("400 invalid signature encoding")
+		}
+		return errors.New("401 invalid signature")
+	}
+	if !isValid {
+		// decoded cleanly but not this address over this message
+		return errWalletSignatureMismatch
+	}
+	return nil
+}
+
+func walletAuthType(blockchain string) AuthType {
+	parsedBlockchain, err := ParseBlockchain(blockchain)
+	if err == nil && parsedBlockchain == TAO {
+		return AuthTypeBittensor
+	}
+	return AuthTypeSolana
+}
+
+func addWalletAuthInTx(
+	tx server.PgTx,
+	addWalletAuth *AddWalletAuthArgs,
+	ctx context.Context,
+) (err error) {
+	walletAuth := addWalletAuth.WalletAuth
+
+	// Check for an existing binding of this wallet to a different user
+	// before attempting the INSERT below, mirroring the
+	// validateUserAuthAvailability pre-check addUserAuthInTx does for
+	// email/phone auth. A unique violation from the INSERT or the mirror
+	// update aborts this transaction and is no answer for the client, so
+	// every conflict that is already committed is refused here, at once.
+	// Only a concurrent link of the same wallet, committed after this
+	// transaction's snapshot, can still meet a unique index; the statement
+	// raises, and server.Tx's rerun sees that link in these checks.
+	//
+	// The wallet half of this deliberately does NOT filter on blockchain.
+	// UNIQUE (wallet_address, blockchain) is byte exact, so a row holding a
+	// non-canonical label -- the legacy lowercase 'solana' that
+	// MigrateNetworkUserChildAuths writes -- is invisible both to the
+	// constraint and to a `blockchain = 'SOL'` pre-check, which let the same
+	// wallet bind to a second account. A single address string belongs to one
+	// chain in practice (a 32 byte base58 Solana key and a 35/36 byte ss58
+	// Bittensor address cannot collide), so any row for this address that
+	// belongs to another user is a conflict regardless of its label.
+	//
+	// The user half enforces the one-wallet-per-user shape the table's
+	// PRIMARY KEY (user_id) already has: without it the upsert below would
+	// silently replace a user's bound wallet with a different one, discarding
+	// the only credential that could still sign them in.
+	//
+	// Note the interaction with RemoveAuth, which refuses to remove the last
+	// remaining auth method: a wallet-only account (created through wallet
+	// network-create, no email or password) can no longer swap wallets in one
+	// call, and must add a second sign-in method first. That is deliberate.
+	// The alternative -- permitting the replacement precisely when the wallet
+	// is the sole credential -- keeps the silent overwrite in the one case
+	// where getting it wrong loses the account permanently, so the error says
+	// what to do instead.
+	var conflictUserId *server.Id
+	var boundWalletAddress *string
+	result, queryErr := tx.Query(
+		ctx,
+		`
+				SELECT user_id, wallet_address FROM network_user_auth_wallet
+				WHERE wallet_address = $1 OR user_id = $2
+			`,
+		walletAuth.PublicKey,
+		addWalletAuth.UserId,
+	)
+	server.WithPgResult(result, queryErr, func() {
+		for result.Next() {
+			var rowUserId *server.Id
+			var rowWalletAddress *string
+			server.Raise(result.Scan(&rowUserId, &rowWalletAddress))
+			if rowUserId != nil && *rowUserId == addWalletAuth.UserId {
+				boundWalletAddress = rowWalletAddress
+				continue
+			}
+			if rowWalletAddress != nil && *rowWalletAddress == walletAuth.PublicKey {
+				conflictUserId = rowUserId
+			}
+		}
+	})
+	if conflictUserId != nil {
+		err = errors.New("409 This wallet is already linked to another account.")
+		return
+	}
+	if boundWalletAddress != nil && *boundWalletAddress != walletAuth.PublicKey {
+		err = errors.New("409 A different wallet is already linked to this account. Remove that wallet first; if it is your only sign-in method, add an email, phone, or generate a seedphrase before removing it.")
+		return
+	}
+
+	// network_user.wallet_address has a global (not per-user) unique index
+	// too, and a legacy account can hold the wallet there alone: its
+	// network_user.wallet_address was set before network_user_auth_wallet
+	// existed and was never cleared. That is the same refusal; without it the
+	// mirror update below fails on the index and the client gets no answer.
+	var legacyHolder bool
+	server.Raise(tx.QueryRow(
+		ctx,
+		`
+			SELECT EXISTS (
+				SELECT 1 FROM network_user
+				WHERE wallet_address = $1 AND user_id <> $2
+			)
+		`,
+		walletAuth.PublicKey,
+		addWalletAuth.UserId,
+	).Scan(&legacyHolder))
+	if legacyHolder {
+		err = errors.New("409 This wallet is already linked to another account.")
+		return
+	}
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+				INSERT INTO network_user_auth_wallet
+				(user_id, wallet_address, blockchain)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (user_id)
+				DO UPDATE SET
+					wallet_address = $2,
+					blockchain = $3,
+					create_time = now();
+			`,
+		addWalletAuth.UserId,
+		walletAuth.PublicKey,
+		walletAuth.Blockchain,
+	))
+
+	// Mirror onto network_user's top-level wallet columns, symmetric
+	// with RemoveAuth's solana branch which clears them. Without this,
+	// a remove-then-re-add cycle leaves wallet_address/wallet_blockchain
+	// nil even though network_user_auth_wallet has the wallet bound.
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`UPDATE network_user
+			 SET wallet_address = $2, wallet_blockchain = $3
+			 WHERE user_id = $1`,
+		addWalletAuth.UserId,
+		walletAuth.PublicKey,
+		walletAuth.Blockchain,
+	))
+	return nil
+}
+
+func getWalletAuths(
+	ctx context.Context,
+	userId server.Id,
+) ([]NetworkUserWalletAuth, error) {
+
+	var walletAuths []NetworkUserWalletAuth
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT
+				wallet_address,
+				blockchain
+			FROM network_user_auth_wallet
+			WHERE user_id = $1
+		`,
+			userId,
+		)
+		if err != nil {
+			server.Raise(err)
+		}
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				walletAuth := NetworkUserWalletAuth{}
+				server.Raise(result.Scan(
+					&walletAuth.WalletAddress,
+					&walletAuth.Blockchain,
+				))
+				walletAuths = append(walletAuths, walletAuth)
+			}
+		})
+
+	})
+
+	return walletAuths, nil
+}
+
+func getSeedphraseAuths(
+	ctx context.Context,
+	userId server.Id,
+) ([]NetworkUserSeedphraseAuth, error) {
+
+	var seedphraseAuths []NetworkUserSeedphraseAuth
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT
+				create_time
+			FROM network_user_auth_seedphrase
+			WHERE user_id = $1
+		`,
+			userId,
+		)
+		if err != nil {
+			server.Raise(err)
+		}
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				sa := NetworkUserSeedphraseAuth{}
+				server.Raise(result.Scan(
+					&sa.CreateTime,
+				))
+				seedphraseAuths = append(seedphraseAuths, sa)
+			}
+		})
+
+	})
+
+	return seedphraseAuths, nil
+}
+
+func getWalletAuthsByAddress(
+	ctx context.Context,
+	walletAddress string,
+) ([]NetworkUserWalletAuth, error) {
+
+	var walletAuths []NetworkUserWalletAuth
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		result, err := tx.Query(
+			ctx,
+			`
+				SELECT
+					user_id,
+					wallet_address,
+					blockchain
+				FROM network_user_auth_wallet
+				WHERE wallet_address = $1
+				ORDER BY create_time, user_id
+			`,
+			walletAddress,
+		)
+		if err != nil {
+			server.Raise(err)
+		}
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				walletAuth := NetworkUserWalletAuth{}
+				server.Raise(result.Scan(
+					&walletAuth.UserId,
+					&walletAuth.WalletAddress,
+					&walletAuth.Blockchain,
+				))
+				walletAuths = append(walletAuths, walletAuth)
+			}
+		})
+
+	})
+
+	return walletAuths, nil
+}
+
+// filterWalletAuthsByBlockchain keeps the bindings whose stored blockchain
+// resolves to the same chain as the presented one. Both sides go through
+// ParseBlockchain rather than a string compare, so a column value written
+// before canonicalization ('solana') resolves the same account as the
+// canonical 'SOL' a client presents -- a byte-exact or even case-insensitive
+// compare would stop resolving those accounts and silently present them as a
+// new signup. A row whose value does not parse at all is dropped rather than
+// matched by accident.
+func filterWalletAuthsByBlockchain(
+	walletAuths []NetworkUserWalletAuth,
+	blockchain string,
+) []NetworkUserWalletAuth {
+	if strings.TrimSpace(blockchain) == "" {
+		blockchain = SOL.String()
+	}
+	presented, err := ParseBlockchain(blockchain)
+	if err != nil {
+		return nil
+	}
+	matched := []NetworkUserWalletAuth{}
+	for _, walletAuth := range walletAuths {
+		stored, err := ParseBlockchain(walletAuth.Blockchain)
+		if err == nil && stored == presented {
+			matched = append(matched, walletAuth)
+		}
+	}
+	return matched
+}
+
+func FindNetworkIdByWalletAddress(ctx context.Context, walletAddress string) (networkId *server.Id, err error) {
+
+	server.Tx(ctx, func(tx server.PgTx) {
+
+		result, execErr := tx.Query(
+			ctx,
+			`
+			SELECT network.network_id
+			FROM network
+			WHERE EXISTS (
+			  SELECT 1 FROM network_user_auth_wallet
+			  WHERE network_user_auth_wallet.user_id = network.admin_user_id AND network_user_auth_wallet.wallet_address = $1
+			)
+			`,
+			walletAddress,
+		)
+		if execErr != nil {
+			err = execErr
+		}
+
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				server.Raise(result.Scan(
+					&networkId,
+				))
+			}
+		})
+	})
+
+	return
+}
+
+// migratedWalletBlockchain canonicalises a legacy network_user.wallet_blockchain
+// for the network_user_auth_wallet row the migration writes.
+//
+// Both migrations passed SOL unconditionally while the value was sitting in the
+// row they had already read (NetworkUserToMigrate.Blockchain, scanned from
+// nu.wallet_blockchain). A legacy TAO account migrated that way gets a row
+// labelled 'SOL': filterWalletAuthsByBlockchain then drops it for a TAO caller,
+// so the account is unreachable by its own wallet and GET /network/user reports
+// auth_types:["solana"].
+//
+// The uniqueness checks and filterWalletAuthsByBlockchain compare this column
+// byte-exactly, so the label must be the canonical one ParseBlockchain produces,
+// not the raw legacy text. SOL stays the fallback for a NULL or unparseable
+// value -- what the column held before wallet_blockchain existed.
+func migratedWalletBlockchain(blockchain *string) string {
+	if blockchain != nil {
+		if parsed, err := ParseBlockchain(*blockchain); err == nil {
+			return parsed.String()
+		}
+	}
+	return SOL.String()
+}
+
+/**
+ * Migrating network_user to the new model
+ * This is a temporary structure to hold the data
+ */
+type NetworkUserToMigrate struct {
+	UserId        server.Id `json:"user_id"`
+	UserAuth      *string   `json:"user_auth,omitempty"`
+	Verified      bool      `json:"verified"`
+	AuthType      *string   `json:"auth_type"`
+	PasswordHash  *[]byte   `json:"-"`
+	PasswordSalt  *[]byte   `json:"-"`
+	AuthJwt       *string   `json:"auth_jwt"`
+	WalletAddress *string   `json:"wallet_address,omitempty"`
+	Blockchain    *string   `json:"wallet_blockchain"`
+}
+
+/**
+ * Remove this once migration is complete
+ */
+
+func MigrateNetworkUserChildAuthsOriginal(
+	ctx context.Context,
+) {
+
+	server.Db(ctx, func(conn server.PgConn) {
+
+		server.Tx(ctx, func(tx server.PgTx) {
+			result, err := conn.Query(
+				ctx,
+				`
+				SELECT
+					user_id,
+					user_auth,
+					verified,
+					auth_type,
+					password_hash,
+					password_salt,
+					auth_jwt,
+					wallet_address,
+					blockchain
+				FROM network_user
+				`,
+			)
+
+			var networkUsers []NetworkUserToMigrate
+
+			// a failed query or scan raises, which ends the migration with its
+			// cause
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+
+					networkUser := NetworkUserToMigrate{}
+
+					server.Raise(result.Scan(
+						&networkUser.UserId,
+						&networkUser.UserAuth,
+						&networkUser.Verified,
+						&networkUser.AuthType,
+						&networkUser.PasswordHash,
+						&networkUser.PasswordSalt,
+						&networkUser.AuthJwt,
+						&networkUser.WalletAddress,
+						&networkUser.Blockchain,
+					))
+
+					networkUsers = append(networkUsers, networkUser)
+				}
+			})
+
+			for _, networkUser := range networkUsers {
+
+				if networkUser.UserAuth != nil && networkUser.PasswordHash != nil && networkUser.PasswordSalt != nil {
+
+					/**
+					 * Email or phone + password auth
+					 */
+
+					err := addUserAuthInTx(
+						tx,
+						&AddUserAuthArgs{
+							UserId:       networkUser.UserId,
+							UserAuth:     networkUser.UserAuth,
+							PasswordHash: *networkUser.PasswordHash,
+							PasswordSalt: *networkUser.PasswordSalt,
+							Verified:     networkUser.Verified,
+						},
+						ctx,
+					)
+
+					if err != nil {
+						glog.Errorf("Error adding user auth for user %s: %v", networkUser.UserId, err)
+					} else {
+						glog.Infof("Added user auth for user %s: %s", networkUser.UserId, *networkUser.UserAuth)
+					}
+				}
+
+				if networkUser.AuthJwt != nil && networkUser.AuthType != nil {
+
+					/**
+					 * Google or Apple SSO auth
+					 */
+					authJwt, err := ParseAuthJwtUnverified(*networkUser.AuthJwt, AuthType(*networkUser.AuthType))
+					if err != nil {
+						glog.Errorf("Error parsing auth jwt for user %s: %v", networkUser.UserId, err)
+						continue
+					}
+
+					err = addSsoAuth(
+						&AddSsoAuthArgs{
+							ParsedAuthJwt: *authJwt,
+							AuthJwt:       *networkUser.AuthJwt,
+							AuthJwtType:   SsoAuthType(*networkUser.AuthType),
+							UserId:        networkUser.UserId,
+						},
+						ctx,
+					)
+
+					if err != nil {
+						glog.Errorf("Error adding SSO auth for user %s: %v", networkUser.UserId, err)
+					} else {
+						glog.Infof("Added SSO auth for user %s: %s", networkUser.UserId, *networkUser.AuthJwt)
+					}
+
+				}
+
+				if networkUser.WalletAddress != nil {
+
+					/**
+					 * Wallet auth
+					 */
+
+					// a failed insert aborts the migration's transaction, so it
+					// raises rather than go on to commit a rollback
+					server.RaisePgResult(tx.Exec(
+						ctx,
+						`
+							INSERT INTO network_user_auth_wallet
+							(user_id, wallet_address, blockchain)
+							VALUES ($1, $2, $3)
+						`,
+						networkUser.UserId,
+						networkUser.WalletAddress,
+						// the blockchain column, not the auth type: writing
+						// AuthTypeSolana ("solana") here produced rows that the
+						// byte-exact 'SOL' uniqueness checks could not see
+						migratedWalletBlockchain(networkUser.Blockchain),
+					))
+					glog.Infof("Added wallet auth for user %s: %s", networkUser.UserId, *networkUser.WalletAddress)
+
+				}
+
+			}
+
+		})
+
+	})
+}
+
+/**
+ * Remove this once migration is complete
+ */
+
+func MigrateNetworkUserChildAuths(
+	ctx context.Context,
+) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		result, err := tx.Query(
+			ctx,
+			`
+			SELECT
+			    nu.user_id,
+			    nu.user_auth,
+			    nu.verified,
+			    nu.auth_type,
+			    nu.password_hash,
+			    nu.password_salt,
+			    nu.auth_jwt,
+			    nu.wallet_address,
+			    nu.wallet_blockchain
+			FROM
+			    network_user nu
+			LEFT JOIN
+			    network_user_auth_sso sso ON nu.user_id = sso.user_id
+			LEFT JOIN
+			    network_user_auth_password pass ON nu.user_id = pass.user_id
+			LEFT JOIN
+			    network_user_auth_wallet wallet ON nu.user_id = wallet.user_id
+			WHERE
+			    sso.user_id IS NULL
+			    AND pass.user_id IS NULL
+			    AND wallet.user_id IS NULL
+				AND nu.auth_type != 'guest';
+			`,
+		)
+
+		var networkUsers []NetworkUserToMigrate
+		userCount := 0
+
+		// a failed query or scan raises, which ends the migration with its
+		// cause
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+
+				networkUser := NetworkUserToMigrate{}
+
+				server.Raise(result.Scan(
+					&networkUser.UserId,
+					&networkUser.UserAuth,
+					&networkUser.Verified,
+					&networkUser.AuthType,
+					&networkUser.PasswordHash,
+					&networkUser.PasswordSalt,
+					&networkUser.AuthJwt,
+					&networkUser.WalletAddress,
+					&networkUser.Blockchain,
+				))
+
+				networkUsers = append(networkUsers, networkUser)
+				userCount += 1
+			}
+		})
+
+		glog.Infof("Migrating %d network users", userCount)
+
+		i := 0
+
+		for _, networkUser := range networkUsers {
+
+			glog.Infof("Migrating user %d/%d: %s", i+1, userCount, networkUser.UserId)
+
+			i += 1
+
+			if networkUser.UserAuth != nil && networkUser.PasswordHash != nil && networkUser.PasswordSalt != nil {
+
+				/**
+				 * Email or phone + password auth
+				 */
+
+				err := addUserAuthInTx(
+					tx,
+					&AddUserAuthArgs{
+						UserId:       networkUser.UserId,
+						UserAuth:     networkUser.UserAuth,
+						PasswordHash: *networkUser.PasswordHash,
+						PasswordSalt: *networkUser.PasswordSalt,
+						Verified:     networkUser.Verified,
+					},
+					ctx,
+				)
+
+				if err != nil {
+					glog.Errorf("Error adding user auth for user %s: %v", networkUser.UserId, err)
+				} else {
+					glog.Infof("Added user auth for user %s: %s", networkUser.UserId, *networkUser.UserAuth)
+				}
+			}
+
+			if networkUser.AuthJwt != nil && networkUser.AuthType != nil {
+
+				/**
+				 * Google or Apple SSO auth
+				 */
+				authJwt, err := ParseAuthJwtUnverified(*networkUser.AuthJwt, AuthType(*networkUser.AuthType))
+				if err != nil {
+					glog.Errorf("Error parsing auth jwt for user %s: %v", networkUser.UserId, err)
+					continue
+				}
+
+				err = addSsoAuth(
+					&AddSsoAuthArgs{
+						ParsedAuthJwt: *authJwt,
+						AuthJwt:       *networkUser.AuthJwt,
+						AuthJwtType:   SsoAuthType(*networkUser.AuthType),
+						UserId:        networkUser.UserId,
+					},
+					ctx,
+				)
+
+				if err != nil {
+					glog.Errorf("Error adding SSO auth for user %s: %v", networkUser.UserId, err)
+				} else {
+					glog.Infof("Added SSO auth for user %s: %s", networkUser.UserId, *networkUser.AuthJwt)
+				}
+
+			}
+
+			if networkUser.WalletAddress != nil {
+
+				/**
+				 * Wallet auth
+				 */
+
+				// a failed insert aborts the migration's transaction, so it
+				// raises rather than go on to commit a rollback
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+						INSERT INTO network_user_auth_wallet
+						(user_id, wallet_address, blockchain)
+						VALUES ($1, $2, $3)
+					`,
+					networkUser.UserId,
+					networkUser.WalletAddress,
+					// the blockchain column, not the auth type -- see the same
+					// fix in MigrateNetworkUserChildAuthsOriginal
+					migratedWalletBlockchain(networkUser.Blockchain),
+				))
+				glog.Infof("Added wallet auth for user %s: %s", networkUser.UserId, *networkUser.WalletAddress)
+
+			}
+
+		}
+
+	})
+}
+
+// HasAnyAuthMethod reports whether userId has at least one bound
+// password/phone, SSO, wallet, or seedphrase auth method.
+//
+// This exists because neither the JWT's GuestMode claim nor
+// network_user.auth_type reliably reflect whether a legacy guest account
+// (auth_type = 'guest', now silently treated as a normal account since guest
+// signup was retired) has since added a real auth method via AddAuth:
+// RefreshToken re-signs guest JWTs with GuestMode=false unconditionally, and
+// AddAuth never updates network_user.auth_type when adding a guest's first
+// real method. A live count across the auth tables is the only accurate
+// signal, and it self-heals the moment a guest adds a method -- no refresh
+// or auth_type backfill required.
+func HasAnyAuthMethod(ctx context.Context, userId server.Id) bool {
+	var count int
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`SELECT COUNT(*) FROM (
+				SELECT 1 FROM network_user_auth_password WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_sso WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_wallet WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_seedphrase WHERE user_id = $1
+			) AS auth_counts`,
+			userId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&count))
+			}
+		})
+	})
+	return 0 < count
+}
+
+// removeAuthMethodIsBound reports whether the row backing a requested auth
+// method exists, so RemoveAuth can refuse instead of running a DELETE that
+// matches nothing and reporting success.
+func removeAuthMethodIsBound(
+	ctx context.Context,
+	tx server.PgTx,
+	query string,
+	args ...any,
+) bool {
+	bound := false
+	result, err := tx.Query(ctx, query, args...)
+	server.WithPgResult(result, err, func() {
+		bound = result.Next()
+	})
+	return bound
+}
+
+func RemoveAuth(ctx context.Context, userId server.Id, authType string) error {
+	if err := CheckAccountActionRateLimit(
+		ctx,
+		userId,
+		AccountActionRemoveAuth,
+		AccountActionRemoveAuthDailyLimit,
+		AccountActionDailyWindow,
+	); err != nil {
+		return err
+	}
+
+	var validationErr error
+
+	server.Tx(ctx, func(tx server.PgTx) {
+		// Lock the user row for the duration of this tx so a concurrent
+		// RemoveAuth call blocks (and retries via server.Tx's serialization
+		// handling) instead of both calls reading the same stale auth-method
+		// count and both committing, which can leave the account with zero
+		// remaining auth methods.
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`SELECT 1 FROM network_user WHERE user_id = $1 FOR UPDATE`,
+			userId,
+		))
+
+		currentCount := 0
+		countResult, err := tx.Query(
+			ctx,
+			`SELECT COUNT(*) FROM (
+				SELECT 1 FROM network_user_auth_password WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_sso WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_wallet WHERE user_id = $1
+				UNION ALL
+				SELECT 1 FROM network_user_auth_seedphrase WHERE user_id = $1
+			) AS auth_counts`,
+			userId,
+		)
+		server.WithPgResult(countResult, err, func() {
+			if countResult.Next() {
+				server.Raise(countResult.Scan(&currentCount))
+			}
+		})
+		if currentCount <= 1 {
+			validationErr = fmt.Errorf("cannot remove your last auth method")
+			return
+		}
+
+		// The wallet this account has bound, named the way auth_types[] names
+		// it, or empty when it has none. Read before the switch because two
+		// things need it: the refusal below, and the scalar reconcile at the
+		// end of this function, which used to classify the chain with its own
+		// SQL CASE. That CASE recognised 'TAO' but not the 'bittensor' spelling
+		// ParseBlockchain also accepts, so a row carrying the non-canonical
+		// label was reconciled to 'solana'. Deriving the name once, in Go,
+		// through walletAuthType leaves one classification rule instead of two.
+		//
+		// blockchain is `varchar(32) NOT NULL`, so scanning into a string
+		// cannot raise and turn a refusal into a 500.
+		walletLabel := ""
+		var storedBlockchain string
+		walletResult, walletErr := tx.Query(
+			ctx,
+			`SELECT blockchain FROM network_user_auth_wallet WHERE user_id = $1`,
+			userId,
+		)
+		server.WithPgResult(walletResult, walletErr, func() {
+			if walletResult.Next() {
+				server.Raise(walletResult.Scan(&storedBlockchain))
+				walletLabel = walletAuthType(storedBlockchain)
+			}
+		})
+
+		// Every branch below refuses a method this account does not actually
+		// have. Previously the only guard was the last-method count: the DELETE
+		// then matched nothing and the call still reported success, so a client
+		// that unlinked Apple from a google+email account was told it worked.
+		//
+		// The wallet branch was the sharpest instance. Its DELETE has no
+		// blockchain predicate, so "solana" and "bittensor" behaved as
+		// interchangeable aliases and {"auth_type":"solana"} deleted a
+		// Bittensor wallet. Comparing against walletLabel makes the chain a
+		// predicate instead of a label, without a special case.
+		//
+		// The message carries the status the refusal deserves even though this
+		// function's only caller answers 200 with a structured body and peels
+		// the prefix off (controller.RemoveAuth). That is deliberate: every
+		// user-caused refusal in this package states its own status, so the
+		// value is right wherever the error ends up, and the endpoint's wire
+		// shape stays a decision made at the boundary rather than encoded here.
+		notBound := func() {
+			validationErr = fmt.Errorf("400 %s is not a sign-in method on this account", authType)
+		}
+
+		switch authType {
+		case "email", "phone":
+			if !removeAuthMethodIsBound(
+				ctx, tx,
+				`SELECT 1 FROM network_user_auth_password WHERE user_id = $1 AND auth_type = $2`,
+				userId, authType,
+			) {
+				notBound()
+				return
+			}
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_user_auth_password
+				 WHERE user_id = $1 AND auth_type = $2`,
+				userId, authType,
+			))
+		case "apple", "google":
+			if !removeAuthMethodIsBound(
+				ctx, tx,
+				`SELECT 1 FROM network_user_auth_sso WHERE user_id = $1 AND auth_type = $2`,
+				userId, authType,
+			) {
+				notBound()
+				return
+			}
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_user_auth_sso
+				 WHERE user_id = $1 AND auth_type = $2`,
+				userId, authType,
+			))
+		case "solana", "bittensor":
+			if walletLabel != authType {
+				notBound()
+				return
+			}
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_user_auth_wallet
+				 WHERE user_id = $1`,
+				userId,
+			))
+			// Clear wallet fields on network_user so the wallet
+			// can be reused to create a fresh account
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE network_user
+				 SET wallet_address = NULL, wallet_blockchain = NULL
+				 WHERE user_id = $1`,
+				userId,
+			))
+			walletLabel = ""
+		case "seedphrase":
+			if !removeAuthMethodIsBound(
+				ctx, tx,
+				`SELECT 1 FROM network_user_auth_seedphrase WHERE user_id = $1`,
+				userId,
+			) {
+				notBound()
+				return
+			}
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`DELETE FROM network_user_auth_seedphrase
+				 WHERE user_id = $1`,
+				userId,
+			))
+		default:
+			// network_user.auth_type is a second, wider vocabulary (it can hold
+			// 'password', 'bringyour', 'guest'); a client that echoes that
+			// scalar back lands here. Name the surface that carries the values
+			// this endpoint does accept.
+			validationErr = fmt.Errorf(
+				"unknown auth type: %s (use a value from auth_types in GET /network/user)",
+				authType,
+			)
+			return
+		}
+
+		// Update network_user.auth_type to match what's actually left.
+		// The app reads this field to show available sign-in methods,
+		// so it must reflect reality after removal.
+		//
+		// walletLabel is NULL when no wallet row survives this call, so the
+		// wallet arm of the COALESCE is skipped exactly as an empty subquery
+		// would have been.
+		var remainingWalletLabel *string
+		if walletLabel != "" {
+			remainingWalletLabel = &walletLabel
+		}
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`UPDATE network_user
+			 SET auth_type = COALESCE(
+				 (SELECT auth_type FROM network_user_auth_password  WHERE user_id = $1 LIMIT 1),
+				 (SELECT 'apple'   FROM network_user_auth_sso       WHERE user_id = $1 AND auth_type = 'apple'  LIMIT 1),
+				 (SELECT 'google'  FROM network_user_auth_sso       WHERE user_id = $1 AND auth_type = 'google' LIMIT 1),
+				 (SELECT $2::text  FROM network_user_auth_wallet    WHERE user_id = $1 LIMIT 1),
+				 (SELECT 'seedphrase' FROM network_user_auth_seedphrase WHERE user_id = $1 LIMIT 1),
+				 auth_type
+			 )
+			 WHERE user_id = $1`,
+			userId,
+			remainingWalletLabel,
+		))
+	})
+
+	if validationErr == nil {
+		RecordAccountActionAttempt(ctx, userId, AccountActionRemoveAuth)
+	}
+
+	return validationErr
+}
+
+// Testing_AddWalletAuth binds a wallet to a user without a signature, for tests
+// that need an account in a given wallet state rather than to exercise the
+// signature path.
+//
+// Blockchain is a parameter, unlike Testing_CreateNetworkByWallet which hard
+// codes AuthTypeSolana -- a TAO fixture built on that helper silently produces
+// a SOL row and any assertion about Bittensor reporting passes for the wrong
+// reason.
+func Testing_AddWalletAuth(
+	ctx context.Context,
+	userId server.Id,
+	blockchain string,
+	walletAddress string,
+) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO network_user_auth_wallet
+				(user_id, wallet_address, blockchain)
+				VALUES ($1, $2, $3)
+				ON CONFLICT (user_id)
+				DO UPDATE SET
+					wallet_address = $2,
+					blockchain = $3
+			`,
+			userId,
+			walletAddress,
+			blockchain,
+		))
+	})
+}
