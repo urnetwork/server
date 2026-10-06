@@ -21,11 +21,12 @@ type residentContractManager struct {
 
 	settings *ExchangeSettings
 
-	stateLock       sync.Mutex
-	activeContracts map[model.TransferPair]*activeContractEntry
-	activeReads     map[model.TransferPair]*activeContractRead
-	readSequence    uint64
-	readContract    func(context.Context, server.Id, server.Id) bool
+	stateLock                   sync.Mutex
+	activeContracts             map[model.TransferPair]*activeContractEntry
+	activeReads                 map[model.TransferPair]*activeContractRead
+	readSequence                uint64
+	readContract                func(context.Context, server.Id, server.Id) bool
+	nextActiveContractSweepTime time.Time
 }
 
 func newResidentContractManager(
@@ -76,6 +77,19 @@ func (self *residentContractManager) HasActiveContract(sourceId server.Id, desti
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		startedSequence = self.readSequence
+		now := time.Now()
+		// A resident can outlive many provider pairs. Reclaim expired positive
+		// checks on the next use instead of retaining their historical keys for
+		// the resident's lifetime. The existing freshness interval bounds sweep
+		// frequency; active reads retain their separate ownership and result.
+		if !now.Before(self.nextActiveContractSweepTime) {
+			for pair, cached := range self.activeContracts {
+				if self.settings.ContractManagerCheckTimeout <= 0 || cached.checkTime.Add(self.settings.ContractManagerCheckTimeout).Before(now) {
+					delete(self.activeContracts, pair)
+				}
+			}
+			self.nextActiveContractSweepTime = now.Add(self.settings.ContractManagerCheckTimeout)
+		}
 
 		if 0 < self.settings.ContractManagerCheckTimeout {
 			var ok bool
@@ -177,7 +191,9 @@ func (self *residentContractManager) performActiveContractRead(
 	if completed {
 		if hasActiveContract {
 			read.entry = &activeContractEntry{checkTime: time.Now()}
-			self.activeContracts[transferPair] = read.entry
+			if 0 < self.settings.ContractManagerCheckTimeout {
+				self.activeContracts[transferPair] = read.entry
+			}
 		} else {
 			delete(self.activeContracts, transferPair)
 		}
