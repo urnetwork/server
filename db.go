@@ -236,6 +236,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		}
 		configurePgPoolLiveness(config)
 		configurePgPoolWriteTracking(config)
+		configurePgPoolStatementErrors(config)
 
 		self.pool, err = pgxpool.NewWithConfig(self.ctx, config)
 		if err != nil {
@@ -309,6 +310,8 @@ type DbRetryOptions struct {
 	rerunOnConnectionError bool
 	// this only works if the conflict, e.g. an ID, is changed on each run
 	// the BY coding style will generate the id in the callback, so this is generally considered safe
+	// a unique or foreign key violation that a rerun repeats exactly ends the
+	// reruns, and permanent errors are never rerun (see db_retry_taxonomy.go)
 	rerunOnTransientError bool
 	retryMinTimeout       time.Duration
 	retryMaxTimeout       time.Duration
@@ -411,25 +414,15 @@ func (self *PgRetry) Error() string {
 	return "retry"
 }
 
-// transient errors can be resolved by either
-// - changing the parameters of the query to avoid constraint conflicts
-// - chaning the timing of the query to avoid rollbacks
+// Whether a rerun of the whole callback can resolve the error: a
+// serialization failure or deadlock, an explicit `PgRetry`, or a unique or
+// foreign key violation, which a rerun resolves unless it repeats (see
+// db_retry_taxonomy.go). Every other error, including the other integrity
+// violations and every data exception, is permanent.
 // https://www.postgresql.org/docs/current/mvcc-serialization-failure-handling.html
 // https://www.postgresql.org/docs/current/errcodes-appendix.html
 func isTransientError(err error) bool {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		if pgErr.Code == pgerrcode.StatementCompletionUnknown {
-			return false
-		}
-		return pgerrcode.IsIntegrityConstraintViolation(pgErr.Code) ||
-			pgerrcode.IsTransactionRollback(pgErr.Code)
-	}
-	var retryErr *PgRetry
-	if errors.As(err, &retryErr) {
-		return true
-	}
-	return false
+	return pgRetryClassOf(err) != pgRetryNever
 }
 
 func isConnectionError(err error) bool {
@@ -615,6 +608,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 	retryEndTime := NowUtc().Add(retryOptions.endRetryTimeout)
 	// retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
 	backoff := retryOptions.Backoff()
+	retryEvidence := &callbackRetryEvidence{}
 	for {
 		var pgErr error
 		connectionContextDone := false
@@ -682,7 +676,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 		}()
 
 		if pgErr != nil {
-			if isTransientError(pgErr) && retryOptions.rerunOnTransientError {
+			if retryOptions.rerunOnTransientError && retryEvidence.CanRerun(pgErr) {
 				waitStarted := timing.start()
 				select {
 				case <-ctx.Done():
@@ -691,6 +685,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				case <-time.After(backoff.NextRetryTimeout()):
 					timing.finish(DbTimingRetryWait, waitStarted)
 					if retryEndTime.Before(NowUtc()) {
+						recordRerunDecision(pgErr, rerunDecisionEndedBudget)
 						panic(pgErr)
 					}
 					if glog.V(2) {
@@ -809,10 +804,14 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 	retryEndTime := NowUtc().Add(retryOptions.endRetryTimeout)
 	// retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
 	backoff := retryOptions.Backoff()
+	retryEvidence := &callbackRetryEvidence{}
 	for {
 		var pgErr error
 		var commitErr error
 		dbWithPool(ctx, pool, func(conn PgConn) {
+			// an earlier use of the pooled connection is not evidence about
+			// this attempt
+			pgStatementErrorRecorderOf(conn.Conn().PgConn()).Reset()
 			beginStarted := timing.start()
 			tx, err := conn.BeginTx(ctx, txOptions)
 			timing.finish(DbTimingBegin, beginStarted)
@@ -835,6 +834,9 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 					if err := recover(); err != nil {
 						switch v := err.(type) {
 						case error:
+							// a statement refused in a transaction an earlier
+							// statement aborted is classified by that statement
+							v = withAbortingStatementError(conn.Conn().PgConn(), v, callback)
 							if isTransientError(v) && retryOptions.rerunOnTransientError {
 								pgErr = v
 							} else {
@@ -868,6 +870,12 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				commitErr = tx.Commit(commitCtx)
 				timing.finish(DbTimingCommit, commitStarted)
 				commitCancel()
+				if errors.Is(commitErr, pgx.ErrTxCommitRollback) {
+					// the callback returned normally after one of its
+					// statements failed; the recorded statement error is the
+					// cause and decides whether a rerun can succeed
+					commitErr = abortedCommitError(conn.Conn().PgConn(), commitErr, callback)
+				}
 			} else {
 				rollbackStarted := timing.start()
 				rollbackTx(ctx, tx)
@@ -876,7 +884,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 		}, options...)
 
 		if pgErr != nil {
-			if isTransientError(pgErr) && retryOptions.rerunOnTransientError {
+			if retryOptions.rerunOnTransientError && retryEvidence.CanRerun(pgErr) {
 				waitStarted := timing.start()
 				select {
 				case <-ctx.Done():
@@ -886,6 +894,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 					timing.finish(DbTimingRetryWait, waitStarted)
 				}
 				if retryEndTime.Before(NowUtc()) {
+					recordRerunDecision(pgErr, rerunDecisionEndedBudget)
 					panic(pgErr)
 				}
 				if glog.V(2) {
@@ -898,7 +907,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 			panic(pgErr)
 		}
 		if commitErr != nil {
-			if retryOptions.rerunOnCommitError && canRetryCommitError(commitErr) {
+			if retryOptions.rerunOnCommitError && canRetryCommitError(commitErr) && retryEvidence.CanRerun(commitErr) {
 				waitStarted := timing.start()
 				select {
 				case <-ctx.Done():
@@ -908,6 +917,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 					timing.finish(DbTimingRetryWait, waitStarted)
 				}
 				if retryEndTime.Before(NowUtc()) {
+					recordRerunDecision(commitErr, rerunDecisionEndedBudget)
 					panic(commitErr)
 				}
 				if glog.V(2) {

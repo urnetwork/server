@@ -28,6 +28,22 @@ type pgPoolWireFixture struct {
 	workers     sync.WaitGroup
 	query       func(int, string) bool
 	queryError  func(int, string) *pgproto3.ErrorResponse
+	// the number of coming commits to answer with a rollback, as postgres does
+	// for a transaction aborted by an error the client never received
+	commitRollbacks atomic.Int32
+}
+
+// Whether this commit is one of the rollbacks a test asked for.
+func (self *pgPoolWireFixture) takeCommitRollback() bool {
+	for {
+		count := self.commitRollbacks.Load()
+		if count <= 0 {
+			return false
+		}
+		if self.commitRollbacks.CompareAndSwap(count, count-1) {
+			return true
+		}
+	}
 }
 
 // Supplies a synthetic PostgreSQL startup and simple-query transport.
@@ -86,6 +102,16 @@ func (self *pgPoolWireFixture) dial(ctx context.Context, network string, address
 				if self.query != nil && !self.query(connectionIndex, message.String) {
 					return
 				}
+				// like postgres, an aborted transaction refuses every statement
+				// but its end
+				if txStatus == 'E' && message.String != "commit" && message.String != "rollback" {
+					backend.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: "25P02", Message: "current transaction is aborted, commands ignored until end of transaction block"})
+					backend.Send(&pgproto3.ReadyForQuery{TxStatus: txStatus})
+					if err := backend.Flush(); err != nil {
+						return
+					}
+					continue
+				}
 				if self.queryError != nil {
 					if err := self.queryError(connectionIndex, message.String); err != nil {
 						if message.String == "commit" {
@@ -108,6 +134,10 @@ func (self *pgPoolWireFixture) dial(ctx context.Context, network string, address
 				case strings.HasPrefix(message.String, "begin"):
 					txStatus, commandTag = 'T', "BEGIN"
 					backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(commandTag)})
+				case message.String == "commit" && (txStatus == 'E' || self.takeCommitRollback()):
+					// postgres ends an aborted transaction's commit in a rollback
+					txStatus = 'I'
+					backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("ROLLBACK")})
 				case message.String == "commit" || message.String == "rollback":
 					txStatus = 'I'
 					backend.Send(&pgproto3.CommandComplete{CommandTag: []byte(strings.ToUpper(message.String))})
@@ -147,6 +177,7 @@ func newPgPoolWireFixture(t testing.TB, query func(int, string) bool, shouldPing
 	}
 	configurePgPoolLiveness(config)
 	configurePgPoolWriteTracking(config)
+	configurePgPoolStatementErrors(config)
 	config.ShouldPing = shouldPing
 	pgPool, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {

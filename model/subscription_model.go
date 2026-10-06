@@ -1011,10 +1011,9 @@ func AddBasicTransferBalanceInTx(
 		transferBalance,
 		NanoCents(0),
 	)
-
-	if err != nil {
-		returnErr = err
-	}
+	// a failed insert aborts the caller's transaction, so it raises rather
+	// than leave the caller to commit a rollback
+	server.Raise(err)
 	return
 }
 
@@ -1059,10 +1058,9 @@ func AddProTransferBalanceInTx(
 		transferBalance,
 		NanoCents(0),
 	)
-	if err != nil {
-		returnErr = err
-	}
-
+	// a failed insert aborts the caller's transaction, so it raises rather
+	// than leave the caller to commit a rollback
+	server.Raise(err)
 	return
 }
 
@@ -4613,7 +4611,9 @@ func SubscriptionCreatePaymentId(createPaymentId *SubscriptionCreatePaymentIdArg
 
 		subscriptionPaymentId := server.NewId()
 
-		tx.Exec(
+		// a failed insert raises: the payment id must not be handed out
+		// unless its row commits
+		server.RaisePgResult(tx.Exec(
 			clientSession.Ctx,
 			`
             INSERT INTO subscription_payment (
@@ -4625,7 +4625,7 @@ func SubscriptionCreatePaymentId(createPaymentId *SubscriptionCreatePaymentIdArg
 			subscriptionPaymentId,
 			clientSession.ByJwt.NetworkId,
 			clientSession.ByJwt.UserId,
-		)
+		))
 
 		createPaymentIdResult = &SubscriptionCreatePaymentIdResult{
 			SubscriptionPaymentId: subscriptionPaymentId,
@@ -4711,7 +4711,10 @@ func LockPaymentNetworkInTx(
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrPaymentNetworkNotFound
 	}
-	return err
+	// any other failure aborts the caller's transaction: it raises, so no
+	// credit path goes on to commit a rollback
+	server.Raise(err)
+	return nil
 }
 
 // LockPlaySubscriptionPurchaseInTx serializes a Play purchase's credit and end
@@ -4730,12 +4733,12 @@ func LockPlaySubscriptionPurchaseInTx(
 	if err := LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
 		return err
 	}
-	_, err := tx.Exec(
+	server.RaisePgResult(tx.Exec(
 		ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
 		purchaseToken,
-	)
-	return err
+	))
+	return nil
 }
 
 func AddSubscriptionRenewalInTx(tx server.PgTx, ctx context.Context, renewal *SubscriptionRenewal) (returnErr error) {
@@ -4771,11 +4774,9 @@ func AddSubscriptionRenewalInTx(tx server.PgTx, ctx context.Context, renewal *Su
 		renewal.SubscriptionMarket,
 		renewal.TransactionId,
 	)
-
-	if err != nil {
-		returnErr = err
-	}
-
+	// a failed insert aborts the caller's transaction, so it raises rather
+	// than leave the credit path to commit a rollback
+	server.Raise(err)
 	return
 }
 

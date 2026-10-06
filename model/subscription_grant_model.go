@@ -120,9 +120,9 @@ func AddGrantTransferBalanceInTx(
 		grantKind == GrantKindPro,
 		grantKind,
 	)
-	if err != nil {
-		returnErr = err
-	}
+	// a failed insert aborts the caller's transaction, so it raises rather
+	// than leave the caller to commit a rollback
+	server.Raise(err)
 	return
 }
 
