@@ -1344,9 +1344,62 @@ current classification reasons. Independent actual gate
 binds the result. This is an older-than-cutover publication, not a zero pool or
 a measured failure of the 900-second age bound. It does not identify an active
 publisher or explain the publication delay. The earlier 547/6,569/56,100 counts
-remain historical; a newly qualified publication and generation-bound sample
-are still needed. Both contacts' later local watcher/fallback checks passed;
-no automatic retry or freshness relaxation followed.
+remain historical. Both contacts' later local watcher/fallback checks passed;
+no automatic retry or freshness relaxation followed. Root separately scheduled
+the later successful observation below.
+
+At `2026-10-06T06:03:28.892641Z`, a matching native census/private companion
+pair contained **644 Quality, 5,264 Speed and 58,789 Online** providers. The
+source ran from `05:54:06.319159Z` to `05:56:07.092311Z` and published at
+`06:00:52.863356Z`: 120.773152 seconds of evaluation and 285.771045 seconds
+from completion to publication. Source age was 441.800330 seconds, within
+900 seconds and after the Config completion cutoff. Quality was 12.234043%
+of Speed, leaving **4,620 Speed-without-Quality** providers. The source's
+Online cohort had 5,264 passing and 53,525 failing selected-policy 4/5 URL
+ratios, with no missing evidence. Those ratio failures remain distinct from
+the Speed-only classification gap and cannot be cleared by changing ARIN.
+
+Two unchanged Redis pairs bracketed one read-only statement lasting 0.286216
+seconds; the native body took 487.168 milliseconds. The new private sample
+selected 256 of the 4,620 Speed-only members. Its current first-failing reasons
+were:
+
+| Current reason | Sample providers |
+| --- | ---: |
+| Non-Quality in both current connection facts and provider rollup | 207 |
+| URL ratio below 4/5 in the later rolling window | 24 |
+| Incomplete current classification | 22 |
+| No connection with a live handler | 3 |
+
+This statement used epoch `1791253792` and the exact Config-start lookup floor.
+Across the bounded sample it saw 251 live connection rows, of which 223 matched
+the selected epoch, client binding and lookup-time range. The remaining 28
+rows do not distinguish missing evidence, an epoch mismatch or a time/client
+binding failure; connection counts are not an additive partition of provider
+reasons. In particular, the 22 incomplete-classification providers do not by
+themselves prove a stale-row defect or authorize a rewrite.
+
+The 207 consistent non-Quality cases had complete current-epoch lookups and
+passed preceding identity, public-key, rollup, reliability, TLS and current
+URL checks. At least one live connection remained non-Quality, the rollup was
+non-Quality, and no live hard-risk flag was found. Stored countries placed 192
+of these cases in the US and 15 across ten other countries. The retained
+booleans still supply no operator/ASN attribution or unknown-versus-ambiguous
+versus-explicit-exclusion breakdown. No provider reached the verified-current-
+subscriber/soft-rollup discrepancy category. Reason order can hide later
+dimensions, so this is not an exhaustive risk/TLS intersection census or a
+basis for blanket subscriber promotion, risk removal or classification CAS.
+
+Compared with the earlier distinct publication, Quality is 97 higher, Speed
+is 1,305 lower and Online is 2,689 higher. Both publication and sample hashes
+changed; no fixed-provider improvement, catalog effect or release-performance
+benefit follows. The source interval began after Config selection and the
+`db9f` Taskworker terminal, but the key still has no publisher or loaded-resource
+identity. The separate `05:30` mapped-process observation does not join this
+publication to its publisher, sampled callers or request-time resource use.
+Receipt `8ee8e0e7c21c66f8226a0d08067b0e70484df23d0a7df9fa65ab7f4fb9274d9d`
+retains only bounded aggregates. Strict freshness and all query/transport
+limits were unchanged, and the later local watcher/fallback check passed.
 
 The native publication has source clocks but lacks ARIN epochs and exclusion
 reasons. These reviewed sources export no loaded-ARIN epoch gauge. The bounded
@@ -1383,9 +1436,12 @@ For this release, retain the following evidence as rollout proceeds:
    score-generation and provider rollup convergence. Require source completion
    at or after Config completion `05:23:58.314035Z`; that floor alone does not
    identify the publisher or prove its source evaluation started after selection.
+   The successful 256-member Speed-only sample supplies one bounded check;
+   complete fleet coverage and per-reason missing/outdated evidence remain open.
    Do not treat old stored facts as freshly reclassified.
-3. Actual Quality, Speed and Online results under their existing health,
-   reliability and common-risk gates, including fallback and publication age.
+3. Continue generation-bound Quality, Speed and Online comparisons under their
+   existing health, reliability and common-risk gates, including request-local
+   fallback and publication age. Keep changing cohorts and source clocks explicit.
 4. Complete owner-side capture aggregates where available, preserving unknown,
    withheld, conflicting and overflow populations. Prioritize exact
    allocation-owner and origin-set research from those gaps, review the Atlas
