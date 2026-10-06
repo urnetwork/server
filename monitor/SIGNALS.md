@@ -5284,6 +5284,34 @@ executor source and per-scan cap/count authority before prescribing a cap
 correction. Candidate count is not terminal-verified sibling progress, and a
 short successful task alone does not prove that the aged backlog is draining.
 
+2026-10-06 retained-epoch discriminator: a fresh claim with no retry error can
+still traverse a historical scan epoch for days. An exact private cursor join
+found post-epoch contracts outside that pass and older candidates still ahead
+of its open cursor; none had yet been visited. Task freshness therefore proves
+executor activity, not coverage of recently created contracts. Preserve that
+historical epoch and position, and alternate its complete raw subpages with a
+second pass covering contracts created strictly after the historical epoch.
+The second pass has its own fixed upper boundary and repeats from the same
+lower boundary, so arrivals cannot extend a pass and recently active rows do
+not age out of coverage. A sliding trailing-day lower bound is insufficient:
+post-epoch contracts already older than a day would be excluded from both
+passes. Both lanes share the existing raw-row, parallelism and elapsed budgets,
+financial guards, classified-error handling and required payout posts.
+
+The deterministic control retains a million historical rows while continuously
+adding eligible arrivals, round-trips each checkpoint through JSON, and requires
+both historical progress and timely visits to the arrivals. Native controls
+retain recently reported rows, exercise both open/dispute selectors and equal
+timestamp boundaries, and verify that the task persists both lane cursors.
+Before release, compare the running taskworker source with this selection
+policy. After all taskworkers converge, verify consecutive persisted lane
+handoffs and a decreasing post-epoch eligible set alongside the historical
+cursor advancing. A cursor crossing a creation key is only a visit: a fresh
+report, settlement intent or accounting refusal can correctly preserve the
+contract. Conversely, aggregate close acknowledgements, fresh claims or an
+error-free task cannot prove account clearance; require a fresh bounded payer
+face and unsettled-escrow witness, with capped or unavailable coverage unknown.
+
 Also compare the complete stored failure and next due time with the attempt's
 duration. A verified underfunded dispute can leave unrelated per-contract
 commits durable while the whole task fails and backs off. The narrow §1.2 retry
