@@ -41,7 +41,7 @@ type UrlProbeCoverageObservation struct {
 }
 
 // The existing short-write guard prevents a partial record from reporting success.
-func (self UrlProbeCoverageObservation) WriteJSONL(output io.Writer) error {
+func (self UrlProbeCoverageObservation) WriteJsonl(output io.Writer) error {
 	return json.NewEncoder(shortWriteErrorWriter{Writer: output}).Encode(self)
 }
 

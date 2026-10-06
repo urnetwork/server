@@ -49,7 +49,7 @@ func TestUrlProbeObservationHealthyNewcomersKeepMatureHundredPercent(t *testing.
 	var output bytes.Buffer
 	for range 2 {
 		alerts, err := runUrlProbeObservationFixture(t, now, urlProbeCoverageFixtureJson(t, now, first, second), func(record UrlProbeCoverageObservation) error {
-			return record.WriteJSONL(&output)
+			return record.WriteJsonl(&output)
 		})
 		if err != nil || len(alerts) != 0 {
 			t.Fatalf("healthy coverage manufactured an alert: err=%v alerts=%d", err, len(alerts))
@@ -170,7 +170,7 @@ func TestUrlProbeObservationOutputFailureRetainsAlerts(t *testing.T) {
 		t.Fatalf("output failure discarded real findings: %d", len(alerts))
 	}
 	requireAlertClass(t, alerts, "url-probe-coverage-deficit")
-	if err := (UrlProbeCoverageObservation{}).WriteJSONL(shortNilWriter{}); !errors.Is(err, io.ErrShortWrite) {
+	if err := (UrlProbeCoverageObservation{}).WriteJsonl(shortNilWriter{}); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("partial record passed: %v", err)
 	}
 }

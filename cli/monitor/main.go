@@ -162,7 +162,7 @@ func runWithSettingsLoader(args []string, stdout io.Writer, loadSettings func() 
 		}
 		defer func() { resultErr = errors.Join(resultErr, output.Close()) }()
 		settings.UrlProbeCoverageObserver = func(observation servermonitor.UrlProbeCoverageObservation) error {
-			return observation.WriteJSONL(output)
+			return observation.WriteJsonl(output)
 		}
 	}
 	monitor := servermonitor.NewWithSignals(settings, signals...)
