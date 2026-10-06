@@ -19,6 +19,10 @@ type ContractExpirySweepCursor struct {
 	RecentAfter    time.Time             `json:"recent_after"`
 	HistoricalDone bool                  `json:"historical_done,omitempty"`
 	HistoricalNext bool                  `json:"historical_next,omitempty"`
+	Fresh          *ContractExpiryCursor `json:"fresh,omitempty"`
+	FreshBefore    time.Time             `json:"fresh_before,omitzero"`
+	FreshNext      bool                  `json:"fresh_next,omitempty"`
+	BacklogDone    bool                  `json:"backlog_done,omitempty"`
 }
 
 // Alternate complete subpages, not independent workers. A slow subpage keeps
@@ -32,7 +36,7 @@ func ForceCloseOpenContractIdsFairPage(ctx context.Context, minTime time.Time, m
 	}
 	return forceCloseContractPagesBudgeted(ctx, maxCount, after, forceClosePageBudget, forceCloseRawSubpageSize, time.Now,
 		func(size int, cursor *ContractExpirySweepCursor) (int64, *ContractExpirySweepCursor, error) {
-			return forceCloseContractExpirySweepPage(minTime, server.NowUtc(), cursor,
+			return forceCloseContractExpiryFreshPage(minTime, server.NowUtc(), cursor,
 				func(position *ContractExpiryCursor) (int64, *ContractExpiryCursor, error) {
 					return ForceCloseOpenContractIdsPage(ctx, minTime, size, parallel, blockSize, blockIndex, position)
 				})
