@@ -55,35 +55,32 @@ func resolvedSourceModuleIn(t *testing.T, directory, modulePath string) sourceMo
 	return module
 }
 
-// The workflow is the source lock used by a clean CI checkout. Read its exact
-// revision instead of maintaining a second, eventually contradictory pin list.
+// lock.yml beside this file is the source lock a clean checkout follows. Read
+// its exact revision instead of maintaining a second, eventually contradictory
+// pin list.
 func reviewedRevision(t *testing.T, sibling, repository string) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join(serverDirectory(t), ".github", "workflows", "test.yml"))
+	raw, err := os.ReadFile(filepath.Join(serverDirectory(t), "local", "source-graph", "lock.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var workflow struct {
-		Jobs map[string]struct {
-			Steps []struct {
-				With struct {
-					Repository string `yaml:"repository"`
-					Path       string `yaml:"path"`
-					Ref        string `yaml:"ref"`
-				} `yaml:"with"`
-			} `yaml:"steps"`
-		} `yaml:"jobs"`
+	var lock struct {
+		Siblings []struct {
+			Repository string `yaml:"repository"`
+			Path       string `yaml:"path"`
+			Ref        string `yaml:"ref"`
+		} `yaml:"siblings"`
 	}
-	if err := yaml.Unmarshal(raw, &workflow); err != nil {
+	if err := yaml.Unmarshal(raw, &lock); err != nil {
 		t.Fatal(err)
 	}
 	var revisions []string
-	for _, step := range workflow.Jobs["build"].Steps {
-		if step.With.Path == sibling {
-			if step.With.Repository != repository || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(step.With.Ref) {
-				t.Fatalf("%s checkout must pin a complete %s commit: %+v", sibling, repository, step.With)
+	for _, checkout := range lock.Siblings {
+		if checkout.Path == sibling {
+			if checkout.Repository != repository || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(checkout.Ref) {
+				t.Fatalf("%s checkout must pin a complete %s commit: %+v", sibling, repository, checkout)
 			}
-			revisions = append(revisions, step.With.Ref)
+			revisions = append(revisions, checkout.Ref)
 		}
 	}
 	if len(revisions) != 1 {
