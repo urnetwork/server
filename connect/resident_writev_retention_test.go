@@ -1,3 +1,4 @@
+// Native tcp controls separate pool returns from borrowed write-vector retention.
 package connect
 
 import (
@@ -17,43 +18,64 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Embedding the TCP connection preserves net.Buffers' native writev path.
+// Embedding the tcp connection preserves net.Buffers' native writev path.
 // Write calls distinguish that path from its ordinary net.Conn fallback.
-type exchangeWritevObservedTCPConn struct {
+type exchangeWritevObservedTcpConn struct {
 	*net.TCPConn
 	writes       atomic.Int64
 	deadlines    atomic.Int64
 	closeAtBatch bool
 }
 
-func (c *exchangeWritevObservedTCPConn) Write(p []byte) (int, error) {
-	c.writes.Add(1)
-	return c.TCPConn.Write(p)
+// Counts ordinary writes while preserving the embedded native writev method.
+func (self *exchangeWritevObservedTcpConn) Write(p []byte) (int, error) {
+	self.writes.Add(1)
+	return self.TCPConn.Write(p)
 }
 
-func (c *exchangeWritevObservedTCPConn) SetWriteDeadline(deadline time.Time) error {
-	err := c.TCPConn.SetWriteDeadline(deadline)
-	if c.deadlines.Add(1) == 3 && c.closeAtBatch && err == nil {
+// Closes the batch socket only after its deadline succeeds for the immediate-error case.
+func (self *exchangeWritevObservedTcpConn) SetWriteDeadline(deadline time.Time) error {
+	err := self.TCPConn.SetWriteDeadline(deadline)
+	if self.deadlines.Add(1) == 3 && self.closeAtBatch && err == nil {
 		// The header and singleton have completed. Close the real socket only
 		// after the batch deadline succeeds, so WriteTo itself sees the error.
-		_ = c.TCPConn.Close()
+		_ = self.TCPConn.Close()
 	}
 	return err
 }
 
-// A failed native writev can consume only an iovec prefix. Closing and joining
-// the owning ExchangeConnection must leave no borrowed payload or header
-// pointers in the reusable vector, even while that closed owner stays alive.
-func TestExchangeConnectionWritevReleasesTerminalBatchReferences(t *testing.T) {
-	for _, op := range []ExchangeOp{ExchangeOpTransport, ExchangeOpForward} {
-		for _, outcome := range []string{"success", "partial_timeout", "immediate_close"} {
-			t.Run(exchangeOpMetricLabel(op)+"/"+outcome, func(t *testing.T) {
-				testExchangeConnectionWritevTerminalBatch(t, op, outcome)
-			})
-		}
-	}
+// Successful transport writes preserve payloads and release vector references.
+func TestExchangeConnectionWritevTransportSuccess(t *testing.T) {
+	testExchangeConnectionWritevTerminalBatch(t, ExchangeOpTransport, "success")
 }
 
+// Partial transport writes release borrowed pointers after returning pool ownership.
+func TestExchangeConnectionWritevTransportPartialTimeout(t *testing.T) {
+	testExchangeConnectionWritevTerminalBatch(t, ExchangeOpTransport, "partial_timeout")
+}
+
+// Immediate transport failures release every unconsumed vector reference.
+func TestExchangeConnectionWritevTransportImmediateClose(t *testing.T) {
+	testExchangeConnectionWritevTerminalBatch(t, ExchangeOpTransport, "immediate_close")
+}
+
+// Successful forward writes preserve payloads and release vector references.
+func TestExchangeConnectionWritevForwardSuccess(t *testing.T) {
+	testExchangeConnectionWritevTerminalBatch(t, ExchangeOpForward, "success")
+}
+
+// Partial forward writes release borrowed pointers after returning pool ownership.
+func TestExchangeConnectionWritevForwardPartialTimeout(t *testing.T) {
+	testExchangeConnectionWritevTerminalBatch(t, ExchangeOpForward, "partial_timeout")
+}
+
+// Immediate forward failures release every unconsumed vector reference.
+func TestExchangeConnectionWritevForwardImmediateClose(t *testing.T) {
+	testExchangeConnectionWritevTerminalBatch(t, ExchangeOpForward, "immediate_close")
+}
+
+// Exercises the real handshake and native writev, joins both peers, and checks
+// all vector slots while the closed connection and shared-root witnesses remain live.
 func testExchangeConnectionWritevTerminalBatch(t *testing.T, op ExchangeOp, outcome string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -157,7 +179,7 @@ func testExchangeConnectionWritevTerminalBatch(t *testing.T, op ExchangeOp, outc
 		}()
 	}()
 
-	var socket *exchangeWritevObservedTCPConn
+	var socket *exchangeWritevObservedTcpConn
 	settings.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		conn, err := (&net.Dialer{}).DialContext(ctx, network, listener.Addr().String())
 		if err != nil {
@@ -168,12 +190,12 @@ func testExchangeConnectionWritevTerminalBatch(t *testing.T, op ExchangeOp, outc
 			tcp.Close()
 			return nil, err
 		}
-		socket = &exchangeWritevObservedTCPConn{TCPConn: tcp, closeAtBatch: outcome == "immediate_close"}
+		socket = &exchangeWritevObservedTcpConn{TCPConn: tcp, closeAtBatch: outcome == "immediate_close"}
 		return socket, nil
 	}
 	connection, err := NewExchangeConnection(ctx, ExchangeHeader{
 		Version: 1, ClientId: server.NewId(), ResidentId: server.NewId(), Op: op,
-	}, "fixture", 1, nil, settings)
+	}, "fixture.example", 1, nil, settings)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +228,7 @@ func testExchangeConnectionWritevTerminalBatch(t *testing.T, op ExchangeOp, outc
 		t.Fatal(ctx.Err())
 	}
 	// Two accepted frames share each root, while a third reference stays in the
-	// test. This detects missing or duplicate returns without relying on GC.
+	// test. This detects missing or duplicate returns without relying on gc.
 	for i := range batchCount / 2 {
 		message := clientconnect.MessagePoolCopy(bytes.Repeat([]byte{byte(i + 1)}, payloadSize))
 		if cap(message) != payloadSize+clientconnect.MessagePoolMetaByteCount {
