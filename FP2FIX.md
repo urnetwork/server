@@ -7858,3 +7858,46 @@ independently corroborated by
 The deployment receipt is
 `temp/fp2-renewal-arin-taskworker-release-20261005/scaffold-vcs/taskworker-deploy-result.json`
 (SHA-256 `194c0bf3b262496120e83f9fbab4032643f7039fde0194077e77ec802ba2c595`).
+
+### 2026-10-05 23:53 UTC current mature coverage and deficit investigation
+
+Root's 23:55:27 observation qualifies all eight selected Taskworkers as ready
+on `49b3cf2ae966f95d90775e99c945ddb301911990`, matching the deployed image.
+The latest coherent global source snapshot is **23:53:19.685884 UTC**:
+**70,181 / 70,285 mature providers meet quota (99.852031%)**. The remaining
+104 mature providers need 109 credits; integer arithmetic implies at least
+99 of them are exactly one credit short. Warming is separately 16 complete
+of 27 eligible, with 11 deficient providers needing 60 credits. Unknown
+first-admission age is zero. All-current quota is 70,197 / 70,312;
+secure-complete is separately 70,171, with 26 unresolved security exceptions
+and zero unknown security targets.
+
+This is a fresh stock at its original comparison time. It does not establish
+a current credit rate, fixed-provider continuity, predecessor retirement or
+a rollout effect. Membership differs from the earlier roughly 77,000-provider
+cohort, so the percentages are not a fixed-cohort trend. **Sustained 100%
+mature coverage remains unproven.** Quota still counts ten unique accepted
+measured successes plus failures per rolling four hours; newcomer warming,
+the 4/5 quality gate and TLS security remain separate.
+
+The bounded V5 diagnostic at 23:48:09 UTC passed its read and plan guards
+but found zero matches for its narrow completed-setup-failure predicate with
+an unchanged fifteen-minute claim deadline. It did not sample the full
+deficient cohort and does not establish a global cause or the absence of
+other long leases. The next diagnostic is being implemented in the existing
+census: select mature measured-deficient providers before a 128-provider
+cap, then join their claim, attempt and latest-ten credit/expiry evidence
+within that same database snapshot. It adds no credits or scheduling change.
+
+Finite coverage evidence is
+`temp/pg-contention-20261004/astra-49b3c-admission-cohort-v2-current-reduction.json`
+(SHA-256 `7c83d055805d48c96e364747f5fd03de1089bae81e37a287e1ed1994638af437`),
+independently corroborated by
+`temp/pg-contention-20261004/sol-49b3c-admission-cohort-v2-actual-corroboration.json`
+(SHA-256 `54f4fd11fd39159718ca379f8921a8c25ece97c6705198be658543a57a34090d`).
+The V5 finite reduction is
+`temp/pg-contention-20261004/astra-future-frontier-native-v5-reduction.json`
+(SHA-256 `8f394f3aa9d30fb51d4fe320d2d51071c20e7537b07b0dc2accc721d60d8c859`),
+with independent corroboration
+`temp/pg-contention-20261004/sol-future-frontier-native-v5-actual-corroboration.json`
+(SHA-256 `b6a1f0bf1439cecb678e5e48ce61be59219a354adc3ea6eaf54e5fcf54380a71`).
