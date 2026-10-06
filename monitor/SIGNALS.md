@@ -18307,6 +18307,19 @@ catalog result remains unknown. These probe contracts are independent of the
 earlier bounded schema-readiness reader and do not retroactively change its
 coverage. The published migration DDL and accounting behavior are unchanged.
 
+Versions 783 through 785 follow. Version 783 requires the ordinary stored
+`account_message_outbox` table with its published columns (exact types,
+nullability and the `attempt_count` default of 0), `PRIMARY KEY (message_id)`,
+`UNIQUE (message_key)` and `CHECK ((attempt_count >= 0))`, and the due, held and
+finished partial indexes with their exact keys and predicates. Version 784
+requires `search_value_update.xid` as a `NOT NULL` `xid8` column whose default
+is `pg_current_xact_id()`: a constant default would put every new update record
+at the oldest position, and the search poll would again miss records that commit
+out of update-id order. Version 785 requires the valid, ready
+`search_value_update_realm_xid_update_id` index on `(realm, xid, update_id)`. An
+interrupted concurrent build leaves that index invalid, which is drift until the
+restartable migration rebuilds it. Each contract is pending before its version.
+
 Migration764 appends logical close-report receipts after the unchanged deployed
 1–763 prefix. The artifact contract checks the exact contract/party/report key,
 nonzero report IDs, nonnegative acknowledged bytes, finality and timestamp
