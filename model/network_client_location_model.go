@@ -4384,6 +4384,11 @@ func loadClientLocations(
 	ctx context.Context,
 	locationIds map[server.Id]bool,
 ) (clientLocations map[server.Id]*ClientLocation, returnErr error) {
+	defer func() {
+		if returnErr != nil {
+			clientLocations = nil
+		}
+	}()
 	server.Redis(ctx, func(r server.RedisClient) {
 		load := func(locationIds map[server.Id]bool, clientLocations map[server.Id]*ClientLocation) error {
 			clientLocationCmds := map[server.Id]*redis.StringCmd{}
