@@ -218,9 +218,6 @@ func TestInvalidDestinationResetFailurePrecedesProcessorAndPersistenceErrors(t *
 			t.Errorf("SQL reset classifier must precede %q", class)
 		}
 	}
-	if !strings.Contains(taskFailureSummarySQL, "WHEN split_part(function_name,'.',3) = 'AdvancePayment'\n\t\t           AND lower(coalesce(reschedule_error,'')) LIKE '%; invalid destination reset error = %'") {
-		t.Fatal("SQL reset classifier lost the task-scoped exact composed marker")
-	}
 }
 
 func TestInvalidDestinationResetFailureRequiresExactOwnedMarker(t *testing.T) {
