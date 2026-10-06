@@ -406,7 +406,7 @@ func NetworkCreate(
 		if resultNetworkCreate.Created {
 			auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, session)
 
-			networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, resultNetworkCreate.NetworkId, 0)
+			networkNameSearch().Add(session.Ctx, validatedNetworkName, resultNetworkCreate.NetworkId, 0)
 
 			if testAuthPolicy.BypassVerification {
 				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
@@ -476,7 +476,7 @@ func NetworkCreate(
 			if resultNetworkCreate.Created {
 				auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, session)
 
-				networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, resultNetworkCreate.NetworkId, 0)
+				networkNameSearch().Add(session.Ctx, validatedNetworkName, resultNetworkCreate.NetworkId, 0)
 
 				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
@@ -599,7 +599,7 @@ func NetworkCreate(
 
 			auditNetworkCreate(networkCreate, networkCreateResult.NetworkId, session)
 
-			networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, networkCreateResult.NetworkId, 0)
+			networkNameSearch().Add(session.Ctx, validatedNetworkName, networkCreateResult.NetworkId, 0)
 
 			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
@@ -1329,6 +1329,16 @@ func networkNameHeldInTx(ctx context.Context, tx server.PgTx, networkName string
 	return held
 }
 
+// Replaces the network's entry in the network name search with the name, in
+// the caller's transaction, so the entry commits or rolls back with the
+// rename. Network create adds the same entry (the network id, variant 0) after
+// its commit. The search also updates this process's in-memory index at the
+// call, as account removal's RemoveInTx does; other processes load the
+// committed entry from the search's update log.
+func IndexNetworkNameInTx(ctx context.Context, tx server.PgTx, networkId server.Id, networkName string) {
+	networkNameSearch().AddInTx(ctx, networkName, networkId, 0, tx)
+}
+
 func checkNetworkNameAvailability(
 	networkName string,
 	session *session.ClientSession,
@@ -1369,7 +1379,8 @@ var networkUpdateBeforeWrite func()
 // anything is written. The exact check is repeated in the write's own
 // transaction, and a write that meets another network holding the name on the
 // unique index (committed after that transaction's snapshot) is refused the
-// same way, instead of failing the call.
+// same way, instead of failing the call. The rename's transaction also
+// replaces the network's entry in the network name search.
 func NetworkUpdate(
 	networkUpdate NetworkUpdateArgs,
 	session *session.ClientSession,
@@ -1399,7 +1410,7 @@ func NetworkUpdate(
 		if networkUpdateBeforeWrite != nil {
 			networkUpdateBeforeWrite()
 		}
-		RaiseNetworkNameWrite(tx.Exec(
+		tag := RaiseNetworkNameWrite(tx.Exec(
 			session.Ctx,
 			`
 				UPDATE network
@@ -1409,6 +1420,9 @@ func NetworkUpdate(
 			session.ByJwt.NetworkId,
 			validatedNetworkName,
 		))
+		if tag.RowsAffected() == 1 {
+			IndexNetworkNameInTx(session.Ctx, tx, session.ByJwt.NetworkId, validatedNetworkName)
+		}
 	})
 	if held || taken {
 		return refusal(networkNameNotAvailableMessage)

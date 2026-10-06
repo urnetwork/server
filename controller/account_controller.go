@@ -55,7 +55,8 @@ var changeNetworkNameBeforeWrite func()
 // write's own transaction, so a name another network took or that entered its
 // reclaim cooldown since is refused too. Another network committing the name
 // after that transaction's snapshot meets the write on the unique index, which
-// is refused the same way and rolls back the old name's cooldown.
+// is refused the same way and rolls back the old name's cooldown. The write's
+// transaction also replaces the network's entry in the network name search.
 func changeNetworkName(
 	args ChangeNetworkNameArgs,
 	session *session.ClientSession,
@@ -130,11 +131,12 @@ func changeNetworkName(
 			return
 		}
 
+		var networkId *server.Id
 		var oldName *string
 		result, err := tx.Query(
 			session.Ctx,
 			`
-			SELECT network_name FROM network
+			SELECT network_id, network_name FROM network
 			WHERE admin_user_id = $1
 			`,
 			session.ByJwt.UserId,
@@ -142,7 +144,7 @@ func changeNetworkName(
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				var name string
-				server.Raise(result.Scan(&name))
+				server.Raise(result.Scan(&networkId, &name))
 				oldName = &name
 			}
 		})
@@ -166,7 +168,7 @@ func changeNetworkName(
 			))
 		}
 
-		model.RaiseNetworkNameWrite(tx.Exec(
+		tag := model.RaiseNetworkNameWrite(tx.Exec(
 			session.Ctx,
 			`
 				UPDATE network
@@ -176,6 +178,11 @@ func changeNetworkName(
 			session.ByJwt.UserId,
 			normalizedName,
 		))
+		// the unique index lets the update set the name on one network only,
+		// the one read above
+		if networkId != nil && tag.RowsAffected() == 1 {
+			model.IndexNetworkNameInTx(session.Ctx, tx, *networkId, normalizedName)
+		}
 	})
 	if !available || taken {
 		return notAvailable, nil
