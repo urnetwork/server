@@ -253,7 +253,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.SweepOrphanContractData,
 			work.SweepOrphanContractDataPost,
 		),
-		task.NewTaskTargetWithPost(work.RefreshContractHoles, work.RefreshContractHolesPost),
+		task.WithErrorRetryCap(task.NewTaskTargetWithPost(work.RefreshContractHoles, work.RefreshContractHolesPost), task.RescheduleTimeout),
 		task.NewTaskTargetWithPost(
 			work.IndexSearchLocations,
 			work.IndexSearchLocationsPost,

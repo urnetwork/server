@@ -443,6 +443,8 @@ existing unresolved source-pair index in 256-row cursor pages. The next complete
 pass is due 30 seconds after the prior pass started, half the 60-second TTL.
 Each page owns at most eight concurrent pair snapshots and joins all admitted
 work. A failed candidate query preserves the unread source cursor for retry.
+A source refusal requests the scheduler's two-second minimum delay; the task's
+retry cap also bounds deadline failures without clearing their error count.
 A known page advances past individual failed, superseded or oversized pairs,
 records them as unknown and retries them on the next complete pass; one failed
 Redis slot cannot starve later healthy pairs. Packet traffic never schedules
