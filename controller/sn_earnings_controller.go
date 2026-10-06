@@ -40,12 +40,25 @@ const snNanoPointsPerPoint = 1_000_000
 // Wallet: read + validate
 // -----------------------------------------------------------------------------
 
+// The consent kinds a wallet entry can come from. An entry without a scope
+// is an account projection of a wallet login proof or the network side copy,
+// which release settlement never pays.
+const (
+	SnWalletConsentScopeProvider = protocol.EarningWalletModeProvider
+	SnWalletConsentScopeNetwork  = protocol.EarningWalletModeNetwork
+)
+
 // SnWallet is one attached coldkey. ClientId is nil for the network-level
 // wallet and set for a provider client's wallet.
 type SnWallet struct {
 	ColdkeySs58 string     `json:"coldkey_ss58"`
 	ClientId    *server.Id `json:"client_id,omitempty"`
 	SetAtMillis int64      `json:"set_at_millis"`
+	// SnWalletConsentScope*, or absent when the entry is not a consent
+	ConsentScope string `json:"consent_scope,omitempty"`
+	// for a consent: its first and last earning epochs
+	FromEpoch    uint64 `json:"from_epoch,omitempty"`
+	ThroughEpoch uint64 `json:"through_epoch,omitempty"`
 }
 
 type SnGetWalletError struct {
@@ -53,8 +66,10 @@ type SnGetWalletError struct {
 }
 
 // SnGetWalletResult lists every wallet attached inside the network. `Wallet`
-// is the effective one for the session: the client-scoped wallet for a
-// client session when set, else the network wallet; nil when none.
+// is the effective one for the session, in settlement's precedence: a client
+// session's own provider consent, else the network consent, else the
+// client's own wallet without a consent, else the network side copy. A network
+// session: the network consent, else the side copy. Nil when none.
 type SnGetWalletResult struct {
 	Wallet  *SnWallet         `json:"wallet,omitempty"`
 	Wallets []SnWallet        `json:"wallets"`
@@ -65,11 +80,31 @@ func SnGetWallet(clientSession *session.ClientSession) (*SnGetWalletResult, erro
 	ctx := clientSession.Ctx
 	networkId := clientSession.ByJwt.NetworkId
 	result := &SnGetWalletResult{Wallets: []SnWallet{}}
+	// the effective candidates in precedence order
+	var ownConsent, networkConsent, ownProjection, sideCopy *SnWallet
+	// the network consent is listed before the side copy, so a client that
+	// takes the first network-level entry finds the consent
+	if domain, ok := stClientKeyHistoryDomain(); ok {
+		consent, err := model.GetNetworkWalletMappingConsent(ctx, domain, networkId)
+		if err != nil {
+			return nil, err
+		}
+		if consent != nil {
+			wallet := SnWallet{
+				ColdkeySs58:  consent.ColdkeySs58,
+				SetAtMillis:  consent.AcceptedAt.UnixMilli(),
+				ConsentScope: SnWalletConsentScopeNetwork,
+				FromEpoch:    consent.FromEpoch,
+				ThroughEpoch: consent.ThroughEpoch,
+			}
+			result.Wallets = append(result.Wallets, wallet)
+			networkConsent = &wallet
+		}
+	}
 	if wallet := model.GetStWallet(ctx, networkId); wallet != nil {
 		networkWallet := SnWallet{ColdkeySs58: wallet.ColdkeySs58, SetAtMillis: wallet.SetTime.UnixMilli()}
 		result.Wallets = append(result.Wallets, networkWallet)
-		effective := networkWallet
-		result.Wallet = &effective
+		sideCopy = &networkWallet
 	}
 	for _, providerWallet := range model.GetStProviderWalletsForNetwork(ctx, networkId) {
 		clientId := providerWallet.ClientId
@@ -78,10 +113,26 @@ func SnGetWallet(clientSession *session.ClientSession) (*SnGetWalletResult, erro
 			ClientId:    &clientId,
 			SetAtMillis: providerWallet.SetTime.UnixMilli(),
 		}
+		if providerWallet.OriginalMessage != nil {
+			if statement, err := protocol.DecodeWalletMappingStatement(*providerWallet.OriginalMessage); err == nil && statement.ClientId == [16]byte(clientId) {
+				wallet.ConsentScope = SnWalletConsentScopeProvider
+				wallet.FromEpoch, wallet.ThroughEpoch = statement.FromEpoch, statement.ThroughEpoch
+			}
+		}
 		result.Wallets = append(result.Wallets, wallet)
 		if clientSession.ByJwt.ClientId != nil && *clientSession.ByJwt.ClientId == clientId {
-			effective := wallet
-			result.Wallet = &effective
+			if wallet.ConsentScope == SnWalletConsentScopeProvider {
+				ownConsent = &wallet
+			} else {
+				ownProjection = &wallet
+			}
+		}
+	}
+	for _, effective := range []*SnWallet{ownConsent, networkConsent, ownProjection, sideCopy} {
+		if effective != nil {
+			wallet := *effective
+			result.Wallet = &wallet
+			break
 		}
 	}
 	return result, nil

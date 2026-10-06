@@ -9607,4 +9607,8 @@ var migrations = []any{
 		CREATE INDEX search_value_update_realm_xid_update_id
 		ON search_value_update (realm, xid, update_id)
 	`),
+	// Network wallet consent chains and the settled earning wallet of each
+	// published release epoch (db_network_wallet_mapping_consent.go). New
+	// tables: nothing is rewritten, and old binaries never read them.
+	newSqlMigration(networkWalletMappingConsentSchemaSql),
 }

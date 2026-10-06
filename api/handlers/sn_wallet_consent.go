@@ -18,3 +18,14 @@ func SnWalletMappingChallenge(w http.ResponseWriter, r *http.Request) {
 func SnWalletMappingHistory(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputNoAuth(controller.SnWalletMappingHistory, w, r)
 }
+
+// Only the authenticated network owner (a network JWT) can request the
+// network's prospective mapping.
+func SnNetworkWalletMappingChallenge(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.SnNetworkWalletMappingChallenge, w, r)
+}
+
+// The caller supplies the network chain's independently pinned head.
+func SnNetworkWalletMappingHistory(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputNoAuth(controller.SnNetworkWalletMappingHistory, w, r)
+}

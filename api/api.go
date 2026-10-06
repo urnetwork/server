@@ -290,6 +290,8 @@ func routesWithReservedAttemptUpload(reserved *controller.StReservedAttemptUploa
 		router.NewRoute("POST", "/sn/wallet", handlers.SnSetWallet),
 		router.NewRoute("POST", "/sn/wallet/consent", handlers.SnWalletMappingChallenge),
 		router.NewRoute("POST", "/sn/wallet/consent/history", handlers.SnWalletMappingHistory),
+		router.NewRoute("POST", "/sn/wallet/network-consent", handlers.SnNetworkWalletMappingChallenge),
+		router.NewRoute("POST", "/sn/wallet/network-consent/history", handlers.SnNetworkWalletMappingHistory),
 		router.NewRoute("GET", "/sn/wallet", handlers.SnGetWallet),
 		router.NewRoute("POST", "/sn/wallet/validate", handlers.SnValidateWallet),
 		router.NewRoute("GET", "/sn/head", handlers.SnHead),

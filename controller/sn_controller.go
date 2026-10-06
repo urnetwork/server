@@ -82,7 +82,10 @@ type SnSetWalletResult struct {
 // coldkey its pool payouts are claimable by. Deliberately separate from
 // `account_wallet`/`payout_wallet` (D-2) so the USDC payout planner never
 // sees subnet wallets. The upsert is idempotent; the latest set wins and
-// applies from the next committed epoch's leaf set.
+// applies from the next committed epoch's leaf set. A message that starts
+// with a wallet mapping consent prefix is accepted as that consent instead:
+// a provider consent (sn_wallet_consent.go) or a network consent from the
+// network owner's session (sn_network_wallet_consent.go).
 func SnSetWallet(
 	setWallet *SnSetWalletArgs,
 	clientSession *session.ClientSession,
@@ -92,6 +95,9 @@ func SnSetWallet(
 	}
 	if strings.HasPrefix(setWallet.Message, protocol.WalletMappingConsentPrefix) {
 		return snAcceptWalletMapping(setWallet, clientSession)
+	}
+	if strings.HasPrefix(setWallet.Message, protocol.NetworkWalletMappingConsentPrefix) {
+		return snAcceptNetworkWalletMapping(setWallet, clientSession)
 	}
 	fail := func(message string) (*SnSetWalletResult, error) {
 		return &SnSetWalletResult{Error: &SnSetWalletError{Message: message}}, nil

@@ -100,6 +100,9 @@ type StProviderWallet struct {
 	SetTime           time.Time
 	OriginalMessage   *string
 	OriginalSignature *string
+	// set only by release epoch selection: the consent that selected this
+	// wallet. Nil for account projections.
+	Resolution *StPayoutWalletResolution
 }
 
 // Legacy writers retain a missing original instead of inventing wallet consent.

@@ -52,7 +52,8 @@ func TestLegacySettlementTaskPartitionsAndBoundedContinuation(t *testing.T) {
 		}{
 			{"progress", true, 512, 0, true}, {"busy", true, 0, 0, false}, {"partial_failure", true, 512, 1, false}, {"caught_up", false, 3, 0, false},
 		} {
-			cursor := model.LegacySettlementCursor{NextAttemptTime: server.NowUtc(), ContractId: server.NewId(), PassEndTime: server.NowUtc()}
+			cursor := model.LegacySettlementCursor{NextAttemptTime: server.NowUtc(), ContractId: server.NewId(), PassEndTime: server.NowUtc(),
+				HeadAfter: &model.LegacySettlementPosition{NextAttemptTime: server.NowUtc().Add(-time.Hour), ContractId: server.NewId()}}
 			before := server.NowUtc()
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE run_once_key='["flush_legacy_settlements_3"]'`))
@@ -64,7 +65,8 @@ func TestLegacySettlementTaskPartitionsAndBoundedContinuation(t *testing.T) {
 				server.Raise(conn.QueryRow(ctx, `SELECT args_json,run_at FROM pending_task WHERE run_once_key='["flush_legacy_settlements_3"]'`).Scan(&data, &due))
 				var args FlushLegacySettlementsArgs
 				server.Raise(json.Unmarshal(data, &args))
-				if args.Cursor == nil || args.Cursor.ContractId != cursor.ContractId || !args.Cursor.NextAttemptTime.Equal(cursor.NextAttemptTime) || !args.Cursor.PassEndTime.Equal(cursor.PassEndTime) {
+				if args.Cursor == nil || args.Cursor.ContractId != cursor.ContractId || !args.Cursor.NextAttemptTime.Equal(cursor.NextAttemptTime) || !args.Cursor.PassEndTime.Equal(cursor.PassEndTime) ||
+					args.Cursor.HeadAfter == nil || args.Cursor.HeadAfter.ContractId != cursor.HeadAfter.ContractId || !args.Cursor.HeadAfter.NextAttemptTime.Equal(cursor.HeadAfter.NextAttemptTime) {
 					t.Fatal("cursor lost", test.name)
 				}
 				if test.immediate && due.Sub(before) > time.Second || !test.immediate && due.Sub(before) < time.Second {
