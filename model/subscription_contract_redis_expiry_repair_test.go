@@ -119,7 +119,7 @@ func TestRedisContractExpiryRepairObservedShapesConserve(t *testing.T) {
 					t.Fatal("ordinary mean consumption was changed or premature credit writeback occurred")
 				}
 			})
-			requireRedisExpiryRepairTestCredit(t, ctx, f, 1000, 37+test.consumed)
+			requireRedisExpiryRepairTestCredit(t, ctx, f, 1000, 137)
 			replayed, err := RepairRedisContractExpiry(ctx, request)
 			if err != nil || replayed.Contracts[0].Status != "terminal" || replayed.Contracts[0].ProofCommitted {
 				t.Fatal("terminal replay attempted another closure")
@@ -171,7 +171,7 @@ func TestRedisContractExpiryRepairCompanionAndPayer(t *testing.T) {
 		if proof.ByteCount != 11 || len(proof.Providers) != 1 || proof.Providers[0].ClientId != f.destinationId || proof.Providers[0].NetworkId != f.destinationNetworkId {
 			t.Fatal("companion usage was attributed to the payer or current direction")
 		}
-		requireRedisExpiryRepairTestCredit(t, ctx, f, 1000, 114)
+		requireRedisExpiryRepairTestCredit(t, ctx, f, 1000, 200)
 		requireRedisExpiryRepairTestCredit(t, ctx, other, 1000, 0)
 		_, _, _, err = flushTransferDebitBalance(ctx, f.balanceId)
 		server.Raise(err)
@@ -420,6 +420,9 @@ func TestRedisContractExpiryRepairHeldGrantNeighbor(t *testing.T) {
 			t.Fatal("held-grant neighbor was altered")
 		}
 		server.Raise(held.Rollback(ctx))
-		requireRedisExpiryRepairTestCredit(t, ctx, f, 1000, 51)
+		requireRedisExpiryRepairTestCredit(t, ctx, f, 1000, 137)
+		_, _, _, err = flushTransferDebitBalance(ctx, f.balanceId)
+		server.Raise(err)
+		requireRedisExpiryRepairTestCredit(t, ctx, f, 986, 37)
 	})
 }

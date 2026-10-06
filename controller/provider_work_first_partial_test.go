@@ -30,6 +30,19 @@ import (
 // The cutoff is the second actual immutable close instant, prepared before the
 // first earning-policy admission. Neither SQL originals nor their clocks move.
 func TestProviderWorkFirstPartialSdkEpochPublishesOnlyNewEarnings(t *testing.T) {
+	providerWorkFirstPartialRun(t, false)
+}
+
+// The same epoch with the second earning provider paid through its network's
+// consent: the roster pins no provider chain for it and the network chain for
+// its network. The leaf pays the network coldkey and the retained resolution
+// records the network mode.
+func TestProviderWorkFirstPartialSdkEpochPaysNetworkConsent(t *testing.T) {
+	providerWorkFirstPartialRun(t, true)
+}
+
+// With networkMode, client 3 earns through the network consent.
+func providerWorkFirstPartialRun(t *testing.T, networkMode bool) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -61,6 +74,12 @@ func TestProviderWorkFirstPartialSdkEpochPublishesOnlyNewEarnings(t *testing.T) 
 		t.Cleanup(server.Vault.PushSimpleResource("provider_work.yml", []byte(fmt.Sprintf("schema: %s\ndomain_hash: %x\nrequest_public_key: %x\nauthority_signer: %s\nclient_key_root_signer: %s\nattribution_signer: %s\n", ProviderWorkPolicySchema, f.domain, f.authority.RequestPublicKey, root.Hex(), root.Hex(), root.Hex()))))
 		networkId := server.Id{11}
 		model.Testing_CreateNetwork(ctx, networkId, "first-partial-publisher.example", server.NewId())
+		var networkColdkey [32]byte
+		if networkMode {
+			var networkWallet payoutartifact.WholeWorkNetworkWallet
+			networkWallet, networkColdkey = providerWorkRetainFixtureNetworkWallet(t, f.cfg, f.authority.Domain, f.epoch.Epoch, f.epoch.Start.Block, start, [16]byte(networkId))
+			f.authority.NetworkWallets = []payoutartifact.WholeWorkNetworkWallet{networkWallet}
+		}
 		var clients []*connect.Client
 		var transports []*providerWorkPublisherOob
 		t.Cleanup(func() {
@@ -100,7 +119,11 @@ func TestProviderWorkFirstPartialSdkEpochPublishesOnlyNewEarnings(t *testing.T) 
 				t.Fatal(err)
 			}
 			f.authority.Owners = append(f.authority.Owners, payoutartifact.WholeWorkOwner{ClientId: identity.ClientId, NetworkId: [16]byte(networkId), Generation: identity.Generation, PublicKey: identity.PublicKey})
-			f.authority.ExpectedProviders = append(f.authority.ExpectedProviders, providerWorkRetainFixtureWallet(t, f.cfg, f.authority.Domain, f.epoch.Epoch, f.epoch.Start.Block, start, identity.ClientId, [16]byte(networkId)))
+			if networkMode && index == 2 {
+				f.authority.ExpectedProviders = append(f.authority.ExpectedProviders, payoutartifact.WholeWorkExpectedProvider{ClientId: identity.ClientId, NetworkId: [16]byte(networkId)})
+			} else {
+				f.authority.ExpectedProviders = append(f.authority.ExpectedProviders, providerWorkRetainFixtureWallet(t, f.cfg, f.authority.Domain, f.epoch.Epoch, f.epoch.Start.Block, start, identity.ClientId, [16]byte(networkId)))
+			}
 			cut := providerWorkRetainActualCut(t, f, client.ContractManager(), "start")
 			if !cut.Complete || len(cut.Contracts) != 0 {
 				t.Fatal("actual first-partial start cut is not empty")
@@ -290,6 +313,25 @@ func TestProviderWorkFirstPartialSdkEpochPublishesOnlyNewEarnings(t *testing.T) 
 		}
 		if err := payoutartifact.VerifyWithContext(ctx, artifact); err != nil {
 			t.Fatal("public first-partial artifact signature or payout proof failed", err)
+		}
+		resolutions := model.GetStPayoutWalletResolutions(ctx, f.cfg.DeploymentKey(), f.epoch.Epoch, f.cfg.NoId)
+		if len(resolutions) != 3 {
+			t.Fatal("the publication did not retain every provider's wallet resolution", resolutions)
+		}
+		for index, resolution := range resolutions {
+			mode := snprotocol.EarningWalletModeProvider
+			if networkMode && index == 2 {
+				mode = snprotocol.EarningWalletModeNetwork
+			}
+			if resolution.ClientId != (server.Id{byte(index + 1)}) || resolution.NetworkId != networkId || resolution.Mode != mode || resolution.Coldkey != artifact.Providers[index].Coldkey {
+				t.Fatal("a retained resolution differs from the published provider wallet", index, resolution)
+			}
+		}
+		if networkMode && (artifact.Leaves[1].Coldkey != networkColdkey || resolutions[2].HeadGeneration != 1 || resolutions[2].ConsentHash != resolutions[2].HeadHash) {
+			t.Fatal("the network-mode provider was not paid to the network consent", artifact.Leaves[1])
+		}
+		if !networkMode && artifact.Leaves[1].Coldkey == networkColdkey {
+			t.Fatal("provider mode paid a network coldkey")
 		}
 		digest, err := providerWorkPolicyHash(strings.TrimPrefix(record.ContentHash, "sha256:"))
 		if err != nil {

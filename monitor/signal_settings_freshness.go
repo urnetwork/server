@@ -127,6 +127,7 @@ func NewSettingsGenerationCheck(load SignalSettingsLoader) SettingsGenerationChe
 func comparableSignalSettings(settings SignalSettings) SignalSettings {
 	settings = settings.withDefaults()
 	settings.SettingsGenerationCheck = nil
+	settings.UrlProbeCoverageObserver = nil
 	settings.Source = nil
 	settings.Now = nil
 	settings.runtime = nil

@@ -1676,8 +1676,8 @@ revision-matched PostgreSQL snapshot used by admission before exact fallback.
 A delayed-settlement control with 10,001 surviving reservations blocked on
 escrow history despite a current cache before the change; the repaired mirror
 completed while that history table remained locked. Missing/stale snapshots,
-legacy mutations and deleted balances still require the exact census, and
-reconciliation itself remains exact. The two finite `result` values of
+legacy mutations and deleted balances still require the exact census. Operator
+reconciliation remains exact; scheduled repair is distinguished below. The two finite `result` values of
 `urnetwork_net_escrow_refresh_snapshot_total` count `reused`/`reloaded` balance
 snapshots after source reads, not distinct SQL calls, successful Redis writes,
 settlements, or committed admissions. They do not identify the production
@@ -1685,6 +1685,34 @@ census caller. A current cache can remove repeat reads without reducing
 required settlement work; persistent misses can leave CPU high. Verify fresh
 per-process counter continuity and source coverage alongside independent CPU
 and successful traffic before claiming recovery.
+
+Scheduled `ReconcileCachedNetEscrow` now uses that same committed revision
+cache for each current and noncurrent balance page. Previously the recurring
+task rescanned every qualifying legacy reservation even when no writer had
+changed its cached revision. Exact misses remain read-only in PostgreSQL;
+targeted posts and admission remain the cache warmers. This avoids creating
+snapshot rows for the fleet's mostly-empty cold balances. Page-local reads and
+the Redis revision fence remain in place. The explicit fleet and per-network `ReconcileNetEscrow` audit/repair
+entry points always census history, including dry runs, and never trust or
+write the optional PostgreSQL snapshot cache. A corrupted cache amount at a
+matching revision must therefore still be detected as Redis drift by those
+operator paths. Scheduled reuse assumes the existing revision triggers cover
+all authoritative legacy writes; it is not an independent corruption audit.
+
+The owning controls in `subscription_net_escrow_reconcile_cache_test.go`
+hold historical escrow access while the scheduled current page must publish
+10,001 cached reservations, then join after discovery's separate relation lock
+is released. They also cover cold/warm noncurrent pages, mutation invalidation,
+neighbor reservations, a deleted balance captured by an earlier page, and
+operator audit/apply against deliberately corrupt same-revision cache data.
+Retain the existing rollback, delayed-publication and mixed Redis/legacy owner
+controls. These establish source behavior, not that a sampled 107.5-second
+`reservation_census_prefix` query came from this task. Truncated shared SQL,
+completed cache counters and query age alone cannot identify that caller or
+assign PostgreSQL CPU. Cold or continuously invalidated history and noncurrent
+discovery can remain expensive; missing full-statement or owner evidence stays
+unknown. Require current deployed-source coverage, successful financial traffic
+and independent CPU observations before reporting incident recovery.
 
 Settlement metadata also advances reservation revisions when it marks escrow
 rows settled. Its post must lock the contract's existing balances in sorted
@@ -3249,7 +3277,8 @@ a partial hot reload.
 Every minute, load the current effective Config and Vault inputs again and
 compare the resulting complete settings value with the startup snapshot only
 in memory. Ignore process-only test/runtime seams (`Now`, synthetic `Source`,
-runtime limiters, and the checker itself). Never render, hash, log, serialize,
+the URL coverage output callback, runtime limiters, and the checker itself).
+Never render, hash, log, serialize,
 or persist either settings value, any credential, or a content-derived
 fingerprint. Production `LoadSignalSettings` always arms this local-only check;
 manually assembled library settings may omit it for compatibility.
@@ -3264,6 +3293,20 @@ manually assembled library settings may omit it for compatibility.
   Alert.
 - Context cancellation is watcher lifecycle, not settings loss, and returns
   `context.Canceled` without an Alert.
+
+False-positive qualifier: the URL coverage writer introduced in `9cf0f197c`
+attached a process-local callback after loading the startup settings. Before
+that callback was excluded from generation comparison, enabling
+`-url-probe-coverage-output` made unchanged settings compare unequal: a nonnil
+Go function never passes deep equality, even against itself. This also refused
+the PG query sampler at its settings preflight, before source contact or
+durable cadence admission. A first alert after a 15-minute startup floor does
+not date a Config or Vault change. Qualify the callback exclusion with unchanged
+and genuinely changed settings, then use controlled watcher promotion while
+retaining the coverage writer, complete-generation guard, state directory and
+15-minute sampling floor. Actual credential, topology or desired-state changes
+must still report stale; successful local controls do not establish Main query
+coverage until the replacement records a completed sample.
 
 An explicit whole-host pause uses repeatable `-exclude-host HOSTNAME` selectors.
 Match exact current inventory names; empty, wildcard, unknown, or ambiguous
@@ -5283,6 +5326,34 @@ selection above 25,000 does not prove a legacy deployment; establish the exact
 executor source and per-scan cap/count authority before prescribing a cap
 correction. Candidate count is not terminal-verified sibling progress, and a
 short successful task alone does not prove that the aged backlog is draining.
+
+2026-10-06 retained-epoch discriminator: a fresh claim with no retry error can
+still traverse a historical scan epoch for days. An exact private cursor join
+found post-epoch contracts outside that pass and older candidates still ahead
+of its open cursor; none had yet been visited. Task freshness therefore proves
+executor activity, not coverage of recently created contracts. Preserve that
+historical epoch and position, and alternate its complete raw subpages with a
+second pass covering contracts created strictly after the historical epoch.
+The second pass has its own fixed upper boundary and repeats from the same
+lower boundary, so arrivals cannot extend a pass and recently active rows do
+not age out of coverage. A sliding trailing-day lower bound is insufficient:
+post-epoch contracts already older than a day would be excluded from both
+passes. Both lanes share the existing raw-row, parallelism and elapsed budgets,
+financial guards, classified-error handling and required payout posts.
+
+The deterministic control retains a million historical rows while continuously
+adding eligible arrivals, round-trips each checkpoint through JSON, and requires
+both historical progress and timely visits to the arrivals. Native controls
+retain recently reported rows, exercise both open/dispute selectors and equal
+timestamp boundaries, and verify that the task persists both lane cursors.
+Before release, compare the running taskworker source with this selection
+policy. After all taskworkers converge, verify consecutive persisted lane
+handoffs and a decreasing post-epoch eligible set alongside the historical
+cursor advancing. A cursor crossing a creation key is only a visit: a fresh
+report, settlement intent or accounting refusal can correctly preserve the
+contract. Conversely, aggregate close acknowledgements, fresh claims or an
+error-free task cannot prove account clearance; require a fresh bounded payer
+face and unsettled-escrow witness, with capped or unavailable coverage unknown.
 
 Also compare the complete stored failure and next due time with the attempt's
 duration. A verified underfunded dispute can leave unrelated per-contract
@@ -18346,6 +18417,19 @@ out of update-id order. Version 785 requires the valid, ready
 interrupted concurrent build leaves that index invalid, which is drift until the
 restartable migration rebuilds it. Each contract is pending before its version.
 
+Version 786 adds network wallet mapping consent beside the per-provider chains
+of 772: `network_wallet_mapping_challenge` (nonce primary key, a `NOT NULL`
+network, generation 1 to 4096 and its owner index on
+`(domain_hash, network_id, expires_at)`), `network_wallet_mapping_consent`
+(primary key `(domain_hash, network_id, generation)`, unique original hash and
+nonce, and the nonce foreign key to its challenge) and
+`st_payout_wallet_resolution`, the earning wallet each published release epoch
+settled per provider (primary key `(deployment_key, epoch, no_id, client_id)`,
+`mode` limited to `provider` or `network`, 32-byte coldkey, consent and head
+hashes, generations 1 to 4096). All three tables carry the row and truncate
+guards of `wallet_mapping_original_guard`: a missing or disabled guard, a
+nullable network or a widened mode is drift at head 786.
+
 Migration764 appends logical close-report receipts after the unchanged deployed
 1–763 prefix. The artifact contract checks the exact contract/party/report key,
 nonzero report IDs, nonnegative acknowledged bytes, finality and timestamp
@@ -20340,6 +20424,17 @@ extended five seconds backwards exceeded the reader's ten-minute maximum and
 correctly refused before contact; disabled source manifests still need no
 activation fence.
 
+The 2026-10-06 Connect owner reader refused locally before contacting Main:
+its disabled manifest was 128,320 bytes, but activation metadata expanded the
+bound manifest to 136,200 bytes, beyond the unchanged 131,072-byte invocation
+guard. Source and binder gates had omitted the final enabled artifact's size.
+That refusal yielded no runtime census or evidence of service recovery or
+regression and does not change the independent runtime PAGE. Lossless compact
+serialization reduces the same bound JSON object to
+121,590 bytes. A successor must check its serialized size before creating the
+one-use target, pass the copied invocation guard locally, and receive a fresh
+authority fence. Preserve the original refusal and every remote query bound.
+
 Use existing same-process pool, heap, stack, resident and worker counters
 before adding a live profile. `resident_clients` leaves the residents map
 before `CloseAndWait` completes, whereas callback, forward and idle-watch
@@ -20353,6 +20448,28 @@ budget. Preserve all generations, exact metric scrape anchors, and a unique
 native host/block/start/source match; a missing hot process cannot borrow a
 healthy peer's counters. No full heap or goroutine traversal is made
 pause-bounded merely by limiting the returned bytes.
+
+Resident and forward routing entries must be published before their lifecycle
+workers can retire them. A resident can consume its existing idle allowance
+while construction waits for peer metadata; an immediately retiring worker
+must not remove an absent entry and then leave a later insertion behind.
+Forward construction has the same ordering requirement. Publish each owner
+before launch, and remove only that exact forward candidate if worker admission
+has already closed. Concurrent live forwards remain the routing winner.
+
+The native publication controls force real worker retirement before construction
+returns and check the owning map after the join. Both original-order controls
+reproduce a retained entry; the correction passes normal and race controls,
+including caller-to-exchange lifetime transfer, refused-forward reclamation,
+and accepted control completion across transport and idle retirement. The
+separate active-forward control preserves native ACK delivery. A joined resident
+graph may still be reachable through a stale map entry; joined worker counts
+alone do not establish reclamation. Normal parent retirement performs a final
+forward-map sweep, so the adjacent forward ordering defect does not by itself
+prove process-long forward retention. These source controls do not establish
+Main incidence or explain its goroutine remainder. Keep the runtime PAGE open
+until qualified executable, population, and matched runtime observations show
+recovery; a deployment or restart alone is not that evidence.
 
 `connect-resident-cost-unobservable` WARNs immediately when the newest Connect
 population join is missing/stale, duplicated, invalid, or cannot select an

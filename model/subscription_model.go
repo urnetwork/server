@@ -471,6 +471,21 @@ func Testing_DeleteNetEscrow(ctx context.Context, balanceId server.Id) {
 // direction that starves the available balance and produces spurious
 // "Insufficient balance". Only networks with nonzero net drift are returned.
 func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[server.Id]ByteCount, balanceCount int) {
+	return reconcileNetEscrow(ctx, apply, false)
+}
+
+// ReconcileCachedNetEscrow repairs scheduled mirror drift using a durable
+// snapshot only when its revision matches the same-statement source revision.
+// Revision triggers invalidate legacy changes; misses retain exact census.
+// Fleet repair never writes the cache. Operators use ReconcileNetEscrow for an independent
+// exact audit, including detection of a corrupted same-revision cache entry.
+func ReconcileCachedNetEscrow(ctx context.Context) (driftByNetworkId map[server.Id]ByteCount, balanceCount int) {
+	return reconcileNetEscrow(ctx, true, true)
+}
+
+// Both callers retain page-local authority and the same Redis revision fence.
+// Only scheduled repair may reuse the durable snapshot cache.
+func reconcileNetEscrow(ctx context.Context, apply, useCache bool) (driftByNetworkId map[server.Id]ByteCount, balanceCount int) {
 	now := server.NowUtc()
 	driftByNetworkId = map[server.Id]ByteCount{}
 
@@ -519,12 +534,11 @@ func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[s
 		for i, row := range rows {
 			balanceIds[i] = row.balanceId
 		}
-		// Read reservations immediately before correcting this page. Do not move
-		// this above the pagination loop: that recreates the stale-global-snapshot
-		// incident described in the function comment. Keep the query on the fast
-		// unsettled partial path so its statement-snapshot-to-Redis-GET window stays
-		// bounded as well.
-		pending := openEscrowReservedForBalances(ctx, balanceIds)
+		// Read reservations immediately before correcting this page. A durable
+		// cached amount is exact only at the revision read in the same statement;
+		// stale or missing amounts retain the per-balance history fallback. Never
+		// move this above pagination and recreate a stale global snapshot.
+		pending := readReconcileNetEscrowSnapshots(ctx, balanceIds, useCache)
 		drift := reconcileNetEscrowBatch(ctx, pending, balanceIds, apply)
 		for _, row := range rows {
 			driftByNetworkId[row.networkId] += drift[row.balanceId]
@@ -592,7 +606,7 @@ func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[s
 		for i, row := range rows {
 			balanceIds[i] = row.balanceId
 		}
-		pending := openEscrowReservedForBalances(ctx, balanceIds)
+		pending := readReconcileNetEscrowSnapshots(ctx, balanceIds, useCache)
 		drift := reconcileNetEscrowBatch(ctx, pending, balanceIds, apply)
 		for _, row := range rows {
 			driftByNetworkId[row.networkId] += drift[row.balanceId]
@@ -830,6 +844,7 @@ func openEscrowReservedForBalances(ctx context.Context, balanceIds []server.Id) 
 	if len(balanceIds) == 0 {
 		return pending
 	}
+	defer enterLegacySettlementTiming(ctx, legacySettlementColdCensus)()
 	server.Tx(ctx, func(tx server.PgTx) {
 		configureNetEscrowReservationPageTimeout(ctx, tx, netEscrowReservationPageStatementTimeout)
 		pending = readNetEscrowSnapshots(ctx, tx, balanceIds)
@@ -2800,7 +2815,7 @@ func settleContractWithExpiryScope(ctx context.Context, contractId server.Id, sc
 				diff := sourceUsedTransferByteCount - destinationUsedTransferByteCount
 				if math.Abs(float64(diff)) <= AcceptableTransfersByteDifference {
 					// fmt.Printf("CLOSE CONTRACT SETTLE (%s) %s\n", clientId.String(), contractId.String())
-					posts, closed, returnErr = settleEscrowForegroundInTx(ctx, tx, contractId, ContractOutcomeSettled)
+					posts, closed, returnErr = settleEscrowForegroundWithExpiryScopeInTx(ctx, tx, contractId, ContractOutcomeSettled, scope)
 				} else {
 					if scope == nil {
 						glog.Infof("[sub]contract[%s]diff %d (%d <> %d)\n", contractId.String(), diff, sourceUsedTransferByteCount, destinationUsedTransferByteCount)
@@ -3240,13 +3255,24 @@ func settleEscrowInTx(
 }
 
 func settleEscrowForegroundInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome) ([]func() any, bool, error) {
-	return settleEscrowWithOptionsInTx(ctx, tx, contractId, outcome, true, false)
+	return settleEscrowForegroundWithExpiryScopeInTx(ctx, tx, contractId, outcome, nil)
+}
+
+// Scoped Redis expiry already commits the debit worker's recovery authority.
+// It leaves metadata and reservation release to that owner, preserving clock
+// posts: the clock's startup aggregate backfill is not a per-contract retry.
+func settleEscrowForegroundWithExpiryScopeInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, scope *contractExpiryRepairScope) ([]func() any, bool, error) {
+	return settleEscrowWithProjectionOptionsInTx(ctx, tx, contractId, outcome, true, false, scope != nil && scope.redis != nil)
 }
 
 // Current Redis contracts append independent consumption records. Legacy
 // callers queue an intent without releasing their reservation; the worker uses
 // the original atomic debit/outcome path and commits exact earnings plus durable total-projection ownership.
 func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial bool) (posts []func() any, closed bool, returnErr error) {
+	return settleEscrowWithProjectionOptionsInTx(ctx, tx, contractId, outcome, deferLegacy, inlineFinancial, false)
+}
+
+func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, deferLegacy, inlineFinancial, deferRedisDebitPosts bool) (posts []func() any, closed bool, returnErr error) {
 	// CloseContract already owns this lock; direct and recovery settlement
 	// must acquire it before balance locks to keep the same lock order.
 	server.RaisePgResult(tx.Exec(ctx, `SELECT contract_id FROM transfer_contract WHERE contract_id = $1 FOR UPDATE`, contractId))
@@ -3255,6 +3281,7 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	var asyncDebit, hasEscrow bool
 	server.Raise(tx.QueryRow(ctx, `SELECT COALESCE(bool_and(redis_reserved),false),count(*)>0
         FROM transfer_escrow WHERE contract_id=$1`, contractId).Scan(&asyncDebit, &hasEscrow))
+	deferRedisDebitPosts = deferRedisDebitPosts && asyncDebit
 	if deferLegacy && hasEscrow && !asyncDebit {
 		return nil, false, queueLegacySettlementInTx(ctx, tx, contractId, outcome, false)
 	}
@@ -3494,7 +3521,7 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	}
 	publishSettlementNetEscrowSnapshots(ctx, tx, reservationSnapshots, positiveReservations, true)
 	if 0 < clockTransferByteCount {
-		posts = append(posts, clockTransferPost(ctx, clockTransferByteCount))
+		posts = append(posts, observeLegacySettlementPost(ctx, legacySettlementClock, clockTransferPost(ctx, clockTransferByteCount)))
 	}
 
 	// run all the posts in parallel in as small blocks as reasonable to minimize the work for serialization errors
@@ -3545,10 +3572,10 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 			}
 		}
 		if len(mirrorBalanceIds) > 0 {
-			mirrorPost := func() any {
+			mirrorPost := observeLegacySettlementPost(ctx, legacySettlementMirror, func() any {
 				refreshNetEscrow(ctx, mirrorBalanceIds)
 				return nil
-			}
+			})
 			if len(reservationSnapshots) < len(positiveReservations) {
 				// A cold mirror must follow this metadata attempt: otherwise it
 				// can warm the preceding revision after metadata already read a
@@ -3563,12 +3590,12 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 			} else {
 				posts = append(posts, metadataPost, mirrorPost)
 			}
-		} else {
+		} else if !deferRedisDebitPosts {
 			posts = append(posts, metadataPost)
 		}
 	}
 
-	if len(redisReservations) > 0 {
+	if len(redisReservations) > 0 && !deferRedisDebitPosts {
 		posts = append(posts, func() any {
 			// Read committed journal state, not captured transaction predictions.
 			// Lost posts leave the original reservation conservatively outstanding.
