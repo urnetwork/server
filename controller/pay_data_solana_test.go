@@ -88,19 +88,23 @@ func TestPayDataSolanaIntentEarlyErrors(t *testing.T) {
 	result, err := PayDataSolanaIntent(&PayDataSolanaIntentArgs{ItemId: "data_2tib", NetworkName: "net", Reference: reference}, clientSession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, result.Error.Message, "Unknown item.")
+	connect.AssertEqual(t, result.Error.Code, PurchaseErrorCodeInvalidRequest)
 
 	result, err = PayDataSolanaIntent(&PayDataSolanaIntentArgs{ItemId: StripeItemProMonthly, NetworkName: "net", Reference: reference}, clientSession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, result.Error.Message, "Unknown item.")
+	connect.AssertEqual(t, result.Error.Code, PurchaseErrorCodeInvalidRequest)
 
 	result, err = PayDataSolanaIntent(&PayDataSolanaIntentArgs{ItemId: StripeItemData1Tib, NetworkName: "net", Reference: "short"}, clientSession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, result.Error.Message, "Invalid payment reference.")
+	connect.AssertEqual(t, result.Error.Code, PurchaseErrorCodeInvalidRequest)
 
 	// no network means nowhere for the data to go: crypto never asks for an email
 	result, err = PayDataSolanaIntent(&PayDataSolanaIntentArgs{ItemId: StripeItemData1Tib, NetworkName: "  ", Reference: reference}, clientSession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, result.Error.Message, "Enter the network that should receive the data.")
+	connect.AssertEqual(t, result.Error.Code, PurchaseErrorCodeNetworkNameRequired)
 
 	// a malformed reference is simply unknown to the status endpoint
 	status, err := PayDataSolanaStatus(&PayDataSolanaStatusArgs{Reference: " "}, clientSession)

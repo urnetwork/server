@@ -317,8 +317,10 @@ type StripePaymentSheetResult struct {
 	Error        *OnboardingError `json:"error,omitempty"`
 }
 
-func stripePaymentSheetError(message string) *StripePaymentSheetResult {
-	return &StripePaymentSheetResult{Error: &OnboardingError{Message: message}}
+// stripePaymentSheetError is a refused payment sheet: a `PurchaseErrorCode*`
+// and its message.
+func stripePaymentSheetError(code string, message string) *StripePaymentSheetResult {
+	return &StripePaymentSheetResult{Error: &OnboardingError{Code: code, Message: message}}
 }
 
 // StripePaymentSheet prepares an inline Stripe PaymentSheet purchase of Pro: the
@@ -340,7 +342,7 @@ func StripePaymentSheet(
 	}
 	plan := strings.ToLower(strings.TrimSpace(args.Plan))
 	if plan != model.PlanYearly && plan != model.PlanMonthly {
-		return stripePaymentSheetError("Unknown plan."), nil
+		return stripePaymentSheetError(PurchaseErrorCodeInvalidRequest, "Unknown plan."), nil
 	}
 	if err := model.CheckOnboardingRateLimit(clientSession, model.OnboardingOfferRateLimit); err != nil {
 		return nil, err
@@ -353,20 +355,20 @@ func StripePaymentSheet(
 	priceId, err := StripePriceIdForTier(tier.Tier, plan)
 	if err != nil {
 		glog.Errorf("[stripe]payment sheet: no %s price for tier %s: %s\n", plan, tier.Tier.Name, err)
-		return stripePaymentSheetError("That plan is not available."), nil
+		return stripePaymentSheetError(PurchaseErrorCodePlanUnavailable, "That plan is not available."), nil
 	}
 
 	customerId, err := stripeCustomerIdForSession(clientSession)
 	if err != nil {
 		glog.Errorf("[stripe]payment sheet: customer: %s\n", err)
-		return stripePaymentSheetError("Could not start the payment. Please try again."), nil
+		return stripePaymentSheetError(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage), nil
 	}
 
 	// never start a second subscription while one is active: a sheet that looked
 	// like it failed would otherwise charge the customer again
 	if stripeNetworkHasActiveSubscription(clientSession, customerId) {
 		glog.Infof("[stripe]payment sheet: network %s already has an active subscription\n", networkId)
-		return stripePaymentSheetError(stripeAlreadySubscribedMessage), nil
+		return stripePaymentSheetError(PurchaseErrorCodeAlreadySubscribed, stripeAlreadySubscribedMessage), nil
 	}
 
 	// a sheet the customer abandoned leaves a pending subscription behind; replace
@@ -414,7 +416,7 @@ func StripePaymentSheet(
 	sub, err := subscription.New(params)
 	if err != nil {
 		glog.Errorf("[stripe]payment sheet: could not create subscription for network %s: %s\n", networkId, err)
-		return stripePaymentSheetError("Could not start the payment. Please try again."), nil
+		return stripePaymentSheetError(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage), nil
 	}
 
 	stripeVersion := strings.TrimSpace(args.StripeVersion)
@@ -427,7 +429,7 @@ func StripePaymentSheet(
 	})
 	if err != nil {
 		glog.Errorf("[stripe]payment sheet: ephemeral key: %s\n", err)
-		return stripePaymentSheetError("Could not start the payment. Please try again."), nil
+		return stripePaymentSheetError(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage), nil
 	}
 
 	regular := tier.Tier.PriceUsd(plan)
@@ -461,7 +463,7 @@ func StripePaymentSheet(
 		result.PaymentIntentClientSecret = sub.LatestInvoice.ConfirmationSecret.ClientSecret
 	default:
 		glog.Errorf("[stripe]payment sheet: subscription %s has no intent to confirm\n", sub.ID)
-		return stripePaymentSheetError("Could not start the payment. Please try again."), nil
+		return stripePaymentSheetError(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage), nil
 	}
 	glog.Infof(
 		"[stripe]payment sheet: subscription %s for network %s plan %s tier %s (%s) offer=%t\n",

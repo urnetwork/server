@@ -71,12 +71,17 @@ type PayDataCheckoutResult struct {
 }
 
 type PayDataCheckoutError struct {
+	// one of the `PurchaseErrorCode*` values. Added after `Message`; older
+	// clients ignore it.
+	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 }
 
-func payDataCheckoutError(message string) *PayDataCheckoutResult {
+// payDataCheckoutError is a refused checkout: a `PurchaseErrorCode*` and its
+// message.
+func payDataCheckoutError(code string, message string) *PayDataCheckoutResult {
 	return &PayDataCheckoutResult{
-		Error: &PayDataCheckoutError{Message: message},
+		Error: &PayDataCheckoutError{Code: code, Message: message},
 	}
 }
 
@@ -187,28 +192,31 @@ func PayDataCheckout(
 	args *PayDataCheckoutArgs,
 	clientSession *session.ClientSession,
 ) (*PayDataCheckoutResult, error) {
-	target, provider, errMessage := payDataValidate(args)
+	target, provider, errCode, errMessage := payDataValidate(args)
 	if errMessage != "" {
-		return payDataCheckoutError(errMessage), nil
+		return payDataCheckoutError(errCode, errMessage), nil
 	}
 
 	if !payDataCheckoutLimiter.allow(clientSession) {
-		return payDataCheckoutError("Too many checkout attempts from this address. Try again in a minute."), nil
+		return payDataCheckoutError(
+			PurchaseErrorCodeRateLimited,
+			"Too many checkout attempts from this address. Try again in a minute.",
+		), nil
 	}
 
 	networkNameArg := strings.TrimSpace(args.NetworkName)
 	if networkNameArg != "" {
 		networkId, storedName := model.FindNetworkByName(clientSession.Ctx, networkNameArg)
 		if networkId == nil {
-			return payDataCheckoutError(fmt.Sprintf("No network named %s", networkNameArg)), nil
+			return payDataCheckoutError(PurchaseErrorCodeNetworkNotFound, fmt.Sprintf("No network named %s", networkNameArg)), nil
 		}
 		target.NetworkId = networkId
 		target.NetworkName = storedName
 	}
 
-	checkoutUrl, errMessage := payDataStripeCheckout(target)
+	checkoutUrl, errCode, errMessage := payDataStripeCheckout(target)
 	if errMessage != "" {
-		return payDataCheckoutError(errMessage), nil
+		return payDataCheckoutError(errCode, errMessage), nil
 	}
 
 	glog.Infof(
@@ -224,12 +232,13 @@ func PayDataCheckout(
 }
 
 // payDataValidate checks the request shape before anything is looked up or
-// counted against the rate limit. The returned target has no network yet.
-func payDataValidate(args *PayDataCheckoutArgs) (target payDataTarget, provider string, errMessage string) {
+// counted against the rate limit. The returned target has no network yet. A
+// refusal is its `PurchaseErrorCode*` and its message.
+func payDataValidate(args *PayDataCheckoutArgs) (target payDataTarget, provider string, errCode string, errMessage string) {
 	itemId := strings.TrimSpace(args.ItemId)
 	byteCount, ok := stripeDataPackByteCount(itemId)
 	if !ok {
-		return target, "", "Unknown item."
+		return target, "", PurchaseErrorCodeInvalidRequest, "Unknown item."
 	}
 
 	provider = strings.ToLower(strings.TrimSpace(args.Provider))
@@ -238,12 +247,12 @@ func payDataValidate(args *PayDataCheckoutArgs) (target payDataTarget, provider 
 		// the request shape keeps the field; stripe is the only hosted checkout
 		provider = PayDataProviderStripe
 	default:
-		return target, "", "Unknown provider."
+		return target, "", PurchaseErrorCodeInvalidRequest, "Unknown provider."
 	}
 
 	email := strings.TrimSpace(args.Email)
 	if email != "" && !payDataValidEmail(email) {
-		return target, "", "That email address does not look right."
+		return target, "", PurchaseErrorCodeInvalidEmail, "That email address does not look right."
 	}
 
 	target = payDataTarget{
@@ -251,7 +260,7 @@ func payDataValidate(args *PayDataCheckoutArgs) (target payDataTarget, provider 
 		ByteCount: byteCount,
 		Email:     email,
 	}
-	return target, provider, ""
+	return target, provider, "", ""
 }
 
 // payDataValidEmail is a shape check only: the address is where a paid code is
@@ -331,17 +340,19 @@ func payDataStripeSessionParams(
 	return params
 }
 
-func payDataStripeCheckout(target payDataTarget) (checkoutUrl string, errMessage string) {
+// payDataStripeCheckout creates the hosted checkout and returns its url, or a
+// refusal: its `PurchaseErrorCode*` and its message.
+func payDataStripeCheckout(target payDataTarget) (checkoutUrl string, errCode string, errMessage string) {
 	urls := stripeCheckoutUrls()
 	if urls.SuccessUrl == "" || urls.CancelUrl == "" {
 		// refuse rather than hand a customer to Stripe with no way back
 		glog.Errorf("[paydata]stripe checkout urls are not configured\n")
-		return "", "Checkout is not configured."
+		return "", PurchaseErrorCodeCheckoutUnavailable, "Checkout is not configured."
 	}
 
-	lineItems, errMessage := stripeDataPackLineItems(target.ItemId)
+	lineItems, errCode, errMessage := stripeDataPackLineItems(target.ItemId)
 	if errMessage != "" {
-		return "", errMessage
+		return "", errCode, errMessage
 	}
 
 	params := payDataStripeSessionParams(target, urls, lineItems)
@@ -350,11 +361,11 @@ func payDataStripeCheckout(target payDataTarget) (checkoutUrl string, errMessage
 	checkoutSession, err := stripecheckout.New(params)
 	if err != nil {
 		glog.Errorf("[paydata]could not create stripe checkout session for %s: %s\n", target.ItemId, err)
-		return "", "Could not start checkout. Please try again."
+		return "", PurchaseErrorCodeStartFailed, "Could not start checkout. Please try again."
 	}
 	if checkoutSession.URL == "" {
 		glog.Errorf("[paydata]stripe checkout session %s has no url\n", checkoutSession.ID)
-		return "", "Could not start checkout. Please try again."
+		return "", PurchaseErrorCodeStartFailed, "Could not start checkout. Please try again."
 	}
-	return checkoutSession.URL, ""
+	return checkoutSession.URL, "", ""
 }

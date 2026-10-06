@@ -417,6 +417,21 @@ func TestSubscriptionCancelRefusesStoresItCannotAct(t *testing.T) {
 	if subscriptionCancelRefusal("") == nil || subscriptionCancelRefusal("x402") == nil {
 		t.Fatal("unknown stores are refused")
 	}
+	// each refusal names its reason in a stable code beside the message
+	for _, c := range []struct {
+		store string
+		code  string
+	}{
+		{store: model.SubscriptionMarketApple, code: SubscriptionErrorCodeManagedByAppStore},
+		{store: model.SubscriptionMarketGoogle, code: SubscriptionErrorCodeManagedByGooglePlay},
+		{store: model.SubscriptionMarketSolana, code: SubscriptionErrorCodeDoesNotRenew},
+		{store: "x402", code: SubscriptionErrorCodeNotCancelable},
+	} {
+		refusal := subscriptionCancelRefusal(c.store)
+		if refusal.Error.Code != c.code || refusal.Error.Message == "" {
+			t.Errorf("%s: error %+v, want code %s with its message", c.store, refusal.Error, c.code)
+		}
+	}
 	if subscriptionCancelRefusal(model.SubscriptionMarketStripe) != nil {
 		t.Fatal("stripe is the store the server acts on")
 	}
