@@ -358,3 +358,104 @@ func TestWgPacketColdConfigFailureCompletesItsOwner(t *testing.T) {
 		}
 	})
 }
+
+// Parent cancellation while construction is outside the lock must also close
+// the publication gate. The admitted creator joins its unpublished device,
+// while canceled coalesced callers return without waiting for that cleanup.
+func TestWgDeviceConstructionCanceledBeforePublication(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		manager := wgAdmissionTestManager(t)
+		proxyId := server.NewId()
+		buildEntered, buildRelease := make(chan struct{}), make(chan struct{})
+		closeEntered, closeRelease := make(chan struct{}), make(chan struct{})
+		var buildReleaseOnce, closeReleaseOnce sync.Once
+		releaseBuild := func() { buildReleaseOnce.Do(func() { close(buildRelease) }) }
+		releaseClose := func() { closeReleaseOnce.Do(func() { close(closeRelease) }) }
+		defer releaseBuild()
+		defer releaseClose()
+		var closed atomic.Int32
+		deviceCtx, deviceCancel := context.WithCancel(manager.ctx)
+		device := &ProxyDevice{
+			ctx: deviceCtx, cancel: deviceCancel,
+			closeDeviceLocalForTest: func() {
+				closed.Add(1)
+				close(closeEntered)
+				<-closeRelease
+			},
+		}
+		manager.proxyDeviceBuilder = func(server.Id) (*ProxyDevice, error) {
+			close(buildEntered)
+			<-buildRelease
+			return device, nil
+		}
+		type openResult struct {
+			device *ProxyDevice
+			err    error
+		}
+		first := make(chan openResult, 1)
+		go func() {
+			device, err := manager.OpenProxyDevice(proxyId)
+			first <- openResult{device: device, err: err}
+		}()
+		<-buildEntered
+		const waiterCount = 8
+		waiters := make(chan openResult, waiterCount)
+		for range waiterCount {
+			go func() {
+				device, err := manager.OpenProxyDevice(proxyId)
+				waiters <- openResult{device: device, err: err}
+			}()
+		}
+		synctest.Wait()
+		manager.stateLock.RLock()
+		state := manager.proxyDevices[proxyId]
+		manager.stateLock.RUnlock()
+		if state == nil || state.users.Load() != waiterCount+1 {
+			t.Fatal("fixture did not hold every opener behind one construction")
+		}
+		state.StateLock.Lock()
+		creation := state.creating
+		state.StateLock.Unlock()
+		manager.cancel()
+		synctest.Wait()
+		if len(waiters) != waiterCount {
+			t.Errorf("cancellation retained %d coalesced openers", waiterCount-len(waiters))
+		}
+		releaseBuild()
+		<-closeEntered
+		synctest.Wait()
+		if len(first) != 0 {
+			t.Error("canceled construction returned a device before unpublished cleanup joined")
+		}
+		select {
+		case <-creation.done:
+			t.Error("construction result completed before unpublished cleanup joined")
+		default:
+		}
+		releaseClose()
+		result := <-first
+		if result.device != nil || !errors.Is(result.err, context.Canceled) {
+			t.Errorf("canceled construction was published: device=%p err=%v", result.device, result.err)
+		}
+		for range waiterCount {
+			result := <-waiters
+			if result.device != nil || result.err == nil {
+				t.Error("canceled coalesced opener adopted a device")
+			}
+		}
+		if err := manager.CloseAndWait(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-creation.done:
+		default:
+			t.Error("canceled construction retained its completion marker")
+		}
+		if closed.Load() != 1 || manager.DeviceCount() != 0 || deviceCtx.Err() == nil {
+			t.Error("canceled construction retained device ownership")
+		}
+		if got := server.PacketPostgresAttempts(manager.ctx); got != 0 {
+			t.Fatalf("canceled publication attempted PostgreSQL %d times", got)
+		}
+	})
+}
