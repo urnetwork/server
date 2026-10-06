@@ -121,6 +121,22 @@ func TestRedisCommandProbeNoRetryAppliedWrite(t *testing.T) {
 	}
 }
 
+func TestRedisCommandProbeDedicatedPoliciesUnchanged(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no_command_retry", true: "deadline"}[deadline], func(t *testing.T) {
+			peer, _, pool := newRedisCommandProbeClient(t)
+			pool.disableCommandRetry = true
+			pool.contextTimeoutEnabled = deadline
+			redisWithClient(t.Context(), pool, func(r RedisClient) {
+				Raise(r.Set(t.Context(), "dedicated-policy", "unchanged", 0).Err())
+			}, OptNoRetry())
+			if peer.count("ping") != 1 || peer.count("set") != 1 {
+				t.Fatal("dedicated Redis boundary lost its existing probe policy")
+			}
+		})
+	}
+}
+
 func TestRedisCommandProbeCanceledBeforeAdmission(t *testing.T) {
 	for _, retry := range []bool{false, true} {
 		t.Run(map[bool]string{false: "no_retry", true: "default_retry"}[retry], func(t *testing.T) {
