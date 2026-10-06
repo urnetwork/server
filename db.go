@@ -902,6 +902,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				} else if glog.V(1) {
 					glog.Infof("[db]transient error, retry = %v\n", pgErr)
 				}
+				runTxRerunHook(ctx)
 				continue
 			}
 			panic(pgErr)
@@ -925,6 +926,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				} else if glog.V(1) {
 					glog.Infof("[db]commit error, retry = %v\n", commitErr)
 				}
+				runTxRerunHook(ctx)
 				continue
 			}
 			panic(commitErr)
