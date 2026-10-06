@@ -46,9 +46,12 @@ type contractExpiryRepairScope struct {
 	contractId    server.Id
 	expectedPayer server.Id
 	continuation  *contractExpiryRepairState
+	redis         *contractRedisExpiryRepairScope
 	// Tests may change custody between real committed transaction boundaries.
 	// Production never supplies this callback.
 	beforeTxForTest func()
+	// Simulates lost acknowledgement after a real commit, before authority moves.
+	afterCommitForTest func()
 }
 
 type contractExpiryRepairReport struct {
@@ -141,6 +144,9 @@ func (scope *contractExpiryRepairScope) checkInTx(ctx context.Context, tx server
 	if dispute {
 		return contractExpiryRepairRefusal("disputed")
 	}
+	if scope.redis != nil {
+		return scope.checkRedisInTx(ctx, tx, contractId, lock)
+	}
 	var intent, legacy, redis, debit bool
 	if err := tx.QueryRow(ctx, `SELECT
 		EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1),
@@ -181,7 +187,13 @@ func contractExpiryContinuationTx(ctx context.Context, contractId server.Id, sco
 		callback(tx)
 		next = readContractExpiryRepairState(ctx, tx, contractId)
 	}, server.TxReadCommitted, server.OptNoRetry())
+	if scope.afterCommitForTest != nil {
+		scope.afterCommitForTest()
+	}
 	scope.continuation = next
+	if scope.redis != nil {
+		scope.redis.custody = scope.redis.observed
+	}
 }
 
 // Catch privately: the standard logging recovery may include IDs and financial
@@ -244,6 +256,12 @@ func observeContractExpiryRepair(ctx context.Context, scope *contractExpiryRepai
 // it never quarantines accounting failures, flushes grants or releases custody.
 // A deadline may leave a committed proof/report prefix for the ordinary owner.
 func RepairContractExpiry(ctx context.Context, request ContractExpiryRepairRequest) (result ContractExpiryRepairResult, returnErr error) {
+	return repairContractExpiry(ctx, request, false)
+}
+
+// Each entry point chooses its own reservation admission; reports, proof,
+// cancellation, and ordinary continuation retain one owner.
+func repairContractExpiry(ctx context.Context, request ContractExpiryRepairRequest, redis bool) (result ContractExpiryRepairResult, returnErr error) {
 	if err := validateContractExpiryRepair(request); err != nil {
 		return result, err
 	}
@@ -260,6 +278,9 @@ func RepairContractExpiry(ctx context.Context, request ContractExpiryRepairReque
 		}
 		entry := &result.Contracts[i]
 		scope := &contractExpiryRepairScope{contractId: id, expectedPayer: request.ExpectedPayerNetworkId}
+		if redis {
+			scope.redis = &contractRedisExpiryRepairScope{cutoff: result.Cutoff}
+		}
 		var fresh *contractExpiryState
 		err := captureContractExpiryRepair(func() error {
 			if request.Apply {

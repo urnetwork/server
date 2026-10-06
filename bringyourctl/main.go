@@ -93,6 +93,7 @@ Usage:
 		bringyourctl wallets sync-circle
     bringyourctl contracts repair-expiry-route-check
     bringyourctl contracts repair-expiry --private-stdin [--apply]
+    bringyourctl contracts repair-redis-expiry --private-stdin [--apply]
     bringyourctl contracts drain-legacy --private-stdin [--apply]
     bringyourctl contracts close-expired [-c <count>]
     bringyourctl contracts close --contract_id=<contract_id> --target_id=<target_id> --used_transfer_byte_count=<used_transfer_byte_count>
@@ -307,6 +308,10 @@ Options:
 		if repairExpiry, _ := opts.Bool("repair-expiry"); repairExpiry {
 			apply, _ := opts.Bool("--apply")
 			os.Exit(runPrivateContractExpiryRepair(context.Background(), os.Stdin, os.Stdout, apply, invokeContractExpiryRepair))
+		}
+		if repairRedisExpiry, _ := opts.Bool("repair-redis-expiry"); repairRedisExpiry {
+			apply, _ := opts.Bool("--apply")
+			os.Exit(runPrivateRedisContractExpiryRepair(context.Background(), os.Stdin, os.Stdout, apply, invokeRedisContractExpiryRepair))
 		}
 		if closeExpired, _ := opts.Bool("close-expired"); closeExpired {
 			closeExpiredContracts(opts)
