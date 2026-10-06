@@ -2293,6 +2293,10 @@ func (self *ExchangeBuffer) WriteMessages(conn net.Conn, transferFrameBytesBatch
 	// keeps its backing for the next batch.
 	buffers := self.writeBuffers
 	n, err := buffers.WriteTo(conn)
+	// A failed WriteTo leaves its unconsumed tail in the shared backing array.
+	// Drop those borrowed references before returning the payload ownership.
+	clear(self.writeBuffers)
+	self.writeBuffers = self.writeBuffers[:0]
 	// A writev can finish a frame prefix before a later iovec fails. Account
 	// for that completed prefix without treating the partial trailing frame as
 	// a packet.
