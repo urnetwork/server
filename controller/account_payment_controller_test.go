@@ -31,6 +31,7 @@ func TestSendPaymentsUsesBoundedPlannerAndPreservesPartialError(t *testing.T) {
 		err := sendPaymentsWithPlanner(clientSession, func(
 			plannerCtx context.Context,
 			maxDuration time.Duration,
+			writeInTx func(server.PgTx, *model.PaymentPlan),
 			onSlice func(*model.PaymentPlan),
 		) ([]*model.PaymentPlan, error) {
 			called = true
@@ -40,6 +41,9 @@ func TestSendPaymentsUsesBoundedPlannerAndPreservesPartialError(t *testing.T) {
 			wantMaxDuration := boundedPaymentPlanSliceDuration(model.EnvSubsidyConfig().MinDurationPerPayout())
 			if maxDuration != wantMaxDuration {
 				t.Fatalf("planner maxDuration = %s, want %s", maxDuration, wantMaxDuration)
+			}
+			if writeInTx == nil {
+				t.Fatal("send path did not hold its notices in the slice transactions")
 			}
 			if onSlice != nil {
 				t.Fatal("send path unexpectedly supplied an onSlice callback")
@@ -91,52 +95,56 @@ func TestBoundedPaymentPlanSliceDurationExceedsMinimumSubsidyDuration(t *testing
 	}
 }
 
-func TestCollectMissingWalletNoticesDeduplicatesAcrossSlices(t *testing.T) {
+// The held notices of one network across slices release as one notice,
+// carried by the first slice's notice, with the payout of all of them.
+func TestCoalesceMissingWalletNoticesDeduplicatesAcrossSlices(t *testing.T) {
 	networkId := server.NewId()
-	firstPaymentId := server.NewId()
-	walletNetworkId := server.NewId()
-	walletId := server.NewId()
-
-	notices := collectMissingWalletNotices([]*model.PaymentPlan{
-		{
-			NetworkPayments: map[server.Id]*model.AccountPayment{
-				networkId: {
-					PaymentId: firstPaymentId,
-					Payout:    125,
-				},
-				walletNetworkId: {
-					PaymentId: server.NewId(),
-					WalletId:  &walletId,
-					Payout:    999,
-				},
-			},
-		},
-		{
-			NetworkPayments: map[server.Id]*model.AccountPayment{
-				networkId: {
-					PaymentId: server.NewId(),
-					Payout:    375,
-				},
-			},
-		},
-	}, 0)
-
-	if len(notices) != 1 {
-		t.Fatalf("missing-wallet notices = %v, want one network", notices)
+	otherNetworkId := server.NewId()
+	first := &heldMissingWalletNotice{
+		messageId: server.NewId(),
+		networkId: networkId,
+		paymentId: server.NewId(),
+		payout:    125,
 	}
-	notice := notices[networkId]
-	if notice == nil {
-		t.Fatalf("missing-wallet notice for %s was not collected", networkId)
+	other := &heldMissingWalletNotice{
+		messageId: server.NewId(),
+		networkId: otherNetworkId,
+		paymentId: server.NewId(),
+		payout:    999,
 	}
-	if notice.paymentId != firstPaymentId {
-		t.Fatalf("notice payment id = %s, want first slice id %s", notice.paymentId, firstPaymentId)
+	second := &heldMissingWalletNotice{
+		messageId: server.NewId(),
+		networkId: networkId,
+		paymentId: server.NewId(),
+		payout:    375,
+	}
+
+	released, removedMessageIds := coalesceMissingWalletNotices([]*heldMissingWalletNotice{first, other, second}, 0)
+
+	if len(released) != 2 {
+		t.Fatalf("released notices = %v, want one per network", released)
+	}
+	notice := released[0]
+	if notice.networkId != networkId || notice.messageId != first.messageId || notice.paymentId != first.paymentId {
+		t.Fatalf("notice = %+v, want carried by the first slice's notice %+v", notice, first)
 	}
 	if notice.payout != 500 {
 		t.Fatalf("notice payout = %d, want 500", notice.payout)
 	}
+	if released[1].networkId != otherNetworkId || released[1].payout != 999 {
+		t.Fatalf("other notice = %+v, want its own payout", released[1])
+	}
+	if len(removedMessageIds) != 1 || removedMessageIds[0] != second.messageId {
+		t.Fatalf("removed = %v, want the second slice's notice", removedMessageIds)
+	}
+	if first.payout != 125 {
+		t.Fatal("coalescing changed a held notice")
+	}
 }
 
-func TestCollectMissingWalletNoticesSkipsPayoutsBelowMinimum(t *testing.T) {
+// Networks whose total withheld payout is below the minimum get no notice, and
+// their held notices are removed.
+func TestCoalesceMissingWalletNoticesSkipsPayoutsBelowMinimum(t *testing.T) {
 	minPayout := missingWalletNoticeMinPayout(0.20)
 	if minPayout != model.UsdToNanoCents(0.20) {
 		t.Fatalf("min payout = %d, want %d", minPayout, model.UsdToNanoCents(0.20))
@@ -151,25 +159,30 @@ func TestCollectMissingWalletNoticesSkipsPayoutsBelowMinimum(t *testing.T) {
 	splitNetworkId := server.NewId()
 	largeNetworkId := server.NewId()
 
-	notices := collectMissingWalletNotices([]*model.PaymentPlan{
-		{
-			NetworkPayments: map[server.Id]*model.AccountPayment{
-				// "You earned 0.00 USDC" (support inbox 981)
-				subCentNetworkId: {PaymentId: server.NewId(), Payout: model.UsdToNanoCents(0.004)},
-				// "You earned 0.01 USDC" (support inbox 897)
-				smallNetworkId: {PaymentId: server.NewId(), Payout: model.UsdToNanoCents(0.01)},
-				splitNetworkId: {PaymentId: server.NewId(), Payout: model.UsdToNanoCents(0.15)},
-				largeNetworkId: {PaymentId: server.NewId(), Payout: model.UsdToNanoCents(1.25)},
-			},
-		},
-		{
-			NetworkPayments: map[server.Id]*model.AccountPayment{
-				// the run total reaches the minimum across slices
-				splitNetworkId: {PaymentId: server.NewId(), Payout: model.UsdToNanoCents(0.05)},
-			},
-		},
-	}, minPayout)
+	held := func(networkId server.Id, payoutUsd float64) *heldMissingWalletNotice {
+		return &heldMissingWalletNotice{
+			messageId: server.NewId(),
+			networkId: networkId,
+			paymentId: server.NewId(),
+			payout:    model.UsdToNanoCents(payoutUsd),
+		}
+	}
+	heldNotices := []*heldMissingWalletNotice{
+		// "You earned 0.00 USDC" (support inbox 981)
+		held(subCentNetworkId, 0.004),
+		// "You earned 0.01 USDC" (support inbox 897)
+		held(smallNetworkId, 0.01),
+		held(splitNetworkId, 0.15),
+		held(largeNetworkId, 1.25),
+		// the run total reaches the minimum across slices
+		held(splitNetworkId, 0.05),
+	}
+	released, removedMessageIds := coalesceMissingWalletNotices(heldNotices, minPayout)
 
+	notices := map[server.Id]*heldMissingWalletNotice{}
+	for _, notice := range released {
+		notices[notice.networkId] = notice
+	}
 	if _, ok := notices[subCentNetworkId]; ok {
 		t.Fatal("sub-cent payout produced a missing-wallet notice")
 	}
@@ -184,6 +197,10 @@ func TestCollectMissingWalletNoticesSkipsPayoutsBelowMinimum(t *testing.T) {
 	}
 	if len(notices) != 2 {
 		t.Fatalf("missing-wallet notices = %d, want 2", len(notices))
+	}
+	// the two below the minimum and the split network's second slice
+	if len(removedMessageIds) != 3 {
+		t.Fatalf("removed %d held notices, want 3", len(removedMessageIds))
 	}
 }
 

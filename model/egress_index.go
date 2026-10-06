@@ -806,7 +806,7 @@ type ProviderEgressInspection struct {
 }
 
 // Reads one provider's rollup and accepted URL evidence for operator inspection.
-// This diagnostic uses the same bulk eligibility facts as the publication pass.
+// This diagnostic reads the publication pass's evidence for this provider only.
 func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgressInspection {
 	var inspection *ProviderEgressInspection
 	var publishedCountryCode *string
@@ -854,7 +854,7 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 
 	inspection.Settings = egressIndexSettings()
 	inspection.EgressTestEnabled = providerEgressTestEnabled()
-	countFilter := newProviderCountFilter(ctx, inspection.EgressTestEnabled)
+	countFilter := newProviderCountFilterForClients(ctx, []server.Id{clientId})
 
 	facts := countFilter.egressFacts(
 		clientId,

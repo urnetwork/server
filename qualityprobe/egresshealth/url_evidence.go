@@ -80,10 +80,7 @@ func (self *UrlProbeEvidence) Validate() error {
 	if err := self.Policy.Validate(); err != nil {
 		return err
 	}
-	// Reader support advances before the producer matcher during a staged rollout.
-	switch self.ContentMatcherVersion {
-	case 1, 2, 3:
-	default:
+	if self.ContentMatcherVersion != 1 && self.ContentMatcherVersion != 2 && self.ContentMatcherVersion != UrlProbeContentMatcherVersion {
 		return fmt.Errorf("URL content matcher version %d is unsupported", self.ContentMatcherVersion)
 	}
 	if UrlProbeDestinationKey(self.Destination) == "" || len(self.Destination.Name) == 0 || len(self.Destination.Name) > 256 || len(self.Destination.Url) > 4096 || self.MeasuredAt.IsZero() || len(self.Security) > 6 {

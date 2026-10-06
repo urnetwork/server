@@ -724,10 +724,14 @@ WHERE function_name LIKE '%UpdateClient%'
   generic processor 400s because only that typed, definitive pre-chain result
   is safe to unpin (§5.7).
 - GOTCHA — a destination rejection and its failed reset are different phases.
-  `AdvancePayment` can return a composed `; invalid destination reset error = `
-  suffix after the original processor rejection. The complete SQL error is
-  classified as `invalid-destination-reset-failed` before processor or
-  persistence text; the fixed task taxonomy uses the same task-scoped marker.
+  `AdvancePayment` currently composes `Payment create transaction error: ...;
+  invalid destination reset error: ...`; retained older errors use ` = ` at
+  both separators. One shared pattern requires the complete paired form and
+  nonempty reset detail in the SQL, fixed task taxonomy, and log classifier.
+  Task and SQL classification additionally require `AdvancePayment` ownership.
+  The complete SQL error is classified as `invalid-destination-reset-failed`
+  before processor or persistence text. A lone suffix, mixed separators, or
+  ordinary destination rejection does not establish a failed reset.
   Single-cause guidance uses that full-text class even when the representative
   160-byte sample ends before the suffix. Mixed-family guidance includes this
   reset/persistence action only when its class is present. Inspect concurrent,
@@ -735,6 +739,12 @@ WHERE function_name LIKE '%UpdateClient%'
   preserve the existing key and reconcile before another submission. Neither
   a matching destination phrase nor a current source base proves successful
   reset or unchanged account configuration. Never clear rows or keys manually.
+  An equals-only watcher misses the current colon form, so absence of this
+  class there is not reset-health evidence. The source mismatch alone cannot
+  assign an observed `other` cohort to reset failures; retain the original
+  complete-error observation and its source before attribution. Missing or
+  failed SQL/log observations remain unknown, and relabeling a failure does
+  not prove that payment recovery occurred.
 - The 2026-09-18 Main `AdvancePayment` investigation established the current
   operations/configuration split with a bounded read-only primary query. Of
   1,119 pending failures, 1,117 were `wallet-insufficient`: each remained
@@ -2422,10 +2432,11 @@ it does not encode the outer context state or active artifact ancestry. The
 local release tag `v2026.9.3-1036806790` dereferences to operator-proxy snapshot
 commit `4ba0dd88`, whose versioned source logs every TUN read return, and does
 not contain `20e289bd`. That tag inspection does not prove the active
-Taskworker runs it. Current operator-proxy main contains `20e289bd`, which
-suppresses the read error only after that tunnel's context is canceled and
-preserves live-context read errors. Class only the exact terminal `Done` form
-as `provider-tunnel-read-done`, then prove runtime ancestry. On a proven
+Taskworker runs it. Server's `qualityprobe/providertunnel` carries `20e289bd`
+(imported with the prober's history on 2026-09-26), which suppresses the read
+error only after that tunnel's context is canceled and preserves live-context
+read errors. Class only the exact terminal `Done` form as
+`provider-tunnel-read-done`, then prove runtime ancestry. On a proven
 pre-`20e289bd` artifact, the line is consistent with ordinary teardown through
 the unconditional legacy logger; deploy a containing Taskworker. On a proven
 descendant, recurrence is an affirmative unexpected Tun/context close-order
@@ -10788,16 +10799,17 @@ API artifact convergence, then require the mixed one-hour rate window to clear
 before using the new projection as steady-state closure evidence.
 
 Connect commit `66aaad4` (the patch-identical rebased successor of historical
-commit `d3b49d9`) and Operator Proxy commit `35b0bc7` separately make a
+commit `d3b49d9`) and prober commit `35b0bc7` separately make a
 short-lived probe's final derived-client removal part of joined tunnel
 retirement. They prevent canceled control-plane cleanup from leaving active
 derived rows until the idle reaper, but do not repair legacy HMAC rejection or
 substitute for the concurrency correction. Require aggregate child-lifecycle
 evidence from §2.25 before attributing current fleet size or throughput to that
 adjacent leak, and require a Taskworker build containing current Connect
-`66aaad4` plus Operator Proxy `35b0bc7` before its post-deploy cleanup gate
-begins. The historical hash documents the original incident fix; it is not
-standing deployment guidance after the rebase.
+`66aaad4` plus prober commit `35b0bc7` (in Server's `qualityprobe` history
+since the 2026-09-26 import) before its post-deploy cleanup gate begins. The
+historical hash documents the original incident fix; it is not standing
+deployment guidance after the rebase.
 
 Correlate a stalled frame with its bounded `ProviderEgressProbe` Taskworker
 logs and generic task error. Repair the concrete authentication, API,
@@ -11027,9 +11039,9 @@ At 20:32 UTC, an exact bounded unsettled-escrow join matched the ~604.1 GB
 Redis reservation mirror: 13,668 contracts larger than 32 MiB held ~535.2 GB
 (88.6%) while 56,365 contracts at or below 1 MiB held ~59.1 GB. Thus the
 1 MiB blackhole opening target alone cannot explain the credit drain. Verify
-the deployed Taskworker/Operator Proxy artifact and attribute large contracts
-to a specific probe lane before changing reservation policy; source-tree code
-or contract size by itself is not deployed-lane proof.
+the deployed Taskworker artifact, which embeds the prober, and attribute large
+contracts to a specific probe lane before changing reservation policy;
+source-tree code or contract size by itself is not deployed-lane proof.
 The 20:42 UTC bounded direction join then identified 15,652 open/unsettled
 contracts over 32 MiB (about 578.3 GiB requested) as return-to-prober
 companions, versus only 39 own-source originals (about 1.25 GiB). Fresh
@@ -11070,7 +11082,7 @@ cleanup backlog therefore holds genuine reservations; changing the Redis mirror
 or manually funding the account would not repair that mechanism. Bootstrap's
 last successful grant and an unexpired token did not establish current affordability.
 
-The owning Operator Proxy correction gives only the cheap blackhole tunnel a
+The owning `qualityprobe` correction gives only the cheap blackhole tunnel a
 private 1 MiB contract-reservation ramp target using fresh client settings. It
 avoids the ordinary large unused successors for this small measurement; full
 probe and bandwidth tunnels keep their defaults. This is a per-request
@@ -11128,7 +11140,7 @@ These source tests do not attest a running Main image or explain every DoH PAGE;
 verify the deployed artifact and same-process logical outcome before
 attribution or closure.
 
-**Per-probe DoH ownership:** Taskworker's full and blackhole Operator Proxy
+**Per-probe DoH ownership:** Taskworker's full and blackhole `qualityprobe`
 checks each open a new `providertunnel.Tunnel`. Each tunnel constructs its own
 TUN and in-tunnel DoH cache and closes that cache with the tunnel; neither the
 task nor a shared transport-budget owner owns probe DNS state. The synthetic
@@ -11137,7 +11149,7 @@ one explicit transport owner and verifies distinct DoH caches and control
 strategies, including independent teardown. A later probe-concurrency change
 must preserve this boundary. This is a construction invariant, not a claim
 that a DoH-attempt timeout proves a whole logical DNS lookup failed. The
-Operator Proxy control-plane API/WebSocket dial uses a private per-tunnel
+`qualityprobe` control-plane API/WebSocket dial uses a private per-tunnel
 strategy but currently resolves its host names outside the in-tunnel DoH path;
 do not confuse that bootstrap resolution with provider egress DNS.
 
@@ -12323,6 +12335,29 @@ ratio, security exceptions, and ten-measured-outcome quota are distinct rules.
 Hourly acknowledgement capacity still uses all-current demand and cannot prove
 unique accepted credits, per-provider fairness, or sustained completion.
 
+The sole watcher can append `-url-probe-coverage-output PATH` JSONL records
+on every existing URL-coverage execution, including healthy samples. This
+adds no query or cadence. Schema 1 keeps the evaluation clock separate from
+the original census and scrape clocks, and includes all-current, mature,
+warming and unknown-age counts, nullable known-mature percentage, separate
+TLS counts, source-coverage gaps and fixed census/cohort reason codes. A
+missing or invalid census emits null counts; a missing cohort extension
+retains a valid all-current census with null cohort counts. Zero mature
+providers yields a null percentage. Unknown ages can coexist with 100% known
+mature coverage while `whole_fleet_age_known=false`. `source_coverage_complete`
+describes visibility, not quota attainment. Consumers must check the newest
+record and its source clock rather than carrying forward an old healthy row.
+The age domain is explicitly `immutable_probe_cycle_started_at`; it does not
+prove physical first join or continuous historical eligibility.
+
+False-positive qualifier: ordinary newcomers reduce all-current quota without
+reducing mature coverage. False-negative qualifier: an old watcher that lacks
+the cohort selectors cannot establish mature coverage, and silence from the
+alert stream cannot establish a healthy mature sample. The running binary's
+source must contain the cohort query, reducer and optional observation sink.
+Output failures remain monitor visibility errors and retain actual deficit
+alerts; the observer never converts healthy samples into alerts.
+
 The provider quality probes dashboard has a dedicated URL quota row with the
 known mature ratio, known warming count, unknown age count, all-current quota,
 all nine cohort counts, and separate TLS exceptions. It selects one current,
@@ -12444,28 +12479,35 @@ profile alone. False-negative qualifier: local transport controls do not model
 provider scheduling, Main contract availability or the live eligible population;
 retain the independently observed per-provider quota and ownership requirements.
 
-URL content matcher v2 records changed HTML semantics separately from the
+URL content matcher v3 records changed HTML semantics separately from the
 unchanged result-policy version. It ignores controls in inert, hidden and example
 subtrees, parses script/form marker URLs, and requires a document title or H1
-human prompt plus live challenge structure. A custom-title browser gate can use
-its JavaScript-and-cookies instruction plus a non-passive platform script.
+human prompt or a direct paragraph/button instruction plus live challenge
+structure. Human prompts allow optional "that" and "a"; line breaks separate
+words while inline formatting preserves them. Body instructions exclude quoted
+prose and form controls. Generic widgets and human prompts inside forms cannot
+corroborate unrelated page content, even when a tutorial has a challenge-like
+title or heading without semantic article markup. A prompt with a CAPTCHA-only
+form remains a gate when no unrelated visible prose or data-entry fields are
+present. Quoted article prose remains content, while quoted prompts and markers
+cannot corroborate a gate. Explicit response decisions,
+platform scripts and the separately corroborated unusual-traffic form retain
+their own rules. A custom-title browser gate can use its JavaScript-and-cookies
+instruction plus a non-passive platform script.
 Ordinary article content defeats generic widget heuristics; corroborated
 platform scripts and explicit response decisions remain authoritative. Auxiliary
 widgets do not establish a document gate. The detector does not
 render overlays or interpret inline script bootstraps, and a partial content
-prefix still does not certify a requested article. The deterministic
+prefix still does not certify a requested article. A JavaScript modal can preserve
+the underlying article; article metadata alone does not prove rendered access.
+The deterministic
 `qualityprobe/egresshealth/TestUrlProbeHumanGate*` controls cover the repaired
 misses, inactive markers, passive scripts, articles and mixed matcher receipts.
 
-Deploy v1/v2-compatible API evidence readers before enabling v2 producers in
+Deploy v1/v2/v3-compatible API evidence readers before enabling v3 producers in
 Taskworker or standalone probes. The shared validator is also used by
-API ingress, model storage and probe publication; old v1-only readers reject v2.
-Historical v1 evidence retains its recorded provenance during a mixed rollout.
-The v3 rollout begins with a reader-only compatibility stage: the shared evidence
-validator accepts matcher versions 1, 2 and 3 while producers remain at version 2.
-API ingress, model storage, Taskworker and the shared standalone/fleet prober use
-that validator. Verify every API reader has this compatibility stage before
-enabling v3 producers; accepting v3 receipts does not activate the v3 detector.
+API ingress, model storage and probe publication; old v2 readers reject v3.
+Historical v1/v2 evidence retains its recorded provenance during a mixed rollout.
 This detector change does not alter phase limits, body sampling, the ten accepted
 measured outcomes per four hours, the inclusive 0.8 quality ratio, or the local
 setup versus measured-provider boundary. Local fixtures establish matcher
@@ -13966,10 +14008,11 @@ and 57,288 (90.7%) were active without a connection; the oldest residual was
 legacy Operator Proxy tunnel close canceled the shared generator context before
 cleanup completed, and legacy Connect final client removal did not wait for the
 remove response. Current Connect `66aaad4` (the patch-identical rebased
-successor of historical `d3b49d9`) and Operator Proxy `35b0bc7` correct new
-teardown, but an immutable Taskworker artifact must prove both exact sibling
-inputs because Server's local module replacements make its outer VCS stamp
-insufficient evidence. Do not require the superseded Connect hash to be an
+successor of historical `d3b49d9`) and prober commit `35b0bc7` correct new
+teardown. Since the 2026-09-26 `qualityprobe` import the prober fix is Server
+history, so Server's VCS stamp covers it; Connect is still a local module
+replacement, so an immutable Taskworker artifact must prove its exact Connect
+input separately. Do not require the superseded Connect hash to be an
 ancestor of a post-rebase build. That sample predates the lifetime-connection
 split and therefore records only the historical combined residual; it must not
 be assigned retroactively to either current branch.
@@ -15175,7 +15218,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `payout-retry-microburst` (derived from the fixed `transfer-admission admitted observable=v1` line) | At least four exact-replay-deduplicated pre-POST admission markers carried one authoritative Redis TIME second, which cannot fit under the three-admission rolling-second gate. Host/logger timestamps, response completions, and evaluator lines do not count. Absence is unknown unless §2.14 proves the marker capability on every newest Taskworker. | **Software/telemetry action:** first restore or deploy complete §2.14 capability coverage according to §8.12 provenance. With coverage complete, preserve the ceiling, backoff, and idempotency keys while diagnosing the Redis gate. An uninstrumented caller belongs to the separate processor-429 source investigation because it cannot emit this marker. Verify zero gate errors, a full 90-minute window below four admission markers/second, and no processor-rate-limit event. Funding or pausing the wallet remains separate finance/ops work. |
 | `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. At `07:12:48Z` on 2026-09-01, an already-jittered artifact still produced five wallet rejection responses plus a sixth 429, proving random retry dispersion was not a hard ceiling. Circle documents five default POST requests/second. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Deploy a clean Taskworker containing marker-capable `928abfca` only where §8.12/§2.14 proves the shared Redis-time gate or complete observation contract absent. The earlier `66525afc` baseline does not emit the capability gauge or exact marker. Then require zero gate errors and zero 429s for 90 minutes. If a fully converged gate still sees 429, correlate all Circle request sources and obtain the account's authoritative quota before tuning it. |
 | `[circlec][transfer-admission] failed closed` (Taskworker) | Redis admission failed or the task context ended while waiting, so the gate returned before the Circle POST. A deploy drain can cancel one waiter; repetition outside a drain points to Redis health or admission pressure. | Keep the gate fail closed. Correlate §2.14 errors/waits with Taskworker drain state and Redis health; never manually replay, pull the task forward, or loosen the ceiling. Verify zero admission errors and Circle 429s for two five-minute windows with stable idempotency keys. |
-| `payout-invalid-destination-reset-failed` — composed `Payment create transaction error = ...; invalid destination reset error = ...` | The controller reported a destination rejection followed by an unsuccessful guarded attempt reset. This exact composed marker precedes ordinary processor/network classes. Concurrent, terminal, or on-chain state can block reset, as can persistence failure; it does not prove unchanged wallet configuration. The Alert retains a fixed sample and `phase=guarded-reset`, never the processor/persistence suffix or inferred address. | Reconcile the current payment/processor state privately and distinguish guarded state rejection from persistence failure. Preserve the key; do not change wallets solely from this class or clear/replay rows. Verify an eligible reset succeeds or the existing attempt reaches a safe terminal outcome, with no duplicate transfer and stable keys for ambiguous submits. Require zero reset-failure events and durable `invalid-destination-reset-failed` rows through the natural 90-minute retry window plus ingestion delay. See §1.2/§5.7. |
+| `payout-invalid-destination-reset-failed` — composed `Payment create transaction error: ...; invalid destination reset error: ...`, or the legacy form with ` = ` at both separators | The controller reported a destination rejection followed by an unsuccessful guarded attempt reset. The shared complete marker requires nonempty reset detail and precedes ordinary processor/network classes. Concurrent, terminal, or on-chain state can block reset, as can persistence failure; it does not prove unchanged wallet configuration. The Alert retains a fixed sample and `phase=guarded-reset`, never the processor/persistence suffix or inferred address. An older equals-only watcher or incomplete log window cannot establish a healthy reset window. | Reconcile the current payment/processor state privately and distinguish guarded state rejection from persistence failure. Preserve the key; do not change wallets solely from this class or clear/replay rows. Verify an eligible reset succeeds or the existing attempt reaches a safe terminal outcome, with no duplicate transfer and stable keys for ambiguous submits. Require zero reset-failure events and durable `invalid-destination-reset-failed` rows through the natural 90-minute retry window plus ingestion delay, using a containing watcher and complete observations. See §1.2/§5.7. |
 | `payout-invalid-destination` — `Invalid destination address.` / Circle code `155219` (taskworker, Circle payment path) | The ordinary processor response rejects the destination before transfer creation. Historically the chain-blind validator admitted Solana keys declared as `MATIC`; after a successful guarded reset, an unchanged wallet selection can repeat that rejection. An ordinary Circle-client line can accompany a later reset failure and is not a reset-success witness. | Confirm typed rejection, guarded reset success, current artifact, and current wallet selection before correcting a proven chain mismatch through the supported account API under account-owner/operations authority. Resolve a concurrent `payout-invalid-destination-reset-failed` boundary first. Preserve keys for ambiguous submits; never edit/delete payment/task rows. Verify the next natural retry selects the corrected wallet with the safely renewed key, no duplicate transfer, and zero durable/logical errors within 90 minutes plus ingestion delay. See §5.7. |
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band and, above threshold, reconciles the bounded `missing_origin_details_total` resolution/relationship/lifecycle cohorts. Absent or incomplete detail is not zero and cannot support attribution. Never infer roles from the Boolean or print raw pairs; the higher `companion=true` band needs separate calibration. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
@@ -18242,6 +18285,40 @@ websocket connections and probes only.
 
 ### 8.9 Append-only migration coherence — a numeric head can hide skipped schema
 Probe: `migrations`
+
+Mainnet and native-fee artifact checks belong to this one registered probe.
+Their helpers live in `migration_sn_mainnet.go` and `migration_native_fee.go`;
+`signal_*.go` filenames are reserved for independently registered signals.
+A helper filename that violates that convention does not establish a missing
+probe, but its contract must still reach the owning probe's emitted query and
+drift reducer. The registry guard and missing-artifact controls enforce both
+boundaries; adding duplicate probes or ignoring the naming failure does not.
+
+The catalog now includes the final published contracts at versions 781 and 782.
+Version 781 requires an ordinary stored, nullable `transfer_balance.grant_kind`
+column of exactly `varchar(32)` with no default. Version 782 separately requires
+the exact per-client try-lock function and the no-op statement-fence function,
+including their signatures, language, arguments, privileges, configuration and
+complete bodies. A partial repair or either historical blocking function is
+drift at head 782. Corrected fresh version 776 already installs both repaired
+bodies, so their presence before 782 is valid; it does not advance the recorded
+migration head. Missing future objects remain pending, and an unavailable
+catalog result remains unknown. These probe contracts are independent of the
+earlier bounded schema-readiness reader and do not retroactively change its
+coverage. The published migration DDL and accounting behavior are unchanged.
+
+Versions 783 through 785 follow. Version 783 requires the ordinary stored
+`account_message_outbox` table with its published columns (exact types,
+nullability and the `attempt_count` default of 0), `PRIMARY KEY (message_id)`,
+`UNIQUE (message_key)` and `CHECK ((attempt_count >= 0))`, and the due, held and
+finished partial indexes with their exact keys and predicates. Version 784
+requires `search_value_update.xid` as a `NOT NULL` `xid8` column whose default
+is `pg_current_xact_id()`: a constant default would put every new update record
+at the oldest position, and the search poll would again miss records that commit
+out of update-id order. Version 785 requires the valid, ready
+`search_value_update_realm_xid_update_id` index on `(realm, xid, update_id)`. An
+interrupted concurrent build leaves that index invalid, which is drift until the
+restartable migration rebuilds it. Each contract is pending before its version.
 
 Migration764 appends logical close-report receipts after the unchanged deployed
 1–763 prefix. The artifact contract checks the exact contract/party/report key,

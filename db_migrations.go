@@ -9577,4 +9577,34 @@ var migrations = []any{
 		ALTER TABLE transfer_balance ADD COLUMN grant_kind varchar(32) NULL;
 	`),
 	newSqlMigration(providerWorkSessionContentionRepairSql),
+	// Account messages commit with the state change that owes them, and a task
+	// delivers them after the commit (db_account_message_outbox.go). A new table:
+	// nothing is rewritten, and old binaries never read it.
+	newSqlMigration(accountMessageOutboxSchemaSql),
+	// The search update log is read in commit order
+	// (search.SearchUpdatePosition): each record carries the transaction that
+	// wrote it, and a poll reads a transaction's records once it has finished.
+	// Read by update id alone, a record that committed after a later record had
+	// been read went unread. The constant default leaves the existing rows
+	// unrewritten, at 0, the oldest; new rows, from new and old binaries alike,
+	// take their transaction's id. The lock timeout keeps the ALTER from
+	// queueing every search write behind a long lock holder; a migrate that
+	// times out is re-run.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE search_value_update
+			ADD COLUMN xid xid8 NOT NULL DEFAULT '0',
+			ALTER COLUMN xid SET DEFAULT pg_current_xact_id();
+	`),
+	// The poll reads a realm's records in (xid, update id) order.
+	newRestartableOnlineSqlMigration(`
+		DROP INDEX CONCURRENTLY IF EXISTS search_value_update_realm_xid_update_id
+	`, `
+		CREATE INDEX CONCURRENTLY search_value_update_realm_xid_update_id
+		ON search_value_update (realm, xid, update_id)
+	`, `
+		DROP INDEX IF EXISTS search_value_update_realm_xid_update_id;
+		CREATE INDEX search_value_update_realm_xid_update_id
+		ON search_value_update (realm, xid, update_id)
+	`),
 }

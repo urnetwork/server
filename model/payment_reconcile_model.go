@@ -87,13 +87,19 @@ type PaymentReconciliationEvent struct {
 
 // AddPaymentReconciliationEvent appends one audit row. The audit trail must
 // never turn a completed repair into a failed run, so callers log-and-continue
-// on error rather than aborting.
+// on error rather than aborting. A failed insert rolls back this audit-only
+// transaction and is returned as the error; it used to go on to a commit that
+// postgres rolled back, which raised past the callers instead.
 func AddPaymentReconciliationEvent(
 	ctx context.Context,
 	event *PaymentReconciliationEvent,
 ) (err error) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		err = AddPaymentReconciliationEventInTx(tx, ctx, event)
+	server.HandleError(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.Raise(AddPaymentReconciliationEventInTx(tx, ctx, event))
+		})
+	}, func(handledErr error) {
+		err = handledErr
 	})
 	return
 }
@@ -101,7 +107,8 @@ func AddPaymentReconciliationEvent(
 // AddPaymentReconciliationEventInTx is AddPaymentReconciliationEvent inside a
 // caller-owned tx -- used by the refund/revocation webhook handlers so the
 // operator event commits (or rolls back) atomically with the clawback and its
-// idempotency-ledger row.
+// idempotency-ledger row. A failed insert raises, which ends the caller's
+// transaction at once with its own error, so the error result is always nil.
 func AddPaymentReconciliationEventInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -122,7 +129,7 @@ func AddPaymentReconciliationEventInTx(
 	event.EventId = server.NewId()
 	event.EventTime = server.NowUtc()
 
-	_, err = tx.Exec(
+	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
 		INSERT INTO payment_reconciliation_event
@@ -138,43 +145,51 @@ func AddPaymentReconciliationEventInTx(
 		detailsJson,
 		event.DryRun,
 		event.EventTime,
-	)
-	return
+	))
+	return nil
 }
 
 // AddPaymentReconciliationEventOnce appends the event unless a non-dry-run row
 // with the same store, action and evidence already exists. added is false when
 // one does. Webhook redeliveries use this so one store object is one support
 // row; two concurrent first deliveries can still both append, which is
-// harmless (readers count distinct evidence).
+// harmless (readers count distinct evidence). A failed statement rolls back
+// the transaction and is returned as the error, like
+// AddPaymentReconciliationEvent.
 func AddPaymentReconciliationEventOnce(
 	ctx context.Context,
 	event *PaymentReconciliationEvent,
 ) (added bool, err error) {
-	server.Tx(ctx, func(tx server.PgTx) {
-		result, queryErr := tx.Query(
-			ctx,
-			`
-			SELECT 1 FROM payment_reconciliation_event
-			WHERE store = $1
-			  AND action = $2
-			  AND evidence = $3
-			  AND NOT dry_run
-			LIMIT 1
-			`,
-			event.Store,
-			event.Action,
-			event.Evidence,
-		)
-		exists := false
-		server.WithPgResult(result, queryErr, func() {
-			exists = result.Next()
+	server.HandleError(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			added = false
+			result, queryErr := tx.Query(
+				ctx,
+				`
+				SELECT 1 FROM payment_reconciliation_event
+				WHERE store = $1
+				  AND action = $2
+				  AND evidence = $3
+				  AND NOT dry_run
+				LIMIT 1
+				`,
+				event.Store,
+				event.Action,
+				event.Evidence,
+			)
+			exists := false
+			server.WithPgResult(result, queryErr, func() {
+				exists = result.Next()
+			})
+			if exists {
+				return
+			}
+			server.Raise(AddPaymentReconciliationEventInTx(tx, ctx, event))
+			added = true
 		})
-		if exists {
-			return
-		}
-		err = AddPaymentReconciliationEventInTx(tx, ctx, event)
-		added = err == nil
+	}, func(handledErr error) {
+		added = false
+		err = handledErr
 	})
 	return
 }

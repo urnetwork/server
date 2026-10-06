@@ -275,7 +275,7 @@ func parseMimirRejectedLog(line string) (mimirRejectedLogEvent, bool) {
 		return mimirRejectedLogEvent{}, false
 	}
 	switch match[3] {
-	case "alt", "api", "app", "config-updater", "connect", "gossip", "grafana", "lb", "mcp", "operator-proxy", "proxy", "taskworker", "web", "other":
+	case "alt", "api", "app", "config-updater", "connect", "gossip", "grafana", "lb", "mcp", "proxy", "taskworker", "web", "other":
 	default:
 		return mimirRejectedLogEvent{}, false
 	}
@@ -453,7 +453,7 @@ var logClasses = []logClass{
 	},
 	// Preserve the controller-owned reset phase before its processor response
 	// or persistence suffix can match an ordinary destination/network class.
-	{name: "payout-invalid-destination-reset-failed", re: regexp.MustCompile(`(?is)Payment create transaction error = .*; invalid destination reset error = \S`),
+	{name: "payout-invalid-destination-reset-failed", re: invalidDestinationResetErrorRe,
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.2, §4, and §5.7",
 		canonical: &logCanonical{
 			eventRe: regexp.MustCompile(`\[task\.go:[0-9]+\]`),
@@ -983,11 +983,11 @@ var logClasses = []logClass{
 	{name: "provider-tunnel-read-done", re: regexp.MustCompile(`providertunnel: tun read error: Done[[:space:]]*$`),
 		sample:        providerTunnelReadDoneLogSample,
 		rateThreshold: novelRateThreshold, tier: tierWarn, playbook: "SIGNALS.md §4", redactIDs: true,
-		meaning:   "the Taskworker's embedded operator-proxy returned terminal Done from Tun.Read; the line does not encode the outer context state or the active artifact ancestry",
-		mechanism: "Release tag v2026.9.3-1036806790 dereferences to operator-proxy snapshot 4ba0dd88, which contains an unconditional providertunnel TUN-read logger and does not contain commit 20e289bd. On an active artifact proven to predate 20e289bd, the exact line is consistent with that legacy logger observing ordinary canceled teardown. On a proven descendant, 20e289bd suppresses a read error only after the tunnel context is canceled, so recurrence is an affirmative unexpected Tun/context close-order fault.",
+		meaning:   "the Taskworker's provider tunnel (Server's qualityprobe/providertunnel) returned terminal Done from Tun.Read; the line does not encode the outer context state or the active artifact ancestry",
+		mechanism: "Commit 20e289bd suppresses a read error only after the tunnel context is canceled, and every Taskworker built from Server since the 2026-09-26 qualityprobe import contains it. Release tag v2026.9.3-1036806790 instead dereferences to the older standalone prober snapshot 4ba0dd88, which contains an unconditional providertunnel TUN-read logger and does not contain 20e289bd. On an active artifact proven to predate 20e289bd, the exact line is consistent with that legacy logger observing ordinary canceled teardown. On a proven descendant, recurrence is an affirmative unexpected Tun/context close-order fault.",
 		context:   "The 2026-09-04 authoritative Taskworker tail reported this exact normalized shape at about 65/min, but the line and the locally inspected release tag do not prove which artifact emitted it. A separate monitor defect could pair a novel alert's top shape with the first sample from another shape; this dedicated class and the shape-keyed novel samples prevent that misleading evidence. Do not generalize this classification to any other TUN read error.",
-		action:    "Use §8.12 to prove the active Taskworker artifact's embedded operator-proxy ancestry first. If it predates 20e289bd, build and deploy Taskworker from a deliberate operator-proxy main descendant containing that commit. If it contains 20e289bd, investigate a close-order/context-cancellation fault instead. Do not restart an unproven release, suppress all TUN read errors, or infer context state from Done alone.",
-		verify:    "Every active Taskworker artifact is proven to contain operator-proxy 20e289bd or a descendant; the exact providertunnel Done line remains zero for 10 minutes through comparable ProviderEgress churn; and a synthetic live-context TUN read failure is still logged and classified independently.",
+		action:    "Use §8.12 to prove the active Taskworker artifact's provider-tunnel ancestry first. If it predates 20e289bd, build and deploy Taskworker from current Server main, whose qualityprobe tree contains that commit. If it contains 20e289bd, investigate a close-order/context-cancellation fault instead. Do not restart an unproven release, suppress all TUN read errors, or infer context state from Done alone.",
+		verify:    "Every active Taskworker artifact is proven to contain 20e289bd or a descendant; the exact providertunnel Done line remains zero for 10 minutes through comparable ProviderEgress churn; and a synthetic live-context TUN read failure is still logged and classified independently.",
 	},
 	{name: "signal-send-unclassified", re: signalSendLegacyRe,
 		sample:        signalSendLegacyLogSample,
@@ -1169,7 +1169,7 @@ const (
 
 // Only source symbols from the application's go.mod module closure can become
 // owner frames. Arguments, paths, line numbers and compiler closures never do.
-var panicLogFunctionRe = regexp.MustCompile(`^github\.com/urnetwork/((?:server|connect|sdk|proxy|operator-proxy|userwireguard|warp)(?:/[A-Za-z_][A-Za-z0-9_-]*)*)\.((?:\(\*?[A-Za-z_][A-Za-z0-9_]*(?:\[\.\.\.\])?\)|[A-Za-z_][A-Za-z0-9_]*(?:\[\.\.\.\])?)(?:\.[A-Za-z_][A-Za-z0-9_]*(?:\[\.\.\.\])?|\.[0-9]+)*)(?:-fm)?\(`)
+var panicLogFunctionRe = regexp.MustCompile(`^github\.com/urnetwork/((?:server|connect|sdk|proxy|userwireguard|warp)(?:/[A-Za-z_][A-Za-z0-9_-]*)*)\.((?:\(\*?[A-Za-z_][A-Za-z0-9_]*(?:\[\.\.\.\])?\)|[A-Za-z_][A-Za-z0-9_]*(?:\[\.\.\.\])?)(?:\.[A-Za-z_][A-Za-z0-9_]*(?:\[\.\.\.\])?|\.[0-9]+)*)(?:-fm)?\(`)
 var panicLogVersionedRootRe = regexp.MustCompile(`^(server|connect)/v[0-9]+$`)
 var panicLogClosureRe = regexp.MustCompile(`\.(?:(?:func|gowrap)[0-9]+|[0-9]+)(?:\.|$)`)
 var panicLogSourceRe = regexp.MustCompile(`(?:^|/)[A-Za-z_][A-Za-z0-9_]*\.go:[0-9]+(?: \+0x[0-9a-f]+)?$`)

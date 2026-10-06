@@ -379,8 +379,9 @@ ASNs and the same 160 country contexts**. It adds 12 reviewed sibling ASNs to
 five existing operators and one new Thailand operator, `nt-th` with AS23969.
 Previous reviewed identities and all six negative groups are retained. These
 additions have passed native catalog parsing and the complete new artifact's
-readback gates; the selected-v13 counts above remain the baseline until the
-new resource is deployed and loaded. No regional ranking or service-presence
+readback gates. Config selected this successor on October 6; the bounded
+one-process mapping proof is recorded below. The v13 counts remain the
+historical comparison. No fleet-use, regional ranking or service-presence
 completion follows from these additions.
 
 For NT, APNIC's exact ASN record, the official TOT/CAT-to-NT merger history,
@@ -394,6 +395,74 @@ findings do not attribute the native Speed-minus-Quality population to either
 operator. Continue exact identity review for smaller access providers and the
 unfinished country/state/province ranking work under the same clean-default
 rule, preserving explicit contrary use.
+
+### US origin-identity gaps under review
+
+A fresh count of the selected successor's pinned catalog (`ec316ffc`) finds
+**nine subscriber groups with 13 ASNs in the US review context**, compared with
+**4,694 groups in Brazil**: 90.43% of its 5,191 subscriber groups. The global
+160-country count therefore does not establish balanced country coverage.
+These are origin-catalog counts, not all classifier approvals; direct
+registration rules already recognize, for example, Google Fiber and Webpass.
+Neither catalog concentration nor the sampled stored US country identifies
+any sampled provider's operator or explains its exclusion.
+
+Primary RIR identity and operator service records support this next,
+source-reviewed candidate:
+
+| Existing or new operator group | Additional exact ASNs |
+| --- | --- |
+| Charter / Spectrum | 10796, 20001, 11427, 11351, 11426, 12271, 33363 |
+| AT&T | 7132 |
+| Verizon US | 701 |
+| Optimum / former Suddenlink | 19108 |
+| Astound / RCN / Wave / Grande | 6079, 11404, 7459 |
+| GFiber | 16591 |
+
+The review joins exact RIR assignments to the operator's subscriber service,
+with operator-maintained ASN records where obtained. The three Charter ASNs
+11351/11426/12271 have the exact regional RIR assignments and Spectrum access
+service evidence, without a retained PeeringDB record. Verizon's
+[Internet Dedicated instructions](https://www.verizon.com/business/welcome-kits/internet-dedicated-services/)
+explicitly identify AS701; business subscribers qualify, and an NSP label
+alone does not establish hosting or proxy use. AT&T reports AS7132's peering
+consolidated into AS7018, so its addition does not establish current routes.
+Astound's [brand history](https://www.astound.com/industry-trends/newsroom/rcn-grande-wave-entouch-and-digital-west-now-astound-broadband/)
+and [residential service](https://www.astound.com/internet/) support its three
+exact reviewed siblings. GFiber's origin addition supplements existing direct
+registration approvals; it does not approve Google's cloud networks.
+
+AS22773 remains registered to Cox. [Cox's transaction history](https://www.coxenterprises.com/what-we-do/broadband)
+and [Charter's completion announcement](https://corporate.charter.com/newsroom/charter-and-cox-communications-complete-transaction)
+confirm the August 2026 acquisition, so the existing Charter-family placement
+is preserved rather than treated as a proven ownership error. Registration
+identity, corporate ownership and actual network use remain distinct facts.
+
+Candidate `4bc85427`, source-review gate `653c6a4e`, adds 14 ASNs and two groups:
+prospectively 5,193 subscriber groups, 5,459 ASNs and the same 160 country
+contexts, including 11 US groups and 27 ASNs. It preserves every previous
+identity, all six negative groups, policy and pinned evidence feeds. This is a
+catalog candidate, not a newly built or activated resource. It adds no regional
+rank completion and supplies no attribution of the retained Speed-only sample.
+
+Source review also found a diagnostic loss: the MMDB retains
+`origin_withheld_reason`, while the deployed shadow projection retains only
+origin ASNs and use state. A prepared typed projection preserves the four
+closed withholding reasons for visibility, RPKI, reviewed-country policy and
+registry hosting assignment; the selected catalog does not enable the optional
+reviewed-country policy. It changes no classification or eligibility rule.
+An older strict coordinator rejects the added field, requiring coordinator
+compatibility before using an updated capture producer.
+
+The next bounded attribution needs a fresh generation-bound private sample,
+complete connection groups and an authenticated current owner to join typed
+classification, exact origin ASN sets and registration-rule provenance. The
+retained aggregate has no recoverable provider IDs or addresses. Existing
+capture enablement/expiry authority remains unproved, and a cold recorder
+hashes both database streams before mapping; the short RPC deadline does not
+turn that initialization into a bounded tail read. Those prerequisites remain
+separate from the catalog research and from any proposal to change serving
+classification.
 
 ## Output and provenance
 
@@ -1344,9 +1413,62 @@ current classification reasons. Independent actual gate
 binds the result. This is an older-than-cutover publication, not a zero pool or
 a measured failure of the 900-second age bound. It does not identify an active
 publisher or explain the publication delay. The earlier 547/6,569/56,100 counts
-remain historical; a newly qualified publication and generation-bound sample
-are still needed. Both contacts' later local watcher/fallback checks passed;
-no automatic retry or freshness relaxation followed.
+remain historical. Both contacts' later local watcher/fallback checks passed;
+no automatic retry or freshness relaxation followed. Root separately scheduled
+the later successful observation below.
+
+At `2026-10-06T06:03:28.892641Z`, a matching native census/private companion
+pair contained **644 Quality, 5,264 Speed and 58,789 Online** providers. The
+source ran from `05:54:06.319159Z` to `05:56:07.092311Z` and published at
+`06:00:52.863356Z`: 120.773152 seconds of evaluation and 285.771045 seconds
+from completion to publication. Source age was 441.800330 seconds, within
+900 seconds and after the Config completion cutoff. Quality was 12.234043%
+of Speed, leaving **4,620 Speed-without-Quality** providers. The source's
+Online cohort had 5,264 passing and 53,525 failing selected-policy 4/5 URL
+ratios, with no missing evidence. Those ratio failures remain distinct from
+the Speed-only classification gap and cannot be cleared by changing ARIN.
+
+Two unchanged Redis pairs bracketed one read-only statement lasting 0.286216
+seconds; the native body took 487.168 milliseconds. The new private sample
+selected 256 of the 4,620 Speed-only members. Its current first-failing reasons
+were:
+
+| Current reason | Sample providers |
+| --- | ---: |
+| Non-Quality in both current connection facts and provider rollup | 207 |
+| URL ratio below 4/5 in the later rolling window | 24 |
+| Incomplete current classification | 22 |
+| No connection with a live handler | 3 |
+
+This statement used epoch `1791253792` and the exact Config-start lookup floor.
+Across the bounded sample it saw 251 live connection rows, of which 223 matched
+the selected epoch, client binding and lookup-time range. The remaining 28
+rows do not distinguish missing evidence, an epoch mismatch or a time/client
+binding failure; connection counts are not an additive partition of provider
+reasons. In particular, the 22 incomplete-classification providers do not by
+themselves prove a stale-row defect or authorize a rewrite.
+
+The 207 consistent non-Quality cases had complete current-epoch lookups and
+passed preceding identity, public-key, rollup, reliability, TLS and current
+URL checks. At least one live connection remained non-Quality, the rollup was
+non-Quality, and no live hard-risk flag was found. Stored countries placed 192
+of these cases in the US and 15 across ten other countries. The retained
+booleans still supply no operator/ASN attribution or unknown-versus-ambiguous
+versus-explicit-exclusion breakdown. No provider reached the verified-current-
+subscriber/soft-rollup discrepancy category. Reason order can hide later
+dimensions, so this is not an exhaustive risk/TLS intersection census or a
+basis for blanket subscriber promotion, risk removal or classification CAS.
+
+Compared with the earlier distinct publication, Quality is 97 higher, Speed
+is 1,305 lower and Online is 2,689 higher. Both publication and sample hashes
+changed; no fixed-provider improvement, catalog effect or release-performance
+benefit follows. The source interval began after Config selection and the
+`db9f` Taskworker terminal, but the key still has no publisher or loaded-resource
+identity. The separate `05:30` mapped-process observation does not join this
+publication to its publisher, sampled callers or request-time resource use.
+Receipt `8ee8e0e7c21c66f8226a0d08067b0e70484df23d0a7df9fa65ab7f4fb9274d9d`
+retains only bounded aggregates. Strict freshness and all query/transport
+limits were unchanged, and the later local watcher/fallback check passed.
 
 The native publication has source clocks but lacks ARIN epochs and exclusion
 reasons. These reviewed sources export no loaded-ARIN epoch gauge. The bounded
@@ -1383,9 +1505,12 @@ For this release, retain the following evidence as rollout proceeds:
    score-generation and provider rollup convergence. Require source completion
    at or after Config completion `05:23:58.314035Z`; that floor alone does not
    identify the publisher or prove its source evaluation started after selection.
+   The successful 256-member Speed-only sample supplies one bounded check;
+   complete fleet coverage and per-reason missing/outdated evidence remain open.
    Do not treat old stored facts as freshly reclassified.
-3. Actual Quality, Speed and Online results under their existing health,
-   reliability and common-risk gates, including fallback and publication age.
+3. Continue generation-bound Quality, Speed and Online comparisons under their
+   existing health, reliability and common-risk gates, including request-local
+   fallback and publication age. Keep changing cohorts and source clocks explicit.
 4. Complete owner-side capture aggregates where available, preserving unknown,
    withheld, conflicting and overflow populations. Prioritize exact
    allocation-owner and origin-set research from those gaps, review the Atlas

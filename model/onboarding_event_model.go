@@ -37,7 +37,8 @@ type OnboardingEvent struct {
 	Props      map[string]any
 }
 
-// AddOnboardingEvents stores a batch in one transaction.
+// AddOnboardingEvents stores a batch in one transaction. A failed insert
+// raises with its own error (see AddOnboardingEventInTx).
 func AddOnboardingEvents(ctx context.Context, events []*OnboardingEvent) (returnErr error) {
 	if len(events) == 0 {
 		return nil
@@ -58,6 +59,10 @@ func AddOnboardingEvent(ctx context.Context, event *OnboardingEvent) error {
 	return AddOnboardingEvents(ctx, []*OnboardingEvent{event})
 }
 
+// Stores one event in the caller's transaction. Returns only a failure to
+// encode the event's props. A failed insert raises, which ends the transaction
+// at once with its own error; returning it let the caller's callback go on to
+// a commit that postgres rolled back.
 func AddOnboardingEventInTx(tx server.PgTx, ctx context.Context, event *OnboardingEvent) error {
 	if event.EventId == (server.Id{}) {
 		event.EventId = server.NewId()
@@ -77,7 +82,7 @@ func AddOnboardingEventInTx(tx server.PgTx, ctx context.Context, event *Onboardi
 		propsStr := string(propsJson)
 		props = &propsStr
 	}
-	_, err := tx.Exec(
+	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
 			INSERT INTO network_onboarding_event (
@@ -112,8 +117,8 @@ func AddOnboardingEventInTx(tx server.PgTx, ctx context.Context, event *Onboardi
 		event.Variant,
 		event.Session,
 		props,
-	)
-	return err
+	))
+	return nil
 }
 
 // AppOpenAttributionWindow is how long after a landing click an app open is

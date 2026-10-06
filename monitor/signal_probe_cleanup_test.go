@@ -81,6 +81,7 @@ func TestProbeCleanupSignalSyntheticReachedChannelLeak(t *testing.T) {
 		"previously opened a connection",
 		"reached-channel teardown branch",
 		"ordered tunnel close",
+		"Server's qualityprobe tunnel code",
 	} {
 		if !strings.Contains(alert.Markdown(), want) {
 			t.Fatalf("reached-channel alert missing %q:\n%s", want, alert.Markdown())

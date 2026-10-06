@@ -8005,3 +8005,134 @@ The separate diagnostic is
 (SHA-256 `26fb13e35480fb0f21d2d055ea2004f8fb86837d5216b503c8143b82883c00b0`),
 independent `sol-6bd44-mature-deficit-v2-actual-corroboration.json`
 (SHA-256 `3b5c1b2c3f38017ac186898de1cc898016b0899ab5fcf803466b87655aa89af9`).
+
+### 2026-10-06 05:31 UTC completed-lease guard merged; current coverage unknown
+
+The completed-lease repair is merged in canonical
+`003081dd01b6a83ab3c00a592e721eca1a802c07` and included in release source
+`db9f90a156cd2d064e4047b034b8824ba131421a`. At this checkpoint its rollout is
+queued; no completed db9f deployment or actual runtime adoption is established
+here. Builds, selected versions and local test success do not prove a Main
+coverage or throughput effect.
+
+The exact cf1e baseline reproduced the local ownership failure through both
+real worker branches: a funding-readiness veto and an unstarted
+`health_not_run` turn reached the public controller and database completion
+owner, but retained roughly fifteen minutes of the already-finished claim's
+lease. The correction changes API completion handling. On first durable
+acceptance of a nonempty local failure with `AllowPacing=false`, only the
+still-current ordinal's exact issued fifteen-minute deadline can shorten to
+the existing configured retry interval and provider jitter, measured from
+first server receipt. The default tested interval is 54–66 seconds, capped
+by the existing deadline. It cannot extend an earlier deadline or overwrite
+a custom deadline, newer claim or newer accepted result. Active claims and
+the existing `AllowPacing=true` behavior remain unchanged.
+
+This local retry grants **no accepted measured result, quota credit or
+provider-failure verdict**. Ordinary claim admission, rolling history,
+the 4/5 quality gate and TLS protections remain intact. Replay returns the
+stored receipt without repacing or recounting; already-completed long leases
+are not retroactively rewritten. The diagnostic completed-turn count remains
+separate from accepted measured credits. Thirteen current top-level normal
+controls and three focused model race controls pass, including full-quota
+renewal headroom, security quarantine, withdrawn eligibility, receive-time
+pacing, replay and concurrent first acceptance. Three intended baseline
+failure assertions are retained. The final worker controls are standalone
+top-level tests under CODESTYLE. Main prevalence remains unproved; the
+earlier separate completed-900-second and local-failure domains still have
+no rowwise or `AllowPacing` join.
+
+The latest retained standing coverage warning, **05:12:27 UTC**, reports
+`shard_0_owners=0` and `census_reason=owner_unavailable`. Its owning Mimir
+fetch and parse succeeded, but no shard-zero owner qualified, so it supplies
+no current census or rate. The object does not distinguish an explicit zero
+heartbeat from missing or stale series, geometry rejection or ambiguous
+process selection. A normal completed pass already joins its heartbeat
+refresher and publishes zero when its last local owner exits; that source
+behavior does not establish the cause of this warning.
+
+The preceding **04:57:09 UTC** standing snapshot reported all-current quota
+**54,568 / 55,444**, secure-complete 54,540, 3,036 missing credits and 902
+overdue providers, with a separate missing-shard-seven warning. It is an
+older all-current stock, not a mature denominator or proof of coverage at
+05:12. The qualified 04:17 mature census above remains historical.
+**Sustained 100% mature coverage and a current durable credit rate remain
+unproven.** After Root's actual deployment terminal, queued source-qualified
+cohort, bounded-deficit and rate observations must retain their original
+clocks, current generations and mature/warming distinction. No cycle age is
+backdated and no unmeasured turn is counted toward the rolling ten-result goal.
+
+The frozen candidate and native evidence are under
+`/run/media/by/archive1/urnetwork-build/artifacts/fp2-completed-lease-retry-20261006`:
+`source-manifest.json` (SHA-256
+`3fe73f90c61e2f4f3a2d6a260691995a83a1146ade6b45d07a0b770da68be1f0`),
+`validation-receipt.json` (SHA-256
+`f87428ef9526bb15d692201669401bd9bf7fd3c6eac388a65dc938491323b662`),
+and independent `sol-independent-source-GO.json` (SHA-256
+`f0909e1e03d3ece6e061dd966555b2fa31281ef9c06b85e36bf35fa4089eff1d`).
+Private retained watcher objects are
+`monitor/objects/sha256/94/94a947d52841b709d70d14bbc54774ebcb72863bf07a9fcf607b528abd0811de`
+and
+`monitor/objects/sha256/23/23ab80d22b7449c6dacb92b5d705be47bfbf43a427c1c7daafe8babbcd2a5cc0`;
+each object's SHA-256 is its filename.
+
+### 2026-10-06 06:33 UTC db9f mature coverage and durable credits
+
+Root's retained observations qualify all sixteen selected API slots at
+05:47:44 UTC and all eight selected Taskworkers at 06:33:08 UTC as ready on
+`db9f90a156cd2d064e4047b034b8824ba131421a`. The Taskworker rollout completed
+at 05:38:16.871241 UTC. These are scoped runtime self-reports; beta API slots,
+other generations and native executable ownership remain outside the proof.
+
+The latest coherent global source snapshot is **06:32:13.621778 UTC**.
+Known-cycle-age mature quota is **54,868 / 54,997 (99.765442%)**, with
+**129 deficient providers needing 779 credits**. Warming is separately
+6 / 515, with 509 deficient providers needing 4,043 credits; unknown cycle
+age is zero. All-current quota is 54,874 / 55,512. Secure-complete remains
+separate at 54,845, with 29 pending security cases and zero unknown targets.
+
+The earlier coherent **05:52:07.086798 UTC** stock was mature
+**58,283 / 58,810 (99.103894%)**, with 527 deficient providers needing 1,702
+credits. A separate **05:54:20.315407 UTC** diagnostic counted 232 mature
+deficits; its deterministic, nonrepresentative 128-provider sample needed
+370 credits. None of those sample deadlines was due: 110 were within the next
+90 seconds and 18 were 360–900 seconds away. Its separate claim domain had
+110 completed and 18 pending claims; zero completed and 18 pending claims
+had exact issued 900-second deadlines. Matching aggregate counts do not join
+these domains, reveal `AllowPacing` or attribute a deadline writer or cause.
+The stocks have different timestamps and membership; no fixed-provider
+recovery, current diagnostic state or rollout effect follows from their difference.
+
+The bounded primary-history read at **06:12:24.645229–06:12:24.792805 UTC**
+found **16,409 unique admitted measured policy-1 runs** whose measurement
+times fall in **(05:50:00, 05:55:00] UTC**: **54.6967 checks/second** over
+300 seconds, comprising **4,795 successes and 11,614 measured failures**
+across 12,892 providers. The unique run-ID constraint prevents duplicate
+durable credit. This is history visible at the query time, measured by the
+original measurement clock. Arrival and ACK rates, per-row runtime writers
+and membership in the mature census are not joined. It does not establish
+instantaneous capacity, a db9f effect or ten timely credits for every provider.
+
+The retained standing watcher is built from `0c4d749`; its source predates
+the mature-cohort detector, so its all-current alerts cannot supply the
+mature denominator. At the retained qualification, candidate `915ee30f2`
+had never started and its full formal gates remained pending. It contributes
+no production mature observation to this checkpoint.
+
+The goal remains **sustained 100% coverage of the mature eligible cohort**,
+which is not proved by these observations. Mature and warming use stored
+cycle age; known age does not establish physical first join or continuity
+across changed identities. Quota still requires ten unique accepted measured
+successes or failures in four hours, with no credit for local unmeasured
+turns. The separate 4/5 quality gate and TLS protections are unchanged.
+
+Finite evidence under `temp/pg-contention-20261004`:
+
+- `astra-db9f9-admission-cohort-v2-current-reduction.json`
+  (SHA-256 `5c75b15656a8d30405cf5f0160702d38eea26284a3ae25ca66e4d7950e130a2c`).
+- `astra-db9f9-mature-deficit-v1-current-reduction.json`
+  (SHA-256 `8a345c88e6401d2ef67dec9145cc87e5051dbf867a519ed308052ae023ce6418`).
+- `astra-url-accepted-window-0550-current-durable-reduction.json`
+  (SHA-256 `f05c3af13b72a4847374e518eef0dfcdb65ef1c18a01e5c5e4b491cf0fc857fe`),
+  independently corroborated by `sol-url-accepted-window-0550-actual-corroboration.json`
+  (SHA-256 `962a5e5f41f15f9e390837c763a7cdfca6c32957e979aa617208570f3c56d016`).

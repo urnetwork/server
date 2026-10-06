@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	// "unicode"
@@ -87,6 +88,21 @@ type SearchValueUpdate struct {
 	SearchValue
 }
 
+// A reader's position in a realm's update log. Each record carries the
+// transaction that wrote it (search_value_update.xid), and records are read in
+// (xid, update id) order, each only once its transaction has finished. Update
+// ids are taken at insert, not at commit, so ordering by them alone let a
+// record that committed after a later record had been read go unread.
+// Everything at or before the position has been read except the records of
+// the transactions in inProgressXids, which were still in progress below the
+// position when it was read: their records are read once they finish, and a
+// rolled-back one leaves none. The zero position is the start of the log.
+type SearchUpdatePosition struct {
+	xid            uint64
+	updateId       int64
+	inProgressXids []uint64
+}
+
 type Search interface {
 	Realm() string
 	SearchType() SearchType
@@ -104,8 +120,9 @@ type Search interface {
 	Remove(ctx context.Context, valueId server.Id)
 	RemoveInTx(ctx context.Context, valueId server.Id, tx server.PgTx)
 
-	// return is ordered by update id
-	OrderedSearchRecordsAfter(ctx context.Context, startUpdateId int64, limit int) []*SearchValueUpdate
+	// returns the records after the position, in (xid, update id) order, and
+	// the next position (see SearchUpdatePosition)
+	OrderedSearchRecordsAfter(ctx context.Context, position SearchUpdatePosition, limit int) ([]*SearchValueUpdate, SearchUpdatePosition)
 	OrderedSearchValues(ctx context.Context, startValueId server.Id, limit int) []*SearchValue
 }
 
@@ -621,72 +638,144 @@ func SearchValuesUpToDate(s Search, storedVariantAliasValues map[int]map[int]str
 	return true
 }
 
-func (self *SearchDb) OrderedSearchRecordsAfter(ctx context.Context, startUpdateId int64, limit int) (updates []*SearchValueUpdate) {
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
+// Reads, with one snapshot (a repeatable read transaction), the records of the
+// position's in-progress transactions that have since finished, then up to
+// limit records after the position, in (xid, update id) order, and returns
+// them with the next position. A record is visible only once its transaction
+// has committed, so every record returned is final. A transaction still in
+// progress is never waited on: the next position lists it when it is below
+// that position, and a later read takes its records once it finishes.
+func (self *SearchDb) OrderedSearchRecordsAfter(ctx context.Context, position SearchUpdatePosition, limit int) (updates []*SearchValueUpdate, nextPosition SearchUpdatePosition) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		updates = []*SearchValueUpdate{}
+		nextPosition = SearchUpdatePosition{
+			xid:      position.xid,
+			updateId: position.updateId,
+		}
+
+		// the transactions in progress at the snapshot the reads below share
+		var inProgressXidTexts []string
+		server.Raise(tx.QueryRow(
 			ctx,
+			`SELECT ARRAY(SELECT pg_snapshot_xip(pg_current_snapshot())::text)`,
+		).Scan(&inProgressXidTexts))
+
+		// reads the records of the query in order; records after the position
+		// advance it
+		read := func(advance bool, sql string, args ...any) {
+			result, err := tx.Query(ctx, sql, args...)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var updateId int64
+					var xidText string
+					var valueId server.Id
+					var valueVariant *int
+					var value *string
+					var remove bool
+					server.Raise(result.Scan(
+						&updateId,
+						&xidText,
+						&valueId,
+						&valueVariant,
+						&value,
+						&remove,
+					))
+					xid, err := strconv.ParseUint(xidText, 10, 64)
+					server.Raise(err)
+					if advance {
+						nextPosition.xid = xid
+						nextPosition.updateId = updateId
+					}
+
+					if remove {
+						update := &SearchValueUpdate{
+							UpdateId: updateId,
+							Remove:   true,
+							SearchValue: SearchValue{
+								ValueId: valueId,
+							},
+						}
+						updates = append(updates, update)
+					} else if valueVariant != nil && value != nil {
+						update := &SearchValueUpdate{
+							UpdateId: updateId,
+							SearchValue: SearchValue{
+								ValueId:      valueId,
+								ValueVariant: *valueVariant,
+								Value:        *value,
+							},
+						}
+						updates = append(updates, update)
+					} else {
+						glog.Infof("[s][%s]update[%d] must have value variant and value. Malformed record, will skip.", valueId, updateId)
+					}
+				}
+			})
+		}
+
+		if 0 < len(position.inProgressXids) {
+			// a finished transaction's records are all visible at once, so
+			// these are read whole, without the limit
+			pendingXidTexts := []string{}
+			for _, xid := range position.inProgressXids {
+				pendingXidTexts = append(pendingXidTexts, strconv.FormatUint(xid, 10))
+			}
+			read(
+				false,
+				`
+				SELECT
+					update_id,
+					xid::text,
+					value_id,
+					value_variant,
+					value,
+					remove
+				FROM search_value_update
+				WHERE
+					realm = $1 AND
+					xid = ANY($2::text[]::xid8[])
+				ORDER BY xid, update_id
+				`,
+				self.realm,
+				pendingXidTexts,
+			)
+		}
+
+		read(
+			true,
 			`
 			SELECT
 				update_id,
-		        value_id,
-		        value_variant,
-		        value,
-		        remove
+				xid::text,
+				value_id,
+				value_variant,
+				value,
+				remove
 			FROM search_value_update
 			WHERE
 				realm = $1 AND
-				$2 <= update_id
-			ORDER BY update_id
-			LIMIT $3
+				(xid, update_id) > ($2::text::xid8, $3)
+			ORDER BY xid, update_id
+			LIMIT $4
 			`,
 			self.realm,
-			startUpdateId,
+			strconv.FormatUint(position.xid, 10),
+			position.updateId,
 			limit,
 		)
 
-		updates = []*SearchValueUpdate{}
-
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var updateId int64
-				var valueId server.Id
-				var valueVariant *int
-				var value *string
-				var remove bool
-				server.Raise(result.Scan(
-					&updateId,
-					&valueId,
-					&valueVariant,
-					&value,
-					&remove,
-				))
-
-				if remove {
-					update := &SearchValueUpdate{
-						UpdateId: updateId,
-						Remove:   true,
-						SearchValue: SearchValue{
-							ValueId: valueId,
-						},
-					}
-					updates = append(updates, update)
-				} else if valueVariant != nil && value != nil {
-					update := &SearchValueUpdate{
-						UpdateId: updateId,
-						SearchValue: SearchValue{
-							ValueId:      valueId,
-							ValueVariant: *valueVariant,
-							Value:        *value,
-						},
-					}
-					updates = append(updates, update)
-				} else {
-					glog.Infof("[s][%s]update[%d] must have value variant and value. Malformed record, will skip.", valueId, updateId)
-				}
+		// a transaction in progress below the next position would commit
+		// records behind it; the next read takes them once it finishes. One
+		// listed before that has finished had its records read above.
+		for _, xidText := range inProgressXidTexts {
+			xid, err := strconv.ParseUint(xidText, 10, 64)
+			server.Raise(err)
+			if xid < nextPosition.xid {
+				nextPosition.inProgressXids = append(nextPosition.inProgressXids, xid)
 			}
-		})
+		}
+		slices.Sort(nextPosition.inProgressXids)
 	})
-
 	return
 }
 

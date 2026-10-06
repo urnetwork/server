@@ -27,12 +27,11 @@ func providerWorkOptionalInTx(ctx context.Context, tx server.PgTx, fn func(serve
 
 // Fences also apply to unsigned current callers. Before the optional migration
 // exists, a savepoint preserves their original operation and compatibility.
+// A savepoint that cannot be created raises: the transaction is aborted, its
+// context canceled or its connection lost, so the caller cannot go on either.
 func providerWorkOptionalSchemaInTx(ctx context.Context, tx server.PgTx, fn func(server.PgTx) error) bool {
-	optional, err := tx.Begin(ctx)
-	if err != nil {
-		return false
-	}
-	if err = fn(optional); err != nil {
+	optional := server.RaisePgResult(tx.Begin(ctx))
+	if err := fn(optional); err != nil {
 		server.Raise(optional.Rollback(ctx))
 		server.Raise(ctx.Err())
 		var pgErr *pgconn.PgError
@@ -75,16 +74,19 @@ func providerWorkLockSessionMutationInTx(ctx context.Context, tx server.PgTx, cl
 	})
 }
 
+var providerWorkEndpointWriteLockSQL = server.TaggedDatabaseStatement(`SELECT pg_advisory_xact_lock(776,lock_key) FROM
+   (SELECT DISTINCT ('x'||substr(md5(client_id::text),1,8))::bit(32)::int AS lock_key
+    FROM unnest($1::uuid[]) AS client_id ORDER BY lock_key) AS locks`)
+var providerWorkEndpointWriteHeadSQL = server.TaggedDatabaseStatement(`SELECT client_id FROM provider_work_session_head WHERE client_id=ANY($1) ORDER BY client_id FOR UPDATE`)
+
 // A head updated after a repeatable-read snapshot must retry the transaction;
 // otherwise an advisory wait alone could certify a stale connected set.
 func providerWorkLockEndpointRowsInTx(ctx context.Context, tx server.PgTx, clientIds []server.Id) error {
-	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(776,lock_key) FROM
-   (SELECT DISTINCT ('x'||substr(md5(client_id::text),1,8))::bit(32)::int AS lock_key
-    FROM unnest($1::uuid[]) AS client_id ORDER BY lock_key) AS locks`, clientIds)
+	_, err := tx.Exec(ctx, providerWorkEndpointWriteLockSQL, clientIds)
 	if err != nil {
 		return err
 	}
-	rows, err := tx.Query(ctx, `SELECT client_id FROM provider_work_session_head WHERE client_id=ANY($1) ORDER BY client_id FOR UPDATE`, clientIds)
+	rows, err := tx.Query(ctx, providerWorkEndpointWriteHeadSQL, clientIds)
 	if err != nil {
 		return err
 	}

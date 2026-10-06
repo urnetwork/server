@@ -1212,6 +1212,12 @@ func AuthVerify(
 			`,
 			userAuthVerifyId,
 		))
+
+		if newAccount {
+			// the welcome commits with the verification that completes the
+			// sign-up
+			addNetworkWelcomeInTx(session.Ctx, tx, networkId, userId, *userAuth)
+		}
 	})
 
 	SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
@@ -1655,6 +1661,9 @@ func AuthPasswordSet(
 			`,
 			userId,
 		))
+
+		// the password-changed notice commits with the change
+		addPasswordSetNoticeInTx(session.Ctx, tx, networkId, *userAuthResetId)
 	})
 
 	SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
@@ -2151,6 +2160,39 @@ func GetUserAuth(ctx context.Context, networkId server.Id) (userAuth string, ret
 // does not hold a second pooled connection for the read.
 func GetUserAuthInTx(ctx context.Context, tx server.PgTx, networkId server.Id) (string, error) {
 	return getUserAuth(ctx, tx, networkId)
+}
+
+// The email or phone of each network's admin, read on the caller's
+// transaction in one query. Networks whose admin has neither, and networks
+// that are gone, are absent.
+func GetUserAuthsInTx(ctx context.Context, tx server.PgTx, networkIds []server.Id) map[server.Id]string {
+	networkIdUserAuths := map[server.Id]string{}
+	if len(networkIds) == 0 {
+		return networkIdUserAuths
+	}
+	result, err := tx.Query(
+		ctx,
+		`
+			SELECT
+				network.network_id,
+				network_user.user_auth
+			FROM network
+			INNER JOIN network_user ON network_user.user_id = network.admin_user_id
+			WHERE
+				network.network_id = ANY($1) AND
+				network_user.user_auth IS NOT NULL
+		`,
+		networkIds,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var networkId server.Id
+			var userAuth string
+			server.Raise(result.Scan(&networkId, &userAuth))
+			networkIdUserAuths[networkId] = userAuth
+		}
+	})
+	return networkIdUserAuths
 }
 
 // An admin without email or phone auth is `ErrMissingUserAuth`; a missing

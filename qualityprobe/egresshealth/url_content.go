@@ -4,17 +4,26 @@ package egresshealth
 import (
 	"bytes"
 	"net/url"
+	"regexp"
 	"strings"
 
 	"golang.org/x/net/html"
 )
 
-// Version two excludes inert structure and corroborates document-level prompts.
+// Version three recognizes human-prompt grammar and direct visible instructions.
 // This identifies detector semantics without changing timing or quota policy.
-const UrlProbeContentMatcherVersion = 2
+const UrlProbeContentMatcherVersion = 3
+
+// Optional articles and conjunctions do not change the human-verification request.
+var urlProbeHumanPrompt = regexp.MustCompile(`\b(?:are you (?:a )?human|(?:verify|confirm) (?:that )?you are (?:a )?human)\b`)
 
 type urlProbeHtml struct {
 	form, humanGate, portalTitle bool
+}
+
+// Ancestor context is copied into children, never shared between sibling nodes.
+type urlProbeHtmlScope struct {
+	article, auxiliary, form, prompt, widget bool
 }
 
 // Live scripts may corroborate a gate, but their text is never visible prose.
@@ -27,25 +36,71 @@ func inspectUrlProbeHtml(body []byte) urlProbeHtml {
 		return page
 	}
 	var captchaWidget, challengeScript, humanCaptchaMount, humanCaptchaScript bool
+	var formCaptchaWidget, formHumanCaptchaMount, documentPrompt, humanInstruction, ordinaryContent bool
 	var challengePrompt, javascriptPrompt, googleSorryForm, unusualTraffic, articleContent bool
 	containsPrompt := func(value string) bool {
-		for _, marker := range []string{"are you a human", "are you human", "verify you are human", "confirm you are human", "verify that you are human", "confirm that you are human", "security check", "just a moment", "captcha verification"} {
+		if urlProbeHumanPrompt.MatchString(value) {
+			return true
+		}
+		for _, marker := range []string{"security check", "just a moment", "captcha verification"} {
 			if strings.Contains(value, marker) {
 				return true
 			}
 		}
 		return false
 	}
-	var visit func(*html.Node, bool, bool)
-	visit = func(node *html.Node, inArticle, auxiliary bool) {
+	// Body prose must be a direct instruction, not a description of one.
+	containsInstruction := func(value string) bool {
+		match := urlProbeHumanPrompt.FindStringIndex(value)
+		if match == nil {
+			return false
+		}
+		switch strings.TrimPrefix(value[:match[0]], "please ") {
+		case "", "press & hold to ", "press and hold to ":
+		default:
+			return false
+		}
+		suffix := strings.TrimSuffix(strings.TrimRight(value[match[1]:], ".!?"), " to continue")
+		return suffix == "" || suffix == " (and not a bot)"
+	}
+	var visit func(*html.Node, urlProbeHtmlScope)
+	visit = func(node *html.Node, scope urlProbeHtmlScope) {
 		if urlProbeHtmlIgnored(node) {
 			return
 		}
 		if node.Type == html.ElementNode {
-			inArticle = inArticle || node.Data == "article"
-			auxiliary = auxiliary || node.Data == "footer" || node.Data == "aside" || node.Data == "nav"
+			scope.article = scope.article || node.Data == "article"
+			scope.auxiliary = scope.auxiliary || node.Data == "footer" || node.Data == "aside" || node.Data == "nav"
+			scope.form = scope.form || node.Data == "form"
 			for _, attribute := range node.Attr {
-				inArticle = inArticle || attribute.Key == "role" && strings.EqualFold(strings.TrimSpace(attribute.Val), "article")
+				scope.article = scope.article || attribute.Key == "role" && strings.EqualFold(strings.TrimSpace(attribute.Val), "article")
+			}
+			if node.Data == "blockquote" || node.Data == "q" {
+				// Quoted prose stays visible content, but none of its controls or
+				// prompts can corroborate a challenge on the containing page.
+				visible := false
+				var visitText func(*html.Node, bool)
+				visitText = func(quoted *html.Node, inArticle bool) {
+					if visible && articleContent || urlProbeHtmlIgnored(quoted) || quoted.Type == html.ElementNode && quoted.Data == "script" {
+						return
+					}
+					if quoted.Type == html.ElementNode {
+						inArticle = inArticle || quoted.Data == "article"
+						for _, attribute := range quoted.Attr {
+							inArticle = inArticle || attribute.Key == "role" && strings.EqualFold(strings.TrimSpace(attribute.Val), "article")
+						}
+					}
+					if quoted.Type == html.TextNode && strings.TrimSpace(quoted.Data) != "" {
+						visible = true
+						articleContent = articleContent || inArticle
+					}
+					for child := quoted.FirstChild; child != nil; child = child.NextSibling {
+						visitText(child, inArticle)
+					}
+				}
+				visitText(node, scope.article)
+				ordinaryContent = ordinaryContent || !scope.auxiliary && visible
+				return
 			}
 			if node.Data == "script" {
 				source, scriptType := "", ""
@@ -57,7 +112,7 @@ func inspectUrlProbeHtml(body []byte) urlProbeHtml {
 					}
 				}
 				executable := scriptType == "" || scriptType == "module" || scriptType == "text/javascript" || scriptType == "application/javascript"
-				if target := urlProbeHtmlMarkerUrl(source); target != nil && executable && !auxiliary {
+				if target := urlProbeHtmlMarkerUrl(source); target != nil && executable && !scope.auxiliary {
 					path := target.Path
 					passive := strings.Contains(path, "/scripts/jsd/") || strings.HasSuffix(path, "/scripts/jsd")
 					challengeScript = challengeScript || strings.HasPrefix(path, "/cdn-cgi/challenge-platform/") && !passive
@@ -67,15 +122,25 @@ func inspectUrlProbeHtml(body []byte) urlProbeHtml {
 			}
 			if node.Data == "title" {
 				value := urlProbeHtmlText(node)
-				challengePrompt = challengePrompt || containsPrompt(value)
+				prompt := containsPrompt(value)
+				challengePrompt = challengePrompt || prompt
+				documentPrompt = documentPrompt || prompt
 				for _, marker := range []string{"wi-fi sign in", "wifi sign in", "captive portal", "sign in to this network", "log in to this network"} {
 					page.portalTitle = page.portalTitle || strings.Contains(value, marker)
 				}
 				return
 			}
-			if !inArticle && !auxiliary {
+			if !scope.article && !scope.auxiliary {
 				if node.Data == "h1" {
-					challengePrompt = challengePrompt || containsPrompt(urlProbeHtmlText(node))
+					prompt := containsPrompt(urlProbeHtmlText(node))
+					challengePrompt = challengePrompt || prompt
+					documentPrompt = documentPrompt || !scope.form && prompt
+					scope.prompt = scope.prompt || prompt
+				}
+				if node.Data == "p" || node.Data == "button" {
+					instruction := containsInstruction(urlProbeHtmlText(node))
+					humanInstruction = humanInstruction || !scope.form && instruction
+					scope.prompt = scope.prompt || instruction
 				}
 				if node.Data == "noscript" {
 					javascriptPrompt = javascriptPrompt || strings.Contains(urlProbeHtmlText(node), "enable javascript and cookies")
@@ -85,9 +150,17 @@ func inspectUrlProbeHtml(body []byte) urlProbeHtml {
 					value := strings.ToLower(strings.TrimSpace(attribute.Val))
 					if attribute.Key == "class" || attribute.Key == "id" {
 						for _, token := range strings.Fields(value) {
-							captchaWidget = captchaWidget || token == "g-recaptcha" || token == "h-captcha" || token == "cf-turnstile"
+							if token == "g-recaptcha" || token == "h-captcha" || token == "cf-turnstile" {
+								captchaWidget = captchaWidget || !scope.form
+								formCaptchaWidget = formCaptchaWidget || scope.form
+								scope.prompt, scope.widget = true, true
+							}
 						}
-						humanCaptchaMount = humanCaptchaMount || attribute.Key == "id" && value == "px-captcha"
+						if attribute.Key == "id" && value == "px-captcha" {
+							humanCaptchaMount = humanCaptchaMount || !scope.form
+							formHumanCaptchaMount = formHumanCaptchaMount || scope.form
+							scope.prompt, scope.widget = true, true
+						}
 					}
 					if node.Data == "form" && attribute.Key == "action" {
 						if target := urlProbeHtmlMarkerUrl(attribute.Val); target != nil {
@@ -97,21 +170,43 @@ func inspectUrlProbeHtml(body []byte) urlProbeHtml {
 						}
 					}
 				}
+				if scope.form && !scope.widget {
+					switch node.Data {
+					case "textarea", "select":
+						ordinaryContent = true
+					case "input":
+						inputType := "text"
+						for _, attribute := range node.Attr {
+							if attribute.Key == "type" {
+								inputType = strings.ToLower(strings.TrimSpace(attribute.Val))
+							}
+						}
+						switch inputType {
+						case "hidden", "submit", "button", "reset", "image":
+						default:
+							ordinaryContent = true
+						}
+					}
+				}
 			}
 		}
 		if node.Type == html.TextNode {
 			value := strings.ToLower(strings.Join(strings.Fields(node.Data), " "))
-			articleContent = articleContent || inArticle && value != ""
-			unusualTraffic = unusualTraffic || !inArticle && !auxiliary && strings.Contains(value, "unusual traffic from your computer network")
+			articleContent = articleContent || scope.article && value != ""
+			ordinaryContent = ordinaryContent || !scope.auxiliary && !scope.prompt && value != ""
+			unusualTraffic = unusualTraffic || !scope.article && !scope.auxiliary && strings.Contains(value, "unusual traffic from your computer network")
 		}
 		for child := node.FirstChild; child != nil; child = child.NextSibling {
-			visit(child, inArticle, auxiliary)
+			visit(child, scope)
 		}
 	}
-	visit(root, false, false)
+	visit(root, urlProbeHtmlScope{})
+	// Form-local prompts and widgets cannot corroborate unrelated page content.
 	widget := captchaWidget || humanCaptchaMount && humanCaptchaScript
+	// A prompt and otherwise empty challenge form retain the standalone-gate rule.
+	formGate := documentPrompt && !ordinaryContent && (formCaptchaWidget || formHumanCaptchaMount && humanCaptchaScript)
 	page.humanGate = challengeScript && (challengePrompt || javascriptPrompt) ||
-		!articleContent && (challengePrompt && widget || googleSorryForm && unusualTraffic)
+		!articleContent && (documentPrompt && widget || humanInstruction && (widget || challengeScript) || formGate || googleSorryForm && unusualTraffic)
 	return page
 }
 
@@ -141,20 +236,31 @@ func urlProbeHtmlIgnored(node *html.Node) bool {
 	return false
 }
 
-// Coalescing descendants preserves inline words and decoded entities, with a
-// fixed text ceiling independent of the response body's larger sampling cap.
+// Inline words stay joined; line breaks and blocks separate adjacent words.
+// The text ceiling is independent of the response body's larger sampling cap.
 func urlProbeHtmlText(root *html.Node) string {
 	var text strings.Builder
 	var visit func(*html.Node)
 	visit = func(node *html.Node) {
-		if text.Len() >= 4096 || urlProbeHtmlIgnored(node) || node.Type == html.ElementNode && node.Data == "script" {
+		if text.Len() >= 4096 || urlProbeHtmlIgnored(node) || node.Type == html.ElementNode && (node.Data == "script" || node.Data == "blockquote" || node.Data == "q") {
 			return
+		}
+		separator := false
+		if node.Type == html.ElementNode {
+			switch node.Data {
+			case "br", "div", "p", "section", "h1", "h2", "h3", "h4", "h5", "h6", "li":
+				separator = true
+				text.WriteByte(' ')
+			}
 		}
 		if node.Type == html.TextNode {
 			text.WriteString(node.Data[:min(len(node.Data), 4096-text.Len())])
 		}
 		for child := node.FirstChild; child != nil; child = child.NextSibling {
 			visit(child)
+		}
+		if separator && text.Len() < 4096 {
+			text.WriteByte(' ')
 		}
 	}
 	visit(root)

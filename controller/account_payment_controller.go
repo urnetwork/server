@@ -79,16 +79,14 @@ func boundedPaymentPlanSliceDuration(minSubsidyDuration time.Duration) time.Dura
 	)
 }
 
+// Plans the payout in bounded slices. writeInTx runs in each slice's
+// transaction; onSlice after each committed slice.
 type paymentPlanLoop func(
 	context.Context,
 	time.Duration,
+	func(server.PgTx, *model.PaymentPlan),
 	func(*model.PaymentPlan),
 ) ([]*model.PaymentPlan, error)
-
-type missingWalletNotice struct {
-	paymentId server.Id
-	payout    model.NanoCents
-}
 
 // missingWalletNoticeMinPayout is the smallest withheld total that earns a
 // missing-wallet notice. It is the wallet payout minimum, and never less than
@@ -97,65 +95,171 @@ func missingWalletNoticeMinPayout(minWalletPayoutUsd float64) model.NanoCents {
 	return max(model.UsdToNanoCents(minWalletPayoutUsd), model.UsdToNanoCents(0.01))
 }
 
-// collects one notice per wallet-less network across all plan slices. Networks
-// whose total withheld payout is below `minPayout` are not notified.
-func collectMissingWalletNotices(plans []*model.PaymentPlan, minPayout model.NanoCents) map[server.Id]*missingWalletNotice {
-	notices := map[server.Id]*missingWalletNotice{}
-	for _, plan := range plans {
-		for networkId, payment := range plan.NetworkPayments {
-			if payment.WalletId != nil {
+// The configured missing-wallet notice minimum.
+func configuredMissingWalletNoticeMinPayout() model.NanoCents {
+	return missingWalletNoticeMinPayout(model.EnvSubsidyConfig().MinWalletPayoutUsd)
+}
+
+// A payout run holds a missing-wallet notice in the outbox at most this long
+// before any delivery run releases it. Longer than the payout task's max time
+// (work.SchedulePayout), so a live run is never split; a run that stopped before
+// its own release still notifies.
+const missingWalletNoticeHoldTimeout = 12 * time.Hour
+
+// One held missing-wallet notice: the wallet-less payment of one network in one
+// plan slice.
+type heldMissingWalletNotice struct {
+	messageId server.Id
+	networkId server.Id
+	paymentId server.Id
+	payout    model.NanoCents
+}
+
+// Holds a missing-wallet notice in the outbox for each wallet-less payment of
+// the slice, in the slice's own transaction, so the notices commit with the
+// payments they are about. A network whose admin has no email or phone gets
+// none.
+func holdMissingWalletNoticesInTx(ctx context.Context, tx server.PgTx, plan *model.PaymentPlan) {
+	networkIds := []server.Id{}
+	for networkId, payment := range plan.NetworkPayments {
+		if payment.WalletId == nil {
+			networkIds = append(networkIds, networkId)
+		}
+	}
+	networkIdUserAuths := model.GetUserAuthsInTx(ctx, tx, networkIds)
+	messages := []*accountMessage{}
+	for _, networkId := range networkIds {
+		userAuth, ok := networkIdUserAuths[networkId]
+		if !ok {
+			continue
+		}
+		payment := plan.NetworkPayments[networkId]
+		messages = append(messages, &accountMessage{
+			key:       payment.PaymentId.String(),
+			networkId: &networkId,
+			userAuth:  userAuth,
+			template: &MissingWalletTemplate{
+				PaymentId: payment.PaymentId,
+				Payout:    payment.Payout,
+			},
+			held: true,
+		})
+	}
+	addAccountMessagesInTx(ctx, tx, messages)
+}
+
+// Coalesces held notices, oldest first, into the notices a release sends: one
+// per network, carried by its oldest held notice with that notice's payment and
+// the payout of all of them, when the total reaches `minPayout`. Every other
+// held notice is removed.
+func coalesceMissingWalletNotices(
+	heldNotices []*heldMissingWalletNotice,
+	minPayout model.NanoCents,
+) (releasedNotices []*heldMissingWalletNotice, removedMessageIds []server.Id) {
+	networkIdNotices := map[server.Id]*heldMissingWalletNotice{}
+	networkIds := []server.Id{}
+	for _, heldNotice := range heldNotices {
+		notice, ok := networkIdNotices[heldNotice.networkId]
+		if !ok {
+			notice = &heldMissingWalletNotice{
+				messageId: heldNotice.messageId,
+				networkId: heldNotice.networkId,
+				paymentId: heldNotice.paymentId,
+				payout:    heldNotice.payout,
+			}
+			networkIdNotices[heldNotice.networkId] = notice
+			networkIds = append(networkIds, heldNotice.networkId)
+			continue
+		}
+		notice.payout += heldNotice.payout
+		removedMessageIds = append(removedMessageIds, heldNotice.messageId)
+	}
+	for _, networkId := range networkIds {
+		notice := networkIdNotices[networkId]
+		if notice.payout < minPayout {
+			removedMessageIds = append(removedMessageIds, notice.messageId)
+			continue
+		}
+		releasedNotices = append(releasedNotices, notice)
+	}
+	return
+}
+
+// Releases the missing-wallet notices held at or before `heldBefore`, in one
+// transaction: one notice per network, due now, carrying the total withheld
+// across the held slices (see coalesceMissingWalletNotices). The minimum is
+// read only when something is held. A held notice that cannot be decoded is
+// released as it is. Returns the number released.
+func releaseMissingWalletNotices(
+	ctx context.Context,
+	heldBefore time.Time,
+	minPayout func() model.NanoCents,
+) (releasedCount int) {
+	templateName := (&MissingWalletTemplate{}).Name()
+	server.Tx(ctx, func(tx server.PgTx) {
+		releasedCount = 0
+		heldMessages := model.GetHeldAccountMessagesForUpdateInTx(ctx, tx, templateName, heldBefore)
+		if len(heldMessages) == 0 {
+			return
+		}
+		now := server.NowUtc()
+		heldNotices := []*heldMissingWalletNotice{}
+		for _, message := range heldMessages {
+			var template MissingWalletTemplate
+			if message.NetworkId == nil || json.Unmarshal([]byte(message.TemplateJson), &template) != nil {
+				model.ReleaseAccountMessageInTx(ctx, tx, message.MessageId, message.TemplateJson, now)
+				releasedCount += 1
 				continue
 			}
-			notice, ok := notices[networkId]
-			if !ok {
-				notice = &missingWalletNotice{paymentId: payment.PaymentId}
-				notices[networkId] = notice
+			heldNotices = append(heldNotices, &heldMissingWalletNotice{
+				messageId: message.MessageId,
+				networkId: *message.NetworkId,
+				paymentId: template.PaymentId,
+				payout:    template.Payout,
+			})
+		}
+		releasedNotices, removedMessageIds := coalesceMissingWalletNotices(heldNotices, minPayout())
+		model.RemoveHeldAccountMessagesInTx(ctx, tx, removedMessageIds)
+		for _, notice := range releasedNotices {
+			templateJson, err := json.Marshal(&MissingWalletTemplate{
+				PaymentId: notice.paymentId,
+				Payout:    notice.payout,
+			})
+			if err != nil {
+				panic(err)
 			}
-			notice.payout += payment.Payout
+			model.ReleaseAccountMessageInTx(ctx, tx, notice.messageId, string(templateJson), now)
+			releasedCount += 1
 		}
-	}
-	for networkId, notice := range notices {
-		if notice.payout < minPayout {
-			delete(notices, networkId)
-		}
-	}
-	return notices
+	}, server.TxReadCommitted)
+	return
 }
 
 func SendPayments(clientSession *session.ClientSession) error {
-	return sendPaymentsWithPlanner(clientSession, model.PlanPaymentsWithMaxDurationLoop)
+	return sendPaymentsWithPlanner(clientSession, model.PlanPaymentsWithMaxDurationLoopInTx)
 }
 
 func sendPaymentsWithPlanner(clientSession *session.ClientSession, planner paymentPlanLoop) error {
+	// Each slice holds a missing-wallet notice for each of its wallet-less
+	// networks, in the slice's own transaction.
 	plans, planErr := planner(
 		clientSession.Ctx,
 		boundedPaymentPlanSliceDuration(model.EnvSubsidyConfig().MinDurationPerPayout()),
+		func(tx server.PgTx, plan *model.PaymentPlan) {
+			holdMissingWalletNoticesInTx(clientSession.Ctx, tx, plan)
+		},
 		nil,
 	)
 
-	// Several slices can include the same network. Notify it at most once per
-	// payout run instead of once per committed slice.
-	missingWalletNotices := collectMissingWalletNotices(
-		plans,
-		missingWalletNoticeMinPayout(model.EnvSubsidyConfig().MinWalletPayoutUsd),
+	// Several slices can include the same network. Release one notice per
+	// network carrying the total withheld across every slice in this run, also
+	// when a later slice failed, and with it anything an earlier run held and
+	// did not release.
+	releaseMissingWalletNotices(
+		clientSession.Ctx,
+		server.NowUtc(),
+		configuredMissingWalletNoticeMinPayout,
 	)
-
-	// For any network that is missing a wallet id, send one notice carrying the
-	// total withheld across every slice in this run.
-	for networkId, notice := range missingWalletNotices {
-		userAuth, err := model.GetUserAuth(clientSession.Ctx, networkId)
-		if err == nil {
-			awsMessageSender := GetAWSMessageSender()
-			// TODO handler error
-
-			awsMessageSender.SendAccountMessageTemplate(userAuth, &MissingWalletTemplate{
-				PaymentId: notice.paymentId,
-				AmountUsd: fmt.Sprintf("%.2f", model.NanoCentsToUsd(notice.payout)),
-			})
-		} else {
-			glog.Warningf("[%s]Missing user auth. Cannot send missing wallet notice.", networkId)
-		}
-	}
 
 	// schedule all pending payments, which includes the payments in this plan
 	// and payments held from earlier plans (e.g. waiting on a valid wallet)

@@ -260,7 +260,6 @@ func (m *Monitor) Run(ctx context.Context) (Alerts, error) {
 		if err != nil {
 			errs = append(errs, fmt.Errorf("signal %s: %w", signal.Number(), err))
 			alerts = append(alerts, visibilityAlert(m.settings, signal, err))
-			continue
 		}
 		alerts = append(alerts, signalAlerts...)
 	}

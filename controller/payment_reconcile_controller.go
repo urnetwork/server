@@ -1848,10 +1848,11 @@ func reconcileX402(run *paymentReconcileRun, since time.Time) (bool, error) {
 				Network:     network,
 			}
 			netRevenue := model.UsdToNanoCents(sku.PriceUsd)
+			// the purchase's email is not kept with the event: no receipt
 			if sku.Pro {
-				return x402GrantProMonthFunc(ctx, networkId, sku, netRevenue, settleResponse)
+				return x402GrantProMonthFunc(ctx, networkId, sku, netRevenue, settleResponse, nil)
 			}
-			return x402GrantDataFunc(ctx, networkId, sku, netRevenue, settleResponse)
+			return x402GrantDataFunc(ctx, networkId, sku, netRevenue, settleResponse, nil)
 		}()
 		switch {
 		case errors.Is(err, model.ErrPaymentNetworkNotFound):

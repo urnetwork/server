@@ -115,6 +115,15 @@ func snMainnetMigrationForeignKeyCensus(table string, definitions ...string) str
 	return "NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid=to_regclass('public." + table + "') AND contype='f'" + predicate + ")"
 }
 
+// A partial index is pinned by its complete definition, predicate included:
+// the same keys over different rows would serve a different read.
+func snMainnetMigrationPartialIndex(table, name, columns, predicate string) string {
+	return fmt.Sprintf(`EXISTS(SELECT 1 FROM pg_index i WHERE i.indrelid=to_regclass('public.%s')
+ AND i.indexrelid=to_regclass('public.%s') AND i.indisvalid AND i.indisready
+ AND pg_get_indexdef(i.indexrelid)=%s)`,
+		table, name, snMainnetMigrationLiteral("CREATE INDEX "+name+" ON public."+table+" USING btree ("+columns+") WHERE "+predicate))
+}
+
 // Operative trigger events, row/statement scope and complete function identity
 // remain separate predicates so all functions are inspected exactly once.
 func snMainnetMigrationTrigger(table, trigger, function string, mask int) string {
@@ -823,4 +832,51 @@ var snMainnetMigrationContracts = []snMainnetMigrationContract{
 		snMainnetMigrationFunction("verify_original_request_capture()", "trigger", "plpgsql", "v", false, snMainnetVerifyCaptureBody),
 		snMainnetMigrationFunction("verify_original_request_closed_fence()", "trigger", "plpgsql", "v", false, snMainnetVerifyFenceBody)),
 	snMainnetNativeFeeMigrationContract(),
+	snMainnetMigration(781, "transfer balance grant kind metadata",
+		migrationFp2Table("transfer_balance"),
+		snMainnetMigrationColumns("transfer_balance",
+			snMainnetMigrationColumn{name: "grant_kind", kind: "character varying(32)"})),
+	// Fresh v776 already installs these exact bodies. The appended repair is
+	// still independently required at v782 for previously installed functions.
+	snMainnetMigration(782, "per-client provider work session contention repair",
+		snMainnetMigrationFunction("provider_work_endpoint_lock(uuid)", "void", "plpgsql", "v", false, snMainnetProviderEndpointBody, "client"),
+		snMainnetMigrationFunction("provider_work_session_statement_fence()", "trigger", "plpgsql", "v", false, snMainnetProviderStatementFenceBody)),
+	// Delivery claims due rows, releases held rows and removes finished rows
+	// through the three partial indexes, each over exactly its own rows.
+	snMainnetMigration(783, "transactional account message outbox",
+		migrationFp2Table("account_message_outbox"),
+		snMainnetMigrationColumns("account_message_outbox",
+			snMainnetMigrationColumn{name: "message_id", kind: "uuid", notNull: true},
+			snMainnetMigrationColumn{name: "message_key", kind: "character(64)", notNull: true},
+			snMainnetMigrationColumn{name: "network_id", kind: "uuid"},
+			snMainnetMigrationColumn{name: "user_auth", kind: "character varying(256)", notNull: true},
+			snMainnetMigrationColumn{name: "template_name", kind: "character varying(64)", notNull: true},
+			snMainnetMigrationColumn{name: "template_json", kind: "jsonb", notNull: true},
+			snMainnetMigrationColumn{name: "create_time", kind: "timestamp without time zone", notNull: true},
+			snMainnetMigrationColumn{name: "deliver_time", kind: "timestamp without time zone"},
+			snMainnetMigrationColumn{name: "attempt_count", kind: "integer", notNull: true, defaultExpression: "0"},
+			snMainnetMigrationColumn{name: "claim_id", kind: "uuid"},
+			snMainnetMigrationColumn{name: "claim_until", kind: "timestamp without time zone"},
+			snMainnetMigrationColumn{name: "last_error", kind: "character varying(512)"},
+			snMainnetMigrationColumn{name: "sent_time", kind: "timestamp without time zone"},
+			snMainnetMigrationColumn{name: "abandon_time", kind: "timestamp without time zone"}),
+		snMainnetMigrationConstraints("account_message_outbox",
+			"PRIMARY KEY (message_id)",
+			"UNIQUE (message_key)",
+			"CHECK ((attempt_count >= 0))"),
+		snMainnetMigrationPartialIndex("account_message_outbox", "account_message_outbox_due", "deliver_time, message_id",
+			"((deliver_time IS NOT NULL) AND (sent_time IS NULL) AND (abandon_time IS NULL))"),
+		snMainnetMigrationPartialIndex("account_message_outbox", "account_message_outbox_held", "template_name, create_time, message_id",
+			"(deliver_time IS NULL)"),
+		snMainnetMigrationPartialIndex("account_message_outbox", "account_message_outbox_finished", "create_time, message_id",
+			"((sent_time IS NOT NULL) OR (abandon_time IS NOT NULL))")),
+	// A constant default would date every new update record at the oldest
+	// position, and the poll would again read by update id alone.
+	snMainnetMigration(784, "search update transaction ids",
+		migrationFp2Table("search_value_update"),
+		snMainnetMigrationColumns("search_value_update",
+			snMainnetMigrationColumn{name: "xid", kind: "xid8", notNull: true, defaultExpression: "pg_current_xact_id()"})),
+	// The concurrent build is valid and ready only once it has completed.
+	snMainnetMigration(785, "search update commit-order index",
+		financialIndexArtifact("search_value_update", "search_value_update_realm_xid_update_id", "realm, xid, update_id")),
 }

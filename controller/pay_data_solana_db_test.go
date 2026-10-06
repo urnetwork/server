@@ -63,7 +63,7 @@ func solanaTestMemoPayment(reference string, signature string, amountUsd float64
 // hand with the reference as the memo, and the webhook lands the data on that
 // network: data only (no Pro), valid for the data code duration, the intent
 // consumed so a redelivery cannot land it twice. The admin's login is an email,
-// so the applied note is sent there.
+// so the applied note is owed with the credit and delivered there.
 func TestSolanaWebhookAppliesDataPackToNamedNetwork(t *testing.T) {
 	skipWithoutProYml(t)
 
@@ -149,7 +149,10 @@ func TestSolanaWebhookAppliesDataPackToNamedNetwork(t *testing.T) {
 		// data only: buying data never confers Pro
 		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), false)
 
-		// the applied note went to the network's admin email, with no code to show
+		// the applied note is owed with the credit and goes to the network's admin
+		// email, with no code to show
+		connect.AssertEqual(t, len(sentTo), 0)
+		deliverAccountMessagesAt(ctx, GetAWSMessageSender(), server.NowUtc())
 		connect.AssertEqual(t, sentTo, []string{adminEmail})
 		applied, ok := sentTemplate.(*SubscriptionDataAppliedTemplate)
 		connect.AssertEqual(t, ok, true)
@@ -170,6 +173,7 @@ func TestSolanaWebhookAppliesDataPackToNamedNetwork(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Message, "No payment intent found for this network ID")
 		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, networkId)), 1)
+		deliverAccountMessagesAt(ctx, GetAWSMessageSender(), server.NowUtc())
 		connect.AssertEqual(t, len(sentTo), 1)
 
 		// a plan intent is not reported by the public status endpoint

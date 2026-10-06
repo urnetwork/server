@@ -234,6 +234,7 @@ func (self *safePgPool) open() *pgxpool.Pool {
 		if err != nil {
 			panic(fmt.Sprintf("Unable to parse url: %s", err))
 		}
+		glog.Infof("[db]statement_tag = %s\n", processPgStatementTag())
 		configurePgPoolLiveness(config)
 		configurePgPoolWriteTracking(config)
 		configurePgPoolStatementErrors(config)
