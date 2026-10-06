@@ -1,0 +1,2693 @@
+package controller
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	mathrand "math/rand/v2"
+	"net/http"
+	"net/url"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/urnetwork/glog/v2026"
+
+	"github.com/urnetwork/server/v2026"
+	"github.com/urnetwork/server/v2026/model"
+	"github.com/urnetwork/server/v2026/session"
+	"github.com/urnetwork/server/v2026/task"
+)
+
+const InitialTransferBalance = 32 * model.Gib
+
+// 30 days
+const InitialTransferBalanceDuration = 30 * 24 * time.Hour
+
+// The recurring per-tier data grants come from pro.yml (model.Pro().DataAmount),
+// on three separate schedules -- see model.FreeGrantWindow / model.ProGrantWindow /
+// model.ReferralGrantWindow and the three Refresh*TransferBalances tasks below.
+//
+// RefreshSupporterTransferBalance is the legacy amount still used at subscription
+// ACTIVATION, where the balance spans the whole subscription period alongside the
+// revenue/subsidy accounting. It is not the recurring meter.
+const RefreshSupporterTransferBalance = 600 * model.Gib
+
+const SubscriptionGracePeriod = 24 * time.Hour
+
+// manualPaymentGracePeriod keeps an already-paid Stripe, Solana, or x402 supporter
+// entitlement available while a renewal can be paid manually. It does not
+// record an unpaid renewal as paid or mint another transfer balance.
+const manualPaymentGracePeriod = 30 * 24 * time.Hour
+
+const SubscriptionYearDuration = 365 * 24 * time.Hour
+
+type Skus struct {
+	Skus map[string]*Sku `yaml:"skus"`
+}
+
+type Sku struct {
+	// the fees on the payment amount
+	FeeFraction                   float64 `yaml:"fee_fraction"`
+	PriceAmountUsd                float64 `yaml:"price_amount_usd,omitempty"`
+	BalanceByteCountHumanReadable string  `yaml:"balance_byte_count"`
+	Supporter                     bool    `yaml:"supporter"`
+}
+
+func (self *Sku) BalanceByteCount() model.ByteCount {
+	byteCount, err := model.ParseByteCount(self.BalanceByteCountHumanReadable)
+	if err != nil {
+		panic(err)
+	}
+	return byteCount
+}
+
+var coinbaseWebhookSharedSecret = sync.OnceValue(func() string {
+	c := server.Vault.RequireSimpleResource("coinbase.yml").Parse()
+	return c["webhook"].(map[string]any)["shared_secret"].(string)
+})
+
+var coinbaseSkus = sync.OnceValue(func() map[string]*Sku {
+	var skus Skus
+	server.Config.RequireSimpleResource("coinbase.yml").UnmarshalYaml(&skus)
+	return skus.Skus
+})
+
+// Replaceable only by hermetic fulfillment tests whose environment does not
+// carry coinbase.yml. Production always delegates to the cached config.
+var coinbaseSkusFunc = func() map[string]*Sku { return coinbaseSkus() }
+
+var playPublisherEmail = sync.OnceValue(func() string {
+	c := server.Vault.RequireSimpleResource("google.yml").Parse()
+	return c["webhook"].(map[string]any)["publisher_email"].(string)
+})
+
+var playPackageName = sync.OnceValue(func() string {
+	c := server.Vault.RequireSimpleResource("google.yml").Parse()
+	return c["webhook"].(map[string]any)["package_name"].(string)
+})
+
+var playSkus = sync.OnceValue(func() map[string]*Sku {
+	var skus Skus
+	server.Config.RequireSimpleResource("play.yml").UnmarshalYaml(&skus)
+	return skus.Skus
+})
+
+// var companySenderEmail = sync.OnceValue(func() string {
+// 	c := server.Config.RequireSimpleResource("email.yml").Parse()
+// 	return c["company_sender_email"].(string)
+// })
+
+var playClientId = sync.OnceValue(func() string {
+	c := server.Vault.RequireSimpleResource("google.yml").Parse()
+	return c["oauth"].(map[string]any)["client_id"].(string)
+})
+
+var playClientSecret = sync.OnceValue(func() string {
+	c := server.Vault.RequireSimpleResource("google.yml").Parse()
+	return c["oauth"].(map[string]any)["client_secret"].(string)
+})
+
+var playRefreshToken = sync.OnceValue(func() string {
+	c := server.Vault.RequireSimpleResource("google.yml").Parse()
+	return c["oauth"].(map[string]any)["refresh_token"].(string)
+})
+
+// app initially calls "get info"
+// then if no wallet, show a button to initialize wallet
+// if wallet, show a button to refresh, and to withdraw
+
+type SubscriptionBalanceResult struct {
+	/*
+	 * StartBalanceByteCount - The available balance the user starts the day with
+	 */
+	StartBalanceByteCount model.ByteCount `json:"start_balance_byte_count"`
+	/**
+	 * BalanceByteCount - The remaining balance the user has available
+	 */
+	BalanceByteCount model.ByteCount `json:"balance_byte_count"`
+	/**
+	 * OpenTransferByteCount - The total number of bytes tied up in open transfers
+	 */
+	OpenTransferByteCount model.ByteCount `json:"open_transfer_byte_count"`
+	/**
+	 * CurrentSubscription - ONE of the active subscriptions, or nil.
+	 *
+	 * Shipped apple/android/windows/linux clients read this through the sdk and
+	 * treat it as the plan indicator, so it keeps its exact single-value meaning.
+	 * It cannot name more than one store; use Subscriptions for the full set.
+	 */
+	CurrentSubscription *Subscription `json:"current_subscription,omitempty"`
+	/**
+	 * Subscriptions - EVERY store currently billing this network, one entry per
+	 * store, so a caller can offer a cancel path for each. A user subscribed on
+	 * two stores is charged by both and has to cancel in both places.
+	 *
+	 * Not gated on Pro: an active renewal row means a store is taking money now,
+	 * and that is exactly when the cancel path must be reachable, entitlement
+	 * bookkeeping notwithstanding.
+	 */
+	Subscriptions             []*Subscription          `json:"subscriptions,omitempty"`
+	ActiveTransferBalances    []*model.TransferBalance `json:"active_transfer_balances,omitempty"`
+	PendingPayoutUsdNanoCents model.NanoCents          `json:"pending_payout_usd_nano_cents"`
+	UpdateTime                time.Time                `json:"update_time"`
+	/**
+	 * Guest - the network has no login method (no password/phone, SSO, wallet
+	 * or seedphrase sign-in): a legacy guest network. Read from the live auth
+	 * tables on every call, so it is right after a token refresh (which signs
+	 * every jwt without the guest_mode claim) and turns false the moment a
+	 * login method is added with AddAuth. A client must not sell a plan to a
+	 * guest network, because nothing can sign back in to it.
+	 */
+	Guest bool `json:"guest"`
+
+	// ----- the onboarding plan fields (onboarding_controller.go DecoratePlan) -----
+	// PriceTier is the caller's regional price tier (display estimate unless the
+	// source is a storefront or a billing country).
+	PriceTier *PriceTierResult `json:"price_tier,omitempty"`
+	// OnboardingOffer is the caller's welcome offer, null when none was issued.
+	OnboardingOffer *OnboardingOfferResult `json:"onboarding_offer"`
+	// Experiments is the caller's variant per experiment surface.
+	Experiments map[string]*model.ExperimentAssignment `json:"experiments,omitempty"`
+}
+
+type Subscription struct {
+	SubscriptionId server.Id `json:"subscription_id"`
+	Store          string    `json:"store"`
+	Plan           string    `json:"plan"`
+}
+
+func SubscriptionBalance(session *session.ClientSession) (*SubscriptionBalanceResult, error) {
+	// at a grant boundary the old grant is still active through its grace; the
+	// summary counts only the new one (see model.SummarizeTransferBalances)
+	transferBalanceSummary := model.GetTransferBalanceSummary(session.Ctx, session.ByJwt.NetworkId)
+
+	// Pro comes from pro_model, the single place it is tracked. It is NOT "has a
+	// paid balance": a data code is paid but data-only, so that test would report
+	// a data-code buyer as Pro.
+	isPro := model.IsProNetwork(session.Ctx, session.ByJwt.NetworkId)
+
+	var currentSubscription *Subscription
+
+	_, market := model.HasSubscriptionRenewal(session.Ctx, session.ByJwt.NetworkId, model.SubscriptionTypeSupporter)
+
+	if isPro {
+		currentSubscription = &Subscription{
+			Plan: model.SubscriptionTypeSupporter,
+		}
+
+		if market != nil {
+			currentSubscription.Store = *market
+		}
+	}
+
+	// one entry per store billing this network. MIN(market) above can only name
+	// one of them, so a second store would otherwise be invisible -- and keep
+	// charging, with nowhere in the ui to go and cancel it.
+	subscriptions := []*Subscription{}
+	for _, market := range model.GetActiveSubscriptionRenewalMarkets(
+		session.Ctx,
+		session.ByJwt.NetworkId,
+		model.SubscriptionTypeSupporter,
+	) {
+		subscriptions = append(subscriptions, &Subscription{
+			Store: market,
+			Plan:  model.SubscriptionTypeSupporter,
+		})
+	}
+
+	// FIXME
+	pendingPayout := model.ByteCount(0)
+
+	return &SubscriptionBalanceResult{
+		BalanceByteCount:          transferBalanceSummary.BalanceByteCount,
+		StartBalanceByteCount:     transferBalanceSummary.StartBalanceByteCount,
+		OpenTransferByteCount:     transferBalanceSummary.OpenTransferByteCount,
+		CurrentSubscription:       currentSubscription,
+		Subscriptions:             subscriptions,
+		ActiveTransferBalances:    transferBalanceSummary.ActiveTransferBalances,
+		PendingPayoutUsdNanoCents: pendingPayout,
+		UpdateTime:                server.NowUtc(),
+		Guest:                     isGuestNetwork(session, model.HasAnyAuthMethod),
+	}, nil
+}
+
+// isGuestNetwork reports whether the session's network has no login method.
+// It deliberately ignores the jwt's GuestMode claim: RefreshToken signs every
+// jwt with GuestMode=false, so a refreshed legacy guest no longer carries it,
+// and a guest that just added a login method still carries it until the next
+// refresh.
+func isGuestNetwork(
+	session *session.ClientSession,
+	hasAnyAuthMethod func(ctx context.Context, userId server.Id) bool,
+) bool {
+	return !hasAnyAuthMethod(session.Ctx, session.ByJwt.UserId)
+}
+
+// Stable machine codes for a refused checkout or payment intent
+// (/stripe/create-checkout-session, /stripe/payment-intent,
+// /subscription/stripe/payment-sheet, /solana/payment-intent, /pay/data/checkout
+// and /pay/data/solana-intent). Clients pick a localized message (or flow) from
+// the code and fall back to `Message`, which every refusal still carries, so a
+// client older than a code reads the refusal as before.
+const (
+	// the network has no login method; add one (AddAuth) before buying
+	PurchaseErrorCodeGuestSignInRequired = "guest_sign_in_required"
+	// the network already has an active Pro subscription; nothing was charged
+	PurchaseErrorCodeAlreadySubscribed = "already_subscribed"
+	// the plan cannot be sold now: no price or product is configured for it
+	PurchaseErrorCodePlanUnavailable = "plan_unavailable"
+	// the data pack cannot be sold now: no price or product is configured for it
+	PurchaseErrorCodeItemUnavailable = "item_unavailable"
+	// the welcome offer is not, or no longer, redeemable by this network
+	PurchaseErrorCodeOfferUnavailable = "offer_unavailable"
+	// this deployment has no checkout configured
+	PurchaseErrorCodeCheckoutUnavailable = "checkout_unavailable"
+	// the request names an item, plan, provider, mode or reference the endpoint
+	// does not take: a client defect, not something the buyer can change
+	PurchaseErrorCodeInvalidRequest = "invalid_request"
+	// the email address the code goes to does not look like one
+	PurchaseErrorCodeInvalidEmail = "invalid_email"
+	// a data purchase for a network by name was sent without the name
+	PurchaseErrorCodeNetworkNameRequired = "network_name_required"
+	// no network has the given name
+	PurchaseErrorCodeNetworkNotFound = "network_not_found"
+	// too many attempts from this address; it may try again in a minute
+	PurchaseErrorCodeRateLimited = "rate_limited"
+	// the payment could not be started (Stripe or the database failed); a
+	// retry may work
+	PurchaseErrorCodeStartFailed = "start_failed"
+)
+
+const purchaseGuestSignInRequiredMessage = "Add a sign-in to your account before buying a plan."
+
+// The message of a payment that could not be started. The cause is logged, not
+// sent: it can carry Stripe's or the database's own words.
+const purchaseStartFailedMessage = "Could not start the payment. Please try again."
+
+// The auth-method lookup, model.HasAnyAuthMethod. Replaceable only by hermetic
+// tests, which answer the lookup without a database. Production never mutates
+// it.
+var purchaseHasAnyAuthMethod = model.HasAnyAuthMethod
+
+// Reports whether the session's network must not start a checkout or a
+// payment intent: a legacy guest network has no login method, so nothing could
+// sign back in to the plan it bought. Current apps convert a guest in place
+// before checkout; this covers the builds from before that.
+//
+// Only the server-created checkouts and intents call this. A store-verified
+// purchase (verify-play-purchase, verify-apple-transaction) and every webhook
+// still credit a guest network: the store has already taken the money.
+func refuseGuestPurchase(session *session.ClientSession) bool {
+	if !isGuestNetwork(session, purchaseHasAnyAuthMethod) {
+		return false
+	}
+	if glog.V(1) {
+		glog.Infof("[sub]refused a purchase for guest network %s\n", session.ByJwt.NetworkId)
+	}
+	return true
+}
+
+type CoinbaseWebhookArgs struct {
+	Event *CoinbaseEvent `json:"event"`
+}
+
+type CoinbaseEvent struct {
+	Id   string             `json:"id"`
+	Type string             `json:"type"`
+	Data *CoinbaseEventData `json:"data"`
+}
+
+type CoinbaseEventData struct {
+	Id          string                      `json:"id"`
+	Name        string                      `json:"name"`
+	Description string                      `json:"description"`
+	Payments    []*CoinbaseEventDataPayment `json:"payments"`
+	Checkout    *CoinbaseEventDataCheckout  `json:"checkout"`
+	Metadata    *CoinbaseEventDataMetadata  `json:"metadata"`
+}
+
+type CoinbaseEventDataCheckout struct {
+	Id string `json:"id"`
+}
+
+type CoinbaseEventDataMetadata struct {
+	Email string `json:"email"`
+	// set by /pay/data/checkout when the purchase applies to a named network
+	NetworkId      string `json:"network_id"`
+	NetworkName    string `json:"network_name"`
+	ApplyToNetwork string `json:"apply_to_network"`
+}
+
+// coinbaseAppliedNetwork reads the buy-data checkout metadata: the network the
+// purchase applies to, when the charge was created for one. A malformed id is
+// treated as "no network" so the purchase still delivers as a code by email.
+func coinbaseAppliedNetwork(metadata *CoinbaseEventDataMetadata) (redeemNetworkId *server.Id, appliedNetworkName string) {
+	if metadata == nil || metadata.ApplyToNetwork != payDataMetadataApplyYes {
+		return nil, ""
+	}
+	networkId, err := server.ParseId(metadata.NetworkId)
+	if err != nil {
+		return nil, ""
+	}
+	return &networkId, metadata.NetworkName
+}
+
+type CoinbaseEventDataPayment struct {
+	Net *CoinbaseEventDataPaymentNet `json:"net"`
+}
+
+type CoinbaseEventDataPaymentNet struct {
+	Local  *CoinbaseEventDataPaymentAmount `json:"local"`
+	Crypto *CoinbaseEventDataPaymentAmount `json:"crypto"`
+}
+
+type CoinbaseEventDataPaymentAmount struct {
+	Amount   string `json:"amount"`
+	Currency string `json:"currency"`
+}
+
+type CoinbaseWebhookResult struct {
+}
+
+func CoinbaseWebhook(
+	coinbaseWebhook *CoinbaseWebhookArgs,
+	clientSession *session.ClientSession,
+) (*CoinbaseWebhookResult, error) {
+	// A signed-but-malformed event must be an ERROR, never a panic: a nil deref
+	// here would 500 this delivery and every retry of it, forever, with only a
+	// stack trace to find it by. The error is still a non-2xx (Coinbase retries
+	// and shows the failure in its dashboard), but it says what is missing.
+	if coinbaseWebhook.Event == nil {
+		return nil, errors.New("Coinbase event missing.")
+	}
+	if coinbaseWebhook.Event.Type == "charge:confirmed" {
+		if coinbaseWebhook.Event.Data == nil {
+			return nil, errors.New("Coinbase event data missing.")
+		}
+		skuName := coinbaseWebhook.Event.Data.Name
+		skus := coinbaseSkusFunc()
+		if sku, ok := skus[skuName]; ok {
+			purchaseEmail := ""
+			var redeemNetworkId *server.Id
+			appliedNetworkName := ""
+			if metadata := coinbaseWebhook.Event.Data.Metadata; metadata != nil {
+				purchaseEmail = metadata.Email
+				redeemNetworkId, appliedNetworkName = coinbaseAppliedNetwork(metadata)
+			}
+			// with a known network the credit lands directly; the email is optional
+			if purchaseEmail == "" && redeemNetworkId == nil {
+				return nil, errors.New("Missing purchase email to send balance code.")
+			}
+
+			coinbaseDataJsonBytes, err := json.Marshal(coinbaseWebhook.Event.Data)
+			if err != nil {
+				return nil, err
+			}
+
+			payments := coinbaseWebhook.Event.Data.Payments
+			if len(payments) == 0 || payments[0] == nil || payments[0].Net == nil || payments[0].Net.Local == nil {
+				return nil, errors.New("Coinbase event has no payment amount.")
+			}
+
+			paymentUsd, err := strconv.ParseFloat(payments[0].Net.Local.Amount, 64)
+			if err != nil {
+				return nil, err
+			}
+			netRevenue := model.UsdToNanoCents((1.0 - sku.FeeFraction) * paymentUsd)
+
+			err = createBalanceCode(
+				clientSession.Ctx,
+				sku.BalanceByteCount(),
+				model.Pro().DataCodeDuration,
+				netRevenue,
+				coinbaseWebhook.Event.Data.Id,
+				string(coinbaseDataJsonBytes),
+				purchaseEmail,
+				// a Coinbase purchase is not tied to a signed-in session: the network is
+				// known only when the buy-data checkout named one (charge metadata),
+				// otherwise the emailed code IS the delivery mechanism
+				redeemNetworkId,
+				appliedNetworkName,
+			)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, fmt.Errorf("Coinbase sku not found: %s", skuName)
+		}
+
+	}
+	// else ignore
+
+	return &CoinbaseWebhookResult{}, nil
+}
+
+// CreateBalanceCode creates the data code for a purchase and emails it.
+//
+// When redeemNetworkId is set, the code is ALSO redeemed into that network immediately,
+// so the data simply lands. That is the case for a purchase made while SIGNED IN, where
+// the Stripe checkout session told us exactly whose network it is
+// (client_reference_id). The code is still emailed, as a record.
+//
+// Without this, a signed-in customer who buys data on the site is emailed a code they
+// have to go and find and paste back into the app -- and the confirmation page sits
+// there polling for a balance that never arrives, eventually telling them their purchase
+// is "taking longer than usual" when in fact it worked perfectly. We know who they are.
+// Make the data appear.
+//
+// redeemNetworkId is nil for purchases where we genuinely do not know the network (the
+// Coinbase flow), which is what data codes exist for in the first place.
+func CreateBalanceCode(
+	ctx context.Context,
+	balanceByteCount model.ByteCount,
+	duration time.Duration,
+	netRevenue model.NanoCents,
+	purchaseEventId string,
+	purchaseRecord string,
+	purchaseEmail string,
+	redeemNetworkId *server.Id,
+) error {
+	return createBalanceCode(
+		ctx,
+		balanceByteCount,
+		duration,
+		netRevenue,
+		purchaseEventId,
+		purchaseRecord,
+		purchaseEmail,
+		redeemNetworkId,
+		"",
+	)
+}
+
+// createBalanceCode is CreateBalanceCode plus the "applied" email. When
+// appliedNetworkName is set -- the customer bought the data FOR that network from
+// the buy-data page -- and the code is on that network, the email says the data
+// is already there instead of offering a code to redeem.
+func createBalanceCode(
+	ctx context.Context,
+	balanceByteCount model.ByteCount,
+	duration time.Duration,
+	netRevenue model.NanoCents,
+	purchaseEventId string,
+	purchaseRecord string,
+	purchaseEmail string,
+	redeemNetworkId *server.Id,
+	appliedNetworkName string,
+) error {
+	// This is a PAID path -- by the time we are here the customer's money has already
+	// moved. So this one does NOT no-op like the grants do.
+	//
+	// A code with a zero duration expires the instant it is created: the customer pays,
+	// receives a code, redeems it, and gets nothing, with no error anywhere. Refuse
+	// instead. The caller is a webhook, so an error means the provider RETRIES and the
+	// failure is visible in their dashboard -- an unfulfilled payment we can see and fix
+	// beats a fulfilled one that is worthless.
+	if duration <= 0 {
+		glog.Errorf(
+			"[sub]refusing to create a balance code with a zero duration "+
+				"(purchase_event_id = %s). Is pro.yml present?\n",
+			purchaseEventId,
+		)
+		return fmt.Errorf("balance code duration is not configured (pro.yml)")
+	}
+
+	// With no email AND no network there is no delivery mechanism at all -- the
+	// code would exist and nobody could ever learn it. Refuse so the webhook
+	// retries and the failure is visible.
+	if purchaseEmail == "" && redeemNetworkId == nil {
+		return fmt.Errorf("balance code needs a purchase email or a network to redeem into")
+	}
+
+	var balanceCode *model.BalanceCode
+
+	if balanceCodeId, err := model.GetBalanceCodeIdForPurchaseEventId(ctx, purchaseEventId); err == nil {
+		// the code was already created for this purchase event -- a webhook retry.
+		// Re-send it, and fall through so an earlier failed redeem is retried too.
+		balanceCode, err = model.GetBalanceCode(ctx, balanceCodeId)
+		if err != nil {
+			return err
+		}
+	} else {
+		balanceCode, err = model.CreateBalanceCode(
+			ctx,
+			balanceByteCount,
+			duration,
+			netRevenue,
+			purchaseEventId,
+			purchaseRecord,
+			purchaseEmail,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	// A normal webhook retry reaches this call after the first redemption has
+	// committed. Preserve that state instead of asking the redeem endpoint,
+	// whose public unavailable-code result deliberately does not distinguish a
+	// spent code from an unknown one.
+	applied := redeemNetworkId != nil &&
+		balanceCode.RedeemNetworkId != nil &&
+		*balanceCode.RedeemNetworkId == *redeemNetworkId &&
+		!balanceCode.RedeemTime.IsZero()
+	if redeemNetworkId != nil && !applied {
+		redeemResult, err := model.RedeemBalanceCode(&model.RedeemBalanceCodeArgs{
+			Secret:    balanceCode.Secret,
+			NetworkId: *redeemNetworkId,
+		}, ctx)
+		if err != nil {
+			// Do NOT fail the webhook here. Stripe retries a failed webhook, and every
+			// retry would re-send the email -- so a transient redeem error would turn
+			// into a stream of duplicate emails. The most likely "error" is simply that
+			// the code is already redeemed (this IS the retry), in which case the data is
+			// already where it belongs.
+			//
+			// The customer is not stranded either way: they hold the emailed code and can
+			// redeem it by hand.
+			glog.Infof(
+				"[sub]balance code %s redeem into network %s: %s\n",
+				balanceCode.BalanceCodeId, *redeemNetworkId, err,
+			)
+			if balanceCode.PurchaseEmail == "" {
+				return fmt.Errorf("automatic balance-code delivery failed without email recovery: %w", err)
+			}
+		} else if redeemResult != nil && redeemResult.Error != nil {
+			// "already redeemed" IS the retry: the data is already where it belongs.
+			// Anything else (expired, voided by a refund) means it is not.
+			applied = strings.Contains(strings.ToLower(redeemResult.Error.Message), "already redeemed")
+			glog.Infof(
+				"[sub]balance code %s redeem into network %s: %s\n",
+				balanceCode.BalanceCodeId, *redeemNetworkId, redeemResult.Error.Message,
+			)
+			if !applied && balanceCode.PurchaseEmail == "" {
+				return errors.New("automatic balance-code delivery failed without email recovery")
+			}
+		} else {
+			applied = true
+			glog.Infof(
+				"[sub]balance code %s redeemed into network %s (%s)\n",
+				balanceCode.BalanceCodeId, *redeemNetworkId,
+				model.ByteCountHumanReadable(balanceCode.BalanceByteCount),
+			)
+		}
+	}
+
+	// No email on the purchase means automatic redemption is the only delivery
+	// channel. Every unsuccessful branch above returns an error, so reaching
+	// here proves the data landed in the requested network.
+	if balanceCode.PurchaseEmail == "" {
+		return nil
+	}
+
+	awsMessageSender := GetAWSMessageSender()
+
+	if applied && appliedNetworkName != "" {
+		// bought FOR this network from the buy-data page, and the data is there:
+		// say so rather than offer a code that is already spent
+		return awsMessageSender.SendAccountMessageTemplate(
+			balanceCode.PurchaseEmail,
+			&SubscriptionDataAppliedTemplate{
+				Secret:           balanceCode.Secret,
+				BalanceByteCount: balanceCode.BalanceByteCount,
+				NetworkName:      appliedNetworkName,
+			},
+		)
+	}
+
+	return awsMessageSender.SendAccountMessageTemplate(
+		balanceCode.PurchaseEmail,
+		&SubscriptionTransferBalanceCodeTemplate{
+			Secret:           balanceCode.Secret,
+			BalanceByteCount: balanceCode.BalanceByteCount,
+		},
+	)
+}
+
+type RedeemBalanceCodeArgs struct {
+	Secret string `json:"secret"`
+}
+
+func RedeemBalanceCode(
+	redeemBalanceCode RedeemBalanceCodeArgs,
+	session *session.ClientSession,
+) (*model.RedeemBalanceCodeResult, error) {
+
+	return model.RedeemBalanceCode(
+		&model.RedeemBalanceCodeArgs{
+			Secret:    redeemBalanceCode.Secret,
+			NetworkId: session.ByJwt.NetworkId,
+		},
+		session.Ctx,
+	)
+}
+
+// https://developers.google.com/android-publisher/authorization
+func playAuth(ctx context.Context) (string, error) {
+	form := url.Values{}
+	form.Add("grant_type", "refresh_token")
+	form.Add("client_id", playClientId())
+	form.Add("client_secret", playClientSecret())
+	form.Add("refresh_token", playRefreshToken())
+
+	result, err := server.HttpPostForm(
+		ctx,
+		"https://accounts.google.com/o/oauth2/token",
+		form,
+		server.NoCustomHeaders,
+		server.ResponseJsonObject[map[string]any],
+	)
+	if err != nil {
+		return "", err
+	}
+
+	tokenType := result["token_type"]
+	accessToken := result["access_token"]
+
+	if tokenType == "Bearer" {
+		return fmt.Sprintf("Bearer %s", accessToken), nil
+	}
+	return "", errors.New("Could not auth.")
+}
+
+func playAuthHeader(ctx context.Context, header http.Header) {
+	if auth, err := playAuth(ctx); err == nil {
+		header.Add("Authorization", auth)
+	}
+}
+
+type PlayRtdnMessage struct {
+	Version                  string                        `json:"version"`
+	PackageName              string                        `json:"packageName"`
+	SubscriptionNotification *PlaySubscriptionNotification `json:"subscriptionNotification,omitempty"`
+}
+
+type PlaySubscriptionNotification struct {
+	Version          string `json:"version"`
+	NotificationType int    `json:"notificationType"`
+	PurchaseToken    string `json:"purchaseToken"`
+	SubscriptionId   string `json:"subscriptionId"`
+}
+
+// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptionsv2#SubscriptionPurchaseV2
+type PlaySubscription struct {
+	LineItems []*PlaySubscriptionPurchaseLineItem `json:"lineItems"`
+	StartTime string                              `json:"startTime"`
+	// RegionCode is the ISO 3166-1 alpha-2 billing country of the purchase: the
+	// storefront that prices the regional tier
+	RegionCode string `json:"regionCode,omitempty"`
+	// values:
+	// - SUBSCRIPTION_STATE_UNSPECIFIED
+	// - SUBSCRIPTION_STATE_PENDING
+	// - SUBSCRIPTION_STATE_ACTIVE
+	// - SUBSCRIPTION_STATE_PAUSED
+	// - SUBSCRIPTION_STATE_IN_GRACE_PERIOD
+	// - SUBSCRIPTION_STATE_ON_HOLD
+	// - SUBSCRIPTION_STATE_CANCELED
+	// - SUBSCRIPTION_STATE_EXPIRED
+	// - SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED
+	SubscriptionState string `json:"subscriptionState"`
+	// values:
+	// - ACKNOWLEDGEMENT_STATE_UNSPECIFIED
+	// - ACKNOWLEDGEMENT_STATE_PENDING
+	// - ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED
+	AcknowledgementState       string                          `json:"acknowledgementState"`
+	ExternalAccountIdentifiers *PlayExternalAccountIdentifiers `json:"externalAccountIdentifiers"`
+	SubscribeWithGoogleInfo    *PlaySubscribeWithGoogleInfo    `json:"subscribeWithGoogleInfo,omitempty"`
+	// LinkedPurchaseToken is the token of the subscription this purchase
+	// continues (re-signup, upgrade/downgrade, plan conversion); an unlinked
+	// token resolves through its binding (play_purchase_binding)
+	LinkedPurchaseToken string `json:"linkedPurchaseToken,omitempty"`
+}
+
+// playAcknowledgeSubscription acknowledges the purchase with Google, unless
+// Play already reports it acknowledged. Every renewal RTDN is for an
+// acknowledged purchase; acknowledging it again would make each renewal depend
+// on Play accepting a repeat, and a non-200 there would fail every redelivery
+// while the renewal is never credited inline.
+func playAcknowledgeSubscription(
+	ctx context.Context,
+	rtdnMessage *PlayRtdnMessage,
+	sub *PlaySubscription,
+) error {
+	if sub.AcknowledgementState == "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED" {
+		return nil
+	}
+	url := fmt.Sprintf(
+		"%s/androidpublisher/v3/applications/%s/purchases/subscriptions/%s/tokens/%s:acknowledge",
+		playPublisherApiBaseUrl,
+		rtdnMessage.PackageName,
+		rtdnMessage.SubscriptionNotification.SubscriptionId,
+		rtdnMessage.SubscriptionNotification.PurchaseToken,
+	)
+	_, err := server.HttpPostRawRequireStatusOk(
+		ctx,
+		url,
+		[]byte{},
+		func(header http.Header) {
+			playAuthHeaderFunc(ctx, header)
+		},
+	)
+	if err != nil {
+		glog.Errorf(
+			"[sub]play acknowledge failed for token %s: %s\n",
+			rtdnMessage.SubscriptionNotification.PurchaseToken, err,
+		)
+		return fmt.Errorf("could not acknowledge play purchase: %w", err)
+	}
+	return nil
+}
+
+func (self *PlaySubscription) ParseStartTime() (time.Time, error) {
+	return time.Parse(time.RFC3339, self.StartTime)
+}
+
+func (self *PlaySubscription) RequireStartTime() time.Time {
+	t, err := self.ParseStartTime()
+	if err != nil {
+		panic(err)
+	}
+	return t
+}
+
+type PlayExternalAccountIdentifiers struct {
+	ExternalAccountId           string `json:"externalAccountId,omitempty"`
+	ObfuscatedExternalAccountId string `json:"obfuscatedExternalAccountId,omitempty"`
+	ObfuscatedExternalProfileId string `json:"obfuscatedExternalProfileId,omitempty"`
+}
+
+type PlaySubscribeWithGoogleInfo struct {
+	EmailAddress string `json:"emailAddress,omitempty"`
+}
+
+type PlaySubscriptionPurchaseLineItem struct {
+	ProductId  string `json:"productId"`
+	ExpiryTime string `json:"expiryTime"`
+	// present for auto-renewing plans (absent for prepaid): the customer's
+	// auto-renew switch, read by the subscription details
+	AutoRenewingPlan *PlayAutoRenewingPlan `json:"autoRenewingPlan,omitempty"`
+	// OfferDetails names the base plan and offer the purchase was made under;
+	// the welcome offer is recognized by its offer tag
+	OfferDetails *PlayOfferDetails `json:"offerDetails,omitempty"`
+	// SignupPromotion is set when a Play promotion code was applied at signup
+	SignupPromotion *PlaySignupPromotion `json:"signupPromotion,omitempty"`
+}
+
+// PlaySignupPromotion is exactly one of oneTimeCode (a single-use code; the
+// API reports no identifier for it) or vanityCode (a custom code, named).
+type PlaySignupPromotion struct {
+	OneTimeCode *struct{}       `json:"oneTimeCode,omitempty"`
+	VanityCode  *PlayVanityCode `json:"vanityCode,omitempty"`
+}
+
+type PlayVanityCode struct {
+	PromotionCode string `json:"promotionCode,omitempty"`
+}
+
+type PlayOfferDetails struct {
+	OfferTags  []string `json:"offerTags,omitempty"`
+	BasePlanId string   `json:"basePlanId,omitempty"`
+	OfferId    string   `json:"offerId,omitempty"`
+}
+
+// HasOfferTag reports whether any line item was bought under an offer carrying
+// the tag.
+func (self *PlaySubscription) HasOfferTag(tag string) bool {
+	if tag == "" {
+		return false
+	}
+	for _, item := range self.LineItems {
+		if item == nil || item.OfferDetails == nil {
+			continue
+		}
+		for _, itemTag := range item.OfferDetails.OfferTags {
+			if itemTag == tag {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+type PlayAutoRenewingPlan struct {
+	AutoRenewEnabled bool `json:"autoRenewEnabled"`
+}
+
+func (self *PlaySubscriptionPurchaseLineItem) ParseExpiryTime() (time.Time, error) {
+	return time.Parse(time.RFC3339, self.ExpiryTime)
+}
+
+func (self *PlaySubscriptionPurchaseLineItem) RequireExpiryTime() time.Time {
+	t, err := self.ParseExpiryTime()
+	if err != nil {
+		panic(err)
+	}
+	return t
+}
+
+type PlayWebhookArgs struct {
+	Message *PlayWebhookMessage `json:"message"`
+}
+
+type PlayWebhookMessage struct {
+	Data string `json:"data"`
+}
+
+type PlayWebhookResultMessage struct {
+	Message string `json:"message"`
+}
+
+type PlayWebhookResult struct {
+	Message *PlayWebhookResultMessage
+}
+
+// SUBSCRIPTION_REVOKED (RTDN notificationType 12): the user was refunded and
+// access ends NOW (UPGRADE.md §2 S7). Distinct from SUBSCRIPTION_EXPIRED (13),
+// the normal end of a paid period, which never claws anything back.
+const playRtdnNotificationTypeRevoked = 12
+
+// Replaceable only by the hermetic Play webhook tests, which stand up a fake
+// Android Publisher API (this test env has no google vault/config to read the
+// real package name, skus or oauth credentials from). Production never mutates
+// these.
+var playPublisherApiBaseUrl = "https://androidpublisher.googleapis.com"
+var playPackageNameFunc = playPackageName
+var playSkusFunc = func() map[string]*Sku { return playSkus() }
+var playAuthHeaderFunc = playAuthHeader
+
+// Replaceable only by the terminal-renewal error-path test. Production always
+// ends through the network-and-purchase-token-scoped model transaction.
+var endPlaySubscriptionEntitlement = func(
+	ctx context.Context,
+	networkId server.Id,
+	purchaseToken string,
+	now time.Time,
+) (bool, error) {
+	return model.EndReconciledEntitlementForNetworkPurchaseToken(
+		ctx,
+		networkId,
+		model.SubscriptionMarketGoogle,
+		purchaseToken,
+		now,
+	)
+}
+
+// https://developer.android.com/google/play/billing/getting-ready#configure-rtdn
+// https://developer.android.com/google/play/billing/rtdn-reference
+func PlayWebhook(
+	webhookArgs *PlayWebhookArgs,
+	clientSession *session.ClientSession,
+) (*PlayWebhookResult, error) {
+
+	data, err := base64.StdEncoding.DecodeString(webhookArgs.Message.Data)
+	if err != nil {
+		return nil, err
+	}
+	var rtdnMessage *PlayRtdnMessage
+	err = json.Unmarshal(data, &rtdnMessage)
+	if err != nil {
+		return nil, err
+	}
+
+	if rtdnMessage.PackageName == playPackageNameFunc() {
+		// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptionsv2/get
+		// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptionsv2#SubscriptionPurchaseV2
+		// https://developers.google.com/android-publisher/api-ref/rest/v3/purchases.subscriptions/acknowledge
+		if rtdnMessage.SubscriptionNotification != nil {
+			url := fmt.Sprintf(
+				"%s/androidpublisher/v3/applications/%s/purchases/subscriptionsv2/tokens/%s",
+				playPublisherApiBaseUrl,
+				rtdnMessage.PackageName,
+				rtdnMessage.SubscriptionNotification.PurchaseToken,
+			)
+			sub, err := server.HttpGetRequireStatusOk[*PlaySubscription](
+				clientSession.Ctx,
+				url,
+				func(header http.Header) {
+					playAuthHeaderFunc(clientSession.Ctx, header)
+				},
+				server.ResponseJsonObject[*PlaySubscription],
+			)
+			if err != nil {
+				if v, ok := err.(*server.HttpStatusError); ok {
+					switch v.StatusCode {
+					// Gone
+					case 410:
+						if rtdnMessage.SubscriptionNotification.NotificationType == playRtdnNotificationTypeRevoked {
+							// a revoked purchase can be gone from the store
+							// entirely; the renewal rows still map the token to
+							// its network
+							return playHandleRevoked(
+								clientSession,
+								rtdnMessage.SubscriptionNotification.PurchaseToken,
+								"GONE",
+							)
+						}
+						return &PlayWebhookResult{}, nil
+					default:
+						return nil, err
+					}
+				} else {
+					return nil, err
+				}
+			}
+
+			glog.Infof("[sub]google play sub: %v\n", sub)
+
+			if rtdnMessage.SubscriptionNotification.NotificationType == playRtdnNotificationTypeRevoked {
+				// verified against Google before clawing back: the RTDN push is
+				// only as trusted as the state fetch above confirms. A revoked
+				// subscription reports EXPIRED (or is 410, handled above); if
+				// Play still says ACTIVE, do nothing -- later signals will tell.
+				if sub.SubscriptionState == "SUBSCRIPTION_STATE_ACTIVE" {
+					glog.Warningf(
+						"[sub]play REVOKED notification for token %s but Play reports %s; ignoring\n",
+						rtdnMessage.SubscriptionNotification.PurchaseToken,
+						sub.SubscriptionState,
+					)
+					return &PlayWebhookResult{}, nil
+				}
+				return playHandleRevoked(
+					clientSession,
+					rtdnMessage.SubscriptionNotification.PurchaseToken,
+					sub.SubscriptionState,
+				)
+			}
+
+			if len(sub.LineItems) == 0 {
+				glog.Infof("Google play cannot not renew subscription with zero line items (%s)", rtdnMessage.SubscriptionNotification.PurchaseToken)
+				return &PlayWebhookResult{
+					Message: &PlayWebhookResultMessage{
+						Message: fmt.Sprintf(
+							"Google play cannot not renew subscription with zero line items (%s), sub state: (%s), sub aknowledgement: (%s)",
+							rtdnMessage.SubscriptionNotification.PurchaseToken,
+							sub.SubscriptionState,
+							sub.AcknowledgementState,
+						),
+					},
+				}, nil
+			}
+
+			var networkId server.Id
+			identifiers := sub.ExternalAccountIdentifiers
+			if identifiers != nil && identifiers.ExternalAccountId != "" {
+				networkId, err = server.ParseId(identifiers.ExternalAccountId)
+				if err != nil {
+					return nil, fmt.Errorf("Google Play subscription malformed external account id: \"%s\" = %s", identifiers.ExternalAccountId, err)
+				}
+			} else if identifiers != nil && identifiers.ObfuscatedExternalAccountId != "" {
+				networkIdOrSubscriptionPaymentId, err := server.ParseId(identifiers.ObfuscatedExternalAccountId)
+				if err != nil {
+					return nil, fmt.Errorf("Google Play subscription malformed obfuscated external account id: \"%s\" = %s", identifiers.ObfuscatedExternalAccountId, err)
+				}
+				networkId, err = model.SubscriptionGetNetworkIdForPaymentId(clientSession.Ctx, networkIdOrSubscriptionPaymentId)
+				if err != nil {
+					// the obfuscated account id is just a plain network id
+					networkId = networkIdOrSubscriptionPaymentId
+				}
+			} else {
+				// no account identifiers (a purchase outside the app's billing
+				// flow): only a binding made by the verify endpoint names the
+				// network (play_purchase_binding_controller.go)
+				boundNetworkId, bound := playPurchaseBindingLookupFunc(
+					clientSession.Ctx,
+					rtdnMessage.SubscriptionNotification.PurchaseToken,
+					sub.LinkedPurchaseToken,
+					true,
+				)
+				if !bound {
+					return &PlayWebhookResult{
+						Message: &PlayWebhookResultMessage{
+							Message: fmt.Sprintf(
+								"Google Play subscription no external account information and no binding: sub state: (%s), sub aknowledgement: (%s)",
+								sub.SubscriptionState,
+								sub.AcknowledgementState,
+							),
+						},
+					}, nil
+				}
+				networkId = boundNetworkId
+			}
+
+			minExpiryTime := sub.LineItems[0].RequireExpiryTime()
+			for _, item := range sub.LineItems[1:] {
+				if item.RequireExpiryTime().Before(minExpiryTime) {
+					minExpiryTime = item.RequireExpiryTime()
+				}
+			}
+
+			acknowledgeAndCheckRenewal := true
+			switch sub.SubscriptionState {
+			case "SUBSCRIPTION_STATE_CANCELED",
+				"SUBSCRIPTION_STATE_EXPIRED",
+				"SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED":
+				acknowledgeAndCheckRenewal = false
+				// the onboarding trial outcome: a trial that stops renewing or
+				// expires before its first paid period is trial.cancelled
+				storeTrialCancelled(
+					clientSession.Ctx,
+					networkId,
+					model.OnboardingStorePlay,
+					planForProductId(rtdnMessage.SubscriptionNotification.SubscriptionId),
+					server.NowUtc(),
+				)
+			}
+
+			if acknowledgeAndCheckRenewal {
+				// Aknowledge. The result MATTERS: a purchase Google never sees
+				// acknowledged is auto-refunded after 3 days while any granted
+				// balance would stand. A failure here is a non-2xx so Pub/Sub
+				// redelivers and the acknowledge is attempted again.
+				if err := playAcknowledgeSubscription(clientSession.Ctx, rtdnMessage, sub); err != nil {
+					return nil, err
+				}
+
+				// fire this immediately since we pull current plan from subscription_renewal table.
+				// A credit failure (sku missing from play.yml, Google API failure) is a
+				// non-2xx so Pub/Sub RETRIES the delivery -- otherwise the entitlement
+				// would arrive only via the task scheduled at the END of the paid
+				// period, or never.
+				renewalResult, err := PlaySubscriptionRenewal(
+					&PlaySubscriptionRenewalArgs{
+						NetworkId:      networkId,
+						PackageName:    rtdnMessage.PackageName,
+						SubscriptionId: rtdnMessage.SubscriptionNotification.SubscriptionId,
+						PurchaseToken:  rtdnMessage.SubscriptionNotification.PurchaseToken,
+					},
+					clientSession,
+				)
+				if err != nil {
+					glog.Errorf(
+						"[sub]play inline renewal failed for token %s: %s\n",
+						rtdnMessage.SubscriptionNotification.PurchaseToken, err,
+					)
+					return nil, err
+				}
+				if renewalResult != nil && renewalResult.Renewed {
+					// the onboarding trial outcome: a credited renewal past a
+					// recorded trial's length is trial.converted
+					storeTrialConverted(
+						clientSession.Ctx,
+						networkId,
+						model.OnboardingStorePlay,
+						planForProductId(rtdnMessage.SubscriptionNotification.SubscriptionId),
+						server.NowUtc(),
+					)
+				}
+
+				// continually renew as long as the expiry time keeps getting pushed forward
+				// note RTDN messages for renewal may unreliably delivered, so Google
+				// recommends polling their system around the expiry time
+				server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+					SchedulePlaySubscriptionRenewal(
+						clientSession,
+						tx,
+						&PlaySubscriptionRenewalArgs{
+							NetworkId:      networkId,
+							PackageName:    rtdnMessage.PackageName,
+							SubscriptionId: rtdnMessage.SubscriptionNotification.SubscriptionId,
+							PurchaseToken:  rtdnMessage.SubscriptionNotification.PurchaseToken,
+							CheckTime:      minExpiryTime,
+						},
+					)
+				})
+			}
+		}
+	}
+	// else unknown package, ignore the message
+
+	return &PlayWebhookResult{}, nil
+}
+
+// playHandleRevoked ends a revoked purchase's entitlement: the renewals the
+// purchase token bought and the pro balances they granted, with the network
+// derived from the renewal rows themselves (a revoked token can be 410-Gone
+// at the store). Idempotent: a Pub/Sub redelivery finds nothing left to end
+// and records nothing. Always 200 -- a retry cannot do more.
+func playHandleRevoked(
+	clientSession *session.ClientSession,
+	purchaseToken string,
+	subscriptionState string,
+) (*PlayWebhookResult, error) {
+	endedNetworkIds := model.EndReconciledEntitlementForPurchaseToken(
+		clientSession.Ctx,
+		model.SubscriptionMarketGoogle,
+		purchaseToken,
+		server.NowUtc(),
+	)
+	for _, networkId := range endedNetworkIds {
+		if err := model.AddPaymentReconciliationEvent(clientSession.Ctx, &model.PaymentReconciliationEvent{
+			RunId:     server.NewId(),
+			Store:     model.SubscriptionMarketGoogle,
+			NetworkId: &networkId,
+			Action:    model.PaymentReconcileActionRevoked,
+			Evidence:  purchaseToken,
+			Details: map[string]any{
+				"subscription_state": subscriptionState,
+			},
+		}); err != nil {
+			// the audit trail must never turn a completed clawback into a
+			// failed delivery (Pub/Sub would redeliver into a no-op)
+			glog.Errorf("[sub]play revoked token %s: could not record event: %s\n", purchaseToken, err)
+		}
+		// the onboarding refund outcome
+		RecordRefund(clientSession.Ctx, networkId, model.OnboardingStorePlay, 0)
+	}
+	glog.Infof(
+		"[sub]play revoked token %s (%s): ended %d network(s)\n",
+		purchaseToken, subscriptionState, len(endedNetworkIds),
+	)
+	return &PlayWebhookResult{}, nil
+}
+
+type PlaySubscriptionRenewalArgs struct {
+	NetworkId      server.Id `json:"network_id"`
+	PackageName    string    `json:"package_name"`
+	SubscriptionId string    `json:"subscription_id"`
+	PurchaseToken  string    `json:"purchase_token"`
+	CheckTime      time.Time `json:"check_time"`
+	// ExpiryTime time.Time `json:"expiry_time"`
+}
+
+type PlaySubscriptionRenewalResult struct {
+	Canceled         bool      `json:"canceled"`
+	EntitlementEnded bool      `json:"entitlement_ended"`
+	ExpiryTime       time.Time `json:"expiry_time"`
+	Renewed          bool      `json:"renewed"`
+	Terminal         bool      `json:"terminal"`
+}
+
+func SchedulePlaySubscriptionRenewal(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
+) {
+	task.ScheduleTaskInTx(
+		tx,
+		PlaySubscriptionRenewal,
+		playSubscriptionRenewal,
+		clientSession,
+		task.RunOnce("play_subscription_renewal", playSubscriptionRenewal.PurchaseToken),
+		task.RunAt(playSubscriptionRenewal.CheckTime),
+	)
+}
+
+func PlaySubscriptionRenewal(
+	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
+	clientSession *session.ClientSession,
+) (*PlaySubscriptionRenewalResult, error) {
+
+	url := fmt.Sprintf(
+		"%s/androidpublisher/v3/applications/%s/purchases/subscriptionsv2/tokens/%s",
+		playPublisherApiBaseUrl,
+		playSubscriptionRenewal.PackageName,
+		playSubscriptionRenewal.PurchaseToken,
+	)
+	sub, err := server.HttpGetRequireStatusOk[*PlaySubscription](
+		clientSession.Ctx,
+		url,
+		func(header http.Header) {
+			playAuthHeaderFunc(clientSession.Ctx, header)
+		},
+		server.ResponseJsonObject[*PlaySubscription],
+	)
+	if err != nil {
+		if v, ok := err.(*server.HttpStatusError); ok {
+			switch v.StatusCode {
+			// Gone
+			case 410:
+				return endTerminalPlaySubscriptionRenewal(
+					playSubscriptionRenewal,
+					clientSession,
+					time.Time{},
+				)
+			default:
+				return nil, err
+			}
+		} else {
+			return nil, err
+		}
+	}
+
+	if len(sub.LineItems) == 0 {
+		return nil, fmt.Errorf("Google play cannot not renew subscription with zero line items (%s)", playSubscriptionRenewal.PurchaseToken)
+	}
+
+	maxExpiryTime := sub.LineItems[0].RequireExpiryTime()
+	minExpiryTime := maxExpiryTime
+	for _, item := range sub.LineItems[1:] {
+		if maxExpiryTime.Before(item.RequireExpiryTime()) {
+			maxExpiryTime = item.RequireExpiryTime()
+		} else if item.RequireExpiryTime().Before(minExpiryTime) {
+			minExpiryTime = item.RequireExpiryTime()
+		}
+	}
+	for _, item := range sub.LineItems[1:] {
+		if maxExpiryTime.Before(item.RequireExpiryTime()) {
+			maxExpiryTime = item.RequireExpiryTime()
+		}
+	}
+	startTime, err := sub.ParseStartTime()
+	if err != nil {
+		return nil, err
+	}
+
+	now := server.NowUtc()
+	active := false
+	canceled := false
+	terminal := false
+	switch sub.SubscriptionState {
+	case "SUBSCRIPTION_STATE_ACTIVE":
+		active = true
+	case "SUBSCRIPTION_STATE_CANCELED":
+		canceled = true
+		terminal = !maxExpiryTime.After(now)
+	case "SUBSCRIPTION_STATE_EXPIRED",
+		"SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED":
+		canceled = true
+		terminal = true
+	}
+
+	if terminal {
+		return endTerminalPlaySubscriptionRenewal(
+			playSubscriptionRenewal,
+			clientSession,
+			minExpiryTime,
+		)
+	}
+
+	if canceled {
+		return &PlaySubscriptionRenewalResult{
+			Canceled:   true,
+			ExpiryTime: maxExpiryTime,
+		}, nil
+	}
+
+	if active {
+		if _, err := model.GetOverlappingTransferBalance(clientSession.Ctx, playSubscriptionRenewal.PurchaseToken, maxExpiryTime); err != nil {
+			skus := playSkusFunc()
+			skuName := playSubscriptionRenewal.SubscriptionId
+			sku, ok := skus[skuName]
+			if !ok {
+				return nil, fmt.Errorf("Play sku not found: %s", skuName)
+			}
+
+			// The overlap check above is only a fast path: the inline webhook call
+			// and the scheduled renewal task can both pass it for the same token at
+			// once, and then both credit. So the credit happens in ONE tx that
+			// serializes on the purchase token (advisory xact lock, released at
+			// commit/rollback) and RE-CHECKS the overlap inside -- whichever of the
+			// two racers gets the lock second sees the balance the first one wrote
+			// and adds nothing.
+			renewed := false
+			var creditErr error
+			// ReadCommitted, NOT the default RepeatableRead: the gate is
+			// lock-then-recheck, and under RepeatableRead the second racer's
+			// snapshot is pinned by the lock statement itself, taken BEFORE it
+			// blocks -- after the winner commits, the loser re-checks against
+			// the pre-winner snapshot (sees no credit) and then aborts with a
+			// serialization failure (40001) on the rows the winner wrote.
+			// Per-statement snapshots make the post-lock re-check see the
+			// winner's commit, which is the entire point of the re-check.
+			server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+				renewed, creditErr = playCreditSubscriptionInTx(
+					tx,
+					clientSession,
+					playSubscriptionRenewal,
+					sub,
+					sku,
+					startTime,
+					maxExpiryTime,
+				)
+			}, server.TxReadCommitted)
+			if creditErr != nil {
+				return nil, creditErr
+			}
+
+			if renewed {
+				if sku.Supporter {
+					// the pro balance is committed -- refresh the entitlement so the
+					// upgrade is visible immediately rather than after ProCacheTtl
+					model.UpdateProNetwork(clientSession.Ctx, playSubscriptionRenewal.NetworkId)
+				}
+
+				return &PlaySubscriptionRenewalResult{
+					ExpiryTime: minExpiryTime,
+					Renewed:    true,
+				}, nil
+			}
+		}
+	}
+
+	// not active or
+	// a transfer balance was already for the current expiry time
+	// hence, the subscription has not been extended/renewed
+	return &PlaySubscriptionRenewalResult{
+		ExpiryTime: minExpiryTime,
+		Renewed:    false,
+	}, nil
+}
+
+// playCreditSubscriptionInTx is the Play credit gate: it serializes on the
+// purchase token (advisory xact lock, released at commit/rollback), re-checks
+// the overlap inside the tx and only then adds the renewal and the balance.
+// renewed is false when a credit for this expiry already landed (or the paid
+// window has ended). The tx must be ReadCommitted (see PlaySubscriptionRenewal).
+// Shared by PlaySubscriptionRenewal and the unlinked-purchase binding
+// (play_purchase_binding_controller.go), which credits inside its own tx.
+func playCreditSubscriptionInTx(
+	tx server.PgTx,
+	clientSession *session.ClientSession,
+	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
+	sub *PlaySubscription,
+	sku *Sku,
+	startTime time.Time,
+	maxExpiryTime time.Time,
+) (bool, error) {
+	if err := model.LockPlaySubscriptionPurchaseInTx(
+		tx,
+		clientSession.Ctx,
+		playSubscriptionRenewal.NetworkId,
+		playSubscriptionRenewal.PurchaseToken,
+	); err != nil {
+		return false, err
+	}
+	// A provider response can cross a terminal poll while waiting
+	// for this lock. Never let a stale ACTIVE response whose paid
+	// window has now ended recreate the entitlement the terminal
+	// owner just closed. A real renewal has a future max expiry and
+	// still proceeds.
+	if !server.NowUtc().Before(maxExpiryTime) {
+		return false, nil
+	}
+
+	if _, err := model.GetOverlappingTransferBalanceInTx(tx, clientSession.Ctx, playSubscriptionRenewal.PurchaseToken, maxExpiryTime); err == nil {
+		// a concurrent credit for this expiry already landed
+		return false, nil
+	}
+
+	if sku.Supporter {
+
+		endTime := maxExpiryTime.Add(SubscriptionGracePeriod)
+		netRevenue := model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd)
+
+		renewal := &model.SubscriptionRenewal{
+			NetworkId:          playSubscriptionRenewal.NetworkId,
+			StartTime:          startTime,
+			EndTime:            endTime,
+			NetRevenue:         netRevenue,
+			PurchaseToken:      playSubscriptionRenewal.PurchaseToken,
+			SubscriptionType:   model.SubscriptionTypeSupporter,
+			SubscriptionMarket: model.SubscriptionMarketGoogle,
+		}
+		if err := model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, renewal); err != nil {
+			return false, err
+		}
+		// the regional price tier and the welcome offer, from the
+		// store's region code and offer tag
+		playRecordOnboardingInTx(tx, clientSession, sub, renewal)
+
+		// a supporter subscription -> carries the Pro entitlement
+		transferBalance := &model.TransferBalance{
+			NetworkId:             playSubscriptionRenewal.NetworkId,
+			StartTime:             startTime,
+			EndTime:               endTime,
+			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			SubsidyNetRevenue:     netRevenue,
+			BalanceByteCount:      RefreshSupporterTransferBalance,
+			PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
+			Pro:                   true,
+		}
+		model.AddTransferBalanceInTx(
+			clientSession.Ctx,
+			tx,
+			transferBalance,
+		)
+
+	} else {
+		// a data pack, NOT a subscription -> data only, never Pro
+		transferBalance := &model.TransferBalance{
+			NetworkId:             playSubscriptionRenewal.NetworkId,
+			StartTime:             startTime,
+			EndTime:               maxExpiryTime.Add(SubscriptionGracePeriod),
+			StartBalanceByteCount: sku.BalanceByteCount(),
+			SubsidyNetRevenue:     model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd),
+			BalanceByteCount:      sku.BalanceByteCount(),
+			PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
+			Pro:                   false,
+		}
+		model.AddTransferBalanceInTx(
+			clientSession.Ctx,
+			tx,
+			transferBalance,
+		)
+	}
+
+	return true, nil
+}
+
+// endTerminalPlaySubscriptionRenewal applies the same terminal-state contract
+// as reconciliation, but inside the ordinary scheduled poll: EXPIRED,
+// PENDING_PURCHASE_CANCELED, expired CANCELED, and 410 end only the task's
+// network-and-token entitlement. An end failure is returned so the task is
+// retried instead of recording a successful terminal stop.
+func endTerminalPlaySubscriptionRenewal(
+	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
+	clientSession *session.ClientSession,
+	expiryTime time.Time,
+) (*PlaySubscriptionRenewalResult, error) {
+	ended, err := endPlaySubscriptionEntitlement(
+		clientSession.Ctx,
+		playSubscriptionRenewal.NetworkId,
+		playSubscriptionRenewal.PurchaseToken,
+		server.NowUtc(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("could not end terminal Play entitlement: %w", err)
+	}
+	return &PlaySubscriptionRenewalResult{
+		Canceled:         true,
+		EntitlementEnded: ended,
+		ExpiryTime:       expiryTime,
+		Terminal:         true,
+	}, nil
+}
+
+// Runs in the transaction that finishes the renewal task and schedules the
+// next poll there. The subscription-ended notice is added to the account
+// message outbox in the same transaction: a finish that rolls back leaves no
+// notice, a finish that reruns its callback (or a retried post) owes one
+// notice, and a crash after the commit no longer loses it. The delivery task
+// sends it after the commit.
+func PlaySubscriptionRenewalPost(
+	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
+	playSubscriptionRenewalResult *PlaySubscriptionRenewalResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	if playSubscriptionRenewalResult.Canceled {
+		if !playSubscriptionRenewalResult.Terminal &&
+			!playSubscriptionRenewalResult.ExpiryTime.IsZero() {
+			// Cancellation before the paid-through expiry preserves access and
+			// retains exactly one poll at that terminal boundary. If Post was
+			// delayed across the boundary, make that poll immediately due.
+			playSubscriptionRenewal.CheckTime = server.MaxTime(
+				playSubscriptionRenewalResult.ExpiryTime,
+				server.NowUtc(),
+			)
+			SchedulePlaySubscriptionRenewal(
+				clientSession,
+				tx,
+				playSubscriptionRenewal,
+			)
+		}
+		return nil
+	}
+
+	if playSubscriptionRenewalResult.Renewed {
+		// FIXME is the expiry time messed up sometimes?
+		playSubscriptionRenewal.CheckTime = server.MaxTime(
+			playSubscriptionRenewalResult.ExpiryTime,
+			server.NowUtc().Add(1*time.Hour),
+		)
+		SchedulePlaySubscriptionRenewal(
+			clientSession,
+			tx,
+			playSubscriptionRenewal,
+		)
+	} else if now := server.NowUtc(); playSubscriptionRenewalResult.ExpiryTime.Before(now) && now.Before(playSubscriptionRenewalResult.ExpiryTime.Add(SubscriptionGracePeriod)) {
+		// check again in an hour
+		playSubscriptionRenewal.CheckTime = now.Add(1 * time.Hour)
+		SchedulePlaySubscriptionRenewal(
+			clientSession,
+			tx,
+			playSubscriptionRenewal,
+		)
+	} else {
+		// else not renewed, stop trying
+		networkId := playSubscriptionRenewal.NetworkId
+		userAuth, err := model.GetUserAuthInTx(clientSession.Ctx, tx, networkId)
+		if err != nil {
+			if errors.Is(err, model.ErrMissingUserAuth) {
+				// The notice is optional; a wallet/guest account must not strand
+				// completed renewal post-processing for lack of a recipient.
+				return nil
+			}
+			return err
+		}
+		if userAuth == "" {
+			// the network or its admin is gone
+			return nil
+		}
+		// one notice per lapse of this purchase on this network
+		addAccountMessageInTx(clientSession.Ctx, tx, &accountMessage{
+			key: fmt.Sprintf(
+				"%s/%s/%d",
+				networkId,
+				playSubscriptionRenewal.PurchaseToken,
+				playSubscriptionRenewalResult.ExpiryTime.Unix(),
+			),
+			networkId: &networkId,
+			userAuth:  userAuth,
+			template:  &SubscriptionEndedTemplate{},
+		})
+	}
+
+	return nil
+}
+
+func VerifyCoinbaseBody(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// see https://docs.cloud.coinbase.com/commerce-onchain/docs/webhooks-security
+	err = coinbaseSignature(bodyBytes, req.Header.Get("X-CC-Webhook-Signature"), coinbaseWebhookSharedSecret())
+	if err != nil {
+		return nil, err
+	}
+
+	return bytes.NewReader(bodyBytes), nil
+}
+
+func coinbaseSignature(bodyBytes []byte, header string, secret string) error {
+	// see https://docs.cloud.coinbase.com/commerce-onchain/docs/webhooks-security
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(bodyBytes)
+	computedSignature := mac.Sum(nil)
+	headerSignature, err := hex.DecodeString(header)
+	if err != nil {
+		return err
+	}
+	if hmac.Equal(computedSignature, headerSignature) {
+		return nil
+	}
+
+	return errors.New("Invalid authentication.")
+}
+
+func VerifyPlayBody(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
+
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	authHeader := req.Header.Get("Authorization")
+
+	if authHeader == "" {
+		return nil, errors.New("missing authorization header")
+	}
+
+	// see https://cloud.google.com/pubsub/docs/authenticate-push-subscriptions?hl=en#protocol
+	err = verifyPlayAuth(req.Context(), authHeader)
+	if err != nil {
+		glog.Infof("verifyPlayAuth failed: %v", err)
+		return nil, err
+	}
+
+	return bytes.NewReader(bodyBytes), nil
+}
+
+func verifyPlayAuth(ctx context.Context, auth string) error {
+	bearerPrefix := "Bearer "
+
+	if strings.HasPrefix(auth, bearerPrefix) {
+		jwt := auth[len(bearerPrefix):len(auth)]
+		url := fmt.Sprintf("https://oauth2.googleapis.com/tokeninfo?id_token=%s", jwt)
+
+		claimBytes, err := server.HttpGetRawRequireStatusOk(ctx, url, server.NoCustomHeaders)
+		if err != nil {
+			return err
+		}
+
+		// parse the body as a claim map
+		var claims map[string]any
+		err = json.Unmarshal(claimBytes, &claims)
+		if err != nil {
+			return err
+		}
+
+		if claims["email"] == playPublisherEmail() {
+			return nil
+		}
+	}
+	return errors.New("Missing authorization.")
+}
+
+// The grant windows (model.FreeGrantWindow, model.ProGrantWindow,
+// model.ReferralGrantWindow) live in the model, next to the balance summary that
+// tells a grant in its grace from the next grant of its kind.
+
+// AddRefreshTransferBalance grants one network the data allowance for its CURRENT
+// tier and period: a Pro network gets the monthly Pro amount, everyone else gets the
+// daily free amount. Used when a network is created and when a subscription changes,
+// so the network does not have to wait for the next scheduled grant.
+func AddRefreshTransferBalance(ctx context.Context, networkId server.Id) (returnErr error) {
+	proGranted := false
+	server.Tx(ctx, func(tx server.PgTx) {
+		proGranted, returnErr = AddRefreshTransferBalanceInTx(tx, ctx, networkId)
+	})
+	if returnErr != nil {
+		return
+	}
+
+	if proGranted {
+		// the Pro grant is committed -- refresh the entitlement so the upgrade is
+		// visible immediately rather than after ProCacheTtl
+		model.UpdateProNetwork(ctx, networkId)
+	}
+	return
+}
+
+// Writes the refresh grant in the caller's tx and
+// returns true when it is the Pro grant. The caller must then refresh the Pro cache
+// (model.UpdateProNetwork) after the tx commits. A refresh inside the tx reads on its
+// own connection, so it would cache the entitlement from before the grant for up to
+// ProCacheTtl, and a tx that rolled back would still have written the cache.
+//
+// The tier comes from the renewals as the tx sees them, read on the tx's own
+// connection: a renewal the tx itself wrote counts, and the tx does not hold a second
+// pool connection while it holds this one.
+func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkId server.Id) (proGranted bool, returnErr error) {
+	pro, _ := model.HasSubscriptionRenewalInTx(tx, ctx, networkId, model.SubscriptionTypeSupporter)
+
+	// Nothing to grant -> grant nothing. With no pro.yml the amount is ZERO, and granting
+	// zero is not a no-op: it writes a real transfer_balance row with nothing in it.
+	// Keyed off the amount rather than a "was pro.yml loaded" flag, so a pro.yml that is
+	// present but says `data: 0` is handled the same way.
+	if model.Pro().DataAmount(pro) <= 0 {
+		glog.Errorf("[sub]no data amount configured for pro = %t; skipping the grant\n", pro)
+		return false, nil
+	}
+
+	if pro {
+		// the Pro grant carries pro = true, which is what confers the entitlement
+		startTime, endTime := model.ProGrantWindow(server.NowUtc())
+		err := model.AddGrantTransferBalanceInTx(
+			tx,
+			ctx,
+			networkId,
+			model.GrantKindPro,
+			model.Pro().DataAmount(true),
+			startTime,
+			endTime,
+		)
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	startTime, endTime := model.FreeGrantWindow(server.NowUtc())
+	return false, model.AddGrantTransferBalanceInTx(
+		tx,
+		ctx,
+		networkId,
+		model.GrantKindFree,
+		model.Pro().DataAmount(false),
+		startTime,
+		endTime,
+	)
+}
+
+// ----- Free grant: runs every day -----
+
+type RefreshFreeTransferBalancesArgs struct {
+}
+
+type RefreshFreeTransferBalancesResult struct {
+}
+
+func ScheduleRefreshFreeTransferBalances(clientSession *session.ClientSession, tx server.PgTx) {
+	// the start of the next day
+	year, month, day := server.NowUtc().Date()
+	runAt := time.Date(year, month, day+1, 0, 0, 0, 0, time.UTC)
+	task.ScheduleTaskInTx(
+		tx,
+		RefreshFreeTransferBalances,
+		&RefreshFreeTransferBalancesArgs{},
+		clientSession,
+		task.RunOnce("refresh_free_transfer_balances"),
+		task.RunAt(runAt),
+		task.MaxTime(1*time.Hour),
+	)
+}
+
+// RefreshFreeTransferBalances grants the daily free allowance (pro.yml free.data) to
+// every network without an active subscription.
+func RefreshFreeTransferBalances(
+	refreshFreeTransferBalances *RefreshFreeTransferBalancesArgs,
+	clientSession *session.ClientSession,
+) (*RefreshFreeTransferBalancesResult, error) {
+	// Nothing to grant -> grant nothing, rather than write zero-byte balance rows. With no
+	// pro.yml this amount is zero. The task stays SCHEDULED, so once pro.yml lands (and
+	// the process restarts) the grants resume on their normal cadence by themselves.
+	if model.Pro().DataAmount(false) <= 0 {
+		glog.Errorf("[sub]RefreshFreeTransferBalances: no amount configured (is pro.yml present?); skipping the grant\n")
+		return &RefreshFreeTransferBalancesResult{}, nil
+	}
+
+	startTime, endTime := model.FreeGrantWindow(server.NowUtc())
+	model.AddFreeTransferBalanceToAllNetworks(
+		clientSession.Ctx,
+		startTime,
+		endTime,
+		model.Pro().DataAmount(false),
+	)
+	return &RefreshFreeTransferBalancesResult{}, nil
+}
+
+func RefreshFreeTransferBalancesPost(
+	refreshFreeTransferBalances *RefreshFreeTransferBalancesArgs,
+	refreshFreeTransferBalancesResult *RefreshFreeTransferBalancesResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleRefreshFreeTransferBalances(clientSession, tx)
+	return nil
+}
+
+// ----- Pro grant: runs every month -----
+
+type RefreshProTransferBalancesArgs struct {
+}
+
+type RefreshProTransferBalancesResult struct {
+}
+
+func ScheduleRefreshProTransferBalances(clientSession *session.ClientSession, tx server.PgTx) {
+	// the start of the next month (time.Date normalizes month 13 to January)
+	year, month, _ := server.NowUtc().Date()
+	runAt := time.Date(year, month+1, 1, 0, 0, 0, 0, time.UTC)
+	task.ScheduleTaskInTx(
+		tx,
+		RefreshProTransferBalances,
+		&RefreshProTransferBalancesArgs{},
+		clientSession,
+		task.RunOnce("refresh_pro_transfer_balances"),
+		task.RunAt(runAt),
+		task.MaxTime(1*time.Hour),
+	)
+}
+
+// RefreshProTransferBalances grants the FULL monthly Pro allowance (pro.yml pro.data)
+// to every network with an active subscription, at the start of the month. The
+// balance is not rationed per-day: a Pro network gets the whole 10 TiB up front and
+// can spend it however it likes over the month.
+func RefreshProTransferBalances(
+	refreshProTransferBalances *RefreshProTransferBalancesArgs,
+	clientSession *session.ClientSession,
+) (*RefreshProTransferBalancesResult, error) {
+	// Nothing to grant -> grant nothing, rather than write zero-byte balance rows. With no
+	// pro.yml this amount is zero. The task stays SCHEDULED, so once pro.yml lands (and
+	// the process restarts) the grants resume on their normal cadence by themselves.
+	if model.Pro().DataAmount(true) <= 0 {
+		glog.Errorf("[sub]RefreshProTransferBalances: no amount configured (is pro.yml present?); skipping the grant\n")
+		return &RefreshProTransferBalancesResult{}, nil
+	}
+
+	startTime, endTime := model.ProGrantWindow(server.NowUtc())
+	model.AddProTransferBalanceToAllNetworks(
+		clientSession.Ctx,
+		startTime,
+		endTime,
+		model.Pro().DataAmount(true),
+	)
+	return &RefreshProTransferBalancesResult{}, nil
+}
+
+func RefreshProTransferBalancesPost(
+	refreshProTransferBalances *RefreshProTransferBalancesArgs,
+	refreshProTransferBalancesResult *RefreshProTransferBalancesResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleRefreshProTransferBalances(clientSession, tx)
+	return nil
+}
+
+// ----- Referral grant: runs every referral period -----
+
+type RefreshReferralTransferBalancesArgs struct {
+}
+
+type RefreshReferralTransferBalancesResult struct {
+}
+
+func ScheduleRefreshReferralTransferBalances(clientSession *session.ClientSession, tx server.PgTx) {
+	// ReferralGrantPeriod, never the raw ReferralPeriod: a zero period here schedules the
+	// task for NOW, and its Post hook reschedules it for now again -- a hot loop.
+	runAt := server.NowUtc().Add(model.Pro().ReferralGrantPeriod())
+	task.ScheduleTaskInTx(
+		tx,
+		RefreshReferralTransferBalances,
+		&RefreshReferralTransferBalancesArgs{},
+		clientSession,
+		task.RunOnce("refresh_referral_transfer_balances"),
+		task.RunAt(runAt),
+		task.MaxTime(1*time.Hour),
+	)
+}
+
+// RefreshReferralTransferBalances grants the referral bonus to both sides for one
+// period, all from pro.yml: the referrer earns bonus_per_referral x min(referrals,
+// max_referrals), and each referred network earns referred_bonus. Referrals pay out
+// every period for life. The balances are unpaid and pro = false, so referral data
+// never confers Pro.
+func RefreshReferralTransferBalances(
+	refreshReferralTransferBalances *RefreshReferralTransferBalancesArgs,
+	clientSession *session.ClientSession,
+) (*RefreshReferralTransferBalancesResult, error) {
+	// Nothing to grant -> grant nothing, rather than write zero-byte balance rows. With no
+	// pro.yml this amount is zero. The task stays SCHEDULED, so once pro.yml lands (and
+	// the process restarts) the grants resume on their normal cadence by themselves.
+	if model.Pro().ReferralBonus <= 0 && model.Pro().ReferredBonus <= 0 {
+		glog.Errorf("[sub]RefreshReferralTransferBalances: no amount configured (is pro.yml present?); skipping the grant\n")
+		return &RefreshReferralTransferBalancesResult{}, nil
+	}
+
+	startTime, endTime := model.ReferralGrantWindow(server.NowUtc())
+	model.AddReferralBonusesToAllNetworks(
+		clientSession.Ctx,
+		startTime,
+		endTime,
+		model.Pro().ReferralBonus,
+		model.Pro().ReferredBonus,
+	)
+	return &RefreshReferralTransferBalancesResult{}, nil
+}
+
+func RefreshReferralTransferBalancesPost(
+	refreshReferralTransferBalances *RefreshReferralTransferBalancesArgs,
+	refreshReferralTransferBalancesResult *RefreshReferralTransferBalancesResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleRefreshReferralTransferBalances(clientSession, tx)
+	return nil
+}
+
+/**
+ * Apple App Store Webhooks
+ */
+
+type AppleNotificationPayload struct {
+	SignedPayload string `json:"signedPayload"`
+}
+
+type AppleNotificationDecodedPayload struct {
+	NotificationType      string                 `json:"notificationType"`
+	Subtype               string                 `json:"subtype"`
+	NotificationUUID      string                 `json:"notificationUUID"`
+	NotificationVersion   string                 `json:"version"`
+	SignedDate            int64                  `json:"signedDate"`
+	Data                  map[string]interface{} `json:"data"` // need to parse this depending on the notification type
+	AppAppleId            int64                  `json:"appAppleId"`
+	BundleId              string                 `json:"bundleId"`
+	BundleVersion         string                 `json:"bundleVersion"`
+	Environment           string                 `json:"environment"`
+	Status                int                    `json:"status"`
+	SignedRenewalInfo     string                 `json:"signedRenewalInfo"`
+	SignedTransactionInfo string                 `json:"signedTransactionInfo"`
+	// Populated only by the App Store JWS verifier. Controller code must never
+	// decode SignedRenewalInfo or SignedTransactionInfo itself.
+	RenewalInfo     map[string]any `json:"-"`
+	TransactionInfo map[string]any `json:"-"`
+}
+
+/**
+ * Helius Webhooks for Solana payments
+ */
+
+var heliusAuthSecret = sync.OnceValue(func() string {
+	c := server.Vault.RequireSimpleResource("helius.yml").Parse()
+	return c["helius"].(map[string]any)["webhook_auth_header"].(string)
+})
+
+func VerifyHeliusBody(_ *session.ClientSession, req *http.Request) (io.Reader, error) {
+	bodyBytes, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	secret := req.Header.Get("Authorization")
+
+	if secret != heliusAuthSecret() {
+		glog.Infof("[helius] Invalid authentication; dumping all headers")
+		return nil, errors.New("Invalid authentication.")
+	}
+
+	return bytes.NewReader(bodyBytes), nil
+}
+
+type SolanaTransaction struct {
+	AccountData      []AccountData          `json:"accountData"`
+	Description      string                 `json:"description"`
+	Events           map[string]interface{} `json:"events"`
+	Fee              int64                  `json:"fee"`
+	FeePayer         string                 `json:"feePayer"`
+	Instructions     []Instruction          `json:"instructions"`
+	NativeTransfers  []NativeTransfer       `json:"nativeTransfers"`
+	Signature        string                 `json:"signature"`
+	Slot             int64                  `json:"slot"`
+	Source           string                 `json:"source"`
+	Timestamp        int64                  `json:"timestamp"`
+	TokenTransfers   []TokenTransfer        `json:"tokenTransfers"`
+	TransactionError interface{}            `json:"transactionError"`
+	Type             string                 `json:"type"`
+}
+
+type AccountData struct {
+	Account             string               `json:"account"`
+	NativeBalanceChange int64                `json:"nativeBalanceChange"`
+	TokenBalanceChanges []TokenBalanceChange `json:"tokenBalanceChanges"`
+}
+
+type TokenBalanceChange struct {
+	Mint           string         `json:"mint"`
+	RawTokenAmount RawTokenAmount `json:"rawTokenAmount"`
+	TokenAccount   string         `json:"tokenAccount"`
+	UserAccount    string         `json:"userAccount"`
+}
+
+type RawTokenAmount struct {
+	Decimals    int    `json:"decimals"`
+	TokenAmount string `json:"tokenAmount"`
+}
+
+type Instruction struct {
+	Accounts          []string           `json:"accounts"`
+	Data              string             `json:"data"`
+	InnerInstructions []InnerInstruction `json:"innerInstructions"`
+	ProgramId         string             `json:"programId"`
+}
+
+type InnerInstruction struct {
+	Accounts  []string `json:"accounts"`
+	Data      string   `json:"data"`
+	ProgramId string   `json:"programId"`
+}
+
+type NativeTransfer struct {
+	Amount          int64  `json:"amount"`
+	FromUserAccount string `json:"fromUserAccount"`
+	ToUserAccount   string `json:"toUserAccount"`
+}
+
+type TokenTransfer struct {
+	FromTokenAccount string  `json:"fromTokenAccount"`
+	FromUserAccount  string  `json:"fromUserAccount"`
+	Mint             string  `json:"mint"`
+	ToTokenAccount   string  `json:"toTokenAccount"`
+	ToUserAccount    string  `json:"toUserAccount"`
+	TokenAmount      float64 `json:"tokenAmount"`
+	TokenStandard    string  `json:"tokenStandard"`
+}
+
+type HeliusWebhookArgs struct{}
+
+type HeliusWebhookResult struct {
+	Message string `json:"message,omitempty"`
+}
+
+const solanaUsdcMint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+// The one source of where a Solana Pay payment goes. The webhook credits a
+// USDC transfer to any of these; the first is the one every intent path
+// quotes (solanaPaymentRecipient). Clients pay the address the quote names
+// and keep none of their own, so rotating the receiver is an edit here: the
+// new address first, and the old one listed after it while payments quoted
+// to it can still arrive.
+var solanaReceiverAddresses = []string{
+	"4Fj9RCwJqHLdLNK28DwWHunHqWapxKbbzeYZLmreSYCM", // coinbase account address
+	"74UNdYRpvakSABaYHSZMQNaXBVtA6eY9Nt8chcqocKe7", // deprecating this
+}
+
+// The receiver a client is told to pay: the one every intent result names
+// (SolanaPaymentIntentResult.Recipient, PayDataSolanaIntentResult.Recipient)
+// and the one the browser-wallet transfer pays (CreateSolanaPaymentTransaction).
+func solanaPaymentRecipient() string {
+	return solanaReceiverAddresses[0]
+}
+
+// db lookups and writes HeliusWebhook makes, as seams so a test can drive a batch
+// (including a failed write) without Postgres
+var (
+	heliusSearchPaymentIntents           = model.SearchPaymentIntents
+	heliusIsSolanaPaymentCompleted       = model.IsSolanaPaymentCompleted
+	heliusRecordUnfulfilledSolanaPayment = model.RecordUnfulfilledSolanaPayment
+	heliusListIntentsByAmountMicro       = model.ListSolanaPaymentIntentsByAmountMicro
+)
+
+func HeliusWebhook(
+	transactions []*SolanaTransaction,
+	clientSession *session.ClientSession,
+) (*HeliusWebhookResult, error) {
+
+	if len(transactions) == 0 {
+		return &HeliusWebhookResult{Message: "No transactions"}, nil
+	}
+
+	// One Helius delivery carries a BATCH of transactions, and a customer's payment can
+	// arrive behind any number of unrelated transfers in the same batch. So a
+	// transaction that does not match is SKIPPED (continue), never returned on: the
+	// early returns this loop used to take meant a valid payment behind any unrelated
+	// transfer was never examined at all -- Helius got its 200 and never retried, and
+	// the money bought nothing.
+	//
+	// A per-transaction DB failure is remembered and returned AFTER the whole batch is
+	// examined: the non-2xx makes Helius redeliver everything, and the consumed intents
+	// (tx_signature set) make the already-credited ones no-ops on the retry.
+	var matched int
+	var firstErr error
+	// the reason the transaction was skipped -- reported as the result message for a
+	// single-transaction delivery, so a caller (and the existing tests) can see WHY
+	skipMessage := ""
+	lookups := &solanaDbPaymentLookups{clientSession: clientSession}
+	for _, transaction := range transactions {
+		decision := solanaDecidePayment(transaction, lookups)
+
+		switch decision.action {
+		case solanaPaymentActionError:
+			if firstErr == nil {
+				firstErr = decision.err
+			}
+			continue
+		case solanaPaymentActionSkip:
+			skipMessage = decision.skipMessage
+			continue
+		case solanaPaymentActionRecord:
+			// Money arrived at our address and bought nothing. Helius is still acked
+			// 200 (it never re-examines a delivered tx) once it is recorded where an
+			// operator can see and repair it.
+			if err := heliusRecordUnfulfilledSolanaPayment(clientSession.Ctx, decision.unfulfilled); err != nil {
+				// the row is the only trace of this payment, so a failed write fails
+				// the batch and Helius redelivers (the insert is ON CONFLICT DO NOTHING)
+				glog.Errorf("HeliusWebhook: could not record unfulfilled payment %s: %v\n", transaction.Signature, err)
+				if firstErr == nil {
+					firstErr = err
+				}
+			}
+			skipMessage = decision.skipMessage
+			continue
+		}
+
+		credited, insertErr := solanaCreditPaymentIntent(
+			clientSession,
+			decision.intent,
+			transaction.Signature,
+			decision.tokenAmountUsd,
+		)
+
+		if insertErr != nil {
+			glog.Infof("HeliusWebhook: error inserting payment data: %v", insertErr)
+			if firstErr == nil {
+				firstErr = insertErr
+			}
+			continue
+		}
+
+		if !credited {
+			// lost the race to a concurrent delivery of the same transaction, which
+			// already consumed the intent and credited
+			skipMessage = "No payment intent found for this network ID"
+			continue
+		}
+
+		// the regional price tier and the welcome offer on the credited row
+		solanaRecordOnboarding(clientSession, decision.intent)
+
+		matched++
+	}
+
+	// a per-transaction DB failure surfaces as a non-2xx AFTER the whole batch was
+	// examined, so Helius redelivers everything; the consumed intents make the
+	// already-credited transactions no-ops on the retry
+	if firstErr != nil {
+		return nil, firstErr
+	}
+
+	if matched == 0 {
+		glog.Infof("HeliusWebhook: no matching payments found for %v", transactions)
+		// a single-transaction delivery keeps its specific reason; a batch with
+		// nothing matched can only be summarized
+		if len(transactions) == 1 && skipMessage != "" {
+			return &HeliusWebhookResult{Message: skipMessage}, nil
+		}
+		return &HeliusWebhookResult{Message: "No matching payments"}, nil
+	}
+	return &HeliusWebhookResult{Message: fmt.Sprintf("Processed %d matching payments", matched)}, nil
+}
+
+// What the webhook does with one transaction (solanaDecidePayment).
+type solanaPaymentAction int
+
+const (
+	// nothing to credit or record; skipMessage says why
+	solanaPaymentActionSkip solanaPaymentAction = iota
+	// credit intent with tokenAmountUsd (the intent one-shot still guards it)
+	solanaPaymentActionCredit
+	// record unfulfilled for an operator; skipMessage says why
+	solanaPaymentActionRecord
+	// a lookup failed; err is returned after the batch so Helius redelivers
+	solanaPaymentActionError
+)
+
+type solanaPaymentDecision struct {
+	action         solanaPaymentAction
+	skipMessage    string
+	intent         *model.PaymentIntentSearchResult
+	tokenAmountUsd float64
+	unfulfilled    *model.UnfulfilledSolanaPayment
+	err            error
+}
+
+// The reads solanaDecidePayment makes. The webhook uses the db
+// (solanaDbPaymentLookups); tests use an in-memory fake, so the matching rules
+// are exercised without Postgres.
+type solanaPaymentLookups interface {
+	// the open intent whose reference is one of references, or nil
+	searchIntentsByReference(references []string) (*model.PaymentIntentSearchResult, error)
+	// whether this transaction signature already consumed an intent
+	isPaymentCompleted(signature string) bool
+	// every intent, open or consumed, quoted exactly amountMicro that expires
+	// after minExpiresAt (model.ListSolanaPaymentIntentsByAmountMicro)
+	intentsByAmountMicro(amountMicro int64, minExpiresAt time.Time) ([]*model.SolanaPaymentIntent, error)
+}
+
+type solanaDbPaymentLookups struct {
+	clientSession *session.ClientSession
+}
+
+func (self *solanaDbPaymentLookups) searchIntentsByReference(references []string) (*model.PaymentIntentSearchResult, error) {
+	return heliusSearchPaymentIntents(references, self.clientSession)
+}
+
+func (self *solanaDbPaymentLookups) isPaymentCompleted(signature string) bool {
+	return heliusIsSolanaPaymentCompleted(self.clientSession.Ctx, signature)
+}
+
+func (self *solanaDbPaymentLookups) intentsByAmountMicro(amountMicro int64, minExpiresAt time.Time) ([]*model.SolanaPaymentIntent, error) {
+	return heliusListIntentsByAmountMicro(self.clientSession.Ctx, amountMicro, minExpiresAt)
+}
+
+// solanaDecidePayment decides what one Helius transaction buys, with no writes:
+// the webhook carries out the decision (credit through the intent one-shot, or
+// record for an operator). The rules, in order:
+//
+//   - only a TRANSFER with a USDC transfer to one of our receiving addresses is
+//     a payment; anything else is skipped
+//   - the reference is searched among the account keys and memo texts
+//     (solanaReferenceCandidates); an open intent found there is credited when
+//     the amount is not under its quote (underpaid is recorded)
+//   - no open intent: a redelivery of an already credited signature is
+//     skipped; otherwise the payment is matched by its exact unique amount
+//     (solanaDecideMemolessPayment) and credited only when unambiguous, else
+//     recorded as no_intent
+func solanaDecidePayment(
+	transaction *SolanaTransaction,
+	lookups solanaPaymentLookups,
+) *solanaPaymentDecision {
+	if transaction.Type != "TRANSFER" {
+		glog.Infof("HeliusWebhook: ignoring non-transfer transaction: %s of type %s", transaction.Signature, transaction.Type)
+		return &solanaPaymentDecision{
+			action:      solanaPaymentActionSkip,
+			skipMessage: fmt.Sprintf("Ignoring non-transfer transaction of type %s", transaction.Type),
+		}
+	}
+
+	if len(transaction.TokenTransfers) == 0 {
+		glog.Infof("HeliusWebhook: no token transfers found for transaction: %s", transaction.Signature)
+		return &solanaPaymentDecision{
+			action:      solanaPaymentActionSkip,
+			skipMessage: "Ignoring transaction with no token transfers",
+		}
+	}
+
+	// Take the largest USDC transfer to one of our receiving addresses, WHATEVER its
+	// size. It used to require `>= 40` here -- a hardcoded stand-in for the yearly
+	// price -- which meant a customer who chose the $5 monthly plan on the site had
+	// their payment ignored entirely as "no matching USDC payment". They paid and got
+	// nothing.
+	//
+	// The amount is checked below, against what they were actually QUOTED.
+	paymentReceived := false
+	var tokenAmountReceived float64
+
+	for _, tokenTransfer := range transaction.TokenTransfers {
+
+		if tokenTransfer.Mint == solanaUsdcMint &&
+			slices.Contains(solanaReceiverAddresses, tokenTransfer.ToUserAccount) &&
+			0 < tokenTransfer.TokenAmount {
+			paymentReceived = true
+			if tokenAmountReceived < tokenTransfer.TokenAmount {
+				tokenAmountReceived = tokenTransfer.TokenAmount
+			}
+		}
+
+	}
+
+	if !paymentReceived {
+		glog.Infof("HeliusWebhook: no USDC payment found for transaction: %s", transaction.Signature)
+		return &solanaPaymentDecision{
+			action:      solanaPaymentActionSkip,
+			skipMessage: "Ignoring transaction with no matching USDC payment",
+		}
+	}
+
+	// every string the reference could be found under: the account keys (a
+	// Solana Pay wallet attaches the reference as an account) and the memo
+	// texts (a payment sent by hand carries it as the transfer memo)
+	accounts := solanaReferenceCandidates(transaction)
+
+	paymentSearchResult, err := lookups.searchIntentsByReference(accounts)
+
+	if err != nil {
+		glog.Infof("HeliusWebhook: error searching payment intents: %v", err)
+		return &solanaPaymentDecision{
+			action: solanaPaymentActionError,
+			err:    err,
+		}
+	}
+
+	// on-chain time, when the webhook carried one, for the unfulfilled record
+	var transactionTime *time.Time
+	if transaction.Timestamp != 0 {
+		t := time.Unix(transaction.Timestamp, 0).UTC()
+		transactionTime = &t
+	}
+
+	if paymentSearchResult == nil {
+		// a REDELIVERY of a payment that already consumed its intent finds no
+		// open intent either -- that one is credited and done, not unfulfilled
+		if lookups.isPaymentCompleted(transaction.Signature) {
+			glog.Infof("HeliusWebhook: transaction %s already credited; ignoring redelivery", transaction.Signature)
+			return &solanaPaymentDecision{
+				action:      solanaPaymentActionSkip,
+				skipMessage: "No payment intent found for this network ID",
+			}
+		}
+
+		// No open intent matched the reference -- a payment sent without it (a
+		// wallet that cannot add a memo), after the intent was swept, or with an
+		// unknown reference. A late payment whose intent has merely EXPIRED but
+		// not yet been swept never lands here: the search ignores expires_at on
+		// purpose, so it still resolves and is credited -- late is not
+		// fraudulent.
+		//
+		// Try the exact unique amount; what does not match unambiguously is
+		// recorded with the account keys and memos the reference was searched
+		// among, the sender, and why the amount did not match.
+		decision := solanaDecideMemolessPayment(transaction, lookups, &model.UnfulfilledSolanaPayment{
+			TxSignature:         transaction.Signature,
+			Reason:              model.SolanaUnfulfilledReasonNoIntent,
+			TokenAmountUsd:      tokenAmountReceived,
+			ReferenceCandidates: accounts,
+			TransactionTime:     transactionTime,
+		})
+		switch decision.action {
+		case solanaPaymentActionCredit:
+			glog.Infof(
+				"HeliusWebhook: transaction %s has no reference; matched intent %s (network %s) by its unique amount %.6f USDC\n",
+				transaction.Signature,
+				decision.intent.PaymentReference,
+				*decision.intent.NetworkId,
+				decision.tokenAmountUsd,
+			)
+		case solanaPaymentActionRecord:
+			glog.Errorf(
+				"HeliusWebhook: no payment intent found for transaction: %s; recording as unfulfilled (%s)\n",
+				transaction.Signature,
+				*decision.unfulfilled.MatchNote,
+			)
+		}
+		return decision
+	}
+
+	// Verify the payment against what the customer was QUOTED. Underpaying must not
+	// buy a plan; overpaying is their choice and is honored.
+	//
+	// The tolerance absorbs float dust in the token amount (it arrives as a float64
+	// from the chain), not a real discount.
+	if solanaAmountTolerance < paymentSearchResult.ExpectedAmountUsd-tokenAmountReceived {
+		glog.Errorf(
+			"HeliusWebhook: underpaid %s: received %.2f USDC, quoted %.2f (reference %s)\n",
+			transaction.Signature,
+			tokenAmountReceived,
+			paymentSearchResult.ExpectedAmountUsd,
+			paymentSearchResult.PaymentReference,
+		)
+		// funds were kept and the intent stays open -- record the shortfall where
+		// an operator can see it, with the quote it was checked against
+		return &solanaPaymentDecision{
+			action:      solanaPaymentActionRecord,
+			skipMessage: "Payment is less than the quoted price",
+			unfulfilled: &model.UnfulfilledSolanaPayment{
+				TxSignature:       transaction.Signature,
+				Reason:            model.SolanaUnfulfilledReasonUnderpaid,
+				TokenAmountUsd:    tokenAmountReceived,
+				ExpectedAmountUsd: &paymentSearchResult.ExpectedAmountUsd,
+				PaymentReference:  &paymentSearchResult.PaymentReference,
+				NetworkId:         paymentSearchResult.NetworkId,
+				TransactionTime:   transactionTime,
+			},
+		}
+	}
+
+	return &solanaPaymentDecision{
+		action:         solanaPaymentActionCredit,
+		intent:         paymentSearchResult,
+		tokenAmountUsd: tokenAmountReceived,
+	}
+}
+
+// solanaCreditPaymentIntent consumes an open intent and grants the plan the
+// customer was quoted, in ONE tx. Shared by the Helius webhook and the payment
+// reconciler (which sweeps recorded unfulfilled payments whose reference now
+// resolves), so a reconcile credit racing a webhook redelivery of the same
+// transaction produces exactly one credit.
+//
+// The intent is consumed FIRST, in the same tx as the credit. The guarded
+// UPDATE (tx_signature IS NULL, rows-affected checked) is the concurrency
+// gate: two callers with the same transaction set the same signature, so only
+// rows-affected can tell them apart -- exactly one proceeds to credit, the
+// other sees a consumed intent and adds nothing (credited = false, no error).
+func solanaCreditPaymentIntent(
+	clientSession *session.ClientSession,
+	paymentSearchResult *model.PaymentIntentSearchResult,
+	signature string,
+	tokenAmountReceivedUsd float64,
+) (credited bool, returnErr error) {
+	// a data pack bought for a named network from the buy-data page: data only,
+	// no subscription (pay_data_solana_controller.go)
+	if solanaIsDataPackPlan(paymentSearchResult.SubscriptionPlan) {
+		return solanaCreditDataPack(clientSession, paymentSearchResult, signature, tokenAmountReceivedUsd)
+	}
+
+	// Grant the plan they actually bought. This used to be a YEAR every time,
+	// whatever they had chosen and whatever they had paid.
+	startTime := server.NowUtc()
+	endTime := startTime.Add(solanaPlanDuration(paymentSearchResult.SubscriptionPlan) + manualPaymentGracePeriod)
+
+	netRevenue := model.UsdToNanoCents(tokenAmountReceivedUsd)
+
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		credited = false
+		returnErr = nil
+		if err := model.LockPaymentNetworkInTx(
+			tx,
+			clientSession.Ctx,
+			*paymentSearchResult.NetworkId,
+		); err != nil {
+			returnErr = err
+			return
+		}
+
+		completed, err := model.MarkPaymentIntentCompletedInTx(
+			tx,
+			paymentSearchResult.PaymentReference,
+			signature,
+			clientSession,
+		)
+		if err != nil {
+			glog.Infof("[sub]solana credit: error marking payment intent completed: %v", err)
+			returnErr = err
+			return
+		}
+		if !completed {
+			glog.Infof("[sub]solana credit: payment intent %s already completed; not crediting again", paymentSearchResult.PaymentReference)
+			return
+		}
+
+		subscriptionRenewal := model.SubscriptionRenewal{
+			NetworkId:          *paymentSearchResult.NetworkId,
+			SubscriptionType:   model.SubscriptionTypeSupporter,
+			StartTime:          startTime,
+			EndTime:            endTime,
+			NetRevenue:         netRevenue,
+			SubscriptionMarket: model.SubscriptionMarketSolana,
+			TransactionId:      paymentSearchResult.PaymentReference,
+		}
+
+		err = model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, &subscriptionRenewal)
+
+		if err != nil {
+			glog.Infof("[sub]solana credit: error adding subscription renewal: %v", err)
+			returnErr = err
+			return
+		}
+
+		// a supporter subscription -> carries the Pro entitlement
+		transferBalance := &model.TransferBalance{
+			NetworkId:             *paymentSearchResult.NetworkId,
+			StartTime:             startTime,
+			EndTime:               endTime,
+			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			SubsidyNetRevenue:     netRevenue,
+			BalanceByteCount:      RefreshSupporterTransferBalance,
+			Pro:                   true,
+		}
+		model.AddTransferBalanceInTx(
+			clientSession.Ctx,
+			tx,
+			transferBalance,
+		)
+
+		credited = true
+	}, server.TxReadCommitted)
+
+	if returnErr != nil {
+		return false, returnErr
+	}
+
+	if credited {
+		// the pro balance is committed -- refresh the entitlement so the upgrade
+		// is visible immediately rather than after ProCacheTtl
+		model.UpdateProNetwork(clientSession.Ctx, *paymentSearchResult.NetworkId)
+	}
+
+	return credited, nil
+}
+
+/**
+ * Solana Payment intents
+ * We create a reference for each payment intent and map it to the network ID
+ */
+
+// a plan intent is paid from a wallet the buyer is already in; the data pack
+// intents of the buy-data page last longer (payDataSolanaIntentDuration)
+const solanaPlanIntentDuration = 1 * time.Hour
+
+// solanaPickAmountSuffixMicro proposes a quote suffix in [1,
+// model.SolanaUniqueAmountMaxSuffixMicro]; the reservation decides whether it
+// is free.
+var solanaPickAmountSuffixMicro = func() int64 {
+	return 1 + mathrand.Int64N(model.SolanaUniqueAmountMaxSuffixMicro)
+}
+
+// solanaAmountTolerance absorbs float dust in the chain-reported token amount. It is not
+// a discount: anything more than a cent short of the quoted price is an underpayment.
+const solanaAmountTolerance = 0.01
+
+// solanaPlanDuration is how long the plan the customer bought lasts. An empty plan means
+// an intent created before the plan was recorded, which was always treated as yearly --
+// so that is what those legacy intents still get.
+func solanaPlanDuration(subscriptionPlan string) time.Duration {
+	switch subscriptionPlan {
+	case model.SolanaPlanMonthly:
+		return 30 * 24 * time.Hour
+	case model.SolanaPlanYearlyOnboarding:
+		// the welcome offer stacks on the 14-day trial: a year plus the trial
+		return SubscriptionYearDuration + StripeSubscriptionTrialDays*24*time.Hour
+	default:
+		return SubscriptionYearDuration
+	}
+}
+
+type SolanaPaymentIntentArgs struct {
+	Reference string `json:"reference"`
+	// The plan the customer picked: yearly | monthly | yearly_onboarding (the
+	// welcome offer, only while the caller's offer is redeemable). The PRICE is
+	// never taken from the client -- the server derives it from pro.yml. A
+	// client-supplied amount would let anyone quote themselves a year for a cent.
+	Plan string `json:"plan"`
+	// the store's storefront country, when the app knows it; else the tier is
+	// resolved from the Stripe billing country or the client ip (Solana keeps the
+	// estimate: accepted risk on a one-time crypto payment)
+	StorefrontCountry string `json:"storefront_country,omitempty"`
+}
+
+type SolanaPaymentIntentResult struct {
+	// the amount the SERVER quoted -- the client must pay exactly this. It is the
+	// price plus a unique sub-cent suffix (up to 6 decimals), which identifies a
+	// payment sent without the reference; show and pay all its decimals
+	AmountUsd float64                   `json:"amount_usd,omitempty"`
+	Error     *SolanaPaymentIntentError `json:"error,omitempty"`
+	// the tier the quote came from and the plan's regular price (the offer's
+	// full-year price for yearly_onboarding)
+	Tier             string  `json:"tier,omitempty"`
+	Plan             string  `json:"plan,omitempty"`
+	RegularAmountUsd float64 `json:"regular_amount_usd,omitempty"`
+	OfferApplied     bool    `json:"offer_applied,omitempty"`
+	Currency         string  `json:"currency,omitempty"`
+	// where to pay: the merchant address (base58) and the SPL token mint (USDC).
+	// Clients build the payment url from these instead of hardcoding them, so a
+	// rotated receiving address reaches every client with the quote.
+	Recipient    string `json:"recipient,omitempty"`
+	SplTokenMint string `json:"spl_token_mint,omitempty"`
+}
+
+type SolanaPaymentIntentError struct {
+	// one of the `PurchaseErrorCode*` values, when the refusal has one. Added
+	// after `Message`; older clients ignore it.
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message"`
+}
+
+// solanaPlanPriceUsd is the quoted price for a plan, from pro.yml. Server-side, always.
+// solanaPlanPriceUsd is the price we QUOTE for a plan, and the price the webhook then
+// checks the payment against. ok = false means we will not sell the plan at all.
+//
+// A price of zero is never sellable. With no pro.yml (or a mis-specified price: 0) this
+// would otherwise quote UR Pro at $0.00 -- and the webhook's check is
+// `amount >= price - tolerance`, which at price 0 is `amount >= -0.01`: satisfied by
+// ANY payment, including none. We would hand out a year of Pro for nothing. Refuse.
+func solanaPlanPriceUsd(subscriptionPlan string) (float64, bool) {
+	return solanaPlanPriceUsdForTier(subscriptionPlan, model.Pro().DefaultPriceTier())
+}
+
+// solanaPlanPriceUsdForTier is solanaPlanPriceUsd at a regional price tier. The
+// welcome-offer plan (yearly_onboarding) is the tier's yearly price less the
+// configured discount; the caller must have checked the offer is redeemable.
+func solanaPlanPriceUsdForTier(subscriptionPlan string, tier *model.ProPriceTier) (float64, bool) {
+	var priceUsd float64
+	switch subscriptionPlan {
+	case model.SolanaPlanMonthly:
+		priceUsd = tier.MonthlyUsd
+	case model.SolanaPlanYearly:
+		priceUsd = tier.YearlyUsd
+	case model.SolanaPlanYearlyOnboarding:
+		cfg := model.Onboarding()
+		if !cfg.OfferEnabled() {
+			return 0, false
+		}
+		priceUsd = cfg.OfferPriceUsd(tier.YearlyUsd)
+	default:
+		return 0, false
+	}
+	if priceUsd <= 0 {
+		glog.Errorf(
+			"[sub]refusing to quote %s: no price is configured (is pro.yml present?)\n",
+			subscriptionPlan,
+		)
+		return 0, false
+	}
+	return priceUsd, true
+}
+
+func CreateSolanaPaymentIntent(
+	intent *SolanaPaymentIntentArgs,
+	clientSession *session.ClientSession,
+) (*SolanaPaymentIntentResult, error) {
+	if refuseGuestPurchase(clientSession) {
+		return &SolanaPaymentIntentResult{
+			Error: &SolanaPaymentIntentError{
+				Code:    PurchaseErrorCodeGuestSignInRequired,
+				Message: purchaseGuestSignInRequiredMessage,
+			},
+		}, nil
+	}
+
+	// The price comes from pro.yml, keyed by the plan and the caller's regional
+	// price tier. It is NEVER taken from the client.
+	tier := ResolvePriceTier(clientSession, intent.StorefrontCountry)
+	offerApplied := false
+	if intent.Plan == model.SolanaPlanYearlyOnboarding {
+		if EligibleOnboardingOffer(clientSession, clientSession.ByJwt.NetworkId) == nil {
+			return &SolanaPaymentIntentResult{
+				Error: &SolanaPaymentIntentError{
+					Code:    PurchaseErrorCodeOfferUnavailable,
+					Message: "The welcome offer is not available.",
+				},
+			}, nil
+		}
+		offerApplied = true
+	}
+	priceUsd, ok := solanaPlanPriceUsdForTier(intent.Plan, tier.Tier)
+	if !ok || priceUsd <= 0 {
+		// an unknown plan or one with no configured price: not for sale now
+		return &SolanaPaymentIntentResult{
+			Error: &SolanaPaymentIntentError{
+				Code:    PurchaseErrorCodePlanUnavailable,
+				Message: "Unknown plan.",
+			},
+		}, nil
+	}
+	regularUsd := priceUsd
+	if offerApplied {
+		regularUsd = tier.Tier.YearlyUsd
+	}
+
+	// The error used to be discarded here, so a duplicate or failed intent looked exactly
+	// like a successful one -- and the customer was sent off to pay against an intent
+	// that did not exist.
+	//
+	// The quote is the price plus a reserved sub-cent suffix, so a payment sent
+	// without the reference is still identified by its exact amount.
+	amountUsd, err := model.CreateSolanaPaymentIntentWithUniqueAmount(
+		clientSession.Ctx,
+		intent.Reference,
+		clientSession.ByJwt.NetworkId,
+		priceUsd,
+		intent.Plan,
+		server.NowUtc().Add(solanaPlanIntentDuration),
+		solanaPickAmountSuffixMicro,
+	)
+	if err != nil {
+		glog.Errorf("[sub]could not create solana payment intent: %s\n", err)
+		return &SolanaPaymentIntentResult{
+			Error: &SolanaPaymentIntentError{
+				Code:    PurchaseErrorCodeStartFailed,
+				Message: purchaseStartFailedMessage,
+			},
+		}, nil
+	}
+
+	// Hand the quoted amount back so the payment url the client builds and the intent the
+	// webhook checks against cannot disagree.
+	return solanaPaymentIntentQuote(amountUsd, regularUsd, tier.Tier.Name, intent.Plan, offerApplied), nil
+}
+
+// solanaPaymentIntentQuote is the successful intent result: the quoted amount
+// (the price plus its unique suffix) and where to pay it, the same receiver and
+// mint the webhook credits.
+func solanaPaymentIntentQuote(
+	amountUsd float64,
+	regularUsd float64,
+	tierName string,
+	plan string,
+	offerApplied bool,
+) *SolanaPaymentIntentResult {
+	return &SolanaPaymentIntentResult{
+		AmountUsd:        amountUsd,
+		Tier:             tierName,
+		Plan:             plan,
+		RegularAmountUsd: regularUsd,
+		OfferApplied:     offerApplied,
+		Currency:         model.PriceTierCurrency,
+		Recipient:        solanaPaymentRecipient(),
+		SplTokenMint:     solanaUsdcMint,
+	}
+}
