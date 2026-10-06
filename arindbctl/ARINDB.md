@@ -379,8 +379,9 @@ ASNs and the same 160 country contexts**. It adds 12 reviewed sibling ASNs to
 five existing operators and one new Thailand operator, `nt-th` with AS23969.
 Previous reviewed identities and all six negative groups are retained. These
 additions have passed native catalog parsing and the complete new artifact's
-readback gates; the selected-v13 counts above remain the baseline until the
-new resource is deployed and loaded. No regional ranking or service-presence
+readback gates. Config selected this successor on October 6; the bounded
+one-process mapping proof is recorded below. The v13 counts remain the
+historical comparison. No fleet-use, regional ranking or service-presence
 completion follows from these additions.
 
 For NT, APNIC's exact ASN record, the official TOT/CAT-to-NT merger history,
@@ -394,6 +395,74 @@ findings do not attribute the native Speed-minus-Quality population to either
 operator. Continue exact identity review for smaller access providers and the
 unfinished country/state/province ranking work under the same clean-default
 rule, preserving explicit contrary use.
+
+### US origin-identity gaps under review
+
+A fresh count of the selected successor's pinned catalog (`ec316ffc`) finds
+**nine subscriber groups with 13 ASNs in the US review context**, compared with
+**4,694 groups in Brazil**: 90.43% of its 5,191 subscriber groups. The global
+160-country count therefore does not establish balanced country coverage.
+These are origin-catalog counts, not all classifier approvals; direct
+registration rules already recognize, for example, Google Fiber and Webpass.
+Neither catalog concentration nor the sampled stored US country identifies
+any sampled provider's operator or explains its exclusion.
+
+Primary RIR identity and operator service records support this next,
+source-reviewed candidate:
+
+| Existing or new operator group | Additional exact ASNs |
+| --- | --- |
+| Charter / Spectrum | 10796, 20001, 11427, 11351, 11426, 12271, 33363 |
+| AT&T | 7132 |
+| Verizon US | 701 |
+| Optimum / former Suddenlink | 19108 |
+| Astound / RCN / Wave / Grande | 6079, 11404, 7459 |
+| GFiber | 16591 |
+
+The review joins exact RIR assignments to the operator's subscriber service,
+with operator-maintained ASN records where obtained. The three Charter ASNs
+11351/11426/12271 have the exact regional RIR assignments and Spectrum access
+service evidence, without a retained PeeringDB record. Verizon's
+[Internet Dedicated instructions](https://www.verizon.com/business/welcome-kits/internet-dedicated-services/)
+explicitly identify AS701; business subscribers qualify, and an NSP label
+alone does not establish hosting or proxy use. AT&T reports AS7132's peering
+consolidated into AS7018, so its addition does not establish current routes.
+Astound's [brand history](https://www.astound.com/industry-trends/newsroom/rcn-grande-wave-entouch-and-digital-west-now-astound-broadband/)
+and [residential service](https://www.astound.com/internet/) support its three
+exact reviewed siblings. GFiber's origin addition supplements existing direct
+registration approvals; it does not approve Google's cloud networks.
+
+AS22773 remains registered to Cox. [Cox's transaction history](https://www.coxenterprises.com/what-we-do/broadband)
+and [Charter's completion announcement](https://corporate.charter.com/newsroom/charter-and-cox-communications-complete-transaction)
+confirm the August 2026 acquisition, so the existing Charter-family placement
+is preserved rather than treated as a proven ownership error. Registration
+identity, corporate ownership and actual network use remain distinct facts.
+
+Candidate `4bc85427`, source-review gate `653c6a4e`, adds 14 ASNs and two groups:
+prospectively 5,193 subscriber groups, 5,459 ASNs and the same 160 country
+contexts, including 11 US groups and 27 ASNs. It preserves every previous
+identity, all six negative groups, policy and pinned evidence feeds. This is a
+catalog candidate, not a newly built or activated resource. It adds no regional
+rank completion and supplies no attribution of the retained Speed-only sample.
+
+Source review also found a diagnostic loss: the MMDB retains
+`origin_withheld_reason`, while the deployed shadow projection retains only
+origin ASNs and use state. A prepared typed projection preserves the four
+closed withholding reasons for visibility, RPKI, reviewed-country policy and
+registry hosting assignment; the selected catalog does not enable the optional
+reviewed-country policy. It changes no classification or eligibility rule.
+An older strict coordinator rejects the added field, requiring coordinator
+compatibility before using an updated capture producer.
+
+The next bounded attribution needs a fresh generation-bound private sample,
+complete connection groups and an authenticated current owner to join typed
+classification, exact origin ASN sets and registration-rule provenance. The
+retained aggregate has no recoverable provider IDs or addresses. Existing
+capture enablement/expiry authority remains unproved, and a cold recorder
+hashes both database streams before mapping; the short RPC deadline does not
+turn that initialization into a bounded tail read. Those prerequisites remain
+separate from the catalog research and from any proposal to change serving
+classification.
 
 ## Output and provenance
 
