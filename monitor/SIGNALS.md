@@ -5391,6 +5391,59 @@ contract. Conversely, aggregate close acknowledgements, fresh claims or an
 error-free task cannot prove account clearance; require a fresh bounded payer
 face and unsettled-escrow witness, with capped or unavailable coverage unknown.
 
+2026-10-06 fresh-window coverage discriminator: all three retained expiry passes
+can advance while a quiet eligible contract belongs to none of their current
+ranges. The historical upper is older; the retained recent upper precedes the
+fresh pass's fixed upper minus its one-hour window. Creations strictly after
+that recent upper and at or before the fresh lower timestamp fall between the
+retained passes. A bounded same-snapshot contract/report/intent join and complete
+saved task arguments established this interval for the observed cohort. Saved
+arguments describe an invocation's input, not the cursor inside a running page
+or evidence of every prior visit. A future full recent pass still covers the
+interval; the defect can delay admission behind a long prefix without proving
+that the contract permanently lacks an owner.
+
+The false-positive qualifier is that open state, age, or a cursor crossing alone
+does not establish financial eligibility. An authenticated recent report,
+pending settlement intent, usage-proof requirement, or accounting refusal can
+correctly retain a visited contract. The healthy native control retains an
+active sibling and closes it only after logical quiet time advances. The
+false-negative qualifier is that fresh claims, advancing original cursors, a
+completed fresh window, or aggregate close counts cannot show that this middle
+interval was visited. Incomplete, truncated, malformed, stale, or contradictory
+cursor/report/intent evidence remains unknown. Use complete bounds from the
+same observation and the ordinary expiry eligibility/proof owner; do not infer
+absence of reports or intent from an incomplete join.
+
+The catch-up continuation records `catchup_after` before recent can finish or
+reset, so a replacement recent pass cannot discard the discovered interval.
+Its lower bound stays fixed for the sweep. Each catch-up pass owns a fixed upper
+through the fresh lower timestamp, and retains both open/disputed raw cursors.
+`catchup_before` records the last completed upper; `catchup_checked` records the
+first page's quiet cutoff. A later cutoff reopens the interval for reports that
+became quiet, and a later pass can extend to a newer fresh lower. Fresh keeps
+its alternating share; catch-up rotates with the two original backlog lanes
+over the remaining subpages. All lanes share the existing 256-row subpages,
+15-second cooperative budget, concurrency, classified-error boundary, expiry
+proof, and financial posts. Completing backlog or catch-up cannot discard
+another unfinished lane. No larger rolling window, cursor rewind, financial
+adjustment, or new schema is required.
+
+The original coordinator fails deterministic controls for a quiet gap visit,
+native funded gap settlement, and recent completing before the first catch-up
+turn. The corrected controls also cover expanding gaps, quiet rechecks, equal
+timestamp boundaries, cancellation, accounting refusals, JSON/old-reader
+handoffs, and multiple remaining fresh pages after backlog completion. The
+native PostgreSQL/Redis control preserves the original report proof, settles
+two synthetic funded contracts for exactly 28 total bytes, leaves the payer
+with 972 bytes and an active 37-byte reservation, and applies no debit on replay.
+These establish local admission and conservation, not Main account clearance
+or a universal elapsed expiry deadline under arbitrary density or contention.
+Old readers ignore the additive catch-up fields and retain complete original
+coverage, but can discard the acceleration checkpoint. After every taskworker
+converges, require the exact executor artifact and consecutive persisted
+catch-up bounds/handoffs, then a bounded same-cohort terminal/reservation witness.
+
 Also compare the complete stored failure and next due time with the attempt's
 duration. A verified underfunded dispute can leave unrelated per-contract
 commits durable while the whole task fails and backs off. The narrow §1.2 retry
