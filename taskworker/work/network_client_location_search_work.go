@@ -38,9 +38,13 @@ func IndexSearchLocations(
 	cityLimit := 0
 	model.AddDefaultLocations(clientSession.Ctx, cityLimit)
 
+	// the location searches' in-memory indexes change, in the transaction's
+	// order, once it has committed
+	var posts []server.PostFunction
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-		model.IndexSearchLocationsInTx(clientSession.Ctx, tx)
+		posts = model.IndexSearchLocationsInTx(clientSession.Ctx, tx)
 	})
+	server.RunPosts(clientSession.Ctx, server.SequencePosts(posts...))
 	return &IndexSearchLocationsResult{}, nil
 }
 

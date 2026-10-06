@@ -245,7 +245,11 @@ func authVerifySend(
 		},
 	)
 	if err != nil {
-		glog.Warningf("[auth]verification code send failed: %s\n", err)
+		// the sender counts the failure and reports it at most once per
+		// interval; a client can repeat this request, so the detail is verbose
+		if glog.V(1) {
+			glog.Infof("[auth]verification code send failed: %s\n", err)
+		}
 		result.Error = &AuthVerifySendError{
 			Code:    model.AuthVerifySendErrorCodeSendFailed,
 			Message: verifySendFailedMessage,
@@ -387,7 +391,11 @@ func authPasswordReset(
 		},
 	)
 	if err != nil {
-		glog.Warningf("[auth]password reset code send failed: %s\n", err)
+		// the sender counts the failure and reports it at most once per
+		// interval; a client can repeat this request, so the detail is verbose
+		if glog.V(1) {
+			glog.Infof("[auth]password reset code send failed: %s\n", err)
+		}
 		result.Error = &AuthVerifySendError{
 			Code:    model.AuthVerifySendErrorCodeSendFailed,
 			Message: passwordResetSendFailedMessage,
@@ -410,20 +418,9 @@ func AuthPasswordSet(passwordSet model.AuthPasswordSetArgs, session *session.Cli
 			Error: passwordSetResult.Error,
 		}, nil
 	}
-	// The password is already changed. An account created with a wallet or
-	// SSO and given an email or phone sign-in later has no network_user
-	// recipient, which is not a failure of the reset.
-	userAuth, err := model.GetUserAuth(session.Ctx, passwordSetResult.NetworkId)
-	if err != nil && !errors.Is(err, model.ErrMissingUserAuth) {
-		return nil, err
-	}
-	if normalUserAuth, _ := model.NormalUserAuthV1(&userAuth); normalUserAuth != nil {
-		awsMessageSender := GetAWSMessageSender()
-		awsMessageSender.SendAccountMessageTemplate(
-			*normalUserAuth,
-			&AuthPasswordSetTemplate{},
-		)
-	}
+	// The password-changed notice was added to the account message outbox in
+	// the transaction that changed the password (model.AuthPasswordSet), for
+	// the admin's email or phone when the account has one.
 
 	safePasswordSetResult := &AuthPasswordSetResult{}
 	return safePasswordSetResult, nil
@@ -440,12 +437,13 @@ func AuthVerify(
 	return result, err
 }
 
-// authVerifyEffects are the side effects of a successful verification.
+// authVerifyEffects are the side effects of a successful verification, after
+// its commit. The welcome is not one of them: model.AuthVerify adds it to the
+// account message outbox in the verification's transaction.
 type authVerifyEffects struct {
 	// enrollOnboarding enrolls the verified network and returns its parsed jwt
 	enrollOnboarding func(*model.AuthVerifyResult, string, *session.ClientSession) *jwt.ByJwt
 	parseByJwt       func(*session.ClientSession, string) *jwt.ByJwt
-	sendWelcome      func(userAuth string)
 	// syncProductUpdates runs with the verified network's jwt
 	syncProductUpdates func(*session.ClientSession)
 }
@@ -459,13 +457,6 @@ func defaultAuthVerifyEffects() authVerifyEffects {
 				return nil
 			}
 			return byJwt
-		},
-		sendWelcome: func(userAuth string) {
-			awsMessageSender := GetAWSMessageSender()
-			awsMessageSender.SendAccountMessageTemplate(
-				userAuth,
-				&NetworkWelcomeTemplate{},
-			)
 		},
 		syncProductUpdates: func(verifiedSession *session.ClientSession) {
 			// the preference the sign-up form asked for was persisted by
@@ -485,12 +476,12 @@ func defaultAuthVerifyEffects() authVerifyEffects {
 	}
 }
 
-// completeAuthVerify runs after the verification is committed. The welcome
-// email and the onboarding campaign are for a new account only: verifying an
-// email or phone added later to an existing account (one created with Apple,
-// Google, a wallet, or another email or phone) is not a sign-up. Every
-// verification syncs the network's existing product-updates preference, which
-// never overrides an opt-out.
+// completeAuthVerify runs after the verification is committed. The onboarding
+// campaign, like the welcome email the verification owed in its transaction, is
+// for a new account only: verifying an email or phone added later to an
+// existing account (one created with Apple, Google, a wallet, or another email
+// or phone) is not a sign-up. Every verification syncs the network's existing
+// product-updates preference, which never overrides an opt-out.
 func completeAuthVerify(
 	result *model.AuthVerifyResult,
 	userAuth string,
@@ -503,7 +494,6 @@ func completeAuthVerify(
 	var byJwt *jwt.ByJwt
 	if result.NewAccount {
 		byJwt = effects.enrollOnboarding(result, userAuth, clientSession)
-		effects.sendWelcome(userAuth)
 	} else {
 		byJwt = effects.parseByJwt(clientSession, result.Network.ByJwt)
 	}

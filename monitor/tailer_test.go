@@ -840,6 +840,7 @@ func TestMimirStructuredRejectionsFailClosedOnImpossibleOrMalformedTuples(t *tes
 		{name: "summary mismatch", line: strings.Replace(valid, "go:1,process:1", "go:1,process:2", 1)},
 		{name: "impossible truncation", line: strings.Replace(valid, "truncated=false", "truncated=true", 1)},
 		{name: "raw job", line: strings.Replace(valid, "job=api", "job=private-fixture", 1)},
+		{name: "retired job", line: strings.Replace(valid, "job=api", "job=operator-proxy", 1)},
 		{name: "raw family", line: strings.Replace(valid, "go:1,process:1", "private-fixture:2", 1)},
 		{name: "unknown reason", line: strings.Replace(valid, "reason=series-limit", "reason=private-fixture", 1)},
 		{name: "missing field", line: strings.Replace(valid, "time_series=3 ", "", 1)},
@@ -2724,10 +2725,17 @@ func TestProviderTunnelReadDoneUsesArtifactBoundedClass(t *testing.T) {
 		"If it contains 20e289bd",
 		"zero for 10 minutes",
 		"live-context TUN read failure is still logged",
+		"qualityprobe/providertunnel",
+		"build and deploy Taskworker from current Server main",
 	} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("provider-tunnel finding lacks %q: %+v", want, readDone)
 		}
+	}
+	// the prober lives in Server now; the guidance must not send anyone to
+	// the retired standalone repository
+	if strings.Contains(markdown, "operator-proxy") {
+		t.Fatalf("provider-tunnel finding still names the retired prober repository:\n%s", markdown)
 	}
 	for _, private := range []string{"edge-private", entityID} {
 		if strings.Contains(markdown, private) {

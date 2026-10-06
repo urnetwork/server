@@ -1,5 +1,6 @@
 // The final catalog contracts must inspect their actual published DDL, including
-// a partial historical provider-function repair and a nullable grant marker.
+// a partial historical provider-function repair, a nullable grant marker, the
+// account message outbox and the search update commit order.
 package monitor
 
 import (
@@ -93,6 +94,61 @@ func TestMigrationsCurrentSuffixCatalogFaultsReachSignal(t *testing.T) {
 	for _, observation := range observed {
 		if alert := requireAlertClass(t, observation.alerts, "migration-schema-drift"); !strings.Contains(alert.Markdown(), observation.want) {
 			t.Fatalf("current suffix drift lost its owning version: %s", alert.Markdown())
+		}
+	}
+}
+
+// The outbox and search commit-order contracts reject each change that would
+// break delivery or reading in commit order: a dropped or redefined outbox
+// part, a partial index over other rows, a missing, nullable or constant
+// transaction id, and a missing or reordered commit-order index.
+func TestMigrationsOutboxAndSearchOrderCatalogFaultsReachSignal(t *testing.T) {
+	faults := []struct {
+		name    string
+		version int
+		sql     string
+	}{
+		{"missing outbox", 783, `DROP TABLE account_message_outbox`},
+		{"nullable recipient", 783, `ALTER TABLE account_message_outbox ALTER COLUMN user_auth DROP NOT NULL`},
+		{"wider message key", 783, `ALTER TABLE account_message_outbox ALTER COLUMN message_key TYPE char(65)`},
+		{"missing attempt bound", 783, snMainnetMigrationDropConstraint("account_message_outbox", "c", "CHECK ((attempt_count >= 0))")},
+		{"missing message key uniqueness", 783, snMainnetMigrationDropConstraint("account_message_outbox", "u", "UNIQUE (message_key)")},
+		{"due index over every row", 783, `DROP INDEX account_message_outbox_due; CREATE INDEX account_message_outbox_due ON account_message_outbox (deliver_time, message_id)`},
+		{"missing held index", 783, `DROP INDEX account_message_outbox_held`},
+		{"finished index over sent rows only", 783, `DROP INDEX account_message_outbox_finished; CREATE INDEX account_message_outbox_finished ON account_message_outbox (create_time, message_id) WHERE sent_time IS NOT NULL`},
+		{"missing transaction id", 784, `ALTER TABLE search_value_update DROP COLUMN xid`},
+		{"nullable transaction id", 784, `ALTER TABLE search_value_update ALTER COLUMN xid DROP NOT NULL`},
+		{"constant transaction id default", 784, `ALTER TABLE search_value_update ALTER COLUMN xid SET DEFAULT '0'`},
+		{"missing commit-order index", 785, `DROP INDEX search_value_update_realm_xid_update_id`},
+		{"reordered commit-order index", 785, `DROP INDEX search_value_update_realm_xid_update_id; CREATE INDEX search_value_update_realm_xid_update_id ON search_value_update (realm, update_id, xid)`},
+	}
+	var observed []snMainnetMigrationAlertObservation
+	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
+		for _, fault := range faults {
+			snMainnetMigrationFaultTx(t, func(ctx context.Context, tx server.PgTx) {
+				contract := snMainnetMigrationTestContract(t, fault.version)
+				snMainnetMigrationAdmitted(t, ctx, tx, contract.query, true)
+				if _, err := tx.Exec(ctx, fault.sql); err != nil {
+					t.Fatalf("apply %s: %v", fault.name, err)
+				}
+				snMainnetMigrationAdmitted(t, ctx, tx, contract.query, false)
+				alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(&snMainnetMigrationTxSource{tx: tx}))
+				if err != nil {
+					t.Fatalf("inspect %s: %v", fault.name, err)
+				}
+				observed = append(observed, snMainnetMigrationAlertObservation{alerts: alerts, want: fmt.Sprintf("%s@v%d", contract.artifact.name, fault.version)})
+			})
+		}
+		if _, drift := migrationPingDatabaseCheck(t, t.Context()); drift != "" {
+			t.Fatalf("rolled-back outbox and search order faults left catalog drift: %s", drift)
+		}
+	})
+	if len(observed) != len(faults) {
+		t.Fatalf("observed %d outbox and search order faults, want %d", len(observed), len(faults))
+	}
+	for _, observation := range observed {
+		if alert := requireAlertClass(t, observation.alerts, "migration-schema-drift"); !strings.Contains(alert.Markdown(), observation.want) {
+			t.Fatalf("outbox or search order drift lost its owning version: %s", alert.Markdown())
 		}
 	}
 }

@@ -592,7 +592,10 @@ func applyLocationMerges(
 	for start := 0; start < len(memberIds); start += settings.MergeBatchSize {
 		end := min(start+settings.MergeBatchSize, len(memberIds))
 		var batchDeletedCount int
+		// the location search's in-memory index changes once the batch commits
+		var posts []server.PostFunction
 		server.Tx(ctx, func(tx server.PgTx) {
+			posts = nil
 			tag, err := tx.Exec(
 				ctx,
 				`DELETE FROM location WHERE location_id = ANY($1::uuid[])`,
@@ -601,9 +604,10 @@ func applyLocationMerges(
 			server.Raise(err)
 			batchDeletedCount = int(tag.RowsAffected())
 			for _, memberId := range memberIds[start:end] {
-				locationSearch().RemoveInTx(ctx, memberId, tx)
+				posts = append(posts, locationSearch().RemoveInTxPost(ctx, memberId, tx))
 			}
 		})
+		server.RunPosts(ctx, server.SequencePosts(posts...))
 		mergedRowCount += batchDeletedCount
 	}
 	// No lookup finds a deleted row, so a reference to one can only have been

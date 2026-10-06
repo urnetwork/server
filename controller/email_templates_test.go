@@ -28,6 +28,7 @@ func TestEmailTemplatesRender(t *testing.T) {
 		{&AuthPasswordResetTemplate{ResetCode: strings.Repeat("ab", 64)}, true},
 		{&AuthPasswordSetTemplate{}, true},
 		{&NetworkWelcomeTemplate{}, true},
+		{&SubscriptionEndedTemplate{}, true},
 		{&ProviderUpgradeNoticeTemplate{NetworkName: "Synthetic network"}, false},
 		{&EpochEarningsTemplate{
 			Epoch:          42,
@@ -49,7 +50,7 @@ func TestEmailTemplatesRender(t *testing.T) {
 			Top200Rank:  9,
 			EpochEnd:    server.NowUtc(),
 		}, true},
-		{&MissingWalletTemplate{PaymentId: server.NewId(), AmountUsd: "5.00"}, true},
+		{&MissingWalletTemplate{PaymentId: server.NewId(), Payout: model.UsdToNanoCents(5.00)}, true},
 		{&SubscriptionTransferBalanceCodeTemplate{Secret: "K7QX3M2PNB4DLZ8R9YWC5AGHT6", BalanceByteCount: 10 * model.Tib}, false},
 		{&SubscriptionDataAppliedTemplate{Secret: "K7QX3M2PNB4DLZ8R9YWC5AGHT6", BalanceByteCount: 1 * model.Tib, NetworkName: "brien"}, false},
 		{&X402ReceiptTemplate{
@@ -241,7 +242,7 @@ func TestEmailTemplatesDeepLinks(t *testing.T) {
 	// Bittensor wallet the Earnings screen connects, so the missing wallet
 	// reminder names Solana and opens the Solana connect flow on Earnings; the
 	// old wallets route only redirects to Earnings
-	missingWallet := &MissingWalletTemplate{PaymentId: server.NewId(), AmountUsd: "3.87"}
+	missingWallet := &MissingWalletTemplate{PaymentId: server.NewId(), Payout: model.UsdToNanoCents(3.87)}
 	subject, bodyHtml, bodyText, err := RenderEmailTemplate(missingWallet)
 	if err != nil {
 		t.Fatal(err)
@@ -278,7 +279,7 @@ func TestEmailTemplatesDeepLinks(t *testing.T) {
 	}
 
 	// a phone account gets one GSM-7 segment even at a five-figure amount
-	bigSms, err := RenderSmsTemplate(&MissingWalletTemplate{PaymentId: server.NewId(), AmountUsd: "12345.67"})
+	bigSms, err := RenderSmsTemplate(&MissingWalletTemplate{PaymentId: server.NewId(), Payout: model.UsdToNanoCents(12345.67)})
 	if err != nil {
 		t.Fatal(err)
 	}

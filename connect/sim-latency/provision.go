@@ -92,12 +92,13 @@ func provisionProviders(
 }
 
 // provisionEgressEvidenceBatch establishes the simulated providers as usable
-// supply for the real egress-health gate. Production fills these tables from an
-// external prober, but the self-contained simulation has no external internet
-// or operator-proxy process. Its ground truth already defines each fleet entry
-// as a functioning egress with modeled latency, bandwidth, loss, and churn, so
-// one passing synthetic probe and an observation in the configured fake country
-// are part of the simulation's initial condition, like the reliability prewarm.
+// supply for the real egress-health gate. Production fills these tables from
+// the Taskworker's egress prober (qualityprobe), but the self-contained
+// simulation has no external internet or prober. Its ground truth already
+// defines each fleet entry as a functioning egress with modeled latency,
+// bandwidth, loss, and churn, so one passing synthetic probe and an observation
+// in the configured fake country are part of the simulation's initial
+// condition, like the reliability prewarm.
 func provisionEgressEvidenceBatch(
 	ctx context.Context,
 	entries []ProviderEntry,

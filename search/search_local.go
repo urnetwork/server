@@ -64,7 +64,14 @@ type SearchLocal struct {
 	stateLock sync.RWMutex
 	// value id -> variant -> projection
 	valueIdVariantProjections map[server.Id]map[int]*localProjection
+
+	// the update poll's position in the update log; read and written only by
+	// pollUpdates, which only the update loop calls
+	updatePosition SearchUpdatePosition
 }
+
+// The most records one poll of the update log reads past its position.
+const searchLocalUpdateLimit = 10000
 
 func NewSearchLocalWithDefaults(ctx context.Context, impl Search) *SearchLocal {
 	return NewSearchLocal(ctx, impl, DefaultSearchLocalSettings())
@@ -92,11 +99,9 @@ func NewSearchLocal(ctx context.Context, impl Search, settings *SearchLocalSetti
 func (self *SearchLocal) update(initialSyncDone context.CancelFunc) {
 	defer self.cancel()
 
-	updateLimit := 10000
-
 	var startValueId server.Id
 	for {
-		values := self.OrderedSearchValues(self.ctx, startValueId, updateLimit)
+		values := self.OrderedSearchValues(self.ctx, startValueId, searchLocalUpdateLimit)
 		if len(values) == 0 {
 			break
 		}
@@ -109,16 +114,8 @@ func (self *SearchLocal) update(initialSyncDone context.CancelFunc) {
 	}
 	initialSyncDone()
 
-	var startUpdateId int64
 	for {
-		orderedUpdates := self.impl.OrderedSearchRecordsAfter(self.ctx, startUpdateId, updateLimit)
-
-		for _, update := range orderedUpdates {
-			self.index(update)
-		}
-		if 0 < len(orderedUpdates) {
-			startUpdateId = orderedUpdates[len(orderedUpdates)-1].UpdateId + 1
-		}
+		self.pollUpdates(searchLocalUpdateLimit)
 
 		select {
 		case <-self.ctx.Done():
@@ -126,6 +123,19 @@ func (self *SearchLocal) update(initialSyncDone context.CancelFunc) {
 		case <-time.After(self.settings.UpdatePollTimeout):
 		}
 	}
+}
+
+// Indexes the update log's records past the poll's position, at most limit
+// of them, and the records of the transactions the position lists that have
+// since finished, then moves the position (see SearchUpdatePosition). It
+// waits on no transaction: one still in progress is read by a later poll.
+// Called by the update loop on its timer, and directly by tests.
+func (self *SearchLocal) pollUpdates(limit int) {
+	updates, nextPosition := self.impl.OrderedSearchRecordsAfter(self.ctx, self.updatePosition, limit)
+	for _, update := range updates {
+		self.index(update)
+	}
+	self.updatePosition = nextPosition
 }
 
 func (self *SearchLocal) WaitForInitialSync(ctx context.Context) bool {
@@ -410,6 +420,27 @@ func (self *SearchLocal) AddRawInTx(ctx context.Context, value string, valueId s
 	self.impl.AddRawInTx(ctx, value, valueId, valueVariant, tx)
 }
 
+// Writes the value's entries in the caller's transaction, as AddInTx does, and
+// returns the post that updates the local index, for the caller to run once
+// the transaction commits (server.RunPosts). AddInTx updates the local index
+// at the call, so a transaction that then rolls back leaves it on a value the
+// database never kept, which the update poll does not correct: it replays only
+// newer committed update records.
+func (self *SearchLocal) AddInTxPost(ctx context.Context, value string, valueId server.Id, valueVariant int, tx server.PgTx) server.PostFunction {
+	value = NormalizeForSearch(value)
+	self.impl.AddRawInTx(ctx, value, valueId, valueVariant, tx)
+	return func() any {
+		self.index(&SearchValueUpdate{
+			SearchValue: SearchValue{
+				Value:        value,
+				ValueId:      valueId,
+				ValueVariant: valueVariant,
+			},
+		})
+		return nil
+	}
+}
+
 func (self *SearchLocal) Remove(ctx context.Context, valueId server.Id) {
 	self.index(&SearchValueUpdate{
 		Remove: true,
@@ -430,8 +461,24 @@ func (self *SearchLocal) RemoveInTx(ctx context.Context, valueId server.Id, tx s
 	self.impl.RemoveInTx(ctx, valueId, tx)
 }
 
-func (self *SearchLocal) OrderedSearchRecordsAfter(ctx context.Context, startRecordId int64, limit int) []*SearchValueUpdate {
-	return self.impl.OrderedSearchRecordsAfter(ctx, startRecordId, limit)
+// Removes the value's entries in the caller's transaction, as RemoveInTx does,
+// and returns the post that removes it from the local index, for the caller
+// to run once the transaction commits (server.RunPosts). See AddInTxPost.
+func (self *SearchLocal) RemoveInTxPost(ctx context.Context, valueId server.Id, tx server.PgTx) server.PostFunction {
+	self.impl.RemoveInTx(ctx, valueId, tx)
+	return func() any {
+		self.index(&SearchValueUpdate{
+			Remove: true,
+			SearchValue: SearchValue{
+				ValueId: valueId,
+			},
+		})
+		return nil
+	}
+}
+
+func (self *SearchLocal) OrderedSearchRecordsAfter(ctx context.Context, position SearchUpdatePosition, limit int) ([]*SearchValueUpdate, SearchUpdatePosition) {
+	return self.impl.OrderedSearchRecordsAfter(ctx, position, limit)
 }
 
 func (self *SearchLocal) OrderedSearchValues(ctx context.Context, startValueId server.Id, limit int) []*SearchValue {

@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	mathrand "math/rand"
+	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -148,4 +150,35 @@ func TestRunPosts(t *testing.T) {
 
 	RunPosts(ctx, f(5))
 	connect.AssertEqual(t, int(count.Load()), 16)
+}
+
+// The combined post runs its posts one after another in the order given, and
+// the next generations they return run after it.
+func TestSequencePostsRunsInOrder(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var stateLock sync.Mutex
+	order := []int{}
+	record := func(n int) {
+		stateLock.Lock()
+		defer stateLock.Unlock()
+		order = append(order, n)
+	}
+	post := func(n int, next any) PostFunction {
+		return func() any {
+			record(n)
+			return next
+		}
+	}
+
+	RunPosts(ctx, SequencePosts(
+		post(1, nil),
+		post(2, post(4, nil)),
+		post(3, []PostFunction{post(5, nil)}),
+	))
+
+	if len(order) != 5 || !slices.Equal(order[:3], []int{1, 2, 3}) || !slices.Contains(order[3:], 4) || !slices.Contains(order[3:], 5) {
+		t.Fatalf("the posts ran in the order %v, want 1, 2, 3 and then the next generation 4 and 5", order)
+	}
 }

@@ -1,0 +1,39 @@
+# The source lock for the canonical service build: the Go release and the
+# complete commit of each sibling checkout beside server, under these directory
+# names. Local replacements use these sibling directories, so pinning their
+# complete source revisions makes one server commit select one reproducible
+# graph. Bump the refs together after compiling the service commands. The tests
+# in this directory read the refs from here.
+go: 1.26.7
+siblings:
+  # Connect's tracked sctp/ directory supplies the SCTP fork from the same
+  # revision.
+  - repository: urnetwork/connect
+    path: connect
+    ref: 44e9a3745817aed1f84e8aee81e5c485c7d58bc9
+  - repository: urnetwork/glog
+    path: glog
+    ref: 80a11b434ae90ae2221deb932daa21913919875a
+  - repository: urnetwork/sdk
+    path: sdk
+    ref: 8d8ecc4d84763de09f0a69c355b3a65e79d38126
+  - repository: urnetwork/proxy
+    path: proxy
+    ref: 15ccbdda72756ef07d05d3a18a50dc036c321576
+  - repository: urnetwork/goidenticons
+    path: goidenticons
+    ref: 06eb779a691e056be7dc5fa9a0239001c3ea390f
+  - repository: urnetwork/userwireguard
+    path: userwireguard
+    ref: 85fb1ca4086fa5dbfcda526bec7a17a894e691b9
+  - repository: urnetwork/warp
+    path: warp
+    ref: 3b6e875f83140b2de1a50d2bfffe0f7830edd74e
+  - repository: urfoundation/sn
+    path: sn
+    ref: a70dae9c367868073f7325a16b34bd885f59b943
+  # Server and SN's fixture generator use this same reviewed fork. Published
+  # release modules receive an immutable replacement from the builder.
+  - repository: urnetwork/gvisor
+    path: gvisor
+    ref: c0783dba2eeff7b79692a7f122ffee5f8bd837c1

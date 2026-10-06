@@ -24,12 +24,20 @@ import (
 // the production private credential/controller path, a single actual-sized
 // shard grant, and distinct derived clients. No provider carrier is simulated.
 type privateLoadFixture struct {
-	control *providerEgressControl
-	owner   *model.ProberShardOwner
-	peer    server.Id
-	tokens  []string
-	clients []server.Id
-	peers   []server.Id
+	closeOwner func()
+	control    *providerEgressControl
+	owner      *model.ProberShardOwner
+	peer       server.Id
+	tokens     []string
+	clients    []server.Id
+	peers      []server.Id
+}
+
+// Close joins notification workers before their TestEnv restores Redis resources.
+func (self privateLoadFixture) Close() {
+	if self.closeOwner != nil {
+		self.closeOwner()
+	}
 }
 
 func newPrivateLoadFixture(t testing.TB, ctx context.Context, index, history int) privateLoadFixture {
@@ -80,9 +88,16 @@ func newPrivateLoadFixtureCount(t testing.TB, ctx context.Context, index, histor
 				SELECT md5($1::uuid::text||'-loaded-history-'||n)::uuid,$1,1 FROM generate_series(1,$2)n`, owner.BalanceId, history))
 		})
 	}
+	if history > 0 {
+		// Synthetic legacy SQL history needs the same targeted mirror publication as legacy production.
+		// This is fixture preparation, outside the measured native admission workload.
+		_, count := model.ReconcileNetEscrowForNetwork(ctx, owner.NetworkId, true)
+		if count != 1 {
+			t.Fatal("synthetic legacy history did not resolve its one grant")
+		}
+	}
 	notifications := model.NewContractOriginNotifications(ctx, model.DefaultContractOriginNotificationSettings())
-	t.Cleanup(notifications.Close)
-	f.control, err = newProviderEgressControl(credentials, notifications)
+	f.control, f.closeOwner, err = privateLoadFinishControl(func() (*providerEgressControl, error) { return newProviderEgressControl(credentials, notifications) }, notifications.Close)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +109,7 @@ type privateLoadProtocolRefusal struct {
 	requestError error
 }
 
-func (e *privateLoadProtocolRefusal) Error() string { return "bounded contract protocol refusal" }
+func (self *privateLoadProtocolRefusal) Error() string { return "bounded contract protocol refusal" }
 
 func privateLoadCall(ctx context.Context, f privateLoadFixture, token string, message proto.Message) (*protocol.StoredContract, error) {
 	frame, err := connect.ToFrame(message, connect.DefaultProtocolVersion)
@@ -186,6 +201,9 @@ func privateLoadStats(t testing.TB) map[string]float64 {
 			values[name+"_"+result] = privateLoadMetric(t, "urnetwork_net_escrow_"+name+"_snapshot_total", map[string]string{"result": result})
 		}
 	}
+	for _, operation := range []string{"reserve", "reserve-owned", "reserve-owned-full"} {
+		values["native_reserved"] += privateLoadMetric(t, "urnetwork_redis_contract_reservation_total", map[string]string{"operation": operation, "result": "accepted"})
+	}
 	for _, result := range []string{"selected_first", "fallback", "error"} {
 		values[result] = privateLoadMetric(t, "urnetwork_prober_grant_selection_total", map[string]string{"result": result})
 	}
@@ -196,20 +214,15 @@ func privateLoadStats(t testing.TB) map[string]float64 {
 
 func privateLoadAssertAccounting(t testing.TB, ctx context.Context, f privateLoadFixture, want model.ByteCount) {
 	t.Helper()
-	var exact, cached model.ByteCount
-	var current bool
-	server.Db(ctx, func(conn server.PgConn) {
-		server.Raise(conn.QueryRow(ctx, `SELECT
-			(SELECT COALESCE(sum(e.balance_byte_count),0) FROM transfer_escrow e
-			 JOIN transfer_contract c USING(contract_id)
-			 WHERE e.balance_id=$1 AND NOT e.settled AND c.outcome IS NULL),
-			s.reserved_byte_count, s.revision=r.revision
-			FROM transfer_balance_net_escrow_snapshot s
-			JOIN transfer_balance_net_escrow_revision r USING(balance_id)
-			WHERE s.balance_id=$1`, f.owner.BalanceId).Scan(&exact, &cached, &current))
-	})
-	if exact != want || cached != want || !current || model.Testing_NetEscrowByteCount(ctx, f.owner.BalanceId) != want {
-		t.Fatalf("financial state mismatch: exact=%d cache=%d expected=%d current=%t", exact, cached, want, current)
+	state, err := privateLoadReadAccounting(ctx, f)
+	if err != nil {
+		t.Fatal("accounting source read failed", err)
+	}
+	if err := state.validate(); err != nil {
+		t.Fatal(err)
+	}
+	if state.exact != want {
+		t.Fatalf("financial state mismatch: exact=%d expected=%d", state.exact, want)
 	}
 }
 
@@ -220,8 +233,9 @@ func TestPrivateProviderLoadedSelectedGrant(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 150*time.Second)
 		defer cancel()
 		for arm, settings := range []struct{ pool, history int }{{1, 0}, {1, 10001}, {16, 0}, {16, 10001}} {
-			f := newPrivateLoadFixture(t, ctx, arm, settings.history)
 			func() {
+				f := newPrivateLoadFixture(t, ctx, arm, settings.history)
+				defer f.Close()
 				pop := server.Config.PushSimpleResource("db.yml", []byte(fmt.Sprintf("min_connections: 0\nmax_connections: %d\n", settings.pool)))
 				server.PgReset()
 				defer func() { pop(); server.PgReset() }()
@@ -269,9 +283,7 @@ func TestPrivateProviderLoadedSelectedGrant(t *testing.T) {
 				if got := privateLoadMetric(t, "urnetwork_pg_pool_connections", map[string]string{"pool": "default", "state": "maximum"}); got != float64(settings.pool) {
 					t.Fatalf("observed pool maximum=%v, expected%d", got, settings.pool)
 				}
-				if after["selected_first"] != 73 || after["admission_reloaded"] != 1 {
-					t.Fatalf("wrong allocator or cache path: %v", after)
-				}
+				privateLoadAssertNativeAdmission(t, ctx, f, after, 73)
 				want := model.ByteCount(int64(settings.history) + allocated)
 				privateLoadAssertAccounting(t, ctx, f, want)
 				t.Logf("pool=%d history=%d create_counters=%v exact_reserved=%d", settings.pool, settings.history, after, want)
@@ -310,17 +322,20 @@ func TestPrivateProviderLoadedSelectedGrant(t *testing.T) {
 				}
 				began := time.Now()
 				close(start)
-				for range created {
-					if err := <-results; err != nil {
-						t.Fatal("concurrent settlement failed", err)
-					}
-				}
+				settleErr := privateLoadJoinResults(len(created), results)
+				var createErr error
 				for range created {
 					contract, err := <-newContracts, <-createErrors
-					if err != nil || contract == nil {
-						t.Fatal("creation overlapping settlement failed", err)
+					if err != nil {
+						createErr = errors.Join(createErr, err)
+					} else if contract == nil {
+						createErr = errors.Join(createErr, errors.New("creation returned no contract"))
+					} else {
+						want += model.ByteCount(contract.TransferByteCount)
 					}
-					want += model.ByteCount(contract.TransferByteCount)
+				}
+				if err := errors.Join(settleErr, createErr); err != nil {
+					t.Fatal("overlapping owners failed after joining", err)
 				}
 				after = privateLoadStats(t)
 				for key := range after {
