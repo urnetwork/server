@@ -262,8 +262,9 @@ func (self *providerEgressProbePass) drainUrlProbes(ctx context.Context, args *P
 }
 
 // A returned durable claim remains owned even when no URL turn may start.
-// Completion records only local failure, with no quality, quota or retry-pacing
-// verdict. The original task deadline still bounds this joined publication.
+// Completion records only local failure, with no quality, quota or provider
+// verdict. The server may schedule bounded retry after durable completion.
+// The original task deadline still bounds this joined publication.
 // A failed acknowledgment is explicit; the existing durable claim expiry is
 // the recovery authority, never an invented successful completion.
 func (self *providerEgressProbePass) completeUnstartedUrlClaims(ctx context.Context, due []ingest.DueProvider, concurrency int, observation *providerUrlProbeSchedulerOwner) error {

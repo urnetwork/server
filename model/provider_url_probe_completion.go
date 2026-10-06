@@ -19,7 +19,9 @@ const (
 )
 
 // One completed turn, including setup failures; retries retain every field.
-// AllowPacing is false when platform readiness forbids a provider retry verdict.
+// AllowPacing is false when platform readiness forbids a provider verdict.
+// Its first durable completion can still release its exact live-claim lease
+// into bounded local retry; this grants no measured evidence or quota credit.
 type ProviderUrlProbeCompletion struct {
 	ClientId     server.Id
 	ClaimOrdinal int64
@@ -97,19 +99,27 @@ func CompleteProviderUrlProbeRun(ctx context.Context, completion ProviderUrlProb
 			SET reported_completed_at=$3,completed_at=$4,received_at=$5,probe_failure=$6,counted=$7
 			WHERE client_id=$1 AND claim_ordinal=$2`,
 			completion.ClientId, completion.ClaimOrdinal, reportedAt, effectiveAt, receivedAt, completion.ProbeFailure, counted))
+		// A finished local turn no longer owns an in-flight lease. Only its
+		// exact issued deadline may enter local retry; custom/newer deadlines
+		// and newer accepted results keep their owners. Anchor the local retry
+		// to first server receipt, and never extend an earlier deadline.
 		server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_cycle AS cycle SET
 			completed_run_count=completed_run_count+$4,
 			completed_next_expiry_at=CASE WHEN $4>0
 				THEN LEAST(COALESCE(completed_next_expiry_at,$5),$5) ELSE completed_next_expiry_at END,
 			completed_priority_ready=false,
-			next_attempt_at=CASE WHEN $6 AND $7<>'' AND cycle.claim_ordinal=$2
+			next_attempt_at=CASE WHEN $7<>'' AND cycle.claim_ordinal=$2
+				AND ($6 OR cycle.next_attempt_at=$9)
 				AND ((SELECT `+providerUrlProbeMeasuredWorkDueSql("recent", "$3", "$8")+` FROM (`+providerUrlProbeRunWindowSql("cycle.client_id", "$3")+`) AS recent)
 					OR (`+providerHasUrlSecurityExceptionSql("cycle.client_id")+`))
 				AND (cycle.latest_result_at IS NULL OR cycle.latest_result_at<$3)
-				THEN `+providerUrlProbePacedAttemptSql("cycle", "$3", "0")+` ELSE cycle.next_attempt_at END
+				THEN CASE WHEN $6 THEN `+providerUrlProbePacedAttemptSql("cycle", "$3", "0")+`
+					ELSE LEAST(cycle.next_attempt_at, `+providerUrlProbePacedAttemptSql("cycle", "$10", "0")+`) END
+				ELSE cycle.next_attempt_at END
 			WHERE cycle.client_id=$1`,
 			completion.ClientId, completion.ClaimOrdinal, effectiveAt, increment,
-			effectiveAt.Add(ProviderUrlProbeCompletedWindow), completion.AllowPacing, completion.ProbeFailure, ProviderUrlProbeRunTarget))
+			effectiveAt.Add(ProviderUrlProbeCompletedWindow), completion.AllowPacing, completion.ProbeFailure, ProviderUrlProbeRunTarget,
+			claimedAt.Add(ProviderEgressProbeAttemptBackoff), receivedAt))
 		receipt = &ProviderUrlProbeCompletionReceipt{CompletedAt: effectiveAt, ReceivedAt: receivedAt}
 	})
 	if returnErr != nil || receipt == nil {

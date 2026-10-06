@@ -231,7 +231,7 @@ func TestContractExpiryRepairContinuationRechecks(t *testing.T) {
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		other := newNetEscrowOrderingTestFixture(t, ctx)
 		for _, kind := range []string{"payer_mismatch", "legacy_intent_present", "continuation_changed"} {
-			for stopAt := 1; stopAt <= 3; stopAt++ {
+			for stopAt := 1; stopAt <= 2; stopAt++ {
 				id := newContractExpiryRepairTestContract(t, ctx, f, false)
 				scope := &contractExpiryRepairScope{contractId: id, expectedPayer: f.sourceNetworkId}
 				var fresh *contractExpiryState
@@ -276,14 +276,16 @@ func TestContractExpiryRepairContinuationRechecks(t *testing.T) {
 				})
 				if kind != "legacy_intent_present" {
 					reports := 1
-					if stopAt == 3 {
+					if stopAt == 2 {
 						reports = 2
 					}
 					requireContractExpiryRepairUntouched(t, ctx, f, id, reports, true)
 				}
 			}
 		}
-		if Testing_NetEscrowByteCount(ctx, f.balanceId) != 90 {
+		// Three refusal kinds at the report and settlement boundaries retain
+		// six independent ten-byte reservations.
+		if Testing_NetEscrowByteCount(ctx, f.balanceId) != 60 {
 			t.Fatal("refused continuations released custody")
 		}
 	})
@@ -373,7 +375,9 @@ func TestContractExpiryRepairLateReportAndRollback(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
-		for _, stepToChange := range []int{1, 2} {
+		// Preparation already retained the flag. The report transaction is
+		// now the only boundary before finalization of this checkpoint.
+		{
 			id := newContractExpiryRepairTestContract(t, ctx, f, true)
 			scope := &contractExpiryRepairScope{contractId: id, expectedPayer: f.sourceNetworkId}
 			var fresh *contractExpiryState
@@ -389,12 +393,12 @@ func TestContractExpiryRepairLateReportAndRollback(t *testing.T) {
 			step := 0
 			scope.beforeTxForTest = func() {
 				step++
-				if step == stepToChange {
+				if step == 1 {
 					server.Raise(CloseContract(ctx, id, f.destinationId, 1, true))
 				}
 			}
 			err := captureContractExpiryRepair(func() error { return continueContractExpiry(ctx, "[test]", fresh, scope) })
-			if contractExpiryRepairErrorStatus(err) != "continuation_changed" {
+			if contractExpiryRepairErrorStatus(err) != "continuation_changed" || step != 1 {
 				t.Fatal("new authenticated checkpoint was finalized")
 			}
 			after, _ := readContractExpiryTestSnapshot(t, ctx, id)
@@ -425,7 +429,7 @@ func TestContractExpiryRepairLateReportAndRollback(t *testing.T) {
 			t.Fatal("uncommitted proof became continuation authority")
 		}
 		requireContractExpiryRepairUntouched(t, ctx, f, id, 1, false)
-		if Testing_NetEscrowByteCount(ctx, f.balanceId) != 30 {
+		if Testing_NetEscrowByteCount(ctx, f.balanceId) != 20 {
 			t.Fatal("withdrawal or rollback released reservation")
 		}
 	})

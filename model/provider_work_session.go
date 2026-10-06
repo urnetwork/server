@@ -52,7 +52,7 @@ func providerWorkLockEndpointsInTx(ctx context.Context, tx server.PgTx, clientId
 		if _, err := optional.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(-776::bigint)`); err != nil {
 			return err
 		}
-		return providerWorkLockEndpointRowsInTx(ctx, optional, clientIds)
+		return providerWorkLockEndpointReadRowsInTx(ctx, optional, clientIds)
 	})
 }
 
@@ -85,6 +85,27 @@ func providerWorkLockEndpointRowsInTx(ctx context.Context, tx server.PgTx, clien
 		return err
 	}
 	rows, err := tx.Query(ctx, `SELECT client_id FROM provider_work_session_head WHERE client_id=ANY($1) ORDER BY client_id FOR UPDATE`, clientIds)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+	}
+	err = rows.Err()
+	rows.Close()
+	return err
+}
+
+// Contract publication reads a stable endpoint cut without changing its head.
+// Shared fences allow concurrent contract readers; connection mutations retain
+// exclusive fences on the same keys. The row lock still rejects stale snapshots.
+func providerWorkLockEndpointReadRowsInTx(ctx context.Context, tx server.PgTx, clientIds []server.Id) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(776,lock_key) FROM
+   (SELECT DISTINCT ('x'||substr(md5(client_id::text),1,8))::bit(32)::int AS lock_key
+    FROM unnest($1::uuid[]) AS client_id ORDER BY lock_key) AS locks`, clientIds)
+	if err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `SELECT client_id FROM provider_work_session_head WHERE client_id=ANY($1) ORDER BY client_id FOR SHARE`, clientIds)
 	if err != nil {
 		return err
 	}

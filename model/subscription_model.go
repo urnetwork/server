@@ -4316,6 +4316,7 @@ func ForceCloseOpenContractIdsPage(ctx context.Context, minTime time.Time, maxCo
 					prepareErr := runForceClose(func() error {
 						var err error
 						server.Tx(ctx, func(tx server.PgTx) {
+							fresh = nil
 							var pending bool
 							server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM legacy_settlement_intent WHERE contract_id=$1)`, openContract.contractId).Scan(&pending))
 							if pending {

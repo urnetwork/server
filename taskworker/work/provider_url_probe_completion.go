@@ -34,8 +34,9 @@ func (self *providerEgressFullBatch) publishAttempt(ctx context.Context, provide
 	return self.sink.ReportUrlProbeCompletion(ctx, completion)
 }
 
-// A completed run remains a completed run during platform failure. Preserve
-// the old no-provider-verdict boundary by withholding pacing, not the count.
+// A completed run remains a completed run during platform failure. Withhold
+// provider-verdict permission; the server may release this finished claim into
+// bounded local retry without granting measured evidence or quota credit.
 func (self *providerEgressProbeReadinessReporter) ReportUrlProbeCompletion(ctx context.Context, completion qualityprobe.UrlProbeCompletion) error {
 	var readinessErr error
 	if completion.ProbeFailure != "" {

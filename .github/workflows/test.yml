@@ -35,7 +35,7 @@ jobs:
       # Bump the refs together after compiling the service commands. Connect's
       # tracked sctp/ directory supplies the SCTP fork from the same revision.
       - uses: actions/checkout@v4
-        with: { repository: urnetwork/connect, path: connect, ref: 5e9a5fc4e17814608e6c420563aa09f153bc7d86 }
+        with: { repository: urnetwork/connect, path: connect, ref: 44e9a3745817aed1f84e8aee81e5c485c7d58bc9 }
       - uses: actions/checkout@v4
         with: { repository: urnetwork/glog, path: glog, ref: 80a11b434ae90ae2221deb932daa21913919875a }
       - uses: actions/checkout@v4
