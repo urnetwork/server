@@ -488,7 +488,7 @@ BT/Plusnet AS6871, OneBroadband AS17665, XL Axiata AS24203 and YouFibre
 AS212655. It would contain 5,209 subscriber groups and 5,478 ASNs across the
 same 160 country contexts. Both preserve every negative object, policy and
 feed. Their cumulative native parser/augmentation controls later passed with
-the five-ASN successor below; its complete artifact build remains pending.
+the five-ASN successor below; its completed artifact awaits readback qualification.
 No retained Main provider sample is joined to these additions.
 
 A further cumulative candidate (`320b4c10`) appends five exact US ASNs to
@@ -519,8 +519,8 @@ generated artifact still needs qualification. No AS3356, AS3549, affiliate, pare
 customer ASN gains approval by association. Neither the frozen `4bc85427`
 update nor the separate earlier candidates were changed in place.
 
-The shortest prepared artifact path for `320b4c10` reuses the completed
-October 6 registration base `257ca5e6` and runs `augment-subscribers` once.
+The completed augmentation for `320b4c10` reuses the completed October 6
+registration base `257ca5e6` and runs `augment-subscribers` once.
 That 445,051,096-byte base already passed the complete registration traversal.
 Streamed hashing on October 6 at 17:37 UTC verified the retained base, its
 rules and GeoLite lineage, the builder and all 38 evidence snapshots. The new
@@ -535,7 +535,7 @@ The retained successful run spent approximately 691 seconds in augmentation
 out of 2,054 seconds overall, using adjacent manifest timestamps to delimit
 the phase. Its augmentation RSS rose from below one GiB to 11,937,247,232
 bytes. Reusing the base therefore avoids roughly 22.6 minutes of preceding
-work but does not establish a four-GiB build budget. The disabled reuse
+work but does not establish a four-GiB build budget. The reuse
 executor retains 12-GiB host admission and RSS caps, the immediate one-GiB
 host floor and existing disk floors; only its native and wall deadlines shrink
 to 30 and 31 minutes. All 40 builder Go files, including tests, match between
@@ -543,12 +543,28 @@ qualified source `0bb38ed6` and canonical `8be38525`. This file parity does not
 establish equivalence of their surrounding module graphs. The prepared
 executor requires the qualified binary and original frozen graph. Independent
 gate `d9de0c9a` binds the six actual catalog controls, 14 synthetic controls,
-executor/Root-binder review and readback source review. The review-bound
-disabled manifest checks as ready while execution remains disabled. Root's
-exclusive resource window is still required. Full, native, mapped and targeted policy readbacks
-must bind the new final hash and retained-base lineage before release review.
-Neither reuse preparation nor its source controls establish Main activation
-or recovered provider Quality.
+executor/Root-binder review and readback source review. Root bound the reviewed
+manifest in an exclusive resource window before launching the augmentation.
+
+The October 6 native run completed in 730.125 seconds with exit zero and no
+resource limit triggered. Its qualified executor reports a valid output of
+595,184,171 bytes, epoch `1791310718`, SHA-256
+`bfe386270592c8b30a9da6cce762d4bbf1661359e4cbcc34769ed89f8d0f5cbe`.
+Peak sampled group RSS was 11,847,909,376 bytes; the lowest sampled host
+available memory was 1,911,414,784 bytes. Status `1a34f240` and retained local
+observation `341bc4fc` bind that result. The new and preceding manifests have
+the same 40 input-hash roles; only the subscriber catalog hash differs.
+The explicit `reuse-manifest.json` records that registration and evidence were
+not refreshed, and their original observation and expiry times remain intact.
+
+The new manifest reports 4,706,008 inferred subscriber partitions versus
+3,198,507 in its predecessor. These are origin-stage counters before the
+hosting and address overlays, with changed partition boundaries; they are not
+independently traversed final populations, address totals or live-provider
+gains. Full, native, mapped and targeted policy readbacks must bind the new
+final hash and retained-base lineage before release review. The generated
+artifact is not yet qualified for activation. Main adoption and recovered
+provider Quality remain unproved.
 
 Retained RIS routing measurements must also distinguish direct observations
 from inherited visibility. On the October 6 `02:03:14Z` IPv4 snapshot,
