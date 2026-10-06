@@ -113,6 +113,12 @@ func TestReceiptCollectorRetryEmptyTreesAndMissingCausesRefuse(t *testing.T) {
 }
 
 func TestReceiptCollectorRetryKnownTransportAndHardCausesRemainDistinct(t *testing.T) {
+	// The actual failed read was explicitly retryable even though both of
+	// Errno's optional network hints are false. The fallback cannot veto it.
+	var eioNetwork net.Error = syscall.EIO
+	if eioNetwork.Timeout() || eioNetwork.Temporary() {
+		t.Fatal("EIO precedence fixture no longer exercises negative network hints")
+	}
 	permanent := errors.New("synthetic permanent evidence refusal")
 	for _, cause := range []error{
 		context.DeadlineExceeded, io.EOF, io.ErrUnexpectedEOF,
@@ -170,18 +176,17 @@ func TestReceiptCollectorRpcBoundedJoinedTransientRetainsOriginalDeadline(t *tes
 	rpc := newReceiptCollectorRpc("http://native.example")
 	rpc.finality, rpc.nativeExecution = true, true
 	calls, waits, chargedBytes := 0, 0, 0
-	var firstDeadline time.Time
+	ownerDeadline := time.Now().Add(300 * time.Second)
+	ctx, cancel := context.WithDeadline(t.Context(), ownerDeadline)
+	defer cancel()
 	originalRemaining := rpc.remaining
 	rpc.client.Transport = nativeReadTestTransport(func(request *http.Request) (*http.Response, error) {
 		calls++
 		deadline, ok := request.Context().Deadline()
-		if !ok {
-			t.Fatal("production request lost its bounded owner deadline")
-		}
-		if calls == 1 {
-			firstDeadline = deadline
-		} else if deadline != firstDeadline {
-			t.Fatal("retry replaced the original logical deadline")
+		// Each HTTP attempt has its own shorter physical timeout. It may
+		// move between attempts while remaining inside the same owner.
+		if !ok || deadline.After(ownerDeadline) || time.Until(deadline) <= 0 || time.Until(deadline) > rpc.client.Timeout {
+			t.Fatal("production request escaped its physical or original owner deadline")
 		}
 		raw := []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":"original"}`, calls))
 		chargedBytes += len(raw)
@@ -191,8 +196,14 @@ func TestReceiptCollectorRpcBoundedJoinedTransientRetainsOriginalDeadline(t *tes
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: body}, nil
 	})
-	rpc.wait = func(ctx context.Context, _ time.Duration) error { waits++; return ctx.Err() }
-	raw, err := rpc.call(t.Context(), "chain_getHeader", []any{"original"})
+	rpc.wait = func(waitCtx context.Context, _ time.Duration) error {
+		waits++
+		if deadline, ok := waitCtx.Deadline(); !ok || !deadline.Equal(ownerDeadline) {
+			t.Fatal("retry replaced the original logical owner deadline", deadline)
+		}
+		return waitCtx.Err()
+	}
+	raw, err := rpc.call(ctx, "chain_getHeader", []any{"original"})
 	if err != nil || string(raw) != `"original"` || calls != 2 || waits != 1 || rpc.requests != 2 || rpc.remaining != originalRemaining-chargedBytes {
 		t.Fatal("bounded transient recovery changed original request budget or evidence", string(raw), err, calls, waits, rpc.remaining)
 	}
