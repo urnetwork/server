@@ -896,6 +896,15 @@ func networkCreateAuthJwt(
 		createdUserId = server.NewId()
 		createdNetworkId = server.NewId()
 
+		// Another user can hold the identity in a child table only, without it
+		// on their network_user row (a sign-in or an email added to an existing
+		// account). addSsoAuthInTx would refuse it after the user is written,
+		// so it is refused here, before anything is written.
+		if validateUserAuthAvailability(ctx, tx, normalizedUserAuth, createdUserId) != nil {
+			refusalStatus = http.StatusConflict
+			return
+		}
+
 		// NetworkCreate checked the name before this transaction (see
 		// networkNameHeldInTx)
 		if networkNameHeldInTx(ctx, tx, validatedNetworkName) {
@@ -921,8 +930,10 @@ func networkCreateAuthJwt(
 			panic(err)
 		}
 
-		// insert into network_user_auth_sso
-		err = addSsoAuthInTx(
+		// insert into network_user_auth_sso. Its availability check passed
+		// above in this snapshot, so a refusal here raises: returning it would
+		// commit the user without its sign-in.
+		server.Raise(addSsoAuthInTx(
 			tx,
 			ctx,
 			&AddSsoAuthArgs{
@@ -931,13 +942,7 @@ func networkCreateAuthJwt(
 				ParsedAuthJwt: parsedAuthJwt,
 				AuthJwtType:   SsoAuthType(*networkCreate.AuthJwtType),
 			},
-		)
-
-		if err != nil {
-			glog.Infof("Error adding sso auth in tx: %s", err.Error())
-			created = false
-			return
-		}
+		))
 
 		_, err = tx.Exec(
 			ctx,
@@ -1029,6 +1034,18 @@ func networkCreateUserAuth(
 			return
 		}
 
+		createdUserId = server.NewId()
+		createdNetworkId = server.NewId()
+
+		// Another user can hold the user auth in a child table only, without it
+		// on their network_user row (an auth added to an existing account).
+		// addUserAuthInTx would refuse it after the user is written, so it is
+		// refused here, before anything is written.
+		if validateUserAuthAvailability(ctx, tx, *userAuth, createdUserId) != nil {
+			refusalStatus = http.StatusConflict
+			return
+		}
+
 		// the name as it is stored. NetworkCreate checked it before this
 		// transaction (see networkNameHeldInTx).
 		if networkNameHeldInTx(ctx, tx, validatedNetworkName) {
@@ -1036,9 +1053,6 @@ func networkCreateUserAuth(
 			refusalMessage = networkNameNotAvailableMessage
 			return
 		}
-
-		createdUserId = server.NewId()
-		createdNetworkId = server.NewId()
 
 		passwordSalt := createPasswordSalt()
 		passwordHash := computePasswordHashV1([]byte(*networkCreate.Password), passwordSalt)
@@ -1060,8 +1074,10 @@ func networkCreateUserAuth(
 		)
 		server.Raise(err)
 
-		// insert into network_user_auth_password
-		addUserAuthInTx(
+		// insert into network_user_auth_password. Its checks passed above in
+		// this snapshot, so a refusal here raises: ignoring it created the
+		// network without its password auth.
+		server.Raise(addUserAuthInTx(
 			tx,
 			&AddUserAuthArgs{
 				UserId:       createdUserId,
@@ -1071,7 +1087,7 @@ func networkCreateUserAuth(
 				Verified:     verified,
 			},
 			ctx,
-		)
+		))
 
 		_, err = tx.Exec(
 			ctx,
