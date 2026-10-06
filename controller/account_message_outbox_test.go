@@ -527,3 +527,17 @@ func TestAccountMessageTemplatesDecodeAndRender(t *testing.T) {
 		t.Fatalf("claim lease %s does not outlast two of the longest sends (%s)", accountMessageClaimLease, maxAccountMessageSendTimeout)
 	}
 }
+
+// The templates the model writes itself are registered under the names it
+// writes.
+func TestModelAccountMessageTemplatesAreRegistered(t *testing.T) {
+	for _, templateName := range []string{model.AuthPasswordSetTemplateName, model.NetworkWelcomeTemplateName} {
+		template, err := decodeAccountMessageTemplate(templateName, "{}")
+		if err != nil {
+			t.Fatalf("%s: %v", templateName, err)
+		}
+		if template.Name() != templateName {
+			t.Fatalf("model template %s decodes as %s", templateName, template.Name())
+		}
+	}
+}

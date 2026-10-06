@@ -82,6 +82,14 @@ var accountMessageTemplates = map[string]func() Template{
 	(&MissingWalletTemplate{}).Name(): func() Template {
 		return &MissingWalletTemplate{}
 	},
+	// written by the model (model.AuthPasswordSetTemplateName)
+	(&AuthPasswordSetTemplate{}).Name(): func() Template {
+		return &AuthPasswordSetTemplate{}
+	},
+	// written by the model (model.NetworkWelcomeTemplateName)
+	(&NetworkWelcomeTemplate{}).Name(): func() Template {
+		return &NetworkWelcomeTemplate{}
+	},
 }
 
 // Counts delivery outcomes by template and result (sent, retried, abandoned,

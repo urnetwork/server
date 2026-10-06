@@ -1,9 +1,10 @@
 package controller
 
 // Hermetic tests (no database) for the side effects of a successful
-// /auth/verify: the welcome email and onboarding enrollment belong to a new
+// /auth/verify after its commit: onboarding enrollment belongs to a new
 // account's sign-up only, never to an email or phone added later to an
-// existing account. The product-updates sync runs for every verification.
+// existing account. The product-updates sync runs for every verification. The
+// welcome email is owed in the verification's own transaction (model tests).
 
 import (
 	"context"
@@ -17,7 +18,6 @@ import (
 
 type authVerifyEffectsRecorder struct {
 	enrolled      []string
-	welcomed      []string
 	parsed        []string
 	syncedNetwork []server.Id
 }
@@ -33,9 +33,6 @@ func newAuthVerifyEffectsRecorder(byJwt *jwt.ByJwt) (*authVerifyEffectsRecorder,
 			recorder.parsed = append(recorder.parsed, signedByJwt)
 			return byJwt
 		},
-		sendWelcome: func(userAuth string) {
-			recorder.welcomed = append(recorder.welcomed, userAuth)
-		},
 		syncProductUpdates: func(verifiedSession *session.ClientSession) {
 			recorder.syncedNetwork = append(recorder.syncedNetwork, verifiedSession.ByJwt.NetworkId)
 		},
@@ -49,7 +46,7 @@ func authVerifyTestSession(t *testing.T) *session.ClientSession {
 	return session.NewLocalClientSession(ctx, "", nil)
 }
 
-func TestCompleteAuthVerifyNewAccountGetsWelcomeAndEnrollment(t *testing.T) {
+func TestCompleteAuthVerifyNewAccountGetsEnrollment(t *testing.T) {
 	networkId := server.NewId()
 	byJwt := &jwt.ByJwt{NetworkId: networkId, UserId: server.NewId()}
 	for _, userAuth := range []string{"new@fixture.example", "+15555550100"} {
@@ -66,9 +63,6 @@ func TestCompleteAuthVerifyNewAccountGetsWelcomeAndEnrollment(t *testing.T) {
 		if len(recorder.enrolled) != 1 || recorder.enrolled[0] != userAuth {
 			t.Errorf("%s: onboarding enrollments = %v, want one for the sign-up", userAuth, recorder.enrolled)
 		}
-		if len(recorder.welcomed) != 1 || recorder.welcomed[0] != userAuth {
-			t.Errorf("%s: welcome emails = %v, want one for the sign-up", userAuth, recorder.welcomed)
-		}
 		if len(recorder.syncedNetwork) != 1 || recorder.syncedNetwork[0] != networkId {
 			t.Errorf("%s: product-updates syncs = %v, want one for the network", userAuth, recorder.syncedNetwork)
 		}
@@ -77,7 +71,7 @@ func TestCompleteAuthVerifyNewAccountGetsWelcomeAndEnrollment(t *testing.T) {
 
 // A network created with Apple, Google or a wallet that adds an email sign-in
 // verifies it through /auth/verify. That is not a sign-up.
-func TestCompleteAuthVerifyAddedSignInGetsNoWelcomeOrEnrollment(t *testing.T) {
+func TestCompleteAuthVerifyAddedSignInGetsNoEnrollment(t *testing.T) {
 	networkId := server.NewId()
 	byJwt := &jwt.ByJwt{NetworkId: networkId, UserId: server.NewId()}
 	recorder, effects := newAuthVerifyEffectsRecorder(byJwt)
@@ -90,9 +84,6 @@ func TestCompleteAuthVerifyAddedSignInGetsNoWelcomeOrEnrollment(t *testing.T) {
 		authVerifyTestSession(t),
 		effects,
 	)
-	if len(recorder.welcomed) != 0 {
-		t.Errorf("welcome emails = %v, want none for an added sign-in", recorder.welcomed)
-	}
 	if len(recorder.enrolled) != 0 {
 		t.Errorf("onboarding enrollments = %v, want none for an added sign-in", recorder.enrolled)
 	}
@@ -114,7 +105,7 @@ func TestCompleteAuthVerifyFailedVerificationHasNoEffects(t *testing.T) {
 		authVerifyTestSession(t),
 		effects,
 	)
-	if len(recorder.enrolled)+len(recorder.welcomed)+len(recorder.parsed)+len(recorder.syncedNetwork) != 0 {
+	if len(recorder.enrolled)+len(recorder.parsed)+len(recorder.syncedNetwork) != 0 {
 		t.Errorf("failed verification had effects: %+v", recorder)
 	}
 }

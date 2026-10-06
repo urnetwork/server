@@ -1212,6 +1212,12 @@ func AuthVerify(
 			`,
 			userAuthVerifyId,
 		))
+
+		if newAccount {
+			// the welcome commits with the verification that completes the
+			// sign-up
+			addNetworkWelcomeInTx(session.Ctx, tx, networkId, userId, *userAuth)
+		}
 	})
 
 	SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
@@ -1655,6 +1661,9 @@ func AuthPasswordSet(
 			`,
 			userId,
 		))
+
+		// the password-changed notice commits with the change
+		addPasswordSetNoticeInTx(session.Ctx, tx, networkId, *userAuthResetId)
 	})
 
 	SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
