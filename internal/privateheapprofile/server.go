@@ -29,15 +29,18 @@ type Config struct {
 }
 
 type Request struct {
-	Schema   int      `json:"schema"`
-	Expected Identity `json:"expected"`
+	Schema    int      `json:"schema"`
+	Expected  Identity `json:"expected"`
+	Operation string   `json:"operation,omitempty"`
+	RequestID string   `json:"request_id,omitempty"`
 }
 
 type Response struct {
-	Schema   int      `json:"schema"`
-	Status   string   `json:"status"`
-	Identity Identity `json:"identity"`
-	Capture  *Capture `json:"capture,omitempty"`
+	Schema    int      `json:"schema"`
+	Status    string   `json:"status"`
+	Identity  Identity `json:"identity"`
+	Capture   *Capture `json:"capture,omitempty"`
+	RequestID string   `json:"request_id,omitempty"`
 }
 
 type Server struct {
@@ -54,6 +57,7 @@ type Server struct {
 	socketInfo os.FileInfo
 	peer       func(*net.UnixConn) bool
 	capture    func(context.Context, func() Companion) (Capture, error)
+	retained   retainedResponse
 }
 
 func ValidTarget(target string) bool {
@@ -158,19 +162,63 @@ func (s *Server) handle(conn *net.UnixConn) {
 	if decoder.Decode(&extra) != io.EOF {
 		return
 	}
-	if request.Schema != 1 || request.Expected != s.identity {
-		s.respond(conn, "identity_mismatch", nil)
+	if !validRequest(request) {
+		return
+	}
+	if request.Expected != s.identity {
+		if request.Schema == 2 {
+			s.respondV2(conn, request.RequestID, "identity_mismatch", nil)
+		} else {
+			s.respond(conn, "identity_mismatch", nil)
+		}
+		return
+	}
+	if request.Schema == 2 && request.Operation == "status" {
+		s.respondStatus(conn, request.RequestID)
+		return
+	}
+	if request.Schema == 2 && request.Operation == "retrieve" {
+		wire, state := s.retained.retrieve(request.RequestID, time.Now())
+		if wire == nil {
+			s.respondV2(conn, request.RequestID, state, nil)
+			return
+		}
+		// The retrieval is consumed before writing, including a failed write.
+		// It never invokes capture and returns the exact originally retained bytes.
+		_, _ = conn.Write(wire)
 		return
 	}
 	if !s.used.CompareAndSwap(false, true) {
-		s.respond(conn, "already_consumed", nil)
+		if request.Schema == 2 {
+			s.respondV2(conn, request.RequestID, "already_consumed", nil)
+		} else {
+			s.respond(conn, "already_consumed", nil)
+		}
 		return
 	}
+	s.retained.begin(request.RequestID)
 	ctx, cancel := context.WithTimeout(s.ctx, CaptureBudget)
 	defer cancel()
 	capture, err := s.capture(ctx, s.companion)
 	if err != nil || ctx.Err() != nil || len(capture.Profile) > MaxProfileBytes {
-		s.respond(conn, "capture_unavailable", nil)
+		s.retained.failed()
+		if request.Schema == 2 {
+			s.respondV2(conn, request.RequestID, "capture_unavailable", nil)
+		} else {
+			s.respond(conn, "capture_unavailable", nil)
+		}
+		return
+	}
+	if request.Schema == 2 {
+		wire, err := responseWire(s.identity, request.RequestID, capture)
+		if err != nil || ctx.Err() != nil || !s.retained.keep(s.ctx, wire, responseTTL) {
+			s.retained.failed()
+			s.respondV2(conn, request.RequestID, "capture_unavailable", nil)
+			return
+		}
+		// Publication to the bounded retention owner precedes the first write.
+		// A reader validation failure cannot silently destroy the only copy.
+		_, _ = conn.Write(wire)
 		return
 	}
 	if s.respond(conn, "complete", &capture) == nil {
@@ -196,6 +244,7 @@ func (s *Server) Close() {
 	}
 	s.mu.Unlock()
 	<-s.done
+	s.retained.close()
 	if info, err := os.Lstat(s.path); err == nil && os.SameFile(info, s.socketInfo) {
 		_ = os.Remove(s.path)
 	}

@@ -6268,6 +6268,19 @@ return zero; one or two requested IDs can correctly return one or two. The
 metric's default `quality` label does not mean ranking ran, and `unknown`
 caller-country is expected when this branch skips the IP-country lookup.
 
+Expected family availability is an independent incident qualifier. When the
+operator explicitly confirms that IPv6 providers are not yet available during
+an ongoing rollout, retained `v6` empty-result cohorts describe that expected
+absence; they do not establish a regression in supported IPv4 selection or
+justify changing family intent or eligibility. Record the operator statement
+and observation clock, keep the measured zero counts, and resume ordinary IPv6
+availability assessment when support is enabled. The current reducer has no
+family-support input, so an emitted IPv6 PAGE must not be silently rewritten as
+healthy. Keep `any` (dualstack then IPv4-only) and `v4` discovery findings,
+initial-picker errors, and supported-route failures independently actionable.
+An IPv6 ingress address is not evidence of available IPv6 providers. See the
+published-family and incident controls in §2.9c.
+
 The existing volume/ratio threshold crossing retains the direct cohort's exact
 response counts as this intent-unknown WARN. Do not infer either direct health
 or a provider failure: the metric lacks requested, nonexcluded, and expected
