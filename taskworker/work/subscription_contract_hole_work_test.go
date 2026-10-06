@@ -144,6 +144,9 @@ func TestContractHoleRefreshTaskReadinessAndSourceFailure(t *testing.T) {
 		if err == nil || result != nil || string(before) != string(after) || testutil.ToFloat64(contractHoleRefreshAvailable) != 0 {
 			t.Fatalf("source failure moved progress: result=%+v error=%v before=%s after=%s", result, err, before, after)
 		}
+		if receipt, err := model.ReadContractHoleReadiness(ctx); err == nil || receipt != nil {
+			t.Fatalf("canceled source failure retained a healthy receipt: receipt=%+v error=%v", receipt, err)
+		}
 		if !model.HasOpenContractHole(ctx, source, destination) {
 			t.Fatal("readiness loss revoked an independent healthy pair")
 		}

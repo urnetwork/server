@@ -472,6 +472,10 @@ the receipt. Its expiry is capped at pass-start plus 60 seconds; an end-of-pass
 success cannot hide an expired early pair. Reading the receipt rechecks the
 witness. Packet reads never consult this receipt, so unrelated partial refresh
 failure does not globally deny healthy pairs.
+Loss of coverage attempts a one-second Redis cleanup independent of source
+cancellation. If Redis itself refuses that cleanup, invalidation is best effort:
+the previous receipt still expires at its original pass-start deadline. Assess
+the receipt alongside current failure/availability observations during rollout.
 
 Before reader rollout, prove task adoption, initial coverage against a fresh
 distinct Main cohort census, and repeated full-pass completion inside the

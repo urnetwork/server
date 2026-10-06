@@ -123,8 +123,9 @@ func PublishContractHoleReadiness(ctx context.Context, receipt *ContractHoleRead
 }
 
 // Loss of coverage closes the rollout gate without changing any pair's counter.
+// The task owns one bounded cleanup even after its source context was canceled.
 func InvalidateContractHoleReadiness(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, contractHoleRedisTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), contractHoleRedisTimeout)
 	defer cancel()
 	return server.RedisWithDeadline(ctx, func(client server.RedisClient) error {
 		return client.Eval(ctx, `return redis.call('DEL',KEYS[1])`, []string{contractHoleReadinessKey}).Err()
