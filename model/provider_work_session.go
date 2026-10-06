@@ -27,12 +27,11 @@ func providerWorkOptionalInTx(ctx context.Context, tx server.PgTx, fn func(serve
 
 // Fences also apply to unsigned current callers. Before the optional migration
 // exists, a savepoint preserves their original operation and compatibility.
+// A savepoint that cannot be created raises: the transaction is aborted, its
+// context canceled or its connection lost, so the caller cannot go on either.
 func providerWorkOptionalSchemaInTx(ctx context.Context, tx server.PgTx, fn func(server.PgTx) error) bool {
-	optional, err := tx.Begin(ctx)
-	if err != nil {
-		return false
-	}
-	if err = fn(optional); err != nil {
+	optional := server.RaisePgResult(tx.Begin(ctx))
+	if err := fn(optional); err != nil {
 		server.Raise(optional.Rollback(ctx))
 		server.Raise(ctx.Err())
 		var pgErr *pgconn.PgError
