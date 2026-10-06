@@ -1,9 +1,10 @@
 // Admission of competition submissions around their retained upload. The
 // upload runs with no transaction or lock held, a submission is admitted only
 // if its round still admits once the upload is done, an admission that reruns
-// uploads once, and a failed or timed-out upload writes nothing. The probe
-// archive retains through a local blob store and runs a hook inside the
-// upload, so a test acts while an upload is in progress instead of sleeping.
+// uploads once, and a failed or timed-out upload writes nothing; a round's
+// workload upload is bounded too. The probe archive retains submissions
+// through a local blob store and runs hooks inside the uploads, so a test acts
+// while an upload is in progress instead of sleeping.
 package controller
 
 import (
@@ -23,14 +24,28 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Retains through a real local archive and counts uploads. The hook runs
-// inside the upload, before anything is retained; an error from it fails the
-// upload.
+// Retains submissions through a real local archive and counts their uploads.
+// Each hook runs inside its upload, before anything is retained; an error from
+// it fails the upload. Round workloads are not retained.
 type submissionArchiveProbe struct {
 	fakeArtifactArchive
-	retained     *blobArtifactArchive
-	uploadCount  atomic.Int32
-	duringUpload func(ctx context.Context, patch *CanonicalPatch) error
+	retained          *blobArtifactArchive
+	uploadCount       atomic.Int32
+	duringUpload      func(ctx context.Context, patch *CanonicalPatch) error
+	duringRoundUpload func(ctx context.Context) error
+}
+
+// Runs the round hook in place of an upload.
+func (self *submissionArchiveProbe) ArchiveRound(
+	ctx context.Context,
+	settings *Settings,
+	round *roundRecord,
+	workload workloadArtifact,
+) error {
+	if self.duringRoundUpload != nil {
+		return self.duringRoundUpload(ctx)
+	}
+	return nil
 }
 
 // Runs the hook, then retains the patch.
@@ -706,5 +721,46 @@ func TestCompetitionSubmissionUploadsOnlyForNewJobs(t *testing.T) {
 			t.Fatalf("submission to a closed round error = %v, want ErrRoundClosed", err)
 		}
 		requireUploads("a closed round", 1)
+	})
+}
+
+// A round's workload upload carries its own deadline, the same kind of bound
+// as a submission upload, even when the operator's request has none; a failed
+// upload refuses the round with nothing written.
+func TestCompetitionRoundUploadIsBoundedByTimeout(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.RerunCount = 0
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		fixture := newSubmissionArchiveFixture(t, ctx, "round-upload")
+		var uploadBound time.Duration
+		fixture.probe.duringRoundUpload = func(uploadCtx context.Context) error {
+			enteredAt := time.Now()
+			deadline, bounded := uploadCtx.Deadline()
+			if !bounded {
+				return errors.New("round upload deadline is unbounded")
+			}
+			uploadBound = deadline.Sub(enteredAt)
+			return nil
+		}
+		round := fixture.openStagingRound(t, ctx)
+		if uploadBound <= 0 || defaultRoundArchiveTimeout < uploadBound {
+			t.Fatalf("round upload bound = %s, want at most %s", uploadBound, defaultRoundArchiveTimeout)
+		}
+
+		fixture.probe.duringRoundUpload = func(context.Context) error {
+			return errors.New("synthetic object store failure")
+		}
+		if replacement, err := fixture.store.CreateStagingRound(ctx, fixture.settings, GenerateRoundArgs{
+			OpensAt:  fixture.clock,
+			ClosesAt: fixture.clock.Add(time.Hour),
+			RevealAt: fixture.clock.Add(time.Hour),
+		}, true); err == nil {
+			t.Fatalf("round created with a failed workload upload: %#v", replacement)
+		}
+		current, err := fixture.store.CurrentStagingRound(ctx, fixture.settings)
+		if err != nil || current == nil || current.RoundId != round.RoundId || current.Canceled {
+			t.Fatalf("current staging round after a failed upload = %#v, %v, want %s unchanged", current, err, round.RoundId)
+		}
 	})
 }

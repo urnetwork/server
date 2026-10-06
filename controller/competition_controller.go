@@ -3982,6 +3982,12 @@ func evaluatorImageDigestFromPolicy(stored json.RawMessage) (string, error) {
 	return policy.EvaluatorImageDigest, nil
 }
 
+// Bounds the retained upload of one round's workload, as the submission upload
+// is bounded. Round creation uploads before its transaction and holds no lock,
+// so the bound limits only the operator's own request; it stays under the
+// api's 30 s write timeout so the refusal still gets answered.
+const defaultRoundArchiveTimeout = 15 * time.Second
+
 func (self PostgresStore) prepareRound(
 	ctx context.Context,
 	settings *Settings,
@@ -4031,7 +4037,9 @@ func (self PostgresStore) prepareRound(
 	if settings.artifactArchive == nil {
 		return nil, errors.New("competition artifact archive is unavailable")
 	}
-	if err := settings.artifactArchive.ArchiveRound(ctx, settings, round, workload); err != nil {
+	archiveCtx, archiveCancel := context.WithTimeout(ctx, defaultRoundArchiveTimeout)
+	defer archiveCancel()
+	if err := settings.artifactArchive.ArchiveRound(archiveCtx, settings, round, workload); err != nil {
 		return nil, fmt.Errorf("archive round workload: %w", err)
 	}
 	return round, nil
