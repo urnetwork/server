@@ -46,6 +46,8 @@ func authVerifyTestSession(t *testing.T) *session.ClientSession {
 	return session.NewLocalClientSession(ctx, "", nil)
 }
 
+// The verification that completes an email or phone sign-up enrolls the
+// network in onboarding and syncs its product-updates preference.
 func TestCompleteAuthVerifyNewAccountGetsEnrollment(t *testing.T) {
 	networkId := server.NewId()
 	byJwt := &jwt.ByJwt{NetworkId: networkId, UserId: server.NewId()}

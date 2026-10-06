@@ -37,40 +37,6 @@ const (
 	NetworkWelcomeTemplateName  = "network_welcome"
 )
 
-// Owes the notice that the account's password changed, to the admin's email or
-// phone, in the transaction that changes it: one per reset code. An admin
-// without email or phone (an account created with a wallet or SSO), or a
-// network that is gone, gets none.
-func addPasswordSetNoticeInTx(ctx context.Context, tx server.PgTx, networkId server.Id, userAuthResetId server.Id) {
-	userAuth, err := getUserAuth(ctx, tx, networkId)
-	if err != nil || userAuth == "" {
-		return
-	}
-	normalUserAuth, _ := NormalUserAuthV1(&userAuth)
-	if normalUserAuth == nil {
-		return
-	}
-	AddAccountMessageInTx(ctx, tx, &AccountMessageArgs{
-		Key:          userAuthResetId.String(),
-		NetworkId:    &networkId,
-		UserAuth:     *normalUserAuth,
-		TemplateName: AuthPasswordSetTemplateName,
-		TemplateJson: "{}",
-	})
-}
-
-// Owes the welcome to the email or phone that completes a sign-up, in the
-// transaction that marks it verified: one per user.
-func addNetworkWelcomeInTx(ctx context.Context, tx server.PgTx, networkId server.Id, userId server.Id, userAuth string) {
-	AddAccountMessageInTx(ctx, tx, &AccountMessageArgs{
-		Key:          userId.String(),
-		NetworkId:    &networkId,
-		UserAuth:     userAuth,
-		TemplateName: NetworkWelcomeTemplateName,
-		TemplateJson: "{}",
-	})
-}
-
 // The longest last error kept on a message (varchar(512)).
 const accountMessageLastErrorMaxLength = 512
 
@@ -511,4 +477,38 @@ func GetAccountMessageByKey(ctx context.Context, templateName string, key string
 		})
 	})
 	return
+}
+
+// Owes the notice that the account's password changed, to the admin's email or
+// phone, in the transaction that changes it: one per reset code. An admin
+// without email or phone (an account created with a wallet or SSO), or a
+// network that is gone, gets none.
+func addPasswordSetNoticeInTx(ctx context.Context, tx server.PgTx, networkId server.Id, userAuthResetId server.Id) {
+	userAuth, err := getUserAuth(ctx, tx, networkId)
+	if err != nil || userAuth == "" {
+		return
+	}
+	normalUserAuth, _ := NormalUserAuthV1(&userAuth)
+	if normalUserAuth == nil {
+		return
+	}
+	AddAccountMessageInTx(ctx, tx, &AccountMessageArgs{
+		Key:          userAuthResetId.String(),
+		NetworkId:    &networkId,
+		UserAuth:     *normalUserAuth,
+		TemplateName: AuthPasswordSetTemplateName,
+		TemplateJson: "{}",
+	})
+}
+
+// Owes the welcome to the email or phone that completes a sign-up, in the
+// transaction that marks it verified: one per user.
+func addNetworkWelcomeInTx(ctx context.Context, tx server.PgTx, networkId server.Id, userId server.Id, userAuth string) {
+	AddAccountMessageInTx(ctx, tx, &AccountMessageArgs{
+		Key:          userId.String(),
+		NetworkId:    &networkId,
+		UserAuth:     userAuth,
+		TemplateName: NetworkWelcomeTemplateName,
+		TemplateJson: "{}",
+	})
 }

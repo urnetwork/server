@@ -18,6 +18,8 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
 )
 
 // One send the outbox test sender saw.
@@ -540,4 +542,121 @@ func TestModelAccountMessageTemplatesAreRegistered(t *testing.T) {
 			t.Fatalf("model template %s decodes as %s", templateName, template.Name())
 		}
 	}
+}
+
+// The delivery task delivers what is due through the message sender and
+// schedules its next run after the interval; a run whose context ends early
+// asks for the next run at once.
+func TestDeliverAccountMessagesTaskDeliversAndSchedulesTheNextRun(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		addOutboxTestMessage(ctx, "synthetic-task", "outbox-task@synthetic.example")
+		sender := newOutboxTestSender()
+		previousSender := GetAWSMessageSender()
+		SetMessageSender(sender)
+		defer SetMessageSender(previousSender)
+
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+		defer clientSession.Cancel()
+		result, err := DeliverAccountMessages(&DeliverAccountMessagesArgs{}, clientSession)
+		if err != nil || result.SentCount != 1 || result.More {
+			t.Fatalf("delivery run = %+v err=%v, want one sent and nothing left", result, err)
+		}
+		if sends := sender.sent(); len(sends) != 1 {
+			t.Fatalf("delivered %d messages, want 1", len(sends))
+		}
+
+		beforePost := server.NowUtc()
+		server.Tx(ctx, func(tx server.PgTx) {
+			if err := DeliverAccountMessagesPost(&DeliverAccountMessagesArgs{}, result, clientSession, tx); err != nil {
+				t.Fatal(err)
+			}
+		})
+		var runAt time.Time
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(
+				ctx,
+				`SELECT run_at FROM pending_task WHERE run_once_key = $1`,
+				task.RunOnce("deliver_account_messages").String(),
+			).Scan(&runAt))
+		})
+		if runAt.Before(beforePost.Add(accountMessageDeliverInterval - time.Second)) {
+			t.Fatalf("next run at %s, want about %s after %s", runAt, accountMessageDeliverInterval, beforePost)
+		}
+
+		// a drain or the max time ends a run before it claims more
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+		addOutboxTestMessage(ctx, "synthetic-task-canceled", "outbox-task-canceled@synthetic.example")
+		delivery := newAccountMessageDelivery(canceledCtx, sender, server.NowUtc, defaultAccountMessageDeliverySettings())
+		if more := delivery.Run(); !more || delivery.sentCount != 0 {
+			t.Fatalf("canceled run sent %d and asked for more %t, want none sent and the next run at once", delivery.sentCount, more)
+		}
+	})
+}
+
+// A `MessageSender` that runs a hook inside each send and counts the sends.
+type outboxHookSender struct {
+	onSend    func()
+	sendCount int
+}
+
+// A `MessageSender`.
+func (self *outboxHookSender) SendAccountMessageTemplate(string, Template, ...any) error {
+	self.sendCount += 1
+	self.onSend()
+	return nil
+}
+
+// A send that went out while the run was being canceled (a drain, the task's
+// max time) is still recorded, so it is not sent again when its lease ends.
+func TestAccountMessageOutboxRecordsASendWhenTheRunIsCanceledDuringIt(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		addOutboxTestMessage(ctx, "synthetic-canceled-send", "outbox-canceled-send@synthetic.example")
+		runCtx, runCancel := context.WithCancel(ctx)
+		defer runCancel()
+		sender := &outboxHookSender{onSend: runCancel}
+
+		now := server.NowUtc()
+		delivery := newAccountMessageDelivery(runCtx, sender, func() time.Time { return now }, defaultAccountMessageDeliverySettings())
+		if more := delivery.Run(); !more || delivery.sentCount != 1 {
+			t.Fatalf("canceled run recorded %d sends and asked for more %t, want the send recorded", delivery.sentCount, more)
+		}
+		message := outboxTestMessage(t, ctx, "synthetic-canceled-send")
+		if message.SentTime == nil || message.ClaimId != nil {
+			t.Fatalf("message = %+v, want recorded as sent", message)
+		}
+		deliverAccountMessagesAt(ctx, sender, now.Add(2*accountMessageClaimLease))
+		if sender.sendCount != 1 {
+			t.Fatalf("sent %d times, want once", sender.sendCount)
+		}
+	})
+}
+
+// A message claimed more often than the most attempts, each time without a
+// recorded outcome (a process that keeps stopping in the send), is abandoned
+// without another send.
+func TestAccountMessageOutboxAbandonsAMessageClaimedTooOftenWithoutAnOutcome(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		addOutboxTestMessage(ctx, "synthetic-crash-loop", "outbox-crash-loop@synthetic.example")
+		settings := defaultAccountMessageDeliverySettings()
+		settings.maxAttemptCount = 3
+
+		now := server.NowUtc()
+		for range settings.maxAttemptCount {
+			if message := model.ClaimAccountMessage(ctx, now, settings.claimLease); message == nil {
+				t.Fatal("the message was not claimable after its lease ended")
+			}
+			now = now.Add(settings.claimLease)
+		}
+		sender := newOutboxTestSender()
+		delivery := deliverAccountMessagesWithSettings(ctx, sender, now, settings)
+		message := outboxTestMessage(t, ctx, "synthetic-crash-loop")
+		if len(sender.sent())+sender.failed() != 0 || delivery.abandonCount != 1 || message.AbandonTime == nil ||
+			!strings.Contains(message.LastError, "without a recorded outcome") {
+			t.Fatalf("message = %+v (abandoned %d, sends %d), want abandoned unsent", message, delivery.abandonCount, len(sender.sent()))
+		}
+	})
 }

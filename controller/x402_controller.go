@@ -976,7 +976,7 @@ func init() {
 // X402ReceiptTemplate in aws_controller). One receipt per settle transaction.
 //
 // Only when the caller supplied an email (a nil receipt is none). The receipt
-// must NEVER fail the purchase: the email is the agent's input, so one that is
+// must never fail the purchase: the email is the agent's input, so one that is
 // not an address an account message can go to, or does not fit the outbox, is
 // counted and skipped, never written. The delivery task retries a failed send
 // after the commit.

@@ -453,10 +453,10 @@ func PlanPaymentsWithMaxDurationLoop(
 	return PlanPaymentsWithMaxDurationLoopInTx(ctx, maxDuration, nil, onSlice)
 }
 
-// PlanPaymentsWithMaxDurationLoopInTx is PlanPaymentsWithMaxDurationLoop with
-// writeInTx run in each slice's transaction once the slice's plan is built:
-// what it writes commits with the slice or not at all (the payout run's held
-// missing-wallet notices).
+// The bounded drain of PlanPaymentsWithMaxDurationLoop, with writeInTx run in
+// each slice's transaction once the slice's plan is built: what it writes
+// commits with the slice or not at all (the payout run's held missing-wallet
+// notices).
 func PlanPaymentsWithMaxDurationLoopInTx(
 	ctx context.Context,
 	maxDuration time.Duration,

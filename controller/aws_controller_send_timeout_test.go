@@ -25,7 +25,7 @@ import (
 const awsSendTimeoutTestGuard = 1 * time.Minute
 
 // A local stand-in for an AWS endpoint that either never answers or answers
-// with a fixed body, and keeps the last request it read.
+// with a fixed body, and keeps the requests it read.
 type awsEndpointFixture struct {
 	server      *httptest.Server
 	received    chan *http.Request
@@ -83,8 +83,8 @@ func (self *awsEndpointFixture) sender(sendTimeout time.Duration) *AWSMessageSen
 	}
 }
 
-// The request the endpoint read, or nil if none arrived.
-func (self *awsEndpointFixture) lastRequest() *http.Request {
+// The oldest request the endpoint read and the test has not taken, or nil.
+func (self *awsEndpointFixture) receivedRequest() *http.Request {
 	select {
 	case r := <-self.received:
 		return r
@@ -133,7 +133,7 @@ func TestAWSMessageSenderEmailStopsAtTheSendTimeout(t *testing.T) {
 	if elapsed := time.Since(startTime); elapsed < 200*time.Millisecond {
 		t.Fatalf("the send gave up after %s, before its bound", elapsed)
 	}
-	request := endpoint.lastRequest()
+	request := endpoint.receivedRequest()
 	if request == nil {
 		t.Fatal("the endpoint saw no SES call")
 	}
@@ -157,7 +157,7 @@ func TestAWSMessageSenderSmsStopsAtTheSendTimeout(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("send error = %v, want a timeout", err)
 	}
-	request := endpoint.lastRequest()
+	request := endpoint.receivedRequest()
 	if request == nil || request.Header.Get("X-Amz-Target") != "PinpointSMSVoiceV2.SendTextMessage" {
 		t.Fatalf("the endpoint saw %v, want a Pinpoint SendTextMessage call", request)
 	}
@@ -190,7 +190,7 @@ func TestAWSMessageSenderEmailSendsWhenSesAnswers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send error = %v, want none", err)
 	}
-	request := endpoint.lastRequest()
+	request := endpoint.receivedRequest()
 	if request == nil {
 		t.Fatal("the endpoint saw no SES call")
 	}
@@ -219,7 +219,7 @@ func TestAWSMessageSenderSmsSendsWhenPinpointAnswers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("send error = %v, want none", err)
 	}
-	request := endpoint.lastRequest()
+	request := endpoint.receivedRequest()
 	if request == nil || request.Header.Get("X-Amz-Target") != "PinpointSMSVoiceV2.SendTextMessage" {
 		t.Fatalf("the endpoint saw %v, want a Pinpoint SendTextMessage call", request)
 	}

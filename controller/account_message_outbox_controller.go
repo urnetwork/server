@@ -67,6 +67,9 @@ const accountMessageRemoveLimit = 10000
 // The minimum time between two default-level reports of each delivery problem.
 const accountMessageDeliveryReportInterval = 1 * time.Minute
 
+// Bounds recording a send's outcome, which outlives the run's cancellation.
+const accountMessageRecordTimeout = 30 * time.Second
+
 // The templates that go through the outbox, by name, each with a constructor the
 // stored fields decode into.
 var accountMessageTemplates = map[string]func() Template{
@@ -275,25 +278,42 @@ func (self *accountMessageDelivery) retryDelay(attemptCount int) time.Duration {
 	return min(delay, self.settings.retryMaxDelay)
 }
 
-// Sends one claimed message and records the outcome.
+// Sends one claimed message and records the outcome. The record runs on a
+// context detached from the run's cancellation (a drain, the task's max time):
+// a send that went out must be recorded, or it is sent again when its lease
+// ends. A message claimed more often than the most attempts, each without a
+// recorded outcome (a process that keeps stopping in the send), is abandoned
+// unsent.
 func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
+	recordCtx, recordCancel := context.WithTimeout(context.WithoutCancel(self.ctx), accountMessageRecordTimeout)
+	defer recordCancel()
+
 	templateLabel := accountMessageTemplateLabel(message.TemplateName)
-	template, err := decodeAccountMessageTemplate(message.TemplateName, message.TemplateJson)
-	if err == nil {
-		err = self.sender.SendAccountMessageTemplate(message.UserAuth, template)
-		if err == nil {
-			self.consecutiveFailureCount = 0
-			if model.CompleteAccountMessage(self.ctx, message.MessageId, *message.ClaimId, self.now()) {
-				self.sentCount += 1
-				accountMessageDeliveryCounter.WithLabelValues(templateLabel, "sent").Inc()
-			} else {
-				self.reportLeaseLost(message)
-			}
-			return
+	err := func() error {
+		if self.settings.maxAttemptCount < message.AttemptCount {
+			return fmt.Errorf("claimed %d times without a recorded outcome", message.AttemptCount)
 		}
-		// failed sends in a row end the run; a message that does not decode
-		// says nothing about the sender
-		self.consecutiveFailureCount += 1
+		template, err := decodeAccountMessageTemplate(message.TemplateName, message.TemplateJson)
+		if err != nil {
+			// says nothing about the sender
+			return err
+		}
+		if err := self.sender.SendAccountMessageTemplate(message.UserAuth, template); err != nil {
+			// failed sends in a row end the run
+			self.consecutiveFailureCount += 1
+			return err
+		}
+		self.consecutiveFailureCount = 0
+		return nil
+	}()
+	if err == nil {
+		if model.CompleteAccountMessage(recordCtx, message.MessageId, *message.ClaimId, self.now()) {
+			self.sentCount += 1
+			accountMessageDeliveryCounter.WithLabelValues(templateLabel, "sent").Inc()
+		} else {
+			self.reportLeaseLost(message)
+		}
+		return
 	}
 
 	failure := "failed"
@@ -302,7 +322,7 @@ func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
 	}
 	now := self.now()
 	if self.settings.maxAttemptCount <= message.AttemptCount {
-		if !model.AbandonAccountMessage(self.ctx, message.MessageId, *message.ClaimId, now, err.Error()) {
+		if !model.AbandonAccountMessage(recordCtx, message.MessageId, *message.ClaimId, now, err.Error()) {
 			self.reportLeaseLost(message)
 			return
 		}
@@ -321,7 +341,7 @@ func (self *accountMessageDelivery) deliver(message *model.AccountMessage) {
 		return
 	}
 	deliverTime := now.Add(self.retryDelay(message.AttemptCount))
-	if !model.RetryAccountMessage(self.ctx, message.MessageId, *message.ClaimId, deliverTime, err.Error()) {
+	if !model.RetryAccountMessage(recordCtx, message.MessageId, *message.ClaimId, deliverTime, err.Error()) {
 		self.reportLeaseLost(message)
 		return
 	}
@@ -406,11 +426,16 @@ func DeliverAccountMessages(
 		defaultAccountMessageDeliverySettings(),
 	)
 	more := delivery.Run()
-	model.RemoveFinishedAccountMessages(
-		clientSession.Ctx,
-		server.NowUtc().Add(-accountMessageRetention),
-		accountMessageRemoveLimit,
-	)
+	select {
+	case <-clientSession.Ctx.Done():
+		// a drain or the max time ended the run; the next run removes them
+	default:
+		model.RemoveFinishedAccountMessages(
+			clientSession.Ctx,
+			server.NowUtc().Add(-accountMessageRetention),
+			accountMessageRemoveLimit,
+		)
+	}
 	return &DeliverAccountMessagesResult{
 		SentCount:    delivery.sentCount,
 		RetryCount:   delivery.retryCount,

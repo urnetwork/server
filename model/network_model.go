@@ -1617,8 +1617,8 @@ func GetNetworkAdminUserAuth(ctx context.Context, networkId server.Id) (networkN
 	return
 }
 
-// GetNetworkAdminUserAuth on the caller's transaction, for a note written in
-// the transaction that owes it.
+// The network's name and admin login read on the caller's transaction, for a
+// note written in the transaction that owes it.
 func GetNetworkAdminUserAuthInTx(ctx context.Context, tx server.PgTx, networkId server.Id) (networkName string, userAuth string, ok bool) {
 	return getNetworkAdminUserAuth(ctx, tx, networkId)
 }

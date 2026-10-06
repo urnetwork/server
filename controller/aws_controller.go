@@ -324,6 +324,7 @@ type AWSMessageSender struct {
 	credentials *credentials.Credentials
 }
 
+// A `MessageSender`: an email address gets the email, a phone number the SMS.
 func (self *AWSMessageSender) SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error {
 
 	normalUserAuth, userAuthType := model.NormalUserAuth(userAuth)

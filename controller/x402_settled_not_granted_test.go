@@ -90,6 +90,7 @@ type x402FakeGrants struct {
 	calls   int
 }
 
+// Stands in for both grant functions; the receipt is not modeled.
 func (self *x402FakeGrants) grant(_ context.Context, _ server.Id, sku *X402Sku, _ model.NanoCents, settleResponse *X402SettleResponse, _ *x402Receipt) error {
 	self.calls += 1
 	if self.err != nil {
