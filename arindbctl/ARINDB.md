@@ -488,7 +488,8 @@ BT/Plusnet AS6871, OneBroadband AS17665, XL Axiata AS24203 and YouFibre
 AS212655. It would contain 5,209 subscriber groups and 5,478 ASNs across the
 same 160 country contexts. Both preserve every negative object, policy and
 feed. Their cumulative native parser/augmentation controls later passed with
-the five-ASN successor below; its completed artifact awaits readback qualification.
+the five-ASN successor below; its completed artifact passed the four readbacks
+recorded below.
 No retained Main provider sample is joined to these additions.
 
 A further cumulative candidate (`320b4c10`) appends five exact US ASNs to
@@ -514,8 +515,9 @@ review `5dd1d47d` verified all 26 source pins, the exact predecessor byte prefix
 and five appended entries, and repeated all seven controls. Six cumulative
 native parser/augmentation tests then passed under independent gate `ddd88d32`
 in 9.0 seconds with 297,844,736 bytes of sampled group RSS. They exercise the
-19 prior additions and five new identities with the existing vetoes. A complete
-generated artifact still needs qualification. No AS3356, AS3549, affiliate, parent or
+19 prior additions and five new identities with the existing vetoes. The complete
+generated artifact subsequently passed its separate readbacks. No AS3356,
+AS3549, affiliate, parent or
 customer ASN gains approval by association. Neither the frozen `4bc85427`
 update nor the separate earlier candidates were changed in place.
 
@@ -539,7 +541,7 @@ work but does not establish a four-GiB build budget. The reuse
 executor retains 12-GiB host admission and RSS caps, the immediate one-GiB
 host floor and existing disk floors; only its native and wall deadlines shrink
 to 30 and 31 minutes. All 40 builder Go files, including tests, match between
-qualified source `0bb38ed6` and canonical `cab28202`. This file parity does not
+qualified source `0bb38ed6` and canonical `cf7ced9e`. This file parity does not
 establish equivalence of their surrounding module graphs. The prepared
 executor requires the qualified binary and original frozen graph. Independent
 gate `d9de0c9a` binds the six actual catalog controls, 14 synthetic controls,
@@ -561,20 +563,55 @@ The new manifest reports 4,706,008 inferred subscriber partitions versus
 3,198,507 in its predecessor. These are origin-stage counters before the
 hosting and address overlays, with changed partition boundaries; they are not
 independently traversed final populations, address totals or live-provider
-gains. Full, native, mapped and targeted policy readbacks must bind the new
-final hash and retained-base lineage before release review. The generated
-artifact is not yet qualified for activation. Main adoption and recovered
-provider Quality remain unproved.
+gains. All four exact-hash readbacks completed successfully on October 6 at
+21:31 UTC. Combined independent receipt `f72964a9` binds their contracts,
+output summaries, lineage and resource telemetry:
+
+| Readback | Actual receipt | Evidence checked | Elapsed seconds | Peak sampled group RSS bytes |
+| --- | --- | --- | ---: | ---: |
+| Full structure and origins | `a66f5ede` | 6,956,934 registration boundaries, 7,888,720 final boundaries and 1,227,465 independent-origin boundaries; exact origin LPM, preserved registration fields, monotonic base risk and no promotion of explicit base exclusions | 286.049 | 1,461,133,312 |
+| Native serving and capture | `1471cf7b` | 2,048 public samples matched typed state, risk, verified status, origin attribution and the actual database epoch | 40.056 | 1,036,943,360 |
+| Mapped capture | `65a88d99` | The same 2,048 samples passed against the exact new/new file pair and measured mapping bounds; two hash streams read 1,190,368,454 bytes | 11.048 | 1,071,816,704 |
+| Targeted hosting and address policy | `17a7ea7c` | 305 public samples across 14 feeds, including 72 subscriber-carrier hosting conflicts, retained the required hosting and VPN/Tor exclusions | 35.029 | 1,112,809,472 |
+
+Full contract `82d7f3b0` and native contract `3639f30f` bind the same final
+artifact, retained registration base and catalog. Full summary `b939c3a8`,
+public samples `440569b0` and policy summary `0ec02811` identify the actual
+outputs. The policy gate checks selected published samples, not every feed
+prefix. These results qualify the offline artifact for publication review;
+they establish neither Main adoption nor recovered provider Quality.
 
 Readiness receipt `67742a21` rechecked the unchanged artifact-status and handoff
 pins and the complete frozen readback source: 5,622 source files and 20,921
 dependency files matched. This source-only check used 36,429,824 bytes of peak
-RSS and did not traverse the database. The four readbacks remain sequential,
+RSS and did not traverse the database. The four readbacks then ran sequentially,
 with a two-GiB RSS and work limit and a 30-minute wall limit per phase. Each
 launch requires three GiB of available memory, ten GiB free on both filesystems
-and an idle Go/build lane; the existing live floors remain intact. The next
-Root step is to bind the full-readback contract, then pass its actual hash to
-the qualified launcher. No readback result is implied by source readiness.
+and an idle Go/build lane; the existing live floors remained intact. Their
+completed native results above supersede the earlier preparation-only status.
+
+The additive Config payload contains `arin.mmdb`, `manifest.json`,
+`registration-manifest.json` and `reuse-manifest.json` under resource version
+`2026.10.6+1791310718`, totaling 595,202,871 bytes. A release must preserve the
+then-selected physical Config inventory, GeoLite/places resources, private
+profile and policy-two setting. The earlier 97-path packaging baseline is
+historical; it cannot replace a fresh owning inventory. The reuse manifest
+must remain explicit rather than be labelled as a new full update.
+
+Source inspection distinguishes the adoption owners. Connect announces call
+the controller's actual-address lookup and persist its database epoch and
+lookup time. API also opens the ARIN reader on IP-info and extender location
+paths, and its Quality guard consumes current connection facts. Taskworker
+rollup and native index publication consume those stored facts; they do not
+reclassify old addresses from the connection table. `ip.go` opens ARIN through
+`sync.OnceValues`, so an already initialized process retains its reader across
+a Config selection. Root must attest the actual mapped resource in every
+current or draining lookup owner and observe fresh post-cutover connection
+facts, completed rollup/index generations and native Quality supply. Desired
+Config, a fresh metric push, or a file visible inside one container cannot
+substitute for that adoption evidence. Missing and older-epoch connections
+remain explicit in aggregate coverage; raw provider addresses cannot be
+reconstructed from their stored hashes.
 
 The retained Atlas reference archive `458d5421` also remains available. Its
 existing validation report binds predecessor `2952a345`, so its precision and
