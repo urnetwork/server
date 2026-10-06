@@ -49,21 +49,23 @@ func closeExpiredContractsRetryDelay(verifiedCloseCount int64, randomUnit float6
 }
 
 type CloseExpiredContractsArgs struct {
-	BlockSize  int                         `json:"block_size"`
-	BlockIndex int                         `json:"block_index"`
-	Cursor     *model.ContractExpiryCursor `json:"cursor,omitempty"`
+	BlockSize  int                              `json:"block_size"`
+	BlockIndex int                              `json:"block_index"`
+	Cursor     *model.ContractExpiryCursor      `json:"cursor,omitempty"`
+	Sweep      *model.ContractExpirySweepCursor `json:"sweep,omitempty"`
 }
 
 type CloseExpiredContractsResult struct {
-	Full   bool                        `json:"full"`
-	Cursor *model.ContractExpiryCursor `json:"cursor,omitempty"`
+	Full   bool                             `json:"full"`
+	Cursor *model.ContractExpiryCursor      `json:"cursor,omitempty"`
+	Sweep  *model.ContractExpirySweepCursor `json:"sweep,omitempty"`
 }
 
 func ScheduleCloseExpiredContracts(clientSession *session.ClientSession, tx server.PgTx, blockIndex int, delay bool) {
-	scheduleCloseExpiredContractsPage(clientSession, tx, blockIndex, delay, nil)
+	scheduleCloseExpiredContractsPage(clientSession, tx, blockIndex, delay, nil, nil)
 }
 
-func scheduleCloseExpiredContractsPage(clientSession *session.ClientSession, tx server.PgTx, blockIndex int, delay bool, cursor *model.ContractExpiryCursor) {
+func scheduleCloseExpiredContractsPage(clientSession *session.ClientSession, tx server.PgTx, blockIndex int, delay bool, cursor *model.ContractExpiryCursor, sweep *model.ContractExpirySweepCursor) {
 	// runAt := func() time.Time {
 	// 	now := server.NowUtc()
 	// 	year, month, day := now.Date()
@@ -87,6 +89,7 @@ func scheduleCloseExpiredContractsPage(clientSession *session.ClientSession, tx 
 			BlockSize:  blockSize,
 			BlockIndex: blockIndex,
 			Cursor:     cursor,
+			Sweep:      sweep,
 		},
 		clientSession,
 		// legacy key
@@ -109,19 +112,44 @@ func CloseExpiredContracts(
 ) (*CloseExpiredContractsResult, error) {
 	if closeExpiredContracts.BlockSize == DefaultCloseExpiredContractsBlockSize {
 		minTime := closeExpiredContractsCutoff(server.NowUtc())
-		c, next, err := model.ForceCloseOpenContractIdsBudgetedPage(
+		sweep := closeExpiredContracts.Sweep
+		if sweep == nil && closeExpiredContracts.Cursor != nil {
+			sweep = &model.ContractExpirySweepCursor{Historical: closeExpiredContracts.Cursor}
+		}
+		c, next, err := model.ForceCloseOpenContractIdsFairPage(
 			clientSession.Ctx,
 			minTime,
 			closeExpiredContractsMaxCount,
 			closeExpiredContractsParallel,
 			closeExpiredContracts.BlockSize,
 			closeExpiredContracts.BlockIndex,
-			closeExpiredContracts.Cursor,
+			sweep,
 		)
-		return closeExpiredContractsPageResult(clientSession.Ctx, closeExpiredContracts, c, next, err)
+		return closeExpiredContractsSweepPageResult(clientSession.Ctx, closeExpiredContracts, c, next, err)
 	}
 	// else ignore lingering tasks with older block size
 	return &CloseExpiredContractsResult{}, nil
+}
+
+// Keep both lanes in the same successful or classified-error checkpoint. The
+// legacy cursor remains available to a rollback; it never replaces sweep state.
+func closeExpiredContractsSweepPageResult(ctx context.Context, args *CloseExpiredContractsArgs, c int64,
+	next *model.ContractExpirySweepCursor, err error,
+) (*CloseExpiredContractsResult, error) {
+	var historical *model.ContractExpiryCursor
+	if next != nil {
+		historical = next.Historical
+	}
+	nextArgs := *args
+	nextArgs.Sweep = next
+	result, err := closeExpiredContractsPageResult(ctx, &nextArgs, c, historical, err)
+	result.Sweep = next
+	if err == nil && next != nil {
+		// Recent work can outlast its historical pass. Raw continuation
+		// still gets a successor even when no close was verified.
+		result.Full = true
+	}
+	return result, err
 }
 
 // Only a completed, fully classified accounting-error page may checkpoint its
@@ -143,7 +171,7 @@ func closeExpiredContractsPageResult(ctx context.Context, args *CloseExpiredCont
 		full = closeExpiredContractsFull(accounting.VerifiedCloseCount())
 		delay := closeExpiredContractsRetryDelay(accounting.VerifiedCloseCount(), mathrand.Float64())
 		err = task.WithRetryDelayAndArgs(err, delay, &CloseExpiredContractsArgs{
-			BlockSize: args.BlockSize, BlockIndex: args.BlockIndex, Cursor: next,
+			BlockSize: args.BlockSize, BlockIndex: args.BlockIndex, Cursor: next, Sweep: args.Sweep,
 		})
 		glog.Infof("[close-expired]completed batch terminal_verified=%d unresolved_accounting=%d quarantined_accounting=%d retry_delay_ms=%d\n",
 			accounting.VerifiedCloseCount(), accounting.AccountingRejectionCount(), accounting.QuarantinedAccountingRejectionCount(), delay.Milliseconds())
@@ -160,7 +188,7 @@ func CloseExpiredContractsPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	scheduleCloseExpiredContractsPage(clientSession, tx, closeExpiredContracts.BlockIndex, !closeExpiredContractsResult.Full, closeExpiredContractsResult.Cursor)
+	scheduleCloseExpiredContractsPage(clientSession, tx, closeExpiredContracts.BlockIndex, !closeExpiredContractsResult.Full, closeExpiredContractsResult.Cursor, closeExpiredContractsResult.Sweep)
 	return nil
 }
 

@@ -28,15 +28,29 @@ func forceCloseOpenContractIdsBudgetedPage(ctx context.Context, minTime time.Tim
 	if maxCount <= 0 || parallel <= 0 || budget <= 0 || subpageSize <= 0 {
 		return 0, nil, fmt.Errorf("invalid force close page budget")
 	}
-	budgetEnd := time.Now().Add(budget)
+	return forceCloseContractPagesBudgeted(ctx, maxCount, after, budget, subpageSize, time.Now,
+		func(size int, cursor *ContractExpiryCursor) (int64, *ContractExpiryCursor, error) {
+			return ForceCloseOpenContractIdsPage(ctx, minTime, size, parallel, blockSize, blockIndex, cursor)
+		})
+}
+
+// Both scan policies share the same row/time budget and completed-page error
+// boundary. The callback owns selection; financial errors retain their meaning.
+func forceCloseContractPagesBudgeted[Cursor any](ctx context.Context, maxCount int, after *Cursor,
+	budget time.Duration, subpageSize int, now func() time.Time, page func(int, *Cursor) (int64, *Cursor, error),
+) (closed int64, next *Cursor, returnErr error) {
+	if maxCount <= 0 || budget <= 0 || subpageSize <= 0 {
+		return 0, after, fmt.Errorf("invalid force close page budget")
+	}
+	budgetEnd := now().Add(budget)
 	next = after
 	for remaining := maxCount; remaining > 0; {
 		size := min(remaining, subpageSize)
 		var count int64
-		var cursor *ContractExpiryCursor
+		var cursor *Cursor
 		var pageErr error
 		server.HandleError(func() {
-			count, cursor, pageErr = ForceCloseOpenContractIdsPage(ctx, minTime, size, parallel, blockSize, blockIndex, next)
+			count, cursor, pageErr = page(size, next)
 		}, func(err error) { pageErr = errors.Join(pageErr, err) })
 		if ctx.Err() != nil {
 			// Parent cancellation is never a normal page yield, even after a
@@ -60,7 +74,7 @@ func forceCloseOpenContractIdsBudgetedPage(ctx context.Context, minTime time.Tim
 		closed += count
 		next = cursor
 		remaining -= size
-		if next == nil || !time.Now().Before(budgetEnd) {
+		if next == nil || !now().Before(budgetEnd) {
 			return closed, next, nil
 		}
 	}
