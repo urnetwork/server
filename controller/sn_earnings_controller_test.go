@@ -12,10 +12,12 @@ import (
 	"testing"
 
 	"github.com/ChainSafe/go-schnorrkel"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/urfoundation/sn/miner/onchain"
 	"github.com/urfoundation/sn/ss58"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 )
 
@@ -240,5 +242,58 @@ func TestEpochEarningsTemplateText(t *testing.T) {
 	plain.ShareBps = 500
 	if plain.HasUnclaimed() {
 		t.Fatal("no wallet, no unclaimed line")
+	}
+}
+
+// Both the live answer and the redis summary pass through the overlay: the
+// genesis hash is "0x" and 64 lowercase hex digits beside the other chain
+// settings, survives the json the summary is cached as, and is omitted while
+// unset.
+// The epoch-row fallback summary has no chain identity; it must state the same
+// chain id and contract as the cached summary, not 0 and "".
+func TestSnEpochSummaryWithChainSettingsStatesTheChainOfTheEpochRowFallback(t *testing.T) {
+	cfg := &StConfig{ChainId: 964, ContractAddress: common.Address{4}, Netuid: 25}
+	cfg.GenesisHash[0] = 1
+	fallback := snEpochSummaryWithChainSettings(cfg, &model.StEpochSummary{Epoch: 42, StartBlock: 10})
+	if fallback.ChainId != 964 || fallback.ContractAddress != cfg.ContractAddress.Hex() || fallback.Netuid != 25 || fallback.GenesisHash == "" {
+		t.Fatalf("fallback summary = %+v", fallback)
+	}
+	cached := snEpochSummaryWithChainSettings(cfg, &model.StEpochSummary{Epoch: 42, ChainId: 7, ContractAddress: "0x0000000000000000000000000000000000000009"})
+	if cached.ChainId != 7 || cached.ContractAddress != "0x0000000000000000000000000000000000000009" {
+		t.Fatalf("stated chain settings were overwritten: %+v", cached)
+	}
+}
+
+func TestSnEpochSummaryWithChainSettingsStatesTheGenesisHash(t *testing.T) {
+	cfg := &StConfig{ChainId: 945, Netuid: 25, NoId: 7, SettlementVault: common.Address{5}, PublicRpcUrl: "https://rpc.example"}
+	for i := range cfg.GenesisHash {
+		cfg.GenesisHash[i] = byte(0xa0 + i)
+	}
+	const genesisHash = "0xa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf"
+	summary := snEpochSummaryWithChainSettings(cfg, &model.StEpochSummary{Epoch: 42, ChainId: cfg.ChainId, ContractAddress: "0x0000000000000000000000000000000000000004"})
+	if summary.GenesisHash != genesisHash || summary.Epoch != 42 || summary.ChainId != 945 || summary.Netuid != 25 || summary.NoId != "7" || summary.RpcUrl != "https://rpc.example" {
+		t.Fatalf("summary = %+v", summary)
+	}
+	summaryJson, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(summaryJson, &fields); err != nil || fields["genesis_hash"] != genesisHash {
+		t.Fatalf("summary json = %s, %v", summaryJson, err)
+	}
+	var cached model.StEpochSummary
+	if err := json.Unmarshal(summaryJson, &cached); err != nil || cached != *summary {
+		t.Fatalf("cached summary = %+v, %v; want %+v", cached, err, *summary)
+	}
+
+	cfg.GenesisHash = [32]byte{}
+	unset := snEpochSummaryWithChainSettings(cfg, &model.StEpochSummary{Epoch: 42})
+	unsetJson, err := json.Marshal(unset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unset.GenesisHash != "" || strings.Contains(string(unsetJson), "genesis_hash") {
+		t.Fatalf("unset genesis hash = %q in %s", unset.GenesisHash, unsetJson)
 	}
 }
