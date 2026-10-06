@@ -86,9 +86,11 @@ type PayDataSolanaIntentResult struct {
 	Error        *PayDataCheckoutError `json:"error,omitempty"`
 }
 
-func payDataSolanaIntentError(message string) *PayDataSolanaIntentResult {
+// payDataSolanaIntentError is a refused intent: a `PurchaseErrorCode*` and its
+// message.
+func payDataSolanaIntentError(code string, message string) *PayDataSolanaIntentResult {
 	return &PayDataSolanaIntentResult{
-		Error: &PayDataCheckoutError{Message: message},
+		Error: &PayDataCheckoutError{Code: code, Message: message},
 	}
 }
 
@@ -155,19 +157,22 @@ func PayDataSolanaIntent(
 ) (*PayDataSolanaIntentResult, error) {
 	itemId := strings.TrimSpace(args.ItemId)
 	if _, ok := stripeDataPackByteCount(itemId); !ok {
-		return payDataSolanaIntentError("Unknown item."), nil
+		return payDataSolanaIntentError(PurchaseErrorCodeInvalidRequest, "Unknown item."), nil
 	}
 	reference := strings.TrimSpace(args.Reference)
 	if !payDataSolanaValidReference(reference) {
-		return payDataSolanaIntentError("Invalid payment reference."), nil
+		return payDataSolanaIntentError(PurchaseErrorCodeInvalidRequest, "Invalid payment reference."), nil
 	}
 	networkName := strings.TrimSpace(args.NetworkName)
 	if networkName == "" {
-		return payDataSolanaIntentError("Enter the network that should receive the data."), nil
+		return payDataSolanaIntentError(PurchaseErrorCodeNetworkNameRequired, "Enter the network that should receive the data."), nil
 	}
 
 	if !payDataCheckoutLimiter.allow(clientSession) {
-		return payDataSolanaIntentError("Too many payment attempts from this address. Try again in a minute."), nil
+		return payDataSolanaIntentError(
+			PurchaseErrorCodeRateLimited,
+			"Too many payment attempts from this address. Try again in a minute.",
+		), nil
 	}
 
 	// The price comes from pro.yml, keyed by the item. It is NEVER taken from the
@@ -175,12 +180,12 @@ func PayDataSolanaIntent(
 	priceUsd, ok := dataPackPriceUsd(itemId)
 	if !ok {
 		glog.Errorf("[paydata]no usable price in pro.yml for data pack %s\n", itemId)
-		return payDataSolanaIntentError("That data pack is not available."), nil
+		return payDataSolanaIntentError(PurchaseErrorCodeItemUnavailable, "That data pack is not available."), nil
 	}
 
 	networkId, storedName := model.FindNetworkByName(clientSession.Ctx, networkName)
 	if networkId == nil {
-		return payDataSolanaIntentError(fmt.Sprintf("No network named %s", networkName)), nil
+		return payDataSolanaIntentError(PurchaseErrorCodeNetworkNotFound, fmt.Sprintf("No network named %s", networkName)), nil
 	}
 
 	// the quote carries a reserved sub-cent suffix, so a payment sent without
@@ -199,7 +204,7 @@ func PayDataSolanaIntent(
 		// a duplicate reference or a failed insert must not send the buyer off to
 		// pay against an intent that does not exist
 		glog.Errorf("[paydata]could not create solana intent %s for %s: %s\n", reference, itemId, err)
-		return payDataSolanaIntentError("Could not start the payment. Please try again."), nil
+		return payDataSolanaIntentError(PurchaseErrorCodeStartFailed, purchaseStartFailedMessage), nil
 	}
 
 	glog.Infof(
