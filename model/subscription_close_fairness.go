@@ -23,6 +23,12 @@ type ContractExpirySweepCursor struct {
 	FreshBefore    time.Time             `json:"fresh_before,omitzero"`
 	FreshNext      bool                  `json:"fresh_next,omitempty"`
 	BacklogDone    bool                  `json:"backlog_done,omitempty"`
+	Catchup        *ContractExpiryCursor `json:"catchup,omitempty"`
+	CatchupAfter   time.Time             `json:"catchup_after,omitzero"`
+	CatchupBefore  time.Time             `json:"catchup_before,omitzero"`
+	// Keep the earliest quiet cutoff in a catch-up pass for skipped-row revisits.
+	CatchupChecked time.Time `json:"catchup_checked,omitzero"`
+	CatchupTurn    uint8     `json:"catchup_turn,omitempty"`
 }
 
 // Alternate complete subpages, not independent workers. A slow subpage keeps

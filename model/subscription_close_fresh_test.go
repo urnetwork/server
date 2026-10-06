@@ -130,8 +130,19 @@ func TestExpiryFreshRetainsWorkAfterBacklogCompletion(t *testing.T) {
 			}
 			return 1, nil, nil
 		})
+	if err != nil || next == nil || next.CatchupAfter.IsZero() {
+		t.Fatal("completed original passes dropped the interval above their recent upper")
+	}
+	_, next, err = forceCloseContractExpiryFreshPage(fresh.ScanBefore, fresh.ScanBefore, next,
+		func(position *ContractExpiryCursor) (int64, *ContractExpiryCursor, error) {
+			if !position.ScanBefore.Equal(fresh.ScanBefore.Add(-forceCloseFreshWindow)) ||
+				!position.Open.CreateTime.Equal(before.Recent.ScanBefore) {
+				t.Fatal("completion changed the retained gap bounds")
+			}
+			return 1, nil, nil
+		})
 	if err != nil || next != nil {
-		t.Fatal("complete fresh and backlog passes failed to return to ordinary cadence")
+		t.Fatal("complete fresh, backlog and gap passes failed to return to ordinary cadence")
 	}
 }
 
