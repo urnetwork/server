@@ -1484,15 +1484,17 @@ func endTerminalPlaySubscriptionRenewal(
 }
 
 // Runs in the transaction that finishes the renewal task and schedules the
-// next poll there. The subscription-ended notice is returned as work for after
-// that transaction commits: a finish that rolls back, or reruns its callback,
-// sends nothing, and the send does not hold the transaction open.
+// next poll there. The subscription-ended notice is added to the account
+// message outbox in the same transaction: a finish that rolls back leaves no
+// notice, a finish that reruns its callback (or a retried post) owes one
+// notice, and a crash after the commit no longer loses it. The delivery task
+// sends it after the commit.
 func PlaySubscriptionRenewalPost(
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 	playSubscriptionRenewalResult *PlaySubscriptionRenewalResult,
 	clientSession *session.ClientSession,
 	tx server.PgTx,
-) ([]server.PostFunction, error) {
+) error {
 	if playSubscriptionRenewalResult.Canceled {
 		if !playSubscriptionRenewalResult.Terminal &&
 			!playSubscriptionRenewalResult.ExpiryTime.IsZero() {
@@ -1509,7 +1511,7 @@ func PlaySubscriptionRenewalPost(
 				playSubscriptionRenewal,
 			)
 		}
-		return nil, nil
+		return nil
 	}
 
 	if playSubscriptionRenewalResult.Renewed {
@@ -1539,28 +1541,29 @@ func PlaySubscriptionRenewalPost(
 			if errors.Is(err, model.ErrMissingUserAuth) {
 				// The notice is optional; a wallet/guest account must not strand
 				// completed renewal post-processing for lack of a recipient.
-				return nil, nil
+				return nil
 			}
-			return nil, err
+			return err
 		}
 		if userAuth == "" {
 			// the network or its admin is gone
-			return nil, nil
-		}
-		return []server.PostFunction{func() any {
-			awsMessageSender := GetAWSMessageSender()
-			err := awsMessageSender.SendAccountMessageTemplate(
-				userAuth,
-				&SubscriptionEndedTemplate{},
-			)
-			if err != nil {
-				glog.Infof("[sub]could not send the subscription ended notice for network %s: %s\n", networkId, err)
-			}
 			return nil
-		}}, nil
+		}
+		// one notice per lapse of this purchase on this network
+		addAccountMessageInTx(clientSession.Ctx, tx, &accountMessage{
+			key: fmt.Sprintf(
+				"%s/%s/%d",
+				networkId,
+				playSubscriptionRenewal.PurchaseToken,
+				playSubscriptionRenewalResult.ExpiryTime.Unix(),
+			),
+			networkId: &networkId,
+			userAuth:  userAuth,
+			template:  &SubscriptionEndedTemplate{},
+		})
 	}
 
-	return nil, nil
+	return nil
 }
 
 func VerifyCoinbaseBody(_ *session.ClientSession, req *http.Request) (io.Reader, error) {

@@ -54,6 +54,7 @@ func initTaskSchedule(ctx context.Context) {
 		controller.ScheduleOnboardingResultsRollup(clientSession, tx, onboarding.NextRollupAt(server.NowUtc()))
 		controller.ScheduleOnboardingEmailTrackerSync(clientSession, tx, server.NowUtc())
 		controller.ScheduleSubscriptionMetricsSync(clientSession, tx, server.NowUtc())
+		controller.ScheduleDeliverAccountMessages(clientSession, tx)
 		work.SchedulePayout(clientSession, tx)
 		work.ScheduleProcessPendingPayouts(clientSession, tx)
 		work.ScheduleCancelHungAccountPayments(clientSession, tx)
@@ -201,7 +202,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.CancelHungAccountPayments,
 			work.CancelHungAccountPaymentsPost,
 		),
-		task.NewTaskTargetWithCommitPost(
+		task.NewTaskTargetWithPost(
+			controller.DeliverAccountMessages,
+			controller.DeliverAccountMessagesPost,
+		),
+		task.NewTaskTargetWithPost(
 			controller.PlaySubscriptionRenewal,
 			controller.PlaySubscriptionRenewalPost,
 			"bringyour.com/bringyour/controller.PlaySubscriptionRenewal",

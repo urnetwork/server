@@ -273,13 +273,15 @@ func TestPlaySubscriptionRenewalPostWithoutEmailCompletes(t *testing.T) {
 					wallet.PublicKey().String(), base64.StdEncoding.EncodeToString(signature[:]), message)
 			}
 			args := playTerminalTestArgs(networkId, "synthetic.package", "synthetic-no-email-"+accountType)
-			var posts []server.PostFunction
 			var postErr error
 			server.Tx(ctx, func(tx server.PgTx) {
-				posts, postErr = PlaySubscriptionRenewalPost(args, result, clientSession, tx)
+				postErr = PlaySubscriptionRenewalPost(args, result, clientSession, tx)
 			})
-			if postErr != nil || len(posts) != 0 {
-				t.Fatalf("%s completed post without recipient: posts=%d err=%v", accountType, len(posts), postErr)
+			if postErr != nil {
+				t.Fatalf("%s completed post without recipient: err=%v", accountType, postErr)
+			}
+			if count := outboxMessageCount(t, ctx, networkId); count != 0 {
+				t.Fatalf("%s completed post without recipient owes %d notices, want none", accountType, count)
 			}
 			if count, _ := countScheduledPlayRenewals(t, ctx, args.PurchaseToken); count != 0 {
 				t.Fatalf("%s completed post scheduled %d additional renewals, want none", accountType, count)
@@ -293,7 +295,8 @@ func TestPlaySubscriptionRenewalPostWithoutEmailCompletes(t *testing.T) {
 
 // An existing recipient still receives exactly one notice with the intended
 // template when the completed renewal stops scheduling itself. The post sends
-// nothing in its transaction; it returns the send for after the commit.
+// nothing in its transaction; it adds the notice to the account message
+// outbox, and a delivery after the commit sends it.
 func TestPlaySubscriptionRenewalPostWithEmailSendsNotice(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -325,18 +328,20 @@ func TestPlaySubscriptionRenewalPostWithEmailSendsNotice(t *testing.T) {
 		clientSession := session.Testing_CreateClientSession(ctx, nil)
 		args := playTerminalTestArgs(networkId, "synthetic.package", "synthetic-email-token")
 		result := &PlaySubscriptionRenewalResult{ExpiryTime: server.NowUtc().Add(-2 * SubscriptionGracePeriod)}
-		var posts []server.PostFunction
 		var postErr error
 		openSent := 0
 		server.Tx(ctx, func(tx server.PgTx) {
-			posts, postErr = PlaySubscriptionRenewalPost(args, result, clientSession, tx)
+			postErr = PlaySubscriptionRenewalPost(args, result, clientSession, tx)
 			openSent = sent
 		})
 		if postErr != nil || openSent != 0 {
 			t.Fatalf("email completed post error=%v notices in its transaction=%d, want none", postErr, openSent)
 		}
-		// the worker runs the post's work after the finish commits
-		server.RunPosts(ctx, posts...)
+		if count := outboxMessageCount(t, ctx, networkId); count != 1 {
+			t.Fatalf("email completed post owes %d notices, want one", count)
+		}
+		// the delivery task sends it after the finish commits
+		deliverAccountMessagesAt(ctx, GetAWSMessageSender(), server.NowUtc())
 		if sent != 1 {
 			t.Fatalf("email completed post notices=%d, want one", sent)
 		}
@@ -382,7 +387,7 @@ func TestPlaySubscriptionRenewalPostPreservesDatabaseCancellation(t *testing.T) 
 			}()
 			// Keep the transaction live so cancellation occurs in GetUserAuthInTx.
 			server.Tx(ctx, func(tx server.PgTx) {
-				_, postErr = PlaySubscriptionRenewalPost(args, result, clientSession, tx)
+				postErr = PlaySubscriptionRenewalPost(args, result, clientSession, tx)
 			})
 		}()
 		if !errors.Is(postErr, context.Canceled) {
@@ -390,6 +395,9 @@ func TestPlaySubscriptionRenewalPostPreservesDatabaseCancellation(t *testing.T) 
 		}
 		if sent != 0 {
 			t.Fatalf("sent %d notices after failed recipient lookup", sent)
+		}
+		if count := outboxMessageCount(t, ctx, networkId); count != 0 {
+			t.Fatalf("failed recipient lookup owes %d notices, want none", count)
 		}
 		if count, _ := countScheduledPlayRenewals(t, ctx, args.PurchaseToken); count != 0 {
 			t.Fatalf("failed post scheduled %d additional renewals, want none", count)
@@ -459,10 +467,13 @@ func TestPlaySubscriptionRenewalFutureCancellationPreservesAndReschedules(t *tes
 		}
 
 		server.Tx(ctx, func(tx server.PgTx) {
-			if posts, err := PlaySubscriptionRenewalPost(args, result, clientSession, tx); err != nil || len(posts) != 0 {
-				t.Fatalf("future cancellation post: posts=%d err=%v", len(posts), err)
+			if err := PlaySubscriptionRenewalPost(args, result, clientSession, tx); err != nil {
+				t.Fatalf("future cancellation post: err=%v", err)
 			}
 		})
+		if count := outboxMessageCount(t, ctx, networkId); count != 0 {
+			t.Fatalf("future cancellation post owes %d notices, want none", count)
+		}
 		count, runAt := countScheduledPlayRenewals(t, ctx, purchaseToken)
 		if count != 1 {
 			t.Fatalf("scheduled future-cancellation polls = %d, want 1", count)
@@ -477,15 +488,18 @@ func TestPlaySubscriptionRenewalFutureCancellationPreservesAndReschedules(t *tes
 		legacyToken := "synthetic-legacy-canceled"
 		legacyArgs := playTerminalTestArgs(networkId, env.packageName, legacyToken)
 		server.Tx(ctx, func(tx server.PgTx) {
-			if posts, err := PlaySubscriptionRenewalPost(
+			if err := PlaySubscriptionRenewalPost(
 				legacyArgs,
 				&PlaySubscriptionRenewalResult{Canceled: true},
 				clientSession,
 				tx,
-			); err != nil || len(posts) != 0 {
-				t.Fatalf("legacy canceled post: posts=%d err=%v", len(posts), err)
+			); err != nil {
+				t.Fatalf("legacy canceled post: err=%v", err)
 			}
 		})
+		if count := outboxMessageCount(t, ctx, networkId); count != 0 {
+			t.Fatalf("legacy canceled post owes %d notices, want none", count)
+		}
 		if count, _ := countScheduledPlayRenewals(t, ctx, legacyToken); count != 0 {
 			t.Fatalf("scheduled legacy canceled polls = %d, want 0", count)
 		}
@@ -497,7 +511,7 @@ func TestPlaySubscriptionRenewalFutureCancellationPreservesAndReschedules(t *tes
 		crossedArgs := playTerminalTestArgs(networkId, env.packageName, crossedToken)
 		beforePost := server.NowUtc()
 		server.Tx(ctx, func(tx server.PgTx) {
-			if posts, err := PlaySubscriptionRenewalPost(
+			if err := PlaySubscriptionRenewalPost(
 				crossedArgs,
 				&PlaySubscriptionRenewalResult{
 					Canceled:   true,
@@ -505,10 +519,13 @@ func TestPlaySubscriptionRenewalFutureCancellationPreservesAndReschedules(t *tes
 				},
 				clientSession,
 				tx,
-			); err != nil || len(posts) != 0 {
-				t.Fatalf("crossed-boundary canceled post: posts=%d err=%v", len(posts), err)
+			); err != nil {
+				t.Fatalf("crossed-boundary canceled post: err=%v", err)
 			}
 		})
+		if count := outboxMessageCount(t, ctx, networkId); count != 0 {
+			t.Fatalf("crossed-boundary canceled post owes %d notices, want none", count)
+		}
 		afterPost := server.NowUtc()
 		count, runAt = countScheduledPlayRenewals(t, ctx, crossedToken)
 		if count != 1 {
@@ -645,10 +662,13 @@ func TestPlaySubscriptionRenewalGoneEndsIdempotentlyAndStops(t *testing.T) {
 			t.Fatalf("first gone result = %+v, want terminal end", first)
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
-			if posts, err := PlaySubscriptionRenewalPost(args, first, clientSession, tx); err != nil || len(posts) != 0 {
-				t.Fatalf("gone renewal post: posts=%d err=%v", len(posts), err)
+			if err := PlaySubscriptionRenewalPost(args, first, clientSession, tx); err != nil {
+				t.Fatalf("gone renewal post: err=%v", err)
 			}
 		})
+		if count := outboxMessageCount(t, ctx, networkId); count != 0 {
+			t.Fatalf("gone renewal post owes %d notices, want none", count)
+		}
 		if count, _ := countScheduledPlayRenewals(t, ctx, purchaseToken); count != 0 {
 			t.Fatalf("scheduled gone polls = %d, want 0", count)
 		}

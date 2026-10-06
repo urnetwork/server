@@ -30,7 +30,7 @@ import (
 // the entitlement is granted; neither can be taken back. A recording failure is
 // a bookkeeping hole to be repaired from the logged transaction hash, not a
 // reason to answer the agent with an error for something it successfully
-// bought. Same rule as x402SendReceipt.
+// bought. Same rule as the receipt (addX402ReceiptInTx).
 
 // stripePreviewApiVersion is the API version that carries crypto
 // transaction_verification. Stripe gates the feature on the header, so a plain

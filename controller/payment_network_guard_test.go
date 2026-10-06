@@ -138,9 +138,9 @@ func TestX402GrantsRefuseDeletedNetwork(t *testing.T) {
 			var err error
 			if testCase.pro {
 				sku.SkuId = X402SkuProMonth
-				err = x402GrantProMonth(ctx, networkId, sku, model.UsdToNanoCents(1), settle)
+				err = x402GrantProMonth(ctx, networkId, sku, model.UsdToNanoCents(1), settle, nil)
 			} else {
-				err = x402GrantData(ctx, networkId, sku, model.UsdToNanoCents(1), settle)
+				err = x402GrantData(ctx, networkId, sku, model.UsdToNanoCents(1), settle, nil)
 			}
 			if !errors.Is(err, model.ErrPaymentNetworkNotFound) {
 				t.Fatalf("%s grant after delete = %v", testCase.name, err)
