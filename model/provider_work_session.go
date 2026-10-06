@@ -56,8 +56,9 @@ func providerWorkLockEndpointsInTx(ctx context.Context, tx server.PgTx, clientId
 	})
 }
 
-// Current writers share the compatibility bridge and prelock every endpoint.
-// Unmarked rolling writers take it exclusively before any connection row lock.
+// Current writers prelock every endpoint. The shared bridge supports databases
+// that still have the original v776 functions; the repair removes its exclusive
+// holder and makes conflicting rolling writers retry before waiting on a fence.
 func providerWorkLockSessionMutationInTx(ctx context.Context, tx server.PgTx, clientIds ...server.Id) bool {
 	if len(clientIds) == 0 {
 		return false

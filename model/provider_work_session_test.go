@@ -685,30 +685,15 @@ func TestProviderWorkSessionRepeatableReadCannotCertifyAnOldAdmissionHead(t *tes
 	})
 }
 
-func TestProviderWorkSessionLegacyWriterWaitsBeforeTakingConnectionRow(t *testing.T) {
+// A legacy row owner refuses a conflicting endpoint immediately, so the
+// cooperating owner can retire and sign before the legacy no-op is retried.
+func TestProviderWorkSessionLegacyWriterRetriesWithoutHoldingConnectionRow(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		f := newProviderWorkSessionFixture(t)
-		ctx, cancel := context.WithTimeout(f.ctx, 2*time.Minute)
+		ctx, cancel := context.WithTimeout(f.ctx, 30*time.Second)
 		defer cancel()
-		legacyCtx, cancelLegacy := context.WithCancel(ctx)
-		defer cancelLegacy()
-		ready := make(chan int, 1)
-		done := make(chan error, 1)
-		joined := make(chan struct{})
-		started := false
-		defer func() {
-			cancelLegacy()
-			if !started {
-				return
-			}
-			select {
-			case <-joined:
-			case <-time.After(time.Minute):
-				t.Error("legacy writer did not join canceled cleanup")
-			}
-		}()
 		server.Db(ctx, func(conn server.PgConn) {
 			tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 			if err != nil {
@@ -718,70 +703,25 @@ func TestProviderWorkSessionLegacyWriterWaitsBeforeTakingConnectionRow(t *testin
 			if !providerWorkLockSessionMutationInTx(ctx, tx, f.sourceId) {
 				t.Fatal("new admission owner did not acquire its ordered fences")
 			}
-			var ownerPid int
-			server.Raise(tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&ownerPid))
-			started = true
-			go func() {
-				defer close(joined)
-				var resultErr error
-				server.HandleError(func() {
-					server.Db(legacyCtx, func(other server.PgConn) {
-						legacy, err := other.BeginTx(legacyCtx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-						server.Raise(err)
-						defer rollbackCloseReportTestTransaction(legacyCtx, legacy)
-						var pid int
-						server.Raise(legacy.QueryRow(legacyCtx, `SELECT pg_backend_pid()`).Scan(&pid))
-						ready <- pid
-						_, resultErr = legacy.Exec(legacyCtx, `UPDATE network_client_connection SET connected=false,disconnect_time=$2 WHERE connection_id=$1`, f.sourceConnectionId, server.NowUtc())
-						if resultErr == nil {
-							resultErr = legacy.Commit(legacyCtx)
-						}
-					})
-				}, func(err error) { resultErr = err })
-				done <- resultErr
-			}()
-			var legacyPid int
-			select {
-			case legacyPid = <-ready:
-			case <-ctx.Done():
-				t.Fatal(ctx.Err())
-			}
-			for {
-				select {
-				case err := <-done:
-					t.Fatal("legacy writer crossed the original reservation fence", err)
-				default:
+			server.Db(ctx, func(other server.PgConn) {
+				legacy, err := other.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+				server.Raise(err)
+				defer rollbackCloseReportTestTransaction(ctx, legacy)
+				server.RaisePgResult(legacy.Exec(ctx, `SET LOCAL lock_timeout='2s'`))
+				_, err = legacy.Exec(ctx, `UPDATE network_client_connection SET connected=false,disconnect_time=$2 WHERE connection_id=$1`, f.sourceConnectionId, server.NowUtc())
+				var pgErr *pgconn.PgError
+				if !errors.As(err, &pgErr) || pgErr.Code != "40001" {
+					t.Fatal("legacy writer did not release its conflicting row for retry", err)
 				}
-				var blocked, bridge bool
-				server.Raise(tx.QueryRow(ctx, `SELECT $2=ANY(pg_blocking_pids($1)),EXISTS(
-				 SELECT 1 FROM pg_locks WHERE pid=$1 AND locktype='advisory' AND NOT granted
-				 AND classid=4294967295::oid AND objid=4294966520::oid AND objsubid=1)`, legacyPid, ownerPid).Scan(&blocked, &bridge))
-				if blocked {
-					if !bridge {
-						t.Fatal("legacy writer took the row before waiting for the endpoint; lock order inverted")
-					}
-					break
-				}
-				select {
-				case err := <-done:
-					t.Fatal("legacy writer crossed the original reservation fence", err)
-				case <-ctx.Done():
-					t.Fatal(ctx.Err())
-				case <-time.After(time.Millisecond):
-				}
-			}
+				server.Raise(legacy.Rollback(ctx))
+			})
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client_connection SET connected=false,disconnect_time=$2 WHERE connection_id=$1`, f.sourceConnectionId, server.NowUtc()))
 			providerWorkRetainSessionEventsInTx(ctx, tx, f.sourceId)
 			server.Raise(tx.Commit(ctx))
 		})
-		select {
-		case err := <-done:
-			if err != nil {
-				t.Fatal("legacy traffic failed after the original owner committed", err)
-			}
-		case <-ctx.Done():
-			t.Fatal(ctx.Err())
-		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client_connection SET connected=false,disconnect_time=$2 WHERE connection_id=$1`, f.sourceConnectionId, server.NowUtc()))
+		})
 		id := f.contract(t)
 		if !providerWorkFixtureReservation(t, providerWorkFixtureReceipts(t, f.ctx, id), id).Reservation.Complete {
 			t.Fatal("ordered legacy no-op lost the original retirement")

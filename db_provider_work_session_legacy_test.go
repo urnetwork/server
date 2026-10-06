@@ -1,9 +1,9 @@
-// Original session mutations share a durable endpoint fence with reservations.
+// Exact historical v776 is a negative control and an installed-schema repair fixture.
 package server
 
 // Migration 776 preserves unsigned gaps from rolling writers. No mutable
 // connection row, cleanup, or signing-key rotation can reset a journal birth.
-const providerWorkSessionSchemaSql = `
+const testLegacyProviderWorkSessionSchemaSql = `
 CREATE TABLE provider_work_session_head (
  client_id uuid PRIMARY KEY,
  sequence bigint NOT NULL CHECK(sequence>0)
@@ -53,7 +53,9 @@ CREATE TABLE provider_work_outcome_original (
  receipt_hash bytea NOT NULL UNIQUE CHECK(octet_length(receipt_hash)=32),
  original bytea NOT NULL CHECK(octet_length(original) BETWEEN 1 AND 65536)
 );
-` + providerWorkSessionEndpointLockSql + `
+CREATE FUNCTION provider_work_endpoint_lock(client uuid) RETURNS void LANGUAGE sql AS $endpoint_lock$
+ SELECT pg_advisory_xact_lock(776,('x'||substr(md5(client::text),1,8))::bit(32)::int);
+$endpoint_lock$;
 CREATE FUNCTION provider_work_session_append(client uuid,connection uuid,event_kind text,extender uuid)
  RETURNS bigint LANGUAGE plpgsql AS $session_append$
 DECLARE next_sequence bigint; owner_network uuid;
@@ -87,7 +89,22 @@ BEGIN
  RETURN NEW;
 END;
 $session_mutation$;
-` + providerWorkSessionStatementFenceSql + `
+CREATE FUNCTION provider_work_session_statement_fence() RETURNS trigger LANGUAGE plpgsql AS $statement_fence$
+BEGIN
+ IF current_setting('urnetwork.provider_work_cooperating',true)='1' THEN
+  PERFORM pg_advisory_xact_lock_shared(-776::bigint);
+ ELSE
+  IF EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND granted
+   AND classid=4294967295::oid AND objid=4294966520::oid AND objsubid=1 AND mode='ShareLock')
+   AND NOT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND granted
+    AND classid=4294967295::oid AND objid=4294966520::oid AND objsubid=1 AND mode='ExclusiveLock') THEN
+   RAISE EXCEPTION 'provider work mutation lacks ordered endpoint fences' USING ERRCODE='40001';
+  END IF;
+  PERFORM pg_advisory_xact_lock(-776::bigint);
+ END IF;
+ RETURN NULL;
+END;
+$statement_fence$;
 CREATE TRIGGER provider_work_session_statement_fence BEFORE INSERT OR UPDATE OR DELETE ON network_client_connection
  FOR EACH STATEMENT EXECUTE FUNCTION provider_work_session_statement_fence();
 CREATE TRIGGER provider_work_session_mutation AFTER INSERT OR UPDATE OR DELETE ON network_client_connection
@@ -110,37 +127,3 @@ DO $guards$ DECLARE table_name text; BEGIN
  END LOOP;
 END; $guards$;
 `
-
-// A rolling writer can already hold a connection row when its row trigger
-// reaches the endpoint fence. Refuse that same-client conflict without waiting:
-// the whole transaction rolls back and the existing bounded 40001 retry starts
-// with no row locks. No mutation or journal event is omitted. Cleanup may finish
-// on a later retry; no global exclusive fence serializes unrelated clients.
-const providerWorkSessionEndpointLockSql = `
-CREATE OR REPLACE FUNCTION provider_work_endpoint_lock(client uuid) RETURNS void LANGUAGE plpgsql AS $endpoint_lock$
-BEGIN
- IF NOT pg_try_advisory_xact_lock(776,('x'||substr(md5(client::text),1,8))::bit(32)::int) THEN
-  RAISE EXCEPTION 'provider work endpoint is busy' USING ERRCODE='40001';
- END IF;
-END;
-$endpoint_lock$;
-`
-
-// Retain the historical trigger binding while removing its global bridge.
-// Existing binaries may still take the shared bridge, which has no conflicting
-// holder after this repair. No-op connection updates need no endpoint fence.
-const providerWorkSessionStatementFenceSql = `
-CREATE OR REPLACE FUNCTION provider_work_session_statement_fence() RETURNS trigger LANGUAGE plpgsql AS $statement_fence$
-BEGIN
- RETURN NULL;
-END;
-$statement_fence$;
-`
-
-// Repair already-installed v776 atomically without rewriting retained evidence
-// or acquiring a table-wide connection lock. Fresh v776 uses the same functions
-// so an upgrade cannot introduce the global mutex before reaching this repair.
-// Transactions already executing the old function retain their locks until end.
-const providerWorkSessionContentionRepairSql = `
-SET LOCAL lock_timeout = '5s';
-` + providerWorkSessionEndpointLockSql + providerWorkSessionStatementFenceSql

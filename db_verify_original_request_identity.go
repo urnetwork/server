@@ -24,5 +24,6 @@ func MigrationIdentityMatches(index int, recorded string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return recorded == current || matchesVerifyOriginalMigrationIdentity(index, current, recorded), nil
+	return recorded == current || matchesVerifyOriginalMigrationIdentity(index, current, recorded) ||
+		matchesProviderWorkSessionMigrationIdentity(index, current, recorded), nil
 }

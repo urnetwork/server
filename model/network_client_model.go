@@ -2728,6 +2728,8 @@ func ConnectNetworkClientWithIpFamily(
 	return
 }
 
+// Endpoint conflicts retry within Tx's bound. If transport cancellation exhausts
+// that bound, handler expiry retires the remaining connection asynchronously.
 func DisconnectNetworkClient(ctx context.Context, connectionId server.Id) error {
 	ctx = providerWorkSessionContext(ctx)
 	var disconnectErr error

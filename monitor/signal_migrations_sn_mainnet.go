@@ -216,7 +216,11 @@ END
 `
 
 const snMainnetProviderEndpointBody = `
- SELECT pg_advisory_xact_lock(776,('x'||substr(md5(client::text),1,8))::bit(32)::int);
+BEGIN
+ IF NOT pg_try_advisory_xact_lock(776,('x'||substr(md5(client::text),1,8))::bit(32)::int) THEN
+  RAISE EXCEPTION 'provider work endpoint is busy' USING ERRCODE='40001';
+ END IF;
+END;
 `
 
 const snMainnetProviderSessionAppendBody = `
@@ -255,17 +259,6 @@ END;
 
 const snMainnetProviderStatementFenceBody = `
 BEGIN
- IF current_setting('urnetwork.provider_work_cooperating',true)='1' THEN
-  PERFORM pg_advisory_xact_lock_shared(-776::bigint);
- ELSE
-  IF EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND granted
-   AND classid=4294967295::oid AND objid=4294966520::oid AND objsubid=1 AND mode='ShareLock')
-   AND NOT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND granted
-    AND classid=4294967295::oid AND objid=4294966520::oid AND objsubid=1 AND mode='ExclusiveLock') THEN
-   RAISE EXCEPTION 'provider work mutation lacks ordered endpoint fences' USING ERRCODE='40001';
-  END IF;
-  PERFORM pg_advisory_xact_lock(-776::bigint);
- END IF;
  RETURN NULL;
 END;
 `
@@ -696,7 +689,7 @@ var snMainnetMigrationContracts = []snMainnetMigrationContract{
 		snMainnetMigrationTrigger("provider_work_outcome_original", "original_truncate_guard", "provider_work_original_guard", 34),
 		snMainnetMigrationTrigger("network_client_connection", "provider_work_session_statement_fence", "provider_work_session_statement_fence", 30),
 		snMainnetMigrationTrigger("network_client_connection", "provider_work_session_mutation", "provider_work_session_mutation", 29),
-		snMainnetMigrationFunction("provider_work_endpoint_lock(uuid)", "void", "sql", "v", false, snMainnetProviderEndpointBody, "client"),
+		snMainnetMigrationFunction("provider_work_endpoint_lock(uuid)", "void", "plpgsql", "v", false, snMainnetProviderEndpointBody, "client"),
 		snMainnetMigrationFunction("provider_work_session_append(uuid,uuid,text,uuid)", "bigint", "plpgsql", "v", false, snMainnetProviderSessionAppendBody, "client", "connection", "event_kind", "extender"),
 		snMainnetMigrationFunction("provider_work_session_mutation()", "trigger", "plpgsql", "v", false, snMainnetProviderSessionMutationBody),
 		snMainnetMigrationFunction("provider_work_session_statement_fence()", "trigger", "plpgsql", "v", false, snMainnetProviderStatementFenceBody),

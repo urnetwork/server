@@ -9576,4 +9576,5 @@ var migrations = []any{
 		SET LOCAL lock_timeout = '5s';
 		ALTER TABLE transfer_balance ADD COLUMN grant_kind varchar(32) NULL;
 	`),
+	newSqlMigration(providerWorkSessionContentionRepairSql),
 }
