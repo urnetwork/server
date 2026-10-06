@@ -13,6 +13,16 @@ import (
 // queued mirror below is produced by the ordinary financial worker. One grant
 // shared by 1,000 due intents must not create 1,000 historical mirror owners.
 func TestLegacySettlementColdDenseGrantCoalescesThousandCloses(t *testing.T) {
+	testLegacySettlementColdDenseGrant(t, 64, false)
+}
+
+// The scheduled ceiling uses the same thousand real financial transitions and
+// conservation/replay checks, through the public fifteen-second page owner.
+func TestLegacySettlementPage256DenseSharedGrantConserves(t *testing.T) {
+	testLegacySettlementColdDenseGrant(t, 256, true)
+}
+
+func testLegacySettlementColdDenseGrant(t *testing.T, pageLimit int, publicPage bool) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -76,10 +86,16 @@ func TestLegacySettlementColdDenseGrantCoalescesThousandCloses(t *testing.T) {
 		blocker := contractLifecycleTestBackendPid(t, ctx, held)
 		bounded, cancelPage := context.WithCancelCause(ctx)
 		defer cancelPage(context.Canceled)
+		nextPage := func(cursor *LegacySettlementCursor) (LegacySettlementFlushResult, error) {
+			if publicPage {
+				return FlushLegacySettlements(bounded, 1, cursor, pageLimit)
+			}
+			return flushLegacySettlementsPage(ctx, bounded, 1, cursor, pageLimit, flushLegacySettlementWithGrantWait)
+		}
 		done := make(chan legacyColdPageResult, 1)
 		began := time.Now()
 		go func() {
-			page, err := flushLegacySettlementsPage(ctx, bounded, 1, nil, 64, flushLegacySettlementWithGrantWait)
+			page, err := nextPage(nil)
 			done <- legacyColdPageResult{page: page, err: err}
 		}()
 		first, blocked := legacyColdPageWait(t, ctx, held, blocker, done)
@@ -95,6 +111,7 @@ func TestLegacySettlementColdDenseGrantCoalescesThousandCloses(t *testing.T) {
 		}
 		page, err := first.page, first.err
 		completed, pages := 0, 0
+		budgetYielded := false
 		for {
 			if err != nil || page.Completed != page.Visited || page.Completed == 0 || page.BusyOrGone != 0 || page.Failed != 0 {
 				t.Fatalf("dense grant page failed: %+v err=%v", page, err)
@@ -104,13 +121,15 @@ func TestLegacySettlementColdDenseGrantCoalescesThousandCloses(t *testing.T) {
 			if page.Cursor == nil {
 				break
 			}
-			if pages >= 16 {
+			budgetYielded = budgetYielded || page.Completed < pageLimit
+			if pages >= count {
 				t.Fatal("bounded cold-free pages did not finish fixed 1,000 cohort")
 			}
-			page, err = flushLegacySettlementsPage(ctx, bounded, 1, page.Cursor, 64, flushLegacySettlementWithGrantWait)
+			page, err = nextPage(page.Cursor)
 		}
-		if completed != count || pages != 16 {
-			t.Fatalf("dense grant progress=%d pages=%d, want1000/16", completed, pages)
+		minimumPages := (count + pageLimit - 1) / pageLimit
+		if completed != count || pages < minimumPages || !budgetYielded && pages != minimumPages {
+			t.Fatalf("dense grant progress=%d pages=%d minimum=%d budget_yielded=%t", completed, pages, minimumPages, budgetYielded)
 		}
 		elapsed := time.Since(began)
 		if len(settlementCacheSnapshot(ctx, []server.Id{f.balanceId})) != 0 {
@@ -153,7 +172,11 @@ func TestLegacySettlementColdDenseGrantCoalescesThousandCloses(t *testing.T) {
 			server.Raise(conn.QueryRow(ctx, `SELECT task_id FROM pending_task
                 WHERE function_name=$1 AND (args_json::jsonb->>'balance_id')::uuid=$2`, legacyColdPageMirrorFunction, f.balanceId).Scan(&ownerId))
 		})
-		t.Logf("dense cold grant: completed=%d pages=%d mirror_owners=1 elapsed=%s; elapsed is observational, not an asserted speedup", completed, pages, elapsed)
+		t.Logf("dense cold grant: completed=%d page_limit=%d pages=%d mirror_owners=1 elapsed=%s budget_yielded=%t; elapsed is observational, not an asserted speedup", completed, pageLimit, pages, elapsed, budgetYielded)
+		// A fixed two-second handoff is a comparison model, not a claim about
+		// this fixture or production throughput. Full64 needs15 boundaries;
+		// full256 needs3. Financial work and concurrent deletions are separate.
+		t.Logf("modeled two-second successor handoff for1000: cap64=30s cap256=6s; observed page boundaries=%d", pages-1)
 		server.Raise(held.Rollback(ctx))
 		settings := task.DefaultTaskWorkerSettings()
 		settings.ClaimRegisteredTargetsOnly = true

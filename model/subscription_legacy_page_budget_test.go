@@ -10,7 +10,8 @@ import (
 )
 
 // Each statement stays below the worker's two-second limit, while a loaded
-// page cannot fit all 64 independent commits inside its fifteen-second budget.
+// page cannot fit all 64 independent commits inside its fifteen-second budget,
+// even when the row ceiling permits256. The ceiling cannot extend that budget.
 // A page timeout must checkpoint the committed prefix, preserve the interrupted
 // contract's full reservation, and resume without a task-wide error backoff.
 func TestLegacySettlementLoadedPageBudgetPreservesContinuation(t *testing.T) {
@@ -63,7 +64,7 @@ func TestLegacySettlementLoadedPageBudgetPreservesContinuation(t *testing.T) {
                 EXECUTE FUNCTION synthetic_legacy_settlement_residence();`))
 		})
 		started := time.Now()
-		first, err := FlushLegacySettlements(ctx, 0, nil, count)
+		first, err := FlushLegacySettlements(ctx, 0, nil, 256)
 		elapsed := time.Since(started)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `DROP TRIGGER synthetic_legacy_settlement_residence ON transfer_contract;
@@ -90,7 +91,7 @@ func TestLegacySettlementLoadedPageBudgetPreservesContinuation(t *testing.T) {
 		if err != nil || first.Completed != terminal || first.Failed != 0 || !first.More || first.Cursor == nil || first.Cursor.ContractId != ids[terminal-1] {
 			t.Fatalf("page budget discarded its completed prefix instead of continuing: %+v, %v", first, err)
 		}
-		second, err := FlushLegacySettlements(ctx, 0, first.Cursor, count)
+		second, err := FlushLegacySettlements(ctx, 0, first.Cursor, 256)
 		if err != nil || second.Failed != 0 || first.Completed+second.Completed != count || second.Cursor != nil {
 			t.Fatalf("continued page skipped the interrupted intent: %+v, %v", second, err)
 		}
@@ -172,7 +173,7 @@ func TestLegacySettlementParentCancellationKeepsPartialPageError(t *testing.T) {
 		done := make(chan outcome, 1)
 		shard := int(firstID[15]) % LegacySettlementShardCount
 		go func() {
-			result, err := FlushLegacySettlements(parent, shard, nil, 64)
+			result, err := FlushLegacySettlements(parent, shard, nil, 256)
 			done <- outcome{result, err}
 		}()
 		requireContractLifecycleBlockedBy(t, ctx, held, blocker)
@@ -193,7 +194,7 @@ func TestLegacySettlementParentCancellationKeepsPartialPageError(t *testing.T) {
 		}
 		requireLegacySettlementTestState(t, ctx, f, firstID, false, true, 989, 100)
 		requireLegacySettlementTestState(t, ctx, f, secondID, true, false, 989, 100)
-		resumed, err := FlushLegacySettlements(ctx, shard, nil, 64)
+		resumed, err := FlushLegacySettlements(ctx, shard, nil, 256)
 		if err != nil || resumed.Completed != 1 || resumed.Cursor != nil {
 			t.Fatalf("parent-canceled intent did not resume: %+v, %v", resumed, err)
 		}

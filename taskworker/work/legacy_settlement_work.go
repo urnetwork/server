@@ -33,7 +33,7 @@ func ScheduleFlushLegacySettlements(clientSession *session.ClientSession, tx ser
 	}
 }
 func FlushLegacySettlements(args *FlushLegacySettlementsArgs, clientSession *session.ClientSession) (*FlushLegacySettlementsResult, error) {
-	result, err := model.FlushLegacySettlements(clientSession.Ctx, args.Shard, args.Cursor, 64)
+	result, err := model.FlushLegacySettlements(clientSession.Ctx, args.Shard, args.Cursor, model.LegacySettlementPageLimit)
 	return &FlushLegacySettlementsResult{LegacySettlementFlushResult: result}, err
 }
 func FlushLegacySettlementsPost(args *FlushLegacySettlementsArgs, result *FlushLegacySettlementsResult, clientSession *session.ClientSession, tx server.PgTx) error {

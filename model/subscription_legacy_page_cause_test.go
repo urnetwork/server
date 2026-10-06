@@ -48,6 +48,9 @@ func TestLegacySettlementPageDeadlinePreservesJoinedFailureAndCommittedCursor(t 
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET next_attempt_time=$2 WHERE contract_id=$1`, firstId, oldest))
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET next_attempt_time=$2 WHERE contract_id=$1`, secondId, oldest.Add(time.Millisecond)))
 			})
+			// Setup-only identity rewrites must not add deferred cold projection
+			// repair to this financial cancellation and committed-cursor control.
+			refreshNetEscrow(ctx, []server.Id{f.balanceId})
 			owner, cancelParent := context.WithCancel(ctx)
 			bounded, expire := context.WithCancelCause(owner)
 			calls := 0
