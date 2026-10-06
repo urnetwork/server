@@ -28,7 +28,7 @@ var netEscrowCreationSnapshots = prometheus.NewCounterVec(prometheus.CounterOpts
 
 var netEscrowRefreshSnapshots = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_net_escrow_refresh_snapshot_total",
-	Help: "Settlement, quarantine and retention mirror snapshots reused at a durable revision or reloaded from escrow history; not completed settlements.",
+	Help: "Settlement, quarantine, retention and scheduled reconciliation snapshots reused at a durable revision or reloaded from escrow history; not completed settlements or census query counts.",
 }, []string{"result"})
 
 func init() {
@@ -225,6 +225,13 @@ func publishCreatedNetEscrow(
 // Keep exact fallback for legacy writes and invalidated or deleted balances;
 // the source revision fences publishers that overtake either read/write pair.
 func readMirrorNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id) map[server.Id]netEscrowSnapshot {
+	return readCachedOrExactNetEscrowSnapshots(ctx, balanceIds, true)
+}
+
+// Targeted committed posts warm their exact misses. Scheduled fleet repair
+// only reuses existing cache entries: a sweep of mostly-empty balances must
+// not create a fleet-wide snapshot-write workload.
+func readCachedOrExactNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id, warmCache bool) map[server.Id]netEscrowSnapshot {
 	pending := map[server.Id]netEscrowSnapshot{}
 	if len(balanceIds) == 0 {
 		return pending
@@ -234,13 +241,24 @@ func readMirrorNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id) m
 	})
 	missing := missingNetEscrowSnapshots(pending, balanceIds)
 	exact := openEscrowReservedForBalances(ctx, missing)
-	cacheCommittedNetEscrowSnapshots(ctx, exact)
+	if warmCache {
+		cacheCommittedNetEscrowSnapshots(ctx, exact)
+	}
 	for balanceId, snapshot := range exact {
 		pending[balanceId] = snapshot
 	}
 	netEscrowRefreshSnapshots.WithLabelValues("reused").Add(float64(len(balanceIds) - len(missing)))
 	netEscrowRefreshSnapshots.WithLabelValues("reloaded").Add(float64(len(missing)))
 	return pending
+}
+
+// Scheduled reconciliation shares committed mirror authority without writing
+// the cache. The operator's exact audit and repair do not use the cache either.
+func readReconcileNetEscrowSnapshots(ctx context.Context, balanceIds []server.Id, useCache bool) map[server.Id]netEscrowSnapshot {
+	if !useCache {
+		return openEscrowReservedForBalances(ctx, balanceIds)
+	}
+	return readCachedOrExactNetEscrowSnapshots(ctx, balanceIds, false)
 }
 
 func refreshNetEscrow(ctx context.Context, balanceIds []server.Id) {

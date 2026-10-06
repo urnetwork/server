@@ -471,6 +471,21 @@ func Testing_DeleteNetEscrow(ctx context.Context, balanceId server.Id) {
 // direction that starves the available balance and produces spurious
 // "Insufficient balance". Only networks with nonzero net drift are returned.
 func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[server.Id]ByteCount, balanceCount int) {
+	return reconcileNetEscrow(ctx, apply, false)
+}
+
+// ReconcileCachedNetEscrow repairs scheduled mirror drift using a durable
+// snapshot only when its revision matches the same-statement source revision.
+// Revision triggers invalidate legacy changes; misses retain exact census.
+// Fleet repair never writes the cache. Operators use ReconcileNetEscrow for an independent
+// exact audit, including detection of a corrupted same-revision cache entry.
+func ReconcileCachedNetEscrow(ctx context.Context) (driftByNetworkId map[server.Id]ByteCount, balanceCount int) {
+	return reconcileNetEscrow(ctx, true, true)
+}
+
+// Both callers retain page-local authority and the same Redis revision fence.
+// Only scheduled repair may reuse the durable snapshot cache.
+func reconcileNetEscrow(ctx context.Context, apply, useCache bool) (driftByNetworkId map[server.Id]ByteCount, balanceCount int) {
 	now := server.NowUtc()
 	driftByNetworkId = map[server.Id]ByteCount{}
 
@@ -519,12 +534,11 @@ func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[s
 		for i, row := range rows {
 			balanceIds[i] = row.balanceId
 		}
-		// Read reservations immediately before correcting this page. Do not move
-		// this above the pagination loop: that recreates the stale-global-snapshot
-		// incident described in the function comment. Keep the query on the fast
-		// unsettled partial path so its statement-snapshot-to-Redis-GET window stays
-		// bounded as well.
-		pending := openEscrowReservedForBalances(ctx, balanceIds)
+		// Read reservations immediately before correcting this page. A durable
+		// cached amount is exact only at the revision read in the same statement;
+		// stale or missing amounts retain the per-balance history fallback. Never
+		// move this above pagination and recreate a stale global snapshot.
+		pending := readReconcileNetEscrowSnapshots(ctx, balanceIds, useCache)
 		drift := reconcileNetEscrowBatch(ctx, pending, balanceIds, apply)
 		for _, row := range rows {
 			driftByNetworkId[row.networkId] += drift[row.balanceId]
@@ -592,7 +606,7 @@ func ReconcileNetEscrow(ctx context.Context, apply bool) (driftByNetworkId map[s
 		for i, row := range rows {
 			balanceIds[i] = row.balanceId
 		}
-		pending := openEscrowReservedForBalances(ctx, balanceIds)
+		pending := readReconcileNetEscrowSnapshots(ctx, balanceIds, useCache)
 		drift := reconcileNetEscrowBatch(ctx, pending, balanceIds, apply)
 		for _, row := range rows {
 			driftByNetworkId[row.networkId] += drift[row.balanceId]
