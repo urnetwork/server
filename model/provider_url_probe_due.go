@@ -329,7 +329,7 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 				WHERE location_id=candidates.region_location_id OFFSET 0) AS region ON true
 			WHERE claimed.measured_work_due OR claimed.security_exception
 			ORDER BY %s
-		`, providerProbeEligibilitySql("provider"), providerUrlProbeRunWindowSql("candidates.client_id", "$1"),
+		`, providerUrlProbeAdmissionSql("provider"), providerUrlProbeRunWindowSql("candidates.client_id", "$1"),
 		providerUrlProbeSuccessWindowSql("candidates.client_id", "$1"),
 		providerHasUrlSecurityExceptionSql("candidates.client_id"), int((ProviderEgressProbeRefreshAge-ProviderUrlProbeRenewalHeadroom)/time.Second), countProjection, resultOrder)
 }

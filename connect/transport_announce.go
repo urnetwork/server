@@ -497,7 +497,11 @@ func (self *ConnectionAnnounce) run() {
 	// 2026-07-15 pending a pubsub throughput redesign.
 	if self.settings.EnableNetworkPeers {
 		peerNetworkId, topLevel, peerCategory, peerProfile, peersEnabled := model.GetNetworkPeerProfile(self.ctx, self.clientId)
-		if peersEnabled && topLevel && peerCategory != model.NetworkPeerCategoryProxy && peerProfile != nil {
+		if peersEnabled && topLevel && peerCategory == model.NetworkPeerCategoryProvider && peerProfile != nil {
+			// a provider install is counted at once but is never a peer: no
+			// metadata, events or subscriptions
+			model.AddNetworkProviderPeer(self.ctx, peerNetworkId, self.clientId, self.settings.PeerRegisterTtl)
+		} else if peersEnabled && topLevel && peerCategory == model.NetworkPeerCategoryClient && peerProfile != nil {
 			// ttl 0: read-only lookup — extending the resident record's expiry
 			// is the resident keepalive's job, not the announce's
 			if resident := model.GetResidentForClient(self.ctx, self.clientId, 0); resident != nil {

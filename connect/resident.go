@@ -896,6 +896,20 @@ func (self *Exchange) NominateLocalResidentWithContext(
 	instanceId server.Id,
 	residentIdToReplace *server.Id,
 ) bool {
+	nominated, _ := self.nominateLocalResident(callerCtx, clientId, instanceId, residentIdToReplace, false)
+	return nominated
+}
+
+// Nominates for a transport that may have declared provide intent. Returns
+// whether the resident was nominated, and whether a refusal was for the
+// concurrent client limit.
+func (self *Exchange) nominateLocalResident(
+	callerCtx context.Context,
+	clientId server.Id,
+	instanceId server.Id,
+	residentIdToReplace *server.Id,
+	provideIntent bool,
+) (bool, bool) {
 	admissionCtx, admissionCancel := context.WithCancel(callerCtx)
 	stopExchangeCancel := context.AfterFunc(self.ctx, admissionCancel)
 	defer func() {
@@ -903,7 +917,7 @@ func (self *Exchange) NominateLocalResidentWithContext(
 		admissionCancel()
 	}()
 	if admissionCtx.Err() != nil || self.ctx.Err() != nil {
-		return false
+		return false, false
 	}
 	// Admit before any model work. Close takes the same lock, so WaitForIdle
 	// cannot observe a zero worker count while a pre-close nomination is still
@@ -911,7 +925,7 @@ func (self *Exchange) NominateLocalResidentWithContext(
 	self.residentWorkerLock.Lock()
 	if self.residentWorkersClosed {
 		self.residentWorkerLock.Unlock()
-		return false
+		return false, false
 	}
 	self.residentWorkers.Add(1)
 	self.residentWorkerLock.Unlock()
@@ -941,15 +955,16 @@ func (self *Exchange) NominateLocalResidentWithContext(
 		if glog.V(1) {
 			glog.Infof("[exchange]nominate refused: draining\n")
 		}
-		return false
+		return false, false
 	}
 
 	// Refuse to nominate a resident for a client that would push the network past
-	// its limit, which keeps the client from becoming active. Public providers are
-	// exempt and a re-nomination of an already-connected client is not a new
-	// connection (see model.CanConnectNetworkPeer). This is a no-op while
+	// its limit, which keeps the client from becoming active. An intent provider
+	// is judged by its provider intent check and a re-nomination of an
+	// already-connected client is not a new connection (see
+	// model.CanConnectNetworkPeer). This is a no-op while
 	// enforce_concurrent_clients is false in pro.yml.
-	if !model.CanConnectNetworkPeer(admissionCtx, clientId) {
+	if !model.CanConnectNetworkPeer(admissionCtx, clientId, provideIntent) {
 		nominationRefusedCounter.WithLabelValues("concurrent_client_limit").Inc()
 		if glog.V(1) {
 			glog.Infof(
@@ -957,11 +972,11 @@ func (self *Exchange) NominateLocalResidentWithContext(
 				clientId,
 			)
 		}
-		return false
+		return false, true
 	}
 
 	if admissionCtx.Err() != nil {
-		return false
+		return false, false
 	}
 	residentId := server.NewId()
 
@@ -987,10 +1002,10 @@ func (self *Exchange) NominateLocalResidentWithContext(
 		if admissionCtx.Err() == nil {
 			abandonedNomination = nil
 		}
-		return false
+		return false, false
 	}
 	if admissionCtx.Err() != nil {
-		return false
+		return false, false
 	}
 
 	resident := newResidentDuringAdmission(
@@ -1005,7 +1020,7 @@ func (self *Exchange) NominateLocalResidentWithContext(
 		if err := resident.CloseAndWait(context.Background()); err != nil {
 			glog.Errorf("[r]abandoned resident close wait = %s\n", err)
 		}
-		return false
+		return false, false
 	}
 	// Publish before any lifecycle worker can remove this generation. A worker
 	// that retires immediately must not leave a later insertion behind it.
@@ -1053,6 +1068,12 @@ func (self *Exchange) NominateLocalResidentWithContext(
 						*resident.peerNetworkId,
 						clientId,
 					)
+				} else if resident.peerCategory == model.NetworkPeerCategoryProvider {
+					model.RemoveNetworkProviderPeer(
+						cleanupCtx,
+						*resident.peerNetworkId,
+						clientId,
+					)
 				} else {
 					model.RemoveNetworkPeer(
 						cleanupCtx,
@@ -1091,7 +1112,7 @@ func (self *Exchange) NominateLocalResidentWithContext(
 		afterStarted(resident)
 	}
 
-	return true
+	return true, false
 }
 
 // Refreshes metadata for one resident. Transport cancellation must not change
@@ -1136,6 +1157,12 @@ func (self *Exchange) refreshResidentRegistration(resident *Resident) bool {
 				// also the initial proxy registration (proxy clients
 				// do not pass through ConnectionAnnounce)
 				model.AddNetworkProxyPeer(peerCtx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
+				return
+			}
+			if resident.peerCategory == model.NetworkPeerCategoryProvider {
+				// a provider install is counted but never a peer; the add
+				// doubles as the heartbeat
+				model.AddNetworkProviderPeer(peerCtx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
 				return
 			}
 			if !model.RefreshNetworkPeer(peerCtx, *resident.peerNetworkId, clientId, residentId, self.settings.ExchangeResidentTtl) {
@@ -2772,12 +2799,26 @@ type ResidentTransport struct {
 	clientId   server.Id
 	instanceId server.Id
 
+	admission ResidentTransportAdmission
+
 	routes map[string]string
 
 	send    chan []byte
 	receive chan []byte
 
 	beforeReliableReceiveWaitForTest func()
+}
+
+// How the connection behind a resident transport is admitted against the
+// network's concurrent client limit.
+type ResidentTransportAdmission struct {
+	// the connection declared provide intent: its provider intent check decides
+	// the client limit (model.CanConnectNetworkPeer)
+	ProvideIntent bool
+	// called when a nomination is refused for the concurrent client limit, so
+	// the connection closes with the client limit exceeded signal. It must not
+	// block; it may be called again while the connection closes.
+	ClientLimitExceeded func()
 }
 
 // pooledMessageSendResult describes the final ownership of one queue offer.
@@ -3017,6 +3058,25 @@ func NewResidentTransportWithProperties(
 	instanceId server.Id,
 	properties connect.TransferCarrierProperties,
 ) *ResidentTransport {
+	return NewResidentTransportWithAdmission(
+		ctx,
+		exchange,
+		clientId,
+		instanceId,
+		properties,
+		ResidentTransportAdmission{},
+	)
+}
+
+// Adds the connection's client limit admission to the carrier properties.
+func NewResidentTransportWithAdmission(
+	ctx context.Context,
+	exchange *Exchange,
+	clientId server.Id,
+	instanceId server.Id,
+	properties connect.TransferCarrierProperties,
+	admission ResidentTransportAdmission,
+) *ResidentTransport {
 	header := ExchangeHeader{
 		Op:                                    ExchangeOpTransport,
 		UnreliableTransfer:                    properties.Unreliable,
@@ -3024,7 +3084,9 @@ func NewResidentTransportWithProperties(
 		UnreliableFlowIsolation:               properties.UnreliableFlowIsolation,
 		UnreliableFlowReserve:                 properties.UnreliableFlowReserve,
 	}
-	return newResidentTransport(ctx, exchange, header, clientId, instanceId)
+	transport := newResidentTransport(ctx, exchange, header, clientId, instanceId)
+	transport.admission = admission
+	return transport
 }
 
 func newResidentTransport(
@@ -3223,12 +3285,19 @@ func (self *ResidentTransport) Run() {
 		}
 
 		c := func() bool {
-			return self.exchange.NominateLocalResidentWithContext(
+			nominated, clientLimitExceeded := self.exchange.nominateLocalResident(
 				self.ctx,
 				self.clientId,
 				self.instanceId,
 				residentIdToReplace,
+				self.admission.ProvideIntent,
 			)
+			if clientLimitExceeded && self.admission.ClientLimitExceeded != nil {
+				// the connection closes with the signal; until then this keeps
+				// retrying at the reconnect pace
+				self.admission.ClientLimitExceeded()
+			}
+			return nominated
 		}
 		if glog.V(2) {
 			server.TraceWithReturn(

@@ -501,6 +501,7 @@ func DefaultConnectHandlerSettings() *ConnectHandlerSettings {
 		ConnectionAnnounceTimeout:   5 * time.Second,
 		ConnectionAnnounceSettings:  *DefaultConnectionAnnounceSettings(),
 		ConnectionRateLimitSettings: *DefaultConnectionRateLimitSettings(),
+		ProviderIntentCheckSettings: *DefaultProviderIntentCheckSettings(),
 
 		// Both windows keep quic-go's behavior until a deployment sets them:
 		// 512 KiB initial and 6 MiB maximum per stream, with no bound at all on
@@ -559,6 +560,8 @@ type ConnectHandlerSettings struct {
 	ConnectionTestConfig *TestConfig
 	ConnectionAnnounceSettings
 	ConnectionRateLimitSettings
+	// the check of connections that declare provide intent (provider_intent.go)
+	ProviderIntentCheckSettings ProviderIntentCheckSettings
 	// Tests replace only the configuration loader so initialization failure can
 	// be held before any listener goroutine exists.
 	transportTlsLoader func(*server.TransportTlsSettings) (*server.TransportTls, error)
@@ -1475,6 +1478,10 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	// family is re-derived from the same address at the model
 	_, ipFamilyIntent := connectionIpFamily(clientId, clientAddress, auth)
 
+	// the header, or the frame field of a first-frame auth
+	provideIntent := provideIntentFromHeader(r.Header) || auth.ProvideIntent
+	defer trackProvideIntentConnection(connectTransportH1, provideIntent)()
+
 	connectionId := server.NewId()
 	self.exchange.registerConnection(clientId, connectionId, handleCancel)
 	defer self.exchange.unregisterConnection(clientId, connectionId)
@@ -1494,6 +1501,32 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		} else {
 			testConfig = DefaultTestConfig()
 		}
+		// the writer sends the client limit exceeded close for the first request
+		kickRequest := make(chan string, 1)
+		kickClientLimit := func(cause string) {
+			select {
+			case kickRequest <- cause:
+			default:
+			}
+		}
+
+		var providerIntentCheck *providerIntentCheck
+		if provideIntent {
+			providerIntentCheck = newProviderIntentCheck(
+				handleCtx,
+				byJwt.NetworkId,
+				clientId,
+				connectTransportH1,
+				&self.settings.ProviderIntentCheckSettings,
+			)
+			if !providerIntentCheck.Start() {
+				// over the client limit: no worker writes yet
+				countClientLimitKick(connectTransportH1, clientLimitKickCauseProviderIntent)
+				writeConnectH1ClientLimitExceeded(ws, self.settings.WriteTimeout)
+				return
+			}
+		}
+
 		announce := NewConnectionAnnounceWithIpFamily(
 			handleCtx,
 			handleCancel,
@@ -1509,11 +1542,22 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		)
 		defer finishConnectionAnnounce(announce)
 
-		residentTransport := NewResidentTransport(
+		admission := ResidentTransportAdmission{
+			ProvideIntent: provideIntent,
+		}
+		if !provideIntent {
+			// an intent connection's check owns its kick
+			admission.ClientLimitExceeded = func() {
+				kickClientLimit(clientLimitKickCauseConcurrentClientLimit)
+			}
+		}
+		residentTransport := NewResidentTransportWithAdmission(
 			handleCtx,
 			self.exchange,
 			clientId,
 			instanceId,
+			connect.TransferCarrierProperties{},
+			admission,
 		)
 		var workers connectHandlerWorkers
 		defer finishH1ConnectHandlerWorkers(&workers, func() {
@@ -1528,6 +1572,13 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 			defer handleCancel()
 			residentTransport.Run()
 		})
+		if providerIntentCheck != nil {
+			workers.start(func() {
+				if !providerIntentCheck.Run() {
+					kickClientLimit(clientLimitKickCauseProviderIntent)
+				}
+			})
+		}
 
 		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
 
@@ -1649,6 +1700,14 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 
+			// the client limit exceeded close ends the writer and the connection
+			writeKick := func(cause string) {
+				countClientLimitKick(connectTransportH1, cause)
+				if err := writeConnectH1ClientLimitExceeded(ws, self.settings.WriteTimeout); err != nil {
+					recordWriteError(err)
+				}
+			}
+
 			writeBatchConn := connectH1WriteBatchForConn(ws.UnderlyingConn())
 			writeUser := func(message []byte, ok bool) bool {
 				open, err := writeConnectH1UserReadyBatch(
@@ -1697,6 +1756,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 						return
 					case <-residentTransport.Done():
 						return
+					case cause := <-kickRequest:
+						writeKick(cause)
+						return
 					default:
 					}
 					mathrand.Read(chunk)
@@ -1729,13 +1791,17 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 
-				// fast path without arming the ping timer
+				// fast path without arming the ping timer. A pending kick is
+				// selected here too, so continuous traffic cannot starve it.
 				select {
 				case message, ok := <-residentTransport.receive:
 					if !writeUser(message, ok) {
 						return
 					}
 					continue
+				case cause := <-kickRequest:
+					writeKick(cause)
+					return
 				default:
 				}
 
@@ -1744,6 +1810,9 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 				case <-handleCtx.Done():
 					return
 				case <-residentTransport.Done():
+					return
+				case cause := <-kickRequest:
+					writeKick(cause)
 					return
 				case message, ok := <-residentTransport.receive:
 					if !writeUser(message, ok) {
@@ -2168,6 +2237,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	var connectionId server.Id
 	ipFamilyIntent := 0
 	appVersion := ""
+	provideIntent := false
 	useH3Datagrams := false
 	connectionRegistered := false
 	defer func() {
@@ -2210,6 +2280,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 
 			_, ipFamilyIntent = connectionIpFamily(clientId, clientAddress, auth)
 			appVersion = auth.AppVersion
+			provideIntent = auth.ProvideIntent
 
 			if authCtx.Err() != nil {
 				return authCtx.Err()
@@ -2250,6 +2321,16 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 	connectionId = server.NewId()
 	self.exchange.registerConnection(clientId, connectionId, handleCancel)
 	connectionRegistered = true
+	defer trackProvideIntentConnection(connectTransportH3, provideIntent)()
+
+	// closing the connection is the signal; count it once
+	var kickOnce sync.Once
+	kickClientLimit := func(cause string) {
+		kickOnce.Do(func() {
+			countClientLimitKick(connectTransportH3, cause)
+			closeConnectQuicClientLimitExceeded(conn)
+		})
+	}
 
 	c := func() {
 		announceTimeout := time.Duration(0)
@@ -2258,6 +2339,21 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			// now we delay the announcement to make sure the transport is stable
 			announceTimeout = self.settings.ConnectionAnnounceTimeout
 		}
+		var providerIntentCheck *providerIntentCheck
+		if provideIntent {
+			providerIntentCheck = newProviderIntentCheck(
+				handleCtx,
+				byJwt.NetworkId,
+				clientId,
+				connectTransportH3,
+				&self.settings.ProviderIntentCheckSettings,
+			)
+			if !providerIntentCheck.Start() {
+				kickClientLimit(clientLimitKickCauseProviderIntent)
+				return
+			}
+		}
+
 		announce := NewConnectionAnnounceWithIpFamily(
 			handleCtx,
 			handleCancel,
@@ -2280,7 +2376,16 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				conn.SendDatagram,
 			)
 		}
-		residentTransport := NewResidentTransportWithProperties(
+		admission := ResidentTransportAdmission{
+			ProvideIntent: provideIntent,
+		}
+		if !provideIntent {
+			// an intent connection's check owns its kick
+			admission.ClientLimitExceeded = func() {
+				kickClientLimit(clientLimitKickCauseConcurrentClientLimit)
+			}
+		}
+		residentTransport := NewResidentTransportWithAdmission(
 			handleCtx,
 			self.exchange,
 			clientId,
@@ -2290,6 +2395,7 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 				self.settings.H3DatagramSettings,
 				maxDatagramByteCount,
 			),
+			admission,
 		)
 		var datagramFragmenter *connect.H3DatagramFragmenter
 		var datagramReassembler *connect.H3DatagramReassembler
@@ -2332,6 +2438,13 @@ func (self *ConnectHandler) connectQuic(conn *quic.Conn) error {
 			case <-residentTransport.Done():
 			}
 		})
+		if providerIntentCheck != nil {
+			workers.start(func() {
+				if !providerIntentCheck.Run() {
+					kickClientLimit(clientLimitKickCauseProviderIntent)
+				}
+			})
+		}
 
 		pingTracker := NewPingTracker(self.settings.PingTrackerCount)
 		deliverRoutedMessage := func(

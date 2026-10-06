@@ -9607,4 +9607,28 @@ var migrations = []any{
 		CREATE INDEX search_value_update_realm_xid_update_id
 		ON search_value_update (realm, xid, update_id)
 	`),
+	// Egress URL probe priority for intent providers in their qualification
+	// grace (model/provider_intent_model.go): one row per provider while its
+	// attempt is pending, read by primary key from the URL probe admission. A
+	// new table: nothing is rewritten. It must exist before a binary that reads
+	// it serves.
+	newSqlMigration(`
+		CREATE TABLE provider_intent_probe_priority (
+			client_id uuid NOT NULL PRIMARY KEY,
+			priority_since timestamp NOT NULL,
+			update_time timestamp NOT NULL
+		)
+	`),
+	// Provider installs: top-level clients created with provide intent
+	// (POST /network/auth-client provide_intent). Like proxy_device_config, the
+	// row is the client's category for its life: never a network peer and not
+	// counted by the peer valve or the top-level client cap
+	// (model/peer_model.go). A new table: nothing is rewritten. It must exist
+	// before a binary that reads it serves.
+	newSqlMigration(`
+		CREATE TABLE network_client_provider_intent (
+			client_id uuid NOT NULL PRIMARY KEY,
+			create_time timestamp NOT NULL
+		)
+	`),
 }

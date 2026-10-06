@@ -78,7 +78,7 @@ func providerUrlProbeFleetSql(policy int) string {
 			AND (provider.ipv4_proven OR NOT provider.ipv6_proven)
 			AND client.active AND client.source_client_id IS NULL
 			AND EXISTS (SELECT 1 FROM provide_key AS key WHERE key.client_id=provider.client_id AND key.provide_mode=$2)
-			AND ` + providerProbeEligibilitySql("provider") + `
+			AND ` + providerUrlProbeAdmissionSql("provider") + `
 			)` + providerUrlProbeMatureDeficitCtesSql(policy) + `
 			SELECT COUNT(*),
 				COUNT(*) FILTER (WHERE next_attempt_at <= $1 OR client_id IS NULL),

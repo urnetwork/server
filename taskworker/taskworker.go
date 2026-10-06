@@ -282,6 +282,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			"bringyour.com/bringyour/controller.AdvancePayment",
 		),
 		task.NewTaskTargetWithPost(
+			controller.ProviderIntentCheck,
+			controller.ProviderIntentCheckPost,
+		),
+		task.NewTaskTargetWithPost(
 			work.SetMissingConnectionLocations,
 			work.SetMissingConnectionLocationsPost,
 		),

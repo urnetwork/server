@@ -61,6 +61,19 @@ func providerProbeEligibilitySql(rollupAlias string) string {
 	return fmt.Sprintf(`NOT %s.arin_risk AND %s`, rollupAlias, providerReliabilityEligibilitySql(rollupAlias+".client_id"))
 }
 
+// URL probe admission also admits an intent provider in its qualification
+// grace without reliability history (provider_intent_model.go): the grace is
+// judged on probes, and a new provider's 12 hour weight stays under the floor
+// for hours. Serving eligibility (providerEgressEligibilitySql) is unchanged.
+func providerUrlProbeAdmissionSql(rollupAlias string) string {
+	return fmt.Sprintf(
+		`NOT %s.arin_risk AND (%s OR %s)`,
+		rollupAlias,
+		providerReliabilityEligibilitySql(rollupAlias+".client_id"),
+		providerIntentProbePrioritySql(rollupAlias+".client_id"),
+	)
+}
+
 // Public-mode changes already own a client transaction. Read only that client's
 // admission inputs; missing location still waits for the ordinary rollup.
 func providerUrlProbeClientEligibilitySql() string {
@@ -72,7 +85,7 @@ func providerUrlProbeClientEligibilitySql() string {
 		AND (provider_location.ipv4_proven OR NOT provider_location.ipv6_proven)
 		AND provider.active AND provider.source_client_id IS NULL
 		AND EXISTS (SELECT 1 FROM provide_key WHERE provide_key.client_id = $1 AND provide_mode = $2)
-		AND ` + providerProbeEligibilitySql("provider_location") + `)`
+		AND ` + providerUrlProbeAdmissionSql("provider_location") + `)`
 }
 
 // Repair the changed identity before publishing its provide keys. Preserve all
@@ -105,7 +118,10 @@ func updateProviderUrlProbeEligibilityForClient(ctx context.Context, tx server.P
 func updateProviderUrlProbeEligibility(ctx context.Context, tx server.PgTx) {
 	server.RaisePgResult(tx.Exec(ctx, `
 		INSERT INTO provider_egress_probe_cycle (client_id, cycle_started_at, next_attempt_at, eligible)
-		SELECT provider_location.client_id, $1, $1, true
+		SELECT provider_location.client_id, $1, LEAST($1::timestamp, COALESCE((
+			SELECT intent_priority.priority_since FROM provider_intent_probe_priority AS intent_priority
+			WHERE intent_priority.client_id = provider_location.client_id
+		), $1::timestamp)), true
 		FROM network_client_location_reliability AS provider_location
 		JOIN network_client AS provider USING (client_id)
 		WHERE provider_location.connected AND provider_location.valid
@@ -113,7 +129,7 @@ func updateProviderUrlProbeEligibility(ctx context.Context, tx server.PgTx) {
 		AND provider.active AND provider.source_client_id IS NULL
 		AND NOT EXISTS (SELECT 1 FROM provider_egress_probe_cycle AS cycle WHERE cycle.client_id = provider_location.client_id)
 		AND EXISTS (SELECT 1 FROM provide_key WHERE provide_key.client_id = provider_location.client_id AND provide_mode = $2)
-		AND `+providerProbeEligibilitySql("provider_location")+`
+		AND `+providerUrlProbeAdmissionSql("provider_location")+`
 		ON CONFLICT (client_id) DO NOTHING`, server.NowUtc(), ProvideModePublic))
 
 	// Claims still recheck current gates. Reconcile both admission and rejection
@@ -128,7 +144,7 @@ func updateProviderUrlProbeEligibility(ctx context.Context, tx server.PgTx) {
 				AND (provider_location.ipv4_proven OR NOT provider_location.ipv6_proven)
 				AND provider.active AND provider.source_client_id IS NULL
 				AND EXISTS (SELECT 1 FROM provide_key WHERE provide_key.client_id = cycle.client_id AND provide_mode = $1)
-				AND `+providerProbeEligibilitySql("provider_location")+`
+				AND `+providerUrlProbeAdmissionSql("provider_location")+`
 			) AS eligible FROM provider_egress_probe_cycle AS cycle
 		)
 		UPDATE provider_egress_probe_cycle AS cycle SET eligible = eligibility.eligible
