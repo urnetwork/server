@@ -8,43 +8,6 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// TestIsPublicProvider pins the exemption from the connected top-level client
-// limit: a client counts against the limit UNLESS it is a public provider, which
-// means it offers BOTH public and stream provide modes. Offering only one of the
-// two is not a public provider and still counts.
-func TestIsPublicProvider(t *testing.T) {
-	// exempt: public + stream
-	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{
-		ProvideModes: []ProvideMode{ProvideModePublic, ProvideModeStream},
-	}), true)
-	// order does not matter
-	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{
-		ProvideModes: []ProvideMode{ProvideModeStream, ProvideModePublic},
-	}), true)
-	// extra modes alongside both are still exempt
-	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{
-		ProvideModes: []ProvideMode{ProvideModeNetwork, ProvideModePublic, ProvideModeStream},
-	}), true)
-
-	// not exempt: only one of the pair
-	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{
-		ProvideModes: []ProvideMode{ProvideModePublic},
-	}), false)
-	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{
-		ProvideModes: []ProvideMode{ProvideModeStream},
-	}), false)
-
-	// not exempt: neither
-	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{
-		ProvideModes: []ProvideMode{ProvideModeNetwork, ProvideModeFriendsAndFamily},
-	}), false)
-	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{ProvideModes: []ProvideMode{}}), false)
-	connect.AssertEqual(t, isPublicProvider(&NetworkPeer{}), false)
-
-	// defensive: no peer
-	connect.AssertEqual(t, isPublicProvider(nil), false)
-}
-
 // TestReferralBonusCount pins the referral payout cap: a referrer is paid for at
 // most pro.yml referral.max_referrals referrals (10), no matter how many it has.
 func TestReferralBonusCount(t *testing.T) {

@@ -18519,6 +18519,15 @@ hashes, generations 1 to 4096). All three tables carry the row and truncate
 guards of `wallet_mapping_original_guard`: a missing or disabled guard, a
 nullable network or a widened mode is drift at head 786.
 
+Version 787 adds `provider_intent_probe_priority`, the egress URL probe priority
+of an intent provider in its qualification grace (`client_id` primary key,
+`NOT NULL` `priority_since` and `update_time` timestamps, no foreign keys).
+Version 788 adds `network_client_provider_intent`, the provider install
+category of a top-level client created with provide intent (`client_id`
+primary key, `NOT NULL` `create_time`, no foreign keys); the peer list, the
+peer valve and the top-level client cap read it. A missing table, a nullable
+column or a missing primary key is drift at its version.
+
 Migration764 appends logical close-report receipts after the unchanged deployed
 1–763 prefix. The artifact contract checks the exact contract/party/report key,
 nonzero report IDs, nonnegative acknowledged bytes, finality and timestamp
