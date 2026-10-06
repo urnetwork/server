@@ -410,6 +410,27 @@ func (self *SearchLocal) AddRawInTx(ctx context.Context, value string, valueId s
 	self.impl.AddRawInTx(ctx, value, valueId, valueVariant, tx)
 }
 
+// Writes the value's entries in the caller's transaction, as AddInTx does, and
+// returns the post that updates the local index, for the caller to run once
+// the transaction commits (server.RunPosts). AddInTx updates the local index
+// at the call, so a transaction that then rolls back leaves it on a value the
+// database never kept, which the update poll does not correct: it replays only
+// newer committed update records.
+func (self *SearchLocal) AddInTxPost(ctx context.Context, value string, valueId server.Id, valueVariant int, tx server.PgTx) server.PostFunction {
+	value = NormalizeForSearch(value)
+	self.impl.AddRawInTx(ctx, value, valueId, valueVariant, tx)
+	return func() any {
+		self.index(&SearchValueUpdate{
+			SearchValue: SearchValue{
+				Value:        value,
+				ValueId:      valueId,
+				ValueVariant: valueVariant,
+			},
+		})
+		return nil
+	}
+}
+
 func (self *SearchLocal) Remove(ctx context.Context, valueId server.Id) {
 	self.index(&SearchValueUpdate{
 		Remove: true,
@@ -428,6 +449,22 @@ func (self *SearchLocal) RemoveInTx(ctx context.Context, valueId server.Id, tx s
 		},
 	})
 	self.impl.RemoveInTx(ctx, valueId, tx)
+}
+
+// Removes the value's entries in the caller's transaction, as RemoveInTx does,
+// and returns the post that removes it from the local index, for the caller
+// to run once the transaction commits (server.RunPosts). See AddInTxPost.
+func (self *SearchLocal) RemoveInTxPost(ctx context.Context, valueId server.Id, tx server.PgTx) server.PostFunction {
+	self.impl.RemoveInTx(ctx, valueId, tx)
+	return func() any {
+		self.index(&SearchValueUpdate{
+			Remove: true,
+			SearchValue: SearchValue{
+				ValueId: valueId,
+			},
+		})
+		return nil
+	}
 }
 
 func (self *SearchLocal) OrderedSearchRecordsAfter(ctx context.Context, startRecordId int64, limit int) []*SearchValueUpdate {

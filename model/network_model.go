@@ -13,6 +13,8 @@ import (
 	// "github.com/urnetwork/glog"
 
 	goaway "github.com/TwiN/go-away"
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
 	bip39 "github.com/tyler-smith/go-bip39"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
@@ -34,14 +36,39 @@ func init() {
 	})
 }
 
+// The database index of the network name search.
+func newNetworkNameSearchDb() *search.SearchDb {
+	return search.NewSearchDb("network_name", search.SearchTypeFull)
+}
+
 func createNetworkNameSearch() *search.SearchLocal {
 	return search.NewSearchLocalWithDefaults(
 		context.Background(),
-		search.NewSearchDb("network_name", search.SearchTypeFull),
+		newNetworkNameSearchDb(),
 	)
 }
 
 var networkNameSearch = sync.OnceValue(createNetworkNameSearch)
+
+// Testing_InMemoryNetworkNameSearch replaces the network name search with one
+// whose in-memory index changes only through the writes a test makes: its
+// context is canceled before it starts, so its background load fails at once
+// and it never loads or polls the database index, and it answers queries from
+// memory. Its writes still reach the database index. Returns the search, and
+// the func that restores the previous one.
+func Testing_InMemoryNetworkNameSearch(ctx context.Context) (inMemorySearch *search.SearchLocal, restore func()) {
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	inMemorySearch = search.NewSearchLocalWithDefaults(canceledCtx, newNetworkNameSearchDb())
+	previousNetworkNameSearch := networkNameSearch
+	networkNameSearch = func() *search.SearchLocal {
+		return inMemorySearch
+	}
+	restore = func() {
+		networkNameSearch = previousNetworkNameSearch
+	}
+	return
+}
 
 const MinPasswordLength = 6
 
@@ -404,7 +431,7 @@ func NetworkCreate(
 		if resultNetworkCreate.Created {
 			auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, session)
 
-			networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, resultNetworkCreate.NetworkId, 0)
+			networkNameSearch().Add(session.Ctx, validatedNetworkName, resultNetworkCreate.NetworkId, 0)
 
 			if testAuthPolicy.BypassVerification {
 				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
@@ -441,9 +468,13 @@ func NetworkCreate(
 			}
 			return result, nil
 		} else {
+			message := "Account might already exist. Please start over."
+			if resultNetworkCreate.refusalMessage != "" {
+				message = resultNetworkCreate.refusalMessage
+			}
 			result := &NetworkCreateResult{
 				Error: &NetworkCreateResultError{
-					Message:       "Account might already exist. Please start over.",
+					Message:       message,
 					refusalStatus: resultNetworkCreate.refusalStatus,
 				},
 			}
@@ -470,7 +501,7 @@ func NetworkCreate(
 			if resultNetworkCreate.Created {
 				auditNetworkCreate(networkCreate, resultNetworkCreate.NetworkId, session)
 
-				networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, resultNetworkCreate.NetworkId, 0)
+				networkNameSearch().Add(session.Ctx, validatedNetworkName, resultNetworkCreate.NetworkId, 0)
 
 				SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
@@ -496,9 +527,13 @@ func NetworkCreate(
 				}
 				return result, nil
 			} else {
+				message := "Account might already exist. Please log in again."
+				if resultNetworkCreate.refusalMessage != "" {
+					message = resultNetworkCreate.refusalMessage
+				}
 				result := &NetworkCreateResult{
 					Error: &NetworkCreateResultError{
-						Message:       "Account might already exist. Please log in again.",
+						Message:       message,
 						refusalStatus: resultNetworkCreate.refusalStatus,
 					},
 				}
@@ -589,7 +624,7 @@ func NetworkCreate(
 
 			auditNetworkCreate(networkCreate, networkCreateResult.NetworkId, session)
 
-			networkNameSearch().Add(session.Ctx, networkCreate.NetworkName, networkCreateResult.NetworkId, 0)
+			networkNameSearch().Add(session.Ctx, validatedNetworkName, networkCreateResult.NetworkId, 0)
 
 			SetUserAuthAttemptSuccess(session.Ctx, userAuthAttemptId, true)
 
@@ -703,8 +738,11 @@ func networkCreateWalletAuth(
 	isPro := false
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		// a rerun starts over
+		created = false
 		refusalStatus = 0
 		refusalMessage = ""
+		isPro = false
 		var userId *server.Id
 
 		result, err := tx.Query(
@@ -747,6 +785,14 @@ func networkCreateWalletAuth(
 		if conflictUserId != nil {
 			refusalStatus = http.StatusConflict
 			refusalMessage = "This wallet is already linked to another account."
+			return
+		}
+
+		// NetworkCreate checked the name before this transaction (see
+		// networkNameHeldInTx)
+		if networkNameHeldInTx(ctx, tx, validatedNetworkName) {
+			refusalStatus = http.StatusConflict
+			refusalMessage = networkNameNotAvailableMessage
 			return
 		}
 
@@ -840,12 +886,17 @@ func networkCreateAuthJwt(
 
 	created := false
 	refusalStatus := 0
+	refusalMessage := ""
 	var createdNetworkId server.Id
 	var createdUserId server.Id
 	isPro := false
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		// a rerun starts over
+		created = false
 		refusalStatus = 0
+		refusalMessage = ""
+		isPro = false
 		var userId *server.Id
 
 		result, err := tx.Query(
@@ -870,6 +921,23 @@ func networkCreateAuthJwt(
 		createdUserId = server.NewId()
 		createdNetworkId = server.NewId()
 
+		// Another user can hold the identity in a child table only, without it
+		// on their network_user row (a sign-in or an email added to an existing
+		// account). addSsoAuthInTx would refuse it after the user is written,
+		// so it is refused here, before anything is written.
+		if validateUserAuthAvailability(ctx, tx, normalizedUserAuth, createdUserId) != nil {
+			refusalStatus = http.StatusConflict
+			return
+		}
+
+		// NetworkCreate checked the name before this transaction (see
+		// networkNameHeldInTx)
+		if networkNameHeldInTx(ctx, tx, validatedNetworkName) {
+			refusalStatus = http.StatusConflict
+			refusalMessage = networkNameNotAvailableMessage
+			return
+		}
+
 		_, err = tx.Exec(
 			ctx,
 			`
@@ -887,8 +955,10 @@ func networkCreateAuthJwt(
 			panic(err)
 		}
 
-		// insert into network_user_auth_sso
-		err = addSsoAuthInTx(
+		// insert into network_user_auth_sso. Its availability check passed
+		// above in this snapshot, so a refusal here raises: returning it would
+		// commit the user without its sign-in.
+		server.Raise(addSsoAuthInTx(
 			tx,
 			ctx,
 			&AddSsoAuthArgs{
@@ -897,13 +967,7 @@ func networkCreateAuthJwt(
 				ParsedAuthJwt: parsedAuthJwt,
 				AuthJwtType:   SsoAuthType(*networkCreate.AuthJwtType),
 			},
-		)
-
-		if err != nil {
-			glog.Infof("Error adding sso auth in tx: %s", err.Error())
-			created = false
-			return
-		}
+		))
 
 		_, err = tx.Exec(
 			ctx,
@@ -935,12 +999,13 @@ func networkCreateAuthJwt(
 	})
 
 	return networkCreateResult{
-		Created:       created,
-		NetworkId:     createdNetworkId,
-		NetworkName:   networkCreate.NetworkName,
-		UserId:        createdUserId,
-		IsPro:         isPro,
-		refusalStatus: refusalStatus,
+		Created:        created,
+		NetworkId:      createdNetworkId,
+		NetworkName:    networkCreate.NetworkName,
+		UserId:         createdUserId,
+		IsPro:          isPro,
+		refusalStatus:  refusalStatus,
+		refusalMessage: refusalMessage,
 	}
 
 }
@@ -960,12 +1025,17 @@ func networkCreateUserAuth(
 
 	created := false
 	refusalStatus := 0
+	refusalMessage := ""
 	var createdNetworkId server.Id
 	var createdUserId server.Id
 	isPro := false
 
 	server.Tx(ctx, func(tx server.PgTx) {
+		// a rerun starts over
+		created = false
 		refusalStatus = 0
+		refusalMessage = ""
+		isPro = false
 		var result server.PgResult
 		var err error
 
@@ -989,28 +1059,25 @@ func networkCreateUserAuth(
 			return
 		}
 
-		var existingNetworkId *server.Id
+		createdUserId = server.NewId()
+		createdNetworkId = server.NewId()
 
-		result, err = tx.Query(
-			ctx,
-			`
-				SELECT network_id FROM network WHERE network_name = $1
-			`,
-			networkCreate.NetworkName,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&existingNetworkId))
-			}
-		})
-
-		if existingNetworkId != nil {
+		// Another user can hold the user auth in a child table only, without it
+		// on their network_user row (an auth added to an existing account).
+		// addUserAuthInTx would refuse it after the user is written, so it is
+		// refused here, before anything is written.
+		if validateUserAuthAvailability(ctx, tx, *userAuth, createdUserId) != nil {
 			refusalStatus = http.StatusConflict
 			return
 		}
 
-		createdUserId = server.NewId()
-		createdNetworkId = server.NewId()
+		// the name as it is stored. NetworkCreate checked it before this
+		// transaction (see networkNameHeldInTx).
+		if networkNameHeldInTx(ctx, tx, validatedNetworkName) {
+			refusalStatus = http.StatusConflict
+			refusalMessage = networkNameNotAvailableMessage
+			return
+		}
 
 		passwordSalt := createPasswordSalt()
 		passwordHash := computePasswordHashV1([]byte(*networkCreate.Password), passwordSalt)
@@ -1032,8 +1099,10 @@ func networkCreateUserAuth(
 		)
 		server.Raise(err)
 
-		// insert into network_user_auth_password
-		addUserAuthInTx(
+		// insert into network_user_auth_password. Its checks passed above in
+		// this snapshot, so a refusal here raises: ignoring it created the
+		// network without its password auth.
+		server.Raise(addUserAuthInTx(
 			tx,
 			&AddUserAuthArgs{
 				UserId:       createdUserId,
@@ -1043,7 +1112,7 @@ func networkCreateUserAuth(
 				Verified:     verified,
 			},
 			ctx,
-		)
+		))
 
 		_, err = tx.Exec(
 			ctx,
@@ -1072,12 +1141,13 @@ func networkCreateUserAuth(
 	})
 
 	return networkCreateResult{
-		Created:       created,
-		NetworkId:     createdNetworkId,
-		NetworkName:   networkCreate.NetworkName,
-		UserId:        createdUserId,
-		IsPro:         isPro,
-		refusalStatus: refusalStatus,
+		Created:        created,
+		NetworkId:      createdNetworkId,
+		NetworkName:    networkCreate.NetworkName,
+		UserId:         createdUserId,
+		IsPro:          isPro,
+		refusalStatus:  refusalStatus,
+		refusalMessage: refusalMessage,
 	}
 
 }
@@ -1221,12 +1291,84 @@ type NetworkUpdateResult struct {
 	Error *NetworkUpdateError `json:"error,omitempty"`
 }
 
+// The refusal of a name another network holds, from the name checks and the
+// endpoints that answer them as is.
+const networkNameNotAvailableMessage = "Network name not available"
+
+// The unique constraint on network.network_name (postgres's name for the
+// table's UNIQUE (network_name)).
+const networkNameUniqueConstraint = "network_network_name_key"
+
+// Raised by RaiseNetworkNameWrite in place of a unique violation on
+// network.network_name. It is not a database error, so server.Tx rolls the
+// transaction back and raises it without a rerun, and NetworkNameTx answers it
+// as the name being taken.
+var errNetworkNameTaken = errors.New("network name taken")
+
+// Runs a transaction whose callback writes network.network_name through
+// RaiseNetworkNameWrite, and reports whether the write met another network
+// holding the name. Such a network committed the name after the transaction's
+// snapshot, so the callback's own availability check in the same transaction
+// could not see it. The transaction is rolled back, so nothing the callback
+// wrote remains; every other failure raises as usual.
+func NetworkNameTx(ctx context.Context, callback func(server.PgTx)) (taken bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			if err, ok := r.(error); ok && errors.Is(err, errNetworkNameTaken) {
+				taken = true
+				return
+			}
+			panic(r)
+		}
+	}()
+	server.Tx(ctx, callback)
+	return
+}
+
+// Raises the error of a write to network.network_name. A unique violation on
+// the name raises errNetworkNameTaken, which NetworkNameTx answers as the name
+// being taken.
+func RaiseNetworkNameWrite[T any](result T, err error) T {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == pgerrcode.UniqueViolation && pgErr.ConstraintName == networkNameUniqueConstraint {
+		panic(errNetworkNameTaken)
+	}
+	server.Raise(err)
+	return result
+}
+
+// Whether a network holds the name, as of the transaction's snapshot. A write
+// of the name checks this in its own transaction: a check before it leaves a
+// window in which another network takes the name, and the write then meets
+// the unique index. A network that commits the name after the snapshot still
+// meets the index. A create's insert raises that unique violation and
+// server.Tx's rerun repeats this check, which then sees the name; a rename
+// answers it at once through RaiseNetworkNameWrite.
+func networkNameHeldInTx(ctx context.Context, tx server.PgTx, networkName string) bool {
+	held := false
+	server.Raise(tx.QueryRow(
+		ctx,
+		`SELECT EXISTS (SELECT 1 FROM network WHERE network_name = $1)`,
+		networkName,
+	).Scan(&held))
+	return held
+}
+
+// Replaces the network's entry in the network name search with the name, in
+// the caller's transaction, so the database entry commits or rolls back with
+// the rename. Network create adds the same entry (the network id, variant 0)
+// after its commit. Returns the post that moves the network in this process's
+// in-memory index, which the caller runs only once the transaction has
+// committed (server.RunPosts); other processes load the committed entry from
+// the search's update log.
+func IndexNetworkNameInTx(ctx context.Context, tx server.PgTx, networkId server.Id, networkName string) server.PostFunction {
+	return networkNameSearch().AddInTxPost(ctx, networkName, networkId, 0, tx)
+}
+
 func checkNetworkNameAvailability(
 	networkName string,
 	session *session.ClientSession,
 ) (err error) {
-
-	var existingNetworkId *server.Id
 
 	validatedNetworkName, validationErr := ValidateNetworkName(networkName)
 	if validationErr != nil {
@@ -1237,71 +1379,88 @@ func checkNetworkNameAvailability(
 	taken := networkNameSearch().AnyAround(session.Ctx, validatedNetworkName, 1)
 
 	if taken {
-		err = errors.New("Network name not available")
+		err = errors.New(networkNameNotAvailableMessage)
 		return
 	}
 
 	server.Tx(session.Ctx, func(tx server.PgTx) {
-
-		result, queryErr := tx.Query(
-			session.Ctx,
-			`
-				SELECT network_id FROM network WHERE network_name = $1
-			`,
-			validatedNetworkName,
-		)
-		server.WithPgResult(result, queryErr, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&existingNetworkId))
-			}
-		})
-
-		if existingNetworkId != nil {
-
-			err = errors.New("Network name not available")
-			return
-
+		err = nil
+		if networkNameHeldInTx(session.Ctx, tx, validatedNetworkName) {
+			err = errors.New(networkNameNotAvailableMessage)
 		}
 	})
 
 	return err
 }
 
+// Test-only scheduling hook between NetworkUpdate's availability check and its
+// write, in the write's transaction. Production leaves it nil; tests use it to
+// commit the name for another network in between, without sleeps or scheduler
+// luck.
+var networkUpdateBeforeWrite func()
+
+// Renames the session's network to the validated (normalized) form of the
+// name, as network create stores it. A name that fails validation, or that
+// the fuzzy name search or the exact name check finds taken, is refused before
+// anything is written. The exact check is repeated in the write's own
+// transaction, and a write that meets another network holding the name on the
+// unique index (committed after that transaction's snapshot) is refused the
+// same way, instead of failing the call. The rename's transaction also
+// replaces the network's entry in the network name search, and this process's
+// in-memory index follows once it has committed.
 func NetworkUpdate(
 	networkUpdate NetworkUpdateArgs,
 	session *session.ClientSession,
 ) (*NetworkUpdateResult, error) {
-	var networkCreateResult = &NetworkUpdateResult{}
-	networkName := strings.TrimSpace(networkUpdate.NetworkName)
-
-	err := checkNetworkNameAvailability(networkName, session)
-	if err != nil {
-		networkCreateResult = &NetworkUpdateResult{
+	refusal := func(message string) (*NetworkUpdateResult, error) {
+		return &NetworkUpdateResult{
 			Error: &NetworkUpdateError{
-				Message: err.Error(),
+				Message: message,
 			},
-		}
-		return networkCreateResult, nil
+		}, nil
 	}
 
-	server.Tx(session.Ctx, func(tx server.PgTx) {
+	validatedNetworkName, err := ValidateNetworkName(networkUpdate.NetworkName)
+	if err != nil {
+		return refusal(err.Error())
+	}
+	if err := checkNetworkNameAvailability(validatedNetworkName, session); err != nil {
+		return refusal(err.Error())
+	}
 
-		server.RaisePgResult(tx.Exec(
+	held := false
+	var posts []server.PostFunction
+	taken := NetworkNameTx(session.Ctx, func(tx server.PgTx) {
+		// a rerun starts over
+		posts = nil
+		held = networkNameHeldInTx(session.Ctx, tx, validatedNetworkName)
+		if held {
+			return
+		}
+		if networkUpdateBeforeWrite != nil {
+			networkUpdateBeforeWrite()
+		}
+		tag := RaiseNetworkNameWrite(tx.Exec(
 			session.Ctx,
 			`
-							UPDATE network
-							SET
-									network_name = $2
-							WHERE
-									network_id = $1
-					`,
+				UPDATE network
+				SET network_name = $2
+				WHERE network_id = $1
+			`,
 			session.ByJwt.NetworkId,
-			networkName,
+			validatedNetworkName,
 		))
-
+		if tag.RowsAffected() == 1 {
+			posts = append(posts, IndexNetworkNameInTx(session.Ctx, tx, session.ByJwt.NetworkId, validatedNetworkName))
+		}
 	})
+	if held || taken {
+		return refusal(networkNameNotAvailableMessage)
+	}
+	// the rename committed
+	server.RunPosts(session.Ctx, posts...)
 
-	return networkCreateResult, nil
+	return &NetworkUpdateResult{}, nil
 }
 
 type Network struct {
