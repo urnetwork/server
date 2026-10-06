@@ -12323,6 +12323,29 @@ ratio, security exceptions, and ten-measured-outcome quota are distinct rules.
 Hourly acknowledgement capacity still uses all-current demand and cannot prove
 unique accepted credits, per-provider fairness, or sustained completion.
 
+The sole watcher can append `-url-probe-coverage-output PATH` JSONL records
+on every existing URL-coverage execution, including healthy samples. This
+adds no query or cadence. Schema 1 keeps the evaluation clock separate from
+the original census and scrape clocks, and includes all-current, mature,
+warming and unknown-age counts, nullable known-mature percentage, separate
+TLS counts, source-coverage gaps and fixed census/cohort reason codes. A
+missing or invalid census emits null counts; a missing cohort extension
+retains a valid all-current census with null cohort counts. Zero mature
+providers yields a null percentage. Unknown ages can coexist with 100% known
+mature coverage while `whole_fleet_age_known=false`. `source_coverage_complete`
+describes visibility, not quota attainment. Consumers must check the newest
+record and its source clock rather than carrying forward an old healthy row.
+The age domain is explicitly `immutable_probe_cycle_started_at`; it does not
+prove physical first join or continuous historical eligibility.
+
+False-positive qualifier: ordinary newcomers reduce all-current quota without
+reducing mature coverage. False-negative qualifier: an old watcher that lacks
+the cohort selectors cannot establish mature coverage, and silence from the
+alert stream cannot establish a healthy mature sample. The running binary's
+source must contain the cohort query, reducer and optional observation sink.
+Output failures remain monitor visibility errors and retain actual deficit
+alerts; the observer never converts healthy samples into alerts.
+
 The provider quality probes dashboard has a dedicated URL quota row with the
 known mature ratio, known warming count, unknown age count, all-current quota,
 all nine cohort counts, and separate TLS exceptions. It selects one current,

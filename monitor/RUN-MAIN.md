@@ -183,6 +183,15 @@ The normal workstation mode is `overlay`; use `lan` only from a host with the
 configured LAN routes. An explicit `-ssh-key` may be repeated when the SSH
 configuration does not already select the identities.
 
+For continuous URL-quota tracking, add `-url-probe-coverage-output` with a
+private JSONL path under the run evidence directory to the authoritative
+watcher. The same signal execution records healthy and unavailable samples
+alongside the unchanged alert stream; it starts no additional observer or
+query. Keep this append-only file across cadence samples and pin it with the
+watcher binary. Read the latest record's source clocks, nullable age partitions
+and gaps before reporting a mature percentage; an old numeric row is not a
+current observation. Source promotion is still subject to the gates below.
+
 ```sh
 test -n "$BRINGYOUR_HOME"
 test -n "$WARP_HOME"
