@@ -539,7 +539,7 @@ work but does not establish a four-GiB build budget. The reuse
 executor retains 12-GiB host admission and RSS caps, the immediate one-GiB
 host floor and existing disk floors; only its native and wall deadlines shrink
 to 30 and 31 minutes. All 40 builder Go files, including tests, match between
-qualified source `0bb38ed6` and canonical `8be38525`. This file parity does not
+qualified source `0bb38ed6` and canonical `cab28202`. This file parity does not
 establish equivalence of their surrounding module graphs. The prepared
 executor requires the qualified binary and original frozen graph. Independent
 gate `d9de0c9a` binds the six actual catalog controls, 14 synthetic controls,
@@ -565,6 +565,23 @@ gains. Full, native, mapped and targeted policy readbacks must bind the new
 final hash and retained-base lineage before release review. The generated
 artifact is not yet qualified for activation. Main adoption and recovered
 provider Quality remain unproved.
+
+Readiness receipt `67742a21` rechecked the unchanged artifact-status and handoff
+pins and the complete frozen readback source: 5,622 source files and 20,921
+dependency files matched. This source-only check used 36,429,824 bytes of peak
+RSS and did not traverse the database. The four readbacks remain sequential,
+with a two-GiB RSS and work limit and a 30-minute wall limit per phase. Each
+launch requires three GiB of available memory, ten GiB free on both filesystems
+and an idle Go/build lane; the existing live floors remain intact. The next
+Root step is to bind the full-readback contract, then pass its actual hash to
+the qualified launcher. No readback result is implied by source readiness.
+
+The retained Atlas reference archive `458d5421` also remains available. Its
+existing validation report binds predecessor `2952a345`, so its precision and
+recall measurements do not describe this successor. A disabled, bounded
+source plan can apply the qualified validator to the new artifact after its
+readbacks. That host-labelled reference remains a review aid with geographic
+and population bias; it does not establish live-provider coverage or supply.
 
 Retained RIS routing measurements must also distinguish direct observations
 from inherited visibility. On the October 6 `02:03:14Z` IPv4 snapshot,
