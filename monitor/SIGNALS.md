@@ -18266,6 +18266,14 @@ websocket connections and probes only.
 ### 8.9 Append-only migration coherence — a numeric head can hide skipped schema
 Probe: `migrations`
 
+Mainnet and native-fee artifact checks belong to this one registered probe.
+Their helpers live in `migration_sn_mainnet.go` and `migration_native_fee.go`;
+`signal_*.go` filenames are reserved for independently registered signals.
+A helper filename that violates that convention does not establish a missing
+probe, but its contract must still reach the owning probe's emitted query and
+drift reducer. The registry guard and missing-artifact controls enforce both
+boundaries; adding duplicate probes or ignoring the naming failure does not.
+
 Migration764 appends logical close-report receipts after the unchanged deployed
 1–763 prefix. The artifact contract checks the exact contract/party/report key,
 nonzero report IDs, nonnegative acknowledged bytes, finality and timestamp

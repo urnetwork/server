@@ -449,6 +449,10 @@ cheapest first read on most log classes and stays as its own probe.
 One importable `package monitor` at `server/monitor`; process wiring is the
 thin `server/cli/monitor` command:
 
+Reserve `signal_*.go` for registered probe entry points. Supporting code uses
+its owning component name, such as `migration_sn_mainnet.go`; it does not
+acquire an independent cadence or registry entry by being split into a file.
+
 ```
 server/monitor/
   MONITOR.md            this design
