@@ -38,8 +38,14 @@ func TestExpiryFreshNativeVisitsNewerThanBothPassesAndRevisitsQuiet(t *testing.T
 			middle = append(middle, createUnfunded(epoch.Add(time.Hour+time.Duration(index)*time.Second), cutoff.Add(24*time.Hour)))
 		}
 		// This gap is above the original middle pass and outside the fresh
-		// window. A later complete pass must still cover it; it is never dropped.
+		// window. Catch-up may close it before either original pass completes.
 		gap := createUnfunded(cutoff.Add(-6*time.Hour), time.Time{})
+		gapClosed := func() int64 {
+			if _, terminal := GetContractClose(ctx, gap); terminal {
+				return 1
+			}
+			return 0
+		}
 		createFunded := func(created, reported time.Time) server.Id {
 			escrow := createRedisAdmissionTest(ctx, f, 100)
 			server.Tx(ctx, func(tx server.PgTx) {
@@ -87,7 +93,7 @@ func TestExpiryFreshNativeVisitsNewerThanBothPassesAndRevisitsQuiet(t *testing.T
 				break
 			}
 		}
-		if _, terminal := GetContractClose(ctx, quiet); !terminal || closed != 1 {
+		if _, terminal := GetContractClose(ctx, quiet); !terminal || closed-gapClosed() != 1 {
 			t.Fatal("eligible contract beyond both fixed upper bounds was not closed by fresh admission")
 		}
 		if _, terminal := GetContractClose(ctx, active); terminal {
@@ -106,7 +112,7 @@ func TestExpiryFreshNativeVisitsNewerThanBothPassesAndRevisitsQuiet(t *testing.T
 				break
 			}
 		}
-		if _, terminal := GetContractClose(ctx, active); !terminal || closed != 2 {
+		if _, terminal := GetContractClose(ctx, active); !terminal || closed-gapClosed() != 2 {
 			t.Fatal("recent-report skip was stranded behind the full backlog after the fresh watermark advanced")
 		}
 		for _, id := range []server.Id{quiet, active} {
@@ -117,9 +123,8 @@ func TestExpiryFreshNativeVisitsNewerThanBothPassesAndRevisitsQuiet(t *testing.T
 				t.Fatal("fresh scheduling changed the original report proof")
 			}
 		}
-		// Finish the original finite ranges before asking a new full pass to
-		// cover their gap. Each original raw row can consume a visit in each
-		// lane; empty tails and the remaining fresh pass consume extra turns.
+		// Finish the original finite ranges. Each raw row can consume a visit
+		// in each lane; empty tails and the fresh pass consume extra turns.
 		// The bound follows this fixture's row count, not elapsed time.
 		passTurns := 2 * (len(history) + len(middle) + 4)
 		for turn := 0; cursor != nil && turn < passTurns; turn++ {
