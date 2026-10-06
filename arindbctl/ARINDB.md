@@ -442,8 +442,53 @@ Candidate `4bc85427`, source-review gate `653c6a4e`, adds 14 ASNs and two groups
 prospectively 5,193 subscriber groups, 5,459 ASNs and the same 160 country
 contexts, including 11 US groups and 27 ASNs. It preserves every previous
 identity, all six negative groups, policy and pinned evidence feeds. This is a
-catalog candidate, not a newly built or activated resource. It adds no regional
-rank completion and supplies no attribution of the retained Speed-only sample.
+catalog candidate, not a newly built or activated resource. Its three focused
+native parser/augmentation control families passed under independent gate
+`97a904b8`. It adds no regional rank completion and supplies no attribution of
+the retained Speed-only sample.
+
+The first full update with this catalog started at `2026-10-06T07:38:30Z`.
+The kernel records a global OOM kill of its exact `arindbctl` PID 4081336 at
+`08:21:31Z`; local reinspection at `12:52Z` found no surviving builder or
+supervisor. The retained stage has a registration-base file and manifest but only
+2,940,928 bytes of the final MMDB, no final manifest, no published bundle and
+no terminal executor receipt. It is not adoptable. The kernel proves the
+native termination; the missing supervisor receipt remains unexplained.
+
+The run started with 6,159,581,184 bytes of host `MemAvailable`. Its final
+sample had 10,497,654,784 bytes of group RSS and 904,335,360 available bytes;
+the original one-GiB memory floor allowed a 20-second grace. A prior successful
+same-builder update started with 12,261,048,320 available bytes and peaked at
+11,650,019,328 sampled RSS bytes. These observations establish inadequate
+joint resource admission in the failed run, not a catalog-specific memory
+regression or a bound on future peak usage. Terminal evidence is pinned by
+`6f37a760`; all old inputs and partial outputs remain intact.
+
+A fresh v2 executor preserves the exact builder and `4bc85427` catalog,
+requires 12 GiB available host memory at startup and stops at the first
+sample below the unchanged one-GiB live floor. Its 3,660-second wall limit,
+12-GiB RSS cap, 20-GiB work budget and eight-GiB filesystem floors are unchanged.
+Six local controls and independent predecessor-RED/candidate-GREEN admission
+and first-low-floor controls passed (`aa7972da`). Root still owns the exclusive
+heavy-work window, binding, launch, artifact readback and any later activation;
+the prepared wrapper supplies no completed artifact or Quality recovery claim.
+The corrected v2 Root binder and disabled composition passed independent
+review (`ffd1fdf0`). Full, native and mapped readback preparation also passed
+source review (`ff3b5ac2`, launcher `6ebb2c6a`), with actual native success and
+fresh output-bound contracts required before execution. These are preparation
+gates, not artifact or production observations.
+
+Two later source-reviewed candidates remain separate from that frozen build.
+The US follow-up (`8ef7afb4`, review `5513b5d6`) adds 14 more ASNs, yielding
+23 US-context groups and 41 ASNs. Its new groups cover PenTeleData, TDS,
+altafiber, Windstream, Midco, Breezeline, WOW, Fidium, Brightspeed, Ziply,
+Armstrong and Metronet, with reviewed additions to AT&T and Charter. The
+cumulative global follow-up (`924e1aff`, review `60d42484`) adds Indosat AS4761,
+BT/Plusnet AS6871, OneBroadband AS17665, XL Axiata AS24203 and YouFibre
+AS212655. It would contain 5,209 subscriber groups and 5,478 ASNs across the
+same 160 country contexts. Both preserve every negative object, policy and
+feed; their native parser/augmentation gates and artifact builds remain pending.
+No retained Main provider sample is joined to these additions.
 
 Source review also found a diagnostic loss: the MMDB retains
 `origin_withheld_reason`, while the deployed shadow projection retains only
