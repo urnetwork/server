@@ -946,4 +946,25 @@ var snMainnetMigrationContracts = []snMainnetMigrationContract{
 		snMainnetMigrationForeignKeyCensus("st_payout_wallet_resolution"),
 		snMainnetMigrationTrigger("st_payout_wallet_resolution", "st_payout_wallet_resolution_guard", "wallet_mapping_original_guard", 27),
 		snMainnetMigrationTrigger("st_payout_wallet_resolution", "st_payout_wallet_resolution_truncate_guard", "wallet_mapping_original_guard", 34)),
+	// URL probe admission reads an intent provider's priority row by its
+	// client id while the provider's qualification grace is pending.
+	snMainnetMigration(787, "provider intent probe priority",
+		migrationFp2Table("provider_intent_probe_priority"),
+		snMainnetMigrationColumns("provider_intent_probe_priority",
+			snMainnetMigrationColumn{name: "client_id", kind: "uuid", notNull: true},
+			snMainnetMigrationColumn{name: "priority_since", kind: "timestamp without time zone", notNull: true},
+			snMainnetMigrationColumn{name: "update_time", kind: "timestamp without time zone", notNull: true}),
+		snMainnetMigrationConstraints("provider_intent_probe_priority",
+			"PRIMARY KEY (client_id)"),
+		snMainnetMigrationForeignKeyCensus("provider_intent_probe_priority")),
+	// A provider install's row is its category for its life: the peer list,
+	// the peer valve and the top-level client cap read it by client id.
+	snMainnetMigration(788, "provider install category",
+		migrationFp2Table("network_client_provider_intent"),
+		snMainnetMigrationColumns("network_client_provider_intent",
+			snMainnetMigrationColumn{name: "client_id", kind: "uuid", notNull: true},
+			snMainnetMigrationColumn{name: "create_time", kind: "timestamp without time zone", notNull: true}),
+		snMainnetMigrationConstraints("network_client_provider_intent",
+			"PRIMARY KEY (client_id)"),
+		snMainnetMigrationForeignKeyCensus("network_client_provider_intent")),
 }
