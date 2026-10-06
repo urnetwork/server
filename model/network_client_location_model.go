@@ -2024,8 +2024,12 @@ func createLocation(ctx context.Context, location *Location, options createLocat
 		}
 	}
 	var resolved *Location
+	// the location search's in-memory index changes, in the transaction's order
+	var posts []server.PostFunction
 	server.Tx(ctx, func(tx server.PgTx) {
+		// a rerun starts over
 		resolved = nil
+		posts = nil
 
 		if !options.seed && input.LocationType == LocationTypeCity && input.CityGeonameId != 0 {
 			if cityLocation := cityLocationByGeonameIdInTx(ctx, tx, &input); cityLocation != nil {
@@ -2034,20 +2038,26 @@ func createLocation(ctx context.Context, location *Location, options createLocat
 			}
 		}
 
-		countryLocation := countryLocationInTx(ctx, tx, &input, countryCode, options.seed)
+		countryLocation, countryPosts := countryLocationInTx(ctx, tx, &input, countryCode, options.seed)
+		posts = append(posts, countryPosts...)
 		if input.LocationType == LocationTypeCountry {
 			resolved = countryLocation
 			return
 		}
 
-		regionLocation := regionLocationInTx(ctx, tx, &input, countryCode, countryLocation, names, options.seed)
+		regionLocation, regionPosts := regionLocationInTx(ctx, tx, &input, countryCode, countryLocation, names, options.seed)
+		posts = append(posts, regionPosts...)
 		if input.LocationType == LocationTypeRegion {
 			resolved = regionLocation
 			return
 		}
 
-		resolved = cityLocationInTx(ctx, tx, &input, countryCode, countryLocation, regionLocation, names, options)
+		cityLocation, cityPosts := cityLocationInTx(ctx, tx, &input, countryCode, countryLocation, regionLocation, names, options)
+		posts = append(posts, cityPosts...)
+		resolved = cityLocation
 	})
+	// the transaction committed
+	server.RunPosts(ctx, server.SequencePosts(posts...))
 	if resolved == nil {
 		return false
 	}
@@ -2187,7 +2197,8 @@ func newRowNameInTx(
 // search strings with it, and reports whether it did. It leaves the row as it
 // is when another row already holds the full name the new name composes: that
 // is a row of the same place from before geoname ids, and both stay
-// resolvable.
+// resolvable. Returns the posts that move the location search's in-memory
+// index, for the caller to run, in order, once the transaction commits.
 func renameLocationInTx(
 	ctx context.Context,
 	tx server.PgTx,
@@ -2195,7 +2206,7 @@ func renameLocationInTx(
 	name string,
 	fullName string,
 	searchLocation *Location,
-) bool {
+) (bool, []server.PostFunction) {
 	tag, err := tx.Exec(
 		ctx,
 		`
@@ -2220,13 +2231,15 @@ func renameLocationInTx(
 	)
 	server.Raise(err)
 	if tag.RowsAffected() == 0 {
-		return false
+		return false, nil
 	}
-	locationSearch().RemoveInTx(ctx, locationId, tx)
+	posts := []server.PostFunction{
+		locationSearch().RemoveInTxPost(ctx, locationId, tx),
+	}
 	for i, searchStr := range searchLocation.SearchStrings() {
-		locationSearch().AddInTx(ctx, searchStr, locationId, i, tx)
+		posts = append(posts, locationSearch().AddInTxPost(ctx, searchStr, locationId, i, tx))
 	}
-	return true
+	return true, posts
 }
 
 // Finds or creates the country row. A country code names one country, so a
@@ -2240,7 +2253,8 @@ func countryLocationInTx(
 	location *Location,
 	countryCode string,
 	seed bool,
-) *Location {
+) (*Location, []server.PostFunction) {
+	var posts []server.PostFunction
 	var countryLocation *Location
 	result, err := tx.Query(
 		ctx,
@@ -2304,11 +2318,13 @@ func countryLocationInTx(
 				CountryCode:  countryLocation.CountryCode,
 			}
 			// a country row's full name is its code
-			if renameLocationInTx(ctx, tx, countryLocation.LocationId, location.Country, countryLocation.CountryCode, renamed) {
+			nameChanged, renamePosts := renameLocationInTx(ctx, tx, countryLocation.LocationId, location.Country, countryLocation.CountryCode, renamed)
+			posts = append(posts, renamePosts...)
+			if nameChanged {
 				countryLocation.Country = location.Country
 			}
 		}
-		return countryLocation
+		return countryLocation, posts
 	}
 
 	if location.Country == "" {
@@ -2350,9 +2366,9 @@ func countryLocationInTx(
 
 	// add to the search
 	for i, searchStr := range countryLocation.SearchStrings() {
-		locationSearch().AddInTx(ctx, searchStr, locationId, i, tx)
+		posts = append(posts, locationSearch().AddInTxPost(ctx, searchStr, locationId, i, tx))
 	}
-	return countryLocation
+	return countryLocation, posts
 }
 
 // Finds or creates the region row under the country row: by the subdivision's
@@ -2366,7 +2382,8 @@ func regionLocationInTx(
 	countryLocation *Location,
 	names *locationPlaceNames,
 	seed bool,
-) *Location {
+) (*Location, []server.PostFunction) {
+	var posts []server.PostFunction
 	var regionLocation *Location
 	scanRegion := func(result server.PgResult) {
 		if result.Next() {
@@ -2482,11 +2499,13 @@ func regionLocationInTx(
 				CountryCode:  countryCode,
 			}
 			fullName := fmt.Sprintf("%s, %s", location.Region, countryCode)
-			if renameLocationInTx(ctx, tx, regionLocation.LocationId, location.Region, fullName, renamed) {
+			nameChanged, renamePosts := renameLocationInTx(ctx, tx, regionLocation.LocationId, location.Region, fullName, renamed)
+			posts = append(posts, renamePosts...)
+			if nameChanged {
 				regionLocation.Region = location.Region
 			}
 		}
-		return regionLocation
+		return regionLocation, posts
 	}
 
 	// create a new location
@@ -2535,9 +2554,9 @@ func regionLocationInTx(
 
 	// add to the search
 	for i, searchStr := range regionLocation.SearchStrings() {
-		locationSearch().AddInTx(ctx, searchStr, locationId, i, tx)
+		posts = append(posts, locationSearch().AddInTxPost(ctx, searchStr, locationId, i, tx))
 	}
-	return regionLocation
+	return regionLocation, posts
 }
 
 // The list's region a lookup names, or nil: the region of its subdivision's
@@ -2976,7 +2995,8 @@ func cityLocationInTx(
 	regionLocation *Location,
 	names *locationPlaceNames,
 	options createLocationOptions,
-) *Location {
+) (*Location, []server.PostFunction) {
+	var posts []server.PostFunction
 	seed := options.seed
 	var row *storedCityRow
 	if location.CityGeonameId != 0 {
@@ -3037,7 +3057,7 @@ func cityLocationInTx(
 	}
 
 	if row == nil && options.exactCity {
-		return nil
+		return nil, posts
 	}
 
 	if row != nil {
@@ -3079,14 +3099,16 @@ func cityLocationInTx(
 					Country:      row.countryName,
 					CountryCode:  row.countryCode,
 				}
-				if renameLocationInTx(ctx, tx, row.locationId, location.City, fullName, renamed) {
+				nameChanged, renamePosts := renameLocationInTx(ctx, tx, row.locationId, location.City, fullName, renamed)
+				posts = append(posts, renamePosts...)
+				if nameChanged {
 					row.name = location.City
 				}
 			}
 		} else {
 			healCityCoordinatesInTx(ctx, tx, row, location)
 		}
-		return row.location()
+		return row.location(), posts
 	}
 
 	// create a new location
@@ -3150,9 +3172,9 @@ func cityLocationInTx(
 
 	// add to the search
 	for i, searchStr := range cityLocation.SearchStrings() {
-		locationSearch().AddInTx(ctx, searchStr, locationId, i, tx)
+		posts = append(posts, locationSearch().AddInTxPost(ctx, searchStr, locationId, i, tx))
 	}
-	return cityLocation
+	return cityLocation, posts
 }
 
 // Reads a location row with the city, region and
@@ -3310,7 +3332,11 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
 		}
 		uniqueMemberLocationIds[memberLocationId] = true
 	}
+	// the location group search's in-memory index changes, in order
+	var posts []server.PostFunction
 	server.Tx(ctx, func(tx server.PgTx) {
+		// a rerun starts over
+		posts = nil
 		ok := false
 		var locationGroupId server.Id
 
@@ -3393,9 +3419,11 @@ func CreateLocationGroup(ctx context.Context, locationGroup *LocationGroup) {
 		locationGroup.LocationGroupId = locationGroupId
 
 		for i, searchStr := range locationGroup.SearchStrings() {
-			locationGroupSearch().AddInTx(ctx, searchStr, locationGroupId, i, tx)
+			posts = append(posts, locationGroupSearch().AddInTxPost(ctx, searchStr, locationGroupId, i, tx))
 		}
 	})
+	// the transaction committed
+	server.RunPosts(ctx, server.SequencePosts(posts...))
 }
 
 func UpdateLocationGroup(ctx context.Context, locationGroup *LocationGroup) bool {

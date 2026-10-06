@@ -26,9 +26,13 @@ func TestLocationsSearch(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 
+		var locationSanFrancisco *Location
+		var locationGroupWhosTheBest *LocationGroup
+		// the searches' in-memory indexes change once the index commits
+		var posts []server.PostFunction
 		server.Tx(ctx, func(tx server.PgTx) {
 
-			locationSanFrancisco := &Location{
+			locationSanFrancisco = &Location{
 				LocationType: LocationTypeCity,
 				City:         "San Francisco",
 				Region:       "California",
@@ -79,7 +83,7 @@ func TestLocationsSearch(t *testing.T) {
 				CountryCode:  "us",
 			})
 
-			locationGroupWhosTheBest := &LocationGroup{
+			locationGroupWhosTheBest = &LocationGroup{
 				Name:     "Who's the best",
 				Promoted: false,
 			}
@@ -93,21 +97,21 @@ func TestLocationsSearch(t *testing.T) {
 				Promoted: false,
 			})
 
-			IndexSearchLocationsInTx(ctx, tx)
-
-			r1 := locationSearch().AroundIds(ctx, "san fra", 0)
-			connect.AssertEqual(t, len(r1), 3)
-			connect.AssertEqual(t, 0, r1[locationSanFrancisco.LocationId].ValueDistance)
-
-			r2 := locationSearch().AroundIds(ctx, "san frn", 1)
-			connect.AssertEqual(t, len(r2), 3)
-			connect.AssertEqual(t, 1, r2[locationSanFrancisco.LocationId].ValueDistance)
-
-			r3 := locationGroupSearch().AroundIds(ctx, "who's the", 0)
-			connect.AssertEqual(t, len(r3), 2)
-			connect.AssertEqual(t, 0, r3[locationGroupWhosTheBest.LocationGroupId].ValueDistance)
-
+			posts = IndexSearchLocationsInTx(ctx, tx)
 		})
+		server.RunPosts(ctx, server.SequencePosts(posts...))
+
+		r1 := locationSearch().AroundIds(ctx, "san fra", 0)
+		connect.AssertEqual(t, len(r1), 3)
+		connect.AssertEqual(t, 0, r1[locationSanFrancisco.LocationId].ValueDistance)
+
+		r2 := locationSearch().AroundIds(ctx, "san frn", 1)
+		connect.AssertEqual(t, len(r2), 3)
+		connect.AssertEqual(t, 1, r2[locationSanFrancisco.LocationId].ValueDistance)
+
+		r3 := locationGroupSearch().AroundIds(ctx, "who's the", 0)
+		connect.AssertEqual(t, len(r3), 2)
+		connect.AssertEqual(t, 0, r3[locationGroupWhosTheBest.LocationGroupId].ValueDistance)
 
 	})
 
@@ -132,10 +136,14 @@ func TestIndexSearchLocationsSkipUnchanged(t *testing.T) {
 		}
 		CreateLocationGroup(ctx, locationGroupWhosTheBest)
 
+		// as the index task does: the searches' in-memory indexes change once
+		// the index commits
 		index := func() {
+			var posts []server.PostFunction
 			server.Tx(ctx, func(tx server.PgTx) {
-				IndexSearchLocationsInTx(ctx, tx)
+				posts = IndexSearchLocationsInTx(ctx, tx)
 			})
+			server.RunPosts(ctx, server.SequencePosts(posts...))
 		}
 
 		// max update id and row count of `search_value_update`,
