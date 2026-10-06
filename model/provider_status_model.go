@@ -196,6 +196,37 @@ func providerCountFilterClientSql() string {
 // newProviderCountFilter for only clientIds: every map holds what the fleet
 // filter holds for those providers and nothing for any other.
 func newProviderCountFilterForClients(ctx context.Context, clientIds []server.Id) providerCountFilter {
+	f := newProviderCommonFilterForClients(ctx, clientIds)
+	if len(clientIds) != 0 {
+		f.healthCounts, f.healthWindowEnd = getProviderEgressHealthCountsSnapshot(ctx, clientIds)
+	}
+	return f
+}
+
+// Common gates and fresh country evidence, without the health aggregate.
+// Score publication retains its existing fleet-wide SourceMap health census;
+// other consumers load only their own clients' accepted health window.
+func newProviderCommonFilterForClients(ctx context.Context, clientIds []server.Id) providerCountFilter {
+	// In the underlying evidence readers nil means the entire fleet. An empty
+	// consumer cohort must not accidentally request that unbounded history.
+	if len(clientIds) == 0 {
+		now := server.NowUtc()
+		return providerCountFilter{
+			now: now, healthWindowEnd: now,
+			arinRisk: map[server.Id]bool{}, arinNonQuality: map[server.Id]bool{},
+			reliabilityFailed: map[server.Id]bool{}, tlsAuthenticationFailed: map[server.Id]bool{},
+			countryCodes: map[server.Id]string{}, healthCounts: map[server.Id]ProviderEgressHealthCounts{},
+		}
+	}
+	uniqueClientIds := make([]server.Id, 0, len(clientIds))
+	seen := make(map[server.Id]bool, len(clientIds))
+	for _, clientId := range clientIds {
+		if !seen[clientId] {
+			seen[clientId] = true
+			uniqueClientIds = append(uniqueClientIds, clientId)
+		}
+	}
+	clientIds = uniqueClientIds
 	f := providerCountFilter{
 		now:                     server.NowUtc(),
 		arinRisk:                map[server.Id]bool{},
@@ -204,25 +235,31 @@ func newProviderCountFilterForClients(ctx context.Context, clientIds []server.Id
 		tlsAuthenticationFailed: getProviderEgressTlsAuthenticationFailedClientIds(ctx, clientIds),
 		countryCodes:            getProviderEgressCountryCodes(ctx, clientIds),
 	}
-	f.healthCounts, f.healthWindowEnd = getProviderEgressHealthCountsSnapshot(ctx, clientIds)
 	server.Db(ctx, func(conn server.PgConn) {
-		rows, err := conn.Query(ctx, providerCountFilterClientSql(), clientIds)
-		server.WithPgResult(rows, err, func() {
-			for rows.Next() {
-				var clientId server.Id
-				var risk, nonQuality, reliabilityFailed bool
-				server.Raise(rows.Scan(&clientId, &risk, &nonQuality, &reliabilityFailed))
-				if risk {
-					f.arinRisk[clientId] = true
+		// Bound planner input even for a large export cohort. Each batch can
+		// return at most two rows per client, rather than fleet history.
+		const batchSize = 1024
+		query := providerCountFilterClientSql()
+		for start := 0; start < len(clientIds); start += batchSize {
+			batch := clientIds[start:min(start+batchSize, len(clientIds))]
+			rows, err := conn.Query(ctx, query, batch)
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					var clientId server.Id
+					var risk, nonQuality, reliabilityFailed bool
+					server.Raise(rows.Scan(&clientId, &risk, &nonQuality, &reliabilityFailed))
+					if risk {
+						f.arinRisk[clientId] = true
+					}
+					if nonQuality {
+						f.arinNonQuality[clientId] = true
+					}
+					if reliabilityFailed {
+						f.reliabilityFailed[clientId] = true
+					}
 				}
-				if nonQuality {
-					f.arinNonQuality[clientId] = true
-				}
-				if reliabilityFailed {
-					f.reliabilityFailed[clientId] = true
-				}
-			}
-		})
+			})
+		}
 	})
 	return f
 }

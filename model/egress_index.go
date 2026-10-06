@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/glog"
 
@@ -492,13 +493,49 @@ var findProviders2AnsweredProviders = prometheus.NewCounterVec(prometheus.Counte
 	Help: "Providers FindProviders2 location answers held, native and borrowed, per requested rank mode",
 }, []string{"rank_mode"})
 
-// A complete cached snapshot of common gate failures covers normal, explicit
-// client and force_minimum paths. Missing snapshots use bounded candidate reads.
+// Cached common gate failures cover normal, explicit client and force_minimum
+// paths. Candidates outside a published cohort use bounded database reads.
 const providerHardExclusionsKey = "{provider_hard_exclusions}"
 
 // The same atomic set carries evidence that even an empty publication exists.
 // This reserved member cannot be a provider id. Older writers omit it.
 const providerHardExclusionsReadyMember = "ready:v2"
+
+// A cohort publication identifies each client whose evidence was loaded. It
+// deliberately omits ready:v2: older readers must read through, not mistake a
+// missing historical client for an allowed one.
+const providerHardExclusionsCohortReadyMember = "ready:v3:cohort"
+
+// A reserved namespace keeps coverage distinct from positive exclusions.
+func providerHardExclusionsCheckedMember(clientId server.Id) string {
+	return "checked:" + clientId.String()
+}
+
+// Replace exclusions, checked identities and their expiry in one transaction.
+func publishProviderHardExclusions(ctx context.Context, clientIds []server.Id, filter providerCountFilter, ttl time.Duration) error {
+	members := []any{providerHardExclusionsCohortReadyMember}
+	seen := map[server.Id]bool{}
+	for _, clientId := range clientIds {
+		if seen[clientId] {
+			continue
+		}
+		seen[clientId] = true
+		members = append(members, providerHardExclusionsCheckedMember(clientId))
+		if filter.hasHardEgressFailure(clientId) {
+			members = append(members, clientId.String())
+		}
+	}
+	var err error
+	server.Redis(ctx, func(r server.RedisClient) {
+		_, err = r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+			pipe.Del(ctx, providerHardExclusionsKey)
+			pipe.SAdd(ctx, providerHardExclusionsKey, members...)
+			pipe.Expire(ctx, providerHardExclusionsKey, ttl)
+			return nil
+		})
+	})
+	return err
+}
 
 // Bound every input before evaluating the shared fleet policy. Without these
 // request-only relation names, hashed EXISTS alternatives can scan the fleet
@@ -528,20 +565,20 @@ func providerHardExclusionsSql() string {
 	`
 }
 
-// Which candidates the complete cached set excludes. A missing, expired or
-// legacy snapshot has unknown coverage, so read only these candidates from
-// the primary database. Backend errors never become an empty exclusion set.
+// Read complete v2 snapshots during a rolling upgrade, or the checked members
+// of a v3 cohort. Missing coverage uses only those candidates on the primary
+// database. Backend errors never become an empty exclusion set.
 func getProviderHardExclusions(ctx context.Context, clientIds []server.Id) (excludedClientIds map[server.Id]bool, returnErr error) {
 	excludedClientIds = map[server.Id]bool{}
 	if len(clientIds) == 0 {
 		return
 	}
-	members := make([]any, 0, len(clientIds)+1)
-	members = append(members, providerHardExclusionsReadyMember)
+	members := make([]any, 0, 2*len(clientIds)+2)
+	members = append(members, providerHardExclusionsReadyMember, providerHardExclusionsCohortReadyMember)
 	for _, clientId := range clientIds {
-		members = append(members, clientId.String())
+		members = append(members, clientId.String(), providerHardExclusionsCheckedMember(clientId))
 	}
-	complete := false
+	unknownClientIds := make([]server.Id, 0, len(clientIds))
 	server.Redis(ctx, func(r server.RedisClient) {
 		memberships, err := r.SMIsMember(ctx, providerHardExclusionsKey, members...).Result()
 		if err != nil {
@@ -552,21 +589,28 @@ func getProviderHardExclusions(ctx context.Context, clientIds []server.Id) (excl
 			returnErr = fmt.Errorf("incomplete provider hard-exclusion membership response")
 			return
 		}
-		complete = memberships[0]
-		if !complete {
-			return
-		}
-		for i, member := range memberships[1:] {
-			if member {
-				excludedClientIds[clientIds[i]] = true
+		complete, cohort := memberships[0], memberships[1]
+		for i, clientId := range clientIds {
+			// A mixed-version set is not a valid atomic publication.
+			covered := complete && !cohort || cohort && !complete && memberships[2*i+3]
+			if !covered {
+				unknownClientIds = append(unknownClientIds, clientId)
+			} else if memberships[2*i+2] {
+				excludedClientIds[clientId] = true
 			}
 		}
 	})
 	if returnErr != nil {
 		return nil, returnErr
 	}
-	if !complete {
-		return readProviderHardExclusions(ctx, clientIds)
+	if len(unknownClientIds) != 0 {
+		unknownExcluded, err := readProviderHardExclusions(ctx, unknownClientIds)
+		if err != nil {
+			return nil, err
+		}
+		for clientId := range unknownExcluded {
+			excludedClientIds[clientId] = true
+		}
 	}
 	return
 }
@@ -686,7 +730,6 @@ type ProviderEgressCounts struct {
 func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 	settings := egressIndexSettings()
 	egressTestEnabled := providerEgressTestEnabled()
-	countFilter := newProviderCountFilter(ctx, egressTestEnabled)
 
 	counts := &ProviderEgressCounts{
 		BucketIndexCounts: map[string]map[string]int64{},
@@ -700,6 +743,8 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 		counts.ReasonCounts[reason] = 0
 	}
 
+	rows := []providerCountRow{}
+	clientIds := []server.Id{}
 	server.ReplicaDb(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -730,40 +775,38 @@ func CountProviderEgress(ctx context.Context) *ProviderEgressCounts {
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				var clientId server.Id
-				var egressIndex *int
-				var egressQuality *bool
-				var publishedCountryCode *string
-				server.Raise(result.Scan(
-					&clientId,
-					&egressIndex,
-					&egressQuality,
-					&publishedCountryCode,
-				))
-				decision := decideProviderEgress(
-					countFilter.egressFacts(clientId, publishedCountryCode, egressIndex, egressQuality, settings),
-					egressTestEnabled,
-				)
-				// the index as the dashboard labels it
-				indexLabel := ProviderEgressIndexNone
-				if egressIndex != nil {
-					indexLabel = strconv.Itoa(*egressIndex)
-				}
-				if decision.quality {
-					counts.BucketIndexCounts[RankModeQuality][indexLabel] += 1
-				}
-				if decision.speed {
-					counts.BucketIndexCounts[RankModeSpeed][indexLabel] += 1
-				}
-				if decision.online {
-					counts.BucketIndexCounts[ProviderEgressBucketOnline][indexLabel] += 1
-				}
-				if decision.reason != "" {
-					counts.ReasonCounts[decision.reason] += 1
-				}
+				var row providerCountRow
+				server.Raise(result.Scan(&row.clientId, &row.egressIndex, &row.egressQuality, &row.claimedCountryCode))
+				rows = append(rows, row)
+				clientIds = append(clientIds, row.clientId)
 			}
 		})
 	})
+	// Capture the exact dashboard population before loading its evidence.
+	countFilter := newProviderCountFilterForClients(ctx, clientIds)
+	for _, row := range rows {
+		decision := decideProviderEgress(
+			countFilter.egressFacts(row.clientId, row.claimedCountryCode, row.egressIndex, row.egressQuality, settings),
+			egressTestEnabled,
+		)
+		// the index as the dashboard labels it
+		indexLabel := ProviderEgressIndexNone
+		if row.egressIndex != nil {
+			indexLabel = strconv.Itoa(*row.egressIndex)
+		}
+		if decision.quality {
+			counts.BucketIndexCounts[RankModeQuality][indexLabel] += 1
+		}
+		if decision.speed {
+			counts.BucketIndexCounts[RankModeSpeed][indexLabel] += 1
+		}
+		if decision.online {
+			counts.BucketIndexCounts[ProviderEgressBucketOnline][indexLabel] += 1
+		}
+		if decision.reason != "" {
+			counts.ReasonCounts[decision.reason] += 1
+		}
+	}
 	return counts
 }
 
