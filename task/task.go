@@ -1731,7 +1731,9 @@ func (self *TaskWorker) RunPostPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	_, err := tx.Exec(
+	// a failed update raises: a returned error would leave the finalize
+	// transaction to commit a rollback
+	server.RaisePgResult(tx.Exec(
 		clientSession.Ctx,
 		`
 			UPDATE finished_task
@@ -1740,8 +1742,8 @@ func (self *TaskWorker) RunPostPost(
 			WHERE task_id = $1
 		`,
 		runPost.TaskId,
-	)
-	return err
+	))
+	return nil
 }
 
 // takes the n next available tasks, makes an initial timestamp claim, and
@@ -2410,7 +2412,8 @@ func (self *TaskWorker) EvalTasks(n int) (
 
 				postRescheduledTasks[taskId] = err
 
-				tx.Exec(
+				// a failed update raises: going on would commit a rollback
+				server.RaisePgResult(tx.Exec(
 					finalizeCtx,
 					`
 						UPDATE finished_task
@@ -2421,7 +2424,7 @@ func (self *TaskWorker) EvalTasks(n int) (
 					`,
 					taskId,
 					err.Error(),
-				)
+				))
 
 				// re-run the post
 				func() {

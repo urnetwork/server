@@ -223,7 +223,9 @@ func TestTxDoesNotReplayCompletionUnknownCommit(t *testing.T) {
 	}
 }
 
-// Pins the narrow commit policy independently of socket-error wrapping.
+// Pins the narrow commit policy independently of socket-error wrapping. A
+// commit postgres turned into a rollback is replayed only for a transient
+// recorded statement error.
 func TestTxCommitRetryRequiresKnownRollback(t *testing.T) {
 	for _, testCase := range []struct {
 		err   error
@@ -232,8 +234,13 @@ func TestTxCommitRetryRequiresKnownRollback(t *testing.T) {
 		{err: &pgconn.PgError{Code: "40001"}, retry: true},
 		{err: &pgconn.PgError{Code: "40P01"}, retry: true},
 		{err: &pgconn.PgError{Code: "23505"}, retry: true},
-		{err: pgx.ErrTxCommitRollback, retry: true},
-		{err: fmt.Errorf("synthetic commit: %w", pgx.ErrTxCommitRollback), retry: true},
+		{err: pgx.ErrTxCommitRollback},
+		{err: fmt.Errorf("synthetic commit: %w", pgx.ErrTxCommitRollback)},
+		{err: &txAbortedError{statementErr: &pgconn.PgError{Code: "40001"}, err: pgx.ErrTxCommitRollback}, retry: true},
+		{err: &txAbortedError{statementErr: &pgconn.PgError{Code: "23505"}, err: pgx.ErrTxCommitRollback}, retry: true},
+		{err: &txAbortedError{statementErr: &pgconn.PgError{Code: "23502"}, err: pgx.ErrTxCommitRollback}},
+		{err: &txAbortedError{err: pgx.ErrTxCommitRollback}},
+		{err: &pgconn.PgError{Code: "23514"}},
 		{err: &pgconn.PgError{Code: "40003"}},
 		{err: &pgconn.PgError{Code: "08007"}},
 		{err: &pgconn.PgError{Code: "42601"}},

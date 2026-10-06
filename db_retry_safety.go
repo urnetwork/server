@@ -9,7 +9,6 @@ import (
 	"net"
 	"sync/atomic"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -71,10 +70,10 @@ func (self pgWriteSnapshot) unchanged() bool {
 
 // Only an explicit rollback outcome authorizes a whole-transaction replay.
 // A lost response, timeout, or unknown completion may already have committed.
+// A commit postgres turned into a rollback (`pgx.ErrTxCommitRollback`) means
+// the callback went on after a failed statement; it is replayed only when the
+// statement error recorded for it (see `txAbortedError`) is itself transient.
 func canRetryCommitError(err error) bool {
-	if errors.Is(err, pgx.ErrTxCommitRollback) {
-		return true
-	}
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && isTransientError(pgErr)
 }

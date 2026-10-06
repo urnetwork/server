@@ -71,7 +71,8 @@ func CreateNetworkReferral(
 			return
 		}
 
-		_, err = tx.Exec(
+		// a failed upsert raises: going on would commit a rollback
+		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				INSERT INTO network_referral (
@@ -88,14 +89,11 @@ func CreateNetworkReferral(
 			networkId,
 			referralNetworkId,
 			createTime,
-		)
+		))
 
-		if err == nil {
-			// create network referral
-			networkReferral = &NetworkReferral{
-				NetworkId:         &networkId,
-				ReferralNetworkId: referralNetworkId,
-			}
+		networkReferral = &NetworkReferral{
+			NetworkId:         &networkId,
+			ReferralNetworkId: referralNetworkId,
 		}
 	})
 	return networkReferral

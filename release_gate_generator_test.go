@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 const releaseGateSuiteGeneratorEnvironment = "URNETWORK_SERVER_TEST_FIXTURE_GENERATOR"
@@ -108,6 +110,12 @@ func runReleaseGateSuiteTests(run func() int) (status int) {
 		fmt.Fprintf(os.Stderr, "locate private suite generator source: %v\n", err)
 		return 1
 	}
+	directoryFile, err := os.OpenFile(directory, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pin private suite generator directory: %v\n", err)
+		return 1
+	}
+	defer directoryFile.Close()
 	releaseGateSuiteGenerator = filepath.Join(directory, "server-fixture")
 	// Keep compilation synchronous in the inherited process group. The suite
 	// guardian's group interruption therefore still owns compiler descendants.
@@ -115,6 +123,41 @@ func runReleaseGateSuiteTests(run func() int) (status int) {
 	build.Dir = filepath.Join(serverSource, "..", "sn")
 	if output, err := build.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "build exact private suite generator before cases: %v\n%s", err, output)
+		return 1
+	}
+	// Go creates executables with 0777 filtered by the caller's umask. Narrow
+	// only this owner's new regular file, never an inherited binary or alias.
+	protectGenerator := func() error {
+		var parent, namedParent unix.Stat_t
+		if err := unix.Fstat(int(directoryFile.Fd()), &parent); err != nil {
+			return err
+		}
+		if parent.Mode&unix.S_IFMT != unix.S_IFDIR || parent.Mode&0o7777 != 0o700 || parent.Uid != uint32(os.Geteuid()) {
+			return fmt.Errorf("built generator parent is not an owned private directory")
+		}
+		if err := unix.Lstat(directory, &namedParent); err != nil || parent.Dev != namedParent.Dev || parent.Ino != namedParent.Ino {
+			return fmt.Errorf("built generator parent identity changed: %v", err)
+		}
+		fd, err := unix.Openat(int(directoryFile.Fd()), "server-fixture", unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+		if err != nil {
+			return err
+		}
+		file := os.NewFile(uintptr(fd), releaseGateSuiteGenerator)
+		defer file.Close()
+		var state, namedState unix.Stat_t
+		if err := unix.Fstat(fd, &state); err != nil {
+			return err
+		}
+		if state.Mode&unix.S_IFMT != unix.S_IFREG || state.Mode&0o111 == 0 || state.Mode&0o7000 != 0 || state.Uid != uint32(os.Geteuid()) || state.Nlink != 1 {
+			return fmt.Errorf("built generator is not an owned singly linked regular executable")
+		}
+		if err := unix.Fstatat(int(directoryFile.Fd()), "server-fixture", &namedState, unix.AT_SYMLINK_NOFOLLOW); err != nil || state.Dev != namedState.Dev || state.Ino != namedState.Ino {
+			return fmt.Errorf("built generator file identity changed: %v", err)
+		}
+		return file.Chmod(0o700)
+	}
+	if err := protectGenerator(); err != nil {
+		fmt.Fprintf(os.Stderr, "protect prepared private suite generator: %v\n", err)
 		return 1
 	}
 	digest, err := releaseGateSuiteGeneratorDigest(releaseGateSuiteGenerator)
@@ -135,6 +178,73 @@ func runReleaseGateSuiteTests(run func() int) (status int) {
 	return run()
 }
 
+// Ordinary compiler umasks must not leak group write access into the published
+// fixture. A fake compiler retains its output mode before setup protects it.
+func TestReleaseGateServicesGeneratorBuildProtectsOrdinaryUmasks(t *testing.T) {
+	const childEnvironment = "RELEASE_GATE_GENERATOR_BUILD_UMASK_CHILD"
+	if marker := os.Getenv(childEnvironment); marker != "" {
+		info, err := os.Lstat(releaseGateSuiteGenerator)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o700 {
+			t.Fatalf("prepared generator is not a private regular executable: %v %v", info, err)
+		}
+		parentInfo, err := os.Lstat(filepath.Dir(releaseGateSuiteGenerator))
+		if err != nil || !parentInfo.IsDir() || parentInfo.Mode().Perm() != 0o700 {
+			t.Fatalf("prepared generator parent is not private: %v %v", parentInfo, err)
+		}
+		if err := os.WriteFile(marker, []byte("case entered\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mask := range []os.FileMode{0o000, 0o002, 0o022, 0o077} {
+		binDirectory := t.TempDir()
+		tempDirectory := t.TempDir()
+		compilerMarker := filepath.Join(binDirectory, "compiler-called")
+		compilerOutput := filepath.Join(binDirectory, "compiler-output")
+		caseMarker := filepath.Join(binDirectory, "case-entered")
+		compiler := `#!/bin/sh
+set -eu
+umask "$RELEASE_GATE_COMPILER_UMASK"
+printf 'called\n' >> "$RELEASE_GATE_COMPILER_MARKER"
+printf '#!/bin/sh\nexit 0\n' > "$3"
+chmod +x "$3"
+cp -p "$3" "$RELEASE_GATE_COMPILER_OUTPUT"
+`
+		if err := os.WriteFile(filepath.Join(binDirectory, "go"), []byte(compiler), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		child := exec.CommandContext(ctx, executable, "-test.run=^"+t.Name()+"$", "-test.count=1")
+		child.Env = testCommandEnvironment(map[string]string{
+			releaseGateSuiteGeneratorEnvironment: "", childEnvironment: caseMarker,
+			"PATH":   binDirectory + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"TMPDIR": tempDirectory, "RELEASE_GATE_COMPILER_MARKER": compilerMarker,
+			"RELEASE_GATE_COMPILER_UMASK": fmt.Sprintf("%04o", mask), "RELEASE_GATE_COMPILER_OUTPUT": compilerOutput,
+		})
+		output, err := child.CombinedOutput()
+		cancel()
+		if err != nil {
+			t.Fatalf("umask %04o prevented private fixture preparation: %v\n%s", mask, err, output)
+		}
+		if info, err := os.Stat(compilerOutput); err != nil || info.Mode().Perm() != 0o777&^mask {
+			t.Fatalf("umask %04o did not reproduce the compiler output mode: %v %v", mask, info, err)
+		}
+		if marker, err := os.ReadFile(compilerMarker); err != nil || string(marker) != "called\n" {
+			t.Fatalf("umask %04o did not make exactly one build attempt: %q %v", mask, marker, err)
+		}
+		if marker, err := os.ReadFile(caseMarker); err != nil || string(marker) != "case entered\n" {
+			t.Fatalf("umask %04o did not reach test cases: %q %v", mask, marker, err)
+		}
+		if files, err := os.ReadDir(tempDirectory); err != nil || len(files) != 0 {
+			t.Fatalf("umask %04o retained its generator directory after exit: %v %v", mask, files, err)
+		}
+	}
+}
+
 // A failed setup is terminal, runs no cases, and removes only its new private
 // build directory before the captured process exits. It cannot retry to green.
 func TestReleaseGateServicesGeneratorBuildFailureCleansBeforeExit(t *testing.T) {
@@ -145,38 +255,64 @@ func TestReleaseGateServicesGeneratorBuildFailureCleansBeforeExit(t *testing.T) 
 		}
 		return
 	}
-	binDirectory := t.TempDir()
-	tempDirectory := t.TempDir()
-	compilerMarker := filepath.Join(binDirectory, "compiler-called")
-	caseMarker := filepath.Join(binDirectory, "case-entered")
-	compiler := "#!/bin/sh\nprintf 'called\\n' >> \"$RELEASE_GATE_COMPILER_MARKER\"\nexit 93\n"
-	if err := os.WriteFile(filepath.Join(binDirectory, "go"), []byte(compiler), 0o700); err != nil {
-		t.Fatal(err)
-	}
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-	child := exec.CommandContext(ctx, executable, "-test.run=^"+t.Name()+"$", "-test.count=1")
-	child.Env = testCommandEnvironment(map[string]string{
-		releaseGateSuiteGeneratorEnvironment: "", childEnvironment: caseMarker,
-		"PATH":   binDirectory + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"TMPDIR": tempDirectory, "RELEASE_GATE_COMPILER_MARKER": compilerMarker,
-	})
-	output, err := child.CombinedOutput()
-	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 || !strings.Contains(string(output), "build exact private suite generator before cases: exit status 93") {
-		t.Fatalf("setup build refusal was not retained: %v\n%s", err, output)
-	}
-	if marker, err := os.ReadFile(compilerMarker); err != nil || string(marker) != "called\n" {
-		t.Fatalf("setup did not make exactly one build attempt: %q %v", marker, err)
-	}
-	if _, err := os.Lstat(caseMarker); !os.IsNotExist(err) {
-		t.Fatalf("failed preparation reached test cases: %v", err)
-	}
-	if files, err := os.ReadDir(tempDirectory); err != nil || len(files) != 0 {
-		t.Fatalf("failed setup retained its generator directory after exit: %v %v", files, err)
+	for _, c := range []struct {
+		name    string
+		build   string
+		refusal string
+	}{
+		{name: "compiler-failed", build: "exit 93", refusal: "build exact private suite generator before cases: exit status 93"},
+		{name: "file-alias", build: `ln -s "$RELEASE_GATE_FOREIGN_FIXTURE" "$3"`, refusal: "protect prepared private suite generator:"},
+		{name: "file-hardlink", build: `ln "$RELEASE_GATE_FOREIGN_FIXTURE" "$3"`, refusal: "protect prepared private suite generator:"},
+		{name: "directory", build: `mkdir "$3"`, refusal: "protect prepared private suite generator:"},
+		{name: "fifo", build: `mkfifo "$3"`, refusal: "protect prepared private suite generator:"},
+		{name: "nonexecutable", build: `printf 'fixture\n' > "$3"`, refusal: "protect prepared private suite generator:"},
+		{name: "public-parent", build: `cp "$RELEASE_GATE_FOREIGN_FIXTURE" "$3"; chmod 755 "${3%/*}"`, refusal: "protect prepared private suite generator:"},
+		{name: "replaced-parent", build: `mv "${3%/*}" "$RELEASE_GATE_MOVED_DIRECTORY"; mkdir -m 700 "${3%/*}"; cp "$RELEASE_GATE_FOREIGN_FIXTURE" "$3"`, refusal: "protect prepared private suite generator:"},
+	} {
+		binDirectory := t.TempDir()
+		tempDirectory := t.TempDir()
+		compilerMarker := filepath.Join(binDirectory, "compiler-called")
+		caseMarker := filepath.Join(binDirectory, "case-entered")
+		foreignFixture := filepath.Join(binDirectory, "foreign-fixture")
+		if err := os.WriteFile(foreignFixture, []byte("foreign fixture\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(foreignFixture, 0o775); err != nil {
+			t.Fatal(err)
+		}
+		compiler := "#!/bin/sh\nset -eu\nprintf 'called\\n' >> \"$RELEASE_GATE_COMPILER_MARKER\"\n" + c.build + "\n"
+		if err := os.WriteFile(filepath.Join(binDirectory, "go"), []byte(compiler), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		child := exec.CommandContext(ctx, executable, "-test.run=^"+t.Name()+"$", "-test.count=1")
+		child.Env = testCommandEnvironment(map[string]string{
+			releaseGateSuiteGeneratorEnvironment: "", childEnvironment: caseMarker,
+			"PATH":   binDirectory + string(os.PathListSeparator) + os.Getenv("PATH"),
+			"TMPDIR": tempDirectory, "RELEASE_GATE_COMPILER_MARKER": compilerMarker,
+			"RELEASE_GATE_FOREIGN_FIXTURE": foreignFixture, "RELEASE_GATE_MOVED_DIRECTORY": filepath.Join(binDirectory, "moved-directory"),
+		})
+		output, err := child.CombinedOutput()
+		cancel()
+		if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 || !strings.Contains(string(output), c.refusal) {
+			t.Fatalf("%s setup refusal was not retained: %v\n%s", c.name, err, output)
+		}
+		if marker, err := os.ReadFile(compilerMarker); err != nil || string(marker) != "called\n" {
+			t.Fatalf("%s setup did not make exactly one build attempt: %q %v", c.name, marker, err)
+		}
+		if info, err := os.Stat(foreignFixture); err != nil || info.Mode().Perm() != 0o775 {
+			t.Fatalf("%s setup changed an unowned fixture: %v %v", c.name, info, err)
+		}
+		if _, err := os.Lstat(caseMarker); !os.IsNotExist(err) {
+			t.Fatalf("%s failed preparation reached test cases: %v", c.name, err)
+		}
+		if files, err := os.ReadDir(tempDirectory); err != nil || len(files) != 0 {
+			t.Fatalf("%s failed setup retained its generator directory after exit: %v %v", c.name, files, err)
+		}
 	}
 }
 
