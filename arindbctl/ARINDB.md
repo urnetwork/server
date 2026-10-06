@@ -508,9 +508,11 @@ prior catalog bytes, identities, six negative groups, policy and evidence feeds
 are preserved; the five entries are appended. Seven deterministic Python
 source controls passed, including rejection of an unchanged predecessor,
 unreviewed AS3356 expansion, negative removal, weaker visibility policy,
-changed existing provenance and country expansion. These are source controls;
-the incremental native parser/augmentation controls and a complete generated
-artifact still need qualification. No AS3356, AS3549, affiliate, parent or
+changed existing provenance and country expansion. Independent composition
+review `5dd1d47d` verified all 26 source pins, the exact predecessor byte prefix
+and five appended entries, and repeated all seven controls. These are source
+controls; the incremental native parser/augmentation controls and a complete
+generated artifact still need qualification. No AS3356, AS3549, affiliate, parent or
 customer ASN gains approval by association. Neither the frozen `4bc85427`
 update nor the separate earlier candidates were changed in place.
 
