@@ -16,6 +16,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/internal/privateprovidercapture"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
@@ -204,6 +205,20 @@ func runWithDependencies(
 			}
 			apiRouter.ServeHTTP(w, r)
 		})
+	}
+	// The private owner starts unarmed and accepts only a root-authenticated
+	// local request naming this exact process. Failure leaves selection intact.
+	if admitted {
+		env, _ := server.Env()
+		host, _ := server.Host()
+		block, _ := server.Block()
+		capture, captureErr := privateprovidercapture.Start(processCtx, env, host, block)
+		if captureErr != nil {
+			glog.Infof("[api]private provider capture unavailable\n")
+		} else if capture != nil {
+			defer capture.Close()
+			handler = capture.Recorder.Wrap(handler)
+		}
 	}
 
 	glog.Infof("[api]serving %s %s on *:%d\n", server.RequireEnv(), server.RequireVersion(), options.Port)

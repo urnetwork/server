@@ -8,6 +8,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/internal/privateprovidercapture"
 )
 
 var findProviders2SelectionOutcomes = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -51,6 +52,9 @@ func init() {
 type findProviders2LoadObservation struct {
 	missingTargets int
 	missingPages   int
+	privateCapture *privateprovidercapture.Recorder
+	privateSource  string
+	missingGroup   *findProviders2MissingGroup
 }
 
 // Owned by one request. No identity map or observation state outlives it.
@@ -76,6 +80,8 @@ type findProviders2SelectionObservation struct {
 	primaryClientScores  map[server.Id]*ClientScore
 	backfillClientScores map[server.Id]*ClientScore
 	load                 findProviders2LoadObservation
+	privateStarted       time.Time
+	privateGroupCount    int
 }
 
 // Captures only bounded request intent; resolving target types later reuses
@@ -284,4 +290,5 @@ func (self *findProviders2SelectionObservation) finish(ctx context.Context) {
 		}
 	}
 	findProviders2SelectionOutcomes.WithLabelValues(self.targetKind, self.requestClass, findProviders2OutcomeIpFamily(self.args.IpFamily), self.rankMode, self.outcome, self.reason).Inc()
+	self.finishPrivateCapture(ctx)
 }
