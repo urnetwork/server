@@ -69,11 +69,7 @@ func TestStatsQueryPlans(t *testing.T) {
 		server.Db(ctx, func(conn server.PgConn) {
 			statsPlanSeed(t, ctx, conn, networkId, sourceNetworkId, all)
 
-			assertStatsIndexPlan(t, ctx, conn, "01_enumerate_providers", `
-				SELECT network_client.client_id
-				FROM network_client INNER JOIN provide_key ON provide_key.client_id = network_client.client_id
-				WHERE network_client.network_id = $1 AND network_client.active = true
-				GROUP BY network_client.client_id`, networkId)
+			assertStatsIndexPlan(t, ctx, conn, "01_enumerate_providers", providerStatsClientsSQL, networkId)
 
 			assertStatsIndexPlan(t, ctx, conn, "02_transfer_list", `
 				SELECT tc.destination_id, COALESCE(SUM(cc.used_transfer_byte_count), 0)
