@@ -46,6 +46,9 @@ func TestLegacySettlementLoadedPageBudgetPreservesContinuation(t *testing.T) {
 				server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET next_attempt_time=$2 WHERE contract_id=$1`, id, oldest.Add(time.Duration(index)*time.Millisecond)))
 			})
 		}
+		// The setup-only ID rewrites must not add deferred cold repair to
+		// this financial page-budget control.
+		refreshNetEscrow(ctx, []server.Id{f.balanceId})
 
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `
@@ -134,6 +137,7 @@ func TestLegacySettlementParentCancellationKeepsPartialPageError(t *testing.T) {
 		})
 		server.Raise(CloseContract(ctx, secondID, f.sourceId, 11, false))
 		server.Raise(CloseContract(ctx, secondID, f.destinationId, 11, false))
+		refreshNetEscrow(ctx, []server.Id{f.balanceId})
 		oldest := server.NowUtc().Add(-time.Hour)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE legacy_settlement_intent SET next_attempt_time=$2 WHERE contract_id=$1`, firstID, oldest))

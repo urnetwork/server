@@ -91,6 +91,15 @@ func TestLegacySettlementOwnedMetadataCoverageAndSnapshots(t *testing.T) {
 			requireLegacyOwnedMetadataFinancialState(t, ctx, f, id, ids)
 			server.RunPosts(ctx, posts...)
 			server.RunPosts(ctx, posts...)
+			if mode == "cold" {
+				if len(settlementCacheSnapshot(ctx, ids)) != 0 {
+					t.Fatal("cold foreground posts performed the deferred census")
+				}
+				// A durable owner, rather than a replayed foreground callback,
+				// repairs the cold mirror. Its replay stays absolute.
+				legacyMirrorTestRun(t, ctx, f.balanceId)
+				legacyMirrorTestRun(t, ctx, f.balanceId)
+			}
 			for _, balanceId := range ids {
 				requireLegacyOwnedMetadataRedis(t, ctx, balanceId, 0)
 			}
@@ -142,6 +151,11 @@ func TestLegacySettlementOwnedMetadataRejectsChangedRevision(t *testing.T) {
 		}
 		server.RunPosts(ctx, posts...)
 		server.RunPosts(ctx, posts...)
+		if len(settlementCacheSnapshot(ctx, []server.Id{f.balanceId})) != 0 {
+			t.Fatal("invalidated foreground posts performed the deferred census")
+		}
+		legacyMirrorTestRun(t, ctx, f.balanceId)
+		legacyMirrorTestRun(t, ctx, f.balanceId)
 		requireLegacyOwnedMetadataRedis(t, ctx, f.balanceId, 9)
 		if cache := settlementCacheSnapshot(ctx, []server.Id{f.balanceId})[f.balanceId]; cache.revision != after.revision || cache.reserved != 9 {
 			t.Fatal("committed mirror did not repair the invalidated cache", cache, after)

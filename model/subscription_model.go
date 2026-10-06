@@ -3572,8 +3572,17 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 			}
 		}
 		if len(mirrorBalanceIds) > 0 {
+			if inlineFinancial {
+				// One durable owner per balance coalesces every close, including a
+				// cache hit that can be invalidated before this post gets to run.
+				queueLegacyNetEscrowMirrorsInTx(ctx, tx, mirrorBalanceIds)
+			}
 			mirrorPost := observeLegacySettlementPost(ctx, legacySettlementMirror, func() any {
-				refreshNetEscrow(ctx, mirrorBalanceIds)
+				if inlineFinancial {
+					refreshCachedLegacyNetEscrow(ctx, mirrorBalanceIds)
+				} else {
+					refreshNetEscrow(ctx, mirrorBalanceIds)
+				}
 				return nil
 			})
 			if len(reservationSnapshots) < len(positiveReservations) {
