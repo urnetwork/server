@@ -117,9 +117,20 @@ func TestExpiryFreshNativeVisitsNewerThanBothPassesAndRevisitsQuiet(t *testing.T
 				t.Fatal("fresh scheduling changed the original report proof")
 			}
 		}
-		// Finish finite old ranges and reopen ordinary full coverage. A row in
-		// the old-to-fresh gap must remain reachable without sliding away.
-		for range 80 {
+		// Finish the original finite ranges before asking a new full pass to
+		// cover their gap. Each original raw row can consume a visit in each
+		// lane; empty tails and the remaining fresh pass consume extra turns.
+		// The bound follows this fixture's row count, not elapsed time.
+		passTurns := 2 * (len(history) + len(middle) + 4)
+		for turn := 0; cursor != nil && turn < passTurns; turn++ {
+			step(later)
+		}
+		if cursor != nil {
+			t.Fatal("fresh scheduling prevented the original finite backlog passes from completing")
+		}
+		// A new historical pass includes every original middle row. Empty
+		// recent turns alternate with it while the active old rows stay open.
+		for range passTurns {
 			step(later)
 			if _, terminal := GetContractClose(ctx, gap); terminal {
 				break
