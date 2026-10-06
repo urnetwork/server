@@ -64,6 +64,9 @@ type AuthLoginArgs struct {
 	AuthJwt     *string         `json:"auth_jwt,omitempty"`
 	WalletAuth  *WalletAuthArgs `json:"wallet_auth,omitempty"`
 	Seedphrase  *string         `json:"seedphrase,omitempty"`
+	// return a coded refusal (`AuthLoginResultError.Code`) in the result
+	// `error` with a 200, instead of the HTTP 401 older clients expect
+	ResultErrors bool `json:"result_errors,omitempty"`
 }
 
 type AuthLoginResult struct {
@@ -95,7 +98,11 @@ func (r AuthLoginResult) MarshalJSON() ([]byte, error) {
 
 type AuthLoginResultError struct {
 	SuggestedUserAuth *string `json:"suggested_user_auth,omitempty"`
-	Message           string  `json:"message"`
+	// `WalletAuthErrorCodeSignatureMismatch` for a wallet signature that does
+	// not verify for its address, "" for every other refusal. Added after
+	// `Message`; older clients ignore it.
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message"`
 }
 
 type AuthLoginResultNetwork struct {
@@ -654,6 +661,17 @@ func handleLoginWallet(
 	}, ctx)
 	if err != nil {
 		returnErr = err
+		return
+	}
+	if useResult.SignatureMismatch {
+		// coded, so the apps can say the wallet signed with another account;
+		// the controller answers older clients with the 401 they expect
+		result = &AuthLoginResult{
+			Error: &AuthLoginResultError{
+				Code:    WalletAuthErrorCodeSignatureMismatch,
+				Message: walletAuthSignatureMismatchMessage,
+			},
+		}
 		return
 	}
 	if !useResult.Valid {

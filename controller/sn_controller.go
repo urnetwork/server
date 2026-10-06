@@ -56,9 +56,14 @@ const (
 	// the challenge: in practice the user signed with another account than the
 	// address they typed (or signed other text). sr25519 cannot name the key
 	// that did sign. Malformed input and a wrong, used or expired challenge
-	// carry no code.
-	SnSetWalletErrorCodeSignatureMismatch = "signature_mismatch"
+	// carry no code. A wallet mapping consent signed by another account than
+	// the coldkey it names carries it too. The same value as the wallet
+	// sign-in refusals.
+	SnSetWalletErrorCodeSignatureMismatch = model.WalletAuthErrorCodeSignatureMismatch
 )
+
+// the coded refusal's message, which clients that do not know the code show
+const snSetWalletSignatureMismatchMessage = "The signature does not match this coldkey address. Sign the challenge with this address."
 
 type SnSetWalletError struct {
 	// one of the `SnSetWalletErrorCode*` values. Added after `Message`; older
@@ -125,7 +130,7 @@ func SnSetWallet(
 			if use.SignatureMismatch {
 				return &SnSetWalletResult{Error: &SnSetWalletError{
 					Code:    SnSetWalletErrorCodeSignatureMismatch,
-					Message: "The signature does not match this coldkey address. Sign the challenge with this address.",
+					Message: snSetWalletSignatureMismatchMessage,
 				}}, nil
 			}
 			message := "Invalid wallet signature."

@@ -73,7 +73,8 @@ func Testing_CreateApiKey(networkId server.Id, ctx context.Context) (result *Cre
 		}
 
 		apiKeyHash := sha256.Sum256([]byte(apiKey))
-		_, err = tx.Exec(
+		// a failed insert raises, which ends the transaction at once
+		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
 				INSERT INTO account_api_key
@@ -89,7 +90,7 @@ func Testing_CreateApiKey(networkId server.Id, ctx context.Context) (result *Cre
 			networkId,
 			hex.EncodeToString(apiKeyHash[:]),
 			"testkey",
-		)
+		))
 	})
 
 	if err != nil {
