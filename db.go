@@ -506,6 +506,7 @@ func MaintenanceDb(ctx context.Context, callback func(PgConn), options ...any) {
 // PostgreSQL advisory lock guarding a task claim. The maintenance pool bypasses
 // transaction-pooled PgBouncer, where session locks would not be safe.
 func AcquireMaintenanceDbConn(ctx context.Context) (PgConn, error) {
+	checkPostgresAllowed(ctx)
 	conn, err := safeMaintenancePool.open().Acquire(ctx)
 	if err != nil {
 		return nil, err
@@ -589,6 +590,7 @@ func discardPgConnection(ctx context.Context, conn PgConn) {
 }
 
 func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), options ...any) {
+	checkPostgresAllowed(ctx)
 	retryOptions := OptRetryDefault()
 	rwOptions := OptReadOnly()
 	var timing *DbTiming
