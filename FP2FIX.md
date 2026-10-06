@@ -8005,3 +8005,73 @@ The separate diagnostic is
 (SHA-256 `26fb13e35480fb0f21d2d055ea2004f8fb86837d5216b503c8143b82883c00b0`),
 independent `sol-6bd44-mature-deficit-v2-actual-corroboration.json`
 (SHA-256 `3b5c1b2c3f38017ac186898de1cc898016b0899ab5fcf803466b87655aa89af9`).
+
+### 2026-10-06 05:31 UTC completed-lease guard merged; current coverage unknown
+
+The completed-lease repair is merged in canonical
+`003081dd01b6a83ab3c00a592e721eca1a802c07` and included in release source
+`db9f90a156cd2d064e4047b034b8824ba131421a`. At this checkpoint its rollout is
+queued; no completed db9f deployment or actual runtime adoption is established
+here. Builds, selected versions and local test success do not prove a Main
+coverage or throughput effect.
+
+The exact cf1e baseline reproduced the local ownership failure through both
+real worker branches: a funding-readiness veto and an unstarted
+`health_not_run` turn reached the public controller and database completion
+owner, but retained roughly fifteen minutes of the already-finished claim's
+lease. The correction changes API completion handling. On first durable
+acceptance of a nonempty local failure with `AllowPacing=false`, only the
+still-current ordinal's exact issued fifteen-minute deadline can shorten to
+the existing configured retry interval and provider jitter, measured from
+first server receipt. The default tested interval is 54–66 seconds, capped
+by the existing deadline. It cannot extend an earlier deadline or overwrite
+a custom deadline, newer claim or newer accepted result. Active claims and
+the existing `AllowPacing=true` behavior remain unchanged.
+
+This local retry grants **no accepted measured result, quota credit or
+provider-failure verdict**. Ordinary claim admission, rolling history,
+the 4/5 quality gate and TLS protections remain intact. Replay returns the
+stored receipt without repacing or recounting; already-completed long leases
+are not retroactively rewritten. The diagnostic completed-turn count remains
+separate from accepted measured credits. Thirteen current top-level normal
+controls and three focused model race controls pass, including full-quota
+renewal headroom, security quarantine, withdrawn eligibility, receive-time
+pacing, replay and concurrent first acceptance. Three intended baseline
+failure assertions are retained. The final worker controls are standalone
+top-level tests under CODESTYLE. Main prevalence remains unproved; the
+earlier separate completed-900-second and local-failure domains still have
+no rowwise or `AllowPacing` join.
+
+The latest retained standing coverage warning, **05:12:27 UTC**, reports
+`shard_0_owners=0` and `census_reason=owner_unavailable`. Its owning Mimir
+fetch and parse succeeded, but no shard-zero owner qualified, so it supplies
+no current census or rate. The object does not distinguish an explicit zero
+heartbeat from missing or stale series, geometry rejection or ambiguous
+process selection. A normal completed pass already joins its heartbeat
+refresher and publishes zero when its last local owner exits; that source
+behavior does not establish the cause of this warning.
+
+The preceding **04:57:09 UTC** standing snapshot reported all-current quota
+**54,568 / 55,444**, secure-complete 54,540, 3,036 missing credits and 902
+overdue providers, with a separate missing-shard-seven warning. It is an
+older all-current stock, not a mature denominator or proof of coverage at
+05:12. The qualified 04:17 mature census above remains historical.
+**Sustained 100% mature coverage and a current durable credit rate remain
+unproven.** After Root's actual deployment terminal, queued source-qualified
+cohort, bounded-deficit and rate observations must retain their original
+clocks, current generations and mature/warming distinction. No cycle age is
+backdated and no unmeasured turn is counted toward the rolling ten-result goal.
+
+The frozen candidate and native evidence are under
+`/run/media/by/archive1/urnetwork-build/artifacts/fp2-completed-lease-retry-20261006`:
+`source-manifest.json` (SHA-256
+`3fe73f90c61e2f4f3a2d6a260691995a83a1146ade6b45d07a0b770da68be1f0`),
+`validation-receipt.json` (SHA-256
+`f87428ef9526bb15d692201669401bd9bf7fd3c6eac388a65dc938491323b662`),
+and independent `sol-independent-source-GO.json` (SHA-256
+`f0909e1e03d3ece6e061dd966555b2fa31281ef9c06b85e36bf35fa4089eff1d`).
+Private retained watcher objects are
+`monitor/objects/sha256/94/94a947d52841b709d70d14bbc54774ebcb72863bf07a9fcf607b528abd0811de`
+and
+`monitor/objects/sha256/23/23ab80d22b7449c6dacb92b5d705be47bfbf43a427c1c7daafe8babbcd2a5cc0`;
+each object's SHA-256 is its filename.
