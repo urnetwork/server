@@ -595,6 +595,26 @@ policy or longest-prefix classification partitions. These are route visibility
 counts, not eligible addresses, customers, current Main providers or measured
 Quality gains. APNIC user estimates remain audit-priority inputs only.
 
+A source-only pass through all 1,589,823 rows of the same IPv4 and IPv6
+snapshots also measured direct visibility for the 38 subscriber ASNs added
+between catalogs `ec316ffc` and `320b4c10`. Repeated measurements agree
+(`ff93366d`); for the five latest US identities the IPv4 counts are:
+
+| Exact ASN | Observed distinct prefixes | Direct peer count at least ten |
+| --- | ---: | ---: |
+| AS209 | 1,590 | 1,588 |
+| AS4922 | 101 | 93 |
+| AS6621 | 371 | 371 |
+| AS7155 | 4,366 | 4,346 |
+| AS15108 | 57 | 57 |
+
+AS7132, another newly reviewed ASN, has no observed route in either retained
+snapshot. These per-ASN counts use the maximum direct count on repeated
+observations, never a sum. They omit parent and sibling-identity visibility
+and all classification discriminators; multi-origin prefixes can appear in
+more than one ASN's count. They add routing context to the catalog inventory,
+without establishing final classifier coverage or a provider gain.
+
 Source review also found a diagnostic loss in the inspected `db9f90a` shadow
 projection: the MMDB retains `origin_withheld_reason`, but the projection
 retains only origin ASNs and use state. The change prepared as `4ec4f8ab4`
