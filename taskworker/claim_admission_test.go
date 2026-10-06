@@ -6,26 +6,28 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
 )
 
-// Only the probe owns the newly introduced production limit. Other settings
-// and subnet-operator behavior retain their original values.
+// Probe placement is production-only; mirror repair is bounded in both
+// profiles that can produce it. Other worker settings retain their values.
 func TestProviderProbeClaimAdmissionIsProductionOnly(t *testing.T) {
 	settings := task.DefaultTaskWorkerSettings()
 	production := taskWorkerSettingsForProfile(settings, WorkloadProfileProduction)
 	name := task.NewTaskTarget(work.ProviderEgressProbe).TargetFunctionName()
-	if !reflect.DeepEqual(production.TargetClaimLimits, map[string]int{name: 1}) || settings.TargetClaimLimits != nil {
-		t.Fatal("production did not opt in only the provider probe, or mutated its caller")
+	mirror := task.NewTaskTarget(model.ApplyLegacyNetEscrowMirror).TargetFunctionName()
+	if !reflect.DeepEqual(production.TargetClaimLimits, map[string]int{name: 1, mirror: 1}) || settings.TargetClaimLimits != nil {
+		t.Fatal("production target placement differs or mutated its caller")
 	}
 	production.TargetClaimLimits = nil
 	if !reflect.DeepEqual(production, settings) {
 		t.Fatal("probe placement changed ordinary worker settings")
 	}
 	operator := taskWorkerSettingsForProfile(settings, WorkloadProfileSubnetOperator)
-	if operator.TargetClaimLimits != nil || !operator.ClaimRegisteredTargetsOnly {
-		t.Fatal("probe placement changed the independent workload profile")
+	if !reflect.DeepEqual(operator.TargetClaimLimits, map[string]int{mirror: 1}) || !operator.ClaimRegisteredTargetsOnly {
+		t.Fatal("independent profile did not retain mirror-only placement")
 	}
 }
 

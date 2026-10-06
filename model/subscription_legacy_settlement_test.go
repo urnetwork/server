@@ -302,6 +302,7 @@ func TestLegacySettlementBusyCursorAndConcurrentWorkers(t *testing.T) {
 		})
 		server.Raise(CloseContract(ctx, secondId, second.sourceId, 11, false))
 		server.Raise(CloseContract(ctx, secondId, second.destinationId, 11, false))
+		refreshNetEscrow(ctx, []server.Id{second.balanceId})
 		conn := acquireContractLifecycleTestConnection(t, ctx)
 		defer conn.Release()
 		held, err := conn.Begin(ctx)

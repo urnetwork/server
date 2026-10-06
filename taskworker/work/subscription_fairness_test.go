@@ -29,7 +29,10 @@ func TestCloseExpiryFairSuccessPersistsBothLaneCursors(t *testing.T) {
 			Dispute: &model.ContractExpiryPosition{CreateTime: stamp.Add(-2 * time.Hour), ContractId: server.NewId()}, OpenDone: true}
 		for _, historicalDone := range []bool{false, true} {
 			sweep := &model.ContractExpirySweepCursor{Historical: historical, Recent: recent, RecentAfter: historical.ScanBefore,
-				HistoricalDone: historicalDone, HistoricalNext: true}
+				HistoricalDone: historicalDone, HistoricalNext: true,
+				Fresh: &model.ContractExpiryCursor{ScanBefore: stamp.Add(-12 * time.Minute),
+					Open: &model.ContractExpiryPosition{CreateTime: stamp.Add(-20 * time.Minute), ContractId: server.NewId()}},
+				FreshBefore: stamp.Add(-30 * time.Minute), FreshNext: true}
 			if historicalDone {
 				sweep.Historical = nil
 			}

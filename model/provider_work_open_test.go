@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -330,8 +332,8 @@ func TestProviderWorkOpenObservationDeadlinePreservesApprovedBudgetAndParent(t *
 	}
 }
 
-// This instance substitutes only the database clock result; all contract locks,
-// report reads, SQL writes and original signing remain their actual owners.
+// This instance substitutes only the database clock expression; the real update
+// returns its stored timestamp to the unchanged original-signing owner.
 type providerWorkOpenClockTx struct {
 	server.PgTx
 	at     time.Time
@@ -339,27 +341,12 @@ type providerWorkOpenClockTx struct {
 }
 
 func (self *providerWorkOpenClockTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	if sql == `SELECT clock_timestamp() AT TIME ZONE 'UTC'` {
+	if strings.Contains(sql, "UPDATE transfer_contract") && strings.Contains(sql, "RETURNING close_time") {
 		self.called = true
-		return providerWorkOpenClockRow{at: self.at}
+		sql = strings.Replace(sql, "clock_timestamp() AT TIME ZONE 'UTC'", fmt.Sprintf("$%d::timestamp", len(args)+1), 1)
+		args = append(args, self.at.UTC())
 	}
 	return self.PgTx.QueryRow(ctx, sql, args...)
-}
-
-type providerWorkOpenClockRow struct{ at time.Time }
-
-func (self providerWorkOpenClockRow) Scan(values ...any) error {
-	if len(values) != 1 {
-		return errors.New("synthetic database clock destination differs")
-	}
-	destination, ok := values[0].(*time.Time)
-	if !ok {
-		return errors.New("synthetic database clock destination is not time")
-	}
-	// The real timestamp-without-time-zone decoder returns UTC for
-	// clock_timestamp() AT TIME ZONE 'UTC', regardless of the handler's zone.
-	*destination = self.at.UTC()
-	return nil
 }
 
 func TestProviderWorkOpenObservationAndOutcomeUseDatabaseClock(t *testing.T) {

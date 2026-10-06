@@ -844,6 +844,7 @@ func openEscrowReservedForBalances(ctx context.Context, balanceIds []server.Id) 
 	if len(balanceIds) == 0 {
 		return pending
 	}
+	defer enterLegacySettlementTiming(ctx, legacySettlementColdCensus)()
 	server.Tx(ctx, func(tx server.PgTx) {
 		configureNetEscrowReservationPageTimeout(ctx, tx, netEscrowReservationPageStatementTimeout)
 		pending = readNetEscrowSnapshots(ctx, tx, balanceIds)
@@ -2870,33 +2871,34 @@ func claimContractOutcomeInTx(
 	if err != nil {
 		return false, err
 	}
-	// Open observations and terminal originals share the database clock after
-	// this same row fence; a handler clock skew cannot reverse their order.
+	// Return the database clock from the outcome write, avoiding another round
+	// trip while grants are held. The signed original uses this exact stored time.
 	var closedAt time.Time
-	if err := tx.QueryRow(ctx, `SELECT clock_timestamp() AT TIME ZONE 'UTC'`).Scan(&closedAt); err != nil {
-		return false, err
-	}
-	tag := server.RaisePgResult(tx.Exec(
+	err = tx.QueryRow(
 		ctx,
 		`
             UPDATE transfer_contract
             SET
                 outcome = $2,
-                close_time = $3,
-                provider_usage = $4
+                close_time = clock_timestamp() AT TIME ZONE 'UTC',
+                provider_usage = $3
             WHERE
                 contract_id = $1 AND
                 outcome IS NULL
+            RETURNING close_time
         `,
 		contractId,
 		outcome,
-		closedAt,
 		usage,
-	))
-	if tag.RowsAffected() == 1 {
-		providerWorkRetainOutcomeInTx(ctx, tx, contractId, outcome, closedAt)
+	).Scan(&closedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
 	}
-	return tag.RowsAffected() == 1, nil
+	if err != nil {
+		return false, err
+	}
+	providerWorkRetainOutcomeInTx(ctx, tx, contractId, outcome, closedAt)
+	return true, nil
 }
 
 // contractParticipantsInTx returns the service side of a contract: the
@@ -3520,7 +3522,7 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 	}
 	publishSettlementNetEscrowSnapshots(ctx, tx, reservationSnapshots, positiveReservations, true)
 	if 0 < clockTransferByteCount {
-		posts = append(posts, clockTransferPost(ctx, clockTransferByteCount))
+		posts = append(posts, observeLegacySettlementPost(ctx, legacySettlementClock, clockTransferPost(ctx, clockTransferByteCount)))
 	}
 
 	// run all the posts in parallel in as small blocks as reasonable to minimize the work for serialization errors
@@ -3571,10 +3573,19 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 			}
 		}
 		if len(mirrorBalanceIds) > 0 {
-			mirrorPost := func() any {
-				refreshNetEscrow(ctx, mirrorBalanceIds)
-				return nil
+			if inlineFinancial {
+				// One durable owner per balance coalesces every close, including a
+				// cache hit that can be invalidated before this post gets to run.
+				queueLegacyNetEscrowMirrorsInTx(ctx, tx, mirrorBalanceIds)
 			}
+			mirrorPost := observeLegacySettlementPost(ctx, legacySettlementMirror, func() any {
+				if inlineFinancial {
+					refreshCachedLegacyNetEscrow(ctx, mirrorBalanceIds)
+				} else {
+					refreshNetEscrow(ctx, mirrorBalanceIds)
+				}
+				return nil
+			})
 			if len(reservationSnapshots) < len(positiveReservations) {
 				// A cold mirror must follow this metadata attempt: otherwise it
 				// can warm the preceding revision after metadata already read a

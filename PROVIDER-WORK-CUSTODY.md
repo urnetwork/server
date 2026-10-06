@@ -45,6 +45,35 @@ the first prospective window. The production Frontier clock profile is
 `frontier-legacy-rlp15-milliseconds`. An operator cannot construct a roster by
 enumerating its database and re-signing the observed set.
 
+## Production roster signer
+
+The epoch roster producer lives in the **SN repository**, at
+`cli/payoutroster` with reusable implementation in `payoutroster`. Its operator
+handoff is [SN's payout roster guide](../sn/mainnet/PAYOUT-ROSTER.md).
+
+Run it under the independently approved roster authority's custody, separately
+from the payout artifact worker. Its `vault/main/payout_roster.yml` configuration
+names a dedicated private key file and pins the public authority, artifact and
+client-key registration signers plus the exact deployment domain. The Server's
+`provider_work.yml` keeps only the matching approved public inputs; it does not
+receive the roster private key.
+
+The producer prepares a canonical request from an explicitly complete owner and
+provider inventory with original enrollment, registration and wallet-consent
+histories. When network-consent heads are present, it emits roster v2 with
+`network_wallets`. It retains unmapped providers rather than omitting them, and
+uses the shared consent rules without changing install-consent precedence.
+Observed usage or a SQL owner enumeration is not a complete population.
+
+Use `prepare` for review, `sign` for local retained signing, `once` for retained
+signing and publication, or `run` for a reviewed request inbox. The producer
+retains the reviewed request and exact signed roster before posting to
+`POST /provider-work/v1/authorities`; transient failures retry the identical
+bytes under a default 300-second operation budget. A verified digest receipt is
+retained before completed queue work is retired. Preserve that state on restart;
+never produce a replacement roster for an already retained domain and epoch.
+See the guide for exact flags, file formats, queue retirement and recovery.
+
 Payout production reads its separate window in the same SQL statement as credited
 usage, including a zero-credit window. Before signing, it joins every approved
 owner's exact start/end request and cut. It retains exact committed Frontier RLP15

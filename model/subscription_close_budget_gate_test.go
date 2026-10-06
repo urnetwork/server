@@ -11,6 +11,23 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// Redis admission commits earned payouts and their independent projection
+// owner with the outcome. Its provider total is applied to PostgreSQL, so an
+// absent Redis increment is expected. Run the actual owner twice to prove the
+// completed subpage retained one exact contribution across replay.
+func requireForceCloseBudgetProvider(t testing.TB, ctx context.Context, fixture *forceCloseDisputeFixture, bytes ByteCount) {
+	t.Helper()
+	terminal, journals, sweeps, owners, earned, revenue := asyncPayoutRecoveryState(t, ctx, fixture.contractId)
+	if !terminal || journals != 1 || sweeps != 1 || owners != 1 || earned != bytes {
+		t.Fatal("completed budget subpage lost its exact payout and durable provider owner")
+	}
+	owner := asyncPayoutRecoveryProject(t, ctx, fixture.contractId)
+	requireProviderTotalsTestState(t, ctx, owner, fixture.providerNetworkId, true, int64(bytes), int64(revenue))
+	if fixture.state(t, ctx).providerPayoutByteCount != 0 {
+		t.Fatal("completed budget subpage duplicated the durable provider contribution in Redis")
+	}
+}
+
 // A PostgreSQL trigger holds each close below the worker deadline while the
 // completed subpage crosses the cooperative budget. Later rows await replay.
 func TestForceCloseBudgetLoadedSubpageReplay(t *testing.T) {
@@ -137,15 +154,16 @@ func TestForceCloseBudgetRedisReservationAndParentCancel(t *testing.T) {
 				}
 				if !parentCancel {
 					settled := firstFixture.state(t, setupCtx)
-					if settled.outcome != ContractOutcomeSettled || !settled.escrowSettled || settled.providerPayoutByteCount != 1024 || settled.escrowPayoutByteCount != 1024 || settled.requestTokenByteCount != 1024 || settled.redisEscrowByteCount != 1024 || settled.streamFound {
+					if settled.outcome != ContractOutcomeSettled || !settled.escrowSettled || settled.providerPayoutByteCount != 0 || settled.escrowPayoutByteCount != 1024 || settled.requestTokenByteCount != 1024 || settled.redisEscrowByteCount != 1024 || settled.streamFound {
 						t.Fatalf("budget overrun lost required financial posts: %+v", settled)
 					}
+					requireForceCloseBudgetProvider(t, setupCtx, firstFixture, 1024)
 					applied, released, busy, debitErr := flushTransferDebitBalance(setupCtx, firstFixture.balanceId)
 					if debitErr != nil || applied != 1 || released != 1 || busy {
 						t.Fatalf("owner debit failed conservation: applied=%d released=%d busy=%t err=%v", applied, released, busy, debitErr)
 					}
 					final := firstFixture.state(t, setupCtx)
-					if final.payerBalanceByteCount != forceCloseDisputeInitialBalance-1024 || final.requestTokenByteCount != 0 || final.redisEscrowByteCount != 0 || final.providerPayoutByteCount != 1024 {
+					if final.payerBalanceByteCount != forceCloseDisputeInitialBalance-1024 || final.requestTokenByteCount != 0 || final.redisEscrowByteCount != 0 || final.providerPayoutByteCount != 0 {
 						t.Fatalf("owner debit financial result: %+v", final)
 					}
 					if a, r, b, e := flushTransferDebitBalance(setupCtx, firstFixture.balanceId); a != 0 || r != 0 || b || e != nil || firstFixture.state(t, setupCtx) != final {
@@ -208,8 +226,11 @@ func TestForceCloseBudgetAccountingAndMixedErrors(t *testing.T) {
 				if after.escrowSettled || after.escrowPayoutByteCount != before.escrowPayoutByteCount || after.payerBalanceByteCount != before.payerBalanceByteCount || after.providerPayoutByteCount != before.providerPayoutByteCount || after.requestTokenByteCount != before.requestTokenByteCount {
 					t.Fatalf("rejected money state changed: before=%+v after=%+v", before, after)
 				}
-				if state := good.state(t, ctx); !mixed && (state.providerPayoutByteCount != 1024 || !state.escrowSettled) {
+				if state := good.state(t, ctx); !mixed && (state.providerPayoutByteCount != 0 || !state.escrowSettled) {
 					t.Fatalf("completed prefix missing financial posts: %+v", state)
+				}
+				if !mixed {
+					requireForceCloseBudgetProvider(t, ctx, good, 1024)
 				}
 			})
 		})

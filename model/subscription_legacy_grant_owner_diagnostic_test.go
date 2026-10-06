@@ -222,7 +222,7 @@ func (self *legacyGrantOwnerDiagnosticTx) Query(ctx context.Context, sql string,
 		return rows, err
 	}
 	return &legacyGrantOwnerDiagnosticRows{Rows: rows, close: func() {
-		if self.acquiredAt.IsZero() && strings.Contains(sql, "FOR UPDATE OF balance SKIP LOCKED") {
+		if self.acquiredAt.IsZero() && strings.Contains(sql, "FOR UPDATE OF balance") {
 			self.acquiredAt = time.Now()
 			self.afterGrant()
 			self.barrierTime = time.Since(self.acquiredAt)
