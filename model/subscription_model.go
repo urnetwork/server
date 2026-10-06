@@ -3527,10 +3527,10 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 					}
 				})
 			}
-			if inlineFinancial {
-				// No required payout may depend on a callback after the queue
-				// item's deletion. Its first insertion clock and attribution
-				// commit with the debit, outcome and escrow metadata.
+			if inlineFinancial || asyncDebit {
+				// Required earnings commit with the outcome and debit authority.
+				// The Redis debit worker cannot reconstruct a lost payout callback;
+				// these per-contract rows do not lock a shared payer or provider.
 				writePayouts(tx)
 			} else {
 				posts = append(posts, func() any {
@@ -3579,11 +3579,11 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 		})
 	}
 
-	if inlineFinancial && len(accountPayouts) > 0 {
+	if (inlineFinancial || asyncDebit) && len(accountPayouts) > 0 {
 		// Exact earnings remain in the sweep ledger. Their lifetime display
-		// totals have an independent durable owner, so a held provider row
-		// cannot retain this transaction's payer grants. No Redis increment is
-		// added; account totals and their task's replay marker commit together.
+		// totals have an independent per-contract durable owner, so a held
+		// provider row cannot retain this transaction. No Redis increment is
+		// added; account totals and the task's replay marker commit together.
 		queueLegacyProviderTotalsInTx(ctx, tx, contractId, accountPayouts)
 	} else if 0 < len(accountPayouts) {
 		posts = append(posts, func() any {
