@@ -463,6 +463,8 @@ func GetStEpochsWithStatus(ctx context.Context, deploymentKey StDeploymentKey, s
 
 // StEpochSummary is the hot mirror of the contract clock served by
 // `GET /sn/epoch`. Json tags are the client-facing contract — do not change.
+// The genesis hash is the subnet chain's genesis block hash, "0x" and 64
+// lowercase hex digits; with the chain id and netuid it names the subnet.
 type StEpochSummary struct {
 	Epoch               uint64 `json:"epoch"`
 	StartBlock          uint64 `json:"start_block"`
@@ -471,6 +473,7 @@ type StEpochSummary struct {
 	FinalizeBlock       uint64 `json:"finalize_block"`
 	TEpochBlocks        uint64 `json:"t_epoch_blocks"`
 	ChainId             uint64 `json:"chain_id"`
+	GenesisHash         string `json:"genesis_hash,omitempty"`
 	ContractAddress     string `json:"contract_address"`
 	// release chain settings for direct claims (SDK/web overlay; empty or
 	// zero means unset and the client default wins)

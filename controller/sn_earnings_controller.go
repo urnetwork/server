@@ -283,11 +283,24 @@ func snChainState(ctx context.Context) (*StConfig, StClient, *StEpochState) {
 
 // snEpochSummaryWithChainSettings overlays the release chain settings that
 // direct claims need onto the epoch summary: settlement vault, no_id
-// (decimal), netuid and the selected profile's public rpc url. Unset values
-// stay empty so the SDK/web defaults win.
+// (decimal), netuid and the selected profile's public rpc url. It also states
+// the genesis hash, which with chain_id and netuid names the subnet a miner's
+// hotkey wallet consent is signed for, so a miner learns the subnet without
+// requesting a challenge. Unset values stay empty so the SDK/web defaults win.
 func snEpochSummaryWithChainSettings(cfg *StConfig, summary *model.StEpochSummary) *model.StEpochSummary {
 	if cfg == nil || summary == nil {
 		return summary
+	}
+	// the epoch-row fallback carries no chain identity of its own; the cached
+	// summary already states the same configured values
+	if summary.ChainId == 0 {
+		summary.ChainId = cfg.ChainId
+	}
+	if summary.ContractAddress == "" && cfg.ContractAddress != (common.Address{}) {
+		summary.ContractAddress = cfg.ContractAddress.Hex()
+	}
+	if cfg.GenesisHash != ([32]byte{}) {
+		summary.GenesisHash = "0x" + hex.EncodeToString(cfg.GenesisHash[:])
 	}
 	if cfg.SettlementVault != (common.Address{}) {
 		summary.SettlementVaultAddress = cfg.SettlementVault.Hex()
