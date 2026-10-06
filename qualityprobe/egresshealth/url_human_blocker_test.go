@@ -94,12 +94,12 @@ func TestUrlProbeHumanGateRejectsCorroboratedDocumentPrompts(t *testing.T) {
 	}
 }
 
-// Mixed fleets retain v1 receipts while new producers identify changed semantics.
+// Readers accept the staged v3 receipt before the producer advances from v2.
 func TestUrlProbeHumanGateEvidenceVersions(t *testing.T) {
-	for _, version := range []int{0, 1, 2, 3} {
+	for _, version := range []int{-1, 0, 1, 2, 3, 4} {
 		evidence := urlEvidenceTestSuccess()
 		evidence.ContentMatcherVersion = version
-		want := version == 1 || version == 2
+		want := version == 1 || version == 2 || version == 3
 		if err := evidence.ValidateOutcome(1, 1, false); (err == nil) != want {
 			t.Errorf("matcher version %d: accepted=%t want=%t: %v", version, err == nil, want, err)
 		}

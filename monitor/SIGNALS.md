@@ -12461,6 +12461,11 @@ Deploy v1/v2-compatible API evidence readers before enabling v2 producers in
 Taskworker or standalone probes. The shared validator is also used by
 API ingress, model storage and probe publication; old v1-only readers reject v2.
 Historical v1 evidence retains its recorded provenance during a mixed rollout.
+The v3 rollout begins with a reader-only compatibility stage: the shared evidence
+validator accepts matcher versions 1, 2 and 3 while producers remain at version 2.
+API ingress, model storage, Taskworker and the shared standalone/fleet prober use
+that validator. Verify every API reader has this compatibility stage before
+enabling v3 producers; accepting v3 receipts does not activate the v3 detector.
 This detector change does not alter phase limits, body sampling, the ten accepted
 measured outcomes per four hours, the inclusive 0.8 quality ratio, or the local
 setup versus measured-provider boundary. Local fixtures establish matcher

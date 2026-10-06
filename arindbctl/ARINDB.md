@@ -904,7 +904,7 @@ or reproducing it, and refresh through the normal update path as evidence ages.
 The process-local reader does not automatically unload or reclassify records
 when an evidence timestamp expires.
 
-### Reviewed catalog artifact and staging (2026-10-06)
+### Reviewed catalog artifact and deployment (2026-10-06)
 
 The normal update produced resource `2026.10.6+1791253792`: 571,201,428 bytes,
 SHA-256 `2952a3458a574ffea68cf726a9e5d0116b49d6dbe6a105fccd287064875349d1`,
@@ -932,9 +932,29 @@ Config paths, including the private-profile resource. Seven added files and
 two directories produce 106 paths totaling 5,064,120,310 bytes. Artifact and
 physical-inventory qualification are complete. The actual `6bd44a1b` native
 resolver control also selected all three pinned ARIN/GeoLite/places resources
-and loaded epoch `1791253792`. Image publication, Config selection and loaded
-Main-process proof remain separate rollout checkpoints at this recorded stage.
-No Main classification or Quality gain is attributed to this new artifact.
+and loaded epoch `1791253792`. Both Config image architectures passed independent
+verification. Root selected version
+`2026.10.6-arin-reviewed-catalog+1064574990`, index
+`sha256:a963d0c695067d1683647f6e091b3c838e9f402fe0f8e6a9c14582f6cbd7930c`,
+at `05:23:54.652287Z`–`05:23:58.314035Z`, with `restart=yes` requested.
+The successful deployment receipt is
+`c151b2603434c9278777bf2992e907592929651b24b409162f63b8ccd46d7ee9`;
+it does not establish every process restart or resource adoption.
+
+At `05:30:13.995316Z`–`05:30:14.125936Z`, one exact `cf1e52c3` amd64 Connect
+process at edge1/g1 had a stable mapping of epoch `1791253792`. Its file length
+was 571,201,428 bytes; the final 131,072 bytes and decoded metadata matched
+the new artifact's separately pinned fingerprints. Native owner, executable,
+process generation and mapped device/inode remained bound across the read.
+Independent actual gate
+`017830938ba80a170aa00c9660dc4fe790f2c52cac3177333482ca63090df09a`
+qualifies that observation. The legacy v13-match flag is false for this new
+artifact, as expected; it is not a failed new-artifact comparison.
+
+This proves one process mapping and a bounded fingerprint, not the full file
+hash, request-time use, fleet convergence or a classification/Quality gain.
+The observation preceded the subsequent `db9f` service rollout and does not
+prove resource adoption by its newer process generations.
 
 ### One mapped-process observation (2026-10-05)
 
@@ -1312,6 +1332,22 @@ Receipt `ec486133c964eea273c6d0abe1a61d237b17ac7c8c95d4ff8c7675c8335bf637`
 retains only aggregate output. No publisher identity, loaded-resource use,
 fixed-cohort improvement or historical 10,616-member attribution follows.
 
+The first post-Config comparison at `2026-10-06T05:31:10.144121Z` refused
+`source_before_cutover`: the key's parsed source completion preceded the new
+Config completion floor, `05:23:58.314035Z`. The native body completed in
+41.543 milliseconds after one fixed-pair read through one approved redirect;
+**no PostgreSQL query ran**. The cutoff check precedes the 900-second age,
+bucket/ratio and sample-membership checks, so none of those later checks was
+qualified. The refusal retained no exact source/publication clocks, counts or
+current classification reasons. Independent actual gate
+`5fae25ce0da8329a7a41fbea2efc5a3ffc6359fbd0c38142772d9050c8d1ef3f`
+binds the result. This is an older-than-cutover publication, not a zero pool or
+a measured failure of the 900-second age bound. It does not identify an active
+publisher or explain the publication delay. The earlier 547/6,569/56,100 counts
+remain historical; a newly qualified publication and generation-bound sample
+are still needed. Both contacts' later local watcher/fallback checks passed;
+no automatic retry or freshness relaxation followed.
+
 The native publication has source clocks but lacks ARIN epochs and exclusion
 reasons. These reviewed sources export no loaded-ARIN epoch gauge. The bounded
 process observation above supplies a mapped epoch for one process; its
@@ -1342,9 +1378,12 @@ For this release, retain the following evidence as rollout proceeds:
 1. The selected Config index and actual process resource path/hash/epoch after
    the owning restart; desired selectors and successful image publication are
    insufficient by themselves.
-2. Aggregate current, outdated and missing lookups at epoch `1791162091`, using
-   the actual cutover time, followed by native score-generation and provider
-   rollup convergence. Do not treat old stored facts as freshly reclassified.
+2. Aggregate current, outdated and missing lookups at epoch `1791253792`,
+   using the Config start `2026-10-06T05:23:54.652287Z`, followed by native
+   score-generation and provider rollup convergence. Require source completion
+   at or after Config completion `05:23:58.314035Z`; that floor alone does not
+   identify the publisher or prove its source evaluation started after selection.
+   Do not treat old stored facts as freshly reclassified.
 3. Actual Quality, Speed and Online results under their existing health,
    reliability and common-risk gates, including fallback and publication age.
 4. Complete owner-side capture aggregates where available, preserving unknown,
