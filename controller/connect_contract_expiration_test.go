@@ -74,7 +74,7 @@ func TestCreateContractSignsPersistedExpiration(t *testing.T) {
 				server.Db(ctx, func(conn server.PgConn) {
 					server.Raise(conn.QueryRow(ctx, `SELECT create_time,expiration_time FROM transfer_contract WHERE contract_id=$1`, id).Scan(&created, &persisted))
 				})
-				if !persisted.Equal(time.UnixMilli(*stored.ExpirationTimeUnixMilli)) || persisted.Sub(created) != 60*time.Minute {
+				if !persisted.Equal(time.UnixMilli(*stored.ExpirationTimeUnixMilli)) || !persisted.Equal(created.Truncate(time.Millisecond).Add(60*time.Minute)) {
 					t.Fatalf("%s signed deadline differs from 60 minute persisted deadline", test.name)
 				}
 				if !connect.VerifyStoredContract(settings, secret, result.Contract.StoredContractBytes, result.Contract.StoredContractHmac) {

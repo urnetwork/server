@@ -1751,7 +1751,7 @@ func createTransferEscrowInTx(
 		batch.Queue(
 			`
 	            WITH creation_clock AS MATERIALIZED (
-	                SELECT date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC') AS create_time
+	                SELECT clock_timestamp() AT TIME ZONE 'UTC' AS create_time
 	            )
 	            INSERT INTO transfer_contract (
 	                contract_id,
@@ -1770,7 +1770,7 @@ func createTransferEscrowInTx(
 	            SELECT
 	                $1, $2, $3, $4, $5, $6, $7, $8, ($7::uuid IS NULL),
 	                create_time, $9,
-	                create_time + $10 * INTERVAL '1 millisecond'
+	                date_trunc('milliseconds', create_time) + $10 * INTERVAL '1 millisecond'
 	            FROM creation_clock
 	            RETURNING expiration_time
 	        `,
@@ -2506,7 +2506,7 @@ func createContractNoEscrowInTx(
 		ctx,
 		`
 	            WITH creation_clock AS MATERIALIZED (
-	                SELECT date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC') AS create_time
+	                SELECT clock_timestamp() AT TIME ZONE 'UTC' AS create_time
 	            )
                 INSERT INTO transfer_contract (
                     contract_id,
@@ -2521,7 +2521,7 @@ func createContractNoEscrowInTx(
                 )
 	            SELECT
 	                $1, $2, $3, $4, $5, $6, $7,
-	                create_time, create_time + $8 * INTERVAL '1 millisecond'
+	                create_time, date_trunc('milliseconds', create_time) + $8 * INTERVAL '1 millisecond'
 	            FROM creation_clock
 	            RETURNING expiration_time
 	        `,

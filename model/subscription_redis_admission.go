@@ -330,10 +330,10 @@ func createRedisTransferEscrowInTx(ctx context.Context, tx server.PgTx, admissio
 			batch.Queue(`INSERT INTO transfer_escrow(contract_id,balance_id,balance_byte_count,redis_reserved) VALUES($1,$2,$3,true)`, admission.contractId, b.BalanceId, b.BalanceByteCount)
 		}
 		batch.Queue(`WITH creation_clock AS MATERIALIZED (
-                SELECT date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC') AS create_time
+                SELECT clock_timestamp() AT TIME ZONE 'UTC' AS create_time
             )
             INSERT INTO transfer_contract(contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,companion_contract_id,payer_network_id,usage_origin_is_source,create_time,priority,expiration_time)
-            SELECT $1,$2,$3,$4,$5,$6,$7,$8,($7::uuid IS NULL),create_time,$9,create_time + $10 * INTERVAL '1 millisecond'
+            SELECT $1,$2,$3,$4,$5,$6,$7,$8,($7::uuid IS NULL),create_time,$9,date_trunc('milliseconds', create_time) + $10 * INTERVAL '1 millisecond'
             FROM creation_clock RETURNING expiration_time`,
 			admission.contractId, sourceNetworkId, sourceId, destinationNetworkId, destinationId, granted, companionId, payerNetworkId, priority,
 			DefaultContractExpiration.Milliseconds(),

@@ -9,6 +9,8 @@ import (
 )
 
 // The database creation clock starts this lifetime after admission lock waits.
+// Only the deadline rounds down to wire milliseconds; create_time retains its
+// full precision so it can never precede the admission fence that released it.
 const DefaultContractExpiration = 60 * time.Minute
 
 // Reads the actual committed deadline for the signed contract response. Legacy

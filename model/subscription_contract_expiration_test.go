@@ -73,9 +73,9 @@ func TestContractExpirationDefaultAcrossCreationPaths(t *testing.T) {
 			server.Db(ctx, func(conn server.PgConn) {
 				server.Raise(conn.QueryRow(ctx, `SELECT create_time FROM transfer_contract WHERE contract_id=$1`, test.id).Scan(&created))
 			})
-			if DefaultContractExpiration != 60*time.Minute || expires.Sub(created) != 60*time.Minute ||
+			if DefaultContractExpiration != 60*time.Minute || !expires.Equal(created.Truncate(time.Millisecond).Add(60*time.Minute)) ||
 				!expires.Equal(time.UnixMilli(expires.UnixMilli())) {
-				t.Fatalf("deadline=%s created=%s, want exactly 60 minutes with wire precision", expires, created)
+				t.Fatalf("deadline=%s created=%s, want 60 minutes at wire precision", expires, created)
 			}
 			if !test.returned.IsZero() && !test.returned.Equal(*expires) {
 				t.Fatal("returned reservation deadline differs from its committed row")
@@ -255,6 +255,19 @@ func TestContractExpirationCompanionSelectsLiveRenewal(t *testing.T) {
 			f.destinationNetworkId, f.destinationId, 100, time.Minute)
 		if err != nil || reverse == nil || reverse.CompanionContractId == nil || *reverse.CompanionContractId != companion.ContractId {
 			t.Fatalf("reverse companion renewal failed: %v", err)
+		}
+		server.Raise(CloseContract(ctx, companion.ContractId, f.destinationId, 0, true))
+		server.Raise(CloseContract(ctx, companion.ContractId, f.destinationId, 0, false))
+		server.Raise(CloseContract(ctx, companion.ContractId, f.sourceId, 0, false))
+		originalDeadline, err := GetContractExpirationTime(ctx, live.ContractId)
+		if err != nil || originalDeadline == nil || !originalDeadline.Equal(live.ExpirationTime) {
+			t.Fatal("companion reporting changed its original's deadline", err)
+		}
+		if _, terminal := GetContractClose(ctx, live.ContractId); terminal {
+			t.Fatal("companion close retired the live original")
+		}
+		if _, terminal := GetContractClose(ctx, expired.ContractId); !terminal {
+			t.Fatal("companion close revived the expired original")
 		}
 	})
 }
