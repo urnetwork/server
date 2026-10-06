@@ -100,14 +100,20 @@ func providerUrlProbeSuccessWindowSql(clientIdExpression, nowExpression string) 
 // have no measured row or total_count=0; grouped/legacy versions do not count.
 // The partial index bounds reads to the latest ten runs, with strict expiry
 // and no future credit. Immutable run_id identity deduplicates publication.
-func providerUrlProbeRunWindowSql(clientIdExpression, nowExpression string) string {
+func providerUrlProbeRunWindowSql(clientIdExpression, nowExpression string, policies ...int) string {
+	policy := 0
+	if len(policies) == 0 {
+		policy = SelectedProviderUrlProbePolicyVersion()
+	} else {
+		policy = policies[0]
+	}
 	return fmt.Sprintf(`SELECT COUNT(*)::integer AS run_count, MIN(measured_at) AS oldest_run_at
 		FROM (SELECT measured_at FROM provider_egress_health_history
 			WHERE client_id=%s AND url_probe AND url_probe_policy_version=%d
 			AND total_count=1 AND (ok_count=0 OR ok_count=1)
 			AND measured_at > %s::timestamp - interval '%d seconds'
 			AND measured_at <= %s::timestamp
-			ORDER BY measured_at DESC LIMIT %d) AS recent_runs`, clientIdExpression, SelectedProviderUrlProbePolicyVersion(), nowExpression,
+			ORDER BY measured_at DESC LIMIT %d) AS recent_runs`, clientIdExpression, policy, nowExpression,
 		int(ProviderEgressProbeRefreshAge/time.Second), nowExpression, ProviderUrlProbeRunTarget)
 }
 

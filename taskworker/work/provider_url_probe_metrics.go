@@ -49,14 +49,16 @@ type providerUrlProbeFleetSnapshot struct {
 }
 
 type providerUrlProbeFleetCollector struct {
-	snapshot       atomic.Pointer[providerUrlProbeFleetSnapshot]
-	fleet          *prometheus.Desc
-	oldest         *prometheus.Desc
-	observed       *prometheus.Desc
-	started        *prometheus.Desc
-	cohort         *prometheus.Desc
-	cohortContract *prometheus.Desc
-	refreshMetrics *providerUrlProbeFleetRefreshCollectors
+	snapshot        atomic.Pointer[providerUrlProbeFleetSnapshot]
+	fleet           *prometheus.Desc
+	oldest          *prometheus.Desc
+	observed        *prometheus.Desc
+	started         *prometheus.Desc
+	cohort          *prometheus.Desc
+	cohortContract  *prometheus.Desc
+	deficit         *prometheus.Desc
+	deficitContract *prometheus.Desc
+	refreshMetrics  *providerUrlProbeFleetRefreshCollectors
 }
 
 func newProviderUrlProbeFleetCollector() *providerUrlProbeFleetCollector {
@@ -74,6 +76,10 @@ func newProviderUrlProbeFleetCollector() *providerUrlProbeFleetCollector {
 			"Current URL quota by immutable first-admission age: mature at four hours, known warming, or unknown age", []string{"cohort", "state"}, nil),
 		cohortContract: prometheus.NewDesc("urnetwork_url_probe_admission_cohort_contract",
 			"Atomic census extension version: 1 partitions current eligibility into mature, warming, and unknown age", nil, nil),
+		deficit: prometheus.NewDesc("urnetwork_url_probe_mature_deficit_diagnostic",
+			"Closed aggregate observations of at most 128 current mature quota-deficient providers; accepted credits include measured success and failure, setup failures are separate, and lag maxima describe completion receipt or attempt projection rather than health-history arrival", []string{"state"}, nil),
+		deficitContract: prometheus.NewDesc("urnetwork_url_probe_mature_deficit_diagnostic_contract",
+			"Atomic census diagnostic version: 1 selects mature quota deficits before a deterministic limit of 128 providers; observations do not establish pacing, writer identity, or first deficit onset", nil, nil),
 	}
 }
 
@@ -84,6 +90,8 @@ func (self *providerUrlProbeFleetCollector) Describe(metrics chan<- *prometheus.
 	metrics <- self.started
 	metrics <- self.cohort
 	metrics <- self.cohortContract
+	metrics <- self.deficit
+	metrics <- self.deficitContract
 }
 
 func (self *providerUrlProbeFleetCollector) Collect(metrics chan<- prometheus.Metric) {
@@ -124,6 +132,70 @@ func (self *providerUrlProbeFleetCollector) Collect(metrics chan<- prometheus.Me
 		}
 	}
 	metrics <- prometheus.MustNewConstMetric(self.cohortContract, prometheus.GaugeValue, 1)
+	// This fixed value struct was read at the same comparison clock as the
+	// census above. No provider identity, stored failure, map, or mutable slice
+	// enters the metric vocabulary. Version 0 is unobserved, not a zero sample.
+	if d := fleet.MatureDeficitDiagnostics; d.ContractVersion != 0 {
+		metrics <- prometheus.MustNewConstMetric(self.deficitContract, prometheus.GaugeValue, float64(d.ContractVersion))
+		for _, cell := range []struct {
+			state string
+			value float64
+		}{
+			{"policy_version", float64(d.PolicyVersion)},
+			{"sample_limit", float64(d.SampleLimit)},
+			{"selected", float64(d.Selected)},
+			{"total_mature_deficient", float64(d.TotalMatureDeficient)},
+			{"runs_needed", float64(d.RunsNeeded)},
+			{"capped", float64(d.Capped)},
+			{"accepted_successes", float64(d.AcceptedSuccesses)},
+			{"accepted_failures", float64(d.AcceptedFailures)},
+			{"missing_credit_1", float64(d.MissingCredits[0])},
+			{"missing_credit_2", float64(d.MissingCredits[1])},
+			{"missing_credit_3_to9", float64(d.MissingCredits[2])},
+			{"missing_credit_10", float64(d.MissingCredits[3])},
+			{"deadline_due", float64(d.Deadline[0])},
+			{"deadline_0_to90_seconds", float64(d.Deadline[1])},
+			{"deadline_90_to360_seconds", float64(d.Deadline[2])},
+			{"deadline_360_to900_seconds", float64(d.Deadline[3])},
+			{"deadline_over900_seconds", float64(d.Deadline[4])},
+			{"hint_false", float64(d.HintFalse)},
+			{"claim_never", float64(d.Claim[0])},
+			{"claim_missing", float64(d.Claim[1])},
+			{"claim_pending", float64(d.Claim[2])},
+			{"claim_completed", float64(d.Claim[3])},
+			{"pending_exact900", float64(d.PendingExact900)},
+			{"completed_exact900", float64(d.CompletedExact900)},
+			{"completed_local_failure", float64(d.CompletedLocalFailure)},
+			{"attempt_missing", float64(d.Attempt[0])},
+			{"attempt_local_setup_submit", float64(d.Attempt[1])},
+			{"attempt_no_failure_text", float64(d.Attempt[2])},
+			{"attempt_other_failure", float64(d.Attempt[3])},
+			{"retained_history_fewer10", float64(d.RetainedFewer10)},
+			{"expired_age_0_to90_seconds", float64(d.ExpiredAge[0])},
+			{"expired_age_90_to360_seconds", float64(d.ExpiredAge[1])},
+			{"expired_age_over360_seconds", float64(d.ExpiredAge[2])},
+			{"claim_vs_expiry_no_expired_receipt", float64(d.ClaimVsExpiry[0])},
+			{"claim_vs_expiry_missing_or_future", float64(d.ClaimVsExpiry[1])},
+			{"claim_vs_expiry_before_headroom", float64(d.ClaimVsExpiry[2])},
+			{"claim_vs_expiry_in_headroom", float64(d.ClaimVsExpiry[3])},
+			{"claim_vs_expiry_at_or_after_expiry", float64(d.ClaimVsExpiry[4])},
+			{"completion_vs_expiry_before", float64(d.CompletionVsExpiry[0])},
+			{"completion_vs_expiry_at_or_after", float64(d.CompletionVsExpiry[1])},
+			{"completion_vs_expiry_missing_or_unknown", float64(d.CompletionVsExpiry[2])},
+			{"latest_accepted_none", float64(d.LatestAccepted[0])},
+			{"latest_accepted_0_to90_seconds", float64(d.LatestAccepted[1])},
+			{"latest_accepted_over90_seconds", float64(d.LatestAccepted[2])},
+			{"priority_ready", float64(d.PriorityReady)},
+			{"security_exception", float64(d.SecurityException)},
+			{"completed_count_ge10", float64(d.CompletedCountGE10)},
+			{"claim_clock_future", float64(d.ClaimClockFuture)},
+			{"attempt_clock_future", float64(d.AttemptClockFuture)},
+			{"completion_receive_lag_max_seconds", d.CompletionReceiveLagMaxSeconds},
+			{"attempt_update_lag_max_seconds", d.AttemptUpdateLagMaxSeconds},
+		} {
+			metrics <- prometheus.MustNewConstMetric(self.deficit, prometheus.GaugeValue, cell.value, cell.state)
+		}
+	}
 }
 
 var urlProbeFleetMetrics = newProviderUrlProbeFleetCollector()
