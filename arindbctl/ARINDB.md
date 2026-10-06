@@ -398,7 +398,7 @@ rule, preserving explicit contrary use.
 
 ### US origin-identity gaps under review
 
-A fresh count of the selected successor's pinned catalog (`ec316ffc`) finds
+The retained October 6 count of the selected successor's catalog (`ec316ffc`) finds
 **nine subscriber groups with 13 ASNs in the US review context**, compared with
 **4,694 groups in Brazil**: 90.43% of its 5,191 subscriber groups. The global
 160-country count therefore does not establish balanced country coverage.
@@ -487,17 +487,182 @@ cumulative global follow-up (`924e1aff`, review `60d42484`) adds Indosat AS4761,
 BT/Plusnet AS6871, OneBroadband AS17665, XL Axiata AS24203 and YouFibre
 AS212655. It would contain 5,209 subscriber groups and 5,478 ASNs across the
 same 160 country contexts. Both preserve every negative object, policy and
-feed; their native parser/augmentation gates and artifact builds remain pending.
+feed. Their cumulative native parser/augmentation controls later passed with
+the five-ASN successor below; its completed artifact passed the four readbacks
+recorded below.
 No retained Main provider sample is joined to these additions.
 
-Source review also found a diagnostic loss: the MMDB retains
-`origin_withheld_reason`, while the deployed shadow projection retains only
-origin ASNs and use state. A prepared typed projection preserves the four
-closed withholding reasons for visibility, RPKI, reviewed-country policy and
-registry hosting assignment; the selected catalog does not enable the optional
-reviewed-country policy. It changes no classification or eligibility rule.
-An older strict coordinator rejects the added field, requiring coordinator
-compatibility before using an updated capture producer.
+A further cumulative candidate (`320b4c10`) appends five exact US ASNs to
+`924e1aff`. Independent source review `97259b87` accepted the registry,
+operator and first-party service joins under `identified-subscriber-default`:
+
+| Subscriber operator | Exact ASN | First-party service evidence and scope |
+| --- | --- | --- |
+| Lumen / CenturyLink Communications LLC | 209 | The [business Internet schedule](https://assets.lumen.com/is/content/Lumen/internet-services-service-schedule) names the matching legal provider and AS209 as a Lumen-network destination. It also covers transit; this is not proof that every AS209 prefix serves subscribers. |
+| Shentel / Glo Fiber | 4922 | [Glo Fiber terms](https://www.glofiber.com/en/terms) identify the exact registrant, Shenandoah Cable Television LLC, and its residential fiber-to-the-home service. |
+| Hughesnet | 6621 | The [current subscriber agreement](https://legal.hughesnet.com/ServiceTermsAndConditions-current.cfm) identifies Hughes Network Systems LLC and its residential satellite/Fusion service. |
+| Viasat | 7155 | The [currently linked residential agreement](https://www.viasat.com/content/dam/us-site/legal/documents/Customer_Agreement_Residential_v9_21.pdf) identifies Viasat Inc and residential Internet service. The registry's backbone label does not alone establish transit-only use. |
+| ALLO Communications | 15108 | The [residential subscriber agreement](https://www.allocommunications.com/terms-and-conditions/subscriber-agreement-for-residential-services/) identifies the exact legal registrant. Its general AUP also names web hosting; address-level exclusions remain necessary. |
+
+This successor contains **5,214 subscriber groups and 5,483 ASNs** across the
+same 160 country contexts, including **28 US groups and 46 US ASNs**. All
+prior catalog bytes, identities, six negative groups, policy and evidence feeds
+are preserved; the five entries are appended. Seven deterministic Python
+source controls passed, including rejection of an unchanged predecessor,
+unreviewed AS3356 expansion, negative removal, weaker visibility policy,
+changed existing provenance and country expansion. Independent composition
+review `5dd1d47d` verified all 26 source pins, the exact predecessor byte prefix
+and five appended entries, and repeated all seven controls. Six cumulative
+native parser/augmentation tests then passed under independent gate `ddd88d32`
+in 9.0 seconds with 297,844,736 bytes of sampled group RSS. They exercise the
+19 prior additions and five new identities with the existing vetoes. The complete
+generated artifact subsequently passed its separate readbacks. No AS3356,
+AS3549, affiliate, parent or
+customer ASN gains approval by association. Neither the frozen `4bc85427`
+update nor the separate earlier candidates were changed in place.
+
+The completed augmentation for `320b4c10` reuses the completed October 6
+registration base `257ca5e6` and runs `augment-subscribers` once.
+That 445,051,096-byte base already passed the complete registration traversal.
+Streamed hashing on October 6 at 17:37 UTC verified the retained base, its
+rules and GeoLite lineage, the builder and all 38 evidence snapshots. The new
+catalog's policy and every source stanza exactly match the completed bundle;
+the changed operator inventory still requires a new final MMDB. Exact regular
+copies of the catalog and snapshots are staged in a separate archive directory.
+Their earliest expiry remains `2026-10-08T02:03:14Z`; reuse does not refresh
+their observation times. The failed update's registration file has a different
+hash (`543c26d0`), despite matching input hashes and counts, and is not selected.
+
+The retained successful run spent approximately 691 seconds in augmentation
+out of 2,054 seconds overall, using adjacent manifest timestamps to delimit
+the phase. Its augmentation RSS rose from below one GiB to 11,937,247,232
+bytes. Reusing the base therefore avoids roughly 22.6 minutes of preceding
+work but does not establish a four-GiB build budget. The reuse
+executor retains 12-GiB host admission and RSS caps, the immediate one-GiB
+host floor and existing disk floors; only its native and wall deadlines shrink
+to 30 and 31 minutes. All 40 builder Go files, including tests, match between
+qualified source `0bb38ed6` and canonical `cf7ced9e`. This file parity does not
+establish equivalence of their surrounding module graphs. The prepared
+executor requires the qualified binary and original frozen graph. Independent
+gate `d9de0c9a` binds the six actual catalog controls, 14 synthetic controls,
+executor/Root-binder review and readback source review. Root bound the reviewed
+manifest in an exclusive resource window before launching the augmentation.
+
+The October 6 native run completed in 730.125 seconds with exit zero and no
+resource limit triggered. Its qualified executor reports a valid output of
+595,184,171 bytes, epoch `1791310718`, SHA-256
+`bfe386270592c8b30a9da6cce762d4bbf1661359e4cbcc34769ed89f8d0f5cbe`.
+Peak sampled group RSS was 11,847,909,376 bytes; the lowest sampled host
+available memory was 1,911,414,784 bytes. Status `1a34f240` and retained local
+observation `341bc4fc` bind that result. The new and preceding manifests have
+the same 40 input-hash roles; only the subscriber catalog hash differs.
+The explicit `reuse-manifest.json` records that registration and evidence were
+not refreshed, and their original observation and expiry times remain intact.
+
+The new manifest reports 4,706,008 inferred subscriber partitions versus
+3,198,507 in its predecessor. These are origin-stage counters before the
+hosting and address overlays, with changed partition boundaries; they are not
+independently traversed final populations, address totals or live-provider
+gains. All four exact-hash readbacks completed successfully on October 6 at
+21:31 UTC. Combined independent receipt `f72964a9` binds their contracts,
+output summaries, lineage and resource telemetry:
+
+| Readback | Actual receipt | Evidence checked | Elapsed seconds | Peak sampled group RSS bytes |
+| --- | --- | --- | ---: | ---: |
+| Full structure and origins | `a66f5ede` | 6,956,934 registration boundaries, 7,888,720 final boundaries and 1,227,465 independent-origin boundaries; exact origin LPM, preserved registration fields, monotonic base risk and no promotion of explicit base exclusions | 286.049 | 1,461,133,312 |
+| Native serving and capture | `1471cf7b` | 2,048 public samples matched typed state, risk, verified status, origin attribution and the actual database epoch | 40.056 | 1,036,943,360 |
+| Mapped capture | `65a88d99` | The same 2,048 samples passed against the exact new/new file pair and measured mapping bounds; two hash streams read 1,190,368,454 bytes | 11.048 | 1,071,816,704 |
+| Targeted hosting and address policy | `17a7ea7c` | 305 public samples across 14 feeds, including 72 subscriber-carrier hosting conflicts, retained the required hosting and VPN/Tor exclusions | 35.029 | 1,112,809,472 |
+
+Full contract `82d7f3b0` and native contract `3639f30f` bind the same final
+artifact, retained registration base and catalog. Full summary `b939c3a8`,
+public samples `440569b0` and policy summary `0ec02811` identify the actual
+outputs. The policy gate checks selected published samples, not every feed
+prefix. These results qualify the offline artifact for publication review;
+they establish neither Main adoption nor recovered provider Quality.
+
+Readiness receipt `67742a21` rechecked the unchanged artifact-status and handoff
+pins and the complete frozen readback source: 5,622 source files and 20,921
+dependency files matched. This source-only check used 36,429,824 bytes of peak
+RSS and did not traverse the database. The four readbacks then ran sequentially,
+with a two-GiB RSS and work limit and a 30-minute wall limit per phase. Each
+launch requires three GiB of available memory, ten GiB free on both filesystems
+and an idle Go/build lane; the existing live floors remained intact. Their
+completed native results above supersede the earlier preparation-only status.
+
+The additive Config payload contains `arin.mmdb`, `manifest.json`,
+`registration-manifest.json` and `reuse-manifest.json` under resource version
+`2026.10.6+1791310718`, totaling 595,202,871 bytes. A release must preserve the
+then-selected physical Config inventory, GeoLite/places resources, private
+profile and policy-two setting. The earlier 97-path packaging baseline is
+historical; it cannot replace a fresh owning inventory. The reuse manifest
+must remain explicit rather than be labelled as a new full update.
+
+Source inspection distinguishes the adoption owners. Connect announces call
+the controller's actual-address lookup and persist its database epoch and
+lookup time. API also opens the ARIN reader on IP-info and extender location
+paths, and its Quality guard consumes current connection facts. Taskworker
+rollup and native index publication consume those stored facts; they do not
+reclassify old addresses from the connection table. `ip.go` opens ARIN through
+`sync.OnceValues`, so an already initialized process retains its reader across
+a Config selection. Root must attest the actual mapped resource in every
+current or draining lookup owner and observe fresh post-cutover connection
+facts, completed rollup/index generations and native Quality supply. Desired
+Config, a fresh metric push, or a file visible inside one container cannot
+substitute for that adoption evidence. Missing and older-epoch connections
+remain explicit in aggregate coverage; raw provider addresses cannot be
+reconstructed from their stored hashes.
+
+The retained Atlas reference archive `458d5421` also remains available. Its
+existing validation report binds predecessor `2952a345`, so its precision and
+recall measurements do not describe this successor. A disabled, bounded
+source plan can apply the qualified validator to the new artifact after its
+readbacks. That host-labelled reference remains a review aid with geographic
+and population bias; it does not establish live-provider coverage or supply.
+
+Retained RIS routing measurements must also distinguish direct observations
+from inherited visibility. On the October 6 `02:03:14Z` IPv4 snapshot,
+PenTeleData AS3737 has 27 of 1,229 observed prefixes directly meeting the
+ten-peer floor. A bounded Python calculation of the classifier's nearest
+matching-parent rule brings all 1,229 to that floor or higher; TDS AS4181 similarly
+goes from 83 to 535 of 535. The calculation uses complete origin sets and
+reviewed operator identities and never sums peer counts (`7b353111`). It does
+not join RPKI, registration, risk/cloud, address lists, assignment, country
+policy or longest-prefix classification partitions. These are route visibility
+counts, not eligible addresses, customers, current Main providers or measured
+Quality gains. APNIC user estimates remain audit-priority inputs only.
+
+A source-only pass through all 1,589,823 rows of the same IPv4 and IPv6
+snapshots also measured direct visibility for the 38 subscriber ASNs added
+between catalogs `ec316ffc` and `320b4c10`. Repeated measurements agree
+(`ff93366d`); for the five latest US identities the IPv4 counts are:
+
+| Exact ASN | Observed distinct prefixes | Direct peer count at least ten |
+| --- | ---: | ---: |
+| AS209 | 1,590 | 1,588 |
+| AS4922 | 101 | 93 |
+| AS6621 | 371 | 371 |
+| AS7155 | 4,366 | 4,346 |
+| AS15108 | 57 | 57 |
+
+AS7132, another newly reviewed ASN, has no observed route in either retained
+snapshot. These per-ASN counts use the maximum direct count on repeated
+observations, never a sum. They omit parent and sibling-identity visibility
+and all classification discriminators; multi-origin prefixes can appear in
+more than one ASN's count. They add routing context to the catalog inventory,
+without establishing final classifier coverage or a provider gain.
+
+Source review also found a diagnostic loss in the inspected `db9f90a` shadow
+projection: the MMDB retains `origin_withheld_reason`, but the projection
+retains only origin ASNs and use state. The change prepared as `4ec4f8ab4`
+preserves the four closed withholding reasons for visibility, RPKI,
+reviewed-country policy and registry hosting assignment. Its exact production
+and test postimages passed ten local decoder, aggregation, authenticated-wire
+and compatibility controls; later module composition and runtime adoption
+remain separate checks. The selected catalog does not enable the optional
+reviewed-country policy, and the projection changes no classification or
+eligibility rule. An older strict coordinator rejects the added field, requiring
+coordinator compatibility before using an updated capture producer.
 
 The next bounded attribution needs a fresh generation-bound private sample,
 complete connection groups and an authenticated current owner to join typed
