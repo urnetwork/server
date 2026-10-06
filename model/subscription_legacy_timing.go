@@ -19,7 +19,7 @@ type LegacySettlementPhaseDuration struct {
 
 // These fields are one page's observations, not global rates or financial
 // outcomes. The callback families can overlap; their sum is not page latency.
-// ColdCensus is a subset of Mirror, and all families are within JoinedPosts.
+// ColdCensus is a subset of Mirror; callback families are within JoinedPosts.
 // Selection and Financial include pool acquisition and transaction completion.
 // An interrupted final attempt can be timed without entering the Visited count;
 // JoinedPosts also records calls with no callbacks after a busy ownership gate.
