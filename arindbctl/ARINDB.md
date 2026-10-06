@@ -516,6 +516,35 @@ generated artifact still need qualification. No AS3356, AS3549, affiliate, paren
 customer ASN gains approval by association. Neither the frozen `4bc85427`
 update nor the separate earlier candidates were changed in place.
 
+The shortest prepared artifact path for `320b4c10` reuses the completed
+October 6 registration base `257ca5e6` and runs `augment-subscribers` once.
+That 445,051,096-byte base already passed the complete registration traversal.
+Streamed hashing on October 6 at 17:37 UTC verified the retained base, its
+rules and GeoLite lineage, the builder and all 38 evidence snapshots. The new
+catalog's policy and every source stanza exactly match the completed bundle;
+the changed operator inventory still requires a new final MMDB. Exact regular
+copies of the catalog and snapshots are staged in a separate archive directory.
+Their earliest expiry remains `2026-10-08T02:03:14Z`; reuse does not refresh
+their observation times. The failed update's registration file has a different
+hash (`543c26d0`), despite matching input hashes and counts, and is not selected.
+
+The retained successful run spent approximately 691 seconds in augmentation
+out of 2,054 seconds overall, using adjacent manifest timestamps to delimit
+the phase. Its augmentation RSS rose from below one GiB to 11,937,247,232
+bytes. Reusing the base therefore avoids roughly 22.6 minutes of preceding
+work but does not establish a four-GiB build budget. The disabled reuse
+executor retains 12-GiB host admission and RSS caps, the immediate one-GiB
+host floor and existing disk floors; only its native and wall deadlines shrink
+to 30 and 31 minutes. All 40 builder Go files, including tests, match between
+qualified source `0bb38ed6` and canonical `6717f8f5`. This file parity does not
+establish equivalence of their surrounding module graphs. The prepared
+executor requires the qualified binary and original frozen graph, six actual
+cumulative native catalog controls, independent executor review and Root's
+exclusive resource window. Full, native, mapped and targeted policy readbacks
+must bind the new final hash and retained-base lineage before release review.
+Neither reuse preparation nor its source controls establish Main activation
+or recovered provider Quality.
+
 Retained RIS routing measurements must also distinguish direct observations
 from inherited visibility. On the October 6 `02:03:14Z` IPv4 snapshot,
 PenTeleData AS3737 has 27 of 1,229 observed prefixes directly meeting the
