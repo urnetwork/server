@@ -126,16 +126,7 @@ func statsProviders(
 		order := []server.Id{}
 		result, err := conn.Query(
 			clientSession.Ctx,
-			`
-			SELECT DISTINCT network_client.client_id
-			FROM network_client
-			INNER JOIN provide_key ON
-				provide_key.client_id = network_client.client_id
-			WHERE
-				network_client.network_id = $1 AND
-				network_client.active = true AND
-				network_client.source_client_id IS NULL
-			`,
+			providerStatsClientsSQL,
 			networkId,
 		)
 		server.WithPgResult(result, err, func() {
@@ -561,16 +552,7 @@ func StatsProvidersOverview(
 		providerIds := []server.Id{}
 		result, err := conn.Query(
 			clientSession.Ctx,
-			`
-			SELECT DISTINCT network_client.client_id
-			FROM network_client
-			INNER JOIN provide_key ON
-				provide_key.client_id = network_client.client_id
-			WHERE
-				network_client.network_id = $1 AND
-				network_client.active = true AND
-				network_client.source_client_id IS NULL
-			`,
+			providerStatsClientsSQL,
 			networkId,
 		)
 		server.WithPgResult(result, err, func() {
