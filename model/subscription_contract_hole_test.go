@@ -114,6 +114,47 @@ func TestContractHoleRedisLifecycleConservation(t *testing.T) {
 	})
 }
 
+// Busy unrelated deltas cannot preserve a lost revocation past the last source
+// expiry. Explicit Redis deadlines force the boundary without sleeping.
+func TestContractHoleRedisLifecyclePreservesExpiry(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		source, destination := server.NewId(), server.NewId()
+		first, second := server.NewId(), server.NewId()
+		keys := contractHoleKeys(source, destination)
+		server.Raise(applyContractHoleEvent(ctx, first, source, destination, "create"))
+		var originalExpiry int64
+		server.Redis(ctx, func(client server.RedisClient) {
+			originalExpiry = server.NowUtc().Add(ContractHoleTtl / 4).UnixMilli()
+			for _, key := range keys[:2] {
+				server.Raise(client.PExpireAt(ctx, key, time.UnixMilli(originalExpiry)).Err())
+			}
+		})
+		for _, operation := range []string{"create", "create", "remove", "remove"} {
+			server.Raise(applyContractHoleEvent(ctx, second, source, destination, operation))
+			server.Redis(ctx, func(client server.RedisClient) {
+				for _, key := range keys[:2] {
+					expiry, err := client.Eval(ctx, `local t=redis.call('TIME'); return tonumber(t[1])*1000+math.floor(tonumber(t[2])/1000)+redis.call('PTTL',KEYS[1])`, []string{key}).Int64()
+					if err != nil || expiry > originalExpiry {
+						t.Fatalf("lifecycle %s renewed expiry: got=%d original=%d error=%v", operation, expiry, originalExpiry, err)
+					}
+				}
+			})
+		}
+		requireContractHoleCount(t, ctx, source, destination, 1)
+		server.Redis(ctx, func(client server.RedisClient) {
+			for _, key := range keys[:2] {
+				server.Raise(client.PExpireAt(ctx, key, time.Unix(1, 0)).Err())
+			}
+		})
+		requireContractHoleCount(t, ctx, source, destination, 0)
+		server.Raise(applyContractHoleEvent(ctx, server.NewId(), source, destination, "create"))
+		requireContractHoleCount(t, ctx, source, destination, 1)
+	})
+}
+
 // A delayed create cannot revive a closed member, including after all ephemeral
 // Redis state expires: the captured event itself has a fixed bounded lifetime.
 func TestContractHoleRedisCloseBeforeCreateAndExpiredCallback(t *testing.T) {
@@ -151,7 +192,7 @@ func TestContractHoleRedisExpiryAndMalformedReadsFailClosed(t *testing.T) {
 			}
 		})
 		requireContractHoleCount(t, ctx, source, destination, 0)
-		for _, value := range []string{"broken", "-1", "0", "1.5"} {
+		for _, value := range []string{"broken", "-1", "-0", "0", "1.5", "0001", "+1", "1e0", " 1", "8193"} {
 			server.Redis(ctx, func(client server.RedisClient) {
 				server.Raise(client.Set(ctx, contractHoleKeys(source, destination)[0], value, ContractHoleTtl).Err())
 			})
@@ -223,4 +264,70 @@ func TestContractHoleRedisRefreshFencesEventsAndOlderSnapshots(t *testing.T) {
 		}
 		requireContractHoleCount(t, ctx, source, destination, 1)
 	})
+}
+
+// Every page owns its concurrency cap; held callbacks prove exactly eight may
+// enter, and the joined high-water count proves later jobs cannot exceed it.
+func TestContractHoleRefreshWorkersBoundAndJoin(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	positions := make([]ContractHoleCursor, ContractHoleRefreshPageSize)
+	for index := range positions {
+		positions[index] = ContractHoleCursor{SourceClientId: server.NewId(), DestinationClientId: server.NewId()}
+	}
+	entered := make(chan struct{}, len(positions))
+	release := make(chan struct{})
+	var active, peak, calls atomic.Int32
+	type result struct{ pairs, failed int }
+	done := make(chan result, 1)
+	go func() {
+		pairs, failed := refreshContractHolePairs(ctx, positions, func(ctx context.Context, _, _ server.Id) (bool, error) {
+			current := active.Add(1)
+			defer active.Add(-1)
+			for old := peak.Load(); current > old; old = peak.Load() {
+				if peak.CompareAndSwap(old, current) {
+					break
+				}
+			}
+			calls.Add(1)
+			entered <- struct{}{}
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case <-release:
+				return true, nil
+			}
+		})
+		done <- result{pairs: pairs, failed: failed}
+	}()
+	for range contractHoleRefreshWorkers {
+		select {
+		case <-entered:
+		case <-ctx.Done():
+			t.Fatal("worker barrier did not complete", ctx.Err())
+		}
+	}
+	if active.Load() != contractHoleRefreshWorkers {
+		t.Error("worker barrier did not retain the configured ownership")
+	}
+	close(release)
+	got := <-done
+	if got.pairs != len(positions) || got.failed != 0 || calls.Load() != int32(len(positions)) || active.Load() != 0 || peak.Load() != contractHoleRefreshWorkers {
+		t.Fatalf("result=%+v calls=%d active=%d peak=%d", got, calls.Load(), active.Load(), peak.Load())
+	}
+}
+
+// Cancellation accounts for unobserved pairs and admits no source callback.
+func TestContractHoleRefreshCanceledPageRemainsUnknown(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	positions := []ContractHoleCursor{{SourceClientId: server.NewId(), DestinationClientId: server.NewId()}}
+	called := false
+	pairs, failed := refreshContractHolePairs(ctx, positions, func(context.Context, server.Id, server.Id) (bool, error) {
+		called = true
+		return true, nil
+	})
+	if called || pairs != 1 || failed != 1 {
+		t.Fatalf("canceled page called=%t pairs=%d failed=%d", called, pairs, failed)
+	}
 }

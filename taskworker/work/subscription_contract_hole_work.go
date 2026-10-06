@@ -21,23 +21,47 @@ var contractHoleRefreshCompleted = prometheus.NewGauge(prometheus.GaugeOpts{
 
 var contractHoleRefreshDuration = prometheus.NewGauge(prometheus.GaugeOpts{
 	Name: "urnetwork_contract_hole_refresh_duration_seconds",
-	Help: "Elapsed time of the last complete contract-hole pass, including page scheduling delays",
+	Help: "Elapsed time of the last traversed contract-hole pass, including page scheduling delays",
+})
+
+var contractHoleRefreshAvailable = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "urnetwork_contract_hole_refresh_available",
+	Help: "One only after a complete timely contract-hole pass published a surviving earliest-pair witness",
+})
+
+var contractHoleRefreshFailedPairs = prometheus.NewGauge(prometheus.GaugeOpts{
+	Name: "urnetwork_contract_hole_refresh_failed_pairs",
+	Help: "Failed pair observations in the last traversed contract-hole source pass",
 })
 
 func init() {
-	prometheus.MustRegister(contractHoleRefreshCompleted, contractHoleRefreshDuration)
+	prometheus.MustRegister(contractHoleRefreshCompleted, contractHoleRefreshDuration,
+		contractHoleRefreshAvailable, contractHoleRefreshFailedPairs)
 }
 
 // PassStarted fixes cadence independently of page count and finalizer latency.
 type RefreshContractHolesArgs struct {
-	Cursor      *model.ContractHoleCursor `json:"cursor,omitempty"`
-	PassStarted time.Time                 `json:"pass_started"`
+	Cursor           *model.ContractHoleCursor  `json:"cursor,omitempty"`
+	PassStarted      time.Time                  `json:"pass_started"`
+	FailedPairs      int                        `json:"failed_pairs,omitempty"`
+	PairVisits       int                        `json:"pair_visits,omitempty"`
+	SuccessfulPairs  int                        `json:"successful_pairs,omitempty"`
+	PositivePairs    int                        `json:"positive_pairs,omitempty"`
+	Pages            int                        `json:"pages,omitempty"`
+	EarliestPositive *model.ContractHoleWitness `json:"earliest_positive,omitempty"`
 }
 
 // Nil cursor means the indexed source pass reached its end.
 type RefreshContractHolesResult struct {
-	Cursor *model.ContractHoleCursor `json:"cursor,omitempty"`
-	Pairs  int                       `json:"pairs"`
+	Cursor           *model.ContractHoleCursor  `json:"cursor,omitempty"`
+	Pairs            int                        `json:"pairs"`
+	FailedPairs      int                        `json:"failed_pairs"`
+	PairVisits       int                        `json:"pair_visits"`
+	SuccessfulPairs  int                        `json:"successful_pairs"`
+	PositivePairs    int                        `json:"positive_pairs"`
+	Pages            int                        `json:"pages"`
+	EarliestPositive *model.ContractHoleWitness `json:"earliest_positive,omitempty"`
+	WarmReady        bool                       `json:"warm_ready"`
 }
 
 // Starts the bootstrap immediately; existing run-once ownership prevents a new
@@ -58,27 +82,66 @@ func scheduleRefreshContractHoles(clientSession *session.ClientSession, tx serve
 func RefreshContractHoles(args *RefreshContractHolesArgs, clientSession *session.ClientSession) (*RefreshContractHolesResult, error) {
 	ctx, cancel := context.WithTimeout(clientSession.Ctx, 15*time.Second)
 	defer cancel()
-	next, pairs, err := model.RefreshContractHolesPage(ctx, args.Cursor)
+	page, err := model.RefreshContractHolesPage(ctx, args.Cursor)
 	if err != nil {
-		return nil, task.WithRetryDelayAndArgs(err, time.Second, &RefreshContractHolesArgs{Cursor: next, PassStarted: args.PassStarted})
+		contractHoleRefreshAvailable.Set(0)
+		_ = model.InvalidateContractHoleReadiness(clientSession.Ctx)
+		return nil, task.WithRetryDelayAndArgs(err, time.Second, args)
 	}
-	if next == nil {
-		now := server.NowUtc()
-		contractHoleRefreshCompleted.Set(float64(now.Unix()))
+	now := server.NowUtc()
+	result := observeContractHoleRefreshPage(args, page, now)
+	if result.FailedPairs > 0 {
+		_ = model.InvalidateContractHoleReadiness(clientSession.Ctx)
+	} else if result.Cursor == nil {
+		result.WarmReady, err = model.PublishContractHoleReadiness(clientSession.Ctx, &model.ContractHoleReadiness{
+			Version: 1, PassStarted: args.PassStarted, PassCompleted: now, PairVisits: result.PairVisits,
+			SuccessfulPairs: result.SuccessfulPairs, UnknownPairs: result.FailedPairs, PositivePairs: result.PositivePairs,
+			Pages: result.Pages, EarliestPositive: result.EarliestPositive,
+		})
+		if err != nil || !result.WarmReady {
+			contractHoleRefreshAvailable.Set(0)
+		} else {
+			contractHoleRefreshAvailable.Set(1)
+		}
+	}
+	return result, nil
+}
+
+// A traversed source pass is not complete coverage if any pair failed, was
+// superseded, or exceeded its bound. Only a later entire healthy pass recovers it.
+func observeContractHoleRefreshPage(args *RefreshContractHolesArgs, page *model.ContractHoleRefreshPageResult, now time.Time) *RefreshContractHolesResult {
+	failedPairs := args.FailedPairs + page.FailedPairs
+	if failedPairs > 0 {
+		contractHoleRefreshAvailable.Set(0)
+	}
+	if page.Cursor == nil {
 		contractHoleRefreshDuration.Set(max(0, now.Sub(args.PassStarted).Seconds()))
+		contractHoleRefreshFailedPairs.Set(float64(failedPairs))
+		if failedPairs == 0 {
+			contractHoleRefreshCompleted.Set(float64(now.Unix()))
+		}
 	}
-	return &RefreshContractHolesResult{Cursor: next, Pairs: pairs}, nil
+	earliest := args.EarliestPositive
+	if page.EarliestPositive != nil && (earliest == nil || page.EarliestPositive.SourceStarted.Before(earliest.SourceStarted)) {
+		earliest = page.EarliestPositive
+	}
+	return &RefreshContractHolesResult{Cursor: page.Cursor, Pairs: page.Pairs, FailedPairs: failedPairs,
+		PairVisits: args.PairVisits + page.Pairs, SuccessfulPairs: args.SuccessfulPairs + page.Pairs - page.FailedPairs,
+		PositivePairs: args.PositivePairs + page.PositivePairs, Pages: args.Pages + 1, EarliestPositive: earliest,
+	}
 }
 
 // Continuations run immediately; completed passes begin again at half the TTL.
 // A slow pass restarts immediately and leaves expired projections fail closed.
 func RefreshContractHolesPost(args *RefreshContractHolesArgs, result *RefreshContractHolesResult, clientSession *session.ClientSession, tx server.PgTx) error {
 	now := server.NowUtc()
-	next := &RefreshContractHolesArgs{Cursor: result.Cursor, PassStarted: args.PassStarted}
+	next := &RefreshContractHolesArgs{Cursor: result.Cursor, PassStarted: args.PassStarted, FailedPairs: result.FailedPairs,
+		PairVisits: result.PairVisits, SuccessfulPairs: result.SuccessfulPairs, PositivePairs: result.PositivePairs,
+		Pages: result.Pages, EarliestPositive: result.EarliestPositive}
 	runAt := now
 	if result.Cursor == nil {
 		runAt = maxContractHoleRefreshTime(now, args.PassStarted.Add(model.ContractHoleRefreshInterval))
-		next.PassStarted = runAt
+		next = &RefreshContractHolesArgs{PassStarted: runAt}
 	}
 	scheduleRefreshContractHoles(clientSession, tx, next, runAt)
 	return nil

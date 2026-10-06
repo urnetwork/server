@@ -427,7 +427,10 @@ source query or financial lock. Optional posts run after connection release in
 groups of at most eight, are discarded on rollback/retry, and expire five seconds
 after registration. Closed-member tombstones last 60 seconds, preventing an old
 admitted create from reviving a close. Every delta cancels a prior background
-publication token. A refresh must still own its five-second token when its
+publication token. Deltas preserve an existing pair's earlier expiry; repeated
+traffic cannot retain a lost close indefinitely when source refresh is unavailable.
+Only a complete source refresh renews that existing expiry. A refresh must still
+own its five-second token when its
 complete source snapshot is atomically installed; a later close or newer
 refresher invalidates it. Process failure, cancellation, Redis refusal and an
 ambiguous commit can lose a post. A lost revocation can remain visible until
@@ -438,8 +441,12 @@ not a transactional PostgreSQL/Redis authorization guarantee.
 Taskworker's `RefreshContractHoles` chain starts immediately and traverses the
 existing unresolved source-pair index in 256-row cursor pages. The next complete
 pass is due 30 seconds after the prior pass started, half the 60-second TTL.
-Continuation and failed-page retry preserve their source cursor; packet traffic
-never schedules source work. Each pair snapshot admits at most 8,192 members;
+Each page owns at most eight concurrent pair snapshots and joins all admitted
+work. A failed candidate query preserves the unread source cursor for retry.
+A known page advances past individual failed, superseded or oversized pairs,
+records them as unknown and retries them on the next complete pass; one failed
+Redis slot cannot starve later healthy pairs. Packet traffic never schedules
+source work. Each pair snapshot admits at most 8,192 members;
 an oversized pair is denied instead of receiving a partial counter. The task's
 15-second page budget and 20-second execution deadline bound dependency work.
 The full fleet pass has no fixed capacity guarantee: scheduler lag or a cohort
@@ -447,14 +454,33 @@ too large for the cadence can expire valid permissions and must be measured
 before enabling Redis-only reads for an existing fleet.
 
 `urnetwork_contract_hole_operations_total{outcome=...}` separates positive/zero,
-missing/error reads, expired/failed events, publication, supersession, source failure and
-oversized pairs. `urnetwork_contract_hole_refresh_completed_seconds` and
-`urnetwork_contract_hole_refresh_duration_seconds` report the last completed
-source pass per worker; missing/zero/stale completion is unknown coverage, not
-proof of an empty contract population. Before reader rollout, prove task adoption,
-bootstrap coverage, and repeated full-pass completion inside the half-TTL margin
-against the actual Main cohort and scheduler latency. These producer metrics
-are qualification evidence; this documentation adds no new monitor probe.
+missing/error reads, expired/failed events, publication, supersession, source
+failure and oversized pairs. `urnetwork_contract_hole_refresh_completed_seconds`
+advances only after every visited pair was observed successfully. The duration
+and failed-pairs gauges describe the last traversed pass, including a partial one.
+`urnetwork_contract_hole_refresh_available` is zero after a failed observation or
+readiness publication; one requires a timely full pass and a surviving early pair.
+Missing/zero/stale observations are unknown coverage, never an empty population.
+
+The independent control-plane receipt `contract-hole:v1:{refresh}:ready` records
+pass begin/end, pages, candidate pair visits, successful and unknown visits, a
+conservative remaining TTL and the earliest positive source-start witness.
+Visits include repeated pairs across row pages and directions; they are not a
+distinct-fleet census or an atomic fleet snapshot. A pass at least 30 seconds
+long, any unknown visit, an expired witness or insufficient expiry margin refuses
+the receipt. Its expiry is capped at pass-start plus 60 seconds; an end-of-pass
+success cannot hide an expired early pair. Reading the receipt rechecks the
+witness. Packet reads never consult this receipt, so unrelated partial refresh
+failure does not globally deny healthy pairs.
+
+Before reader rollout, prove task adoption, initial coverage against a fresh
+distinct Main cohort census, and repeated full-pass completion inside the
+half-TTL margin with actual scheduler latency. Retain the receipt, pair counts,
+unknown visits and minimum observed Redis TTL for that qualification. The local
+128-pair × 64-contract plus 4,096-contract-pair fixture measures bounded local
+capacity and repeated half-TTL refresh; it does not predict Main capacity.
+These producer metrics and receipts are qualification evidence; this
+documentation adds no new monitor probe.
 
 ### 1.2 Task canaries — the cheapest end-to-end redis probes
 Probe: `task-canaries`

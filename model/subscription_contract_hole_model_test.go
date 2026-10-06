@@ -60,6 +60,13 @@ func TestContractHoleModelCreationModesCheckpointResumeAndFinalClose(t *testing.
 			}
 			server.Raise(CloseContract(ctx, id, clientId, 0, false))
 			requireContractHoleCount(t, ctx, f.sourceId, f.destinationId, int64(3-index))
+			server.Db(ctx, func(conn server.PgConn) {
+				var outcome *ContractOutcome
+				server.Raise(conn.QueryRow(ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1`, id).Scan(&outcome))
+				if outcome != nil {
+					t.Fatal("first final party close unexpectedly settled contract")
+				}
+			})
 		}
 	})
 }
@@ -96,7 +103,10 @@ func TestContractHoleBackgroundPreservesOpenPredicateAndRepairsDrift(t *testing.
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close(contract_id,party,used_transfer_byte_count,checkpoint)
  VALUES($1,'',0,false),($2,'',0,true),($3,'source',0,false)`, empty, checkpoint, closed))
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET dispute=true WHERE contract_id=$1`, disputed))
-			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET outcome=$2 WHERE contract_id=$1`, settled, ContractOutcomeSettled))
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract
+ SET outcome=$2, close_time=now() AT TIME ZONE 'UTC',
+     provider_usage='{"version":1,"byte_count":0,"providers":[]}'::jsonb
+ WHERE contract_id=$1`, settled, ContractOutcomeSettled))
 		})
 		if HasOpenContractHole(ctx, source, destination) {
 			t.Fatal("cold reader performed inline source rebuild")
@@ -151,6 +161,9 @@ func TestContractHoleModelDisputeReopenAndDirectOutcome(t *testing.T) {
 		server.Raise(err)
 		requireContractHoleCount(t, ctx, source, destination, 1)
 		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET usage_origin_is_source=true WHERE contract_id=$1`, id))
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO contract_close(contract_id,party,used_transfer_byte_count,checkpoint)
+ VALUES($1,'source',0,false),($1,'destination',0,false)`, id))
 			claimed, err := claimContractOutcomeInTx(ctx, tx, id, ContractOutcomeSettled)
 			server.Raise(err)
 			if !claimed {
@@ -203,14 +216,14 @@ func TestContractHoleBackgroundCursorAndMemberBound(t *testing.T) {
  (contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count)
  SELECT gen_random_uuid(),$1,$2,$3,$4,0 FROM generate_series(1,$5)`, server.NewId(), source, server.NewId(), destination, count))
 		})
-		cursor, pairs, err := RefreshContractHolesPage(ctx, nil)
-		if err != nil || cursor == nil || pairs != 1 {
-			t.Fatalf("first cursor=%v pairs=%d error=%v", cursor, pairs, err)
+		page, err := RefreshContractHolesPage(ctx, nil)
+		if err != nil || page == nil || page.Cursor == nil || page.Pairs != 1 || page.FailedPairs != 0 {
+			t.Fatalf("first page=%+v error=%v", page, err)
 		}
 		requireContractHoleCount(t, ctx, source, destination, int64(count))
-		next, pairs, err := RefreshContractHolesPage(ctx, cursor)
-		if err != nil || next != nil || pairs != 1 {
-			t.Fatalf("final cursor=%v pairs=%d error=%v", next, pairs, err)
+		page, err = RefreshContractHolesPage(ctx, page.Cursor)
+		if err != nil || page == nil || page.Cursor != nil || page.Pairs != 1 || page.FailedPairs != 0 {
+			t.Fatalf("final page=%+v error=%v", page, err)
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
@@ -227,16 +240,16 @@ func TestContractHoleBackgroundCursorAndMemberBound(t *testing.T) {
 	})
 }
 
-// Partial progress survives a dependency failure, preventing a slow or broken
-// later pair from repeatedly refreshing only the already-completed page prefix.
-func TestContractHoleBackgroundFailurePreservesCursor(t *testing.T) {
+// One unavailable Redis slot cannot starve later healthy pairs. The page reports
+// incomplete coverage and a subsequent full pass retries the failed pair.
+func TestContractHoleBackgroundFailureDoesNotStarveHealthyPairs(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		source := server.NewId()
 		first, second, third := server.NewId(), server.NewId(), server.NewId()
-		firstContract := insertContractHoleSourceRow(ctx, source, first)
+		insertContractHoleSourceRow(ctx, source, first)
 		insertContractHoleSourceRow(ctx, source, second)
 		insertContractHoleSourceRow(ctx, source, third)
 		failure := &contractHoleRedisFailure{key: contractHoleKeys(source, second)[0]}
@@ -245,17 +258,17 @@ func TestContractHoleBackgroundFailurePreservesCursor(t *testing.T) {
 		cancel()
 		failure.enabled.Store(true)
 		defer failure.enabled.Store(false)
-		cursor, _, err := RefreshContractHolesPage(ctx, nil)
-		if err == nil || cursor == nil || cursor.ContractId != firstContract {
-			t.Fatalf("partial source progress lost: cursor=%v error=%v", cursor, err)
+		page, err := RefreshContractHolesPage(ctx, nil)
+		if err != nil || page == nil || page.Cursor != nil || page.Pairs != 3 || page.FailedPairs != 1 {
+			t.Fatalf("partial coverage was hidden: page=%+v error=%v", page, err)
 		}
 		requireContractHoleCount(t, ctx, source, first, 1)
 		requireContractHoleCount(t, ctx, source, second, 0)
-		requireContractHoleCount(t, ctx, source, third, 0)
+		requireContractHoleCount(t, ctx, source, third, 1)
 		failure.enabled.Store(false)
-		next, _, err := RefreshContractHolesPage(ctx, cursor)
-		if err != nil || next != nil {
-			t.Fatalf("retry did not complete: cursor=%v error=%v", next, err)
+		page, err = RefreshContractHolesPage(ctx, nil)
+		if err != nil || page == nil || page.Cursor != nil || page.FailedPairs != 0 {
+			t.Fatalf("next pass did not complete: page=%+v error=%v", page, err)
 		}
 		requireContractHoleCount(t, ctx, source, second, 1)
 		requireContractHoleCount(t, ctx, source, third, 1)
