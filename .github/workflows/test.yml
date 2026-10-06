@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
         with: { repository: urnetwork/sdk, path: sdk, ref: 8d8ecc4d84763de09f0a69c355b3a65e79d38126 }
       - uses: actions/checkout@v4
-        with: { repository: urnetwork/proxy, path: proxy, ref: e1da814937132eeca361bcd5defc12cde7e793cf }
+        with: { repository: urnetwork/proxy, path: proxy, ref: 15ccbdda72756ef07d05d3a18a50dc036c321576 }
       - uses: actions/checkout@v4
         with: { repository: urnetwork/goidenticons, path: goidenticons, ref: 06eb779a691e056be7dc5fa9a0239001c3ea390f }
       - uses: actions/checkout@v4
