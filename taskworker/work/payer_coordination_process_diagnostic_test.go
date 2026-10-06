@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
@@ -106,81 +106,50 @@ func privateLoadCreateWaveBarrier(ctx context.Context, t testing.TB, f privateLo
 	return report
 }
 
-// One test-owned observer connection samples only the disposable database.
-// Observations are finite source shapes; query text and local identities are
-// discarded. Query age is never described as a lock's residence duration.
-func privateLoadStartObserver(ctx context.Context, t testing.TB) func() map[string]float64 {
+// Bootstrap before any barrier takes the sole maintenance slot, then own one
+// direct read-only observer connection outside the unchanged workload pools.
+func privateLoadStartObserver(ctx context.Context, t testing.TB, sampleRequests ...<-chan chan struct{}) func() map[string]float64 {
 	t.Helper()
-	conn, err := server.AcquireMaintenanceDbConn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	stop, done := make(chan struct{}), make(chan map[string]float64, 1)
-	go func() {
-		defer conn.Release()
-		values := map[string]float64{}
-		for {
-			rows, err := conn.Query(ctx, `SELECT query,state,COALESCE(wait_event_type,''),
-				EXTRACT(epoch FROM clock_timestamp()-query_start)::double precision
-				FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND state<>'idle'`)
-			if err != nil {
-				values["sampling_error"]++
-				break
-			}
-			counts := map[string]float64{}
-			for rows.Next() {
-				var query, state, wait string
-				var age float64
-				if err := rows.Scan(&query, &state, &wait, &age); err != nil {
-					values["sampling_error"]++
-					continue
-				}
-				query = strings.ToLower(strings.Join(strings.Fields(query), " "))
-				kind := "other"
-				switch {
-				case strings.Contains(query, "update network_client as top"):
-					kind = "usage_stamp"
-				case strings.Contains(query, "coalesce(sum(selected_escrow.balance_byte_count)"):
-					kind = "census"
-				case strings.Contains(query, "snapshot") && strings.Contains(query, "transfer_balance_net_escrow"):
-					kind = "cache"
-				case strings.Contains(query, "transfer_balance") && strings.Contains(query, "for update"):
-					kind = "balance"
-				case strings.Contains(query, "update transfer_escrow"):
-					kind = "metadata"
-				case strings.Contains(query, "transfer_contract") && strings.Contains(query, "for update"):
-					kind = "contract"
-				}
-				if wait == "Lock" {
-					kind += "_lock"
-				} else if state == "idle in transaction" {
-					kind += "_idle_tx"
-				} else if wait != "" {
-					kind += "_other_wait"
-				} else {
-					kind += "_active"
-				}
-				counts[kind]++
-				values[kind+"_max_query_age_seconds"] = max(values[kind+"_max_query_age_seconds"], age)
-			}
-			rows.Close()
-			for kind, count := range counts {
-				values[kind+"_peak"] = max(values[kind+"_peak"], count)
-			}
-			values["samples"]++
-			select {
-			case <-stop:
-				done <- values
-				return
-			case <-ctx.Done():
-				done <- values
-				return
-			case <-time.After(50 * time.Millisecond):
-			}
+	config := func() *pgx.ConnConfig {
+		conn, err := server.AcquireMaintenanceDbConn(ctx)
+		if err != nil {
+			t.Fatal(err)
 		}
-		done <- values
+		defer conn.Release()
+		return conn.Conn().Config().Copy()
 	}()
-	return func() map[string]float64 { close(stop); return <-done }
+	if config.RuntimeParams == nil {
+		config.RuntimeParams = map[string]string{}
+	}
+	config.RuntimeParams["application_name"] = "urnetwork-private-load-observer"
+	config.RuntimeParams["default_transaction_read_only"] = "on"
+	connectCtx, connectCancel := context.WithTimeout(ctx, server.PgConnectTimeout)
+	conn, err := pgx.ConnectConfig(connectCtx, config)
+	connectCancel()
+	if err != nil {
+		t.Fatal("open private activity observer", err)
+	}
+	observer := newPrivateLoadObserver(ctx, conn, func() error {
+		closeCtx, closeCancel := context.WithTimeout(context.WithoutCancel(ctx), server.PgRollbackTimeout)
+		defer closeCancel()
+		closeErr := conn.Close(closeCtx)
+		select {
+		case <-conn.PgConn().CleanupDone():
+			return closeErr
+		case <-closeCtx.Done():
+			return errors.Join(closeErr, closeCtx.Err())
+		}
+	}, sampleRequests...)
+	var reportOnce sync.Once
+	return func() map[string]float64 {
+		values := observer.Close()
+		reportOnce.Do(func() {
+			if values["sampling_error"] != 0 || values["cleanup_error"] != 0 {
+				t.Errorf("activity observer failed: sampling=%g cleanup=%g", values["sampling_error"], values["cleanup_error"])
+			}
+		})
+		return values
+	}
 }
 
 // Invoked only by the parent test's own executable. It does not create, reset,
@@ -253,88 +222,100 @@ func TestPrivateProviderLoadedPeerProcess(t *testing.T) {
 		if command == "stop" {
 			return
 		}
-		var report privateLoadProcessReport
-		switch command {
-		case "prepare_create", "prepare_create_shared":
-			waveFixture := f
-			if command == "prepare_create_shared" {
-				waveFixture.peers = nil
-			}
-			ready, release := make(chan struct{}), make(chan struct{})
-			result := make(chan privateLoadProcessReport, 1)
-			go func() { result <- privateLoadCreateWaveBarrier(ctx, t, waveFixture, ready, release) }()
-			<-ready
-			if err := encoder.Encode(privateLoadProcessReport{Ready: true}); err != nil {
-				t.Fatal(err)
-			}
-			var next string
-			if err := decoder.Decode(&next); err != nil || next != "go" {
-				t.Fatal("cross-process barrier not released")
-			}
-			close(release)
-			report = <-result
-			previous = report.Contracts
-		case "prepare_settle":
-			ready, release := make(chan struct{}), make(chan struct{})
-			result := make(chan privateLoadProcessReport, 1)
-			go func() { result <- privateLoadSettleWave(ctx, t, f, previous, ready, release) }()
-			<-ready
-			if err := encoder.Encode(privateLoadProcessReport{Ready: true}); err != nil {
-				t.Fatal(err)
-			}
-			var next string
-			if err := decoder.Decode(&next); err != nil || next != "go" {
-				t.Fatal("settlement barrier not released")
-			}
-			close(release)
-			report = <-result
-		case "create":
-			report = privateLoadCreateWave(ctx, t, f)
-			previous = report.Contracts
-		case "settle":
-			before := privateLoadStats(t)
-			start := make(chan struct{})
-			results := make(chan error, len(previous))
-			for index, stored := range previous {
-				go func() {
-					<-start
-					requestCtx, cancelRequest := context.WithTimeout(ctx, 10*time.Second)
-					defer cancelRequest()
-					if stored == nil {
-						results <- errors.New("prior contract absent")
-						return
-					}
-					if _, err := privateLoadCall(requestCtx, f, f.tokens[index], &protocol.CloseContract{ContractId: stored.ContractId}); err != nil {
-						results <- err
-						return
-					}
-					results <- server.HandleError1(func() error {
-						id, err := server.IdFromBytes(stored.ContractId)
-						if err != nil {
-							return err
-						}
-						// The independent provider acknowledgment invokes the same
-						// current model authority as its API/Connect controller.
-						return model.CloseContract(requestCtx, id, f.peer, 0, false)
-					}, func(err error) error { return err })
-				}()
-			}
-			began := time.Now()
-			close(start)
-			for range previous {
-				if <-results == nil {
-					report.Completed++
-				} else {
-					report.Failed++
+		report := func() privateLoadProcessReport {
+			var report privateLoadProcessReport
+			switch command {
+			case "prepare_create", "prepare_create_shared":
+				waveFixture := f
+				if command == "prepare_create_shared" {
+					waveFixture.peers = nil
 				}
+				wave := privateLoadStartWave(ctx, func(waveCtx context.Context, ready chan<- struct{}, release <-chan struct{}) privateLoadProcessReport {
+					return privateLoadCreateWaveBarrier(waveCtx, t, waveFixture, ready, release)
+				})
+				defer wave.Close()
+				if err := wave.Ready(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if err := encoder.Encode(privateLoadProcessReport{Ready: true}); err != nil {
+					t.Fatal(err)
+				}
+				var next string
+				if err := decoder.Decode(&next); err != nil || next != "go" {
+					t.Fatal("cross-process barrier not released")
+				}
+				wave.Start()
+				report = wave.Wait()
+				wave.Close()
+				previous = report.Contracts
+			case "prepare_settle":
+				wave := privateLoadStartWave(ctx, func(waveCtx context.Context, ready chan<- struct{}, release <-chan struct{}) privateLoadProcessReport {
+					return privateLoadSettleWave(waveCtx, t, f, previous, ready, release)
+				})
+				defer wave.Close()
+				if err := wave.Ready(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if err := encoder.Encode(privateLoadProcessReport{Ready: true}); err != nil {
+					t.Fatal(err)
+				}
+				var next string
+				if err := decoder.Decode(&next); err != nil || next != "go" {
+					t.Fatal("settlement barrier not released")
+				}
+				wave.Start()
+				report = wave.Wait()
+				wave.Close()
+			case "create":
+				report = privateLoadCreateWave(ctx, t, f)
+				previous = report.Contracts
+			case "settle":
+				before := privateLoadStats(t)
+				start := make(chan struct{})
+				results := make(chan error, len(previous))
+				for index, stored := range previous {
+					go func() {
+						<-start
+						requestCtx, cancelRequest := context.WithTimeout(ctx, 10*time.Second)
+						defer cancelRequest()
+						if stored == nil {
+							results <- errors.New("prior contract absent")
+							return
+						}
+						if _, err := privateLoadCall(requestCtx, f, f.tokens[index], &protocol.CloseContract{ContractId: stored.ContractId}); err != nil {
+							results <- err
+							return
+						}
+						results <- server.HandleError1(func() error {
+							id, err := server.IdFromBytes(stored.ContractId)
+							if err != nil {
+								return err
+							}
+							// The independent provider acknowledgment invokes the same
+							// current model authority as its API/Connect controller.
+							return model.CloseContract(requestCtx, id, f.peer, 0, false)
+						}, func(err error) error { return err })
+					}()
+				}
+				began := time.Now()
+				close(start)
+				for range previous {
+					if <-results == nil {
+						report.Completed++
+					} else {
+						report.Failed++
+					}
+				}
+				report.Elapsed, report.Counters = time.Since(began), privateLoadStats(t)
+				for key := range report.Counters {
+					report.Counters[key] -= before[key]
+				}
+			default:
+				t.Fatal("invalid child command")
 			}
-			report.Elapsed, report.Counters = time.Since(began), privateLoadStats(t)
-			for key := range report.Counters {
-				report.Counters[key] -= before[key]
-			}
-		default:
-			t.Fatal("invalid child command")
-		}
+			return report
+		}()
+
 		if err := encoder.Encode(report); err != nil {
 			t.Fatal(err)
 		}
@@ -345,25 +326,13 @@ func TestPrivateProviderLoadedPeerProcess(t *testing.T) {
 // Returned success is deliberately not used as a committed-contract oracle.
 func privateLoadObserveAccounting(t testing.TB, ctx context.Context, f privateLoadFixture) {
 	t.Helper()
-	var exact, promised, remaining, start, cached model.ByteCount
-	var current bool
-	var open, terminal int64
-	server.Db(ctx, func(conn server.PgConn) {
-		server.Raise(conn.QueryRow(ctx, `SELECT
-   (SELECT COALESCE(sum(e.balance_byte_count),0) FROM transfer_escrow e JOIN transfer_contract c USING(contract_id)
-    WHERE e.balance_id=$1 AND NOT e.settled AND c.outcome IS NULL),
-   (SELECT COALESCE(sum(transfer_byte_count),0) FROM transfer_contract WHERE payer_network_id=$2 AND outcome IS NULL),
-   b.balance_byte_count,b.start_balance_byte_count,s.reserved_byte_count,s.revision=r.revision,
-   (SELECT count(*) FROM transfer_contract WHERE payer_network_id=$2 AND outcome IS NULL AND transfer_byte_count>1),
-   (SELECT count(*) FROM transfer_contract WHERE payer_network_id=$2 AND outcome IS NOT NULL)
-   FROM transfer_balance b JOIN transfer_balance_net_escrow_snapshot s USING(balance_id)
-   JOIN transfer_balance_net_escrow_revision r USING(balance_id)
-   WHERE balance_id=$1`, f.owner.BalanceId, f.owner.NetworkId).Scan(&exact, &promised, &remaining, &start, &cached, &current, &open, &terminal))
-	})
-	mirror := model.Testing_NetEscrowByteCount(ctx, f.owner.BalanceId)
-	t.Logf("accounting_before_completion_gate exact_reserved=%d committed_open_promises=%d remaining=%d start=%d cache_current=%t cache_reserved=%d mirror_reserved=%d committed_open_standard_contracts=%d terminal_contracts=%d", exact, promised, remaining, start, current, cached, mirror, open, terminal)
-	if exact != promised || exact < 0 || exact > remaining || remaining != start || (current && cached != exact) {
-		t.Fatal("authoritative accounting invariant failed before completion gate")
+	state, err := privateLoadReadAccounting(ctx, f)
+	if err != nil {
+		t.Fatal("accounting source read failed", err)
+	}
+	t.Logf("accounting_before_completion_gate exact_reserved=%d committed_open_promises=%d remaining=%d start=%d cache_current=%t cache_reserved=%d legacy_reserved=%d native_reserved=%d committed_open_standard_contracts=%d terminal_contracts=%d", state.exact, state.promised, state.remaining, state.start, state.cacheCurrent, state.cached, state.legacy, state.native, state.open, state.terminal)
+	if err := state.validate(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -374,6 +343,7 @@ func TestPrivateProviderLoadedIndependentProcesses(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 75*time.Second)
 		defer cancel()
 		f := newPrivateLoadFixture(t, ctx, 0, 10001)
+		defer f.Close()
 		pop := server.Config.PushSimpleResource("db.yml", []byte("min_connections: 0\nmax_connections: 1\n"))
 		server.PgReset()
 		defer func() { pop(); server.PgReset() }()
@@ -392,38 +362,42 @@ func TestPrivateProviderLoadedIndependentProcesses(t *testing.T) {
 		want := model.ByteCount(10001)
 		var childCreated []*protocol.StoredContract
 		for _, command := range []string{"create", "settle"} {
-			observe := privateLoadStartObserver(ctx, t)
-			if err := encoder.Encode(command); err != nil {
-				t.Fatal(err)
-			}
-			local := privateLoadCreateWave(ctx, t, f)
-			var remote privateLoadProcessReport
-			if err := decoder.Decode(&remote); err != nil {
-				t.Fatalf("independent process did not return: decode=%v private_diagnostics=%s", err, child.diagnostics)
-			}
-			t.Logf("independent_processes history=10001 operation=%s local_pool=1 remote_pool=16 local=%d/%d elapsed=%s errors=%v remote=%d/%d elapsed=%s local_counters=%v remote_counters=%v activity=%v", command, local.Completed, local.Failed, local.Elapsed, local.Errors, remote.Completed, remote.Failed, remote.Elapsed, local.Counters, remote.Counters, observe())
-			privateLoadObserveAccounting(t, ctx, f)
-			if local.Completed != 64 || local.Failed != 0 || remote.Completed != 64 || remote.Failed != 0 {
-				t.Fatalf("independent process finite operation failed: local=%d/%d remote=%d/%d", local.Completed, local.Failed, remote.Completed, remote.Failed)
-			}
-			for _, stored := range local.Contracts {
-				want += model.ByteCount(stored.TransferByteCount)
-			}
-			if command == "create" {
-				childCreated = remote.Contracts
-				for _, stored := range childCreated {
+			func() {
+				observe := privateLoadStartObserver(ctx, t)
+				defer observe()
+				if err := encoder.Encode(command); err != nil {
+					t.Fatal(err)
+				}
+				local := privateLoadCreateWave(ctx, t, f)
+				var remote privateLoadProcessReport
+				if err := decoder.Decode(&remote); err != nil {
+					t.Fatalf("independent process did not return: decode=%v private_diagnostics=%s", err, child.diagnostics)
+				}
+				t.Logf("independent_processes history=10001 operation=%s local_pool=1 remote_pool=16 local=%d/%d elapsed=%s errors=%v remote=%d/%d elapsed=%s local_counters=%v remote_counters=%v activity=%v", command, local.Completed, local.Failed, local.Elapsed, local.Errors, remote.Completed, remote.Failed, remote.Elapsed, local.Counters, remote.Counters, observe())
+				privateLoadObserveAccounting(t, ctx, f)
+				if local.Completed != 64 || local.Failed != 0 || remote.Completed != 64 || remote.Failed != 0 {
+					t.Fatalf("independent process finite operation failed: local=%d/%d remote=%d/%d", local.Completed, local.Failed, remote.Completed, remote.Failed)
+				}
+				for _, stored := range local.Contracts {
 					want += model.ByteCount(stored.TransferByteCount)
 				}
-				if local.Counters["selected_first"] <= 0 || remote.Counters["selected_first"] <= 0 {
-					t.Fatal("independent processes did not exercise selected-first allocation")
+				if command == "create" {
+					childCreated = remote.Contracts
+					for _, stored := range childCreated {
+						want += model.ByteCount(stored.TransferByteCount)
+					}
+					if local.Counters["native_reserved"] < 64 || remote.Counters["native_reserved"] < 64 {
+						t.Fatal("independent processes did not exercise native reservation")
+					}
+					privateLoadAssertNativeAdmission(t, ctx, f, map[string]float64{"native_reserved": local.Counters["native_reserved"] + remote.Counters["native_reserved"]}, 128)
+				} else {
+					for _, stored := range childCreated {
+						want -= model.ByteCount(stored.TransferByteCount)
+					}
 				}
-			} else {
-				for _, stored := range childCreated {
-					want -= model.ByteCount(stored.TransferByteCount)
-				}
-			}
-			privateLoadAssertAccounting(t, ctx, f, want)
-			t.Logf("independent_processes operation=%s exact_reserved=%d", command, want)
+				privateLoadAssertAccounting(t, ctx, f, want)
+				t.Logf("independent_processes operation=%s exact_reserved=%d", command, want)
+			}()
 		}
 		if err := encoder.Encode("stop"); err != nil {
 			t.Fatal(err)
@@ -441,6 +415,7 @@ func TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows(t *testing.T) 
 		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Second)
 		defer cancel()
 		f := newPrivateLoadFixture(t, ctx, 0, 0)
+		defer f.Close()
 		pop := server.Config.PushSimpleResource("db.yml", []byte("min_connections: 0\nmax_connections: 1\n"))
 		server.PgReset()
 		defer func() { pop(); server.PgReset() }()
@@ -474,49 +449,42 @@ func TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows(t *testing.T) 
 			t.Logf("actual escrow-to-balance foreign keys=%d", foreignKeys)
 		})
 		for _, arm := range []struct{ name, query string }{
-			{"balance", `SELECT 1 FROM transfer_balance WHERE balance_id=$1 FOR UPDATE`},
-			{"revision", `SELECT 1 FROM transfer_balance_net_escrow_revision WHERE balance_id=$1 FOR UPDATE`},
-			{"snapshot", `SELECT 1 FROM transfer_balance_net_escrow_snapshot WHERE balance_id=$1 FOR UPDATE`},
+			{name: "balance", query: `SELECT 1 FROM transfer_balance WHERE balance_id=$1 FOR UPDATE`},
+			{name: "revision", query: `SELECT 1 FROM transfer_balance_net_escrow_revision WHERE balance_id=$1 FOR UPDATE`},
+			{name: "snapshot", query: `SELECT 1 FROM transfer_balance_net_escrow_snapshot WHERE balance_id=$1 FOR UPDATE`},
 		} {
-			conn, err := server.AcquireMaintenanceDbConn(ctx)
-			if err != nil {
-				t.Fatal(err)
-			}
-			held, err := conn.Begin(ctx)
-			if err != nil {
-				conn.Release()
-				t.Fatal(err)
-			}
-			tag, err := held.Exec(ctx, arm.query, f.owner.BalanceId)
-			if err != nil || tag.RowsAffected() != 1 {
-				held.Rollback(context.WithoutCancel(ctx))
-				conn.Release()
-				t.Fatal("barrier row not held", err)
-			}
-			observe := privateLoadStartObserver(ctx, t)
-			if err := encoder.Encode("create"); err != nil {
-				t.Fatal(err)
-			}
-			var remote privateLoadProcessReport
-			decodeErr := decoder.Decode(&remote)
-			activity := observe()
-			// Do not release the blocker until the actual child returns.
-			rollbackErr := held.Rollback(context.WithoutCancel(ctx))
-			conn.Release()
-			if decodeErr != nil || rollbackErr != nil {
-				t.Fatal("child/barrier did not join", decodeErr, rollbackErr)
-			}
-			t.Logf("contention barrier=%s completed=%d failed=%d elapsed=%s error_classes=%v activity=%v", arm.name, remote.Completed, remote.Failed, remote.Elapsed, remote.Errors, activity)
-			if remote.Completed != 64 || remote.Failed != 0 {
-				t.Errorf("contract creation queued on shared %s row", arm.name)
-			}
-			if err := encoder.Encode("create"); err != nil {
-				t.Fatal(err)
-			}
-			var healthy privateLoadProcessReport
-			if err := decoder.Decode(&healthy); err != nil || healthy.Completed != 64 || healthy.Failed != 0 {
-				t.Fatal("released barrier healthy control failed", err)
-			}
+			func() {
+				// Bootstrap and return the sole maintenance lease before the barrier takes it.
+				observe := privateLoadStartObserver(ctx, t)
+				defer observe()
+				var remote privateLoadProcessReport
+				var activity map[string]float64
+				err := privateLoadWithBarrier(ctx, privateLoadAcquireBarrier, arm.query, f.owner.BalanceId, func() error {
+					if err := encoder.Encode("create"); err != nil {
+						return err
+					}
+					if err := decoder.Decode(&remote); err != nil {
+						return err
+					}
+					activity = observe()
+					// The row remains held through the actual independent process result.
+					return nil
+				})
+				if err != nil {
+					t.Fatal("child/barrier did not join", err)
+				}
+				t.Logf("contention barrier=%s completed=%d failed=%d elapsed=%s error_classes=%v activity=%v", arm.name, remote.Completed, remote.Failed, remote.Elapsed, remote.Errors, activity)
+				if remote.Completed != 64 || remote.Failed != 0 {
+					t.Errorf("contract creation queued on shared %s row", arm.name)
+				}
+				if err := encoder.Encode("create"); err != nil {
+					t.Fatal(err)
+				}
+				var healthy privateLoadProcessReport
+				if err := decoder.Decode(&healthy); err != nil || healthy.Completed != 64 || healthy.Failed != 0 {
+					t.Fatal("released barrier healthy control failed", err)
+				}
+			}()
 		}
 		if err := encoder.Encode("stop"); err != nil {
 			t.Fatal(err)
