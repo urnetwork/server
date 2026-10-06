@@ -55,22 +55,35 @@ func snWalletMappingOwner(clientId *server.Id, clientSession *session.ClientSess
 // Resolve one actual finalized coordinator boundary under the original
 // deployment owner. Public epoch fields cannot select a historical read.
 func snWalletMappingProspectiveOwner(ctx context.Context, caller model.WalletMappingOwner) (model.WalletMappingOwner, error) {
-	owner, err := newStClientKeyAuthorityOwner()
+	prospective, err := snWalletMappingProspective(ctx, caller.Domain)
 	if err != nil {
 		return model.WalletMappingOwner{}, err
 	}
-	if owner.domain != caller.Domain {
-		return model.WalletMappingOwner{}, protocol.ErrWalletMappingIntegrity
+	caller.Prospective = prospective
+	return caller, nil
+}
+
+// The operator owner of both consent kinds: the configured root key and the
+// finalized boundary it co-signs, for the caller's configured domain.
+func snWalletMappingProspective(ctx context.Context, domain protocol.ClientKeyHistoryDomain) (*model.WalletMappingProspectiveOwner, error) {
+	owner, err := newStClientKeyAuthorityOwner()
+	if err != nil {
+		return nil, err
+	}
+	if owner.domain != domain {
+		return nil, protocol.ErrWalletMappingIntegrity
 	}
 	boundary, operator, err := owner.readBoundary(ctx, nil)
 	if err != nil {
-		return model.WalletMappingOwner{}, err
+		return nil, err
 	}
 	if !operator.Active || operator.RootSigner != crypto.PubkeyToAddress(owner.rootKey.PublicKey) {
-		return model.WalletMappingOwner{}, protocol.ErrWalletMappingIntegrity
+		return nil, protocol.ErrWalletMappingIntegrity
 	}
-	caller.Prospective = &model.WalletMappingProspectiveOwner{Boundary: boundary, RootKey: owner.rootKey}
-	return caller, ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return &model.WalletMappingProspectiveOwner{Boundary: boundary, RootKey: owner.rootKey}, nil
 }
 
 // This public authenticated request cannot override the configured deployment,
