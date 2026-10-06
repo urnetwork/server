@@ -41,8 +41,9 @@ import (
 const DefaultAccountMessageSendTimeout = 15 * time.Second
 
 // The largest send timeout email.yml can set; larger values are clamped. A call
-// that needs longer will not succeed, and whatever waits on a send (an API
-// request, a task) should not wait longer.
+// that needs longer will not succeed, whatever waits on a send (an API request,
+// a task) should not wait longer, and an outbox claim must outlast a send
+// (accountMessageClaimLease).
 const maxAccountMessageSendTimeout = 2 * time.Minute
 
 type EmailConfig struct {

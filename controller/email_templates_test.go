@@ -28,6 +28,7 @@ func TestEmailTemplatesRender(t *testing.T) {
 		{&AuthPasswordResetTemplate{ResetCode: strings.Repeat("ab", 64)}, true},
 		{&AuthPasswordSetTemplate{}, true},
 		{&NetworkWelcomeTemplate{}, true},
+		{&SubscriptionEndedTemplate{}, true},
 		{&ProviderUpgradeNoticeTemplate{NetworkName: "Synthetic network"}, false},
 		{&EpochEarningsTemplate{
 			Epoch:          42,

@@ -9577,4 +9577,8 @@ var migrations = []any{
 		ALTER TABLE transfer_balance ADD COLUMN grant_kind varchar(32) NULL;
 	`),
 	newSqlMigration(providerWorkSessionContentionRepairSql),
+	// Account messages commit with the state change that owes them, and a task
+	// delivers them after the commit (db_account_message_outbox.go). A new table:
+	// nothing is rewritten, and old binaries never read it.
+	newSqlMigration(accountMessageOutboxSchemaSql),
 }

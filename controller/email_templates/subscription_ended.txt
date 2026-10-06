@@ -1,0 +1,11 @@
+{{define "headline"}}UR PRO SUBSCRIPTION ENDED{{end}}
+{{define "why"}}Sent to the address on your URnetwork account when its UR Pro
+subscription through Google Play ends without renewing.{{end}}
+{{define "content"}}
+Your UR Pro subscription through Google Play was not renewed, so it has
+ended.
+
+To keep UR Pro, subscribe again in the URnetwork app. If you think this
+is a mistake, check your subscriptions in Google Play, or contact
+support@ur.io.
+{{end}}
