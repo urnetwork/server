@@ -5,28 +5,45 @@ import (
 	texttemplate "text/template"
 
 	// "net/url"
+	"context"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
+	"net"
+	"net/http"
 	"regexp"
 	"strings"
 	"sync"
-
-	// "time"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/pinpointsmsvoicev2"
 	"github.com/aws/aws-sdk-go/service/ses"
+	"github.com/prometheus/client_golang/prometheus"
 
-	// "github.com/aws/aws-sdk-go/aws/awserr"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
-// IMPORTANT this controller is for account messages only
+// this controller is for account messages only
 // marketing messages are sent via a separate channel
+
+// Bounds every SES and SMS call when email.yml sets no send timeout. SES and
+// Pinpoint answer in well under a second; the bound only has to outlast a slow
+// network and the SDK's own retries, and keeps a hung call from holding an API
+// request or the task worker that sends.
+const DefaultAccountMessageSendTimeout = 15 * time.Second
+
+// The largest send timeout email.yml can set; larger values are clamped. A call
+// that needs longer will not succeed, and whatever waits on a send (an API
+// request, a task) should not wait longer.
+const maxAccountMessageSendTimeout = 2 * time.Minute
 
 type EmailConfig struct {
 	CompanySenderEmail string `yaml:"company_sender_email"`
@@ -37,6 +54,19 @@ type EmailConfig struct {
 	// bounce, and complaint events (EMAIL1.md §5 phase A). Empty until it exists
 	// in SES; the per-template message tag is attached only alongside it.
 	ConfigurationSet string `yaml:"configuration_set"`
+	// SendTimeoutSeconds bounds each SES email and Pinpoint SMS call: the call's
+	// context and its session's http client both stop there, and a call that
+	// runs out is a failed send. 0 uses DefaultAccountMessageSendTimeout; more
+	// than two minutes is clamped to two minutes.
+	SendTimeoutSeconds int `yaml:"send_timeout_seconds"`
+}
+
+// The bound on one SES or SMS call.
+func (self *EmailConfig) SendTimeout() time.Duration {
+	if self.SendTimeoutSeconds <= 0 {
+		return DefaultAccountMessageSendTimeout
+	}
+	return min(time.Duration(self.SendTimeoutSeconds)*time.Second, maxAccountMessageSendTimeout)
 }
 
 var EnvEmailConfig = sync.OnceValue(func() *EmailConfig {
@@ -238,28 +268,157 @@ func SetMessageSender(messageSender MessageSender) {
 	messageSenderInstance = messageSender
 }
 
-type AWSMessageSender struct{}
+// The channels an account message goes out on, as the send metric labels them.
+const (
+	accountMessageChannelEmail = "email"
+	accountMessageChannelSms   = "sms"
+)
 
-func (c *AWSMessageSender) SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error {
+// Counts SES and SMS calls by channel and result (sent, timeout, failed).
+var accountMessageSendCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "account_message",
+		Name:      "sends_total",
+		Help:      "SES email and Pinpoint SMS calls for account messages, by channel and result",
+	},
+	[]string{"channel", "result"},
+)
+
+// Registers the send metric with the default registry.
+func init() {
+	prometheus.MustRegister(accountMessageSendCounter)
+}
+
+// The minimum time between two default-level reports of failed account
+// message calls.
+const accountMessageSendReportInterval = 1 * time.Minute
+
+// The default-level report of failed SES and SMS calls. A client can make the
+// server send (a verification code), so a line per failed call would let an
+// outage, or a client during one, fill the logs.
+var accountMessageSendFailures = newBoundedReport(accountMessageSendReportInterval)
+
+// Sends account messages through SES (email) and Pinpoint SMS (phone). Every
+// AWS call runs under the send timeout: the call's context and its session's
+// http client both stop there, so a hung endpoint fails the send instead of
+// holding the caller. Each call is counted (urnetwork_account_message_sends_total)
+// and failures are reported at most once per interval; a call that ran out of
+// time returns an error that is `context.DeadlineExceeded`.
+// The zero value is the production sender. Safe for concurrent use.
+type AWSMessageSender struct {
+	// zero uses email.yml's send timeout
+	sendTimeout time.Duration
+	// empty uses the AWS endpoints; tests point both services at a local server
+	endpoint string
+	// nil uses the default credential chain
+	credentials *credentials.Credentials
+}
+
+func (self *AWSMessageSender) SendAccountMessageTemplate(userAuth string, template Template, sendOpts ...any) error {
 
 	normalUserAuth, userAuthType := model.NormalUserAuth(userAuth)
 
 	switch userAuthType {
 	case model.UserAuthTypeEmail:
-		return SendAccountEmailTemplate(normalUserAuth, template, sendOpts...)
+		return self.sendEmailTemplate(normalUserAuth, template, sendOpts...)
 	case model.UserAuthTypePhone:
-		return SendAccountSms(normalUserAuth, template)
+		return self.sendSmsTemplate(normalUserAuth, template)
 	default:
 		return fmt.Errorf("Unknown user auth: %s", userAuthType)
 	}
 }
 
+// The bound on one call.
+func (self *AWSMessageSender) timeout() time.Duration {
+	if 0 < self.sendTimeout {
+		return self.sendTimeout
+	}
+	return EnvEmailConfig().SendTimeout()
+}
+
+// A session for one call in the region, whose http client stops at the send
+// timeout as a backstop for any request made without the call's context.
+func (self *AWSMessageSender) newSession(region string, sendTimeout time.Duration) (*session.Session, error) {
+	config := &aws.Config{
+		Region: aws.String(region),
+		HTTPClient: &http.Client{
+			Timeout: sendTimeout,
+		},
+	}
+	if self.endpoint != "" {
+		config.Endpoint = aws.String(self.endpoint)
+	}
+	if self.credentials != nil {
+		config.Credentials = self.credentials
+	}
+	return session.NewSession(config)
+}
+
+// Counts and reports the outcome of one call. A call whose context or http
+// client ran out of time returns an error that is `context.DeadlineExceeded`.
+func accountMessageSendResult(sendCtx context.Context, channel string, sendTimeout time.Duration, err error) error {
+	if err == nil {
+		accountMessageSendCounter.WithLabelValues(channel, "sent").Inc()
+		return nil
+	}
+	result := "failed"
+	timedOut := errors.Is(sendCtx.Err(), context.DeadlineExceeded)
+	if !timedOut {
+		// the http client's backstop timeout surfaces as a net timeout inside
+		// the SDK's error chain
+		for cause := err; cause != nil; {
+			var netErr net.Error
+			if errors.As(cause, &netErr) && netErr.Timeout() {
+				timedOut = true
+				break
+			}
+			awsErr, ok := cause.(awserr.Error)
+			if !ok {
+				break
+			}
+			cause = awsErr.OrigErr()
+		}
+	}
+	if timedOut {
+		result = "timeout"
+		err = fmt.Errorf("%s send timed out after %s: %w: %w", channel, sendTimeout, context.DeadlineExceeded, err)
+	}
+	accountMessageSendCounter.WithLabelValues(channel, result).Inc()
+	// the line names the channel and the SDK's error code only: SES messages can
+	// carry an address
+	code := "?"
+	var awsErr awserr.Error
+	if errors.As(err, &awsErr) {
+		code = awsErr.Code()
+	}
+	if suppressedCount, ok := accountMessageSendFailures.Allow(time.Now()); ok {
+		glog.Infof(
+			"[aws]account %s send %s (%s); %d more failed sends since the last report\n",
+			channel,
+			result,
+			code,
+			suppressedCount,
+		)
+	}
+	if glog.V(1) {
+		glog.Infof("[aws]account %s send %s: %s\n", channel, result, err)
+	}
+	return err
+}
+
+// Sends an account email with the production sender.
 func SendAccountEmailTemplate(emailAddress string, template Template, sendOpts ...any) error {
+	return (&AWSMessageSender{}).sendEmailTemplate(emailAddress, template, sendOpts...)
+}
+
+// Renders the template and sends it as one email.
+func (self *AWSMessageSender) sendEmailTemplate(emailAddress string, template Template, sendOpts ...any) error {
 	subject, bodyHtml, bodyText, err := RenderEmailTemplate(template)
 	if err != nil {
 		return err
 	}
-	return sendAccountEmail(emailAddress, template.Name(), subject, bodyHtml, bodyText, sendOpts...)
+	return self.sendEmail(emailAddress, template.Name(), subject, bodyHtml, bodyText, sendOpts...)
 }
 
 const emailTemplateDir = "email_templates"
@@ -353,12 +512,18 @@ func renderEmailTextFile(template Template, name string, path string) (string, e
 	return out.String(), nil
 }
 
+// Sends an account SMS with the production sender.
 func SendAccountSms(phoneNumber string, template Template) error {
+	return (&AWSMessageSender{}).sendSmsTemplate(phoneNumber, template)
+}
+
+// Renders the template's SMS body and sends it as one text.
+func (self *AWSMessageSender) sendSmsTemplate(phoneNumber string, template Template) error {
 	bodyText, err := RenderSmsTemplate(template)
 	if err != nil {
 		return err
 	}
-	return sendAccountSms(phoneNumber, bodyText)
+	return self.sendSms(phoneNumber, bodyText)
 }
 
 // RenderSmsTemplate renders `<name>.sms.txt`, the short body a phone account
@@ -386,10 +551,11 @@ func SenderEmail(senderEmail string) *SendAccountEmailSenderEmail {
 	}
 }
 
+// One SES SendEmail call, bounded by the send timeout.
 // https://docs.aws.amazon.com/sdk-for-go/api/aws/session/
 // https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/ses-example-send-email.html
 // https://docs.aws.amazon.com/ses/latest/APIReference-V2/API_SendEmail.html
-func sendAccountEmail(emailAddress string, templateName string, subject string, bodyHtml string, bodyText string, sendOpts ...any) error {
+func (self *AWSMessageSender) sendEmail(emailAddress string, templateName string, subject string, bodyHtml string, bodyText string, sendOpts ...any) error {
 	awsRegion := "us-west-1"
 	charSet := "UTF-8"
 
@@ -404,11 +570,13 @@ func sendAccountEmail(emailAddress string, templateName string, subject string, 
 		}
 	}
 
-	awsSession, err := session.NewSession(&aws.Config{
-		Region: aws.String(awsRegion),
-	})
+	sendTimeout := self.timeout()
+	sendCtx, sendCancel := context.WithTimeout(context.Background(), sendTimeout)
+	defer sendCancel()
+
+	awsSession, err := self.newSession(awsRegion, sendTimeout)
 	if err != nil {
-		return err
+		return accountMessageSendResult(sendCtx, accountMessageChannelEmail, sendTimeout, err)
 	}
 
 	sesService := ses.New(awsSession)
@@ -452,44 +620,24 @@ func sendAccountEmail(emailAddress string, templateName string, subject string, 
 		}}
 	}
 
-	// Attempt to send the email.
-	_, err = sesService.SendEmail(input)
-
-	// Display error messages if they occur.
-	if err != nil {
-		// if aerr, ok := err.(awserr.Error); ok {
-		//     switch aerr.Code() {
-		//     case ses.ErrCodeMessageRejected:
-		//         fmt.Println(ses.ErrCodeMessageRejected, aerr.Error())
-		//     case ses.ErrCodeMailFromDomainNotVerifiedException:
-		//         fmt.Println(ses.ErrCodeMailFromDomainNotVerifiedException, aerr.Error())
-		//     case ses.ErrCodeConfigurationSetDoesNotExistException:
-		//         fmt.Println(ses.ErrCodeConfigurationSetDoesNotExistException, aerr.Error())
-		//     default:
-		//         fmt.Println(aerr.Error())
-		//     }
-		// } else {
-		//     // Print the error, cast err to awserr.Error to get the Code and
-		//     // Message from an error.
-		//     fmt.Println(err.Error())
-		// }
-		return err
-
-	}
-
-	return nil
+	// the call and every SDK retry inside it stop at the send timeout
+	_, err = sesService.SendEmailWithContext(sendCtx, input)
+	return accountMessageSendResult(sendCtx, accountMessageChannelEmail, sendTimeout, err)
 }
 
-// https://docs.aws.amazon.com/sdk-for-go/api/service/sns/
-// https://docs.aws.amazon.com/sdk-for-go/api/service/sns/#PublishInput
-func sendAccountSms(phoneNumber string, bodyText string) error {
+// One Pinpoint SMS SendTextMessage call, bounded by the send timeout.
+// https://docs.aws.amazon.com/sdk-for-go/api/service/pinpointsmsvoicev2/
+// https://docs.aws.amazon.com/pinpoint/latest/apireference_smsvoicev2/API_SendTextMessage.html
+func (self *AWSMessageSender) sendSms(phoneNumber string, bodyText string) error {
 	awsRegion := "us-east-1"
 
-	awsSession, err := session.NewSession(&aws.Config{
-		Region: aws.String(awsRegion),
-	})
+	sendTimeout := self.timeout()
+	sendCtx, sendCancel := context.WithTimeout(context.Background(), sendTimeout)
+	defer sendCancel()
+
+	awsSession, err := self.newSession(awsRegion, sendTimeout)
 	if err != nil {
-		return err
+		return accountMessageSendResult(sendCtx, accountMessageChannelSms, sendTimeout, err)
 	}
 
 	// pinpoint requires +CCXXXXXXX format with no spaces and no dashes
@@ -504,10 +652,7 @@ func sendAccountSms(phoneNumber string, bodyText string) error {
 		MessageType:            aws.String(pinpointsmsvoicev2.MessageTypeTransactional),
 	}
 
-	_, err = smsService.SendTextMessage(input)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	// the call and every SDK retry inside it stop at the send timeout
+	_, err = smsService.SendTextMessageWithContext(sendCtx, input)
+	return accountMessageSendResult(sendCtx, accountMessageChannelSms, sendTimeout, err)
 }
