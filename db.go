@@ -811,16 +811,18 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 	for {
 		var pgErr error
 		var commitErr error
+		var commitPosts []PostFunction
 		dbWithPool(ctx, pool, func(conn PgConn) {
 			// an earlier use of the pooled connection is not evidence about
 			// this attempt
 			pgStatementErrorRecorderOf(conn.Conn().PgConn()).Reset()
 			beginStarted := timing.start()
-			tx, err := conn.BeginTx(ctx, txOptions)
+			rawTx, err := conn.BeginTx(ctx, txOptions)
 			timing.finish(DbTimingBegin, beginStarted)
 			if err != nil {
 				panic(err)
 			}
+			tx := &postCommitPgTx{PgTx: rawTx}
 			// if debugOptions.txCommitSeparately {
 			// 	tx = newDebugTx(tx, conn, txOptions)
 			// }
@@ -871,6 +873,9 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 				)
 				commitStarted := timing.start()
 				commitErr = tx.Commit(commitCtx)
+				if commitErr == nil {
+					commitPosts = tx.posts
+				}
 				timing.finish(DbTimingCommit, commitStarted)
 				commitCancel()
 				if errors.Is(commitErr, pgx.ErrTxCommitRollback) {
@@ -935,6 +940,11 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 			panic(commitErr)
 		}
 
+		// A reaper can register many independent projections. Bound this
+		// transaction owner's post fanout rather than parking one worker per row.
+		for offset := 0; offset < len(commitPosts); offset += 8 {
+			RunPosts(ctx, commitPosts[offset:min(offset+8, len(commitPosts))]...)
+		}
 		return
 	}
 }
