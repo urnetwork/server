@@ -598,6 +598,31 @@ profile and policy-two setting. The earlier 97-path packaging baseline is
 historical; it cannot replace a fresh owning inventory. The reuse manifest
 must remain explicit rather than be labelled as a new full update.
 
+The cumulative Config successor was physically staged with 111 paths and
+5,659,323,181 bytes, preserving all 106 paths in the freshly read selected
+baseline. Stage receipt `4cb423b9` binds the four added files and their version
+directory. Actual native precedence receipt `f08d56e9` confirms that generic
+and explicit ARIN resource resolution select the new exact database and epoch;
+GeoLite and places continue to resolve to epoch `1791253792`. This native
+control passed in 39.029 seconds with a sampled peak RSS of 1,027,596,288 bytes.
+
+The standard Config packager published version
+`2026.10.6-arin-cumulative-catalog+1065252460` from genuine Warp source
+`544e8234`, with build receipt `bb059589`. Its immutable registry index is
+`sha256:2f6bf9cd251e8097cb205ea7a72f3d49ba8cc01c732151809965941cd7b024c3`.
+Full image verification completed at October 6 23:21:53 UTC in manifest
+`eb21f8aa`: both amd64 and arm64 images match all 111 staged path types, modes
+and file hashes, both updater binaries match their local clean VCS builds,
+and the amd64 help/version smoke checks pass with networking disabled.
+Independent image gate `7fd1e946` binds that manifest and Root's successful
+verifier terminal `3030cd5c`. The image retains policy two and the native
+reader. Root's fresh baseline receipt `3d64d9a3` matched the prior selection.
+The normal Config selector then completed with exit zero at October 6
+23:26:14 UTC, selecting the cumulative version and requesting its supported
+restart. Receipt `c959ed7d` records the actual start at 23:26:04.646404 UTC and
+completion at 23:26:14.011087 UTC. This establishes selection; actual reader
+identity and provider-coverage observations remain separate evidence.
+
 Source inspection distinguishes the adoption owners. Connect announces call
 the controller's actual-address lookup and persist its database epoch and
 lookup time. API also opens the ARIN reader on IP-info and extender location
