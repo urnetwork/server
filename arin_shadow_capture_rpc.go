@@ -124,7 +124,7 @@ func (r *ArinShadowRecorder) CallCapture(ctx context.Context, client *ArinShadow
 		if row.Reason == "qualified" && (row.ClientId == (Id{}) || row.HandlerId == (Id{}) || row.ActualAt.IsZero() || row.ObservedAt.Before(started.Add(-arinShadowCaptureClockSkew)) || row.ActualAt.After(row.ObservedAt.Add(arinShadowCaptureClockSkew)) || !slices.Contains([]string{"subscriber", "excluded", "unknown", "ambiguous"}, row.State) || row.ProxyRisk && !row.Risk || row.Verified && row.State != "subscriber") {
 			return ArinShadowCapturedBatch{}, ErrArinShadowInput
 		}
-		rows[i] = arinShadowCapturedConnection{recorder: r, connectionId: row.ConnectionId, clientId: row.ClientId, handlerId: row.HandlerId, actualAt: row.ActualAt, observedAt: row.ObservedAt, capturedAt: row.CapturedAt, facts: arinShadowFacts{state: row.State, risk: row.Risk, proxyRisk: row.ProxyRisk, verified: row.Verified, registration: row.Registration, origin: newArinShadowOrigin(row.Origin.ASNs, row.Origin.UseState)}, reason: row.Reason}
+		rows[i] = arinShadowCapturedConnection{recorder: r, connectionId: row.ConnectionId, clientId: row.ClientId, handlerId: row.HandlerId, actualAt: row.ActualAt, observedAt: row.ObservedAt, capturedAt: row.CapturedAt, facts: arinShadowFacts{state: row.State, risk: row.Risk, proxyRisk: row.ProxyRisk, verified: row.Verified, registration: row.Registration, origin: newArinShadowOriginEvidence(row.Origin.ASNs, row.Origin.UseState, row.Origin.WithheldReason)}, reason: row.Reason}
 	}
 	return ArinShadowCapturedBatch{rows}, nil
 }

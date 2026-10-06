@@ -14,8 +14,9 @@ const arinShadowOriginASNLimit = 8
 // Multiple origins remain a set; assigning their connections to one arbitrary
 // operator would hide the very conflicts that the classifier must preserve.
 type ArinShadowOrigin struct {
-	ASNs     []uint32 `json:"asns,omitempty"`
-	UseState string   `json:"use_state,omitempty"`
+	ASNs           []uint32 `json:"asns,omitempty"`
+	UseState       string   `json:"use_state,omitempty"`
+	WithheldReason string   `json:"withheld_reason,omitempty"`
 }
 
 type ArinShadowOriginCount struct {
@@ -31,9 +32,17 @@ type ArinShadowOriginCount struct {
 
 func validArinShadowOrigin(origin ArinShadowOrigin) bool {
 	if len(origin.ASNs) == 0 {
-		return origin.UseState == ""
+		return origin.UseState == "" && origin.WithheldReason == ""
 	}
 	if len(origin.ASNs) > arinShadowOriginASNLimit || !slices.Contains([]string{"subscriber", "excluded", "unknown", "ambiguous", "withheld"}, origin.UseState) {
+		return false
+	}
+	// Older captures omit the reason. A supplied reason is a closed MMDB
+	// discriminator, never free-form source text or a subscriber approval.
+	if origin.WithheldReason != "" && (origin.UseState != "withheld" || !slices.Contains([]string{
+		"insufficient-origin-visibility", "rpki-invalid-origin",
+		"outside-reviewed-countries", "registry-hosting-assignment",
+	}, origin.WithheldReason)) {
 		return false
 	}
 	var previous uint32
@@ -47,7 +56,11 @@ func validArinShadowOrigin(origin ArinShadowOrigin) bool {
 }
 
 func newArinShadowOrigin(asns []uint32, useState string) ArinShadowOrigin {
-	origin := ArinShadowOrigin{ASNs: asns, UseState: useState}
+	return newArinShadowOriginEvidence(asns, useState, "")
+}
+
+func newArinShadowOriginEvidence(asns []uint32, useState, withheldReason string) ArinShadowOrigin {
+	origin := ArinShadowOrigin{ASNs: asns, UseState: useState, WithheldReason: withheldReason}
 	if !validArinShadowOrigin(origin) {
 		return ArinShadowOrigin{}
 	}
@@ -58,6 +71,8 @@ func newArinShadowOrigin(asns []uint32, useState string) ArinShadowOrigin {
 func arinShadowOriginKey(origin ArinShadowOrigin) string {
 	var key strings.Builder
 	key.WriteString(origin.UseState)
+	key.WriteByte(',')
+	key.WriteString(origin.WithheldReason)
 	for _, asn := range origin.ASNs {
 		key.WriteByte(',')
 		key.WriteString(strconv.FormatUint(uint64(asn), 10))
@@ -77,7 +92,7 @@ func (s *ArinShadowCaptureStream) addOrigin(f arinShadowFacts) {
 			s.report.OriginOverflowConnections++
 			return
 		}
-		row = &ArinShadowOriginCount{ArinShadowOrigin: newArinShadowOrigin(f.origin.ASNs, f.origin.UseState)}
+		row = &ArinShadowOriginCount{ArinShadowOrigin: newArinShadowOriginEvidence(f.origin.ASNs, f.origin.UseState, f.origin.WithheldReason)}
 		s.origins[key] = row
 	}
 	row.Connections++
@@ -114,6 +129,9 @@ func (s *ArinShadowCaptureStream) finishOrigins() {
 		if order := slices.Compare(a.ASNs, b.ASNs); order != 0 {
 			return order
 		}
-		return strings.Compare(a.UseState, b.UseState)
+		if order := strings.Compare(a.UseState, b.UseState); order != 0 {
+			return order
+		}
+		return strings.Compare(a.WithheldReason, b.WithheldReason)
 	})
 }

@@ -199,6 +199,7 @@ func shadowFacts(db *mmdb.Reader, address netip.Addr) (arinShadowFacts, *ArinInf
 		MultipleOwners          bool     `maxminddb:"multiple_registration_owners"`
 		OriginASNs              []uint32 `maxminddb:"origin_asns"`
 		OriginUseState          string   `maxminddb:"origin_use_state"`
+		OriginWithheldReason    string   `maxminddb:"origin_withheld_reason"`
 		Evidence                []struct {
 			Category string `maxminddb:"category"`
 		} `maxminddb:"network_risk_evidence"`
@@ -212,7 +213,7 @@ func shadowFacts(db *mmdb.Reader, address netip.Addr) (arinShadowFacts, *ArinInf
 	if !extra.MultipleOwners {
 		facts.registration = newArinShadowRegistration(extra.OrgHandle, extra.NetHandle, extra.ClassificationOrgHandle, extra.ClassificationRule)
 	}
-	facts.origin = newArinShadowOrigin(extra.OriginASNs, extra.OriginUseState)
+	facts.origin = newArinShadowOriginEvidence(extra.OriginASNs, extra.OriginUseState, extra.OriginWithheldReason)
 	for _, e := range extra.Evidence {
 		if slices.Contains([]string{"proxy", "residential_proxy", "virtual_isp", "vpn", "tor"}, e.Category) {
 			facts.proxyRisk = true
