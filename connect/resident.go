@@ -469,8 +469,11 @@ type ExchangeSettings struct {
 	ForwardEnforceActiveContracts bool
 
 	ContractManagerCheckTimeout time.Duration
-	DrainOneTimeout             time.Duration
-	DrainAllTimeout             time.Duration
+	// Temporary rollout bridge for contracts created by older writers. Disable
+	// only after old-writer retirement and verified eligible-cohort coverage.
+	ContractHoleCompatibilityFallback bool
+	DrainOneTimeout                   time.Duration
+	DrainAllTimeout                   time.Duration
 
 	// drain coordination (CONNECTDRAIN2.md). `EnableDrainExcuse` gates the
 	// excuse markers written at drain / migrate and their consumption in the
@@ -547,7 +550,8 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		// this must match the warp `settings.yml` for the environment
 		StartInternalPort: 5080,
 
-		MaxConcurrentForwardsPerResident: 8 * 1024,
+		MaxConcurrentForwardsPerResident:  8 * 1024,
+		ContractHoleCompatibilityFallback: true,
 
 		// ResidentIdleTimeout: 300 * time.Minute,
 		ForwardIdleTimeout: 15 * time.Minute,
@@ -658,7 +662,9 @@ type Exchange struct {
 	hostToServicePorts map[int]int
 	routes             map[string]string
 
-	settings              *ExchangeSettings
+	settings *ExchangeSettings
+	// One shared, zero-wait compatibility budget for this exchange's residents.
+	contractHoleFallback  *residentContractFallback
 	memoryOwnerLedger     *connect.TransferMemoryOwnerLedger
 	payloadOwnerLedger    *residentPayloadLedger
 	sdkPayloadOwnerLedger *connect.TransferPayloadOwnerLedger
@@ -789,6 +795,9 @@ func newExchange(
 		residentChanges:       map[server.Id]chan struct{}{},
 		connections:           map[server.Id]map[server.Id]context.CancelFunc{},
 		drainedClients:        map[server.Id]struct{}{},
+	}
+	if settings.ContractHoleCompatibilityFallback {
+		exchange.contractHoleFallback = newResidentContractFallback()
 	}
 
 	if settings.KeyEventDelivery.Enabled {
@@ -3737,11 +3746,12 @@ func newResidentDuringAdmission(
 	// because the platform creates the contracts for the client
 	client.ContractManager().AddNoContractPeer(connect.Id(clientId))
 
-	residentContractManager := newResidentContractManager(
+	residentContractManager := newResidentContractManagerWithFallback(
 		cancelCtx,
 		cancel,
 		clientId,
 		exchange.settings,
+		exchange.contractHoleFallback,
 	)
 
 	residentController := newResidentController(

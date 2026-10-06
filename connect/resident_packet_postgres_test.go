@@ -139,6 +139,12 @@ func residentPacketHoleKey(source, destination server.Id) string {
 // actual callback/consumer/forward path. A sentinel on the same FIFO worker is
 // the completion barrier; the only wrapper records real model read attempts.
 func testResidentPacketRedisProjection(t testing.TB, value string, active bool, mutate ...func(context.Context, server.Id, server.Id)) {
+	testResidentPacketRedisProjectionWithFallback(t, value, active, nil, mutate...)
+}
+
+// The same acquisition tripwire covers a configured bridge: authoritative
+// positive and negative evidence must not consult its source helper.
+func testResidentPacketRedisProjectionWithFallback(t testing.TB, value string, active bool, fallback *residentContractFallback, mutate ...func(context.Context, server.Id, server.Id)) {
 	t.Helper()
 	postgresAttempts, stopPostgresTripwire := server.DenyPostgresForTest(t)
 	defer stopPostgresTripwire()
@@ -155,7 +161,7 @@ func testResidentPacketRedisProjection(t testing.TB, value string, active bool, 
 			t.Errorf("process packet PostgreSQL attempts=%d", got)
 		}
 	}()
-	resident.residentContractManager = newResidentContractManager(resident.ctx, resident.cancel, resident.clientId, settings)
+	resident.residentContractManager = newResidentContractManagerWithFallback(resident.ctx, resident.cancel, resident.clientId, settings, fallback)
 	ledger := &residentPayloadLedger{}
 	resident.exchange.payloadOwnerLedger = ledger
 	destination, sentinel := server.NewId(), server.NewId()
@@ -174,6 +180,7 @@ func testResidentPacketRedisProjection(t testing.TB, value string, active bool, 
 		if target == sentinel {
 			close(barrier)
 			<-release
+			return false
 		} else {
 			calls.Add(1)
 		}
