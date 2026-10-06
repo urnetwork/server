@@ -53,21 +53,25 @@ func (self *legacyFinancialLatencyTx) before(ctx context.Context, sql string) {
 	}
 }
 
+// Keep each execution on the original transaction.
 func (self *legacyFinancialLatencyTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	self.before(ctx, sql)
 	return self.PgTx.Exec(ctx, sql, args...)
 }
 
+// The wrapped recorder owns result consumption and the grant barrier.
 func (self *legacyFinancialLatencyTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	self.before(ctx, sql)
 	return self.PgTx.Query(ctx, sql, args...)
 }
 
+// The real scan retains ordinary errors and transaction ownership.
 func (self *legacyFinancialLatencyTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	self.before(ctx, sql)
 	return self.PgTx.QueryRow(ctx, sql, args...)
 }
 
+// One batch receives one modeled client round trip.
 func (self *legacyFinancialLatencyTx) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
 	self.before(ctx, "batch")
 	return self.PgTx.SendBatch(ctx, batch)

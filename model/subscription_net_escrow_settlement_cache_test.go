@@ -35,13 +35,13 @@ type settlementCacheMutationTx struct {
 	beforeMetadata func()
 }
 
-func (tx *settlementCacheMutationTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	if strings.Contains(sql, "provider_usage = $4") && tx.beforeClaim != nil {
+func (tx *settlementCacheMutationTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if strings.Contains(sql, "UPDATE transfer_contract") && strings.Contains(sql, "RETURNING close_time") && tx.beforeClaim != nil {
 		hook := tx.beforeClaim
 		tx.beforeClaim = nil
 		hook()
 	}
-	return tx.PgTx.Exec(ctx, sql, args...)
+	return tx.PgTx.QueryRow(ctx, sql, args...)
 }
 
 func (tx *settlementCacheMutationTx) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
