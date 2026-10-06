@@ -4998,8 +4998,26 @@ queue key. No provider-total row is acquired while this transaction owns grants.
 For a contract with N eligible provider networks this replaces N inline total
 upserts with one independent task insertion. Application still needs N upserts,
 one owning-row read and one marker write, plus ordinary scheduler claim and
-finalization work. It adds one task per legacy settlement; it does not establish
-task capacity, reduce the total write count or add a shared-provider queue key.
+finalization work. It adds one task per eligible legacy or Redis-mode settlement;
+it does not establish task capacity, reduce the total write count or add a
+shared-provider queue key.
+
+Redis-mode payout ownership (2026-10-06): the final outcome, asynchronous payer
+debit journal, exact provider sweeps and per-contract total-projection task now
+commit together. Losing every post-commit callback cannot lose earned payout
+authority. The existing debit worker still applies payer consumption and repairs
+escrow metadata asynchronously; reservation release remains its acknowledged,
+replay-safe projection. Foreground settlement does not acquire payer grant or
+provider-total rows. The existing `ApplyLegacyProviderTotals` target and payload
+remain compatible with already-deployed task workers.
+
+This prevents future volatile-post gaps. It does not reconstruct a historically
+missing payout, prove current projection completion, or clear an insufficient-
+escrow hold. Original reports, unresolved liability and healthy-neighbor
+reservations remain unchanged. A deterministic commit-before-callback control
+must retain one sweep and one unapplied projection owner before recovery; the
+rollback control must retain neither. Independent same-payer closes must reach
+their owned pre-commit barriers while shared financial rows remain locked.
 
 The baseline native control fails at a held provider row. With the writer, an
 exact `pg_blocking_pids` projection-to-provider edge remains present before and
