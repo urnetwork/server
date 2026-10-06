@@ -92,6 +92,8 @@ func (ratio *ClientScoreNativeEgressRatio) UnmarshalJSON(data []byte) error {
 // Eligibility can change after SourceCompletedAt; readers must display source
 // age and must not label PublishedAt or metric scrape time a live recomputation.
 type ClientScoreNativeCensus struct {
+	// Kept private and omitted from the existing count wire format.
+	speedOnlySample   *clientScoreNativeSpeedSample
 	SchemaVersion     int                                     `json:"schema_version"`
 	PublicationId     string                                  `json:"publication_id"`
 	SourceStartedAt   time.Time                               `json:"source_started_at"`
@@ -160,6 +162,7 @@ func newClientScoreNativeCensus(startedAt, completedAt, healthWindowEnd time.Tim
 		census.Buckets[bucket] = count
 	}
 	census.EgressRatio = newClientScoreNativeEgressRatio(startedAt, completedAt, healthWindowEnd, egressIndexSettings(), healthCounts, members["online"])
+	census.speedOnlySample = newClientScoreNativeSpeedSample(census, members[RankModeSpeed], members[RankModeQuality], healthCounts)
 	return census
 }
 
@@ -312,6 +315,10 @@ func writeClientScoreNativeCensus(ctx context.Context, census *ClientScoreNative
 			return
 		}
 		returnErr = r.Set(ctx, clientScoreNativeCensusKey, data, ttl).Err()
+		if returnErr == nil {
+			// Optional private evidence never changes the completed census result.
+			_ = writeClientScoreNativeSpeedSample(ctx, r, census, data, ttl)
+		}
 	})
 	return
 }
