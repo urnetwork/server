@@ -316,6 +316,8 @@ func (self *ProxyDeviceManager) OpenProxyDevice(proxyId server.Id) (*ProxyDevice
 			self.lifecycleLock.Lock()
 			if self.closed {
 				err = fmt.Errorf("Proxy device manager closed.")
+			} else if cancelErr := self.ctx.Err(); cancelErr != nil {
+				err = cancelErr
 			} else {
 				self.deviceWorkers.Add(2)
 				pdState.ProxyDevice = pd
