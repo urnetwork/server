@@ -344,6 +344,9 @@ func addUserAuth(
 	return
 }
 
+// Adds an email or phone password auth to the user in the caller's
+// transaction. Returns a refusal (no user auth, another user holds it, or the
+// user has one of its type), and raises a failed statement.
 func addUserAuthInTx(
 	tx server.PgTx,
 	args *AddUserAuthArgs,
@@ -375,6 +378,9 @@ func addUserAuthInTx(
 	/**
 	 * Check if this type of userauth already exists for the user
 	 */
+	// A failed query raises, through WithPgResult, which ends the transaction
+	// at once with its own error. It used to be returned, and the caller's
+	// callback went on to a commit that postgres rolled back.
 	result, queryErr := tx.Query(
 		ctx,
 		`
@@ -386,10 +392,6 @@ func addUserAuthInTx(
 		args.UserId,
 		userAuthType,
 	)
-	if queryErr != nil {
-		returnErr = queryErr
-		return
-	}
 
 	exists := false
 

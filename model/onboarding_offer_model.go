@@ -141,6 +141,11 @@ func lockOnboardingNetworkInTx(tx server.PgTx, ctx context.Context, networkId se
 	return true
 }
 
+// Issues the network's offer once in the caller's transaction (see
+// IssueOnboardingOffer). Returns ErrOnboardingNetworkNotFound for a network
+// that does not exist, and raises a failed statement, which ends the
+// transaction at once with its own error; a returned insert error let the
+// caller's callback go on to a commit that postgres rolled back.
 func IssueOnboardingOfferInTx(tx server.PgTx, ctx context.Context, args *IssueOnboardingOfferArgs) (*OnboardingOffer, bool, error) {
 	if !lockOnboardingNetworkInTx(tx, ctx, args.NetworkId) {
 		return nil, false, ErrOnboardingNetworkNotFound
@@ -158,7 +163,7 @@ func IssueOnboardingOfferInTx(tx server.PgTx, ctx context.Context, args *IssueOn
 		}
 	}
 
-	tag, err := tx.Exec(
+	tag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
 			INSERT INTO network_onboarding_offer (
@@ -188,10 +193,7 @@ func IssueOnboardingOfferInTx(tx server.PgTx, ctx context.Context, args *IssueOn
 		nullIfEmpty(args.StripeCouponId),
 		nullIfEmpty(appleOfferCode),
 		nullIfEmpty(args.PlayOfferTag),
-	)
-	if err != nil {
-		return nil, false, err
-	}
+	))
 	offer := GetOnboardingOfferInTx(tx, ctx, args.NetworkId)
 	if offer == nil {
 		return nil, false, ErrOnboardingOfferNotFound
