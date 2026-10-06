@@ -423,6 +423,9 @@ type SignalSettings struct {
 	// Optional per-execution coverage sink, including healthy and unavailable
 	// observations. The callback must return promptly; errors remain visible.
 	UrlProbeCoverageObserver func(UrlProbeCoverageObservation) error
+	// Retains every validated selection reason, including observations that do
+	// not cross an alert threshold. No request or target identities are retained.
+	ProviderSelectionObserver func(ProviderSelectionObservation) error
 
 	SSHConnectTimeout time.Duration
 	CommandTimeout    time.Duration
