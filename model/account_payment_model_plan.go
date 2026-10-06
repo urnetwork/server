@@ -87,7 +87,7 @@ const paymentPlanLockKey = "provider-payment-plan/v1"
 var errPaymentPlanSelectionChanged = errors.New("payment plan sweep ownership changed; allocation rolled back for retry")
 
 func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun bool, maxDuration time.Duration) (paymentPlan *PaymentPlan, returnErr error) {
-	return createPaymentPlan(ctx, subsidyConfig, dryRun, maxDuration, true)
+	return createPaymentPlan(ctx, subsidyConfig, dryRun, maxDuration, true, nil)
 }
 
 // createPaymentPlan is CreatePaymentPlan with explicit control over whether the
@@ -99,7 +99,17 @@ func CreatePaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 // to back; that refresh is identical for every slice, so the loop refreshes once
 // on the first slice and passes false afterward instead of repeating the same
 // heavy refresh on every slice.
-func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun bool, maxDuration time.Duration, refreshReliabilityInputs bool) (paymentPlan *PaymentPlan, returnErr error) {
+//
+// writeInTx, when set, runs in the plan's transaction once the plan is built,
+// so what it writes commits with the plan or not at all. A dry run skips it.
+func createPaymentPlan(
+	ctx context.Context,
+	subsidyConfig *SubsidyConfig,
+	dryRun bool,
+	maxDuration time.Duration,
+	refreshReliabilityInputs bool,
+	writeInTx func(server.PgTx, *PaymentPlan),
+) (paymentPlan *PaymentPlan, returnErr error) {
 	defer func() {
 		if value := recover(); value != nil {
 			if err, ok := value.(error); ok && (errors.Is(err, ErrProviderLegacyReliabilityWindow) || errors.Is(err, errPaymentPlanSelectionChanged) ||
@@ -226,6 +236,10 @@ func createPaymentPlan(ctx context.Context, subsidyConfig *SubsidyConfig, dryRun
 
 		// set the bonus weights for next payout
 		UpdateClientLocationReliabilityMultipliersWithDefaultsInTx(tx, ctx)
+
+		if writeInTx != nil && !dryRun {
+			writeInTx(tx, paymentPlan)
+		}
 
 	}, server.TxReadCommitted)
 

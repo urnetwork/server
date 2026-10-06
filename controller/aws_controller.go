@@ -243,14 +243,22 @@ func (self *SubscriptionEndedTemplate) Name() string {
 	return "subscription_ended"
 }
 
+// The notice that a network's USDC payout is withheld for want of a Solana
+// wallet. Payout is the withheld total, which the account message outbox sums
+// over the slices of one payout run.
 type MissingWalletTemplate struct {
 	PaymentId server.Id
-	AmountUsd string
+	Payout    model.NanoCents
 	BaseTemplate
 }
 
 func (self *MissingWalletTemplate) Name() string {
 	return "subscription_missing_wallet"
+}
+
+// The withheld total in USD with two decimals, as the templates print it.
+func (self *MissingWalletTemplate) AmountUsd() string {
+	return fmt.Sprintf("%.2f", model.NanoCentsToUsd(self.Payout))
 }
 
 // fixme - we can clean this up so all public functions are in the interface

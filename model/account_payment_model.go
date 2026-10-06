@@ -450,6 +450,19 @@ func PlanPaymentsWithMaxDurationLoop(
 	maxDuration time.Duration,
 	onSlice func(*PaymentPlan),
 ) ([]*PaymentPlan, error) {
+	return PlanPaymentsWithMaxDurationLoopInTx(ctx, maxDuration, nil, onSlice)
+}
+
+// PlanPaymentsWithMaxDurationLoopInTx is PlanPaymentsWithMaxDurationLoop with
+// writeInTx run in each slice's transaction once the slice's plan is built:
+// what it writes commits with the slice or not at all (the payout run's held
+// missing-wallet notices).
+func PlanPaymentsWithMaxDurationLoopInTx(
+	ctx context.Context,
+	maxDuration time.Duration,
+	writeInTx func(server.PgTx, *PaymentPlan),
+	onSlice func(*PaymentPlan),
+) ([]*PaymentPlan, error) {
 	transition, err := server.LoadProviderPayoutEarningPolicy(ctx)
 	if err != nil {
 		return nil, err
@@ -459,7 +472,7 @@ func PlanPaymentsWithMaxDurationLoop(
 		end = server.MinTime(end, transition.Cutoff)
 	}
 	if maxDuration <= 0 {
-		plan, err := CreatePaymentPlan(ctx, EnvSubsidyConfig(), false, 0)
+		plan, err := createPaymentPlan(ctx, EnvSubsidyConfig(), false, 0, true, writeInTx)
 		if err != nil {
 			return nil, err
 		}
@@ -474,7 +487,7 @@ func PlanPaymentsWithMaxDurationLoop(
 	for i := 0; ; i += 1 {
 		// refresh the shared reliability inputs only on the first slice; the
 		// window is the same for every slice in this drain.
-		plan, err := createPaymentPlan(ctx, EnvSubsidyConfig(), false, maxDuration, i == 0)
+		plan, err := createPaymentPlan(ctx, EnvSubsidyConfig(), false, maxDuration, i == 0, writeInTx)
 		if err != nil {
 			return plans, err
 		}

@@ -79,6 +79,9 @@ var accountMessageTemplates = map[string]func() Template{
 	(&X402ReceiptTemplate{}).Name(): func() Template {
 		return &X402ReceiptTemplate{}
 	},
+	(&MissingWalletTemplate{}).Name(): func() Template {
+		return &MissingWalletTemplate{}
+	},
 }
 
 // Counts delivery outcomes by template and result (sent, retried, abandoned,
@@ -126,26 +129,40 @@ type accountMessage struct {
 	held bool
 }
 
-// Adds the message in the caller's transaction (`model.AddAccountMessageInTx`).
-// The template must go through the outbox. Returns false when a message with
-// the key exists.
-func addAccountMessageInTx(ctx context.Context, tx server.PgTx, message *accountMessage) bool {
-	templateName := message.template.Name()
+// The model's arguments for the message. The template must go through the
+// outbox.
+func (self *accountMessage) args() *model.AccountMessageArgs {
+	templateName := self.template.Name()
 	if _, ok := accountMessageTemplates[templateName]; !ok {
 		panic(fmt.Errorf("account message template %s does not go through the outbox", templateName))
 	}
-	templateJson, err := json.Marshal(message.template)
+	templateJson, err := json.Marshal(self.template)
 	if err != nil {
 		panic(err)
 	}
-	return model.AddAccountMessageInTx(ctx, tx, &model.AccountMessageArgs{
-		Key:          message.key,
-		NetworkId:    message.networkId,
-		UserAuth:     message.userAuth,
+	return &model.AccountMessageArgs{
+		Key:          self.key,
+		NetworkId:    self.networkId,
+		UserAuth:     self.userAuth,
 		TemplateName: templateName,
 		TemplateJson: string(templateJson),
-		Held:         message.held,
-	})
+		Held:         self.held,
+	}
+}
+
+// Adds the message in the caller's transaction (`model.AddAccountMessageInTx`).
+// Returns false when a message with the key exists.
+func addAccountMessageInTx(ctx context.Context, tx server.PgTx, message *accountMessage) bool {
+	return model.AddAccountMessageInTx(ctx, tx, message.args())
+}
+
+// Adds the messages in the caller's transaction in one round trip.
+func addAccountMessagesInTx(ctx context.Context, tx server.PgTx, messages []*accountMessage) {
+	argsList := []*model.AccountMessageArgs{}
+	for _, message := range messages {
+		argsList = append(argsList, message.args())
+	}
+	model.AddAccountMessagesInTx(ctx, tx, argsList)
 }
 
 // The template a stored message renders, decoded from its fields.
@@ -362,12 +379,18 @@ func scheduleDeliverAccountMessagesAt(clientSession *session.ClientSession, tx s
 	)
 }
 
-// Delivers the due account messages, then removes finished ones past their
-// retention.
+// Releases the missing-wallet notices a stopped payout run left held, delivers
+// the due account messages, then removes finished ones past their retention.
 func DeliverAccountMessages(
 	_ *DeliverAccountMessagesArgs,
 	clientSession *session.ClientSession,
 ) (*DeliverAccountMessagesResult, error) {
+	// a payout run that stopped before its release leaves its notices held
+	releaseMissingWalletNotices(
+		clientSession.Ctx,
+		server.NowUtc().Add(-missingWalletNoticeHoldTimeout),
+		configuredMissingWalletNoticeMinPayout,
+	)
 	delivery := newAccountMessageDelivery(
 		clientSession.Ctx,
 		GetAWSMessageSender(),

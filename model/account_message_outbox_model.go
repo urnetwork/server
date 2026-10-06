@@ -83,6 +83,21 @@ func AccountMessageKey(templateName string, key string) string {
 	return hex.EncodeToString(digest.Sum(nil))
 }
 
+// Inserts one message unless its key exists.
+const addAccountMessageSql = `
+	INSERT INTO account_message_outbox (
+		message_id,
+		message_key,
+		network_id,
+		user_auth,
+		template_name,
+		template_json,
+		create_time,
+		deliver_time
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	ON CONFLICT (message_key) DO NOTHING
+`
+
 // Adds the message in the caller's transaction, due now unless held. Returns
 // false when a message with the key exists.
 func AddAccountMessageInTx(ctx context.Context, tx server.PgTx, args *AccountMessageArgs) (added bool) {
@@ -93,19 +108,7 @@ func AddAccountMessageInTx(ctx context.Context, tx server.PgTx, args *AccountMes
 	}
 	tag := server.RaisePgResult(tx.Exec(
 		ctx,
-		`
-			INSERT INTO account_message_outbox (
-				message_id,
-				message_key,
-				network_id,
-				user_auth,
-				template_name,
-				template_json,
-				create_time,
-				deliver_time
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			ON CONFLICT (message_key) DO NOTHING
-		`,
+		addAccountMessageSql,
 		server.NewId(),
 		AccountMessageKey(args.TemplateName, args.Key),
 		args.NetworkId,
@@ -116,6 +119,34 @@ func AddAccountMessageInTx(ctx context.Context, tx server.PgTx, args *AccountMes
 		deliverTime,
 	))
 	return tag.RowsAffected() == 1
+}
+
+// Adds the messages in the caller's transaction in one round trip, as
+// `AddAccountMessageInTx` adds each.
+func AddAccountMessagesInTx(ctx context.Context, tx server.PgTx, argsList []*AccountMessageArgs) {
+	if len(argsList) == 0 {
+		return
+	}
+	createTime := server.NowUtc()
+	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
+		for _, args := range argsList {
+			var deliverTime *time.Time
+			if !args.Held {
+				deliverTime = &createTime
+			}
+			batch.Queue(
+				addAccountMessageSql,
+				server.NewId(),
+				AccountMessageKey(args.TemplateName, args.Key),
+				args.NetworkId,
+				args.UserAuth,
+				args.TemplateName,
+				args.TemplateJson,
+				createTime,
+				deliverTime,
+			)
+		}
+	})
 }
 
 // Claims the due message that has waited longest, for one delivery attempt that
