@@ -1,10 +1,9 @@
 # Provider quality probes
 
-This is the in-tree copy of the former `operator-proxy` Go packages. Taskworker,
-the monitor, and the operator-facing API use these packages through
-`github.com/urnetwork/server/qualityprobe/...`; the standalone
-`operator-proxy` checkout remains in place for history, but it is not a Server
-or build/all runtime dependency.
+Taskworker, the monitor, and the operator-facing API use these packages through
+`github.com/urnetwork/server/qualityprobe/...`. They came, with their history,
+from the retired `operator-proxy` repository (imported 2026-09-26), which no
+Server service or build/all runtime depends on.
 
 `providertunnel` opens a private userspace TUN pinned to one provider. Probe
 traffic, including its DNS lookups, uses that TUN. `controlplane` owns the

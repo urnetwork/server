@@ -7,37 +7,25 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// GeolocationSourceHosts is the set of hosts the geolocation prober reaches
-// through a provider tunnel, and therefore the set this server observes
-// certificate pins for.
+// The ip-intelligence hosts the egress prober used to geolocate a provider
+// through its tunnel, and therefore the hosts this server observed certificate
+// pins for.
 //
-// # This list has a counterpart in another repository
+// # Retired with the geolocation sources
 //
-// Its counterpart is `geolocate/sources.go` in the operator-proxy repo
-// (github.com/urnetwork/operator-proxy), whose `sources` table is the
-// authority on which endpoints are actually queried; `geolocate.SourceHosts()`
-// derives the host set from it. The two CANNOT be linked in code: the prober is
-// a separate Go module in a separate repository, and it depends on this server
-// rather than the other way round -- importing the prober from the server would
-// invert that dependency. So this is a deliberate second copy, and the comment
-// is the only thing keeping it honest. When a source endpoint changes there,
-// change it here in the same pass.
-//
-// # Drift is caught at runtime, fail-closed, not silently
-//
-// That is not merely a promise. The prober treats a source host with no served
-// pin as a hard error and refuses to probe rather than probing unpinned, so a
-// host added to `sources.go` but not to this list stops the prober at startup
-// instead of quietly leaving one source unprotected. A host removed there but
-// left here only costs a pointless observation. The dangerous direction is the
-// one that fails loudly.
+// The prober in qualityprobe/ queries none of these hosts and requires no pin:
+// it places the exit with the operator's own /ip echo and GeoLite2
+// (connect/GEOMAP.md D24). The observation job is retired
+// (work.RefreshGeolocationSourcePins), and the pin route keeps serving the rows
+// already stored until the route, that task and its table are removed together.
+// No other repository keeps a copy of this list, so there is no counterpart to
+// keep in step with.
 //
 // This list is a compile-time constant on purpose: it is a trust decision about
 // which hosts the server will vouch for, and nothing outside a code change --
 // no request, no database row, and above all no provider -- may add to it.
 var GeolocationSourceHosts = []string{
-	// ip.pn -- moved from ip.pn to api.i.pn on 2026-08-02, which is exactly
-	// the drift this comment block exists for.
+	// ip.pn moved from ip.pn to api.i.pn on 2026-08-02
 	"api.i.pn",
 	"free.freeipapi.com",
 	"ipinfo.io",

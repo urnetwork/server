@@ -55,27 +55,35 @@ func resolvedSourceModuleIn(t *testing.T, directory, modulePath string) sourceMo
 	return module
 }
 
-// lock.yml beside this file is the source lock a clean checkout follows. Read
-// its exact revision instead of maintaining a second, eventually contradictory
-// pin list.
-func reviewedRevision(t *testing.T, sibling, repository string) string {
+// lock.yml beside this file is the source lock a clean checkout follows.
+type sourceLock struct {
+	Siblings []struct {
+		Repository string `yaml:"repository"`
+		Path       string `yaml:"path"`
+		Ref        string `yaml:"ref"`
+	} `yaml:"siblings"`
+}
+
+// Every assertion reads the one checked-in lock rather than a second,
+// eventually contradictory pin list.
+func readSourceLock(t *testing.T) sourceLock {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(serverDirectory(t), "local", "source-graph", "lock.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var lock struct {
-		Siblings []struct {
-			Repository string `yaml:"repository"`
-			Path       string `yaml:"path"`
-			Ref        string `yaml:"ref"`
-		} `yaml:"siblings"`
-	}
+	var lock sourceLock
 	if err := yaml.Unmarshal(raw, &lock); err != nil {
 		t.Fatal(err)
 	}
+	return lock
+}
+
+// The lock's exact revision for one sibling checkout.
+func reviewedRevision(t *testing.T, sibling, repository string) string {
+	t.Helper()
 	var revisions []string
-	for _, checkout := range lock.Siblings {
+	for _, checkout := range readSourceLock(t).Siblings {
 		if checkout.Path == sibling {
 			if checkout.Repository != repository || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(checkout.Ref) {
 				t.Fatalf("%s checkout must pin a complete %s commit: %+v", sibling, repository, checkout)
@@ -149,6 +157,20 @@ func TestReleaseSourceGraphPinsReviewedSctpFork(t *testing.T) {
 func TestReleaseSourceGraphPinsNativeFeeOwner(t *testing.T) {
 	requireReviewedSibling(t, "github.com/urfoundation/sn", "sn", "urfoundation/sn", "")
 	requireReviewedSibling(t, "github.com/centrifuge/go-substrate-rpc-client/v4", "sn", "urfoundation/sn", "third_party/go-substrate-rpc-client")
+}
+
+// The quality probes live in qualityprobe/ with their history, and their
+// standalone repository is retired. A pin for it would send every clean
+// checkout after source that nothing builds or tests.
+func TestReleaseSourceGraphLockOmitsRetiredSiblings(t *testing.T) {
+	retiredSiblings := []string{"operator-proxy"}
+	for _, checkout := range readSourceLock(t).Siblings {
+		for _, retiredSibling := range retiredSiblings {
+			if checkout.Path == retiredSibling || checkout.Repository == "urnetwork/"+retiredSibling {
+				t.Errorf("source lock pins retired sibling %s: %+v", retiredSibling, checkout)
+			}
+		}
+	}
 }
 
 func TestReleaseSourceGraphPinsRemainingServiceSiblings(t *testing.T) {

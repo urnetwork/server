@@ -2432,10 +2432,11 @@ it does not encode the outer context state or active artifact ancestry. The
 local release tag `v2026.9.3-1036806790` dereferences to operator-proxy snapshot
 commit `4ba0dd88`, whose versioned source logs every TUN read return, and does
 not contain `20e289bd`. That tag inspection does not prove the active
-Taskworker runs it. Current operator-proxy main contains `20e289bd`, which
-suppresses the read error only after that tunnel's context is canceled and
-preserves live-context read errors. Class only the exact terminal `Done` form
-as `provider-tunnel-read-done`, then prove runtime ancestry. On a proven
+Taskworker runs it. Server's `qualityprobe/providertunnel` carries `20e289bd`
+(imported with the prober's history on 2026-09-26), which suppresses the read
+error only after that tunnel's context is canceled and preserves live-context
+read errors. Class only the exact terminal `Done` form as
+`provider-tunnel-read-done`, then prove runtime ancestry. On a proven
 pre-`20e289bd` artifact, the line is consistent with ordinary teardown through
 the unconditional legacy logger; deploy a containing Taskworker. On a proven
 descendant, recurrence is an affirmative unexpected Tun/context close-order
@@ -10798,16 +10799,17 @@ API artifact convergence, then require the mixed one-hour rate window to clear
 before using the new projection as steady-state closure evidence.
 
 Connect commit `66aaad4` (the patch-identical rebased successor of historical
-commit `d3b49d9`) and Operator Proxy commit `35b0bc7` separately make a
+commit `d3b49d9`) and prober commit `35b0bc7` separately make a
 short-lived probe's final derived-client removal part of joined tunnel
 retirement. They prevent canceled control-plane cleanup from leaving active
 derived rows until the idle reaper, but do not repair legacy HMAC rejection or
 substitute for the concurrency correction. Require aggregate child-lifecycle
 evidence from §2.25 before attributing current fleet size or throughput to that
 adjacent leak, and require a Taskworker build containing current Connect
-`66aaad4` plus Operator Proxy `35b0bc7` before its post-deploy cleanup gate
-begins. The historical hash documents the original incident fix; it is not
-standing deployment guidance after the rebase.
+`66aaad4` plus prober commit `35b0bc7` (in Server's `qualityprobe` history
+since the 2026-09-26 import) before its post-deploy cleanup gate begins. The
+historical hash documents the original incident fix; it is not standing
+deployment guidance after the rebase.
 
 Correlate a stalled frame with its bounded `ProviderEgressProbe` Taskworker
 logs and generic task error. Repair the concrete authentication, API,
@@ -11037,9 +11039,9 @@ At 20:32 UTC, an exact bounded unsettled-escrow join matched the ~604.1 GB
 Redis reservation mirror: 13,668 contracts larger than 32 MiB held ~535.2 GB
 (88.6%) while 56,365 contracts at or below 1 MiB held ~59.1 GB. Thus the
 1 MiB blackhole opening target alone cannot explain the credit drain. Verify
-the deployed Taskworker/Operator Proxy artifact and attribute large contracts
-to a specific probe lane before changing reservation policy; source-tree code
-or contract size by itself is not deployed-lane proof.
+the deployed Taskworker artifact, which embeds the prober, and attribute large
+contracts to a specific probe lane before changing reservation policy;
+source-tree code or contract size by itself is not deployed-lane proof.
 The 20:42 UTC bounded direction join then identified 15,652 open/unsettled
 contracts over 32 MiB (about 578.3 GiB requested) as return-to-prober
 companions, versus only 39 own-source originals (about 1.25 GiB). Fresh
@@ -11080,7 +11082,7 @@ cleanup backlog therefore holds genuine reservations; changing the Redis mirror
 or manually funding the account would not repair that mechanism. Bootstrap's
 last successful grant and an unexpired token did not establish current affordability.
 
-The owning Operator Proxy correction gives only the cheap blackhole tunnel a
+The owning `qualityprobe` correction gives only the cheap blackhole tunnel a
 private 1 MiB contract-reservation ramp target using fresh client settings. It
 avoids the ordinary large unused successors for this small measurement; full
 probe and bandwidth tunnels keep their defaults. This is a per-request
@@ -11138,7 +11140,7 @@ These source tests do not attest a running Main image or explain every DoH PAGE;
 verify the deployed artifact and same-process logical outcome before
 attribution or closure.
 
-**Per-probe DoH ownership:** Taskworker's full and blackhole Operator Proxy
+**Per-probe DoH ownership:** Taskworker's full and blackhole `qualityprobe`
 checks each open a new `providertunnel.Tunnel`. Each tunnel constructs its own
 TUN and in-tunnel DoH cache and closes that cache with the tunnel; neither the
 task nor a shared transport-budget owner owns probe DNS state. The synthetic
@@ -11147,7 +11149,7 @@ one explicit transport owner and verifies distinct DoH caches and control
 strategies, including independent teardown. A later probe-concurrency change
 must preserve this boundary. This is a construction invariant, not a claim
 that a DoH-attempt timeout proves a whole logical DNS lookup failed. The
-Operator Proxy control-plane API/WebSocket dial uses a private per-tunnel
+`qualityprobe` control-plane API/WebSocket dial uses a private per-tunnel
 strategy but currently resolves its host names outside the in-tunnel DoH path;
 do not confuse that bootstrap resolution with provider egress DNS.
 
@@ -14006,10 +14008,11 @@ and 57,288 (90.7%) were active without a connection; the oldest residual was
 legacy Operator Proxy tunnel close canceled the shared generator context before
 cleanup completed, and legacy Connect final client removal did not wait for the
 remove response. Current Connect `66aaad4` (the patch-identical rebased
-successor of historical `d3b49d9`) and Operator Proxy `35b0bc7` correct new
-teardown, but an immutable Taskworker artifact must prove both exact sibling
-inputs because Server's local module replacements make its outer VCS stamp
-insufficient evidence. Do not require the superseded Connect hash to be an
+successor of historical `d3b49d9`) and prober commit `35b0bc7` correct new
+teardown. Since the 2026-09-26 `qualityprobe` import the prober fix is Server
+history, so Server's VCS stamp covers it; Connect is still a local module
+replacement, so an immutable Taskworker artifact must prove its exact Connect
+input separately. Do not require the superseded Connect hash to be an
 ancestor of a post-rebase build. That sample predates the lifetime-connection
 split and therefore records only the historical combined residual; it must not
 be assigned retroactively to either current branch.
