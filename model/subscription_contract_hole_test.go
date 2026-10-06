@@ -8,9 +8,11 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/urnetwork/server"
 )
 
@@ -29,6 +31,31 @@ func TestContractHoleKeysUseUnorderedClientIds(t *testing.T) {
 	if ContractHoleRefreshInterval*2 != ContractHoleTtl || contractHoleEventLifetime >= ContractHoleTtl {
 		t.Fatal("refresh cadence or replay-fence lifetime changed")
 	}
+}
+
+// One selected pair refuses Redis publication without disturbing other tests or
+// relying on dependency sleep. Disabling the instance restores its real client.
+type contractHoleRedisFailure struct {
+	key     string
+	enabled atomic.Bool
+}
+
+func (self *contractHoleRedisFailure) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (self *contractHoleRedisFailure) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, command redis.Cmder) error {
+		args := command.Args()
+		if self.enabled.Load() && command.Name() == "eval" && len(args) > 3 && args[3] == self.key {
+			return errors.New("synthetic contract-hole Redis refusal")
+		}
+		return next(ctx, command)
+	}
+}
+
+func (self *contractHoleRedisFailure) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
 }
 
 // The scalar, exact membership and TTL must agree after every mutation.
