@@ -33,14 +33,25 @@ type stNetworkEarningChain struct {
 	err      error
 }
 
+// One hotkey delegation's outcome at the epoch, shared by the network's
+// providers: the resolved wallet of the first provider that fell back to it,
+// and the global consent original that names its coldkey.
+type stHotkeyEarningChain struct {
+	wallet   *protocol.EarningWallet
+	original protocol.HotkeyWalletMappingConsent
+	err      error
+}
+
 // The signed roster selects each exact history head. Every retained original
 // is verified before selecting the latest consent effective at the requested
 // epoch; a future rotation never replaces the current epoch's wallet. A
 // provider's own consent effective at the epoch wins; a provider chain that is
 // absent from the roster or has no consent effective at the epoch falls back
-// to its network's chain (protocol.SelectEarningWallet, shared with the
-// independent verifier). Missing authority or any refused member returns no
-// partial wallet map.
+// to its network's chain, and a network chain that is absent or not effective
+// falls back to the network's hotkey delegation
+// (protocol.SelectEarningWalletWithHotkey, shared with the independent
+// verifier). Missing authority or any refused member returns no partial
+// wallet map.
 func GetStProviderWalletsForEpoch(ctx context.Context, authorityOriginal []byte, expected payoutartifact.WholeWorkExpectation, scope StProviderWalletEpochScope) (walletClientIds map[server.Id]*StProviderWallet, resultErr error) {
 	defer providerWorkRecover(&resultErr)
 	if ctx == nil || len(authorityOriginal) == 0 || expected.AuthoritySigner == (common.Address{}) || expected.ClientKeyRootSigner == (common.Address{}) || scope.StartTime.Unix() <= 0 {
@@ -126,17 +137,56 @@ func GetStProviderWalletsForEpoch(ctx context.Context, authorityOriginal []byte,
 		}
 		return &stNetworkEarningChain{mapping: mapping, original: originals[mapping.Statement.Generation-1]}
 	}
+	// The roster's pinned delegation head, the complete delegation chain
+	// through it and the global chain through the consent head of the
+	// delegation effective at the epoch, resolved by the shared protocol
+	// function with the same prospective gate. A network the roster pins no
+	// delegation for is absent.
+	hotkeyChain := func(networkId [16]byte, clientId [16]byte) *stHotkeyEarningChain {
+		pinned, ok := authority.HotkeyDelegation(networkId)
+		if !ok {
+			return &stHotkeyEarningChain{err: protocol.WalletMappingAbsentError()}
+		}
+		head, err := hex.DecodeString(pinned.DelegationHeadHash)
+		if err != nil || len(head) != 32 || hex.EncodeToString(head) != pinned.DelegationHeadHash {
+			return &stHotkeyEarningChain{err: protocol.ErrWalletMappingIntegrity}
+		}
+		delegations, err := ReadHotkeyNetworkDelegationHistory(ctx, scope.Domain, server.Id(networkId), pinned.DelegationGeneration, [32]byte(head))
+		if err != nil {
+			return &stHotkeyEarningChain{err: err}
+		}
+		expectation := protocol.HotkeyNetworkDelegationHistoryExpectation{Domain: scope.Domain, NetworkId: networkId, HeadHash: [32]byte(head), Generation: pinned.DelegationGeneration, Epoch: scope.Epoch}
+		// the delegation effective at the epoch names the global head to read
+		delegation, err := protocol.VerifyHotkeyNetworkDelegationHistory(ctx, delegations, expectation)
+		if err != nil {
+			return &stHotkeyEarningChain{err: err}
+		}
+		consents, err := ReadHotkeyWalletMappingHistory(ctx, scope.Domain.HotkeySubnet(), delegation.Statement.Hotkey, delegation.Statement.ConsentGeneration, delegation.Statement.ConsentHeadHash)
+		if err != nil {
+			return &stHotkeyEarningChain{err: err}
+		}
+		wallet, err := protocol.ResolveHotkeyEarningWallet(ctx, clientId, protocol.HotkeyEarningWalletEvidence{Delegations: delegations, DelegationExpected: expectation, Consents: consents}, expected.ClientKeyRootSigner, scope.Start.Number, scope.StartTime.Unix())
+		if err != nil {
+			return &stHotkeyEarningChain{err: err}
+		}
+		if wallet == nil || wallet.ConsentGeneration == 0 || uint64(len(consents)) < wallet.ConsentGeneration {
+			return &stHotkeyEarningChain{err: protocol.ErrWalletMappingIntegrity}
+		}
+		return &stHotkeyEarningChain{wallet: wallet, original: consents[wallet.ConsentGeneration-1]}
+	}
 	wallets := make(map[server.Id]*StProviderWallet, len(authority.ExpectedProviders))
-	// each network chain is read and verified at most once, and only when a
-	// provider of the network falls back to it
+	// each network chain and delegation is read and verified at most once, and
+	// only when a provider of the network falls back to it
 	networkIdChains := map[[16]byte]*stNetworkEarningChain{}
+	hotkeyNetworkIdChains := map[[16]byte]*stHotkeyEarningChain{}
 	for _, provider := range authority.ExpectedProviders {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		own, ownOriginal, ownErr := providerChain(provider)
 		var networkOriginal protocol.WalletMappingConsent
-		earning, err := protocol.SelectEarningWallet(own, ownErr, func() (*protocol.EarningWallet, error) {
+		var hotkeyOriginal protocol.HotkeyWalletMappingConsent
+		earning, err := protocol.SelectEarningWalletWithHotkey(own, ownErr, func() (*protocol.EarningWallet, error) {
 			chain := networkIdChains[provider.NetworkId]
 			if chain == nil {
 				chain = networkChain(provider.NetworkId)
@@ -147,13 +197,31 @@ func GetStProviderWalletsForEpoch(ctx context.Context, authorityOriginal []byte,
 			}
 			networkOriginal = chain.original
 			return protocol.NetworkEarningWallet(provider.ClientId, chain.mapping), nil
+		}, func() (*protocol.EarningWallet, error) {
+			chain := hotkeyNetworkIdChains[provider.NetworkId]
+			if chain == nil {
+				chain = hotkeyChain(provider.NetworkId, provider.ClientId)
+				hotkeyNetworkIdChains[provider.NetworkId] = chain
+			}
+			if chain.err != nil {
+				return nil, chain.err
+			}
+			hotkeyOriginal = chain.original
+			// the resolution names its client only; the rest is the network's
+			wallet := *chain.wallet
+			wallet.ClientId = provider.ClientId
+			return &wallet, nil
 		})
 		if err != nil {
 			return nil, err
 		}
 		original := ownOriginal
-		if earning.Mode == protocol.EarningWalletModeNetwork {
+		switch earning.Mode {
+		case protocol.EarningWalletModeNetwork:
 			original = networkOriginal
+		case protocol.EarningWalletModeHotkey:
+			// the global consent the coldkey signed names the earning wallet
+			original = protocol.WalletMappingConsent{Message: hotkeyOriginal.Message, Signature: hotkeyOriginal.ColdkeySignature}
 		}
 		if earning.ClientId != provider.ClientId || earning.NetworkId != provider.NetworkId {
 			return nil, protocol.ErrWalletMappingIntegrity
@@ -168,14 +236,19 @@ func GetStProviderWalletsForEpoch(ctx context.Context, authorityOriginal []byte,
 		// SetTime stays unknown: issuance is not the original acceptance time,
 		// and the account projection's timestamp has no selection authority.
 		resolution := &StPayoutWalletResolution{
-			ClientId:          clientId,
-			NetworkId:         server.Id(provider.NetworkId),
-			Mode:              earning.Mode,
-			Coldkey:           earning.Coldkey,
-			ConsentHash:       earning.OriginalHash,
-			ConsentGeneration: earning.Generation,
-			HeadHash:          earning.HeadHash,
-			HeadGeneration:    earning.HeadGeneration,
+			ClientId:                    clientId,
+			NetworkId:                   server.Id(provider.NetworkId),
+			Mode:                        earning.Mode,
+			Coldkey:                     earning.Coldkey,
+			ConsentHash:                 earning.OriginalHash,
+			ConsentGeneration:           earning.Generation,
+			HeadHash:                    earning.HeadHash,
+			HeadGeneration:              earning.HeadGeneration,
+			Hotkey:                      earning.Hotkey,
+			HotkeyConsentHash:           earning.ConsentOriginalHash,
+			HotkeyConsentGeneration:     earning.ConsentGeneration,
+			HotkeyConsentHeadHash:       earning.ConsentHeadHash,
+			HotkeyConsentHeadGeneration: earning.ConsentHeadGeneration,
 		}
 		wallets[clientId] = &StProviderWallet{ClientId: clientId, NetworkId: server.Id(provider.NetworkId), ColdkeySs58: address, ColdkeyPubkey: earning.Coldkey, OriginalMessage: &message, OriginalSignature: &signature, Resolution: resolution}
 	}

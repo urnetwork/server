@@ -24,11 +24,12 @@ func TestMigrationsNetworkWalletConsentCatalogFaultsReachSignal(t *testing.T) {
 		{name: "missing consent nonce reference", sql: snMainnetMigrationDropConstraint("network_wallet_mapping_consent", "f", "FOREIGN KEY (nonce) REFERENCES network_wallet_mapping_challenge(nonce)")},
 		{name: "missing challenge owner index", sql: `DROP INDEX network_wallet_mapping_challenge_owner`},
 		{name: "missing challenge guard", sql: `DROP TRIGGER network_wallet_mapping_challenge_guard ON network_wallet_mapping_challenge`},
-		{name: "missing resolution mode check", sql: snMainnetMigrationDropConstraint("st_payout_wallet_resolution", "c", "CHECK (((mode)::text = ANY ((ARRAY['provider'::character varying, 'network'::character varying])::text[])))")},
+		// the head carries v789's mode set, which this contract also admits
+		{name: "missing resolution mode check", sql: snMainnetMigrationDropConstraint("st_payout_wallet_resolution", "c", snMainnetResolutionHotkeyModes)},
 		{name: "missing resolution guard", sql: `DROP TRIGGER st_payout_wallet_resolution_guard ON st_payout_wallet_resolution`},
 		{name: "missing resolution truncate guard", sql: `DROP TRIGGER st_payout_wallet_resolution_truncate_guard ON st_payout_wallet_resolution`},
 		{name: "disabled consent guard", sql: `ALTER TABLE network_wallet_mapping_consent DISABLE TRIGGER network_wallet_mapping_consent_guard`},
-		{name: "widened resolution mode", sql: snMainnetMigrationDropConstraint("st_payout_wallet_resolution", "c", "CHECK (((mode)::text = ANY ((ARRAY['provider'::character varying, 'network'::character varying])::text[])))") + `; ALTER TABLE st_payout_wallet_resolution ADD CHECK (mode IN ('provider','network','side_copy'))`},
+		{name: "widened resolution mode", sql: snMainnetMigrationDropConstraint("st_payout_wallet_resolution", "c", snMainnetResolutionHotkeyModes) + `; ALTER TABLE st_payout_wallet_resolution ADD CHECK (mode IN ('provider','network','hotkey','side_copy'))`},
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
