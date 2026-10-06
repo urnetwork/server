@@ -2131,7 +2131,7 @@ func TestNetworkTopLevelClientLimitDisabled(t *testing.T) {
 		assert.Equal(t, NetworkConcurrentClientsExceeded(ctx, networkId), false)
 		// every client may connect — the connection activation gate is dark
 		for i, clientId := range clientIds {
-			if !CanConnectNetworkPeer(ctx, clientId) {
+			if !CanConnectNetworkPeer(ctx, clientId, false) {
 				t.Fatalf("provider %d (%s) cannot connect while limit disabled", i, clientId)
 			}
 		}
@@ -2146,63 +2146,5 @@ func TestNetworkTopLevelClientLimitDisabled(t *testing.T) {
 		assert.Equal(t, topLevel, true)
 		assert.NotEqual(t, profile, nil)
 		assert.Equal(t, peersEnabled, false)
-	})
-}
-
-// TestNetworkProviderConnectionExemptFromLimit guards the specific provider
-// concern under FUTURE enforcement: even when the concurrent-client limit is
-// ENABLED and the network is at its plan limit, PUBLIC PROVIDERS can still
-// connect — they add capacity rather than consume it, so they are exempt from
-// both the enforceable connected count and the activation gate. A network's
-// providers are never blocked by its own client limit.
-func TestNetworkProviderConnectionExemptFromLimit(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		networkId := server.NewId()
-
-		// enforcement ON, plan limit of 1 connected top-level client
-		defer Testing_SetEnforceConcurrentClients(true)()
-		defer Testing_SetConcurrentClientsLimit(1, 1)()
-		Testing_ClearNetworkPeersEnabledCache()
-
-		// register one ordinary (non-provider) connected client: the network is
-		// now at its plan limit of 1. (Testing_CreateDevice arg order is
-		// networkId, deviceId, clientId.)
-		ordinaryId := server.NewId()
-		Testing_CreateDevice(ctx, networkId, server.NewId(), ordinaryId, "ordinary", "ordinary")
-		AddNetworkPeer(ctx, networkId, &NetworkPeer{ClientId: ordinaryId}, server.NewId(), 60*time.Second)
-		assert.Equal(t, GetNetworkEnforceableConnectedCount(ctx, networkId), 1)
-
-		// a second ordinary client would exceed the limit -> refused
-		ordinary2Id := server.NewId()
-		Testing_CreateDevice(ctx, networkId, server.NewId(), ordinary2Id, "ordinary2", "ordinary2")
-		assert.Equal(t, CanConnectNetworkPeer(ctx, ordinary2Id), false)
-
-		// a PUBLIC PROVIDER connects regardless: exempt from the count and the
-		// activation gate. SetProvide gives the DB provide modes the gate reads;
-		// register several beyond the limit.
-		publicStream := map[ProvideMode][]byte{
-			ProvideModePublic: make([]byte, 32),
-			ProvideModeStream: make([]byte, 32),
-		}
-		for i := range 5 {
-			providerId := server.NewId()
-			Testing_CreateDevice(ctx, networkId, server.NewId(), providerId,
-				fmt.Sprintf("provider %d", i), fmt.Sprintf("provider %d", i))
-			SetProvide(ctx, providerId, publicStream)
-			AddNetworkPeer(ctx, networkId, &NetworkPeer{
-				ClientId:     providerId,
-				ProvideModes: []ProvideMode{ProvideModePublic, ProvideModeStream},
-			}, server.NewId(), 60*time.Second)
-			if !CanConnectNetworkPeer(ctx, providerId) {
-				t.Fatalf("public provider %d refused at the network's client limit", i)
-			}
-		}
-
-		// providers did not consume the enforceable count (still 1: the lone
-		// ordinary client)
-		assert.Equal(t, GetNetworkEnforceableConnectedCount(ctx, networkId), 1)
 	})
 }

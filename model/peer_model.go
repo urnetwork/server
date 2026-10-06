@@ -58,15 +58,18 @@ type NetworkPeer struct {
 }
 
 // NetworkPeerCategory distinguishes ordinary clients from hosted proxy clients
-// in the peer registry. Both count toward a network's connected client total,
-// but only clients appear in the peer list and receive peer subscriptions: a
-// hosted proxy device is controlled remotely and does not participate as a
-// visible peer.
+// and provider installs in the peer registry. All count toward a network's
+// connected client total by their rules, but only clients appear in the peer
+// list and receive peer subscriptions: a hosted proxy device is controlled
+// remotely, and a provider install (a top-level client created with provide
+// intent, provider_intent_model.go) only provides, and an embedded fleet of
+// them must not scale the peer fan-out.
 type NetworkPeerCategory int
 
 const (
-	NetworkPeerCategoryClient NetworkPeerCategory = 0
-	NetworkPeerCategoryProxy  NetworkPeerCategory = 1
+	NetworkPeerCategoryClient   NetworkPeerCategory = 0
+	NetworkPeerCategoryProxy    NetworkPeerCategory = 1
+	NetworkPeerCategoryProvider NetworkPeerCategory = 2
 )
 
 // use gob encoding for `networkPeerMeta` which is more compact than json
@@ -100,6 +103,13 @@ func networkPeerDisconnectedKey(networkId server.Id) string {
 // client peer flow never reads.
 func networkPeerConnectedProxyKey(networkId server.Id) string {
 	return fmt.Sprintf("{np_%s}connected_proxy", networkId)
+}
+
+// zset: provider install client id bytes scored by expiry unix milli. Like
+// proxy clients, provider installs are counted by the client limit rules but
+// never appear in the peer list, so they live in their own zset.
+func networkPeerConnectedProviderKey(networkId server.Id) string {
+	return fmt.Sprintf("{np_%s}connected_provider", networkId)
 }
 
 // the per-network version counter (PEERS2.md): INCR'd on every visible
@@ -332,6 +342,11 @@ const networkPeersRecentAuthWindow = 14 * 24 * time.Hour
 // truly-connected set (it also includes clients that disconnected within the
 // window), so it still errs toward disabling for genuinely busy networks.
 //
+// Provider installs (clients created with provide intent, a
+// network_client_provider_intent row) are not counted: they never register as
+// peers, so they add no fan-out, and a network with an embedded provider fleet
+// keeps the peer list for its other clients.
+//
 // This valve is enforced INDEPENDENTLY of enforce_concurrent_clients: it only
 // removes the peer feature. The connection and creation caps
 // (NetworkConcurrentClientsExceeded, CanConnectNetworkPeer, AuthNetworkClient)
@@ -356,7 +371,11 @@ func NetworkPeersEnabled(ctx context.Context, networkId server.Id) bool {
 						network_id = $1 AND
 						active = true AND
 						source_client_id IS NULL AND
-						auth_time > $3
+						auth_time > $3 AND
+						NOT EXISTS (
+							SELECT 1 FROM network_client_provider_intent
+							WHERE network_client_provider_intent.client_id = network_client.client_id
+						)
 					LIMIT $2
 				) t
 			`,
@@ -381,7 +400,8 @@ func NetworkPeersEnabled(ctx context.Context, networkId server.Id) bool {
 // whether the network is enabled for peers (`NetworkPeersEnabled`, typically
 // resolved from the process-local cache so no additional query is made).
 // `peer` is nil when the client does not exist or is not active. `category` is
-// proxy when the client has a hosted proxy device (a proxy_device_config row).
+// proxy when the client has a hosted proxy device (a proxy_device_config row),
+// and provider for a provider install (a network_client_provider_intent row).
 // `peersEnabled` is false whenever the client is not an active top-level client.
 func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId server.Id, topLevel bool, category NetworkPeerCategory, peer *NetworkPeer, peersEnabled bool) {
 	server.Db(ctx, func(conn server.PgConn) {
@@ -397,7 +417,11 @@ func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId s
 					EXISTS (
 						SELECT 1 FROM proxy_device_config
 						WHERE proxy_device_config.client_id = network_client.client_id
-					) AS is_proxy
+					) AS is_proxy,
+					EXISTS (
+						SELECT 1 FROM network_client_provider_intent
+						WHERE network_client_provider_intent.client_id = network_client.client_id
+					) AS is_provider
 				FROM network_client
 				LEFT JOIN device ON
 					device.device_id = network_client.device_id
@@ -414,6 +438,7 @@ func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId s
 				var deviceName *string
 				var deviceSpec *string
 				var isProxy bool
+				var isProvider bool
 				server.Raise(result.Scan(
 					&networkId,
 					&sourceClientId,
@@ -421,10 +446,13 @@ func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId s
 					&deviceName,
 					&deviceSpec,
 					&isProxy,
+					&isProvider,
 				))
 				topLevel = sourceClientId == nil
 				if isProxy {
 					category = NetworkPeerCategoryProxy
+				} else if isProvider {
+					category = NetworkPeerCategoryProvider
 				}
 				peer = &NetworkPeer{
 					ClientId: clientId,
@@ -1067,9 +1095,9 @@ func pruneNetworkProxyPeers(ctx context.Context, r server.RedisClient, networkId
 }
 
 // GetNetworkConnectedCount returns the number of connected top-level clients of
-// a network, counting both ordinary clients and hosted proxy clients. This is
-// the combined connected total a client+proxy quota would enforce against; it
-// is exposed for accounting and not enforced here.
+// a network, counting ordinary clients, hosted proxy clients and provider
+// installs. This is the combined connected total a client+proxy quota would
+// enforce against; it is exposed for accounting and not enforced here.
 func GetNetworkConnectedCount(ctx context.Context, networkId server.Id) (count int) {
 	server.Redis(ctx, func(r server.RedisClient) {
 		nowMs := server.NowUtc().UnixMilli()
@@ -1079,87 +1107,85 @@ func GetNetworkConnectedCount(ctx context.Context, networkId server.Id) (count i
 		pipe := r.TxPipeline()
 		clientCmd := pipe.ZCount(ctx, networkPeerConnectedKey(networkId), liveMin, "+inf")
 		proxyCmd := pipe.ZCount(ctx, networkPeerConnectedProxyKey(networkId), liveMin, "+inf")
+		providerCmd := pipe.ZCount(ctx, networkPeerConnectedProviderKey(networkId), liveMin, "+inf")
 		_, err := pipe.Exec(ctx)
 		if err != nil && err != server.RedisNil {
 			panic(err)
 		}
-		count = int(clientCmd.Val()) + int(proxyCmd.Val())
+		count = int(clientCmd.Val()) + int(proxyCmd.Val()) + int(providerCmd.Val())
 	})
 	return
 }
 
-// isPublicProvider reports whether a peer is running as a public provider, i.e.
-// it offers BOTH public and stream provide modes. Public providers contribute
-// capacity to the network rather than consuming it, so they are exempt from the
-// connected top-level client limit.
-func isPublicProvider(peer *NetworkPeer) bool {
-	if peer == nil {
-		return false
-	}
-	public := false
-	stream := false
-	for _, provideMode := range peer.ProvideModes {
-		switch provideMode {
-		case ProvideModePublic:
-			public = true
-		case ProvideModeStream:
-			stream = true
+// Registers a connected provider install. Like a proxy client it is counted
+// (by the provider intent rules, see GetNetworkConnectedClientCounts) and never
+// appears in the peer list or emits events. Refresh by calling again with a
+// fresh ttl.
+func AddNetworkProviderPeer(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+	ttl time.Duration,
+) {
+	member := string(clientId.Bytes())
+	expiryMs := server.NowUtc().Add(ttl).UnixMilli()
+
+	server.Redis(ctx, func(r server.RedisClient) {
+		pipe := r.TxPipeline()
+		pipe.ZAdd(ctx, networkPeerConnectedProviderKey(networkId), redis.Z{
+			Score:  float64(expiryMs),
+			Member: member,
+		})
+		pipe.Expire(ctx, networkPeerConnectedProviderKey(networkId), networkPeerKeyTtl)
+		_, err := pipe.Exec(ctx)
+		if err != nil {
+			panic(err)
 		}
-	}
-	return public && stream
+		// age out expired installs, piggybacked on install activity
+		err = r.ZRemRangeByScore(
+			ctx,
+			networkPeerConnectedProviderKey(networkId),
+			"-inf",
+			strconv.FormatInt(server.NowUtc().UnixMilli(), 10),
+		).Err()
+		if err != nil {
+			panic(err)
+		}
+	})
+}
+
+// Removes a connected provider install.
+func RemoveNetworkProviderPeer(
+	ctx context.Context,
+	networkId server.Id,
+	clientId server.Id,
+) {
+	member := string(clientId.Bytes())
+	server.Redis(ctx, func(r server.RedisClient) {
+		err := r.ZRem(ctx, networkPeerConnectedProviderKey(networkId), member).Err()
+		if err != nil {
+			panic(err)
+		}
+	})
 }
 
 // GetNetworkEnforceableConnectedCount returns the number of connected top-level
-// clients that count toward a network's concurrent-client limit: the same set as
-// GetNetworkConnectedCount, minus any client running as a public provider
-// (public + stream provide mode), which is exempt.
+// clients that count toward a network's concurrent-client limit: ordinary
+// clients, hosted proxy clients and intent clients that failed the provider
+// qualification. An intent client in its qualification grace or qualified as a
+// provider is counted separately (GetNetworkConnectedClientCounts) and is
+// exempt while it holds a live intent connection; without declared intent a
+// public provider counts like any client.
 //
 // This is the count to compare against model.Pro().ConcurrentClientsExceeded.
-// Hosted proxy clients never register provide modes, so they can never be exempt
-// and always count.
 func GetNetworkEnforceableConnectedCount(ctx context.Context, networkId server.Id) (count int) {
-	server.Redis(ctx, func(r server.RedisClient) {
-		nowMs := server.NowUtc().UnixMilli()
-		// count only entries whose expiry is still in the future
-		liveMin := strconv.FormatInt(nowMs+1, 10)
-
-		pipe := r.TxPipeline()
-		metaCmd := pipe.HGetAll(ctx, networkPeerMetaKey(networkId))
-		connectedCmd := pipe.ZRangeByScore(ctx, networkPeerConnectedKey(networkId), &redis.ZRangeBy{
-			Min: liveMin,
-			Max: "+inf",
-		})
-		proxyCmd := pipe.ZCount(ctx, networkPeerConnectedProxyKey(networkId), liveMin, "+inf")
-		_, err := pipe.Exec(ctx)
-		if err != nil && err != server.RedisNil {
-			panic(err)
-		}
-
-		metas, err := metaCmd.Result()
-		if err != nil && err != server.RedisNil {
-			panic(err)
-		}
-		connected, err := connectedCmd.Result()
-		if err != nil && err != server.RedisNil {
-			panic(err)
-		}
-
-		count = int(proxyCmd.Val())
-		for _, member := range connected {
-			meta, _ := loadNetworkPeerMeta([]byte(metas[member]))
-			if meta != nil && isPublicProvider(meta.Peer) {
-				// exempt: this client provides for the network
-				continue
-			}
-			count += 1
-		}
-	})
+	count, _ = GetNetworkConnectedClientCounts(ctx, networkId)
 	return
 }
 
 // isNetworkPeerConnected reports whether a client is currently registered as a
-// connected top-level client (ordinary or hosted proxy) whose entry has not yet
-// expired.
+// connected top-level client (ordinary, hosted proxy or provider install) whose
+// entry has not yet expired.
 func isNetworkPeerConnected(ctx context.Context, networkId server.Id, clientId server.Id) (connected bool) {
 	member := string(clientId.Bytes())
 
@@ -1169,12 +1195,13 @@ func isNetworkPeerConnected(ctx context.Context, networkId server.Id, clientId s
 		pipe := r.TxPipeline()
 		clientCmd := pipe.ZScore(ctx, networkPeerConnectedKey(networkId), member)
 		proxyCmd := pipe.ZScore(ctx, networkPeerConnectedProxyKey(networkId), member)
+		providerCmd := pipe.ZScore(ctx, networkPeerConnectedProviderKey(networkId), member)
 		_, err := pipe.Exec(ctx)
 		if err != nil && err != server.RedisNil {
 			panic(err)
 		}
 
-		for _, cmd := range []*redis.FloatCmd{clientCmd, proxyCmd} {
+		for _, cmd := range []*redis.FloatCmd{clientCmd, proxyCmd, providerCmd} {
 			if expiryMs, err := cmd.Result(); err == nil && nowMs < int64(expiryMs) {
 				connected = true
 				return
@@ -1189,7 +1216,7 @@ func isNetworkPeerConnected(ctx context.Context, networkId server.Id, clientId s
 //
 // While enforcement is dark this returns false IMMEDIATELY, with no redis and no db
 // lookup, so shipping the gate costs nothing on the auth hot path -- the cost only
-// arrives with the rollout. Public providers are exempt from the count, and Pro is
+// arrives with the rollout. Exempt intent providers are not counted, and Pro is
 // read live (never from the jwt's stale claim). This is the client-creation gate;
 // CanConnectNetworkPeer is the connection-activation gate.
 func NetworkConcurrentClientsExceeded(ctx context.Context, networkId server.Id) bool {
@@ -1210,27 +1237,30 @@ func NetworkConcurrentClientsExceeded(ctx context.Context, networkId server.Id) 
 // It is always true when:
 //   - enforcement is dark (pro.yml enforce_concurrent_clients = false);
 //   - the client is not a top-level client — only top-level clients count;
-//   - the client runs as a public provider (public + stream provide mode), which
-//     adds capacity to the network rather than consuming it, and so is exempt;
 //   - the client is already registered as connected — a re-nomination (e.g.
 //     resident replacement) is not a new connection and is already counted.
 //
-// Otherwise the network's enforceable connected count is compared against its
-// tier limit. This is the connection-activation gate; AuthNetworkClient applies
-// the same limit at client creation. It fails open (allows) for an unknown
-// client.
-func CanConnectNetworkPeer(ctx context.Context, clientId server.Id) bool {
+// A connection that declared provide intent is judged by its provider intent
+// check instead (ConnectProviderIntent): the client is exempt while pending or
+// qualified, a client that failed holds a normal slot that was decided
+// atomically, and only a client over the limit is refused. Otherwise the
+// network's enforceable connected count is compared against its tier limit. A
+// public provider without declared intent counts like any client. This is the
+// connection-activation gate; AuthNetworkClient applies the same limit at
+// client creation. It fails open (allows) for an unknown client.
+func CanConnectNetworkPeer(ctx context.Context, clientId server.Id, provideIntent bool) bool {
 	// dark, or no pro.yml at all -> allowed, and no i/o to find that out
 	if !Pro().EnforceConcurrentClients {
 		return true
 	}
 
-	networkId, topLevel, _, peer, _ := GetNetworkPeerProfile(ctx, clientId)
+	networkId, topLevel, _, _, _ := GetNetworkPeerProfile(ctx, clientId)
 	if !topLevel {
 		return true
 	}
-	if isPublicProvider(peer) {
-		return true
+	if provideIntent {
+		state := GetProviderIntentState(ctx, networkId, clientId)
+		return state == nil || state.Status != ProviderIntentStatusOverLimit
 	}
 	if isNetworkPeerConnected(ctx, networkId, clientId) {
 		return true

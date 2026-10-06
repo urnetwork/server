@@ -194,6 +194,13 @@ type AuthNetworkClientArgs struct {
 
 	ProxyConfig *ProxyConfig `json:"proxy_config,omitempty"`
 
+	// a new top-level client that will provide publicly. Its creation is exempt
+	// from the top-level client cap and the concurrent connected client check:
+	// providers do not count toward the client limit, and the connection's
+	// provider intent check keeps the flag honest (provider_intent_model.go).
+	// Ignored for a re-auth and for an ancillary client.
+	ProvideIntent bool `json:"provide_intent,omitempty"`
+
 	// TimeZone is the device's IANA zone (e.g. "America/Los_Angeles"), used
 	// only to place the onboarding campaign's sends in the user's local day.
 	// Optional; never stored on the client.
@@ -420,13 +427,13 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 
 		// Client-creation gate for the plan's concurrent connected-client limit:
 		// Do not provision a new top-level client while the network is already at its
-		// connected limit. Only top-level clients count and public providers are
-		// exempt; Pro is read live rather than from the jwt's stale claim; and while
-		// the rollout is dark this does no redis/db work at all. See
-		// NetworkConcurrentClientsExceeded. Checked before the tx so the lookup does
-		// not hold it open. Connection activation applies the same limit; see
-		// CanConnectNetworkPeer.
-		concurrentLimitExceeded := authClient.SourceClientId == nil && NetworkConcurrentClientsExceeded(session.Ctx, session.ByJwt.NetworkId)
+		// connected limit. Only top-level clients count and a client created with
+		// provide intent is exempt, like an intent provider at connect; Pro is read
+		// live rather than from the jwt's stale claim; and while the rollout is dark
+		// this does no redis/db work at all. See NetworkConcurrentClientsExceeded.
+		// Checked before the tx so the lookup does not hold it open. Connection
+		// activation applies the same limit; see CanConnectNetworkPeer.
+		concurrentLimitExceeded := authClient.SourceClientId == nil && !authClient.ProvideIntent && NetworkConcurrentClientsExceeded(session.Ctx, session.ByJwt.NetworkId)
 		if concurrentLimitExceeded && registration == nil {
 			authClientResult = &AuthNetworkClientResult{
 				Error: &AuthNetworkClientError{
@@ -541,8 +548,10 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 				// count is hard limited (see peer_model.go). Gated by
 				// enforce_concurrent_clients: while the concurrent-client rollout
 				// is dark, this cap is not enforced and no count runs at all (see
-				// pro.yml). Provisioning must never be refused while dark.
-				if Pro().EnforceConcurrentClients {
+				// pro.yml). Provisioning must never be refused while dark. A
+				// provider install (provide intent) is exempt and is not counted:
+				// it never becomes a peer (NetworkPeerCategoryProvider).
+				if Pro().EnforceConcurrentClients && !authClient.ProvideIntent {
 					// the scan is bounded at the limit since only the threshold matters
 					result, err := tx.Query(
 						session.Ctx,
@@ -554,7 +563,11 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 								WHERE
 									network_id = $1 AND
 									active = true AND
-									source_client_id IS NULL
+									source_client_id IS NULL AND
+									NOT EXISTS (
+										SELECT 1 FROM network_client_provider_intent
+										WHERE network_client_provider_intent.client_id = network_client.client_id
+									)
 								LIMIT $2
 							) t
 						`,
@@ -693,6 +706,22 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, session *session.Clien
 				authClient.SourceClientId,
 				principal,
 			))
+
+			if authClient.ProvideIntent && authClient.SourceClientId == nil {
+				// a provider install for its life (NetworkPeerCategoryProvider)
+				server.RaisePgResult(tx.Exec(
+					session.Ctx,
+					`
+						INSERT INTO network_client_provider_intent (
+							client_id,
+							create_time
+						)
+						VALUES ($1, $2)
+					`,
+					clientId,
+					createTime,
+				))
+			}
 
 			if 0 < len(roles) {
 				server.BatchInTx(session.Ctx, tx, func(batch server.PgBatch) {
@@ -3106,6 +3135,15 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 				ctx,
 				`
 				DELETE FROM client_tls_certificate
+				WHERE client_id = ANY($1::uuid[])
+				`,
+				idStrings(chunk),
+			))
+			// (cascade) and their provider install category
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				DELETE FROM network_client_provider_intent
 				WHERE client_id = ANY($1::uuid[])
 				`,
 				idStrings(chunk),
