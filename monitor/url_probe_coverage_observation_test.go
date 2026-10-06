@@ -33,7 +33,7 @@ func runUrlProbeObservationFixture(t *testing.T, now time.Time, payload string, 
 	signal.probe = urlProbeCoverageProbe{loadDesired: func() (urlProbeCoverageDesired, error) {
 		return urlProbeCoverageDesired{enabled: true, shardCount: 2}, nil
 	}}
-	alerts, err := signal.Run(context.Background(), settings)
+	alerts, err := NewWithSignals(settings, signal).Run(context.Background())
 	if contacts != 1 {
 		t.Fatalf("observation added or skipped source reads: %d", contacts)
 	}
@@ -166,7 +166,7 @@ func TestUrlProbeObservationOutputFailureRetainsAlerts(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "synthetic-private") {
 		t.Fatal("output error was hidden or leaked")
 	}
-	if len(alerts) != 1 {
+	if len(alerts) != 2 {
 		t.Fatalf("output failure discarded real findings: %d", len(alerts))
 	}
 	requireAlertClass(t, alerts, "url-probe-coverage-deficit")
