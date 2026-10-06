@@ -1393,9 +1393,9 @@ type TaskWorkerSettings struct {
 	// functions to unwind; a function that ignores its context keeps its
 	// claim lease and rides to the process kill
 	DrainCancelTimeout time.Duration
-	// bounds the detached transaction that records completion/reschedule and
-	// releases claims after task functions return. It deliberately outlives
-	// the serving root context during shutdown.
+	// bounds each detached transaction that records a returned task's
+	// completion/reschedule. It deliberately outlives the serving root context
+	// during shutdown; batch advisory ownership stays until all tasks join.
 	FinalizeTimeout time.Duration
 }
 
@@ -1417,6 +1417,7 @@ type TaskWorker struct {
 	// heartbeat and a pooled refresh panic with explicit barriers. Every worker
 	// constructed through NewTaskWorker receives the real clock and DB write.
 	heartbeatAfter             func(time.Duration) <-chan time.Time
+	heartbeatNow               func() time.Time
 	refreshTaskTimestampLeases func(context.Context, map[server.Id]*Task)
 	// Drain logs are best effort: a full stdout pipe must not hold shutdown.
 	drainLogf func(string, ...any)
@@ -1454,6 +1455,7 @@ func NewTaskWorker(ctx context.Context, settings *TaskWorkerSettings) *TaskWorke
 		targetMetricNames:          map[string]string{},
 		settings:                   settings,
 		heartbeatAfter:             time.After,
+		heartbeatNow:               time.Now,
 		refreshTaskTimestampLeases: refreshTaskTimestampLeases,
 		drainLogf:                  glog.Infof,
 		claimTargetCounts:          map[string]int{},
@@ -2046,6 +2048,17 @@ func tryRefreshTaskTimestampLeases(
 	return nil
 }
 
+// One completed execution; its durable handback is independent of the other
+// task functions claimed by the same evaluator.
+type taskExecutionResult struct {
+	task         *Task
+	err          error
+	runStartTime time.Time
+	runEndTime   time.Time
+	resultJson   string
+	runPost      func(server.PgTx) ([]server.PostFunction, error)
+}
+
 // return taskIds of the finished tasks, rescheduled tasks
 func (self *TaskWorker) EvalTasks(n int) (
 	finishedTaskIds []server.Id,
@@ -2081,21 +2094,8 @@ func (self *TaskWorker) EvalTasks(n int) (
 		task.FunctionName = updateFunctionName(task.FunctionName)
 	}
 
-	type finished struct {
-		runStartTime time.Time
-		runEndTime   time.Time
-		resultJson   string
-		runPost      func(server.PgTx) ([]server.PostFunction, error)
-	}
-
-	type result struct {
-		task *Task
-		err  error
-		finished
-	}
-
 	taskCtx, taskCancel := context.WithCancel(evalCtx)
-	results := make(chan *result)
+	results := make(chan *taskExecutionResult)
 	executionAdmissions := claimGuard.retainExecutionAdmissions(tasks)
 
 	go server.HandleError(func() {
@@ -2120,11 +2120,9 @@ func (self *TaskWorker) EvalTasks(n int) (
 				taskExecutionInflight.WithLabelValues(metricName, attribution).Inc()
 				defer taskExecutionInflight.WithLabelValues(metricName, attribution).Dec()
 
-				r := &result{
-					task: task,
-					finished: finished{
-						runStartTime: server.NowUtc(),
-					},
+				r := &taskExecutionResult{
+					task:         task,
+					runStartTime: server.NowUtc(),
 				}
 				if target, ok := self.targets[task.FunctionName]; ok {
 					glog.V(1).Infof("[%s]eval start %s(%s)\n", task.TaskId, task.FunctionName, ArgumentsForLog(task.ArgsJson))
@@ -2200,15 +2198,97 @@ func (self *TaskWorker) EvalTasks(n int) (
 		wg.Wait()
 	})
 
-	finishedTasks := map[server.Id]*finished{}
-	rescheduledTasks := map[server.Id]error{}
-	postRescheduledTasks := map[server.Id]error{}
+	// The launcher concurrently ranges tasks. These collector-owned maps track
+	// receipt and durable handback separately, including an ambiguous commit.
+	unreceivedTasks := make(map[server.Id]*Task, len(tasks))
+	heartbeatTasks := make(map[server.Id]*Task, len(tasks))
+	for taskId, task := range tasks {
+		unreceivedTasks[taskId] = task
+		heartbeatTasks[taskId] = task
+	}
+	var commitPosts []server.PostFunction
+	var finalizePanic any
+	finalize := func(r *taskExecutionResult) {
+		// A failed handback must not unwind the batch guard while unrelated
+		// task functions are still executing. Do not replay an unknown commit.
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				if finalizePanic == nil {
+					finalizePanic = recovered
+				}
+				glog.Infof("[%s]task finalization failed: %v\n", r.task.TaskId, recovered)
+			}
+		}()
+		posts, postRescheduled := self.finalizeTask(r)
+		delete(heartbeatTasks, r.task.TaskId)
+		commitPosts = append(commitPosts, posts...)
+		switch {
+		case r.err != nil:
+			rescheduledTaskIds = append(rescheduledTaskIds, r.task.TaskId)
+			taskFinalizationsTotal.WithLabelValues("rescheduled").Inc()
+		case postRescheduled:
+			postRescheduledTaskIds = append(postRescheduledTaskIds, r.task.TaskId)
+			taskFinalizationsTotal.WithLabelValues("post_rescheduled").Inc()
+		default:
+			finishedTaskIds = append(finishedTaskIds, r.task.TaskId)
+			taskFinalizationsTotal.WithLabelValues("succeeded").Inc()
+		}
+	}
 
 	func() {
 		defer taskCancel()
 
-		startTime := time.Now()
+		startTime := self.heartbeatNow()
+		nextHeartbeatTime := startTime.Add(ReleaseTimeout / 3)
+		heartbeat := func() {
+			elapsedSeconds := float32(self.heartbeatNow().Sub(startTime)/time.Millisecond) / 1000
+			if 10 <= elapsedSeconds {
+				for _, task := range heartbeatTasks {
+					glog.Infof("[%s]eval active(%.2fs) %s(%s)\n", task.TaskId, elapsedSeconds, task.FunctionName, ArgumentsForLog(task.ArgsJson))
+				}
+			}
+
+			// A drain give-up can cancel the serving root while a
+			// context-ignoring task is still unwinding. Keep its lease
+			// heartbeat bounded but detached too; otherwise a canceled
+			// heartbeat panics out of EvalTasks before the later result
+			// can reach the detached finalization transaction.
+			heartbeatTimeout := self.settings.FinalizeTimeout
+			if heartbeatTimeout <= 0 {
+				heartbeatTimeout = DefaultTaskFinalizeTimeout
+			}
+			heartbeatCtx, heartbeatCancel := context.WithTimeout(
+				context.WithoutCancel(self.ctx),
+				heartbeatTimeout,
+			)
+			// Keep the direct session carrying the advisory ownership lock
+			// active and fail this evaluation if that ownership session is lost.
+			func() {
+				defer heartbeatCancel()
+				server.Raise(claimGuard.ping(heartbeatCtx))
+				if err := tryRefreshTaskTimestampLeases(
+					heartbeatCtx,
+					heartbeatTasks,
+					self.refreshTaskTimestampLeases,
+				); err != nil {
+					taskTimestampLeaseRefreshErrorCounter.Inc()
+					glog.Infof(
+						"[taskworker]timestamp lease refresh failed while advisory ownership remained healthy: %v\n",
+						err,
+					)
+				}
+			}()
+			nextHeartbeatTime = self.heartbeatNow().Add(ReleaseTimeout / 3)
+		}
 		for {
+			// Finalizing ready results must not reset the lease clock. Check
+			// an overdue heartbeat between bounded handbacks even when result
+			// delivery is continuously ready; the guard connection stays serial.
+			heartbeatDelay := nextHeartbeatTime.Sub(self.heartbeatNow())
+			if heartbeatDelay <= 0 {
+				heartbeat()
+				continue
+			}
 			select {
 			case <-taskCtx.Done():
 				return
@@ -2219,251 +2299,28 @@ func (self *TaskWorker) EvalTasks(n int) (
 				elapsedSeconds := float32(r.runEndTime.Sub(r.runStartTime)/time.Millisecond) / 1000
 				if r.err == nil {
 					glog.V(1).Infof("[%s]eval done(%.2fs) %s(%s) = %s\n", r.task.TaskId, elapsedSeconds, r.task.FunctionName, ArgumentsForLog(r.task.ArgsJson), string(r.resultJson))
-					finishedTasks[r.task.TaskId] = &r.finished
 				} else {
 					glog.Infof("[%s]eval error(%.2fs) (reschedule) %s(%s) = %s\n", r.task.TaskId, elapsedSeconds, r.task.FunctionName, ArgumentsForLog(r.task.ArgsJson), r.err)
-					rescheduledTasks[r.task.TaskId] = r.err
 				}
 
-			case <-self.heartbeatAfter(ReleaseTimeout / 3):
-				elapsedSeconds := float32(time.Now().Sub(startTime)/time.Millisecond) / 1000
-				if 10 <= elapsedSeconds {
-					for _, task := range tasks {
-						glog.Infof("[%s]eval active(%.2fs) %s(%s)\n", task.TaskId, elapsedSeconds, task.FunctionName, ArgumentsForLog(task.ArgsJson))
-					}
-				}
+				delete(unreceivedTasks, r.task.TaskId)
+				finalize(r)
 
-				// A drain give-up can cancel the serving root while a
-				// context-ignoring task is still unwinding. Keep its lease
-				// heartbeat bounded but detached too; otherwise a canceled
-				// heartbeat panics out of EvalTasks before the later result
-				// can reach the detached finalization transaction.
-				heartbeatTimeout := self.settings.FinalizeTimeout
-				if heartbeatTimeout <= 0 {
-					heartbeatTimeout = DefaultTaskFinalizeTimeout
-				}
-				heartbeatCtx, heartbeatCancel := context.WithTimeout(
-					context.WithoutCancel(self.ctx),
-					heartbeatTimeout,
-				)
-				// Keep the direct session carrying the advisory ownership lock
-				// active and fail this evaluation if that ownership session is lost.
-				func() {
-					defer heartbeatCancel()
-					server.Raise(claimGuard.ping(heartbeatCtx))
-					if err := tryRefreshTaskTimestampLeases(
-						heartbeatCtx,
-						tasks,
-						self.refreshTaskTimestampLeases,
-					); err != nil {
-						taskTimestampLeaseRefreshErrorCounter.Inc()
-						glog.Infof(
-							"[taskworker]timestamp lease refresh failed while advisory ownership remained healthy: %v\n",
-							err,
-						)
-					}
-				}()
+			case <-self.heartbeatAfter(heartbeatDelay):
+				heartbeat()
 			}
 		}
 	}()
 
-	for _, task := range tasks {
-		_, rescheduled := rescheduledTasks[task.TaskId]
-		_, finished := finishedTasks[task.TaskId]
-		if !rescheduled && !finished {
-			// this task was not recorded
-			// treat it as rescheduled
-			// LOG("Task not run.")
-
-			rescheduledTasks[task.TaskId] = errors.New("Task not run.")
-		}
+	for _, task := range unreceivedTasks {
+		finalize(&taskExecutionResult{task: task, err: errors.New("Task not run.")})
 	}
-
-	finalizeTimeout := self.settings.FinalizeTimeout
-	if finalizeTimeout <= 0 {
-		finalizeTimeout = DefaultTaskFinalizeTimeout
-	}
-	finalizeCtx, finalizeCancel := context.WithTimeout(
-		context.WithoutCancel(self.ctx),
-		finalizeTimeout,
-	)
-	defer finalizeCancel()
-
-	var commitPosts []server.PostFunction
-	server.Tx(finalizeCtx, func(tx server.PgTx) {
-		// a rerun callback starts over: the post errors and the work of a
-		// rolled-back attempt must not outlive it
-		commitPosts = nil
-		clear(postRescheduledTasks)
-
-		server.BatchInTx(finalizeCtx, tx, func(batch server.PgBatch) {
-			for taskId, finished := range finishedTasks {
-				batch.Queue(
-					`
-					INSERT INTO finished_task (
-						task_id,
-				        function_name,
-				        args_json,
-				        client_address,
-				        client_address_hash,
-				        client_address_port,
-				        client_by_jwt_json,
-				        run_at,
-				        run_once_key,
-				        run_priority,
-				        run_max_time_seconds,
-
-				        run_start_time,
-				        run_end_time,
-				        reschedule_error,
-				        result_json
-					)
-					SELECT
-						task_id,
-				        function_name,
-				        args_json,
-				        client_address,
-				        client_address_hash,
-				        client_address_port,
-				        client_by_jwt_json,
-				        run_at,
-				        run_once_key,
-				        run_priority,
-				        run_max_time_seconds,
-
-				        $2 AS run_start_time,
-				        $3 AS run_end_time,
-				        reschedule_error,
-				        $4 AS result_json
-					
-					FROM pending_task
-					WHERE task_id = $1
-					`,
-					taskId,
-					finished.runStartTime,
-					finished.runEndTime,
-					finished.resultJson,
-				)
-
-				batch.Queue(
-					`
-					DELETE FROM pending_task
-					WHERE task_id = $1
-					`,
-					taskId,
-				)
-			}
-
-			for taskId, err := range rescheduledTasks {
-				now := server.NowUtc()
-				// Exponential backoff is computed in Go so saturated retries can
-				// receive proportional jitter. The first error retains the old
-				// fast cadence (transient blips stay fast); a wedged cohort
-				// converges to a one-hour mean while spreading retries across a
-				// full hour instead of preserving an outage wave. The exponent
-				// remains clamped to keep power() bounded.
-				//
-				// Two error classes adjust the backoff:
-				// - drained (operator-caused): no error-count advance and a
-				//   flat ~RescheduleTimeout retry; release_time = now below
-				//   releases the claim so another worker re-runs immediately
-				// - target not found (deploy version skew): the count still
-				//   advances (visibility) but the exponent clamps low, so the
-				//   retry converges to ~16s instead of the backoff cap
-				// A classified failure hint or registered target cap can retain
-				// its cadence while preserving this same failing task and count.
-				delay, errorCountDelta := taskTargetErrorRetryDelay(
-					self.targets[tasks[taskId].FunctionName],
-					err,
-					tasks[taskId].RescheduleErrorCount,
-					mathrand.Float64(),
-				)
-				rescheduleTime := now.Add(delay)
-				var retryArgsJson *string
-				if self.ctx.Err() == nil && self.drainCtx.Err() == nil {
-					retryArgsJson = taskRetryArgsJson(err)
-				}
-				batch.Queue(
-					`
-						UPDATE pending_task
-						SET
-							reschedule_error = $2,
-							reschedule_error_count = pending_task.reschedule_error_count + $5,
-							args_json = COALESCE($6, pending_task.args_json),
-							run_at = $3,
-							release_time = $4
-						WHERE task_id = $1
-					`,
-					taskId,
-					err.Error(),
-					rescheduleTime,
-					now,
-					errorCountDelta,
-					retryArgsJson,
-				)
-			}
-		})
-
-		for taskId, finished := range finishedTasks {
-			if posts, err := finished.runPost(tx); err == nil {
-				commitPosts = append(commitPosts, posts...)
-			} else {
-				// record the post error
-
-				postRescheduledTasks[taskId] = err
-
-				// a failed update raises: going on would commit a rollback
-				server.RaisePgResult(tx.Exec(
-					finalizeCtx,
-					`
-						UPDATE finished_task
-						SET
-							post_error = $2,
-							post_completed = false
-						WHERE task_id = $1
-					`,
-					taskId,
-					err.Error(),
-				))
-
-				// re-run the post
-				func() {
-					now := server.NowUtc()
-					rescheduleTime := now.Add(time.Second * time.Duration(mathrand.Intn(int(RescheduleTimeout/time.Second))))
-					task := tasks[taskId]
-					clientSession, err := task.ClientSession(finalizeCtx)
-					if err != nil {
-						panic(err)
-					}
-					defer clientSession.Cancel()
-					ScheduleTaskInTx(
-						tx,
-						self.RunPost,
-						&RunPostArgs{TaskId: taskId},
-						clientSession,
-						RunAt(rescheduleTime),
-					)
-				}()
-			}
-		}
-	})
-	// the finish committed
+	// External post work retains the batch join boundary; it must not block
+	// collection/heartbeats while sibling functions are still executing.
 	server.RunPosts(evalCtx, commitPosts...)
-
-	for taskId, _ := range finishedTasks {
-		if _, postRescheduled := postRescheduledTasks[taskId]; !postRescheduled {
-			finishedTaskIds = append(finishedTaskIds, taskId)
-		}
+	if finalizePanic != nil {
+		panic(finalizePanic)
 	}
-	for taskId, _ := range rescheduledTasks {
-		rescheduledTaskIds = append(rescheduledTaskIds, taskId)
-	}
-	for taskId, _ := range postRescheduledTasks {
-		postRescheduledTaskIds = append(postRescheduledTaskIds, taskId)
-	}
-	taskFinalizationsTotal.WithLabelValues("succeeded").Add(float64(len(finishedTaskIds)))
-	taskFinalizationsTotal.WithLabelValues("rescheduled").Add(float64(len(rescheduledTaskIds)))
-	taskFinalizationsTotal.WithLabelValues("post_rescheduled").Add(float64(len(postRescheduledTaskIds)))
 
 	return
 }

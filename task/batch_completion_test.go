@@ -21,6 +21,24 @@ type taskBatchCompletionTarget struct {
 	before func()
 }
 
+// Supplies a held sibling and observable external work after its successful
+// finish, including when another task in the batch fails finalization.
+type taskBatchCompletionSlowTarget struct {
+	Target
+	fixture *taskBatchCompletionFixture
+	started chan struct{}
+}
+
+// Cancellation remains visible after the explicit unwind barrier releases.
+func (self *taskBatchCompletionSlowTarget) Run(ctx context.Context, _ *Task) (any, func(server.PgTx) ([]server.PostFunction, error), error) {
+	self.fixture.slowCtx = ctx
+	close(self.started)
+	<-self.fixture.releaseSlow
+	return &claimProfileResult{}, func(server.PgTx) ([]server.PostFunction, error) {
+		return []server.PostFunction{func() any { self.fixture.slowCommitCount.Add(1); return nil }}, nil
+	}, ctx.Err()
+}
+
 // The fast target cannot finish until its unrelated sibling is executing.
 func (self *taskBatchCompletionTarget) Run(ctx context.Context, task *Task) (any, func(server.PgTx) ([]server.PostFunction, error), error) {
 	self.before()
@@ -49,6 +67,7 @@ type taskBatchCompletionFixture struct {
 	heartbeatTaskIds  chan []server.Id
 	done              chan struct{}
 	outcome           taskBatchCompletionOutcome
+	slowCommitCount   atomic.Int32
 	continueOnce      sync.Once
 	releaseOnce       sync.Once
 }
@@ -58,6 +77,7 @@ type taskBatchCompletionFixture struct {
 func newTaskBatchCompletionFixture(
 	ctx context.Context,
 	post TaskCommitPostFunction[*commitPostArgs, *commitPostResult],
+	configure ...func(*TaskWorker),
 ) *taskBatchCompletionFixture {
 	fixture := &taskBatchCompletionFixture{
 		collected:         make(chan struct{}),
@@ -69,19 +89,17 @@ func newTaskBatchCompletionFixture(
 	}
 	slowStarted := make(chan struct{})
 	fixture.worker = newCommitPostWorker(ctx, post)
+	syntheticNow := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	fixture.worker.heartbeatNow = func() time.Time { return syntheticNow }
 	fixture.worker.AddTargets(
 		&taskBatchCompletionTarget{
 			Target: NewTaskTargetWithCommitPost(commitPostWork, post),
 			before: func() { <-slowStarted },
 		},
-		&claimAdmissionLifecycleTarget{
-			Target: NewTaskTarget(claimProfileExcluded),
-			run: func(ctx context.Context) error {
-				fixture.slowCtx = ctx
-				close(slowStarted)
-				<-fixture.releaseSlow
-				return ctx.Err()
-			},
+		&taskBatchCompletionSlowTarget{
+			Target:  NewTaskTarget(claimProfileExcluded),
+			fixture: fixture,
+			started: slowStarted,
 		},
 	)
 	selectCount := 0
@@ -105,6 +123,9 @@ func newTaskBatchCompletionFixture(
 	defer clientSession.Cancel()
 	fixture.fastTaskId = scheduleCommitPostWork(clientSession)
 	fixture.slowTaskId = ScheduleTask(claimProfileExcluded, &claimProfileArgs{}, clientSession, RunAt(server.NowUtc().Add(-time.Hour)))
+	for _, apply := range configure {
+		apply(fixture.worker)
+	}
 	go func() {
 		defer close(fixture.done)
 		defer func() { fixture.outcome.panicValue = recover() }()
@@ -217,11 +238,36 @@ func TestTaskBatchCompletionFailureRetainsUnrelatedOwner(t *testing.T) {
 		if err, ok := fixture.outcome.panicValue.(error); !ok || !strings.Contains(err.Error(), "synthetic failure at commit") {
 			t.Fatalf("completion failure lost original panic: %+v", fixture.outcome)
 		}
-		if GetFinishedTasks(ctx, fixture.slowTaskId)[fixture.slowTaskId] == nil {
-			t.Fatal("sibling success was lost with the failed completion")
+		if GetFinishedTasks(ctx, fixture.slowTaskId)[fixture.slowTaskId] == nil || fixture.slowCommitCount.Load() != 1 {
+			t.Fatal("sibling success or committed external work was lost with the failed completion")
 		}
 		if GetTasks(ctx, fixture.fastTaskId)[fixture.fastTaskId] == nil || commitCount.Load() != 0 {
 			t.Fatal("failed completion was replayed or ran its rolled-back external work")
+		}
+	})
+}
+
+// A slow finalization advances a synthetic clock past the heartbeat deadline.
+// The next select cannot reset the interval and postpone live-sibling upkeep.
+func TestTaskBatchCompletionHeartbeatsBetweenSlowFinalizations(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		var elapsed atomic.Int64
+		syntheticStart := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		fixture := newTaskBatchCompletionFixture(context.Background(), func(_ *commitPostArgs, _ *commitPostResult, _ *session.ClientSession, _ server.PgTx) ([]server.PostFunction, error) {
+			elapsed.Add(int64(ReleaseTimeout))
+			return nil, nil
+		}, func(worker *TaskWorker) {
+			worker.heartbeatNow = func() time.Time { return syntheticStart.Add(time.Duration(elapsed.Load())) }
+		})
+		defer fixture.close(t)
+		waitForSignal(t, fixture.collected, 10*time.Second, "select after slow finalization")
+		select {
+		case taskIds := <-fixture.heartbeatTaskIds:
+			if len(taskIds) != 1 || taskIds[0] != fixture.slowTaskId {
+				t.Fatalf("overdue heartbeat did not retain only the live sibling: %v", taskIds)
+			}
+		default:
+			t.Fatal("slow finalization postponed heartbeat behind the next select")
 		}
 	})
 }
