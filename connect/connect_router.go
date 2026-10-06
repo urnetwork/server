@@ -149,6 +149,12 @@ func (self *ConnectRouter) ConnectHandler() *ConnectHandler {
 // listener enabled by its port allocation is actually accepting. It also
 // becomes unready again if a listener exits between supervised restarts.
 func (self *ConnectRouter) Status(w http.ResponseWriter, r *http.Request) {
+	self.statusWithWarpStatus(w, r, nil)
+}
+
+// Keeps transport readiness on the actual handler while selecting the
+// composed service's independent startup/drain latch.
+func (self *ConnectRouter) statusWithWarpStatus(w http.ResponseWriter, r *http.Request, status *router.WarpStatusState) {
 	listenerPorts, err := self.connectHandler.ListenerReadyUdpPorts()
 	if err != nil {
 		http.Error(w, fmt.Sprintf("not ready: %s", err), http.StatusServiceUnavailable)
@@ -163,7 +169,7 @@ func (self *ConnectRouter) Status(w http.ResponseWriter, r *http.Request) {
 		portStrings[i] = strconv.Itoa(port)
 	}
 	w.Header().Set("X-UR-Connect-UDP-Listeners", strings.Join(portStrings, ","))
-	router.WarpStatus(w, r)
+	status.Handler(w, r)
 }
 
 // func (self *ConnectRouter) ProxyConnect(w http.ResponseWriter, r *http.Request) {

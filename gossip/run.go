@@ -57,6 +57,8 @@ const (
 
 type RunOptions struct {
 	Port int
+	// A composed operator owns the single process metrics publisher.
+	StartStatsPusher func(context.Context) func()
 }
 
 func (self RunOptions) Validate() error {
@@ -152,7 +154,11 @@ func newNode(
 
 // Run serves the production gossip module until ctx is canceled.
 func Run(ctx context.Context, options RunOptions) error {
-	return runWithDependencies(ctx, options, router.StartupReadiness, server.StartStatsPusher)
+	startStatsPusher := options.StartStatsPusher
+	if startStatsPusher == nil {
+		startStatsPusher = server.StartStatsPusher
+	}
+	return runWithDependencies(ctx, options, router.CheckStartupReadiness, startStatsPusher)
 }
 
 // The command and the tests share the startup, drain and publish wiring. Only
@@ -200,7 +206,7 @@ func runWithDependencies(
 
 	flushStats := func() {}
 	joinPublish := func() {}
-	if err := readiness(runCtx); err != nil {
+	if err := readiness(ctx); err != nil {
 		// the mesh itself needs no database, so an unready replica still
 		// carries what it hears; only the drip waits
 		glog.Infof("[gossip]not ready (%s)\n", err)
