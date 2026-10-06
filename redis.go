@@ -419,9 +419,22 @@ func redisWithClient(ctx context.Context, pool *safeRedisClient, callback func(R
 	// retryDebugTime := NowUtc().Add(retryOptions.debugRetryTimeout)
 	backoff := retryOptions.Backoff()
 	for {
+		if err := ctx.Err(); err != nil {
+			if retryOptions.rerunOnConnectionError {
+				panic(dbContextDoneCause(ctx, err))
+			}
+			panic(err)
+		}
 		client := pool.open()
 
-		connErr := client.Ping(ctx).Err()
+		// Ordinary callbacks report their command errors through the existing
+		// retry boundary. A separate PING doubles a one-command round trip and
+		// cannot guarantee the next command succeeds. Dedicated non-retrying
+		// and deadline pools retain their existing preflight policy.
+		var connErr error
+		if pool.disableCommandRetry || pool.contextTimeoutEnabled {
+			connErr = client.Ping(ctx).Err()
+		}
 		if connErr != nil {
 			if retryOptions.rerunOnConnectionError {
 				select {
