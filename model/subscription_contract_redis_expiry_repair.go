@@ -1,6 +1,6 @@
 // Explicit Redis expiry adds a bounded custody fence to the ordinary proof and
-// report owners and their existing posts. No independent debit flush or Redis
-// repair operation is added; returned status does not acknowledge those posts.
+// report owners. Durable debit workers finish metadata and reservation release;
+// returned status acknowledges neither their completion nor a Redis release.
 package model
 
 import (
@@ -173,7 +173,9 @@ func (self *contractExpiryRepairScope) checkRedisInTx(ctx context.Context, tx se
 
 // Preview and apply retain the existing scoped repair's five-minute quiet policy
 // and the ordinary expiry proof owner. Every write rechecks payer, reports and the
-// bounded Redis custody tuple. Terminal observation is not a debit/release ACK.
+// bounded Redis custody tuple. Its no-stream scope needs no stream cleanup.
+// Debit workers finish metadata and reservation release independently of this
+// observation deadline. Clock posts retain their existing synchronous attempt.
 func RepairRedisContractExpiry(ctx context.Context, request ContractExpiryRepairRequest) (ContractExpiryRepairResult, error) {
 	return repairContractExpiry(ctx, request, true)
 }
