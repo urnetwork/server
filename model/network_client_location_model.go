@@ -4357,6 +4357,11 @@ func loadClientLocations(
 	ctx context.Context,
 	locationIds map[server.Id]bool,
 ) (clientLocations map[server.Id]*ClientLocation, returnErr error) {
+	defer func() {
+		if returnErr != nil {
+			clientLocations = nil
+		}
+	}()
 	server.Redis(ctx, func(r server.RedisClient) {
 		load := func(locationIds map[server.Id]bool, clientLocations map[server.Id]*ClientLocation) error {
 			clientLocationCmds := map[server.Id]*redis.StringCmd{}
@@ -4367,8 +4372,11 @@ func loadClientLocations(
 				v := pipe.Get(ctx, clientLocationKey(locationId))
 				clientLocationCmds[locationId] = v
 			}
-			// note ignore the error for GET since it will include missing key
-			pipe.Exec(ctx)
+			// Missing metadata is a cache miss; every other command failure
+			// invalidates the batch, even behind an earlier redis.Nil.
+			if err := execClientScoreReadPipeline(ctx, pipe); err != nil {
+				return err
+			}
 
 			for locationId, clientLocationCmd := range clientLocationCmds {
 				clientLocationBytes, _ := clientLocationCmd.Bytes()
