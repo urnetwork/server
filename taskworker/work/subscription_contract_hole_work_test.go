@@ -5,6 +5,8 @@ package work
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/server/task"
 )
 
 // A completed pass does not defer refresh by another interval after its runtime.
@@ -149,6 +152,65 @@ func TestContractHoleRefreshTaskReadinessAndSourceFailure(t *testing.T) {
 		}
 		if !model.HasOpenContractHole(ctx, source, destination) {
 			t.Fatal("readiness loss revoked an independent healthy pair")
+		}
+	})
+}
+
+// High prior failures cannot turn a target-owned source retry into an hour of
+// ordinary backoff. The real evaluator retains identity, cursor and error count.
+func TestContractHoleRefreshSourceRetryKeepsBoundedCadenceAndCursor(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
+		defer clientSession.Cancel()
+		args := &RefreshContractHolesArgs{PassStarted: server.NowUtc(), PairVisits: 17, SuccessfulPairs: 17, Pages: 3,
+			Cursor: &model.ContractHoleCursor{SourceClientId: server.NewId(), DestinationClientId: server.NewId(),
+				CreateTime: server.NowUtc(), ContractId: server.NewId()}}
+		expected, err := json.Marshal(args)
+		server.Raise(err)
+		for _, failure := range []error{errors.New("synthetic contract-hole source query refusal"), context.DeadlineExceeded} {
+			page := func(args *RefreshContractHolesArgs, clientSession *session.ClientSession) (*RefreshContractHolesResult, error) {
+				return refreshContractHolesWithSource(args, clientSession,
+					func(context.Context, *model.ContractHoleCursor) (*model.ContractHoleRefreshPageResult, error) {
+						return nil, failure
+					})
+			}
+			id := task.ScheduleTask(page, args, clientSession, task.RunOnce("synthetic-contract-hole-retry"))
+			worker := task.NewTaskWorkerWithDefaults(ctx)
+			var target task.Target = task.NewTaskTarget(page)
+			if errors.Is(failure, context.DeadlineExceeded) {
+				target = task.WithErrorRetryCap(target, task.RescheduleTimeout)
+			}
+			// Leave the ordinary error uncapped to prove its hint is accepted;
+			// canceled work instead requires the production target's retry cap.
+			worker.AddTargets(target)
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE pending_task SET
+ run_at=now()-interval '5 seconds',release_time=now()-interval '5 seconds',reschedule_error_count=10
+ WHERE task_id=$1`, id))
+			})
+			finished, retried, posts, err := worker.EvalTasks(1)
+			if err != nil || len(finished) != 0 || len(retried) != 1 || retried[0] != id || len(posts) != 0 {
+				t.Fatalf("source failure lost its task: finished=%v retried=%v posts=%v error=%v", finished, retried, posts, err)
+			}
+			var storedArgs, storedError string
+			var errorCount int
+			var runAt, released time.Time
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT args_json,reschedule_error,reschedule_error_count,run_at,release_time
+ FROM pending_task WHERE task_id=$1`, id).Scan(&storedArgs, &storedError, &errorCount, &runAt, &released))
+			})
+			delay := runAt.Sub(released)
+			if storedArgs != string(expected) || !strings.Contains(storedError, failure.Error()) || errorCount != 11 ||
+				delay < task.RescheduleTimeout || delay >= task.RescheduleTimeout+time.Second || delay >= model.ContractHoleRefreshInterval {
+				t.Fatalf("retry lost cadence or custody: delay=%s errors=%d stored_error=%q args=%s want=%s", delay, errorCount, storedError, storedArgs, expected)
+			}
+			t.Logf("contract-hole actual evaluator source retry: failure=%v error_count=%d delay=%s same_cursor=true same_task=true", failure, errorCount, delay)
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE task_id=$1`, id))
+			})
 		}
 	})
 }

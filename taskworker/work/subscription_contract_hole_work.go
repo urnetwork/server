@@ -80,13 +80,21 @@ func scheduleRefreshContractHoles(clientSession *session.ClientSession, tx serve
 
 // A page performs bounded indexed work and propagates failure for durable retry.
 func RefreshContractHoles(args *RefreshContractHolesArgs, clientSession *session.ClientSession) (*RefreshContractHolesResult, error) {
+	return refreshContractHolesWithSource(args, clientSession, model.RefreshContractHolesPage)
+}
+
+// The source boundary permits a deterministic dependency failure through the
+// real task evaluator; scheduling, cursor custody and readiness remain owned here.
+func refreshContractHolesWithSource(args *RefreshContractHolesArgs, clientSession *session.ClientSession,
+	readSource func(context.Context, *model.ContractHoleCursor) (*model.ContractHoleRefreshPageResult, error),
+) (*RefreshContractHolesResult, error) {
 	ctx, cancel := context.WithTimeout(clientSession.Ctx, 15*time.Second)
 	defer cancel()
-	page, err := model.RefreshContractHolesPage(ctx, args.Cursor)
+	page, err := readSource(ctx, args.Cursor)
 	if err != nil {
 		contractHoleRefreshAvailable.Set(0)
 		_ = model.InvalidateContractHoleReadiness(clientSession.Ctx)
-		return nil, task.WithRetryDelayAndArgs(err, time.Second, args)
+		return nil, task.WithRetryDelayAndArgs(err, task.RescheduleTimeout, args)
 	}
 	now := server.NowUtc()
 	result := observeContractHoleRefreshPage(args, page, now)
