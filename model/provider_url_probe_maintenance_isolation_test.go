@@ -40,13 +40,16 @@ func testingUrlMaintenancePeers(t testing.TB, now time.Time, shardCount int) (se
 // A held cycle lock deterministically keeps one expired receipt pending. The
 // other due provider must still receive its own exact-count, server-issued claim.
 func TestUrlCompletedPriorityLockedExpiryDoesNotBlockIndependentProvider(t *testing.T) {
-	for _, shardCount := range []int{1, 3} {
-		t.Run(fmt.Sprintf("shards%d", shardCount), func(t *testing.T) {
+	for _, scenario := range []struct {
+		shardCount int
+		wasReady   bool
+	}{{1, false}, {1, true}, {3, false}, {3, true}} {
+		t.Run(fmt.Sprintf("shards%d/expired_ready%t", scenario.shardCount, scenario.wasReady), func(t *testing.T) {
 			server.DefaultTestEnv().Run(t, func(t testing.TB) {
 				ctx := t.Context()
 				now := server.NowUtc().Truncate(time.Microsecond)
 				testingUrlCompletionPriority(t, now.Add(-8*time.Hour))
-				blockedId, independentId, shardIndex := testingUrlMaintenancePeers(t, now, shardCount)
+				blockedId, independentId, shardIndex := testingUrlMaintenancePeers(t, now, scenario.shardCount)
 				first := testingClaimUrlCompletion(t, ctx, blockedId, now.Add(-5*time.Hour))
 				testingCompleteUrlClaim(t, ctx, first, now.Add(-5*time.Hour+time.Second), "tunnel_failed")
 				server.Tx(ctx, func(tx server.PgTx) {
@@ -54,6 +57,10 @@ func TestUrlCompletedPriorityLockedExpiryDoesNotBlockIndependentProvider(t *test
 						CASE WHEN client_id=$1 THEN $3::timestamp-interval '1 minute'
 						WHEN client_id=$2 THEN $3::timestamp-interval '30 seconds'
 						ELSE $3::timestamp+interval '1 day' END`, blockedId, independentId, now))
+					// The clock can expire a previously promoted count without a
+					// pacing write that would invalidate its readiness flag.
+					server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_cycle
+						SET completed_priority_ready=$2 WHERE client_id=$1`, blockedId, scenario.wasReady))
 				})
 				var result ProviderUrlProbeDueResult
 				server.Tx(ctx, func(lockTx server.PgTx) {
@@ -62,7 +69,7 @@ func TestUrlCompletedPriorityLockedExpiryDoesNotBlockIndependentProvider(t *test
 						WHERE client_id=$1 FOR UPDATE`, blockedId).Scan(&locked))
 					claimCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 					defer cancel()
-					result = ClaimProviderUrlProbeDueWithStatus(claimCtx, now, 1, shardIndex, shardCount)
+					result = ClaimProviderUrlProbeDueWithStatus(claimCtx, now, 1, shardIndex, scenario.shardCount)
 					if result.PriorityMaintenancePending || len(result.Providers) != 1 || result.Providers[0].ClientId != independentId {
 						t.Fatalf("locked expired provider blocked independent due work: %+v", result)
 					}
@@ -78,7 +85,7 @@ func TestUrlCompletedPriorityLockedExpiryDoesNotBlockIndependentProvider(t *test
 				})
 				// Once the conflicting owner releases, bounded maintenance admits
 				// that provider with its retired count and preserves the first lease.
-				recovered := ClaimProviderUrlProbeDueWithStatus(ctx, now, 2, shardIndex, shardCount)
+				recovered := ClaimProviderUrlProbeDueWithStatus(ctx, now, 2, shardIndex, scenario.shardCount)
 				if recovered.PriorityMaintenancePending || len(recovered.Providers) != 1 || recovered.Providers[0].ClientId != blockedId ||
 					recovered.Providers[0].CompletedRunCount == nil || *recovered.Providers[0].CompletedRunCount != 0 ||
 					recovered.Providers[0].ClaimOrdinal != first.ClaimOrdinal+1 {
