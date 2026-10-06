@@ -1,6 +1,6 @@
 module github.com/urnetwork/server
 
-go 1.26.5
+go 1.27.1
 
 require (
 	github.com/ChainSafe/go-schnorrkel v1.1.0

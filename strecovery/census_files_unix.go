@@ -1,10 +1,12 @@
-//go:build linux
+//go:build linux || darwin
 
 // Custody files are opened through pinned directory descriptors. Every path
 // component refuses symlinks, and publication is atomic and create-only.
 package strecovery
 
 import (
+	"github.com/urnetwork/connect/durablesys"
+
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -258,7 +260,7 @@ func publishFile(ctx context.Context, directory *os.File, name string, raw []byt
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	if err := unix.Renameat2(int(directory.Fd()), temporary, int(directory.Fd()), name, unix.RENAME_NOREPLACE); err != nil {
+	if err := durablesys.RenameNoReplace(int(directory.Fd()), temporary, int(directory.Fd()), name); err != nil {
 		return false, err
 	}
 	return true, directory.Sync()
