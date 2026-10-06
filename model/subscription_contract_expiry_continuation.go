@@ -93,9 +93,13 @@ func settleExpiredContractDispute(ctx context.Context, tag string, contractId se
 func continueContractExpiry(ctx context.Context, tag string, openContract *contractExpiryState, scope *contractExpiryRepairScope) error {
 	// Force close may synthesize a missing endpoint close. Its billing
 	// outcome must not be mistaken for verified bilateral subnet usage.
-	contractExpiryContinuationTx(ctx, openContract.contractId, scope, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET usage_unverified=true WHERE contract_id=$1 AND outcome IS NULL`, openContract.contractId))
-	})
+	// Both preparation callers commit before continuing. Reuse that sticky
+	// flag; states without the write-preparation witness keep the fallback.
+	if !openContract.usageUnverifiedRetained {
+		contractExpiryContinuationTx(ctx, openContract.contractId, scope, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_contract SET usage_unverified=true WHERE contract_id=$1 AND outcome IS NULL`, openContract.contractId))
+		})
+	}
 	if openContract.dispute {
 		settleExpiredContractDispute(ctx, tag, openContract.contractId, scope)
 		return nil

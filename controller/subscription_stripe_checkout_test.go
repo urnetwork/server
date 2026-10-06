@@ -80,8 +80,9 @@ func TestStripeCheckoutRefusesWithoutReturnUrls(t *testing.T) {
 	// this test env has no config stripe.yml, so the urls are empty and checkout must
 	// be refused. (In main they are set -- see config/main/stripe.yml.)
 	if urls.SuccessUrl == "" || urls.CancelUrl == "" {
-		result := stripeCheckoutError("Checkout is not configured.")
+		result := stripeCheckoutError(PurchaseErrorCodeCheckoutUnavailable, "Checkout is not configured.")
 		connect.AssertNotEqual(t, result.Error, nil)
+		connect.AssertEqual(t, result.Error.Code, PurchaseErrorCodeCheckoutUnavailable)
 		connect.AssertEqual(t, result.CheckoutUrl, "")
 	}
 }

@@ -26,7 +26,8 @@ func (self *testingUrlCompletionIngest) ReportUrlProbeCompletion(_ context.Conte
 }
 
 // Count the completed turn during platform failure, but preserve the existing
-// no-provider-verdict rule: no negative quality or retry pacing is authorized.
+// no-provider-verdict rule: no negative quality is authorized. The model owns
+// a separate bounded retry once this exact claim is durably complete.
 func TestUrlCompletedReadinessCountsWithoutProviderVerdict(t *testing.T) {
 	for _, funded := range []bool{false, true} {
 		inner := &testingUrlCompletionIngest{recordingEgressProbeIngest: newRecordingEgressProbeIngest()}

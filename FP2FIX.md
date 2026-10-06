@@ -7949,3 +7949,59 @@ Finite actual evidence is
 independently corroborated by
 `temp/pg-contention-20261004/sol-775f6-admission-cohort-v1-actual-corroboration.json`
 (SHA-256 `2d998210c8b30e079311b647232d3d1ecfb5ce7d7db329bb7ae1a91f1bc68884`).
+
+### 2026-10-06 04:17 UTC current coverage and completed-lease investigation
+
+Root's 04:18:35 observation qualifies all eight selected Taskworkers as ready
+on `cf1e52c3b07c4d201cb78be40537459cbcc57b0a`; rollout completed at
+04:11:45.830287 UTC. The latest coherent global source snapshot is
+**04:17:39.364846 UTC**. Known-cycle-age mature quota is **56,338 / 57,490
+(97.996173%)**, with **1,152 deficient providers needing 2,829 credits**.
+Warming is separately 5 / 7, with two deficient providers needing 18 credits;
+unknown cycle age is zero. All-current quota is 56,343 / 57,497.
+Secure-complete remains separate at 56,314, with 29 security exceptions and
+zero unknown security targets.
+
+The goal remains **sustained 100% coverage of the mature eligible cohort**.
+Quota still requires ten unique accepted measured successes or failures in
+four hours; local unmeasured failures earn no credit. Warming does not prove
+physical newness, and the 4/5 quality gate and TLS protections are unchanged.
+This dynamic stock establishes neither a current credit rate, fixed-provider
+continuity nor a release effect; older rates cannot be carried forward.
+
+Before this rollout, the corrected diagnostic on ready 6bd44 workers retained
+a coherent **03:59:14.668925 UTC** snapshot with **907 mature deficits**.
+It selects deficient providers before a deterministic cap of 128. That capped,
+nonrepresentative sample needs 166 credits: 99 providers lack one, 23 lack
+two, and six lack three to nine. Its deadline domain has 55 due and 73 future
+rows. Separately, 32 completed claims and four pending claims have future
+deadlines equal to claim time plus 900 seconds; 34 completed claims record local
+failure, and 35 latest attempts record local setup/submission failure.
+These aggregate domains do not establish their intersections, `AllowPacing`,
+a deadline writer or the cause of all 907 deficits. They are not the same
+provider cohort or source time as the later cf1e census.
+
+The owning investigation now targets the completed-lease retry boundary with
+a deterministic model reproduction and narrow repair. Active claims, current
+claim identity, newer-result guards, security and no-credit semantics must
+remain intact. The aggregate observation does not establish Main prevalence
+of a specific guard failure or prove that a repair has been deployed.
+
+The human-blocker correction from
+`7e6805762e3bc85e2272e6514e825b8c9946a3e7` is already present in the observed
+6bd44 release and retained unchanged in cf1e. Its version-2 matcher uses
+bounded static HTML and response-header evidence, excludes inactive markup,
+and corroborates document-level human gates. It does not run JavaScript or
+a headless browser. Deployment of this classifier neither reclassifies old
+negative results nor demonstrates recovery of any particular provider.
+
+Finite current coverage:
+`temp/pg-contention-20261004/astra-cf1e5-admission-cohort-v1-current-reduction.json`
+(SHA-256 `7fc713c951f80cb1c709c6d28c6d463b858fa60f223162dda4af4ecaf054cf0e`),
+independent `sol-cf1e5-admission-cohort-v1-actual-corroboration.json`
+(SHA-256 `7a3b4be5a31ceb01b8654986483098c8e56f2557f0f893cddc030adf253665f5`).
+The separate diagnostic is
+`temp/pg-contention-20261004/astra-6bd44-mature-deficit-v2-current-reduction.json`
+(SHA-256 `26fb13e35480fb0f21d2d055ea2004f8fb86837d5216b503c8143b82883c00b0`),
+independent `sol-6bd44-mature-deficit-v2-actual-corroboration.json`
+(SHA-256 `3b5c1b2c3f38017ac186898de1cc898016b0899ab5fcf803466b87655aa89af9`).

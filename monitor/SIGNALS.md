@@ -4998,8 +4998,26 @@ queue key. No provider-total row is acquired while this transaction owns grants.
 For a contract with N eligible provider networks this replaces N inline total
 upserts with one independent task insertion. Application still needs N upserts,
 one owning-row read and one marker write, plus ordinary scheduler claim and
-finalization work. It adds one task per legacy settlement; it does not establish
-task capacity, reduce the total write count or add a shared-provider queue key.
+finalization work. It adds one task per eligible legacy or Redis-mode settlement;
+it does not establish task capacity, reduce the total write count or add a
+shared-provider queue key.
+
+Redis-mode payout ownership (2026-10-06): the final outcome, asynchronous payer
+debit journal, exact provider sweeps and per-contract total-projection task now
+commit together. Losing every post-commit callback cannot lose earned payout
+authority. The existing debit worker still applies payer consumption and repairs
+escrow metadata asynchronously; reservation release remains its acknowledged,
+replay-safe projection. Foreground settlement does not acquire payer grant or
+provider-total rows. The existing `ApplyLegacyProviderTotals` target and payload
+remain compatible with already-deployed task workers.
+
+This prevents future volatile-post gaps. It does not reconstruct a historically
+missing payout, prove current projection completion, or clear an insufficient-
+escrow hold. Original reports, unresolved liability and healthy-neighbor
+reservations remain unchanged. A deterministic commit-before-callback control
+must retain one sweep and one unapplied projection owner before recovery; the
+rollback control must retain neither. Independent same-payer closes must reach
+their owned pre-commit barriers while shared financial rows remain locked.
 
 The baseline native control fails at a held provider row. With the writer, an
 exact `pg_blocking_pids` projection-to-provider edge remains present before and
@@ -6267,6 +6285,19 @@ score, reliability, network-only, or IP-family filters. Empty specs or all-exclu
 return zero; one or two requested IDs can correctly return one or two. The
 metric's default `quality` label does not mean ranking ran, and `unknown`
 caller-country is expected when this branch skips the IP-country lookup.
+
+Expected family availability is an independent incident qualifier. When the
+operator explicitly confirms that IPv6 providers are not yet available during
+an ongoing rollout, retained `v6` empty-result cohorts describe that expected
+absence; they do not establish a regression in supported IPv4 selection or
+justify changing family intent or eligibility. Record the operator statement
+and observation clock, keep the measured zero counts, and resume ordinary IPv6
+availability assessment when support is enabled. The current reducer has no
+family-support input, so an emitted IPv6 PAGE must not be silently rewritten as
+healthy. Keep `any` (dualstack then IPv4-only) and `v4` discovery findings,
+initial-picker errors, and supported-route failures independently actionable.
+An IPv6 ingress address is not evidence of available IPv6 providers. See the
+published-family and incident controls in §2.9c.
 
 The existing volume/ratio threshold crossing retains the direct cohort's exact
 response counts as this intent-unknown WARN. Do not infer either direct health
@@ -12430,6 +12461,11 @@ Deploy v1/v2-compatible API evidence readers before enabling v2 producers in
 Taskworker or standalone probes. The shared validator is also used by
 API ingress, model storage and probe publication; old v1-only readers reject v2.
 Historical v1 evidence retains its recorded provenance during a mixed rollout.
+The v3 rollout begins with a reader-only compatibility stage: the shared evidence
+validator accepts matcher versions 1, 2 and 3 while producers remain at version 2.
+API ingress, model storage, Taskworker and the shared standalone/fleet prober use
+that validator. Verify every API reader has this compatibility stage before
+enabling v3 producers; accepting v3 receipts does not activate the v3 detector.
 This detector change does not alter phase limits, body sampling, the ten accepted
 measured outcomes per four hours, the inclusive 0.8 quality ratio, or the local
 setup versus measured-provider boundary. Local fixtures establish matcher

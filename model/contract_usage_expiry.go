@@ -26,6 +26,10 @@ type contractExpiryState struct {
 	destinationId server.Id
 	dispute       bool
 
+	// Only write preparation may retain this witness. Callers must commit
+	// that transaction before continuing; the durable flag never resets.
+	usageUnverifiedRetained bool
+
 	sourceCloseTime             *time.Time
 	sourceUsedTransferByteCount *ByteCount
 	sourceCheckpoint            *bool
@@ -138,6 +142,7 @@ func inspectContractExpiryInTx(ctx context.Context, tx server.PgTx, contractId s
 		// The earlier expiry already owned retirement. Synthetic close times
 		// cannot postpone its durable continuation by another quiet period.
 		_, err := retainedContractExpiryUsage(retained)
+		state.usageUnverifiedRetained = writeProof && err == nil
 		return state, err
 	}
 	if lastReport.After(cutoff) {
@@ -163,9 +168,11 @@ func inspectContractExpiryInTx(ctx context.Context, tx server.PgTx, contractId s
 		}
 	}
 	if writeProof {
-		if _, err := tx.Exec(ctx, `UPDATE transfer_contract SET usage_unverified=true,provider_usage=$2 WHERE contract_id=$1 AND outcome IS NULL`, contractId, snapshot); err != nil {
+		result, err := tx.Exec(ctx, `UPDATE transfer_contract SET usage_unverified=true,provider_usage=$2 WHERE contract_id=$1 AND outcome IS NULL`, contractId, snapshot)
+		if err != nil {
 			return nil, fmt.Errorf("retain original expiry proof: %w", err)
 		}
+		state.usageUnverifiedRetained = result.RowsAffected() == 1
 	}
 	return state, nil
 }

@@ -9,6 +9,8 @@ package controller
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -157,11 +159,11 @@ func TestSubscriptionDetailsDbListsCancelsAndResumes(t *testing.T) {
 
 		// the other store on the same network: refused with where to go
 		refused, err := SubscriptionCancel(&SubscriptionCancelArgs{Store: "solana"}, clientSession)
-		if err != nil || refused.Error == nil {
+		if err != nil || refused.Error == nil || refused.Error.Code != SubscriptionErrorCodeDoesNotRenew {
 			t.Fatalf("solana cancel: %+v %v", refused, err)
 		}
 		apple, _ := SubscriptionCancel(&SubscriptionCancelArgs{Store: "apple"}, clientSession)
-		if apple.Error == nil || apple.ManageUrl != appleManageSubscriptionsUrl {
+		if apple.Error == nil || apple.ManageUrl != appleManageSubscriptionsUrl || apple.Error.Code != SubscriptionErrorCodeManagedByAppStore {
 			t.Fatalf("apple cancel: %+v", apple)
 		}
 
@@ -221,8 +223,72 @@ func TestSubscriptionDetailsDbNoCustomerNoPortal(t *testing.T) {
 		if err != nil || result.Error == nil {
 			t.Fatalf("no stripe subscription: %+v %v", result, err)
 		}
+		if result.Error.Code != SubscriptionErrorCodeNoSubscription || result.Error.Message != "No Stripe subscription is billing this network." {
+			t.Fatalf("no stripe subscription: error %+v", result.Error)
+		}
 		if len(env.updates) != 0 {
 			t.Fatal("nothing must be written to stripe")
+		}
+
+		// no Stripe customer, so no billing portal: the code and the old message
+		portal, err := StripeCreateCustomerPortal(&StripeCreateCustomerPortalArgs{}, clientSession)
+		if err != nil || portal.Error == nil || portal.Url != "" {
+			t.Fatalf("portal without a customer: %+v %v", portal, err)
+		}
+		if portal.Error.Code != SubscriptionErrorCodeNoCustomer || portal.Error.Message != "No stripe customer found" {
+			t.Fatalf("portal without a customer: error %+v", portal.Error)
+		}
+	})
+}
+
+// TestSubscriptionDetailsDbStripeUnreachable: a cancel while Stripe does not
+// answer is refused as store_unavailable, with its message, and writes
+// nothing; the next try (Stripe back) goes through.
+func TestSubscriptionDetailsDbStripeUnreachable(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		networkId := server.NewId()
+		userId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "managesubdown", userId)
+		clientSession := session.Testing_CreateClientSession(ctx, &jwt.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &clientId,
+			UserId:    userId,
+		})
+		env := newStripeSubscriptionTestEnv(t)
+		periodEnd := now.Add(20 * 24 * time.Hour).Truncate(time.Second)
+		env.addSubscription("cus_managesubdown", "sub_managesubdown", "active", false, periodEnd, "month")
+		if err := model.CreateStripeCustomer("cus_managesubdown", clientSession); err != nil {
+			t.Fatal(err)
+		}
+
+		// Stripe is down: the listing's connection is refused at once
+		upUrl := stripeApiBaseUrl
+		down := httptest.NewServer(http.NotFoundHandler())
+		stripeApiBaseUrl = down.URL
+		down.Close()
+
+		result, err := SubscriptionCancel(&SubscriptionCancelArgs{Store: "stripe"}, clientSession)
+		if err != nil || result.Error == nil {
+			t.Fatalf("cancel while stripe is down: %+v %v", result, err)
+		}
+		if result.Error.Code != SubscriptionErrorCodeStoreUnavailable || result.Error.Message != "Could not reach Stripe. Please try again." {
+			t.Fatalf("cancel while stripe is down: error %+v", result.Error)
+		}
+		if len(env.updates) != 0 {
+			t.Fatalf("nothing must be written while stripe is down: %v", env.updates)
+		}
+
+		// Stripe is back: the same cancel goes through
+		stripeApiBaseUrl = upUrl
+		result, err = SubscriptionCancel(&SubscriptionCancelArgs{Store: "stripe"}, clientSession)
+		if err != nil || result.Error != nil {
+			t.Fatalf("cancel once stripe is back: %+v %v", result, err)
+		}
+		if len(env.updates) != 1 || env.updates[0] != "true" {
+			t.Fatalf("expected one cancel_at_period_end=true update, got %v", env.updates)
 		}
 	})
 }

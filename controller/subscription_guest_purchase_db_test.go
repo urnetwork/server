@@ -95,25 +95,26 @@ func TestGuestPurchaseRefusedUntilSignInAdded(t *testing.T) {
 			t.Fatalf("converted balance=%+v err=%v, want not guest", balance, err)
 		}
 
-		// past the guard, each entry answers with its own validation
+		// past the guard, each entry answers with its own validation and its
+		// code, never the guest code
 		checkout, err = StripeCreateCheckoutSession(&StripeCreateCheckoutSessionArgs{
 			ItemId: StripeItemProYearly,
 			UiMode: "synthetic-unknown",
 		}, clientSession)
-		if err != nil || checkout == nil || checkout.Error == nil || checkout.Error.Code != "" || checkout.Error.Message != "Unknown ui mode." {
+		if err != nil || checkout == nil || checkout.Error == nil || checkout.Error.Code != PurchaseErrorCodeInvalidRequest || checkout.Error.Message != "Unknown ui mode." {
 			t.Fatalf("converted checkout session: result=%+v err=%v, want the ui mode error", checkout, err)
 		}
 		sheet, err = StripePaymentSheet(&StripePaymentSheetArgs{
 			Plan: "synthetic-unknown",
 		}, clientSession)
-		if err != nil || sheet == nil || sheet.Error == nil || sheet.Error.Code != "" || sheet.Error.Message != "Unknown plan." {
+		if err != nil || sheet == nil || sheet.Error == nil || sheet.Error.Code != PurchaseErrorCodeInvalidRequest || sheet.Error.Message != "Unknown plan." {
 			t.Fatalf("converted payment sheet: result=%+v err=%v, want the plan error", sheet, err)
 		}
 		solana, err = CreateSolanaPaymentIntent(&SolanaPaymentIntentArgs{
 			Reference: solanaReference,
 			Plan:      "synthetic-unknown",
 		}, clientSession)
-		if err != nil || solana == nil || solana.Error == nil || solana.Error.Code != "" || solana.Error.Message != "Unknown plan." {
+		if err != nil || solana == nil || solana.Error == nil || solana.Error.Code != PurchaseErrorCodePlanUnavailable || solana.Error.Message != "Unknown plan." {
 			t.Fatalf("converted solana payment intent: result=%+v err=%v, want the plan error", solana, err)
 		}
 

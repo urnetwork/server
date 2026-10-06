@@ -284,8 +284,15 @@ func TestUrlCompletedReceiptValidatesClockAndRetainsRawTime(t *testing.T) {
 			if index == 3 {
 				wantCount = 0
 			}
-			if cycle.count != wantCount || !cycle.next.Equal(now.Add(ProviderEgressProbeAttemptBackoff)) {
-				t.Fatalf("clock/AllowPacing changed count or lease: %+v", cycle)
+			if cycle.count != wantCount {
+				t.Fatalf("completion clock changed count: %+v", cycle)
+			}
+			if index == 3 {
+				if !cycle.next.Equal(now.Add(ProviderEgressProbeAttemptBackoff)) {
+					t.Fatalf("late local completion extended its expired lease: %+v", cycle)
+				}
+			} else if delay := cycle.next.Sub(receivedAt); delay < 54*time.Second || delay > 66*time.Second {
+				t.Fatalf("bounded-skew local completion did not schedule receipt-owned retry: %+v", cycle)
 			}
 		}
 		if receipt, err := CompleteProviderUrlProbeRun(ctx, ProviderUrlProbeCompletion{

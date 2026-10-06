@@ -128,7 +128,7 @@ func TestGuestPurchaseRefusedAtEveryEntry(t *testing.T) {
 
 // A network with a login method passes the guard even while its jwt still
 // carries a stale GuestMode claim (a guest that just added a sign-in): the
-// entries answer with their own validation and no guest code.
+// entries answer with their own validation and its code, not the guest code.
 func TestGuestPurchaseAllowedWithSignIn(t *testing.T) {
 	clientSession := guestPurchaseTestSession(t, true, true)
 
@@ -139,7 +139,7 @@ func TestGuestPurchaseAllowedWithSignIn(t *testing.T) {
 	if err != nil || checkout == nil || checkout.Error == nil {
 		t.Fatalf("checkout session: result=%v err=%v, want the ui mode error", checkout, err)
 	}
-	if checkout.Error.Code != "" || checkout.Error.Message != "Unknown ui mode." {
+	if checkout.Error.Code != PurchaseErrorCodeInvalidRequest || checkout.Error.Message != "Unknown ui mode." {
 		t.Fatalf("checkout session: error %+v, want the ui mode error", checkout.Error)
 	}
 
@@ -149,16 +149,17 @@ func TestGuestPurchaseAllowedWithSignIn(t *testing.T) {
 	if err != nil || sheet == nil || sheet.Error == nil {
 		t.Fatalf("payment sheet: result=%v err=%v, want the plan error", sheet, err)
 	}
-	if sheet.Error.Code != "" || sheet.Error.Message != "Unknown plan." {
+	if sheet.Error.Code != PurchaseErrorCodeInvalidRequest || sheet.Error.Message != "Unknown plan." {
 		t.Fatalf("payment sheet: error %+v, want the plan error", sheet.Error)
 	}
 
-	// an error without a code keeps the old wire shape
+	// the code rides beside the unchanged message, so a client that reads only
+	// the message reads the refusal as before
 	b, err := json.Marshal(checkout)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(b) != `{"error":{"message":"Unknown ui mode."}}` {
+	if string(b) != `{"error":{"code":"invalid_request","message":"Unknown ui mode."}}` {
 		t.Fatalf("checkout error marshals as %s", b)
 	}
 }

@@ -77,10 +77,19 @@ func providerUrlProbePacedAttemptSql(cycleAlias, measuredAtParam, acceptedSucces
 		recovery = fmt.Sprintf("(%s) AND %s.cycle_started_at <= %s::timestamp - interval '%d seconds'",
 			measuredDeficit[0], cycleAlias, measuredAtParam, int(ProviderEgressProbeRefreshAge/time.Second))
 	}
-	return fmt.Sprintf(`%[2]s::timestamp + ((CASE WHEN %[3]s > 0 AND NOT (%[6]s) THEN %[4]d ELSE %[5]d END)
+	paced := fmt.Sprintf(`%[2]s::timestamp + ((CASE WHEN %[3]s > 0 AND NOT (%[6]s) THEN %[4]d ELSE %[5]d END)
 		* (0.9 + (((hashtext(%[1]s.client_id::text) %% 2001) + 2001) %% 2001)::double precision / 10000)
 		* interval '1 second')`, cycleAlias, measuredAtParam, acceptedSuccessesParam,
 		successSeconds, failureSeconds, recovery)
+	if len(measuredDeficit) == 0 {
+		return paced
+	}
+	// Only an accepted warm success can reserve beyond its cycle's maturity.
+	// Cap that deficit's pace; active claims and setup completion stay unchanged.
+	maturity := fmt.Sprintf("%s.cycle_started_at + interval '%d seconds'", cycleAlias, int(ProviderEgressProbeRefreshAge/time.Second))
+	return fmt.Sprintf(`CASE WHEN (%s) AND %s > 0 AND %s::timestamp < (%s)
+		THEN LEAST((%s), (%s)) ELSE (%s) END`, measuredDeficit[0], acceptedSuccessesParam,
+		measuredAtParam, maturity, paced, maturity, paced)
 }
 
 // This success-only projection remains diagnostic. It cannot satisfy the

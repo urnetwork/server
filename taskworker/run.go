@@ -56,6 +56,9 @@ type RunOptions struct {
 	Count           int
 	BatchSize       int
 	WorkloadProfile WorkloadProfile
+	// Optional owners for a process composing multiple service runners.
+	WarpStatus       *router.WarpStatusState
+	StartStatsPusher func(context.Context) func()
 }
 
 func (self RunOptions) Validate() error {
@@ -75,11 +78,15 @@ func (self RunOptions) Validate() error {
 // the command and integration harness on the same readiness, claim, and final
 // handback implementation.
 func Run(ctx context.Context, options RunOptions) error {
+	startStatsPusher := options.StartStatsPusher
+	if startStatsPusher == nil {
+		startStatsPusher = server.StartStatsPusher
+	}
 	return runWithDependencies(
 		ctx,
 		options,
 		router.CheckStartupReadiness,
-		server.StartStatsPusher,
+		startStatsPusher,
 		server.HttpListenAndServeWithReusePort,
 		startTaskworkerRuntime,
 	)
@@ -203,7 +210,7 @@ func runWithStartupWait(
 	admission, cancelAdmission := context.WithCancel(ctx)
 	defer cancelAdmission()
 	readyGauge.Set(0)
-	router.SetWarpStatusNotReady(errors.New("startup dependency checks pending"))
+	options.WarpStatus.SetNotReady(errors.New("startup dependency checks pending"))
 	var startup taskworkerStartupResult
 	startupDone := make(chan struct{})
 	go func() {
@@ -220,7 +227,7 @@ func runWithStartupWait(
 		}
 		cancelAdmission()
 		<-startupDone
-		router.SetWarpStatusDrainingIfReady()
+		options.WarpStatus.SetDrainingIfReady()
 		readyGauge.Set(0)
 		if worker := startup.worker; worker != nil {
 			drainStart := time.Now()
@@ -242,7 +249,7 @@ func runWithStartupWait(
 	err := listenAndServe(
 		runCtx,
 		net.JoinHostPort(listenIPv4, strconv.Itoa(listenPort)),
-		router.NewRouter(runCtx, []*router.Route{router.NewRoute("GET", "/status", router.WarpStatus)}),
+		router.NewRouter(runCtx, []*router.Route{router.NewRoute("GET", "/status", options.WarpStatus.Handler)}),
 		false,
 		server.HttpServerOptions{
 			ReadTimeout:     15 * time.Second,
