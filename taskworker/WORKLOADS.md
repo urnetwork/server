@@ -31,7 +31,7 @@ the original claim query and unknown-target retry behavior.
 | `StSyncChain`, `StEpochClose`, `StCommitRoot`, `StDeposit`, `StFinalizePoke` | Contract epoch/event mirror, payout root, operator commit/deposit and finalization. Every parent/child and post retry remains available. |
 | `SweepVerifyTrails`, `RollupVerifyProviderStats`, `RemoveOldVerifyProviderStats`, `RefreshVerifyProxyEgress` | Full `/verify` trail lifecycle, provider statistics, and proxy egress index refresh. |
 | `RollupSearchProviderStats`, `RemoveOldSearchProviderStats` | Provider search evidence and retention. |
-| `CloseExpiredContracts`, `SweepOrphanContractData`, `RemoveCompletedContracts`, `ReconcileNetEscrow`, `FlushTransferDebits`, `FlushLegacySettlements` | Transfer finalization, contract retention, and escrow reconciliation. |
+| `CloseExpiredContracts`, `SweepOrphanContractData`, `RemoveCompletedContracts`, `ReconcileNetEscrow`, `FlushTransferDebits`, `FlushLegacySettlements`, `ApplyLegacyNetEscrowMirror` | Transfer finalization, contract retention, and escrow reconciliation. Legacy mirror work is enqueued by the financial transaction and coalesces by balance. |
 | `CloseExpiredNetworkClientHandlers`, `RemoveDisconnectedNetworkClients`, `SweepOrphanNetworkClientData`, `RemoveNetworkClientsTask` | Connection lifecycle and API-enqueued client removal. |
 | `BackfillInitialTransferBalance`, `RefreshFreeTransferBalances`, `RebuildPointsLeaderboard` | Transfer grants and accounting-derived provider/account state. |
 | `IndexSearchLocations`, `WarmNetworkGetProviderLocations`, `UpdateClientLocations`, `UpdateClientScores`, `RemoveExpiredProviderEgressLocations` | Local provider discovery, location/score indices and egress expiry. |
@@ -44,6 +44,14 @@ API artifact publication, immutable attempt history, admission, and relay stream
 readers do not execute through the task registry and are unchanged. Stats
 collection, queue metrics and stream retention still start through the ordinary
 taskworker runtime.
+
+`ApplyLegacyNetEscrowMirror` has one claim per worker in both production and
+subnet-operator profiles. Its cold census and fenced Redis write hold no
+financial or pending-task row lock. The short finishing transaction re-arms a
+changed source revision after deleting the completed owner, preserving closes
+that race with repair. Pending scope is immutable and private; older workers
+retain an unsupported target for normal retry. Keep a compatible worker until
+these obligations have drained during rollback.
 
 ## Excluded workloads
 

@@ -4869,6 +4869,42 @@ individual worker statements use 2-second statement / 250ms lock timeouts.
 Already-started projection posts retain their existing separately bounded joins;
 this is not a 15-second end-to-end claim for a failed Redis dependency.
 
+Legacy mirror ownership (2026-10-06): each inline settlement also touches one
+immutable `ApplyLegacyNetEscrowMirror` pending task per affected balance in its
+financial transaction. Repeated closes share that owner. The foreground mirror
+only reads a snapshot at the current durable revision and publishes it with the
+existing Redis fence; a cache miss performs no historical census. Its one-second
+context is a cancellation deadline, not a proven wall-time bound. Clock updates
+and native Redis reservation release keep their existing immediate ownership.
+
+The task reads committed cache or exact history outside financial and task-row
+locks, then acknowledges the same fenced absolute Redis write. Ordinary
+per-result finalization deletes its pending row before a nonlocking revision
+point read; a newer source revision queues a successor in that transaction.
+Every producer uses a conflict update on the pending key, so a producer before
+deletion must commit before finalization can proceed, while a producer after
+deletion inserts a new owner. Missing acknowledgements retry safely. One mirror
+claim per worker bounds cold-read concurrency; the task's sixty-second context
+honors parent cancellation. There is one additional pending-row upsert per
+affected balance per close, and ordinary completed-task retention still applies.
+
+Controls hold the actual history census behind a PostgreSQL advisory barrier
+while 129 and 1,000 real settlements advance, verify coalesced owners and exact
+financial conservation, and force both producer/finalizer orderings. A running
+cold owner must also allow another close on its same grant. Older workers retain
+the unknown target for retry. Rollback, deleted balances, a lost Redis reply and
+warm-at-commit invalidation retain the durable obligation. Operator exact audit
+and admission authority are unchanged; global reconciliation is a fallback.
+
+False-positive qualifier: a lower foreground `cold_census` count now means that
+work may have moved to its durable owner, not that the account is recovered.
+Require qualified financial outcomes, cursor progress and queue ages. A dense
+predecessor interval alone does not identify the slow dependency. False-negative
+qualifier: absent tuple locks do not prove a row unlocked, and unchanged due
+intent fields do not distinguish unvisited work from `SKIP LOCKED`. Retained
+account snapshots and local controls do not attribute a particular Main census
+or prove production throughput improvement.
+
 Page-budget qualification (2026-10-04): the page's own fifteen-second deadline
 can expire after earlier per-contract transactions committed. Previously, the
 worker then attempted its failure-state write using the canceled context and
