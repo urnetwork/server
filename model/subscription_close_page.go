@@ -1,13 +1,14 @@
 // Close-page report reads stay keyed to the selected raw contract page.
 package model
 
-// The raw page retains its cursor, pending-intent and quiet-period semantics.
+// The raw page retains its cursor and pending-intent semantics. An absolute
+// deadline also makes a row eligible, independently of recent checkpoints.
 // Each report is unique by (contract_id, party). LATERAL LIMIT 1 prevents the
 // planner from scanning retained global report history for a bounded page;
 // absent reports still produce the same nullable LEFT JOIN fields.
 const forceCloseOpenContractPageSql = `
                 WITH bounded AS MATERIALIZED (
-                    SELECT contract_id,source_id,destination_id,dispute,create_time,usage_unverified
+                    SELECT contract_id,source_id,destination_id,dispute,create_time,usage_unverified,expiration_time
                     FROM transfer_contract
                     WHERE open AND (create_time,contract_id)>($5,$6) AND create_time <= $7
                     ORDER BY create_time,contract_id LIMIT $4
@@ -17,7 +18,7 @@ const forceCloseOpenContractPageSql = `
                     destination_contract_close.close_time,destination_contract_close.used_transfer_byte_count,destination_contract_close.checkpoint,
                     t.create_time,
                     NOT COALESCE((SELECT true FROM legacy_settlement_intent pending WHERE pending.contract_id=t.contract_id),false)
-                    AND (t.usage_unverified OR (t.create_time <= $3
+                    AND (t.usage_unverified OR COALESCE(t.expiration_time <= statement_timestamp() AT TIME ZONE 'UTC', false) OR (t.create_time <= $3
                         AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $3)))
                 FROM bounded t
                 LEFT JOIN LATERAL (SELECT close_time,used_transfer_byte_count,checkpoint FROM contract_close
@@ -31,14 +32,14 @@ const forceCloseOpenContractPageSql = `
 // selection separate from the open-page source/destination report projection.
 const forceCloseDisputedContractPageSql = `
                 WITH bounded AS MATERIALIZED (
-                    SELECT contract_id,source_id,destination_id,create_time,usage_unverified
+                    SELECT contract_id,source_id,destination_id,create_time,usage_unverified,expiration_time
                     FROM transfer_contract
                     WHERE dispute AND outcome IS NULL AND (create_time,contract_id)>($3,$4) AND create_time <= $5
                     ORDER BY create_time,contract_id LIMIT $2
                 )
                 SELECT t.contract_id,t.source_id,t.destination_id,t.create_time,
                     NOT COALESCE((SELECT true FROM legacy_settlement_intent pending WHERE pending.contract_id=t.contract_id),false)
-                    AND (t.usage_unverified OR (t.create_time <= $1
+                    AND (t.usage_unverified OR COALESCE(t.expiration_time <= statement_timestamp() AT TIME ZONE 'UTC', false) OR (t.create_time <= $1
                         AND NOT EXISTS(SELECT 1 FROM contract_close recent_close WHERE recent_close.contract_id=t.contract_id AND recent_close.close_time > $1)))
                 FROM bounded t ORDER BY t.create_time,t.contract_id
 			`

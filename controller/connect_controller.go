@@ -887,12 +887,21 @@ func CreateContract(
 
 	leaveResponse := server.EnterContractCreationStage(ctx, server.ContractStageResponse)
 	defer leaveResponse()
+	expirationTime, err := model.GetContractExpirationTime(ctx, contractId)
+	if err != nil {
+		return nil, err
+	}
+	if expirationTime == nil {
+		return nil, fmt.Errorf("new contract has no expiration time: %s", contractId)
+	}
+	expirationTimeUnixMilli := expirationTime.UnixMilli()
 	storedContract := &protocol.StoredContract{
 		ContractId:                               contractId.Bytes(),
 		TransferByteCount:                        uint64(transferByteCount),
 		SourceId:                                 clientId.Bytes(),
 		DestinationId:                            destinationId.Bytes(),
 		Priority:                                 &priority,
+		ExpirationTimeUnixMilli:                  &expirationTimeUnixMilli,
 		ProvideTlsCertificate:                    provideTlsCertificate,
 		DestinationClientPublicKey:               destinationClientPublicKey,
 		DestinationClientKeySignedTlsCertificate: clientKeySignedTlsCertificate,

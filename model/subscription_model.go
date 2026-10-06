@@ -1305,6 +1305,7 @@ const (
 type TransferEscrow struct {
 	ContractId          server.Id
 	CompanionContractId *server.Id
+	ExpirationTime      time.Time
 	Priority            Priority
 	TransferByteCount   ByteCount
 	Balances            []*TransferEscrowBalance
@@ -1715,6 +1716,9 @@ func createTransferEscrowInTx(
 	if err := validateProberShardAdmissionDeadlineInTx(ctx, tx, shardDeadline); err != nil {
 		return nil, nil, err
 	}
+	if err := validateCompanionContractExpirationInTx(ctx, tx, companionContractId); err != nil {
+		return nil, nil, err
+	}
 	pending := make(map[server.Id]netEscrowSnapshot, len(balanceIds))
 	if 0 < contractTransferByteCount {
 		for _, balanceId := range balanceIds {
@@ -1725,6 +1729,7 @@ func createTransferEscrowInTx(
 			pending[balanceId] = snapshot
 		}
 	}
+	var expirationTime time.Time
 	server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 		for _, balanceId := range balanceIds {
 			escrow := balanceEscrows[balanceId]
@@ -1745,6 +1750,9 @@ func createTransferEscrowInTx(
 
 		batch.Queue(
 			`
+	            WITH creation_clock AS MATERIALIZED (
+	                SELECT date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC') AS create_time
+	            )
 	            INSERT INTO transfer_contract (
 	                contract_id,
 	                source_network_id,
@@ -1756,13 +1764,15 @@ func createTransferEscrowInTx(
 	                payer_network_id,
 	                usage_origin_is_source,
 	                create_time,
-	                priority
+	                priority,
+	                expiration_time
 	            )
-	            VALUES (
+	            SELECT
 	                $1, $2, $3, $4, $5, $6, $7, $8, ($7::uuid IS NULL),
-	                clock_timestamp() AT TIME ZONE 'UTC',
-	                $9
-	            )
+	                create_time, $9,
+	                create_time + $10 * INTERVAL '1 millisecond'
+	            FROM creation_clock
+	            RETURNING expiration_time
 	        `,
 			contractId,
 			sourceNetworkId,
@@ -1773,7 +1783,8 @@ func createTransferEscrowInTx(
 			companionContractId,
 			payerNetworkId,
 			priority,
-		)
+			DefaultContractExpiration.Milliseconds(),
+		).QueryRow(func(row pgx.Row) error { return row.Scan(&expirationTime) })
 
 		batch.Queue(
 			contractExtenderInsertSql,
@@ -1816,6 +1827,7 @@ func createTransferEscrowInTx(
 	transferEscrow = &TransferEscrow{
 		ContractId:          contractId,
 		CompanionContractId: companionContractId,
+		ExpirationTime:      expirationTime,
 		TransferByteCount:   contractTransferByteCount,
 		Priority:            priority,
 		Balances:            balances,
@@ -2056,11 +2068,13 @@ func createCompanionTransferEscrow(
                             SELECT transfer_byte_count FROM transfer_contract
                             WHERE
                                 (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                                (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
                                 source_id = $1 AND destination_id = $2 AND
                                 companion_contract_id IS NULL
                             UNION ALL
                             SELECT transfer_byte_count FROM transfer_contract
                             WHERE open = false AND $3 <= close_time AND
+                                (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
                                 source_id = $1 AND destination_id = $2 AND
                                 companion_contract_id IS NULL
                         ) AS eligible_probe_origins
@@ -2073,6 +2087,7 @@ func createCompanionTransferEscrow(
 							-- The CASE is equivalent to the generated open flag but
 							-- opaque to legacy false-zero open/outcome indexes.
 							(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                            (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
                             source_id = $1 AND
                             destination_id = $2 AND
                             companion_contract_id IS NULL
@@ -2088,6 +2103,7 @@ func createCompanionTransferEscrow(
                         WHERE
                             open = false AND
                             $3 <= close_time AND
+                            (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
                             source_id = $1 AND
                             destination_id = $2 AND
                             companion_contract_id IS NULL
@@ -2150,6 +2166,7 @@ func createCompanionTransferEscrow(
                                 FROM transfer_contract
                                 WHERE
                                     (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                                    (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
                                     source_id = $1 AND destination_id = $2 AND
                                     companion_contract_id IS NOT NULL
                                 UNION ALL
@@ -2157,6 +2174,7 @@ func createCompanionTransferEscrow(
                                     source_network_id, destination_network_id
                                 FROM transfer_contract
                                 WHERE open = false AND $3 <= close_time AND
+                                    (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
                                     source_id = $1 AND destination_id = $2 AND
                                     companion_contract_id IS NOT NULL
                                 -- Filter private ownership outside the pair boundary;
@@ -2179,6 +2197,7 @@ func createCompanionTransferEscrow(
 								-- Keep both generic open and outcome-null partial
 								-- indexes ineligible for this pair lookup.
 								(CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) AND
+                                (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
                                 source_id = $1 AND
                                 destination_id = $2 AND
                                 companion_contract_id IS NOT NULL
@@ -2195,6 +2214,7 @@ func createCompanionTransferEscrow(
                             WHERE
                                 open = false AND
                                 $3 <= close_time AND
+                                (expiration_time IS NULL OR expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
                                 source_id = $1 AND
                                 destination_id = $2 AND
                                 companion_contract_id IS NOT NULL
@@ -2312,6 +2332,7 @@ func GetOpenTransferEscrowsOrderedByPriorityCreateTime(
 					-- This is equivalent to the generated-open expression but
 					-- remains opaque to false-zero legacy partial indexes.
 					(CASE WHEN transfer_contract.outcome IS NULL THEN transfer_contract.dispute = false ELSE false END) AND
+                    (transfer_contract.expiration_time IS NULL OR transfer_contract.expiration_time > statement_timestamp() AT TIME ZONE 'UTC') AND
                     transfer_contract.source_id = $1 AND
                     transfer_contract.destination_id = $2 AND
                     transfer_contract.transfer_byte_count <= $3 AND
@@ -2480,9 +2501,13 @@ func createContractNoEscrowInTx(
 	}
 
 	contractId = server.NewId()
-	server.RaisePgResult(tx.Exec(
+	var expirationTime time.Time
+	server.Raise(tx.QueryRow(
 		ctx,
 		`
+	            WITH creation_clock AS MATERIALIZED (
+	                SELECT date_trunc('milliseconds', clock_timestamp() AT TIME ZONE 'UTC') AS create_time
+	            )
                 INSERT INTO transfer_contract (
                     contract_id,
                     source_network_id,
@@ -2491,12 +2516,14 @@ func createContractNoEscrowInTx(
                     destination_id,
                     transfer_byte_count,
                     usage_origin_is_source,
-                    create_time
+                    create_time,
+                    expiration_time
                 )
-	            VALUES (
+	            SELECT
 	                $1, $2, $3, $4, $5, $6, $7,
-	                clock_timestamp() AT TIME ZONE 'UTC'
-	            )
+	                create_time, create_time + $8 * INTERVAL '1 millisecond'
+	            FROM creation_clock
+	            RETURNING expiration_time
 	        `,
 		contractId,
 		sourceNetworkId,
@@ -2505,7 +2532,8 @@ func createContractNoEscrowInTx(
 		destinationId,
 		contractTransferByteCount,
 		usageOriginIsSource,
-	))
+		DefaultContractExpiration.Milliseconds(),
+	).Scan(&expirationTime))
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		contractExtenderInsertSql,
