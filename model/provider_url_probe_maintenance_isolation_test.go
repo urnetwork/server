@@ -52,6 +52,13 @@ func TestUrlCompletedPriorityLockedExpiryDoesNotBlockIndependentProvider(t *test
 				blockedId, independentId, shardIndex := testingUrlMaintenancePeers(t, now, scenario.shardCount)
 				first := testingClaimUrlCompletion(t, ctx, blockedId, now.Add(-5*time.Hour))
 				testingCompleteUrlClaim(t, ctx, first, now.Add(-5*time.Hour+time.Second), "tunnel_failed")
+				// Its higher exact count places independent work behind the
+				// stale ready row, exercising the limited sharded head as well.
+				for turn := range 2 {
+					at := now.Add(-2*time.Hour + time.Duration(turn)*time.Minute)
+					due := testingClaimUrlCompletion(t, ctx, independentId, at)
+					testingCompleteUrlClaim(t, ctx, due, at.Add(time.Second), "health_not_run")
+				}
 				server.Tx(ctx, func(tx server.PgTx) {
 					server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_cycle SET next_attempt_at=
 						CASE WHEN client_id=$1 THEN $3::timestamp-interval '1 minute'
@@ -74,8 +81,8 @@ func TestUrlCompletedPriorityLockedExpiryDoesNotBlockIndependentProvider(t *test
 						t.Fatalf("locked expired provider blocked independent due work: %+v", result)
 					}
 					provider := result.Providers[0]
-					if !result.CompletedRunPriorityReady || provider.CompletedRunCount == nil || *provider.CompletedRunCount != 0 ||
-						provider.ClaimOrdinal != 1 || !provider.ClaimedAt.Equal(now) || provider.RunsNeeded != ProviderUrlProbeRunTarget {
+					if !result.CompletedRunPriorityReady || provider.CompletedRunCount == nil || *provider.CompletedRunCount != 2 ||
+						provider.ClaimOrdinal != 3 || !provider.ClaimedAt.Equal(now) || provider.RunsNeeded != ProviderUrlProbeRunTarget {
 						t.Fatalf("independent provider lost exact priority or claim/quota authority: %+v", provider)
 					}
 					blocked := testingReadUrlCompletionCycle(t, ctx, blockedId)
