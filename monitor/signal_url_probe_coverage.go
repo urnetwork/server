@@ -127,11 +127,16 @@ func (self urlProbeCoverageProbe) check(ctx context.Context, env *probeEnv) ([]f
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	now := env.now()
+	observation := newUrlProbeCoverageObservation(env.cfg.env, now)
+	env.urlProbeCoverageObservation = &observation
 	desired, err := self.loadDesired()
 	if err != nil {
+		observation.CensusReason = "desired_configuration_unavailable"
 		return []finding{urlProbeCoverageUnknown("desired URL scheduler configuration unavailable or legacy")}, nil
 	}
 	if !desired.enabled {
+		observation.CensusReason = "workflow_disabled"
 		return nil, nil
 	}
 	expected := map[string]bool{}
@@ -142,6 +147,7 @@ func (self urlProbeCoverageProbe) check(ctx context.Context, env *probeEnv) ([]f
 	}
 	gateways := env.cfg.hostsWithRole("services")
 	if len(expected) == 0 || len(gateways) == 0 {
+		observation.CensusReason = "inventory_unavailable"
 		return []finding{urlProbeCoverageUnknown("taskworker inventory or services gateway unavailable")}, nil
 	}
 	command := "curl -fsS --max-time 15 --max-filesize 2097152 --data-urlencode " +
@@ -152,13 +158,17 @@ func (self urlProbeCoverageProbe) check(ctx context.Context, env *probeEnv) ([]f
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		observation.CensusReason = "transport_unavailable"
 		return []finding{urlProbeCoverageUnknown("bounded Mimir observation unavailable")}, nil
 	}
-	processes, err := parseUrlProbeCoverage(out, env.cfg.env, env.now())
+	now = env.now()
+	observation.ObservedAt = now
+	processes, err := parseUrlProbeCoverage(out, env.cfg.env, now)
 	if err != nil {
+		observation.CensusReason = "response_invalid"
 		return []finding{urlProbeCoverageUnknown("malformed, partial, or ambiguous Mimir response")}, nil
 	}
-	return evaluateUrlProbeCoverage(processes, expected, desired.shardCount, env.now()), nil
+	return evaluateUrlProbeCoverageObservation(processes, expected, desired.shardCount, now, &observation), nil
 }
 
 // Recognize only fixed metric families, finite states and bounded shard labels.
@@ -294,6 +304,12 @@ func urlProbeCoverageCensusValid(process *urlProbeCoverageProcess, now time.Time
 // metrics are absent. Hourly capacity needs all current sources and ranges;
 // missing sources must not become a misleading low-rate capacity verdict.
 func evaluateUrlProbeCoverage(processes []*urlProbeCoverageProcess, expected map[string]bool, shardCount int, now time.Time) []finding {
+	observation := newUrlProbeCoverageObservation("", now)
+	return evaluateUrlProbeCoverageObservation(processes, expected, shardCount, now, &observation)
+}
+
+// The alert reducer and healthy observer use the same selected owner and cells.
+func evaluateUrlProbeCoverageObservation(processes []*urlProbeCoverageProcess, expected map[string]bool, shardCount int, now time.Time, observation *UrlProbeCoverageObservation) []finding {
 	current := currentUrlProbeProcesses(processes, expected, now)
 	owners := make([][]*urlProbeCoverageProcess, shardCount)
 	unexpectedShard := false
@@ -317,6 +333,11 @@ func evaluateUrlProbeCoverage(processes []*urlProbeCoverageProcess, expected map
 	}
 	findings := []finding{}
 	gaps := []string{}
+	defer func() {
+		sort.Strings(gaps)
+		observation.Gaps = append([]string{}, gaps...)
+		observation.SourceCoverageComplete = observation.CensusReason == "ok" && len(gaps) == 0
+	}()
 	if unexpectedShard {
 		gaps = append(gaps, "unexpected_active_shard")
 	}
@@ -326,11 +347,13 @@ func evaluateUrlProbeCoverage(processes []*urlProbeCoverageProcess, expected map
 		}
 	}
 	if len(owners) == 0 || len(owners[0]) != 1 {
+		observation.CensusReason = "owner_unavailable"
 		gaps = append(gaps, "fresh_coherent_global_census_unavailable")
 		gaps = append(gaps, "source=census-owner census_reason=owner_unavailable")
 		return []finding{urlProbeCoverageUnknown(strings.Join(gaps, " "))}
 	}
 	census := diagnoseUrlProbeCoverageCensus(owners[0][0], now)
+	observation.CensusReason = urlProbeCensusReasonLabels[census.reason]
 	if census.reason != urlProbeCensusOK {
 		gaps = append(gaps, "fresh_coherent_global_census_unavailable", census.projection())
 		return []finding{urlProbeCoverageUnknown(strings.Join(gaps, " "))}
@@ -342,6 +365,7 @@ func evaluateUrlProbeCoverage(processes []*urlProbeCoverageProcess, expected map
 		eligible, values["fleet:quota_complete"], complete, values["fleet:due"], values["fleet:overdue"], values["fleet:warming"], values["fleet:uninitialized"], values["fleet:runs_needed"], values["fleet:security_pending"], values["fleet:security_unknown_targets"], values["oldest"])
 	observed += " " + census.projection()
 	cohort := diagnoseUrlProbeAdmissionCohort(owners[0][0])
+	observation.recordCensus(owners[0][0], cohort)
 	observed += " " + cohort.projection(values)
 	if !cohort.valid {
 		gaps = append(gaps, "mature_cohort_unobservable")

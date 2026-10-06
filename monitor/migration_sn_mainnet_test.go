@@ -214,7 +214,7 @@ func TestMigrationsMainnetOriginalCatalogAcrossPublishedPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 		defer cancel()
-		for version := 769; version <= 779; version++ {
+		for version := 769; version <= server.MigrationCount(); version++ {
 			server.ApplyDbMigrationsUpTo(ctx, version)
 			row, drift := migrationPingDatabaseCheck(t, ctx)
 			if drift != "" {
@@ -226,6 +226,11 @@ func TestMigrationsMainnetOriginalCatalogAcrossPublishedPrefixes(t *testing.T) {
 				}
 				want := contract.artifact.requiredVersion <= version
 				if contract.artifact.requiredVersion == 779 && version >= 775 {
+					want = true
+				}
+				// The corrected fresh v776 already has the two repaired bodies;
+				// v782 independently requires them on upgraded installations.
+				if contract.artifact.requiredVersion == 782 && version >= 776 {
 					want = true
 				}
 				if actual := migrationBool(pgRow(row).str(contract.artifact.rowColumn)); actual != want {

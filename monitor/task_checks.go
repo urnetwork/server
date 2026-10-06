@@ -472,7 +472,7 @@ const taskFailureSummarySQL = `
 		       run_max_time_seconds,
 		       CASE
 		         WHEN split_part(function_name,'.',3) = 'AdvancePayment'
-		           AND lower(coalesce(reschedule_error,'')) LIKE '%; invalid destination reset error = %'
+		           AND coalesce(reschedule_error,'') ~ '` + invalidDestinationResetErrorPattern + `'
 		           THEN 'invalid-destination-reset-failed'
 		         WHEN lower(coalesce(reschedule_error,'')) LIKE '%statement timeout%'
 		           AND lower(coalesce(reschedule_error,'')) LIKE '%sqlstate 57014%'

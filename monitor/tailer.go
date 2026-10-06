@@ -453,7 +453,7 @@ var logClasses = []logClass{
 	},
 	// Preserve the controller-owned reset phase before its processor response
 	// or persistence suffix can match an ordinary destination/network class.
-	{name: "payout-invalid-destination-reset-failed", re: regexp.MustCompile(`(?is)Payment create transaction error = .*; invalid destination reset error = \S`),
+	{name: "payout-invalid-destination-reset-failed", re: invalidDestinationResetErrorRe,
 		rateThreshold: 1, tier: tierWarn, playbook: "SIGNALS.md §1.2, §4, and §5.7",
 		canonical: &logCanonical{
 			eventRe: regexp.MustCompile(`\[task\.go:[0-9]+\]`),

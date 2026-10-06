@@ -823,4 +823,13 @@ var snMainnetMigrationContracts = []snMainnetMigrationContract{
 		snMainnetMigrationFunction("verify_original_request_capture()", "trigger", "plpgsql", "v", false, snMainnetVerifyCaptureBody),
 		snMainnetMigrationFunction("verify_original_request_closed_fence()", "trigger", "plpgsql", "v", false, snMainnetVerifyFenceBody)),
 	snMainnetNativeFeeMigrationContract(),
+	snMainnetMigration(781, "transfer balance grant kind metadata",
+		migrationFp2Table("transfer_balance"),
+		snMainnetMigrationColumns("transfer_balance",
+			snMainnetMigrationColumn{name: "grant_kind", kind: "character varying(32)"})),
+	// Fresh v776 already installs these exact bodies. The appended repair is
+	// still independently required at v782 for previously installed functions.
+	snMainnetMigration(782, "per-client provider work session contention repair",
+		snMainnetMigrationFunction("provider_work_endpoint_lock(uuid)", "void", "plpgsql", "v", false, snMainnetProviderEndpointBody, "client"),
+		snMainnetMigrationFunction("provider_work_session_statement_fence()", "trigger", "plpgsql", "v", false, snMainnetProviderStatementFenceBody)),
 }

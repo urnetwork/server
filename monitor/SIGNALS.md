@@ -724,10 +724,14 @@ WHERE function_name LIKE '%UpdateClient%'
   generic processor 400s because only that typed, definitive pre-chain result
   is safe to unpin (§5.7).
 - GOTCHA — a destination rejection and its failed reset are different phases.
-  `AdvancePayment` can return a composed `; invalid destination reset error = `
-  suffix after the original processor rejection. The complete SQL error is
-  classified as `invalid-destination-reset-failed` before processor or
-  persistence text; the fixed task taxonomy uses the same task-scoped marker.
+  `AdvancePayment` currently composes `Payment create transaction error: ...;
+  invalid destination reset error: ...`; retained older errors use ` = ` at
+  both separators. One shared pattern requires the complete paired form and
+  nonempty reset detail in the SQL, fixed task taxonomy, and log classifier.
+  Task and SQL classification additionally require `AdvancePayment` ownership.
+  The complete SQL error is classified as `invalid-destination-reset-failed`
+  before processor or persistence text. A lone suffix, mixed separators, or
+  ordinary destination rejection does not establish a failed reset.
   Single-cause guidance uses that full-text class even when the representative
   160-byte sample ends before the suffix. Mixed-family guidance includes this
   reset/persistence action only when its class is present. Inspect concurrent,
@@ -735,6 +739,12 @@ WHERE function_name LIKE '%UpdateClient%'
   preserve the existing key and reconcile before another submission. Neither
   a matching destination phrase nor a current source base proves successful
   reset or unchanged account configuration. Never clear rows or keys manually.
+  An equals-only watcher misses the current colon form, so absence of this
+  class there is not reset-health evidence. The source mismatch alone cannot
+  assign an observed `other` cohort to reset failures; retain the original
+  complete-error observation and its source before attribution. Missing or
+  failed SQL/log observations remain unknown, and relabeling a failure does
+  not prove that payment recovery occurred.
 - The 2026-09-18 Main `AdvancePayment` investigation established the current
   operations/configuration split with a bounded read-only primary query. Of
   1,119 pending failures, 1,117 were `wallet-insufficient`: each remained
@@ -12323,6 +12333,29 @@ ratio, security exceptions, and ten-measured-outcome quota are distinct rules.
 Hourly acknowledgement capacity still uses all-current demand and cannot prove
 unique accepted credits, per-provider fairness, or sustained completion.
 
+The sole watcher can append `-url-probe-coverage-output PATH` JSONL records
+on every existing URL-coverage execution, including healthy samples. This
+adds no query or cadence. Schema 1 keeps the evaluation clock separate from
+the original census and scrape clocks, and includes all-current, mature,
+warming and unknown-age counts, nullable known-mature percentage, separate
+TLS counts, source-coverage gaps and fixed census/cohort reason codes. A
+missing or invalid census emits null counts; a missing cohort extension
+retains a valid all-current census with null cohort counts. Zero mature
+providers yields a null percentage. Unknown ages can coexist with 100% known
+mature coverage while `whole_fleet_age_known=false`. `source_coverage_complete`
+describes visibility, not quota attainment. Consumers must check the newest
+record and its source clock rather than carrying forward an old healthy row.
+The age domain is explicitly `immutable_probe_cycle_started_at`; it does not
+prove physical first join or continuous historical eligibility.
+
+False-positive qualifier: ordinary newcomers reduce all-current quota without
+reducing mature coverage. False-negative qualifier: an old watcher that lacks
+the cohort selectors cannot establish mature coverage, and silence from the
+alert stream cannot establish a healthy mature sample. The running binary's
+source must contain the cohort query, reducer and optional observation sink.
+Output failures remain monitor visibility errors and retain actual deficit
+alerts; the observer never converts healthy samples into alerts.
+
 The provider quality probes dashboard has a dedicated URL quota row with the
 known mature ratio, known warming count, unknown age count, all-current quota,
 all nine cohort counts, and separate TLS exceptions. It selects one current,
@@ -15175,7 +15208,7 @@ error CLASS, not the volume. Classes, causes, and the action each implies:
 | `payout-retry-microburst` (derived from the fixed `transfer-admission admitted observable=v1` line) | At least four exact-replay-deduplicated pre-POST admission markers carried one authoritative Redis TIME second, which cannot fit under the three-admission rolling-second gate. Host/logger timestamps, response completions, and evaluator lines do not count. Absence is unknown unless §2.14 proves the marker capability on every newest Taskworker. | **Software/telemetry action:** first restore or deploy complete §2.14 capability coverage according to §8.12 provenance. With coverage complete, preserve the ceiling, backoff, and idempotency keys while diagnosing the Redis gate. An uninstrumented caller belongs to the separate processor-429 source investigation because it cannot emit this marker. Verify zero gate errors, a full 90-minute window below four admission markers/second, and no processor-rate-limit event. Funding or pausing the wallet remains separate finance/ops work. |
 | `Bad status: 429 Too Many Requests ... API rate limit error` (Circle payment path) | The processor identity crossed a short-window request limit. One attempt normally produces both a Circle-client and task-evaluator line, so log-line rate is not unique submits. At `07:12:48Z` on 2026-09-01, an already-jittered artifact still produced five wallet rejection responses plus a sixth 429, proving random retry dispersion was not a hard ceiling. Circle documents five default POST requests/second. | Preserve the existing idempotency key and normal backoff; never manually replay or pull rows forward. Deploy a clean Taskworker containing marker-capable `928abfca` only where §8.12/§2.14 proves the shared Redis-time gate or complete observation contract absent. The earlier `66525afc` baseline does not emit the capability gauge or exact marker. Then require zero gate errors and zero 429s for 90 minutes. If a fully converged gate still sees 429, correlate all Circle request sources and obtain the account's authoritative quota before tuning it. |
 | `[circlec][transfer-admission] failed closed` (Taskworker) | Redis admission failed or the task context ended while waiting, so the gate returned before the Circle POST. A deploy drain can cancel one waiter; repetition outside a drain points to Redis health or admission pressure. | Keep the gate fail closed. Correlate §2.14 errors/waits with Taskworker drain state and Redis health; never manually replay, pull the task forward, or loosen the ceiling. Verify zero admission errors and Circle 429s for two five-minute windows with stable idempotency keys. |
-| `payout-invalid-destination-reset-failed` — composed `Payment create transaction error = ...; invalid destination reset error = ...` | The controller reported a destination rejection followed by an unsuccessful guarded attempt reset. This exact composed marker precedes ordinary processor/network classes. Concurrent, terminal, or on-chain state can block reset, as can persistence failure; it does not prove unchanged wallet configuration. The Alert retains a fixed sample and `phase=guarded-reset`, never the processor/persistence suffix or inferred address. | Reconcile the current payment/processor state privately and distinguish guarded state rejection from persistence failure. Preserve the key; do not change wallets solely from this class or clear/replay rows. Verify an eligible reset succeeds or the existing attempt reaches a safe terminal outcome, with no duplicate transfer and stable keys for ambiguous submits. Require zero reset-failure events and durable `invalid-destination-reset-failed` rows through the natural 90-minute retry window plus ingestion delay. See §1.2/§5.7. |
+| `payout-invalid-destination-reset-failed` — composed `Payment create transaction error: ...; invalid destination reset error: ...`, or the legacy form with ` = ` at both separators | The controller reported a destination rejection followed by an unsuccessful guarded attempt reset. The shared complete marker requires nonempty reset detail and precedes ordinary processor/network classes. Concurrent, terminal, or on-chain state can block reset, as can persistence failure; it does not prove unchanged wallet configuration. The Alert retains a fixed sample and `phase=guarded-reset`, never the processor/persistence suffix or inferred address. An older equals-only watcher or incomplete log window cannot establish a healthy reset window. | Reconcile the current payment/processor state privately and distinguish guarded state rejection from persistence failure. Preserve the key; do not change wallets solely from this class or clear/replay rows. Verify an eligible reset succeeds or the existing attempt reaches a safe terminal outcome, with no duplicate transfer and stable keys for ambiguous submits. Require zero reset-failure events and durable `invalid-destination-reset-failed` rows through the natural 90-minute retry window plus ingestion delay, using a containing watcher and complete observations. See §1.2/§5.7. |
 | `payout-invalid-destination` — `Invalid destination address.` / Circle code `155219` (taskworker, Circle payment path) | The ordinary processor response rejects the destination before transfer creation. Historically the chain-blind validator admitted Solana keys declared as `MATIC`; after a successful guarded reset, an unchanged wallet selection can repeat that rejection. An ordinary Circle-client line can accompany a later reset failure and is not a reset-success witness. | Confirm typed rejection, guarded reset success, current artifact, and current wallet selection before correcting a proven chain mismatch through the supported account API under account-owner/operations authority. Resolve a concurrent `payout-invalid-destination-reset-failed` boundary first. Preserve keys for ambiguous submits; never edit/delete payment/task rows. Verify the next natural retry selects the corrected wallet with the safely renewed key, no duplicate transfer, and zero durable/logical errors within 90 minutes plus ingestion delay. See §5.7. |
 | `urnetwork_connect_contract_failures_total{cause="missing_companion_origin"}` (Mimir; `[contract][error] class=missing_companion_origin` is V(1) detail only) | A contract request resolved to the companion path but no reversed origin contract exists. Emitted by `CreateCompanionTransferEscrow`. `companion=false` is only the original wire bit: `resolveNonCompanionProvideMode` converted it to Stream fallback, but the request may be selection, provider-return, or same-network traffic. | §2.17 watches only `companion=false` against its calibrated five-minute band and, above threshold, reconciles the bounded `missing_origin_details_total` resolution/relationship/lifecycle cohorts. Absent or incomplete detail is not zero and cannot support attribution. Never infer roles from the Boolean or print raw pairs; the higher `companion=true` band needs separate calibration. |
 | `Resource not found in vault (<resource>.yml)` in a route panic | A lazily resolved resource is absent from the deployed vault generation. The process and `/hello` can stay green indefinitely; only the first request to the dependent route fails. On 2026-08-29, `/verify/keys` and `/verify/stats` returned 500 while `/hello` remained 200 because the unreleased subnet was disabled and its deliberately absent `verify.yml` was nevertheless loaded by unconditionally exposed handlers. | First branch on feature state. If disabled, fail closed with a stable 503 before parsing or vault access; do not fabricate a signing secret merely to stop the panic. If enabled, the missing resource is a deployment blocker: provision it through the supported secret mechanism and probe the affected route on every active generation (§8.7). |
@@ -18242,6 +18275,27 @@ websocket connections and probes only.
 
 ### 8.9 Append-only migration coherence — a numeric head can hide skipped schema
 Probe: `migrations`
+
+Mainnet and native-fee artifact checks belong to this one registered probe.
+Their helpers live in `migration_sn_mainnet.go` and `migration_native_fee.go`;
+`signal_*.go` filenames are reserved for independently registered signals.
+A helper filename that violates that convention does not establish a missing
+probe, but its contract must still reach the owning probe's emitted query and
+drift reducer. The registry guard and missing-artifact controls enforce both
+boundaries; adding duplicate probes or ignoring the naming failure does not.
+
+The catalog now includes the final published contracts at versions 781 and 782.
+Version 781 requires an ordinary stored, nullable `transfer_balance.grant_kind`
+column of exactly `varchar(32)` with no default. Version 782 separately requires
+the exact per-client try-lock function and the no-op statement-fence function,
+including their signatures, language, arguments, privileges, configuration and
+complete bodies. A partial repair or either historical blocking function is
+drift at head 782. Corrected fresh version 776 already installs both repaired
+bodies, so their presence before 782 is valid; it does not advance the recorded
+migration head. Missing future objects remain pending, and an unavailable
+catalog result remains unknown. These probe contracts are independent of the
+earlier bounded schema-readiness reader and do not retroactively change its
+coverage. The published migration DDL and accounting behavior are unchanged.
 
 Migration764 appends logical close-report receipts after the unchanged deployed
 1–763 prefix. The artifact contract checks the exact contract/party/report key,
