@@ -145,22 +145,29 @@ func TestReceiptCollectorRpcTypedNilBodyAndCloseCannotPublish(t *testing.T) {
 func TestReceiptCollectorRpcPresentTypedNetworkRecoversOriginalRead(t *testing.T) {
 	rpc := newReceiptCollectorRpc("http://retry.example")
 	calls, waits := 0, 0
-	var deadline time.Time
+	ownerDeadline := time.Now().Add(300 * time.Second)
+	ctx, cancel := context.WithDeadline(t.Context(), ownerDeadline)
+	defer cancel()
 	rpc.client.Transport = nativeReadTestTransport(func(request *http.Request) (*http.Response, error) {
 		calls++
 		current, ok := request.Context().Deadline()
-		if !ok || calls > 1 && current != deadline {
-			t.Fatal("typed transient recovery reset original deadline")
+		if !ok || current.After(ownerDeadline) || time.Until(current) <= 0 || time.Until(current) > rpc.client.Timeout {
+			t.Fatal("typed transient request escaped its physical or original owner deadline")
 		}
-		deadline = current
 		body := &nativeReadTestBody{raw: []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":"original"}`, calls))}
 		if calls == 1 {
 			body.closeErr = errors.Join(&receiptTypedNetwork{}, syscall.EIO)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: body}, nil
 	})
-	rpc.wait = func(ctx context.Context, _ time.Duration) error { waits++; return ctx.Err() }
-	raw, err := rpc.call(t.Context(), "eth_chainId", []any{"original"})
+	rpc.wait = func(waitCtx context.Context, _ time.Duration) error {
+		waits++
+		if current, ok := waitCtx.Deadline(); !ok || !current.Equal(ownerDeadline) {
+			t.Fatal("typed transient recovery reset the original logical owner deadline", current)
+		}
+		return waitCtx.Err()
+	}
+	raw, err := rpc.call(ctx, "eth_chainId", []any{"original"})
 	if err != nil || string(raw) != `"original"` || calls != 2 || waits != 1 {
 		t.Fatal("actual typed transient did not recover original read", calls, waits, err)
 	}
