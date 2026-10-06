@@ -1,13 +1,10 @@
 package work
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -17,7 +14,6 @@ import (
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
-	"gopkg.in/yaml.v3"
 )
 
 type privateLoadProcessConfig struct {
@@ -33,6 +29,7 @@ type privateLoadProcessConfig struct {
 
 type privateLoadProcessReport struct {
 	Ready     bool
+	Failure   string
 	Completed int
 	Failed    int
 	Elapsed   time.Duration
@@ -107,23 +104,6 @@ func privateLoadCreateWaveBarrier(ctx context.Context, t testing.TB, f privateLo
 		report.Counters[key] -= before[key]
 	}
 	return report
-}
-
-type privateLoadLockedBuffer struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (b *privateLoadLockedBuffer) Write(data []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.b.Write(data)
-}
-
-func (b *privateLoadLockedBuffer) Len() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.b.Len()
 }
 
 // One test-owned observer connection samples only the disposable database.
@@ -210,20 +190,23 @@ func TestPrivateProviderLoadedPeerProcess(t *testing.T) {
 	if os.Getenv("URNETWORK_PRIVATE_LOAD_CHILD") != "1" {
 		t.Skip("owned subprocess only")
 	}
-	decoder, encoder := json.NewDecoder(os.Stdin), json.NewEncoder(os.Stdout)
+	reports, err := privateLoadChildReportPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reports.Close()
+	decoder, encoder := json.NewDecoder(os.Stdin), json.NewEncoder(reports)
 	var config privateLoadProcessConfig
 	if err := decoder.Decode(&config); err != nil {
 		t.Fatal(err)
 	}
-	var pg, redis map[string]any
-	if yaml.Unmarshal(config.PG, &pg) != nil || yaml.Unmarshal(config.Redis, &redis) != nil ||
-		server.RequireEnv() != "local" || os.Getenv("WARP_TEST_ENV_USE_PORTABLE_RESOURCES") != "1" ||
-		pg["authority"] != os.Getenv("WARP_TEST_ENV_PORTABLE_POSTGRES_AUTHORITY") ||
-		redis["authority"] != os.Getenv("WARP_TEST_ENV_PORTABLE_REDIS_AUTHORITY") ||
-		!strings.HasPrefix(os.Getenv("WARP_TEST_ENV_PORTABLE_POSTGRES_AUTHORITY"), "127.0.0.1:") ||
-		os.Getenv("WARP_TEST_ENV_PORTABLE_POSTGRES_AUTHORITY") == "127.0.0.1:5432" ||
-		!strings.HasPrefix(fmt.Sprint(pg["db"]), "test_") || config.PoolSize != 16 {
-		t.Fatal("child refused a nonisolated resource")
+	if config.PoolSize != 16 {
+		_ = encoder.Encode(privateLoadProcessReport{Failure: "child pool size is not the independent workload size"})
+		t.Fatal("child pool size is not the independent workload size")
+	}
+	if err := server.ValidateTestEnvironmentChildResources(t.Context(), config.PG, config.Redis); err != nil {
+		_ = encoder.Encode(privateLoadProcessReport{Failure: err.Error()})
+		t.Fatal(err)
 	}
 	popPG := server.Vault.PushSimpleResource(server.DefaultPgVaultResourceName, config.PG)
 	popMaintenance := server.Vault.PushSimpleResource(server.MaintenancePgVaultResourceName, config.PG)
@@ -394,33 +377,9 @@ func TestPrivateProviderLoadedIndependentProcesses(t *testing.T) {
 		pop := server.Config.PushSimpleResource("db.yml", []byte("min_connections: 0\nmax_connections: 1\n"))
 		server.PgReset()
 		defer func() { pop(); server.PgReset() }()
-		executable, err := os.Executable()
-		if err != nil {
-			t.Fatal(err)
-		}
-		child := exec.CommandContext(ctx, executable, "-test.run=^TestPrivateProviderLoadedPeerProcess$", "-test.timeout=50s")
-		child.Env = append(os.Environ(), "URNETWORK_PRIVATE_LOAD_CHILD=1")
-		stdin, err := child.StdinPipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		stdout, err := child.StdoutPipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		var privateStderr privateLoadLockedBuffer
-		child.Stderr = &privateStderr
-		if err := child.Start(); err != nil {
-			t.Fatal(err)
-		}
-		joined := false
-		defer func() {
-			if !joined {
-				_ = child.Process.Kill()
-				_ = child.Wait()
-			}
-		}()
-		encoder, decoder := json.NewEncoder(stdin), json.NewDecoder(stdout)
+		child := privateLoadStartPeerProcess(t, ctx, 50*time.Second)
+		defer child.close(t)
+		encoder, decoder := child.encoder, child.decoder
 		config := privateLoadProcessConfig{
 			PG:    server.Vault.RequireSimpleResource(server.DefaultPgVaultResourceName).Bytes(),
 			Redis: server.Vault.RequireSimpleResource("redis.yml").Bytes(), Owner: f.owner,
@@ -429,10 +388,7 @@ func TestPrivateProviderLoadedIndependentProcesses(t *testing.T) {
 		if err := encoder.Encode(config); err != nil {
 			t.Fatal(err)
 		}
-		var ready privateLoadProcessReport
-		if err := decoder.Decode(&ready); err != nil || !ready.Ready {
-			t.Fatalf("independent process did not qualify: decode=%v private_stderr_bytes=%d", err, privateStderr.Len())
-		}
+		child.requireReady(t)
 		want := model.ByteCount(10001)
 		var childCreated []*protocol.StoredContract
 		for _, command := range []string{"create", "settle"} {
@@ -443,7 +399,7 @@ func TestPrivateProviderLoadedIndependentProcesses(t *testing.T) {
 			local := privateLoadCreateWave(ctx, t, f)
 			var remote privateLoadProcessReport
 			if err := decoder.Decode(&remote); err != nil {
-				t.Fatalf("independent process did not return: decode=%v private_stderr_bytes=%d", err, privateStderr.Len())
+				t.Fatalf("independent process did not return: decode=%v private_diagnostics=%s", err, child.diagnostics)
 			}
 			t.Logf("independent_processes history=10001 operation=%s local_pool=1 remote_pool=16 local=%d/%d elapsed=%s errors=%v remote=%d/%d elapsed=%s local_counters=%v remote_counters=%v activity=%v", command, local.Completed, local.Failed, local.Elapsed, local.Errors, remote.Completed, remote.Failed, remote.Elapsed, local.Counters, remote.Counters, observe())
 			privateLoadObserveAccounting(t, ctx, f)
@@ -472,11 +428,9 @@ func TestPrivateProviderLoadedIndependentProcesses(t *testing.T) {
 		if err := encoder.Encode("stop"); err != nil {
 			t.Fatal(err)
 		}
-		_ = stdin.Close()
-		if err := child.Wait(); err != nil {
-			t.Fatalf("independent process did not join: %v private_stderr_bytes=%d", err, privateStderr.Len())
+		if err := child.wait(); err != nil {
+			t.Fatalf("independent process did not join: %v private_diagnostics=%s", err, child.diagnostics)
 		}
-		joined = true
 	})
 }
 
@@ -490,33 +444,9 @@ func TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows(t *testing.T) 
 		pop := server.Config.PushSimpleResource("db.yml", []byte("min_connections: 0\nmax_connections: 1\n"))
 		server.PgReset()
 		defer func() { pop(); server.PgReset() }()
-		executable, err := os.Executable()
-		if err != nil {
-			t.Fatal(err)
-		}
-		child := exec.CommandContext(ctx, executable, "-test.run=^TestPrivateProviderLoadedPeerProcess$", "-test.timeout=90s")
-		child.Env = append(os.Environ(), "URNETWORK_PRIVATE_LOAD_CHILD=1")
-		stdin, err := child.StdinPipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		stdout, err := child.StdoutPipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		var privateStderr privateLoadLockedBuffer
-		child.Stderr = &privateStderr
-		if err := child.Start(); err != nil {
-			t.Fatal(err)
-		}
-		joined := false
-		defer func() {
-			if !joined {
-				_ = child.Process.Kill()
-				_ = child.Wait()
-			}
-		}()
-		encoder, decoder := json.NewEncoder(stdin), json.NewDecoder(stdout)
+		child := privateLoadStartPeerProcess(t, ctx, 90*time.Second)
+		defer child.close(t)
+		encoder, decoder := child.encoder, child.decoder
 		config := privateLoadProcessConfig{
 			PG:    server.Vault.RequireSimpleResource(server.DefaultPgVaultResourceName).Bytes(),
 			Redis: server.Vault.RequireSimpleResource("redis.yml").Bytes(), Owner: f.owner,
@@ -525,10 +455,7 @@ func TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows(t *testing.T) 
 		if err := encoder.Encode(config); err != nil {
 			t.Fatal(err)
 		}
-		var ready privateLoadProcessReport
-		if err := decoder.Decode(&ready); err != nil || !ready.Ready {
-			t.Fatalf("independent process did not qualify: decode=%v private_stderr_bytes=%d", err, privateStderr.Len())
-		}
+		child.requireReady(t)
 		warm := privateLoadCreateWave(ctx, t, f)
 		if warm.Completed != 64 || warm.Failed != 0 {
 			t.Fatal("healthy warm control failed")
@@ -594,10 +521,8 @@ func TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows(t *testing.T) 
 		if err := encoder.Encode("stop"); err != nil {
 			t.Fatal(err)
 		}
-		_ = stdin.Close()
-		if err := child.Wait(); err != nil {
+		if err := child.wait(); err != nil {
 			t.Fatal("child did not join", err)
 		}
-		joined = true
 	})
 }

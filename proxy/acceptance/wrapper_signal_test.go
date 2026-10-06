@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/urnetwork/server"
 )
 
 const (
@@ -118,6 +120,19 @@ func testProxyAcceptanceWrapperWaitsForCleanupAfterSignal(t *testing.T) {
 		resultMessage = "completed after cleanup"
 	}
 	if os.Getenv(proxyWrapperSignalChild) == "1" {
+		// Qualify every endpoint before markers, barriers or descriptor ownership.
+		for _, endpoint := range []struct {
+			fd     uintptr
+			access server.TestProcessPipeAccess
+		}{
+			{fd: 3, access: server.TestProcessPipeWrite},
+			{fd: 4, access: server.TestProcessPipeWrite},
+			{fd: 5, access: server.TestProcessPipeRead},
+		} {
+			if err := server.ValidateTestProcessPipe(endpoint.fd, endpoint.access); err != nil {
+				os.Exit(70)
+			}
+		}
 		startedWriter := os.NewFile(3, "started-writer")
 		canceledWriter := os.NewFile(4, "canceled-writer")
 		releaseReader := os.NewFile(5, "release-reader")

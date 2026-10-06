@@ -815,11 +815,13 @@ func pushTestPgResourcePairWithReset(pg, maintenancePg map[string]any, database,
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			// Close every pool made from this scope before restoring the outer
-			// resources. Repeated cleanup after a setup/teardown panic is safe.
+			// Restore both resources before invalidating their pools. PgReset
+			// closes the pools sequentially: a late caller reopening the first
+			// pool must already see the outer scope, not cache this scope again.
+			// Defers retain restoration if reset panics; repeated cleanup is safe.
+			defer reset()
 			defer popPg()
-			defer popMaintenance()
-			reset()
+			popMaintenance()
 		})
 	}
 }

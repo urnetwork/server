@@ -41,7 +41,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -106,10 +105,7 @@ type fetchTestStack struct {
 	httpsPort int
 
 	proxyDeviceManager *proxy.ProxyDeviceManager
-	connectServer      *connectserver.ConnectHandler
-	webServer          *httptest.Server
-
-	closeOnce sync.Once
+	lifecycle          fetchTestStackLifecycle
 }
 
 // Selects production security policy and optional target-request observation.
@@ -118,22 +114,50 @@ type fetchTestStackOptions struct {
 	onWebRequest            func()
 }
 
-// Tears down the stack. Admission is stopped before the root ctx is canceled:
-// connect's deferred rate-limit decrement uses redis, so every admitted
-// handler must finish before DefaultTestEnv closes this test's redis pool.
+// Joins stack consumers before DefaultTestEnv restores database/Redis resources.
 func (self *fetchTestStack) close() {
-	self.closeOnce.Do(func() {
-		self.connectServer.Close()
-		self.cancel()
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer closeCancel()
+	if err := self.lifecycle.close(closeCtx); err != nil {
+		self.t.Errorf("fetch stack teardown did not join all owners: %v", err)
+	}
+}
 
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer closeCancel()
-		if !self.connectServer.WaitForIdle(closeCtx) {
-			self.t.Errorf("connect handlers did not finish during stack teardown")
+// Runs inside the TestEnv callback's stack frame. In particular, Goexit during
+// partial setup must join acquired owners before TestEnv's teardown defer runs;
+// testing.T.Cleanup would run only after that database/Redis scope has gone.
+func newFetchTestStack(t testing.TB, setup func(*fetchTestStack)) *fetchTestStack {
+	ctx, cancel := context.WithCancel(context.Background())
+	stack := &fetchTestStack{
+		t:         t,
+		ctx:       ctx,
+		cancel:    cancel,
+		lifecycle: fetchTestStackLifecycle{cancel: cancel},
+	}
+	complete := false
+	defer func() {
+		if !complete {
+			stack.close()
 		}
+	}()
+	setup(stack)
+	complete = true
+	return stack
+}
 
-		self.webServer.Close()
-	})
+// Acquires a listener-specific cancellation boundary before any frontend starts.
+// Platform controls remain available for manager/client/out-of-band rollback.
+func (self *fetchTestStack) newFrontendContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(self.ctx)
+	self.lifecycle.frontendCancel = cancel
+	return ctx, cancel
+}
+
+// Isolating frontend cancellation must not hide an actual bring-up failure.
+func (self *fetchTestStack) requireFrontendStarted(frontendCtx context.Context) {
+	if self.ctx.Err() != nil || frontendCtx.Err() != nil {
+		self.t.Fatalf("fetch proxy bring-up canceled the stack or frontend context")
+	}
 }
 
 // Builds an http client that reaches the local web server through the proxy's
@@ -374,290 +398,269 @@ func setupFetchTestStack(t testing.TB) *fetchTestStack {
 
 func setupFetchTestStackWithOptions(t testing.TB, options *fetchTestStackOptions) *fetchTestStack {
 	setFetchTestEnv()
+	return newFetchTestStack(t, func(stack *fetchTestStack) {
+		ctx := stack.ctx
 
-	ctx, cancel := context.WithCancel(context.Background())
+		// ---- the local web server the provider egresses to -----------------------
+		webServer := startFetchTestWebServer(t, options.onWebRequest)
+		stack.lifecycle.web = webServer
 
-	// ---- the local web server the provider egresses to -----------------------
-	webServer := startFetchTestWebServer(t, options.onWebRequest)
+		// ---- local connect server (plain ws, in-process) -------------------------
+		connectHost := "fetchtest"
+		service := "connect"
+		block := "test"
+		routes := map[string]string{connectHost: "127.0.0.1"}
+		hostToServicePorts := map[int]int{fetchTestConnectServicePort: fetchTestConnectServicePort}
 
-	// ---- local connect server (plain ws, in-process) -------------------------
-	connectHost := "fetchtest"
-	service := "connect"
-	block := "test"
-	routes := map[string]string{connectHost: "127.0.0.1"}
-	hostToServicePorts := map[int]int{fetchTestConnectServicePort: fetchTestConnectServicePort}
+		exchangeSettings := connectserver.DefaultExchangeSettings()
+		exchange := connectserver.NewExchange(ctx, connectHost, service, block, hostToServicePorts, routes, exchangeSettings)
+		stack.lifecycle.exchange = exchange
 
-	exchangeSettings := connectserver.DefaultExchangeSettings()
-	exchange := connectserver.NewExchange(ctx, connectHost, service, block, hostToServicePorts, routes, exchangeSettings)
+		connectHandlerSettings := connectserver.DefaultConnectHandlerSettings()
+		connectHandlerSettings.ConnectionAnnounceTimeout = 0
+		// this stack drives the h1 websocket endpoint. Do not also bind the
+		// production h3 and dns ports; a running local environment owns them.
+		connectHandlerSettings.ListenH3Port = 0
+		connectHandlerSettings.ListenDnsPort = 0
+		connectHandler := connectserver.NewConnectHandler(ctx, server.NewId(), exchange, connectHandlerSettings)
+		stack.lifecycle.handler = connectHandler
 
-	connectHandlerSettings := connectserver.DefaultConnectHandlerSettings()
-	connectHandlerSettings.ConnectionAnnounceTimeout = 0
-	// this stack drives the h1 websocket endpoint. Do not also bind the
-	// production h3 and dns ports; a running local environment owns them.
-	connectHandlerSettings.ListenH3Port = 0
-	connectHandlerSettings.ListenDnsPort = 0
-	connectHandler := connectserver.NewConnectHandler(ctx, server.NewId(), exchange, connectHandlerSettings)
+		connectRoutes := []*router.Route{
+			router.NewRoute("GET", "/status", router.WarpStatus),
+			router.NewRoute("GET", "/", connectHandler.Connect),
+		}
+		connectListener := listenFetchTestTcp(t)
+		connectClientPort := fetchTestTcpPort(connectListener)
+		stack.lifecycle.connectHttp = server.NewTestHttpServer(ctx, connectListener, &http.Server{Handler: router.NewRouter(ctx, connectRoutes)})
 
-	connectRoutes := []*router.Route{
-		router.NewRoute("GET", "/status", router.WarpStatus),
-		router.NewRoute("GET", "/", connectHandler.Connect),
-	}
-	connectListener := listenFetchTestTcp(t)
-	connectClientPort := fetchTestTcpPort(connectListener)
-	connectHttp := &http.Server{
-		Handler: router.NewRouter(ctx, connectRoutes),
-	}
-	go connectHttp.Serve(connectListener)
+		// ---- local api server (plain http, full route set, in-process) -----------
+		apiListener := listenFetchTestTcp(t)
+		apiPort := fetchTestTcpPort(apiListener)
+		stack.lifecycle.apiHttp = server.NewTestHttpServer(ctx, apiListener, &http.Server{Handler: router.NewRouter(ctx, api.Routes())})
 
-	// ---- local api server (plain http, full route set, in-process) -----------
-	apiListener := listenFetchTestTcp(t)
-	apiPort := fetchTestTcpPort(apiListener)
-	apiHttp := &http.Server{
-		Handler: router.NewRouter(ctx, api.Routes()),
-	}
-	go apiHttp.Serve(apiListener)
+		// give the listeners a moment to bind
+		select {
+		case <-time.After(1 * time.Second):
+		}
 
-	go func() {
-		<-ctx.Done()
-		connectHttp.Close()
-		apiHttp.Close()
-		exchange.Close()
-	}()
+		apiUrl := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
+		platformUrl := fmt.Sprintf("ws://127.0.0.1:%d", connectClientPort)
 
-	// give the listeners a moment to bind
-	select {
-	case <-time.After(1 * time.Second):
-	}
-
-	apiUrl := fmt.Sprintf("http://127.0.0.1:%d", apiPort)
-	platformUrl := fmt.Sprintf("ws://127.0.0.1:%d", connectClientPort)
-
-	// ---- the test network space pointing the sdk at the local servers --------
-	connectSettings := connect.DefaultConnectSettings()
-	networkSpace := sdk.Testing_NewNetworkSpaceWithUrls(
-		ctx,
-		apiUrl,
-		platformUrl,
-		connectSettings,
-	)
-	t.Cleanup(networkSpace.Close)
-
-	// ---- a local provider ----------------------------------------------------
-	providerNetworkId := server.NewId()
-	providerUserId := server.NewId()
-	providerNetworkName := fmt.Sprintf("provider-%s", providerNetworkId)
-	providerDeviceId := server.NewId()
-	providerClientId := server.NewId()
-	providerInstanceId := server.NewId()
-
-	model.Testing_CreateNetwork(ctx, providerNetworkId, providerNetworkName, providerUserId)
-	model.Testing_CreateDevice(ctx, providerNetworkId, providerDeviceId, providerClientId, "provider", "provider")
-	fetchTestRedeemBalance(t, ctx, providerNetworkId, fetchTestInitialBalance)
-
-	providerByJwt := jwt.NewByJwt(providerNetworkId, providerUserId, providerNetworkName, false, false).
-		Client(providerDeviceId, providerClientId).Sign()
-
-	// The sdk's NewPlatformDeviceLocal hardcodes allowProvider=false (it's for
-	// embedded source devices that reach providers via the multi-client
-	// generator). A real provider needs its own client + platform transport +
-	// egress nat, so build it directly from connect primitives.
-	providerStrategySettings := connect.DefaultClientStrategySettings()
-	providerStrategySettings.EnableResilient = false
-	providerClientStrategy := connect.NewClientStrategy(ctx, providerStrategySettings)
-
-	providerOob := connect.NewApiOutOfBandControl(ctx, providerClientStrategy, providerByJwt, apiUrl)
-	providerClient := connect.NewClient(ctx, connect.Id(providerClientId), providerOob, connect.DefaultClientSettings())
-	go func() {
-		<-ctx.Done()
-		providerClient.Close()
-	}()
-
-	providerAuth := &connect.ClientAuth{
-		ByJwt:      providerByJwt,
-		InstanceId: connect.Id(providerInstanceId),
-		AppVersion: server.RequireVersion(),
-	}
-	providerTransport := connect.NewPlatformTransportWithDefaults(
-		providerClient.Ctx(),
-		providerClientStrategy,
-		providerClient.RouteManager(),
-		platformUrl,
-		providerAuth,
-	)
-	go func() {
-		<-ctx.Done()
-		providerTransport.Close()
-	}()
-
-	// egress via a user-space nat. The default policy allows only public
-	// unicast destinations for a public provide relationship, which would make
-	// the loopback web server an incident on the provider's ingress
-	// inspection, so the policy is disabled here.
-	providerLocalUserNat := connect.NewLocalUserNatWithDefaults(providerClient.Ctx(), providerClientId.String())
-	providerNatSettings := connect.DefaultRemoteUserNatProviderSettings()
-	if options.disableSecurityPolicies {
-		providerNatSettings.SecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
-	}
-	providerRemoteNat := connect.NewRemoteUserNatProvider(providerClient, providerLocalUserNat, providerNatSettings)
-	go func() {
-		<-ctx.Done()
-		providerRemoteNat.Close()
-		providerLocalUserNat.Close()
-	}()
-
-	// provide public, with return-traffic stream so the source can open both
-	// the forward and companion contracts
-	providerClient.ContractManager().SetProvideModesWithReturnTraffic(map[protocol.ProvideMode]bool{
-		protocol.ProvideMode_Public:  true,
-		protocol.ProvideMode_Network: true,
-	})
-
-	// wait for the provider's provide to register on the platform before the
-	// proxy device tries to open contracts to it
-	fetchTestWaitFor(t, 30*time.Second, "provider provide registered", func() bool {
-		modes, err := model.GetProvideModes(ctx, providerClientId)
-		return err == nil && len(modes) > 0
-	})
-
-	// ---- the proxy device's network/device/client + balance ------------------
-	pdNetworkId := server.NewId()
-	pdUserId := server.NewId()
-	pdNetworkName := fmt.Sprintf("proxydev-%s", pdNetworkId)
-	pdDeviceId := server.NewId()
-	pdClientId := server.NewId()
-
-	model.Testing_CreateNetwork(ctx, pdNetworkId, pdNetworkName, pdUserId)
-	model.Testing_CreateDevice(ctx, pdNetworkId, pdDeviceId, pdClientId, "proxydevice", "mcp")
-	fetchTestRedeemBalance(t, ctx, pdNetworkId, fetchTestInitialBalance)
-
-	// the proxy device connects "by location" pinned directly to the provider
-	// client id, which the real find-providers2 path resolves
-	location := &sdk.ConnectLocation{
-		ConnectLocationId: &sdk.ConnectLocationId{
-			ClientId: server.ToSdkId(providerClientId),
-		},
-	}
-
-	proxyDeviceConfig := &model.ProxyDeviceConfig{
-		ProxyDeviceConnection: model.ProxyDeviceConnection{
-			ClientId: pdClientId,
-		},
-		ProxyDeviceMode: model.ProxyDeviceModeDevice,
-		InitialDeviceState: &model.ProxyDeviceState{
-			Location: location,
-		},
-	}
-	if err := model.CreateProxyDeviceConfig(ctx, proxyDeviceConfig); err != nil {
-		t.Fatalf("create proxy device config: %v", err)
-	}
-	proxyId := proxyDeviceConfig.ProxyId
-
-	// seed a few high-sequence proxy_client_ipv4 rows so CreateProxyClient(wg)
-	// can allocate a client ip (avoids the 10M-row ResetProxyClientIpv4)
-	seedFetchTestProxyClientIpv4(t, ctx)
-
-	proxyClient, err := model.CreateProxyClient(
-		ctx,
-		proxyId,
-		pdClientId,
-		proxyDeviceConfig.InstanceId,
-		model.CreateProxyClientOptions{EnableWg: true},
-	)
-	if err != nil {
-		t.Fatalf("create proxy client: %v", err)
-	}
-
-	// ---- the real proxy http/https ingress -----------------------------------
-	proxySettings := proxy.DefaultProxySettings()
-	testPorts, releaseTestPorts := reserveFetchTestPorts(t)
-	proxySettings.HttpPort = testPorts.http
-	proxySettings.HttpsPort = testPorts.https
-
-	transportTls := server.NewTransportTls(
-		map[string]bool{},
-		&server.TransportTlsSettings{EnableSelfSign: true, DefaultHostName: "127.0.0.1"},
-	)
-
-	// the client side of the same public-unicast rule: without this the proxy
-	// device drops its own egress to the loopback web server
-	pdmSettings := proxy.DefaultProxyDeviceManagerSettings()
-	pdmSettings.NetworkSpace = networkSpace
-	if options.disableSecurityPolicies {
-		pdmSettings.ClientSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
-	}
-	proxyDeviceManager := proxy.NewProxyDeviceManager(ctx, pdmSettings)
-	go func() {
-		<-ctx.Done()
-		_ = proxyDeviceManager.CloseAndWait(context.Background())
-	}()
-
-	releaseTestPorts()
-	proxy.NewHttpServer(ctx, cancel, proxyDeviceManager, transportTls, proxySettings)
-
-	// give the proxy listeners a moment to bind
-	select {
-	case <-time.After(1 * time.Second):
-	}
-
-	// warm up the proxy device: open it and wait until it has a usable path to
-	// the provider before any traffic is driven through it
-	pd, err := proxyDeviceManager.OpenProxyDevice(proxyId)
-	if err != nil {
-		t.Fatalf("open proxy device: %v", err)
-	}
-	if ready := pd.WaitForReady(ctx, 60*time.Second); !ready {
-		t.Fatalf("proxy device did not become ready (provider not reachable)")
-	}
-	proxyOwner := model.GetNetworkClient(ctx, proxyDeviceConfig.ClientId)
-	if proxyOwner == nil {
-		t.Fatalf("mcp proxy owner client %s does not exist", proxyDeviceConfig.ClientId)
-	}
-	if proxyOwner.NetworkId != pdNetworkId {
-		t.Fatalf(
-			"mcp proxy fixture owner network=%s device_spec=%q, want network=%s",
-			proxyOwner.NetworkId,
-			proxyOwner.DeviceSpec,
-			pdNetworkId,
+		// ---- the test network space pointing the sdk at the local servers --------
+		connectSettings := connect.DefaultConnectSettings()
+		networkSpace := sdk.Testing_NewNetworkSpaceWithUrls(
+			ctx,
+			apiUrl,
+			platformUrl,
+			connectSettings,
 		)
-	}
+		stack.lifecycle.networkSpace = networkSpace
 
-	mcpBinding := identityStateBinding(
-		pdUserId.String(),
-		pdNetworkId,
-		fetchTestOAuthClientId,
-		McpResource,
-	)
-	mcpSignedProxyId, err := seal(
-		sealLabelProxy,
-		mcpBinding,
-		&sealedProxyHandle{SignedProxyId: proxyClient.AuthToken},
-		fetchSealTtl,
-	)
-	if err != nil {
-		t.Fatalf("seal mcp proxy handle: %v", err)
-	}
+		// ---- a local provider ----------------------------------------------------
+		providerNetworkId := server.NewId()
+		providerUserId := server.NewId()
+		providerNetworkName := fmt.Sprintf("provider-%s", providerNetworkId)
+		providerDeviceId := server.NewId()
+		providerClientId := server.NewId()
+		providerInstanceId := server.NewId()
 
-	return &fetchTestStack{
-		t:                  t,
-		ctx:                ctx,
-		cancel:             cancel,
-		signedProxyId:      proxyClient.AuthToken,
-		mcpSignedProxyId:   mcpSignedProxyId,
-		proxyClient:        proxyClient,
-		webUrl:             webServer.URL,
-		pdNetworkId:        pdNetworkId,
-		pdUserId:           pdUserId,
-		pdClientId:         pdClientId,
-		providerNetworkId:  providerNetworkId,
-		providerClientId:   providerClientId,
-		proxyId:            proxyId,
-		apiUrl:             apiUrl,
-		httpPort:           testPorts.http,
-		httpsPort:          testPorts.https,
-		proxyDeviceManager: proxyDeviceManager,
-		connectServer:      connectHandler,
-		webServer:          webServer,
-	}
+		model.Testing_CreateNetwork(ctx, providerNetworkId, providerNetworkName, providerUserId)
+		model.Testing_CreateDevice(ctx, providerNetworkId, providerDeviceId, providerClientId, "provider", "provider")
+		fetchTestRedeemBalance(t, ctx, providerNetworkId, fetchTestInitialBalance)
+
+		providerByJwt := jwt.NewByJwt(providerNetworkId, providerUserId, providerNetworkName, false, false).
+			Client(providerDeviceId, providerClientId).Sign()
+
+		// The sdk's NewPlatformDeviceLocal hardcodes allowProvider=false (it's for
+		// embedded source devices that reach providers via the multi-client
+		// generator). A real provider needs its own client + platform transport +
+		// egress nat, so build it directly from connect primitives.
+		providerStrategySettings := connect.DefaultClientStrategySettings()
+		providerStrategySettings.EnableResilient = false
+		providerClientStrategy := connect.NewClientStrategy(ctx, providerStrategySettings)
+		stack.lifecycle.provider.strategy = providerClientStrategy
+
+		providerOob := connect.NewApiOutOfBandControl(ctx, providerClientStrategy, providerByJwt, apiUrl)
+		stack.lifecycle.provider.oob = providerOob
+		providerClient := connect.NewClient(ctx, connect.Id(providerClientId), providerOob, connect.DefaultClientSettings())
+		stack.lifecycle.provider.client = providerClient
+
+		providerAuth := &connect.ClientAuth{
+			ByJwt:      providerByJwt,
+			InstanceId: connect.Id(providerInstanceId),
+			AppVersion: server.RequireVersion(),
+		}
+		providerTransport := connect.NewPlatformTransportWithDefaults(
+			providerClient.Ctx(),
+			providerClientStrategy,
+			providerClient.RouteManager(),
+			platformUrl,
+			providerAuth,
+		)
+		stack.lifecycle.provider.transport = providerTransport
+
+		// egress via a user-space nat. The default policy allows only public
+		// unicast destinations for a public provide relationship, which would make
+		// the loopback web server an incident on the provider's ingress
+		// inspection, so the policy is disabled here.
+		providerLocalUserNat := connect.NewLocalUserNatWithDefaults(providerClient.Ctx(), providerClientId.String())
+		stack.lifecycle.provider.localNat = providerLocalUserNat
+		providerNatSettings := connect.DefaultRemoteUserNatProviderSettings()
+		if options.disableSecurityPolicies {
+			providerNatSettings.SecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+		}
+		providerRemoteNat := connect.NewRemoteUserNatProvider(providerClient, providerLocalUserNat, providerNatSettings)
+		stack.lifecycle.provider.remoteNat = providerRemoteNat
+
+		// provide public, with return-traffic stream so the source can open both
+		// the forward and companion contracts
+		providerClient.ContractManager().SetProvideModesWithReturnTraffic(map[protocol.ProvideMode]bool{
+			protocol.ProvideMode_Public:  true,
+			protocol.ProvideMode_Network: true,
+		})
+
+		// wait for the provider's provide to register on the platform before the
+		// proxy device tries to open contracts to it
+		fetchTestWaitFor(t, 30*time.Second, "provider provide registered", func() bool {
+			modes, err := model.GetProvideModes(ctx, providerClientId)
+			return err == nil && len(modes) > 0
+		})
+
+		// ---- the proxy device's network/device/client + balance ------------------
+		pdNetworkId := server.NewId()
+		pdUserId := server.NewId()
+		pdNetworkName := fmt.Sprintf("proxydev-%s", pdNetworkId)
+		pdDeviceId := server.NewId()
+		pdClientId := server.NewId()
+
+		model.Testing_CreateNetwork(ctx, pdNetworkId, pdNetworkName, pdUserId)
+		model.Testing_CreateDevice(ctx, pdNetworkId, pdDeviceId, pdClientId, "proxydevice", "mcp")
+		fetchTestRedeemBalance(t, ctx, pdNetworkId, fetchTestInitialBalance)
+
+		// the proxy device connects "by location" pinned directly to the provider
+		// client id, which the real find-providers2 path resolves
+		location := &sdk.ConnectLocation{
+			ConnectLocationId: &sdk.ConnectLocationId{
+				ClientId: server.ToSdkId(providerClientId),
+			},
+		}
+
+		proxyDeviceConfig := &model.ProxyDeviceConfig{
+			ProxyDeviceConnection: model.ProxyDeviceConnection{
+				ClientId: pdClientId,
+			},
+			ProxyDeviceMode: model.ProxyDeviceModeDevice,
+			InitialDeviceState: &model.ProxyDeviceState{
+				Location: location,
+			},
+		}
+		if err := model.CreateProxyDeviceConfig(ctx, proxyDeviceConfig); err != nil {
+			t.Fatalf("create proxy device config: %v", err)
+		}
+		proxyId := proxyDeviceConfig.ProxyId
+
+		// seed a few high-sequence proxy_client_ipv4 rows so CreateProxyClient(wg)
+		// can allocate a client ip (avoids the 10M-row ResetProxyClientIpv4)
+		seedFetchTestProxyClientIpv4(t, ctx)
+
+		proxyClient, err := model.CreateProxyClient(
+			ctx,
+			proxyId,
+			pdClientId,
+			proxyDeviceConfig.InstanceId,
+			model.CreateProxyClientOptions{EnableWg: true},
+		)
+		if err != nil {
+			t.Fatalf("create proxy client: %v", err)
+		}
+
+		// ---- the real proxy http/https ingress -----------------------------------
+		proxySettings := proxy.DefaultProxySettings()
+		testPorts, releaseTestPorts := reserveFetchTestPorts(t)
+		defer releaseTestPorts()
+		proxySettings.HttpPort = testPorts.http
+		proxySettings.HttpsPort = testPorts.https
+
+		transportTls := server.NewTransportTls(
+			map[string]bool{},
+			&server.TransportTlsSettings{EnableSelfSign: true, DefaultHostName: "127.0.0.1"},
+		)
+
+		// the client side of the same public-unicast rule: without this the proxy
+		// device drops its own egress to the loopback web server
+		pdmSettings := proxy.DefaultProxyDeviceManagerSettings()
+		pdmSettings.NetworkSpace = networkSpace
+		if options.disableSecurityPolicies {
+			pdmSettings.ClientSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+		}
+		proxyDeviceManager := proxy.NewProxyDeviceManager(ctx, pdmSettings)
+		stack.lifecycle.manager = proxyDeviceManager
+
+		releaseTestPorts()
+		frontendCtx, frontendCancel := stack.newFrontendContext()
+		ingress := proxy.NewHttpServer(frontendCtx, frontendCancel, proxyDeviceManager, transportTls, proxySettings)
+		stack.lifecycle.frontendListener = ingress
+		stack.lifecycle.ingress = ingress
+
+		// give the proxy listeners a moment to bind
+		select {
+		case <-time.After(1 * time.Second):
+		}
+		stack.requireFrontendStarted(frontendCtx)
+
+		// warm up the proxy device: open it and wait until it has a usable path to
+		// the provider before any traffic is driven through it
+		pd, err := proxyDeviceManager.OpenProxyDevice(proxyId)
+		if err != nil {
+			t.Fatalf("open proxy device: %v", err)
+		}
+		if ready := pd.WaitForReady(ctx, 60*time.Second); !ready {
+			t.Fatalf("proxy device did not become ready (provider not reachable)")
+		}
+		proxyOwner := model.GetNetworkClient(ctx, proxyDeviceConfig.ClientId)
+		if proxyOwner == nil {
+			t.Fatalf("mcp proxy owner client %s does not exist", proxyDeviceConfig.ClientId)
+		}
+		if proxyOwner.NetworkId != pdNetworkId {
+			t.Fatalf(
+				"mcp proxy fixture owner network=%s device_spec=%q, want network=%s",
+				proxyOwner.NetworkId,
+				proxyOwner.DeviceSpec,
+				pdNetworkId,
+			)
+		}
+
+		mcpBinding := identityStateBinding(
+			pdUserId.String(),
+			pdNetworkId,
+			fetchTestOAuthClientId,
+			McpResource,
+		)
+		mcpSignedProxyId, err := seal(
+			sealLabelProxy,
+			mcpBinding,
+			&sealedProxyHandle{SignedProxyId: proxyClient.AuthToken},
+			fetchSealTtl,
+		)
+		if err != nil {
+			t.Fatalf("seal mcp proxy handle: %v", err)
+		}
+
+		stack.signedProxyId = proxyClient.AuthToken
+		stack.mcpSignedProxyId = mcpSignedProxyId
+		stack.proxyClient = proxyClient
+		stack.webUrl = webServer.URL
+		stack.pdNetworkId = pdNetworkId
+		stack.pdUserId = pdUserId
+		stack.pdClientId = pdClientId
+		stack.providerNetworkId = providerNetworkId
+		stack.providerClientId = providerClientId
+		stack.proxyId = proxyId
+		stack.apiUrl = apiUrl
+		stack.httpPort = testPorts.http
+		stack.httpsPort = testPorts.https
+		stack.proxyDeviceManager = proxyDeviceManager
+	})
 }
 
 // Checks that the stack stands up and that the local web server is reachable

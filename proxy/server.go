@@ -250,6 +250,73 @@ type ProxySettings struct {
 	WgSessionSampleTimeout time.Duration
 }
 
+// Owns the supervisor and every listener it starts. Only the supervisor may
+// add workers; completion is published after cancellation, recovery and joins.
+// CloseAndWait is concurrent and retryable, and retains real startup failures.
+type proxyListenerLifecycle struct {
+	ctx       context.Context
+	cancel    context.CancelFunc
+	done      chan struct{}
+	workers   sync.WaitGroup
+	stateLock sync.Mutex
+	err       error
+}
+
+// Acquires completion ownership before a constructor starts any goroutine.
+func newProxyListenerLifecycle(ctx context.Context, cancel context.CancelFunc) *proxyListenerLifecycle {
+	return &proxyListenerLifecycle{ctx: ctx, cancel: cancel, done: make(chan struct{})}
+}
+
+// Starts the sole supervisor. Cancellation precedes worker joins even if setup
+// panics or calls Goexit before every listener has been launched.
+func (self *proxyListenerLifecycle) start(run func()) {
+	go func() {
+		defer close(self.done)
+		defer func() { self.cancel(); self.workers.Wait() }()
+		server.HandleError(run, self.recordError)
+	}()
+}
+
+// Accounts a listener before launching it, then retains its recovery result.
+func (self *proxyListenerLifecycle) startListener(run func()) {
+	self.workers.Add(1)
+	go func() {
+		defer self.workers.Done()
+		server.HandleError(run, self.recordError)
+	}()
+}
+
+// Expected parent cancellation is not a startup failure; every other recovered
+// listener/supervisor error remains visible after subsequent cleanup attempts.
+func (self *proxyListenerLifecycle) recordError(err error) {
+	if server.IsDoneError(err) {
+		return
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.err = errors.Join(self.err, err)
+}
+
+// Cancels the supplied server context and joins its supervisor/listener tree.
+// Callers that retain platform controls supply a child context. A missed bound
+// is an explicit failure, not idle.
+func (self *proxyListenerLifecycle) CloseAndWait(ctx context.Context) error {
+	self.cancel()
+	var waitErr error
+	select {
+	case <-self.done:
+	default:
+		select {
+		case <-self.done:
+		case <-ctx.Done():
+			waitErr = fmt.Errorf("proxy listener workers did not join: %w", ctx.Err())
+		}
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return errors.Join(self.err, waitErr)
+}
+
 type socks5Server struct {
 	ctx                context.Context
 	cancel             context.CancelFunc
@@ -257,6 +324,7 @@ type socks5Server struct {
 	transportTls       *server.TransportTls
 	settings           *ProxySettings
 	socksProxy         *proxy.SocksProxy
+	lifecycle          *proxyListenerLifecycle
 }
 
 func NewSocks5Server(
@@ -268,6 +336,7 @@ func NewSocks5Server(
 ) *socks5Server {
 	s := &socks5Server{
 		ctx:                ctx,
+		lifecycle:          newProxyListenerLifecycle(ctx, cancel),
 		cancel:             cancel,
 		proxyDeviceManager: proxyDeviceManager,
 		transportTls:       transportTls,
@@ -277,7 +346,7 @@ func NewSocks5Server(
 	// WaitIdle) is valid as soon as the constructor returns
 	s.socksProxy = s.newSocksProxy()
 
-	go server.HandleError(s.run, cancel)
+	s.lifecycle.start(s.run)
 
 	return s
 }
@@ -300,6 +369,19 @@ func (self *socks5Server) Stats() proxy.SocksStatsSnapshot {
 
 func (self *socks5Server) WaitIdle(ctx context.Context) bool {
 	return self.socksProxy.WaitIdle(ctx)
+}
+
+// Joins listener supervisors after hard cancellation. The caller must first
+// use Drain and WaitIdle if admitted sessions should finish gracefully.
+func (self *socks5Server) CloseAndWait(ctx context.Context) error {
+	listenerErr := self.lifecycle.CloseAndWait(ctx)
+	select {
+	case <-self.lifecycle.done:
+		return errors.Join(listenerErr, self.socksProxy.WaitStats(ctx))
+	default:
+		// A supervisor still running may start the singleton stats worker later.
+		return listenerErr
+	}
 }
 
 func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
@@ -387,7 +469,7 @@ func (self *socks5Server) run() {
 
 	listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(self.settings.SocksPort)
 
-	go server.HandleError(func() {
+	self.lifecycle.startListener(func() {
 		defer self.cancel()
 		err := self.socksProxy.ListenAndServe(
 			self.ctx,
@@ -400,7 +482,7 @@ func (self *socks5Server) run() {
 	})
 
 	if listenIpv6 != "" {
-		go server.HandleError(func() {
+		self.lifecycle.startListener(func() {
 			defer self.cancel()
 			err := self.socksProxy.ListenAndServe(
 				self.ctx,
@@ -425,6 +507,7 @@ type httpServer struct {
 	transportTls       *server.TransportTls
 	settings           *ProxySettings
 	httpProxy          *proxy.HttpProxy
+	lifecycle          *proxyListenerLifecycle
 }
 
 func NewHttpServer(
@@ -436,6 +519,7 @@ func NewHttpServer(
 ) *httpServer {
 	s := &httpServer{
 		ctx:                ctx,
+		lifecycle:          newProxyListenerLifecycle(ctx, cancel),
 		cancel:             cancel,
 		proxyDeviceManager: proxyDeviceManager,
 		transportTls:       transportTls,
@@ -445,7 +529,7 @@ func NewHttpServer(
 	// WaitIdle) is valid as soon as the constructor returns
 	s.httpProxy = s.newHttpProxy()
 
-	go server.HandleError(s.run, cancel)
+	s.lifecycle.start(s.run)
 
 	return s
 }
@@ -468,6 +552,12 @@ func (self *httpServer) Stats() proxy.HttpStatsSnapshot {
 
 func (self *httpServer) WaitIdle(ctx context.Context) bool {
 	return self.httpProxy.WaitIdle(ctx)
+}
+
+// Joins listener supervisors after hard cancellation, preserving the separate
+// graceful Drain/WaitIdle phase used before tearing down shared platform state.
+func (self *httpServer) CloseAndWait(ctx context.Context) error {
+	return self.lifecycle.CloseAndWait(ctx)
 }
 
 func (self *httpServer) newHttpProxy() *proxy.HttpProxy {
@@ -548,7 +638,7 @@ func (self *httpServer) run() {
 	func() {
 		listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(self.settings.HttpPort)
 
-		go server.HandleError(func() {
+		self.lifecycle.startListener(func() {
 			defer self.cancel()
 			err := self.httpProxy.ListenAndServe(
 				self.ctx,
@@ -560,7 +650,7 @@ func (self *httpServer) run() {
 			}
 		})
 		if listenIpv6 != "" {
-			go server.HandleError(func() {
+			self.lifecycle.startListener(func() {
 				defer self.cancel()
 				err := self.httpProxy.ListenAndServe(
 					self.ctx,
@@ -578,7 +668,7 @@ func (self *httpServer) run() {
 	func() {
 		listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(self.settings.HttpsPort)
 
-		go server.HandleError(func() {
+		self.lifecycle.startListener(func() {
 			defer self.cancel()
 			err := self.httpProxy.ListenAndServeTls(
 				self.ctx,
@@ -590,7 +680,7 @@ func (self *httpServer) run() {
 			}
 		})
 		if listenIpv6 != "" {
-			go server.HandleError(func() {
+			self.lifecycle.startListener(func() {
 				defer self.cancel()
 				err := self.httpProxy.ListenAndServeTls(
 					self.ctx,

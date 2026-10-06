@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -43,28 +44,62 @@ func useFetchTestStack(stack *fetchTestStack) func() {
 // An authorized mcp session against an in-process mcp server. The fetch tool
 // needs both scopes: the transport enforces the read scope and the tool itself
 // enforces the fetch scope.
-func connectFetchTestClient(t testing.TB, ctx context.Context, stack *fetchTestStack) (*mcpsdk.ClientSession, func()) {
-	serverUrl, cleanupServer := startTestServer(t)
-	accessToken, _, err := oauth.MintAccessToken(&oauth.MintAccessTokenArgs{
-		UserId:    stack.pdUserId,
-		NetworkId: stack.pdNetworkId,
-		ClientId:  fetchTestOAuthClientId,
-		Audience:  McpResource,
-		Scopes: []string{
-			oauth.ScopeMcpRead,
-			oauth.ScopeMcpFetch,
-		},
-	})
-	if err != nil {
-		t.Fatalf("mint fetch test access token: %v", err)
+// Keeps failure injection per fixture, before the first token/model operation.
+type fetchTestClientOptions struct {
+	server  mcpTestServerOptions
+	connect func(string, func()) *mcpsdk.ClientSession
+}
+
+// Acquires server cleanup immediately, before token minting or client connection
+// can terminate this frame. Repeated cleanup joins a session once but retries
+// the independently owned server after a failed bounded join.
+func connectFetchTestClient(t testing.TB, ctx context.Context, stack *fetchTestStack, options ...fetchTestClientOptions) (*mcpsdk.ClientSession, func()) {
+	var settings fetchTestClientOptions
+	if 0 < len(options) {
+		settings = options[0]
 	}
-
-	session := connectTestClientWithToken(t, ctx, serverUrl, accessToken)
-
-	return session, func() {
-		session.Close()
+	serverUrl, cleanupServer := startTestServer(t, settings.server)
+	var session *mcpsdk.ClientSession
+	var closeOnce sync.Once
+	var sessionCloseErr error
+	cleanup := func() {
+		closeOnce.Do(func() {
+			if session != nil {
+				sessionCloseErr = session.Close()
+			}
+		})
+		if sessionCloseErr != nil {
+			t.Errorf("mcp test client did not close: %v", sessionCloseErr)
+		}
 		cleanupServer()
 	}
+	complete := false
+	defer func() {
+		if !complete {
+			cleanup()
+		}
+	}()
+	if settings.connect != nil {
+		session = settings.connect(serverUrl, cleanupServer)
+	} else {
+		accessToken, _, err := oauth.MintAccessToken(&oauth.MintAccessTokenArgs{
+			UserId:    stack.pdUserId,
+			NetworkId: stack.pdNetworkId,
+			ClientId:  fetchTestOAuthClientId,
+			Audience:  McpResource,
+			Scopes: []string{
+				oauth.ScopeMcpRead,
+				oauth.ScopeMcpFetch,
+			},
+		})
+		if err != nil {
+			t.Fatalf("mint fetch test access token: %v", err)
+		}
+
+		session = connectTestClientWithToken(t, ctx, serverUrl, accessToken)
+	}
+	complete = true
+	return session, cleanup
 }
 
 // Calls fetch, retrying while the proxy device converges on the provider. The

@@ -3,9 +3,7 @@ package work
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"os"
-	"os/exec"
 	"strconv"
 	"testing"
 	"time"
@@ -50,41 +48,14 @@ func TestContractCreationSameNetworkLargeNContentionFree(t *testing.T) {
 		pop := server.Config.PushSimpleResource("db.yml", []byte("min_connections: 0\nmax_connections: 16\n"))
 		server.PgReset()
 		defer func() { pop(); server.PgReset() }()
-		executable, err := os.Executable()
-		if err != nil {
-			t.Fatal(err)
-		}
-		child := exec.CommandContext(ctx, executable, "-test.run=^TestPrivateProviderLoadedPeerProcess$", "-test.timeout=100s")
-		child.Env = append(os.Environ(), "URNETWORK_PRIVATE_LOAD_CHILD=1")
-		stdin, err := child.StdinPipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		stdout, err := child.StdoutPipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		var stderr privateLoadLockedBuffer
-		child.Stderr = &stderr
-		if err := child.Start(); err != nil {
-			t.Fatal(err)
-		}
-		joined := false
-		defer func() {
-			if !joined {
-				_ = child.Process.Kill()
-				_ = child.Wait()
-			}
-		}()
-		encoder, decoder := json.NewEncoder(stdin), json.NewDecoder(stdout)
+		child := privateLoadStartPeerProcess(t, ctx, 100*time.Second)
+		defer child.close(t)
+		encoder, decoder := child.encoder, child.decoder
 		config := privateLoadProcessConfig{PG: server.Vault.RequireSimpleResource(server.DefaultPgVaultResourceName).Bytes(), Redis: server.Vault.RequireSimpleResource("redis.yml").Bytes(), Owner: f.owner, Peer: f.peer, Tokens: f.tokens[count/2:], Clients: f.clients[count/2:], PoolSize: 16, Peers: peers}
 		if err := encoder.Encode(config); err != nil {
 			t.Fatal(err)
 		}
-		var ready privateLoadProcessReport
-		if err := decoder.Decode(&ready); err != nil || !ready.Ready {
-			t.Fatal("child not ready")
-		}
+		child.requireReady(t)
 		local := f
 		local.tokens = f.tokens[:count/2]
 		local.clients = f.clients[:count/2]
@@ -104,9 +75,7 @@ func TestContractCreationSameNetworkLargeNContentionFree(t *testing.T) {
 			if err := encoder.Encode(command); err != nil {
 				t.Fatal(err)
 			}
-			if err := decoder.Decode(&ready); err != nil || !ready.Ready {
-				t.Fatal("child barrier not ready")
-			}
+			child.requireReady(t)
 			<-localReady
 			if err := encoder.Encode("go"); err != nil {
 				t.Fatal(err)
@@ -146,11 +115,9 @@ func TestContractCreationSameNetworkLargeNContentionFree(t *testing.T) {
 		if err := encoder.Encode("stop"); err != nil {
 			t.Fatal(err)
 		}
-		_ = stdin.Close()
-		if err := child.Wait(); err != nil {
+		if err := child.wait(); err != nil {
 			t.Fatal("child did not join")
 		}
-		joined = true
 		var durable int
 		server.Db(ctx, func(conn server.PgConn) {
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM transfer_escrow WHERE balance_id=$1 AND redis_reserved`, f.owner.BalanceId).Scan(&durable))
