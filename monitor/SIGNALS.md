@@ -20339,6 +20339,28 @@ native host/block/start/source match; a missing hot process cannot borrow a
 healthy peer's counters. No full heap or goroutine traversal is made
 pause-bounded merely by limiting the returned bytes.
 
+Resident and forward routing entries must be published before their lifecycle
+workers can retire them. A resident can consume its existing idle allowance
+while construction waits for peer metadata; an immediately retiring worker
+must not remove an absent entry and then leave a later insertion behind.
+Forward construction has the same ordering requirement. Publish each owner
+before launch, and remove only that exact forward candidate if worker admission
+has already closed. Concurrent live forwards remain the routing winner.
+
+The native publication controls force real worker retirement before construction
+returns and check the owning map after the join. Both original-order controls
+reproduce a retained entry; the correction passes normal and race controls,
+including caller-to-exchange lifetime transfer, refused-forward reclamation,
+and accepted control completion across transport and idle retirement. The
+separate active-forward control preserves native ACK delivery. A joined resident
+graph may still be reachable through a stale map entry; joined worker counts
+alone do not establish reclamation. Normal parent retirement performs a final
+forward-map sweep, so the adjacent forward ordering defect does not by itself
+prove process-long forward retention. These source controls do not establish
+Main incidence or explain its goroutine remainder. Keep the runtime PAGE open
+until qualified executable, population, and matched runtime observations show
+recovery; a deployment or restart alone is not that evidence.
+
 `connect-resident-cost-unobservable` WARNs immediately when the newest Connect
 population join is missing/stale, duplicated, invalid, or cannot select an
 unambiguous newest generation. It carries only fixed fleet counts. Duplicate
