@@ -35,6 +35,7 @@ func TestContractHoleReadStatusDistinguishesNegativeAndUnknown(t *testing.T) {
 			{value: "broken", expiry: ContractHoleTtl, status: ContractHoleUnknown, wantError: true},
 			{value: "1", expiry: 0, status: ContractHoleUnknown, wantError: true},
 			{value: "1", expiry: ContractHoleTtl + time.Hour, status: ContractHoleUnknown, wantError: true},
+			{value: "1", expiry: ContractHoleTtl, status: ContractHolePositive},
 		} {
 			server.Redis(ctx, func(client server.RedisClient) {
 				server.Raise(client.Set(ctx, contractHoleKeys(source, destination)[0], sample.value, sample.expiry).Err())
