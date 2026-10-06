@@ -1,3 +1,4 @@
+// Serves the proxy control endpoints with shared route/configuration assembly.
 package proxy
 
 import (
@@ -53,38 +54,8 @@ func NewApiServer(
 func (self *apiServer) run() {
 	defer self.cancel()
 
-	// the device rpc control endpoint shares this TLS listener: a DeviceRemote
-	// (e.g. a browser) connects with the device's signed proxy id to control the
-	// hosted DeviceLocal. It authenticates the same way as /warmup (signed proxy
-	// id) and terminates the same per-proxy SNI TLS, so it belongs here rather
-	// than on the forward-proxy listener.
-	deviceRpc := NewDeviceRpcHandler(self.proxyDeviceManager, self.settings)
-	flowTrace := flowTraceHandler{
-		auth: authHeaderProxyId, open: self.proxyDeviceManager.OpenProxyDevice,
-		lookup: self.proxyDeviceManager.flowTraceDevice,
-	}
-
-	routes := []*router.Route{
-		router.NewRoute("POST", "/warmup", self.HandleWarmup),
-		router.NewRoute("GET", deviceRpcPath, deviceRpc.ServeHTTP),
-		router.NewRoute("POST", flowTracePath, flowTrace.ServeHTTP),
-		router.NewRoute("GET", flowTracePath, flowTrace.ServeHTTP),
-	}
-
-	router := router.NewRouter(self.ctx, routes)
-
+	router, httpServerOptions, tlsConfig := self.httpConfiguration()
 	reusePort := false
-
-	httpServerOptions := server.HttpServerOptions{
-		ReadTimeout:     15 * time.Second,
-		WriteTimeout:    30 * time.Second,
-		IdleTimeout:     5 * time.Minute,
-		ShutdownTimeout: 30 * time.Second,
-	}
-
-	tlsConfig := &tls.Config{
-		GetConfigForClient: self.transportTls.GetTlsConfigForClient,
-	}
 
 	listenIpv4, listenIpv6, listenPort := server.RequireListenIpPort(self.port)
 
@@ -122,6 +93,43 @@ func (self *apiServer) run() {
 	select {
 	case <-self.ctx.Done():
 	}
+}
+
+// Assembles the identical authenticated routes, tls selection and timeouts for
+// the production listener and its explicitly owned in-process test listener.
+func (self *apiServer) httpConfiguration() (http.Handler, server.HttpServerOptions, *tls.Config) {
+	// the device rpc control endpoint shares this TLS listener: a DeviceRemote
+	// (e.g. a browser) connects with the device's signed proxy id to control the
+	// hosted DeviceLocal. It authenticates the same way as /warmup (signed proxy
+	// id) and terminates the same per-proxy SNI TLS, so it belongs here rather
+	// than on the forward-proxy listener.
+	deviceRpc := NewDeviceRpcHandler(self.proxyDeviceManager, self.settings)
+	flowTrace := flowTraceHandler{
+		auth: authHeaderProxyId, open: self.proxyDeviceManager.OpenProxyDevice,
+		lookup: self.proxyDeviceManager.flowTraceDevice,
+	}
+
+	routes := []*router.Route{
+		router.NewRoute("POST", "/warmup", self.HandleWarmup),
+		router.NewRoute("GET", deviceRpcPath, deviceRpc.ServeHTTP),
+		router.NewRoute("POST", flowTracePath, flowTrace.ServeHTTP),
+		router.NewRoute("GET", flowTracePath, flowTrace.ServeHTTP),
+	}
+
+	router := router.NewRouter(self.ctx, routes)
+
+	httpServerOptions := server.HttpServerOptions{
+		ReadTimeout:     15 * time.Second,
+		WriteTimeout:    30 * time.Second,
+		IdleTimeout:     5 * time.Minute,
+		ShutdownTimeout: 30 * time.Second,
+	}
+
+	tlsConfig := &tls.Config{
+		GetConfigForClient: self.transportTls.GetTlsConfigForClient,
+	}
+
+	return router, httpServerOptions, tlsConfig
 }
 
 type WarmupRequest struct {

@@ -1,8 +1,10 @@
+// Runs mcp handlers behind explicitly owned in-process test servers.
 package mcp
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -22,36 +24,66 @@ import (
 	urSession "github.com/urnetwork/server/session"
 )
 
-// Starts the production mcp assembly (middleware, tools, stateless
-// streamable http handler) on an ephemeral port and returns its url and
-// cleanup function. The listener queues connections from the moment it is
-// created, so there is no readiness race.
-func startTestServer(t testing.TB) (string, func()) {
-	listener, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatalf("Failed to listen: %v", err)
-	}
+// Allows isolated lifecycle tests to supply a handler and an exact deadline
+// without evaluating authentication configuration or touching shared fixtures.
+type mcpTestServerOptions struct {
+	createHandler func(context.Context) http.Handler
+	closeContext  func() (context.Context, context.CancelFunc)
+	listen        func() (net.Listener, error)
+}
 
-	// the production route table, not just the mcp handler: the protected
-	// resource metadata route and the auth wrapping only exist here
+// Starts the production mcp assembly on an ephemeral listener acquired before
+// route setup can panic or Goexit. Returns its url and retryable cleanup.
+func startTestServer(t testing.TB, options ...mcpTestServerOptions) (string, func()) {
+	var settings mcpTestServerOptions
+	if 0 < len(options) {
+		settings = options[0]
+	}
 	ctx, cancelRoutes := context.WithCancel(context.Background())
-	httpServer := &http.Server{
-		Handler: router.NewRouter(ctx, Routes()),
-	}
-
-	go func() {
-		if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
-			t.Logf("Server error: %v", err)
+	var listener net.Listener
+	var owner *server.TestHttpServer
+	complete := false
+	defer func() {
+		if !complete {
+			cancelRoutes()
+			if listener != nil {
+				if err := listener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+					t.Errorf("partial mcp listener cleanup: %v", err)
+				}
+			}
 		}
 	}()
-
-	cleanup := func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		httpServer.Shutdown(shutdownCtx)
-		cancelRoutes()
+	var err error
+	if settings.listen != nil {
+		listener, err = settings.listen()
+	} else {
+		listener, err = net.Listen("tcp", "localhost:0")
 	}
-
+	if err != nil {
+		t.Fatalf("listen on mcp test port: %v", err)
+	}
+	var handler http.Handler
+	if settings.createHandler != nil {
+		handler = settings.createHandler(ctx)
+	} else {
+		handler = router.NewRouter(ctx, Routes())
+	}
+	owner = server.NewTestHttpServer(ctx, listener, &http.Server{Handler: handler})
+	cleanup := func() {
+		var shutdownCtx context.Context
+		var cancel context.CancelFunc
+		if settings.closeContext != nil {
+			shutdownCtx, cancel = settings.closeContext()
+		} else {
+			shutdownCtx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+		}
+		defer cancel()
+		defer cancelRoutes()
+		if err := owner.CloseAndWait(shutdownCtx); err != nil {
+			t.Errorf("mcp test server did not join: %v", err)
+		}
+	}
+	complete = true
 	return fmt.Sprintf("http://%s", listener.Addr().String()), cleanup
 }
 

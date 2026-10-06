@@ -2,9 +2,7 @@ package work
 
 import (
 	"context"
-	"encoding/json"
 	"os"
-	"os/exec"
 	"strconv"
 	"testing"
 	"time"
@@ -73,31 +71,12 @@ func TestContractSettlementSameNetworkLargeNContentionFree(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 110*time.Second)
 		defer cancel()
 		f := newPrivateLoadFixtureCount(t, ctx, 0, 0, count)
-		executable, err := os.Executable()
-		server.Raise(err)
-		child := exec.CommandContext(ctx, executable, "-test.run=^TestPrivateProviderLoadedPeerProcess$", "-test.timeout=100s")
-		child.Env = append(os.Environ(), "URNETWORK_PRIVATE_LOAD_CHILD=1")
-		stdin, err := child.StdinPipe()
-		server.Raise(err)
-		stdout, err := child.StdoutPipe()
-		server.Raise(err)
-		var stderr privateLoadLockedBuffer
-		child.Stderr = &stderr
-		server.Raise(child.Start())
-		joined := false
-		defer func() {
-			if !joined {
-				_ = child.Process.Kill()
-				_ = child.Wait()
-			}
-		}()
-		encoder, decoder := json.NewEncoder(stdin), json.NewDecoder(stdout)
+		child := privateLoadStartPeerProcess(t, ctx, 100*time.Second)
+		defer child.close(t)
+		encoder, decoder := child.encoder, child.decoder
 		config := privateLoadProcessConfig{PG: server.Vault.RequireSimpleResource(server.DefaultPgVaultResourceName).Bytes(), Redis: server.Vault.RequireSimpleResource("redis.yml").Bytes(), Owner: f.owner, Peer: f.peer, Tokens: f.tokens[count/2:], Clients: f.clients[count/2:], PoolSize: 16}
 		server.Raise(encoder.Encode(config))
-		var ready privateLoadProcessReport
-		if err := decoder.Decode(&ready); err != nil || !ready.Ready {
-			t.Fatal("independent settlement process not ready", err)
-		}
+		child.requireReady(t)
 		local := f
 		local.tokens = f.tokens[:count/2]
 		local.clients = f.clients[:count/2]
@@ -119,9 +98,7 @@ func TestContractSettlementSameNetworkLargeNContentionFree(t *testing.T) {
 		localResult := make(chan privateLoadProcessReport, 1)
 		go func() { localResult <- privateLoadSettleWave(ctx, t, local, created.Contracts, localReady, release) }()
 		server.Raise(encoder.Encode("prepare_settle"))
-		if err := decoder.Decode(&ready); err != nil || !ready.Ready {
-			t.Fatal("remote settlement barrier missing", err)
-		}
+		child.requireReady(t)
 		<-localReady
 		observe := privateLoadStartObserver(ctx, t)
 		server.Raise(encoder.Encode("go"))
@@ -180,8 +157,6 @@ func TestContractSettlementSameNetworkLargeNContentionFree(t *testing.T) {
 			t.Fatal("batched settlement accounting differs", credit)
 		}
 		server.Raise(encoder.Encode("stop"))
-		_ = stdin.Close()
-		server.Raise(child.Wait())
-		joined = true
+		server.Raise(child.wait())
 	})
 }

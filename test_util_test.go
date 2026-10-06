@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -373,6 +374,84 @@ func TestTestPgResourcePairRollsBackConstructionAndCleanupPanics(t *testing.T) {
 				t.Fatal("failed fixture resource constructor or cleanup left an override behind")
 			}
 		})
+	}
+}
+
+// PgReset closes the application and maintenance pools sequentially. Force an
+// application reopen between those closes, as a canceled stack worker can do,
+// without dialing PostgreSQL: both private pools have zero minimum connections.
+func TestTestPgResourcePairRestoresBeforeConcurrentPoolReopen(t *testing.T) {
+	pushTestEnvironmentPreflightResources(t)
+	popMaintenance := Vault.PushSimpleResource(MaintenancePgVaultResourceName, []byte("authority: direct.test:15433\nuser: direct\npassword: direct\ndb: outer-maintenance\n"))
+	defer popMaintenance()
+	popConfig := Config.PushSimpleResource(DefaultPgConfigResourceName, []byte("min_connections: 0\nmax_connections: 1\n"))
+	defer popConfig()
+	popMaintenanceConfig := Config.PushSimpleResource(MaintenancePgConfigResourceName, []byte("min_connections: 0\nmax_connections: 1\n"))
+	defer popMaintenanceConfig()
+	pg := Vault.RequireSimpleResource(DefaultPgVaultResourceName).Parse()
+	maintenance := Vault.RequireSimpleResource(MaintenancePgVaultResourceName).Parse()
+	appPool := &safePgPool{ctx: context.Background(), vaultResourceName: DefaultPgVaultResourceName, configResourceName: DefaultPgConfigResourceName}
+	maintenancePool := &safePgPool{ctx: context.Background(), vaultResourceName: MaintenancePgVaultResourceName, configResourceName: MaintenancePgConfigResourceName}
+	defer appPool.reset()
+	defer maintenancePool.reset()
+
+	appReset := make(chan struct{})
+	continueReset := make(chan struct{})
+	resumeReset := sync.OnceFunc(func() { close(continueReset) })
+	resetCalls := 0
+	pop := pushTestPgResourcePairWithReset(pg, maintenance, "test_ephemeral", "test_ephemeral", func() {
+		appPool.reset()
+		resetCalls++
+		if resetCalls == 2 {
+			close(appReset)
+			<-continueReset
+		}
+		maintenancePool.reset()
+	})
+	defer func() {
+		resumeReset()
+		pop()
+	}()
+	for _, pool := range []*safePgPool{appPool, maintenancePool} {
+		if got := pool.open().Config().ConnConfig.Database; got != "test_ephemeral" {
+			t.Fatalf("initial pool database = %q, want test_ephemeral", got)
+		}
+	}
+
+	popDone := make(chan struct{})
+	go func() {
+		defer close(popDone)
+		pop()
+	}()
+	defer func() {
+		resumeReset()
+		select {
+		case <-popDone:
+		case <-time.After(5 * time.Second):
+			t.Error("resource cleanup did not join after reset was released")
+		}
+	}()
+	select {
+	case <-appReset:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup did not reach the application/maintenance reset boundary")
+	}
+	reopened := appPool.open()
+	resumeReset()
+	select {
+	case <-popDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resource cleanup did not finish")
+	}
+	if got := reopened.Config().ConnConfig.Database; got != pg["db"] {
+		t.Errorf("pool reopened during cleanup retained database %q, want restored %q", got, pg["db"])
+	}
+	if got := maintenancePool.open().Config().ConnConfig.Database; got != maintenance["db"] {
+		t.Errorf("maintenance pool database = %q, want restored %q", got, maintenance["db"])
+	}
+	pop()
+	if resetCalls != 2 || appPool.open() != reopened {
+		t.Fatal("repeated cleanup invalidated the restored pool again")
 	}
 }
 

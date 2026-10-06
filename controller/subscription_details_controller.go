@@ -804,7 +804,31 @@ type SubscriptionCancelArgs struct {
 	Store string `json:"store"`
 }
 
+// Stable machine codes for a refused subscription change (/subscription/cancel,
+// /subscription/resume) or billing portal (/stripe/customer-portal). Clients
+// pick a localized message from the code and fall back to `Message`, which
+// every refusal still carries.
+const (
+	// the subscription is billed by the App Store: cancel it there (manage_url)
+	SubscriptionErrorCodeManagedByAppStore = "managed_by_app_store"
+	// the subscription is billed by Google Play: cancel it there (manage_url)
+	SubscriptionErrorCodeManagedByGooglePlay = "managed_by_google_play"
+	// a USDC payment covers one period and never renews: nothing to cancel
+	SubscriptionErrorCodeDoesNotRenew = "does_not_renew"
+	// a store the server cannot act on
+	SubscriptionErrorCodeNotCancelable = "not_cancelable"
+	// no Stripe subscription is billing this network
+	SubscriptionErrorCodeNoSubscription = "no_subscription"
+	// this network has no Stripe customer, so there is no billing portal
+	SubscriptionErrorCodeNoCustomer = "no_customer"
+	// Stripe did not answer or refused the change; a retry may work
+	SubscriptionErrorCodeStoreUnavailable = "store_unavailable"
+)
+
 type SubscriptionCancelError struct {
+	// one of the `SubscriptionErrorCode*` values. Added after `Message`; older
+	// clients ignore it.
+	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 }
 
@@ -818,10 +842,12 @@ type SubscriptionCancelResult struct {
 	Error     *SubscriptionCancelError `json:"error,omitempty"`
 }
 
-func subscriptionCancelError(message string, manageUrl string) *SubscriptionCancelResult {
+// subscriptionCancelError is a refused change: a `SubscriptionErrorCode*`, its
+// message, and where the customer acts instead, if anywhere.
+func subscriptionCancelError(code string, message string, manageUrl string) *SubscriptionCancelResult {
 	return &SubscriptionCancelResult{
 		ManageUrl: manageUrl,
-		Error:     &SubscriptionCancelError{Message: message},
+		Error:     &SubscriptionCancelError{Code: code, Message: message},
 	}
 }
 
@@ -844,13 +870,25 @@ func subscriptionCancelRefusal(store string) *SubscriptionCancelResult {
 	case model.SubscriptionMarketStripe:
 		return nil
 	case model.SubscriptionMarketApple:
-		return subscriptionCancelError("Cancel this subscription in the App Store.", appleManageSubscriptionsUrl)
+		return subscriptionCancelError(
+			SubscriptionErrorCodeManagedByAppStore,
+			"Cancel this subscription in the App Store.",
+			appleManageSubscriptionsUrl,
+		)
 	case model.SubscriptionMarketGoogle:
-		return subscriptionCancelError("Cancel this subscription in Google Play.", googleManageSubscriptionsUrl)
+		return subscriptionCancelError(
+			SubscriptionErrorCodeManagedByGooglePlay,
+			"Cancel this subscription in Google Play.",
+			googleManageSubscriptionsUrl,
+		)
 	case model.SubscriptionMarketSolana:
-		return subscriptionCancelError("A USDC payment covers one period and does not renew. There is nothing to cancel.", "")
+		return subscriptionCancelError(
+			SubscriptionErrorCodeDoesNotRenew,
+			"A USDC payment covers one period and does not renew. There is nothing to cancel.",
+			"",
+		)
 	default:
-		return subscriptionCancelError("This subscription cannot be cancelled here.", "")
+		return subscriptionCancelError(SubscriptionErrorCodeNotCancelable, "This subscription cannot be cancelled here.", "")
 	}
 }
 
@@ -882,7 +920,7 @@ func stripeSetSubscriptionCancelAtPeriodEnd(
 		}
 	}
 	if customerId == "" && invoiceId == "" {
-		return subscriptionCancelError("No Stripe subscription is billing this network.", ""), nil
+		return subscriptionCancelError(SubscriptionErrorCodeNoSubscription, "No Stripe subscription is billing this network.", ""), nil
 	}
 
 	lookupCtx, cancel := context.WithTimeout(ctx, subscriptionStoreLookupTimeout)
@@ -890,16 +928,20 @@ func stripeSetSubscriptionCancelAtPeriodEnd(
 	sub, err := stripeFindSubscription(lookupCtx, customerId, invoiceId)
 	if err != nil {
 		glog.Infof("[sub]cancel: find stripe subscription for %s: %v\n", networkId, err)
-		return subscriptionCancelError("Could not reach Stripe. Please try again.", ""), nil
+		return subscriptionCancelError(SubscriptionErrorCodeStoreUnavailable, "Could not reach Stripe. Please try again.", ""), nil
 	}
 	if !stripeSubscriptionBilling(sub.Status) {
-		return subscriptionCancelError("No Stripe subscription is billing this network.", ""), nil
+		return subscriptionCancelError(SubscriptionErrorCodeNoSubscription, "No Stripe subscription is billing this network.", ""), nil
 	}
 	if sub.CancelAtPeriodEnd != cancelAtPeriodEnd {
 		updated, err := stripeSetCancelAtPeriodEnd(lookupCtx, sub.Id, cancelAtPeriodEnd)
 		if err != nil {
 			glog.Infof("[sub]cancel: update stripe subscription %s: %v\n", sub.Id, err)
-			return subscriptionCancelError("Could not update the subscription with Stripe. Please try again.", ""), nil
+			return subscriptionCancelError(
+				SubscriptionErrorCodeStoreUnavailable,
+				"Could not update the subscription with Stripe. Please try again.",
+				"",
+			), nil
 		}
 		sub = updated
 	}

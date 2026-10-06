@@ -36,34 +36,41 @@ func payDataTestUrls() StripeCheckoutUrls {
 }
 
 func TestPayDataValidate(t *testing.T) {
-	_, _, errMessage := payDataValidate(&PayDataCheckoutArgs{ItemId: "data_7tib", Provider: "stripe"})
+	_, _, errCode, errMessage := payDataValidate(&PayDataCheckoutArgs{ItemId: "data_7tib", Provider: "stripe"})
 	connect.AssertEqual(t, errMessage, "Unknown item.")
+	connect.AssertEqual(t, errCode, PurchaseErrorCodeInvalidRequest)
 
-	_, _, errMessage = payDataValidate(&PayDataCheckoutArgs{ItemId: StripeItemProMonthly, Provider: "stripe"})
+	_, _, errCode, errMessage = payDataValidate(&PayDataCheckoutArgs{ItemId: StripeItemProMonthly, Provider: "stripe"})
 	connect.AssertEqual(t, errMessage, "Unknown item.")
+	connect.AssertEqual(t, errCode, PurchaseErrorCodeInvalidRequest)
 
-	_, _, errMessage = payDataValidate(&PayDataCheckoutArgs{ItemId: StripeItemData1Tib, Provider: "paypal"})
+	_, _, errCode, errMessage = payDataValidate(&PayDataCheckoutArgs{ItemId: StripeItemData1Tib, Provider: "paypal"})
 	connect.AssertEqual(t, errMessage, "Unknown provider.")
+	connect.AssertEqual(t, errCode, PurchaseErrorCodeInvalidRequest)
 
 	// coinbase was dropped: crypto is USDC on Solana (pay_data_solana_controller.go)
-	_, _, errMessage = payDataValidate(&PayDataCheckoutArgs{ItemId: StripeItemData1Tib, Provider: "coinbase"})
+	_, _, errCode, errMessage = payDataValidate(&PayDataCheckoutArgs{ItemId: StripeItemData1Tib, Provider: "coinbase"})
 	connect.AssertEqual(t, errMessage, "Unknown provider.")
+	connect.AssertEqual(t, errCode, PurchaseErrorCodeInvalidRequest)
 
-	_, _, errMessage = payDataValidate(&PayDataCheckoutArgs{ItemId: StripeItemData1Tib, Provider: "stripe", Email: "not an email"})
+	_, _, errCode, errMessage = payDataValidate(&PayDataCheckoutArgs{ItemId: StripeItemData1Tib, Provider: "stripe", Email: "not an email"})
 	connect.AssertEqual(t, errMessage, "That email address does not look right.")
+	connect.AssertEqual(t, errCode, PurchaseErrorCodeInvalidEmail)
 
 	// an empty provider is stripe, so a request written before the field
 	// existed keeps working
-	_, provider, errMessage := payDataValidate(&PayDataCheckoutArgs{ItemId: StripeItemData1Tib})
+	_, provider, errCode, errMessage := payDataValidate(&PayDataCheckoutArgs{ItemId: StripeItemData1Tib})
 	connect.AssertEqual(t, errMessage, "")
+	connect.AssertEqual(t, errCode, "")
 	connect.AssertEqual(t, provider, PayDataProviderStripe)
 
-	target, provider, errMessage := payDataValidate(&PayDataCheckoutArgs{
+	target, provider, errCode, errMessage := payDataValidate(&PayDataCheckoutArgs{
 		ItemId:   " data_10tib ",
 		Provider: " Stripe ",
 		Email:    " buyer@example.com ",
 	})
 	connect.AssertEqual(t, errMessage, "")
+	connect.AssertEqual(t, errCode, "")
 	connect.AssertEqual(t, provider, PayDataProviderStripe)
 	connect.AssertEqual(t, target.ItemId, StripeItemData10Tib)
 	connect.AssertEqual(t, target.ByteCount, 10*model.Tib)
@@ -200,10 +207,17 @@ func TestPayDataCheckoutEarlyErrors(t *testing.T) {
 	result, err := PayDataCheckout(&PayDataCheckoutArgs{ItemId: "data_2tib", Provider: "stripe"}, clientSession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, result.Error.Message, "Unknown item.")
+	connect.AssertEqual(t, result.Error.Code, PurchaseErrorCodeInvalidRequest)
 
 	result, err = PayDataCheckout(&PayDataCheckoutArgs{ItemId: StripeItemData1Tib, Provider: "cash"}, clientSession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, result.Error.Message, "Unknown provider.")
+	connect.AssertEqual(t, result.Error.Code, PurchaseErrorCodeInvalidRequest)
+
+	result, err = PayDataCheckout(&PayDataCheckoutArgs{ItemId: StripeItemData1Tib, Email: "buyer at example"}, clientSession)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, result.Error.Message, "That email address does not look right.")
+	connect.AssertEqual(t, result.Error.Code, PurchaseErrorCodeInvalidEmail)
 
 	// an empty lookup is simply "no"
 	lookup, err := PayDataNetworkLookup(&PayDataNetworkLookupArgs{NetworkName: "  "}, clientSession)

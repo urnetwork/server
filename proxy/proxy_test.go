@@ -1,3 +1,5 @@
+// Builds the in-process proxy fixture and retains each acquired owner until
+// teardown has joined all resource consumers inside the test environment.
 package proxy
 
 // Integration test for the proxy server, mirroring connect/connect_test in
@@ -167,20 +169,47 @@ type proxyTestHarness struct {
 	apiPort   int
 	wgPort    int
 
-	closeOnce sync.Once
+	lifecycle proxyTestLifecycle
 }
 
+// Joins all resource consumers before the enclosing test environment can pop.
 func (self *proxyTestHarness) close(t testing.TB) {
-	self.closeOnce.Do(func() {
-		closeProxyDeviceManager(t, self.proxyDeviceManager)
-		if self.closeProvider != nil {
-			self.closeProvider(t)
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer closeCancel()
+	if err := self.lifecycle.close(closeCtx); err != nil {
+		t.Errorf("proxy harness teardown did not join all owners: %v", err)
+	}
+}
+
+// Acquires cleanup ownership in the same stack frame as setup. A panic or Goexit
+// joins every registered stage before the enclosing TestEnv teardown can run.
+func newProxyTestHarness(t testing.TB, setup func(*proxyTestHarness)) *proxyTestHarness {
+	ctx, cancel := context.WithCancel(context.Background())
+	harness := &proxyTestHarness{ctx: ctx, cancel: cancel, lifecycle: proxyTestLifecycle{cancel: cancel}}
+	complete := false
+	defer func() {
+		if !complete {
+			harness.close(t)
 		}
-		if self.networkSpace != nil {
-			self.networkSpace.Close()
-		}
-		closeProxyConnectLifecycles(t, self.connectServer, self.exchange, self.cancel)
-	})
+	}()
+	setup(harness)
+	complete = true
+	return harness
+}
+
+// Keeps the frontend startup/cancellation boundary in one acquired scope.
+func (self *proxyTestHarness) newFrontendContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(self.ctx)
+	self.lifecycle.frontendCancel = cancel
+	return ctx, cancel
+}
+
+// A listener failure still fails construction even when its child context no
+// longer tears down the platform controls needed by partial rollback.
+func (self *proxyTestHarness) requireFrontendStarted(t testing.TB, frontendCtx context.Context) {
+	if self.ctx.Err() != nil || frontendCtx.Err() != nil {
+		t.Fatalf("proxy server bring-up canceled the harness or frontend ctx (a listener failed to bind; see Unexpected error above)")
+	}
 }
 
 // Joins every admitted hosted device while its in-process Connect peer is
@@ -288,363 +317,341 @@ func setupProxyTest(t testing.TB) *proxyTestHarness {
 func setupProxyTestWithOptions(t testing.TB, opts *proxyTestOptions) *proxyTestHarness {
 	setProxyTestEnv()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	return newProxyTestHarness(t, func(harness *proxyTestHarness) {
+		ctx, cancel := harness.ctx, harness.cancel
 
-	// ---- local connect server (plain ws, in-process) -------------------------
-	connectHost := "proxytest"
-	service := "connect"
-	block := "test"
-	routes := map[string]string{connectHost: "127.0.0.1"}
-	hostToServicePorts := map[int]int{testConnectServicePort: testConnectServicePort}
+		// ---- local connect server (plain ws, in-process) -------------------------
+		connectHost := "proxytest"
+		service := "connect"
+		block := "test"
+		routes := map[string]string{connectHost: "127.0.0.1"}
+		hostToServicePorts := map[int]int{testConnectServicePort: testConnectServicePort}
 
-	exchangeSettings := connectserver.DefaultExchangeSettings()
-	exchange := connectserver.NewExchange(ctx, connectHost, service, block, hostToServicePorts, routes, exchangeSettings)
+		exchangeSettings := connectserver.DefaultExchangeSettings()
+		exchange := connectserver.NewExchange(ctx, connectHost, service, block, hostToServicePorts, routes, exchangeSettings)
+		harness.lifecycle.exchange = exchange
 
-	connectHandlerSettings := connectserver.DefaultConnectHandlerSettings()
-	connectHandlerSettings.ConnectionAnnounceTimeout = 0
-	// This harness drives the H1 websocket endpoint. Do not also bind the
-	// production H3 and DNS ports; a running local environment owns them.
-	connectHandlerSettings.ListenH3Port = 0
-	connectHandlerSettings.ListenDnsPort = 0
-	connectHandler := connectserver.NewConnectHandler(ctx, server.NewId(), exchange, connectHandlerSettings)
+		connectHandlerSettings := connectserver.DefaultConnectHandlerSettings()
+		connectHandlerSettings.ConnectionAnnounceTimeout = 0
+		// This harness drives the H1 websocket endpoint. Do not also bind the
+		// production H3 and DNS ports; a running local environment owns them.
+		connectHandlerSettings.ListenH3Port = 0
+		connectHandlerSettings.ListenDnsPort = 0
+		connectHandler := connectserver.NewConnectHandler(ctx, server.NewId(), exchange, connectHandlerSettings)
+		harness.lifecycle.handler = connectHandler
 
-	connectRoutes := []*router.Route{
-		router.NewRoute("GET", "/status", router.WarpStatus),
-		router.NewRoute("GET", "/", connectHandler.Connect),
-	}
-	connectListener := listenProxyTestTcp(t)
-	connectClientPort := proxyTestTcpPort(connectListener)
-	connectHttp := &http.Server{
-		Handler: router.NewRouter(ctx, connectRoutes),
-	}
-	go connectHttp.Serve(connectListener)
-
-	// ---- local api server (plain http, full route set, in-process) -----------
-	apiListener := listenProxyTestTcp(t)
-	testApiPort := proxyTestTcpPort(apiListener)
-	apiHttp := &http.Server{
-		Handler: router.NewRouter(ctx, api.Routes()),
-	}
-	go apiHttp.Serve(apiListener)
-
-	go func() {
-		<-ctx.Done()
-		connectHttp.Close()
-		apiHttp.Close()
-	}()
-
-	// give the listeners a moment to bind
-	select {
-	case <-time.After(1 * time.Second):
-	}
-
-	// ---- the test network space pointing the SDK at the local servers --------
-	connectSettings := connect.DefaultConnectSettings()
-	hostedApiUrl := fmt.Sprintf("http://127.0.0.1:%d", testApiPort)
-	if opts.hostedApiUrl != "" {
-		hostedApiUrl = opts.hostedApiUrl
-	}
-	networkSpace := sdk.Testing_NewNetworkSpaceWithUrls(
-		ctx,
-		hostedApiUrl,
-		fmt.Sprintf("ws://127.0.0.1:%d", connectClientPort),
-		connectSettings,
-	)
-	t.Cleanup(networkSpace.Close)
-
-	apiUrl := fmt.Sprintf("http://127.0.0.1:%d", testApiPort)
-	platformUrl := fmt.Sprintf("ws://127.0.0.1:%d", connectClientPort)
-
-	// ---- a local provider (sdk.DeviceLocal in provide mode) ------------------
-	// The provider's network/device rows always exist, so the proxy device's
-	// InitialDeviceState.Location resolves. The live provider client (transport,
-	// egress NAT, provide registration) is what a control-plane-only test skips.
-	providerNetworkId := server.NewId()
-	providerUserId := server.NewId()
-	providerNetworkName := fmt.Sprintf("provider-%s", providerNetworkId)
-	providerDeviceId := server.NewId()
-	providerClientId := server.NewId()
-	providerInstanceId := server.NewId()
-
-	model.Testing_CreateNetwork(ctx, providerNetworkId, providerNetworkName, providerUserId)
-	model.Testing_CreateDevice(ctx, providerNetworkId, providerDeviceId, providerClientId, "provider", "provider")
-	redeemBalance(t, ctx, providerNetworkId, opts.providerInitialBalance)
-
-	var closeProvider func(testing.TB)
-	var closeProviderOnce sync.Once
-	if !opts.controlPlaneOnly {
-		providerByJwt := jwt.NewByJwt(providerNetworkId, providerUserId, providerNetworkName, false, false).
-			Client(providerDeviceId, providerClientId).Sign()
-
-		// The sdk's NewPlatformDeviceLocal hardcodes allowProvider=false (it's for
-		// embedded source devices that reach providers via the multi-client
-		// generator). A real provider needs its own client + platform transport +
-		// egress NAT, so build it directly from connect primitives.
-		providerStrategySettings := connect.DefaultClientStrategySettings()
-		providerStrategySettings.EnableResilient = false
-		providerClientStrategy := connect.NewClientStrategy(ctx, providerStrategySettings)
-
-		providerOob := connect.NewApiOutOfBandControl(ctx, providerClientStrategy, providerByJwt, apiUrl)
-		providerClient := connect.NewClient(ctx, connect.Id(providerClientId), providerOob, connect.DefaultClientSettings())
-		go func() {
-			<-ctx.Done()
-			providerClient.Close()
-		}()
-
-		providerAuth := &connect.ClientAuth{
-			ByJwt:      providerByJwt,
-			InstanceId: connect.Id(providerInstanceId),
-			AppVersion: server.RequireVersion(),
+		connectRoutes := []*router.Route{
+			router.NewRoute("GET", "/status", router.WarpStatus),
+			router.NewRoute("GET", "/", connectHandler.Connect),
 		}
-		providerTransport := connect.NewPlatformTransportWithDefaults(
-			providerClient.Ctx(),
-			providerClientStrategy,
-			providerClient.RouteManager(),
-			platformUrl,
-			providerAuth,
+		connectHttp := &http.Server{Handler: router.NewRouter(ctx, connectRoutes)}
+		connectListener := listenProxyTestTcp(t)
+		connectClientPort := proxyTestTcpPort(connectListener)
+		harness.lifecycle.connectHttp = server.NewTestHttpServer(ctx, connectListener, connectHttp)
+
+		// ---- local api server (plain http, full route set, in-process) -----------
+		apiHttp := &http.Server{Handler: router.NewRouter(ctx, api.Routes())}
+		apiListener := listenProxyTestTcp(t)
+		testApiPort := proxyTestTcpPort(apiListener)
+		harness.lifecycle.apiHttp = server.NewTestHttpServer(ctx, apiListener, apiHttp)
+
+		// give the listeners a moment to bind
+		select {
+		case <-time.After(1 * time.Second):
+		}
+
+		// ---- the test network space pointing the SDK at the local servers --------
+		connectSettings := connect.DefaultConnectSettings()
+		hostedApiUrl := fmt.Sprintf("http://127.0.0.1:%d", testApiPort)
+		if opts.hostedApiUrl != "" {
+			hostedApiUrl = opts.hostedApiUrl
+		}
+		networkSpace := sdk.Testing_NewNetworkSpaceWithUrls(
+			ctx,
+			hostedApiUrl,
+			fmt.Sprintf("ws://127.0.0.1:%d", connectClientPort),
+			connectSettings,
 		)
-		go func() {
-			<-ctx.Done()
-			providerTransport.Close()
-		}()
+		harness.lifecycle.networkSpace = networkSpace
 
-		// egress to the real internet via a user-space NAT
-		providerLocalUserNat := connect.NewLocalUserNatWithDefaults(providerClient.Ctx(), providerClientId.String())
-		providerNatSettings := connect.DefaultRemoteUserNatProviderSettings()
-		if opts.disableSecurityPolicies {
-			providerNatSettings.SecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
-		}
-		providerRemoteNat := connect.NewRemoteUserNatProvider(providerClient, providerLocalUserNat, providerNatSettings)
-		go func() {
-			<-ctx.Done()
-			providerRemoteNat.Close()
-			providerLocalUserNat.Close()
-		}()
+		apiUrl := fmt.Sprintf("http://127.0.0.1:%d", testApiPort)
+		platformUrl := fmt.Sprintf("ws://127.0.0.1:%d", connectClientPort)
 
-		// provide public, with return-traffic stream so the source can open both the
-		// forward and companion contracts
-		providerClient.ContractManager().SetProvideModesWithReturnTraffic(map[protocol.ProvideMode]bool{
-			protocol.ProvideMode_Public:  true,
-			protocol.ProvideMode_Network: true,
-		})
+		// ---- a local provider (sdk.DeviceLocal in provide mode) ------------------
+		// The provider's network/device rows always exist, so the proxy device's
+		// InitialDeviceState.Location resolves. The live provider client (transport,
+		// egress NAT, provide registration) is what a control-plane-only test skips.
+		providerNetworkId := server.NewId()
+		providerUserId := server.NewId()
+		providerNetworkName := fmt.Sprintf("provider-%s", providerNetworkId)
+		providerDeviceId := server.NewId()
+		providerClientId := server.NewId()
+		providerInstanceId := server.NewId()
 
-		// wait for the provider's provide to register on the platform before the
-		// proxy device tries to open contracts to it
-		waitFor(t, 30*time.Second, "provider provide registered", func() bool {
-			modes, err := model.GetProvideModes(ctx, providerClientId)
-			return err == nil && len(modes) > 0
-		})
-		fmt.Printf("[progress]provider provide registered\n")
-		closeProvider = func(t testing.TB) {
-			closeProviderOnce.Do(func() {
-				providerRemoteNat.Close()
-				closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer closeCancel()
-				if err := providerTransport.CloseAndWait(closeCtx); err != nil {
-					t.Errorf("provider transport did not finish during harness teardown: %v", err)
-				}
-				if err := providerLocalUserNat.CloseAndWait(closeCtx); err != nil {
-					t.Errorf("provider local NAT did not finish during harness teardown: %v", err)
-				}
-				if err := providerClient.CloseAndWait(closeCtx); err != nil {
-					t.Errorf("provider client did not finish during harness teardown: %v", err)
-				}
-				if err := providerOob.CloseAndWait(closeCtx); err != nil {
-					t.Errorf("provider out-of-band control did not finish during harness teardown: %v", err)
-				}
-				providerClientStrategy.Close()
-			})
-		}
-		t.Cleanup(func() { closeProvider(t) })
-	}
+		model.Testing_CreateNetwork(ctx, providerNetworkId, providerNetworkName, providerUserId)
+		model.Testing_CreateDevice(ctx, providerNetworkId, providerDeviceId, providerClientId, "provider", "provider")
+		redeemBalance(t, ctx, providerNetworkId, opts.providerInitialBalance)
 
-	// ---- the proxy device's network/device/client + balance ------------------
-	pdNetworkId := server.NewId()
-	pdUserId := server.NewId()
-	pdNetworkName := fmt.Sprintf("proxydev-%s", pdNetworkId)
-	pdDeviceId := server.NewId()
-	pdClientId := server.NewId()
-
-	model.Testing_CreateNetwork(ctx, pdNetworkId, pdNetworkName, pdUserId)
-	model.Testing_CreateDevice(ctx, pdNetworkId, pdDeviceId, pdClientId, "proxydevice", "proxydevice")
-	redeemBalance(t, ctx, pdNetworkId, opts.pdInitialBalance)
-
-	// the proxy device connects "by location" pinned directly to the provider
-	// client id, which the real find-providers2 path resolves.
-	location := &sdk.ConnectLocation{
-		ConnectLocationId: &sdk.ConnectLocationId{
-			ClientId: server.ToSdkId(providerClientId),
-		},
-	}
-
-	proxyDeviceConfig := &model.ProxyDeviceConfig{
-		ProxyDeviceConnection: model.ProxyDeviceConnection{
-			ClientId: pdClientId,
-		},
-		ProxyDeviceMode: model.ProxyDeviceModeDevice,
-		InitialDeviceState: &model.ProxyDeviceState{
-			Location: location,
-		},
-	}
-	if err := model.CreateProxyDeviceConfig(ctx, proxyDeviceConfig); err != nil {
-		t.Fatalf("create proxy device config: %v", err)
-	}
-	proxyId := proxyDeviceConfig.ProxyId
-
-	// seed a few high-sequence proxy_client_ipv4 rows so CreateProxyClient(wg)
-	// can allocate a client ip (avoids the 10M-row ResetProxyClientIpv4).
-	seedProxyClientIpv4(t, ctx)
-
-	proxyClient, err := model.CreateProxyClient(
-		ctx,
-		proxyId,
-		pdClientId,
-		proxyDeviceConfig.InstanceId,
-		model.CreateProxyClientOptions{EnableWg: true},
-	)
-	if err != nil {
-		t.Fatalf("create proxy client: %v", err)
-	}
-	signedProxyId := proxyClient.AuthToken
-
-	// ---- the real proxy servers (socks/http/https/wg/api) --------------------
-	proxySettings := DefaultProxySettings()
-	if opts.disableDeviceRpcH1Plus {
-		proxySettings.EnableDeviceRpcH1Plus = false
-	}
-	proxySettings.DeviceRpcH1PlusStats = opts.deviceRpcH1PlusStats
-	testPorts, releaseTestPorts := reserveProxyTestPorts(t)
-	proxySettings.SocksPort = testPorts.socks
-	proxySettings.HttpPort = testPorts.http
-	proxySettings.HttpsPort = testPorts.https
-	proxySettings.WgPort = testPorts.wg
-
-	transportTls := server.NewTransportTls(
-		map[string]bool{},
-		&server.TransportTlsSettings{EnableSelfSign: true, DefaultHostName: "127.0.0.1"},
-	)
-
-	pdmSettings := DefaultProxyDeviceManagerSettings()
-	pdmSettings.NetworkSpace = networkSpace
-	if opts.disableSecurityPolicies {
-		pdmSettings.ClientSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
-	}
-	proxyDeviceManager := NewProxyDeviceManager(ctx, pdmSettings)
-	if idleTimeout := opts.proxyDeviceIdleTimeout; 0 < idleTimeout {
-		buildProxyDevice := proxyDeviceManager.proxyDeviceBuilder
-		proxyDeviceManager.proxyDeviceBuilder = func(proxyId server.Id) (*ProxyDevice, error) {
-			pd, err := buildProxyDevice(proxyId)
-			if err == nil {
-				// The builder has not published pd or started CancelIfIdle.
-				pd.settings.ProxyDeviceIdleTimeout = idleTimeout
+		closeProvider := func(t testing.TB) {
+			closeCtx, closeCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer closeCancel()
+			if err := harness.lifecycle.provider.CloseAndWait(closeCtx); err != nil {
+				t.Errorf("provider did not finish during harness teardown: %v", err)
 			}
-			return pd, err
 		}
-	}
-	go func() {
-		<-ctx.Done()
-		_ = proxyDeviceManager.CloseAndWait(context.Background())
-	}()
+		if !opts.controlPlaneOnly {
+			providerByJwt := jwt.NewByJwt(providerNetworkId, providerUserId, providerNetworkName, false, false).
+				Client(providerDeviceId, providerClientId).Sign()
 
-	deviceRpcUrl := ""
-	if opts.enableDeviceRpc {
-		// expose the device rpc endpoint the way server/connect exposes its
-		// handler for tests: the same handler wired into a plain http listener,
-		// dialed over ws. Production serves it over the proxy api TLS listener
-		// (NewApiServer); here we avoid the self-signed TLS trust setup. The
-		// DeviceRemote connects here directly with the signed proxy id — no
-		// resident or proxy_host indirection.
-		deviceRpc := NewDeviceRpcHandler(proxyDeviceManager, proxySettings)
-		deviceRpcListener := listenProxyTestTcp(t)
-		testDeviceRpcPort := proxyTestTcpPort(deviceRpcListener)
-		deviceRpcHttp := &http.Server{
-			Handler: router.NewRouter(ctx, []*router.Route{
-				router.NewRoute("GET", "/device-rpc", deviceRpc.ServeHTTP),
-			}),
+			// The sdk's NewPlatformDeviceLocal hardcodes allowProvider=false (it's for
+			// embedded source devices that reach providers via the multi-client
+			// generator). A real provider needs its own client + platform transport +
+			// egress NAT, so build it directly from connect primitives.
+			providerStrategySettings := connect.DefaultClientStrategySettings()
+			providerStrategySettings.EnableResilient = false
+			providerClientStrategy := connect.NewClientStrategy(ctx, providerStrategySettings)
+			harness.lifecycle.provider.strategy = providerClientStrategy
+
+			providerOob := connect.NewApiOutOfBandControl(ctx, providerClientStrategy, providerByJwt, apiUrl)
+			harness.lifecycle.provider.oob = providerOob
+			providerClient := connect.NewClient(ctx, connect.Id(providerClientId), providerOob, connect.DefaultClientSettings())
+			harness.lifecycle.provider.client = providerClient
+
+			providerAuth := &connect.ClientAuth{
+				ByJwt:      providerByJwt,
+				InstanceId: connect.Id(providerInstanceId),
+				AppVersion: server.RequireVersion(),
+			}
+			providerTransport := connect.NewPlatformTransportWithDefaults(
+				providerClient.Ctx(),
+				providerClientStrategy,
+				providerClient.RouteManager(),
+				platformUrl,
+				providerAuth,
+			)
+			harness.lifecycle.provider.transport = providerTransport
+
+			// egress to the real internet via a user-space NAT
+			providerLocalUserNat := connect.NewLocalUserNatWithDefaults(providerClient.Ctx(), providerClientId.String())
+			harness.lifecycle.provider.localNat = providerLocalUserNat
+			providerNatSettings := connect.DefaultRemoteUserNatProviderSettings()
+			if opts.disableSecurityPolicies {
+				providerNatSettings.SecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+			}
+			providerRemoteNat := connect.NewRemoteUserNatProvider(providerClient, providerLocalUserNat, providerNatSettings)
+			harness.lifecycle.provider.remoteNat = providerRemoteNat
+
+			// provide public, with return-traffic stream so the source can open both the
+			// forward and companion contracts
+			providerClient.ContractManager().SetProvideModesWithReturnTraffic(map[protocol.ProvideMode]bool{
+				protocol.ProvideMode_Public:  true,
+				protocol.ProvideMode_Network: true,
+			})
+
+			// wait for the provider's provide to register on the platform before the
+			// proxy device tries to open contracts to it
+			waitFor(t, 30*time.Second, "provider provide registered", func() bool {
+				modes, err := model.GetProvideModes(ctx, providerClientId)
+				return err == nil && len(modes) > 0
+			})
+			fmt.Printf("[progress]provider provide registered\n")
 		}
-		go deviceRpcHttp.Serve(deviceRpcListener)
-		go func() {
-			<-ctx.Done()
-			deviceRpcHttp.Close()
-		}()
-		deviceRpcUrl = fmt.Sprintf("ws://127.0.0.1:%d", testDeviceRpcPort)
-	}
 
-	releaseTestPorts()
-	socks5 := NewSocks5Server(ctx, cancel, proxyDeviceManager, transportTls, proxySettings)
-	httpS := NewHttpServer(ctx, cancel, proxyDeviceManager, transportTls, proxySettings)
-	wgCtx, wgCancel := context.WithCancel(ctx)
-	wg := NewWgServer(wgCtx, wgCancel, proxyDeviceManager, proxySettings)
-	NewApiServer(ctx, cancel, proxyDeviceManager, transportTls, nil, testPorts.api, proxySettings)
+		// ---- the proxy device's network/device/client + balance ------------------
+		pdNetworkId := server.NewId()
+		pdUserId := server.NewId()
+		pdNetworkName := fmt.Sprintf("proxydev-%s", pdNetworkId)
+		pdDeviceId := server.NewId()
+		pdClientId := server.NewId()
 
-	// give the proxy listeners a moment to bind
-	select {
-	case <-time.After(1 * time.Second):
-	}
+		model.Testing_CreateNetwork(ctx, pdNetworkId, pdNetworkName, pdUserId)
+		model.Testing_CreateDevice(ctx, pdNetworkId, pdDeviceId, pdClientId, "proxydevice", "proxydevice")
+		redeemBalance(t, ctx, pdNetworkId, opts.pdInitialBalance)
 
-	// a server whose listen failed panics and its rescue handler cancels the
-	// shared ctx; report that as the bring-up failure it is instead of letting
-	// a later step surface collateral (c12-1 died as a misleading wg "device
-	// closed" one second after two EADDRINUSE bind panics)
-	if ctx.Err() != nil {
-		t.Fatalf("proxy server bring-up canceled the harness ctx (a listener failed to bind; see Unexpected error above)")
-	}
-
-	// register the wg client with the wg server (in production this is driven by
-	// the proxy client notification / warmup callback)
-	if err := wg.AddProxyClients(proxyClient); err != nil {
-		t.Fatalf("wg add proxy client: %v", err)
-	}
-
-	// warm up the proxy device: open it and wait until it has a usable path to
-	// the provider before we start driving traffic through it. A
-	// control-plane-only test has no live provider, so it opens the device (the
-	// hosted DeviceLocal and its rpc listener exist as soon as it is created)
-	// but never waits for a usable egress path.
-	pd, err := proxyDeviceManager.OpenProxyDevice(proxyId)
-	if err != nil {
-		t.Fatalf("open proxy device: %v", err)
-	}
-	if !opts.controlPlaneOnly {
-		if ready := pd.WaitForReady(ctx, 60*time.Second); !ready {
-			t.Fatalf("proxy device did not become ready (provider not reachable)")
+		// the proxy device connects "by location" pinned directly to the provider
+		// client id, which the real find-providers2 path resolves.
+		location := &sdk.ConnectLocation{
+			ConnectLocationId: &sdk.ConnectLocationId{
+				ClientId: server.ToSdkId(providerClientId),
+			},
 		}
-		fmt.Printf("[progress]proxy device ready\n")
-	}
 
-	return &proxyTestHarness{
-		ctx:                ctx,
-		cancel:             cancel,
-		signedProxyId:      signedProxyId,
-		proxyClient:        proxyClient,
-		proxySettings:      proxySettings,
-		proxyDeviceManager: proxyDeviceManager,
-		socks5:             socks5,
-		httpS:              httpS,
-		wg:                 wg,
-		wgCancel:           wgCancel,
-		pdNetworkId:        pdNetworkId,
-		pdClientId:         pdClientId,
-		providerNetworkId:  providerNetworkId,
-		providerClientId:   providerClientId,
-		proxyId:            proxyId,
-		pdUserId:           pdUserId,
-		pdDeviceId:         pdDeviceId,
-		pdInstanceId:       proxyDeviceConfig.InstanceId,
-		pdByClientJwt:      jwt.NewByJwt(pdNetworkId, pdUserId, pdNetworkName, false, false).Client(pdDeviceId, pdClientId).Sign(),
-		platformUrl:        platformUrl,
-		networkSpace:       networkSpace,
-		deviceRpcUrl:       deviceRpcUrl,
-		connectServer:      connectHandler,
-		exchange:           exchange,
-		closeProvider:      closeProvider,
-		socksPort:          testPorts.socks,
-		httpPort:           testPorts.http,
-		httpsPort:          testPorts.https,
-		apiPort:            testPorts.api,
-		wgPort:             testPorts.wg,
-	}
+		proxyDeviceConfig := &model.ProxyDeviceConfig{
+			ProxyDeviceConnection: model.ProxyDeviceConnection{
+				ClientId: pdClientId,
+			},
+			ProxyDeviceMode: model.ProxyDeviceModeDevice,
+			InitialDeviceState: &model.ProxyDeviceState{
+				Location: location,
+			},
+		}
+		if err := model.CreateProxyDeviceConfig(ctx, proxyDeviceConfig); err != nil {
+			t.Fatalf("create proxy device config: %v", err)
+		}
+		proxyId := proxyDeviceConfig.ProxyId
+
+		// seed a few high-sequence proxy_client_ipv4 rows so CreateProxyClient(wg)
+		// can allocate a client ip (avoids the 10M-row ResetProxyClientIpv4).
+		seedProxyClientIpv4(t, ctx)
+
+		proxyClient, err := model.CreateProxyClient(
+			ctx,
+			proxyId,
+			pdClientId,
+			proxyDeviceConfig.InstanceId,
+			model.CreateProxyClientOptions{EnableWg: true},
+		)
+		if err != nil {
+			t.Fatalf("create proxy client: %v", err)
+		}
+		signedProxyId := proxyClient.AuthToken
+
+		// ---- the real proxy servers (socks/http/https/wg/api) --------------------
+		proxySettings := DefaultProxySettings()
+		if opts.disableDeviceRpcH1Plus {
+			proxySettings.EnableDeviceRpcH1Plus = false
+		}
+		proxySettings.DeviceRpcH1PlusStats = opts.deviceRpcH1PlusStats
+		testPorts, releaseTestPorts := reserveProxyTestPorts(t)
+		defer releaseTestPorts()
+		proxySettings.SocksPort = testPorts.socks
+		proxySettings.HttpPort = testPorts.http
+		proxySettings.HttpsPort = testPorts.https
+		proxySettings.WgPort = testPorts.wg
+
+		transportTls := server.NewTransportTls(
+			map[string]bool{},
+			&server.TransportTlsSettings{EnableSelfSign: true, DefaultHostName: "127.0.0.1"},
+		)
+
+		pdmSettings := DefaultProxyDeviceManagerSettings()
+		pdmSettings.NetworkSpace = networkSpace
+		if opts.disableSecurityPolicies {
+			pdmSettings.ClientSecurityPolicyGenerator = connect.DisableSecurityPolicyWithStats
+		}
+		proxyDeviceManager := NewProxyDeviceManager(ctx, pdmSettings)
+		harness.lifecycle.manager = proxyDeviceManager
+		if idleTimeout := opts.proxyDeviceIdleTimeout; 0 < idleTimeout {
+			buildProxyDevice := proxyDeviceManager.proxyDeviceBuilder
+			proxyDeviceManager.proxyDeviceBuilder = func(proxyId server.Id) (*ProxyDevice, error) {
+				pd, err := buildProxyDevice(proxyId)
+				if err == nil {
+					// The builder has not published pd or started CancelIfIdle.
+					pd.settings.ProxyDeviceIdleTimeout = idleTimeout
+				}
+				return pd, err
+			}
+		}
+
+		deviceRpcUrl := ""
+		if opts.enableDeviceRpc {
+			// expose the device rpc endpoint the way server/connect exposes its
+			// handler for tests: the same handler wired into a plain http listener,
+			// dialed over ws. Production serves it over the proxy api TLS listener
+			// (NewApiServer); here we avoid the self-signed TLS trust setup. The
+			// DeviceRemote connects here directly with the signed proxy id — no
+			// resident or proxy_host indirection.
+			deviceRpc := NewDeviceRpcHandler(proxyDeviceManager, proxySettings)
+			deviceRpcHttp := &http.Server{
+				Handler: router.NewRouter(ctx, []*router.Route{
+					router.NewRoute("GET", "/device-rpc", deviceRpc.ServeHTTP),
+				}),
+			}
+			deviceRpcListener := listenProxyTestTcp(t)
+			testDeviceRpcPort := proxyTestTcpPort(deviceRpcListener)
+			harness.lifecycle.deviceRpc = server.NewTestHttpServer(ctx, deviceRpcListener, deviceRpcHttp)
+			deviceRpcUrl = fmt.Sprintf("ws://127.0.0.1:%d", testDeviceRpcPort)
+		}
+
+		releaseTestPorts()
+		frontendCtx, frontendCancel := harness.newFrontendContext()
+		socks5 := NewSocks5Server(frontendCtx, frontendCancel, proxyDeviceManager, transportTls, proxySettings)
+		harness.lifecycle.socksListener = socks5
+		harness.lifecycle.socksIngress = socks5
+		httpS := NewHttpServer(frontendCtx, frontendCancel, proxyDeviceManager, transportTls, proxySettings)
+		harness.lifecycle.httpListener = httpS
+		harness.lifecycle.httpIngress = httpS
+		wgCtx, wgCancel := context.WithCancel(ctx)
+		harness.lifecycle.wgCancel = wgCancel
+		wg := NewWgServer(wgCtx, wgCancel, proxyDeviceManager, proxySettings)
+		// Share production routes, authentication, tls selection and timeouts while
+		// retaining independent ownership of handlers and hijacked rpc sessions.
+		apiAssembly := &apiServer{
+			ctx: ctx, cancel: cancel, proxyDeviceManager: proxyDeviceManager,
+			transportTls: transportTls, port: testPorts.api, settings: proxySettings,
+		}
+		apiHandler, apiOptions, apiTlsConfig := apiAssembly.httpConfiguration()
+		apiFrontendListener, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", testPorts.api))
+		if err != nil {
+			t.Fatalf("listen on proxy api test port: %v", err)
+		}
+		harness.lifecycle.tlsFrontend = server.NewTestHttpServer(ctx, apiFrontendListener, &http.Server{
+			Handler: apiHandler, TLSConfig: apiTlsConfig,
+			ReadTimeout: apiOptions.ReadTimeout, WriteTimeout: apiOptions.WriteTimeout, IdleTimeout: apiOptions.IdleTimeout,
+		})
+
+		// give the proxy listeners a moment to bind
+		select {
+		case <-time.After(1 * time.Second):
+		}
+
+		// Listener workers cancel the frontend child on failure. Keep that a
+		// construction error without canceling controls needed by rollback.
+		harness.requireFrontendStarted(t, frontendCtx)
+
+		// register the wg client with the wg server (in production this is driven by
+		// the proxy client notification / warmup callback)
+		if err := wg.AddProxyClients(proxyClient); err != nil {
+			t.Fatalf("wg add proxy client: %v", err)
+		}
+
+		// warm up the proxy device: open it and wait until it has a usable path to
+		// the provider before we start driving traffic through it. A
+		// control-plane-only test has no live provider, so it opens the device (the
+		// hosted DeviceLocal and its rpc listener exist as soon as it is created)
+		// but never waits for a usable egress path.
+		pd, err := proxyDeviceManager.OpenProxyDevice(proxyId)
+		if err != nil {
+			t.Fatalf("open proxy device: %v", err)
+		}
+		if !opts.controlPlaneOnly {
+			if ready := pd.WaitForReady(ctx, 60*time.Second); !ready {
+				t.Fatalf("proxy device did not become ready (provider not reachable)")
+			}
+			fmt.Printf("[progress]proxy device ready\n")
+		}
+
+		harness.ctx = ctx
+		harness.cancel = cancel
+		harness.signedProxyId = signedProxyId
+		harness.proxyClient = proxyClient
+		harness.proxySettings = proxySettings
+		harness.proxyDeviceManager = proxyDeviceManager
+		harness.socks5 = socks5
+		harness.httpS = httpS
+		harness.wg = wg
+		harness.wgCancel = wgCancel
+		harness.pdNetworkId = pdNetworkId
+		harness.pdClientId = pdClientId
+		harness.providerNetworkId = providerNetworkId
+		harness.providerClientId = providerClientId
+		harness.proxyId = proxyId
+		harness.pdUserId = pdUserId
+		harness.pdDeviceId = pdDeviceId
+		harness.pdInstanceId = proxyDeviceConfig.InstanceId
+		harness.pdByClientJwt = jwt.NewByJwt(pdNetworkId, pdUserId, pdNetworkName, false, false).Client(pdDeviceId, pdClientId).Sign()
+		harness.platformUrl = platformUrl
+		harness.networkSpace = networkSpace
+		harness.deviceRpcUrl = deviceRpcUrl
+		harness.connectServer = connectHandler
+		harness.exchange = exchange
+		harness.closeProvider = closeProvider
+		harness.socksPort = testPorts.socks
+		harness.httpPort = testPorts.http
+		harness.httpsPort = testPorts.https
+		harness.apiPort = testPorts.api
+		harness.wgPort = testPorts.wg
+	})
 }
 
 func redeemBalance(t testing.TB, ctx context.Context, networkId server.Id, initialTransferBalance model.ByteCount) {
