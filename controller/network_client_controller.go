@@ -213,7 +213,7 @@ func SetConnectionLocation(
 	ctx context.Context,
 	connectionId server.Id,
 	clientIp string,
-) error {
+) (returnErr error) {
 	// the mmdb lookup on the control ip. This is resolved up front even when
 	// the probed path is about to win, because the probed path has to know how
 	// precise the mmdb answer is before it can decide whether replacing it is
@@ -222,6 +222,23 @@ func SetConnectionLocation(
 	// `err` is deliberately not returned yet: a failed mmdb lookup is not a
 	// reason to discard a perfectly good probed location.
 	location, connectionLocationScores, err := GetLocationForIp(ctx, clientIp)
+	// Optional shadow observer is absent by default. Successful connection
+	// writes may compare two attested readers without retaining the address.
+	defer func() {
+		// A panic is not a successful durable write. Preserve its propagation
+		// while preventing the optional observer from recording that result.
+		if failure := recover(); failure != nil {
+			panic(failure)
+		}
+		if returnErr == nil && connectionLocationScores != nil && connectionLocationScores.ArinLookupAt != nil {
+			server.ObserveArinShadowConnection(connectionId.String(), clientIp, server.ArinShadowActiveFacts{
+				Epoch: connectionLocationScores.ArinDatabaseBuildEpoch,
+				At:    *connectionLocationScores.ArinLookupAt,
+				Risk:  connectionLocationScores.ArinRisk, NonQuality: connectionLocationScores.ArinNonQuality,
+				Verified: connectionLocationScores.ArinQualityVerified,
+			})
+		}
+	}()
 
 	// a provider probed through its own egress is located from that probe, not
 	// from a lookup on its control-connection ip: the egress is where user
@@ -366,6 +383,7 @@ func SetConnectionLocation(
 		}
 		setErr := model.SetConnectionLocation(ctx, connectionId, egress.LocationId, scores)
 		if setErr == nil {
+			connectionLocationScores = scores
 			return nil
 		}
 		// fall through to the mmdb path on a storage error
