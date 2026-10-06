@@ -18417,6 +18417,19 @@ out of update-id order. Version 785 requires the valid, ready
 interrupted concurrent build leaves that index invalid, which is drift until the
 restartable migration rebuilds it. Each contract is pending before its version.
 
+Version 786 adds network wallet mapping consent beside the per-provider chains
+of 772: `network_wallet_mapping_challenge` (nonce primary key, a `NOT NULL`
+network, generation 1 to 4096 and its owner index on
+`(domain_hash, network_id, expires_at)`), `network_wallet_mapping_consent`
+(primary key `(domain_hash, network_id, generation)`, unique original hash and
+nonce, and the nonce foreign key to its challenge) and
+`st_payout_wallet_resolution`, the earning wallet each published release epoch
+settled per provider (primary key `(deployment_key, epoch, no_id, client_id)`,
+`mode` limited to `provider` or `network`, 32-byte coldkey, consent and head
+hashes, generations 1 to 4096). All three tables carry the row and truncate
+guards of `wallet_mapping_original_guard`: a missing or disabled guard, a
+nullable network or a widened mode is drift at head 786.
+
 Migration764 appends logical close-report receipts after the unchanged deployed
 1–763 prefix. The artifact contract checks the exact contract/party/report key,
 nonzero report IDs, nonnegative acknowledged bytes, finality and timestamp
