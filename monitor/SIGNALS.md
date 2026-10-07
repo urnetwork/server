@@ -278,6 +278,45 @@ parallel. The deterministic transport test fills the budget through separate
 probe environments, proves the next same-host command cannot invoke SSH,
 proves its canceled wait releases no slot, and proves another host still runs.
 
+The four concurrent signal slots are not a four-SSH budget: a signal can fan
+out to several destinations. On 2026-10-07 a separate bounded diagnostic was
+correctly refused with four existing SSH commands plus its two-command gateway
+hop, while every destination remained within two. This proves a cross-process
+admission mismatch, not a host failure or a continuously saturated interval.
+For the shared Main profile, `-ssh-admission-dir` arms one private Linux queue
+used by every watcher SSH call and the same binary's `ssh-lease` helper.
+It admits at most four commands total and two per inventory host. A gateway
+hop reserves both hosts atomically; alternating watcher/diagnostic turns stop
+fresh fanout from continuously filling the two slots a waiting hop needs.
+Only one diagnostic can be queued or active. Signal selection, standing tails,
+the 15-minute cadence floor and continuous PG sampling remain unchanged.
+
+Class `observation-admission-unavailable` identifies local queue/owner failure.
+Queued work has a bounded lifetime; running claims do not expire by time. They
+leave only after an explicit joined-transport release or proof that the exact
+dead owner's original cgroup is empty or removed. Boot, PID start, service
+invocation, cgroup device/inode and private state are checked. Reused or unknown
+group identities retain capacity. Corruption is unavailable capacity, never
+an empty queue. Queue observations do not rewrite unchanged state.
+
+The diagnostic helper receives fresh empty private Config/Site/Vault roots and
+a minimal local user-bus environment. This contains the shared binary's generic
+package initialization while the watcher's configuration remains unchanged.
+Startup stderr is counted/hashed within an 8192-byte total limit. The exact
+stdout grant frame, successful helper exit and joined release carry the lease
+protocol; diagnostic stderr never supplies capacity or completion authority.
+
+- **False-positive qualifier:** a local reservation refusal has no remote
+  observation and must not become a remote host/database failure. The healthy
+  control holds four unrelated commands, queues a two-host read, then releases
+  two and grants the whole hop without exceeding either cap.
+- **False-negative qualifier:** all participants must use the same qualified
+  directory and coupled helper; older watchers and external SSH commands are
+  outside this queue. Keep exact process/inventory and before/after SSH audits.
+  An unjoined owner, stale claim, timeout or failed native identity read remains
+  unknown. Fair admission does not prove command completion, target health or
+  an absolute latency bound under already-running slow commands.
+
 The first capped production startup exposed the independent host boundary.
 The monitor admitted only three sessions in the trip second, but sshd was
 already holding seven unauthenticated sessions on its public-facing address,

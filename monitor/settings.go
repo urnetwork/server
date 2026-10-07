@@ -416,6 +416,7 @@ type SignalSettings struct {
 	PGQuerySampleContinuous bool
 	PGQuerySampleUntil      time.Time
 	StateDir                string
+	sharedSshAdmission      sshAdmissionBackend
 	// SettingsGenerationCheck is armed by LoadSignalSettings. Embedders that
 	// assemble SignalSettings directly may omit it; synthetic tests inject it
 	// without touching Config or Vault.
@@ -655,6 +656,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		pgQuerySampleContinuous: settings.PGQuerySampleContinuous,
 		publicUdp:               clonePublicUdpSettings(settings.PublicUdp),
 		stateDir:                settings.StateDir,
+		sharedSshAdmission:      settings.sharedSshAdmission,
 		sshConnectTimeout:       settings.SSHConnectTimeout,
 		commandTimeout:          settings.CommandTimeout,
 	}

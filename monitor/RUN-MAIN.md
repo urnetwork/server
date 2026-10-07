@@ -640,6 +640,53 @@ SQL, process argv and credentials out of public evidence. See `SIGNALS.md`
 
 ## Safe watcher promotion
 
+### Shared SSH admission for bounded diagnostics
+
+When the qualified shared-admission profile is selected, the watcher receives
+`-ssh-admission-dir` naming a private mode-0700 directory separate from sampler
+cadence files. This Linux-only profile requires a dedicated user systemd service
+with `KillMode=control-group`. The directory persists across controlled watcher
+replacement. Do not erase it, lower its accounting, or reset sampler clocks to
+obtain a diagnostic slot. Registration refuses a second live watcher; follow
+the user's exact singleton promotion policy rather than bypassing registration.
+
+A qualified diagnostic wrapper invokes the same source-qualified binary as
+`monitor ssh-lease PRIVATE_REQUEST_JSON` within its separately owned finite
+systemd service. The shared binary initializes generic Config/Site resources
+before command dispatch, so the helper must receive a minimal environment:
+only the local user-bus variables are inherited, and all WARP resource roots
+point at newly created private mode-0700 empty Config/Site/Vault directories.
+This isolation applies only to the helper; the watcher keeps its complete
+effective settings. Remove the temporary resource directories after joining
+the helper. Account for startup stderr separately with an 8192-byte total
+limit, retaining only its count/hash. Exact stdout framing, zero exit status,
+and joined ownership establish completion; stderr alone establishes neither
+grant nor release.
+
+The mode-0600 request has exactly `directory`, `watcher`
+(`pid`, `start_ticks`, `boot_id`), `hosts` (one inventory name or the exact
+gateway and leaf), and `wait_seconds` (1–120). The helper executes no target
+command and emits only `{"granted":true}` on stdout after an atomic reservation.
+The caller must retain and join this local helper, preserve its
+full watcher/binary/inventory guards, perform both existing SSH audits after
+the grant, and start only its qualified finite read. Write `release\n` only
+after every transport descendant is joined or the owner proves none started.
+EOF, cancellation and timeout deliberately retain the active reservation until
+native dead-owner cleanup proves its exact original cgroup empty or removed.
+The helper's 240-second process budget does not extend the existing read or
+outer resource limits. A failed grant is a local refusal, not Main contact.
+
+Before this profile is used, qualify the coupled watcher and diagnostic source,
+normal/race/vet controls, rendered target, one direct/one atomic-hop admission,
+and real local process/cgroup ownership. Preserve standing tails and the
+15-minute floor, continuous PG, current resource fences and global-four/
+per-host-two limits. No watcher pause, second diagnostic, cap exception, or
+blind retry follows an admission failure. The private queue is scheduling
+evidence only; actual native results and original capture receipts remain the
+authority for production findings.
+
+### Watcher handoff
+
 Any monitor code, catalog, inventory-loading, tailer, alert-rendering, or
 effective Config/Vault settings-generation change requires a newly built
 watcher. A `settings-freshness` finding means this boundary has already been
