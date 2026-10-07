@@ -629,10 +629,15 @@ return {size, changed}
 
 // The hop and its dirty version must change atomically. An ordinary pipeline
 // of separate commands would let a poll consume the version before removal.
+// Preserve the prior transaction's runtime-error behavior: run all commands,
+// then report the first error. A malformed key cannot skip the other effects.
 const removeStreamHopScript = `
-redis.call('INCR', KEYS[1])
-redis.call('SREM', KEYS[2], ARGV[1])
-redis.call('PEXPIRE', KEYS[1], ARGV[2])
+local version = redis.pcall('INCR', KEYS[1])
+local removed = redis.pcall('SREM', KEYS[2], ARGV[1])
+local expiry = redis.pcall('PEXPIRE', KEYS[1], ARGV[2])
+if type(version) == 'table' and version.err then return version end
+if type(removed) == 'table' and removed.err then return removed end
+if type(expiry) == 'table' and expiry.err then return expiry end
 return 1
 `
 
