@@ -8,15 +8,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strconv"
 	"time"
 
 	"github.com/urnetwork/server"
 )
 
-const contractHoleReadinessKey = "contract-hole:v1:{refresh}:ready"
+const contractHoleReadinessKey = "contract-hole:v2:{refresh}:ready"
 
-// SourceStarted precedes this pair's publication and bounds its earliest expiry.
+// SourceStarted precedes publication and bounds refresh freshness; each member
+// may have an earlier absolute expiry, checked by the live witness lease.
 type ContractHoleWitness struct {
 	SourceClientId      server.Id `json:"source_client_id"`
 	DestinationClientId server.Id `json:"destination_client_id"`
@@ -30,6 +30,7 @@ type ContractHoleReadiness struct {
 	Version                   int                  `json:"version"`
 	PassStarted               time.Time            `json:"pass_started"`
 	PassCompleted             time.Time            `json:"pass_completed"`
+	CoveredUntil              time.Time            `json:"covered_until"`
 	PairVisits                int                  `json:"pair_visits"`
 	SuccessfulPairs           int                  `json:"successful_pairs"`
 	UnknownPairs              int                  `json:"unknown_pairs"`
@@ -55,35 +56,18 @@ func validContractHoleReadiness(receipt *ContractHoleReadiness, now time.Time) b
 		!receipt.EarliestPositive.SourceStarted.After(receipt.PassCompleted)
 }
 
-const contractHoleWitnessScript = `
-local value = redis.call('GET', KEYS[1])
-local ttl = redis.call('PTTL', KEYS[1])
-if not value or ttl <= 0 then return false end
-return {value, ttl}
-`
-
 // Reads the earliest positive witness in one slot. A legitimate intervening final
-// close can invalidate this conservative gate; a later pass supplies a new witness.
-func contractHoleWitnessTtl(ctx context.Context, witness *ContractHoleWitness) (time.Duration, error) {
-	var ttl time.Duration
-	err := server.RedisWithDeadline(ctx, func(client server.RedisClient) error {
-		values, err := client.Eval(ctx, contractHoleWitnessScript, contractHoleKeys(witness.SourceClientId, witness.DestinationClientId)[:1]).Slice()
-		if err != nil {
-			return err
-		}
-		if len(values) != 2 {
-			return errors.New("invalid contract hole witness")
-		}
-		value, valueOk := values[0].(string)
-		milliseconds, ttlOk := values[1].(int64)
-		count, parseErr := strconv.ParseInt(value, 10, 64)
-		if !valueOk || !ttlOk || parseErr != nil || value != strconv.FormatInt(count, 10) || count <= 0 || count > contractHoleMemberLimit || milliseconds <= 0 || milliseconds > ContractHoleTtl.Milliseconds() {
-			return errors.New("invalid contract hole witness")
-		}
-		ttl = time.Duration(milliseconds) * time.Millisecond
-		return nil
-	})
-	return ttl, err
+// close or absolute expiry can invalidate this conservative gate; a later pass
+// supplies a new witness. Packet reads never depend on this receipt.
+func contractHoleWitnessLease(ctx context.Context, witness *ContractHoleWitness) (time.Time, error) {
+	status, validUntil, err := ReadContractHoleLease(ctx, witness.SourceClientId, witness.DestinationClientId)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if status != ContractHolePositive || !time.Now().Before(validUntil) {
+		return time.Time{}, errors.New("invalid contract hole witness")
+	}
+	return validUntil, nil
 }
 
 // Publishes only complete passes inside the half-TTL margin. The receipt's own
@@ -96,19 +80,27 @@ func PublishContractHoleReadiness(ctx context.Context, receipt *ContractHoleRead
 	if !validContractHoleReadiness(receipt, now) {
 		return false, InvalidateContractHoleReadiness(ctx)
 	}
+	receipt.CoveredUntil = receipt.PassStarted.Add(ContractHoleTtl)
+	var witnessUntil time.Time
 	if receipt.EarliestPositive != nil {
-		ttl, err := contractHoleWitnessTtl(ctx, receipt.EarliestPositive)
+		var err error
+		witnessUntil, err = contractHoleWitnessLease(ctx, receipt.EarliestPositive)
 		if err != nil {
 			_ = InvalidateContractHoleReadiness(ctx)
 			return false, err
 		}
-		receipt.WitnessRemainingTtlMillis = ttl.Milliseconds()
+		if witnessUntil.Before(receipt.CoveredUntil) {
+			receipt.CoveredUntil = witnessUntil
+		}
 	}
+	receipt.CoveredUntil = receipt.CoveredUntil.Truncate(time.Millisecond)
 	now = server.NowUtc()
-	remaining := receipt.PassStarted.Add(ContractHoleTtl).Sub(now)
-	if now.Sub(receipt.PassStarted) >= ContractHoleRefreshInterval || remaining <= 0 ||
-		(receipt.EarliestPositive != nil && receipt.WitnessRemainingTtlMillis < remaining.Milliseconds()) {
+	remaining := receipt.CoveredUntil.Sub(now)
+	if now.Sub(receipt.PassStarted) >= ContractHoleRefreshInterval || remaining <= ContractHoleRefreshInterval {
 		return false, InvalidateContractHoleReadiness(ctx)
+	}
+	if receipt.EarliestPositive != nil {
+		receipt.WitnessRemainingTtlMillis = witnessUntil.Sub(now).Milliseconds()
 	}
 	receipt.MinimumRemainingTtlMillis = remaining.Milliseconds()
 	encoded, err := json.Marshal(receipt)
@@ -117,7 +109,7 @@ func PublishContractHoleReadiness(ctx context.Context, receipt *ContractHoleRead
 	}
 	err = server.RedisWithDeadline(ctx, func(client server.RedisClient) error {
 		return client.Eval(ctx, `redis.call('SET',KEYS[1],ARGV[1],'PXAT',ARGV[2]); return 1`, []string{contractHoleReadinessKey},
-			encoded, receipt.PassStarted.Add(ContractHoleTtl).UnixMilli()).Err()
+			encoded, receipt.CoveredUntil.UnixMilli()).Err()
 	})
 	return err == nil, err
 }
@@ -150,19 +142,27 @@ func ReadContractHoleReadiness(ctx context.Context) (*ContractHoleReadiness, err
 	if err := json.Unmarshal([]byte(encoded), receipt); err != nil {
 		return nil, err
 	}
-	if !validContractHoleReadiness(receipt, server.NowUtc()) || receipt.MinimumRemainingTtlMillis <= 0 || receipt.MinimumRemainingTtlMillis > ContractHoleTtl.Milliseconds() {
+	if !validContractHoleReadiness(receipt, server.NowUtc()) || receipt.MinimumRemainingTtlMillis <= 0 || receipt.MinimumRemainingTtlMillis > ContractHoleTtl.Milliseconds() ||
+		receipt.CoveredUntil.After(receipt.PassStarted.Add(ContractHoleTtl)) || !receipt.PassCompleted.Before(receipt.CoveredUntil) {
 		return nil, errors.New("contract hole readiness is stale or incomplete")
 	}
+	var witnessUntil time.Time
 	if receipt.EarliestPositive != nil {
-		ttl, err := contractHoleWitnessTtl(ctx, receipt.EarliestPositive)
+		var err error
+		witnessUntil, err = contractHoleWitnessLease(ctx, receipt.EarliestPositive)
 		if err != nil {
 			return nil, err
 		}
-		receipt.WitnessRemainingTtlMillis = ttl.Milliseconds()
+		if witnessUntil.Before(receipt.CoveredUntil) {
+			receipt.CoveredUntil = witnessUntil
+		}
 	}
-	receipt.MinimumRemainingTtlMillis = receipt.PassStarted.Add(ContractHoleTtl).Sub(server.NowUtc()).Milliseconds()
-	if receipt.MinimumRemainingTtlMillis <= 0 ||
-		(receipt.EarliestPositive != nil && receipt.WitnessRemainingTtlMillis < receipt.MinimumRemainingTtlMillis) {
+	now := server.NowUtc()
+	if receipt.EarliestPositive != nil {
+		receipt.WitnessRemainingTtlMillis = witnessUntil.Sub(now).Milliseconds()
+	}
+	receipt.MinimumRemainingTtlMillis = receipt.CoveredUntil.Sub(now).Milliseconds()
+	if receipt.MinimumRemainingTtlMillis <= 0 {
 		return nil, errors.New("contract hole readiness lost its expiry margin")
 	}
 	return receipt, nil

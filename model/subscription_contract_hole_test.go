@@ -79,7 +79,7 @@ func requireContractHoleCount(t testing.TB, ctx context.Context, source, destina
 				}
 			}
 		}
-		members, err := client.SCard(ctx, keys[1]).Result()
+		members, err := client.ZCard(ctx, keys[1]).Result()
 		if err != nil || members != want {
 			t.Fatalf("hole membership=%d error=%v want=%d", members, err, want)
 		}
@@ -208,9 +208,7 @@ func TestContractHoleRedisExpiryAndMalformedReadsFailClosed(t *testing.T) {
 				t.Fatalf("scalar escaped the authorization ttl: expiry=%s", expiry)
 			}
 		}
-		server.Redis(ctx, func(client server.RedisClient) {
-			server.Raise(client.Set(ctx, contractHoleKeys(source, destination)[0], "1", ContractHoleTtl).Err())
-		})
+		server.Raise(applyContractHoleEvent(ctx, contract, source, destination, "create"))
 		if !HasOpenContractHole(ctx, source, destination) {
 			t.Fatal("cancellation control lacks a healthy permission")
 		}
@@ -240,12 +238,15 @@ func TestContractHoleRedisRefreshFencesEventsAndOlderSnapshots(t *testing.T) {
 			var result int64
 			args := []any{token, ContractHoleTtl.Milliseconds()}
 			for _, member := range members {
-				args = append(args, member.String())
+				args = append(args, member.String(), "+inf")
 			}
 			server.Redis(ctx, func(client server.RedisClient) {
-				var err error
-				result, err = client.Eval(ctx, contractHolePublishScript, keys, args...).Int64()
+				values, err := client.Eval(ctx, contractHolePublishScript, keys, args...).Slice()
 				server.Raise(err)
+				if len(values) != 2 {
+					t.Fatal("invalid snapshot result", values)
+				}
+				result = values[0].(int64)
 			})
 			return result
 		}

@@ -11,6 +11,61 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// A measured lease can be slightly shorter than the nominal pass-start bound.
+// Store that real bound without rejecting healthy millisecond/I/O rounding.
+func TestContractHoleReadinessCapsMeasuredLeaseAndAbsoluteDeadline(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		for _, finite := range []bool{false, true} {
+			source, destination, contract := server.NewId(), server.NewId(), server.NewId()
+			start := server.NowUtc()
+			bound := start.Add(ContractHoleTtl - 5*time.Millisecond).Truncate(time.Millisecond)
+			if finite {
+				bound = start.Add(45 * time.Second).Truncate(time.Millisecond)
+				server.Raise(applyContractHoleEvent(ctx, contract, source, destination, "create", bound))
+			} else {
+				server.Raise(applyContractHoleEvent(ctx, contract, source, destination, "create"))
+				server.Redis(ctx, func(client server.RedisClient) {
+					for _, key := range contractHoleKeys(source, destination)[:2] {
+						server.Raise(client.PExpireAt(ctx, key, bound).Err())
+					}
+				})
+			}
+			receipt := &ContractHoleReadiness{Version: 1, PassStarted: start, PassCompleted: server.NowUtc(),
+				PairVisits: 1, SuccessfulPairs: 1, PositivePairs: 1, Pages: 1,
+				EarliestPositive: &ContractHoleWitness{SourceClientId: source, DestinationClientId: destination, SourceStarted: start}}
+			ready, err := PublishContractHoleReadiness(ctx, receipt)
+			if err != nil || !ready || receipt.CoveredUntil.After(bound) || receipt.MinimumRemainingTtlMillis <= ContractHoleRefreshInterval.Milliseconds() {
+				t.Fatalf("measured finite=%t readiness=%t receipt=%+v error=%v", finite, ready, receipt, err)
+			}
+			server.Redis(ctx, func(client server.RedisClient) {
+				expiry, err := client.Eval(ctx, `return redis.call('PEXPIRETIME', KEYS[1])`, []string{contractHoleReadinessKey}).Int64()
+				if err != nil || expiry > bound.UnixMilli() || expiry != receipt.CoveredUntil.UnixMilli() {
+					t.Fatalf("receipt exceeded observed lease: expiry=%d receipt=%s bound=%s error=%v", expiry, receipt.CoveredUntil, bound, err)
+				}
+			})
+			observed, err := ReadContractHoleReadiness(ctx)
+			if err != nil || observed == nil || observed.CoveredUntil.After(receipt.CoveredUntil) {
+				t.Fatalf("measurement changed coverage optimistically: receipt=%+v error=%v", observed, err)
+			}
+			for _, invalidBound := range []time.Time{{}, start.Add(ContractHoleTtl + time.Second)} {
+				corrupt := *receipt
+				corrupt.CoveredUntil = invalidBound
+				encoded, err := json.Marshal(corrupt)
+				server.Raise(err)
+				server.Redis(ctx, func(client server.RedisClient) {
+					server.Raise(client.Set(ctx, contractHoleReadinessKey, encoded, ContractHoleTtl).Err())
+				})
+				if observed, err := ReadContractHoleReadiness(ctx); err == nil || observed != nil {
+					t.Fatalf("invalid coverage bound accepted: receipt=%+v error=%v", observed, err)
+				}
+			}
+		}
+	})
+}
+
 // Pure clock boundaries distinguish an incomplete/slow pass from healthy zero.
 func TestContractHoleReadinessRequiresCompleteTimelyPass(t *testing.T) {
 	start := time.Unix(1000, 0)
@@ -125,8 +180,10 @@ func TestContractHoleReadinessRequiresSurvivingEarliestPair(t *testing.T) {
 				server.Raise(client.PExpire(ctx, key, ContractHoleTtl/4).Err())
 			}
 		})
-		if observed, err := ReadContractHoleReadiness(ctx); err == nil || observed != nil {
-			t.Fatalf("short witness hid early expiry: receipt=%+v error=%v", observed, err)
+		if observed, err := ReadContractHoleReadiness(ctx); err != nil || observed == nil ||
+			observed.MinimumRemainingTtlMillis <= 0 || observed.MinimumRemainingTtlMillis > (ContractHoleTtl/4).Milliseconds() ||
+			!observed.CoveredUntil.Before(receipt.CoveredUntil) {
+			t.Fatalf("short witness did not shorten coverage: receipt=%+v error=%v", observed, err)
 		}
 		ready, err = PublishContractHoleReadiness(ctx, receipt)
 		if err != nil || ready {

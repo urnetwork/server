@@ -31,6 +31,16 @@ func TestContractHoleModelCreationModesCheckpointResumeAndFinalClose(t *testing.
 		requireContractHoleCount(t, ctx, f.sourceId, f.destinationId, 4)
 		ids := []server.Id{legacy.ContractId, current.ContractId, companion.ContractId, noEscrow}
 		for _, id := range ids {
+			var expiration time.Time
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT expiration_time FROM transfer_contract WHERE contract_id=$1`, id).Scan(&expiration))
+			})
+			server.Redis(ctx, func(client server.RedisClient) {
+				score, err := client.ZScore(ctx, contractHoleKeys(f.sourceId, f.destinationId)[1], id.String()).Result()
+				if err != nil || score != float64(expiration.UnixMilli()) {
+					t.Fatalf("creation did not publish its persisted deadline: score=%f expiration=%s error=%v", score, expiration, err)
+				}
+			})
 			clientId := f.sourceId
 			if id == companion.ContractId {
 				clientId = f.destinationId
@@ -47,9 +57,10 @@ func TestContractHoleModelCreationModesCheckpointResumeAndFinalClose(t *testing.
 			requireContractHoleCount(t, ctx, f.sourceId, f.destinationId, 4)
 			server.Db(ctx, func(conn server.PgConn) {
 				var outcome *ContractOutcome
-				server.Raise(conn.QueryRow(ctx, `SELECT outcome FROM transfer_contract WHERE contract_id=$1`, id).Scan(&outcome))
-				if outcome != nil {
-					t.Fatal("checkpoint unexpectedly settled contract")
+				var observedExpiration time.Time
+				server.Raise(conn.QueryRow(ctx, `SELECT outcome, expiration_time FROM transfer_contract WHERE contract_id=$1`, id).Scan(&outcome, &observedExpiration))
+				if outcome != nil || !observedExpiration.Equal(expiration) {
+					t.Fatal("checkpoint settled or extended the contract")
 				}
 			})
 		}
@@ -73,12 +84,16 @@ func TestContractHoleModelCreationModesCheckpointResumeAndFinalClose(t *testing.
 
 // Inserts legacy source rows without a projection, representing a pre-rollout
 // contract or a confirmed commit whose process died before its optional post.
-func insertContractHoleSourceRow(ctx context.Context, source, destination server.Id) server.Id {
+func insertContractHoleSourceRow(ctx context.Context, source, destination server.Id, expirationTime ...time.Time) server.Id {
 	id := server.NewId()
+	var expiration *time.Time
+	if len(expirationTime) > 0 {
+		expiration = &expirationTime[0]
+	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO transfer_contract
- (contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count)
- VALUES($1,$2,$3,$4,$5,0)`, id, server.NewId(), source, server.NewId(), destination))
+ (contract_id,source_network_id,source_id,destination_network_id,destination_id,transfer_byte_count,expiration_time)
+ VALUES($1,$2,$3,$4,$5,0,$6)`, id, server.NewId(), source, server.NewId(), destination, expiration))
 	})
 	return id
 }
@@ -120,13 +135,13 @@ func TestContractHoleBackgroundPreservesOpenPredicateAndRepairsDrift(t *testing.
 		requireContractHoleCount(t, ctx, source, source, 1)
 		server.Redis(ctx, func(client server.RedisClient) {
 			for _, id := range []server.Id{forward, reverse, empty, checkpoint} {
-				found, err := client.SIsMember(ctx, contractHoleKeys(source, destination)[1], id.String()).Result()
-				if err != nil || !found {
+				_, err := client.ZScore(ctx, contractHoleKeys(source, destination)[1], id.String()).Result()
+				if err != nil {
 					t.Fatal("eligible source member missing", err)
 				}
 			}
-			found, err := client.SIsMember(ctx, contractHoleKeys(source, source)[1], self.String()).Result()
-			if err != nil || !found {
+			_, err := client.ZScore(ctx, contractHoleKeys(source, source)[1], self.String()).Result()
+			if err != nil {
 				t.Fatal("self source member missing", err)
 			}
 			server.Raise(client.Set(ctx, contractHoleKeys(source, destination)[0], 99, ContractHoleTtl).Err())
