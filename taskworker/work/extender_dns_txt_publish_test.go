@@ -3,7 +3,6 @@ package work
 import (
 	"context"
 	"fmt"
-	mathrand "math/rand/v2"
 	"net/netip"
 	"slices"
 	"strings"
@@ -37,6 +36,7 @@ func testExtenderDnsAddress(
 ) *model.NetworkExtenderDnsAddress {
 	return &model.NetworkExtenderDnsAddress{
 		ExtenderId:  extenderId,
+		PublicKey:   testExtenderDnsKey(extenderId.String()),
 		IpVersion:   ipVersion,
 		Ip:          netip.MustParseAddr(testExtenderDnsIp(ipVersion, index)),
 		CountryCode: countryCode,
@@ -81,7 +81,8 @@ func TestExtenderDnsSampleAddsATxtSetPerLocation(t *testing.T) {
 	desiredSets := sampleExtenderDnsRecordSets(
 		addresses,
 		8,
-		mathrand.New(mathrand.NewPCG(7, 11)),
+		testExtenderDnsSecret,
+		testExtenderDnsEpoch,
 		signRecord,
 	)
 
@@ -120,7 +121,8 @@ func TestExtenderDnsSampleAddsATxtSetPerLocation(t *testing.T) {
 	unsigned := sampleExtenderDnsRecordSets(
 		addresses,
 		8,
-		mathrand.New(mathrand.NewPCG(7, 11)),
+		testExtenderDnsSecret,
+		testExtenderDnsEpoch,
 		nil,
 	)
 	connect.AssertEqual(t, len(unsigned), 5)
@@ -144,7 +146,8 @@ func TestExtenderDnsSampleTxtCoversTheFill(t *testing.T) {
 	desiredSets := sampleExtenderDnsRecordSets(
 		addresses,
 		8,
-		mathrand.New(mathrand.NewPCG(7, 11)),
+		testExtenderDnsSecret,
+		testExtenderDnsEpoch,
 		func(extenderId server.Id) (string, bool) {
 			return extenderId.String(), true
 		},
