@@ -50,25 +50,27 @@ func GetProviderUrlProbeFleetObserved(ctx context.Context, now time.Time, observ
 	fleet := ProviderUrlProbeFleet{}
 	policy := SelectedProviderUrlProbePolicyVersion()
 	server.Db(ctx, func(conn server.PgConn) {
-		observation.BeginQuery()
-		querySucceeded := false
-		defer func() { observation.FinishQuery(querySucceeded) }()
-		var deficitJson []byte
-		rows, err := conn.Query(ctx, providerUrlProbeFleetSql(policy), now.UTC(), ProvideModePublic, ProviderUrlProbeRunTarget,
-			now.Add(-ProviderEgressProbeRefreshAge).UTC())
-		server.WithPgResult(rows, err, func() {
-			if rows.Next() {
-				server.Raise(rows.Scan(&fleet.Eligible, &fleet.Due, &fleet.Complete, &fleet.Overdue, &fleet.RunsNeeded, &fleet.OldestDueSeconds,
-					&fleet.SecurityExceptions, &fleet.SecurityUnknownTargets, &fleet.QuotaComplete,
-					&fleet.Warming, &fleet.MissingCycles, &fleet.CohortStartedAtSeconds,
-					&fleet.MatureEligible, &fleet.MatureQuotaComplete, &fleet.MatureRunsNeeded,
-					&fleet.WarmingEligible, &fleet.WarmingQuotaComplete, &fleet.WarmingRunsNeeded,
-					&fleet.EligibilityAgeUnknown, &fleet.AgeUnknownQuotaComplete, &fleet.AgeUnknownRunsNeeded, &deficitJson))
-				observation.Row()
-				fleet.MatureDeficitDiagnostics = providerUrlProbeMatureDeficitDiagnostics(deficitJson, policy, fleet.MatureEligible-fleet.MatureQuotaComplete)
-			}
+		providerUrlProbeFleetRead(ctx, conn, func(tx server.PgTx) {
+			observation.BeginQuery()
+			querySucceeded := false
+			defer func() { observation.FinishQuery(querySucceeded) }()
+			var deficitJson []byte
+			rows, err := tx.Query(ctx, providerUrlProbeFleetSql(policy), now.UTC(), ProvideModePublic, ProviderUrlProbeRunTarget,
+				now.Add(-ProviderEgressProbeRefreshAge).UTC())
+			server.WithPgResult(rows, err, func() {
+				if rows.Next() {
+					server.Raise(rows.Scan(&fleet.Eligible, &fleet.Due, &fleet.Complete, &fleet.Overdue, &fleet.RunsNeeded, &fleet.OldestDueSeconds,
+						&fleet.SecurityExceptions, &fleet.SecurityUnknownTargets, &fleet.QuotaComplete,
+						&fleet.Warming, &fleet.MissingCycles, &fleet.CohortStartedAtSeconds,
+						&fleet.MatureEligible, &fleet.MatureQuotaComplete, &fleet.MatureRunsNeeded,
+						&fleet.WarmingEligible, &fleet.WarmingQuotaComplete, &fleet.WarmingRunsNeeded,
+						&fleet.EligibilityAgeUnknown, &fleet.AgeUnknownQuotaComplete, &fleet.AgeUnknownRunsNeeded, &deficitJson))
+					observation.Row()
+					fleet.MatureDeficitDiagnostics = providerUrlProbeMatureDeficitDiagnostics(deficitJson, policy, fleet.MatureEligible-fleet.MatureQuotaComplete)
+				}
+			})
+			querySucceeded = true
 		})
-		querySucceeded = true
 	}, observation)
 	fleet.SuccessesNeeded = fleet.RunsNeeded
 	return fleet
