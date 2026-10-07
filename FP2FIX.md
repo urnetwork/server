@@ -1,5 +1,12 @@
 # FindProviders2 supply and quality-probe repair plan
 
+Census implementation checkpoint, 2026-10-07: the transaction-local server
+statement deadline now has a qualified native control for snapshot release when
+the separate cancellation connection stalls. This is source qualification;
+deployment, current mature coverage and census query efficiency remain separate
+acceptance evidence. See [the server-lifetime control](#2026-10-07-census-server-statement-lifetime).
+The earlier visibility checkpoints below describe their own dated observations.
+
 Latest URL-quota visibility checkpoint, 2026-10-07 07:47 UTC: **current mature
 coverage is unknown**. The sole aa71 watcher still reports `observed_missing`
 and no census at 07:37 UTC. Separately, a bounded database read confirms
@@ -8545,3 +8552,50 @@ The frozen evidence is
 SHA-256 `22ab671f875892f5fe2285912a0af3cfc4be64ec01612f4f9234486868bc9bd1`.
 This checkpoint was prepared from retained local artifacts and performs no
 Main read, watcher start, compiler, deployment or canonical edit.
+
+### 2026-10-07 census server statement lifetime
+
+The census publisher supplies a ten-second client context. In the released
+pgx cancellation path, the client can return while a separate connection is
+still delivering cancellation and asynchronous socket cleanup is pending.
+The census read-only transaction previously set only `jit=off`. Its client
+return therefore did not independently establish server snapshot retirement.
+
+The retained C5 index-build capture observes the same backend generation and
+virtual transaction blocking the old-snapshot phase at query ages 9.379393,
+12.359851 and 15.383318 seconds. Its 1,023-byte activity buffer exactly matches
+the census constructor prefix. The full query, executing caller and client
+cancellation timing are not proved. The source/edge reduction is
+`temp/pg-contention-20261004/schema793-cic-inflight-actual-analysis-v3/actual-stage-and-source-reduction-v2.json`,
+SHA-256 `b28d231eefd1559ce273e6abe2fab1ac4f6825ee7182a8eb21b0be0355942348`.
+
+The scoped fix in `model/provider_url_probe_fleet_read.go` sets transaction-local
+`statement_timeout` from the remaining caller budget, rounded down to integer
+milliseconds, while preserving any tighter nonzero inherited timeout. An
+exhausted budget refuses the target query instead of setting zero, which would
+disable the timeout. Callers without a deadline retain the inherited setting.
+Rollback restores both settings before reuse, and cancellation before or just
+after `BEGIN` retains its original cause. The census SQL, statement snapshot,
+22 output fields, eligibility and quota rules remain unchanged: mature eligible
+providers need ten unique accepted measured successes plus failures in the
+rolling four hours; the 0.8 quality pass ratio is a separate requirement.
+
+The original-source native control holds cancellation transport after observing
+an active query and snapshot on one fixture-owned backend generation. Both
+early cancellation and deadline expiry returned to the client while the server
+remained active with `backend_xmin` beyond the original two-second budget plus
+one second. The candidate passes all six new normal and six race controls,
+three adjacent JIT controls, two exact census/quota controls, and model vet;
+the isolated PostgreSQL/Redis fixture reports no OOM kills. Native qualification
+uses Go 1.27.1 and the selected Core60/text41 graph. Its immutable gate is
+`/run/media/by/archive1/urnetwork-build/artifacts/fp2-server-deadline-native-sol-20261007-v1/sol-independent-fp2-server-deadline-native-GO.json`,
+SHA-256 `a4b7fdbdaf9012fbac198b7afd8fa244265db799133d98caed2f4dd4e3cc3655`.
+
+This change bounds a server statement's configured budget; PostgreSQL still
+processes interrupts, so it is not a hard wall-clock guarantee. The control
+proves inactive query/no snapshot, not disappearance of every lock or backend.
+The pool can continue retaining an acquired resource while pgx cleanup is
+pending even after the server snapshot is gone. Full-pool cancellation tests
+and the separate identity-background query-cost experiment remain independent.
+These results do not establish Main cancellation-transport causality, a faster
+census, current quota coverage or sustained 100% mature coverage.
