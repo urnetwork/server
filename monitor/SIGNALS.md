@@ -5198,6 +5198,30 @@ rollback and lost-reply replay, with explicit Redis error checks. This reduces
 known local ownership work; fresh owner outcomes and age reduction are still
 required to establish Main recovery or identify a dominant downstream owner.
 
+Owned contract-fact reuse (2026-10-07): billing and provider usage share one
+read of their locked contract header and original close reports, then derive
+their results separately. The row lock and report read remain successive Read
+Committed statements in one pgx batch; a waiting owner must see reports committed
+before its lock is granted. The state never survives a transaction, retry,
+contract or post. Shared stream participants can change through a sibling
+contract, so both billing and usage still read those retained rows independently.
+Monetary eligibility, the billing mean, usage direction and the usage lower bound
+retain their distinct rules, including all refusal and rollback guards. Optional
+signed provider-work provenance retains its separate original-evidence reads.
+
+The native 129-contract shared-grant control preserved exact debit, sweeps,
+metadata, both revision advances, durable total owners and no-op replay while
+reducing report/header reads from 258 each to 129 each and owned client calls
+from 2,840 to 2,324. The four removed client calls per settlement in this normal
+branch include batching; they are not four omitted financial guards. The
+one-millisecond-per-call latency model is a local diagnostic, not Main latency
+or exact PostgreSQL lock residence. Held-owner snapshot, sibling participant
+commit, opposite usage direction and invalid-report controls establish the reuse
+boundary. A smaller client-call count does not identify Main's dominant dependency
+or prove recovered queue age. Require source-qualified successful outcomes, busy
+gates, per-call phases and finite-pass progress; absent waiters still do not rule
+out SKIP LOCKED contention.
+
 Clock, legacy reservation mirror and stream cleanup remain post-commit
 projections: the clock uses its existing aggregate backfill with its documented
 ambiguity; the mirror is rebuilt from durable revisions; mixed Redis reservation

@@ -2904,16 +2904,22 @@ func claimContractOutcomeInTx(
 	contractId server.Id,
 	outcome ContractOutcome,
 ) (bool, error) {
-	ctx = providerWorkSessionContext(ctx)
 	usage, err := contractUsageSnapshotInTx(ctx, tx, contractId, outcome)
 	if err != nil {
 		return false, err
 	}
+	return claimContractOutcomeWithUsageInTx(ctx, tx, contractId, outcome, usage)
+}
+
+// The usage came from this transaction's locked contract and original reports.
+// Keep the guarded outcome write, signed provenance and commit event together.
+func claimContractOutcomeWithUsageInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome, usage *contractUsageSnapshot) (bool, error) {
+	ctx = providerWorkSessionContext(ctx)
 	// Return the database clock from the outcome write, avoiding another round
 	// trip while grants are held. The signed original uses this exact stored time.
 	var closedAt time.Time
 	var sourceId, destinationId server.Id
-	err = tx.QueryRow(
+	err := tx.QueryRow(
 		ctx,
 		`
             UPDATE transfer_contract
@@ -3010,6 +3016,21 @@ func contractParticipantsWithUsageOriginInTx(
 		returnErr = fmt.Errorf("Contract not found while loading participants: %s", contractId.String())
 		return
 	}
+	return contractParticipantsFromOwnerInTx(ctx, tx, contractId, contractParticipantOwner{
+		sourceNetworkId: sourceNetworkId, sourceId: sourceId,
+		destinationNetworkId: destinationNetworkId, destinationId: destinationId,
+		payerNetworkId: payerNetworkId, companionContractId: companionContractId, streamId: streamId,
+	}, usageOriginIsSource)
+}
+
+// Reuse only the locked contract's header. Shared stream membership is not
+// protected by this contract's lock, so each caller still reads fresh rows.
+func contractParticipantsFromOwnerInTx(ctx context.Context, tx server.PgTx, contractId server.Id, owner contractParticipantOwner, usageOriginIsSource *bool) (participants []ContractParticipant, originNetworkId server.Id, returnErr error) {
+	sourceNetworkId, sourceId := owner.sourceNetworkId, owner.sourceId
+	destinationNetworkId, destinationId := owner.destinationNetworkId, owner.destinationId
+	payerNetworkId, companionContractId, streamId := owner.payerNetworkId, owner.companionContractId, owner.streamId
+	var result pgx.Rows
+	var err error
 
 	// Plain contracts originate at source; companion contracts reverse the
 	// payer and originate at destination. payer_network_id is authoritative for
@@ -3348,51 +3369,30 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 	})
 	var usedTransferByteCount ByteCount
 	var clockTransferByteCount ByteCount
+	settlementOwner, err := readContractSettlementOwnerInTx(ctx, tx, contractId)
+	if err != nil {
+		return nil, false, err
+	}
 
 	switch outcome {
 	case ContractOutcomeSettled:
-		result, err := tx.Query(
-			ctx,
-			`
-                SELECT
-                    used_transfer_byte_count,
-                    party,
-                    checkpoint
-                FROM contract_close
-                WHERE
-                    contract_id = $1
-            `,
-			contractId,
-		)
 		var partyByteCounts [2]ByteCount
 		partyCount := 0
 		checkpointCount := 0
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var usedTransferByteCountForParty ByteCount
-				var party ContractParty
-				var checkpoint bool
-				server.Raise(result.Scan(
-					&usedTransferByteCountForParty,
-					&party,
-					&checkpoint,
-				))
-				// Count the checkpoint row's byte count like any other close:
-				// settleContract already established one party is non-checkpoint,
-				// so no more activity is coming and the checkpoint's
-				// `used_transfer_byte_count` is that party's final contribution.
-				if checkpoint {
-					checkpointCount += 1
-				}
-				if partyCount < len(partyByteCounts) {
-					partyByteCounts[partyCount] = usedTransferByteCountForParty
-				}
-				if party == ContractPartyDestination {
-					clockTransferByteCount = usedTransferByteCountForParty
-				}
-				partyCount += 1
+		for _, report := range settlementOwner.reports {
+			// Billing counts a checkpoint's final contribution. The independent
+			// usage guard below still requires its original completed reports.
+			if report.checkpoint {
+				checkpointCount++
 			}
-		})
+			if partyCount < len(partyByteCounts) {
+				partyByteCounts[partyCount] = report.byteCount
+			}
+			if report.party == ContractPartyDestination {
+				clockTransferByteCount = report.byteCount
+			}
+			partyCount++
+		}
 		if partyCount != 2 {
 			returnErr = fmt.Errorf("Must have 2 parties to settle contract (found %d).", partyCount)
 			return
@@ -3415,43 +3415,13 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 		default:
 			party = ContractPartyDestination
 		}
-		result, err := tx.Query(
-			ctx,
-			`
-                SELECT
-                    used_transfer_byte_count
-                FROM contract_close
-                WHERE
-                    contract_id = $1 AND
-                    party = $2
-            `,
-			contractId,
-			party,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&usedTransferByteCount))
-				if party == ContractPartyDestination {
-					clockTransferByteCount = usedTransferByteCount
-				}
+		for _, report := range settlementOwner.reports {
+			if report.party == party {
+				usedTransferByteCount = report.byteCount
 			}
-		})
-		if party != ContractPartyDestination {
-			result, err = tx.Query(
-				ctx,
-				`
-                    SELECT used_transfer_byte_count
-                    FROM contract_close
-                    WHERE contract_id = $1 AND party = $2
-                `,
-				contractId,
-				ContractPartyDestination,
-			)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&clockTransferByteCount))
-				}
-			})
+			if report.party == ContractPartyDestination {
+				clockTransferByteCount = report.byteCount
+			}
 		}
 	default:
 		returnErr = fmt.Errorf("Unknown contract outcome: %s", outcome)
@@ -3462,7 +3432,7 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 		return
 	}
 
-	contractParticipants, originNetworkId, err := contractParticipantsInTx(ctx, tx, contractId)
+	contractParticipants, originNetworkId, err := contractParticipantsFromOwnerInTx(ctx, tx, contractId, settlementOwner.participants, nil)
 	if err != nil {
 		returnErr = err
 		return
@@ -3540,7 +3510,11 @@ func settleEscrowWithProjectionOptionsInTx(ctx context.Context, tx server.PgTx, 
 	)
 
 	reservationSnapshots := readSettlementNetEscrowSnapshots(ctx, tx, settlementReservationIds(positiveReservations))
-	closed, returnErr = claimContractOutcomeInTx(ctx, tx, contractId, outcome)
+	usage, err := settlementOwner.usageSnapshotInTx(ctx, tx, contractId, outcome)
+	if err != nil {
+		return nil, false, err
+	}
+	closed, returnErr = claimContractOutcomeWithUsageInTx(ctx, tx, contractId, outcome, usage)
 	if returnErr != nil || !closed {
 		return
 	}

@@ -17,13 +17,15 @@ import (
 // This models latency outside PostgreSQL without substituting any financial SQL.
 type legacyFinancialLatencyTx struct {
 	server.PgTx
-	owner             *legacyGrantOwnerDiagnosticTx
-	roundTrip         time.Duration
-	ownedRoundTrips   int
-	clockReads        int
-	freshGrantReads   int
-	cacheWrites       int
-	mirrorOwnerWrites int
+	owner                  *legacyGrantOwnerDiagnosticTx
+	roundTrip              time.Duration
+	ownedRoundTrips        int
+	clockReads             int
+	freshGrantReads        int
+	cacheWrites            int
+	mirrorOwnerWrites      int
+	reportReads            int
+	participantHeaderReads int
 }
 
 // The same instance is used by one transaction and read after it completes.
@@ -32,6 +34,27 @@ func (self *legacyFinancialLatencyTx) before(ctx context.Context, sql string) {
 		return
 	}
 	self.ownedRoundTrips++
+	self.recordStatement(sql)
+	if self.roundTrip > 0 {
+		select {
+		case <-time.After(self.roundTrip):
+		case <-ctx.Done():
+			server.Raise(ctx.Err())
+		}
+	}
+}
+
+// Count SQL work separately from protocol sends, including queued statements.
+func (self *legacyFinancialLatencyTx) recordStatement(sql string) {
+	if self.owner.acquiredAt.IsZero() {
+		return
+	}
+	if strings.Contains(sql, "FROM contract_close") {
+		self.reportReads++
+	}
+	if strings.HasPrefix(strings.TrimSpace(sql), "SELECT") && strings.Contains(sql, "FROM transfer_contract") && strings.Contains(sql, "source_network_id") {
+		self.participantHeaderReads++
+	}
 	if strings.TrimSpace(sql) == `SELECT clock_timestamp() AT TIME ZONE 'UTC'` {
 		self.clockReads++
 	}
@@ -43,13 +66,6 @@ func (self *legacyFinancialLatencyTx) before(ctx context.Context, sql string) {
 	}
 	if strings.Contains(sql, "INSERT INTO pending_task") && strings.Contains(sql, "DO UPDATE") {
 		self.mirrorOwnerWrites++
-	}
-	if self.roundTrip > 0 {
-		select {
-		case <-time.After(self.roundTrip):
-		case <-ctx.Done():
-			server.Raise(ctx.Err())
-		}
 	}
 }
 
@@ -74,6 +90,9 @@ func (self *legacyFinancialLatencyTx) QueryRow(ctx context.Context, sql string, 
 // One batch receives one modeled client round trip.
 func (self *legacyFinancialLatencyTx) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
 	self.before(ctx, "batch")
+	for _, query := range batch.QueuedQueries {
+		self.recordStatement(query.SQL)
+	}
 	return self.PgTx.SendBatch(ctx, batch)
 }
 
@@ -208,13 +227,15 @@ func TestLegacySettlementFinancialLatencyDenseSharedGrant(t *testing.T) {
 		if replay, err := FlushLegacySettlements(ctx, 1, nil, 64); err != nil || replay.Visited != 0 {
 			t.Fatal("drained dense grant was not a no-op on replay", replay, err)
 		}
-		var calls, clockReads, grantReads, cacheWrites, mirrorWrites int
+		var calls, clockReads, grantReads, cacheWrites, mirrorWrites, reportReads, participantHeaderReads int
 		for _, trace := range traces {
 			calls += trace.ownedRoundTrips
 			clockReads += trace.clockReads
 			grantReads += trace.freshGrantReads
 			cacheWrites += trace.cacheWrites
 			mirrorWrites += trace.mirrorOwnerWrites
+			reportReads += trace.reportReads
+			participantHeaderReads += trace.participantHeaderReads
 		}
 		t.Logf("dense warm grant: completed=%d recovery_pages=%d blocked_prefix=64 owned_round_trips=%d injected_latency=%s client_grant_residence=%s first_owner_calls=%d first_owner_clock_reads=%d fresh_grant_reads=%d cache_writes=%d mirror_owner_writes=%d; local latency model, not Main attribution", completed, pages, calls, time.Duration(calls)*time.Millisecond, ownerResidence, traces[0].ownedRoundTrips, traces[0].clockReads, grantReads, cacheWrites, mirrorWrites)
 		if grantReads != count || cacheWrites != 2*count {
@@ -222,6 +243,9 @@ func TestLegacySettlementFinancialLatencyDenseSharedGrant(t *testing.T) {
 		}
 		if clockReads != 0 {
 			t.Fatalf("financial owner retained its shared grant for %d unnecessary standalone clock round trips", clockReads)
+		}
+		if reportReads != count || participantHeaderReads != count {
+			t.Fatalf("financial owner reread locked contract facts: completed=%d reports=%d participant_headers=%d", count, reportReads, participantHeaderReads)
 		}
 	})
 }

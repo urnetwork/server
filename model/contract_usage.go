@@ -113,54 +113,11 @@ func newContractUsageSnapshot(byteCount ByteCount, participants []ContractPartic
 // participants. Legacy directions remain explicitly uncredited; guessing a
 // normalized same-network return would pay the consumer as its provider.
 func contractUsageSnapshotInTx(ctx context.Context, tx server.PgTx, contractId server.Id, outcome ContractOutcome) (*contractUsageSnapshot, error) {
-	var usageOriginIsSource *bool
-	var priorOutcome *ContractOutcome
-	var capacity ByteCount
-	var unverified bool
-	var retained []byte
-	if err := tx.QueryRow(ctx, `
-		SELECT usage_origin_is_source, outcome, transfer_byte_count, usage_unverified, provider_usage
-		FROM transfer_contract WHERE contract_id = $1 FOR UPDATE
-	`, contractId).Scan(&usageOriginIsSource, &priorOutcome, &capacity, &unverified, &retained); err != nil {
-		return nil, fmt.Errorf("read contract usage owner: %w", err)
-	}
-	if priorOutcome != nil {
-		return nil, nil
-	}
-	if unverified {
-		return retainedContractExpiryUsage(retained)
-	}
-	if usageOriginIsSource == nil {
-		return nil, nil
-	}
-	closes := map[ContractParty]contractUsageClose{}
-	rows, err := tx.Query(ctx, `SELECT party, used_transfer_byte_count, checkpoint FROM contract_close WHERE contract_id = $1`, contractId)
-	if err != nil {
-		return nil, fmt.Errorf("read completed contract usage: %w", err)
-	}
-	for rows.Next() {
-		var party ContractParty
-		var close contractUsageClose
-		if err := rows.Scan(&party, &close.ByteCount, &close.Checkpoint); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		closes[party] = close
-	}
-	err = rows.Err()
-	rows.Close()
+	owner, err := readContractSettlementOwnerInTx(ctx, tx, contractId)
 	if err != nil {
 		return nil, err
 	}
-	byteCount, err := contractCompletedUsage(outcome, capacity, closes)
-	if err != nil {
-		return nil, err
-	}
-	participants, _, err := contractParticipantsWithUsageOriginInTx(ctx, tx, contractId, usageOriginIsSource)
-	if err != nil {
-		return nil, err
-	}
-	return newContractUsageSnapshot(byteCount, participants)
+	return owner.usageSnapshotInTx(ctx, tx, contractId, outcome)
 }
 
 // Refuses incomplete or tampered snapshots before any provider receives

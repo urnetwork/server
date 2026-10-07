@@ -356,6 +356,12 @@ func contractPayoutTestAccountAmount(
 ) contractPayoutTestAmount {
 	t.Helper()
 	var amount contractPayoutTestAmount
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT
+			COALESCE((SELECT provided_byte_count FROM account_balance WHERE network_id=$1),0),
+			COALESCE((SELECT provided_net_revenue_nano_cents FROM account_balance WHERE network_id=$1),0)`,
+			networkId).Scan(&amount.byteCount, &amount.payout))
+	})
 	server.Redis(ctx, func(r server.RedisClient) {
 		byteCount, err := r.Get(ctx, accountBalanceNetPayoutByteCountKey(networkId)).Int64()
 		if err != nil && err != server.RedisNil {
@@ -365,8 +371,8 @@ func contractPayoutTestAccountAmount(
 		if err != nil && err != server.RedisNil {
 			t.Fatalf("read payout revenue for %s: %v", networkId, err)
 		}
-		amount.byteCount = ByteCount(byteCount)
-		amount.payout = NanoCents(payout)
+		amount.byteCount += ByteCount(byteCount)
+		amount.payout += NanoCents(payout)
 	})
 	return amount
 }
@@ -378,6 +384,9 @@ func assertContractPayoutTestAccounts(
 	want map[server.Id]contractPayoutTestAmount,
 ) {
 	t.Helper()
+	// Apply the separate durable owner before inspecting account totals. The
+	// reader counts only applied PostgreSQL and Redis totals, never queued work.
+	projectLegacyProviderTotalsForTest(t, ctx)
 	seen := map[server.Id]bool{}
 	for _, networkId := range networkIds {
 		if seen[networkId] {
