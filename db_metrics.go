@@ -12,17 +12,19 @@ import (
 
 // pgPoolMetricSnapshot is one identity-free pgx pool generation snapshot.
 type pgPoolMetricSnapshot struct {
-	acquiredConnections int32
-	idleConnections     int32
-	totalConnections    int32
-	maximumConnections  int32
-	acquires            int64
-	emptyAcquires       int64
-	canceledAcquires    int64
-	acquireDuration     time.Duration
-	newConnections      int64
-	lifetimeDestroyed   int64
-	idleDestroyed       int64
+	acquiredConnections     int32
+	constructingConnections int32
+	idleConnections         int32
+	totalConnections        int32
+	maximumConnections      int32
+	acquires                int64
+	emptyAcquires           int64
+	canceledAcquires        int64
+	acquireDuration         time.Duration
+	newConnections          int64
+	lifetimeDestroyed       int64
+	idleDestroyed           int64
+	wrapper                 pgPoolWrapperSnapshot
 }
 
 // pgPoolMetricsSource supplies a snapshot without opening a pool.
@@ -39,17 +41,19 @@ func (self *safePgPool) metricSnapshot() (pgPoolMetricSnapshot, bool) {
 	}
 	stats := self.pool.Stat()
 	return pgPoolMetricSnapshot{
-		acquiredConnections: stats.AcquiredConns(),
-		idleConnections:     stats.IdleConns(),
-		totalConnections:    stats.TotalConns(),
-		maximumConnections:  stats.MaxConns(),
-		acquires:            stats.AcquireCount(),
-		emptyAcquires:       stats.EmptyAcquireCount(),
-		canceledAcquires:    stats.CanceledAcquireCount(),
-		acquireDuration:     stats.AcquireDuration(),
-		newConnections:      stats.NewConnsCount(),
-		lifetimeDestroyed:   stats.MaxLifetimeDestroyCount(),
-		idleDestroyed:       stats.MaxIdleDestroyCount(),
+		acquiredConnections:     stats.AcquiredConns(),
+		constructingConnections: stats.ConstructingConns(),
+		idleConnections:         stats.IdleConns(),
+		totalConnections:        stats.TotalConns(),
+		maximumConnections:      stats.MaxConns(),
+		acquires:                stats.AcquireCount(),
+		emptyAcquires:           stats.EmptyAcquireCount(),
+		canceledAcquires:        stats.CanceledAcquireCount(),
+		acquireDuration:         stats.AcquireDuration(),
+		newConnections:          stats.NewConnsCount(),
+		lifetimeDestroyed:       stats.MaxLifetimeDestroyCount(),
+		idleDestroyed:           stats.MaxIdleDestroyCount(),
+		wrapper:                 self.wrapperSnapshot(self.pool),
 	}, true
 }
 
@@ -60,6 +64,8 @@ type pgPoolMetricsCollector struct {
 	acquireDurationDesc *prometheus.Desc
 	createdDesc         *prometheus.Desc
 	destroyedDesc       *prometheus.Desc
+	wrapperDesc         *prometheus.Desc
+	trackingDroppedDesc *prometheus.Desc
 	stateLock           sync.Mutex
 	sources             map[string]pgPoolMetricsSource
 }
@@ -84,13 +90,23 @@ func newPgPoolMetricsCollector(sources map[string]pgPoolMetricsSource) *pgPoolMe
 		),
 		createdDesc: prometheus.NewDesc(
 			"urnetwork_pg_pool_connections_created_total",
-			"Cumulative PostgreSQL client-pool connections created in this process generation.",
+			"Cumulative PostgreSQL client-pool constructor starts in this process generation; includes failed construction.",
 			[]string{"pool"}, nil,
 		),
 		destroyedDesc: prometheus.NewDesc(
 			"urnetwork_pg_pool_connections_destroyed_total",
 			"Cumulative PostgreSQL client-pool connections destroyed by bounded reason.",
 			[]string{"pool", "reason"}, nil,
+		),
+		wrapperDesc: prometheus.NewDesc(
+			"urnetwork_pg_pool_wrapper_connections",
+			"Observed Db/Tx wrapper ownership, release, and pending disposal by fixed state; excludes raw leases and pool-internal disposal, and is sampled separately from pool state.",
+			[]string{"pool", "state"}, nil,
+		),
+		trackingDroppedDesc: prometheus.NewDesc(
+			"urnetwork_pg_pool_wrapper_cleanup_tracking_dropped_total",
+			"Cumulative wrapper cleanup observations omitted by this process and pool role because a generation's bounded registry was full; pending cleanup coverage may be incomplete.",
+			[]string{"pool"}, nil,
 		),
 		sources: sources,
 	}
@@ -112,6 +128,8 @@ func (self *pgPoolMetricsCollector) Describe(descriptions chan<- *prometheus.Des
 	descriptions <- self.acquireDurationDesc
 	descriptions <- self.createdDesc
 	descriptions <- self.destroyedDesc
+	descriptions <- self.wrapperDesc
+	descriptions <- self.trackingDroppedDesc
 }
 
 // Collect implements prometheus.Collector without initializing unused pools.
@@ -132,6 +150,7 @@ func (self *pgPoolMetricsCollector) Collect(metrics chan<- prometheus.Metric) {
 			value int32
 		}{
 			{name: "acquired", value: snapshot.acquiredConnections},
+			{name: "constructing", value: snapshot.constructingConnections},
 			{name: "idle", value: snapshot.idleConnections},
 			{name: "total", value: snapshot.totalConnections},
 			{name: "maximum", value: snapshot.maximumConnections},
@@ -152,5 +171,16 @@ func (self *pgPoolMetricsCollector) Collect(metrics chan<- prometheus.Metric) {
 		metrics <- prometheus.MustNewConstMetric(self.createdDesc, prometheus.CounterValue, float64(snapshot.newConnections), role)
 		metrics <- prometheus.MustNewConstMetric(self.destroyedDesc, prometheus.CounterValue, float64(snapshot.lifetimeDestroyed), role, "max_lifetime")
 		metrics <- prometheus.MustNewConstMetric(self.destroyedDesc, prometheus.CounterValue, float64(snapshot.idleDestroyed), role, "max_idle")
+		for _, state := range []struct {
+			name  string
+			value int64
+		}{
+			{name: "owned", value: snapshot.wrapper.owned},
+			{name: "releasing", value: snapshot.wrapper.releasing},
+			{name: "cleanup_pending", value: snapshot.wrapper.cleanupPending},
+		} {
+			metrics <- prometheus.MustNewConstMetric(self.wrapperDesc, prometheus.GaugeValue, float64(state.value), role, state.name)
+		}
+		metrics <- prometheus.MustNewConstMetric(self.trackingDroppedDesc, prometheus.CounterValue, float64(snapshot.wrapper.trackingDropped), role)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	mathrand "math/rand"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -122,6 +123,9 @@ type safePgPool struct {
 	ctx                context.Context
 	mutex              sync.Mutex
 	pool               *pgxpool.Pool
+	lifecycleLock      sync.Mutex
+	lifecycle          *pgPoolWrapperLifecycle
+	lifecycleDropped   atomic.Uint64
 }
 
 // resolveResources returns the connection (vault) and pool-sizing (config)
@@ -644,17 +648,23 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 			}
 			panic(connErr)
 		}
+		lifecycle := pool.observeBorrow(pgPool)
+		physical := conn.Conn().PgConn()
+		cleanup := physical.CleanupDone()
 
 		func() {
 			// Cleanup must observe the classification below. Register it first so
 			// the recovery defer runs before it during panic unwinding.
 			defer func() {
+				needsCleanup := connErr != nil || physical.IsClosed() || physical.IsBusy() || physical.TxStatus() != 'I'
+				lifecycle.beginRelease()
 				if connErr != nil {
 					discardPgConnection(ctx, conn)
 					conn = nil
 				} else {
 					conn.Release()
 				}
+				lifecycle.finishRelease(cleanup, needsCleanup)
 			}()
 			defer func() {
 				if err := recover(); err != nil {

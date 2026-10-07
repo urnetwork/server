@@ -37,17 +37,19 @@ func TestPgPoolMetricsPublishFiniteCompleteSnapshot(t *testing.T) {
 		"default": pgPoolMetricsFixtureSource{
 			ready: true,
 			snapshot: pgPoolMetricSnapshot{
-				acquiredConnections: 2,
-				idleConnections:     3,
-				totalConnections:    5,
-				maximumConnections:  8,
-				acquires:            13,
-				emptyAcquires:       1,
-				canceledAcquires:    2,
-				acquireDuration:     3 * time.Second,
-				newConnections:      7,
-				lifetimeDestroyed:   4,
-				idleDestroyed:       6,
+				acquiredConnections:     2,
+				constructingConnections: 1,
+				idleConnections:         3,
+				totalConnections:        6,
+				maximumConnections:      8,
+				acquires:                13,
+				emptyAcquires:           1,
+				canceledAcquires:        2,
+				acquireDuration:         3 * time.Second,
+				newConnections:          7,
+				lifetimeDestroyed:       4,
+				idleDestroyed:           6,
+				wrapper:                 pgPoolWrapperSnapshot{owned: 1, releasing: 1, cleanupPending: 2, trackingDropped: 3},
 			},
 		},
 	})
@@ -68,11 +70,16 @@ func TestPgPoolMetricsPublishFiniteCompleteSnapshot(t *testing.T) {
 			}
 		}
 	}
-	if metricCount != 11 {
-		t.Fatalf("PostgreSQL pool metrics = %d, want 11 complete samples", metricCount)
+	if metricCount != 16 {
+		t.Fatalf("PostgreSQL pool metrics = %d, want 16 complete samples", metricCount)
 	}
 	assertPgPoolMetricValue(t, families, "urnetwork_pg_pool_connections", "state", "maximum", 8)
 	assertPgPoolMetricValue(t, families, "urnetwork_pg_pool_acquires_total", "outcome", "canceled", 2)
+	assertPgPoolMetricValue(t, families, "urnetwork_pg_pool_connections", "state", "constructing", 1)
+	assertPgPoolMetricValue(t, families, "urnetwork_pg_pool_wrapper_connections", "state", "owned", 1)
+	assertPgPoolMetricValue(t, families, "urnetwork_pg_pool_wrapper_connections", "state", "releasing", 1)
+	assertPgPoolMetricValue(t, families, "urnetwork_pg_pool_wrapper_connections", "state", "cleanup_pending", 2)
+	assertPgPoolMetricValue(t, families, "urnetwork_pg_pool_wrapper_cleanup_tracking_dropped_total", "pool", "default", 3)
 }
 
 // assertPgPoolMetricValue finds one finite-label pool series.

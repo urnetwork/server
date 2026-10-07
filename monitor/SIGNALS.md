@@ -13055,6 +13055,35 @@ the pressure peak, explain initial-list read failures, or prove sustained
 recovery. Existing same-request coalescing must be checked in the actual
 producer's dependency closure before proposing another retry/coalescing fix.
 
+The pgx acquired gauge also includes resources undergoing asynchronous
+pool destruction: application return and `Release` return can precede
+`CleanupDone`. The pool deliberately retains that capacity until its bounded
+destructor finishes. A full acquired gauge alone therefore cannot identify
+live application borrowers, an executing statement, or a specific cleanup
+wait. The existing held-cancellation wire control extends this distinction to
+all sixteen slots through both `dbWithPool` and `txWithPool`: callback return,
+physical cleanup, blocked sibling admission, and later recovery are separate
+assertions. Synthetic transport behavior does not establish a Main cleanup
+duration or PostgreSQL backend/snapshot lifetime.
+
+`urnetwork_pg_pool_wrapper_connections{pool,state}` adds three fixed states:
+`owned` runs from successful acquisition through setup/body/commit/rollback,
+`releasing` covers the existing release/discard call, and `cleanup_pending`
+counts observed wrapper disposals whose cleanup channel is still open. The
+registry is bounded by the pool generation's maximum size and uses no worker,
+SQL, timer, identity label or connection-cap change. Completed channels are
+pruned on release and collection. A nonzero
+`urnetwork_pg_pool_wrapper_cleanup_tracking_dropped_total{pool}` means pending
+cleanup tracking has lost observations in this process and pool role; the
+counter remains cumulative across pool resets. Neither a zero pending
+value nor that counter's absence can then prove all disposal complete.
+Raw maintenance leases and pool-internal ping/lifetime disposal are outside
+these wrapper states. The added ordinary pool `constructing` state comes
+from pgx. Pool and wrapper snapshots are sampled separately; subtracting them
+is not an exact ownership partition. Compare actual producer generations and
+fresh metrics before using this discriminator; it changes no financial
+outcome, retry, commit/rollback, pool sizing or socket-disposal decision.
+
 The 2026-10-01 grant-allocation discriminator adds a concrete lock-fanout
 boundary. Twelve direct-primary snapshots at 19:21:38–19:22:06 UTC retained
 5,679 active lock-wait backend-samples versus 175 active no-wait samples;
