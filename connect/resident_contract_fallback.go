@@ -5,6 +5,7 @@ package connect
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -22,6 +23,7 @@ const (
 type residentContractFallback struct {
 	slots        chan struct{}
 	readContract func(context.Context, server.Id, server.Id) (model.ContractHoleStatus, time.Time, error)
+	metrics      *residentContractFallbackMetrics
 }
 
 // A successful read carries its strict source deadline to every cached offer.
@@ -36,6 +38,7 @@ func newResidentContractFallback() *residentContractFallback {
 	return &residentContractFallback{
 		slots:        make(chan struct{}, residentContractFallbackMaxConcurrent),
 		readContract: model.ReadResumableContractLease,
+		metrics:      defaultResidentContractFallbackMetrics,
 	}
 }
 
@@ -104,9 +107,21 @@ func (self *residentContractFallback) check(ctx context.Context, source, destina
 		return residentContractAllowance{}
 	}
 	defaultResidentContractAllowanceMetrics.add(contractAllowanceFallbackStarted)
+	started := time.Now()
+	defer func() { self.metrics.sourceSeconds.Observe(time.Since(started).Seconds()) }()
 	status, validUntil, err := self.readContract(readCtx, source, destination)
-	if readCtx.Err() != nil || err != nil {
+	if contextErr := readCtx.Err(); contextErr != nil {
+		err = contextErr
+	}
+	if err != nil {
 		defaultResidentContractAllowanceMetrics.add(contractAllowanceFallbackError)
+		reason := contractFallbackPhysicalError
+		if errors.Is(err, context.DeadlineExceeded) {
+			reason = contractFallbackDeadline
+		} else if errors.Is(err, context.Canceled) {
+			reason = contractFallbackCanceled
+		}
+		self.metrics.add(reason)
 		return residentContractAllowance{}
 	}
 	if status == model.ContractHolePositive && time.Now().Before(validUntil) {
@@ -116,6 +131,11 @@ func (self *residentContractFallback) check(ctx context.Context, source, destina
 		defaultResidentContractAllowanceMetrics.add(contractAllowanceFallbackNegative)
 	} else {
 		defaultResidentContractAllowanceMetrics.add(contractAllowanceFallbackError)
+		reason := contractFallbackUnknown
+		if status == model.ContractHolePositive && !validUntil.IsZero() {
+			reason = contractFallbackExpiredLease
+		}
+		self.metrics.add(reason)
 	}
 	return residentContractAllowance{}
 }

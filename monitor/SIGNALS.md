@@ -451,6 +451,22 @@ would require scanning more source rows. An observation that expires during I/O
 is unknown, since another member may still survive. After the bridge is disabled, unknown remains
 fail-closed without invoking that source seam.
 
+`urnetwork_connect_contract_allowance_total` keeps Redis positive, negative,
+unknown/error, source starts/results, saturated admissions and refused pair
+checks separate. `urnetwork_connect_contract_fallback_errors_total` splits the
+existing failed-source result into exactly `deadline`, `canceled`,
+`physical_error`, `unknown`, and `expired_lease`. Caller termination takes
+precedence over the returned error; no error text or identity becomes a label.
+`urnetwork_connect_contract_fallback_source_seconds` measures each admitted
+source call including cleanup, excluding Redis and refused admission. It does
+not separate pool acquisition from query execution or promise that connection
+cleanup completes inside the caller's 250 ms query budget. Compare per-process
+counter deltas only across the same source, start, and monotonic scrape clocks;
+starts and results can straddle the observation endpoints. A high deadline
+fraction is evidence of refused checks, not proof of a particular SQL wait.
+Redis positives do not count cache-hit packets or prove a one-for-one number of
+avoided SQL calls, and none of these metrics alone establish packet delivery.
+
 Committed lifecycle events use existing transaction identities, with no added
 source query or financial lock. Optional posts run after connection release in
 groups of at most eight, are discarded on rollback/retry, and expire five seconds

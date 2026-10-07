@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
@@ -68,22 +69,16 @@ func insertResidentFallbackContract(ctx context.Context, source, destination ser
 // One real callback FIFO contains a whole packet cohort. A held live-forward
 // consumer records acceptance without introducing another socket owner; a
 // separate FIFO sentinel proves every offered packet has been processed.
-func testResidentPacketSourceFallback(t testing.TB, caseName string, active bool, prepare func(context.Context, server.Id, server.Id)) {
+func testResidentPacketSourceFallback(t testing.TB, caseName string, active bool, prepare func(context.Context, server.Id, server.Id), expectedReasons ...contractFallbackErrorReason) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	settings := DefaultExchangeSettings()
-	settings.ResidentForwardQueueShardCount = 1
-	resident := newResidentCallbackLifecycleFixture(t, ctx, settings)
-	ledger := &residentPayloadLedger{}
-	resident.exchange.payloadOwnerLedger = ledger
-	destination, sentinel := server.NewId(), server.NewId()
-	if prepare != nil {
-		prepare(ctx, resident.clientId, destination)
-	}
-	postgresAttempts, stopPostgresTripwire := server.DenyPostgresForTest(t)
-	defer stopPostgresTripwire()
+	exchange := newResidentConstructionExchange(ctx)
+	defer exchange.Close()
+	exchange.settings.ResidentForwardQueueShardCount = 1
+	registry := prometheus.NewPedanticRegistry()
 	fallback := newResidentContractFallback()
+	fallback.metrics = newResidentContractFallbackMetrics(registry)
 	var sourceReads atomic.Int32
 	fallback.readContract = func(ctx context.Context, source, target server.Id) (model.ContractHoleStatus, time.Time, error) {
 		sourceReads.Add(1)
@@ -91,7 +86,23 @@ func testResidentPacketSourceFallback(t testing.TB, caseName string, active bool
 		defer revoke()
 		return model.ReadResumableContractLease(sourceCtx, source, target)
 	}
-	resident.residentContractManager = newResidentContractManagerWithFallback(resident.ctx, resident.cancel, resident.clientId, settings, fallback)
+	exchange.contractHoleFallback = fallback
+	ledger := &residentPayloadLedger{}
+	exchange.payloadOwnerLedger = ledger
+	// Keep the real constructor's manager and its captured source context. The
+	// initial peer-profile lookup is allowed setup before the packet tripwire.
+	resident := NewResident(ctx, exchange, server.NewId(), server.NewId(), server.NewId())
+	defer func() {
+		if err := resident.CloseAndWait(context.Background()); err != nil {
+			t.Error(err)
+		}
+	}()
+	destination, sentinel := server.NewId(), server.NewId()
+	if prepare != nil {
+		prepare(ctx, resident.clientId, destination)
+	}
+	postgresAttempts, stopPostgresTripwire := server.DenyPostgresForTest(t)
+	defer stopPostgresTripwire()
 	forward := NewResidentForward(ctx, resident.exchange, destination)
 	resident.forwards[destination] = forward
 	barrier, release := make(chan struct{}), make(chan struct{})
@@ -135,6 +146,7 @@ func testResidentPacketSourceFallback(t testing.TB, caseName string, active bool
 	if got := server.PacketPostgresAttempts(resident.residentContractManager.ctx); got != 0 {
 		t.Fatalf("%s: bridge escaped through an ordinary packet dependency: attempts=%d", caseName, got)
 	}
+	requireResidentFallbackMetrics(t, registry, 1, expectedReasons...)
 	releaseOnce.Do(func() { close(release) })
 	if err := resident.CloseAndWait(context.Background()); err != nil {
 		t.Error(err)
@@ -277,7 +289,7 @@ func TestResidentPacketFallbackBlockedSourceCancelsBeforeBarrierRelease(t *testi
 			cancel()
 			t.Fatal("local SQL barrier did not acquire its lock")
 		}
-		testResidentPacketSourceFallback(t, "blocked_source", false, nil)
+		testResidentPacketSourceFallback(t, "blocked_source", false, nil, contractFallbackDeadline)
 		select {
 		case <-finished:
 			t.Fatal("source barrier ended before the packet cohort drained")
