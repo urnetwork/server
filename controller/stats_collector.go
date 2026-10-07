@@ -69,8 +69,11 @@ package controller
 //
 // the 24 hour contract numbers are summed from one hour buckets of
 // create_time; a complete bucket is computed once by whichever host needs it
-// first and cached in redis, so a refresh normally scans only the current
-// partial hour (model/contract_stats_model.go).
+// first and cached in redis. The periodic collector also shares the complete
+// window for five minutes, so only one lease owner scans the current partial
+// hour (model/contract_stats_model.go). contract_hour_window_end_seconds is
+// the original window end, not the cache-hit time; contract_hour_available
+// drops to zero and the three counts become NaN when that source expires.
 //
 // the block accumulators reset when a block rolls over, so the feed also
 // serves the finished block as a stable reference. deposits and emissions
@@ -82,7 +85,7 @@ package controller
 // StartStatsCollector is called only by the taskworker
 // (cli/taskworker/main.go), so only taskworker registries export these
 // series. Most values are recomputed on each host's own clock; provider-egress
-// aggregates share one completed snapshot across hosts. The feed reads each
+// and hourly-contract aggregates share completed snapshots across hosts. The feed reads each
 // gauge with max across hosts. a gauge
 // registers with the default registry (pushed by server.StartStatsPusher)
 // on its first set, so a stat that never has a value here (st disabled,
@@ -279,18 +282,6 @@ var statsOnlineExtendersByIpFamilyGauge = newStatsGaugeVec(
 	"online_extenders_by_ip_family",
 	"Online extenders by the ip families they have an active address on",
 	"ip_family",
-)
-var statsContracts24hGauge = newStatsGauge(
-	"contracts_24h",
-	"Transfer contracts created in the last 24 hours",
-)
-var statsContractsWithExtender24hGauge = newStatsGauge(
-	"contracts_with_extender_24h",
-	"Transfer contracts created in the last 24 hours with at least one extender party",
-)
-var statsDisputes24hGauge = newStatsGauge(
-	"disputes_24h",
-	"Transfer contracts created in the last 24 hours that are disputed",
 )
 
 // The egress index (connect/GEOMAP.md §10.4), read only by the providers
@@ -634,6 +625,9 @@ func StartStatsCollector(ctx context.Context) {
 				server.HandleError(func() {
 					statsRefreshProviderEgress(ctx)
 				})
+				server.HandleError(func() {
+					statsRefreshContractHourWindow(ctx)
+				})
 			}
 			dbTick = (dbTick + 1) % statsCollectorDbTicks
 			server.HandleError(func() {
@@ -747,10 +741,7 @@ func statsRefreshDb(ctx context.Context) {
 	// Open counts are a bounded snapshot, separate from the hourly cache.
 	// A capped or unavailable read must never masquerade as an exact gauge.
 	statsRefreshOpenContracts(ctx)
-	contracts := model.CountContractHourWindow(ctx, now)
-	statsContracts24hGauge.set(float64(contracts.Contracts))
-	statsContractsWithExtender24hGauge.set(float64(contracts.WithExtender))
-	statsDisputes24hGauge.set(float64(contracts.Disputes))
+	statsRefreshContractHourWindow(ctx)
 
 	statsUsers24hGauge.set(float64(model.CountTopLevelClientsWithContractSince(ctx, now.Add(-24*time.Hour))))
 
